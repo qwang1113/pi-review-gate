@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# pi-review-gate: strip/flag AI attribution in commit messages.
+# PR #7 lesson 8: only AI is \b-bounded (avoids maintainer/domain false
+# positives under -i); GPT/OpenAI stay unbounded to catch ChatGPT/GPT-4.
+set -euo pipefail
+[[ "${REVIEW_GATE_BYPASS:-}" == "1" ]] && exit 0
+MSG_FILE="$1"
+
+if grep -Eiq 'Co-Authored-By:.*(Claude|Anthropic|GPT|OpenAI|Copilot|noreply@anthropic)' "$MSG_FILE" \
+  || grep -Eiq 'Generated (by|with).*(Claude|\bAI\b|GPT|OpenAI|Copilot)' "$MSG_FILE" \
+  || grep -Eiq '🤖.*(Claude|\bAI\b|GPT|OpenAI)' "$MSG_FILE"; then
+  echo "[review-gate] commit message contains AI attribution — remove it (or REVIEW_GATE_BYPASS=1)." >&2
+  exit 1
+fi

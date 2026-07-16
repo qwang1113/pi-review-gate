@@ -1,0 +1,174 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  CODE_EXTENSIONS,
+  DOC_EXTENSIONS,
+  isCodeFile,
+  isDocFile,
+  isSensitiveFile,
+  coalesceToolPath,
+  COMMIT_MSG_FORBIDDEN,
+} from "../lib/constants.ts";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// ---------------------------------------------------------------------------
+// PR #7 lesson 5 — structural consistency: exactly ONE code-extension list.
+// No other source file may declare its own extension alternation. If a file
+// needs to know "is this code?", it must import from lib/constants.ts.
+// ---------------------------------------------------------------------------
+
+function walk(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir)) {
+    if (entry === "node_modules" || entry === ".git" || entry === "test") continue;
+    const p = join(dir, entry);
+    if (statSync(p).isDirectory()) walk(p, out);
+    else if (/\.(ts|mjs)$/.test(entry)) out.push(p);
+  }
+  return out;
+}
+
+test("structural: no source file other than lib/constants.ts declares a code-extension list", () => {
+  const files = walk(ROOT).filter((f) => !f.endsWith("lib/constants.ts"));
+  // A "code-extension list" = a string/array literal containing >= 5 of our
+  // known extensions in one expression. Heuristic mirrors 's
+  // code-extension-consistency test: keying on any single token would miss
+  // drift; a structural threshold catches any re-declared list.
+  const needles = ["tsx", "jsx", "ipynb", "pyw", "kts", "hpp", "exs"]; // uncommon members
+  for (const file of files) {
+    const src = readFileSync(file, "utf8");
+    for (const line of src.split("\n")) {
+      const hits = needles.filter((n) => new RegExp(`[\"'\\|]${n}[\"'\\|]`).test(line)).length;
+      assert.ok(
+        hits < 3,
+        `${file} appears to declare its own extension list (${hits} uncommon extension tokens on one line):\n${line.trim()}\n` +
+          "Import CODE_EXTENSIONS from lib/constants.ts instead.",
+      );
+    }
+  }
+});
+
+test("ipynb is a code extension (PR #7 NotebookEdit bypass regression)", () => {
+  assert.ok(CODE_EXTENSIONS.includes("ipynb"));
+  assert.ok(isCodeFile("/proj/analysis.ipynb"));
+});
+
+test("shell scripts are code (is .sh-primary; gate must engage)", () => {
+  for (const f of ["hooks/x.sh", "a.bash", "b.zsh"]) assert.ok(isCodeFile(f), f);
+});
+
+test("docs classified separately from code", () => {
+  assert.ok(isDocFile("README.md"));
+  assert.ok(isDocFile("docs/a.mdx"));
+  assert.ok(!isCodeFile("README.md"));
+  assert.ok(!isDocFile("a.ts"));
+});
+
+test("no overlap between code and doc extension sets", () => {
+  const overlap = CODE_EXTENSIONS.filter((e) => DOC_EXTENSIONS.includes(e));
+  assert.deepEqual(overlap, []);
+});
+
+test("extensionless and dotfiles are neither code nor docs", () => {
+  assert.ok(!isCodeFile("Makefile"));
+  assert.ok(!isCodeFile(".gitignore"));
+  assert.ok(!isDocFile("LICENSE"));
+});
+
+// ---------------------------------------------------------------------------
+// PR #7 lesson 4 — path coalescing across parameter spellings
+// ---------------------------------------------------------------------------
+
+test("coalesceToolPath reads every known path parameter spelling", () => {
+  assert.equal(coalesceToolPath({ path: "/a.ts" }), "/a.ts");
+  assert.equal(coalesceToolPath({ file_path: "/b.ts" }), "/b.ts");
+  assert.equal(coalesceToolPath({ filePath: "/c.ts" }), "/c.ts");
+  assert.equal(coalesceToolPath({ notebook_path: "/d.ipynb" }), "/d.ipynb");
+  assert.equal(coalesceToolPath({ notebookPath: "/e.ipynb" }), "/e.ipynb");
+  assert.equal(coalesceToolPath({}), undefined);
+  assert.equal(coalesceToolPath(undefined), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Sensitive files
+// ---------------------------------------------------------------------------
+
+test("sensitive file patterns", () => {
+  for (const f of [
+    ".env",
+    "/proj/.env.local",
+    "config/.env.production",
+    "certs/server.pem",
+    "id_rsa",
+    "/home/u/.ssh/id_ed25519",
+    "secrets.yaml",
+    "credentials",
+    ".npmrc",
+    "auth.json",
+  ]) {
+    assert.ok(isSensitiveFile(f), `should be sensitive: ${f}`);
+  }
+  for (const f of ["src/env.ts", "environment.md", "src/auth.service.ts", "key-utils.ts", "envelope.ts"]) {
+    assert.ok(!isSensitiveFile(f), `should NOT be sensitive: ${f}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PR #7 lesson 8 — commit message word boundaries
+// ---------------------------------------------------------------------------
+
+function anyMatch(msg: string): boolean {
+  return COMMIT_MSG_FORBIDDEN.some((re) => re.test(msg));
+}
+
+test("FP regression: 'Generated by the maintainer' passes (ai inside maintainer)", () => {
+  assert.ok(!anyMatch("docs: update runbook\n\nGenerated by the maintainer script."));
+});
+
+test("FP regression: 'Generated by domain tooling' passes", () => {
+  assert.ok(!anyMatch("chore: regen\n\nGenerated by domain tooling."));
+});
+
+test("blocks 'Generated by AI assistant' (bounded AI)", () => {
+  assert.ok(anyMatch("feat: x\n\nGenerated by AI assistant"));
+});
+
+test("blocks 'Generated with ChatGPT' (unbounded GPT)", () => {
+  assert.ok(anyMatch("feat: x\n\nGenerated with ChatGPT"));
+});
+
+test("blocks 'Generated by OpenAI Codex' (explicit OpenAI)", () => {
+  assert.ok(anyMatch("feat: x\n\nGenerated by OpenAI Codex"));
+});
+
+test("blocks Co-Authored-By Claude trailer", () => {
+  assert.ok(anyMatch("fix: y\n\nCo-Authored-By: Claude <noreply@anthropic.com>"));
+});
+
+test("blocks robot-emoji attribution", () => {
+  assert.ok(anyMatch("feat: z\n\n🤖 Generated with Claude Code"));
+});
+
+test("normal conventional commit passes", () => {
+  assert.ok(!anyMatch("feat: add session reset logic\n\nDetails here."));
+});
+
+// ---------------------------------------------------------------------------
+// CJS fingerprint script extension-set drift guard
+// ---------------------------------------------------------------------------
+
+test("structural: compute-fingerprint.cjs CODE_DOC_EXT matches constants.ts", () => {
+  const cjsSrc = readFileSync(join(ROOT, "scripts", "compute-fingerprint.cjs"), "utf8");
+  // Extract the Set(...) call from the CJS file.
+  const setMatch = cjsSrc.match(/CODE_DOC_EXT\s*=\s*new Set\(\[([\s\S]*?)\]\)/);
+  assert.ok(setMatch, "must find CODE_DOC_EXT Set in compute-fingerprint.cjs");
+  // Parse the quoted extension list.
+  const cjsExts = [...setMatch[1].matchAll(/"([a-z0-9]+)"/g)].map(m => m[1]).sort();
+  const tsExts = [...CODE_EXTENSIONS, ...DOC_EXTENSIONS].sort();
+  assert.deepEqual(cjsExts, tsExts,
+    "CODE_DOC_EXT in compute-fingerprint.cjs must exactly match [...CODE_EXTENSIONS, ...DOC_EXTENSIONS]");
+});

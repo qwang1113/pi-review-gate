@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# pi-review-gate defense-in-depth: verify gate sidecar before commit.
+# Validates review/precommit verdicts against current worktree fingerprint.
+# Bypass: REVIEW_GATE_BYPASS=1 git commit ...
+set -euo pipefail
+
+[[ "${REVIEW_GATE_BYPASS:-}" == "1" ]] && exit 0
+
+STATE_FILE=".pi/review-gate-state.json"
+
+# .blocked marker (extension write failure) → fail closed even without JSON.
+if [[ -f "${STATE_FILE}.blocked" ]]; then
+  echo "[review-gate] gate sidecar write failure detected (.blocked marker) — failing closed." >&2
+  echo "[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ..." >&2
+  exit 1
+fi
+
+# No sidecar → extension not active in this repo; allow.
+[[ -f "$STATE_FILE" ]] || exit 0
+
+command -v node >/dev/null 2>&1 || {
+  echo "[review-gate] node not found; cannot verify gate — failing closed." >&2
+  exit 1
+}
+
+# Resolve the fingerprint script relative to the hook location.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FP_SCRIPT="${HOOK_DIR}/../scripts/compute-fingerprint.cjs"
+
+FP_JSON=$(node "$FP_SCRIPT" "$(pwd)") || {
+  echo "[review-gate] cannot compute worktree fingerprint — failing closed." >&2
+  exit 1
+}
+
+node - "$STATE_FILE" "$FP_JSON" <<'NODE'
+const { readFileSync } = require("node:fs");
+
+const statePath = process.argv[2];
+const fpJson = process.argv[3];
+
+let state;
+try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch {
+  console.error("[review-gate] gate state unreadable — failing closed.");
+  process.exit(1);
+}
+
+if (state.schema !== 1) {
+  console.error("[review-gate] unknown gate schema — failing closed.");
+  process.exit(1);
+}
+
+// P0/P1: reject malformed schema=1 payloads, AND unknown/forged verdict enums.
+// A payload with precommit.verdict:"READY" (not a real precommit verdict) must
+// be rejected here so it can't slip past the if-else chain below and fail-open.
+const GATE_VERDICTS = new Set(["PENDING", "READY", "BLOCKED", "NEEDS_HUMAN"]);
+const PRECOMMIT_VERDICTS = new Set(["PASS", "FAIL", "NO_CHECKS_RUN", "NOT_RUN"]);
+if (typeof state.hasCodeChange !== "boolean" || typeof state.hasDocChange !== "boolean" ||
+    !state.review || !GATE_VERDICTS.has(state.review.verdict) ||
+    !state.precommit || !PRECOMMIT_VERDICTS.has(state.precommit.verdict) ||
+    !Array.isArray(state.rounds) ||
+    !state.bypass || typeof state.bypass.active !== "boolean") {
+  console.error("[review-gate] gate state shape/verdict invalid — failing closed.");
+  process.exit(1);
+}
+
+if (state.bypass && state.bypass.active) process.exit(0);
+if (!state.hasCodeChange && !state.hasDocChange) process.exit(0);
+
+let currentFp;
+try {
+  const fp = JSON.parse(fpJson);
+  if (fp.unavailable) throw new Error("fingerprint unavailable");
+  currentFp = fp.digest;
+} catch {
+  console.error("[review-gate] cannot compute worktree fingerprint — failing closed.");
+  process.exit(1);
+}
+
+const problems = [];
+
+if (state.hasCodeChange) {
+  if (state.review.verdict !== "READY") {
+    problems.push(`review is ${state.review.verdict}`);
+  } else if (!state.review.fingerprint) {
+    problems.push("review PASS has no fingerprint binding — cannot verify");
+  } else if (state.review.fingerprint !== currentFp) {
+    problems.push("code was modified after the last READY review (fingerprint mismatch)");
+  }
+
+  // Fail-closed: only an explicit PASS bound to the current fingerprint passes.
+  if (state.precommit.verdict === "PASS") {
+    if (!state.precommit.fingerprint) {
+      problems.push("precommit PASS has no fingerprint binding — cannot verify");
+    } else if (state.precommit.fingerprint !== currentFp) {
+      problems.push("code was modified after the last precommit PASS (fingerprint mismatch)");
+    }
+  } else if (state.precommit.verdict === "NOT_RUN") {
+    problems.push("precommit not run");
+  } else if (state.precommit.verdict === "FAIL") {
+    problems.push("precommit FAILED");
+  } else if (state.precommit.verdict === "NO_CHECKS_RUN") {
+    problems.push("precommit ran zero checks (not a pass)");
+  } else {
+    problems.push(`precommit verdict unrecognized (${String(state.precommit.verdict)})`);
+  }
+} else if (state.hasDocChange) {
+  if (state.review.verdict !== "READY") {
+    problems.push(`doc review is ${state.review.verdict}`);
+  } else if (!state.review.fingerprint) {
+    problems.push("doc review PASS has no fingerprint binding");
+  } else if (state.review.fingerprint !== currentFp) {
+    problems.push("docs were modified after the last READY review (fingerprint mismatch)");
+  }
+}
+
+if (problems.length) {
+  console.error("[review-gate] commit blocked:");
+  for (const p of problems) console.error(`  - ${p}`);
+  console.error("[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ...");
+  process.exit(1);
+}
+NODE

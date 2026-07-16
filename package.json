@@ -1,0 +1,27 @@
+{
+  "name": "pi-review-gate",
+  "version": "0.2.0",
+  "description": "Quality gates for Pi — hard-block git commit/push/PR until review + precommit pass. Globally installable via npm/npx.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "pi-review-gate-install": "./scripts/install-global.sh"
+  },
+  "files": [
+    "extensions/",
+    "lib/",
+    "hooks/",
+    "scripts/",
+    "skills/",
+    "agents/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test $(find test -name '*.test.ts' -o -name '*.test.mjs')"
+  },
+  "keywords": ["pi", "review-gate", "quality-gate", "code-review", "harness"],
+  "pi": {
+    "extensions": ["./extensions/review-gate.ts"],
+    "skills": ["./skills/review-loop"]
+  }
+}

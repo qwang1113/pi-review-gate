@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# pi-review-gate defense-in-depth: same gate verification as pre-commit, on push.
+# Run the pre-commit hook verbatim (it now validates fingerprint, not just labels).
+set -euo pipefail
+[[ "${REVIEW_GATE_BYPASS:-}" == "1" ]] && exit 0
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$HOOK_DIR/pre-commit"
