@@ -100,6 +100,30 @@ flags, but only edits can set them), **untracked-file-aware fingerprints**
 (`-uall`, PR #7's `-uno` regression), and **atomic sidecar writes** (temp+rename
 so a crash can't leave truncated JSON for a fail-open parser).
 
+### -dev-flow features ported beyond PR #7
+
+| -dev-flow feature | pi-review-gate port |
+|-----------------------|---------------------|
+| `auto-loop-project.md` `## Max Rounds` override (R6) | `.pi/review-gate.json` `"maxRounds"` — JSON instead of markdown parsing; **clamped to 3–50** so a forged config can't make the cap unreachable |
+| "Think Harder" strategic reset near cap (R10) | `"thinkHarder"` (default on): when the loop is still BLOCKED within 3 rounds of the cap, a one-shot `[STRATEGIC_RESET]` checklist is injected; fired-flag persisted in gate state |
+| "Git Memory" post-compaction context (R9) | `"gitMemory"` (default off, opt-in): filtered `git log/diff/status` snapshot appended to the compaction resume message — secret-pattern line filter, 40-line cap, argv-only git (no `eval` pipeline like the original) |
+| Auto-loop prohibited behaviors (`rules/auto-loop.md`) | Baked into the per-turn system-prompt reminder: no "fixed" without re-review, no permission-asking, no context-length excuses, no completion-style summaries while gates are unmet |
+| `pre-edit-guard` `.git/` protection | `.git/…` added to `SENSITIVE_FILE_PATTERNS` — the model can't rewrite `.git/hooks/pre-commit` to disarm L3 (`.gitignore`/`.github` still editable) |
+| Self-improvement lesson log (`rules/self-improvement.md`) | `/gate-lesson <text>` appends numbered lessons to `.pi/review-gate-lessons.md`; promote 3+ recurrences into rules |
+
+Per-project config lives in `.pi/review-gate.json`:
+
+```jsonc
+{
+  "maxRounds": 10,     // 3..50 — loop hard cap (clamped, fail-safe)
+  "thinkHarder": true, // one-shot [STRATEGIC_RESET] checklist near the cap
+  "gitMemory": false   // opt-in [GIT_CONTEXT] after compaction
+}
+```
+
+Every field is validated independently; a missing/corrupt config silently
+falls back to defaults and can never loosen the gate.
+
 ## Install
 
 ### Global (recommended — works on all projects)
@@ -175,6 +199,7 @@ sentinel printed by any other command can never grant a PASS.
 | `/gate-status` | Show verdicts, rounds, fingerprint, unmet requirements |
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
 | `/gate-reset` | Reset gate state for this session |
+| `/gate-lesson <text>` | Append a lesson to `.pi/review-gate-lessons.md` (self-improvement log) |
 
 Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 

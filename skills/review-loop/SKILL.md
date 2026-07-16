@@ -60,6 +60,12 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
 
 3. **Fix** — if BLOCKED: fix ALL findings (P0-P2; Nits at your judgment),
    then go to step 1 again. Fixing without re-reviewing is a violation.
+   When you deliberately leave a Nit unfixed, log it in a structured line so
+   the decision is auditable (sd0x-dev-flow Nit exemption log):
+
+   ```
+   [NIT_DEFERRED] file:line | issue | reason: <why> | <ISO date>
+   ```
 
 4. **Precommit** — once READY: call the **`run_precommit`** tool (optionally
    `{ "mode": "full" }`; default is fast). This is the ONLY way to record a
@@ -85,6 +91,16 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
   硬拦截。（注意：这与 L4 不矛盾——面向用户的聊天用中文，commit/PR 用英文。）
 - Never edit `.env`, key files, or credentials (hard-blocked anyway).
 - Never put AI attribution in commit messages (hard-blocked anyway).
-- Max 10 rounds; if findings plateau 3 rounds running, stop and escalate to
+- Max 10 rounds (per-project override via `.pi/review-gate.json` `maxRounds`,
+  clamped to 3–50); if findings plateau 3 rounds running, stop and escalate to
   the user instead of looping.
-- Do not output a completion-style summary while gates are unmet.
+- Near the round cap the gate injects a one-shot `[STRATEGIC_RESET]` checklist
+  (sd0x-dev-flow "Think Harder"): re-read the original requirement, challenge
+  assumptions, and try a fundamentally different approach before escalating.
+- Prohibited while gates are unmet (auto-loop rules): claiming a fix is done
+  without re-reviewing; asking permission to continue; citing context length or
+  token budget to skip review; outputting a completion-style summary. Brief
+  status lines ("Fixed 3 issues, re-reviewing…") are fine.
+- When the user corrects a recurring mistake, record it with `/gate-lesson`
+  (appends to `.pi/review-gate-lessons.md`); promote lessons recurring 3+
+  times into project rules.

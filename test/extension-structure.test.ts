@@ -130,6 +130,28 @@ test("P1: turn_end awaits commitsAheadOfBase", () => {
   assert.match(SRC, /await\s+commitsAheadOfBase/);
 });
 
+test("R6/R9/R10: project config, git memory, strategic reset wired in", () => {
+  // R6 — per-project maxRounds loaded (clamped in lib/project-config.ts).
+  assert.match(SRC, /loadProjectConfig/);
+  assert.match(SRC, /state\.maxRounds = projectConfig\.maxRounds/);
+  // R9 — git memory appended to the compaction resume message, opt-in only.
+  assert.match(SRC, /projectConfig\.gitMemory \? buildGitMemory/);
+  // R10 — strategic reset is one-shot and persisted via strategicResetFired.
+  assert.match(SRC, /maybeStrategicReset/);
+  assert.match(SRC, /strategicResetFired/);
+  assert.match(SRC, /STRATEGIC_RESET_CHECKLIST/);
+});
+
+test("auto-loop prohibited behaviors are in the per-turn reminder (sd0x-dev-flow port)", () => {
+  assert.match(SRC, /Prohibited while gates are unmet/);
+  assert.match(SRC, /completion-style summary/);
+});
+
+test("gate-lesson command registered (self-improvement loop port)", () => {
+  assert.match(SRC, /registerCommand\(["']gate-lesson["']/);
+  assert.match(SRC, /review-gate-lessons\.md/);
+});
+
 test("precommit trust does NOT depend on parsing bash command text (root-cause fix)", () => {
   // The old forgeable approach inferred a PASS from whether a bash command
   // "looked like" a runner invocation. That whole trust path is gone; PASS now

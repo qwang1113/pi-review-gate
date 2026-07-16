@@ -117,6 +117,18 @@ test("sensitive file patterns", () => {
   }
 });
 
+// sd0x-dev-flow pre-edit-guard port: .git internals are never editable — the
+// model could otherwise rewrite .git/hooks/pre-commit and disarm the L3 layer.
+test(".git internals are sensitive (pre-edit-guard port)", () => {
+  for (const f of [".git/config", ".git/hooks/pre-commit", "/repo/.git/HEAD", "sub/.git"]) {
+    assert.ok(isSensitiveFile(f), `should be sensitive: ${f}`);
+  }
+  // .gitignore / .github and lookalike names must NOT be blocked.
+  for (const f of [".gitignore", ".github/workflows/ci.yml", "src/.gitkeep", "digit.ts", "legit/file.ts"]) {
+    assert.ok(!isSensitiveFile(f), `should NOT be sensitive: ${f}`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // PR #7 lesson 8 — commit message word boundaries
 // ---------------------------------------------------------------------------

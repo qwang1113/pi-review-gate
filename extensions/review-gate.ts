@@ -31,6 +31,14 @@
  *   7 compaction       → state persisted via appendEntry + sidecar; re-injected
  *                        into context after session_compact and on resume
  *   8 word boundaries  → commit-msg patterns \b-bound only bare AI
+ *
+ * sd0x-dev-flow ports beyond PR #7 (see README "-dev-flow features ported"):
+ *   R6  per-project maxRounds via .pi/review-gate.json (clamped 3..50)
+ *   R9  opt-in [GIT_CONTEXT] git memory after compaction (filtered, capped)
+ *   R10 one-shot [STRATEGIC_RESET] think-harder checklist near the round cap
+ *   —   auto-loop prohibited behaviors in the per-turn reminder
+ *   —   .git/ internals in SENSITIVE_FILE_PATTERNS (pre-edit-guard port)
+ *   —   /gate-lesson self-improvement log (.pi/review-gate-lessons.md)
  */
 
 import { existsSync, statSync, unlinkSync, writeFileSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -51,7 +59,11 @@ import {
   COMMIT_MSG_FORBIDDEN,
   LANGUAGE_DIRECTIVE,
   PLATEAU_ROUNDS,
+  STRATEGIC_RESET_OFFSET,
+  STRATEGIC_RESET_CHECKLIST,
 } from "./lib/constants.ts";
+import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "./lib/project-config.ts";
+import { buildGitMemory } from "./lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "./lib/ship-detect.ts";
 import { firstNonEnglish } from "./lib/lang-detect.ts";
 import { validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
@@ -61,6 +73,7 @@ import {
   isPlateaued,
   loadSidecar,
   saveSidecar,
+  shouldStrategicReset,
   sidecarPath,
   unmetRequirements,
   type GateState,
@@ -114,6 +127,22 @@ export default function reviewGate(pi: ExtensionAPI) {
   let cwd = process.cwd();
   let continuationsInjected = 0; // total auto-continuation injections (persisted)
   let loopArmed = true; // /gate-bypass or NEEDS_HUMAN disarms auto-continuation
+  // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
+  // session_start; a missing/corrupt config file falls back to safe defaults.
+  let projectConfig: ProjectConfig = defaultProjectConfig();
+
+  /**
+   * sd0x-dev-flow R10 "Think Harder": one-shot strategic-reset checklist when
+   * the loop is BLOCKED close to the round cap. The firing predicate is the
+   * pure, unit-tested shouldStrategicReset() (review verdict must be BLOCKED —
+   * a READY loop merely awaiting precommit must NOT consume the one-shot).
+   * Returns the checklist text to append (and marks it fired), or "".
+   */
+  function maybeStrategicReset(): string {
+    if (!shouldStrategicReset(state, projectConfig.thinkHarder, STRATEGIC_RESET_OFFSET)) return "";
+    state.strategicResetFired = true;
+    return "\n\n" + STRATEGIC_RESET_CHECKLIST;
+  }
 
   // ---------- persistence ----------
 
@@ -377,6 +406,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       } else if (isPlateaued(state.rounds, PLATEAU_ROUNDS)) {
         loopArmed = false;
         note = " Plateau detected — escalate to the user.";
+      } else if (parsed.verdict === "BLOCKED") {
+        // R10: still blocked and approaching the cap → one-shot rethink nudge.
+        note = maybeStrategicReset();
       }
 
       persist(ctx as unknown as ExtensionContext);
@@ -476,12 +508,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (problems.length === 0) return;
 
     continuationsInjected += 1;
+    // R10: fire the strategic-reset checklist BEFORE persist so the fired flag
+    // survives restarts (one-shot per gate-state lifetime).
+    const reset = maybeStrategicReset();
     persist(ctx);
     pi.sendUserMessage(
       "[REVIEW_GATE_RESUME] Quality gates are still unmet:\n" +
         problems.map((p) => `- ${p}`).join("\n") +
         `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
-        "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute.",
+        "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute." +
+        reset,
       { deliverAs: "followUp" },
     );
   });
@@ -494,6 +530,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
     state.sessionId = sessionId;
+
+    // Per-project overrides (sd0x-dev-flow R6): maxRounds is clamped to [3,50]
+    // by the loader, so a forged config cannot make the cap unreachable.
+    projectConfig = loadProjectConfig(cwd);
+    state.maxRounds = projectConfig.maxRounds;
 
     // P0-2: detect pre-existing changes — worktree AND branch commits.
     if (!state.hasCodeChange && !state.hasDocChange && !state.bypass.active) {
@@ -526,13 +567,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     const fp = computeFingerprint(cwd);
     const problems = unmetRequirements(state, fp.digest, fp.unavailable);
     if (problems.length === 0 || state.bypass.active) return;
+    // R9 (git memory, opt-in): filtered git snapshot so the model recovers its
+    // working context after compaction without re-exploring the repo.
+    const gitContext = projectConfig.gitMemory ? buildGitMemory(cwd) : "";
     pi.sendMessage({
       customType: "review-gate-resume",
       content:
         "[REVIEW_GATE_RESUME] Context compacted. Gate state survived:\n" +
         `- review: ${state.review.verdict}\n- precommit: ${state.precommit.verdict}\n` +
         `- round: ${state.rounds.length}/${state.maxRounds}\n` +
-        "Unmet:\n" + problems.map((p) => `- ${p}`).join("\n") + "\nResume the loop.",
+        "Unmet:\n" + problems.map((p) => `- ${p}`).join("\n") + "\nResume the loop." +
+        (gitContext ? "\n\n" + gitContext : ""),
       display: true,
     }, { deliverAs: "followUp", triggerTurn: false });
   });
@@ -571,6 +616,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         `precommit: ${state.precommit.verdict}${state.precommit.at ? ` (${state.precommit.at})` : ""}`,
         `changes:   code=${state.hasCodeChange} docs=${state.hasDocChange}`,
         `rounds:    ${state.rounds.length}/${state.maxRounds}`,
+        `config:    thinkHarder=${projectConfig.thinkHarder}${state.strategicResetFired ? " (fired)" : ""} gitMemory=${projectConfig.gitMemory}`,
         `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
         `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
         problems.length ? `ship gate: BLOCKED\n${problems.map((p) => `  - ${p}`).join("\n")}` : "ship gate: OPEN",
@@ -606,6 +652,28 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
+  // sd0x-dev-flow self-improvement loop port: /gate-lesson records a corrected
+  // mistake into a per-project lesson log (.pi/review-gate-lessons.md). Lessons
+  // recurring 3+ times should be promoted into rules/config by the user.
+  pi.registerCommand("gate-lesson", {
+    description: "Record a lesson learned (self-improvement log): /gate-lesson <text>",
+    handler: async (args, ctx) => {
+      const text = (args ?? "").trim();
+      if (!text) { ctx.ui.notify("Usage: /gate-lesson <what went wrong → correct approach>", "error"); return; }
+      const logPath = pathJoin(cwd, ".pi", "review-gate-lessons.md");
+      try {
+        const { appendFileSync, mkdirSync } = await import("node:fs");
+        mkdirSync(pathDirname(logPath), { recursive: true });
+        let n = 1;
+        try { n = (readFileSync(logPath, "utf8").match(/^### L\d+/gm) ?? []).length + 1; } catch { /* new log */ }
+        appendFileSync(logPath, `\n### L${n} — ${new Date().toISOString().slice(0, 10)}\n\n${text}\n`);
+        ctx.ui.notify(`review-gate: lesson L${n} recorded in .pi/review-gate-lessons.md`, "info");
+      } catch (e) {
+        ctx.ui.notify(`review-gate: could not write lesson log: ${(e as Error).message}`, "error");
+      }
+    },
+  });
+
   // ---------- per-turn protocol reminder ----------
 
   pi.on("before_agent_start", (event) => {
@@ -634,6 +702,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         "and DURING non-trivial, ambiguous, or risky work \u2014 consulting early is cheaper " +
         "than a failed review later. The `reviewer` (also a top-tier model at xhigh) is the " +
         "independent gatekeeper that emits the recorded verdict.\n" +
+        "Prohibited while gates are unmet (sd0x-dev-flow auto-loop rules): claiming a fix " +
+        "is done without re-reviewing; asking for permission to continue the loop; citing " +
+        "context length or token budget as a reason to skip review; outputting a polished " +
+        "completion-style summary. Brief status lines are fine; execute the next step.\n" +
         (problems.length
           ? `Current unmet:\n${problems.map((p) => `- ${p}`).join("\n")}`
           : "All gates satisfied — you may ship."),

@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -9,6 +9,7 @@ import {
   isPlateaued,
   loadSidecar,
   saveSidecar,
+  shouldStrategicReset,
   sidecarPath,
   unmetRequirements,
   type GateState,
@@ -215,4 +216,75 @@ test("unmetRequirements blocks an in-memory unknown precommit verdict (default-d
   s.precommit.fingerprint = FP;
   const problems = unmetRequirements(s, FP, false);
   assert.ok(problems.some((p) => /unrecognized/.test(p)), "unknown precommit verdict must block");
+});
+
+// ---------------------------------------------------------------------------
+// shouldStrategicReset — sd0x-dev-flow R10 "Think Harder" firing predicate
+// ---------------------------------------------------------------------------
+
+function blockedNearCap(rounds: number, maxRounds = 10): GateState {
+  const s = emptyState("sess1", maxRounds);
+  s.hasCodeChange = true;
+  s.review = { verdict: "BLOCKED", fingerprint: null, at: "t" };
+  for (let i = 1; i <= rounds; i++) {
+    s.rounds.push({ round: i, findingsTotal: 3, fingerprints: ["a#1#x"], at: "t" });
+  }
+  return s;
+}
+
+test("R10 fires: BLOCKED at maxRounds-offset", () => {
+  assert.ok(shouldStrategicReset(blockedNearCap(7), true, 3)); // threshold = 10-3
+});
+
+test("R10 does not fire below threshold", () => {
+  assert.ok(!shouldStrategicReset(blockedNearCap(6), true, 3));
+});
+
+test("R10 does not fire when thinkHarder disabled", () => {
+  assert.ok(!shouldStrategicReset(blockedNearCap(9), false, 3));
+});
+
+test("R10 is one-shot: fired flag suppresses", () => {
+  const s = blockedNearCap(8);
+  s.strategicResetFired = true;
+  assert.ok(!shouldStrategicReset(s, true, 3));
+});
+
+test("R10 does NOT consume the one-shot on non-BLOCKED verdicts (reviewer P1)", () => {
+  // READY awaiting precommit, PENDING before first review, NEEDS_HUMAN already
+  // escalated — none of these is "the loop is stuck"; none may fire.
+  for (const v of ["READY", "PENDING", "NEEDS_HUMAN"] as const) {
+    const s = blockedNearCap(8);
+    s.review.verdict = v;
+    assert.ok(!shouldStrategicReset(s, true, 3), v);
+  }
+});
+
+test("R10 threshold floors at 1 for tiny maxRounds", () => {
+  const s = blockedNearCap(1, 3); // threshold = max(1, 3-3) = 1
+  assert.ok(shouldStrategicReset(s, true, 3));
+});
+
+test("R10 fired flag survives sidecar round-trip", () => {
+  const p = sidecarPath(makeTemp());
+  const s = blockedNearCap(8);
+  s.strategicResetFired = true;
+  saveSidecar(p, s);
+  const loaded = loadSidecar(p);
+  assert.ok(loaded);
+  assert.equal(loaded!.strategicResetFired, true);
+  assert.ok(!shouldStrategicReset(loaded!, true, 3));
+});
+
+test("legacy sidecar without strategicResetFired still validates (schema compat)", () => {
+  const p = sidecarPath(makeTemp());
+  const s = blockedNearCap(8);
+  saveSidecar(p, s);
+  // Simulate an old-version sidecar: strip the new optional field.
+  const raw = JSON.parse(readFileSync(p, "utf8"));
+  delete raw.strategicResetFired;
+  writeFileSync(p, JSON.stringify(raw));
+  const loaded = loadSidecar(p);
+  assert.ok(loaded, "legacy schema-1 sidecar must still load");
+  assert.ok(shouldStrategicReset(loaded!, true, 3), "absent flag ⇒ not fired");
 });

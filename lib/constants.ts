@@ -72,6 +72,11 @@ export const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = Object.freeze([
   /(^|\/)\.netrc$/i,
   /(^|\/)auth\.json$/i,
   /(^|\/)serviceaccount.*\.json$/i,
+  // sd0x-dev-flow pre-edit-guard port: .git internals are never editable by the
+  // model — otherwise it could rewrite .git/hooks/pre-commit and disarm the L3
+  // defense-in-depth layer. Matches `.git/…` and a bare `.git` path segment,
+  // but NOT .gitignore / .github (the dot must be followed by exactly "git").
+  /(^|\/)\.git(\/|$)/i,
 ]);
 
 export function isSensitiveFile(filePath: string): boolean {
@@ -118,8 +123,27 @@ export const LANGUAGE_DIRECTIVE =
   "——尤其是门禁裁决 JSON 里的 \"READY\" / \"BLOCKED\" / \"NEEDS_HUMAN\" 字段值、precommit 的 " +
   "`## Overall:` sentinel、以及 commit message。这些若被翻译会破坏门禁解析。";
 
-/** Gate loop hard cap — mirrors auto-loop max_rounds. */
+/** Gate loop hard cap — mirrors auto-loop max_rounds. Overridable per project
+ * via .pi/review-gate.json (see lib/project-config.ts, sd0x-dev-flow R6). */
 export const DEFAULT_MAX_ROUNDS = 10;
 
 /** Consecutive identical-fingerprint rounds before we call it a plateau. */
 export const PLATEAU_ROUNDS = 3;
+
+/**
+ * Strategic reset (sd0x-dev-flow R10 "Think Harder"): when the review loop is
+ * still BLOCKED within this many rounds of the cap, inject a one-shot rethink
+ * checklist instead of letting the model burn the remaining rounds on
+ * incremental fixes. Fires ONCE per gate-state lifetime (reset by /gate-reset
+ * or a new session state).
+ */
+export const STRATEGIC_RESET_OFFSET = 3;
+
+export const STRATEGIC_RESET_CHECKLIST =
+  "[STRATEGIC_RESET] Approaching the round cap. Before burning the remaining rounds:\n" +
+  "1) Re-read the ORIGINAL requirement/error from the start of the task.\n" +
+  "2) Challenge the current assumption — what if the opposite is true?\n" +
+  "3) Search the codebase for similar patterns that are already solved.\n" +
+  "4) Consider a fundamentally different approach, not an incremental fix.\n" +
+  "5) Consult the adviser subagent with the full problem statement.\n" +
+  "If still blocked at the cap, escalate to the user.";

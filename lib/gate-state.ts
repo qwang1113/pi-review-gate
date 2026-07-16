@@ -55,6 +55,12 @@ export interface GateState {
     reason: string | null;
     at: string | null;
   };
+  /**
+   * sd0x-dev-flow R10 ("Think Harder") port: whether the one-shot strategic
+   * reset checklist has fired for this state lifetime. Optional so schema-1
+   * sidecars written by older versions still validate; absent ⇒ not fired.
+   */
+  strategicResetFired?: boolean;
   updatedAt: string;
 }
 
@@ -172,6 +178,29 @@ export function unmetRequirements(
   }
 
   return problems;
+}
+
+/**
+ * sd0x-dev-flow R10 "Think Harder" firing predicate (pure, unit-tested).
+ * The one-shot [STRATEGIC_RESET] checklist fires only when ALL hold:
+ *  - the project has thinkHarder enabled;
+ *  - it has not fired for this state lifetime;
+ *  - the review loop is actually stuck (verdict BLOCKED — not READY awaiting
+ *    precommit, not PENDING before a first review, not NEEDS_HUMAN which
+ *    already escalated);
+ *  - the round count is within `offset` rounds of the cap.
+ * The CALLER sets strategicResetFired and persists it when this returns true.
+ */
+export function shouldStrategicReset(
+  state: GateState,
+  thinkHarder: boolean,
+  offset: number,
+): boolean {
+  if (!thinkHarder) return false;
+  if (state.strategicResetFired) return false;
+  if (state.review.verdict !== "BLOCKED") return false;
+  const threshold = Math.max(1, state.maxRounds - offset);
+  return state.rounds.length >= threshold;
 }
 
 /** Plateau detection: same findings recurring across N rounds without shrinking. */
