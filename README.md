@@ -29,6 +29,9 @@ L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
 L5  Commit/PR English     tool_call → block git commit / gh pr create whose
                           message or PR title/body contains a non-Latin script
                           (commit & PR text must be English)
+L6  Test-label English    pre-commit → block a staged it/test/describe label in
+                          a non-Latin script, unless a `// review-gate:
+                          allow-non-english` (line) or `-file` marker exempts it
 ```
 
 State lives in **two places**: Pi session entries (`pi.appendEntry`, survives
@@ -197,6 +200,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 - Ship command obfuscated via `g""it` / `g"i"t` / `git${IFS}commit` / `git$IFS"commit"` / `${x:=git}` / `${x:-g}${y:-it}` / `$(printf git) commit` (dynamic head) / `\g\i\t` / backslash-newline continuation → shell-dequoting + de-obfuscation + dynamic-head detection still catch it (fail-closed)
 - Ship command hidden behind an INLINE git alias (`git -c "alias.ship=commit --no-verify" ship`, attached `-calias.x=commit`, shell-alias body `!git commit`, or `--config-env=alias.x=VAR`) → the alias body is scanned for `commit`/`push` and flagged (fail-closed; opaque config-env bodies default to commit)
 - `max_rounds` (10) or 3-round finding plateau → loop stops, escalates to the human — no infinite burn
+- Non-English `it`/`test`/`describe` label committed without a bypass marker → pre-commit (L6) blocks with the offending `file:line` (missing scanner on an older install → warn-and-skip, never a bricked commit)
 
 ### Threat model & residual risk (explicit)
 
@@ -260,10 +264,71 @@ Kana, Hangul, Cyrillic, Greek, Arabic, Hebrew, Thai, Devanagari, …). Detection
 it **allows** ASCII, code identifiers, numbers, URLs, emoji, and Latin text with
 diacritics (`café`, `naïve`) — only another script is blocked.
 
+### Test-label English gate (L6)
+
+Test descriptions must be **English** too. Enforced at the `pre-commit` hook
+(L3) layer by `scripts/scan-test-labels.cjs`, which scans the **staged** content
+of test files (`*.test.*`, `*.spec.*`, or under `__tests__/`, JS/TS only) for
+`it(…)` / `test(…)` / `describe(…)` (incl. `.only`/`.skip` chains) whose
+string-literal description contains a non-Latin script. Same detection as L5
+(`lib/lang-detect.ts`, mirrored in the CJS scanner), so diacritics/emoji/digits
+pass and only another writing system is blocked.
+
+When a test description legitimately must be non-English, exempt it with a
+bypass marker — recognized **only in `//` line comments**:
+
+```js
+// review-gate: allow-non-english
+it('返佣金额按 currencyRate 换算', () => { /* … */ });
+```
+
+A standalone marker line exempts the **first test call on the next line**; a
+trailing marker (`it('…'); // review-gate: allow-non-english`) exempts the call
+on **its own line**. Each marker exempts **exactly one** call (so a marker can
+never silently exempt a neighbour). To exempt an entire file, put
+`// review-gate: allow-non-english-file` in a `//` comment within its first 5
+lines.
+
+Scope is deliberately narrow to keep false positives near zero. A tiny
+zero-dependency JS/TS lexer classifies code vs. string vs. comment vs. regex, so
+`it(` inside a comment, a string, a regex literal, or a member call
+(`foo.it(...)`) is normally not mistaken for a test. Only **static** string
+labels are checked; interpolated template labels (`` `runs ${n}` ``) are
+skipped. Known MVP limitations (not blocked): a parenthesized label `it(('x'))`,
+an `it.each([...])('x')` data label, and `/* */` block-comment markers are not
+handled — use a `//` marker. Because the lexer is a heuristic (not a full
+parser), regex-vs-division is resolved **fail-closed against hiding a real test
+call**: a `/` after a bare `}`, or after `of`/`in` (`for (x of /re/)`), is read
+as division, so a genuine regex literal in those rare positions is scanned as
+code and a stray `it(` inside it could need a bypass marker — an over-report
+(one marker) is preferred to swallowing a real call. The lexer is Unicode-aware
+(ECMAScript ID_Start/ID_Continue), so non-ASCII identifiers are handled, and
+string/template labels have their JS escapes decoded (`\uXXXX`, `\u{…}`,
+`\xXX`), so a label written as `it('\u4e2d\u6587')` is still caught — decoding
+matters because tool-generated code (JSON round-trips, i18n pipelines)
+legitimately escapes non-ASCII, which is inside the cooperative-but-fallible
+model.
+
+Two residuals are accepted and out of scope, both requiring a DELIBERATELY
+obfuscated call head, which no cooperative agent produces and which belongs to
+the same excluded class as editing the control plane (see the threat model
+above): a **Unicode-escaped identifier** call head (`\u0069t('中文')` for
+`it('中文')` — semantically equivalent under JS identifier-escape rules, but a
+plain-text `it` is never written that way except to evade), and a contextual
+keyword used as a **bare identifier** in a classic sloppy script
+(`var await = 5; await / it(…) / 2`), which is invalid in ESM/`async` and
+vanishingly rare in real test files. Neither can cause a SECONDARY miss: an
+escaped head only hides its own call, and every following plain call is still
+scanned independently.
+Like the other layers, L6 is short-circuited by `/gate-bypass` (state-level) and
+`REVIEW_GATE_BYPASS=1`. Missing scanner (older installs) → warn-and-skip, never
+a blocked commit; a violation → the commit is blocked with the offending
+`file:line`.
+
 ## Development
 
 ```bash
-npm test        # 292 tests, node:test native TS (no build step)
+npm test        # 340 tests, node:test native TS (no build step)
 ```
 
 Layout:
@@ -277,6 +342,7 @@ lib/model-ranking.ts          leaderboard-scored judge ranking (reference for th
 scripts/fetch-leaderboard.mjs opt-in, gate-external leaderboard fetcher (the only network I/O)
 lib/shell-lex.ts              quote-aware shell lexer (segments + dequoted tokens)
 lib/lang-detect.ts            L5: non-Latin-script detection for commit/PR English gate
+scripts/scan-test-labels.cjs  L6: non-English test-label scanner (pre-commit, staged content)
 lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count table → PASS/FAIL/ERROR)
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)
 lib/fingerprint.ts            worktree fingerprint (HEAD+staged+unstaged+untracked)
@@ -287,7 +353,7 @@ scripts/install-project.sh    per-project installer (same layout as global)
 scripts/install-git-hooks.sh  chained installer for L3
 hooks/pre-commit|pre-push|commit-msg
 skills/review-loop/SKILL.md   the loop protocol as a Pi skill
-test/                         292 tests incl. PR #7 regression suite
+test/                         340 tests incl. PR #7 regression suite
 ```
 
 ## License

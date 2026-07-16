@@ -80,6 +80,13 @@ echo "✓ Precommit runner installed"
 cp "${SRC}/scripts/compute-fingerprint.cjs" "${AGENT_DIR}/scripts/compute-fingerprint.cjs"
 echo "✓ Fingerprint script installed"
 
+# 3c. Test-label English scanner for git hooks. MUST keep the original filename
+# (scan-test-labels.cjs): the installed pre-commit resolves it relative to its
+# own dir as ../scripts/scan-test-labels.cjs. A rename would silently disable
+# the L6 gate.
+cp "${SRC}/scripts/scan-test-labels.cjs" "${AGENT_DIR}/scripts/scan-test-labels.cjs"
+echo "✓ Test-label scanner installed"
+
 # 4. Hook installer + git hooks (NOT in ~/.pi/agent/hooks — Pi deprecated that dir)
 mkdir -p "${AGENT_DIR}/scripts"
 cp "${SRC}/hooks/"* "${AGENT_DIR}/scripts/"

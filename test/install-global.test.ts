@@ -39,6 +39,11 @@ test("install-global ships compute-fingerprint.cjs where the hooks resolve it", 
   const fpScript = join(scriptsDir, "compute-fingerprint.cjs");
   assert.ok(existsSync(fpScript), "compute-fingerprint.cjs missing from installed scripts dir");
 
+  // The L6 test-label scanner must also ship under its ORIGINAL name so the
+  // installed pre-commit resolves ../scripts/scan-test-labels.cjs.
+  const labelScript = join(scriptsDir, "scan-test-labels.cjs");
+  assert.ok(existsSync(labelScript), "scan-test-labels.cjs missing from installed scripts dir");
+
   // The installed pre-commit hook resolves FP_SCRIPT as HOOK_DIR/../scripts/…;
   // HOOK_DIR is the same scripts dir, so the relative path must also resolve.
   const hookResolved = join(scriptsDir, "..", "scripts", "compute-fingerprint.cjs");

@@ -16,6 +16,10 @@
  *   L5 Commit/PR English — tool_call blocks git commit / gh pr create whose
  *                          message or PR title/body contains a non-Latin script
  *                          (commit & PR text must be English).
+ *   L6 Test-label English — pre-commit (scripts/scan-test-labels.cjs) blocks a
+ *                          staged it/test/describe label written in a non-Latin
+ *                          script, unless a `// review-gate: allow-non-english`
+ *                          (line) or `-file` marker exempts it.
  *
  * Design principles (from real-world harness engineering):
  *   1 glob trap        → precommit runner warns on `node --test **` scripts
