@@ -383,8 +383,17 @@ function firstArgString(src, tokens, tokenByStart, from) {
   return tok && tok.kind === "string" ? tok : null;
 }
 
-function scanFile(path, src) {
+/**
+ * Full analysis of one file: deterministic violations (non-Latin labels, for
+ * the pre-commit hook) AND the non-exempt static labels that PASSED the
+ * Unicode check (`latinLabels`) — the extension feeds those to the LLM
+ * english-check layer, which catches romanized non-English (pinyin/romaji)
+ * that Unicode script detection cannot see. Exempt markers apply to both.
+ */
+function analyzeFile(path, src) {
   const violations = [];
+  const latinLabels = [];
+  const result = { violations, latinLabels };
   const tokens = lex(src);
   const mask = maskOf(src, tokens);
   const starts = lineStarts(src);
@@ -395,7 +404,7 @@ function scanFile(path, src) {
   // line (line comments are single-line) carries the file marker.
   for (const t of tokens) {
     if (t.kind === "line" && FILE_MARKER.test(t.text) && lineAt(starts, t.start) <= 5) {
-      return violations;
+      return result;
     }
   }
 
@@ -446,9 +455,16 @@ function scanFile(path, src) {
   }
 
   for (const c of calls) {
-    if (c.violation && !c.exempt) violations.push({ path, line: c.line, label: c.label });
+    if (c.exempt) continue;
+    if (c.violation) violations.push({ path, line: c.line, label: c.label });
+    else if (c.label) latinLabels.push({ path, line: c.line, label: c.label });
   }
-  return violations;
+  return result;
+}
+
+/** Hook-facing wrapper — exact historical behavior (violations only). */
+function scanFile(path, src) {
+  return analyzeFile(path, src).violations;
 }
 
 // ---- staged I/O --------------------------------------------------------------
@@ -516,4 +532,8 @@ function main() {
   process.exit(1);
 }
 
-main();
+// Run as a script (the pre-commit hook path); requiring as a module only
+// exposes the analysis functions — zero behavior change for the hook.
+if (require.main === module) main();
+
+module.exports = { scanFile, analyzeFile, isTestFile, isNonEnglishText };

@@ -153,11 +153,12 @@ test("only fetch-leaderboard.mjs performs network I/O; lib/ and extension stay n
 });
 
 // Judge model priority is pinned by the user (highest priority first). thinking
-// is a single value, not a fallback list; xhigh is the highest valid pi level
-// ("ultra"/"max" are not in THINKING_LEVELS).
-const JUDGE_THINKING = /thinking:\s*xhigh/;
+// is a single value, not a fallback list; max is the highest valid pi level
+// (pi --help: off, minimal, low, medium, high, xhigh, max). Models whose
+// provider lacks reasoning-effort support clamp gracefully.
+const JUDGE_THINKING = /thinking:\s*max/;
 
-test("adviser is pinned to the user's priority list at xhigh, and stays a non-gatekeeper", () => {
+test("adviser is pinned to the user's priority list at max thinking, and stays a non-gatekeeper", () => {
   const adviser = readFileSync(join(ROOT, "agents", "adviser.md"), "utf8");
   assert.match(adviser, /name:\s*adviser/);
   assert.match(adviser, JUDGE_THINKING);
@@ -169,7 +170,7 @@ test("adviser is pinned to the user's priority list at xhigh, and stays a non-ga
   assert.match(adviser, /not an executor and not a gatekeeper/i);
 });
 
-test("reviewer override is pinned to the user's priority list at xhigh and still emits a gate verdict", () => {
+test("reviewer override is pinned to the user's priority list at max thinking and still emits a gate verdict", () => {
   const reviewer = readFileSync(join(ROOT, "agents", "reviewer.md"), "utf8");
   assert.match(reviewer, /name:\s*reviewer/);
   assert.match(reviewer, JUDGE_THINKING);
@@ -180,11 +181,11 @@ test("reviewer override is pinned to the user's priority list at xhigh and still
   assert.match(reviewer, /"gate":\s*"READY"/);
 });
 
-test("pinned thinking level is a valid pi THINKING_LEVEL (xhigh), never ultra/max", () => {
+test("pinned thinking level is a valid pi THINKING_LEVEL, never an invented one", () => {
   for (const f of ["adviser.md", "reviewer.md"]) {
     const src = readFileSync(join(ROOT, "agents", f), "utf8");
     const m = src.match(/^thinking:\s*(\S+)/m);
     assert.ok(m, `${f} must declare a thinking level`);
-    assert.ok(["off", "minimal", "low", "medium", "high", "xhigh"].includes(m![1]), `${f} thinking '${m![1]}' must be a valid pi level`);
+    assert.ok(["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(m![1]), `${f} thinking '${m![1]}' must be a valid pi level`);
   }
 });

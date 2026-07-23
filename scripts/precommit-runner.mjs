@@ -116,16 +116,13 @@ if (pkg) {
   tryScript("test", mode === "fast" ? ["test:unit", "test"] : ["test"]);
 } else {
   // ecosystem fallback — try in priority order, first match wins.
-  let matched = false;
-
   if (existsSync(join(cwd, "Cargo.toml"))) {
-    matched = true; anyRan = true;
+    anyRan = true;
     if (!runStep("cargo-test", "cargo test --quiet")) anyFail = true;
   } else if (existsSync(join(cwd, "go.mod"))) {
-    matched = true; anyRan = true;
+    anyRan = true;
     if (!runStep("go-test", "go test ./...")) anyFail = true;
   } else if (existsSync(join(cwd, "pyproject.toml")) || existsSync(join(cwd, "setup.py"))) {
-    matched = true;
     let pytest = false;
     try { execSync("command -v pytest", { cwd, stdio: "ignore" }); pytest = true; } catch { /* not installed */ }
     if (pytest) {
@@ -135,21 +132,16 @@ if (pkg) {
       skipStep("pytest", "pytest not installed");
     }
   } else if (existsSync(join(cwd, "deno.json")) || existsSync(join(cwd, "deno.jsonc"))) {
-    matched = true; anyRan = true;
+    anyRan = true;
     if (!runStep("deno-test", "deno test --quiet")) anyFail = true;
-  }
-
-  // Generic build-system test targets (only if nothing above matched).
-  if (!matched) {
-    if (existsSync(join(cwd, "justfile"))) {
-      anyRan = true;
-      if (!runStep("just-test", "just test")) anyFail = true;
-    } else if (existsSync(join(cwd, "Makefile"))) {
-      anyRan = true;
-      if (!runStep("make-test", "make test")) anyFail = true;
-    } else {
-      skipStep("detect", "no package.json / Cargo.toml / go.mod / pyproject.toml / Makefile / justfile / deno.json");
-    }
+  } else if (existsSync(join(cwd, "justfile"))) {
+    anyRan = true;
+    if (!runStep("just-test", "just test")) anyFail = true;
+  } else if (existsSync(join(cwd, "Makefile"))) {
+    anyRan = true;
+    if (!runStep("make-test", "make test")) anyFail = true;
+  } else {
+    skipStep("detect", "no package.json / Cargo.toml / go.mod / pyproject.toml / Makefile / justfile / deno.json");
   }
 }
 

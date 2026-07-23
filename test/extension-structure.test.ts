@@ -33,8 +33,65 @@ test("L1: tool_call handler exists and can block", () => {
 
 test("L2: agent_settled auto-continuation with recursion guard", () => {
   assert.match(SRC, /pi\.on\(["']agent_settled["']/);
+  assert.match(SRC, /state\.taskMode === "explore"/);
   assert.match(SRC, /continuationsInjected/);
   assert.match(SRC, /REVIEW_GATE_RESUME/);
+});
+
+test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits arm the loop flag)", () => {
+  // Explore-mode edits set loopArmed = true in tool_result; only the explore
+  // early-return keeps auto-continuation off. If someone reorders the checks,
+  // explore would silently regain forced continuation.
+  const start = SRC.indexOf('pi.on("agent_settled"');
+  assert.ok(start >= 0, "agent_settled handler must exist");
+  const body = SRC.slice(start, start + 900);
+  const exploreAt = body.indexOf('state.taskMode === "explore"');
+  const loopArmedAt = body.indexOf("!loopArmed");
+  assert.ok(exploreAt >= 0 && loopArmedAt >= 0, "both checks must exist");
+  assert.ok(exploreAt < loopArmedAt, "explore early-return must precede the loopArmed check");
+});
+
+test("first task delegates to the pure decideTaskMode flow and warns on auto-explore", () => {
+  assert.match(SRC, /pi\.on\(["']input["']/);
+  // The handler must use the unit-tested pure decision flow (auto vs dialog vs
+  // no-UI vs cancel), not re-implement the branching inline.
+  assert.match(SRC, /decideTaskMode\(/);
+  assert.match(SRC, /decision\.via === "auto"/);
+  // Auto-selecting explore relaxes auto-continuation — the notify level must
+  // be "warning" for explore (info only for loop) so misfires are noticed.
+  assert.match(SRC, /decision\.mode === "loop" \? "info" : "warning"/);
+  assert.match(SRC, /registerCommand\(["']gate-mode["']/);
+  assert.doesNotMatch(SRC, /name:\s*["'](?:set_)?task_mode["']/);
+});
+
+test("explore workflow: advisory completion, no edit/bash blocking, ship gate intact", () => {
+  // declare_done is self-accepted in explore.
+  assert.match(SRC, /explore task completed by AI judgment/);
+  // The system prompt guides toward read-only work instead of hard-blocking.
+  assert.match(SRC, /## Explore workflow/);
+  assert.match(SRC, /PREFER read-only work/);
+  // The old hard blocks must be gone: no mode-based edit/bash/run_precommit
+  // refusal may remain anywhere in the extension.
+  assert.doesNotMatch(SRC, /current task is in read-only workflow/);
+  assert.doesNotMatch(SRC, /bash is disabled/);
+  assert.doesNotMatch(SRC, /run_precommit is unavailable/);
+});
+
+test("SECURITY: explore never weakens the L1 ship gate (no taskMode branch in tool_call)", () => {
+  // Ship commands (git commit/push, gh pr) must stay fully gated in every
+  // mode: explore only relaxes declare_done and auto-continuation. Guard
+  // against reintroducing a mode check inside the tool_call handler.
+  const start = SRC.indexOf('pi.on("tool_call"');
+  assert.ok(start >= 0, "tool_call handler must exist");
+  const end = SRC.indexOf('pi.on("tool_result"', start);
+  assert.ok(end > start, "tool_result handler must follow tool_call");
+  const body = SRC.slice(start, end);
+  assert.doesNotMatch(body, /taskMode\s*===/,
+    "tool_call (L1 ship gate + sensitive files + L6) must be task-mode independent");
+});
+
+test("restore validates persisted taskMode through normalizeTaskMode", () => {
+  assert.match(SRC, /normalizeTaskMode/);
 });
 
 test("compaction recovery: session_compact re-injects state", () => {
@@ -58,18 +115,59 @@ test("record_review parses full output through verdict-parse", () => {
   assert.match(SRC, /parseReviewOutput/);
 });
 
-test("L5: commit & PR title/body must be English (blocks non-Latin scripts)", () => {
+test("L5: commit & PR title/body language check is ADVISORY (warns, never blocks)", () => {
   // commit messages AND gh pr create title/body are language-checked.
   assert.match(SRC, /firstNonEnglish/);
   assert.match(SRC, /extractPrTextFields/);
-  assert.match(SRC, /must be English/);
   // Applied to both ship kinds.
-  assert.match(SRC, /s\.kind === "pr-create"/);
+  assert.match(SRC, /s\.kind === "pr-create" \|\| s\.kind === "pr-edit"/);
+  // Findings are collected as advisories and surfaced via notify — the L5
+  // branch must NOT return a block (extraction heuristics can mis-read
+  // heredoc/substitution commit commands; a wrong guess must not stop a ship).
+  assert.match(SRC, /l5Advisories/);
+  assert.match(SRC, /review-gate \(L5 advisory\)/);
+
+  // Reviewer P2 hardening: prove the LANGUAGE branches themselves cannot
+  // block, independent of any reason wording. Each language check appends to
+  // l5Advisories; between the deterministic check and its advisory push there
+  // must be NO `block: true` — and the segment from the LAST language check to
+  // the notify call must be block-free too.
+  const commitLangAt = SRC.indexOf("firstNonEnglish(msgs)");
+  const prLangAt = SRC.indexOf("firstNonEnglish(prTexts)");
+  const notifyAt = SRC.indexOf("review-gate (L5 advisory)");
+  assert.ok(commitLangAt > 0 && prLangAt > commitLangAt && notifyAt > prLangAt,
+    "commit language check → PR language check → advisory notify, in order");
+  const langRegion = SRC.slice(commitLangAt, notifyAt);
+  assert.doesNotMatch(langRegion, /block:\s*true/,
+    "no blocking return may exist between the language checks and the advisory notify");
+  // The advisory must be surfaced through ctx.ui.notify at warning level.
+  const notifyCall = SRC.slice(SRC.lastIndexOf("ctx.ui.notify", notifyAt), notifyAt + 400);
+  assert.match(notifyCall, /ctx\.ui\.notify\(/);
+  assert.match(notifyCall, /"warning"/);
+
+  // AI-attribution BEFORE the language region STAYS a hard block.
+  const attrRegion = SRC.slice(SRC.indexOf("const l5Advisories"), commitLangAt);
+  assert.match(attrRegion, /AI attribution[\s\S]*?block:\s*true/);
 });
 
-test("commands registered: gate-status, gate-bypass, gate-reset", () => {
-  for (const cmd of ["gate-status", "gate-bypass", "gate-reset"]) {
+test("commands registered: gate-status, gate-bypass, gate-mode, gate-reset", () => {
+  for (const cmd of ["gate-status", "gate-bypass", "gate-mode", "gate-reset"]) {
     assert.match(SRC, new RegExp(`registerCommand\\(["']${cmd}["']`), cmd);
+  }
+});
+
+test("high-value sd0x-dev-flow commands are registered from a shared catalog", () => {
+  assert.match(SRC, /WORKFLOW_COMMANDS/);
+  assert.match(SRC, /registerWorkflowCommand/);
+  assert.match(SRC, /buildWorkflowPrompt/);
+  assert.match(SRC, /pi\.sendUserMessage/);
+
+  const catalog = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
+  for (const cmd of [
+    "review", "precommit", "precommit-fast", "verify", "next-step",
+    "risk-assess", "smart-commit", "create-pr", "load-pr-review", "watch-ci",
+  ]) {
+    assert.match(catalog, new RegExp(`["']?${cmd}["']?\\s*:`), cmd);
   }
 });
 
@@ -90,9 +188,23 @@ test("precommit PASS is granted ONLY by the run_precommit tool (trusted spawn + 
 });
 
 test("run_precommit spawns with argv, never shell:true", () => {
-  assert.match(SRC, /spawnSync\(/);
+  assert.match(SRC, /spawn\(/);
   assert.match(SRC, /shell:\s*false/);
   assert.doesNotMatch(SRC, /shell:\s*true/);
+});
+
+test("run_precommit is async and abortable — never a sync spawn that freezes the event loop", () => {
+  // Root-cause fix for "run_precommit hangs, ESC can't cancel": spawnSync blocks
+  // the extension host's event loop for up to 20 minutes. The runner must be
+  // spawned async, detached (own process group), with abort + timeout killing
+  // the whole process tree.
+  assert.doesNotMatch(SRC, /spawnSync\s*\(/);
+  assert.match(SRC, /async function runTrustedPrecommit/);
+  assert.match(SRC, /abortSignal\?\.addEventListener\("abort"/);
+  assert.match(SRC, /detached:\s*true/);
+  assert.match(SRC, /killProcessTree/);
+  // The tool must pass its AbortSignal through.
+  assert.match(SRC, /await runTrustedPrecommit\(mode, _signal\)/);
 });
 
 test("stale-state reconciliation is one-way", () => {
@@ -134,7 +246,8 @@ test("R6/R9/R10: project config, git memory, strategic reset wired in", () => {
   // R6 — per-project maxRounds loaded (clamped in lib/project-config.ts).
   assert.match(SRC, /loadProjectConfig/);
   assert.match(SRC, /state\.maxRounds = projectConfig\.maxRounds/);
-  // R9 — git memory appended to the compaction resume message, opt-in only.
+  // R9 — git memory appended to the compaction resume message (default on,
+  // knob-guarded so an explicit "gitMemory": false still disables it).
   assert.match(SRC, /projectConfig\.gitMemory \? buildGitMemory/);
   // R10 — strategic reset is one-shot and persisted via strategicResetFired.
   assert.match(SRC, /maybeStrategicReset/);
@@ -158,4 +271,70 @@ test("precommit trust does NOT depend on parsing bash command text (root-cause f
   // comes only from run_precommit spawning the runner + verifying a receipt.
   // Guard against regressing to a command-text trust heuristic.
   assert.doesNotMatch(SRC, /isPrecommitRunnerCommand/);
+});
+
+// ---------------------------------------------------------------------------
+// LLM semantic guard layer — call-site safety invariants (structural)
+
+test("LLM guards: deterministic checks precede every LLM call (tighten-only order)", () => {
+  // Guard #2: COMMIT_MSG_FORBIDDEN regex loop must appear BEFORE the semantic
+  // attribution call in the commit branch.
+  const forbidden = SRC.indexOf("COMMIT_MSG_FORBIDDEN.some");
+  const semanticAttr = SRC.indexOf("classifyAiAttribution(");
+  assert.ok(forbidden > 0 && semanticAttr > forbidden,
+    "regex attribution check must precede classifyAiAttribution");
+
+  // L5 (advisory): Unicode firstNonEnglish must precede the semantic english
+  // check — anchored to the commit-msg branch (`msgs`), because the L6
+  // edit-time branch also calls classifyNonEnglish earlier in the file.
+  const unicodeCheck = SRC.indexOf("firstNonEnglish(msgs)");
+  const semanticEnglish = SRC.indexOf("classifyNonEnglish(classifier(), msgs)");
+  assert.ok(unicodeCheck > 0 && semanticEnglish > unicodeCheck,
+    "Unicode script check must precede classifyNonEnglish in the commit branch");
+  // same ordering in the PR branch
+  const unicodePr = SRC.indexOf("firstNonEnglish(prTexts)");
+  const semanticPr = SRC.indexOf("classifyNonEnglish(classifier(), prTexts)");
+  assert.ok(unicodePr > 0 && semanticPr > unicodePr,
+    "Unicode script check must precede classifyNonEnglish in the PR branch");
+  // L6: the deterministic violations check must precede the semantic layer
+  // inside checkTestLabels.
+  const l6Deterministic = SRC.indexOf("res.violations.length > 0");
+  const l6Semantic = SRC.indexOf("classifyNonEnglish(classifier(), labels)");
+  assert.ok(l6Deterministic > 0 && l6Semantic > l6Deterministic,
+    "deterministic L6 violations must precede the semantic label check");
+
+  // Guard #4: the ship LLM layer only runs inside the ships.length === 0
+  // branch (it can only ADD detections, never lift one).
+  const staticShips = SRC.indexOf("detectShipCommands(command)");
+  const shipLlm = SRC.indexOf("classifyShipCommand(");
+  assert.ok(staticShips > 0 && shipLlm > staticShips,
+    "static ship detection must precede classifyShipCommand");
+  const between = SRC.slice(staticShips, shipLlm);
+  assert.match(between, /ships\.length === 0/,
+    "LLM ship layer must be gated on the static detector finding nothing");
+});
+
+test("LLM guards: every call site is gated on its llmGuards config flag", () => {
+  assert.match(SRC, /projectConfig\.llmGuards\.taskMode/);
+  assert.match(SRC, /projectConfig\.llmGuards\.aiAttribution/);
+  assert.match(SRC, /projectConfig\.llmGuards\.englishCheck/);
+  assert.match(SRC, /projectConfig\.llmGuards\.shipDetect/);
+});
+
+test("LLM task-mode verdict keeps source auto (never downgrades the git hook)", () => {
+  // The decideTaskMode call must pass the classifier; the "llm" via maps to
+  // source:"auto" in lib/task-mode.ts (unit-tested there) — here we pin that
+  // the extension actually routes through decideTaskMode with classify.
+  assert.match(SRC, /classify:\s*projectConfig\.llmGuards\.taskMode/);
+  assert.match(SRC, /classifyTaskMode\(classifier\(\), prompt\)/);
+});
+
+test("L6 edit-time check scans the FULL projected file, not newText fragments", () => {
+  // P1 regression guard: the extension must project via lib/edit-projection.ts.
+  assert.match(SRC, /projectEditedContent\(/);
+  assert.ok(SRC.includes('./lib/edit-projection.ts'), "must import lib/edit-projection.ts");
+  // and the label check runs inside the edit-tool branch before returning
+  const editBranch = SRC.indexOf("EDIT_TOOL_NAMES.has(event.toolName)");
+  const labelCheck = SRC.indexOf("checkTestLabels(");
+  assert.ok(editBranch > 0 && labelCheck > 0, "checkTestLabels must exist");
 });

@@ -23,18 +23,57 @@ command -v node >/dev/null 2>&1 || {
   exit 1
 }
 
-# State-level bypass (/gate-bypass writes bypass.active=true). Honor it BEFORE any
-# sub-gate below so `/gate-bypass` disables ALL ship blocking (L6 included),
-# matching the documented escape. A malformed/unreadable sidecar is NOT treated
-# as bypass here — the main verdict block below still fails closed on it.
-if node -e '
-  try {
-    const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-    process.exit(s && s.bypass && s.bypass.active === true ? 0 : 1);
-  } catch { process.exit(1); }
-' "$STATE_FILE" 2>/dev/null; then
-  exit 0
-fi
+# Validate the complete sidecar shape BEFORE honoring bypass or explore mode.
+# This keeps both escape paths fail-closed for corrupt, unknown-schema, or forged
+# states. Exit 10 means a valid bypass; 11 means a valid USER-chosen explore
+# advisory state (an auto-classified explore never downgrades the hook).
+set +e
+node - "$STATE_FILE" <<'NODE'
+const { readFileSync } = require("node:fs");
+let state;
+try { state = JSON.parse(readFileSync(process.argv[2], "utf8")); } catch {
+  console.error("[review-gate] gate state unreadable — failing closed.");
+  process.exit(1);
+}
+const GATE_VERDICTS = new Set(["PENDING", "READY", "BLOCKED", "NEEDS_HUMAN"]);
+const PRECOMMIT_VERDICTS = new Set(["PASS", "FAIL", "NO_CHECKS_RUN", "NOT_RUN"]);
+if (state.schema !== 1) {
+  console.error("[review-gate] unknown gate schema — failing closed.");
+  process.exit(1);
+}
+const nullableString = (v) => v === null || typeof v === "string";
+const validRound = (r) => r && Number.isInteger(r.round) && r.round > 0 &&
+  (r.findingsTotal === null || (Number.isInteger(r.findingsTotal) && r.findingsTotal >= 0)) &&
+  Array.isArray(r.fingerprints) && r.fingerprints.every((v) => typeof v === "string") &&
+  typeof r.at === "string";
+if (!nullableString(state.sessionId) ||
+    typeof state.hasCodeChange !== "boolean" || typeof state.hasDocChange !== "boolean" ||
+    !state.review || !GATE_VERDICTS.has(state.review.verdict) ||
+    !nullableString(state.review.fingerprint) || !nullableString(state.review.at) ||
+    (state.review.docSync !== undefined && state.review.docSync !== "UPDATED" && state.review.docSync !== "NOT_NEEDED") ||
+    !state.precommit || !PRECOMMIT_VERDICTS.has(state.precommit.verdict) ||
+    !nullableString(state.precommit.fingerprint) || !nullableString(state.precommit.at) ||
+    !Array.isArray(state.rounds) || !state.rounds.every(validRound) ||
+    !Number.isInteger(state.maxRounds) || state.maxRounds < 3 || state.maxRounds > 50 ||
+    !state.bypass || typeof state.bypass.active !== "boolean" ||
+    !nullableString(state.bypass.reason) || !nullableString(state.bypass.at) ||
+    (state.taskMode !== undefined && state.taskMode !== "loop" && state.taskMode !== "explore") ||
+    (state.taskModeSource !== undefined && state.taskModeSource !== "auto" && state.taskModeSource !== "user") ||
+    (state.strategicResetFired !== undefined && typeof state.strategicResetFired !== "boolean") ||
+    typeof state.updatedAt !== "string") {
+  console.error("[review-gate] gate state shape/verdict invalid — failing closed.");
+  process.exit(1);
+}
+if (state.bypass.active) process.exit(10);
+// SECURITY: only a USER-chosen explore (dialog or /gate-mode) makes the hook
+// advisory. A heuristic auto-classification must never weaken the commit gate.
+if (state.taskMode === "explore" && state.taskModeSource === "user") process.exit(11);
+process.exit(0);
+NODE
+STATE_MODE=$?
+set -e
+[[ "$STATE_MODE" == "10" || "$STATE_MODE" == "11" ]] && exit 0
+[[ "$STATE_MODE" == "0" ]] || exit 1
 
 # Resolve helper scripts relative to the hook location.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,6 +109,15 @@ try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch {
   console.error("[review-gate] gate state unreadable — failing closed.");
   process.exit(1);
 }
+
+// Per-project docSync knob (defense-in-depth mirror of unmetRequirements).
+// Default ON; only an explicit `"docSync": false` in a valid config disables.
+// Missing/corrupt config ⇒ default (enforced) — fail-safe, never fail-open.
+let docSyncEnforced = true;
+try {
+  const cfg = JSON.parse(readFileSync(".pi/review-gate.json", "utf8"));
+  if (cfg && typeof cfg === "object" && cfg.docSync === false) docSyncEnforced = false;
+} catch { /* no config — default enforced */ }
 
 if (state.schema !== 1) {
   console.error("[review-gate] unknown gate schema — failing closed.");
@@ -112,6 +160,10 @@ if (state.hasCodeChange) {
     problems.push("review PASS has no fingerprint binding — cannot verify");
   } else if (state.review.fingerprint !== currentFp) {
     problems.push("code was modified after the last READY review (fingerprint mismatch)");
+  } else if (docSyncEnforced &&
+             state.review.docSync !== "UPDATED" && state.review.docSync !== "NOT_NEEDED") {
+    // docSync knob: the READY review must carry a code↔doc attestation.
+    problems.push("docSync enforced: READY review lacks a code↔doc attestation (UPDATED | NOT_NEEDED)");
   }
 
   // Fail-closed: only an explicit PASS bound to the current fingerprint passes.

@@ -7,12 +7,19 @@
  *   FAIL > NO_CHECKS_RUN > PASS. FAIL is terminal.
  */
 
-import type { GateVerdict } from "./gate-state.ts";
+import type { DocSyncAttestation, GateVerdict } from "./gate-state.ts";
+import { DOC_SYNC_ATTESTATIONS } from "./gate-state.ts";
 
 export interface ParsedVerdict {
   verdict: Exclude<GateVerdict, "PENDING">;
   findingsTotal: number | null;
   findingFingerprints: string[];
+  /**
+   * Reviewer's code↔doc attestation (docSync knob). Only the enum whitelist
+   * is accepted; any unknown value is treated as absent (fail-closed — absent
+   * blocks when enforcement is on, it never passes).
+   */
+  docSync?: DocSyncAttestation;
 }
 
 interface FenceVerdict {
@@ -20,6 +27,7 @@ interface FenceVerdict {
   findingsTotal: number | null;
   findingFingerprints: string[];
   hasP0P1: boolean;
+  docSync?: DocSyncAttestation;
 }
 
 const SEVERITY: Record<string, number> = { BLOCKED: 3, NEEDS_HUMAN: 2, READY: 1 };
@@ -30,12 +38,15 @@ function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
   if (!a) return b;
   const bWorse = SEVERITY[b.verdict] > SEVERITY[a.verdict];
   if (bWorse) return b;
-  // Equal severity: merge — accumulate findings and hasP0P1.
+  // Equal severity: merge — accumulate findings and hasP0P1. docSync merges
+  // conservatively: agreeing fences keep the value, disagreeing fences drop
+  // it (absent blocks under enforcement — fail-closed on contradiction).
   return {
     verdict: a.verdict,
     findingsTotal: (a.findingsTotal ?? 0) + (b.findingsTotal ?? 0),
     findingFingerprints: [...a.findingFingerprints, ...b.findingFingerprints],
     hasP0P1: a.hasP0P1 || b.hasP0P1,
+    docSync: a.docSync === b.docSync ? a.docSync : undefined,
   };
 }
 
@@ -84,7 +95,14 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
     }
   }
 
-  return { verdict, findingsTotal, findingFingerprints: fingerprints, hasP0P1 };
+  // docSync attestation — enum whitelist only, unknown values → absent.
+  let docSync: DocSyncAttestation | undefined;
+  const docSyncRaw = obj.docSync ?? obj.doc_sync;
+  if (typeof docSyncRaw === "string" && DOC_SYNC_ATTESTATIONS.has(docSyncRaw.trim().toUpperCase())) {
+    docSync = docSyncRaw.trim().toUpperCase() as DocSyncAttestation;
+  }
+
+  return { verdict, findingsTotal, findingFingerprints: fingerprints, hasP0P1, docSync };
 }
 
 /**
@@ -113,6 +131,7 @@ export function parseReviewOutput(text: string): ParsedVerdict | undefined {
     verdict: result.verdict,
     findingsTotal: result.findingsTotal,
     findingFingerprints: result.findingFingerprints,
+    docSync: result.docSync,
   };
 }
 

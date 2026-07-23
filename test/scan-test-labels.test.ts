@@ -478,3 +478,61 @@ test("this repo's own staged test labels are all English (self-check)", () => {
     assert.doesNotMatch(r.stderr, /test\/.*\.test\.ts:/, `own test labels flagged:\n${r.stderr}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Module exports (extension-side L6: analyzeFile / isTestFile / scanFile)
+
+test("module export: require() does NOT run main (no argv side effects)", () => {
+  // Requiring in a subprocess with no staged repo must exit 0 silently.
+  const r = spawnSync("node", ["-e", `
+    const m = require(${JSON.stringify(SCANNER)});
+    if (typeof m.analyzeFile !== "function") process.exit(2);
+    if (typeof m.scanFile !== "function") process.exit(3);
+    if (typeof m.isTestFile !== "function") process.exit(4);
+    if (typeof m.isNonEnglishText !== "function") process.exit(5);
+  `], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+});
+
+test("analyzeFile separates violations from latin labels honoring exemptions", () => {
+  const r = spawnSync("node", ["-e", `
+    const { analyzeFile } = require(${JSON.stringify(SCANNER)});
+    const src = [
+      "it('computes the sum', () => {});",
+      "// review-gate: allow-non-english",
+      "it('返佣金额', () => {});",
+      "it('另一个中文', () => {});",
+      "it('ceshi yonghu denglu', () => {});",
+    ].join("\\n");
+    const res = analyzeFile("x.test.ts", src);
+    console.log(JSON.stringify(res));
+  `], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const res = JSON.parse(r.stdout);
+  // exempted 返佣金额 is neither a violation nor a latin label
+  assert.equal(res.violations.length, 1);
+  assert.match(res.violations[0].label, /另一个中文/);
+  // both pure-Latin labels (English + pinyin) surface for the LLM layer
+  assert.deepEqual(res.latinLabels.map((l: { label: string }) => l.label),
+    ["computes the sum", "ceshi yonghu denglu"]);
+});
+
+test("analyzeFile: file-level marker exempts latin labels from the LLM layer too", () => {
+  const r = spawnSync("node", ["-e", `
+    const { analyzeFile } = require(${JSON.stringify(SCANNER)});
+    const src = "// review-gate: allow-non-english-file\\nit('ceshi denglu', () => {});\\nit('中文', () => {});";
+    console.log(JSON.stringify(analyzeFile("x.test.ts", src)));
+  `], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const res = JSON.parse(r.stdout);
+  assert.equal(res.violations.length, 0);
+  assert.equal(res.latinLabels.length, 0);
+});
+
+test("hook behavior unchanged: scanFile still returns violations only", () => {
+  const dir = repoWith({ "c.test.ts": "it('ceshi yonghu denglu', () => {});\n" });
+  // pinyin passes the deterministic hook (Unicode check) — LLM layer is
+  // extension-side only, so the zero-dependency hook stays permissive here.
+  const r = scan(dir);
+  assert.equal(r.status, 0, r.stderr);
+});

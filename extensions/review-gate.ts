@@ -2,7 +2,7 @@
  * pi-review-gate — quality gates for Pi.
  *
  * Enforcement layers:
- *   L1 Ship gate (HARD)  — tool_call blocks git commit/push & gh pr create
+ *   L1 Ship gate (HARD)  — tool_call blocks git commit/push & gh pr create/edit
  *                          until review READY + precommit PASS, both bound to
  *                          the current worktree fingerprint.
  *   L2 Auto-continuation — agent_settled re-triggers the loop when gates are
@@ -13,9 +13,11 @@
  *                          strict Simplified-Chinese LANGUAGE_DIRECTIVE every
  *                          turn (thinking in Chinese too); protocol English
  *                          tokens (verdict enum, commit msgs, code) exempt.
- *   L5 Commit/PR English — tool_call blocks git commit / gh pr create whose
- *                          message or PR title/body contains a non-Latin script
- *                          (commit & PR text must be English).
+ *   L5 Commit/PR English — ADVISORY: tool_call warns (never blocks) when a git
+ *                          commit message or PR title/body looks non-English;
+ *                          the per-turn LANGUAGE_DIRECTIVE instructs the agent
+ *                          to write ship text in English and the reviewer
+ *                          checks it during review.
  *   L6 Test-label English — pre-commit (scripts/scan-test-labels.cjs) blocks a
  *                          staged it/test/describe label written in a non-Latin
  *                          script, unless a `// review-gate: allow-non-english`
@@ -34,7 +36,7 @@
  *
  * sd0x-dev-flow ports beyond PR #7 (see README "-dev-flow features ported"):
  *   R6  per-project maxRounds via .pi/review-gate.json (clamped 3..50)
- *   R9  opt-in [GIT_CONTEXT] git memory after compaction (filtered, capped)
+ *   R9  [GIT_CONTEXT] git memory after compaction (filtered, capped; default on)
  *   R10 one-shot [STRATEGIC_RESET] think-harder checklist near the round cap
  *   —   auto-loop prohibited behaviors in the per-turn reminder
  *   —   .git/ internals in SENSITIVE_FILE_PATTERNS (pre-edit-guard port)
@@ -46,7 +48,7 @@ import { tmpdir } from "node:os";
 import { join as pathJoin, dirname as pathDirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -79,6 +81,18 @@ import {
   type GateState,
 } from "./lib/gate-state.ts";
 import { parseReviewOutput, parsePrecommitOutput } from "./lib/verdict-parse.ts";
+import { decideTaskMode, normalizeTaskMode, type TaskMode, type TaskModeSource } from "./lib/task-mode.ts";
+import {
+  createLlmClassifier,
+  classifyTaskMode,
+  classifyAiAttribution,
+  classifyNonEnglish,
+  classifyShipCommand,
+  isSuspiciousShipCandidate,
+  type LlmClassifier,
+} from "./lib/llm-classify.ts";
+import { projectEditedContent } from "./lib/edit-projection.ts";
+import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "./lib/workflow-commands.ts";
 
 const ENTRY_TYPE = "review-gate-state";
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
@@ -130,6 +144,20 @@ export default function reviewGate(pi: ExtensionAPI) {
   // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
   // session_start; a missing/corrupt config file falls back to safe defaults.
   let projectConfig: ProjectConfig = defaultProjectConfig();
+
+  // LLM semantic guard layer (DeepSeek V4 Flash — lib/llm-classify.ts).
+  // Lazily (re)created so it always reflects the loaded projectConfig model.
+  // Every use is tighten-only + fail-back: an unreachable model degrades each
+  // guard to its exact pre-LLM deterministic behavior.
+  let llmClassifier: LlmClassifier | null = null;
+  let llmClassifierModel = "";
+  function classifier(): LlmClassifier {
+    if (!llmClassifier || llmClassifierModel !== projectConfig.llmGuards.model) {
+      llmClassifier = createLlmClassifier(projectConfig.llmGuards.model);
+      llmClassifierModel = projectConfig.llmGuards.model;
+    }
+    return llmClassifier;
+  }
 
   /**
    * sd0x-dev-flow R10 "Think Harder": one-shot strategic-reset checklist when
@@ -190,6 +218,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
     } catch { /* best effort */ }
 
+    if (restored?.taskMode !== undefined && normalizeTaskMode(restored.taskMode) === undefined) {
+      delete restored.taskMode;
+    }
+
     if (restored && restored.sessionId === sessionId) {
       state = restored;
       continuationsInjected = restoredInjections;
@@ -210,13 +242,117 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.bypass.active) {
       parts.push("gate: BYPASSED");
     } else if (!state.hasCodeChange && !state.hasDocChange) {
-      parts.push("gate: idle");
+      if (state.taskMode === "explore") parts.push("gate: explore (advisory)");
+      else parts.push(state.taskMode === "loop" ? "gate: loop · idle" : "gate: awaiting choice");
     } else {
+      // Explore shows the same live verdict status, tagged advisory — the
+      // agent can edit in this mode, so a static label would hide real state.
+      if (state.taskMode === "explore") parts.push("explore (advisory)");
       parts.push(`review: ${state.review.verdict}`);
       parts.push(`precommit: ${state.precommit.verdict}`);
       parts.push(`round ${state.rounds.length}/${state.maxRounds}`);
     }
     try { ctx.ui.setStatus("review-gate", parts.join(" · ")); } catch { /* non-TUI */ }
+  }
+
+  // SECURITY: source is persisted so the git pre-commit hook can distinguish a
+  // user-chosen explore (advisory hook) from a heuristic auto-classification
+  // (hook stays fully enforced — verb lists can never be complete).
+  function setTaskMode(mode: TaskMode, source: TaskModeSource, ctx: ExtensionContext) {
+    state.taskMode = mode;
+    state.taskModeSource = source;
+    loopArmed = mode === "loop";
+    continuationsInjected = 0;
+    persist(ctx);
+  }
+
+  // Decide once, before the first task reaches the agent. When the heuristic
+  // has a clear signal the extension auto-selects the mode and only notifies
+  // the user (override anytime with /gate-mode); only genuinely ambiguous
+  // prompts fall back to asking the user. The full decision flow (including
+  // no-UI fail-closed loop default and dialog-cancel fallback) is the pure,
+  // unit-tested decideTaskMode().
+  pi.on("input", async (event, ctx) => {
+    if (state.taskMode !== undefined) return { action: "continue" as const };
+    if (event.source === "extension" || event.streamingBehavior !== undefined) {
+      return { action: "continue" as const };
+    }
+
+    const decision = await decideTaskMode({
+      prompt: event.text,
+      hasUI: ctx.hasUI,
+      select: (title, options) => ctx.ui.select(title, options),
+      // Guard #1: semantic classification via DeepSeek V4 Flash. Judges intent
+      // (quoted logs/notifications are context, not intent) where the regex
+      // heuristic word-matches. Disabled or failing → regex + dialog fallback.
+      classify: projectConfig.llmGuards.taskMode
+        ? (prompt) => classifyTaskMode(classifier(), prompt)
+        : undefined,
+    });
+    setTaskMode(decision.mode, decision.source, ctx);
+    if (decision.via === "auto" || decision.via === "llm") {
+      const by = decision.via === "llm" ? "语义判定（flash）" : "自动判定";
+      // Auto-explore relaxes auto-continuation — surface it as a warning so a
+      // misclassification is noticed (ship gate and git hooks stay enforced).
+      ctx.ui.notify(
+        decision.mode === "loop"
+          ? `review-gate: ${by}为循环任务（多轮 review + precommit + gate）。可用 /gate-mode explore 切换。`
+          : `review-gate: ${by}为探查任务 — 优先只读排查，gate 仅供参考，AI 可自主结束（commit/push 等 ship 命令仍被完整拦截）。如需完整循环请用 /gate-mode loop 切换。`,
+        decision.mode === "loop" ? "info" : "warning",
+      );
+    }
+    return { action: "continue" as const };
+  });
+
+  // ---------- L6 (extension side): test-label language, checked at edit time ----------
+
+  /**
+   * Full post-edit file projection (lib/edit-projection.ts). Scanning the
+   * complete projected file — not newText fragments — closes the reviewer's
+   * P1 bypass: an edit replacing just a label STRING (`'old label'` →
+   * `'ceshi denglu'`) still yields a file where the lexer sees the
+   * surrounding `it(...)` call.
+   */
+  function editedTestContent(input: Record<string, unknown>, path: string): string {
+    return projectEditedContent(input, () => {
+      try { return readFileSync(path, "utf8"); } catch { return undefined; }
+    });
+  }
+
+  /**
+   * L6 moved LEFT: the git-hook scanner (scripts/scan-test-labels.cjs) stays
+   * the deterministic, zero-dependency backstop at commit time; here the SAME
+   * lexer runs at edit time for immediate feedback, plus the flash semantic
+   * layer for the Unicode blind spot (romanized non-English labels). Both are
+   * tighten-only; scanner load/parse failure → pass (hook still enforces).
+   */
+  async function checkTestLabels(path: string, content: string): Promise<string | undefined> {
+    if (!content) return undefined;
+    let analyze: ((p: string, src: string) => { violations: Array<{ line: number; label: string }>; latinLabels: Array<{ line: number; label: string }> }) | undefined;
+    let isTest: ((p: string) => boolean) | undefined;
+    try {
+      const { createRequire } = await import("node:module");
+      const req = createRequire(import.meta.url);
+      const mod = req("../scripts/scan-test-labels.cjs");
+      analyze = mod.analyzeFile; isTest = mod.isTestFile;
+    } catch { return undefined; /* scanner unavailable — hook backstop remains */ }
+    if (!analyze || !isTest || !isTest(path)) return undefined;
+    let res: ReturnType<typeof analyze>;
+    try { res = analyze(path, content); } catch { return undefined; }
+    if (res.violations.length > 0) {
+      const v = res.violations[0];
+      return `review-gate: non-English test label (L6) in ${path}:${v.line}: "${v.label.slice(0, 60)}". ` +
+        "Test descriptions must be English. Use `// review-gate: allow-non-english` on the line above to exempt one case.";
+    }
+    // Unicode check passed — flash semantic layer for romanized non-English.
+    if (projectConfig.llmGuards.englishCheck && res.latinLabels.length > 0) {
+      const labels = res.latinLabels.map((l) => l.label);
+      if (await classifyNonEnglish(classifier(), labels) === true) {
+        return `review-gate: test label reads as romanized non-English (L6, semantic check) in ${path}. ` +
+          "Test descriptions must be English. Use `// review-gate: allow-non-english` to exempt a deliberate case.";
+      }
+    }
+    return undefined;
   }
 
   // ---------- L1: tool_call — sensitive files + ship gate ----------
@@ -232,6 +368,13 @@ export default function reviewGate(pi: ExtensionAPI) {
           reason: `review-gate: "${path}" matches a sensitive-file pattern (.env/keys/credentials). Ask the user to edit it themselves.`,
         };
       }
+      // Explore mode does NOT block edits: the system prompt asks the agent to
+      // prefer read-only work, but small edits during an investigation are
+      // allowed. Sensitive-file and L6 label checks above/below stay active.
+      if (path) {
+        const labelProblem = await checkTestLabels(path, editedTestContent(input, path));
+        if (labelProblem) return { block: true, reason: labelProblem };
+      }
       return;
     }
 
@@ -239,17 +382,42 @@ export default function reviewGate(pi: ExtensionAPI) {
     const command = typeof input.command === "string" ? input.command : "";
     if (!command) return;
 
+    // Explore mode does NOT block bash — investigations need diagnostic
+    // commands. Ship commands below stay FULLY gated in every mode: explore
+    // only relaxes auto-continuation and declare_done, never the ship gate.
+
     // P0-5: detect ALL ship commands, not just the first. Block if ANY operation
     // would ship ungated and warn about compound commands.
     const ships = detectShipCommands(command);
-    if (ships.length === 0) return;
+    if (ships.length === 0) {
+      // Guard #4 additional layer (tighten-only): the static parser saw no ship
+      // op, but the command mentions git/gh with dynamic shell constructs the
+      // parser cannot resolve (encodings, aliases, substitutions). Ask flash
+      // whether it would ship; only a positive answer ADDS a detection — "none"
+      // or a failed call changes nothing (the command was passing anyway).
+      if (
+        projectConfig.llmGuards.shipDetect &&
+        (state.hasCodeChange || state.hasDocChange) &&
+        isSuspiciousShipCandidate(command)
+      ) {
+        const kind = await classifyShipCommand(classifier(), command);
+        if (kind !== undefined && kind !== "none") {
+          ships.push({ kind, segment: command });
+        }
+      }
+      if (ships.length === 0) return;
+    }
 
     // Short-circuit: if no changes tracked, no gate to enforce.
     if (!state.hasCodeChange && !state.hasDocChange) return;
 
-    // AI attribution + English-language (L5) checks on commit messages and PR
-    // title/description. commit messages and PR title/body must be English;
-    // block if a non-Latin script is present.
+    // AI attribution (HARD) + English-language (L5, ADVISORY) checks on commit
+    // messages and PR title/description. L5 no longer hard-blocks: extraction
+    // heuristics can mis-read complex shell forms (e.g. `-m "$(cat <<'EOF' …)"`
+    // heredocs), so a wrong language guess must not stop a legitimate ship.
+    // Instead we warn, the per-turn LANGUAGE_DIRECTIVE tells the agent to write
+    // ship text in English, and the reviewer checks commit/PR language.
+    const l5Advisories: string[] = [];
     for (const s of ships) {
       if (s.kind === "commit") {
         const msgs = extractCommitMessages(s.segment);
@@ -261,26 +429,51 @@ export default function reviewGate(pi: ExtensionAPI) {
             };
           }
         }
+        // Guard #2 (tighten-only): regexes missed — ask flash about paraphrased
+        // AI attribution ("pair-programmed with an assistant"). Failure → pass
+        // (exact pre-LLM behavior).
+        if (msgs.length > 0 && projectConfig.llmGuards.aiAttribution) {
+          if (await classifyAiAttribution(classifier(), msgs) === true) {
+            return {
+              block: true,
+              reason: "review-gate: commit message contains AI attribution (semantic check). Rewrite without it.",
+            };
+          }
+        }
         const nonEn = firstNonEnglish(msgs);
         if (nonEn) {
-          return {
-            block: true,
-            reason: `review-gate: commit message must be English (L5). Non-English text found: "${nonEn.slice(0, 60)}". Rewrite the message in English.`,
-          };
+          l5Advisories.push(`commit message contains non-English text: "${nonEn.slice(0, 60)}"`);
+        } else if (msgs.length > 0 && projectConfig.llmGuards.englishCheck
+          && await classifyNonEnglish(classifier(), msgs) === true) {
+          // L5 blind spot (tighten-only ordering kept): Unicode-script check
+          // passed, but pure-Latin romanized non-English may slip through.
+          l5Advisories.push("commit message reads as romanized non-English (semantic check)");
         }
-      } else if (s.kind === "pr-create") {
-        const nonEn = firstNonEnglish(extractPrTextFields(s.segment));
+      } else if (s.kind === "pr-create" || s.kind === "pr-edit") {
+        const prTexts = extractPrTextFields(s.segment);
+        const nonEn = firstNonEnglish(prTexts);
         if (nonEn) {
-          return {
-            block: true,
-            reason: `review-gate: PR title/description must be English (L5). Non-English text found: "${nonEn.slice(0, 60)}". Rewrite the title and body in English.`,
-          };
+          l5Advisories.push(`PR title/description contains non-English text: "${nonEn.slice(0, 60)}"`);
+        } else if (prTexts.length > 0 && projectConfig.llmGuards.englishCheck
+          && await classifyNonEnglish(classifier(), prTexts) === true) {
+          l5Advisories.push("PR title/description reads as romanized non-English (semantic check)");
         }
       }
     }
+    if (l5Advisories.length > 0) {
+      // Advisory only — never a block. Surface to the user; the reviewer is
+      // instructed to flag non-English ship text during review.
+      try {
+        ctx.ui.notify(
+          "review-gate (L5 advisory): " + l5Advisories.join("; ") +
+            " — commit/PR text must be English. Consider amending (git commit --amend / gh pr edit).",
+          "warning",
+        );
+      } catch { /* headless UI — advisory is best-effort */ }
+    }
 
     const fp = computeFingerprint(cwd);
-    const problems = unmetRequirements(state, fp.digest, fp.unavailable);
+    const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
     if (problems.length === 0) return;
 
     // P0-5: warn about compound commands where later ops might ship after HEAD changes.
@@ -388,6 +581,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         verdict: parsed.verdict,
         fingerprint: parsed.verdict === "READY" ? fp.digest : null,
         at: new Date().toISOString(),
+        // Code↔doc attestation travels with the verdict it came from; absent
+        // stays absent (blocks under the docSync knob — fail-closed).
+        ...(parsed.docSync !== undefined ? { docSync: parsed.docSync } : {}),
       };
       state.rounds.push({
         round: state.rounds.length + 1,
@@ -436,8 +632,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       mode: Type.Optional(Type.String({ description: "'fast' (default) or 'full'" })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      // Available in every mode: explore allows edits/bash, so the agent may
+      // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
-      const outcome = runTrustedPrecommit(mode);
+      const outcome = await runTrustedPrecommit(mode, _signal);
 
       if (outcome.verdict === "PASS") {
         // Bind PASS to the fingerprint recomputed AFTER the runner finished
@@ -472,7 +670,22 @@ export default function reviewGate(pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const fp = computeFingerprint(cwd);
-      const problems = unmetRequirements(state, fp.digest, fp.unavailable);
+      const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
+      if (state.taskMode === "explore") {
+        // Explore's defining behavior: the agent may end the task on its own
+        // judgment. Gate status is reported as advisory only. (Ship commands
+        // remain fully gated by L1 regardless.)
+        loopArmed = false;
+        persist(ctx as unknown as ExtensionContext);
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: explore task completed by AI judgment. ${params.summary}` +
+              (problems.length ? "\nAdvisory gate status:\n" + problems.map((p) => `  - ${p}`).join("\n") : ""),
+          }],
+          details: { accepted: true, advisoryProblems: problems },
+        };
+      }
       if (problems.length > 0) {
         return {
           content: [{
@@ -497,6 +710,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- L2: auto-continuation ----------
 
   pi.on("agent_settled", async (_event, ctx) => {
+    // Explore never auto-continues — that is its defining difference from
+    // loop. This check MUST stay before the loopArmed check: explore-mode
+    // edits set loopArmed = true in tool_result, and only this early return
+    // keeps the continuation loop off.
+    if (state.taskMode === "explore") return;
     if (!loopArmed) return;
     if (state.bypass.active) return;
     if (!state.hasCodeChange && !state.hasDocChange) return;
@@ -504,7 +722,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!ctx.isIdle()) return;
 
     const fp = computeFingerprint(cwd);
-    const problems = unmetRequirements(state, fp.digest, fp.unavailable);
+    const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
     if (problems.length === 0) return;
 
     continuationsInjected += 1;
@@ -564,10 +782,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   pi.on("session_compact", async (_event, ctx) => {
+    // Explore has no enforced loop to resume — a "Resume the loop" nudge
+    // would contradict the mode, so skip the gate-resume injection entirely.
+    if (state.taskMode === "explore") return;
     const fp = computeFingerprint(cwd);
-    const problems = unmetRequirements(state, fp.digest, fp.unavailable);
+    const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
     if (problems.length === 0 || state.bypass.active) return;
-    // R9 (git memory, opt-in): filtered git snapshot so the model recovers its
+    // R9 (git memory, default on): filtered git snapshot so the model recovers its
     // working context after compaction without re-exploring the repo.
     const gitContext = projectConfig.gitMemory ? buildGitMemory(cwd) : "";
     pi.sendMessage({
@@ -606,20 +827,46 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- commands ----------
 
+  function registerWorkflowCommand(name: WorkflowCommandName) {
+    const command = WORKFLOW_COMMANDS[name];
+    pi.registerCommand(name, {
+      description: command.description,
+      handler: async (args, ctx) => {
+        if (!ctx.isIdle()) {
+          ctx.ui.notify(`Agent is busy. Retry ${command.usage} when it is idle.`, "warning");
+          return;
+        }
+        pi.sendUserMessage(buildWorkflowPrompt(name, args ?? ""));
+      },
+    });
+  }
+
+  for (const name of Object.keys(WORKFLOW_COMMANDS) as WorkflowCommandName[]) {
+    registerWorkflowCommand(name);
+  }
+
   pi.registerCommand("gate-status", {
     description: "Show review-gate state",
     handler: async (_args, ctx) => {
       const fp = computeFingerprint(cwd);
-      const problems = unmetRequirements(state, fp.digest, fp.unavailable);
+      const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
       const lines = [
         `review:    ${state.review.verdict}${state.review.at ? ` (${state.review.at})` : ""}`,
         `precommit: ${state.precommit.verdict}${state.precommit.at ? ` (${state.precommit.at})` : ""}`,
         `changes:   code=${state.hasCodeChange} docs=${state.hasDocChange}`,
+        `docSync:   ${projectConfig.docSync ? `ENFORCED (attested: ${state.review.docSync ?? "none"})` : "off"}`,
         `rounds:    ${state.rounds.length}/${state.maxRounds}`,
         `config:    thinkHarder=${projectConfig.thinkHarder}${state.strategicResetFired ? " (fired)" : ""} gitMemory=${projectConfig.gitMemory}`,
+        `task mode: ${state.taskMode ?? "not chosen (defaults to loop)"}`,
         `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
         `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
-        problems.length ? `ship gate: BLOCKED\n${problems.map((p) => `  - ${p}`).join("\n")}` : "ship gate: OPEN",
+        // Explore: ship commands stay fully gated (L1), but declare_done and
+        // auto-continuation are advisory — label the status accordingly.
+        state.taskMode === "explore"
+          ? (problems.length
+            ? `ship gate: BLOCKED (explore: completion advisory, ship still gated)\n${problems.map((p) => `  - ${p}`).join("\n")}`
+            : "ship gate: OPEN (explore)")
+          : (problems.length ? `ship gate: BLOCKED\n${problems.map((p) => `  - ${p}`).join("\n")}` : "ship gate: OPEN"),
       ];
       ctx.ui.notify(lines.join("\n"), problems.length ? "warning" : "info");
     },
@@ -638,6 +885,25 @@ export default function reviewGate(pi: ExtensionAPI) {
       loopArmed = false;
       persist(ctx);
       ctx.ui.notify(`review-gate: BYPASSED (${reason})`, "warning");
+    },
+  });
+
+  pi.registerCommand("gate-mode", {
+    description: "Set task workflow: /gate-mode loop|explore",
+    handler: async (args, ctx) => {
+      const mode = normalizeTaskMode((args ?? "").trim());
+      if (mode === undefined) {
+        ctx.ui.notify("Usage: /gate-mode loop|explore", "error");
+        return;
+      }
+      // /gate-mode is user-invoked — an explicit choice, so source is "user".
+      setTaskMode(mode, "user", ctx);
+      ctx.ui.notify(
+        mode === "loop"
+          ? "review-gate: switched to loop workflow"
+          : "review-gate: switched to explore workflow — gates advisory, AI may self-complete; prefer read-only work (ship commands stay gated)",
+        mode === "loop" ? "info" : "warning",
+      );
     },
   });
 
@@ -683,7 +949,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     let systemPrompt = event.systemPrompt + "\n\n" + LANGUAGE_DIRECTIVE;
 
     const fp = computeFingerprint(cwd);
-    const problems = unmetRequirements(state, fp.digest, fp.unavailable);
+    const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
+    if (state.taskMode === "explore") {
+      return {
+        systemPrompt:
+          systemPrompt +
+          "\n\n## Explore workflow (investigation)\n" +
+          "This is an explore (investigation/troubleshooting) task, not a delivery loop. " +
+          "PREFER read-only work: inspect, run diagnostic/read-only commands, and reason — avoid editing files unless a small change is genuinely needed for the investigation (e.g. a temporary probe). " +
+          "Review/precommit gates are advisory in this mode, auto-continuation is disabled, and you may call declare_done " +
+          "as soon as the task is satisfactorily complete — you decide when it is done. " +
+          "Ship commands (git commit/push, gh pr) remain fully gated; if the task turns into delivery work, ask the user to run /gate-mode loop." +
+          (problems.length ? `\nAdvisory gate status:\n${problems.map((p) => `- ${p}`).join("\n")}` : ""),
+      };
+    }
     if (!state.hasCodeChange && !state.hasDocChange && problems.length === 0) {
       return { systemPrompt };
     }
@@ -696,7 +975,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         "(1) run an independent review, (2) call record_review with the FULL reviewer output, " +
         "(3) fix all findings and re-review until READY, " +
         "(4) run the precommit runner, (5) call declare_done. " +
-        "git commit/push and gh pr create are HARD-BLOCKED until gates pass.\n" +
+        "git commit/push and gh pr create/edit are HARD-BLOCKED until gates pass.\n" +
         "You are ENCOURAGED to proactively consult the `adviser` subagent (a stronger, " +
         "independent second opinion, pinned to a top-tier model at xhigh thinking) BEFORE " +
         "and DURING non-trivial, ambiguous, or risky work \u2014 consulting early is cheaper " +
@@ -768,14 +1047,37 @@ function resolveTrustedRunner(): string | null {
  * atomically wrote that carries the exact nonce. This closes the stdout-forgery
  * class (a `## Overall: PASS` printed by any bash command). It is not a defense
  * against same-user tampering with the runner itself (see threat model above).
+ *
+ * Runs ASYNC (never spawnSync): a synchronous 20-minute spawn would block the
+ * extension host's event loop, freezing the UI and making ESC/abort dead. The
+ * runner is spawned detached in its own process group so an abort or timeout
+ * kills the whole tree (runner + bash + npm test grandchildren).
  */
-function runTrustedPrecommit(mode: "fast" | "full"): PrecommitOutcome {
+function killProcessTree(child: ChildProcess): void {
+  try {
+    if (child.pid) process.kill(-child.pid, "SIGKILL"); // negative pid = process group
+    else child.kill("SIGKILL");
+  } catch {
+    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+}
+
+interface SpawnOutcome {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  spawnError: boolean;
+  aborted: boolean;
+  timedOut: boolean;
+}
+
+async function runTrustedPrecommit(mode: "fast" | "full", abortSignal?: AbortSignal): Promise<PrecommitOutcome> {
   const cwd = process.cwd();
   const fail = (error: string): PrecommitOutcome =>
     ({ verdict: "ERROR", checksRun: 0, checksFailed: 0, fingerprint: "", error });
 
   const runner = resolveTrustedRunner();
   if (!runner) return fail("trusted precommit runner not found");
+  if (abortSignal?.aborted) return fail("aborted before start");
 
   let dir: string;
   try { dir = mkdtempSync(pathJoin(tmpdir(), "rg-precommit-")); } catch { return fail("cannot create temp dir"); }
@@ -783,13 +1085,33 @@ function runTrustedPrecommit(mode: "fast" | "full"): PrecommitOutcome {
   const nonce = randomBytes(24).toString("hex");
 
   try {
-    const res = spawnSync(
-      process.execPath,
-      [runner, "--mode", mode, "--cwd", cwd, "--receipt", receipt, "--nonce", nonce],
-      { cwd, encoding: "utf8", timeout: 20 * 60 * 1000, maxBuffer: 64 * 1024 * 1024, shell: false,
-        // Do NOT leak the nonce to child lint/test processes.
-        env: { ...process.env } },
-    );
+    const res = await new Promise<SpawnOutcome>((resolve) => {
+      let aborted = false;
+      let timedOut = false;
+      const child = spawn(
+        process.execPath,
+        [runner, "--mode", mode, "--cwd", cwd, "--receipt", receipt, "--nonce", nonce],
+        { cwd, shell: false, detached: true, stdio: ["ignore", "ignore", "ignore"],
+          // Do NOT leak the nonce to child lint/test processes.
+          env: { ...process.env } },
+      );
+      const timer = setTimeout(() => { timedOut = true; killProcessTree(child); }, 20 * 60 * 1000);
+      const onAbort = () => { aborted = true; killProcessTree(child); };
+      abortSignal?.addEventListener("abort", onAbort, { once: true });
+      let settled = false;
+      const finish = (out: SpawnOutcome) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        abortSignal?.removeEventListener("abort", onAbort);
+        resolve(out);
+      };
+      child.on("error", () => finish({ status: null, signal: null, spawnError: true, aborted, timedOut }));
+      child.on("close", (status, signal) => finish({ status, signal, spawnError: false, aborted, timedOut }));
+    });
+
+    if (res.aborted) return fail("aborted by user — precommit run cancelled, no verdict recorded as PASS");
+    if (res.timedOut) return fail("runner timed out after 20 minutes");
 
     // Recompute the fingerprint AFTER the runner (lint:fix may have edited files).
     const fp = computeFingerprint(cwd);
@@ -807,7 +1129,7 @@ function runTrustedPrecommit(mode: "fast" | "full"): PrecommitOutcome {
     // contradiction becomes ERROR, never a silent business verdict.
     const v = validatePrecommitReceipt(parsed, {
       nonce, cwd, mode,
-      exitStatus: res.status, signal: res.signal, spawnError: !!res.error,
+      exitStatus: res.status, signal: res.signal, spawnError: res.spawnError,
     });
     if (v.verdict === "PASS") {
       if (!fingerprint) return fail("worktree fingerprint unavailable post-run");

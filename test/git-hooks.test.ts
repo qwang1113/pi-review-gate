@@ -47,6 +47,7 @@ function runPreCommit(dir: string, env: Record<string, string> = {}) {
 
 const READY = {
   schema: 1,
+  sessionId: "test-session",
   hasCodeChange: true,
   hasDocChange: false,
   review: { verdict: "READY", fingerprint: "x", at: "t" },
@@ -54,6 +55,7 @@ const READY = {
   rounds: [],
   maxRounds: 10,
   bypass: { active: false, reason: null, at: null },
+  updatedAt: "t",
 };
 
 // ---------------------------------------------------------------------------
@@ -118,9 +120,104 @@ test("unknown schema → block (fail closed)", () => {
   assert.equal(runPreCommit(dir).status, 1);
 });
 
+test("user-chosen explore mode makes hook gates advisory", () => {
+  const dir = makeGitRepo();
+  writeState(dir, {
+    ...READY,
+    taskMode: "explore",
+    taskModeSource: "user",
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+  });
+  assert.equal(runPreCommit(dir).status, 0);
+});
+
+test("SECURITY: auto-classified explore must NOT make the hook advisory", () => {
+  // A heuristic misclassification (taskModeSource: "auto") or a sidecar
+  // without the field must keep the full commit gate. Only an explicit user
+  // choice may downgrade the hook.
+  for (const extra of [{ taskModeSource: "auto" }, {}]) {
+    const dir = makeGitRepo();
+    writeState(dir, {
+      ...READY,
+      taskMode: "explore",
+      ...extra,
+      review: { verdict: "PENDING", fingerprint: null, at: null },
+      precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+    });
+    const res = runPreCommit(dir);
+    assert.equal(res.status, 1, JSON.stringify(extra));
+    assert.match(res.stderr, /review is PENDING/);
+  }
+});
+
+test("SECURITY: forged taskModeSource values fail closed", () => {
+  const dir = makeGitRepo();
+  writeState(dir, {
+    ...READY,
+    taskMode: "explore",
+    taskModeSource: "root",
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+  });
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /shape\/verdict invalid/);
+});
+
+test("SECURITY: unknown taskMode values fail closed (whitelist, incl. retired 'readonly')", () => {
+  for (const taskMode of ["free", "readonly"]) {
+    const dir = makeGitRepo();
+    writeState(dir, {
+      ...READY,
+      taskMode,
+      taskModeSource: "user",
+      review: { verdict: "PENDING", fingerprint: null, at: null },
+      precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+    });
+    const res = runPreCommit(dir);
+    assert.equal(res.status, 1, taskMode);
+    assert.match(res.stderr, /shape\/verdict invalid/);
+  }
+});
+
+test("explore does not bypass unknown or malformed sidecar schemas", () => {
+  const unknown = makeDir();
+  writeState(unknown, { ...READY, schema: 999, taskMode: "explore" });
+  const unknownRes = runPreCommit(unknown);
+  assert.equal(unknownRes.status, 1);
+  assert.match(unknownRes.stderr, /unknown gate schema/);
+
+  const malformed = makeDir();
+  writeState(malformed, {
+    ...READY,
+    taskMode: "explore",
+    hasCodeChange: "yes",
+    review: { verdict: "FORGED" },
+  });
+  const malformedRes = runPreCommit(malformed);
+  assert.equal(malformedRes.status, 1);
+  assert.match(malformedRes.stderr, /shape\/verdict invalid/);
+
+  const incomplete = makeDir();
+  writeState(incomplete, {
+    schema: 1,
+    hasCodeChange: true,
+    hasDocChange: false,
+    review: { verdict: "PENDING" },
+    precommit: { verdict: "NOT_RUN" },
+    rounds: [],
+    bypass: { active: false },
+    taskMode: "explore",
+  });
+  const incompleteRes = runPreCommit(incomplete);
+  assert.equal(incompleteRes.status, 1);
+  assert.match(incompleteRes.stderr, /shape\/verdict invalid/);
+});
+
 test("bypass active in state → allow", () => {
   const dir = makeDir();
-  writeState(dir, { ...READY, review: { verdict: "PENDING" }, bypass: { active: true, reason: "hotfix", at: "t" } });
+  writeState(dir, { ...READY, review: { verdict: "PENDING", fingerprint: null, at: null }, bypass: { active: true, reason: "hotfix", at: "t" } });
   assert.equal(runPreCommit(dir).status, 0);
 });
 
@@ -132,8 +229,72 @@ test("REVIEW_GATE_BYPASS=1 env → allow", () => {
 
 test("no changes tracked → allow even without verdicts", () => {
   const dir = makeDir();
-  writeState(dir, { ...READY, hasCodeChange: false, review: { verdict: "PENDING" }, precommit: { verdict: "NOT_RUN" } });
+  writeState(dir, {
+    ...READY,
+    hasCodeChange: false,
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+  });
   assert.equal(runPreCommit(dir).status, 0);
+});
+
+// ---------------------------------------------------------------------------
+// pre-commit: docSync knob (code↔doc attestation, defense-in-depth mirror)
+// ---------------------------------------------------------------------------
+
+const FP_SCRIPT = join(ROOT, "scripts", "compute-fingerprint.cjs");
+
+/** Repo whose sidecar has READY+PASS bound to the REAL current fingerprint. */
+function repoWithMatchingGates(extraReview: object = {}, extraConfig?: object): string {
+  const dir = makeGitRepo();
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "lib.ts"), "// change\n");
+  execFileSync("git", ["add", "src/lib.ts"], { cwd: dir, stdio: "ignore" });
+  const fp = JSON.parse(execFileSync("node", [FP_SCRIPT, dir], { encoding: "utf8" })).digest;
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  if (extraConfig) writeFileSync(join(dir, ".pi", "review-gate.json"), JSON.stringify(extraConfig));
+  writeFileSync(join(dir, ".pi", "review-gate-state.json"), JSON.stringify({
+    ...READY,
+    review: { verdict: "READY", fingerprint: fp, at: "t", ...extraReview },
+    precommit: { verdict: "PASS", fingerprint: fp, at: "t" },
+  }));
+  return dir;
+}
+
+test("docSync DEFAULT ON → READY review without attestation blocks", () => {
+  const dir = repoWithMatchingGates(); // no config file → default enforced
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /docSync enforced/);
+});
+
+test("docSync explicitly disabled → READY+PASS without attestation commits", () => {
+  const dir = repoWithMatchingGates({}, { docSync: false });
+  assert.equal(runPreCommit(dir).status, 0);
+});
+
+test("docSync on → UPDATED / NOT_NEEDED attestation commits (default and explicit)", () => {
+  for (const att of ["UPDATED", "NOT_NEEDED"]) {
+    const dflt = repoWithMatchingGates({ docSync: att });
+    assert.equal(runPreCommit(dflt).status, 0, `default: ${att}`);
+    const explicit = repoWithMatchingGates({ docSync: att }, { docSync: true });
+    assert.equal(runPreCommit(explicit).status, 0, `explicit: ${att}`);
+  }
+});
+
+test("SECURITY: forged docSync attestation values fail closed (shape invalid)", () => {
+  const dir = repoWithMatchingGates({ docSync: "YES" }, { docSync: true });
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /shape\/verdict invalid/);
+});
+
+test("docSync: corrupt project config → default ENFORCED (fail-safe, never fail-open)", () => {
+  const dir = repoWithMatchingGates();
+  writeFileSync(join(dir, ".pi", "review-gate.json"), "{truncated");
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /docSync enforced/);
 });
 
 test("fingerprint mismatch on review → block", () => {

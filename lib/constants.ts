@@ -98,7 +98,7 @@ export const COMMIT_MSG_FORBIDDEN: readonly RegExp[] = Object.freeze([
 ]);
 
 /** Ship commands that the hard gate intercepts. */
-export const SHIP_COMMAND_KINDS = Object.freeze(["commit", "push", "pr-create"] as const);
+export const SHIP_COMMAND_KINDS = Object.freeze(["commit", "push", "pr-create", "pr-edit"] as const);
 export type ShipCommandKind = (typeof SHIP_COMMAND_KINDS)[number];
 
 /**
@@ -121,7 +121,9 @@ export const LANGUAGE_DIRECTIVE =
   "thinking（思考过程）也请尽量使用简体中文。\n" +
   "例外（保持英文原样，不要翻译）：代码、标识符、文件路径、shell 命令，以及协议要求的固定英文标记" +
   "——尤其是门禁裁决 JSON 里的 \"READY\" / \"BLOCKED\" / \"NEEDS_HUMAN\" 字段值、precommit 的 " +
-  "`## Overall:` sentinel、以及 commit message。这些若被翻译会破坏门禁解析。";
+  "`## Overall:` sentinel、以及 commit message。这些若被翻译会破坏门禁解析。\n" +
+  "反向要求（L5，advisory）：commit message 与 PR 的 title/description 必须用英文撰写，" +
+  "不要出现中文或其他非英文文案；reviewer 审核时也会检查这一点。";
 
 /** Gate loop hard cap — mirrors auto-loop max_rounds. Overridable per project
  * via .pi/review-gate.json (see lib/project-config.ts, sd0x-dev-flow R6). */

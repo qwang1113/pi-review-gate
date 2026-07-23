@@ -41,8 +41,93 @@ function readyState(): GateState {
 // unmetRequirements — the single ship authority
 // ---------------------------------------------------------------------------
 
+test("task mode is optional and invalid persisted values fail closed to unchosen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gate-task-mode-"));
+  const path = join(dir, "state.json");
+  try {
+    const state = emptyState("s", 10);
+    state.taskMode = "explore";
+    writeFileSync(path, JSON.stringify(state));
+    assert.equal(loadSidecar(path)?.taskMode, "explore");
+
+    // Unknown values (including the retired "readonly") fail closed to unchosen.
+    for (const bad of ["readonly", "disabled"]) {
+      writeFileSync(path, JSON.stringify({ ...state, taskMode: bad }));
+      assert.equal(loadSidecar(path)?.taskMode, undefined, bad);
+    }
+
+    // taskModeSource: valid values round-trip; forged values fail closed to
+    // absent (treated as "auto" — the hook stays fully enforced).
+    writeFileSync(path, JSON.stringify({ ...state, taskModeSource: "user" }));
+    assert.equal(loadSidecar(path)?.taskModeSource, "user");
+    writeFileSync(path, JSON.stringify({ ...state, taskModeSource: "root" }));
+    assert.equal(loadSidecar(path)?.taskModeSource, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("all gates met on same fingerprint → ship allowed", () => {
   assert.deepEqual(unmetRequirements(readyState(), FP, false), []);
+});
+
+// ---------------------------------------------------------------------------
+// docSync knob — code↔doc attestation enforcement
+// ---------------------------------------------------------------------------
+
+test("docSync disabled (requireDocSync false/absent): READY review without attestation ships", () => {
+  // The project default is docSync ON — callers pass projectConfig.docSync.
+  // This covers the explicit `"docSync": false` project opt-out path.
+  assert.deepEqual(unmetRequirements(readyState(), FP, false), []);
+  assert.deepEqual(unmetRequirements(readyState(), FP, false, { requireDocSync: false }), []);
+});
+
+test("docSync enforced: READY review lacking attestation blocks (fail-closed)", () => {
+  const problems = unmetRequirements(readyState(), FP, false, { requireDocSync: true });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /docSync enforced/);
+});
+
+test("docSync enforced: UPDATED and NOT_NEEDED attestations both ship", () => {
+  for (const att of ["UPDATED", "NOT_NEEDED"] as const) {
+    const s = readyState();
+    s.review.docSync = att;
+    assert.deepEqual(unmetRequirements(s, FP, false, { requireDocSync: true }), [], att);
+  }
+});
+
+test("docSync enforced on EVERY code change — touching a doc file does not exempt", () => {
+  // Anti-gaming: the attestation is required even when hasDocChange is true,
+  // so trivially appending to a .md cannot satisfy the gate.
+  const s = readyState();
+  s.hasDocChange = true;
+  const problems = unmetRequirements(s, FP, false, { requireDocSync: true });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /docSync enforced/);
+});
+
+test("docSync enforcement does not fire for non-READY reviews (verdict blocks first)", () => {
+  const s = readyState();
+  s.review.verdict = "PENDING";
+  const problems = unmetRequirements(s, FP, false, { requireDocSync: true });
+  assert.ok(problems.some((p) => /review gate is PENDING/.test(p)));
+  assert.ok(!problems.some((p) => /docSync/.test(p)), "no redundant docSync problem before READY");
+});
+
+test("loadSidecar: valid docSync round-trips, forged values fail closed to absent", () => {
+  const dir = makeTemp();
+  const path = sidecarPath(dir);
+  const s = readyState();
+  s.review.docSync = "NOT_NEEDED";
+  saveSidecar(path, s);
+  assert.equal(loadSidecar(path)?.review.docSync, "NOT_NEEDED");
+
+  const forged = JSON.parse(readFileSync(path, "utf8"));
+  forged.review.docSync = "YES"; // not in the enum whitelist
+  writeFileSync(path, JSON.stringify(forged));
+  const loaded = loadSidecar(path);
+  assert.ok(loaded, "sidecar with forged docSync still loads");
+  assert.equal(loaded?.review.docSync, undefined, "forged attestation dropped (blocks under enforcement)");
 });
 
 test("missing state → fail closed", () => {

@@ -10,6 +10,12 @@ function firstKind(cmd: string) { const s = detectShipCommands(cmd); return s.le
 test("detects plain git commit", () => { assert.equal(firstKind("git commit -m 'x'"), "commit"); });
 test("detects git push", () => { assert.equal(firstKind("git push origin main"), "push"); });
 test("detects gh pr create", () => { assert.equal(firstKind("gh pr create --title x"), "pr-create"); });
+test("detects gh pr edit as a gated published-PR mutation", () => {
+  assert.equal(firstKind("gh pr edit 123 --title x"), "pr-edit");
+  assert.equal(firstKind("gh --repo owner/repo pr edit 123 --body x"), "pr-edit");
+  assert.equal(firstKind("eval 'gh pr edit 123 --title x'"), "pr-edit");
+  assert.equal(firstKind("${GH} pr edit 123 --title x"), "pr-edit");
+});
 test("detects gh pr create with -R / --repo / --repo= / -Rcompact repo flags", () => {
   assert.equal(firstKind("gh -R owner/repo pr create"), "pr-create");
   assert.equal(firstKind("gh --repo owner/repo pr create"), "pr-create");

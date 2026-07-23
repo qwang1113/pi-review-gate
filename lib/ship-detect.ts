@@ -1,6 +1,6 @@
 /**
  * Ship-command detection: decide whether a bash command line contains a
- * "ship" operation (git commit / git push / gh pr create).
+ * "ship" operation (git commit / git push / gh pr create / gh pr edit).
  *
  * Design notes:
  * - We tokenize per shell segment (split on ;, &&, ||, |, newline) so
@@ -241,11 +241,13 @@ function matchGh(tokens: string[]): ShipCommandKind | undefined {
     break;
   }
   if (tokens[i] === "pr" && tokens[i + 1] === "create") return "pr-create";
+  if (tokens[i] === "pr" && tokens[i + 1] === "edit") return "pr-edit";
   // Fail-closed for an UNKNOWN separate-value gh global option (not in
   // GH_VALUE_OPTS): it would leave us pointing at its VALUE, with `pr create`
   // one token later. If the preceding token was a `-`flag, check that.
-  if (i > 1 && tokens[i - 1].startsWith("-") && tokens[i + 1] === "pr" && tokens[i + 2] === "create") {
-    return "pr-create";
+  if (i > 1 && tokens[i - 1].startsWith("-") && tokens[i + 1] === "pr") {
+    if (tokens[i + 2] === "create") return "pr-create";
+    if (tokens[i + 2] === "edit") return "pr-edit";
   }
   return undefined;
 }
@@ -266,6 +268,7 @@ function matchEvasion(segment: string, fullCommand: string): ShipCommandKind | u
     if (/\bgit\b[^|;&]*\bcommit\b/.test(fullCommand)) return "commit";
     if (/\bgit\b[^|;&]*\bpush\b/.test(fullCommand)) return "push";
     if (/\bgh\b[^|;&]*\bpr\b[^|;&]*\bcreate\b/.test(fullCommand)) return "pr-create";
+    if (/\bgh\b[^|;&]*\bpr\b[^|;&]*\bedit\b/.test(fullCommand)) return "pr-edit";
   }
   // Bare sh/bash token: likely piped-to-shell (echo ... | sh). Check full command.
   if (/^(ba|z|da)?sh$/.test(segment) || /^\S*\/(ba|z|da)?sh$/.test(segment)) {
@@ -316,6 +319,7 @@ function matchObfuscated(segment: string): ShipCommandKind | undefined {
     if (verb1 === "commit") return "commit";
     if (verb1 === "push") return "push";
     if (verb1 === "pr" && verb2 === "create") return "pr-create";
+    if (verb1 === "pr" && verb2 === "edit") return "pr-edit";
   }
   return undefined;
 }
@@ -339,6 +343,7 @@ function matchDynamicHead(rawSegment: string): ShipCommandKind | undefined {
   if (verb1 === "commit") return "commit";
   if (verb1 === "push") return "push";
   if (verb1 === "pr" && verb2 === "create") return "pr-create";
+  if (verb1 === "pr" && verb2 === "edit") return "pr-edit";
   return undefined;
 }
 

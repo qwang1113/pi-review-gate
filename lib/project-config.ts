@@ -10,7 +10,15 @@
  *   {
  *     "maxRounds": 10,        // 3..50, R6 — loop hard cap for this project
  *     "thinkHarder": true,    // R10 — one-shot strategic-reset checklist near cap
- *     "gitMemory": false      // R9 — inject filtered git context after compaction
+ *     "gitMemory": true,      // R9 — inject filtered git context after compaction
+ *     "docSync": true,        // default on — code changes require a reviewer code↔doc attestation
+ *     "llmGuards": {            // LLM (DeepSeek V4 Flash) semantic guard layer
+ *       "model": "deepseek/deepseek-v4-flash",
+ *       "taskMode": true,       // guard #1 — semantic loop/explore classification
+ *       "aiAttribution": true,  // guard #2 — commit-msg AI attribution (regex fallback stays)
+ *       "englishCheck": true,   // L5 blind spot — romanized non-English in commit/PR text
+ *       "shipDetect": true      // guard #4 — extra ship-command layer on suspicious bash
+ *     }
  *   }
  *
  * Fail-safe philosophy: a missing / corrupt / out-of-range config NEVER
@@ -27,12 +35,54 @@ import { DEFAULT_MAX_ROUNDS } from "./constants.ts";
 export const MIN_MAX_ROUNDS = 3;
 export const MAX_MAX_ROUNDS = 50;
 
+/**
+ * LLM guard layer knobs. Every flag only controls an ADDITIVE semantic check
+ * (tighten-only by construction — see lib/llm-classify.ts invariants), so a
+ * missing/corrupt block falls back to defaults without weakening any
+ * deterministic gate.
+ */
+export interface LlmGuardsConfig {
+  /** "provider/model" id. Fixed default: DeepSeek V4 Flash. */
+  model: string;
+  /** Guard #1: semantic task-mode classification of the first prompt. */
+  taskMode: boolean;
+  /** Guard #2: commit-message AI-attribution semantic check. */
+  aiAttribution: boolean;
+  /** L5/L6 blind spot: romanized non-English detection in commit/PR text. */
+  englishCheck: boolean;
+  /** Guard #4: additional ship-command layer for suspicious bash commands. */
+  shipDetect: boolean;
+}
+
+export function defaultLlmGuardsConfig(): LlmGuardsConfig {
+  return {
+    model: "deepseek/deepseek-v4-flash",
+    // All ON by default: each check is tighten-only and fail-back, so the
+    // worst case of an unreachable model is exactly the pre-LLM behavior.
+    taskMode: true,
+    aiAttribution: true,
+    englishCheck: true,
+    shipDetect: true,
+  };
+}
+
 export interface ProjectConfig {
   maxRounds: number;
   /** R10: inject the strategic-reset checklist once near the round cap. */
   thinkHarder: boolean;
   /** R9: append filtered git context to the post-compaction resume message. */
   gitMemory: boolean;
+  /**
+   * Code↔doc sync enforcement (default ON): a code change requires the READY
+   * review to carry a docSync attestation (UPDATED | NOT_NEEDED) — see
+   * lib/gate-state.ts unmetRequirements. "Docs" means the project's
+   * requirement / plan / feature documentation (docs/, README, …), NOT agent
+   * memory files (CLAUDE.md, AGENTS.md, progress.md). Set `"docSync": false` in
+   * .pi/review-gate.json to disable for a project.
+   */
+  docSync: boolean;
+  /** LLM semantic guard layer (DeepSeek V4 Flash) — see LlmGuardsConfig. */
+  llmGuards: LlmGuardsConfig;
 }
 
 export function defaultProjectConfig(): ProjectConfig {
@@ -40,9 +90,14 @@ export function defaultProjectConfig(): ProjectConfig {
     maxRounds: DEFAULT_MAX_ROUNDS,
     // R10 defaults ON here (it is a pure text nudge, cannot loosen the gate).
     thinkHarder: true,
-    // R9 defaults OFF (mirrors sd0x-dev-flow opt-in: commit messages might
-    // contain text the user does not want re-injected into context).
-    gitMemory: false,
+    // R9 default ON (user policy: features ship enabled). The snapshot is
+    // secret-line-filtered and 40-line capped; disable per project with
+    // `"gitMemory": false` if git output must never re-enter context.
+    gitMemory: true,
+    // Default ON: every code change needs an explicit reviewer attestation
+    // (UPDATED | NOT_NEEDED); NOT_NEEDED keeps small fixes low-friction.
+    docSync: true,
+    llmGuards: defaultLlmGuardsConfig(),
   };
 }
 
@@ -78,5 +133,18 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
   }
   if (typeof obj.thinkHarder === "boolean") cfg.thinkHarder = obj.thinkHarder;
   if (typeof obj.gitMemory === "boolean") cfg.gitMemory = obj.gitMemory;
+  if (typeof obj.docSync === "boolean") cfg.docSync = obj.docSync;
+  if (typeof obj.llmGuards === "object" && obj.llmGuards !== null && !Array.isArray(obj.llmGuards)) {
+    const lg = obj.llmGuards as Record<string, unknown>;
+    // Field-independent validation, same fail-safe style as the other knobs.
+    // model must be "provider/id" — anything else keeps the fixed default.
+    if (typeof lg.model === "string" && /^[^\/\s]+\/[^\s]+$/.test(lg.model)) {
+      cfg.llmGuards.model = lg.model;
+    }
+    if (typeof lg.taskMode === "boolean") cfg.llmGuards.taskMode = lg.taskMode;
+    if (typeof lg.aiAttribution === "boolean") cfg.llmGuards.aiAttribution = lg.aiAttribution;
+    if (typeof lg.englishCheck === "boolean") cfg.llmGuards.englishCheck = lg.englishCheck;
+    if (typeof lg.shipDetect === "boolean") cfg.llmGuards.shipDetect = lg.shipDetect;
+  }
   return cfg;
 }

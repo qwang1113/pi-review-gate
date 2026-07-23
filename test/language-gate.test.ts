@@ -56,7 +56,7 @@ test("language gate is UNCONDITIONAL — injected before the no-changes early re
   // Locate the handler body.
   const start = EXT.indexOf('pi.on("before_agent_start"');
   assert.ok(start >= 0, "handler must exist");
-  const body = EXT.slice(start, start + 1200);
+  const body = EXT.slice(start, start + 2400);
   const injectAt = body.indexOf("LANGUAGE_DIRECTIVE");
   const earlyReturnAt = body.search(/if\s*\(!state\.hasCodeChange\s*&&\s*!state\.hasDocChange\s*&&\s*problems\.length\s*===\s*0\)/);
   assert.ok(injectAt >= 0 && earlyReturnAt >= 0, "both the injection and the early return must be present");
@@ -66,7 +66,8 @@ test("language gate is UNCONDITIONAL — injected before the no-changes early re
 
 test("the no-changes early return still returns the language systemPrompt (not undefined)", () => {
   const start = EXT.indexOf('pi.on("before_agent_start"');
-  const body = EXT.slice(start, start + 1200);
-  // The early-return branch must return the built systemPrompt object.
+  const body = EXT.slice(start, start + 2400);
+  // The early-return branch must return the built systemPrompt object. The
+  // explore workflow adds an earlier branch, so keep enough of the handler.
   assert.match(body, /problems\.length\s*===\s*0\)\s*\{\s*return\s*\{\s*systemPrompt\s*\}/);
 });

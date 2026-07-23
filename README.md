@@ -2,7 +2,7 @@
 
 **Quality gates for [Pi](https://github.com/earendil-works/pi-coding-agent)** — ship-gate hard blocking, persistent gate state, auto-continuing review loop. Globally installable.
 
-> Quality gates the model can't skip: `git commit`, `git push`, and `gh pr create`
+> Quality gates the model can't skip: `git commit`, `git push`, `gh pr create`, and `gh pr edit`
 > are **hard-blocked** at the `tool_call` layer until an independent review is
 > READY **and** precommit PASSes — both bound to the exact worktree state they
 > verified.
@@ -11,10 +11,33 @@
 
 Pi has no `Stop` event to prevent the model from quitting — but it has something better: `tool_call` blocking. Instead of intercepting "the model wants to stop", we intercept "the model wants to ship". Combined with `agent_settled` auto-continuation, the model fixes → re-reviews → re-runs precommit until every gate is green, and *cannot* commit around it.
 
+At the first task in each interactive session, the extension classifies the prompt to pick a workflow. When the LLM guard layer is enabled (default), a **semantic classifier** (DeepSeek V4 Flash, ~2s) judges the *intent* of the prompt — quoted logs, pasted notifications, and error messages are treated as context rather than intent, which a word-matching regex cannot do. If the model is unreachable or answers garbage, the decision **falls back** to the original fast deterministic classifier. When the (fallback) regex signal is clear it **auto-selects** the workflow and just notifies you — write intent (fix/implement/修改…) selects the full enforced **loop** workflow, and *pure* analysis/investigation intent (explain/review/分析/排查…) selects a conservative **explore** workflow. Explore auto-selection is deliberately strict: it requires an analysis hint **and** the absence of every known mutation/ship verb (commit, deploy, merge, save, upload, sync, 提交, 部署, 上传…); any mixed or unrecognized prompt pops the selection dialog instead.
+
+**Explore mode** is the investigation/troubleshooting workflow. Its one essential difference from loop: **the agent may end the task on its own judgment** — `declare_done` is always accepted (gate status is reported as advisory) and auto-continuation is off. Edits and `bash` stay **available** — the injected system prompt merely instructs the agent to prefer read-only work — because troubleshooting routinely needs diagnostic commands. Ship commands (`git commit/push`, `gh pr create/edit`) remain **fully gated by L1 in every mode**: explore never weakens the in-session ship gate, so an auto-misclassification only relaxes auto-continuation — the safe direction. For the *git hooks* (defense-in-depth outside Pi), the sidecar records *who* chose the mode (`taskModeSource`): pre-commit/pre-push treat explore as advisory **only when the user chose it explicitly** (dialog or `/gate-mode`) — this protects the user's own manual commits during an explore session, while an auto-classified explore keeps the hooks fully enforced. An LLM-decided mode also keeps `taskModeSource: "auto"` — semantic classification never downgrades the commit hooks either. You can override the decision anytime with `/gate-mode loop|explore`. In print/JSON mode, where no selection UI is available, the extension defaults safely to the loop workflow (without consulting the LLM); cancelling the dialog also defaults to loop.
+
+### LLM semantic guard layer (DeepSeek V4 Flash)
+
+Four guards get an additional **semantic layer** backed by a fast, cheap model (`deepseek/deepseek-v4-flash`, configurable via `llmGuards.model`). Design invariants, enforced by construction in `lib/llm-classify.ts`:
+
+1. **Tighten-only** — an LLM verdict can only *add* a block or pick the safer side of an ambiguous case. Deterministic checks run first and short-circuit; the LLM is never asked to *approve* something a deterministic check blocked.
+2. **Fail-back** — timeout (8s), spawn failure, or unparseable output degrade each guard to its exact pre-LLM deterministic behavior. No network ⇒ no regression.
+3. **Injection-resistant** — classified text is wrapped in `<data>` tags as untrusted data; a hostile prompt can at worst flip one classification, which by (1)+(2) cannot open the gate.
+
+| Guard | Deterministic base | What the LLM layer adds |
+|---|---|---|
+| Task-mode (`llmGuards.taskMode`) | regex hints + dialog | Semantic intent judgment; quoted text no longer pollutes the decision |
+| AI attribution (`llmGuards.aiAttribution`) | `COMMIT_MSG_FORBIDDEN` regexes | Paraphrases: “pair-programmed with an assistant”, “drafted by a language model” |
+| English check L5/L6 (`llmGuards.englishCheck`) | Unicode non-Latin-script detection | The romanization blind spot: pure-Latin pinyin/romaji commit messages, PR text, and test labels |
+| Ship detect (`llmGuards.shipDetect`) | ~static shell parser (`lib/ship-detect.ts`) | Suspicious git/gh commands with dynamic constructs (base64-piped shells, inline-defined aliases) the static parser cannot resolve — a positive answer *adds* a detection; “none” changes nothing |
+
+The L6 test-label check also moves **left**: the same lexer the git hook uses now runs at *edit time* in the extension (immediate feedback + the semantic layer), while the zero-dependency hook remains the deterministic backstop at commit time — hooks never call an LLM, so offline commits behave exactly as before. Edit-time scanning works on the **full projected post-edit file** (`lib/edit-projection.ts`): the current file content with every `oldText→newText` applied — so an edit that replaces only a label *string* still exposes the surrounding `it(...)` call to the lexer, and a fragment that cannot be applied is still appended and scanned rather than skipped.
+
+The classifier child process is **fully isolated**: `pi -p --no-session --no-extensions --no-skills --no-tools --no-context-files --no-prompt-templates`, argv-array spawn (never a shell string), stdin closed immediately, 8s timeout. No extensions means the child cannot recursively load review-gate; no tools means a prompt-injected classifier can at worst emit wrong JSON — and the verdict parse is strict (the entire stdout must be exactly the one-key JSON object; echoed data or chatty prefixes ⇒ fail-back to deterministic behavior).
+
 ## Architecture — three enforcement layers
 
 ```
-L1  Ship gate (HARD)      tool_call → block git commit/push, gh pr create
+L1  Ship gate (HARD)      tool_call → block git commit/push, gh pr create/edit
                           until review READY + precommit PASS on the
                           current worktree fingerprint
 L2  Auto-continuation     agent_settled → if gates unmet, inject
@@ -26,9 +49,9 @@ L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
                           strict Simplified-Chinese directive every turn
                           (thinking in Chinese too; protocol English tokens
                           READY/BLOCKED/commit-msg/code stay exempt)
-L5  Commit/PR English     tool_call → block git commit / gh pr create whose
-                          message or PR title/body contains a non-Latin script
-                          (commit & PR text must be English)
+L5  Commit/PR English     tool_call → ADVISORY warning when a git commit message
+                          or PR title/body looks non-English; the language
+                          directive (L4) + the reviewer enforce English ship text
 L6  Test-label English    pre-commit → block a staged it/test/describe label in
                           a non-Latin script, unless a `// review-gate:
                           allow-non-english` (line) or `-file` marker exempts it
@@ -38,21 +61,22 @@ State lives in **two places**: Pi session entries (`pi.appendEntry`, survives
 context compaction) and a sidecar file `.pi/review-gate-state.json` (readable
 by the git hooks without Pi).
 
-## Two judges on a stronger model, pinned at `xhigh`
+## Two judges on a stronger model, pinned at `max`
 
 The gate is only as good as the brain judging the work. Two independent roles
-run on a **top-tier reasoning model at `xhigh` thinking**, each with a fallback
+run on a **top-tier reasoning model at `max` thinking**, each with a fallback
 priority list (first available wins). The models are **pinned in the agent
 definitions** — decided up front, not re-selected per task:
 
 | Role | When | Gates? | Model priority (first = preferred) | Thinking |
 |------|------|--------|-------------------------------------|----------|
-| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → GPT-5.6 Sol → Opus 4.8 → GPT-5.5 | `xhigh` |
-| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | GPT-5.6 Sol → Fable 5 → GPT-5.5 → Opus 4.8 | `xhigh` |
+| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → GPT-5.6 Sol → Opus 4.8 → GPT-5.5 | `max` |
+| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | GPT-5.6 Sol → Fable 5 → GPT-5.5 → Opus 4.8 | `max` |
 
-`thinking` is a single value, not a fallback list; `xhigh` is the highest valid
-pi level (`ultra`/`max` are **not** in `THINKING_LEVELS` — pi clamps unsupported
-models down automatically). Proactively consulting the adviser early is cheaper
+`thinking` is a single value, not a fallback list; `max` is the highest valid
+pi level (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — pi clamps
+models that lack a level down automatically). Proactively consulting the
+adviser early is cheaper
 than a failed review later, so the extension's per-turn reminder and the
 `review-loop` skill both nudge for it.
 
@@ -106,7 +130,7 @@ so a crash can't leave truncated JSON for a fail-open parser).
 |-----------------------|---------------------|
 | `auto-loop-project.md` `## Max Rounds` override (R6) | `.pi/review-gate.json` `"maxRounds"` — JSON instead of markdown parsing; **clamped to 3–50** so a forged config can't make the cap unreachable |
 | "Think Harder" strategic reset near cap (R10) | `"thinkHarder"` (default on): when the loop is still BLOCKED within 3 rounds of the cap, a one-shot `[STRATEGIC_RESET]` checklist is injected; fired-flag persisted in gate state |
-| "Git Memory" post-compaction context (R9) | `"gitMemory"` (default off, opt-in): filtered `git log/diff/status` snapshot appended to the compaction resume message — secret-pattern line filter, 40-line cap, argv-only git (no `eval` pipeline like the original) |
+| "Git Memory" post-compaction context (R9) | `"gitMemory"` (default on; `false` disables): filtered `git log/diff/status` snapshot appended to the compaction resume message — secret-pattern line filter, 40-line cap, argv-only git (no `eval` pipeline like the original) |
 | Auto-loop prohibited behaviors (`rules/auto-loop.md`) | Baked into the per-turn system-prompt reminder: no "fixed" without re-review, no permission-asking, no context-length excuses, no completion-style summaries while gates are unmet |
 | `pre-edit-guard` `.git/` protection | `.git/…` added to `SENSITIVE_FILE_PATTERNS` — the model can't rewrite `.git/hooks/pre-commit` to disarm L3 (`.gitignore`/`.github` still editable) |
 | Self-improvement lesson log (`rules/self-improvement.md`) | `/gate-lesson <text>` appends numbered lessons to `.pi/review-gate-lessons.md`; promote 3+ recurrences into rules |
@@ -117,12 +141,45 @@ Per-project config lives in `.pi/review-gate.json`:
 {
   "maxRounds": 10,     // 3..50 — loop hard cap (clamped, fail-safe)
   "thinkHarder": true, // one-shot [STRATEGIC_RESET] checklist near the cap
-  "gitMemory": false   // opt-in [GIT_CONTEXT] after compaction
+  "gitMemory": true,   // default ON — [GIT_CONTEXT] after compaction; false disables
+  "docSync": true,     // default ON — reviewer code↔doc attestation; false disables
+  "llmGuards": {                // LLM semantic guard layer (all tighten-only + fail-back)
+    "model": "deepseek/deepseek-v4-flash", // "provider/model" — fixed default
+    "taskMode": true,           // semantic loop/explore classification
+    "aiAttribution": true,      // paraphrased AI attribution in commit messages
+    "englishCheck": true,       // romanized non-English in commit/PR/test-label text
+    "shipDetect": true          // extra ship-command layer on suspicious bash
+  }
 }
 ```
 
 Every field is validated independently; a missing/corrupt config silently
 falls back to defaults and can never loosen the gate.
+
+### Enforced code↔doc sync (`docSync`, default ON)
+
+A mechanical "a `.md` file was touched" rule would be satisfied by appending a
+trivial line, so `docSync` enforces *judgment*, not file counts: every code
+change requires the READY review's verdict JSON to carry an explicit
+attestation —
+
+```json
+{"gate": "READY", "docSync": "UPDATED" | "NOT_NEEDED", "findings": []}
+```
+
+- "Docs" means the project's **requirement / plan / feature documentation**
+  (`docs/`, README, specs) — NOT agent memory files (CLAUDE.md, AGENTS.md,
+  progress.md); touching those does not count.
+- `UPDATED` — the reviewer verified docs were *meaningfully* updated for the
+  behavior change (token doc touches are a P1 finding ⇒ BLOCKED).
+- `NOT_NEEDED` — the reviewer states why no doc change is required.
+- The attestation is required on **every** code change — touching a doc file
+  does not exempt it, so the gate cannot be gamed by a cosmetic doc edit.
+- Missing/forged attestation ⇒ unmet requirement (fail-closed), enforced both
+  in `unmetRequirements` and mirrored in the git pre-commit hook.
+- Disable per project with `"docSync": false` in `.pi/review-gate.json`; a
+  missing or corrupt config keeps the default (enforced) — fail-safe, never
+  fail-open.
 
 ## Install
 
@@ -163,7 +220,7 @@ Per repo, idempotent, chains existing hooks, supports worktrees:
 Work normally. The moment the model edits a code or doc file:
 
 1. The gate arms (`review: PENDING`, `precommit: NOT_RUN` in the status bar).
-2. Any `git commit` / `git push` / `gh pr create` is **blocked** with the exact
+2. Any `git commit` / `git push` / `gh pr create` / `gh pr edit` is **blocked** with the exact
    list of unmet requirements.
 3. When the model settles without clearing gates, a `[REVIEW_GATE_RESUME]`
    follow-up restarts the loop (max 10 rounds, plateau-guarded).
@@ -196,10 +253,35 @@ sentinel printed by any other command can never grant a PASS.
 
 | Command | Effect |
 |---------|--------|
-| `/gate-status` | Show verdicts, rounds, fingerprint, unmet requirements |
+| `/gate-status` | Show workflow mode, verdicts, rounds, fingerprint, unmet requirements |
+| `/gate-mode loop\|explore` | Switch the session workflow. `explore` makes gates advisory and lets the AI self-complete (edits/bash stay available but read-only work is preferred; ship commands stay gated). Only the user can invoke this command. |
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
-| `/gate-reset` | Reset gate state for this session |
+| `/gate-reset` | Reset gate state and ask for the workflow again on the next task |
 | `/gate-lesson <text>` | Append a lesson to `.pi/review-gate-lessons.md` (self-improvement log) |
+
+### sd0x-dev-flow workflow commands
+
+These high-value commands are native Pi extension commands, so they work as short
+aliases without loading a large skill catalog into every session. Commands that
+can ship default to a dry run and still pass through the same hard review gate.
+
+| Command | Effect |
+|---------|--------|
+| `/review [focus]` | Start the independent review → `record_review` → fix/re-review loop |
+| `/precommit` | Run the trusted full precommit gate |
+| `/precommit-fast` | Run the trusted fast precommit gate |
+| `/verify [focus]` | Run the strongest available lint/typecheck/build/test ladder |
+| `/next-step` | Recommend the next action from git and gate state without executing it |
+| `/risk-assess [focus]` | Score breaking surface, blast radius, scope, migration, and regression risk |
+| `/smart-commit [--execute]` | Propose cohesive English commits; execute only with an exact standalone `--execute` token and open gates |
+| `/create-pr [--execute] [base]` | Prepare an English PR by default; create/update only with an exact standalone `--execute` token and open gates |
+| `/load-pr-review [PR]` | Load and triage GitHub PR review feedback without auto-fixing |
+| `/watch-ci [PR or run]` | Monitor GitHub Actions to pass/fail/timeout without mutating CI |
+
+Pi already exposes packaged skills as `/skill:<name>`. The commands above are
+implemented as lightweight workflow dispatchers because their useful behavior
+maps directly onto Pi's existing tools, subagents, `gh`, and trusted gate. Broad
+or platform-specific sd0x skills are intentionally not copied wholesale.
 
 Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 
@@ -260,7 +342,7 @@ including a content hash, by editing the checker too):
   hardening), not a runtime source check.
 
 The git hooks (L3) are a useful second layer, not a complete boundary: they
-depend on the sidecar existing and being untampered, and `gh pr create` is not a
+depend on the sidecar existing and being untampered, and `gh pr create/edit` is not a
 local commit.
 
 ### Output-language gate (L4)
@@ -277,17 +359,20 @@ Protocol-fixed English tokens are explicitly exempted — verdict enum values
 messages, code, identifiers, and paths — so the language rule can never corrupt
 the review gate's own parsing.
 
-### Commit/PR English gate (L5)
+### Commit/PR English gate (L5, advisory)
 
 Complementary to L4: while L4 makes user-facing *chat* Simplified Chinese, L5
-requires **commit messages and PR title/description to be English**. Enforced at
-the `tool_call` layer — `git commit -m …` and `gh pr create --title/--body …`
-are **blocked** if the message or PR text contains a **non-Latin script** (CJK,
-Kana, Hangul, Cyrillic, Greek, Arabic, Hebrew, Thai, Devanagari, …). Detection
-(`lib/lang-detect.ts`) is fail-closed on the unambiguous "not English" signal
-(a non-Latin writing system) rather than trying to prove text *is* English, so
-it **allows** ASCII, code identifiers, numbers, URLs, emoji, and Latin text with
-diacritics (`café`, `naïve`) — only another script is blocked.
+asks for **commit messages and PR title/description in English**. It is
+**advisory, not a hard block**: `-m`/`--title`/`--body` extraction is a
+heuristic and can mis-read complex shell forms (e.g. a heredoc-substituted
+message `git commit -m "$(cat <<'EOF' … EOF)"`), so a wrong language guess must
+never stop a legitimate ship. When the checked text contains a **non-Latin
+script** (CJK, Kana, Hangul, Cyrillic, … — `lib/lang-detect.ts`) or the
+semantic layer reads it as romanized non-English, the gate emits a **warning**
+and moves on. Enforcement lives with the humans-in-the-loop instead: the L4
+language directive instructs the agent to write ship text in English every
+turn, and the reviewer treats a non-English commit message or PR title/body as
+a **P1 finding**.
 
 ### Test-label English gate (L6)
 
@@ -360,13 +445,14 @@ Layout:
 
 ```
 extensions/review-gate.ts     Pi extension (L1 + L2 + L4, tools, commands)
+lib/workflow-commands.ts      sd0x-dev-flow command catalog and safe dispatcher prompts
 lib/constants.ts              THE code-ext list, sensitive patterns, msg regexes, LANGUAGE_DIRECTIVE (L4)
-agents/adviser.md             consulting subagent, pinned model @ xhigh (proactively consulted)
-agents/reviewer.md            gatekeeper reviewer override, pinned model @ xhigh
+agents/adviser.md             consulting subagent, pinned model @ max (proactively consulted)
+agents/reviewer.md            gatekeeper reviewer override, pinned model @ max
 lib/model-ranking.ts          leaderboard-scored judge ranking (reference for the pins)
 scripts/fetch-leaderboard.mjs opt-in, gate-external leaderboard fetcher (the only network I/O)
 lib/shell-lex.ts              quote-aware shell lexer (segments + dequoted tokens)
-lib/lang-detect.ts            L5: non-Latin-script detection for commit/PR English gate
+lib/lang-detect.ts            L5: non-Latin-script detection for commit/PR English advisory
 scripts/scan-test-labels.cjs  L6: non-English test-label scanner (pre-commit, staged content)
 lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count table → PASS/FAIL/ERROR)
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)

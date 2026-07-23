@@ -1,7 +1,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -70,12 +70,15 @@ test("installed pre-commit hook computes a fingerprint (no fail-closed on missin
   mkdirSync(join(repo, ".pi"), { recursive: true });
   writeFileSync(join(repo, ".pi", "review-gate-state.json"), JSON.stringify({
     schema: 1,
+    sessionId: "test-session",
     hasCodeChange: false,
     hasDocChange: false,
     review: { verdict: "PENDING", fingerprint: null, at: null },
     precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
     rounds: [],
-    bypass: { active: false },
+    maxRounds: 10,
+    bypass: { active: false, reason: null, at: null },
+    updatedAt: "t",
   }));
 
   const res = spawnSync("bash", [installedPreCommit], { cwd: repo, encoding: "utf8" });
@@ -110,4 +113,34 @@ test("install-global resolves its own symlink (npm .bin entrypoint works)", () =
   // Real artifacts must land under the resolved package root, not node_modules.
   assert.ok(existsSync(join(home, ".pi", "agent", "extensions", "pi-review-gate", "review-gate.ts")));
   assert.ok(existsSync(join(home, ".pi", "agent", "scripts", "compute-fingerprint.cjs")));
+});
+
+// ---------------------------------------------------------------------------
+// Agent definitions: always overwritten with the shipped version (the repo is
+// the single source of truth — same policy as the extension/skill/scripts).
+
+test("re-install overwrites agent definitions with the shipped version", () => {
+  const home = makeHome();
+  const first = installGlobal(home);
+  assert.equal(first.status, 0, `installer failed: ${first.stderr}`);
+  const agentsDir = join(home, ".pi", "agent", "agents");
+  const reviewerFile = join(agentsDir, "reviewer.md");
+  const adviserFile = join(agentsDir, "adviser.md");
+  assert.ok(existsSync(reviewerFile) && existsSync(adviserFile));
+  const shipped = readFileSync(reviewerFile, "utf8");
+
+  // A locally edited copy is overwritten on re-install (repo wins).
+  writeFileSync(reviewerFile, shipped.replace(/^thinking: .*$/m, "thinking: low"));
+  // Simulate leftover state from the removed three-way-merge updater so the
+  // cleanup is actually exercised (an empty assertion would pass vacuously).
+  const legacyDir = join(agentsDir, ".pi-review-gate-shipped");
+  mkdirSync(legacyDir, { recursive: true });
+  writeFileSync(join(legacyDir, "reviewer.md"), "stale base copy");
+  const second = installGlobal(home);
+  assert.equal(second.status, 0, `re-install failed: ${second.stderr}`);
+  assert.equal(readFileSync(reviewerFile, "utf8"), shipped, "re-install must restore the shipped version");
+  assert.match(second.stdout, /reviewer subagent installed \(overwritten with shipped version\)/);
+
+  // Legacy three-way-merge state dir is cleaned up.
+  assert.ok(!existsSync(legacyDir), "legacy merge-base dir must be removed");
 });

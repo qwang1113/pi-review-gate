@@ -48,11 +48,19 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
    verdict:
 
    ```json
-   {"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
+   {"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
    ```
 
    Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix,
    Nit = optional. Any P0/P1 open ⇒ gate BLOCKED.
+
+   `docSync` is the reviewer's code↔doc attestation, required for code
+   reviews: `UPDATED` (project docs — requirement / plan / feature docs under
+   `docs/`, README, specs; NOT agent memory files: CLAUDE.md, AGENTS.md,
+   progress.md — meaningfully updated for the behavior change) or `NOT_NEEDED` (with a
+   one-line reason in prose). Enforced by default; the gate fails closed
+   without it (disable per project via `"docSync": false` in
+   `.pi/review-gate.json`).
 
 2. **Record** — call the `record_review` tool with the reviewer's FULL raw
    output (the gate parses every fence; the worst verdict wins — never
@@ -86,9 +94,10 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
   中文。例外保持英文原样：代码、标识符、文件路径、shell 命令，以及协议固定英文
   标记——裁决 JSON 的 `READY`/`BLOCKED`/`NEEDS_HUMAN`、precommit 的 `## Overall:`
   sentinel、commit message（翻译它们会破坏门禁解析）。
-- **Commit/PR 英文（L5，强制）**：commit message 和 PR 的 title/description 必须用
-  英文。含非拉丁文字（中文/日文/韩文/西里尔等）的 `git commit` / `gh pr create` 会被
-  硬拦截。（注意：这与 L4 不矛盾——面向用户的聊天用中文，commit/PR 用英文。）
+- **Commit/PR 英文（L5，advisory）**：commit message 和 PR 的 title/description 必须用
+  英文。门禁不再硬拦截（提取启发式对 heredoc 等复杂 shell 写法可能误判），但会发出
+  警告，且 reviewer 审核时会把非英文的 commit/PR 文案记为 P1 finding。请直接用英文写。
+  （注意：这与 L4 不矛盾——面向用户的聊天用中文，commit/PR 用英文。）
 - Never edit `.env`, key files, or credentials (hard-blocked anyway).
 - Never put AI attribution in commit messages (hard-blocked anyway).
 - Max 10 rounds (per-project override via `.pi/review-gate.json` `maxRounds`,

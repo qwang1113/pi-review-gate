@@ -3,11 +3,13 @@
  * small, filtered snapshot of git state so the model can recover its working
  * context without re-exploring the repo.
  *
- * Opt-in via .pi/review-gate.json `"gitMemory": true` (see project-config.ts).
+ * Default ON; disable via .pi/review-gate.json `"gitMemory": false`
+ * (see project-config.ts).
  *
  * Safety properties mirrored from the sd0x-dev-flow hook, hardened:
  *  - basic secret-pattern line filtering (.env/.pem/.key/.secret/credential/
- *    token) — NOT a comprehensive scanner, hence opt-in;
+ *    token) — NOT a comprehensive scanner; disable the knob for repos where
+ *    git output must never re-enter context;
  *  - hard 40-line output cap;
  *  - read-only `git` invocations via execFileSync argv (no shell, unlike the
  *    original's `eval "$_FILTER"` pipeline);

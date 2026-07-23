@@ -37,7 +37,7 @@ test("no config file → defaults", () => {
   assert.deepEqual(cfg, defaultProjectConfig());
   assert.equal(cfg.maxRounds, DEFAULT_MAX_ROUNDS);
   assert.equal(cfg.thinkHarder, true);
-  assert.equal(cfg.gitMemory, false);
+  assert.equal(cfg.gitMemory, true);
 });
 
 test("corrupt JSON → defaults (fail-safe)", () => {
@@ -88,12 +88,12 @@ test("non-integer / non-numeric maxRounds keeps default", () => {
 // thinkHarder (R10) / gitMemory (R9) — independent boolean validation
 // ---------------------------------------------------------------------------
 
-test("thinkHarder=false and gitMemory=true are honored", () => {
+test("thinkHarder=false and gitMemory=false are honored (explicit opt-out)", () => {
   const d = makeTemp();
-  writeConfig(d, JSON.stringify({ thinkHarder: false, gitMemory: true }));
+  writeConfig(d, JSON.stringify({ thinkHarder: false, gitMemory: false }));
   const cfg = loadProjectConfig(d);
   assert.equal(cfg.thinkHarder, false);
-  assert.equal(cfg.gitMemory, true);
+  assert.equal(cfg.gitMemory, false);
 });
 
 test("non-boolean flags keep defaults; other valid fields still apply", () => {
@@ -101,7 +101,7 @@ test("non-boolean flags keep defaults; other valid fields still apply", () => {
   writeConfig(d, JSON.stringify({ thinkHarder: "yes", gitMemory: 1, maxRounds: 12 }));
   const cfg = loadProjectConfig(d);
   assert.equal(cfg.thinkHarder, true);   // default
-  assert.equal(cfg.gitMemory, false);    // default
+  assert.equal(cfg.gitMemory, true);     // default (ON)
   assert.equal(cfg.maxRounds, 12);       // valid field still honored
 });
 
@@ -109,4 +109,68 @@ test("unknown fields are ignored", () => {
   const d = makeTemp();
   writeConfig(d, JSON.stringify({ maxRounds: 8, futureKnob: "x" }));
   assert.equal(loadProjectConfig(d).maxRounds, 8);
+});
+
+// ---------------------------------------------------------------------------
+// docSync knob — default ON boolean; explicit false disables; invalid → default
+// ---------------------------------------------------------------------------
+
+test("docSync defaults ON; explicit false disables; non-boolean keeps default", () => {
+  assert.equal(loadProjectConfig(makeTemp()).docSync, true);
+
+  const d1 = makeTemp();
+  writeConfig(d1, JSON.stringify({ docSync: false }));
+  assert.equal(loadProjectConfig(d1).docSync, false);
+
+  const d2 = makeTemp();
+  writeConfig(d2, JSON.stringify({ docSync: "yes" }));
+  assert.equal(loadProjectConfig(d2).docSync, true); // fail-safe default (enforced)
+});
+
+// ---------------------------------------------------------------------------
+// llmGuards (LLM semantic guard layer — DeepSeek V4 Flash)
+
+test("llmGuards defaults: all guards on, fixed flash model", () => {
+  const d = makeTemp();
+  assert.deepEqual(loadProjectConfig(d).llmGuards, {
+    model: "deepseek/deepseek-v4-flash",
+    taskMode: true,
+    aiAttribution: true,
+    englishCheck: true,
+    shipDetect: true,
+  });
+  assert.deepEqual(defaultProjectConfig().llmGuards, loadProjectConfig(d).llmGuards);
+});
+
+test("llmGuards fields load independently; invalid fields keep defaults", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({
+    llmGuards: { taskMode: false, shipDetect: false, aiAttribution: "yes", model: 42 },
+  }));
+  const lg = loadProjectConfig(d).llmGuards;
+  assert.equal(lg.taskMode, false);
+  assert.equal(lg.shipDetect, false);
+  assert.equal(lg.aiAttribution, true);  // invalid type → default
+  assert.equal(lg.englishCheck, true);   // absent → default
+  assert.equal(lg.model, "deepseek/deepseek-v4-flash"); // invalid type → default
+});
+
+test("llmGuards model accepts provider/id and rejects malformed ids", () => {
+  const good = makeTemp();
+  writeConfig(good, JSON.stringify({ llmGuards: { model: "onekey/deepseek-v4-flash" } }));
+  assert.equal(loadProjectConfig(good).llmGuards.model, "onekey/deepseek-v4-flash");
+
+  for (const bad of ["no-slash", "/x", "x/", "a b/c"]) {
+    const d = makeTemp();
+    writeConfig(d, JSON.stringify({ llmGuards: { model: bad } }));
+    assert.equal(loadProjectConfig(d).llmGuards.model, "deepseek/deepseek-v4-flash", bad);
+  }
+});
+
+test("llmGuards non-object (null/array/string) keeps all defaults", () => {
+  for (const bad of [null, [], "on", 1, true]) {
+    const d = makeTemp();
+    writeConfig(d, JSON.stringify({ llmGuards: bad }));
+    assert.deepEqual(loadProjectConfig(d).llmGuards, defaultProjectConfig().llmGuards, JSON.stringify(bad));
+  }
 });

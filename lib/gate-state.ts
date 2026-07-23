@@ -18,9 +18,21 @@
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
 export type PrecommitVerdict = "PASS" | "FAIL" | "NO_CHECKS_RUN" | "NOT_RUN";
+
+/**
+ * Code↔doc sync attestation (docSync knob). When a review covers code
+ * changes the reviewer must explicitly attest either that docs were
+ * meaningfully UPDATED for the behavior change, or that a doc change is
+ * NOT_NEEDED. This is deliberately an attestation the INDEPENDENT reviewer
+ * makes — a mechanical "a .md file was touched" rule would be satisfied by a
+ * trivial one-line append, whereas the reviewer must verify substance.
+ */
+export type DocSyncAttestation = "UPDATED" | "NOT_NEEDED";
+export const DOC_SYNC_ATTESTATIONS: ReadonlySet<string> = new Set<DocSyncAttestation>(["UPDATED", "NOT_NEEDED"]);
 
 /** Valid enum members, used to fail-closed on unknown/forged sidecar verdicts. */
 export const GATE_VERDICTS: ReadonlySet<string> = new Set<GateVerdict>(["PENDING", "READY", "BLOCKED", "NEEDS_HUMAN"]);
@@ -42,6 +54,13 @@ export interface GateState {
     verdict: GateVerdict;
     fingerprint: string | null; // worktree fingerprint the verdict is bound to
     at: string | null;
+    /**
+     * Reviewer's code↔doc attestation from the verdict JSON. Optional for
+     * backward compatibility with older sidecars; absent ⇒ no attestation,
+     * which is an UNMET requirement when the project enables `docSync`
+     * (fail-closed — same philosophy as NO_CHECKS_RUN ≠ PASS).
+     */
+    docSync?: DocSyncAttestation;
   };
   precommit: {
     verdict: PrecommitVerdict;
@@ -55,6 +74,16 @@ export interface GateState {
     reason: string | null;
     at: string | null;
   };
+  /** Session-level workflow choice. Absent means not chosen yet; consumers
+   * must fail closed by treating it as loop until the user decides. */
+  taskMode?: TaskMode;
+  /**
+   * Who chose taskMode. SECURITY: the git pre-commit hook downgrades to
+   * advisory ONLY for a user-chosen explore ("user"); a heuristic
+   * auto-selection ("auto") never weakens the hook. Absent ⇒ treated as
+   * "auto" (fail-closed — older sidecars keep the full gate).
+   */
+  taskModeSource?: TaskModeSource;
   /**
    * sd0x-dev-flow R10 ("Think Harder") port: whether the one-shot strategic
    * reset checklist has fired for this state lifetime. Optional so schema-1
@@ -98,6 +127,20 @@ export function loadSidecar(path: string): GateState | undefined {
     if (!parsed.precommit || !PRECOMMIT_VERDICTS.has(parsed.precommit.verdict as string)) return undefined;
     if (!Array.isArray(parsed.rounds)) return undefined;
     if (!parsed.bypass || typeof parsed.bypass.active !== "boolean") return undefined;
+    // Optional field. Unknown values are removed so consumers fall back to
+    // the safer loop behavior.
+    if (parsed.taskMode !== undefined && normalizeTaskMode(parsed.taskMode) === undefined) {
+      delete parsed.taskMode;
+    }
+    // Unknown source values fail closed to "auto" (never hook-advisory).
+    if (parsed.taskModeSource !== undefined && parsed.taskModeSource !== "auto" && parsed.taskModeSource !== "user") {
+      delete parsed.taskModeSource;
+    }
+    // Unknown/forged docSync attestation → treated as absent (fail-closed:
+    // absent blocks when the project enforces docSync, never passes).
+    if (parsed.review.docSync !== undefined && !DOC_SYNC_ATTESTATIONS.has(parsed.review.docSync as string)) {
+      delete parsed.review.docSync;
+    }
     return parsed;
   } catch {
     return undefined;
@@ -122,6 +165,16 @@ export function unmetRequirements(
   state: GateState | undefined,
   currentFingerprint: string,
   fingerprintUnavailable: boolean,
+  opts?: {
+    /**
+     * Project knob `docSync` (default ON). When true, a code change additionally
+     * requires the READY review to carry a docSync attestation
+     * (UPDATED | NOT_NEEDED). The attestation is required on EVERY code
+     * change — not only when no doc file was touched — so trivially touching
+     * a .md file cannot satisfy the gate: the reviewer must always judge.
+     */
+    requireDocSync?: boolean;
+  },
 ): string[] {
   if (!state) return ["gate state missing (fail-closed)"];
   if (state.bypass.active) return [];
@@ -147,6 +200,13 @@ export function unmetRequirements(
       problems.push(`code review gate is ${state.review.verdict} (need READY)`);
     } else if (state.review.fingerprint !== currentFingerprint) {
       problems.push("code was modified after the last READY review (fingerprint mismatch)");
+    } else if (opts?.requireDocSync && state.review.docSync === undefined) {
+      // Fail-closed: enforcement is on and the READY review carries no
+      // attestation (older review, or reviewer omitted the field) → unmet.
+      problems.push(
+        "docSync enforced: READY review lacks a code↔doc attestation — the reviewer verdict JSON " +
+        'must include "docSync": "UPDATED" | "NOT_NEEDED"; re-run the independent review',
+      );
     }
 
     // Fail-closed: only an explicit PASS bound to the current fingerprint is a
