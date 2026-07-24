@@ -42,6 +42,12 @@ export interface RoundRecord {
   round: number;
   findingsTotal: number | null; // null = unparseable (PR #7 lesson 2: never fail-open on parse trouble)
   fingerprints: string[]; // finding fingerprints for plateau detection
+  /**
+   * The recorded verdict for this round. Optional for backward compatibility
+   * with older sidecars that predate oscillation detection (absent ⇒ unknown,
+   * which conservatively does NOT count toward an oscillation transition).
+   */
+  verdict?: Exclude<GateVerdict, "PENDING">;
   at: string;
 }
 
@@ -261,6 +267,33 @@ export function shouldStrategicReset(
   if (state.review.verdict !== "BLOCKED") return false;
   const threshold = Math.max(1, state.maxRounds - offset);
   return state.rounds.length >= threshold;
+}
+
+/**
+ * Oscillation detection (pure, unit-tested). Counts READY→BLOCKED transitions
+ * across the recorded rounds: a round whose verdict is BLOCKED and whose
+ * immediately preceding round with a known verdict was READY. When this count
+ * reaches `limit` the review loop is thrashing (the reviewer keeps finding NEW
+ * problems after signalling READY) rather than converging.
+ *
+ * Rounds with an absent verdict (older sidecars) are skipped when looking for
+ * the preceding verdict, so a legacy tail never fabricates a transition.
+ * Tighten-only: the caller uses a true result solely to DISARM the auto-loop
+ * and escalate — it never permits a ship.
+ */
+export function countOscillations(rounds: RoundRecord[]): number {
+  let count = 0;
+  let prevKnown: Exclude<GateVerdict, "PENDING"> | undefined;
+  for (const r of rounds) {
+    if (r.verdict === undefined) continue; // legacy round: cannot judge
+    if (r.verdict === "BLOCKED" && prevKnown === "READY") count++;
+    prevKnown = r.verdict;
+  }
+  return count;
+}
+
+export function isOscillating(rounds: RoundRecord[], limit: number): boolean {
+  return countOscillations(rounds) >= limit;
 }
 
 /** Plateau detection: same findings recurring across N rounds without shrinking. */

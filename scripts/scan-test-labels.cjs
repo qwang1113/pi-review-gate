@@ -8,9 +8,10 @@
  * content so it checks exactly what is about to be committed.
  *
  * Non-English detection mirrors lib/lang-detect.ts — keep them in sync: a
- * label is flagged when it contains a NON-LATIN letter (CJK/Kana/Hangul/
- * Cyrillic/…) or CJK punctuation. Latin-with-diacritics (café), digits,
- * punctuation, URLs and emoji all pass.
+ * label is flagged only when a NON-LATIN script (CJK/Kana/Hangul/Cyrillic/…)
+ * is the MAJORITY of its letters (majority-body policy). A minority foreign
+ * word passes; Latin-with-diacritics (café), digits, punctuation, URLs and
+ * emoji all pass.
  *
  * We do NOT regex raw source (that false-positives on comments, embedded
  * strings, `foo . it(...)`, and `it(` inside a regex literal). Instead a tiny
@@ -61,13 +62,38 @@ function isTestFile(p) {
 }
 
 // ---- non-English detection (mirror of lib/lang-detect.ts) --------------------
-const CJK_PUNCT = /[\u3000-\u303f\uff00-\uffef]/u;
+// Majority-body policy with ASYMMETRIC counting (kept in sync with
+// analyzeLanguageMix() in lib/lang-detect.ts): NON-Latin letters are counted
+// over the FULL label (so a non-Latin body can't hide inside `code`/URLs),
+// while LATIN letters are counted over the PROSE only (so a Latin code span
+// can't dilute the ratio). Fails when non-Latin letters are STRICTLY more than
+// half of (proseLatin + fullNonLatin). Only `\p{L}` letters count.
+function stripNonProse(text) {
+  let t = text;
+  t = t.replace(/```[\s\S]*?```/g, " ");
+  t = t.replace(/~~~[\s\S]*?~~~/g, " ");
+  t = t.replace(/`[^`]*`/g, " ");
+  t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1");
+  t = t.replace(/\bhttps?:\/\/\S+/gi, " ");
+  t = t.replace(/\bwww\.\S+/gi, " ");
+  t = t.replace(/<[^>]+>/g, " ");
+  return t;
+}
 function isNonEnglishText(text) {
   if (!text) return false;
-  for (const ch of text) {
-    if (/\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch)) return true;
+  const full = text.normalize("NFC");
+  const prose = stripNonProse(full);
+  let latin = 0;
+  for (const ch of prose) {
+    if (/\p{L}/u.test(ch) && /\p{Script=Latin}/u.test(ch)) latin++;
   }
-  return CJK_PUNCT.test(text);
+  let nonLatin = 0;
+  for (const ch of full) {
+    if (/\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch)) nonLatin++;
+  }
+  const total = latin + nonLatin;
+  if (total === 0) return false;
+  return nonLatin * 2 > total;
 }
 
 // ---- bypass markers ----------------------------------------------------------

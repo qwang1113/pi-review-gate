@@ -50,20 +50,29 @@ L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
                           (thinking in Chinese too; protocol English tokens
                           READY/BLOCKED/commit-msg/code stay exempt)
 L5  Commit/PR English     tool_call → ADVISORY warning when a git commit message
-                          or PR title/body looks non-English; the language
-                          directive (L4) + the reviewer enforce English ship text
-L6  Test-label English    pre-commit → block a staged it/test/describe label in
-                          a non-Latin script, unless a `// review-gate:
-                          allow-non-english` (line) or `-file` marker exempts it
+                          or PR title/body is PREDOMINANTLY non-English (majority
+                          body); the language directive (L4) + reviewer enforce
+                          English ship text; a minority foreign token passes
+L6  Test-label English    pre-commit → block a staged it/test/describe label
+                          that is PREDOMINANTLY non-Latin, unless a
+                          `// review-gate: allow-non-english` (line) or `-file`
+                          marker exempts it
 ```
+
+**Arbiter (circular-block escape).** Layered on top of L1: when the ship gate
+blocks a lone `gh pr edit` (PR text) whose only fix is that same blocked action,
+the agent may call `request_arbitration`. An independent arbiter rules
+GATE_WINS / AGENT_WINS (a single-use, tightly-bound bypass of that one command)
+/ HUMAN. It can never release a commit/push/pr-create and fails closed to
+GATE_WINS — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception).
 
 State lives in **two places**: Pi session entries (`pi.appendEntry`, survives
 context compaction) and a sidecar file `.pi/review-gate-state.json` (readable
 by the git hooks without Pi).
 
-## Two judges on a stronger model, pinned at `max`
+## Judges on a stronger model, pinned at `max`
 
-The gate is only as good as the brain judging the work. Two independent roles
+The gate is only as good as the brain judging the work. Three independent roles
 run on a **top-tier reasoning model at `max` thinking**, each with a fallback
 priority list (first available wins). The models are **pinned in the agent
 definitions** — decided up front, not re-selected per task:
@@ -72,6 +81,7 @@ definitions** — decided up front, not re-selected per task:
 |------|------|--------|-------------------------------------|----------|
 | **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → GPT-5.6 Sol → Opus 4.8 → GPT-5.5 | `max` |
 | **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | GPT-5.6 Sol → Fable 5 → GPT-5.5 → Opus 4.8 | `max` |
+| **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | GPT-5.6 Sol → Fable 5 → GPT-5.5 → Opus 4.8 | `max` |
 
 `thinking` is a single value, not a fallback list; `max` is the highest valid
 pi level (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — pi clamps
@@ -289,9 +299,66 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 
 | Tool | Purpose |
 |------|---------|
-| `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau detection. |
+| `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. |
-| `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet. "Declaring ≠ executing." |
+| `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
+| `request_arbitration` | Contest a ship block the agent believes is **circular** (the only remedy is an action the block forbids). Narrow + fail-closed — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception). |
+
+### Arbiter (a narrow, fail-closed gate exception)
+
+Every other LLM in this project is **tighten-only** — it may only ADD a block,
+never lift one (`lib/llm-classify.ts`). The **arbiter** is the one deliberate,
+tightly-scoped exception, added to break a real **deadlock**: a pre-existing
+non-English PR body was flagged (L5/reviewer), but the only way to fix it —
+`gh pr edit` — is itself hard-blocked until the gate is green, and the gate
+won't go green until the body is fixed. Circular.
+
+When the ship gate blocks a **lone `gh pr edit`** (limited to
+`--title`/`--body`/`--body-file`), the agent may call `request_arbitration`
+with its argument. The extension then:
+
+1. Confirms the block is **real and arbitrable** (`lib/arbitration.ts`
+   `parseArbitrableAction` requires EXACTLY one `gh pr edit` with only
+   `--title`/`--body`/`--body-file` — it rejects `git commit`, `git push`,
+   `gh pr create`, compound/piped commands, a second *visible* ship op detected
+   inside the command, and any out-of-scope flag — so the arbiter can never
+   grant a bypass for a command *shaped* as anything but a single `gh pr edit`
+   (a substitution hidden in an argument still executes when the granted raw
+   command re-runs — see the residual-risk note in the threat model). There is
+   deliberately **no content pre-filter** that
+   rejects a command just for containing `$`/backtick/substitution characters:
+   that filter was the gate second-guessing the command text, and its
+   over-broad form deadlocked a legitimate PR markdown body
+   (`--body '… `code` … $var …'`) out of ever reaching the arbiter. Judging a
+   dubious command is the **arbiter's** job — it is spawned tool-less with every
+   input wrapped as untrusted data and instructed to judge content, never obey
+   it, and any bypass it grants is single-use and bound to the command's exact
+   raw bytes.
+2. Gathers **trusted ground truth itself** (`gh pr view`, `git log`, the
+   proposed body file) and spawns an **independent** arbiter subagent
+   (`agents/arbiter.md`, a top-tier model) tool-less and isolated (same argv/no
+   -tools discipline as the classifier) — the agent **cannot hand-write** the
+   verdict, and its argument is passed as clearly-marked **untrusted** data.
+3. Applies the verdict, one of three outcomes:
+   - **GATE_WINS** → the agent must comply (fix the underlying problem).
+   - **AGENT_WINS** → a **single-use** bypass token is issued, bound to the
+     exact command digest + worktree fingerprint + review round + body-file
+     content, with a short TTL. It authorizes **one** run of that exact
+     `gh pr edit`, is **consumed on the attempt**, and is invalidated by any
+     edit, new review round, fingerprint change, or `/gate-reset`. It never
+     touches the code review loop (review stays PENDING, precommit stays
+     NOT_RUN).
+   - **HUMAN** → a 3-way dialog (`Gate wins` / `Allow this exact edit once` /
+     `Pause gate and wait`) hands the decision to the user; **no UI → fail-closed
+     to GATE_WINS**.
+
+Fail-closed everywhere: a disabled arbiter, an out-of-scope command, the
+per-session cap (default 3), a re-roll of an already-decided action, a spawn/
+parse failure, or an unknown verdict all resolve to **GATE_WINS**. The token is
+**in-memory only** (never persisted to the sidecar — a restart legitimately
+drops it). Every decision is appended to `.pi/review-gate-arbitration.log`.
+Configure via `.pi/review-gate.json` → `"arbiter": { "enabled", "model",
+"maxPerSession" }`.
 
 ### Fail-closed inventory
 
@@ -306,8 +373,9 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 - Ship command hidden in `bash -c` / `eval` / `xargs` → still detected (over-detection preferred)
 - Ship command obfuscated via `g""it` / `g"i"t` / `git${IFS}commit` / `git$IFS"commit"` / `${x:=git}` / `${x:-g}${y:-it}` / `$(printf git) commit` (dynamic head) / `\g\i\t` / backslash-newline continuation → shell-dequoting + de-obfuscation + dynamic-head detection still catch it (fail-closed)
 - Ship command hidden behind an INLINE git alias (`git -c "alias.ship=commit --no-verify" ship`, attached `-calias.x=commit`, shell-alias body `!git commit`, or `--config-env=alias.x=VAR`) → the alias body is scanned for `commit`/`push` and flagged (fail-closed; opaque config-env bodies default to commit)
-- `max_rounds` (10) or 3-round finding plateau → loop stops, escalates to the human — no infinite burn
-- Non-English `it`/`test`/`describe` label committed without a bypass marker → pre-commit (L6) blocks with the offending `file:line` (missing scanner on an older install → warn-and-skip, never a bricked commit)
+- `max_rounds` (10), a 3-round finding plateau, or 3 READY→BLOCKED oscillations (the reviewer keeps signalling READY then finding fresh problems) → loop stops, escalates to the human — no infinite burn
+- Predominantly non-English `it`/`test`/`describe` label committed without a bypass marker → pre-commit (L6) blocks with the offending `file:line` (missing scanner on an older install → warn-and-skip, never a bricked commit)
+- Arbitration requested with no real block, an out-of-scope command (commit/push/pr-create/compound/piped, a second ship op detected in the command, or an out-of-scope flag), the per-session cap hit, a re-rolled decision, arbiter spawn/parse failure, unknown verdict, or a no-UI HUMAN outcome → **GATE_WINS** (block stands). An AGENT_WINS token is single-use, content+worktree+round bound, in-memory only, and never green-lights the code review loop.
 
 ### Threat model & residual risk (explicit)
 
@@ -316,6 +384,33 @@ shortcuts or generating obfuscated shell — unintentionally or cheaply bypassin
 the gate. Within that model the PASS trust path is single-entry (only
 `run_precommit`), bash stdout can never forge a PASS, and the common ship-command
 obfuscations above are detected.
+
+The **arbiter** (the one capability that can LIFT a block) stays inside this
+model: it can only ever release a single top-level `gh pr edit` (PR text) —
+never a top-level commit/push/pr-create — the extension (not the agent) spawns
+it and gathers its evidence, and every failure mode falls back to GATE_WINS. Its
+token is raw-command+worktree+round bound and single-use.
+
+**Residual risk of the arbiter bypass (be explicit).** There is deliberately no
+content pre-filter on the arbitrated command (removing the over-broad one that
+deadlocked legitimate PR markdown). The structural guards guarantee the
+authorized command is shaped as ONE `gh pr edit` with only title/body/body-file
+and no *visible* second ship op — but they do NOT semantically evaluate a shell
+substitution the command may contain. So a granted bypass runs the EXACT raw
+command through the shell, and a substitution in an argument
+(`--body "$(…)"`, `` --title "`…`" ``) executes during expansion *before*
+`gh pr edit`. A hostile substitution (e.g. `--body "$(… | base64 -d | sh)"`)
+could therefore run arbitrary shell — including a hidden `git push` — under a
+granted token. This is bounded by: the arbiter must first grant AGENT_WINS
+(it is spawned tool-less, judges every input as untrusted data, is told an
+attempt to smuggle a command is itself grounds to refuse, and biases
+GATE_WINS > HUMAN > AGENT_WINS); the human 3-way dialog on HUMAN; the per-session
+cap; single-use raw-byte binding; and the same-user threat-model boundary below
+(a same-UID agent can already run any shell directly, so this grants no new
+authority it lacks — it only means the arbiter's grant is a *command execution*,
+not a proven-safe "edit PR text only" operation). If you want the bypass to be
+provably text-only, run the arbitrated `gh pr edit` via `shell:false` argv
+instead of re-running the raw command (future hardening).
 
 It explicitly does **not** claim to defend against a principal with the current
 user's write access who deliberately tampers with the control plane. These are
@@ -366,13 +461,28 @@ asks for **commit messages and PR title/description in English**. It is
 **advisory, not a hard block**: `-m`/`--title`/`--body` extraction is a
 heuristic and can mis-read complex shell forms (e.g. a heredoc-substituted
 message `git commit -m "$(cat <<'EOF' … EOF)"`), so a wrong language guess must
-never stop a legitimate ship. When the checked text contains a **non-Latin
-script** (CJK, Kana, Hangul, Cyrillic, … — `lib/lang-detect.ts`) or the
-semantic layer reads it as romanized non-English, the gate emits a **warning**
-and moves on. Enforcement lives with the humans-in-the-loop instead: the L4
-language directive instructs the agent to write ship text in English every
-turn, and the reviewer treats a non-English commit message or PR title/body as
-a **P1 finding**.
+never stop a legitimate ship. The check uses a **majority-body policy**
+(`lib/lang-detect.ts`): after stripping non-prose (code fences, inline code,
+URLs, Markdown link destinations, HTML tags) it counts letters and flags the
+text only when a **non-Latin script** (CJK, Kana, Hangul, Cyrillic, …) is the
+**majority** of them — so a mostly-English body with a **stray/minority** quoted
+foreign term (e.g. one `确认中`) **passes**, while a predominantly non-Latin body
+warns. Each text (title, body, each commit message) is judged **separately** so
+a long English body can't mask a fully non-English title. The pure-Latin
+romanized-language semantic layer runs only when the text has **zero** non-Latin
+letters. Counting is **asymmetric** so markup can't hide a non-Latin body:
+non-Latin letters are counted over the **full** text (a `确认中` inside a code
+fence still counts), while Latin letters are counted over **prose only** (a big
+Latin code block can't dilute the ratio). Known conservative side-effect: an
+English text quoting a **large** non-Latin code sample can tip to "majority
+non-Latin" — advisory-only for L5 (a warning), and a deliberate non-English test
+label can be exempted with the L6 bypass marker. Enforcement lives with the humans-in-the-loop: the L4 language
+directive instructs the agent to write ship text in English every turn, and the
+reviewer treats a **predominantly** non-English commit message or PR title/body
+as a **P1 finding** (a single minority foreign token is **not** a finding). If a
+non-English PR body can only be fixed by an action the gate itself blocks (the
+circular deadlock), the agent can escalate via the
+[arbiter](#arbiter-a-narrow-fail-closed-gate-exception).
 
 ### Test-label English gate (L6)
 
@@ -380,9 +490,10 @@ Test descriptions must be **English** too. Enforced at the `pre-commit` hook
 (L3) layer by `scripts/scan-test-labels.cjs`, which scans the **staged** content
 of test files (`*.test.*`, `*.spec.*`, or under `__tests__/`, JS/TS only) for
 `it(…)` / `test(…)` / `describe(…)` (incl. `.only`/`.skip` chains) whose
-string-literal description contains a non-Latin script. Same detection as L5
-(`lib/lang-detect.ts`, mirrored in the CJS scanner), so diacritics/emoji/digits
-pass and only another writing system is blocked.
+string-literal description is **predominantly** a non-Latin script. Same
+majority-body detection as L5 (`lib/lang-detect.ts`, mirrored in the CJS
+scanner), so diacritics/emoji/digits pass, a minority foreign token passes, and
+only a label whose letters are **mostly** another writing system is blocked.
 
 When a test description legitimately must be non-English, exempt it with a
 bypass marker — recognized **only in `//` line comments**:

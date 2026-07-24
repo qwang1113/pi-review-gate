@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import {
   emptyState,
   isPlateaued,
+  isOscillating,
+  countOscillations,
   loadSidecar,
   saveSidecar,
   shouldStrategicReset,
@@ -14,6 +16,7 @@ import {
   unmetRequirements,
   type GateState,
   type RoundRecord,
+  type GateVerdict,
 } from "../lib/gate-state.ts";
 
 const tempDirs: string[] = [];
@@ -266,6 +269,58 @@ test("unparseable totals (null) → not plateaued (rely on hard cap)", () => {
 
 test("fewer rounds than window → not plateaued", () => {
   assert.ok(!isPlateaued([round(1, 3, ["a#1#x"])], 3));
+});
+
+// ---------------------------------------------------------------------------
+// Oscillation detection (READY→BLOCKED thrash the plateau check cannot catch)
+// ---------------------------------------------------------------------------
+
+function vround(n: number, verdict: Exclude<GateVerdict, "PENDING">): RoundRecord {
+  return { round: n, findingsTotal: verdict === "BLOCKED" ? 1 : 0, fingerprints: [], verdict, at: "t" };
+}
+
+test("oscillation: counts each READY→BLOCKED transition", () => {
+  const rounds = [
+    vround(1, "BLOCKED"),
+    vround(2, "READY"),
+    vround(3, "BLOCKED"), // flip 1
+    vround(4, "READY"),
+    vround(5, "BLOCKED"), // flip 2
+  ];
+  assert.equal(countOscillations(rounds), 2);
+  assert.ok(!isOscillating(rounds, 3));
+  assert.ok(isOscillating(rounds, 2));
+});
+
+test("oscillation: steady convergence (BLOCKED*→READY) never counts", () => {
+  const rounds = [vround(1, "BLOCKED"), vround(2, "BLOCKED"), vround(3, "READY")];
+  assert.equal(countOscillations(rounds), 0);
+  assert.ok(!isOscillating(rounds, 1));
+});
+
+test("oscillation: BLOCKED after BLOCKED is not a flip (only READY→BLOCKED)", () => {
+  const rounds = [vround(1, "READY"), vround(2, "BLOCKED"), vround(3, "BLOCKED")];
+  assert.equal(countOscillations(rounds), 1);
+});
+
+test("oscillation: legacy rounds without a verdict never fabricate a flip", () => {
+  const rounds: RoundRecord[] = [
+    { round: 1, findingsTotal: 0, fingerprints: [], at: "t" }, // legacy: verdict absent
+    vround(2, "BLOCKED"),
+    { round: 3, findingsTotal: 0, fingerprints: [], at: "t" }, // legacy READY-ish, unknown
+    vround(4, "BLOCKED"),
+  ];
+  // No known READY precedes either BLOCKED, so zero flips.
+  assert.equal(countOscillations(rounds), 0);
+});
+
+test("oscillation: a legacy round between READY and BLOCKED is skipped, flip still seen", () => {
+  const rounds: RoundRecord[] = [
+    vround(1, "READY"),
+    { round: 2, findingsTotal: 0, fingerprints: [], at: "t" }, // legacy gap
+    vround(3, "BLOCKED"),
+  ];
+  assert.equal(countOscillations(rounds), 1);
 });
 
 // ---------------------------------------------------------------------------

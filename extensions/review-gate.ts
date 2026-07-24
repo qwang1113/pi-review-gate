@@ -43,12 +43,12 @@
  *   —   /gate-lesson self-improvement log (.pi/review-gate-lessons.md)
  */
 
-import { existsSync, statSync, unlinkSync, writeFileSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, statSync, unlinkSync, writeFileSync, readFileSync, mkdtempSync, rmSync, appendFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as pathJoin, dirname as pathDirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -61,18 +61,21 @@ import {
   COMMIT_MSG_FORBIDDEN,
   LANGUAGE_DIRECTIVE,
   PLATEAU_ROUNDS,
+  OSCILLATION_LIMIT,
   STRATEGIC_RESET_OFFSET,
   STRATEGIC_RESET_CHECKLIST,
 } from "./lib/constants.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "./lib/project-config.ts";
 import { buildGitMemory } from "./lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "./lib/ship-detect.ts";
-import { firstNonEnglish } from "./lib/lang-detect.ts";
+import { firstNonEnglish, containsNonLatinLetter } from "./lib/lang-detect.ts";
 import { validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
 import { changedFiles, computeFingerprint } from "./lib/fingerprint.ts";
 import {
   emptyState,
   isPlateaued,
+  isOscillating,
+  countOscillations,
   loadSidecar,
   saveSidecar,
   shouldStrategicReset,
@@ -93,6 +96,17 @@ import {
 } from "./lib/llm-classify.ts";
 import { projectEditedContent } from "./lib/edit-projection.ts";
 import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "./lib/workflow-commands.ts";
+import {
+  parseArbitrableAction,
+  tokenAuthorizes,
+  buildArbiterPrompt,
+  runArbiter,
+  sha256,
+  BYPASS_TOKEN_TTL_MS,
+  type ArbitrableAction,
+  type BypassToken,
+  type TokenBindings,
+} from "./lib/arbitration.ts";
 
 const ENTRY_TYPE = "review-gate-state";
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
@@ -151,6 +165,24 @@ export default function reviewGate(pi: ExtensionAPI) {
   // guard to its exact pre-LLM deterministic behavior.
   let llmClassifier: LlmClassifier | null = null;
   let llmClassifierModel = "";
+
+  // ---- Arbitration state (in-memory ONLY; never persisted to the sidecar) ----
+  // A single-use bypass token issued by an AGENT_WINS arbiter decision, bound to
+  // the exact action + worktree + review round (lib/arbitration.ts). Any edit,
+  // new review round, fingerprint change, or /gate-reset clears it.
+  let bypassToken: BypassToken | null = null;
+  // The most recent ship command the gate BLOCKED, so request_arbitration can
+  // only contest a real block (not an agent-invented one).
+  let lastBlockedShip: { command: string; problems: string[]; blockReason: string } | null = null;
+  // Per-session arbitration request count (capped by projectConfig.arbiter).
+  let arbitrationsUsed = 0;
+  // Re-roll prevention: decisions cached by (commandDigest#round). A GATE_WINS /
+  // HUMAN outcome cannot be re-requested for the same action+round.
+  const arbitrationDecisions = new Map<string, "GATE_WINS" | "AGENT_WINS" | "HUMAN">();
+
+  /** Clear any standing bypass token (called whenever the worktree or review
+   *  round changes, so a token can never outlive the exact state it was for). */
+  function clearBypassToken() { bypassToken = null; }
   function classifier(): LlmClassifier {
     if (!llmClassifier || llmClassifierModel !== projectConfig.llmGuards.model) {
       llmClassifier = createLlmClassifier(projectConfig.llmGuards.model);
@@ -442,19 +474,23 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         const nonEn = firstNonEnglish(msgs);
         if (nonEn) {
-          l5Advisories.push(`commit message contains non-English text: "${nonEn.slice(0, 60)}"`);
+          l5Advisories.push(`commit message is predominantly non-English: "${nonEn.slice(0, 60)}"`);
         } else if (msgs.length > 0 && projectConfig.llmGuards.englishCheck
+          && !msgs.some(containsNonLatinLetter)
           && await classifyNonEnglish(classifier(), msgs) === true) {
-          // L5 blind spot (tighten-only ordering kept): Unicode-script check
-          // passed, but pure-Latin romanized non-English may slip through.
+          // L5 blind spot: the majority-body check passed, but a message that is
+          // 100% Latin script may still be romanized non-English (pinyin/romaji).
+          // Only run the semantic check when there is NO non-Latin letter at all
+          // — a minority foreign word already passes under the majority policy.
           l5Advisories.push("commit message reads as romanized non-English (semantic check)");
         }
       } else if (s.kind === "pr-create" || s.kind === "pr-edit") {
         const prTexts = extractPrTextFields(s.segment);
         const nonEn = firstNonEnglish(prTexts);
         if (nonEn) {
-          l5Advisories.push(`PR title/description contains non-English text: "${nonEn.slice(0, 60)}"`);
+          l5Advisories.push(`PR title/description is predominantly non-English: "${nonEn.slice(0, 60)}"`);
         } else if (prTexts.length > 0 && projectConfig.llmGuards.englishCheck
+          && !prTexts.some(containsNonLatinLetter)
           && await classifyNonEnglish(classifier(), prTexts) === true) {
           l5Advisories.push("PR title/description reads as romanized non-English (semantic check)");
         }
@@ -476,20 +512,124 @@ export default function reviewGate(pi: ExtensionAPI) {
     const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
     if (problems.length === 0) return;
 
-    // P0-5: warn about compound commands where later ops might ship after HEAD changes.
-    const desc = ships.length > 1
-      ? `compound command with ${ships.map(s => s.kind).join(" + ")}`
-      : ships[0].kind;
+    // Single-use arbiter bypass token (lib/arbitration.ts). Only a lone,
+    // in-scope `gh pr edit` (title/body) can EVER match — the token is bound to
+    // the exact command + worktree fingerprint + review round + body-file
+    // content, and is consumed on the first authorized run. It never bypasses
+    // commit/push/pr-create (those are not arbitrable, so no token is ever
+    // issued for them) and never touches the code review loop.
+    if (ships.length === 1 && ships[0].kind === "pr-edit" && bypassToken && !fp.unavailable) {
+      const parsed = parseArbitrableAction(command);
+      if (parsed.ok) {
+        const bindings = await computeTokenBindings(parsed.action, fp.digest);
+        if (tokenAuthorizes(bypassToken, bindings, Date.now())) {
+          bypassToken = { ...bypassToken, consumed: true }; // consume on attempt
+          clearBypassToken();
+          try {
+            ctx.ui.notify("review-gate: single-use arbiter bypass consumed for this `gh pr edit`. Re-review after PR text is fixed.", "warning");
+          } catch { /* headless */ }
+          appendLesson(`arbiter AGENT_WINS bypass consumed: ${desc(command, ships)}`);
+          return;
+        }
+      }
+    }
+
+    // Record this block so request_arbitration can only contest a REAL block.
+    const blockReason =
+      `review-gate: ${desc(command, ships)} blocked — quality gates unmet:\n` +
+      problems.map((p) => `  - ${p}`).join("\n") +
+      (ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "");
+    lastBlockedShip = { command, problems, blockReason };
 
     return {
       block: true,
       reason:
-        `review-gate: ${desc} blocked — quality gates unmet:\n` +
-        problems.map((p) => `  - ${p}`).join("\n") +
-        (ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "") +
-        `\nRun the review loop to clear the gate, or /gate-bypass <reason>.`,
+        blockReason +
+        "\nRun the review loop to clear the gate, or /gate-bypass <reason>." +
+        (ships.length === 1 && ships[0].kind === "pr-edit"
+          ? "\nIf this block is genuinely CIRCULAR (the only fix requires this exact `gh pr edit`), you may call request_arbitration with your argument."
+          : ""),
     };
   });
+
+  // P0-5: describe compound vs single ship for block/lesson messages.
+  function desc(_command: string, ships: Array<{ kind: string }>): string {
+    return ships.length > 1
+      ? `compound command with ${ships.map((s) => s.kind).join(" + ")}`
+      : ships[0].kind;
+  }
+
+  // Compute the current binding material for a parsed arbitrable action: hash
+  // each --body-file's (path + content) so replacing the file after issue
+  // invalidates the token.
+  async function computeTokenBindings(action: ArbitrableAction, fingerprint: string): Promise<TokenBindings> {
+    return {
+      sessionId: state.sessionId,
+      kind: action.kind,
+      fingerprint,
+      round: state.rounds.length,
+      commandDigest: action.commandDigest,
+      bodyFileDigest: bodyFileDigest(action.bodyFilePaths),
+    };
+  }
+
+  function bodyFileDigest(paths: readonly string[]): string {
+    if (paths.length === 0) return "";
+    const parts: string[] = [];
+    for (const p of paths) {
+      let content = "";
+      try { content = readFileSync(p.startsWith("/") ? p : pathJoin(cwd, p), "utf8"); } catch { content = "\0MISSING"; }
+      parts.push(sha256(p + "\0" + content));
+    }
+    return sha256(parts.join("\0"));
+  }
+
+  function appendLesson(text: string) {
+    try {
+      const logPath = pathJoin(cwd, ".pi", "review-gate-arbitration.log");
+      mkdirSync(pathDirname(logPath), { recursive: true });
+      appendFileSync(logPath, `${new Date().toISOString()} ${text}\n`);
+    } catch { /* best effort audit log */ }
+  }
+
+  // Evidence gatherers for the arbiter (the arbiter is tool-less; the extension
+  // fetches trusted ground truth). All are best-effort read-only and degrade to
+  // an explicit "unavailable" note rather than throwing.
+  function runReadOnly(argv: string[]): string | undefined {
+    try {
+      return execFileSync(argv[0], argv.slice(1), { cwd, encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"], maxBuffer: 4 * 1024 * 1024 }).trim();
+    } catch { return undefined; }
+  }
+
+  function gatherPrText(action: ArbitrableAction): string {
+    // Query the SAME PR the blocked command targets: mirror its selector, repo,
+    // and hostname so the arbiter's ground truth matches the action under
+    // review (not the current branch's default PR). All values come from the
+    // parsed, validated action (argv, never a shell).
+    const argv = ["gh", "pr", "view"];
+    if (action.selector) argv.push(action.selector);
+    if (action.repo) argv.push("--repo", action.repo);
+    if (action.hostname) argv.push("--hostname", action.hostname);
+    argv.push("--json", "number,title,body,url");
+    const out = runReadOnly(argv);
+    return out ?? "(current PR text unavailable — `gh pr view` failed; arbiter should weigh this as missing evidence)";
+  }
+
+  function gatherProposedText(action: ArbitrableAction): string {
+    if (action.bodyFilePaths.length === 0) return "(no --body-file; inline --title/--body is inside the blocked command shown above)";
+    const parts: string[] = [];
+    for (const p of action.bodyFilePaths) {
+      try {
+        const abs = p.startsWith("/") ? p : pathJoin(cwd, p);
+        parts.push(`--- ${p} ---\n${readFileSync(abs, "utf8")}`);
+      } catch { parts.push(`--- ${p} ---\n(unreadable)`); }
+    }
+    return parts.join("\n\n");
+  }
+
+  function gatherGitLog(_cwd: string): string {
+    return runReadOnly(["git", "log", "--oneline", "-15"]) ?? "(git log unavailable)";
+  }
 
   // ---------- track edits & precommit results ----------
 
@@ -507,6 +647,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
         loopArmed = true;
         dirty = true;
+        clearBypassToken(); // any edit invalidates a standing arbiter bypass
       }
       if (dirty) persist(ctx);
       return;
@@ -541,6 +682,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           if (state.hasCodeChange || state.hasDocChange) {
             if (state.review.verdict === "READY") state.review.verdict = "PENDING";
             if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
+            clearBypassToken();
             persist(ctx);
           }
         }
@@ -569,8 +711,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         return {
           content: [{
             type: "text",
-            text: "review-gate: no recognizable review verdict found. The reviewer must output a JSON fence with " +
-              `{"gate":"READY"|"BLOCKED"|"NEEDS_HUMAN","findings":[...]}. Gate remains PENDING (fail-closed).`,
+            text: "review-gate: no recognizable review verdict found. The reviewer must output a fenced JSON verdict, " +
+              `e.g.\n\`\`\`json\n{"gate":"READY"|"BLOCKED"|"NEEDS_HUMAN","docSync":"UPDATED"|"NOT_NEEDED","findings":[...]}\n\`\`\`\n` +
+              "Common causes: (1) the review was pure Markdown (`### Blocker`) with no JSON fence — add the fence; " +
+              "(2) an unescaped quote inside a string (full-width “” are fine; a straight \" inside `issue` breaks JSON — " +
+              "escape it or rephrase). Gate remains PENDING (fail-closed).",
           }],
           details: {},
         };
@@ -589,8 +734,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         round: state.rounds.length + 1,
         findingsTotal: parsed.findingsTotal,
         fingerprints: parsed.findingFingerprints,
+        verdict: parsed.verdict,
         at: new Date().toISOString(),
       });
+      // A new review round changes the token's bound round; drop any standing
+      // token explicitly too (defense in depth — tokenAuthorizes already
+      // checks round).
+      clearBypassToken();
 
       let note = "";
       if (parsed.verdict === "NEEDS_HUMAN") {
@@ -599,6 +749,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       } else if (state.rounds.length >= state.maxRounds) {
         loopArmed = false;
         note = ` Max rounds (${state.maxRounds}) reached — escalate to the user.`;
+      } else if (isOscillating(state.rounds, OSCILLATION_LIMIT)) {
+        // The reviewer keeps flipping READY→BLOCKED with fresh findings instead
+        // of converging. Disarm the auto-loop and escalate (tighten-only: this
+        // never permits a ship, it only stops the churn so a human/adviser can
+        // break the tie). Plateau below stays for the stuck-on-same-finding case.
+        loopArmed = false;
+        note = ` Oscillation detected (${countOscillations(state.rounds)} READY→BLOCKED flips) — ` +
+          "the review is not converging. Escalate to the user or consult the adviser subagent " +
+          "instead of burning more rounds.";
       } else if (isPlateaued(state.rounds, PLATEAU_ROUNDS)) {
         loopArmed = false;
         note = " Plateau detected — escalate to the user.";
@@ -692,18 +851,161 @@ export default function reviewGate(pi: ExtensionAPI) {
             type: "text",
             text: "review-gate: declare_done REJECTED — gates unmet:\n" +
               problems.map((p) => `  - ${p}`).join("\n") +
-              "\nComplete the loop (fix → review → record_review → precommit) and try again.",
+              "\nComplete the loop (fix → review → record_review → precommit) and try again." +
+              (problems.some((p) => p.includes("modified after the last READY"))
+                ? "\nTip: any code OR doc edit after a READY review invalidates it — including handoff/design/" +
+                  "plan docs. Finish ALL edits (docs included) FIRST, then run the final review + precommit " +
+                  "as the last steps before declare_done, so the READY fingerprint still matches."
+                : ""),
           }],
           details: { accepted: false, problems },
           isError: true,
         };
       }
       loopArmed = false;
+      // A completed unit of work closes its review loop. Session-log analysis
+      // showed multi-task sessions accumulating a single ever-growing round
+      // counter (e.g. "round 24/10"), which misleads the agent into believing
+      // it is stuck in one runaway loop when it is really starting the next
+      // task. Reset the per-task loop bookkeeping now that the gate is fully
+      // satisfied. This only clears already-satisfied history — the next code
+      // edit re-arms hasCodeChange and a fresh review is still required, so it
+      // cannot loosen the gate.
+      state.rounds = [];
+      state.strategicResetFired = false;
       persist(ctx as unknown as ExtensionContext);
       return {
         content: [{ type: "text", text: `review-gate: done accepted. ${params.summary}` }],
         details: { accepted: true },
       };
+    },
+  });
+
+  // ---------- request_arbitration tool (narrow, fail-closed gate exception) ----------
+
+  pi.registerTool({
+    name: "request_arbitration",
+    label: "Request Arbitration",
+    description:
+      "Contest a review-gate ship block you believe is MEANINGLESS or CIRCULAR (the only way " +
+      "to satisfy the gate is an action the gate forbids). ONLY a lone `gh pr edit` limited to " +
+      "--title/--body/--body-file is arbitrable — never git commit/push or gh pr create. An " +
+      "INDEPENDENT arbiter (you cannot write its verdict) rules: GATE_WINS (comply), AGENT_WINS " +
+      "(one single-use bypass of this exact command), or HUMAN (a human decides). Call this only " +
+      "AFTER the gate has actually blocked the command.",
+    parameters: Type.Object({
+      argument: Type.String({ description: "Your case for why this specific block is circular/meaningless — cite evidence (e.g. the offending text is pre-existing)." }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
+
+      if (!projectConfig.arbiter.enabled) {
+        return deny("review-gate: arbitration is disabled for this project (arbiter.enabled=false). GATE_WINS — comply with the gate.");
+      }
+      // Must contest a REAL, recent block.
+      if (!lastBlockedShip) {
+        return deny("review-gate: no ship block to arbitrate. Run the command first; arbitration only contests an actual block.");
+      }
+      const parsed = parseArbitrableAction(lastBlockedShip.command);
+      if (!parsed.ok) {
+        return deny(`review-gate: this block is NOT arbitrable — ${parsed.reason}. Only a lone \`gh pr edit\` (title/body) qualifies; git commit/push and gh pr create must go through the full gate.`);
+      }
+      // Per-session cap and re-roll prevention.
+      if (arbitrationsUsed >= projectConfig.arbiter.maxPerSession) {
+        return deny(`review-gate: arbitration limit reached (${projectConfig.arbiter.maxPerSession}/session). Escalate to the user or /gate-bypass.`);
+      }
+      const fp = computeFingerprint(cwd);
+      if (fp.unavailable) return deny("review-gate: worktree fingerprint unavailable — cannot bind an arbitration token. GATE_WINS (fail-closed).");
+      // Re-roll prevention: an action identity (exact command + review round +
+      // body-file content) may be arbitrated AT MOST ONCE. This covers
+      // AGENT_WINS too — a granted-then-consumed token must NOT be re-mintable by
+      // calling again. To legitimately try again the agent must change the
+      // command or fix the code (new round / fingerprint), which yields a
+      // different identity.
+      const bodyDigest = bodyFileDigest(parsed.action.bodyFilePaths);
+      const decisionKey = `${parsed.action.commandDigest}#${state.rounds.length}#${bodyDigest}`;
+      const cached = arbitrationDecisions.get(decisionKey);
+      if (cached) {
+        return deny(`review-gate: this exact action was already arbitrated this round → ${cached}. Re-rolling is not allowed; change the action or comply with the gate.`);
+      }
+
+      arbitrationsUsed += 1;
+
+      // Gather TRUSTED ground-truth evidence ourselves (the arbiter is tool-less).
+      const currentPr = gatherPrText(parsed.action);
+      const proposedText = gatherProposedText(parsed.action);
+      const gitContext = gatherGitLog(cwd);
+      const prompt = buildArbiterPrompt({
+        blockReason: lastBlockedShip.blockReason,
+        gateProblems: lastBlockedShip.problems,
+        command: lastBlockedShip.command,
+        currentPr,
+        proposedText,
+        gitContext,
+        agentArgument: params.argument,
+      });
+
+      const verdict = await runArbiter(projectConfig.arbiter.model, prompt);
+      // Fail-closed: any spawn/parse failure → GATE_WINS.
+      const decision = verdict?.decision ?? "GATE_WINS";
+      arbitrationDecisions.set(decisionKey, decision);
+      appendLesson(`arbitration #${arbitrationsUsed} decision=${decision} reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} cmd=${lastBlockedShip.command.slice(0, 200)} arg=${params.argument.slice(0, 200)}`);
+
+      if (decision === "AGENT_WINS") {
+        const bindings = await computeTokenBindings(parsed.action, fp.digest);
+        bypassToken = {
+          blockId: randomBytes(8).toString("hex"),
+          sessionId: bindings.sessionId,
+          kind: bindings.kind,
+          fingerprint: bindings.fingerprint,
+          round: bindings.round,
+          commandDigest: bindings.commandDigest,
+          bodyFileDigest: bindings.bodyFileDigest,
+          issuedAt: Date.now(),
+          ttlMs: BYPASS_TOKEN_TTL_MS,
+          consumed: false,
+        };
+        return {
+          content: [{ type: "text", text: `review-gate: arbiter ruled AGENT_WINS — ${verdict?.reason ?? ""}\nA SINGLE-USE bypass is issued for this exact \`gh pr edit\` (valid ${Math.round(BYPASS_TOKEN_TTL_MS / 60000)} min, this worktree/round only). Run the SAME command now; it will be allowed ONCE, then you must re-review.` }],
+          details: { decision },
+        };
+      }
+
+      if (decision === "HUMAN") {
+        // Pause the gate: hand the choice to the human via a 3-way dialog. No
+        // UI → fail-closed to GATE_WINS.
+        if (!ctx.hasUI) {
+          return deny("review-gate: arbiter deferred to a HUMAN but no interactive UI is available → GATE_WINS (fail-closed). Escalate to the user out-of-band.");
+        }
+        let choice: string | undefined;
+        try {
+          choice = await ctx.ui.select(
+            `review-gate: arbiter is unsure — you decide.\nBlock: ${lastBlockedShip.blockReason.split("\n")[0]}\nArbiter: ${verdict?.reason ?? ""}`,
+            ["Gate wins — require correction", "Allow this exact `gh pr edit` once", "Pause gate and wait"],
+          );
+        } catch { choice = undefined; }
+        if (choice === "Allow this exact `gh pr edit` once") {
+          const bindings = await computeTokenBindings(parsed.action, fp.digest);
+          bypassToken = {
+            blockId: randomBytes(8).toString("hex"),
+            sessionId: bindings.sessionId, kind: bindings.kind, fingerprint: bindings.fingerprint,
+            round: bindings.round, commandDigest: bindings.commandDigest, bodyFileDigest: bindings.bodyFileDigest,
+            issuedAt: Date.now(), ttlMs: BYPASS_TOKEN_TTL_MS, consumed: false,
+          };
+          appendLesson(`arbitration #${arbitrationsUsed} HUMAN→allow-once`);
+          return { content: [{ type: "text", text: "review-gate: human allowed this exact `gh pr edit` ONCE. Run the same command now." }], details: { decision: "HUMAN", human: "allow-once" } };
+        }
+        if (choice === "Pause gate and wait") {
+          loopArmed = false;
+          appendLesson(`arbitration #${arbitrationsUsed} HUMAN→pause`);
+          return { content: [{ type: "text", text: "review-gate: gate PAUSED by the human — auto-continuation disarmed. No bypass issued. Wait for further instructions." }], details: { decision: "HUMAN", human: "pause" } };
+        }
+        appendLesson(`arbitration #${arbitrationsUsed} HUMAN→gate-wins`);
+        return deny("review-gate: human ruled GATE_WINS — comply with the gate.");
+      }
+
+      // GATE_WINS
+      return deny(`review-gate: arbiter ruled GATE_WINS — ${verdict?.reason ?? "the block stands (no valid verdict → fail-closed)"}. Comply: fix the underlying problem, then re-review.`);
     },
   });
 
@@ -913,6 +1215,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       state = emptyState(state.sessionId, state.maxRounds);
       loopArmed = true;
       continuationsInjected = 0;
+      clearBypassToken();
+      lastBlockedShip = null;
+      arbitrationsUsed = 0;
+      arbitrationDecisions.clear();
       persist(ctx);
       ctx.ui.notify("review-gate: state reset", "info");
     },

@@ -41,7 +41,7 @@ test("English labels pass", () => {
 });
 
 test("a non-English label with no bypass is blocked", () => {
-  const dir = repoWith({ "b.test.ts": "it('返佣金额按 currencyRate 换算', () => {});\n" });
+  const dir = repoWith({ "b.test.ts": "it('返佣金额按汇率换算校验', () => {});\n" });
   const r = scan(dir);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /b\.test\.ts:1:/);
@@ -134,7 +134,7 @@ test("marker binds the FIRST test call on the target line, not the first non-Eng
 
 test("a block-comment /* */ marker is NOT honored (only // markers)", () => {
   const dir = repoWith({
-    "cm3.test.ts": "/* review-gate: allow-non-english */\nit('块注释 marker 不豁免', () => {});\n",
+    "cm3.test.ts": "/* review-gate: allow-non-english */\nit('块注释标记并不豁免用例', () => {});\n",
   });
   const r = scan(dir);
   assert.equal(r.status, 1);
@@ -175,16 +175,16 @@ test("a keyword used as a property name or identifier does NOT trigger regex mas
   const dir = repoWith({
     "kw.test.ts":
       "const a = of / it('of后中文', () => {}) / 2;\n" +
-      "const b = obj.return / test('属性return后中文', () => {}) / 2;\n" +
-      "const c = obj.await / describe('属性await后中文', () => {}) / 2;\n" +
-      "const d = obj.if(ok) / it('方法名 if 后中文', () => {}) / 2;\n",
+      "const b = obj.return / test('属性关键字之后的中文', () => {}) / 2;\n" +
+      "const c = obj.await / describe('属性等待之后的中文', () => {}) / 2;\n" +
+      "const d = obj.if(ok) / it('方法名之后的中文用例', () => {}) / 2;\n",
   });
   const r = scan(dir);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /of后中文/);
-  assert.match(r.stderr, /属性return后中文/);
-  assert.match(r.stderr, /属性await后中文/);
-  assert.match(r.stderr, /方法名 if 后中文/);
+  assert.match(r.stderr, /属性关键字之后的中文/);
+  assert.match(r.stderr, /属性等待之后的中文/);
+  assert.match(r.stderr, /方法名之后的中文用例/);
 });
 
 test("Unicode identifiers/member names/private names don't cause a regex misread", () => {
@@ -210,7 +210,7 @@ test("Unicode escapes in string labels are decoded (\\uXXXX, \\u{...}, template)
     "esc.test.ts":
       "it('\\u4e2d\\u6587', () => {});\n" +               // \u4e2d\u6587 -> 中文
       "test(\"\\u{4e2d}\\u{6587}\", () => {});\n" +      // \u{...} form
-      "describe(`\\u4e2d\\u6587tpl`, () => {});\n",        // template literal
+      "describe(`\\u4e2d\\u6587\\u6d4b\\u8bd5`, () => {});\n",   // template literal -> 中文测试
   });
   const r = scan(dir);
   assert.equal(r.status, 1);
@@ -251,13 +251,13 @@ test("astral (surrogate-pair) identifiers/private names don't cause a regex misr
   const A = String.fromCodePoint(0x1d400);
   const dir = repoWith({
     "astral.test.ts":
-      `var ${A}=4; const r1 = ${A} / it('astral标识符后中文', () => {}) / 2;\n` +
-      `class C { #${A}=4; m(){ const z = this.#${A} / test('astral私有后中文', () => {}) / 2; return z; } }\n`,
+      `var ${A}=4; const r1 = ${A} / it('星标标识符之后的中文用例', () => {}) / 2;\n` +
+      `class C { #${A}=4; m(){ const z = this.#${A} / test('星标私有字段之后的中文', () => {}) / 2; return z; } }\n`,
   });
   const r = scan(dir);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /astral标识符后中文/);
-  assert.match(r.stderr, /astral私有后中文/);
+  assert.match(r.stderr, /星标标识符之后的中文用例/);
+  assert.match(r.stderr, /星标私有字段之后的中文/);
 });
 
 test("an it/test/describe that is only a SUFFIX of a longer name is not a global call", () => {
@@ -276,14 +276,14 @@ test("a private member name (#return/#if) is not a keyword; following / is divis
   const dir = repoWith({
     "priv.test.ts":
       "class C {\n  #return = 4;\n  #if() { return 4; }\n  m() {\n" +
-      "    const x = this.#return / it('私有return后中文', () => {}) / 2;\n" +
-      "    const y = this.#if() / it('私有if后中文', () => {}) / 2;\n" +
+      "    const x = this.#return / it('私有返回字段之后的中文', () => {}) / 2;\n" +
+      "    const y = this.#if() / it('私有条件方法之后的中文', () => {}) / 2;\n" +
       "    return x + y;\n  }\n}\n",
   });
   const r = scan(dir);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /私有return后中文/);
-  assert.match(r.stderr, /私有if后中文/);
+  assert.match(r.stderr, /私有返回字段之后的中文/);
+  assert.match(r.stderr, /私有条件方法之后的中文/);
 });
 
 test("real regex after `return`/`typeof` is still masked (no over-correction)", () => {
@@ -374,10 +374,10 @@ test("interpolated template labels are skipped; plain backtick labels are checke
 test("a STATIC template with a literal $ (no interpolation) is still checked", () => {
   // `[^`$]*` used to skip any backtick label containing `$`; only real ${...}
   // interpolation should cause a skip.
-  const dir = repoWith({ "f2.test.ts": "it(`price $100 中文`, () => {});\n" });
+  const dir = repoWith({ "f2.test.ts": "it(`价格一百元的中文用例 $100`, () => {});\n" });
   const r = scan(dir);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /price \$100 中文/);
+  assert.match(r.stderr, /价格一百元的中文用例/);
 });
 
 test(".only/.skip modifier chains are still detected", () => {

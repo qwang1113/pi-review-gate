@@ -66,6 +66,28 @@ export function defaultLlmGuardsConfig(): LlmGuardsConfig {
   };
 }
 
+/**
+ * Arbitration knobs (lib/arbitration.ts). The arbiter is a NARROW, fail-closed
+ * capability exception: when a gate block is genuinely circular the agent may
+ * contest it and an independent arbiter may grant a single-use bypass of ONE
+ * `gh pr edit` (title/body only). Never bypasses commit/push/pr-create.
+ */
+export interface ArbiterConfig {
+  /** Master switch. When false, request_arbitration always denies (GATE_WINS). */
+  enabled: boolean;
+  /** "provider/model" id for the independent arbiter spawn (a strong model). */
+  model: string;
+  /** Per-session hard cap on arbitration requests. */
+  maxPerSession: number;
+}
+
+/** Default arbiter model — a top-tier reasoning model, matching agents/arbiter.md. */
+export const DEFAULT_ARBITER_MODEL = "onekey/gpt-5.6-sol";
+
+export function defaultArbiterConfig(): ArbiterConfig {
+  return { enabled: true, model: DEFAULT_ARBITER_MODEL, maxPerSession: 3 };
+}
+
 export interface ProjectConfig {
   maxRounds: number;
   /** R10: inject the strategic-reset checklist once near the round cap. */
@@ -83,6 +105,8 @@ export interface ProjectConfig {
   docSync: boolean;
   /** LLM semantic guard layer (DeepSeek V4 Flash) — see LlmGuardsConfig. */
   llmGuards: LlmGuardsConfig;
+  /** Arbiter capability-exception config — see ArbiterConfig. */
+  arbiter: ArbiterConfig;
 }
 
 export function defaultProjectConfig(): ProjectConfig {
@@ -98,6 +122,7 @@ export function defaultProjectConfig(): ProjectConfig {
     // (UPDATED | NOT_NEEDED); NOT_NEEDED keeps small fixes low-friction.
     docSync: true,
     llmGuards: defaultLlmGuardsConfig(),
+    arbiter: defaultArbiterConfig(),
   };
 }
 
@@ -145,6 +170,15 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
     if (typeof lg.aiAttribution === "boolean") cfg.llmGuards.aiAttribution = lg.aiAttribution;
     if (typeof lg.englishCheck === "boolean") cfg.llmGuards.englishCheck = lg.englishCheck;
     if (typeof lg.shipDetect === "boolean") cfg.llmGuards.shipDetect = lg.shipDetect;
+  }
+  if (typeof obj.arbiter === "object" && obj.arbiter !== null && !Array.isArray(obj.arbiter)) {
+    const ab = obj.arbiter as Record<string, unknown>;
+    if (typeof ab.enabled === "boolean") cfg.arbiter.enabled = ab.enabled;
+    if (typeof ab.model === "string" && /^[^\/\s]+\/[^\s]+$/.test(ab.model)) cfg.arbiter.model = ab.model;
+    if (typeof ab.maxPerSession === "number" && Number.isInteger(ab.maxPerSession)) {
+      // Clamp to a sane range so a forged huge value can't make re-rolling free.
+      cfg.arbiter.maxPerSession = Math.min(10, Math.max(1, ab.maxPerSession));
+    }
   }
   return cfg;
 }

@@ -58,9 +58,35 @@ function normalizeGateWord(raw: string): Exclude<GateVerdict, "PENDING"> | undef
   return undefined;
 }
 
+/**
+ * Fail-closed recovery for a fence whose JSON did not parse. Real reviewer
+ * outputs frequently embed unescaped full-width quotes inside the `issue`
+ * string (e.g. `"issue":"验证“无 X”…"`), which breaks `JSON.parse` and
+ * previously discarded the whole verdict (no verdict ⇒ PENDING, stalling the
+ * gate). We salvage ONLY the machine-critical gate word via a tight regex.
+ *
+ * Safety (never fail-open): a salvaged verdict can NEVER be READY. READY is
+ * the one verdict that unlocks the ship gate, and a fence we could not fully
+ * parse might carry open P0/P1 findings we cannot see; downgrading any
+ * salvaged READY to BLOCKED keeps recovery strictly tightening. BLOCKED and
+ * NEEDS_HUMAN are already the blocking verdicts, so recovering them changes
+ * nothing about safety — it only avoids a spurious PENDING stall. Findings are
+ * reported as unparseable (null total, no fingerprints) so plateau detection
+ * relies on the hard cap rather than trusting salvaged counts.
+ */
+function recoverFenceVerdict(body: string): FenceVerdict | undefined {
+  const m = /["']?(?:gate|verdict|status)["']?\s*:\s*["']([A-Za-z_-]+)["']/.exec(body);
+  if (!m) return undefined;
+  const verdict = normalizeGateWord(m[1]);
+  if (!verdict) return undefined;
+  // Salvaged READY is untrustworthy (possible hidden P0/P1) → downgrade.
+  const safeVerdict = verdict === "READY" ? "BLOCKED" : verdict;
+  return { verdict: safeVerdict, findingsTotal: null, findingFingerprints: [], hasP0P1: false };
+}
+
 function parseJsonFence(body: string): FenceVerdict | undefined {
   let data: unknown;
-  try { data = JSON.parse(body); } catch { return undefined; }
+  try { data = JSON.parse(body); } catch { return recoverFenceVerdict(body); }
   if (typeof data !== "object" || data === null) return undefined;
   const obj = data as Record<string, unknown>;
   const gateRaw = obj.gate ?? obj.verdict ?? obj.status;

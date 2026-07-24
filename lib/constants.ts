@@ -133,6 +133,19 @@ export const DEFAULT_MAX_ROUNDS = 10;
 export const PLATEAU_ROUNDS = 3;
 
 /**
+ * Oscillation cap. Session-log analysis of real projects showed ~50% of gated
+ * sessions where the reviewer returned READY and then, a round or two later,
+ * BLOCKED again with an entirely NEW set of findings (finding fingerprints
+ * never repeated across rounds). `isPlateaued` cannot catch this — it requires
+ * a non-decreasing, overlapping finding set, whereas oscillation is 0→N→0→M.
+ * When the READY→BLOCKED transition recurs this many times the loop is not
+ * converging; we disarm the auto-loop and escalate to the user (same treatment
+ * as plateau / max-rounds). This ONLY disarms auto-continuation and never
+ * loosens the ship gate — it is a tighten-only stop condition.
+ */
+export const OSCILLATION_LIMIT = 3;
+
+/**
  * Strategic reset (sd0x-dev-flow R10 "Think Harder"): when the review loop is
  * still BLOCKED within this many rounds of the cap, inject a one-shot rethink
  * checklist instead of letting the model burn the remaining rounds on

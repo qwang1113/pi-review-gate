@@ -60,6 +60,43 @@ test("verdict synonyms normalize", () => {
   assert.equal(parseReviewOutput('```json\n{"status":"PASS","findings":[]}\n```')!.verdict, "READY");
 });
 
+// ---- malformed-fence recovery (fail-closed) ----
+
+test("recovery: unescaped straight quotes break JSON but BLOCKED is salvaged", () => {
+  // A real failure mode: a straight " inside the issue string breaks JSON.parse.
+  const out = '```json\n{"gate":"BLOCKED","findings":[{"issue":"asserts "no reread" but does not"}]}\n```';
+  const p = parseReviewOutput(out);
+  assert.equal(p!.verdict, "BLOCKED");
+  assert.equal(p!.findingsTotal, null, "salvaged findings are unparseable, not trusted");
+});
+
+test("recovery: salvaged READY is downgraded to BLOCKED (never fail-open)", () => {
+  // Broken JSON (trailing junk) whose only readable token says READY must NOT
+  // unlock the gate — a fence we could not fully parse may hide P0/P1.
+  const out = '```json\n{"gate":"READY","findings":[{"issue":"broken "quote" here"}] TRAILING\n```';
+  const p = parseReviewOutput(out);
+  assert.equal(p!.verdict, "BLOCKED");
+});
+
+test("recovery: salvaged NEEDS_HUMAN is preserved", () => {
+  const out = '```json\n{"gate":"NEEDS_HUMAN","note":"unescaped "x" breaks parse"}\n```';
+  const p = parseReviewOutput(out);
+  assert.equal(p!.verdict, "NEEDS_HUMAN");
+});
+
+test("recovery: a well-formed later fence still wins over a salvaged one", () => {
+  // First fence is broken (salvages BLOCKED); second is clean READY. worst wins
+  // → BLOCKED, so this is safe either way, but confirms recovery participates.
+  const out =
+    '```json\n{"gate":"BLOCKED","findings":[{"issue":"bad "q" mark"}]}\n```\n' +
+    '```json\n{"gate":"READY","findings":[]}\n```';
+  assert.equal(parseReviewOutput(out)!.verdict, "BLOCKED");
+});
+
+test("recovery: fence with no gate token at all → still undefined", () => {
+  assert.equal(parseReviewOutput('```json\n{"notes":"just prose, no verdict"}\n```'), undefined);
+});
+
 // ---- docSync attestation parsing ----
 
 test("docSync: valid attestations parse (docSync and doc_sync spellings, case-insensitive)", () => {

@@ -174,3 +174,47 @@ test("llmGuards non-object (null/array/string) keeps all defaults", () => {
     assert.deepEqual(loadProjectConfig(d).llmGuards, defaultProjectConfig().llmGuards, JSON.stringify(bad));
   }
 });
+
+// ---------------------------------------------------------------------------
+// arbiter (narrow capability-exception config)
+
+test("arbiter defaults: enabled, strong model, small per-session cap", () => {
+  const d = makeTemp();
+  assert.deepEqual(loadProjectConfig(d).arbiter, {
+    enabled: true,
+    model: "onekey/gpt-5.6-sol",
+    maxPerSession: 3,
+  });
+  assert.deepEqual(defaultProjectConfig().arbiter, loadProjectConfig(d).arbiter);
+});
+
+test("arbiter fields load independently; invalid fields keep defaults", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({ arbiter: { enabled: false, model: "prov/model-x", maxPerSession: 5 } }));
+  const ab = loadProjectConfig(d).arbiter;
+  assert.equal(ab.enabled, false);
+  assert.equal(ab.model, "prov/model-x");
+  assert.equal(ab.maxPerSession, 5);
+});
+
+test("arbiter maxPerSession is clamped to [1,10] (a forged huge cap can't make re-rolling free)", () => {
+  const hi = makeTemp();
+  writeConfig(hi, JSON.stringify({ arbiter: { maxPerSession: 100000 } }));
+  assert.equal(loadProjectConfig(hi).arbiter.maxPerSession, 10);
+  const lo = makeTemp();
+  writeConfig(lo, JSON.stringify({ arbiter: { maxPerSession: 0 } }));
+  assert.equal(loadProjectConfig(lo).arbiter.maxPerSession, 1);
+});
+
+test("arbiter invalid model / non-object keeps defaults", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({ arbiter: { model: "no-slash", enabled: "yes" } }));
+  const ab = loadProjectConfig(d).arbiter;
+  assert.equal(ab.model, "onekey/gpt-5.6-sol"); // invalid → default
+  assert.equal(ab.enabled, true);               // invalid type → default
+  for (const bad of [null, [], "on", 1]) {
+    const b = makeTemp();
+    writeConfig(b, JSON.stringify({ arbiter: bad }));
+    assert.deepEqual(loadProjectConfig(b).arbiter, defaultProjectConfig().arbiter, JSON.stringify(bad));
+  }
+});

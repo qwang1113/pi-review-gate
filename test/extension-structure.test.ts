@@ -115,6 +115,70 @@ test("record_review parses full output through verdict-parse", () => {
   assert.match(SRC, /parseReviewOutput/);
 });
 
+test("request_arbitration is registered and is a NARROW, fail-closed capability", () => {
+  assert.match(SRC, /name:\s*["']request_arbitration["']/);
+  // It must only ever act on a real recorded block, and only on an arbitrable
+  // action (parseArbitrableAction rejects commit/push/pr-create).
+  assert.match(SRC, /lastBlockedShip/);
+  assert.match(SRC, /parseArbitrableAction/);
+  // The arbiter is spawned by the extension (agent cannot hand-write it).
+  assert.match(SRC, /runArbiter/);
+  assert.match(SRC, /buildArbiterPrompt/);
+  // Fail-closed: any missing/invalid verdict resolves to GATE_WINS.
+  assert.match(SRC, /verdict\?\.decision \?\? "GATE_WINS"/);
+  // No-UI HUMAN path fails closed to GATE_WINS.
+  assert.match(SRC, /!ctx\.hasUI[\s\S]{0,200}GATE_WINS/);
+});
+
+test("arbiter bypass token is in-memory ONLY, never persisted to the sidecar", () => {
+  // The token is a replayable capability ticket; it must not be written to the
+  // sidecar (a process restart legitimately loses it). Prove it is not part of
+  // the persisted GateState shape or the save path.
+  assert.match(SRC, /bypassToken:\s*BypassToken\s*\|\s*null/);
+  assert.doesNotMatch(SRC, /state\.bypassToken/);
+  assert.doesNotMatch(SRC, /saveSidecar\([^)]*bypassToken/);
+});
+
+test("arbiter bypass only ever matches a lone gh pr edit, never commit/push/pr-create", () => {
+  // The token-consumption branch is guarded on kind === "pr-edit"; there is no
+  // token path for other ship kinds (they are never arbitrable).
+  assert.match(SRC, /ships\[0\]\.kind === "pr-edit" && bypassToken/);
+  // An AGENT_WINS decision never sets review READY or precommit PASS.
+  const arbAt = SRC.indexOf('name: "request_arbitration"') >= 0
+    ? SRC.indexOf("request_arbitration") : SRC.indexOf("request_arbitration");
+  const arbRegion = SRC.slice(arbAt, arbAt + 4000);
+  assert.doesNotMatch(arbRegion, /verdict\s*=\s*"READY"/);
+  assert.doesNotMatch(arbRegion, /precommit\.verdict\s*=\s*"PASS"/);
+});
+
+test("arbiter evidence queries the SAME PR the blocked command targets (selector/repo/hostname)", () => {
+  // Reviewer P1: the arbiter must not be shown the current-branch default PR
+  // when the command targets a different one.
+  assert.match(SRC, /function gatherPrText\(action: ArbitrableAction\)/);
+  assert.match(SRC, /action\.selector/);
+  assert.match(SRC, /action\.repo/);
+  assert.match(SRC, /action\.hostname/);
+});
+
+test("re-roll is blocked for ANY prior decision (including AGENT_WINS)", () => {
+  // Reviewer P1: a granted-then-consumed AGENT_WINS must not be re-mintable.
+  const at = SRC.indexOf("arbitrationDecisions.get(decisionKey)");
+  const region = SRC.slice(at, at + 300);
+  assert.match(region, /if \(cached\) \{/);
+  // The decision key binds command digest + round + body-file content.
+  assert.match(SRC, /decisionKey = `\$\{parsed\.action\.commandDigest\}#\$\{state\.rounds\.length\}#\$\{bodyDigest\}`/);
+});
+
+test("a standing arbiter token is cleared on any edit / new round / gate-reset", () => {
+  assert.match(SRC, /clearBypassToken\(\);\s*\/\/ any edit invalidates/);
+  // gate-reset clears it and the arbitration bookkeeping.
+  const resetAt = SRC.indexOf('registerCommand("gate-reset"');
+  const resetRegion = SRC.slice(resetAt, resetAt + 600);
+  assert.match(resetRegion, /clearBypassToken\(\)/);
+  assert.match(resetRegion, /arbitrationsUsed = 0/);
+  assert.match(resetRegion, /arbitrationDecisions\.clear\(\)/);
+});
+
 test("L5: commit & PR title/body language check is ADVISORY (warns, never blocks)", () => {
   // commit messages AND gh pr create title/body are language-checked.
   assert.match(SRC, /firstNonEnglish/);
