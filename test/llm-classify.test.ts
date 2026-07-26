@@ -235,3 +235,28 @@ test("non-git dynamic commands are not suspicious", () => {
   assert.equal(isSuspiciousShipCandidate("echo $HOME"), false);
   assert.equal(isSuspiciousShipCandidate("eval ls"), false);
 });
+
+test("P1 regression: git/gh must be WORD-bounded — substrings never trigger the model call", () => {
+  // "light"/"weight"/"right" contain gh; "logitech"/"digit" contain git. With
+  // the old substring test each of these paid an up-to-8s flash round-trip.
+  for (const cmd of [
+    'echo "light $x"',
+    "echo weight \\n",
+    'printf "%s" "right$USER"',
+    'grep -r "logitech" $SRC_DIR',
+    'echo "digit: $n"',
+  ]) {
+    assert.equal(isSuspiciousShipCandidate(cmd), false, cmd);
+  }
+});
+
+test("word-bounded git/gh still catches path and obfuscation forms", () => {
+  for (const cmd of [
+    "/usr/bin/git ${ACTION} -m x",
+    'bash -c "git commit -m hi"',
+    "$(printf 'git') commit -m x",
+    'echo Y29tbWl0 | base64 -d | xargs git',
+  ]) {
+    assert.equal(isSuspiciousShipCandidate(cmd), true, cmd);
+  }
+});

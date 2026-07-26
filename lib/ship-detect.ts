@@ -388,8 +388,15 @@ export function detectShipCommands(command: string): ShipDetection[] {
  */
 export function extractCommitMessages(segment: string): string[] {
   const out: string[] = [];
-  // Handles: -m "msg", -m'msg', --message=msg, -m"msg", -mmsg (git accepts all)
-  const re = /(?:-m|--message)\s*(=?\s*)("([^"]*)"|'([^']*)'|(\S+))/g;
+  // Handles: -m "msg", -m'msg', --message=msg, -m"msg", -mmsg (git accepts all).
+  // P0 fix: git/pflag allow CLUSTERING boolean shorthands before the
+  // value-taking -m (`git commit -am 'msg'`, `-sam 'msg'`), which the old
+  // `(?:-m|--message)` pattern missed entirely — an AI-attribution message
+  // shipped via the very common `-am` form was never scanned. The cluster
+  // prefix is constrained to commit's BOOLEAN shorthands only (-a -s -n -e -q
+  // -v -z -i -o -p -u) so a different value-taking shorthand's argument (e.g.
+  // `-C <commit>`) can't be misread as a message.
+  const re = /(?:^|\s)(?:-[asneqvzioup]*m|--message)\s*(=?\s*)("([^"]*)"|'([^']*)'|(\S+))/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(segment)) !== null) {
     out.push(m[3] ?? m[4] ?? m[5] ?? "");

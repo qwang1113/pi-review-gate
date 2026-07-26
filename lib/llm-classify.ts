@@ -270,6 +270,11 @@ export async function classifyShipCommand(
  * Plain `git status` / `git diff` never pay the latency.
  */
 export function isSuspiciousShipCandidate(command: string): boolean {
-  if (!/git|gh/i.test(command)) return false;
+  // P1 fix: word-bounded. The old substring test (/git|gh/i) matched "light",
+  // "weight", "right", "logitech"… and, combined with a $/\\/sh substring,
+  // sent ordinary commands into an up-to-8s LLM round-trip on every call.
+  // \b keeps real heads AND path/obfuscation forms: "/usr/bin/git", "git${IFS}",
+  // "$(printf 'git')" all retain a git token boundary.
+  if (!/\b(git|gh)\b/i.test(command)) return false;
   return /[$`\\]|base64|\beval\b|\bxargs\b|\balias\b|\bsource\b|\brev\b|\b(ba|z|da)?sh\b/.test(command);
 }

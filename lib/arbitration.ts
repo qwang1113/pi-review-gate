@@ -32,6 +32,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import type { ShipCommandKind } from "./constants.ts";
+import { DEFAULT_ARBITER_MODEL } from "./project-config.ts";
 import { detectShipCommands } from "./ship-detect.ts";
 import { lexSegments } from "./shell-lex.ts";
 
@@ -213,7 +214,12 @@ const defaultArbiterExec: ArbiterExec = (argv, timeoutMs) =>
 
 function splitModel(id: string): { provider: string; model: string } {
   const idx = id.indexOf("/");
-  if (idx <= 0 || idx === id.length - 1) return { provider: "onekey", model: "gpt-5.6-sol" };
+  if (idx <= 0 || idx === id.length - 1) {
+    // Malformed id → the single default constant (no duplicated literal that
+    // could drift from project-config's DEFAULT_ARBITER_MODEL).
+    const di = DEFAULT_ARBITER_MODEL.indexOf("/");
+    return { provider: DEFAULT_ARBITER_MODEL.slice(0, di), model: DEFAULT_ARBITER_MODEL.slice(di + 1) };
+  }
   return { provider: id.slice(0, idx), model: id.slice(idx + 1) };
 }
 

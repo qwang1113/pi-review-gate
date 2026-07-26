@@ -55,7 +55,7 @@ echo "✓ Review-loop skill installed"
 mkdir -p "${AGENT_DIR}/agents"
 # Clean up state from the removed three-way-merge updater (older installs).
 rm -rf "${AGENT_DIR}/agents/.pi-review-gate-shipped" 2>/dev/null || true
-for a in adviser reviewer; do
+for a in adviser reviewer arbiter; do
   SRC_AGENT="${SRC}/agents/${a}.md"
   [ -f "${SRC_AGENT}" ] || continue
   cp "${SRC_AGENT}" "${AGENT_DIR}/agents/${a}.md"

@@ -110,6 +110,29 @@ test("declare_done validates server-side and rejects on unmet gates", () => {
   assert.match(SRC, /isError:\s*true/);
 });
 
+test("declare_done resets BOTH per-task loop budgets (rounds AND continuationsInjected)", () => {
+  // P1 regression: rounds was reset but the L2 continuation budget was not,
+  // so task B in a session inherited task A's exhausted auto-continuation cap.
+  const at = SRC.indexOf('name: "declare_done"');
+  assert.ok(at >= 0);
+  const region = SRC.slice(at, SRC.indexOf("registerTool", at + 10));
+  assert.match(region, /state\.rounds = \[\]/);
+  assert.match(region, /continuationsInjected = 0/);
+});
+
+test("run_precommit maps runner-protocol ERROR to a VALID sidecar verdict (never persists 'ERROR')", () => {
+  // P0 regression: persisting verdict:"ERROR" (not in PRECOMMIT_VERDICTS) made
+  // loadSidecar AND the git pre-commit hook reject the whole sidecar as forged.
+  assert.match(SRC, /outcome\.verdict === "ERROR" \? "NOT_RUN" : outcome\.verdict/);
+});
+
+test("edit-time L6 scanner probes every install layout (not just the dev repo path)", () => {
+  // P1 regression: the lone "../scripts/…" require only resolved in the dev
+  // repo; global installs (extensions/pi-review-gate/) need ../../scripts/.
+  assert.match(SRC, /\.\.\/scripts\/scan-test-labels\.cjs/);
+  assert.match(SRC, /\.\.\/\.\.\/scripts\/scan-test-labels\.cjs/);
+});
+
 test("record_review parses full output through verdict-parse", () => {
   assert.match(SRC, /name:\s*["']record_review["']/);
   assert.match(SRC, /parseReviewOutput/);
@@ -267,8 +290,10 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   assert.match(SRC, /abortSignal\?\.addEventListener\("abort"/);
   assert.match(SRC, /detached:\s*true/);
   assert.match(SRC, /killProcessTree/);
-  // The tool must pass its AbortSignal through.
-  assert.match(SRC, /await runTrustedPrecommit\(mode, _signal\)/);
+  // The tool must pass the SESSION cwd and its AbortSignal through (P1 fix:
+  // process.cwd() can differ from ctx.cwd under pi --cwd).
+  assert.match(SRC, /await runTrustedPrecommit\(cwd, mode, _signal\)/);
+  assert.doesNotMatch(SRC, /async function runTrustedPrecommit[^{]*\{\s*\n\s*const cwd = process\.cwd\(\)/);
 });
 
 test("stale-state reconciliation is one-way", () => {

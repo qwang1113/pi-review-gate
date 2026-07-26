@@ -134,6 +134,15 @@ flags, but only edits can set them), **untracked-file-aware fingerprints**
 (`-uall`, PR #7's `-uno` regression), and **atomic sidecar writes** (temp+rename
 so a crash can't leave truncated JSON for a fail-open parser).
 
+The fingerprint **excludes gate-owned paths** (`.pi/`, `.pi-subagents/` — via
+git `:(exclude)` pathspecs, mirrored in the CJS hook script with a parity
+test): the gate itself rewrites `.pi/review-gate-state.json` on every persist,
+so including it would let `record_review` immediately invalidate its own READY
+binding in any repo that does not gitignore `.pi`. Reviews judge project code,
+never Pi's state dirs. (Recommended anyway: add `.pi/review-gate-state.json`
+and `.pi-subagents/` to the project's `.gitignore` — gate state is per-machine
+and has no business in version control.)
+
 ### -dev-flow features ported beyond PR #7
 
 | -dev-flow feature | pi-review-gate port |
@@ -429,6 +438,11 @@ including a content hash, by editing the checker too):
   (`git ship`, not defined on the command line) — statically invisible, same
   class as editing the control plane. (An alias *defined inline* on the command
   line, e.g. `git -c alias.ship=commit ship`, IS detected.)
+- A commit message supplied via `-F <file>` / `--file <file>` (or an editor
+  session) — the in-session extractor only reads inline `-m`/`--message`
+  payloads, so file-based messages skip the in-session attribution/L5 checks.
+  The commit-msg git hook (L3) still scans the FINAL message file and remains
+  the deterministic backstop for attribution.
 - Fabricating the reviewer output fed to `record_review` — the reviewer is a
   subagent whose transcript necessarily transits the main agent, so the verdict
   rests on the cooperative assumption (the main agent can equally write the
@@ -549,7 +563,7 @@ a blocked commit; a violation → the commit is blocked with the offending
 ## Development
 
 ```bash
-npm test        # 340 tests, node:test native TS (no build step)
+npm test        # 560+ tests, node:test native TS (no build step)
 ```
 
 Layout:
@@ -575,7 +589,7 @@ scripts/install-project.sh    per-project installer (same layout as global)
 scripts/install-git-hooks.sh  chained installer for L3
 hooks/pre-commit|pre-push|commit-msg
 skills/review-loop/SKILL.md   the loop protocol as a Pi skill
-test/                         340 tests incl. PR #7 regression suite
+test/                         560+ tests incl. PR #7 regression suite
 ```
 
 ## License

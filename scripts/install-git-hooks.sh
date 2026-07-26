@@ -11,6 +11,12 @@ HOOKS_DST="$(git rev-parse --git-path hooks)"
 mkdir -p "$HOOKS_DST"
 
 MARKER="# pi-review-gate:installed"
+# Structured record of the chained original hook. P1 fix: the old extraction
+# reverse-engineered the original path from the generated script line with
+# `tr -d '" '`, which DELETED spaces inside the path — any original hook in a
+# directory containing a space broke the chain on re-install. Now the path is
+# recorded verbatim in a marker comment and read back with a single sed.
+ORIG_MARKER="# pi-review-gate:original="
 
 for hook in pre-commit pre-push commit-msg; do
   src="$HOOKS_SRC/$hook"
@@ -18,13 +24,18 @@ for hook in pre-commit pre-push commit-msg; do
 
   # Already installed by us → update without clobbering original.
   if [[ -f "$dst" ]] && grep -q "$MARKER" "$dst" 2>/dev/null; then
-    # Extract the original hook path from the chain.
-    original=$(grep -v "$MARKER" "$dst" | grep -v "exec.*$src" | grep -v '^#!/' | grep -v '^set ' | grep '^".*" "\$@"' | sed 's/"\$@"//' | tr -d '" ' || true)
+    # Preferred: structured marker (exact path, spaces safe). Fallback for
+    # hooks written by OLDER installers: the known chained-backup location.
+    original=$(sed -n "s|^${ORIG_MARKER}||p" "$dst" | head -1 || true)
+    if [[ -z "$original" && -f "$dst.pre-pi-review-gate" ]]; then
+      original="$dst.pre-pi-review-gate"
+    fi
     if [[ -n "$original" && -f "$original" ]]; then
       # Re-create chain: us → original
       cat > "$dst" <<EOF
 #!/usr/bin/env bash
 $MARKER
+${ORIG_MARKER}${original}
 set -e
 "$src" "\$@"
 "$original" "\$@"
@@ -47,6 +58,7 @@ EOF
     cat > "$dst" <<EOF
 #!/usr/bin/env bash
 $MARKER
+${ORIG_MARKER}$dst.pre-pi-review-gate
 set -e
 "$src" "\$@"
 "$dst.pre-pi-review-gate" "\$@"

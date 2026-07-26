@@ -17,6 +17,25 @@ import { CODE_EXTENSIONS, DOC_EXTENSIONS, extOf } from "./constants.ts";
 
 const CODE_DOC_EXT = new Set([...CODE_EXTENSIONS, ...DOC_EXTENSIONS]);
 
+/**
+ * Gate-owned paths excluded from the fingerprint (and from changedFiles).
+ *
+ * P0 self-deadlock fix: the gate itself WRITES files under .pi/ (the state
+ * sidecar on every persist, the lessons log, the arbitration audit log) and
+ * subagent runs write artifacts under .pi-subagents/. If those writes
+ * participate in the fingerprint, recording a READY review immediately
+ * invalidates its own binding in any repo that does not gitignore .pi
+ * (record_review → persist() rewrites the sidecar → next fingerprint
+ * differs → "code was modified after the last READY review" forever).
+ * Reviews judge PROJECT code, never Pi's own state/artifact dirs, so both
+ * dirs are excluded wholesale via git pathspec magic. Keep in sync with
+ * scripts/compute-fingerprint.cjs (a parity test enforces it).
+ */
+export const GATE_EXCLUDE_PATHSPECS: readonly string[] = Object.freeze([
+  ":(exclude).pi",
+  ":(exclude).pi-subagents",
+]);
+
 export interface Fingerprint {
   digest: string;
   head: string;
@@ -42,7 +61,7 @@ export function computeFingerprint(cwd: string): Fingerprint {
     const head = gitOrNull(cwd, ["rev-parse", "HEAD"]) ?? "NO_HEAD";
 
     // P1 fix: staged diff failure → fail closed (unavailable=true).
-    let stagedDiff = gitOrNull(cwd, ["diff", "--cached"]);
+    let stagedDiff = gitOrNull(cwd, ["diff", "--cached", "--", ...GATE_EXCLUDE_PATHSPECS]);
     if (stagedDiff === null) {
       return { digest: "__UNAVAILABLE__", head: "__UNAVAILABLE__", unavailable: true };
     }
@@ -51,13 +70,13 @@ export function computeFingerprint(cwd: string): Fingerprint {
     if (head === "NO_HEAD") {
       trackedDiff = stagedDiff; // fresh repo: --cached is the whole picture
     } else {
-      trackedDiff = gitOrNull(cwd, ["diff", "HEAD"]);
+      trackedDiff = gitOrNull(cwd, ["diff", "HEAD", "--", ...GATE_EXCLUDE_PATHSPECS]);
     }
     if (trackedDiff === null) {
       return { digest: "__UNAVAILABLE__", head: "__UNAVAILABLE__", unavailable: true };
     }
 
-    const porcelain = gitOrNull(cwd, ["status", "--porcelain", "-uall", "-z"]);
+    const porcelain = gitOrNull(cwd, ["status", "--porcelain", "-uall", "-z", "--", ...GATE_EXCLUDE_PATHSPECS]);
     if (porcelain === null) {
       return { digest: "__UNAVAILABLE__", head: "__UNAVAILABLE__", unavailable: true };
     }
@@ -105,7 +124,7 @@ export function computeFingerprint(cwd: string): Fingerprint {
 /** List changed file paths from NUL-delimited porcelain. */
 export function changedFiles(cwd: string): string[] | undefined {
   try {
-    const porcelain = gitOrNull(cwd, ["status", "--porcelain", "-uall", "-z"]);
+    const porcelain = gitOrNull(cwd, ["status", "--porcelain", "-uall", "-z", "--", ...GATE_EXCLUDE_PATHSPECS]);
     if (porcelain === null) return undefined;
     if (!porcelain) return [];
     const entries = porcelain.split("\0").filter(Boolean);

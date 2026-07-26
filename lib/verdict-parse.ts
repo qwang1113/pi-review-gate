@@ -172,7 +172,7 @@ export function parsePrecommitOutput(text: string): "PASS" | "FAIL" | "NO_CHECKS
   while ((match = sentinelRe.exec(text)) !== null) {
     const s = match[1];
     if (s.includes("FAIL")) return "FAIL";
-    if (s.includes("NO CHECKS") && result !== "FAIL") result = "NO_CHECKS_RUN";
+    if (s.includes("NO CHECKS")) result = "NO_CHECKS_RUN";
     if (s.includes("PASS") && result === null) result = "PASS";
   }
   return result;

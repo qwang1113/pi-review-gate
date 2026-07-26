@@ -45,7 +45,10 @@ const steps = [];
 
 function runStep(name, command) {
   const started = Date.now();
-  const res = spawnSync("bash", ["-lc", command], {
+  // Plain -c (NOT -lc): a login shell would source the user's full profile
+  // for EVERY step — slow and environment-dependent. PATH etc. inherit from
+  // the parent environment, which is what ran this runner in the first place.
+  const res = spawnSync("bash", ["-c", command], {
     cwd,
     encoding: "utf8",
     timeout: 15 * 60 * 1000,

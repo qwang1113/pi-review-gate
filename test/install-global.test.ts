@@ -126,7 +126,10 @@ test("re-install overwrites agent definitions with the shipped version", () => {
   const agentsDir = join(home, ".pi", "agent", "agents");
   const reviewerFile = join(agentsDir, "reviewer.md");
   const adviserFile = join(agentsDir, "adviser.md");
-  assert.ok(existsSync(reviewerFile) && existsSync(adviserFile));
+  // P2 regression: the arbiter agent definition must ship too — the README
+  // documents all three judge roles as part of the install.
+  const arbiterFile = join(agentsDir, "arbiter.md");
+  assert.ok(existsSync(reviewerFile) && existsSync(adviserFile) && existsSync(arbiterFile));
   const shipped = readFileSync(reviewerFile, "utf8");
 
   // A locally edited copy is overwritten on re-install (repo wins).

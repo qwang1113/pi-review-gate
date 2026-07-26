@@ -12,6 +12,14 @@ const { createHash } = require("node:crypto");
 const { readFileSync, statSync } = require("node:fs");
 const { join, basename } = require("node:path");
 
+// Gate-owned paths excluded from the fingerprint (mirror of
+// lib/fingerprint.ts GATE_EXCLUDE_PATHSPECS — keep in sync; a parity test
+// enforces it). The gate itself writes .pi/ files (state sidecar, lessons,
+// arbitration log) and subagents write .pi-subagents/ artifacts; including
+// them would let the gate's own persist() invalidate a READY binding in any
+// repo that does not gitignore .pi.
+const GATE_EXCLUDE_PATHSPECS = [":(exclude).pi", ":(exclude).pi-subagents"];
+
 const CODE_DOC_EXT = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs",
   "py", "pyw", "ipynb",
@@ -47,7 +55,7 @@ function extOf(filePath) {
 function compute(cwd) {
   const head = gitOrNull(cwd, ["rev-parse", "HEAD"]) ?? "NO_HEAD";
 
-  const stagedDiff = gitOrNull(cwd, ["diff", "--cached"]);
+  const stagedDiff = gitOrNull(cwd, ["diff", "--cached", "--", ...GATE_EXCLUDE_PATHSPECS]);
   if (stagedDiff === null) {
     return { digest: "__UNAVAILABLE__", head: "__UNAVAILABLE__", unavailable: true };
   }
@@ -55,12 +63,12 @@ function compute(cwd) {
   const trackedDiff =
     head === "NO_HEAD"
       ? stagedDiff
-      : gitOrNull(cwd, ["diff", "HEAD"]);
+      : gitOrNull(cwd, ["diff", "HEAD", "--", ...GATE_EXCLUDE_PATHSPECS]);
   if (trackedDiff === null) {
     return { digest: "__UNAVAILABLE__", head: "__UNAVAILABLE__", unavailable: true };
   }
 
-  const porcelain = gitOrNull(cwd, ["status", "--porcelain", "-uall", "-z"]);
+  const porcelain = gitOrNull(cwd, ["status", "--porcelain", "-uall", "-z", "--", ...GATE_EXCLUDE_PATHSPECS]);
   if (porcelain === null) {
     return { digest: "__UNAVAILABLE__", head: "__UNAVAILABLE__", unavailable: true };
   }

@@ -228,10 +228,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       const entries = ctx.sessionManager.getEntries() as Array<{
         customType?: string; data?: { state?: GateState; continuationsInjected?: number };
       }>;
-      for (const e of entries) {
+      // Newest entry wins; scan backward and stop at the first match so a
+      // long session (persist appends one entry per state change) doesn't
+      // deserialize every historical snapshot.
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i];
         if ((e.customType) === ENTRY_TYPE && e.data?.state?.schema === 1) {
           restored = e.data.state;
           if (typeof e.data.continuationsInjected === "number") restoredInjections = e.data.continuationsInjected;
+          break;
         }
       }
     } catch { /* session manager unavailable */ }
@@ -347,7 +352,10 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function editedTestContent(input: Record<string, unknown>, path: string): string {
     return projectEditedContent(input, () => {
-      try { return readFileSync(path, "utf8"); } catch { return undefined; }
+      // P2 fix: resolve relative tool paths against the SESSION cwd, not the
+      // extension host's process.cwd() (they can differ under pi --cwd).
+      const abs = path.startsWith("/") ? path : pathJoin(cwd, path);
+      try { return readFileSync(abs, "utf8"); } catch { return undefined; }
     });
   }
 
@@ -365,7 +373,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     try {
       const { createRequire } = await import("node:module");
       const req = createRequire(import.meta.url);
-      const mod = req("../scripts/scan-test-labels.cjs");
+      // P1 fix: probe every install layout, mirroring resolveTrustedRunner().
+      // The old single "../scripts/…" path only resolved in the dev repo
+      // (extensions/ sibling); global installs put the extension in
+      // extensions/pi-review-gate/ with scripts/ TWO levels up, so the
+      // edit-time L6 check silently never ran in any installed layout.
+      let mod: { analyzeFile?: typeof analyze; isTestFile?: typeof isTest } | undefined;
+      for (const rel of [
+        "../scripts/scan-test-labels.cjs",       // dev repo: extensions/ sibling
+        "../../scripts/scan-test-labels.cjs",    // global/project: extensions/pi-review-gate/
+        "./scripts/scan-test-labels.cjs",        // flat layout
+      ]) {
+        try { mod = req(rel); break; } catch { /* keep probing */ }
+      }
+      if (!mod) return undefined; /* scanner unavailable — hook backstop remains */
       analyze = mod.analyzeFile; isTest = mod.isTestFile;
     } catch { return undefined; /* scanner unavailable — hook backstop remains */ }
     if (!analyze || !isTest || !isTest(path)) return undefined;
@@ -595,9 +616,12 @@ export default function reviewGate(pi: ExtensionAPI) {
   // Evidence gatherers for the arbiter (the arbiter is tool-less; the extension
   // fetches trusted ground truth). All are best-effort read-only and degrade to
   // an explicit "unavailable" note rather than throwing.
-  function runReadOnly(argv: string[]): string | undefined {
+  function runReadOnly(argv: string[], extraEnv?: Record<string, string>): string | undefined {
     try {
-      return execFileSync(argv[0], argv.slice(1), { cwd, encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"], maxBuffer: 4 * 1024 * 1024 }).trim();
+      return execFileSync(argv[0], argv.slice(1), {
+        cwd, encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"], maxBuffer: 4 * 1024 * 1024,
+        ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
+      }).trim();
     } catch { return undefined; }
   }
 
@@ -609,9 +633,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     const argv = ["gh", "pr", "view"];
     if (action.selector) argv.push(action.selector);
     if (action.repo) argv.push("--repo", action.repo);
-    if (action.hostname) argv.push("--hostname", action.hostname);
     argv.push("--json", "number,title,body,url");
-    const out = runReadOnly(argv);
+    // P1 fix: `gh pr view` has NO --hostname flag (that spelling would make gh
+    // exit with a usage error and the evidence degrade to "unavailable").
+    // gh selects the host via the GH_HOST environment variable instead.
+    const out = runReadOnly(argv, action.hostname ? { GH_HOST: action.hostname } : undefined);
     return out ?? "(current PR text unavailable — `gh pr view` failed; arbiter should weigh this as missing evidence)";
   }
 
@@ -794,14 +820,25 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Available in every mode: explore allows edits/bash, so the agent may
       // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
-      const outcome = await runTrustedPrecommit(mode, _signal);
+      // P1 fix: pass the session cwd. runTrustedPrecommit previously derived
+      // its own process.cwd(), which can differ from ctx.cwd (e.g. pi --cwd),
+      // running checks — and binding the PASS fingerprint — in the wrong dir.
+      const outcome = await runTrustedPrecommit(cwd, mode, _signal);
 
       if (outcome.verdict === "PASS") {
         // Bind PASS to the fingerprint recomputed AFTER the runner finished
         // (a lint:fix step may have modified files).
         state.precommit = { verdict: "PASS", fingerprint: outcome.fingerprint, at: new Date().toISOString() };
       } else {
-        state.precommit = { verdict: outcome.verdict, fingerprint: null, at: new Date().toISOString() };
+        // P0 fix: "ERROR" is a runner-protocol outcome, NOT a GateState
+        // PrecommitVerdict enum member. Persisting it would make loadSidecar
+        // and the git pre-commit hook reject the whole sidecar as forged
+        // (fail-closed — which then bricks even the USER's manual commits).
+        // Map ERROR → NOT_RUN (accurate: no trusted verdict was recorded);
+        // FAIL / NO_CHECKS_RUN persist as themselves. The error detail still
+        // reaches the model via the tool result text below.
+        const persisted = outcome.verdict === "ERROR" ? "NOT_RUN" : outcome.verdict;
+        state.precommit = { verdict: persisted, fingerprint: null, at: new Date().toISOString() };
       }
       persist(ctx as unknown as ExtensionContext);
 
@@ -873,6 +910,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       // cannot loosen the gate.
       state.rounds = [];
       state.strategicResetFired = false;
+      // P1 fix: the L2 auto-continuation budget must reset with the task too.
+      // continuationsInjected is capped against maxRounds in agent_settled; if
+      // task A consumed it, task B in the same session would get ZERO
+      // auto-continuations. Like rounds above, this only clears satisfied
+      // history — it cannot loosen the ship gate.
+      continuationsInjected = 0;
       persist(ctx as unknown as ExtensionContext);
       return {
         content: [{ type: "text", text: `review-gate: done accepted. ${params.summary}` }],
@@ -1376,8 +1419,7 @@ interface SpawnOutcome {
   timedOut: boolean;
 }
 
-async function runTrustedPrecommit(mode: "fast" | "full", abortSignal?: AbortSignal): Promise<PrecommitOutcome> {
-  const cwd = process.cwd();
+async function runTrustedPrecommit(cwd: string, mode: "fast" | "full", abortSignal?: AbortSignal): Promise<PrecommitOutcome> {
   const fail = (error: string): PrecommitOutcome =>
     ({ verdict: "ERROR", checksRun: 0, checksFailed: 0, fingerprint: "", error });
 
@@ -1398,7 +1440,10 @@ async function runTrustedPrecommit(mode: "fast" | "full", abortSignal?: AbortSig
         process.execPath,
         [runner, "--mode", mode, "--cwd", cwd, "--receipt", receipt, "--nonce", nonce],
         { cwd, shell: false, detached: true, stdio: ["ignore", "ignore", "ignore"],
-          // Do NOT leak the nonce to child lint/test processes.
+          // The nonce travels ONLY via the runner's argv (not env), so the
+          // runner's lint/test grandchildren never inherit it. A same-UID
+          // observer could still read the runner argv via ps — accepted: that
+          // principal is outside the threat model (see README).
           env: { ...process.env } },
       );
       const timer = setTimeout(() => { timedOut = true; killProcessTree(child); }, 20 * 60 * 1000);
