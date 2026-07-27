@@ -86,6 +86,13 @@ echo "✓ Fingerprint script installed"
 cp "${SRC}/scripts/scan-test-labels.cjs" "${AGENT_DIR}/scripts/scan-test-labels.cjs"
 echo "✓ Test-label scanner installed"
 
+# 3d. Staged-divergence checker. MUST keep the original filename
+# (check-staged-divergence.cjs): the installed pre-commit resolves it as
+# ../scripts/check-staged-divergence.cjs relative to its own dir. A rename
+# would silently disable the staged-vs-reviewed gate.
+cp "${SRC}/scripts/check-staged-divergence.cjs" "${AGENT_DIR}/scripts/check-staged-divergence.cjs"
+echo "✓ Staged-divergence checker installed"
+
 # 4. Hook installer + git hooks (NOT in ~/.pi/agent/hooks — Pi deprecated that dir)
 mkdir -p "${AGENT_DIR}/scripts"
 cp "${SRC}/hooks/"* "${AGENT_DIR}/scripts/"

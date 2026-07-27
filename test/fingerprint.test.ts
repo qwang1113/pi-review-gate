@@ -1,13 +1,46 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
-const { computeFingerprint, changedFiles } = await import(
+const { computeFingerprint, changedFiles, advisoryChangeToken } = await import(
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "fingerprint.ts")
 );
+
+/**
+ * WHY THE RACE LOOPS BELOW ARE NOT TUNABLE (a rejected optimization).
+ *
+ * These two loops dominate the suite — the 300-round one alone is ~73s of a
+ * ~100s `npm test`, paid on every review round — so an env-scaled
+ * `RG_RACE_ITERS` (25 for a commit-time fast path) was implemented, with a
+ * measured justification: against a mutated implementation (shadow-index
+ * backdate AND `--renormalize` both removed) the loop missed the edit in
+ * 83/100 rounds, which would put the escape probability at 25 rounds around
+ * 0.17^25.
+ *
+ * An independent reviewer reproduced that experiment on the same machine and
+ * got a materially different result: at 25 rounds the mutated implementation
+ * PASSED 3 of 5 runs. The rounds are not independent trials — they share one
+ * repository, and the window depends on filesystem timestamp granularity,
+ * machine load and pacing — so a per-round rate measured once cannot be
+ * exponentiated into a guarantee. The knob was therefore REMOVED rather than
+ * kept with a weaker claim: a safety loop whose strength cannot be stated
+ * honestly should not be reducible by an environment variable.
+ *
+ * If these loops must get cheaper, the sound route is to make each ROUND
+ * cheaper rather than to run fewer of them (dropping the per-round commit
+ * measured 112ms/round vs 219ms/round), and to prove the new construction
+ * still fails reliably against the mutated implementation before adopting it.
+ *
+ * Coverage note, so the next reader does not over-trust these loops: they only
+ * fail when BOTH safeguards are gone. Removing just `--renormalize` is caught
+ * deterministically by "an edit to a file with an ancient preserved mtime is
+ * not invisible"; removing just the backdate is caught by NEITHER, because
+ * `--renormalize` re-reads content unconditionally, which makes the backdate a
+ * deliberate redundant second line of defence.
+ */
 
 const tempDirs: string[] = [];
 function makeRepo(): string {
@@ -46,13 +79,359 @@ test("untracked file inside a new directory is seen", () => {
   assert.notEqual(a.digest, b.digest);
 });
 
-test("staged edit changes fingerprint", () => {
+// P0 regression (INVERTED on purpose — this assertion used to be notEqual).
+// The old digest mixed `git diff --cached` in, so `git add` alone changed it.
+// That is not a safety property: it made the L3 pre-commit hook reject a
+// commit the gate had JUST approved, with zero bytes changed, pushing users
+// toward REVIEW_GATE_BYPASS=1 (which disarms far more than the false
+// mismatch it works around). The real guarantee — "content changed ⇒ binding
+// invalidated" — is asserted by the content tests above/below, which still
+// pass. Staging is bookkeeping; it must NOT invalidate a review binding.
+test("staging an edit does NOT change the fingerprint (content is identical)", () => {
   const dir = makeRepo();
   writeFileSync(join(dir, "file.ts"), "// v1");
   const a = computeFingerprint(dir);
   execFileSync("git", ["add", "file.ts"], { cwd: dir, stdio: "ignore" });
   const b = computeFingerprint(dir);
-  assert.notEqual(a.digest, b.digest);
+  assert.equal(a.digest, b.digest, "git add must be fingerprint-invisible");
+  // ...but changing the STAGED content still invalidates it.
+  writeFileSync(join(dir, "file.ts"), "// v2");
+  assert.notEqual(computeFingerprint(dir).digest, b.digest);
+});
+
+// The other half of the same P0: committing reviewed content must not
+// invalidate its own binding (the old digest hashed HEAD, so pre-push
+// rejected every commit pre-commit had just let through).
+test("committing already-reviewed content does NOT change the fingerprint", () => {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "file.ts"), "// v1");
+  execFileSync("git", ["add", "file.ts"], { cwd: dir, stdio: "ignore" });
+  const beforeCommit = computeFingerprint(dir);
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "w"], {
+    cwd: dir, stdio: "ignore",
+  });
+  const afterCommit = computeFingerprint(dir);
+  assert.equal(beforeCommit.digest, afterCommit.digest, "commit must be fingerprint-invisible");
+  assert.notEqual(beforeCommit.head, afterCommit.head, "HEAD did move (digest just must not depend on it)");
+});
+
+// NOTE ON A REJECTED TEST (kept as a warning, not as code).
+//
+// An attempt to replace the probabilistic loop below with a "deterministic"
+// version — rewrite the file with same-size content, then restore the cached
+// atime/mtime so the stat cache would consider it clean — does NOT work and
+// was removed after an independent review challenged it. Measured on macOS/
+// APFS: even with `core.checkStat=minimal` and `core.trustctime=false`, a
+// plain `git add` with NO safeguards still sees such an edit, because ctime
+// (which user space cannot forge) and sub-second mtime precision both move.
+// The test therefore passed with every safeguard removed — it asserted
+// nothing. Any future "deterministic race test" must first be shown to FAIL
+// against a mutated implementation.
+
+// P0 RACE REGRESSION (git "racily clean").
+// The shadow index is seeded from the real index for speed. copyFileSync
+// stamps the copy with a NEW mtime, which suppressed git's racily-clean
+// re-hash: an edit landing in the same mtime granularity bucket as the index,
+// with the size unchanged, was INVISIBLE to the digest -> a stale READY
+// binding stayed valid across a real code change (the worst failure mode this
+// gate has). The loop exists because the window is a TIMING property, not a
+// constructible one: an attempt to force it deterministically (restore the
+// cached stat after a same-size rewrite) provably asserts nothing, because
+// ctime and sub-second mtime still move and git re-hashes on its own — see the
+// rejected-test note above. Keep the full 300 rounds: a single measurement of
+// the per-round detection rate (83/100 with both safeguards removed) does NOT
+// license running fewer of them — an independent re-run of that same
+// experiment let a mutated implementation pass 3 of 5 times at 25 rounds,
+// because the rounds share one repository and depend on filesystem timestamp
+// granularity, load and pacing rather than being independent trials.
+// (Historically: 25/1500 fail-opens before the original fix, 0/1500 after.)
+//
+// Shape matters: same-size content (`// v1` -> `// v2`) written IMMEDIATELY
+// after the commit is what lands in the racy window.
+test("same-size edit right after a commit is never invisible to the fingerprint (racily-clean)", () => {
+  // ONE repo, reused: the race lives in the (index mtime vs file mtime)
+  // relationship, which is re-established by every commit, so repeated
+  // edit+commit cycles in a single repo probe the same window far more
+  // cheaply than building 300 repos. Verified to still catch the bug
+  // (reintroducing it fails this test well before the loop ends).
+  const ITERATIONS = 300;
+  const dir = makeRepo();
+  for (let i = 0; i < ITERATIONS; i++) {
+    // Alternate between two SAME-SIZE contents so each write is a real change
+    // that a size/mtime-trusting stat cache would miss.
+    const content = i % 2 === 0 ? `// v${i % 10}a` : `// v${i % 10}b`;
+    writeFileSync(join(dir, "file.ts"), content);
+    execFileSync("git", ["add", "file.ts"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", `c${i}`], {
+      cwd: dir, stdio: "ignore",
+    });
+    const before = computeFingerprint(dir);
+    // Same length, written immediately after the commit -> lands in the racy
+    // window where the index mtime and the file mtime share a bucket.
+    writeFileSync(join(dir, "file.ts"), content.slice(0, -1) + "Z");
+    const after = computeFingerprint(dir);
+    // Assert availability FIRST and separately. Two "__UNAVAILABLE__" results
+    // compare equal, so folding this into the notEqual below would report a
+    // spurious fail-closed as a fail-open and send the next reader chasing the
+    // wrong bug (it did exactly that once).
+    assert.equal(before.unavailable, false, `iteration ${i}: fingerprint unavailable before the edit`);
+    assert.equal(after.unavailable, false, `iteration ${i}: fingerprint unavailable after the edit`);
+    assert.notEqual(
+      after.digest,
+      before.digest,
+      `iteration ${i}: a real edit was invisible to the fingerprint (racily-clean fail-open) — ` +
+        "the shadow index mtime must be backdated",
+    );
+  }
+});
+
+// P0 CLOCK-SKEW REGRESSION (found by independent review).
+// The shadow index mtime is backdated so git re-hashes racily-clean entries.
+// Backdating a fixed margin from the REAL index mtime is not enough: if that
+// mtime is in the FUTURE (clock skew, a rolled-back system clock, a copied
+// tree), index-5s is still in the future, entries keep looking safely clean,
+// and a same-size edit stays invisible to the digest — a fail-open on content
+// that can then be committed. The base must be clamped to `now`.
+test("a FUTURE index mtime (clock skew) does not hide a same-size edit", () => {
+  const dir = makeRepo();
+  execFileSync("git", ["config", "core.excludesFile", "/dev/null"], { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, "x.ts"), "AAAA\n");
+  execFileSync("git", ["add", "x.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"], {
+    cwd: dir, stdio: "ignore",
+  });
+
+  // Push the real index mtime an hour into the future.
+  const indexPath = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-path", "index"], {
+    cwd: dir, encoding: "utf8",
+  }).trim();
+  const future = new Date(Date.now() + 3_600_000);
+  utimesSync(indexPath, future, future);
+
+  const before = computeFingerprint(dir);
+  // Same-size edit, with the file's original mtime preserved so it stays
+  // inside the window a future-dated index would wrongly trust.
+  const fileStat = statSync(join(dir, "x.ts"));
+  writeFileSync(join(dir, "x.ts"), "BBBB\n");
+  utimesSync(join(dir, "x.ts"), fileStat.atime, fileStat.mtime);
+  const after = computeFingerprint(dir);
+
+  assert.equal(before.unavailable, false);
+  assert.equal(after.unavailable, false);
+  assert.notEqual(
+    after.digest,
+    before.digest,
+    "a real edit was invisible to the fingerprint when the index mtime was in the future — " +
+      "the backdate base must be clamped to min(indexMtime, now)",
+  );
+});
+
+// P1 STALE-MTIME REGRESSION (found by independent review).
+// Backdating the shadow index only makes entries whose mtime is NEAR the index
+// look racy. A file carrying an ANCIENT preserved mtime — restored from backup,
+// copied with `rsync -a`, unpacked from an archive — still looks confidently
+// clean, so git trusts the copied stat cache and a same-size edit stays
+// invisible to the digest. (`git add --renormalize` re-reads content and closes
+// this.) The content is genuinely committable, so this was a real fail-open.
+test("an edit to a file with an ancient preserved mtime is not invisible", () => {
+  const dir = makeRepo();
+  execFileSync("git", ["config", "core.excludesFile", "/dev/null"], { cwd: dir, stdio: "ignore" });
+  const ancient = new Date("2020-01-01T00:00:00Z");
+  writeFileSync(join(dir, "x.ts"), "AAAA\n");
+  utimesSync(join(dir, "x.ts"), ancient, ancient);
+  execFileSync("git", ["add", "x.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"], {
+    cwd: dir, stdio: "ignore",
+  });
+  utimesSync(join(dir, "x.ts"), ancient, ancient);
+
+  const before = computeFingerprint(dir);
+  writeFileSync(join(dir, "x.ts"), "BBBB\n"); // same size
+  utimesSync(join(dir, "x.ts"), ancient, ancient); // mtime unchanged, as a restore would leave it
+  const after = computeFingerprint(dir);
+
+  assert.equal(before.unavailable, false);
+  assert.equal(after.unavailable, false);
+  assert.notEqual(
+    after.digest,
+    before.digest,
+    "a same-size edit to a file with a preserved ancient mtime was invisible to the fingerprint — " +
+      "the index build must re-read content (--renormalize), not trust the stat cache",
+  );
+});
+
+// P0 REGRESSION (found by independent review, then root-caused):
+// a file that matches .gitignore but is nonetheless TRACKED (`git add -f`)
+// is real, shippable content — `git commit -a` will commit changes to it.
+// Two distinct bugs made such edits invisible to the digest:
+//   1. `git add` refuses to stage an ignored path, so an EMPTY shadow index
+//      drops the file from the tree entirely; only a SEEDED index keeps it.
+//   2. an over-eager mtime-verification fallback deleted the seeded index on
+//      ~57% of runs (utimesSync loses sub-ms precision), silently producing
+//      case 1.
+// Net effect was a ~50% fail-open on shippable content.
+test("edits to a TRACKED but gitignored file still change the fingerprint", () => {
+  const ITERATIONS = 25; // was ~50% fail-open; any regression shows up fast
+  for (let i = 0; i < ITERATIONS; i++) {
+    const dir = makeRepo();
+    // Neutralize any ambient global ignore file on the developer's machine.
+    execFileSync("git", ["config", "core.excludesFile", "/dev/null"], { cwd: dir, stdio: "ignore" });
+    writeFileSync(join(dir, ".gitignore"), "*.gen.ts\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "ignore rule"], {
+      cwd: dir, stdio: "ignore",
+    });
+    // Force-add + commit => genuinely tracked, therefore shippable.
+    writeFileSync(join(dir, "gen.gen.ts"), "export const v = 1;\n");
+    execFileSync("git", ["add", "-f", "gen.gen.ts"], { cwd: dir, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "track generated"], {
+      cwd: dir, stdio: "ignore",
+    });
+
+    const before = computeFingerprint(dir);
+    writeFileSync(join(dir, "gen.gen.ts"), "export const v = 9;\n");
+    const after = computeFingerprint(dir);
+
+    assert.equal(before.unavailable, false, `iteration ${i}: fingerprint unexpectedly unavailable`);
+    assert.equal(after.unavailable, false, `iteration ${i}: fingerprint unexpectedly unavailable`);
+    assert.notEqual(
+      after.digest,
+      before.digest,
+      `iteration ${i}: an edit to a tracked-but-gitignored file was invisible to the fingerprint — ` +
+        "this is shippable content (`git commit -a` commits it), so it must invalidate a READY binding",
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// SUBMODULES (found by independent review): a parent tree stores only each
+// submodule's committed gitlink, so edits INSIDE a checked-out submodule leave
+// the parent tree bit-identical. The pre-change diff/status fingerprint DID
+// catch this, so relying on the tree hash alone was a regression.
+test("an edit inside a checked-out submodule changes the fingerprint", (t) => {
+  const parent = makeRepo();
+  const sub = makeRepo();
+  writeFileSync(join(sub, "s.ts"), "// sub v1\n");
+  execFileSync("git", ["add", "s.ts"], { cwd: sub, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "sub"], {
+    cwd: sub, stdio: "ignore",
+  });
+  try {
+    execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", sub, "sm"], {
+      cwd: parent, stdio: "ignore",
+    });
+  } catch {
+    // Some git builds/policies forbid local-path submodules outright.
+    t.skip("submodule add unsupported in this environment");
+    return;
+  }
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add sm"], {
+    cwd: parent, stdio: "ignore",
+  });
+
+  const before = computeFingerprint(parent);
+  writeFileSync(join(parent, "sm", "s.ts"), "// sub v2 CHANGED\n");
+  const after = computeFingerprint(parent);
+  assert.notEqual(
+    after.digest,
+    before.digest,
+    "an edit inside a submodule must invalidate the parent's READY binding",
+  );
+
+  // ...and the submodule probe must not break staging-invariance.
+  const dirty = computeFingerprint(parent);
+  execFileSync("git", ["add", "-A"], { cwd: parent, stdio: "ignore" });
+  assert.equal(
+    computeFingerprint(parent).digest,
+    dirty.digest,
+    "staging in the parent repo must not change the digest",
+  );
+
+  // ROUND-2 FINDING: hashing `git status` TEXT bound only the state, not the
+  // content. A SECOND edit to an already-dirty file leaves the status line
+  // ("M s.ts") byte-identical, so the digest did not move and the unreviewed
+  // second version could still be committed inside the submodule.
+  const dirtyA = computeFingerprint(parent);
+  writeFileSync(join(parent, "sm", "s.ts"), "// DIRTY version B, entirely different\n");
+  assert.notEqual(
+    computeFingerprint(parent).digest,
+    dirtyA.digest,
+    "a second edit to an already-dirty submodule file must still change the digest " +
+      "(the probe must bind CONTENT, not `git status` text)",
+  );
+});
+
+// ROUND-2 FINDING: submodule detection read `git config --file .gitmodules`,
+// which returns the same empty result for "no submodules" and "this file is
+// corrupt" — so a malformed .gitmodules silently disabled submodule coverage
+// entirely. Detection now reads gitlinks from the index, which is
+// authoritative and survives a broken .gitmodules.
+test("a malformed .gitmodules does not silently disable submodule coverage", (t) => {
+  const parent = makeRepo();
+  const sub = makeRepo();
+  writeFileSync(join(sub, "s.ts"), "// sub v1\n");
+  execFileSync("git", ["add", "s.ts"], { cwd: sub, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "sub"], {
+    cwd: sub, stdio: "ignore",
+  });
+  try {
+    execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", sub, "sm"], {
+      cwd: parent, stdio: "ignore",
+    });
+  } catch {
+    t.skip("submodule add unsupported in this environment");
+    return;
+  }
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add sm"], {
+    cwd: parent, stdio: "ignore",
+  });
+  // Corrupt .gitmodules while the gitlink stays valid.
+  writeFileSync(join(parent, ".gitmodules"), '[submodule "sm"\n  broken = \n');
+  execFileSync("git", ["add", ".gitmodules"], { cwd: parent, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "break"], {
+    cwd: parent, stdio: "ignore",
+  });
+
+  const before = computeFingerprint(parent);
+  writeFileSync(join(parent, "sm", "s.ts"), "// changed despite malformed .gitmodules\n");
+  assert.notEqual(
+    computeFingerprint(parent).digest,
+    before.digest,
+    "submodule edits must still be detected when .gitmodules is unparseable",
+  );
+});
+
+// An uninitialized / deinit'd submodule is a legitimate, common state (CI,
+// shallow checkouts). It has no working content to review, and the parent's
+// gitlink already pins it, so it must NOT make the fingerprint unavailable —
+// that would brick every commit (the B2 lesson: a new sub-gate must never make
+// legitimate work impossible).
+test("a deinit'd submodule does not brick the fingerprint", (t) => {
+  const parent = makeRepo();
+  const sub = makeRepo();
+  writeFileSync(join(sub, "s.ts"), "// sub\n");
+  execFileSync("git", ["add", "s.ts"], { cwd: sub, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "sub"], {
+    cwd: sub, stdio: "ignore",
+  });
+  try {
+    execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", sub, "sm"], {
+      cwd: parent, stdio: "ignore",
+    });
+  } catch {
+    t.skip("submodule add unsupported in this environment");
+    return;
+  }
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add sm"], {
+    cwd: parent, stdio: "ignore",
+  });
+  execFileSync("git", ["submodule", "deinit", "-f", "sm"], { cwd: parent, stdio: "ignore" });
+
+  const fp = computeFingerprint(parent);
+  assert.equal(fp.unavailable, false, "a deinit'd submodule must not make the fingerprint unavailable");
+  assert.match(fp.digest, /^[0-9a-f]{40,64}$/);
+  // Still stable across repeated calls (bindable).
+  assert.equal(computeFingerprint(parent).digest, fp.digest);
 });
 
 test("unstaged edit changes fingerprint", () => {
@@ -66,7 +445,11 @@ test("unstaged edit changes fingerprint", () => {
   assert.notEqual(a.digest, b.digest);
 });
 
-test("HEAD move changes fingerprint", () => {
+// Renamed from "HEAD move changes fingerprint": under the content-addressed
+// digest a HEAD move is NOT what changes it (see the commit test above) —
+// adding f.ts is. Keeping the old name would assert a property the gate
+// deliberately no longer has.
+test("adding a new file changes the fingerprint (even via a commit)", () => {
   const dir = makeRepo();
   const a = computeFingerprint(dir);
   writeFileSync(join(dir, "f.ts"), "//");
@@ -81,6 +464,24 @@ test("non-git directory → unavailable=true (fail closed)", () => {
   tempDirs.push(dir);
   const fp = computeFingerprint(dir);
   assert.equal(fp.unavailable, true);
+});
+
+// Pre-existing defect found while adding the advisory token: `-z` porcelain
+// entries are `XY <path>`, and an UNSTAGED modification starts with a space
+// (" M f.ts"). The shared git() helper trimmed its output, so the FIRST entry
+// lost that space and slice(3) returned ".ts" instead of "f.ts". Invisible to
+// the old consumers (which only look at the extension) and to the old test
+// (which used untracked "?? x.ts" entries, no leading space), but wrong for
+// anything that must open the path.
+test("changedFiles: an unstaged modification keeps its FULL path (no leading-space trim)", () => {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "f.ts"), "// v1");
+  execFileSync("git", ["add", "f.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "c"], {
+    cwd: dir, stdio: "ignore",
+  });
+  writeFileSync(join(dir, "f.ts"), "// v2 (unstaged edit)");
+  assert.deepEqual(changedFiles(dir), ["f.ts"]);
 });
 
 test("changedFiles: clean repo → [], dirty repo lists paths", () => {
@@ -168,4 +569,304 @@ test("parity: compute-fingerprint.cjs emits the same digest as lib/fingerprint.t
   const cjsFp = JSON.parse(cjsOut);
   assert.equal(cjsFp.unavailable, false);
   assert.equal(cjsFp.digest, tsFp.digest, "TS and CJS fingerprint implementations drifted");
+});
+
+// ---------------------------------------------------------------------------
+// advisoryChangeToken — the PROMPT-ONLY cheap probe (see lib/fingerprint.ts).
+// It exists to skip a redundant ~575ms re-hash per turn; its correctness bar
+// is "moves whenever the worktree moves", NOT "staging-invariant".
+
+test("advisory token is stable while nothing changes", () => {
+  const dir = makeRepo();
+  assert.equal(advisoryChangeToken(dir), advisoryChangeToken(dir));
+});
+
+test("advisory token moves for a new untracked file and for a delete", () => {
+  const dir = makeRepo();
+  const clean = advisoryChangeToken(dir);
+  writeFileSync(join(dir, "new.ts"), "// new");
+  const added = advisoryChangeToken(dir);
+  assert.notEqual(added, clean);
+
+  writeFileSync(join(dir, "tracked.ts"), "// v1");
+  execFileSync("git", ["add", "tracked.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add"], {
+    cwd: dir, stdio: "ignore",
+  });
+  const beforeDelete = advisoryChangeToken(dir);
+  rmSync(join(dir, "tracked.ts"));
+  assert.notEqual(advisoryChangeToken(dir), beforeDelete);
+});
+
+// THE case that makes a status-only token worthless: the second edit to a file
+// that is ALREADY dirty leaves the porcelain line byte-identical (" M f.ts").
+// Without the size+mtime stamps the memo would keep serving a stale prompt for
+// the whole editing burst.
+test("advisory token moves on a SECOND edit to an already-dirty file", () => {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "f.ts"), "// v1");
+  execFileSync("git", ["add", "f.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "c"], {
+    cwd: dir, stdio: "ignore",
+  });
+  writeFileSync(join(dir, "f.ts"), "// v1 edited once");
+  const first = advisoryChangeToken(dir);
+  writeFileSync(join(dir, "f.ts"), "// v1 edited once and then twice");
+  assert.notEqual(advisoryChangeToken(dir), first);
+});
+
+test("advisory token ignores the gate's own dirs, exactly like the fingerprint", () => {
+  // The gate writes .pi/ on every persist; if that moved the token, the memo
+  // would never hit (and, worse, invite someone to 'fix' it by weakening the
+  // fingerprint's own exclusions).
+  const dir = makeRepo();
+  const before = advisoryChangeToken(dir);
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "review-gate-state.json"), '{"schema":1}');
+  mkdirSync(join(dir, ".pi-subagents"), { recursive: true });
+  writeFileSync(join(dir, ".pi-subagents", "artifact.md"), "x");
+  assert.equal(advisoryChangeToken(dir), before);
+});
+
+test("advisory token is null (never a stale reuse) outside a git repo", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-nongit-"));
+  tempDirs.push(dir);
+  assert.equal(advisoryChangeToken(dir), null);
+});
+
+test("advisory token is NOT a fingerprint substitute — it is staging-variant", () => {
+  // Documents why enforcement must never key off this value: `git add` alone
+  // moves it, which is precisely the P0 bug the content-addressed fingerprint
+  // was introduced to fix.
+  const dir = makeRepo();
+  writeFileSync(join(dir, "f.ts"), "// v1");
+  const unstaged = advisoryChangeToken(dir);
+  const fpUnstaged = computeFingerprint(dir).digest;
+  execFileSync("git", ["add", "f.ts"], { cwd: dir, stdio: "ignore" });
+  assert.notEqual(advisoryChangeToken(dir), unstaged, "token tracks staging");
+  assert.equal(computeFingerprint(dir).digest, fpUnstaged, "fingerprint does not");
+});
+
+// ---------------------------------------------------------------------------
+// CWD PARITY (found by independent review). The extension computes the
+// fingerprint from the SESSION cwd, which may be a subdirectory; the git hooks
+// always run at the repo toplevel. If the two disagree, the hook rejects a
+// binding the extension just made — "code was modified after the last READY
+// review" with no way to satisfy it. `git ls-files` reports cwd-relative paths
+// by default ("../../sm"), and submoduleDigest() mixes the path text into the
+// digest, so this was reproducible: fp(root) != fp(deep/work).
+
+test("fingerprint is identical from the repo root and from a subdirectory", () => {
+  const dir = makeRepo();
+  mkdirSync(join(dir, "deep", "work"), { recursive: true });
+  writeFileSync(join(dir, "deep", "work", "a.ts"), "// a");
+  writeFileSync(join(dir, "top.ts"), "// top");
+  assert.equal(
+    computeFingerprint(join(dir, "deep", "work")).digest,
+    computeFingerprint(dir).digest,
+    "a plain repo must hash identically from any directory inside it",
+  );
+});
+
+test("fingerprint with a SUBMODULE is identical from the root and a subdirectory", (t) => {
+  const parent = makeRepo();
+  const sub = makeRepo();
+  writeFileSync(join(sub, "s.ts"), "// sub v1\n");
+  execFileSync("git", ["add", "s.ts"], { cwd: sub, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "sub"], {
+    cwd: sub, stdio: "ignore",
+  });
+  try {
+    execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", sub, "sm"], {
+      cwd: parent, stdio: "ignore",
+    });
+  } catch {
+    t.skip("submodule add unsupported in this environment");
+    return;
+  }
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add sm"], {
+    cwd: parent, stdio: "ignore",
+  });
+  mkdirSync(join(parent, "deep", "work"), { recursive: true });
+
+  const fromRoot = computeFingerprint(parent);
+  const fromSubdir = computeFingerprint(join(parent, "deep", "work"));
+  assert.equal(fromSubdir.digest, fromRoot.digest,
+    "the submodule path must enter the digest repo-root-relative, not cwd-relative");
+
+  // Parity must survive an actual submodule edit, not just the clean state.
+  writeFileSync(join(parent, "sm", "s.ts"), "// sub v2 CHANGED\n");
+  const dirtyRoot = computeFingerprint(parent);
+  const dirtySubdir = computeFingerprint(join(parent, "deep", "work"));
+  assert.notEqual(dirtyRoot.digest, fromRoot.digest, "the edit must still be seen");
+  assert.equal(dirtySubdir.digest, dirtyRoot.digest, "and both cwds must still agree");
+});
+
+test("fingerprint with a NESTED submodule is identical from the root and a subdirectory", (t) => {
+  const inner = makeRepo();
+  writeFileSync(join(inner, "i.ts"), "// inner v1\n");
+  execFileSync("git", ["add", "i.ts"], { cwd: inner, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "inner"], {
+    cwd: inner, stdio: "ignore",
+  });
+  const outer = makeRepo();
+  const parent = makeRepo();
+  try {
+    execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", inner, "nested"], {
+      cwd: outer, stdio: "ignore",
+    });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "nest"], {
+      cwd: outer, stdio: "ignore",
+    });
+    execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", outer, "sm"], {
+      cwd: parent, stdio: "ignore",
+    });
+  } catch {
+    t.skip("submodule add unsupported in this environment");
+    return;
+  }
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add sm"], {
+    cwd: parent, stdio: "ignore",
+  });
+  execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], {
+    cwd: parent, stdio: "ignore",
+  });
+  mkdirSync(join(parent, "deep", "work"), { recursive: true });
+
+  assert.equal(
+    computeFingerprint(join(parent, "deep", "work")).digest,
+    computeFingerprint(parent).digest,
+    "nested submodule recursion must also be cwd-independent",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// AMBIENT GIT LOCATION VARIABLES (found while fixing the same class in the
+// divergence checker). git resolves the repository from GIT_DIR/GIT_WORK_TREE
+// before falling back to the cwd, so inheriting them made computeFingerprint()
+// describe a DIFFERENT repository: a real edit in the repo the caller asked
+// about left "its" digest unchanged, keeping a stale READY binding valid.
+
+test("fingerprint ignores an ambient GIT_DIR/GIT_WORK_TREE", () => {
+  const target = makeRepo();
+  const decoy = makeRepo();
+  writeFileSync(join(decoy, "d.ts"), "// decoy");
+  execFileSync("git", ["add", "d.ts"], { cwd: decoy, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "d"], {
+    cwd: decoy, stdio: "ignore",
+  });
+
+  const before = computeFingerprint(target).digest;
+  writeFileSync(join(target, "real.ts"), "// a real edit in the target repo");
+
+  const saved = { dir: process.env.GIT_DIR, work: process.env.GIT_WORK_TREE };
+  try {
+    process.env.GIT_DIR = join(decoy, ".git");
+    process.env.GIT_WORK_TREE = decoy;
+    const poisoned = computeFingerprint(target).digest;
+    assert.notEqual(poisoned, before,
+      "an edit in the target repo must move its digest even with a decoy GIT_DIR set");
+  } finally {
+    if (saved.dir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved.dir;
+    if (saved.work === undefined) delete process.env.GIT_WORK_TREE; else process.env.GIT_WORK_TREE = saved.work;
+  }
+
+  assert.equal(computeFingerprint(target).digest,
+    (() => {
+      const saved2 = process.env.GIT_DIR;
+      try {
+        process.env.GIT_DIR = join(decoy, ".git");
+        return computeFingerprint(target).digest;
+      } finally {
+        if (saved2 === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved2;
+      }
+    })(),
+    "the digest must be identical with and without the ambient variable");
+});
+
+test("advisory change token also ignores an ambient GIT_DIR", () => {
+  const target = makeRepo();
+  const decoy = makeRepo();
+  // The file must be TRACKED in target and absent from decoy, so the two repos
+  // disagree about it: target reports " M t.ts", a decoy index reports
+  // "?? t.ts". A merely untracked file would look identical in both and the
+  // test would pass even with the environment leaking through.
+  writeFileSync(join(target, "t.ts"), "// v1");
+  execFileSync("git", ["add", "t.ts"], { cwd: target, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "t"], {
+    cwd: target, stdio: "ignore",
+  });
+  writeFileSync(join(target, "t.ts"), "// v2 modified");
+  const clean = advisoryChangeToken(target);
+  assert.ok(clean, "precondition: the token must be computable");
+
+  const saved = process.env.GIT_DIR;
+  try {
+    process.env.GIT_DIR = join(decoy, ".git");
+    assert.equal(advisoryChangeToken(target), clean,
+      "the token must describe the requested repo, not the one an env var points at");
+  } finally {
+    if (saved === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GIT CONFIG INJECTION (found by independent review). Stripping GIT_DIR is not
+// enough: `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` (and
+// GIT_CONFIG_PARAMETERS / _GLOBAL / _SYSTEM) inject configuration into the git
+// invocation itself. Injecting `core.excludesFile` made a real untracked edit
+// invisible to `git add`, so the digest never moved and a stale READY binding
+// stayed valid — with no GIT_DIR involved.
+
+test("injected core.excludesFile cannot hide an edit from the fingerprint (TS)", () => {
+  const dir = makeRepo();
+  const patterns = join(mkdtempSync(join(tmpdir(), "rg-pat-")), "ignore");
+  tempDirs.push(dirname(patterns));
+  writeFileSync(patterns, "target.txt\n");
+
+  const before = computeFingerprint(dir).digest;
+  writeFileSync(join(dir, "target.txt"), "a real untracked edit");
+  const honest = computeFingerprint(dir).digest;
+  assert.notEqual(honest, before, "precondition: the edit must move the digest normally");
+
+  const saved = {
+    count: process.env.GIT_CONFIG_COUNT,
+    key: process.env.GIT_CONFIG_KEY_0,
+    value: process.env.GIT_CONFIG_VALUE_0,
+  };
+  try {
+    process.env.GIT_CONFIG_COUNT = "1";
+    process.env.GIT_CONFIG_KEY_0 = "core.excludesFile";
+    process.env.GIT_CONFIG_VALUE_0 = patterns;
+    assert.equal(computeFingerprint(dir).digest, honest,
+      "config injection must not remove a real edit from the digest");
+  } finally {
+    for (const [k, v] of [
+      ["GIT_CONFIG_COUNT", saved.count], ["GIT_CONFIG_KEY_0", saved.key], ["GIT_CONFIG_VALUE_0", saved.value],
+    ] as const) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+});
+
+test("injected core.excludesFile cannot hide an edit from the CJS mirror either", () => {
+  const dir = makeRepo();
+  const patterns = join(mkdtempSync(join(tmpdir(), "rg-pat2-")), "ignore");
+  tempDirs.push(dirname(patterns));
+  writeFileSync(patterns, "target.txt\n");
+  const script = join(resolve(import.meta.dirname ?? "."), "..", "scripts", "compute-fingerprint.cjs");
+  const run = (env: Record<string, string>) =>
+    JSON.parse(execFileSync("node", [script, dir], {
+      encoding: "utf8", env: { ...process.env, ...env },
+    })).digest;
+
+  writeFileSync(join(dir, "target.txt"), "a real untracked edit");
+  const honest = run({});
+  const injected = run({
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.excludesFile",
+    GIT_CONFIG_VALUE_0: patterns,
+  });
+  assert.equal(injected, honest,
+    "the hook-side implementation must resist the same injection as the extension side");
 });

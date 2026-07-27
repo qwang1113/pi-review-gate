@@ -42,7 +42,28 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
    the real question, not your preferred answer. Fold its input in before you
    commit to an approach. Skip only for trivial, low-risk changes.
 
-1. **Review** — spawn an independent reviewer over the current diff
+1. **Precommit FIRST** — with the edits finished, call **`run_precommit`**
+   *before* spawning the reviewer. Two concrete reasons, both measured:
+
+   - The runner runs `lint`/`lint:fix` in **both** modes
+     (`scripts/precommit-runner.mjs`), and `lint:fix` **edits files**. Any
+     edit changes the worktree fingerprint, so a READY verdict obtained
+     *before* precommit is invalidated the moment the runner reformats
+     anything — throwing away a review that costs ~3 minutes (median
+     reviewer wall time) and forcing an extra round.
+   - Tests catch the cheap class of defect that the reviewer would otherwise
+     spend minutes finding — and a test failure is far cheaper to fix than a
+     BLOCKED verdict.
+
+   FAIL / `NO CHECKS RUN` ⇒ fix and re-run; only then continue to the review.
+   `NO CHECKS RUN` is NOT a pass — tell the user real checks are missing.
+
+   (Running `node scripts/precommit-runner.mjs` by hand still prints the
+   human-readable report, but only the `run_precommit` tool records the gate:
+   it spawns the trusted bundled runner and verifies a private nonce receipt,
+   so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
+
+2. **Review** — spawn an independent reviewer over the current diff
    (`git diff HEAD` + untracked files). The reviewer must NOT be fed your own
    conclusions (fresh eyes only) and must end its output with a fenced JSON
    verdict:
@@ -62,12 +83,13 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
    without it (disable per project via `"docSync": false` in
    `.pi/review-gate.json`).
 
-2. **Record** — call the `record_review` tool with the reviewer's FULL raw
+3. **Record** — call the `record_review` tool with the reviewer's FULL raw
    output (the gate parses every fence; the worst verdict wins — never
    summarize or trim it).
 
-3. **Fix** — if BLOCKED: fix ALL findings (P0-P2; Nits at your judgment),
-   then go to step 1 again. Fixing without re-reviewing is a violation.
+4. **Fix** — if BLOCKED: fix ALL findings (P0-P2; Nits at your judgment),
+   then go to step 1 again (fixing edits files, so precommit must run again
+   before the next review). Fixing without re-reviewing is a violation.
    When you deliberately leave a Nit unfixed, log it in a structured line so
    the decision is auditable (sd0x-dev-flow Nit exemption log):
 
@@ -75,18 +97,31 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
    [NIT_DEFERRED] file:line | issue | reason: <why> | <ISO date>
    ```
 
-4. **Precommit** — once READY: call the **`run_precommit`** tool (optionally
-   `{ "mode": "full" }`; default is fast). This is the ONLY way to record a
-   precommit PASS: the extension spawns the trusted bundled runner itself and
-   verifies a private nonce receipt — a PASS can NOT be forged by printing a
-   `## Overall: ✅ PASS` sentinel from bash. FAIL ⇒ fix and return to step 1.
-   `NO CHECKS RUN` is NOT a pass — tell the user real checks are missing.
-
-   (Running `node scripts/precommit-runner.mjs` by hand still prints the
-   human-readable report, but only the `run_precommit` tool records the gate.)
-
 5. **Done** — call `declare_done`. It re-validates everything server-side and
-   rejects if any gate is unmet.
+   rejects if any gate is unmet. Both the precommit PASS and the READY review
+   must be bound to the SAME (current) fingerprint; if anything edited the
+   worktree since, run the affected step again.
+
+   Use `{ "mode": "full" }` for the final precommit of a change that touches
+   build/type surfaces: fast mode runs lint + tests, full mode adds typecheck
+   and build (and prefers a project's `test` script over `test:unit`).
+
+## Cost discipline (the loop is billed per ROUND, not per line)
+
+A round costs ~3 min of reviewer wall time plus the precommit run, and the
+gate re-arms on *every* edit (`review: READY → PENDING`,
+`precommit: PASS → NOT_RUN`). So:
+
+- **Batch the work.** Finish a coherent unit before triggering review. Ten
+  one-line fixes reviewed separately cost ten rounds; reviewed together, one.
+- **Pre-triage cheaply.** For a large diff, a fast cheap model can catch the
+  obvious problems first. A triage pass is *not* a review: it produces no
+  verdict and must never be fed to `record_review`.
+- **Keep re-reviews focused.** For a small fix-up round, give the reviewer the
+  previous findings, the fix diff, and the affected files in full — rather
+  than re-reading the whole tree. Use a full review for structural changes;
+  the verdict still binds to the complete worktree fingerprint either way.
+  This trades review breadth for latency — do not use it to hide a change.
 
 ## Rules
 

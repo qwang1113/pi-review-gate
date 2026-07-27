@@ -147,3 +147,40 @@ test("re-install overwrites agent definitions with the shipped version", () => {
   // Legacy three-way-merge state dir is cleaned up.
   assert.ok(!existsSync(legacyDir), "legacy merge-base dir must be removed");
 });
+
+
+// The pre-commit hook resolves the staged-divergence checker as
+// ../scripts/check-staged-divergence.cjs relative to its own directory. If the
+// installer does not ship it under that exact name the gate silently degrades
+// (the hook warns and skips), so assert it lands where the hook looks.
+test("install-global ships check-staged-divergence.cjs where the hook resolves it", () => {
+  const home = makeHome();
+  const res = installGlobal(home);
+  assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
+  const scriptsDir = join(home, ".pi", "agent", "scripts");
+  assert.ok(
+    existsSync(join(scriptsDir, "check-staged-divergence.cjs")),
+    "check-staged-divergence.cjs missing from installed scripts dir",
+  );
+  assert.ok(
+    existsSync(join(scriptsDir, "..", "scripts", "check-staged-divergence.cjs")),
+    "hook-relative path to the divergence checker does not resolve",
+  );
+});
+
+
+// The project installer must also ship the divergence checker under its exact
+// name, for the same reason as the global one (the hook resolves it by path).
+test("install-project ships check-staged-divergence.cjs under its exact name", () => {
+  const repo = mkdtempSync(join(tmpdir(), "rg-proj-"));
+  tempDirs.push(repo);
+  execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+  const res = spawnSync("bash", [join(ROOT, "scripts", "install-project.sh")], {
+    cwd: repo, encoding: "utf8", env: { ...process.env, HOME: makeHome() },
+  });
+  assert.equal(res.status, 0, `project installer failed: ${res.stderr}`);
+  assert.ok(
+    existsSync(join(repo, ".pi", "scripts", "check-staged-divergence.cjs")),
+    "check-staged-divergence.cjs missing from the project install",
+  );
+});

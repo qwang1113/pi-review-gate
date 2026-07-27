@@ -6,6 +6,7 @@ import {
   classifyAiAttribution,
   classifyNonEnglish,
   classifyShipCommand,
+  createVerdictMemo,
   isSuspiciousShipCandidate,
   parseClassifierJson,
   splitModelId,
@@ -259,4 +260,55 @@ test("word-bounded git/gh still catches path and obfuscation forms", () => {
   ]) {
     assert.equal(isSuspiciousShipCandidate(cmd), true, cmd);
   }
+});
+
+// ---------------------------------------------------------------------------
+// createVerdictMemo — caches the edit-time L6 label verdict (~2s/edit).
+
+test("verdict memo returns the same answer for an identical label set", () => {
+  const memo = createVerdictMemo();
+  const key = memo.key(["counts widgets", "rejects empty input"]);
+  assert.equal(memo.get(key), undefined, "cold cache must miss");
+  memo.remember(key, false);
+  assert.equal(memo.get(key), false);
+  // Same labels, fresh key computation -> same key -> hit.
+  assert.equal(memo.get(memo.key(["counts widgets", "rejects empty input"])), false);
+});
+
+test("any change to the label set misses the memo (added, edited, reordered)", () => {
+  const memo = createVerdictMemo();
+  const base = ["counts widgets", "rejects empty input"];
+  memo.remember(memo.key(base), false);
+  for (const variant of [
+    [...base, "zhengque de jieguo"],           // added a romanized label
+    ["counts widgets", "rejects empty inputs"], // edited one label
+    [base[1], base[0]],                         // reordered
+    ["counts widgets"],                         // removed one
+  ]) {
+    assert.equal(memo.get(memo.key(variant)), undefined, variant.join("|"));
+  }
+});
+
+test("a FAILED classification (undefined) is never remembered", () => {
+  // Caching a timeout would turn one transient model failure into a permanent
+  // pass for that label set — the guard must retry instead.
+  const memo = createVerdictMemo();
+  const key = memo.key(["zhengque de jieguo"]);
+  memo.remember(key, undefined);
+  assert.equal(memo.size, 0);
+  assert.equal(memo.get(key), undefined);
+  // A later successful call is remembered normally.
+  memo.remember(key, true);
+  assert.equal(memo.get(key), true);
+});
+
+test("memo is bounded — it cannot grow without limit in a long session", () => {
+  const memo = createVerdictMemo(4);
+  for (let i = 0; i < 20; i++) memo.remember(memo.key([`label ${i}`]), false);
+  assert.ok(memo.size <= 4, `size ${memo.size} must stay within the bound`);
+});
+
+test("labels containing the join separator cannot forge another key", () => {
+  const memo = createVerdictMemo();
+  assert.notEqual(memo.key(["a", "b"]), memo.key(["a\u0000b"]));
 });

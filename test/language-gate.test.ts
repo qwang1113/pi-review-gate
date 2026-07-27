@@ -52,13 +52,24 @@ test("language gate is injected in before_agent_start", () => {
   assert.match(EXT, /event\.systemPrompt\s*\+\s*"\\n\\n"\s*\+\s*LANGUAGE_DIRECTIVE/);
 });
 
+/**
+ * The "nothing changed this session" early return: any predicate, then
+ * `problems.length === 0`, then `return { systemPrompt }`.
+ */
+const EARLY_RETURN_RE = /if\s*\([^)]*problems\.length\s*===\s*0\s*\)\s*\{\s*return\s*\{\s*systemPrompt\s*\}/;
+
 test("language gate is UNCONDITIONAL — injected before the no-changes early return", () => {
   // Locate the handler body.
   const start = EXT.indexOf('pi.on("before_agent_start"');
   assert.ok(start >= 0, "handler must exist");
-  const body = EXT.slice(start, start + 2400);
+  const body = EXT.slice(start, start + 4000);
   const injectAt = body.indexOf("LANGUAGE_DIRECTIVE");
-  const earlyReturnAt = body.search(/if\s*\(!state\.hasCodeChange\s*&&\s*!state\.hasDocChange\s*&&\s*problems\.length\s*===\s*0\)/);
+  // Match the no-changes early return by its SHAPE ("no problems → return the
+  // bare systemPrompt") rather than by the exact predicate text, so the
+  // assertion keeps testing the ordering invariant instead of one spelling of
+  // the condition (it previously broke when the predicate was hoisted into a
+  // `gateArmed` local to skip a redundant fingerprint computation).
+  const earlyReturnAt = body.search(EARLY_RETURN_RE);
   assert.ok(injectAt >= 0 && earlyReturnAt >= 0, "both the injection and the early return must be present");
   assert.ok(injectAt < earlyReturnAt,
     "LANGUAGE_DIRECTIVE must be injected BEFORE the early return, so it applies even with no pending changes");
@@ -66,8 +77,8 @@ test("language gate is UNCONDITIONAL — injected before the no-changes early re
 
 test("the no-changes early return still returns the language systemPrompt (not undefined)", () => {
   const start = EXT.indexOf('pi.on("before_agent_start"');
-  const body = EXT.slice(start, start + 2400);
+  const body = EXT.slice(start, start + 4000);
   // The early-return branch must return the built systemPrompt object. The
   // explore workflow adds an earlier branch, so keep enough of the handler.
-  assert.match(body, /problems\.length\s*===\s*0\)\s*\{\s*return\s*\{\s*systemPrompt\s*\}/);
+  assert.match(body, EARLY_RETURN_RE);
 });

@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -13,6 +15,7 @@ import {
   coalesceToolPath,
   COMMIT_MSG_FORBIDDEN,
 } from "../lib/constants.ts";
+import { computeFingerprint, FINGERPRINT_VERSION, GIT_LOCATION_ENV, gitBaseEnv } from "../lib/fingerprint.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -170,17 +173,220 @@ test("normal conventional commit passes", () => {
 });
 
 // ---------------------------------------------------------------------------
-// CJS fingerprint script extension-set drift guard
+// CJS fingerprint script drift guard
 // ---------------------------------------------------------------------------
+// The former "CODE_DOC_EXT matches constants.ts" test was REMOVED, not
+// weakened: compute-fingerprint.cjs no longer classifies files by extension
+// at all. It now hashes a real git tree, and git hashes every file regardless
+// of extension, so there is no extension list left to drift. Keeping the test
+// would have meant re-introducing a dead constant purely to be asserted on.
+//
+// TS↔CJS drift is still covered, and more strongly, by
+// test/fingerprint.test.ts "parity: compute-fingerprint.cjs emits the same
+// digest as lib/fingerprint.ts", which compares actual digests over a
+// staged + unstaged + untracked + gate-owned-path mix rather than a literal.
 
-test("structural: compute-fingerprint.cjs CODE_DOC_EXT matches constants.ts", () => {
-  const cjsSrc = readFileSync(join(ROOT, "scripts", "compute-fingerprint.cjs"), "utf8");
-  // Extract the Set(...) call from the CJS file.
-  const setMatch = cjsSrc.match(/CODE_DOC_EXT\s*=\s*new Set\(\[([\s\S]*?)\]\)/);
-  assert.ok(setMatch, "must find CODE_DOC_EXT Set in compute-fingerprint.cjs");
-  // Parse the quoted extension list.
-  const cjsExts = [...setMatch[1].matchAll(/"([a-z0-9]+)"/g)].map(m => m[1]).sort();
-  const tsExts = [...CODE_EXTENSIONS, ...DOC_EXTENSIONS].sort();
-  assert.deepEqual(cjsExts, tsExts,
-    "CODE_DOC_EXT in compute-fingerprint.cjs must exactly match [...CODE_EXTENSIONS, ...DOC_EXTENSIONS]");
+// Rather than grep for another test's TITLE (which would still pass if that
+// test's body were emptied), assert the drift guard BEHAVIOURALLY here: run
+// both implementations over a non-trivial worktree and require identical
+// digests. This is a real check, not a check that a check exists.
+test("TS and CJS fingerprint implementations agree (drift guard)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-drift-"));
+  try {
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+    git("init");
+    git("config", "core.excludesFile", "/dev/null");
+    // Mixed shape: committed + staged + unstaged + untracked + gate-owned.
+    writeFileSync(join(dir, "code.ts"), "// v1\n");
+    git("add", "code.ts");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init");
+    writeFileSync(join(dir, "code.ts"), "// v2\n");
+    git("add", "code.ts");
+    writeFileSync(join(dir, "code.ts"), "// v3 unstaged\n");
+    writeFileSync(join(dir, "notes.md"), "docs\n");
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "review-gate-state.json"), "{}");
+
+    const tsFp = computeFingerprint(dir);
+    const cjsFp = JSON.parse(
+      execFileSync("node", [join(ROOT, "scripts", "compute-fingerprint.cjs"), dir], { encoding: "utf8" }),
+    );
+    assert.equal(tsFp.unavailable, false);
+    assert.equal(cjsFp.unavailable, false);
+    assert.equal(
+      cjsFp.digest,
+      tsFp.digest,
+      "lib/fingerprint.ts and scripts/compute-fingerprint.cjs drifted — the git hooks " +
+        "use the CJS copy, so any divergence makes every hook fail closed",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The parity check above contains no submodule, so both implementations could
+// omit submodule coverage identically and still agree. Exercise that path
+// explicitly: assert parity AND that both actually detect submodule content.
+test("TS and CJS agree on a repo WITH a dirty submodule (parity covers submodules)", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "rg-drift-par-"));
+  const sub = mkdtempSync(join(tmpdir(), "rg-drift-sub-"));
+  const commit = (cwd: string, msg: string) =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", msg], { cwd, stdio: "ignore" });
+  try {
+    for (const d of [parent, sub]) {
+      execFileSync("git", ["init"], { cwd: d, stdio: "ignore" });
+      execFileSync("git", ["config", "core.excludesFile", "/dev/null"], { cwd: d, stdio: "ignore" });
+    }
+    writeFileSync(join(sub, "s.ts"), "// sub v1\n");
+    execFileSync("git", ["add", "s.ts"], { cwd: sub, stdio: "ignore" });
+    commit(sub, "sub init");
+
+    writeFileSync(join(parent, "app.ts"), "// base\n");
+    execFileSync("git", ["add", "app.ts"], { cwd: parent, stdio: "ignore" });
+    commit(parent, "init");
+    try {
+      execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", sub, "sm"], {
+        cwd: parent, stdio: "ignore",
+      });
+    } catch {
+      t.skip("submodule add unsupported in this environment");
+      return;
+    }
+    commit(parent, "add sm");
+
+    const cjs = (d: string) =>
+      JSON.parse(execFileSync("node", [join(ROOT, "scripts", "compute-fingerprint.cjs"), d], { encoding: "utf8" }));
+
+    const tsClean = computeFingerprint(parent);
+    const cjsClean = cjs(parent);
+    assert.equal(cjsClean.digest, tsClean.digest, "TS/CJS drift with a clean submodule");
+
+    // Dirty the submodule; BOTH implementations must move, and agree.
+    writeFileSync(join(parent, "sm", "s.ts"), "// sub v2 CHANGED\n");
+    const tsDirty = computeFingerprint(parent);
+    const cjsDirty = cjs(parent);
+    assert.notEqual(tsDirty.digest, tsClean.digest, "TS impl missed a submodule edit");
+    assert.notEqual(cjsDirty.digest, cjsClean.digest, "CJS impl missed a submodule edit");
+    assert.equal(cjsDirty.digest, tsDirty.digest, "TS/CJS drift with a dirty submodule");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(sub, { recursive: true, force: true });
+  }
+});
+
+// The cwd-parity bug was mirrored in BOTH implementations, and it is exactly
+// the extension-vs-hook split that makes it dangerous: the extension binds a
+// verdict from the session cwd (possibly a subdirectory) while the hook always
+// runs at the toplevel. Assert the cross-implementation, cross-cwd square.
+test("TS (subdirectory) and CJS (repo root) agree on a repo with a submodule", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "rg-cwd-par-"));
+  const sub = mkdtempSync(join(tmpdir(), "rg-cwd-sub-"));
+  const commit = (cwd: string, msg: string) =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", msg], { cwd, stdio: "ignore" });
+  try {
+    for (const d of [parent, sub]) {
+      execFileSync("git", ["init"], { cwd: d, stdio: "ignore" });
+      execFileSync("git", ["config", "core.excludesFile", "/dev/null"], { cwd: d, stdio: "ignore" });
+    }
+    writeFileSync(join(sub, "s.ts"), "// sub v1\n");
+    execFileSync("git", ["add", "s.ts"], { cwd: sub, stdio: "ignore" });
+    commit(sub, "sub init");
+
+    writeFileSync(join(parent, "app.ts"), "// base\n");
+    execFileSync("git", ["add", "app.ts"], { cwd: parent, stdio: "ignore" });
+    commit(parent, "init");
+    try {
+      execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", sub, "sm"], {
+        cwd: parent, stdio: "ignore",
+      });
+    } catch {
+      t.skip("submodule add unsupported in this environment");
+      return;
+    }
+    commit(parent, "add sm");
+    mkdirSync(join(parent, "deep", "work"), { recursive: true });
+
+    const cjs = (d: string) =>
+      JSON.parse(execFileSync("node", [join(ROOT, "scripts", "compute-fingerprint.cjs"), d], { encoding: "utf8" }));
+
+    // extension-from-subdirectory vs hook-at-toplevel: the real pairing.
+    assert.equal(
+      computeFingerprint(join(parent, "deep", "work")).digest,
+      cjs(parent).digest,
+      "an extension session in a subdirectory would bind a verdict the root-run hook rejects",
+    );
+    // ...and the CJS mirror must itself be cwd-independent.
+    assert.equal(cjs(join(parent, "deep", "work")).digest, cjs(parent).digest,
+      "compute-fingerprint.cjs is not cwd-independent");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(sub, { recursive: true, force: true });
+  }
+});
+
+// TS/CJS parity for the sanitized environment: if one implementation strips a
+// relocating variable and the other does not, the extension and the git hooks
+// can be pointed at different repositories — the same fail-open that motivated
+// stripping them at all.
+test("TS and CJS strip the SAME git location variables", () => {
+  const cjsSource = readFileSync(join(ROOT, "scripts", "compute-fingerprint.cjs"), "utf8");
+  const divSource = readFileSync(join(ROOT, "scripts", "check-staged-divergence.cjs"), "utf8");
+  for (const source of [cjsSource, divSource]) {
+    const block = /GIT_LOCATION_ENV\s*=\s*\[([^\]]*)\]/.exec(source);
+    assert.ok(block, "each script must declare GIT_LOCATION_ENV");
+    const names = [...block![1].matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]).sort();
+    assert.deepEqual(names, [...GIT_LOCATION_ENV].sort(),
+      "lib/fingerprint.ts and the CJS mirrors drifted on which variables are stripped");
+    // The config-injection family is matched by PREFIX (the numbered
+    // GIT_CONFIG_KEY_<n>/VALUE_<n> forms are unbounded), so assert the pattern
+    // itself is mirrored rather than a list.
+    assert.match(source, /GIT_CONFIG_ENV_PREFIX\s*=\s*\/\^GIT_CONFIG\(_\|\$\)\//,
+      "each script must strip the GIT_CONFIG_* injection family by prefix");
+  }
+});
+
+test("the sanitized env actually removes every listed variable", () => {
+  const saved: Record<string, string | undefined> = {};
+  try {
+    const injected = [
+      ...GIT_LOCATION_ENV,
+      // The config-injection family, including numbered forms far past _0.
+      "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+      "GIT_CONFIG_KEY_17", "GIT_CONFIG_VALUE_17",
+    ];
+    for (const key of injected) { saved[key] = process.env[key]; process.env[key] = "/poison"; }
+    const env = gitBaseEnv();
+    for (const key of injected) {
+      assert.equal(env[key], undefined, `${key} must not survive into the git environment`);
+    }
+    assert.equal(env.PATH, process.env.PATH, "unrelated variables must be preserved");
+  } finally {
+    for (const key of Object.keys(saved)) {
+      if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]!;
+    }
+  }
+});
+
+// A fingerprint binding is only meaningful under the algorithm that produced
+// it, and the hook decides "migration vs code change" by comparing the
+// sidecar's version against the version the CJS mirror reports. If the two
+// implementations disagree about their own version, every commit would be
+// reported as an endless migration (or, worse, a real algorithm change would
+// go unnoticed and be reported as a code modification).
+test("TS and CJS agree on FINGERPRINT_VERSION", () => {
+  const cjs = readFileSync(join(ROOT, "scripts", "compute-fingerprint.cjs"), "utf8");
+  const declared = /const FINGERPRINT_VERSION = (\d+);/.exec(cjs);
+  assert.ok(declared, "the CJS mirror must declare FINGERPRINT_VERSION");
+  assert.equal(Number(declared![1]), FINGERPRINT_VERSION,
+    "lib/fingerprint.ts and scripts/compute-fingerprint.cjs drifted on the algorithm version");
+});
+
+test("the CJS mirror emits its version in every result, including UNAVAILABLE", () => {
+  const cjs = readFileSync(join(ROOT, "scripts", "compute-fingerprint.cjs"), "utf8");
+  assert.match(cjs, /UNAVAILABLE = \{[^}]*version: FINGERPRINT_VERSION/s,
+    "a fail-closed result must still carry the version the hook compares against");
+  assert.match(cjs, /return \{ digest, head, unavailable: false, version: FINGERPRINT_VERSION \}/,
+    "the success path must report the version too");
 });

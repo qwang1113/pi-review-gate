@@ -60,6 +60,10 @@ if (!nullableString(state.sessionId) ||
     (state.taskMode !== undefined && state.taskMode !== "loop" && state.taskMode !== "explore") ||
     (state.taskModeSource !== undefined && state.taskModeSource !== "auto" && state.taskModeSource !== "user") ||
     (state.strategicResetFired !== undefined && typeof state.strategicResetFired !== "boolean") ||
+    // Absent = a sidecar written before fingerprint versioning; any present
+    // value must be a real version number (a forged non-integer must not slip
+    // through and later compare "equal" to the running algorithm).
+    (state.fingerprintVersion !== undefined && !Number.isInteger(state.fingerprintVersion)) ||
     typeof state.updatedAt !== "string") {
   console.error("[review-gate] gate state shape/verdict invalid — failing closed.");
   process.exit(1);
@@ -91,6 +95,47 @@ if [[ -f "$LABEL_SCRIPT" ]]; then
   }
 else
   echo "[review-gate] test-label scanner not installed (skipping L6) — reinstall hooks to enable." >&2
+fi
+
+# Staged/worktree divergence gate (see scripts/check-staged-divergence.cjs for
+# the full rationale and the exact safe/unsafe state table). The fingerprint is
+# staging-invariant by design, so it cannot notice that `git commit` would ship
+# an INDEX that differs from the reviewed worktree; this check closes that gap.
+#
+# A NUL-safe Node helper does the comparison rather than a shell pipeline: an
+# earlier `comm` of two newline-delimited `git diff` lists missed the
+# staged-delete + worktree-recreate case entirely (`git diff` does not list
+# untracked files) and relied on git's path quoting.
+#
+# Missing script → FAIL CLOSED (deliberately unlike the L6 scanner above).
+#
+# L6 is a style gate: skipping it on an older install costs a lint check. This
+# checker is different — it is the ONLY guard for a core safety property. The
+# fingerprint is intentionally staging-invariant, so it cannot see that the
+# INDEX holds content A while the reviewed worktree holds B; skipping this
+# check therefore re-opens exactly the fail-open the checker was written to
+# close (review binds B, fingerprint matches B, commit publishes A). "Older
+# install compatibility" is not a valid reason to fail open on a safety
+# invariant, and the install scripts ship this file alongside the hook, so a
+# hook that cannot find it is a broken/partial install — which must be fixed,
+# not silently tolerated.
+DIVERGENCE_SCRIPT="${HOOK_DIR}/../scripts/check-staged-divergence.cjs"
+# The second argument is git's own GIT_INDEX_FILE: for `git commit -a` and
+# `git commit -- <path>` git stages into a TEMPORARY index and points the hook
+# at it, so the plain .git/index is NOT what the commit publishes. Passing it
+# explicitly (rather than letting the script read the environment) keeps an
+# ambient variable from redirecting the check while still comparing the index
+# this commit will really write. Empty when git did not set it.
+if [[ -f "$DIVERGENCE_SCRIPT" ]]; then
+  node "$DIVERGENCE_SCRIPT" "$(pwd)" "${GIT_INDEX_FILE-}" || {
+    echo "[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ..." >&2
+    exit 1
+  }
+else
+  echo "[review-gate] staged-divergence checker MISSING (${DIVERGENCE_SCRIPT}) — failing closed." >&2
+  echo "[review-gate] This check guards staged-vs-reviewed content; reinstall the hooks to restore it." >&2
+  echo "[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ..." >&2
+  exit 1
 fi
 
 FP_JSON=$(node "$FP_SCRIPT" "$(pwd)") || {
@@ -142,12 +187,38 @@ if (state.bypass && state.bypass.active) process.exit(0);
 if (!state.hasCodeChange && !state.hasDocChange) process.exit(0);
 
 let currentFp;
+let runningVersion;
 try {
   const fp = JSON.parse(fpJson);
   if (fp.unavailable) throw new Error("fingerprint unavailable");
   currentFp = fp.digest;
+  runningVersion = fp.version;
 } catch {
   console.error("[review-gate] cannot compute worktree fingerprint — failing closed.");
+  process.exit(1);
+}
+
+// FINGERPRINT ALGORITHM MIGRATION.
+//
+// A digest is only meaningful under the algorithm that produced it. Because a
+// Pi extension is a RESIDENT process that loads its modules once, right after
+// an upgrade the extension still writes bindings from the OLD algorithm while
+// this hook already runs the NEW one — so the hook rejected the very commit
+// the gate had just approved, reporting "code was modified after the last
+// READY review" even though the worktree was byte-identical. Detect that
+// explicitly and say what to do, instead of blaming the code. Still
+// fail-closed: an unverifiable binding never ships.
+const bindingVersion = state.fingerprintVersion;
+if ((state.hasCodeChange || state.hasDocChange) &&
+    Number.isInteger(runningVersion) && bindingVersion !== runningVersion) {
+  const boundTo = bindingVersion === undefined ? "an unversioned (pre-migration)" : `a v${bindingVersion}`;
+  console.error(
+    `[review-gate] fingerprint algorithm mismatch: the gate state carries ${boundTo} binding, ` +
+    `this hook computes v${runningVersion}. The code was NOT modified — the binding simply cannot ` +
+    "be verified under the current algorithm.");
+  console.error("[review-gate] To clear it: (1) restart Pi (or /reload) so the extension picks up the " +
+    "new algorithm, (2) run the precommit runner again, (3) get a fresh READY review.");
+  console.error("[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ...");
   process.exit(1);
 }
 

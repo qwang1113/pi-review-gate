@@ -264,6 +264,48 @@ export async function classifyShipCommand(
 }
 
 /**
+ * Bounded memo for classifier verdicts, keyed by the exact input set.
+ *
+ * Motivation: the edit-time L6 check sends a test file's label list to the
+ * model on EVERY edit, and an agent iterating on one test file re-sends an
+ * identical list each time — a ~2s round-trip added to each edit for an
+ * answer that cannot have changed.
+ *
+ * Two invariants keep this from weakening the guard:
+ *  1. EXACT key. The verdict is a pure function of the label list, so a hit
+ *     is the same answer, not an approximation. Any added, removed, edited or
+ *     reordered label yields a different key and is classified afresh.
+ *  2. NEVER remember `undefined`. An undefined verdict means the call failed
+ *     (timeout / unreachable model), which the callers treat as "do not
+ *     block". Caching it would turn one transient failure into a permanent
+ *     pass for that label set; instead the next edit retries the model.
+ */
+export function createVerdictMemo(max = 500) {
+  const memo = new Map<string, boolean>();
+  return {
+    key(inputs: readonly string[]): string {
+      // Length-prefixed so the encoding is UNAMBIGUOUS: a plain join on any
+      // separator lets ["a", "b"] and ["a<sep>b"] collide, which would serve
+      // one label set the verdict computed for a different one.
+      return inputs.map((s) => `${s.length}:${s}`).join("\u0000");
+    },
+    get(key: string): boolean | undefined {
+      return memo.get(key);
+    },
+    /** Store a DEFINITE verdict only; `undefined` (failed call) is dropped. */
+    remember(key: string, verdict: boolean | undefined): void {
+      if (verdict === undefined) return;
+      // Bounded so a long session cannot grow it without limit. Clearing
+      // wholesale (rather than LRU bookkeeping) is fine: a miss only costs
+      // one model call.
+      if (memo.size >= max) memo.clear();
+      memo.set(key, verdict);
+    },
+    get size(): number { return memo.size; },
+  };
+}
+
+/**
  * Cheap pre-filter for the ship additional layer: only commands that mention
  * git/gh AND carry non-trivial shell structure (expansion, substitution,
  * encoding, eval-style indirection, alias definition) are worth a model call.

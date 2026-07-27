@@ -427,3 +427,80 @@ test("L6 edit-time check scans the FULL projected file, not newText fragments", 
   const labelCheck = SRC.indexOf("checkTestLabels(");
   assert.ok(editBranch > 0 && labelCheck > 0, "checkTestLabels must exist");
 });
+
+// ---------------------------------------------------------------------------
+// Advisory fingerprint memo (perf): may inform the PROMPT, never a decision.
+
+test("the advisory fingerprint memo has exactly one caller: the prompt renderer", () => {
+  // A second caller is how this optimization would turn into a fail-open:
+  // the memo can serve a value computed before an untracked-by-events edit,
+  // which is harmless for prompt text and unacceptable for a gate decision.
+  const calls = [...SRC.matchAll(/advisoryFingerprint\(\)/g)].map((m) => m.index!);
+  // One definition (`function advisoryFingerprint()`) is excluded by the
+  // `()` + no `function` prefix match below.
+  const invocations = calls.filter((i) => !/function\s+$/.test(SRC.slice(Math.max(0, i - 20), i)));
+  assert.equal(invocations.length, 1,
+    `advisoryFingerprint() must have exactly ONE call site (found ${invocations.length})`);
+  const promptRenderer = SRC.indexOf('pi.on("before_agent_start"');
+  assert.ok(promptRenderer >= 0, "prompt renderer must exist");
+  assert.ok(invocations[0] > promptRenderer,
+    "the only call site must be inside the before_agent_start prompt renderer");
+});
+
+test("every enforcement path computes a FRESH fingerprint", () => {
+  // Each of these can block a ship, end a task, or bind a verdict, so none of
+  // them may read a memoized value.
+  const anchors: Array<[string, number]> = [
+    ['name: "declare_done"', 1200],
+    ['name: "record_review"', 6000],
+    ['name: "request_arbitration"', 4000],
+    ['pi.on("agent_settled"', 1200],
+    ["detectShipCommands(command)", 6000],
+  ];
+  for (const [anchor, window] of anchors) {
+    const at = SRC.indexOf(anchor);
+    assert.ok(at >= 0, `anchor not found: ${anchor}`);
+    const body = SRC.slice(at, at + window);
+    assert.ok(body.includes("computeFingerprint(cwd)"),
+      `${anchor} must call computeFingerprint(cwd) directly`);
+    assert.ok(!body.includes("advisoryFingerprint()"),
+      `${anchor} must NOT use the advisory memo`);
+  }
+});
+
+test("the advisory memo never caches an UNAVAILABLE fingerprint", () => {
+  // Caching the fail-closed sentinel would keep reporting "git unreadable"
+  // after git recovers, and (worse) invite someone to 'fix' that by ignoring
+  // the sentinel.
+  const at = SRC.indexOf("function advisoryFingerprint()");
+  assert.ok(at >= 0, "advisoryFingerprint must exist");
+  const body = SRC.slice(at, at + 900);
+  assert.match(body, /fp\.unavailable\s*\?\s*null\s*:/);
+});
+
+// The lifecycle wiring that no unit test can reach: restore() must COLLECT the
+// migration result from loadSidecar (which consumes it) and OR it into the
+// flag session_start reports. Asking migrateFingerprintVersion() again would
+// always answer "false" for the sidecar path, so the notice was silently dead
+// on the most common restore route.
+test("restore() collects the migration result from loadSidecar, not from a second call", () => {
+  const restoreAt = SRC.indexOf("function restore(");
+  assert.ok(restoreAt >= 0, "restore() must exist");
+  const body = SRC.slice(restoreAt, restoreAt + 4000);
+
+  assert.match(body, /loadSidecar\(sidecarPath\(cwd\),\s*\w+\)/,
+    "loadSidecar must be given an out-parameter to report the migration");
+  assert.match(body, /fingerprintMigrated\s*=\s*migrateFingerprintVersion\(state\)\s*\|\|\s*\w+\.migrated/,
+    "the sidecar's migration result must be OR'd into the reported flag");
+});
+
+test("session_start surfaces the migration notice and clears the flag", () => {
+  const at = SRC.indexOf('pi.on("session_start"');
+  assert.ok(at >= 0, "session_start handler must exist");
+  const body = SRC.slice(at, at + 4000);
+  assert.match(body, /if \(fingerprintMigrated\)/,
+    "an invalidated binding must be explained, not silently applied");
+  assert.match(body, /FINGERPRINT_MIGRATION_NOTICE/);
+  assert.match(body, /fingerprintMigrated = false/,
+    "the flag must be cleared so the notice is not repeated");
+});

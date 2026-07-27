@@ -131,15 +131,175 @@ node ~/.pi/agent/scripts/pi-review-gate-fetch-leaderboard.mjs --write \
 
 Also ported: **one-way stale-state reconciliation** (git-clean can clear change
 flags, but only edits can set them), **untracked-file-aware fingerprints**
-(`-uall`, PR #7's `-uno` regression), and **atomic sidecar writes** (temp+rename
+(PR #7's `-uno` regression), and **atomic sidecar writes** (temp+rename
 so a crash can't leave truncated JSON for a fail-open parser).
 
+The fingerprint is **content-addressed and staging-invariant**: it is a real
+git *tree hash* of the whole worktree, computed in a private shadow index, so
+it depends only on file contents and paths — never on whether those contents
+are currently unstaged, staged, or committed. This matters because the gate
+binds a READY review to a fingerprint: an earlier implementation hashed
+`git diff --cached` + `git diff HEAD` + `git status` + HEAD, so a plain
+`git add` (and again `git commit`) changed the digest **without a single byte
+of code changing**, and the L3 hooks rejected the very commit the gate had just
+approved. That forced a redundant full review round on every staging operation
+and pushed users toward `REVIEW_GATE_BYPASS=1`, which disarms the gate far more
+thoroughly than the false mismatch it worked around. A tree hash makes staging
+and committing invisible while any real edit — including a new untracked
+file — still changes the digest and correctly invalidates the pass.
+
+> Implementation note: the shadow index is seeded from the real index and its
+> mtime is **backdated to `min(indexMtime, now) - 5s`**. `copyFileSync` stamps a
+> newer mtime, which defeats git's
+> [racily-clean](https://git-scm.com/docs/racy-git) re-hash and makes a
+> same-size edit in the same mtime bucket invisible to the digest — a genuine
+> fail-open (measured 25/1500) covered by a dedicated regression test.
+> An older-looking index makes git re-hash *more*, never less. The clamp to
+> `now` matters: backdating a fixed margin from a **future** index mtime (clock
+> skew, a rolled-back clock, a copied tree) still lands in the future and
+> re-arms the same fail-open — also covered by a regression test.
+>
+> Backdating alone is still not sufficient, because it only makes entries whose
+> mtime is *near* the index look racy. A file carrying an **ancient preserved
+> mtime** (restored from backup, `rsync -a`, an unpacked archive) keeps looking
+> clean, so the index is built in **two passes**: `git add -A --renormalize`
+> re-reads tracked file *content* rather than trusting the stat cache, then a
+> plain `git add -A` picks up untracked/new/deleted paths (`--renormalize`
+> alone adds no untracked files — running only that pass silently dropped every
+> untracked file, a worse fail-open than the one it fixed). Both passes plus the
+> backdate cost ~340ms on a 9k-file repo.
+>
+> Seeding is **required for correctness**, not just speed (~78ms vs ~385ms on a
+> 9k-file repo): `git add` will not stage a path matching `.gitignore`, so an
+> empty index silently drops files that are gitignored yet **tracked**
+> (`git add -f`) — which `git commit -a` still ships.
+
+### Staged vs. reviewed content
+
+The digest is worktree-based so `git add` cannot invalidate a review — but
+`git commit` (without `-a`) ships the **index**. If a path is staged with
+content A while the worktree holds the reviewed content B, the commit would
+ship A while the gate bound B, and the digest never moves. Folding the index
+tree into the digest would simply reintroduce staging-sensitivity, so this is
+enforced as a separate commit-time condition
+(`scripts/check-staged-divergence.cjs`). It builds two trees — the real index
+(what the commit would write) and the worktree (what the review bound) — and
+blocks any path the commit would change whose staged **tree entry** differs
+from the worktree entry. It compares the full entry (mode, type and object id),
+not just the object id: a staged executable bit, or a symlink↔regular-file type
+change whose object content happens to match, is still a different committable
+tree. Blocked states include a partially staged edit (`git add -p`), a staged
+delete whose path was recreated, and a staged rename whose source path was
+recreated. A merely unstaged edit is safe (the index still matches HEAD, so
+the commit changes nothing), as is a staged edit or delete that matches the
+worktree, so the check is per-path rather than global.
+
+For **submodules** the parent tree holds only a gitlink, so index and worktree
+trees look identical whenever they agree on that OID — even if the checkout
+holds different reviewed content. So whenever a commit would change a
+submodule's gitlink, the content that gitlink *publishes* is compared against
+what is actually checked out, **recursively** through nested submodules (an
+outer submodule can match its staged commit exactly while a nested one holds
+unpublished content). A dirty submodule whose gitlink is *not* being committed
+is the safe analogue of an unstaged edit and does not block.
+
+It compares **content, not `git status` output**: `assume-unchanged` and
+`skip-worktree` suppress status reporting, and a status-based version silently
+passed a staged blob that differed from the reviewed worktree. Paths are read
+NUL-delimited, so names with spaces, newlines or non-ASCII characters are
+handled as raw bytes. Any internal failure exits non-zero (fail closed) — only
+a genuinely non-git directory is a clean skip. A **missing** script makes the
+hook fail closed too (it guards a safety invariant, so a partial install must
+block rather than silently downgrade); the script itself never swallows errors.
+
+That "genuinely non-git" decision is **structural, never text-based**. When
+`git rev-parse` itself fails, the script skips only if the path exists *and*
+carries no git metadata anywhere up the tree — checking, at every level, both a
+`.git` entry (via `lstat`, so a **dangling symlink** counts as metadata rather
+than as "nothing here") and the bare-repo shape (`HEAD` + `objects/` + `refs/`).
+Matching git's stderr for "not a git repository" was wrong in both directions:
+git prints that same phrase for a **broken** worktree (a `.git` gitfile whose
+target gitdir is gone) — which would fail open — and a localized git prints
+none of it, which would block ordinary non-repo directories. Exercised
+branches: plain directory → skip; bare repo → skip; missing gitdir target →
+block; malformed gitfile → block; dangling `.git` symlink → block;
+subdirectory of an unparseable bare repo → block; unparseable config → block;
+nonexistent path → block.
+
+### Ambient git environment variables are stripped
+
+Every git invocation in the fingerprint, its CJS mirror and the divergence
+checker runs with two families of variables **removed**, so the repository is
+always discovered from the path the caller asked about and the configuration is
+the repository's own:
+
+| Family | Variables | Reproduced fail-open |
+|---|---|---|
+| Relocation | `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`, `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM` | With `GIT_DIR`/`GIT_WORK_TREE` pointing at a decoy repo, `computeFingerprint(A)` returned a digest describing the decoy — a real edit in A left "its" fingerprint unchanged — and the divergence checker inspected the decoy and exited 0 while A held staged content differing from the reviewed worktree |
+| Config injection (matched by prefix `^GIT_CONFIG(_\|$)`) | `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG` | `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile GIT_CONFIG_VALUE_0=…` made a real untracked edit invisible to `git add`, so the digest never moved — no `GIT_DIR` needed |
+
+The numbered config forms are unbounded, so they are matched by **prefix**, not
+by a fixed list. The user's own `~/.gitconfig` still applies; what is removed is
+an ambient variable's ability to substitute or extend it for this process.
+Parity tests assert the TS and CJS sides never drift apart, and behavioural
+tests run the actual injection against both.
+
+### The index a commit will actually publish
+
+`git commit -a` and `git commit -- <path>` do **not** publish `.git/index`:
+git stages into a temporary index (measured: `<gitdir>/index.lock` and
+`<gitdir>/next-index-<pid>.lock`) and points the hook at it via
+`GIT_INDEX_FILE`. Comparing the plain index there judges content the commit
+will never ship, which blocked a perfectly safe `git commit -a` whose temporary
+index already equalled the reviewed worktree.
+
+The hook therefore forwards that path **explicitly** as an argument
+(`"${GIT_INDEX_FILE-}"`), and the checker accepts it only after verifying its
+**canonical** path (symlinks resolved, via the nearest existing ancestor so
+git's not-yet-created temporary indexes still validate) resolves inside the
+repository's git dir or common dir — anything else fails closed. A lexical
+check was not enough: a symlink planted inside the git dir passed containment
+while the copy followed it out of the repository. A standalone run without the argument uses the plain index, so an
+ambient variable still cannot redirect the check. Submodule recursion keeps
+using each submodule's own index, since the forwarded path describes exactly
+one repository.
+
+Everything runs from the repository **toplevel**, resolved once at startup.
+Several git commands are implicitly cwd-scoped, and each was a silent
+fail-open when the checker was pointed at a subdirectory: `ls-tree` lists only
+the cwd prefix (empty listing ⇒ "no divergence" ⇒ exit 0), `ls-files` returns
+cwd-relative paths, and the `update-index` calls built from them then failed
+outright.
+
+Three content sources sit outside a plain tree hash and are handled explicitly:
+
+- **Submodules** — a parent tree records only each submodule's committed
+  gitlink, so edits inside a checked-out submodule leave it bit-identical. Each
+  submodule is hashed **recursively with the same worktree-tree algorithm**, so
+  its real file content is bound (hashing `git status` text instead would miss a
+  second edit to an already-dirty file, whose status line is unchanged).
+  Submodule paths are read from the **index** (gitlinks), which stays
+  authoritative even when `.gitmodules` is malformed — `git config --file` would
+  report “no submodules” and “file is corrupt” identically. An uninitialized /
+  deinit’d submodule has no checkout to review and is recorded as such rather
+  than failing closed. Repos without submodules keep the bare tree hash.
+  Recursion is capped at 10 levels; deeper nesting fails closed
+  (`unavailable`) rather than recursing without bound.
+- **Tracked-but-gitignored files** — shippable (`git commit -a` commits them),
+  so they must be hashed; see the seeding note above.
+- **CRLF / clean filters** — the digest binds *the content git will commit*.
+  Under `core.autocrlf`, a line-ending-only change is normalized away and git
+  itself reports “nothing to commit”, so the shipped artifact is byte-identical
+  to what was reviewed. Without `autocrlf`, such a change is genuine content
+  and does move the digest.
+
 The fingerprint **excludes gate-owned paths** (`.pi/`, `.pi-subagents/` — via
-git `:(exclude)` pathspecs, mirrored in the CJS hook script with a parity
-test): the gate itself rewrites `.pi/review-gate-state.json` on every persist,
-so including it would let `record_review` immediately invalidate its own READY
-binding in any repo that does not gitignore `.pi`. Reviews judge project code,
-never Pi's state dirs. (Recommended anyway: add `.pi/review-gate-state.json`
+repo-root-anchored git pathspecs, mirrored in the CJS hook script with a digest
+parity test): the gate itself rewrites `.pi/review-gate-state.json` on every
+persist, so including it would let `record_review` immediately invalidate its
+own READY binding in any repo that does not gitignore `.pi`. Reviews judge
+project code, never Pi's state dirs. (Recommended anyway: add
+`.pi/review-gate-state.json`
 and `.pi-subagents/` to the project's `.gitignore` — gate state is per-machine
 and has no business in version control.)
 
@@ -214,6 +374,31 @@ bash ~/workspace/pi-review-gate/scripts/install-global.sh
 
 Then restart Pi or run `/reload`. The extension auto-discovers from `~/.pi/agent/extensions/`.
 
+### Upgrading: fingerprint algorithm migrations
+
+**Restart Pi (or `/reload`) after upgrading — before your next commit.**
+
+A Pi extension is a resident process: it loads its modules once at session
+start and does not hot-reload. The git hooks, in contrast, execute the files on
+disk. So if an upgrade changes the fingerprint algorithm, a still-running
+session computes bindings with the OLD algorithm while the freshly installed
+hook computes the NEW one, and the hook rejects the very commit the gate just
+approved.
+
+That is why every binding records a `fingerprintVersion`:
+
+- **The extension** invalidates bindings from another version on load (READY →
+  `PENDING`, PASS → `NOT_RUN`) and tells you why. Change flags are kept, so the
+  gate re-arms rather than disarms. Old digests are never converted or
+  inherited: a v1 digest says nothing about what v2 covers.
+- **The hook** reports the mismatch as a *migration*, not as "code was modified
+  after the last READY review", and prints the three recovery steps: restart Pi
+  → re-run the precommit runner → get a fresh READY review.
+
+So after upgrading, expect **one** extra review round. If a commit keeps being
+rejected with `fingerprint algorithm mismatch`, the resident extension is still
+on the old algorithm — restart Pi first.
+
 ### Per-project
 
 Use the installer (it lays out `.pi/` the same way as the global install, so the
@@ -247,14 +432,21 @@ Work normally. The moment the model edits a code or doc file:
 The loop protocol (also available as the `review-loop` skill):
 
 ```
-edit code
+edit code (batch related edits — the loop is billed per ROUND, not per line)
+  → call the run_precommit tool FIRST                     # extension spawns the trusted runner
   → run an independent review (subagent / codex MCP / second model)
   → call record_review with the FULL reviewer output      # all fences parsed, worst wins
-  → BLOCKED? fix everything, re-review, record again
-  → READY?  call the run_precommit tool                   # extension spawns the trusted runner
-  → PASS?   call declare_done                             # re-validated server-side
+  → BLOCKED? fix everything, then start again from precommit
+  → READY?  call declare_done                             # re-validated server-side
   → ship    (git commit now passes the gate)
 ```
+
+**Why precommit runs before the review.** The runner executes `lint`/`lint:fix`
+in *both* modes, and `lint:fix` edits files. Every edit re-arms the gate
+(`READY → PENDING`), so a review obtained before the runner reformats anything
+is thrown away — a wasted round at ~3 min of reviewer wall time. Running the
+cheap, deterministic checks first also keeps the expensive judge from spending
+minutes on defects a 15s test run reports for free.
 
 The reviewer should end with a fenced JSON verdict:
 
@@ -377,8 +569,15 @@ Configure via `.pi/review-gate.json` → `"arbiter": { "enabled", "model",
 - Precommit PASS forged from bash stdout (`printf '## Overall: ✅ PASS'`, `… || node runner`, here-docs, quoted operators) → impossible: only `run_precommit` (trusted spawn + nonce receipt) can record PASS
 - Precommit receipt missing / nonce mismatch / cwd mismatch / oversized / non-zero exit → ERROR → ship blocked
 - Precommit ran zero checks → `NO_CHECKS_RUN` (distinct exit code 2) → ship blocked
-- Any code/doc edit after READY/PASS → fingerprint mismatch → ship blocked
+- Any code/doc edit after READY/PASS → fingerprint mismatch → ship blocked (`git add` / `git commit` alone are NOT edits: the fingerprint is content-addressed, so pure staging/committing preserves the binding)
 - Unknown/forged verdict enum in the sidecar (e.g. `precommit:"READY"`) → rejected by the loader **and** default-denied in `unmetRequirements` and the git hook → ship blocked
+- Gate state carries a binding from a DIFFERENT fingerprint algorithm (upgrade with a still-resident old extension) → commit blocked and reported as a **migration**, with recovery steps — never silently trusted, never converted, and never misreported as a code modification; the extension invalidates such bindings on load while keeping the change flags, so the gate re-arms instead of disarming
+- Advisory (prompt-only) fingerprint memo goes stale, or `advisoryChangeToken()` cannot be computed → no effect on any decision: the memo has a single call site (structurally asserted) and every enforcement path recomputes the fingerprint; an unavailable token or an UNAVAILABLE fingerprint is never memoized
+- `scripts/check-staged-divergence.cjs` missing from the hook's install tree → commit blocked (**fail-closed**, not warn-and-skip): it is the only guard for "staged content ≠ reviewed worktree", which the staging-invariant fingerprint cannot see. The L6 label scanner keeps warn-and-skip because it is a style gate, not a safety invariant
+- Session started in a repo SUBDIRECTORY → same digest as the repo root: submodule paths enter the digest repo-root-relative (`git ls-files --full-name`) and are resolved against the toplevel, so the extension and the root-run hooks cannot disagree (a cwd-dependent digest used to reject every commit from a subdirectory of a repo with submodules)
+- Ambient `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / … pointing at another repository → ignored: every git call in the fingerprint, its CJS mirror and the divergence checker runs with those variables stripped, so neither the digest nor the staged-divergence verdict can be redirected at a decoy repo
+- Ambient `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` / `GIT_CONFIG_PARAMETERS` / … injecting `core.excludesFile` (or any other setting) → ignored: the whole `GIT_CONFIG*` family is stripped by prefix, so configuration injection cannot hide a real edit from the digest
+- `git commit -a` / `git commit -- <path>` (git publishes a TEMPORARY index) → correctly judged: the hook forwards git's own `GIT_INDEX_FILE` as an explicit argument and the checker verifies it belongs to this repository, so these commits are neither wrongly blocked nor able to ship unreviewed content
 - Ship command hidden in `bash -c` / `eval` / `xargs` → still detected (over-detection preferred)
 - Ship command obfuscated via `g""it` / `g"i"t` / `git${IFS}commit` / `git$IFS"commit"` / `${x:=git}` / `${x:-g}${y:-it}` / `$(printf git) commit` (dynamic head) / `\g\i\t` / backslash-newline continuation → shell-dequoting + de-obfuscation + dynamic-head detection still catch it (fail-closed)
 - Ship command hidden behind an INLINE git alias (`git -c "alias.ship=commit --no-verify" ship`, attached `-calias.x=commit`, shell-alias body `!git commit`, or `--config-env=alias.x=VAR`) → the alias body is scanned for `commit`/`push` and flagged (fail-closed; opaque config-env bodies default to commit)
@@ -449,6 +648,39 @@ including a content hash, by editing the checker too):
   sidecar directly). Making it unforgeable would require the extension to spawn
   the reviewer itself and verify a receipt, like `run_precommit` (future
   hardening), not a runtime source check.
+- **Git's content-transformation pipeline as a hidden fingerprint input.** The
+  digest asks *git* what the worktree contains, so anything that reconfigures
+  git's answer — `core.excludesFile`, `.gitattributes` filters/eol with the
+  filter definition living in `~/.gitconfig` or `.git/config`, or a substituted
+  `HOME`/`XDG_CONFIG_HOME` at invocation time — changes what the digest sees.
+  Ambient `GIT_DIR`-style relocation and `GIT_CONFIG_*` injection ARE stripped
+  (see above); these two remain, deliberately:
+
+  1. An injected ignore rule can hide a **new untracked file** from the digest.
+     Measured bound: such a file also cannot enter any commit — `git add -A`
+     skips it, and the only way to ship it, `git add -f`, writes it into the
+     real index, which moves the fingerprint and **fails closed** (verified).
+     So a stale READY can never *publish* it; the blind spot is prompt-level,
+     not ship-level.
+  2. A **non-deterministic clean filter** can make the committed blob differ
+     from every tree the gate hashed. Its definition must live in git config,
+     which is the same privilege as editing the hooks themselves — the
+     already-excluded control-plane class (a principal who can write
+     `.git/config` can more cheaply delete `.git/hooks/pre-commit`). Note also
+     that such a filter makes the digest of an *unchanged* worktree unstable
+     (measured: A/B/A across three consecutive runs), so it mostly manifests as
+     repeated fail-closed mismatches; publishing unreviewed content requires
+     deliberately tuning the filter's state machine.
+
+  Check your own machine with
+  `git config --show-origin --get-all core.excludesFile` and
+  `git config --show-origin --get-regexp '^filter\.'` — these list every active
+  source. Treat a repo whose `.gitattributes` names a filter you did not
+  knowingly install as hostile input during review (the `.gitattributes` edit
+  itself always moves the fingerprint and lands in front of the reviewer).
+  *Future hardening:* materialize the worktree tree once per hook decision and
+  reuse it, instead of re-running the filter for each comparison — that also
+  removes duplicated work.
 
 The git hooks (L3) are a useful second layer, not a complete boundary: they
 depend on the sidecar existing and being untampered, and `gh pr create/edit` is not a
@@ -558,13 +790,77 @@ scanned independently.
 Like the other layers, L6 is short-circuited by `/gate-bypass` (state-level) and
 `REVIEW_GATE_BYPASS=1`. Missing scanner (older installs) → warn-and-skip, never
 a blocked commit; a violation → the commit is blocked with the offending
-`file:line`.
+`file:line`. (Warn-and-skip is specific to this **style** gate. The
+staged-divergence checker, which guards a safety invariant, fails closed when
+it is missing — see the fail-closed inventory.)
 
 ## Development
 
 ```bash
-npm test        # 560+ tests, node:test native TS (no build step)
+npm test        # 600+ tests, node:test native TS (no build step)
 ```
+
+### Why the suite is slow, and two rejected ways to speed it up
+
+Two fingerprint regressions are reproduced by TIMING, not by construction, so
+they loop (300 and 25 rounds). The 300-round loop alone is ~73s of a ~100s
+`npm test`, and the review loop pays it on every round. Both attempts to cut
+that cost were tried and withdrawn — they are documented here so they are not
+re-attempted naively:
+
+1. **An env knob (`RG_RACE_ITERS=25`) for a commit-time fast path.** Justified
+   by a measurement — a mutated implementation (shadow-index backdate **and**
+   `--renormalize` removed) missed the edit in 83/100 rounds — which would put
+   the escape probability at 25 rounds near 0.17^25. An independent reviewer
+   re-ran the same experiment and the mutated implementation **passed 3 of 5
+   runs** at 25 rounds. The rounds are not independent trials (one shared
+   repository; the window depends on filesystem timestamp granularity, load and
+   pacing), so a per-round rate cannot be exponentiated into a guarantee. The
+   knob was removed rather than kept with a vaguer claim.
+2. **A "deterministic" replacement** — restore the cached stat after a
+   same-size rewrite so the stat cache would consider the file clean. It does
+   not fool git: ctime cannot be forged from user space and sub-second mtime
+   still moves, even with `core.checkStat=minimal` and `core.trustctime=false`.
+   The test passed against a fully mutated implementation, i.e. it asserted
+   nothing. `test/fingerprint.test.ts` keeps a note so the next reader does not
+   rebuild it.
+
+The sound route, if these loops must get cheaper, is to make each ROUND cheaper
+rather than run fewer of them (dropping the per-round commit measured
+112ms/round vs 219ms/round) — and to prove the new construction still fails
+reliably against the mutated implementation before adopting it.
+
+Coverage boundary, stated explicitly: these loops fail only when **both**
+safeguards are gone. Removing just `--renormalize` is caught deterministically
+by `an edit to a file with an ancient preserved mtime is not invisible`;
+removing just the backdate is caught by neither, because `--renormalize`
+re-reads content unconditionally — the backdate is a deliberate redundant
+second line of defence.
+
+### Latency: where the gate actually costs you time
+
+| Layer | Cost | Notes |
+|---|---|---|
+| Per-turn prompt fingerprint | ~65 ms (56 files) / ~575 ms (9k files) | Skipped entirely when the session tracks no change; otherwise memoized behind `advisoryChangeToken()` (~10 ms / ~47 ms) |
+| Edit-time L6 label check | ~45 ms + one ~2 s model call | The model call is memoized per label set |
+| `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
+| `run_precommit` (this repo) | ~100 s | Dominated by the two timing loops above; see the note on why they are not reducible |
+| **A review round** | **~3 min reviewer + precommit run** | Dominates everything above by two orders of magnitude |
+
+The practical consequence: batching edits into fewer, larger review rounds
+saves far more wall time than any micro-optimization here, because the loop is
+billed per round.
+
+The fingerprint deliberately defeats git's stat cache (`git add --renormalize`,
+~80% of its cost) because trusting that cache reintroduced a measured 25/1500
+fail-open. It is therefore **not** cached across turns by any event-based
+heuristic — `sed -i`, an external editor, or a background process all change
+the worktree with no event to observe. The only memo is
+`advisoryChangeToken()`: a filesystem probe (porcelain status + size/mtime of
+every changed path) that gates a *prompt-rendering* recompute. Every
+enforcement path — ship blocks, `declare_done`, `record_review`, arbitration,
+and the git hooks — recomputes the real fingerprint unconditionally, so a
+stale memo can only produce a stale prompt, never a stale gate decision.
 
 Layout:
 
@@ -581,7 +877,7 @@ lib/lang-detect.ts            L5: non-Latin-script detection for commit/PR Engli
 scripts/scan-test-labels.cjs  L6: non-English test-label scanner (pre-commit, staged content)
 lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count table → PASS/FAIL/ERROR)
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)
-lib/fingerprint.ts            worktree fingerprint (HEAD+staged+unstaged+untracked)
+lib/fingerprint.ts            worktree fingerprint (content-addressed git tree hash; staging-invariant)
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/verdict-parse.ts          all-fence worst-wins verdict parser
 scripts/precommit-runner.mjs  PASS/FAIL/NO_CHECKS_RUN runner; writes nonce receipt for run_precommit

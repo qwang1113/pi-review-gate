@@ -19,6 +19,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
+import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
 export type PrecommitVerdict = "PASS" | "FAIL" | "NO_CHECKS_RUN" | "NOT_RUN";
@@ -53,6 +54,17 @@ export interface RoundRecord {
 
 export interface GateState {
   schema: 1;
+  /**
+   * Algorithm version of the digests in `review.fingerprint` /
+   * `precommit.fingerprint` (see FINGERPRINT_VERSION). Optional because
+   * sidecars written before versioning have none — those are treated as v1 and
+   * their bindings are invalidated on load, never reinterpreted.
+   *
+   * This is deliberately NOT the `schema` field: the sidecar SHAPE is
+   * unchanged, so bumping `schema` would make older hooks reject the file
+   * outright ("unknown gate schema") instead of reporting a migration.
+   */
+  fingerprintVersion?: number;
   sessionId: string | null;
   hasCodeChange: boolean;
   hasDocChange: boolean;
@@ -102,6 +114,7 @@ export interface GateState {
 export function emptyState(sessionId: string | null, maxRounds: number): GateState {
   return {
     schema: 1,
+    fingerprintVersion: FINGERPRINT_VERSION,
     sessionId,
     hasCodeChange: false,
     hasDocChange: false,
@@ -118,7 +131,18 @@ export function sidecarPath(cwd: string, configDirName = ".pi"): string {
   return join(cwd, configDirName, "review-gate-state.json");
 }
 
-export function loadSidecar(path: string): GateState | undefined {
+/**
+ * Load and validate the sidecar.
+ *
+ * The fingerprint migration is applied HERE, not left to callers: forgetting
+ * it would mean trusting a binding produced by another algorithm, which is the
+ * one outcome this must never allow. Because the migration is consumed here,
+ * callers that need to TELL the user why their READY disappeared must pass
+ * `out` — reading `state.fingerprintVersion` afterwards is useless, it has
+ * already been updated (that exact mistake silenced the notice on the
+ * sidecar-restore path).
+ */
+export function loadSidecar(path: string, out?: { migrated: boolean }): GateState | undefined {
   try {
     const raw = readFileSync(path, "utf8");
     const parsed = JSON.parse(raw) as GateState;
@@ -147,11 +171,44 @@ export function loadSidecar(path: string): GateState | undefined {
     if (parsed.review.docSync !== undefined && !DOC_SYNC_ATTESTATIONS.has(parsed.review.docSync as string)) {
       delete parsed.review.docSync;
     }
+    const migrated = migrateFingerprintVersion(parsed);
+    if (out) out.migrated = migrated;
     return parsed;
   } catch {
     return undefined;
   }
 }
+
+/**
+ * Invalidate bindings that were produced by a DIFFERENT fingerprint algorithm.
+ *
+ * A digest only means something under the algorithm that produced it, so an
+ * older (or newer, or corrupt) version number cannot be trusted, reinterpreted
+ * or converted — it is dropped back to "needs a fresh round". The change flags
+ * are deliberately preserved: the worktree really does hold uncommitted work,
+ * and forgetting that would DISARM the gate instead of re-arming it.
+ *
+ * Returns true when a migration actually happened, so callers can tell the
+ * user why their READY disappeared.
+ */
+export function migrateFingerprintVersion(state: GateState): boolean {
+  if (state.fingerprintVersion === FINGERPRINT_VERSION) return false;
+  state.fingerprintVersion = FINGERPRINT_VERSION;
+  const hadBinding =
+    state.review.verdict !== "PENDING" || state.review.fingerprint !== null ||
+    state.precommit.verdict !== "NOT_RUN" || state.precommit.fingerprint !== null;
+  state.review = { verdict: "PENDING", fingerprint: null, at: state.review.at };
+  state.precommit = { verdict: "NOT_RUN", fingerprint: null, at: state.precommit.at };
+  return hadBinding;
+}
+
+/** Operator-facing explanation for a fingerprint-algorithm migration. */
+export const FINGERPRINT_MIGRATION_NOTICE =
+  "review-gate: the worktree fingerprint algorithm changed in this version, so the previous " +
+  "READY review and precommit PASS no longer describe this worktree and were invalidated " +
+  "(the code itself was NOT modified). Run the precommit runner and an independent review again. " +
+  "If the git hook keeps rejecting a commit the gate just approved, the resident extension is " +
+  "still running the old algorithm — restart Pi (or /reload) first.";
 
 export function saveSidecar(path: string, state: GateState): void {
   state.updatedAt = new Date().toISOString();

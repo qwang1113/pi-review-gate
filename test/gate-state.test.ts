@@ -10,6 +10,8 @@ import {
   isOscillating,
   countOscillations,
   loadSidecar,
+  migrateFingerprintVersion,
+  FINGERPRINT_MIGRATION_NOTICE,
   saveSidecar,
   shouldStrategicReset,
   sidecarPath,
@@ -18,6 +20,7 @@ import {
   type RoundRecord,
   type GateVerdict,
 } from "../lib/gate-state.ts";
+import { FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
 
 const tempDirs: string[] = [];
 function makeTemp(): string {
@@ -427,4 +430,158 @@ test("legacy sidecar without strategicResetFired still validates (schema compat)
   const loaded = loadSidecar(p);
   assert.ok(loaded, "legacy schema-1 sidecar must still load");
   assert.ok(shouldStrategicReset(loaded!, true, 3), "absent flag ⇒ not fired");
+});
+
+// ---------------------------------------------------------------------------
+// migrateFingerprintVersion(): the extension side of the same problem. A
+// binding produced by a different algorithm cannot be verified by this one, so
+// it is invalidated rather than trusted — but the CHANGE FLAGS must survive,
+// otherwise the migration would disarm the gate instead of re-arming it.
+
+test("loading a pre-versioning sidecar invalidates its bindings", () => {
+  const state = emptyState("s", 10);
+  state.hasCodeChange = true;
+  state.review = { verdict: "READY", fingerprint: "old-algo-digest", at: "t", docSync: "UPDATED" };
+  state.precommit = { verdict: "PASS", fingerprint: "old-algo-digest", at: "t" };
+  delete (state as { fingerprintVersion?: number }).fingerprintVersion;
+
+  assert.equal(migrateFingerprintVersion(state), true, "a real binding was dropped");
+  assert.equal(state.review.verdict, "PENDING");
+  assert.equal(state.review.fingerprint, null);
+  assert.equal(state.precommit.verdict, "NOT_RUN");
+  assert.equal(state.precommit.fingerprint, null);
+  assert.equal(state.fingerprintVersion, FINGERPRINT_VERSION);
+  assert.equal(state.hasCodeChange, true,
+    "the worktree still holds uncommitted work — forgetting that would DISARM the gate");
+});
+
+test("a binding from a newer algorithm is invalidated too (never trusted forward)", () => {
+  const state = emptyState("s", 10);
+  state.hasCodeChange = true;
+  state.review = { verdict: "READY", fingerprint: "future-digest", at: "t" };
+  state.fingerprintVersion = FINGERPRINT_VERSION + 5;
+  assert.equal(migrateFingerprintVersion(state), true);
+  assert.equal(state.review.verdict, "PENDING");
+  assert.equal(state.fingerprintVersion, FINGERPRINT_VERSION);
+});
+
+test("a current-version sidecar is left completely alone", () => {
+  const state = emptyState("s", 10);
+  state.hasCodeChange = true;
+  state.review = { verdict: "READY", fingerprint: "current-digest", at: "t", docSync: "NOT_NEEDED" };
+  state.precommit = { verdict: "PASS", fingerprint: "current-digest", at: "t" };
+  assert.equal(migrateFingerprintVersion(state), false, "no migration should be reported");
+  assert.equal(state.review.verdict, "READY");
+  assert.equal(state.review.fingerprint, "current-digest");
+  assert.equal(state.precommit.verdict, "PASS");
+});
+
+test("migrating a state that had no binding reports nothing to the user", () => {
+  const state = emptyState("s", 10);
+  delete (state as { fingerprintVersion?: number }).fingerprintVersion;
+  assert.equal(migrateFingerprintVersion(state), false,
+    "there was no READY/PASS to lose, so there is nothing to explain");
+  assert.equal(state.fingerprintVersion, FINGERPRINT_VERSION);
+});
+
+test("loadSidecar applies the migration (bindings cannot survive an upgrade)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-mig-"));
+  try {
+    const path = join(dir, "state.json");
+    writeFileSync(path, JSON.stringify({
+      schema: 1,
+      sessionId: "s",
+      hasCodeChange: true,
+      hasDocChange: false,
+      review: { verdict: "READY", fingerprint: "old-algo-digest", at: "t" },
+      precommit: { verdict: "PASS", fingerprint: "old-algo-digest", at: "t" },
+      rounds: [],
+      maxRounds: 10,
+      bypass: { active: false, reason: null, at: null },
+      updatedAt: "t",
+    }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, "the sidecar shape is still valid, so it must load");
+    assert.equal(loaded!.review.verdict, "PENDING", "the old-algorithm READY must not survive");
+    assert.equal(loaded!.precommit.verdict, "NOT_RUN");
+    assert.equal(loaded!.hasCodeChange, true);
+    assert.equal(loaded!.fingerprintVersion, FINGERPRINT_VERSION);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the migration notice explains the cause and the recovery steps", () => {
+  // Without this the user only sees READY silently become PENDING.
+  assert.match(FINGERPRINT_MIGRATION_NOTICE, /fingerprint algorithm changed/);
+  assert.match(FINGERPRINT_MIGRATION_NOTICE, /code itself was NOT modified/);
+  assert.match(FINGERPRINT_MIGRATION_NOTICE, /restart Pi/);
+});
+
+test("loadSidecar reports whether it invalidated a binding", () => {
+  // The migration is applied inside loadSidecar so it can never be forgotten;
+  // the consequence is that callers cannot detect it afterwards (the version
+  // field is already updated). Without this out-parameter the user sees READY
+  // become PENDING with no explanation.
+  const dir = mkdtempSync(join(tmpdir(), "rg-mig2-"));
+  try {
+    const path = join(dir, "state.json");
+    const base = {
+      schema: 1,
+      sessionId: "s",
+      hasCodeChange: true,
+      hasDocChange: false,
+      review: { verdict: "READY", fingerprint: "old-algo-digest", at: "t" },
+      precommit: { verdict: "PASS", fingerprint: "old-algo-digest", at: "t" },
+      rounds: [],
+      maxRounds: 10,
+      bypass: { active: false, reason: null, at: null },
+      updatedAt: "t",
+    };
+
+    // Unversioned (pre-migration) sidecar → migration reported.
+    writeFileSync(path, JSON.stringify(base));
+    const stale = { migrated: false };
+    const loadedStale = loadSidecar(path, stale);
+    assert.equal(stale.migrated, true, "an invalidated binding must be reported to the caller");
+    assert.equal(loadedStale!.review.verdict, "PENDING");
+
+    // Current-version sidecar → nothing to report.
+    writeFileSync(path, JSON.stringify({ ...base, fingerprintVersion: FINGERPRINT_VERSION }));
+    const fresh = { migrated: false };
+    const loadedFresh = loadSidecar(path, fresh);
+    assert.equal(fresh.migrated, false, "a current binding must not be reported as migrated");
+    assert.equal(loadedFresh!.review.verdict, "READY");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a migration is reported even when the sidecar had nothing else wrong", () => {
+  // Regression guard for the double-consumption bug: calling the migration a
+  // second time on an already-migrated state returns false, so the caller must
+  // rely on the value loadSidecar handed back, not on a fresh call.
+  const dir = mkdtempSync(join(tmpdir(), "rg-mig3-"));
+  try {
+    const path = join(dir, "state.json");
+    writeFileSync(path, JSON.stringify({
+      schema: 1,
+      sessionId: "s",
+      hasCodeChange: true,
+      hasDocChange: false,
+      review: { verdict: "READY", fingerprint: "old", at: "t" },
+      precommit: { verdict: "PASS", fingerprint: "old", at: "t" },
+      rounds: [],
+      maxRounds: 10,
+      bypass: { active: false, reason: null, at: null },
+      updatedAt: "t",
+    }));
+    const out = { migrated: false };
+    const loaded = loadSidecar(path, out)!;
+    assert.equal(out.migrated, true);
+    assert.equal(migrateFingerprintVersion(loaded), false,
+      "a second call cannot see the migration — this is why the out-parameter exists");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

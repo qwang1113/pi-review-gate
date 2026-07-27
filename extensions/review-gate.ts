@@ -70,13 +70,16 @@ import { buildGitMemory } from "./lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "./lib/ship-detect.ts";
 import { firstNonEnglish, containsNonLatinLetter } from "./lib/lang-detect.ts";
 import { validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
-import { changedFiles, computeFingerprint } from "./lib/fingerprint.ts";
+import { advisoryChangeToken, changedFiles, computeFingerprint } from "./lib/fingerprint.ts";
+import type { Fingerprint } from "./lib/fingerprint.ts";
 import {
   emptyState,
   isPlateaued,
   isOscillating,
   countOscillations,
   loadSidecar,
+  migrateFingerprintVersion,
+  FINGERPRINT_MIGRATION_NOTICE,
   saveSidecar,
   shouldStrategicReset,
   sidecarPath,
@@ -91,6 +94,7 @@ import {
   classifyAiAttribution,
   classifyNonEnglish,
   classifyShipCommand,
+  createVerdictMemo,
   isSuspiciousShipCandidate,
   type LlmClassifier,
 } from "./lib/llm-classify.ts";
@@ -171,6 +175,9 @@ export default function reviewGate(pi: ExtensionAPI) {
   // the exact action + worktree + review round (lib/arbitration.ts). Any edit,
   // new review round, fingerprint change, or /gate-reset clears it.
   let bypassToken: BypassToken | null = null;
+  /** Set when restore() dropped bindings written by an older fingerprint
+   *  algorithm, so session_start can explain why they disappeared. */
+  let fingerprintMigrated = false;
   // The most recent ship command the gate BLOCKED, so request_arbitration can
   // only contest a real block (not an agent-invented one).
   let lastBlockedShip: { command: string; problems: string[]; blockReason: string } | null = null;
@@ -183,6 +190,33 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** Clear any standing bypass token (called whenever the worktree or review
    *  round changes, so a token can never outlive the exact state it was for). */
   function clearBypassToken() { bypassToken = null; }
+
+  // ---- Advisory (PROMPT-ONLY) fingerprint memo ----
+  // computeFingerprint() deliberately defeats git's stat cache, which costs
+  // ~575ms on a 9k-file repo (~466ms of it the `--renormalize` re-hash). The
+  // per-turn system prompt paid that on EVERY turn, including long stretches
+  // where the agent only reads files or waits on a review.
+  //
+  // SAFETY: this memo is keyed on advisoryChangeToken() (a filesystem probe,
+  // NOT an extension-event heuristic) and is read by exactly one caller: the
+  // before_agent_start prompt renderer. A stale hit can only produce a stale
+  // PROMPT for one turn; every enforcement path (ship block, declare_done,
+  // record_review, arbitration, precommit binding, git hooks) calls
+  // computeFingerprint() directly and is unaffected. A null token (git
+  // unreadable) always falls through to a real compute — never to a reuse.
+  let advisoryFpMemo: { token: string; fp: Fingerprint } | null = null;
+
+  function advisoryFingerprint(): Fingerprint {
+    const token = advisoryChangeToken(cwd);
+    if (token === null) return computeFingerprint(cwd);
+    if (advisoryFpMemo && advisoryFpMemo.token === token) return advisoryFpMemo.fp;
+    const fp = computeFingerprint(cwd);
+    // Never memoize an UNAVAILABLE result: it is a transient failure signal,
+    // and caching it would keep reporting a fail-closed prompt after git
+    // recovers.
+    advisoryFpMemo = fp.unavailable ? null : { token, fp };
+    return fp;
+  }
   function classifier(): LlmClassifier {
     if (!llmClassifier || llmClassifierModel !== projectConfig.llmGuards.model) {
       llmClassifier = createLlmClassifier(projectConfig.llmGuards.model);
@@ -242,8 +276,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* session manager unavailable */ }
 
     // Fall back to sidecar for cross-process state (L3 hooks read it).
+    // loadSidecar() applies the fingerprint migration itself (so it can never
+    // be forgotten), which means the result must be collected HERE — asking
+    // migrateFingerprintVersion() again below would report "no migration",
+    // and the user would watch READY become PENDING with no explanation.
+    const sidecarMigration = { migrated: false };
     if (!restored) {
-      restored = loadSidecar(sidecarPath(cwd));
+      restored = loadSidecar(sidecarPath(cwd), sidecarMigration);
     }
 
     // Sidecar corruption detection: file exists but couldn't parse → fail-closed.
@@ -271,6 +310,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     } else {
       state = emptyState(sessionId, DEFAULT_MAX_ROUNDS);
     }
+
+    // A binding produced by a DIFFERENT fingerprint algorithm cannot be
+    // verified by this one, so it is invalidated here rather than trusted.
+    // Recorded for session_start to surface — without an explanation the user
+    // just sees a READY silently become PENDING after an upgrade.
+    // Either source can carry a stale binding: the session entry is migrated
+    // by this call, the sidecar was already migrated inside loadSidecar().
+    fingerprintMigrated = migrateFingerprintVersion(state) || sidecarMigration.migrated;
   }
 
   function updateWidget(ctx: ExtensionContext) {
@@ -366,6 +413,10 @@ export default function reviewGate(pi: ExtensionAPI) {
    * layer for the Unicode blind spot (romanized non-English labels). Both are
    * tighten-only; scanner load/parse failure → pass (hook still enforces).
    */
+  /** Cache of romanized-non-English verdicts, keyed by the exact label set
+   *  (lib/llm-classify.ts documents why a failed call is never remembered). */
+  const labelCheckMemo = createVerdictMemo();
+
   async function checkTestLabels(path: string, content: string): Promise<string | undefined> {
     if (!content) return undefined;
     let analyze: ((p: string, src: string) => { violations: Array<{ line: number; label: string }>; latinLabels: Array<{ line: number; label: string }> }) | undefined;
@@ -400,7 +451,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Unicode check passed — flash semantic layer for romanized non-English.
     if (projectConfig.llmGuards.englishCheck && res.latinLabels.length > 0) {
       const labels = res.latinLabels.map((l) => l.label);
-      if (await classifyNonEnglish(classifier(), labels) === true) {
+      // Memoized on the exact label SET: an agent editing the same test file
+      // repeatedly re-sent an identical label list and blocked each edit on a
+      // ~2s model round-trip for an answer that cannot have changed.
+      const key = labelCheckMemo.key(labels);
+      let verdict = labelCheckMemo.get(key);
+      if (verdict === undefined) {
+        verdict = await classifyNonEnglish(classifier(), labels);
+        labelCheckMemo.remember(key, verdict);
+      }
+      if (verdict === true) {
         return `review-gate: test label reads as romanized non-English (L6, semantic check) in ${path}. ` +
           "Test descriptions must be English. Use `// review-gate: allow-non-english` to exempt a deliberate case.";
       }
@@ -1123,6 +1183,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Clean orphan .blocked marker from a prior session.
     try { unlinkSync(sidecarPath(cwd) + ".blocked"); } catch { /* didn't exist */ }
 
+    // Explain an invalidated binding instead of letting READY silently become
+    // PENDING after an upgrade (see migrateFingerprintVersion).
+    if (fingerprintMigrated) {
+      try { ctx.ui.notify(FINGERPRINT_MIGRATION_NOTICE, "warning"); } catch { /* headless */ }
+      fingerprintMigrated = false;
+    }
+
     persist(ctx);
   });
 
@@ -1297,8 +1364,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     // required on every turn, so it is injected before any early return.
     let systemPrompt = event.systemPrompt + "\n\n" + LANGUAGE_DIRECTIVE;
 
-    const fp = computeFingerprint(cwd);
-    const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
+    // Order matters for latency: unmetRequirements() returns [] whenever the
+    // session tracks no code AND no doc change (see lib/gate-state.ts), so the
+    // fingerprint it would be handed cannot affect the outcome. Computing it
+    // first cost every turn of every clean session a full re-hash (~575ms on a
+    // 9k-file repo) to produce a value that was then discarded. Enforcement is
+    // unchanged: this block only renders prompt text — ship blocks,
+    // declare_done and the git hooks each compute their own fingerprint.
+    const gateArmed = state.hasCodeChange || state.hasDocChange;
+    const fp = gateArmed ? advisoryFingerprint() : null;
+    const problems = gateArmed
+      ? unmetRequirements(state, fp!.digest, fp!.unavailable, { requireDocSync: projectConfig.docSync })
+      : [];
     if (state.taskMode === "explore") {
       return {
         systemPrompt:
@@ -1312,7 +1389,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           (problems.length ? `\nAdvisory gate status:\n${problems.map((p) => `- ${p}`).join("\n")}` : ""),
       };
     }
-    if (!state.hasCodeChange && !state.hasDocChange && problems.length === 0) {
+    if (!gateArmed && problems.length === 0) {
       return { systemPrompt };
     }
 
@@ -1321,9 +1398,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         systemPrompt +
         "\n\n## Review Gate (enforced)\n" +
         "pi-review-gate is active. After editing code you MUST: " +
-        "(1) run an independent review, (2) call record_review with the FULL reviewer output, " +
-        "(3) fix all findings and re-review until READY, " +
-        "(4) run the precommit runner, (5) call declare_done. " +
+        "(1) run the precommit runner FIRST (its lint:fix step edits files, and any edit " +
+        "invalidates a review binding — reviewing first throws that review away), " +
+        "(2) run an independent review, (3) call record_review with the FULL reviewer output, " +
+        "(4) fix all findings, then repeat from (1) until READY, (5) call declare_done. " +
+        "Batch related edits before starting a round: the loop is billed per round, not per line. " +
         "git commit/push and gh pr create/edit are HARD-BLOCKED until gates pass.\n" +
         "You are ENCOURAGED to proactively consult the `adviser` subagent (a stronger, " +
         "independent second opinion, pinned to a top-tier model at xhigh thinking) BEFORE " +
