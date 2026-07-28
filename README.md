@@ -244,6 +244,47 @@ an ambient variable's ability to substitute or extend it for this process.
 Parity tests assert the TS and CJS sides never drift apart, and behavioural
 tests run the actual injection against both.
 
+### One materialization per hook decision
+
+The pre-commit hook needs two answers about the same bytes: does the index
+match the reviewed worktree, and what is the worktree's digest. It used to run
+two processes that each built their own shadow-index tree. Now
+`check-staged-divergence.cjs` `require`s the fingerprint implementation, so the
+tree is materialized once per repository and reused for both; the hook calls it
+with `--emit-fingerprint` and reads the digest from stdout. Measured on a
+9k-file repository: **~1765 ms → ~984 ms**.
+
+The sharing is a **per-cwd resolver**, not one tree: the fingerprint recurses
+into submodules, so handing it a single top-level OID would leave every
+submodule materializing itself again — precisely where a `clean` filter could
+still make the divergence verdict and the digest disagree. A test injects a
+counting resolver and asserts each repository (parent *and* submodule) is asked
+for exactly once, because that degradation is invisible in the resulting
+digest.
+
+Beyond speed this closes a correctness gap: a repository `clean` filter is an
+arbitrary program, so two separate materializations of an *unchanged* worktree
+could legitimately produce different trees — leaving the divergence verdict and
+the fingerprint describing different content. A partial install that lacks the
+fingerprint implementation makes the checker fail closed; an older checker that
+does not understand `--emit-fingerprint` prints nothing, and the hook falls back
+to computing the fingerprint separately rather than bricking the commit.
+
+### The gate never writes to your index
+
+Every pass runs in a private shadow index; the real one is read-only to the
+gate. This is enforced by test, because it was violated once: when the
+scratch-index passes were extended to clear `assume-unchanged` / `skip-worktree`
+bits, the helper running them dropped its environment argument, so
+`update-index` hit the **user's real index** and wiped those bits (`S a.ts` /
+`h b.ts` → `H a.ts` / `H b.ts` after a single fingerprint).
+
+Clearing those bits *inside the shadow index* also fixed a pre-existing
+limitation: on a sparse-checkout repository `git add` aborted with "outside of
+your sparse-checkout definition", so the fingerprint failed closed and such a
+repository could never pass the gate at all. It now produces a usable digest
+that still tracks edits to `skip-worktree` paths.
+
 ### The index a commit will actually publish
 
 `git commit -a` and `git commit -- <path>` do **not** publish `.git/index`:
@@ -678,9 +719,11 @@ including a content hash, by editing the checker too):
   source. Treat a repo whose `.gitattributes` names a filter you did not
   knowingly install as hostile input during review (the `.gitattributes` edit
   itself always moves the fingerprint and lands in front of the reviewer).
-  *Future hardening:* materialize the worktree tree once per hook decision and
-  reuse it, instead of re-running the filter for each comparison — that also
-  removes duplicated work.
+  *Partially mitigated since:* one hook decision now materializes the worktree
+  **once** and reuses it for both the divergence comparison and the digest (see
+  below), so those two can no longer disagree with each other. A filter that
+  varies between the review-time fingerprint and the commit-time one is still
+  out of scope.
 
 The git hooks (L3) are a useful second layer, not a complete boundary: they
 depend on the sidecar existing and being untampered, and `gh pr create/edit` is not a

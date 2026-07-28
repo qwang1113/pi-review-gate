@@ -1,9 +1,12 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
+
+const requireCjs = createRequire(import.meta.url);
 
 const { computeFingerprint, changedFiles, advisoryChangeToken } = await import(
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "fingerprint.ts")
@@ -869,4 +872,145 @@ test("injected core.excludesFile cannot hide an edit from the CJS mirror either"
   });
   assert.equal(injected, honest,
     "the hook-side implementation must resist the same injection as the extension side");
+});
+
+// ---------------------------------------------------------------------------
+// THE REAL INDEX IS READ-ONLY TO THE GATE.
+//
+// Everything the fingerprint does happens in a private shadow index. When the
+// scratch-index passes were extended to clear assume-unchanged/skip-worktree,
+// the helper that ran them silently DROPPED its env argument, so
+// `update-index` hit the user's real index instead and wiped those bits
+// (verified: `S a.ts` / `h b.ts` became `H a.ts` / `H b.ts` after a single
+// fingerprint). Destroying user state is worse than any performance win.
+
+/** `git ls-files -v` flags, which encode assume-unchanged (h) / skip-worktree (S). */
+function indexFlags(dir: string): string {
+  return execFileSync("git", ["ls-files", "-v"], { cwd: dir, encoding: "utf8" }).trim();
+}
+
+/** Repo with one skip-worktree and one assume-unchanged path. */
+function repoWithIndexBits(): string {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "a.ts"), "// v1");
+  writeFileSync(join(dir, "b.ts"), "// v1");
+  execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "c"], {
+    cwd: dir, stdio: "ignore",
+  });
+  execFileSync("git", ["update-index", "--skip-worktree", "a.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["update-index", "--assume-unchanged", "b.ts"], { cwd: dir, stdio: "ignore" });
+  return dir;
+}
+
+test("computeFingerprint does not mutate the user's real index", () => {
+  const dir = repoWithIndexBits();
+  const before = indexFlags(dir);
+  assert.match(before, /^S a\.ts$/m, "precondition: skip-worktree is set");
+  assert.match(before, /^h b\.ts$/m, "precondition: assume-unchanged is set");
+
+  computeFingerprint(dir);
+
+  assert.equal(indexFlags(dir), before,
+    "the gate must never clear the user's index bits — those passes belong in the shadow index");
+});
+
+test("the CJS mirror does not mutate the user's real index either", () => {
+  const dir = repoWithIndexBits();
+  const before = indexFlags(dir);
+  execFileSync("node", [
+    join(resolve(import.meta.dirname ?? "."), "..", "scripts", "compute-fingerprint.cjs"), dir,
+  ], { encoding: "utf8" });
+  assert.equal(indexFlags(dir), before, "the hook-side implementation must be read-only too");
+});
+
+test("a skip-worktree repo produces a usable fingerprint that still tracks edits", () => {
+  // Before clearing the bit in the SHADOW index, `git add` aborted with
+  // "outside of your sparse-checkout definition" and the fingerprint failed
+  // closed, so a sparse-checkout repo could never pass the gate at all.
+  const dir = repoWithIndexBits();
+  const first = computeFingerprint(dir);
+  assert.equal(first.unavailable, false, "a sparse-checkout repo must be fingerprintable");
+
+  // And the bit must not hide a real edit from the digest.
+  writeFileSync(join(dir, "a.ts"), "// v2 edited behind skip-worktree");
+  assert.notEqual(computeFingerprint(dir).digest, first.digest,
+    "an edit to a skip-worktree path must still move the digest");
+});
+
+// ---------------------------------------------------------------------------
+// SHARED MATERIALIZATION, PROVEN AT THE FUNCTION BOUNDARY.
+//
+// Counting `clean` filter invocations is not a stable observable (git re-runs
+// the filter a variable number of times per pass: measured 2 for the checker
+// and 5 for the fingerprint through the SAME function). Injecting the tree
+// resolver instead counts the project's OWN materialization boundary, which is
+// exactly the property the hook depends on — including the submodule
+// recursion, where an earlier version silently fell back to a fresh
+// materialization per submodule.
+
+test("compute() asks the injected resolver once per repository, submodules included", (t) => {
+  const inner = makeRepo();
+  writeFileSync(join(inner, "i.ts"), "// inner v1\n");
+  execFileSync("git", ["add", "i.ts"], { cwd: inner, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "inner"], {
+    cwd: inner, stdio: "ignore",
+  });
+  const parent = makeRepo();
+  try {
+    execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", inner, "sm"], {
+      cwd: parent, stdio: "ignore",
+    });
+  } catch {
+    t.skip("submodule add unsupported in this environment");
+    return;
+  }
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add sm"], {
+    cwd: parent, stdio: "ignore",
+  });
+
+  const cjs = requireCjs(join(resolve(import.meta.dirname ?? "."), "..", "scripts", "compute-fingerprint.cjs"));
+
+  // Baseline: no injection at all.
+  const plain = cjs.compute(parent);
+  assert.equal(plain.unavailable, false);
+
+  // Injected resolver that memoizes exactly like the divergence checker does.
+  // Canonicalize: git reports /private/var/... where mkdtemp returned
+  // /var/... on macOS, so a lexical compare would silently never match.
+  const canon = (d: string) => { try { return realpathSync(d); } catch { return resolve(d); } };
+  const calls: string[] = [];
+  const cache = new Map<string, string>();
+  const treeOidForCwd = (dir: string) => {
+    const key = canon(dir);
+    calls.push(key);
+    if (!cache.has(key)) cache.set(key, cjs.worktreeTreeOid(dir));
+    return cache.get(key)!;
+  };
+
+  const shared = cjs.compute(parent, { treeOidForCwd });
+  assert.equal(shared.digest, plain.digest,
+    "sharing must not change the digest");
+
+  // The parent AND the submodule must both go through the resolver...
+  assert.ok(calls.includes(canon(parent)), "the parent tree must come from the resolver");
+  assert.ok(calls.includes(canon(join(parent, "sm"))),
+    "the SUBMODULE tree must come from the resolver too (it used to bypass it)");
+  // ...and neither may be materialized twice within one run.
+  for (const dir of new Set(calls)) {
+    assert.equal(calls.filter((c) => c === dir).length, 1,
+      `${dir} was materialized more than once in a single decision`);
+  }
+});
+
+test("a resolver is used for the top-level repo even without submodules", () => {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "a.ts"), "// content");
+  const cjs = requireCjs(join(resolve(import.meta.dirname ?? "."), "..", "scripts", "compute-fingerprint.cjs"));
+  const calls: string[] = [];
+  const result = cjs.compute(dir, {
+    treeOidForCwd: (d: string) => { calls.push(realpathSync(d)); return cjs.worktreeTreeOid(d); },
+  });
+  assert.equal(result.unavailable, false);
+  assert.deepEqual(calls, [realpathSync(dir)], "exactly one materialization, for the requested repo");
 });

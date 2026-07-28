@@ -85,9 +85,13 @@ function git(cwd, args, env) {
   }).trim();
 }
 
-function gitOrNull(cwd, args) {
+// `env` must be forwarded: the shadow-index passes reach git through
+// GIT_INDEX_FILE. Dropping it made `update-index --no-skip-worktree` run
+// against the USER'S REAL INDEX and wipe their skip-worktree /
+// assume-unchanged bits. Mirror of lib/fingerprint.ts.
+function gitOrNull(cwd, args, env) {
   try {
-    return git(cwd, args);
+    return git(cwd, args, env);
   } catch {
     return null;
   }
@@ -123,7 +127,7 @@ function submodulePaths(cwd) {
 // CONTENT by recursing with the same worktree-tree algorithm. Hashing
 // `git status` text instead would miss a second edit to an already-dirty file
 // (the status line stays "M path"), letting unreviewed content be committed.
-function submoduleDigest(cwd, depth) {
+function submoduleDigest(cwd, depth, opts) {
   if (depth > 10) throw new FingerprintUnavailable("submodule nesting too deep");
   const paths = submodulePaths(cwd);
   if (paths.length === 0) return "";
@@ -144,14 +148,20 @@ function submoduleDigest(cwd, depth) {
       parts.push(`${path}:UNINITIALIZED`);
       continue;
     }
-    parts.push(`${path}:${worktreeTree(subCwd, depth + 1)}`);
+    parts.push(`${path}:${worktreeDigest(subCwd, depth + 1, opts)}`);
   }
   return parts.join("\n");
 }
 
 // Content tree of one repository's worktree (parent or submodule).
 // Throws on any failure so callers fail CLOSED.
-function worktreeTree(cwd, depth) {
+// Chunk size for update-index argv (a huge repo would blow the argv limit).
+const UPDATE_INDEX_CHUNK = 500;
+
+// Materialize the worktree as a git tree and return its BARE OID (no submodule
+// mixing), so a caller can both inspect entries with `ls-tree` and hand it to
+// worktreeDigest() without paying for a second materialization.
+function worktreeTreeOid(cwd) {
   let shadowDir;
   try {
     // --path-format=absolute is required (see lib/fingerprint.ts): the bare
@@ -192,6 +202,20 @@ function worktreeTree(cwd, depth) {
     // file CONTENT (defeating a stale stat cache from an ancient preserved
     // mtime) but adds no untracked files; the plain `-A` pass then picks those
     // up. Running only the first silently dropped every untracked file.
+    // Clear assume-unchanged / skip-worktree in the SCRATCH index only (see
+    // lib/fingerprint.ts): without it `git add` ABORTS on a sparse-checkout
+    // repository ("outside of your sparse-checkout definition") and the whole
+    // fingerprint fails closed. It can only make git read MORE of the
+    // worktree, and on repos without those bits the tree is byte-identical.
+    const tracked = git(cwd, ["ls-files", "-z", "--full-name", "--", REPO_ROOT_PATHSPEC], env)
+      .split("\0")
+      .filter(Boolean);
+    for (let i = 0; i < tracked.length; i += UPDATE_INDEX_CHUNK) {
+      const chunk = tracked.slice(i, i + UPDATE_INDEX_CHUNK);
+      gitOrNull(cwd, ["update-index", "--no-assume-unchanged", "--", ...chunk], env);
+      gitOrNull(cwd, ["update-index", "--no-skip-worktree", "--", ...chunk], env);
+    }
+
     git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
@@ -200,9 +224,7 @@ function worktreeTree(cwd, depth) {
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) {
       throw new FingerprintUnavailable("write-tree returned a non-object-id");
     }
-
-    const submodules = submoduleDigest(cwd, depth);
-    return submodules === "" ? tree : sha256(`${tree}\0${submodules}`);
+    return tree;
   } finally {
     if (shadowDir) {
       try { rmSync(shadowDir, { recursive: true, force: true }); } catch { /* temp dir */ }
@@ -210,9 +232,26 @@ function worktreeTree(cwd, depth) {
   }
 }
 
-function compute(cwd) {
+// Full digest: the worktree tree plus every submodule's real content.
+// `opts.treeOidForCwd` lets a caller that ALREADY materialized a tree hand it
+// over, which is what the git hook does — materializing twice doubled the cost
+// and ran any `clean` filter twice, so two passes over an unchanged worktree
+// could disagree. Mirror of lib/fingerprint.ts worktreeDigest().
+function worktreeDigest(cwd, depth, opts) {
+  // A per-cwd RESOLVER, not a single tree: submodule recursion asks for other
+  // repositories, and handing it one top-level OID would either be wrong or
+  // (as an earlier version did) silently fall through to a fresh
+  // materialization for every submodule — defeating the sharing exactly where
+  // a `clean` filter could make the two passes disagree.
+  const resolveTree = (opts && opts.treeOidForCwd) || worktreeTreeOid;
+  const tree = resolveTree(cwd);
+  const submodules = submoduleDigest(cwd, depth, opts);
+  return submodules === "" ? tree : sha256(`${tree}\0${submodules}`);
+}
+
+function compute(cwd, opts) {
   try {
-    const digest = worktreeTree(cwd, 0);
+    const digest = worktreeDigest(cwd, 0, opts);
     const head = gitOrNull(cwd, ["rev-parse", "HEAD"]) ?? "NO_HEAD";
     return { digest, head, unavailable: false, version: FINGERPRINT_VERSION };
   } catch {
@@ -222,5 +261,12 @@ function compute(cwd) {
   }
 }
 
-const cwd = process.argv[2] || process.cwd();
-console.log(JSON.stringify(compute(cwd)));
+// Dual use: a CLI for the git hooks, and a module the divergence checker
+// requires so ONE process can materialize the worktree tree once and use it
+// for both the divergence comparison and the fingerprint.
+module.exports = { compute, worktreeTreeOid, FINGERPRINT_VERSION };
+
+if (require.main === module) {
+  const cwd = process.argv[2] || process.cwd();
+  console.log(JSON.stringify(compute(cwd)));
+}

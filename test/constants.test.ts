@@ -390,3 +390,25 @@ test("the CJS mirror emits its version in every result, including UNAVAILABLE", 
   assert.match(cjs, /return \{ digest, head, unavailable: false, version: FINGERPRINT_VERSION \}/,
     "the success path must report the version too");
 });
+
+test("the TS implementation exposes the SAME sharing API as the CJS mirror", () => {
+  // The two are asserted to be mirrors, and a divergence in the sharing API is
+  // invisible in the digest — it only shows up as a silently reintroduced
+  // double materialization. Check the shape textually (the TS function is not
+  // exported) plus the CJS behaviour above.
+  const ts = readFileSync(join(resolve(import.meta.dirname ?? "."), "..", "lib", "fingerprint.ts"), "utf8");
+  assert.match(ts, /treeOidForCwd\?: \(cwd: string\) => string/,
+    "TS must offer the per-cwd resolver, not a single tree OID");
+  assert.match(ts, /submoduleDigest\(cwd: string, depth: number, opts\?: WorktreeDigestOptions\)/,
+    "TS submodule recursion must accept the resolver");
+  assert.match(ts, /worktreeDigest\(subCwd, depth \+ 1, opts\)/,
+    "TS submodule recursion must FORWARD the resolver (the CJS mirror shipped this bug)");
+  assert.ok(!/opts\?: \{ treeOid\?: string \}/.test(ts),
+    "the single-OID API must be gone, so it cannot be reintroduced by copy-paste");
+
+  const cjs = readFileSync(
+    join(resolve(import.meta.dirname ?? "."), "..", "scripts", "compute-fingerprint.cjs"), "utf8");
+  assert.match(cjs, /treeOidForCwd/, "CJS must use the same option name");
+  assert.ok(!/opts\.treeOid\b(?!ForCwd)/.test(cjs),
+    "no stale references to the replaced single-OID option");
+});

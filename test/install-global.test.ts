@@ -184,3 +184,48 @@ test("install-project ships check-staged-divergence.cjs under its exact name", (
     "check-staged-divergence.cjs missing from the project install",
   );
 });
+
+// Existence checks are not enough: the checker `require`s its fingerprint
+// dependency from the SAME directory, so an installer that ships only the
+// checker produces a layout where every commit fails closed with "Cannot find
+// module" (reproduced by independent review of the project installer). RUN the
+// installed copy instead of merely looking for it.
+test("install-project produces a WORKING checker (dependency included)", () => {
+  const repo = mkdtempSync(join(tmpdir(), "rg-proj-run-"));
+  tempDirs.push(repo);
+  execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+  const install = spawnSync("bash", [join(ROOT, "scripts", "install-project.sh")], {
+    cwd: repo, encoding: "utf8", env: { ...process.env, HOME: makeHome() },
+  });
+  assert.equal(install.status, 0, `project installer failed: ${install.stderr}`);
+
+  const installed = join(repo, ".pi", "scripts", "check-staged-divergence.cjs");
+  assert.ok(existsSync(installed), "checker missing from the project install");
+  assert.ok(existsSync(join(repo, ".pi", "scripts", "compute-fingerprint.cjs")),
+    "the checker's fingerprint dependency must be installed alongside it");
+
+  const run = spawnSync("node", [installed, repo], { encoding: "utf8" });
+  assert.ok(!/Cannot find module/.test(run.stderr),
+    `the installed checker could not load its dependency: ${run.stderr}`);
+  assert.ok(!/cannot load the fingerprint implementation/.test(run.stderr),
+    `the installed checker failed closed on a clean repo: ${run.stderr}`);
+  assert.equal(run.status, 0, `a clean repo must not be blocked: ${run.stderr}`);
+});
+
+test("install-global also produces a WORKING checker", () => {
+  const home = makeHome();
+  const res = spawnSync("bash", [join(ROOT, "scripts", "install-global.sh")], {
+    encoding: "utf8", env: { ...process.env, HOME: home },
+  });
+  assert.equal(res.status, 0, `global installer failed: ${res.stderr}`);
+  const installed = join(home, ".pi", "agent", "scripts", "check-staged-divergence.cjs");
+  assert.ok(existsSync(installed), "checker missing from the global install");
+
+  const repo = mkdtempSync(join(tmpdir(), "rg-glob-run-"));
+  tempDirs.push(repo);
+  execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+  const run = spawnSync("node", [installed, repo], { encoding: "utf8" });
+  assert.ok(!/Cannot find module/.test(run.stderr),
+    `the installed checker could not load its dependency: ${run.stderr}`);
+  assert.equal(run.status, 0, `a clean repo must not be blocked: ${run.stderr}`);
+});

@@ -192,9 +192,16 @@ function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   }).trim();
 }
 
-function gitOrNull(cwd: string, args: string[]): string | null {
+/**
+ * `env` is NOT optional decoration: the shadow-index passes must reach git
+ * through GIT_INDEX_FILE. An earlier version of this helper silently dropped
+ * the argument, so `update-index --no-skip-worktree` ran against the USER'S
+ * REAL INDEX and wiped their skip-worktree / assume-unchanged bits (verified:
+ * `S a.ts` / `h b.ts` became `H a.ts` / `H b.ts` after one fingerprint).
+ */
+function gitOrNull(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string | null {
   try {
-    return git(cwd, args);
+    return git(cwd, args, env);
   } catch {
     return null;
   }
@@ -297,7 +304,7 @@ function submodulePaths(cwd: string): string[] {
  * the WHOLE fingerprint unavailable rather than collapsing to a stable,
  * bindable value.
  */
-function submoduleDigest(cwd: string, depth: number): string {
+function submoduleDigest(cwd: string, depth: number, opts?: WorktreeDigestOptions): string {
   // Bound recursion: pathological/cyclic setups must not hang the gate.
   if (depth > 10) throw new FingerprintUnavailable("submodule nesting too deep");
 
@@ -331,7 +338,7 @@ function submoduleDigest(cwd: string, depth: number): string {
     }
     // Recurse with the identical algorithm: real content, nested submodules,
     // and the same fail-closed guarantees.
-    parts.push(`${path}:${worktreeTree(subCwd, depth + 1)}`);
+    parts.push(`${path}:${worktreeDigest(subCwd, depth + 1, opts)}`);
   }
   return parts.join("\n");
 }
@@ -344,7 +351,17 @@ function submoduleDigest(cwd: string, depth: number): string {
  *
  * Throws FingerprintUnavailable / any git error so callers fail CLOSED.
  */
-function worktreeTree(cwd: string, depth: number): string {
+/** Chunk size for update-index argv (a huge repo would blow the argv limit). */
+const UPDATE_INDEX_CHUNK = 500;
+
+/**
+ * Materialize the worktree as a git tree and return its OID.
+ *
+ * Returns the BARE tree (no submodule mixing) so callers that must inspect
+ * entries with `ls-tree` can use it directly; worktreeDigest() adds the
+ * submodule binding on top.
+ */
+function worktreeTreeOid(cwd: string): string {
   let shadowDir: string | undefined;
   try {
     // --path-format=absolute is REQUIRED: bare `--git-path index` is relative
@@ -434,6 +451,36 @@ function worktreeTree(cwd: string, depth: number): string {
     //
     // Running only pass 1 silently dropped every untracked file from the tree
     // (a worse fail-open than the one it fixed), so both are required.
+    // Clear assume-unchanged / skip-worktree in the SCRATCH index only (never
+    // the user's), so `git add` genuinely re-reads every file.
+    //
+    // Measured, so this is not guesswork: `--renormalize` already re-reads
+    // content through an `assume-unchanged` bit, so that is not what this
+    // buys. What it does buy is `skip-worktree`: without clearing, `git add`
+    // ABORTS with "outside of your sparse-checkout definition" and the whole
+    // fingerprint fails closed — i.e. a sparse-checkout repository could not
+    // pass the gate at all (reproduced: fingerprint threw while the divergence
+    // checker, which already cleared the bits, produced a correct tree).
+    //
+    // Note this cannot LOOSEN the digest: clearing the bits only makes git
+    // read more of the worktree. On repositories without those bits the tree
+    // is byte-identical (verified across plain/untracked/assume-unchanged
+    // scenarios), which is why FINGERPRINT_VERSION does not need to change:
+    // the only repositories whose result differs are those that previously
+    // produced no usable digest at all, so no existing binding can be
+    // reinterpreted.
+    const tracked = git(cwd, ["ls-files", "-z", "--full-name", "--", REPO_ROOT_PATHSPEC], env)
+      .split("\0")
+      .filter(Boolean);
+    for (let i = 0; i < tracked.length; i += UPDATE_INDEX_CHUNK) {
+      const chunk = tracked.slice(i, i + UPDATE_INDEX_CHUNK);
+      // Best-effort: a path that cannot be unmarked still gets re-read by the
+      // `--renormalize` pass below, and a hard failure here would fail closed
+      // on repositories that merely use an unusual bit combination.
+      gitOrNull(cwd, ["update-index", "--no-assume-unchanged", "--", ...chunk], env);
+      gitOrNull(cwd, ["update-index", "--no-skip-worktree", "--", ...chunk], env);
+    }
+
     git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
@@ -444,15 +491,7 @@ function worktreeTree(cwd: string, depth: number): string {
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) {
       throw new FingerprintUnavailable("write-tree returned a non-object-id");
     }
-
-    // SUBMODULES: a tree records only each submodule's gitlink (its committed
-    // OID), so edits INSIDE a checked-out submodule leave the tree
-    // bit-identical — a real code change that would keep a stale READY
-    // binding valid. The pre-change diff/status fingerprint DID catch this, so
-    // the bare tree hash alone is a regression. Bind the submodules' actual
-    // content by recursing with this same function.
-    const submodules = submoduleDigest(cwd, depth);
-    return submodules === "" ? tree : sha256(`${tree}\0${submodules}`);
+    return tree;
   } finally {
     if (shadowDir) {
       try { rmSync(shadowDir, { recursive: true, force: true }); } catch { /* temp dir */ }
@@ -460,9 +499,53 @@ function worktreeTree(cwd: string, depth: number): string {
   }
 }
 
+/** Options for worktreeDigest(); mirrors the CJS implementation's `opts`. */
+export interface WorktreeDigestOptions {
+  /**
+   * Resolve the bare tree OID for a repository path, letting a caller that has
+   * ALREADY materialized it hand the result over instead of running the whole
+   * shadow-index pass again.
+   *
+   * It is a per-cwd RESOLVER, not one OID, because this function RECURSES into
+   * submodules: a single top-level tree would leave every submodule
+   * materializing itself again — which is exactly where a repository `clean`
+   * filter could still make two passes over an unchanged worktree disagree.
+   * (The CJS mirror shipped that bug; an independent review caught it.)
+   */
+  treeOidForCwd?: (cwd: string) => string;
+}
+
+/**
+ * Full digest for `cwd`: the worktree tree, with every submodule's real
+ * content mixed in.
+ *
+ * Split from worktreeTreeOid() so the tree can be materialized once per
+ * repository and reused. The git hook does exactly that through the CJS
+ * mirror: the divergence checker needs the tree OID to compare entries and the
+ * fingerprint needs a digest over the same content, so materializing it twice
+ * doubled the cost and ran any `clean` filter twice.
+ *
+ * The TS side keeps the identical signature on purpose. These two
+ * implementations are asserted to stay mirrors of each other, and a divergence
+ * in the sharing API is invisible in the resulting digest — it only shows up
+ * as a silently reintroduced double materialization.
+ */
+function worktreeDigest(cwd: string, depth: number, opts?: WorktreeDigestOptions): string {
+  const resolveTree = opts?.treeOidForCwd ?? worktreeTreeOid;
+  const tree = resolveTree(cwd);
+  // SUBMODULES: a tree records only each submodule's gitlink (its committed
+  // OID), so edits INSIDE a checked-out submodule leave the tree
+  // bit-identical — a real code change that would keep a stale READY
+  // binding valid. The pre-change diff/status fingerprint DID catch this, so
+  // the bare tree hash alone is a regression. Bind the submodules' actual
+  // content by recursing with this same function.
+  const submodules = submoduleDigest(cwd, depth, opts);
+  return submodules === "" ? tree : sha256(`${tree}\0${submodules}`);
+}
+
 export function computeFingerprint(cwd: string): Fingerprint {
   try {
-    const digest = worktreeTree(cwd, 0);
+    const digest = worktreeDigest(cwd, 0);
     const head = gitOrNull(cwd, ["rev-parse", "HEAD"]) ?? "NO_HEAD";
     return { digest, head, unavailable: false };
   } catch {

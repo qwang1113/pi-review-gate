@@ -126,8 +126,16 @@ DIVERGENCE_SCRIPT="${HOOK_DIR}/../scripts/check-staged-divergence.cjs"
 # explicitly (rather than letting the script read the environment) keeps an
 # ambient variable from redirecting the check while still comparing the index
 # this commit will really write. Empty when git did not set it.
+#
+# `--emit-fingerprint` makes this ONE process answer both questions. The
+# checker has to materialize the worktree tree anyway; computing the
+# fingerprint from that same tree halves the git work AND removes a subtler
+# problem: a repository-configured `clean` filter is an arbitrary program, so
+# two separate materializations of an UNCHANGED worktree could legitimately
+# disagree, leaving the divergence verdict and the fingerprint describing
+# different content.
 if [[ -f "$DIVERGENCE_SCRIPT" ]]; then
-  node "$DIVERGENCE_SCRIPT" "$(pwd)" "${GIT_INDEX_FILE-}" || {
+  FP_JSON=$(node "$DIVERGENCE_SCRIPT" "$(pwd)" "${GIT_INDEX_FILE-}" --emit-fingerprint) || {
     echo "[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ..." >&2
     exit 1
   }
@@ -138,10 +146,16 @@ else
   exit 1
 fi
 
-FP_JSON=$(node "$FP_SCRIPT" "$(pwd)") || {
-  echo "[review-gate] cannot compute worktree fingerprint — failing closed." >&2
-  exit 1
-}
+# Fallback for a MIXED install (new hook, older checker that does not know
+# --emit-fingerprint and therefore printed nothing): compute the fingerprint
+# separately rather than bricking the commit. Correctness is unaffected — only
+# the single-materialization property is lost.
+if [[ -z "$FP_JSON" ]]; then
+  FP_JSON=$(node "$FP_SCRIPT" "$(pwd)") || {
+    echo "[review-gate] cannot compute worktree fingerprint — failing closed." >&2
+    exit 1
+  }
+fi
 
 node - "$STATE_FILE" "$FP_JSON" <<'NODE'
 const { readFileSync } = require("node:fs");

@@ -177,6 +177,23 @@ function looksBare(dir) {
   }
 }
 
+// The fingerprint implementation is the single source of truth for "what does
+// this worktree contain". Requiring it (instead of re-implementing the shadow
+// index here) keeps the divergence comparison and the fingerprint provably
+// about the same bytes, and lets ONE process materialize the tree once for
+// both. A partial install that lacks it must fail closed — this checker
+// guards a safety invariant and cannot silently fall back to a private copy.
+let sharedWorktreeTreeOid;
+let sharedCompute;
+try {
+  ({ worktreeTreeOid: sharedWorktreeTreeOid, compute: sharedCompute } = require("./compute-fingerprint.cjs"));
+} catch (err) {
+  console.error("[review-gate] staged-divergence check cannot load the fingerprint implementation " +
+    `(scripts/compute-fingerprint.cjs): ${err && err.message ? err.message : err}`);
+  console.error("[review-gate] Failing closed — reinstall the hooks to restore it.");
+  process.exit(1);
+}
+
 const GATE_EXCLUDE_PATHSPECS = [":/.pi", ":/.pi-subagents"];
 const REPO_ROOT_PATHSPEC = ":/";
 const RACE_BACKDATE_MS = 5000;
@@ -304,55 +321,29 @@ function indexTree(cwd) {
   });
 }
 
-/** Tree of the worktree — what the review bound. Mirrors the fingerprint. */
+/**
+ * Tree of the worktree — what the review bound.
+ *
+ * Delegates to the FINGERPRINT's materialization (scripts/compute-fingerprint
+ * .cjs) rather than keeping a second copy: the two must describe the same
+ * bytes, and two near-identical implementations of a security-critical
+ * shadow-index pass are exactly how they drift apart.
+ *
+ * Memoized per repository path, so one hook invocation materializes each
+ * worktree ONCE. That is not only ~half the git work: a repository-configured
+ * `clean` filter is an arbitrary program, and running it twice over the same
+ * unchanged worktree could legitimately produce two different trees, which
+ * would make the divergence comparison and the fingerprint disagree about what
+ * the worktree even contains. Submodule recursion passes a different cwd and
+ * therefore gets its own entry.
+ */
+const worktreeTreeCache = new Map();
 function worktreeTree(cwd) {
-  return withScratchIndex(cwd, (scratch) => {
-    seedScratchIndex(cwd, scratch);
-    // Backdate so git re-hashes racily-clean entries (see lib/fingerprint.ts).
-    // Only meaningful when an index was actually copied.
-    try {
-      const st = statSync(indexPathFor(cwd));
-      utimesSync(scratch, st.atime, new Date(Math.min(st.mtimeMs, Date.now()) - RACE_BACKDATE_MS));
-    } catch (err) {
-      if (err && err.code !== "ENOENT") throw err;
-    }
-    const env = { ...gitBaseEnv(), GIT_INDEX_FILE: scratch };
-
-    // Clear assume-unchanged / skip-worktree in the SCRATCH index only (never
-    // the user's), so `git add` genuinely re-reads every file.
-    //
-    // Measured, so the reasoning is not guesswork: `--renormalize` alone
-    // already re-reads content through an `assume-unchanged` bit, so this is
-    // not what closes that hole — comparing TREE CONTENT instead of
-    // `git status` output is. What it does buy is `skip-worktree`: without
-    // clearing, `git add` aborts ("outside of your sparse-checkout
-    // definition"), which fails closed but blocks the commit with a confusing
-    // sparse-checkout error. Clearing turns that into an accurate divergence
-    // report. Keep it for that reason, not as a security backstop.
-    // --full-name is REQUIRED: `git ls-files` reports paths relative to the
-    // CWD by default, so from a subdirectory the list came back as
-    // "../../x.ts" and the update-index calls below silently did not clear the
-    // bits for those paths — a checker invoked from a subdirectory then MISSED
-    // a real staged/worktree divergence (reproduced: root exit 1, subdir exit
-    // 0 for the same repo). The hook happens to run at the toplevel, but this
-    // script takes a cwd argument and must be correct for any of them.
-    const tracked = git(cwd, ["ls-files", "-z", "--full-name", "--", REPO_ROOT_PATHSPEC], env)
-      .split("\0")
-      .filter(Boolean);
-    if (tracked.length > 0) {
-      // Chunked: a huge repo would blow the argv limit.
-      for (let i = 0; i < tracked.length; i += 500) {
-        const chunk = tracked.slice(i, i + 500);
-        gitOrNull(cwd, ["update-index", "--no-assume-unchanged", "--", ...chunk], env);
-        gitOrNull(cwd, ["update-index", "--no-skip-worktree", "--", ...chunk], env);
-      }
-    }
-
-    git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
-    git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
-    git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
-    return git(cwd, ["write-tree"], env);
-  });
+  const key = resolve(cwd);
+  if (!worktreeTreeCache.has(key)) {
+    worktreeTreeCache.set(key, sharedWorktreeTreeOid(cwd));
+  }
+  return worktreeTreeCache.get(key);
 }
 
 /**
@@ -509,7 +500,49 @@ function divergentPaths(cwd) {
   return [...divergent].sort();
 }
 
-const argCwd = process.argv[2] || process.cwd();
+// `--emit-fingerprint` makes this script ALSO print the worktree fingerprint
+// (as compute-fingerprint.cjs would) on stdout, so the git hook needs a single
+// process for both decisions and the worktree is materialized once. Without
+// the flag the behaviour is unchanged, which keeps an older hook working
+// against a newer checker.
+const EMIT_FINGERPRINT = process.argv.includes("--emit-fingerprint");
+
+/**
+ * Exit, first printing the fingerprint when the hook asked for it.
+ *
+ * The digest REUSES the tree materialized for the divergence comparison
+ * (worktreeTree caches per repo path), so one hook invocation runs the
+ * shadow-index pass — and therefore any repository `clean` filter — exactly
+ * once. Emitting an UNAVAILABLE result rather than nothing keeps the hook's
+ * contract total: it always gets parseable JSON and fails closed on
+ * `unavailable`.
+ */
+function finish(code) {
+  if (EMIT_FINGERPRINT) {
+    // May run BEFORE the toplevel is resolved (the non-repo / bare-repo
+    // skips), so fall back to the requested path rather than touching `cwd`
+    // in its temporal dead zone. compute() fails closed on its own for a
+    // directory it cannot fingerprint.
+    const target = repoTop || argCwd;
+    let result;
+    try {
+      // Hand over the MEMOIZED resolver, not one tree: the fingerprint
+      // recurses into submodules, and each of those must reuse whatever the
+      // divergence comparison already materialized for that same repository.
+      result = sharedCompute(target, repoTop ? { treeOidForCwd: worktreeTree } : undefined);
+    } catch {
+      result = sharedCompute(target); // materialize independently rather than guess
+    }
+    console.log(JSON.stringify(result));
+  }
+  process.exit(code);
+}
+
+/** Repository toplevel once resolved; "" until then (see finish()). */
+let repoTop = "";
+
+const positional = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+const argCwd = positional[0] || process.cwd();
 
 // "Not a git repository" is not a check FAILURE — there is simply nothing to
 // check, and no commit can ship from here either. Anything else that goes
@@ -533,7 +566,7 @@ if (!inside.ok) {
   // tree is a verified "outside any repository". Everything else — a missing
   // path, a `.git` we can see but git cannot use, a bare-repo-shaped directory
   // — is an inspection FAILURE and fails closed.
-  if (existsSync(argCwd) && !hasGitMetadata(argCwd)) process.exit(0);
+  if (existsSync(argCwd) && !hasGitMetadata(argCwd)) finish(0);
   console.error("[review-gate] staged-divergence check could not inspect the repository:");
   console.error(inside.stderr.trim() || "[review-gate] (git produced no diagnostics)");
   console.error("[review-gate] Failing closed — cannot verify that the staged content matches the reviewed worktree.");
@@ -542,7 +575,7 @@ if (!inside.ok) {
 // A bare repo answers "false": no worktree exists, so there is no
 // staged-vs-reviewed-worktree comparison to make and nothing can be committed
 // from here. That is a genuine, verified skip.
-if (inside.out !== "true") process.exit(0);
+if (inside.out !== "true") finish(0);
 
 // Run EVERYTHING from the repository toplevel.
 //
@@ -560,6 +593,7 @@ if (cwd === null) {
   console.error("[review-gate] cannot resolve repository toplevel — failing closed.");
   process.exit(1);
 }
+repoTop = cwd;
 
 // argv[3] is the index git told the HOOK this commit will publish (the hook
 // forwards "${GIT_INDEX_FILE-}"). Empty/absent ⇒ the plain index. Resolved and
@@ -567,7 +601,7 @@ if (cwd === null) {
 // value. An invalid path fails closed rather than silently falling back.
 const COMMIT_INDEX = { repo: "", path: "" };
 try {
-  COMMIT_INDEX.path = commitIndexPath(cwd, process.argv[3] || "");
+  COMMIT_INDEX.path = commitIndexPath(cwd, positional[1] || "");
   COMMIT_INDEX.repo = resolve(cwd);
 } catch (err) {
   console.error(`[review-gate] staged-divergence check failed: ${err && err.message ? err.message : err}`);
@@ -597,4 +631,4 @@ if (paths.length > 0) {
   console.error("[review-gate]                                  # the fingerprint then changes, so re-run review + precommit");
   process.exit(1);
 }
-process.exit(0);
+finish(0);

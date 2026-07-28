@@ -1258,3 +1258,128 @@ test("compute-fingerprint.cjs reports its algorithm version", () => {
   assert.equal(out.version, FP_VERSION,
     "the hook compares against the version the running algorithm reports");
 });
+
+// ---------------------------------------------------------------------------
+// ONE MATERIALIZATION PER HOOK INVOCATION.
+//
+// The checker needs the worktree tree to compare entries and the fingerprint
+// needs a digest over the same content. Building it twice doubled the git work
+// and — because a repository `clean` filter is an arbitrary program — allowed
+// two passes over an UNCHANGED worktree to disagree about what it contains.
+// A counting clean filter makes the number of passes directly observable.
+
+// NOTE ON A REJECTED MEASUREMENT: counting `clean` filter invocations looked
+// like the obvious way to prove "materialized once", but the count is not a
+// stable observable — git re-runs the filter a variable number of times per
+// pass depending on what the scratch index's stat cache still holds (measured
+// on one unchanged repo: 2 invocations for the checker, 5 for the fingerprint,
+// through the SAME materialization function). Asserting a count would produce
+// a flaky test that fails for reasons unrelated to sharing. The property is
+// therefore pinned structurally (below) plus behaviourally by the digest
+// agreement test that follows.
+
+test("the checker memoizes the worktree tree so one run materializes it once", () => {
+  const src = readFileSync(join(ROOT, "scripts", "check-staged-divergence.cjs"), "utf8");
+  assert.match(src, /worktreeTreeCache = new Map\(\)/,
+    "the tree must be memoized per repo path, not rebuilt per caller");
+  assert.match(src, /if \(!worktreeTreeCache\.has\(key\)\)[\s\S]{0,200}sharedWorktreeTreeOid\(cwd\)/,
+    "a cache miss must be the ONLY path that materializes the tree");
+  assert.match(src, /require\("\.\/compute-fingerprint\.cjs"\)/,
+    "the checker must reuse the fingerprint's materialization, not keep a second copy");
+  // Must hand over the RESOLVER, not one tree: passing a single top-level OID
+  // silently degrades to a fresh materialization for every submodule (the
+  // fingerprint recurses), which is where a `clean` filter could make the two
+  // passes disagree. That degradation is invisible in the digest, so it needs
+  // its own assertion.
+  assert.match(src, /sharedCompute\([^)]*treeOidForCwd: worktreeTree/,
+    "the memoized resolver must be handed to the fingerprint, not a single tree OID");
+});
+
+test("the checker fails closed if the shared fingerprint implementation is missing", () => {
+  // The checker now depends on compute-fingerprint.cjs; a partial install must
+  // block rather than silently fall back to a private implementation.
+  const root = makeDir();
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  writeFileSync(join(root, "scripts", "check-staged-divergence.cjs"),
+    readFileSync(join(ROOT, "scripts", "check-staged-divergence.cjs"), "utf8"));
+  const dir = makeGitRepo();
+  const res = spawnSync("node", [join(root, "scripts", "check-staged-divergence.cjs"), dir], {
+    encoding: "utf8",
+  });
+  assert.equal(res.status, 1, "a checker without its fingerprint dependency must fail closed");
+  assert.match(res.stderr, /cannot load the fingerprint implementation/);
+});
+
+test("--emit-fingerprint agrees with the standalone fingerprint script", () => {
+  const dir = makeGitRepo();
+  writeFileSync(join(dir, "a.ts"), "// content");
+  const combined = JSON.parse(spawnSync("node", [
+    join(ROOT, "scripts", "check-staged-divergence.cjs"), dir, "", "--emit-fingerprint",
+  ], { encoding: "utf8" }).stdout);
+  const standalone = JSON.parse(execFileSync("node", [
+    join(ROOT, "scripts", "compute-fingerprint.cjs"), dir,
+  ], { encoding: "utf8" }));
+  assert.equal(combined.digest, standalone.digest,
+    "sharing the tree must not change the digest");
+  assert.equal(combined.version, standalone.version);
+  assert.equal(combined.head, standalone.head);
+});
+
+test("without --emit-fingerprint the checker prints nothing (older hooks keep working)", () => {
+  const dir = makeGitRepo();
+  writeFileSync(join(dir, "a.ts"), "// content");
+  const res = spawnSync("node", [
+    join(ROOT, "scripts", "check-staged-divergence.cjs"), dir,
+  ], { encoding: "utf8" });
+  assert.equal(res.status, 0);
+  assert.equal(res.stdout.trim(), "", "the old contract is stdout-silent");
+});
+
+test("a BLOCKED run exits nonzero BEFORE emitting a fingerprint", () => {
+  // The hook keys off the exit status, never off stdout being present: a
+  // blocked run must not hand it a digest that could be mistaken for approval.
+  const dir = makeGitRepo();
+  writeFileSync(join(dir, "x.ts"), "// v1");
+  execFileSync("git", ["add", "x.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "c"], {
+    cwd: dir, stdio: "ignore",
+  });
+  writeFileSync(join(dir, "x.ts"), "// vA");
+  execFileSync("git", ["add", "x.ts"], { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, "x.ts"), "// vB");
+
+  const res = spawnSync("node", [
+    join(ROOT, "scripts", "check-staged-divergence.cjs"), dir, "", "--emit-fingerprint",
+  ], { encoding: "utf8" });
+  assert.equal(res.status, 1, "the divergence must still block");
+  assert.match(res.stderr, /differs from the reviewed worktree/);
+  assert.equal(res.stdout.trim(), "", "no fingerprint may be emitted once the commit is blocked");
+});
+
+test("the hook asks the checker for the fingerprint, with a fallback for mixed installs", () => {
+  const hook = readFileSync(PRE_COMMIT, "utf8");
+  assert.match(hook, /FP_JSON=\$\(node "\$DIVERGENCE_SCRIPT"[^\n]*--emit-fingerprint\)/,
+    "the hook must get both answers from one process");
+  assert.match(hook, /if \[\[ -z "\$FP_JSON" \]\]; then/,
+    "an older checker that prints nothing must not brick the commit");
+});
+
+test("a sparse-checkout (skip-worktree) repo can now be fingerprinted at all", () => {
+  // Previously `git add` aborted with "outside of your sparse-checkout
+  // definition" and the whole fingerprint failed closed, so such a repo could
+  // never pass the gate. Clearing the bit in the scratch index fixes it.
+  const dir = makeGitRepo();
+  writeFileSync(join(dir, "a.ts"), "// v1");
+  execFileSync("git", ["add", "a.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "c"], {
+    cwd: dir, stdio: "ignore",
+  });
+  execFileSync("git", ["update-index", "--skip-worktree", "a.ts"], { cwd: dir, stdio: "ignore" });
+
+  const fp = JSON.parse(execFileSync("node", [
+    join(ROOT, "scripts", "compute-fingerprint.cjs"), dir,
+  ], { encoding: "utf8" }));
+  assert.equal(fp.unavailable, false,
+    "a skip-worktree repository must produce a usable fingerprint");
+  assert.match(fp.digest, /^[0-9a-f]{40}$/);
+});

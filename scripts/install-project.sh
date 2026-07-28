@@ -35,9 +35,13 @@ echo "✓ Trusted precommit runner installed to ${PI_DIR}/scripts/"
 cp "${SRC}/scripts/scan-test-labels.cjs" "${PI_DIR}/scripts/scan-test-labels.cjs"
 echo "✓ Test-label scanner installed to ${PI_DIR}/scripts/"
 
-# 2c. Staged-divergence checker for the pre-commit hook. MUST keep the original
-#     filename (same rule as above).
+# 2c. Staged-divergence checker for the pre-commit hook, PLUS the fingerprint
+#     implementation it `require`s as ./compute-fingerprint.cjs from the same
+#     directory. Shipping the checker alone makes every commit fail closed with
+#     "Cannot find module" (reproduced by an independent review of this very
+#     installer). Both MUST keep their original filenames.
 cp "${SRC}/scripts/check-staged-divergence.cjs" "${PI_DIR}/scripts/check-staged-divergence.cjs"
+cp "${SRC}/scripts/compute-fingerprint.cjs" "${PI_DIR}/scripts/compute-fingerprint.cjs"
 echo "✓ Staged-divergence checker installed to ${PI_DIR}/scripts/"
 
 # 3. Skill.
