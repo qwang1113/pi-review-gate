@@ -137,6 +137,37 @@ test("user-chosen explore mode makes hook gates advisory", () => {
   assert.equal(runPreCommit(dir).status, 0);
 });
 
+test("user-chosen normal mode makes hook gates advisory", () => {
+  const dir = makeGitRepo();
+  writeState(dir, {
+    ...READY,
+    taskMode: "normal",
+    taskModeSource: "user",
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+  });
+  assert.equal(runPreCommit(dir).status, 0);
+});
+
+test("SECURITY: agent/auto-set normal must NOT make the hook advisory", () => {
+  // normal fully opens the commit gate, so a forged/agent-written sidecar with
+  // source "auto" (or no source) must keep the hook enforced — only a
+  // user-confirmed normal (source "user") may downgrade it.
+  for (const extra of [{ taskModeSource: "auto" }, {}]) {
+    const dir = makeGitRepo();
+    writeState(dir, {
+      ...READY,
+      taskMode: "normal",
+      ...extra,
+      review: { verdict: "PENDING", fingerprint: null, at: null },
+      precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+    });
+    const res = runPreCommit(dir);
+    assert.equal(res.status, 1, JSON.stringify(extra));
+    assert.match(res.stderr, /review is PENDING/);
+  }
+});
+
 test("SECURITY: auto-classified explore must NOT make the hook advisory", () => {
   // A heuristic misclassification (taskModeSource: "auto") or a sidecar
   // without the field must keep the full commit gate. Only an explicit user
@@ -182,6 +213,40 @@ test("SECURITY: unknown taskMode values fail closed (whitelist, incl. retired 'r
     });
     const res = runPreCommit(dir);
     assert.equal(res.status, 1, taskMode);
+    assert.match(res.stderr, /shape\/verdict invalid/);
+  }
+});
+
+test("pausedQuestion: valid shape is accepted (pause never affects the hook's ship decision)", () => {
+  const dir = makeGitRepo();
+  // Gates fully met (no tracked changes) + a well-formed pause → still allow.
+  writeState(dir, {
+    ...READY,
+    hasCodeChange: false,
+    hasDocChange: false,
+    pausedQuestion: { question: "Which auth provider?", at: "t" },
+  });
+  assert.equal(runPreCommit(dir).status, 0);
+});
+
+test("pausedQuestion: gates unmet stay blocked even while paused (no fail-open)", () => {
+  const dir = makeGitRepo();
+  writeState(dir, {
+    ...READY,
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    pausedQuestion: { question: "q", at: "t" },
+  });
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /review is PENDING/);
+});
+
+test("SECURITY: malformed pausedQuestion shapes fail closed (tampered sidecar)", () => {
+  for (const bad of ["str", 42, { question: 1, at: "t" }, { question: "q" }, { at: "t" }]) {
+    const dir = makeGitRepo();
+    writeState(dir, { ...READY, hasCodeChange: false, hasDocChange: false, pausedQuestion: bad });
+    const res = runPreCommit(dir);
+    assert.equal(res.status, 1, JSON.stringify(bad));
     assert.match(res.stderr, /shape\/verdict invalid/);
   }
 });

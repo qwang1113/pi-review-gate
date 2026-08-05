@@ -97,9 +97,10 @@ export interface GateState {
   taskMode?: TaskMode;
   /**
    * Who chose taskMode. SECURITY: the git pre-commit hook downgrades to
-   * advisory ONLY for a user-chosen explore ("user"); a heuristic
-   * auto-selection ("auto") never weakens the hook. Absent ⇒ treated as
-   * "auto" (fail-closed — older sidecars keep the full gate).
+   * advisory ONLY for a user-chosen explore/normal ("user" — confirmed
+   * dialog or /gate-mode); an agent/auto selection ("auto") never weakens
+   * the hook. Absent ⇒ treated as "auto" (fail-closed — older sidecars keep
+   * the full gate).
    */
   taskModeSource?: TaskModeSource;
   /**
@@ -108,6 +109,18 @@ export interface GateState {
    * sidecars written by older versions still validate; absent ⇒ not fired.
    */
   strategicResetFired?: boolean;
+  /**
+   * Agent-requested loop pause (pause_for_question tool): the agent hit a
+   * genuine blocker only the user can resolve, so L2 auto-continuation is
+   * paused until the user's next interactive message. This NEVER affects the
+   * ship gate — unmetRequirements() ignores it entirely; a paused loop still
+   * blocks git commit/push and gh pr. Persisted so the pause survives a
+   * restart while waiting for the user. Absent ⇒ not paused.
+   */
+  pausedQuestion?: {
+    question: string;
+    at: string;
+  };
   updatedAt: string;
 }
 
@@ -170,6 +183,15 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     // absent blocks when the project enforces docSync, never passes).
     if (parsed.review.docSync !== undefined && !DOC_SYNC_ATTESTATIONS.has(parsed.review.docSync as string)) {
       delete parsed.review.docSync;
+    }
+    // Malformed pause → treated as NOT paused (tighten-only: the pause only
+    // relaxes auto-continuation, so dropping a forged one re-arms the loop;
+    // the ship gate never reads this field either way).
+    if (parsed.pausedQuestion !== undefined &&
+        (typeof parsed.pausedQuestion !== "object" || parsed.pausedQuestion === null ||
+         typeof parsed.pausedQuestion.question !== "string" ||
+         typeof parsed.pausedQuestion.at !== "string")) {
+      delete parsed.pausedQuestion;
     }
     const migrated = migrateFingerprintVersion(parsed);
     if (out) out.migrated = migrated;

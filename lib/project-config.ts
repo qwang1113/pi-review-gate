@@ -14,7 +14,6 @@
  *     "docSync": true,        // default on — code changes require a reviewer code↔doc attestation
  *     "llmGuards": {            // LLM (DeepSeek V4 Flash) semantic guard layer
  *       "model": "deepseek/deepseek-v4-flash",
- *       "taskMode": true,       // guard #1 — semantic loop/explore classification
  *       "aiAttribution": true,  // guard #2 — commit-msg AI attribution (regex fallback stays)
  *       "englishCheck": true,   // L5 blind spot — romanized non-English in commit/PR text
  *       "shipDetect": true      // guard #4 — extra ship-command layer on suspicious bash
@@ -44,8 +43,6 @@ export const MAX_MAX_ROUNDS = 50;
 export interface LlmGuardsConfig {
   /** "provider/model" id. Fixed default: DeepSeek V4 Flash. */
   model: string;
-  /** Guard #1: semantic task-mode classification of the first prompt. */
-  taskMode: boolean;
   /** Guard #2: commit-message AI-attribution semantic check. */
   aiAttribution: boolean;
   /** L5/L6 blind spot: romanized non-English detection in commit/PR text. */
@@ -59,7 +56,6 @@ export function defaultLlmGuardsConfig(): LlmGuardsConfig {
     model: "deepseek/deepseek-v4-flash",
     // All ON by default: each check is tighten-only and fail-back, so the
     // worst case of an unreachable model is exactly the pre-LLM behavior.
-    taskMode: true,
     aiAttribution: true,
     englishCheck: true,
     shipDetect: true,
@@ -166,7 +162,8 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
     if (typeof lg.model === "string" && /^[^\/\s]+\/[^\s]+$/.test(lg.model)) {
       cfg.llmGuards.model = lg.model;
     }
-    if (typeof lg.taskMode === "boolean") cfg.llmGuards.taskMode = lg.taskMode;
+    // (An old config's "taskMode" key is simply ignored — the task-mode
+    // decision moved in-session; see lib/task-mode.ts.)
     if (typeof lg.aiAttribution === "boolean") cfg.llmGuards.aiAttribution = lg.aiAttribution;
     if (typeof lg.englishCheck === "boolean") cfg.llmGuards.englishCheck = lg.englishCheck;
     if (typeof lg.shipDetect === "boolean") cfg.llmGuards.shipDetect = lg.shipDetect;

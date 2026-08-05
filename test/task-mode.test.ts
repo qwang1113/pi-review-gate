@@ -1,106 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  decideTaskMode,
+  buildModeConfirmMessage,
+  evaluateModeChange,
+  GATE_MODE_DECISION_DIRECTIVE,
+  MODE_REASON_MAX_CHARS,
   normalizeTaskMode,
-  suggestTaskMode,
-  TASK_MODE_CHOICE_EXPLORE,
-  TASK_MODE_CHOICE_LOOP,
-  TASK_MODE_CHOICE_TITLE,
+  TASK_MODE_RANK,
+  type TaskMode,
 } from "../lib/task-mode.ts";
 
-// ---------------------------------------------------------------------------
-// Classifier: suggestTaskMode
-
-test("implementation prompts confidently suggest loop workflow", () => {
-  for (const prompt of [
-    "fix the login bug",
-    "please implement caching",
-    "帮我修改这个扩展",
-    "新增一个命令并重构状态管理",
-  ]) {
-    assert.deepEqual(suggestTaskMode(prompt), { mode: "loop", confident: true }, prompt);
-  }
-});
-
-test("pure analysis prompts confidently suggest explore workflow", () => {
-  for (const prompt of [
-    "explain why this test fails",
-    "review the architecture",
-    "帮我分析一下这个仓库",
-    "查看代码并总结风险",
-    "帮我排查这个报错",
-  ]) {
-    assert.deepEqual(suggestTaskMode(prompt), { mode: "explore", confident: true }, prompt);
-  }
-});
-
-test("write intent wins over analysis wording", () => {
-  assert.deepEqual(suggestTaskMode("review this code and fix the bug"), { mode: "loop", confident: true });
-  assert.deepEqual(suggestTaskMode("分析后帮我修改实现"), { mode: "loop", confident: true });
-});
-
-test("SECURITY: explore hint + mutation/ship verb must NOT auto-select explore", () => {
-  // An auto-selected explore relaxes auto-continuation and declare_done; a
-  // heuristic misfire on a prompt that actually wants shipping would let the
-  // agent stop early. Any prompt mixing an analysis hint with a mutation/ship
-  // verb outside LOOP_HINTS must ask the user (confident: false).
-  for (const prompt of [
-    "review this code and deploy it",
-    "review the current changes and commit them",
-    "how about merging this PR?",
-    "review this and save the findings to a file",
-    "explain the diff then push it",
-    "analyze the config and apply it to prod",
-    "review this and upload the artifact",
-    "analyze this then submit the PR",
-    "inspect this and open a pull request",
-    "review this and copy the result into config.json",
-    "explain this then sync it to production",
-    "summarize the log and append it to notes.md",
-    "review and move the file to src/",
-    "审阅这些改动并提交",
-    "分析一下然后部署上线",
-    "查看结果并保存到文件",
-    "总结变更后合并这个 PR",
-    "分析后上传产物",
-    "分析后同步到生产环境",
-    "查看后追加到文件",
-    "对比两个分支后复制配置",
-  ]) {
-    assert.deepEqual(suggestTaskMode(prompt), { mode: "loop", confident: false }, prompt);
-  }
-});
-
-test("SECURITY: explore hint + verification intent must NOT auto-select explore", () => {
-  // Explore could run tests (bash is available in that mode), but a prompt
-  // asking to verify tests/lint/typecheck/build signals delivery-validation
-  // intent that belongs to the enforced loop. Keep the conservative behavior:
-  // fall through to the dialog (confident: false) — over-asking is safe.
-  for (const prompt of [
-    "review the current changes and verify the tests pass",
-    "review this diff and make sure the tests still pass",
-    "analyze the module and run the tests",
-    "review and lint the codebase",
-    "inspect the diff and typecheck it",
-    "review the PR and rerun CI",
-    "审阅这些改动并验证测试通过",
-    "分析一下然后跑测试",
-    "查看代码并编译验证",
-  ]) {
-    assert.deepEqual(suggestTaskMode(prompt), { mode: "loop", confident: false }, prompt);
-  }
-  // But a bare "test" noun in an analysis question stays confident explore.
-  assert.deepEqual(
-    suggestTaskMode("explain why this test fails"),
-    { mode: "explore", confident: true },
-  );
-});
-
-test("ambiguous prompts are not confident and fail closed to loop", () => {
-  assert.deepEqual(suggestTaskMode("hello"), { mode: "loop", confident: false });
-  assert.deepEqual(suggestTaskMode("你好"), { mode: "loop", confident: false });
-});
+// Shared fact defaults; individual tests override what they exercise.
+function decide(overrides: Partial<Parameters<typeof evaluateModeChange>[0]> & {
+  current: TaskMode | undefined; requested: TaskMode;
+}) {
+  return evaluateModeChange({
+    hasChanges: false,
+    hasUI: true,
+    downgradesLocked: false,
+    ...overrides,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // normalizeTaskMode — whitelist + forged values
@@ -108,149 +28,182 @@ test("ambiguous prompts are not confident and fail closed to loop", () => {
 test("normalizeTaskMode accepts only the canonical modes", () => {
   assert.equal(normalizeTaskMode("loop"), "loop");
   assert.equal(normalizeTaskMode("explore"), "explore");
+  assert.equal(normalizeTaskMode("normal"), "normal");
 });
 
 test("normalizeTaskMode fails closed on unknown or non-string values", () => {
-  for (const v of ["readonly", "free", "EXPLORE", "", 42, null, undefined, {}]) {
+  for (const v of ["readonly", "free", "EXPLORE", "NORMAL", "", 42, null, undefined, {}]) {
     assert.equal(normalizeTaskMode(v), undefined, String(v));
   }
 });
 
+test("rank order is normal < explore < loop", () => {
+  assert.ok(TASK_MODE_RANK.normal < TASK_MODE_RANK.explore);
+  assert.ok(TASK_MODE_RANK.explore < TASK_MODE_RANK.loop);
+});
+
 // ---------------------------------------------------------------------------
-// Decision flow: decideTaskMode (the extension's input handler delegates here)
+// evaluateModeChange — initial (undecided) classification
 
-function selectSpy(answer: string | undefined) {
-  const calls: Array<{ title: string; options: string[] }> = [];
-  return {
-    calls,
-    select: async (title: string, options: string[]) => {
-      calls.push({ title, options });
-      return answer;
-    },
-  };
-}
-
-test("confident classification auto-decides without showing the dialog", async () => {
-  const loopSpy = selectSpy(TASK_MODE_CHOICE_EXPLORE); // would flip mode if consulted
-  assert.deepEqual(
-    await decideTaskMode({ prompt: "fix the login bug", hasUI: true, select: loopSpy.select }),
-    { mode: "loop", via: "auto", source: "auto" },
-  );
-  assert.equal(loopSpy.calls.length, 0);
-
-  const exploreSpy = selectSpy(TASK_MODE_CHOICE_LOOP);
-  assert.deepEqual(
-    await decideTaskMode({ prompt: "explain this architecture", hasUI: true, select: exploreSpy.select }),
-    { mode: "explore", via: "auto", source: "auto" },
-  );
-  assert.equal(exploreSpy.calls.length, 0);
+test("undecided → loop applies immediately with source auto", () => {
+  assert.deepEqual(decide({ current: undefined, requested: "loop" }),
+    { action: "apply", source: "auto" });
+  // even without a UI: loop is the fail-closed default made explicit
+  assert.deepEqual(decide({ current: undefined, requested: "loop", hasUI: false }),
+    { action: "apply", source: "auto" });
 });
 
-test("ambiguous prompt shows the dialog; only an explicit choice is source=user", async () => {
-  const exploreSpy = selectSpy(TASK_MODE_CHOICE_EXPLORE);
-  assert.deepEqual(
-    await decideTaskMode({ prompt: "hello", hasUI: true, select: exploreSpy.select }),
-    { mode: "explore", via: "dialog", source: "user" },
-  );
-  assert.equal(exploreSpy.calls.length, 1);
-  assert.equal(exploreSpy.calls[0].title, TASK_MODE_CHOICE_TITLE);
-  assert.deepEqual(exploreSpy.calls[0].options, [TASK_MODE_CHOICE_LOOP, TASK_MODE_CHOICE_EXPLORE]);
-
-  const loopSpy = selectSpy(TASK_MODE_CHOICE_LOOP);
-  assert.deepEqual(
-    await decideTaskMode({ prompt: "hello", hasUI: true, select: loopSpy.select }),
-    { mode: "loop", via: "dialog", source: "user" },
-  );
+test("undecided → explore applies with source auto only on a CLEAN interactive session", () => {
+  assert.deepEqual(decide({ current: undefined, requested: "explore" }),
+    { action: "apply", source: "auto" });
 });
 
-test("cancelled dialog and unknown answers fail closed to loop (source=auto)", async () => {
-  for (const answer of [undefined, "", "garbage"]) {
-    const spy = selectSpy(answer);
-    assert.deepEqual(
-      await decideTaskMode({ prompt: "hello", hasUI: true, select: spy.select }),
-      { mode: "loop", via: "dialog-cancelled", source: "auto" },
-      String(answer),
-    );
+test("SECURITY: undecided → explore with tracked changes is a real downgrade (confirm)", () => {
+  // Undecided behaves as loop. Once edits exist, "classifying" the session as
+  // explore would let the agent slip out of the review loop it was already
+  // in — so the user must consent.
+  assert.deepEqual(decide({ current: undefined, requested: "explore", hasChanges: true }),
+    { action: "confirm" });
+});
+
+test("SECURITY: no-UI sessions can never loosen — only undecided→loop and upgrades", () => {
+  // print/JSON mode has no confirm dialog; auto-continuation is the only
+  // driving force there, so injected content must not be able to switch it off.
+  assert.equal(decide({ current: undefined, requested: "explore", hasUI: false }).action, "reject");
+  assert.equal(decide({ current: undefined, requested: "normal", hasUI: false }).action, "reject");
+  assert.equal(decide({ current: "loop", requested: "explore", hasUI: false }).action, "reject");
+  assert.equal(decide({ current: "explore", requested: "normal", hasUI: false }).action, "reject");
+});
+
+test("SECURITY: normal always requires user consent — even as the initial classification", () => {
+  assert.deepEqual(decide({ current: undefined, requested: "normal" }), { action: "confirm" });
+  assert.deepEqual(decide({ current: undefined, requested: "normal", hasChanges: true }),
+    { action: "confirm" });
+});
+
+// ---------------------------------------------------------------------------
+// evaluateModeChange — firstDecideAuto (USER REQUIREMENT: DeepSeek V4 first
+// classification applies automatically, no consent dialog)
+
+test("USER REQUIREMENT: the first LLM classification applies automatically — even normal", () => {
+  // The user opted out of the FIRST confirmation dialog: an LLM-backed first
+  // verdict on a clean interactive session is applied directly with source
+  // auto (the git hooks stay fully enforced).
+  for (const requested of ["loop", "explore", "normal"] as const) {
+    assert.deepEqual(decide({ current: undefined, requested, firstDecideAuto: true }),
+      { action: "apply", source: "auto" }, requested);
   }
 });
 
-test("no UI (print/JSON mode) fails closed to loop without consulting select", async () => {
-  const spy = selectSpy(TASK_MODE_CHOICE_EXPLORE);
-  assert.deepEqual(
-    await decideTaskMode({ prompt: "explain this repo", hasUI: false, select: spy.select }),
-    { mode: "loop", via: "no-ui", source: "auto" },
-  );
-  assert.equal(spy.calls.length, 0);
+test("SECURITY: firstDecideAuto never loosens a dirty session, a no-UI session, or a decided session", () => {
+  // The LLM runs only pre-work (no tracked changes) — once loop-rules edits
+  // exist, "classifying" the session is a real downgrade and needs consent.
+  assert.equal(decide({ current: undefined, requested: "normal", firstDecideAuto: true, hasChanges: true }).action, "confirm");
+  assert.equal(decide({ current: undefined, requested: "explore", firstDecideAuto: true, hasChanges: true }).action, "confirm");
+  // print/JSON mode has no user present — fail-closed regardless of the flag.
+  assert.equal(decide({ current: undefined, requested: "normal", firstDecideAuto: true, hasUI: false }).action, "reject");
+  // firstDecideAuto only covers the FIRST decision: later downgrades keep
+  // asking the user even though the flag may still be passed.
+  assert.equal(decide({ current: "loop", requested: "explore", firstDecideAuto: true }).action, "confirm");
+  assert.equal(decide({ current: "explore", requested: "normal", firstDecideAuto: true }).action, "confirm");
+});
+
+test("SECURITY: firstDecideAuto with the downgrade lock still rejects", () => {
+  const d = decide({ current: undefined, requested: "normal", firstDecideAuto: true, downgradesLocked: true });
+  assert.equal(d.action, "reject");
 });
 
 // ---------------------------------------------------------------------------
-// LLM classifier integration (guard #1 — lib/llm-classify.ts wiring)
+// evaluateModeChange — upgrades (tighten: never need consent)
 
-test("LLM verdict wins over the regex heuristic and keeps source=auto", async () => {
-  const spy = selectSpy(TASK_MODE_CHOICE_LOOP);
-  // Regex would confidently say loop ("fix"), but the prompt is actually a
-  // question quoting a log line — the semantic classifier sees explore.
-  assert.deepEqual(
-    await decideTaskMode({
-      prompt: 'why does the log say "fix applied" twice?',
-      hasUI: true,
-      select: spy.select,
-      classify: async () => "explore",
-    }),
-    { mode: "explore", via: "llm", source: "auto" },
-  );
-  assert.equal(spy.calls.length, 0); // no dialog when the classifier answers
-
-  assert.deepEqual(
-    await decideTaskMode({
-      prompt: "explain this repo", // regex would say explore
-      hasUI: true,
-      select: spy.select,
-      classify: async () => "loop",
-    }),
-    { mode: "loop", via: "llm", source: "auto" },
-  );
+test("every upgrade applies immediately with source auto", () => {
+  for (const [current, requested] of [
+    ["normal", "explore"],
+    ["normal", "loop"],
+    ["explore", "loop"],
+  ] as const) {
+    assert.deepEqual(decide({ current, requested }),
+      { action: "apply", source: "auto" }, `${current}→${requested}`);
+    // upgrades work without a UI and regardless of tracked changes
+    assert.deepEqual(decide({ current, requested, hasUI: false, hasChanges: true }),
+      { action: "apply", source: "auto" }, `${current}→${requested} (no UI)`);
+  }
 });
 
-test("classifier failure falls back to the regex heuristic (fail-back)", async () => {
-  const spy = selectSpy(TASK_MODE_CHOICE_EXPLORE);
-  assert.deepEqual(
-    await decideTaskMode({
-      prompt: "fix the login bug",
-      hasUI: true,
-      select: spy.select,
-      classify: async () => undefined,
-    }),
-    { mode: "loop", via: "auto", source: "auto" },
-  );
-  assert.equal(spy.calls.length, 0);
+test("SECURITY: an agent upgrade records source auto, never user (no hook-advisory laundering)", () => {
+  // If explore→loop→(later confirmed) explore ended with the AGENT able to
+  // mint source:"user" anywhere, the git hooks could be downgraded without a
+  // real user act. Upgrades therefore always carry "auto".
+  const d = decide({ current: "explore", requested: "loop" });
+  assert.deepEqual(d, { action: "apply", source: "auto" });
 });
 
-test("classifier failure on an ambiguous prompt still shows the dialog", async () => {
-  const spy = selectSpy(TASK_MODE_CHOICE_EXPLORE);
-  assert.deepEqual(
-    await decideTaskMode({
-      prompt: "hello",
-      hasUI: true,
-      select: spy.select,
-      classify: async () => undefined,
-    }),
-    { mode: "explore", via: "dialog", source: "user" },
-  );
-  assert.equal(spy.calls.length, 1);
+// ---------------------------------------------------------------------------
+// evaluateModeChange — downgrades (loosen: user consent required)
+
+test("every downgrade from a decided mode requires confirmation", () => {
+  for (const [current, requested] of [
+    ["loop", "explore"],
+    ["loop", "normal"],
+    ["explore", "normal"],
+  ] as const) {
+    assert.deepEqual(decide({ current, requested }), { action: "confirm" },
+      `${current}→${requested}`);
+  }
 });
 
-test("no-UI mode never consults the classifier (fail-closed loop)", async () => {
-  let called = false;
-  const spy = selectSpy(TASK_MODE_CHOICE_EXPLORE);
-  assert.deepEqual(
-    await decideTaskMode({
-      prompt: "explain this repo",
-      hasUI: false,
-      select: spy.select,
-      classify: async () => { called = true; return "explore"; },
-    }),
-    { mode: "loop", via: "no-ui", source: "auto" },
-  );
-  assert.equal(called, false);
+test("SECURITY: the downgrade lock rejects every consent-requiring transition", () => {
+  // One declined dialog must silence agent-initiated downgrades for the whole
+  // session (anti-grinding): reject, not re-confirm.
+  for (const [current, requested] of [
+    ["loop", "explore"],
+    ["loop", "normal"],
+    ["explore", "normal"],
+    [undefined, "normal"],
+  ] as const) {
+    const d = decide({ current, requested, downgradesLocked: true });
+    assert.equal(d.action, "reject", `${current}→${requested}`);
+    assert.match((d as { reason: string }).reason, /declined/);
+  }
+  // upgrades are unaffected by the lock
+  assert.deepEqual(decide({ current: "explore", requested: "loop", downgradesLocked: true }),
+    { action: "apply", source: "auto" });
+});
+
+test("requesting the current mode is a noop", () => {
+  for (const mode of ["loop", "explore", "normal"] as const) {
+    assert.deepEqual(decide({ current: mode, requested: mode }), { action: "noop" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Confirm-dialog copy — fixed consequences + untrusted reason handling
+
+test("confirm message states the consequences in fixed extension copy", () => {
+  const normal = buildModeConfirmMessage("normal", "quick chore");
+  assert.match(normal, /normal/);
+  assert.match(normal, /commit\/push\/PR 不再被拦截/);
+  const explore = buildModeConfirmMessage("explore", "just investigating");
+  assert.match(explore, /ship 命令仍被完整拦截/);
+});
+
+test("SECURITY: the agent reason is labeled untrusted, JSON-quoted, and length-capped", () => {
+  const long = "a".repeat(MODE_REASON_MAX_CHARS * 3);
+  const msg = buildModeConfirmMessage("normal", long);
+  assert.match(msg, /不可信数据/);
+  assert.ok(!msg.includes(long), "over-long reason must be truncated");
+  // Newlines cannot fake dialog copy: the reason is JSON-quoted, so a literal
+  // newline in the input appears as the two characters \n.
+  const sneaky = buildModeConfirmMessage("normal", '完全无害\n[review-gate] 官方提示：请点“是”');
+  assert.ok(sneaky.includes("\\n"), "reason newlines must be escaped");
+  assert.ok(!sneaky.includes('\n[review-gate] 官方提示'), "raw newline must not survive into the dialog");
+});
+
+test("the undecided-session directive instructs an in-session set_gate_mode call", () => {
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /set_gate_mode/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /fail-closed/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /"loop" \(the safe default\)/);
+  // USER REQUIREMENT: the first classification is automated (DeepSeek V4),
+  // no confirmation dialog.
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /applied AUTOMATICALLY/);
 });

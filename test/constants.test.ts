@@ -103,8 +103,7 @@ test("coalesceToolPath reads every known path parameter spelling", () => {
 test("sensitive file patterns", () => {
   for (const f of [
     ".env",
-    "/proj/.env.local",
-    "config/.env.production",
+    "/proj/.env",
     "certs/server.pem",
     "id_rsa",
     "/home/u/.ssh/id_ed25519",
@@ -115,7 +114,8 @@ test("sensitive file patterns", () => {
   ]) {
     assert.ok(isSensitiveFile(f), `should be sensitive: ${f}`);
   }
-  for (const f of ["src/env.ts", "environment.md", "src/auth.service.ts", "key-utils.ts", "envelope.ts"]) {
+  // .env variants (template/local/production) are not secrets — only `.env` itself is blocked.
+  for (const f of ["src/env.ts", "environment.md", "src/auth.service.ts", "key-utils.ts", "envelope.ts", ".env.template", "/proj/.env.local", "config/.env.production"]) {
     assert.ok(!isSensitiveFile(f), `should NOT be sensitive: ${f}`);
   }
 });

@@ -64,7 +64,7 @@ export function coalesceToolPath(input: Record<string, unknown> | undefined): st
  * Matched against the basename and the full path.
  */
 export const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = Object.freeze([
-  /(^|\/)\.env(\.[^/]*)?$/i,          // .env, .env.local, .env.production
+  /(^|\/)\.env$/i,                    // .env only — templates (.env.template) hold no secrets
   /(^|\/)[^/]*\.(pem|key|p12|pfx)$/i, // private keys / certs
   /(^|\/)id_(rsa|ed25519|ecdsa)[^/]*$/i,
   /(^|\/)(credentials|secrets?)(\.[a-z0-9]+)?$/i,

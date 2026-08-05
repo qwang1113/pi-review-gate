@@ -1,8 +1,8 @@
 ---
 name: reviewer
 description: Versatile review specialist for code diffs, plans, proposed solutions, codebase health, and PR/issue validation — pinned to a top-tier reasoning model at max thinking
-model: onekey/gpt-5.6-sol
-fallbackModels: claude-fable-5, onekey/gpt-5.5, claude-opus-4-8
+model: claude-fable-5
+fallbackModels: onekey/gpt-5.5, claude-opus-4-8
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true

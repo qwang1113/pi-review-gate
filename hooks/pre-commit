@@ -23,10 +23,11 @@ command -v node >/dev/null 2>&1 || {
   exit 1
 }
 
-# Validate the complete sidecar shape BEFORE honoring bypass or explore mode.
-# This keeps both escape paths fail-closed for corrupt, unknown-schema, or forged
-# states. Exit 10 means a valid bypass; 11 means a valid USER-chosen explore
-# advisory state (an auto-classified explore never downgrades the hook).
+# Validate the complete sidecar shape BEFORE honoring bypass or an advisory
+# mode. This keeps every escape path fail-closed for corrupt, unknown-schema,
+# or forged states. Exit 10 means a valid bypass; 11 means a valid USER-chosen
+# explore/normal advisory state (an agent/auto-classified mode never
+# downgrades the hook).
 set +e
 node - "$STATE_FILE" <<'NODE'
 const { readFileSync } = require("node:fs");
@@ -57,9 +58,16 @@ if (!nullableString(state.sessionId) ||
     !Number.isInteger(state.maxRounds) || state.maxRounds < 3 || state.maxRounds > 50 ||
     !state.bypass || typeof state.bypass.active !== "boolean" ||
     !nullableString(state.bypass.reason) || !nullableString(state.bypass.at) ||
-    (state.taskMode !== undefined && state.taskMode !== "loop" && state.taskMode !== "explore") ||
+    (state.taskMode !== undefined && state.taskMode !== "loop" && state.taskMode !== "explore" && state.taskMode !== "normal") ||
     (state.taskModeSource !== undefined && state.taskModeSource !== "auto" && state.taskModeSource !== "user") ||
     (state.strategicResetFired !== undefined && typeof state.strategicResetFired !== "boolean") ||
+    // Optional agent-requested pause (pause_for_question). It never affects
+    // the ship decision, but a present field must be well-formed — a forged
+    // shape means a tampered sidecar, which fails closed like everything else.
+    (state.pausedQuestion !== undefined &&
+      !(state.pausedQuestion && typeof state.pausedQuestion === "object" &&
+        typeof state.pausedQuestion.question === "string" &&
+        typeof state.pausedQuestion.at === "string")) ||
     // Absent = a sidecar written before fingerprint versioning; any present
     // value must be a real version number (a forged non-integer must not slip
     // through and later compare "equal" to the running algorithm).
@@ -69,9 +77,11 @@ if (!nullableString(state.sessionId) ||
   process.exit(1);
 }
 if (state.bypass.active) process.exit(10);
-// SECURITY: only a USER-chosen explore (dialog or /gate-mode) makes the hook
-// advisory. A heuristic auto-classification must never weaken the commit gate.
-if (state.taskMode === "explore" && state.taskModeSource === "user") process.exit(11);
+// SECURITY: only a USER-chosen explore/normal (confirmed dialog or /gate-mode)
+// makes the hook advisory. An agent/auto classification must never weaken the
+// commit gate.
+if ((state.taskMode === "explore" || state.taskMode === "normal") &&
+    state.taskModeSource === "user") process.exit(11);
 process.exit(0);
 NODE
 STATE_MODE=$?

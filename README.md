@@ -11,13 +11,19 @@
 
 Pi has no `Stop` event to prevent the model from quitting — but it has something better: `tool_call` blocking. Instead of intercepting "the model wants to stop", we intercept "the model wants to ship". Combined with `agent_settled` auto-continuation, the model fixes → re-reviews → re-runs precommit until every gate is green, and *cannot* commit around it.
 
-At the first task in each interactive session, the extension classifies the prompt to pick a workflow. When the LLM guard layer is enabled (default), a **semantic classifier** (DeepSeek V4 Flash, ~2s) judges the *intent* of the prompt — quoted logs, pasted notifications, and error messages are treated as context rather than intent, which a word-matching regex cannot do. If the model is unreachable or answers garbage, the decision **falls back** to the original fast deterministic classifier. When the (fallback) regex signal is clear it **auto-selects** the workflow and just notifies you — write intent (fix/implement/修改…) selects the full enforced **loop** workflow, and *pure* analysis/investigation intent (explain/review/分析/排查…) selects a conservative **explore** workflow. Explore auto-selection is deliberately strict: it requires an analysis hint **and** the absence of every known mutation/ship verb (commit, deploy, merge, save, upload, sync, 提交, 部署, 上传…); any mixed or unrecognized prompt pops the selection dialog instead.
+Each session runs in one of **three gate modes** (strictness order `normal < explore < loop`), decided via the `set_gate_mode` tool — and the **first** classification is automated (user requirement): while the mode is undecided the tool asks the **DeepSeek V4** classifier (`llmGuards.model`, `lib/llm-classify.ts`) to pick the mode from the agent's stated reason plus session facts, and the verdict is applied **automatically — no confirmation dialog for the first classification**. A failed model call falls back to the pure rule engine exactly as before (fail-back). While the mode is undecided the gate behaves exactly like `loop` (fail-closed) and the per-turn system prompt instructs the agent to call `set_gate_mode` as its first action; “the agent never decides” therefore costs nothing.
 
-**Explore mode** is the investigation/troubleshooting workflow. Its one essential difference from loop: **the agent may end the task on its own judgment** — `declare_done` is always accepted (gate status is reported as advisory) and auto-continuation is off. Edits and `bash` stay **available** — the injected system prompt merely instructs the agent to prefer read-only work — because troubleshooting routinely needs diagnostic commands. Ship commands (`git commit/push`, `gh pr create/edit`) remain **fully gated by L1 in every mode**: explore never weakens the in-session ship gate, so an auto-misclassification only relaxes auto-continuation — the safe direction. For the *git hooks* (defense-in-depth outside Pi), the sidecar records *who* chose the mode (`taskModeSource`): pre-commit/pre-push treat explore as advisory **only when the user chose it explicitly** (dialog or `/gate-mode`) — this protects the user's own manual commits during an explore session, while an auto-classified explore keeps the hooks fully enforced. An LLM-decided mode also keeps `taskModeSource: "auto"` — semantic classification never downgrades the commit hooks either. You can override the decision anytime with `/gate-mode loop|explore`. In print/JSON mode, where no selection UI is available, the extension defaults safely to the loop workflow (without consulting the LLM); cancelling the dialog also defaults to loop.
+- **`loop`** — the full enforced workflow: review READY + precommit PASS gate every ship, auto-continuation drives the fix→review loop.
+- **`explore`** — investigation/troubleshooting. Its one essential difference from loop: **the agent may end the task on its own judgment** — `declare_done` is always accepted (gate status is reported as advisory) and auto-continuation is off. Edits and `bash` stay **available** — the injected system prompt merely instructs the agent to prefer read-only work — because troubleshooting routinely needs diagnostic commands. Ship commands (`git commit/push`, `gh pr create/edit`) remain **fully gated by L1**: explore never weakens the in-session ship gate, so a misclassification only relaxes auto-continuation — the safe direction.
+- **`normal`** — for non-development, non-research tasks: the extension steps aside as if it were not installed. No workflow prompt injection, no ship blocking, no auto-continuation, no L6 edit-time check, no LLM guard calls. Two things deliberately survive: the **output-language directive (L4)** — it is standing user policy, orthogonal to the gate — and the **sensitive-file guard** (`.env`/keys), a security floor. Because normal fully opens the in-session gate, **every path into it requires the user's explicit consent** (a confirm dialog or `/gate-mode normal`) — with ONE exception: the DeepSeek V4 **first classification** of a clean interactive session applies automatically (user requirement; source stays `"auto"` so the git hooks remain fully enforced).
+
+**Mode switching is asymmetric by design.** *Upgrades* (toward `loop`) apply immediately — tightening never needs consent — and record `taskModeSource: "auto"`. *Downgrades* (toward `normal`) pop a confirmation dialog that the **extension** renders with fixed consequence copy; the agent's stated reason is shown as clearly-labeled untrusted data, and the tool deliberately has **no “confirmed” parameter**, so consent can never be claimed by the caller. A **declined** dialog locks agent-initiated downgrades for the rest of the session (anti-grinding); only `/gate-mode` or `/gate-reset` clears the lock. The **first** classification is the one consent-free path below loop: the DeepSeek V4 verdict applies automatically on an interactive session in which **this session has made no edits yet** — pre-existing worktree/branch changes from before the session do NOT block it (they arm the ship gate, but the verdict records `source: "auto"` so the git hooks stay fully enforced); once the session itself edits, slipping into explore is a real downgrade and asks the user — and in print/JSON mode (no UI) nothing can be confirmed, so only upgrades and `undecided→loop` are possible there (fail-closed).
+
+For the *git hooks* (defense-in-depth outside Pi), the sidecar records *who* chose the mode (`taskModeSource`): pre-commit/pre-push treat explore/normal as advisory **only when the user chose it explicitly** (`"user"` — a confirmed dialog or `/gate-mode`) — this protects the user's own manual commits during such a session, while an agent-set mode keeps the hooks fully enforced (`"auto"`). You can override the mode anytime with `/gate-mode loop|explore|normal`.
 
 ### LLM semantic guard layer (DeepSeek V4 Flash)
 
-Four guards get an additional **semantic layer** backed by a fast, cheap model (`deepseek/deepseek-v4-flash`, configurable via `llmGuards.model`). Design invariants, enforced by construction in `lib/llm-classify.ts`:
+The same fast, cheap model (`deepseek/deepseek-v4-flash`, configurable via `llmGuards.model`) powers the **session-start gate-mode classification** (see Gate modes) and gives **three guards** an additional **semantic layer**. Design invariants, enforced by construction in `lib/llm-classify.ts`:
 
 1. **Tighten-only** — an LLM verdict can only *add* a block or pick the safer side of an ambiguous case. Deterministic checks run first and short-circuit; the LLM is never asked to *approve* something a deterministic check blocked.
 2. **Fail-back** — timeout (8s), spawn failure, or unparseable output degrade each guard to its exact pre-LLM deterministic behavior. No network ⇒ no regression.
@@ -25,7 +31,7 @@ Four guards get an additional **semantic layer** backed by a fast, cheap model (
 
 | Guard | Deterministic base | What the LLM layer adds |
 |---|---|---|
-| Task-mode (`llmGuards.taskMode`) | regex hints + dialog | Semantic intent judgment; quoted text no longer pollutes the decision |
+| Gate-mode classification (session start) | none — the rule engine (`lib/task-mode.ts`) fallbacks | The FIRST `set_gate_mode` call (undecided + clean interactive session) is classified by DeepSeek V4 and applied automatically, no confirmation dialog (user requirement; `source: "auto"` keeps the git hooks enforced; a failed call falls back to the agent's pick under the normal consent rules) |
 | AI attribution (`llmGuards.aiAttribution`) | `COMMIT_MSG_FORBIDDEN` regexes | Paraphrases: “pair-programmed with an assistant”, “drafted by a language model” |
 | English check L5/L6 (`llmGuards.englishCheck`) | Unicode non-Latin-script detection | The romanization blind spot: pure-Latin pinyin/romaji commit messages, PR text, and test labels |
 | Ship detect (`llmGuards.shipDetect`) | ~static shell parser (`lib/ship-detect.ts`) | Suspicious git/gh commands with dynamic constructs (base64-piped shells, inline-defined aliases) the static parser cannot resolve — a positive answer *adds* a detection; “none” changes nothing |
@@ -365,7 +371,6 @@ Per-project config lives in `.pi/review-gate.json`:
   "docSync": true,     // default ON — reviewer code↔doc attestation; false disables
   "llmGuards": {                // LLM semantic guard layer (all tighten-only + fail-back)
     "model": "deepseek/deepseek-v4-flash", // "provider/model" — fixed default
-    "taskMode": true,           // semantic loop/explore classification
     "aiAttribution": true,      // paraphrased AI attribution in commit messages
     "englishCheck": true,       // romanized non-English in commit/PR/test-label text
     "shipDetect": true          // extra ship-command layer on suspicious bash
@@ -506,9 +511,9 @@ sentinel printed by any other command can never grant a PASS.
 | Command | Effect |
 |---------|--------|
 | `/gate-status` | Show workflow mode, verdicts, rounds, fingerprint, unmet requirements |
-| `/gate-mode loop\|explore` | Switch the session workflow. `explore` makes gates advisory and lets the AI self-complete (edits/bash stay available but read-only work is preferred; ship commands stay gated). Only the user can invoke this command. |
+| `/gate-mode loop\|explore\|normal` | Switch the session workflow in any direction without a dialog (user-invoked = explicit consent; also clears the agent-downgrade lock). `explore` makes gates advisory and lets the AI self-complete (ship commands stay gated). `normal` switches the gate off entirely for this session. |
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
-| `/gate-reset` | Reset gate state and ask for the workflow again on the next task |
+| `/gate-reset` | Reset gate state (mode returns to undecided — the agent re-decides via `set_gate_mode`; also clears the agent-downgrade lock) |
 | `/gate-lesson <text>` | Append a lesson to `.pi/review-gate-lessons.md` (self-improvement log) |
 
 ### sd0x-dev-flow workflow commands
@@ -541,10 +546,12 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 
 | Tool | Purpose |
 |------|---------|
+| `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal` + a reason). On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) the tool asks the **DeepSeek V4** classifier and applies its verdict **automatically — no confirmation dialog** (user requirement; the LLM may override the agent's pick; a failed call falls back to the rule engine). Later changes delegate to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. |
 | `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
 | `request_arbitration` | Contest a ship block the agent believes is **circular** (the only remedy is an action the block forbids). Narrow + fail-closed — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception). |
+| `pause_for_question` | Agent-requested **loop pause** for a genuine blocker only the user can resolve (ambiguous requirement, a product decision, missing access). Without it, an agent that ends its turn with a question gets steamrolled by the L2 auto-continuation. The pause is **tighten-only**: it disarms auto-continuation ONLY — `unmetRequirements()` never reads it, so the L1 ship gate and the git hooks stay fully enforced. Persisted in the sidecar (survives a restart while waiting); clears automatically on the user's next message (any non-`extension` input source, so RPC-driven sessions don't deadlock), on the agent's next code/doc edit, `record_review`, `run_precommit`, or a mode change (stale-pause liveness: an agent that keeps looping has proven it is not waiting). During `session_compact` a paused loop re-injects the *waiting* state (`[REVIEW_GATE_PAUSED]`) instead of a resume nudge. Prohibited use — asking permission to continue routine loop work — stays prohibited; the per-turn prompt spells out the exemption. |
 
 ### Arbiter (a narrow, fail-closed gate exception)
 
@@ -667,6 +674,11 @@ user's write access who deliberately tampers with the control plane. These are
 including a content hash, by editing the checker too):
 
 - Editing the extension, the installed runner, git hooks, or the gate sidecar.
+  (Note the sidecar reward grew with `normal` mode: forging
+  `taskMode: "normal", taskModeSource: "user"` makes the git hooks advisory.
+  In-session enforcement is unaffected — L1 reads the in-memory state — and
+  this is the same excluded class as forging `explore`+`user` or `bypass`
+  today: a same-UID writer could equally delete the hooks.)
 - Arbitrary dynamic shell/scripts that construct an unknown command at runtime
   (`$(cat /tmp/x)`, `$COMMAND`, a generated executable). The ship gate blocks
   *recognizable* dynamic ship heads but cannot statically decide Turing-complete
@@ -742,6 +754,28 @@ Protocol-fixed English tokens are explicitly exempted — verdict enum values
 (`READY`/`BLOCKED`/`NEEDS_HUMAN`), the precommit `## Overall:` sentinel, commit
 messages, code, identifiers, and paths — so the language rule can never corrupt
 the review gate's own parsing.
+
+### Edit discipline (prompt-only nudges)
+
+A recurring bad habit across sessions: when an `edit`/`write` tool call fails
+(validation error, `oldText` mismatch, wrong tool name), some agents fall back
+to `bash`/python to modify files directly (`sed -i`, `cat >`, `python -c`
+writes, …) instead of fixing the tool call. This is corrected with **nudges
+only — no blocking, no command rewriting** (`lib/edit-discipline.ts`):
+
+1. **Standing guidance** — an `EDIT_DISCIPLINE_DIRECTIVE` paragraph is injected
+   into the system prompt every turn in every non-normal mode: all file changes
+   go through the `edit`/`write` tools; a failed call is fixed and retried, not
+   worked around with bash.
+2. **Failure feedback** — a failed `edit`/`write` tool result gets
+   `EDIT_FAILURE_NUDGE` appended, telling the agent to retry the tool call.
+3. **Workaround detection** — if the same turn then runs a bash command that
+   looks like a direct file write (`sed -i`, `cat >`, `tee`, `python`/`node`
+   writes, heredocs, …), that bash result gets `BASH_WRITE_NUDGE` appended.
+   The window opens only on an edit failure and closes at turn start, on new
+   user input, on a successful edit, and after one nudge — ordinary bash usage
+   never pays for it, and nothing is ever blocked. All three sites are skipped
+   in normal mode (the user-consented step-aside adds no extension text).
 
 ### Commit/PR English gate (L5, advisory)
 

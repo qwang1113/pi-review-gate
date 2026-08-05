@@ -51,17 +51,124 @@ test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits
   assert.ok(exploreAt < loopArmedAt, "explore early-return must precede the loopArmed check");
 });
 
-test("first task delegates to the pure decideTaskMode flow and warns on auto-explore", () => {
-  assert.match(SRC, /pi\.on\(["']input["']/);
-  // The handler must use the unit-tested pure decision flow (auto vs dialog vs
-  // no-UI vs cancel), not re-implement the branching inline.
-  assert.match(SRC, /decideTaskMode\(/);
-  assert.match(SRC, /decision\.via === "auto"/);
-  // Auto-selecting explore relaxes auto-continuation — the notify level must
-  // be "warning" for explore (info only for loop) so misfires are noticed.
-  assert.match(SRC, /decision\.mode === "loop" \? "info" : "warning"/);
+test("pause_for_question: agent-requested loop pause is registered and tighten-only", () => {
+  assert.match(SRC, /name: "pause_for_question"/);
+  // The pause persists (survives a restart while waiting for the user)…
+  const toolStart = SRC.indexOf('name: "pause_for_question"');
+  const toolBody = SRC.slice(toolStart, toolStart + 3500);
+  assert.match(toolBody, /state\.pausedQuestion = \{/);
+  assert.match(toolBody, /loopArmed = false/);
+  assert.match(toolBody, /persist\(/);
+  // …but it must NEVER touch the ship authority: unmetRequirements takes no
+  // pause input, and no call site filters its problems on pausedQuestion.
+  assert.doesNotMatch(SRC, /unmetRequirements\([^)]*pausedQuestion/);
+});
+
+test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
+  // A stale ordering would let the auto-continuation steamroll the agent's
+  // question with a [REVIEW_GATE_RESUME] follow-up instead of waiting.
+  const start = SRC.indexOf('pi.on("agent_settled"');
+  assert.ok(start >= 0, "agent_settled handler must exist");
+  const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
+  assert.ok(injectAt > start, "agent_settled must contain the RESUME injection");
+  const beforeInject = SRC.slice(start, injectAt);
+  assert.match(beforeInject, /if \(state\.pausedQuestion\) return;/);
+});
+
+test("pause resume: any non-extension input clears the pause (interactive AND rpc users)", () => {
+  // source === "extension" is how the gate injects its own follow-ups; a
+  // narrower filter (interactive-only) would deadlock RPC-driven sessions.
+  const start = SRC.indexOf('pi.on("input"');
+  assert.ok(start >= 0, "input handler must exist");
+  const body = SRC.slice(start, start + 1400);
+  assert.match(body, /event\.source !== "extension"/);
+  assert.match(body, /delete state\.pausedQuestion/);
+});
+
+test("stale pause liveness: cleared when the agent proves it is not waiting", () => {
+  // A pause left behind while the agent keeps looping must not silently
+  // swallow auto-continuation: edits, record_review and run_precommit all
+  // clear it (plus setTaskMode — a fresh mode decision supersedes it).
+  const clears = SRC.match(/delete state\.pausedQuestion/g) ?? [];
+  assert.ok(clears.length >= 5, `expected >=5 clear sites, found ${clears.length}`);
+  const recordStart = SRC.indexOf('name: "record_review"');
+  const recordEnd = SRC.indexOf('name: "run_precommit"');
+  assert.ok(SRC.slice(recordStart, recordEnd).includes("delete state.pausedQuestion"), "record_review must clear the pause");
+  const precommitEnd = SRC.indexOf('name: "declare_done"');
+  assert.ok(SRC.slice(recordEnd, precommitEnd).includes("delete state.pausedQuestion"), "run_precommit must clear the pause");
+});
+
+test("session_compact while paused re-injects the WAITING state, never a resume nudge", () => {
+  const start = SRC.indexOf('pi.on("session_compact"');
+  assert.ok(start >= 0);
+  const body = SRC.slice(start, SRC.indexOf("pi.on", start + 10));
+  assert.match(body, /REVIEW_GATE_PAUSED/);
+});
+
+test("gate mode is decided via set_gate_mode with a DeepSeek V4 first classification", () => {
+  // USER REQUIREMENT: the first classification is automated — the tool asks
+  // the DeepSeek V4 classifier (lib/llm-classify.ts) while undecided and
+  // applies the verdict without a confirmation dialog. The input handler is
+  // CACHE-ONLY (feeds the classifier the user's real first message) — the
+  // old input-handler decision flow stays gone.
+  assert.doesNotMatch(SRC, /decideTaskMode/);
+  assert.match(SRC, /classifyTaskMode\(/);
+  assert.match(SRC, /firstDecideAuto:/);
+  // The cache-only input capture must never decide anything itself.
+  const inputAt = SRC.indexOf('pi.on("input"');
+  assert.ok(inputAt >= 0, "first-input capture handler must exist");
+  const inputBody = SRC.slice(inputAt, inputAt + 600);
+  assert.doesNotMatch(inputBody, /classifyTaskMode|evaluateModeChange|setTaskMode/,
+    "the input handler must cache only — decisions stay in set_gate_mode");
+  assert.match(inputBody, /editFailurePending = false/,
+    "new user input must close the edit-failure nudge window");
+  assert.match(SRC, /name:\s*["']set_gate_mode["']/);
+  // USER REQUIREMENT: "no changes" means THIS session's own edits
+  // (sessionEdited), NOT pre-existing worktree/branch changes — a new session
+  // on a dirty worktree still gets the consent-free first classification.
+  assert.match(SRC, /!sessionEdited/);
+  assert.match(SRC, /sessionEdited = false/); // session_start reset
+  assert.match(SRC, /sessionEdited = true/);  // tool_call passed-edit arm
+  // The tool must delegate to the pure, unit-tested rule engine and inject
+  // the undecided directive from the same module.
+  assert.match(SRC, /evaluateModeChange\(\{/);
+  assert.match(SRC, /GATE_MODE_DECISION_DIRECTIVE/);
   assert.match(SRC, /registerCommand\(["']gate-mode["']/);
-  assert.doesNotMatch(SRC, /name:\s*["'](?:set_)?task_mode["']/);
+});
+
+test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' parameter, decline locks downgrades", () => {
+  const at = SRC.indexOf('name: "set_gate_mode"');
+  assert.ok(at >= 0, "set_gate_mode tool must exist");
+  const region = SRC.slice(at, SRC.indexOf("registerTool", at + 10));
+  // The tool's parameters must be exactly mode + reason — a caller-supplied
+  // consent flag would let the model approve its own downgrade.
+  const paramsAt = region.indexOf("parameters: Type.Object(");
+  const paramsRegion = region.slice(paramsAt, region.indexOf("async execute", paramsAt));
+  const paramKeys = [...paramsRegion.matchAll(/^\s*(\w+):\s*Type\./gm)]
+    .map((m) => m[1])
+    .filter((k) => k !== "parameters"); // the `parameters: Type.Object(` wrapper itself
+  assert.deepEqual(paramKeys.sort(), ["mode", "reason"],
+    "set_gate_mode parameters must be exactly {mode, reason}");
+  // Consent comes from ctx.ui.confirm rendered by the EXTENSION, with the
+  // fixed-copy dialog builder; only that branch may mint source "user".
+  assert.match(region, /ctx\.ui\.confirm\(MODE_CONFIRM_TITLE, buildModeConfirmMessage\(/);
+  const confirmAt = region.indexOf("ctx.ui.confirm");
+  const userMint = region.indexOf('setTaskMode(effective, "user"');
+  assert.ok(userMint > confirmAt, 'source "user" may only be set after the confirm dialog');
+  // A declined dialog locks agent-initiated downgrades (anti-grinding).
+  assert.match(region, /agentDowngradesLocked = true/);
+  // Apply-path modes carry the rule engine's source (always "auto").
+  assert.match(region, /setTaskMode\(\w+, decision\.source/);
+});
+
+test("the downgrade lock is cleared ONLY by user actions (/gate-mode, gate-reset)", () => {
+  // (the `let … = false` declaration is excluded — only assignment sites count)
+  const clears = [...SRC.matchAll(/(?<!let )agentDowngradesLocked = false/g)].map((m) => m.index!);
+  assert.equal(clears.length, 2, "exactly two clear sites: /gate-mode and /gate-reset");
+  const gateModeAt = SRC.indexOf('registerCommand("gate-mode"');
+  const gateResetAt = SRC.indexOf('registerCommand("gate-reset"');
+  assert.ok(clears.some((i) => i > gateModeAt && i < gateModeAt + 1200), "/gate-mode must clear the lock");
+  assert.ok(clears.some((i) => i > gateResetAt && i < gateResetAt + 800), "/gate-reset must clear the lock");
 });
 
 test("explore workflow: advisory completion, no edit/bash blocking, ship gate intact", () => {
@@ -77,21 +184,86 @@ test("explore workflow: advisory completion, no edit/bash blocking, ship gate in
   assert.doesNotMatch(SRC, /run_precommit is unavailable/);
 });
 
-test("SECURITY: explore never weakens the L1 ship gate (no taskMode branch in tool_call)", () => {
-  // Ship commands (git commit/push, gh pr) must stay fully gated in every
-  // mode: explore only relaxes declare_done and auto-continuation. Guard
-  // against reintroducing a mode check inside the tool_call handler.
+test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed normal may", () => {
+  // Ship commands (git commit/push, gh pr) must stay fully gated in explore:
+  // it only relaxes declare_done and auto-continuation. The ONLY permitted
+  // mode branch in tool_call is the normal-mode early return (every path into
+  // normal is user-confirmed — see evaluateModeChange).
   const start = SRC.indexOf('pi.on("tool_call"');
   assert.ok(start >= 0, "tool_call handler must exist");
   const end = SRC.indexOf('pi.on("tool_result"', start);
   assert.ok(end > start, "tool_result handler must follow tool_call");
   const body = SRC.slice(start, end);
-  assert.doesNotMatch(body, /taskMode\s*===/,
-    "tool_call (L1 ship gate + sensitive files + L6) must be task-mode independent");
+  assert.doesNotMatch(body, /taskMode\s*===\s*"explore"/,
+    "tool_call must never branch on explore");
+  assert.doesNotMatch(body, /taskMode\s*!==/,
+    "tool_call must not use negated mode branches");
+  const modeBranches = [...body.matchAll(/taskMode\s*===\s*"(\w+)"/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(modeBranches)], ["normal"],
+    "the only tool_call mode branch is normal");
+});
+
+test("SECURITY: the sensitive-file guard runs BEFORE the normal-mode edit return (security floor)", () => {
+  // Normal mode skips workflow checks but must never skip the .env/keys
+  // guard — the early return has to come after isSensitiveFile.
+  const start = SRC.indexOf('pi.on("tool_call"');
+  const body = SRC.slice(start, SRC.indexOf('pi.on("tool_result"', start));
+  const sensitiveAt = body.indexOf("isSensitiveFile");
+  const normalEditReturn = body.indexOf('state.taskMode === "normal"');
+  assert.ok(sensitiveAt >= 0 && normalEditReturn >= 0, "both checks must exist");
+  assert.ok(sensitiveAt < normalEditReturn,
+    "sensitive-file guard must precede the normal-mode early return");
+});
+
+test("normal mode: prompt-transparent except the language directive; loop resume paths skip it", () => {
+  // before_agent_start returns the language-directive-only prompt for normal
+  // BEFORE any gate text is appended.
+  const promptAt = SRC.indexOf('pi.on("before_agent_start"');
+  assert.ok(promptAt >= 0);
+  const promptBody = SRC.slice(promptAt, promptAt + 2500);
+  const langAt = promptBody.indexOf("LANGUAGE_DIRECTIVE");
+  const normalAt = promptBody.indexOf('state.taskMode === "normal"');
+  const directiveAt = promptBody.indexOf("GATE_MODE_DECISION_DIRECTIVE");
+  assert.ok(langAt >= 0 && normalAt > langAt, "normal early-return must come after the language directive");
+  assert.ok(directiveAt > normalAt, "the undecided directive must not be injected in normal mode");
+  // agent_settled and session_compact both skip normal (no auto-continuation,
+  // no loop-resume nudge).
+  for (const anchor of ['pi.on("agent_settled"', 'pi.on("session_compact"']) {
+    const at = SRC.indexOf(anchor);
+    assert.ok(at >= 0, anchor);
+    assert.match(SRC.slice(at, at + 700), /taskMode === "explore" \|\| state\.taskMode === "normal"/, anchor);
+  }
 });
 
 test("restore validates persisted taskMode through normalizeTaskMode", () => {
   assert.match(SRC, /normalizeTaskMode/);
+});
+
+test("edit-discipline nudges: prompt-only guidance, wired at the three sites", () => {
+  // USER REQUIREMENT: prompt-level correction (no enforcement) for the
+  // recurring "edit failed → bash edits the file" workaround. Three sites:
+  // 1. before_agent_start injects the discipline paragraph in every
+  //    non-normal mode (after the normal early return).
+  const promptAt = SRC.indexOf('pi.on("before_agent_start"');
+  const promptBody = SRC.slice(promptAt, promptAt + 2500);
+  const normalAt = promptBody.indexOf('state.taskMode === "normal"');
+  const disciplineAt = promptBody.indexOf("EDIT_DISCIPLINE_DIRECTIVE");
+  assert.ok(disciplineAt > normalAt, "discipline directive must be injected after the normal-mode return");
+  assert.ok(normalAt > promptBody.indexOf("editFailurePending = false"),
+    "the nudge window must reset BEFORE the normal-mode early return (no cross-turn leak)");
+  // 2. tool_result: a FAILED edit arms the window and appends the nudge.
+  const resultAt = SRC.indexOf('pi.on("tool_result"');
+  const resultEnd = SRC.indexOf('pi.on("session_start"', resultAt);
+  const resultBody = SRC.slice(resultAt, resultEnd);
+  assert.match(resultBody, /EDIT_FAILURE_NUDGE/);
+  assert.match(resultBody, /editFailurePending = true/);
+  // 3. tool_result bash: same-turn write-looking command gets the nudge once.
+  assert.match(resultBody, /BASH_WRITE_NUDGE/);
+  assert.match(resultBody, /editFailurePending = false/);
+  // Both nudge sites are skipped in normal mode (user-consented step-aside
+  // must not add extension text to tool results).
+  const normalGuards = (resultBody.match(/state\.taskMode === "normal"/g) ?? []).length;
+  assert.ok(normalGuards >= 2, "both nudge sites must carry a normal-mode guard");
 });
 
 test("compaction recovery: session_compact re-injects state", () => {
@@ -404,18 +576,9 @@ test("LLM guards: deterministic checks precede every LLM call (tighten-only orde
 });
 
 test("LLM guards: every call site is gated on its llmGuards config flag", () => {
-  assert.match(SRC, /projectConfig\.llmGuards\.taskMode/);
   assert.match(SRC, /projectConfig\.llmGuards\.aiAttribution/);
   assert.match(SRC, /projectConfig\.llmGuards\.englishCheck/);
   assert.match(SRC, /projectConfig\.llmGuards\.shipDetect/);
-});
-
-test("LLM task-mode verdict keeps source auto (never downgrades the git hook)", () => {
-  // The decideTaskMode call must pass the classifier; the "llm" via maps to
-  // source:"auto" in lib/task-mode.ts (unit-tested there) — here we pin that
-  // the extension actually routes through decideTaskMode with classify.
-  assert.match(SRC, /classify:\s*projectConfig\.llmGuards\.taskMode/);
-  assert.match(SRC, /classifyTaskMode\(classifier\(\), prompt\)/);
 });
 
 test("L6 edit-time check scans the FULL projected file, not newText fragments", () => {

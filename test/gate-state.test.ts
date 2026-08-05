@@ -52,9 +52,11 @@ test("task mode is optional and invalid persisted values fail closed to unchosen
   const path = join(dir, "state.json");
   try {
     const state = emptyState("s", 10);
-    state.taskMode = "explore";
-    writeFileSync(path, JSON.stringify(state));
-    assert.equal(loadSidecar(path)?.taskMode, "explore");
+    for (const mode of ["explore", "loop", "normal"] as const) {
+      state.taskMode = mode;
+      writeFileSync(path, JSON.stringify(state));
+      assert.equal(loadSidecar(path)?.taskMode, mode);
+    }
 
     // Unknown values (including the retired "readonly") fail closed to unchosen.
     for (const bad of ["readonly", "disabled"]) {
@@ -75,6 +77,52 @@ test("task mode is optional and invalid persisted values fail closed to unchosen
 
 test("all gates met on same fingerprint → ship allowed", () => {
   assert.deepEqual(unmetRequirements(readyState(), FP, false), []);
+});
+
+// ---------------------------------------------------------------------------
+// pausedQuestion — agent-requested loop pause (pause_for_question tool)
+// ---------------------------------------------------------------------------
+
+test("pausedQuestion: valid shape round-trips through the sidecar", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const s = emptyState("s", 10);
+  s.pausedQuestion = { question: "Which auth provider should I use?", at: "2026-01-01T00:00:00Z" };
+  writeFileSync(path, JSON.stringify(s));
+  assert.deepEqual(loadSidecar(path)?.pausedQuestion, s.pausedQuestion);
+});
+
+test("pausedQuestion: malformed shapes fail toward NOT paused (loop stays armed)", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of [
+    "just a string",
+    42,
+    null,
+    { question: 42, at: "t" },
+    { question: "q" }, // missing at
+    { at: "t" }, // missing question
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, pausedQuestion: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar itself must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.pausedQuestion, undefined, JSON.stringify(bad));
+  }
+});
+
+test("pausedQuestion NEVER affects the ship authority (tighten-only invariant)", () => {
+  // A pause only relaxes auto-continuation; unmetRequirements must be blind
+  // to it in both directions: gates met stay met, gates unmet stay unmet.
+  const ready = readyState();
+  ready.pausedQuestion = { question: "q", at: "t" };
+  assert.deepEqual(unmetRequirements(ready, FP, false), []);
+
+  const pending = emptyState("s", 10);
+  pending.hasCodeChange = true;
+  pending.pausedQuestion = { question: "q", at: "t" };
+  const problems = unmetRequirements(pending, FP, false);
+  assert.ok(problems.length > 0, "unmet gates must remain unmet while paused");
 });
 
 // ---------------------------------------------------------------------------

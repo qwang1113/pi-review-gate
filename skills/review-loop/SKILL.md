@@ -145,6 +145,13 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
   without re-reviewing; asking permission to continue; citing context length or
   token budget to skip review; outputting a completion-style summary. Brief
   status lines ("Fixed 3 issues, re-reviewing…") are fine.
+- EXCEPTION — genuine blockers: if progress is stopped by a question only the
+  user can answer (ambiguous requirement, a product decision, missing access),
+  call `pause_for_question` with the question, ask it in your reply, and END
+  the turn. Auto-continuation pauses until the user's next message (their reply
+  resumes the loop automatically); ship commands stay blocked throughout. Never
+  use it to ask permission to continue routine loop work — that stays
+  prohibited.
 - When the user corrects a recurring mistake, record it with `/gate-lesson`
   (appends to `.pi/review-gate-lessons.md`); promote lessons recurring 3+
   times into project rules.

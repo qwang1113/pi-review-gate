@@ -87,17 +87,31 @@ import {
   type GateState,
 } from "./lib/gate-state.ts";
 import { parseReviewOutput, parsePrecommitOutput } from "./lib/verdict-parse.ts";
-import { decideTaskMode, normalizeTaskMode, type TaskMode, type TaskModeSource } from "./lib/task-mode.ts";
+import {
+  evaluateModeChange,
+  buildModeConfirmMessage,
+  normalizeTaskMode,
+  GATE_MODE_DECISION_DIRECTIVE,
+  MODE_CONFIRM_TITLE,
+  type TaskMode,
+  type TaskModeSource,
+} from "./lib/task-mode.ts";
 import {
   createLlmClassifier,
-  classifyTaskMode,
   classifyAiAttribution,
   classifyNonEnglish,
   classifyShipCommand,
+  classifyTaskMode,
   createVerdictMemo,
   isSuspiciousShipCandidate,
   type LlmClassifier,
 } from "./lib/llm-classify.ts";
+import {
+  BASH_WRITE_NUDGE,
+  EDIT_DISCIPLINE_DIRECTIVE,
+  EDIT_FAILURE_NUDGE,
+  looksLikeBashFileWrite,
+} from "./lib/edit-discipline.ts";
 import { projectEditedContent } from "./lib/edit-projection.ts";
 import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "./lib/workflow-commands.ts";
 import {
@@ -162,6 +176,33 @@ export default function reviewGate(pi: ExtensionAPI) {
   // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
   // session_start; a missing/corrupt config file falls back to safe defaults.
   let projectConfig: ProjectConfig = defaultProjectConfig();
+  // A declined downgrade confirmation locks agent-initiated downgrades for the
+  // rest of the session (anti-grinding: a prompt-injected agent must not be
+  // able to re-pop the dialog until the user gives in). /gate-mode and
+  // /gate-reset clear it. In-memory only — never persisted.
+  let agentDowngradesLocked = false;
+  // USER REQUIREMENT: the user's FIRST real message, captured cache-only so
+  // the DeepSeek V4 first classification sees the actual request, not just the
+  // agent's paraphrase. Input handler stores text; it never decides anything
+  // (no classifier call, no mode write) — classification stays exclusively in
+  // set_gate_mode. undefined = not captured yet (e.g. print/JSON mode).
+  let firstUserInput: string | undefined;
+  // USER REQUIREMENT ("no changes" = THIS session, not pre-existing ones):
+  // tracks whether THIS session has edited anything yet. session_start resets
+  // it; a passed edit tool_call sets it. Distinct from state.hasCodeChange/
+  // hasDocChange, which intentionally include pre-existing worktree/branch
+  // changes detected at session_start (they arm the ship gate). The first
+  // classification stays consent-free as long as the session itself has not
+  // edited — leftover changes from before this session do not force a dialog.
+  // In-memory only: a fresh session starts fresh anyway.
+  let sessionEdited = false;
+  // Edit-discipline nudge window (prompt-only, never blocking): set when an
+  // edit/write tool call FAILS, cleared at turn start, on new user input, on a
+  // successful edit, and after one nudge. While set, a bash result that looks
+  // like a direct file write gets BASH_WRITE_NUDGE appended (lib/edit-
+  // discipline.ts). This targets the recurring "edit failed → shell edits the
+  // file" workaround without policing ordinary bash usage.
+  let editFailurePending = false;
 
   // LLM semantic guard layer (DeepSeek V4 Flash — lib/llm-classify.ts).
   // Lazily (re)created so it always reflects the loaded projectConfig model.
@@ -325,13 +366,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     const parts: string[] = [];
     if (state.bypass.active) {
       parts.push("gate: BYPASSED");
+    } else if (state.taskMode === "normal") {
+      parts.push("gate: normal (off)");
     } else if (!state.hasCodeChange && !state.hasDocChange) {
       if (state.taskMode === "explore") parts.push("gate: explore (advisory)");
-      else parts.push(state.taskMode === "loop" ? "gate: loop · idle" : "gate: awaiting choice");
+      else parts.push(state.taskMode === "loop" ? "gate: loop · idle" : "gate: undecided");
     } else {
       // Explore shows the same live verdict status, tagged advisory — the
       // agent can edit in this mode, so a static label would hide real state.
       if (state.taskMode === "explore") parts.push("explore (advisory)");
+      if (state.pausedQuestion) parts.push("paused: awaiting user");
       parts.push(`review: ${state.review.verdict}`);
       parts.push(`precommit: ${state.precommit.verdict}`);
       parts.push(`round ${state.rounds.length}/${state.maxRounds}`);
@@ -340,53 +384,21 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
-  // user-chosen explore (advisory hook) from a heuristic auto-classification
-  // (hook stays fully enforced — verb lists can never be complete).
+  // user-chosen explore/normal (advisory hook) from an LLM/agent selection
+  // (hook stays fully enforced). The in-session mode decision is made via the
+  // set_gate_mode tool (or the user via /gate-mode): DeepSeek V4 classifies
+  // the FIRST decision automatically (user requirement — no confirmation
+  // dialog); later changes go through lib/task-mode.ts consent rules.
   function setTaskMode(mode: TaskMode, source: TaskModeSource, ctx: ExtensionContext) {
     state.taskMode = mode;
     state.taskModeSource = source;
+    // A fresh mode decision supersedes a standing question pause: loop re-arms
+    // (or the mode itself turns auto-continuation off for explore/normal).
+    delete state.pausedQuestion;
     loopArmed = mode === "loop";
     continuationsInjected = 0;
     persist(ctx);
   }
-
-  // Decide once, before the first task reaches the agent. When the heuristic
-  // has a clear signal the extension auto-selects the mode and only notifies
-  // the user (override anytime with /gate-mode); only genuinely ambiguous
-  // prompts fall back to asking the user. The full decision flow (including
-  // no-UI fail-closed loop default and dialog-cancel fallback) is the pure,
-  // unit-tested decideTaskMode().
-  pi.on("input", async (event, ctx) => {
-    if (state.taskMode !== undefined) return { action: "continue" as const };
-    if (event.source === "extension" || event.streamingBehavior !== undefined) {
-      return { action: "continue" as const };
-    }
-
-    const decision = await decideTaskMode({
-      prompt: event.text,
-      hasUI: ctx.hasUI,
-      select: (title, options) => ctx.ui.select(title, options),
-      // Guard #1: semantic classification via DeepSeek V4 Flash. Judges intent
-      // (quoted logs/notifications are context, not intent) where the regex
-      // heuristic word-matches. Disabled or failing → regex + dialog fallback.
-      classify: projectConfig.llmGuards.taskMode
-        ? (prompt) => classifyTaskMode(classifier(), prompt)
-        : undefined,
-    });
-    setTaskMode(decision.mode, decision.source, ctx);
-    if (decision.via === "auto" || decision.via === "llm") {
-      const by = decision.via === "llm" ? "语义判定（flash）" : "自动判定";
-      // Auto-explore relaxes auto-continuation — surface it as a warning so a
-      // misclassification is noticed (ship gate and git hooks stay enforced).
-      ctx.ui.notify(
-        decision.mode === "loop"
-          ? `review-gate: ${by}为循环任务（多轮 review + precommit + gate）。可用 /gate-mode explore 切换。`
-          : `review-gate: ${by}为探查任务 — 优先只读排查，gate 仅供参考，AI 可自主结束（commit/push 等 ship 命令仍被完整拦截）。如需完整循环请用 /gate-mode loop 切换。`,
-        decision.mode === "loop" ? "info" : "warning",
-      );
-    }
-    return { action: "continue" as const };
-  });
 
   // ---------- L6 (extension side): test-label language, checked at edit time ----------
 
@@ -481,6 +493,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           reason: `review-gate: "${path}" matches a sensitive-file pattern (.env/keys/credentials). Ask the user to edit it themselves.`,
         };
       }
+      // Normal mode: user-consented “as if not installed” — the L6 label check
+      // (and its LLM call) is skipped. The sensitive-file guard ABOVE runs in
+      // every mode: it is a security floor, not workflow enforcement.
+      if (state.taskMode === "normal") return;
       // Explore mode does NOT block edits: the system prompt asks the agent to
       // prefer read-only work, but small edits during an investigation are
       // allowed. Sensitive-file and L6 label checks above/below stay active.
@@ -488,6 +504,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         const labelProblem = await checkTestLabels(path, editedTestContent(input, path));
         if (labelProblem) return { block: true, reason: labelProblem };
       }
+      // USER REQUIREMENT: a passed edit counts as THIS session's work — from
+      // here on, any mode change (including the first classification) goes
+      // through the normal consent rules. Blocked edits (sensitive file / L6)
+      // and normal-mode edits do not set it: they change nothing.
+      sessionEdited = true;
       return;
     }
 
@@ -495,9 +516,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     const command = typeof input.command === "string" ? input.command : "";
     if (!command) return;
 
+    // Normal mode (ALWAYS user-confirmed — evaluateModeChange requires a
+    // consented dialog or /gate-mode for every path into it): the ship gate,
+    // commit-message checks, and LLM ship classification are all off. This is
+    // the mode's defining behavior; explore below never gets this branch.
+    if (state.taskMode === "normal") return;
+
     // Explore mode does NOT block bash — investigations need diagnostic
-    // commands. Ship commands below stay FULLY gated in every mode: explore
-    // only relaxes auto-continuation and declare_done, never the ship gate.
+    // commands. Ship commands below stay FULLY gated in every mode except the
+    // user-confirmed normal: explore only relaxes auto-continuation and
+    // declare_done, never the ship gate.
 
     // P0-5: detect ALL ship commands, not just the first. Block if ANY operation
     // would ship ungated and warn about compound commands.
@@ -722,7 +750,21 @@ export default function reviewGate(pi: ExtensionAPI) {
   pi.on("tool_result", async (event, ctx) => {
     // 1. Edits: only arm gate on success.
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
-      if (event.isError) return;
+      if (event.isError) {
+        // Edit-discipline nudge (prompt-only, non-blocking): a failed edit is
+        // the classic trigger for the "shell edits the file instead"
+        // workaround. Append guidance to THIS result and arm the same-turn
+        // bash window; the failure semantics stay untouched (isError true).
+        // Skipped in normal mode: the user-consented step-aside must not add
+        // extension text to results.
+        if (state.taskMode === "normal") return;
+        editFailurePending = true;
+        return {
+          content: [...(event.content ?? []), { type: "text", text: EDIT_FAILURE_NUDGE }],
+          isError: true,
+        };
+      }
+      editFailurePending = false;
       const path = coalesceToolPath(event.input as Record<string, unknown>);
       if (!path) return;
       let dirty = false;
@@ -732,6 +774,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         if (state.review.verdict === "READY") state.review.verdict = "PENDING";
         if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
         loopArmed = true;
+        // The agent resumed working on its own — a standing question pause
+        // (pause_for_question) is moot; clear it so the loop enforces again.
+        if (state.pausedQuestion) delete state.pausedQuestion;
         dirty = true;
         clearBypassToken(); // any edit invalidates a standing arbiter bypass
       }
@@ -773,6 +818,20 @@ export default function reviewGate(pi: ExtensionAPI) {
           }
         }
       }
+      // Edit-discipline nudge (prompt-only, non-blocking): right after a
+      // FAILED edit call, a bash command that looks like a direct file write
+      // is the exact workaround pattern — append guidance once and close the
+      // window. Deliberately AFTER the state-maintenance above, so this path
+      // never skips the sentinel-invalidation / re-arm safety nets. Skipped in
+      // normal mode. Never blocks; benign bash (read-only, diagnostics) is
+      // untouched because the window only opens on an edit failure.
+      if (state.taskMode !== "normal" && editFailurePending && cmd && looksLikeBashFileWrite(cmd)) {
+        editFailurePending = false;
+        return {
+          content: [...(event.content ?? []), { type: "text", text: BASH_WRITE_NUDGE }],
+          isError: event.isError === true,
+        };
+      }
       return;
     }
   });
@@ -807,6 +866,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
 
+      // The agent is running the loop again — a standing pause_for_question
+      // pause is moot (liveness: a stale pause would silently swallow the
+      // next auto-continuation after a BLOCKED verdict).
+      delete state.pausedQuestion;
       const fp = computeFingerprint(cwd);
       state.review = {
         verdict: parsed.verdict,
@@ -880,6 +943,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Available in every mode: explore allows edits/bash, so the agent may
       // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
+      // Same liveness rule as record_review: running precommit proves the
+      // agent is not waiting on the user — clear any stale question pause.
+      delete state.pausedQuestion;
       // P1 fix: pass the session cwd. runTrustedPrecommit previously derived
       // its own process.cwd(), which can differ from ctx.cwd (e.g. pi --cwd),
       // running checks — and binding the PASS fingerprint — in the wrong dir.
@@ -927,17 +993,19 @@ export default function reviewGate(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const fp = computeFingerprint(cwd);
       const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
-      if (state.taskMode === "explore") {
+      if (state.taskMode === "explore" || state.taskMode === "normal") {
         // Explore's defining behavior: the agent may end the task on its own
         // judgment. Gate status is reported as advisory only. (Ship commands
-        // remain fully gated by L1 regardless.)
+        // remain fully gated by L1 in explore; normal has no ship gate at all.)
         loopArmed = false;
         persist(ctx as unknown as ExtensionContext);
         return {
           content: [{
             type: "text",
-            text: `review-gate: explore task completed by AI judgment. ${params.summary}` +
-              (problems.length ? "\nAdvisory gate status:\n" + problems.map((p) => `  - ${p}`).join("\n") : ""),
+            text: (state.taskMode === "normal"
+              ? `review-gate: normal mode — completion accepted without gates. ${params.summary}`
+              : `review-gate: explore task completed by AI judgment. ${params.summary}` +
+                (problems.length ? "\nAdvisory gate status:\n" + problems.map((p) => `  - ${p}`).join("\n") : "")),
           }],
           details: { accepted: true, advisoryProblems: problems },
         };
@@ -980,6 +1048,252 @@ export default function reviewGate(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: `review-gate: done accepted. ${params.summary}` }],
         details: { accepted: true },
+      };
+    },
+  });
+
+  // ---------- pause_for_question tool (agent-requested loop pause) ----------
+
+  pi.registerTool({
+    name: "pause_for_question",
+    label: "Pause For Question",
+    description:
+      "Pause the review-gate auto-continuation loop because you hit a GENUINE blocker only the " +
+      "user can resolve (ambiguous requirement, a product/design decision between valid options, " +
+      "missing credentials or access). After calling this, ask the question clearly in your reply " +
+      "and END the turn; the pause clears automatically on the user's next message. The ship gate " +
+      "is NOT affected — git commit/push and gh pr stay blocked while gates are unmet. Do NOT use " +
+      "this to ask permission to continue routine loop work, to skip a review round, or to end the " +
+      "task — those remain prohibited.",
+    parameters: Type.Object({
+      question: Type.String({ description: "The exact question the user must answer before work can continue" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const question = params.question.trim();
+      if (!question) {
+        return {
+          content: [{ type: "text", text: "review-gate: pause rejected — provide the actual question the user must answer." }],
+          details: {},
+          isError: true,
+        };
+      }
+      // Explore/normal have no auto-continuation to pause — the agent can
+      // simply ask and end its turn. Informational no-op, never an error.
+      if (state.taskMode === "explore" || state.taskMode === "normal") {
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: no enforced loop in "${state.taskMode}" mode — auto-continuation is already off. Ask the user in your reply and end the turn.`,
+          }],
+          details: { mode: state.taskMode },
+        };
+      }
+      if (state.pausedQuestion) {
+        return {
+          content: [{
+            type: "text",
+            text: "review-gate: the loop is already paused for a user question. Ask it in your reply and END the turn — the user's next message resumes the loop.",
+          }],
+          details: { alreadyPaused: true },
+        };
+      }
+      // Loop (or undecided → behaves as loop): record the pause. Persisted so
+      // it survives a restart while waiting; the ship gate ignores it entirely
+      // (unmetRequirements never reads pausedQuestion — tighten-only).
+      state.pausedQuestion = { question: question.slice(0, 2000), at: new Date().toISOString() };
+      loopArmed = false;
+      persist(ctx as unknown as ExtensionContext);
+      try {
+        ctx.ui.notify(
+          "review-gate: AI 申请暂停循环等待你的回答 — 你的下一条消息会自动恢复循环（ship 命令仍被拦截）。",
+          "warning",
+        );
+      } catch { /* headless */ }
+      return {
+        content: [{
+          type: "text",
+          text:
+            "review-gate: loop PAUSED — auto-continuation is off until the user's next message. " +
+            "Now ask the user your question clearly in your reply and END the turn; do not keep working. " +
+            "Ship commands stay blocked while gates are unmet. The pause clears automatically when the " +
+            "user replies (or on your next code/doc edit).",
+        }],
+        details: { paused: true },
+      };
+    },
+  });
+
+  // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
+
+  // USER REQUIREMENT: cache-only capture of the user's first real message,
+  // feeding the DeepSeek V4 first classification its primary signal. This
+  // handler ONLY stores text — it never intercepts, transforms, classifies,
+  // or writes mode state; all decisions stay inside set_gate_mode (the
+  // input-transform/decision flow is deliberately not resurrected).
+  pi.on("input", (event, ctx) => {
+    if (firstUserInput === undefined && event.source === "interactive") {
+      firstUserInput = event.text;
+    }
+    // A fresh user message resets the edit-failure nudge window.
+    editFailurePending = false;
+    // A real user message (interactive TUI or an RPC driver — never
+    // "extension", which is how the gate injects its own [REVIEW_GATE_RESUME]
+    // follow-ups) answers a standing pause_for_question pause: clear it and
+    // re-arm auto-continuation so the loop enforces again from this turn on.
+    if (state.pausedQuestion && event.source !== "extension") {
+      delete state.pausedQuestion;
+      if (state.taskMode !== "explore" && state.taskMode !== "normal") loopArmed = true;
+      persist(ctx);
+    }
+  });
+
+  pi.registerTool({
+    name: "set_gate_mode",
+    label: "Set Gate Mode",
+    description:
+      "Decide or change this session's gate mode: \"loop\" (full enforced review loop), " +
+      "\"explore\" (investigation — advisory gates, ship commands still blocked), or \"normal\" " +
+      "(gate fully off). Call this FIRST in a new session to classify the task: DeepSeek V4 " +
+      "(the llmGuards model) classifies the FIRST decision and it is applied AUTOMATICALLY — " +
+      "no user confirmation for the first classification (user requirement); the model may " +
+      "override your pick, and a failed model call falls back to the normal consent rules. " +
+      "Upgrades (toward loop) apply immediately; downgrades after the first classification pop a " +
+      "confirmation dialog for the user — you cannot approve it yourself, and a declined " +
+      "dialog locks further agent-initiated downgrades for this session.",
+    parameters: Type.Object({
+      mode: Type.String({ description: '"loop" | "explore" | "normal"' }),
+      reason: Type.String({ description: "One-line justification (shown to the user as untrusted data)" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const requested = normalizeTaskMode(params.mode.trim());
+      if (requested === undefined) {
+        return {
+          content: [{ type: "text", text: 'review-gate: unknown mode — use "loop", "explore", or "normal".' }],
+          details: {},
+          isError: true,
+        };
+      }
+      // FIRST CLASSIFICATION (USER REQUIREMENT): while the mode is undecided
+      // and no session work exists yet, DeepSeek V4 (the llmGuards model)
+      // classifies the task and its verdict applies AUTOMATICALLY — no
+      // consent dialog. The model sees the user's ACTUAL first message (via
+      // the cache-only input handler) plus the agent's reason; its verdict
+      // WINS over the agent's own pick. A failed call (undefined, e.g. model
+      // unreachable) falls back to the pure rule engine exactly as before
+      // (fail-back: the agent's pick then follows the normal consent rules).
+      // The engine still refuses the LLM verdict on a dirty session
+      // (hasChanges) or without a UI, and source stays "auto" so the git
+      // hooks remain fully enforced.
+      let effective = requested;
+      let classifiedBy: string | null = null;
+      if (
+        state.taskMode === undefined &&
+        !sessionEdited &&
+        ctx.hasUI
+      ) {
+        // Facts are constant here: this branch is reachable only when THIS
+        // session has not edited anything (guarded above). Pre-existing
+        // worktree/branch changes may still exist — they arm the ship gate
+        // (state.hasCodeChange) but do not block the consent-free first
+        // classification: source stays "auto" so the git hooks remain fully
+        // enforced, and explore never weakens the ship gate.
+        const facts =
+          "this session has made no edits yet (pre-existing workspace changes may exist); " +
+          "interactive session: yes; mode undecided.";
+        const verdict = await classifyTaskMode(classifier(), firstUserInput, params.reason, facts);
+        if (verdict !== undefined) {
+          effective = verdict;
+          classifiedBy = projectConfig.llmGuards.model;
+        }
+      }
+      // The pure rule engine decides; this tool only supplies FACTS. Consent
+      // is obtained below by the EXTENSION (there is deliberately no
+      // "confirmed" parameter the model could set). hasChanges = THIS
+      // session's own edits only (pre-existing changes arm the gate via
+      // state.hasCodeChange but must not force a confirmation dialog on the
+      // first classification).
+      const decision = evaluateModeChange({
+        current: state.taskMode,
+        requested: effective,
+        hasChanges: sessionEdited,
+        hasUI: ctx.hasUI,
+        downgradesLocked: agentDowngradesLocked,
+        firstDecideAuto: classifiedBy !== null,
+      });
+
+      if (decision.action === "noop") {
+        return {
+          content: [{ type: "text", text: `review-gate: gate mode is already "${effective}".` }],
+          details: { mode: effective },
+        };
+      }
+
+      if (decision.action === "apply") {
+        setTaskMode(effective, decision.source, ctx as unknown as ExtensionContext);
+        try {
+          const sourceNote = classifiedBy
+            ? `（由 ${classifiedBy} 自动判定，无需确认）`
+            : "";
+          ctx.ui.notify(
+            effective === "loop"
+              ? `review-gate: 会话类型已判定为循环任务${sourceNote}。可用 /gate-mode 切换。`
+              : effective === "explore"
+                ? `review-gate: 会话类型已判定为探查任务${sourceNote} — gate 仅供参考，AI 可自主结束（commit/push 等 ship 命令仍被完整拦截）。可用 /gate-mode 切换。`
+                : `review-gate: 会话类型已判定为普通任务${sourceNote} — 本会话门禁关闭。可用 /gate-mode 切换。`,
+            effective === "loop" ? "info" : "warning",
+          );
+        } catch { /* headless */ }
+        return {
+          content: [{
+            type: "text",
+            text:
+              `review-gate: gate mode set to "${effective}" (source: ${decision.source})` +
+              (classifiedBy ? ` — DeepSeek V4 首次自动判定，无需用户确认` : "") +
+              (classifiedBy && effective !== requested
+                ? `。你请求的是 "${requested}"，已以模型判定为准。`
+                : "."),
+          }],
+          details: { mode: effective, source: decision.source, classifiedBy },
+        };
+      }
+
+      if (decision.action === "confirm") {
+        // USER CONSENT — rendered by the extension with fixed consequence copy;
+        // the agent's reason is displayed as clearly-labeled untrusted data.
+        // The dialog must describe what "yes" actually grants: the decision was
+        // computed on `effective` (the LLM verdict wins over the agent's pick),
+        // so the copy is built from `effective` — never from `requested`.
+        let ok = false;
+        try {
+          ok = await ctx.ui.confirm(MODE_CONFIRM_TITLE, buildModeConfirmMessage(effective, params.reason));
+        } catch { ok = false; }
+        if (ok) {
+          setTaskMode(effective, "user", ctx as unknown as ExtensionContext);
+          return {
+            content: [{ type: "text", text: `review-gate: the user CONFIRMED the downgrade — gate mode is now "${effective}".` }],
+            details: { mode: effective, source: "user" },
+          };
+        }
+        // Declined: lock agent-initiated downgrades for this session so the
+        // dialog cannot be re-popped until the user acts (/gate-mode).
+        agentDowngradesLocked = true;
+        return {
+          content: [{
+            type: "text",
+            text:
+              "review-gate: the user DECLINED the downgrade. Agent-initiated downgrades are now " +
+              "locked for this session — continue under the current mode and do not ask again; " +
+              "only the user can change the mode (/gate-mode).",
+          }],
+          details: { mode: state.taskMode ?? null, declined: true },
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: `review-gate: mode change rejected — ${decision.reason}` }],
+        details: { mode: state.taskMode ?? null },
+        isError: true,
       };
     },
   });
@@ -1115,11 +1429,15 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- L2: auto-continuation ----------
 
   pi.on("agent_settled", async (_event, ctx) => {
-    // Explore never auto-continues — that is its defining difference from
-    // loop. This check MUST stay before the loopArmed check: explore-mode
-    // edits set loopArmed = true in tool_result, and only this early return
-    // keeps the continuation loop off.
-    if (state.taskMode === "explore") return;
+    // Explore and normal never auto-continue — that is their defining
+    // difference from loop. This check MUST stay before the loopArmed check:
+    // explore/normal-mode edits set loopArmed = true in tool_result, and only
+    // this early return keeps the continuation loop off.
+    if (state.taskMode === "explore" || state.taskMode === "normal") return;
+    // Paused for a user question (pause_for_question): defense-in-depth —
+    // loopArmed is in-memory and resets on restart, but the persisted pause
+    // must keep auto-continuation off until the user actually replies.
+    if (state.pausedQuestion) return;
     if (!loopArmed) return;
     if (state.bypass.active) return;
     if (!state.hasCodeChange && !state.hasDocChange) return;
@@ -1149,6 +1467,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd ?? process.cwd();
+    // USER REQUIREMENT: "no changes" for the first classification means THIS
+    // session — a new session starts with a clean edit slate even if the
+    // worktree carries pre-existing changes from before (they still arm the
+    // ship gate via the P0-2 detection below).
+    sessionEdited = false;
     let sessionId: string | null = null;
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
@@ -1158,6 +1481,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     // by the loader, so a forged config cannot make the cap unreachable.
     projectConfig = loadProjectConfig(cwd);
     state.maxRounds = projectConfig.maxRounds;
+
+    // A restored pause survives the restart: keep auto-continuation disarmed
+    // until the user's next message clears it (input handler).
+    if (state.pausedQuestion) loopArmed = false;
 
     // P0-2: detect pre-existing changes — worktree AND branch commits.
     if (!state.hasCodeChange && !state.hasDocChange && !state.bypass.active) {
@@ -1194,9 +1521,24 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   pi.on("session_compact", async (_event, ctx) => {
-    // Explore has no enforced loop to resume — a "Resume the loop" nudge
-    // would contradict the mode, so skip the gate-resume injection entirely.
-    if (state.taskMode === "explore") return;
+    // Explore/normal have no enforced loop to resume — a "Resume the loop"
+    // nudge would contradict the mode, so skip the gate-resume injection.
+    if (state.taskMode === "explore" || state.taskMode === "normal") return;
+    // Paused for a user question: "Resume the loop" would contradict the
+    // wait. Instead, re-inject the waiting state so the compacted model does
+    // not lose the fact that it is waiting for the user's answer.
+    if (state.pausedQuestion) {
+      pi.sendMessage({
+        customType: "review-gate-resume",
+        content:
+          "[REVIEW_GATE_PAUSED] Context compacted. The review loop is PAUSED (pause_for_question), " +
+          `awaiting the user's answer to: "${state.pausedQuestion.question.slice(0, 500)}"\n` +
+          "Do not resume the loop on your own — wait for the user's reply (it clears the pause automatically). " +
+          "Ship commands remain blocked while gates are unmet.",
+        display: true,
+      }, { deliverAs: "followUp", triggerTurn: false });
+      return;
+    }
     const fp = computeFingerprint(cwd);
     const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
     if (problems.length === 0 || state.bypass.active) return;
@@ -1269,16 +1611,21 @@ export default function reviewGate(pi: ExtensionAPI) {
         `docSync:   ${projectConfig.docSync ? `ENFORCED (attested: ${state.review.docSync ?? "none"})` : "off"}`,
         `rounds:    ${state.rounds.length}/${state.maxRounds}`,
         `config:    thinkHarder=${projectConfig.thinkHarder}${state.strategicResetFired ? " (fired)" : ""} gitMemory=${projectConfig.gitMemory}`,
-        `task mode: ${state.taskMode ?? "not chosen (defaults to loop)"}`,
+        `task mode: ${state.taskMode ?? "undecided (behaves as loop; agent decides via set_gate_mode)"}`,
+        ...(state.pausedQuestion
+          ? [`paused:    awaiting user answer to "${state.pausedQuestion.question.slice(0, 120)}" (${state.pausedQuestion.at})`]
+          : []),
         `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
         `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
         // Explore: ship commands stay fully gated (L1), but declare_done and
-        // auto-continuation are advisory — label the status accordingly.
-        state.taskMode === "explore"
-          ? (problems.length
-            ? `ship gate: BLOCKED (explore: completion advisory, ship still gated)\n${problems.map((p) => `  - ${p}`).join("\n")}`
-            : "ship gate: OPEN (explore)")
-          : (problems.length ? `ship gate: BLOCKED\n${problems.map((p) => `  - ${p}`).join("\n")}` : "ship gate: OPEN"),
+        // auto-continuation are advisory. Normal: the ship gate is OFF.
+        state.taskMode === "normal"
+          ? "ship gate: OFF (normal mode — extension inactive)"
+          : state.taskMode === "explore"
+            ? (problems.length
+              ? `ship gate: BLOCKED (explore: completion advisory, ship still gated)\n${problems.map((p) => `  - ${p}`).join("\n")}`
+              : "ship gate: OPEN (explore)")
+            : (problems.length ? `ship gate: BLOCKED\n${problems.map((p) => `  - ${p}`).join("\n")}` : "ship gate: OPEN"),
       ];
       ctx.ui.notify(lines.join("\n"), problems.length ? "warning" : "info");
     },
@@ -1301,19 +1648,24 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("gate-mode", {
-    description: "Set task workflow: /gate-mode loop|explore",
+    description: "Set task workflow: /gate-mode loop|explore|normal",
     handler: async (args, ctx) => {
       const mode = normalizeTaskMode((args ?? "").trim());
       if (mode === undefined) {
-        ctx.ui.notify("Usage: /gate-mode loop|explore", "error");
+        ctx.ui.notify("Usage: /gate-mode loop|explore|normal", "error");
         return;
       }
-      // /gate-mode is user-invoked — an explicit choice, so source is "user".
+      // /gate-mode is user-invoked — an explicit choice, so source is "user"
+      // and any direction is allowed without a confirm dialog. A fresh user
+      // decision also clears the agent-downgrade lock.
+      agentDowngradesLocked = false;
       setTaskMode(mode, "user", ctx);
       ctx.ui.notify(
         mode === "loop"
           ? "review-gate: switched to loop workflow"
-          : "review-gate: switched to explore workflow — gates advisory, AI may self-complete; prefer read-only work (ship commands stay gated)",
+          : mode === "explore"
+            ? "review-gate: switched to explore workflow — gates advisory, AI may self-complete; prefer read-only work (ship commands stay gated)"
+            : "review-gate: switched to NORMAL mode — all quality gates are OFF for this session (as if the extension were not installed)",
         mode === "loop" ? "info" : "warning",
       );
     },
@@ -1325,6 +1677,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       state = emptyState(state.sessionId, state.maxRounds);
       loopArmed = true;
       continuationsInjected = 0;
+      agentDowngradesLocked = false;
       clearBypassToken();
       lastBlockedShip = null;
       arbitrationsUsed = 0;
@@ -1363,6 +1716,32 @@ export default function reviewGate(pi: ExtensionAPI) {
     // depend on there being pending changes — strict Simplified Chinese is
     // required on every turn, so it is injected before any early return.
     let systemPrompt = event.systemPrompt + "\n\n" + LANGUAGE_DIRECTIVE;
+
+    // New turn: the edit-failure nudge window from the PREVIOUS turn is stale
+    // (a same-turn workaround is what we care about). Reset BEFORE the
+    // normal-mode early return so the window can never leak across turns in
+    // any mode.
+    editFailurePending = false;
+
+    // Normal mode (always user-consented): the extension steps aside — no
+    // workflow prompt is injected at all. The language directive above stays:
+    // it is the user's standing output-language policy, orthogonal to the
+    // gate, and costs nothing (adviser recommendation; trivially reversible).
+    if (state.taskMode === "normal") {
+      return { systemPrompt };
+    }
+
+    // Edit-discipline nudge (prompt-only): steer agents back to the edit/write
+    // tools instead of shell-editing files after a failed tool call. Pure
+    // guidance — no enforcement.
+    systemPrompt += "\n\n" + EDIT_DISCIPLINE_DIRECTIVE;
+
+    // While the mode is undecided, ask the agent to classify the task
+    // IN-SESSION as its first action (set_gate_mode). Enforcement below stays
+    // full loop behavior until it does — never deciding is fail-closed.
+    if (state.taskMode === undefined) {
+      systemPrompt += "\n\n" + GATE_MODE_DECISION_DIRECTIVE;
+    }
 
     // Order matters for latency: unmetRequirements() returns [] whenever the
     // session tracks no code AND no doc change (see lib/gate-state.ts), so the
@@ -1413,6 +1792,15 @@ export default function reviewGate(pi: ExtensionAPI) {
         "is done without re-reviewing; asking for permission to continue the loop; citing " +
         "context length or token budget as a reason to skip review; outputting a polished " +
         "completion-style summary. Brief status lines are fine; execute the next step.\n" +
+        "EXCEPTION — genuine blockers: if progress is stopped by a question only the user can " +
+        "answer (ambiguous requirement, a product decision, missing access), call " +
+        "pause_for_question with the question, then ask it in your reply and end the turn. " +
+        "Auto-continuation pauses until the user replies; ship commands stay blocked. Never " +
+        "use it to ask permission to continue routine loop work.\n" +
+        (state.pausedQuestion
+          ? `Loop currently PAUSED awaiting the user's answer to: "${state.pausedQuestion.question.slice(0, 200)}". ` +
+            "If the user has replied, continue the loop; otherwise end the turn after asking.\n"
+          : "") +
         (problems.length
           ? `Current unmet:\n${problems.map((p) => `- ${p}`).join("\n")}`
           : "All gates satisfied — you may ship."),

@@ -1,12 +1,7 @@
 /**
- * Fast, deterministic task-mode decision for the first prompt in a session.
+ * Session gate-mode model — decided IN-SESSION, with strict up/down rules.
  *
- * When the prompt carries a clear signal the extension auto-selects the mode
- * and only notifies the user (who can override with /gate-mode). Every other
- * case asks the user; a cancelled or unavailable choice falls back to the
- * safer loop workflow.
- *
- * MODES
+ * MODES (strictness order: normal < explore < loop)
  *  - "loop":    the full enforced workflow — review READY + precommit PASS
  *               gate every ship, and auto-continuation keeps the agent in the
  *               fix→review loop until gates pass.
@@ -16,140 +11,232 @@
  *               Edits and bash stay available — the system prompt merely asks
  *               the agent to prefer read-only work — and agent-initiated ship
  *               commands (git commit/push, gh pr) remain FULLY gated by L1.
+ *  - "normal":  the extension steps aside — no workflow prompt injection, no
+ *               ship blocking, no auto-continuation, no LLM guard calls
+ *               (the output-language directive and the sensitive-file guard
+ *               stay: they are user policy / a security floor, not workflow).
+ *               For non-dev, non-research tasks where speed matters most.
  *
- * SECURITY — two independent layers keep a heuristic misfire from weakening
- * the gate:
- *  1. The explore branch is strictly conservative: an analysis hint alone is
- *     NOT enough — the prompt must also be free of every known mutation/ship
- *     verb (MUTATION_GUARDS). Any doubt falls back to asking the user, and
- *     the loop workflow remains the fail-closed default.
- *  2. No verb list can be complete, so an AUTO-selected explore never
- *     downgrades the git pre-commit hook: the sidecar records
- *     taskModeSource, and hooks/pre-commit treats explore as advisory only
- *     when the USER explicitly chose it (dialog or /gate-mode). In-session,
- *     explore never weakens the L1 ship gate at all (any source), so an
- *     auto-misfire only relaxes auto-continuation — the safe direction.
+ * WHO DECIDES — DeepSeek V4 (LLM first classification, user requirement), the
+ * session's own agent (set_gate_mode tool), or the user (/gate-mode). While
+ * the mode is undecided the gate behaves as loop (fail-closed) and the
+ * per-turn system prompt instructs the agent to call set_gate_mode as its
+ * first action; the tool then asks the DeepSeek V4 classifier to pick the
+ * mode BEFORE the session's work starts (no edits by THIS session —
+ * pre-existing workspace changes do not count, interactive
+ * session) and applies that verdict AUTOMATICALLY — the user opted out of
+ * the first confirmation dialog. A failed/absent model call falls back to
+ * the rule engine's pre-LLM behavior exactly (fail-back). evaluateModeChange()
+ * is the single pure authority on what a requested change may do:
+ *
+ *  - UPGRADES (toward loop) apply immediately — tightening never needs
+ *    consent. Agent-applied modes record source "auto".
+ *  - DOWNGRADES (toward normal) require the USER's explicit confirmation via
+ *    a dialog the EXTENSION renders (the tool deliberately has no "confirmed"
+ *    parameter — consent cannot be claimed by the caller). A confirmed
+ *    downgrade records source "user"; a declined one LOCKS agent-initiated
+ *    downgrades for the rest of the session so a prompt-injected agent
+ *    cannot grind the user down with repeated dialogs.
+ *  - The UNDECIDED state behaves as loop, so undecided→explore counts as an
+ *    initial classification only while THIS session has made NO edits of
+ *    its own; once the session edits (code or doc) it is a real downgrade
+ *    (confirmation required) — otherwise an agent could edit under loop
+ *    rules, then slip out of the review loop by "classifying" the session
+ *    as explore. Pre-existing worktree/branch changes from before the
+ *    session arm the ship gate (state.hasCodeChange) but do NOT block the
+ *    consent-free first classification.
+ *  - USER REQUIREMENT (first-classification automation): the FIRST decision
+ *    (undecided → any mode) applies automatically without a consent dialog
+ *    when the caller marks it firstDecideAuto (the LLM produced the verdict).
+ *    Still bounded: interactive session AND no edits by THIS session, and
+ *    the mode records source "auto" so the git hooks stay fully enforced.
+ *  - Print/JSON mode (no UI) can never confirm, so only upgrades and the
+ *    undecided→loop classification are possible there (fail-closed).
+ *
+ * SECURITY — why an LLM/agent-chosen explore is safe without confirmation:
+ *  1. In-session, explore never weakens the L1 ship gate at all; it only
+ *     relaxes auto-continuation and declare_done — the safe direction.
+ *  2. The sidecar records taskModeSource, and the git hooks treat
+ *     explore/normal as advisory ONLY when the USER chose it ("user" —
+ *     confirmed dialog or /gate-mode). An LLM/agent-set mode keeps source
+ *     "auto", which never downgrades the hooks.
+ *  Normal mode DOES weaken in-session enforcement — which is why the user
+ *  explicitly opted OUT of the first confirmation for it (firstDecideAuto on
+ *  a clean interactive session); every LATER path into it (initial on a dirty
+ *  session, or any downgrade) still requires user confirmation.
  */
 
-export type TaskMode = "loop" | "explore";
+export type TaskMode = "normal" | "explore" | "loop";
 
-/** Normalize a persisted task-mode value; undefined for unknown/forged input. */
+/** Normalize a persisted/requested task-mode value; undefined for unknown or
+ *  forged input (fail-closed: callers treat unknown as loop behavior). */
 export function normalizeTaskMode(value: unknown): TaskMode | undefined {
-  if (value === "loop" || value === "explore") return value;
+  if (value === "loop" || value === "explore" || value === "normal") return value;
   return undefined;
 }
 
-/** Who decided the mode. Only "user" may downgrade the git hook to advisory. */
+/** Who decided the mode. Only "user" may downgrade the git hooks to advisory. */
 export type TaskModeSource = "auto" | "user";
 
-export interface TaskModeSuggestion {
-  mode: TaskMode;
-  /** true → auto-decide without asking; false → ask the user. */
-  confident: boolean;
-}
+/** Strictness rank. A change to a HIGHER rank is an upgrade (tighten). */
+export const TASK_MODE_RANK: Readonly<Record<TaskMode, number>> = Object.freeze({
+  normal: 0,
+  explore: 1,
+  loop: 2,
+});
 
-const LOOP_HINTS: readonly RegExp[] = Object.freeze([
-  /\b(fix|implement|add|change|update|refactor|migrate|upgrade|remove|rename|build|create|write|patch|debug)\b/i,
-  /(修复|实现|新增|添加|修改|更新|重构|迁移|升级|删除|移除|改名|创建|编写|开发|调试|解决)/,
-]);
-
-const EXPLORE_HINTS: readonly RegExp[] = Object.freeze([
-  /\b(explain|analy[sz]e|inspect|investigate|review|audit|summari[sz]e|compare|find|search|read|understand|why|what|how)\b/i,
-  /(解释|分析|查看|检查|调查|审阅|评审|总结|比较|对比|查找|搜索|阅读|理解|排查|为什么|是什么|怎么|如何)/,
-]);
+export type ModeChangeDecision =
+  /** Requested mode is already active. */
+  | { action: "noop" }
+  /** Apply immediately with the given source (no user interaction). */
+  | { action: "apply"; source: TaskModeSource }
+  /** The EXTENSION must obtain user consent (ctx.ui.confirm); consent applies
+   *  the mode with source "user", refusal locks agent downgrades. */
+  | { action: "confirm" }
+  /** Not permitted; the reason is surfaced to the agent verbatim. */
+  | { action: "reject"; reason: string };
 
 /**
- * Mutation/ship verbs that are NOT in LOOP_HINTS but still rule out a
- * confident explore auto-selection ("review this and commit it" must not
- * silently downgrade the gate). Matching one of these without a loop hint
- * yields an unconfident suggestion — the user decides.
+ * The single pure authority on a requested mode change (see header rules).
+ * The caller supplies facts only — it must never pre-decide consent.
  */
-const MUTATION_GUARDS: readonly RegExp[] = Object.freeze([
-  // Stem-matched (\w* suffix) so inflections like "merging"/"committed" are
-  // caught. Over-matching is safe here: a guard hit only demotes confidence to
-  // "ask the user", never auto-selects a mode. This list is best-effort by
-  // design — the taskModeSource layer (see header) covers whatever it misses.
-  /\b(commit|push|merg|deploy|releas|publish|ship|submit|upload|sav|stor|sync|copy|copi|mov|append|open|appl|revert|rebas|cherry-?pick|stag|install|uninstall|execut|run|launch|restart|generat|configur|edit|modif|delet)\w*/i,
-  /(提交|推送|合并|部署|发布|上线|上传|同步|追加|复制|拷贝|移动|保存|写入|落盘|应用|回滚|重置|安装|卸载|执行|运行|启动|重启|生成|配置)/,
-  // Verification verbs/phrases: explore COULD run tests (bash is available),
-  // but "review the changes and verify the tests pass" signals delivery-
-  // validation intent that belongs to the enforced loop, so we conservatively
-  // keep asking the user rather than auto-selecting explore. Nouns like a
-  // bare "test" stay unguarded so "explain why this test fails" remains a
-  // confident explore. A hit only demotes confidence to "ask the user" —
-  // over-asking is the safe direction.
-  // ("run"/"execute" stems are already guarded by the pattern above.)
-  /\b(verif|lint|typecheck|type-check|compil|benchmark|retest|rerun|re-run)\w*/i,
-  /\btests?\s+(still\s+)?pass\b/i,
-  /(验证|校验|跑测试|运行测试|测试通过|编译|构建)/,
-]);
+export function evaluateModeChange(opts: {
+  /** Current session mode; undefined = undecided (behaves as loop). */
+  current: TaskMode | undefined;
+  requested: TaskMode;
+  /** THIS session's own edits (sessionEdited — pre-existing worktree/branch
+   *  changes from before the session do NOT count: they arm the ship gate via
+   *  state.hasCodeChange but must not force a confirmation dialog on the
+   *  first classification). */
+  hasChanges: boolean;
+  /** Whether an interactive confirm dialog is possible. */
+  hasUI: boolean;
+  /** A previously declined confirmation locks agent-initiated downgrades. */
+  downgradesLocked: boolean;
+  /** USER REQUIREMENT: the DeepSeek V4 classifier produced this first
+   *  decision — apply it without a consent dialog. Ignored unless the mode is
+   *  undecided, the session is interactive and has made NO edits of its own
+   *  (the LLM runs only pre-work; see extensions/review-gate.ts). */
+  firstDecideAuto?: boolean;
+}): ModeChangeDecision {
+  const { current, requested } = opts;
+  if (current === requested) return { action: "noop" };
 
-export function suggestTaskMode(prompt: string): TaskModeSuggestion {
-  const loop = LOOP_HINTS.some((pattern) => pattern.test(prompt));
-  // Write intent wins even when mixed with analysis wording ("review and fix").
-  if (loop) return { mode: "loop", confident: true };
-  const explore = EXPLORE_HINTS.some((pattern) => pattern.test(prompt));
-  const mutation = MUTATION_GUARDS.some((pattern) => pattern.test(prompt));
-  // Confident explore requires an analysis hint AND zero mutation signals.
-  if (explore && !mutation) return { mode: "explore", confident: true };
-  // Mixed or no signal → ask the user; loop stays the safe default.
-  return { mode: "loop", confident: false };
+  // Consent path shared by every loosening transition.
+  const needsConsent = (): ModeChangeDecision => {
+    if (opts.downgradesLocked) {
+      return {
+        action: "reject",
+        reason:
+          "the user already declined a gate downgrade this session — agent-initiated " +
+          "downgrades are locked. Continue under the current mode; only the user can " +
+          "change it now (/gate-mode).",
+      };
+    }
+    if (!opts.hasUI) {
+      return {
+        action: "reject",
+        reason:
+          "no interactive UI is available to confirm a gate downgrade (print/JSON mode " +
+          "is fail-closed). Continue under the current mode.",
+      };
+    }
+    return { action: "confirm" };
+  };
+
+  if (current === undefined) {
+    // Initial in-session classification. Undecided behaves as loop, so any
+    // choice below loop is a loosening — but a clean-session explore matches
+    // the long-standing auto-classification precedent (it cannot weaken the
+    // ship gate or the hooks) and stays consent-free.
+    if (requested === "loop") return { action: "apply", source: "auto" };
+    // USER REQUIREMENT (first-classification automation): an LLM-backed first
+    // verdict applies automatically on a CLEAN interactive session — the user
+    // opted out of the first confirmation dialog. Bounded exactly like the
+    // explore auto-classification above: no edits by THIS session (the
+    // session's work has not started under loop rules) and a UI to render
+    // the result.
+    // A declined-downgrade lock still vetoes it (defense in depth — the
+    // undecided state cannot normally hold the lock, but the pure engine
+    // never lets a locked session loosen itself). Source stays "auto" so the
+    // git hooks remain fully enforced.
+    if (opts.firstDecideAuto && !opts.hasChanges && opts.hasUI && !opts.downgradesLocked) {
+      return { action: "apply", source: "auto" };
+    }
+    if (requested === "explore" && !opts.hasChanges && opts.hasUI) {
+      return { action: "apply", source: "auto" };
+    }
+    // explore after this session edited (loop-rules work already happened), explore
+    // without a UI, and normal (total gate shutdown) all need the user.
+    return needsConsent();
+  }
+
+  if (TASK_MODE_RANK[requested] > TASK_MODE_RANK[current]) {
+    // Upgrade — tightening never needs consent. Source stays "auto": for loop
+    // the source is irrelevant, and an agent upgrade must never be able to
+    // launder a later hook-advisory state.
+    return { action: "apply", source: "auto" };
+  }
+
+  return needsConsent();
 }
 
 // ---------------------------------------------------------------------------
-// Full first-prompt decision flow (pure, unit-testable — the extension injects
-// the actual ctx.ui.select).
+// Fixed dialog copy. The consequence text is written by the EXTENSION (the
+// agent cannot alter it) and must spell out exactly what the user is granting.
 
-export type TaskModeDecisionVia = "auto" | "llm" | "dialog" | "dialog-cancelled" | "no-ui";
+export const MODE_CONFIRM_TITLE = "review-gate: AI 请求降低本会话的门禁级别——是否同意？";
 
-export interface TaskModeDecision {
-  mode: TaskMode;
-  via: TaskModeDecisionVia;
-  /** "user" only for an explicit dialog choice; everything else is "auto". */
-  source: TaskModeSource;
+const MODE_CONSEQUENCES: Readonly<Record<TaskMode, string>> = Object.freeze({
+  loop: "", // upgrades never reach the confirm dialog
+  explore:
+    "切换到 explore（探查）模式：关闭强制 review 循环与自动继续，AI 可自行判断结束任务；" +
+    "commit/push 等 ship 命令仍被完整拦截。",
+  normal:
+    "切换到 normal（普通）模式：本会话的全部质量门禁将关闭 —— commit/push/PR 不再被拦截，" +
+    "review/precommit 不再强制，git hooks 对你本人的提交也放行。效果等同于未安装本插件。",
+});
+
+/** Max characters of the agent-supplied reason shown in the dialog. */
+export const MODE_REASON_MAX_CHARS = 200;
+
+/**
+ * Build the confirm-dialog body. The agent's reason is UNTRUSTED data: it is
+ * length-capped, JSON-quoted (so newlines/controls cannot fake dialog copy),
+ * and explicitly labeled — the fixed consequence text above it is the only
+ * authoritative statement of what "yes" grants.
+ */
+export function buildModeConfirmMessage(requested: TaskMode, reason: string): string {
+  const capped = reason.length > MODE_REASON_MAX_CHARS
+    ? reason.slice(0, MODE_REASON_MAX_CHARS) + "…"
+    : reason;
+  return (
+    MODE_CONSEQUENCES[requested] +
+    "\n\nAI 给出的理由（不可信数据，仅供参考）: " + JSON.stringify(capped) +
+    "\n\n拒绝后，本会话将锁定 AI 发起的降级请求（你仍可随时用 /gate-mode 切换）。"
+  );
 }
 
-export const TASK_MODE_CHOICE_TITLE = "无法自动判断任务类型——这是循环任务吗？";
-export const TASK_MODE_CHOICE_LOOP = "是 — 循环任务（多轮 review + precommit + gate）";
-export const TASK_MODE_CHOICE_EXPLORE = "否 — 探查任务（gate 仅供参考，AI 可主动结束）";
-
-export async function decideTaskMode(opts: {
-  prompt: string;
-  hasUI: boolean;
-  select: (title: string, options: string[]) => Promise<string | undefined>;
-  /**
-   * Optional semantic classifier (DeepSeek V4 Flash — see lib/llm-classify.ts).
-   * Consulted for EVERY prompt before the regex heuristic: it judges intent
-   * semantically, so quoted logs/notifications don't pollute the decision the
-   * way regex word-matching does. Returns undefined on timeout/parse failure.
-   *
-   * SECURITY: the LLM decision keeps source:"auto", so even an explore
-   * misclassification (prompt-injected or organic) cannot downgrade the git
-   * pre-commit hook — and in-session explore keeps the L1 ship gate fully
-   * enforced, so a misfire only relaxes auto-continuation (the safe
-   * direction). On classifier failure the flow falls back to the regex +
-   * dialog path unchanged (fail-back).
-   */
-  classify?: (prompt: string) => Promise<"loop" | "explore" | undefined>;
-}): Promise<TaskModeDecision> {
-  if (!opts.hasUI) {
-    // Print/JSON mode cannot display a choice. Fail closed into the loop
-    // workflow rather than silently weakening the gate.
-    return { mode: "loop", via: "no-ui", source: "auto" };
-  }
-  if (opts.classify) {
-    const llmMode = await opts.classify(opts.prompt);
-    if (llmMode !== undefined) return { mode: llmMode, via: "llm", source: "auto" };
-    // fall through: classifier unavailable → regex heuristic + dialog
-  }
-  const suggested = suggestTaskMode(opts.prompt);
-  if (suggested.confident) return { mode: suggested.mode, via: "auto", source: "auto" };
-  const choice = await opts.select(TASK_MODE_CHOICE_TITLE, [
-    TASK_MODE_CHOICE_LOOP,
-    TASK_MODE_CHOICE_EXPLORE,
-  ]);
-  if (choice === TASK_MODE_CHOICE_EXPLORE) return { mode: "explore", via: "dialog", source: "user" };
-  if (choice === TASK_MODE_CHOICE_LOOP) return { mode: "loop", via: "dialog", source: "user" };
-  // Cancelling the dialog keeps the safer loop behavior.
-  return { mode: "loop", via: "dialog-cancelled", source: "auto" };
-}
+/**
+ * Per-turn directive injected while the mode is undecided: the agent calls
+ * set_gate_mode as its FIRST action, and DeepSeek V4 (deepseek/deepseek-v4-
+ * flash, the llmGuards model) classifies the task there — the LLM verdict
+ * applies automatically, no user confirmation needed for this first
+ * classification (user requirement). Enforcement stays full loop behavior
+ * until a decision lands, so "agent never calls it" is fail-closed.
+ */
+export const GATE_MODE_DECISION_DIRECTIVE =
+  "## Gate mode decision required (FIRST action)\n" +
+  "This session's gate mode is UNDECIDED; enforcement currently behaves as the full loop " +
+  "workflow (fail-closed). As your FIRST action, judge the user's actual intent (quoted " +
+  "logs/errors/pasted text are context, not intent) and call the set_gate_mode tool:\n" +
+  '- "loop" — code/doc changes to deliver (fix, implement, refactor, ship...): full enforced review loop.\n' +
+  '- "explore" — the deliverable is knowledge (explain, analyze, investigate, troubleshoot); ' +
+  "running diagnostic commands still counts. Gates become advisory; ship commands stay blocked.\n" +
+  '- "normal" — neither development nor research (casual Q&A, quick chores): the gate switches ' +
+  "off entirely.\n" +
+  "DeepSeek V4 (the llmGuards model) classifies this first decision inside the tool and it is " +
+  "applied AUTOMATICALLY — no confirmation dialog for the first classification (user " +
+  "requirement). Provide a truthful one-line reason; the model may override your pick. " +
+  "Upgrades (toward loop) are always allowed later without confirmation; downgrades after the " +
+  "first classification ask the user. If genuinely uncertain, choose \"loop\" (the safe default).";

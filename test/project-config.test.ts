@@ -134,7 +134,6 @@ test("llmGuards defaults: all guards on, fixed flash model", () => {
   const d = makeTemp();
   assert.deepEqual(loadProjectConfig(d).llmGuards, {
     model: "deepseek/deepseek-v4-flash",
-    taskMode: true,
     aiAttribution: true,
     englishCheck: true,
     shipDetect: true,
@@ -145,10 +144,12 @@ test("llmGuards defaults: all guards on, fixed flash model", () => {
 test("llmGuards fields load independently; invalid fields keep defaults", () => {
   const d = makeTemp();
   writeConfig(d, JSON.stringify({
+    // taskMode is a RETIRED knob (the decision moved in-session) — an old
+    // config carrying it must be ignored, not rejected.
     llmGuards: { taskMode: false, shipDetect: false, aiAttribution: "yes", model: 42 },
   }));
   const lg = loadProjectConfig(d).llmGuards;
-  assert.equal(lg.taskMode, false);
+  assert.equal((lg as Record<string, unknown>).taskMode, undefined); // retired knob ignored
   assert.equal(lg.shipDetect, false);
   assert.equal(lg.aiAttribution, true);  // invalid type → default
   assert.equal(lg.englishCheck, true);   // absent → default

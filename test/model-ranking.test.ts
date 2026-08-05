@@ -174,9 +174,9 @@ test("reviewer override is pinned to the user's priority list at max thinking an
   const reviewer = readFileSync(join(ROOT, "agents", "reviewer.md"), "utf8");
   assert.match(reviewer, /name:\s*reviewer/);
   assert.match(reviewer, JUDGE_THINKING);
-  // Priority: gpt-sol > fable-5 > gpt-5.5 > opus-4.8
-  assert.match(reviewer, /model:\s*onekey\/gpt-5\.6-sol/);
-  assert.match(reviewer, /fallbackModels:\s*claude-fable-5,\s*onekey\/gpt-5\.5,\s*claude-opus-4-8/);
+  // Priority: fable-5 > gpt-5.5 > opus-4.8 (user's current pin)
+  assert.match(reviewer, /model:\s*claude-fable-5/);
+  assert.match(reviewer, /fallbackModels:\s*onekey\/gpt-5\.5,\s*claude-opus-4-8/);
   // Reviewer IS the gatekeeper: it must instruct ending with a JSON gate verdict.
   assert.match(reviewer, /"gate":\s*"READY"/);
 });
