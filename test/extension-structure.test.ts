@@ -105,6 +105,72 @@ test("session_compact while paused re-injects the WAITING state, never a resume 
   assert.match(body, /REVIEW_GATE_PAUSED/);
 });
 
+test("ESC abort (Operation aborted) pauses auto-continuation until the next real user input", () => {
+  // USER REQUIREMENT: a double-ESC abort is an explicit human stop — the L2
+  // loop must NOT steamroll it with a [REVIEW_GATE_RESUME] follow-up.
+  assert.match(SRC, /pi\.on\(["']agent_end["']/);
+  assert.match(SRC, /stopReason === "aborted"/);
+  // agent_settled checks the abort flag BEFORE injecting the continuation…
+  const start = SRC.indexOf('pi.on("agent_settled"');
+  assert.ok(start >= 0, "agent_settled handler must exist");
+  const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
+  assert.ok(injectAt > start, "agent_settled must contain the RESUME injection");
+  assert.ok(SRC.slice(start, injectAt).includes("lastRunAborted"), "abort check must precede the RESUME injection");
+  // …and any non-extension user input clears the pause again.
+  const inputStart = SRC.indexOf('pi.on("input"');
+  assert.ok(inputStart >= 0, "input handler must exist");
+  const inputBody = SRC.slice(inputStart, inputStart + 1800);
+  assert.match(inputBody, /lastRunAborted = false/);
+});
+
+test("request_scope_limit: extension-driven user consent, no 'confirmed' parameter, declined locks", () => {
+  const toolStart = SRC.indexOf('name: "request_scope_limit"');
+  assert.ok(toolStart >= 0, "request_scope_limit tool must be registered");
+  const toolEnd = SRC.indexOf("pi.registerTool", toolStart);
+  const body = SRC.slice(toolStart, toolEnd > toolStart ? toolEnd : toolStart + 7000);
+  // Consent is obtained by the EXTENSION (dialog) — the tool schema exposes
+  // only a reason; there is no parameter the model could set to claim consent.
+  assert.match(body, /ctx\.ui\.confirm/);
+  assert.match(body, /parameters: Type\.Object\(\{\s*reason: Type\.String/);
+  assert.doesNotMatch(body, /confirmed/);
+  // No UI ⇒ fail-closed deny; a declined dialog locks further requests — but
+  // a dialog that could not be SHOWN fails closed without burning the lock.
+  assert.match(body, /hasUI/);
+  assert.match(body, /scopeLimitDeclined = true/);
+  assert.match(body, /dialogFailed/);
+  assert.match(body, /state\.scopeLimit = \{/);
+});
+
+test("a session edit RECLAIMS an exempt file — the grant never covers the session's own work", () => {
+  // P1 regression guard: without the reclaim, a session that edits ONLY
+  // pre-existing dirty files would see turn_end filter them all out, disarm
+  // the gate, and ship its own edits unreviewed.
+  const start = SRC.indexOf('pi.on("tool_result"');
+  assert.ok(start >= 0, "tool_result handler must exist");
+  const body = SRC.slice(start, SRC.indexOf("pi.registerTool", start));
+  assert.match(body, /preexistingFiles\.indexOf/);
+  assert.match(body, /preexistingFiles\.splice/);
+  // Session edit attribution is persisted (restart cannot re-label the
+  // session's own edits as pre-existing) and re-seeded at session_start.
+  assert.match(body, /state\.sessionEditedFiles/);
+  const sessionStart = SRC.indexOf('pi.on("session_start"');
+  const startBody = SRC.slice(sessionStart, SRC.indexOf('pi.on("session_compact"', sessionStart));
+  assert.match(startBody, /state\.sessionEditedFiles/);
+});
+
+test("scope limit exempts pre-existing files at EVERY re-arm site (session_start + bash re-arm + turn_end)", () => {
+  // A grant that only disarmed once would silently re-arm at the next
+  // stash/checkout or restart; every arming path must apply the exempt filter.
+  const hits = SRC.match(/scopeLimit\?\.preexistingFiles/g) ?? [];
+  assert.ok(hits.length >= 3, `expected >=3 exempt-filter sites, found ${hits.length}`);
+  // The grant never touches verdicts/bindings — only the arming flags.
+  const toolStart = SRC.indexOf('name: "request_scope_limit"');
+  const toolEnd = SRC.indexOf("pi.registerTool", toolStart);
+  const body = SRC.slice(toolStart, toolEnd > toolStart ? toolEnd : toolStart + 7000);
+  assert.doesNotMatch(body, /state\.review\.verdict\s*=/);
+  assert.doesNotMatch(body, /state\.precommit\.verdict\s*=/);
+});
+
 test("gate mode is decided via set_gate_mode with a DeepSeek V4 first classification", () => {
   // USER REQUIREMENT: the first classification is automated — the tool asks
   // the DeepSeek V4 classifier (lib/llm-classify.ts) while undecided and

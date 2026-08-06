@@ -126,6 +126,75 @@ test("pausedQuestion NEVER affects the ship authority (tighten-only invariant)",
 });
 
 // ---------------------------------------------------------------------------
+// scopeLimit — user-granted review-scope limit (request_scope_limit tool)
+// ---------------------------------------------------------------------------
+
+test("scopeLimit: valid shape round-trips through the sidecar", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const s = emptyState("s", 10);
+  s.scopeLimit = {
+    preexistingFiles: ["src/old.ts", "docs/old.md"],
+    sessionFiles: ["src/new.ts"],
+    at: "2026-01-01T00:00:00Z",
+  };
+  writeFileSync(path, JSON.stringify(s));
+  assert.deepEqual(loadSidecar(path)?.scopeLimit, s.scopeLimit);
+});
+
+test("scopeLimit: malformed shapes fail toward ABSENT (full-scope gate)", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of [
+    "just a string",
+    42,
+    null,
+    { preexistingFiles: "not-array", sessionFiles: [], at: "t" },
+    { preexistingFiles: [42], sessionFiles: [], at: "t" },
+    { preexistingFiles: [], sessionFiles: [null], at: "t" },
+    { preexistingFiles: [], sessionFiles: [] }, // missing at
+    { sessionFiles: [], at: "t" }, // missing preexistingFiles
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, scopeLimit: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar itself must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.scopeLimit, undefined, JSON.stringify(bad));
+  }
+});
+
+test("sessionEditedFiles: valid shape round-trips; malformed shapes fail toward ABSENT", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const s = emptyState("s", 10);
+  s.sessionEditedFiles = ["src/new.ts", "docs/x.md"];
+  writeFileSync(path, JSON.stringify(s));
+  assert.deepEqual(loadSidecar(path)?.sessionEditedFiles, s.sessionEditedFiles);
+
+  const base = emptyState("s", 10);
+  for (const bad of ["str", 42, { 0: "a" }, [1, 2], ["ok", null]]) {
+    writeFileSync(path, JSON.stringify({ ...base, sessionEditedFiles: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar itself must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.sessionEditedFiles, undefined, JSON.stringify(bad));
+  }
+});
+
+test("scopeLimit NEVER affects the ship authority directly (arming flags decide)", () => {
+  // The scope limit changes what ARMS the gate (hasCodeChange/hasDocChange,
+  // maintained by the extension); unmetRequirements must be blind to it.
+  const ready = readyState();
+  ready.scopeLimit = { preexistingFiles: ["a.ts"], sessionFiles: ["b.ts"], at: "t" };
+  assert.deepEqual(unmetRequirements(ready, FP, false), []);
+
+  const pending = emptyState("s", 10);
+  pending.hasCodeChange = true; // session's own edits stay fully gated
+  pending.scopeLimit = { preexistingFiles: ["a.ts"], sessionFiles: ["b.ts"], at: "t" };
+  const problems = unmetRequirements(pending, FP, false);
+  assert.ok(problems.length > 0, "session edits must remain gated under a scope limit");
+});
+
+// ---------------------------------------------------------------------------
 // docSync knob — code↔doc attestation enforcement
 // ---------------------------------------------------------------------------
 

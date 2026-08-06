@@ -203,6 +203,37 @@ export default function reviewGate(pi: ExtensionAPI) {
   // discipline.ts). This targets the recurring "edit failed → shell edits the
   // file" workaround without policing ordinary bash usage.
   let editFailurePending = false;
+  // USER REQUIREMENT (ESC = pause): when the user aborts a run (ESC — the
+  // TUI's "Operation aborted"), the L2 auto-continuation must NOT steamroll
+  // that explicit human stop with a [REVIEW_GATE_RESUME] follow-up. agent_end
+  // records whether the run's LAST assistant message ended with stopReason
+  // "aborted"; agent_settled then skips the continuation and the next REAL
+  // user input (any non-"extension" source) clears the flag. Deliberately
+  // OVERWRITTEN on every agent_end, so an overflow-recovery abort that Pi
+  // auto-retries (the retried run ends normally) never leaves a stale pause.
+  // In-memory only: no run can settle again until the user speaks, and a
+  // process restart starts idle anyway. Tighten-only — the ship gate never
+  // reads it.
+  let lastRunAborted = false;
+  // Anti-grinding lock for request_scope_limit (mirrors agentDowngradesLocked):
+  // once the user DECLINES a scope-limit dialog, the agent cannot re-pop it
+  // for the rest of the session. /gate-reset clears it. In-memory only.
+  let scopeLimitDeclined = false;
+  // Repo-relative paths of the files THIS session actually edited (successful
+  // edit-tool results only). Feeds the request_scope_limit grant (what stays
+  // in scope) and the scope directive in the per-turn prompt. In-memory; a
+  // same-session resume re-seeds it from state.scopeLimit.sessionFiles.
+  const sessionEditedPaths = new Set<string>();
+
+  /** Normalize a tool/git path to a repo-relative form for scope comparisons
+   *  (changedFiles() emits repo-root-relative paths; edit tools may pass
+   *  absolute). NOTE: assumes the session cwd IS the repo root — the same
+   *  standing assumption sidecarPath() and every changedFiles()/isCodeFile()
+   *  consumer in this file already make; scope-set membership relies on it. */
+  function repoRelative(p: string): string {
+    const abs = p.startsWith("/") ? p : pathJoin(cwd, p);
+    return abs.startsWith(cwd + "/") ? abs.slice(cwd.length + 1) : abs;
+  }
 
   // LLM semantic guard layer (DeepSeek V4 Flash — lib/llm-classify.ts).
   // Lazily (re)created so it always reflects the loaded projectConfig model.
@@ -376,6 +407,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       // agent can edit in this mode, so a static label would hide real state.
       if (state.taskMode === "explore") parts.push("explore (advisory)");
       if (state.pausedQuestion) parts.push("paused: awaiting user");
+      if (lastRunAborted) parts.push("paused: user abort (esc)");
+      if (state.scopeLimit) parts.push("scope: session-only");
       parts.push(`review: ${state.review.verdict}`);
       parts.push(`precommit: ${state.precommit.verdict}`);
       parts.push(`round ${state.rounds.length}/${state.maxRounds}`);
@@ -771,6 +804,26 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (isCodeFile(path) && !state.hasCodeChange) { state.hasCodeChange = true; dirty = true; }
       if (isDocFile(path) && !state.hasDocChange) { state.hasDocChange = true; dirty = true; }
       if (isCodeFile(path) || isDocFile(path)) {
+        // Scope tracking: this file is part of THIS session's own work — it is
+        // always IN scope, even under a user-granted scope limit (which the
+        // persisted lists must reflect across restarts).
+        const rel = repoRelative(path);
+        sessionEditedPaths.add(rel);
+        if (!state.sessionEditedFiles) state.sessionEditedFiles = [];
+        if (!state.sessionEditedFiles.includes(rel)) state.sessionEditedFiles.push(rel);
+        if (state.scopeLimit) {
+          if (!state.scopeLimit.sessionFiles.includes(rel)) {
+            state.scopeLimit.sessionFiles.push(rel);
+          }
+          // P1 fix: a session edit RECLAIMS an exempt file — it is now this
+          // session's own work, so it must arm the gate again at EVERY
+          // exempt-filter site (session_start P0-2, bash re-arm, turn_end).
+          // Without this, a session that edits ONLY pre-existing dirty files
+          // would see turn_end filter them all out, disarm the gate, and ship
+          // its own edits unreviewed.
+          const idx = state.scopeLimit.preexistingFiles.indexOf(rel);
+          if (idx >= 0) state.scopeLimit.preexistingFiles.splice(idx, 1);
+        }
         if (state.review.verdict === "READY") state.review.verdict = "PENDING";
         if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
         loopArmed = true;
@@ -808,8 +861,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (cmd && /(^|[\s;&|])(git\s+(stash\s+(pop|apply)|checkout|switch|restore|reset\s+--hard|merge|pull|rebase|cherry-pick|am)|gh\s+pr\s+checkout)\b/.test(cmd)) {
         const files = changedFiles(cwd);
         if (files && files.length > 0) {
-          if (files.some(isCodeFile) && !state.hasCodeChange) { state.hasCodeChange = true; }
-          if (files.some(isDocFile) && !state.hasDocChange) { state.hasDocChange = true; }
+          // User-granted scope limit: files still in the exempt snapshot
+          // never re-arm the gate (session-edited ones were reclaimed out of
+          // it); anything newer still does (fail-closed).
+          const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
+          const arming = state.scopeLimit ? files.filter((f) => !exempt.has(f)) : files;
+          if (arming.some(isCodeFile) && !state.hasCodeChange) { state.hasCodeChange = true; }
+          if (arming.some(isDocFile) && !state.hasDocChange) { state.hasDocChange = true; }
           if (state.hasCodeChange || state.hasDocChange) {
             if (state.review.verdict === "READY") state.review.verdict = "PENDING";
             if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
@@ -1123,6 +1181,130 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
+  // ---------- request_scope_limit tool (user-consented gate fence narrowing) ----------
+
+  pi.registerTool({
+    name: "request_scope_limit",
+    label: "Request Scope Limit",
+    description:
+      "Ask the USER whether the review gate may be limited to THIS session's own edits when it " +
+      "is demanding coverage of PRE-EXISTING changes (dirty files or branch commits that pre-date " +
+      "this session). The extension shows the user a confirmation dialog — you cannot approve it " +
+      "yourself. If the user agrees, the pre-existing changes recorded at grant time stop arming " +
+      "the gate: with no session edits the ship gate disarms entirely; with session edits the " +
+      "review scope narrows to the files this session touched (instruct the reviewer accordingly; " +
+      "out-of-scope findings become advisory). If the user declines, scope requests lock for the " +
+      "session — do not ask again. This never weakens the gate for the session's OWN edits.",
+    parameters: Type.Object({
+      reason: Type.String({ description: "One-line justification: which unmet requirements target pre-existing changes (shown to the user as untrusted data)" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
+
+      if (state.taskMode === "normal") {
+        return { content: [{ type: "text", text: "review-gate: normal mode — the gate is already off; no scope limit needed." }], details: {} };
+      }
+      if (state.scopeLimit) {
+        return {
+          content: [{ type: "text", text: "review-gate: a user-granted scope limit is already active — the gate covers only this session's edits." }],
+          details: { alreadyLimited: true },
+        };
+      }
+      if (scopeLimitDeclined) {
+        return deny("review-gate: the user already DECLINED a scope limit this session — do not ask again; satisfy the full gate or let the USER run /gate-bypass.");
+      }
+      if (!ctx.hasUI) {
+        return deny("review-gate: no interactive UI — narrowing the gate fence requires the user's explicit dialog approval (fail-closed). Ask the user out-of-band.");
+      }
+      const all = changedFiles(cwd);
+      if (all === undefined) {
+        return deny("review-gate: git status unavailable — cannot determine the pre-existing change set (fail-closed).");
+      }
+      const sessionRel = [...sessionEditedPaths];
+      const sessionSet = new Set(sessionRel);
+      // Only code/doc files arm the gate, so only they justify a dialog — but
+      // the exemption snapshot below covers EVERY non-session changed file.
+      const preexisting = all.filter((f) => (isCodeFile(f) || isDocFile(f)) && !sessionSet.has(f));
+      const ahead = await commitsAheadOfBase(cwd);
+      if (preexisting.length === 0 && ahead === 0) {
+        return deny("review-gate: every current change was made in THIS session — there is nothing pre-existing to exempt; the full gate applies.");
+      }
+
+      // USER CONSENT — extension-rendered dialog with fixed consequence copy;
+      // the agent's reason is displayed as clearly-labeled untrusted data.
+      const preexistingList = preexisting.slice(0, 20).join(", ") || "（仅分支上已有的提交）";
+      const sessionList = sessionRel.length > 0 ? sessionRel.slice(0, 20).join(", ") : "（无）";
+      let ok = false;
+      let dialogFailed = false;
+      try {
+        ok = await ctx.ui.confirm(
+          "review-gate: AI 请求把审查范围缩小到本会话的修改——是否同意？",
+          "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
+            `既有变更（同意后不再触发门禁）: ${preexistingList}` +
+            (ahead > 0 ? `；分支领先基线 ${ahead} 个提交` : "") + "\n" +
+            `本会话修改（仍需完整审查）: ${sessionList}\n` +
+            "同意后：审查只需覆盖本会话自己的修改；若本会话没有任何修改，ship 拦截将解除。\n" +
+            "拒绝后：AI 本会话内不能再次请求缩小范围。\n" +
+            `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
+        );
+      } catch { dialogFailed = true; }
+
+      // A dialog that could not be shown is NOT a decline: fail closed for
+      // THIS request without burning the session's anti-grinding lock.
+      if (dialogFailed) {
+        return deny(
+          "review-gate: the confirmation dialog could not be shown — no scope limit granted (fail-closed), " +
+          "and this does NOT count as a user decline; retry when an interactive dialog is possible.",
+        );
+      }
+
+      if (!ok) {
+        scopeLimitDeclined = true;
+        return deny(
+          "review-gate: the user DECLINED the scope limit — the FULL gate applies (pre-existing " +
+          "changes included). Scope requests are now locked for this session; continue the loop and cover everything.",
+        );
+      }
+
+      // GRANTED: snapshot EVERY non-session changed file as exempt (non-code
+      // files never arm the gate, but freezing the full set keeps later
+      // re-arm filtering unambiguous), then re-derive arming from THIS
+      // session's own edits only. Verdicts/bindings are untouched — narrowing
+      // the fence never fabricates a READY or a PASS.
+      state.scopeLimit = {
+        preexistingFiles: all.filter((f) => !sessionSet.has(f)),
+        sessionFiles: sessionRel,
+        at: new Date().toISOString(),
+      };
+      state.hasCodeChange = sessionRel.some(isCodeFile);
+      state.hasDocChange = sessionRel.some(isDocFile);
+      persist(ctx as unknown as ExtensionContext);
+      const stillArmed = state.hasCodeChange || state.hasDocChange;
+      try {
+        ctx.ui.notify(
+          stillArmed
+            ? "review-gate: 用户已同意缩小审查范围——门禁只覆盖本会话的修改（既有变更已豁免）。"
+            : "review-gate: 用户已同意缩小审查范围——本会话没有自身修改，ship 拦截已解除（既有变更已豁免）。",
+          "warning",
+        );
+      } catch { /* headless */ }
+      return {
+        content: [{
+          type: "text",
+          text: stillArmed
+            ? "review-gate: the user GRANTED the scope limit. The gate now covers ONLY this session's edits: " +
+              `${sessionRel.join(", ")}. When you run the review, instruct the reviewer to verdict only on ` +
+              "findings in these files — pre-existing issues elsewhere are advisory, not blocking. Precommit " +
+              "still runs project-wide; if it fails on pre-existing problems, report that to the user (only " +
+              "the USER can /gate-bypass)."
+            : "review-gate: the user GRANTED the scope limit and this session has no edits of its own — the " +
+              "ship gate is disarmed for the pre-existing changes; you may proceed.",
+        }],
+        details: { granted: true, stillArmed, sessionFiles: sessionRel },
+      };
+    },
+  });
+
   // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
 
   // USER REQUIREMENT: cache-only capture of the user's first real message,
@@ -1136,6 +1318,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     // A fresh user message resets the edit-failure nudge window.
     editFailurePending = false;
+    // A real user message resumes an ESC-abort pause: the user is speaking
+    // again, so auto-continuation may re-arm from this turn on ("extension"
+    // is how the gate injects its own follow-ups — those never count).
+    if (event.source !== "extension") lastRunAborted = false;
     // A real user message (interactive TUI or an RPC driver — never
     // "extension", which is how the gate injects its own [REVIEW_GATE_RESUME]
     // follow-ups) answers a standing pause_for_question pause: clear it and
@@ -1426,6 +1612,21 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
+  // ---------- ESC abort detection (feeds the L2 pause below) ----------
+
+  pi.on("agent_end", (event) => {
+    // stopReason "aborted" on the run's LAST assistant message = the user
+    // aborted (ESC — the TUI's "Operation aborted"). Overwritten each
+    // agent_end: an overflow-recovery abort that Pi retries ends with a later,
+    // non-aborted agent_end, which clears the flag again before settle.
+    let last: { role?: string; stopReason?: string } | undefined;
+    for (let i = event.messages.length - 1; i >= 0; i--) {
+      const m = event.messages[i] as { role?: string; stopReason?: string };
+      if (m?.role === "assistant") { last = m; break; }
+    }
+    lastRunAborted = last?.stopReason === "aborted";
+  });
+
   // ---------- L2: auto-continuation ----------
 
   pi.on("agent_settled", async (_event, ctx) => {
@@ -1448,6 +1649,22 @@ export default function reviewGate(pi: ExtensionAPI) {
     const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
     if (problems.length === 0) return;
 
+    // USER REQUIREMENT: the user aborted this run (ESC — "Operation aborted").
+    // Injecting a continuation would override an explicit human stop, so the
+    // loop pauses instead; the user's next message resumes it (input handler
+    // clears the flag). Tighten-only — ship commands stay blocked while gates
+    // are unmet, exactly like pause_for_question.
+    if (lastRunAborted) {
+      try {
+        ctx.ui.notify(
+          "review-gate: 检测到手动中止（ESC）— 自动循环已暂停（质量门禁仍未满足）。你的下一条消息会恢复循环；ship 命令仍被拦截。",
+          "warning",
+        );
+      } catch { /* headless */ }
+      updateWidget(ctx);
+      return;
+    }
+
     continuationsInjected += 1;
     // R10: fire the strategic-reset checklist BEFORE persist so the fired flag
     // survives restarts (one-shot per gate-state lifetime).
@@ -1458,6 +1675,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         problems.map((p) => `- ${p}`).join("\n") +
         `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
         "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute." +
+        (!sessionEdited && !state.scopeLimit
+          ? "\nIf these unmet gates target PRE-EXISTING changes this session never made, you may call request_scope_limit — the USER decides whether session-only coverage suffices."
+          : "") +
         reset,
       { deliverAs: "followUp" },
     );
@@ -1472,6 +1692,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     // worktree carries pre-existing changes from before (they still arm the
     // ship gate via the P0-2 detection below).
     sessionEdited = false;
+    // In-memory pause/lock hygiene for a fresh (or switched) session.
+    lastRunAborted = false;
+    scopeLimitDeclined = false;
+    sessionEditedPaths.clear();
     let sessionId: string | null = null;
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
@@ -1486,11 +1710,29 @@ export default function reviewGate(pi: ExtensionAPI) {
     // until the user's next message clears it (input handler).
     if (state.pausedQuestion) loopArmed = false;
 
-    // P0-2: detect pre-existing changes — worktree AND branch commits.
+    // A same-session resume keeps this session's edit attribution: re-seed
+    // the in-memory set from the persisted lists so a process restart cannot
+    // re-label the session's own edits as "pre-existing" (and offer them for
+    // a scope-limit exemption), nor lose a granted scope's in-scope list.
+    for (const f of state.sessionEditedFiles ?? []) sessionEditedPaths.add(f);
+    for (const f of state.scopeLimit?.sessionFiles ?? []) sessionEditedPaths.add(f);
+    if (sessionEditedPaths.size > 0) sessionEdited = true;
+
+    // P0-2: detect pre-existing changes — worktree AND branch commits. A
+    // user-granted scope limit exempts exactly the files still in its
+    // snapshot (a file the session later edits is RECLAIMED out of it by the
+    // edit handler); new dirty files still arm the gate (fail-closed).
+    // Branch-commit arming is suspended while the grant stands: a new commit
+    // under a standing grant is either the exempted pre-existing work being
+    // shipped (exactly what the user consented to) or a user/bypass action;
+    // the session's own NEW edits re-arm the gate before any further agent
+    // commit.
     if (!state.hasCodeChange && !state.hasDocChange && !state.bypass.active) {
-      const files = changedFiles(cwd);
+      const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
+      const allFiles = changedFiles(cwd);
+      const files = state.scopeLimit && allFiles ? allFiles.filter((f) => !exempt.has(f)) : allFiles;
       const hasDirtyFiles = files && files.length > 0;
-      const ahead = await commitsAheadOfBase(cwd);
+      const ahead = state.scopeLimit ? 0 : await commitsAheadOfBase(cwd);
       const hasBranchCommits = ahead > 0;
 
       if (hasDirtyFiles || hasBranchCommits) {
@@ -1561,9 +1803,17 @@ export default function reviewGate(pi: ExtensionAPI) {
   // P0-7: re-arm when stash pop / checkout restores dirty state without an edit event.
   pi.on("turn_end", async (_event, ctx) => {
     if (!state.hasCodeChange && !state.hasDocChange) return;
-    const files = changedFiles(cwd);
-    if (files === undefined) return;
-    if (files.length === 0 && (await commitsAheadOfBase(cwd)) === 0) {
+    const allFiles = changedFiles(cwd);
+    if (allFiles === undefined) return;
+    // User-granted scope limit: files still in the exempt snapshot never
+    // count toward the armed/clean reconciliation (session-edited files were
+    // reclaimed out of it by the edit handler, so they DO count), and
+    // branch-commit arming stays suspended while the grant stands (a new
+    // commit is either the consented exempted work being shipped or a
+    // user/bypass action — session edits re-arm the gate first).
+    const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
+    const files = state.scopeLimit ? allFiles.filter((f) => !exempt.has(f)) : allFiles;
+    if (files.length === 0 && ((await commitsAheadOfBase(cwd)) === 0 || state.scopeLimit !== undefined)) {
       state.hasCodeChange = false;
       state.hasDocChange = false;
       persist(ctx);
@@ -1612,6 +1862,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         `rounds:    ${state.rounds.length}/${state.maxRounds}`,
         `config:    thinkHarder=${projectConfig.thinkHarder}${state.strategicResetFired ? " (fired)" : ""} gitMemory=${projectConfig.gitMemory}`,
         `task mode: ${state.taskMode ?? "undecided (behaves as loop; agent decides via set_gate_mode)"}`,
+        ...(state.scopeLimit
+          ? [`scope:     session-only (user-granted ${state.scopeLimit.at}; ${state.scopeLimit.preexistingFiles.length} pre-existing file(s) exempt)`]
+          : []),
         ...(state.pausedQuestion
           ? [`paused:    awaiting user answer to "${state.pausedQuestion.question.slice(0, 120)}" (${state.pausedQuestion.at})`]
           : []),
@@ -1678,6 +1931,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       loopArmed = true;
       continuationsInjected = 0;
       agentDowngradesLocked = false;
+      lastRunAborted = false;
+      scopeLimitDeclined = false;
+      sessionEditedPaths.clear();
       clearBypassToken();
       lastBlockedShip = null;
       arbitrationsUsed = 0;
@@ -1801,6 +2057,17 @@ export default function reviewGate(pi: ExtensionAPI) {
           ? `Loop currently PAUSED awaiting the user's answer to: "${state.pausedQuestion.question.slice(0, 200)}". ` +
             "If the user has replied, continue the loop; otherwise end the turn after asking.\n"
           : "") +
+        (state.scopeLimit
+          ? "SCOPE LIMIT (user-approved): the gate covers ONLY this session's own edits" +
+            (state.scopeLimit.sessionFiles.length
+              ? ` (${state.scopeLimit.sessionFiles.slice(0, 30).join(", ")})`
+              : "") +
+            ". Pre-existing changes are exempt — instruct the reviewer to verdict only on in-scope findings; out-of-scope issues are advisory.\n"
+          : gateArmed && !sessionEdited
+            ? "NOTE: the tracked changes PRE-DATE this session (this session has not edited anything yet). " +
+              "If the unmet gates below are demanding coverage of work you never did, call request_scope_limit — " +
+              "the USER decides whether session-only coverage suffices.\n"
+            : "") +
         (problems.length
           ? `Current unmet:\n${problems.map((p) => `- ${p}`).join("\n")}`
           : "All gates satisfied — you may ship."),

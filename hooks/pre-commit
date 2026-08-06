@@ -68,6 +68,24 @@ if (!nullableString(state.sessionId) ||
       !(state.pausedQuestion && typeof state.pausedQuestion === "object" &&
         typeof state.pausedQuestion.question === "string" &&
         typeof state.pausedQuestion.at === "string")) ||
+    // Optional user-granted scope limit (request_scope_limit). It only ever
+    // narrows what ARMS the gate (already reflected in hasCodeChange/
+    // hasDocChange in this same sidecar); a present field must still be
+    // well-formed — a forged shape means a tampered sidecar, which fails
+    // closed like everything else.
+    (state.scopeLimit !== undefined &&
+      !(state.scopeLimit && typeof state.scopeLimit === "object" &&
+        Array.isArray(state.scopeLimit.preexistingFiles) &&
+        state.scopeLimit.preexistingFiles.every((v) => typeof v === "string") &&
+        Array.isArray(state.scopeLimit.sessionFiles) &&
+        state.scopeLimit.sessionFiles.every((v) => typeof v === "string") &&
+        typeof state.scopeLimit.at === "string")) ||
+    // Optional session-edit attribution (scope hints). Never part of the ship
+    // decision, but a present field must be well-formed — forged shapes fail
+    // closed like everything else.
+    (state.sessionEditedFiles !== undefined &&
+      !(Array.isArray(state.sessionEditedFiles) &&
+        state.sessionEditedFiles.every((v) => typeof v === "string"))) ||
     // Absent = a sidecar written before fingerprint versioning; any present
     // value must be a real version number (a forged non-integer must not slip
     // through and later compare "equal" to the running algorithm).

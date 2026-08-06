@@ -152,6 +152,14 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
   resumes the loop automatically); ship commands stay blocked throughout. Never
   use it to ask permission to continue routine loop work — that stays
   prohibited.
+- SCOPE — pre-existing changes: if the unmet gates demand coverage of dirty
+  files or branch commits that PRE-DATE this session (work you never did),
+  do NOT silently review the world and do NOT bypass — call
+  `request_scope_limit` with a one-line reason. The extension asks the USER
+  whether session-only coverage suffices (you cannot approve it yourself).
+  Granted → review only this session's own edits (out-of-scope findings are
+  advisory; tell the reviewer so). Declined → cover everything; the request
+  locks for the session, so do not ask again.
 - When the user corrects a recurring mistake, record it with `/gate-lesson`
   (appends to `.pi/review-gate-lessons.md`); promote lessons recurring 3+
   times into project rules.

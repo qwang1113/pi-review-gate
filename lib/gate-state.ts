@@ -121,6 +121,40 @@ export interface GateState {
     question: string;
     at: string;
   };
+  /**
+   * USER-GRANTED review-scope limit (request_scope_limit tool): the user
+   * confirmed via an extension-rendered dialog that the gate only needs to
+   * cover THIS session's own edits — pre-existing worktree/branch changes
+   * stop arming it. `preexistingFiles` snapshots the changed files exempted
+   * at grant time, so every re-arm path (session_start P0-2, bash git
+   * re-arm, turn_end reconciliation) exempts exactly those files — and a
+   * file this session later edits is RECLAIMED (removed) from the snapshot
+   * by the edit handler: the grant never covers the session's own work.
+   * Branch commits are exempt for as long as the grant stands — a new
+   * commit under a standing grant is either the exempted pre-existing work
+   * being shipped (exactly what the user consented to) or a user/bypass
+   * action; the session's own NEW edits re-arm the gate before any further
+   * agent commit. `sessionFiles` records what this session edited (the scope
+   * shown to the reviewer) and grows with each edit. This never
+   * fabricates a verdict: narrowing the fence only changes what ARMS the
+   * gate — the session's own edits still require READY + PASS. Absent ⇒
+   * full-scope gate (fail-closed).
+   */
+  scopeLimit?: {
+    preexistingFiles: string[];
+    sessionFiles: string[];
+    at: string;
+  };
+  /**
+   * Repo-relative paths of the files THIS session actually edited
+   * (successful edit-tool results only). Persisted so a same-session process
+   * restart keeps the session's edit attribution — without it, a restart
+   * would re-label the session's own edits as "pre-existing" and offer them
+   * for a scope-limit exemption. The ship authority (unmetRequirements)
+   * never reads it; absent on older sidecars ⇒ no attribution, and the
+   * scope hints stay conservative.
+   */
+  sessionEditedFiles?: string[];
   updatedAt: string;
 }
 
@@ -192,6 +226,26 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
          typeof parsed.pausedQuestion.question !== "string" ||
          typeof parsed.pausedQuestion.at !== "string")) {
       delete parsed.pausedQuestion;
+    }
+    // Malformed scope limit → treated as ABSENT (fail-closed: absent means
+    // the FULL-scope gate; dropping a forged one can only widen coverage,
+    // never narrow it).
+    if (parsed.scopeLimit !== undefined &&
+        (typeof parsed.scopeLimit !== "object" || parsed.scopeLimit === null ||
+         !Array.isArray(parsed.scopeLimit.preexistingFiles) ||
+         !parsed.scopeLimit.preexistingFiles.every((v) => typeof v === "string") ||
+         !Array.isArray(parsed.scopeLimit.sessionFiles) ||
+         !parsed.scopeLimit.sessionFiles.every((v) => typeof v === "string") ||
+         typeof parsed.scopeLimit.at !== "string")) {
+      delete parsed.scopeLimit;
+    }
+    // Malformed session-edit attribution → treated as ABSENT (hints and the
+    // scope tool then behave conservatively; the ship authority never reads
+    // this field either way).
+    if (parsed.sessionEditedFiles !== undefined &&
+        (!Array.isArray(parsed.sessionEditedFiles) ||
+         !parsed.sessionEditedFiles.every((v) => typeof v === "string"))) {
+      delete parsed.sessionEditedFiles;
     }
     const migrated = migrateFingerprintVersion(parsed);
     if (out) out.migrated = migrated;

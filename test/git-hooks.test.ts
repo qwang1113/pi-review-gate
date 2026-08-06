@@ -251,6 +251,70 @@ test("SECURITY: malformed pausedQuestion shapes fail closed (tampered sidecar)",
   }
 });
 
+test("scopeLimit: valid shape is accepted (arming flags in the sidecar decide the ship outcome)", () => {
+  const dir = makeGitRepo();
+  // A user-granted scope limit with no session edits disarms the gate
+  // (hasCodeChange/hasDocChange false) — the hook must allow that state.
+  writeState(dir, {
+    ...READY,
+    hasCodeChange: false,
+    hasDocChange: false,
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+    scopeLimit: { preexistingFiles: ["src/old.ts"], sessionFiles: [], at: "t" },
+  });
+  assert.equal(runPreCommit(dir).status, 0);
+});
+
+test("scopeLimit: session edits stay fully gated even under a scope limit (no fail-open)", () => {
+  const dir = makeGitRepo();
+  writeState(dir, {
+    ...READY,
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    scopeLimit: { preexistingFiles: ["src/old.ts"], sessionFiles: ["src/new.ts"], at: "t" },
+  });
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /review is PENDING/);
+});
+
+test("sessionEditedFiles: valid shape accepted; malformed shapes fail closed", () => {
+  const ok = makeGitRepo();
+  writeState(ok, {
+    ...READY,
+    hasCodeChange: false,
+    hasDocChange: false,
+    sessionEditedFiles: ["src/new.ts"],
+  });
+  assert.equal(runPreCommit(ok).status, 0);
+
+  for (const bad of ["str", 42, [1], ["ok", null]]) {
+    const dir = makeGitRepo();
+    writeState(dir, { ...READY, hasCodeChange: false, hasDocChange: false, sessionEditedFiles: bad });
+    const res = runPreCommit(dir);
+    assert.equal(res.status, 1, JSON.stringify(bad));
+    assert.match(res.stderr, /shape\/verdict invalid/);
+  }
+});
+
+test("SECURITY: malformed scopeLimit shapes fail closed (tampered sidecar)", () => {
+  for (const bad of [
+    "str",
+    42,
+    { preexistingFiles: "x", sessionFiles: [], at: "t" },
+    { preexistingFiles: [1], sessionFiles: [], at: "t" },
+    { preexistingFiles: [], sessionFiles: [null], at: "t" },
+    { preexistingFiles: [], sessionFiles: [] },
+    { sessionFiles: [], at: "t" },
+  ]) {
+    const dir = makeGitRepo();
+    writeState(dir, { ...READY, hasCodeChange: false, hasDocChange: false, scopeLimit: bad });
+    const res = runPreCommit(dir);
+    assert.equal(res.status, 1, JSON.stringify(bad));
+    assert.match(res.stderr, /shape\/verdict invalid/);
+  }
+});
+
 test("explore does not bypass unknown or malformed sidecar schemas", () => {
   const unknown = makeDir();
   writeState(unknown, { ...READY, schema: 999, taskMode: "explore" });
