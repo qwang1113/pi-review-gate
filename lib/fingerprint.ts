@@ -35,8 +35,8 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdtempSync, rmSync, statSync, utimesSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdtempSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 
 /**
@@ -61,6 +61,77 @@ export const GATE_EXCLUDE_PATHSPECS: readonly string[] = Object.freeze([
   ":/.pi",
   ":/.pi-subagents",
 ]);
+
+/**
+ * The same gate-owned dirs as plain repo-root-relative names, for call sites
+ * that classify a single path instead of handing pathspecs to git. Derived
+ * from GATE_EXCLUDE_PATHSPECS so the two can never drift apart.
+ */
+export const GATE_EXCLUDE_DIRS: readonly string[] = Object.freeze(
+  GATE_EXCLUDE_PATHSPECS.map((spec) => spec.replace(/^:\//, "")),
+);
+
+/**
+ * True when `absPath` lives under a gate-owned dir at the root of `repoRoot`.
+ *
+ * Anything this returns true for is INVISIBLE to a review: it is excluded from
+ * the fingerprint and from changedFiles(). Edit-tracking call sites must skip
+ * such paths — arming the gate on a file no reviewer can see is the very
+ * self-deadlock the exclusion exists to prevent.
+ */
+export function isGateOwnedPath(absPath: string, repoRoot: string): boolean {
+  // Cheap pre-filter: no gate dir name anywhere in the path ⇒ certainly not
+  // gate-owned, so hot edit paths skip the realpath syscalls entirely.
+  if (!mayBeGateOwned(absPath)) return false;
+  const rel = relative(realDir(repoRoot), realFile(absPath));
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return false;
+  return GATE_EXCLUDE_DIRS.includes(rel.split(sep)[0]);
+}
+
+/**
+ * Cheap "could this be gate-owned?" test on the raw path — no filesystem
+ * access. Deliberately over-inclusive (it also matches `sub/.pi/x`, which
+ * isGateOwnedPath then rejects): callers use it to avoid paying for the exact
+ * check on every ordinary edit.
+ */
+export function mayBeGateOwned(absPath: string): boolean {
+  return absPath.split(/[\\/]/).some((seg) => GATE_EXCLUDE_DIRS.includes(seg));
+}
+
+/**
+ * Both sides of the comparison must live in the same namespace: repo roots come
+ * from `git rev-parse --show-toplevel` (physical, symlinks resolved) while edit
+ * paths are built from the session cwd (possibly logical). Comparing the two
+ * raw would make a symlinked worktree miss the exclusion — the gate would arm
+ * on a file no review can see. Best-effort: unresolvable paths stay as-is.
+ */
+function realDir(dir: string): string {
+  try {
+    return realpathSync.native(dir);
+  } catch {
+    // Not there yet — the first write into a gate-owned dir happens before
+    // that dir exists, and tool_call fires before the file does. Resolve the
+    // nearest existing ancestor and re-attach the missing segments, so a
+    // symlinked worktree is normalized even for paths that do not exist.
+    const parent = dirname(dir);
+    return parent === dir ? dir : join(realDir(parent), basename(dir));
+  }
+}
+
+/**
+ * Same, for a file. Resolve the file ITSELF when it exists — a symlink sitting
+ * inside a gate dir must be judged by where it really lives, or `.pi/x.ts →
+ * ../lib/x.ts` would silently skip edit tracking for a project file. Falls back
+ * to resolving the directory when the file is not there yet (tool_call fires
+ * before the write lands).
+ */
+function realFile(file: string): string {
+  try {
+    return realpathSync.native(file);
+  } catch {
+    return join(realDir(dirname(file)), basename(file));
+  }
+}
 
 /**
  * Whole-repo pathspec. The session cwd may be a subdirectory, and a plain

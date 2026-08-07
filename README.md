@@ -508,6 +508,46 @@ bash output at all: the `run_precommit` tool spawns the trusted runner itself
 and records the result from a verified nonce receipt, so a `## Overall: ✅ PASS`
 sentinel printed by any other command can never grant a PASS.
 
+### Loop goal — the exit contract (prompt-level, loop mode only)
+
+The gates prove the change is *sound*; they say nothing about whether the
+user's *goal* was met. In `loop` mode the extension therefore injects a **Step
+0** directive: before editing, write the session's exit contract to
+`.pi/loop-goal.md` — task title, one-line intent, 3–7 **checkable** exit
+criteria, non-goals, ISO date, sized to the change (a one-line bugfix deserves
+one criterion and three lines).
+
+- **How it is produced.** If the user has the engineering skills installed
+  (`/to-spec`, `/grilling`, `/to-tickets`, `/wayfinder`), the agent proposes
+  the fitting one and the **user** runs it — those skills are
+  `disable-model-invocation: true` and may assume a configured issue tracker,
+  so they are optional accelerators, never a dependency. The always-available
+  fallback is three inline questions: which observable facts prove this is
+  done, how each is verified, what is out of scope.
+- **Who uses it.** The main agent slices the work against the goal (write
+  subagents serially in the same worktree — their edits move the worktree
+  fingerprint, so a review recorded earlier can no longer ship them; read-only
+  subagents may run in parallel), `adviser` advises against it, and `reviewer`
+  accepts against it criterion by criterion. Both agents also read
+  `.pi/loop-goal.md` by default. The main agent stays the writer of record: it
+  runs precommit, the review, and the fixes.
+- **It is not a new hard gate.** Nothing blocks on the file existing: a
+  self-written text file is not forgery-resistant, and every hard gate here
+  rests on an objective fact (a nonce receipt, a git fingerprint). The goal
+  binds through the reviewer instead — an unmet criterion is a P1 finding, and
+  any P0/P1 ⇒ `BLOCKED`. A missing goal is explicitly *not* a reason to block.
+- **It cannot deadlock the gate.** `.pi/loop-goal.md` lives inside the
+  gate-owned `.pi/` scope, which is both excluded from the fingerprint and
+  skipped by the extension's edit tracking, so writing or rewriting the goal
+  changes no digest, arms no doc gate, and never invalidates a READY review or
+  a precommit PASS. Reading it is best-effort (IO errors degrade to "no goal"),
+  and the injected text is capped at 1500 characters and framed as untrusted
+  repo data that cannot relax the gate rules. A goal older than 24h is flagged
+  as possibly stale so a leftover contract from a previous session is confirmed
+  or rewritten rather than silently trusted.
+
+`explore` and `normal` sessions never see this directive.
+
 ### Multi-repo sessions (the gate follows the checkout, not the cwd)
 
 The gate binds its verdicts to a *worktree fingerprint of a specific git
@@ -527,14 +567,45 @@ gated **per repo**:
   repo. Constructs that cannot be resolved statically (`cd $VAR`, quoted paths
   with spaces, `pushd`, nested `sh -c`) widen the check to every repo the
   session has edited (fail-closed).
-- **Active repo**: `record_review` / `run_precommit` target the repo the model
-  most recently edited — run them once per repo, in that repo's context.
+- **Explicit target repo**: `record_review` / `run_precommit` take a `repo`
+  argument, and it is **mandatory once the session has edited more than one
+  repo** — they refuse to guess. Run the loop once per repo, naming it.
+  Historically they wrote to whichever repo was edited LAST, and only an edit
+  could move that target: a session whose last edit was in repo B could never
+  record a verdict for repo A again, so A's commit stayed blocked through
+  unlimited review rounds while every round reported success. That failure is
+  indistinguishable from the gate corrupting itself, so the ambiguity is now
+  rejected (fail-closed) instead of resolved by guessing. Tool results name
+  the repo they wrote to, and a block message says where the last READY
+  actually landed.
+- **Every block line is labelled** once several repos are in play (including
+  the session repo, which used to print unprefixed), and `/gate-status` lists
+  every repo the session touched with its own verdicts — a repo with no usable
+  state is shown as such rather than omitted.
 - **declare_done** requires *every* repo this session edited to pass its own
   review + precommit. The repo set survives a same-session resume
   (`sessionReposPaths` in the primary sidecar).
 - **Sidecars from other sessions are not trusted**: a stale READY left by a
   previous session is discarded on first edit; pre-existing uncommitted work
   in a never-edited repo still blocks shipping from it (fail-closed).
+- **Two live sessions in one worktree**: the sidecar names a single session and
+  each write replaces the file, so session B's write used to erase the READY +
+  PASS session A had just earned — and since the L3 hooks read only that file,
+  A's commit was then rejected for a review it had passed. A foreign verdict is
+  now carried over on write, but **only after its fingerprint is checked
+  against the worktree as it stands** (a content digest carries no session
+  identity, so it still proves exactly what it always proved: this tree was
+  reviewed). Anything staler is dropped, and our own BLOCKED/FAIL is never
+  upgraded by someone else's READY/PASS. The carry-over is short-lived by
+  design: once the carrying session writes again the verdict is
+  indistinguishable from a stale one of its own and is dropped, so a
+  deliberately invalidated binding does not climb back out of the file (it can
+  outlive that write only where it is still recognizably foreign, or where a
+  session was restored from that sidecar — in both cases still bound to the
+  fingerprint of a reviewed tree). Sharing a worktree therefore remains
+  unreliable by design — the two sessions keep re-arming each other's gate —
+  so the gate warns at session start when it sees another recent session; use
+  `git worktree add` for parallel work.
 - **L3 git hooks are not auto-installed into other repos**: they cover the
   repo(s) where `scripts/install-git-hooks.sh` (or the global installer) ran.
   For a repo you know the model will work in, install the hooks there too for

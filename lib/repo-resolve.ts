@@ -268,3 +268,101 @@ export function resolveShipRepos(command: string, cwd: string): ShipRepoResoluti
   if (repos.length === 0) repos.push(cwd);
   return { repos, ambiguous };
 }
+
+/**
+ * Target repo for `record_review` / `run_precommit` (P-multi deadlock fix).
+ *
+ * ROOT CAUSE this exists for: those two tools used to write to
+ * `activeRepoRoot`, which ONLY an edit-tool call could move. A session that
+ * edited repo B last could never again record a verdict for repo A — every
+ * `record_review` landed on B while the ship gate checked A, so the agent
+ * looped review→precommit→commit forever and (per the real session log)
+ * misdiagnosed it as "another Pi process reset my sidecar".
+ *
+ * The fix is an EXPLICIT `repo` argument, resolved here. Two deliberate
+ * decisions:
+ *
+ *  - The gate never silently retargets itself. Auto-pointing the active repo
+ *    at whatever was just blocked would let a reviewer output about B be
+ *    recorded as A's READY (bound to A's own fingerprint — perfectly valid to
+ *    every later check), turning today's fail-CLOSED deadlock into a
+ *    fail-OPEN. An explicit argument is visible in the transcript and echoed
+ *    back in the tool result.
+ *  - With more than one repo in play, omitting `repo` is an ERROR rather than
+ *    a silent default: "which repo did that review cover?" has no safe guess.
+ *    Single-repo sessions (the common case) are unaffected.
+ *
+ * The requested path is normalized through `resolveRoot` (git's own
+ * `--show-toplevel`, i.e. the SAME normalization `sessionRepos` /
+ * `repoStateCache` keys use) before membership is checked, so a symlinked or
+ * subdirectory path can never create a second GateState for one repo.
+ */
+export interface ToolRepoTargetInput {
+  /** Raw `repo` argument as passed by the agent (absolute or cwd-relative). */
+  requested?: string;
+  /** Every repo root this session has edited (already normalized). */
+  sessionRepos: string[];
+  /** Repo the agent most recently edited — the default for single-repo sessions. */
+  activeRepo: string;
+  /** Session repo, labelled in the error message so the agent can tell them apart. */
+  primaryRepo: string;
+  /** Absolute-path resolver (path.resolve against the session cwd). */
+  resolveAbsolute: (p: string) => string;
+  /** Repo-root resolver (gitRootOfDir); null when the path is not in a repo. */
+  resolveRoot: (dir: string) => string | null;
+}
+
+export type ToolRepoTarget =
+  | { ok: true; root: string }
+  | { ok: false; error: string };
+
+export function resolveToolRepoTarget(input: ToolRepoTargetInput): ToolRepoTarget {
+  const { requested, sessionRepos, activeRepo, primaryRepo, resolveAbsolute, resolveRoot } = input;
+  const known = sessionRepos.length > 0 ? sessionRepos : [activeRepo];
+  const candidates = () =>
+    known
+      .map((r) => `  - ${r}${r === primaryRepo ? " (session repo)" : ""}${r === activeRepo ? " (last edited)" : ""}`)
+      .join("\n");
+
+  const raw = requested?.trim();
+  if (!raw) {
+    if (known.length > 1) {
+      return {
+        ok: false,
+        error:
+          "review-gate: this session has edited more than one repository, so the target repo must be " +
+          'explicit. Re-call with `"repo": "<absolute repo path>"` — the verdict binds to that repo\'s ' +
+          "own worktree fingerprint, and recording it against the wrong repo is what makes a commit " +
+          `look permanently blocked. Repos this session edited:\n${candidates()}`,
+      };
+    }
+    return { ok: true, root: activeRepo };
+  }
+
+  const abs = resolveAbsolute(raw);
+  // A tracked root that git does not recognize is still a legitimate target:
+  // when the session cwd is not inside a repository, the primary root IS that
+  // plain directory (gitRootOfDir falls back to cwd). Requiring resolveRoot to
+  // succeed would make that repo's verdict unrecordable the moment a second
+  // repo is edited — ambiguous without `repo`, rejected with it.
+  if (known.includes(abs)) return { ok: true, root: abs };
+  const root = resolveRoot(abs);
+  if (!root) {
+    return {
+      ok: false,
+      error:
+        `review-gate: repo "${raw}" is not inside a readable git repository (resolved to ${abs}). ` +
+        `Pass the path of a repo this session edited:\n${candidates()}`,
+    };
+  }
+  if (!known.includes(root)) {
+    return {
+      ok: false,
+      error:
+        `review-gate: repo "${raw}" (root ${root}) is not one of the repositories this session has edited, ` +
+        "so the gate tracks no state for it. Edit a file there through the edit tool first (that arms its " +
+        `gate), or target one of:\n${candidates()}`,
+    };
+  }
+  return { ok: true, root };
+}

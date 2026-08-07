@@ -58,11 +58,19 @@ test("language gate is injected in before_agent_start", () => {
  */
 const EARLY_RETURN_RE = /if\s*\([^)]*problems\.length\s*===\s*0\s*\)\s*\{\s*return\s*\{\s*systemPrompt\s*\}/;
 
+/**
+ * How much of the handler to slice for the ordering assertions. Generous on
+ * purpose: every prompt branch added ahead of the early return (explore
+ * workflow, loop goal, …) pushes it further down, and a window that only just
+ * fits turns an unrelated addition into a false failure.
+ */
+const HANDLER_WINDOW = 6000;
+
 test("language gate is UNCONDITIONAL — injected before the no-changes early return", () => {
   // Locate the handler body.
   const start = EXT.indexOf('pi.on("before_agent_start"');
   assert.ok(start >= 0, "handler must exist");
-  const body = EXT.slice(start, start + 4000);
+  const body = EXT.slice(start, start + HANDLER_WINDOW);
   const injectAt = body.indexOf("LANGUAGE_DIRECTIVE");
   // Match the no-changes early return by its SHAPE ("no problems → return the
   // bare systemPrompt") rather than by the exact predicate text, so the
@@ -77,7 +85,7 @@ test("language gate is UNCONDITIONAL — injected before the no-changes early re
 
 test("the no-changes early return still returns the language systemPrompt (not undefined)", () => {
   const start = EXT.indexOf('pi.on("before_agent_start"');
-  const body = EXT.slice(start, start + 4000);
+  const body = EXT.slice(start, start + HANDLER_WINDOW);
   // The early-return branch must return the built systemPrompt object. The
   // explore workflow adds an earlier branch, so keep enough of the handler.
   assert.match(body, EARLY_RETURN_RE);

@@ -133,6 +133,16 @@ export const DEFAULT_MAX_ROUNDS = 10;
 export const PLATEAU_ROUNDS = 3;
 
 /**
+ * How recently another session must have written the sidecar for us to call it
+ * a CONCURRENT session at session_start.
+ *
+ * Purely a notification threshold (it gates no verdict), so it is tuned for
+ * usefulness: long enough to cover a session idling between turns, short
+ * enough that yesterday's finished session does not cry wolf.
+ */
+export const CONCURRENT_SESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
+
+/**
  * Oscillation cap. Session-log analysis of real projects showed ~50% of gated
  * sessions where the reviewer returned READY and then, a round or two later,
  * BLOCKED again with an entirely NEW set of findings (finding fingerprints

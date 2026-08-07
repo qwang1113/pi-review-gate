@@ -1,4 +1,5 @@
 node_modules/
 *.log
 .pi/review-gate-state.json
+.pi/loop-goal.md
 .pi-subagents/

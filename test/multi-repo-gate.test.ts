@@ -63,6 +63,8 @@ function makeRepo(parent: string, name: string): string {
 interface MockPi {
   tools: Map<string, { execute: (id: unknown, p: Record<string, unknown>, sig?: AbortSignal, upd?: unknown, ctx?: unknown) => Promise<unknown> }>;
   handlers: Map<string, (event: unknown, ctx: unknown) => unknown>;
+  commands: Map<string, { handler: (args: unknown, ctx: unknown) => unknown }>;
+  notifications: Array<{ text: string; level?: string }>;
   ctx: Record<string, unknown>;
   setCwd: (c: string) => void;
   entries: Array<{ customType?: string; data?: unknown }>;
@@ -72,7 +74,12 @@ function makeMockPi(cwd: string): MockPi {
   const tools = new Map();
   const handlers = new Map();
   const entries: Array<{ customType?: string; data?: unknown }> = [];
-  const ui = { notify: () => {}, setStatus: () => {} };
+  const commands = new Map();
+  const notifications: Array<{ text: string; level?: string }> = [];
+  const ui = {
+    notify: (text: string, level?: string) => { notifications.push({ text, level }); },
+    setStatus: () => {},
+  };
   const sessionManager = {
     getEntries: () => entries,
     getSessionId: () => "test-session-1",
@@ -84,13 +91,13 @@ function makeMockPi(cwd: string): MockPi {
     appendEntry: (type: string, data: unknown) => entries.push({ customType: type, data }),
     sendMessage: () => {},
     sendUserMessage: () => {},
-    registerCommand: () => {},
+    registerCommand: (name: string, def: unknown) => commands.set(name, def),
   };
   return {
     // Spread the pi API onto the returned object so tests can pass it
     // directly to reviewGate() AND reach the registration maps.
     ...pi,
-    tools, handlers,
+    tools, handlers, commands, notifications,
     entries,
     setCwd: (c: string) => { sessionCwd = c; },
     ctx: {
@@ -153,9 +160,11 @@ test("P-multi: a commit in an edited non-session repo is blocked by THAT repo's 
   const reason = JSON.stringify(blocked);
   assert.match(reason, /repoB/, "block reason must name the offending repo");
 
-  // record_review targets the ACTIVE repo (repoB) — write repoB's sidecar.
+  // record_review targets the repo named in `repo` (repoB) — write repoB's
+  // sidecar. With two repos edited, `repo` is mandatory (see the dedicated
+  // ambiguity test below).
   const recordReview = tools.get("record_review")!.execute;
-  const rr = await recordReview("id", { reviewer_output: READY_REVIEW }, undefined, undefined, ctx);
+  const rr = await recordReview("id", { reviewer_output: READY_REVIEW, repo: repoB }, undefined, undefined, ctx);
   assert.equal((rr as { details: { verdict?: string } }).details.verdict, "READY");
   const sidecarB = JSON.parse(readFileSync(join(repoB, ".pi", "review-gate-state.json"), "utf8"));
   assert.equal(sidecarB.review.verdict, "READY");
@@ -347,7 +356,7 @@ test("P-multi: sidecar from ANOTHER session is not trusted (stale PENDING stays 
   assert.equal(sidecarB.review.verdict, "PENDING");
 });
 
-test("P-multi: editing the PRIMARY repo resets the active repo (no review deadlock)", async () => {
+test("P-multi: an explicit repo target records the verdict on THAT repo (no review deadlock)", async () => {
   const parent = mkdtempSync(join(tmpdir(), "rg-mg7-"));
   rgDirs.push(parent);
   const repoA = makeRepo(parent, "repoA");
@@ -368,10 +377,10 @@ test("P-multi: editing the PRIMARY repo resets the active repo (no review deadlo
   writeFileSync(repoAFile, "export const a = 8;\n");
   await toolResult({ toolName: "edit", isError: false, input: { path: repoAFile }, content: [] }, ctx);
 
-  // record_review must now target the PRIMARY repo (active reset by the
-  // primary edit) — its sidecar gets READY, repoB's sidecar stays PENDING.
+  // record_review targeted at the PRIMARY repo writes the primary sidecar —
+  // repoB's sidecar stays PENDING (a verdict is never shared across repos).
   const recordReview = tools.get("record_review")!.execute;
-  const rr = await recordReview("id", { reviewer_output: READY_REVIEW }, undefined, undefined, ctx);
+  const rr = await recordReview("id", { reviewer_output: READY_REVIEW, repo: repoA }, undefined, undefined, ctx);
   assert.equal((rr as { details: { verdict?: string } }).details.verdict, "READY");
   const sidecarA = JSON.parse(readFileSync(join(repoA, ".pi", "review-gate-state.json"), "utf8"));
   assert.equal(sidecarA.review.verdict, "READY", "review must land on the PRIMARY repo's sidecar");
@@ -412,4 +421,222 @@ test("P-multi: a ship targeting a NON-EXISTENT dir fails closed (mis-parse can't
   }, ctx);
   assert.ok(blocked && (blocked as { block?: boolean }).block === true,
     "ship from an unresolvable/missing dir must fail closed");
+});
+
+// ---------------------------------------------------------------------------
+// The multi-repo review DEADLOCK. Before the explicit `repo` argument,
+// record_review/run_precommit always wrote to the last EDITED repo, and only
+// an edit could move that target. A session that edited repoB last could never
+// again record a verdict for repoA, so repoA's commit stayed blocked through
+// unlimited review rounds — the failure that motivated these tests.
+// ---------------------------------------------------------------------------
+
+test("P-multi: record_review without `repo` is REJECTED once several repos are edited", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "rg-mg9-"));
+  rgDirs.push(parent);
+  const repoA = makeRepo(parent, "repoA");
+  const repoB = makeRepo(parent, "repoB");
+
+  const pi = makeMockPi(repoA);
+  reviewGate(pi as never);
+  const { handlers, tools, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  const toolResult = handlers.get("tool_result")!;
+
+  writeFileSync(join(repoB, "a.ts"), "export const a = 21;\n");
+  await toolResult({ toolName: "edit", isError: false, input: { path: join(repoB, "a.ts") }, content: [] }, ctx);
+
+  const recordReview = tools.get("record_review")!.execute;
+  const ambiguous = await recordReview("id", { reviewer_output: READY_REVIEW }, undefined, undefined, ctx) as
+    { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(ambiguous.isError, true, "an ambiguous target must fail closed, not guess");
+  assert.match(ambiguous.content[0].text, /more than one repository/);
+  assert.match(ambiguous.content[0].text, /repoA/);
+  assert.match(ambiguous.content[0].text, /repoB/);
+
+  // Nothing was recorded anywhere.
+  for (const root of [repoA, repoB]) {
+    const sidecar = JSON.parse(readFileSync(join(root, ".pi", "review-gate-state.json"), "utf8"));
+    assert.equal(sidecar.review.verdict, "PENDING", `${root} must stay unreviewed`);
+  }
+
+  // A repo this session never edited is not a valid target either.
+  const outside = await recordReview(
+    "id", { reviewer_output: READY_REVIEW, repo: join(parent, "nope") }, undefined, undefined, ctx,
+  ) as { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(outside.isError, true);
+});
+
+test("P-multi: `repo` breaks the deadlock — verdict lands on a repo that is NOT the last edited", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "rg-mg10-"));
+  rgDirs.push(parent);
+  const repoA = makeRepo(parent, "repoA");
+  const repoB = makeRepo(parent, "repoB");
+
+  const pi = makeMockPi(repoA);
+  reviewGate(pi as never);
+  const { handlers, tools, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  const toolResult = handlers.get("tool_result")!;
+  const toolCall = handlers.get("tool_call")!;
+
+  // Edit the PRIMARY repo, then repoB last: the old code pinned every later
+  // verdict to repoB with no way back to repoA.
+  writeFileSync(join(repoA, "a.ts"), "export const a = 31;\n");
+  await toolResult({ toolName: "edit", isError: false, input: { path: join(repoA, "a.ts") }, content: [] }, ctx);
+  writeFileSync(join(repoB, "a.ts"), "export const a = 32;\n");
+  await toolResult({ toolName: "edit", isError: false, input: { path: join(repoB, "a.ts") }, content: [] }, ctx);
+
+  const recordReview = tools.get("record_review")!.execute;
+  const rr = await recordReview("id", { reviewer_output: READY_REVIEW, repo: repoA }, undefined, undefined, ctx) as
+    { details: { verdict?: string }; content: Array<{ text: string }> };
+  assert.equal(rr.details.verdict, "READY");
+  // The result NAMES the repo: a session that could not see where its verdicts
+  // landed kept recording READY for the wrong repo and read the resulting
+  // block as sabotage.
+  assert.match(rr.content[0].text, new RegExp(repoA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const sidecarA = JSON.parse(readFileSync(join(repoA, ".pi", "review-gate-state.json"), "utf8"));
+  assert.equal(sidecarA.review.verdict, "READY", "verdict must land on the requested repo");
+  const sidecarB = JSON.parse(readFileSync(join(repoB, ".pi", "review-gate-state.json"), "utf8"));
+  assert.equal(sidecarB.review.verdict, "PENDING", "the last-edited repo must be untouched");
+
+  // repoB is still unreviewed, so its commit is blocked — and the message now
+  // says both WHICH repo is blocked and where the READY actually is.
+  const blocked = await toolCall({
+    toolName: "bash",
+    input: { command: `cd ${repoB} && git commit -am x` },
+  }, ctx) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked.reason!, /\[repoB\]/, "problems must be labelled per repo");
+  assert.match(blocked.reason!, /a READY review is recorded on/, "must point at the repo holding the READY");
+  assert.match(blocked.reason!, new RegExp(repoA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  // A block in the PRIMARY repo is labelled too, now that several repos are in
+  // play: an unlabelled "review is PENDING" was read as being about repoB.
+  const blockedPrimary = await toolCall({
+    toolName: "bash",
+    input: { command: `cd ${repoA} && git push` },
+  }, ctx) as { block?: boolean; reason?: string };
+  assert.equal(blockedPrimary?.block, true);
+  assert.match(blockedPrimary.reason!, /\[repoA\]/, "the session repo must be labelled in a multi-repo session");
+});
+
+test("P-multi: run_precommit obeys the same explicit-repo rule as record_review", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "rg-mg11-"));
+  rgDirs.push(parent);
+  const repoA = makeRepo(parent, "repoA");
+  const repoB = makeRepo(parent, "repoB");
+
+  const pi = makeMockPi(repoA);
+  reviewGate(pi as never);
+  const { handlers, tools, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  const toolResult = handlers.get("tool_result")!;
+
+  writeFileSync(join(repoB, "a.ts"), "export const a = 41;\n");
+  await toolResult({ toolName: "edit", isError: false, input: { path: join(repoB, "a.ts") }, content: [] }, ctx);
+
+  const runPrecommit = tools.get("run_precommit")!.execute;
+  const ambiguous = await runPrecommit("id", {}, undefined, undefined, ctx) as
+    { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(ambiguous.isError, true, "a PASS recorded against the wrong repo blocks the intended one");
+  assert.match(ambiguous.content[0].text, /more than one repository/);
+
+  const outside = await runPrecommit("id", { repo: join(parent, "nope") }, undefined, undefined, ctx) as
+    { isError?: boolean };
+  assert.equal(outside.isError, true, "an unedited repo is not a valid precommit target");
+});
+
+test("P-multi: repos sharing a basename are labelled by full path, not `[api]` twice", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "rg-mg12-"));
+  rgDirs.push(parent);
+  // Two checkouts called `api` under different parents — a basename label
+  // would name both identically and recreate the ambiguity this whole change
+  // exists to remove.
+  mkdirSync(join(parent, "one"), { recursive: true });
+  mkdirSync(join(parent, "two"), { recursive: true });
+  const apiA = makeRepo(join(parent, "one"), "api");
+  const apiB = makeRepo(join(parent, "two"), "api");
+
+  const pi = makeMockPi(apiA);
+  reviewGate(pi as never);
+  const { handlers, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  const toolResult = handlers.get("tool_result")!;
+  const toolCall = handlers.get("tool_call")!;
+
+  writeFileSync(join(apiB, "a.ts"), "export const a = 51;\n");
+  await toolResult({ toolName: "edit", isError: false, input: { path: join(apiB, "a.ts") }, content: [] }, ctx);
+
+  const blocked = await toolCall({
+    toolName: "bash",
+    input: { command: `cd ${apiB} && git commit -am x` },
+  }, ctx) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked.reason!, new RegExp(`\\[${apiB.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]`),
+    "a colliding basename must fall back to the full path");
+  assert.ok(!blocked.reason!.includes("[api]"), "an ambiguous [api] label must not be used");
+});
+
+test("P-multi: /gate-status reports each repo, and a clean stateless repo blocks nothing", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "rg-mg13-"));
+  rgDirs.push(parent);
+  const repoA = makeRepo(parent, "repoA");
+  const repoB = makeRepo(parent, "repoB");
+
+  // A resumed session knows it edited repoB (sessionReposPaths), but repoB's
+  // own sidecar belongs to someone else — so this process has NO usable state
+  // for it. Reporting that repo as green would be a lie; reporting it as
+  // blocking would be a false alarm while it is clean. /gate-status must say
+  // which, mirroring the ship gate's own dirty/clean/unverifiable rule.
+  mkdirSync(join(repoA, ".pi"), { recursive: true });
+  writeFileSync(join(repoA, ".pi", "review-gate-state.json"), JSON.stringify({
+    schema: 1,
+    fingerprintVersion: 2,
+    sessionId: "test-session-1",
+    hasCodeChange: false,
+    hasDocChange: false,
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+    rounds: [],
+    maxRounds: 10,
+    bypass: { active: false, reason: null, at: null },
+    updatedAt: new Date().toISOString(),
+    sessionReposPaths: [repoB],
+  }, null, 2));
+  mkdirSync(join(repoB, ".pi"), { recursive: true });
+  writeFileSync(join(repoB, ".pi", "review-gate-state.json"), JSON.stringify({
+    schema: 1,
+    fingerprintVersion: 2,
+    sessionId: "a-different-session",
+    hasCodeChange: true,
+    hasDocChange: false,
+    review: { verdict: "PENDING", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+    rounds: [],
+    maxRounds: 10,
+    bypass: { active: false, reason: null, at: null },
+    updatedAt: new Date().toISOString(),
+  }, null, 2));
+
+  const pi = makeMockPi(repoA);
+  reviewGate(pi as never);
+  const { handlers, commands, notifications, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+
+  const gateStatus = commands.get("gate-status")!;
+  await gateStatus.handler({}, ctx);
+  const clean = notifications.at(-1)!;
+  assert.match(clean.text, new RegExp(`${repoB.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: no usable gate state`),
+    "a repo with no usable state must be listed, not silently skipped");
+  assert.match(clean.text, /clean, so it blocks nothing/);
+  assert.equal(clean.level, "info", "a clean repo must not raise the whole status to a warning");
+
+  // Same repo, now dirty: the very thing the ship gate refuses to let through.
+  writeFileSync(join(repoB, "a.ts"), "export const a = 61;\n");
+  await gateStatus.handler({}, ctx);
+  const dirty = notifications.at(-1)!;
+  assert.match(dirty.text, /uncommitted change\(s\), so ships from it are blocked/);
+  assert.equal(dirty.level, "warning");
 });

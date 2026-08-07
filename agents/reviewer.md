@@ -7,7 +7,7 @@ thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
-defaultReads: plan.md, progress.md
+defaultReads: plan.md, progress.md, .pi/loop-goal.md
 tools: read, grep, find, ls, bash, edit, write, intercom
 ---
 
@@ -107,6 +107,29 @@ Structure your findings clearly, citing file paths and line numbers:
 - Blocker: critical issue that must be resolved before proceeding
 - Note: observation, risk, or follow-up item
 ```
+
+## Loop goal acceptance (pi-review-gate loop mode)
+
+A loop-mode session works to an **exit contract**: `.pi/loop-goal.md` (task
+title, one-line intent, checkable exit criteria, non-goals). It may also be
+quoted in your task. When a goal is available, accept the change **against it**:
+
+- Walk the exit criteria **one by one** and record `MET` / `NOT_MET` in the
+  prose review, each with concrete evidence (file, line, test name, command
+  output). Never assert a criterion is met because the author says so.
+- An unmet criterion is a **P1 finding**; name it in the `issue` field
+  (`"exit criterion 2 not met: ..."`). Any P0/P1 ⇒ `BLOCKED`, which is how the
+  goal becomes binding — there is no separate goal gate.
+- A criterion that cannot be judged objectively ("code quality is good") is a
+  **P2 finding**: say so and propose a checkable rewrite. Do NOT block on your
+  own subjective reading of a vague criterion.
+- Work that is clearly outside the goal and not required by it is scope creep:
+  a **P2 finding** (or P1 when it carries real risk).
+- **A missing goal file is NOT a blocker.** If no goal is available, review the
+  diff against the task intent as usual and note the absence in prose.
+- If the goal looks **stale or mismatched** (it describes a different task than
+  the diff), do not accept against it blindly: report the mismatch as a Note
+  (P2 if it made the work go astray) and review against the actual task intent.
 
 ## Gate verdict (REQUIRED for pi-review-gate)
 When your review feeds the pi-review-gate `record_review` tool, you MUST include

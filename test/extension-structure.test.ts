@@ -7,6 +7,79 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
 
+test("loop goal: injected ONLY in loop mode, before the unarmed early-return", () => {
+  // The Step 0 directive has to reach the agent while the worktree is still
+  // clean (that is the whole point — set the exit contract BEFORE editing), so
+  // it must sit after the explore early-return and before the
+  // `!gateArmed && problems.length === 0` early-return.
+  assert.match(SRC, /from "\.\/lib\/loop-goal\.ts"/);
+  // Anchor on the REGISTRATION, not the bare word: "before_agent_start" also
+  // appears in the file header comment, which would put the explore anchor
+  // above the whole handler and make the ordering assertion vacuous.
+  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  assert.ok(handlerAt > 0, "handler registration must exist");
+  const injectAt = SRC.indexOf("buildLoopGoalDirective(readLoopGoal(", handlerAt);
+  assert.ok(injectAt > 0, "loop-goal directive must be injected in before_agent_start");
+  const exploreReturnAt = SRC.indexOf('state.taskMode === "explore"', handlerAt);
+  const unarmedReturnAt = SRC.indexOf("if (!gateArmed && problems.length === 0)", handlerAt);
+  assert.ok(exploreReturnAt > 0 && unarmedReturnAt > 0, "both early-returns must exist");
+  assert.ok(exploreReturnAt < injectAt, "explore must return before the loop-goal injection");
+  assert.ok(injectAt < unarmedReturnAt, "loop goal must be injected before the unarmed early-return");
+  // Guarded on loop mode only (explore/normal never see it).
+  const guard = SRC.slice(injectAt - 200, injectAt);
+  assert.match(guard, /state\.taskMode === "loop"/);
+});
+
+test("loop goal: set_gate_mode(loop) delivers Step 0 in the same turn it decides", () => {
+  // before_agent_start only injects on the NEXT turn, and the mode is decided
+  // as the session's first action — without this the agent could edit for a
+  // whole turn before ever seeing the exit contract.
+  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  const toolInjectAt = SRC.indexOf("buildLoopGoalDirective(readLoopGoal(");
+  assert.ok(toolInjectAt > 0 && toolInjectAt < handlerAt, "set_gate_mode must inject the goal too");
+  assert.match(SRC.slice(toolInjectAt - 200, toolInjectAt), /effective === "loop"/);
+});
+
+test("loop goal stays PROMPT-LEVEL: no gate, hook or verdict logic reads it", () => {
+  // A self-written text file must never become a ship precondition — the hard
+  // gates rest on objective facts (nonce receipt, git fingerprint).
+  const gateSources = [
+    join(ROOT, "lib", "gate-state.ts"),
+    join(ROOT, "lib", "verdict-parse.ts"),
+    join(ROOT, "lib", "fingerprint.ts"),
+    join(ROOT, "hooks", "pre-commit"),
+  ];
+  for (const file of gateSources) {
+    assert.doesNotMatch(readFileSync(file, "utf8"), /loop-goal|loopGoal/, file + " must not depend on the loop goal");
+  }
+  // …and the goal file must remain inside the fingerprint-excluded .pi/ scope,
+  // otherwise writing a goal would invalidate the session's own review.
+  const fp = readFileSync(join(ROOT, "lib", "fingerprint.ts"), "utf8");
+  assert.match(fp, /GATE_EXCLUDE_PATHSPECS[\s\S]{0,200}":\/\.pi"/);
+});
+
+test("edits under gate-owned dirs do NOT arm the gate (writing a loop goal must not demote READY)", () => {
+  // The fingerprint already excludes .pi/; edit tracking must skip the same
+  // scope, or writing .pi/loop-goal.md sets hasDocChange and demotes
+  // READY→PENDING over a file no reviewer can even see.
+  const toolResultAt = SRC.indexOf('pi.on("tool_result"');
+  assert.ok(toolResultAt > 0, "tool_result handler must exist");
+  const skipAt = SRC.indexOf("isGateOwnedPath(absEditPath", toolResultAt);
+  assert.ok(skipAt > 0, "edit tracking must skip gate-owned paths");
+  const armAt = SRC.indexOf("hasDocChange = true", toolResultAt);
+  assert.ok(armAt > 0 && skipAt < armAt, "the skip must precede every arming write in the edit path");
+  assert.match(SRC.slice(skipAt, skipAt + 120), /\breturn\b/, "the skip must return, not fall through");
+
+  // Same scope on the tool_call side: a gate-owned write must not count as
+  // this session's edit either, or it would suppress the "changes pre-date
+  // this session" hint and force consent for a later mode change.
+  const toolCallAt = SRC.indexOf('pi.on("tool_call"');
+  const callSkipAt = SRC.indexOf("isGateOwnedPath(abs", toolCallAt);
+  const sessionEditAt = SRC.indexOf("sessionEdited = true", toolCallAt);
+  assert.ok(toolCallAt > 0 && callSkipAt > 0 && sessionEditAt > 0, "tool_call must apply the same skip");
+  assert.ok(callSkipAt < sessionEditAt, "the skip must precede the session-edit attribution");
+});
+
 test("extension imports from local lib/ (single source of truth)", () => {
   assert.ok(SRC.includes('./lib/constants.ts'), "should import from ./lib/constants.ts");
   assert.match(SRC, /\bisCodeFile\b/);
@@ -594,6 +667,16 @@ test("R6/R9/R10: project config, git memory, strategic reset wired in", () => {
 test("auto-loop prohibited behaviors are in the per-turn reminder (sd0x-dev-flow port)", () => {
   assert.match(SRC, /Prohibited while gates are unmet/);
   assert.match(SRC, /completion-style summary/);
+});
+
+test("the multi-repo reminder teaches the CURRENT record_review/run_precommit contract", () => {
+  // This exact string once told the agent that those tools "target the repo you
+  // most recently edited". They no longer do (an explicit `repo` is required
+  // once several repos are edited), and a per-turn prompt outranks every doc:
+  // a session that believed the old wording recorded round after round of
+  // READY against the wrong repo and read the resulting block as sabotage.
+  assert.match(SRC, /REQUIRE an explicit `repo`/);
+  assert.doesNotMatch(SRC, /target the repo you most recently edited/);
 });
 
 test("gate-lesson command registered (self-improvement loop port)", () => {

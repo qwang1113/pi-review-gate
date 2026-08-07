@@ -35,14 +35,71 @@ It is a **reference for choosing the pinned models**, not a runtime selector —
 the models above are fixed in the agent definitions. Refresh the underlying
 scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
 
+## The loop goal — the exit contract
+
+The gates say the code is *sound*; they say nothing about whether the user's
+goal was *met*. The loop goal closes that hole: one short file, written before
+the work starts, listing the checkable facts that mean **done**. The same file
+then drives all three roles — you slice work against it, `adviser` advises
+against it, `reviewer` accepts against it.
+
+**Where**: `.pi/loop-goal.md`. That path sits inside the gate-owned `.pi/`
+scope (`GATE_EXCLUDE_PATHSPECS` / `isGateOwnedPath`, `lib/fingerprint.ts`),
+which both halves of the gate honour: it is excluded from the fingerprint and
+skipped by edit tracking. Writing or rewriting the goal therefore never changes
+the worktree digest, never arms the doc gate, and can never invalidate a READY
+review or a precommit PASS.
+
+**How to produce it** — sized to the change; a one-line bugfix deserves one
+criterion and three lines:
+
+- *Preferred, when the user has the engineering skills installed*: `/to-spec`
+  (synthesize the conversation into a spec), `/grilling` or `/grill-me`
+  (sharpen it until no question remains), `/to-tickets` (slice it into
+  tracer-bullet vertical slices), `/wayfinder` (an effort too big for one
+  session). These are `disable-model-invocation: true` and may assume a
+  configured issue tracker — they are **user-invoked accelerators**: propose
+  the one that fits and let the user run it, never claim to have run one.
+- *Fallback, always available*: answer three questions inline — (1) which
+  observable facts prove this task is done, (2) how each one is verified (a
+  command or a concrete observation), (3) what is explicitly out of scope.
+
+**Shape**: task title · one-line intent · 3–7 checkable exit criteria ·
+non-goals · ISO date. A criterion must be judgeable by a command or a concrete
+observation — "code quality is good" is not a criterion, "`node --test` passes
+and `lib/x.ts` no longer reads the sidecar" is.
+
+**Staleness**: a goal file older than 24h may be left over from a previous
+session. The gate flags it in the prompt; confirm it against what the user is
+asking for now, and rewrite it if it no longer matches.
+
+**Slicing the work to subagents**: turn each criterion (or vertical slice) into
+a subagent task and hand the goal file to every subagent you spawn.
+Write-capable subagents run **serially in this worktree**: their edits change
+the worktree like any other, so a review recorded before them can no longer
+ship (the fingerprint moved), and concurrent writers would keep invalidating
+the binding between precommit and review. Read-only subagents (recon, analysis,
+`adviser`) may run in parallel. You stay the single writer of record: you run
+precommit, you run the review, you fix findings — never delegate the gate
+itself.
+
+**No new hard gate.** Nothing blocks on the goal file's existence — a
+self-written file is not forgery-resistant, and every hard gate here rests on
+an objective fact. The goal binds through the reviewer: an unmet criterion is a
+P1 finding, and any P0/P1 ⇒ BLOCKED.
+
 ## Protocol
 
-0. **Consult (recommended, not gated)** — before or during non-trivial work,
+0. **Goal first (loop mode)** — establish `.pi/loop-goal.md` as described above
+   before you start editing, then work to it. Hand the goal to every subagent,
+   to `adviser`, and to `reviewer`.
+
+1. **Consult (recommended, not gated)** — before or during non-trivial work,
    ask the `adviser` subagent about the design, tradeoffs, and risks. Feed it
    the real question, not your preferred answer. Fold its input in before you
    commit to an approach. Skip only for trivial, low-risk changes.
 
-1. **Precommit FIRST** — with the edits finished, call **`run_precommit`**
+2. **Precommit FIRST** — with the edits finished, call **`run_precommit`**
    *before* spawning the reviewer. Two concrete reasons, both measured:
 
    - The runner runs `lint`/`lint:fix` in **both** modes
@@ -63,7 +120,7 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
    it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
-2. **Review** — spawn an independent reviewer over the current diff
+3. **Review** — spawn an independent reviewer over the current diff
    (`git diff HEAD` + untracked files). The reviewer must NOT be fed your own
    conclusions (fresh eyes only) and must end its output with a fenced JSON
    verdict:
@@ -75,6 +132,11 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
    Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix,
    Nit = optional. Any P0/P1 open ⇒ gate BLOCKED.
 
+   Give the reviewer the loop goal (the file path, or quote it) and require
+   criterion-by-criterion acceptance: each exit criterion marked MET / NOT_MET
+   with evidence, an unmet criterion raised as a P1 finding. A missing goal is
+   not a blocker — the reviewer then judges the diff against the task intent.
+
    `docSync` is the reviewer's code↔doc attestation, required for code
    reviews: `UPDATED` (project docs — requirement / plan / feature docs under
    `docs/`, README, specs; NOT agent memory files: CLAUDE.md, AGENTS.md,
@@ -83,12 +145,12 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
    without it (disable per project via `"docSync": false` in
    `.pi/review-gate.json`).
 
-3. **Record** — call the `record_review` tool with the reviewer's FULL raw
+4. **Record** — call the `record_review` tool with the reviewer's FULL raw
    output (the gate parses every fence; the worst verdict wins — never
    summarize or trim it).
 
-4. **Fix** — if BLOCKED: fix ALL findings (P0-P2; Nits at your judgment),
-   then go to step 1 again (fixing edits files, so precommit must run again
+5. **Fix** — if BLOCKED: fix ALL findings (P0-P2; Nits at your judgment),
+   then go to step 2 again (fixing edits files, so precommit must run again
    before the next review). Fixing without re-reviewing is a violation.
    When you deliberately leave a Nit unfixed, log it in a structured line so
    the decision is auditable (sd0x-dev-flow Nit exemption log):
@@ -97,7 +159,7 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
    [NIT_DEFERRED] file:line | issue | reason: <why> | <ISO date>
    ```
 
-5. **Done** — call `declare_done`. It re-validates everything server-side and
+6. **Done** — call `declare_done`. It re-validates everything server-side and
    rejects if any gate is unmet. Both the precommit PASS and the READY review
    must be bound to the SAME (current) fingerprint; if anything edited the
    worktree since, run the affected step again.
@@ -105,6 +167,34 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
    Use `{ "mode": "full" }` for the final precommit of a change that touches
    build/type surfaces: fast mode runs lint + tests, full mode adds typecheck
    and build (and prefers a project's `test` script over `test:unit`).
+
+## Working across several repos
+
+Every repo has its OWN gate: its own review verdict, its own precommit PASS,
+its own worktree fingerprint. A verdict never transfers between repos, and the
+ship gate checks the repo the command actually runs in.
+
+So once a session has edited more than one repo, `record_review` and
+`run_precommit` **require** an explicit `"repo": "<absolute path>"` — they
+refuse to guess. Run the loop per repo: review repo A → `record_review(repo:
+A)` → `run_precommit(repo: A)` → commit A, then the same for B.
+
+Without that argument the tools used to fall back to the repo you edited LAST,
+and only an edit could move that target. Real consequence: a session that
+edited B last kept recording READY for B while trying to commit A, and A
+reported `code review gate is PENDING` after every single round — an
+unbreakable loop that looks exactly like the gate resetting itself.
+
+If a block message says a READY is recorded on a different repo than the one
+you are shipping, that is this mistake: re-review the blocked repo and record
+the verdict against it. `/gate-status` lists every repo the session touched.
+
+One more thing to know: two Pi sessions in the SAME worktree share one gate
+state file, which is all the git hooks can see. A READY/PASS that still matches
+the worktree survives the other session's next write — but only that one write,
+and each session's edits re-arm the other's gate. Treat a shared worktree as
+unreliable: prefer one session per worktree (`git worktree add` for parallel
+work). The gate warns at session start when it detects another recent session.
 
 ## Cost discipline (the loop is billed per ROUND, not per line)
 

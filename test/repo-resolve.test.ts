@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync, realpathSync, mkdirSync } from "nod
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
-const { gitRootOfDir, resolveShipRepos } = await import(
+const { gitRootOfDir, resolveShipRepos, resolveToolRepoTarget } = await import(
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "repo-resolve.ts")
 );
 
@@ -231,4 +231,110 @@ test("ship segment in a non-repo directory resolves to the bare dir (fail-closed
 test("gh pr create in a cd'd repo resolves that repo", () => {
   const { repos } = resolveShipRepos(`cd ${repoB} && gh pr create --title "x"`, repoA);
   assert.deepEqual(repos, [repoB]);
+});
+
+// ---- resolveToolRepoTarget: which repo a verdict is recorded against -------
+//
+// The multi-repo deadlock these tests guard: record_review/run_precommit used
+// to write to whichever repo was edited LAST, and only an edit could move that
+// target. A session that edited repoB last could never record a verdict for
+// repoA again — repoA's commit stayed blocked no matter how many review rounds
+// ran, which reads exactly like the gate randomly resetting itself.
+
+const toolTargetDefaults = {
+  primaryRepo: repoA,
+  resolveAbsolute: (p: string) => resolve(repoA, p),
+  resolveRoot: (dir: string) => gitRootOfDir(dir) ?? null,
+};
+
+test("tool repo target: a single-repo session still needs no explicit repo", () => {
+  const r = resolveToolRepoTarget({
+    ...toolTargetDefaults, sessionRepos: [repoA], activeRepo: repoA,
+  });
+  assert.deepEqual(r, { ok: true, root: repoA });
+});
+
+test("tool repo target: an explicit repo overrides the last-edited default", () => {
+  const r = resolveToolRepoTarget({
+    ...toolTargetDefaults, sessionRepos: [repoA, repoB], activeRepo: repoB, requested: repoA,
+  });
+  assert.deepEqual(r, { ok: true, root: repoA }, "this is the deadlock escape hatch");
+});
+
+test("tool repo target: a subdirectory normalizes to the repo root", () => {
+  const sub = join(repoB, "src", "deep");
+  mkdirSync(sub, { recursive: true });
+  const r = resolveToolRepoTarget({
+    ...toolTargetDefaults, sessionRepos: [repoA, repoB], activeRepo: repoA, requested: sub,
+  });
+  // Anything but the canonical root would mint a SECOND gate state for one
+  // repo — one of them could hold READY while the ship check reads the other.
+  assert.deepEqual(r, { ok: true, root: repoB });
+});
+
+test("tool repo target: a relative repo path resolves against the session cwd", () => {
+  const r = resolveToolRepoTarget({
+    ...toolTargetDefaults, sessionRepos: [repoA, repoB], activeRepo: repoA,
+    requested: join("..", "repoB"),
+  });
+  assert.deepEqual(r, { ok: true, root: repoB });
+});
+
+test("tool repo target: several repos and no explicit repo is an error, not a guess", () => {
+  const r = resolveToolRepoTarget({
+    ...toolTargetDefaults, sessionRepos: [repoA, repoB], activeRepo: repoB,
+  });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.match(r.error, /more than one repository/);
+  assert.match(r.error, /session repo/, "the candidate list must identify the session repo");
+  assert.match(r.error, /last edited/, "...and which one was edited last");
+  assert.ok(r.error.includes(repoA) && r.error.includes(repoB), "both candidates must be listed");
+});
+
+test("tool repo target: blank/whitespace repo counts as omitted", () => {
+  const r = resolveToolRepoTarget({
+    ...toolTargetDefaults, sessionRepos: [repoA, repoB], activeRepo: repoB, requested: "   ",
+  });
+  assert.equal(r.ok, false, "an empty string must not silently pick the last-edited repo");
+});
+
+test("tool repo target: a repo this session never edited is rejected", () => {
+  const r = resolveToolRepoTarget({
+    ...toolTargetDefaults, sessionRepos: [repoA], activeRepo: repoA, requested: repoB,
+  });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.match(r.error, /not one of the repositories this session has edited/);
+});
+
+test("tool repo target: a path outside any git repo is rejected", () => {
+  const bare = mkdtempSync(join(tmpdir(), "rg-tool-norepo-"));
+  try {
+    const r = resolveToolRepoTarget({
+      ...toolTargetDefaults, sessionRepos: [repoA, repoB], activeRepo: repoA, requested: bare,
+    });
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.error, /not inside a readable git repository/);
+  } finally {
+    try { rmSync(bare, { recursive: true, force: true }); } catch { /* */ }
+  }
+});
+
+test("tool repo target: a tracked non-git primary is still targetable", () => {
+  // When the session cwd is not inside a repository, primaryRepoRoot IS that
+  // plain directory. Requiring git to recognize it would make its verdict
+  // unrecordable as soon as a second repo is edited: omitting `repo` is
+  // ambiguous, and passing it would fail resolution.
+  const bare = mkdtempSync(join(tmpdir(), "rg-tool-bare-"));
+  try {
+    const r = resolveToolRepoTarget({
+      ...toolTargetDefaults, primaryRepo: bare, sessionRepos: [bare, repoB], activeRepo: repoB,
+      resolveAbsolute: (p: string) => resolve(bare, p), requested: bare,
+    });
+    assert.deepEqual(r, { ok: true, root: bare });
+  } finally {
+    try { rmSync(bare, { recursive: true, force: true }); } catch { /* */ }
+  }
 });

@@ -1,14 +1,22 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 
 const requireCjs = createRequire(import.meta.url);
 
-const { computeFingerprint, changedFiles, advisoryChangeToken } = await import(
+const {
+  computeFingerprint,
+  changedFiles,
+  advisoryChangeToken,
+  isGateOwnedPath,
+  mayBeGateOwned,
+  GATE_EXCLUDE_DIRS,
+  GATE_EXCLUDE_PATHSPECS,
+} = await import(
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "fingerprint.ts")
 );
 
@@ -551,6 +559,83 @@ test("real project files still change the fingerprint after the exclusion", () =
   const a = computeFingerprint(dir);
   writeFileSync(join(dir, "new.ts"), "// real change");
   assert.notEqual(computeFingerprint(dir).digest, a.digest);
+});
+
+test("isGateOwnedPath matches exactly the dirs the fingerprint excludes", () => {
+  const root = "/repo";
+  // Gate-owned: fingerprint-invisible, so edit tracking must skip these too.
+  assert.equal(isGateOwnedPath(join(root, ".pi", "loop-goal.md"), root), true);
+  assert.equal(isGateOwnedPath(join(root, ".pi", "review-gate-state.json"), root), true);
+  assert.equal(isGateOwnedPath(join(root, ".pi-subagents", "artifacts", "x.md"), root), true);
+  // Project files, including a nested .pi that the `:/` pathspecs do NOT cover.
+  assert.equal(isGateOwnedPath(join(root, "lib", "loop-goal.ts"), root), false);
+  assert.equal(isGateOwnedPath(join(root, "sub", ".pi", "x.md"), root), false);
+  assert.equal(isGateOwnedPath(join(root, ".pilot", "x.md"), root), false);
+  // Outside the repo entirely (another checkout's .pi must not be swallowed).
+  assert.equal(isGateOwnedPath("/other/.pi/loop-goal.md", root), false);
+  assert.equal(isGateOwnedPath(root, root), false);
+  // Derived from the pathspecs, so the two lists cannot drift.
+  assert.deepEqual([...GATE_EXCLUDE_DIRS], GATE_EXCLUDE_PATHSPECS.map((s) => s.replace(/^:\//, "")));
+});
+
+test("isGateOwnedPath survives a symlinked worktree (logical cwd vs git's physical root)", () => {
+  // Edit paths are built from the session cwd (may run through a symlink),
+  // repo roots come from `git rev-parse --show-toplevel` (always physical).
+  // Comparing them raw would miss the exclusion and arm the gate on a file no
+  // review can see — the bug the .pi/ exclusion exists to prevent.
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "rg-sym-")));
+  tempDirs.push(base);
+  const physical = join(base, "physical");
+  mkdirSync(join(physical, ".pi"), { recursive: true });
+  writeFileSync(join(physical, ".pi", "loop-goal.md"), "# goal\n");
+  const link = join(base, "link");
+  symlinkSync(physical, link, "dir");
+
+  assert.equal(isGateOwnedPath(join(link, ".pi", "loop-goal.md"), physical), true);
+  assert.equal(isGateOwnedPath(join(physical, ".pi", "loop-goal.md"), link), true);
+  // The symlink must not smuggle in a project file.
+  writeFileSync(join(physical, "a.ts"), "export const a = 1;\n");
+  assert.equal(isGateOwnedPath(join(link, "a.ts"), physical), false);
+});
+
+test("isGateOwnedPath normalizes paths that do not exist yet (first write of the goal)", () => {
+  // tool_call fires BEFORE the file exists, and the very first loop goal is
+  // written before `.pi/` itself exists — resolving only existing ancestors
+  // must still normalize the symlinked prefix.
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "rg-sym2-")));
+  tempDirs.push(base);
+  const physical = join(base, "physical");
+  mkdirSync(physical, { recursive: true });
+  const link = join(base, "link");
+  symlinkSync(physical, link, "dir");
+
+  // Neither `.pi/` nor the file exist yet.
+  assert.equal(isGateOwnedPath(join(link, ".pi", "loop-goal.md"), physical), true);
+  assert.equal(isGateOwnedPath(join(link, "lib", "new.ts"), physical), false);
+});
+
+test("a symlink inside a gate dir cannot hide a project file from edit tracking", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rg-sym3-")));
+  tempDirs.push(root);
+  mkdirSync(join(root, "lib"), { recursive: true });
+  mkdirSync(join(root, ".pi"), { recursive: true });
+  writeFileSync(join(root, "lib", "x.ts"), "export const x = 1;\n");
+  // `.pi/x.ts` -> `lib/x.ts`: judged by where the file really lives, so edits
+  // made through the link still arm the gate.
+  symlinkSync(join(root, "lib", "x.ts"), join(root, ".pi", "x.ts"));
+  assert.equal(isGateOwnedPath(join(root, ".pi", "x.ts"), root), false);
+  // A real file under .pi/ is still gate-owned.
+  writeFileSync(join(root, ".pi", "loop-goal.md"), "# goal\n");
+  assert.equal(isGateOwnedPath(join(root, ".pi", "loop-goal.md"), root), true);
+});
+
+test("mayBeGateOwned is a cheap pre-filter: no gate dir name ⇒ no filesystem work", () => {
+  assert.equal(mayBeGateOwned("/repo/lib/x.ts"), false);
+  assert.equal(mayBeGateOwned("/repo/.pilot/x.md"), false);
+  assert.equal(mayBeGateOwned("/repo/.pi/loop-goal.md"), true);
+  // Over-inclusive by design: the exact check rejects nested ones.
+  assert.equal(mayBeGateOwned("/repo/sub/.pi/x.md"), true);
+  assert.equal(isGateOwnedPath("/repo/sub/.pi/x.md", "/repo"), false);
 });
 
 // The CJS mirror (scripts/compute-fingerprint.cjs, used by the git hooks) must

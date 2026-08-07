@@ -43,9 +43,9 @@
  *   —   /gate-lesson self-improvement log (.pi/review-gate-lessons.md)
  */
 
-import { existsSync, statSync, unlinkSync, writeFileSync, readFileSync, mkdtempSync, rmSync, appendFileSync, mkdirSync } from "node:fs";
+import { existsSync, statSync, unlinkSync, writeFileSync, readFileSync, mkdtempSync, rmSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as pathJoin, dirname as pathDirname } from "node:path";
+import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
@@ -54,6 +54,7 @@ import { Type } from "typebox";
 
 import {
   coalesceToolPath,
+  CONCURRENT_SESSION_WINDOW_MS,
   DEFAULT_MAX_ROUNDS,
   isCodeFile,
   isDocFile,
@@ -68,10 +69,21 @@ import {
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "./lib/project-config.ts";
 import { buildGitMemory } from "./lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "./lib/ship-detect.ts";
-import { gitRootOfDir, resolveShipRepos, resolveCommandRepos } from "./lib/repo-resolve.ts";
+import {
+  gitRootOfDir,
+  resolveShipRepos,
+  resolveCommandRepos,
+  resolveToolRepoTarget,
+} from "./lib/repo-resolve.ts";
 import { firstNonEnglish, containsNonLatinLetter } from "./lib/lang-detect.ts";
 import { validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
-import { advisoryChangeToken, changedFiles, computeFingerprint } from "./lib/fingerprint.ts";
+import {
+  advisoryChangeToken,
+  changedFiles,
+  computeFingerprint,
+  isGateOwnedPath,
+  mayBeGateOwned,
+} from "./lib/fingerprint.ts";
 import type { Fingerprint } from "./lib/fingerprint.ts";
 import {
   emptyState,
@@ -81,7 +93,7 @@ import {
   loadSidecar,
   migrateFingerprintVersion,
   FINGERPRINT_MIGRATION_NOTICE,
-  saveSidecar,
+  saveSidecarPreservingConcurrent,
   shouldStrategicReset,
   sidecarPath,
   unmetRequirements,
@@ -114,6 +126,7 @@ import {
   looksLikeBashFileWrite,
 } from "./lib/edit-discipline.ts";
 import { projectEditedContent } from "./lib/edit-projection.ts";
+import { buildLoopGoalDirective, readLoopGoal } from "./lib/loop-goal.ts";
 import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "./lib/workflow-commands.ts";
 import {
   parseArbitrableAction,
@@ -270,6 +283,26 @@ export default function reviewGate(pi: ExtensionAPI) {
     return s;
   }
 
+  /**
+   * Worktree digest for the concurrent-sidecar merge, or null when it cannot
+   * be computed (fail-closed: an unverifiable foreign binding is dropped).
+   *
+   * Only reached when another session's sidecar holds a verdict this session
+   * lacks, so the hashing cost stays off the normal persist path.
+   */
+  function digestForMerge(dir: string): string | null {
+    const fp = computeFingerprint(dir);
+    return fp.unavailable || !fp.digest ? null : fp.digest;
+  }
+
+  /** Do two paths name the same directory? Compared through realpath: a Pi
+   *  launched via a symlinked path has a logical cwd that never string-matches
+   *  git's physical repo root. Unresolvable paths fall back to string
+   *  equality (this only ever decides whether a message says "ran in …"). */
+  function samePlace(a: string, b: string): boolean {
+    if (a === b) return true;
+    try { return realpathSync(a) === realpathSync(b); } catch { return false; }
+  }
   /** Persist a repo's state: the primary repo goes through persist() (session
    *  entry + widget + .blocked handling); other repos write their own sidecar
    *  (the same fail-closed .blocked marker on write failure). */
@@ -277,16 +310,133 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (root === primaryRepoRoot) { persist(ctx); return; }
     const s = stateForRepo(root);
     try {
-      saveSidecar(sidecarPath(root), s);
+      saveSidecarPreservingConcurrent(sidecarPath(root), s, () => digestForMerge(root));
       try { unlinkSync(sidecarPath(root) + ".blocked"); } catch { /* didn't exist */ }
     } catch {
       try { writeFileSync(sidecarPath(root) + ".blocked", "FAILED_WRITE"); } catch { /* */ }
     }
   }
 
-  /** Human label for a repo in messages (the primary repo keeps no prefix). */
+  /** Human label for a repo in messages. The primary repo has no distinctive
+   *  name of its own in a single-repo session, but in a MULTI-repo session an
+   *  unlabelled problem line is exactly what made a real session unfixable:
+   *  the agent read "code review gate is PENDING" as being about the repo it
+   *  had just reviewed (a different one) and looped forever. So label by
+   *  directory name whenever more than one repo is in play — falling back to
+   *  the full path when two checkouts share a basename (two `api` clones
+   *  labelled `[api]` would recreate the very ambiguity this removes). */
   function repoLabel(root: string): string {
-    return root === primaryRepoRoot ? "session repo" : root.split("/").pop() || root;
+    const multi = sessionRepos.size > 1;
+    if (root === primaryRepoRoot && !multi) return "session repo";
+    const name = root.split("/").pop() || root;
+    const collides = knownRepoRoots().some((r) => r !== root && (r.split("/").pop() || r) === name);
+    return collides ? root : name;
+  }
+
+  /** Every repo this session is accountable for, primary first. */
+  function knownRepoRoots(): string[] {
+    const roots = [...sessionRepos];
+    if (!roots.includes(primaryRepoRoot)) roots.unshift(primaryRepoRoot);
+    return roots;
+  }
+
+  /**
+   * Say WHERE the last READY actually landed when a ship is blocked.
+   *
+   * In the session that motivated this, every round's READY was recorded
+   * against the last-edited repo while the commit ran in another one; the
+   * block message named neither, so the agent concluded the sidecar was being
+   * reset by a stray process and retried the same futile loop seven times.
+   * Naming both ends turns that dead end into an actionable next step.
+   *
+   * Deliberately worded as a diagnosis, never as permission: the verdict
+   * quoted here belongs to a different repo and authorizes nothing.
+   */
+  function crossRepoVerdictHint(blockedRoots: string[]): string {
+    if (blockedRoots.length === 0) return "";
+    const elsewhere = knownRepoRoots().filter(
+      (r) => !blockedRoots.includes(r) && enforcementStateFor(r)?.review.verdict === "READY",
+    );
+    if (elsewhere.length === 0) return "";
+    return (
+      `\nnote: a READY review is recorded on ${elsewhere.join(", ")} — not on ${blockedRoots.join(", ")}. ` +
+      "A verdict counts only for the repo it was recorded against, so it does not unblock this one: " +
+      'review the blocked repo and call record_review (then run_precommit) with "repo": "<that repo path>".'
+    );
+  }
+
+  /**
+   * Gate summary for every repo BESIDES the session repo, for /gate-status.
+   *
+   * /gate-status used to report the session repo only, so a session working
+   * across several repos saw "ship gate: OPEN" while the repo it was about to
+   * commit was still PENDING — the status readout actively confirmed the
+   * wrong mental model. Each repo is now listed with its own verdicts and its
+   * own unmet requirements.
+   *
+   * This hashes each repo's worktree (~0.5s on a large repo), which is why it
+   * lives in the user-invoked command and not on any hot path.
+   */
+  function otherRepoStatus(): { lines: string[]; blocked: boolean } {
+    const others = knownRepoRoots().filter((r) => r !== primaryRepoRoot);
+    if (others.length === 0) return { lines: [], blocked: false };
+    const lines = ["", `other repos edited this session (${others.length}):`];
+    let blocked = false;
+    for (const root of others) {
+      const st = enforcementStateFor(root);
+      if (!st) {
+        // Sidecar missing or owned by a different session: nothing verifiable.
+        // Reported explicitly rather than skipped — a skipped repo reads as a
+        // green one. Mirror the ship gate's own rule for this case (see the
+        // `else` branch of the ship check): only DIRTY or unverifiable repos
+        // actually block, so a clean one is not escalated to a warning.
+        const files = changedFiles(root);
+        const dirty = files === undefined || files.length > 0;
+        if (dirty) blocked = true;
+        lines.push(
+          `  ${root}: no usable gate state — ` +
+          (files === undefined
+            ? "worktree unverifiable, ships from it are refused"
+            : files.length > 0
+              ? `${files.length} uncommitted change(s), so ships from it are blocked`
+              : "clean, so it blocks nothing"),
+        );
+        continue;
+      }
+      const rfp = computeFingerprint(root);
+      const unmet = unmetRequirements(st, rfp.digest, rfp.unavailable, { requireDocSync: projectConfig.docSync });
+      if (unmet.length) blocked = true;
+      lines.push(
+        `  ${root}: review=${st.review.verdict} precommit=${st.precommit.verdict} ` +
+        `changes=${st.hasCodeChange ? "code" : st.hasDocChange ? "docs" : "none"} — ` +
+        (unmet.length ? `BLOCKED: ${unmet.join("; ")}` : "OPEN"),
+      );
+    }
+    return { lines, blocked };
+  }
+
+  /**
+   * Resolve the repo a `record_review` / `run_precommit` call targets.
+   *
+   * Before this existed both tools wrote to `activeRepoRoot`, which only an
+   * edit-tool call could move: a session whose last edit was in repo B could
+   * never record a verdict for repo A again, so A's commit stayed blocked no
+   * matter how many review rounds ran. Resolution (and the multi-repo
+   * "be explicit" rule) lives in resolveToolRepoTarget; see its docstring for
+   * why auto-retargeting was rejected as fail-open.
+   */
+  function resolveToolRepo(requested?: string) {
+    return resolveToolRepoTarget({
+      requested,
+      sessionRepos: knownRepoRoots(),
+      activeRepo: activeRepoRoot.current,
+      primaryRepo: primaryRepoRoot,
+      resolveAbsolute: (p) => pathResolve(cwd, p),
+      // Same normalization sessionRepos/repoStateCache keys use: a symlinked
+      // or subdirectory path must never mint a SECOND state for one repo
+      // (two states for one root is the one way this could fail open).
+      resolveRoot: (dir) => gitRootOfDir(dir) ?? null,
+    });
   }
 
   /** State used for ENFORCEMENT checks (ship gate, declare_done): the
@@ -328,6 +478,9 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** Set when restore() dropped bindings written by an older fingerprint
    *  algorithm, so session_start can explain why they disappeared. */
   let fingerprintMigrated = false;
+  /** Set when restore() found the sidecar owned by ANOTHER, recently active
+   *  session in this same repo, so session_start can warn the user. */
+  let concurrentSessionNotice: string | null = null;
   // The most recent ship command the gate BLOCKED, so request_arbitration can
   // only contest a real block (not an agent-invented one).
   let lastBlockedShip: { command: string; problems: string[]; blockReason: string } | null = null;
@@ -399,7 +552,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
     try {
-      saveSidecar(sidecarPath(cwd), state);
+      saveSidecarPreservingConcurrent(sidecarPath(cwd), state, () => digestForMerge(cwd));
       // P1-5: clear stale .blocked marker on successful write.
       try { unlinkSync(sidecarPath(cwd) + ".blocked"); } catch { /* didn't exist */ }
     } catch {
@@ -475,6 +628,34 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Either source can carry a stale binding: the session entry is migrated
     // by this call, the sidecar was already migrated inside loadSidecar().
     fingerprintMigrated = migrateFingerprintVersion(state) || sidecarMigration.migrated;
+
+    // Note a RECENT other session in this repo (independent of which source
+    // won above: the session entry may have restored our own state while the
+    // shared sidecar belongs to someone else). The sidecar holds one session
+    // at a time and only it is visible to the git hooks, so two live sessions
+    // here can surprise each other; saying so beats leaving the user to infer
+    // it from a rejected commit.
+    //
+    // There is no liveness signal available (a pid would be wrong the moment
+    // the extension runs anywhere but this machine), so the recency window
+    // cannot distinguish "still running" from "finished an hour ago" — hence
+    // the conditional wording. A warning that asserts more than it knows is
+    // how users learn to ignore this gate's warnings.
+    try {
+      const onDisk = loadSidecar(sidecarPath(cwd));
+      const otherId = onDisk?.sessionId;
+      const at = onDisk?.updatedAt ? Date.parse(onDisk.updatedAt) : NaN;
+      const recent = Number.isFinite(at) && Date.now() - at < CONCURRENT_SESSION_WINDOW_MS;
+      if (otherId && sessionId && otherId !== sessionId && recent) {
+        concurrentSessionNotice =
+          `review-gate: another Pi session (${otherId}) last wrote this repo's gate state at ${onDisk?.updatedAt}. ` +
+          "If it is still open, note that two sessions in one worktree share a single sidecar — the only " +
+          "thing the git hooks can see — and a single set of uncommitted changes: a READY/PASS that still " +
+          "matches the worktree survives the next session's write, but only until that session writes " +
+          "again, and each session's edits re-arm the other's gate. Prefer one session per worktree " +
+          "(git worktree add for parallel work). If that session is closed, ignore this.";
+      }
+    } catch { /* best effort — a missing/unreadable sidecar means nothing to warn about */ }
   }
 
   function updateWidget(ctx: ExtensionContext) {
@@ -626,6 +807,21 @@ export default function reviewGate(pi: ExtensionAPI) {
       // here on, any mode change (including the first classification) goes
       // through the normal consent rules. Blocked edits (sensitive file / L6)
       // and normal-mode edits do not set it: they change nothing.
+      //
+      // Gate-owned writes (.pi/, .pi-subagents/) are excluded for the same
+      // reason tool_result skips them: everything under those dirs is invisible
+      // to a review (excluded from the fingerprint AND from changedFiles), so
+      // no edit there is session WORK — the gate's own sidecar, a loop goal, a
+      // subagent artifact and the project config alike. Counting them would
+      // suppress the "changes pre-date this session" hint and force consent for
+      // a mode change the agent never earned. mayBeGateOwned pre-filters on
+      // the raw path, so ordinary edits pay no filesystem cost here.
+      if (path) {
+        const abs = path.startsWith("/") ? path : pathJoin(cwd, path);
+        if (mayBeGateOwned(abs) && isGateOwnedPath(abs, gitRootOfDir(pathDirname(abs)) ?? primaryRepoRoot)) {
+          return;
+        }
+      }
       sessionEdited = true;
       return;
     }
@@ -773,6 +969,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     // already resolved above, before the short-circuits). Each ship segment's
     // repo is checked with ITS OWN sidecar + fingerprint.
     const problems: string[] = [];
+    // Label EVERY problem line once more than one repo is in play. An
+    // unlabelled "code review gate is PENDING" from the primary repo is what
+    // a real multi-repo session read as being about the repo it had just
+    // reviewed; single-repo wording is left untouched.
+    const multiRepo = checkRoots.size > 1 || knownRepoRoots().length > 1;
+    const blockedUnreviewed: string[] = [];
     // Primary-repo fingerprint for the arbiter token path below (kept from the
     // loop so we do not re-hash the primary repo).
     let primaryFp: Fingerprint = { digest: "", head: "", unavailable: true };
@@ -781,9 +983,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       const fp = computeFingerprint(root);
       if (root === primaryRepoRoot) primaryFp = fp;
       if (st) {
-        for (const p of unmetRequirements(st, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })) {
-          problems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+        const unmet = unmetRequirements(st, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
+        for (const p of unmet) {
+          problems.push(multiRepo ? `[${repoLabel(root)}] ${p}` : p);
         }
+        // Only a repo that is actually holding this ship up is worth pointing
+        // the cross-repo hint at; a clean repo that simply never needed a
+        // review would make the hint name an innocent bystander.
+        if (unmet.length > 0 && st.review.verdict !== "READY") blockedUnreviewed.push(root);
       } else {
         // No sidecar for a non-primary repo: fail-closed when it holds
         // uncommitted work (an unreviewed diff must not ship through a repo
@@ -829,10 +1036,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
 
     // Record this block so request_arbitration can only contest a REAL block.
+    // The cross-repo hint is part of the recorded text: the arbiter should read
+    // exactly what the agent read, and "your READY is on another repo" is the
+    // single most relevant fact when a multi-repo block is being contested.
     const blockReason =
       `review-gate: ${desc(command, ships)} blocked — quality gates unmet:\n` +
       problems.map((p) => `  - ${p}`).join("\n") +
-      (ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "");
+      (ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "") +
+      crossRepoVerdictHint(blockedUnreviewed);
     lastBlockedShip = { command, problems, blockReason };
 
     return {
@@ -961,6 +1172,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       // round on a change-less repo).
       const absEditPath = path.startsWith("/") ? path : pathJoin(cwd, path);
       const editRepo = gitRootOfDir(pathDirname(absEditPath));
+
+      // Gate-owned paths (.pi/, .pi-subagents/) are excluded from the
+      // fingerprint AND from changedFiles(), so a reviewer can never see them.
+      // Tracking such an edit would arm the doc gate and demote READY→PENDING
+      // over a file with nothing to review — exactly the self-deadlock the
+      // exclusion exists to prevent. It covers the gate's own sidecar/lesson
+      // writes and the agent-authored .pi/loop-goal.md alike.
+      if (isGateOwnedPath(absEditPath, editRepo ?? primaryRepoRoot)) return;
       if (editRepo && editRepo !== primaryRepoRoot) {
         const isProjectFile = isCodeFile(path) || isDocFile(path);
         const isNewRepo = !sessionRepos.has(editRepo);
@@ -1126,6 +1345,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       "(worst verdict wins). Call after every review round.",
     parameters: Type.Object({
       reviewer_output: Type.String({ description: "Complete raw output from the reviewer" }),
+      repo: Type.Optional(Type.String({
+        description:
+          "Absolute path of the repository this review covers. REQUIRED once the session has edited " +
+          "more than one repository — the verdict binds to that repo's own worktree fingerprint and " +
+          "unblocks only that repo.",
+      })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       // P0-1: record_review only accepts JSON fence verdicts, NOT precommit
@@ -1148,13 +1373,18 @@ export default function reviewGate(pi: ExtensionAPI) {
       // The agent is running the loop again — a standing pause_for_question
       // pause is moot (liveness: a stale pause would silently swallow the
       // next auto-continuation after a BLOCKED verdict).
-      // P-multi: the verdict binds to the repo the agent most recently
-      // edited (activeRepoRoot). stateForRepo(primary) IS `state`, so the
-      // local `st` writes land on the right object and persistRepo persists
-      // to the right sidecar — no global state swap (same rationale as
-      // run_precommit: a swap would let a parallel tool_result arm the wrong
-      // repo's state).
-      const targetRoot = activeRepoRoot.current;
+      // P-multi: the verdict binds to ONE repo — `repo` when given, else the
+      // repo the agent most recently edited (single-repo sessions only; with
+      // several repos in play resolveToolRepo rejects the ambiguity instead
+      // of guessing). stateForRepo(primary) IS `state`, so the local `st`
+      // writes land on the right object and persistRepo persists to the right
+      // sidecar — no global state swap (same rationale as run_precommit: a
+      // swap would let a parallel tool_result arm the wrong repo's state).
+      const target = resolveToolRepo(params.repo);
+      if (!target.ok) {
+        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      }
+      const targetRoot = target.root;
       const st = stateForRepo(targetRoot);
       delete st.pausedQuestion;
       const fp = computeFingerprint(targetRoot);
@@ -1206,8 +1436,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `review-gate: recorded verdict ${parsed.verdict} (round ${st.rounds.length}/${st.maxRounds}, findings: ${parsed.findingsTotal ?? "?"}).${note}` +
-            (parsed.verdict === "READY" ? " Next: run precommit." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : ""),
+          // The repo is named in the TEXT, not just details: a session that
+          // could not see which repo its verdicts landed on kept recording
+          // READY for the wrong one and read the resulting block as sabotage.
+          text: `review-gate: recorded verdict ${parsed.verdict} for ${targetRoot} ` +
+            `(round ${st.rounds.length}/${st.maxRounds}, findings: ${parsed.findingsTotal ?? "?"}).${note}` +
+            (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : ""),
         }],
         details: { verdict: parsed.verdict, round: st.rounds.length, repo: repoLabel(targetRoot) },
       };
@@ -1225,13 +1459,20 @@ export default function reviewGate(pi: ExtensionAPI) {
       "The extension spawns the bundled runner itself and verifies a private nonce receipt.",
     parameters: Type.Object({
       mode: Type.Optional(Type.String({ description: "'fast' (default) or 'full'" })),
+      repo: Type.Optional(Type.String({
+        description:
+          "Absolute path of the repository to run the checks in. REQUIRED once the session has edited " +
+          "more than one repository — the PASS binds to that repo's own worktree fingerprint and " +
+          "unblocks only that repo.",
+      })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       // Available in every mode: explore allows edits/bash, so the agent may
       // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
-      // P-multi: precommit runs in — and binds its PASS to — the repo the
-      // agent most recently edited (activeRepoRoot), not the session cwd.
+      // P-multi: precommit runs in — and binds its PASS to — the repo named by
+      // `repo` (mandatory once several repos are in play), falling back to the
+      // last-edited repo in a single-repo session; never just the session cwd.
       // The target DIR for the primary repo stays the session cwd (its
       // precommit may be repo-subdir-aware); other repos run at their root.
       // stateForRepo(primary) IS `state`, so no global swap is needed: the
@@ -1240,7 +1481,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       // across the long `await runTrustedPrecommit` was rejected: a parallel
       // edit tool_result in that window would arm the WRONG repo's state and
       // persist it to the primary sidecar — losing hasCodeChange, a fail-open.)
-      const targetRoot = activeRepoRoot.current;
+      // `repo` overrides the last-edited default; with several repos in play
+      // it is mandatory, because a PASS recorded against the wrong repo
+      // leaves the intended one permanently unshippable.
+      const target = resolveToolRepo(params.repo);
+      if (!target.ok) {
+        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      }
+      const targetRoot = target.root;
       const targetDir = targetRoot === primaryRepoRoot ? cwd : targetRoot;
       const st = stateForRepo(targetRoot);
       // Same liveness rule as record_review: running precommit proves the
@@ -1275,7 +1523,17 @@ export default function reviewGate(pi: ExtensionAPI) {
         : outcome.verdict === "NO_CHECKS_RUN" ? "NO CHECKS RUN — zero runnable checks; this is NOT a pass. Configure real checks or /gate-bypass."
         : `ERROR (${outcome.error ?? "runner could not be trusted"}) — fail-closed.`;
       return {
-        content: [{ type: "text", text: `review-gate: precommit ${detail}` }],
+        // Name the REPO in the text (not just details) — see record_review.
+        // The PASS binds to the repo root, so that is what is echoed; the
+        // working directory is only shown when it is genuinely a different
+        // place. Compared through realpath, because a Pi launched via a
+        // symlinked path has a logical cwd that never string-matches git's
+        // physical root — which would print "(ran in …)" on every single run.
+        content: [{
+          type: "text",
+          text: `review-gate: precommit for ${targetRoot}` +
+            (samePlace(targetDir, targetRoot) ? "" : ` (ran in ${targetDir})`) + `: ${detail}`,
+        }],
         details: { verdict: outcome.verdict, checksRun: outcome.checksRun, checksFailed: outcome.checksFailed, repo: repoLabel(targetRoot) },
         isError: outcome.verdict !== "PASS",
       };
@@ -1694,6 +1952,14 @@ export default function reviewGate(pi: ExtensionAPI) {
             effective === "loop" ? "info" : "warning",
           );
         } catch { /* headless */ }
+        // Loop mode decided ⇒ deliver the Step 0 loop-goal directive right
+        // here. before_agent_start only injects it on the NEXT turn, and the
+        // mode is normally decided as the session's first action — without
+        // this the agent could edit for a whole turn before ever seeing the
+        // exit contract it is supposed to establish first.
+        const goalNote = effective === "loop"
+          ? "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot))
+          : "";
         return {
           content: [{
             type: "text",
@@ -1702,7 +1968,8 @@ export default function reviewGate(pi: ExtensionAPI) {
               (classifiedBy ? ` — DeepSeek V4 首次自动判定，无需用户确认` : "") +
               (classifiedBy && effective !== requested
                 ? `。你请求的是 "${requested}"，已以模型判定为准。`
-                : "."),
+                : ".") +
+              goalNote,
           }],
           details: { mode: effective, source: decision.source, classifiedBy },
         };
@@ -2041,6 +2308,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       fingerprintMigrated = false;
     }
 
+    // Say it out loud when another Pi session is live in this same repo.
+    // saveSidecarPreservingConcurrent keeps a still-valid foreign READY/PASS
+    // alive, but the two sessions still share one file and one worktree, and
+    // an unexplained "the hook rejects what the gate just approved" is what
+    // sent a real session chasing a phantom.
+    if (concurrentSessionNotice) {
+      try { ctx.ui.notify(concurrentSessionNotice, "warning"); } catch { /* headless */ }
+      concurrentSessionNotice = null;
+    }
+
     persist(ctx);
   });
 
@@ -2136,6 +2413,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const fp = computeFingerprint(cwd);
       const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
+      const others = otherRepoStatus();
       const lines = [
         `review:    ${state.review.verdict}${state.review.at ? ` (${state.review.at})` : ""}`,
         `precommit: ${state.precommit.verdict}${state.precommit.at ? ` (${state.precommit.at})` : ""}`,
@@ -2161,8 +2439,12 @@ export default function reviewGate(pi: ExtensionAPI) {
               ? `ship gate: BLOCKED (explore: completion advisory, ship still gated)\n${problems.map((p) => `  - ${p}`).join("\n")}`
               : "ship gate: OPEN (explore)")
             : (problems.length ? `ship gate: BLOCKED\n${problems.map((p) => `  - ${p}`).join("\n")}` : "ship gate: OPEN"),
+        // Every OTHER repo this session edited gets its own line. Showing only
+        // the session repo is how a multi-repo session could look green while
+        // the repo it was about to commit sat at PENDING (and vice versa).
+        ...others.lines,
       ];
-      ctx.ui.notify(lines.join("\n"), problems.length ? "warning" : "info");
+      ctx.ui.notify(lines.join("\n"), problems.length || others.blocked ? "warning" : "info");
     },
   });
 
@@ -2306,6 +2588,15 @@ export default function reviewGate(pi: ExtensionAPI) {
           (problems.length ? `\nAdvisory gate status:\n${problems.map((p) => `- ${p}`).join("\n")}` : ""),
       };
     }
+    // Loop goal (Step 0): loop mode works to an explicit exit contract
+    // (`.pi/loop-goal.md` — see lib/loop-goal.ts for the full rationale).
+    // Injected AFTER the explore early-return and BEFORE the unarmed one: the
+    // goal must be set while the worktree is still clean, i.e. before the
+    // first edit arms the gate. Prompt-level only; nothing gates on it.
+    if (state.taskMode === "loop") {
+      systemPrompt += "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot));
+    }
+
     if (!gateArmed && problems.length === 0) {
       return { systemPrompt };
     }
@@ -2323,8 +2614,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         "git commit/push and gh pr create/edit are HARD-BLOCKED until gates pass.\n" +
         (sessionRepos.size > 1
           ? "Multi-repo session: this session has edited " + sessionRepos.size + " repositories (" +
-            [...sessionRepos].map((r) => repoLabel(r)).join(", ") +
-            "). record_review / run_precommit target the repo you most recently edited; " +
+            [...sessionRepos].join(", ") +
+            "). record_review / run_precommit now REQUIRE an explicit `repo` (absolute path) — " +
+            "a verdict binds to that repo's own worktree and unblocks only that repo, so run the " +
+            "loop once per repo; " +
             "declare_done and git commit/push/gh pr require EVERY edited repo to pass its own review + precommit " +
             "before shipping.\n"
           : "") +
