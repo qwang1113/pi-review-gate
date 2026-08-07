@@ -17,6 +17,10 @@
  *       "aiAttribution": true,  // guard #2 — commit-msg AI attribution (regex fallback stays)
  *       "englishCheck": true,   // L5 blind spot — romanized non-English in commit/PR text
  *       "shipDetect": true      // guard #4 — extra ship-command layer on suspicious bash
+ *     },
+ *     "copilotReview": {        // L7 — post-PR Copilot code-review loop
+ *       "enabled": true,
+ *       "maxRounds": 3          // 1..10 Copilot cycles per task
  *     }
  *   }
  *
@@ -29,6 +33,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_MAX_ROUNDS } from "./constants.ts";
+import {
+  COPILOT_MAX_ROUNDS,
+  COPILOT_MAX_ROUNDS_DEFAULT,
+  COPILOT_MIN_ROUNDS,
+} from "./copilot-review.ts";
 
 /** sd0x-dev-flow documents the same range: "Range: 3-50". */
 export const MIN_MAX_ROUNDS = 3;
@@ -84,6 +93,29 @@ export function defaultArbiterConfig(): ArbiterConfig {
   return { enabled: true, model: DEFAULT_ARBITER_MODEL, maxPerSession: 3 };
 }
 
+/**
+ * L7 knobs — the post-PR Copilot code-review loop (lib/copilot-review.ts).
+ *
+ * `maxRounds` bounds how many Copilot cycles one task may consume before the
+ * requirement is released as EXHAUSTED and escalated to the user. It is
+ * SEPARATE from the review-loop `maxRounds` on purpose: waiting for Copilot
+ * must not eat the budget the fix→review loop needs.
+ */
+export interface CopilotReviewConfig {
+  /** Master switch. When false, no PR ship ever arms a Copilot cycle. */
+  enabled: boolean;
+  /** Copilot review cycles per task, clamped to [1, 10]. */
+  maxRounds: number;
+}
+
+export function defaultCopilotReviewConfig(): CopilotReviewConfig {
+  // Default ON (user policy: features ship enabled). A repo without gh, a
+  // GitHub remote, a PR, or Copilot code review resolves to UNSUPPORTED on
+  // the first check and stops asking — so "on" costs nothing where the
+  // feature does not exist.
+  return { enabled: true, maxRounds: COPILOT_MAX_ROUNDS_DEFAULT };
+}
+
 export interface ProjectConfig {
   maxRounds: number;
   /** R10: inject the strategic-reset checklist once near the round cap. */
@@ -103,6 +135,8 @@ export interface ProjectConfig {
   llmGuards: LlmGuardsConfig;
   /** Arbiter capability-exception config — see ArbiterConfig. */
   arbiter: ArbiterConfig;
+  /** L7 post-PR Copilot review loop — see CopilotReviewConfig. */
+  copilotReview: CopilotReviewConfig;
 }
 
 export function defaultProjectConfig(): ProjectConfig {
@@ -119,6 +153,7 @@ export function defaultProjectConfig(): ProjectConfig {
     docSync: true,
     llmGuards: defaultLlmGuardsConfig(),
     arbiter: defaultArbiterConfig(),
+    copilotReview: defaultCopilotReviewConfig(),
   };
 }
 
@@ -175,6 +210,16 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
     if (typeof ab.maxPerSession === "number" && Number.isInteger(ab.maxPerSession)) {
       // Clamp to a sane range so a forged huge value can't make re-rolling free.
       cfg.arbiter.maxPerSession = Math.min(10, Math.max(1, ab.maxPerSession));
+    }
+  }
+  if (typeof obj.copilotReview === "object" && obj.copilotReview !== null && !Array.isArray(obj.copilotReview)) {
+    const cr = obj.copilotReview as Record<string, unknown>;
+    if (typeof cr.enabled === "boolean") cfg.copilotReview.enabled = cr.enabled;
+    if (typeof cr.maxRounds === "number" && Number.isInteger(cr.maxRounds)) {
+      // Clamped like the review cap: a typo still yields a sane budget, and a
+      // forged huge value cannot turn the Copilot loop into "practically never
+      // exhausts".
+      cfg.copilotReview.maxRounds = Math.min(COPILOT_MAX_ROUNDS, Math.max(COPILOT_MIN_ROUNDS, cr.maxRounds));
     }
   }
   return cfg;

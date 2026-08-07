@@ -43,7 +43,7 @@
  *   —   /gate-lesson self-improvement log (.pi/review-gate-lessons.md)
  */
 
-import { existsSync, statSync, readFileSync, mkdtempSync, rmSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -126,7 +126,34 @@ import {
   looksLikeBashFileWrite,
 } from "./lib/edit-discipline.ts";
 import { projectEditedContent } from "./lib/edit-projection.ts";
-import { buildLoopGoalDirective, readLoopGoal } from "./lib/loop-goal.ts";
+import {
+  LOOP_GOAL_RELPATH,
+  buildLoopGoalDirective,
+  buildGoalConfirmMessage,
+  goalTextHash,
+  isLoopGoalConfirmed,
+  normalizeGoalText,
+  readLoopGoal,
+  GOAL_CONFIRM_TITLE,
+  LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
+} from "./lib/loop-goal.ts";
+import {
+  COPILOT_REVIEWER_LOGIN,
+  COPILOT_THREADS_QUERY,
+  analyzeCopilot,
+  armCopilotReview,
+  copilotProblems,
+  evaluateCopilot,
+  isCopilotOutstanding,
+  parseCopilotPayload,
+  parseNameWithOwner,
+  parsePrView,
+  recordCopilotRequest,
+  releaseCopilotReview,
+  slugFromPrUrl,
+  type CopilotPayload,
+  type PrSummary,
+} from "./lib/copilot-review.ts";
 import {
   SENSITIVE_GRANT_TTL_MS,
   addGrant,
@@ -200,6 +227,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   let state: GateState = emptyState(null, DEFAULT_MAX_ROUNDS);
   let cwd = process.cwd();
   let continuationsInjected = 0; // total auto-continuation injections (persisted)
+  /**
+   * L7/L8 continuations spent on COMPLETION-only work (waiting for Copilot,
+   * negotiating the goal). Separate budget on purpose: a Copilot review that
+   * takes four polls must not eat the rounds the fix→review loop needs, and a
+   * stuck completion requirement still has to stop eventually.
+   */
+  let completionContinuations = 0;
+  const COMPLETION_CONTINUATION_CAP = 12;
   let loopArmed = true; // /gate-bypass or NEEDS_HUMAN disarms auto-continuation
   // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
   // session_start; a missing/corrupt config file falls back to safe defaults.
@@ -726,6 +761,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     delete state.pausedQuestion;
     loopArmed = mode === "loop";
     continuationsInjected = 0;
+    completionContinuations = 0;
     persist(ctx);
   }
 
@@ -1057,6 +1093,21 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
       }
     }
+    // L8 — loop mode ships only against a goal the USER approved. The
+    // negotiation is the point: without it the agent writes its own exit
+    // contract, works to it, and grades itself against it, and a leftover file
+    // from a previous task passes for a contract too. Blocking at ship time
+    // (rather than at declare_done) is what makes the negotiation happen
+    // BEFORE the work lands — by the time `declare_done` runs, the code is
+    // already pushed and agreeing on the goal is theatre.
+    //
+    // L1 only, deliberately: the git hooks judge code facts from the sidecar
+    // and cannot see a dialog, so this requirement never enters
+    // unmetRequirements() (the ship authority they share).
+    if (state.taskMode === "loop" && !loopGoalConfirmed()) {
+      problems.push(multiRepo ? `[${repoLabel(primaryRepoRoot)}] ${LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK}` : LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    }
+
     if (problems.length === 0) return;
 
     // Single-use arbiter bypass token (lib/arbitration.ts). Only a lone,
@@ -1187,6 +1238,192 @@ export default function reviewGate(pi: ExtensionAPI) {
     return runReadOnly(["git", "log", "--oneline", "-15"]) ?? "(git log unavailable)";
   }
 
+  // ---------- L7: post-PR Copilot code-review loop ----------
+  //
+  // Everything the gate BELIEVES about a Copilot review is gathered here, by
+  // the extension itself: `gh` runs as an argv (never through a shell), in the
+  // target repo, with a timeout, and the JSON is interpreted by the pure
+  // lib/copilot-review.ts rules. The agent drives the loop but can never
+  // report its own review outcome — the same trust split as run_precommit.
+
+  /**
+   * Optimistic poll inside check_copilot_review: a couple of quick retries
+   * catch the common "Copilot answered while we were talking" case without
+   * turning the tool into a long block. Anything slower is handled by the
+   * persistent AWAITING state and the next continuation.
+   */
+  const COPILOT_CHECK_ATTEMPTS = 3;
+  const COPILOT_CHECK_DELAY_MS = 10000;
+
+  interface GhResult { ok: boolean; stdout: string; stderr: string }
+
+  /**
+   * Run one `gh` invocation. Never throws; a missing or failing gh is an
+   * ordinary result.
+   *
+   * ASYNC on purpose, and for the same reason run_precommit is: a synchronous
+   * spawn blocks the extension host's event loop, so a slow API call would
+   * freeze the session and swallow the user's ESC. The child is killed on
+   * timeout and on abort.
+   */
+  async function runGh(
+    argv: string[],
+    dir: string,
+    opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<GhResult> {
+    const timeoutMs = opts.timeoutMs ?? 30000;
+    return await new Promise<GhResult>((resolveResult) => {
+      let child: ChildProcess;
+      try {
+        child = spawn(argv[0], argv.slice(1), {
+          cwd: dir,
+          // GH_PAGER="" keeps gh from piping JSON into a pager; NO_COLOR keeps
+          // ANSI escapes out of the payloads we parse.
+          env: { ...process.env, GH_PAGER: "", NO_COLOR: "1" },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (e) {
+        resolveResult({ ok: false, stdout: "", stderr: e instanceof Error ? e.message : String(e) });
+        return;
+      }
+      let out = "";
+      let err = "";
+      let settled = false;
+      const finish = (r: GhResult) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        opts.signal?.removeEventListener("abort", onAbort);
+        resolveResult(r);
+      };
+      const kill = () => { try { child.kill("SIGKILL"); } catch { /* already gone */ } };
+      const timer = setTimeout(() => {
+        kill();
+        finish({ ok: false, stdout: out, stderr: `gh timed out after ${timeoutMs}ms` });
+      }, timeoutMs);
+      const onAbort = () => { kill(); finish({ ok: false, stdout: out, stderr: "aborted" }); };
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      child.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+      child.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+      child.on("error", (e: Error) => finish({ ok: false, stdout: out, stderr: e.message }));
+      child.on("close", (code: number | null) => finish({ ok: code === 0, stdout: out, stderr: err }));
+    });
+  }
+
+  /** First meaningful line of gh's stderr, for the tool's explanation text. */
+  function ghError(res: GhResult, fallback: string): string {
+    const line = res.stderr.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+    return line ? line.slice(0, 200) : fallback;
+  }
+
+  /** The PR for the repo's current branch, or the reason there is none. */
+  async function resolveOpenPr(dir: string, signal?: AbortSignal): Promise<{ pr?: PrSummary; error?: string }> {
+    const res = await runGh(["gh", "pr", "view", "--json", "number,headRefOid,url,state"], dir, { signal });
+    if (!res.ok) return { error: ghError(res, "`gh pr view` failed (gh missing, not authenticated, or no PR)") };
+    const pr = parsePrView(res.stdout);
+    if (!pr) return { error: "`gh pr view` returned no recognizable pull request" };
+    return { pr };
+  }
+
+  /** owner/name for the repo, preferring gh's own answer over URL parsing. */
+  async function resolveRepoSlug(dir: string, pr: PrSummary | undefined, signal?: AbortSignal): Promise<string | null> {
+    const res = await runGh(["gh", "repo", "view", "--json", "nameWithOwner"], dir, { signal });
+    return (res.ok ? parseNameWithOwner(res.stdout) : null) ?? slugFromPrUrl(pr?.url ?? null);
+  }
+
+  /**
+   * Ask GitHub for Copilot's review of one PR (reviews + review threads).
+   * Variables travel as separate argv values — nothing is interpolated into
+   * the query text.
+   */
+  async function fetchCopilotPayload(
+    dir: string,
+    slug: string,
+    prNumber: number,
+    signal?: AbortSignal,
+  ): Promise<CopilotPayload | undefined> {
+    const [owner, name] = slug.split("/");
+    if (!owner || !name) return undefined;
+    const res = await runGh([
+      "gh", "api", "graphql",
+      "-F", `owner=${owner}`,
+      "-F", `name=${name}`,
+      "-F", `number=${prNumber}`,
+      "-f", `query=${COPILOT_THREADS_QUERY}`,
+    ], dir, { signal });
+    if (!res.ok) return undefined;
+    return parseCopilotPayload(res.stdout);
+  }
+
+  /**
+   * Request the Copilot reviewer.
+   *
+   * The argv is FIXED — the only variable is a PR number that came out of
+   * `gh pr view` as an integer. No agent-authored text can reach this command,
+   * which is what makes running a `gh pr edit` (a command the ship gate
+   * blocks) sound here: the gate blocks that command because it can carry PR
+   * title and body text, and this spelling cannot.
+   *
+   * Older `gh` builds have no `@copilot` shorthand, so a failure falls back to
+   * the documented REST review-request endpoint before giving up.
+   */
+  async function requestCopilotReviewer(
+    dir: string,
+    pr: PrSummary,
+    slug: string | null,
+    signal?: AbortSignal,
+  ): Promise<GhResult> {
+    const viaCli = await runGh(["gh", "pr", "edit", String(pr.number), "--add-reviewer", "@copilot"], dir, { signal });
+    if (viaCli.ok || !slug) return viaCli;
+    return await runGh([
+      "gh", "api", "--method", "POST",
+      `repos/${slug}/pulls/${pr.number}/requested_reviewers`,
+      "-f", `reviewers[]=${COPILOT_REVIEWER_LOGIN}`,
+    ], dir, { signal });
+  }
+
+  /** Is the L7 loop active for this repo's state? (mode + project config) */
+  function copilotEnabled(st: GateState): boolean {
+    return projectConfig.copilotReview.enabled && st.taskMode !== "normal";
+  }
+
+  /**
+   * Copilot problems for one repo — a COMPLETION-only requirement.
+   * Never consulted by the ship gate (see lib/copilot-review.ts header).
+   */
+  function copilotProblemsFor(st: GateState | undefined): string[] {
+    if (!st || !copilotEnabled(st)) return [];
+    return copilotProblems(st.copilot);
+  }
+
+  /** The directory `gh` should run in for a given repo root. */
+  function repoDirFor(root: string): string {
+    return root === primaryRepoRoot ? cwd : root;
+  }
+
+  // ---------- L8: the loop goal must be one the USER approved ----------
+
+  /**
+   * Does the goal file's CURRENT text carry the user's approval?
+   *
+   * The comparison is over content, not time: the sidecar holds the hash of
+   * exactly the text shown in the confirm dialog, so an agent edit after the
+   * approval silently drops it — which is the intended behaviour, since the
+   * contract the user agreed to no longer exists. The raw file is re-read here
+   * because the prompt copy is length-capped, and a truncated text cannot be
+   * hashed back to the approved one.
+   */
+  function loopGoalConfirmed(): boolean {
+    const goal = readLoopGoal(primaryRepoRoot);
+    if (!goal.present || !state.loopGoal) return false;
+    let raw: string;
+    try {
+      raw = readFileSync(pathJoin(primaryRepoRoot, LOOP_GOAL_RELPATH), "utf8");
+    } catch {
+      return false; // unreadable ⇒ unapproved (fail-closed)
+    }
+    return isLoopGoalConfirmed(goal, state.loopGoal, raw);
+  }
   // ---------- track edits & precommit results ----------
 
   pi.on("tool_result", async (event, ctx) => {
@@ -1223,6 +1460,15 @@ export default function reviewGate(pi: ExtensionAPI) {
         sensitiveGrants = remaining;
         if (consumed) log(`sensitive-grant consumed for ${consumed.path}`);
       }
+
+      // Normal mode: the extension steps aside completely, and that has to
+      // include ARMING. An armed sidecar would still be read by the L3 git
+      // hooks (which only go advisory for a USER-chosen mode), so tracking
+      // edits here would block the very commits normal mode promises to let
+      // through — the deadlock a headless, forced-normal session would hit on
+      // its first edit. The sensitive-file guard above stays: it is a security
+      // floor, not workflow enforcement.
+      if (state.taskMode === "normal") return;
 
       // P-multi: an edit OUTSIDE the session repo arms THAT repo's own gate.
       // A code/doc file's repo becomes the active repo (the target for the
@@ -1376,6 +1622,27 @@ export default function reviewGate(pi: ExtensionAPI) {
           }
         }
       }
+      // L7: a SUCCESSFUL PR-affecting ship opens a Copilot review round for
+      // the repo the command ran in. `git push` counts even when no PR exists
+      // yet — the check tool resolves that to UNSUPPORTED — because the usual
+      // order is "push the branch, then open the PR", and a requirement that
+      // only armed on `gh pr create` would be bypassed by the previous ship's
+      // terminal state sticking around. A FAILED command arms nothing.
+      if (cmd && event.isError !== true && state.taskMode !== "normal" && projectConfig.copilotReview.enabled) {
+        const kinds = new Set(detectShipCommands(cmd).map((d) => d.kind));
+        if (kinds.has("pr-create") || kinds.has("pr-edit") || kinds.has("push")) {
+          const cmdRepos = resolveCommandRepos(cmd, cwd);
+          const armRoots = cmdRepos.ambiguous ? new Set(sessionRepos) : new Set(cmdRepos.repos);
+          const nowIso = new Date().toISOString();
+          for (const root of armRoots) {
+            const st = root === primaryRepoRoot ? state : stateForRepo(root);
+            st.copilot = armCopilotReview(st.copilot, nowIso);
+            persistRepo(ctx as unknown as ExtensionContext, root);
+            loopArmed = true;
+          }
+        }
+      }
+
       // Edit-discipline nudge (prompt-only, non-blocking): right after a
       // FAILED edit call, a bash command that looks like a direct file write
       // is the exact workaround pattern — append guidance once and close the
@@ -1627,6 +1894,23 @@ export default function reviewGate(pi: ExtensionAPI) {
           problems.push(`[${repoLabel(root)}] gate state missing (fail-closed)`);
         }
       }
+
+      // L7/L8 — completion-only requirements. Neither is in
+      // unmetRequirements(): the Copilot loop needs commits to make progress
+      // (gating ships on it would deadlock it), and the goal approval is a
+      // dialog fact the git hooks cannot see. Both still decide whether the
+      // TASK is finished, which is exactly what this tool answers.
+      const completionProblems: string[] = [];
+      for (const root of sessionRepos) {
+        const st = root === primaryRepoRoot ? state : stateForRepo(root);
+        for (const p of copilotProblemsFor(st)) {
+          completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+        }
+      }
+      if (state.taskMode === "loop" && !loopGoalConfirmed()) {
+        completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+      }
+      problems.push(...completionProblems);
       if (state.taskMode === "explore" || state.taskMode === "normal") {
         // Explore's defining behavior: the agent may end the task on its own
         // judgment. Gate status is reported as advisory only. (Ship commands
@@ -1685,10 +1969,316 @@ export default function reviewGate(pi: ExtensionAPI) {
       // auto-continuations. Like rounds above, this only clears satisfied
       // history — it cannot loosen the ship gate.
       continuationsInjected = 0;
+      completionContinuations = 0;
       persist(ctx as unknown as ExtensionContext);
       return {
         content: [{ type: "text", text: `review-gate: done accepted. ${params.summary}` }],
         details: { accepted: true },
+      };
+    },
+  });
+
+  // ---------- propose_loop_goal tool (L8 — the user approves the contract) ----------
+
+  pi.registerTool({
+    name: "propose_loop_goal",
+    label: "Propose Loop Goal",
+    description:
+      "Submit the NEGOTIATED loop goal (this session's exit contract) for the user's approval. " +
+      "Grill the user first — numbered questions, each with your recommended answer — and only " +
+      "submit what they actually agreed to. The extension shows the text in a confirmation " +
+      "dialog and, if the user approves, writes .pi/loop-goal.md itself and records the approval. " +
+      "Writing that file yourself grants nothing: in loop mode an unapproved goal blocks " +
+      "commit/push/PR and its body is withheld from your prompt. Shape: task title, one-line " +
+      "intent, 3–7 checkable exit criteria, non-goals, ISO date.",
+    parameters: Type.Object({
+      goal: Type.String({ description: "The full goal text (Markdown) as agreed with the user" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const goalText = normalizeGoalText(String(params.goal ?? ""));
+      if (goalText.length === 0) {
+        return {
+          content: [{ type: "text", text: "review-gate: propose_loop_goal rejected — the goal text is empty." }],
+          details: { approved: false },
+          isError: true,
+        };
+      }
+      if (goalText.length > LOOP_GOAL_MAX_WRITE_CHARS) {
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: propose_loop_goal rejected — the goal is ${goalText.length} chars, over the ` +
+              `${LOOP_GOAL_MAX_WRITE_CHARS} limit. An exit contract is 3–7 checkable criteria, not a design doc.`,
+          }],
+          details: { approved: false },
+          isError: true,
+        };
+      }
+
+      // Consent comes from a dialog the EXTENSION renders — there is no
+      // parameter the model could set to claim it. No UI ⇒ no approval; a
+      // session without a UI is forced to normal mode at session_start, so
+      // reaching this branch means the UI disappeared, not a headless run.
+      const uiCtx = ctx as unknown as ExtensionContext;
+      let approved = false;
+      try {
+        approved = (await uiCtx.ui?.confirm?.(GOAL_CONFIRM_TITLE, buildGoalConfirmMessage(goalText))) === true;
+      } catch {
+        approved = false;
+      }
+      if (!approved) {
+        return {
+          content: [{
+            type: "text",
+            text: "review-gate: the user did NOT approve this goal. Ask what is wrong with it, " +
+              "renegotiate, and submit the corrected goal again — do not start shipping work in " +
+              "the meantime.",
+          }],
+          details: { approved: false },
+        };
+      }
+
+      // The EXTENSION writes the file: an approval must describe the text the
+      // user saw, not text the agent might swap in afterwards. The path lives
+      // in the gate-owned .pi/ scope, so this write never moves the worktree
+      // fingerprint and cannot invalidate a READY review or a precommit PASS.
+      const goalPath = pathJoin(primaryRepoRoot, LOOP_GOAL_RELPATH);
+      try {
+        mkdirSync(pathDirname(goalPath), { recursive: true });
+        writeFileSync(goalPath, goalText + "\n", "utf8");
+      } catch (e) {
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: could not write ${LOOP_GOAL_RELPATH} (${e instanceof Error ? e.message : String(e)}). ` +
+              "The approval was NOT recorded.",
+          }],
+          details: { approved: false },
+          isError: true,
+        };
+      }
+      state.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString() };
+      persist(uiCtx);
+      log(`loop goal approved by the user (${goalText.length} chars)`);
+      return {
+        content: [{
+          type: "text",
+          text: `review-gate: goal approved and written to ${LOOP_GOAL_RELPATH}. Work to it; if it has to ` +
+            "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
+            "yourself drops the approval and blocks shipping).",
+        }],
+        details: { approved: true },
+      };
+    },
+  });
+
+  // ---------- L7 Copilot review tools (trusted: the extension runs gh) ----------
+
+  pi.registerTool({
+    name: "request_copilot_review",
+    label: "Request Copilot Review",
+    description:
+      "Ask GitHub Copilot to review the current branch's pull request. Call this after a PR was " +
+      "created or updated (the gate arms the requirement on a successful gh pr create / gh pr " +
+      "edit / git push). The extension resolves the PR, requests the review itself, and stamps " +
+      "the authoritative request time. If the repo or account cannot do Copilot code review (no " +
+      "gh, no GitHub remote, no PR, API refusal) the requirement is released as UNSUPPORTED.",
+    parameters: Type.Object({
+      repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const target = resolveToolRepo(params.repo, "request_copilot_review");
+      if ("error" in target) {
+        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      }
+      const root = target.root;
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      if (!copilotEnabled(st)) {
+        return {
+          content: [{ type: "text", text: "review-gate: the Copilot review loop is off for this repo/mode — nothing to do." }],
+          details: { status: "DISABLED" },
+        };
+      }
+      const nowIso = new Date().toISOString();
+      const dir = repoDirFor(root);
+      const maxRounds = projectConfig.copilotReview.maxRounds;
+
+      // Budget check BEFORE spending another round: a PR where Copilot keeps
+      // finding new things has to end with a human, not with an endless loop.
+      if ((st.copilot?.rounds ?? 0) >= maxRounds) {
+        st.copilot = releaseCopilotReview(st.copilot, "EXHAUSTED",
+          `Copilot review budget spent (${st.copilot?.rounds ?? 0}/${maxRounds} rounds)`, nowIso);
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: Copilot review budget spent (${maxRounds} rounds). The requirement is released ` +
+              "— tell the user what is still open on the PR and let them decide.",
+          }],
+          details: { status: "EXHAUSTED" },
+        };
+      }
+
+      const resolved = await resolveOpenPr(dir, signal);
+      if (!resolved.pr) {
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          `no Copilot review possible: ${resolved.error}`, nowIso);
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: no Copilot review for this repo — ${resolved.error}. Requirement released ` +
+              "(UNSUPPORTED); it is not blocking completion.",
+          }],
+          details: { status: "UNSUPPORTED" },
+        };
+      }
+      const pr = resolved.pr;
+      const slug = await resolveRepoSlug(dir, pr, signal);
+      const requested = await requestCopilotReviewer(dir, pr, slug, signal);
+      if (!requested.ok) {
+        const why = ghError(requested, "the review request was refused");
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          `Copilot review could not be requested: ${why}`, nowIso, pr.head);
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: Copilot code review is not available for PR #${pr.number} — ${why}. ` +
+              "Requirement released (UNSUPPORTED).",
+          }],
+          details: { status: "UNSUPPORTED", pr: pr.number },
+        };
+      }
+      st.copilot = recordCopilotRequest(st.copilot, { pr: pr.number, head: pr.head, nowIso });
+      persistRepo(ctx as unknown as ExtensionContext, root);
+      loopArmed = true;
+      return {
+        content: [{
+          type: "text",
+          text: `review-gate: Copilot review requested for PR #${pr.number} (round ${st.copilot.rounds}/${maxRounds}). ` +
+            "Copilot usually answers within a minute — call check_copilot_review to see whether it " +
+            "has, and what it left open.",
+        }],
+        details: { status: "AWAITING", pr: pr.number, rounds: st.copilot.rounds },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "check_copilot_review",
+    label: "Check Copilot Review",
+    description:
+      "Check what GitHub Copilot's review of the current PR left open. The extension queries the " +
+      "reviews and review threads itself — you cannot report this outcome yourself. A thread " +
+      "counts as handled when it is resolved OR when the last comment in it is yours (the " +
+      "explanation of why it will not be fixed). Returns AWAITING (Copilot has not answered yet), " +
+      "OPEN (threads still waiting on you, listed with their IDs) or SATISFIED.",
+    parameters: Type.Object({
+      repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const target = resolveToolRepo(params.repo, "check_copilot_review");
+      if ("error" in target) {
+        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      }
+      const root = target.root;
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      if (!copilotEnabled(st)) {
+        return {
+          content: [{ type: "text", text: "review-gate: the Copilot review loop is off for this repo/mode — nothing to check." }],
+          details: { status: "DISABLED" },
+        };
+      }
+      const dir = repoDirFor(root);
+      const resolved = await resolveOpenPr(dir, signal);
+      if (!resolved.pr) {
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          `no Copilot review possible: ${resolved.error}`, new Date().toISOString());
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{ type: "text", text: `review-gate: no pull request to check — ${resolved.error}. Requirement released (UNSUPPORTED).` }],
+          details: { status: "UNSUPPORTED" },
+        };
+      }
+      const pr = resolved.pr;
+      const slug = await resolveRepoSlug(dir, pr, signal);
+      if (!slug) {
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          "could not determine the GitHub owner/repo for this PR", new Date().toISOString());
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{ type: "text", text: "review-gate: could not determine owner/repo for this PR. Requirement released (UNSUPPORTED)." }],
+          details: { status: "UNSUPPORTED" },
+        };
+      }
+
+      // Short optimistic poll for the fast path (Copilot often answers within
+      // seconds). The REAL waiting mechanism is the persistent AWAITING state
+      // plus the L2 continuation: blocking a tool call for minutes would burn
+      // the turn and ignore an ESC in the meantime.
+      let payload: CopilotPayload | undefined;
+      let next = st.copilot ?? armCopilotReview(undefined, new Date().toISOString());
+      for (let attempt = 0; attempt < COPILOT_CHECK_ATTEMPTS; attempt++) {
+        if (signal?.aborted) break;
+        payload = await fetchCopilotPayload(dir, slug, pr.number, signal);
+        if (payload) {
+          next = evaluateCopilot(
+            next,
+            analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt }),
+            { nowIso: new Date().toISOString(), now: Date.now(), maxRounds: projectConfig.copilotReview.maxRounds },
+          );
+          next = { ...next, pr: pr.number };
+          if (next.status !== "AWAITING") break;
+        }
+        if (attempt < COPILOT_CHECK_ATTEMPTS - 1) {
+          await new Promise((r) => setTimeout(r, COPILOT_CHECK_DELAY_MS));
+        }
+      }
+
+      if (!payload) {
+        // The GraphQL query failed outright (no gh, no permission, API down).
+        // Releasing is the fail-SAFE direction here: this requirement must
+        // never strand a task over an unreachable API.
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          "the Copilot review query failed (gh missing, unauthenticated, or API refusal)", new Date().toISOString());
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{ type: "text", text: "review-gate: could not read the PR's review threads (gh missing, unauthenticated, or API refusal). Requirement released (UNSUPPORTED)." }],
+          details: { status: "UNSUPPORTED" },
+        };
+      }
+
+      st.copilot = next;
+      persistRepo(ctx as unknown as ExtensionContext, root);
+      if (isCopilotOutstanding(next)) loopArmed = true;
+
+      const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
+      const lines = analysis.actionable.slice(0, 20).map((t) =>
+        `  - ${t.id} ${t.path ?? "(no file)"}${t.line ? ":" + t.line : ""}` +
+        `${t.isOutdated ? " [outdated — the code moved; if that fixed it, resolve the thread]" : ""}\n      ${t.excerpt}`);
+      const text = next.status === "OPEN"
+        ? `review-gate: PR #${pr.number} — ${analysis.actionable.length} Copilot thread(s) waiting on you ` +
+          `(${analysis.resolved} resolved, ${analysis.answered} answered):\n${lines.join("\n")}\n` +
+          "For each: fix it and resolve the thread, or reply in the thread with the reason it will " +
+          "not be fixed. Resolve: gh api graphql -f query='mutation($t:ID!){resolveReviewThread" +
+          "(input:{threadId:$t}){thread{isResolved}}}' -F t=<threadId>. Reply: " +
+          "gh api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply" +
+          "(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}' -F t=<threadId> -F b='<why>'. " +
+          "Then call check_copilot_review again."
+        : next.status === "AWAITING"
+          ? `review-gate: Copilot has not posted its review of PR #${pr.number} yet. Do something useful and ` +
+            "call check_copilot_review again in a minute."
+          : `review-gate: Copilot review of PR #${pr.number} — ${next.note ?? next.status}.`;
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          status: next.status,
+          pr: pr.number,
+          actionable: analysis.actionable.length,
+          resolved: analysis.resolved,
+          answered: analysis.answered,
+        },
       };
     },
   });
@@ -2139,7 +2729,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // this the agent could edit for a whole turn before ever seeing the
         // exit contract it is supposed to establish first.
         const goalNote = effective === "loop"
-          ? "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot))
+          ? "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot), loopGoalConfirmed())
           : "";
         return {
           content: [{
@@ -2354,13 +2944,32 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.pausedQuestion) return;
     if (!loopArmed) return;
     if (state.bypass.active) return;
-    if (!state.hasCodeChange && !state.hasDocChange) return;
-    if (continuationsInjected >= state.maxRounds) return;
     if (!ctx.isIdle()) return;
 
     const fp = computeFingerprint(cwd);
-    const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
-    if (problems.length === 0) return;
+    // Ship-gate requirements only exist once this session touched something.
+    const problems = (state.hasCodeChange || state.hasDocChange)
+      ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
+      : [];
+
+    // L7/L8 — completion-only requirements (never part of the ship authority):
+    // an open Copilot review cycle and an unapproved loop goal. They keep the
+    // loop running after the code itself is clean, which is the whole point of
+    // "the PR is not done when it is opened".
+    const completion: string[] = [];
+    for (const root of sessionRepos) {
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      for (const p of copilotProblemsFor(st)) {
+        completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+      }
+    }
+    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+
+    if (problems.length === 0 && completion.length === 0) return;
+    // Budgets are checked per source: gate problems against maxRounds,
+    // completion-only continuations against their own cap.
+    if (problems.length > 0 && continuationsInjected >= state.maxRounds) return;
+    if (problems.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP) return;
 
     // USER REQUIREMENT: the user aborted this run (ESC — "Operation aborted").
     // Injecting a continuation would override an explicit human stop, so the
@@ -2378,7 +2987,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
 
-    continuationsInjected += 1;
+    if (problems.length > 0) continuationsInjected += 1;
+    else completionContinuations += 1;
     // R10: fire the strategic-reset checklist BEFORE persist so the fired flag
     // survives restarts (one-shot per gate-state lifetime). Pass `state`
     // explicitly — the P-multi signature change (st: GateState) left this
@@ -2387,10 +2997,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     const reset = maybeStrategicReset(state);
     persist(ctx);
     pi.sendUserMessage(
-      "[REVIEW_GATE_RESUME] Quality gates are still unmet:\n" +
-        problems.map((p) => `- ${p}`).join("\n") +
-        `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
-        "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute." +
+      "[REVIEW_GATE_RESUME] " +
+        (problems.length > 0 ? "Quality gates are still unmet:\n" : "The task is not finished yet:\n") +
+        [...problems, ...completion].map((p) => `- ${p}`).join("\n") +
+        (problems.length > 0
+          ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
+            "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute."
+          : `\n(completion continuation ${completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
+            "Continue: work these off — Copilot threads get a fix + resolve or a reply explaining why " +
+            "not (check_copilot_review verifies), an unapproved goal gets negotiated and submitted via " +
+            "propose_loop_goal. Do not summarize; execute.") +
         (!sessionEdited && !state.scopeLimit
           ? "\nIf these unmet gates target PRE-EXISTING changes this session never made, you may call request_scope_limit — the USER decides whether session-only coverage suffices."
           : "") +
@@ -2431,6 +3047,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     // by the loader, so a forged config cannot make the cap unreachable.
     projectConfig = loadProjectConfig(cwd);
     state.maxRounds = projectConfig.maxRounds;
+
+    // USER REQUIREMENT — a session that cannot show a dialog runs in normal
+    // mode, period. Every enforced mode now depends on dialogs (loop-goal
+    // approval, sensitive-edit authorization, downgrade confirmation), so a
+    // headless session would otherwise enter the loop with no way to satisfy
+    // it. Forcing the decision HERE (rather than waiting for set_gate_mode,
+    // which lib/task-mode.ts would reject) means the undecided state — whose
+    // enforcement behaves as loop — never applies to a headless run.
+    if (!ctx.hasUI) setTaskMode("normal", "auto", ctx);
 
     // A restored pause survives the restart: keep auto-continuation disarmed
     // until the user's next message clears it (input handler).
@@ -2618,6 +3243,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(state.pausedQuestion
           ? [`paused:    awaiting user answer to "${state.pausedQuestion.question.slice(0, 120)}" (${state.pausedQuestion.at})`]
           : []),
+        // L8: whether THIS text is the contract the user approved (loop mode
+        // ships are blocked until it is), and L7: the Copilot cycle, which
+        // gates completion only — both are easy to misread from the outside,
+        // so the readout names them explicitly.
+        `loop goal: ${loopGoalConfirmed() ? "approved by the user" : readLoopGoal(primaryRepoRoot).present ? "DRAFT — not approved (loop-mode ships blocked)" : "none"}`,
+        ...(state.copilot
+          ? [`copilot:   ${state.copilot.status}${state.copilot.pr ? ` PR #${state.copilot.pr}` : ""}` +
+            ` (round ${state.copilot.rounds}/${projectConfig.copilotReview.maxRounds}` +
+            `${state.copilot.note ? `; ${state.copilot.note.slice(0, 120)}` : ""})`]
+          : []),
         `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
         `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
         // Explore: ship commands stay fully gated (L1), but declare_done and
@@ -2684,6 +3319,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       state = emptyState(state.sessionId, state.maxRounds);
       loopArmed = true;
       continuationsInjected = 0;
+      completionContinuations = 0;
       agentDowngradesLocked = false;
       lastRunAborted = false;
       scopeLimitDeclined = false;
@@ -2786,9 +3422,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     // (`.pi/loop-goal.md` — see lib/loop-goal.ts for the full rationale).
     // Injected AFTER the explore early-return and BEFORE the unarmed one: the
     // goal must be set while the worktree is still clean, i.e. before the
-    // first edit arms the gate. Prompt-level only; nothing gates on it.
+    // first edit arms the gate. An UNCONFIRMED goal has its body withheld
+    // (L8) and blocks ships at L1; the hooks stay out of it.
     if (state.taskMode === "loop") {
-      systemPrompt += "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot));
+      systemPrompt += "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot), loopGoalConfirmed());
     }
 
     if (!gateArmed && problems.length === 0) {

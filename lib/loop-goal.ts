@@ -27,7 +27,7 @@
  *    prompt budget.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -39,6 +39,9 @@ export const LOOP_GOAL_MAX_CHARS = 1500;
 
 /** Older than this ⇒ warn that the goal may be left over from another session. */
 export const LOOP_GOAL_STALE_MS = 24 * 60 * 60 * 1000;
+
+/** Upper bound on a goal the extension will write on the user's behalf. */
+export const LOOP_GOAL_MAX_WRITE_CHARS = 20000;
 
 export interface LoopGoal {
   /** A non-empty goal file was read. */
@@ -54,6 +57,93 @@ export interface LoopGoal {
 }
 
 const ABSENT: LoopGoal = Object.freeze({ present: false, text: "", truncated: false, stale: false });
+
+// ---------------------------------------------------------------------------
+// L8 — the goal has to be NEGOTIATED, and the confirmation is a fact
+// ---------------------------------------------------------------------------
+//
+// The goal file used to be written by the agent alone, which made it a
+// self-issued exit contract: the agent guessed what "done" meant, wrote it
+// down, and then graded itself against its own guess. Worse, a goal left over
+// from the PREVIOUS task kept being injected verbatim for 24h, so a new
+// session could inherit — and work to — someone else's contract.
+//
+// Both holes close with one fact: a goal counts only while the sidecar holds
+// the hash of exactly this text, recorded when the USER approved it in a
+// dialog the extension rendered. The agent can still write the file (it is an
+// ordinary repo file), but writing it grants nothing: an unconfirmed goal has
+// its body withheld from the prompt and blocks shipping in loop mode.
+
+/** The sidecar record of "the user approved this exact goal text". */
+export interface LoopGoalConfirmation {
+  /** sha256 of the NORMALIZED goal text (see normalizeGoalText). */
+  hash: string;
+  /** ISO time of the user's approval. */
+  at: string;
+}
+
+/**
+ * Canonical form the hash is taken over: line endings unified and outer
+ * whitespace trimmed, so a trailing newline or a CRLF checkout does not
+ * invalidate a goal the user really did approve. Anything else — a reworded
+ * criterion, an added line — changes the hash and needs a fresh approval,
+ * which is the point.
+ */
+export function normalizeGoalText(raw: string): string {
+  return raw.replace(/\r\n/g, "\n").trim();
+}
+
+export function goalTextHash(raw: string): string {
+  return createHash("sha256").update(normalizeGoalText(raw), "utf8").digest("hex");
+}
+
+/**
+ * Is the goal file's CURRENT content the text the user approved?
+ *
+ * Deliberately compares content, not timestamps: an agent edit after the
+ * dialog silently changes the contract, and that must invalidate it.
+ */
+export function isLoopGoalConfirmed(
+  goal: LoopGoal,
+  confirmation: LoopGoalConfirmation | undefined,
+  fileText?: string,
+): boolean {
+  if (!goal.present || !confirmation) return false;
+  // `goal.text` may be truncated for the prompt, so the caller passes the raw
+  // file text when it has it; without it, a truncated goal cannot be verified
+  // and fails closed.
+  const text = fileText ?? (goal.truncated ? undefined : goal.text);
+  if (text === undefined) return false;
+  return goalTextHash(text) === confirmation.hash;
+}
+
+export const GOAL_CONFIRM_TITLE = "review-gate: AI 提交了本次任务的目标（退出条约）——是否认可？";
+
+/** Max characters of the goal shown inside the confirm dialog. */
+export const GOAL_CONFIRM_MAX_CHARS = 2000;
+
+/**
+ * Dialog body. The goal is the agent's text, so it is presented as such and
+ * length-capped; the fixed copy above it states what approval means.
+ */
+export function buildGoalConfirmMessage(goalText: string): string {
+  const normalized = normalizeGoalText(goalText);
+  const shown = normalized.length > GOAL_CONFIRM_MAX_CHARS
+    ? normalized.slice(0, GOAL_CONFIRM_MAX_CHARS) + "\n…（已截断，完整内容将写入 " + LOOP_GOAL_RELPATH + "）"
+    : normalized;
+  return (
+    "同意后，以下内容将由扩展写入 `" + LOOP_GOAL_RELPATH + "`，作为本会话的退出条约：" +
+    "reviewer 会逐条验收它，loop 模式下未经认可的目标会拦住 commit/push/PR。\n\n" +
+    "───── AI 提交的目标（不可信数据） ─────\n" + shown + "\n───────────────────────\n\n" +
+    "不同意就拒绝，然后告诉 AI 哪里不对；它会重新跟你确认后再提交。"
+  );
+}
+
+/** Ship-block copy for loop mode without a confirmed goal (L1 only). */
+export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
+  "loop goal not confirmed by the user — grill the user about what \"done\" means (numbered " +
+  "questions, each with your recommended answer), then call propose_loop_goal so the USER can " +
+  "approve it in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
 /** Read `<repoRoot>/.pi/loop-goal.md`. Never throws: any failure ⇒ absent. */
 export function readLoopGoal(repoRoot: string, now: number = Date.now()): LoopGoal {
@@ -94,33 +184,34 @@ function capText(raw: string): string {
 }
 
 /**
- * Step 0 directive, injected while a loop-mode session has no goal yet.
+ * Step 0 directive, injected while a loop-mode session has no CONFIRMED goal.
  *
- * The engineering skills named here (`to-spec`, `grilling`, `to-tickets`,
- * `wayfinder`) are declared `disable-model-invocation: true` and assume a
- * configured issue tracker, so the agent cannot rely on invoking them itself:
- * they are OPTIONAL accelerators the user triggers. The three-question
- * fallback is always available, which keeps this directive portable to any
- * repo the extension is installed into.
+ * The instruction is to interview the user first, in rounds of numbered
+ * questions that each carry the agent's own recommended answer (the `grilling`
+ * shape), and only then submit the result through `propose_loop_goal` for the
+ * user's approval. The engineering skills named below are declared
+ * `disable-model-invocation: true` and assume a configured issue tracker, so
+ * they are OPTIONAL accelerators the USER triggers; the interview fallback is
+ * always available, which keeps this directive portable to any repo.
  */
 export const LOOP_GOAL_MISSING_DIRECTIVE =
-  "## Loop goal (Step 0 — before you start editing)\n" +
-  "This loop-mode session has no loop goal yet (`" + LOOP_GOAL_RELPATH + "` is missing or empty). " +
-  "The loop goal is this session's EXIT CONTRACT: the checkable facts that mean the task is done " +
-  "and the loop may end. Establish it FIRST, sized to the change — a one-line bugfix deserves one " +
-  "criterion and three lines.\n" +
-  "- Preferred: reuse the user's engineering skills when they are installed — `/to-spec` " +
-  "(synthesize this conversation into a spec), `/grilling` or `/grill-me` (sharpen it until no " +
-  "question remains), `/to-tickets` (slice it into tracer-bullet vertical slices), `/wayfinder` " +
-  "(efforts too big for one session). They are user-invoked (`disable-model-invocation: true`) and " +
-  "may assume a configured issue tracker, so propose the one that fits and let the USER run it — " +
-  "never claim to have run one yourself.\n" +
-  "- Fallback (always available, no skills needed): answer three questions inline — (1) which " +
-  "observable facts prove this task is done, (2) how each one is verified (a command or a concrete " +
-  "observation), (3) what is explicitly out of scope.\n" +
-  "Write the result to `" + LOOP_GOAL_RELPATH + "`: task title, one-line intent, 3–7 checkable exit " +
-  "criteria, non-goals, ISO date. That path is gate-excluded, so writing or rewriting it never " +
-  "changes the fingerprint and never invalidates a review or precommit binding.\n" +
+  "## Loop goal (Step 0 — negotiate it BEFORE you start editing)\n" +
+  "This loop-mode session has no goal the user has approved. The loop goal is this session's " +
+  "EXIT CONTRACT: the checkable facts that mean the task is done and the loop may end. It is " +
+  "NOT yours to assume — a self-written contract lets you grade yourself against your own " +
+  "guess, and a leftover file from a previous task is someone else's contract.\n" +
+  "1. GRILL the user first. Ask the whole frontier of open decisions in ONE round: number each " +
+  "question, give your own recommended answer, and wait for the reply. Their answers open the " +
+  "next round; stop when nothing is left silently assumed. Facts are YOUR job (read the repo, " +
+  "run tools) — only decisions go to the user. Sized to the change: a one-line bugfix is one " +
+  "question, not a questionnaire.\n" +
+  "2. Then call `propose_loop_goal` with the negotiated goal: task title, one-line intent, 3–7 " +
+  "checkable exit criteria, non-goals, ISO date. The EXTENSION shows it to the user for " +
+  "approval and writes `" + LOOP_GOAL_RELPATH + "` itself. Writing that file yourself grants " +
+  "nothing — an unapproved goal blocks commit/push/PR in loop mode and its body is withheld " +
+  "from this prompt.\n" +
+  "(Optional accelerators, only if the USER runs them: `/to-spec`, `/grilling` or `/grill-me`, " +
+  "`/to-tickets`, `/wayfinder`. Propose the one that fits — never claim to have run one.)\n" +
   "Then work the goal: slice it into subagent tasks and hand the goal file to each of them — " +
   "write-capable subagents run SERIALLY in this worktree (their edits change the worktree, so a " +
   "review recorded before them can no longer ship, and concurrent writers would keep invalidating " +
@@ -128,12 +219,37 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "the writer of record: you run precommit, you run the review, you fix the findings. " +
   "`adviser` advises against the goal; `reviewer` accepts against it, criterion by criterion.";
 
+/**
+ * Injected when a goal file EXISTS but the user has not approved this exact
+ * text. The body is deliberately withheld: an unapproved goal is a draft (very
+ * often the previous task's contract), and quoting it into the prompt is what
+ * made a stale contract look authoritative in the first place.
+ */
+export function buildUnconfirmedGoalDirective(goal: LoopGoal): string {
+  const age = formatAge(goal.ageMs);
+  return (
+    "## Loop goal — a DRAFT exists but the user has not approved it\n" +
+    "`" + LOOP_GOAL_RELPATH + "` is present" + (age ? " (updated " + age + ")" : "") +
+    " but its current text carries no user approval, so its contents are deliberately NOT " +
+    "quoted here: an unapproved goal is usually a leftover from an earlier task, and treating " +
+    "it as this session's contract is exactly the mistake this rule exists to prevent. Read the " +
+    "file if you want a starting point, but establish the real goal the normal way.\n" +
+    LOOP_GOAL_MISSING_DIRECTIVE
+  );
+}
+
 /** Per-process data fence for the injected goal text (see buildLoopGoalDirective). */
 const FENCE = "LOOP-GOAL-" + randomBytes(4).toString("hex");
 
-/** Build the per-turn loop-goal paragraph for a loop-mode session. */
-export function buildLoopGoalDirective(goal: LoopGoal): string {
+/**
+ * Build the per-turn loop-goal paragraph for a loop-mode session.
+ *
+ * `confirmed` is the sidecar fact (see {@link isLoopGoalConfirmed}), never a
+ * property of the file itself: only a goal the user approved gets quoted.
+ */
+export function buildLoopGoalDirective(goal: LoopGoal, confirmed = false): string {
   if (!goal.present) return LOOP_GOAL_MISSING_DIRECTIVE;
+  if (!confirmed) return buildUnconfirmedGoalDirective(goal);
   const age = formatAge(goal.ageMs);
   // Fence: unguessable, but computed ONCE per process. A goal file is ordinary
   // Markdown, so `---` is routine in it (front matter, horizontal rules) and a
@@ -153,14 +269,15 @@ export function buildLoopGoalDirective(goal: LoopGoal): string {
     "<<<" + FENCE + "\n" + goal.text + "\n>>>" + FENCE + "\n" +
     (goal.stale
       ? "⚠ This goal is older than 24h — it may be left over from a previous session. Confirm it " +
-        "against what the user is asking for NOW, and rewrite it if it no longer matches.\n"
+        "against what the user is asking for NOW, and renegotiate it if it no longer matches.\n"
       : "") +
     "Work to these criteria and stop when they are all met. Hand this file to every subagent you " +
     "spawn: `adviser` advises against the goal, `reviewer` accepts against it criterion by " +
     "criterion (an unmet criterion is a P1 finding ⇒ BLOCKED). Write-capable subagents run " +
     "SERIALLY in this worktree; read-only ones may run in parallel. If the goal no longer matches " +
-    "the user's request, REWRITE it first — the path is gate-excluded, so updating it never " +
-    "invalidates a review."
+    "the user's request, renegotiate it with the user and re-submit it via `propose_loop_goal` — " +
+    "the path is gate-excluded, so updating it never invalidates a review, but editing the file " +
+    "yourself drops the approval and blocks shipping until the user approves the new text."
   );
 }
 

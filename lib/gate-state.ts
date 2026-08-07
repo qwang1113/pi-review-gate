@@ -20,6 +20,8 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
+import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
+import type { LoopGoalConfirmation } from "./loop-goal.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
 export type PrecommitVerdict = "PASS" | "FAIL" | "NO_CHECKS_RUN" | "NOT_RUN";
@@ -155,6 +157,27 @@ export interface GateState {
    * scope hints stay conservative.
    */
   sessionEditedFiles?: string[];
+  /**
+   * L7: the post-PR Copilot code-review cycle for THIS repo (see
+   * lib/copilot-review.ts). Written by the trusted copilot tools and by the
+   * arming path that watches successful PR ships.
+   *
+   * Deliberately NOT read by {@link unmetRequirements}: fixing a Copilot
+   * finding requires a commit and a push, so a Copilot requirement inside the
+   * ship authority would block its own remedy. It gates task COMPLETION
+   * (declare_done + the L2 continuation) instead. Absent ⇒ no cycle is open.
+   */
+  copilot?: CopilotReviewState;
+  /**
+   * L8: the user's approval of the CURRENT loop-goal text (hash + time,
+   * written only by propose_loop_goal after an extension-rendered dialog).
+   *
+   * Absent ⇒ the goal is a draft: its body is withheld from the prompt and
+   * loop-mode ships are blocked at L1. Like {@link copilot} it stays out of
+   * {@link unmetRequirements}, so the git hooks (which cannot see a dialog)
+   * keep judging code facts only.
+   */
+  loopGoal?: LoopGoalConfirmation;
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of
    *  them. Ship enforcement never reads it; absence just narrows the
@@ -258,6 +281,26 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         (!Array.isArray(parsed.sessionReposPaths) ||
          !parsed.sessionReposPaths.every((v) => typeof v === "string"))) {
       delete parsed.sessionReposPaths;
+    }
+    // L7: a malformed Copilot cycle is repaired, never trusted verbatim and
+    // never fatal — sanitizeCopilotState downgrades an unrecognized status to
+    // ARMED (still to be proven) and drops a non-object entirely. Rejecting
+    // the whole sidecar here would brick the ship gate over a field the ship
+    // gate does not even read.
+    if (parsed.copilot !== undefined) {
+      const copilot = sanitizeCopilotState(parsed.copilot);
+      if (copilot) parsed.copilot = copilot;
+      else delete parsed.copilot;
+    }
+    // L8: a malformed goal approval is treated as ABSENT — the fail-closed
+    // direction here is "not approved" (goal body withheld, loop ships
+    // blocked), so a forged or truncated record can only cost a fresh dialog.
+    if (parsed.loopGoal !== undefined &&
+        (typeof parsed.loopGoal !== "object" || parsed.loopGoal === null ||
+         typeof parsed.loopGoal.hash !== "string" ||
+         !/^[0-9a-f]{64}$/.test(parsed.loopGoal.hash) ||
+         typeof parsed.loopGoal.at !== "string")) {
+      delete parsed.loopGoal;
     }
     const migrated = migrateFingerprintVersion(parsed);
     if (out) out.migrated = migrated;

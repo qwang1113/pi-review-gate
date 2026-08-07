@@ -48,9 +48,9 @@ test("rank order is normal < explore < loop", () => {
 test("undecided → loop applies immediately with source auto", () => {
   assert.deepEqual(decide({ current: undefined, requested: "loop" }),
     { action: "apply", source: "auto" });
-  // even without a UI: loop is the fail-closed default made explicit
-  assert.deepEqual(decide({ current: undefined, requested: "loop", hasUI: false }),
-    { action: "apply", source: "auto" });
+  // …but NOT without a UI: a session that cannot render a dialog can only be
+  // normal (see the no-UI test below).
+  assert.deepEqual(decide({ current: undefined, requested: "loop", hasUI: false }).action, "reject");
 });
 
 test("undecided → explore applies with source auto only on a CLEAN interactive session", () => {
@@ -66,13 +66,24 @@ test("SECURITY: undecided → explore with tracked changes is a real downgrade (
     { action: "confirm" });
 });
 
-test("SECURITY: no-UI sessions can never loosen — only undecided→loop and upgrades", () => {
-  // print/JSON mode has no confirm dialog; auto-continuation is the only
-  // driving force there, so injected content must not be able to switch it off.
-  assert.equal(decide({ current: undefined, requested: "explore", hasUI: false }).action, "reject");
-  assert.equal(decide({ current: undefined, requested: "normal", hasUI: false }).action, "reject");
-  assert.equal(decide({ current: "loop", requested: "explore", hasUI: false }).action, "reject");
-  assert.equal(decide({ current: "explore", requested: "normal", hasUI: false }).action, "reject");
+test("USER REQUIREMENT: a no-UI session can ONLY be normal", () => {
+  // print/JSON mode cannot render a dialog, and every enforced mode now needs
+  // one (loop-goal approval, sensitive-edit authorization, downgrade confirm).
+  // Half-enforcing would strand such a session in a loop it can never satisfy,
+  // so the gate steps aside entirely instead: normal applies, everything else
+  // is refused with an explanation.
+  assert.deepEqual(decide({ current: undefined, requested: "normal", hasUI: false }),
+    { action: "apply", source: "auto" });
+  assert.deepEqual(decide({ current: "loop", requested: "normal", hasUI: false }),
+    { action: "apply", source: "auto" });
+  for (const [current, requested] of [
+    [undefined, "loop"], [undefined, "explore"],
+    ["normal", "loop"], ["normal", "explore"], ["explore", "loop"],
+  ] as const) {
+    const d = decide({ current, requested, hasUI: false });
+    assert.equal(d.action, "reject", `${current}→${requested} (no UI)`);
+    assert.match((d as { reason: string }).reason, /no interactive UI/);
+  }
 });
 
 test("SECURITY: normal always requires user consent — even as the initial classification", () => {
@@ -100,8 +111,11 @@ test("SECURITY: firstDecideAuto never loosens a dirty session, a no-UI session, 
   // exist, "classifying" the session is a real downgrade and needs consent.
   assert.equal(decide({ current: undefined, requested: "normal", firstDecideAuto: true, hasChanges: true }).action, "confirm");
   assert.equal(decide({ current: undefined, requested: "explore", firstDecideAuto: true, hasChanges: true }).action, "confirm");
-  // print/JSON mode has no user present — fail-closed regardless of the flag.
-  assert.equal(decide({ current: undefined, requested: "normal", firstDecideAuto: true, hasUI: false }).action, "reject");
+  // print/JSON mode: the no-UI rule decides first — normal applies (the gate
+  // steps aside), and the LLM's other verdicts are refused outright.
+  assert.deepEqual(decide({ current: undefined, requested: "normal", firstDecideAuto: true, hasUI: false }),
+    { action: "apply", source: "auto" });
+  assert.equal(decide({ current: undefined, requested: "loop", firstDecideAuto: true, hasUI: false }).action, "reject");
   // firstDecideAuto only covers the FIRST decision: later downgrades keep
   // asking the user even though the flag may still be passed.
   assert.equal(decide({ current: "loop", requested: "explore", firstDecideAuto: true }).action, "confirm");
@@ -124,9 +138,10 @@ test("every upgrade applies immediately with source auto", () => {
   ] as const) {
     assert.deepEqual(decide({ current, requested }),
       { action: "apply", source: "auto" }, `${current}→${requested}`);
-    // upgrades work without a UI and regardless of tracked changes
-    assert.deepEqual(decide({ current, requested, hasUI: false, hasChanges: true }),
-      { action: "apply", source: "auto" }, `${current}→${requested} (no UI)`);
+    // upgrades work regardless of tracked changes (a no-UI session is normal
+    // only — see the dedicated test)
+    assert.deepEqual(decide({ current, requested, hasChanges: true }),
+      { action: "apply", source: "auto" }, `${current}→${requested} (dirty)`);
   }
 });
 

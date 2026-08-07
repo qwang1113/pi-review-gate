@@ -40,18 +40,32 @@ test("loop goal: set_gate_mode(loop) delivers Step 0 in the same turn it decides
   assert.match(SRC.slice(toolInjectAt - 200, toolInjectAt), /effective === "loop"/);
 });
 
-test("loop goal stays PROMPT-LEVEL: no gate, hook or verdict logic reads it", () => {
-  // A self-written text file must never become a ship precondition — the hard
-  // gates rest on objective facts (nonce receipt, git fingerprint).
-  const gateSources = [
-    join(ROOT, "lib", "gate-state.ts"),
+test("the loop goal gates SHIP at L1 only — hooks and verdict logic stay blind to it", () => {
+  // USER REQUIREMENT (L8): an unapproved goal blocks commit/push/PR, because
+  // negotiating the contract after the code is pushed is theatre. What did NOT
+  // change: the gate's other layers still rest on objective facts they can
+  // verify themselves. The approval is a DIALOG fact, and a git hook cannot
+  // show a dialog — so the hook, the verdict parser and the fingerprint must
+  // remain unaware of the goal entirely.
+  const blindSources = [
     join(ROOT, "lib", "verdict-parse.ts"),
     join(ROOT, "lib", "fingerprint.ts"),
     join(ROOT, "hooks", "pre-commit"),
   ];
-  for (const file of gateSources) {
+  for (const file of blindSources) {
     assert.doesNotMatch(readFileSync(file, "utf8"), /loop-goal|loopGoal/, file + " must not depend on the loop goal");
   }
+  // gate-state may STORE the approval, but unmetRequirements() — the single
+  // ship authority the hooks share — must never read it: a hook that failed on
+  // an unapproved goal would block commits it can never unblock.
+  const gateState = readFileSync(join(ROOT, "lib", "gate-state.ts"), "utf8");
+  const reqAt = gateState.indexOf("export function unmetRequirements");
+  assert.ok(reqAt > 0, "unmetRequirements must exist");
+  const reqBody = gateState.slice(reqAt, gateState.indexOf("\nexport ", reqAt + 10));
+  assert.doesNotMatch(reqBody, /loopGoal|copilot/i,
+    "the ship authority must not read the goal approval or the Copilot cycle");
+  // The ship block itself lives in the extension's L1 tool_call path.
+  assert.match(SRC, /LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/);
   // …and the goal file must remain inside the fingerprint-excluded .pi/ scope,
   // otherwise writing a goal would invalidate the session's own review.
   const fp = readFileSync(join(ROOT, "lib", "fingerprint.ts"), "utf8");
@@ -349,21 +363,31 @@ test("explore workflow: advisory completion, no edit/bash blocking, ship gate in
 
 test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed normal may", () => {
   // Ship commands (git commit/push, gh pr) must stay fully gated in explore:
-  // it only relaxes declare_done and auto-continuation. The ONLY permitted
-  // mode branch in tool_call is the normal-mode early return (every path into
-  // normal is user-confirmed — see evaluateModeChange).
+  // it only relaxes declare_done and auto-continuation. Two mode branches are
+  // permitted in tool_call, and neither loosens anything for explore:
+  //   normal — the early return (every path into normal is user-confirmed, or
+  //            a no-UI session where the gate steps aside entirely);
+  //   loop   — the L8 loop-goal ship block, which only ADDS a requirement.
   const start = SRC.indexOf('pi.on("tool_call"');
   assert.ok(start >= 0, "tool_call handler must exist");
-  const end = SRC.indexOf('pi.on("tool_result"', start);
-  assert.ok(end > start, "tool_result handler must follow tool_call");
+  // Slice the HANDLER only (it closes with `\n  });` at handler indentation),
+  // not everything up to the next handler — helper functions live in between.
+  const end = SRC.indexOf("\n  });", start);
+  assert.ok(end > start, "tool_call handler must be closed");
   const body = SRC.slice(start, end);
   assert.doesNotMatch(body, /taskMode\s*===\s*"explore"/,
     "tool_call must never branch on explore");
   assert.doesNotMatch(body, /taskMode\s*!==/,
     "tool_call must not use negated mode branches");
   const modeBranches = [...body.matchAll(/taskMode\s*===\s*"(\w+)"/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(modeBranches)], ["normal"],
-    "the only tool_call mode branch is normal");
+  assert.deepEqual([...new Set(modeBranches)].sort(), ["loop", "normal"],
+    "the only tool_call mode branches are normal (step aside) and loop (goal block)");
+  // The loop branch must only PUSH a requirement — its own block body must not
+  // return (i.e. it can never wave a ship through, only add to `problems`).
+  const loopAt = body.indexOf('taskMode === "loop"');
+  const loopBlock = body.slice(loopAt, body.indexOf("\n    }", loopAt));
+  assert.match(loopBlock, /problems\.push\(/);
+  assert.doesNotMatch(loopBlock, /return|block:\s*false/);
 });
 
 test("SECURITY: the sensitive-file guard runs BEFORE the normal-mode edit return (security floor)", () => {
@@ -674,6 +698,89 @@ test("SECURITY: a declined sensitive path is locked, and grants never reach the 
     "sensitive-file grants must never be written into the persisted gate state");
 });
 
+// ---------------------------------------------------------------------------
+// L8 — the loop goal is negotiated with the user, not written by the agent
+
+test("propose_loop_goal: the USER approves in an extension dialog, and the EXTENSION writes the file", () => {
+  const start = SRC.indexOf('name: "propose_loop_goal"');
+  assert.ok(start > 0, "the tool must be registered");
+  const body = SRC.slice(start, start + 6000);
+  assert.match(body, /ui\?\.confirm\?\.\(|ctx\.ui\.confirm\(/,
+    "the extension must render the approval dialog itself");
+  assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
+    "no agent-supplied 'confirmed' parameter — that would be self-approval");
+  // The approval must describe text the USER saw: the extension writes the
+  // file, and the sidecar records the hash of exactly that text.
+  assert.match(body, /writeFileSync\(goalPath/);
+  assert.match(body, /state\.loopGoal = \{ hash: goalTextHash\(goalText\)/);
+  assert.match(body, /LOOP_GOAL_MAX_WRITE_CHARS/, "the goal must be length-bounded");
+});
+
+test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", () => {
+  // If the check were "a confirmation exists", the agent could approve a
+  // one-line goal and then rewrite the file into whatever it wanted to ship.
+  assert.match(SRC, /function loopGoalConfirmed\(\)/);
+  assert.match(SRC, /isLoopGoalConfirmed\(goal, state\.loopGoal, raw\)/);
+  assert.match(SRC, /return false; \/\/ unreadable/, "an unreadable goal file must fail closed");
+});
+
+// ---------------------------------------------------------------------------
+// L7 — the post-PR Copilot review loop
+
+test("the Copilot tools are TRUSTED: the extension runs gh, the agent cannot report the outcome", () => {
+  for (const name of ["request_copilot_review", "check_copilot_review"]) {
+    const start = SRC.indexOf(`name: "${name}"`);
+    assert.ok(start > 0, `${name} must be registered`);
+    const body = SRC.slice(start, start + 7000);
+    // The only parameter is the repo selector — no status, no thread list, no
+    // "I handled it" flag the model could fill in.
+    assert.doesNotMatch(body, /status\s*:\s*Type\.|threads\s*:\s*Type\.|resolved\s*:\s*Type\./,
+      `${name} must not accept an agent-reported outcome`);
+    assert.match(body, /await (resolveOpenPr|fetchCopilotPayload|requestCopilotReviewer)\(/,
+      `${name} must gather its own evidence via gh`);
+  }
+  // gh runs as argv through the async spawn helper (never a shell string, and
+  // never a sync spawn that would freeze the host).
+  assert.match(SRC, /async function runGh\(/);
+  assert.match(SRC, /spawn\(argv\[0\], argv\.slice\(1\)/);
+  assert.doesNotMatch(SRC, /runGh\([^)]*shell/);
+});
+
+test("SECURITY: the Copilot requirement never touches the SHIP gate (it would deadlock)", () => {
+  // Fixing a Copilot finding requires a commit and a push. A Copilot
+  // requirement inside the ship authority would therefore block its own
+  // remedy — so it may appear only in the completion paths.
+  const callStart = SRC.indexOf('pi.on("tool_call"');
+  const callBody = SRC.slice(callStart, SRC.indexOf("\n  });", callStart));
+  assert.doesNotMatch(callBody, /copilot/i, "the L1 ship gate must not consult the Copilot cycle");
+  // …and it must be wired into both completion surfaces instead.
+  const doneStart = SRC.indexOf('name: "declare_done"');
+  assert.match(SRC.slice(doneStart, doneStart + 6000), /copilotProblemsFor\(/);
+  const settledStart = SRC.indexOf('pi.on("agent_settled"');
+  assert.match(SRC.slice(settledStart, settledStart + 4000), /copilotProblemsFor\(/);
+});
+
+test("a FAILED ship arms nothing; a successful PR ship arms the repo it ran in", () => {
+  const at = SRC.indexOf("L7: a SUCCESSFUL PR-affecting ship");
+  assert.ok(at > 0, "the arming site must be documented");
+  const body = SRC.slice(at, at + 1400);
+  assert.match(body, /event\.isError !== true/, "a failed command must not arm a cycle");
+  assert.match(body, /detectShipCommands\(cmd\)/, "reuse the audited ship detector");
+  assert.match(body, /kinds\.has\("pr-create"\)/);
+  assert.match(body, /kinds\.has\("push"\)/);
+  assert.match(body, /armCopilotReview\(st\.copilot, nowIso\)/);
+});
+
+test("waiting for Copilot spends its OWN continuation budget, not the review loop's", () => {
+  // Otherwise a slow Copilot would burn the rounds the fix→review loop needs,
+  // and the session would run out of continuations before fixing anything.
+  assert.match(SRC, /let completionContinuations = 0/);
+  assert.match(SRC, /COMPLETION_CONTINUATION_CAP/);
+  const settledStart = SRC.indexOf('pi.on("agent_settled"');
+  const body = SRC.slice(settledStart, settledStart + 4000);
+  assert.match(body, /problems\.length > 0 && continuationsInjected >= state\.maxRounds/);
+  assert.match(body, /problems\.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP/);
+});
 test("SECURITY: a sensitive-file grant is consumed on the RESULT, not at tool_call", () => {
   const callStart = SRC.indexOf('pi.on("tool_call"');
   const resultStart = SRC.indexOf('pi.on("tool_result"');
@@ -900,9 +1007,9 @@ test("restore() collects the migration result from loadSidecar, not from a secon
 test("session_start surfaces the migration notice and clears the flag", () => {
   const at = SRC.indexOf('pi.on("session_start"');
   assert.ok(at >= 0, "session_start handler must exist");
-  // 5200: the P-multi reset block at the handler head pushes the notice
-  // section past the old 4000-char window.
-  const body = SRC.slice(at, at + 5200);
+  // 6000: the P-multi reset block and the no-UI mode forcing at the handler
+  // head push the notice section past the older windows.
+  const body = SRC.slice(at, at + 6000);
   assert.match(body, /if \(fingerprintMigrated\)/,
     "an invalidated binding must be explained, not silently applied");
   assert.match(body, /FINGERPRINT_MIGRATION_NOTICE/);
