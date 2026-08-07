@@ -57,6 +57,28 @@ test("loop goal stays PROMPT-LEVEL: no gate, hook or verdict logic reads it", ()
   const fp = readFileSync(join(ROOT, "lib", "fingerprint.ts"), "utf8");
   assert.match(fp, /GATE_EXCLUDE_PATHSPECS[\s\S]{0,200}":\/\.pi"/);
 });
+test("blocked marker: every call site reclaims by ownership, none unlinks unconditionally", () => {
+  // The old code deleted `.blocked` outright on session start and after every
+  // successful write, which erased a CONCURRENT session's fail-closed signal
+  // (its state never reached disk) and left the hooks verifying a stale but
+  // well-formed sidecar — fail-closed degraded to fail-open.
+  assert.doesNotMatch(SRC, /unlinkSync/, "the extension must not delete the marker directly");
+  assert.doesNotMatch(SRC, /FAILED_WRITE/, "the legacy content-free marker must be gone");
+  assert.match(SRC, /from "\.\/lib\/blocked-marker\.ts"/);
+
+  const reclaims = SRC.match(/reconcileBlockedMarker\(/g) ?? [];
+  assert.equal(reclaims.length, 3,
+    "session start, persist() and persistRepo() must all reclaim through the shared logic");
+  const records = SRC.match(/recordBlockedMarker\(/g) ?? [];
+  assert.equal(records.length, 2, "both write-failure paths must record an owner");
+
+  // Session start must reclaim on its own: an early return (explore/normal) or
+  // a throw can mean persist() never runs that turn.
+  const sessionStartAt = SRC.indexOf('pi.on("session_start"');
+  assert.ok(sessionStartAt > 0, "session_start handler must exist");
+  assert.ok(SRC.indexOf("reconcileBlockedMarker(", sessionStartAt) > 0,
+    "session_start must reclaim orphan owners");
+});
 
 test("edits under gate-owned dirs do NOT arm the gate (writing a loop goal must not demote READY)", () => {
   // The fingerprint already excludes .pi/; edit tracking must skip the same

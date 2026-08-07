@@ -606,6 +606,25 @@ gated **per repo**:
   unreliable by design — the two sessions keep re-arming each other's gate —
   so the gate warns at session start when it sees another recent session; use
   `git worktree add` for parallel work.
+- **The `.blocked` fail-closed marker has owners**: when the extension cannot
+  write the sidecar it drops `.pi/review-gate-state.json.blocked`, and the L3
+  hooks refuse to commit while that file exists (the sidecar they would
+  otherwise verify is stale). The marker used to be content-free and deleted
+  unconditionally — on session start and after every successful write — so one
+  session routinely erased a *concurrent* session's fail-closed signal, leaving
+  the hooks verifying a stale but well-formed sidecar (fail-closed degraded to
+  fail-open). It now carries its owners (`{ sessionId, pid, host, at }`, written
+  atomically) and is reclaimed only for owners that are **ours** or that have
+  been silent past the concurrent-session window; anything else survives, and
+  the file disappears only once no owner is left. There is deliberately no pid
+  liveness probe: it is meaningless for a checkout shared across hosts and pid
+  reuse can point at a stranger. A marker whose content does not parse (the
+  legacy plain-text one from an older install, or a hand-edited/corrupt file) is
+  **never** removed or rewritten — clear it once by hand, or commit with
+  `REVIEW_GATE_BYPASS=1`. The hook itself still tests existence only and never
+  reads the file: during an upgrade an older extension still writes the legacy
+  marker, and a hook that had to interpret unparsable content is exactly where
+  a guess would become a fail-open.
 - **L3 git hooks are not auto-installed into other repos**: they cover the
   repo(s) where `scripts/install-git-hooks.sh` (or the global installer) ran.
   For a repo you know the model will work in, install the hooks there too for
@@ -1062,6 +1081,7 @@ lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count table �
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)
 lib/fingerprint.ts            worktree fingerprint (content-addressed git tree hash; staging-invariant)
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
+lib/blocked-marker.ts         .blocked marker ownership (record failure, reclaim only our own/orphans)
 lib/verdict-parse.ts          all-fence worst-wins verdict parser
 scripts/precommit-runner.mjs  PASS/FAIL/NO_CHECKS_RUN runner; writes nonce receipt for run_precommit
 scripts/install-project.sh    per-project installer (same layout as global)

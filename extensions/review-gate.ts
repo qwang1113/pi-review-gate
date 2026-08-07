@@ -43,7 +43,7 @@
  *   —   /gate-lesson self-improvement log (.pi/review-gate-lessons.md)
  */
 
-import { existsSync, statSync, unlinkSync, writeFileSync, readFileSync, mkdtempSync, rmSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, statSync, readFileSync, mkdtempSync, rmSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,6 +127,11 @@ import {
 } from "./lib/edit-discipline.ts";
 import { projectEditedContent } from "./lib/edit-projection.ts";
 import { buildLoopGoalDirective, readLoopGoal } from "./lib/loop-goal.ts";
+import {
+  blockedMarkerPath,
+  recordBlockedMarker,
+  reconcileBlockedMarker,
+} from "./lib/blocked-marker.ts";
 import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "./lib/workflow-commands.ts";
 import {
   parseArbitrableAction,
@@ -305,15 +310,17 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
   /** Persist a repo's state: the primary repo goes through persist() (session
    *  entry + widget + .blocked handling); other repos write their own sidecar
-   *  (the same fail-closed .blocked marker on write failure). */
+   *  (the same fail-closed .blocked marker on write failure). Each repo's
+   *  marker is reclaimed strictly against its OWN path — one repo's successful
+   *  write says nothing about another repo's failed one. */
   function persistRepo(ctx: ExtensionContext, root: string) {
     if (root === primaryRepoRoot) { persist(ctx); return; }
     const s = stateForRepo(root);
     try {
       saveSidecarPreservingConcurrent(sidecarPath(root), s, () => digestForMerge(root));
-      try { unlinkSync(sidecarPath(root) + ".blocked"); } catch { /* didn't exist */ }
+      reconcileBlockedMarker(blockedMarkerPath(sidecarPath(root)), { sessionId: s.sessionId });
     } catch {
-      try { writeFileSync(sidecarPath(root) + ".blocked", "FAILED_WRITE"); } catch { /* */ }
+      recordBlockedMarker(blockedMarkerPath(sidecarPath(root)), { sessionId: s.sessionId });
     }
   }
 
@@ -553,10 +560,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
     try {
       saveSidecarPreservingConcurrent(sidecarPath(cwd), state, () => digestForMerge(cwd));
-      // P1-5: clear stale .blocked marker on successful write.
-      try { unlinkSync(sidecarPath(cwd) + ".blocked"); } catch { /* didn't exist */ }
+      // Our own earlier write failure (if any) is resolved: reclaim OUR owner
+      // entry — and any owner whose session has been silent past the
+      // concurrent-session window — but never a live foreign one.
+      reconcileBlockedMarker(blockedMarkerPath(sidecarPath(cwd)), { sessionId: state.sessionId });
     } catch {
-      try { writeFileSync(sidecarPath(cwd) + ".blocked", "FAILED_WRITE"); } catch { /* */ }
+      recordBlockedMarker(blockedMarkerPath(sidecarPath(cwd)), { sessionId: state.sessionId });
     }
     try {
       // Store continuation count alongside state so it survives restarts.
@@ -2298,8 +2307,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
     }
 
-    // Clean orphan .blocked marker from a prior session.
-    try { unlinkSync(sidecarPath(cwd) + ".blocked"); } catch { /* didn't exist */ }
+    // Reclaim orphan .blocked owners (ours, plus any session silent past the
+    // concurrent-session window). Deliberately NOT an unconditional unlink:
+    // that deleted the fail-closed signal of a CONCURRENT session whose state
+    // never reached disk, leaving the hooks to verify a stale-but-well-formed
+    // sidecar — fail-closed degraded to fail-open. Done here as well as in
+    // persist() because an early return (explore/normal, or a throw) can mean
+    // persist() never runs this turn.
+    reconcileBlockedMarker(blockedMarkerPath(sidecarPath(cwd)), { sessionId: state.sessionId });
 
     // Explain an invalidated binding instead of letting READY silently become
     // PENDING after an upgrade (see migrateFingerprintVersion).
