@@ -68,6 +68,7 @@ import {
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "./lib/project-config.ts";
 import { buildGitMemory } from "./lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "./lib/ship-detect.ts";
+import { gitRootOfDir, resolveShipRepos, resolveCommandRepos } from "./lib/repo-resolve.ts";
 import { firstNonEnglish, containsNonLatinLetter } from "./lib/lang-detect.ts";
 import { validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
 import { advisoryChangeToken, changedFiles, computeFingerprint } from "./lib/fingerprint.ts";
@@ -225,6 +226,83 @@ export default function reviewGate(pi: ExtensionAPI) {
   // same-session resume re-seeds it from state.scopeLimit.sessionFiles.
   const sessionEditedPaths = new Set<string>();
 
+  // ---- Multi-repo tracking (see lib/repo-resolve.ts) ----
+  // The gate's sidecar + fingerprint bind to the SESSION repo (cwd's git
+  // root). When the agent edits or ships from ANOTHER git repository (sibling
+  // checkout, submodule, …), that repo gets its OWN sidecar + fingerprint.
+  // `activeRepoRoot` is the repo the agent most recently edited — the target
+  // of record_review / run_precommit. `sessionRepos` collects every repo this
+  // session has edited; declare_done requires ALL of them to pass.
+  let primaryRepoRoot = gitRootOfDir(cwd) ?? cwd;
+  const activeRepoRoot = { current: primaryRepoRoot };
+  const sessionRepos = new Set<string>([primaryRepoRoot]);
+  // Non-primary repo states (primary is `state` itself). Loaded lazily;
+  // each is persisted to its own repo's .pi/review-gate-state.json sidecar so
+  // the L3 git hooks (which read the repo-local sidecar) see the same state.
+  const repoStateCache = new Map<string, GateState>();
+
+  /** State for a repo. The primary repo IS `state`; every other repo gets a
+   *  lazily loaded/cached independent state. A sidecar left over from a
+   *  DIFFERENT session is not trusted: we start fresh but preserve the fact
+   *  that the worktree holds changes (fail-closed — pre-existing uncommitted
+   *  work must still arm the gate). */
+  function stateForRepo(root: string): GateState {
+    if (root === primaryRepoRoot) return state;
+    let s = repoStateCache.get(root);
+    if (!s) {
+      const existing = loadSidecar(sidecarPath(root));
+      if (existing && existing.sessionId === state.sessionId) {
+        s = existing;
+      } else {
+        s = emptyState(state.sessionId ?? null, projectConfig.maxRounds);
+        const files = changedFiles(root);
+        if (files && files.length > 0) {
+          if (files.some(isCodeFile)) s.hasCodeChange = true;
+          if (files.some(isDocFile)) s.hasDocChange = true;
+          if (s.hasCodeChange || s.hasDocChange) {
+            s.review.verdict = "PENDING";
+            s.precommit.verdict = "NOT_RUN";
+          }
+        }
+      }
+      repoStateCache.set(root, s);
+    }
+    return s;
+  }
+
+  /** Persist a repo's state: the primary repo goes through persist() (session
+   *  entry + widget + .blocked handling); other repos write their own sidecar
+   *  (the same fail-closed .blocked marker on write failure). */
+  function persistRepo(ctx: ExtensionContext, root: string) {
+    if (root === primaryRepoRoot) { persist(ctx); return; }
+    const s = stateForRepo(root);
+    try {
+      saveSidecar(sidecarPath(root), s);
+      try { unlinkSync(sidecarPath(root) + ".blocked"); } catch { /* didn't exist */ }
+    } catch {
+      try { writeFileSync(sidecarPath(root) + ".blocked", "FAILED_WRITE"); } catch { /* */ }
+    }
+  }
+
+  /** Human label for a repo in messages (the primary repo keeps no prefix). */
+  function repoLabel(root: string): string {
+    return root === primaryRepoRoot ? "session repo" : root.split("/").pop() || root;
+  }
+
+  /** State used for ENFORCEMENT checks (ship gate, declare_done): the
+   *  primary's live state, the in-memory cache, or a sidecar left by THIS
+   *  session. A sidecar from ANOTHER session is NOT trusted here (same policy
+   *  as stateForRepo — see its docstring): it falls through to undefined so
+   *  the caller's fail-closed "no gate state" handling applies (a never-
+   *  edited repo with uncommitted work blocks shipping from it). */
+  function enforcementStateFor(root: string): GateState | undefined {
+    if (root === primaryRepoRoot) return state;
+    const cached = repoStateCache.get(root);
+    if (cached) return cached;
+    const loaded = loadSidecar(sidecarPath(root));
+    return loaded && loaded.sessionId === state.sessionId ? loaded : undefined;
+  }
+
   /** Normalize a tool/git path to a repo-relative form for scope comparisons
    *  (changedFiles() emits repo-root-relative paths; edit tools may pass
    *  absolute). NOTE: assumes the session cwd IS the repo root — the same
@@ -303,16 +381,23 @@ export default function reviewGate(pi: ExtensionAPI) {
    * pure, unit-tested shouldStrategicReset() (review verdict must be BLOCKED —
    * a READY loop merely awaiting precommit must NOT consume the one-shot).
    * Returns the checklist text to append (and marks it fired), or "".
+   * The state parameter defaults to the primary `state` so a missed
+   * argument can never dereference undefined (the P-multi signature change
+   * to `st: GateState` left the L2 auto-continuation call bare, which
+   * threw inside shouldStrategicReset).
    */
-  function maybeStrategicReset(): string {
-    if (!shouldStrategicReset(state, projectConfig.thinkHarder, STRATEGIC_RESET_OFFSET)) return "";
-    state.strategicResetFired = true;
+  function maybeStrategicReset(st: GateState = state): string {
+    if (!shouldStrategicReset(st, projectConfig.thinkHarder, STRATEGIC_RESET_OFFSET)) return "";
+    st.strategicResetFired = true;
     return "\n\n" + STRATEGIC_RESET_CHECKLIST;
   }
 
   // ---------- persistence ----------
 
   function persist(ctx: ExtensionContext) {
+    // P-multi: persist the session's repo set so a same-session resume (or
+    // restart) re-arms declare_done against every repo this session edited.
+    state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
     try {
       saveSidecar(sidecarPath(cwd), state);
       // P1-5: clear stale .blocked marker on successful write.
@@ -563,6 +648,37 @@ export default function reviewGate(pi: ExtensionAPI) {
     // P0-5: detect ALL ship commands, not just the first. Block if ANY operation
     // would ship ungated and warn about compound commands.
     const ships = detectShipCommands(command);
+
+    // P-multi: resolve the repos this command operates on — but ONLY once
+    // there is something to check. A plain command (no ship op, not even a
+    // suspicious git/gh mention) must not pay for the per-segment git
+    // subprocesses in resolveShipRepos.
+    if (ships.length === 0
+      && !(projectConfig.llmGuards.shipDetect && isSuspiciousShipCandidate(command))) {
+      return;
+    }
+    const resolution = resolveShipRepos(command, cwd);
+    const checkRoots = new Set(resolution.repos);
+    if (resolution.ambiguous) {
+      for (const r of sessionRepos) checkRoots.add(r);
+    }
+    let anyChange = false;
+    for (const root of checkRoots) {
+      const st = enforcementStateFor(root);
+      if (st) {
+        if (st.hasCodeChange || st.hasDocChange) { anyChange = true; break; }
+      } else {
+        // Sidecar-less repo: uncommitted work still counts as a change so the
+        // fail-closed "state missing" check below actually runs (an agent that
+        // edited files via bash, not the edit tool, must not short-circuit).
+        // changedFiles() returning UNDEFINED (dir missing / bare repo / .git
+        // internals) is itself unverifiable — count it as a change so the
+        // block loop fails closed instead of silently passing.
+        const files = changedFiles(root);
+        if ((files && files.length > 0) || files === undefined) { anyChange = true; break; }
+      }
+    }
+
     if (ships.length === 0) {
       // Guard #4 additional layer (tighten-only): the static parser saw no ship
       // op, but the command mentions git/gh with dynamic shell constructs the
@@ -571,7 +687,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // or a failed call changes nothing (the command was passing anyway).
       if (
         projectConfig.llmGuards.shipDetect &&
-        (state.hasCodeChange || state.hasDocChange) &&
+        anyChange &&
         isSuspiciousShipCandidate(command)
       ) {
         const kind = await classifyShipCommand(classifier(), command);
@@ -582,8 +698,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (ships.length === 0) return;
     }
 
-    // Short-circuit: if no changes tracked, no gate to enforce.
-    if (!state.hasCodeChange && !state.hasDocChange) return;
+    // Short-circuit: if no changes tracked in any touched repo, no gate to
+    // enforce. (A sidecar-less repo with uncommitted work still fails closed
+    // in the per-repo check below — it has no state here, so it never
+    // short-circuits; the block loop treats it as "state missing".)
+    if (!anyChange) return;
 
     // AI attribution (HARD) + English-language (L5, ADVISORY) checks on commit
     // messages and PR title/description. L5 no longer hard-blocks: extraction
@@ -650,8 +769,41 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch { /* headless UI — advisory is best-effort */ }
     }
 
-    const fp = computeFingerprint(cwd);
-    const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
+    // P-multi: check every repo this command ships FROM (checkRoots was
+    // already resolved above, before the short-circuits). Each ship segment's
+    // repo is checked with ITS OWN sidecar + fingerprint.
+    const problems: string[] = [];
+    // Primary-repo fingerprint for the arbiter token path below (kept from the
+    // loop so we do not re-hash the primary repo).
+    let primaryFp: Fingerprint = { digest: "", head: "", unavailable: true };
+    for (const root of checkRoots) {
+      const st = enforcementStateFor(root);
+      const fp = computeFingerprint(root);
+      if (root === primaryRepoRoot) primaryFp = fp;
+      if (st) {
+        for (const p of unmetRequirements(st, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })) {
+          problems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+        }
+      } else {
+        // No sidecar for a non-primary repo: fail-closed when it holds
+        // uncommitted work (an unreviewed diff must not ship through a repo
+        // that never initialized its gate), but allow ships from a clean repo
+        // this session has not touched. changedFiles() returning UNDEFINED
+        // (dir missing / bare repo / .git internals) is UNVERIFIABLE — that
+        // fails closed too (P0: a mis-parsed fake dir must never sail through
+        // on "zero information").
+        const files = changedFiles(root);
+        if (files && files.length > 0) {
+          problems.push(
+            `[${repoLabel(root)}] gate state missing (fail-closed) — ${files.length} uncommitted change(s) but no review-gate sidecar; initialize the gate for that repo (edit a file via the edit tool, then review + precommit there) before shipping`,
+          );
+        } else if (files === undefined) {
+          problems.push(
+            `[${repoLabel(root)}] worktree unverifiable (fail-closed) — not inside a readable git repository and no review-gate sidecar; refusing to ship there`,
+          );
+        }
+      }
+    }
     if (problems.length === 0) return;
 
     // Single-use arbiter bypass token (lib/arbitration.ts). Only a lone,
@@ -660,10 +812,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     // content, and is consumed on the first authorized run. It never bypasses
     // commit/push/pr-create (those are not arbitrable, so no token is ever
     // issued for them) and never touches the code review loop.
-    if (ships.length === 1 && ships[0].kind === "pr-edit" && bypassToken && !fp.unavailable) {
+    if (ships.length === 1 && ships[0].kind === "pr-edit" && bypassToken && !primaryFp.unavailable) {
       const parsed = parseArbitrableAction(command);
       if (parsed.ok) {
-        const bindings = await computeTokenBindings(parsed.action, fp.digest);
+        const bindings = await computeTokenBindings(parsed.action, primaryFp.digest);
         if (tokenAuthorizes(bypassToken, bindings, Date.now())) {
           bypassToken = { ...bypassToken, consumed: true }; // consume on attempt
           clearBypassToken();
@@ -800,7 +952,58 @@ export default function reviewGate(pi: ExtensionAPI) {
       editFailurePending = false;
       const path = coalesceToolPath(event.input as Record<string, unknown>);
       if (!path) return;
+
+      // P-multi: an edit OUTSIDE the session repo arms THAT repo's own gate.
+      // A code/doc file's repo becomes the active repo (the target for the
+      // next record_review / run_precommit) and joins the declare_done set.
+      // A non-code/doc edit (config dumps, scratch) must NOT retarget the
+      // active repo or grow the set (round-3 Nit — it would only waste a
+      // round on a change-less repo).
+      const absEditPath = path.startsWith("/") ? path : pathJoin(cwd, path);
+      const editRepo = gitRootOfDir(pathDirname(absEditPath));
+      if (editRepo && editRepo !== primaryRepoRoot) {
+        const isProjectFile = isCodeFile(path) || isDocFile(path);
+        const isNewRepo = !sessionRepos.has(editRepo);
+        if (isProjectFile) {
+          sessionRepos.add(editRepo);
+          activeRepoRoot.current = editRepo;
+        }
+        const s = stateForRepo(editRepo);
+        let dirty = false;
+        if (isCodeFile(path) && !s.hasCodeChange) { s.hasCodeChange = true; dirty = true; }
+        if (isDocFile(path) && !s.hasDocChange) { s.hasDocChange = true; dirty = true; }
+        if (isProjectFile) {
+          const rel = absEditPath.startsWith(editRepo + "/")
+            ? absEditPath.slice(editRepo.length + 1)
+            : absEditPath;
+          if (!s.sessionEditedFiles) s.sessionEditedFiles = [];
+          if (!s.sessionEditedFiles.includes(rel)) s.sessionEditedFiles.push(rel);
+          if (s.review.verdict === "READY") s.review.verdict = "PENDING";
+          if (s.precommit.verdict === "PASS") s.precommit.verdict = "NOT_RUN";
+          loopArmed = true;
+          if (s.pausedQuestion) delete s.pausedQuestion;
+          dirty = true;
+          clearBypassToken(); // any edit invalidates a standing arbiter bypass
+        }
+        if (dirty) {
+          persistRepo(ctx as unknown as ExtensionContext, editRepo);
+          // P-multi (round-2 P2): the FIRST cross-repo edit grows the repo
+          // set — record it in the PRIMARY sidecar's sessionReposPaths NOW so
+          // a crash/restart before the next primary persist cannot drop this
+          // repo from the resumed declare_done set.
+          if (isNewRepo) persist(ctx as unknown as ExtensionContext);
+        }
+        return;
+      }
+
       let dirty = false;
+      // P-multi: an edit in the PRIMARY repo makes it the active repo again —
+      // otherwise a single cross-repo edit would leave record_review /
+      // run_precommit pointed at the other repo forever (multi-repo deadlock).
+      // (An edit OUTSIDE any git repo — editRepo null, e.g. a /tmp scratch
+      // file — must NOT retarget the active repo; that would silently point
+      // the next record_review at the primary and waste a round.)
+      if (editRepo === primaryRepoRoot) activeRepoRoot.current = primaryRepoRoot;
       if (isCodeFile(path) && !state.hasCodeChange) { state.hasCodeChange = true; dirty = true; }
       if (isDocFile(path) && !state.hasDocChange) { state.hasDocChange = true; dirty = true; }
       if (isCodeFile(path) || isDocFile(path)) {
@@ -851,28 +1054,46 @@ export default function reviewGate(pi: ExtensionAPI) {
       // command emits a FAIL/NO_CHECKS_RUN sentinel, drop any standing PASS.
       if (text) {
         const verdict = parsePrecommitOutput(text);
-        if (verdict && verdict !== "PASS" && state.precommit.verdict === "PASS") {
-          state.precommit = { verdict, fingerprint: null, at: new Date().toISOString() };
-          persist(ctx);
+        if (verdict && verdict !== "PASS") {
+          // P-multi: a FAIL sentinel invalidates a standing PASS in EVERY
+          // repo this session tracks, not just the primary (the safety net
+          // must cover all of them).
+          for (const root of sessionRepos) {
+            const st = root === primaryRepoRoot ? state : stateForRepo(root);
+            if (st.precommit.verdict === "PASS") {
+              st.precommit = { verdict, fingerprint: null, at: new Date().toISOString() };
+              persistRepo(ctx as unknown as ExtensionContext, root);
+            }
+          }
         }
       }
       // P0-7: re-arm gate if a git operation restored dirty state
-      // without going through an edit tool (bypass prevention).
+      // without going through an edit tool (bypass prevention). P-multi: the
+      // command's own repos (cd chain / git -C) are re-armed, not just cwd —
+      // `cd other && git checkout -b x` must arm OTHER's gate.
       if (cmd && /(^|[\s;&|])(git\s+(stash\s+(pop|apply)|checkout|switch|restore|reset\s+--hard|merge|pull|rebase|cherry-pick|am)|gh\s+pr\s+checkout)\b/.test(cmd)) {
-        const files = changedFiles(cwd);
-        if (files && files.length > 0) {
+        const cmdRepos = resolveCommandRepos(cmd, cwd);
+        const rearmRoots = new Set(cmdRepos.repos);
+        if (cmdRepos.ambiguous) {
+          for (const r of sessionRepos) rearmRoots.add(r);
+        }
+        for (const root of rearmRoots) {
+          const files = changedFiles(root);
+          if (!files || files.length === 0) continue;
+          const st = root === primaryRepoRoot ? state : stateForRepo(root);
           // User-granted scope limit: files still in the exempt snapshot
           // never re-arm the gate (session-edited ones were reclaimed out of
-          // it); anything newer still does (fail-closed).
-          const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
-          const arming = state.scopeLimit ? files.filter((f) => !exempt.has(f)) : files;
-          if (arming.some(isCodeFile) && !state.hasCodeChange) { state.hasCodeChange = true; }
-          if (arming.some(isDocFile) && !state.hasDocChange) { state.hasDocChange = true; }
-          if (state.hasCodeChange || state.hasDocChange) {
-            if (state.review.verdict === "READY") state.review.verdict = "PENDING";
-            if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
+          // it); anything newer still does (fail-closed). Scope limits are
+          // primary-repo-only; other repos always arm.
+          const exempt = root === primaryRepoRoot ? new Set(state.scopeLimit?.preexistingFiles ?? []) : new Set<string>();
+          const arming = exempt.size > 0 ? files.filter((f) => !exempt.has(f)) : files;
+          if (arming.some(isCodeFile) && !st.hasCodeChange) { st.hasCodeChange = true; }
+          if (arming.some(isDocFile) && !st.hasDocChange) { st.hasDocChange = true; }
+          if (st.hasCodeChange || st.hasDocChange) {
+            if (st.review.verdict === "READY") st.review.verdict = "PENDING";
+            if (st.precommit.verdict === "PASS") st.precommit.verdict = "NOT_RUN";
             clearBypassToken();
-            persist(ctx);
+            persistRepo(ctx as unknown as ExtensionContext, root);
           }
         }
       }
@@ -927,9 +1148,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       // The agent is running the loop again — a standing pause_for_question
       // pause is moot (liveness: a stale pause would silently swallow the
       // next auto-continuation after a BLOCKED verdict).
-      delete state.pausedQuestion;
-      const fp = computeFingerprint(cwd);
-      state.review = {
+      // P-multi: the verdict binds to the repo the agent most recently
+      // edited (activeRepoRoot). stateForRepo(primary) IS `state`, so the
+      // local `st` writes land on the right object and persistRepo persists
+      // to the right sidecar — no global state swap (same rationale as
+      // run_precommit: a swap would let a parallel tool_result arm the wrong
+      // repo's state).
+      const targetRoot = activeRepoRoot.current;
+      const st = stateForRepo(targetRoot);
+      delete st.pausedQuestion;
+      const fp = computeFingerprint(targetRoot);
+      st.review = {
         verdict: parsed.verdict,
         fingerprint: parsed.verdict === "READY" ? fp.digest : null,
         at: new Date().toISOString(),
@@ -937,8 +1166,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         // stays absent (blocks under the docSync knob — fail-closed).
         ...(parsed.docSync !== undefined ? { docSync: parsed.docSync } : {}),
       };
-      state.rounds.push({
-        round: state.rounds.length + 1,
+      st.rounds.push({
+        round: st.rounds.length + 1,
         findingsTotal: parsed.findingsTotal,
         fingerprints: parsed.findingFingerprints,
         verdict: parsed.verdict,
@@ -953,34 +1182,34 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (parsed.verdict === "NEEDS_HUMAN") {
         loopArmed = false;
         note = " Auto-loop disarmed — waiting for a human decision.";
-      } else if (state.rounds.length >= state.maxRounds) {
+      } else if (st.rounds.length >= st.maxRounds) {
         loopArmed = false;
-        note = ` Max rounds (${state.maxRounds}) reached — escalate to the user.`;
-      } else if (isOscillating(state.rounds, OSCILLATION_LIMIT)) {
+        note = ` Max rounds (${st.maxRounds}) reached — escalate to the user.`;
+      } else if (isOscillating(st.rounds, OSCILLATION_LIMIT)) {
         // The reviewer keeps flipping READY→BLOCKED with fresh findings instead
         // of converging. Disarm the auto-loop and escalate (tighten-only: this
         // never permits a ship, it only stops the churn so a human/adviser can
         // break the tie). Plateau below stays for the stuck-on-same-finding case.
         loopArmed = false;
-        note = ` Oscillation detected (${countOscillations(state.rounds)} READY→BLOCKED flips) — ` +
+        note = ` Oscillation detected (${countOscillations(st.rounds)} READY→BLOCKED flips) — ` +
           "the review is not converging. Escalate to the user or consult the adviser subagent " +
           "instead of burning more rounds.";
-      } else if (isPlateaued(state.rounds, PLATEAU_ROUNDS)) {
+      } else if (isPlateaued(st.rounds, PLATEAU_ROUNDS)) {
         loopArmed = false;
         note = " Plateau detected — escalate to the user.";
       } else if (parsed.verdict === "BLOCKED") {
         // R10: still blocked and approaching the cap → one-shot rethink nudge.
-        note = maybeStrategicReset();
+        note = maybeStrategicReset(st);
       }
 
-      persist(ctx as unknown as ExtensionContext);
+      persistRepo(ctx as unknown as ExtensionContext, targetRoot);
       return {
         content: [{
           type: "text",
-          text: `review-gate: recorded verdict ${parsed.verdict} (round ${state.rounds.length}/${state.maxRounds}, findings: ${parsed.findingsTotal ?? "?"}).${note}` +
+          text: `review-gate: recorded verdict ${parsed.verdict} (round ${st.rounds.length}/${st.maxRounds}, findings: ${parsed.findingsTotal ?? "?"}).${note}` +
             (parsed.verdict === "READY" ? " Next: run precommit." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : ""),
         }],
-        details: { verdict: parsed.verdict, round: state.rounds.length },
+        details: { verdict: parsed.verdict, round: st.rounds.length, repo: repoLabel(targetRoot) },
       };
     },
   });
@@ -1001,18 +1230,32 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Available in every mode: explore allows edits/bash, so the agent may
       // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
+      // P-multi: precommit runs in — and binds its PASS to — the repo the
+      // agent most recently edited (activeRepoRoot), not the session cwd.
+      // The target DIR for the primary repo stays the session cwd (its
+      // precommit may be repo-subdir-aware); other repos run at their root.
+      // stateForRepo(primary) IS `state`, so no global swap is needed: the
+      // local `st` writes land on the right object and persistRepo persists
+      // to the right sidecar. (A global `state = stateForRepo(...)` swap
+      // across the long `await runTrustedPrecommit` was rejected: a parallel
+      // edit tool_result in that window would arm the WRONG repo's state and
+      // persist it to the primary sidecar — losing hasCodeChange, a fail-open.)
+      const targetRoot = activeRepoRoot.current;
+      const targetDir = targetRoot === primaryRepoRoot ? cwd : targetRoot;
+      const st = stateForRepo(targetRoot);
       // Same liveness rule as record_review: running precommit proves the
       // agent is not waiting on the user — clear any stale question pause.
-      delete state.pausedQuestion;
-      // P1 fix: pass the session cwd. runTrustedPrecommit previously derived
-      // its own process.cwd(), which can differ from ctx.cwd (e.g. pi --cwd),
-      // running checks — and binding the PASS fingerprint — in the wrong dir.
-      const outcome = await runTrustedPrecommit(cwd, mode, _signal);
+      delete st.pausedQuestion;
+      // P1 fix: pass the target dir explicitly. runTrustedPrecommit previously
+      // derived its own process.cwd(), which can differ from ctx.cwd
+      // (e.g. pi --cwd), running checks — and binding the PASS fingerprint
+      // — in the wrong dir.
+      const outcome = await runTrustedPrecommit(targetDir, mode, _signal);
 
       if (outcome.verdict === "PASS") {
         // Bind PASS to the fingerprint recomputed AFTER the runner finished
         // (a lint:fix step may have modified files).
-        state.precommit = { verdict: "PASS", fingerprint: outcome.fingerprint, at: new Date().toISOString() };
+        st.precommit = { verdict: "PASS", fingerprint: outcome.fingerprint, at: new Date().toISOString() };
       } else {
         // P0 fix: "ERROR" is a runner-protocol outcome, NOT a GateState
         // PrecommitVerdict enum member. Persisting it would make loadSidecar
@@ -1022,9 +1265,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         // FAIL / NO_CHECKS_RUN persist as themselves. The error detail still
         // reaches the model via the tool result text below.
         const persisted = outcome.verdict === "ERROR" ? "NOT_RUN" : outcome.verdict;
-        state.precommit = { verdict: persisted, fingerprint: null, at: new Date().toISOString() };
+        st.precommit = { verdict: persisted, fingerprint: null, at: new Date().toISOString() };
       }
-      persist(ctx as unknown as ExtensionContext);
+      persistRepo(ctx as unknown as ExtensionContext, targetRoot);
 
       const detail =
         outcome.verdict === "PASS" ? `PASS (${outcome.checksRun} checks ran, 0 failed).`
@@ -1033,7 +1276,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         : `ERROR (${outcome.error ?? "runner could not be trusted"}) — fail-closed.`;
       return {
         content: [{ type: "text", text: `review-gate: precommit ${detail}` }],
-        details: { verdict: outcome.verdict, checksRun: outcome.checksRun, checksFailed: outcome.checksFailed },
+        details: { verdict: outcome.verdict, checksRun: outcome.checksRun, checksFailed: outcome.checksFailed, repo: repoLabel(targetRoot) },
         isError: outcome.verdict !== "PASS",
       };
     },
@@ -1049,8 +1292,23 @@ export default function reviewGate(pi: ExtensionAPI) {
       summary: Type.String({ description: "One-paragraph completion summary" }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const fp = computeFingerprint(cwd);
-      const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
+      // P-multi: completion requires EVERY repo this session has edited to
+      // pass its own review + precommit — a multi-repo task is not done while
+      // any of its repos still holds unreviewed work.
+      const problems: string[] = [];
+      for (const root of sessionRepos) {
+        const st = enforcementStateFor(root);
+        const fp = computeFingerprint(root);
+        if (st) {
+          for (const p of unmetRequirements(st, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })) {
+            problems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+          }
+        } else {
+          // An edited repo always has a state (edit hook initializes it);
+          // this is defense against future drift. Fail-closed.
+          problems.push(`[${repoLabel(root)}] gate state missing (fail-closed)`);
+        }
+      }
       if (state.taskMode === "explore" || state.taskMode === "normal") {
         // Explore's defining behavior: the agent may end the task on its own
         // judgment. Gate status is reported as advisory only. (Ship commands
@@ -1091,9 +1349,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       // counter (e.g. "round 24/10"), which misleads the agent into believing
       // it is stuck in one runaway loop when it is really starting the next
       // task. Reset the per-task loop bookkeeping now that the gate is fully
-      // satisfied. This only clears already-satisfied history — the next code
-      // edit re-arms hasCodeChange and a fresh review is still required, so it
-      // cannot loosen the gate.
+      // satisfied — for EVERY repo this session edited (P-multi), not just
+      // the primary. This only clears already-satisfied history — the next
+      // code edit re-arms hasCodeChange and a fresh review is still required,
+      // so it cannot loosen the gate.
+      for (const root of sessionRepos) {
+        const st = root === primaryRepoRoot ? state : stateForRepo(root);
+        st.rounds = [];
+        st.strategicResetFired = false;
+        if (root !== primaryRepoRoot) persistRepo(ctx as unknown as ExtensionContext, root);
+      }
       state.rounds = [];
       state.strategicResetFired = false;
       // P1 fix: the L2 auto-continuation budget must reset with the task too.
@@ -1667,8 +1932,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
     continuationsInjected += 1;
     // R10: fire the strategic-reset checklist BEFORE persist so the fired flag
-    // survives restarts (one-shot per gate-state lifetime).
-    const reset = maybeStrategicReset();
+    // survives restarts (one-shot per gate-state lifetime). Pass `state`
+    // explicitly — the P-multi signature change (st: GateState) left this
+    // call bare and it threw "Cannot read properties of undefined (reading
+    // 'strategicResetFired')".
+    const reset = maybeStrategicReset(state);
     persist(ctx);
     pi.sendUserMessage(
       "[REVIEW_GATE_RESUME] Quality gates are still unmet:\n" +
@@ -1687,6 +1955,13 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd ?? process.cwd();
+    // P-multi: re-derive the primary repo and reset per-repo tracking for the
+    // new session (a switched session may target a different checkout).
+    primaryRepoRoot = gitRootOfDir(cwd) ?? cwd;
+    activeRepoRoot.current = primaryRepoRoot;
+    sessionRepos.clear();
+    sessionRepos.add(primaryRepoRoot);
+    repoStateCache.clear();
     // USER REQUIREMENT: "no changes" for the first classification means THIS
     // session — a new session starts with a clean edit slate even if the
     // worktree carries pre-existing changes from before (they still arm the
@@ -1717,6 +1992,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     for (const f of state.sessionEditedFiles ?? []) sessionEditedPaths.add(f);
     for (const f of state.scopeLimit?.sessionFiles ?? []) sessionEditedPaths.add(f);
     if (sessionEditedPaths.size > 0) sessionEdited = true;
+
+    // P-multi: a same-session resume re-arms the repo set too (persisted as
+    // sessionReposPaths by persist()). Only repos whose sidecar still exists
+    // are re-added — a deleted checkout must not block declare_done forever.
+    for (const r of state.sessionReposPaths ?? []) {
+      if (r !== primaryRepoRoot && existsSync(sidecarPath(r))) sessionRepos.add(r);
+    }
 
     // P0-2: detect pre-existing changes — worktree AND branch commits. A
     // user-granted scope limit exempts exactly the files still in its
@@ -2039,6 +2321,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         "(4) fix all findings, then repeat from (1) until READY, (5) call declare_done. " +
         "Batch related edits before starting a round: the loop is billed per round, not per line. " +
         "git commit/push and gh pr create/edit are HARD-BLOCKED until gates pass.\n" +
+        (sessionRepos.size > 1
+          ? "Multi-repo session: this session has edited " + sessionRepos.size + " repositories (" +
+            [...sessionRepos].map((r) => repoLabel(r)).join(", ") +
+            "). record_review / run_precommit target the repo you most recently edited; " +
+            "declare_done and git commit/push/gh pr require EVERY edited repo to pass its own review + precommit " +
+            "before shipping.\n"
+          : "") +
         "You are ENCOURAGED to proactively consult the `adviser` subagent (a stronger, " +
         "independent second opinion, pinned to a top-tier model at xhigh thinking) BEFORE " +
         "and DURING non-trivial, ambiguous, or risky work \u2014 consulting early is cheaper " +

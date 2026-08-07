@@ -89,13 +89,15 @@ test("stale pause liveness: cleared when the agent proves it is not waiting", ()
   // A pause left behind while the agent keeps looping must not silently
   // swallow auto-continuation: edits, record_review and run_precommit all
   // clear it (plus setTaskMode — a fresh mode decision supersedes it).
-  const clears = SRC.match(/delete state\.pausedQuestion/g) ?? [];
+  // P-multi: record_review/run_precommit clear the ACTIVE repo's state via a
+  // local `st` (no global swap), so both spellings count.
+  const clears = SRC.match(/delete (?:state|st)\.pausedQuestion/g) ?? [];
   assert.ok(clears.length >= 5, `expected >=5 clear sites, found ${clears.length}`);
   const recordStart = SRC.indexOf('name: "record_review"');
   const recordEnd = SRC.indexOf('name: "run_precommit"');
-  assert.ok(SRC.slice(recordStart, recordEnd).includes("delete state.pausedQuestion"), "record_review must clear the pause");
+  assert.ok(SRC.slice(recordStart, recordEnd).includes(".pausedQuestion"), "record_review must clear the pause");
   const precommitEnd = SRC.indexOf('name: "declare_done"');
-  assert.ok(SRC.slice(recordEnd, precommitEnd).includes("delete state.pausedQuestion"), "run_precommit must clear the pause");
+  assert.ok(SRC.slice(recordEnd, precommitEnd).includes(".pausedQuestion"), "run_precommit must clear the pause");
 });
 
 test("session_compact while paused re-injects the WAITING state, never a resume nudge", () => {
@@ -528,9 +530,10 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   assert.match(SRC, /abortSignal\?\.addEventListener\("abort"/);
   assert.match(SRC, /detached:\s*true/);
   assert.match(SRC, /killProcessTree/);
-  // The tool must pass the SESSION cwd and its AbortSignal through (P1 fix:
-  // process.cwd() can differ from ctx.cwd under pi --cwd).
-  assert.match(SRC, /await runTrustedPrecommit\(cwd, mode, _signal\)/);
+  // The tool must pass the target repo root and its AbortSignal through
+  // (P1 fix: process.cwd() can differ from ctx.cwd under pi --cwd; P-multi:
+  // the target may be the active non-session repo).
+  assert.match(SRC, /await runTrustedPrecommit\((?:cwd|targetRoot|targetDir), mode, _signal\)/);
   assert.doesNotMatch(SRC, /async function runTrustedPrecommit[^{]*\{\s*\n\s*const cwd = process\.cwd\(\)/);
 });
 
@@ -580,6 +583,12 @@ test("R6/R9/R10: project config, git memory, strategic reset wired in", () => {
   assert.match(SRC, /maybeStrategicReset/);
   assert.match(SRC, /strategicResetFired/);
   assert.match(SRC, /STRATEGIC_RESET_CHECKLIST/);
+  // R10 regression: the L2 auto-continuation path called maybeStrategicReset
+  // bare after the st: GateState signature change, so
+  // shouldStrategicReset(undefined, ...) threw "Cannot read properties of
+  // undefined (reading 'strategicResetFired')". A bare call must never
+  // reappear.
+  assert.doesNotMatch(SRC, /maybeStrategicReset\s*\(\s*\)/);
 });
 
 test("auto-loop prohibited behaviors are in the per-turn reminder (sd0x-dev-flow port)", () => {
@@ -684,14 +693,19 @@ test("every enforcement path computes a FRESH fingerprint", () => {
     ['name: "record_review"', 6000],
     ['name: "request_arbitration"', 4000],
     ['pi.on("agent_settled"', 1200],
-    ["detectShipCommands(command)", 6000],
+    // 9000: the P-multi per-repo fingerprint loop sits ~130 lines after the
+    // ship-detection anchor inside the tool_call handler.
+    ["detectShipCommands(command)", 9000],
   ];
   for (const [anchor, window] of anchors) {
     const at = SRC.indexOf(anchor);
     assert.ok(at >= 0, `anchor not found: ${anchor}`);
     const body = SRC.slice(at, at + window);
-    assert.ok(body.includes("computeFingerprint(cwd)"),
-      `${anchor} must call computeFingerprint(cwd) directly`);
+    // P-multi: enforcement paths may target a non-session repo, so the
+    // fingerprint arg is a variable (root), not the cwd literal — what must
+    // hold is a DIRECT computeFingerprint call, never the advisory memo.
+    assert.match(body, /computeFingerprint\(/,
+      `${anchor} must call computeFingerprint() directly`);
     assert.ok(!body.includes("advisoryFingerprint()"),
       `${anchor} must NOT use the advisory memo`);
   }
@@ -726,7 +740,9 @@ test("restore() collects the migration result from loadSidecar, not from a secon
 test("session_start surfaces the migration notice and clears the flag", () => {
   const at = SRC.indexOf('pi.on("session_start"');
   assert.ok(at >= 0, "session_start handler must exist");
-  const body = SRC.slice(at, at + 4000);
+  // 5200: the P-multi reset block at the handler head pushes the notice
+  // section past the old 4000-char window.
+  const body = SRC.slice(at, at + 5200);
   assert.match(body, /if \(fingerprintMigrated\)/,
     "an invalidated binding must be explained, not silently applied");
   assert.match(body, /FINGERPRINT_MIGRATION_NOTICE/);

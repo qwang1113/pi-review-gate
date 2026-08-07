@@ -508,6 +508,38 @@ bash output at all: the `run_precommit` tool spawns the trusted runner itself
 and records the result from a verified nonce receipt, so a `## Overall: ✅ PASS`
 sentinel printed by any other command can never grant a PASS.
 
+### Multi-repo sessions (the gate follows the checkout, not the cwd)
+
+The gate binds its verdicts to a *worktree fingerprint of a specific git
+repository*. The session cwd's repo is the primary repo, but when the model
+`cd`s into a **different** git repository (a sibling checkout, a submodule, a
+frontend repo next to the backend one), edits and ships there are tracked and
+gated **per repo**:
+
+- **Per-repo sidecars**: every repo this session edits gets its own
+  `.pi/review-gate-state.json` + fingerprint binding, written by the extension
+  when a file in that repo is edited through the edit/write tools.
+- **Ship resolution**: a ship command (`git commit`/`push`, `gh pr create`) is
+  resolved to the repo(s) it actually operates on — `cd <dir>` chains,
+  `git -C <dir>`, `git --git-dir` / `--work-tree`, and a leading `GIT_DIR=`
+  env assignment. That repo's own review + precommit must be satisfied; a
+  READY+PASS on the session repo **does not** legitimate a commit in another
+  repo. Constructs that cannot be resolved statically (`cd $VAR`, quoted paths
+  with spaces, `pushd`, nested `sh -c`) widen the check to every repo the
+  session has edited (fail-closed).
+- **Active repo**: `record_review` / `run_precommit` target the repo the model
+  most recently edited — run them once per repo, in that repo's context.
+- **declare_done** requires *every* repo this session edited to pass its own
+  review + precommit. The repo set survives a same-session resume
+  (`sessionReposPaths` in the primary sidecar).
+- **Sidecars from other sessions are not trusted**: a stale READY left by a
+  previous session is discarded on first edit; pre-existing uncommitted work
+  in a never-edited repo still blocks shipping from it (fail-closed).
+- **L3 git hooks are not auto-installed into other repos**: they cover the
+  repo(s) where `scripts/install-git-hooks.sh` (or the global installer) ran.
+  For a repo you know the model will work in, install the hooks there too for
+  defense-in-depth outside Pi.
+
 ### Commands
 
 | Command | Effect |

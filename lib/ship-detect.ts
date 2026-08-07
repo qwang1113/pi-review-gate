@@ -20,8 +20,10 @@ export interface ShipDetection {
 }
 
 /** Split a command line into logical shell segments. Also unwraps
- * command substitution $() and backtick `` — fail-closed. */
-function segments(command: string): string[] {
+ * command substitution $() and backtick `` — fail-closed.
+ * Exported for lib/repo-resolve.ts, which needs the same segmentation to
+ * track `cd` chains across a compound command. */
+export function segments(command: string): string[] {
   // Remove backslash-newline line continuations FIRST: the shell deletes them
   // before word splitting, so `git \<newline>commit` executes as `git commit`.
   // Doing this before splitting on newlines is what closes that ship bypass.
@@ -98,7 +100,9 @@ function isShellPrefix(tok: string): boolean {
     || /^&\d*$/.test(tok);    // &1 style leftovers
 }
 
-function normalizedTokens(segment: string): string[] {
+/** Dequoted, shell-prefix-stripped tokens of one segment (see ship-detect
+ *  docstring). Exported for lib/repo-resolve.ts's cd/-C/GIT_DIR scanning. */
+export function normalizedTokens(segment: string): string[] {
   // Split off leading grouping punctuation glued to tokens: `(git`, `{git`.
   const tokens = segment
     .split(/\s+/)

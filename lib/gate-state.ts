@@ -155,6 +155,11 @@ export interface GateState {
    * scope hints stay conservative.
    */
   sessionEditedFiles?: string[];
+  /** P-multi: repo roots (other than the session repo) this session edited,
+   *  persisted so a same-session resume re-arms declare_done against all of
+   *  them. Ship enforcement never reads it; absence just narrows the
+   *  declare_done scope to the session repo (tighten-only). */
+  sessionReposPaths?: string[];
   updatedAt: string;
 }
 
@@ -246,6 +251,13 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         (!Array.isArray(parsed.sessionEditedFiles) ||
          !parsed.sessionEditedFiles.every((v) => typeof v === "string"))) {
       delete parsed.sessionEditedFiles;
+    }
+    // Malformed repo set → treated as ABSENT (declare_done then only covers
+    // the session repo; fail-closed for anything it does cover).
+    if (parsed.sessionReposPaths !== undefined &&
+        (!Array.isArray(parsed.sessionReposPaths) ||
+         !parsed.sessionReposPaths.every((v) => typeof v === "string"))) {
+      delete parsed.sessionReposPaths;
     }
     const migrated = migrateFingerprintVersion(parsed);
     if (out) out.migrated = migrated;
