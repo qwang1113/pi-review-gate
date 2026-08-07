@@ -128,6 +128,15 @@ import {
 import { projectEditedContent } from "./lib/edit-projection.ts";
 import { buildLoopGoalDirective, readLoopGoal } from "./lib/loop-goal.ts";
 import {
+  SENSITIVE_GRANT_TTL_MS,
+  addGrant,
+  consumeGrant,
+  findGrant,
+  isGateIntegrityPath,
+  normalizeSensitivePath,
+  type SensitiveGrant,
+} from "./lib/sensitive-grant.ts";
+import {
   blockedMarkerPath,
   recordBlockedMarker,
   reconcileBlockedMarker,
@@ -243,6 +252,18 @@ export default function reviewGate(pi: ExtensionAPI) {
   // in scope) and the scope directive in the per-turn prompt. In-memory; a
   // same-session resume re-seeds it from state.scopeLimit.sessionFiles.
   const sessionEditedPaths = new Set<string>();
+  // ---- Sensitive-file edit authorization (lib/sensitive-grant.ts) ----
+  // Live one-shot grants issued by request_sensitive_edit, and the set of
+  // paths whose dialog the user already DECLINED. Both in-memory ONLY: a
+  // permission to write `.env` must never outlive the process that asked for
+  // it, so a crash/resume/second session starts fully fail-closed.
+  //
+  // The decline lock is per PATH, not per session (unlike scopeLimitDeclined):
+  // a "no" to `/a/.env` says nothing about `/b/credentials.json`, but it does
+  // permanently answer `/a/.env` — re-popping the same dialog is exactly the
+  // grinding an injected instruction would try.
+  let sensitiveGrants: SensitiveGrant[] = [];
+  const sensitiveDeclinedPaths = new Set<string>();
 
   // ---- Multi-repo tracking (see lib/repo-resolve.ts) ----
   // The gate's sidecar + fingerprint bind to the SESSION repo (cwd's git
@@ -796,10 +817,26 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       const path = coalesceToolPath(input);
       if (path && isSensitiveFile(path)) {
-        return {
-          block: true,
-          reason: `review-gate: "${path}" matches a sensitive-file pattern (.env/keys/credentials). Ask the user to edit it themselves.`,
-        };
+        // A live grant means the USER already approved this exact path in a
+        // dialog (request_sensitive_edit). It is consumed on the successful
+        // tool_result, so the pass here is for one landing edit only.
+        // `cwd` (the session cwd), not ctx.cwd: the grant is keyed at
+        // request time with the same base, and a mismatched base would make a
+        // relative path miss its own grant.
+        const absPath = normalizeSensitivePath(path, cwd);
+        if (!findGrant(sensitiveGrants, absPath, Date.now())) {
+          // absPath in both checks, so the hint matches what the tool would do.
+          const askable = !isGateIntegrityPath(absPath) && !sensitiveDeclinedPaths.has(absPath);
+          return {
+            block: true,
+            reason:
+              `review-gate: "${path}" matches a sensitive-file pattern (.env/keys/credentials). ` +
+              (askable
+                ? "Ask the user to edit it themselves, or call request_sensitive_edit to ask them " +
+                  "for one-time authorization for this exact path."
+                : "Ask the user to edit it themselves — this path cannot be authorized from here."),
+          };
+        }
       }
       // Normal mode: user-consented “as if not installed” — the L6 label check
       // (and its LLM call) is skipped. The sensitive-file guard ABOVE runs in
@@ -1172,6 +1209,20 @@ export default function reviewGate(pi: ExtensionAPI) {
       editFailurePending = false;
       const path = coalesceToolPath(event.input as Record<string, unknown>);
       if (!path) return;
+
+      // The edit LANDED, so burn any one-shot sensitive-file authorization for
+      // this path. Consuming here rather than at tool_call is what makes a
+      // failed edit (stale anchor, missing file) retryable without a second
+      // dialog, while a successful one costs the user a fresh "yes" next time.
+      if (isSensitiveFile(path)) {
+        const { consumed, remaining } = consumeGrant(
+          sensitiveGrants,
+          normalizeSensitivePath(path, cwd),
+          Date.now(),
+        );
+        sensitiveGrants = remaining;
+        if (consumed) log(`sensitive-grant consumed for ${consumed.path}`);
+      }
 
       // P-multi: an edit OUTSIDE the session repo arms THAT repo's own gate.
       // A code/doc file's repo becomes the active repo (the target for the
@@ -1837,6 +1888,127 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
+  // ---------- request_sensitive_edit tool (user-consented one-shot sensitive write) ----------
+
+  pi.registerTool({
+    name: "request_sensitive_edit",
+    label: "Request Sensitive File Edit",
+    description:
+      "Ask the USER for one-time authorization to edit ONE sensitive file (.env, private key, " +
+      "credentials…) that the gate blocks by default. The extension shows a confirmation dialog — " +
+      "you cannot approve it yourself. A granted authorization covers that EXACT path only, is " +
+      "consumed by the first edit that SUCCEEDS, and expires after 10 minutes; it is never " +
+      "persisted, so it dies with the session. `.git/` internals are NEVER grantable (they are " +
+      "the gate's own enforcement). If the user declines, that path is locked for the session — " +
+      "do not ask again, ask the user to edit it by hand. Call this only when the edit is genuinely " +
+      "required by the user's request, and state exactly what you will change.",
+    parameters: Type.Object({
+      path: Type.String({ description: "The sensitive file to edit — absolute, or relative to the session cwd" }),
+      reason: Type.String({ description: "One line: what you will change in this file and why (shown to the user as untrusted data)" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
+
+      const raw = params.path.trim();
+      if (raw.length === 0) return deny("review-gate: path is required — name the exact file you need to edit.");
+      const absPath = normalizeSensitivePath(raw, cwd);
+
+      if (!isSensitiveFile(absPath)) {
+        return deny(
+          `review-gate: "${raw}" is not a sensitive file — the gate does not block it. Edit it directly; ` +
+          "no authorization is needed.",
+        );
+      }
+      // Gate-integrity paths are refused BEFORE any dialog: a "yes" here would
+      // let the agent talk the user into disarming the L3 hook that checks it.
+      if (isGateIntegrityPath(absPath)) {
+        return deny(
+          `review-gate: "${raw}" is git internals — never authorizable from here, because editing ` +
+          "`.git/hooks/*` would disarm the gate's own enforcement. If this change is really needed, " +
+          "the USER must make it by hand.",
+        );
+      }
+      if (sensitiveDeclinedPaths.has(absPath)) {
+        return deny(
+          `review-gate: the user already DECLINED editing "${raw}" this session — do not ask again. ` +
+          "Tell the user what the file needs and let them edit it themselves.",
+        );
+      }
+      const existing = findGrant(sensitiveGrants, absPath, Date.now());
+      if (existing) {
+        return {
+          content: [{
+            type: "text",
+            text:
+              `review-gate: "${raw}" is already authorized (until ` +
+              `${new Date(existing.expiresAt).toISOString()}). Make the edit now — the authorization ` +
+              "is consumed once it succeeds.",
+          }],
+          details: { alreadyGranted: true, path: absPath },
+        };
+      }
+      if (!ctx.hasUI) {
+        return deny(
+          "review-gate: no interactive UI — writing a sensitive file requires the user's explicit dialog " +
+          "approval (fail-closed). Ask the user out-of-band to make the edit.",
+        );
+      }
+
+      // USER CONSENT — extension-rendered dialog with fixed consequence copy;
+      // the agent's reason is displayed as clearly-labeled untrusted data.
+      let ok = false;
+      let dialogFailed = false;
+      try {
+        ok = await ctx.ui.confirm(
+          "review-gate: AI 请求一次性修改敏感文件——是否同意？",
+          `文件（默认禁止 AI 写入）: ${absPath}\n` +
+            "同意后：只授权这一个路径，写入成功一次即失效；10 分钟内未使用也会过期，且不跨会话保留。\n" +
+            "拒绝后：AI 本会话内不能再为该路径弹窗。\n" +
+            "请确认这确实是你本次要求的一部分；文件里的密钥/凭据会暴露给模型。\n" +
+            `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
+        );
+      } catch { dialogFailed = true; }
+
+      // A dialog that could not be shown is NOT a decline: fail closed for THIS
+      // request without burning the path's anti-grinding lock.
+      if (dialogFailed) {
+        return deny(
+          "review-gate: the confirmation dialog could not be shown — no authorization granted " +
+          "(fail-closed), and this does NOT count as a user decline; retry when a dialog is possible.",
+        );
+      }
+
+      if (!ok) {
+        sensitiveDeclinedPaths.add(absPath);
+        return deny(
+          `review-gate: the user DECLINED editing "${raw}". This path is now locked for the session — ` +
+          "do not ask again. Describe the change you wanted and let the user apply it.",
+        );
+      }
+
+      const now = Date.now();
+      const expiresAt = now + SENSITIVE_GRANT_TTL_MS;
+      sensitiveGrants = addGrant(
+        sensitiveGrants,
+        { path: absPath, at: new Date(now).toISOString(), expiresAt, reason: params.reason.slice(0, 300) },
+        now,
+      );
+      log(`sensitive-grant issued for ${absPath}`);
+      try {
+        ctx.ui.notify(`review-gate: 用户已授权 AI 修改 ${absPath}（一次性，10 分钟内有效）。`, "warning");
+      } catch { /* headless */ }
+      return {
+        content: [{
+          type: "text",
+          text:
+            `review-gate: the user GRANTED a one-shot edit of ${absPath}. Make ONLY the change you ` +
+            "described, on this exact path, now — the authorization is consumed by the first successful " +
+            "edit and expires in 10 minutes. Do not echo the file's secrets back to the user.",
+        }],
+        details: { granted: true, path: absPath, expiresAt },
+      };
+    },
+  });
   // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
 
   // USER REQUIREMENT: cache-only capture of the user's first real message,
@@ -2247,6 +2419,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     lastRunAborted = false;
     scopeLimitDeclined = false;
     sessionEditedPaths.clear();
+    // A new/switched session inherits NO sensitive-file authorization.
+    sensitiveGrants = [];
+    sensitiveDeclinedPaths.clear();
     let sessionId: string | null = null;
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
@@ -2513,6 +2688,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       lastRunAborted = false;
       scopeLimitDeclined = false;
       sessionEditedPaths.clear();
+      // The user's call: revoke outstanding one-shot sensitive-file
+      // authorizations AND lift the per-path decline locks.
+      sensitiveGrants = [];
+      sensitiveDeclinedPaths.clear();
       clearBypassToken();
       lastBlockedShip = null;
       arbitrationsUsed = 0;

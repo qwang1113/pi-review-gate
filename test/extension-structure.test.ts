@@ -531,7 +531,8 @@ test("a standing arbiter token is cleared on any edit / new round / gate-reset",
   assert.match(SRC, /clearBypassToken\(\);\s*\/\/ any edit invalidates/);
   // gate-reset clears it and the arbitration bookkeeping.
   const resetAt = SRC.indexOf('registerCommand("gate-reset"');
-  const resetRegion = SRC.slice(resetAt, resetAt + 600);
+  // Window sized to the whole handler — it grows as more session state is reset.
+  const resetRegion = SRC.slice(resetAt, resetAt + 900);
   assert.match(resetRegion, /clearBypassToken\(\)/);
   assert.match(resetRegion, /arbitrationsUsed = 0/);
   assert.match(resetRegion, /arbitrationDecisions\.clear\(\)/);
@@ -638,6 +639,60 @@ test("stale-state reconciliation is one-way", () => {
 
 test("sensitive-file guard wired into tool_call", () => {
   assert.match(SRC, /isSensitiveFile/);
+});
+
+test("request_sensitive_edit: the user decides in an extension dialog, not the agent", () => {
+  const start = SRC.indexOf('name: "request_sensitive_edit"');
+  assert.ok(start > 0, "the tool must be registered");
+  const body = SRC.slice(start, start + 6000);
+
+  assert.match(body, /ctx\.ui\.confirm\(/, "the extension must render the confirm dialog itself");
+  assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
+    "no agent-supplied 'confirmed' parameter — that would be self-approval");
+  assert.match(body, /if \(!ctx\.hasUI\)/, "no UI must fail closed instead of granting");
+  assert.match(body, /dialogFailed/, "a dialog that could not be shown is not a decline");
+});
+
+test("SECURITY: request_sensitive_edit refuses .git internals before showing any dialog", () => {
+  const start = SRC.indexOf('name: "request_sensitive_edit"');
+  const body = SRC.slice(start, start + 6000);
+  const integrityAt = body.indexOf("isGateIntegrityPath");
+  const confirmAt = body.indexOf("ctx.ui.confirm");
+  assert.ok(integrityAt > 0 && confirmAt > 0, "both must exist");
+  assert.ok(integrityAt < confirmAt,
+    "a user must never be asked to authorize a write to .git/hooks — that would disarm L3");
+});
+
+test("SECURITY: a declined sensitive path is locked, and grants never reach the sidecar", () => {
+  assert.match(SRC, /sensitiveDeclinedPaths\.add\(absPath\)/,
+    "a decline must lock that path against re-asking");
+  assert.match(SRC, /sensitiveDeclinedPaths\.has\(absPath\)/,
+    "a locked path must be refused before any dialog");
+  // In-memory only: persisting a grant would let a write authorization survive
+  // a crash/resume, i.e. outlive the conversation the user consented in.
+  assert.doesNotMatch(SRC, /state\.sensitiveGrants/,
+    "sensitive-file grants must never be written into the persisted gate state");
+});
+
+test("SECURITY: a sensitive-file grant is consumed on the RESULT, not at tool_call", () => {
+  const callStart = SRC.indexOf('pi.on("tool_call"');
+  const resultStart = SRC.indexOf('pi.on("tool_result"');
+  assert.ok(callStart > 0 && resultStart > callStart);
+  const callBody = SRC.slice(callStart, resultStart);
+  const resultBody = SRC.slice(resultStart);
+
+  assert.match(callBody, /findGrant\(sensitiveGrants/,
+    "tool_call only checks the grant");
+  assert.doesNotMatch(callBody, /consumeGrant\(/,
+    "burning the grant before the edit lands would force a new dialog after any retry");
+  assert.match(resultBody, /consumeGrant\(/,
+    "a landed edit must burn the one-shot grant");
+});
+
+test("SECURITY: a new session and /gate-reset both start with no sensitive-file grants", () => {
+  const resets = [...SRC.matchAll(/sensitiveGrants = \[\]/g)];
+  assert.ok(resets.length >= 2,
+    "session_start and gate-reset must each clear outstanding grants");
 });
 
 test("no network fetch anywhere in the extension", () => {
