@@ -184,7 +184,10 @@ test("llmGuards fields load independently; invalid fields keep defaults", () => 
     llmGuards: { taskMode: false, shipDetect: false, aiAttribution: "yes", model: 42 },
   }));
   const lg = loadProjectConfig(d).llmGuards;
-  assert.equal((lg as Record<string, unknown>).taskMode, undefined); // retired knob ignored
+  // Double cast: LlmGuardsConfig has no index signature, so TS rejects the
+  // direct assertion. The point of the probe is exactly that the key is NOT on
+  // the type — a retired knob must be dropped, not carried through.
+  assert.equal((lg as unknown as Record<string, unknown>).taskMode, undefined);
   assert.equal(lg.shipDetect, false);
   assert.equal(lg.aiAttribution, true);  // invalid type → default
   assert.equal(lg.englishCheck, true);   // absent → default

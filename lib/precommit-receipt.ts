@@ -89,3 +89,40 @@ export function validatePrecommitReceipt(
   if (run !== 0) return err("NO_CHECKS_RUN with checks that ran");
   return { verdict: "NO_CHECKS_RUN", checksRun: 0, checksFailed: 0 };
 }
+
+/** Longest step name echoed back; runner names are short, this is anti-abuse. */
+const MAX_STEP_NAME = 80;
+/** Upper bound on echoed names, so a pathological receipt cannot flood a reply. */
+const MAX_FAILED_STEPS = 20;
+
+/**
+ * Names of the steps that FAILED, for diagnostics only.
+ *
+ * Deliberately separate from validatePrecommitReceipt(): that function owns the
+ * verdict and its contradiction table, and nothing here may influence it. This
+ * one is pure presentation — it answers "which check should I look at?" so the
+ * agent can open the run log at the right place instead of guessing.
+ *
+ * Only NAMES are returned. Step output (`tail`) is attacker-controlled in the
+ * mundane sense that any test can print anything, so it is never inlined into a
+ * tool reply; the full text lives in the run log, which the agent reads itself.
+ * Names are still truncated and capped: a receipt is trusted for its nonce, not
+ * for its shape.
+ */
+export function failedStepNames(parsed: unknown): string[] {
+  if (typeof parsed !== "object" || parsed === null) return [];
+  const steps = (parsed as Record<string, unknown>).steps;
+  if (!Array.isArray(steps)) return [];
+  const names: string[] = [];
+  for (const step of steps) {
+    if (names.length >= MAX_FAILED_STEPS) break;
+    if (typeof step !== "object" || step === null) continue;
+    const s = step as Record<string, unknown>;
+    if (s.status !== "fail") continue;
+    const raw = typeof s.name === "string" && s.name.trim() ? s.name.trim() : "(unnamed step)";
+    // Strip control characters (including newlines): these names are echoed
+    // into a single-line tool reply.
+    names.push(raw.replace(/[\p{Cc}\p{Cf}]/gu, " ").slice(0, MAX_STEP_NAME));
+  }
+  return names;
+}

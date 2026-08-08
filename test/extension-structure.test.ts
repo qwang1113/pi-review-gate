@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -653,8 +653,78 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   // The tool must pass the target repo root and its AbortSignal through
   // (P1 fix: process.cwd() can differ from ctx.cwd under pi --cwd; P-multi:
   // the target may be the active non-session repo).
-  assert.match(SRC, /await runTrustedPrecommit\((?:cwd|targetRoot|targetDir), mode, _signal\)/);
+  assert.match(SRC, /await runTrustedPrecommit\(targetDir, targetRoot, mode, _signal\)/);
   assert.doesNotMatch(SRC, /async function runTrustedPrecommit[^{]*\{\s*\n\s*const cwd = process\.cwd\(\)/);
+});
+
+// ---------------------------------------------------------------------------
+// Precommit observability — the run output must survive, and be findable.
+
+test("the runner's output is CAPTURED to a file descriptor, never discarded", () => {
+  // It used to be stdio: ["ignore", "ignore", "ignore"], so a FAIL told the
+  // agent "1/3 checks failed" and nothing else — no check name, no error text.
+  assert.doesNotMatch(SRC, /stdio:\s*\["ignore",\s*"ignore",\s*"ignore"\]/,
+    "the precommit runner's output must not be thrown away");
+  const start = SRC.indexOf("async function runTrustedPrecommit");
+  assert.ok(start > 0);
+  const body = SRC.slice(start, start + 6000);
+  assert.match(body, /openSync\(tmpLog/, "capture via a file descriptor");
+  // A pipe would deadlock: the runner is detached and long-lived, and a full
+  // 64KB pipe buffer blocks its next write forever if nobody drains it.
+  assert.doesNotMatch(body, /stdio:\s*\[[^\]]*"pipe"/, "never a pipe for the detached runner");
+  assert.match(body, /rmSync\(dir, \{ recursive: true, force: true \}\)/,
+    "the temp receipt dir is still destroyed after every run");
+});
+
+test("the run log is anchored to the REPO ROOT, or it would invalidate its own PASS", () => {
+  // `.pi/` is gate-owned only at the repo root (GATE_EXCLUDE_PATHSPECS uses
+  // `:/.pi`). The primary repo's precommit may run in a SUBDIRECTORY; a log
+  // written to <root>/sub/.pi/ is an ordinary worktree file, so every run
+  // would change the fingerprint and void the PASS it just recorded.
+  assert.match(SRC, /const PRECOMMIT_LOG_RELPATH = "\.pi\/precommit-last\.log"/);
+  assert.match(SRC, /function keepRunLog\(repoRoot: string, tmpLog: string\)/);
+  assert.match(SRC, /pathJoin\(repoRoot, PRECOMMIT_LOG_RELPATH\)/);
+  assert.doesNotMatch(SRC, /pathJoin\((?:cwd|targetDir), PRECOMMIT_LOG_RELPATH\)/);
+  // Kept BEFORE the abort/timeout early-returns: those are exactly the runs
+  // whose output the agent cannot otherwise see.
+  const keptAt = SRC.indexOf("logPath = keepRunLog(repoRoot, tmpLog)");
+  const abortAt = SRC.indexOf('if (res.aborted) return fail("aborted by user');
+  assert.ok(keptAt > 0 && abortAt > keptAt, "the log must be kept before the abort/timeout returns");
+});
+
+test("precommit replies POINT AT the log; they never inline the runner's output", () => {
+  // A failing suite can emit megabytes, and only the agent knows how much of
+  // it it needs — so the reply carries the path plus the failed check NAMES,
+  // and the agent reads the file itself.
+  const start = SRC.indexOf('name: "run_precommit"');
+  assert.ok(start > 0);
+  const body = SRC.slice(start, SRC.indexOf('name: "declare_done"'));
+  assert.match(body, /Full output: \$\{outcome\.logPath\}/, "every reply names the log");
+  assert.match(body, /outcome\.failedSteps/, "failed check names help locate the section");
+  assert.doesNotMatch(body, /\.tail/, "step output must never be inlined into the reply");
+});
+
+test("failed-step names are diagnostics: read AFTER the verdict, never fed into it", () => {
+  const start = SRC.indexOf("async function runTrustedPrecommit");
+  const body = SRC.slice(start, start + 6000);
+  const verdictAt = body.indexOf("validatePrecommitReceipt(parsed");
+  const stepsAt = body.indexOf("failedStepNames(parsed)");
+  assert.ok(verdictAt > 0 && stepsAt > verdictAt,
+    "the verdict must be decided before the steps are even looked at");
+});
+
+test("the audit log anchors on the REPO ROOT, not the session cwd", () => {
+  // `:/.pi` excludes the ROOT `.pi` only. Pi started in a subdirectory has a
+  // cwd where `.pi/` is an ordinary worktree path, so a writer anchored there
+  // moves the fingerprint on every write — silently voiding a recorded READY.
+  //
+  // Scope: the audit log (added here) and the precommit run log (covered by
+  // its own test above). The older `.pi/` writers — appendLesson and
+  // /gate-lesson — still anchor on cwd; that is pre-existing behaviour, left
+  // alone deliberately rather than widened into this change.
+  assert.match(SRC, /pathJoin\(primaryRepoRoot, "\.pi", "review-gate-audit\.log"\)/,
+    "the audit log must live in the repo root's .pi/");
+  assert.doesNotMatch(SRC, /pathJoin\(cwd, "\.pi", "review-gate-audit\.log"\)/);
 });
 
 test("stale-state reconciliation is one-way", () => {
@@ -714,6 +784,62 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   assert.match(body, /writeFileSync\(goalPath/);
   assert.match(body, /state\.loopGoal = \{ hash: goalTextHash\(goalText\)/);
   assert.match(body, /LOOP_GOAL_MAX_WRITE_CHARS/, "the goal must be length-bounded");
+});
+
+// ---------------------------------------------------------------------------
+// Structural: the extension's `lib/` bindings must actually be imported.
+//
+// REGRESSION: `LOOP_GOAL_MAX_WRITE_CHARS` was used inside propose_loop_goal but
+// missing from the import list. ESM does not fail on load for an unresolved
+// bare identifier — it throws `... is not defined` the first time that line
+// runs, so the bug only surfaced when a user actually proposed a goal, while
+// the structural test above (a plain substring match) happily passed. Every
+// tool body in this extension is reachable only at runtime, so a missing
+// import is invisible without this check.
+
+test("every lib export referenced by the extension is imported (no runtime ReferenceError)", () => {
+  // Comments mention plenty of exported names in prose ("ONE CODE_EXTENSIONS
+  // list", "PrecommitVerdict enum member"); only real code counts.
+  //
+  // The comment stripper is deliberately crude: it can also eat the rest of a
+  // line after a " // " that lives INSIDE a string literal. That direction is
+  // safe — it can only hide a usage (a missed finding), never invent one — and
+  // `npm run typecheck` covers the gap with TS2304. A precise stripper would
+  // mean writing a tokenizer to guard one assertion.
+  const code = SRC
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, "$1");
+
+  const imported = new Set<string>();
+  for (const m of code.matchAll(/import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*"[^"]+"/g)) {
+    for (const clause of m[1].split(",")) {
+      const spec = clause.trim().replace(/^type\s+/, "");
+      if (!spec) continue;
+      const parts = spec.split(/\s+as\s+/);
+      imported.add((parts[1] ?? parts[0]).trim());
+    }
+  }
+  assert.ok(imported.size > 10, "the import scan must find the extension's bindings");
+
+  const libDir = join(ROOT, "lib");
+  const missing: string[] = [];
+  for (const file of readdirSync(libDir)) {
+    if (!file.endsWith(".ts")) continue;
+    const libSrc = readFileSync(join(libDir, file), "utf8");
+    const exportDecl =
+      /^export\s+(?:declare\s+)?(?:async\s+)?(?:const|let|function|class|interface|type|enum)\s+([A-Za-z0-9_$]+)/gm;
+    for (const m of libSrc.matchAll(exportDecl)) {
+      const name = m[1];
+      if (imported.has(name)) continue;
+      // Referenced as a bare identifier (not a property access, not a substring
+      // of a longer name) and not declared locally in the extension itself?
+      const used = new RegExp(`(?<![A-Za-z0-9_$.])${name}(?![A-Za-z0-9_$])`);
+      const declared = new RegExp(`(?:const|let|var|function|class|interface|type|enum)\\s+${name}\\b`);
+      if (used.test(code) && !declared.test(code)) missing.push(`${file} → ${name}`);
+    }
+  }
+  assert.deepEqual(missing, [],
+    `these lib exports are used by extensions/review-gate.ts but never imported: ${missing.join(", ")}`);
 });
 
 test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", () => {

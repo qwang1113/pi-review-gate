@@ -43,7 +43,10 @@
  *   —   /gate-lesson self-improvement log (.pi/review-gate-lessons.md)
  */
 
-import { existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
+  mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,7 +79,7 @@ import {
   resolveToolRepoTarget,
 } from "./lib/repo-resolve.ts";
 import { firstNonEnglish, containsNonLatinLetter } from "./lib/lang-detect.ts";
-import { validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
+import { failedStepNames, validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
 import {
   advisoryChangeToken,
   changedFiles,
@@ -128,6 +131,7 @@ import {
 import { projectEditedContent } from "./lib/edit-projection.ts";
 import {
   LOOP_GOAL_RELPATH,
+  LOOP_GOAL_MAX_WRITE_CHARS,
   buildLoopGoalDirective,
   buildGoalConfirmMessage,
   goalTextHash,
@@ -1194,6 +1198,34 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* best effort audit log */ }
   }
 
+  /**
+   * Best-effort audit line for gate decisions the transcript alone cannot be
+   * trusted to preserve: sensitive-file grants (issued/consumed) and loop-goal
+   * approvals. All three are USER consent events — the one class of fact that
+   * must stay checkable after a compaction, a crash, or a session the agent
+   * later summarizes in its own words.
+   *
+   * This function was CALLED from three places before it existed: ESM only
+   * throws `log is not defined` when the line finally runs, so every
+   * propose_loop_goal / request_sensitive_edit approval crashed in front of the
+   * user. `npm run typecheck` (TS2304) now catches that class before shipping.
+   *
+   * Writes under the REPO ROOT's `.pi/` — gate-owned, so it is excluded from
+   * the fingerprint and from edit tracking: auditing a decision must never
+   * invalidate the review binding the decision belongs to. Anchoring on the
+   * session `cwd` instead would break exactly that when Pi runs in a
+   * subdirectory of the repo, because `:/.pi` only excludes the ROOT one —
+   * `<root>/sub/.pi/audit.log` is an ordinary worktree file, and appending to
+   * it would move the digest under a recorded READY.
+   */
+  function log(text: string): void {
+    try {
+      const logPath = pathJoin(primaryRepoRoot, ".pi", "review-gate-audit.log");
+      mkdirSync(pathDirname(logPath), { recursive: true });
+      appendFileSync(logPath, `${new Date().toISOString()} [${state.sessionId ?? "no-session"}] ${text}\n`);
+    } catch { /* best effort audit log */ }
+  }
+
   // Evidence gatherers for the arbiter (the arbiter is tool-less; the extension
   // fetches trusted ground truth). All are best-effort read-only and degrade to
   // an explicit "unavailable" note rather than throwing.
@@ -1825,7 +1857,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // derived its own process.cwd(), which can differ from ctx.cwd
       // (e.g. pi --cwd), running checks — and binding the PASS fingerprint
       // — in the wrong dir.
-      const outcome = await runTrustedPrecommit(targetDir, mode, _signal);
+      // targetDir is where the checks RUN; targetRoot is the repo the run log
+      // belongs to (`.pi/` is only gate-owned at the root — see keepRunLog).
+      const outcome = await runTrustedPrecommit(targetDir, targetRoot, mode, _signal);
 
       if (outcome.verdict === "PASS") {
         // Bind PASS to the fingerprint recomputed AFTER the runner finished
@@ -1849,6 +1883,20 @@ export default function reviewGate(pi: ExtensionAPI) {
         : outcome.verdict === "FAIL" ? `FAIL (${outcome.checksFailed}/${outcome.checksRun} checks failed).`
         : outcome.verdict === "NO_CHECKS_RUN" ? "NO CHECKS RUN — zero runnable checks; this is NOT a pass. Configure real checks or /gate-bypass."
         : `ERROR (${outcome.error ?? "runner could not be trusted"}) — fail-closed.`;
+
+      // Diagnostics pointer. The full runner output is ALWAYS captured to a
+      // file; what changes with the verdict is whether the agent is told to go
+      // read it. Output is never inlined here — a failing test suite can emit
+      // megabytes, and only the agent knows how much of it it needs. Failed
+      // check NAMES are included so it can jump to the right section instead
+      // of paging through the whole log.
+      const failed = outcome.failedSteps.length ? ` Failed: ${outcome.failedSteps.join(", ")}.` : "";
+      const logNote = !outcome.logPath
+        ? " (run log unavailable — the runner produced no readable output)"
+        : outcome.verdict === "PASS"
+          ? ` Full output: ${outcome.logPath}`
+          : `${failed} Full output: ${outcome.logPath} — read it (or grep it) to see what failed; it is the complete runner output, not a summary.`;
+
       return {
         // Name the REPO in the text (not just details) — see record_review.
         // The PASS binds to the repo root, so that is what is echoed; the
@@ -1859,9 +1907,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         content: [{
           type: "text",
           text: `review-gate: precommit for ${targetRoot}` +
-            (samePlace(targetDir, targetRoot) ? "" : ` (ran in ${targetDir})`) + `: ${detail}`,
+            (samePlace(targetDir, targetRoot) ? "" : ` (ran in ${targetDir})`) + `: ${detail}` + logNote,
         }],
-        details: { verdict: outcome.verdict, checksRun: outcome.checksRun, checksFailed: outcome.checksFailed, repo: repoLabel(targetRoot) },
+        details: {
+          verdict: outcome.verdict, checksRun: outcome.checksRun, checksFailed: outcome.checksFailed,
+          repo: repoLabel(targetRoot), logPath: outcome.logPath, failedSteps: outcome.failedSteps,
+        },
         isError: outcome.verdict !== "PASS",
       };
     },
@@ -2087,7 +2138,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const target = resolveToolRepo(params.repo, "request_copilot_review");
+      // resolveToolRepo takes only `requested`; a second "tool name" argument
+      // was being passed and silently dropped (TS2554, now caught by
+      // `npm run typecheck`). The resolver's error already lists every
+      // candidate repo, so the tool name added nothing to it.
+      const target = resolveToolRepo(params.repo);
       if ("error" in target) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
@@ -2178,7 +2233,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const target = resolveToolRepo(params.repo, "check_copilot_review");
+      const target = resolveToolRepo(params.repo);
       if ("error" in target) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
@@ -3506,6 +3561,10 @@ interface PrecommitOutcome {
   checksFailed: number;
   fingerprint: string;
   error?: string;
+  /** Absolute path of the full run log, or "" when it could not be kept. */
+  logPath: string;
+  /** Names of the checks that failed, for pointing the agent at the log. */
+  failedSteps: string[];
 }
 
 /**
@@ -3566,9 +3625,66 @@ interface SpawnOutcome {
   timedOut: boolean;
 }
 
-async function runTrustedPrecommit(cwd: string, mode: "fast" | "full", abortSignal?: AbortSignal): Promise<PrecommitOutcome> {
+/** Repo-root-relative run log. Under `.pi/` — gate-owned, see keepRunLog(). */
+const PRECOMMIT_LOG_RELPATH = ".pi/precommit-last.log";
+/** Only the last slice of a run log is kept: `npm test` can emit megabytes. */
+const PRECOMMIT_LOG_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Move the temp run log to `<repoRoot>/.pi/precommit-last.log`, tail-truncated.
+ * Returns the kept path, or "" when nothing could be kept.
+ *
+ * `repoRoot` — NOT the run directory. `.pi/` is only gate-owned at the REPO
+ * ROOT (GATE_EXCLUDE_PATHSPECS uses `:/.pi`), and the primary repo's precommit
+ * may run in a subdirectory of it. A log written to `<root>/sub/.pi/` would be
+ * an ordinary worktree file: every run would change the fingerprint and
+ * invalidate the PASS it just produced.
+ *
+ * One file per repo, overwritten every run: "the last precommit" is the only
+ * question this answers, and an accumulating log directory would be litter the
+ * gate never cleans up. Two concurrent run_precommit calls on one repo are
+ * therefore last-writer-wins, and a reader racing the copy can see a partial
+ * file — acceptable for a diagnostics artifact that no decision depends on.
+ */
+function keepRunLog(repoRoot: string, tmpLog: string): string {
+  const dest = pathJoin(repoRoot, PRECOMMIT_LOG_RELPATH);
+  try {
+    mkdirSync(pathDirname(dest), { recursive: true });
+    const size = statSync(tmpLog).size;
+    if (size <= PRECOMMIT_LOG_MAX_BYTES) {
+      copyFileSync(tmpLog, dest);
+      return dest;
+    }
+    // Tail-truncate: the interesting part of a failed run is its end.
+    const fd = openSync(tmpLog, "r");
+    try {
+      const buf = Buffer.allocUnsafe(PRECOMMIT_LOG_MAX_BYTES);
+      const read = readSync(fd, buf, 0, PRECOMMIT_LOG_MAX_BYTES, size - PRECOMMIT_LOG_MAX_BYTES);
+      writeFileSync(
+        dest,
+        `[pi-review-gate] log truncated — ${size} bytes produced, last ${read} kept\n` +
+          buf.subarray(0, read).toString("utf8"),
+      );
+    } finally {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+    return dest;
+  } catch {
+    return "";
+  }
+}
+
+async function runTrustedPrecommit(
+  cwd: string,
+  repoRoot: string,
+  mode: "fast" | "full",
+  abortSignal?: AbortSignal,
+): Promise<PrecommitOutcome> {
+  // `logPath` is filled in as soon as the run log has been kept, so every
+  // failure path below still tells the agent where to look.
+  let logPath = "";
   const fail = (error: string): PrecommitOutcome =>
-    ({ verdict: "ERROR", checksRun: 0, checksFailed: 0, fingerprint: "", error });
+    ({ verdict: "ERROR", checksRun: 0, checksFailed: 0, fingerprint: "", error, logPath, failedSteps: [] });
 
   const runner = resolveTrustedRunner();
   if (!runner) return fail("trusted precommit runner not found");
@@ -3577,16 +3693,26 @@ async function runTrustedPrecommit(cwd: string, mode: "fast" | "full", abortSign
   let dir: string;
   try { dir = mkdtempSync(pathJoin(tmpdir(), "rg-precommit-")); } catch { return fail("cannot create temp dir"); }
   const receipt = pathJoin(dir, "receipt.json");
+  const tmpLog = pathJoin(dir, "output.log");
   const nonce = randomBytes(24).toString("hex");
 
   try {
     const res = await new Promise<SpawnOutcome>((resolve) => {
       let aborted = false;
       let timedOut = false;
+      // Capture the runner's output into a FILE DESCRIPTOR, not a pipe. The
+      // runner is detached and long-lived; with a pipe, anything that stops
+      // draining it (an abort, a busy host) fills the 64KB buffer and blocks
+      // the runner's next write forever. A file has no backpressure. It used
+      // to be "ignore" outright, which is why a FAIL told the agent only
+      // "1/3 checks failed" and nothing about which one or why.
+      let logFd: number | undefined;
+      try { logFd = openSync(tmpLog, "a"); } catch { logFd = undefined; }
       const child = spawn(
         process.execPath,
         [runner, "--mode", mode, "--cwd", cwd, "--receipt", receipt, "--nonce", nonce],
-        { cwd, shell: false, detached: true, stdio: ["ignore", "ignore", "ignore"],
+        { cwd, shell: false, detached: true,
+          stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
           // The nonce travels ONLY via the runner's argv (not env), so the
           // runner's lint/test grandchildren never inherit it. A same-UID
           // observer could still read the runner argv via ps — accepted: that
@@ -3602,11 +3728,18 @@ async function runTrustedPrecommit(cwd: string, mode: "fast" | "full", abortSign
         settled = true;
         clearTimeout(timer);
         abortSignal?.removeEventListener("abort", onAbort);
+        // The child holds its own duplicate of this descriptor; closing ours
+        // once it is gone just releases our handle.
+        if (logFd !== undefined) { try { closeSync(logFd); } catch { /* already closed */ } }
         resolve(out);
       };
       child.on("error", () => finish({ status: null, signal: null, spawnError: true, aborted, timedOut }));
       child.on("close", (status, signal) => finish({ status, signal, spawnError: false, aborted, timedOut }));
     });
+
+    // Keep the log BEFORE any early return: a timed-out or aborted run is
+    // exactly when the agent most needs to see how far the checks got.
+    logPath = keepRunLog(repoRoot, tmpLog);
 
     if (res.aborted) return fail("aborted by user — precommit run cancelled, no verdict recorded as PASS");
     if (res.timedOut) return fail("runner timed out after 20 minutes");
@@ -3629,15 +3762,22 @@ async function runTrustedPrecommit(cwd: string, mode: "fast" | "full", abortSign
       nonce, cwd, mode,
       exitStatus: res.status, signal: res.signal, spawnError: res.spawnError,
     });
+    // Diagnostics only — read AFTER the verdict is decided, and never fed back
+    // into it (see failedStepNames' docstring).
+    const failedSteps = failedStepNames(parsed);
     if (v.verdict === "PASS") {
       if (!fingerprint) return fail("worktree fingerprint unavailable post-run");
-      return { verdict: "PASS", checksRun: v.checksRun, checksFailed: v.checksFailed, fingerprint };
+      return { verdict: "PASS", checksRun: v.checksRun, checksFailed: v.checksFailed, fingerprint, logPath, failedSteps };
     }
-    return { verdict: v.verdict, checksRun: v.checksRun, checksFailed: v.checksFailed, fingerprint, error: v.error };
+    return {
+      verdict: v.verdict, checksRun: v.checksRun, checksFailed: v.checksFailed,
+      fingerprint, error: v.error, logPath, failedSteps,
+    };
   } catch (e) {
     return fail(`runner spawn failed: ${(e as Error).message}`);
   } finally {
-    // Single-use: destroy the receipt dir no matter what.
+    // Single-use: destroy the receipt dir no matter what. The log has already
+    // been copied out to the repo by then.
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 }

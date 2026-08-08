@@ -1,0 +1,39 @@
+{
+  // Type-check only — nothing here is compiled. Pi loads the .ts sources
+  // directly (node's type stripping), which is why `allowImportingTsExtensions`
+  // is required: the runtime specifiers really do carry the `.ts` suffix.
+  //
+  // This config exists because of a class of bug that shipped twice: a bare
+  // identifier used in a tool body but never imported/declared. ESM does not
+  // fail on load for that — it throws `X is not defined` only when that line
+  // finally executes, i.e. in front of the user. `tsc --noEmit` catches it as
+  // TS2304 in CI, and the precommit runner picks up the `typecheck` script
+  // automatically in full mode.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    // The extension imports `./lib/*.ts`, which only resolves in the INSTALLED
+    // layout (install-global.sh copies lib/ next to review-gate.ts inside
+    // extensions/pi-review-gate/). In the repo, lib/ is a sibling of
+    // extensions/. rootDirs merges the two into one virtual directory so tsc
+    // resolves the same specifiers the runtime does, without symlinks or a
+    // build step.
+    "rootDirs": [".", "./extensions"],
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    // Deliberately NOT enabled: noUnusedLocals / noUnusedParameters /
+    // exactOptionalPropertyTypes. The goal is catching "cannot find name" and
+    // real type errors, not a repo-wide style migration (see the loop goal's
+    // non-goals).
+    "noImplicitOverride": true,
+    "resolveJsonModule": true
+  },
+  "include": ["extensions/**/*.ts", "lib/**/*.ts", "test/**/*.ts"]
+}

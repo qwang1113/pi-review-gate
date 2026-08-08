@@ -149,7 +149,7 @@ function runReceipt(dir: string, extra: string[] = []) {
   const res = spawnSync("node", [RUNNER, "--cwd", dir, "--receipt", receipt, "--nonce", "NONCE123", ...extra], { encoding: "utf8" });
   let parsed: Record<string, unknown> | null = null;
   try { parsed = JSON.parse(readFile(receipt, "utf8")); } catch { /* none */ }
-  return { code: res.status, receipt: parsed };
+  return { code: res.status, receipt: parsed, out: res.stdout + res.stderr };
 }
 
 test("receipt: passing checks → schema/verdict/counts/nonce/cwd, exit 0", () => {
@@ -179,4 +179,57 @@ test("receipt: no checks → verdict NO_CHECKS_RUN, distinct exit 2", () => {
   assert.equal(code, 2);
   assert.equal(receipt!.verdict, "NO_CHECKS_RUN");
   assert.equal(receipt!.checksRun, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Streaming diagnostics — the run log has to be useful, including mid-run.
+// ---------------------------------------------------------------------------
+
+test("receipt mode streams each step's FULL output, not just the 40-line receipt tail", () => {
+  // The extension captures this stdout to <repo>/.pi/precommit-last.log and
+  // tells the agent to read it. If only the final summary were printed, a FAIL
+  // would still be undiagnosable — the bug this replaced.
+  const marker = "UNIQUE_FAILURE_MARKER_9271";
+  // 60 lines: more than the receipt's 40-line tail, so a test asserting on the
+  // FIRST line proves the log is not merely the tail reprinted.
+  const script = `for i in $(seq 1 60); do echo "${marker} line $i"; done; exit 1`;
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: script } });
+  const { code, out, receipt } = runReceipt(dir);
+
+  assert.equal(code, 1);
+  assert.equal(receipt!.verdict, "FAIL");
+  assert.match(out, new RegExp(`${marker} line 1$`, "m"), "the first line must reach the log");
+  assert.match(out, new RegExp(`${marker} line 60$`, "m"), "the last line must reach the log");
+  // Step boundaries let a reader (and a killed-mid-run log) locate the step.
+  assert.match(out, /▶ test — /, "each step must be announced BEFORE it runs");
+  assert.match(out, /◀ test — fail \(\d+ms, exit 1\)/, "each step must report its own result");
+});
+
+test("receipt mode announces the step BEFORE running it (a killed run still names the check)", () => {
+  // Ordering is the whole point: on a 20-minute timeout the log ends at the
+  // last ▶ with no matching ◀, which identifies the hung check.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "echo linting", test: "exit 0" } });
+  const { out } = runReceipt(dir);
+  const lintStart = out.indexOf("▶ lint");
+  const lintEnd = out.indexOf("◀ lint");
+  const testStart = out.indexOf("▶ test");
+  assert.ok(lintStart >= 0 && lintEnd > lintStart, "lint must be announced, then completed");
+  assert.ok(testStart > lintEnd, "steps must appear in execution order");
+});
+
+test("skipped steps are named in the log too (a skip is not a silent pass)", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 0" } });
+  const { out } = runReceipt(dir);
+  assert.match(out, /⏭ lint — skipped \(no script/);
+});
+
+test("human mode (no --receipt) keeps the original compact output — no streaming noise", () => {
+  // Streaming is for the machine-captured log. A human running this by hand
+  // must not suddenly get the full output of every check dumped at them.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "echo hello; exit 0" } });
+  const { out } = run(dir);
+  assert.match(out, /## Overall: ✅ PASS/);
+  assert.doesNotMatch(out, /▶ test/);
+  assert.doesNotMatch(out, /◀ test/);
+  assert.doesNotMatch(out, /⏭ lint/);
 });

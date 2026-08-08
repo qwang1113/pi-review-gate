@@ -757,7 +757,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 |------|---------|
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal` + a reason). On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) the tool asks the **DeepSeek V4** classifier and applies its verdict **automatically — no confirmation dialog** (user requirement; the LLM may override the agent's pick; a failed call falls back to the rule engine). Later changes delegate to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. |
 | `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). |
-| `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. |
+| `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply carries that path plus the names of the checks that failed, and the agent reads as much of the log as it needs. Output is never inlined into the reply — a failing suite can emit megabytes. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
 | `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Grill the user first; then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 and its body is withheld from the prompt. |
 | `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. Spending the last round of `copilotReview.maxRounds` releases it as `EXHAUSTED` with an escalate-to-the-user note. |
@@ -1088,8 +1088,24 @@ it is missing — see the fail-closed inventory.)
 ## Development
 
 ```bash
-npm test        # 600+ tests, node:test native TS (no build step)
+npm install     # devDependencies: typescript + the Pi extension API types
+npm test        # 880+ tests, node:test native TS (no build step)
+npm run typecheck  # tsc --noEmit
 ```
+
+`typecheck` is not optional politeness. Pi loads these `.ts` sources with
+node's type stripping, so a bare identifier that is never imported or declared
+is **not** an error at load time — it throws `X is not defined` the first time
+that line runs, in front of the user. That shipped twice (`propose_loop_goal`
+crashed on `LOOP_GOAL_MAX_WRITE_CHARS`, then on `log`), and no test caught it
+because every tool body is reachable only at runtime. `tsc --noEmit` reports
+both as TS2304, and the precommit runner picks the script up automatically in
+`full` mode.
+
+`tsconfig.json` sets `rootDirs: [".", "./extensions"]` because the extension
+imports `./lib/*.ts` — a path that only exists in the INSTALLED layout, where
+`install-global.sh` copies `lib/` next to `review-gate.ts`. rootDirs makes tsc
+resolve the same specifiers the runtime does, with no build step or symlink.
 
 ### Why the suite is slow, and two rejected ways to speed it up
 
@@ -1169,18 +1185,18 @@ scripts/fetch-leaderboard.mjs opt-in, gate-external leaderboard fetcher (the onl
 lib/shell-lex.ts              quote-aware shell lexer (segments + dequoted tokens)
 lib/lang-detect.ts            L5: non-Latin-script detection for commit/PR English advisory
 scripts/scan-test-labels.cjs  L6: non-English test-label scanner (pre-commit, staged content)
-lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count table → PASS/FAIL/ERROR)
+lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count table → PASS/FAIL/ERROR) + failedStepNames (diagnostics only)
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)
 lib/fingerprint.ts            worktree fingerprint (content-addressed git tree hash; staging-invariant)
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/blocked-marker.ts         .blocked marker ownership (record failure, reclaim only our own/orphans)
 lib/verdict-parse.ts          all-fence worst-wins verdict parser
-scripts/precommit-runner.mjs  PASS/FAIL/NO_CHECKS_RUN runner; writes nonce receipt for run_precommit
+scripts/precommit-runner.mjs  PASS/FAIL/NO_CHECKS_RUN runner; writes nonce receipt for run_precommit; streams every step's full output in receipt mode
 scripts/install-project.sh    per-project installer (same layout as global)
 scripts/install-git-hooks.sh  chained installer for L3
 hooks/pre-commit|pre-push|commit-msg
 skills/review-loop/SKILL.md   the loop protocol as a Pi skill
-test/                         560+ tests incl. PR #7 regression suite
+test/                         880+ tests incl. PR #7 regression suite
 ```
 
 ## License

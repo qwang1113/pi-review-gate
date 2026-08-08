@@ -527,10 +527,17 @@ test("P0: gate-owned .pi files do NOT affect the fingerprint (sidecar self-deadl
   writeFileSync(join(dir, ".pi", "review-gate-state.json"), JSON.stringify({ schema: 1 }));
   writeFileSync(join(dir, ".pi", "review-gate-lessons.md"), "### L1\nlesson\n");
   writeFileSync(join(dir, ".pi", "review-gate-arbitration.log"), "entry\n");
+  // Plus the two newer gate-owned writers. The precommit run log is the
+  // sharpest case: run_precommit writes it and then binds its PASS to the
+  // fingerprint computed right after — if the log counted, every PASS would
+  // be born already invalid.
+  writeFileSync(join(dir, ".pi", "precommit-last.log"), "▶ test\nfailing output\n");
+  writeFileSync(join(dir, ".pi", "review-gate-audit.log"), "2026-01-01 [s] goal approved\n");
   const after = computeFingerprint(dir);
   assert.equal(before.digest, after.digest, "gate-owned .pi writes must be fingerprint-invisible");
   // Rewriting the sidecar again (new mtime + content) still changes nothing.
   writeFileSync(join(dir, ".pi", "review-gate-state.json"), JSON.stringify({ schema: 1, updatedAt: "t2" }));
+  writeFileSync(join(dir, ".pi", "precommit-last.log"), "▶ test\ndifferent output\n");
   assert.equal(computeFingerprint(dir).digest, after.digest);
 });
 
@@ -575,7 +582,7 @@ test("isGateOwnedPath matches exactly the dirs the fingerprint excludes", () => 
   assert.equal(isGateOwnedPath("/other/.pi/loop-goal.md", root), false);
   assert.equal(isGateOwnedPath(root, root), false);
   // Derived from the pathspecs, so the two lists cannot drift.
-  assert.deepEqual([...GATE_EXCLUDE_DIRS], GATE_EXCLUDE_PATHSPECS.map((s) => s.replace(/^:\//, "")));
+  assert.deepEqual([...GATE_EXCLUDE_DIRS], GATE_EXCLUDE_PATHSPECS.map((s: string) => s.replace(/^:\//, "")));
 });
 
 test("isGateOwnedPath survives a symlinked worktree (logical cwd vs git's physical root)", () => {

@@ -52,7 +52,7 @@ test("findings counted and fingerprinted with line bucketing", () => {
   const out = '```json\n{"gate":"BLOCKED","findings":[{"file":"src/x.ts","line":42,"severity":"P1","issue":"null check"}]}\n```';
   const p = parseReviewOutput(out)!;
   assert.equal(p.findingsTotal, 1);
-  assert.ok(p.findingFingerprints.some(f => f.includes("src/x.ts") && f.includes("null check")));
+  assert.ok(p.findingFingerprints.some((f: string) => f.includes("src/x.ts") && f.includes("null check")));
 });
 
 test("verdict synonyms normalize", () => {

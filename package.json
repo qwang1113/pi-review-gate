@@ -17,11 +17,28 @@
     "README.md"
   ],
   "scripts": {
+    "typecheck": "tsc --noEmit",
     "test": "node --test $(find test -name '*.test.ts' -o -name '*.test.mjs')"
   },
-  "keywords": ["pi", "review-gate", "quality-gate", "code-review", "harness"],
+  "keywords": [
+    "pi",
+    "review-gate",
+    "quality-gate",
+    "code-review",
+    "harness"
+  ],
   "pi": {
-    "extensions": ["./extensions/review-gate.ts"],
-    "skills": ["./skills/review-loop"]
+    "extensions": [
+      "./extensions/review-gate.ts"
+    ],
+    "skills": [
+      "./skills/review-loop"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@types/node": "^26.2.0",
+    "typebox": "^1.3.11",
+    "typescript": "^5.9.3"
   }
 }
