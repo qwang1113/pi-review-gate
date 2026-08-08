@@ -43,8 +43,28 @@ const nonce = argOf("--nonce", null);
 
 const steps = [];
 
+// Streaming diagnostics (receipt mode only).
+//
+// Each step runs through spawnSync, which buffers the child's output into THIS
+// process's memory — grandchildren do not inherit the runner's stdout. So even
+// after the extension started capturing our stdio to a log file, that log would
+// hold almost nothing, and the final summary only lands once every step has
+// finished: a run killed at the 20-minute timeout produced an EMPTY log, with
+// no way to tell which check hung.
+//
+// In receipt mode we therefore announce each step BEFORE running it and dump
+// its complete stdout+stderr immediately AFTER, so the log stays useful even
+// when the process is killed mid-run. Interactive humans (no --receipt) keep
+// the original compact output.
+const streaming = Boolean(receiptPath && nonce);
+
+function stream(line) {
+  if (streaming) console.log(line);
+}
+
 function runStep(name, command) {
   const started = Date.now();
+  stream(`\n▶ ${name} — ${command}`);
   // Plain -c (NOT -lc): a login shell would source the user's full profile
   // for EVERY step — slow and environment-dependent. PATH etc. inherit from
   // the parent environment, which is what ran this runner in the first place.
@@ -55,17 +75,23 @@ function runStep(name, command) {
     maxBuffer: 64 * 1024 * 1024,
   });
   const passed = res.status === 0;
+  const full = (res.stdout ?? "") + (res.stderr ?? "");
+  stream(full);
+  stream(`◀ ${name} — ${passed ? "pass" : "fail"} (${Date.now() - started}ms, exit ${res.status ?? `signal ${res.signal}`})`);
   steps.push({
     name,
     command,
     status: passed ? "pass" : "fail",
     durationMs: Date.now() - started,
-    tail: ((res.stdout ?? "") + (res.stderr ?? "")).split("\n").slice(-40).join("\n"),
+    // The receipt stays a BOUNDED structured summary; the unbounded full text
+    // lives in the streamed log. Two channels, two jobs.
+    tail: full.split("\n").slice(-40).join("\n"),
   });
   return passed;
 }
 
 function skipStep(name, reason) {
+  stream(`⏭ ${name} — skipped (${reason})`);
   steps.push({ name, command: null, status: "skip", reason });
 }
 

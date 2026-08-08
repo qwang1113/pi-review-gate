@@ -101,7 +101,9 @@ function makeMockPi(cwd: string): MockPi {
     entries,
     setCwd: (c: string) => { sessionCwd = c; },
     ctx: {
-      hasUI: false,
+      // Enforced modes require a UI (a no-UI session is forced to normal, i.e.
+      // no gate at all — see task-mode.test.ts), so the harness has one.
+      hasUI: true,
       ui,
       sessionManager,
       isIdle: () => false,

@@ -12,6 +12,11 @@ import {
   MAX_MAX_ROUNDS,
 } from "../lib/project-config.ts";
 import { DEFAULT_MAX_ROUNDS } from "../lib/constants.ts";
+import {
+  COPILOT_MAX_ROUNDS,
+  COPILOT_MAX_ROUNDS_DEFAULT,
+  COPILOT_MIN_ROUNDS,
+} from "../lib/copilot-review.ts";
 
 const tempDirs: string[] = [];
 function makeTemp(): string {
@@ -38,6 +43,36 @@ test("no config file → defaults", () => {
   assert.equal(cfg.maxRounds, DEFAULT_MAX_ROUNDS);
   assert.equal(cfg.thinkHarder, true);
   assert.equal(cfg.gitMemory, true);
+  // L7 ships ON: a repo with no gh / no GitHub remote / no PR resolves to
+  // UNSUPPORTED on the first check, so "on" costs nothing where the feature
+  // does not exist — while "off by default" would mean nobody gets it.
+  assert.equal(cfg.copilotReview.enabled, true);
+  assert.equal(cfg.copilotReview.maxRounds, COPILOT_MAX_ROUNDS_DEFAULT);
+});
+
+test("copilotReview: honored, clamped, and fail-safe on garbage", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({ copilotReview: { enabled: false, maxRounds: 5 } }));
+  const off = loadProjectConfig(d);
+  assert.equal(off.copilotReview.enabled, false);
+  assert.equal(off.copilotReview.maxRounds, 5);
+
+  // Clamped both ways: a typo still yields a sane budget, and a huge value
+  // cannot turn the Copilot loop into one that practically never exhausts.
+  const e = makeTemp();
+  writeConfig(e, JSON.stringify({ copilotReview: { maxRounds: 9999 } }));
+  assert.equal(loadProjectConfig(e).copilotReview.maxRounds, COPILOT_MAX_ROUNDS);
+  const f = makeTemp();
+  writeConfig(f, JSON.stringify({ copilotReview: { maxRounds: 0 } }));
+  assert.equal(loadProjectConfig(f).copilotReview.maxRounds, COPILOT_MIN_ROUNDS);
+
+  // Wrong shapes are ignored entirely rather than half-applied.
+  const g = makeTemp();
+  writeConfig(g, JSON.stringify({ copilotReview: ["nope"] }));
+  assert.deepEqual(loadProjectConfig(g).copilotReview, defaultProjectConfig().copilotReview);
+  const h = makeTemp();
+  writeConfig(h, JSON.stringify({ copilotReview: { enabled: "yes", maxRounds: 2.5 } }));
+  assert.deepEqual(loadProjectConfig(h).copilotReview, defaultProjectConfig().copilotReview);
 });
 
 test("corrupt JSON → defaults (fail-safe)", () => {
@@ -149,7 +184,10 @@ test("llmGuards fields load independently; invalid fields keep defaults", () => 
     llmGuards: { taskMode: false, shipDetect: false, aiAttribution: "yes", model: 42 },
   }));
   const lg = loadProjectConfig(d).llmGuards;
-  assert.equal((lg as Record<string, unknown>).taskMode, undefined); // retired knob ignored
+  // Double cast: LlmGuardsConfig has no index signature, so TS rejects the
+  // direct assertion. The point of the probe is exactly that the key is NOT on
+  // the type — a retired knob must be dropped, not carried through.
+  assert.equal((lg as unknown as Record<string, unknown>).taskMode, undefined);
   assert.equal(lg.shipDetect, false);
   assert.equal(lg.aiAttribution, true);  // invalid type → default
   assert.equal(lg.englishCheck, true);   // absent → default

@@ -43,7 +43,10 @@
  *   —   /gate-lesson self-improvement log (.pi/review-gate-lessons.md)
  */
 
-import { existsSync, statSync, readFileSync, mkdtempSync, rmSync, appendFileSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
+  mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,7 +79,7 @@ import {
   resolveToolRepoTarget,
 } from "./lib/repo-resolve.ts";
 import { firstNonEnglish, containsNonLatinLetter } from "./lib/lang-detect.ts";
-import { validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
+import { failedStepNames, validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
 import {
   advisoryChangeToken,
   changedFiles,
@@ -126,7 +129,44 @@ import {
   looksLikeBashFileWrite,
 } from "./lib/edit-discipline.ts";
 import { projectEditedContent } from "./lib/edit-projection.ts";
-import { buildLoopGoalDirective, readLoopGoal } from "./lib/loop-goal.ts";
+import {
+  LOOP_GOAL_RELPATH,
+  LOOP_GOAL_MAX_WRITE_CHARS,
+  buildLoopGoalDirective,
+  buildGoalConfirmMessage,
+  goalTextHash,
+  isLoopGoalConfirmed,
+  normalizeGoalText,
+  readLoopGoal,
+  GOAL_CONFIRM_TITLE,
+  LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
+} from "./lib/loop-goal.ts";
+import {
+  COPILOT_REVIEWER_LOGIN,
+  COPILOT_THREADS_QUERY,
+  analyzeCopilot,
+  armCopilotReview,
+  copilotProblems,
+  evaluateCopilot,
+  isCopilotOutstanding,
+  parseCopilotPayload,
+  parseNameWithOwner,
+  parsePrView,
+  recordCopilotRequest,
+  releaseCopilotReview,
+  slugFromPrUrl,
+  type CopilotPayload,
+  type PrSummary,
+} from "./lib/copilot-review.ts";
+import {
+  SENSITIVE_GRANT_TTL_MS,
+  addGrant,
+  consumeGrant,
+  findGrant,
+  isGateIntegrityPath,
+  normalizeSensitivePath,
+  type SensitiveGrant,
+} from "./lib/sensitive-grant.ts";
 import {
   blockedMarkerPath,
   recordBlockedMarker,
@@ -191,6 +231,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   let state: GateState = emptyState(null, DEFAULT_MAX_ROUNDS);
   let cwd = process.cwd();
   let continuationsInjected = 0; // total auto-continuation injections (persisted)
+  /**
+   * L7/L8 continuations spent on COMPLETION-only work (waiting for Copilot,
+   * negotiating the goal). Separate budget on purpose: a Copilot review that
+   * takes four polls must not eat the rounds the fix→review loop needs, and a
+   * stuck completion requirement still has to stop eventually.
+   */
+  let completionContinuations = 0;
+  const COMPLETION_CONTINUATION_CAP = 12;
   let loopArmed = true; // /gate-bypass or NEEDS_HUMAN disarms auto-continuation
   // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
   // session_start; a missing/corrupt config file falls back to safe defaults.
@@ -243,6 +291,18 @@ export default function reviewGate(pi: ExtensionAPI) {
   // in scope) and the scope directive in the per-turn prompt. In-memory; a
   // same-session resume re-seeds it from state.scopeLimit.sessionFiles.
   const sessionEditedPaths = new Set<string>();
+  // ---- Sensitive-file edit authorization (lib/sensitive-grant.ts) ----
+  // Live one-shot grants issued by request_sensitive_edit, and the set of
+  // paths whose dialog the user already DECLINED. Both in-memory ONLY: a
+  // permission to write `.env` must never outlive the process that asked for
+  // it, so a crash/resume/second session starts fully fail-closed.
+  //
+  // The decline lock is per PATH, not per session (unlike scopeLimitDeclined):
+  // a "no" to `/a/.env` says nothing about `/b/credentials.json`, but it does
+  // permanently answer `/a/.env` — re-popping the same dialog is exactly the
+  // grinding an injected instruction would try.
+  let sensitiveGrants: SensitiveGrant[] = [];
+  const sensitiveDeclinedPaths = new Set<string>();
 
   // ---- Multi-repo tracking (see lib/repo-resolve.ts) ----
   // The gate's sidecar + fingerprint bind to the SESSION repo (cwd's git
@@ -705,6 +765,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     delete state.pausedQuestion;
     loopArmed = mode === "loop";
     continuationsInjected = 0;
+    completionContinuations = 0;
     persist(ctx);
   }
 
@@ -796,10 +857,26 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       const path = coalesceToolPath(input);
       if (path && isSensitiveFile(path)) {
-        return {
-          block: true,
-          reason: `review-gate: "${path}" matches a sensitive-file pattern (.env/keys/credentials). Ask the user to edit it themselves.`,
-        };
+        // A live grant means the USER already approved this exact path in a
+        // dialog (request_sensitive_edit). It is consumed on the successful
+        // tool_result, so the pass here is for one landing edit only.
+        // `cwd` (the session cwd), not ctx.cwd: the grant is keyed at
+        // request time with the same base, and a mismatched base would make a
+        // relative path miss its own grant.
+        const absPath = normalizeSensitivePath(path, cwd);
+        if (!findGrant(sensitiveGrants, absPath, Date.now())) {
+          // absPath in both checks, so the hint matches what the tool would do.
+          const askable = !isGateIntegrityPath(absPath) && !sensitiveDeclinedPaths.has(absPath);
+          return {
+            block: true,
+            reason:
+              `review-gate: "${path}" matches a sensitive-file pattern (.env/keys/credentials). ` +
+              (askable
+                ? "Ask the user to edit it themselves, or call request_sensitive_edit to ask them " +
+                  "for one-time authorization for this exact path."
+                : "Ask the user to edit it themselves — this path cannot be authorized from here."),
+          };
+        }
       }
       // Normal mode: user-consented “as if not installed” — the L6 label check
       // (and its LLM call) is skipped. The sensitive-file guard ABOVE runs in
@@ -1020,6 +1097,21 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
       }
     }
+    // L8 — loop mode ships only against a goal the USER approved. The
+    // negotiation is the point: without it the agent writes its own exit
+    // contract, works to it, and grades itself against it, and a leftover file
+    // from a previous task passes for a contract too. Blocking at ship time
+    // (rather than at declare_done) is what makes the negotiation happen
+    // BEFORE the work lands — by the time `declare_done` runs, the code is
+    // already pushed and agreeing on the goal is theatre.
+    //
+    // L1 only, deliberately: the git hooks judge code facts from the sidecar
+    // and cannot see a dialog, so this requirement never enters
+    // unmetRequirements() (the ship authority they share).
+    if (state.taskMode === "loop" && !loopGoalConfirmed()) {
+      problems.push(multiRepo ? `[${repoLabel(primaryRepoRoot)}] ${LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK}` : LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    }
+
     if (problems.length === 0) return;
 
     // Single-use arbiter bypass token (lib/arbitration.ts). Only a lone,
@@ -1106,6 +1198,34 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* best effort audit log */ }
   }
 
+  /**
+   * Best-effort audit line for gate decisions the transcript alone cannot be
+   * trusted to preserve: sensitive-file grants (issued/consumed) and loop-goal
+   * approvals. All three are USER consent events — the one class of fact that
+   * must stay checkable after a compaction, a crash, or a session the agent
+   * later summarizes in its own words.
+   *
+   * This function was CALLED from three places before it existed: ESM only
+   * throws `log is not defined` when the line finally runs, so every
+   * propose_loop_goal / request_sensitive_edit approval crashed in front of the
+   * user. `npm run typecheck` (TS2304) now catches that class before shipping.
+   *
+   * Writes under the REPO ROOT's `.pi/` — gate-owned, so it is excluded from
+   * the fingerprint and from edit tracking: auditing a decision must never
+   * invalidate the review binding the decision belongs to. Anchoring on the
+   * session `cwd` instead would break exactly that when Pi runs in a
+   * subdirectory of the repo, because `:/.pi` only excludes the ROOT one —
+   * `<root>/sub/.pi/audit.log` is an ordinary worktree file, and appending to
+   * it would move the digest under a recorded READY.
+   */
+  function log(text: string): void {
+    try {
+      const logPath = pathJoin(primaryRepoRoot, ".pi", "review-gate-audit.log");
+      mkdirSync(pathDirname(logPath), { recursive: true });
+      appendFileSync(logPath, `${new Date().toISOString()} [${state.sessionId ?? "no-session"}] ${text}\n`);
+    } catch { /* best effort audit log */ }
+  }
+
   // Evidence gatherers for the arbiter (the arbiter is tool-less; the extension
   // fetches trusted ground truth). All are best-effort read-only and degrade to
   // an explicit "unavailable" note rather than throwing.
@@ -1150,6 +1270,192 @@ export default function reviewGate(pi: ExtensionAPI) {
     return runReadOnly(["git", "log", "--oneline", "-15"]) ?? "(git log unavailable)";
   }
 
+  // ---------- L7: post-PR Copilot code-review loop ----------
+  //
+  // Everything the gate BELIEVES about a Copilot review is gathered here, by
+  // the extension itself: `gh` runs as an argv (never through a shell), in the
+  // target repo, with a timeout, and the JSON is interpreted by the pure
+  // lib/copilot-review.ts rules. The agent drives the loop but can never
+  // report its own review outcome — the same trust split as run_precommit.
+
+  /**
+   * Optimistic poll inside check_copilot_review: a couple of quick retries
+   * catch the common "Copilot answered while we were talking" case without
+   * turning the tool into a long block. Anything slower is handled by the
+   * persistent AWAITING state and the next continuation.
+   */
+  const COPILOT_CHECK_ATTEMPTS = 3;
+  const COPILOT_CHECK_DELAY_MS = 10000;
+
+  interface GhResult { ok: boolean; stdout: string; stderr: string }
+
+  /**
+   * Run one `gh` invocation. Never throws; a missing or failing gh is an
+   * ordinary result.
+   *
+   * ASYNC on purpose, and for the same reason run_precommit is: a synchronous
+   * spawn blocks the extension host's event loop, so a slow API call would
+   * freeze the session and swallow the user's ESC. The child is killed on
+   * timeout and on abort.
+   */
+  async function runGh(
+    argv: string[],
+    dir: string,
+    opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<GhResult> {
+    const timeoutMs = opts.timeoutMs ?? 30000;
+    return await new Promise<GhResult>((resolveResult) => {
+      let child: ChildProcess;
+      try {
+        child = spawn(argv[0], argv.slice(1), {
+          cwd: dir,
+          // GH_PAGER="" keeps gh from piping JSON into a pager; NO_COLOR keeps
+          // ANSI escapes out of the payloads we parse.
+          env: { ...process.env, GH_PAGER: "", NO_COLOR: "1" },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (e) {
+        resolveResult({ ok: false, stdout: "", stderr: e instanceof Error ? e.message : String(e) });
+        return;
+      }
+      let out = "";
+      let err = "";
+      let settled = false;
+      const finish = (r: GhResult) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        opts.signal?.removeEventListener("abort", onAbort);
+        resolveResult(r);
+      };
+      const kill = () => { try { child.kill("SIGKILL"); } catch { /* already gone */ } };
+      const timer = setTimeout(() => {
+        kill();
+        finish({ ok: false, stdout: out, stderr: `gh timed out after ${timeoutMs}ms` });
+      }, timeoutMs);
+      const onAbort = () => { kill(); finish({ ok: false, stdout: out, stderr: "aborted" }); };
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      child.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+      child.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+      child.on("error", (e: Error) => finish({ ok: false, stdout: out, stderr: e.message }));
+      child.on("close", (code: number | null) => finish({ ok: code === 0, stdout: out, stderr: err }));
+    });
+  }
+
+  /** First meaningful line of gh's stderr, for the tool's explanation text. */
+  function ghError(res: GhResult, fallback: string): string {
+    const line = res.stderr.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+    return line ? line.slice(0, 200) : fallback;
+  }
+
+  /** The PR for the repo's current branch, or the reason there is none. */
+  async function resolveOpenPr(dir: string, signal?: AbortSignal): Promise<{ pr?: PrSummary; error?: string }> {
+    const res = await runGh(["gh", "pr", "view", "--json", "number,headRefOid,url,state"], dir, { signal });
+    if (!res.ok) return { error: ghError(res, "`gh pr view` failed (gh missing, not authenticated, or no PR)") };
+    const pr = parsePrView(res.stdout);
+    if (!pr) return { error: "`gh pr view` returned no recognizable pull request" };
+    return { pr };
+  }
+
+  /** owner/name for the repo, preferring gh's own answer over URL parsing. */
+  async function resolveRepoSlug(dir: string, pr: PrSummary | undefined, signal?: AbortSignal): Promise<string | null> {
+    const res = await runGh(["gh", "repo", "view", "--json", "nameWithOwner"], dir, { signal });
+    return (res.ok ? parseNameWithOwner(res.stdout) : null) ?? slugFromPrUrl(pr?.url ?? null);
+  }
+
+  /**
+   * Ask GitHub for Copilot's review of one PR (reviews + review threads).
+   * Variables travel as separate argv values — nothing is interpolated into
+   * the query text.
+   */
+  async function fetchCopilotPayload(
+    dir: string,
+    slug: string,
+    prNumber: number,
+    signal?: AbortSignal,
+  ): Promise<CopilotPayload | undefined> {
+    const [owner, name] = slug.split("/");
+    if (!owner || !name) return undefined;
+    const res = await runGh([
+      "gh", "api", "graphql",
+      "-F", `owner=${owner}`,
+      "-F", `name=${name}`,
+      "-F", `number=${prNumber}`,
+      "-f", `query=${COPILOT_THREADS_QUERY}`,
+    ], dir, { signal });
+    if (!res.ok) return undefined;
+    return parseCopilotPayload(res.stdout);
+  }
+
+  /**
+   * Request the Copilot reviewer.
+   *
+   * The argv is FIXED — the only variable is a PR number that came out of
+   * `gh pr view` as an integer. No agent-authored text can reach this command,
+   * which is what makes running a `gh pr edit` (a command the ship gate
+   * blocks) sound here: the gate blocks that command because it can carry PR
+   * title and body text, and this spelling cannot.
+   *
+   * Older `gh` builds have no `@copilot` shorthand, so a failure falls back to
+   * the documented REST review-request endpoint before giving up.
+   */
+  async function requestCopilotReviewer(
+    dir: string,
+    pr: PrSummary,
+    slug: string | null,
+    signal?: AbortSignal,
+  ): Promise<GhResult> {
+    const viaCli = await runGh(["gh", "pr", "edit", String(pr.number), "--add-reviewer", "@copilot"], dir, { signal });
+    if (viaCli.ok || !slug) return viaCli;
+    return await runGh([
+      "gh", "api", "--method", "POST",
+      `repos/${slug}/pulls/${pr.number}/requested_reviewers`,
+      "-f", `reviewers[]=${COPILOT_REVIEWER_LOGIN}`,
+    ], dir, { signal });
+  }
+
+  /** Is the L7 loop active for this repo's state? (mode + project config) */
+  function copilotEnabled(st: GateState): boolean {
+    return projectConfig.copilotReview.enabled && st.taskMode !== "normal";
+  }
+
+  /**
+   * Copilot problems for one repo — a COMPLETION-only requirement.
+   * Never consulted by the ship gate (see lib/copilot-review.ts header).
+   */
+  function copilotProblemsFor(st: GateState | undefined): string[] {
+    if (!st || !copilotEnabled(st)) return [];
+    return copilotProblems(st.copilot);
+  }
+
+  /** The directory `gh` should run in for a given repo root. */
+  function repoDirFor(root: string): string {
+    return root === primaryRepoRoot ? cwd : root;
+  }
+
+  // ---------- L8: the loop goal must be one the USER approved ----------
+
+  /**
+   * Does the goal file's CURRENT text carry the user's approval?
+   *
+   * The comparison is over content, not time: the sidecar holds the hash of
+   * exactly the text shown in the confirm dialog, so an agent edit after the
+   * approval silently drops it — which is the intended behaviour, since the
+   * contract the user agreed to no longer exists. The raw file is re-read here
+   * because the prompt copy is length-capped, and a truncated text cannot be
+   * hashed back to the approved one.
+   */
+  function loopGoalConfirmed(): boolean {
+    const goal = readLoopGoal(primaryRepoRoot);
+    if (!goal.present || !state.loopGoal) return false;
+    let raw: string;
+    try {
+      raw = readFileSync(pathJoin(primaryRepoRoot, LOOP_GOAL_RELPATH), "utf8");
+    } catch {
+      return false; // unreadable ⇒ unapproved (fail-closed)
+    }
+    return isLoopGoalConfirmed(goal, state.loopGoal, raw);
+  }
   // ---------- track edits & precommit results ----------
 
   pi.on("tool_result", async (event, ctx) => {
@@ -1172,6 +1478,29 @@ export default function reviewGate(pi: ExtensionAPI) {
       editFailurePending = false;
       const path = coalesceToolPath(event.input as Record<string, unknown>);
       if (!path) return;
+
+      // The edit LANDED, so burn any one-shot sensitive-file authorization for
+      // this path. Consuming here rather than at tool_call is what makes a
+      // failed edit (stale anchor, missing file) retryable without a second
+      // dialog, while a successful one costs the user a fresh "yes" next time.
+      if (isSensitiveFile(path)) {
+        const { consumed, remaining } = consumeGrant(
+          sensitiveGrants,
+          normalizeSensitivePath(path, cwd),
+          Date.now(),
+        );
+        sensitiveGrants = remaining;
+        if (consumed) log(`sensitive-grant consumed for ${consumed.path}`);
+      }
+
+      // Normal mode: the extension steps aside completely, and that has to
+      // include ARMING. An armed sidecar would still be read by the L3 git
+      // hooks (which only go advisory for a USER-chosen mode), so tracking
+      // edits here would block the very commits normal mode promises to let
+      // through — the deadlock a headless, forced-normal session would hit on
+      // its first edit. The sensitive-file guard above stays: it is a security
+      // floor, not workflow enforcement.
+      if (state.taskMode === "normal") return;
 
       // P-multi: an edit OUTSIDE the session repo arms THAT repo's own gate.
       // A code/doc file's repo becomes the active repo (the target for the
@@ -1325,6 +1654,27 @@ export default function reviewGate(pi: ExtensionAPI) {
           }
         }
       }
+      // L7: a SUCCESSFUL PR-affecting ship opens a Copilot review round for
+      // the repo the command ran in. `git push` counts even when no PR exists
+      // yet — the check tool resolves that to UNSUPPORTED — because the usual
+      // order is "push the branch, then open the PR", and a requirement that
+      // only armed on `gh pr create` would be bypassed by the previous ship's
+      // terminal state sticking around. A FAILED command arms nothing.
+      if (cmd && event.isError !== true && state.taskMode !== "normal" && projectConfig.copilotReview.enabled) {
+        const kinds = new Set(detectShipCommands(cmd).map((d) => d.kind));
+        if (kinds.has("pr-create") || kinds.has("pr-edit") || kinds.has("push")) {
+          const cmdRepos = resolveCommandRepos(cmd, cwd);
+          const armRoots = cmdRepos.ambiguous ? new Set(sessionRepos) : new Set(cmdRepos.repos);
+          const nowIso = new Date().toISOString();
+          for (const root of armRoots) {
+            const st = root === primaryRepoRoot ? state : stateForRepo(root);
+            st.copilot = armCopilotReview(st.copilot, nowIso);
+            persistRepo(ctx as unknown as ExtensionContext, root);
+            loopArmed = true;
+          }
+        }
+      }
+
       // Edit-discipline nudge (prompt-only, non-blocking): right after a
       // FAILED edit call, a bash command that looks like a direct file write
       // is the exact workaround pattern — append guidance once and close the
@@ -1507,7 +1857,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // derived its own process.cwd(), which can differ from ctx.cwd
       // (e.g. pi --cwd), running checks — and binding the PASS fingerprint
       // — in the wrong dir.
-      const outcome = await runTrustedPrecommit(targetDir, mode, _signal);
+      // targetDir is where the checks RUN; targetRoot is the repo the run log
+      // belongs to (`.pi/` is only gate-owned at the root — see keepRunLog).
+      const outcome = await runTrustedPrecommit(targetDir, targetRoot, mode, _signal);
 
       if (outcome.verdict === "PASS") {
         // Bind PASS to the fingerprint recomputed AFTER the runner finished
@@ -1531,6 +1883,20 @@ export default function reviewGate(pi: ExtensionAPI) {
         : outcome.verdict === "FAIL" ? `FAIL (${outcome.checksFailed}/${outcome.checksRun} checks failed).`
         : outcome.verdict === "NO_CHECKS_RUN" ? "NO CHECKS RUN — zero runnable checks; this is NOT a pass. Configure real checks or /gate-bypass."
         : `ERROR (${outcome.error ?? "runner could not be trusted"}) — fail-closed.`;
+
+      // Diagnostics pointer. The full runner output is ALWAYS captured to a
+      // file; what changes with the verdict is whether the agent is told to go
+      // read it. Output is never inlined here — a failing test suite can emit
+      // megabytes, and only the agent knows how much of it it needs. Failed
+      // check NAMES are included so it can jump to the right section instead
+      // of paging through the whole log.
+      const failed = outcome.failedSteps.length ? ` Failed: ${outcome.failedSteps.join(", ")}.` : "";
+      const logNote = !outcome.logPath
+        ? " (run log unavailable — the runner produced no readable output)"
+        : outcome.verdict === "PASS"
+          ? ` Full output: ${outcome.logPath}`
+          : `${failed} Full output: ${outcome.logPath} — read it (or grep it) to see what failed; it is the complete runner output, not a summary.`;
+
       return {
         // Name the REPO in the text (not just details) — see record_review.
         // The PASS binds to the repo root, so that is what is echoed; the
@@ -1541,9 +1907,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         content: [{
           type: "text",
           text: `review-gate: precommit for ${targetRoot}` +
-            (samePlace(targetDir, targetRoot) ? "" : ` (ran in ${targetDir})`) + `: ${detail}`,
+            (samePlace(targetDir, targetRoot) ? "" : ` (ran in ${targetDir})`) + `: ${detail}` + logNote,
         }],
-        details: { verdict: outcome.verdict, checksRun: outcome.checksRun, checksFailed: outcome.checksFailed, repo: repoLabel(targetRoot) },
+        details: {
+          verdict: outcome.verdict, checksRun: outcome.checksRun, checksFailed: outcome.checksFailed,
+          repo: repoLabel(targetRoot), logPath: outcome.logPath, failedSteps: outcome.failedSteps,
+        },
         isError: outcome.verdict !== "PASS",
       };
     },
@@ -1576,6 +1945,23 @@ export default function reviewGate(pi: ExtensionAPI) {
           problems.push(`[${repoLabel(root)}] gate state missing (fail-closed)`);
         }
       }
+
+      // L7/L8 — completion-only requirements. Neither is in
+      // unmetRequirements(): the Copilot loop needs commits to make progress
+      // (gating ships on it would deadlock it), and the goal approval is a
+      // dialog fact the git hooks cannot see. Both still decide whether the
+      // TASK is finished, which is exactly what this tool answers.
+      const completionProblems: string[] = [];
+      for (const root of sessionRepos) {
+        const st = root === primaryRepoRoot ? state : stateForRepo(root);
+        for (const p of copilotProblemsFor(st)) {
+          completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+        }
+      }
+      if (state.taskMode === "loop" && !loopGoalConfirmed()) {
+        completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+      }
+      problems.push(...completionProblems);
       if (state.taskMode === "explore" || state.taskMode === "normal") {
         // Explore's defining behavior: the agent may end the task on its own
         // judgment. Gate status is reported as advisory only. (Ship commands
@@ -1634,10 +2020,320 @@ export default function reviewGate(pi: ExtensionAPI) {
       // auto-continuations. Like rounds above, this only clears satisfied
       // history — it cannot loosen the ship gate.
       continuationsInjected = 0;
+      completionContinuations = 0;
       persist(ctx as unknown as ExtensionContext);
       return {
         content: [{ type: "text", text: `review-gate: done accepted. ${params.summary}` }],
         details: { accepted: true },
+      };
+    },
+  });
+
+  // ---------- propose_loop_goal tool (L8 — the user approves the contract) ----------
+
+  pi.registerTool({
+    name: "propose_loop_goal",
+    label: "Propose Loop Goal",
+    description:
+      "Submit the NEGOTIATED loop goal (this session's exit contract) for the user's approval. " +
+      "Grill the user first — numbered questions, each with your recommended answer — and only " +
+      "submit what they actually agreed to. The extension shows the text in a confirmation " +
+      "dialog and, if the user approves, writes .pi/loop-goal.md itself and records the approval. " +
+      "Writing that file yourself grants nothing: in loop mode an unapproved goal blocks " +
+      "commit/push/PR and its body is withheld from your prompt. Shape: task title, one-line " +
+      "intent, 3–7 checkable exit criteria, non-goals, ISO date.",
+    parameters: Type.Object({
+      goal: Type.String({ description: "The full goal text (Markdown) as agreed with the user" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const goalText = normalizeGoalText(String(params.goal ?? ""));
+      if (goalText.length === 0) {
+        return {
+          content: [{ type: "text", text: "review-gate: propose_loop_goal rejected — the goal text is empty." }],
+          details: { approved: false },
+          isError: true,
+        };
+      }
+      if (goalText.length > LOOP_GOAL_MAX_WRITE_CHARS) {
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: propose_loop_goal rejected — the goal is ${goalText.length} chars, over the ` +
+              `${LOOP_GOAL_MAX_WRITE_CHARS} limit. An exit contract is 3–7 checkable criteria, not a design doc.`,
+          }],
+          details: { approved: false },
+          isError: true,
+        };
+      }
+
+      // Consent comes from a dialog the EXTENSION renders — there is no
+      // parameter the model could set to claim it. No UI ⇒ no approval; a
+      // session without a UI is forced to normal mode at session_start, so
+      // reaching this branch means the UI disappeared, not a headless run.
+      const uiCtx = ctx as unknown as ExtensionContext;
+      let approved = false;
+      try {
+        approved = (await uiCtx.ui?.confirm?.(GOAL_CONFIRM_TITLE, buildGoalConfirmMessage(goalText))) === true;
+      } catch {
+        approved = false;
+      }
+      if (!approved) {
+        return {
+          content: [{
+            type: "text",
+            text: "review-gate: the user did NOT approve this goal. Ask what is wrong with it, " +
+              "renegotiate, and submit the corrected goal again — do not start shipping work in " +
+              "the meantime.",
+          }],
+          details: { approved: false },
+        };
+      }
+
+      // The EXTENSION writes the file: an approval must describe the text the
+      // user saw, not text the agent might swap in afterwards. The path lives
+      // in the gate-owned .pi/ scope, so this write never moves the worktree
+      // fingerprint and cannot invalidate a READY review or a precommit PASS.
+      const goalPath = pathJoin(primaryRepoRoot, LOOP_GOAL_RELPATH);
+      try {
+        mkdirSync(pathDirname(goalPath), { recursive: true });
+        writeFileSync(goalPath, goalText + "\n", "utf8");
+      } catch (e) {
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: could not write ${LOOP_GOAL_RELPATH} (${e instanceof Error ? e.message : String(e)}). ` +
+              "The approval was NOT recorded.",
+          }],
+          details: { approved: false },
+          isError: true,
+        };
+      }
+      state.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString() };
+      persist(uiCtx);
+      log(`loop goal approved by the user (${goalText.length} chars)`);
+      return {
+        content: [{
+          type: "text",
+          text: `review-gate: goal approved and written to ${LOOP_GOAL_RELPATH}. Work to it; if it has to ` +
+            "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
+            "yourself drops the approval and blocks shipping).",
+        }],
+        details: { approved: true },
+      };
+    },
+  });
+
+  // ---------- L7 Copilot review tools (trusted: the extension runs gh) ----------
+
+  pi.registerTool({
+    name: "request_copilot_review",
+    label: "Request Copilot Review",
+    description:
+      "Ask GitHub Copilot to review the current branch's pull request. Call this after a PR was " +
+      "created or updated (the gate arms the requirement on a successful gh pr create / gh pr " +
+      "edit / git push). The extension resolves the PR, requests the review itself, and stamps " +
+      "the authoritative request time. If the repo or account cannot do Copilot code review (no " +
+      "gh, no GitHub remote, no PR, API refusal) the requirement is released as UNSUPPORTED.",
+    parameters: Type.Object({
+      repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      // resolveToolRepo takes only `requested`; a second "tool name" argument
+      // was being passed and silently dropped (TS2554, now caught by
+      // `npm run typecheck`). The resolver's error already lists every
+      // candidate repo, so the tool name added nothing to it.
+      const target = resolveToolRepo(params.repo);
+      if ("error" in target) {
+        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      }
+      const root = target.root;
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      if (!copilotEnabled(st)) {
+        return {
+          content: [{ type: "text", text: "review-gate: the Copilot review loop is off for this repo/mode — nothing to do." }],
+          details: { status: "DISABLED" },
+        };
+      }
+      const nowIso = new Date().toISOString();
+      const dir = repoDirFor(root);
+      const maxRounds = projectConfig.copilotReview.maxRounds;
+
+      // Budget check BEFORE spending another round: a PR where Copilot keeps
+      // finding new things has to end with a human, not with an endless loop.
+      if ((st.copilot?.rounds ?? 0) >= maxRounds) {
+        st.copilot = releaseCopilotReview(st.copilot, "EXHAUSTED",
+          `Copilot review budget spent (${st.copilot?.rounds ?? 0}/${maxRounds} rounds)`, nowIso);
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: Copilot review budget spent (${maxRounds} rounds). The requirement is released ` +
+              "— tell the user what is still open on the PR and let them decide.",
+          }],
+          details: { status: "EXHAUSTED" },
+        };
+      }
+
+      const resolved = await resolveOpenPr(dir, signal);
+      if (!resolved.pr) {
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          `no Copilot review possible: ${resolved.error}`, nowIso);
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: no Copilot review for this repo — ${resolved.error}. Requirement released ` +
+              "(UNSUPPORTED); it is not blocking completion.",
+          }],
+          details: { status: "UNSUPPORTED" },
+        };
+      }
+      const pr = resolved.pr;
+      const slug = await resolveRepoSlug(dir, pr, signal);
+      const requested = await requestCopilotReviewer(dir, pr, slug, signal);
+      if (!requested.ok) {
+        const why = ghError(requested, "the review request was refused");
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          `Copilot review could not be requested: ${why}`, nowIso, pr.head);
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: Copilot code review is not available for PR #${pr.number} — ${why}. ` +
+              "Requirement released (UNSUPPORTED).",
+          }],
+          details: { status: "UNSUPPORTED", pr: pr.number },
+        };
+      }
+      st.copilot = recordCopilotRequest(st.copilot, { pr: pr.number, head: pr.head, nowIso });
+      persistRepo(ctx as unknown as ExtensionContext, root);
+      loopArmed = true;
+      return {
+        content: [{
+          type: "text",
+          text: `review-gate: Copilot review requested for PR #${pr.number} (round ${st.copilot.rounds}/${maxRounds}). ` +
+            "Copilot usually answers within a minute — call check_copilot_review to see whether it " +
+            "has, and what it left open.",
+        }],
+        details: { status: "AWAITING", pr: pr.number, rounds: st.copilot.rounds },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "check_copilot_review",
+    label: "Check Copilot Review",
+    description:
+      "Check what GitHub Copilot's review of the current PR left open. The extension queries the " +
+      "reviews and review threads itself — you cannot report this outcome yourself. A thread " +
+      "counts as handled when it is resolved OR when the last comment in it is yours (the " +
+      "explanation of why it will not be fixed). Returns AWAITING (Copilot has not answered yet), " +
+      "OPEN (threads still waiting on you, listed with their IDs) or SATISFIED.",
+    parameters: Type.Object({
+      repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const target = resolveToolRepo(params.repo);
+      if ("error" in target) {
+        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      }
+      const root = target.root;
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      if (!copilotEnabled(st)) {
+        return {
+          content: [{ type: "text", text: "review-gate: the Copilot review loop is off for this repo/mode — nothing to check." }],
+          details: { status: "DISABLED" },
+        };
+      }
+      const dir = repoDirFor(root);
+      const resolved = await resolveOpenPr(dir, signal);
+      if (!resolved.pr) {
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          `no Copilot review possible: ${resolved.error}`, new Date().toISOString());
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{ type: "text", text: `review-gate: no pull request to check — ${resolved.error}. Requirement released (UNSUPPORTED).` }],
+          details: { status: "UNSUPPORTED" },
+        };
+      }
+      const pr = resolved.pr;
+      const slug = await resolveRepoSlug(dir, pr, signal);
+      if (!slug) {
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          "could not determine the GitHub owner/repo for this PR", new Date().toISOString());
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{ type: "text", text: "review-gate: could not determine owner/repo for this PR. Requirement released (UNSUPPORTED)." }],
+          details: { status: "UNSUPPORTED" },
+        };
+      }
+
+      // Short optimistic poll for the fast path (Copilot often answers within
+      // seconds). The REAL waiting mechanism is the persistent AWAITING state
+      // plus the L2 continuation: blocking a tool call for minutes would burn
+      // the turn and ignore an ESC in the meantime.
+      let payload: CopilotPayload | undefined;
+      let next = st.copilot ?? armCopilotReview(undefined, new Date().toISOString());
+      for (let attempt = 0; attempt < COPILOT_CHECK_ATTEMPTS; attempt++) {
+        if (signal?.aborted) break;
+        payload = await fetchCopilotPayload(dir, slug, pr.number, signal);
+        if (payload) {
+          next = evaluateCopilot(
+            next,
+            analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt }),
+            { nowIso: new Date().toISOString(), now: Date.now(), maxRounds: projectConfig.copilotReview.maxRounds },
+          );
+          next = { ...next, pr: pr.number };
+          if (next.status !== "AWAITING") break;
+        }
+        if (attempt < COPILOT_CHECK_ATTEMPTS - 1) {
+          await new Promise((r) => setTimeout(r, COPILOT_CHECK_DELAY_MS));
+        }
+      }
+
+      if (!payload) {
+        // The GraphQL query failed outright (no gh, no permission, API down).
+        // Releasing is the fail-SAFE direction here: this requirement must
+        // never strand a task over an unreachable API.
+        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+          "the Copilot review query failed (gh missing, unauthenticated, or API refusal)", new Date().toISOString());
+        persistRepo(ctx as unknown as ExtensionContext, root);
+        return {
+          content: [{ type: "text", text: "review-gate: could not read the PR's review threads (gh missing, unauthenticated, or API refusal). Requirement released (UNSUPPORTED)." }],
+          details: { status: "UNSUPPORTED" },
+        };
+      }
+
+      st.copilot = next;
+      persistRepo(ctx as unknown as ExtensionContext, root);
+      if (isCopilotOutstanding(next)) loopArmed = true;
+
+      const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
+      const lines = analysis.actionable.slice(0, 20).map((t) =>
+        `  - ${t.id} ${t.path ?? "(no file)"}${t.line ? ":" + t.line : ""}` +
+        `${t.isOutdated ? " [outdated — the code moved; if that fixed it, resolve the thread]" : ""}\n      ${t.excerpt}`);
+      const text = next.status === "OPEN"
+        ? `review-gate: PR #${pr.number} — ${analysis.actionable.length} Copilot thread(s) waiting on you ` +
+          `(${analysis.resolved} resolved, ${analysis.answered} answered):\n${lines.join("\n")}\n` +
+          "For each: fix it and resolve the thread, or reply in the thread with the reason it will " +
+          "not be fixed. Resolve: gh api graphql -f query='mutation($t:ID!){resolveReviewThread" +
+          "(input:{threadId:$t}){thread{isResolved}}}' -F t=<threadId>. Reply: " +
+          "gh api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply" +
+          "(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}' -F t=<threadId> -F b='<why>'. " +
+          "Then call check_copilot_review again."
+        : next.status === "AWAITING"
+          ? `review-gate: Copilot has not posted its review of PR #${pr.number} yet. Do something useful and ` +
+            "call check_copilot_review again in a minute."
+          : `review-gate: Copilot review of PR #${pr.number} — ${next.note ?? next.status}.`;
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          status: next.status,
+          pr: pr.number,
+          actionable: analysis.actionable.length,
+          resolved: analysis.resolved,
+          answered: analysis.answered,
+        },
       };
     },
   });
@@ -1837,6 +2533,127 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
+  // ---------- request_sensitive_edit tool (user-consented one-shot sensitive write) ----------
+
+  pi.registerTool({
+    name: "request_sensitive_edit",
+    label: "Request Sensitive File Edit",
+    description:
+      "Ask the USER for one-time authorization to edit ONE sensitive file (.env, private key, " +
+      "credentials…) that the gate blocks by default. The extension shows a confirmation dialog — " +
+      "you cannot approve it yourself. A granted authorization covers that EXACT path only, is " +
+      "consumed by the first edit that SUCCEEDS, and expires after 10 minutes; it is never " +
+      "persisted, so it dies with the session. `.git/` internals are NEVER grantable (they are " +
+      "the gate's own enforcement). If the user declines, that path is locked for the session — " +
+      "do not ask again, ask the user to edit it by hand. Call this only when the edit is genuinely " +
+      "required by the user's request, and state exactly what you will change.",
+    parameters: Type.Object({
+      path: Type.String({ description: "The sensitive file to edit — absolute, or relative to the session cwd" }),
+      reason: Type.String({ description: "One line: what you will change in this file and why (shown to the user as untrusted data)" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
+
+      const raw = params.path.trim();
+      if (raw.length === 0) return deny("review-gate: path is required — name the exact file you need to edit.");
+      const absPath = normalizeSensitivePath(raw, cwd);
+
+      if (!isSensitiveFile(absPath)) {
+        return deny(
+          `review-gate: "${raw}" is not a sensitive file — the gate does not block it. Edit it directly; ` +
+          "no authorization is needed.",
+        );
+      }
+      // Gate-integrity paths are refused BEFORE any dialog: a "yes" here would
+      // let the agent talk the user into disarming the L3 hook that checks it.
+      if (isGateIntegrityPath(absPath)) {
+        return deny(
+          `review-gate: "${raw}" is git internals — never authorizable from here, because editing ` +
+          "`.git/hooks/*` would disarm the gate's own enforcement. If this change is really needed, " +
+          "the USER must make it by hand.",
+        );
+      }
+      if (sensitiveDeclinedPaths.has(absPath)) {
+        return deny(
+          `review-gate: the user already DECLINED editing "${raw}" this session — do not ask again. ` +
+          "Tell the user what the file needs and let them edit it themselves.",
+        );
+      }
+      const existing = findGrant(sensitiveGrants, absPath, Date.now());
+      if (existing) {
+        return {
+          content: [{
+            type: "text",
+            text:
+              `review-gate: "${raw}" is already authorized (until ` +
+              `${new Date(existing.expiresAt).toISOString()}). Make the edit now — the authorization ` +
+              "is consumed once it succeeds.",
+          }],
+          details: { alreadyGranted: true, path: absPath },
+        };
+      }
+      if (!ctx.hasUI) {
+        return deny(
+          "review-gate: no interactive UI — writing a sensitive file requires the user's explicit dialog " +
+          "approval (fail-closed). Ask the user out-of-band to make the edit.",
+        );
+      }
+
+      // USER CONSENT — extension-rendered dialog with fixed consequence copy;
+      // the agent's reason is displayed as clearly-labeled untrusted data.
+      let ok = false;
+      let dialogFailed = false;
+      try {
+        ok = await ctx.ui.confirm(
+          "review-gate: AI 请求一次性修改敏感文件——是否同意？",
+          `文件（默认禁止 AI 写入）: ${absPath}\n` +
+            "同意后：只授权这一个路径，写入成功一次即失效；10 分钟内未使用也会过期，且不跨会话保留。\n" +
+            "拒绝后：AI 本会话内不能再为该路径弹窗。\n" +
+            "请确认这确实是你本次要求的一部分；文件里的密钥/凭据会暴露给模型。\n" +
+            `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
+        );
+      } catch { dialogFailed = true; }
+
+      // A dialog that could not be shown is NOT a decline: fail closed for THIS
+      // request without burning the path's anti-grinding lock.
+      if (dialogFailed) {
+        return deny(
+          "review-gate: the confirmation dialog could not be shown — no authorization granted " +
+          "(fail-closed), and this does NOT count as a user decline; retry when a dialog is possible.",
+        );
+      }
+
+      if (!ok) {
+        sensitiveDeclinedPaths.add(absPath);
+        return deny(
+          `review-gate: the user DECLINED editing "${raw}". This path is now locked for the session — ` +
+          "do not ask again. Describe the change you wanted and let the user apply it.",
+        );
+      }
+
+      const now = Date.now();
+      const expiresAt = now + SENSITIVE_GRANT_TTL_MS;
+      sensitiveGrants = addGrant(
+        sensitiveGrants,
+        { path: absPath, at: new Date(now).toISOString(), expiresAt, reason: params.reason.slice(0, 300) },
+        now,
+      );
+      log(`sensitive-grant issued for ${absPath}`);
+      try {
+        ctx.ui.notify(`review-gate: 用户已授权 AI 修改 ${absPath}（一次性，10 分钟内有效）。`, "warning");
+      } catch { /* headless */ }
+      return {
+        content: [{
+          type: "text",
+          text:
+            `review-gate: the user GRANTED a one-shot edit of ${absPath}. Make ONLY the change you ` +
+            "described, on this exact path, now — the authorization is consumed by the first successful " +
+            "edit and expires in 10 minutes. Do not echo the file's secrets back to the user.",
+        }],
+        details: { granted: true, path: absPath, expiresAt },
+      };
+    },
+  });
   // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
 
   // USER REQUIREMENT: cache-only capture of the user's first real message,
@@ -1967,7 +2784,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // this the agent could edit for a whole turn before ever seeing the
         // exit contract it is supposed to establish first.
         const goalNote = effective === "loop"
-          ? "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot))
+          ? "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot), loopGoalConfirmed())
           : "";
         return {
           content: [{
@@ -2182,13 +2999,32 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.pausedQuestion) return;
     if (!loopArmed) return;
     if (state.bypass.active) return;
-    if (!state.hasCodeChange && !state.hasDocChange) return;
-    if (continuationsInjected >= state.maxRounds) return;
     if (!ctx.isIdle()) return;
 
     const fp = computeFingerprint(cwd);
-    const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
-    if (problems.length === 0) return;
+    // Ship-gate requirements only exist once this session touched something.
+    const problems = (state.hasCodeChange || state.hasDocChange)
+      ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
+      : [];
+
+    // L7/L8 — completion-only requirements (never part of the ship authority):
+    // an open Copilot review cycle and an unapproved loop goal. They keep the
+    // loop running after the code itself is clean, which is the whole point of
+    // "the PR is not done when it is opened".
+    const completion: string[] = [];
+    for (const root of sessionRepos) {
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      for (const p of copilotProblemsFor(st)) {
+        completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+      }
+    }
+    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+
+    if (problems.length === 0 && completion.length === 0) return;
+    // Budgets are checked per source: gate problems against maxRounds,
+    // completion-only continuations against their own cap.
+    if (problems.length > 0 && continuationsInjected >= state.maxRounds) return;
+    if (problems.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP) return;
 
     // USER REQUIREMENT: the user aborted this run (ESC — "Operation aborted").
     // Injecting a continuation would override an explicit human stop, so the
@@ -2206,7 +3042,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
 
-    continuationsInjected += 1;
+    if (problems.length > 0) continuationsInjected += 1;
+    else completionContinuations += 1;
     // R10: fire the strategic-reset checklist BEFORE persist so the fired flag
     // survives restarts (one-shot per gate-state lifetime). Pass `state`
     // explicitly — the P-multi signature change (st: GateState) left this
@@ -2215,10 +3052,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     const reset = maybeStrategicReset(state);
     persist(ctx);
     pi.sendUserMessage(
-      "[REVIEW_GATE_RESUME] Quality gates are still unmet:\n" +
-        problems.map((p) => `- ${p}`).join("\n") +
-        `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
-        "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute." +
+      "[REVIEW_GATE_RESUME] " +
+        (problems.length > 0 ? "Quality gates are still unmet:\n" : "The task is not finished yet:\n") +
+        [...problems, ...completion].map((p) => `- ${p}`).join("\n") +
+        (problems.length > 0
+          ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
+            "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute."
+          : `\n(completion continuation ${completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
+            "Continue: work these off — Copilot threads get a fix + resolve or a reply explaining why " +
+            "not (check_copilot_review verifies), an unapproved goal gets negotiated and submitted via " +
+            "propose_loop_goal. Do not summarize; execute.") +
         (!sessionEdited && !state.scopeLimit
           ? "\nIf these unmet gates target PRE-EXISTING changes this session never made, you may call request_scope_limit — the USER decides whether session-only coverage suffices."
           : "") +
@@ -2247,6 +3090,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     lastRunAborted = false;
     scopeLimitDeclined = false;
     sessionEditedPaths.clear();
+    // A new/switched session inherits NO sensitive-file authorization.
+    sensitiveGrants = [];
+    sensitiveDeclinedPaths.clear();
     let sessionId: string | null = null;
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
@@ -2256,6 +3102,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     // by the loader, so a forged config cannot make the cap unreachable.
     projectConfig = loadProjectConfig(cwd);
     state.maxRounds = projectConfig.maxRounds;
+
+    // USER REQUIREMENT — a session that cannot show a dialog runs in normal
+    // mode, period. Every enforced mode now depends on dialogs (loop-goal
+    // approval, sensitive-edit authorization, downgrade confirmation), so a
+    // headless session would otherwise enter the loop with no way to satisfy
+    // it. Forcing the decision HERE (rather than waiting for set_gate_mode,
+    // which lib/task-mode.ts would reject) means the undecided state — whose
+    // enforcement behaves as loop — never applies to a headless run.
+    if (!ctx.hasUI) setTaskMode("normal", "auto", ctx);
 
     // A restored pause survives the restart: keep auto-continuation disarmed
     // until the user's next message clears it (input handler).
@@ -2443,6 +3298,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(state.pausedQuestion
           ? [`paused:    awaiting user answer to "${state.pausedQuestion.question.slice(0, 120)}" (${state.pausedQuestion.at})`]
           : []),
+        // L8: whether THIS text is the contract the user approved (loop mode
+        // ships are blocked until it is), and L7: the Copilot cycle, which
+        // gates completion only — both are easy to misread from the outside,
+        // so the readout names them explicitly.
+        `loop goal: ${loopGoalConfirmed() ? "approved by the user" : readLoopGoal(primaryRepoRoot).present ? "DRAFT — not approved (loop-mode ships blocked)" : "none"}`,
+        ...(state.copilot
+          ? [`copilot:   ${state.copilot.status}${state.copilot.pr ? ` PR #${state.copilot.pr}` : ""}` +
+            ` (round ${state.copilot.rounds}/${projectConfig.copilotReview.maxRounds}` +
+            `${state.copilot.note ? `; ${state.copilot.note.slice(0, 120)}` : ""})`]
+          : []),
         `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
         `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
         // Explore: ship commands stay fully gated (L1), but declare_done and
@@ -2509,10 +3374,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       state = emptyState(state.sessionId, state.maxRounds);
       loopArmed = true;
       continuationsInjected = 0;
+      completionContinuations = 0;
       agentDowngradesLocked = false;
       lastRunAborted = false;
       scopeLimitDeclined = false;
       sessionEditedPaths.clear();
+      // The user's call: revoke outstanding one-shot sensitive-file
+      // authorizations AND lift the per-path decline locks.
+      sensitiveGrants = [];
+      sensitiveDeclinedPaths.clear();
       clearBypassToken();
       lastBlockedShip = null;
       arbitrationsUsed = 0;
@@ -2607,9 +3477,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     // (`.pi/loop-goal.md` — see lib/loop-goal.ts for the full rationale).
     // Injected AFTER the explore early-return and BEFORE the unarmed one: the
     // goal must be set while the worktree is still clean, i.e. before the
-    // first edit arms the gate. Prompt-level only; nothing gates on it.
+    // first edit arms the gate. An UNCONFIRMED goal has its body withheld
+    // (L8) and blocks ships at L1; the hooks stay out of it.
     if (state.taskMode === "loop") {
-      systemPrompt += "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot));
+      systemPrompt += "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot), loopGoalConfirmed());
     }
 
     if (!gateArmed && problems.length === 0) {
@@ -2690,6 +3561,10 @@ interface PrecommitOutcome {
   checksFailed: number;
   fingerprint: string;
   error?: string;
+  /** Absolute path of the full run log, or "" when it could not be kept. */
+  logPath: string;
+  /** Names of the checks that failed, for pointing the agent at the log. */
+  failedSteps: string[];
 }
 
 /**
@@ -2750,9 +3625,66 @@ interface SpawnOutcome {
   timedOut: boolean;
 }
 
-async function runTrustedPrecommit(cwd: string, mode: "fast" | "full", abortSignal?: AbortSignal): Promise<PrecommitOutcome> {
+/** Repo-root-relative run log. Under `.pi/` — gate-owned, see keepRunLog(). */
+const PRECOMMIT_LOG_RELPATH = ".pi/precommit-last.log";
+/** Only the last slice of a run log is kept: `npm test` can emit megabytes. */
+const PRECOMMIT_LOG_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Move the temp run log to `<repoRoot>/.pi/precommit-last.log`, tail-truncated.
+ * Returns the kept path, or "" when nothing could be kept.
+ *
+ * `repoRoot` — NOT the run directory. `.pi/` is only gate-owned at the REPO
+ * ROOT (GATE_EXCLUDE_PATHSPECS uses `:/.pi`), and the primary repo's precommit
+ * may run in a subdirectory of it. A log written to `<root>/sub/.pi/` would be
+ * an ordinary worktree file: every run would change the fingerprint and
+ * invalidate the PASS it just produced.
+ *
+ * One file per repo, overwritten every run: "the last precommit" is the only
+ * question this answers, and an accumulating log directory would be litter the
+ * gate never cleans up. Two concurrent run_precommit calls on one repo are
+ * therefore last-writer-wins, and a reader racing the copy can see a partial
+ * file — acceptable for a diagnostics artifact that no decision depends on.
+ */
+function keepRunLog(repoRoot: string, tmpLog: string): string {
+  const dest = pathJoin(repoRoot, PRECOMMIT_LOG_RELPATH);
+  try {
+    mkdirSync(pathDirname(dest), { recursive: true });
+    const size = statSync(tmpLog).size;
+    if (size <= PRECOMMIT_LOG_MAX_BYTES) {
+      copyFileSync(tmpLog, dest);
+      return dest;
+    }
+    // Tail-truncate: the interesting part of a failed run is its end.
+    const fd = openSync(tmpLog, "r");
+    try {
+      const buf = Buffer.allocUnsafe(PRECOMMIT_LOG_MAX_BYTES);
+      const read = readSync(fd, buf, 0, PRECOMMIT_LOG_MAX_BYTES, size - PRECOMMIT_LOG_MAX_BYTES);
+      writeFileSync(
+        dest,
+        `[pi-review-gate] log truncated — ${size} bytes produced, last ${read} kept\n` +
+          buf.subarray(0, read).toString("utf8"),
+      );
+    } finally {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+    return dest;
+  } catch {
+    return "";
+  }
+}
+
+async function runTrustedPrecommit(
+  cwd: string,
+  repoRoot: string,
+  mode: "fast" | "full",
+  abortSignal?: AbortSignal,
+): Promise<PrecommitOutcome> {
+  // `logPath` is filled in as soon as the run log has been kept, so every
+  // failure path below still tells the agent where to look.
+  let logPath = "";
   const fail = (error: string): PrecommitOutcome =>
-    ({ verdict: "ERROR", checksRun: 0, checksFailed: 0, fingerprint: "", error });
+    ({ verdict: "ERROR", checksRun: 0, checksFailed: 0, fingerprint: "", error, logPath, failedSteps: [] });
 
   const runner = resolveTrustedRunner();
   if (!runner) return fail("trusted precommit runner not found");
@@ -2761,16 +3693,26 @@ async function runTrustedPrecommit(cwd: string, mode: "fast" | "full", abortSign
   let dir: string;
   try { dir = mkdtempSync(pathJoin(tmpdir(), "rg-precommit-")); } catch { return fail("cannot create temp dir"); }
   const receipt = pathJoin(dir, "receipt.json");
+  const tmpLog = pathJoin(dir, "output.log");
   const nonce = randomBytes(24).toString("hex");
 
   try {
     const res = await new Promise<SpawnOutcome>((resolve) => {
       let aborted = false;
       let timedOut = false;
+      // Capture the runner's output into a FILE DESCRIPTOR, not a pipe. The
+      // runner is detached and long-lived; with a pipe, anything that stops
+      // draining it (an abort, a busy host) fills the 64KB buffer and blocks
+      // the runner's next write forever. A file has no backpressure. It used
+      // to be "ignore" outright, which is why a FAIL told the agent only
+      // "1/3 checks failed" and nothing about which one or why.
+      let logFd: number | undefined;
+      try { logFd = openSync(tmpLog, "a"); } catch { logFd = undefined; }
       const child = spawn(
         process.execPath,
         [runner, "--mode", mode, "--cwd", cwd, "--receipt", receipt, "--nonce", nonce],
-        { cwd, shell: false, detached: true, stdio: ["ignore", "ignore", "ignore"],
+        { cwd, shell: false, detached: true,
+          stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
           // The nonce travels ONLY via the runner's argv (not env), so the
           // runner's lint/test grandchildren never inherit it. A same-UID
           // observer could still read the runner argv via ps — accepted: that
@@ -2786,11 +3728,18 @@ async function runTrustedPrecommit(cwd: string, mode: "fast" | "full", abortSign
         settled = true;
         clearTimeout(timer);
         abortSignal?.removeEventListener("abort", onAbort);
+        // The child holds its own duplicate of this descriptor; closing ours
+        // once it is gone just releases our handle.
+        if (logFd !== undefined) { try { closeSync(logFd); } catch { /* already closed */ } }
         resolve(out);
       };
       child.on("error", () => finish({ status: null, signal: null, spawnError: true, aborted, timedOut }));
       child.on("close", (status, signal) => finish({ status, signal, spawnError: false, aborted, timedOut }));
     });
+
+    // Keep the log BEFORE any early return: a timed-out or aborted run is
+    // exactly when the agent most needs to see how far the checks got.
+    logPath = keepRunLog(repoRoot, tmpLog);
 
     if (res.aborted) return fail("aborted by user — precommit run cancelled, no verdict recorded as PASS");
     if (res.timedOut) return fail("runner timed out after 20 minutes");
@@ -2813,15 +3762,22 @@ async function runTrustedPrecommit(cwd: string, mode: "fast" | "full", abortSign
       nonce, cwd, mode,
       exitStatus: res.status, signal: res.signal, spawnError: res.spawnError,
     });
+    // Diagnostics only — read AFTER the verdict is decided, and never fed back
+    // into it (see failedStepNames' docstring).
+    const failedSteps = failedStepNames(parsed);
     if (v.verdict === "PASS") {
       if (!fingerprint) return fail("worktree fingerprint unavailable post-run");
-      return { verdict: "PASS", checksRun: v.checksRun, checksFailed: v.checksFailed, fingerprint };
+      return { verdict: "PASS", checksRun: v.checksRun, checksFailed: v.checksFailed, fingerprint, logPath, failedSteps };
     }
-    return { verdict: v.verdict, checksRun: v.checksRun, checksFailed: v.checksFailed, fingerprint, error: v.error };
+    return {
+      verdict: v.verdict, checksRun: v.checksRun, checksFailed: v.checksFailed,
+      fingerprint, error: v.error, logPath, failedSteps,
+    };
   } catch (e) {
     return fail(`runner spawn failed: ${(e as Error).message}`);
   } finally {
-    // Single-use: destroy the receipt dir no matter what.
+    // Single-use: destroy the receipt dir no matter what. The log has already
+    // been copied out to the repo by then.
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 }

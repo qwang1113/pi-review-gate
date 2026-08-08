@@ -23,13 +23,16 @@ import {
   saveSidecarPreservingConcurrent,
   type GateState,
 } from "../lib/gate-state.ts";
+import { DEFAULT_MAX_ROUNDS } from "../lib/constants.ts";
 
 const DIGEST = "a".repeat(40);
 const OTHER_DIGEST = "b".repeat(40);
 
 /** A state as a session would hold it: armed, nothing achieved yet. */
 function armed(sessionId: string): GateState {
-  const s = emptyState(sessionId);
+  // emptyState takes (sessionId, maxRounds); omitting the second argument left
+  // state.maxRounds undefined in every fixture here.
+  const s = emptyState(sessionId, DEFAULT_MAX_ROUNDS);
   s.hasCodeChange = true;
   return s;
 }

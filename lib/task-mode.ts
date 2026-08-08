@@ -50,8 +50,16 @@
  *    when the caller marks it firstDecideAuto (the LLM produced the verdict).
  *    Still bounded: interactive session AND no edits by THIS session, and
  *    the mode records source "auto" so the git hooks stay fully enforced.
- *  - Print/JSON mode (no UI) can never confirm, so only upgrades and the
- *    undecided→loop classification are possible there (fail-closed).
+ *  - Print/JSON mode (no UI) can only run "normal" (USER REQUIREMENT). Every
+ *    enforced mode now depends on dialogs the extension must be able to
+ *    render — the loop goal is approved in one (lib/loop-goal.ts), a
+ *    sensitive-file edit is authorized in one, a downgrade is confirmed in one
+ *    — so a session that cannot show a dialog would enter the loop and then
+ *    have no way out of it. Rather than half-enforce, the gate steps aside
+ *    entirely there: {@link evaluateModeChange} refuses anything but normal
+ *    when hasUI is false, and normal means the extension does not even arm
+ *    (see extensions/review-gate.ts), so the git hooks see an unarmed state
+ *    and let the headless session commit.
  *
  * SECURITY — why an LLM/agent-chosen explore is safe without confirmation:
  *  1. In-session, explore never weakens the L1 ship gate at all; it only
@@ -122,6 +130,22 @@ export function evaluateModeChange(opts: {
   const { current, requested } = opts;
   if (current === requested) return { action: "noop" };
 
+  // USER REQUIREMENT — no UI ⇒ normal only (see the header). This precedes
+  // every other rule, including the "upgrades never need consent" one: an
+  // upgrade into loop is precisely what a headless session must not do, since
+  // it could never approve a loop goal or authorize an edit afterwards.
+  if (!opts.hasUI) {
+    if (requested === "normal") return { action: "apply", source: "auto" };
+    return {
+      action: "reject",
+      reason:
+        "no interactive UI is available (print/JSON mode), so this session can only run in " +
+        "\"normal\" mode: the enforced modes require dialogs — loop-goal approval, " +
+        "sensitive-edit authorization, downgrade confirmation — that cannot be rendered here. " +
+        "Run the task in an interactive session to get the full gate.",
+    };
+  }
+
   // Consent path shared by every loosening transition.
   const needsConsent = (): ModeChangeDecision => {
     if (opts.downgradesLocked) {
@@ -131,14 +155,6 @@ export function evaluateModeChange(opts: {
           "the user already declined a gate downgrade this session — agent-initiated " +
           "downgrades are locked. Continue under the current mode; only the user can " +
           "change it now (/gate-mode).",
-      };
-    }
-    if (!opts.hasUI) {
-      return {
-        action: "reject",
-        reason:
-          "no interactive UI is available to confirm a gate downgrade (print/JSON mode " +
-          "is fail-closed). Continue under the current mode.",
       };
     }
     return { action: "confirm" };
@@ -160,14 +176,15 @@ export function evaluateModeChange(opts: {
     // undecided state cannot normally hold the lock, but the pure engine
     // never lets a locked session loosen itself). Source stays "auto" so the
     // git hooks remain fully enforced.
-    if (opts.firstDecideAuto && !opts.hasChanges && opts.hasUI && !opts.downgradesLocked) {
+    if (opts.firstDecideAuto && !opts.hasChanges && !opts.downgradesLocked) {
       return { action: "apply", source: "auto" };
     }
-    if (requested === "explore" && !opts.hasChanges && opts.hasUI) {
+    if (requested === "explore" && !opts.hasChanges) {
       return { action: "apply", source: "auto" };
     }
-    // explore after this session edited (loop-rules work already happened), explore
-    // without a UI, and normal (total gate shutdown) all need the user.
+    // explore after this session edited (loop-rules work already happened) and
+    // normal (total gate shutdown) both need the user. (The no-UI case never
+    // reaches here — it resolved to normal above.)
     return needsConsent();
   }
 

@@ -75,7 +75,8 @@ function makeMockPi(cwd: string) {
     ...pi,
     tools, handlers, entries,
     ctx: {
-      hasUI: false,
+      // Enforced modes require a UI (a no-UI session is forced to normal).
+      hasUI: true,
       ui: { notify: () => {}, setStatus: () => {} },
       sessionManager: { getEntries: () => entries, getSessionId: () => "loop-goal-session" },
       isIdle: () => false,

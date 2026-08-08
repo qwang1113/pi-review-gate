@@ -43,6 +43,16 @@ the work starts, listing the checkable facts that mean **done**. The same file
 then drives all three roles — you slice work against it, `adviser` advises
 against it, `reviewer` accepts against it.
 
+**Negotiated, not assumed (L8)**: you do NOT write this file. Grill the user
+first — ask the whole frontier of open decisions in one round, number each
+question, give your own recommended answer, wait for the reply, repeat until
+nothing is silently assumed — then call **`propose_loop_goal`** with what they
+agreed to. The extension shows it in a confirm dialog and, on approval, writes
+the file itself and records the hash of that exact text. In loop mode an
+unapproved goal **blocks commit/push/PR** and its body is withheld from your
+prompt (a leftover goal from a previous task is exactly what that prevents).
+Editing the file afterwards drops the approval — renegotiate and re-submit.
+
 **Where**: `.pi/loop-goal.md`. That path sits inside the gate-owned `.pi/`
 scope (`GATE_EXCLUDE_PATHSPECS` / `isGateOwnedPath`, `lib/fingerprint.ts`),
 which both halves of the gate honour: it is excluded from the fingerprint and
@@ -50,7 +60,8 @@ skipped by edit tracking. Writing or rewriting the goal therefore never changes
 the worktree digest, never arms the doc gate, and can never invalidate a READY
 review or a precommit PASS.
 
-**How to produce it** — sized to the change; a one-line bugfix deserves one
+**How to produce it** — interview the user, then submit it with
+`propose_loop_goal`; sized to the change, a one-line bugfix deserves one
 criterion and three lines:
 
 - *Preferred, when the user has the engineering skills installed*: `/to-spec`
@@ -71,7 +82,8 @@ and `lib/x.ts` no longer reads the sidecar" is.
 
 **Staleness**: a goal file older than 24h may be left over from a previous
 session. The gate flags it in the prompt; confirm it against what the user is
-asking for now, and rewrite it if it no longer matches.
+asking for now, and renegotiate it (grill → `propose_loop_goal`) if it no
+longer matches.
 
 **Slicing the work to subagents**: turn each criterion (or vertical slice) into
 a subagent task and hand the goal file to every subagent you spawn.
@@ -83,10 +95,14 @@ the binding between precommit and review. Read-only subagents (recon, analysis,
 precommit, you run the review, you fix findings — never delegate the gate
 itself.
 
-**No new hard gate.** Nothing blocks on the goal file's existence — a
-self-written file is not forgery-resistant, and every hard gate here rests on
-an objective fact. The goal binds through the reviewer: an unmet criterion is a
-P1 finding, and any P0/P1 ⇒ BLOCKED.
+**What the goal DOES gate.** In loop mode, shipping (`git commit` / `git push`
+/ `gh pr`) is blocked until the user has approved the goal through
+`propose_loop_goal` — negotiating the contract after the code is pushed would
+be theatre. What it does NOT gate: the git hooks and the verdict logic stay
+blind to it (an approval is a dialog fact a hook can never see), and the goal
+file's mere existence proves nothing — only the recorded approval of its exact
+text does. Beyond that, the goal binds through the reviewer: an unmet criterion
+is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
 ## Protocol
 
@@ -159,10 +175,23 @@ P1 finding, and any P0/P1 ⇒ BLOCKED.
    [NIT_DEFERRED] file:line | issue | reason: <why> | <ISO date>
    ```
 
-6. **Done** — call `declare_done`. It re-validates everything server-side and
+6. **Copilot review (L7, once a PR exists)** — a successful `gh pr create`,
+   `gh pr edit` or `git push` opens a Copilot review cycle for that repo. Call
+   **`request_copilot_review`**, then **`check_copilot_review`** (the extension
+   runs `gh` itself — you cannot report this outcome). AWAITING ⇒ do something
+   useful and check again. OPEN ⇒ for each listed thread either fix it and
+   `resolveReviewThread`, or reply in the thread with the reason it will not be
+   fixed; then check again. SATISFIED / UNSUPPORTED / EXHAUSTED ⇒ done (a repo
+   without Copilot review releases itself; a spent round budget escalates to
+   the user). Pushing your fixes re-arms the cycle — that is the loop.
+
+7. **Done** — call `declare_done`. It re-validates everything server-side and
    rejects if any gate is unmet. Both the precommit PASS and the READY review
    must be bound to the SAME (current) fingerprint; if anything edited the
    worktree since, run the affected step again.
+
+   It also rejects while a Copilot cycle is still open or the loop goal is
+   unapproved — those are completion requirements, not ship requirements.
 
    Use `{ "mode": "full" }` for the final precommit of a change that touches
    build/type surfaces: fast mode runs lint + tests, full mode adds typecheck
