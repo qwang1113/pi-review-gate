@@ -21,7 +21,10 @@ import {
   evaluateCopilot,
   isCopilotAuthor,
   isCopilotOutstanding,
+  parseCopilotActorProbe,
   parseCopilotPayload,
+  parseCopilotRequestLanded,
+  parseRestReviewRequests,
   parseNameWithOwner,
   parsePrView,
   recordCopilotRequest,
@@ -347,4 +350,146 @@ test("a sanitized SATISFIED payload keeps blocking nothing (round-trip stays hon
   });
   assert.equal(clean?.status, "SATISFIED");
   assert.equal(isCopilotOutstanding(clean), false);
+});
+
+// ---------------------------------------------------------------------------
+// "Is Copilot even available here?" — the pre-flight probe and the landing
+// check. Both answer a THIRD value (undefined = could not tell), because the
+// only action they can trigger is RELEASING a gate requirement: guessing there
+// is the one direction that fails open.
+
+const actorPayload = (logins: string[]) => JSON.stringify({
+  data: { repository: { suggestedActors: { nodes: logins.map((login) => ({ login })) } } },
+});
+
+test("the actor probe finds Copilot under any of its logins, and says so plainly when absent", () => {
+  assert.equal(parseCopilotActorProbe(actorPayload(["alice", "copilot-swe-agent"])), false,
+    "the coding agent is not the review bot");
+  assert.equal(parseCopilotActorProbe(actorPayload(["alice", "Copilot"])), true);
+  assert.equal(parseCopilotActorProbe(actorPayload(["copilot-pull-request-reviewer[bot]"])), true);
+  assert.equal(parseCopilotActorProbe(actorPayload(["qwang1113"])), false);
+  assert.equal(parseCopilotActorProbe(actorPayload([])), false);
+});
+
+test("an unreadable probe answer is 'cannot tell', never 'Copilot is missing'", () => {
+  // Each of these used to be indistinguishable from a real "no Copilot" answer;
+  // treating them as such would release the requirement on a network hiccup.
+  for (const bad of [
+    "",
+    "not json",
+    "{}",
+    JSON.stringify({ data: { repository: null } }),
+    JSON.stringify({ data: { repository: { suggestedActors: {} } } }),
+    JSON.stringify({ errors: [{ message: "Bad credentials" }] }),
+  ]) {
+    assert.equal(parseCopilotActorProbe(bad), undefined, JSON.stringify(bad));
+  }
+});
+
+test("a landed request is proven by the review list OR by a review Copilot already posted", () => {
+  // `gh pr edit --add-reviewer @copilot` exits 0 and the REST endpoint answers
+  // 200 even where GitHub drops the bot, so the exit code proves nothing and
+  // this read-back is the actual evidence.
+  const landed = JSON.stringify({
+    reviewRequests: [{ __typename: "Bot", login: "copilot-pull-request-reviewer" }],
+    reviews: [],
+  });
+  assert.equal(parseCopilotRequestLanded(landed), true);
+
+  // Copilot can answer and leave the request list before we look.
+  const alreadyReviewed = JSON.stringify({
+    reviewRequests: [],
+    reviews: [{ author: { login: "Copilot" }, state: "COMMENTED" }],
+  });
+  assert.equal(parseCopilotRequestLanded(alreadyReviewed), true);
+
+  // Somebody else's review request is not ours.
+  const other = JSON.stringify({
+    reviewRequests: [{ __typename: "User", login: "alice" }],
+    reviews: [{ author: { login: "bob" }, state: "APPROVED" }],
+  });
+  assert.equal(parseCopilotRequestLanded(other), false);
+  assert.equal(parseCopilotRequestLanded(JSON.stringify({ reviewRequests: [], reviews: [] })), false,
+    "the exact shape this repo returns: accepted by the API, never landed");
+});
+
+test("an unreadable landing answer cannot release the requirement either", () => {
+  for (const bad of ["", "not json", "[]", "null", JSON.stringify({ reviewRequests: "nope" })]) {
+    assert.equal(parseCopilotRequestLanded(bad), undefined, JSON.stringify(bad));
+  }
+  // One readable list is enough to judge — gh may omit the other field.
+  assert.equal(parseCopilotRequestLanded(JSON.stringify({ reviews: [{ author: { login: "copilot" } }] })), true);
+  assert.equal(parseCopilotRequestLanded(JSON.stringify({ reviewRequests: [] })), false);
+});
+
+test("the REST second opinion reads a different shape, with the same three values", () => {
+  // Why a second surface at all: review requests are eventually consistent, and
+  // a `gh` older than the `... on Bot{login}` selection renders a landed bot
+  // request as an empty JSON export — both would otherwise read as "never
+  // landed" and release the requirement on a repo that supports Copilot.
+  assert.equal(parseRestReviewRequests(JSON.stringify({
+    users: [{ login: "copilot-pull-request-reviewer[bot]", type: "Bot" }], teams: [],
+  })), true);
+  assert.equal(parseRestReviewRequests(JSON.stringify({ users: [{ login: "alice" }], teams: [] })), false);
+  assert.equal(parseRestReviewRequests(JSON.stringify({ users: [], teams: [] })), false,
+    "the shape this repo actually returns after a dropped request");
+  for (const bad of ["", "not json", "[]", "null", "{}", JSON.stringify({ users: "nope" })]) {
+    assert.equal(parseRestReviewRequests(bad), undefined, JSON.stringify(bad));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The wait budget belongs to the CYCLE, not to the latest request.
+
+test("re-requesting cannot buy more waiting time (the budget anchors on the first request)", () => {
+  // The failure this prevents, observed for real: three request_copilot_review
+  // calls in a row each refreshed `requestedAt`, so the 20-minute safety valve
+  // kept being pushed out and the task sat in AWAITING indefinitely.
+  const first = "2026-08-07T10:00:00.000Z";
+  let state = recordCopilotRequest(undefined, { pr: 7, head: "abc123", nowIso: first });
+  for (const at of ["2026-08-07T10:05:00.000Z", "2026-08-07T10:12:00.000Z"]) {
+    state = recordCopilotRequest(state, { pr: 7, head: "abc123", nowIso: at });
+  }
+  assert.equal(state.firstRequestedAt, first, "the anchor survives every re-request");
+  assert.equal(state.requestedAt, "2026-08-07T10:12:00.000Z", "the latest stamp is still recorded");
+  assert.equal(state.rounds, 3);
+
+  const justPastTheBudget = Date.parse(first) + COPILOT_AWAIT_TIMEOUT_MS + 1;
+  const next = evaluateCopilot(
+    state,
+    analyzeCopilot(payload(), { anchorAt: first }),
+    { nowIso: NOW_ISO, now: justPastTheBudget, maxRounds: 3 },
+  );
+  assert.equal(next.status, "EXHAUSTED", "20 minutes after the FIRST request, the valve opens");
+  assert.match(next.note ?? "", /escalate to the user/);
+});
+
+test("a cycle re-armed by a new PR ship starts a fresh wait budget", () => {
+  const state = recordCopilotRequest(undefined, { pr: 7, head: "abc123", nowIso: NOW_ISO });
+  const rearmed = armCopilotReview(state, "2026-08-07T11:00:00.000Z");
+  assert.equal(rearmed.firstRequestedAt, undefined, "a new cycle must not inherit the old anchor");
+  assert.equal(rearmed.requestedAt, undefined);
+  assert.equal(rearmed.rounds, 1, "but the round budget stays cumulative");
+});
+
+test("a sidecar written before the anchor existed still ages out on its last request", () => {
+  // Backward compatibility: no firstRequestedAt ⇒ fall back to requestedAt,
+  // which is exactly the old behavior rather than "never expires".
+  const legacy = sanitizeCopilotState({
+    status: "AWAITING", pr: 7, armedAt: NOW_ISO, requestedAt: NOW_ISO, head: "abc123", rounds: 1,
+  })!;
+  assert.equal(legacy.firstRequestedAt, undefined);
+  const next = evaluateCopilot(
+    legacy,
+    analyzeCopilot(payload(), { anchorAt: NOW_ISO }),
+    { nowIso: NOW_ISO, now: NOW + COPILOT_AWAIT_TIMEOUT_MS + 1, maxRounds: 3 },
+  );
+  assert.equal(next.status, "EXHAUSTED");
+  // And a sidecar that HAS the anchor keeps it through sanitization.
+  const modern = sanitizeCopilotState({
+    status: "AWAITING", pr: 7, armedAt: NOW_ISO, requestedAt: NOW_ISO,
+    firstRequestedAt: "2026-08-07T09:00:00.000Z", rounds: 2,
+  });
+  assert.equal(modern?.firstRequestedAt, "2026-08-07T09:00:00.000Z");
+  assert.equal(sanitizeCopilotState({ status: "AWAITING", firstRequestedAt: 42 })?.firstRequestedAt, undefined);
 });

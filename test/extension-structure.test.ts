@@ -1142,3 +1142,79 @@ test("session_start surfaces the migration notice and clears the flag", () => {
   assert.match(body, /fingerprintMigrated = false/,
     "the flag must be cleared so the notice is not repeated");
 });
+
+test("a Copilot request that never lands is released, not parked in AWAITING", () => {
+  // The bug this pins: `gh pr edit --add-reviewer @copilot` exits 0 and the
+  // REST fallback answers 200 even where GitHub drops the bot, so the request
+  // recorded AWAITING and the task waited out the whole 20-minute budget.
+  const at = SRC.indexOf("const requested = await requestCopilotReviewer(");
+  assert.ok(at > 0, "the request path must exist");
+  const before = SRC.slice(Math.max(0, at - 600), at);
+  assert.match(before, /probeCopilotActor\(dir, slug, signal\)/,
+    "the capability probe must run BEFORE a round is spent");
+
+  // Bound the window on the code itself (where AWAITING is recorded) rather
+  // than on a character count that silently truncates as the block grows.
+  const recordAbs = SRC.indexOf("recordCopilotRequest(st.copilot,", at);
+  const landingAbs = SRC.indexOf("copilotRequestLanded(", at);
+  assert.ok(landingAbs > 0, "the request must be read back from the PR");
+  assert.ok(recordAbs > landingAbs, "the read-back must happen before AWAITING is recorded");
+  const body = SRC.slice(at, recordAbs);
+  // Released ONLY on hard evidence: probe says no AND both read-backs say no.
+  assert.match(body, /if \(hasActor === false\)/,
+    "a positive/unknown probe must not trigger the release path");
+  assert.match(body, /copilotRequestLandedViaRest\(dir, slug, pr\.number, signal\)/,
+    "the release must be confirmed by a second read from a different API surface");
+  assert.match(body, /COPILOT_LANDING_RECHECK_DELAY_MS/,
+    "review requests are eventually consistent: the confirming read must wait first");
+  // The confirming pass asks BOTH surfaces: REST alone cannot see a Copilot
+  // that reviewed and left the request list during the pause.
+  assert.match(body, /viaCli === true \|\| viaRest === true/,
+    "either surface saying 'landed' must keep the requirement");
+  assert.match(body, /viaCli === false && viaRest === false \? false : undefined/,
+    "only BOTH surfaces saying 'not there' may resolve to a release");
+  assert.equal((body.match(/copilotRequestLanded\(dir, pr\.number, signal\)/g) ?? []).length, 2,
+    "the JSON-export surface must be read twice: once first, once to confirm");
+  assert.match(body, /if \(landed === false\)[\s\S]{0,200}releaseCopilotReview\(st\.copilot, "UNSUPPORTED"/,
+    "only an explicit 'did not land' may release the requirement");
+});
+
+test("the Copilot probes fail CLOSED: an unreadable gh answer releases nothing", () => {
+  for (const fn of ["probeCopilotActor", "copilotRequestLanded", "copilotRequestLandedViaRest"]) {
+    const at = SRC.indexOf(`async function ${fn}(`);
+    assert.ok(at > 0, `${fn} must exist`);
+    // Bound the window at this function's own closing brace: a fixed character
+    // count spills into the neighbour and lets a mutant in THIS function pass
+    // unnoticed (only the neighbour's identical line is then matched).
+    const rest = SRC.slice(at + 10);
+    const end = rest.indexOf("\n  }\n");
+    assert.ok(end > 0, `${fn} must have a recognizable body`);
+    const body = rest.slice(0, end);
+    assert.ok(body.length < 1200, `${fn} body window must stay local (got ${body.length})`);
+    assert.match(body, /if \(!res\.ok\) return undefined;/,
+      `${fn} must report 'cannot tell' when gh fails, never a negative answer`);
+    assert.match(body, /Promise<boolean \| undefined>/,
+      `${fn} must keep the third value in its type`);
+  }
+});
+
+test("an abort proves nothing about Copilot: it can never release the requirement", () => {
+  // ESC is the user leaving, not GitHub refusing. Two places used to read it
+  // as evidence: a gh call that returns !ok after an abort, and the confirming
+  // read being skipped while the first negative read was kept.
+  const runGhAt = SRC.indexOf("async function runGh(");
+  assert.ok(runGhAt > 0, "runGh must exist");
+  const spawnAt = SRC.indexOf("spawn(argv[0]", runGhAt);
+  const guardAt = SRC.indexOf("if (opts.signal?.aborted)", runGhAt);
+  assert.ok(guardAt > 0 && guardAt < spawnAt,
+    "an already-aborted signal must short-circuit BEFORE spawning (its listener never fires)");
+
+  const requestAt = SRC.indexOf("const requested = await requestCopilotReviewer(");
+  const body = SRC.slice(requestAt, requestAt + 3500);
+  assert.match(body, /if \(!requested\.ok\)[\s\S]{0,200}if \(signal\?\.aborted\)[\s\S]{0,400}return \{/,
+    "a failed request that was merely aborted must return without releasing");
+  assert.doesNotMatch(body, /if \(landed === false && !signal\?\.aborted\)/,
+    "an abort must downgrade the first read, not skip the confirmation and release on it");
+  assert.match(body, /if \(signal\?\.aborted\) \{\s*\n\s*landed = undefined;/,
+    "an aborted confirmation means 'cannot tell'");
+});

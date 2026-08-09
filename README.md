@@ -646,6 +646,27 @@ fixed — before the task counts as done.
   A Copilot that never answers, or a PR that keeps producing new findings, ends
   as `EXHAUSTED` (round budget `copilotReview.maxRounds`, default 3, clamped to
   1–10; wait budget 20 min) with an explicit "escalate to the user" note.
+- **A request that never lands is detected immediately, not after 20 minutes.**
+  `gh pr edit --add-reviewer @copilot` exits 0 — and the REST review-request
+  endpoint answers 200 — even on a repository where GitHub silently drops the
+  bot, so the exit code proves nothing. `request_copilot_review` therefore
+  probes for a Copilot actor first (`suggestedActors`) and, when it does not
+  find one, reads the PR back after requesting: `gh pr view --json
+  reviewRequests,reviews`, then — after a short pause, because review requests
+  are eventually consistent — **both** surfaces again (that JSON export *and*
+  the REST `requested_reviewers` endpoint, which still names a bot on older
+  `gh` builds). Copilot in **none** of them ⇒ `UNSUPPORTED` on the spot instead
+  of a 20-minute wait. Every check answers three values, and only definite
+  "not there" answers release the requirement — a failed, aborted or
+  unparseable `gh` answer means *cannot tell* and changes nothing (GitHub
+  exposes no "is Copilot review enabled" API: `RepositorySuggestedActorFilter`
+  only has `CAN_BE_ASSIGNED`/`CAN_BE_AUTHOR`, so the probe is a heuristic and
+  is never trusted on its own).
+- **The wait budget belongs to the cycle, not to the last request.** Calling
+  `request_copilot_review` again does not push the 20-minute deadline out: it
+  is anchored on the cycle's *first* request (`firstRequestedAt`). Only a new
+  PR-affecting ship — which legitimately re-arms the cycle — starts a fresh
+  wait.
 - **Known limit, stated honestly.** The gate verifies the *structure* (resolved,
   or answered by you), never the *substance* of a reply — "won't fix: out of
   scope" and "ok" are indistinguishable to it. That limit is inherent to the
