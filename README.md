@@ -419,6 +419,40 @@ attestation —
   missing or corrupt config keeps the default (enforced) — fail-safe, never
   fail-open.
 
+### "It can't be done" is a hypothesis, not a finding-free pass
+
+A weaker model — or the same model with too small a thinking budget — tends to
+stop at the first local optimum and then justify it: *"the framework doesn't
+support it"*, *"this can't be tested"*, *"the API has no such option"*. Every
+layer above judges the diff, but nothing judges the **excuse** attached to it,
+so the cheapest way to get a downgraded implementation past a review is to
+assert that the good version was impossible.
+
+The reviewer therefore treats impossibility claims as first-class review
+material (`agents/reviewer.md`):
+
+- **Find them.** They rarely arrive labeled: `TODO`/`FIXME`/"not supported"
+  comments, tests skipped/`xfail`/deleted/gutted with "hard to test", the
+  `[NIT_DEFERRED]` log, loop-goal non-goals that exist *because* something was
+  judged impossible, and the agent's own handoff prose ("blocked by", "would
+  require a rewrite").
+- **Verify with hard evidence**, never by reasoning about the author's
+  reasoning: the dependency source line that actually imposes the limit, the
+  documented type signature, the output of a reproducible read-only command, or
+  a minimal counter-example that makes the "impossible" thing work.
+- **Grade it.** Refuted **and** it caused a degraded implementation, a skipped
+  test, or a bypassed requirement ⇒ **P1** (⇒ `BLOCKED`). Refuted but harmless
+  (a stale comment) ⇒ **P2**. Evidence insufficient either way ⇒ a Note naming
+  the cheapest check that would settle it — "I did not verify" never silently
+  becomes acceptance, and an unevidenced hunch never becomes a P1.
+
+The main agent's side of the deal (`skills/review-loop`): hand the reviewer an
+explicit list of everything you gave up on, worked around, or declared
+infeasible this round, with your evidence — as claims to check, not as
+conclusions. This is prompt-level enforcement by the judges, not a new gate
+requirement: no verdict field was added, and the fail-closed machinery below is
+unchanged.
+
 ## Install
 
 ### Global (recommended — works on all projects)
@@ -612,6 +646,41 @@ fixed — before the task counts as done.
   A Copilot that never answers, or a PR that keeps producing new findings, ends
   as `EXHAUSTED` (round budget `copilotReview.maxRounds`, default 3, clamped to
   1–10; wait budget 20 min) with an explicit "escalate to the user" note.
+- **A request that never lands is detected immediately, not after 20 minutes.**
+  `gh pr edit --add-reviewer @copilot` exits 0 — and the REST review-request
+  endpoint answers 200 — even on a repository where GitHub silently drops the
+  bot, so the exit code proves nothing. `request_copilot_review` therefore
+  probes for a Copilot actor first (`suggestedActors`) and, when it does not
+  find one, reads the PR back after requesting: `gh pr view --json
+  reviewRequests,reviews`, then — after a short pause, because review requests
+  are eventually consistent — **both** surfaces again (that JSON export *and*
+  the REST `requested_reviewers` endpoint, which still names a bot on older
+  `gh` builds). Copilot in **none** of them ⇒ `UNSUPPORTED` on the spot instead
+  of a 20-minute wait. Every check answers three values, and only definite
+  "not there" answers release the requirement — a failed, aborted or
+  unparseable `gh` answer means *cannot tell* and changes nothing (GitHub
+  exposes no "is Copilot review enabled" API: `RepositorySuggestedActorFilter`
+  only has `CAN_BE_ASSIGNED`/`CAN_BE_AUTHOR`, so the probe is a heuristic and
+  is never trusted on its own).
+- **The wait budget belongs to the cycle, not to the last request.** Calling
+  `request_copilot_review` again does not push the 20-minute deadline out: it
+  is anchored on the cycle's *first* request (`firstRequestedAt`). Only a new
+  PR-affecting ship — which legitimately re-arms the cycle — starts a fresh
+  wait.
+- **A released cycle stays released.** `SATISFIED` / `UNSUPPORTED` /
+  `EXHAUSTED` are decisions, not snapshots: `evaluateCopilot` short-circuits on
+  them and `check_copilot_review` reports the stored outcome without spending
+  `gh` calls or rewriting it. **Nothing re-opens a released cycle by
+  observation** — re-entry is an explicit act: a new PR-affecting ship
+  (`armCopilotReview` on a push, `gh pr create` or `gh pr edit` seen by the
+  gate, with the spent round budget carried over), or the agent calling
+  `request_copilot_review` again while rounds remain. The state machine also
+  still re-arms a `SATISFIED` cycle whose head moved (the review no longer
+  describes the code), but that is now defense in depth rather than a live
+  path: the check returns before it could fire, so in practice the ship is
+  what re-opens the cycle. Observed for real: the very next check after a
+  release re-derived `ARMED` and blocked `declare_done` on a requirement the
+  gate had already let go.
 - **Known limit, stated honestly.** The gate verifies the *structure* (resolved,
   or answered by you), never the *substance* of a reply — "won't fix: out of
   scope" and "ok" are indistinguishable to it. That limit is inherent to the

@@ -91,6 +91,54 @@ Review a PR or issue by understanding the context, then verifying:
 - If review-only or no-edit instructions conflict with progress-writing
   instructions, review-only/no-edit wins.
 
+## "It can't be done" — verify the claim, never take it on trust
+
+An author running on a weaker model, or with too small a thinking budget,
+routinely settles for a local optimum and then justifies it: "the framework
+doesn't support it", "this can't be tested", "the API has no such option",
+"it has to be written this way", "only a rewrite would fix it". Such an
+**impossibility claim is a hypothesis, not a fact** — and accepting it on the
+author's word is exactly how a downgraded implementation ships. Re-verifying
+these claims is one of your highest-value jobs.
+
+**Hunt for the claims first — they rarely arrive labeled.** Look in:
+- Code comments and commit/PR prose: `TODO`, `FIXME`, "not supported",
+  "limitation", "workaround", "for now", "unfortunately".
+- Tests that were skipped, marked `.skip`/`.todo`/`xfail`, deleted, or weakened
+  into an assertion-free shell — especially when "hard to test" is the excuse.
+- `[NIT_DEFERRED]` lines and any other deferral log.
+- `.pi/loop-goal.md` non-goals that exist *because* something was judged
+  impossible, as opposed to being deliberately out of scope from the start.
+- Handoff text, task descriptions, and the author's own summary: "blocked by",
+  "not feasible", "would require a rewrite", "platform limitation".
+
+**Verify with hard evidence, not by reasoning about the reasoning.** To confirm
+or overturn a claim, produce at least one of:
+- the source line(s) that actually impose (or refute) the limit — read the
+  installed dependency code (e.g. under `node_modules/`), not your memory of
+  the API;
+- the official documentation or type signature stating the supported behavior;
+- the output of a reproducible read-only command you actually ran;
+- a minimal counter-example demonstrating the "impossible" thing working.
+
+If verification is genuinely too expensive (needs network, credentials, a long
+build), say so in a **Note** naming the cheapest next check that would settle
+it. Never convert "I did not verify" into silent acceptance.
+
+**Grading:**
+- Claim refuted **and** it caused a degraded implementation, a skipped/removed
+  test, or a bypassed requirement ⇒ **P1**
+  (`"impossibility claim refuted: ..."`), with the evidence and the cheapest
+  path to doing it properly.
+- Claim refuted but the change is fine anyway (a stale comment, a harmless
+  excuse) ⇒ **P2**: the misleading text still has to go.
+- Evidence insufficient in either direction ⇒ **Note** stating exactly what
+  would settle it.
+- "The author says it is impossible" is **never**, on its own, sufficient
+  grounds to accept. Symmetrically, do not manufacture a refutation you cannot
+  evidence: an unverified hunch that "it should be possible" is a Note, not a
+  P1.
+
 ## Supervisor coordination
 If you are blocked or need a decision and runtime bridge instructions identify a
 safe supervisor target, use `intercom` to ask, then wait for the reply. Do not

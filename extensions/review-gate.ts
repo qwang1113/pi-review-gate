@@ -142,6 +142,7 @@ import {
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
 } from "./lib/loop-goal.ts";
 import {
+  COPILOT_ACTOR_QUERY,
   COPILOT_REVIEWER_LOGIN,
   COPILOT_THREADS_QUERY,
   analyzeCopilot,
@@ -149,7 +150,10 @@ import {
   copilotProblems,
   evaluateCopilot,
   isCopilotOutstanding,
+  parseCopilotActorProbe,
   parseCopilotPayload,
+  parseCopilotRequestLanded,
+  parseRestReviewRequests,
   parseNameWithOwner,
   parsePrView,
   recordCopilotRequest,
@@ -1287,6 +1291,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   const COPILOT_CHECK_ATTEMPTS = 3;
   const COPILOT_CHECK_DELAY_MS = 10000;
 
+  /**
+   * Pause before the second "did the request land?" read. Review requests are
+   * eventually consistent, so an immediate single read could call a supported
+   * repo unsupported. Only ever paid on the path that is about to RELEASE the
+   * requirement, i.e. once, on a repo where Copilot appears to be absent.
+   */
+  const COPILOT_LANDING_RECHECK_DELAY_MS = 3000;
+
   interface GhResult { ok: boolean; stdout: string; stderr: string }
 
   /**
@@ -1304,6 +1316,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     opts: { timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<GhResult> {
     const timeoutMs = opts.timeoutMs ?? 30000;
+    // Already aborted: an AbortSignal never fires for a listener registered
+    // after the fact, so spawning here would run the whole command past the
+    // user's ESC. `ok: false` is also the answer every caller must draw from
+    // an abort — "could not tell", never a negative finding.
+    if (opts.signal?.aborted) {
+      return { ok: false, stdout: "", stderr: "aborted before gh started" };
+    }
     return await new Promise<GhResult>((resolveResult) => {
       let child: ChildProcess;
       try {
@@ -1412,6 +1431,68 @@ export default function reviewGate(pi: ExtensionAPI) {
       `repos/${slug}/pulls/${pr.number}/requested_reviewers`,
       "-f", `reviewers[]=${COPILOT_REVIEWER_LOGIN}`,
     ], dir, { signal });
+  }
+
+  /**
+   * Heuristic pre-flight: does this repo look like it has a Copilot actor?
+   * `undefined` when the answer could not be read (gh missing, API refusal,
+   * unparseable payload) — the caller must then assume nothing.
+   */
+  async function probeCopilotActor(
+    dir: string,
+    slug: string | null,
+    signal?: AbortSignal,
+  ): Promise<boolean | undefined> {
+    const [owner, name] = (slug ?? "").split("/");
+    if (!owner || !name) return undefined;
+    const res = await runGh([
+      "gh", "api", "graphql",
+      "-F", `owner=${owner}`,
+      "-F", `name=${name}`,
+      "-f", `query=${COPILOT_ACTOR_QUERY}`,
+    ], dir, { signal });
+    if (!res.ok) return undefined;
+    return parseCopilotActorProbe(res.stdout);
+  }
+
+  /**
+   * Did the request we just sent actually land on the PR? `undefined` when the
+   * read-back failed — never treated as "it did not land".
+   */
+  async function copilotRequestLanded(
+    dir: string,
+    prNumber: number,
+    signal?: AbortSignal,
+  ): Promise<boolean | undefined> {
+    const res = await runGh(
+      ["gh", "pr", "view", String(prNumber), "--json", "reviewRequests,reviews"],
+      dir,
+      { signal },
+    );
+    if (!res.ok) return undefined;
+    return parseCopilotRequestLanded(res.stdout);
+  }
+
+  /**
+   * The same question asked of a DIFFERENT surface: the REST review-request
+   * endpoint. Used only as the confirming second read before releasing the
+   * requirement, because review requests are eventually consistent and an
+   * older `gh` may omit a Bot login from its JSON export.
+   */
+  async function copilotRequestLandedViaRest(
+    dir: string,
+    slug: string | null,
+    prNumber: number,
+    signal?: AbortSignal,
+  ): Promise<boolean | undefined> {
+    if (!slug) return undefined;
+    const res = await runGh(
+      ["gh", "api", `repos/${slug}/pulls/${prNumber}/requested_reviewers`],
+      dir,
+      { signal },
+    );
+    if (!res.ok) return undefined;
+    return parseRestReviewRequests(res.stdout);
   }
 
   /** Is the L7 loop active for this repo's state? (mode + project config) */
@@ -2190,8 +2271,23 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       const pr = resolved.pr;
       const slug = await resolveRepoSlug(dir, pr, signal);
+      // Pre-flight: look for a Copilot actor BEFORE spending a round on a repo
+      // that cannot do Copilot review at all.
+      const hasActor = await probeCopilotActor(dir, slug, signal);
       const requested = await requestCopilotReviewer(dir, pr, slug, signal);
       if (!requested.ok) {
+        // An abort is the user pressing ESC, not GitHub refusing: it proves
+        // nothing about Copilot, so it must not release the requirement.
+        if (signal?.aborted) {
+          return {
+            content: [{
+              type: "text",
+              text: "review-gate: aborted before the Copilot review request completed — nothing " +
+                "recorded; call request_copilot_review again.",
+            }],
+            details: { ...(st.copilot ? { status: st.copilot.status } : {}), pr: pr.number },
+          };
+        }
         const why = ghError(requested, "the review request was refused");
         st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
           `Copilot review could not be requested: ${why}`, nowIso, pr.head);
@@ -2204,6 +2300,53 @@ export default function reviewGate(pi: ExtensionAPI) {
           }],
           details: { status: "UNSUPPORTED", pr: pr.number },
         };
+      }
+      // The probe is a heuristic, so a negative one only earns a read-back:
+      // `gh pr edit --add-reviewer @copilot` exits 0 (and the REST endpoint
+      // answers 200) even where GitHub silently drops the bot, which used to
+      // park the requirement in AWAITING until the 20-minute budget expired.
+      // Only hard evidence — Copilot in neither the request list nor the
+      // reviews — releases it; an unreadable read-back changes nothing.
+      if (hasActor === false) {
+        let landed = await copilotRequestLanded(dir, pr.number, signal);
+        if (landed === false) {
+          // Confirm before releasing: wait out the eventual consistency of
+          // review requests, then ask a different API surface. Anything other
+          // than a second explicit "not there" (true, or unreadable) keeps the
+          // requirement — including an abort, which can confirm nothing, so it
+          // downgrades the first read to "cannot tell" instead of releasing.
+          if (signal?.aborted) {
+            landed = undefined;
+          } else {
+            await new Promise((r) => setTimeout(r, COPILOT_LANDING_RECHECK_DELAY_MS));
+            // Ask BOTH surfaces again: REST alone would miss a Copilot that
+            // reviewed and left the request list during the pause, and the
+            // JSON export alone is what an old gh renders bot-blind.
+            const viaCli = await copilotRequestLanded(dir, pr.number, signal);
+            const viaRest = await copilotRequestLandedViaRest(dir, slug, pr.number, signal);
+            landed = (viaCli === true || viaRest === true)
+              ? true
+              : (viaCli === false && viaRest === false ? false : undefined);
+          }
+        }
+        if (landed === false) {
+          st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
+            "the review request did not land: Copilot is not among this repository's actors, and " +
+            "a confirming second pass over both surfaces (gh pr view reviewRequests+reviews, REST " +
+            "requested_reviewers) still found no Copilot review request",
+            nowIso, pr.head);
+          persistRepo(ctx as unknown as ExtensionContext, root);
+          return {
+            content: [{
+              type: "text",
+              text: `review-gate: Copilot code review is not available for PR #${pr.number} — the ` +
+                "request was accepted by the API but never landed on the PR (this repository or " +
+                "account has no Copilot reviewer). Requirement released (UNSUPPORTED); it is not " +
+                "blocking completion.",
+            }],
+            details: { status: "UNSUPPORTED", pr: pr.number },
+          };
+        }
       }
       st.copilot = recordCopilotRequest(st.copilot, { pr: pr.number, head: pr.head, nowIso });
       persistRepo(ctx as unknown as ExtensionContext, root);
@@ -2243,6 +2386,24 @@ export default function reviewGate(pi: ExtensionAPI) {
         return {
           content: [{ type: "text", text: "review-gate: the Copilot review loop is off for this repo/mode — nothing to check." }],
           details: { status: "DISABLED" },
+        };
+      }
+      // Already released: SATISFIED / UNSUPPORTED / EXHAUSTED are decisions,
+      // not snapshots. Re-running the checks here would spend gh calls to
+      // re-derive a state the gate has already let go — and, before the state
+      // machine grew its terminal short-circuit, could resurrect it and block
+      // `declare_done` on a requirement that was finished.
+      const settled = st.copilot;
+      if (settled && !isCopilotOutstanding(settled)) {
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: the Copilot requirement is already released (${settled.status})` +
+              `${settled.note ? ` — ${settled.note}` : ""}. It is not blocking completion; checking ` +
+              "again changes nothing. A fresh round starts only on a new push / PR update, or if you " +
+              "deliberately call request_copilot_review again while rounds remain.",
+          }],
+          details: { status: settled.status, ...(settled.pr === null ? {} : { pr: settled.pr }) },
         };
       }
       const dir = repoDirFor(root);

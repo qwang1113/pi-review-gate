@@ -91,6 +91,13 @@ export interface CopilotReviewState {
   armedAt: string;
   /** ISO time the EXTENSION requested the review (never agent-supplied). */
   requestedAt?: string;
+  /**
+   * ISO time of the FIRST request in this cycle. The wait budget is anchored
+   * here, not on `requestedAt`: re-requesting must not push the deadline out,
+   * or an agent that keeps calling `request_copilot_review` could wait forever
+   * on a repo where Copilot never answers.
+   */
+  firstRequestedAt?: string;
   /** PR head SHA the current cycle was requested against / satisfied at. */
   head?: string;
   /** Copilot review cycles consumed since the requirement was first armed. */
@@ -157,6 +164,9 @@ export function recordCopilotRequest(
     pr: args.pr,
     armedAt: prev?.armedAt ?? args.nowIso,
     requestedAt: args.nowIso,
+    // Anchor the wait budget on the first request of this cycle. Older
+    // sidecars have no `firstRequestedAt`; their `requestedAt` is that anchor.
+    firstRequestedAt: prev?.firstRequestedAt ?? prev?.requestedAt ?? args.nowIso,
     ...(args.head ? { head: args.head } : {}),
     rounds: (prev?.rounds ?? 0) + 1,
     at: args.nowIso,
@@ -178,6 +188,7 @@ export function releaseCopilotReview(
     pr: prev?.pr ?? null,
     armedAt: prev?.armedAt ?? nowIso,
     ...(prev?.requestedAt ? { requestedAt: prev.requestedAt } : {}),
+    ...(prev?.firstRequestedAt ? { firstRequestedAt: prev.firstRequestedAt } : {}),
     ...(boundHead ? { head: boundHead } : {}),
     rounds: prev?.rounds ?? 0,
     at: nowIso,
@@ -265,6 +276,89 @@ export function slugFromPrUrl(url: string | null): string | null {
   if (typeof url !== "string") return null;
   const m = /\/([^/\s]+)\/([^/\s]+)\/pull\/\d+(?:$|[/?#])/.exec(url);
   return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/**
+ * Capability probe: can this repository do Copilot review at all?
+ *
+ * GitHub exposes no "is Copilot code review enabled" API — GraphQL's
+ * `RepositorySuggestedActorFilter` only knows CAN_BE_ASSIGNED and
+ * CAN_BE_AUTHOR — so the presence of a Copilot actor among the repo's
+ * suggested actors is a HEURISTIC, never a proof. That is why a negative
+ * probe does not release the requirement on its own: it only triggers the
+ * landing check below, which is evidence rather than inference.
+ */
+export const COPILOT_ACTOR_QUERY = `query($owner:String!,$name:String!){
+  repository(owner:$owner,name:$name){
+    suggestedActors(capabilities:[CAN_BE_ASSIGNED],first:100){nodes{login}}
+  }
+}`;
+
+/**
+ * Parse {@link COPILOT_ACTOR_QUERY}: `true`/`false` when the actor list was
+ * readable, `undefined` when it was not — an unreadable answer is "no
+ * evidence", never "Copilot is missing".
+ */
+export function parseCopilotActorProbe(raw: string): boolean | undefined {
+  const repo = asRecord(asRecord(asRecord(parseJson(raw))?.data)?.repository);
+  const nodes = asRecord(repo?.suggestedActors)?.nodes;
+  if (!Array.isArray(nodes)) return undefined;
+  return nodes.some((node) => {
+    const value = asRecord(node)?.login;
+    return typeof value === "string" && isCopilotAuthor(value);
+  });
+}
+
+/**
+ * Did a review request actually LAND on the PR?
+ *
+ * `gh pr edit --add-reviewer @copilot` exits 0 and the REST review-request
+ * endpoint answers 200 even on repositories where GitHub silently drops the
+ * bot, so the exit code proves nothing. This reads back
+ * `gh pr view --json reviewRequests,reviews` and looks for Copilot in either
+ * place — still requested, or already reviewed (Copilot can answer and be
+ * removed from the request list before we look).
+ *
+ * `undefined` = the payload was not readable, so the caller must NOT conclude
+ * anything from it (releasing a gate requirement on a parse failure would be
+ * the one direction that fails open).
+ */
+export function parseCopilotRequestLanded(raw: string): boolean | undefined {
+  const obj = asRecord(parseJson(raw));
+  if (!obj) return undefined;
+  const requests = obj.reviewRequests;
+  const reviews = obj.reviews;
+  if (!Array.isArray(requests) && !Array.isArray(reviews)) return undefined;
+  const requested = Array.isArray(requests) && requests.some((node) => {
+    const rec = asRecord(node);
+    const value = rec?.login;
+    // gh renders a requested reviewer as {__typename, login}; a bot reviewer
+    // has no `author` wrapper, hence the direct login read.
+    return typeof value === "string" && isCopilotAuthor(value);
+  });
+  const reviewed = Array.isArray(reviews) && reviews.some((node) => isCopilotAuthor(login(node)));
+  return requested || reviewed;
+}
+
+/**
+ * Second opinion on "did it land", from a DIFFERENT API surface.
+ *
+ * Parses REST `GET /repos/{o}/{r}/pulls/{n}/requested_reviewers`
+ * (`{"users":[{"login":…}],"teams":[…]}`). Two reasons this is not redundant
+ * with {@link parseCopilotRequestLanded}: review requests are eventually
+ * consistent, so one immediate read can miss a request that did land; and a
+ * `gh` build older than the `... on Bot{login}` selection renders a bot
+ * reviewer as an empty entry in the JSON export while REST still names it.
+ * Same three-valued contract — an unreadable answer is `undefined`.
+ */
+export function parseRestReviewRequests(raw: string): boolean | undefined {
+  const obj = asRecord(parseJson(raw));
+  const users = obj?.users;
+  if (!Array.isArray(users)) return undefined;
+  return users.some((node) => {
+    const value = asRecord(node)?.login;
+    return typeof value === "string" && isCopilotAuthor(value);
+  });
 }
 
 /**
@@ -458,7 +552,24 @@ export function analyzeCopilot(
 /**
  * Advance the state machine from a fresh analysis.
  *
- * Order matters and encodes the fail-safe priorities:
+ * Terminal statuses come FIRST, because a released cycle is a decision that
+ * has already been made and re-deciding it is how a finished requirement comes
+ * back from the dead. `EXHAUSTED` (the budget is spent) and `UNSUPPORTED` (the
+ * repo cannot do this at all) are never re-opened by *observation*: this
+ * function will not move them, whatever the payload says. Re-opening is an
+ * explicit act — a new PR-affecting ship calling {@link armCopilotReview}, or
+ * the agent deliberately calling `request_copilot_review` again while rounds
+ * remain. Observed for real: a released cycle was re-classified as ARMED by
+ * the very next check, and `declare_done` was blocked by a requirement that
+ * had already been let go.
+ * `SATISFIED` keeps its safety net at THIS layer: it only survives while it
+ * still describes the code that was reviewed, so a head that moved under it
+ * re-arms. Note that the extension short-circuits every released status before
+ * calling this, so that branch is currently defense in depth (a rule of the
+ * state machine) rather than a path the tools can reach — in practice the
+ * re-arm comes from the ship.
+ *
+ * Then, in order, the fail-safe priorities:
  *  1. head drift — the PR moved under us, so this cycle's evidence is stale
  *     and a new request is due (ARMED);
  *  2. budget — rounds spent or the wait ran too long ⇒ EXHAUSTED (released,
@@ -473,7 +584,12 @@ export function evaluateCopilot(
   analysis: CopilotAnalysis,
   opts: { nowIso: string; now: number; maxRounds: number },
 ): CopilotReviewState {
-  if (state.head && analysis.head && state.head !== analysis.head) {
+  const headMoved = Boolean(state.head && analysis.head && state.head !== analysis.head);
+
+  if (state.status === "EXHAUSTED" || state.status === "UNSUPPORTED") return state;
+  if (state.status === "SATISFIED" && !headMoved) return state;
+
+  if (headMoved) {
     return {
       ...armCopilotReview(state, opts.nowIso),
       pr: state.pr,
@@ -491,7 +607,10 @@ export function evaluateCopilot(
   }
 
   if (!analysis.reviewed) {
-    const requestedMs = parseTime(state.requestedAt);
+    // Anchored on the FIRST request of this cycle (falling back to the last
+    // one for sidecars written before that field existed): re-requesting must
+    // never buy more waiting time.
+    const requestedMs = parseTime(state.firstRequestedAt ?? state.requestedAt);
     if (requestedMs !== undefined && opts.now - requestedMs > COPILOT_AWAIT_TIMEOUT_MS) {
       return releaseCopilotReview(
         state,
@@ -561,6 +680,7 @@ export function sanitizeCopilotState(raw: unknown): CopilotReviewState | undefin
     rounds,
   };
   if (typeof obj.requestedAt === "string") out.requestedAt = obj.requestedAt;
+  if (typeof obj.firstRequestedAt === "string") out.firstRequestedAt = obj.firstRequestedAt;
   if (typeof obj.head === "string" && obj.head.length > 0) out.head = obj.head;
   if (typeof obj.at === "string") out.at = obj.at;
   if (typeof obj.note === "string") out.note = obj.note.slice(0, 500);
