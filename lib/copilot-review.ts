@@ -552,7 +552,24 @@ export function analyzeCopilot(
 /**
  * Advance the state machine from a fresh analysis.
  *
- * Order matters and encodes the fail-safe priorities:
+ * Terminal statuses come FIRST, because a released cycle is a decision that
+ * has already been made and re-deciding it is how a finished requirement comes
+ * back from the dead. `EXHAUSTED` (the budget is spent) and `UNSUPPORTED` (the
+ * repo cannot do this at all) are never re-opened by *observation*: this
+ * function will not move them, whatever the payload says. Re-opening is an
+ * explicit act — a new PR-affecting ship calling {@link armCopilotReview}, or
+ * the agent deliberately calling `request_copilot_review` again while rounds
+ * remain. Observed for real: a released cycle was re-classified as ARMED by
+ * the very next check, and `declare_done` was blocked by a requirement that
+ * had already been let go.
+ * `SATISFIED` keeps its safety net at THIS layer: it only survives while it
+ * still describes the code that was reviewed, so a head that moved under it
+ * re-arms. Note that the extension short-circuits every released status before
+ * calling this, so that branch is currently defense in depth (a rule of the
+ * state machine) rather than a path the tools can reach — in practice the
+ * re-arm comes from the ship.
+ *
+ * Then, in order, the fail-safe priorities:
  *  1. head drift — the PR moved under us, so this cycle's evidence is stale
  *     and a new request is due (ARMED);
  *  2. budget — rounds spent or the wait ran too long ⇒ EXHAUSTED (released,
@@ -567,7 +584,12 @@ export function evaluateCopilot(
   analysis: CopilotAnalysis,
   opts: { nowIso: string; now: number; maxRounds: number },
 ): CopilotReviewState {
-  if (state.head && analysis.head && state.head !== analysis.head) {
+  const headMoved = Boolean(state.head && analysis.head && state.head !== analysis.head);
+
+  if (state.status === "EXHAUSTED" || state.status === "UNSUPPORTED") return state;
+  if (state.status === "SATISFIED" && !headMoved) return state;
+
+  if (headMoved) {
     return {
       ...armCopilotReview(state, opts.nowIso),
       pr: state.pr,

@@ -2388,6 +2388,24 @@ export default function reviewGate(pi: ExtensionAPI) {
           details: { status: "DISABLED" },
         };
       }
+      // Already released: SATISFIED / UNSUPPORTED / EXHAUSTED are decisions,
+      // not snapshots. Re-running the checks here would spend gh calls to
+      // re-derive a state the gate has already let go — and, before the state
+      // machine grew its terminal short-circuit, could resurrect it and block
+      // `declare_done` on a requirement that was finished.
+      const settled = st.copilot;
+      if (settled && !isCopilotOutstanding(settled)) {
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: the Copilot requirement is already released (${settled.status})` +
+              `${settled.note ? ` — ${settled.note}` : ""}. It is not blocking completion; checking ` +
+              "again changes nothing. A fresh round starts only on a new push / PR update, or if you " +
+              "deliberately call request_copilot_review again while rounds remain.",
+          }],
+          details: { status: settled.status, ...(settled.pr === null ? {} : { pr: settled.pr }) },
+        };
+      }
       const dir = repoDirFor(root);
       const resolved = await resolveOpenPr(dir, signal);
       if (!resolved.pr) {

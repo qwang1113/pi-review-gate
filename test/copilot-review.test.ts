@@ -275,6 +275,61 @@ test("SAFETY VALVE: the round budget ends the loop with a human, not with more r
   assert.match(next.note ?? "", /budget spent/);
 });
 
+// ---------------------------------------------------------------------------
+// Terminal statuses are DECISIONS, not snapshots.
+
+test("a released cycle is never resurrected by the next check", () => {
+  // Observed for real: request_copilot_review released the cycle as EXHAUSTED,
+  // the very next check_copilot_review re-classified it as ARMED, and
+  // declare_done was blocked by a requirement the gate had already let go.
+  for (const status of ["EXHAUSTED", "UNSUPPORTED"] as const) {
+    const released = armed({ status, rounds: 3, note: "released earlier" });
+    for (const [label, analysis] of [
+      ["no review at all", analyzeCopilot(payload(), { anchorAt: NOW_ISO })],
+      ["threads waiting on us", analyzeCopilot(payload({ threads: [thread()] }), { anchorAt: NOW_ISO })],
+      ["head moved", analyzeCopilot(payload({ head: "deadbeef" }), { anchorAt: NOW_ISO })],
+    ] as const) {
+      const next = evaluateCopilot(released, analysis, {
+        nowIso: "2026-08-07T12:00:00.000Z",
+        now: NOW + COPILOT_AWAIT_TIMEOUT_MS + 1,
+        maxRounds: 3,
+      });
+      assert.deepEqual(next, released, `${status} must survive untouched (${label})`);
+      assert.deepEqual(copilotProblems(next), [], "and must keep blocking nothing");
+    }
+  }
+});
+
+test("SATISFIED survives a re-check, but not code moving under it", () => {
+  const satisfied = armed({ status: "SATISFIED", head: "abc123", openThreads: 0 });
+  const sameCode = evaluateCopilot(
+    satisfied,
+    analyzeCopilot(payload({ threads: [thread({ isResolved: true })] }), { anchorAt: NOW_ISO }),
+    { nowIso: "2026-08-07T12:00:00.000Z", now: NOW, maxRounds: 3 },
+  );
+  assert.deepEqual(sameCode, satisfied, "re-checking the same head must not rewrite the decision");
+
+  // The one exception that keeps its safety net: the review no longer
+  // describes the code, so the cycle re-opens.
+  const moved = evaluateCopilot(
+    satisfied,
+    analyzeCopilot(payload({ head: "deadbeef" }), { anchorAt: NOW_ISO }),
+    { nowIso: "2026-08-07T12:00:00.000Z", now: NOW, maxRounds: 3 },
+  );
+  assert.equal(moved.status, "ARMED");
+  assert.match(moved.note ?? "", /head moved/);
+});
+
+test("a new PR ship is still the way a released cycle re-opens", () => {
+  // The terminal short-circuit must not close the loop off entirely: arming is
+  // a different entry point and keeps overriding every terminal status.
+  for (const status of ["EXHAUSTED", "UNSUPPORTED", "SATISFIED"] as const) {
+    const rearmed = armCopilotReview(armed({ status, rounds: 2 }), NOW_ISO);
+    assert.equal(rearmed.status, "ARMED", status);
+    assert.equal(rearmed.rounds, 2, "and the spent budget is carried over, not refunded");
+  }
+});
+
 test("the round budget is bounded by construction (a config typo cannot unbound it)", () => {
   assert.ok(COPILOT_MIN_ROUNDS >= 1);
   assert.ok(COPILOT_MAX_ROUNDS <= 10, "an upper bound must exist");

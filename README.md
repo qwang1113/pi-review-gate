@@ -667,6 +667,20 @@ fixed — before the task counts as done.
   is anchored on the cycle's *first* request (`firstRequestedAt`). Only a new
   PR-affecting ship — which legitimately re-arms the cycle — starts a fresh
   wait.
+- **A released cycle stays released.** `SATISFIED` / `UNSUPPORTED` /
+  `EXHAUSTED` are decisions, not snapshots: `evaluateCopilot` short-circuits on
+  them and `check_copilot_review` reports the stored outcome without spending
+  `gh` calls or rewriting it. **Nothing re-opens a released cycle by
+  observation** — re-entry is an explicit act: a new PR-affecting ship
+  (`armCopilotReview` on a push, `gh pr create` or `gh pr edit` seen by the
+  gate, with the spent round budget carried over), or the agent calling
+  `request_copilot_review` again while rounds remain. The state machine also
+  still re-arms a `SATISFIED` cycle whose head moved (the review no longer
+  describes the code), but that is now defense in depth rather than a live
+  path: the check returns before it could fire, so in practice the ship is
+  what re-opens the cycle. Observed for real: the very next check after a
+  release re-derived `ARMED` and blocked `declare_done` on a requirement the
+  gate had already let go.
 - **Known limit, stated honestly.** The gate verifies the *structure* (resolved,
   or answered by you), never the *substance* of a reply — "won't fix: out of
   scope" and "ok" are indistinguishable to it. That limit is inherent to the

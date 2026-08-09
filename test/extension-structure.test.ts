@@ -1218,3 +1218,22 @@ test("an abort proves nothing about Copilot: it can never release the requiremen
   assert.match(body, /if \(signal\?\.aborted\) \{\s*\n\s*landed = undefined;/,
     "an aborted confirmation means 'cannot tell'");
 });
+
+test("check_copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {
+  // The loop this closes: request released the cycle as EXHAUSTED, the next
+  // check re-derived it as ARMED, and declare_done was blocked again.
+  const at = SRC.indexOf('name: "check_copilot_review"');
+  assert.ok(at > 0, "the check tool must exist");
+  // Bound the window on the next tool registration, not on a character count.
+  const end = SRC.indexOf("pi.registerTool({", at);
+  const body = SRC.slice(at, end === -1 ? SRC.length : end);
+  const guardAt = body.indexOf("!isCopilotOutstanding(settled)");
+  assert.ok(guardAt > 0, "a released cycle must short-circuit the whole check");
+  for (const laterWork of ["resolveOpenPr(", "fetchCopilotPayload(", "evaluateCopilot("]) {
+    const workAt = body.indexOf(laterWork);
+    assert.ok(workAt > guardAt, `${laterWork} must come AFTER the released short-circuit`);
+  }
+  assert.doesNotMatch(body.slice(guardAt, body.indexOf("}", body.indexOf("details:", guardAt))),
+    /persistRepo|releaseCopilotReview|armCopilotReview/,
+    "the short-circuit must not rewrite the state it reports");
+});
