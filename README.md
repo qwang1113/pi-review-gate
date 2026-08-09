@@ -419,6 +419,40 @@ attestation —
   missing or corrupt config keeps the default (enforced) — fail-safe, never
   fail-open.
 
+### "It can't be done" is a hypothesis, not a finding-free pass
+
+A weaker model — or the same model with too small a thinking budget — tends to
+stop at the first local optimum and then justify it: *"the framework doesn't
+support it"*, *"this can't be tested"*, *"the API has no such option"*. Every
+layer above judges the diff, but nothing judges the **excuse** attached to it,
+so the cheapest way to get a downgraded implementation past a review is to
+assert that the good version was impossible.
+
+The reviewer therefore treats impossibility claims as first-class review
+material (`agents/reviewer.md`):
+
+- **Find them.** They rarely arrive labeled: `TODO`/`FIXME`/"not supported"
+  comments, tests skipped/`xfail`/deleted/gutted with "hard to test", the
+  `[NIT_DEFERRED]` log, loop-goal non-goals that exist *because* something was
+  judged impossible, and the agent's own handoff prose ("blocked by", "would
+  require a rewrite").
+- **Verify with hard evidence**, never by reasoning about the author's
+  reasoning: the dependency source line that actually imposes the limit, the
+  documented type signature, the output of a reproducible read-only command, or
+  a minimal counter-example that makes the "impossible" thing work.
+- **Grade it.** Refuted **and** it caused a degraded implementation, a skipped
+  test, or a bypassed requirement ⇒ **P1** (⇒ `BLOCKED`). Refuted but harmless
+  (a stale comment) ⇒ **P2**. Evidence insufficient either way ⇒ a Note naming
+  the cheapest check that would settle it — "I did not verify" never silently
+  becomes acceptance, and an unevidenced hunch never becomes a P1.
+
+The main agent's side of the deal (`skills/review-loop`): hand the reviewer an
+explicit list of everything you gave up on, worked around, or declared
+infeasible this round, with your evidence — as claims to check, not as
+conclusions. This is prompt-level enforcement by the judges, not a new gate
+requirement: no verdict field was added, and the fail-closed machinery below is
+unchanged.
+
 ## Install
 
 ### Global (recommended — works on all projects)

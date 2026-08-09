@@ -153,6 +153,15 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    with evidence, an unmet criterion raised as a P1 finding. A missing goal is
    not a blocker — the reviewer then judges the diff against the task intent.
 
+   **Hand over your "impossible" list.** Anything you gave up on, worked
+   around, or declared infeasible this round — a skipped/removed test, a
+   `TODO`/`FIXME` you left, a non-goal added because it "can't be done", a
+   requirement met only partially — must be listed explicitly for the reviewer,
+   with your evidence. Do NOT hand over your justification as a conclusion: the
+   reviewer re-verifies each claim from source, docs, or a counter-example, and
+   a refuted claim that produced a degraded implementation is a P1 finding.
+   Hiding the list does not make it pass — it just costs a round.
+
    `docSync` is the reviewer's code↔doc attestation, required for code
    reviews: `UPDATED` (project docs — requirement / plan / feature docs under
    `docs/`, README, specs; NOT agent memory files: CLAUDE.md, AGENTS.md,
