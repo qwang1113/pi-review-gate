@@ -13,6 +13,13 @@
  *
  * Usage: node precommit-runner.mjs [--mode fast|full] [--cwd <dir>] [--json]
  *
+ * Scheduling (default-on, no flags): any lint:fix script runs FIRST (it edits
+ * files, so it must stabilize the worktree before anything reads it), then the
+ * remaining checks (lint/typecheck/build/test) run in parallel. Output and the
+ * receipt's `steps` array are presented in DECLARATION order (lint, typecheck,
+ * build, test), never in completion order, so a killed run's log still stops at
+ * the first unfinished check.
+ *
  * Detection: package.json scripts (lint:fix/lint, typecheck, build, test:unit/test),
  * then ecosystem fallbacks (cargo, go, pytest/ruff) when package.json is absent.
  *
@@ -21,7 +28,7 @@
  * does not recurse `**` and tests may be silently skipped.
  */
 
-import { execSync, spawnSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
@@ -62,37 +69,86 @@ function stream(line) {
   if (streaming) console.log(line);
 }
 
-function runStep(name, command) {
-  const started = Date.now();
-  stream(`\n▶ ${name} — ${command}`);
-  // Plain -c (NOT -lc): a login shell would source the user's full profile
-  // for EVERY step — slow and environment-dependent. PATH etc. inherit from
-  // the parent environment, which is what ran this runner in the first place.
-  const res = spawnSync("bash", ["-c", command], {
-    cwd,
-    encoding: "utf8",
-    timeout: 15 * 60 * 1000,
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  const passed = res.status === 0;
-  const full = (res.stdout ?? "") + (res.stderr ?? "");
-  stream(full);
-  stream(`◀ ${name} — ${passed ? "pass" : "fail"} (${Date.now() - started}ms, exit ${res.status ?? `signal ${res.signal}`})`);
-  steps.push({
-    name,
-    command,
-    status: passed ? "pass" : "fail",
-    durationMs: Date.now() - started,
-    // The receipt stays a BOUNDED structured summary; the unbounded full text
-    // lives in the streamed log. Two channels, two jobs.
-    tail: full.split("\n").slice(-40).join("\n"),
-  });
-  return passed;
+// ---- parallel execution, declaration-order presentation ----
+//
+// Checks run concurrently, but the log and the receipt `steps` array must read
+// in DECLARATION order (lint, typecheck, build, test) — not completion order.
+// Each finished unit waits for every earlier-declared unit to be presented
+// first. Consequences, both intended:
+//   - a killed run's log stops at the FIRST unfinished check in declaration
+//     order (its `▶` is the last line), so the hung step stays identifiable;
+//   - the `▶ … ◀` pair marks a unit's place in the log, not the instant the
+//     child was spawned (a parallel child may have finished by then).
+const pending = []; // declaration-order slots; null until that step finished
+let nextToPresent = 0;
+
+function present(idx, lines, step) {
+  pending[idx] = { lines, step };
+  while (nextToPresent < pending.length && pending[nextToPresent]) {
+    const unit = pending[nextToPresent];
+    for (const line of unit.lines) stream(line);
+    steps.push(unit.step);
+    nextToPresent++;
+  }
 }
 
-function skipStep(name, reason) {
-  stream(`⏭ ${name} — skipped (${reason})`);
-  steps.push({ name, command: null, status: "skip", reason });
+function runStep(name, command, idx, yieldCpu = false) {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    // CPU priority: when checks actually run in parallel, `test` gets the
+    // highest priority and every OTHER parallel step yields via `nice -n 10`.
+    // Timing-sensitive suites (this repo's fingerprint regressions) measurably
+    // slow down when tsc competes for CPU; a yielding tsc keeps the test's
+    // pacing intact. `nice` is POSIX and bash is already a hard requirement.
+    // A step that runs alone (the lint:fix first stage, a single ecosystem
+    // fallback) has no competitor and is never niced.
+    const cmd = yieldCpu ? `nice -n 10 ${command}` : command;
+    const child = spawn("bash", ["-c", cmd], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15 * 60 * 1000,
+    });
+    // The old spawnSync had a 64MB maxBuffer that turned pathological output
+    // into a hard failure; the streamed version caps capture the same way,
+    // but truncates with a marker instead of failing the step.
+    let full = "";
+    let captureTruncated = false;
+    const MAX_CAPTURE = 64 * 1024 * 1024;
+    const onData = (d) => {
+      if (captureTruncated) return;
+      if (full.length + d.length > MAX_CAPTURE) {
+        full = `${full.slice(0, MAX_CAPTURE)}\n…[output truncated at 64MB]…\n`;
+        captureTruncated = true;
+        return;
+      }
+      full += d;
+    };
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
+    child.on("error", () => { /* spawn failure surfaces via close with non-zero */ });
+    child.on("close", (code, signal) => {
+      const passed = code === 0;
+      const lines = [
+        `\n▶ ${name} — ${cmd}`,
+        full,
+        `◀ ${name} — ${passed ? "pass" : "fail"} (${Date.now() - started}ms, exit ${code ?? `signal ${signal}`})`,
+      ];
+      present(idx, lines, {
+        name,
+        command: cmd,
+        status: passed ? "pass" : "fail",
+        durationMs: Date.now() - started,
+        // The receipt stays a BOUNDED structured summary; the unbounded full text
+        // lives in the streamed log. Two channels, two jobs.
+        tail: full.split("\n").slice(-40).join("\n"),
+      });
+      resolve();
+    });
+  });
+}
+
+function skipStep(name, reason, idx) {
+  present(idx, [`⏭ ${name} — skipped (${reason})`], { name, command: null, status: "skip", reason });
 }
 
 // ---- discover checks ----
@@ -106,14 +162,21 @@ if (existsSync(pkgPath)) {
   }
 }
 
-let anyFail = false;
+// `anyFail` is derived from the (declaration-ordered) steps in the verdict
+// section, not from return values: parallel steps cannot report back through
+// a boolean channel.
 let anyRan = false;
 
-function tryScript(stepName, scriptNames) {
+// ---- collect phase: decide which checks exist WITHOUT running them, so the
+// scheduler can run lint:fix first (it edits files) and parallelize the rest.
+const plan = []; // { name, command, reason?, isFix?, idx } — declaration order
+
+function collectStep(stepName, scriptNames) {
   const scripts = pkg?.scripts ?? {};
   const found = scriptNames.find((s) => typeof scripts[s] === "string");
+  const idx = plan.length;
   if (!found) {
-    skipStep(stepName, `no script (${scriptNames.join("/")})`);
+    plan.push({ name: stepName, command: null, reason: `no script (${scriptNames.join("/")})`, idx });
     return;
   }
 
@@ -133,48 +196,63 @@ function tryScript(stepName, scriptNames) {
     : existsSync(join(cwd, "pnpm-lock.yaml")) ? "pnpm"
     : "npm";
   const runPrefix = pm === "npm" ? "npm run" : pm === "bun" ? "bun run" : pm;
-  if (!runStep(stepName, `${runPrefix} ${found}`)) anyFail = true;
+  plan.push({ name: stepName, command: `${runPrefix} ${found}`, isFix: found === "lint:fix", idx });
 }
 
 if (pkg) {
-  tryScript("lint", ["lint:fix", "lint"]);
+  collectStep("lint", ["lint:fix", "lint"]);
   if (mode === "full") {
-    tryScript("typecheck", ["typecheck", "type-check"]);
-    tryScript("build", ["build"]);
+    collectStep("typecheck", ["typecheck", "type-check"]);
+    collectStep("build", ["build"]);
   }
-  tryScript("test", mode === "fast" ? ["test:unit", "test"] : ["test"]);
+  collectStep("test", mode === "fast" ? ["test:unit", "test"] : ["test"]);
 } else {
   // ecosystem fallback — try in priority order, first match wins.
   if (existsSync(join(cwd, "Cargo.toml"))) {
     anyRan = true;
-    if (!runStep("cargo-test", "cargo test --quiet")) anyFail = true;
+    plan.push({ name: "cargo-test", command: "cargo test --quiet", idx: plan.length });
   } else if (existsSync(join(cwd, "go.mod"))) {
     anyRan = true;
-    if (!runStep("go-test", "go test ./...")) anyFail = true;
+    plan.push({ name: "go-test", command: "go test ./...", idx: plan.length });
   } else if (existsSync(join(cwd, "pyproject.toml")) || existsSync(join(cwd, "setup.py"))) {
     let pytest = false;
     try { execSync("command -v pytest", { cwd, stdio: "ignore" }); pytest = true; } catch { /* not installed */ }
     if (pytest) {
       anyRan = true;
-      if (!runStep("pytest", "pytest -q")) anyFail = true;
+      plan.push({ name: "pytest", command: "pytest -q", idx: plan.length });
     } else {
-      skipStep("pytest", "pytest not installed");
+      plan.push({ name: "pytest", command: null, reason: "pytest not installed", idx: plan.length });
     }
   } else if (existsSync(join(cwd, "deno.json")) || existsSync(join(cwd, "deno.jsonc"))) {
     anyRan = true;
-    if (!runStep("deno-test", "deno test --quiet")) anyFail = true;
+    plan.push({ name: "deno-test", command: "deno test --quiet", idx: plan.length });
   } else if (existsSync(join(cwd, "justfile"))) {
     anyRan = true;
-    if (!runStep("just-test", "just test")) anyFail = true;
+    plan.push({ name: "just-test", command: "just test", idx: plan.length });
   } else if (existsSync(join(cwd, "Makefile"))) {
     anyRan = true;
-    if (!runStep("make-test", "make test")) anyFail = true;
+    plan.push({ name: "make-test", command: "make test", idx: plan.length });
   } else {
-    skipStep("detect", "no package.json / Cargo.toml / go.mod / pyproject.toml / Makefile / justfile / deno.json");
+    plan.push({ name: "detect", command: null, reason: "no package.json / Cargo.toml / go.mod / pyproject.toml / Makefile / justfile / deno.json", idx: plan.length });
   }
 }
 
+// ---- execute: skips present immediately (queued behind unfinished earlier
+// steps), lint:fix runs first and alone, everything else in parallel. ----
+for (const s of plan) if (!s.command) skipStep(s.name, s.reason, s.idx);
+const fix = plan.find((s) => s.command && s.isFix);
+const rest = plan.filter((s) => s.command && s !== fix);
+if (fix) await runStep(fix.name, fix.command, fix.idx);
+// Only steps that actually run CONCURRENTLY need CPU yielding, and only the
+// non-test ones should yield: a lone ecosystem step has no competitor.
+const concurrent = rest.length > 1;
+await Promise.all(rest.map((s) => runStep(s.name, s.command, s.idx, concurrent && s.name !== "test")));
+
+
 // ---- verdict ----
+// `anyFail` is derived from the (declaration-ordered) steps, not from return
+// values: parallel steps cannot report back through the old boolean channel.
+const anyFail = steps.some((s) => s.status === "fail");
 let overall;
 if (anyFail) overall = "## Overall: ❌ FAIL";
 else if (!anyRan) overall = "## Overall: ⚠️ NO CHECKS RUN";
