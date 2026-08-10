@@ -67,9 +67,16 @@ mkdir -p "${AGENT_DIR}/scripts"
 cp "${SRC}/scripts/fetch-leaderboard.mjs" "${AGENT_DIR}/scripts/pi-review-gate-fetch-leaderboard.mjs"
 echo "✓ Leaderboard fetcher installed (run manually to refresh model scores)"
 
-# 3. Precommit runner
+# 3. Precommit runner + the modules it imports.
+#
+# precommit-plan.mjs / precommit-cache.mjs MUST keep their original filenames:
+# the runner imports them by relative specifier, so a pi-review-gate-* rename
+# would make every run crash on startup (which the extension reports as a
+# fail-closed ERROR — no PASS, no commits).
 mkdir -p "${AGENT_DIR}/scripts"
 cp "${SRC}/scripts/precommit-runner.mjs" "${AGENT_DIR}/scripts/pi-review-gate-precommit.mjs"
+cp "${SRC}/scripts/precommit-plan.mjs" "${AGENT_DIR}/scripts/precommit-plan.mjs"
+cp "${SRC}/scripts/precommit-cache.mjs" "${AGENT_DIR}/scripts/precommit-cache.mjs"
 echo "✓ Precommit runner installed"
 
 # 3b. Fingerprint script for git hooks. MUST keep the original filename

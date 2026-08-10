@@ -14,6 +14,21 @@
 
 export type PrecommitVerdict = "PASS" | "FAIL" | "NO_CHECKS_RUN" | "ERROR";
 
+/**
+ * How much of the project's RUNNABLE test suite a run covered.
+ *
+ *  - `full`    nothing was narrowed away (including repos with no runnable
+ *              tests: a full run would cover the same empty set);
+ *  - `related` the fast lane ran only the tests related to the changed files;
+ *  - `skipped` a runnable suite exists but the fast lane could not derive a
+ *              related set, so the test step was dropped.
+ *
+ * The ship gate requires `full` for a push / PR, so this value is part of the
+ * trust boundary and is validated like every other receipt field.
+ */
+export const TEST_SCOPES = Object.freeze(["related", "full", "skipped"] as const);
+export type TestScope = (typeof TEST_SCOPES)[number];
+
 export interface ReceiptExpectation {
   nonce: string;
   cwd: string;
@@ -30,6 +45,8 @@ export interface ReceiptResult {
   verdict: PrecommitVerdict;
   checksRun: number;
   checksFailed: number;
+  /** Present only for a non-ERROR verdict; ERROR carries no trusted scope. */
+  testScope?: TestScope;
   error?: string;
 }
 
@@ -60,6 +77,20 @@ export function validatePrecommitReceipt(
     return err(`receipt verdict invalid (${String(verdict)})`);
   }
 
+  // `testScope` decides whether this PASS may later authorize a push/PR, so a
+  // missing, unknown or self-contradictory value is a protocol ERROR rather
+  // than something to interpret generously. A `full` run can only ever report
+  // `full`: it never narrows a suite, and a repo with no runnable tests still
+  // reports `full` because a full run would cover the same empty set.
+  const scope = r.testScope;
+  if (typeof scope !== "string" || !(TEST_SCOPES as readonly string[]).includes(scope)) {
+    return err(`receipt testScope invalid (${String(scope)})`);
+  }
+  if (exp.mode === "full" && scope !== "full") {
+    return err(`receipt testScope ${scope} contradicts mode full`);
+  }
+  const testScope = scope as TestScope;
+
   const checksRun = r.checksRun;
   const checksFailed = r.checksFailed;
   if (!Number.isSafeInteger(checksRun) || (checksRun as number) < 0) return err("checksRun not a safe non-negative integer");
@@ -76,18 +107,18 @@ export function validatePrecommitReceipt(
     if (status !== 0) return err(`exit ${status} conflicts with PASS`);
     if (run === 0) return err("PASS with zero checks");
     if (failed !== 0) return err("PASS with failed checks");
-    return { verdict: "PASS", checksRun: run, checksFailed: failed };
+    return { verdict: "PASS", checksRun: run, checksFailed: failed, testScope };
   }
   if (verdict === "FAIL") {
     if (status !== 1) return err(`exit ${status} conflicts with FAIL`);
     if (run === 0) return err("FAIL with zero checks");
     if (failed === 0) return err("FAIL with zero failed checks");
-    return { verdict: "FAIL", checksRun: run, checksFailed: failed };
+    return { verdict: "FAIL", checksRun: run, checksFailed: failed, testScope };
   }
   // NO_CHECKS_RUN
   if (status !== 2) return err(`exit ${status} conflicts with NO_CHECKS_RUN`);
   if (run !== 0) return err("NO_CHECKS_RUN with checks that ran");
-  return { verdict: "NO_CHECKS_RUN", checksRun: 0, checksFailed: 0 };
+  return { verdict: "NO_CHECKS_RUN", checksRun: 0, checksFailed: 0, testScope };
 }
 
 /** Longest step name echoed back; runner names are short, this is anti-abuse. */
@@ -125,4 +156,49 @@ export function failedStepNames(parsed: unknown): string[] {
     names.push(raw.replace(/[\p{Cc}\p{Cf}]/gu, " ").slice(0, MAX_STEP_NAME));
   }
   return names;
+}
+
+/** One step's timing line, as recorded in `.pi/gate-timings.jsonl`. */
+export interface StepTiming {
+  name: string;
+  status: string;
+  durationMs: number;
+  cached: boolean;
+}
+
+/** Upper bound on recorded steps: a receipt is trusted for its nonce, not its shape. */
+const MAX_TIMED_STEPS = 40;
+
+/**
+ * Per-step timings for the observability log.
+ *
+ * Diagnostics only — nothing here influences a verdict, so a malformed field
+ * is normalized (unknown status, 0ms) rather than rejected. That keeps a
+ * partially-written receipt from costing the run its timing record.
+ */
+export function stepTimings(parsed: unknown): StepTiming[] {
+  if (typeof parsed !== "object" || parsed === null) return [];
+  const steps = (parsed as Record<string, unknown>).steps;
+  if (!Array.isArray(steps)) return [];
+  const out: StepTiming[] = [];
+  for (const step of steps) {
+    if (out.length >= MAX_TIMED_STEPS) break;
+    if (typeof step !== "object" || step === null) continue;
+    const s = step as Record<string, unknown>;
+    const name = typeof s.name === "string" && s.name.trim() ? s.name.trim() : "(unnamed step)";
+    out.push({
+      name: name.replace(/[\p{Cc}\p{Cf}]/gu, " ").slice(0, MAX_STEP_NAME),
+      status: typeof s.status === "string" ? s.status.slice(0, 16) : "unknown",
+      durationMs: Number.isFinite(s.durationMs) ? Math.max(0, Math.round(s.durationMs as number)) : 0,
+      cached: s.cached === true,
+    });
+  }
+  return out;
+}
+
+/** Wall clock the runner measured for the whole run, or 0 when unavailable. */
+export function receiptTotalMs(parsed: unknown): number {
+  if (typeof parsed !== "object" || parsed === null) return 0;
+  const total = (parsed as Record<string, unknown>).totalMs;
+  return Number.isFinite(total) ? Math.max(0, Math.round(total as number)) : 0;
 }

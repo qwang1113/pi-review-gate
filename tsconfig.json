@@ -16,6 +16,12 @@
     "moduleResolution": "NodeNext",
     "types": ["node"],
     "allowImportingTsExtensions": true,
+    // The runner's pure planning/cache modules are `.mjs` (the runner is spawned
+    // by node directly, with no build step, so it cannot import `.ts`). Their
+    // TESTS are TypeScript, so tsc has to resolve them; `allowJs` makes it
+    // infer their shapes from the source. `checkJs` stays OFF — the goal is
+    // resolving the import, not type-migrating the scripts.
+    "allowJs": true,
     // The extension imports `./lib/*.ts`, which only resolves in the INSTALLED
     // layout (install-global.sh copies lib/ next to review-gate.ts inside
     // extensions/pi-review-gate/). In the repo, lib/ is a sibling of

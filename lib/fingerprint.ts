@@ -431,8 +431,13 @@ const UPDATE_INDEX_CHUNK = 500;
  * Returns the BARE tree (no submodule mixing) so callers that must inspect
  * entries with `ls-tree` can use it directly; worktreeDigest() adds the
  * submodule binding on top.
+ *
+ * Exported because the incremental-review scope (lib/review-scope.ts) needs a
+ * DIFFABLE handle on "the tree the last READY review was bound to": the
+ * fingerprint digest mixes submodules in and is therefore not a git object,
+ * whereas this OID can be fed straight to `git diff`.
  */
-function worktreeTreeOid(cwd: string): string {
+export function worktreeTreeOid(cwd: string): string {
   let shadowDir: string | undefined;
   try {
     // --path-format=absolute is REQUIRED: bare `--git-path index` is relative
@@ -723,4 +728,96 @@ export function changedFiles(cwd: string): string[] | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Files and changed-line count between two trees. */
+export interface TreeIncrement {
+  files: string[];
+  lines: number;
+}
+
+/**
+ * Parse `git diff --numstat -z` output.
+ *
+ * The `-z` form emits `adds\tdels\tpath\0` for ordinary changes and
+ * `adds\tdels\t\0old\0new\0` for renames — the trailing tab with an empty
+ * path is the marker that two more records follow. Binary files report `-`
+ * for both counts, which contributes 0 lines but still counts as a file.
+ */
+function parseNumstatZ(out: string): TreeIncrement {
+  const parts = out.split("\0");
+  const files: string[] = [];
+  let lines = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const rec = parts[i];
+    if (!rec) continue;
+    const fields = rec.split("\t");
+    if (fields.length < 3) continue;
+    const adds = parseInt(fields[0], 10);
+    const dels = parseInt(fields[1], 10);
+    if (Number.isFinite(adds)) lines += adds;
+    if (Number.isFinite(dels)) lines += dels;
+    if (fields[2] === "") {
+      // Rename: the next two records are the old and the new path. Only the
+      // destination is reported — that is the file a reviewer must read.
+      const dest = parts[i + 2];
+      i += 2;
+      if (dest) files.push(dest);
+      continue;
+    }
+    files.push(fields[2]);
+  }
+  return { files, lines };
+}
+
+/**
+ * What changed between a previously recorded tree and the worktree as it
+ * stands now.
+ *
+ * Used by the incremental-review scope: `baseTree` is the tree the last READY
+ * review was bound to, so this is exactly "what the reviewer has not seen".
+ * Returns undefined when it cannot be computed (unknown tree after a `git gc`,
+ * unreadable repo) — callers must then fall back to a full review.
+ *
+ * `baseTree` is re-validated here even though loadSidecar already rejects a
+ * malformed one: it ends up in an argv, so "it was checked upstream" is not a
+ * property worth betting a `--upload-pack=…`-class injection on.
+ */
+export function incrementSinceTree(cwd: string, baseTree: string): TreeIncrement | undefined {
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(baseTree)) return undefined;
+  try {
+    const current = worktreeTreeOid(cwd);
+    if (current === baseTree) return { files: [], lines: 0 };
+    const out = git(cwd, ["diff", "--numstat", "-z", baseTree, current]);
+    return parseNumstatZ(out);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Every file the CURRENT change covers, relative to the branch's base: the
+ * committed work on this branch plus the dirty worktree.
+ *
+ * This is the scope a full review reads, so recording it with a READY verdict
+ * is what later lets the gate say "the increment only touches files that
+ * review already covered". Returns undefined when no base can be resolved,
+ * which makes the next round fall back to a full review.
+ */
+export function reviewCoverageFiles(cwd: string): string[] | undefined {
+  const bases = ["@{upstream}", "main", "master", "origin/main", "origin/master"];
+  let current: string;
+  try {
+    current = worktreeTreeOid(cwd);
+  } catch {
+    return undefined;
+  }
+  for (const base of bases) {
+    const merge = gitOrNull(cwd, ["merge-base", base, "HEAD"]);
+    if (!merge) continue;
+    const out = gitRawOrNull(cwd, ["diff", "--name-only", "-z", merge, current]);
+    if (out === null) continue;
+    return out.split("\0").filter(Boolean);
+  }
+  return undefined;
 }

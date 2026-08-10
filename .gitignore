@@ -2,6 +2,11 @@ node_modules/
 *.log
 .pi/review-gate-state.json
 .pi/loop-goal.md
+# Per-run gate artifacts: the step cache and the timings log are local
+# diagnostics, not shared state (both live under the fingerprint-excluded
+# `.pi/`, so tracking them would only add churn).
+.pi/precommit-cache.json
+.pi/gate-timings.jsonl
 .pi-subagents/
 
 # AGENTS.md is excluded by the global gitignore (sd0x-dev-flow keeps it

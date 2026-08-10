@@ -122,7 +122,15 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
      while it works. The runner schedules itself (no flags): any `lint:fix`
      script runs FIRST and alone (it edits files, so nothing may read the
      worktree before it finishes), then lint/typecheck/build/test run in
-     parallel with declaration-order output.
+     parallel with declaration-order output. Steps whose inputs have not
+     changed reuse their previous PASS and report `cached`.
+   - **Pick the lane.** The default `fast` lane runs lint + typecheck + build
+     + only the tests RELATED to the changed files — seconds instead of
+     minutes, and enough to clear a `git commit`. Use `mode: "full"` for the
+     LAST round before you ship: `git push`, `gh pr create/edit` and
+     `declare_done` all require a run whose tests were not narrowed, and the
+     gate will say so if you try. Running every intermediate round in `full`
+     just pays for the whole suite on every typo fix.
    - **Why this is safe**: the verdict binds to the worktree fingerprint
      either way — the worst a race can do is discard a verdict, never ship
      unverified work. If a repo's checks write files (snapshots, build
@@ -315,7 +323,9 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
   status lines ("Fixed 3 issues, re-reviewing…") are fine.
 - EXCEPTION — genuine blockers: if progress is stopped by a question only the
   user can answer (ambiguous requirement, a product decision, missing access),
-  call `pause_for_question` with the question, ask it in your reply, and END
+  put the COMPLETE question (options + your recommendation) in
+  `pause_for_question`'s `question` parameter — the user sees it verbatim, so do
+  NOT repeat it in your reply; write one short line pointing at it and END
   the turn. Auto-continuation pauses until the user's next message (their reply
   resumes the loop automatically); ship commands stay blocked throughout. Never
   use it to ask permission to continue routine loop work — that stays

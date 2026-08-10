@@ -39,7 +39,7 @@ function readyState(): GateState {
   const s = emptyState("sess1", 10);
   s.hasCodeChange = true;
   s.review = { verdict: "READY", fingerprint: FP, at: "t" };
-  s.precommit = { verdict: "PASS", fingerprint: FP, at: "t" };
+  s.precommit = { verdict: "PASS", fingerprint: FP, at: "t", mode: "full", testScope: "full" };
   return s;
 }
 
@@ -79,6 +79,126 @@ test("all gates met on same fingerprint → ship allowed", () => {
   assert.deepEqual(unmetRequirements(readyState(), FP, false), []);
 });
 
+// ---------------------------------------------------------------------------
+// Precommit lanes — a commit accepts the fast lane, publishing does not
+// ---------------------------------------------------------------------------
+
+test("a fast PASS clears a commit but NOT a push/PR/completion", () => {
+  const s = readyState();
+  s.precommit = { verdict: "PASS", fingerprint: FP, at: "t", mode: "fast", testScope: "related" };
+
+  // commit: no requireFullTests → the narrowed run is enough.
+  assert.deepEqual(unmetRequirements(s, FP, false), []);
+
+  // push / gh pr / declare_done: the suite was never run in full.
+  const problems = unmetRequirements(s, FP, false, { requireFullTests: true });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /requires a FULL precommit run/);
+  assert.match(problems[0], /related/);
+});
+
+test("a fast run that SKIPPED tests also cannot publish", () => {
+  const s = readyState();
+  s.precommit = { verdict: "PASS", fingerprint: FP, at: "t", mode: "fast", testScope: "skipped" };
+  assert.deepEqual(unmetRequirements(s, FP, false), []);
+  assert.ok(unmetRequirements(s, FP, false, { requireFullTests: true }).some((p) => /FULL precommit/.test(p)));
+});
+
+test("testScope full clears publishing regardless of which lane produced it", () => {
+  // A repo with no narrowable suite reports `full` from the fast lane too;
+  // requiring the LANE rather than the coverage would deadlock it.
+  const s = readyState();
+  s.precommit = { verdict: "PASS", fingerprint: FP, at: "t", mode: "fast", testScope: "full" };
+  assert.deepEqual(unmetRequirements(s, FP, false, { requireFullTests: true }), []);
+});
+
+test("an older sidecar without testScope cannot claim a full run (fail-closed)", () => {
+  const s = readyState();
+  s.precommit = { verdict: "PASS", fingerprint: FP, at: "t" };
+  assert.deepEqual(unmetRequirements(s, FP, false), [], "commits still work");
+  const problems = unmetRequirements(s, FP, false, { requireFullTests: true });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /predates the fast\/full split/);
+});
+
+test("the lane requirement never masks a more basic failure", () => {
+  // A stale fingerprint must still be reported as such — the lane check runs
+  // only once the binding itself is good.
+  const s = readyState();
+  s.precommit = { verdict: "PASS", fingerprint: OTHER_FP, at: "t", mode: "fast", testScope: "related" };
+  const problems = unmetRequirements(s, FP, false, { requireFullTests: true });
+  assert.ok(problems.some((p) => /precommit PASS \(fingerprint mismatch\)/.test(p)));
+  assert.ok(!problems.some((p) => /FULL precommit/.test(p)));
+});
+
+// ---------------------------------------------------------------------------
+// lastReadyReview — the incremental-review baseline
+// ---------------------------------------------------------------------------
+
+test("lastReadyReview round-trips a well-formed baseline", () => {
+  const path = sidecarPath(makeTemp());
+  const s = readyState();
+  s.lastReadyReview = { treeOid: "a".repeat(40), files: ["src/a.ts"], at: "t" };
+  saveSidecar(path, s);
+  assert.deepEqual(loadSidecar(path)?.lastReadyReview, { treeOid: "a".repeat(40), files: ["src/a.ts"], at: "t" });
+});
+
+test("a malformed lastReadyReview is DROPPED (treeOid reaches a git argv)", () => {
+  // `treeOid` is passed to `git diff` as an argument, so an unvalidated string
+  // from a tampered — or simply repo-committed — sidecar would be git option
+  // injection. Dropping the field is the safe outcome: the next round is then
+  // a full review.
+  const path = sidecarPath(makeTemp());
+  const base = readyState();
+  saveSidecar(path, base); // creates .pi/ so the raw writes below can land
+  const bad = [
+    { treeOid: "--output=/tmp/pwned", at: "t" },
+    { treeOid: "HEAD", at: "t" },
+    { treeOid: "a".repeat(39), at: "t" },
+    { treeOid: "A".repeat(40), at: "t" },              // uppercase is not a git oid
+    { treeOid: "a".repeat(40) },                       // no timestamp
+    { treeOid: "a".repeat(40), files: ["ok", 7], at: "t" },
+    { treeOid: "a".repeat(40), files: "src/a.ts", at: "t" },
+    "not-an-object",
+    null,
+  ];
+  for (const b of bad) {
+    writeFileSync(path, JSON.stringify({ ...base, lastReadyReview: b }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `a bad baseline must not reject the sidecar: ${JSON.stringify(b)}`);
+    assert.equal(loaded!.lastReadyReview, undefined, JSON.stringify(b));
+  }
+});
+
+test("the baseline is never part of the ship decision", () => {
+  // It only scopes the NEXT review; a present or absent baseline must not
+  // change whether the current state may ship.
+  const withBase = readyState();
+  withBase.lastReadyReview = { treeOid: "b".repeat(40), files: ["src/a.ts"], at: "t" };
+  assert.deepEqual(unmetRequirements(withBase, FP, false), []);
+  assert.deepEqual(unmetRequirements(withBase, FP, false, { requireFullTests: true }), []);
+});
+test("lane metadata round-trips; forged values are dropped (which blocks publishing)", () => {
+  const dir = makeTemp();
+  const path = sidecarPath(dir);
+  const s = readyState();
+  s.precommit = { verdict: "PASS", fingerprint: FP, at: "t", mode: "fast", testScope: "related" };
+  saveSidecar(path, s);
+  const loaded = loadSidecar(path);
+  assert.equal(loaded?.precommit.mode, "fast");
+  assert.equal(loaded?.precommit.testScope, "related");
+
+  for (const forged of [{ mode: "turbo" }, { testScope: "partial" }]) {
+    writeFileSync(path, JSON.stringify({ ...s, precommit: { ...s.precommit, ...forged } }));
+    const bad = loadSidecar(path);
+    assert.ok(bad, "a forged lane field must not reject the whole sidecar");
+    if ("mode" in forged) assert.equal(bad!.precommit.mode, undefined);
+    if ("testScope" in forged) {
+      assert.equal(bad!.precommit.testScope, undefined);
+      assert.ok(unmetRequirements(bad, FP, false, { requireFullTests: true }).length > 0);
+    }
+  }
+});
 // ---------------------------------------------------------------------------
 // pausedQuestion — agent-requested loop pause (pause_for_question tool)
 // ---------------------------------------------------------------------------
