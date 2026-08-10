@@ -44,9 +44,9 @@ then drives all three roles — you slice work against it, `adviser` advises
 against it, `reviewer` accepts against it.
 
 **Negotiated, not assumed (L8)**: you do NOT write this file. Grill the user
-first — ask the whole frontier of open decisions in one round, number each
-question, give your own recommended answer, wait for the reply, repeat until
-nothing is silently assumed — then call **`propose_loop_goal`** with what they
+first — unless they asked for them all at once, ask ONE question per turn,
+labeled "N of M", give your own recommended answer, wait for the reply, repeat
+until nothing is silently assumed — then call **`propose_loop_goal`** with what they
 agreed to. The extension shows it in a confirm dialog and, on approval, writes
 the file itself and records the hash of that exact text. In loop mode an
 unapproved goal **blocks commit/push/PR** and its body is withheld from your
