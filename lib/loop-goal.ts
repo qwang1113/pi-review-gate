@@ -141,8 +141,9 @@ export function buildGoalConfirmMessage(goalText: string): string {
 
 /** Ship-block copy for loop mode without a confirmed goal (L1 only). */
 export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
-  "loop goal not confirmed by the user — grill the user about what \"done\" means (numbered " +
-  "questions, each with your recommended answer), then call propose_loop_goal so the USER can " +
+  "loop goal not confirmed by the user — interview the user about what \"done\" means (ONE " +
+  "question per turn, labeled \"N of M\", each with your recommended answer — all at once only " +
+  "when the user asks for it), then call propose_loop_goal so the USER can " +
   "approve it in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
 /** Read `<repoRoot>/.pi/loop-goal.md`. Never throws: any failure ⇒ absent. */
@@ -186,9 +187,10 @@ function capText(raw: string): string {
 /**
  * Step 0 directive, injected while a loop-mode session has no CONFIRMED goal.
  *
- * The instruction is to interview the user first, in rounds of numbered
- * questions that each carry the agent's own recommended answer (the `grilling`
- * shape), and only then submit the result through `propose_loop_goal` for the
+ * The instruction is to interview the user first, ONE question per turn with
+ * the position labeled ("N of M") and the agent's own recommended answer
+ * attached (the `grilling` shape — all-at-once only when the user asks for
+ * it), and only then submit the result through `propose_loop_goal` for the
  * user's approval. The engineering skills named below are declared
  * `disable-model-invocation: true` and assume a configured issue tracker, so
  * they are OPTIONAL accelerators the USER triggers; the interview fallback is
@@ -200,11 +202,12 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "EXIT CONTRACT: the checkable facts that mean the task is done and the loop may end. It is " +
   "NOT yours to assume — a self-written contract lets you grade yourself against your own " +
   "guess, and a leftover file from a previous task is someone else's contract.\n" +
-  "1. GRILL the user first. Ask the whole frontier of open decisions in ONE round: number each " +
-  "question, give your own recommended answer, and wait for the reply. Their answers open the " +
-  "next round; stop when nothing is left silently assumed. Facts are YOUR job (read the repo, " +
-  "run tools) — only decisions go to the user. Sized to the change: a one-line bugfix is one " +
-  "question, not a questionnaire.\n" +
+  "1. GRILL the user first. Unless the user asked for them all at once, ask ONE question per " +
+  "turn and label it with its position — \"N of M\" — so the user always knows the progress; " +
+  "give your own recommended answer and wait for the reply before asking the next. Their " +
+  "answers open the next round; stop when nothing is left silently assumed. Facts are YOUR job " +
+  "(read the repo, run tools) — only decisions go to the user. Sized to the change: a one-line " +
+  "bugfix is one question, not a questionnaire.\n" +
   "2. Then call `propose_loop_goal` with the negotiated goal: task title, one-line intent, 3–7 " +
   "checkable exit criteria, non-goals, ISO date. The EXTENSION shows it to the user for " +
   "approval and writes `" + LOOP_GOAL_RELPATH + "` itself. Writing that file yourself grants " +

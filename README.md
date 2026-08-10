@@ -589,10 +589,11 @@ And because a *leftover* goal file was injected verbatim for 24h, a new session
 could silently inherit the previous task's contract. Both holes are closed by
 one fact:
 
-- **Grill first.** The directive tells the agent to interview the user in
-  rounds of numbered questions, each carrying its own recommended answer, until
-  nothing is left silently assumed. Facts are the agent's job (read the repo,
-  run the tools); only decisions go to the user.
+- **Grill first.** The directive tells the agent to interview the user one
+  question per turn — each labeled "N of M" and carrying its own recommended
+  answer, all at once only when the user asks for it — until nothing is left
+  silently assumed. Facts are the agent's job (read the repo, run the tools);
+  only decisions go to the user.
 - **Then `propose_loop_goal`.** The **extension** shows the negotiated text in
   a confirm dialog, and only if the user approves does the extension write
   `.pi/loop-goal.md` and record the sha256 of exactly that text in the sidecar.
@@ -849,7 +850,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply carries that path plus the names of the checks that failed, and the agent reads as much of the log as it needs. Output is never inlined into the reply — a failing suite can emit megabytes. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
-| `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Grill the user first; then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 and its body is withheld from the prompt. |
+| `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it); then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 and its body is withheld from the prompt. |
 | `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. Spending the last round of `copilotReview.maxRounds` releases it as `EXHAUSTED` with an escalate-to-the-user note. |
 | `check_copilot_review` | Verify what Copilot's review left open (L7). The extension runs the GraphQL query itself and classifies each thread: resolved ⇒ handled, answered by you ⇒ handled, Copilot spoke last ⇒ still yours (listed with thread IDs and the exact `resolveReviewThread` / reply mutations). Returns AWAITING / OPEN / SATISFIED — an outcome the agent cannot report for itself. |
 | `request_arbitration` | Contest a ship block the agent believes is **circular** (the only remedy is an action the block forbids). Narrow + fail-closed — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception). |

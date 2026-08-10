@@ -2117,7 +2117,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     label: "Propose Loop Goal",
     description:
       "Submit the NEGOTIATED loop goal (this session's exit contract) for the user's approval. " +
-      "Grill the user first — numbered questions, each with your recommended answer — and only " +
+      "Interview the user first — ONE question per turn, labeled \"N of M\", each with your " +
+      "recommended answer (all at once only when the user asks for it) — and only " +
       "submit what they actually agreed to. The extension shows the text in a confirmation " +
       "dialog and, if the user approves, writes .pi/loop-goal.md itself and records the approval. " +
       "Writing that file yourself grants nothing: in loop mode an unapproved goal blocks " +
@@ -2507,11 +2508,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     description:
       "Pause the review-gate auto-continuation loop because you hit a GENUINE blocker only the " +
       "user can resolve (ambiguous requirement, a product/design decision between valid options, " +
-      "missing credentials or access). After calling this, ask the question clearly in your reply " +
-      "and END the turn; the pause clears automatically on the user's next message. The ship gate " +
-      "is NOT affected — git commit/push and gh pr stay blocked while gates are unmet. Do NOT use " +
-      "this to ask permission to continue routine loop work, to skip a review round, or to end the " +
-      "task — those remain prohibited.",
+      "missing credentials or access). Waiting on the user's answer to a question you already " +
+      "asked — e.g. the grill questions while negotiating the loop goal — is such a blocker: " +
+      "call this instead of re-asking. After calling this, ask the question clearly in your " +
+      "reply and END the turn; the pause clears automatically on the user's next message. The " +
+      "ship gate is NOT affected — git commit/push and gh pr stay blocked while gates are unmet. " +
+      "Do NOT use this to ask permission to continue routine loop work, to skip a review round, " +
+      "or to end the task — those remain prohibited.",
     parameters: Type.Object({
       question: Type.String({ description: "The exact question the user must answer before work can continue" }),
     }),
@@ -3180,6 +3183,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
     }
     if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    // Goal-only continuation: the ONLY remaining item is the unapproved loop
+    // goal. If the agent already grilled the user and is waiting for the
+    // answer, it must pause_for_question instead of re-asking — the resume
+    // text below says so explicitly.
+    const goalOnly =
+      problems.length === 0 &&
+      completion.length === 1 &&
+      completion[0] === LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK;
 
     if (problems.length === 0 && completion.length === 0) return;
     // Budgets are checked per source: gate problems against maxRounds,
@@ -3220,9 +3231,18 @@ export default function reviewGate(pi: ExtensionAPI) {
           ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
             "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute."
           : `\n(completion continuation ${completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
-            "Continue: work these off — Copilot threads get a fix + resolve or a reply explaining why " +
-            "not (check_copilot_review verifies), an unapproved goal gets negotiated and submitted via " +
-            "propose_loop_goal. Do not summarize; execute.") +
+            (goalOnly
+              ? "The only open item is the unapproved loop goal. If you already asked the user a " +
+                "question, call pause_for_question and END the turn — do not re-ask; the user's " +
+                "next message resumes the loop. Otherwise interview the user now, ONE question per " +
+                "turn labeled \"N of M\" (each with your recommended answer; all at once only when " +
+                "the user asks for it), then call propose_loop_goal for approval. " +
+                "Do not summarize; execute."
+              : "Continue: work these off — Copilot threads get a fix + resolve or a reply explaining " +
+                "why not (check_copilot_review verifies), an unapproved goal gets negotiated and " +
+                "submitted via propose_loop_goal. If you already asked the user a question and are " +
+                "waiting on their answer (e.g. grill questions), call pause_for_question and END the " +
+                "turn instead of re-asking. Do not summarize; execute.")) +
         (!sessionEdited && !state.scopeLimit
           ? "\nIf these unmet gates target PRE-EXISTING changes this session never made, you may call request_scope_limit — the USER decides whether session-only coverage suffices."
           : "") +
