@@ -22,9 +22,14 @@ import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mo
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
 import type { LoopGoalConfirmation } from "./loop-goal.ts";
+import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
 export type PrecommitVerdict = "PASS" | "FAIL" | "NO_CHECKS_RUN" | "NOT_RUN";
+
+/** The two precommit lanes. See scripts/precommit-runner.mjs for what each runs. */
+export type PrecommitMode = "fast" | "full";
+export const PRECOMMIT_MODES: ReadonlySet<string> = new Set<PrecommitMode>(["fast", "full"]);
 
 /**
  * Code↔doc sync attestation (docSync knob). When a review covers code
@@ -82,10 +87,44 @@ export interface GateState {
      */
     docSync?: DocSyncAttestation;
   };
+  /**
+   * The last READY review's git tree and the files it covered.
+   *
+   * Kept OUTSIDE `review` on purpose: `review` is replaced wholesale by every
+   * verdict, so a single BLOCKED round would erase the very baseline the next
+   * round needs. This survives until a new READY replaces it.
+   *
+   * DIAGNOSTIC INPUT ONLY — it feeds the incremental-review scope
+   * (lib/review-scope.ts) and never the ship decision, which stays bound to
+   * `review.fingerprint` alone. `review.fingerprint` cannot serve this role:
+   * it mixes submodule digests in, so it is not a git object and cannot be
+   * diffed. Absent ⇒ the next round is a full review (fail-safe).
+   */
+  lastReadyReview?: {
+    treeOid: string;
+    files?: string[];
+    at: string;
+  };
   precommit: {
     verdict: PrecommitVerdict;
     fingerprint: string | null;
     at: string | null;
+    /**
+     * Which lane produced this verdict (`run_precommit --mode`). Diagnostics
+     * and timing attribution only — the ship decision reads `testScope`,
+     * which states what was actually covered rather than what was requested.
+     * Absent on sidecars written before the split.
+     */
+    mode?: PrecommitMode;
+    /**
+     * How much of the runnable test suite that run covered. This IS part of
+     * the ship decision: a push / PR requires `"full"`, so a fast lane that
+     * narrowed the suite to the changed files cannot authorize one.
+     *
+     * Absent ⇒ unknown ⇒ treated as NOT full (fail-closed): an older sidecar
+     * predates the guarantee, so it cannot be read as providing it.
+     */
+    testScope?: TestScope;
   };
   rounds: RoundRecord[];
   maxRounds: number;
@@ -230,6 +269,30 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     // chain in unmetRequirements and fail-open.
     if (!parsed.review || !GATE_VERDICTS.has(parsed.review.verdict as string)) return undefined;
     if (!parsed.precommit || !PRECOMMIT_VERDICTS.has(parsed.precommit.verdict as string)) return undefined;
+    // Lane metadata. A forged/unknown value is DROPPED rather than rejecting
+    // the sidecar, and dropping is the fail-closed direction: an absent
+    // testScope is treated as "not full", which blocks a push/PR.
+    if (parsed.precommit.mode !== undefined && !PRECOMMIT_MODES.has(parsed.precommit.mode as string)) {
+      delete parsed.precommit.mode;
+    }
+    if (parsed.precommit.testScope !== undefined &&
+        !(TEST_SCOPES as readonly string[]).includes(parsed.precommit.testScope as string)) {
+      delete parsed.precommit.testScope;
+    }
+    // Incremental-review baseline. `treeOid` is handed to `git diff` as an
+    // ARGUMENT, so an unvalidated string from a tampered (or simply
+    // repo-committed) sidecar would be git option injection — `--output=…`
+    // and friends. Accept only a real object id; drop the whole field
+    // otherwise, which just means the next round is a full review.
+    if (parsed.lastReadyReview !== undefined) {
+      const b = parsed.lastReadyReview as Record<string, unknown> | null;
+      const validOid = typeof b?.treeOid === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(b.treeOid);
+      const validFiles = b?.files === undefined ||
+        (Array.isArray(b.files) && b.files.every((f: unknown) => typeof f === "string"));
+      if (!b || typeof b !== "object" || Array.isArray(b) || !validOid || !validFiles || typeof b.at !== "string") {
+        delete parsed.lastReadyReview;
+      }
+    }
     if (!Array.isArray(parsed.rounds)) return undefined;
     if (!parsed.bypass || typeof parsed.bypass.active !== "boolean") return undefined;
     // Optional field. Unknown values are removed so consumers fall back to
@@ -474,6 +537,21 @@ export function unmetRequirements(
      * a .md file cannot satisfy the gate: the reviewer must always judge.
      */
     requireDocSync?: boolean;
+    /**
+     * Require a precommit run whose tests were NOT narrowed (`testScope`
+     * `"full"`).
+     *
+     * The two lanes exist so a `git commit` does not have to re-run a whole
+     * suite for a one-line fix: `fast` runs lint + typecheck + build + the
+     * tests related to the changed files. That is a real check, but it is not
+     * evidence the suite passes — so everything that PUBLISHES work
+     * (`git push`, `gh pr create`/`edit`, and task completion) sets this and
+     * demands a full run.
+     *
+     * Absent `testScope` on an older sidecar counts as NOT full: the
+     * guarantee did not exist when it was written, so it cannot be claimed.
+     */
+    requireFullTests?: boolean;
   },
 ): string[] {
   if (!state) return ["gate state missing (fail-closed)"];
@@ -516,6 +594,13 @@ export function unmetRequirements(
     if (state.precommit.verdict === "PASS") {
       if (state.precommit.fingerprint !== currentFingerprint) {
         problems.push("code was modified after the last precommit PASS (fingerprint mismatch)");
+      } else if (opts?.requireFullTests && state.precommit.testScope !== "full") {
+        const covered = state.precommit.testScope ?? "unknown (sidecar predates the fast/full split)";
+        problems.push(
+          `this action requires a FULL precommit run (tests covered: ${covered}) — ` +
+          "a fast run narrows the suite to the changed files, which is enough to commit but not to " +
+          'publish; run the precommit runner again with mode "full"',
+        );
       }
     } else if (state.precommit.verdict === "NOT_RUN") {
       problems.push("precommit has not run");

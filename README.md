@@ -45,7 +45,9 @@ The classifier child process is **fully isolated**: `pi -p --no-session --no-ext
 ```
 L1  Ship gate (HARD)      tool_call → block git commit/push, gh pr create/edit
                           until review READY + precommit PASS on the
-                          current worktree fingerprint
+                          current worktree fingerprint; publishing (push, gh
+                          pr, declare_done) additionally requires a precommit
+                          run whose tests were NOT narrowed
 L2  Auto-continuation     agent_settled → if gates unmet, inject
                           [REVIEW_GATE_RESUME] follow-up (recursion-guarded,
                           max 10 rounds, plateau detection; a user ESC abort
@@ -88,6 +90,75 @@ GATE_WINS — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception).
 State lives in **two places**: Pi session entries (`pi.appendEntry`, survives
 context compaction) and a sidecar file `.pi/review-gate-state.json` (readable
 by the git hooks without Pi).
+
+### Two precommit lanes: cheap commits, honest ships
+
+Binding every verdict to worktree content has one unavoidable consequence: a
+one-character fix invalidates the previous PASS, so everything runs again. On a
+large repo that is minutes per loop round, nearly all of it re-testing code the
+round never touched. The runner therefore has **two lanes**, chosen with
+`run_precommit`'s `mode`:
+
+| Lane | Runs | Satisfies |
+|---|---|---|
+| `fast` (default) | lint + typecheck + build + the tests **related to the changed files** | `git commit` |
+| `full` | the same checks with the **complete** suite | `git push`, `gh pr create/edit`, `declare_done` |
+
+The receipt reports `testScope`: `related` (narrowed), `full` (nothing was
+narrowed away), or `skipped` (a runnable suite exists but no related set could
+be derived). The **ship gate reads the coverage, not the lane** — a repo whose
+suite cannot be narrowed reports `full` from the fast lane too, and requiring
+the lane instead would deadlock it. An older sidecar with no `testScope` counts
+as *not* full: the guarantee did not exist when it was written.
+
+Related tests are derived per runner: **jest** is enumerated with
+`--listTests --findRelatedTests` and then intersected with the script's own
+path filter (jest *ignores* `--testPathPattern` next to `--findRelatedTests`,
+so a `jest test/unit` project would otherwise have integration suites pulled
+into its commit-time check); **vitest** uses `vitest related`. Anything else —
+`node --test`, an unrecognized runner, a compound script — yields `skipped`,
+and the fast lane simply does not run tests. One exception keeps that from
+bricking a repo: if the underivable suite is the **only** runnable check,
+it runs in full rather than leaving the run with zero checks.
+
+The git hooks mirror the split exactly: `pre-commit` accepts any PASS,
+`pre-push` re-execs it with `REVIEW_GATE_REQUIRE_FULL=1`.
+
+### Per-step result cache
+
+Each step records the digest of the inputs it consumes; a later run whose
+inputs are byte-identical reuses the recorded PASS and marks the step `cached`.
+The run's verdict is still bound to the **current** worktree fingerprint, so
+the gate's meaning is unchanged — "every check is green for exactly this tree"
+— only the recomputation is removed.
+
+The keys are **materialized git trees**, not `stat()` data: a cache hit skips
+real work, so a key that can miss a change is a fail-open, and mtime/size
+heuristics have a documented racily-clean blind spot (same-size edits in the
+same mtime bucket — exactly what a "fix one character" loop produces). Steps
+that provably do not consume documentation (`typecheck`, `build`, `test`) key
+on the tree **minus** doc blobs, so a README edit leaves them cached; `lint`
+never gets that narrowing, because linters and formatters do read Markdown.
+A repo with a Markdown-consuming build (Astro, Docusaurus, VitePress…) or a
+code step that itself invokes a Markdown-aware tool loses the narrowing too.
+Only a PASS is cacheable, submodules disable the cache entirely (the parent
+tree records only their gitlink), and every failure path — no git, corrupt
+cache, unreadable tree — results in the step simply running.
+
+### Incremental review rounds
+
+The gate remembers the git tree the last READY review approved and the files
+that review covered. When a new round starts it computes the increment and
+injects a **review scope** block naming what was already approved, what is new,
+and which of the previous round's findings must be re-checked one by one. The
+reviewer still receives the full diff — the narrowing is in what must be
+*re-derived*, never in what may be looked at, and the verdict still covers the
+whole change (`agents/reviewer.md` spells this out).
+
+It escalates back to a full deep review whenever the increment exceeds **20
+files or 500 changed lines**, touches a file no previous review covered, or
+cannot be computed at all. Incremental is never the default and never inferred:
+it is granted only when every precondition holds.
 
 ## Judges on a stronger model, pinned at `max`
 
@@ -810,7 +881,7 @@ gated **per repo**:
 
 | Command | Effect |
 |---------|--------|
-| `/gate-status` | Show workflow mode, verdicts, rounds, fingerprint, unmet requirements |
+| `/gate-status` | Show workflow mode, verdicts (including the precommit lane and its `testScope`), rounds, fingerprint, unmet requirements, and the last precommit's slowest steps from `.pi/gate-timings.jsonl` |
 | `/gate-mode loop\|explore\|normal` | Switch the session workflow in any direction without a dialog (user-invoked = explicit consent; also clears the agent-downgrade lock). `explore` makes gates advisory and lets the AI self-complete (ship commands stay gated). `normal` switches the gate off entirely for this session. |
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
 | `/gate-reset` | Reset gate state (mode returns to undecided — the agent re-decides via `set_gate_mode`; also clears the agent-downgrade lock) |
@@ -848,7 +919,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 |------|---------|
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal` + a reason). On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) the tool asks the **DeepSeek V4** classifier and applies its verdict **automatically — no confirmation dialog** (user requirement; the LLM may override the agent's pick; a failed call falls back to the rule engine). Later changes delegate to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. |
 | `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). |
-| `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply carries that path plus the names of the checks that failed, and the agent reads as much of the log as it needs. Output is never inlined into the reply — a failing suite can emit megabytes. |
+| `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. Output is never inlined into the reply — a failing suite can emit megabytes. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
 | `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it); then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 and its body is withheld from the prompt. |
 | `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. Spending the last round of `copilotReview.maxRounds` releases it as `EXHAUSTED` with an escalate-to-the-user note. |
@@ -856,7 +927,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | `request_arbitration` | Contest a ship block the agent believes is **circular** (the only remedy is an action the block forbids). Narrow + fail-closed — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception). |
 | `request_scope_limit` | Agent-requested **gate fence narrowing** for the "pre-existing changes" complaint: the gate arms on dirty files / branch commits that pre-date the session (P0-2), so it can demand review coverage of work the session never did. Instead of silently complying (or bypassing), the agent calls this tool and the **extension renders a user confirm dialog** (fixed consequence copy; the agent's reason labeled untrusted; **no `confirmed` parameter** the model could set). Granted → the non-session changed files are snapshotted as `scopeLimit.preexistingFiles` in the sidecar and stop arming the gate at **every** re-arm site (session_start P0-2, bash stash/checkout re-arm, turn_end reconciliation); a file the session later edits is **reclaimed** out of the snapshot by the edit handler — the grant never covers the session's own work — and branch-commit arming is suspended for as long as the grant stands (a new commit under a standing grant is either the exempted pre-existing work being shipped — exactly what the user consented to — or a user/bypass action; the session's own NEW edits re-arm the gate before any further agent commit). With no session edits the ship gate disarms entirely; with session edits the review scope narrows to `sessionFiles` (the per-turn prompt instructs the reviewer: out-of-scope findings are advisory). Session edit attribution is persisted (`sessionEditedFiles`), so a process restart cannot re-label the session's own edits as pre-existing. A dialog that cannot be shown fails closed WITHOUT counting as a decline. Verdicts/bindings are untouched — narrowing the fence never fabricates a READY/PASS, and the session's OWN edits stay fully gated. Declined → scope requests lock for the session (anti-grinding, mirrors the mode-downgrade lock). Malformed persisted shapes fail closed to ABSENT = full-scope gate (extension loader + git hook both validate). |
 | `request_sensitive_edit` | Agent-requested **one-shot authorization** to edit ONE sensitive file (`.env`, private keys, credentials) that the guard blocks by default. Same consent shape as the tools above: the **extension** renders the confirm dialog (fixed consequence copy, agent reason labeled untrusted, **no `confirmed` parameter**). A grant is **path-exact** (normalized absolute path), **single-use** (burned by the first edit that *succeeds* — a failed edit stays retryable), **10-minute TTL**, and **in-memory only** (never written to the sidecar, so a crash/resume/second session starts fail-closed). `.git/` internals are refused **before** any dialog — they are the gate's own L3 enforcement, not the user's secrets. A **declined** path is locked for the session (per-path anti-grinding, unlike the session-wide `request_scope_limit` lock); a dialog that could not be *shown* is not a decline. `/gate-reset` revokes outstanding grants and lifts the decline locks. |
-| `pause_for_question` | Agent-requested **loop pause** for a genuine blocker only the user can resolve (ambiguous requirement, a product decision, missing access). Without it, an agent that ends its turn with a question gets steamrolled by the L2 auto-continuation. The pause is **tighten-only**: it disarms auto-continuation ONLY — `unmetRequirements()` never reads it, so the L1 ship gate and the git hooks stay fully enforced. Persisted in the sidecar (survives a restart while waiting); clears automatically on the user's next message (any non-`extension` input source, so RPC-driven sessions don't deadlock), on the agent's next code/doc edit, `record_review`, `run_precommit`, or a mode change (stale-pause liveness: an agent that keeps looping has proven it is not waiting). During `session_compact` a paused loop re-injects the *waiting* state (`[REVIEW_GATE_PAUSED]`) instead of a resume nudge. Prohibited use — asking permission to continue routine loop work — stays prohibited; the per-turn prompt spells out the exemption. |
+| `pause_for_question` | Agent-requested **loop pause** for a genuine blocker only the user can resolve (ambiguous requirement, a product decision, missing access). Without it, an agent that ends its turn with a question gets steamrolled by the L2 auto-continuation. The `question` parameter **is** what the user sees, so the agent is told to put the complete question (options + recommendation) there and reply with a one-line pointer instead of restating it — asking the same thing twice is pure token waste. The pause is **tighten-only**: it disarms auto-continuation ONLY — `unmetRequirements()` never reads it, so the L1 ship gate and the git hooks stay fully enforced. Persisted in the sidecar (survives a restart while waiting); clears automatically on the user's next message (any non-`extension` input source, so RPC-driven sessions don't deadlock), on the agent's next code/doc edit, `record_review`, `run_precommit`, or a mode change (stale-pause liveness: an agent that keeps looping has proven it is not waiting). During `session_compact` a paused loop re-injects the *waiting* state (`[REVIEW_GATE_PAUSED]`) instead of a resume nudge. Prohibited use — asking permission to continue routine loop work — stays prohibited; the per-turn prompt spells out the exemption. |
 
 ### Arbiter (a narrow, fail-closed gate exception)
 
@@ -984,6 +1055,16 @@ including a content hash, by editing the checker too):
   In-session enforcement is unaffected — L1 reads the in-memory state — and
   this is the same excluded class as forging `explore`+`user` or `bypass`
   today: a same-UID writer could equally delete the hooks.)
+- Editing `.pi/precommit-cache.json`. The per-step cache decides which checks
+  may be SKIPPED as already-passed, so an entry forged against the current
+  tree buys a PASS with **zero checks executed** — the same class of reward as
+  a forged sidecar, and excluded for the same reason (a signature would only
+  move the problem to the key). Two things narrow it in practice: the file is
+  in `SENSITIVE_FILE_PATTERNS` and in `isGateIntegrityPath`, so the AGENT
+  cannot reach it through the edit/write tools and **no user dialog can unlock
+  it**; and only a PASS is ever reusable, so a forged cache cannot turn a
+  failing check into a passing one for a tree that was never checked — it can
+  only skip work. A human who really wants to reset it can delete the file.
 - Arbitrary dynamic shell/scripts that construct an unknown command at runtime
   (`$(cat /tmp/x)`, `$COMMAND`, a generated executable). The ship gate blocks
   *recognizable* dynamic ship heads but cannot statically decide Turing-complete
@@ -1180,7 +1261,7 @@ it is missing — see the fail-closed inventory.)
 
 ```bash
 npm install     # devDependencies: typescript + the Pi extension API types
-npm test        # 880+ tests, node:test native TS (no build step)
+npm test        # 990+ tests, node:test native TS (no build step)
 npm run typecheck  # tsc --noEmit
 ```
 
@@ -1242,7 +1323,8 @@ second line of defence.
 | Per-turn prompt fingerprint | ~65 ms (56 files) / ~575 ms (9k files) | Skipped entirely when the session tracks no change; otherwise memoized behind `advisoryChangeToken()` (~10 ms / ~47 ms) |
 | Edit-time L6 label check | ~45 ms + one ~2 s model call | The model call is memoized per label set |
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
-| `run_precommit` (this repo) | ~100 s | Dominated by the two timing loops above; typecheck now runs CONCURRENTLY with `npm test` (parallel scheduling, declaration-order output) — the timing loops themselves are not reducible |
+| `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
+| `run_precommit --mode full` (this repo) | ~100 s | Dominated by the two timing loops in the suite; typecheck runs CONCURRENTLY with `npm test` — the timing loops themselves are not reducible |
 | **A review round** | **~3 min reviewer ⇄ precommit, overlapped** | The reviewer (async) and precommit run concurrently; see `docs/parallel-execution-plan.md` |
 
 **Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
@@ -1255,6 +1337,16 @@ which contains the two timing regressions) — all six PASS; wall clock
 The practical consequence: batching edits into fewer, larger review rounds
 saves far more wall time than any micro-optimization here, because the loop is
 billed per round.
+
+**Where the time actually went, per run**: `.pi/gate-timings.jsonl` records one
+line per precommit and per review round — lane, `testScope`, total wall clock,
+every step's duration and whether it was a cache hit, and (for reviews) the
+scope and increment size. `/gate-status` prints the last run's slowest steps.
+It is diagnostics only: nothing reads it back into a decision, it is capped at
+500 records, and it lives under `.pi/` so writing it cannot invalidate the run
+it describes. Review durations are recorded as **upper bounds** (`approximate:
+true`) — the reviewer is a subagent the extension never sees, so all it can
+measure is the wall clock since the previous gate event.
 
 The fingerprint deliberately defeats git's stat cache (`git add --renormalize`,
 ~80% of its cost) because trusting that cache reintroduced a measured 25/1500
@@ -1283,18 +1375,22 @@ scripts/fetch-leaderboard.mjs opt-in, gate-external leaderboard fetcher (the onl
 lib/shell-lex.ts              quote-aware shell lexer (segments + dequoted tokens)
 lib/lang-detect.ts            L5: non-Latin-script detection for commit/PR English advisory
 scripts/scan-test-labels.cjs  L6: non-English test-label scanner (pre-commit, staged content)
-lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count table → PASS/FAIL/ERROR) + failedStepNames (diagnostics only)
+lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count/testScope table → PASS/FAIL/ERROR) + failedStepNames / stepTimings (diagnostics only)
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)
-lib/fingerprint.ts            worktree fingerprint (content-addressed git tree hash; staging-invariant)
+lib/fingerprint.ts            worktree fingerprint (content-addressed git tree hash; staging-invariant) + tree increments for incremental review
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
+lib/review-scope.ts           incremental-review scoping + escalation thresholds (pure)
+lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)
 lib/blocked-marker.ts         .blocked marker ownership (record failure, reclaim only our own/orphans)
 lib/verdict-parse.ts          all-fence worst-wins verdict parser
-scripts/precommit-runner.mjs  PASS/FAIL/NO_CHECKS_RUN runner; writes nonce receipt for run_precommit; streams every step's full output in receipt mode
+scripts/precommit-runner.mjs  PASS/FAIL/NO_CHECKS_RUN runner; fast/full lanes, per-step cache, nonce receipt, streamed step output
+scripts/precommit-plan.mjs    pure lane planning: related-test derivation + per-step cache scope
+scripts/precommit-cache.mjs   per-step result cache keyed on git trees
 scripts/install-project.sh    per-project installer (same layout as global)
 scripts/install-git-hooks.sh  chained installer for L3
 hooks/pre-commit|pre-push|commit-msg
 skills/review-loop/SKILL.md   the loop protocol as a Pi skill
-test/                         880+ tests incl. PR #7 regression suite
+test/                         990+ tests incl. PR #7 regression suite
 ```
 
 ## License

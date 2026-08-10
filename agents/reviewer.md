@@ -156,6 +156,48 @@ Structure your findings clearly, citing file paths and line numbers:
 - Note: observation, risk, or follow-up item
 ```
 
+## Incremental rounds (pi-review-gate)
+
+A loop round often changes very little: the previous round was already
+reviewed, findings were fixed, and the diff since then is a handful of lines.
+Re-deriving the whole change at `max` thinking every time is the single most
+expensive thing this loop does, so the gate may hand you a **review scope**
+block naming three things: what a previous READY verdict already covered, what
+is new since, and which of last round's findings must be re-checked.
+
+When the task carries such a block:
+
+- **Deep-review the increment.** The listed files are where this round's risk
+  is. Read them properly — same standard as any full review.
+- **Re-check every listed previous finding, one by one.** "The author says it
+  is fixed" is not evidence (see the section above); open the code and
+  confirm. A finding you cannot confirm as fixed stays open.
+- **Scan the rest for consistency, do not re-derive it.** You still receive
+  the complete diff. Use it to check that the increment did not contradict
+  something outside it (a renamed symbol, a changed invariant, a doc that now
+  describes the old behavior). If it did, that is a finding like any other.
+- **The verdict is still yours, and still covers the whole change.** An
+  incremental round narrows what you must re-derive, never what you may look
+  at, and never what you are responsible for. If the scope block looks wrong
+  — it claims files were reviewed that you can see were not, or the increment
+  does not match the diff — ignore it, review the change in full, and say so
+  in a Note.
+
+When no scope block is present, or it says **FULL**, review the entire change
+as usual. The gate escalates to full on its own whenever the increment is
+large, reaches into files no previous review covered, or cannot be computed —
+so a full round is the normal case, not a failure.
+
+### Precommit lanes
+
+The gate runs precommit in two lanes. `fast` (what a `git commit` needs) runs
+lint + typecheck + build + only the tests **related to the changed files**;
+`full` (required for `git push` / `gh pr create` / task completion) runs the
+complete suite. So a PASS you see quoted in a task may not mean the suite is
+green. Treat "the tests pass" as established only by a run whose `testScope`
+is `full`; if a change's risk is not covered by the related-tests subset and
+no full run has happened yet, say so in a Note rather than assuming it.
+
 ## Loop goal acceptance (pi-review-gate loop mode)
 
 A loop-mode session works to an **exit contract**: `.pi/loop-goal.md` (task

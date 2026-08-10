@@ -1,13 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { failedStepNames, validatePrecommitReceipt, type ReceiptExpectation } from "../lib/precommit-receipt.ts";
+import {
+  failedStepNames,
+  receiptTotalMs,
+  stepTimings,
+  validatePrecommitReceipt,
+  type ReceiptExpectation,
+} from "../lib/precommit-receipt.ts";
 
 const EXP: ReceiptExpectation = {
   nonce: "N", cwd: "/repo", mode: "fast", exitStatus: 0, signal: null, spawnError: false,
 };
 function receipt(over: Record<string, unknown> = {}) {
-  return { schema: 1, verdict: "PASS", mode: "fast", checksRun: 2, checksFailed: 0, nonce: "N", cwd: "/repo", ...over };
+  return { schema: 1, verdict: "PASS", mode: "fast", testScope: "related", checksRun: 2, checksFailed: 0, nonce: "N", cwd: "/repo", ...over };
 }
 
 // --- happy paths -----------------------------------------------------------
@@ -93,6 +99,74 @@ for (const bad of [1.5, -1, NaN, Infinity, "2", null]) {
     assert.equal(validatePrecommitReceipt(receipt({ checksRun: bad }), EXP).verdict, "ERROR");
   });
 }
+
+// --- testScope contract ----------------------------------------------------
+//
+// `testScope` decides whether a PASS may authorize a push/PR, so it is part of
+// the trust boundary: unknown or self-contradictory values are ERROR, never
+// interpreted generously.
+
+test("testScope travels with every non-ERROR verdict", () => {
+  assert.equal(validatePrecommitReceipt(receipt(), EXP).testScope, "related");
+  assert.equal(
+    validatePrecommitReceipt(receipt({ verdict: "FAIL", checksFailed: 1, testScope: "skipped" }), { ...EXP, exitStatus: 1 }).testScope,
+    "skipped",
+  );
+  assert.equal(
+    validatePrecommitReceipt(receipt({ verdict: "NO_CHECKS_RUN", checksRun: 0, testScope: "full" }), { ...EXP, exitStatus: 2 }).testScope,
+    "full",
+  );
+});
+
+for (const bad of [undefined, "", "partial", "FULL", 1, null]) {
+  test(`testScope=${String(bad)} → ERROR (fail-closed)`, () => {
+    const r = validatePrecommitReceipt(receipt({ testScope: bad }), EXP);
+    assert.equal(r.verdict, "ERROR");
+    assert.match(r.error ?? "", /testScope/);
+  });
+}
+
+test("mode full can only report testScope full — a narrowed suite contradicts the lane", () => {
+  const fullExp: ReceiptExpectation = { ...EXP, mode: "full" };
+  for (const scope of ["related", "skipped"]) {
+    const r = validatePrecommitReceipt(receipt({ mode: "full", testScope: scope }), fullExp);
+    assert.equal(r.verdict, "ERROR", scope);
+    assert.match(r.error ?? "", /contradicts mode full/);
+  }
+  assert.equal(validatePrecommitReceipt(receipt({ mode: "full", testScope: "full" }), fullExp).verdict, "PASS");
+});
+
+test("ERROR carries no testScope claim", () => {
+  const r = validatePrecommitReceipt(receipt(), { ...EXP, exitStatus: 1 });
+  assert.equal(r.verdict, "ERROR");
+  assert.equal(r.testScope, undefined);
+});
+
+// --- timings (diagnostics; must never reject a run) ------------------------
+
+test("stepTimings normalizes malformed fields instead of dropping the record", () => {
+  const timings = stepTimings({
+    steps: [
+      { name: "lint", status: "pass", durationMs: 12.6, cached: false },
+      { name: "test", status: "pass", cached: true },
+      { name: "  ", status: 7, durationMs: -5 },
+      "not-an-object",
+    ],
+  });
+  assert.deepEqual(timings, [
+    { name: "lint", status: "pass", durationMs: 13, cached: false },
+    { name: "test", status: "pass", durationMs: 0, cached: true },
+    { name: "(unnamed step)", status: "unknown", durationMs: 0, cached: false },
+  ]);
+});
+
+test("stepTimings / receiptTotalMs tolerate junk", () => {
+  assert.deepEqual(stepTimings(null), []);
+  assert.deepEqual(stepTimings({ steps: "nope" }), []);
+  assert.equal(receiptTotalMs({ totalMs: 1234 }), 1234);
+  assert.equal(receiptTotalMs({ totalMs: "1234" }), 0);
+  assert.equal(receiptTotalMs(undefined), 0);
+});
 
 // --- failedStepNames: diagnostics ONLY, never an input to the verdict -------
 

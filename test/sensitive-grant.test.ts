@@ -125,3 +125,69 @@ test("the grant list is never mutated in place", () => {
   consumeGrant(original, "/repo/.env", NOW);
   assert.deepEqual(original, snapshot);
 });
+
+// ---------------------------------------------------------------------------
+// Gate-integrity paths: the gate's own enforcement is never grantable
+// ---------------------------------------------------------------------------
+
+test("the gate's decision inputs are integrity paths, not grantable secrets", () => {
+  // A forged sidecar fabricates verdicts; a forged precommit cache buys a PASS
+  // with zero checks executed. Neither is the user's data, so no dialog may
+  // unlock them — that dialog would be the agent asking permission to disarm
+  // the thing checking it.
+  for (const p of [
+    "/repo/.pi/review-gate-state.json",
+    "/repo/.pi/review-gate-state.json.blocked",
+    "/repo/.pi/precommit-cache.json",
+    "/repo/.git/hooks/pre-commit",
+    "/repo/.git",
+  ]) {
+    assert.ok(isGateIntegrityPath(p), p);
+    assert.ok(isSensitiveFile(p), `${p} must also be blocked outright`);
+  }
+});
+
+test("neighbouring gate files stay editable (the guard is narrow)", () => {
+  // The loop goal is protected by CONTENT hashing, not by a write block: the
+  // agent may write it, it just gains nothing by doing so. Timings and logs
+  // are pure diagnostics.
+  for (const p of [
+    "/repo/.pi/loop-goal.md",
+    "/repo/.pi/gate-timings.jsonl",
+    "/repo/.pi/precommit-last.log",
+    "/repo/.pi/review-gate.json",
+    "/repo/.gitignore",
+    "/repo/.github/workflows/ci.yml",
+  ]) {
+    assert.ok(!isGateIntegrityPath(p), p);
+  }
+});
+
+test("a path that merely CONTAINS the name is not protected", () => {
+  // The patterns are anchored on a `.pi/` segment + exact basename, so an
+  // ordinary project file cannot be locked out by accident.
+  for (const p of [
+    "/repo/docs/precommit-cache.json",
+    "/repo/.pi-subagents/review-gate-state.json",
+    "/repo/.pi/precommit-cache.json.bak",
+  ]) {
+    assert.ok(!isGateIntegrityPath(p), p);
+  }
+});
+
+test("normalization closes the path-variant bypass", () => {
+  // The guard matches on the RESOLVED path. Without that, an agent could reach
+  // a protected file by spelling it `.pi/./precommit-cache.json` or
+  // `x/../.pi/precommit-cache.json` — the patterns anchor on path segments,
+  // which those spellings break.
+  for (const raw of [
+    ".pi/./precommit-cache.json",
+    "sub/../.pi/precommit-cache.json",
+    "./.pi/review-gate-state.json",
+    ".git/./hooks/pre-commit",
+  ]) {
+    const abs = normalizeSensitivePath(raw, "/repo");
+    assert.ok(isSensitiveFile(abs), `${raw} → ${abs} must be blocked once resolved`);
+    assert.ok(isGateIntegrityPath(abs), `${raw} → ${abs} must stay non-grantable`);
+  }
+});

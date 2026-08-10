@@ -61,7 +61,9 @@ test("failing test script → ❌ FAIL, exit 1", () => {
 
 test("lint pass + test fail → FAIL (any failure wins)", () => {
   const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "exit 0", test: "exit 1" } });
-  const { code, out } = run(dir);
+  // `--mode full`: with another check present, the fast lane would narrow the
+  // test step away (this script has no derivable related set).
+  const { code, out } = run(dir, ["--mode", "full"]);
   assert.equal(code, 1);
   assert.match(out, /## Overall: ❌ FAIL/);
 });
@@ -210,8 +212,10 @@ test("steps appear in DECLARATION order in the log — parallel execution, merge
   // first unfinished check's `▶` with no matching `◀`, which identifies the
   // hung step. Checks now run in parallel, but the log still reads in
   // declaration order (lint before test), never in completion order.
+  // `--mode full` so the test step is the complete suite: the fast lane would
+  // narrow it to the changed files, which is a different question.
   const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "echo linting", test: "exit 0" } });
-  const { out } = runReceipt(dir);
+  const { out } = runReceipt(dir, ["--mode", "full"]);
   const lintStart = out.indexOf("▶ lint");
   const lintEnd = out.indexOf("◀ lint");
   const testStart = out.indexOf("▶ test");
@@ -227,7 +231,7 @@ test("steps appear in DECLARATION order in the log — parallel execution, merge
 test("independent checks run in PARALLEL — wall time is less than the serial sum", () => {
   const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "sleep 1", test: "sleep 1" } });
   const started = Date.now();
-  const { code } = run(dir);
+  const { code } = run(dir, ["--mode", "full"]);
   const elapsed = Date.now() - started;
   assert.equal(code, 0);
   // Serial would take ~2s; parallel ~1s. Generous bound against loaded CI.
@@ -236,12 +240,12 @@ test("independent checks run in PARALLEL — wall time is less than the serial s
 
 test("a SLOW earlier-declared step does not reorder the log or the receipt steps", () => {
   const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "echo LINT_BODY; sleep 1.5", test: "echo TEST_BODY" } });
-  const { out, receipt } = runReceipt(dir, ["--json"]);
+  const { out, receipt } = runReceipt(dir, ["--mode", "full", "--json"]);
   // test finishes long before lint, yet the log and the steps array must
   // present lint first — completion order must never leak into either.
   assert.ok(out.indexOf("LINT_BODY") < out.indexOf("TEST_BODY"), "log follows declaration order");
   const names = (receipt!.steps as Array<{ name: string }>).map((s) => s.name);
-  assert.deepEqual(names, ["lint", "test"], "receipt steps follow declaration order");
+  assert.deepEqual(names, ["lint", "typecheck", "build", "test"], "receipt steps follow declaration order");
 });
 
 test("lint:fix runs FIRST and alone — parallel checks start only after it finished", () => {
@@ -256,16 +260,16 @@ test("lint:fix runs FIRST and alone — parallel checks start only after it fini
       test: "test -f fix-marker.txt",
     },
   });
-  const { code, receipt } = runReceipt(dir);
+  const { code, receipt } = runReceipt(dir, ["--mode", "full"]);
   assert.equal(code, 0);
   assert.equal(receipt!.verdict, "PASS");
   const names = (receipt!.steps as Array<{ name: string }>).map((s) => s.name);
-  assert.deepEqual(names, ["lint", "test"], "lint (the fix step) is declared first");
+  assert.deepEqual(names, ["lint", "typecheck", "build", "test"], "lint (the fix step) is declared first");
 });
 
 test("a failure in any parallel check still fails the run (any-failure-wins)", () => {
   const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "exit 0", test: "exit 1" } });
-  const { code, out, receipt } = runReceipt(dir);
+  const { code, out, receipt } = runReceipt(dir, ["--mode", "full"]);
   assert.equal(code, 1);
   assert.equal(receipt!.verdict, "FAIL");
   assert.equal(receipt!.checksRun, 2);

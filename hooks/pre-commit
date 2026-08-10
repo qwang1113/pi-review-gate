@@ -54,6 +54,15 @@ if (!nullableString(state.sessionId) ||
     (state.review.docSync !== undefined && state.review.docSync !== "UPDATED" && state.review.docSync !== "NOT_NEEDED") ||
     !state.precommit || !PRECOMMIT_VERDICTS.has(state.precommit.verdict) ||
     !nullableString(state.precommit.fingerprint) || !nullableString(state.precommit.at) ||
+    // Optional lane metadata (fast/full split). A present field must be
+    // well-formed — a forged shape means a tampered sidecar, which fails
+    // closed like everything else. Absence is fine and is itself fail-closed:
+    // a missing testScope cannot claim a full run, so a push stays blocked.
+    (state.precommit.mode !== undefined &&
+      state.precommit.mode !== "fast" && state.precommit.mode !== "full") ||
+    (state.precommit.testScope !== undefined &&
+      state.precommit.testScope !== "related" && state.precommit.testScope !== "full" &&
+      state.precommit.testScope !== "skipped") ||
     !Array.isArray(state.rounds) || !state.rounds.every(validRound) ||
     !Number.isInteger(state.maxRounds) || state.maxRounds < 3 || state.maxRounds > 50 ||
     !state.bypass || typeof state.bypass.active !== "boolean" ||
@@ -206,6 +215,12 @@ try {
   if (cfg && typeof cfg === "object" && cfg.docSync === false) docSyncEnforced = false;
 } catch { /* no config — default enforced */ }
 
+// Lane requirement. pre-push re-execs this hook with REVIEW_GATE_REQUIRE_FULL=1
+// because publishing needs a precommit run whose tests were not narrowed; a
+// plain commit is satisfied by the fast lane. Only the exact string "1" turns
+// it on, so an unrelated ambient value cannot silently relax OR tighten it.
+const requireFullTests = process.env.REVIEW_GATE_REQUIRE_FULL === "1";
+
 if (state.schema !== 1) {
   console.error("[review-gate] unknown gate schema — failing closed.");
   process.exit(1);
@@ -285,6 +300,14 @@ if (state.hasCodeChange) {
       problems.push("precommit PASS has no fingerprint binding — cannot verify");
     } else if (state.precommit.fingerprint !== currentFp) {
       problems.push("code was modified after the last precommit PASS (fingerprint mismatch)");
+    } else if (requireFullTests && state.precommit.testScope !== "full") {
+      // Lane split, mirroring lib/constants.ts requiresFullPrecommit and the
+      // extension's L1 check: a commit accepts the fast lane, a PUSH does not.
+      // An absent testScope predates the split and cannot claim a full run.
+      const covered = state.precommit.testScope || "unknown (sidecar predates the fast/full split)";
+      problems.push(
+        `push requires a FULL precommit run (tests covered: ${covered}) — ` +
+        'the fast lane only runs the tests related to the changed files; re-run with mode "full"');
     }
   } else if (state.precommit.verdict === "NOT_RUN") {
     problems.push("precommit not run");

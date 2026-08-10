@@ -1237,3 +1237,49 @@ test("check_copilot_review leaves a released cycle alone (no resurrection, no gh
     /persistRepo|releaseCopilotReview|armCopilotReview/,
     "the short-circuit must not rewrite the state it reports");
 });
+
+// ---------------------------------------------------------------------------
+// Precommit lanes + incremental review — structural invariants
+// ---------------------------------------------------------------------------
+
+test("publishing paths require a full precommit run; a commit does not", () => {
+  // The split has to be applied at BOTH decision points. A missing
+  // `requireFullTests` on either would let a narrowed run publish.
+  assert.match(SRC, /requiresFullPrecommit/, "the ship gate must consult the lane rule");
+  const shipAt = SRC.indexOf("const requireFullTests = ships.some(");
+  assert.ok(shipAt > 0, "the ship path must derive the lane requirement from the detected commands");
+
+  // declare_done publishes by implication, so it hardcodes the strict side.
+  const doneAt = SRC.indexOf('name: "declare_done"');
+  assert.ok(doneAt > 0);
+  const doneBody = SRC.slice(doneAt, doneAt + 4000);
+  assert.match(doneBody, /requireFullTests:\s*true/, "declare_done must demand a full run");
+});
+
+test("the incremental baseline records only what the review actually covered", () => {
+  // Under a user-granted scope limit the review only read the session's own
+  // files; recording the whole branch diff would later let the scoper call
+  // never-reviewed files "already reviewed" and skip escalating to full.
+  const at = SRC.indexOf("st.lastReadyReview = {");
+  assert.ok(at > 0, "record_review must set the baseline");
+  const before = SRC.slice(at - 900, at);
+  assert.match(before, /st\.scopeLimit\s*\n?\s*\?\s*st\.scopeLimit\.sessionFiles/,
+    "a scope-limited review must record sessionFiles, not the whole branch diff");
+});
+
+test("the baseline is written only for a READY verdict", () => {
+  // A BLOCKED round must not move the baseline — nothing was approved.
+  const at = SRC.indexOf("st.lastReadyReview = {");
+  const guard = SRC.slice(SRC.lastIndexOf('parsed.verdict === "READY"', at), at);
+  assert.ok(guard.length > 0 && guard.length < 900, "the baseline write must sit inside a READY guard");
+});
+
+test("timings are appended, never read back into a decision", () => {
+  // The observability log is diagnostics-only. `readTimings`/`lastPrecommitTiming`
+  // may only feed the status command's rendering.
+  const statusAt = SRC.indexOf('pi.registerCommand("gate-status"');
+  assert.ok(statusAt > 0);
+  const readAt = SRC.indexOf("lastPrecommitTiming(");
+  assert.ok(readAt > statusAt, "the only timings read must be inside /gate-status");
+  assert.ok(!/unmetRequirements\([^)]*Timing/.test(SRC), "no timing value may enter the ship authority");
+});

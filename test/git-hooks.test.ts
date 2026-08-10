@@ -379,7 +379,7 @@ test("no changes tracked → allow even without verdicts", () => {
 const FP_SCRIPT = join(ROOT, "scripts", "compute-fingerprint.cjs");
 
 /** Repo whose sidecar has READY+PASS bound to the REAL current fingerprint. */
-function repoWithMatchingGates(extraReview: object = {}, extraConfig?: object): string {
+function repoWithMatchingGates(extraReview: object = {}, extraConfig?: object, extraPrecommit: object = {}): string {
   const dir = makeGitRepo();
   mkdirSync(join(dir, "src"), { recursive: true });
   writeFileSync(join(dir, "src", "lib.ts"), "// change\n");
@@ -390,7 +390,7 @@ function repoWithMatchingGates(extraReview: object = {}, extraConfig?: object): 
   writeFileSync(join(dir, ".pi", "review-gate-state.json"), JSON.stringify({
     ...READY,
     review: { verdict: "READY", fingerprint: fp, at: "t", ...extraReview },
-    precommit: { verdict: "PASS", fingerprint: fp, at: "t" },
+    precommit: { verdict: "PASS", fingerprint: fp, at: "t", ...extraPrecommit },
   }));
   return dir;
 }
@@ -416,6 +416,67 @@ test("docSync on → UPDATED / NOT_NEEDED attestation commits (default and expli
   }
 });
 
+// ---------------------------------------------------------------------------
+// Precommit lanes: the hooks must split exactly like lib/constants.ts
+// requiresFullPrecommit — a commit accepts the fast lane, a push does not.
+// ---------------------------------------------------------------------------
+
+/** pre-push re-execs pre-commit with the stricter lane requirement set. */
+function runPrePush(dir: string) {
+  return spawnSync("bash", [join(ROOT, "hooks", "pre-push")], { cwd: dir, encoding: "utf8", env: { ...process.env } });
+}
+
+test("fast lane PASS: commit allowed, PUSH blocked", () => {
+  const state = { docSync: "NOT_NEEDED" };
+  const fast = { mode: "fast", testScope: "related" };
+
+  assert.equal(runPreCommit(repoWithMatchingGates(state, undefined, fast)).status, 0,
+    "a narrowed run is enough to commit");
+
+  const res = runPrePush(repoWithMatchingGates(state, undefined, fast));
+  assert.equal(res.status, 1, "a narrowed run must not publish");
+  assert.match(res.stderr, /push requires a FULL precommit run/);
+  assert.match(res.stderr, /related/);
+});
+
+test("fast lane that SKIPPED tests: commit allowed, PUSH blocked", () => {
+  const res = runPrePush(repoWithMatchingGates({ docSync: "NOT_NEEDED" }, undefined, { mode: "fast", testScope: "skipped" }));
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /push requires a FULL precommit run/);
+});
+
+test("testScope full: push allowed no matter which lane produced it", () => {
+  for (const mode of ["fast", "full"]) {
+    const dir = repoWithMatchingGates({ docSync: "NOT_NEEDED" }, undefined, { mode, testScope: "full" });
+    assert.equal(runPrePush(dir).status, 0, mode);
+  }
+});
+
+test("a sidecar predating the split cannot claim a full run (push fails closed)", () => {
+  const dir = repoWithMatchingGates({ docSync: "NOT_NEEDED" }); // no lane fields
+  assert.equal(runPreCommit(dir).status, 0, "old sidecars still commit");
+  const res = runPrePush(repoWithMatchingGates({ docSync: "NOT_NEEDED" }));
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /predates the fast\/full split/);
+});
+
+test("REVIEW_GATE_REQUIRE_FULL only counts as exactly \"1\" (no accidental relaxation)", () => {
+  // Any other ambient value leaves the commit-level rule in force; it must
+  // neither tighten a commit nor loosen the push path.
+  for (const v of ["0", "true", ""]) {
+    const dir = repoWithMatchingGates({ docSync: "NOT_NEEDED" }, undefined, { mode: "fast", testScope: "related" });
+    assert.equal(runPreCommit(dir, { REVIEW_GATE_REQUIRE_FULL: v }).status, 0, v);
+  }
+});
+
+test("a forged lane value fails the whole sidecar closed", () => {
+  for (const forged of [{ mode: "turbo", testScope: "full" }, { mode: "fast", testScope: "partial" }]) {
+    const dir = repoWithMatchingGates({ docSync: "NOT_NEEDED" }, undefined, forged);
+    const res = runPreCommit(dir);
+    assert.equal(res.status, 1, JSON.stringify(forged));
+    assert.match(res.stderr, /shape\/verdict invalid/);
+  }
+});
 test("SECURITY: forged docSync attestation values fail closed (shape invalid)", () => {
   const dir = repoWithMatchingGates({ docSync: "YES" }, { docSync: true });
   const res = runPreCommit(dir);

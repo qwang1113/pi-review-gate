@@ -77,6 +77,16 @@ export const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = Object.freeze([
   // defense-in-depth layer. Matches `.git/…` and a bare `.git` path segment,
   // but NOT .gitignore / .github (the dot must be followed by exactly "git").
   /(^|\/)\.git(\/|$)/i,
+  // The gate's own decision inputs, for the same reason. The sidecar carries
+  // the verdicts a commit is checked against, and the precommit cache decides
+  // which checks may be SKIPPED as already-passed — a forged entry keyed to
+  // the current tree buys a PASS with zero checks executed. Neither is a
+  // user secret, so neither is grantable either (see isGateIntegrityPath):
+  // a dialog there would let the agent talk the user into disarming the
+  // thing that is checking it. The extension and the runner write these with
+  // plain fs calls, which this guard does not touch; a human can still edit
+  // them by hand.
+  /(^|\/)\.pi\/(review-gate-state\.json(\.blocked)?|precommit-cache\.json)$/i,
 ]);
 
 export function isSensitiveFile(filePath: string): boolean {
@@ -100,6 +110,24 @@ export const COMMIT_MSG_FORBIDDEN: readonly RegExp[] = Object.freeze([
 /** Ship commands that the hard gate intercepts. */
 export const SHIP_COMMAND_KINDS = Object.freeze(["commit", "push", "pr-create", "pr-edit"] as const);
 export type ShipCommandKind = (typeof SHIP_COMMAND_KINDS)[number];
+
+/**
+ * Ship kinds that PUBLISH work, and therefore require a precommit run whose
+ * tests were not narrowed (`testScope: "full"`).
+ *
+ * `commit` is deliberately absent. A commit is local and reversible, so it is
+ * satisfied by the fast lane (lint + typecheck + build + the tests related to
+ * the changed files) — which is what makes a loop round cheap. Everything
+ * that leaves the machine, or declares the task finished, needs the complete
+ * suite.
+ *
+ * THE GIT HOOKS MIRROR THIS SET: hooks/pre-commit accepts any PASS, and
+ * hooks/pre-push re-runs it with REVIEW_GATE_REQUIRE_FULL=1. Changing the
+ * split here means changing it there too (test/git-hooks.test.ts checks it).
+ */
+export function requiresFullPrecommit(kind: ShipCommandKind): boolean {
+  return kind !== "commit";
+}
 
 /**
  * Output-language gate — the single source of truth for the language directive.

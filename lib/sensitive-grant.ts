@@ -76,11 +76,19 @@ export function normalizeSensitivePath(raw: string, cwd: string): string {
 /**
  * Paths that no user dialog may unlock (see the module header).
  *
- * Mirrors the `.git` branch of `SENSITIVE_FILE_PATTERNS`: `.git/…` or a bare
- * `.git` segment, but never `.gitignore` / `.github`.
+ * Two families, both the gate's own enforcement rather than the user's data:
+ *  - `.git/…` or a bare `.git` segment (never `.gitignore` / `.github`) — the
+ *    L3 hooks live there;
+ *  - the gate's decision inputs under `.pi/`: the state sidecar (which carries
+ *    the verdicts a commit is checked against) and the precommit cache (which
+ *    decides what may be skipped as already-passed).
+ *
+ * Mirrors the corresponding entries in `SENSITIVE_FILE_PATTERNS`; a change to
+ * one needs the same change here, or a blocked edit would become grantable.
  */
 export function isGateIntegrityPath(filePath: string): boolean {
-  return /(^|\/)\.git(\/|$)/i.test(filePath);
+  return /(^|\/)\.git(\/|$)/i.test(filePath) ||
+    /(^|\/)\.pi\/(review-gate-state\.json(\.blocked)?|precommit-cache\.json)$/i.test(filePath);
 }
 
 /** The live grant for `absPath`, or undefined when there is none / it expired. */

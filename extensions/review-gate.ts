@@ -68,6 +68,8 @@ import {
   OSCILLATION_LIMIT,
   STRATEGIC_RESET_OFFSET,
   STRATEGIC_RESET_CHECKLIST,
+  requiresFullPrecommit,
+  type ShipCommandKind,
 } from "./lib/constants.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "./lib/project-config.ts";
 import { buildGitMemory } from "./lib/git-memory.ts";
@@ -79,13 +81,33 @@ import {
   resolveToolRepoTarget,
 } from "./lib/repo-resolve.ts";
 import { firstNonEnglish, containsNonLatinLetter } from "./lib/lang-detect.ts";
-import { failedStepNames, validatePrecommitReceipt } from "./lib/precommit-receipt.ts";
+import {
+  failedStepNames,
+  receiptTotalMs,
+  stepTimings,
+  validatePrecommitReceipt,
+  type StepTiming,
+  type TestScope,
+} from "./lib/precommit-receipt.ts";
+import {
+  appendTiming,
+  formatPrecommitSummary,
+  lastPrecommitTiming,
+} from "./lib/gate-timings.ts";
+import {
+  decideReviewScope,
+  formatReviewScopeDirective,
+  type ReviewScopeDecision,
+} from "./lib/review-scope.ts";
 import {
   advisoryChangeToken,
   changedFiles,
   computeFingerprint,
+  incrementSinceTree,
   isGateOwnedPath,
   mayBeGateOwned,
+  reviewCoverageFiles,
+  worktreeTreeOid,
 } from "./lib/fingerprint.ts";
 import type { Fingerprint } from "./lib/fingerprint.ts";
 import {
@@ -591,6 +613,41 @@ export default function reviewGate(pi: ExtensionAPI) {
     advisoryFpMemo = fp.unavailable ? null : { token, fp };
     return fp;
   }
+
+  // Wall clock of the last gate event (session start, precommit, review).
+  // Used ONLY to approximate how long a review round took: the reviewer runs
+  // as a subagent the extension cannot observe, so the honest measure is
+  // "time since the gate last heard anything", recorded as an upper bound.
+  let lastGateEventAt = Date.now();
+
+  /**
+   * How much of this round the reviewer must deep-read.
+   *
+   * Collects the git facts (increment since the last approved tree, what that
+   * review covered) and hands them to the pure decision function. Every
+   * missing fact resolves to a FULL review — see lib/review-scope.ts.
+   */
+  function reviewScopeFor(root: string, st: GateState): ReviewScopeDecision {
+    const base = st.lastReadyReview;
+    if (!base) return decideReviewScope({});
+    const increment = incrementSinceTree(root, base.treeOid);
+    return decideReviewScope({
+      baseTree: base.treeOid,
+      changedFiles: increment?.files,
+      changedLines: increment?.lines,
+      previouslyReviewedFiles: base.files,
+    });
+  }
+
+  /** Findings the previous round left on the table, for the next reviewer. */
+  function previousRoundFindings(st: GateState): string[] {
+    const last = st.rounds[st.rounds.length - 1];
+    if (!last || last.verdict === "READY") return [];
+    // Only the fingerprints are persisted (the issue prose is not), which is
+    // enough to make the reviewer look each one up and re-check it.
+    return last.fingerprints.slice(0, 20);
+  }
+
   function classifier(): LlmClassifier {
     if (!llmClassifier || llmClassifierModel !== projectConfig.llmGuards.model) {
       llmClassifier = createLlmClassifier(projectConfig.llmGuards.model);
@@ -749,7 +806,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (lastRunAborted) parts.push("paused: user abort (esc)");
       if (state.scopeLimit) parts.push("scope: session-only");
       parts.push(`review: ${state.review.verdict}`);
-      parts.push(`precommit: ${state.precommit.verdict}`);
+      parts.push(
+        `precommit: ${state.precommit.verdict}` +
+        (state.precommit.verdict === "PASS" && state.precommit.testScope !== "full" ? " (fast)" : ""),
+      );
       parts.push(`round ${state.rounds.length}/${state.maxRounds}`);
     }
     try { ctx.ui.setStatus("review-gate", parts.join(" · ")); } catch { /* non-TUI */ }
@@ -825,7 +885,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!mod) return undefined; /* scanner unavailable — hook backstop remains */
       analyze = mod.analyzeFile; isTest = mod.isTestFile;
     } catch { return undefined; /* scanner unavailable — hook backstop remains */ }
-    if (!analyze || !isTest || !isTest(path)) return undefined;
+    // Classify on the RESOLVED path, for the same reason the sensitive-file
+    // guard does: `foo.test.ts/x/..` names a test file that a segment-based
+    // matcher would miss. (Such a spelling also fails at the fs layer and the
+    // L3 hook scans the real committed paths, so this is consistency rather
+    // than a hole being closed.) Messages keep the caller's spelling — that is
+    // what the agent typed and can act on.
+    if (!analyze || !isTest || !isTest(normalizeSensitivePath(path, cwd))) return undefined;
     let res: ReturnType<typeof analyze>;
     try { res = analyze(path, content); } catch { return undefined; }
     if (res.violations.length > 0) {
@@ -860,14 +926,19 @@ export default function reviewGate(pi: ExtensionAPI) {
 
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       const path = coalesceToolPath(input);
-      if (path && isSensitiveFile(path)) {
+      // Match on the NORMALIZED path, not the raw one. `resolve` collapses `.`
+      // and `..`, so `.pi/./precommit-cache.json` and `a/../.env` cannot slip
+      // past a pattern that anchors on path segments. (The grant lookup below
+      // already keyed on the normalized form; matching the raw string here was
+      // the inconsistency.)
+      const absPath = path ? normalizeSensitivePath(path, cwd) : undefined;
+      if (absPath && isSensitiveFile(absPath)) {
         // A live grant means the USER already approved this exact path in a
         // dialog (request_sensitive_edit). It is consumed on the successful
         // tool_result, so the pass here is for one landing edit only.
         // `cwd` (the session cwd), not ctx.cwd: the grant is keyed at
         // request time with the same base, and a mismatched base would make a
         // relative path miss its own grant.
-        const absPath = normalizeSensitivePath(path, cwd);
         if (!findGrant(sensitiveGrants, absPath, Date.now())) {
           // absPath in both checks, so the hint matches what the tool would do.
           const askable = !isGateIntegrityPath(absPath) && !sensitiveDeclinedPaths.has(absPath);
@@ -1068,12 +1139,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Primary-repo fingerprint for the arbiter token path below (kept from the
     // loop so we do not re-hash the primary repo).
     let primaryFp: Fingerprint = { digest: "", head: "", unavailable: true };
+    // Lane requirement for THIS command. A commit is local and reversible, so
+    // the fast lane satisfies it; anything that publishes (push, gh pr) needs a
+    // run whose tests were not narrowed. A compound command is judged by its
+    // strictest segment — `git commit && git push` must satisfy the push rule.
+    const requireFullTests = ships.some((s) => requiresFullPrecommit(s.kind as ShipCommandKind));
     for (const root of checkRoots) {
       const st = enforcementStateFor(root);
       const fp = computeFingerprint(root);
       if (root === primaryRepoRoot) primaryFp = fp;
       if (st) {
-        const unmet = unmetRequirements(st, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
+        const unmet = unmetRequirements(st, fp.digest, fp.unavailable, {
+          requireDocSync: projectConfig.docSync,
+          requireFullTests,
+        });
         for (const p of unmet) {
           problems.push(multiRepo ? `[${repoLabel(root)}] ${p}` : p);
         }
@@ -1564,10 +1643,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       // this path. Consuming here rather than at tool_call is what makes a
       // failed edit (stale anchor, missing file) retryable without a second
       // dialog, while a successful one costs the user a fresh "yes" next time.
-      if (isSensitiveFile(path)) {
+      // Normalized on both sides, exactly like the tool_call guard: a grant is
+      // keyed by the resolved path, so matching the raw spelling here could
+      // leave a burned-but-unconsumed grant alive.
+      const sensitiveAbs = normalizeSensitivePath(path, cwd);
+      if (isSensitiveFile(sensitiveAbs)) {
         const { consumed, remaining } = consumeGrant(
           sensitiveGrants,
-          normalizeSensitivePath(path, cwd),
+          sensitiveAbs,
           Date.now(),
         );
         sensitiveGrants = remaining;
@@ -1828,6 +1911,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       const st = stateForRepo(targetRoot);
       delete st.pausedQuestion;
       const fp = computeFingerprint(targetRoot);
+      // Scope THIS round was judged under — computed BEFORE the new verdict
+      // overwrites the baseline, or it would always read as "nothing new".
+      const scopeNow = reviewScopeFor(targetRoot, st);
       st.review = {
         verdict: parsed.verdict,
         fingerprint: parsed.verdict === "READY" ? fp.digest : null,
@@ -1836,6 +1922,31 @@ export default function reviewGate(pi: ExtensionAPI) {
         // stays absent (blocks under the docSync knob — fail-closed).
         ...(parsed.docSync !== undefined ? { docSync: parsed.docSync } : {}),
       };
+      // A READY verdict moves the incremental-review baseline: it records the
+      // git TREE that was approved and the files that approval covered, so the
+      // NEXT round can state precisely what is new instead of making the
+      // reviewer re-derive the whole diff (lib/review-scope.ts). Neither field
+      // authorizes anything — `review.fingerprint` still does that alone.
+      // Best-effort: an unavailable tree just means the next round is full.
+      if (parsed.verdict === "READY") {
+        let treeOid: string | undefined;
+        try { treeOid = worktreeTreeOid(targetRoot); } catch { treeOid = undefined; }
+        if (treeOid) {
+          // What this review ACTUALLY covered. Under a user-granted scope
+          // limit that is only the session's own files — recording the whole
+          // branch diff would later let the increment scoper call
+          // never-reviewed, exempted files "already reviewed and unchanged"
+          // and skip the escalation to a full round.
+          const files = st.scopeLimit
+            ? st.scopeLimit.sessionFiles.slice()
+            : reviewCoverageFiles(targetRoot);
+          st.lastReadyReview = {
+            treeOid,
+            at: new Date().toISOString(),
+            ...(files ? { files } : {}),
+          };
+        }
+      }
       st.rounds.push({
         round: st.rounds.length + 1,
         findingsTotal: parsed.findingsTotal,
@@ -1843,6 +1954,24 @@ export default function reviewGate(pi: ExtensionAPI) {
         verdict: parsed.verdict,
         at: new Date().toISOString(),
       });
+      // Observability: what this round cost and how much of the change it had
+      // to judge. The duration is an UPPER BOUND — the reviewer is a subagent
+      // the extension never sees, so all it can measure is the wall clock
+      // since the previous gate event (see lib/gate-timings.ts).
+      appendTiming(targetRoot, {
+        kind: "review",
+        at: new Date().toISOString(),
+        repo: targetRoot,
+        round: st.rounds.length,
+        verdict: parsed.verdict,
+        scope: scopeNow.scope,
+        changedFiles: scopeNow.changedFiles.length,
+        changedLines: scopeNow.changedLines,
+        approxMs: Math.max(0, Date.now() - lastGateEventAt),
+        approximate: true,
+        fingerprint: fp.unavailable ? "" : fp.digest.slice(0, 12),
+      });
+      lastGateEventAt = Date.now();
       // A new review round changes the token's bound round; drop any standing
       // token explicitly too (defense in depth — tokenAuthorizes already
       // checks round).
@@ -1944,8 +2073,16 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       if (outcome.verdict === "PASS") {
         // Bind PASS to the fingerprint recomputed AFTER the runner finished
-        // (a lint:fix step may have modified files).
-        st.precommit = { verdict: "PASS", fingerprint: outcome.fingerprint, at: new Date().toISOString() };
+        // (a lint:fix step may have modified files). `testScope` travels with
+        // the binding because it decides what this PASS may authorize: a fast
+        // lane narrowed to the changed files can clear a commit, never a push.
+        st.precommit = {
+          verdict: "PASS",
+          fingerprint: outcome.fingerprint,
+          at: new Date().toISOString(),
+          mode,
+          testScope: outcome.testScope,
+        };
       } else {
         // P0 fix: "ERROR" is a runner-protocol outcome, NOT a GateState
         // PrecommitVerdict enum member. Persisting it would make loadSidecar
@@ -1955,14 +2092,45 @@ export default function reviewGate(pi: ExtensionAPI) {
         // FAIL / NO_CHECKS_RUN persist as themselves. The error detail still
         // reaches the model via the tool result text below.
         const persisted = outcome.verdict === "ERROR" ? "NOT_RUN" : outcome.verdict;
-        st.precommit = { verdict: persisted, fingerprint: null, at: new Date().toISOString() };
+        st.precommit = {
+          verdict: persisted,
+          fingerprint: null,
+          at: new Date().toISOString(),
+          mode,
+          testScope: outcome.testScope,
+        };
       }
       persistRepo(ctx as unknown as ExtensionContext, targetRoot);
 
+      // Observability (diagnostics only, never read by an enforcement path):
+      // one line per run so "why did this take 5 minutes?" stays answerable
+      // after the fact. See lib/gate-timings.ts.
+      appendTiming(targetRoot, {
+        kind: "precommit",
+        at: new Date().toISOString(),
+        repo: targetRoot,
+        mode,
+        testScope: outcome.testScope ?? "unknown",
+        verdict: outcome.verdict,
+        totalMs: outcome.totalMs ?? 0,
+        steps: outcome.timings ?? [],
+        fingerprint: outcome.fingerprint.slice(0, 12),
+      });
+      // A precommit run is a gate event: the NEXT review round's approximate
+      // duration measures from here, not from before this run, so a 100s full
+      // lane does not get attributed to the reviewer.
+      lastGateEventAt = Date.now();
+
+      // Naming the lane in the reply is what stops the agent from discovering
+      // at push time that its PASS does not qualify.
+      const lane = `[lane ${mode}, tests: ${outcome.testScope ?? "unknown"}]`;
+      const pushNote = outcome.verdict === "PASS" && outcome.testScope !== "full"
+        ? ' This clears a `git commit`; `git push` / `gh pr create` need a run with mode "full".'
+        : "";
       const detail =
-        outcome.verdict === "PASS" ? `PASS (${outcome.checksRun} checks ran, 0 failed).`
-        : outcome.verdict === "FAIL" ? `FAIL (${outcome.checksFailed}/${outcome.checksRun} checks failed).`
-        : outcome.verdict === "NO_CHECKS_RUN" ? "NO CHECKS RUN — zero runnable checks; this is NOT a pass. Configure real checks or /gate-bypass."
+        outcome.verdict === "PASS" ? `PASS ${lane} (${outcome.checksRun} checks ran, 0 failed).${pushNote}`
+        : outcome.verdict === "FAIL" ? `FAIL ${lane} (${outcome.checksFailed}/${outcome.checksRun} checks failed).`
+        : outcome.verdict === "NO_CHECKS_RUN" ? `NO CHECKS RUN ${lane} — zero runnable checks; this is NOT a pass. Configure real checks or /gate-bypass.`
         : `ERROR (${outcome.error ?? "runner could not be trusted"}) — fail-closed.`;
 
       // Diagnostics pointer. The full runner output is ALWAYS captured to a
@@ -2017,7 +2185,15 @@ export default function reviewGate(pi: ExtensionAPI) {
         const st = enforcementStateFor(root);
         const fp = computeFingerprint(root);
         if (st) {
-          for (const p of unmetRequirements(st, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })) {
+          // `requireFullTests`: declaring the task done means the work is
+          // about to be published, and the fast lane never proved the suite
+          // passes — only the tests related to the last edit. Requiring the
+          // full run HERE (rather than only at push time) is what keeps the
+          // loop honest: the agent cannot finish on a narrowed check.
+          for (const p of unmetRequirements(st, fp.digest, fp.unavailable, {
+            requireDocSync: projectConfig.docSync,
+            requireFullTests: true,
+          })) {
             problems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
           }
         } else {
@@ -2510,13 +2686,19 @@ export default function reviewGate(pi: ExtensionAPI) {
       "user can resolve (ambiguous requirement, a product/design decision between valid options, " +
       "missing credentials or access). Waiting on the user's answer to a question you already " +
       "asked — e.g. the grill questions while negotiating the loop goal — is such a blocker: " +
-      "call this instead of re-asking. After calling this, ask the question clearly in your " +
-      "reply and END the turn; the pause clears automatically on the user's next message. The " +
+      "call this instead of re-asking. The `question` parameter IS the question the user sees, so " +
+      "do NOT repeat it in your reply — write one short line pointing at it (\"see the question " +
+      "above\") or add only the context the parameter does not carry, then END the turn. The pause " +
+      "clears automatically on the user's next message. The " +
       "ship gate is NOT affected — git commit/push and gh pr stay blocked while gates are unmet. " +
       "Do NOT use this to ask permission to continue routine loop work, to skip a review round, " +
       "or to end the task — those remain prohibited.",
     parameters: Type.Object({
-      question: Type.String({ description: "The exact question the user must answer before work can continue" }),
+      question: Type.String({
+        description:
+          "The COMPLETE question the user must answer, including the options and your recommendation. " +
+          "It is shown to the user verbatim, so it must stand on its own — your reply should not restate it.",
+      }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const question = params.question.trim();
@@ -2533,7 +2715,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         return {
           content: [{
             type: "text",
-            text: `review-gate: no enforced loop in "${state.taskMode}" mode — auto-continuation is already off. Ask the user in your reply and end the turn.`,
+            text: `review-gate: no enforced loop in "${state.taskMode}" mode — auto-continuation is already off. Your question has been shown to the user; end the turn without repeating it.`,
           }],
           details: { mode: state.taskMode },
         };
@@ -2564,7 +2746,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           type: "text",
           text:
             "review-gate: loop PAUSED — auto-continuation is off until the user's next message. " +
-            "Now ask the user your question clearly in your reply and END the turn; do not keep working. " +
+            "Your question has ALREADY been delivered to the user verbatim: do NOT repeat it in your " +
+            "reply. Write one short line pointing at it (or only the context the parameter did not " +
+            "carry) and END the turn; do not keep working. " +
             "Ship commands stay blocked while gates are unmet. The pause clears automatically when the " +
             "user replies (or on your next code/doc edit).",
         }],
@@ -2707,8 +2891,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       "credentials…) that the gate blocks by default. The extension shows a confirmation dialog — " +
       "you cannot approve it yourself. A granted authorization covers that EXACT path only, is " +
       "consumed by the first edit that SUCCEEDS, and expires after 10 minutes; it is never " +
-      "persisted, so it dies with the session. `.git/` internals are NEVER grantable (they are " +
-      "the gate's own enforcement). If the user declines, that path is locked for the session — " +
+      "persisted, so it dies with the session. The gate's OWN enforcement is NEVER grantable: " +
+      "`.git/` internals (the L3 hooks) and `.pi/review-gate-state.json` / " +
+      "`.pi/precommit-cache.json` (the verdicts and the already-passed record a commit is checked " +
+      "against). If the user declines, that path is locked for the session — " +
       "do not ask again, ask the user to edit it by hand. Call this only when the edit is genuinely " +
       "required by the user's request, and state exactly what you will change.",
     parameters: Type.Object({
@@ -2732,9 +2918,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       // let the agent talk the user into disarming the L3 hook that checks it.
       if (isGateIntegrityPath(absPath)) {
         return deny(
-          `review-gate: "${raw}" is git internals — never authorizable from here, because editing ` +
-          "`.git/hooks/*` would disarm the gate's own enforcement. If this change is really needed, " +
-          "the USER must make it by hand.",
+          `review-gate: "${raw}" is part of the gate's own enforcement — never authorizable from ` +
+          "here. `.git/hooks/*` IS the L3 layer, and `.pi/review-gate-state.json` / " +
+          "`.pi/precommit-cache.json` are the verdicts and the already-passed record a commit is " +
+          "checked against. A dialog here would be the agent asking permission to disarm its own " +
+          "gate. If this change is really needed, the USER must make it by hand.",
         );
       }
       if (sensitiveDeclinedPaths.has(absPath)) {
@@ -3467,7 +3655,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       const others = otherRepoStatus();
       const lines = [
         `review:    ${state.review.verdict}${state.review.at ? ` (${state.review.at})` : ""}`,
-        `precommit: ${state.precommit.verdict}${state.precommit.at ? ` (${state.precommit.at})` : ""}`,
+        `precommit: ${state.precommit.verdict}` +
+          (state.precommit.verdict === "PASS"
+            ? ` [lane ${state.precommit.mode ?? "?"}, tests: ${state.precommit.testScope ?? "unknown"}]` +
+              (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run")
+            : "") +
+          (state.precommit.at ? ` (${state.precommit.at})` : ""),
+        ...formatPrecommitSummary(lastPrecommitTiming(primaryRepoRoot)),
         `changes:   code=${state.hasCodeChange} docs=${state.hasDocChange}`,
         `docSync:   ${projectConfig.docSync ? `ENFORCED (attested: ${state.review.docSync ?? "none"})` : "off"}`,
         `rounds:    ${state.rounds.length}/${state.maxRounds}`,
@@ -3699,7 +3893,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         "completion-style summary. Brief status lines are fine; execute the next step.\n" +
         "EXCEPTION — genuine blockers: if progress is stopped by a question only the user can " +
         "answer (ambiguous requirement, a product decision, missing access), call " +
-        "pause_for_question with the question, then ask it in your reply and end the turn. " +
+        "pause_for_question — put the COMPLETE question (options + your recommendation) in the " +
+        "`question` parameter, then end the turn with a one-line pointer instead of repeating it. " +
         "Auto-continuation pauses until the user replies; ship commands stay blocked. Never " +
         "use it to ask permission to continue routine loop work.\n" +
         (state.pausedQuestion
@@ -3717,9 +3912,23 @@ export default function reviewGate(pi: ExtensionAPI) {
               "If the unmet gates below are demanding coverage of work you never did, call request_scope_limit — " +
               "the USER decides whether session-only coverage suffices.\n"
             : "") +
+        // Scope for the NEXT review round: what a reviewer already approved,
+        // what is new since, and which of last round's findings must be
+        // re-checked. Only rendered while a review is actually outstanding —
+        // once the gate is satisfied there is nothing to scope.
+        (problems.length && state.review.verdict !== "READY"
+          ? `\n${formatReviewScopeDirective(reviewScopeFor(primaryRepoRoot, state), previousRoundFindings(state))}\n`
+          : "") +
+        // The fast lane clears a commit but not a push/PR, and finding that
+        // out at push time wastes a round. Say it while the lane still shows.
+        (problems.length === 0 && state.precommit.verdict === "PASS" && state.precommit.testScope !== "full"
+          ? `\nNOTE: the recorded precommit is the FAST lane (tests: ${state.precommit.testScope ?? "unknown"}). ` +
+            "That satisfies `git commit`; `git push`, `gh pr create/edit` and declare_done additionally " +
+            'require one run with mode "full".\n'
+          : "") +
         (problems.length
           ? `Current unmet:\n${problems.map((p) => `- ${p}`).join("\n")}`
-          : "All gates satisfied — you may ship."),
+          : "All gates satisfied — you may ship.")
     };
   });
 }
@@ -3746,6 +3955,15 @@ interface PrecommitOutcome {
   logPath: string;
   /** Names of the checks that failed, for pointing the agent at the log. */
   failedSteps: string[];
+  /**
+   * How much of the runnable suite the run covered. Absent for ERROR: a run
+   * the extension could not trust reports no coverage claim either.
+   */
+  testScope?: TestScope;
+  /** Per-step timings for `.pi/gate-timings.jsonl` (diagnostics only). */
+  timings?: StepTiming[];
+  /** Runner-measured wall clock for the whole run. */
+  totalMs?: number;
 }
 
 /**
@@ -3944,15 +4162,21 @@ async function runTrustedPrecommit(
       exitStatus: res.status, signal: res.signal, spawnError: res.spawnError,
     });
     // Diagnostics only — read AFTER the verdict is decided, and never fed back
-    // into it (see failedStepNames' docstring).
+    // into it (see failedStepNames' docstring). The timings travel with the
+    // outcome so the caller can append one observability record per run.
     const failedSteps = failedStepNames(parsed);
+    const timings = stepTimings(parsed);
+    const totalMs = receiptTotalMs(parsed);
     if (v.verdict === "PASS") {
       if (!fingerprint) return fail("worktree fingerprint unavailable post-run");
-      return { verdict: "PASS", checksRun: v.checksRun, checksFailed: v.checksFailed, fingerprint, logPath, failedSteps };
+      return {
+        verdict: "PASS", checksRun: v.checksRun, checksFailed: v.checksFailed,
+        testScope: v.testScope, fingerprint, logPath, failedSteps, timings, totalMs,
+      };
     }
     return {
       verdict: v.verdict, checksRun: v.checksRun, checksFailed: v.checksFailed,
-      fingerprint, error: v.error, logPath, failedSteps,
+      testScope: v.testScope, fingerprint, error: v.error, logPath, failedSteps, timings, totalMs,
     };
   } catch (e) {
     return fail(`runner spawn failed: ${(e as Error).message}`);
