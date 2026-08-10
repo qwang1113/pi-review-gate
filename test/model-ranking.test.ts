@@ -162,9 +162,9 @@ test("adviser is pinned to the user's priority list at max thinking, and stays a
   const adviser = readFileSync(join(ROOT, "agents", "adviser.md"), "utf8");
   assert.match(adviser, /name:\s*adviser/);
   assert.match(adviser, JUDGE_THINKING);
-  // Priority: fable-5 > gpt-sol > opus-4.8 > gpt-5.5
+  // Priority: fable-5 > opus-5 > opus-4.6 > gpt-sol > opus-4.8 > gpt-5.5
   assert.match(adviser, /model:\s*claude-fable-5/);
-  assert.match(adviser, /fallbackModels:\s*onekey\/gpt-5\.6-sol,\s*claude-opus-4-8,\s*onekey\/gpt-5\.5/);
+  assert.match(adviser, /fallbackModels:\s*claude-opus-5,\s*claude-opus-4-6,\s*onekey\/gpt-5\.6-sol,\s*claude-opus-4-8,\s*onekey\/gpt-5\.5/);
   // Consultant, not a gatekeeper: no record_review tool, no gate verdicts.
   assert.doesNotMatch(adviser, /tools:.*record_review/);
   assert.match(adviser, /not an executor and not a gatekeeper/i);
@@ -174,9 +174,9 @@ test("reviewer override is pinned to the user's priority list at max thinking an
   const reviewer = readFileSync(join(ROOT, "agents", "reviewer.md"), "utf8");
   assert.match(reviewer, /name:\s*reviewer/);
   assert.match(reviewer, JUDGE_THINKING);
-  // Priority: fable-5 > gpt-5.5 > opus-4.8 (user's current pin)
+  // Priority: fable-5 > opus-5 > opus-4.6 > gpt-5.5 > opus-4.8 (user's current pin)
   assert.match(reviewer, /model:\s*claude-fable-5/);
-  assert.match(reviewer, /fallbackModels:\s*onekey\/gpt-5\.5,\s*claude-opus-4-8/);
+  assert.match(reviewer, /fallbackModels:\s*claude-opus-5,\s*claude-opus-4-6,\s*onekey\/gpt-5\.5,\s*claude-opus-4-8/);
   // Reviewer IS the gatekeeper: it must instruct ending with a JSON gate verdict.
   assert.match(reviewer, /"gate":\s*"READY"/);
 });

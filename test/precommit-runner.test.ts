@@ -205,16 +205,72 @@ test("receipt mode streams each step's FULL output, not just the 40-line receipt
   assert.match(out, /◀ test — fail \(\d+ms, exit 1\)/, "each step must report its own result");
 });
 
-test("receipt mode announces the step BEFORE running it (a killed run still names the check)", () => {
+test("steps appear in DECLARATION order in the log — parallel execution, merged presentation", () => {
   // Ordering is the whole point: on a 20-minute timeout the log ends at the
-  // last ▶ with no matching ◀, which identifies the hung check.
+  // first unfinished check's `▶` with no matching `◀`, which identifies the
+  // hung step. Checks now run in parallel, but the log still reads in
+  // declaration order (lint before test), never in completion order.
   const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "echo linting", test: "exit 0" } });
   const { out } = runReceipt(dir);
   const lintStart = out.indexOf("▶ lint");
   const lintEnd = out.indexOf("◀ lint");
   const testStart = out.indexOf("▶ test");
   assert.ok(lintStart >= 0 && lintEnd > lintStart, "lint must be announced, then completed");
-  assert.ok(testStart > lintEnd, "steps must appear in execution order");
+  assert.ok(testStart > lintEnd, "steps must appear in declaration order");
+});
+
+// ---------------------------------------------------------------------------
+// Parallel scheduling (default-on): independent checks overlap, lint:fix runs
+// first and alone, output and receipt stay in declaration order.
+// ---------------------------------------------------------------------------
+
+test("independent checks run in PARALLEL — wall time is less than the serial sum", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "sleep 1", test: "sleep 1" } });
+  const started = Date.now();
+  const { code } = run(dir);
+  const elapsed = Date.now() - started;
+  assert.equal(code, 0);
+  // Serial would take ~2s; parallel ~1s. Generous bound against loaded CI.
+  assert.ok(elapsed < 1800, `expected parallel overlap, took ${elapsed}ms`);
+});
+
+test("a SLOW earlier-declared step does not reorder the log or the receipt steps", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "echo LINT_BODY; sleep 1.5", test: "echo TEST_BODY" } });
+  const { out, receipt } = runReceipt(dir, ["--json"]);
+  // test finishes long before lint, yet the log and the steps array must
+  // present lint first — completion order must never leak into either.
+  assert.ok(out.indexOf("LINT_BODY") < out.indexOf("TEST_BODY"), "log follows declaration order");
+  const names = (receipt!.steps as Array<{ name: string }>).map((s) => s.name);
+  assert.deepEqual(names, ["lint", "test"], "receipt steps follow declaration order");
+});
+
+test("lint:fix runs FIRST and alone — parallel checks start only after it finished", () => {
+  // lint:fix edits files; every other check must see the fixed worktree.
+  // The test script fails if the marker does not exist yet, which would
+  // happen if it were allowed to start before lint:fix completed.
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    scripts: {
+      "lint:fix": "echo FIXED > fix-marker.txt",
+      test: "test -f fix-marker.txt",
+    },
+  });
+  const { code, receipt } = runReceipt(dir);
+  assert.equal(code, 0);
+  assert.equal(receipt!.verdict, "PASS");
+  const names = (receipt!.steps as Array<{ name: string }>).map((s) => s.name);
+  assert.deepEqual(names, ["lint", "test"], "lint (the fix step) is declared first");
+});
+
+test("a failure in any parallel check still fails the run (any-failure-wins)", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "exit 0", test: "exit 1" } });
+  const { code, out, receipt } = runReceipt(dir);
+  assert.equal(code, 1);
+  assert.equal(receipt!.verdict, "FAIL");
+  assert.equal(receipt!.checksRun, 2);
+  assert.equal(receipt!.checksFailed, 1);
+  assert.match(out, /## Overall: ❌ FAIL/);
 });
 
 test("skipped steps are named in the log too (a skip is not a silent pass)", () => {

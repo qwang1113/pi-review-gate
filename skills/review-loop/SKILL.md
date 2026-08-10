@@ -115,18 +115,24 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    the real question, not your preferred answer. Fold its input in before you
    commit to an approach. Skip only for trivial, low-risk changes.
 
-2. **Precommit FIRST** — with the edits finished, call **`run_precommit`**
-   *before* spawning the reviewer. Two concrete reasons, both measured:
+2. **Parallel round — precommit ⇄ review** — with the edits finished, run
+   the reviewer and precommit **concurrently** instead of serially:
 
-   - The runner runs `lint`/`lint:fix` in **both** modes
-     (`scripts/precommit-runner.mjs`), and `lint:fix` **edits files**. Any
-     edit changes the worktree fingerprint, so a READY verdict obtained
-     *before* precommit is invalidated the moment the runner reformats
-     anything — throwing away a review that costs ~3 minutes (median
-     reviewer wall time) and forcing an extra round.
-   - Tests catch the cheap class of defect that the reviewer would otherwise
-     spend minutes finding — and a test failure is far cheaper to fix than a
-     BLOCKED verdict.
+   - Spawn the reviewer subagent `async: true`, then call **`run_precommit`**
+     while it works. The runner schedules itself (no flags): any `lint:fix`
+     script runs FIRST and alone (it edits files, so nothing may read the
+     worktree before it finishes), then lint/typecheck/build/test run in
+     parallel with declaration-order output.
+   - **Why this is safe**: the verdict binds to the worktree fingerprint
+     either way — the worst a race can do is discard a verdict, never ship
+     unverified work. If a repo's checks write files (snapshots, build
+     artifacts) while the reviewer reads, the fingerprint moves and the round
+     repeats: a wasted round, accepted and documented in
+     `docs/parallel-execution-plan.md`.
+   - Precommit still matters for two measured reasons: tests catch the cheap
+     defect class the reviewer would otherwise spend minutes finding (a test
+     failure is far cheaper to fix than a BLOCKED verdict), and a FAIL is
+     cheaper to fix before the expensive judge looks.
 
    FAIL / `NO CHECKS RUN` ⇒ fix and re-run; only then continue to the review.
    `NO CHECKS RUN` is NOT a pass — tell the user real checks are missing.
@@ -136,10 +142,21 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
+   **Waiting-window discipline**: while the reviewer runs (~3 min) and while
+   Copilot waits (up to 20 min), do useful parallel work — other repos'
+   loops, PR description drafts, `[NIT_DEFERRED]` bookkeeping, a triage
+   sweep. Never idle-poll a running subagent.
+
 3. **Review** — spawn an independent reviewer over the current diff
    (`git diff HEAD` + untracked files). The reviewer must NOT be fed your own
    conclusions (fresh eyes only) and must end its output with a fenced JSON
    verdict:
+
+   **Triage first (L1, large diffs)**: for anything but a tiny diff, spawn
+   the `triage` agent (async, cheap: `claude-haiku-4-5` →
+   `deepseek-v4-flash`) over the same diff and hand its findings to the
+   reviewer as input. Triage output carries NO verdict — never feed it to
+   `record_review`; the reviewer owns the verdict.
 
    ```json
    {"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
@@ -206,6 +223,26 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    build/type surfaces: fast mode runs lint + tests, full mode adds typecheck
    and build (and prefers a project's `test` script over `test:unit`).
 
+## Model tiers — cheap models execute, strong models judge
+
+Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
+
+- **L1 cheap/fast** (`triage`, `claude-haiku-4-5` → `deepseek-v4-flash`) —
+  mechanical pre-scan and recon. Advisory only; carries no verdict.
+- **L2 execution** (`fixer`, `claude-sonnet-5` → `deepseek-v4-pro` →
+  `grok-4.5`) — implements findings into a diff; you review and merge it
+  (single writer stays with you).
+- **L3 judgment** (reviewer / adviser / arbiter, `max` thinking) — the only
+  tier whose verdicts may be recorded. Never delegate the verdict to a
+  cheaper model.
+- **Low-risk exception**: a change that is purely docs / formatting /
+  one-line may be reviewed by an L1 agent whose verdict IS recorded.
+  Judging "low-risk" is yours; a misjudged call is a P1 finding for the L3
+  reviewer.
+- **Split review (very large diffs)**: parallel reviewers over disjoint file
+  groups or dimensions; you merge — any BLOCKED wins (worst wins) and the
+  merged result is what gets recorded.
+
 ## Working across several repos
 
 Every repo has its OWN gate: its own review verdict, its own precommit PASS,
@@ -214,8 +251,11 @@ ship gate checks the repo the command actually runs in.
 
 So once a session has edited more than one repo, `record_review` and
 `run_precommit` **require** an explicit `"repo": "<absolute path>"` — they
-refuse to guess. Run the loop per repo: review repo A → `record_review(repo:
-A)` → `run_precommit(repo: A)` → commit A, then the same for B.
+refuse to guess. **Run the loops concurrently**: repos share no state (own
+sidecar, own fingerprint, own verdict), so spawn repo A's reviewer and repo
+B's reviewer in parallel, run both precommits while they work, record each
+verdict against its own repo, and ship each repo when its own gates pass.
+Only the final `declare_done` needs every repo green.
 
 Without that argument the tools used to fall back to the repo you edited LAST,
 and only an edit could move that target. Real consequence: a session that

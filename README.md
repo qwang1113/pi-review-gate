@@ -98,9 +98,9 @@ definitions** — decided up front, not re-selected per task:
 
 | Role | When | Gates? | Model priority (first = preferred) | Thinking |
 |------|------|--------|-------------------------------------|----------|
-| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → GPT-5.6 Sol → Opus 4.8 → GPT-5.5 | `max` |
-| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | GPT-5.6 Sol → Fable 5 → GPT-5.5 → Opus 4.8 | `max` |
-| **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | GPT-5.6 Sol → Fable 5 → GPT-5.5 → Opus 4.8 | `max` |
+| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → Opus 5 → Opus 4.6 → GPT-5.6 Sol → Opus 4.8 → GPT-5.5 | `max` |
+| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | Fable 5 → Opus 5 → Opus 4.6 → GPT-5.5 → Opus 4.8 | `max` |
+| **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | GPT-5.6 Sol → Opus 5 → Opus 4.6 → Fable 5 → GPT-5.5 → Opus 4.8 | `max` |
 
 `thinking` is a single value, not a fallback list; `max` is the highest valid
 pi level (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — pi clamps
@@ -108,6 +108,24 @@ models that lack a level down automatically). Proactively consulting the
 adviser early is cheaper
 than a failed review later, so the extension's per-turn reminder and the
 `review-loop` skill both nudge for it.
+
+### Execution tiers (L1/L2) — cheap models execute, strong models judge
+
+Beyond the L3 judges, two cheaper tiers do the mechanical work; design record
+and numbers in `docs/parallel-execution-plan.md`:
+
+| Tier | Models (first = preferred) | Role | Verdict power |
+|---|---|---|---|
+| **L1 cheap/fast** | `claude-haiku-4-5` → `deepseek-v4-flash` | `agents/triage.md` — diff pre-scan, mechanical checklist, recon | none — advisory input for the reviewer |
+| **L2 execution** | `claude-sonnet-5` → `deepseek-v4-pro` → `grok-4.5` | `agents/fixer.md` — implements findings into a diff the main agent merges | none — output reviewed by the main agent |
+
+Model IDs resolve against the configured providers (`~/.pi/agent/models.json`,
+onekey gateway); `grok-4.5` is configured there even though the read-only
+models-store cache does not list it. Protocol rules (in the `review-loop`
+skill, all default-on): triage findings feed the reviewer but never
+`record_review`; a low-risk change (docs / formatting / one-line) may be
+reviewed by an L1 agent whose verdict IS recorded; very large diffs may be
+split across parallel reviewers, merged worst-wins.
 
 ### "Which model is strongest?" — leaderboard reference for the pins
 
@@ -526,20 +544,23 @@ The loop protocol (also available as the `review-loop` skill):
 
 ```
 edit code (batch related edits — the loop is billed per ROUND, not per line)
-  → call the run_precommit tool FIRST                     # extension spawns the trusted runner
-  → run an independent review (subagent / codex MCP / second model)
+  → spawn the reviewer (async) + call run_precommit — they run CONCURRENTLY
   → call record_review with the FULL reviewer output      # all fences parsed, worst wins
   → BLOCKED? fix everything, then start again from precommit
   → READY?  call declare_done                             # re-validated server-side
   → ship    (git commit now passes the gate)
 ```
 
-**Why precommit runs before the review.** The runner executes `lint`/`lint:fix`
-in *both* modes, and `lint:fix` edits files. Every edit re-arms the gate
-(`READY → PENDING`), so a review obtained before the runner reformats anything
-is thrown away — a wasted round at ~3 min of reviewer wall time. Running the
-cheap, deterministic checks first also keeps the expensive judge from spending
-minutes on defects a 15s test run reports for free.
+**Why the review and precommit may overlap.** The runner schedules itself
+(no flags): any `lint:fix` script runs FIRST — it edits files, so the
+worktree stabilizes before anything reads it — then the remaining checks
+(lint/typecheck/build/test) run in parallel with declaration-order output.
+The reviewer therefore runs concurrently (spawn it `async`, then call
+`run_precommit`), and the verdict binds to the worktree fingerprint either
+way: the worst a race can do is discard a verdict — never ship unverified
+work. A FAIL still takes priority over the review: fix it before spending
+the expensive judge's time. Design record and measured numbers:
+`docs/parallel-execution-plan.md`.
 
 The reviewer should end with a fenced JSON verdict:
 
@@ -1220,8 +1241,15 @@ second line of defence.
 | Per-turn prompt fingerprint | ~65 ms (56 files) / ~575 ms (9k files) | Skipped entirely when the session tracks no change; otherwise memoized behind `advisoryChangeToken()` (~10 ms / ~47 ms) |
 | Edit-time L6 label check | ~45 ms + one ~2 s model call | The model call is memoized per label set |
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
-| `run_precommit` (this repo) | ~100 s | Dominated by the two timing loops above; see the note on why they are not reducible |
-| **A review round** | **~3 min reviewer + precommit run** | Dominates everything above by two orders of magnitude |
+| `run_precommit` (this repo) | ~100 s | Dominated by the two timing loops above; typecheck now runs CONCURRENTLY with `npm test` (parallel scheduling, declaration-order output) — the timing loops themselves are not reducible |
+| **A review round** | **~3 min reviewer ⇄ precommit, overlapped** | The reviewer (async) and precommit run concurrently; see `docs/parallel-execution-plan.md` |
+
+**Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
+ran six consecutive times on this repo (typecheck concurrent with `npm test`,
+which contains the two timing regressions) — all six PASS; wall clock
+138–157 s, on par with the serial baseline (`npm test` ~137 s + typecheck
+~2 s). The parallel win lands on multi-step repos; see
+`docs/parallel-execution-plan.md` §7.
 
 The practical consequence: batching edits into fewer, larger review rounds
 saves far more wall time than any micro-optimization here, because the loop is
