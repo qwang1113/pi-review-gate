@@ -293,3 +293,243 @@ test("human mode (no --receipt) keeps the original compact output — no streami
   assert.doesNotMatch(out, /◀ test/);
   assert.doesNotMatch(out, /⏭ lint/);
 });
+
+// ---------------------------------------------------------------------------
+// Project-level step configuration (`.pi/review-gate.json` → `precommit`)
+// ---------------------------------------------------------------------------
+
+import { mkdirSync } from "node:fs";
+
+function writeReviewGateConfig(dir: string, content: string): void {
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "review-gate.json"), content);
+}
+
+test("config: configured command replaces the detected step and marks the receipt", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 1" } });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { typecheck: { command: "exit 0" } },
+  }));
+  const { code, receipt, out } = runReceipt(dir);
+  assert.equal(code, 0);
+  assert.equal(receipt!.verdict, "PASS");
+  // config.source travels with the receipt so the extension can name it.
+  assert.deepEqual(receipt!.config, { source: "project", path: join(dir, ".pi", "review-gate.json") });
+  const typecheck = (receipt!.steps as Array<Record<string, unknown>>).find((s) => s.name === "typecheck");
+  assert.equal(typecheck!.status, "pass");
+  assert.equal(typecheck!.source, "config");
+  // The unconfigured test step still used default detection (and failed).
+  const test = (receipt!.steps as Array<Record<string, unknown>>).find((s) => s.name === "test");
+  assert.equal(test!.source, "detected");
+  assert.match(out, /config: project/);
+});
+
+test("config: null / {skip:true} steps are explicitly skipped with a reason", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 0" } });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { lint: null, typecheck: { skip: true, command: "exit 1" } },
+  }));
+  const { code, receipt, out } = runReceipt(dir);
+  assert.equal(code, 0);
+  assert.match(out, /⏭ lint — skipped \(configured skip\)/);
+  assert.match(out, /⏭ typecheck — skipped \(configured skip\)/);
+  const names = (receipt!.steps as Array<{ name: string }>).map((s) => s.name);
+  assert.deepEqual(names, ["lint", "typecheck", "build", "test"], "all four steps are declared, skipped ones included");
+});
+
+test("config: a configured script missing from package.json skips the step (never a silent fallback)", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: {} });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { typecheck: { script: "nope" } },
+  }));
+  const { code, out } = runReceipt(dir);
+  assert.equal(code, 2); // nothing runnable left
+  assert.match(out, /⏭ typecheck — skipped \(configured script "nope" not found in package.json\)/);
+  assert.match(out, /## Overall: ⚠️ NO CHECKS RUN/);
+});
+
+test("config: fast test with narrow:false runs the complete command → testScope full", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 0" } });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { test: { fast: { script: "test", narrow: false } } },
+  }));
+  const { code, receipt, out } = runReceipt(dir);
+  assert.equal(code, 0);
+  assert.equal(receipt!.testScope, "full");
+  assert.match(out, /narrow disabled/);
+  // Narrowing the fast lane is why it exists — disabling it must be visible.
+  const test = (receipt!.steps as Array<Record<string, unknown>>).find((s) => s.name === "test");
+  assert.equal(test!.status, "pass");
+  assert.equal(test!.source, "config");
+});
+
+test("config: fast test command that cannot be narrowed runs in full → testScope full (never dropped)", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "sh -c 'exit 0'" } });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { test: { fast: { script: "test" } } },
+  }));
+  const { code, receipt, out } = runReceipt(dir);
+  assert.equal(code, 0);
+  assert.equal(receipt!.testScope, "full");
+  assert.match(out, /narrow not applicable/);
+});
+
+test("config: corrupt JSON falls back to the default detection with a loud warning", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: {} });
+  writeReviewGateConfig(dir, "{broken");
+  const { code, receipt, out } = runReceipt(dir);
+  assert.equal(code, 2); // same as with no config at all
+  assert.equal(receipt!.verdict, "NO_CHECKS_RUN");
+  assert.deepEqual(receipt!.config, { source: "default", path: join(dir, ".pi", "review-gate.json") });
+  assert.match(out, /\[precommit-config\]/);
+});
+
+test("config: full lane uses its own configured test command; fast lane falls back to detection", () => {
+  const dir = makeDir({
+    name: "t", version: "1.0.0",
+    scripts: { test: "exit 1", "test:unit": "exit 0", lint: "exit 0" },
+  });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { test: { full: { script: "test" } } },
+  }));
+  // fast: full lane unconfigured → default detection picks test:unit, which is
+  // a bare single command with no derivable related set → dropped as skipped
+  // (lint is the other runnable check, so the drop does not trigger the
+  // only-check full-suite fallback).
+  const fast = runReceipt(dir);
+  assert.equal(fast.code, 0);
+  assert.equal(fast.receipt!.testScope, "skipped");
+  // full: configured to use the failing `test` script → FAIL.
+  const full = runReceipt(dir, ["--mode", "full"]);
+  assert.equal(full.code, 1);
+  assert.equal(full.receipt!.verdict, "FAIL");
+  assert.equal(full.receipt!.testScope, "full");
+});
+
+test("config: top-level \"test\": null skips BOTH lanes without crashing", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 1" } });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { typecheck: { command: "exit 0" }, test: null },
+  }));
+  // Regression: reading `cfg.fast` on a top-level null crashed the runner.
+  const fast = runReceipt(dir);
+  assert.equal(fast.code, 0);
+  assert.equal(fast.receipt!.verdict, "PASS");
+  assert.equal(fast.receipt!.testScope, "skipped");
+  const test = (fast.receipt!.steps as Array<Record<string, unknown>>).find((s) => s.name === "test");
+  assert.equal(test!.status, "skip");
+  assert.match(test!.reason as string, /configured skip/);
+  // full lane must not violate "mode full ⇒ testScope full".
+  const full = runReceipt(dir, ["--mode", "full"]);
+  assert.equal(full.code, 0);
+  assert.equal(full.receipt!.verdict, "PASS");
+  assert.equal(full.receipt!.testScope, "full");
+});
+
+test("config: full lane + skipped test reports testScope full (protocol invariant)", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 1" } });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { typecheck: { command: "exit 0" }, test: { skip: true } },
+  }));
+  const { code, receipt } = runReceipt(dir, ["--mode", "full"]);
+  assert.equal(code, 0);
+  // Receipt must be accepted by validatePrecommitReceipt: mode full ⇒ full.
+  assert.equal(receipt!.mode, "full");
+  assert.equal(receipt!.testScope, "full");
+});
+
+test("config: full lane + configured script missing reports testScope full, not a protocol ERROR", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: {} });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { typecheck: { command: "exit 0" }, test: { script: "nope" } },
+  }));
+  const { code, receipt } = runReceipt(dir, ["--mode", "full"]);
+  assert.equal(code, 0);
+  assert.equal(receipt!.verdict, "PASS");
+  assert.equal(receipt!.testScope, "full");
+});
+
+test("config: no package.json + partial config still runs the ecosystem fallback test", () => {
+  // Cargo project with a configured lint command: the unconfigured test step
+  // must fall back to the ecosystem detection, never be silently dropped.
+  const dir = makeDir();
+  writeFileSync(join(dir, "Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\n");
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { lint: { command: "exit 0" } },
+  }));
+  const { receipt, out } = runReceipt(dir);
+  const names = (receipt!.steps as Array<{ name: string }>).map((s) => s.name);
+  assert.ok(names.includes("cargo-test"), `ecosystem fallback missing from steps: ${names.join(",")}`);
+  assert.equal(receipt!.testScope, "full");
+  assert.match(out, /cargo test --quiet/);
+});
+
+test("config: no package.json + configured test command replaces the ecosystem fallback", () => {
+  const dir = makeDir();
+  writeFileSync(join(dir, "Cargo.toml"), "[package]\nname = \"t\"\nversion = \"0.1.0\"\n");
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { test: { fast: { command: "exit 0" } } },
+  }));
+  const { code, receipt } = runReceipt(dir);
+  assert.equal(code, 0);
+  assert.equal(receipt!.verdict, "PASS");
+  const names = (receipt!.steps as Array<{ name: string }>).map((s) => s.name);
+  assert.ok(!names.includes("cargo-test"), `ecosystem fallback should be replaced: ${names.join(",")}`);
+  assert.equal(receipt!.testScope, "full");
+});
+
+test("config: fast test narrowing SUCCEEDS → testScope related (entry.body wiring)", () => {
+  // Regression (P1-A): configured narrow attempts were dropped because the
+  // entry lacked `body`; narrowTestStep re-parses entry.body and saw null.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "vitest run", lint: "exit 0" } });
+  const binDir = join(dir, "node_modules", ".bin");
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, "vitest"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  // A git repo with a changed source file, so the related set is derivable.
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "init"], { cwd: dir });
+  writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { test: { fast: { script: "test" } } },
+  }));
+  const { code, receipt, out } = runReceipt(dir);
+  assert.equal(code, 0);
+  assert.equal(receipt!.verdict, "PASS");
+  assert.equal(receipt!.testScope, "related");
+  const test = (receipt!.steps as Array<Record<string, unknown>>).find((s) => s.name === "test");
+  assert.equal(test!.status, "pass");
+  assert.equal(test!.source, "config");
+  assert.match(out, /vitest related/);
+});
+
+test("config: lane-only narrow:false keeps the detected test and runs it in full", () => {
+  // Regression (P1-B): { narrow: false } without command/script silently
+  // dropped the whole suite (fail-open) instead of configuring the lane.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 0", lint: "exit 0" } });
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { test: { fast: { narrow: false } } },
+  }));
+  const { code, receipt } = runReceipt(dir);
+  assert.equal(code, 0);
+  assert.equal(receipt!.verdict, "PASS");
+  assert.equal(receipt!.testScope, "full");
+  const test = (receipt!.steps as Array<Record<string, unknown>>).find((s) => s.name === "test");
+  assert.equal(test!.status, "pass");
+  assert.equal(test!.source, "detected");
+  // The failing-suite case must FAIL, never pass (fail-open guard).
+  const bad = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 1", lint: "exit 0" } });
+  writeReviewGateConfig(bad, JSON.stringify({
+    precommit: { test: { fast: { narrow: false } } },
+  }));
+  const badRun = runReceipt(bad);
+  assert.equal(badRun.code, 1);
+  assert.equal(badRun.receipt!.verdict, "FAIL");
+  // full lane too: the same config must run the detected suite.
+  const full = runReceipt(bad, ["--mode", "full"]);
+  assert.equal(full.code, 1);
+  assert.equal(full.receipt!.verdict, "FAIL");
+});

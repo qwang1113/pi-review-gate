@@ -124,6 +124,80 @@ it runs in full rather than leaving the run with zero checks.
 The git hooks mirror the split exactly: `pre-commit` accepts any PASS,
 `pre-push` re-execs it with `REVIEW_GATE_REQUIRE_FULL=1`.
 
+### Project-level step configuration (`.pi/review-gate.json`)
+
+A project can override which commands the runner executes per step — useful
+when the default detection (package.json script priority table, ecosystem
+fallbacks) does not match the project's actual commands. The `precommit`
+section of `.pi/review-gate.json` is parsed per step; a missing config file,
+unparseable JSON, or an invalid section falls back to the default detection
+unchanged (fail-safe — a broken config can never change what the gate runs):
+
+```jsonc
+{
+  "precommit": {
+    "lint": "lint:fix",                 // string = package.json script name
+    "typecheck": { "command": "tsc --noEmit" },  // raw shell command
+    "build": null,                      // null = explicitly skipped
+    "test": {
+      "fast": { "script": "test:unit", "narrow": true },
+      "full": { "command": "yarn test" }
+    }
+  }
+}
+```
+
+- Each step (`lint` / `typecheck` / `build` / `test`) accepts: a string
+  (package.json script name), `{ "script": "name" }`, `{ "command": "..." }`
+  (run as-is, works without package.json), `null` or `{ "skip": true }`
+  (explicitly skip), or omit it (default detection for that step). When both
+  `command` and `script` are present, `command` wins.
+- `test` may also be written per lane as `{ "fast": ..., "full": ... }`; a
+  missing lane falls back to default detection.
+- `narrow` only affects the **fast** test lane: `false` runs the configured
+  command in full (testScope `full` — this fast PASS may then authorize a
+  push, because nothing was narrowed); `true`/omitted tries to narrow and,
+  when the command is not a single jest/vitest invocation, runs it in full
+  rather than dropping it — an explicitly configured command is executed,
+  never silently skipped. Only the default (unconfigured) fast lane drops the
+  test step when narrowing is impossible.
+- A configured `script` that does not exist in package.json skips that step
+  with a visible reason in the log (never a silent fallback).
+- **Skipping the test step is lane-honest**: `"test": null` / `{ "skip": true }`
+  (or a missing configured script) reports `skipped` on the fast lane but
+  `full` on the full lane — a `full` run covers the same (config-diminished)
+  set, exactly like a project with no test script at all. This keeps the
+  protocol invariant "mode full ⇒ testScope full" intact; a push is then
+  authorized on the checks that did run.
+- **No package.json**: the ecosystem fallback (Cargo/go/pytest/deno/just/make)
+  still applies to an unconfigured test step under a partial config — a
+  partial config never silently drops the project's real test suite. A
+  configured `test` command replaces it.
+- `lint:fix` keeps its special scheduling (runs first, alone) only when it is
+  configured as the `lint:fix` script; a raw `command` runs in parallel with
+  the other checks.
+
+The status bar shows where the commands come from (`precommit: … · cfg` for
+an active project section, `… · auto` for the default detection) and the
+runner's summary line and the `run_precommit` reply carry the same
+`config: project|default` tag.
+
+> Note: `.pi/` is typically git-ignored (a common global rule ignores `.pi*`),
+> so the config is a per-machine local file — write it once per clone; a
+> missing file simply means "default detection".
+
+### Generating the config: `/gate-init`
+
+Run `/gate-init` (when the agent is idle) to generate `.pi/review-gate.json`
+interactively: the agent detects the project's checks (package.json scripts,
+or ecosystem markers when there is no package.json), starts from any existing
+config, and asks you — one step at a time — to confirm or edit each step's
+command (script name, raw command, or explicit skip) plus the fast test's
+`narrow` flag. After confirmation it writes only the `precommit` section and
+reports: the config takes effect immediately (the runner reads the file on
+every run), the status bar shows `precommit: cfg`, and `/reload` is needed for
+the `cfg`/`auto` indicator to appear in the current session.
+
 ### Per-step result cache
 
 Each step records the digest of the inputs it consumes; a later run whose

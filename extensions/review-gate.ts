@@ -810,7 +810,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       parts.push(`review: ${state.review.verdict}`);
       parts.push(
         `precommit: ${state.precommit.verdict}` +
-        (state.precommit.verdict === "PASS" && state.precommit.testScope !== "full" ? " (fast)" : ""),
+        (state.precommit.verdict === "PASS" && state.precommit.testScope !== "full" ? " (fast)" : "") +
+        // Where the precommit commands come from: project config (`.pi/review-gate.json`
+        // `precommit` section) or the default detection.
+        ` · ${projectConfig?.precommit ? "cfg" : "auto"}`,
       );
       parts.push(`round ${state.rounds.length}/${state.maxRounds}`);
     }
@@ -2195,7 +2198,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       // Naming the lane in the reply is what stops the agent from discovering
       // at push time that its PASS does not qualify.
-      const lane = `[lane ${mode}, tests: ${outcome.testScope ?? "unknown"}]`;
+      const lane = `[lane ${mode}, tests: ${outcome.testScope ?? "unknown"}${outcome.configSource ? `, config: ${outcome.configSource}` : ""}]`;
       const pushNote = outcome.verdict === "PASS" && outcome.testScope !== "full"
         ? ' This clears a `git commit`; `git push` / `gh pr create` need a run with mode "full".'
         : "";
@@ -3612,8 +3615,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
     // Per-project overrides (sd0x-dev-flow R6): maxRounds is clamped to [3,50]
     // by the loader, so a forged config cannot make the cap unreachable.
-    projectConfig = loadProjectConfig(cwd);
+    // Anchored at the repo ROOT (matches the runner's own .pi lookup).
+    projectConfig = loadProjectConfig(primaryRepoRoot);
     state.maxRounds = projectConfig.maxRounds;
+    // Reflect the precommit config source in the status bar right away.
+    updateWidget(ctx);
 
     // USER REQUIREMENT — a session that cannot show a dialog runs in normal
     // mode, period. Every enforced mode now depends on dialogs (loop-goal
@@ -4107,6 +4113,12 @@ interface PrecommitOutcome {
    * the extension could not trust reports no coverage claim either.
    */
   testScope?: TestScope;
+  /**
+   * Where the step commands came from: "project" (`.pi/review-gate.json`
+   * `precommit` section) or "default" (package.json / ecosystem detection).
+   * Diagnostics only — never part of the verdict. Absent for ERROR.
+   */
+  configSource?: "project" | "default";
   /** Per-step timings for `.pi/gate-timings.jsonl` (diagnostics only). */
   timings?: StepTiming[];
   /** Runner-measured wall clock for the whole run. */
@@ -4314,16 +4326,19 @@ async function runTrustedPrecommit(
     const failedSteps = failedStepNames(parsed);
     const timings = stepTimings(parsed);
     const totalMs = receiptTotalMs(parsed);
+    const cfg = (parsed as Record<string, unknown>).config as { source?: unknown } | undefined;
+    const configSource: "project" | "default" | undefined =
+      cfg && cfg.source === "project" ? "project" : "default";
     if (v.verdict === "PASS") {
       if (!fingerprint) return fail("worktree fingerprint unavailable post-run");
       return {
         verdict: "PASS", checksRun: v.checksRun, checksFailed: v.checksFailed,
-        testScope: v.testScope, fingerprint, logPath, failedSteps, timings, totalMs,
+        testScope: v.testScope, configSource, fingerprint, logPath, failedSteps, timings, totalMs,
       };
     }
     return {
       verdict: v.verdict, checksRun: v.checksRun, checksFailed: v.checksFailed,
-      testScope: v.testScope, fingerprint, error: v.error, logPath, failedSteps, timings, totalMs,
+      testScope: v.testScope, configSource, fingerprint, error: v.error, logPath, failedSteps, timings, totalMs,
     };
   } catch (e) {
     return fail(`runner spawn failed: ${(e as Error).message}`);

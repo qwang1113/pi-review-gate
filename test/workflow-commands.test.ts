@@ -18,6 +18,7 @@ const EXPECTED = [
   "create-pr",
   "load-pr-review",
   "watch-ci",
+  "gate-init",
 ];
 
 test("workflow command catalog exposes the high-value sd0x-dev-flow ports", () => {
@@ -77,4 +78,25 @@ test("analysis helpers explicitly avoid mutation by default", () => {
   assert.match(buildWorkflowPrompt("risk-assess"), /analysis-only: do not edit or ship/i);
   assert.match(buildWorkflowPrompt("load-pr-review"), /analysis-only/);
   assert.match(buildWorkflowPrompt("watch-ci"), /Do not push/);
+});
+
+test("gate-init prompts the interactive precommit-config generation flow", () => {
+  const prompt = buildWorkflowPrompt("gate-init");
+  // Detection: package.json scripts + ecosystem markers.
+  assert.match(prompt, /package.json scripts/);
+  assert.match(prompt, /lint:fix\/lint/);
+  assert.match(prompt, /Cargo\.toml/);
+  // Per-step confirmation, one at a time, accepting script/command/skip.
+  assert.match(prompt, /ONE STEP AT A TIME/);
+  assert.match(prompt, /raw shell command/);
+  assert.match(prompt, /explicit skip/);
+  assert.match(prompt, /narrow/);
+  // Starts from an existing config; writes ONLY the precommit section.
+  assert.match(prompt, /existing \.pi\/review-gate\.json/);
+  assert.match(prompt, /ONLY the confirmed precommit section/);
+  // Effect + status-bar disclosure, no other files touched.
+  assert.match(prompt, /takes effect immediately/);
+  assert.match(prompt, /precommit: cfg/);
+  assert.match(prompt, /\/reload/);
+  assert.match(prompt, /Do not change any other file/);
 });
