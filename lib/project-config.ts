@@ -116,6 +116,93 @@ export function defaultCopilotReviewConfig(): CopilotReviewConfig {
   return { enabled: true, maxRounds: COPILOT_MAX_ROUNDS_DEFAULT };
 }
 
+// --------------------------------------------------------------------------
+// precommit step configuration (`.pi/review-gate.json` → `precommit`)
+//
+// Lets a project override which commands the precommit runner executes for
+// fast/full lanes. Each step may be:
+//   - omitted           → default detection (package.json script priority table)
+//   - null              → explicitly skipped
+//   - "script-name"     → shorthand for { "script": "script-name" }
+//   - { "script" }      → run `<pm> <script>` (must exist in package.json)
+//   - { "command" }     → raw shell command, run as-is (works without package.json)
+//   - { "skip": true }  → explicitly skipped
+// `narrow` is only meaningful on the FAST test lane (see scripts/precommit-config.mjs).
+// When `command` and `script` are both present, `command` wins.
+// --------------------------------------------------------------------------
+
+export interface PrecommitStepConfig {
+  /** package.json script name to run (resolved like the default detection). */
+  script?: string;
+  /** Raw shell command — takes precedence over `script`. */
+  command?: string;
+  /** Explicitly skip this check. */
+  skip?: boolean;
+  /** Fast test lane only: narrow to related tests (default: try, fall back to full). */
+  narrow?: boolean;
+}
+
+/** Per-lane test configuration; a missing lane falls back to default detection. */
+export interface PrecommitTestConfig {
+  fast?: PrecommitStepConfig | null;
+  full?: PrecommitStepConfig | null;
+}
+
+/**
+ * A project's precommit step overrides. `null` (the default) means "no
+ * project configuration — run the default detection logic" for the whole
+ * section; an individual step being absent means "default for that step".
+ */
+export interface PrecommitConfig {
+  lint?: PrecommitStepConfig | null;
+  typecheck?: PrecommitStepConfig | null;
+  build?: PrecommitStepConfig | null;
+  test?: PrecommitTestConfig | PrecommitStepConfig | null;
+}
+
+export function parsePrecommitStep(value: unknown): PrecommitStepConfig | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "string") {
+    const s = value.trim();
+    return s ? { script: s } : undefined;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) return undefined;
+  const o = value as Record<string, unknown>;
+  if (o.skip === true) return { skip: true }; // skip wins over any command
+  const out: PrecommitStepConfig = {};
+  if (typeof o.command === "string" && o.command.trim()) out.command = o.command;
+  else if (typeof o.script === "string" && o.script.trim()) out.script = o.script;
+  if (typeof o.narrow === "boolean") out.narrow = o.narrow;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export function parsePrecommitConfig(raw: Record<string, unknown>): PrecommitConfig {
+  const cfg: PrecommitConfig = {};
+  for (const key of ["lint", "typecheck", "build"] as const) {
+    const step = parsePrecommitStep(raw[key]);
+    if (step !== undefined) cfg[key] = step;
+  }
+  const test = raw.test;
+  if (test !== undefined) {
+    const isLanes =
+      typeof test === "object" && test !== null && !Array.isArray(test) &&
+      ((test as Record<string, unknown>).fast !== undefined || (test as Record<string, unknown>).full !== undefined);
+    if (isLanes) {
+      const lanes: PrecommitTestConfig = {};
+      const fast = parsePrecommitStep((test as Record<string, unknown>).fast);
+      const full = parsePrecommitStep((test as Record<string, unknown>).full);
+      if (fast !== undefined) lanes.fast = fast;
+      if (full !== undefined) lanes.full = full;
+      if (Object.keys(lanes).length > 0) cfg.test = lanes;
+    } else {
+      const step = parsePrecommitStep(test);
+      if (step !== undefined) cfg.test = step;
+    }
+  }
+  return cfg;
+}
+
 export interface ProjectConfig {
   maxRounds: number;
   /** R10: inject the strategic-reset checklist once near the round cap. */
@@ -137,6 +224,12 @@ export interface ProjectConfig {
   arbiter: ArbiterConfig;
   /** L7 post-PR Copilot review loop — see CopilotReviewConfig. */
   copilotReview: CopilotReviewConfig;
+  /**
+   * Precommit step overrides — see PrecommitConfig. `null` (default) means
+   * the runner uses its default detection (package.json scripts / ecosystem
+   * fallback) unchanged.
+   */
+  precommit: PrecommitConfig | null;
 }
 
 export function defaultProjectConfig(): ProjectConfig {
@@ -154,6 +247,7 @@ export function defaultProjectConfig(): ProjectConfig {
     llmGuards: defaultLlmGuardsConfig(),
     arbiter: defaultArbiterConfig(),
     copilotReview: defaultCopilotReviewConfig(),
+    precommit: null,
   };
 }
 
@@ -211,6 +305,10 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
       // Clamp to a sane range so a forged huge value can't make re-rolling free.
       cfg.arbiter.maxPerSession = Math.min(10, Math.max(1, ab.maxPerSession));
     }
+  }
+  if (typeof obj.precommit === "object" && obj.precommit !== null && !Array.isArray(obj.precommit)) {
+    const pc = parsePrecommitConfig(obj.precommit as Record<string, unknown>);
+    if (Object.keys(pc).length > 0) cfg.precommit = pc;
   }
   if (typeof obj.copilotReview === "object" && obj.copilotReview !== null && !Array.isArray(obj.copilotReview)) {
     const cr = obj.copilotReview as Record<string, unknown>;

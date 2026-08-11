@@ -257,3 +257,94 @@ test("arbiter invalid model / non-object keeps defaults", () => {
     assert.deepEqual(loadProjectConfig(b).arbiter, defaultProjectConfig().arbiter, JSON.stringify(bad));
   }
 });
+
+// ---------------------------------------------------------------------------
+// precommit section — per-step overrides, fail-safe fallback per step
+// ---------------------------------------------------------------------------
+
+test("no precommit section → cfg.precommit === null (default behavior)", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({ maxRounds: 5 }));
+  assert.equal(loadProjectConfig(d).precommit, null);
+  assert.equal(defaultProjectConfig().precommit, null);
+});
+
+test("precommit step shapes: string / null / {script} / {command} / {skip}", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({
+    precommit: {
+      lint: "lint:fix",
+      typecheck: { command: "tsc --noEmit" },
+      build: null,
+    },
+  }));
+  const pc = loadProjectConfig(d).precommit;
+  assert.ok(pc !== null);
+  assert.deepEqual(pc.lint, { script: "lint:fix" });
+  assert.deepEqual(pc.typecheck, { command: "tsc --noEmit" });
+  assert.equal(pc.build, null);
+  assert.equal(pc.test, undefined);
+});
+
+test("precommit test per-lane shape with narrow; command wins over script", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({
+    precommit: {
+      test: {
+        fast: { script: "test:unit", narrow: false },
+        full: { command: "yarn test", script: "test" },
+      },
+    },
+  }));
+  const pc = loadProjectConfig(d).precommit;
+  assert.ok(pc !== null);
+  assert.deepEqual(pc.test, {
+    fast: { script: "test:unit", narrow: false },
+    full: { command: "yarn test" },
+  });
+});
+
+test("precommit test single-step shape applies to both lanes", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({ precommit: { test: { command: "yarn test" } } }));
+  const pc = loadProjectConfig(d).precommit;
+  assert.ok(pc !== null);
+  assert.deepEqual(pc.test, { command: "yarn test" });
+});
+
+test("precommit invalid shapes fall back per step (independent, fail-safe)", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({
+    precommit: {
+      lint: 42,                    // invalid → ignored
+      typecheck: "typecheck",      // valid → kept
+      build: { script: 7 },        // invalid script type → ignored
+      test: { fast: 3 },           // invalid fast → ignored; no full → nothing
+    },
+  }));
+  const pc = loadProjectConfig(d).precommit;
+  assert.ok(pc !== null);
+  assert.equal(pc.lint, undefined);
+  assert.deepEqual(pc.typecheck, { script: "typecheck" });
+  assert.equal(pc.build, undefined);
+  assert.equal(pc.test, undefined);
+});
+
+test("precommit: whole section with no usable steps → null (default behavior)", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({ precommit: { lint: 42, build: [] } }));
+  assert.equal(loadProjectConfig(d).precommit, null);
+  for (const bad of [null, [], "on", 1]) {
+    const b = makeTemp();
+    writeConfig(b, JSON.stringify({ precommit: bad }));
+    assert.equal(loadProjectConfig(b).precommit, null, JSON.stringify(bad));
+  }
+});
+
+test("precommit corrupt JSON keeps every other field default and precommit null", () => {
+  const d = makeTemp();
+  writeConfig(d, "{broken");
+  const cfg = loadProjectConfig(d);
+  assert.equal(cfg.precommit, null);
+  assert.equal(cfg.maxRounds, DEFAULT_MAX_ROUNDS);
+});

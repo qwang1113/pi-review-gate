@@ -132,6 +132,23 @@ export const WORKFLOW_COMMANDS = {
       invocation,
     ),
   },
+  "gate-init": {
+    description: "Interactively generate .pi/review-gate.json precommit configuration",
+    usage: "/gate-init",
+    allowsExecute: false,
+    prompt: (invocation) => withInvocation(
+      "Generate the project's .pi/review-gate.json precommit configuration by INTERACTIVE GUIDANCE. " +
+      "First detect the project's checks: read package.json scripts for lint:fix/lint, typecheck, build, test:unit/test; " +
+      "if there is no package.json, probe for ecosystem markers (Cargo.toml, go.mod, pyproject.toml/setup.py, deno.json, justfile, Makefile). " +
+      "Read the existing .pi/review-gate.json if present and start from its current values. " +
+      "Then, ONE STEP AT A TIME, ask the user to confirm or edit the suggested value for each step (lint, typecheck, build, test.fast, test.full) " +
+      "— accept a package.json script name, a raw shell command, or an explicit skip; when the fast test uses a script, ask whether to keep narrowing (narrow). " +
+      "After every step is confirmed, write .pi/review-gate.json containing ONLY the confirmed precommit section (no other fields) and tell the user: " +
+      "the config takes effect immediately (the runner reads it on every run), the status bar shows precommit: cfg, and the extension needs /reload for the cfg/auto indicator to appear. " +
+      "Do not change any other file.",
+      invocation,
+    ),
+  },
 } satisfies Record<string, WorkflowCommand>;
 
 export type WorkflowCommandName = keyof typeof WORKFLOW_COMMANDS;

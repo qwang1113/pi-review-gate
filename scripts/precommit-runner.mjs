@@ -43,6 +43,7 @@ import { execSync, execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { readPrecommitConfig } from "./precommit-config.mjs";
 import {
   detectsMdConsumingBuild,
   intersectWithScriptPaths,
@@ -88,6 +89,14 @@ const nonce = argOf("--nonce", null);
 // the doc-consuming-framework probe) is anchored here rather than on `cwd`.
 const repoRoot = repoRootOf(cwd) ?? cwd;
 
+// Project-level step overrides (`.pi/review-gate.json` → `precommit`).
+// `source: "default"` keeps the default detection below byte-for-byte;
+// `invalid` is diagnostics-only (the run still uses the default logic).
+const pc = readPrecommitConfig(repoRoot);
+if (pc.invalid) {
+  console.error(`⚠️  [precommit-config] ${pc.path}: ${pc.invalid} — using default detection`);
+}
+
 const steps = [];
 
 // Streaming diagnostics (receipt mode only).
@@ -123,7 +132,7 @@ const pending = []; // declaration-order slots; null until that step finished
 let nextToPresent = 0;
 
 function present(idx, lines, step) {
-  pending[idx] = { lines, step };
+  pending[idx] = { lines, step: { ...step, source: plan[idx]?.source ?? "detected" } };
   while (nextToPresent < pending.length && pending[nextToPresent]) {
     const unit = pending[nextToPresent];
     for (const line of unit.lines) stream(line);
@@ -267,9 +276,54 @@ function collectStep(stepName, scriptNames) {
   }
 
   anyRan = true;
-  const entry = { name: stepName, command: `${runPrefix} ${found}`, isFix: found === "lint:fix", idx, script: found, body };
+  const entry = { name: stepName, command: `${runPrefix} ${found}`, isFix: found === "lint:fix", idx, script: found, body, source: "detected" };
   plan.push(entry);
   return entry;
+}
+
+/**
+ * Collect one non-test step under project config. `configured` comes from
+ * `.pi/review-gate.json`; `undefined` means "default detection for this step".
+ * A configured script that does not exist in package.json skips the step with
+ * a reason (fail-safe — the config never invents a command to run).
+ */
+function collectConfigured(stepName, scriptNames, configured) {
+  const idx = plan.length;
+  if (configured === undefined) return collectStep(stepName, scriptNames);
+  if (configured === null || configured.skip === true) {
+    plan.push({ name: stepName, command: null, reason: "configured skip", idx, source: "config" });
+    return null;
+  }
+  if (typeof configured.command === "string" && configured.command !== "") {
+    const entry = { name: stepName, command: configured.command, isFix: false, idx, source: "config" };
+    plan.push(entry);
+    anyRan = true;
+    return entry;
+  }
+  if (typeof configured.script === "string" && configured.script !== "") {
+    const scripts = pkg?.scripts ?? {};
+    if (typeof scripts[configured.script] === "string") {
+      const entry = {
+        name: stepName,
+        command: `${runPrefix} ${configured.script}`,
+        isFix: configured.script === "lint:fix",
+        idx,
+        source: "config",
+      };
+      plan.push(entry);
+      anyRan = true;
+      return entry;
+    }
+    plan.push({
+      name: stepName,
+      command: null,
+      reason: `configured script "${configured.script}" not found in package.json`,
+      idx,
+      source: "config",
+    });
+    return null;
+  }
+  return collectStep(stepName, scriptNames);
 }
 
 /**
@@ -371,6 +425,127 @@ function narrowTestStep(entry) {
   return { testScope: "related", note: `${related.length} related test file(s)` };
 }
 
+/**
+ * Collect the test step under project config (see precommit-config.mjs for
+ * the normalized shapes). Lane semantics, agreed with the user:
+ *   - a configured FAST test that cannot be narrowed (compound command,
+ *     non-jest/vitest runner, missing bin, or `narrow: false`) runs the
+ *     configured command IN FULL with testScope "full" — an explicitly
+ *     configured command is executed, never silently dropped;
+ *   - when narrowing IS attempted and yields no related tests, the step is
+ *     dropped like the default lane (testScope "skipped").
+ */
+function collectTestConfigured() {
+  const cfg = pc.steps.test;
+  // `null` at the top level means "explicitly skip the test step in BOTH
+  // lanes" — it must be handled BEFORE the lanes probe (reading `cfg.fast`
+  // on null would crash).
+  const step = cfg === null ? null
+    : cfg === undefined ? undefined
+    : (typeof cfg.fast !== "undefined" || typeof cfg.full !== "undefined"
+      ? (mode === "fast" ? cfg.fast : cfg.full)
+      : cfg);
+  const idx = plan.length;
+  // An object with neither `command` nor `script` (e.g. { narrow: false })
+  // still configures the LANE: keep its narrow flag and use default detection
+  // for the command — an explicit narrow:false must never silently drop the
+  // detected test suite (fail-open), and a bare narrow:true is exactly the
+  // default behavior anyway.
+  const laneOnlyNarrow = step !== null && typeof step === "object" && step.skip !== true &&
+    typeof step.command !== "string" && typeof step.script !== "string";
+  const narrowFlag = laneOnlyNarrow && step.narrow === false ? false : undefined;
+  const effectiveStep = laneOnlyNarrow ? undefined : step;
+  if (effectiveStep === undefined) {
+    // Lane not configured → default detection + default narrowing. Without
+    // package.json the ecosystem fallback (Cargo/Go/pytest/…) still applies
+    // — a partial config must never silently drop the project's real tests.
+    collectDefaultTest(narrowFlag);
+    return;
+  }
+  if (effectiveStep === null || effectiveStep.skip === true) {
+    plan.push({ name: "test", command: null, reason: "configured skip", idx, source: "config" });
+    // A `full` run covers the same (config-diminished) empty set a configured
+    // skip leaves behind — same rationale as "no test script". Reporting
+    // `skipped` here would violate the protocol invariant "mode full ⇒
+    // testScope full" and turn every full run into a fail-closed ERROR.
+    testScope = mode === "full" ? "full" : "skipped";
+    testScopeNote = mode === "full"
+      ? "test step skipped by project config (a full run covers the same set)"
+      : "test step skipped by project config";
+    return;
+  }
+  let entry;
+  if (typeof effectiveStep.command === "string" && effectiveStep.command !== "") {
+    entry = { name: "test", command: effectiveStep.command, idx, source: "config" };
+    plan.push(entry);
+  } else if (typeof effectiveStep.script === "string" && effectiveStep.script !== "") {
+    const scripts = pkg?.scripts ?? {};
+    if (typeof scripts[effectiveStep.script] === "string") {
+      entry = { name: "test", command: `${runPrefix} ${effectiveStep.script}`, idx, source: "config" };
+      plan.push(entry);
+    } else {
+      plan.push({
+        name: "test",
+        command: null,
+        reason: `configured script "${effectiveStep.script}" not found in package.json`,
+        idx,
+        source: "config",
+      });
+      testScope = mode === "full" ? "full" : "skipped";
+      testScopeNote = mode === "full"
+        ? "configured test script not found (a full run covers the same set)"
+        : "configured test script not found";
+      return;
+    }
+  } else {
+    // Defensive fallback — a command/script-less object is normalized to the
+    // default-detection branch above, but never silently drop the suite.
+    collectDefaultTest(narrowFlag);
+    return;
+  }
+  anyRan = true;
+  if (mode === "full") {
+    testScope = "full";
+    return;
+  }
+  // fast lane: narrowing is opt-out via `narrow: false`, otherwise attempted
+  // when the configured command is a single jest/vitest invocation.
+  if (effectiveStep.narrow === false) {
+    testScope = "full";
+    testScopeNote = "configured fast test runs the complete command (narrow disabled)";
+    return;
+  }
+  const body = typeof effectiveStep.script === "string" ? (pkg?.scripts?.[effectiveStep.script] ?? "") : (effectiveStep.command ?? "");
+  // narrowTestStep() re-parses entry.body — the entry MUST carry the original
+  // script body, otherwise every configured narrow attempt would be dropped
+  // as "not a single simple command" (silent under-run).
+  entry.body = body;
+  const parsed = parseTestScript(body);
+  const narrowable = parsed !== null && (parsed.runner === "jest" || parsed.runner === "vitest") &&
+    resolveRunnerBin(parsed.runner) !== null;
+  if (!narrowable) {
+    testScope = "full";
+    testScopeNote = "narrow not applicable to the configured test command — ran it in full";
+    return;
+  }
+  const fullCommand = entry.command;
+  const narrowed = narrowTestStep(entry);
+  testScope = narrowed.testScope;
+  testScopeNote = narrowed.note;
+  if (!entry.command) {
+    if (!plan.some((s) => s.command)) {
+      // The narrowed set was empty and this was the only runnable check — run
+      // the complete configured command so a commit is never deadlocked.
+      entry.command = fullCommand;
+      delete entry.reason;
+      testScope = "full";
+      testScopeNote = `${narrowed.note}; ran the configured command in full (it is the only check)`;
+    } else {
+      anyRan = plan.some((s) => s.command);
+    }
+  }
+}
+
 // `testScope` describes how much of the project's RUNNABLE test suite this run
 // covered. The gate reads it to decide whether a PASS may authorize a push/PR,
 // so its meaning has to be exact:
@@ -385,7 +560,14 @@ function narrowTestStep(entry) {
 let testScope = mode === "full" ? "full" : "skipped";
 let testScopeNote = "";
 
-if (pkg) {
+if (pc.source === "project") {
+  // Project config replaces the default detection step-by-step; an absent
+  // step still falls back to it.
+  collectConfigured("lint", ["lint:fix", "lint"], pc.steps.lint);
+  collectConfigured("typecheck", ["typecheck", "type-check"], pc.steps.typecheck);
+  collectConfigured("build", ["build"], pc.steps.build);
+  collectTestConfigured();
+} else if (pkg) {
   collectStep("lint", ["lint:fix", "lint"]);
   collectStep("typecheck", ["typecheck", "type-check"]);
   collectStep("build", ["build"]);
@@ -416,39 +598,88 @@ if (pkg) {
     testScopeNote = "no test script";
   }
 } else {
-  // ecosystem fallback — try in priority order, first match wins.
-  // These runners have no related-test derivation yet, so the fast lane runs
-  // them in full (never less than before).
+  // No package.json: ecosystem fallback — try in priority order, first match
+  // wins. These runners have no related-test derivation yet, so the fast lane
+  // runs them in full (never less than before).
+  collectEcosystemTest();
+}
+
+/**
+ * Default detection for the test step: package.json script priority table
+ * (with the ecosystem fallback when there is no package.json) plus the
+ * default narrowing. `narrowFlag === false` (from a lane-only config object
+ * like { narrow: false }) runs the detected command in full instead.
+ */
+function collectDefaultTest(narrowFlag) {
+  if (!pkg) {
+    collectEcosystemTest();
+    return;
+  }
+  const testEntry = collectStep("test", mode === "fast" ? ["test:unit", "test"] : ["test"]);
+  if (!testEntry) {
+    testScope = "full";
+    testScopeNote = "no test script";
+    return;
+  }
+  if (mode !== "fast") return; // full lane runs the detected command as-is
+  if (narrowFlag === false) {
+    testScope = "full";
+    testScopeNote = "configured narrow:false runs the detected test command in full";
+    return;
+  }
+  const fullTestCommand = testEntry.command;
+  const narrowed = narrowTestStep(testEntry);
+  testScope = narrowed.testScope;
+  testScopeNote = narrowed.note;
+  if (!testEntry.command) {
+    if (!plan.some((s) => s.command)) {
+      testEntry.command = fullTestCommand;
+      delete testEntry.reason;
+      testScope = "full";
+      testScopeNote = `${narrowed.note}; ran the full suite (it is the only check)`;
+    } else {
+      anyRan = plan.some((s) => s.command);
+    }
+  }
+}
+
+/**
+ * Ecosystem fallback for the test step (no package.json): Cargo/go/pytest/
+ * deno/just/make, first match wins. Also used by the project-config path so a
+ * partial config can never silently drop the project's real test suite.
+ */
+function collectEcosystemTest() {
   testScope = "full";
+  const idx = plan.length;
   if (existsSync(join(cwd, "Cargo.toml"))) {
     anyRan = true;
-    plan.push({ name: "cargo-test", command: "cargo test --quiet", idx: plan.length });
+    plan.push({ name: "cargo-test", command: "cargo test --quiet", idx, source: "detected" });
   } else if (existsSync(join(cwd, "go.mod"))) {
     anyRan = true;
-    plan.push({ name: "go-test", command: "go test ./...", idx: plan.length });
+    plan.push({ name: "go-test", command: "go test ./...", idx, source: "detected" });
   } else if (existsSync(join(cwd, "pyproject.toml")) || existsSync(join(cwd, "setup.py"))) {
     let pytest = false;
     try { execSync("command -v pytest", { cwd, stdio: "ignore" }); pytest = true; } catch { /* not installed */ }
     if (pytest) {
       anyRan = true;
-      plan.push({ name: "pytest", command: "pytest -q", idx: plan.length });
+      plan.push({ name: "pytest", command: "pytest -q", idx, source: "detected" });
     } else {
       // pytest is not installed, so a `full` run cannot execute these tests
       // either — nothing was narrowed away.
-      plan.push({ name: "pytest", command: null, reason: "pytest not installed", idx: plan.length });
+      plan.push({ name: "pytest", command: null, reason: "pytest not installed", idx, source: "detected" });
     }
   } else if (existsSync(join(cwd, "deno.json")) || existsSync(join(cwd, "deno.jsonc"))) {
     anyRan = true;
-    plan.push({ name: "deno-test", command: "deno test --quiet", idx: plan.length });
+    plan.push({ name: "deno-test", command: "deno test --quiet", idx, source: "detected" });
   } else if (existsSync(join(cwd, "justfile"))) {
     anyRan = true;
-    plan.push({ name: "just-test", command: "just test", idx: plan.length });
+    plan.push({ name: "just-test", command: "just test", idx, source: "detected" });
   } else if (existsSync(join(cwd, "Makefile"))) {
     anyRan = true;
-    plan.push({ name: "make-test", command: "make test", idx: plan.length });
+    plan.push({ name: "make-test", command: "make test", idx, source: "detected" });
   } else {
     // No recognizable ecosystem: there is no suite to narrow away.
-    plan.push({ name: "detect", command: null, reason: "no package.json / Cargo.toml / go.mod / pyproject.toml / Makefile / justfile / deno.json", idx: plan.length });
+    plan.push({ name: "detect", command: null, reason: "no package.json / Cargo.toml / go.mod / pyproject.toml / Makefile / justfile / deno.json", idx, source: "detected" });
   }
 }
 
@@ -558,6 +789,9 @@ const result = {
   schema: 1,
   verdict,
   mode,
+  // Where the step commands came from: "project" (`.pi/review-gate.json`
+  // precommit section) or "default" (package.json / ecosystem detection).
+  config: { source: pc.source, path: pc.path },
   // `testScope` is what makes the two lanes safe to distinguish downstream:
   // the gate accepts a fast PASS for a commit, but a push/PR requires a run
   // whose tests were not narrowed.
@@ -585,7 +819,8 @@ if (receiptPath && nonce) {
 if (asJson) {
   console.log(JSON.stringify(result, null, 2));
 } else {
-  console.log(`# Precommit (${mode}, tests: ${testScope}${testScopeNote ? ` — ${testScopeNote}` : ""})`);
+  const configTag = pc.source === "project" ? `config: project (${pc.path})` : "config: default";
+  console.log(`# Precommit (${mode}, tests: ${testScope}${testScopeNote ? ` — ${testScopeNote}` : ""}, ${configTag})`);
   for (const s of steps) {
     const icon = s.status === "pass" ? "✅" : s.status === "fail" ? "❌" : "⏭️";
     const timing = s.status === "skip" ? ` (${s.reason})` : s.cached ? " (cached)" : ` (${s.durationMs}ms)`;

@@ -76,6 +76,7 @@ echo "✓ Leaderboard fetcher installed (run manually to refresh model scores)"
 mkdir -p "${AGENT_DIR}/scripts"
 cp "${SRC}/scripts/precommit-runner.mjs" "${AGENT_DIR}/scripts/pi-review-gate-precommit.mjs"
 cp "${SRC}/scripts/precommit-plan.mjs" "${AGENT_DIR}/scripts/precommit-plan.mjs"
+cp "${SRC}/scripts/precommit-config.mjs" "${AGENT_DIR}/scripts/precommit-config.mjs"
 cp "${SRC}/scripts/precommit-cache.mjs" "${AGENT_DIR}/scripts/precommit-cache.mjs"
 echo "✓ Precommit runner installed"
 
