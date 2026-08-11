@@ -119,23 +119,64 @@ export function isLoopGoalConfirmed(
 
 export const GOAL_CONFIRM_TITLE = "review-gate: AI 提交了本次任务的目标（退出条约）——是否认可？";
 
-/** Max characters of the goal shown inside the confirm dialog. */
+/**
+ * Max characters of the goal echoed into the transcript before the dialog.
+ * The transcript scrolls, so this is about not spamming the session, not about
+ * geometry — the dialog itself is bounded by lib/dialog-budget.ts.
+ */
 export const GOAL_CONFIRM_MAX_CHARS = 2000;
 
 /**
- * Dialog body. The goal is the agent's text, so it is presented as such and
- * length-capped; the fixed copy above it states what approval means.
+ * Full-text message shown in the TRANSCRIPT before the approval dialog opens.
+ *
+ * WHY NOT IN THE DIALOG. `ui.confirm` renders its text as one unclipped block
+ * pinned to the bottom of the screen; a goal-sized block makes the dialog
+ * taller than the terminal, which pushes the animating spinner row out of the
+ * viewport and turns every spinner frame into a full-screen clear (see
+ * lib/dialog-budget.ts for the measurements). The transcript, unlike the
+ * dialog, scrolls — so the reviewable text goes there and the dialog keeps
+ * only the decision.
  */
-export function buildGoalConfirmMessage(goalText: string): string {
+export function buildGoalTranscriptMessage(goalText: string): string {
   const normalized = normalizeGoalText(goalText);
   const shown = normalized.length > GOAL_CONFIRM_MAX_CHARS
     ? normalized.slice(0, GOAL_CONFIRM_MAX_CHARS) + "\n…（已截断，完整内容将写入 " + LOOP_GOAL_RELPATH + "）"
     : normalized;
   return (
-    "同意后，以下内容将由扩展写入 `" + LOOP_GOAL_RELPATH + "`，作为本会话的退出条约：" +
-    "reviewer 会逐条验收它，loop 模式下未经认可的目标会拦住 commit/push/PR。\n\n" +
-    "───── AI 提交的目标（不可信数据） ─────\n" + shown + "\n───────────────────────\n\n" +
-    "不同意就拒绝，然后告诉 AI 哪里不对；它会重新跟你确认后再提交。"
+    "───── AI 提交的目标（不可信数据） ─────\n" +
+    shown +
+    "\n───────────────────────\n" +
+    "认可后，以上内容将由扩展写入 `" + LOOP_GOAL_RELPATH + "`，作为本会话的退出条约：" +
+    "reviewer 会逐条验收它，loop 模式下未经认可的目标会拦住 commit/push/PR。"
+  );
+}
+
+/** Max characters of the goal's title line echoed into the dialog. */
+export const GOAL_DIALOG_TITLE_MAX_CHARS = 60;
+
+/**
+ * Dialog body — the decision only. The goal text itself was just printed to
+ * the transcript by {@link buildGoalTranscriptMessage}; repeating it here is
+ * what made the terminal flicker, so this stays a handful of lines and the
+ * caller runs it through `fitDialogMessage` for the hard bound.
+ *
+ * ORDER AND BOUNDS. The dialog can be truncated from the END, so the fixed
+ * copy stating what approval grants comes FIRST and the agent's own text last;
+ * that text is additionally hard-capped, because a goal whose first line is
+ * thousands of characters long would otherwise eat the whole budget and push
+ * the consequence copy out of the dialog.
+ */
+export function buildGoalConfirmMessage(goalText: string): string {
+  const normalized = normalizeGoalText(goalText);
+  const rawTitle = normalized.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "（空）";
+  const title = rawTitle.length > GOAL_DIALOG_TITLE_MAX_CHARS
+    ? rawTitle.slice(0, GOAL_DIALOG_TITLE_MAX_CHARS) + "…"
+    : rawTitle;
+  return (
+    "目标全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
+    "认可后：扩展把它写入 `" + LOOP_GOAL_RELPATH + "`，reviewer 逐条验收。\n" +
+    "不认可就拒绝，然后告诉 AI 哪里不对；它会重新跟你确认后再提交。\n" +
+    "标题（不可信数据）: " + title
   );
 }
 

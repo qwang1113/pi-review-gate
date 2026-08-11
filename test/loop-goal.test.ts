@@ -4,8 +4,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { DIALOG_BODY_MAX_LINES, fitDialogMessage } from "../lib/dialog-budget.ts";
+import { MODE_CONFIRM_TITLE, buildModeConfirmMessage } from "../lib/task-mode.ts";
 import {
   GOAL_CONFIRM_MAX_CHARS,
+  GOAL_CONFIRM_TITLE,
+  buildGoalTranscriptMessage,
   LOOP_GOAL_MAX_CHARS,
   LOOP_GOAL_MISSING_DIRECTIVE,
   LOOP_GOAL_RELPATH,
@@ -221,13 +225,52 @@ test("a TRUNCATED goal cannot be verified from the prompt copy alone (fail-close
   assert.equal(isLoopGoalConfirmed(truncated, confirmation, long), true);
 });
 
-test("the confirm dialog shows the goal as untrusted, capped data", () => {
-  const msg = buildGoalConfirmMessage("x".repeat(GOAL_CONFIRM_MAX_CHARS + 400));
+test("the transcript message shows the goal as untrusted, capped data", () => {
+  const msg = buildGoalTranscriptMessage("x".repeat(GOAL_CONFIRM_MAX_CHARS + 400));
   assert.match(msg, new RegExp(LOOP_GOAL_RELPATH.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(msg, /不可信数据/);
-  assert.ok(msg.length < GOAL_CONFIRM_MAX_CHARS + 800, "the dialog must stay bounded");
+  assert.ok(msg.length < GOAL_CONFIRM_MAX_CHARS + 800, "the echo must stay bounded");
   assert.match(msg, /已截断/);
   // The fixed copy must state what approval buys — the user is the one who
   // needs to understand the consequence.
   assert.match(msg, /commit\/push\/PR/);
+});
+
+test("FLICKER: the goal dialog carries the decision, not the goal text", () => {
+  // An oversized ui.confirm makes the dialog taller than the terminal, which
+  // turns every spinner frame into a full-screen clear. The goal text goes to
+  // the transcript (which scrolls); the dialog stays inside the row budget.
+  const goal = Array.from({ length: 60 }, (_, i) => `- 退出标准 ${i}：这是一条足够长的中文标准描述`).join("\n");
+  const dialog = buildGoalConfirmMessage(goal);
+  const fitted = fitDialogMessage(GOAL_CONFIRM_TITLE, dialog);
+  assert.equal(fitted.truncated, false, "the decision copy must fit without truncation");
+  assert.ok(fitted.rows <= DIALOG_BODY_MAX_LINES,
+    `title + dialog must fit the budget (was ${fitted.rows} > ${DIALOG_BODY_MAX_LINES})`);
+  // The goal body itself must NOT be inlined into the dialog.
+  assert.doesNotMatch(dialog, /退出标准 30/, "the goal text belongs in the transcript");
+  assert.match(dialog, /上方消息/, "the dialog must point at where the full text is");
+});
+
+test("FLICKER: a goal whose FIRST LINE is huge still fits, and loses only the agent's text", () => {
+  // Worst case for the dialog: the untrusted title line is agent-controlled and
+  // unbounded, and CJK costs two cells per character. It must be capped, and it
+  // must sit AFTER the fixed copy so truncation can never eat the consequence.
+  const dialog = buildGoalConfirmMessage("标".repeat(4000) + "\n\n- 退出标准");
+  const fitted = fitDialogMessage(GOAL_CONFIRM_TITLE, dialog);
+  assert.ok(fitted.rows <= DIALOG_BODY_MAX_LINES,
+    `title + dialog must fit the budget (was ${fitted.rows} > ${DIALOG_BODY_MAX_LINES})`);
+  assert.ok(dialog.length < 400, `the title line must be capped (dialog was ${dialog.length} chars)`);
+  assert.match(fitted.message, /认可后/, "what approval grants must survive");
+  assert.match(fitted.message, /不认可就拒绝/, "how to decline must survive");
+  assert.match(dialog, /…/, "the over-long title must be visibly cut");
+});
+
+test("FLICKER: the mode-downgrade dialog fits the budget, and truncation eats the agent's text last", () => {
+  const fitted = fitDialogMessage(MODE_CONFIRM_TITLE, buildModeConfirmMessage("normal", "x".repeat(400)));
+  assert.ok(fitted.rows <= DIALOG_BODY_MAX_LINES,
+    `title + dialog must fit the budget (was ${fitted.rows} > ${DIALOG_BODY_MAX_LINES})`);
+  // The authoritative consequence copy comes first, so anything dropped is the
+  // agent's untrusted reason — never the statement of what "yes" grants.
+  assert.match(fitted.message, /全部质量门禁将关闭/);
+  assert.match(fitted.message, /锁定 AI 发起的降级请求/);
 });

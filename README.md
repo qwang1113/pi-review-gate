@@ -783,6 +783,60 @@ fixed — before the task counts as done.
 Turn it off per project with `"copilotReview": { "enabled": false }` in
 `.pi/review-gate.json`.
 
+### Dialogs stay short, long text goes to the transcript
+
+Two user-visible channels, and the rule for choosing between them is not
+cosmetic — it is a rendering constraint:
+
+- **`ui.confirm` = the decision only.** The host renders `title + "\n" +
+  message` as *one unclipped, unscrollable block* in the editor container at
+  the bottom of the screen. Nothing truncates it, so the dialog is exactly as
+  tall as the extension makes it.
+- **`ui.notify` = anything long.** The transcript scrolls; the dialog does not.
+
+**Why `ui.notify` and not `pi.sendMessage`.** Inside a tool the session is
+streaming, so `sendMessage` is *queued*, not rendered. With
+`deliverAs: "followUp"` it lands in the follow-up queue, which `agent-loop.ts`
+drains at the point the agent would otherwise STOP — so it silently buys
+another LLM turn (fatal for `pause_for_question`, whose entire job is to stop
+the loop) and still shows nothing until the turn ends, which would make a
+dialog saying "full text above" a lie. Interactive `ui.notify` is synchronous:
+it appends a `Text` to the chat container and requests a render immediately, so
+the content is on screen *before* the dialog that asks about it.
+
+Why it matters: while a tool awaits a dialog the agent is still mid-turn, so
+the working spinner keeps animating — and the spinner row sits *above* the
+editor container. Once the dialog plus everything under it is as tall as the
+terminal, the spinner row falls above pi-tui's `prevViewportTop` and every
+animation frame takes the `firstChanged < prevViewportTop` branch in
+`tui-main-screen.ts`, i.e. `fullRender(true)` → `\x1b[2J\x1b[H\x1b[3J`:
+clear screen, clear **scrollback**. Ten spinner frames a second means ten
+screen wipes a second — the terminal appears to flicker while the user is
+trying to read the very dialog that caused it.
+
+Measured against the real `TuiMainScreen` (40-row terminal, 30 spinner frames):
+
+| dialog + rows below | full-screen clears |
+|---|---|
+| 39 rows | 0 / 30 |
+| **40 rows (= terminal height)** | **29 / 30** |
+
+So `lib/dialog-budget.ts` bounds every dialog by **rendered rows** — CJK is
+double-width, and soft wrapping means a 40-character Chinese line costs a full
+80-column row — sized for a 24-row terminal: 24 − 8 (selector chrome) − 2
+(footer) − 2 (slack) = **12 rows for title + message together**. Every
+`ui.confirm` in the extension goes through `confirmBounded`, which applies it;
+`test/extension-structure.test.ts` fails the build if a call site bypasses it.
+Where truncation is possible, the fixed consequence copy is written *first* and
+the agent's untrusted text last, so what gets dropped is never the statement of
+what "yes" grants.
+
+Guards: `test/dialog-budget.test.ts` (always runs) and
+`test/tui-flicker.test.ts`, which drives the real renderer and asserts both
+directions — a budgeted dialog never wipes, the pre-fix height still does. The
+latter skips when pi-tui cannot be resolved (it ships with the globally
+installed pi, not with this repo).
+
 ### No UI ⇒ the gate runs in `normal` mode
 
 Every enforced mode now depends on dialogs the extension must be able to render
@@ -927,7 +981,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | `request_arbitration` | Contest a ship block the agent believes is **circular** (the only remedy is an action the block forbids). Narrow + fail-closed — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception). |
 | `request_scope_limit` | Agent-requested **gate fence narrowing** for the "pre-existing changes" complaint: the gate arms on dirty files / branch commits that pre-date the session (P0-2), so it can demand review coverage of work the session never did. Instead of silently complying (or bypassing), the agent calls this tool and the **extension renders a user confirm dialog** (fixed consequence copy; the agent's reason labeled untrusted; **no `confirmed` parameter** the model could set). Granted → the non-session changed files are snapshotted as `scopeLimit.preexistingFiles` in the sidecar and stop arming the gate at **every** re-arm site (session_start P0-2, bash stash/checkout re-arm, turn_end reconciliation); a file the session later edits is **reclaimed** out of the snapshot by the edit handler — the grant never covers the session's own work — and branch-commit arming is suspended for as long as the grant stands (a new commit under a standing grant is either the exempted pre-existing work being shipped — exactly what the user consented to — or a user/bypass action; the session's own NEW edits re-arm the gate before any further agent commit). With no session edits the ship gate disarms entirely; with session edits the review scope narrows to `sessionFiles` (the per-turn prompt instructs the reviewer: out-of-scope findings are advisory). Session edit attribution is persisted (`sessionEditedFiles`), so a process restart cannot re-label the session's own edits as pre-existing. A dialog that cannot be shown fails closed WITHOUT counting as a decline. Verdicts/bindings are untouched — narrowing the fence never fabricates a READY/PASS, and the session's OWN edits stay fully gated. Declined → scope requests lock for the session (anti-grinding, mirrors the mode-downgrade lock). Malformed persisted shapes fail closed to ABSENT = full-scope gate (extension loader + git hook both validate). |
 | `request_sensitive_edit` | Agent-requested **one-shot authorization** to edit ONE sensitive file (`.env`, private keys, credentials) that the guard blocks by default. Same consent shape as the tools above: the **extension** renders the confirm dialog (fixed consequence copy, agent reason labeled untrusted, **no `confirmed` parameter**). A grant is **path-exact** (normalized absolute path), **single-use** (burned by the first edit that *succeeds* — a failed edit stays retryable), **10-minute TTL**, and **in-memory only** (never written to the sidecar, so a crash/resume/second session starts fail-closed). `.git/` internals are refused **before** any dialog — they are the gate's own L3 enforcement, not the user's secrets. A **declined** path is locked for the session (per-path anti-grinding, unlike the session-wide `request_scope_limit` lock); a dialog that could not be *shown* is not a decline. `/gate-reset` revokes outstanding grants and lifts the decline locks. |
-| `pause_for_question` | Agent-requested **loop pause** for a genuine blocker only the user can resolve (ambiguous requirement, a product decision, missing access). Without it, an agent that ends its turn with a question gets steamrolled by the L2 auto-continuation. The `question` parameter **is** what the user sees, so the agent is told to put the complete question (options + recommendation) there and reply with a one-line pointer instead of restating it — asking the same thing twice is pure token waste. The pause is **tighten-only**: it disarms auto-continuation ONLY — `unmetRequirements()` never reads it, so the L1 ship gate and the git hooks stay fully enforced. Persisted in the sidecar (survives a restart while waiting); clears automatically on the user's next message (any non-`extension` input source, so RPC-driven sessions don't deadlock), on the agent's next code/doc edit, `record_review`, `run_precommit`, or a mode change (stale-pause liveness: an agent that keeps looping has proven it is not waiting). During `session_compact` a paused loop re-injects the *waiting* state (`[REVIEW_GATE_PAUSED]`) instead of a resume nudge. Prohibited use — asking permission to continue routine loop work — stays prohibited; the per-turn prompt spells out the exemption. |
+| `pause_for_question` | Agent-requested **loop pause** for a genuine blocker only the user can resolve (ambiguous requirement, a product decision, missing access). Without it, an agent that ends its turn with a question gets steamrolled by the L2 auto-continuation. The extension **shows the `question` in full via `ui.notify`** (synchronous — `sendMessage` would be queued and would buy an extra LLM turn), so the agent is told to put the complete question (options + recommendation) there and reply with a one-line pointer instead of restating it — asking the same thing twice is pure token waste. The tool result reports whether the question was actually shown and tells the agent to write it out itself when it was not; every return path (loop, explore/normal, already-paused) shows it. *(Regression this closes: the question used to be filed into `state.pausedQuestion` and nowhere else while the result claimed it had been "delivered to the user verbatim" — so the user saw a bare warning, the agent dutifully wrote "see the question above", and there was nothing above.)* The pause is **tighten-only**: it disarms auto-continuation ONLY — `unmetRequirements()` never reads it, so the L1 ship gate and the git hooks stay fully enforced. Persisted in the sidecar (survives a restart while waiting); clears automatically on the user's next message (any non-`extension` input source, so RPC-driven sessions don't deadlock), on the agent's next code/doc edit, `record_review`, `run_precommit`, or a mode change (stale-pause liveness: an agent that keeps looping has proven it is not waiting). During `session_compact` a paused loop re-injects the *waiting* state (`[REVIEW_GATE_PAUSED]`) instead of a resume nudge. Prohibited use — asking permission to continue routine loop work — stays prohibited; the per-turn prompt spells out the exemption. |
 
 ### Arbiter (a narrow, fail-closed gate exception)
 
