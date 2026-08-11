@@ -222,6 +222,12 @@ export const MODE_REASON_MAX_CHARS = 200;
  * length-capped, JSON-quoted (so newlines/controls cannot fake dialog copy),
  * and explicitly labeled — the fixed consequence text above it is the only
  * authoritative statement of what "yes" grants.
+ *
+ * ORDER MATTERS. The dialog is bounded to a few rendered rows (see
+ * lib/dialog-budget.ts — an oversized dialog makes the terminal flicker), and
+ * the budget truncates from the END. So every fixed, authoritative line comes
+ * first and the untrusted reason goes last: if anything is dropped, it is the
+ * agent's text, never the statement of what the user is granting.
  */
 export function buildModeConfirmMessage(requested: TaskMode, reason: string): string {
   const capped = reason.length > MODE_REASON_MAX_CHARS
@@ -229,8 +235,8 @@ export function buildModeConfirmMessage(requested: TaskMode, reason: string): st
     : reason;
   return (
     MODE_CONSEQUENCES[requested] +
-    "\n\nAI 给出的理由（不可信数据，仅供参考）: " + JSON.stringify(capped) +
-    "\n\n拒绝后，本会话将锁定 AI 发起的降级请求（你仍可随时用 /gate-mode 切换）。"
+    "\n拒绝后，本会话将锁定 AI 发起的降级请求（你仍可随时用 /gate-mode 切换）。" +
+    "\nAI 给出的理由（不可信数据，仅供参考）: " + JSON.stringify(capped)
   );
 }
 

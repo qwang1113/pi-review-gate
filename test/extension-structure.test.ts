@@ -164,13 +164,90 @@ test("pause_for_question: agent-requested loop pause is registered and tighten-o
   assert.match(SRC, /name: "pause_for_question"/);
   // The pause persists (survives a restart while waiting for the user)…
   const toolStart = SRC.indexOf('name: "pause_for_question"');
-  const toolBody = SRC.slice(toolStart, toolStart + 3500);
+  const toolBody = SRC.slice(toolStart, SRC.indexOf('name: "request_scope_limit"', toolStart));
   assert.match(toolBody, /state\.pausedQuestion = \{/);
   assert.match(toolBody, /loopArmed = false/);
   assert.match(toolBody, /persist\(/);
   // …but it must NEVER touch the ship authority: unmetRequirements takes no
   // pause input, and no call site filters its problems on pausedQuestion.
   assert.doesNotMatch(SRC, /unmetRequirements\([^)]*pausedQuestion/);
+});
+
+test("pause_for_question: the QUESTION reaches the user, not just the state file", () => {
+  // REGRESSION (the bug this test exists for): the question was written to
+  // `state.pausedQuestion` and nowhere else, while the tool result told the
+  // agent it had been "delivered to the user verbatim". The agent then wrote
+  // "see the question above" and the user saw a warning with no question in it.
+  const toolStart = SRC.indexOf('name: "pause_for_question"');
+  const toolBody = SRC.slice(toolStart, SRC.indexOf('name: "request_scope_limit"', toolStart));
+
+  // The SAME text that is filed into state must be the text the user is shown
+  // — the regression was precisely that only the state copy existed.
+  assert.match(toolBody, /const askUser = \([^)]*\)[^=]*=>\s*showToUser\(ctx, lead, [^;]*question\)/,
+    "the question itself must be handed to showToUser");
+  assert.match(toolBody, /state\.pausedQuestion = \{ question: question\.slice\(/,
+    "the state copy and the shown copy must come from the same `question`");
+  // Every return path must show it BEFORE returning: no branch may file the
+  // pause away and answer the agent without the user ever seeing the question.
+  // (`\s+` matters: the branch returns are indented deeper than the tail one.)
+  const beforeReturns = toolBody.split(/\n\s+return \{/).slice(0, -1);
+  assert.equal(beforeReturns.length, 4,
+    `expected 4 return paths (empty-question reject + 3 ask paths), found ${beforeReturns.length}`);
+  for (const branch of beforeReturns) {
+    assert.ok(/= askUser\(/.test(branch) || /if \(!question\)/.test(branch),
+      "each return path either rejects an empty question or shows it first");
+  }
+
+  // The tool result must report what ACTUALLY happened rather than asserting
+  // delivery unconditionally: a headless session can show nothing.
+  assert.match(toolBody, /const delivered = askUser\(/);
+  assert.match(toolBody, /deliveryNote\(delivered\)/, "the reply text must branch on real delivery");
+  assert.doesNotMatch(toolBody, /ALREADY been delivered to the user verbatim/,
+    "never claim delivery that did not happen");
+
+  // Every return path (loop, explore/normal, already-paused) shows the
+  // question — a mode difference must not silently swallow it.
+  const showCalls = [...toolBody.matchAll(/= askUser\(/g)].length;
+  assert.equal(showCalls, 3,
+    `all three return paths (explore/normal, already-paused, loop) must show it (found ${showCalls})`);
+});
+
+test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an extra turn", () => {
+  // pi.sendMessage inside a tool is queued, not rendered: with
+  // deliverAs:"followUp" agent-loop drains the queue when the agent would
+  // STOP, silently buying another LLM turn — fatal for a tool whose job is to
+  // PAUSE the loop, and it shows the user nothing until the turn ends anyway.
+  // ui.notify appends to the chat container and requests a render right away.
+  const start = SRC.indexOf("function showToUser");
+  assert.ok(start > 0, "the helper must exist");
+  const body = SRC.slice(start, start + 800);
+  assert.match(body, /notify\(`\$\{lead\}\\n\$\{clipped\}`, "warning"\)/,
+    "the full text must go through ui.notify");
+  assert.match(body, /return false/, "no UI must be reported honestly, not swallowed");
+  assert.doesNotMatch(body, /sendMessage/, "sendMessage is queued, not rendered");
+  // Nothing in the extension may deliver user-facing text via the follow-up
+  // queue: that is the extra-turn trap.
+  assert.doesNotMatch(SRC, /deliverAs: "followUp", triggerTurn: false \}\);[\s\S]{0,40}pausedQuestion/,
+    "the pause path must never enqueue a follow-up message");
+});
+
+test("FLICKER: every confirm dialog goes through the row budget", () => {
+  // An oversized ui.confirm makes the dialog taller than the terminal, which
+  // pushes the animating spinner row out of the viewport and turns EVERY
+  // spinner frame into a full-screen clear (measured: 29 of 30 frames).
+  // confirmBounded applies lib/dialog-budget.ts; nothing may bypass it.
+  const helperAt = SRC.indexOf("async function confirmBounded");
+  assert.ok(helperAt > 0, "confirmBounded must exist");
+  assert.match(SRC.slice(helperAt, helperAt + 700), /fitDialogMessage\(/,
+    "confirmBounded must apply the budget");
+
+  // The ONLY places `.confirm(` may appear are the helper's own call and its
+  // parameter type; every other dialog must call confirmBounded instead.
+  const callSites = [...SRC.matchAll(/\.confirm\?\.\(|\.confirm\(/g)].map((m) => m.index ?? 0);
+  const helperEnd = SRC.indexOf("\n  }", helperAt);
+  const strays = callSites.filter((i) => i < helperAt || i > helperEnd);
+  assert.deepEqual(strays, [],
+    `every ui.confirm must go through confirmBounded (stray call sites at ${strays.join(", ")})`);
 });
 
 test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in agent_settled", () => {
@@ -241,7 +318,7 @@ test("request_scope_limit: extension-driven user consent, no 'confirmed' paramet
   const body = SRC.slice(toolStart, toolEnd > toolStart ? toolEnd : toolStart + 7000);
   // Consent is obtained by the EXTENSION (dialog) — the tool schema exposes
   // only a reason; there is no parameter the model could set to claim consent.
-  assert.match(body, /ctx\.ui\.confirm/);
+  assert.match(body, /confirmBounded\(/);
   assert.match(body, /parameters: Type\.Object\(\{\s*reason: Type\.String/);
   assert.doesNotMatch(body, /confirmed/);
   // No UI ⇒ fail-closed deny; a declined dialog locks further requests — but
@@ -328,8 +405,8 @@ test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' par
     "set_gate_mode parameters must be exactly {mode, reason}");
   // Consent comes from ctx.ui.confirm rendered by the EXTENSION, with the
   // fixed-copy dialog builder; only that branch may mint source "user".
-  assert.match(region, /ctx\.ui\.confirm\(MODE_CONFIRM_TITLE, buildModeConfirmMessage\(/);
-  const confirmAt = region.indexOf("ctx.ui.confirm");
+  assert.match(region, /confirmBounded\(\s*ctx as unknown as ExtensionContext,\s*MODE_CONFIRM_TITLE,\s*buildModeConfirmMessage\(/);
+  const confirmAt = region.indexOf("confirmBounded");
   const userMint = region.indexOf('setTaskMode(effective, "user"');
   assert.ok(userMint > confirmAt, 'source "user" may only be set after the confirm dialog');
   // A declined dialog locks agent-initiated downgrades (anti-grinding).
@@ -740,7 +817,7 @@ test("request_sensitive_edit: the user decides in an extension dialog, not the a
   assert.ok(start > 0, "the tool must be registered");
   const body = SRC.slice(start, start + 6000);
 
-  assert.match(body, /ctx\.ui\.confirm\(/, "the extension must render the confirm dialog itself");
+  assert.match(body, /confirmBounded\(/, "the extension must render the confirm dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
     "no agent-supplied 'confirmed' parameter — that would be self-approval");
   assert.match(body, /if \(!ctx\.hasUI\)/, "no UI must fail closed instead of granting");
@@ -751,7 +828,7 @@ test("SECURITY: request_sensitive_edit refuses .git internals before showing any
   const start = SRC.indexOf('name: "request_sensitive_edit"');
   const body = SRC.slice(start, start + 6000);
   const integrityAt = body.indexOf("isGateIntegrityPath");
-  const confirmAt = body.indexOf("ctx.ui.confirm");
+  const confirmAt = body.indexOf("confirmBounded");
   assert.ok(integrityAt > 0 && confirmAt > 0, "both must exist");
   assert.ok(integrityAt < confirmAt,
     "a user must never be asked to authorize a write to .git/hooks — that would disarm L3");
@@ -775,7 +852,7 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   const start = SRC.indexOf('name: "propose_loop_goal"');
   assert.ok(start > 0, "the tool must be registered");
   const body = SRC.slice(start, start + 6000);
-  assert.match(body, /ui\?\.confirm\?\.\(|ctx\.ui\.confirm\(/,
+  assert.match(body, /confirmBounded\(/,
     "the extension must render the approval dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
     "no agent-supplied 'confirmed' parameter — that would be self-approval");

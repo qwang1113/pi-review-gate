@@ -156,6 +156,7 @@ import {
   LOOP_GOAL_MAX_WRITE_CHARS,
   buildLoopGoalDirective,
   buildGoalConfirmMessage,
+  buildGoalTranscriptMessage,
   goalTextHash,
   isLoopGoalConfirmed,
   normalizeGoalText,
@@ -163,6 +164,7 @@ import {
   GOAL_CONFIRM_TITLE,
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
 } from "./lib/loop-goal.ts";
+import { fitDialogMessage } from "./lib/dialog-budget.ts";
 import {
   COPILOT_ACTOR_QUERY,
   COPILOT_REVIEWER_LOGIN,
@@ -815,6 +817,76 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { ctx.ui.setStatus("review-gate", parts.join(" · ")); } catch { /* non-TUI */ }
   }
 
+  // ---------- user-visible output channels ----------
+  //
+  // Two rules, both learned the hard way (see lib/dialog-budget.ts):
+  //
+  //  1. LONG TEXT GOES TO THE TRANSCRIPT. `ui.confirm` renders its text as one
+  //     unclipped block at the bottom of the screen; anything tall enough to
+  //     push the animating spinner row out of the viewport turns every spinner
+  //     frame into a full-screen clear (measured: 29 of 30 frames). The
+  //     transcript scrolls, the dialog does not.
+  //  2. A DIALOG ONLY CARRIES THE DECISION. Every ui.confirm in this file goes
+  //     through confirmBounded, which enforces the row budget.
+
+  /** Hard cap on one transcript notice, so nothing can flood the screen. */
+  const USER_NOTICE_MAX_CHARS = 4000;
+
+  /**
+   * Max characters of a sensitive path echoed INSIDE the dialog. The path is
+   * agent-chosen, so an unbounded one would push the authorization copy out of
+   * the row budget; the full path is shown in the transcript instead.
+   */
+  const SENSITIVE_PATH_DIALOG_MAX_CHARS = 60;
+
+  /**
+   * Put text in front of the USER, in the transcript, RIGHT NOW.
+   *
+   * WHY notify AND NOT pi.sendMessage: inside a tool the session is streaming,
+   * so `sendMessage` is queued rather than rendered — `deliverAs: "followUp"`
+   * lands in the follow-up queue, which agent-loop.ts drains when the agent
+   * would otherwise STOP, i.e. it silently buys another LLM turn (fatal for a
+   * tool whose whole job is to pause the loop) and still shows nothing until
+   * the turn ends. `ui.notify` is synchronous: interactive mode appends a Text
+   * to the chat container and requests a render, so the user sees it before
+   * the confirm dialog that follows.
+   *
+   * Returns false when there is no UI to render into (headless): callers must
+   * report that honestly instead of claiming the user saw something.
+   */
+  function showToUser(
+    uiCtx: { ui?: { notify?: (message: string, type?: "info" | "warning" | "error") => void } },
+    lead: string,
+    body: string,
+  ): boolean {
+    const clipped = body.length > USER_NOTICE_MAX_CHARS
+      ? body.slice(0, USER_NOTICE_MAX_CHARS) + "\n…（已截断）"
+      : body;
+    try {
+      const notify = uiCtx.ui?.notify;
+      if (!notify) return false;
+      notify(`${lead}\n${clipped}`, "warning");
+      return true;
+    } catch {
+      return false; // headless / no UI
+    }
+  }
+
+  /**
+   * `ui.confirm` with the dialog-height budget applied. Never let a caller pass
+   * unbounded text straight to the host: that is the flicker bug.
+   */
+  async function confirmBounded(
+    uiCtx: { ui?: { confirm?: (title: string, message: string) => Promise<boolean> } },
+    title: string,
+    message: string,
+    pointer?: string,
+  ): Promise<boolean> {
+    const fitted = pointer === undefined
+      ? fitDialogMessage(title, message)
+      : fitDialogMessage(title, message, pointer);
+    return (await uiCtx.ui?.confirm?.(title, fitted.message)) === true;
+  }
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
   // user-chosen explore/normal (advisory hook) from an LLM/agent selection
   // (hook stays fully enforced). The in-session mode decision is made via the
@@ -2329,9 +2401,20 @@ export default function reviewGate(pi: ExtensionAPI) {
       // session without a UI is forced to normal mode at session_start, so
       // reaching this branch means the UI disappeared, not a headless run.
       const uiCtx = ctx as unknown as ExtensionContext;
+      // The goal itself is shown in the TRANSCRIPT first: it is the thing the
+      // user has to read, and it is far too tall for a dialog (that is what
+      // made the terminal flicker). ui.notify renders synchronously, so it is
+      // on screen BEFORE the dialog below asks about it; the dialog that
+      // follows carries only the decision.
+      showToUser(uiCtx, GOAL_CONFIRM_TITLE, buildGoalTranscriptMessage(goalText));
       let approved = false;
       try {
-        approved = (await uiCtx.ui?.confirm?.(GOAL_CONFIRM_TITLE, buildGoalConfirmMessage(goalText))) === true;
+        approved = await confirmBounded(
+          uiCtx,
+          GOAL_CONFIRM_TITLE,
+          buildGoalConfirmMessage(goalText),
+          "（目标全文见上方消息）",
+        );
       } catch {
         approved = false;
       }
@@ -2686,9 +2769,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       "user can resolve (ambiguous requirement, a product/design decision between valid options, " +
       "missing credentials or access). Waiting on the user's answer to a question you already " +
       "asked — e.g. the grill questions while negotiating the loop goal — is such a blocker: " +
-      "call this instead of re-asking. The `question` parameter IS the question the user sees, so " +
-      "do NOT repeat it in your reply — write one short line pointing at it (\"see the question " +
-      "above\") or add only the context the parameter does not carry, then END the turn. The pause " +
+      "call this instead of re-asking. The extension shows the `question` parameter to the user " +
+      "IN FULL, as a notification in the transcript, so do NOT repeat it " +
+      "in your reply — write one short line pointing at it (\"see the question above\") or add only " +
+      "the context the parameter does not carry, then END the turn. If the tool result says the " +
+      "question could NOT be shown, write it out in your reply instead. The pause " +
       "clears automatically on the user's next message. The " +
       "ship gate is NOT affected — git commit/push and gh pr stay blocked while gates are unmet. " +
       "Do NOT use this to ask permission to continue routine loop work, to skip a review round, " +
@@ -2697,7 +2782,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       question: Type.String({
         description:
           "The COMPLETE question the user must answer, including the options and your recommendation. " +
-          "It is shown to the user verbatim, so it must stand on its own — your reply should not restate it.",
+          "It is rendered to the user verbatim, so it must stand on its own — your reply should not restate it.",
       }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -2709,24 +2794,53 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
+      // THE POINT OF THIS TOOL IS THAT THE USER SEES THE QUESTION.
+      //
+      // REGRESSION THIS FIXES: the question used to be stored in
+      // `state.pausedQuestion` and nowhere else, while the tool result told the
+      // agent it had been "delivered to the user verbatim". The agent duly
+      // wrote "see the question above" — and the user saw a bare warning with no
+      // question in it. Every channel that claims delivery must actually
+      // deliver, and the result text below reports what really happened.
+      const banner = "───── AI 需要你回答 ─────\n";
+      const askUser = (lead: string): boolean => showToUser(ctx, lead, banner + question);
+      // Honesty extends to the edges: a question past the notice cap is shown
+      // CLIPPED, so the agent is told to carry the rest itself rather than
+      // being assured the user saw everything. The banner is part of what
+      // showToUser measures, so it is part of what decides "clipped".
+      const clipped = banner.length + question.length > USER_NOTICE_MAX_CHARS;
+      const deliveryNote = (delivered: boolean) => !delivered
+        ? "WARNING: the question could NOT be shown (no interactive UI). Write " +
+          "the COMPLETE question out in your reply instead, then END the turn."
+        : clipped
+        ? `WARNING: the question exceeded the ${USER_NOTICE_MAX_CHARS}-character notice cap and was ` +
+          "shown CLIPPED. Put whatever was cut off in your reply, keep future questions shorter, " +
+          "then END the turn."
+        : "Your question was shown to the user in full, so do NOT repeat it in your reply. Write " +
+          "one short line pointing at it (or only the context the parameter did not carry) and " +
+          "END the turn.";
+
       // Explore/normal have no auto-continuation to pause — the agent can
       // simply ask and end its turn. Informational no-op, never an error.
       if (state.taskMode === "explore" || state.taskMode === "normal") {
+        const delivered = askUser(`review-gate: AI 有一个问题在等你回答（${state.taskMode} 模式，本来就没有自动循环）。`);
         return {
           content: [{
             type: "text",
-            text: `review-gate: no enforced loop in "${state.taskMode}" mode — auto-continuation is already off. Your question has been shown to the user; end the turn without repeating it.`,
+            text: `review-gate: no enforced loop in "${state.taskMode}" mode — auto-continuation is already off. ${deliveryNote(delivered)}`,
           }],
-          details: { mode: state.taskMode },
+          details: { mode: state.taskMode, delivered },
         };
       }
       if (state.pausedQuestion) {
+        const delivered = askUser("review-gate: AI 又提了一个问题（循环已处于暂停中）。");
         return {
           content: [{
             type: "text",
-            text: "review-gate: the loop is already paused for a user question. Ask it in your reply and END the turn — the user's next message resumes the loop.",
+            text: "review-gate: the loop is ALREADY paused for an earlier question, so this call did not " +
+              `change the pause state. ${deliveryNote(delivered)}`,
           }],
-          details: { alreadyPaused: true },
+          details: { alreadyPaused: true, delivered },
         };
       }
       // Loop (or undecided → behaves as loop): record the pause. Persisted so
@@ -2735,24 +2849,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       state.pausedQuestion = { question: question.slice(0, 2000), at: new Date().toISOString() };
       loopArmed = false;
       persist(ctx as unknown as ExtensionContext);
-      try {
-        ctx.ui.notify(
-          "review-gate: AI 申请暂停循环等待你的回答 — 你的下一条消息会自动恢复循环（ship 命令仍被拦截）。",
-          "warning",
-        );
-      } catch { /* headless */ }
+      const delivered = askUser("review-gate: AI 申请暂停循环等待你的回答 — 你的下一条消息会自动恢复循环（ship 命令仍被拦截）。");
       return {
         content: [{
           type: "text",
           text:
             "review-gate: loop PAUSED — auto-continuation is off until the user's next message. " +
-            "Your question has ALREADY been delivered to the user verbatim: do NOT repeat it in your " +
-            "reply. Write one short line pointing at it (or only the context the parameter did not " +
-            "carry) and END the turn; do not keep working. " +
+            `${deliveryNote(delivered)} Do not keep working. ` +
             "Ship commands stay blocked while gates are unmet. The pause clears automatically when the " +
             "user replies (or on your next code/doc edit).",
         }],
-        details: { paused: true },
+        details: { paused: true, delivered },
       };
     },
   });
@@ -2808,20 +2915,36 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       // USER CONSENT — extension-rendered dialog with fixed consequence copy;
       // the agent's reason is displayed as clearly-labeled untrusted data.
+      //
+      // The file LISTS go to the transcript, not the dialog: twenty paths is
+      // easily twenty rendered rows, which is exactly the geometry that makes
+      // the terminal flicker (lib/dialog-budget.ts). The dialog keeps the
+      // counts and the consequences.
       const preexistingList = preexisting.slice(0, 20).join(", ") || "（仅分支上已有的提交）";
       const sessionList = sessionRel.length > 0 ? sessionRel.slice(0, 20).join(", ") : "（无）";
+      const moreP = preexisting.length > 20 ? `（另有 ${preexisting.length - 20} 个未列出）` : "";
+      const moreS = sessionRel.length > 20 ? `（另有 ${sessionRel.length - 20} 个未列出）` : "";
+      showToUser(
+        ctx,
+        "review-gate: AI 请求缩小审查范围——涉及的文件如下。",
+        `既有变更 ${preexisting.length} 个（同意后不再触发门禁）: ${preexistingList}${moreP}` +
+        (ahead > 0 ? `\n分支领先基线 ${ahead} 个提交` : "") + "\n" +
+        `本会话修改 ${sessionRel.length} 个（仍需完整审查）: ${sessionList}${moreS}\n` +
+        `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
+      );
       let ok = false;
       let dialogFailed = false;
       try {
-        ok = await ctx.ui.confirm(
+        ok = await confirmBounded(
+          ctx as unknown as ExtensionContext,
           "review-gate: AI 请求把审查范围缩小到本会话的修改——是否同意？",
           "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
-            `既有变更（同意后不再触发门禁）: ${preexistingList}` +
-            (ahead > 0 ? `；分支领先基线 ${ahead} 个提交` : "") + "\n" +
-            `本会话修改（仍需完整审查）: ${sessionList}\n` +
+            `既有变更 ${preexisting.length} 个` +
+            (ahead > 0 ? `，分支领先基线 ${ahead} 个提交` : "") +
+            `；本会话修改 ${sessionRel.length} 个（清单见上方消息）。\n` +
             "同意后：审查只需覆盖本会话自己的修改；若本会话没有任何修改，ship 拦截将解除。\n" +
-            "拒绝后：AI 本会话内不能再次请求缩小范围。\n" +
-            `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
+            "拒绝后：AI 本会话内不能再次请求缩小范围。",
+          "（清单与理由见上方消息）",
         );
       } catch { dialogFailed = true; }
 
@@ -2953,16 +3076,32 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       // USER CONSENT — extension-rendered dialog with fixed consequence copy;
       // the agent's reason is displayed as clearly-labeled untrusted data.
+      //
+      // The full path and reason go to the transcript first; the dialog gets a
+      // TAIL-truncated path and the reason last, so a pathological path (the
+      // agent picks it) can never push the authorization copy out of a
+      // budget-bounded dialog.
+      const shownPath = absPath.length > SENSITIVE_PATH_DIALOG_MAX_CHARS
+        ? "…" + absPath.slice(-SENSITIVE_PATH_DIALOG_MAX_CHARS)
+        : absPath;
+      showToUser(
+        ctx,
+        "review-gate: AI 请求一次性修改敏感文件——完整信息如下。",
+        `文件（完整路径）: ${absPath}\n` +
+        `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
+      );
       let ok = false;
       let dialogFailed = false;
       try {
-        ok = await ctx.ui.confirm(
+        ok = await confirmBounded(
+          ctx as unknown as ExtensionContext,
           "review-gate: AI 请求一次性修改敏感文件——是否同意？",
-          `文件（默认禁止 AI 写入）: ${absPath}\n` +
-            "同意后：只授权这一个路径，写入成功一次即失效；10 分钟内未使用也会过期，且不跨会话保留。\n" +
+          "同意后：只授权这一个路径，写入成功一次即失效；10 分钟内未使用也会过期，且不跨会话保留。\n" +
             "拒绝后：AI 本会话内不能再为该路径弹窗。\n" +
             "请确认这确实是你本次要求的一部分；文件里的密钥/凭据会暴露给模型。\n" +
+            `文件（默认禁止 AI 写入）: ${shownPath}\n` +
             `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
+          "（完整路径与理由见上方消息）",
         );
       } catch { dialogFailed = true; }
 
@@ -3161,7 +3300,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         // so the copy is built from `effective` — never from `requested`.
         let ok = false;
         try {
-          ok = await ctx.ui.confirm(MODE_CONFIRM_TITLE, buildModeConfirmMessage(effective, params.reason));
+          ok = await confirmBounded(
+            ctx as unknown as ExtensionContext,
+            MODE_CONFIRM_TITLE,
+            buildModeConfirmMessage(effective, params.reason),
+          );
         } catch { ok = false; }
         if (ok) {
           setTaskMode(effective, "user", ctx as unknown as ExtensionContext);
@@ -3709,7 +3852,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       const reason = (args ?? "").trim();
       if (!reason) { ctx.ui.notify("Usage: /gate-bypass <reason>", "error"); return; }
       const ok = ctx.hasUI
-        ? await ctx.ui.confirm("Bypass review gate?", `Reason: ${reason}\nDisables ship blocking until /gate-reset.`)
+        ? await confirmBounded(
+            ctx,
+            "Bypass review gate?",
+            `Reason: ${reason}\nDisables ship blocking until /gate-reset.`,
+          )
         : true;
       if (!ok) return;
       state.bypass = { active: true, reason, at: new Date().toISOString() };
