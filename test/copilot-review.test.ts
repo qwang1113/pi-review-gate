@@ -10,9 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   COPILOT_AWAIT_TIMEOUT_MS,
-  COPILOT_MAX_ROUNDS,
-  COPILOT_MAX_ROUNDS_DEFAULT,
-  COPILOT_MIN_ROUNDS,
+  COPILOT_HISTORY_PR_COUNT,
   COPILOT_REVIEWER_LOGIN,
   COPILOT_THREADS_QUERY,
   analyzeCopilot,
@@ -21,10 +19,10 @@ import {
   evaluateCopilot,
   isCopilotAuthor,
   isCopilotOutstanding,
-  parseCopilotActorProbe,
+  parseCopilotHistoryProbe as historyProbe,
   parseCopilotPayload,
-  parseCopilotRequestLanded,
-  parseRestReviewRequests,
+  decideCopilotSupport,
+  isCopilotOwnerAllowed,
   parseNameWithOwner,
   parsePrView,
   recordCopilotRequest,
@@ -212,7 +210,7 @@ const armed = (over: Partial<CopilotReviewState> = {}): CopilotReviewState => ({
 
 test("no review yet ⇒ AWAITING (a persistent state, not a failure)", () => {
   const next = evaluateCopilot(armed(), analyzeCopilot(payload(), { anchorAt: NOW_ISO }), {
-    nowIso: NOW_ISO, now: NOW, maxRounds: 3,
+    nowIso: NOW_ISO, now: NOW,
   });
   assert.equal(next.status, "AWAITING");
   assert.equal(isCopilotOutstanding(next), true);
@@ -222,7 +220,7 @@ test("threads waiting on us ⇒ OPEN with the count the agent must work off", ()
   const next = evaluateCopilot(
     armed(),
     analyzeCopilot(payload({ threads: [thread({ id: "a" }), thread({ id: "b" })] }), { anchorAt: NOW_ISO }),
-    { nowIso: NOW_ISO, now: NOW, maxRounds: 3 },
+    { nowIso: NOW_ISO, now: NOW },
   );
   assert.equal(next.status, "OPEN");
   assert.equal(next.openThreads, 2);
@@ -232,7 +230,7 @@ test("every thread handled ⇒ SATISFIED, bound to the head it was verified agai
   const next = evaluateCopilot(
     armed(),
     analyzeCopilot(payload({ threads: [thread({ isResolved: true }), thread({ id: "b", lastAuthor: "alice" })] }), { anchorAt: NOW_ISO }),
-    { nowIso: NOW_ISO, now: NOW, maxRounds: 3 },
+    { nowIso: NOW_ISO, now: NOW },
   );
   assert.equal(next.status, "SATISFIED");
   assert.equal(next.head, "abc123");
@@ -247,32 +245,164 @@ test("the PR moving under us re-opens the cycle instead of accepting stale evide
   const next = evaluateCopilot(
     armed(),
     analyzeCopilot(payload({ head: "newsha", threads: [] }), { anchorAt: NOW_ISO }),
-    { nowIso: NOW_ISO, now: NOW, maxRounds: 3 },
+    { nowIso: NOW_ISO, now: NOW },
   );
   assert.equal(next.status, "ARMED");
   assert.equal(next.requestedAt, undefined, "a new cycle needs a fresh request stamp");
   assert.match(next.note ?? "", /head moved/);
 });
 
+test("REGRESSION: a push must not bury Copilot findings that are still waiting on us", () => {
+  // The reported bug, reproduced from a real PR. Copilot reviewed commit A and
+  // left an unanswered thread; the fix was pushed, so the head became B and
+  // `reviewed` went false for the new cycle. The old state machine asked
+  // "reviewed?" before "anything waiting on us?", so it reported AWAITING /
+  // ARMED and the finding stopped being counted — then the wait budget expired
+  // and the task was released with the comment never handled. GitHub does not
+  // re-review a new head by default, so that thread was the ONLY feedback
+  // there was.
+  const stalePush = analyzeCopilot(
+    payload({
+      head: "newsha",
+      reviews: [{ author: "Copilot", submittedAt: "2026-08-07T09:00:00Z", commit: "abc123", state: "COMMENTED" }],
+      threads: [thread({ id: "unanswered", createdAt: "2026-08-07T09:00:00Z" })],
+    }),
+    { anchorAt: NOW_ISO },
+  );
+  assert.equal(stalePush.reviewed, false, "nothing has reviewed the new head — that part was right");
+  assert.equal(stalePush.actionable.length, 1, "but the old finding is still ours");
+
+  const next = evaluateCopilot(armed(), stalePush, { nowIso: NOW_ISO, now: NOW });
+  assert.equal(next.status, "OPEN", "the finding outranks both the head drift and the wait");
+  assert.equal(next.openThreads, 1);
+  assert.equal(copilotProblems(next).length, 1, "and completion stays blocked until it is handled");
+
+  // Even a wait budget that has fully expired cannot release it.
+  const expired = evaluateCopilot(armed(), stalePush, {
+    nowIso: NOW_ISO,
+    now: NOW + COPILOT_AWAIT_TIMEOUT_MS + 1,
+  });
+  assert.equal(expired.status, "OPEN");
+
+  // Once it IS handled, the head drift takes over and a fresh review is due.
+  const handled = analyzeCopilot(
+    payload({
+      head: "newsha",
+      reviews: [{ author: "Copilot", submittedAt: "2026-08-07T09:00:00Z", commit: "abc123", state: "COMMENTED" }],
+      threads: [thread({ id: "unanswered", lastAuthor: "alice", createdAt: "2026-08-07T09:00:00Z" })],
+    }),
+    { anchorAt: NOW_ISO },
+  );
+  assert.equal(
+    evaluateCopilot(armed(), handled, { nowIso: NOW_ISO, now: NOW }).status,
+    "ARMED",
+  );
+});
+
+test("REGRESSION: an unhandled finding also outranks a SATISFIED verdict from an earlier cycle", () => {
+  // SATISFIED short-circuits before anything else is examined. If Copilot
+  // comments again on the same head after we were declared done, that comment
+  // must reopen the cycle rather than land behind a closed decision.
+  const next = evaluateCopilot(
+    armed({ status: "SATISFIED", head: "abc123", openThreads: 0 }),
+    analyzeCopilot(payload({ threads: [thread()] }), { anchorAt: NOW_ISO }),
+    { nowIso: NOW_ISO, now: NOW },
+  );
+  assert.equal(next.status, "OPEN");
+  assert.equal(next.openThreads, 1);
+});
+
+test("a repo with no sign of Copilot is released at once instead of waiting out the budget", () => {
+  // The user's rule: if it cannot do this, do not spend my time finding out.
+  // UNKNOWN means no Copilot review has ever appeared here AND the owner is
+  // not on the allow-list.
+  const next = evaluateCopilot(
+    armed(),
+    analyzeCopilot(payload(), { anchorAt: NOW_ISO }),
+    { nowIso: NOW_ISO, now: NOW, support: "UNKNOWN" },
+  );
+  assert.equal(next.status, "UNSUPPORTED");
+  assert.match(next.note ?? "", /allow-list/, "and it says what would change the answer");
+  assert.deepEqual(copilotProblems(next), [], "released requirements block nothing");
+
+  // Evidence or policy ⇒ the normal wait applies instead.
+  for (const support of ["CONFIRMED", "ASSUMED"] as const) {
+    assert.equal(
+      evaluateCopilot(armed(), analyzeCopilot(payload(), { anchorAt: NOW_ISO }), {
+        nowIso: NOW_ISO, now: NOW, support,
+      }).status,
+      "AWAITING",
+      support,
+    );
+  }
+  // A caller that supplies nothing keeps the old waiting behaviour.
+  assert.equal(
+    evaluateCopilot(armed(), analyzeCopilot(payload(), { anchorAt: NOW_ISO }), {
+      nowIso: NOW_ISO, now: NOW,
+    }).status,
+    "AWAITING",
+  );
+});
+
+test("UNKNOWN availability never overrides findings that are already on the table", () => {
+  // "Unsupported" is about the future (no review will come), never about
+  // comments that already exist and are waiting on us.
+  const next = evaluateCopilot(
+    armed(),
+    analyzeCopilot(payload({ threads: [thread()] }), { anchorAt: NOW_ISO }),
+    { nowIso: NOW_ISO, now: NOW, support: "UNKNOWN" },
+  );
+  assert.equal(next.status, "OPEN");
+});
+
 test("SAFETY VALVE: a Copilot that never answers releases the task instead of stranding it", () => {
   const next = evaluateCopilot(
     armed(),
     analyzeCopilot(payload(), { anchorAt: NOW_ISO }),
-    { nowIso: NOW_ISO, now: NOW + COPILOT_AWAIT_TIMEOUT_MS + 1, maxRounds: 3 },
+    { nowIso: NOW_ISO, now: NOW + COPILOT_AWAIT_TIMEOUT_MS + 1 },
   );
   assert.equal(next.status, "EXHAUSTED");
   assert.match(next.note ?? "", /escalate to the user/);
   assert.deepEqual(copilotProblems(next), [], "a released requirement blocks nothing");
 });
 
-test("SAFETY VALVE: the round budget ends the loop with a human, not with more rounds", () => {
-  const next = evaluateCopilot(
-    armed({ rounds: 4 }),
-    analyzeCopilot(payload({ threads: [thread()] }), { anchorAt: NOW_ISO }),
-    { nowIso: NOW_ISO, now: NOW, maxRounds: 3 },
+test("there is NO round cap: a long review conversation is not a reason to stop", () => {
+  // Deleted on the user's instruction, and it was a real third way to finish
+  // with Copilot's comments unhandled: on round 4 the requirement released
+  // itself, whatever was still open. Unlike a wait, another round costs only
+  // the agent's own work — so nothing about "round N" justifies walking away.
+  for (const rounds of [4, 25, 500]) {
+    const idle = evaluateCopilot(
+      armed({ rounds }),
+      analyzeCopilot(payload(), { anchorAt: NOW_ISO }),
+      { nowIso: NOW_ISO, now: NOW },
+    );
+    assert.equal(idle.status, "AWAITING", `round ${rounds} must still just wait`);
+
+    const open = evaluateCopilot(
+      armed({ rounds }),
+      analyzeCopilot(payload({ threads: [thread()] }), { anchorAt: NOW_ISO }),
+      { nowIso: NOW_ISO, now: NOW },
+    );
+    assert.equal(open.status, "OPEN", `round ${rounds} must still demand the fix`);
+    assert.equal(copilotProblems(open).length, 1, "and completion stays blocked");
+
+    const moved = evaluateCopilot(
+      armed({ rounds }),
+      analyzeCopilot(payload({ head: "newsha" }), { anchorAt: NOW_ISO }),
+      { nowIso: NOW_ISO, now: NOW },
+    );
+    assert.equal(moved.status, "ARMED", `round ${rounds} must still re-arm on a push`);
+  }
+
+  // The ONLY budget left is the wait, and it fires only when Copilot said
+  // nothing at all — it cannot drop feedback, because there is none.
+  const silent = evaluateCopilot(
+    armed({ rounds: 99 }),
+    analyzeCopilot(payload(), { anchorAt: NOW_ISO }),
+    { nowIso: NOW_ISO, now: NOW + COPILOT_AWAIT_TIMEOUT_MS + 1 },
   );
-  assert.equal(next.status, "EXHAUSTED");
-  assert.match(next.note ?? "", /budget spent/);
+  assert.equal(silent.status, "EXHAUSTED");
 });
 
 // ---------------------------------------------------------------------------
@@ -292,7 +422,6 @@ test("a released cycle is never resurrected by the next check", () => {
       const next = evaluateCopilot(released, analysis, {
         nowIso: "2026-08-07T12:00:00.000Z",
         now: NOW + COPILOT_AWAIT_TIMEOUT_MS + 1,
-        maxRounds: 3,
       });
       assert.deepEqual(next, released, `${status} must survive untouched (${label})`);
       assert.deepEqual(copilotProblems(next), [], "and must keep blocking nothing");
@@ -305,7 +434,7 @@ test("SATISFIED survives a re-check, but not code moving under it", () => {
   const sameCode = evaluateCopilot(
     satisfied,
     analyzeCopilot(payload({ threads: [thread({ isResolved: true })] }), { anchorAt: NOW_ISO }),
-    { nowIso: "2026-08-07T12:00:00.000Z", now: NOW, maxRounds: 3 },
+    { nowIso: "2026-08-07T12:00:00.000Z", now: NOW },
   );
   assert.deepEqual(sameCode, satisfied, "re-checking the same head must not rewrite the decision");
 
@@ -314,7 +443,7 @@ test("SATISFIED survives a re-check, but not code moving under it", () => {
   const moved = evaluateCopilot(
     satisfied,
     analyzeCopilot(payload({ head: "deadbeef" }), { anchorAt: NOW_ISO }),
-    { nowIso: "2026-08-07T12:00:00.000Z", now: NOW, maxRounds: 3 },
+    { nowIso: "2026-08-07T12:00:00.000Z", now: NOW },
   );
   assert.equal(moved.status, "ARMED");
   assert.match(moved.note ?? "", /head moved/);
@@ -330,11 +459,12 @@ test("a new PR ship is still the way a released cycle re-opens", () => {
   }
 });
 
-test("the round budget is bounded by construction (a config typo cannot unbound it)", () => {
-  assert.ok(COPILOT_MIN_ROUNDS >= 1);
-  assert.ok(COPILOT_MAX_ROUNDS <= 10, "an upper bound must exist");
-  assert.ok(COPILOT_MAX_ROUNDS_DEFAULT >= COPILOT_MIN_ROUNDS && COPILOT_MAX_ROUNDS_DEFAULT <= COPILOT_MAX_ROUNDS);
-  assert.ok(COPILOT_AWAIT_TIMEOUT_MS <= 60 * 60 * 1000, "the wait must be bounded in wall time too");
+test("the only remaining budget is the wait, and it is bounded in wall time", () => {
+  assert.ok(COPILOT_AWAIT_TIMEOUT_MS > 0);
+  assert.ok(COPILOT_AWAIT_TIMEOUT_MS <= 60 * 60 * 1000, "the wait must be bounded in wall time");
+  // The history probe has to look back far enough to be useful and stay one
+  // cheap query (measured: 7 of the last 20 PRs on a repo that uses Copilot).
+  assert.ok(COPILOT_HISTORY_PR_COUNT >= 10 && COPILOT_HISTORY_PR_COUNT <= 100);
 });
 
 // ---------------------------------------------------------------------------
@@ -408,89 +538,79 @@ test("a sanitized SATISFIED payload keeps blocking nothing (round-trip stays hon
 });
 
 // ---------------------------------------------------------------------------
-// "Is Copilot even available here?" — the pre-flight probe and the landing
-// check. Both answer a THIRD value (undefined = could not tell), because the
-// only action they can trigger is RELEASING a gate requirement: guessing there
-// is the one direction that fails open.
+// "Is Copilot even available here?" — the evidence-based availability probe.
+//
+// Measured facts this section encodes (see lib/copilot-review.ts):
+//   * `suggestedActors(CAN_BE_ASSIGNED)` answers a DIFFERENT question and
+//     returned no Copilot on a repo Copilot demonstrably reviews — that probe
+//     is gone;
+//   * a silently dropped request still exits 0 / answers 200 and leaves every
+//     `reviewRequests` surface empty — those read-backs are gone too;
+//   * a past Copilot review is direct evidence of the exact capability.
 
-const actorPayload = (logins: string[]) => JSON.stringify({
-  data: { repository: { suggestedActors: { nodes: logins.map((login) => ({ login })) } } },
+const historyPayload = (prs: string[][]) => JSON.stringify({
+  data: {
+    repository: {
+      pullRequests: {
+        nodes: prs.map((logins) => ({
+          reviews: { nodes: logins.map((login) => ({ author: { login } })) },
+        })),
+      },
+    },
+  },
 });
 
-test("the actor probe finds Copilot under any of its logins, and says so plainly when absent", () => {
-  assert.equal(parseCopilotActorProbe(actorPayload(["alice", "copilot-swe-agent"])), false,
+test("the history probe finds Copilot under any of its logins, and says so plainly when absent", () => {
+  assert.equal(historyProbe(historyPayload([["alice"], ["Copilot"]])), true);
+  assert.equal(historyProbe(historyPayload([["copilot-pull-request-reviewer[bot]"]])), true);
+  assert.equal(historyProbe(historyPayload([["alice", "bob"], []])), false);
+  assert.equal(historyProbe(historyPayload([])), false, "a repo with no PRs has no evidence");
+  assert.equal(historyProbe(historyPayload([["copilot-swe-agent"]])), false,
     "the coding agent is not the review bot");
-  assert.equal(parseCopilotActorProbe(actorPayload(["alice", "Copilot"])), true);
-  assert.equal(parseCopilotActorProbe(actorPayload(["copilot-pull-request-reviewer[bot]"])), true);
-  assert.equal(parseCopilotActorProbe(actorPayload(["qwang1113"])), false);
-  assert.equal(parseCopilotActorProbe(actorPayload([])), false);
 });
 
-test("an unreadable probe answer is 'cannot tell', never 'Copilot is missing'", () => {
-  // Each of these used to be indistinguishable from a real "no Copilot" answer;
-  // treating them as such would release the requirement on a network hiccup.
+test("an unreadable history answer is 'cannot tell', never 'Copilot is missing'", () => {
+  // Each of these used to be indistinguishable from a real "no Copilot"
+  // answer; treating them as such would decide availability on a hiccup.
   for (const bad of [
     "",
     "not json",
     "{}",
     JSON.stringify({ data: { repository: null } }),
-    JSON.stringify({ data: { repository: { suggestedActors: {} } } }),
+    JSON.stringify({ data: { repository: { pullRequests: {} } } }),
     JSON.stringify({ errors: [{ message: "Bad credentials" }] }),
   ]) {
-    assert.equal(parseCopilotActorProbe(bad), undefined, JSON.stringify(bad));
+    assert.equal(historyProbe(bad), undefined, JSON.stringify(bad));
   }
 });
 
-test("a landed request is proven by the review list OR by a review Copilot already posted", () => {
-  // `gh pr edit --add-reviewer @copilot` exits 0 and the REST endpoint answers
-  // 200 even where GitHub drops the bot, so the exit code proves nothing and
-  // this read-back is the actual evidence.
-  const landed = JSON.stringify({
-    reviewRequests: [{ __typename: "Bot", login: "copilot-pull-request-reviewer" }],
-    reviews: [],
-  });
-  assert.equal(parseCopilotRequestLanded(landed), true);
-
-  // Copilot can answer and leave the request list before we look.
-  const alreadyReviewed = JSON.stringify({
-    reviewRequests: [],
-    reviews: [{ author: { login: "Copilot" }, state: "COMMENTED" }],
-  });
-  assert.equal(parseCopilotRequestLanded(alreadyReviewed), true);
-
-  // Somebody else's review request is not ours.
-  const other = JSON.stringify({
-    reviewRequests: [{ __typename: "User", login: "alice" }],
-    reviews: [{ author: { login: "bob" }, state: "APPROVED" }],
-  });
-  assert.equal(parseCopilotRequestLanded(other), false);
-  assert.equal(parseCopilotRequestLanded(JSON.stringify({ reviewRequests: [], reviews: [] })), false,
-    "the exact shape this repo returns: accepted by the API, never landed");
+test("the owner allow-list is case-insensitive and only ever matches the owner half", () => {
+  assert.equal(isCopilotOwnerAllowed("OneKeyHQ/server-service-rebate", ["onekeyhq"]), true);
+  assert.equal(isCopilotOwnerAllowed("onekeyhq/x", ["OneKeyHQ"]), true);
+  assert.equal(isCopilotOwnerAllowed("someone/onekeyhq", ["onekeyhq"]), false,
+    "a repo NAMED like the org is not owned by it");
+  assert.equal(isCopilotOwnerAllowed("qwang1113/pi-review-gate", ["onekeyhq"]), false);
+  assert.equal(isCopilotOwnerAllowed(null, ["onekeyhq"]), false);
+  assert.equal(isCopilotOwnerAllowed("onekeyhq/x", []), false);
 });
 
-test("an unreadable landing answer cannot release the requirement either", () => {
-  for (const bad of ["", "not json", "[]", "null", JSON.stringify({ reviewRequests: "nope" })]) {
-    assert.equal(parseCopilotRequestLanded(bad), undefined, JSON.stringify(bad));
-  }
-  // One readable list is enough to judge — gh may omit the other field.
-  assert.equal(parseCopilotRequestLanded(JSON.stringify({ reviews: [{ author: { login: "copilot" } }] })), true);
-  assert.equal(parseCopilotRequestLanded(JSON.stringify({ reviewRequests: [] })), false);
-});
-
-test("the REST second opinion reads a different shape, with the same three values", () => {
-  // Why a second surface at all: review requests are eventually consistent, and
-  // a `gh` older than the `... on Bot{login}` selection renders a landed bot
-  // request as an empty JSON export — both would otherwise read as "never
-  // landed" and release the requirement on a repo that supports Copilot.
-  assert.equal(parseRestReviewRequests(JSON.stringify({
-    users: [{ login: "copilot-pull-request-reviewer[bot]", type: "Bot" }], teams: [],
-  })), true);
-  assert.equal(parseRestReviewRequests(JSON.stringify({ users: [{ login: "alice" }], teams: [] })), false);
-  assert.equal(parseRestReviewRequests(JSON.stringify({ users: [], teams: [] })), false,
-    "the shape this repo actually returns after a dropped request");
-  for (const bad of ["", "not json", "[]", "null", "{}", JSON.stringify({ users: "nope" })]) {
-    assert.equal(parseRestReviewRequests(bad), undefined, JSON.stringify(bad));
-  }
+test("availability: evidence outranks policy, policy outranks silence", () => {
+  const owners = ["onekeyhq"];
+  // A Copilot review on THIS PR is the cheapest and strongest evidence.
+  assert.equal(decideCopilotSupport({ onPr: true, slug: "nobody/x", owners }), "CONFIRMED");
+  // Sticky evidence from an earlier cycle counts without re-querying.
+  assert.equal(decideCopilotSupport({ remembered: true, slug: "nobody/x", owners }), "CONFIRMED");
+  assert.equal(decideCopilotSupport({ history: true, slug: "nobody/x", owners }), "CONFIRMED");
+  // No evidence, but the owner is covered by policy.
+  assert.equal(decideCopilotSupport({ history: false, slug: "OneKeyHQ/x", owners }), "ASSUMED");
+  // Neither.
+  assert.equal(decideCopilotSupport({ history: false, slug: "nobody/x", owners }), "UNKNOWN");
+  // An UNREADABLE probe must not demote a repo policy already covers: that is
+  // the difference between "no evidence" and "evidence of absence".
+  assert.equal(decideCopilotSupport({ history: undefined, slug: "OneKeyHQ/x", owners }), "ASSUMED");
+  assert.equal(decideCopilotSupport({ history: undefined, slug: "nobody/x", owners }), "UNKNOWN");
+  // Nothing supplied at all is the honest worst case, not an optimistic one.
+  assert.equal(decideCopilotSupport({}), "UNKNOWN");
 });
 
 // ---------------------------------------------------------------------------
@@ -513,7 +633,7 @@ test("re-requesting cannot buy more waiting time (the budget anchors on the firs
   const next = evaluateCopilot(
     state,
     analyzeCopilot(payload(), { anchorAt: first }),
-    { nowIso: NOW_ISO, now: justPastTheBudget, maxRounds: 3 },
+    { nowIso: NOW_ISO, now: justPastTheBudget },
   );
   assert.equal(next.status, "EXHAUSTED", "20 minutes after the FIRST request, the valve opens");
   assert.match(next.note ?? "", /escalate to the user/);
@@ -524,7 +644,7 @@ test("a cycle re-armed by a new PR ship starts a fresh wait budget", () => {
   const rearmed = armCopilotReview(state, "2026-08-07T11:00:00.000Z");
   assert.equal(rearmed.firstRequestedAt, undefined, "a new cycle must not inherit the old anchor");
   assert.equal(rearmed.requestedAt, undefined);
-  assert.equal(rearmed.rounds, 1, "but the round budget stays cumulative");
+  assert.equal(rearmed.rounds, 1, "but the round COUNT stays cumulative (no cap, just bookkeeping)");
 });
 
 test("a sidecar written before the anchor existed still ages out on its last request", () => {
@@ -537,7 +657,7 @@ test("a sidecar written before the anchor existed still ages out on its last req
   const next = evaluateCopilot(
     legacy,
     analyzeCopilot(payload(), { anchorAt: NOW_ISO }),
-    { nowIso: NOW_ISO, now: NOW + COPILOT_AWAIT_TIMEOUT_MS + 1, maxRounds: 3 },
+    { nowIso: NOW_ISO, now: NOW + COPILOT_AWAIT_TIMEOUT_MS + 1 },
   );
   assert.equal(next.status, "EXHAUSTED");
   // And a sidecar that HAS the anchor keeps it through sanitization.

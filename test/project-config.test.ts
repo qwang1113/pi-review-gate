@@ -12,11 +12,6 @@ import {
   MAX_MAX_ROUNDS,
 } from "../lib/project-config.ts";
 import { DEFAULT_MAX_ROUNDS } from "../lib/constants.ts";
-import {
-  COPILOT_MAX_ROUNDS,
-  COPILOT_MAX_ROUNDS_DEFAULT,
-  COPILOT_MIN_ROUNDS,
-} from "../lib/copilot-review.ts";
 
 const tempDirs: string[] = [];
 function makeTemp(): string {
@@ -47,32 +42,56 @@ test("no config file → defaults", () => {
   // UNSUPPORTED on the first check, so "on" costs nothing where the feature
   // does not exist — while "off by default" would mean nobody gets it.
   assert.equal(cfg.copilotReview.enabled, true);
-  assert.equal(cfg.copilotReview.maxRounds, COPILOT_MAX_ROUNDS_DEFAULT);
+  // The owner allow-list is the cold-start fallback for "is Copilot review
+  // available here?" — GitHub publishes no way to ask.
+  assert.deepEqual(cfg.copilotReview.owners, ["onekeyhq"]);
 });
 
-test("copilotReview: honored, clamped, and fail-safe on garbage", () => {
+test("copilotReview: honored and fail-safe on garbage", () => {
   const d = makeTemp();
-  writeConfig(d, JSON.stringify({ copilotReview: { enabled: false, maxRounds: 5 } }));
-  const off = loadProjectConfig(d);
-  assert.equal(off.copilotReview.enabled, false);
-  assert.equal(off.copilotReview.maxRounds, 5);
-
-  // Clamped both ways: a typo still yields a sane budget, and a huge value
-  // cannot turn the Copilot loop into one that practically never exhausts.
-  const e = makeTemp();
-  writeConfig(e, JSON.stringify({ copilotReview: { maxRounds: 9999 } }));
-  assert.equal(loadProjectConfig(e).copilotReview.maxRounds, COPILOT_MAX_ROUNDS);
-  const f = makeTemp();
-  writeConfig(f, JSON.stringify({ copilotReview: { maxRounds: 0 } }));
-  assert.equal(loadProjectConfig(f).copilotReview.maxRounds, COPILOT_MIN_ROUNDS);
+  writeConfig(d, JSON.stringify({ copilotReview: { enabled: false } }));
+  assert.equal(loadProjectConfig(d).copilotReview.enabled, false);
 
   // Wrong shapes are ignored entirely rather than half-applied.
   const g = makeTemp();
   writeConfig(g, JSON.stringify({ copilotReview: ["nope"] }));
   assert.deepEqual(loadProjectConfig(g).copilotReview, defaultProjectConfig().copilotReview);
   const h = makeTemp();
-  writeConfig(h, JSON.stringify({ copilotReview: { enabled: "yes", maxRounds: 2.5 } }));
+  writeConfig(h, JSON.stringify({ copilotReview: { enabled: "yes" } }));
   assert.deepEqual(loadProjectConfig(h).copilotReview, defaultProjectConfig().copilotReview);
+
+  // `maxRounds` was REMOVED (a round cap could only ever end a task with
+  // review comments unhandled). A config still carrying it stays valid and
+  // the key is simply inert — it must not resurrect a cap.
+  const i = makeTemp();
+  writeConfig(i, JSON.stringify({ copilotReview: { maxRounds: 3 } }));
+  assert.deepEqual(loadProjectConfig(i).copilotReview, defaultProjectConfig().copilotReview);
+});
+
+test("copilotReview.owners: REPLACES the default, normalized, junk-safe", () => {
+  const d = makeTemp();
+  writeConfig(d, JSON.stringify({ copilotReview: { owners: ["Acme", "  OTHER-Org "] } }));
+  assert.deepEqual(loadProjectConfig(d).copilotReview.owners, ["acme", "other-org"],
+    "lowercased, trimmed, and the default org is NOT silently kept");
+
+  // An explicit empty list is a real choice: "evidence only, trust no owner".
+  const e = makeTemp();
+  writeConfig(e, JSON.stringify({ copilotReview: { owners: [] } }));
+  assert.deepEqual(loadProjectConfig(e).copilotReview.owners, []);
+
+  // Junk entries are dropped; an all-junk array degrades to the same
+  // evidence-only end rather than to somebody else's organisation.
+  const f = makeTemp();
+  writeConfig(f, JSON.stringify({ copilotReview: { owners: [42, null, "  ", { x: 1 }] } }));
+  assert.deepEqual(loadProjectConfig(f).copilotReview.owners, []);
+  const g = makeTemp();
+  writeConfig(g, JSON.stringify({ copilotReview: { owners: [42, "Keep"] } }));
+  assert.deepEqual(loadProjectConfig(g).copilotReview.owners, ["keep"]);
+
+  // A non-array keeps the default untouched (half-applied config is worse).
+  const h = makeTemp();
+  writeConfig(h, JSON.stringify({ copilotReview: { owners: "acme" } }));
+  assert.deepEqual(loadProjectConfig(h).copilotReview.owners, ["onekeyhq"]);
 });
 
 test("corrupt JSON → defaults (fail-safe)", () => {
