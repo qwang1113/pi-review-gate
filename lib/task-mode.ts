@@ -51,16 +51,16 @@
  *    Still bounded: interactive session AND no edits by THIS session, and
  *    the mode records source "auto" so the git hooks stay fully enforced.
  *  - USER REQUIREMENT (pi-self): a first classification in a session that
- *    works ON pi itself — the gate's own repo/install, the pi binary, or
- *    ~/.pi (see lib/pi-self.ts) — applies "normal" automatically via
- *    piSelfTask, with the same bounds as firstDecideAuto (clean interactive
- *    session, not locked). The gate must not gate its own maintenance, and
- *    the user asked for no dialogs there. Source stays "auto": the git
- *    hooks carry their OWN deterministic pi-self exemption
- *    (hooks/pre-commit: package.json name "pi-review-gate"), so this never
- *    weakens hooks in ordinary repos. A requested upgrade to "loop" still
- *    wins — the user can always demand the full loop for gate work; the
- *    auto-exemption only sets the default.
+ *    works on pi's GLOBAL configuration — the user's ~/.pi config dir or the
+ *    pi binary install (see lib/pi-self.ts) — applies "normal" automatically
+ *    via piSelfTask, with the same bounds as firstDecideAuto (clean
+ *    interactive session, not locked). Pi's own config is not gate material,
+ *    and the user asked for no dialogs there. DELIBERATE NON-GOAL:
+ *    developing pi-review-gate ITSELF (its repo anywhere) is NOT pi-self —
+ *    it runs the full loop like any development. Source stays "auto" and
+ *    the hooks need no exemption (pi's config dirs are not git repos), so
+ *    ordinary repos stay fully enforced. A requested upgrade to "loop"
+ *    still wins — the auto-exemption only sets the default.
  *  - Print/JSON mode (no UI) can only run "normal" (USER REQUIREMENT). Every
  *    enforced mode now depends on dialogs the extension must be able to
  *    render — the loop goal is approved in one (lib/loop-goal.ts), a
@@ -83,7 +83,8 @@
  *  explicitly opted OUT of the first confirmation for it (firstDecideAuto on
  *  a clean interactive session); every LATER path into it (initial on a dirty
  *  session, or any downgrade) still requires user confirmation — except the
- *  pi-self first classification, where the user asked for no dialogs at all.
+ *  pi-self first classification (pi's global config only), where the user
+ *  asked for no dialogs at all.
  */
 
 export type TaskMode = "normal" | "explore" | "loop";
@@ -287,9 +288,11 @@ export const GATE_MODE_DECISION_DIRECTIVE =
   "running diagnostic commands still counts. Gates become advisory; ship commands stay blocked.\n" +
   '- "normal" — neither development nor research (casual Q&A, quick chores): the gate switches ' +
   "off entirely.\n" +
-  'NOTE (pi-self): a session working ON pi itself — the review-gate extension\'s own repo/install, ' +
-  "the pi binary, or ~/.pi — is classified \"normal\" AUTOMATICALLY by a deterministic path rule; " +
-  "call set_gate_mode with \"normal\" (or \"loop\" if the user explicitly wants the full loop).\n" +
+  'NOTE (pi-self): a session working on pi\'s GLOBAL config — the ~/.pi config dir, the pi binary ' +
+  "install — or troubleshooting pi's own behavior is classified \"normal\" AUTOMATICALLY by a " +
+  "deterministic path rule; call set_gate_mode with \"normal\" (or \"loop\" if the user explicitly " +
+  "wants the full loop). Developing pi-review-gate ITSELF (its repo) is NOT pi-self — it runs the " +
+  "full loop like any development.\n" +
   "DeepSeek V4 (the llmGuards model) classifies this first decision inside the tool and it is " +
   "applied AUTOMATICALLY — no confirmation dialog for the first classification (user " +
   "requirement). Provide a truthful one-line reason; the model may override your pick. " +

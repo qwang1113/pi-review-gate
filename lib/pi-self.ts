@@ -1,10 +1,16 @@
 /**
- * PI-SELF DETECTION — the gate must not gate its own maintenance.
+ * PI-SELF DETECTION — pi's own configuration is not gate material.
  *
- * USER REQUIREMENT: sessions that work ON pi itself — the review-gate
- * extension's own repository or installed copy, the pi binary's install
- * directory, or the user's ~/.pi config dir — have the gate OFF
- * automatically: no LLM round-trip, no consent dialog, no review loop.
+ * USER REQUIREMENT: sessions that work on pi's GLOBAL configuration — the
+ * user's ~/.pi config dir (settings, MCP, installed extensions) or the pi
+ * binary's install directory — or that troubleshoot pi's own behavior, have
+ * the gate OFF automatically: no LLM round-trip, no consent dialog, no
+ * review loop.
+ *
+ * DELIBERATE NON-GOAL: developing pi-review-gate ITSELF (its repository
+ * anywhere, or a per-project .pi install) is NOT pi-self — it is regular
+ * development and runs the full loop. The gate gates its own development
+ * like any other code; it only steps aside for pi's global config.
  *
  * Detection is DETERMINISTIC and path-based on purpose: the session's repo
  * root is chosen by the USER (the agent cannot forge which directory a
@@ -12,36 +18,28 @@
  * a pi task") are NOT trusted here — that soft path is covered by the LLM
  * classifier prompt instead (lib/llm-classify.ts, classifyTaskMode).
  *
- * The git hooks mirror this exemption deterministically (hooks/pre-commit
- * and hooks/commit-msg: package.json name === "pi-review-gate"), so pi-self
- * commits never need REVIEW_GATE_BYPASS while ordinary repos stay fully
- * enforced. Hooks only exist inside git repos, so the ~/.pi and pi-binary
- * branches of this module matter only to the in-session extension.
+ * The git hooks need NO mirror of this: ~/.pi and the pi binary install are
+ * not git repositories, so no hook ever runs there. Ordinary repos — the
+ * gate's own checkout included — stay fully enforced.
  */
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, resolve, sep } from "node:path";
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { gitRootOfDir } from "./repo-resolve.ts";
-
-/** The gate's own package name — its repo is exempt wherever it is checked out. */
-export const GATE_PACKAGE_NAME = "pi-review-gate";
 
 let cachedSelfRoots: readonly string[] | undefined;
 
-/** Paths that count as "pi itself". Resolved once per process (the extension
- *  is resident; these paths cannot move under it mid-session). */
+/** Paths that count as "pi's global configuration". Resolved once per process
+ *  (the extension is resident; these paths cannot move under it mid-session). */
 function selfRoots(): readonly string[] {
   if (cachedSelfRoots) return cachedSelfRoots;
   const roots = new Set<string>();
-  // <gate-root>/lib in the dev checkout, .../extensions/pi-review-gate/lib in
-  // the installed copy (which itself lives under ~/.pi — doubly covered below).
-  const here = dirname(fileURLToPath(import.meta.url));
 
-  // 1. The gate's own source: its git checkout, or its non-repo installed copy.
-  const gateRoot = gitRootOfDir(here) ?? resolve(here, "..");
-  roots.add(gateRoot);
+  // 1. The user's pi config dir — settings, MCP config, installed extensions
+  //    (the review-gate install copy lives under ~/.pi/agent/extensions/…,
+  //    so editing the INSTALLED copy is config work; the source repo is not).
+  roots.add(resolve(homedir(), ".pi"));
 
   // 2. The pi binary install directory (global node_modules layout).
   try {
@@ -49,9 +47,6 @@ function selfRoots(): readonly string[] {
     const pkgEntry = req.resolve("@earendil-works/pi-coding-agent/package.json");
     roots.add(dirname(pkgEntry));
   } catch { /* not resolvable from here — no signal */ }
-
-  // 3. The user's pi config dir.
-  roots.add(resolve(homedir(), ".pi"));
 
   cachedSelfRoots = [...roots].map(realOrPlain);
   return cachedSelfRoots;
@@ -61,7 +56,7 @@ function realOrPlain(p: string): string {
   try { return realpathSync(p); } catch { return resolve(p); }
 }
 
-/** Is `abs` (an absolute path) part of pi itself? */
+/** Is `abs` (an absolute path) part of pi's global configuration? */
 export function isPiSelfPath(abs: string): boolean {
   const target = realOrPlain(abs);
   for (const root of selfRoots()) {
@@ -70,12 +65,9 @@ export function isPiSelfPath(abs: string): boolean {
   return false;
 }
 
-/** Is `root` a repository that IS the gate? Its own checkout, wherever it
- *  lives (name check) — or a path that is pi itself (path check). */
+/** Is `root` a repository/session root that IS pi's global config? A path
+ *  check only — the gate's OWN checkout is deliberately NOT pi-self
+ *  (developing it runs the full loop). */
 export function isPiSelfRoot(root: string): boolean {
-  try {
-    const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as { name?: unknown };
-    if (pkg?.name === GATE_PACKAGE_NAME) return true;
-  } catch { /* not a package — fall through to the path check */ }
   return isPiSelfPath(root);
 }

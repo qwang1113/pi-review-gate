@@ -3319,12 +3319,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       // hooks remain fully enforced.
       let effective = requested;
       let classifiedBy: string | null = null;
-      // PI-SELF (USER REQUIREMENT): sessions working ON pi itself — the
-      // gate's own repo/install, the pi binary, or ~/.pi (lib/pi-self.ts) —
-      // get "normal" automatically: no LLM round-trip, no consent dialog.
-      // Deterministic path detection: the session's repo root is chosen by
-      // the USER, so this is not a forgeable text claim. A requested "loop"
-      // still wins — the user can always demand the full loop for gate work.
+      // PI-SELF (USER REQUIREMENT): sessions working on pi's GLOBAL
+      // config — the user's ~/.pi dir or the pi binary install
+      // (lib/pi-self.ts) — get "normal" automatically: no LLM round-trip,
+      // no consent dialog. Deliberately NOT pi-self: developing the gate's
+      // own repo, which runs the full loop like any development. Deterministic
+      // path detection: the session's repo root is chosen by the USER, so
+      // this is not a forgeable text claim. A requested "loop" still wins —
+      // the user can always demand the full loop for gate work.
       const piSelf = isPiSelfRoot(primaryRepoRoot);
       let piSelfAuto = false;
       if (
