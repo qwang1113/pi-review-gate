@@ -12,20 +12,20 @@ enforced by the pi-review-gate extension: `git commit`, `git push`, and
 ## Two independent judges, on a stronger model than you
 
 Good judgement comes from a *stronger, independent* brain than the one that
-wrote the code. Both roles are pinned to a top-tier reasoning model at `xhigh`
+wrote the code. Both roles are pinned to a top-tier reasoning model at `max`
 thinking, with a fallback priority list (first available wins):
 
 - **`adviser`** (`agents/adviser.md`, consultant, *before/during* work) —
   you should **proactively consult** it whenever a decision is non-trivial,
   ambiguous, risky, or you feel stuck. It does not gate; it advises on
   direction. Consulting early is cheaper than a failed review later.
-  Model priority: Fable 5 → GPT-5.6 Sol → Opus 4.8 → GPT-5.5.
+  Model priority: Fable 5 → Opus 5 → Opus 4.6 → GPT-5.6 Sol → Opus 4.8 → GPT-5.5.
 - **`reviewer`** (`agents/reviewer.md`, gatekeeper, *after* a diff exists) —
   independent audit that emits the JSON verdict the gate records.
-  Model priority: GPT-5.6 Sol → Fable 5 → GPT-5.5 → Opus 4.8.
+  Model priority: Fable 5 → Opus 5 → Opus 4.6 → GPT-5.5 → Opus 4.8.
 
-Thinking is a single value (`xhigh`, the highest valid pi level); it is not a
-fallback list. If a model doesn't support `xhigh`, pi clamps it down.
+Thinking is a single value (`max`, the highest valid pi level); it is not a
+fallback list. If a model doesn't support `max`, pi clamps it down.
 
 Why these models? `lib/model-ranking.ts` scores model families from public
 capability leaderboards (Artificial Analysis Intelligence Index, LMArena Elo,
