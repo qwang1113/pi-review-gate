@@ -27,6 +27,15 @@ test("~/.pi and everything under it is pi-self (the user's global pi config)", (
     "path membership must not depend on the file existing");
 });
 
+test("/tmp and macOS /private/tmp are pi-self (ad-hoc scratch sessions)", () => {
+  // USER REQUIREMENT: sessions started in the scratch dir need no gate —
+  // the 019ff576-style pi-config/troubleshooting sessions run from a temp cwd.
+  assert.equal(isPiSelfPath("/tmp"), true);
+  assert.equal(isPiSelfPath("/private/tmp"), true);
+  assert.equal(isPiSelfPath("/tmp/scratch-dir"), true);
+  assert.equal(isPiSelfRoot("/private/tmp"), true);
+});
+
 test("the gate's OWN checkout is NOT pi-self — developing it runs the full loop", () => {
   // USER REQUIREMENT: pi-review-gate development is regular development and
   // must go through the full review loop; only pi's global config is exempt.

@@ -3,9 +3,10 @@
  *
  * USER REQUIREMENT: sessions that work on pi's GLOBAL configuration — the
  * user's ~/.pi config dir (settings, MCP, installed extensions) or the pi
- * binary's install directory — or that troubleshoot pi's own behavior, have
- * the gate OFF automatically: no LLM round-trip, no consent dialog, no
- * review loop.
+ * binary's install directory — that troubleshoot pi's own behavior, or that
+ * run in the scratch dir /tmp (ad-hoc sessions, e.g. pi config work done
+ * from a temp cwd), have the gate OFF automatically: no LLM round-trip, no
+ * consent dialog, no review loop.
  *
  * DELIBERATE NON-GOAL: developing pi-review-gate ITSELF (its repository
  * anywhere, or a per-project .pi install) is NOT pi-self — it is regular
@@ -48,19 +49,33 @@ function selfRoots(): readonly string[] {
     roots.add(dirname(pkgEntry));
   } catch { /* not resolvable from here — no signal */ }
 
-  cachedSelfRoots = [...roots].map(realOrPlain);
+  // 3. Scratch/temp dirs: sessions started in /tmp (macOS /private/tmp is the
+  //    same dir through a symlink) are ad-hoc scratch sessions (pi config
+  //    work, troubleshooting) — the gate steps aside there too (USER
+  //    REQUIREMENT). Everything under /tmp is exempt, including any
+  //    incidental git checkout inside it: the dir is scratch space by
+  //    definition, so no real development lives there.
+  roots.add("/tmp");
+
+  // Keep BOTH the plain and the realpath form of every root: a path that
+  // does not exist yet (e.g. /tmp/scratch-dir) stays in its plain form while
+  // its root (e.g. /tmp → /private/tmp on macOS) was realpathed — a
+  // one-sided normalization would miss the match.
+  cachedSelfRoots = [...roots].flatMap(pathVariants);
   return cachedSelfRoots;
 }
 
-function realOrPlain(p: string): string {
-  try { return realpathSync(p); } catch { return resolve(p); }
+function pathVariants(p: string): string[] {
+  const variants = new Set<string>([resolve(p)]);
+  try { variants.add(realpathSync(p)); } catch { /* keep the plain form */ }
+  return [...variants];
 }
 
 /** Is `abs` (an absolute path) part of pi's global configuration? */
 export function isPiSelfPath(abs: string): boolean {
-  const target = realOrPlain(abs);
+  const targetVariants = pathVariants(abs);
   for (const root of selfRoots()) {
-    if (target === root || target.startsWith(root + sep)) return true;
+    if (targetVariants.some((t) => t === root || t.startsWith(root + sep))) return true;
   }
   return false;
 }
