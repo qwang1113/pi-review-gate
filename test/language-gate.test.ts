@@ -61,10 +61,14 @@ const EARLY_RETURN_RE = /if\s*\([^)]*problems\.length\s*===\s*0\s*\)\s*\{\s*retu
 /**
  * How much of the handler to slice for the ordering assertions. Generous on
  * purpose: every prompt branch added ahead of the early return (explore
- * workflow, loop goal, …) pushes it further down, and a window that only just
- * fits turns an unrelated addition into a false failure.
+ * workflow, loop goal, the oversized-requirement checkpoints, …) pushes it
+ * further down, and a window that only just fits turns an unrelated addition
+ * into a false failure. Raised from 6000 when the oversized-requirement
+ * checkpoints landed; the assertions themselves are unchanged — what is being
+ * tested is the ORDER of the injection and the early return, not the distance
+ * between them.
  */
-const HANDLER_WINDOW = 6000;
+const HANDLER_WINDOW = 9000;
 
 test("language gate is UNCONDITIONAL — injected before the no-changes early return", () => {
   // Locate the handler body.
