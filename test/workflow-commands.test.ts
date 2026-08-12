@@ -19,6 +19,10 @@ const EXPECTED = [
   "load-pr-review",
   "watch-ci",
   "gate-init",
+  "decompose",
+  "plan-next",
+  "plan-status",
+  "plan-verify",
 ];
 
 test("workflow command catalog exposes the high-value sd0x-dev-flow ports", () => {
@@ -99,4 +103,34 @@ test("gate-init prompts the interactive precommit-config generation flow", () =>
   assert.match(prompt, /precommit: cfg/);
   assert.match(prompt, /\/reload/);
   assert.match(prompt, /Do not change any other file/);
+});
+
+test("the orchestration commands keep the serial single-writer contract", () => {
+  const decompose = buildWorkflowPrompt("decompose", "build the whole thing");
+  assert.match(decompose, /disjoint/, "disjoint ownership is the real split criterion");
+  assert.match(decompose, /acyclic/);
+  assert.match(decompose, /ONCE for edits and approval/, "the table is negotiated once, not per module");
+  assert.match(decompose, /do not dispatch a worker/i);
+  assert.match(decompose, /"build the whole thing"/, "the requirement stays inside the untrusted data block");
+
+  const next = buildWorkflowPrompt("plan-next");
+  assert.match(next, /exactly ONE worker/);
+  assert.match(next, /never run two workers at once/);
+  assert.match(next, /never guess a repair/, "malformed state must fail closed");
+  assert.match(next, /must not read the diff/, "the driver's context stays bounded");
+
+  const status = buildWorkflowPrompt("plan-status");
+  assert.match(status, /Read-only/);
+  assert.match(status, /never re-print past review text/i);
+});
+
+test("plan-verify encodes the two-phase docSync protocol the gate depends on", () => {
+  const verify = buildWorkflowPrompt("plan-verify");
+  assert.match(verify, /run_precommit mode=full ONCE/, "one merged precommit per round");
+  assert.match(verify, /MUST omit docSync/, "shard fences must not carry an attestation");
+  assert.match(verify, /record ITS output ALONE/, "Phase B is recorded alone so its docSync survives merging");
+  assert.match(verify, /single record_review call/, "Phase A shards are recorded together");
+  assert.match(verify, /seam module M-INT-<n>/, "every finding gets exactly one owner");
+  assert.match(verify, /never inline/, "remediation goes back through /plan-next");
+  assert.match(verify, /Above 8/, "the human threshold matches the design");
 });

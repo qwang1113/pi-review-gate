@@ -299,6 +299,44 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
   the verdict still binds to the complete worktree fingerprint either way.
   This trades review breadth for latency — do not use it to hide a change.
 
+## Very large requirements: the serial module loop
+
+When one request is too big for a single session, do not stretch the loop —
+split the requirement. `docs/requirement-orchestration.md` is the contract;
+`/decompose`, `/plan-next`, `/plan-status` and `/plan-verify` drive it. The
+shape:
+
+1. `/decompose` — a cold planner proposes a module table (id, intent,
+   `owned_paths`, `depends_on`, `must_haves`, model, thinking, risk). Show it
+   to the user ONCE, whole, for approval. Plan-time modules must own disjoint
+   paths and form a DAG; that, not a token estimate, is what makes a split
+   real. Approved state lands in `.pi/plan/state.json`.
+2. `/plan-next`, repeatedly — the planner cold-starts from the state, writes
+   the next module's task brief, and returns ONE instruction; you dispatch ONE
+   worker and record its status plus a one-line result. **You are a driver
+   here**: never read the diff, the source or the worker's transcript. The
+   planner is disposable precisely because everything that matters is on disk,
+   so a planner that runs out of context costs nothing.
+3. `/plan-verify` — one round: `run_precommit` full ONCE, then Phase A (one
+   module reviewer per module, parallel, read-only) recorded together, then
+   Phase B (the integration reviewer over the whole change) recorded ALONE.
+
+**The docSync protocol is the part that will bite you.** `record_review`
+merges equal-severity fences and DROPS `docSync` when they disagree, and an
+absent attestation fails closed. So Phase A fences must omit `docSync`
+entirely (a shard reviewer cannot attest to the whole change), and Phase B must
+be its own `record_review` call so its attestation survives intact. Two calls
+per verify round is the price; it is why the round cap matters on a long plan.
+
+On any failure the round ABORTS: every finding gets exactly one owner (an
+existing module, or a seam module `M-INT-<n>` when the fix crosses ownership),
+the counters are charged, uncharged modules roll back to `implemented`, and
+remediation goes through `/plan-next` — never inline. Above 8 charged rounds
+for a module or for the integration counter, stop and ask the user.
+
+Serial by decision: exactly one writer in the worktree at a time. That is what
+lets this skip worktrees entirely without ever putting a verdict at risk.
+
 ## Rules
 
 - **输出语言（L4，强制）**：所有面向用户的文字用严格简体中文，thinking 也尽量用

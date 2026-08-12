@@ -149,6 +149,72 @@ export const WORKFLOW_COMMANDS = {
       invocation,
     ),
   },
+  decompose: {
+    description: "Split one large requirement into a serial, gated module plan",
+    usage: "/decompose [requirement text or path to a requirement file]",
+    allowsExecute: false,
+    prompt: (invocation) => withInvocation(
+      "Decompose the requirement in the user-data block into a module plan, following docs/requirement-orchestration.md. " +
+      "Store the requirement text VERBATIM as .pi/plan/brief.md (if the block names a file, read that file and store its contents). " +
+      "Then spawn a COLD planner subagent (fresh context, read-only plus state writes) to propose the module table. Each module needs: " +
+      "id, title, one-paragraph intent, owned_paths, depends_on, must_haves (each with kind artifact/behavior/test/doc, a checkable statement and a risk), " +
+      "suggested model, suggested thinking level, a risk band, and an estimated context size. " +
+      "Plan-time modules MUST own disjoint paths and their depends_on graph MUST be acyclic — those, not the token estimate, are the real split criteria. " +
+      "Warn the user about any module estimated above ~120k tokens of context: that size is a sign the boundary is in the wrong place. " +
+      "Present the WHOLE table to the user ONCE for edits and approval; do not interrogate module by module. " +
+      "Only after the user approves, write .pi/plan/state.json (schema 1, status approved) via lib/plan-state.ts and let it render PLAN.md. " +
+      "Do not implement anything and do not dispatch a worker in this command.",
+      invocation,
+    ),
+  },
+  "plan-next": {
+    description: "Run one serial step of the module plan: ask the planner, dispatch one worker",
+    usage: "/plan-next",
+    allowsExecute: false,
+    prompt: (invocation) => withInvocation(
+      "Advance the module plan by exactly ONE step, per docs/requirement-orchestration.md §5.2. " +
+      "Read .pi/plan/state.json; if it is missing or malformed, report the exact defect and stop — never guess a repair. " +
+      "Spawn a COLD planner subagent that reads only the plan state, the brief and the loop goal, and APPENDS the dispatched module's task brief to its worklog " +
+      "(preserving any execution log, self-check and review sections already there — that audit trail is what the reviewers judge against), " +
+      "and returns ONE instruction: run <module id>, replan with a reason, or 'all modules implemented'. " +
+      "Then dispatch exactly ONE worker subagent for that module at its recorded model and thinking level, with a turn budget; never run two workers at once. " +
+      "The worker implements inside owned_paths, self-checks every must_have with evidence, and appends its execution log, changed-file list and self-check to the worklog. " +
+      "Record only the resulting status and a ONE-LINE result in the plan state: as the driver you must not read the diff or the worker transcript. " +
+      "If the planner says replan, or the worker reports it must touch files outside owned_paths, stop and ask the user before changing the plan. " +
+      "When the planner reports every module implemented, tell the user to run /plan-verify.",
+      invocation,
+    ),
+  },
+  "plan-status": {
+    description: "Show module plan progress from the machine-readable state",
+    usage: "/plan-status",
+    allowsExecute: false,
+    prompt: (invocation) => withInvocation(
+      "Read .pi/plan/state.json and report progress: plan status, verify round, both blocked counters, the cursor, and one line per module " +
+      "(id, status, blocked_rounds, one-line result). Name the next action implied by the state (/plan-next, /plan-verify, or a human decision). " +
+      "Read-only: change no file, dispatch no subagent, and never re-print past review text.",
+      invocation,
+    ),
+  },
+  "plan-verify": {
+    description: "Run one verify round: merged precommit, sharded review, integration review",
+    usage: "/plan-verify",
+    allowsExecute: false,
+    prompt: (invocation) => withInvocation(
+      "Run ONE verify round exactly as docs/requirement-orchestration.md §5.3 specifies. " +
+      "Step 0: every implemented module enters review. " +
+      "Step 1: run_precommit mode=full ONCE for the whole change. " +
+      "Step 2 (Phase A): spawn one module-reviewer subagent per module, in parallel, read-only, each judging ONLY its own must_haves, worklog and owned_paths diff; " +
+      "their verdict fences MUST omit docSync. Concatenate their FULL raw outputs into a single record_review call. " +
+      "Step 3 (Phase B): only if Phase A was READY, spawn ONE integration reviewer over the whole change (cross-module seams, duplicated abstractions, interfaces " +
+      "implemented two different ways, the loop goal criterion by criterion) and record ITS output ALONE, because it carries the single docSync attestation. " +
+      "On any failure: assign every finding exactly one owner (an existing module when the whole fix is inside its owned_paths, otherwise a new seam module M-INT-<n>), " +
+      "charge the counters, roll every uncharged module back to implemented, set the plan to executing and return — remediation happens through /plan-next, never inline. " +
+      "Above 8 charged rounds for a module or for the integration counter, stop and ask the user. " +
+      "Only when Phase B is READY may you accept the modules and proceed to declare_done.",
+      invocation,
+    ),
+  },
 } satisfies Record<string, WorkflowCommand>;
 
 export type WorkflowCommandName = keyof typeof WORKFLOW_COMMANDS;
