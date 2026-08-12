@@ -18,7 +18,11 @@ test("loop goal: injected ONLY in loop mode, before the unarmed early-return", (
   // above the whole handler and make the ordering assertion vacuous.
   const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
   assert.ok(handlerAt > 0, "handler registration must exist");
-  const injectAt = SRC.indexOf("buildLoopGoalDirective(readLoopGoal(", handlerAt);
+  // Anchored on the call, not on its argument expression: the goal is now read
+  // into a local (the oversized-requirement checkpoint reads the same value),
+  // and this assertion is about WHERE the directive is injected, not how the
+  // argument is spelled.
+  const injectAt = SRC.indexOf("buildLoopGoalDirective(", handlerAt);
   assert.ok(injectAt > 0, "loop-goal directive must be injected in before_agent_start");
   const exploreReturnAt = SRC.indexOf('state.taskMode === "explore"', handlerAt);
   const unarmedReturnAt = SRC.indexOf("if (!gateArmed && problems.length === 0)", handlerAt);

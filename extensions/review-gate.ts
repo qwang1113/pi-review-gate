@@ -45,7 +45,7 @@
 
 import {
   existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
-  mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync,
+  mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
@@ -139,6 +139,7 @@ import {
   classifyAiAttribution,
   classifyNonEnglish,
   classifyShipCommand,
+  classifyRequirementSize,
   classifyTaskMode,
   createVerdictMemo,
   isSuspiciousShipCandidate,
@@ -164,6 +165,13 @@ import {
   GOAL_CONFIRM_TITLE,
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
 } from "./lib/loop-goal.ts";
+import {
+  assessRequirementSize,
+  buildDecomposeSuggestion,
+  countExitCriteria,
+  detectTouchedDirs,
+  type ModuleBucket,
+} from "./lib/requirement-size.ts";
 import { fitDialogMessage } from "./lib/dialog-budget.ts";
 import {
   COPILOT_ACTOR_QUERY,
@@ -298,6 +306,46 @@ export default function reviewGate(pi: ExtensionAPI) {
   // discipline.ts). This targets the recurring "edit failed → shell edits the
   // file" workaround without policing ordinary bash usage.
   let editFailurePending = false;
+  // Oversized-requirement detection (lib/requirement-size.ts). The classifier
+  // runs ONCE, piggybacking on the first set_gate_mode call so it costs no
+  // extra latency point; `unavailable` records that it was consulted and could
+  // not answer, which the injected text must disclose rather than hide.
+  let requirementBucket: ModuleBucket | undefined;
+  let requirementClassifierUnavailable = false;
+  // At most ONE decompose suggestion per session, across both checkpoints.
+  // Rationale: there is no tool for the user to press "no" with, so a decline
+  // is invisible to the gate; but a user who saw the suggestion and went on to
+  // negotiate a loop goal has, in effect, already answered. Suggesting once is
+  // therefore the honest reading of "never ask twice" — and it is strictly
+  // quieter than the alternative.
+  // In-memory only, like the other session flags: a restart mid-session can
+  // re-ask once. Persisting it would mean writing gate state for a suggestion
+  // that changes nothing, and the cost of the rare duplicate is one sentence.
+  let decomposeSuggestedAt: "first-message" | "loop-goal" | null = null;
+  // Tracked separately from the real suggestion: an evidence-free "the
+  // classifier is down" notice must not spend the session's one ask (see the
+  // checkpoint below).
+  let degradedNoticeShown = false;
+  let topLevelDirsCache: string[] | undefined;
+  /**
+   * The repo's own top-level directories, so "how many areas does this touch?"
+   * is answered against reality rather than against a path-shaped regex.
+   * Hidden and vendored directories are excluded: nobody decomposes a
+   * requirement because it mentioned `node_modules/`. Read once per session
+   * (the set does not meaningfully change mid-run) and never throws — an
+   * unreadable repo simply contributes no directory signal.
+   */
+  const repoTopLevelDirs = (): string[] => {
+    if (topLevelDirsCache) return topLevelDirsCache;
+    try {
+      topLevelDirsCache = readdirSync(primaryRepoRoot, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules")
+        .map((e) => e.name);
+    } catch {
+      topLevelDirsCache = [];
+    }
+    return topLevelDirsCache;
+  };
   // USER REQUIREMENT (ESC = pause): when the user aborts a run (ESC — the
   // TUI's "Operation aborted"), the L2 auto-continuation must NOT steamroll
   // that explicit human stop with a [REVIEW_GATE_RESUME] follow-up. agent_end
@@ -3229,7 +3277,15 @@ export default function reviewGate(pi: ExtensionAPI) {
         const facts =
           "this session has made no edits yet (pre-existing workspace changes may exist); " +
           "interactive session: yes; mode undecided.";
-        const verdict = await classifyTaskMode(classifier(), firstUserInput, params.reason, facts);
+        // Both classifications run against the SAME first message, so they are
+        // issued together: sequentially this would double the worst-case stall
+        // the user feels on a dead network, for no benefit.
+        const [verdict, sizeBucket] = await Promise.all([
+          classifyTaskMode(classifier(), firstUserInput, params.reason, facts),
+          classifyRequirementSize(classifier(), firstUserInput),
+        ]);
+        requirementBucket = sizeBucket;
+        requirementClassifierUnavailable = sizeBucket === undefined;
         if (verdict !== undefined) {
           effective = verdict;
           classifiedBy = projectConfig.llmGuards.model;
@@ -4008,7 +4064,43 @@ export default function reviewGate(pi: ExtensionAPI) {
     // first edit arms the gate. An UNCONFIRMED goal has its body withheld
     // (L8) and blocks ships at L1; the hooks stay out of it.
     if (state.taskMode === "loop") {
-      systemPrompt += "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot), loopGoalConfirmed());
+      const goal = readLoopGoal(primaryRepoRoot);
+      const goalConfirmed = loopGoalConfirmed();
+      systemPrompt += "\n\n" + buildLoopGoalDirective(goal, goalConfirmed);
+
+      // Oversized-requirement checkpoints. Both are cheap: the model side was
+      // already computed at set_gate_mode time, the structural side is
+      // counting. The suggestion is prompt-only — it starts nothing, blocks
+      // nothing, and asks the agent to put the choice to the user.
+      if (decomposeSuggestedAt === null && !sessionEdited) {
+        const atLoopGoal = goal.present && goalConfirmed;
+        const requirementText = atLoopGoal ? goal.text : (firstUserInput ?? "");
+        const assessment = assessRequirementSize({
+          // Only an APPROVED goal's criteria count: a draft the user has not
+          // accepted is not yet a contract, and counting it would let the
+          // agent's own draft trigger the suggestion.
+          criteriaCount: atLoopGoal ? countExitCriteria(goal.text) : undefined,
+          touchedDirs: detectTouchedDirs(requirementText, repoTopLevelDirs()),
+          moduleBucket: requirementBucket,
+          classifierUnavailable: requirementClassifierUnavailable,
+        });
+        if (assessment.oversized) {
+          // A suggestion backed by evidence is the one ask this session gets.
+          decomposeSuggestedAt = atLoopGoal ? "loop-goal" : "first-message";
+          systemPrompt += "\n\n" + buildDecomposeSuggestion(assessment, decomposeSuggestedAt);
+        } else if (assessment.degraded && !degradedNoticeShown) {
+          // Classifier down and no structural threshold fired: still say so
+          // once (user requirement — silence and "nothing to report" are
+          // indistinguishable, and the point is that the user decides). But
+          // this notice carries NO evidence, so it must not consume the real
+          // ask: a later approved loop goal with 6 criteria is exactly the
+          // signal the session most needs, and skipping a content-free notice
+          // is not an answer to it.
+          degradedNoticeShown = true;
+          systemPrompt +=
+            "\n\n" + buildDecomposeSuggestion(assessment, atLoopGoal ? "loop-goal" : "first-message");
+        }
+      }
     }
 
     if (!gateArmed && problems.length === 0) {

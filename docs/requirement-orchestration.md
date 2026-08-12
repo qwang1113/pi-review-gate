@@ -234,6 +234,52 @@ is the exact failure this design exists to prevent.
 
 ## 5. The execution loop
 
+### 5.0 Getting here at all
+
+The expensive failure is not a bad decomposition; it is never decomposing. A
+requirement too big for one session does not announce itself — it degrades, and
+by the time that is obvious the cheap moment to split has passed. So the gate
+judges the size itself, at two checkpoints where it costs nothing:
+
+- **the first user message**, classified alongside the gate-mode decision (one
+  model call, issued in parallel with it, so there is no extra stall);
+- **the moment an approved loop goal exists**, where the exit-criteria count is
+  a far better signal than any prose.
+
+Thresholds (`lib/requirement-size.ts`), any one of which is enough — they
+measure different dimensions and being big in one is reason enough to split:
+
+| Signal | Fires at | Depends on the model? |
+|---|---|---|
+| exit criteria in the approved loop goal | ≥ 5 | no |
+| top-level directories the requirement names | ≥ 3 | no |
+| estimated modules of work | ≥ 3 | yes |
+
+What happens then is a **suggestion, not an action**: the gate injects a
+directive requiring the agent to open its next reply by proposing `/decompose`
+— with the evidence that fired — and then stop. The user answers in one word.
+Judgement is the gate's; the decision is the user's, so a false positive costs
+a sentence rather than a workflow.
+
+Three rules keep it from becoming noise:
+
+- **At most one evidence-backed suggestion per session.** There is no button
+  for the user to press "no" with, so a decline is invisible to the gate — but
+  a user who saw the suggestion and went on to negotiate a loop goal has
+  already answered. Suggesting once is the honest reading of "never ask twice".
+- **A degraded signal says so, on its own budget.** If the classifier times out
+  or is unavailable, the structural rules still run and the injected text is
+  explicitly labelled as degraded — never dressed up as a judgement the gate
+  made. When nothing measurable fired at all it still says so once, because
+  silence and "nothing to report" look identical to the user. That notice is
+  tracked separately: an evidence-free "the classifier is down" line must not
+  consume the session's one real ask, or an offline session could never be told
+  that its just-approved goal has six exit criteria.
+- **"Never consulted" is not "unavailable".** A session that set its mode
+  explicitly, or ran headless, never asks the model at all; that is reported as
+  a plain structural verdict, not a degraded one. Inventing a failure that did
+  not happen is the same dishonesty the labelling exists to prevent.
+
 ### 5.1 Decompose
 
 ```
