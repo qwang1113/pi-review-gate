@@ -803,32 +803,55 @@ fixed — before the task counts as done.
   outcome); Copilot commenting again after your reply ⇒ yours again. An
   `isOutdated` thread is still yours — moved code is not a fixed concern — but
   the hint is surfaced so you can resolve it if the change did fix it.
+- **An unhandled finding outranks everything else**, including head drift and a
+  `SATISFIED` verdict from an earlier cycle: as long as a Copilot thread is
+  unresolved and Copilot spoke last, the status is `OPEN`. This cannot
+  deadlock — replying or resolving needs nobody but you. It is also the fix
+  for a real bug: GitHub does **not** re-review a new head by default, so
+  after you push, the old thread is frequently the ONLY feedback that exists.
+  The state machine used to ask "has Copilot reviewed the current head?"
+  first, answer no, report `AWAITING`, and let the wait budget expire —
+  releasing the task with the comment never handled. A cycle can still be
+  released with findings open — but only by a fail-safe path that cannot see
+  the PR any more (it vanished, `gh` lost its credentials, the API refused).
+  Those paths report the count they are abandoning and tell you to take it to
+  the user; they never go quiet.
 - **Completion-only, never the ship gate.** Fixing a Copilot finding requires a
   commit and a push, so a Copilot requirement inside the ship authority would
   block its own remedy. It gates `declare_done` (hard in loop mode, advisory in
   explore) and rides the auto-continuation on its **own** budget, so waiting for
   Copilot never eats the rounds the fix→review loop needs.
-- **It can never strand a task.** No `gh`, no GitHub remote, no PR, an API
-  refusal, or an unreadable thread query ⇒ `UNSUPPORTED`, requirement released.
-  A Copilot that never answers, or a PR that keeps producing new findings, ends
-  as `EXHAUSTED` (round budget `copilotReview.maxRounds`, default 3, clamped to
-  1–10; wait budget 20 min) with an explicit "escalate to the user" note.
-- **A request that never lands is detected immediately, not after 20 minutes.**
-  `gh pr edit --add-reviewer @copilot` exits 0 — and the REST review-request
-  endpoint answers 200 — even on a repository where GitHub silently drops the
-  bot, so the exit code proves nothing. `request_copilot_review` therefore
-  probes for a Copilot actor first (`suggestedActors`) and, when it does not
-  find one, reads the PR back after requesting: `gh pr view --json
-  reviewRequests,reviews`, then — after a short pause, because review requests
-  are eventually consistent — **both** surfaces again (that JSON export *and*
-  the REST `requested_reviewers` endpoint, which still names a bot on older
-  `gh` builds). Copilot in **none** of them ⇒ `UNSUPPORTED` on the spot instead
-  of a 20-minute wait. Every check answers three values, and only definite
-  "not there" answers release the requirement — a failed, aborted or
-  unparseable `gh` answer means *cannot tell* and changes nothing (GitHub
-  exposes no "is Copilot review enabled" API: `RepositorySuggestedActorFilter`
-  only has `CAN_BE_ASSIGNED`/`CAN_BE_AUTHOR`, so the probe is a heuristic and
-  is never trusted on its own).
+- **It can never strand a task — and there is no round cap.** No `gh`, no
+  GitHub remote, no PR, an API refusal, or an unreadable thread query ⇒
+  `UNSUPPORTED`, requirement released. A Copilot that never answers ends as
+  `EXHAUSTED` after the 20-minute **wait** budget, with an explicit "escalate
+  to the user" note. There is deliberately **no cap on review cycles**: a cap
+  could only ever end a task with the reviewer's comments unhandled, and
+  another round costs nothing but your own work. The wait budget is the one
+  remaining bound, and it fires exactly when there is no feedback to lose.
+- **"Can this repo do Copilot review?" is answered by evidence, because nothing
+  else works.** GitHub exposes no capability API (`RepositorySuggestedActorFilter`
+  only has `CAN_BE_ASSIGNED`/`CAN_BE_AUTHOR`, neither of which is about
+  reviewing), and — measured on a repository where the request is silently
+  dropped — `gh pr edit --add-reviewer @copilot` exits 0, the REST
+  review-request endpoint answers 200, and `reviewRequests` then stays empty on
+  **every** surface (gh JSON, GraphQL, REST) with no `ReviewRequestedEvent` in
+  the timeline. So neither exit codes nor request read-backs can distinguish
+  "dropped" from "not visible yet"; both were removed after they declared
+  healthy repositories unsupported. What is left is positive evidence, in
+  order:
+  1. **CONFIRMED** — a Copilot review or thread exists on this PR, or on any of
+     the repository's last 20 PRs (one GraphQL query, then remembered in the
+     sidecar);
+  2. **ASSUMED** — the repository owner is listed in `copilotReview.owners`
+     (default `["onekeyhq"]`): the cold-start case, where a repo that does
+     support Copilot has simply never been asked;
+  3. **UNKNOWN** — neither. The requirement is released as `UNSUPPORTED`
+     **immediately** rather than burning the 20-minute wait, with a note
+     naming the config key that would change the answer.
+
+  A repository is self-healing: one real Copilot review anywhere in its recent
+  PRs flips it to CONFIRMED for good.
 - **The wait budget belongs to the cycle, not to the last request.** Calling
   `request_copilot_review` again does not push the 20-minute deadline out: it
   is anchored on the cycle's *first* request (`firstRequestedAt`). Only a new
@@ -840,8 +863,8 @@ fixed — before the task counts as done.
   `gh` calls or rewriting it. **Nothing re-opens a released cycle by
   observation** — re-entry is an explicit act: a new PR-affecting ship
   (`armCopilotReview` on a push, `gh pr create` or `gh pr edit` seen by the
-  gate, with the spent round budget carried over), or the agent calling
-  `request_copilot_review` again while rounds remain. The state machine also
+  gate, with the cumulative round count carried over), or the agent calling
+  `request_copilot_review` again. The state machine also
   still re-arms a `SATISFIED` cycle whose head moved (the review no longer
   describes the code), but that is now defense in depth rather than a live
   path: the check returns before it could fire, so in practice the ship is
@@ -854,8 +877,9 @@ fixed — before the task counts as done.
   rule it enforces, the same way `docSync` trusts the reviewer's attestation
   instead of counting touched files.
 
-Turn it off per project with `"copilotReview": { "enabled": false }` in
-`.pi/review-gate.json`.
+Configure per project in `.pi/review-gate.json`: `"copilotReview": { "enabled":
+false }` turns it off, `"owners": ["acme"]` replaces the owner allow-list (an
+empty list means "evidence only").
 
 ### Dialogs stay short, long text goes to the transcript
 
@@ -1050,8 +1074,8 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. Output is never inlined into the reply — a failing suite can emit megabytes. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
 | `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it); then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 and its body is withheld from the prompt. |
-| `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. Spending the last round of `copilotReview.maxRounds` releases it as `EXHAUSTED` with an escalate-to-the-user note. |
-| `check_copilot_review` | Verify what Copilot's review left open (L7). The extension runs the GraphQL query itself and classifies each thread: resolved ⇒ handled, answered by you ⇒ handled, Copilot spoke last ⇒ still yours (listed with thread IDs and the exact `resolveReviewThread` / reply mutations). Returns AWAITING / OPEN / SATISFIED — an outcome the agent cannot report for itself. |
+| `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. It also decides **availability from evidence** (a Copilot review on this PR or in the repo's last 20 PRs ⇒ CONFIRMED; owner in `copilotReview.owners` ⇒ ASSUMED; neither ⇒ UNKNOWN, and a silent Copilot is then released instead of waited for). The request itself is never vetoed by a read-back — those cannot see a dropped request. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. There is **no round cap**; the only budget is the 20-minute wait for a review that never arrives. |
+| `check_copilot_review` | Verify what Copilot's review left open (L7). The extension runs the GraphQL query itself and classifies each thread: resolved ⇒ handled, answered by you ⇒ handled, Copilot spoke last ⇒ still yours (listed with thread IDs and the exact `resolveReviewThread` / reply mutations) — regardless of which commit the review was submitted against, so a push cannot bury a finding. Returns AWAITING / OPEN / SATISFIED — an outcome the agent cannot report for itself. A cycle released with findings still open lists them for you to report to the user. |
 | `request_arbitration` | Contest a ship block the agent believes is **circular** (the only remedy is an action the block forbids). Narrow + fail-closed — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception). |
 | `request_scope_limit` | Agent-requested **gate fence narrowing** for the "pre-existing changes" complaint: the gate arms on dirty files / branch commits that pre-date the session (P0-2), so it can demand review coverage of work the session never did. Instead of silently complying (or bypassing), the agent calls this tool and the **extension renders a user confirm dialog** (fixed consequence copy; the agent's reason labeled untrusted; **no `confirmed` parameter** the model could set). Granted → the non-session changed files are snapshotted as `scopeLimit.preexistingFiles` in the sidecar and stop arming the gate at **every** re-arm site (session_start P0-2, bash stash/checkout re-arm, turn_end reconciliation); a file the session later edits is **reclaimed** out of the snapshot by the edit handler — the grant never covers the session's own work — and branch-commit arming is suspended for as long as the grant stands (a new commit under a standing grant is either the exempted pre-existing work being shipped — exactly what the user consented to — or a user/bypass action; the session's own NEW edits re-arm the gate before any further agent commit). With no session edits the ship gate disarms entirely; with session edits the review scope narrows to `sessionFiles` (the per-turn prompt instructs the reviewer: out-of-scope findings are advisory). Session edit attribution is persisted (`sessionEditedFiles`), so a process restart cannot re-label the session's own edits as pre-existing. A dialog that cannot be shown fails closed WITHOUT counting as a decline. Verdicts/bindings are untouched — narrowing the fence never fabricates a READY/PASS, and the session's OWN edits stay fully gated. Declined → scope requests lock for the session (anti-grinding, mirrors the mode-downgrade lock). Malformed persisted shapes fail closed to ABSENT = full-scope gate (extension loader + git hook both validate). |
 | `request_sensitive_edit` | Agent-requested **one-shot authorization** to edit ONE sensitive file (`.env`, private keys, credentials) that the guard blocks by default. Same consent shape as the tools above: the **extension** renders the confirm dialog (fixed consequence copy, agent reason labeled untrusted, **no `confirmed` parameter**). A grant is **path-exact** (normalized absolute path), **single-use** (burned by the first edit that *succeeds* — a failed edit stays retryable), **10-minute TTL**, and **in-memory only** (never written to the sidecar, so a crash/resume/second session starts fail-closed). `.git/` internals are refused **before** any dialog — they are the gate's own L3 enforcement, not the user's secrets. A **declined** path is locked for the session (per-path anti-grinding, unlike the session-wide `request_scope_limit` lock); a dialog that could not be *shown* is not a decline. `/gate-reset` revokes outstanding grants and lifts the decline locks. |

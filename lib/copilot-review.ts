@@ -26,6 +26,25 @@
  * attestation, which trusts the reviewer's judgement instead of counting
  * touched files.
  *
+ * HOW "IS COPILOT AVAILABLE HERE?" IS DECIDED. GitHub exposes NO capability
+ * API for Copilot code review, and — measured, not assumed — every request
+ * surface reports success even where the request is silently dropped:
+ * `gh pr edit --add-reviewer @copilot` exits 0 and REST
+ * `POST .../requested_reviewers` answers 200 on a repository that then shows
+ * `reviewRequests.totalCount == 0`, no `ReviewRequestedEvent` in the timeline,
+ * and no review at all. So neither the exit code nor a `reviewRequests`
+ * read-back can decide this. Only POSITIVE evidence counts, in this order:
+ *
+ *   CONFIRMED  a Copilot review or Copilot thread exists on THIS PR, or the
+ *              repository's recent PRs contain one (COPILOT_HISTORY_QUERY)
+ *   ASSUMED    the repository owner is on the configured owner allow-list
+ *   UNKNOWN    neither — treated as "not available", released without waiting
+ *
+ * UNKNOWN releases instead of waiting because the user's rule is explicit:
+ * a repo that cannot do this must not cost the task 20 minutes of polling.
+ * The cost of the heuristic is bounded and self-healing: one real Copilot
+ * review anywhere in the repo's recent PRs flips it to CONFIRMED forever.
+ *
  * PURITY. No IO, no clock, no throwing: payloads arrive as strings, `now` is
  * injected, and every function returns a new value. The extension owns `gh`,
  * the timers and the storage; this module owns the rules.
@@ -39,7 +58,8 @@
  *   OPEN        Copilot answered and left threads that still need work
  *   SATISFIED   every Copilot thread is resolved or answered
  *   UNSUPPORTED no PR / no gh / repo or account cannot do Copilot review
- *   EXHAUSTED   the round or wait budget ran out — released, escalate to human
+ *   EXHAUSTED   Copilot never answered within the wait budget — released,
+ *               escalate to human (there is no round budget)
  *
  * The last three are terminal for the current cycle: they stop blocking
  * `declare_done`. A new PR-affecting ship re-arms from any of them (see
@@ -63,16 +83,28 @@ const RELEASED: ReadonlySet<CopilotStatus> = new Set<CopilotStatus>([
   "SATISFIED", "UNSUPPORTED", "EXHAUSTED",
 ]);
 
-/** Default cap on Copilot review cycles per task (project-configurable). */
-export const COPILOT_MAX_ROUNDS_DEFAULT = 3;
-/** Hard bounds for the configurable cap — a forged huge value cannot make the loop endless. */
-export const COPILOT_MIN_ROUNDS = 1;
-export const COPILOT_MAX_ROUNDS = 10;
+/**
+ * There is NO cap on Copilot review cycles, on purpose.
+ *
+ * There used to be one (3 rounds, project-configurable). It was a third way to
+ * finish a task with Copilot findings unhandled: on a PR where Copilot keeps
+ * commenting, round 4 simply released the requirement. "Round 4 of a review
+ * conversation" is not a reason to stop caring what the reviewer said, and
+ * unlike a wait, another round costs nothing but the agent's own work — the
+ * way out is always in the agent's hands (fix it, or reply why not).
+ *
+ * The loop still cannot run forever: it advances only when the agent pushes
+ * new code, and every cycle that Copilot does not answer is bounded by
+ * {@link COPILOT_AWAIT_TIMEOUT_MS}.
+ */
 
 /**
  * How long a requested review may stay unanswered before the requirement is
  * released as EXHAUSTED. Copilot normally answers within a minute; a repo
  * where the feature is silently unavailable would otherwise wait forever.
+ *
+ * This is the ONLY remaining budget, and it is deliberately the one that
+ * cannot drop feedback: it fires exactly when there is no feedback to drop.
  */
 export const COPILOT_AWAIT_TIMEOUT_MS = 20 * 60 * 1000;
 
@@ -100,7 +132,10 @@ export interface CopilotReviewState {
   firstRequestedAt?: string;
   /** PR head SHA the current cycle was requested against / satisfied at. */
   head?: string;
-  /** Copilot review cycles consumed since the requirement was first armed. */
+  /**
+   * Copilot review cycles since the requirement was first armed. Bookkeeping
+   * only — nothing caps it (see COPILOT_AWAIT_TIMEOUT_MS).
+   */
   rounds: number;
   /** ISO time of the last transition. */
   at?: string;
@@ -108,7 +143,19 @@ export interface CopilotReviewState {
   note?: string;
   /** Threads still needing work at the last check (status OPEN). */
   openThreads?: number;
+  /**
+   * Sticky memory of a CONFIRMED availability probe (a real Copilot review was
+   * seen on this PR or in the repo's recent PRs). Cached because the evidence
+   * is monotonic — a repository that has done a Copilot review can do one —
+   * so later cycles skip the history query entirely. Never set from an
+   * ASSUMED (owner allow-list) decision: an allow-list entry is a policy, not
+   * evidence, and must stay re-evaluable when the policy changes.
+   */
+  supportConfirmed?: boolean;
 }
+
+/** How sure are we that Copilot code review works on this repository? */
+export type CopilotSupport = "CONFIRMED" | "ASSUMED" | "UNKNOWN";
 
 /**
  * Logins that mean "the Copilot reviewer".
@@ -136,9 +183,9 @@ export const COPILOT_REVIEWER_LOGIN = "copilot-pull-request-reviewer[bot]";
  * This deliberately overrides EVERY terminal status. Without that, the most
  * common ordering — push the branch, then open the PR — would resolve to
  * UNSUPPORTED ("no PR yet") on the push and stay there, and the feature would
- * be bypassed by the normal way people work. `rounds` is cumulative on
- * purpose: re-arming must not hand out a fresh budget, or a fix→push→re-arm
- * cycle could never exhaust it.
+ * be bypassed by the normal way people work. `rounds` stays cumulative across
+ * re-arms so the count reads as "how long has this conversation been going",
+ * not "how many times was the counter reset".
  */
 export function armCopilotReview(
   prev: CopilotReviewState | undefined,
@@ -149,6 +196,9 @@ export function armCopilotReview(
     pr: prev?.pr ?? null,
     armedAt: nowIso,
     rounds: prev?.rounds ?? 0,
+    // Availability evidence survives re-arming: it is a fact about the
+    // repository, not about this cycle.
+    ...(prev?.supportConfirmed ? { supportConfirmed: true } : {}),
     at: nowIso,
     note: "PR created or updated — a Copilot review round is due",
   };
@@ -157,7 +207,13 @@ export function armCopilotReview(
 /** The extension requested a review: stamp the authoritative time + head. */
 export function recordCopilotRequest(
   prev: CopilotReviewState | undefined,
-  args: { pr: number | null; head: string | null; nowIso: string; note?: string },
+  args: {
+    pr: number | null;
+    head: string | null;
+    nowIso: string;
+    note?: string;
+    supportConfirmed?: boolean;
+  },
 ): CopilotReviewState {
   return {
     status: "AWAITING",
@@ -169,20 +225,33 @@ export function recordCopilotRequest(
     firstRequestedAt: prev?.firstRequestedAt ?? prev?.requestedAt ?? args.nowIso,
     ...(args.head ? { head: args.head } : {}),
     rounds: (prev?.rounds ?? 0) + 1,
+    ...(args.supportConfirmed || prev?.supportConfirmed ? { supportConfirmed: true } : {}),
     at: args.nowIso,
     note: args.note ?? "Copilot review requested",
   };
 }
 
-/** Terminal transition (release the requirement) with an explanation. */
+/**
+ * Terminal transition (release the requirement) with an explanation.
+ *
+ * `openThreads` is carried into the terminal state on purpose: releasing with
+ * Copilot findings still unhandled is allowed (nothing may strand a task), but
+ * the count has to survive the release. It is the ONLY thing that survives on
+ * the paths that matter — the PR is gone, `gh` lost its credentials, the API
+ * refused, so there is no payload left to list from — and the extension turns
+ * it into the "you are abandoning N findings, tell the user" line those paths
+ * used to be silent about.
+ */
 export function releaseCopilotReview(
   prev: CopilotReviewState | undefined,
   status: "SATISFIED" | "UNSUPPORTED" | "EXHAUSTED",
   note: string,
   nowIso: string,
   head?: string | null,
+  openThreads?: number,
 ): CopilotReviewState {
   const boundHead = head ?? prev?.head ?? null;
+  const unhandled = openThreads ?? prev?.openThreads;
   return {
     status,
     pr: prev?.pr ?? null,
@@ -191,6 +260,8 @@ export function releaseCopilotReview(
     ...(prev?.firstRequestedAt ? { firstRequestedAt: prev.firstRequestedAt } : {}),
     ...(boundHead ? { head: boundHead } : {}),
     rounds: prev?.rounds ?? 0,
+    ...(prev?.supportConfirmed ? { supportConfirmed: true } : {}),
+    ...(typeof unhandled === "number" ? { openThreads: unhandled } : {}),
     at: nowIso,
     note,
   };
@@ -279,86 +350,103 @@ export function slugFromPrUrl(url: string | null): string | null {
 }
 
 /**
- * Capability probe: can this repository do Copilot review at all?
+ * How many recent PRs the availability probe looks back over.
  *
- * GitHub exposes no "is Copilot code review enabled" API — GraphQL's
- * `RepositorySuggestedActorFilter` only knows CAN_BE_ASSIGNED and
- * CAN_BE_AUTHOR — so the presence of a Copilot actor among the repo's
- * suggested actors is a HEURISTIC, never a proof. That is why a negative
- * probe does not release the requirement on its own: it only triggers the
- * landing check below, which is evidence rather than inference.
+ * Large enough that a repository which uses Copilot at all almost certainly
+ * shows one (measured: 7 of the last 20 PRs on a repo that uses it), small
+ * enough to stay one cheap query.
  */
-export const COPILOT_ACTOR_QUERY = `query($owner:String!,$name:String!){
+export const COPILOT_HISTORY_PR_COUNT = 20;
+
+/**
+ * Availability probe: has Copilot EVER reviewed a PR in this repository?
+ *
+ * This replaced a `suggestedActors(capabilities:[CAN_BE_ASSIGNED])` probe that
+ * looked reasonable and was measurably useless: that filter answers "who can
+ * be an ASSIGNEE" (the Copilot coding agent), not "who can review", and
+ * GraphQL has no other filter to offer — `RepositorySuggestedActorFilter` only
+ * defines CAN_BE_ASSIGNED and CAN_BE_AUTHOR. Measured on a repository whose
+ * PRs Copilot demonstrably reviews, that probe returned NO Copilot actor, so
+ * it was a constant "false" driving a constant "unsupported".
+ *
+ * Past reviews, by contrast, are direct evidence of the exact capability we
+ * care about.
+ */
+export const COPILOT_HISTORY_QUERY = `query($owner:String!,$name:String!,$count:Int!){
   repository(owner:$owner,name:$name){
-    suggestedActors(capabilities:[CAN_BE_ASSIGNED],first:100){nodes{login}}
+    pullRequests(last:$count,states:[OPEN,MERGED,CLOSED]){
+      nodes{reviews(last:20){nodes{author{login}}}}
+    }
   }
 }`;
 
 /**
- * Parse {@link COPILOT_ACTOR_QUERY}: `true`/`false` when the actor list was
- * readable, `undefined` when it was not — an unreadable answer is "no
- * evidence", never "Copilot is missing".
+ * Parse {@link COPILOT_HISTORY_QUERY}: `true` when a Copilot review was found,
+ * `false` when the PR list was readable and held none, `undefined` when the
+ * payload was not readable at all.
+ *
+ * `false` means "no evidence", NOT "unsupported" — a repository nobody has
+ * ever asked has the same empty history as one that cannot. The caller
+ * combines it with the owner allow-list before concluding anything.
  */
-export function parseCopilotActorProbe(raw: string): boolean | undefined {
+export function parseCopilotHistoryProbe(raw: string): boolean | undefined {
   const repo = asRecord(asRecord(asRecord(parseJson(raw))?.data)?.repository);
-  const nodes = asRecord(repo?.suggestedActors)?.nodes;
+  const nodes = asRecord(repo?.pullRequests)?.nodes;
   if (!Array.isArray(nodes)) return undefined;
-  return nodes.some((node) => {
-    const value = asRecord(node)?.login;
-    return typeof value === "string" && isCopilotAuthor(value);
+  return nodes.some((pr) => {
+    const reviews = asRecord(asRecord(pr)?.reviews)?.nodes;
+    return Array.isArray(reviews) && reviews.some((r) => isCopilotAuthor(login(r)));
   });
 }
 
-/**
- * Did a review request actually LAND on the PR?
- *
- * `gh pr edit --add-reviewer @copilot` exits 0 and the REST review-request
- * endpoint answers 200 even on repositories where GitHub silently drops the
- * bot, so the exit code proves nothing. This reads back
- * `gh pr view --json reviewRequests,reviews` and looks for Copilot in either
- * place — still requested, or already reviewed (Copilot can answer and be
- * removed from the request list before we look).
- *
- * `undefined` = the payload was not readable, so the caller must NOT conclude
- * anything from it (releasing a gate requirement on a parse failure would be
- * the one direction that fails open).
- */
-export function parseCopilotRequestLanded(raw: string): boolean | undefined {
-  const obj = asRecord(parseJson(raw));
-  if (!obj) return undefined;
-  const requests = obj.reviewRequests;
-  const reviews = obj.reviews;
-  if (!Array.isArray(requests) && !Array.isArray(reviews)) return undefined;
-  const requested = Array.isArray(requests) && requests.some((node) => {
-    const rec = asRecord(node);
-    const value = rec?.login;
-    // gh renders a requested reviewer as {__typename, login}; a bot reviewer
-    // has no `author` wrapper, hence the direct login read.
-    return typeof value === "string" && isCopilotAuthor(value);
-  });
-  const reviewed = Array.isArray(reviews) && reviews.some((node) => isCopilotAuthor(login(node)));
-  return requested || reviewed;
+/** The `owner` half of an `owner/name` slug, lowercased; null when unusable. */
+export function ownerOfSlug(slug: string | null | undefined): string | null {
+  if (typeof slug !== "string") return null;
+  const owner = slug.split("/")[0]?.trim().toLowerCase();
+  return owner ? owner : null;
 }
 
 /**
- * Second opinion on "did it land", from a DIFFERENT API surface.
+ * Is this repository's owner on the configured allow-list?
  *
- * Parses REST `GET /repos/{o}/{r}/pulls/{n}/requested_reviewers`
- * (`{"users":[{"login":…}],"teams":[…]}`). Two reasons this is not redundant
- * with {@link parseCopilotRequestLanded}: review requests are eventually
- * consistent, so one immediate read can miss a request that did land; and a
- * `gh` build older than the `... on Bot{login}` selection renders a bot
- * reviewer as an empty entry in the JSON export while REST still names it.
- * Same three-valued contract — an unreadable answer is `undefined`.
+ * The allow-list is a POLICY escape hatch, not evidence: it exists because
+ * GitHub gives no way to ask "is Copilot code review enabled here?", and
+ * waiting 20 minutes to find out is worse than being told. Matching is
+ * case-insensitive because GitHub logins are.
  */
-export function parseRestReviewRequests(raw: string): boolean | undefined {
-  const obj = asRecord(parseJson(raw));
-  const users = obj?.users;
-  if (!Array.isArray(users)) return undefined;
-  return users.some((node) => {
-    const value = asRecord(node)?.login;
-    return typeof value === "string" && isCopilotAuthor(value);
-  });
+export function isCopilotOwnerAllowed(
+  slug: string | null | undefined,
+  owners: readonly string[],
+): boolean {
+  const owner = ownerOfSlug(slug);
+  if (!owner) return false;
+  return owners.some((o) => typeof o === "string" && o.trim().toLowerCase() === owner);
+}
+
+/**
+ * Decide availability from the evidence gathered so far.
+ *
+ * Order matters: real reviews outrank the allow-list, and the allow-list
+ * outranks silence. An unreadable history probe (`undefined`) is NOT evidence
+ * of absence — it falls through to the allow-list exactly like a readable
+ * empty history, so a flaky API call cannot flip a repo to UNKNOWN on its own
+ * when policy already covers it.
+ */
+export function decideCopilotSupport(args: {
+  /** A Copilot review or thread exists on THIS PR. */
+  onPr?: boolean;
+  /** Sticky evidence from an earlier cycle. */
+  remembered?: boolean;
+  /** Result of {@link parseCopilotHistoryProbe}. */
+  history?: boolean;
+  /** owner/name for this repository. */
+  slug?: string | null;
+  /** Configured owner allow-list. */
+  owners?: readonly string[];
+}): CopilotSupport {
+  if (args.onPr === true || args.remembered === true || args.history === true) return "CONFIRMED";
+  if (isCopilotOwnerAllowed(args.slug ?? null, args.owners ?? [])) return "ASSUMED";
+  return "UNKNOWN";
 }
 
 /**
@@ -489,6 +577,11 @@ export interface CopilotAnalysis {
   resolved: number;
   /** Current PR head, straight from the payload. */
   head: string | null;
+  /**
+   * Copilot has touched this PR at all (any review, any thread, any age).
+   * Availability evidence — deliberately NOT tied to the current cycle.
+   */
+  present: boolean;
 }
 
 function parseTime(value: string | null | undefined): number | undefined {
@@ -514,6 +607,13 @@ function parseTime(value: string | null | undefined): number | undefined {
  * reply flips it back to actionable, which is exactly right. `isOutdated` does
  * NOT excuse a thread: code moving is not the same as the concern being
  * addressed — it is surfaced to the agent as a hint instead.
+ *
+ * Note what "actionable" deliberately does NOT depend on: which commit the
+ * review was submitted against, and whether `reviewed` is true for this cycle.
+ * An unanswered Copilot finding stays the agent's business after a push —
+ * GitHub does not re-review a new head by default, so the old thread is
+ * frequently the ONLY feedback that exists, and scoping it to the current
+ * head is precisely how findings used to be dropped on the floor.
  */
 export function analyzeCopilot(
   payload: CopilotPayload,
@@ -546,6 +646,7 @@ export function analyzeCopilot(
     answered: unresolved.length - actionable.length,
     resolved: copilotThreads.length - unresolved.length,
     head,
+    present: copilotReviews.length > 0 || copilotThreads.length > 0,
   };
 }
 
@@ -558,8 +659,8 @@ export function analyzeCopilot(
  * repo cannot do this at all) are never re-opened by *observation*: this
  * function will not move them, whatever the payload says. Re-opening is an
  * explicit act — a new PR-affecting ship calling {@link armCopilotReview}, or
- * the agent deliberately calling `request_copilot_review` again while rounds
- * remain. Observed for real: a released cycle was re-classified as ARMED by
+ * the agent deliberately calling `request_copilot_review` again. Observed for
+ * real: a released cycle was re-classified as ARMED by
  * the very next check, and `declare_done` was blocked by a requirement that
  * had already been let go.
  * `SATISFIED` keeps its safety net at THIS layer: it only survives while it
@@ -570,43 +671,83 @@ export function analyzeCopilot(
  * re-arm comes from the ship.
  *
  * Then, in order, the fail-safe priorities:
- *  1. head drift — the PR moved under us, so this cycle's evidence is stale
- *     and a new request is due (ARMED);
- *  2. budget — rounds spent or the wait ran too long ⇒ EXHAUSTED (released,
- *     with an escalation note): a repo where Copilot never answers must never
- *     strand the task;
- *  3. no review yet ⇒ AWAITING;
- *  4. threads waiting on us ⇒ OPEN;
- *  5. otherwise ⇒ SATISFIED, bound to the head it was verified against.
+ *  1. threads waiting on us ⇒ OPEN — FIRST, ahead of head drift and ahead of
+ *     the wait budget. An unanswered Copilot finding is work the agent can
+ *     always do (reply or resolve; Copilot's participation is not required),
+ *     so this can never deadlock, and putting it anywhere lower is what let a
+ *     push bury real findings: the head moved, `reviewed` went false, and the
+ *     thread stopped being counted at all;
+ *  2. head drift — the PR moved and nothing is pending on us, so this cycle's
+ *     evidence is stale and a new request is due (ARMED). There is no round
+ *     cap on this: as long as Copilot keeps finding things, the loop keeps
+ *     going;
+ *  3. no review yet ⇒ AWAITING, unless availability is UNKNOWN (nothing has
+ *     ever shown Copilot works here) in which case the requirement is
+ *     released immediately as UNSUPPORTED rather than burning the wait
+ *     budget, or the wait budget already ran out ⇒ EXHAUSTED;
+ *  4. otherwise ⇒ SATISFIED, bound to the head it was verified against.
  */
 export function evaluateCopilot(
   state: CopilotReviewState,
   analysis: CopilotAnalysis,
-  opts: { nowIso: string; now: number; maxRounds: number },
+  opts: {
+    nowIso: string;
+    now: number;
+    /**
+     * What the availability evidence says (see {@link decideCopilotSupport}).
+     * Defaults to CONFIRMED so a caller that cannot probe keeps the
+     * "wait for the review" behaviour instead of releasing early.
+     */
+    support?: CopilotSupport;
+  },
 ): CopilotReviewState {
   const headMoved = Boolean(state.head && analysis.head && state.head !== analysis.head);
+  const support = opts.support ?? "CONFIRMED";
 
   if (state.status === "EXHAUSTED" || state.status === "UNSUPPORTED") return state;
-  if (state.status === "SATISFIED" && !headMoved) return state;
+  if (state.status === "SATISFIED" && !headMoved && analysis.actionable.length === 0) return state;
+
+  if (analysis.actionable.length > 0) {
+    return {
+      ...state,
+      status: "OPEN",
+      at: opts.nowIso,
+      openThreads: analysis.actionable.length,
+      note: `${analysis.actionable.length} Copilot thread(s) waiting on a fix, a resolve, or a reply`,
+    };
+  }
 
   if (headMoved) {
     return {
       ...armCopilotReview(state, opts.nowIso),
       pr: state.pr,
       note: "the PR head moved since the review was requested — request a fresh Copilot review",
+      openThreads: 0,
     };
   }
 
-  if (state.rounds > opts.maxRounds) {
-    return releaseCopilotReview(
-      state,
-      "EXHAUSTED",
-      `Copilot review budget spent (${state.rounds}/${opts.maxRounds} rounds) — escalate to the user`,
-      opts.nowIso,
-    );
-  }
+  // NOTE: no round cap here. Deleted deliberately — see the comment on
+  // COPILOT_AWAIT_TIMEOUT_MS. "We have been round this loop N times" was
+  // never a reason to stop handling what the reviewer said, and every round
+  // costs only the agent's own work.
 
   if (!analysis.reviewed) {
+    // Nothing has ever demonstrated that Copilot reviews here, and the owner
+    // is not on the allow-list: waiting out the full budget would spend the
+    // user's time to learn nothing. Release now and say what would change the
+    // answer.
+    if (support === "UNKNOWN") {
+      return releaseCopilotReview(
+        state,
+        "UNSUPPORTED",
+        "no Copilot review has ever appeared on this repository's recent PRs and its owner is not " +
+        "on the Copilot owner allow-list — treating Copilot code review as unavailable instead of " +
+        "waiting; add the owner to copilotReview.owners in .pi/review-gate.json if that is wrong",
+        opts.nowIso,
+        null,
+        0,
+      );
+    }
     // Anchored on the FIRST request of this cycle (falling back to the last
     // one for sidecars written before that field existed): re-requesting must
     // never buy more waiting time.
@@ -618,6 +759,8 @@ export function evaluateCopilot(
         "Copilot did not answer the review request within the wait budget — the repository or " +
         "account may not have Copilot code review enabled; escalate to the user",
         opts.nowIso,
+        null,
+        0,
       );
     }
     return {
@@ -631,16 +774,6 @@ export function evaluateCopilot(
     };
   }
 
-  if (analysis.actionable.length > 0) {
-    return {
-      ...state,
-      status: "OPEN",
-      at: opts.nowIso,
-      openThreads: analysis.actionable.length,
-      note: `${analysis.actionable.length} Copilot thread(s) waiting on a fix, a resolve, or a reply`,
-    };
-  }
-
   return {
     ...releaseCopilotReview(
       state,
@@ -648,6 +781,7 @@ export function evaluateCopilot(
       `every Copilot thread handled (${analysis.resolved} resolved, ${analysis.answered} answered)`,
       opts.nowIso,
       analysis.head,
+      0,
     ),
     openThreads: 0,
   };
@@ -687,5 +821,9 @@ export function sanitizeCopilotState(raw: unknown): CopilotReviewState | undefin
   if (typeof obj.openThreads === "number" && Number.isInteger(obj.openThreads) && obj.openThreads >= 0) {
     out.openThreads = obj.openThreads;
   }
+  // Only `true` survives: a forged or garbled value must not be able to claim
+  // evidence that was never gathered. Claiming CONFIRMED costs waiting time,
+  // never correctness, but the field should still mean what it says.
+  if (obj.supportConfirmed === true) out.supportConfirmed = true;
   return out;
 }

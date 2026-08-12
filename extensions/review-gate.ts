@@ -174,24 +174,27 @@ import {
 } from "./lib/requirement-size.ts";
 import { fitDialogMessage } from "./lib/dialog-budget.ts";
 import {
-  COPILOT_ACTOR_QUERY,
+  COPILOT_HISTORY_PR_COUNT,
+  COPILOT_HISTORY_QUERY,
   COPILOT_REVIEWER_LOGIN,
   COPILOT_THREADS_QUERY,
   analyzeCopilot,
   armCopilotReview,
   copilotProblems,
+  decideCopilotSupport,
   evaluateCopilot,
   isCopilotOutstanding,
-  parseCopilotActorProbe,
+  parseCopilotHistoryProbe,
   parseCopilotPayload,
-  parseCopilotRequestLanded,
-  parseRestReviewRequests,
   parseNameWithOwner,
   parsePrView,
   recordCopilotRequest,
   releaseCopilotReview,
   slugFromPrUrl,
   type CopilotPayload,
+  type CopilotReviewState,
+  type CopilotSupport,
+  type CopilotThread,
   type PrSummary,
 } from "./lib/copilot-review.ts";
 import {
@@ -1485,21 +1488,18 @@ export default function reviewGate(pi: ExtensionAPI) {
   // report its own review outcome — the same trust split as run_precommit.
 
   /**
-   * Optimistic poll inside check_copilot_review: a couple of quick retries
-   * catch the common "Copilot answered while we were talking" case without
-   * turning the tool into a long block. Anything slower is handled by the
-   * persistent AWAITING state and the next continuation.
+   * Optimistic poll inside check_copilot_review: a few quick retries catch the
+   * common "Copilot answered while we were talking" case without turning the
+   * tool into a long block. Anything slower is handled by the persistent
+   * AWAITING state and the next continuation.
+   *
+   * Sized against measurements, not folklore: GitHub documents "usually less
+   * than 30 seconds", and an observed real review took 2m43s. 3 x 20s covers
+   * the documented case in a single tool call without pretending to cover the
+   * slow tail.
    */
   const COPILOT_CHECK_ATTEMPTS = 3;
-  const COPILOT_CHECK_DELAY_MS = 10000;
-
-  /**
-   * Pause before the second "did the request land?" read. Review requests are
-   * eventually consistent, so an immediate single read could call a supported
-   * repo unsupported. Only ever paid on the path that is about to RELEASE the
-   * requirement, i.e. once, on a repo where Copilot appears to be absent.
-   */
-  const COPILOT_LANDING_RECHECK_DELAY_MS = 3000;
+  const COPILOT_CHECK_DELAY_MS = 20000;
 
   interface GhResult { ok: boolean; stdout: string; stderr: string }
 
@@ -1636,11 +1636,22 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * Heuristic pre-flight: does this repo look like it has a Copilot actor?
+   * Availability probe: has Copilot reviewed ANY recent PR in this repo?
+   *
    * `undefined` when the answer could not be read (gh missing, API refusal,
    * unparseable payload) — the caller must then assume nothing.
+   *
+   * Replaces a `suggestedActors` capability probe and a pair of
+   * "did the review request land?" read-backs. All three were measured and
+   * found unusable: the capability filter answers a different question
+   * (assignee, not reviewer) and returned no Copilot on a repo Copilot
+   * demonstrably reviews, and a request that GitHub silently drops still
+   * leaves `reviewRequests` empty on every surface — gh JSON, GraphQL and
+   * REST alike — while both request calls report success. Together they made
+   * "unsupported" the near-certain verdict for any PR that had not already
+   * been reviewed by Copilot once.
    */
-  async function probeCopilotActor(
+  async function probeCopilotHistory(
     dir: string,
     slug: string | null,
     signal?: AbortSignal,
@@ -1651,50 +1662,68 @@ export default function reviewGate(pi: ExtensionAPI) {
       "gh", "api", "graphql",
       "-F", `owner=${owner}`,
       "-F", `name=${name}`,
-      "-f", `query=${COPILOT_ACTOR_QUERY}`,
+      "-F", `count=${COPILOT_HISTORY_PR_COUNT}`,
+      "-f", `query=${COPILOT_HISTORY_QUERY}`,
     ], dir, { signal });
     if (!res.ok) return undefined;
-    return parseCopilotActorProbe(res.stdout);
+    return parseCopilotHistoryProbe(res.stdout);
   }
 
   /**
-   * Did the request we just sent actually land on the PR? `undefined` when the
-   * read-back failed — never treated as "it did not land".
+   * Decide availability for one repo, cheapest evidence first.
+   *
+   * Remembered evidence short-circuits the query entirely; the history probe
+   * only runs when nothing is known yet. `confirmed` tells the caller whether
+   * the answer is worth remembering in the sidecar (policy is not evidence).
    */
-  async function copilotRequestLanded(
-    dir: string,
-    prNumber: number,
-    signal?: AbortSignal,
-  ): Promise<boolean | undefined> {
-    const res = await runGh(
-      ["gh", "pr", "view", String(prNumber), "--json", "reviewRequests,reviews"],
-      dir,
-      { signal },
-    );
-    if (!res.ok) return undefined;
-    return parseCopilotRequestLanded(res.stdout);
-  }
-
-  /**
-   * The same question asked of a DIFFERENT surface: the REST review-request
-   * endpoint. Used only as the confirming second read before releasing the
-   * requirement, because review requests are eventually consistent and an
-   * older `gh` may omit a Bot login from its JSON export.
-   */
-  async function copilotRequestLandedViaRest(
+  async function resolveCopilotSupport(
     dir: string,
     slug: string | null,
-    prNumber: number,
-    signal?: AbortSignal,
-  ): Promise<boolean | undefined> {
-    if (!slug) return undefined;
-    const res = await runGh(
-      ["gh", "api", `repos/${slug}/pulls/${prNumber}/requested_reviewers`],
-      dir,
-      { signal },
-    );
-    if (!res.ok) return undefined;
-    return parseRestReviewRequests(res.stdout);
+    st: GateState,
+    opts: { onPr?: boolean; signal?: AbortSignal } = {},
+  ): Promise<{ support: CopilotSupport; confirmed: boolean }> {
+    const remembered = st.copilot?.supportConfirmed === true;
+    if (remembered || opts.onPr === true) {
+      return { support: "CONFIRMED", confirmed: true };
+    }
+    const history = await probeCopilotHistory(dir, slug, opts.signal);
+    const support = decideCopilotSupport({
+      history,
+      slug,
+      owners: projectConfig.copilotReview.owners,
+    });
+    return { support, confirmed: support === "CONFIRMED" };
+  }
+
+  /**
+   * The thread list an agent must carry to the user when a cycle is released
+   * with findings still open. Released ≠ handled: the gate stops blocking, the
+   * agent still owes the user an explanation.
+   */
+  function copilotUnhandledText(threads: CopilotThread[]): string {
+    if (threads.length === 0) return "";
+    const lines = threads.slice(0, 20).map((t) =>
+      `  - ${t.path ?? "(no file)"}${t.line ? ":" + t.line : ""} — ${t.excerpt}`);
+    return `\n${threads.length} Copilot thread(s) are still unhandled — tell the user about them ` +
+      `before you finish:\n${lines.join("\n")}`;
+  }
+
+  /**
+   * The same duty, for the paths that release WITHOUT a readable payload.
+   *
+   * These are the ones that actually happen: the PR vanished, the slug cannot
+   * be resolved, `gh` lost its credentials, the API refused. They release to
+   * keep the task moving — and used to do it in total silence, even when the
+   * previous check had recorded open Copilot findings. The count is the only
+   * thing left (there is no payload to list from), so the count is what gets
+   * reported.
+   */
+  function copilotAbandonedText(prev: CopilotReviewState | undefined): string {
+    const open = prev?.openThreads ?? 0;
+    if (open <= 0) return "";
+    return `\n${open} Copilot thread(s) were still waiting on you at the last check and are now ` +
+      "being abandoned unverified — tell the user about them before you finish" +
+      `${prev?.pr ? ` (PR #${prev.pr})` : ""}.`;
   }
 
   /** Is the L7 loop active for this repo's state? (mode + project config) */
@@ -2548,43 +2577,35 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       const nowIso = new Date().toISOString();
       const dir = repoDirFor(root);
-      const maxRounds = projectConfig.copilotReview.maxRounds;
-
-      // Budget check BEFORE spending another round: a PR where Copilot keeps
-      // finding new things has to end with a human, not with an endless loop.
-      if ((st.copilot?.rounds ?? 0) >= maxRounds) {
-        st.copilot = releaseCopilotReview(st.copilot, "EXHAUSTED",
-          `Copilot review budget spent (${st.copilot?.rounds ?? 0}/${maxRounds} rounds)`, nowIso);
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: Copilot review budget spent (${maxRounds} rounds). The requirement is released ` +
-              "— tell the user what is still open on the PR and let them decide.",
-          }],
-          details: { status: "EXHAUSTED" },
-        };
-      }
+      // No round budget any more. The old pre-flight check released the cycle
+      // as EXHAUSTED once `rounds` hit the cap — i.e. it stopped asking about
+      // Copilot's comments because the conversation had gone on a while. The
+      // only bound left is the wait timeout, which fires when there is no
+      // feedback to lose.
 
       const resolved = await resolveOpenPr(dir, signal);
       if (!resolved.pr) {
+        const abandoned = copilotAbandonedText(st.copilot);
         st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
           `no Copilot review possible: ${resolved.error}`, nowIso);
         persistRepo(ctx as unknown as ExtensionContext, root);
+        log(`copilot cycle released UNSUPPORTED on request: ${resolved.error}`);
         return {
           content: [{
             type: "text",
             text: `review-gate: no Copilot review for this repo — ${resolved.error}. Requirement released ` +
-              "(UNSUPPORTED); it is not blocking completion.",
+              "(UNSUPPORTED); it is not blocking completion." + abandoned,
           }],
           details: { status: "UNSUPPORTED" },
         };
       }
       const pr = resolved.pr;
       const slug = await resolveRepoSlug(dir, pr, signal);
-      // Pre-flight: look for a Copilot actor BEFORE spending a round on a repo
-      // that cannot do Copilot review at all.
-      const hasActor = await probeCopilotActor(dir, slug, signal);
+      // Availability, from evidence, BEFORE spending a round. Not a veto: the
+      // request goes out either way (it is cheap, and a repo nobody has asked
+      // yet can only start producing evidence once someone asks). It decides
+      // how long a silent Copilot is worth waiting for.
+      const support = await resolveCopilotSupport(dir, slug, st, { signal });
       const requested = await requestCopilotReviewer(dir, pr, slug, signal);
       if (!requested.ok) {
         // An abort is the user pressing ESC, not GitHub refusing: it proves
@@ -2600,76 +2621,55 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
         const why = ghError(requested, "the review request was refused");
+        const abandoned = copilotAbandonedText(st.copilot);
         st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
           `Copilot review could not be requested: ${why}`, nowIso, pr.head);
         persistRepo(ctx as unknown as ExtensionContext, root);
+        log(`copilot cycle released UNSUPPORTED on request for PR #${pr.number}: ${why}`);
         return {
           content: [{
             type: "text",
             text: `review-gate: Copilot code review is not available for PR #${pr.number} — ${why}. ` +
-              "Requirement released (UNSUPPORTED).",
+              "Requirement released (UNSUPPORTED)." + abandoned,
           }],
           details: { status: "UNSUPPORTED", pr: pr.number },
         };
       }
-      // The probe is a heuristic, so a negative one only earns a read-back:
-      // `gh pr edit --add-reviewer @copilot` exits 0 (and the REST endpoint
-      // answers 200) even where GitHub silently drops the bot, which used to
-      // park the requirement in AWAITING until the 20-minute budget expired.
-      // Only hard evidence — Copilot in neither the request list nor the
-      // reviews — releases it; an unreadable read-back changes nothing.
-      if (hasActor === false) {
-        let landed = await copilotRequestLanded(dir, pr.number, signal);
-        if (landed === false) {
-          // Confirm before releasing: wait out the eventual consistency of
-          // review requests, then ask a different API surface. Anything other
-          // than a second explicit "not there" (true, or unreadable) keeps the
-          // requirement — including an abort, which can confirm nothing, so it
-          // downgrades the first read to "cannot tell" instead of releasing.
-          if (signal?.aborted) {
-            landed = undefined;
-          } else {
-            await new Promise((r) => setTimeout(r, COPILOT_LANDING_RECHECK_DELAY_MS));
-            // Ask BOTH surfaces again: REST alone would miss a Copilot that
-            // reviewed and left the request list during the pause, and the
-            // JSON export alone is what an old gh renders bot-blind.
-            const viaCli = await copilotRequestLanded(dir, pr.number, signal);
-            const viaRest = await copilotRequestLandedViaRest(dir, slug, pr.number, signal);
-            landed = (viaCli === true || viaRest === true)
-              ? true
-              : (viaCli === false && viaRest === false ? false : undefined);
-          }
-        }
-        if (landed === false) {
-          st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-            "the review request did not land: Copilot is not among this repository's actors, and " +
-            "a confirming second pass over both surfaces (gh pr view reviewRequests+reviews, REST " +
-            "requested_reviewers) still found no Copilot review request",
-            nowIso, pr.head);
-          persistRepo(ctx as unknown as ExtensionContext, root);
-          return {
-            content: [{
-              type: "text",
-              text: `review-gate: Copilot code review is not available for PR #${pr.number} — the ` +
-                "request was accepted by the API but never landed on the PR (this repository or " +
-                "account has no Copilot reviewer). Requirement released (UNSUPPORTED); it is not " +
-                "blocking completion.",
-            }],
-            details: { status: "UNSUPPORTED", pr: pr.number },
-          };
-        }
-      }
-      st.copilot = recordCopilotRequest(st.copilot, { pr: pr.number, head: pr.head, nowIso });
+      // NOTE: no read-back here on purpose. Measured on a repository where
+      // GitHub drops the request: `gh pr edit --add-reviewer @copilot` exits
+      // 0, REST POST answers 200, and `reviewRequests` stays empty on all
+      // three surfaces with no ReviewRequestedEvent in the timeline. A
+      // read-back therefore cannot distinguish "dropped" from "not visible
+      // yet", and using it as a veto declared healthy repos unsupported.
+      // Availability is judged by evidence (above) and by whether a review
+      // actually shows up (check_copilot_review).
+      st.copilot = recordCopilotRequest(st.copilot, {
+        pr: pr.number,
+        head: pr.head,
+        nowIso,
+        supportConfirmed: support.confirmed,
+      });
       persistRepo(ctx as unknown as ExtensionContext, root);
       loopArmed = true;
+      log(`copilot review requested for PR #${pr.number} (round ${st.copilot.rounds}, ` +
+        `availability ${support.support})`);
+      const waitNote = support.support === "UNKNOWN"
+        ? "No Copilot review has ever appeared on this repository's recent PRs and its owner is not " +
+          "on the allow-list, so if nothing comes back the requirement is released instead of " +
+          "waiting."
+        : "Copilot usually answers within a minute.";
       return {
         content: [{
           type: "text",
-          text: `review-gate: Copilot review requested for PR #${pr.number} (round ${st.copilot.rounds}/${maxRounds}). ` +
-            "Copilot usually answers within a minute — call check_copilot_review to see whether it " +
-            "has, and what it left open.",
+          text: `review-gate: Copilot review requested for PR #${pr.number} (round ${st.copilot.rounds}). ` +
+            `${waitNote} Call check_copilot_review to see whether it answered, and what it left open.`,
         }],
-        details: { status: "AWAITING", pr: pr.number, rounds: st.copilot.rounds },
+        details: {
+          status: "AWAITING",
+          pr: pr.number,
+          rounds: st.copilot.rounds,
+          support: support.support,
+        },
       };
     },
   });
@@ -2712,48 +2712,87 @@ export default function reviewGate(pi: ExtensionAPI) {
             text: `review-gate: the Copilot requirement is already released (${settled.status})` +
               `${settled.note ? ` — ${settled.note}` : ""}. It is not blocking completion; checking ` +
               "again changes nothing. A fresh round starts only on a new push / PR update, or if you " +
-              "deliberately call request_copilot_review again while rounds remain.",
+              "deliberately call request_copilot_review again." +
+              // A cycle can be released with findings still open (any of the
+              // fail-safe paths below). Repeating the reminder here means the
+              // duty survives a re-check instead of scrolling away.
+              copilotAbandonedText(settled),
           }],
-          details: { status: settled.status, ...(settled.pr === null ? {} : { pr: settled.pr }) },
+          details: {
+            status: settled.status,
+            ...(settled.pr === null ? {} : { pr: settled.pr }),
+            ...(settled.openThreads ? { unhandled: settled.openThreads } : {}),
+          },
         };
       }
       const dir = repoDirFor(root);
       const resolved = await resolveOpenPr(dir, signal);
       if (!resolved.pr) {
+        const abandoned = copilotAbandonedText(st.copilot);
         st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
           `no Copilot review possible: ${resolved.error}`, new Date().toISOString());
         persistRepo(ctx as unknown as ExtensionContext, root);
+        log(`copilot cycle released UNSUPPORTED on check: ${resolved.error}`);
         return {
-          content: [{ type: "text", text: `review-gate: no pull request to check — ${resolved.error}. Requirement released (UNSUPPORTED).` }],
+          content: [{
+            type: "text",
+            text: `review-gate: no pull request to check — ${resolved.error}. Requirement released ` +
+              "(UNSUPPORTED)." + abandoned,
+          }],
           details: { status: "UNSUPPORTED" },
         };
       }
       const pr = resolved.pr;
       const slug = await resolveRepoSlug(dir, pr, signal);
       if (!slug) {
+        const abandoned = copilotAbandonedText(st.copilot);
         st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
           "could not determine the GitHub owner/repo for this PR", new Date().toISOString());
         persistRepo(ctx as unknown as ExtensionContext, root);
+        log(`copilot cycle released UNSUPPORTED on check: no owner/repo for PR #${pr.number}`);
         return {
-          content: [{ type: "text", text: "review-gate: could not determine owner/repo for this PR. Requirement released (UNSUPPORTED)." }],
+          content: [{
+            type: "text",
+            text: "review-gate: could not determine owner/repo for this PR. Requirement released " +
+              "(UNSUPPORTED)." + abandoned,
+          }],
           details: { status: "UNSUPPORTED" },
         };
       }
 
-      // Short optimistic poll for the fast path (Copilot often answers within
-      // seconds). The REAL waiting mechanism is the persistent AWAITING state
-      // plus the L2 continuation: blocking a tool call for minutes would burn
-      // the turn and ignore an ESC in the meantime.
+      // Short optimistic poll for the fast path (GitHub documents "usually
+      // less than 30 seconds"). The REAL waiting mechanism is the persistent
+      // AWAITING state plus the L2 continuation: blocking a tool call for
+      // minutes would burn the turn and ignore an ESC in the meantime.
       let payload: CopilotPayload | undefined;
       let next = st.copilot ?? armCopilotReview(undefined, new Date().toISOString());
+      let support: CopilotSupport = "CONFIRMED";
+      let supportResolved = false;
       for (let attempt = 0; attempt < COPILOT_CHECK_ATTEMPTS; attempt++) {
         if (signal?.aborted) break;
         payload = await fetchCopilotPayload(dir, slug, pr.number, signal);
         if (payload) {
+          const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
+          // Availability is only worth a query when the PR itself shows
+          // nothing yet, and only once per call. Copilot on THIS PR is the
+          // strongest evidence there is, and it costs no API call at all.
+          if (!supportResolved || analysis.present) {
+            const decided = await resolveCopilotSupport(dir, slug, st, {
+              onPr: analysis.present,
+              signal,
+            });
+            support = decided.support;
+            supportResolved = true;
+            if (decided.confirmed) next = { ...next, supportConfirmed: true };
+          }
           next = evaluateCopilot(
             next,
-            analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt }),
-            { nowIso: new Date().toISOString(), now: Date.now(), maxRounds: projectConfig.copilotReview.maxRounds },
+            analysis,
+            {
+              nowIso: new Date().toISOString(),
+              now: Date.now(),
+              support,
+            },
           );
           next = { ...next, pr: pr.number };
           if (next.status !== "AWAITING") break;
@@ -2766,12 +2805,19 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!payload) {
         // The GraphQL query failed outright (no gh, no permission, API down).
         // Releasing is the fail-SAFE direction here: this requirement must
-        // never strand a task over an unreachable API.
+        // never strand a task over an unreachable API. What it must NOT do is
+        // go quiet about findings an earlier check already found.
+        const abandoned = copilotAbandonedText(st.copilot);
         st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
           "the Copilot review query failed (gh missing, unauthenticated, or API refusal)", new Date().toISOString());
         persistRepo(ctx as unknown as ExtensionContext, root);
+        log(`copilot cycle released UNSUPPORTED on check: thread query failed for PR #${pr.number}`);
         return {
-          content: [{ type: "text", text: "review-gate: could not read the PR's review threads (gh missing, unauthenticated, or API refusal). Requirement released (UNSUPPORTED)." }],
+          content: [{
+            type: "text",
+            text: "review-gate: could not read the PR's review threads (gh missing, unauthenticated, " +
+              "or API refusal). Requirement released (UNSUPPORTED)." + abandoned,
+          }],
           details: { status: "UNSUPPORTED" },
         };
       }
@@ -2779,6 +2825,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       st.copilot = next;
       persistRepo(ctx as unknown as ExtensionContext, root);
       if (isCopilotOutstanding(next)) loopArmed = true;
+      log(`copilot check for PR #${pr.number}: ${next.status} (availability ${support}` +
+        `${next.note ? `, ${next.note}` : ""})`);
 
       const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
       const lines = analysis.actionable.slice(0, 20).map((t) =>
@@ -2796,7 +2844,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         : next.status === "AWAITING"
           ? `review-gate: Copilot has not posted its review of PR #${pr.number} yet. Do something useful and ` +
             "call check_copilot_review again in a minute."
-          : `review-gate: Copilot review of PR #${pr.number} — ${next.note ?? next.status}.`;
+          // Released with a readable payload. `evaluateCopilot` puts
+          // actionable threads ahead of every release, so this list is
+          // normally empty — it is kept as the belt to the sidecar-count
+          // braces used by the fail-safe paths above, and it costs one call
+          // on data that is already in hand.
+          : `review-gate: Copilot review of PR #${pr.number} — ${next.note ?? next.status}.` +
+            copilotUnhandledText(analysis.actionable);
       return {
         content: [{ type: "text", text }],
         details: {
@@ -2805,6 +2859,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           actionable: analysis.actionable.length,
           resolved: analysis.resolved,
           answered: analysis.answered,
+          support,
         },
       };
     },
@@ -3885,7 +3940,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         `loop goal: ${loopGoalConfirmed() ? "approved by the user" : readLoopGoal(primaryRepoRoot).present ? "DRAFT — not approved (loop-mode ships blocked)" : "none"}`,
         ...(state.copilot
           ? [`copilot:   ${state.copilot.status}${state.copilot.pr ? ` PR #${state.copilot.pr}` : ""}` +
-            ` (round ${state.copilot.rounds}/${projectConfig.copilotReview.maxRounds}` +
+            ` (round ${state.copilot.rounds}, no round cap` +
             `${state.copilot.note ? `; ${state.copilot.note.slice(0, 120)}` : ""})`]
           : []),
         `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,

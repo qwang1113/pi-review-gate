@@ -20,7 +20,7 @@
  *     },
  *     "copilotReview": {        // L7 — post-PR Copilot code-review loop
  *       "enabled": true,
- *       "maxRounds": 3          // 1..10 Copilot cycles per task
+ *       "owners": ["onekeyhq"]  // owners assumed to have Copilot code review
  *     }
  *   }
  *
@@ -33,11 +33,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_MAX_ROUNDS } from "./constants.ts";
-import {
-  COPILOT_MAX_ROUNDS,
-  COPILOT_MAX_ROUNDS_DEFAULT,
-  COPILOT_MIN_ROUNDS,
-} from "./copilot-review.ts";
 
 /** sd0x-dev-flow documents the same range: "Range: 3-50". */
 export const MIN_MAX_ROUNDS = 3;
@@ -96,24 +91,48 @@ export function defaultArbiterConfig(): ArbiterConfig {
 /**
  * L7 knobs — the post-PR Copilot code-review loop (lib/copilot-review.ts).
  *
- * `maxRounds` bounds how many Copilot cycles one task may consume before the
- * requirement is released as EXHAUSTED and escalated to the user. It is
- * SEPARATE from the review-loop `maxRounds` on purpose: waiting for Copilot
- * must not eat the budget the fix→review loop needs.
+ * There is deliberately no round cap here any more: a cap could only ever end
+ * a task with the reviewer's comments unhandled, which is the opposite of what
+ * this layer is for. The single remaining bound is the wait timeout in
+ * lib/copilot-review.ts, which fires only when there is no feedback at all.
  */
 export interface CopilotReviewConfig {
   /** Master switch. When false, no PR ship ever arms a Copilot cycle. */
   enabled: boolean;
-  /** Copilot review cycles per task, clamped to [1, 10]. */
-  maxRounds: number;
+  /**
+   * Repository owners whose repos are ASSUMED to have Copilot code review,
+   * lowercased.
+   *
+   * Needed because GitHub publishes no way to ask whether Copilot code review
+   * is available: every request surface reports success even when the request
+   * is silently dropped. Evidence (a past Copilot review in the repo) is
+   * preferred and needs no configuration; this list only covers the cold
+   * start, where a repo that DOES support Copilot has simply never been asked
+   * — without it, the first PR in such a repo would be released as
+   * UNSUPPORTED instead of waiting for the review.
+   */
+  owners: string[];
 }
+
+/**
+ * Owners assumed to have Copilot code review out of the box.
+ *
+ * This is the project author's own organisation: a personal, local-first tool
+ * ships the default that is right for its user, and any other org is one
+ * `.pi/review-gate.json` line away. Anything not listed still gets the full
+ * treatment as soon as one real Copilot review exists in the repository.
+ */
+export const DEFAULT_COPILOT_OWNERS = ["onekeyhq"];
 
 export function defaultCopilotReviewConfig(): CopilotReviewConfig {
   // Default ON (user policy: features ship enabled). A repo without gh, a
   // GitHub remote, a PR, or Copilot code review resolves to UNSUPPORTED on
   // the first check and stops asking — so "on" costs nothing where the
   // feature does not exist.
-  return { enabled: true, maxRounds: COPILOT_MAX_ROUNDS_DEFAULT };
+  return {
+    enabled: true,
+    owners: [...DEFAULT_COPILOT_OWNERS],
+  };
 }
 
 // --------------------------------------------------------------------------
@@ -313,11 +332,18 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
   if (typeof obj.copilotReview === "object" && obj.copilotReview !== null && !Array.isArray(obj.copilotReview)) {
     const cr = obj.copilotReview as Record<string, unknown>;
     if (typeof cr.enabled === "boolean") cfg.copilotReview.enabled = cr.enabled;
-    if (typeof cr.maxRounds === "number" && Number.isInteger(cr.maxRounds)) {
-      // Clamped like the review cap: a typo still yields a sane budget, and a
-      // forged huge value cannot turn the Copilot loop into "practically never
-      // exhausts".
-      cfg.copilotReview.maxRounds = Math.min(COPILOT_MAX_ROUNDS, Math.max(COPILOT_MIN_ROUNDS, cr.maxRounds));
+    // `maxRounds` is intentionally NOT read any more. A project that still
+    // carries the old key keeps its config valid — the key is simply inert,
+    // because no number of rounds is a reason to abandon review comments.
+    if (Array.isArray(cr.owners)) {
+      // REPLACES the default rather than extending it: a project that lists
+      // owners is stating its own policy, and silently keeping someone else's
+      // organisation in the list would be surprising. An array of only junk
+      // yields an empty list — i.e. "evidence only", which is the safe end.
+      cfg.copilotReview.owners = cr.owners
+        .filter((o): o is string => typeof o === "string")
+        .map((o) => o.trim().toLowerCase())
+        .filter((o) => o.length > 0);
     }
   }
   return cfg;

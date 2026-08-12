@@ -216,8 +216,16 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    useful and check again. OPEN ⇒ for each listed thread either fix it and
    `resolveReviewThread`, or reply in the thread with the reason it will not be
    fixed; then check again. SATISFIED / UNSUPPORTED / EXHAUSTED ⇒ done (a repo
-   without Copilot review releases itself; a spent round budget escalates to
-   the user). Pushing your fixes re-arms the cycle — that is the loop.
+   with no sign of Copilot releases itself at once instead of waiting; a
+   Copilot that never answers within 20 minutes escalates to the user).
+   Pushing your fixes re-arms the cycle — that is the loop, and it has **no
+   round cap**: keep going until every finding is handled.
+
+   Two things you do NOT get to skip: an open thread stays yours even after you
+   push (GitHub does not re-review a new head by default, so that thread is
+   often the only feedback there is), and a release that abandons open findings
+   (the PR vanished, `gh` lost its credentials, the wait ran out) says so and
+   names the count — carry that to the user before you finish.
 
 7. **Done** — call `declare_done`. It re-validates everything server-side and
    rejects if any gate is unmet. Both the precommit PASS and the READY review
