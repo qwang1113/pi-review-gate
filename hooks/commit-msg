@@ -4,6 +4,15 @@
 # positives under -i); GPT/OpenAI stay unbounded to catch ChatGPT/GPT-4.
 set -euo pipefail
 [[ "${REVIEW_GATE_BYPASS:-}" == "1" ]] && exit 0
+# PI-SELF EXEMPTION (USER REQUIREMENT): the gate never gates its own
+# maintenance — commits in the gate's own repository (package.json name
+# "pi-review-gate") skip the AI-attribution check, matching pre-commit.
+# The repo root is resolved via git (not $PWD), so the hook judges the repo
+# being committed no matter which directory it runs from.
+PI_SELF_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "$PI_SELF_ROOT" ]] && node -e 'const p = require(process.argv[1] + "/package.json"); process.exit(p && p.name === "pi-review-gate" ? 0 : 1)' "$PI_SELF_ROOT" 2>/dev/null; then
+  exit 0
+fi
 MSG_FILE="$1"
 
 if grep -Eiq 'Co-Authored-By:.*(Claude|Anthropic|GPT|OpenAI|Copilot|noreply@anthropic)' "$MSG_FILE" \

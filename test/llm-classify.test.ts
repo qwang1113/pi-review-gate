@@ -302,6 +302,16 @@ test("classifyTaskMode tolerates a missing user message (fail-open to reason + f
   assert.equal(await classifyTaskMode(c, undefined, "quick chore", "clean session"), "loop");
 });
 
+test("USER REQUIREMENT: the prompt teaches the pi-self rule (maintain pi itself ⇒ normal)", async () => {
+  const capture: { argv?: readonly string[] } = {};
+  const c = createLlmClassifier(undefined, fakeExec('{"mode":"normal"}', capture));
+  await classifyTaskMode(c, "配置一下 pi 的 mcp 和扩展", "configure pi itself", "clean session");
+  const q = capture.argv![capture.argv!.length - 1];
+  assert.ok(q.includes("pi ITSELF"), "prompt must teach the pi-self rule");
+  assert.ok(q.includes("must not gate its own maintenance"), "prompt must state the rationale");
+  assert.ok(q.includes('"normal"'), "the rule must map pi-self work to normal");
+});
+
 // ---------------------------------------------------------------------------
 // createVerdictMemo — caches the edit-time L6 label verdict (~2s/edit).
 

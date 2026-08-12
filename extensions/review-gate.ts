@@ -145,6 +145,7 @@ import {
   isSuspiciousShipCandidate,
   type LlmClassifier,
 } from "./lib/llm-classify.ts";
+import { isPiSelfRoot } from "./lib/pi-self.ts";
 import {
   BASH_WRITE_NUDGE,
   EDIT_DISCIPLINE_DIRECTIVE,
@@ -3318,7 +3319,23 @@ export default function reviewGate(pi: ExtensionAPI) {
       // hooks remain fully enforced.
       let effective = requested;
       let classifiedBy: string | null = null;
+      // PI-SELF (USER REQUIREMENT): sessions working ON pi itself — the
+      // gate's own repo/install, the pi binary, or ~/.pi (lib/pi-self.ts) —
+      // get "normal" automatically: no LLM round-trip, no consent dialog.
+      // Deterministic path detection: the session's repo root is chosen by
+      // the USER, so this is not a forgeable text claim. A requested "loop"
+      // still wins — the user can always demand the full loop for gate work.
+      const piSelf = isPiSelfRoot(primaryRepoRoot);
+      let piSelfAuto = false;
       if (
+        state.taskMode === undefined &&
+        !sessionEdited &&
+        ctx.hasUI &&
+        piSelf
+      ) {
+        effective = requested === "loop" ? "loop" : "normal";
+        piSelfAuto = true;
+      } else if (
         state.taskMode === undefined &&
         !sessionEdited &&
         ctx.hasUI
@@ -3359,6 +3376,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         hasUI: ctx.hasUI,
         downgradesLocked: agentDowngradesLocked,
         firstDecideAuto: classifiedBy !== null,
+        piSelfTask: piSelfAuto,
       });
 
       if (decision.action === "noop") {
@@ -3373,7 +3391,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         try {
           const sourceNote = classifiedBy
             ? `（由 ${classifiedBy} 自动判定，无需确认）`
-            : "";
+            : piSelfAuto
+              ? "（pi 自身任务，规则自动判定，无需确认）"
+              : "";
           ctx.ui.notify(
             effective === "loop"
               ? `review-gate: 会话类型已判定为循环任务${sourceNote}。可用 /gate-mode 切换。`

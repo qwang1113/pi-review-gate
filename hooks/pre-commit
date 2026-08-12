@@ -104,6 +104,15 @@ if (!nullableString(state.sessionId) ||
   process.exit(1);
 }
 if (state.bypass.active) process.exit(10);
+// PI-SELF EXEMPTION (USER REQUIREMENT): the gate never gates its own
+// maintenance — commits in the gate's own repository (package.json name
+// "pi-review-gate") are exempt from the verdict checks, like a USER-chosen
+// normal mode. Deterministic: the repo identity is not forgeable from a
+// hook (the user chose the checkout). Exit 11 = advisory bypass, the same
+// path as user-chosen explore/normal below.
+let pkg;
+try { pkg = JSON.parse(readFileSync("package.json", "utf8")); } catch { /* not a package */ }
+if (pkg && pkg.name === "pi-review-gate") process.exit(11);
 // SECURITY: only a USER-chosen explore/normal (confirmed dialog or /gate-mode)
 // makes the hook advisory. An agent/auto classification must never weaken the
 // commit gate.

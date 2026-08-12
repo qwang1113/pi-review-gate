@@ -128,6 +128,44 @@ test("SECURITY: firstDecideAuto with the downgrade lock still rejects", () => {
 });
 
 // ---------------------------------------------------------------------------
+// evaluateModeChange — piSelfTask (USER REQUIREMENT: sessions working ON pi
+// itself — the gate's own repo/install, the pi binary, ~/.pi — get "normal"
+// automatically on the first classification, no consent dialog)
+
+// ---------------------------------------------------------------------------
+
+test("USER REQUIREMENT: pi-self first classification applies normal automatically", () => {
+  assert.deepEqual(decide({ current: undefined, requested: "normal", piSelfTask: true }),
+    { action: "apply", source: "auto" });
+  // The caller normalizes any non-loop pick to "normal" in a pi-self session;
+  // the engine accepts an explore pick the same way.
+  assert.deepEqual(decide({ current: undefined, requested: "explore", piSelfTask: true }),
+    { action: "apply", source: "auto" });
+});
+
+test("USER REQUIREMENT: a requested loop still wins in a pi-self session", () => {
+  // The exemption only sets the DEFAULT — the user can always demand the full
+  // loop for gate work (upgrades never need consent).
+  assert.deepEqual(decide({ current: undefined, requested: "loop", piSelfTask: true }),
+    { action: "apply", source: "auto" });
+  assert.deepEqual(decide({ current: "normal", requested: "loop", piSelfTask: true }),
+    { action: "apply", source: "auto" });
+});
+
+test("SECURITY: piSelfTask never loosens a dirty, no-UI, decided, or locked session", () => {
+  // Same bounds as firstDecideAuto: first classification on a CLEAN
+  // interactive session only.
+  assert.equal(decide({ current: undefined, requested: "normal", piSelfTask: true, hasChanges: true }).action, "confirm");
+  assert.equal(decide({ current: undefined, requested: "normal", piSelfTask: true, downgradesLocked: true }).action, "reject");
+  // no-UI: the normal-only rule already applies automatically — same outcome.
+  assert.deepEqual(decide({ current: undefined, requested: "normal", piSelfTask: true, hasUI: false }),
+    { action: "apply", source: "auto" });
+  // piSelfTask is a FIRST-classification path only: later downgrades still ask.
+  assert.equal(decide({ current: "loop", requested: "normal", piSelfTask: true }).action, "confirm");
+  assert.equal(decide({ current: "explore", requested: "normal", piSelfTask: true }).action, "confirm");
+});
+
+// ---------------------------------------------------------------------------
 // evaluateModeChange — upgrades (tighten: never need consent)
 
 test("every upgrade applies immediately with source auto", () => {
@@ -219,6 +257,7 @@ test("the undecided-session directive instructs an in-session set_gate_mode call
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /fail-closed/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /"loop" \(the safe default\)/);
   // USER REQUIREMENT: the first classification is automated (DeepSeek V4),
-  // no confirmation dialog.
+  // and pi-self sessions are classified "normal" by a deterministic rule.
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /applied AUTOMATICALLY/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /pi-self/);
 });
