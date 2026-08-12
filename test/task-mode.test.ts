@@ -128,16 +128,16 @@ test("SECURITY: firstDecideAuto with the downgrade lock still rejects", () => {
 });
 
 // ---------------------------------------------------------------------------
-// evaluateModeChange — piSelfTask (USER REQUIREMENT: sessions working ON pi
-// itself — the gate's own repo/install, the pi binary, ~/.pi — get "normal"
-// automatically on the first classification, no consent dialog)
+// evaluateModeChange — piSelfTask (USER REQUIREMENT: sessions STARTED IN the
+// scratch dir /tmp — the ONLY exempt case — get "normal" automatically on
+// the first classification, no consent dialog)
 
 // ---------------------------------------------------------------------------
 
 test("USER REQUIREMENT: pi-self first classification applies normal automatically", () => {
   assert.deepEqual(decide({ current: undefined, requested: "normal", piSelfTask: true }),
     { action: "apply", source: "auto" });
-  // The caller normalizes any non-loop pick to "normal" in a pi-self session;
+  // The caller normalizes any non-loop pick to "normal" in a scratch session;
   // the engine accepts an explore pick the same way.
   assert.deepEqual(decide({ current: undefined, requested: "explore", piSelfTask: true }),
     { action: "apply", source: "auto" });
@@ -257,7 +257,8 @@ test("the undecided-session directive instructs an in-session set_gate_mode call
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /fail-closed/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /"loop" \(the safe default\)/);
   // USER REQUIREMENT: the first classification is automated (DeepSeek V4),
-  // and pi-self sessions are classified "normal" by a deterministic rule.
+  // and /tmp scratch sessions are classified "normal" by a deterministic rule.
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /applied AUTOMATICALLY/);
-  assert.match(GATE_MODE_DECISION_DIRECTIVE, /pi-self/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /\/tmp/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /NOT exempt/);
 });
