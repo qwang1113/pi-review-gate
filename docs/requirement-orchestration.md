@@ -26,9 +26,9 @@ pointers.**
 | D1 | **Serial execution.** Modules run one at a time. | No git worktrees, no wave scheduling, no write-collision guard. The single-writer invariant the gate already depends on holds for free. |
 | D2 | **Precommit is merged, not per-module: one full run per verify round.** | Module-level churn never triggers a precommit. It cannot be "one run for the whole requirement": a precommit PASS is bound to the worktree fingerprint (`lib/gate-state.ts`), so every remediation invalidates it and the next round must re-run it. |
 | D3 | **Review is sharded and parallel, then integrated.** N module reviewers (one per worklog) run concurrently, read-only; a single integration reviewer then judges the whole change. | Each module is genuinely reviewed against its own `must_haves` instead of drowning in one giant diff, and the seams still get a global read. |
-| D4 | **The planner is short-lived, not long-running.** It answers "what is the next step" from `PLAN.md` and exits. | The "planner runs out of context and must hand off" problem disappears: every planner turn is already a cold start from disk. Handoff is a property, not a mechanism. |
+| D4 | **The planner is short-lived, not long-running.** It answers "what is the next step" from the plan state and exits. | The "planner runs out of context and must hand off" problem disappears: every planner turn is already a cold start from disk. Handoff is a property, not a mechanism. |
 | D5 | **The main session is a thin driver that may still think.** It spawns, collects one-line results, merges verdicts, runs the gate, ships. | It never reads diffs or source files. Detail lives in worklogs. Its one unavoidable bulk intake is the reviewers' raw output at verify time (§5.3). |
-| D6 | **Authoritative state is machine-readable; the human view is rendered.** | `PLAN.md` YAML frontmatter is the source of truth; the markdown body and `/plan-status` are projections of it. |
+| D6 | **Authoritative state is machine-readable; the human view is rendered.** | `state.json` is the source of truth; `PLAN.md` and `/plan-status` are projections of it and are never parsed back. |
 | D7 | **Escalate silently, interrupt rarely.** Auto-retry with model/thinking escalation; ask the human only after a module accumulates **more than 8** BLOCKED rounds, on a plan-level error, or on an explicit worker request. | Repeated BLOCKED is normal in this repo; interrupting at 2 would make the tool unusable. |
 
 Ruled out for this iteration (see §11): parallel execution, worktree isolation,
@@ -38,15 +38,15 @@ TUI dashboards, run GC, cross-session memory, cost budgeting.
 
 | Role | Lifetime | Tools | Reads | Writes |
 |---|---|---|---|---|
-| **main session** (driver) | whole run | spawn, gate tools, git | `PLAN.md` frontmatter; reviewer output at verify time | `PLAN.md` state transitions, the worklog `## Review` sections |
-| **planner** | one question, then exits | read, grep, find, ls, write | `PLAN.md`, `.pi/loop-goal.md`, the requirement brief | `PLAN.md`, the task brief of the module it dispatches |
+| **main session** (driver) | whole run | spawn, gate tools, git | `state.json`; reviewer output at verify time | `state.json` transitions, the worklog `## Review` sections |
+| **planner** | one question, then exits | read, grep, find, ls, write | `PLAN.md` (the rendered view), `.pi/loop-goal.md`, the requirement brief | `state.json`, the task brief of the module it dispatches |
 | **worker** | one module (or one remediation) | read, grep, find, ls, bash, edit, write | its own task brief + the code it owns | source files inside `owned_paths`, its own worklog |
 | **module reviewer** | one module, read-only | read, grep, find, ls, bash | `worklog/M-xx.md`, the module diff, its `must_haves` | nothing (returns a verdict) |
 | **integration reviewer** | once per verify round, read-only | read, grep, find, ls, bash | `PLAN.md`, `.pi/loop-goal.md`, the whole diff, cross-module seams | nothing (returns a verdict) |
 
 The integration reviewer is the repo's existing `agents/reviewer.md`, briefed
-with the seam checklist of §5.3; PR2 therefore adds three new role definitions,
-not four.
+with the seam checklist of §5.3; the three roles above it are defined in
+`agents/planner.md`, `agents/worker.md` and `agents/module-reviewer.md`.
 
 The worker is the only role that writes source code, and only one worker runs at
 a time. That is the whole concurrency model.
@@ -63,48 +63,66 @@ dispatches.
 
 ## 4. State model
 
-Two artifacts, both under `.pi/plan/`. PR2 adds that directory to `.gitignore`
-alongside the other per-run gate artifacts. `.pi/` is already excluded from the
-worktree fingerprint (`lib/fingerprint.ts`), which is what makes it safe for the
-main session to append to a worklog between review rounds without invalidating a
+Everything lives under `.pi/plan/`, which is git-ignored alongside the other
+per-run gate artifacts. `.pi/` is already excluded from the worktree
+fingerprint (`lib/fingerprint.ts`), which is what makes it safe for the main
+session to append to a worklog between review rounds without invalidating a
 bound verdict.
 
-### 4.1 `PLAN.md` — the authoritative index
+```
+.pi/plan/
+  state.json        authoritative machine-readable state (lib/plan-state.ts)
+  PLAN.md           rendered human view — generated, never parsed back
+  brief.md          the requirement text, verbatim, written once
+  worklog/M-01.md   one audit-trail shard per module
+```
 
-YAML frontmatter is the machine-readable source of truth. The markdown body
-below it is a rendered human view and is never parsed.
+### 4.1 `state.json` — the authoritative index
 
-```yaml
----
-schema: 1
-requirement: "one-line intent of the whole requirement"
-brief: brief.md              # the full requirement text, verbatim, written once
-created: 2026-08-12
-status: drafting | approved | executing | verifying | done | blocked
-cursor: M-03                 # the module the next step applies to
-verify_round: 0              # incremented once per /plan-verify invocation
-integration_blocked_rounds: 0  # run-level verify bound; charged per §5.3
-modules:
-  - id: M-01
-    title: "short imperative title"
-    intent: "one paragraph: what this module must achieve"
-    owned_paths: ["lib/plan-state.ts", "test/plan-state.test.ts"]
-    depends_on: []
-    must_haves:
-      - id: mh-1
-        kind: artifact | behavior | test | doc
-        statement: "lib/plan-state.ts exports parsePlan and writePlan"
-        risk: normal | high
-    agent: worker
-    model: claude-sonnet-5
-    thinking: high
-    risk: low | normal | high
-    est_context_tokens: 80000
-    status: pending | running | implemented | reviewing | blocked | accepted
-    blocked_rounds: 0
-    worklog: worklog/M-01.md
-    result: "one line, written whenever the module changes status"
----
+The source of truth is JSON, not YAML frontmatter. The gate takes no npm
+dependencies, so a YAML source of truth would mean hand-rolling a YAML subset
+parser and then trusting the run's only durable record to it; `JSON.parse` is
+in the platform and cannot silently misread a document. `PLAN.md` is rendered
+from this state for humans and is never read back — which is also what keeps
+D6 honest: one machine-readable truth, one projection.
+
+```json
+{
+  "schema": 1,
+  "requirement": "one-line intent of the whole requirement",
+  "brief": "brief.md",
+  "created": "2026-08-12",
+  "status": "drafting | approved | executing | verifying | done | blocked",
+  "cursor": "M-03",
+  "verify_round": 0,
+  "integration_blocked_rounds": 0,
+  "modules": [
+    {
+      "id": "M-01",
+      "title": "short imperative title",
+      "intent": "one paragraph: what this module must achieve",
+      "owned_paths": ["lib/plan-state.ts", "test/plan-state.test.ts"],
+      "depends_on": [],
+      "must_haves": [
+        {
+          "id": "mh-1",
+          "kind": "artifact | behavior | test | doc",
+          "statement": "lib/plan-state.ts exports parsePlanState and writePlanState",
+          "risk": "low | normal | high"
+        }
+      ],
+      "model": "claude-sonnet-5",
+      "thinking": "low | medium | high | max",
+      "risk": "low | normal | high",
+      "est_context_tokens": 80000,
+      "status": "pending | running | implemented | reviewing | blocked | accepted",
+      "blocked_rounds": 0,
+      "worklog": "worklog/M-01.md",
+      "result": "one line, written whenever the module changes status",
+      "seam": "true only on a seam module created during a verify round (omitted otherwise)"
+    }
+  ]
+}
 ```
 
 #### Field rules
@@ -165,11 +183,11 @@ Module `status` — every transition is written by a numbered step of §5.3 or b
 
 #### Malformed state is fail-closed
 
-If `PLAN.md` is missing, its frontmatter does not parse, `schema` is not `1`, a
+If `state.json` is missing, does not parse, `schema` is not `1`, a
 `depends_on` edge points at an unknown module, or the `depends_on` graph has a
 cycle, or two plan-time modules declare overlapping `owned_paths` (seam modules
 are exempt, §5.3), every command except `/decompose` refuses to act and reports the exact
-defect. A partially written `PLAN.md` must never be silently "repaired" by
+defect. A partially written state must never be silently "repaired" by
 guessing — the run stops and the user decides. Writes are atomic (write to a
 temp file in the same directory, then rename) so a crash mid-write leaves the
 previous valid state intact.
@@ -209,7 +227,7 @@ in context (the failure this design exists to prevent) or produce briefs that
 are stale by the time earlier modules have changed the code they describe.
 
 Why the index/shard split rather than one big document: the planner cold-starts
-from `PLAN.md` on every single step, so `PLAN.md` must stay a few KB forever;
+from the plan state on every single step, so it must stay a few KB forever;
 the reviewer needs everything about its module, so the shard may grow freely.
 One combined file would make the planner unusable within a few modules — which
 is the exact failure this design exists to prevent.
@@ -223,7 +241,7 @@ is the exact failure this design exists to prevent.
    → the requirement text is stored verbatim as brief.md
    → planner (cold) reads the brief + repo, proposes the module table
    → main session shows the table ONCE for the user to edit and approve
-   → PLAN.md written, status: approved
+   → state.json written (and PLAN.md rendered), status: approved
 ```
 
 ### 5.2 Implement, one module at a time
@@ -231,12 +249,12 @@ is the exact failure this design exists to prevent.
 ```
 repeat until the planner reports "all modules implemented":
    /plan-next
-     → planner (cold) reads PLAN.md → writes the next module's task brief and
+     → planner (cold) reads the plan → writes the next module's task brief and
        returns ONE instruction:
        "run M-03" | "replan: <reason>" | "all modules implemented"
      → main session spawns the worker for that module with its task brief
      → worker implements, self-checks its must_haves, writes the worklog
-     → main session records status + a one-line result in PLAN.md
+     → main session records status + a one-line result in state.json
 ```
 
 Exactly one worker runs at a time, including during remediation. Nothing else
@@ -310,17 +328,21 @@ one of:
    `owned_paths` (the exact files the fix needs, empty-then-discovered when the
    failure is environmental), `must_haves` (the finding restated as acceptance
    criteria), its own worklog, its own `blocked_rounds` — created with status
-   `pending` and `depends_on` listing every module it overlaps. When a round
+   `pending`, `seam: true`, and `depends_on` listing every module it overlaps.
+   When a round
    creates several seam modules, `cursor` points at the first of them; the rest
    are ordinary `pending` modules that `/plan-next` picks up in `depends_on`
    order like any other.
 
-A seam module is the **only** case where `owned_paths` may overlap another
+A module carrying `seam: true` is the **only** case where `owned_paths` may overlap another
 module's. That is safe because execution is serial (D1): the overlap is a
 statement about ownership for review scoping, never about concurrent access.
 The `/decompose` disjointness rule (§4.1) therefore applies to plan-time modules
-only, and the malformed-state validation enforces it with that exemption. A
-finding is never split across two remediations: one finding, one owner.
+only, and the malformed-state validation enforces it with that exemption. The
+exemption keys on the explicit `seam` field, not on the `M-INT-` naming
+convention — an id prefix is a habit, and a plan-time module accidentally named
+like a seam must not slip past the rule in silence. A finding is never split
+across two remediations: one finding, one owner.
 
 **Charging.** A round that aborts always increments at least one counter:
 
@@ -431,9 +453,9 @@ All commands are prompt-injecting workflow commands registered in
 
 | Command | Effect |
 |---|---|
-| `/decompose [requirement or path]` | Store the requirement as `brief.md`; a cold planner proposes the module table; the main session presents it **once** for approval; writes `.pi/plan/PLAN.md`. |
+| `/decompose [requirement or path]` | Store the requirement as `brief.md`; a cold planner proposes the module table; the main session presents it **once** for approval; writes `.pi/plan/state.json` and renders `PLAN.md`. |
 | `/plan-next` | One step of §5.2: the cold planner writes the next task brief and returns one instruction, the main session dispatches one worker and records the result. |
-| `/plan-status` | Render the frontmatter as a progress table. Read-only, and never re-prints past review text. |
+| `/plan-status` | Render the plan state as a progress table. Read-only, and never re-prints past review text. |
 | `/plan-verify` | One verify round per §5.3: merged precommit, Phase A sharded review, Phase B integration review. Any failure aborts the round, returns the plan to `executing`, and hands remediation back to `/plan-next`; it never dispatches a worker itself. |
 
 Negotiation happens exactly once, at `/decompose`, over the whole table (module
@@ -460,8 +482,8 @@ not statements we depend on.
 | **pi-subagents** (installed) | async spawn without worktrees, `status`/`resume`/`steer`, acceptance ledger, `turnBudget`/`toolBudget`, intercom escalation, clarify TUI, recursion guard | The execution substrate (§3, §7) |
 | **pi-gsd** | phase → plan → atomic task layering; `depends_on` / `files_modified` / `must_haves` contract; verification against reality rather than the executor's claim; on-disk state and resume | §4 state model, §5 loop, §7 self-check-vs-reality |
 | **pi-conductor** | "you are not the implementer" overseer prompt with a banned-tool list; filtered context inheritance; handoff documents; failure classification with escalating retry | §3 main-session contract, §7 escalation ladder |
-| **pi-agent-orchestrator** | machine-readable structured handoff; permission inheritance (a child may not silently regain a scope its parent removed); depth limits | §4.1 frontmatter as the handoff format, §3 role tool tables |
-| **pi-roadmap / stepstone / ank** | a persistent, structured task store that survives sessions | `PLAN.md` as the cross-session source of truth |
+| **pi-agent-orchestrator** | machine-readable structured handoff; permission inheritance (a child may not silently regain a scope its parent removed); depth limits | §4.1 `state.json` as the handoff format, §3 role tool tables |
+| **pi-roadmap / stepstone / ank** | a persistent, structured task store that survives sessions | `state.json` as the cross-session source of truth |
 | **billion-context-pi / pi-context-prune** | model-driven compression, tool-output pruning | Deferred (§11); the index/shard split already bounds the planner's context by construction |
 
 Deliberately not adopted: their shipping paths (`/gsd-ship`, autonomous modes,
@@ -494,7 +516,8 @@ to enforce.
    input size for a large run, and whether per-shard truncation (keeping each
    fence intact) is needed.
 3. Whether the cold planner reliably produces a single actionable instruction
-   from `PLAN.md` alone, or needs the previous module's `result` line inlined.
+   from the plan state alone, or needs the previous module's `result` line
+   inlined.
 4. Whether two `record_review` calls per verify round exhaust the default round
    cap too quickly on a large plan, and whether the cap needs to scale with the
    module count.
@@ -507,12 +530,22 @@ to enforce.
 ## 12. Delivery
 
 - **PR1** — this document.
-- **PR2** — MVP: the four commands, `PLAN.md` read/write with the §4.1 schema
-  validation and atomic writes, the three new role definitions in `agents/`
-  (planner, worker, module reviewer; the integration reviewer reuses the
-  existing `agents/reviewer.md`), the serial loop and
-  the §6.3 docSync protocol written into `skills/review-loop/SKILL.md`, and
-  tests for the state model, the malformed-state refusal, the module-status
-  transition table (including the Phase B paths: seam-module creation and
-  `reviewing` → `implemented` rollback), and the two-phase verdict path. The
-  module-reviewer definition must hard-code the §6.3 docSync prohibition.
+- **PR2** (shipped) — MVP:
+  - `lib/plan-state.ts`: the §4.1 schema with fail-closed validation, atomic
+    writes, the `PLAN.md` projection, the charging rule and dispatch selection;
+  - `lib/workflow-commands.ts`: `/decompose`, `/plan-next`, `/plan-status`,
+    `/plan-verify`;
+  - `agents/planner.md`, `agents/worker.md`, `agents/module-reviewer.md` (the
+    integration reviewer reuses `agents/reviewer.md`), with the §6.3 docSync
+    prohibition hard-coded into the module-reviewer definition;
+  - the serial loop and the two-phase verdict protocol in
+    `skills/review-loop/SKILL.md`;
+  - tests for the state model, the malformed-state refusals, the module-status
+    transitions (including seam-module creation and the `reviewing` →
+    `implemented` rollback), the charging bound, and the role definitions.
+
+The design intentionally stays ahead of the MVP in one place: it describes the
+behaviour a driver must follow, while the commands inject that behaviour as
+prompts rather than executing it in code. The state module is the part that is
+mechanically enforced — which is why validation, charging and dispatch live
+there and not in a prompt.
