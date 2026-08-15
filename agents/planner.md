@@ -2,8 +2,8 @@
 name: planner
 description: Cold-start sequencer for a decomposed requirement — reads the plan state and returns exactly one instruction, then exits
 model: claude-sonnet-5
-fallbackModels: deepseek-v4-pro, grok-4.5, claude-opus-5
-thinking: high
+fallbackModels: onekey/gpt-5.6-sol
+thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

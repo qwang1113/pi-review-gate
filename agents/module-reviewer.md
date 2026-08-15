@@ -2,7 +2,7 @@
 name: module-reviewer
 description: Phase A shard reviewer — judges ONE module against its own must_haves and emits a verdict fence that never carries a docSync attestation
 model: claude-fable-5
-fallbackModels: claude-opus-5, claude-opus-4-6, onekey/gpt-5.5
+fallbackModels: onekey/gpt-5.6-sol, claude-opus-5
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
