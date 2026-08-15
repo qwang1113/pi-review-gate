@@ -23,7 +23,7 @@ pointers.**
 
 | # | Decision | Consequence |
 |---|---|---|
-| D1 | **Serial execution.** Modules run one at a time. | No git worktrees, no wave scheduling, no write-collision guard. The single-writer invariant the gate already depends on holds for free. |
+| D1 | **Wave-parallel execution with a single writer.** Pending modules whose dependencies are ready run concurrently as read-only patch producers; the main session validates and applies their patches (§5.2). | No shared-worktree writes: workers are engine-level read-only (edit/write/bash excluded) and deliver unified diffs; the worktree still has exactly one writer — the main session. The pdw engine is a hard dependency: no serial fallback exists. |
 | D2 | **Precommit is merged, not per-module: one full run per verify round.** | Module-level churn never triggers a precommit. It cannot be "one run for the whole requirement": a precommit PASS is bound to the worktree fingerprint (`lib/gate-state.ts`), so every remediation invalidates it and the next round must re-run it. |
 | D3 | **Review is sharded and parallel, then integrated.** N module reviewers (one per worklog) run concurrently, read-only; a single integration reviewer then judges the whole change. | Each module is genuinely reviewed against its own `must_haves` instead of drowning in one giant diff, and the seams still get a global read. |
 | D4 | **The planner is short-lived, not long-running.** It answers "what is the next step" from the plan state and exits. | The "planner runs out of context and must hand off" problem disappears: every planner turn is already a cold start from disk. Handoff is a property, not a mechanism. |
@@ -31,8 +31,10 @@ pointers.**
 | D6 | **Authoritative state is machine-readable; the human view is rendered.** | `state.json` is the source of truth; `PLAN.md` and `/plan-status` are projections of it and are never parsed back. |
 | D7 | **Escalate silently, interrupt rarely.** Auto-retry with model/thinking escalation; ask the human only after a module accumulates **more than 8** BLOCKED rounds, on a plan-level error, or on an explicit worker request. | Repeated BLOCKED is normal in this repo; interrupting at 2 would make the tool unusable. |
 
-Ruled out for this iteration (see §11): parallel execution, worktree isolation,
-TUI dashboards, run GC, cross-session memory, cost budgeting.
+Ruled out for this iteration (see §11): TUI dashboards, run GC, cross-session
+memory, cost budgeting. (Parallel execution and worktree isolation were
+previously deferred; both are now implemented — §5.2/§5.3 and
+docs/parallel-execution-plan.md §8.)
 
 ## 3. Roles
 
@@ -261,6 +263,17 @@ directive requiring the agent to open its next reply by proposing `/decompose`
 Judgement is the gate's; the decision is the user's, so a false positive costs
 a sentence rather than a workflow.
 
+The suggestion is **not the only entry**. The main agent may **initiate**
+`/decompose` itself whenever it detects a complex task — a requirement too big
+for one session, or scope growing complex mid-task — with the same rule as an
+invariant: **initiating is a request, not an action; the user's explicit
+consent must precede any decompose step** (no brief write, no planner spawn
+before it). The consent to initiate (§5.1) and the table approval are two
+separate confirmations asking two different questions: "is this worth
+splitting?" and "is this split the right one?". A user who says "this is
+getting too big, split it" has consented by asking; an agent whose initiation
+was declined carries on and does not re-raise it.
+
 Three rules keep it from becoming noise:
 
 - **At most one evidence-backed suggestion per session.** There is no button
@@ -283,28 +296,50 @@ Three rules keep it from becoming noise:
 ### 5.1 Decompose
 
 ```
-/decompose <requirement>
+/decompose <requirement>            (user-typed, or agent-initiated)
+   → AGENT-INITIATED ENTRY: the main agent may start decompose whenever it
+     detects a complex task (mid-task included, §5.0). It must FIRST present
+     the evidence (signals that fired + its module-count estimate) and wait
+     for the user's EXPLICIT consent — no brief write, no planner spawn
+     before consent.
    → the requirement text is stored verbatim as brief.md
    → planner (cold) reads the brief + repo, proposes the module table
    → main session shows the table ONCE for the user to edit and approve
    → state.json written (and PLAN.md rendered), status: approved
 ```
 
-### 5.2 Implement, one module at a time
+### 5.2 Implement, one wave at a time (patch-first parallel)
 
 ```
 repeat until the planner reports "all modules implemented":
    /plan-next
-     → planner (cold) reads the plan → writes the next module's task brief and
-       returns ONE instruction:
+     → planner (cold) reads the plan → writes the next WAVE's task briefs and
+       returns ONE instruction per module:
        "run M-03" | "replan: <reason>" | "all modules implemented"
-     → main session spawns the worker for that module with its task brief
-     → worker implements, self-checks its must_haves, writes the worklog
-     → main session records status + a one-line result in state.json
+     → main session computes the wave (every pending module whose depends_on
+       are all implemented/accepted; capped at 4) and, when the pdw engine is
+       available (lib/pdw-bridge.ts), dispatches the whole wave IN PARALLEL:
+       runWaveWorkflow spawns one READ-ONLY worker per module (edit/write
+       tools excluded at the engine level); each worker returns unified git
+       diff patches for its owned_paths
+     → main session VALIDATES every patch (validatePatchOwnership, then
+       git apply --check), persists them under .pi/plan/patches/, and applies
+       them in sequence with per-patch validation (a patch that fails to apply is sent back to its
+       worker for one retry, never silently fixed)
+     → main session records status + a one-line result per module in state.json
 ```
 
-Exactly one worker runs at a time, including during remediation. Nothing else
-writes to the worktree while a worker is running.
+The worktree still has exactly one writer at all times: the main session.
+Workers are read-only and the single-writer guarantee of the serial design is
+what makes patch application safe (applied in sequence with per-patch
+validation; no cross-patch rollback transaction). The pdw engine is a HARD
+dependency — if it is unavailable, /plan-next stops and reports the
+installation error; there is no serial worker to fall back to.
+
+Workers are still expected to implement inside owned_paths, self-check every
+must_have with evidence, and write their worklog (execution log, changed-file
+list, self-check) exactly as before — only the write mechanism changes: their
+changes travel as patches through the main session instead of direct edits.
 
 ### 5.3 Verify (one round; repeats until READY)
 
@@ -343,8 +378,8 @@ ABORT the round (identical on every failure path):
      reviewing → implemented
   b. plan → executing, /plan-verify returns
 Remediation is NOT inlined: it runs through §5.2's /plan-next loop, which is the
-only dispatcher of workers, so every fix reuses the same serial single-writer
-path. When every module is `implemented` again, /plan-verify starts a NEW round
+only dispatcher of workers, so every fix reuses the same wave-parallel
+single-writer path. When every module is `implemented` again, /plan-verify starts a NEW round
 at step 0 — that is what returns the repaired modules to `reviewing`. Nothing
 from the aborted round survives: the fingerprint has moved, so its precommit
 PASS and its verdicts are void.
@@ -499,7 +534,7 @@ All commands are prompt-injecting workflow commands registered in
 
 | Command | Effect |
 |---|---|
-| `/decompose [requirement or path]` | Store the requirement as `brief.md`; a cold planner proposes the module table; the main session presents it **once** for approval; writes `.pi/plan/state.json` and renders `PLAN.md`. |
+| `/decompose [requirement or path]` | Store the requirement as `brief.md`; a cold planner proposes the module table; the main session presents it **once** for approval; writes `.pi/plan/state.json` and renders `PLAN.md`. Also the agent-initiated entry: the main agent may start it when it detects a complex task (mid-task included), but only after the user's **explicit consent to the initiation** — a separate confirmation from the table approval (§5.0/§5.1). |
 | `/plan-next` | One step of §5.2: the cold planner writes the next task brief and returns one instruction, the main session dispatches one worker and records the result. |
 | `/plan-status` | Render the plan state as a progress table. Read-only, and never re-prints past review text. |
 | `/plan-verify` | One verify round per §5.3: merged precommit, Phase A sharded review, Phase B integration review. Any failure aborts the round, returns the plan to `executing`, and hands remediation back to `/plan-next`; it never dispatches a worker itself. |
@@ -544,14 +579,32 @@ to enforce.
   bending the parser.
 - No verdict may be recorded by anything but an L3 reviewer through
   `record_review`.
-- One writer at a time in this worktree — that is what makes D1/D2 safe.
-- **No new npm dependencies.** `pi-subagents` is a runtime prerequisite of these
-  four commands (§8), not a package this repo installs or vendors; nothing else
-  in the gate depends on it.
+- One writer at a time in this worktree — the main session. Parallel workers
+  are READ-ONLY and ship their changes as validated patches (§5.2); nothing
+  else writes to the worktree while the main session applies them.
+- **Exactly one npm dependency beyond the platform: `@quintinshaw/pi-dynamic-workflows`**
+  (peer: pi-coding-agent ≥ 0.80.8) — a HARD dependency: the parallel loop is
+  the only execution path, so a missing/broken engine is an installation
+  error surfaced by the tools, never a silent serial fallback.
+  `@earendil-works/pi-ai` is pinned alongside it because pdw imports it
+  without declaring it. No other new dependency, and no network I/O in the
+  gate.
 - `.pi/plan/` is run state, not source: git-ignored from PR2 on, and evidence for
   the reviewers during the run rather than repository history.
 
 ## 11. Open items to validate during PR2
+
+Implemented since this document first shipped (see
+`docs/parallel-execution-plan.md` §8 for the design record):
+
+- **Parallel execution** (was deferred) — shipped as plane 1 (parallel shard
+  review) and plane 2 (patch-first wave workers) on top of
+  `@quintinshaw/pi-dynamic-workflows`. The pdw worktree-isolation mode was
+  deliberately NOT used for writers: v3.5.1 deletes the worktree/branch after
+  each agent, forbids worker commits, and silently degrades to the shared
+  worktree when isolation fails — patch-first avoids all three.
+
+Still open (unchanged):
 
 1. Whether a subagent child process loads this extension at all, and if so
    whether its gate state interferes with the child's work. The design assumes

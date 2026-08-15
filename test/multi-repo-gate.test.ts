@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync,
-  copyFileSync, readdirSync, existsSync, readFileSync,
+  copyFileSync, readdirSync, existsSync, readFileSync, symlinkSync,
 } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -24,9 +24,10 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // The extension imports ./lib/... and typebox relative to its own file, so
-// load it from a temp copy under /tmp that mirrors the installed layout
-// (extensions/pi-review-gate/); /tmp/node_modules symlinks provide typebox
-// (ESM resolves node_modules up from the file's own directory).
+// load it from a temp copy that mirrors the installed layout
+// (extensions/pi-review-gate/). A per-fixture node_modules/typebox symlink
+// keeps ESM resolution self-contained (walking up from os.tmpdir() does not
+// reach the repo, and a global /tmp/node_modules only helps when tmpdir() IS /tmp).
 const INSTALL = mkdtempSync(join(tmpdir(), "rg-ext-install-"));
 before(() => {
   mkdirSync(join(INSTALL, "lib"), { recursive: true });
@@ -34,6 +35,8 @@ before(() => {
   for (const f of readdirSync(join(ROOT, "lib"))) {
     copyFileSync(join(ROOT, "lib", f), join(INSTALL, "lib", f));
   }
+  mkdirSync(join(INSTALL, "node_modules"), { recursive: true });
+  symlinkSync(join(ROOT, "node_modules", "typebox"), join(INSTALL, "node_modules", "typebox"));
 });
 after(() => {
   for (const d of [INSTALL, ...(globalThis as { __rgDirs?: string[] }).__rgDirs ?? []]) {

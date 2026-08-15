@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync,
-  copyFileSync, readdirSync, existsSync, readFileSync,
+  copyFileSync, readdirSync, existsSync, readFileSync, symlinkSync,
 } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -23,8 +23,11 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-// The extension imports ./lib/... relative to its own file, so run it from a
-// temp copy that mirrors the installed layout (same trick as multi-repo-gate).
+// The extension imports ./lib/... and typebox relative to its own file, so
+// run it from a temp copy that mirrors the installed layout (same trick as
+// multi-repo-gate). A per-fixture node_modules/typebox symlink keeps ESM
+// resolution self-contained — os.tmpdir() is not /tmp on macOS, so a global
+// /tmp/node_modules would not be found by walking up from the fixture.
 const INSTALL = mkdtempSync(join(tmpdir(), "rg-lg-install-"));
 const dirs: string[] = [INSTALL];
 before(() => {
@@ -33,6 +36,8 @@ before(() => {
   for (const f of readdirSync(join(ROOT, "lib"))) {
     copyFileSync(join(ROOT, "lib", f), join(INSTALL, "lib", f));
   }
+  mkdirSync(join(INSTALL, "node_modules"), { recursive: true });
+  symlinkSync(join(ROOT, "node_modules", "typebox"), join(INSTALL, "node_modules", "typebox"));
 });
 after(() => {
   for (const d of dirs) {

@@ -101,8 +101,14 @@ Key facts of the implementation:
 - Timing-regression tests: iteration count and mechanism untouched; their
   stability under parallel scheduling is verified (see §7).
 - Single-writer: L2 fixes are merged by the main agent; concurrent writers
-  never share one worktree.
-- No new npm dependencies, no network I/O in the gate.
+  never share one worktree. (Parallel wave workers are read-only and deliver
+  patches — see §8.)
+- **Exactly two npm dependencies, both required and shipped with the
+  extension**: `@quintinshaw/pi-dynamic-workflows` (the engine — a HARD
+  dependency, there is no serial fallback) and `@earendil-works/pi-ai`
+  (pdw's undeclared import). `lib/pdw-bridge.ts` loads the engine once per
+  process; a missing/broken engine THROWS an installation error that the
+  tools surface — it never silently degrades. No network I/O in the gate.
 - Verdicts only from L3 (with the low-risk exception above).
 
 ## 7. Parallel-stability verification
@@ -116,3 +122,76 @@ par with the serial baseline (`npm test` ~137 s + typecheck ~2 s); the
 parallel win lands on multi-step repos, where independent checks overlap.
 Non-test parallel steps run `nice -n 10` so a timing-sensitive `test` keeps
 its pacing when a CPU-heavy check (tsc, build) is concurrent.
+
+## 8. Parallel loop & decompose on pi-dynamic-workflows (plane 1 + plane 2)
+
+**Status**: implemented 2026-08-15 (landing branch: a semantic feature branch, per AGENTS.md; never main).
+
+The two remaining serial bottlenecks were (a) the single full-diff reviewer
+round and (b) one-worker-at-a-time module implementation. Both are now
+parallelized on top of `@quintinshaw/pi-dynamic-workflows` (pdw), the
+engine — the ONLY execution path (§6): there is no serial protocol to fall
+back to.
+
+### 8.1 Plane 1 — parallel shard review (read-only fan-out)
+
+`lib/parallel-review.ts`. A large diff is split into ≤4 disjoint shards
+(`planReviewShards`, weight-balanced); a pdw workflow runs one L3 reviewer
+per shard in parallel (`agentType: 'reviewer'`, model `claude-fable-5:max`),
+each with a structured-output schema that carries NO docSync (a shard cannot
+attest the whole change). The main agent records every shard's full raw
+output in ONE `record_review` call (worst verdict wins, same as serial), then
+runs ONE integration reviewer over the whole change whose record — alone —
+carries the docSync attestation. This mirrors the /plan-verify two-phase
+protocol (§6.3 of the orchestration doc). `/review` drives it directly — the
+agent auto-shards any review (large diff ⇒ planReviewShards ≤4 shards, small
+diff ⇒ a single shard) without asking the user.
+
+### 8.2 Plane 2 — patch-first wave workers (parallel implementation)
+
+`lib/plan-parallel.ts`. pdw's own `isolation: "worktree"` was investigated
+and rejected for writers: v3.5.1 never auto-merges, deletes the worktree and
+branch in a finally block right after each agent, forbids worker `git
+commit` (so edits would be destroyed), and silently degrades to the shared
+worktree when isolation fails. Patch-first instead: `computeWave` selects
+every pending module whose dependencies are implemented/accepted (≤4 per
+wave); `runWaveWorkflow` runs one READ-ONLY worker per module in parallel
+(edit/write tools excluded engine-wide), each returning unified git diffs;
+the main agent validates (`validatePatchOwnership` ⊆ owned_paths, then
+`git apply --check`), persists patches under `.pi/plan/patches/`, and applies
+them in sequence with per-patch validation (no cross-patch rollback transaction — a failed patch is sent back to its worker, never silently edited). Single-writer is preserved: the worktree is only ever
+written by the main agent.
+
+### 8.3 Hard dependency and safety
+
+- `lib/pdw-bridge.ts` loads pdw via dynamic import once per process; any
+  failure throws `PdwUnavailableError` (installation guidance) and every
+  consumer propagates it — the tools report the error, they never run a
+  serial protocol. The engine ships with the extension
+  (`scripts/install-global.sh` installs it into the extension directory and
+  FAILS the install if npm cannot).
+- Gate core (binding, fail-closed, fingerprint, verdict/docSync parsing,
+  receipt) untouched; pinned by the existing test suite.
+- A wave patch that fails `git apply` is sent back to its worker for one
+  retry, never silently edited by the main agent.
+- Target: parallel review ≤60% of the serial wall clock (~190 s baseline on
+  this repo) and a 3-module wave ≈ 1.5–2× a single module's serial time.
+  Wall-clock measurements are NOT yet taken: end-to-end runs need a real pi
+  session with the installed engine — until then the numbers above are
+  targets, not measurements.
+
+#### Post-install verification checklist
+
+1. Run the extension installer (`scripts/install-global.sh`): it REQUIRES npm
+   and installs the pdw runtime into the extension directory (a failed
+   install fails the installer — there is no best-effort mode), then restart
+   Pi / `/reload`.
+2. In a real pi session on this repo: run `/review` on a change with ≥4
+   changed files and confirm the engine auto-shards and runs the reviewers
+   concurrently (watch the pdw run panel), then record Phase A and run the
+   integration review.
+3. In a real pi session with a multi-module plan: run `/plan-next` and
+   confirm one wave dispatches several read-only workers concurrently and
+   their patches apply.
+4. Record wall-clock numbers and compare against the ~190 s serial baseline;
+   update this section when measured.

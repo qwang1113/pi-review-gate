@@ -39,11 +39,23 @@ function withInvocation(base: string, invocation: WorkflowInvocation): string {
 
 export const WORKFLOW_COMMANDS = {
   review: {
-    description: "Review current changes with the enforced independent review loop",
+    description: "Review current changes with the enforced independent review loop (always via the pdw workflow engine, auto-sharded)",
     usage: "/review [focus]",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Review the current worktree changes now. Use a real independent reviewer, record its FULL raw output with record_review, fix every P0-P2 finding, and re-review until READY. Do not run precommit unless the review becomes READY. Treat this as an explicit request to execute the review loop, not merely explain it.",
+      "Execute the review loop for the current worktree changes, through the pdw workflow engine (the ONLY execution path — no serial protocol exists). " +
+      "AUTONOMOUS PROTOCOL: you run this loop on your own whenever code/doc edits are complete and need the gate — this command is only an explicit trigger; " +
+      "do not wait for the user to call it before reviewing your own finished work. " +
+      "Steps: (1) collect the changed files and call the run_parallel_shard_review tool with the loop goal text — it auto-shards " +
+      "large diffs (planReviewShards, ≤4 shards) and runs the L3 reviewers in parallel; the shard plan needs NO user confirmation. " +
+      "(2) record Phase A: feed the tool's returned shard record (EVERY shard's full raw output) to record_review in ONE call " +
+      "(shard fences carry no docSync by design — worst verdict wins); a shard in the tool's failedShards produced NO verdict — " +
+      "its files MUST be covered by the integration review that follows. " +
+      "(3) only if Phase A was READY, run ONE integration reviewer over the whole change (cross-shard seams, duplicated " +
+      "abstractions, the loop goal criterion by criterion) and record ITS output ALONE, because it carries the single docSync " +
+      "attestation. Fix every P0-P2 finding and re-review until READY (later rounds reuse the same shards). " +
+      "Do not run precommit unless the review becomes READY. Treat this as an explicit request to execute the review loop, " +
+      "not merely explain it.",
       invocation,
     ),
   },
@@ -150,37 +162,64 @@ export const WORKFLOW_COMMANDS = {
     ),
   },
   decompose: {
-    description: "Split one large requirement into a serial, gated module plan",
+    description: "Split one large requirement into a gated, wave-parallel module plan",
     usage: "/decompose [requirement text or path to a requirement file]",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Decompose the requirement in the user-data block into a module plan, following docs/requirement-orchestration.md. " +
-      "Store the requirement text VERBATIM as .pi/plan/brief.md (if the block names a file, read that file and store its contents). " +
+      "Decompose the requirement in the user-data block into a gated module plan. This command is SELF-CONTAINED: " +
+      "its contract is this prompt plus lib/plan-state.ts (the schema authority) — never rely on a repo-local docs/ file; the extension must work in any repository. " +
+      "AUTONOMOUS PROTOCOL: agent-initiated by default — you propose /decompose yourself whenever you detect a complex task " +
+      "(a requirement too big for one session, or scope growing complex mid-task — not only when the gate's size hint fires); " +
+      "this command is only an explicit trigger, not the expected entry. " +
+      "ENTRY — two ways: (1) the user types /decompose; (2) the main agent INITIATES it itself per the autonomous protocol. " +
+      "Initiating is a REQUEST, not an action: before taking any decompose step (no brief write, no planner spawn) the agent must present " +
+      "the evidence that fired (exit-criteria count, directories spanned, module estimate) plus its own module-count estimate and wait " +
+      "for the user's EXPLICIT consent. The module-table approval below is a second, separate confirmation. " +
+      "Once consented (or invoked directly): store the requirement text VERBATIM as .pi/plan/brief.md (if the block names a file, read that file and store its contents). " +
       "Then spawn a COLD planner subagent (fresh context, read-only plus state writes) to propose the module table. Each module needs: " +
       "id, title, one-paragraph intent, owned_paths, depends_on, must_haves (each with kind artifact/behavior/test/doc, a checkable statement and a risk), " +
       "suggested model, suggested thinking level, a risk band, and an estimated context size. " +
       "Plan-time modules MUST own disjoint paths and their depends_on graph MUST be acyclic — those, not the token estimate, are the real split criteria. " +
       "Warn the user about any module estimated above ~120k tokens of context: that size is a sign the boundary is in the wrong place. " +
       "Present the WHOLE table to the user ONCE for edits and approval; do not interrogate module by module. " +
-      "Only after the user approves, write .pi/plan/state.json (schema 1, status approved) via lib/plan-state.ts and let it render PLAN.md. " +
-      "Do not implement anything and do not dispatch a worker in this command.",
+      "Only after the user approves, write .pi/plan/state.json (schema 1, status approved) exactly in the shape defined by " +
+      "the extension's lib/plan-state.ts — resolve it at .pi/extensions/pi-review-gate/lib/plan-state.ts (project install) " +
+      "or ~/.pi/agent/extensions/pi-review-gate/lib/plan-state.ts (global install) — and render PLAN.md from that state " +
+      "(a pure projection, never parsed back). " +
+      "Do not implement anything and do not dispatch a worker in this command. " +
+      "Implementation runs in WAVES (see /plan-next): modules whose depends_on are all implemented run concurrently via patch-first workers; " +
+      "the plan's disjoint owned_paths + acyclic depends_on are exactly what make the wave split sound. " +
+      "AUTONOMOUS EXECUTION: once the module table is approved, you drive the whole loop yourself — /plan-next waves and /plan-verify rounds " +
+      "run back-to-back until the plan is accepted or a human decision is required; the user does not need to type those commands.",
       invocation,
     ),
   },
   "plan-next": {
-    description: "Run one serial step of the module plan: ask the planner, dispatch one worker",
+    description: "Run one wave of the module plan: ask the planner, dispatch parallel patch-first workers",
     usage: "/plan-next",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Advance the module plan by exactly ONE step, per docs/requirement-orchestration.md §5.2. " +
+      "Advance the module plan by exactly ONE WAVE of the parallel patch-first loop, then stop. " +
       "Read .pi/plan/state.json; if it is missing or malformed, report the exact defect and stop — never guess a repair. " +
-      "Spawn a COLD planner subagent that reads only the plan state, the brief and the loop goal, and APPENDS the dispatched module's task brief to its worklog " +
-      "(preserving any execution log, self-check and review sections already there — that audit trail is what the reviewers judge against), " +
-      "and returns ONE instruction: run <module id>, replan with a reason, or 'all modules implemented'. " +
-      "Then dispatch exactly ONE worker subagent for that module at its recorded model and thinking level, with a turn budget; never run two workers at once. " +
-      "The worker implements inside owned_paths, self-checks every must_have with evidence, and appends its execution log, changed-file list and self-check to the worklog. " +
-      "Record only the resulting status and a ONE-LINE result in the plan state: as the driver you must not read the diff or the worker transcript. " +
-      "If the planner says replan, or the worker reports it must touch files outside owned_paths, stop and ask the user before changing the plan. " +
+      "THE WAVE: a wave is every pending module whose depends_on are all implemented/accepted (compute it from the state; cap at 4 modules per wave). " +
+      "If the wave is empty and modules remain pending, report the blocker (a dependency that never reached implemented) and stop. " +
+      "Spawn a COLD planner subagent that reads only the plan state, the brief and the loop goal, and APPENDS each dispatched module's task brief to its worklog " +
+      "(preserving any execution log, self-check and review sections already there), and returns ONE instruction per module: run <module id>, replan with a reason, or 'all modules implemented'. " +
+      "Then dispatch the whole wave: call the run_wave_workflow tool (modules = the wave as JSON " +
+      "[{id, title, ownedPaths, worklogPath, model}] with each module's worklog path under .pi/plan/worklog/, " +
+      "and state_file = .pi/plan/state.json so the tool verifies the wave against computeWave). " +
+      "The tool runs the wave's workers IN PARALLEL (read-only, edit/write excluded), validates ownership, persists patches under .pi/plan/patches/ " +
+      "and pre-checks git apply. The pdw engine is a HARD dependency: if the tool reports the engine missing, stop and fix the install " +
+      "(re-run scripts/install-global.sh) — there is no serial protocol to fall back to. " +
+      "The module table was already approved by the user, so wave dispatch itself needs NO further confirmation. " +
+      "For every module whose patches are ownershipOk and applies=true, apply them with git apply and mark the module implemented. " +
+      "A patch that does not apply is NOT silently fixed: send the git error back to that worker and retry once. " +
+      "Append each worker's execution log, changed-file list and self-check to its worklog. " +
+      "Record only the resulting status and a ONE-LINE result per module in the plan state: as the driver you must not read the diff or the worker transcript. " +
+      "MAINTAIN THE PARALLEL LEDGER: after each wave, update state.json's parallel field (engine: \"pdw\", " +
+      "waves: append {modules, status: running|applied|failed, patches_dir, note}) so /plan-status and the reviewers see " +
+      "exactly how each module ran — a wave whose workers failed (failedModules from the tool) is recorded as failed, never applied. " +
+      "If the planner says replan, or a worker reports it must touch files outside owned_paths, stop and ask the user before changing the plan. " +
       "When the planner reports every module implemented, tell the user to run /plan-verify.",
       invocation,
     ),
@@ -201,7 +240,7 @@ export const WORKFLOW_COMMANDS = {
     usage: "/plan-verify",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Run ONE verify round exactly as docs/requirement-orchestration.md §5.3 specifies. " +
+      "Run ONE verify round — merged precommit, sharded module review, then integration review (the two-phase docSync protocol). " +
       "Step 0: every implemented module enters review. " +
       "Step 1: run_precommit mode=full ONCE for the whole change. " +
       "Step 2 (Phase A): spawn one module-reviewer subagent per module, in parallel, read-only, each judging ONLY its own must_haves, worklog and owned_paths diff; " +

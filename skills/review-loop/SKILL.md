@@ -110,6 +110,21 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    before you start editing, then work to it. Hand the goal to every subagent,
    to `adviser`, and to `reviewer`.
 
+0b. **Autonomous protocol (no command needed)** — you drive both loops
+    yourself; the slash commands are only explicit triggers, never the
+    expected entry:
+    - **Review**: whenever your edits are complete and the change needs the
+      gate, start the review loop on your own (step 2/3 below) — do not wait
+      for the user to type `/review`. The pdw engine auto-shards; the shard
+      plan needs no user confirmation.
+    - **Decompose**: whenever you detect a complex task (too big for one
+      session, scope growing mid-task), propose it yourself with evidence and
+      a module estimate (step 0 of the module-loop section) and wait for the
+      user's consent — do not wait for `/decompose`. Once the module table is
+      approved, drive the whole plan yourself: `/plan-next` waves and
+      `/plan-verify` rounds run back-to-back until accepted or a human
+      decision is required.
+
 1. **Consult (recommended, not gated)** — before or during non-trivial work,
    ask the `adviser` subagent about the design, tradeoffs, and risks. Feed it
    the real question, not your preferred answer. Fold its input in before you
@@ -255,9 +270,15 @@ Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
   one-line may be reviewed by an L1 agent whose verdict IS recorded.
   Judging "low-risk" is yours; a misjudged call is a P1 finding for the L3
   reviewer.
-- **Split review (very large diffs)**: parallel reviewers over disjoint file
-  groups or dimensions; you merge — any BLOCKED wins (worst wins) and the
-  merged result is what gets recorded.
+- **Split review = every review (auto-sharded via the pdw engine)**: the
+  review loop runs through the workflow engine — `planReviewShards` splits
+  large diffs into ≤4 disjoint shards (a small diff is a single shard), L3
+  reviewers audit shards in parallel (shard fences WITHOUT docSync) → record
+  ALL shard outputs in ONE `record_review` → then ONE integration reviewer
+  recorded alone (it carries the docSync attestation). Worst wins. No user
+  confirmation is needed for the shard plan. There is NO serial protocol:
+  the engine is a hard dependency, and a missing engine is an installation
+  error, not a fallback.
 
 ## Working across several repos
 
@@ -307,12 +328,25 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
   the verdict still binds to the complete worktree fingerprint either way.
   This trades review breadth for latency — do not use it to hide a change.
 
-## Very large requirements: the serial module loop
+## Very large requirements: the wave-parallel module loop
 
 When one request is too big for a single session, do not stretch the loop —
-split the requirement. `docs/requirement-orchestration.md` is the contract;
-`/decompose`, `/plan-next`, `/plan-status` and `/plan-verify` drive it. The
-shape:
+split the requirement. The contract is SELF-CONTAINED: it lives in the
+commands themselves (`lib/workflow-commands.ts`) and the state module
+`lib/plan-state.ts` (the schema authority — resolve it at
+`.pi/extensions/pi-review-gate/lib/plan-state.ts` for a project install or
+`~/.pi/agent/extensions/pi-review-gate/lib/plan-state.ts` for a global one) —
+no repo-local doc is required; the extension must work in any repository. `/decompose`, `/plan-next`,
+`/plan-status` and `/plan-verify` drive it. The shape:
+
+0. **Agent-initiated entry** — you may initiate `/decompose` yourself whenever
+you detect a complex task (a requirement too big for one session, or scope
+growing complex mid-task), not only when the gate's size hint fires.
+Initiating is a REQUEST, not an action: present the evidence (exit-criteria
+count, directories spanned, module estimate) plus your own module-count
+estimate and wait for the user's EXPLICIT consent before writing the brief or
+spawning the planner. The module-table approval below is the second, separate
+confirmation.
 
 1. `/decompose` — a cold planner proposes a module table (id, intent,
    `owned_paths`, `depends_on`, `must_haves`, model, thinking, risk). Show it
@@ -320,11 +354,19 @@ shape:
    paths and form a DAG; that, not a token estimate, is what makes a split
    real. Approved state lands in `.pi/plan/state.json`.
 2. `/plan-next`, repeatedly — the planner cold-starts from the state, writes
-   the next module's task brief, and returns ONE instruction; you dispatch ONE
-   worker and record its status plus a one-line result. **You are a driver
-   here**: never read the diff, the source or the worker's transcript. The
-   planner is disposable precisely because everything that matters is on disk,
-   so a planner that runs out of context costs nothing.
+   the next WAVE's task briefs, and returns one instruction per module. A wave
+   is every pending module whose `depends_on` are all implemented/accepted
+   (≤4 per wave). With pdw available, dispatch the whole wave IN PARALLEL via
+   `runWaveWorkflow` (`lib/plan-parallel.ts`): each worker is READ-ONLY
+   (edit/write excluded) and returns unified git diffs for its `owned_paths`;
+   you validate (`validatePatchOwnership` + `git apply --check`), persist
+   patches under `.pi/plan/patches/`, apply them in sequence with per-patch validation, and record each
+   module's status plus a one-line result. The pdw engine is a HARD
+   dependency — a missing engine is an installation error, never a serial
+   fallback. **You are a driver here**: never read the diff,
+   the source or the worker's transcript. The planner is disposable precisely
+   because everything that matters is on disk, so a planner that runs out of
+   context costs nothing.
 3. `/plan-verify` — one round: `run_precommit` full ONCE, then Phase A (one
    module reviewer per module, parallel, read-only) recorded together, then
    Phase B (the integration reviewer over the whole change) recorded ALONE.

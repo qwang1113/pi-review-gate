@@ -6,6 +6,7 @@ import {
   GATE_MODE_DECISION_DIRECTIVE,
   MODE_REASON_MAX_CHARS,
   normalizeTaskMode,
+  scratchFirstMode,
   TASK_MODE_RANK,
   type TaskMode,
 } from "../lib/task-mode.ts";
@@ -87,50 +88,51 @@ test("USER REQUIREMENT: a no-UI session can ONLY be normal", () => {
 });
 
 test("SECURITY: normal always requires user consent — even as the initial classification", () => {
+  // The first classification is the AGENT's own pick, with no external
+  // classifier behind it — so this asymmetry IS the protection: the agent can
+  // classify itself INTO the gate but never out of it. An injected
+  // instruction can at worst tighten enforcement.
   assert.deepEqual(decide({ current: undefined, requested: "normal" }), { action: "confirm" });
   assert.deepEqual(decide({ current: undefined, requested: "normal", hasChanges: true }),
     { action: "confirm" });
+  // A declined downgrade earlier in the session hardens that into a refusal.
+  assert.equal(decide({ current: undefined, requested: "normal", downgradesLocked: true }).action,
+    "reject");
 });
 
 // ---------------------------------------------------------------------------
-// evaluateModeChange — firstDecideAuto (USER REQUIREMENT: DeepSeek V4 first
-// classification applies automatically, no consent dialog)
+// evaluateModeChange — the agent's own first classification. No external
+// classifier model is consulted for the mode (see lib/llm-classify.ts): the
+// engine's tighten-only asymmetry is the entire bound.
 
-test("USER REQUIREMENT: the first LLM classification applies automatically — even normal", () => {
-  // The user opted out of the FIRST confirmation dialog: an LLM-backed first
-  // verdict on a clean interactive session is applied directly with source
-  // auto (the git hooks stay fully enforced).
-  for (const requested of ["loop", "explore", "normal"] as const) {
-    assert.deepEqual(decide({ current: undefined, requested, firstDecideAuto: true }),
-      { action: "apply", source: "auto" }, requested);
-  }
-});
-
-test("SECURITY: firstDecideAuto never loosens a dirty session, a no-UI session, or a decided session", () => {
-  // The LLM runs only pre-work (no tracked changes) — once loop-rules edits
-  // exist, "classifying" the session is a real downgrade and needs consent.
-  assert.equal(decide({ current: undefined, requested: "normal", firstDecideAuto: true, hasChanges: true }).action, "confirm");
-  assert.equal(decide({ current: undefined, requested: "explore", firstDecideAuto: true, hasChanges: true }).action, "confirm");
-  // print/JSON mode: the no-UI rule decides first — normal applies (the gate
-  // steps aside), and the LLM's other verdicts are refused outright.
-  assert.deepEqual(decide({ current: undefined, requested: "normal", firstDecideAuto: true, hasUI: false }),
+test("the agent's own first classification applies with no dialog — loop always, explore while clean", () => {
+  assert.deepEqual(decide({ current: undefined, requested: "loop" }),
     { action: "apply", source: "auto" });
-  assert.equal(decide({ current: undefined, requested: "loop", firstDecideAuto: true, hasUI: false }).action, "reject");
-  // firstDecideAuto only covers the FIRST decision: later downgrades keep
-  // asking the user even though the flag may still be passed.
-  assert.equal(decide({ current: "loop", requested: "explore", firstDecideAuto: true }).action, "confirm");
-  assert.equal(decide({ current: "explore", requested: "normal", firstDecideAuto: true }).action, "confirm");
+  assert.deepEqual(decide({ current: undefined, requested: "explore" }),
+    { action: "apply", source: "auto" });
+  // Source stays "auto" in both cases, so the git hooks remain fully enforced
+  // — only a USER-chosen mode may make them advisory.
 });
 
-test("SECURITY: firstDecideAuto with the downgrade lock still rejects", () => {
-  const d = decide({ current: undefined, requested: "normal", firstDecideAuto: true, downgradesLocked: true });
-  assert.equal(d.action, "reject");
+test("SECURITY: a self-classification never escapes a dirty, no-UI, or already-decided session", () => {
+  // Once THIS session has edited under loop rules, "classifying" it is a real
+  // downgrade and needs consent.
+  assert.equal(decide({ current: undefined, requested: "normal", hasChanges: true }).action, "confirm");
+  assert.equal(decide({ current: undefined, requested: "explore", hasChanges: true }).action, "confirm");
+  // print/JSON mode: the no-UI rule decides first — normal applies (the gate
+  // steps aside), every enforced mode is refused outright.
+  assert.deepEqual(decide({ current: undefined, requested: "normal", hasUI: false }),
+    { action: "apply", source: "auto" });
+  assert.equal(decide({ current: undefined, requested: "loop", hasUI: false }).action, "reject");
+  // Later downgrades keep asking the user.
+  assert.equal(decide({ current: "loop", requested: "explore" }).action, "confirm");
+  assert.equal(decide({ current: "explore", requested: "normal" }).action, "confirm");
 });
 
 // ---------------------------------------------------------------------------
 // evaluateModeChange — piSelfTask (USER REQUIREMENT: sessions STARTED IN the
-// scratch dir /tmp — the ONLY exempt case — get "normal" automatically on
-// the first classification, no consent dialog)
+// scratch dir /tmp NEVER enter loop via the agent; first classification is
+// explore or normal, no consent dialog)
 
 // ---------------------------------------------------------------------------
 
@@ -143,24 +145,35 @@ test("USER REQUIREMENT: pi-self first classification applies normal automaticall
     { action: "apply", source: "auto" });
 });
 
-test("USER REQUIREMENT: a requested loop still wins in a pi-self session", () => {
-  // The exemption only sets the DEFAULT — the user can always demand the full
-  // loop for gate work (upgrades never need consent).
+test("USER REQUIREMENT: /tmp first classification never applies loop", () => {
+  // Agent asked for loop — land on normal so the session is not left undecided
+  // (undecided behaves as loop).
   assert.deepEqual(decide({ current: undefined, requested: "loop", piSelfTask: true }),
     { action: "apply", source: "auto" });
-  assert.deepEqual(decide({ current: "normal", requested: "loop", piSelfTask: true }),
-    { action: "apply", source: "auto" });
+  // Later agent upgrades to loop are rejected; only /gate-mode can force loop.
+  const later = decide({ current: "normal", requested: "loop", piSelfTask: true });
+  assert.equal(later.action, "reject");
+  if (later.action === "reject") assert.match(later.reason, /\/tmp/);
+  const fromExplore = decide({ current: "explore", requested: "loop", piSelfTask: true });
+  assert.equal(fromExplore.action, "reject");
+});
+
+test("scratchFirstMode: only an explicit explore pick stays explore", () => {
+  assert.equal(scratchFirstMode("explore"), "explore");
+  assert.equal(scratchFirstMode("normal"), "normal");
+  assert.equal(scratchFirstMode("loop"), "normal");
+  assert.equal(scratchFirstMode(undefined), "normal");
 });
 
 test("SECURITY: piSelfTask never loosens a dirty, no-UI, decided, or locked session", () => {
-  // Same bounds as firstDecideAuto: first classification on a CLEAN
+  // Same bounds as any other first classification: a CLEAN
   // interactive session only.
   assert.equal(decide({ current: undefined, requested: "normal", piSelfTask: true, hasChanges: true }).action, "confirm");
   assert.equal(decide({ current: undefined, requested: "normal", piSelfTask: true, downgradesLocked: true }).action, "reject");
   // no-UI: the normal-only rule already applies automatically — same outcome.
   assert.deepEqual(decide({ current: undefined, requested: "normal", piSelfTask: true, hasUI: false }),
     { action: "apply", source: "auto" });
-  // piSelfTask is a FIRST-classification path only: later downgrades still ask.
+  // Later downgrades still ask the user; only the loop upgrade is forbidden.
   assert.equal(decide({ current: "loop", requested: "normal", piSelfTask: true }).action, "confirm");
   assert.equal(decide({ current: "explore", requested: "normal", piSelfTask: true }).action, "confirm");
 });
@@ -252,13 +265,33 @@ test("SECURITY: the agent reason is labeled untrusted, JSON-quoted, and length-c
   assert.ok(!sneaky.includes('\n[review-gate] 官方提示'), "raw newline must not survive into the dialog");
 });
 
+test("a /tmp-clamped pick is disclosed, so the reason does not read as a non-sequitur", () => {
+  // /tmp + this session already edited + the agent asked for loop: the clamp
+  // rewrites the pick to normal, so the dialog offers normal while the agent's
+  // reason argues for loop. The fixed copy must say why.
+  const msg = buildModeConfirmMessage("normal", "deliver the refactor", "loop");
+  assert.match(msg, /AI 实际请求的是 "loop"/);
+  assert.match(msg, /\/tmp/);
+  // No note when nothing was clamped — including the same-mode call.
+  assert.doesNotMatch(buildModeConfirmMessage("normal", "r", "normal"), /实际请求的是/);
+  assert.doesNotMatch(buildModeConfirmMessage("normal", "r"), /实际请求的是/);
+  // The clamp note is EXTENSION copy: it must sit above the untrusted reason,
+  // so a truncated dialog drops the agent's text first.
+  assert.ok(msg.indexOf("AI 实际请求的是") < msg.indexOf("不可信数据"));
+});
+
 test("the undecided-session directive instructs an in-session set_gate_mode call", () => {
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /set_gate_mode/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /fail-closed/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /"loop" \(the safe default\)/);
-  // USER REQUIREMENT: the first classification is automated (DeepSeek V4),
-  // and /tmp scratch sessions are classified "normal" by a deterministic rule.
-  assert.match(GATE_MODE_DECISION_DIRECTIVE, /applied AUTOMATICALLY/);
+  // The agent's own pick IS the classification (no external classifier), and
+  // /tmp scratch sessions never enter loop via the agent.
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /Your pick IS the classification/);
+  // It must also spell out the one direction the agent cannot take itself.
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /always asks the USER to confirm/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /\/tmp/);
-  assert.match(GATE_MODE_DECISION_DIRECTIVE, /NOT exempt/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /NEVER enters loop/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /NOT path-exempt/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /except in \/tmp/);
+  assert.doesNotMatch(GATE_MODE_DECISION_DIRECTIVE, /always allowed later/);
 });

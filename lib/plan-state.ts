@@ -1,6 +1,7 @@
 /**
- * Requirement-orchestration plan state — the on-disk contract of
- * `docs/requirement-orchestration.md`.
+ * Requirement-orchestration plan state — the on-disk contract of the
+ * `/decompose` loop (design doc: this repo's `docs/requirement-orchestration.md`;
+ * the runtime contract is self-contained in this module and the command prompts).
  *
  * WHY THIS FILE EXISTS: a large requirement is executed one module at a time by
  * short-lived subagents. Nothing may live only in an agent's context, because
@@ -107,6 +108,31 @@ export interface PlanState {
   verify_round: number;
   integration_blocked_rounds: number;
   modules: PlanModule[];
+  /**
+   * Optional parallel-execution ledger (schema stays 1: absent on older runs,
+   * so pre-parallel state files parse unchanged). Each wave records which
+   * modules ran together, how they ran (always via the pdw engine — it is a
+   * hard dependency), and
+   * where their patch artifacts landed. Written by the driver (/plan-next),
+   * read by /plan-status and reviewers.
+   */
+  parallel?: PlanParallelState;
+}
+
+/** One executed wave in the parallel ledger. */
+export interface PlanWaveRecord {
+  /** Module ids dispatched together in this wave (≤ maxWaveSize). */
+  modules: string[];
+  status: "running" | "applied" | "failed";
+  /** Repo-relative or absolute path of this wave's patch artifacts. */
+  patches_dir: string;
+  /** One-line outcome (applied cleanly, failed patches, retried worker…). */
+  note?: string;
+}
+
+export interface PlanParallelState {
+  engine: "pdw";
+  waves: PlanWaveRecord[];
 }
 
 export type PlanResult =
@@ -172,6 +198,9 @@ export function parsePlanState(raw: string): PlanResult {
     modules.push(m.module);
   }
 
+  const parallel = parseParallelState(data.parallel);
+  if (!parallel.ok) return fail(parallel.error);
+
   const state: PlanState = {
     schema: PLAN_SCHEMA,
     requirement: data.requirement as string,
@@ -182,11 +211,51 @@ export function parsePlanState(raw: string): PlanResult {
     verify_round: data.verify_round as number,
     integration_blocked_rounds: data.integration_blocked_rounds as number,
     modules,
+    parallel: parallel.value,
   };
 
   const structural = validateGraph(state);
   if (structural) return fail(structural);
   return { ok: true, state };
+}
+
+type ParallelParseResult = { ok: true; value: PlanParallelState | undefined } | { ok: false; error: string };
+
+/**
+ * Validate the optional parallel-execution ledger. Absent (older runs) is
+ * fine; present but malformed fails closed with the exact defect.
+ */
+function parseParallelState(raw: unknown): ParallelParseResult {
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (!isRecord(raw)) return { ok: false, error: "plan field \"parallel\" must be an object" };
+  if (raw.engine !== "pdw") {
+    return { ok: false, error: "plan field \"parallel.engine\" must be \"pdw\"" };
+  }
+  if (!Array.isArray(raw.waves)) return { ok: false, error: "plan field \"parallel.waves\" must be an array" };
+  const waves: PlanWaveRecord[] = [];
+  for (const [index, entry] of raw.waves.entries()) {
+    const where = `parallel.waves[${index}]`;
+    if (!isRecord(entry)) return { ok: false, error: `${where} must be an object` };
+    if (!isStringArray(entry.modules) || entry.modules.length === 0) {
+      return { ok: false, error: `${where}.modules must be a non-empty array of module ids` };
+    }
+    if (entry.status !== "running" && entry.status !== "applied" && entry.status !== "failed") {
+      return { ok: false, error: `${where}.status must be running|applied|failed` };
+    }
+    if (typeof entry.patches_dir !== "string" || entry.patches_dir.length === 0) {
+      return { ok: false, error: `${where}.patches_dir must be a non-empty string` };
+    }
+    if (entry.note !== undefined && typeof entry.note !== "string") {
+      return { ok: false, error: `${where}.note must be a string` };
+    }
+    waves.push({
+      modules: entry.modules as string[],
+      status: entry.status as PlanWaveRecord["status"],
+      patches_dir: entry.patches_dir as string,
+      note: entry.note as string | undefined,
+    });
+  }
+  return { ok: true, value: { engine: raw.engine as PlanParallelState["engine"], waves } };
 }
 
 type ModuleResult = { ok: true; module: PlanModule } | { ok: false; error: string };

@@ -363,20 +363,24 @@ test("scope limit exempts pre-existing files at EVERY re-arm site (session_start
   assert.doesNotMatch(body, /state\.precommit\.verdict\s*=/);
 });
 
-test("gate mode is decided via set_gate_mode with a DeepSeek V4 first classification", () => {
-  // USER REQUIREMENT: the first classification is automated — the tool asks
-  // the DeepSeek V4 classifier (lib/llm-classify.ts) while undecided and
-  // applies the verdict without a confirmation dialog. The input handler is
-  // CACHE-ONLY (feeds the classifier the user's real first message) — the
-  // old input-handler decision flow stays gone.
+test("gate mode is decided by the agent itself in set_gate_mode — no LLM classifier", () => {
+  // The mode is the agent's own pick, bounded by lib/task-mode.ts (tighten
+  // only — a first "normal" still needs the user's dialog). No external
+  // classifier is consulted for it, and the old input-handler decision flow
+  // stays gone. The input handler is CACHE-ONLY (it feeds the user's real
+  // first message to the requirement-size hint).
   assert.doesNotMatch(SRC, /decideTaskMode/);
-  assert.match(SRC, /classifyTaskMode\(/);
-  assert.match(SRC, /firstDecideAuto:/);
+  assert.doesNotMatch(SRC, /classifyTaskMode/,
+    "gate mode must not be classified by an LLM");
+  assert.doesNotMatch(SRC, /firstDecideAuto/,
+    "the LLM-only consent bypass must be gone from the rule-engine call");
+  assert.match(SRC, /let effective = requested;/,
+    "the agent's requested mode must be the starting point of the decision");
   // The cache-only input capture must never decide anything itself.
   const inputAt = SRC.indexOf('pi.on("input"');
   assert.ok(inputAt >= 0, "first-input capture handler must exist");
   const inputBody = SRC.slice(inputAt, inputAt + 600);
-  assert.doesNotMatch(inputBody, /classifyTaskMode|evaluateModeChange|setTaskMode/,
+  assert.doesNotMatch(inputBody, /classify|evaluateModeChange|setTaskMode/,
     "the input handler must cache only — decisions stay in set_gate_mode");
   assert.match(inputBody, /editFailurePending = false/,
     "new user input must close the edit-failure nudge window");
@@ -419,6 +423,76 @@ test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' par
   assert.match(region, /setTaskMode\(\w+, decision\.source/);
 });
 
+test("USER REQUIREMENT: /tmp first classification clamps via scratchFirstMode; /gate-mode never goes through it", () => {
+  // Agent path: /tmp sessions clamp the first verdict and keep piSelfTask true
+  // so later agent upgrades to loop are rejected.
+  assert.match(SRC, /scratchFirstMode\(/);
+  assert.match(SRC, /piSelfTask:\s*piSelf/);
+  // setTaskMode must not be able to receive loop on a /tmp first classification
+  // even if the classifier block was skipped (session already edited).
+  assert.match(SRC, /piSelf && state\.taskMode === undefined && effective === "loop"/);
+  assert.match(SRC, /apply immediately except in \/tmp/);
+  assert.doesNotMatch(SRC, /Upgrades \(toward loop\) apply immediately;/);
+  assert.doesNotMatch(SRC, /ALWAYS user-confirmed/);
+  assert.doesNotMatch(SRC, /always user-consented/);
+  const README = readFileSync(join(ROOT, "README.md"), "utf8");
+  assert.match(README, /scratchFirstMode/);
+  // The consent-free entries into normal must be enumerated, and the agent's
+  // own first classification must NOT be one of them.
+  assert.match(README, /Exactly two entries are consent-free/);
+  assert.match(README, /including the agent's own first classification/);
+  assert.match(README, /print\/JSON \(no UI\) session/);
+  assert.doesNotMatch(README, /ONE exception/);
+  assert.doesNotMatch(README, /two consent-free first-classification exceptions/);
+  assert.doesNotMatch(SRC, /failed model call falls back to the normal consent rules\. /);
+  assert.match(README, /Outside `\/tmp`/);
+  assert.doesNotMatch(README, /undecided→loop/);
+  assert.match(README, /Print\/JSON mode \(no UI\) cannot render those dialogs/);
+  const TASK_MODE = readFileSync(join(ROOT, "lib", "task-mode.ts"), "utf8");
+  const PI_SELF = readFileSync(join(ROOT, "lib", "pi-self.ts"), "utf8");
+  assert.match(PI_SELF, /Explore still keeps the L1 ship gate/);
+  assert.doesNotMatch(PI_SELF, /the gate steps aside there/);
+  assert.doesNotMatch(PI_SELF, /Everything under \/tmp is exempt/);
+  assert.doesNotMatch(PI_SELF, /gate-exempt/);
+  assert.doesNotMatch(README, /user-consented step-aside/);
+  assert.doesNotMatch(SRC, /user-consented step-aside/);
+  assert.match(TASK_MODE, /print\/JSON no-UI/);
+  assert.match(TASK_MODE, /even on a dirty worktree/);
+  // Only the HEADLESS normal force skips arming. An interactive normal session
+  // still arms, so pre-existing changes stay inside the fence if the user later
+  // switches the session to loop via /gate-mode.
+  assert.match(SRC, /const headlessNormal = state\.taskMode === "normal" && !ctx\.hasUI;/);
+  assert.match(SRC, /!headlessNormal && !state\.hasCodeChange && !state\.hasDocChange && !state\.bypass\.active/);
+  assert.doesNotMatch(SRC, /taskMode !== "normal" && !state\.hasCodeChange/,
+    "a blanket normal exemption would strand pre-existing changes outside the gate");
+  // No user-facing text may still claim an external model decides the mode.
+  for (const [name, text] of [["README", README], ["review-gate.ts", SRC], ["task-mode.ts", TASK_MODE]] as const) {
+    assert.doesNotMatch(text, /DeepSeek V4 (?:first )?classification/, `${name} still credits a model for the gate mode`);
+    assert.doesNotMatch(text, /failed classifier/, `${name} still describes a gate-mode classifier failure path`);
+    assert.doesNotMatch(text, /LLM verdict wins/, `${name} still claims an LLM overrides the agent's pick`);
+  }
+  // /tmp makes NO classifier call at all: it can never reach loop, and the
+  // /decompose hint is only ever surfaced under loop.
+  assert.match(SRC, /if \(piSelf\) \{[\s\S]{0,600}?effective = scratchFirstMode\(requested\);[\s\S]{0,40}?\} else \{[\s\S]{0,400}?await classifyRequirementSize\(/);
+  // The guard layer must document that it deliberately holds NO gate-mode
+  // classifier, so a future round does not "restore" one.
+  const CLASSIFY = readFileSync(join(ROOT, "lib", "llm-classify.ts"), "utf8");
+  assert.match(CLASSIFY, /there is deliberately NO gate-mode classifier here/);
+  assert.doesNotMatch(CLASSIFY, /classifyTaskMode/);
+
+
+  // User path: /gate-mode writes source "user" directly and must not consult
+  // evaluateModeChange — that is what lets the user force loop in /tmp.
+  const gateModeAt = SRC.indexOf('registerCommand("gate-mode"');
+  assert.ok(gateModeAt >= 0, "/gate-mode must exist");
+  const gateModeBody = SRC.slice(gateModeAt, SRC.indexOf("registerCommand", gateModeAt + 20));
+  assert.doesNotMatch(gateModeBody, /evaluateModeChange/,
+    "/gate-mode must not consult the agent rule engine");
+  assert.doesNotMatch(gateModeBody, /piSelfTask|scratchFirstMode/,
+    "/gate-mode must not apply the /tmp loop ban");
+  assert.match(gateModeBody, /setTaskMode\(mode, "user"/);
+});
+
 test("the downgrade lock is cleared ONLY by user actions (/gate-mode, gate-reset)", () => {
   // (the `let … = false` declaration is excluded — only assignment sites count)
   const clears = [...SRC.matchAll(/(?<!let )agentDowngradesLocked = false/g)].map((m) => m.index!);
@@ -446,8 +520,8 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
   // Ship commands (git commit/push, gh pr) must stay fully gated in explore:
   // it only relaxes declare_done and auto-continuation. Two mode branches are
   // permitted in tool_call, and neither loosens anything for explore:
-  //   normal — the early return (every path into normal is user-confirmed, or
-  //            a no-UI session where the gate steps aside entirely);
+  //   normal — the early return (consent-free first classification, /tmp
+  //            clamp, no-UI session_start, or later user consent);
   //   loop   — the L8 loop-goal ship block, which only ADDS a requirement.
   const start = SRC.indexOf('pi.on("tool_call"');
   assert.ok(start >= 0, "tool_call handler must exist");
@@ -528,8 +602,8 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   // 3. tool_result bash: same-turn write-looking command gets the nudge once.
   assert.match(resultBody, /BASH_WRITE_NUDGE/);
   assert.match(resultBody, /editFailurePending = false/);
-  // Both nudge sites are skipped in normal mode (user-consented step-aside
-  // must not add extension text to tool results).
+  // Both nudge sites are skipped in normal mode (the step-aside must not
+  // add extension text to tool results).
   const normalGuards = (resultBody.match(/state\.taskMode === "normal"/g) ?? []).length;
   assert.ok(normalGuards >= 2, "both nudge sites must carry a normal-mode guard");
 });
@@ -1214,9 +1288,9 @@ test("restore() collects the migration result from loadSidecar, not from a secon
 test("session_start surfaces the migration notice and clears the flag", () => {
   const at = SRC.indexOf('pi.on("session_start"');
   assert.ok(at >= 0, "session_start handler must exist");
-  // 6000: the P-multi reset block and the no-UI mode forcing at the handler
-  // head push the notice section past the older windows.
-  const body = SRC.slice(at, at + 6000);
+  // 7000: the P-multi reset block, no-UI mode forcing, and the normal-mode
+  // no-arm comment at the handler head push the notice section past 6000.
+  const body = SRC.slice(at, at + 7000);
   assert.match(body, /if \(fingerprintMigrated\)/,
     "an invalidated binding must be explained, not silently applied");
   assert.match(body, /FINGERPRINT_MIGRATION_NOTICE/);

@@ -242,8 +242,8 @@ test("the extension wires both checkpoints and suggests at most once per session
   );
   assert.match(
     src,
-    /Promise\.all\(\[\s*\n\s*classifyTaskMode/,
-    "both classifications share one latency point",
+    /await classifyRequirementSize\(classifier\(\), firstUserInput\)/,
+    "the size hint reads the user's real first message, captured cache-only",
   );
   assert.match(
     src,

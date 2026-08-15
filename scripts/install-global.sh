@@ -43,19 +43,39 @@ EOF
 
 echo "✓ Extension installed to ${INSTALL_DIR}/"
 
+# 1b. Install the pdw runtime (REQUIRED — the engine ships with the extension).
+# @quintinshaw/pi-dynamic-workflows must resolve from the extension directory;
+# the parallel loop has NO serial fallback, so a failed install is a failed
+# install: the gate's parallel tools will report a clear error until this works.
+if ! command -v npm >/dev/null 2>&1; then
+  echo "✗ npm not found — cannot install the required pdw runtime." >&2
+  echo "  Install Node.js/npm and re-run this installer." >&2
+  exit 1
+fi
+if ! (cd "${INSTALL_DIR}" && npm install --no-audit --no-fund --loglevel=error \
+    @quintinshaw/pi-dynamic-workflows@^3.5.1 @earendil-works/pi-ai@^0.84.1) \
+    >/dev/null; then
+  echo "✗ pdw runtime install FAILED — the parallel loop cannot run without it." >&2
+  echo "  Re-run this installer (it retries the npm install), or run:" >&2
+  echo "  (cd ${INSTALL_DIR} && npm install @quintinshaw/pi-dynamic-workflows@^3.5.1 @earendil-works/pi-ai@^0.84.1)" >&2
+  exit 1
+fi
+echo "✓ pdw runtime installed (parallel loop engine ready)"
+
 # 2. Copy skills
 mkdir -p "${AGENT_DIR}/skills/pi-review-gate"
 cp "${SRC}/skills/review-loop/SKILL.md" "${AGENT_DIR}/skills/pi-review-gate/SKILL.md" 2>/dev/null || true
 echo "✓ Review-loop skill installed"
 
-# 2b. Install the adviser + reviewer subagents — ALWAYS overwrite with the
-# shipped version (same policy as the extension/skill/scripts above: the repo
-# is the single source of truth). Customize by editing the repo's agents/*.md
-# and re-running this installer, not the installed copies.
+# 2b. Install the subagents — adviser/reviewer/arbiter (gate roles) plus
+# planner/worker/module-reviewer (the /decompose orchestration roles), ALWAYS
+# overwritten with the shipped version (same policy as the extension/skill/
+# scripts above: the repo is the single source of truth). Customize by editing
+# the repo's agents/*.md and re-running this installer, not the installed copies.
 mkdir -p "${AGENT_DIR}/agents"
 # Clean up state from the removed three-way-merge updater (older installs).
 rm -rf "${AGENT_DIR}/agents/.pi-review-gate-shipped" 2>/dev/null || true
-for a in adviser reviewer arbiter; do
+for a in adviser reviewer arbiter planner worker module-reviewer; do
   SRC_AGENT="${SRC}/agents/${a}.md"
   [ -f "${SRC_AGENT}" ] || continue
   cp "${SRC_AGENT}" "${AGENT_DIR}/agents/${a}.md"

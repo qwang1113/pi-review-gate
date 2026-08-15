@@ -9,6 +9,25 @@ feature is integrated directly and enabled by default; it never hides
 behind an opt-in flag or a config toggle. If a feature cannot be safe by
 default, make it safe by default rather than adding a switch.
 
+### Parallel loop (the only execution path, agent-initiated)
+
+The review loop and the decompose module loop run through the
+`@quintinshaw/pi-dynamic-workflows` engine — a HARD dependency that ships
+with this extension (installed into the extension directory by
+`scripts/install-global.sh`). `/review` auto-shards large diffs
+(`run_parallel_shard_review`); `/plan-next` dispatches patch-first wave
+workers (`run_wave_workflow`). The agent decides when a task is large enough
+to propose `/decompose` (evidence + estimate → user consent → module-table
+approval) — there is no serial protocol and no fallback: a missing engine is
+an installation error, never a slow lane. Design record:
+`docs/parallel-execution-plan.md` §8; runtime contract: `lib/pdw-bridge.ts`.
+
+Both loops are AGENT-DRIVEN: you start the review loop yourself once edits
+are complete (auto-sharded via the engine) and you propose `/decompose`
+yourself when a task outgrows one session — the slash commands are only
+optional explicit triggers, never the expected entry. The user approves at
+two points only: decompose initiation and the module table.
+
 ## Git workflow guardrails
 
 Hard rules for every git operation in this repo. On top of these rules, the

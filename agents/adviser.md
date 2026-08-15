@@ -2,7 +2,7 @@
 name: adviser
 description: Cross-model consulting adviser — an independent, high-reasoning second brain the main agent should proactively consult on design, tradeoffs, risks, and hard decisions BEFORE and DURING implementation
 model: claude-fable-5
-fallbackModels: claude-opus-5, claude-opus-4-6, onekey/gpt-5.6-sol, claude-opus-4-8, onekey/gpt-5.5
+fallbackModels: onekey/gpt-5.6-sol, claude-opus-5
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true

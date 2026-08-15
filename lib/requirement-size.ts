@@ -1,6 +1,8 @@
 /**
  * Oversized-requirement detection — decide whether a session's work should be
- * proposed for `/decompose` (see `docs/requirement-orchestration.md`).
+ * proposed for `/decompose` (design doc: this repo's
+ * `docs/requirement-orchestration.md`; the runtime contract is self-contained
+ * in the command prompts and `lib/plan-state.ts`).
  *
  * WHY: the failure this catches is silent. A requirement too big for one
  * session does not announce itself; it degrades — context fills with stale
@@ -181,10 +183,12 @@ export function buildDecomposeSuggestion(verdict: SizeVerdict, checkpoint: Check
     "This session's work looks large enough that one session is likely to degrade on it " +
     "(context rot, silent scope reduction, nothing verifiable per piece). Evidence:\n" +
     `${evidence}${degradedNote}\n\n` +
-    "REQUIRED: open your very next reply by proposing `/decompose` — state the evidence above " +
+    "REQUIRED: open your very next reply by proposing to start `/decompose` — state the evidence above " +
     "and your own estimate of the module count — then STOP and let the user decide. Do not " +
     "start the work, and do not silently skip this. If the user declines, carry on normally " +
-    "and never raise it again this session."
+    "and never raise it again this session. (Independently of this suggestion, you may also " +
+    "initiate /decompose yourself whenever you detect a complex task — mid-task included — " +
+    "always presenting the evidence and waiting for the user's explicit consent first.)"
   );
 }
 

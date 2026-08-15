@@ -2,7 +2,7 @@
 name: arbiter
 description: Independent gate arbiter — adjudicates a CONTESTED review-gate block when the agent argues it is meaningless or circular, deciding GATE_WINS, AGENT_WINS, or HUMAN
 model: onekey/gpt-5.6-sol
-fallbackModels: claude-opus-5, claude-opus-4-6, claude-fable-5, onekey/gpt-5.5, claude-opus-4-8
+fallbackModels: claude-fable-5
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
