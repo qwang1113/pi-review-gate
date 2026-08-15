@@ -129,6 +129,7 @@ import {
   evaluateModeChange,
   buildModeConfirmMessage,
   normalizeTaskMode,
+  scratchFirstMode,
   GATE_MODE_DECISION_DIRECTIVE,
   MODE_CONFIRM_TITLE,
   type TaskMode,
@@ -140,7 +141,6 @@ import {
   classifyNonEnglish,
   classifyShipCommand,
   classifyRequirementSize,
-  classifyTaskMode,
   createVerdictMemo,
   isSuspiciousShipCandidate,
   type LlmClassifier,
@@ -288,11 +288,12 @@ export default function reviewGate(pi: ExtensionAPI) {
   // able to re-pop the dialog until the user gives in). /gate-mode and
   // /gate-reset clear it. In-memory only — never persisted.
   let agentDowngradesLocked = false;
-  // USER REQUIREMENT: the user's FIRST real message, captured cache-only so
-  // the DeepSeek V4 first classification sees the actual request, not just the
-  // agent's paraphrase. Input handler stores text; it never decides anything
-  // (no classifier call, no mode write) — classification stays exclusively in
-  // set_gate_mode. undefined = not captured yet (e.g. print/JSON mode).
+  // The user's FIRST real message, captured cache-only so the
+  // requirement-size classifier (the /decompose suggestion) sees the actual
+  // request, not the agent's paraphrase. Input handler stores text; it never
+  // decides anything (no classifier call, no mode write) — the gate mode is
+  // decided exclusively in set_gate_mode, by the agent itself.
+  // undefined = not captured yet (e.g. print/JSON mode).
   let firstUserInput: string | undefined;
   // USER REQUIREMENT ("no changes" = THIS session, not pre-existing ones):
   // tracks whether THIS session has edited anything yet. session_start resets
@@ -943,11 +944,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     return (await uiCtx.ui?.confirm?.(title, fitted.message)) === true;
   }
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
-  // user-chosen explore/normal (advisory hook) from an LLM/agent selection
+  // user-chosen explore/normal (advisory hook) from an agent selection
   // (hook stays fully enforced). The in-session mode decision is made via the
-  // set_gate_mode tool (or the user via /gate-mode): DeepSeek V4 classifies
-  // the FIRST decision automatically (user requirement — no confirmation
-  // dialog); later changes go through lib/task-mode.ts consent rules.
+  // set_gate_mode tool (or the user via /gate-mode): the agent classifies the
+  // FIRST decision itself, bounded by lib/task-mode.ts — it can pick loop or
+  // (while clean) explore without a dialog, but never normal; later changes go
+  // through the same consent rules.
   function setTaskMode(mode: TaskMode, source: TaskModeSource, ctx: ExtensionContext) {
     state.taskMode = mode;
     state.taskModeSource = source;
@@ -1080,7 +1082,8 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
       }
-      // Normal mode: user-consented “as if not installed” — the L6 label check
+      // Normal mode (“as if not installed” — consent-free first classification,
+      // /tmp clamp, no-UI session_start, or later user consent): the L6 label check
       // (and its LLM call) is skipped. The sensitive-file guard ABOVE runs in
       // every mode: it is a security floor, not workflow enforcement.
       if (state.taskMode === "normal") return;
@@ -1118,15 +1121,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     const command = typeof input.command === "string" ? input.command : "";
     if (!command) return;
 
-    // Normal mode (ALWAYS user-confirmed — evaluateModeChange requires a
-    // consented dialog or /gate-mode for every path into it): the ship gate,
+    // Normal mode (user-confirmed, or the consent-free /tmp scratchFirstMode
+    // first classification which maps loop / missing picks to normal):
+    // the ship gate,
     // commit-message checks, and LLM ship classification are all off. This is
     // the mode's defining behavior; explore below never gets this branch.
     if (state.taskMode === "normal") return;
 
     // Explore mode does NOT block bash — investigations need diagnostic
     // commands. Ship commands below stay FULLY gated in every mode except the
-    // user-confirmed normal: explore only relaxes auto-continuation and
+    // normal mode: explore only relaxes auto-continuation and
     // declare_done, never the ship gate.
 
     // P0-5: detect ALL ship commands, not just the first. Block if ANY operation
@@ -1779,7 +1783,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // the classic trigger for the "shell edits the file instead"
         // workaround. Append guidance to THIS result and arm the same-turn
         // bash window; the failure semantics stay untouched (isError true).
-        // Skipped in normal mode: the user-consented step-aside must not add
+        // Skipped in normal mode: the step-aside must not add
         // extension text to results.
         if (state.taskMode === "normal") return;
         editFailurePending = true;
@@ -3254,8 +3258,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
   // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
 
-  // USER REQUIREMENT: cache-only capture of the user's first real message,
-  // feeding the DeepSeek V4 first classification its primary signal. This
+  // Cache-only capture of the user's first real message, feeding the
+  // requirement-size classifier its primary signal. This
   // handler ONLY stores text — it never intercepts, transforms, classifies,
   // or writes mode state; all decisions stay inside set_gate_mode (the
   // input-transform/decision flow is deliberately not resurrected).
@@ -3286,11 +3290,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     description:
       "Decide or change this session's gate mode: \"loop\" (full enforced review loop), " +
       "\"explore\" (investigation — advisory gates, ship commands still blocked), or \"normal\" " +
-      "(gate fully off). Call this FIRST in a new session to classify the task: DeepSeek V4 " +
-      "(the llmGuards model) classifies the FIRST decision and it is applied AUTOMATICALLY — " +
-      "no user confirmation for the first classification (user requirement); the model may " +
-      "override your pick, and a failed model call falls back to the normal consent rules. " +
-      "Upgrades (toward loop) apply immediately; downgrades after the first classification pop a " +
+      "(gate fully off). Call this FIRST in a new session to classify the task — YOUR pick is the " +
+      "classification; no external model second-guesses it. You can only classify yourself INTO the " +
+      "gate: a first \"loop\" always applies, a first \"explore\" applies while this session is still " +
+      "clean, but \"normal\" (gate fully off) always needs the user's confirmation dialog. " +
+      "In /tmp, scratchFirstMode keeps only an explicit explore and otherwise applies normal. " +
+      "Upgrades (toward loop) apply immediately except in /tmp, where the agent cannot enter loop " +
+      "(first classification is remapped to normal; later agent loop upgrades are rejected; only " +
+      "the user can force loop via /gate-mode). Downgrades after the first classification pop a " +
       "confirmation dialog for the user — you cannot approve it yourself, and a declined " +
       "dialog locks further agent-initiated downgrades for this session.",
     parameters: Type.Object({
@@ -3306,79 +3313,71 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
-      // FIRST CLASSIFICATION (USER REQUIREMENT): while the mode is undecided
-      // and no session work exists yet, DeepSeek V4 (the llmGuards model)
-      // classifies the task and its verdict applies AUTOMATICALLY — no
-      // consent dialog. The model sees the user's ACTUAL first message (via
-      // the cache-only input handler) plus the agent's reason; its verdict
-      // WINS over the agent's own pick. A failed call (undefined, e.g. model
-      // unreachable) falls back to the pure rule engine exactly as before
-      // (fail-back: the agent's pick then follows the normal consent rules).
-      // The engine still refuses the LLM verdict on a dirty session
-      // (hasChanges) or without a UI, and source stays "auto" so the git
-      // hooks remain fully enforced.
+      // FIRST CLASSIFICATION: while the mode is undecided and THIS session
+      // has not edited anything, the AGENT's own pick IS the classification —
+      // no external classifier is consulted for the mode (see the NOTE in
+      // lib/llm-classify.ts). The pure rule engine below is what bounds it:
+      // the agent can only tighten (loop always, explore while clean), a
+      // first "normal" still needs the user's dialog, a dirty or headless
+      // session is refused, and source stays "auto" so the git hooks remain
+      // fully enforced.
       let effective = requested;
-      let classifiedBy: string | null = null;
-      // SCRATCH-SESSION EXEMPTION (USER REQUIREMENT): sessions STARTED IN
-      // /tmp (the scratch dir, lib/pi-self.ts) get "normal" automatically:
-      // no LLM round-trip, no consent dialog. NOTHING else is exempt — ~/.pi
-      // config edits, the pi binary install, developing the gate's own repo
-      // all run the full loop like any development. Deterministic path
-      // detection: the session's repo root is chosen by the USER, so this is
-      // not a forgeable text claim. A requested "loop" still wins — the user
-      // can always demand the full loop for gate work.
+      // SCRATCH-SESSION RULE (USER REQUIREMENT): sessions STARTED IN /tmp
+      // (lib/pi-self.ts) never enter loop via the agent. On the first
+      // classification the agent's pick is clamped: only an explicit explore
+      // (investigation) survives, everything else — including loop and a
+      // missing pick — becomes normal (local pi-config work / chores). Later
+      // agent upgrades to loop are rejected (piSelfTask stays true for the
+      // whole session). Only the user can force loop (/gate-mode). NOTHING
+      // else is path-exempt — a session started in ~/.pi or in this repo runs
+      // the full loop. Path detection is deterministic: the session cwd is
+      // chosen by the USER.
       const piSelf = isPiSelfRoot(primaryRepoRoot);
-      let piSelfAuto = false;
       if (
-        state.taskMode === undefined &&
-        !sessionEdited &&
-        ctx.hasUI &&
-        piSelf
-      ) {
-        effective = requested === "loop" ? "loop" : "normal";
-        piSelfAuto = true;
-      } else if (
         state.taskMode === undefined &&
         !sessionEdited &&
         ctx.hasUI
       ) {
-        // Facts are constant here: this branch is reachable only when THIS
-        // session has not edited anything (guarded above). Pre-existing
-        // worktree/branch changes may still exist — they arm the ship gate
-        // (state.hasCodeChange) but do not block the consent-free first
-        // classification: source stays "auto" so the git hooks remain fully
-        // enforced, and explore never weakens the ship gate.
-        const facts =
-          "this session has made no edits yet (pre-existing workspace changes may exist); " +
-          "interactive session: yes; mode undecided.";
-        // Both classifications run against the SAME first message, so they are
-        // issued together: sequentially this would double the worst-case stall
-        // the user feels on a dead network, for no benefit.
-        const [verdict, sizeBucket] = await Promise.all([
-          classifyTaskMode(classifier(), firstUserInput, params.reason, facts),
-          classifyRequirementSize(classifier(), firstUserInput),
-        ]);
-        requirementBucket = sizeBucket;
-        requirementClassifierUnavailable = sizeBucket === undefined;
-        if (verdict !== undefined) {
-          effective = verdict;
-          classifiedBy = projectConfig.llmGuards.model;
+        if (piSelf) {
+          // /tmp is scratch space: it can never reach loop via the agent, and the
+          // /decompose suggestion is only ever surfaced under loop. Asking the
+          // model here would spend up to the full guard timeout on an answer
+          // nobody reads, so a scratch session makes NO LLM call at all — the
+          // same promise the pre-refactor code kept.
+          effective = scratchFirstMode(requested);
+        } else {
+          // Requirement-size hint (the /decompose suggestion) — unrelated to the
+          // mode: it reads the user's first message, starts nothing and blocks
+          // nothing. It runs here because this is the one point where the
+          // session's first message is known and the work has not begun.
+          const sizeBucket = await classifyRequirementSize(classifier(), firstUserInput);
+          requirementBucket = sizeBucket;
+          requirementClassifierUnavailable = sizeBucket === undefined;
         }
+      }
+      // Defense in depth: even if the first-classification block was skipped
+      // (session already edited) or a future caller forgets scratchFirstMode,
+      // a /tmp first classification must never hand "loop" to setTaskMode.
+      // evaluateModeChange remaps internally too, but it does not return the
+      // remapped mode — the tool applies `effective`.
+      if (piSelf && state.taskMode === undefined && effective === "loop") {
+        effective = "normal";
       }
       // The pure rule engine decides; this tool only supplies FACTS. Consent
       // is obtained below by the EXTENSION (there is deliberately no
       // "confirmed" parameter the model could set). hasChanges = THIS
       // session's own edits only (pre-existing changes arm the gate via
       // state.hasCodeChange but must not force a confirmation dialog on the
-      // first classification).
+      // first classification). piSelfTask is the session cwd, not a
+      // first-classification-only flag: later agent loop upgrades must also
+      // be rejected.
       const decision = evaluateModeChange({
         current: state.taskMode,
         requested: effective,
         hasChanges: sessionEdited,
         hasUI: ctx.hasUI,
         downgradesLocked: agentDowngradesLocked,
-        firstDecideAuto: classifiedBy !== null,
-        piSelfTask: piSelfAuto,
+        piSelfTask: piSelf,
       });
 
       if (decision.action === "noop") {
@@ -3389,13 +3388,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
 
       if (decision.action === "apply") {
+        const scratchFirst = piSelf && state.taskMode === undefined;
         setTaskMode(effective, decision.source, ctx as unknown as ExtensionContext);
         try {
-          const sourceNote = classifiedBy
-            ? `（由 ${classifiedBy} 自动判定，无需确认）`
-            : piSelfAuto
-              ? "（pi 自身任务，规则自动判定，无需确认）"
-              : "";
+          const sourceNote = scratchFirst
+            ? "（/tmp 临时会话，规则禁止 loop，无需确认）"
+            : "";
           ctx.ui.notify(
             effective === "loop"
               ? `review-gate: 会话类型已判定为循环任务${sourceNote}。可用 /gate-mode 切换。`
@@ -3418,13 +3416,12 @@ export default function reviewGate(pi: ExtensionAPI) {
             type: "text",
             text:
               `review-gate: gate mode set to "${effective}" (source: ${decision.source})` +
-              (classifiedBy ? ` — DeepSeek V4 首次自动判定，无需用户确认` : "") +
-              (classifiedBy && effective !== requested
-                ? `。你请求的是 "${requested}"，已以模型判定为准。`
+              (effective !== requested
+                ? `。你请求的是 "${requested}"，/tmp 临时会话规则已将其调整为 "${effective}"。`
                 : ".") +
               goalNote,
           }],
-          details: { mode: effective, source: decision.source, classifiedBy },
+          details: { mode: effective, source: decision.source },
         };
       }
 
@@ -3432,14 +3429,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         // USER CONSENT — rendered by the extension with fixed consequence copy;
         // the agent's reason is displayed as clearly-labeled untrusted data.
         // The dialog must describe what "yes" actually grants: the decision was
-        // computed on `effective` (the LLM verdict wins over the agent's pick),
-        // so the copy is built from `effective` — never from `requested`.
+        // computed on `effective` (which the /tmp clamp may have rewritten), so
+        // the copy is built from `effective` — never from `requested`. When the
+        // two differ, `requested` is passed as well so the fixed copy can say
+        // why the agent's reason argues for another mode.
         let ok = false;
         try {
           ok = await confirmBounded(
             ctx as unknown as ExtensionContext,
             MODE_CONFIRM_TITLE,
-            buildModeConfirmMessage(effective, params.reason),
+            buildModeConfirmMessage(effective, params.reason, requested),
           );
         } catch { ok = false; }
         if (ok) {
@@ -3791,7 +3790,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     // shipped (exactly what the user consented to) or a user/bypass action;
     // the session's own NEW edits re-arm the gate before any further agent
     // commit.
-    if (!state.hasCodeChange && !state.hasDocChange && !state.bypass.active) {
+    // ONLY the headless force above may skip arming: a no-UI normal session
+    // keeps the git hooks fully enforced (source "auto"), so arming a dirty
+    // worktree here would block exactly the commit that mode promises to
+    // allow. An INTERACTIVE normal session still arms. Nothing is enforced
+    // while it stays normal — and its hooks are already harmless (a
+    // user-confirmed normal records source "user", which makes them advisory;
+    // the only agent-reachable normal is a /tmp scratch session, where no
+    // hook-installed repo lives) — but if the user later switches it to loop
+    // via /gate-mode, the pre-existing changes must already be inside the
+    // fence. Skipping here would leave them permanently unreviewable.
+    const headlessNormal = state.taskMode === "normal" && !ctx.hasUI;
+    if (!headlessNormal && !state.hasCodeChange && !state.hasDocChange && !state.bypass.active) {
       const exempt = new Set(state.scopeLimit?.preexistingFiles ?? []);
       const allFiles = changedFiles(cwd);
       const files = state.scopeLimit && allFiles ? allFiles.filter((f) => !exempt.has(f)) : allFiles;
@@ -4089,7 +4099,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // any mode.
     editFailurePending = false;
 
-    // Normal mode (always user-consented): the extension steps aside — no
+    // Normal mode (user-confirmed later, or a consent-free first
+    // classification / /tmp scratch clamp): the extension steps aside — no
     // workflow prompt is injected at all. The language directive above stays:
     // it is the user's standing output-language policy, orthogonal to the
     // gate, and costs nothing (adviser recommendation; trivially reversible).

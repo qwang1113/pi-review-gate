@@ -1,25 +1,28 @@
 /**
- * SCRATCH-SESSION DETECTION — /tmp sessions are not gate material.
+ * SCRATCH-SESSION DETECTION — /tmp sessions never enter loop via the agent.
  *
  * USER REQUIREMENT: ONLY sessions started in the scratch dir /tmp (macOS
- * /private/tmp is the same dir through a symlink) get the gate OFF
- * automatically: no LLM round-trip, no consent dialog, no review loop.
- * Everything under /tmp is exempt, including any incidental git checkout
- * inside it: the dir is scratch space by definition, so no real
- * development lives there.
+ * /private/tmp is the same dir through a symlink) are path-exempt: they
+ * NEVER enter loop via the agent. First classification is explore
+ * (investigation) or normal (local pi-config work / chores) — no consent
+ * dialog. Explore still keeps the L1 ship gate; only normal steps the
+ * in-session gate aside. Everything under /tmp is scratch for PATH
+ * detection, including any incidental git checkout inside it.
  *
- * NOTHING ELSE IS EXEMPT — in particular NOT:
- *  - the user's ~/.pi config dir (settings, MCP, installed extensions),
+ * NOTHING ELSE IS PATH-EXEMPT — in particular NOT:
+ *  - a session STARTED IN the user's ~/.pi config dir,
  *  - the pi binary's install directory,
  *  - developing pi-review-gate ITSELF (its repository anywhere, or a
  *    per-project .pi install) — that is regular development and runs the
- *    full loop. The gate gates its own development like any other code.
+ *    full loop. Editing ~/.pi FROM a /tmp session is the intended scratch
+ *    case and stays out of loop.
  *
  * Detection is DETERMINISTIC and path-based on purpose: the session's repo
  * root is chosen by the USER (the agent cannot forge which directory a
  * session runs in), so a path hit is a genuine signal. Text claims ("this
- * is a pi task") are NOT trusted here — that soft path is covered by the
- * LLM classifier prompt instead (lib/llm-classify.ts, classifyTaskMode).
+ * is a pi task") are NOT trusted here — the agent's own gate-mode pick is the
+ * soft path, and this clamp exists precisely to bound it (lib/task-mode.ts,
+ * scratchFirstMode).
  *
  * The git hooks need NO mirror of this: /tmp is scratch space, so no
  * hook-installed repo lives there. Ordinary repos — the gate's own
@@ -30,7 +33,7 @@ import { realpathSync } from "node:fs";
 
 let cachedSelfRoots: readonly string[] | undefined;
 
-/** Paths that count as gate-exempt scratch roots. Resolved once per process
+/** Paths that count as path-exempt scratch roots. Resolved once per process
  *  (the extension is resident; these paths cannot move under it mid-session). */
 function selfRoots(): readonly string[] {
   if (cachedSelfRoots) return cachedSelfRoots;
@@ -38,10 +41,10 @@ function selfRoots(): readonly string[] {
 
   // 1. Scratch/temp dirs: sessions started in /tmp (macOS /private/tmp is
   //    the same dir through a symlink) are ad-hoc scratch sessions (pi
-  //    config work, troubleshooting) — the gate steps aside there too (USER
-  //    REQUIREMENT). Everything under /tmp is exempt, including any
-  //    incidental git checkout inside it: the dir is scratch space by
-  //    definition, so no real development lives there.
+  //    config work, troubleshooting). The agent cannot enter loop there
+  //    (USER REQUIREMENT): first classification is explore or normal;
+  //    explore still keeps the L1 ship gate. Everything under /tmp is a
+  //    scratch PATH, including any incidental git checkout inside it.
   roots.add("/tmp");
 
   // Keep BOTH the plain and the realpath form of every root: a path that
@@ -58,7 +61,7 @@ function pathVariants(p: string): string[] {
   return [...variants];
 }
 
-/** Is `abs` (an absolute path) inside a gate-exempt scratch root (/tmp)? */
+/** Is `abs` (an absolute path) inside a path-exempt scratch root (/tmp)? */
 export function isPiSelfPath(abs: string): boolean {
   const targetVariants = pathVariants(abs);
   for (const root of selfRoots()) {
@@ -67,7 +70,7 @@ export function isPiSelfPath(abs: string): boolean {
   return false;
 }
 
-/** Is `root` a repository/session root that is gate-exempt? A path check
+/** Is `root` a repository/session root that is path-exempt? A path check
  *  only — anything outside /tmp (the gate's OWN checkout included) is
  *  deliberately NOT exempt and runs the full loop. */
 export function isPiSelfRoot(root: string): boolean {

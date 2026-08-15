@@ -17,20 +17,25 @@
  *               stay: they are user policy / a security floor, not workflow).
  *               For non-dev, non-research tasks where speed matters most.
  *
- * WHO DECIDES — DeepSeek V4 (LLM first classification, user requirement), the
- * session's own agent (set_gate_mode tool), or the user (/gate-mode). While
- * the mode is undecided the gate behaves as loop (fail-closed) and the
- * per-turn system prompt instructs the agent to call set_gate_mode as its
- * first action; the tool then asks the DeepSeek V4 classifier to pick the
- * mode BEFORE the session's work starts (no edits by THIS session —
- * pre-existing workspace changes do not count, interactive
- * session) and applies that verdict AUTOMATICALLY — the user opted out of
- * the first confirmation dialog. A failed/absent model call falls back to
- * the rule engine's pre-LLM behavior exactly (fail-back). evaluateModeChange()
- * is the single pure authority on what a requested change may do:
+ * WHO DECIDES — the session's own agent (set_gate_mode tool) or the user
+ * (/gate-mode). While the mode is undecided the gate behaves as loop
+ * (fail-closed) and the per-turn system prompt instructs the agent to call
+ * set_gate_mode as its FIRST action, before the session's work starts. The
+ * agent's own pick IS the first classification: no external classifier model
+ * is consulted for the mode (deliberately — the extra round-trip bought
+ * nothing the rule engine below does not already bound, and the agent has
+ * far more context than a three-line prompt). What keeps that safe is the
+ * asymmetry the engine enforces: the agent may pick itself INTO the enforced
+ * modes (loop, explore) but cannot pick itself OUT of the gate — a first
+ * "normal" (total shutdown) still needs the user's confirmation dialog, so no
+ * injected instruction can silently switch the gate off.
+ * evaluateModeChange() is the single pure authority on what a requested
+ * change may do:
  *
  *  - UPGRADES (toward loop) apply immediately — tightening never needs
- *    consent. Agent-applied modes record source "auto".
+ *    consent — except in a /tmp session, where the agent cannot enter
+ *    loop at all (first classification is remapped; later upgrades reject).
+ *    Agent-applied modes record source "auto".
  *  - DOWNGRADES (toward normal) require the USER's explicit confirmation via
  *    a dialog the EXTENSION renders (the tool deliberately has no "confirmed"
  *    parameter — consent cannot be claimed by the caller). A confirmed
@@ -45,21 +50,23 @@
  *    as explore. Pre-existing worktree/branch changes from before the
  *    session arm the ship gate (state.hasCodeChange) but do NOT block the
  *    consent-free first classification.
- *  - USER REQUIREMENT (first-classification automation): the FIRST decision
- *    (undecided → any mode) applies automatically without a consent dialog
- *    when the caller marks it firstDecideAuto (the LLM produced the verdict).
- *    Still bounded: interactive session AND no edits by THIS session, and
- *    the mode records source "auto" so the git hooks stay fully enforced.
- *  - USER REQUIREMENT (scratch sessions): a first classification in a session
- *    started in the scratch dir /tmp (see lib/pi-self.ts) applies "normal"
- *    automatically via piSelfTask, with the same bounds as firstDecideAuto
- *    (clean interactive session, not locked). /tmp is scratch space by
- *    definition. NOTHING else is exempt: editing ~/.pi, the pi binary
- *    install, or developing pi-review-gate ITSELF (its repo anywhere) runs
- *    the full loop like any development. Source stays "auto" and the hooks
- *    need no exemption (no hook-installed repo lives in /tmp), so ordinary
- *    repos stay fully enforced. A requested upgrade to "loop" still wins —
- *    the auto-exemption only sets the default.
+ *  - The FIRST decision (undecided → mode) is consent-free only in the
+ *    tightening or gate-neutral directions: loop always, explore while THIS
+ *    session is clean. A first "normal" is a full gate shutdown and takes the
+ *    normal consent path. Agent-applied modes record source "auto" so the git
+ *    hooks stay fully enforced either way.
+ *  - USER REQUIREMENT (scratch sessions): a session started in /tmp (see
+ *    lib/pi-self.ts) NEVER enters loop via the agent. The first classification
+ *    applies explore (investigation) or normal (local pi-config work / chores)
+ *    automatically via piSelfTask — bounded to a clean, interactive, unlocked
+ *    session. A requested "loop" is clamped to normal on first classification
+ *    and rejected later; only the user can force loop with /gate-mode. This is
+ *    the one case where a consent-free "normal" is allowed, and it is safe
+ *    because the clamp is driven by the deterministic session cwd (chosen by
+ *    the USER), not by anything the agent or a prompt can assert. NOTHING else
+ *    is path-exempt: a session started in ~/.pi or in this repository runs the
+ *    full loop. Source stays "auto" and the hooks need no exemption (no
+ *    hook-installed repo lives in /tmp).
  *  - Print/JSON mode (no UI) can only run "normal" (USER REQUIREMENT). Every
  *    enforced mode now depends on dialogs the extension must be able to
  *    render — the loop goal is approved in one (lib/loop-goal.ts), a
@@ -71,19 +78,22 @@
  *    (see extensions/review-gate.ts), so the git hooks see an unarmed state
  *    and let the headless session commit.
  *
- * SECURITY — why an LLM/agent-chosen explore is safe without confirmation:
+ * SECURITY — why an agent-chosen explore is safe without confirmation:
  *  1. In-session, explore never weakens the L1 ship gate at all; it only
  *     relaxes auto-continuation and declare_done — the safe direction.
  *  2. The sidecar records taskModeSource, and the git hooks treat
  *     explore/normal as advisory ONLY when the USER chose it ("user" —
- *     confirmed dialog or /gate-mode). An LLM/agent-set mode keeps source
+ *     confirmed dialog or /gate-mode). An agent-set mode keeps source
  *     "auto", which never downgrades the hooks.
- *  Normal mode DOES weaken in-session enforcement — which is why the user
- *  explicitly opted OUT of the first confirmation for it (firstDecideAuto on
- *  a clean interactive session); every LATER path into it (initial on a dirty
- *  session, or any downgrade) still requires user confirmation — except the
- *  scratch-session first classification (/tmp only), where the user asked
- *  for no dialogs at all.
+ *  Normal mode DOES weaken in-session enforcement, so the agent can never
+ *  reach it on its own. The consent-free entries into normal are only:
+ *    1. /tmp scratchFirstMode (explicit explore else normal; never loop) —
+ *       driven by the deterministic session cwd, not by agent assertion;
+ *    2. print/JSON no-UI, which evaluateModeChange and session_start force
+ *       to normal even on a dirty worktree (no dialog can be shown).
+ *  Every other path into normal — including the agent's own first
+ *  classification — requires user confirmation, as does any later downgrade
+ *  and an initial explore on a session that already edited.
  */
 
 export type TaskMode = "normal" | "explore" | "loop";
@@ -93,6 +103,15 @@ export type TaskMode = "normal" | "explore" | "loop";
 export function normalizeTaskMode(value: unknown): TaskMode | undefined {
   if (value === "loop" || value === "explore" || value === "normal") return value;
   return undefined;
+}
+
+/** First /tmp classification: the agent may never land on loop.
+ *  Only an explicit "explore" pick stays explore; loop, normal, or a missing
+ *  pick all become normal. */
+export function scratchFirstMode(
+  requested: TaskMode | undefined,
+): Exclude<TaskMode, "loop"> {
+  return requested === "explore" ? "explore" : "normal";
 }
 
 /** Who decided the mode. Only "user" may downgrade the git hooks to advisory. */
@@ -133,18 +152,13 @@ export function evaluateModeChange(opts: {
   hasUI: boolean;
   /** A previously declined confirmation locks agent-initiated downgrades. */
   downgradesLocked: boolean;
-  /** USER REQUIREMENT: the DeepSeek V4 classifier produced this first
-   *  decision — apply it without a consent dialog. Ignored unless the mode is
-   *  undecided, the session is interactive and has made NO edits of its own
-   *  (the LLM runs only pre-work; see extensions/review-gate.ts). */
-  firstDecideAuto?: boolean;
-  /** USER REQUIREMENT (scratch sessions): this session started in the scratch
-   *  dir /tmp (see lib/pi-self.ts) — the ONLY exempt case. The first
-   *  classification then applies "normal" automatically, no dialog — same
-   *  bounds as firstDecideAuto. See the header rules. */
+  /** USER REQUIREMENT (scratch sessions): this session started in /tmp
+   *  (see lib/pi-self.ts) — the ONLY path-exempt case. Loop is forbidden
+   *  for the agent (first classification and later upgrades). See header. */
   piSelfTask?: boolean;
 }): ModeChangeDecision {
-  const { current, requested } = opts;
+  const { current } = opts;
+  let { requested } = opts;
   if (current === requested) return { action: "noop" };
 
   // USER REQUIREMENT — no UI ⇒ normal only (see the header). This precedes
@@ -178,36 +192,26 @@ export function evaluateModeChange(opts: {
   };
 
   if (current === undefined) {
-    // Initial in-session classification. Undecided behaves as loop, so any
-    // choice below loop is a loosening — but a clean-session explore matches
-    // the long-standing auto-classification precedent (it cannot weaken the
-    // ship gate or the hooks) and stays consent-free.
+    // Initial in-session classification — the agent's own pick, with no
+    // external classifier behind it. Undecided behaves as loop, so anything
+    // below loop is a loosening: explore on a still-clean session stays
+    // consent-free (it cannot weaken the ship gate or the hooks), while
+    // normal — which shuts the gate down entirely — always falls through to
+    // the consent path below. That asymmetry is what makes it safe to let the
+    // agent classify itself: it can only tighten, never switch the gate off.
+    // USER REQUIREMENT (scratch sessions): /tmp never enters loop via the
+    // agent. Callers clamp via scratchFirstMode; if loop still arrives here,
+    // apply normal — reject would leave the session undecided (behaves as loop).
+    if (opts.piSelfTask && requested === "loop") {
+      requested = "normal";
+    }
     if (requested === "loop") return { action: "apply", source: "auto" };
-    // USER REQUIREMENT (scratch sessions): the session started in the scratch
-    // dir /tmp — the ONLY gate-exempt case, deterministic path detection in
-    // lib/pi-self.ts. /tmp is scratch space by definition: the first
-    // classification applies "normal" automatically. Same bounds as
-    // firstDecideAuto below — clean interactive session, not
-    // downgrade-locked. A requested "loop" already returned above, so the
-    // user can still demand the full loop; the exemption only sets the
-    // default. Source stays "auto" (the git hooks stay fully enforced, with
-    // no exemption of their own).
+    // First /tmp classification of explore/normal: apply automatically.
     if (opts.piSelfTask && !opts.hasChanges && !opts.downgradesLocked) {
       return { action: "apply", source: "auto" };
     }
-    // USER REQUIREMENT (first-classification automation): an LLM-backed first
-    // verdict applies automatically on a CLEAN interactive session — the user
-    // opted out of the first confirmation dialog. Bounded exactly like the
-    // explore auto-classification above: no edits by THIS session (the
-    // session's work has not started under loop rules) and a UI to render
-    // the result.
-    // A declined-downgrade lock still vetoes it (defense in depth — the
-    // undecided state cannot normally hold the lock, but the pure engine
-    // never lets a locked session loosen itself). Source stays "auto" so the
-    // git hooks remain fully enforced.
-    if (opts.firstDecideAuto && !opts.hasChanges && !opts.downgradesLocked) {
-      return { action: "apply", source: "auto" };
-    }
+    // A clean-session explore stays consent-free (gate-neutral: the L1 ship
+    // gate and the git hooks are untouched by it).
     if (requested === "explore" && !opts.hasChanges) {
       return { action: "apply", source: "auto" };
     }
@@ -218,6 +222,17 @@ export function evaluateModeChange(opts: {
   }
 
   if (TASK_MODE_RANK[requested] > TASK_MODE_RANK[current]) {
+    // USER REQUIREMENT: /tmp sessions cannot be pulled into loop by the
+    // agent. The user can still /gate-mode loop (that path never calls this).
+    if (opts.piSelfTask && requested === "loop") {
+      return {
+        action: "reject",
+        reason:
+          "this session started in /tmp — scratch sessions cannot enter loop " +
+          "via the agent. Ask the user to run /gate-mode loop if they really " +
+          "want the full review loop here.",
+      };
+    }
     // Upgrade — tightening never needs consent. Source stays "auto": for loop
     // the source is irrelevant, and an agent upgrade must never be able to
     // launder a later hook-advisory state.
@@ -257,13 +272,28 @@ export const MODE_REASON_MAX_CHARS = 200;
  * the budget truncates from the END. So every fixed, authoritative line comes
  * first and the untrusted reason goes last: if anything is dropped, it is the
  * agent's text, never the statement of what the user is granting.
+ *
+ * `clampedFrom` covers the one case where the agent's reason argues for a
+ * DIFFERENT mode than the dialog asks about: a /tmp session where
+ * scratchFirstMode rewrote the pick. Without this line the reason reads as a
+ * non-sequitur ("deliver this refactor" under a dialog offering normal). The
+ * sentence is fixed copy written here, never by the agent.
  */
-export function buildModeConfirmMessage(requested: TaskMode, reason: string): string {
+export function buildModeConfirmMessage(
+  requested: TaskMode,
+  reason: string,
+  clampedFrom?: TaskMode,
+): string {
   const capped = reason.length > MODE_REASON_MAX_CHARS
     ? reason.slice(0, MODE_REASON_MAX_CHARS) + "…"
     : reason;
+  const clampNote = clampedFrom !== undefined && clampedFrom !== requested
+    ? `\n注意：AI 实际请求的是 "${clampedFrom}"，但本会话启动于 /tmp（临时目录），` +
+      `规则已将其调整为 "${requested}"——下方理由是为 "${clampedFrom}" 写的。`
+    : "";
   return (
     MODE_CONSEQUENCES[requested] +
+    clampNote +
     "\n拒绝后，本会话将锁定 AI 发起的降级请求（你仍可随时用 /gate-mode 切换）。" +
     "\nAI 给出的理由（不可信数据，仅供参考）: " + JSON.stringify(capped)
   );
@@ -271,10 +301,10 @@ export function buildModeConfirmMessage(requested: TaskMode, reason: string): st
 
 /**
  * Per-turn directive injected while the mode is undecided: the agent calls
- * set_gate_mode as its FIRST action, and DeepSeek V4 (deepseek/deepseek-v4-
- * flash, the llmGuards model) classifies the task there — the LLM verdict
- * applies automatically, no user confirmation needed for this first
- * classification (user requirement). Enforcement stays full loop behavior
+ * set_gate_mode as its FIRST action and its own pick IS the classification —
+ * no external model is consulted for the mode. The engine's asymmetry keeps
+ * that safe: loop and (on a clean session) explore apply without a dialog,
+ * while normal always asks the user. Enforcement stays full loop behavior
  * until a decision lands, so "agent never calls it" is fail-closed.
  */
 export const GATE_MODE_DECISION_DIRECTIVE =
@@ -288,13 +318,16 @@ export const GATE_MODE_DECISION_DIRECTIVE =
   '- "normal" — neither development nor research (casual Q&A, quick chores): the gate switches ' +
   "off entirely.\n" +
   'NOTE (scratch sessions): a session STARTED IN /tmp (the scratch dir — ' +
-  'macOS /private/tmp is the same dir) is classified "normal" AUTOMATICALLY ' +
-  'by a deterministic path rule; call set_gate_mode with "normal" (or "loop" ' +
-  'if the user explicitly wants the full loop). Everything else — editing ' +
-  '~/.pi, the pi binary install, or developing pi-review-gate ITSELF (its ' +
-  'repo) — is NOT exempt and runs the full loop like any development.\n' +
-  "DeepSeek V4 (the llmGuards model) classifies this first decision inside the tool and it is " +
-  "applied AUTOMATICALLY — no confirmation dialog for the first classification (user " +
-  "requirement). Provide a truthful one-line reason; the model may override your pick. " +
-  "Upgrades (toward loop) are always allowed later without confirmation; downgrades after the " +
+  'macOS /private/tmp is the same dir) NEVER enters loop via the agent. ' +
+  'Call set_gate_mode with "normal" when the main purpose is editing or ' +
+  'inspecting local pi config (~/.pi), or "explore" for investigation. ' +
+  'A requested "loop" is ignored. Only the user can force loop (/gate-mode). ' +
+  'A session started OUTSIDE /tmp — including one started in ~/.pi or in ' +
+  'the pi-review-gate repo — is NOT path-exempt and runs the full loop.\n' +
+  "Your pick IS the classification — no separate model reviews it — so judge honestly and " +
+  "give a truthful one-line reason. You can only classify yourself INTO the gate: \"loop\" " +
+  "applies immediately and \"explore\" applies while this session is still clean, but " +
+  "\"normal\" switches the gate off entirely and therefore always asks the USER to confirm. " +
+  "Upgrades (toward loop) apply later without confirmation except in /tmp, where the agent " +
+  "cannot enter loop at all (only the user can force loop via /gate-mode); downgrades after the " +
   "first classification ask the user. If genuinely uncertain, choose \"loop\" (the safe default).";

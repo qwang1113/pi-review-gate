@@ -11,7 +11,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tempDirs: string[] = [];
 function makeDir(): string {
   // ROOT (the gate's own checkout) instead of os.tmpdir(): tmpdir() is /tmp
-  // on Linux CI, and /tmp paths ARE gate-exempt under the scratch rule — a
+  // on Linux CI, and /tmp paths ARE path-exempt under the scratch rule — a
   // "NOT pi-self" fixture must live outside it.
   const dir = mkdtempSync(join(ROOT, ".rg-pi-self-tmp-"));
   tempDirs.push(dir);
@@ -22,8 +22,8 @@ after(() => {
 });
 
 test("~/.pi and everything under it is NOT pi-self (no config-dir exemption)", () => {
-  // USER REQUIREMENT: ONLY /tmp sessions are exempt. Editing ~/.pi (settings,
-  // MCP, installed extensions) is ordinary work and runs the full loop.
+  // USER REQUIREMENT: ONLY /tmp sessions are path-exempt. A session STARTED
+  // IN ~/.pi is ordinary work and runs the full loop.
   assert.equal(isPiSelfPath(resolve(homedir(), ".pi")), false);
   assert.equal(isPiSelfPath(resolve(homedir(), ".pi", "agent", "settings.json")), false);
   assert.equal(isPiSelfPath(resolve(homedir(), ".pi", "agent", "extensions", "pi-review-gate", "review-gate.ts")), false,
@@ -33,8 +33,8 @@ test("~/.pi and everything under it is NOT pi-self (no config-dir exemption)", (
 });
 
 test("/tmp and macOS /private/tmp are pi-self (ad-hoc scratch sessions)", () => {
-  // USER REQUIREMENT: sessions started in the scratch dir need no gate —
-  // the 019ff576-style pi-config/troubleshooting sessions run from a temp cwd.
+  // USER REQUIREMENT: sessions started in /tmp never enter loop via the
+  // agent (pi-config / troubleshooting scratch cwd).
   assert.equal(isPiSelfPath("/tmp"), true);
   assert.equal(isPiSelfPath("/private/tmp"), true);
   assert.equal(isPiSelfPath("/tmp/scratch-dir"), true);
