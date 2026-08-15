@@ -174,50 +174,6 @@ test("install-global ships check-staged-divergence.cjs where the hook resolves i
   );
 });
 
-
-// The project installer must also ship the divergence checker under its exact
-// name, for the same reason as the global one (the hook resolves it by path).
-test("install-project ships check-staged-divergence.cjs under its exact name", () => {
-  const repo = mkdtempSync(join(tmpdir(), "rg-proj-"));
-  tempDirs.push(repo);
-  execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
-  const res = spawnSync("bash", [join(ROOT, "scripts", "install-project.sh")], {
-    cwd: repo, encoding: "utf8", env: { ...process.env, HOME: makeHome() },
-  });
-  assert.equal(res.status, 0, `project installer failed: ${res.stderr}`);
-  assert.ok(
-    existsSync(join(repo, ".pi", "scripts", "check-staged-divergence.cjs")),
-    "check-staged-divergence.cjs missing from the project install",
-  );
-});
-
-// Existence checks are not enough: the checker `require`s its fingerprint
-// dependency from the SAME directory, so an installer that ships only the
-// checker produces a layout where every commit fails closed with "Cannot find
-// module" (reproduced by independent review of the project installer). RUN the
-// installed copy instead of merely looking for it.
-test("install-project produces a WORKING checker (dependency included)", () => {
-  const repo = mkdtempSync(join(tmpdir(), "rg-proj-run-"));
-  tempDirs.push(repo);
-  execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
-  const install = spawnSync("bash", [join(ROOT, "scripts", "install-project.sh")], {
-    cwd: repo, encoding: "utf8", env: { ...process.env, HOME: makeHome() },
-  });
-  assert.equal(install.status, 0, `project installer failed: ${install.stderr}`);
-
-  const installed = join(repo, ".pi", "scripts", "check-staged-divergence.cjs");
-  assert.ok(existsSync(installed), "checker missing from the project install");
-  assert.ok(existsSync(join(repo, ".pi", "scripts", "compute-fingerprint.cjs")),
-    "the checker's fingerprint dependency must be installed alongside it");
-
-  const run = spawnSync("node", [installed, repo], { encoding: "utf8" });
-  assert.ok(!/Cannot find module/.test(run.stderr),
-    `the installed checker could not load its dependency: ${run.stderr}`);
-  assert.ok(!/cannot load the fingerprint implementation/.test(run.stderr),
-    `the installed checker failed closed on a clean repo: ${run.stderr}`);
-  assert.equal(run.status, 0, `a clean repo must not be blocked: ${run.stderr}`);
-});
-
 test("install-global also produces a WORKING checker", () => {
   const home = makeHome();
   const res = spawnSync("bash", [join(ROOT, "scripts", "install-global.sh")], {
@@ -234,4 +190,17 @@ test("install-global also produces a WORKING checker", () => {
   assert.ok(!/Cannot find module/.test(run.stderr),
     `the installed checker could not load its dependency: ${run.stderr}`);
   assert.equal(run.status, 0, `a clean repo must not be blocked: ${run.stderr}`);
+});
+
+// The /decompose orchestration roles must ship with the global installer:
+// without planner/worker/module-reviewer, the commands' cold-planner and
+// shard-reviewer spawns fail in every repository that is not this one.
+test("install-global ships the /decompose orchestration subagents", () => {
+  const home = makeHome();
+  const res = installGlobal(home);
+  assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
+  const agentsDir = join(home, ".pi", "agent", "agents");
+  for (const role of ["adviser", "reviewer", "arbiter", "planner", "worker", "module-reviewer"]) {
+    assert.ok(existsSync(join(agentsDir, `${role}.md`)), `${role}.md must be installed`);
+  }
 });

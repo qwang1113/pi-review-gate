@@ -657,18 +657,6 @@ So after upgrading, expect **one** extra review round. If a commit keeps being
 rejected with `fingerprint algorithm mismatch`, the resident extension is still
 on the old algorithm — restart Pi first.
 
-### Per-project
-
-Use the installer (it lays out `.pi/` the same way as the global install, so the
-extension's relative imports and the trusted precommit runner both resolve — a
-plain `cp` of `extensions,lib,skills` does NOT install the runner and breaks
-`run_precommit`):
-
-```bash
-# from the target repo root
-bash ~/workspace/pi-review-gate/scripts/install-project.sh
-```
-
 ### Git hooks (defense-in-depth)
 
 Per repo, idempotent, chains existing hooks, supports worktrees:
@@ -1540,7 +1528,6 @@ lib/verdict-parse.ts          all-fence worst-wins verdict parser
 scripts/precommit-runner.mjs  PASS/FAIL/NO_CHECKS_RUN runner; fast/full lanes, per-step cache, nonce receipt, streamed step output
 scripts/precommit-plan.mjs    pure lane planning: related-test derivation + per-step cache scope
 scripts/precommit-cache.mjs   per-step result cache keyed on git trees
-scripts/install-project.sh    per-project installer (same layout as global)
 scripts/install-git-hooks.sh  chained installer for L3
 hooks/pre-commit|pre-push|commit-msg
 skills/review-loop/SKILL.md   the loop protocol as a Pi skill

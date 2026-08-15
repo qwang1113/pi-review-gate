@@ -48,14 +48,15 @@ mkdir -p "${AGENT_DIR}/skills/pi-review-gate"
 cp "${SRC}/skills/review-loop/SKILL.md" "${AGENT_DIR}/skills/pi-review-gate/SKILL.md" 2>/dev/null || true
 echo "✓ Review-loop skill installed"
 
-# 2b. Install the adviser + reviewer subagents — ALWAYS overwrite with the
-# shipped version (same policy as the extension/skill/scripts above: the repo
-# is the single source of truth). Customize by editing the repo's agents/*.md
-# and re-running this installer, not the installed copies.
+# 2b. Install the subagents — adviser/reviewer/arbiter (gate roles) plus
+# planner/worker/module-reviewer (the /decompose orchestration roles), ALWAYS
+# overwritten with the shipped version (same policy as the extension/skill/
+# scripts above: the repo is the single source of truth). Customize by editing
+# the repo's agents/*.md and re-running this installer, not the installed copies.
 mkdir -p "${AGENT_DIR}/agents"
 # Clean up state from the removed three-way-merge updater (older installs).
 rm -rf "${AGENT_DIR}/agents/.pi-review-gate-shipped" 2>/dev/null || true
-for a in adviser reviewer arbiter; do
+for a in adviser reviewer arbiter planner worker module-reviewer; do
   SRC_AGENT="${SRC}/agents/${a}.md"
   [ -f "${SRC_AGENT}" ] || continue
   cp "${SRC_AGENT}" "${AGENT_DIR}/agents/${a}.md"
