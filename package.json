@@ -40,5 +40,9 @@
     "@types/node": "^26.2.0",
     "typebox": "^1.3.11",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@quintinshaw/pi-dynamic-workflows": "^3.5.1"
   }
 }

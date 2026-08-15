@@ -214,6 +214,20 @@ import {
 } from "./lib/blocked-marker.ts";
 import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "./lib/workflow-commands.ts";
 import {
+  planReviewShards,
+  runParallelShardReview,
+  formatShardReviewRecord,
+} from "./lib/parallel-review.ts";
+import { parsePlanState } from "./lib/plan-state.ts";
+import {
+  computeWave,
+  runWaveWorkflow,
+  writeWavePatches,
+  validatePatchOwnership,
+  checkPatchApplies,
+  planDirFor,
+} from "./lib/plan-parallel.ts";
+import {
   parseArbitrableAction,
   tokenAuthorizes,
   buildArbiterPrompt,
@@ -2174,6 +2188,221 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
+  // ---------- parallel loop tools (pdw engine — the only execution path) ----------
+
+  /** Collect changed files: tracked edits vs HEAD plus untracked, repo-relative. */
+  async function listChangedFiles(
+    cwd: string,
+  ): Promise<{ ok: true; files: string[] } | { ok: false; error: string }> {
+    const { execFile } = await import("node:child_process");
+    const run = (args: string[]): Promise<{ ok: true; lines: string[] } | { ok: false; error: string }> =>
+      new Promise((resolve) => {
+        execFile("git", args, { cwd }, (err, stdout) => {
+          if (err) {
+            resolve({ ok: false, error: String(err.message ?? err).split("\n")[0] });
+          } else {
+            resolve({ ok: true, lines: stdout.split("\n").filter((l) => l.trim().length > 0) });
+          }
+        });
+      });
+    const tracked = await run(["diff", "--name-only", "HEAD"]);
+    if (!tracked.ok) return { ok: false, error: `git diff failed: ${tracked.error}` };
+    const untracked = await run(["ls-files", "--others", "--exclude-standard"]);
+    if (!untracked.ok) return { ok: false, error: `git ls-files failed: ${untracked.error}` };
+    return { ok: true, files: [...new Set([...tracked.lines, ...untracked.lines])] };
+  }
+
+  pi.registerTool({
+    name: "run_parallel_shard_review",
+    label: "Run Parallel Shard Review",
+    description:
+      "Run the parallel shard review via the pdw workflow engine: multiple L3 reviewers audit DISJOINT " +
+      "shards of the change concurrently, each returning a verdict fence WITHOUT docSync. Returns the " +
+      "combined shard record: record it in ONE record_review call (worst verdict wins), then run ONE " +
+      "integration reviewer over the whole change recorded ALONE (it carries the docSync attestation). " +
+      "The pdw engine is a HARD dependency: when it is unavailable the tool reports an installation " +
+      "error — there is no serial fallback.",
+    parameters: Type.Object({
+      repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
+      goal: Type.Optional(Type.String({ description: "Loop goal text handed to every shard reviewer" })),
+      max_shards: Type.Optional(Type.Integer({ description: "Shard count cap (default 4)" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const cwd = params.repo ?? ctx.cwd ?? process.cwd();
+      try {
+        const filesResult = await listChangedFiles(cwd);
+        if (!filesResult.ok) {
+          return {
+            content: [{ type: "text", text: `parallel shard review failed: ${filesResult.error}.` }],
+            details: { available: false, reason: "not-a-git-repo", error: filesResult.error },
+          };
+        }
+        const files = filesResult.files;
+        if (files.length === 0) {
+          return {
+            content: [{ type: "text", text: "parallel shard review: no changed files." }],
+            details: { available: true, shards: [], reason: "no-changes" },
+          };
+        }
+        const plan = planReviewShards(files, { maxShards: params.max_shards ?? 4 });
+        const outcome = await runParallelShardReview({
+          cwd,
+          shards: plan.shards,
+          goalText: params.goal ?? undefined,
+          modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
+        });
+        if (!outcome.ok) {
+          return {
+            content: [{ type: "text", text: `parallel shard review failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` }],
+            details: { available: false, reason: outcome.reason, error: outcome.error ?? null },
+          };
+        }
+        const record = formatShardReviewRecord(outcome.shards);
+        return {
+          content: [{ type: "text", text: record }],
+          details: {
+            available: true,
+            shardCount: outcome.shards.length,
+            failedShards: outcome.failedShards ?? [],
+            durationMs: outcome.durationMs,
+            agentCount: outcome.agentCount,
+          },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-run scripts/install-global.sh (it installs @quintinshaw/pi-dynamic-workflows into the extension directory).` }],
+          details: { available: false, reason: "tool-failed", error: (err as Error).message },
+        };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "run_wave_workflow",
+    label: "Run Wave Workflow",
+    description:
+      "Run one wave of patch-first parallel module workers via the pdw engine: every module in the wave gets " +
+      "a READ-ONLY worker (edit/write tools excluded) that returns unified git diffs for its owned paths. " +
+      "The tool validates ownership, persists the patches under .pi/plan/patches/<module>/ and checks they " +
+      "apply; YOU apply them with git apply and record each module's status. " +
+      "The pdw engine is a HARD dependency: when it is unavailable the tool reports an installation error — there is no serial fallback.",
+    parameters: Type.Object({
+      repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
+      modules: Type.String({
+        description:
+          "JSON array of wave modules: [{id, title, ownedPaths: string[], worklogPath, model}] " +
+          "— the next wave is every pending module whose depends_on are implemented/accepted (≤4).",
+      }),
+      goal: Type.Optional(Type.String({ description: "Loop goal text handed to every worker" })),
+      state_file: Type.Optional(Type.String({
+        description:
+          "Absolute path of .pi/plan/state.json. When given, the tool RE-COMPUTES the wave from the " +
+          "plan (computeWave) and refuses to run a modules list that is not exactly that wave " +
+          "(fail-closed; the driver must not invent the wave).",
+      })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const cwd = params.repo ?? ctx.cwd ?? process.cwd();
+      try {
+        let modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model: string }>;
+        try {
+          const parsed = JSON.parse(params.modules);
+          if (!Array.isArray(parsed)) throw new Error("modules must be a JSON array");
+          modules = parsed as typeof modules;
+        } catch (err) {
+          return {
+            content: [{ type: "text", text: `run_wave_workflow: bad modules JSON — ${(err as Error).message}` }],
+            details: { available: false, reason: "bad-modules" },
+          };
+        }
+        // Fail-closed wave reconciliation: when a plan state file is supplied,
+        // the wave MUST equal computeWave(state) — the driver cannot invent one.
+        // Check BEFORE dispatching so an invented wave never burns a run.
+        if (params.state_file) {
+          try {
+            const parsed = parsePlanState(readFileSync(params.state_file, "utf8"));
+            if (!parsed.ok) {
+              return {
+                content: [{ type: "text", text: `wave workflow: plan state invalid — ${parsed.error}.` }],
+                details: { available: false, reason: "invalid-plan-state", error: parsed.error },
+              };
+            }
+            const expected = computeWave(parsed.state.modules);
+            const actual = modules.map((m) => m.id).sort();
+            const want = [...expected.wave].sort();
+            if (actual.length !== want.length || actual.some((id, i) => id !== want[i])) {
+              return {
+                content: [{
+                  type: "text",
+                  text: `wave workflow: module list ${JSON.stringify(actual)} does not match the computed wave ${JSON.stringify(want)}. Re-run with the computed wave.`,
+                }],
+                details: { available: false, reason: "wave-mismatch", expectedWave: want },
+              };
+            }
+          } catch (err) {
+            return {
+              content: [{ type: "text", text: `wave workflow: state_file check failed — ${(err as Error).message}.` }],
+              details: { available: false, reason: "tool-failed", error: (err as Error).message },
+            };
+          }
+        }
+        const outcome = await runWaveWorkflow({
+          cwd,
+          modules: modules.map((m) => ({ ...m, goalText: params.goal ?? undefined })),
+          modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
+        });
+        if (!outcome.ok) {
+          return {
+            content: [{ type: "text", text: `wave workflow failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` }],
+            details: { available: false, reason: outcome.reason, error: outcome.error ?? null },
+          };
+        }
+        const planDir = planDirFor(cwd);
+        const perModule = outcome.results.map((r) => {
+          const ownership = validatePatchOwnership(r.patches, modules.find((m) => m.id === r.moduleId)?.ownedPaths ?? []);
+          // Fail-closed: a patch that violates owned_paths is NOT persisted and
+          // NOT pre-checked — it must never be applied by accident.
+          const patchFiles = ownership.ok ? writeWavePatches(planDir, r.moduleId, r.patches) : [];
+          return {
+            moduleId: r.moduleId,
+            summary: r.summary,
+            selfcheck: r.selfcheck,
+            patchCount: r.patches.length,
+            patchFiles,
+            ownershipOk: ownership.ok,
+            ownershipViolations: ownership.ok ? [] : ownership.violations,
+            applies: [] as boolean[], /* git apply --check results filled below */
+          };
+        });
+        // Fill git apply --check results (parallel checks; only for ownership-OK modules).
+        const applyStatus = await Promise.all(
+          perModule.map((m) => Promise.all(m.patchFiles.map((f) => checkPatchApplies(cwd, f)))),
+        );
+        perModule.forEach((m, i) => {
+          m.applies = applyStatus[i];
+        });
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(perModule, null, 2) +
+              (outcome.failedModules?.length ? `\n\nFAILED MODULES (no result, do NOT mark implemented): ${outcome.failedModules.join(", ")}` : ""),
+          }],
+          details: {
+            available: true,
+            moduleCount: perModule.length,
+            failedModules: outcome.failedModules ?? [],
+            durationMs: outcome.durationMs,
+            agentCount: outcome.agentCount,
+          },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `wave workflow failed: ${(err as Error).message}. If the pdw engine is missing, re-run scripts/install-global.sh (it installs @quintinshaw/pi-dynamic-workflows into the extension directory).` }],
+          details: { available: false, reason: "tool-failed", error: (err as Error).message },
+        };
+      }
+    },
+  });
   // ---------- run_precommit tool (the ONLY path to a PASS) ----------
 
   pi.registerTool({

@@ -632,6 +632,19 @@ bash ~/workspace/pi-review-gate/scripts/install-global.sh
 
 Then restart Pi or run `/reload`. The extension auto-discovers from `~/.pi/agent/extensions/`.
 
+### Parallel loop engine (the only execution path)
+
+The review loop and the decompose module loop run through the
+[pi-dynamic-workflows](https://github.com/QuintinShaw/pi-dynamic-workflows)
+engine — a HARD dependency that ships with this extension (the installer
+installs it into the extension directory; see `docs/parallel-execution-plan.md`
+§8): shard reviewers fan out across L3 models, and wave workers implement
+module groups concurrently (patch-first — workers are read-only and the main
+session applies their validated patches). The engine auto-shards large diffs
+and dispatches module waves by itself; the agent asks you only when it
+proposes a decompose. If the engine is missing, the gate's parallel tools
+report a clear installation error — there is no serial fallback.
+
 ### Upgrading: fingerprint algorithm migrations
 
 **Restart Pi (or `/reload`) after upgrading — before your next commit.**

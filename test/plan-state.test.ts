@@ -337,3 +337,39 @@ test("blocked modules are re-dispatchable, and a fully implemented plan asks for
 test("a finished plan reports done rather than looping", () => {
   assert.deepEqual(nextDispatch(planOf([moduleOf({ status: "accepted" })], { status: "done" })), { kind: "done" });
 });
+
+test("parallel ledger: absent on older runs, validated when present (schema stays 1)", () => {
+  // Pre-parallel state files have no parallel field and must parse unchanged.
+  const legacy = planOf([moduleOf()]);
+  const parsedLegacy = parsePlanState(serialize(legacy));
+  assert.ok(parsedLegacy.ok);
+  assert.equal(parsedLegacy.ok && parsedLegacy.state.parallel, undefined);
+
+  // A well-formed parallel ledger round-trips.
+  const withParallel = planOf([moduleOf()], {
+    parallel: {
+      engine: "pdw",
+      waves: [
+        { modules: ["M-01"], status: "applied", patches_dir: ".pi/plan/patches/M-01", note: "clean apply" },
+      ],
+    },
+  });
+  const parsed = parsePlanState(serialize(withParallel));
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  assert.deepEqual(parsed.ok && parsed.state.parallel, withParallel.parallel);
+  assert.equal(parsed.ok && parsed.state.schema, PLAN_SCHEMA);
+
+  // Malformed ledger fails closed with the exact defect.
+  for (const bad of [
+    { engine: "turbo", waves: [] },
+    { engine: "serial", waves: [], note: "no serial engine exists in v3 — must be rejected" },
+    { engine: "pdw", waves: "nope" },
+    { engine: "pdw", waves: [{ modules: [], status: "applied", patches_dir: "p" }] },
+    { engine: "pdw", waves: [{ modules: ["M-01"], status: "halfway", patches_dir: "p" }] },
+    { engine: "pdw", waves: [{ modules: ["M-01"], status: "applied", patches_dir: "" }] },
+  ]) {
+    const raw = JSON.stringify({ ...withParallel, parallel: bad });
+    const result = parsePlanState(raw);
+    assert.equal(result.ok, false, `must reject ${JSON.stringify(bad).slice(0, 60)}`);
+  }
+});
