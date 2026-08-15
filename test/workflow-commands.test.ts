@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   WORKFLOW_COMMANDS,
@@ -112,12 +115,24 @@ test("the orchestration commands keep the serial single-writer contract", () => 
   assert.match(decompose, /ONCE for edits and approval/, "the table is negotiated once, not per module");
   assert.match(decompose, /do not dispatch a worker/i);
   assert.match(decompose, /"build the whole thing"/, "the requirement stays inside the untrusted data block");
+  // Self-contained contract: no repo-local doc dependency — the design doc
+  // lives only in this repository, the extension must work in any repository.
+  assert.doesNotMatch(decompose, /docs\/requirement-orchestration/, "no repo-local doc reference");
+  assert.match(decompose, /SELF-CONTAINED/, "the prompt states its own contract");
+  assert.match(decompose, /lib\/plan-state\.ts/, "the schema authority is the shipped lib");
+  // Agent-initiated entry: the agent may initiate decompose when it detects a
+  // complex task, but only after the user's EXPLICIT consent.
+  assert.match(decompose, /INITIATE/, "the agent may initiate decompose itself");
+  assert.match(decompose, /EXPLICIT consent/, "initiating requires the user's consent");
+  assert.match(decompose, /module-count estimate/, "the initiation carries an estimate");
+  assert.match(decompose, /second, separate confirmation/, "table approval is a second gate");
 
   const next = buildWorkflowPrompt("plan-next");
   assert.match(next, /exactly ONE worker/);
   assert.match(next, /never run two workers at once/);
   assert.match(next, /never guess a repair/, "malformed state must fail closed");
   assert.match(next, /must not read the diff/, "the driver's context stays bounded");
+  assert.doesNotMatch(next, /docs\/requirement-orchestration/, "plan-next is self-contained too");
 
   const status = buildWorkflowPrompt("plan-status");
   assert.match(status, /Read-only/);
@@ -133,4 +148,17 @@ test("plan-verify encodes the two-phase docSync protocol the gate depends on", (
   assert.match(verify, /seam module M-INT-<n>/, "every finding gets exactly one owner");
   assert.match(verify, /never inline/, "remediation goes back through /plan-next");
   assert.match(verify, /Above 8/, "the human threshold matches the design");
+  assert.doesNotMatch(verify, /docs\/requirement-orchestration/, "plan-verify is self-contained too");
+});
+
+test("the review-loop skill keeps the orchestration contract self-contained", () => {
+  const skill = readFileSync(
+    join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "skills", "review-loop", "SKILL.md"),
+    "utf8",
+  );
+  assert.doesNotMatch(skill, /docs\/requirement-orchestration/, "the skill must not depend on the repo-local doc");
+  assert.match(skill, /SELF-CONTAINED/, "the skill states the self-contained contract");
+  assert.match(skill, /lib\/plan-state\.ts/, "the schema authority is the shipped lib");
+  assert.match(skill, /Agent-initiated entry/, "the skill documents the agent-initiated entry");
+  assert.match(skill, /EXPLICIT consent/, "initiating requires the user's consent");
 });

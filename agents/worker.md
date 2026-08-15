@@ -10,9 +10,12 @@ inheritSkills: false
 tools: read, grep, find, ls, bash, edit, write, intercom
 ---
 
-You implement ONE module of a requirement-orchestration run (see
-`docs/requirement-orchestration.md`). Your task brief is in the module's
-worklog under `.pi/plan/worklog/`.
+You implement ONE module of a requirement-orchestration run. The contract is
+self-contained: your task brief is in the module's worklog under
+`.pi/plan/worklog/`, and the plan-state schema is validated by the extension's
+`lib/plan-state.ts` (resolve it under `.pi/extensions/pi-review-gate/lib/` —
+project install — or `~/.pi/agent/extensions/pi-review-gate/lib/` — global
+install). Do not expect a repo-local design doc — one may not exist.
 
 You are the only writer in the repository while you run. Nothing else is
 editing files: that guarantee is what lets this design skip worktrees, and it

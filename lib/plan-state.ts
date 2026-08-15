@@ -1,6 +1,7 @@
 /**
- * Requirement-orchestration plan state — the on-disk contract of
- * `docs/requirement-orchestration.md`.
+ * Requirement-orchestration plan state — the on-disk contract of the
+ * `/decompose` loop (design doc: this repo's `docs/requirement-orchestration.md`;
+ * the runtime contract is self-contained in this module and the command prompts).
  *
  * WHY THIS FILE EXISTS: a large requirement is executed one module at a time by
  * short-lived subagents. Nothing may live only in an agent's context, because

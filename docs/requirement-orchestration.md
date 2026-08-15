@@ -261,6 +261,17 @@ directive requiring the agent to open its next reply by proposing `/decompose`
 Judgement is the gate's; the decision is the user's, so a false positive costs
 a sentence rather than a workflow.
 
+The suggestion is **not the only entry**. The main agent may **initiate**
+`/decompose` itself whenever it detects a complex task — a requirement too big
+for one session, or scope growing complex mid-task — with the same rule as an
+invariant: **initiating is a request, not an action; the user's explicit
+consent must precede any decompose step** (no brief write, no planner spawn
+before it). The consent to initiate (§5.1) and the table approval are two
+separate confirmations asking two different questions: "is this worth
+splitting?" and "is this split the right one?". A user who says "this is
+getting too big, split it" has consented by asking; an agent whose initiation
+was declined carries on and does not re-raise it.
+
 Three rules keep it from becoming noise:
 
 - **At most one evidence-backed suggestion per session.** There is no button
@@ -283,7 +294,12 @@ Three rules keep it from becoming noise:
 ### 5.1 Decompose
 
 ```
-/decompose <requirement>
+/decompose <requirement>            (user-typed, or agent-initiated)
+   → AGENT-INITIATED ENTRY: the main agent may start decompose whenever it
+     detects a complex task (mid-task included, §5.0). It must FIRST present
+     the evidence (signals that fired + its module-count estimate) and wait
+     for the user's EXPLICIT consent — no brief write, no planner spawn
+     before consent.
    → the requirement text is stored verbatim as brief.md
    → planner (cold) reads the brief + repo, proposes the module table
    → main session shows the table ONCE for the user to edit and approve
@@ -499,7 +515,7 @@ All commands are prompt-injecting workflow commands registered in
 
 | Command | Effect |
 |---|---|
-| `/decompose [requirement or path]` | Store the requirement as `brief.md`; a cold planner proposes the module table; the main session presents it **once** for approval; writes `.pi/plan/state.json` and renders `PLAN.md`. |
+| `/decompose [requirement or path]` | Store the requirement as `brief.md`; a cold planner proposes the module table; the main session presents it **once** for approval; writes `.pi/plan/state.json` and renders `PLAN.md`. Also the agent-initiated entry: the main agent may start it when it detects a complex task (mid-task included), but only after the user's **explicit consent to the initiation** — a separate confirmation from the table approval (§5.0/§5.1). |
 | `/plan-next` | One step of §5.2: the cold planner writes the next task brief and returns one instruction, the main session dispatches one worker and records the result. |
 | `/plan-status` | Render the plan state as a progress table. Read-only, and never re-prints past review text. |
 | `/plan-verify` | One verify round per §5.3: merged precommit, Phase A sharded review, Phase B integration review. Any failure aborts the round, returns the plan to `executing`, and hands remediation back to `/plan-next`; it never dispatches a worker itself. |

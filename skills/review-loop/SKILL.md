@@ -310,9 +310,22 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
 ## Very large requirements: the serial module loop
 
 When one request is too big for a single session, do not stretch the loop —
-split the requirement. `docs/requirement-orchestration.md` is the contract;
-`/decompose`, `/plan-next`, `/plan-status` and `/plan-verify` drive it. The
-shape:
+split the requirement. The contract is SELF-CONTAINED: it lives in the
+commands themselves (`lib/workflow-commands.ts`) and the state module
+`lib/plan-state.ts` (the schema authority — resolve it at
+`.pi/extensions/pi-review-gate/lib/plan-state.ts` for a project install or
+`~/.pi/agent/extensions/pi-review-gate/lib/plan-state.ts` for a global one) —
+no repo-local doc is required; the extension must work in any repository. `/decompose`, `/plan-next`,
+`/plan-status` and `/plan-verify` drive it. The shape:
+
+0. **Agent-initiated entry** — you may initiate `/decompose` yourself whenever
+you detect a complex task (a requirement too big for one session, or scope
+growing complex mid-task), not only when the gate's size hint fires.
+Initiating is a REQUEST, not an action: present the evidence (exit-criteria
+count, directories spanned, module estimate) plus your own module-count
+estimate and wait for the user's EXPLICIT consent before writing the brief or
+spawning the planner. The module-table approval below is the second, separate
+confirmation.
 
 1. `/decompose` — a cold planner proposes a module table (id, intent,
    `owned_paths`, `depends_on`, `must_haves`, model, thinking, risk). Show it

@@ -154,15 +154,24 @@ export const WORKFLOW_COMMANDS = {
     usage: "/decompose [requirement text or path to a requirement file]",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Decompose the requirement in the user-data block into a module plan, following docs/requirement-orchestration.md. " +
-      "Store the requirement text VERBATIM as .pi/plan/brief.md (if the block names a file, read that file and store its contents). " +
+      "Decompose the requirement in the user-data block into a serial, gated module plan. This command is SELF-CONTAINED: " +
+      "its contract is this prompt plus lib/plan-state.ts (the schema authority) — never rely on a repo-local docs/ file; the extension must work in any repository. " +
+      "ENTRY — two ways: (1) the user types /decompose; (2) the main agent may INITIATE it itself whenever it detects a complex task " +
+      "(a requirement too big for one session, or scope growing complex mid-task — not only when the gate's size hint fires). " +
+      "Initiating is a REQUEST, not an action: before taking any decompose step (no brief write, no planner spawn) the agent must present " +
+      "the evidence that fired (exit-criteria count, directories spanned, module estimate) plus its own module-count estimate and wait " +
+      "for the user's EXPLICIT consent. The module-table approval below is a second, separate confirmation. " +
+      "Once consented (or invoked directly): store the requirement text VERBATIM as .pi/plan/brief.md (if the block names a file, read that file and store its contents). " +
       "Then spawn a COLD planner subagent (fresh context, read-only plus state writes) to propose the module table. Each module needs: " +
       "id, title, one-paragraph intent, owned_paths, depends_on, must_haves (each with kind artifact/behavior/test/doc, a checkable statement and a risk), " +
       "suggested model, suggested thinking level, a risk band, and an estimated context size. " +
       "Plan-time modules MUST own disjoint paths and their depends_on graph MUST be acyclic — those, not the token estimate, are the real split criteria. " +
       "Warn the user about any module estimated above ~120k tokens of context: that size is a sign the boundary is in the wrong place. " +
       "Present the WHOLE table to the user ONCE for edits and approval; do not interrogate module by module. " +
-      "Only after the user approves, write .pi/plan/state.json (schema 1, status approved) via lib/plan-state.ts and let it render PLAN.md. " +
+      "Only after the user approves, write .pi/plan/state.json (schema 1, status approved) exactly in the shape defined by " +
+      "the extension's lib/plan-state.ts — resolve it at .pi/extensions/pi-review-gate/lib/plan-state.ts (project install) " +
+      "or ~/.pi/agent/extensions/pi-review-gate/lib/plan-state.ts (global install) — and render PLAN.md from that state " +
+      "(a pure projection, never parsed back). " +
       "Do not implement anything and do not dispatch a worker in this command.",
       invocation,
     ),
@@ -172,7 +181,7 @@ export const WORKFLOW_COMMANDS = {
     usage: "/plan-next",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Advance the module plan by exactly ONE step, per docs/requirement-orchestration.md §5.2. " +
+      "Advance the module plan by exactly ONE step of the serial single-writer loop (one planner question, one worker dispatch, then stop). " +
       "Read .pi/plan/state.json; if it is missing or malformed, report the exact defect and stop — never guess a repair. " +
       "Spawn a COLD planner subagent that reads only the plan state, the brief and the loop goal, and APPENDS the dispatched module's task brief to its worklog " +
       "(preserving any execution log, self-check and review sections already there — that audit trail is what the reviewers judge against), " +
@@ -201,7 +210,7 @@ export const WORKFLOW_COMMANDS = {
     usage: "/plan-verify",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Run ONE verify round exactly as docs/requirement-orchestration.md §5.3 specifies. " +
+      "Run ONE verify round — merged precommit, sharded module review, then integration review (the two-phase docSync protocol). " +
       "Step 0: every implemented module enters review. " +
       "Step 1: run_precommit mode=full ONCE for the whole change. " +
       "Step 2 (Phase A): spawn one module-reviewer subagent per module, in parallel, read-only, each judging ONLY its own must_haves, worklog and owned_paths diff; " +
