@@ -80,10 +80,27 @@ test("buildWaveWorkerPrompt enforces read-only and patch output", () => {
   assert.match(prompt, /M-02/);
   assert.match(prompt, /lib\/auth\.ts/);
   assert.match(prompt, /edit\/write AND bash tools are disabled/);
+  assert.match(prompt, /patch-first/);
   assert.match(prompt, /unified git diff/);
   assert.match(prompt, /--- \/dev\/null/);
   assert.match(prompt, /exit criterion 2/);
   assert.match(prompt, /selfcheck/);
+  assert.match(prompt, /Wave daily protocol/);
+});
+
+test("buildWaveWorkerPrompt without goalText omits wave daily protocol", () => {
+  const prompt = buildWaveWorkerPrompt({
+    moduleId: "M-03",
+    title: "simple fix",
+    ownedPaths: ["lib/x.ts"],
+    worklogPath: ".pi/plan/worklog/M-03.md",
+  });
+  assert.match(prompt, /M-03/);
+  assert.match(prompt, /patch-first/);
+  // Wave daily protocol paragraph is only injected when goalText is present
+  // (the goal drives the task — daily waves need the goal context).
+  // Without goalText the prompt is still valid and carries the core constraints.
+  assert.doesNotMatch(prompt, /Wave daily protocol/);
 });
 
 test("parseWaveWorkerResult tolerates malformed structured output", () => {

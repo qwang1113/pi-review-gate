@@ -217,8 +217,11 @@ import {
   planReviewShards,
   runParallelShardReview,
   formatShardReviewRecord,
+  shouldShardReview,
+  SHARD_THRESHOLD_FILES,
+  SHARD_THRESHOLD_LINES,
 } from "./lib/parallel-review.ts";
-import { parsePlanState } from "./lib/plan-state.ts";
+import { parsePlanState, PLAN_DIR } from "./lib/plan-state.ts";
 import {
   computeWave,
   runWaveWorkflow,
@@ -2212,6 +2215,92 @@ export default function reviewGate(pi: ExtensionAPI) {
     return { ok: true, files: [...new Set([...tracked.lines, ...untracked.lines])] };
   }
 
+  /** Count total lines in the unified diff of the given files. */
+  async function countDiffLines(
+    cwd: string,
+    files: string[],
+  ): Promise<{ ok: true; lines: number } | { ok: false; error: string }> {
+    const { execFile } = await import("node:child_process");
+    return new Promise((resolve) => {
+      execFile("git", ["diff", "HEAD", "--", ...files], { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+        if (err) {
+          resolve({ ok: false, error: String(err.message ?? err).split("\n")[0] });
+        } else {
+          resolve({ ok: true, lines: stdout.split("\n").length - 1 }); // trailing newline
+        }
+      });
+    });
+  }
+
+  /** Compute per-shard diffs for a set of shards. */
+  async function addDiffContext(
+    cwd: string,
+    shards: Array<{ label: string; files: string[]; note: string }>,
+  ): Promise<Array<{ label: string; files: string[]; note: string; diff?: string }>> {
+    const { execFile } = await import("node:child_process");
+    const results = await Promise.all(
+      shards.map(async (shard) => {
+        if (shard.files.length === 0) return { ...shard };
+        try {
+          const diff = await new Promise<string>((resolve, reject) => {
+            execFile(
+              "git", ["diff", "HEAD", "--", ...shard.files],
+              { cwd, maxBuffer: 4 * 1024 * 1024 },
+              (err, stdout) => {
+                if (err) reject(err);
+                else resolve(stdout);
+              },
+            );
+          });
+          // Cap at 8KB to keep the prompt manageable (the reviewer reads the
+          // actual files anyway; the diff is orientation only).
+          const capped = diff.length > 8192
+            ? diff.slice(0, 8192) + "\n... (diff truncated at 8KB — review the worktree files)"
+            : diff;
+          return { ...shard, diff: capped };
+        } catch {
+          return { ...shard }; // diff unavailable — reviewer reads worktree files
+        }
+      }),
+    );
+    return results;
+  }
+
+  /**
+   * Build a single-shard review prompt (no pdw) for small diffs. The prompt
+   * instructs the agent to run a standard reviewer subagent and return the
+   * fenced verdict — same shape as a shard record, so the caller can feed it
+   * to record_review unchanged.
+   */
+  function buildSingleShardPrompt(
+    files: string[],
+    fileCount: number,
+    lineCount: number,
+    goalText?: string,
+  ): string {
+    const lines = [
+      "## Single-shard review (tiered trigger: small diff)",
+      "",
+      `The diff is ${fileCount} file(s), ~${lineCount} line(s) — below the parallel-shard threshold `,
+      `(${SHARD_THRESHOLD_FILES} files / ${SHARD_THRESHOLD_LINES} lines).`,
+      "Run a standard reviewer subagent over the full change:",
+      "",
+      "### Changed files",
+      ...files.map((f) => `- ${f}`),
+      "",
+      "Run the reviewer subagent with the same instructions as a shard reviewer:",
+      "- Read every changed file in the worktree.",
+      "- Verify from the code (never guess).",
+      "- Report findings with file paths and line numbers.",
+      "- Return a fenced JSON verdict WITHOUT docSync (the integration review attests it).",
+      "- Do NOT edit any file. Do NOT run tests that write files.",
+    ];
+    if (goalText && goalText.trim()) {
+      lines.push("", "### Loop goal", goalText.trim());
+    }
+    return lines.join("\n");
+  }
+
   pi.registerTool({
     name: "run_parallel_shard_review",
     label: "Run Parallel Shard Review",
@@ -2220,12 +2309,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       "shards of the change concurrently, each returning a verdict fence WITHOUT docSync. Returns the " +
       "combined shard record: record it in ONE record_review call (worst verdict wins), then run ONE " +
       "integration reviewer over the whole change recorded ALONE (it carries the docSync attestation). " +
+      "SMALL DIFFS (<20 files AND <500 lines) skip the pdw engine entirely — the tool returns a single-shard " +
+      "prompt the agent runs with a standard reviewer subagent. " +
       "The pdw engine is a HARD dependency: when it is unavailable the tool reports an installation " +
       "error — there is no serial fallback.",
     parameters: Type.Object({
       repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
       goal: Type.Optional(Type.String({ description: "Loop goal text handed to every shard reviewer" })),
       max_shards: Type.Optional(Type.Integer({ description: "Shard count cap (default 4)" })),
+      model: Type.Optional(Type.String({ description: "Reviewer model spec override (default: pinned judge with fallback resolution)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const cwd = params.repo ?? ctx.cwd ?? process.cwd();
@@ -2244,11 +2336,42 @@ export default function reviewGate(pi: ExtensionAPI) {
             details: { available: true, shards: [], reason: "no-changes" },
           };
         }
+
+        // Tiered trigger: count lines and decide whether to shard.
+        const lineResult = await countDiffLines(cwd, files);
+        const lineCount = lineResult.ok ? lineResult.lines : 0;
+        const shouldShard = shouldShardReview(files.length, lineCount);
+
+        if (!shouldShard) {
+          // Small diff: single-shard review without pdw.
+          const prompt = buildSingleShardPrompt(files, files.length, lineCount, params.goal ?? undefined);
+          return {
+            content: [{
+              type: "text",
+              text:
+                `## Tiered trigger: small diff (${files.length} file(s), ~${lineCount} line(s))\n` +
+                `Below the parallel-shard threshold (${SHARD_THRESHOLD_FILES} files / ${SHARD_THRESHOLD_LINES} lines).\n` +
+                `Run a SINGLE reviewer subagent (not pdw) over the full change:\n\n` +
+                prompt,
+            }],
+            details: {
+              available: true,
+              shardCount: 1,
+              tier: "single",
+              fileCount: files.length,
+              lineCount,
+            },
+          };
+        }
+
+        // Large diff: shard and add per-shard diff context.
         const plan = planReviewShards(files, { maxShards: params.max_shards ?? 4 });
+        const shardsWithDiff = await addDiffContext(cwd, plan.shards);
         const outcome = await runParallelShardReview({
           cwd,
-          shards: plan.shards,
+          shards: shardsWithDiff,
           goalText: params.goal ?? undefined,
+          model: params.model ?? undefined,
           modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
         });
         if (!outcome.ok) {
@@ -2263,6 +2386,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           details: {
             available: true,
             shardCount: outcome.shards.length,
+            tier: "parallel",
             failedShards: outcome.failedShards ?? [],
             durationMs: outcome.durationMs,
             agentCount: outcome.agentCount,
@@ -2345,6 +2469,23 @@ export default function reviewGate(pi: ExtensionAPI) {
               details: { available: false, reason: "tool-failed", error: (err as Error).message },
             };
           }
+        }
+        // Fail-closed worklog check: every wave worker is told to "read the
+        // worklog first", so a missing worklog file (a decompose driver that
+        // never wrote .pi/plan/worklog/<id>.md) makes every worker fail or
+        // hallucinate its brief. Refuse to dispatch instead of burning a run.
+        const worklogPlanDir = pathJoin(cwd, PLAN_DIR);
+        const missingWorklogs = modules
+          .filter((m) => !existsSync(pathJoin(worklogPlanDir, m.worklogPath)))
+          .map((m) => pathJoin(worklogPlanDir, m.worklogPath));
+        if (missingWorklogs.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `wave workflow: worklog file(s) missing — ${missingWorklogs.join(", ")}. Create them (module brief + must-haves) before dispatching the wave.`,
+            }],
+            details: { available: false, reason: "missing-worklogs", worklogs: missingWorklogs },
+          };
         }
         const outcome = await runWaveWorkflow({
           cwd,

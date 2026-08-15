@@ -11,16 +11,35 @@ default, make it safe by default rather than adding a switch.
 
 ### Parallel loop (the only execution path, agent-initiated)
 
-The review loop and the decompose module loop run through the
-`@quintinshaw/pi-dynamic-workflows` engine — a HARD dependency that ships
-with this extension (installed into the extension directory by
-`scripts/install-global.sh`). `/review` auto-shards large diffs
+The review loop, the decompose module loop, and **wave daily** (ad-hoc parallel
+editing) all run through the `@quintinshaw/pi-dynamic-workflows` engine — a
+HARD dependency that ships with this extension (installed into the extension
+directory by `scripts/install-global.sh`). `/review` auto-shards large diffs
 (`run_parallel_shard_review`); `/plan-next` dispatches patch-first wave
 workers (`run_wave_workflow`). The agent decides when a task is large enough
 to propose `/decompose` (evidence + estimate → user consent → module-table
 approval) — there is no serial protocol and no fallback: a missing engine is
 an installation error, never a slow lane. Design record:
 `docs/parallel-execution-plan.md` §8; runtime contract: `lib/pdw-bridge.ts`.
+
+### Wave daily — parallel editing for everyday tasks (not just decompose)
+
+Wave workers are **not decompose-exclusive**. The agent may dispatch a wave for
+ANY task that can be split into 2–4 independent sub-tasks with disjoint file
+ownership. The patch-first protocol is the same:
+
+1. **Define modules ad-hoc** — each with an id, title, `owned_paths` (disjoint),
+   and a task description. No formal plan state needed.
+2. **Dispatch the wave** — call `run_wave_workflow` with the module list.
+   Workers run in parallel (read-only, edit/write excluded), each producing
+   unified git diffs.
+3. **Validate and apply** — `validatePatchOwnership` + `git apply --check`,
+   then `git apply`. Failed patches are sent back for one retry.
+4. **The worktree still has exactly one writer: the main agent.**
+
+Read-only exploration (recon, code reading, `adviser`) is inherently
+parallel-safe: spawn multiple read-only subagents concurrently, and overlap
+exploration with editing. Only the main agent writes to the worktree.
 
 Both loops are AGENT-DRIVEN: you start the review loop yourself once edits
 are complete (auto-sharded via the engine) and you propose `/decompose`

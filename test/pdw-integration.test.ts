@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { runParallelShardReview } from "../lib/parallel-review.ts";
 import { runWaveWorkflow } from "../lib/plan-parallel.ts";
+import { resolveBestModel } from "../lib/pdw-bridge.ts";
 
 /**
  * A stub WorkflowAgentRunner mirroring the PRODUCTION shape: for a schema'd
@@ -163,4 +164,83 @@ test("runWaveWorkflow splits recoverable-null workers into failedModules", async
     "failed worker must be excluded from results",
   );
   assert.deepEqual(outcome.failedModules, ["M-02"], "failed worker must be reported separately");
+});
+
+
+// resolveBestModel resolves candidates through pdw's OWN model resolver
+// (resolveModelSpecWithThinking imported from the engine) against a registry
+// that exposes getAll() + hasConfiguredAuth(model) — the pi ModelRegistry
+// shape. An earlier implementation called a registry method and passed the
+// spec STRING to hasConfiguredAuth, so every candidate looked unavailable
+// and candidates[0] (the unauthenticated pinned default) was always picked.
+const mkRegistry = (
+  models: Array<{ provider: string; id: string }>,
+  auth: (m: { provider: string; id: string }) => boolean = () => true,
+) => ({
+  getAll: () => models,
+  hasConfiguredAuth: (m: { provider: string; id: string }) => auth(m),
+});
+
+test("resolveBestModel returns first candidate when registry is undefined", async () => {
+  assert.equal(await resolveBestModel(["claude-sonnet-5", "onekey/deepseek-v4-pro"]), "claude-sonnet-5");
+});
+
+test("resolveBestModel returns first candidate when registry is null", async () => {
+  assert.equal(await resolveBestModel(["claude-sonnet-5", "onekey/deepseek-v4-pro"], null), "claude-sonnet-5");
+});
+
+test("resolveBestModel returns empty string for empty candidates", async () => {
+  assert.equal(await resolveBestModel([]), "");
+});
+
+test("resolveBestModel returns first candidate when registry lacks getAll", async () => {
+  const registry = { someOtherMethod: () => true };
+  assert.equal(await resolveBestModel(["a", "b"], registry), "a");
+});
+
+test("resolveBestModel picks the first candidate the registry can resolve", async () => {
+  const registry = mkRegistry([
+    { provider: "onekey", id: "deepseek-v4-pro" },
+    { provider: "onekey", id: "gpt-5.6-sol" },
+  ]);
+  assert.equal(
+    await resolveBestModel(["claude-sonnet-5", "onekey/deepseek-v4-pro"], registry),
+    "onekey/deepseek-v4-pro",
+  );
+});
+
+test("resolveBestModel falls back to first candidate when none resolve", async () => {
+  const registry = mkRegistry([{ provider: "onekey", id: "deepseek-v4-pro" }]);
+  assert.equal(
+    await resolveBestModel(["claude-sonnet-5", "grok-4.6"], registry),
+    "claude-sonnet-5",
+  );
+});
+
+test("resolveBestModel skips candidates without configured auth", async () => {
+  const registry = mkRegistry(
+    [
+      { provider: "onekey", id: "deepseek-v4-pro" },
+      { provider: "onekey", id: "gpt-5.6-sol" },
+    ],
+    (m) => m.id !== "deepseek-v4-pro",
+  );
+  assert.equal(
+    await resolveBestModel(["onekey/deepseek-v4-pro", "onekey/gpt-5.6-sol"], registry),
+    "onekey/gpt-5.6-sol",
+  );
+});
+
+test("resolveBestModel returns first candidate when all fail auth", async () => {
+  const registry = mkRegistry(
+    [
+      { provider: "onekey", id: "deepseek-v4-pro" },
+      { provider: "onekey", id: "gpt-5.6-sol" },
+    ],
+    () => false,
+  );
+  assert.equal(
+    await resolveBestModel(["onekey/deepseek-v4-pro", "onekey/gpt-5.6-sol"], registry),
+    "onekey/deepseek-v4-pro",
+  );
 });

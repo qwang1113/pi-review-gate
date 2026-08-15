@@ -87,6 +87,19 @@ longer matches.
 
 **Slicing the work to subagents**: turn each criterion (or vertical slice) into
 a subagent task and hand the goal file to every subagent you spawn.
+
+### Parallel exploration — read-only subagents run concurrently
+
+Read-only subagents (recon, code reading, analysis, `adviser`) are inherently
+parallel-safe: they never write to the worktree, so they cannot invalidate a
+binding or race with each other. When you need to explore several areas of the
+codebase, spawn them in parallel — each reads its own files and returns
+findings; you merge the results. Exploration and editing may also overlap:
+while a read-only subagent surveys the code, you can concurrently edit a
+different file (the single-writer invariant still holds — only YOU write).
+
+### Serial writers — exactly one writer in the worktree
+
 Write-capable subagents run **serially in this worktree**: their edits change
 the worktree like any other, so a review recorded before them can no longer
 ship (the fingerprint moved), and concurrent writers would keep invalidating
@@ -174,6 +187,20 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    (`git diff HEAD` + untracked files). The reviewer must NOT be fed your own
    conclusions (fresh eyes only) and must end its output with a fenced JSON
    verdict:
+
+   **Tiered trigger (small diff fast, large diff parallel)**: decide BEFORE
+   spawning, by diff size — `shouldShardReview(fileCount, lineCount)`:
+
+   - **Small diff** (< 20 files AND < 500 changed lines): ONE reviewer over
+     the full change — no pdw engine, no sharding. Cheapest round.
+   - **Large diff** (≥ 20 files OR ≥ 500 changed lines): auto-shard with
+     `run_parallel_shard_review` (≤ 4 reviewers, each with its own files AND
+     per-shard diff context), then ONE integration review over the whole
+     change that carries the `docSync` attestation.
+
+   The thresholds are exported constants (`SHARD_THRESHOLD_FILES` /
+   `SHARD_THRESHOLD_LINES` in `lib/parallel-review.ts`) — never invent your
+   own split rule.
 
    **Triage first (L1, large diffs)**: for anything but a tiny diff, spawn
    the `triage` agent (async, cheap: `claude-haiku-4-5` →
@@ -270,15 +297,16 @@ Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
   one-line may be reviewed by an L1 agent whose verdict IS recorded.
   Judging "low-risk" is yours; a misjudged call is a P1 finding for the L3
   reviewer.
-- **Split review = every review (auto-sharded via the pdw engine)**: the
-  review loop runs through the workflow engine — `planReviewShards` splits
-  large diffs into ≤4 disjoint shards (a small diff is a single shard), L3
-  reviewers audit shards in parallel (shard fences WITHOUT docSync) → record
-  ALL shard outputs in ONE `record_review` → then ONE integration reviewer
-  recorded alone (it carries the docSync attestation). Worst wins. No user
-  confirmation is needed for the shard plan. There is NO serial protocol:
-  the engine is a hard dependency, and a missing engine is an installation
-  error, not a fallback.
+- **Split review = tiered by diff size**: the review loop runs through the
+  workflow engine for LARGE diffs — `planReviewShards` splits ≥20-file or
+  ≥500-line diffs into ≤4 disjoint shards, L3 reviewers audit shards in
+  parallel (shard fences WITHOUT docSync) → record ALL shard outputs in ONE
+  `record_review` → then ONE integration reviewer recorded alone (it carries
+  the docSync attestation). Small diffs (<20 files AND <500 lines) run a
+  SINGLE reviewer with no pdw engine overhead — see the Tiered trigger in
+  step 3. Worst wins. No user confirmation is needed for the shard plan.
+  There is NO serial protocol: the engine is a hard dependency, and a
+  missing engine is an installation error, not a fallback.
 
 ## Working across several repos
 
@@ -327,6 +355,104 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
   than re-reading the whole tree. Use a full review for structural changes;
   the verdict still binds to the complete worktree fingerprint either way.
   This trades review breadth for latency — do not use it to hide a change.
+
+## Wave daily — parallel editing for everyday tasks
+
+Wave workers are **not just for decompose**. The patch-first protocol described
+below works for ANY task that can be split into independent sub-tasks with
+disjoint file ownership. The engine is the same; the only difference is that
+decompose has a formal module table and plan state, while a daily wave is
+ad-hoc — you define the modules, dispatch them, and apply their patches.
+
+### When to wave vs when to serialize
+
+| Condition | Decision |
+|---|---|
+| Task fits in one session, no module split needed | **Serialize.** One writer, one pass. |
+| Task has 2–4 independent sub-tasks, each scoped to disjoint files | **Wave.** Patch-first workers in parallel. |
+| Sub-tasks share files or have ordering dependencies | **Serialize.** Wave requires disjoint owned_paths and a DAG. |
+| Task is a single large change with no natural split | **Serialize.** A wave with one module is just overhead. |
+| Task is too large for one session (>5 modules or unknown scope) | **Decompose.** Formal module table, plan state, verify rounds. |
+
+### Wave daily trigger
+
+When you detect a task that can be split into 2–4 independent sub-tasks, each
+with clearly disjoint file ownership:
+
+1. **Define the modules.** Each module needs: an id, a one-line title, its
+   `owned_paths` (disjoint from other modules), and its task description.
+   Modules with no dependencies all run in the same wave.
+2. **Dispatch the wave.** Call `run_wave_workflow` with the module list. The
+   engine runs all workers in parallel (read-only, edit/write excluded); each
+   returns unified git diffs for its owned paths.
+3. **Validate and apply.** For each worker's patches: `validatePatchOwnership`
+   (declared path ∪ diff headers ⊆ owned_paths), `git apply --check`, then
+   `git apply`. A patch that fails is sent back to its worker for one retry —
+   never silently edited.
+4. **Record.** The worktree still has exactly one writer: you. After all
+   patches apply, the worktree is ready for precommit and review.
+
+### Patch-first protocol (daily wave)
+
+> This is the SAME protocol as the decompose wave — the engine is identical.
+> The only difference is that daily waves have no formal plan state or
+> verify rounds; the main agent defines the modules ad-hoc.
+
+- **Workers are READ-ONLY.** edit/write AND bash are excluded at the engine
+  level. Each worker reads its owned paths and produces unified git diffs.
+- **≤4 modules per wave.** The engine caps concurrency at 4; a 5th module
+  waits for the next wave.
+- **Patch-first.** Workers produce diffs; the main agent validates and applies
+  them. No worker ever writes to the worktree directly.
+- **Ownership is mechanically binding.** `validatePatchOwnership` checks both
+  the declared `path` field AND the diff's own `+++ b/...` / `--- a/...`
+  headers against the module's `owned_paths`. A patch that escapes ownership
+  is rejected — the main agent must not apply it.
+- **No cross-patch rollback.** Patches are applied in sequence with per-patch
+  validation. A failed patch is sent back to its worker for one retry, never
+  silently edited by the main agent.
+- **The engine is a HARD dependency.** A missing engine throws
+  `PdwUnavailableError` (installation guidance) — there is no serial fallback.
+
+### Example: daily wave dispatch
+
+```
+Task: add pagination to list endpoints (3 files, 2 independent sub-tasks)
+
+Module A: backend pagination — owned_paths: ["src/api/list.ts", "src/db/query.ts"]
+Module B: frontend pagination — owned_paths: ["src/ui/ListPage.tsx", "src/ui/ListPage.test.tsx"]
+
+Wave: [A, B] — no dependencies, dispatch in parallel
+→ Worker A returns patch for src/api/list.ts and src/db/query.ts
+→ Worker B returns patch for src/ui/ListPage.tsx and src/ui/ListPage.test.tsx
+→ Main agent validates ownership, git apply --check, applies both patches
+→ Precommit + review as usual
+```
+
+### Wave daily vs decompose
+
+| Aspect | Wave daily | Decompose |
+|---|---|---|
+| Module table | Ad-hoc, defined by the agent | Formal, approved by the user |
+| Plan state | None | `.pi/plan/state.json` |
+| Verify rounds | Standard review loop | Two-phase (module + integration) |
+| Round cap | Standard (10 rounds) | Per-module (8 charged rounds) |
+| When to use | 2–4 independent sub-tasks, one session | 5+ modules, multiple sessions |
+
+### Exploration parallelization
+
+Read-only exploration (recon, code reading, `adviser` consultation) is
+inherently parallel-safe:
+
+- **Spawn in parallel.** Multiple read-only subagents can read different parts
+  of the codebase concurrently. Each reads its own files; no writes happen.
+- **Overlap with editing.** While a read-only subagent surveys the code, you
+  can concurrently edit a different file. The single-writer invariant holds —
+  only YOU write to the worktree.
+- **Merge results.** Collect findings from all parallel subagents; fold them
+  into your decisions before committing to an approach.
+- **Cost discipline.** Read-only subagents run on cheap models (L1/L2);
+  parallel exploration is cheap per-agent and the wall-clock win is real.
 
 ## Very large requirements: the wave-parallel module loop
 

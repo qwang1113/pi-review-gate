@@ -112,6 +112,18 @@ test("full: no recorded coverage at all means nothing can be claimed reviewed", 
   assert.deepEqual(d.unreviewedFiles, ["src/a.ts"]);
 });
 
+test("full: unreviewedFiles is populated even when the full path is taken for too-many-lines", () => {
+  const d = decideReviewScope({
+    baseTree: "T",
+    changedFiles: ["src/a.ts", "src/new.ts"],
+    changedLines: INCREMENT_MAX_LINES + 1,
+    previouslyReviewedFiles: ["src/a.ts"],
+  });
+  assert.equal(d.scope, "full");
+  assert.match(d.reason, new RegExp(`> ${INCREMENT_MAX_LINES}`));
+  assert.deepEqual(d.unreviewedFiles, ["src/new.ts"]);
+});
+
 // ---------------------------------------------------------------------------
 // Directive text — what the agent actually hands the reviewer
 // ---------------------------------------------------------------------------

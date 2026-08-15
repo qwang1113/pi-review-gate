@@ -48,6 +48,19 @@ Inspect the actual diff or changed files. Verify:
   the gate itself blocks (a circular deadlock), say so in a Note so the agent
   can escalate to the `arbiter` rather than being hard-stuck.
 
+### 6. Tiered parallel shard review
+
+The gate applies a tiered trigger to parallel review:
+- **Small diffs** (<20 files AND <500 lines): a single reviewer audits the
+  full change without the pdw engine. The reviewer receives the complete file
+  list and a line-count estimate.
+- **Large diffs** (≥20 files OR ≥500 lines): the change is auto-sharded into
+  ≤4 parallel reviewers, each receiving a disjoint set of files AND a
+  per-shard unified diff for orientation.
+
+When you receive a per-shard diff, use it for orientation but always verify
+against the live worktree files — the diff may have drifted.
+
 ### 2. Plans
 Validate a proposed plan for:
 - Feasibility and completeness.

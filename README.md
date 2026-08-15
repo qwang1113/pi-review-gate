@@ -634,15 +634,20 @@ Then restart Pi or run `/reload`. The extension auto-discovers from `~/.pi/agent
 
 ### Parallel loop engine (the only execution path)
 
-The review loop and the decompose module loop run through the
+The review loop, the decompose module loop, and **wave daily** (ad-hoc parallel
+editing) all run through the
 [pi-dynamic-workflows](https://github.com/QuintinShaw/pi-dynamic-workflows)
 engine — a HARD dependency that ships with this extension (the installer
 installs it into the extension directory; see `docs/parallel-execution-plan.md`
 §8): shard reviewers fan out across L3 models, and wave workers implement
 module groups concurrently (patch-first — workers are read-only and the main
-session applies their validated patches). The engine auto-shards large diffs
-and dispatches module waves by itself; the agent asks you only when it
-proposes a decompose. If the engine is missing, the gate's parallel tools
+session applies their validated patches). The engine uses a **tiered trigger**:
+small diffs (<20 files AND <500 lines) run a single reviewer with no engine
+overhead; large diffs are auto-sharded into ≤4 parallel reviewers. Wave
+workers are **not decompose-exclusive** — the agent may dispatch a wave for
+any task that can be split into 2–4 independent sub-tasks with disjoint file
+ownership. The agent asks you only when it proposes a decompose. If the
+engine is missing, the gate's parallel tools
 report a clear installation error — there is no serial fallback.
 
 ### Upgrading: fingerprint algorithm migrations
@@ -698,6 +703,14 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
   → READY?  call declare_done                             # re-validated server-side
   → ship    (git commit now passes the gate)
 ```
+
+**Tiered trigger — small diff fast, large diff parallel.** The review
+auto-decides by diff size before spawning: small diffs (<20 files AND
+<500 changed lines) run a single reviewer with no pdw engine overhead
+(cheapest per-round cost); large diffs (≥20 files OR ≥500 changed lines)
+are auto-sharded into ≤4 parallel reviewers via the pdw engine, then one
+integration review over the whole change. The thresholds are constants in
+`lib/parallel-review.ts` (`SHARD_THRESHOLD_FILES` / `SHARD_THRESHOLD_LINES`).
 
 **Why the review and precommit may overlap.** The runner schedules itself
 (no flags): any `lint:fix` script runs FIRST — it edits files, so the
@@ -1480,7 +1493,8 @@ second line of defence.
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
 | `run_precommit --mode full` (this repo) | ~100 s | Dominated by the two timing loops in the suite; typecheck runs CONCURRENTLY with `npm test` — the timing loops themselves are not reducible |
-| **A review round** | **~3 min reviewer ⇄ precommit, overlapped** | The reviewer (async) and precommit run concurrently; see `docs/parallel-execution-plan.md` |
+| **A review round (small diff)** | **~3 min reviewer ⇄ precommit, overlapped** | Single reviewer, no pdw engine — <20 files AND <500 lines; cheapest per-round cost; see `docs/parallel-execution-plan.md` |
+| **A review round (large diff)** | **≤4 parallel shard reviewers ⇄ precommit** | Auto-sharded via pdw engine + one integration review; see `docs/parallel-execution-plan.md` |
 
 **Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
 ran six consecutive times on this repo (typecheck concurrent with `npm test`,

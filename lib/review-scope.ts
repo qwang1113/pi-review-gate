@@ -70,13 +70,16 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
   const changedFiles = input.changedFiles ?? [];
   const changedLines = input.changedLines ?? 0;
 
-  const full = (reason: string): ReviewScopeDecision => ({
-    scope: "full",
-    changedFiles,
-    changedLines,
-    unreviewedFiles: [],
-    reason,
-  });
+  const full = (reason: string): ReviewScopeDecision => {
+    const seen = new Set(input.previouslyReviewedFiles ?? []);
+    return {
+      scope: "full",
+      changedFiles,
+      changedLines,
+      unreviewedFiles: changedFiles.filter((f) => !seen.has(f)),
+      reason,
+    };
+  };
 
   if (!input.baseTree) {
     return full("no previous READY review to build on — full deep review");

@@ -198,10 +198,14 @@ function worktreeTreeOid(cwd) {
     // add-then-remove (never `git add` with an exclude pathspec): with a
     // gitignored .pi, that form exits 1 on a mere advisory, which is
     // indistinguishable from a real failure. See lib/fingerprint.ts.
-    // TWO passes (see lib/fingerprint.ts): `--renormalize` re-reads TRACKED
-    // file CONTENT (defeating a stale stat cache from an ancient preserved
-    // mtime) but adds no untracked files; the plain `-A` pass then picks those
-    // up. Running only the first silently dropped every untracked file.
+    // TWO passes (see lib/fingerprint.ts): the plain `-A` pass runs FIRST so
+    // worktree deletions leave the index before `--renormalize` (implied `-u`)
+    // stats every tracked file — git aborts with `unable to stat` on a
+    // deleted-but-indexed file, failing the fingerprint closed.
+    // `--renormalize` then re-reads the remaining TRACKED file CONTENT
+    // (defeating a stale stat cache from an ancient preserved mtime) but adds
+    // no untracked files. Running only the second silently dropped every
+    // untracked file.
     // Clear assume-unchanged / skip-worktree in the SCRATCH index only (see
     // lib/fingerprint.ts): without it `git add` ABORTS on a sparse-checkout
     // repository ("outside of your sparse-checkout definition") and the whole
@@ -216,8 +220,8 @@ function worktreeTreeOid(cwd) {
       gitOrNull(cwd, ["update-index", "--no-skip-worktree", "--", ...chunk], env);
     }
 
-    git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
+    git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
 
     const tree = git(cwd, ["write-tree"], env);

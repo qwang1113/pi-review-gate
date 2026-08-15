@@ -84,15 +84,21 @@ Key facts of the implementation:
 - **Split review** (very large diffs): parallel reviewers over disjoint file
   groups or dimensions; the main agent merges — any BLOCKED wins (worst
   wins), consistent findings are merged, and the merged result is recorded.
+  As of the tiered-trigger implementation (2026-08-15), split review is
+  automatic: the agent decides by diff size — small diffs (<20 files AND
+  <500 lines) run a single reviewer, large diffs are auto-sharded ≤4 ways.
 
 ## 5. Latency & cost
 
 | Stage | Before | After |
 |---|---|---|
-| One review round (this repo) | ~280 s serial | ~190 s (review ⇄ precommit overlap) |
+| One review round, small diff (<20 files, <500 lines) | ~280 s serial | ~190 s (single reviewer ⇄ precommit overlap) |
+| One review round, large diff (auto-sharded) | ~280 s serial | ≤4 parallel shard reviewers + 1 integration review |
 | Precommit (multi-step repos) | serial steps | parallel steps, declaration-order output |
 | Multi-repo session | one repo at a time | N repos concurrently |
 | Token cost | ~all on the strong model | ~80% of tokens on L1/L2 (~10% of cost) |
+Small-diff rounds avoid the pdw orchestration overhead entirely — the 3×
+cost bug where small diffs were unnecessarily sharded is gone.
 
 ## 6. Boundaries (never cross)
 
@@ -135,32 +141,49 @@ back to.
 
 ### 8.1 Plane 1 — parallel shard review (read-only fan-out)
 
-`lib/parallel-review.ts`. A large diff is split into ≤4 disjoint shards
-(`planReviewShards`, weight-balanced); a pdw workflow runs one L3 reviewer
-per shard in parallel (`agentType: 'reviewer'`, model `claude-fable-5:max`),
-each with a structured-output schema that carries NO docSync (a shard cannot
-attest the whole change). The main agent records every shard's full raw
-output in ONE `record_review` call (worst verdict wins, same as serial), then
-runs ONE integration reviewer over the whole change whose record — alone —
-carries the docSync attestation. This mirrors the /plan-verify two-phase
-protocol (§6.3 of the orchestration doc). `/review` drives it directly — the
-agent auto-shards any review (large diff ⇒ planReviewShards ≤4 shards, small
-diff ⇒ a single shard) without asking the user.
+`lib/parallel-review.ts`. The review uses a **tiered trigger**
+(`shouldShardReview(fileCount, lineCount)`, thresholds exported as
+`SHARD_THRESHOLD_FILES` / `SHARD_THRESHOLD_LINES`):
+
+- **Small diff** (<20 files AND <500 changed lines): ONE reviewer over the
+  full change — no pdw engine, no sharding. Cheapest per-round cost.
+- **Large diff** (≥20 files OR ≥500 changed lines): the diff is split into
+  ≤4 disjoint shards (`planReviewShards`, weight-balanced); a pdw workflow
+  runs one L3 reviewer per shard in parallel (no `agentType` binding — the
+  shard prompt itself carries the reviewer role and the engine-level
+  excludeTools list is the write protection; the model is resolved from
+  `DEFAULT_REVIEWER_MODEL` with a fallback candidate list via
+  `resolveBestModel`, so a pinned model missing from the user's models.json
+  never falls back to an unauthenticated provider), each with a
+  structured-output schema that carries NO docSync (a shard cannot attest the
+  whole change). The main agent records every shard's full raw output in ONE
+  `record_review` call (worst verdict wins, same as serial), then runs ONE
+  integration reviewer over the whole change whose record — alone — carries
+  the docSync attestation.
+
+This mirrors the /plan-verify two-phase protocol (§6.3 of the orchestration
+doc). `/review` drives it directly — the agent decides by diff size without
+asking the user.
 
 ### 8.2 Plane 2 — patch-first wave workers (parallel implementation)
 
-`lib/plan-parallel.ts`. pdw's own `isolation: "worktree"` was investigated
-and rejected for writers: v3.5.1 never auto-merges, deletes the worktree and
-branch in a finally block right after each agent, forbids worker `git
-commit` (so edits would be destroyed), and silently degrades to the shared
-worktree when isolation fails. Patch-first instead: `computeWave` selects
-every pending module whose dependencies are implemented/accepted (≤4 per
-wave); `runWaveWorkflow` runs one READ-ONLY worker per module in parallel
+`lib/plan-parallel.ts`. Wave workers are **not decompose-exclusive**: the
+patch-first protocol is the same for formal decompose waves and for ad-hoc
+**wave daily** (any task that can be split into 2–4 independent sub-tasks
+with disjoint file ownership). pdw's own `isolation: "worktree"` was
+investigated and rejected for writers: v3.5.1 never auto-merges, deletes the
+worktree and branch in a finally block right after each agent, forbids worker
+`git commit` (so edits would be destroyed), and silently degrades to the
+shared worktree when isolation fails. Patch-first instead: `computeWave`
+selects every pending module whose dependencies are implemented/accepted (≤4
+per wave); `runWaveWorkflow` runs one READ-ONLY worker per module in parallel
 (edit/write tools excluded engine-wide), each returning unified git diffs;
 the main agent validates (`validatePatchOwnership` ⊆ owned_paths, then
 `git apply --check`), persists patches under `.pi/plan/patches/`, and applies
-them in sequence with per-patch validation (no cross-patch rollback transaction — a failed patch is sent back to its worker, never silently edited). Single-writer is preserved: the worktree is only ever
-written by the main agent.
+them in sequence with per-patch validation (no cross-patch rollback
+transaction — a failed patch is sent back to its worker, never silently
+edited). Single-writer is preserved: the worktree is only ever written by the
+main agent.
 
 ### 8.3 Hard dependency and safety
 
@@ -174,11 +197,14 @@ written by the main agent.
   receipt) untouched; pinned by the existing test suite.
 - A wave patch that fails `git apply` is sent back to its worker for one
   retry, never silently edited by the main agent.
-- Target: parallel review ≤60% of the serial wall clock (~190 s baseline on
-  this repo) and a 3-module wave ≈ 1.5–2× a single module's serial time.
-  Wall-clock measurements are NOT yet taken: end-to-end runs need a real pi
-  session with the installed engine — until then the numbers above are
-  targets, not measurements.
+- Target: small-diff review rounds avoid the pdw orchestration overhead
+  entirely (the 3× cost bug where small diffs were unnecessarily sharded is
+  gone); large-diff parallel review targets ≤60% of the serial wall clock
+  (~190 s baseline on this repo). A 3-module wave (decompose or wave daily)
+  targets ≈ 1.5–2× a single module's serial time. Wall-clock measurements
+  are NOT yet taken: end-to-end runs need a real pi session with the
+  installed engine — until then the numbers above are targets, not
+  measurements.
 
 #### Post-install verification checklist
 
@@ -186,12 +212,15 @@ written by the main agent.
    and installs the pdw runtime into the extension directory (a failed
    install fails the installer — there is no best-effort mode), then restart
    Pi / `/reload`.
-2. In a real pi session on this repo: run `/review` on a change with ≥4
-   changed files and confirm the engine auto-shards and runs the reviewers
-   concurrently (watch the pdw run panel), then record Phase A and run the
-   integration review.
+2. In a real pi session on this repo: run `/review` on a **small** change
+   (<20 files, <500 lines) and confirm a single reviewer runs with no pdw
+   engine; then run `/review` on a change with ≥20 files or ≥500 lines and
+   confirm the engine auto-shards and runs the reviewers concurrently (watch
+   the pdw run panel), then record Phase A and run the integration review.
 3. In a real pi session with a multi-module plan: run `/plan-next` and
    confirm one wave dispatches several read-only workers concurrently and
-   their patches apply.
+   their patches apply. Also test a **wave daily** dispatch: define 2–4
+   ad-hoc modules with disjoint owned_paths, call `run_wave_workflow`, and
+   confirm the patches apply.
 4. Record wall-clock numbers and compare against the ~190 s serial baseline;
    update this section when measured.

@@ -1,11 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENTS = join(ROOT, "agents");
+const SKILL_MD = join(ROOT, "skills", "review-loop", "SKILL.md");
+const AGENTS_MD = join(ROOT, "AGENTS.md");
 
 function frontmatter(file: string): string {
   const src = readFileSync(join(AGENTS, file), "utf8");
@@ -71,4 +73,29 @@ test("the shard reviewer is forbidden from emitting docSync — the two-phase pr
   const src = readFileSync(join(AGENTS, "module-reviewer.md"), "utf8");
   assert.match(src, /Never include a `docSync` field/i, "the prohibition must be in the role, not the task text");
   assert.match(src, /integration reviewer/i, "and it must say where the single attestation comes from");
+});
+
+// ── Wave daily: SKILL.md + AGENTS.md carry the protocol ───────────────────
+
+test("SKILL.md documents wave daily trigger conditions and parallel exploration", () => {
+  assert.ok(existsSync(SKILL_MD), "SKILL.md must exist");
+  const src = readFileSync(SKILL_MD, "utf8");
+  // Wave daily (not just decompose) — the trigger conditions and decision rules.
+  assert.match(src, /[Ww]ave daily/, "SKILL.md must document wave daily trigger conditions");
+  assert.match(src, /patch-first/, "SKILL.md must describe the patch-first protocol");
+  assert.match(src, /≤4/, "SKILL.md must state the ≤4 module cap");
+  // Read-only exploration parallel rules.
+  assert.match(src, /read-only.*parallel|parallel.*read-only/i, "SKILL.md must state read-only subagents can run in parallel");
+  // Decision rules: when to wave vs serial.
+  assert.match(src, /when (not )?to wave|wave.*decision|decide.*wave|wave vs/i, "SKILL.md must have wave vs serial decision guidance");
+});
+
+test("AGENTS.md documents wave daily and parallel exploration", () => {
+  assert.ok(existsSync(AGENTS_MD), "AGENTS.md must exist");
+  const src = readFileSync(AGENTS_MD, "utf8");
+  // Wave daily: the parallel loop is not just for decompose.
+  assert.match(src, /[Ww]ave daily/, "AGENTS.md must document wave daily");
+  assert.match(src, /patch-first/, "AGENTS.md must describe the patch-first protocol");
+  // Read-only parallel exploration.
+  assert.match(src, /read-only.*parallel|parallel.*read-only/i, "AGENTS.md must state read-only subagents can run in parallel");
 });

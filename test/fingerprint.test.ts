@@ -16,6 +16,10 @@ const {
   mayBeGateOwned,
   GATE_EXCLUDE_DIRS,
   GATE_EXCLUDE_PATHSPECS,
+  worktreeTreeOid,
+  incrementSinceTree,
+  reviewCoverageFiles,
+  FINGERPRINT_VERSION,
 } = await import(
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "fingerprint.ts")
 );
@@ -1105,4 +1109,230 @@ test("a resolver is used for the top-level repo even without submodules", () => 
   });
   assert.equal(result.unavailable, false);
   assert.deepEqual(calls, [realpathSync(dir)], "exactly one materialization, for the requested repo");
+});
+
+// ---------------------------------------------------------------------------
+// worktreeTreeOid — the bare tree OID (no submodule mixing)
+// ---------------------------------------------------------------------------
+
+test("worktreeTreeOid returns a valid 40-char hex OID", () => {
+  const dir = makeRepo();
+  const oid = worktreeTreeOid(dir);
+  assert.match(oid, /^[0-9a-f]{40}$/, "must be a valid git tree OID");
+});
+
+test("worktreeTreeOid is stable across repeated calls", () => {
+  const dir = makeRepo();
+  assert.equal(worktreeTreeOid(dir), worktreeTreeOid(dir));
+});
+
+test("worktreeTreeOid changes when content changes", () => {
+  const dir = makeRepo();
+  const a = worktreeTreeOid(dir);
+  writeFileSync(join(dir, "new.ts"), "// new file");
+  const b = worktreeTreeOid(dir);
+  assert.notEqual(b, a, "a new file must change the tree OID");
+});
+
+test("worktreeTreeOid is the same from a subdirectory", () => {
+  const dir = makeRepo();
+  mkdirSync(join(dir, "deep", "work"), { recursive: true });
+  writeFileSync(join(dir, "deep", "work", "a.ts"), "// a");
+  assert.equal(
+    worktreeTreeOid(join(dir, "deep", "work")),
+    worktreeTreeOid(dir),
+    "the tree OID must be cwd-independent",
+  );
+});
+
+test("worktreeTreeOid is staging-invariant", () => {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "file.ts"), "// v1");
+  const unstaged = worktreeTreeOid(dir);
+  execFileSync("git", ["add", "file.ts"], { cwd: dir, stdio: "ignore" });
+  assert.equal(worktreeTreeOid(dir), unstaged, "git add must not change the tree OID");
+});
+
+test("worktreeTreeOid excludes gate-owned dirs", () => {
+  const dir = makeRepo();
+  const before = worktreeTreeOid(dir);
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "review-gate-state.json"), "{}");
+  mkdirSync(join(dir, ".pi-subagents"), { recursive: true });
+  writeFileSync(join(dir, ".pi-subagents", "artifact.md"), "x");
+  assert.equal(worktreeTreeOid(dir), before, "gate-owned dirs must be excluded from the tree");
+});
+
+test("worktreeTreeOid survives a deleted tracked file (two-pass order regression)", () => {
+  // P1 regression (2026-08-15): the shadow-index passes ran `--renormalize`
+  // FIRST. It implies `-u`, and git's `-u` stats every tracked file — a file
+  // deleted from the worktree (but still in the index) aborted with
+  // `fatal: unable to stat`, failing the whole fingerprint closed and
+  // blocking every commit in any repo with a deleted file. The fix swaps the
+  // order: plain `-A` removes deletions from the index first, then
+  // `--renormalize` only touches files that still exist. This test pins the
+  // DIRECT behavior (worktreeTreeOid itself, not the increment wrapper):
+  // reverting the order must fail it.
+  const dir = makeRepo();
+  writeFileSync(join(dir, "to_delete.ts"), "// will be deleted\n");
+  execFileSync("git", ["add", "to_delete.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "base"], {
+    cwd: dir, stdio: "ignore",
+  });
+  const before = worktreeTreeOid(dir);
+  rmSync(join(dir, "to_delete.ts"));
+  const after = worktreeTreeOid(dir);
+  assert.match(after, /^[0-9a-f]{40}$/, "must still produce a tree OID after a delete");
+  assert.notEqual(after, before, "the deleted file must move the tree");
+});
+
+// ---------------------------------------------------------------------------
+// incrementSinceTree — what changed since a recorded tree OID
+// ---------------------------------------------------------------------------
+
+test("incrementSinceTree: invalid baseTree returns undefined", () => {
+  const dir = makeRepo();
+  assert.equal(incrementSinceTree(dir, "not-a-tree"), undefined);
+  assert.equal(incrementSinceTree(dir, ""), undefined);
+  assert.equal(incrementSinceTree(dir, "--upload-pack=evil"), undefined);
+});
+
+test("incrementSinceTree: empty increment when baseTree matches current", () => {
+  const dir = makeRepo();
+  const tree = worktreeTreeOid(dir);
+  const inc = incrementSinceTree(dir, tree);
+  assert.ok(inc, "must return a result, not undefined");
+  assert.deepEqual(inc!.files, []);
+  assert.equal(inc!.lines, 0);
+});
+
+test("incrementSinceTree: detects new and modified files", () => {
+  const dir = makeRepo();
+  // Create a baseline commit so the tree is not empty.
+  writeFileSync(join(dir, "existing.ts"), "// line 1\n// line 2\n");
+  execFileSync("git", ["add", "existing.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "base"], {
+    cwd: dir, stdio: "ignore",
+  });
+  const baseTree = worktreeTreeOid(dir);
+
+  // Add a new file and modify the existing one.
+  writeFileSync(join(dir, "new.ts"), "// new\n");
+  writeFileSync(join(dir, "existing.ts"), "// line 1 changed\n// line 2\n// line 3\n");
+
+  const inc = incrementSinceTree(dir, baseTree);
+  assert.ok(inc, "must return a result");
+  assert.ok(inc!.files.includes("new.ts"), "new file must be listed");
+  assert.ok(inc!.files.includes("existing.ts"), "modified file must be listed");
+  assert.ok(inc!.lines > 0, "must report changed lines");
+});
+
+test("incrementSinceTree: returns undefined outside a git repo", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-nogit-"));
+  tempDirs.push(dir);
+  assert.equal(incrementSinceTree(dir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), undefined);
+});
+
+test("incrementSinceTree: returns undefined when baseTree is a valid OID but not in this repo", () => {
+  const dir = makeRepo();
+  // A valid-looking OID that does not exist in this repo.
+  assert.equal(incrementSinceTree(dir, "0000000000000000000000000000000000000000"), undefined);
+});
+
+test("incrementSinceTree: a deleted file is detected", () => {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "to_delete.ts"), "// will be deleted\n");
+  execFileSync("git", ["add", "to_delete.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "base"], {
+    cwd: dir, stdio: "ignore",
+  });
+  const baseTree = worktreeTreeOid(dir);
+  rmSync(join(dir, "to_delete.ts"));
+
+  const inc = incrementSinceTree(dir, baseTree);
+  assert.ok(inc, "must return a result");
+  assert.ok(inc!.files.includes("to_delete.ts"), "deleted file must be listed");
+});
+
+test("incrementSinceTree: staging does not affect the increment", () => {
+  const dir = makeRepo();
+  writeFileSync(join(dir, "file.ts"), "// v1\n");
+  execFileSync("git", ["add", "file.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "base"], {
+    cwd: dir, stdio: "ignore",
+  });
+  const baseTree = worktreeTreeOid(dir);
+
+  writeFileSync(join(dir, "file.ts"), "// v2\n");
+  const unstagedInc = incrementSinceTree(dir, baseTree);
+  execFileSync("git", ["add", "file.ts"], { cwd: dir, stdio: "ignore" });
+  const stagedInc = incrementSinceTree(dir, baseTree);
+
+  assert.ok(unstagedInc, "unstaged increment must be computable");
+  assert.ok(stagedInc, "staged increment must be computable");
+  assert.deepEqual(
+    stagedInc!.files,
+    unstagedInc!.files,
+    "staging must not change the increment files",
+  );
+  assert.equal(
+    stagedInc!.lines,
+    unstagedInc!.lines,
+    "staging must not change the increment line count",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// reviewCoverageFiles — files covered by the current change
+// ---------------------------------------------------------------------------
+
+test("reviewCoverageFiles: returns files changed since the branch base", () => {
+  const dir = makeRepo();
+  // Create a commit on main.
+  writeFileSync(join(dir, "base.ts"), "// base\n");
+  execFileSync("git", ["add", "base.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "base"], {
+    cwd: dir, stdio: "ignore",
+  });
+
+  // Branch off and make changes.
+  execFileSync("git", ["checkout", "-b", "feature"], { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, "feature.ts"), "// feature\n");
+  execFileSync("git", ["add", "feature.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "feature"], {
+    cwd: dir, stdio: "ignore",
+  });
+
+  const files = reviewCoverageFiles(dir);
+  assert.ok(files, "must return a list, not undefined");
+  assert.ok(files!.includes("feature.ts"), "the committed feature file must be covered");
+  // Also covers dirty worktree files.
+  writeFileSync(join(dir, "dirty.ts"), "// dirty");
+  const filesWithDirty = reviewCoverageFiles(dir);
+  assert.ok(filesWithDirty, "must return a list with dirty files");
+  assert.ok(filesWithDirty!.includes("dirty.ts"), "dirty untracked file must be covered");
+});
+
+test("reviewCoverageFiles: returns undefined outside a git repo", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-nogit-"));
+  tempDirs.push(dir);
+  assert.equal(reviewCoverageFiles(dir), undefined);
+});
+
+test("reviewCoverageFiles: returns undefined in a repo with no commits", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-nogit-"));
+  tempDirs.push(dir);
+  // init without an initial commit — no branch base to diff against.
+  execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+  assert.equal(reviewCoverageFiles(dir), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// FINGERPRINT_VERSION — the algorithm version baked into every binding
+// ---------------------------------------------------------------------------
+
+test("FINGERPRINT_VERSION is a positive integer", () => {
+  assert.equal(typeof FINGERPRINT_VERSION, "number");
+  assert.ok(Number.isSafeInteger(FINGERPRINT_VERSION));
+  assert.ok(FINGERPRINT_VERSION >= 2, "must be at least 2 (v1 was pre-versioning)");
 });

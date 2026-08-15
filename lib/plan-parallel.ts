@@ -1,16 +1,19 @@
 /**
- * Patch-first parallel workers (plane 2 of the parallel loop).
+ * Patch-first parallel workers — wave daily (plane 2 of the parallel loop).
  *
  * Serial module execution (/plan-next, one worker at a time) is the other
- * latency bottleneck of the decompose loop. Plane 2 keeps the "exactly one
- * writer in the worktree" invariant while parallelizing the expensive part:
+ * latency bottleneck. Plane 2 keeps the "exactly one writer in the worktree"
+ * invariant while parallelizing the expensive part:
  *
- *   wave workers (read-only, edit/write AND bash excluded) each produce
- *   unified git diffs for their module → the main agent VALIDATES every patch
- *   (declared path ∪ diff headers ⊆ owned_paths, `git apply --check`) and
- *   applies them in sequence with per-patch validation (no cross-patch
- *   rollback transaction) → records status/worklog. The worktree still has
- *   exactly one writer: the main agent.
+ *   wave workers (read-only, edit/write AND bash excluded) each produce unified
+ *   git diffs for their module → the main agent VALIDATES every patch (declared
+ *   path ∪ diff headers ⊆ owned_paths, `git apply --check`) and applies them
+ *   in sequence with per-patch validation (no cross-patch rollback transaction)
+ *   → records status/worklog. The worktree still has exactly one writer: the
+ *   main agent.
+ *
+ * Wave daily: the agent may dispatch wave workers for ANY task that can be
+ * split into ≤4 modules with disjoint owned_paths, not just decompose plans.
  *
  * Wave scheduling is a pure function over `depends_on`: all pending modules
  * whose dependencies are implemented/ accepted form the next wave and run
@@ -123,14 +126,16 @@ export function buildWaveWorkerPrompt(args: {
   goalText?: string;
 }): string {
   const lines = [
-    "You are a PARALLEL wave worker. Every module in your wave runs concurrently; the worktree must stay untouched by you.",
+    "You are a PARALLEL wave worker (patch-first). Every module in your wave runs concurrently; the worktree must stay untouched by you.",
     "",
     `Module: ${args.moduleId} — ${args.title}`,
     `Owned paths (write surface limit): ${args.ownedPaths.join(", ")}`,
     `Task brief + worklog: ${args.worklogPath} (read it first)`,
   ];
   if (args.goalText && args.goalText.trim()) {
-    lines.push("", "Loop goal:", args.goalText.trim());
+    lines.push("", "Loop goal:", args.goalText.trim(), "",
+      "Wave daily protocol: you may be part of a non-decompose wave — the same patch-first rules apply. " +
+      "Produce unified git diffs for your owned_paths; the main agent validates and applies them.");
   }
   lines.push(
     "",
@@ -192,23 +197,27 @@ export type WaveWorkflowOutcome =
 export async function runWaveWorkflow(
   opts: WaveWorkflowOptions,
 ): Promise<WaveWorkflowOutcome> {
-  const { loadPdw, PdwUnavailableError } = await import("./pdw-bridge.ts");
-  // Hard dependency: no serial fallback. A missing/broken engine throws
+  const { loadPdw, PdwUnavailableError, resolveBestModel, registryHasModels } = await import("./pdw-bridge.ts");  // Hard dependency: no serial fallback. A missing/broken engine throws
   // PdwUnavailableError (installation guidance) instead of degrading.
   if (opts.pdwOverride === null) throw new PdwUnavailableError(new Error("forced by test"));
   const pdw = opts.pdwOverride !== undefined ? opts.pdwOverride : await loadPdw();
 
-  const defs = opts.modules.map((m) => ({
-    moduleId: m.id,
-    prompt: buildWaveWorkerPrompt({
+  const defs = await Promise.all(
+    opts.modules.map(async (m) => ({
       moduleId: m.id,
-      title: m.title,
-      ownedPaths: m.ownedPaths,
-      worklogPath: m.worklogPath,
-      goalText: m.goalText,
-    }),
-    model: m.model,
-  }));
+      prompt: buildWaveWorkerPrompt({
+        moduleId: m.id,
+        title: m.title,
+        ownedPaths: m.ownedPaths,
+        worklogPath: m.worklogPath,
+        goalText: m.goalText,
+      }),
+      model: await resolveBestModel(
+        [m.model, "onekey/deepseek-v4-pro", "onekey/grok-4.6"],
+        opts.modelRegistry,
+      ),
+    })),
+  );
 
   const script = `export const meta = {
   name: 'wave_workers',
@@ -249,7 +258,12 @@ return results
   };
   if (opts.agentRegistry) runOptions.agentRegistry = opts.agentRegistry;
   if (opts.agent) runOptions.agent = opts.agent;
-  if (opts.modelRegistry) runOptions.modelRegistry = opts.modelRegistry;
+  // Same sync-facade guard as runParallelShardReview: an unwarmed pi
+  // ModelRegistry reports no models and pdw fails every worker with
+  // "No models available"; let pdw build its own disk-backed registry.
+  if (opts.modelRegistry && registryHasModels(opts.modelRegistry)) {
+    runOptions.modelRegistry = opts.modelRegistry;
+  }
 
   try {
     const result = await pdw.runWorkflow(script, runOptions);
@@ -384,10 +398,17 @@ export function validatePatchOwnership(
   return violations.length === 0 ? { ok: true } : { ok: false, violations };
 }
 
-/** Run `git apply --check` for a patch file. Resolves true when it applies cleanly. */
+/**
+ * Run `git apply --check` for a patch file. Resolves true when it applies
+ * cleanly. `--recount` is load-bearing: LLM-generated diffs routinely
+ * miscount the `@@ -a,b +c,d @@` hunk line counts (measured: 9 of 13 wave
+ * patches in the first parallel run), which makes a plain `git apply`
+ * report "corrupt patch" even though the content is exact. --recount makes
+ * git re-count from the actual lines instead of trusting the header.
+ */
 export function checkPatchApplies(cwd: string, patchFile: string): Promise<boolean> {
   return new Promise((resolve) => {
-    execFile("git", ["apply", "--check", "--verbose", patchFile], { cwd }, (err) => {
+    execFile("git", ["apply", "--recount", "--check", "--verbose", patchFile], { cwd }, (err) => {
       resolve(!err);
     });
   });
@@ -396,7 +417,7 @@ export function checkPatchApplies(cwd: string, patchFile: string): Promise<boole
 /** Apply a validated patch file. Resolves the git error on failure. */
 export function applyPatchFile(cwd: string, patchFile: string): Promise<{ ok: true } | { ok: false; error: string }> {
   return new Promise((resolve) => {
-    execFile("git", ["apply", patchFile], { cwd }, (err) => {
+    execFile("git", ["apply", "--recount", patchFile], { cwd }, (err) => {
       resolve(err ? { ok: false, error: String(err.message ?? err) } : { ok: true });
     });
   });

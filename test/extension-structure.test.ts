@@ -1462,3 +1462,25 @@ test("timings are appended, never read back into a decision", () => {
   assert.ok(readAt > statusAt, "the only timings read must be inside /gate-status");
   assert.ok(!/unmetRequirements\([^)]*Timing/.test(SRC), "no timing value may enter the ship authority");
 });
+
+test("the extension never calls require() (ESM type-stripped runtime)", () => {
+  // Pi loads these .ts sources with node's type stripping in ESM mode, where
+  // `require` is undefined — a call would throw ReferenceError the first time
+  // that line runs (a small-diff single-shard prompt did exactly this until
+  // the constants were imported instead). The extension must import statically.
+  assert.doesNotMatch(SRC, /require\(/);
+  assert.match(SRC, /SHARD_THRESHOLD_FILES/);
+  assert.match(SRC, /SHARD_THRESHOLD_LINES/);
+});
+
+// ---- Tiered parallel review trigger ----
+
+test("tiered trigger: shouldShardReview is imported and used in run_parallel_shard_review", () => {
+  assert.match(SRC, /shouldShardReview/);
+  assert.match(SRC, /SHARD_THRESHOLD_FILES/);
+  assert.match(SRC, /SHARD_THRESHOLD_LINES/);
+  assert.match(SRC, /countDiffLines/);
+  assert.match(SRC, /addDiffContext/);
+  assert.match(SRC, /tier: "single"/);
+  assert.match(SRC, /tier: "parallel"/);
+});
