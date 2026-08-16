@@ -1,16 +1,19 @@
 /**
- * Patch-first parallel workers (plane 2 of the parallel loop).
+ * Patch-first parallel workers — wave daily (plane 2 of the parallel loop).
  *
  * Serial module execution (/plan-next, one worker at a time) is the other
- * latency bottleneck of the decompose loop. Plane 2 keeps the "exactly one
- * writer in the worktree" invariant while parallelizing the expensive part:
+ * latency bottleneck. Plane 2 keeps the "exactly one writer in the worktree"
+ * invariant while parallelizing the expensive part:
  *
- *   wave workers (read-only, edit/write AND bash excluded) each produce
- *   unified git diffs for their module → the main agent VALIDATES every patch
- *   (declared path ∪ diff headers ⊆ owned_paths, `git apply --check`) and
- *   applies them in sequence with per-patch validation (no cross-patch
- *   rollback transaction) → records status/worklog. The worktree still has
- *   exactly one writer: the main agent.
+ *   wave workers (read-only, edit/write AND bash excluded) each produce unified
+ *   git diffs for their module → the main agent VALIDATES every patch (declared
+ *   path ∪ diff headers ⊆ owned_paths, `git apply --check`) and applies them
+ *   in sequence with per-patch validation (no cross-patch rollback transaction)
+ *   → records status/worklog. The worktree still has exactly one writer: the
+ *   main agent.
+ *
+ * Wave daily: the agent may dispatch wave workers for ANY task that can be
+ * split into ≤4 modules with disjoint owned_paths, not just decompose plans.
  *
  * Wave scheduling is a pure function over `depends_on`: all pending modules
  * whose dependencies are implemented/ accepted form the next wave and run
@@ -24,7 +27,9 @@ import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLAN_DIR } from "./plan-state.ts";
+import { sanitizeInjectedWorkflowText } from "./pdw-bridge.ts";
 import type { PdwModule } from "./pdw-bridge.ts";
+import { buildRunProgressCallbacks, createProgressSink, newPdwRunId } from "./pdw-progress.ts";
 
 /** A module's minimal shape for wave planning. */
 export interface WaveModule {
@@ -123,14 +128,16 @@ export function buildWaveWorkerPrompt(args: {
   goalText?: string;
 }): string {
   const lines = [
-    "You are a PARALLEL wave worker. Every module in your wave runs concurrently; the worktree must stay untouched by you.",
+    "You are a PARALLEL wave worker (patch-first). Every module in your wave runs concurrently; the worktree must stay untouched by you.",
     "",
     `Module: ${args.moduleId} — ${args.title}`,
     `Owned paths (write surface limit): ${args.ownedPaths.join(", ")}`,
     `Task brief + worklog: ${args.worklogPath} (read it first)`,
   ];
   if (args.goalText && args.goalText.trim()) {
-    lines.push("", "Loop goal:", args.goalText.trim());
+    lines.push("", "Loop goal:", args.goalText.trim(), "",
+      "Wave daily protocol: you may be part of a non-decompose wave — the same patch-first rules apply. " +
+      "Produce unified git diffs for your owned_paths; the main agent validates and applies them.");
   }
   lines.push(
     "",
@@ -172,6 +179,11 @@ export interface WaveWorkflowOptions {
    * null forces the PdwUnavailableError path deterministically.
    */
   pdwOverride?: PdwModule | null;
+  /**
+   * Live progress callback (the tool layer's `onUpdate`). `text` is a
+   * one-line status; `progress` is a 0-100 percentage when known.
+   */
+  onProgress?: (text: string, progress?: number) => void;
 }
 
 export type WaveWorkflowOutcome =
@@ -182,8 +194,22 @@ export type WaveWorkflowOutcome =
       failedModules?: string[];
       durationMs: number;
       agentCount: number;
+      /** Run identity — the engine log and the ndjson progress file share it. */
+      runId: string;
+      /** Absolute path of the live ndjson progress file (.pi/pdw-progress/). */
+      progressFile: string;
+      /** Best-effort engine log path (~/.pi/workflows/projects/<key>/runs/). */
+      engineLogFile: string;
     }
-  | { ok: false; reason: "workflow-failed"; error?: string };
+  | {
+      ok: false;
+      reason: "workflow-failed";
+      error?: string;
+      /** Run identity + artifacts, also on failure so the caller can locate them. */
+      runId: string;
+      progressFile: string;
+      engineLogFile: string;
+    };
 
 /**
  * Run one wave of parallel workers via pdw. Workers are read-only (edit/write
@@ -192,23 +218,27 @@ export type WaveWorkflowOutcome =
 export async function runWaveWorkflow(
   opts: WaveWorkflowOptions,
 ): Promise<WaveWorkflowOutcome> {
-  const { loadPdw, PdwUnavailableError } = await import("./pdw-bridge.ts");
-  // Hard dependency: no serial fallback. A missing/broken engine throws
+  const { loadPdw, PdwUnavailableError, resolveBestModel, registryHasModels } = await import("./pdw-bridge.ts");  // Hard dependency: no serial fallback. A missing/broken engine throws
   // PdwUnavailableError (installation guidance) instead of degrading.
   if (opts.pdwOverride === null) throw new PdwUnavailableError(new Error("forced by test"));
   const pdw = opts.pdwOverride !== undefined ? opts.pdwOverride : await loadPdw();
 
-  const defs = opts.modules.map((m) => ({
-    moduleId: m.id,
-    prompt: buildWaveWorkerPrompt({
+  const defs = await Promise.all(
+    opts.modules.map(async (m) => ({
       moduleId: m.id,
-      title: m.title,
-      ownedPaths: m.ownedPaths,
-      worklogPath: m.worklogPath,
-      goalText: m.goalText,
-    }),
-    model: m.model,
-  }));
+      prompt: sanitizeInjectedWorkflowText(buildWaveWorkerPrompt({
+        moduleId: m.id,
+        title: m.title,
+        ownedPaths: m.ownedPaths,
+        worklogPath: m.worklogPath,
+        goalText: m.goalText,
+      })),
+      model: await resolveBestModel(
+        [m.model, "onekey/deepseek-v4-pro", "onekey/grok-4.6"],
+        opts.modelRegistry,
+      ),
+    })),
+  );
 
   const script = `export const meta = {
   name: 'wave_workers',
@@ -232,12 +262,22 @@ const results = await parallel(defs.map((def) => () =>
 return results
 `;
 
+  // Run identity + live progress (same wiring as runParallelShardReview).
+  const runId = newPdwRunId();
+  const sink = createProgressSink(opts.cwd, runId);
+  sink.setTotal(opts.modules.length);
+  const progressCallbacks = buildRunProgressCallbacks(sink, {
+    total: opts.modules.length,
+    onProgress: opts.onProgress,
+  });
+
   const runOptions: Record<string, unknown> = {
     cwd: opts.cwd,
     args: {},
+    runId,
     concurrency: opts.concurrency ?? Math.min(4, Math.max(1, opts.modules.length)),
     agentRetries: 1,
-    persistLogs: false,
+    persistAgentSessions: true,
     // Wave workers must be READ-ONLY: edit/write AND bash are excluded at the
     // engine level. agents/worker.md's "only writer" system prompt describes
     // the SERIAL role and must not leak into concurrent waves — so no
@@ -246,10 +286,16 @@ return results
       "bash",
       "edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit",
     ],
+    ...progressCallbacks,
   };
   if (opts.agentRegistry) runOptions.agentRegistry = opts.agentRegistry;
   if (opts.agent) runOptions.agent = opts.agent;
-  if (opts.modelRegistry) runOptions.modelRegistry = opts.modelRegistry;
+  // Same sync-facade guard as runParallelShardReview: an unwarmed pi
+  // ModelRegistry reports no models and pdw fails every worker with
+  // "No models available"; let pdw build its own disk-backed registry.
+  if (opts.modelRegistry && registryHasModels(opts.modelRegistry)) {
+    runOptions.modelRegistry = opts.modelRegistry;
+  }
 
   try {
     const result = await pdw.runWorkflow(script, runOptions);
@@ -273,9 +319,22 @@ return results
       failedModules,
       durationMs: result.durationMs,
       agentCount: result.agentCount,
+      runId,
+      progressFile: sink.progressFile,
+      engineLogFile: sink.engineLogFile,
     };
   } catch (err) {
-    return { ok: false, reason: "workflow-failed", error: (err as Error).message };
+    return {
+      ok: false,
+      reason: "workflow-failed",
+      error: (err as Error).message,
+      runId,
+      progressFile: sink.progressFile,
+      engineLogFile: sink.engineLogFile,
+    };
+  } finally {
+    // Terminal event: the ndjson file is complete and tail -f readers can stop.
+    sink.done();
   }
 }
 
@@ -384,10 +443,17 @@ export function validatePatchOwnership(
   return violations.length === 0 ? { ok: true } : { ok: false, violations };
 }
 
-/** Run `git apply --check` for a patch file. Resolves true when it applies cleanly. */
+/**
+ * Run `git apply --check` for a patch file. Resolves true when it applies
+ * cleanly. `--recount` is load-bearing: LLM-generated diffs routinely
+ * miscount the `@@ -a,b +c,d @@` hunk line counts (measured: 9 of 13 wave
+ * patches in the first parallel run), which makes a plain `git apply`
+ * report "corrupt patch" even though the content is exact. --recount makes
+ * git re-count from the actual lines instead of trusting the header.
+ */
 export function checkPatchApplies(cwd: string, patchFile: string): Promise<boolean> {
   return new Promise((resolve) => {
-    execFile("git", ["apply", "--check", "--verbose", patchFile], { cwd }, (err) => {
+    execFile("git", ["apply", "--recount", "--check", "--verbose", patchFile], { cwd }, (err) => {
       resolve(!err);
     });
   });
@@ -396,7 +462,7 @@ export function checkPatchApplies(cwd: string, patchFile: string): Promise<boole
 /** Apply a validated patch file. Resolves the git error on failure. */
 export function applyPatchFile(cwd: string, patchFile: string): Promise<{ ok: true } | { ok: false; error: string }> {
   return new Promise((resolve) => {
-    execFile("git", ["apply", patchFile], { cwd }, (err) => {
+    execFile("git", ["apply", "--recount", patchFile], { cwd }, (err) => {
       resolve(err ? { ok: false, error: String(err.message ?? err) } : { ok: true });
     });
   });

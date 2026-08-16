@@ -23,15 +23,17 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-// The extension imports ./lib/... and typebox relative to its own file, so
-// load it from a temp copy that mirrors the installed layout
-// (extensions/pi-review-gate/). A per-fixture node_modules/typebox symlink
-// keeps ESM resolution self-contained (walking up from os.tmpdir() does not
-// reach the repo, and a global /tmp/node_modules only helps when tmpdir() IS /tmp).
+// The extension imports ../lib/... and typebox relative to its own file, so
+// load it from a temp copy that mirrors the pi-package layout
+// (<pkg>/extensions/ + <pkg>/lib/). A per-fixture node_modules/typebox
+// symlink keeps ESM resolution self-contained (walking up from os.tmpdir()
+// does not reach the repo, and a global /tmp/node_modules only helps when
+// tmpdir() IS /tmp).
 const INSTALL = mkdtempSync(join(tmpdir(), "rg-ext-install-"));
 before(() => {
+  mkdirSync(join(INSTALL, "extensions"), { recursive: true });
   mkdirSync(join(INSTALL, "lib"), { recursive: true });
-  copyFileSync(join(ROOT, "extensions", "review-gate.ts"), join(INSTALL, "review-gate.ts"));
+  copyFileSync(join(ROOT, "extensions", "review-gate.ts"), join(INSTALL, "extensions", "review-gate.ts"));
   for (const f of readdirSync(join(ROOT, "lib"))) {
     copyFileSync(join(ROOT, "lib", f), join(INSTALL, "lib", f));
   }
@@ -45,7 +47,7 @@ after(() => {
 });
 const rgDirs = ((globalThis as { __rgDirs?: string[] }).__rgDirs ??= []);
 
-const { default: reviewGate } = await import(join(INSTALL, "review-gate.ts"));
+const { default: reviewGate } = await import(join(INSTALL, "extensions", "review-gate.ts"));
 
 // ---- fixtures ---------------------------------------------------------------
 

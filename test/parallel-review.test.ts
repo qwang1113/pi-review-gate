@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  SHARD_THRESHOLD_FILES,
+  SHARD_THRESHOLD_LINES,
+  shouldShardReview,
   DEFAULT_REVIEWER_MODEL,
   buildShardPrompt,
   formatShardReviewRecord,
@@ -58,6 +61,42 @@ test("buildShardPrompt names the shard files and forbids edits", () => {
   assert.match(prompt, /READY.*BLOCKED.*NEEDS_HUMAN/);
 });
 
+test("buildShardPrompt includes diff context when shard.diff is provided", () => {
+  const prompt = buildShardPrompt(
+    { label: "shard-1", files: ["src/a.ts"], note: "1 file(s)", diff: "@@ -1,3 +1,4 @@\n+added line" },
+  );
+  assert.match(prompt, /Diff context/);
+  assert.match(prompt, /```diff/);
+  assert.match(prompt, /@@ -1,3 \+1,4 @@/);
+  assert.match(prompt, /for reference only/);
+  assert.match(prompt, /the diff may have drifted/);
+});
+
+test("buildShardPrompt does NOT include diff section when shard.diff is absent", () => {
+  const prompt = buildShardPrompt(
+    { label: "shard-1", files: ["src/a.ts"], note: "1 file(s)" },
+  );
+  assert.doesNotMatch(prompt, /Diff context/);
+  assert.doesNotMatch(prompt, /```diff/);
+});
+
+test("shouldShardReview triggers on file count threshold", () => {
+  assert.equal(shouldShardReview(SHARD_THRESHOLD_FILES - 1, 0), false);
+  assert.equal(shouldShardReview(SHARD_THRESHOLD_FILES, 0), true);
+  assert.equal(shouldShardReview(SHARD_THRESHOLD_FILES + 1, 0), true);
+});
+
+test("shouldShardReview triggers on line count threshold", () => {
+  assert.equal(shouldShardReview(1, SHARD_THRESHOLD_LINES - 1), false);
+  assert.equal(shouldShardReview(1, SHARD_THRESHOLD_LINES), true);
+  assert.equal(shouldShardReview(1, SHARD_THRESHOLD_LINES + 1), true);
+});
+
+test("shouldShardReview returns false when both counts are below thresholds", () => {
+  assert.equal(shouldShardReview(5, 100), false);
+  assert.equal(shouldShardReview(0, 0), false);
+});
+
 test("generateShardReviewScript embeds prompts, model and schema", () => {
   const script = generateShardReviewScript({
     shards: [
@@ -67,7 +106,13 @@ test("generateShardReviewScript embeds prompts, model and schema", () => {
     model: "claude-opus-5:max",
   });
   assert.match(script, /parallel\(shardDefs\.map/);
-  assert.match(script, /agentType: 'reviewer'/);
+  assert.match(script, /agent\(def\.prompt/);
+  // No agentType binding: the shard prompt itself carries the reviewer role.
+  // Binding agents/reviewer.md (systemPromptMode: replace) made pdw load the
+  // full agent definition — its pinned model overrode the resolved one and
+  // the call hung/failed (reproduced). The engine-level excludeTools list is
+  // the write protection.
+  assert.doesNotMatch(script, /agentType/);
   assert.match(script, /claude-opus-5:max/);
   assert.match(script, /shard-1/);
   assert.match(script, /shard-2/);

@@ -24,7 +24,7 @@ import { execFile } from "node:child_process";
 import type { ShipCommandKind } from "./constants.ts";
 import { MODULE_BUCKETS, type ModuleBucket } from "./requirement-size.ts";
 
-/** Fixed default model (user requirement): DeepSeek V4 Flash. */
+/** Fixed default model (user requirement): DeepSeek V4 Flash via the user's own deepseek provider. */
 export const DEFAULT_LLM_GUARD_MODEL = "deepseek/deepseek-v4-flash";
 
 /** Per-call timeout. Flash answers in ~2s; 8s covers cold starts without

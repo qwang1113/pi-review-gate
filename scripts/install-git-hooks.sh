@@ -4,7 +4,23 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-HOOKS_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../hooks" && pwd)"
+
+# Resolve THIS script through any symlinks first: npm/npx expose the package
+# bin as a node_modules/.bin/* symlink, so dirname "$0" would land in .bin and
+# ../hooks would not resolve. Follow the chain to the real file.
+resolve_symlink() {
+  local src="$1" target
+  while [ -L "$src" ]; do
+    target="$(readlink "$src")"
+    case "$target" in
+      /*) src="$target" ;;
+      *)  src="$(cd "$(dirname "$src")" && pwd -P)/$target" ;;
+    esac
+  done
+  printf '%s\n' "$src"
+}
+SELF="$(resolve_symlink "${BASH_SOURCE[0]}")"
+HOOKS_SRC="$(cd "$(dirname "$SELF")/../hooks" && pwd)"
 
 # P1-1: use git rev-parse --git-path hooks for worktree/alternate hook dir support.
 HOOKS_DST="$(git rev-parse --git-path hooks)"

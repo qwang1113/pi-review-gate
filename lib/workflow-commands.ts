@@ -183,8 +183,8 @@ export const WORKFLOW_COMMANDS = {
       "Warn the user about any module estimated above ~120k tokens of context: that size is a sign the boundary is in the wrong place. " +
       "Present the WHOLE table to the user ONCE for edits and approval; do not interrogate module by module. " +
       "Only after the user approves, write .pi/plan/state.json (schema 1, status approved) exactly in the shape defined by " +
-      "the extension's lib/plan-state.ts — resolve it at .pi/extensions/pi-review-gate/lib/plan-state.ts (project install) " +
-      "or ~/.pi/agent/extensions/pi-review-gate/lib/plan-state.ts (global install) — and render PLAN.md from that state " +
+      "the extension's lib/plan-state.ts — resolve it at <package-root>/lib/plan-state.ts (a local-path `pi install` " +
+      "points at the repo itself; a global/npm install puts it at ~/.pi/agent/npm/pi-review-gate/lib/) — and render PLAN.md from that state " +
       "(a pure projection, never parsed back). " +
       "Do not implement anything and do not dispatch a worker in this command. " +
       "Implementation runs in WAVES (see /plan-next): modules whose depends_on are all implemented run concurrently via patch-first workers; " +
@@ -210,7 +210,7 @@ export const WORKFLOW_COMMANDS = {
       "and state_file = .pi/plan/state.json so the tool verifies the wave against computeWave). " +
       "The tool runs the wave's workers IN PARALLEL (read-only, edit/write excluded), validates ownership, persists patches under .pi/plan/patches/ " +
       "and pre-checks git apply. The pdw engine is a HARD dependency: if the tool reports the engine missing, stop and fix the install " +
-      "(re-run scripts/install-global.sh) — there is no serial protocol to fall back to. " +
+      "(re-run the package installer: `pi install` the extension or `npm install` in its repo) — there is no serial protocol to fall back to. " +
       "The module table was already approved by the user, so wave dispatch itself needs NO further confirmation. " +
       "For every module whose patches are ownershipOk and applies=true, apply them with git apply and mark the module implemented. " +
       "A patch that does not apply is NOT silently fixed: send the git error back to that worker and retry once. " +

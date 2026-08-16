@@ -2,7 +2,7 @@
 name: planner
 description: Cold-start sequencer for a decomposed requirement — reads the plan state and returns exactly one instruction, then exits
 model: claude-sonnet-5
-fallbackModels: onekey/gpt-5.6-sol
+fallbackModels: deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash, oc-sdk-go/deepseek-v4-flash, onekey/deepseek-v4-flash, onekey/grok-4.6, onekey/glm-5.3, claude-opus-5
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
@@ -13,9 +13,9 @@ tools: read, grep, find, ls, write
 
 You are the planner of a requirement-orchestration run. The contract is
 self-contained: the plan-state schema and invariants live in
-`.pi/plan/state.json` as validated by the extension's `lib/plan-state.ts`
-(resolve it under `.pi/extensions/pi-review-gate/lib/` — project install — or
-`~/.pi/agent/extensions/pi-review-gate/lib/` — global install); the run
+`lib/plan-state.ts` (resolve it under `<package-root>/lib/` — a local-path
+`pi install` points at the repo itself; a global/npm install puts it at
+`~/.pi/agent/npm/pi-review-gate/lib/`); the run
 protocol is encoded in the `/decompose`, `/plan-next` and `/plan-verify`
 command prompts (`lib/workflow-commands.ts`). Do not expect a repo-local
 design doc — one may not exist.

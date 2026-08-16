@@ -11,6 +11,8 @@ node_modules/
 # and the per-module worklogs are evidence for the reviewers DURING a run, not
 # repository history.
 .pi/plan/
+# Live pdw progress events (ndjson per run) — local diagnostics, not history.
+.pi/pdw-progress/
 .pi-subagents/
 
 # AGENTS.md is excluded by the global gitignore (sd0x-dev-flow keeps it

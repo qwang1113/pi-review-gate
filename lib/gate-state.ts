@@ -362,7 +362,8 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         (typeof parsed.loopGoal !== "object" || parsed.loopGoal === null ||
          typeof parsed.loopGoal.hash !== "string" ||
          !/^[0-9a-f]{64}$/.test(parsed.loopGoal.hash) ||
-         typeof parsed.loopGoal.at !== "string")) {
+         typeof parsed.loopGoal.at !== "string" ||
+         (parsed.loopGoal.reason !== undefined && typeof parsed.loopGoal.reason !== "string"))) {
       delete parsed.loopGoal;
     }
     const migrated = migrateFingerprintVersion(parsed);
@@ -460,7 +461,8 @@ export function saveSidecar(path: string, state: GateState): void {
  * Sharing one worktree between sessions therefore stays unreliable by design;
  * this only removes the gratuitous loss of a verdict that is provably valid.
  *
- * Scope is deliberately narrow: only the two verdict blocks. `bypass`,
+ * Scope is deliberately narrow: only the two verdict blocks and the
+ * incremental-review baseline (`lastReadyReview`). `bypass`,
  * `taskMode`, change flags, scope limits and rounds always stay this
  * session's own — a foreign bypass or advisory mode must never leak in.
  */
@@ -498,6 +500,10 @@ export function mergeConcurrentBindings(
     ...mine,
     review: keepReview ? { ...disk.review } : mine.review,
     precommit: keepPrecommit ? { ...disk.precommit } : mine.precommit,
+    // The incremental-review baseline must survive the carry-over too,
+    // otherwise the next round is forced into a full review even though
+    // the tree it describes was already reviewed.
+    ...(keepReview && disk.lastReadyReview ? { lastReadyReview: disk.lastReadyReview } : {}),
   };
 }
 

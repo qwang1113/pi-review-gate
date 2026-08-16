@@ -822,3 +822,31 @@ test("a migration is reported even when the sidecar had nothing else wrong", () 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// loopGoal — approved-goal confirmation (reason is optional metadata)
+// ---------------------------------------------------------------------------
+
+test("loopGoal: a missing reason keeps old sidecars valid; a string reason round-trips", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  // Old sidecar without a reason field — must keep loading.
+  writeFileSync(path, JSON.stringify({ ...base, loopGoal: { hash: "a".repeat(64), at: "t" } }));
+  assert.deepEqual(loadSidecar(path)?.loopGoal, { hash: "a".repeat(64), at: "t" });
+  // New sidecar with a string reason — must round-trip.
+  writeFileSync(path, JSON.stringify({ ...base, loopGoal: { hash: "a".repeat(64), at: "t", reason: "scope note" } }));
+  assert.deepEqual(loadSidecar(path)?.loopGoal, { hash: "a".repeat(64), at: "t", reason: "scope note" });
+});
+
+test("loopGoal: a non-string reason fails closed to ABSENT (not approved)", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of [42, null, {}, true]) {
+    writeFileSync(path, JSON.stringify({ ...base, loopGoal: { hash: "a".repeat(64), at: "t", reason: bad } }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar itself must stay valid for reason ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.loopGoal, undefined, JSON.stringify(bad));
+  }
+});

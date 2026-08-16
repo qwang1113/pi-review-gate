@@ -516,14 +516,22 @@ export function worktreeTreeOid(cwd: string): string {
     // exit code meaningful, so the catch below is a true fail-closed path.
     // TWO passes, in this order — each covers what the other cannot:
     //
-    //  1. `--renormalize` re-reads every TRACKED file's CONTENT instead of
-    //     trusting the copied stat cache. Backdating alone only makes entries
-    //     whose mtime is NEAR the index look racy; a file carrying an ancient
-    //     preserved mtime (restored from backup, `rsync -a`, an unpacked
-    //     archive) still looks confidently clean, so a same-size edit to it
-    //     stayed invisible — a fail-open that predates this change.
-    //     This pass does NOT add untracked files.
-    //  2. plain `-A` then picks up untracked/new/deleted paths.
+    //  1. plain `-A` picks up untracked/new/deleted paths FIRST. This order
+    //     is load-bearing: `--renormalize` (pass 2) implies `-u` and re-reads
+    //     every TRACKED file's content, and git's `-u` STATS each one — a
+    //     file deleted from the worktree (but still in the index) makes it
+    //     abort with `fatal: unable to stat '…'`, failing the whole
+    //     fingerprint closed (reproduced: deleting a tracked file made
+    //     computeFingerprint unavailable and blocked every commit). Moving
+    //     deletions out of the index first means pass 2 only touches files
+    //     that still exist.
+    //  2. `--renormalize` then re-reads every remaining TRACKED file's
+    //     CONTENT instead of trusting the copied stat cache. Backdating alone
+    //     only makes entries whose mtime is NEAR the index look racy; a file
+    //     carrying an ancient preserved mtime (restored from backup,
+    //     `rsync -a`, an unpacked archive) still looks confidently clean, so
+    //     a same-size edit to it stayed invisible — a fail-open that
+    //     predates this change. This pass does NOT add untracked files.
     //
     // Running only pass 1 silently dropped every untracked file from the tree
     // (a worse fail-open than the one it fixed), so both are required.
@@ -557,8 +565,8 @@ export function worktreeTreeOid(cwd: string): string {
       gitOrNull(cwd, ["update-index", "--no-skip-worktree", "--", ...chunk], env);
     }
 
-    git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
+    git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
 
     const tree = git(cwd, ["write-tree"], env);

@@ -46,6 +46,13 @@ function selfRoots(): readonly string[] {
   //    explore still keeps the L1 ship gate. Everything under /tmp is a
   //    scratch PATH, including any incidental git checkout inside it.
   roots.add("/tmp");
+  // Add /private/tmp EXPLICITLY, not only via realpath: on macOS /tmp is a
+  // symlink to it, but on Linux /tmp is a real dir whose realpath stays
+  // /tmp — there /private/tmp is a syntactically-valid canonical form that
+  // must still classify as scratch so behavior (and the tests) are
+  // platform-independent. realpath still adds the symlink-resolved form for
+  // macOS where the two spellings must be treated as one dir.
+  roots.add("/private/tmp");
 
   // Keep BOTH the plain and the realpath form of every root: a path that
   // does not exist yet (e.g. /tmp/scratch-dir) stays in its plain form while

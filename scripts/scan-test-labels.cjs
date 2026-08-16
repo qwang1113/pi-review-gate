@@ -377,7 +377,81 @@ function lineAt(starts, offset) {
 }
 
 // A test-call head in CODE: it/test/describe (+ .only/.skip …) then `(`.
+//
+// The three standard names alone are NOT enough: a repo may import them under
+// a LOCAL ALIAS (often another language's word — `import { describe as 描述 }
+// from "node:test"`), and abused aliases then dodge the gate because `描述(`
+// never matches an ASCII-only pattern. So the head set is the STANDARD three
+// plus every import-alias bound to one of them found in the same file
+// (`import { it as 应该 }` → `应该` is a test head too). Aliases are matched
+// against a Unicode-aware identifier boundary (the ASCII `\b` cannot see a
+// CJK boundary), while the standard names keep `\b` — see
+// buildTestHeadRegex().
 const HEAD_RE = /\b(it|test|describe)((?:\s*\.\s*\w+)*)\s*\(/g;
+
+/**
+ * Collect test-function import aliases from the file: every binding that
+ * aliases one of `it|test|describe` (`import { describe as 描述 }`, incl.
+ * `.only`/`.skip` are METHODS on the alias, not separate bindings). Both
+ * named bindings (`{ it as x }`) and default-of-known shapes are handled; a
+ * namespace import (`import * as t`) is deliberately NOT treated as a test
+ * head — `t.it('…')` is a member call the same way `foo.it(` is, and the
+ * method-name gate already covers the standard names on it.
+ * Returns the alias identifiers in source order (deduped).
+ */
+function testImportAliases(src) {
+  const aliases = [];
+  const seen = new Set();
+  // import { it as 应该, test as 检查, describe as 描述 } from "...";
+  const namedRe = /\bimport\s*\{\s*([\s\S]*?)\s*\}\s*from\s*[\x27"`][\s\S]*?[\x27"`]\s*;?/g;
+  let m;
+  while ((m = namedRe.exec(src)) !== null) {
+    const body = m[1];
+    // Split top-level commas at brace depth 0 inside the body.
+    let depth = 0;
+    let cur = "";
+    for (const ch of body) {
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      if (ch === "," && depth === 0) {
+        const spec = cur.trim();
+        if (spec && !seen.has(spec)) { seen.add(spec); aliases.push(spec); }
+        cur = "";
+        continue;
+      }
+      cur += ch;
+    }
+    const last = cur.trim();
+    if (last && !seen.has(last)) { seen.add(last); aliases.push(last); }
+  }
+  const out = [];
+  for (const spec of aliases) {
+    // `import { describe as 描述 }` — the IMPORTED name is `describe` (the
+    // framework's), the LOCAL alias is `描述` (what the source calls). Only
+    // bind the alias when the imported name is one of the test functions.
+    const parts = spec.split(/\s+as\s+/i);
+    if (parts.length !== 2) continue;             // plain `{ it }` — standard name
+    const imported = parts[0].trim().replace(/,$/, "");
+    const local = parts[1].trim();
+    if (!/^(it|test|describe)$/.test(imported)) continue;
+    if (!local || !/^[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*$/u.test(local)) continue;
+    if (!out.includes(local)) out.push(local);
+  }
+  return out;
+}
+
+/** Build the per-file test-head matcher: standard names plus import aliases. */
+function buildTestHeadRegex(src) {
+  const aliases = testImportAliases(src);
+  if (aliases.length === 0) return HEAD_RE;
+  // The ASCII `\b` cannot see a CJK boundary, so an alias alternative needs
+  // its own left boundary: not preceded by an identifier char / `.` / `#`.
+  // Positive-lookbehind `(?<![\w$.])` is ES2018 and fine for a node script;
+  // the standard branch keeps its historical `\b` behavior (a member access
+  // `foo.it(` is filtered by isMemberAccess anyway).
+  const aliasAlt = aliases.map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return new RegExp(`(?:\\b(it|test|describe)|(?<![\\w$.#])(?:${aliasAlt}))((?:\\s*\\.\\s*\\w+)*)\\s*\\(`, "g");
+}
 
 /** Not a standalone global `it(`/`test(`/`describe(` call when either:
  *  - the char immediately before is an identifier char or `#`, so the match is
@@ -450,12 +524,13 @@ function analyzeFile(path, src) {
   // first non-English one (which would let a marker silently skip an English
   // neighbour and exempt a non-English call further along).
   const calls = [];
+  const headRe = buildTestHeadRegex(src);
   let m;
-  HEAD_RE.lastIndex = 0;
-  while ((m = HEAD_RE.exec(src)) !== null) {
+  headRe.lastIndex = 0;
+  while ((m = headRe.exec(src)) !== null) {
     const idStart = m.index;
     if (mask[idStart]) continue;                 // inside string/comment/regex
-    if (isMemberAccess(src, idStart)) continue;  // foo.it(
+    if (isMemberAccess(src, idStart)) continue;  // foo.it( / foo.描述(
     const parenIdx = m.index + m[0].length;
     const arg = firstArgString(src, tokens, tokenByStart, parenIdx);
     // A call whose first arg is a static non-English string literal is a
@@ -562,4 +637,4 @@ function main() {
 // exposes the analysis functions — zero behavior change for the hook.
 if (require.main === module) main();
 
-module.exports = { scanFile, analyzeFile, isTestFile, isNonEnglishText };
+module.exports = { scanFile, analyzeFile, isTestFile, isNonEnglishText, testImportAliases };

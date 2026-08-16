@@ -70,17 +70,18 @@ import {
   STRATEGIC_RESET_CHECKLIST,
   requiresFullPrecommit,
   type ShipCommandKind,
-} from "./lib/constants.ts";
-import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "./lib/project-config.ts";
-import { buildGitMemory } from "./lib/git-memory.ts";
-import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "./lib/ship-detect.ts";
+} from "../lib/constants.ts";
+import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
+import { buildGitMemory } from "../lib/git-memory.ts";
+import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
+import { buildAgentsWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveShipRepos,
   resolveCommandRepos,
   resolveToolRepoTarget,
-} from "./lib/repo-resolve.ts";
-import { firstNonEnglish, containsNonLatinLetter } from "./lib/lang-detect.ts";
+} from "../lib/repo-resolve.ts";
+import { firstNonEnglish, containsNonLatinLetter } from "../lib/lang-detect.ts";
 import {
   failedStepNames,
   receiptTotalMs,
@@ -88,17 +89,17 @@ import {
   validatePrecommitReceipt,
   type StepTiming,
   type TestScope,
-} from "./lib/precommit-receipt.ts";
+} from "../lib/precommit-receipt.ts";
 import {
   appendTiming,
   formatPrecommitSummary,
   lastPrecommitTiming,
-} from "./lib/gate-timings.ts";
+} from "../lib/gate-timings.ts";
 import {
   decideReviewScope,
   formatReviewScopeDirective,
   type ReviewScopeDecision,
-} from "./lib/review-scope.ts";
+} from "../lib/review-scope.ts";
 import {
   advisoryChangeToken,
   changedFiles,
@@ -108,8 +109,8 @@ import {
   mayBeGateOwned,
   reviewCoverageFiles,
   worktreeTreeOid,
-} from "./lib/fingerprint.ts";
-import type { Fingerprint } from "./lib/fingerprint.ts";
+} from "../lib/fingerprint.ts";
+import type { Fingerprint } from "../lib/fingerprint.ts";
 import {
   emptyState,
   isPlateaued,
@@ -123,8 +124,8 @@ import {
   sidecarPath,
   unmetRequirements,
   type GateState,
-} from "./lib/gate-state.ts";
-import { parseReviewOutput, parsePrecommitOutput } from "./lib/verdict-parse.ts";
+} from "../lib/gate-state.ts";
+import { parseReviewOutput, parsePrecommitOutput } from "../lib/verdict-parse.ts";
 import {
   evaluateModeChange,
   buildModeConfirmMessage,
@@ -134,7 +135,7 @@ import {
   MODE_CONFIRM_TITLE,
   type TaskMode,
   type TaskModeSource,
-} from "./lib/task-mode.ts";
+} from "../lib/task-mode.ts";
 import {
   createLlmClassifier,
   classifyAiAttribution,
@@ -144,15 +145,15 @@ import {
   createVerdictMemo,
   isSuspiciousShipCandidate,
   type LlmClassifier,
-} from "./lib/llm-classify.ts";
-import { isPiSelfRoot } from "./lib/pi-self.ts";
+} from "../lib/llm-classify.ts";
+import { isPiSelfRoot } from "../lib/pi-self.ts";
 import {
   BASH_WRITE_NUDGE,
   EDIT_DISCIPLINE_DIRECTIVE,
   EDIT_FAILURE_NUDGE,
   looksLikeBashFileWrite,
-} from "./lib/edit-discipline.ts";
-import { projectEditedContent } from "./lib/edit-projection.ts";
+} from "../lib/edit-discipline.ts";
+import { projectEditedContent } from "../lib/edit-projection.ts";
 import {
   LOOP_GOAL_RELPATH,
   LOOP_GOAL_MAX_WRITE_CHARS,
@@ -165,15 +166,15 @@ import {
   readLoopGoal,
   GOAL_CONFIRM_TITLE,
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
-} from "./lib/loop-goal.ts";
+} from "../lib/loop-goal.ts";
 import {
   assessRequirementSize,
   buildDecomposeSuggestion,
   countExitCriteria,
   detectTouchedDirs,
   type ModuleBucket,
-} from "./lib/requirement-size.ts";
-import { fitDialogMessage } from "./lib/dialog-budget.ts";
+} from "../lib/requirement-size.ts";
+import { fitDialogMessage } from "../lib/dialog-budget.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_HISTORY_QUERY,
@@ -197,7 +198,7 @@ import {
   type CopilotSupport,
   type CopilotThread,
   type PrSummary,
-} from "./lib/copilot-review.ts";
+} from "../lib/copilot-review.ts";
 import {
   SENSITIVE_GRANT_TTL_MS,
   addGrant,
@@ -206,19 +207,22 @@ import {
   isGateIntegrityPath,
   normalizeSensitivePath,
   type SensitiveGrant,
-} from "./lib/sensitive-grant.ts";
+} from "../lib/sensitive-grant.ts";
 import {
   blockedMarkerPath,
   recordBlockedMarker,
   reconcileBlockedMarker,
-} from "./lib/blocked-marker.ts";
-import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "./lib/workflow-commands.ts";
+} from "../lib/blocked-marker.ts";
+import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "../lib/workflow-commands.ts";
 import {
   planReviewShards,
   runParallelShardReview,
   formatShardReviewRecord,
-} from "./lib/parallel-review.ts";
-import { parsePlanState } from "./lib/plan-state.ts";
+  shouldShardReview,
+  SHARD_THRESHOLD_FILES,
+  SHARD_THRESHOLD_LINES,
+} from "../lib/parallel-review.ts";
+import { parsePlanState, PLAN_DIR } from "../lib/plan-state.ts";
 import {
   computeWave,
   runWaveWorkflow,
@@ -226,7 +230,7 @@ import {
   validatePatchOwnership,
   checkPatchApplies,
   planDirFor,
-} from "./lib/plan-parallel.ts";
+} from "../lib/plan-parallel.ts";
 import {
   parseArbitrableAction,
   tokenAuthorizes,
@@ -237,7 +241,7 @@ import {
   type ArbitrableAction,
   type BypassToken,
   type TokenBindings,
-} from "./lib/arbitration.ts";
+} from "../lib/arbitration.ts";
 
 const ENTRY_TYPE = "review-gate-state";
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
@@ -857,34 +861,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* best effort — a missing/unreadable sidecar means nothing to warn about */ }
   }
 
+  // ---- TUI widgets (display-only; never throw, never block the gate) ----
+  // Content is built by pure functions in lib/ui-widget.ts and only pushed to
+  // the TUI when it actually changed (pi re-renders on every setWidget call).
+  let lastUiCtx: ExtensionContext | undefined;
+  let lastAgentsWidget = "";
+
   function updateWidget(ctx: ExtensionContext) {
+    lastUiCtx = ctx;
     if (!ctx.hasUI) return;
-    const parts: string[] = [];
-    if (state.bypass.active) {
-      parts.push("gate: BYPASSED");
-    } else if (state.taskMode === "normal") {
-      parts.push("gate: normal (off)");
-    } else if (!state.hasCodeChange && !state.hasDocChange) {
-      if (state.taskMode === "explore") parts.push("gate: explore (advisory)");
-      else parts.push(state.taskMode === "loop" ? "gate: loop · idle" : "gate: undecided");
-    } else {
-      // Explore shows the same live verdict status, tagged advisory — the
-      // agent can edit in this mode, so a static label would hide real state.
-      if (state.taskMode === "explore") parts.push("explore (advisory)");
-      if (state.pausedQuestion) parts.push("paused: awaiting user");
-      if (lastRunAborted) parts.push("paused: user abort (esc)");
-      if (state.scopeLimit) parts.push("scope: session-only");
-      parts.push(`review: ${state.review.verdict}`);
-      parts.push(
-        `precommit: ${state.precommit.verdict}` +
-        (state.precommit.verdict === "PASS" && state.precommit.testScope !== "full" ? " (fast)" : "") +
-        // Where the precommit commands come from: project config (`.pi/review-gate.json`
-        // `precommit` section) or the default detection.
-        ` · ${projectConfig?.precommit ? "cfg" : "auto"}`,
-      );
-      parts.push(`round ${state.rounds.length}/${state.maxRounds}`);
-    }
-    try { ctx.ui.setStatus("review-gate", parts.join(" · ")); } catch { /* non-TUI */ }
+    // belowEditor — sub-agent runs visible in the TUI (running first, with age).
+    try {
+      const agents = scanAgentArtifacts(pathJoin(cwd, ".pi-subagents", "artifacts"), Date.now(), { maxAgeSec: 2 * 3600 });
+      const lines = buildAgentsWidget(agents);
+      const key = lines.join("\n");
+      if (key !== lastAgentsWidget) {
+        lastAgentsWidget = key;
+        ctx.ui.setWidget("review-gate-agents", lines, { placement: "belowEditor" });
+      }
+    } catch { /* display-only */ }
   }
 
   // ---------- user-visible output channels ----------
@@ -2212,6 +2207,99 @@ export default function reviewGate(pi: ExtensionAPI) {
     return { ok: true, files: [...new Set([...tracked.lines, ...untracked.lines])] };
   }
 
+  /** Count total lines in the unified diff of the given files. */
+  async function countDiffLines(
+    cwd: string,
+    files: string[],
+  ): Promise<{ ok: true; lines: number } | { ok: false; error: string }> {
+    const { execFile } = await import("node:child_process");
+    return new Promise((resolve) => {
+      execFile("git", ["diff", "HEAD", "--", ...files], { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+        if (err) {
+          resolve({ ok: false, error: String(err.message ?? err).split("\n")[0] });
+        } else {
+          resolve({ ok: true, lines: stdout.split("\n").length - 1 }); // trailing newline
+        }
+      });
+    });
+  }
+
+  /** Compute per-shard diffs for a set of shards. */
+  async function addDiffContext(
+    cwd: string,
+    shards: Array<{ label: string; files: string[]; note: string }>,
+  ): Promise<Array<{ label: string; files: string[]; note: string; diff?: string }>> {
+    const { execFile } = await import("node:child_process");
+    const results = await Promise.all(
+      shards.map(async (shard) => {
+        if (shard.files.length === 0) return { ...shard };
+        try {
+          const diff = await new Promise<string>((resolve, reject) => {
+            execFile(
+              "git", ["diff", "HEAD", "--", ...shard.files],
+              { cwd, maxBuffer: 4 * 1024 * 1024 },
+              (err, stdout) => {
+                if (err) reject(err);
+                else resolve(stdout);
+              },
+            );
+          });
+          // Cap at 8KB to keep the prompt manageable (the reviewer reads the
+          // actual files anyway; the diff is orientation only).
+          const capped = diff.length > 8192
+            ? diff.slice(0, 8192) + "\n... (diff truncated at 8KB — review the worktree files)"
+            : diff;
+          return { ...shard, diff: capped };
+        } catch {
+          return { ...shard }; // diff unavailable — reviewer reads worktree files
+        }
+      }),
+    );
+    return results;
+  }
+
+  /**
+   * Build a single-shard review prompt (no pdw) for small diffs. The prompt
+   * instructs the agent to run the DEFAULT TWO cross-family reviewers (fable-5
+   * + gpt-5.6-sol chains, both at max thinking) and return both fenced
+   * verdicts — each WITH docSync (there is no separate integration review on
+   * the small-diff path, so the reviewers attest code↔doc themselves) — so
+   * the caller can feed them to record_review unchanged (worst wins).
+   */
+  function buildSingleShardPrompt(
+    files: string[],
+    fileCount: number,
+    lineCount: number,
+    goalText?: string,
+  ): string {
+    const lines = [
+      "## Two-reviewer review (tiered trigger: small diff)",
+      "",
+      `The diff is ${fileCount} file(s), ~${lineCount} line(s) — below the parallel-shard threshold `,
+      `(${SHARD_THRESHOLD_FILES} files / ${SHARD_THRESHOLD_LINES} lines).`,
+      "Run TWO reviewers from different model families over the full change " +
+        "(default: claude-fable-5/anthropic + onekey/gpt-5.6-sol/openai, both max thinking; " +
+        "fall down the pinned chains if unavailable):",
+      "",
+      "### Changed files",
+      ...files.map((f) => `- ${f}`),
+      "",
+      "Each reviewer subagent follows the same instructions as a shard reviewer:",
+      "- Read every changed file in the worktree.",
+      "- Verify from the code (never guess).",
+      "- Report findings with file paths and line numbers.",
+      "- Return a fenced JSON verdict WITH docSync (UPDATED | NOT_NEEDED) — there is NO separate " +
+        "integration review on the small-diff path, so each reviewer attests code↔doc itself.",
+      "- Do NOT edit any file. Do NOT run tests that write files.",
+      "",
+      "Record BOTH full outputs via record_review (worst verdict wins).",
+    ];
+    if (goalText && goalText.trim()) {
+      lines.push("", "### Loop goal", goalText.trim());
+    }
+    return lines.join("\n");
+  }
+
   pi.registerTool({
     name: "run_parallel_shard_review",
     label: "Run Parallel Shard Review",
@@ -2220,14 +2308,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       "shards of the change concurrently, each returning a verdict fence WITHOUT docSync. Returns the " +
       "combined shard record: record it in ONE record_review call (worst verdict wins), then run ONE " +
       "integration reviewer over the whole change recorded ALONE (it carries the docSync attestation). " +
+      "SMALL DIFFS (<20 files AND <500 lines) skip the pdw engine entirely — the tool returns a " +
+      "two-reviewer prompt the agent runs with standard reviewer subagents (two cross-family reviewers, worst wins). " +
       "The pdw engine is a HARD dependency: when it is unavailable the tool reports an installation " +
       "error — there is no serial fallback.",
     parameters: Type.Object({
       repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
       goal: Type.Optional(Type.String({ description: "Loop goal text handed to every shard reviewer" })),
       max_shards: Type.Optional(Type.Integer({ description: "Shard count cap (default 4)" })),
+      model: Type.Optional(Type.String({ description: "Reviewer model spec override (default: pinned judge with fallback resolution)" })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, onUpdate, ctx) {
       const cwd = params.repo ?? ctx.cwd ?? process.cwd();
       try {
         const filesResult = await listChangedFiles(cwd);
@@ -2244,17 +2335,61 @@ export default function reviewGate(pi: ExtensionAPI) {
             details: { available: true, shards: [], reason: "no-changes" },
           };
         }
+
+        // Tiered trigger: count lines and decide whether to shard.
+        const lineResult = await countDiffLines(cwd, files);
+        const lineCount = lineResult.ok ? lineResult.lines : 0;
+        const shouldShard = shouldShardReview(files.length, lineCount);
+
+        if (!shouldShard) {
+          // Small diff: single-shard review without pdw.
+          const prompt = buildSingleShardPrompt(files, files.length, lineCount, params.goal ?? undefined);
+          return {
+            content: [{
+              type: "text",
+              text:
+                `## Tiered trigger: small diff (${files.length} file(s), ~${lineCount} line(s))\n` +
+                `Below the parallel-shard threshold (${SHARD_THRESHOLD_FILES} files / ${SHARD_THRESHOLD_LINES} lines).\n` +
+                `Run TWO cross-family reviewers (not pdw) over the full change — worst verdict wins:\n\n` +
+                prompt,
+            }],
+            details: {
+              available: true,
+              shardCount: 1,
+              tier: "single",
+              fileCount: files.length,
+              lineCount,
+            },
+          };
+        }
+
+        // Large diff: shard and add per-shard diff context.
         const plan = planReviewShards(files, { maxShards: params.max_shards ?? 4 });
+        const shardsWithDiff = await addDiffContext(cwd, plan.shards);
         const outcome = await runParallelShardReview({
           cwd,
-          shards: plan.shards,
+          shards: shardsWithDiff,
           goalText: params.goal ?? undefined,
+          model: params.model ?? undefined,
           modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
+          onProgress: (text: string, progress?: number) => {
+            onUpdate?.({
+              content: [{ type: "text", text }],
+              details: progress !== undefined ? { progress } : {},
+            });
+          },
         });
         if (!outcome.ok) {
           return {
             content: [{ type: "text", text: `parallel shard review failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` }],
-            details: { available: false, reason: outcome.reason, error: outcome.error ?? null },
+            details: {
+              available: false,
+              reason: outcome.reason,
+              error: outcome.error ?? null,
+              runId: outcome.runId,
+              progressFile: outcome.progressFile,
+              engineLogFile: outcome.engineLogFile,
+            },
           };
         }
         const record = formatShardReviewRecord(outcome.shards);
@@ -2263,14 +2398,18 @@ export default function reviewGate(pi: ExtensionAPI) {
           details: {
             available: true,
             shardCount: outcome.shards.length,
+            tier: "parallel",
             failedShards: outcome.failedShards ?? [],
             durationMs: outcome.durationMs,
             agentCount: outcome.agentCount,
+            runId: outcome.runId,
+            progressFile: outcome.progressFile,
+            engineLogFile: outcome.engineLogFile,
           },
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-run scripts/install-global.sh (it installs @quintinshaw/pi-dynamic-workflows into the extension directory).` }],
+          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` }],
           details: { available: false, reason: "tool-failed", error: (err as Error).message },
         };
       }
@@ -2301,7 +2440,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           "(fail-closed; the driver must not invent the wave).",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, onUpdate, ctx) {
       const cwd = params.repo ?? ctx.cwd ?? process.cwd();
       try {
         let modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model: string }>;
@@ -2346,15 +2485,45 @@ export default function reviewGate(pi: ExtensionAPI) {
             };
           }
         }
+        // Fail-closed worklog check: every wave worker is told to "read the
+        // worklog first", so a missing worklog file (a decompose driver that
+        // never wrote .pi/plan/worklog/<id>.md) makes every worker fail or
+        // hallucinate its brief. Refuse to dispatch instead of burning a run.
+        const worklogPlanDir = pathJoin(cwd, PLAN_DIR);
+        const missingWorklogs = modules
+          .filter((m) => !existsSync(pathJoin(worklogPlanDir, m.worklogPath)))
+          .map((m) => pathJoin(worklogPlanDir, m.worklogPath));
+        if (missingWorklogs.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `wave workflow: worklog file(s) missing — ${missingWorklogs.join(", ")}. Create them (module brief + must-haves) before dispatching the wave.`,
+            }],
+            details: { available: false, reason: "missing-worklogs", worklogs: missingWorklogs },
+          };
+        }
         const outcome = await runWaveWorkflow({
           cwd,
           modules: modules.map((m) => ({ ...m, goalText: params.goal ?? undefined })),
           modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
+          onProgress: (text: string, progress?: number) => {
+            onUpdate?.({
+              content: [{ type: "text", text }],
+              details: progress !== undefined ? { progress } : {},
+            });
+          },
         });
         if (!outcome.ok) {
           return {
             content: [{ type: "text", text: `wave workflow failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` }],
-            details: { available: false, reason: outcome.reason, error: outcome.error ?? null },
+            details: {
+              available: false,
+              reason: outcome.reason,
+              error: outcome.error ?? null,
+              runId: outcome.runId,
+              progressFile: outcome.progressFile,
+              engineLogFile: outcome.engineLogFile,
+            },
           };
         }
         const planDir = planDirFor(cwd);
@@ -2393,11 +2562,14 @@ export default function reviewGate(pi: ExtensionAPI) {
             failedModules: outcome.failedModules ?? [],
             durationMs: outcome.durationMs,
             agentCount: outcome.agentCount,
+            runId: outcome.runId,
+            progressFile: outcome.progressFile,
+            engineLogFile: outcome.engineLogFile,
           },
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: `wave workflow failed: ${(err as Error).message}. If the pdw engine is missing, re-run scripts/install-global.sh (it installs @quintinshaw/pi-dynamic-workflows into the extension directory).` }],
+          content: [{ type: "text", text: `wave workflow failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` }],
           details: { available: false, reason: "tool-failed", error: (err as Error).message },
         };
       }
@@ -2732,15 +2904,32 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch {
         approved = false;
       }
+      // The decision may carry a REASON: the user can confirm with a note
+      // (scope nudges the agent should honor) or reject with the objection
+      // (so the agent renegotiates against the real problem instead of
+      // re-asking). Reason input is best-effort — a headless/no-input
+      // environment simply yields no reason and keeps the old behavior.
+      let reason: string | undefined;
+      try {
+        const reasonTitle = approved
+          ? "认可原因(可留空,将随认可记录)"
+          : "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)";
+        const typed = await uiCtx.ui?.input?.(reasonTitle, approved ? "可选:附言/范围提醒" : "必填:哪里不合适");
+        reason = (typed ?? "").trim() || undefined;
+      } catch {
+        reason = undefined;
+      }
       if (!approved) {
         return {
           content: [{
             type: "text",
-            text: "review-gate: the user did NOT approve this goal. Ask what is wrong with it, " +
-              "renegotiate, and submit the corrected goal again — do not start shipping work in " +
-              "the meantime.",
+            text: "review-gate: the user did NOT approve this goal." +
+              (reason
+                ? ` Reason: ${reason}. Renegotiate against THAT objection and submit the corrected goal again — `
+                : " Ask what is wrong with it, renegotiate, and submit the corrected goal again — ") +
+              "do not start shipping work in the meantime.",
           }],
-          details: { approved: false },
+          details: { approved: false, reason: reason ?? null },
         };
       }
 
@@ -2763,17 +2952,18 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
-      state.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString() };
+      state.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString(), ...(reason ? { reason } : {}) };
       persist(uiCtx);
-      log(`loop goal approved by the user (${goalText.length} chars)`);
+      log(`loop goal approved by the user (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
       return {
         content: [{
           type: "text",
           text: `review-gate: goal approved and written to ${LOOP_GOAL_RELPATH}. Work to it; if it has to ` +
             "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
-            "yourself drops the approval and blocks shipping).",
+            "yourself drops the approval and blocks shipping)." +
+            (reason ? `\nUser's note on approval: ${reason}` : ""),
         }],
-        details: { approved: true },
+        details: { approved: true, reason: reason ?? null },
       };
     },
   });
@@ -3924,7 +4114,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         [...problems, ...completion].map((p) => `- ${p}`).join("\n") +
         (problems.length > 0
           ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
-            "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute."
+            "Continue: fix → re-review → record_review → precommit → declare_done. " +
+            "If you already asked the user a question and are waiting on their answer " +
+            "(grill questions while negotiating the loop goal, a product/design decision, " +
+            "missing access) — call pause_for_question with the COMPLETE question and END the " +
+            "turn instead of re-asking or working on. The user's next message resumes the loop. " +
+            "Do not summarize; execute."
           : `\n(completion continuation ${completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
             (goalOnly
               ? "The only open item is the unapproved loop goal. If you already asked the user a " +
@@ -4493,6 +4688,16 @@ export default function reviewGate(pi: ExtensionAPI) {
           : "All gates satisfied — you may ship.")
     };
   });
+
+  // Refresh the TUI widgets periodically while sub-agents run: agent_settled
+  // only fires for the MAIN session, so a turn spent waiting on a sub-agent
+  // would otherwise freeze the running-agents list. One cheap dir scan + a few
+  // small file reads every 5s, content-compared inside updateWidget; .unref()
+  // so the timer never keeps the process alive. Display-only — no gate reads
+  // this state.
+  setInterval(() => {
+    if (lastUiCtx) updateWidget(lastUiCtx);
+  }, 5000).unref();
 }
 
 function contentText(content: unknown): string {

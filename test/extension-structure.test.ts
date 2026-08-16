@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,7 +12,7 @@ test("loop goal: injected ONLY in loop mode, before the unarmed early-return", (
   // clean (that is the whole point — set the exit contract BEFORE editing), so
   // it must sit after the explore early-return and before the
   // `!gateArmed && problems.length === 0` early-return.
-  assert.match(SRC, /from "\.\/lib\/loop-goal\.ts"/);
+  assert.match(SRC, /from "\.\.\/lib\/loop-goal\.ts"/);
   // Anchor on the REGISTRATION, not the bare word: "before_agent_start" also
   // appears in the file header comment, which would put the explore anchor
   // above the whole handler and make the ordering assertion vacuous.
@@ -82,7 +82,7 @@ test("blocked marker: every call site reclaims by ownership, none unlinks uncond
   // well-formed sidecar — fail-closed degraded to fail-open.
   assert.doesNotMatch(SRC, /unlinkSync/, "the extension must not delete the marker directly");
   assert.doesNotMatch(SRC, /FAILED_WRITE/, "the legacy content-free marker must be gone");
-  assert.match(SRC, /from "\.\/lib\/blocked-marker\.ts"/);
+  assert.match(SRC, /from "\.\.\/lib\/blocked-marker\.ts"/);
 
   const reclaims = SRC.match(/reconcileBlockedMarker\(/g) ?? [];
   assert.equal(reclaims.length, 3,
@@ -121,7 +121,7 @@ test("edits under gate-owned dirs do NOT arm the gate (writing a loop goal must 
 });
 
 test("extension imports from local lib/ (single source of truth)", () => {
-  assert.ok(SRC.includes('./lib/constants.ts'), "should import from ./lib/constants.ts");
+  assert.ok(SRC.includes('../lib/constants.ts'), "should import from ../lib/constants.ts (package-root lib/)");
   assert.match(SRC, /\bisCodeFile\b/);
   assert.match(SRC, /\bisDocFile\b/);
   assert.match(SRC, /\bcoalesceToolPath\b/);
@@ -263,6 +263,21 @@ test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in 
   assert.ok(injectAt > start, "agent_settled must contain the RESUME injection");
   const beforeInject = SRC.slice(start, injectAt);
   assert.match(beforeInject, /if \(state\.pausedQuestion\) return;/);
+});
+
+test("RESUME text: the unmet-gates branch also tells a waiting agent to pause_for_question", () => {
+  // An agent that ASKED a grill/decision question but did not (yet) call
+  // pause_for_question has no pausedQuestion set, so the auto-continuation
+  // fires. The unmet-gates resume text must then REMIND it to pause instead
+  // of blindly continuing to work — otherwise the follow-up steers the agent
+  // away from the question it is already waiting on (live regression: agent
+  // asked "决策 3 of 3", RESUME said only "Continue: fix → re-review …").
+  const start = SRC.indexOf('pi.on("agent_settled"');
+  const end = SRC.indexOf("// ---------- lifecycle ----------", start);
+  const body = SRC.slice(start, end);
+  // The main branch (problems > 0) must mention pause_for_question.
+  assert.match(body, /problems\.length > 0[\s\S]{0,800}?pause_for_question/s,
+    "unmet-gates resume must advise pause_for_question when the agent waits on the user");
 });
 
 test("pause resume: any non-extension input clears the pause (interactive AND rpc users)", () => {
@@ -941,6 +956,21 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   assert.match(body, /LOOP_GOAL_MAX_WRITE_CHARS/, "the goal must be length-bounded");
 });
 
+test("propose_loop_goal: confirm/reject may carry a user REASON (input after the dialog)", () => {
+  // The user can answer "确认 + 原因" / "拒绝 + 原因" — a reason input follows
+  // the Yes/No dialog. A rejection reason must be handed back to the agent so
+  // it renegotiates against the real objection; an approval reason is
+  // persisted with the confirmation and echoed to the agent.
+  const start = SRC.indexOf('name: "propose_loop_goal"');
+  assert.ok(start > 0);
+  const body = SRC.slice(start, start + 8000);
+  assert.match(body, /uiCtx\.ui\?\..*input/, "a reason input must follow the confirm dialog");
+  assert.match(body, /did NOT approve this goal\."/, "rejection path must exist");
+  assert.match(body, /Reason: \$\{reason\}/, "rejection reason must reach the agent");
+  assert.match(body, /\.\.\.\(reason \? \{ reason \} : \{\}\)/, "approval reason must be persisted");
+  assert.match(body, /User's note on approval/, "approval reason must be echoed to the agent");
+});
+
 // ---------------------------------------------------------------------------
 // Structural: the extension's `lib/` bindings must actually be imported.
 //
@@ -1207,7 +1237,7 @@ test("LLM guards: every call site is gated on its llmGuards config flag", () => 
 test("L6 edit-time check scans the FULL projected file, not newText fragments", () => {
   // P1 regression guard: the extension must project via lib/edit-projection.ts.
   assert.match(SRC, /projectEditedContent\(/);
-  assert.ok(SRC.includes('./lib/edit-projection.ts'), "must import lib/edit-projection.ts");
+  assert.ok(SRC.includes('../lib/edit-projection.ts'), "must import lib/edit-projection.ts");
   // and the label check runs inside the edit-tool branch before returning
   const editBranch = SRC.indexOf("EDIT_TOOL_NAMES.has(event.toolName)");
   const labelCheck = SRC.indexOf("checkTestLabels(");
@@ -1461,4 +1491,46 @@ test("timings are appended, never read back into a decision", () => {
   const readAt = SRC.indexOf("lastPrecommitTiming(");
   assert.ok(readAt > statusAt, "the only timings read must be inside /gate-status");
   assert.ok(!/unmetRequirements\([^)]*Timing/.test(SRC), "no timing value may enter the ship authority");
+});
+
+test("the extension never calls require() (ESM type-stripped runtime)", () => {
+  // Pi loads these .ts sources with node's type stripping in ESM mode, where
+  // `require` is undefined — a call would throw ReferenceError the first time
+  // that line runs (a small-diff single-shard prompt did exactly this until
+  // the constants were imported instead). The extension must import statically.
+  assert.doesNotMatch(SRC, /require\(/);
+  assert.match(SRC, /SHARD_THRESHOLD_FILES/);
+  assert.match(SRC, /SHARD_THRESHOLD_LINES/);
+});
+
+// ---- Tiered parallel review trigger ----
+
+test("tiered trigger: shouldShardReview is imported and used in run_parallel_shard_review", () => {
+  assert.match(SRC, /shouldShardReview/);
+  assert.match(SRC, /SHARD_THRESHOLD_FILES/);
+  assert.match(SRC, /SHARD_THRESHOLD_LINES/);
+  assert.match(SRC, /countDiffLines/);
+  assert.match(SRC, /addDiffContext/);
+  assert.match(SRC, /tier: "single"/);
+  assert.match(SRC, /tier: "parallel"/);
+});
+
+// P0 regression (pi package layout): pi loads the extension entry IN PLACE via
+// jiti, so every relative import must resolve to a REAL sibling path — the old
+// `./lib/*` specifiers only worked because install-global.sh copied lib/
+// next to review-gate.ts (that installer is gone). This test would have
+// caught the break immediately.
+test("extension entry's relative imports resolve to existing files (package layout)", () => {
+  const entry = join(ROOT, "extensions", "review-gate.ts");
+  const src = readFileSync(entry, "utf8");
+  const imports = [...src.matchAll(/from "(\.\.[^"]+|\.\/[^"]+)"/g)].map((m) => m[1]);
+  assert.ok(imports.length > 10, `expected many relative imports, found ${imports.length}`);
+  const missing = imports
+    .map((spec) => ({ spec, abs: resolve(dirname(entry), spec) }))
+    .filter(({ abs }) => !existsSync(abs));
+  assert.deepEqual(
+    missing.map((m) => `${m.spec} → ${m.abs}`),
+    [],
+    "relative imports must resolve to real files under the package layout",
+  );
 });
