@@ -2918,15 +2918,32 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch {
         approved = false;
       }
+      // The decision may carry a REASON: the user can confirm with a note
+      // (scope nudges the agent should honor) or reject with the objection
+      // (so the agent renegotiates against the real problem instead of
+      // re-asking). Reason input is best-effort — a headless/no-input
+      // environment simply yields no reason and keeps the old behavior.
+      let reason: string | undefined;
+      try {
+        const reasonTitle = approved
+          ? "认可原因(可留空,将随认可记录)"
+          : "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)";
+        const typed = await uiCtx.ui?.input?.(reasonTitle, approved ? "可选:附言/范围提醒" : "必填:哪里不合适");
+        reason = (typed ?? "").trim() || undefined;
+      } catch {
+        reason = undefined;
+      }
       if (!approved) {
         return {
           content: [{
             type: "text",
-            text: "review-gate: the user did NOT approve this goal. Ask what is wrong with it, " +
-              "renegotiate, and submit the corrected goal again — do not start shipping work in " +
-              "the meantime.",
+            text: "review-gate: the user did NOT approve this goal." +
+              (reason
+                ? ` Reason: ${reason}. Renegotiate against THAT objection and submit the corrected goal again — `
+                : " Ask what is wrong with it, renegotiate, and submit the corrected goal again — ") +
+              "do not start shipping work in the meantime.",
           }],
-          details: { approved: false },
+          details: { approved: false, reason: reason ?? null },
         };
       }
 
@@ -2949,17 +2966,18 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
-      state.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString() };
+      state.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString(), ...(reason ? { reason } : {}) };
       persist(uiCtx);
-      log(`loop goal approved by the user (${goalText.length} chars)`);
+      log(`loop goal approved by the user (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
       return {
         content: [{
           type: "text",
           text: `review-gate: goal approved and written to ${LOOP_GOAL_RELPATH}. Work to it; if it has to ` +
             "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
-            "yourself drops the approval and blocks shipping).",
+            "yourself drops the approval and blocks shipping)." +
+            (reason ? `\nUser's note on approval: ${reason}` : ""),
         }],
-        details: { approved: true },
+        details: { approved: true, reason: reason ?? null },
       };
     },
   });

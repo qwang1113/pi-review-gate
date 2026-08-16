@@ -362,7 +362,8 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         (typeof parsed.loopGoal !== "object" || parsed.loopGoal === null ||
          typeof parsed.loopGoal.hash !== "string" ||
          !/^[0-9a-f]{64}$/.test(parsed.loopGoal.hash) ||
-         typeof parsed.loopGoal.at !== "string")) {
+         typeof parsed.loopGoal.at !== "string" ||
+         (parsed.loopGoal.reason !== undefined && typeof parsed.loopGoal.reason !== "string"))) {
       delete parsed.loopGoal;
     }
     const migrated = migrateFingerprintVersion(parsed);

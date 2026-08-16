@@ -956,6 +956,21 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   assert.match(body, /LOOP_GOAL_MAX_WRITE_CHARS/, "the goal must be length-bounded");
 });
 
+test("propose_loop_goal: confirm/reject may carry a user REASON (input after the dialog)", () => {
+  // The user can answer "确认 + 原因" / "拒绝 + 原因" — a reason input follows
+  // the Yes/No dialog. A rejection reason must be handed back to the agent so
+  // it renegotiates against the real objection; an approval reason is
+  // persisted with the confirmation and echoed to the agent.
+  const start = SRC.indexOf('name: "propose_loop_goal"');
+  assert.ok(start > 0);
+  const body = SRC.slice(start, start + 8000);
+  assert.match(body, /uiCtx\.ui\?\..*input/, "a reason input must follow the confirm dialog");
+  assert.match(body, /did NOT approve this goal\."/, "rejection path must exist");
+  assert.match(body, /Reason: \$\{reason\}/, "rejection reason must reach the agent");
+  assert.match(body, /\.\.\.\(reason \? \{ reason \} : \{\}\)/, "approval reason must be persisted");
+  assert.match(body, /User's note on approval/, "approval reason must be echoed to the agent");
+});
+
 // ---------------------------------------------------------------------------
 // Structural: the extension's `lib/` bindings must actually be imported.
 //

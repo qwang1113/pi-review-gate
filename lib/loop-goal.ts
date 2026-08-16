@@ -80,6 +80,14 @@ export interface LoopGoalConfirmation {
   hash: string;
   /** ISO time of the user's approval. */
   at: string;
+  /**
+   * Optional user-supplied reason carried with the decision: the user may
+   * confirm WITH a note (scope nudges the agent should honor) or reject
+   * WITH the reason (so the agent renegotiates against the real objection
+   * instead of re-asking). Never part of the hash — a reason is metadata,
+   * not goal text.
+   */
+  reason?: string;
 }
 
 /**
