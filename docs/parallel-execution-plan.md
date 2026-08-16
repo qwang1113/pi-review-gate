@@ -157,7 +157,11 @@ back to.
   excludeTools list is the write protection; the model is resolved from
   `DEFAULT_REVIEWER_MODEL` with a fallback candidate list via
   `resolveBestModel`, so a pinned model missing from the user's models.json
-  never falls back to an unauthenticated provider), each with a
+  never falls back to an unauthenticated provider; `resolveBestModel` also
+  enforces the hard-coded cost allowlist `isModelAllowed` — the opencode-go
+  provider may only run `deepseek-v4-flash` (every other opencode-go model
+  is billed per-use and explicitly forbidden), while all other providers are
+  unrestricted), each with a
   structured-output schema that carries NO docSync (a shard cannot attest the
   whole change). The main agent records every shard's full raw output in ONE
   `record_review` call (worst verdict wins, same as serial), then runs ONE

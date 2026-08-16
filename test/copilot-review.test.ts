@@ -19,9 +19,12 @@ import {
   evaluateCopilot,
   isCopilotAuthor,
   isCopilotOutstanding,
+  isUnknownJsonFieldError,
+  PR_VIEW_JSON_FIELDS,
   parseCopilotHistoryProbe as historyProbe,
   parseCopilotPayload,
   decideCopilotSupport,
+  decidePrView,
   isCopilotOwnerAllowed,
   parseNameWithOwner,
   parsePrView,
@@ -89,6 +92,72 @@ test("gh payloads that are garbage parse to 'no data', not to an exception", () 
   for (const bad of ["", "{}", "not json", '{"data":{"repository":null}}']) {
     assert.equal(parseCopilotPayload(bad), undefined, bad);
   }
+});
+
+test("REGRESSION: legacy gh without headRefOid still resolves a PR (timestamp-anchored fallback)", () => {
+  // gh 2.4.0 (measured) rejects `--json number,headRefOid,url,state` with
+  // `Unknown JSON field: "headRefOid"` — resolveOpenPr retries with the
+  // legacy field set, and parsePrView must yield a usable PrSummary whose
+  // head is null (analyzeCopilot then anchors proof on timestamps).
+  assert.equal(
+    isUnknownJsonFieldError('Unknown JSON field: "headRefOid"'),
+    true,
+  );
+  assert.equal(
+    isUnknownJsonFieldError("no pull requests found for branch \"main\""),
+    false,
+  );
+  assert.equal(isUnknownJsonFieldError(""), false);
+  assert.deepEqual(
+    parsePrView('{"number":12,"url":"https://github.com/o/r/pull/12","state":"OPEN"}'),
+    { number: 12, head: null, url: "https://github.com/o/r/pull/12", state: "OPEN" },
+  );
+  // The legacy list must not name a field legacy gh rejects.
+  assert.ok(PR_VIEW_JSON_FIELDS.legacy.includes("number"));
+  assert.ok(!PR_VIEW_JSON_FIELDS.legacy.includes("headRefOid"));
+  assert.ok(PR_VIEW_JSON_FIELDS.modern.includes("headRefOid"));
+});
+
+test("decidePrView: every version-drift branch is behavior-locked (P1: modern→legacy + error choice)", () => {
+  const modernOk = {
+    ok: true,
+    stdout: '{"number":12,"headRefOid":"deadbeef","url":"https://github.com/o/r/pull/12","state":"OPEN"}',
+    stderr: "",
+  };
+  const legacyFieldError = {
+    ok: false,
+    stdout: "",
+    stderr: 'Unknown JSON field: "headRefOid"',
+  };
+  const legacyOk = {
+    ok: true,
+    stdout: '{"number":12,"url":"https://github.com/o/r/pull/12","state":"OPEN"}',
+    stderr: "",
+  };
+  const noPr = { ok: false, stdout: "", stderr: 'no pull requests found for branch "main"' };
+
+  // modern ok → its payload wins.
+  assert.deepEqual(decidePrView(modernOk, undefined), { ok: true, pr: { number: 12, head: "deadbeef", url: "https://github.com/o/r/pull/12", state: "OPEN" } });
+  // modern ok but unparseable → its own error, no legacy call needed.
+  assert.deepEqual(decidePrView({ ok: true, stdout: "nope", stderr: "" }, undefined), {
+    ok: false,
+    error: "`gh pr view` returned no recognizable pull request",
+  });
+  // modern failed for a REAL reason (no PR) → no retry, real cause reported.
+  assert.deepEqual(decidePrView(noPr, legacyOk), { ok: false, error: 'no pull requests found for branch "main"' });
+  // modern field-whitelist error + legacy ok → legacy payload wins (head null).
+  assert.deepEqual(decidePrView(legacyFieldError, legacyOk), { ok: true, pr: { number: 12, head: null, url: "https://github.com/o/r/pull/12", state: "OPEN" } });
+  // modern field-whitelist error + legacy ALSO failed → THE LEGACY error wins
+  // (the whitelist error would mask the real cause).
+  assert.deepEqual(decidePrView(legacyFieldError, noPr), { ok: false, error: 'no pull requests found for branch "main"' });
+  // modern field-whitelist error, legacy undefined (caller skipped the retry)
+  // → falls back to the modern error text.
+  assert.deepEqual(decidePrView(legacyFieldError, undefined), { ok: false, error: 'Unknown JSON field: "headRefOid"' });
+  // empty stderr → the caller's fallback text.
+  assert.deepEqual(decidePrView({ ok: false, stdout: "", stderr: "" }, undefined), {
+    ok: false,
+    error: "`gh pr view` failed (gh missing, not authenticated, or no PR)",
+  });
 });
 
 test("owner/name comes from gh, with a host-agnostic URL fallback", () => {

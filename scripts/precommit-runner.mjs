@@ -829,6 +829,14 @@ if (asJson) {
   }
   console.log(`\nTotal: ${result.totalMs}ms`);
   console.log("");
+  // testScope skipped means the fast lane dropped the test step entirely: a
+  // PASS here did NOT execute the test suite. Say so in the human report —
+  // silently "PASS" next to a zero-test run is exactly the trap users hit.
+  if (testScope === "skipped" && !anyFail && anyRan) {
+    console.log("⚠️  WARNING: no tests were run in this lane (no related-test strategy for the test script);");
+    console.log("    a `git push` / `gh pr create` still requires a full run that executes the suite.");
+    console.log("");
+  }
   console.log(overall);
 }
 

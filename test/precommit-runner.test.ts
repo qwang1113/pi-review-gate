@@ -399,6 +399,13 @@ test("config: full lane uses its own configured test command; fast lane falls ba
   const fast = runReceipt(dir);
   assert.equal(fast.code, 0);
   assert.equal(fast.receipt!.testScope, "skipped");
+  // REGRESSION (P0b): a skipped test step must be LOUD in the human report —
+  // a PASS next to a zero-test run is the silent-failure trap this batch
+  // exists to kill.
+  assert.match(fast.out, /WARNING: no tests were run in this lane/,
+    "a fast PASS with testScope skipped must print the no-tests warning");
+  assert.match(fast.out, /\[pi-review-gate\]|\u26a0\ufe0f/,
+    "the warning must be visually prominent");
   // full: configured to use the failing `test` script → FAIL.
   const full = runReceipt(dir, ["--mode", "full"]);
   assert.equal(full.code, 1);

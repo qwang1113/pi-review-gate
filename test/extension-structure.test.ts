@@ -1428,6 +1428,43 @@ test("a released Copilot cycle still has to report what it left unhandled", () =
     "each Copilot state transition must be written to the audit log");
 });
 
+test("REGRESSION: resolveOpenPr must fall back for gh versions without headRefOid", () => {
+  // gh 2.4.0 rejects `--json number,headRefOid,url,state` with
+  // `Unknown JSON field: "headRefOid"` — the audit log showed every Copilot
+  // cycle released UNSUPPORTED on request because resolveOpenPr never
+  // retried. The modern attempt must be followed by a legacy retry.
+  const at = SRC.indexOf("async function resolveOpenPr(");
+  assert.ok(at > 0, "resolveOpenPr must exist");
+  const body = SRC.slice(at, SRC.indexOf("\n  }\n", at) + 4);
+  assert.match(body, /PR_VIEW_JSON_FIELDS\.modern/, "the first attempt must use the modern field set");
+  assert.match(body, /PR_VIEW_JSON_FIELDS\.legacy/, "the legacy retry must use the legacy field set");
+  assert.match(body, /decidePrView\(/, "the control flow must delegate to the pure decision helper");
+  assert.match(body, /isUnknownJsonFieldError\(modern\.stderr\)/,
+    "the legacy retry must be conditional on the field-whitelist error (P2: never retry for a real failure)");
+});
+
+test("REGRESSION (P0b): the no-tests-warning is wired into the tool result and /gate-status", () => {
+  // The runner prints its own warning; the EXTENSION must carry the same
+  // message into the run_precommit tool result and /gate-status, or the
+  // agent would see a bare PASS. Structural assertions pin the strings.
+  const precommitAt = SRC.indexOf('name: "run_precommit"');
+  assert.ok(precommitAt > 0, "run_precommit must exist");
+  const toolBody = SRC.slice(precommitAt, SRC.indexOf("pi.registerTool({", precommitAt + 1));
+  assert.match(toolBody, /skippedNote = outcome\.verdict === "PASS" && outcome\.testScope === "skipped"/,
+    "the tool result must build a skipped warning");
+  assert.match(toolBody, /NO tests ran in this lane/,
+    "the warning text must name the dropped test step");
+  assert.ok(toolBody.indexOf("skippedNote") > toolBody.indexOf("pushNote"),
+    "the skipped warning must ride in the same PASS detail as the lane note");
+  const statusAt = SRC.indexOf('pi.registerCommand("gate-status"');
+  assert.ok(statusAt > 0, "gate-status must exist");
+  const statusBody = SRC.slice(statusAt, SRC.indexOf("pi.registerCommand(", statusAt + 1));
+  assert.match(statusBody, /tests were NOT run in this lane/,
+    "gate-status must surface the skipped test step");
+  assert.match(statusBody, /testScope === "skipped"/,
+    "the gate-status warning must be keyed on the skipped scope");
+});
+
 test("check_copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {
   // The loop this closes: request released the cycle as EXHAUSTED, the next
   // check re-derived it as ARMED, and declare_done was blocked again.

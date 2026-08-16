@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 
 import { runParallelShardReview } from "../lib/parallel-review.ts";
 import { runWaveWorkflow } from "../lib/plan-parallel.ts";
-import { resolveBestModel } from "../lib/pdw-bridge.ts";
+import { isModelAllowed, resolveBestModel } from "../lib/pdw-bridge.ts";
 
 /**
  * A stub WorkflowAgentRunner mirroring the PRODUCTION shape: for a schema'd
@@ -25,6 +25,25 @@ function stubRunner(byLabel: Record<string, unknown>): { run: (prompt: string, o
     },
   };
 }
+
+test("USER REQUIREMENT: opencode-go may only run deepseek-v4-flash", () => {
+  // The registry lists every opencode-go model; the allowlist is what stops a
+  // pinned candidate from silently landing on an expensive one.
+  assert.equal(isModelAllowed({ provider: "opencode-go", id: "deepseek-v4-flash" }), true);
+  assert.equal(isModelAllowed({ provider: "opencode-go", id: "qwen3.8-max" }), false);
+  assert.equal(isModelAllowed({ provider: "opencode-go", id: "gpt-5.6-luna" }), false);
+  assert.equal(isModelAllowed({ provider: "opencode-go", id: "deepseek-v4-pro" }), false);
+  // Every other provider is unrestricted (claude / onekey / ... may be added
+  // later and must not be blocked by this rule).
+  assert.equal(isModelAllowed({ provider: "anthropic", id: "claude-fable-5" }), true);
+  assert.equal(isModelAllowed({ provider: "onekey", id: "gpt-5.6-sol" }), true);
+  assert.equal(isModelAllowed({ provider: "opencode-go", id: "DEEPSEEK-V4-FLASH" }), false,
+    "id match is exact (registry ids are lowercase)");
+  // Malformed entries are rejected (fail-closed: never trust a bare string).
+  assert.equal(isModelAllowed(null), false);
+  assert.equal(isModelAllowed("opencode-go/qwen3.8-max"), false);
+  assert.equal(isModelAllowed({ provider: "opencode-go" }), false);
+});
 
 test("runParallelShardReview really fans out through the workflow engine", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "pdw-review-"));
@@ -276,6 +295,38 @@ test("resolveBestModel picks the first candidate the registry can resolve", asyn
   );
 });
 
+test("USER REQUIREMENT: candidate loop skips a resolvable but disallowed opencode-go model", async () => {
+  // opencode-go/deepseek-v4-pro resolves AND has auth, but the allowlist
+  // forbids it — the loop must skip it and take the next candidate. Without
+  // this test, deleting the isModelAllowed call at the loop site leaves the
+  // whole suite green while a pinned candidate silently lands on the
+  // expensive model.
+  const registry = mkRegistry([
+    { provider: "opencode-go", id: "deepseek-v4-pro" },
+    { provider: "onekey", id: "gpt-5.6-sol" },
+  ]);
+  assert.equal(
+    await resolveBestModel(["opencode-go/deepseek-v4-pro", "onekey/gpt-5.6-sol"], registry),
+    "onekey/gpt-5.6-sol",
+  );
+});
+
+test("USER REQUIREMENT: registry fallback picks flash over a disallowed opencode-go model", async () => {
+  // Neither pinned candidate resolves; the getAll fallback must NOT pick
+  // opencode-go/deepseek-v4-pro (resolvable + auth, but disallowed) — it
+  // must pick deepseek-v4-flash. Without this test, deleting the
+  // isModelAllowed call at the fallback site leaves the suite green while
+  // the fallback silently chooses the expensive model.
+  const registry = mkRegistry([
+    { provider: "opencode-go", id: "deepseek-v4-pro" },
+    { provider: "opencode-go", id: "deepseek-v4-flash" },
+  ]);
+  assert.equal(
+    await resolveBestModel(["claude-fable-5"], registry),
+    "opencode-go/deepseek-v4-flash",
+  );
+});
+
 test("resolveBestModel falls back to an authenticatable registry model when none of the pinned candidates resolve", async () => {
   // The pinned judge chain (claude-fable-5 etc.) does not exist in a minimal
   // registry that only carries e.g. opencode-go/deepseek-v4-flash. Returning
@@ -298,16 +349,18 @@ test("resolveBestModel keeps the pinned thinking suffix on the registry fallback
 });
 
 test("resolveBestModel skips registry candidates without configured auth when falling back", async () => {
+  // opencode-go is allowlisted to deepseek-v4-flash only (USER REQUIREMENT),
+  // so this scenario uses a different provider to isolate the auth rule.
   const registry = mkRegistry(
     [
-      { provider: "opencode-go", id: "deepseek-v4-flash" },
-      { provider: "opencode-go", id: "deepseek-v4-pro" },
+      { provider: "onekey", id: "deepseek-v4-flash" },
+      { provider: "onekey", id: "deepseek-v4-pro" },
     ],
     (m) => m.id !== "deepseek-v4-flash",
   );
   assert.equal(
     await resolveBestModel(["claude-fable-5"], registry),
-    "opencode-go/deepseek-v4-pro",
+    "onekey/deepseek-v4-pro",
   );
 });
 

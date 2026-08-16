@@ -184,8 +184,11 @@ import {
   armCopilotReview,
   copilotProblems,
   decideCopilotSupport,
+  decidePrView,
   evaluateCopilot,
   isCopilotOutstanding,
+  isUnknownJsonFieldError,
+  PR_VIEW_JSON_FIELDS,
   parseCopilotHistoryProbe,
   parseCopilotPayload,
   parseNameWithOwner,
@@ -1585,11 +1588,24 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** The PR for the repo's current branch, or the reason there is none. */
   async function resolveOpenPr(dir: string, signal?: AbortSignal): Promise<{ pr?: PrSummary; error?: string }> {
-    const res = await runGh(["gh", "pr", "view", "--json", "number,headRefOid,url,state"], dir, { signal });
-    if (!res.ok) return { error: ghError(res, "`gh pr view` failed (gh missing, not authenticated, or no PR)") };
-    const pr = parsePrView(res.stdout);
-    if (!pr) return { error: "`gh pr view` returned no recognizable pull request" };
-    return { pr };
+    // gh's --json field whitelist is version-dependent: `headRefOid` exists
+    // only in newer gh builds. Legacy gh (measured: 2.4.0) rejects the modern
+    // list with `Unknown JSON field: "headRefOid"` BEFORE even looking up
+    // the PR — so only retry with the legacy list when that whitelist error
+    // is actually what failed (the decision logic lives in the pure
+    // lib/copilot-review.ts decidePrView; it also makes sure THE RETRY's
+    // error is reported when it fails — the whitelist error would mask the
+    // real cause, e.g. "no pull requests found"). `analyzeCopilot` anchors
+    // proof on timestamps when head is absent (documented fallback).
+    const modern = await runGh(["gh", "pr", "view", "--json", PR_VIEW_JSON_FIELDS.modern], dir, { signal });
+    const decision = decidePrView(
+      modern,
+      isUnknownJsonFieldError(modern.stderr)
+        ? await runGh(["gh", "pr", "view", "--json", PR_VIEW_JSON_FIELDS.legacy], dir, { signal })
+        : undefined,
+    );
+    if (decision.ok) return { pr: decision.pr };
+    return { error: decision.error };
   }
 
   /** owner/name for the repo, preferring gh's own answer over URL parsing. */
@@ -2685,8 +2701,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       const pushNote = outcome.verdict === "PASS" && outcome.testScope !== "full"
         ? ' This clears a `git commit`; `git push` / `gh pr create` need a run with mode "full".'
         : "";
+      // testScope skipped = the test step was DROPPED (no related-test
+      // strategy), so the commit-time PASS never executed the suite. This
+      // must be loud: a user seeing only "PASS" would reasonably assume
+      // tests ran.
+      const skippedNote = outcome.verdict === "PASS" && outcome.testScope === "skipped"
+        ? " ⚠️ WARNING: NO tests ran in this lane — the test script could not be narrowed to related tests and was skipped entirely; this PASS did NOT execute the test suite. A `git push` / `gh pr create` requires a full run that does."
+        : "";
       const detail =
-        outcome.verdict === "PASS" ? `PASS ${lane} (${outcome.checksRun} checks ran, 0 failed).${pushNote}`
+        outcome.verdict === "PASS" ? `PASS ${lane} (${outcome.checksRun} checks ran, 0 failed).${pushNote}${skippedNote}`
         : outcome.verdict === "FAIL" ? `FAIL ${lane} (${outcome.checksFailed}/${outcome.checksRun} checks failed).`
         : outcome.verdict === "NO_CHECKS_RUN" ? `NO CHECKS RUN ${lane} — zero runnable checks; this is NOT a pass. Configure real checks or /gate-bypass.`
         : `ERROR (${outcome.error ?? "runner could not be trusted"}) — fail-closed.`;
@@ -4374,7 +4397,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         `precommit: ${state.precommit.verdict}` +
           (state.precommit.verdict === "PASS"
             ? ` [lane ${state.precommit.mode ?? "?"}, tests: ${state.precommit.testScope ?? "unknown"}]` +
-              (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run")
+              (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run") +
+              (state.precommit.testScope === "skipped" ? " — ⚠️ tests were NOT run in this lane" : "")
             : "") +
           (state.precommit.at ? ` (${state.precommit.at})` : ""),
         ...formatPrecommitSummary(lastPrecommitTiming(primaryRepoRoot)),
