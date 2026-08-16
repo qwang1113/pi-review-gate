@@ -44,17 +44,21 @@ edit (batched; L2 fixer output merged by the main agent)
   → [run_precommit]  runner: lint:fix FIRST (edits files → stabilizes the
                      worktree), then lint/typecheck/build/test in PARALLEL,
                      output + receipt steps in declaration order
-  ⇄  [reviewer subagent, spawned async]  reads the same worktree concurrently
-  ⇄  [triage subagent, async]  mechanical sweep → findings fed to reviewer
+  → [triage subagent, async]  mechanical sweep → findings fed to reviewer
+  → [reviewer subagents, spawned async, SAME turn]  audit the green tree
   → record_review (worst verdict wins; triage findings are input, not verdict)
   → BLOCKED? fix → repeat    READY? declare_done → ship
 ```
 
 Key facts of the implementation:
 
-- **No flags.** The runner schedules: any `lint:fix` script runs first and
-  alone (it edits files, so nothing may read the worktree before it finishes);
-  the remaining checks run concurrently via `Promise.all`.
+- **Precommit runs FIRST, review second — never concurrently.** The runner
+  schedules: any `lint:fix` script runs first and alone (it edits files, so
+  nothing may read the worktree before it finishes); the remaining checks run
+  concurrently via `Promise.all`. Only after a PASS does the expensive review
+  start — a FAIL is cheaper to fix before the expensive judge looks, and a
+  review spent on a red tree is a fully wasted round. (An earlier design
+  overlapped them; abandoned for exactly that reason — measured in §5.)
 - **Declaration-order presentation.** The log and the receipt `steps` array
   read in declaration order (lint, typecheck, build, test), never completion
   order. A killed run's log therefore stops at the FIRST unfinished check —
@@ -69,8 +73,9 @@ Key facts of the implementation:
 
 ## 4. Protocol additions (skills/review-loop/SKILL.md)
 
-- **Parallel round**: spawn the reviewer (and triage) async, run
-  `run_precommit` while they work; record only after both finished.
+- **Precommit first, review second**: `run_precommit` (fast for an
+  intermediate round, full for the final round) must PASS before the
+  reviewer subagents are spawned — both of them, in the SAME turn, async.
 - **Multi-repo**: loops for independent repos run concurrently (no shared
   state; `record_review`/`run_precommit` bind per-repo).
 - **Waiting-window discipline**: while the reviewer runs (~3 min), do useful
@@ -93,7 +98,7 @@ Key facts of the implementation:
 
 | Stage | Before | After |
 |---|---|---|
-| One review round, small diff (<20 files, <500 lines) | ~280 s serial | ~190 s (two cross-family reviewers ⇄ precommit overlap) |
+| One review round, small diff (<20 files, <500 lines) | ~280 s serial | ~190 s (two cross-family reviewers in parallel; precommit runs first, ~2 s fast lane — figure measured under the earlier overlap design, drift negligible) |
 | One review round, large diff (auto-sharded) | ~280 s serial | ≤4 parallel shard reviewers + 1 integration review |
 | Precommit (multi-step repos) | serial steps | parallel steps, declaration-order output |
 | Multi-repo session | one repo at a time | N repos concurrently |

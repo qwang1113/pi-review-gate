@@ -731,7 +731,8 @@ The loop protocol (also available as the `review-loop` skill):
 
 ```
 edit code (batch related edits — the loop is billed per ROUND, not per line)
-  → spawn the reviewer (async) + call run_precommit — they run CONCURRENTLY
+  → run_precommit first (cheap checks before the expensive judge)
+  → spawn the reviewer(s) — two cross-family, SAME turn, async
   → call record_review with the FULL reviewer output      # all fences parsed, worst wins
   → BLOCKED? fix everything, then start again from precommit
   → READY?  call declare_done                             # re-validated server-side
@@ -747,15 +748,16 @@ are auto-sharded into ≤4 parallel reviewers via the pdw engine, then one
 integration review over the whole change. The thresholds are constants in
 `lib/parallel-review.ts` (`SHARD_THRESHOLD_FILES` / `SHARD_THRESHOLD_LINES`).
 
-**Why the review and precommit may overlap.** The runner schedules itself
-(no flags): any `lint:fix` script runs FIRST — it edits files, so the
-worktree stabilizes before anything reads it — then the remaining checks
-(lint/typecheck/build/test) run in parallel with declaration-order output.
-The reviewer therefore runs concurrently (spawn it `async`, then call
-`run_precommit`), and the verdict binds to the worktree fingerprint either
-way: the worst a race can do is discard a verdict — never ship unverified
-work. A FAIL still takes priority over the review: fix it before spending
-the expensive judge's time. Design record and measured numbers:
+**Precommit runs FIRST, review second — never concurrently.** The runner
+schedules itself (no flags): any `lint:fix` script runs FIRST — it edits
+files, so the worktree stabilizes before anything reads it — then the
+remaining checks (lint/typecheck/build/test) run in parallel with
+declaration-order output. The review then spends the expensive judges'
+(max thinking) time only on a tree the cheap checks already confirmed
+green. This order is deliberate: a precommit FAIL is cheaper to fix before
+the expensive judge looks, and a review spent on a red tree is a fully
+wasted round — an earlier design ran both concurrently to save wall time
+and was abandoned for exactly that reason. Design record:
 `docs/parallel-execution-plan.md`.
 
 The reviewer should end with a fenced JSON verdict:
@@ -1529,8 +1531,8 @@ second line of defence.
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
 | `run_precommit --mode full` (this repo) | ~100 s | Dominated by the two timing loops in the suite; typecheck runs CONCURRENTLY with `npm test` — the timing loops themselves are not reducible |
-| **A review round (small diff)** | **~3 min reviewer ⇄ precommit, overlapped** | Two cross-family reviewers, no pdw engine — <20 files AND <500 lines; see `docs/parallel-execution-plan.md` |
-| **A review round (large diff)** | **≤4 parallel shard reviewers ⇄ precommit** | Auto-sharded via pdw engine + one integration review; see `docs/parallel-execution-plan.md` |
+| **A review round (small diff)** | **~3 min reviewer, precommit first** | Two cross-family reviewers, no pdw engine — <20 files AND <500 lines; precommit runs BEFORE the review (see the loop protocol); see `docs/parallel-execution-plan.md` |
+| **A review round (large diff)** | **≤4 parallel shard reviewers, precommit first** | Auto-sharded via pdw engine + one integration review; see `docs/parallel-execution-plan.md` |
 
 **Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
 ran six consecutive times on this repo (typecheck concurrent with `npm test`,

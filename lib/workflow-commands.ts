@@ -46,7 +46,9 @@ export const WORKFLOW_COMMANDS = {
       "Execute the review loop for the current worktree changes, through the pdw workflow engine (the ONLY execution path — no serial protocol exists). " +
       "AUTONOMOUS PROTOCOL: you run this loop on your own whenever code/doc edits are complete and need the gate — this command is only an explicit trigger; " +
       "do not wait for the user to call it before reviewing your own finished work. " +
-      "Steps: (1) collect the changed files and call the run_parallel_shard_review tool with the loop goal text — it auto-shards " +
+      "Steps: (0) FIRST run the trusted precommit lane — `run_precommit` (fast for an intermediate round, full for the final round before shipping) — and " +
+      "confirm it PASSES before spending the expensive judge's time: a FAIL is cheaper to fix before the review, and the reviewer must never be the " +
+      "first one to find a test failure. (1) then collect the changed files and call the run_parallel_shard_review tool with the loop goal text — it auto-shards " +
       "large diffs (planReviewShards, ≤4 shards) and runs the L3 reviewers in parallel; the shard plan needs NO user confirmation. " +
       "(2) record Phase A: feed the tool's returned shard record (EVERY shard's full raw output) to record_review in ONE call " +
       "(shard fences carry no docSync by design — worst verdict wins); a shard in the tool's failedShards produced NO verdict — " +
@@ -54,8 +56,9 @@ export const WORKFLOW_COMMANDS = {
       "(3) only if Phase A was READY, run ONE integration reviewer over the whole change (cross-shard seams, duplicated " +
       "abstractions, the loop goal criterion by criterion) and record ITS output ALONE, because it carries the single docSync " +
       "attestation. Fix every P0-P2 finding and re-review until READY (later rounds reuse the same shards). " +
-      "Do not run precommit unless the review becomes READY. Treat this as an explicit request to execute the review loop, " +
-      "not merely explain it.",
+      "Small diffs (<20 files AND <500 lines) skip the engine: spawn the two cross-family reviewers as async subagents IN THE SAME TURN " +
+      "(both async:true, never one after the other) after the precommit PASS, and run precommit and the review serially — precommit first, always. " +
+      "Treat this as an explicit request to execute the review loop, not merely explain it.",
       invocation,
     ),
   },

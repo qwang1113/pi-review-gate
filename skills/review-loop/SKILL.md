@@ -169,15 +169,14 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    the real question, not your preferred answer. Fold its input in before you
    commit to an approach. Skip only for trivial, low-risk changes.
 
-2. **Parallel round — precommit ⇄ review** — with the edits finished, run
-   the reviewer and precommit **concurrently** instead of serially:
+2. **Precommit first, review second** — with the edits finished, run the
+   trusted precommit BEFORE spending the expensive judge's time:
 
-   - Spawn the reviewer subagent `async: true`, then call **`run_precommit`**
-     while it works. The runner schedules itself (no flags): any `lint:fix`
-     script runs FIRST and alone (it edits files, so nothing may read the
-     worktree before it finishes), then lint/typecheck/build/test run in
-     parallel with declaration-order output. Steps whose inputs have not
-     changed reuse their previous PASS and report `cached`.
+   - Call **`run_precommit`** first. The runner schedules itself (no flags):
+     any `lint:fix` script runs FIRST and alone (it edits files, so nothing
+     may read the worktree before it finishes), then lint/typecheck/build/
+     test run in parallel with declaration-order output. Steps whose inputs
+     have not changed reuse their previous PASS and report `cached`.
    - **Pick the lane.** The default `fast` lane runs lint + typecheck + build
      + only the tests RELATED to the changed files — seconds instead of
      minutes, and enough to clear a `git commit`. Use `mode: "full"` for the
@@ -185,16 +184,16 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
      `declare_done` all require a run whose tests were not narrowed, and the
      gate will say so if you try. Running every intermediate round in `full`
      just pays for the whole suite on every typo fix.
-   - **Why this is safe**: the verdict binds to the worktree fingerprint
-     either way — the worst a race can do is discard a verdict, never ship
-     unverified work. If a repo's checks write files (snapshots, build
-     artifacts) while the reviewer reads, the fingerprint moves and the round
-     repeats: a wasted round, accepted and documented in
-     `docs/parallel-execution-plan.md`.
-   - Precommit still matters for two measured reasons: tests catch the cheap
-     defect class the reviewer would otherwise spend minutes finding (a test
-     failure is far cheaper to fix than a BLOCKED verdict), and a FAIL is
-     cheaper to fix before the expensive judge looks.
+   - **Why precommit first, not concurrent**: precommit is cheap (seconds to
+     a couple of minutes) and catches the cheap defect class the reviewer
+     would otherwise spend minutes finding; the review is EXPENSIVE (two
+     top-tier judges at max thinking). A FAIL is cheaper to fix before the
+     expensive judge looks — the reviewer must never be the first one to
+     find a test failure, and a review spent on a red tree is pure waste.
+     (An earlier design ran both concurrently to save wall time; it was
+     abandoned because a precommit FAIL made the concurrent review a wasted
+     round — the expensive half of the loop was paid for a tree that could
+     not ship.)
 
    FAIL / `NO CHECKS RUN` ⇒ fix and re-run; only then continue to the review.
    `NO CHECKS RUN` is NOT a pass — tell the user real checks are missing.
@@ -222,7 +221,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
    - **Small diff** (< 20 files AND < 500 changed lines): TWO cross-family
      reviewers (default fable-5 + gpt-5.6-sol, both max) over the full change
-     — no pdw engine, no sharding; each attests `docSync` itself.
+     — no pdw engine, no sharding; each attests `docSync` itself. **Spawn
+     BOTH in the SAME turn with `async: true`** — never one after the other:
+     serial spawns double the review wall time for zero additional signal.
    - **Large diff** (≥ 20 files OR ≥ 500 changed lines): auto-shard with
      `run_parallel_shard_review` (≤ 4 reviewers, each with its own files AND
      per-shard diff context), then ONE integration review over the whole
@@ -357,11 +358,14 @@ ship gate checks the repo the command actually runs in.
 
 So once a session has edited more than one repo, `record_review` and
 `run_precommit` **require** an explicit `"repo": "<absolute path>"` — they
-refuse to guess. **Run the loops concurrently**: repos share no state (own
-sidecar, own fingerprint, own verdict), so spawn repo A's reviewer and repo
-B's reviewer in parallel, run both precommits while they work, record each
-verdict against its own repo, and ship each repo when its own gates pass.
-Only the final `declare_done` needs every repo green.
+refuse to guess. **Run the loops concurrently — each repo precommit-first**:
+repos share no state (own sidecar, own fingerprint, own verdict), so for
+EACH repo run its precommit to a PASS first, then spawn its reviewer; the
+two repos' loops may interleave (A's precommit while B's reviewer runs is
+fine — that is parallelism ACROSS repos, never a review and a precommit of
+the SAME repo overlapping). Record each verdict against its own repo, and
+ship each repo when its own gates pass. Only the final `declare_done` needs
+every repo green.
 
 Without that argument the tools used to fall back to the repo you edited LAST,
 and only an edit could move that target. Real consequence: a session that
