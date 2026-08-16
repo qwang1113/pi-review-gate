@@ -1,13 +1,11 @@
 /**
  * pi-review-gate — TUI widget content builders (pure functions).
  *
- * The extension renders two widgets via `ctx.ui.setWidget`:
- *   - aboveEditor: this loop's tasks — the `.pi/loop-goal.md` exit criteria,
- *     checked off as a whole when review READY + precommit PASS are both bound
- *     to the current worktree.
+ * The extension renders one widget via `ctx.ui.setWidget`:
  *   - belowEditor: the running/known sub-agents, scanned from the
  *     `.pi-subagents/artifacts/` directory (pi-subagents writes one
  *     `<runId>_<agent>[_<n>]_<kind>.<ext>` file set per child run).
+ *
  *
  * Everything here is a pure function of plain strings / filesystem scans so it
  * can be unit-tested without a TUI. The extension owns the side effects
@@ -15,114 +13,6 @@
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-
-export interface GoalTask {
-  /** 1-based criterion number as written in the goal. */
-  index: number;
-  /** The **bolded** title of the criterion (without the asterisks). */
-  title: string;
-  /** The rest of the criterion line, after the title (may be empty). */
-  body: string;
-}
-
-/**
- * Parse the exit criteria out of a `.pi/loop-goal.md` text.
- *
- * Criteria are the numbered list under `## Exit criteria` (the heading the
- * extension writes) up to the next `## ` heading (normally `## Non-goals`).
- * Lines are shaped `1. **title**: rest of the criterion` when the author
- * bolds a title, but that is a style, not a contract — the skill never
- * requires bold, and a generated goal like `1. \`src/utils.js\` adds …` must
- * parse too (live regression: the widget wrongly reported "no parseable exit
- * criteria" for a perfectly valid goal because ONLY bolded lines matched).
- * A numbered line's whole text is the title when no `**title**` is present.
- *
- * Never throws: malformed or missing sections produce an empty list, and a
- * caller renders that as "no loop goal yet" rather than crashing the widget.
- */
-export function parseGoalTasks(goalText: string): GoalTask[] {
-  const tasks: GoalTask[] = [];
-  const lines = goalText.split(/\r?\n/);
-  let inCriteria = false;
-  for (const line of lines) {
-    // Heading forms: `## Exit criteria` (extension-written), a bilingual or
-    // suffixed variant (`## 退出标准（Exit Criteria）`, `## Exit criteria:`),
-    // or a bolded inline label (`**退出标准**:`) that generated goals often
-    // use instead of a real ATX heading.
-    const heading = line.match(/^##\s+(.+)$/);
-    if (heading) {
-      const name = heading[1]!.trim().toLowerCase();
-      // Heading may be bilingual (agents write `## 退出标准（Exit Criteria）`)
-      // or contain a leader like `## Exit criteria:`. Match the section name
-      // as a token instead of requiring an exact bare spelling.
-      if (name.includes("exit criteria") || name.includes("退出标准")) {
-        inCriteria = true;
-        continue;
-      }
-      if (inCriteria) break; // next section — stop
-      continue;
-    }
-    // Bolded inline label: `**退出标准**:` — treat it like a section heading.
-    // The trailing `(.*)` also matches a label carrying inline content
-    // (`**非目标**: no push.`), so a numbered list after such an end label
-    // cannot leak into the criteria.
-    const boldLabel = line.match(/^\*\*([^*]+)\*\*\s*[:：]?\s*(.*)$/);
-    if (boldLabel) {
-      const name = boldLabel[1]!.trim().toLowerCase();
-      if (name.includes("exit criteria") || name.includes("退出标准")) {
-        inCriteria = true;
-        continue;
-      }
-      if (inCriteria) break; // next section — stop
-      continue;
-    }
-    if (!inCriteria) continue;
-    const numbered = line.match(/^(\d+)\.\s+(.*)$/);
-    if (!numbered) continue;
-    const raw = numbered[2]!.trim();
-    if (!raw) continue;
-    // `**title**: body` — title is the bolded part, body the rest.
-    const bolded = raw.match(/^\*\*(.+?)\*\*\s*[:：]?\s*(.*)$/);
-    if (bolded) {
-      tasks.push({ index: Number(numbered[1]), title: bolded[1]!.trim(), body: bolded[2]!.trim() });
-      continue;
-    }
-    // Plain numbered line (no bold) — the whole text is the title.
-    tasks.push({ index: Number(numbered[1]), title: raw, body: "" });
-  }
-  return tasks;
-}
-
-export interface TasksWidgetOptions {
-  /** True when the review verdict is READY and bound to the current worktree. */
-  reviewReady: boolean;
-  /** True when precommit PASS is recorded for the current worktree. */
-  precommitPass: boolean;
-}
-
-/**
- * Build the aboveEditor widget lines: one line per exit criterion, checked
- * `[x]` when review READY + precommit PASS both hold (the loop is complete),
- * plus a status footer. When no goal exists, a single explanatory line.
- */
-export function buildTasksWidget(
-  goalText: string | undefined,
-  opts: TasksWidgetOptions,
-): string[] {
-  if (!goalText) return ["[no loop goal yet — negotiate with the user]"];
-  const tasks = parseGoalTasks(goalText);
-  if (tasks.length === 0) return ["[loop goal has no parseable exit criteria]"];
-  const done = opts.reviewReady && opts.precommitPass;
-  const lines = tasks.map((t) => {
-    const mark = done ? "[x]" : "[ ]";
-    const label = t.body ? `${t.title} — ${t.body}` : t.title;
-    return `${mark} ${t.index}. ${label}`;
-  });
-  const review = opts.reviewReady ? "READY" : "pending";
-  const precommit = opts.precommitPass ? "PASS" : "not-run";
-  lines.push(`gate: review ${review} · precommit ${precommit}`);
-  return lines;
-}
 
 export type AgentArtifactState = "running" | "done";
 

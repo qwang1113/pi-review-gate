@@ -74,7 +74,7 @@ import {
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
-import { buildTasksWidget, buildAgentsWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
+import { buildAgentsWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveShipRepos,
@@ -865,57 +865,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   // Content is built by pure functions in lib/ui-widget.ts and only pushed to
   // the TUI when it actually changed (pi re-renders on every setWidget call).
   let lastUiCtx: ExtensionContext | undefined;
-  let lastTasksWidget = "";
   let lastAgentsWidget = "";
 
   function updateWidget(ctx: ExtensionContext) {
     lastUiCtx = ctx;
     if (!ctx.hasUI) return;
-    const parts: string[] = [];
-    if (state.bypass.active) {
-      parts.push("gate: BYPASSED");
-    } else if (state.taskMode === "normal") {
-      parts.push("gate: normal (off)");
-    } else if (!state.hasCodeChange && !state.hasDocChange) {
-      if (state.taskMode === "explore") parts.push("gate: explore (advisory)");
-      else parts.push(state.taskMode === "loop" ? "gate: loop · idle" : "gate: undecided");
-    } else {
-      // Explore shows the same live verdict status, tagged advisory — the
-      // agent can edit in this mode, so a static label would hide real state.
-      if (state.taskMode === "explore") parts.push("explore (advisory)");
-      if (state.pausedQuestion) parts.push("paused: awaiting user");
-      if (lastRunAborted) parts.push("paused: user abort (esc)");
-      if (state.scopeLimit) parts.push("scope: session-only");
-      parts.push(`review: ${state.review.verdict}`);
-      parts.push(
-        `precommit: ${state.precommit.verdict}` +
-        (state.precommit.verdict === "PASS" && state.precommit.testScope !== "full" ? " (fast)" : "") +
-        // Where the precommit commands come from: project config (`.pi/review-gate.json`
-        // `precommit` section) or the default detection.
-        ` · ${projectConfig?.precommit ? "cfg" : "auto"}`,
-      );
-      parts.push(`round ${state.rounds.length}/${state.maxRounds}`);
-    }
-    try { ctx.ui.setStatus("review-gate", parts.join(" · ")); } catch { /* non-TUI */ }
-
-    // aboveEditor — this loop's tasks (exit criteria of .pi/loop-goal.md),
-    // checked off as a whole once review READY + precommit PASS are recorded.
-    try {
-      let goalText: string | undefined;
-      try {
-        goalText = readFileSync(pathJoin(cwd, ".pi", "loop-goal.md"), "utf8");
-      } catch { /* no goal yet — widget says so */ }
-      const lines = buildTasksWidget(goalText, {
-        reviewReady: state.review.verdict === "READY",
-        precommitPass: state.precommit.verdict === "PASS",
-      });
-      const key = lines.join("\n");
-      if (key !== lastTasksWidget) {
-        lastTasksWidget = key;
-        ctx.ui.setWidget("review-gate-tasks", lines, { placement: "aboveEditor" });
-      }
-    } catch { /* display-only: a widget failure never breaks the gate */ }
-
     // belowEditor — sub-agent runs visible in the TUI (running first, with age).
     try {
       const agents = scanAgentArtifacts(pathJoin(cwd, ".pi-subagents", "artifacts"), Date.now(), { maxAgeSec: 2 * 3600 });
