@@ -48,7 +48,7 @@ import {
   existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
   mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -176,6 +176,8 @@ import {
   type ModuleBucket,
 } from "../lib/requirement-size.ts";
 import { fitDialogMessage } from "../lib/dialog-budget.ts";
+import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "../lib/model-diagnose.ts";
+import { isModelAllowed } from "../lib/pdw-bridge.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_HISTORY_QUERY,
@@ -2422,8 +2424,11 @@ export default function reviewGate(pi: ExtensionAPI) {
           },
         });
         if (!outcome.ok) {
+          // One diagnosis call, hoisted (the helper reads agent files — never
+          // pay for it twice on an error path).
+          const diag = modelDiagnosisLines(ctx.modelRegistry);
           return {
-            content: [{ type: "text", text: `parallel shard review failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` }],
+            content: [{ type: "text", text: `parallel shard review failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` + (diag.length ? `\n\n${diag.join("\n")}` : "") }],
             details: {
               available: false,
               reason: outcome.reason,
@@ -2450,8 +2455,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           },
         };
       } catch (err) {
+        const diag = modelDiagnosisLines(ctx.modelRegistry);
         return {
-          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` }],
+          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` + (diag.length ? `\n\n${diag.join("\n")}` : "") }],
           details: { available: false, reason: "tool-failed", error: (err as Error).message },
         };
       }
@@ -2469,10 +2475,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       "The pdw engine is a HARD dependency: when it is unavailable the tool reports an installation error — there is no serial fallback.",
     parameters: Type.Object({
       repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
-      modules: Type.String({
+      modules: Type.Array(Type.Object({
+        id: Type.String({ description: "Module id (must match the plan state when state_file is given)" }),
+        title: Type.String(),
+        ownedPaths: Type.Array(Type.String({ description: "Disjoint file paths this module owns" })),
+        worklogPath: Type.String({ description: "Path under .pi/plan/worklog/ (module brief + must-haves)" }),
+        model: Type.String({ description: "Worker model spec" }),
+      }), {
         description:
-          "JSON array of wave modules: [{id, title, ownedPaths: string[], worklogPath, model}] " +
-          "— the next wave is every pending module whose depends_on are implemented/accepted (≤4).",
+          "The wave modules — the next wave is every pending module whose depends_on are implemented/accepted (≤4).",
       }),
       goal: Type.Optional(Type.String({ description: "Loop goal text handed to every worker" })),
       state_file: Type.Optional(Type.String({
@@ -2485,17 +2496,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     async execute(_id, params, _signal, onUpdate, ctx) {
       const cwd = params.repo ?? ctx.cwd ?? process.cwd();
       try {
-        let modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model: string }>;
-        try {
-          const parsed = JSON.parse(params.modules);
-          if (!Array.isArray(parsed)) throw new Error("modules must be a JSON array");
-          modules = parsed as typeof modules;
-        } catch (err) {
-          return {
-            content: [{ type: "text", text: `run_wave_workflow: bad modules JSON — ${(err as Error).message}` }],
-            details: { available: false, reason: "bad-modules" },
-          };
-        }
+        // TypeBox validated the shape at the parameter layer — modules is a
+        // real array now, no JSON round-trip (was a JSON string until 2026-08-16).
+        const modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model: string }> =
+          params.modules;
         // Fail-closed wave reconciliation: when a plan state file is supplied,
         // the wave MUST equal computeWave(state) — the driver cannot invent one.
         // Check BEFORE dispatching so an invented wave never burns a run.
@@ -4412,6 +4416,68 @@ export default function reviewGate(pi: ExtensionAPI) {
     registerWorkflowCommand(name);
   }
 
+  /** Read-only model-chain diagnosis for /gate-status. Best-effort: any IO
+   *  failure yields no lines (diagnostics never block, never gate).
+   *
+   *  PRIMARY facts source is the session's own model registry (the SAME
+   *  facts pdw-bridge resolves against — it includes built-in catalogs
+   *  like anthropic that never appear in models-store.json; reading only
+   *  the store mis-reported every built-in judge chain as BLOCKED while
+   *  the review was literally running on fable-5). File reads are a
+   *  fallback when the registry exposes nothing. */
+  function modelDiagnosisLines(registry?: unknown): string[] {
+    try {
+      const home = homedir();
+      const agentsDir = pathJoin(home, ".pi", "agent", "agents");
+      const agentFiles = readdirSync(agentsDir).filter((f) => f.endsWith(".md"));
+      const authedProviders = new Set<string>();
+      const models: Array<{ provider: string; id: string }> = [];
+      const facts: RegistryFacts = { models, authedProviders, allowed: isModelAllowed };
+      const reg = registry as { getAll?: () => unknown[]; hasConfiguredAuth?: (m: unknown) => boolean } | undefined;
+      const all = reg?.getAll?.() ?? [];
+      if (Array.isArray(all) && all.length > 0) {
+        // Symmetric with pdw-bridge's hasAuth guard: a registry without
+        // hasConfiguredAuth skips the auth filter entirely (treating every
+        // provider as authed would be wrong — the missing method is the
+        // signal that auth is not part of this registry's contract).
+        const authCheckable = typeof reg?.hasConfiguredAuth === "function";
+        for (const m of all) {
+          const obj = m as { provider?: unknown; id?: unknown };
+          if (typeof obj.provider !== "string" || typeof obj.id !== "string") continue;
+          models.push({ provider: obj.provider, id: obj.id });
+          if (!authCheckable || reg!.hasConfiguredAuth!(obj)) authedProviders.add(obj.provider);
+        }
+      }
+      if (models.length === 0) {
+        // Fallback: disk files (a host session without a usable registry).
+        try {
+          const store = JSON.parse(
+            readFileSync(pathJoin(home, ".pi", "agent", "models-store.json"), "utf8"),
+          ) as Record<string, { models?: Array<{ provider?: string; id?: string }> }>;
+          for (const prov of Object.keys(store)) {
+            for (const m of store[prov]?.models ?? []) {
+              if (typeof m.provider === "string" && typeof m.id === "string") {
+                models.push({ provider: m.provider, id: m.id });
+              }
+            }
+          }
+        } catch { /* no store — empty registry */ }
+        try {
+          const auth = JSON.parse(
+            readFileSync(pathJoin(home, ".pi", "agent", "auth.json"), "utf8"),
+          ) as Record<string, unknown>;
+          for (const k of Object.keys(auth)) authedProviders.add(k);
+        } catch { /* no auth — no provider looks usable */ }
+      }
+      const entries = agentFiles
+        .map((f) => diagnoseChain(f.replace(/\.md$/, ""), readFileSync(pathJoin(agentsDir, f), "utf8"), facts))
+        .filter((e) => e.chain.length > 0);
+      return entries.length === 0 ? [] : formatModelDiagnosis(entries).split("\n");
+    } catch {
+      return []; // diagnostics only — never block the status readout
+    }
+  }
+
   pi.registerCommand("gate-status", {
     description: "Show review-gate state",
     handler: async (_args, ctx) => {
@@ -4451,6 +4517,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           : []),
         `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
         `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
+        ...modelDiagnosisLines(ctx.modelRegistry),
         // Explore: ship commands stay fully gated (L1), but declare_done and
         // auto-continuation are advisory. Normal: the ship gate is OFF.
         state.taskMode === "normal"

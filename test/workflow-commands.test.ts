@@ -110,6 +110,16 @@ test("analysis helpers explicitly avoid mutation by default", () => {
   assert.match(buildWorkflowPrompt("watch-ci"), /Do not push/);
 });
 
+test("plan-next passes modules as a structured ARRAY, not a JSON string (tool contract)", () => {
+  const prompt = buildWorkflowPrompt("plan-next");
+  assert.match(prompt, /structured ARRAY of objects/,
+    "the prompt must describe the structured modules parameter");
+  assert.match(prompt, /NOT a JSON string/,
+    "the old JSON-string encoding must be explicitly ruled out");
+  assert.doesNotMatch(prompt, /the wave as JSON/,
+    "the legacy JSON-string phrasing must be gone");
+});
+
 test("gate-init prompts the interactive precommit-config generation flow", () => {
   const prompt = buildWorkflowPrompt("gate-init");
   // Detection: package.json scripts + ecosystem markers.

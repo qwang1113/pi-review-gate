@@ -208,8 +208,8 @@ export const WORKFLOW_COMMANDS = {
       "If the wave is empty and modules remain pending, report the blocker (a dependency that never reached implemented) and stop. " +
       "Spawn a COLD planner subagent that reads only the plan state, the brief and the loop goal, and APPENDS each dispatched module's task brief to its worklog " +
       "(preserving any execution log, self-check and review sections already there), and returns ONE instruction per module: run <module id>, replan with a reason, or 'all modules implemented'. " +
-      "Then dispatch the whole wave: call the run_wave_workflow tool (modules = the wave as JSON " +
-      "[{id, title, ownedPaths, worklogPath, model}] with each module's worklog path under .pi/plan/worklog/, " +
+      "Then dispatch the whole wave: call the run_wave_workflow tool (modules = the wave as a structured " +
+      "ARRAY of objects [{id, title, ownedPaths, worklogPath, model}] — NOT a JSON string — with each module's worklog path under .pi/plan/worklog/, " +
       "and state_file = .pi/plan/state.json so the tool verifies the wave against computeWave). " +
       "The tool runs the wave's workers IN PARALLEL (read-only, edit/write excluded), validates ownership, persists patches under .pi/plan/patches/ " +
       "and pre-checks git apply. The pdw engine is a HARD dependency: if the tool reports the engine missing, stop and fix the install " +

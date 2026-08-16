@@ -2,6 +2,8 @@
 
 **Quality gates for [Pi](https://github.com/earendil-works/pi-coding-agent)** — ship-gate hard blocking, persistent gate state, auto-continuing review loop. Globally installable.
 
+> **新用户？先读 [QUICKSTART.md](QUICKSTART.md)（5 分钟上手），再看本文件。**
+
 > Quality gates the model can't skip: `git commit`, `git push`, `gh pr create`, and `gh pr edit`
 > are **hard-blocked** at the `tool_call` layer until an independent review is
 > READY **and** precommit PASSes — both bound to the exact worktree state they
