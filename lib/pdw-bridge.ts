@@ -184,6 +184,38 @@ export async function resolveBestModel(candidates: readonly string[], registry?:
       // Resolution failed — try the next candidate.
     }
   }
-  // All candidates failed → return first candidate, pdw will report its own error.
+  // All candidates failed → fall back to a model the registry can ACTUALLY
+  // run instead of returning candidates[0] (a spec that pdw will promptly
+  // reject with MODEL_NOT_FOUND and kill the whole parallel run). The pinned
+  // candidates (e.g. anthropic/claude-fable-5:max, onekey/*) are judged-tier
+  // models that exist in the user's full registry but NOT in a minimal
+  // one — a wave / shard review must degrade to an authenticatable model
+  // present in this registry, not die. Only when the registry offers nothing
+  // usable does the legacy fail-safe (candidates[0], pdw reports its own
+  // error) kick in.
+  if (hasAuth || typeof reg.getAll === "function") {
+    try {
+      const all = (reg.getAll as () => unknown[] | undefined)?.();
+      if (Array.isArray(all)) {
+        const usable = all.find((m) => {
+          const obj = m as { provider?: unknown; id?: unknown } | null;
+          if (!obj || typeof obj.provider !== "string" || typeof obj.id !== "string") return false;
+          if (hasAuth && !(reg.hasConfiguredAuth as (m: unknown) => boolean)(obj)) return false;
+          return true;
+        });
+        if (usable) {
+          const { provider, id } = usable as { provider: string; id: string };
+          // Keep any :thinking suffix the caller pinned (e.g. "...:max");
+          // if none, pdw uses its default thinking.
+          const suffix = candidates.some((c) => c.includes(":")) ? ":max" : "";
+          return `${provider}/${id}${suffix}`;
+        }
+      }
+    } catch {
+      // Registry introspection failed — fall through to the legacy path.
+    }
+  }
+  // All candidates failed (or nothing usable in the registry) → return first
+  // candidate, pdw will report its own error.
   return candidates[0];
 }

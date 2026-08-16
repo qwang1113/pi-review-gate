@@ -209,11 +209,57 @@ test("resolveBestModel picks the first candidate the registry can resolve", asyn
   );
 });
 
-test("resolveBestModel falls back to first candidate when none resolve", async () => {
-  const registry = mkRegistry([{ provider: "onekey", id: "deepseek-v4-pro" }]);
+test("resolveBestModel falls back to an authenticatable registry model when none of the pinned candidates resolve", async () => {
+  // The pinned judge chain (claude-fable-5 etc.) does not exist in a minimal
+  // registry that only carries e.g. opencode-go/deepseek-v4-flash. Returning
+  // candidates[0] hands pdw a spec it rejects with MODEL_NOT_FOUND, killing
+  // the whole parallel run — the resolver must degrade to a model the
+  // registry can actually run.
+  const registry = mkRegistry([{ provider: "opencode-go", id: "deepseek-v4-flash" }]);
+  assert.equal(
+    await resolveBestModel(["anthropic/claude-fable-5:max", "onekey/gpt-5.6-sol"], registry),
+    "opencode-go/deepseek-v4-flash:max",
+  );
+});
+
+test("resolveBestModel keeps the pinned thinking suffix on the registry fallback", async () => {
+  const registry = mkRegistry([{ provider: "opencode-go", id: "deepseek-v4-flash" }]);
+  assert.equal(
+    await resolveBestModel(["claude-sonnet-5:max", "grok-4.6"], registry),
+    "opencode-go/deepseek-v4-flash:max",
+  );
+});
+
+test("resolveBestModel skips registry candidates without configured auth when falling back", async () => {
+  const registry = mkRegistry(
+    [
+      { provider: "opencode-go", id: "deepseek-v4-flash" },
+      { provider: "opencode-go", id: "deepseek-v4-pro" },
+    ],
+    (m) => m.id !== "deepseek-v4-flash",
+  );
+  assert.equal(
+    await resolveBestModel(["claude-fable-5"], registry),
+    "opencode-go/deepseek-v4-pro",
+  );
+});
+
+test("resolveBestModel falls back to first candidate when registry offers nothing usable", async () => {
+  const registry = mkRegistry([{ provider: "onekey", id: "deepseek-v4-pro" }], () => false);
   assert.equal(
     await resolveBestModel(["claude-sonnet-5", "grok-4.6"], registry),
     "claude-sonnet-5",
+  );
+});
+
+test("resolveBestModel falls back to first candidate when registry has no usable models", async () => {
+  const registry = mkRegistry([{ provider: "onekey", id: "deepseek-v4-pro" }]);
+  // "grok-4.6" ✗ unknown in registry, "claude-sonnet-5" ✗ unknown in registry,
+  // and the only registry model is NOT in the candidates list — the registry
+  // fallback still finds it because it is a real, authenticatable model.
+  assert.equal(
+    await resolveBestModel(["claude-sonnet-5", "grok-4.6"], registry),
+    "onekey/deepseek-v4-pro",
   );
 });
 
@@ -231,7 +277,7 @@ test("resolveBestModel skips candidates without configured auth", async () => {
   );
 });
 
-test("resolveBestModel returns first candidate when all fail auth", async () => {
+test("resolveBestModel returns first candidate when all fail auth and registry has nothing else", async () => {
   const registry = mkRegistry(
     [
       { provider: "onekey", id: "deepseek-v4-pro" },
