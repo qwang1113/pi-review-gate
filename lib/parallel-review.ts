@@ -19,6 +19,7 @@
 
 import { sanitizeInjectedWorkflowText } from "./pdw-bridge.ts";
 import type { PdwModule } from "./pdw-bridge.ts";
+import { buildRunProgressCallbacks, createProgressSink, newPdwRunId } from "./pdw-progress.ts";
 
 /** Tiered trigger thresholds: a diff meeting either bound triggers sharding. */
 export const SHARD_THRESHOLD_FILES = 20;
@@ -183,6 +184,12 @@ export interface ShardWorkflowOptions {
   agentRegistry?: unknown;
   /** Injected agent runner (tests; production uses pdw's default WorkflowAgent). */
   agent?: unknown;
+  /**
+   * Live progress callback (the tool layer's `onUpdate`). `text` is a
+   * one-line status; `progress` is a 0-100 percentage when known. Fired on
+   * every engine event (agent start/end/fail, phase, log).
+   */
+  onProgress?: (text: string, progress?: number) => void;
   /** Shared model registry from the host session (pdw resolves models against it). */
   modelRegistry?: unknown;
   /**
@@ -200,8 +207,22 @@ export type ShardReviewOutcome =
       agentCount: number;
       /** Shard labels whose agent call failed (recoverable-null per pdw contract). */
       failedShards?: string[];
+      /** Run identity — the engine log and the ndjson progress file share it. */
+      runId: string;
+      /** Absolute path of the live ndjson progress file (.pi/pdw-progress/). */
+      progressFile: string;
+      /** Best-effort engine log path (~/.pi/workflows/projects/<key>/runs/). */
+      engineLogFile: string;
     }
-  | { ok: false; reason: "workflow-failed"; error?: string };
+  | {
+      ok: false;
+      reason: "workflow-failed";
+      error?: string;
+      /** Run identity + artifacts, also on failure so the caller can locate them. */
+      runId: string;
+      progressFile: string;
+      engineLogFile: string;
+    };
 
 /**
  * Run the parallel shard review via pdw. The engine is a hard dependency:
@@ -234,17 +255,32 @@ export async function runParallelShardReview(
     model,
   });
 
+  // Run identity + live progress. The sink OWNS the runId: the engine log
+  // (~/.pi/workflows/projects/<key>/runs/, persistLogs defaults true), the
+  // ndjson progress file (.pi/pdw-progress/) and the tool's onUpdate
+  // streaming all share it. Persist each shard reviewer's full transcript so
+  // the user can open it from the /resume session picker.
+  const runId = newPdwRunId();
+  const sink = createProgressSink(opts.cwd, runId);
+  sink.setTotal(opts.shards.length);
+  const progressCallbacks = buildRunProgressCallbacks(sink, {
+    total: opts.shards.length,
+    onProgress: opts.onProgress,
+  });
+
   const runOptions: Record<string, unknown> = {
     cwd: opts.cwd,
     args: {},
     mainModel: model,
+    runId,
     concurrency: opts.concurrency ?? Math.min(4, Math.max(1, opts.shards.length)),
     agentRetries: 1,
-    persistLogs: false,
+    persistAgentSessions: true,
     // Shard reviewers audit a live worktree: they must never write to it.
     // (agents/reviewer.md allows edit/write; the engine-level denylist is the
     // mechanical backstop on top of the prompt.)
     excludeTools: ["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"],
+    ...progressCallbacks,
   };
   if (opts.agentRegistry) runOptions.agentRegistry = opts.agentRegistry;
   if (opts.agent) runOptions.agent = opts.agent;
@@ -296,6 +332,9 @@ export async function runParallelShardReview(
         ok: false,
         reason: "workflow-failed",
         error: `all shard reviewers failed (${failedLabels.join(", ")})`,
+        runId,
+        progressFile: sink.progressFile,
+        engineLogFile: sink.engineLogFile,
       };
     }
     return {
@@ -304,9 +343,22 @@ export async function runParallelShardReview(
       durationMs: result.durationMs,
       agentCount: result.agentCount,
       failedShards: failedLabels,
+      runId,
+      progressFile: sink.progressFile,
+      engineLogFile: sink.engineLogFile,
     };
   } catch (err) {
-    return { ok: false, reason: "workflow-failed", error: (err as Error).message };
+    return {
+      ok: false,
+      reason: "workflow-failed",
+      error: (err as Error).message,
+      runId,
+      progressFile: sink.progressFile,
+      engineLogFile: sink.engineLogFile,
+    };
+  } finally {
+    // Terminal event: the ndjson file is complete and tail -f readers can stop.
+    sink.done();
   }
 }
 

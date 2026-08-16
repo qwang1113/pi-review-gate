@@ -2318,7 +2318,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       max_shards: Type.Optional(Type.Integer({ description: "Shard count cap (default 4)" })),
       model: Type.Optional(Type.String({ description: "Reviewer model spec override (default: pinned judge with fallback resolution)" })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, onUpdate, ctx) {
       const cwd = params.repo ?? ctx.cwd ?? process.cwd();
       try {
         const filesResult = await listChangedFiles(cwd);
@@ -2372,11 +2372,24 @@ export default function reviewGate(pi: ExtensionAPI) {
           goalText: params.goal ?? undefined,
           model: params.model ?? undefined,
           modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
+          onProgress: (text: string, progress?: number) => {
+            onUpdate?.({
+              content: [{ type: "text", text }],
+              details: progress !== undefined ? { progress } : {},
+            });
+          },
         });
         if (!outcome.ok) {
           return {
             content: [{ type: "text", text: `parallel shard review failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` }],
-            details: { available: false, reason: outcome.reason, error: outcome.error ?? null },
+            details: {
+              available: false,
+              reason: outcome.reason,
+              error: outcome.error ?? null,
+              runId: outcome.runId,
+              progressFile: outcome.progressFile,
+              engineLogFile: outcome.engineLogFile,
+            },
           };
         }
         const record = formatShardReviewRecord(outcome.shards);
@@ -2389,6 +2402,9 @@ export default function reviewGate(pi: ExtensionAPI) {
             failedShards: outcome.failedShards ?? [],
             durationMs: outcome.durationMs,
             agentCount: outcome.agentCount,
+            runId: outcome.runId,
+            progressFile: outcome.progressFile,
+            engineLogFile: outcome.engineLogFile,
           },
         };
       } catch (err) {
@@ -2424,7 +2440,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           "(fail-closed; the driver must not invent the wave).",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, onUpdate, ctx) {
       const cwd = params.repo ?? ctx.cwd ?? process.cwd();
       try {
         let modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model: string }>;
@@ -2490,11 +2506,24 @@ export default function reviewGate(pi: ExtensionAPI) {
           cwd,
           modules: modules.map((m) => ({ ...m, goalText: params.goal ?? undefined })),
           modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
+          onProgress: (text: string, progress?: number) => {
+            onUpdate?.({
+              content: [{ type: "text", text }],
+              details: progress !== undefined ? { progress } : {},
+            });
+          },
         });
         if (!outcome.ok) {
           return {
             content: [{ type: "text", text: `wave workflow failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` }],
-            details: { available: false, reason: outcome.reason, error: outcome.error ?? null },
+            details: {
+              available: false,
+              reason: outcome.reason,
+              error: outcome.error ?? null,
+              runId: outcome.runId,
+              progressFile: outcome.progressFile,
+              engineLogFile: outcome.engineLogFile,
+            },
           };
         }
         const planDir = planDirFor(cwd);
@@ -2533,6 +2562,9 @@ export default function reviewGate(pi: ExtensionAPI) {
             failedModules: outcome.failedModules ?? [],
             durationMs: outcome.durationMs,
             agentCount: outcome.agentCount,
+            runId: outcome.runId,
+            progressFile: outcome.progressFile,
+            engineLogFile: outcome.engineLogFile,
           },
         };
       } catch (err) {

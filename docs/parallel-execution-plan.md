@@ -188,7 +188,44 @@ transaction — a failed patch is sent back to its worker, never silently
 edited). Single-writer is preserved: the worktree is only ever written by the
 main agent.
 
-### 8.3 Hard dependency and safety
+### 8.3 Run visibility (live progress + persisted artifacts)
+
+**Status**: implemented 2026-08-16.
+
+A pdw run used to be a black box: the tools awaited `runWorkflow` with no
+callbacks and `persistLogs: false` explicitly disabled the engine's default
+log. Every parallel run now wires the engine's live callbacks
+(`onLog` / `onPhase` / `onRuntimeEvent` / `onAgentStart` / `onAgentEnd`)
+through `lib/pdw-progress.ts` (`createProgressSink`) to three surfaces:
+
+1. **Live streaming in the tool card** — both tools pass `onProgress` to the
+extension `onUpdate` protocol: each agent start/end pushes a one-line status
+(`[run-…] 1/3 agents · active: shard-2 · last: shard-1 done ([model] 12.3s, 1234
+tok)`) plus a 0–100 `details.progress` (carried on the same `onUpdate` events;
+pi renders the `content` text on the tool card).
+2. **ndjson event file** — every event is appended to
+`.pi/pdw-progress/<runId>.ndjson` (one JSON object per line, `run-end`
+terminal event in the `finally`); `tail -f` it from another terminal while
+the tool call blocks. The directory is gitignored. The ndjson is anchored
+at the GIT ROOT (`gitRootOfDir`, sanitized env) — never at a subdirectory
+cwd — so it stays inside the fingerprint's `:/.pi` exclusion and a
+recording run can never invalidate its own READY binding.
+3. **Engine log + session transcripts** — `persistLogs` is back to the
+engine default (true): `~/.pi/workflows/projects/<key>/runs/<runId>.log`.
+`persistAgentSessions: true` persists each sub-agent's full transcript to
+`~/.pi/agent/sessions/<encoded-cwd>/` named `workflow:<runId> <label>`,
+openable/switchable from pi's `/resume` session picker (default-on per the
+project principle; transcripts may contain sensitive context, as the engine
+itself warns).
+
+All progress writes are best-effort: a read-only cwd, ENOSPC or a `.pi` that
+is a regular file silently degrades the sink (in-memory events only) — it
+never aborts the review/wave run.
+
+Every outcome (success AND failure) carries `runId`, `progressFile` and
+`engineLogFile` so a failed run can still be located and replayed.
+
+### 8.4 Hard dependency and safety
 
 - `lib/pdw-bridge.ts` loads pdw via dynamic import once per process; any
   failure throws `PdwUnavailableError` (installation guidance) and every

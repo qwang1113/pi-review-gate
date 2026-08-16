@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { runParallelShardReview } from "../lib/parallel-review.ts";
 import { runWaveWorkflow } from "../lib/plan-parallel.ts";
@@ -27,6 +28,7 @@ function stubRunner(byLabel: Record<string, unknown>): { run: (prompt: string, o
 
 test("runParallelShardReview really fans out through the workflow engine", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "pdw-review-"));
+  const updates: Array<{ text: string; progress?: number }> = [];
   const outcome = await runParallelShardReview({
     cwd,
     shards: [
@@ -40,6 +42,9 @@ test("runParallelShardReview really fans out through the workflow engine", async
       "shard-2": { gate: "READY", findings: [] },
       "shard-3": { gate: "BLOCKED", findings: [{ file: "c.ts", line: 2, severity: "P1", issue: "bug" }] },
     }),
+    onProgress: (text: string, progress?: number) => {
+      updates.push({ text, progress });
+    },
   });
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
@@ -50,6 +55,42 @@ test("runParallelShardReview really fans out through the workflow engine", async
   assert.equal(byLabel.get("shard-3")!.verdict!.gate, "BLOCKED");
   assert.equal(byLabel.get("shard-3")!.verdict!.findings.length, 1);
   assert.match(outcome.shards[0].output, /READY/);
+  // Progress wiring: the run owns a runId, an ndjson event file and the
+  // engine log path; the event file records real engine callbacks.
+  assert.match(outcome.runId, /^run-/);
+  assert.ok(outcome.progressFile.endsWith(`${outcome.runId}.ndjson`));
+  assert.ok(outcome.progressFile.includes(join(cwd, ".pi", "pdw-progress")));
+  assert.ok(existsSync(outcome.progressFile), "ndjson progress file must exist");
+  assert.ok(outcome.engineLogFile.includes(join("workflows", "projects")));
+  assert.ok(outcome.engineLogFile.endsWith(`${outcome.runId}.log`));
+  assert.ok(existsSync(outcome.engineLogFile), "engine log must persist (persistLogs default true)");
+  const lines = readFileSync(outcome.progressFile, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as { type: string });
+  const types = lines.map((e) => e.type);
+  assert.ok(types.includes("agent-start"), "ndjson must record agent starts");
+  assert.ok(types.includes("agent-end"), "ndjson must record agent ends");
+  assert.equal(lines[lines.length - 1].type, "run-end", "ndjson must end with the terminal event");
+  // The onUpdate stream carries label/status text and a bounded progress pct.
+  assert.ok(updates.length >= 3, `expected live progress updates, got ${updates.length}`);
+  assert.ok(updates.some((u) => /shard-\d/.test(u.text)), "updates must name shard labels");
+  assert.ok(updates.some((u) => /done|FAILED/.test(u.text)), "updates must carry per-agent status");
+  for (const u of updates) {
+    if (u.progress !== undefined) {
+      assert.ok(Number.isInteger(u.progress) && u.progress >= 0 && u.progress <= 100);
+    }
+  }
+  const lastPct = [...updates].reverse().find((u) => u.progress !== undefined);
+  assert.equal(lastPct?.progress, 100, "the last percentage-carrying update must report 100%");
+  // Cleanup: remove the engine log the run persisted under the user home.
+  try {
+    // Remove the whole project dir (runs/ + locks), not just the log.
+    rmSync(dirname(dirname(outcome.engineLogFile)), { recursive: true, force: true });
+  } catch {
+    // Best-effort test hygiene.
+  }
 });
 
 test("runParallelShardReview surfaces a workflow failure as ok:false", async () => {
@@ -70,6 +111,17 @@ test("runParallelShardReview surfaces a workflow failure as ok:false", async () 
     // pdw's parallel() folds a failing agent into null; the caller sees a
     // descriptive "all shard reviewers failed" summary instead of the raw throw.
     assert.match(outcome.error ?? "", /failed/);
+    // Diagnostic paths survive failures too (goal exit criterion 4).
+    assert.match(outcome.runId, /^run-/);
+    assert.ok(outcome.progressFile.endsWith(`${outcome.runId}.ndjson`));
+    assert.ok(outcome.engineLogFile.endsWith(`${outcome.runId}.log`));
+    assert.ok(existsSync(outcome.progressFile), "ndjson must exist even when the run fails");
+    try {
+      // Remove the whole project dir (runs/ + locks), not just the log.
+      rmSync(dirname(dirname(outcome.engineLogFile)), { recursive: true, force: true });
+    } catch {
+      // Best-effort test hygiene.
+    }
   }
 });
 
@@ -140,6 +192,15 @@ test("runWaveWorkflow really fans out workers and parses patches", async () => {
   const m02 = outcome.results.find((r) => r.moduleId === "M-02")!;
   assert.deepEqual(m02.patches, []);
   assert.equal(outcome.agentCount, 2);
+  assert.match(outcome.runId, /^run-/);
+  assert.ok(outcome.progressFile.endsWith(`${outcome.runId}.ndjson`));
+  assert.ok(existsSync(outcome.progressFile));
+  try {
+    // Remove the whole project dir (runs/ + locks), not just the log.
+    rmSync(dirname(dirname(outcome.engineLogFile)), { recursive: true, force: true });
+  } catch {
+    // Best-effort test hygiene.
+  }
 });
 
 test("runWaveWorkflow splits recoverable-null workers into failedModules", async () => {
@@ -164,6 +225,12 @@ test("runWaveWorkflow splits recoverable-null workers into failedModules", async
     "failed worker must be excluded from results",
   );
   assert.deepEqual(outcome.failedModules, ["M-02"], "failed worker must be reported separately");
+  try {
+    // Remove the whole project dir (runs/ + locks), not just the log.
+    rmSync(dirname(dirname(outcome.engineLogFile)), { recursive: true, force: true });
+  } catch {
+    // Best-effort test hygiene.
+  }
 });
 
 

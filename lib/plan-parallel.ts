@@ -29,6 +29,7 @@ import { join } from "node:path";
 import { PLAN_DIR } from "./plan-state.ts";
 import { sanitizeInjectedWorkflowText } from "./pdw-bridge.ts";
 import type { PdwModule } from "./pdw-bridge.ts";
+import { buildRunProgressCallbacks, createProgressSink, newPdwRunId } from "./pdw-progress.ts";
 
 /** A module's minimal shape for wave planning. */
 export interface WaveModule {
@@ -178,6 +179,11 @@ export interface WaveWorkflowOptions {
    * null forces the PdwUnavailableError path deterministically.
    */
   pdwOverride?: PdwModule | null;
+  /**
+   * Live progress callback (the tool layer's `onUpdate`). `text` is a
+   * one-line status; `progress` is a 0-100 percentage when known.
+   */
+  onProgress?: (text: string, progress?: number) => void;
 }
 
 export type WaveWorkflowOutcome =
@@ -188,8 +194,22 @@ export type WaveWorkflowOutcome =
       failedModules?: string[];
       durationMs: number;
       agentCount: number;
+      /** Run identity — the engine log and the ndjson progress file share it. */
+      runId: string;
+      /** Absolute path of the live ndjson progress file (.pi/pdw-progress/). */
+      progressFile: string;
+      /** Best-effort engine log path (~/.pi/workflows/projects/<key>/runs/). */
+      engineLogFile: string;
     }
-  | { ok: false; reason: "workflow-failed"; error?: string };
+  | {
+      ok: false;
+      reason: "workflow-failed";
+      error?: string;
+      /** Run identity + artifacts, also on failure so the caller can locate them. */
+      runId: string;
+      progressFile: string;
+      engineLogFile: string;
+    };
 
 /**
  * Run one wave of parallel workers via pdw. Workers are read-only (edit/write
@@ -242,12 +262,22 @@ const results = await parallel(defs.map((def) => () =>
 return results
 `;
 
+  // Run identity + live progress (same wiring as runParallelShardReview).
+  const runId = newPdwRunId();
+  const sink = createProgressSink(opts.cwd, runId);
+  sink.setTotal(opts.modules.length);
+  const progressCallbacks = buildRunProgressCallbacks(sink, {
+    total: opts.modules.length,
+    onProgress: opts.onProgress,
+  });
+
   const runOptions: Record<string, unknown> = {
     cwd: opts.cwd,
     args: {},
+    runId,
     concurrency: opts.concurrency ?? Math.min(4, Math.max(1, opts.modules.length)),
     agentRetries: 1,
-    persistLogs: false,
+    persistAgentSessions: true,
     // Wave workers must be READ-ONLY: edit/write AND bash are excluded at the
     // engine level. agents/worker.md's "only writer" system prompt describes
     // the SERIAL role and must not leak into concurrent waves — so no
@@ -256,6 +286,7 @@ return results
       "bash",
       "edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit",
     ],
+    ...progressCallbacks,
   };
   if (opts.agentRegistry) runOptions.agentRegistry = opts.agentRegistry;
   if (opts.agent) runOptions.agent = opts.agent;
@@ -288,9 +319,22 @@ return results
       failedModules,
       durationMs: result.durationMs,
       agentCount: result.agentCount,
+      runId,
+      progressFile: sink.progressFile,
+      engineLogFile: sink.engineLogFile,
     };
   } catch (err) {
-    return { ok: false, reason: "workflow-failed", error: (err as Error).message };
+    return {
+      ok: false,
+      reason: "workflow-failed",
+      error: (err as Error).message,
+      runId,
+      progressFile: sink.progressFile,
+      engineLogFile: sink.engineLogFile,
+    };
+  } finally {
+    // Terminal event: the ndjson file is complete and tail -f readers can stop.
+    sink.done();
   }
 }
 
