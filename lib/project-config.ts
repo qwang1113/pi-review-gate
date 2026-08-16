@@ -31,6 +31,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_MAX_ROUNDS } from "./constants.ts";
 
@@ -274,27 +275,33 @@ export function projectConfigPath(cwd: string, configDirName = ".pi"): string {
   return join(cwd, configDirName, "review-gate.json");
 }
 
-/**
- * Load the per-project config. Each field is validated independently; an
- * invalid field silently keeps its default (fail-safe, never fail-open).
- */
-export function loadProjectConfig(cwd: string): ProjectConfig {
-  const cfg = defaultProjectConfig();
+/** User-global fallback config (~/.pi/review-gate.json), read when a project
+ *  leaves a field unset. Project values always win field-by-field. */
+export function globalConfigPath(home = homedir()): string {
+  return join(home, ".pi", "review-gate.json");
+}
+
+/** Parse one config file; undefined on missing/unreadable/corrupt JSON. */
+function readConfigObject(path: string): Record<string, unknown> | undefined {
   let raw: string;
   try {
-    raw = readFileSync(projectConfigPath(cwd), "utf8");
+    raw = readFileSync(path, "utf8");
   } catch {
-    return cfg; // no config file — defaults
+    return undefined; // no file
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    return parsed as Record<string, unknown>;
   } catch {
-    return cfg; // corrupt JSON — defaults (the gate itself stays untouched)
+    return undefined; // corrupt JSON — fail-safe: defaults stay
   }
-  if (typeof parsed !== "object" || parsed === null) return cfg;
-  const obj = parsed as Record<string, unknown>;
+}
 
+/** Apply one config object's fields onto the running config. Each field is
+ *  validated independently; an invalid field silently keeps the current
+ *  value (fail-safe, never fail-open). */
+function applyConfigFields(cfg: ProjectConfig, obj: Record<string, unknown>): void {
   if (typeof obj.maxRounds === "number" && Number.isInteger(obj.maxRounds)) {
     // Clamp instead of reject: 1 → 3 and 500 → 50, so a typo still yields a
     // sane cap rather than silently reverting to the default.
@@ -327,7 +334,14 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
   }
   if (typeof obj.precommit === "object" && obj.precommit !== null && !Array.isArray(obj.precommit)) {
     const pc = parsePrecommitConfig(obj.precommit as Record<string, unknown>);
-    if (Object.keys(pc).length > 0) cfg.precommit = pc;
+    if (Object.keys(pc).length > 0) {
+      // STEP-LEVEL merge across layers (consistent with the other sub-objects):
+      // each step (lint/typecheck/build/test) of the higher layer replaces
+      // that step only; a step the higher layer does not mention keeps the
+      // lower layer's value. An explicit `null` / {skip} in the higher layer
+      // wins (deliberate skip).
+      cfg.precommit = { ...(cfg.precommit ?? {}), ...pc };
+    }
   }
   if (typeof obj.copilotReview === "object" && obj.copilotReview !== null && !Array.isArray(obj.copilotReview)) {
     const cr = obj.copilotReview as Record<string, unknown>;
@@ -346,5 +360,19 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
         .filter((o) => o.length > 0);
     }
   }
+}
+
+/**
+ * Load the effective config: defaults ← user-global (~/.pi/review-gate.json)
+ * ← project (.pi/review-gate.json), each layer overriding the previous
+ * FIELD-BY-FIELD. Every field is validated independently; an invalid field
+ * silently keeps the lower layer's value (fail-safe, never fail-open).
+ */
+export function loadProjectConfig(cwd: string, homeOverride?: string): ProjectConfig {
+  const cfg = defaultProjectConfig();
+  const global = readConfigObject(globalConfigPath(homeOverride ?? homedir()));
+  if (global) applyConfigFields(cfg, global);
+  const project = readConfigObject(projectConfigPath(cwd));
+  if (project) applyConfigFields(cfg, project);
   return cfg;
 }

@@ -564,9 +564,11 @@ lets this skip worktrees entirely without ever putting a verdict at risk.
   中文。例外保持英文原样：代码、标识符、文件路径、shell 命令，以及协议固定英文
   标记——裁决 JSON 的 `READY`/`BLOCKED`/`NEEDS_HUMAN`、precommit 的 `## Overall:`
   sentinel、commit message（翻译它们会破坏门禁解析）。
-- **Commit/PR 英文（L5，advisory）**：commit message 和 PR 的 title/description 必须用
-  英文。门禁不再硬拦截（提取启发式对 heredoc 等复杂 shell 写法可能误判），但会发出
-  警告，且 reviewer 审核时会把非英文的 commit/PR 文案记为 P1 finding。请直接用英文写。
+- **Commit/PR 英文（L5，强制）**：commit message 和 PR 的 title/description 必须用
+  英文。门禁**硬拦截**非英文为主的文案（majority-body 判定，少数外来词可通过；
+  报错信息带逃生说明：会话内由用户 `/gate-bypass <reason>` 放行，`REVIEW_GATE_BYPASS=1`
+  仅对会话外的 git hooks 层提交有效），reviewer 审核时也会把非英文的
+  commit/PR 文案记为 P1 finding。请直接用英文写。
   （注意：这与 L4 不矛盾——面向用户的聊天用中文，commit/PR 用英文。）
 - Never edit `.env`, key files, or credentials (hard-blocked anyway).
 - Never put AI attribution in commit messages (hard-blocked anyway).

@@ -732,39 +732,43 @@ test("a standing arbiter token is cleared on any edit / new round / gate-reset",
   assert.match(resetRegion, /arbitrationDecisions\.clear\(\)/);
 });
 
-test("L5: commit & PR title/body language check is ADVISORY (warns, never blocks)", () => {
+test("L5 is HARD: commit & PR title/body language checks BLOCK (majority policy, escape hatch named)", () => {
   // commit messages AND gh pr create title/body are language-checked.
   assert.match(SRC, /firstNonEnglish/);
   assert.match(SRC, /extractPrTextFields/);
   // Applied to both ship kinds.
   assert.match(SRC, /s\.kind === "pr-create" \|\| s\.kind === "pr-edit"/);
-  // Findings are collected as advisories and surfaced via notify — the L5
-  // branch must NOT return a block (extraction heuristics can mis-read
-  // heredoc/substitution commit commands; a wrong guess must not stop a ship).
-  assert.match(SRC, /l5Advisories/);
-  assert.match(SRC, /review-gate \(L5 advisory\)/);
+  // User policy (2026-08-16): L5 upgraded from advisory to HARD — a
+  // predominantly non-English commit message or PR title/body returns
+  // block:true. The majority-body policy keeps minority foreign tokens
+  // passing, and the reason names the escape hatch so a wrong guess never
+  // strands a legitimate commit.
+  assert.match(SRC, /L5 HARD/);
+  assert.doesNotMatch(SRC, /l5Advisories/,
+    "the advisory collection must be gone — every language branch blocks");
+  assert.doesNotMatch(SRC, /review-gate \(L5 advisory\)/,
+    "the advisory notify must be gone");
 
-  // Reviewer P2 hardening: prove the LANGUAGE branches themselves cannot
-  // block, independent of any reason wording. Each language check appends to
-  // l5Advisories; between the deterministic check and its advisory push there
-  // must be NO `block: true` — and the segment from the LAST language check to
-  // the notify call must be block-free too.
+  // Both language branches must actually return block:true.
   const commitLangAt = SRC.indexOf("firstNonEnglish(msgs)");
   const prLangAt = SRC.indexOf("firstNonEnglish(prTexts)");
-  const notifyAt = SRC.indexOf("review-gate (L5 advisory)");
-  assert.ok(commitLangAt > 0 && prLangAt > commitLangAt && notifyAt > prLangAt,
-    "commit language check → PR language check → advisory notify, in order");
-  const langRegion = SRC.slice(commitLangAt, notifyAt);
-  assert.doesNotMatch(langRegion, /block:\s*true/,
-    "no blocking return may exist between the language checks and the advisory notify");
-  // The advisory must be surfaced through ctx.ui.notify at warning level.
-  const notifyCall = SRC.slice(SRC.lastIndexOf("ctx.ui.notify", notifyAt), notifyAt + 400);
-  assert.match(notifyCall, /ctx\.ui\.notify\(/);
-  assert.match(notifyCall, /"warning"/);
+  assert.ok(commitLangAt > 0 && prLangAt > commitLangAt,
+    "commit language check → PR language check, in order");
+  const commitRegion = SRC.slice(commitLangAt, prLangAt);
+  assert.match(commitRegion, /block: true/,
+    "a non-English commit message must block the ship");
+  assert.match(commitRegion, /\/gate-bypass <reason>/,
+    "the commit block must name the in-session escape hatch");
+  assert.match(commitRegion, /REVIEW_GATE_BYPASS=1/,
+    "the commit block must also name the out-of-session hook bypass");
+  const prRegion = SRC.slice(prLangAt, prLangAt + 1600);
+  assert.match(prRegion, /block: true/,
+    "a non-English PR title/body must block the ship");
+  assert.match(prRegion, /gh pr edit --title\/--body/,
+    "the PR block must point at the fix");
 
-  // AI-attribution BEFORE the language region STAYS a hard block.
-  const attrRegion = SRC.slice(SRC.indexOf("const l5Advisories"), commitLangAt);
-  assert.match(attrRegion, /AI attribution[\s\S]*?block:\s*true/);
+  // AI-attribution stays a hard block too (double barrier).
+  assert.match(SRC, /AI attribution[\s\S]*?block:\s*true/);
 });
 
 test("commands registered: gate-status, gate-bypass, gate-mode, gate-reset", () => {
@@ -1441,6 +1445,49 @@ test("REGRESSION: resolveOpenPr must fall back for gh versions without headRefOi
   assert.match(body, /decidePrView\(/, "the control flow must delegate to the pure decision helper");
   assert.match(body, /isUnknownJsonFieldError\(modern\.stderr\)/,
     "the legacy retry must be conditional on the field-whitelist error (P2: never retry for a real failure)");
+});
+
+test("L5 is HARD: non-English commit/PR text blocks the ship with the escape hatch named", () => {
+  // User policy (2026-08-16): L5 upgraded from advisory to hard block — the
+  // same majority-body detection, but a hit now returns block:true, and the
+  // reason must name the escape hatch so a wrong guess never strands a
+  // legitimate commit.
+  const callStart = SRC.indexOf('pi.on("tool_call"');
+  const callBody = SRC.slice(callStart, SRC.indexOf('pi.on("tool_result"', callStart));
+  assert.match(callBody, /L5 HARD: a predominantly non-English/,
+    "the L5 section must be marked HARD");
+  assert.match(callBody, /commit message is predominantly non-English/,
+    "a non-English commit message must block");
+  assert.match(callBody, /\/gate-bypass <reason>/,
+    "the commit block reason must name the in-session escape hatch");
+  assert.match(callBody, /REVIEW_GATE_BYPASS=1/,
+    "the out-of-session hook bypass must be named too");
+  assert.match(callBody, /PR title\/description is predominantly non-English/,
+    "a non-English PR title/body must block");
+  assert.match(callBody, /gh pr edit --title\/--body/,
+    "the PR block reason must point at the fix");
+  assert.doesNotMatch(callBody, /advisory only — never a block/,
+    "the advisory-only rationale must be gone");
+  const blocks = callBody.split("block: true").length - 1;
+  assert.ok(blocks >= 6, `expected the L5 blocks to exist alongside the others (got ${blocks} total block:true sites)`);
+});
+
+test("REGRESSION: /gate-bypass actually disarms the L1 ship gate in-session", () => {
+  // The /gate-bypass command wrote state.bypass but L1 never consulted it —
+  // a bypassed session still blocked every ship command at tool_call (only
+  // the git hooks honored it). The bash branch must step aside on
+  // state.bypass.active BEFORE any ship detection.
+  const callStart = SRC.indexOf('pi.on("tool_call"');
+  const callBody = SRC.slice(callStart, SRC.indexOf('pi.on("tool_result"', callStart));
+  const normalAt = callBody.indexOf('state.taskMode === "normal"');
+  const bypassAt = callBody.indexOf("state.bypass.active");
+  assert.ok(normalAt > 0 && bypassAt > normalAt,
+    "the bypass check must come after the normal-mode early return");
+  const detectAt = callBody.indexOf("detectShipCommands(command)");
+  assert.ok(detectAt > bypassAt,
+    "the bypass check must run BEFORE ship detection");
+  assert.match(callBody.slice(bypassAt, bypassAt + 120), /return;/,
+    "bypass must early-return the bash branch");
 });
 
 test("REGRESSION (P0b): the no-tests-warning is wired into the tool result and /gate-status", () => {

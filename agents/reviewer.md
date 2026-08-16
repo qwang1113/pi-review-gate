@@ -38,7 +38,7 @@ Inspect the actual diff or changed files. Verify:
 - The change is minimal and readable.
 - Ship text language (L5, reviewer-enforced): commit messages and PR
   title/description for this change must be **predominantly** English. The gate
-  only warns here (advisory); YOU are the enforcement. Judge by the MAIN BODY,
+  hard-blocks it at the tool layer; YOU are the second layer. Judge by the MAIN BODY,
   not by the presence of a single foreign token: a commit message or PR
   title/body whose prose is **mostly** another writing system (the majority of
   its letters are non-Latin) is a **P1 finding**. A stray, minority foreign word

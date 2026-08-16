@@ -13,11 +13,12 @@
  *                          strict Simplified-Chinese LANGUAGE_DIRECTIVE every
  *                          turn (thinking in Chinese too); protocol English
  *                          tokens (verdict enum, commit msgs, code) exempt.
- *   L5 Commit/PR English — ADVISORY: tool_call warns (never blocks) when a git
- *                          commit message or PR title/body looks non-English;
- *                          the per-turn LANGUAGE_DIRECTIVE instructs the agent
- *                          to write ship text in English and the reviewer
- *                          checks it during review.
+ *   L5 Commit/PR English — HARD: tool_call blocks a git commit message or
+ *                          PR title/body that is predominantly non-English
+ *                          (majority-body policy; escape hatch named in the
+ *                          reason); the per-turn LANGUAGE_DIRECTIVE instructs
+ *                          the agent to write ship text in English and the
+ *                          reviewer checks it during review too.
  *   L6 Test-label English — pre-commit (scripts/scan-test-labels.cjs) blocks a
  *                          staged it/test/describe label written in a non-Latin
  *                          script, unless a `// review-gate: allow-non-english`
@@ -1140,6 +1141,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the mode's defining behavior; explore below never gets this branch.
     if (state.taskMode === "normal") return;
 
+    // /gate-bypass (user-authorized, reason logged in state): the L1 ship gate
+    // steps aside for the rest of the session. The git hooks mirror it via
+    // REVIEW_GATE_BYPASS=1 for commits made OUTSIDE Pi; inside the session
+    // this is the only in-session escape. (Missing before 2026-08-16: the
+    // command set state.bypass but L1 never consulted it, so a bypassed
+    // session still blocked every ship — only the hooks honored it.)
+    if (state.bypass.active) return;
+
     // Explore mode does NOT block bash — investigations need diagnostic
     // commands. Ship commands below stay FULLY gated in every mode except the
     // normal mode: explore only relaxes auto-continuation and
@@ -1204,13 +1213,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // short-circuits; the block loop treats it as "state missing".)
     if (!anyChange) return;
 
-    // AI attribution (HARD) + English-language (L5, ADVISORY) checks on commit
-    // messages and PR title/description. L5 no longer hard-blocks: extraction
-    // heuristics can mis-read complex shell forms (e.g. `-m "$(cat <<'EOF' …)"`
-    // heredocs), so a wrong language guess must not stop a legitimate ship.
-    // Instead we warn, the per-turn LANGUAGE_DIRECTIVE tells the agent to write
-    // ship text in English, and the reviewer checks commit/PR language.
-    const l5Advisories: string[] = [];
+    // AI attribution (HARD) + English-language (L5, HARD) checks on commit
+    // messages and PR title/description. L5 HARD: a predominantly non-English
+    // commit message or PR title/body blocks the ship (the majority-body
+    // policy keeps minority foreign tokens passing; the escape hatch is named
+    // in every reason so a wrong guess never strands a legitimate commit).
     for (const s of ships) {
       if (s.kind === "commit") {
         const msgs = extractCommitMessages(s.segment);
@@ -1233,9 +1240,20 @@ export default function reviewGate(pi: ExtensionAPI) {
             };
           }
         }
+        // L5 HARD (user policy): predominantly non-English commit messages
+        // block the ship — same majority-body policy that used to be advisory
+        // only. The escape hatch is named in the reason: a wrong guess must
+        // never permanently strand a legitimate commit.
         const nonEn = firstNonEnglish(msgs);
         if (nonEn) {
-          l5Advisories.push(`commit message is predominantly non-English: "${nonEn.slice(0, 60)}"`);
+          return {
+            block: true,
+            reason:
+              `review-gate: commit message is predominantly non-English: "${nonEn.slice(0, 60)}". ` +
+              "Commit messages must be English — rewrite it (git commit --amend). " +
+              "Escape hatch: the user may run /gate-bypass <reason> (in-session; REVIEW_GATE_BYPASS=1 " +
+              "only applies outside the session, at the git-hook layer).",
+          };
         } else if (msgs.length > 0 && projectConfig.llmGuards.englishCheck
           && !msgs.some(containsNonLatinLetter)
           && await classifyNonEnglish(classifier(), msgs) === true) {
@@ -1243,30 +1261,38 @@ export default function reviewGate(pi: ExtensionAPI) {
           // 100% Latin script may still be romanized non-English (pinyin/romaji).
           // Only run the semantic check when there is NO non-Latin letter at all
           // — a minority foreign word already passes under the majority policy.
-          l5Advisories.push("commit message reads as romanized non-English (semantic check)");
+          return {
+            block: true,
+            reason:
+              "review-gate: commit message reads as romanized non-English (semantic check). " +
+              "Rewrite it in English. Escape hatch: the user may run /gate-bypass <reason> " +
+              "(in-session; REVIEW_GATE_BYPASS=1 only applies outside the session).",
+          };
         }
       } else if (s.kind === "pr-create" || s.kind === "pr-edit") {
         const prTexts = extractPrTextFields(s.segment);
         const nonEn = firstNonEnglish(prTexts);
         if (nonEn) {
-          l5Advisories.push(`PR title/description is predominantly non-English: "${nonEn.slice(0, 60)}"`);
+          return {
+            block: true,
+            reason:
+              `review-gate: PR title/description is predominantly non-English: "${nonEn.slice(0, 60)}". ` +
+              "PR text must be English — rewrite it (gh pr edit --title/--body). " +
+              "Escape hatch: the user may run /gate-bypass <reason> (in-session; REVIEW_GATE_BYPASS=1 " +
+              "only applies outside the session, at the git-hook layer).",
+          };
         } else if (prTexts.length > 0 && projectConfig.llmGuards.englishCheck
           && !prTexts.some(containsNonLatinLetter)
           && await classifyNonEnglish(classifier(), prTexts) === true) {
-          l5Advisories.push("PR title/description reads as romanized non-English (semantic check)");
+          return {
+            block: true,
+            reason:
+              "review-gate: PR title/description reads as romanized non-English (semantic check). " +
+              "Rewrite it in English. Escape hatch: the user may run /gate-bypass <reason> " +
+              "(in-session; REVIEW_GATE_BYPASS=1 only applies outside the session).",
+          };
         }
       }
-    }
-    if (l5Advisories.length > 0) {
-      // Advisory only — never a block. Surface to the user; the reviewer is
-      // instructed to flag non-English ship text during review.
-      try {
-        ctx.ui.notify(
-          "review-gate (L5 advisory): " + l5Advisories.join("; ") +
-            " — commit/PR text must be English. Consider amending (git commit --amend / gh pr edit).",
-          "warning",
-        );
-      } catch { /* headless UI — advisory is best-effort */ }
     }
 
     // P-multi: check every repo this command ships FROM (checkRoots was

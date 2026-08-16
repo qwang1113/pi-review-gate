@@ -61,10 +61,12 @@ L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
                           strict Simplified-Chinese directive every turn
                           (thinking in Chinese too; protocol English tokens
                           READY/BLOCKED/commit-msg/code stay exempt)
-L5  Commit/PR English     tool_call → ADVISORY warning when a git commit message
+L5  Commit/PR English     tool_call → HARD block when a git commit message
                           or PR title/body is PREDOMINANTLY non-English (majority
-                          body); the language directive (L4) + reviewer enforce
-                          English ship text; a minority foreign token passes
+                          body; in-session escape: /gate-bypass, outside:
+                          REVIEW_GATE_BYPASS=1 (git hooks only)); the language
+                          directive (L4) + reviewer enforce English ship text;
+                          a minority foreign token passes
 L6  Test-label English    pre-commit → block a staged it/test/describe label
                           that is PREDOMINANTLY non-Latin, unless a
                           `// review-gate: allow-non-english` (line) or `-file`
@@ -559,6 +561,18 @@ Per-project config lives in `.pi/review-gate.json`:
 
 Every field is validated independently; a missing/corrupt config silently
 falls back to defaults and can never loosen the gate.
+
+**User-global config (`~/.pi/review-gate.json`) is the fallback layer.** The
+same file shape may be placed in the user's home directory; the effective
+config is merged **field-by-field** in the order defaults ← global ← project
+(project values win). Sub-objects merge at their own level: `llmGuards` /
+`arbiter` / `copilotReview` merge field-by-field, and `precommit` merges
+**per step** (`lint` / `typecheck` / `build` / `test` — a step the project
+mentions replaces that step only; an explicit `null` skip wins). The git
+pre-commit hook reads the same two files for its `docSync` mirror (project
+wins, then global, then the enforced default), so the extension and the hook
+never disagree. A project that states nothing uses the user's global
+preferences; a machine without either file runs the documented defaults.
 
 ### Enforced code↔doc sync (`docSync`, default ON)
 
@@ -1368,20 +1382,24 @@ only — no blocking, no command rewriting** (`lib/edit-discipline.ts`):
    never pays for it, and nothing is ever blocked. All three sites are skipped
    in normal mode (the step-aside adds no extension text).
 
-### Commit/PR English gate (L5, advisory)
+### Commit/PR English gate (L5, HARD)
 
 Complementary to L4: while L4 makes user-facing *chat* Simplified Chinese, L5
-asks for **commit messages and PR title/description in English**. It is
-**advisory, not a hard block**: `-m`/`--title`/`--body` extraction is a
-heuristic and can mis-read complex shell forms (e.g. a heredoc-substituted
-message `git commit -m "$(cat <<'EOF' … EOF)"`), so a wrong language guess must
-never stop a legitimate ship. The check uses a **majority-body policy**
+requires **commit messages and PR title/description in English** and it is a
+**hard block**: a predominantly non-English commit message or PR title/body
+returns `block: true` at the tool layer, with the escape hatches named in the
+reason (`/gate-bypass` in-session; `REVIEW_GATE_BYPASS=1` only outside the
+session, where the git hooks honor it) so a wrong guess never strands a
+legitimate
+ship. (It was advisory until 2026-08-16 — user policy hardened it; the
+extraction heuristic concern is bounded by the majority-body policy below
+plus the escape hatch.) The check uses a **majority-body policy**
 (`lib/lang-detect.ts`): after stripping non-prose (code fences, inline code,
 URLs, Markdown link destinations, HTML tags) it counts letters and flags the
 text only when a **non-Latin script** (CJK, Kana, Hangul, Cyrillic, …) is the
 **majority** of them — so a mostly-English body with a **stray/minority** quoted
 foreign term (e.g. one `确认中`) **passes**, while a predominantly non-Latin body
-warns. Each text (title, body, each commit message) is judged **separately** so
+blocks. Each text (title, body, each commit message) is judged **separately** so
 a long English body can't mask a fully non-English title. The pure-Latin
 romanized-language semantic layer runs only when the text has **zero** non-Latin
 letters. Counting is **asymmetric** so markup can't hide a non-Latin body:
@@ -1389,9 +1407,10 @@ non-Latin letters are counted over the **full** text (a `确认中` inside a cod
 fence still counts), while Latin letters are counted over **prose only** (a big
 Latin code block can't dilute the ratio). Known conservative side-effect: an
 English text quoting a **large** non-Latin code sample can tip to "majority
-non-Latin" — advisory-only for L5 (a warning), and a deliberate non-English test
-label can be exempted with the L6 bypass marker. Enforcement lives with the humans-in-the-loop: the L4 language
-directive instructs the agent to write ship text in English every turn, and the
+non-Latin" and block — use the escape hatch or rephrase; a deliberate
+non-English test label can be exempted with the L6 bypass marker. Enforcement
+is layered: the L4 language directive instructs the agent to write ship text in
+English every turn, the tool layer blocks, and the
 reviewer treats a **predominantly** non-English commit message or PR title/body
 as a **P1 finding** (a single minority foreign token is **not** a finding). If a
 non-English PR body can only be fixed by an action the gate itself blocks (the
@@ -1580,7 +1599,7 @@ agents/reviewer.md            gatekeeper reviewer override, pinned model @ max
 lib/model-ranking.ts          leaderboard-scored judge ranking (reference for the pins)
 scripts/fetch-leaderboard.mjs opt-in, gate-external leaderboard fetcher (the only network I/O)
 lib/shell-lex.ts              quote-aware shell lexer (segments + dequoted tokens)
-lib/lang-detect.ts            L5: non-Latin-script detection for commit/PR English advisory
+lib/lang-detect.ts            L5: non-Latin-script detection for the commit/PR English hard gate
 scripts/scan-test-labels.cjs  L6: non-English test-label scanner (pre-commit, staged content)
 lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count/testScope table → PASS/FAIL/ERROR) + failedStepNames / stepTimings (diagnostics only)
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)
