@@ -15,7 +15,10 @@ The review loop, the decompose module loop, and **wave daily** (ad-hoc parallel
 editing) all run through the `@quintinshaw/pi-dynamic-workflows` engine — a
 HARD dependency that ships with this extension (installed via the package's
 `postinstall` — `scripts/install-package.mjs`, which also copies `agents/*.md`
-to `~/.pi/agent/agents/` and installs the git hooks when the current dir is a
+to `~/.pi/agent/agents/`, registers the companion pi packages
+(`pi-subagents` for the spawn-reviewer protocol, `pi-opencode-bridge` for the
+opencode-go provider) via `pi install` when missing, and installs the git hooks
+when the current dir is a
 repo). `/review` auto-shards large diffs
 (`run_parallel_shard_review`); `/plan-next` dispatches patch-first wave
 workers (`run_wave_workflow`). The agent decides when a task is large enough

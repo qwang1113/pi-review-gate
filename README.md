@@ -639,8 +639,18 @@ The package's `postinstall` (`scripts/install-package.mjs`) runs automatically
 on `pi install` / `npm install` and:
 
 1. copies `agents/*.md` → `~/.pi/agent/agents/` (pi-subagents loads them there),
-2. if the current directory is a git repo, installs the git hooks into it
+2. registers the **companion pi packages** this extension needs at runtime —
+   the pinned platform in `package.json` `dependencies` — via `pi install` when
+   they are missing from `~/.pi/agent/settings.json` (idempotent:
+   already-present packages are left untouched): `pi-subagents` (the
+   spawn-reviewer protocol), `pi-opencode-bridge` (the opencode-go provider),
+   `pi-anthropic-oauth`, `pi-mcp-adapter`, `pi-notify`, `pi-vim`,
+   `pi-web-access`, `@narumitw/pi-lsp` and `pi-hashline-readmap`.
+3. if the current directory is a git repo, installs the git hooks into it
    (idempotent; chained, never clobbered).
+
+So a fresh `pi install pi-review-gate` on a pi with a working provider setup
+gives a working loop out of the box — no manual companion installs needed.
 
 Then restart Pi or run `/reload`. Per-repo git hooks in other repositories:
 

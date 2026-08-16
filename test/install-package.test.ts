@@ -1,7 +1,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, chmodSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -9,6 +9,21 @@ import { tmpdir } from "node:os";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALLER = join(ROOT, "scripts", "install-package.mjs");
 const HOOK_INSTALLER = join(ROOT, "scripts", "install-git-hooks.sh");
+
+// The pinned companion platform: every entry must also appear in
+// COMPANION_PACKAGES in scripts/install-package.mjs (the manifest test
+// cross-checks the two lists).
+const COMPANION_EXPECTED = [
+  "@narumitw/pi-lsp",
+  "pi-anthropic-oauth",
+  "pi-hashline-readmap",
+  "pi-mcp-adapter",
+  "pi-notify",
+  "pi-opencode-bridge",
+  "pi-subagents",
+  "pi-vim",
+  "pi-web-access",
+];
 
 const tempDirs: string[] = [];
 function makeHome(): string {
@@ -49,6 +64,22 @@ test("package.json is a publishable pi package (manifest, peers, postinstall)", 
   }
   const deps = (pkg.dependencies ?? {}) as Record<string, string>;
   assert.ok(deps["@quintinshaw/pi-dynamic-workflows"], "pdw must stay a runtime dependency");
+  // Companion pi packages (the working platform): pinned as runtime deps so a
+  // fresh `pi install pi-review-gate` resolves them and the postinstall
+  // registers them via `pi install` — must match scripts/install-package.mjs
+  // COMPANION_PACKAGES exactly, else a companion never gets registered.
+  const installer = readFileSync(join(ROOT, "scripts", "install-package.mjs"), "utf8");
+  const companions = [...installer.matchAll(/"npm:([^"]+)"/g)].map((m) => m[1]!.replace(/^@.*?\//, "")).sort();
+  assert.ok(companions.length >= 8, `expected ≥8 companions, found ${companions.length}`);
+  for (const dep of Object.keys(deps)) {
+    if (dep.startsWith("@quintinshaw/") || dep.startsWith("@earendil-works/")) continue; // non-companion
+    const bare = dep.replace(/^@.*?\//, "");
+    if (companions.includes(bare)) continue;
+    assert.fail(`companion ${dep} is a dependency but missing from COMPANION_PACKAGES`);
+  }
+  for (const spec of COMPANION_EXPECTED) {
+    assert.ok(deps[spec], `${spec} must be pinned in dependencies`);
+  }
   // postinstall drives the agents+hooks installer on `pi install` / `npm install`.
   const scripts = (pkg.scripts ?? {}) as Record<string, string>;
   assert.match(scripts.postinstall ?? "", /install-package\.mjs/, "postinstall must run the package installer");
@@ -180,4 +211,109 @@ test("install-git-hooks resolves its own symlink (npm .bin entrypoint works)", (
   assert.equal(res.status, 0, `hook installer via symlink failed: ${res.stderr}`);
   assert.ok(existsSync(join(repo, ".git", "hooks", "pre-commit")), "hooks not installed via symlinked entrypoint");
   assert.ok(!/No such file or directory/.test(res.stderr), `symlink resolution broken: ${res.stderr}`);
+});
+
+// ---------------------------------------------------------------------------
+// Companion package registration (pi-subagents / pi-opencode-bridge)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the installer with a fake `pi` CLI on PATH that records every
+ * `pi install <spec>` invocation instead of really installing. The fake
+ * settings.json under HOME controls what the installer sees as registered.
+ */
+function runInstallerWithFakePi(home: string, pkgs: string[]): { status: number; stderr: string; installs: string[] } {
+  const binDir = join(home, "fakebin");
+  mkdirSync(binDir, { recursive: true });
+  const logFile = join(home, "pi-installs.log");
+  writeFileSync(join(binDir, "pi"), `#!/usr/bin/env bash\necho "$*" >> "${logFile}"\nexit 0\n`);
+  // spawnSync("pi") needs an exec bit on the fake CLI.
+  chmodSync(join(binDir, "pi"), 0o755);
+
+  const agentDir = join(home, ".pi", "agent");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: pkgs }, null, 2));
+
+  const res = spawnSync("node", [INSTALLER], {
+    encoding: "utf8",
+    cwd: ROOT,
+    env: { ...process.env, HOME: home, PATH: `${binDir}:${process.env.PATH ?? ""}` },
+  });
+  const installs = existsSync(logFile) ? readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean) : [];
+  return { status: res.status ?? -1, stderr: res.stderr, installs };
+}
+
+test("postinstall registers missing companion packages via pi install", () => {
+  const home = makeHome();
+  // Fresh home with only opencode-bridge preinstalled: every other companion
+  // must be registered, skipping the present one.
+  const { status, stderr, installs } = runInstallerWithFakePi(home, ["npm:pi-opencode-bridge"]);
+  assert.equal(status, 0, `installer failed: ${stderr}`);
+  const expectedMissing = [
+    "npm:pi-subagents",
+    "npm:pi-anthropic-oauth",
+    "npm:pi-mcp-adapter",
+    "npm:pi-notify",
+    "npm:pi-vim",
+    "npm:pi-web-access",
+    "npm:@narumitw/pi-lsp",
+    "npm:pi-hashline-readmap",
+  ];
+  assert.deepEqual(installs, expectedMissing.map((s) => `install ${s}`));
+});
+
+test("postinstall registers several missing companions (partial home)", () => {
+  const home = makeHome();
+  // Only the two earliest companions preinstalled — the rest must be added in
+  // COMPANION_PACKAGES order, skipping the present ones.
+  const { status, stderr, installs } = runInstallerWithFakePi(home, ["npm:pi-subagents", "npm:pi-opencode-bridge"]);
+  assert.equal(status, 0, `installer failed: ${stderr}`);
+  const expectedMissing = [
+    "npm:pi-anthropic-oauth",
+    "npm:pi-mcp-adapter",
+    "npm:pi-notify",
+    "npm:pi-vim",
+    "npm:pi-web-access",
+    "npm:@narumitw/pi-lsp",
+    "npm:pi-hashline-readmap",
+  ];
+  assert.deepEqual(installs, expectedMissing.map((s) => `install ${s}`));
+});
+
+test("postinstall skips companions already present in settings.json", () => {
+  const home = makeHome();
+  // ALL companions preinstalled: nothing may be re-registered.
+  const all = [
+    "npm:pi-subagents",
+    "npm:pi-opencode-bridge",
+    "npm:pi-anthropic-oauth",
+    "npm:pi-mcp-adapter",
+    "npm:pi-notify",
+    "npm:pi-vim",
+    "npm:pi-web-access",
+    "npm:@narumitw/pi-lsp",
+    "npm:pi-hashline-readmap",
+  ];
+  const { status, stderr, installs } = runInstallerWithFakePi(home, all);
+  assert.equal(status, 0, `installer failed: ${stderr}`);
+  assert.deepEqual(installs, [], "already-registered companions must not be reinstalled");
+});
+
+test("postinstall does not touch settings when there is no pi agent dir (no HOME .pi)", () => {
+  const home = makeHome();
+  // runInstaller (the shared helper) never created ~/.pi/agent/settings.json.
+  const res = runInstaller(home);
+  assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
+  assert.ok(!/companion already registered/.test(res.stdout), "unexpected companion log line");
+});
+
+test("postinstall registers ALL companions when settings.json has none", () => {
+  const home = makeHome();
+  const { status, stderr, installs } = runInstallerWithFakePi(home, []);
+  assert.equal(status, 0, `installer failed: ${stderr}`);
+  // Every npm: spec in COMPANION_PACKAGES must be registered, in order.
+  const installerSrc = readFileSync(INSTALLER, "utf8");
+  const specs = [...installerSrc.matchAll(/"npm:[^"]+"/g)].map((m) => m[0].slice(1, -1));
+  assert.ok(specs.length >= 8, `expected ≥8 companions, got ${specs.length}`);
+  assert.deepEqual(installs, specs.map((s) => `install ${s}`));
 });
