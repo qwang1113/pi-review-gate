@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,7 +12,7 @@ test("loop goal: injected ONLY in loop mode, before the unarmed early-return", (
   // clean (that is the whole point — set the exit contract BEFORE editing), so
   // it must sit after the explore early-return and before the
   // `!gateArmed && problems.length === 0` early-return.
-  assert.match(SRC, /from "\.\/lib\/loop-goal\.ts"/);
+  assert.match(SRC, /from "\.\.\/lib\/loop-goal\.ts"/);
   // Anchor on the REGISTRATION, not the bare word: "before_agent_start" also
   // appears in the file header comment, which would put the explore anchor
   // above the whole handler and make the ordering assertion vacuous.
@@ -82,7 +82,7 @@ test("blocked marker: every call site reclaims by ownership, none unlinks uncond
   // well-formed sidecar — fail-closed degraded to fail-open.
   assert.doesNotMatch(SRC, /unlinkSync/, "the extension must not delete the marker directly");
   assert.doesNotMatch(SRC, /FAILED_WRITE/, "the legacy content-free marker must be gone");
-  assert.match(SRC, /from "\.\/lib\/blocked-marker\.ts"/);
+  assert.match(SRC, /from "\.\.\/lib\/blocked-marker\.ts"/);
 
   const reclaims = SRC.match(/reconcileBlockedMarker\(/g) ?? [];
   assert.equal(reclaims.length, 3,
@@ -121,7 +121,7 @@ test("edits under gate-owned dirs do NOT arm the gate (writing a loop goal must 
 });
 
 test("extension imports from local lib/ (single source of truth)", () => {
-  assert.ok(SRC.includes('./lib/constants.ts'), "should import from ./lib/constants.ts");
+  assert.ok(SRC.includes('../lib/constants.ts'), "should import from ../lib/constants.ts (package-root lib/)");
   assert.match(SRC, /\bisCodeFile\b/);
   assert.match(SRC, /\bisDocFile\b/);
   assert.match(SRC, /\bcoalesceToolPath\b/);
@@ -1207,7 +1207,7 @@ test("LLM guards: every call site is gated on its llmGuards config flag", () => 
 test("L6 edit-time check scans the FULL projected file, not newText fragments", () => {
   // P1 regression guard: the extension must project via lib/edit-projection.ts.
   assert.match(SRC, /projectEditedContent\(/);
-  assert.ok(SRC.includes('./lib/edit-projection.ts'), "must import lib/edit-projection.ts");
+  assert.ok(SRC.includes('../lib/edit-projection.ts'), "must import lib/edit-projection.ts");
   // and the label check runs inside the edit-tool branch before returning
   const editBranch = SRC.indexOf("EDIT_TOOL_NAMES.has(event.toolName)");
   const labelCheck = SRC.indexOf("checkTestLabels(");
@@ -1483,4 +1483,24 @@ test("tiered trigger: shouldShardReview is imported and used in run_parallel_sha
   assert.match(SRC, /addDiffContext/);
   assert.match(SRC, /tier: "single"/);
   assert.match(SRC, /tier: "parallel"/);
+});
+
+// P0 regression (pi package layout): pi loads the extension entry IN PLACE via
+// jiti, so every relative import must resolve to a REAL sibling path — the old
+// `./lib/*` specifiers only worked because install-global.sh copied lib/
+// next to review-gate.ts (that installer is gone). This test would have
+// caught the break immediately.
+test("extension entry's relative imports resolve to existing files (package layout)", () => {
+  const entry = join(ROOT, "extensions", "review-gate.ts");
+  const src = readFileSync(entry, "utf8");
+  const imports = [...src.matchAll(/from "(\.\.[^"]+|\.\/[^"]+)"/g)].map((m) => m[1]);
+  assert.ok(imports.length > 10, `expected many relative imports, found ${imports.length}`);
+  const missing = imports
+    .map((spec) => ({ spec, abs: resolve(dirname(entry), spec) }))
+    .filter(({ abs }) => !existsSync(abs));
+  assert.deepEqual(
+    missing.map((m) => `${m.spec} → ${m.abs}`),
+    [],
+    "relative imports must resolve to real files under the package layout",
+  );
 });

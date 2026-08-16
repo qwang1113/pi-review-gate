@@ -22,12 +22,10 @@
     // infer their shapes from the source. `checkJs` stays OFF — the goal is
     // resolving the import, not type-migrating the scripts.
     "allowJs": true,
-    // The extension imports `./lib/*.ts`, which only resolves in the INSTALLED
-    // layout (install-global.sh copies lib/ next to review-gate.ts inside
-    // extensions/pi-review-gate/). In the repo, lib/ is a sibling of
-    // extensions/. rootDirs merges the two into one virtual directory so tsc
-    // resolves the same specifiers the runtime does, without symlinks or a
-    // build step.
+    // The extension imports `../lib/*.ts` — resolved relative to the
+    // extension file itself, which lands in the package root's lib/ both in
+    // the repo and in the installed pi-package layout (jiti loads the entry
+    // in place, so relative specifiers must point at real sibling paths).
     "rootDirs": [".", "./extensions"],
     "noEmit": true,
     "skipLibCheck": true,

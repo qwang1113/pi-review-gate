@@ -1,8 +1,9 @@
 /**
  * Parallel shard review (plane 1 of the parallel loop).
  *
- * Tiered parallel review: small diffs (<20 files AND <500 lines) use a single
- * reviewer without pdw; large diffs auto-shard to ≤4 parallel reviewers via
+ * Tiered parallel review: small diffs (<20 files AND <500 lines) use the
+ * default TWO cross-family reviewers without pdw; large diffs auto-shard to
+ * ≤4 parallel reviewers via
  * the pdw workflow engine. Each shard reviewer audits a DISJOINT set of
  * changed files and receives a per-shard diff for context. Shard verdicts
  * carry NO docSync — the integration review that follows attests it. Worst
@@ -16,6 +17,7 @@
  * tests without a workflow engine.
  */
 
+import { sanitizeInjectedWorkflowText } from "./pdw-bridge.ts";
 import type { PdwModule } from "./pdw-bridge.ts";
 
 /** Tiered trigger thresholds: a diff meeting either bound triggers sharding. */
@@ -57,7 +59,7 @@ export interface ShardVerdict {
   notes?: string;
 }
 
-export const DEFAULT_REVIEWER_MODEL = "claude-fable-5:max";
+export const DEFAULT_REVIEWER_MODEL = "anthropic/claude-fable-5:max";
 
 /**
  * Split changed files into balanced, disjoint review shards.
@@ -366,7 +368,10 @@ export function generateShardReviewScript(args: {
   const model = args.model ?? DEFAULT_REVIEWER_MODEL;
   const shardDefs = args.shards.map((shard) => ({
     label: shard.label,
-    prompt: buildShardPrompt(shard, args.goalText),
+    // Sanitize injected DATA: the engine's determinism blocklist is a plain
+    // regex over the whole script and would reject diff/goal text that merely
+    // mentions Date.now / Math.random / new Date() (see pdw-bridge.ts).
+    prompt: sanitizeInjectedWorkflowText(buildShardPrompt(shard, args.goalText)),
   }));
   return `export const meta = {
   name: 'parallel_shard_review',

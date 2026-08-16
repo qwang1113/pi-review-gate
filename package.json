@@ -1,11 +1,11 @@
 {
   "name": "pi-review-gate",
   "version": "0.2.0",
-  "description": "Quality gates for Pi — hard-block git commit/push/PR until review + precommit pass. Globally installable via npm/npx.",
+  "description": "Quality gates for Pi — hard-block git commit/push/PR until review + precommit pass. Installs as a standard pi package (extensions + skills + agents + hooks via postinstall).",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "pi-review-gate-install": "./scripts/install-global.sh"
+    "pi-review-gate-install-hooks": "./scripts/install-git-hooks.sh"
   },
   "files": [
     "extensions/",
@@ -17,11 +17,13 @@
     "README.md"
   ],
   "scripts": {
+    "postinstall": "node scripts/install-package.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test $(find test -name '*.test.ts' -o -name '*.test.mjs')"
   },
   "keywords": [
     "pi",
+    "pi-package",
     "review-gate",
     "quality-gate",
     "code-review",
@@ -29,20 +31,24 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions/review-gate.ts"
+      "./extensions"
     ],
     "skills": [
-      "./skills/review-loop"
+      "./skills"
     ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "@quintinshaw/pi-dynamic-workflows": "^3.5.1"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.1",
     "@types/node": "^26.2.0",
     "typebox": "^1.3.11",
     "typescript": "^5.9.3"
-  },
-  "dependencies": {
-    "@earendil-works/pi-ai": "^0.84.1",
-    "@quintinshaw/pi-dynamic-workflows": "^3.5.1"
   }
 }

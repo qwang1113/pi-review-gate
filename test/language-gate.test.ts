@@ -42,7 +42,7 @@ test("LANGUAGE_DIRECTIVE exempts protocol-fixed English tokens (fail-safe for th
 test("extension imports the directive from lib/constants (single source of truth)", () => {
   assert.match(EXT, /LANGUAGE_DIRECTIVE/);
   // It must be a named import from constants, not an inline re-declaration.
-  assert.match(EXT, /import\s*\{[\s\S]*LANGUAGE_DIRECTIVE[\s\S]*\}\s*from\s*["']\.\/lib\/constants\.ts["']/);
+  assert.match(EXT, /import\s*\{[\s\S]*LANGUAGE_DIRECTIVE[\s\S]*\}\s*from\s*["']\.\.\/lib\/constants\.ts["']/);
   // No second declaration of the directive anywhere in the extension.
   assert.doesNotMatch(EXT, /const\s+LANGUAGE_DIRECTIVE\s*=/);
 });

@@ -27,6 +27,7 @@ import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLAN_DIR } from "./plan-state.ts";
+import { sanitizeInjectedWorkflowText } from "./pdw-bridge.ts";
 import type { PdwModule } from "./pdw-bridge.ts";
 
 /** A module's minimal shape for wave planning. */
@@ -205,13 +206,13 @@ export async function runWaveWorkflow(
   const defs = await Promise.all(
     opts.modules.map(async (m) => ({
       moduleId: m.id,
-      prompt: buildWaveWorkerPrompt({
+      prompt: sanitizeInjectedWorkflowText(buildWaveWorkerPrompt({
         moduleId: m.id,
         title: m.title,
         ownedPaths: m.ownedPaths,
         worklogPath: m.worklogPath,
         goalText: m.goalText,
-      }),
+      })),
       model: await resolveBestModel(
         [m.model, "onekey/deepseek-v4-pro", "onekey/grok-4.6"],
         opts.modelRegistry,

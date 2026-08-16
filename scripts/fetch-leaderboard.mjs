@@ -211,7 +211,7 @@ async function main() {
       `Snapshot file not found: ${SNAPSHOT_FILE}\n` +
       `After a global install the ranking lib lives elsewhere; pass ` +
       `--snapshot-file <path> or set SNAPSHOT_FILE=<path> ` +
-      `(e.g. ~/.pi/agent/extensions/pi-review-gate/lib/model-ranking.ts).`,
+      "(e.g. <package-root>/lib/model-ranking.ts).",
     );
   }
   const dateRe = /export const SNAPSHOT_DATE = "[^"]*";/;

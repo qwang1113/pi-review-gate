@@ -38,6 +38,7 @@ export type ModelFamily =
   | "qwen"
   | "meta"
   | "mistral"
+  | "xai" // Grok
   | "unknown";
 
 export interface FamilyCapability {
@@ -71,6 +72,7 @@ export const FAMILY_CAPABILITY: readonly FamilyCapability[] = Object.freeze([
   { family: "minimax", score: 80, openWeight: true, source: "artificial-analysis" },
   { family: "meta", score: 78, openWeight: true, source: "livebench" }, // Llama
   { family: "mistral", score: 76, openWeight: true, source: "livebench" },
+  { family: "xai", score: 86, openWeight: false, source: "artificial-analysis+lmarena" }, // Grok
 ]);
 
 const CAP_BY_FAMILY: ReadonlyMap<ModelFamily, FamilyCapability> = new Map(
@@ -94,6 +96,7 @@ export function familyOf(modelId: string): ModelFamily {
   if (/qwen/.test(id)) return "qwen";
   if (/(llama|meta-)/.test(id)) return "meta";
   if (/(mistral|mixtral|codestral)/.test(id)) return "mistral";
+  if (/(grok|xai)/.test(id)) return "xai";
   if (/(gemini|palm|bard|google)/.test(id)) return "google";
   if (/(claude|opus|sonnet|haiku|fable|anthropic)/.test(id)) return "anthropic";
   // OpenAI: strong tokens, then o-series and product codenames ANCHORED to a

@@ -19,13 +19,26 @@ thinking, with a fallback priority list (first available wins):
   you should **proactively consult** it whenever a decision is non-trivial,
   ambiguous, risky, or you feel stuck. It does not gate; it advises on
   direction. Consulting early is cheaper than a failed review later.
-  Model priority: Fable 5 → Opus 5 → Opus 4.6 → GPT-5.6 Sol → Opus 4.8 → GPT-5.5.
+  Model priority: Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6.
 - **`reviewer`** (`agents/reviewer.md`, gatekeeper, *after* a diff exists) —
   independent audit that emits the JSON verdict the gate records.
-  Model priority: Fable 5 → Opus 5 → Opus 4.6 → GPT-5.5 → Opus 4.8.
+  Model priority: Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6.
 
 Thinking is a single value (`max`, the highest valid pi level); it is not a
 fallback list. If a model doesn't support `max`, pi clamps it down.
+
+**Default two-reviewer final pass (cross-family).** The review that ends a
+round runs **two reviewers by default**, from **different model families**:
+`claude-fable-5` (anthropic) as reviewer A and `onekey/gpt-5.6-sol` (openai)
+as reviewer B, both at `max` thinking — so the two audits do not share the
+main agent's blind spots. If a model is unavailable, fall down the pinned
+chains (see the tables above), keeping the two families distinct. Record BOTH
+full
+outputs via `record_review` (worst verdict wins; the gate's fail-closed
+semantics are unchanged). Pick the second reviewer with `rankJudges` from
+`lib/model-ranking.ts` when a choice exists; a single reviewer is the
+acceptable fallback only when a different-family model is genuinely
+unavailable, and that fact goes in a Note.
 
 Why these models? `lib/model-ranking.ts` scores model families from public
 capability leaderboards (Artificial Analysis Intelligence Index, LMArena Elo,
@@ -52,6 +65,19 @@ the file itself and records the hash of that exact text. In loop mode an
 unapproved goal **blocks commit/push/PR** and its body is withheld from your
 prompt (a leftover goal from a previous task is exactly what that prevents).
 Editing the file afterwards drops the approval — renegotiate and re-submit.
+
+**Pre-review the draft goal (single cross-family reviewer, C1).** Before you
+submit a goal for approval, run the draft through ONE cross-family reviewer —
+a different model family than your own session model, so goal-shaped blind
+spots get caught. The reviewer critiques the draft against: (a) is every
+criterion checkable by a command or concrete observation, (b) is the scope
+sized to the change, (c) do non-goals actually fence off the edges, (d) does
+it match what the user asked. If the reviewer raises BLOCKED-level objections,
+fix the draft and re-review before calling `propose_loop_goal` — never submit
+a goal you know is uncheckable. This is protocol, not a gate: the extension
+does not enforce it, but the `reviewer` WILL flag a goal whose criteria
+cannot be judged objectively (P2) and an uncheckable criterion that made the
+work go astray (P1).
 
 **Where**: `.pi/loop-goal.md`. That path sits inside the gate-owned `.pi/`
 scope (`GATE_EXCLUDE_PATHSPECS` / `isGateOwnedPath`, `lib/fingerprint.ts`),
@@ -184,15 +210,19 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    sweep. Never idle-poll a running subagent.
 
 3. **Review** — spawn an independent reviewer over the current diff
-   (`git diff HEAD` + untracked files). The reviewer must NOT be fed your own
-   conclusions (fresh eyes only) and must end its output with a fenced JSON
+   (`git diff HEAD` + untracked files). **By default spawn TWO reviewers from
+   different model families** (see "Default two-reviewer final pass" above);
+   run them in parallel and record both via `record_review` (worst wins). The
+   reviewer must NOT be fed your own conclusions (fresh eyes only) and must
+   end its output with a fenced JSON
    verdict:
 
    **Tiered trigger (small diff fast, large diff parallel)**: decide BEFORE
    spawning, by diff size — `shouldShardReview(fileCount, lineCount)`:
 
-   - **Small diff** (< 20 files AND < 500 changed lines): ONE reviewer over
-     the full change — no pdw engine, no sharding. Cheapest round.
+   - **Small diff** (< 20 files AND < 500 changed lines): TWO cross-family
+     reviewers (default fable-5 + gpt-5.6-sol, both max) over the full change
+     — no pdw engine, no sharding; each attests `docSync` itself.
    - **Large diff** (≥ 20 files OR ≥ 500 changed lines): auto-shard with
      `run_parallel_shard_review` (≤ 4 reviewers, each with its own files AND
      per-shard diff context), then ONE integration review over the whole
@@ -204,7 +234,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
    **Triage first (L1, large diffs)**: for anything but a tiny diff, spawn
    the `triage` agent (async, cheap: `claude-haiku-4-5` →
-   `deepseek-v4-flash`) over the same diff and hand its findings to the
+   `deepseek/deepseek-v4-flash` → `oc-sdk-go/deepseek-v4-flash` →
+   `onekey/deepseek-v4-flash`) over the same diff and hand its findings to the
    reviewer as input. Triage output carries NO verdict — never feed it to
    `record_review`; the reviewer owns the verdict.
 
@@ -281,18 +312,27 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    build/type surfaces: fast mode runs lint + tests, full mode adds typecheck
    and build (and prefers a project's `test` script over `test:unit`).
 
-## Model tiers — cheap models execute, strong models judge
+## Model tiers — cheap models read, mid models execute, strong models judge
 
 Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
 
-- **L1 cheap/fast** (`triage`, `claude-haiku-4-5` → `deepseek-v4-flash`) —
-  mechanical pre-scan and recon. Advisory only; carries no verdict.
-- **L2 execution** (`fixer`, `claude-sonnet-5` → `deepseek-v4-pro` →
-  `grok-4.5`) — implements findings into a diff; you review and merge it
-  (single writer stays with you).
-- **L3 judgment** (reviewer / adviser / arbiter, `max` thinking) — the only
-  tier whose verdicts may be recorded. Never delegate the verdict to a
-  cheaper model.
+- **L1 cheap/fast** (`triage`, `recon`, `claude-haiku-4-5` →
+  `deepseek/deepseek-v4-flash` → `oc-sdk-go/deepseek-v4-flash` →
+  `onekey/deepseek-v4-flash`, **thinking `low`/off**) — mechanical pre-scan, code/doc
+  search, heavy reading. Advisory only; carries no verdict. The main agent
+  delegates heavy reading to `recon` so expensive models never pay token cost
+  for scanning.
+- **L2 execution** (`worker` / `planner` / `fixer`, `claude-sonnet-5` →
+  `deepseek/deepseek-v4-pro` → `deepseek/deepseek-v4-flash` →
+  `oc-sdk-go/deepseek-v4-flash` → `onekey/deepseek-v4-flash` → `grok-4.6` →
+  `glm-5.3` →
+  `claude-opus-5`, **thinking `max`**) — implements findings / modules into a
+  diff; you review and merge it (single writer stays with you).
+  `deepseek-v4-flash` at `max` thinking is strong enough for execution; grok /
+  opus / glm are equally valid execution fallbacks.
+- **L3 judgment** (reviewer / adviser / module-reviewer / arbiter, `max`
+  thinking) — the only tier whose verdicts may be recorded. Never delegate
+  the verdict to a cheaper model.
 - **Low-risk exception**: a change that is purely docs / formatting /
   one-line may be reviewed by an L1 agent whose verdict IS recorded.
   Judging "low-risk" is yours; a misjudged call is a P1 finding for the L3
@@ -302,9 +342,10 @@ Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
   ≥500-line diffs into ≤4 disjoint shards, L3 reviewers audit shards in
   parallel (shard fences WITHOUT docSync) → record ALL shard outputs in ONE
   `record_review` → then ONE integration reviewer recorded alone (it carries
-  the docSync attestation). Small diffs (<20 files AND <500 lines) run a
-  SINGLE reviewer with no pdw engine overhead — see the Tiered trigger in
-  step 3. Worst wins. No user confirmation is needed for the shard plan.
+  the docSync attestation). Small diffs (<20 files AND <500 lines) run the
+  default TWO cross-family reviewers with no pdw engine overhead — see the
+  Tiered trigger in step 3. Worst wins. No user confirmation is needed for the
+  shard plan.
   There is NO serial protocol: the engine is a hard dependency, and a
   missing engine is an installation error, not a fallback.
 
@@ -460,8 +501,8 @@ When one request is too big for a single session, do not stretch the loop —
 split the requirement. The contract is SELF-CONTAINED: it lives in the
 commands themselves (`lib/workflow-commands.ts`) and the state module
 `lib/plan-state.ts` (the schema authority — resolve it at
-`.pi/extensions/pi-review-gate/lib/plan-state.ts` for a project install or
-`~/.pi/agent/extensions/pi-review-gate/lib/plan-state.ts` for a global one) —
+`<package-root>/lib/plan-state.ts`; a local-path `pi install` points at the
+repo itself, a global/npm install at `~/.pi/agent/npm/pi-review-gate/lib/`) —
 no repo-local doc is required; the extension must work in any repository. `/decompose`, `/plan-next`,
 `/plan-status` and `/plan-verify` drive it. The shape:
 

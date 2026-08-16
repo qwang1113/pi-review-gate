@@ -25,17 +25,17 @@ must never be crossed while extending the workflow.
 
 | Tier | Models (first = preferred) | Role | Verdict power |
 |---|---|---|---|
-| **L1 cheap/fast** | `claude-haiku-4-5` → `deepseek-v4-flash` | triage pre-scan, mechanical checklist, failure triage, recon | none (advisory input) |
-| **L2 execution** | `claude-sonnet-5` → `deepseek-v4-pro` → `grok-4.5` | implement fixes from findings, write tests, docs, Copilot-thread prep | none (output reviewed by main agent) |
-| **L3 judgment** | `claude-fable-5` / `onekey/gpt-5.6-sol` (per role) → `claude-opus-5` → `claude-opus-4-6` → … | reviewer / arbiter / major adviser consultation | **the only tier that emits verdicts** |
+| **L1 cheap/fast** | `claude-haiku-4-5` → `deepseek/deepseek-v4-flash` → `oc-sdk-go/deepseek-v4-flash` → `onekey/deepseek-v4-flash` | triage pre-scan, mechanical checklist, failure triage, recon | none (advisory input) |
+| **L2 execution** | `claude-sonnet-5` → `deepseek/deepseek-v4-pro` → `deepseek/deepseek-v4-flash` → `oc-sdk-go/deepseek-v4-flash` → `onekey/deepseek-v4-flash` → `onekey/grok-4.6` → `onekey/glm-5.3` → `claude-opus-5` | implement fixes from findings, write tests, docs, Copilot-thread prep | none (output reviewed by main agent) |
+| **L3 judgment** | `claude-fable-5` (per role) → `claude-opus-5` → `onekey/gpt-5.6-sol` → `onekey/glm-5.3` → `onekey/grok-4.6` | reviewer / arbiter / major adviser consultation | **the only tier that emits verdicts** |
 
 Agents: `agents/triage.md` (L1), `agents/fixer.md` (L2), `agents/reviewer.md`
 + `agents/adviser.md` + `agents/arbiter.md` (L3, `thinking: max`).
 
 Model IDs resolve against the configured providers (`~/.pi/agent/models.json`,
-onekey gateway); `grok-4.5` is configured there but is absent from the
-read-only `models-store.json` cache — the runtime source of truth is the
-configuration, not the store.
+onekey gateway; `oc-sdk-go` from the `pi-opencode-bridge` package;
+`deepseek/…` is the user's own DeepSeek subscription). The runtime source of
+truth is the configuration, not the models-store cache.
 
 ## 3. The pipeline (one round)
 
@@ -86,13 +86,14 @@ Key facts of the implementation:
   wins), consistent findings are merged, and the merged result is recorded.
   As of the tiered-trigger implementation (2026-08-15), split review is
   automatic: the agent decides by diff size — small diffs (<20 files AND
-  <500 lines) run a single reviewer, large diffs are auto-sharded ≤4 ways.
+  <500 lines) run the default TWO cross-family reviewers (fable-5 +
+  gpt-5.6-sol chains, both max thinking), large diffs are auto-sharded ≤4 ways.
 
 ## 5. Latency & cost
 
 | Stage | Before | After |
 |---|---|---|
-| One review round, small diff (<20 files, <500 lines) | ~280 s serial | ~190 s (single reviewer ⇄ precommit overlap) |
+| One review round, small diff (<20 files, <500 lines) | ~280 s serial | ~190 s (two cross-family reviewers ⇄ precommit overlap) |
 | One review round, large diff (auto-sharded) | ~280 s serial | ≤4 parallel shard reviewers + 1 integration review |
 | Precommit (multi-step repos) | serial steps | parallel steps, declaration-order output |
 | Multi-repo session | one repo at a time | N repos concurrently |
@@ -109,10 +110,11 @@ cost bug where small diffs were unnecessarily sharded is gone.
 - Single-writer: L2 fixes are merged by the main agent; concurrent writers
   never share one worktree. (Parallel wave workers are read-only and deliver
   patches — see §8.)
-- **Exactly two npm dependencies, both required and shipped with the
-  extension**: `@quintinshaw/pi-dynamic-workflows` (the engine — a HARD
-  dependency, there is no serial fallback) and `@earendil-works/pi-ai`
-  (pdw's undeclared import). `lib/pdw-bridge.ts` loads the engine once per
+- **One runtime npm dependency, required and shipped with the package**: `@quintinshaw/pi-dynamic-workflows`
+  (the engine — a HARD dependency, there is no serial fallback).
+  `@earendil-works/pi-ai` / `@earendil-works/pi-coding-agent` / `typebox` are
+  `peerDependencies` ("*") provided by the pi host. `lib/pdw-bridge.ts` loads
+the engine once per
   process; a missing/broken engine THROWS an installation error that the
   tools surface — it never silently degrades. No network I/O in the gate.
 - Verdicts only from L3 (with the low-risk exception above).
@@ -145,8 +147,9 @@ back to.
 (`shouldShardReview(fileCount, lineCount)`, thresholds exported as
 `SHARD_THRESHOLD_FILES` / `SHARD_THRESHOLD_LINES`):
 
-- **Small diff** (<20 files AND <500 changed lines): ONE reviewer over the
-  full change — no pdw engine, no sharding. Cheapest per-round cost.
+- **Small diff** (<20 files AND <500 changed lines): TWO cross-family
+  reviewers over the full change — no pdw engine, no sharding. Each attests
+  `docSync` itself (no separate integration review on this path).
 - **Large diff** (≥20 files OR ≥500 changed lines): the diff is split into
   ≤4 disjoint shards (`planReviewShards`, weight-balanced); a pdw workflow
   runs one L3 reviewer per shard in parallel (no `agentType` binding — the
@@ -191,8 +194,8 @@ main agent.
   failure throws `PdwUnavailableError` (installation guidance) and every
   consumer propagates it — the tools report the error, they never run a
   serial protocol. The engine ships with the extension
-  (`scripts/install-global.sh` installs it into the extension directory and
-  FAILS the install if npm cannot).
+  (`scripts/install-package.mjs` runs on `pi install` / `npm install` and
+  FAILS loudly if the runtime cannot resolve).
 - Gate core (binding, fail-closed, fingerprint, verdict/docSync parsing,
   receipt) untouched; pinned by the existing test suite.
 - A wave patch that fails `git apply` is sent back to its worker for one
@@ -208,13 +211,12 @@ main agent.
 
 #### Post-install verification checklist
 
-1. Run the extension installer (`scripts/install-global.sh`): it REQUIRES npm
-   and installs the pdw runtime into the extension directory (a failed
-   install fails the installer — there is no best-effort mode), then restart
-   Pi / `/reload`.
+1. Install the package (`pi install <path-or-npm-spec>` — its `postinstall`
+   runs `scripts/install-package.mjs`: agents → `~/.pi/agent/agents/`, and
+   git hooks when the current dir is a repo), then restart Pi / `/reload`.
 2. In a real pi session on this repo: run `/review` on a **small** change
-   (<20 files, <500 lines) and confirm a single reviewer runs with no pdw
-   engine; then run `/review` on a change with ≥20 files or ≥500 lines and
+   (<20 files, <500 lines) and confirm TWO cross-family reviewers run with no pdw
+   engine (worst verdict wins); then run `/review` on a change with ≥20 files or ≥500 lines and
    confirm the engine auto-shards and runs the reviewers concurrently (watch
    the pdw run panel), then record Phase A and run the integration review.
 3. In a real pi session with a multi-module plan: run `/plan-next` and

@@ -70,17 +70,18 @@ import {
   STRATEGIC_RESET_CHECKLIST,
   requiresFullPrecommit,
   type ShipCommandKind,
-} from "./lib/constants.ts";
-import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "./lib/project-config.ts";
-import { buildGitMemory } from "./lib/git-memory.ts";
-import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "./lib/ship-detect.ts";
+} from "../lib/constants.ts";
+import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
+import { buildGitMemory } from "../lib/git-memory.ts";
+import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
+import { buildTasksWidget, buildAgentsWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveShipRepos,
   resolveCommandRepos,
   resolveToolRepoTarget,
-} from "./lib/repo-resolve.ts";
-import { firstNonEnglish, containsNonLatinLetter } from "./lib/lang-detect.ts";
+} from "../lib/repo-resolve.ts";
+import { firstNonEnglish, containsNonLatinLetter } from "../lib/lang-detect.ts";
 import {
   failedStepNames,
   receiptTotalMs,
@@ -88,17 +89,17 @@ import {
   validatePrecommitReceipt,
   type StepTiming,
   type TestScope,
-} from "./lib/precommit-receipt.ts";
+} from "../lib/precommit-receipt.ts";
 import {
   appendTiming,
   formatPrecommitSummary,
   lastPrecommitTiming,
-} from "./lib/gate-timings.ts";
+} from "../lib/gate-timings.ts";
 import {
   decideReviewScope,
   formatReviewScopeDirective,
   type ReviewScopeDecision,
-} from "./lib/review-scope.ts";
+} from "../lib/review-scope.ts";
 import {
   advisoryChangeToken,
   changedFiles,
@@ -108,8 +109,8 @@ import {
   mayBeGateOwned,
   reviewCoverageFiles,
   worktreeTreeOid,
-} from "./lib/fingerprint.ts";
-import type { Fingerprint } from "./lib/fingerprint.ts";
+} from "../lib/fingerprint.ts";
+import type { Fingerprint } from "../lib/fingerprint.ts";
 import {
   emptyState,
   isPlateaued,
@@ -123,8 +124,8 @@ import {
   sidecarPath,
   unmetRequirements,
   type GateState,
-} from "./lib/gate-state.ts";
-import { parseReviewOutput, parsePrecommitOutput } from "./lib/verdict-parse.ts";
+} from "../lib/gate-state.ts";
+import { parseReviewOutput, parsePrecommitOutput } from "../lib/verdict-parse.ts";
 import {
   evaluateModeChange,
   buildModeConfirmMessage,
@@ -134,7 +135,7 @@ import {
   MODE_CONFIRM_TITLE,
   type TaskMode,
   type TaskModeSource,
-} from "./lib/task-mode.ts";
+} from "../lib/task-mode.ts";
 import {
   createLlmClassifier,
   classifyAiAttribution,
@@ -144,15 +145,15 @@ import {
   createVerdictMemo,
   isSuspiciousShipCandidate,
   type LlmClassifier,
-} from "./lib/llm-classify.ts";
-import { isPiSelfRoot } from "./lib/pi-self.ts";
+} from "../lib/llm-classify.ts";
+import { isPiSelfRoot } from "../lib/pi-self.ts";
 import {
   BASH_WRITE_NUDGE,
   EDIT_DISCIPLINE_DIRECTIVE,
   EDIT_FAILURE_NUDGE,
   looksLikeBashFileWrite,
-} from "./lib/edit-discipline.ts";
-import { projectEditedContent } from "./lib/edit-projection.ts";
+} from "../lib/edit-discipline.ts";
+import { projectEditedContent } from "../lib/edit-projection.ts";
 import {
   LOOP_GOAL_RELPATH,
   LOOP_GOAL_MAX_WRITE_CHARS,
@@ -165,15 +166,15 @@ import {
   readLoopGoal,
   GOAL_CONFIRM_TITLE,
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
-} from "./lib/loop-goal.ts";
+} from "../lib/loop-goal.ts";
 import {
   assessRequirementSize,
   buildDecomposeSuggestion,
   countExitCriteria,
   detectTouchedDirs,
   type ModuleBucket,
-} from "./lib/requirement-size.ts";
-import { fitDialogMessage } from "./lib/dialog-budget.ts";
+} from "../lib/requirement-size.ts";
+import { fitDialogMessage } from "../lib/dialog-budget.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_HISTORY_QUERY,
@@ -197,7 +198,7 @@ import {
   type CopilotSupport,
   type CopilotThread,
   type PrSummary,
-} from "./lib/copilot-review.ts";
+} from "../lib/copilot-review.ts";
 import {
   SENSITIVE_GRANT_TTL_MS,
   addGrant,
@@ -206,13 +207,13 @@ import {
   isGateIntegrityPath,
   normalizeSensitivePath,
   type SensitiveGrant,
-} from "./lib/sensitive-grant.ts";
+} from "../lib/sensitive-grant.ts";
 import {
   blockedMarkerPath,
   recordBlockedMarker,
   reconcileBlockedMarker,
-} from "./lib/blocked-marker.ts";
-import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "./lib/workflow-commands.ts";
+} from "../lib/blocked-marker.ts";
+import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "../lib/workflow-commands.ts";
 import {
   planReviewShards,
   runParallelShardReview,
@@ -220,8 +221,8 @@ import {
   shouldShardReview,
   SHARD_THRESHOLD_FILES,
   SHARD_THRESHOLD_LINES,
-} from "./lib/parallel-review.ts";
-import { parsePlanState, PLAN_DIR } from "./lib/plan-state.ts";
+} from "../lib/parallel-review.ts";
+import { parsePlanState, PLAN_DIR } from "../lib/plan-state.ts";
 import {
   computeWave,
   runWaveWorkflow,
@@ -229,7 +230,7 @@ import {
   validatePatchOwnership,
   checkPatchApplies,
   planDirFor,
-} from "./lib/plan-parallel.ts";
+} from "../lib/plan-parallel.ts";
 import {
   parseArbitrableAction,
   tokenAuthorizes,
@@ -240,7 +241,7 @@ import {
   type ArbitrableAction,
   type BypassToken,
   type TokenBindings,
-} from "./lib/arbitration.ts";
+} from "../lib/arbitration.ts";
 
 const ENTRY_TYPE = "review-gate-state";
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
@@ -860,7 +861,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* best effort — a missing/unreadable sidecar means nothing to warn about */ }
   }
 
+  // ---- TUI widgets (display-only; never throw, never block the gate) ----
+  // Content is built by pure functions in lib/ui-widget.ts and only pushed to
+  // the TUI when it actually changed (pi re-renders on every setWidget call).
+  let lastUiCtx: ExtensionContext | undefined;
+  let lastTasksWidget = "";
+  let lastAgentsWidget = "";
+
   function updateWidget(ctx: ExtensionContext) {
+    lastUiCtx = ctx;
     if (!ctx.hasUI) return;
     const parts: string[] = [];
     if (state.bypass.active) {
@@ -888,6 +897,35 @@ export default function reviewGate(pi: ExtensionAPI) {
       parts.push(`round ${state.rounds.length}/${state.maxRounds}`);
     }
     try { ctx.ui.setStatus("review-gate", parts.join(" · ")); } catch { /* non-TUI */ }
+
+    // aboveEditor — this loop's tasks (exit criteria of .pi/loop-goal.md),
+    // checked off as a whole once review READY + precommit PASS are recorded.
+    try {
+      let goalText: string | undefined;
+      try {
+        goalText = readFileSync(pathJoin(cwd, ".pi", "loop-goal.md"), "utf8");
+      } catch { /* no goal yet — widget says so */ }
+      const lines = buildTasksWidget(goalText, {
+        reviewReady: state.review.verdict === "READY",
+        precommitPass: state.precommit.verdict === "PASS",
+      });
+      const key = lines.join("\n");
+      if (key !== lastTasksWidget) {
+        lastTasksWidget = key;
+        ctx.ui.setWidget("review-gate-tasks", lines, { placement: "aboveEditor" });
+      }
+    } catch { /* display-only: a widget failure never breaks the gate */ }
+
+    // belowEditor — sub-agent runs visible in the TUI (running first, with age).
+    try {
+      const agents = scanAgentArtifacts(pathJoin(cwd, ".pi-subagents", "artifacts"), Date.now(), { maxAgeSec: 2 * 3600 });
+      const lines = buildAgentsWidget(agents);
+      const key = lines.join("\n");
+      if (key !== lastAgentsWidget) {
+        lastAgentsWidget = key;
+        ctx.ui.setWidget("review-gate-agents", lines, { placement: "belowEditor" });
+      }
+    } catch { /* display-only */ }
   }
 
   // ---------- user-visible output channels ----------
@@ -2268,9 +2306,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /**
    * Build a single-shard review prompt (no pdw) for small diffs. The prompt
-   * instructs the agent to run a standard reviewer subagent and return the
-   * fenced verdict — same shape as a shard record, so the caller can feed it
-   * to record_review unchanged.
+   * instructs the agent to run the DEFAULT TWO cross-family reviewers (fable-5
+   * + gpt-5.6-sol chains, both at max thinking) and return both fenced
+   * verdicts — each WITH docSync (there is no separate integration review on
+   * the small-diff path, so the reviewers attest code↔doc themselves) — so
+   * the caller can feed them to record_review unchanged (worst wins).
    */
   function buildSingleShardPrompt(
     files: string[],
@@ -2279,21 +2319,26 @@ export default function reviewGate(pi: ExtensionAPI) {
     goalText?: string,
   ): string {
     const lines = [
-      "## Single-shard review (tiered trigger: small diff)",
+      "## Two-reviewer review (tiered trigger: small diff)",
       "",
       `The diff is ${fileCount} file(s), ~${lineCount} line(s) — below the parallel-shard threshold `,
       `(${SHARD_THRESHOLD_FILES} files / ${SHARD_THRESHOLD_LINES} lines).`,
-      "Run a standard reviewer subagent over the full change:",
+      "Run TWO reviewers from different model families over the full change " +
+        "(default: claude-fable-5/anthropic + onekey/gpt-5.6-sol/openai, both max thinking; " +
+        "fall down the pinned chains if unavailable):",
       "",
       "### Changed files",
       ...files.map((f) => `- ${f}`),
       "",
-      "Run the reviewer subagent with the same instructions as a shard reviewer:",
+      "Each reviewer subagent follows the same instructions as a shard reviewer:",
       "- Read every changed file in the worktree.",
       "- Verify from the code (never guess).",
       "- Report findings with file paths and line numbers.",
-      "- Return a fenced JSON verdict WITHOUT docSync (the integration review attests it).",
+      "- Return a fenced JSON verdict WITH docSync (UPDATED | NOT_NEEDED) — there is NO separate " +
+        "integration review on the small-diff path, so each reviewer attests code↔doc itself.",
       "- Do NOT edit any file. Do NOT run tests that write files.",
+      "",
+      "Record BOTH full outputs via record_review (worst verdict wins).",
     ];
     if (goalText && goalText.trim()) {
       lines.push("", "### Loop goal", goalText.trim());
@@ -2309,8 +2354,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       "shards of the change concurrently, each returning a verdict fence WITHOUT docSync. Returns the " +
       "combined shard record: record it in ONE record_review call (worst verdict wins), then run ONE " +
       "integration reviewer over the whole change recorded ALONE (it carries the docSync attestation). " +
-      "SMALL DIFFS (<20 files AND <500 lines) skip the pdw engine entirely — the tool returns a single-shard " +
-      "prompt the agent runs with a standard reviewer subagent. " +
+      "SMALL DIFFS (<20 files AND <500 lines) skip the pdw engine entirely — the tool returns a " +
+      "two-reviewer prompt the agent runs with standard reviewer subagents (two cross-family reviewers, worst wins). " +
       "The pdw engine is a HARD dependency: when it is unavailable the tool reports an installation " +
       "error — there is no serial fallback.",
     parameters: Type.Object({
@@ -2351,7 +2396,7 @@ export default function reviewGate(pi: ExtensionAPI) {
               text:
                 `## Tiered trigger: small diff (${files.length} file(s), ~${lineCount} line(s))\n` +
                 `Below the parallel-shard threshold (${SHARD_THRESHOLD_FILES} files / ${SHARD_THRESHOLD_LINES} lines).\n` +
-                `Run a SINGLE reviewer subagent (not pdw) over the full change:\n\n` +
+                `Run TWO cross-family reviewers (not pdw) over the full change — worst verdict wins:\n\n` +
                 prompt,
             }],
             details: {
@@ -2394,7 +2439,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-run scripts/install-global.sh (it installs @quintinshaw/pi-dynamic-workflows into the extension directory).` }],
+          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` }],
           details: { available: false, reason: "tool-failed", error: (err as Error).message },
         };
       }
@@ -2538,7 +2583,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: `wave workflow failed: ${(err as Error).message}. If the pdw engine is missing, re-run scripts/install-global.sh (it installs @quintinshaw/pi-dynamic-workflows into the extension directory).` }],
+          content: [{ type: "text", text: `wave workflow failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` }],
           details: { available: false, reason: "tool-failed", error: (err as Error).message },
         };
       }
@@ -4634,6 +4679,16 @@ export default function reviewGate(pi: ExtensionAPI) {
           : "All gates satisfied — you may ship.")
     };
   });
+
+  // Refresh the TUI widgets periodically while sub-agents run: agent_settled
+  // only fires for the MAIN session, so a turn spent waiting on a sub-agent
+  // would otherwise freeze the running-agents list. One cheap dir scan + a few
+  // small file reads every 5s, content-compared inside updateWidget; .unref()
+  // so the timer never keeps the process alive. Display-only — no gate reads
+  // this state.
+  setInterval(() => {
+    if (lastUiCtx) updateWidget(lastUiCtx);
+  }, 5000).unref();
 }
 
 function contentText(content: unknown): string {

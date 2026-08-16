@@ -23,16 +23,18 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-// The extension imports ./lib/... and typebox relative to its own file, so
-// run it from a temp copy that mirrors the installed layout (same trick as
-// multi-repo-gate). A per-fixture node_modules/typebox symlink keeps ESM
-// resolution self-contained — os.tmpdir() is not /tmp on macOS, so a global
-// /tmp/node_modules would not be found by walking up from the fixture.
+// The extension imports ../lib/... and typebox relative to its own file, so
+// run it from a temp copy that mirrors the pi-package layout
+// (<pkg>/extensions/review-gate.ts + <pkg>/lib/). A per-fixture
+// node_modules/typebox symlink keeps ESM resolution self-contained —
+// os.tmpdir() is not /tmp on macOS, so a global /tmp/node_modules would not
+// be found by walking up from the fixture.
 const INSTALL = mkdtempSync(join(tmpdir(), "rg-lg-install-"));
 const dirs: string[] = [INSTALL];
 before(() => {
+  mkdirSync(join(INSTALL, "extensions"), { recursive: true });
   mkdirSync(join(INSTALL, "lib"), { recursive: true });
-  copyFileSync(join(ROOT, "extensions", "review-gate.ts"), join(INSTALL, "review-gate.ts"));
+  copyFileSync(join(ROOT, "extensions", "review-gate.ts"), join(INSTALL, "extensions", "review-gate.ts"));
   for (const f of readdirSync(join(ROOT, "lib"))) {
     copyFileSync(join(ROOT, "lib", f), join(INSTALL, "lib", f));
   }
@@ -45,7 +47,7 @@ after(() => {
   }
 });
 
-const { default: reviewGate } = await import(join(INSTALL, "review-gate.ts"));
+const { default: reviewGate } = await import(join(INSTALL, "extensions", "review-gate.ts"));
 
 function git(dir: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();

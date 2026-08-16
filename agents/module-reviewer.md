@@ -2,7 +2,7 @@
 name: module-reviewer
 description: Phase A shard reviewer — judges ONE module against its own must_haves and emits a verdict fence that never carries a docSync attestation
 model: claude-fable-5
-fallbackModels: onekey/gpt-5.6-sol, claude-opus-5
+fallbackModels: claude-opus-5, onekey/gpt-5.6-sol, onekey/glm-5.3, onekey/grok-4.6
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
@@ -14,8 +14,8 @@ You review ONE module of a requirement-orchestration run — Phase A of the
 verify round (the protocol is encoded in the `/plan-verify` command prompt,
 `lib/workflow-commands.ts`; the plan-state schema is validated by the
 extension's `lib/plan-state.ts` — resolve it under
-`.pi/extensions/pi-review-gate/lib/` — project install — or
-`~/.pi/agent/extensions/pi-review-gate/lib/` — global install). You are
+`<package-root>/lib/` — a local-path `pi install` points at the repo itself — or
+`~/.pi/agent/npm/pi-review-gate/lib/` — npm/global install). You are
 read-only: you never edit, never fix, never ship.
 
 ## Your scope
