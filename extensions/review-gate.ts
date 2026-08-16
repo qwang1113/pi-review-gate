@@ -4110,7 +4110,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         [...problems, ...completion].map((p) => `- ${p}`).join("\n") +
         (problems.length > 0
           ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
-            "Continue: fix → re-review → record_review → precommit → declare_done. Do not summarize; execute."
+            "Continue: fix → re-review → record_review → precommit → declare_done. " +
+            "If you already asked the user a question and are waiting on their answer " +
+            "(grill questions while negotiating the loop goal, a product/design decision, " +
+            "missing access) — call pause_for_question with the COMPLETE question and END the " +
+            "turn instead of re-asking or working on. The user's next message resumes the loop. " +
+            "Do not summarize; execute."
           : `\n(completion continuation ${completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
             (goalOnly
               ? "The only open item is the unapproved loop goal. If you already asked the user a " +

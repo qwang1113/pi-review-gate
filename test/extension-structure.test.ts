@@ -265,6 +265,21 @@ test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in 
   assert.match(beforeInject, /if \(state\.pausedQuestion\) return;/);
 });
 
+test("RESUME text: the unmet-gates branch also tells a waiting agent to pause_for_question", () => {
+  // An agent that ASKED a grill/decision question but did not (yet) call
+  // pause_for_question has no pausedQuestion set, so the auto-continuation
+  // fires. The unmet-gates resume text must then REMIND it to pause instead
+  // of blindly continuing to work — otherwise the follow-up steers the agent
+  // away from the question it is already waiting on (live regression: agent
+  // asked "决策 3 of 3", RESUME said only "Continue: fix → re-review …").
+  const start = SRC.indexOf('pi.on("agent_settled"');
+  const end = SRC.indexOf("// ---------- lifecycle ----------", start);
+  const body = SRC.slice(start, end);
+  // The main branch (problems > 0) must mention pause_for_question.
+  assert.match(body, /problems\.length > 0[\s\S]{0,800}?pause_for_question/s,
+    "unmet-gates resume must advise pause_for_question when the agent waits on the user");
+});
+
 test("pause resume: any non-extension input clears the pause (interactive AND rpc users)", () => {
   // source === "extension" is how the gate injects its own follow-ups; a
   // narrower filter (interactive-only) would deadlock RPC-driven sessions.
