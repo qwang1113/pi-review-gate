@@ -30,7 +30,12 @@ export interface GoalTask {
  *
  * Criteria are the numbered list under `## Exit criteria` (the heading the
  * extension writes) up to the next `## ` heading (normally `## Non-goals`).
- * Lines are shaped `1. **title**: rest of the criterion`.
+ * Lines are shaped `1. **title**: rest of the criterion` when the author
+ * bolds a title, but that is a style, not a contract — the skill never
+ * requires bold, and a generated goal like `1. \`src/utils.js\` adds …` must
+ * parse too (live regression: the widget wrongly reported "no parseable exit
+ * criteria" for a perfectly valid goal because ONLY bolded lines matched).
+ * A numbered line's whole text is the title when no `**title**` is present.
  *
  * Never throws: malformed or missing sections produce an empty list, and a
  * caller renders that as "no loop goal yet" rather than crashing the widget.
@@ -43,7 +48,10 @@ export function parseGoalTasks(goalText: string): GoalTask[] {
     const heading = line.match(/^##\s+(.+)$/);
     if (heading) {
       const name = heading[1]!.trim().toLowerCase();
-      if (name === "exit criteria") {
+      // Heading may be bilingual (agents write `## 退出标准（Exit Criteria）`)
+      // or contain a leader like `## Exit criteria:`. Match the section name
+      // as a token instead of requiring an exact bare spelling.
+      if (name.includes("exit criteria") || name.includes("退出标准")) {
         inCriteria = true;
         continue;
       }
@@ -51,10 +59,18 @@ export function parseGoalTasks(goalText: string): GoalTask[] {
       continue;
     }
     if (!inCriteria) continue;
-    const m = line.match(/^(\d+)\.\s+\*\*(.+?)\*\*[:：]?\s*(.*)$/);
-    if (m) {
-      tasks.push({ index: Number(m[1]), title: m[2]!.trim(), body: m[3]!.trim() });
+    const numbered = line.match(/^(\d+)\.\s+(.*)$/);
+    if (!numbered) continue;
+    const raw = numbered[2]!.trim();
+    if (!raw) continue;
+    // `**title**: body` — title is the bolded part, body the rest.
+    const bolded = raw.match(/^\*\*(.+?)\*\*\s*[:：]?\s*(.*)$/);
+    if (bolded) {
+      tasks.push({ index: Number(numbered[1]), title: bolded[1]!.trim(), body: bolded[2]!.trim() });
+      continue;
     }
+    // Plain numbered line (no bold) — the whole text is the title.
+    tasks.push({ index: Number(numbered[1]), title: raw, body: "" });
   }
   return tasks;
 }

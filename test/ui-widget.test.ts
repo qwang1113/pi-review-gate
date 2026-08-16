@@ -47,6 +47,13 @@ test("parseGoalTasks is case-insensitive on the section heading", () => {
   assert.equal(tasks.length, 2);
 });
 
+test("parseGoalTasks accepts bilingual or suffixed heading spellings", () => {
+  const bilingual = parseGoalTasks(SAMPLE_GOAL.replace("## Exit criteria", "## 退出标准（Exit Criteria）"));
+  assert.equal(bilingual.length, 2);
+  const suffixed = parseGoalTasks(SAMPLE_GOAL.replace("## Exit criteria", "## Exit criteria:"));
+  assert.equal(suffixed.length, 2);
+});
+
 test("parseGoalTasks returns [] for a goal without criteria", () => {
   assert.deepEqual(parseGoalTasks("# no criteria here\n\n## Non-goals\n- x\n"), []);
   assert.deepEqual(parseGoalTasks(""), []);
@@ -57,6 +64,29 @@ test("parseGoalTasks skips non-numbered lines inside the criteria section", () =
   const tasks = parseGoalTasks(text);
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0]!.title, "Only");
+});
+
+// Live regression: the main agent generated a goal whose criteria are plain
+// numbered lines starting with backticked code (no `**title**` bold) — the
+// widget then wrongly showed "no parseable exit criteria" although the goal
+// file was valid. A numbered line must parse even without bold.
+test("parseGoalTasks parses plain numbered criteria without bold title", () => {
+  const text = `# Task\n\n## Exit criteria\n1. \`src/utils.js\` adds multiply and nothing else.\n2. \`npm test\` passes.\n\n## Non-goals\n- no push\n`;
+  const tasks = parseGoalTasks(text);
+  assert.equal(tasks.length, 2);
+  assert.equal(tasks[0]!.index, 1);
+  assert.equal(tasks[0]!.title, "`src/utils.js` adds multiply and nothing else.");
+  assert.equal(tasks[0]!.body, "");
+  assert.equal(tasks[1]!.index, 2);
+  assert.equal(tasks[1]!.title, "`npm test` passes.");
+});
+
+test("parseGoalTasks keeps the bolded title when present and tolerates gaps", () => {
+  const text = `## Exit criteria\n1. **First**: one.\n3. **Third**: three.\n`;
+  const tasks = parseGoalTasks(text);
+  assert.equal(tasks.length, 2);
+  assert.deepEqual(tasks[0], { index: 1, title: "First", body: "one." });
+  assert.deepEqual(tasks[1], { index: 3, title: "Third", body: "three." });
 });
 
 // ---------------------------------------------------------------------------

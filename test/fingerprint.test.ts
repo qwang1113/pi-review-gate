@@ -453,7 +453,7 @@ test("unstaged edit changes fingerprint", () => {
   const dir = makeRepo();
   writeFileSync(join(dir, "file.ts"), "// v1");
   execFileSync("git", ["add", "file.ts"], { cwd: dir, stdio: "ignore" });
-  execFileSync("git", ["commit", "-m", "add"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add"], { cwd: dir, stdio: "ignore" });
   const a = computeFingerprint(dir);
   writeFileSync(join(dir, "file.ts"), "// v2");
   const b = computeFingerprint(dir);
@@ -469,7 +469,7 @@ test("adding a new file changes the fingerprint (even via a commit)", () => {
   const a = computeFingerprint(dir);
   writeFileSync(join(dir, "f.ts"), "//");
   execFileSync("git", ["add", "f.ts"], { cwd: dir, stdio: "ignore" });
-  execFileSync("git", ["commit", "-m", "add"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add"], { cwd: dir, stdio: "ignore" });
   const b = computeFingerprint(dir);
   assert.notEqual(a.digest, b.digest);
 });
