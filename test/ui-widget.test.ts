@@ -54,6 +54,27 @@ test("parseGoalTasks accepts bilingual or suffixed heading spellings", () => {
   assert.equal(suffixed.length, 2);
 });
 
+test("parseGoalTasks accepts a bolded inline criteria label (**退出标准**:)", () => {
+  // Generated goals often label the section with a bolded paragraph instead
+  // of an ATX heading — live regression from the review-gate repo's own goal.
+  const text = `# Task\n\n**任务**: do the thing.\n\n**退出标准**:\n1. \`npm test\` passes.\n2. docs updated.\n\n**非目标**: no push.\n`;
+  const tasks = parseGoalTasks(text);
+  assert.equal(tasks.length, 2);
+  assert.equal(tasks[0]!.title, "`npm test` passes.");
+  assert.equal(tasks[1]!.title, "docs updated.");
+  assert.ok(!tasks.some((t) => t.title.includes("no push")), "non-goals must not leak in");
+});
+
+test("parseGoalTasks stops at a bolded end label even when it carries inline content", () => {
+  // `**非目标**: no push.` (label and content on the same line) must still
+  // close the criteria section — otherwise a numbered line after it leaks in.
+  const text = `**任务**: t\n\n**退出标准**:\n1. one.\n\n**非目标**: no push.\n1. no PR either.\n`;
+  const tasks = parseGoalTasks(text);
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0]!.title, "one.");
+  assert.ok(!tasks.some((t) => t.title.includes("no PR")), "numbered lines after a bolded end label must not leak");
+});
+
 test("parseGoalTasks returns [] for a goal without criteria", () => {
   assert.deepEqual(parseGoalTasks("# no criteria here\n\n## Non-goals\n- x\n"), []);
   assert.deepEqual(parseGoalTasks(""), []);

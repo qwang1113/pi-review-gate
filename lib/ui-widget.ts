@@ -45,12 +45,30 @@ export function parseGoalTasks(goalText: string): GoalTask[] {
   const lines = goalText.split(/\r?\n/);
   let inCriteria = false;
   for (const line of lines) {
+    // Heading forms: `## Exit criteria` (extension-written), a bilingual or
+    // suffixed variant (`## 退出标准（Exit Criteria）`, `## Exit criteria:`),
+    // or a bolded inline label (`**退出标准**:`) that generated goals often
+    // use instead of a real ATX heading.
     const heading = line.match(/^##\s+(.+)$/);
     if (heading) {
       const name = heading[1]!.trim().toLowerCase();
       // Heading may be bilingual (agents write `## 退出标准（Exit Criteria）`)
       // or contain a leader like `## Exit criteria:`. Match the section name
       // as a token instead of requiring an exact bare spelling.
+      if (name.includes("exit criteria") || name.includes("退出标准")) {
+        inCriteria = true;
+        continue;
+      }
+      if (inCriteria) break; // next section — stop
+      continue;
+    }
+    // Bolded inline label: `**退出标准**:` — treat it like a section heading.
+    // The trailing `(.*)` also matches a label carrying inline content
+    // (`**非目标**: no push.`), so a numbered list after such an end label
+    // cannot leak into the criteria.
+    const boldLabel = line.match(/^\*\*([^*]+)\*\*\s*[:：]?\s*(.*)$/);
+    if (boldLabel) {
+      const name = boldLabel[1]!.trim().toLowerCase();
       if (name.includes("exit criteria") || name.includes("退出标准")) {
         inCriteria = true;
         continue;
