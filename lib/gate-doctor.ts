@@ -1,23 +1,14 @@
 /**
  * /gate-doctor — read-only health check for the optimizations this package
- * ships: the pdw engine (wave daily / decompose — review no longer uses it),
- * chains, the opencode-go provider allowlist, the precommit runner, the git
- * hooks, the user-global config fallback, the L5 language gate, the Copilot
- * gh compatibility path, and the command registry.
- *
- * DIAGNOSTICS ONLY, by design: nothing here reads or writes gate state, no
- * check decides a verdict, nothing blocks a ship. Every check returns
- * PASS / FAIL / WARN with evidence and repair advice; a single IO failure
- * degrades that one check, never the whole report (best-effort, symmetric
- * with modelDiagnosisLines in the extension).
- *
- * All decision logic is PURE (facts injected, no I/O inside a check); the
- * only I/O lives in `runGateDoctor`'s deps, so the whole report is
- * unit-testable with fake filesystems and probes.
+ * ships: the agent model chains, the opencode-go provider allowlist, the
+ * precommit runner, the git hooks, the user-global config fallback, the L5
+ * language gate, the Copilot gh compatibility path, and the command registry.
+ * (The pdw engine check was deleted with the engine itself — step 2 of
+ * docs/handoff-remove-pdw.md.)
  */
 import { join } from "node:path";
 import { diagnoseChain, type ModelChainEntry, type RegistryFacts } from "./model-diagnose.ts";
-import { isModelAllowed } from "./pdw-bridge.ts";
+import { isModelAllowed } from "./model-allowlist.ts";
 
 export type DoctorStatus = "PASS" | "FAIL" | "WARN";
 
@@ -43,39 +34,6 @@ export interface ProbeResult<T = string> {
   ok: boolean;
   value?: T;
   error?: string;
-}
-
-/**
- * The engine still ships for WAVE workers and the decompose module loop.
- * Review does not use it any more (it discards a per-agent `cwd`, so a reviewer
- * could not hold its own snapshot of the change under review — see
- * docs/handoff-remove-pdw.md), so a FAIL here no longer blocks reviewing.
- */
-export function checkPdwEngine(result: ProbeResult): DoctorCheck {
-  if (result.ok) {
-    return {
-      id: "pdw-engine",
-      title: "pdw workflow engine loads",
-      status: "PASS",
-      // Two lines: what loaded, and what it is still FOR. The scope note must
-      // not depend on the caller omitting a value — a reader seeing only
-      // "runWorkflow exported" would still assume review depends on it.
-      evidence: [
-        result.value ?? "@quintinshaw/pi-dynamic-workflows imports, runWorkflow exported",
-        "used by wave workers and the decompose module loop; review runs on plain subagents",
-      ],
-    };
-  }
-  return {
-    id: "pdw-engine",
-    title: "pdw workflow engine loads",
-    status: "FAIL",
-    evidence: [result.error ?? "engine unavailable"],
-    advice: [
-      "re-install the package so its node_modules land next to the extension code: `pi install` it, or run `scripts/install-package.mjs` / `npm install` in the package repo",
-      "only wave workers (`/plan-next`) and the decompose module loop need it — review runs on plain subagents",
-    ],
-  };
 }
 
 export function checkModelChains(entries: ModelChainEntry[], factsAvailable: boolean): DoctorCheck {
@@ -374,7 +332,6 @@ export interface DoctorDeps {
   hooksDir?: string;
   workflowCommandCount: number;
   isNonEnglishText: (text: string) => boolean;
-  probePdw: () => Promise<ProbeResult>;
   probeGh: () => Promise<ProbeResult>;
   readFile: (path: string) => string | undefined;
   exists: (path: string) => boolean;
@@ -475,10 +432,8 @@ function hookProbeFor(deps: DoctorDeps): HookProbe {
 }
 
 export async function runGateDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
-  const pdw = await deps.probePdw();
   const gh = await deps.probeGh();
   return [
-    checkPdwEngine(pdw),
     modelChainCheck(deps),
     checkOpencodeGoStore(deps.readFile(deps.modelsStorePath), deps.exists(`${deps.modelsStorePath}.bak`)),
     checkGlobalConfig(deps.readFile(deps.globalConfigPath)),

@@ -23,7 +23,7 @@ pointers.**
 
 | # | Decision | Consequence |
 |---|---|---|
-| D1 | **Wave-parallel execution with a single writer.** Pending modules whose dependencies are ready run concurrently as read-only patch producers; the main session validates and applies their patches (§5.2). | No shared-worktree writes: workers are engine-level read-only (edit/write/bash excluded) and deliver unified diffs; the worktree still has exactly one writer — the main session. The pdw engine is a hard dependency: no serial fallback exists. |
+| D1 | **Wave-parallel execution with a single writer.** Pending modules whose dependencies are ready run concurrently as read-only patch producers; the main session validates and applies their patches (§5.2). | No shared-worktree writes: worker-readonly subagents are read-only by construction (tools: allowlist has no edit/write/bash) and deliver unified diffs; the worktree still has exactly one writer — the main session. No engine is involved. |
 | D2 | **Precommit is merged, not per-module: one full run per verify round.** | Module-level churn never triggers a precommit. It cannot be "one run for the whole requirement": a precommit PASS is bound to the worktree fingerprint (`lib/gate-state.ts`), so every remediation invalidates it and the next round must re-run it. |
 | D3 | **Review is sharded and parallel, then integrated.** N module reviewers (one per worklog) run concurrently, read-only; a single integration reviewer then judges the whole change. | Each module is genuinely reviewed against its own `must_haves` instead of drowning in one giant diff, and the seams still get a global read. |
 | D4 | **The planner is short-lived, not long-running.** It answers "what is the next step" from the plan state and exits. | The "planner runs out of context and must hand off" problem disappears: every planner turn is already a cold start from disk. Handoff is a property, not a mechanism. |
@@ -317,11 +317,13 @@ repeat until the planner reports "all modules implemented":
        returns ONE instruction per module:
        "run M-03" | "replan: <reason>" | "all modules implemented"
      → main session computes the wave (every pending module whose depends_on
-       are all implemented/accepted; capped at 4) and, when the pdw engine is
-       available (lib/pdw-bridge.ts), dispatches the whole wave IN PARALLEL:
-       runWaveWorkflow spawns one READ-ONLY worker per module (edit/write
-       tools excluded at the engine level); each worker returns unified git
-       diff patches for its owned_paths
+       are all implemented/accepted; capped at 4) and dispatches the whole
+       wave via prepare_wave (fail-closed: computeWave + worklog existence),
+       then spawns ONE worker-readonly subagent per module IN THE SAME TURN
+       (async; WAVE_WORKER_SCHEMA as outputSchema; the worker's tools:
+       allowlist has no edit/write/bash — it is read-only by construction), and
+       each returns unified git diff patches for its owned_paths via
+       apply_wave_patches (validation + persistence + git apply --check)
      → main session VALIDATES every patch (validatePatchOwnership, then
        git apply --check), persists them under .pi/plan/patches/, and applies
        them in sequence with per-patch validation (a patch that fails to apply is sent back to its
@@ -332,9 +334,10 @@ repeat until the planner reports "all modules implemented":
 The worktree still has exactly one writer at all times: the main session.
 Workers are read-only and the single-writer guarantee of the serial design is
 what makes patch application safe (applied in sequence with per-patch
-validation; no cross-patch rollback transaction). The pdw engine is a HARD
-dependency — if it is unavailable, /plan-next stops and reports the
-installation error; there is no serial worker to fall back to.
+validation; no cross-patch rollback transaction). There is no engine anymore
+(docs/handoff-remove-pdw.md step 2): a worker that fails to return a result
+makes its module FAIL (never applied, never "nothing to change"), and there
+is no serial worker to fall back to.
 
 Workers are still expected to implement inside owned_paths, self-check every
 must_have with evidence, and write their worklog (execution log, changed-file
@@ -582,12 +585,10 @@ to enforce.
 - One writer at a time in this worktree — the main session. Parallel workers
   are READ-ONLY and ship their changes as validated patches (§5.2); nothing
   else writes to the worktree while the main session applies them.
-- **Exactly one npm dependency beyond the platform: `@quintinshaw/pi-dynamic-workflows`**
-  (peer: pi-coding-agent ≥ 0.80.8) — a HARD dependency: the parallel loop is
-  the only execution path, so a missing/broken engine is an installation
-  error surfaced by the tools, never a silent serial fallback.
-  `@earendil-works/pi-ai` is pinned alongside it because pdw imports it
-  without declaring it. No other new dependency, and no network I/O in the
+- **No workflow engine is shipped or required any more** — the
+  `@quintinshaw/pi-dynamic-workflows` dependency was retired
+  (docs/handoff-remove-pdw.md step 2): wave workers and reviewers are ordinary
+  subagents (pi-subagents provides the spawn protocol). No network I/O in the
   gate.
 - `.pi/plan/` is run state, not source: git-ignored from PR2 on, and evidence for
   the reviewers during the run rather than repository history.
@@ -598,11 +599,12 @@ Implemented since this document first shipped (see
 `docs/parallel-execution-plan.md` §8 for the design record):
 
 - **Parallel execution** (was deferred) — shipped as plane 1 (parallel shard
-  review) and plane 2 (patch-first wave workers) on top of
-  `@quintinshaw/pi-dynamic-workflows`. The pdw worktree-isolation mode was
-  deliberately NOT used for writers: v3.5.1 deletes the worktree/branch after
-  each agent, forbids worker commits, and silently degrades to the shared
-  worktree when isolation fails — patch-first avoids all three.
+  review) and plane 2 (patch-first wave workers) on plain subagents. The pdw
+  engine's worktree-isolation mode was deliberately NOT used for writers: it
+  deletes the worktree/branch after each agent, forbids worker commits, and
+  silently degrades to the shared worktree when isolation fails — patch-first
+  avoids all three. The engine itself is now retired: everything runs as
+  subagents (docs/handoff-remove-pdw.md).
 
 Still open (unchanged):
 

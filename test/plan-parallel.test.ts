@@ -15,6 +15,10 @@ import {
   patchFileList,
   validatePatchOwnership,
   writeWavePatches,
+  unplannedModuleIds,
+  unknownResultModuleIds,
+  ownedPathsFromPlan,
+  duplicateResultModuleIds,
 } from "../lib/plan-parallel.ts";
 
 test("computeWave picks exactly the pending modules whose deps are ready", () => {
@@ -237,4 +241,82 @@ test("git apply check and apply work on a real repo patch", async () => {
   const bogus = join(dir, "bogus.patch");
   writeFileSync(bogus, "--- a/missing.txt\n+++ b/missing.txt\n@@ -1 +1 @@\n-x\n+x\n", "utf8");
   assert.equal(await checkPatchApplies(dir, bogus), false);
+});
+
+test("behavioral: a wave worker's patches leave git status untouched until applied", async () => {
+  // The whole point of patch-first: the worktree must have exactly one writer
+  // (the main agent). A worker's patches land under .pi/plan/patches/ (a
+  // gitignored, fingerprint-excluded dir), are pre-checked, and only a `git
+  // apply` by the driver changes the worktree — nothing else may.
+  const dir = mkdtempSync(join(tmpdir(), "wave-apply-untouched-"));
+  const { execFileSync } = await import("node:child_process");
+  const { writeFileSync } = await import("node:fs");
+  execFileSync("git", ["init", "-q", dir]);
+  execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+  writeFileSync(join(dir, "seed.txt"), "line1\nline2\nline3\n", "utf8");
+  writeFileSync(join(dir, ".gitignore"), ".pi/\n", "utf8");
+  execFileSync("git", ["add", "seed.txt", ".gitignore"], { cwd: dir });
+  execFileSync("git", ["commit", "-q", "-m", "seed"], { cwd: dir });
+
+  // Persist a worker's patch the way apply_wave_patches would.
+  const patchDir = join(dir, ".pi", "plan");
+  const written = writeWavePatches(patchDir, "M-01", [
+    { path: "seed.txt", diff: "--- a/seed.txt\n+++ b/seed.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-edited\n line3\n" },
+  ]);
+  assert.equal(written.length, 1);
+
+  // The patch file itself is invisible to git status (gate-owned dir).
+  const statusBefore = execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" });
+  assert.equal(statusBefore.trim(), "", `worktree must stay clean after patches are persisted: ${statusBefore}`);
+
+  // The patch pre-checks and applies cleanly.
+  assert.equal(await checkPatchApplies(dir, written[0]), true);
+  const applied = await applyPatchFile(dir, written[0]);
+  assert.deepEqual(applied, { ok: true });
+  const changed = readFileSync(join(dir, "seed.txt"), "utf8");
+  assert.match(changed, /line2-edited/);
+  // …and now the worktree shows exactly that one change (only the driver's
+  // apply moved the tree — nothing else did).
+  const statusAfter = execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" });
+  assert.match(statusAfter, /^ M seed\.txt$/m);
+});
+
+test("apply_wave_patches reconciliation is fail-closed (pure checks)", () => {
+  // The two rejections apply_wave_patches makes with a plan in play must stay
+  // mechanically testable: deleting them silently would let a driver invent a
+  // wave (unapproved owned_paths) or smuggle in results for modules that were
+  // never dispatched.
+  const wave = [{ id: "M-01" }, { id: "M-02" }];
+  const planIds = new Set(["M-01", "M-02"]);
+  assert.deepEqual(unplannedModuleIds(wave, planIds), []);
+  assert.deepEqual(
+    unplannedModuleIds([{ id: "M-01" }, { id: "M-03" }], planIds),
+    ["M-03"],
+    "an unplanned module id must be reported, never silently accepted",
+  );
+
+  assert.deepEqual(
+    unknownResultModuleIds([{ moduleId: "M-01" }, { moduleId: "M-09" }], new Set(["M-01", "M-02"])),
+    ["M-09"],
+    "a result for a module that is not in the wave must be reported",
+  );
+
+  // Ownership comes from the plan when one is given; caller paths are the
+  // fallback only when there is no plan.
+  const withPlan = ownedPathsFromPlan(
+    [{ id: "M-01", ownedPaths: ["caller/a.ts"] }],
+    { modules: [{ id: "M-01", owned_paths: ["plan/a.ts", "plan/b.ts"] }] },
+  );
+  assert.deepEqual(withPlan.get("M-01"), ["plan/a.ts", "plan/b.ts"], "plan ownership must win");
+  const noPlan = ownedPathsFromPlan([{ id: "M-01", ownedPaths: ["caller/a.ts"] }]);
+  assert.deepEqual(noPlan.get("M-01"), ["caller/a.ts"]);
+
+  // Two results for the same module are a handoff defect — never last-wins.
+  assert.deepEqual(duplicateResultModuleIds([{ moduleId: "M-01" }, { moduleId: "M-02" }]), []);
+  assert.deepEqual(
+    duplicateResultModuleIds([{ moduleId: "M-01" }, { moduleId: "M-01" }, { moduleId: "M-02" }]),
+    ["M-01"],
+    "a duplicated result must be reported, never silently replaced",
+  );
 });

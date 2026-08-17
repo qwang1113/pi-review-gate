@@ -136,7 +136,7 @@ export function formatFanoutPlan(plan: FanoutPlan): string {
 export interface JudgeFacts {
   models: ReadonlyArray<{ provider: string; id: string }>;
   authedProviders: ReadonlySet<string>;
-  /** The resolver's provider/model allowlist (pdw-bridge isModelAllowed). */
+  /** The resolver's provider/model allowlist (lib/model-allowlist.ts isModelAllowed). */
   allowed: (model: { provider: string; id: string }) => boolean;
 }
 

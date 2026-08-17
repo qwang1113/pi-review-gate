@@ -309,10 +309,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
      `record_review` call; then run ONE integration review over the whole change
      that carries the `docSync` attestation.
 
-   Reviews do NOT run on the pdw engine — it discards a per-agent `cwd`, so a
-   shard reviewer could never hold its own snapshot of the change it judges (see
-   `docs/handoff-remove-pdw.md`). The engine still drives wave workers and the
-   decompose module loop.
+   No engine is involved anywhere — the pdw engine is retired
+   (`docs/handoff-remove-pdw.md`); wave workers (`worker-readonly`) and the
+   decompose module loop run on plain subagents too.
 
    The thresholds are exported constants (`SHARD_THRESHOLD_FILES` /
    `SHARD_THRESHOLD_LINES` in `lib/parallel-review.ts`) — never invent your
@@ -427,7 +426,7 @@ Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
   one-line may be reviewed by an L1 agent whose verdict IS recorded.
   Judging "low-risk" is yours; a misjudged call is a P1 finding for the L3
   reviewer.
-- **Split review = tiered by diff size**, and it does NOT use the pdw engine:
+- **Split review = tiered by diff size**, and it runs on plain subagents:
   `prepare_review` splits ≥20-file or ≥500-line diffs with `planReviewShards`
   into ≤4 disjoint groups covering every changed file, hands each shard its own
   writable snapshot + stream, and you spawn one subagent per shard in ONE turn
@@ -436,9 +435,8 @@ Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
   docSync attestation). Small diffs (<20 files AND <500 lines) run the default
   TWO cross-family reviewers over the whole change — see the Tiered trigger in
   step 3. Worst wins. No user confirmation is needed for the shard plan.
-  The engine is a hard dependency for WAVES and the decompose module loop only;
-  it cannot host reviews because it discards a per-agent `cwd`
-  (`docs/handoff-remove-pdw.md`).
+  No engine is involved anywhere (the pdw engine is retired —
+  `docs/handoff-remove-pdw.md`).
 
 ## Working across several repos
 
@@ -495,7 +493,7 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
 
 Wave workers are **not just for decompose**. The patch-first protocol described
 below works for ANY task that can be split into independent sub-tasks with
-disjoint file ownership. The engine is the same; the only difference is that
+disjoint file ownership. The protocol is the same; the only difference is that
 decompose has a formal module table and plan state, while a daily wave is
 ad-hoc — you define the modules, dispatch them, and apply their patches.
 
@@ -517,9 +515,11 @@ with clearly disjoint file ownership:
 1. **Define the modules.** Each module needs: an id, a one-line title, its
    `owned_paths` (disjoint from other modules), and its task description.
    Modules with no dependencies all run in the same wave.
-2. **Dispatch the wave.** Call `run_wave_workflow` with the module list. The
-   engine runs all workers in parallel (read-only, edit/write excluded); each
-   returns unified git diffs for its owned paths.
+2. **Dispatch the wave.** Call `prepare_wave` with the module list, then spawn
+   ONE `worker-readonly` subagent per module IN THE SAME TURN (async), each
+   with its ready-made task and `WAVE_WORKER_SCHEMA` as outputSchema. All
+   workers run in parallel (strictly read-only — no edit/write/bash in their
+   allowlist); each returns unified git diffs for its owned paths.
 3. **Validate and apply.** For each worker's patches: `validatePatchOwnership`
    (declared path ∪ diff headers ⊆ owned_paths), `git apply --check`, then
    `git apply`. A patch that fails is sent back to its worker for one retry —
@@ -529,13 +529,16 @@ with clearly disjoint file ownership:
 
 ### Patch-first protocol (daily wave)
 
-> This is the SAME protocol as the decompose wave — the engine is identical.
+> This is the SAME protocol as the decompose wave — the workers and the
+> patch-first mechanics are identical.
 > The only difference is that daily waves have no formal plan state or
 > verify rounds; the main agent defines the modules ad-hoc.
 
-- **Workers are READ-ONLY.** edit/write AND bash are excluded at the engine
-  level. Each worker reads its owned paths and produces unified git diffs.
-- **≤4 modules per wave.** The engine caps concurrency at 4; a 5th module
+- **Workers are READ-ONLY.** Their `tools:` allowlist has no
+  edit/write/bash (`agents/worker-readonly.md` — enforced at launch, since
+  pi-subagents has no per-call tool denylist). Each worker reads its owned
+  paths and produces unified git diffs.
+- **≤4 modules per wave.** `computeWave` caps the wave at 4; a 5th module
   waits for the next wave.
 - **Patch-first.** Workers produce diffs; the main agent validates and applies
   them. No worker ever writes to the worktree directly.
@@ -546,9 +549,12 @@ with clearly disjoint file ownership:
 - **No cross-patch rollback.** Patches are applied in sequence with per-patch
   validation. A failed patch is sent back to its worker for one retry, never
   silently edited by the main agent.
-- **The engine is a HARD dependency for WAVES** (and the decompose module
-  loop) — not for review, which runs on plain subagents. A missing engine throws
-  `PdwUnavailableError` (installation guidance) — there is no serial fallback.
+- **Wave workers are strictly read-only** — `agents/worker-readonly.md`'s
+  `tools:` allowlist has no edit/write/bash (pi-subagents has no per-call tool
+  denylist; the allowlist is the mechanical guarantee). The pdw engine that
+  used to enforce this is retired (`docs/handoff-remove-pdw.md`); a worker that
+  returns no result makes its module FAIL (never "nothing to change"), and
+  there is no serial fallback.
 
 ### Example: daily wave dispatch
 
@@ -618,14 +624,17 @@ confirmation.
 2. `/plan-next`, repeatedly — the planner cold-starts from the state, writes
    the next WAVE's task briefs, and returns one instruction per module. A wave
    is every pending module whose `depends_on` are all implemented/accepted
-   (≤4 per wave). With pdw available, dispatch the whole wave IN PARALLEL via
-   `runWaveWorkflow` (`lib/plan-parallel.ts`): each worker is READ-ONLY
-   (edit/write excluded) and returns unified git diffs for its `owned_paths`;
-   you validate (`validatePatchOwnership` + `git apply --check`), persist
-   patches under `.pi/plan/patches/`, apply them in sequence with per-patch validation, and record each
-   module's status plus a one-line result. The pdw engine is a HARD
-   dependency — a missing engine is an installation error, never a serial
-   fallback. **You are a driver here**: never read the diff,
+   (≤4 per wave). Call `prepare_wave` (`lib/plan-parallel.ts` + the extension
+   tools) to reconcile the wave fail-closed and get one ready-made task per
+   module; spawn ONE `worker-readonly` subagent per module IN THE SAME TURN
+   (async) with `WAVE_WORKER_SCHEMA` as outputSchema — each worker is strictly
+   READ-ONLY (no edit/write/bash in its allowlist) and returns unified git
+   diffs for its `owned_paths`. Then call `apply_wave_patches` with your
+   workers' structured outputs: it validates (`validatePatchOwnership` + `git
+   apply --check`), persists patches under `.pi/plan/patches/`, and you apply
+   them in sequence with per-patch validation and record each
+   module's status plus a one-line result. A worker that returns no result
+   means its module FAILED — never applied. **You are a driver here**: never read the diff,
    the source or the worker's transcript. The planner is disposable precisely
    because everything that matters is on disk, so a planner that runs out of
    context costs nothing.

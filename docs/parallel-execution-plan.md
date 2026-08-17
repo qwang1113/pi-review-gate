@@ -103,7 +103,7 @@ Key facts of the implementation:
 | Precommit (multi-step repos) | serial steps | parallel steps, declaration-order output |
 | Multi-repo session | one repo at a time | N repos concurrently |
 | Token cost | ~all on the strong model | ~80% of tokens on L1/L2 (~10% of cost) |
-Small-diff rounds avoid the pdw orchestration overhead entirely — the 3×
+Small-diff rounds avoid any orchestration overhead entirely — the 3×
 cost bug where small diffs were unnecessarily sharded is gone.
 
 ## 6. Boundaries (never cross)
@@ -123,13 +123,13 @@ cost bug where small diffs were unnecessarily sharded is gone.
   Integrity is mechanical, not honour-based: the snapshot's tree is re-derived
   when the reviewer finishes, and a READY from a reviewer that left its own
   edits behind is downgraded to BLOCKED (its findings stay valid).
-- **One runtime npm dependency, required and shipped with the package**: `@quintinshaw/pi-dynamic-workflows`
-  (the engine — a HARD dependency, there is no serial fallback).
-  `@earendil-works/pi-ai` / `@earendil-works/pi-coding-agent` / `typebox` are
-  `peerDependencies` ("*") provided by the pi host. `lib/pdw-bridge.ts` loads
-the engine once per
-  process; a missing/broken engine THROWS an installation error that the
-  tools surface — it never silently degrades. No network I/O in the gate.
+- **No runtime workflow engine is shipped any more** — the
+  `@quintinshaw/pi-dynamic-workflows` dependency was retired in step 2 of
+  `docs/handoff-remove-pdw.md`; wave workers and reviewers are ordinary
+  subagents (pi-subagents is the companion package providing the spawn
+  protocol). `@earendil-works/pi-ai` / `@earendil-works/pi-coding-agent` /
+  `typebox` are `peerDependencies` ("*") provided by the pi host. No network
+  I/O in the gate.
 - Verdicts only from L3 (with the low-risk exception above).
 
 ## 7. Parallel-stability verification
@@ -144,7 +144,7 @@ parallel win lands on multi-step repos, where independent checks overlap.
 Non-test parallel steps run `nice -n 10` so a timing-sensitive `test` keeps
 its pacing when a CPU-heavy check (tsc, build) is concurrent.
 
-## 8. Parallel loop & decompose on pi-dynamic-workflows (plane 1 + plane 2)
+## 8. Parallel loop & decompose on subagents (plane 1 + plane 2)
 
 **Status**: implemented 2026-08-15 (landing branch: a semantic feature branch, per AGENTS.md; never main).
 
@@ -153,13 +153,14 @@ round and (b) one-worker-at-a-time module implementation. Both are now
 parallelized, but NOT on the same substrate — and the split is forced, not
 chosen:
 
-- **Module implementation (waves) + the decompose loop** run on
-  `@quintinshaw/pi-dynamic-workflows` (pdw), a hard dependency with no serial
-  fallback (§6).
-- **Review** runs on plain subagents. The engine discards a per-agent `cwd`, so
+- **Module implementation (waves) + the decompose loop** run on plain
+  subagents of the static READ-ONLY agent `agents/worker-readonly.md`
+  (`prepare_wave` → N same-turn spawns → `apply_wave_patches`; the engine is
+  gone, see §8.4).
+- **Review** runs on plain subagents. The engine discarded a per-agent `cwd`, so
   a shard reviewer could not hold its own snapshot of the change it judges;
   `prepare_review` shards the diff and materializes one writable snapshot per
-  reviewer instead. Rationale, evidence and the plan to retire the engine
+  reviewer instead. Rationale, evidence and the record of retiring the engine
   entirely: `docs/handoff-remove-pdw.md`.
 
 ### 8.1 Plane 1 — parallel shard review (snapshot-isolated fan-out)
@@ -169,7 +170,7 @@ chosen:
 `SHARD_THRESHOLD_FILES` / `SHARD_THRESHOLD_LINES`):
 
 - **Small diff** (<20 files AND <500 changed lines): TWO cross-family
-  reviewers over the full change — no pdw engine, no sharding. Each attests
+  reviewers over the full change — no engine, no sharding. Each attests
   `docSync` itself (no separate integration review on this path).
 - **Large diff** (≥20 files OR ≥500 changed lines): `prepare_review` splits the
   diff into ≤4 disjoint shards (`planReviewShards`) covering every changed
@@ -198,82 +199,70 @@ asking the user.
 `lib/plan-parallel.ts`. Wave workers are **not decompose-exclusive**: the
 patch-first protocol is the same for formal decompose waves and for ad-hoc
 **wave daily** (any task that can be split into 2–4 independent sub-tasks
-with disjoint file ownership). pdw's own `isolation: "worktree"` was
-investigated and rejected for writers: v3.5.1 never auto-merges, deletes the
-worktree and branch in a finally block right after each agent, forbids worker
-`git commit` (so edits would be destroyed), and silently degrades to the
-shared worktree when isolation fails. Patch-first instead: `computeWave`
-selects every pending module whose dependencies are implemented/accepted (≤4
-per wave); `runWaveWorkflow` runs one READ-ONLY worker per module in parallel
-(edit/write tools excluded engine-wide), each returning unified git diffs;
-the main agent validates (`validatePatchOwnership` ⊆ owned_paths, then
-`git apply --check`), persists patches under `.pi/plan/patches/`, and applies
-them in sequence with per-patch validation (no cross-patch rollback
-transaction — a failed patch is sent back to its worker, never silently
-edited). Single-writer is preserved: the worktree is only ever written by the
-main agent.
+with disjoint file ownership). Engine isolation was investigated and
+rejected for writers (it never auto-merges, deletes the worktree and branch
+in a finally block right after each agent, and silently degrades to the
+shared worktree when isolation fails). Patch-first with subagents instead:
+`computeWave` selects every pending module whose dependencies are
+implemented/accepted (≤4 per wave); `prepare_wave` reconciles the wave
+fail-closed and hands back one ready-made task per module; the MAIN AGENT
+spawns one READ-ONLY worker subagent per module in the SAME turn
+(`agents/worker-readonly.md` — its `tools:` allowlist has no edit/write/bash;
+`WAVE_WORKER_SCHEMA` as outputSchema), each returning unified git diffs;
+`apply_wave_patches` re-validates (`validatePatchOwnership` ⊆ owned_paths,
+then `git apply --check`), persists patches under `.pi/plan/patches/`, and the
+main agent applies them in sequence with per-patch validation (no
+cross-patch rollback transaction — a failed patch is sent back to its worker,
+never silently edited). Single-writer is preserved: the worktree is only ever
+written by the main agent.
 
 ### 8.3 Run visibility (live progress + persisted artifacts)
 
 **Status**: implemented 2026-08-16.
 
 A pdw run used to be a black box: the tools awaited `runWorkflow` with no
-callbacks and `persistLogs: false` explicitly disabled the engine's default
-log. The remaining engine consumer — `run_wave_workflow`; review left the engine,
-so `run_parallel_shard_review` no longer exists — wires the engine's live
-callbacks
-(`onLog` / `onPhase` / `onRuntimeEvent` / `onAgentStart` / `onAgentEnd`)
-through `lib/pdw-progress.ts` (`createProgressSink`) to three surfaces
-(spawned reviewers surface through `.pi-subagents/artifacts` instead, which is
-what the TUI widget reads):
+callbacks and `persistLogs` disabled. That layer is gone (step 2 of
+`docs/handoff-remove-pdw.md`): `lib/pdw-progress.ts`, `.pi/pdw-progress/*.ndjson`
+and the engine log path are deleted. Everything that runs is an ordinary
+subagent now, and its visibility comes from the sub-agent runtime itself:
 
-1. **Live streaming in the tool card** — the wave tool passes `onProgress` to the
-extension `onUpdate` protocol: each agent start/end pushes a one-line status
-(`[run-…] 1/3 agents · active: shard-2 · last: shard-1 done ([model] 12.3s, 1234
-tok)`) plus a 0–100 `details.progress` (carried on the same `onUpdate` events;
-pi renders the `content` text on the tool card).
-2. **ndjson event file** — every event is appended to
-`.pi/pdw-progress/<runId>.ndjson` (one JSON object per line, `run-end`
-terminal event in the `finally`); `tail -f` it from another terminal while
-the tool call blocks. The directory is gitignored. The ndjson is anchored
-at the GIT ROOT (`gitRootOfDir`, sanitized env) — never at a subdirectory
-cwd — so it stays inside the fingerprint's `:/.pi` exclusion and a
-recording run can never invalidate its own READY binding.
-3. **Engine log + session transcripts** — `persistLogs` is back to the
-engine default (true): `~/.pi/workflows/projects/<key>/runs/<runId>.log`.
-`persistAgentSessions: true` persists each sub-agent's full transcript to
-`~/.pi/agent/sessions/<encoded-cwd>/` named `workflow:<runId> <label>`,
-openable/switchable from pi's `/resume` session picker (default-on per the
-project principle; transcripts may contain sensitive context, as the engine
-itself warns).
+1. **`.pi-subagents/artifacts`** — every spawned agent (wave worker, shard
+   reviewer, planner) writes its artifact there; the TUI widget and
+   `/gate-status` scan it (`scanAgentArtifacts`). Worker start/end and
+   outcomes are visible even while the main agent keeps editing or fixing.
+2. **Structured output at the source** — each spawn carries an `outputSchema`
+   (`WAVE_WORKER_SCHEMA` for wave workers, `SHARD_VERDICT_SCHEMA` for
+   reviewers), so a malformed result fails at the spawn instead of arriving as
+   unparseable prose.
+3. **Session transcripts** — pi-subagents persists each agent's transcript
+   (`~/.pi/agent/sessions/…`), switchable from pi's `/resume` picker. No
+   extension-side log mirroring.
 
-All progress writes are best-effort: a read-only cwd, ENOSPC or a `.pi` that
-is a regular file silently degrades the sink (in-memory events only) — it
-never aborts the review/wave run.
+None of this is load-bearing for a verdict: the gate only ever binds on the
+worktree fingerprint and the recorded review/precommit verdicts. Progress
+artifacts are best-effort diagnostics.
 
-Every outcome (success AND failure) carries `runId`, `progressFile` and
-`engineLogFile` so a failed run can still be located and replayed.
+### 8.4 No engine — subagents only
 
-### 8.4 Hard dependency and safety
-
-- `lib/pdw-bridge.ts` loads pdw via dynamic import once per process; any
-  failure throws `PdwUnavailableError` (installation guidance) and every
-  consumer propagates it — the tools report the error, they never run a
-  serial protocol. The engine ships with the extension
-  (`scripts/install-package.mjs` runs on `pi install` / `npm install` and
-  FAILS loudly if the runtime cannot resolve).
+- The `@quintinshaw/pi-dynamic-workflows` dependency is REMOVED (package.json
+  and `scripts/install-package.mjs`); `lib/pdw-bridge.ts` and
+  `lib/pdw-progress.ts` are deleted. `.pi/plan/state.json`'s parallel ledger
+  records `engine: "subagents"` (the legacy `"pdw"` value still parses for
+  historical runs).
+- Wave workers are read-only by construction: `agents/worker-readonly.md`'s
+  `tools:` allowlist has no edit/write/bash — the mechanical guarantee
+  (pi-subagents has no per-call tool denylist).
 - Gate core (binding, fail-closed, fingerprint, verdict/docSync parsing,
   receipt) untouched; pinned by the existing test suite.
 - A wave patch that fails `git apply` is sent back to its worker for one
   retry, never silently edited by the main agent.
-- Target: small-diff review rounds avoid the pdw orchestration overhead
-  entirely (the 3× cost bug where small diffs were unnecessarily sharded is
+- Target: small-diff review rounds avoid any orchestration overhead
+  (the 3× cost bug where small diffs were unnecessarily sharded is
   gone); large-diff parallel review targets ≤60% of the serial wall clock
   (~190 s baseline on this repo). A 3-module wave (decompose or wave daily)
   targets ≈ 1.5–2× a single module's serial time. Wall-clock measurements
-  are NOT yet taken: end-to-end runs need a real pi session with the
-  installed engine — until then the numbers above are targets, not
-  measurements.
+  are to be taken during real dogfooding of the wave flow — until then the
+  numbers above are targets, not measurements.
 
 #### Post-install verification checklist
 
@@ -291,7 +280,8 @@ Every outcome (success AND failure) carries `runId`, `progressFile` and
 3. In a real pi session with a multi-module plan: run `/plan-next` and
    confirm one wave dispatches several read-only workers concurrently and
    their patches apply. Also test a **wave daily** dispatch: define 2–4
-   ad-hoc modules with disjoint owned_paths, call `run_wave_workflow`, and
+   ad-hoc modules with disjoint owned_paths, call `prepare_wave`, spawn one
+   `worker-readonly` subagent per module, call `apply_wave_patches`, and
    confirm the patches apply.
 4. Record wall-clock numbers and compare against the ~190 s serial baseline;
    update this section when measured.

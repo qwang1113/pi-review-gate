@@ -202,7 +202,7 @@ import {
 } from "../lib/review-snapshot.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
 import { applyVerdictGuards, decideSnapshotPlan } from "../lib/verdict-guards.ts";
-import { isModelAllowed, loadPdw } from "../lib/pdw-bridge.ts";
+import { isModelAllowed } from "../lib/model-allowlist.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_HISTORY_QUERY,
@@ -256,12 +256,18 @@ import {
 } from "../lib/parallel-review.ts";
 import { parsePlanState, PLAN_DIR } from "../lib/plan-state.ts";
 import {
+  WAVE_WORKER_SCHEMA,
+  buildWaveWorkerPrompt,
   computeWave,
-  runWaveWorkflow,
   writeWavePatches,
+  parseWaveWorkerResult,
   validatePatchOwnership,
   checkPatchApplies,
   planDirFor,
+  ownedPathsFromPlan,
+  unplannedModuleIds,
+  unknownResultModuleIds,
+  duplicateResultModuleIds,
 } from "../lib/plan-parallel.ts";
 import {
   parseArbitrableAction,
@@ -2737,7 +2743,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- parallel loop tools (pdw engine — the only execution path) ----------
+  // ---------- parallel loop tools: wave planning + patch application ----------
 
   /** Collect changed files: tracked edits vs HEAD plus untracked, repo-relative. */
   async function listChangedFiles(
@@ -2786,30 +2792,39 @@ export default function reviewGate(pi: ExtensionAPI) {
   //    truth for the reviewer contract) via `prepare_review`.
   // Deleting them beats keeping "maybe useful later" code that no test covers.
 
-  // NOTE: `run_parallel_shard_review` used to live here. Review no longer runs
-  // through the pdw engine at all — the engine DISCARDS a per-agent `cwd`
-  // (workflow.js: runCwd comes only from its own `isolation:"worktree"`, which
-  // checks out HEAD and therefore does NOT contain the change under review), so
-  // shard reviewers could never get their own snapshot of the work being
-  // judged. They shared the live worktree instead: fighting each other, the
-  // main agent, and the tree the gate fingerprints.
+  // NOTE: `run_parallel_shard_review` used to live here; review no longer runs
+  // through the pdw engine at all (it DISCARDS a per-agent `cwd`, so a reviewer
+  // could not hold its own snapshot of the change — see the comment on
+  // prepare_review). The engine is now RETIRED ENTIRELY (docs/handoff-remove-pdw.md,
+  // step 2): wave workers and the decompose module loop run as ordinary
+  // subagents of the static READ-ONLY agent `agents/worker-readonly.md` (its
+  // `tools:` allowlist has no edit/write/bash — pi-subagents has no per-call
+  // tool denylist, so the allowlist IS the mechanical read-only guarantee).
   //
-  // Reviews are now dispatched as ordinary subagents (pi-subagents honors a
-  // per-call `cwd` and enforces a structured `outputSchema`), one disposable
-  // WRITABLE snapshot each, with `prepare_review` computing the shard plan so
-  // the split stays mechanical. The engine remains a hard dependency for wave
-  // workers and the decompose module loop — see docs/handoff-remove-pdw.md for
-  // the plan to retire it there too.
+  // The extension cannot spawn subagents itself, so the wave flow mirrors
+  // prepare_review → spawn → record_review:
+  //   1. `prepare_wave`  — fail-closed reconciliation (computeWave + worklog
+  //      existence), then hands back per-module ready-made task text and the
+  //      output schema;
+  //   2. the MAIN AGENT spawns one `worker-readonly` per module, ALL IN THE
+  //      SAME TURN (async), with WAVE_WORKER_SCHEMA as each spawn's
+  //      outputSchema;
+  //   3. `apply_wave_patches` — re-validates every patch (declared path ∪ diff
+  //      headers ⊆ owned_paths), persists them under .pi/plan/patches/<module>/
+  //      and runs `git apply --check`; a module without a result is FAILED,
+  //      never "nothing to change". The MAIN AGENT applies the patches with
+  //      `git apply` and records each module's status.
 
   pi.registerTool({
-    name: "run_wave_workflow",
-    label: "Run Wave Workflow",
+    name: "prepare_wave",
+    label: "Prepare Wave",
     description:
-      "Run one wave of patch-first parallel module workers via the pdw engine: every module in the wave gets " +
-      "a READ-ONLY worker (edit/write tools excluded) that returns unified git diffs for its owned paths. " +
-      "The tool validates ownership, persists the patches under .pi/plan/patches/<module>/ and checks they " +
-      "apply; YOU apply them with git apply and record each module's status. " +
-      "The pdw engine is a HARD dependency: when it is unavailable the tool reports an installation error — there is no serial fallback.",
+      "Prepare one wave of patch-first parallel module workers without the pdw engine: fail-closed reconciliation " +
+      "(state_file ⇒ the module list must equal computeWave(state); every worklog must exist), then return one " +
+      "ready-made task text per module plus the WAVE_WORKER_SCHEMA outputSchema. YOU then spawn ONE " +
+      "`worker-readonly` subagent per module in the SAME turn (async) — its tools: allowlist has no " +
+      "edit/write/bash, so it cannot touch the worktree and only returns unified git diffs as structured output. " +
+      "When the workers are back, call apply_wave_patches with your results array and git apply the clean patches.",
     parameters: Type.Object({
       repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
       modules: Type.Array(Type.Object({
@@ -2817,7 +2832,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         title: Type.String(),
         ownedPaths: Type.Array(Type.String({ description: "Disjoint file paths this module owns" })),
         worklogPath: Type.String({ description: "Path under .pi/plan/worklog/ (module brief + must-haves)" }),
-        model: Type.String({ description: "Worker model spec" }),
+        model: Type.Optional(Type.String({ description: "Legacy worker model spec — the worker's model now comes from agents/worker-readonly.md's pinned chain; kept for call-site compatibility" })),
       }), {
         description:
           "The wave modules — the next wave is every pending module whose depends_on are implemented/accepted (≤4).",
@@ -2826,26 +2841,24 @@ export default function reviewGate(pi: ExtensionAPI) {
       state_file: Type.Optional(Type.String({
         description:
           "Absolute path of .pi/plan/state.json. When given, the tool RE-COMPUTES the wave from the " +
-          "plan (computeWave) and refuses to run a modules list that is not exactly that wave " +
+          "plan (computeWave) and refuses to prepare a modules list that is not exactly that wave " +
           "(fail-closed; the driver must not invent the wave).",
       })),
     }),
-    async execute(_id, params, _signal, onUpdate, ctx) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const cwd = params.repo ?? ctx.cwd ?? process.cwd();
       try {
-        // TypeBox validated the shape at the parameter layer — modules is a
-        // real array now, no JSON round-trip (was a JSON string until 2026-08-16).
-        const modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model: string }> =
+        const modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model?: string }> =
           params.modules;
         // Fail-closed wave reconciliation: when a plan state file is supplied,
         // the wave MUST equal computeWave(state) — the driver cannot invent one.
-        // Check BEFORE dispatching so an invented wave never burns a run.
+        // Check BEFORE returning task text so an invented wave never burns a run.
         if (params.state_file) {
           try {
             const parsed = parsePlanState(readFileSync(params.state_file, "utf8"));
             if (!parsed.ok) {
               return {
-                content: [{ type: "text", text: `wave workflow: plan state invalid — ${parsed.error}.` }],
+                content: [{ type: "text", text: `prepare_wave: plan state invalid — ${parsed.error}.` }],
                 details: { available: false, reason: "invalid-plan-state", error: parsed.error },
               };
             }
@@ -2856,14 +2869,14 @@ export default function reviewGate(pi: ExtensionAPI) {
               return {
                 content: [{
                   type: "text",
-                  text: `wave workflow: module list ${JSON.stringify(actual)} does not match the computed wave ${JSON.stringify(want)}. Re-run with the computed wave.`,
+                  text: `prepare_wave: module list ${JSON.stringify(actual)} does not match the computed wave ${JSON.stringify(want)}. Re-run with the computed wave.`,
                 }],
                 details: { available: false, reason: "wave-mismatch", expectedWave: want },
               };
             }
           } catch (err) {
             return {
-              content: [{ type: "text", text: `wave workflow: state_file check failed — ${(err as Error).message}.` }],
+              content: [{ type: "text", text: `prepare_wave: state_file check failed — ${(err as Error).message}.` }],
               details: { available: false, reason: "tool-failed", error: (err as Error).message },
             };
           }
@@ -2871,7 +2884,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // Fail-closed worklog check: every wave worker is told to "read the
         // worklog first", so a missing worklog file (a decompose driver that
         // never wrote .pi/plan/worklog/<id>.md) makes every worker fail or
-        // hallucinate its brief. Refuse to dispatch instead of burning a run.
+        // hallucinate its brief. Refuse to prepare instead of burning a run.
         const worklogPlanDir = pathJoin(cwd, PLAN_DIR);
         const missingWorklogs = modules
           .filter((m) => !existsSync(pathJoin(worklogPlanDir, m.worklogPath)))
@@ -2880,53 +2893,188 @@ export default function reviewGate(pi: ExtensionAPI) {
           return {
             content: [{
               type: "text",
-              text: `wave workflow: worklog file(s) missing — ${missingWorklogs.join(", ")}. Create them (module brief + must-haves) before dispatching the wave.`,
+              text: `prepare_wave: worklog file(s) missing — ${missingWorklogs.join(", ")}. Create them (module brief + must-haves) before preparing the wave.`,
             }],
             details: { available: false, reason: "missing-worklogs", worklogs: missingWorklogs },
           };
         }
-        const outcome = await runWaveWorkflow({
-          cwd,
-          modules: modules.map((m) => ({ ...m, goalText: params.goal ?? undefined })),
-          modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
-          onProgress: (text: string, progress?: number) => {
-            onUpdate?.({
-              content: [{ type: "text", text }],
-              details: progress !== undefined ? { progress } : {},
-            });
-          },
-        });
-        if (!outcome.ok) {
+        const goalText = params.goal?.trim() || undefined;
+        const tasks = modules.map((m) => ({
+          moduleId: m.id,
+          task: buildWaveWorkerPrompt({
+            moduleId: m.id,
+            title: m.title,
+            ownedPaths: m.ownedPaths,
+            worklogPath: m.worklogPath,
+            goalText,
+          }),
+        }));
+        return {
+          content: [{
+            type: "text",
+            text:
+              `wave prepared: ${modules.length} module(s). Spawn ONE \`worker-readonly\` subagent per module below, ` +
+              `ALL IN THE SAME TURN (async:true, never one after the other), each with the ready-made task text. ` +
+              `The worker's tools: allowlist has no edit/write/bash, so it cannot touch the worktree — it only ` +
+              `returns unified git diffs as structured output.` +
+              "\n\nSpawn each worker with this outputSchema (WAVE_WORKER_SCHEMA):\n```json\n" +
+              JSON.stringify(WAVE_WORKER_SCHEMA, null, 2) +
+              "\n```\n\n--- task text per module ---\n" +
+              tasks.map((t) => `### ${t.moduleId}\n\n${t.task}`).join("\n\n") +
+              "\n\nWhen every worker is back, call apply_wave_patches with:\n" +
+              "- modules: the same module array you passed here (id/title/ownedPaths/worklogPath),\n" +
+              "- results: your workers' structured outputs verbatim — [{moduleId, patches: [{path, diff}], summary, selfcheck}],\n" +
+              "- state_file: the same path (so owned_paths stay the plan's, fail-closed).\n" +
+              "Then git apply (with --recount) the patches whose applies=true and record each module's status.",
+          }],
+          details: { available: true, moduleCount: modules.length },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `prepare_wave failed: ${(err as Error).message}.` }],
+          details: { available: false, reason: "tool-failed", error: (err as Error).message },
+        };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "apply_wave_patches",
+    label: "Apply Wave Patches",
+    description:
+      "Validate and persist the patches your wave workers produced: re-check every patch against its module's " +
+      "owned paths (declared path AND diff headers), persist them under .pi/plan/patches/<module>/ and run " +
+      "`git apply --check` for each. A module with NO result entry is reported as FAILED, never as \"nothing " +
+      "to change\". After this returns, YOU apply the patches whose applies=true with `git apply --recount` " +
+      "— the worktree has exactly one writer: you.",
+    parameters: Type.Object({
+      repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
+      modules: Type.Array(Type.Object({
+        id: Type.String(),
+        title: Type.String(),
+        ownedPaths: Type.Array(Type.String()),
+        worklogPath: Type.String(),
+      }), {
+        description: "The same module array you passed to prepare_wave (id/title/ownedPaths/worklogPath).",
+      }),
+      results: Type.Array(Type.Object({
+        moduleId: Type.String({ description: "Module id this worker produced patches for" }),
+        patches: Type.Array(Type.Object({
+          path: Type.String(),
+          diff: Type.String(),
+        })),
+        summary: Type.Optional(Type.String()),
+        selfcheck: Type.Optional(Type.Array(Type.Object({
+          must_have: Type.String(),
+          met: Type.Boolean(),
+          evidence: Type.String(),
+        }))),
+      }), {
+        description: "Your wave workers' structured outputs, verbatim, one entry per module.",
+      }),
+      state_file: Type.Optional(Type.String({
+        description:
+          "Absolute path of .pi/plan/state.json. When given, each module's owned_paths come from the plan " +
+          "(the driver cannot redefine them) and every result moduleId must exist in the plan.",
+      })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const cwd = params.repo ?? ctx.cwd ?? process.cwd();
+      try {
+        const modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string }> = params.modules;
+        const results: Array<{ moduleId: string; patches: Array<{ path: string; diff: string }>; summary?: string; selfcheck?: Array<{ must_have: string; met: boolean; evidence: string }> }> =
+          params.results;
+        // Fail-closed: every module must have a result entry — a missing result
+        // is a FAILED module (the worker crashed or returned nothing), never
+        // "nothing to change".
+        const resultsBy = new Map(results.map((r) => [r.moduleId, r]));
+        const failedModules = modules.filter((m) => !resultsBy.has(m.id)).map((m) => m.id);
+        // When a plan state is given, ownership comes from the plan, not the
+        // caller: the driver cannot redefine a module's owned paths after the
+        // user approved them.
+        let planState: { modules: Array<{ id: string; owned_paths: string[] }> } | undefined;
+        if (params.state_file) {
+          const parsed = parsePlanState(readFileSync(params.state_file, "utf8"));
+          if (!parsed.ok) {
+            return {
+              content: [{ type: "text", text: `apply_wave_patches: plan state invalid — ${parsed.error}.` }],
+              details: { available: false, reason: "invalid-plan-state", error: parsed.error },
+            };
+          }
+          const unplanned = unplannedModuleIds(modules, new Set(parsed.state.modules.map((m) => m.id)));
+          if (unplanned.length > 0) {
+            return {
+              content: [{
+                type: "text",
+                text: `apply_wave_patches: module(s) not in the plan — ${unplanned.join(", ")}. The wave must only contain planned modules (their owned_paths were approved); re-run prepare_wave with the computed wave.`,
+              }],
+              details: { available: false, reason: "module-not-in-plan", modules: unplanned },
+            };
+          }
+          planState = parsed.state;
+        }
+        // Ownership comes from the plan (when given) or from the caller: the
+        // driver cannot redefine a module's owned paths after the user approved
+        // them. A single pure function owns both branches.
+        const ownedBy = ownedPathsFromPlan(modules, planState);
+        // Fail-closed: a result for a module that is not in this wave — or TWO
+        // results for the same module — is a handoff defect; refuse instead of
+        // silently dropping/replacing an entry (which would mislead the
+        // failedModules report).
+        const unknownResults = unknownResultModuleIds(results, new Set(modules.map((m) => m.id)));
+        if (unknownResults.length > 0) {
           return {
-            content: [{ type: "text", text: `wave workflow failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` }],
-            details: {
-              available: false,
-              reason: outcome.reason,
-              error: outcome.error ?? null,
-              runId: outcome.runId,
-              progressFile: outcome.progressFile,
-              engineLogFile: outcome.engineLogFile,
-            },
+            content: [{
+              type: "text",
+              text: `apply_wave_patches: result(s) for module(s) not in this wave — ${unknownResults.join(", ")}. Every result must belong to a module of the prepared wave.`,
+            }],
+            details: { available: false, reason: "unknown-result-module", modules: unknownResults },
+          };
+        }
+        const duplicates = duplicateResultModuleIds(results);
+        if (duplicates.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `apply_wave_patches: duplicate result(s) for the same module — ${duplicates.join(", ")}. Each module may receive exactly one result.`,
+            }],
+            details: { available: false, reason: "duplicate-result-module", modules: duplicates },
           };
         }
         const planDir = planDirFor(cwd);
-        const perModule = outcome.results.map((r) => {
-          const ownership = validatePatchOwnership(r.patches, modules.find((m) => m.id === r.moduleId)?.ownedPaths ?? []);
+        const perModule = modules.map((m) => {
+          const r = resultsBy.get(m.id);
+          if (!r) {
+            return {
+              moduleId: m.id,
+              summary: "",
+              selfcheck: [],
+              patchCount: 0,
+              patchFiles: [] as string[],
+              ownershipOk: false,
+              ownershipViolations: [] as string[],
+              applies: [] as boolean[],
+              failed: true,
+            };
+          }
+          const parsed = parseWaveWorkerResult(m.id, r as Record<string, unknown>);
+          const ownership = validatePatchOwnership(parsed.patches, ownedBy.get(m.id) ?? m.ownedPaths);
           // Fail-closed: a patch that violates owned_paths is NOT persisted and
           // NOT pre-checked — it must never be applied by accident.
-          const patchFiles = ownership.ok ? writeWavePatches(planDir, r.moduleId, r.patches) : [];
+          const patchFiles = ownership.ok ? writeWavePatches(planDir, m.id, parsed.patches) : [];
           return {
-            moduleId: r.moduleId,
-            summary: r.summary,
-            selfcheck: r.selfcheck,
-            patchCount: r.patches.length,
+            moduleId: m.id,
+            summary: parsed.summary,
+            selfcheck: parsed.selfcheck,
+            patchCount: parsed.patches.length,
             patchFiles,
             ownershipOk: ownership.ok,
             ownershipViolations: ownership.ok ? [] : ownership.violations,
-            applies: [] as boolean[], /* git apply --check results filled below */
+            applies: [] as boolean[],
           };
         });
-        // Fill git apply --check results (parallel checks; only for ownership-OK modules).
+        // Fill git apply --check results (parallel checks; only for
+        // ownership-OK modules).
         const applyStatus = await Promise.all(
           perModule.map((m) => Promise.all(m.patchFiles.map((f) => checkPatchApplies(cwd, f)))),
         );
@@ -2937,22 +3085,17 @@ export default function reviewGate(pi: ExtensionAPI) {
           content: [{
             type: "text",
             text: JSON.stringify(perModule, null, 2) +
-              (outcome.failedModules?.length ? `\n\nFAILED MODULES (no result, do NOT mark implemented): ${outcome.failedModules.join(", ")}` : ""),
+              (failedModules.length ? `\n\nFAILED MODULES (no result, do NOT mark implemented): ${failedModules.join(", ")}` : ""),
           }],
           details: {
             available: true,
             moduleCount: perModule.length,
-            failedModules: outcome.failedModules ?? [],
-            durationMs: outcome.durationMs,
-            agentCount: outcome.agentCount,
-            runId: outcome.runId,
-            progressFile: outcome.progressFile,
-            engineLogFile: outcome.engineLogFile,
+            failedModules,
           },
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: `wave workflow failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` }],
+          content: [{ type: "text", text: `apply_wave_patches failed: ${(err as Error).message}.` }],
           details: { available: false, reason: "tool-failed", error: (err as Error).message },
         };
       }
@@ -4833,7 +4976,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  failure yields no lines (diagnostics never block, never gate).
    *
    *  PRIMARY facts source is the session's own model registry (the SAME
-   *  facts pdw-bridge resolves against — it includes built-in catalogs
+   *  facts the model registry exposes — it includes built-in catalogs
    *  like anthropic that never appear in models-store.json; reading only
    *  the store mis-reported every built-in judge chain as BLOCKED while
    *  the review was literally running on fable-5). File reads are a
@@ -4849,7 +4992,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const reg = registry as { getAll?: () => unknown[]; hasConfiguredAuth?: (m: unknown) => boolean } | undefined;
       const all = reg?.getAll?.() ?? [];
       if (Array.isArray(all) && all.length > 0) {
-        // Symmetric with pdw-bridge's hasAuth guard: a registry without
+        // Symmetric with gate-doctor's hasAuth guard: a registry without
         // hasConfiguredAuth skips the auth filter entirely (treating every
         // provider as authed would be wrong — the missing method is the
         // signal that auth is not part of this registry's contract).
@@ -5042,7 +5185,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   // /gate-doctor — read-only health check: verifies every optimization this
-  // package ships actually works in the CURRENT environment (pdw engine, model
+  // package ships actually works in the CURRENT environment (model
   // chains, opencode-go prune, precommit runner, git hooks, global config
   // fallback, L5 gate, Copilot gh, command registry). Pure diagnostics: it
   // reads files and probes executables, writes NOTHING, and never feeds a
@@ -5074,10 +5217,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         hooksDir,
         workflowCommandCount: Object.keys(WORKFLOW_COMMANDS).length,
         isNonEnglishText,
-        probePdw: async () => {
-          try { await loadPdw(); return { ok: true }; }
-          catch (e) { return { ok: false, error: (e as Error).message }; }
-        },
         probeGh: async () => {
           try {
             const out = execFileSync("gh", ["--version"], {

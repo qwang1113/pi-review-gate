@@ -39,7 +39,7 @@ function withInvocation(base: string, invocation: WorkflowInvocation): string {
 
 export const WORKFLOW_COMMANDS = {
   review: {
-    description: "Review current changes with the enforced independent review loop (always via the pdw workflow engine, auto-sharded)",
+    description: "Review current changes with the enforced independent review loop (sharded by prepare_review, plain subagents; no engine)",
     usage: "/review [focus]",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
@@ -224,18 +224,21 @@ export const WORKFLOW_COMMANDS = {
       "If the wave is empty and modules remain pending, report the blocker (a dependency that never reached implemented) and stop. " +
       "Spawn a COLD planner subagent that reads only the plan state, the brief and the loop goal, and APPENDS each dispatched module's task brief to its worklog " +
       "(preserving any execution log, self-check and review sections already there), and returns ONE instruction per module: run <module id>, replan with a reason, or 'all modules implemented'. " +
-      "Then dispatch the whole wave: call the run_wave_workflow tool (modules = the wave as a structured " +
-      "ARRAY of objects [{id, title, ownedPaths, worklogPath, model}] — NOT a JSON string — with each module's worklog path under .pi/plan/worklog/, " +
+      "Then dispatch the whole wave: call the prepare_wave tool (modules = the wave as a structured " +
+      "ARRAY of objects [{id, title, ownedPaths, worklogPath}] — NOT a JSON string — with each module's worklog path under .pi/plan/worklog/, " +
       "and state_file = .pi/plan/state.json so the tool verifies the wave against computeWave). " +
-      "The tool runs the wave's workers IN PARALLEL (read-only, edit/write excluded), validates ownership, persists patches under .pi/plan/patches/ " +
-      "and pre-checks git apply. The pdw engine is a HARD dependency: if the tool reports the engine missing, stop and fix the install " +
-      "(re-run the package installer: `pi install` the extension or `npm install` in its repo) — there is no serial protocol to fall back to. " +
+      "The tool returns one ready-made task per module plus the WAVE_WORKER_SCHEMA outputSchema; spawn ONE `worker-readonly` subagent " +
+      "per module IN THE SAME TURN (async:true, never one after the other), each with its task — the worker's tools: allowlist has " +
+      "no edit/write/bash, so it cannot touch the worktree and only returns unified git diffs as structured output. " +
+      "Then call apply_wave_patches with the same modules array plus your workers' structured outputs verbatim " +
+      "(results: [{moduleId, patches, summary, selfcheck}]) and state_file — it validates ownership, persists patches under .pi/plan/patches/ " +
+      "and pre-checks git apply. A worker that fails to return a result means its module FAILED — never applied, never \"nothing to change\". " +
       "The module table was already approved by the user, so wave dispatch itself needs NO further confirmation. " +
-      "For every module whose patches are ownershipOk and applies=true, apply them with git apply and mark the module implemented. " +
+      "For every module whose patches are ownershipOk and applies=true, apply them with `git apply --recount` (LLM hunks routinely miscount their @@ headers — --recount re-counts from the actual lines) and mark the module implemented. " +
       "A patch that does not apply is NOT silently fixed: send the git error back to that worker and retry once. " +
       "Append each worker's execution log, changed-file list and self-check to its worklog. " +
       "Record only the resulting status and a ONE-LINE result per module in the plan state: as the driver you must not read the diff or the worker transcript. " +
-      "MAINTAIN THE PARALLEL LEDGER: after each wave, update state.json's parallel field (engine: \"pdw\", " +
+      "MAINTAIN THE PARALLEL LEDGER: after each wave, update state.json's parallel field (engine: \"subagents\", " +
       "waves: append {modules, status: running|applied|failed, patches_dir, note}) so /plan-status and the reviewers see " +
       "exactly how each module ran — a wave whose workers failed (failedModules from the tool) is recorded as failed, never applied. " +
       "If the planner says replan, or a worker reports it must touch files outside owned_paths, stop and ask the user before changing the plan. " +
