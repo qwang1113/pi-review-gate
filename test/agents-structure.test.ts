@@ -265,11 +265,19 @@ test("REGRESSION: the protocol forbids a SAME-family reviewer pair, in all four 
   const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
   assert.match(commands, /same[- ]family/i, "/review prompt must state the rule");
 
-  // Scope guard: shard counts belong to the engine, not to this rule.
+  // Scope guard: for a LARGE diff the shard count is not the agent's choice.
+  // (This used to assert "decided by the engine's sharding" — which then LOCKED
+  // that sentence in place after review moved off the engine: the assertion was
+  // protecting the stale doc. Assert the invariant, not the old mechanism.)
   const skill = readFileSync(SKILL_MD, "utf8");
   // Whitespace-tolerant: these files are hard-wrapped prose, so a rule may
   // legitimately straddle a line break.
-  assert.match(skill, /shard\s+reviewers\s+is\s+decided\s+by\s+the\s+engine/i);
+  assert.match(skill, /shard\s+count\s+comes\s+from\s+`?prepare_review/i);
+  assert.doesNotMatch(
+    skill,
+    /decided\s+by\s+the\s+engine's\s+sharding/i,
+    "reviews no longer run on the engine — this claim must not come back",
+  );
 });
 
 test("REGRESSION: every re-review must carry the previous round's conclusion", () => {
@@ -300,4 +308,113 @@ test("REGRESSION: every re-review must carry the previous round's conclusion", (
   const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
   assert.match(reviewer, /re-litigate/i);
   assert.match(reviewer, /reopen it/i);
+});
+
+test("the read-only reviewer variant CANNOT write, and says why it exists", () => {
+  // pi-subagents has no per-call tool denylist, so "please do not edit" is only
+  // a request. A static agent whose allowlist lacks edit/write is the one
+  // mechanical guard available for the no-isolation fallback.
+  const file = "reviewer-readonly.md";
+  const fm = frontmatter(file);
+  const toolsLine = fm.split("\n").find((l) => l.startsWith("tools:"))!;
+  assert.ok(toolsLine, "the variant must declare tools:");
+  for (const forbidden of ["edit", "write"]) {
+    assert.doesNotMatch(
+      toolsLine,
+      new RegExp(`\\b${forbidden}\\b`, "i"),
+      `${file}: the point of this agent is that it cannot ${forbidden}`,
+    );
+  }
+  // It still needs to READ and to inspect.
+  for (const needed of ["read", "grep", "bash"]) {
+    assert.match(toolsLine, new RegExp(`\\b${needed}\\b`), `${file} must keep ${needed}`);
+  }
+  const src = readFileSync(join(AGENTS, file), "utf8");
+  assert.match(src, /read-only inspection/i);
+  assert.match(src, /[Mm]utation analysis is NOT available/);
+  assert.match(src, /no per-call tool denylist/i, "it must state WHY a separate agent is needed");
+  // Same judge tier as the writable reviewer — the fallback must not be weaker.
+  assert.match(fm, /^model: claude-fable-5$/m);
+  assert.match(fm, /^thinking: max$/m);
+});
+
+test("the step-2 handoff document exists with its required sections", () => {
+  // A handoff that is prose nobody can accept is worthless; the sections are
+  // the checkable part.
+  const doc = readFileSync(join(ROOT, "docs", "handoff-remove-pdw.md"), "utf8");
+  for (const heading of [
+    "## Motivation",
+    "## Evidence",
+    "## Validated pattern",
+    "## Remaining work",
+    "## Risks & verification",
+    "## New readonly worker variant",
+  ]) {
+    assert.ok(doc.includes(heading), `handoff must carry the section ${heading}`);
+  }
+  // The evidence must be the concrete engine finding, not a vague claim.
+  assert.match(doc, /runCwd/, "the cwd-discarding evidence must be quoted");
+  assert.match(doc, /worktree add -b/, "the HEAD-checkout evidence must be quoted");
+  // Remaining work has to point at real files, or it cannot be executed.
+  for (const path of ["lib/plan-parallel.ts", "lib/pdw-bridge.ts", "lib/pdw-progress.ts", "scripts/install-package.mjs"]) {
+    assert.ok(doc.includes(path), `remaining work must name ${path}`);
+  }
+  // The one thing that must NOT be deleted with the bridge.
+  assert.match(doc, /isModelAllowed` must survive|isModelAllowed\*\* must survive/);
+});
+test("REGRESSION: the snapshot contract is stated everywhere a reviewer reads it", () => {
+  // Unbanning reviewer writes is only safe because of two paired promises:
+  // "you are in a disposable copy" and "restore before you finish". A file
+  // that carries one without the other invites exactly the damage the
+  // isolation exists to prevent.
+  for (const file of [join(AGENTS, "reviewer.md"), join(AGENTS, "module-reviewer.md")]) {
+    const src = readFileSync(file, "utf8");
+    assert.match(src, /disposable snapshot|snapshot cwd|throwaway git worktree/i, `${file}: must say where it runs`);
+    assert.match(src, /mutation analysis/i, `${file}: must permit verification by doing`);
+    assert.match(src, /[Rr]estore every mutation/, `${file}: must demand restoration`);
+    assert.match(src, /\$TMPDIR/, `${file}: must send scratch files outside the snapshot`);
+    assert.match(src, /READY from (you|it) is NOT accepted/i, `${file}: must state the consequence`);
+    // Tolerates Markdown emphasis around the words (`**Never** run …`).
+    assert.match(src, /never\W{0,4}run\s+`?git commit/i, `${file}: shipping stays with the main session`);
+    // BOTH shared paths must be named, with the installer ban. Isolation covers
+    // the worktree, not `.git`: a reviewer that ran an installer inside its
+    // snapshot repointed the REAL repo's hooks at a directory that was then
+    // deleted, and every later commit died. Naming only `node_modules` would
+    // leave the worse escape undocumented.
+    assert.match(src, /node_modules/, `${file}: must name the node_modules symlink as shared`);
+    assert.match(src, /`?\.git`?\b/, `${file}: must name .git as shared (linked worktree)`);
+    assert.match(
+      src,
+      /never run an installer|never run any installer/i,
+      `${file}: must forbid installers — they write through the shared .git`,
+    );
+  }
+  // A reviewer must never present a repair as its own contribution.
+  const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
+  assert.doesNotMatch(
+    reviewer,
+    /if you applied a fix/i,
+    "the output format must not invite the reviewer to fix the code it judges",
+  );
+});
+
+test("REGRESSION: isolation + streaming are documented in every protocol surface", () => {
+  for (const file of [SKILL_MD, AGENTS_MD]) {
+    const src = readFileSync(file, "utf8");
+    assert.match(src, /prepare_review/, `${file} must name the tool that hands out snapshots`);
+    assert.match(src, /stream/i, `${file} must describe streamed findings`);
+    assert.match(
+      src,
+      /evidence/i,
+      `${file} must state the evidence bar for acting on a streamed finding`,
+    );
+  }
+  // The /review prompt the extension actually sends carries it too.
+  const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
+  assert.match(commands, /prepare_review/);
+  assert.match(commands, /never poll in a tight loop/i);
+  // And the design record no longer contradicts the implementation.
+  const plan = readFileSync(join(ROOT, "docs", "parallel-execution-plan.md"), "utf8");
+  assert.match(plan, /MAIN WORKTREE has exactly one writer/i);
+  assert.match(plan, /own disposable snapshot worktree/i);
 });

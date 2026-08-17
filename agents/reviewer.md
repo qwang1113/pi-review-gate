@@ -57,13 +57,14 @@ the best available different-family model — e.g. gpt-5.6-sol once onekey
 is configured; without a second family a single reviewer is the accepted
 fallback, declared in a Note). Each reviewer receives the complete file
 list and a line-count estimate, and each attests `docSync` itself.
-- **Large diffs** (≥20 files OR ≥500 lines): the change is auto-sharded into
-≤4 parallel reviewers, each receiving a disjoint set of files AND a
-per-shard unified diff for orientation; the integration review that follows
+- **Large diffs** (≥20 files OR ≥500 lines): `prepare_review` shards the change
+itself (`planReviewShards`: ≤4 disjoint groups covering every changed file) and
+gives each shard reviewer its own snapshot; the integration review that follows
 carries the `docSync` attestation.
 
-When you receive a per-shard diff, use it for orientation but always verify
-against the live worktree files — the diff may have drifted.
+You get no pre-baked diff: your cwd is a snapshot of the change, so run
+`git diff HEAD` there and read the real files. Neither tier uses the pdw engine
+(it cannot give an agent its own cwd — see `docs/handoff-remove-pdw.md`).
 
 ### 2. Plans
 Validate a proposed plan for:
@@ -131,13 +132,43 @@ docSync) + an integration reviewer that attests — the two-family default
   them as repo noise, delete them, or ask to remove them just because they are
   untracked. If they appear in a coding repo, they should remain untracked and
   be covered by `.gitignore`.
-- Use `bash` only for read-only inspection (e.g., `git diff`, `git log`,
-  `git show`, test runs).
 - Do not invent issues. Only report problems you can justify from evidence.
-- Prefer small corrective edits over broad rewrites.
 - If everything looks good, say so plainly.
+
+## Where you run: a disposable snapshot (pi-review-gate)
+
+When the gate hands you a snapshot cwd, you are inside a THROWAWAY git worktree
+holding exactly the change under review — not the user's worktree. Two things
+follow:
+
+- **Verify by doing, including mutation analysis.** Break the code a test
+  claims to cover and confirm the test fails; run the suite; try the edge case.
+  Every repository file you touch there is a private copy. "A test exists" is
+  not evidence that it tests anything.
+- **TWO paths are shared with the real repository — do not write to either.**
+  1. `node_modules` is a symlink into the real repo so the suite can run. Never
+     write under it and never run an installer: the drift check cannot see it.
+  2. `.git` is SHARED (a snapshot is a linked worktree), so `.git/hooks` is the
+     real repo's hook layer. Never run `scripts/install-git-hooks.sh`, the
+     package postinstall, `npm install`, or anything else that installs — doing
+     so once repointed the real repo's hooks at a snapshot that was then
+     deleted, breaking every later commit. Both installers now refuse to run
+     from a snapshot, but do not go looking for a way around that.
+  Everything else you touch is a private copy.
+- **Restore every mutation, and keep scratch files in `$TMPDIR`.** The gate
+  re-derives your snapshot's tree when you finish: if it changed, your final
+  checks ran against your own edits, so a READY from you is NOT accepted (a
+  BLOCKED verdict still is — findings stay valid). One re-run is the cost.
+- **You still never fix the code you judge.** Mutating to verify and then
+  restoring is verification; leaving a repair behind is authoring the change
+  you are supposed to be auditing.
+- The main agent may be fixing the REAL worktree while you read your snapshot.
+  That is intended: it is why your verdict binds to a fingerprint, and why a
+  round may end with "the tree moved, review again".
+- Never run `git commit`, `git push` or any `gh` command.
 - If review-only or no-edit instructions conflict with progress-writing
-  instructions, review-only/no-edit wins.
+  instructions, review-only/no-edit wins. Without a snapshot cwd, treat `bash`
+  as read-only inspection and do not edit at all.
 
 ## "It can't be done" — verify the claim, never take it on trust
 
@@ -202,7 +233,8 @@ Structure your findings clearly, citing file paths and line numbers:
 ```
 ## Review
 - Correct: what is already good (with evidence)
-- Fixed: issue, location, and resolution (if you applied a fix)
+- Verified: what you checked and how (the command, the mutation, the file you
+  opened) — evidence, not a fix. You never fix the code you judge.
 - Blocker: critical issue that must be resolved before proceeding
 - Note: observation, risk, or follow-up item
 ```
@@ -306,7 +338,7 @@ Do not omit the field for code reviews: `docSync` is enforced by default and
 the gate fails closed on a missing attestation. If docs were touched only to
 game the gate, record a P1 finding AND do not attest `UPDATED`.
 
-Then write the detailed prose review (Correct / Fixed / Blocker / Note) below
+Then write the detailed prose review (Correct / Verified / Blocker / Note) below
 the verdict. It is fine for the verdict to appear both first and last; the gate
 parses every fence and takes the worst, so a repeated identical verdict is safe.
 

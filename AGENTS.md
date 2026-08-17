@@ -11,21 +11,34 @@ default, make it safe by default rather than adding a switch.
 
 ### Parallel loop (the only execution path, agent-initiated)
 
-The review loop, the decompose module loop, and **wave daily** (ad-hoc parallel
-editing) all run through the `@quintinshaw/pi-dynamic-workflows` engine — a
-HARD dependency that ships with this extension (installed via the package's
-`postinstall` — `scripts/install-package.mjs`, which also copies `agents/*.md`
-to `~/.pi/agent/agents/`, registers the companion pi packages
-(`pi-subagents` for the spawn-reviewer protocol, `pi-opencode-bridge` for the
-opencode-go provider) via `pi install` when missing, and installs the git hooks
-when the current dir is a
-repo). `/review` auto-shards large diffs
-(`run_parallel_shard_review`); `/plan-next` dispatches patch-first wave
-workers (`run_wave_workflow`). The agent decides when a task is large enough
-to propose `/decompose` (evidence + estimate → user consent → module-table
-approval) — there is no serial protocol and no fallback: a missing engine is
-an installation error, never a slow lane. Design record:
-`docs/parallel-execution-plan.md` §8; runtime contract: `lib/pdw-bridge.ts`.
+**Review runs on subagents; the decompose module loop and wave daily run on the
+engine.** That split is not a preference — it is what the two layers can
+actually do:
+
+- **Review → plain subagents** (`prepare_review` + `pi-subagents`). Each
+  reviewer needs its OWN disposable snapshot of the change under review, which
+  needs a per-call `cwd`. The `@quintinshaw/pi-dynamic-workflows` engine
+  **discards** a per-agent `cwd` (its `runCwd` comes only from its own
+  `isolation: "worktree"`, a checkout of HEAD without the uncommitted change),
+  so reviewers on the engine had to share the live worktree — colliding with
+  each other, with your fixes, and with the fingerprinted tree. `/review`
+  therefore shards through the pure `planReviewShards` inside `prepare_review`
+  and the agent spawns one subagent per shard, each with its own writable
+  snapshot. Details: `docs/handoff-remove-pdw.md`.
+- **Decompose module loop + wave daily → the pdw engine**, still a HARD
+  dependency that ships with this extension (installed via the package's
+  `postinstall` — `scripts/install-package.mjs`, which also copies `agents/*.md`
+  to `~/.pi/agent/agents/`, registers the companion pi packages (`pi-subagents`,
+  `pi-opencode-bridge` for the opencode-go provider) via `pi install` when
+  missing, and installs the git hooks when the current dir is a repo).
+  `/plan-next` dispatches patch-first wave workers (`run_wave_workflow`); a
+  missing engine there is an installation error, never a slow lane. Retiring it
+  from these two paths as well is planned in `docs/handoff-remove-pdw.md`.
+
+The agent decides when a task is large enough to propose `/decompose` (evidence
++ estimate → user consent → module-table approval) — there is no serial
+protocol. Design record: `docs/parallel-execution-plan.md` §8; engine contract:
+`lib/pdw-bridge.ts`.
 
 ### Model tiers — capability × cost × cross-family diversity
 
@@ -72,14 +85,31 @@ gate from this host's real model registry (`planFanoutFromFacts`,
 auto-continuation resume text: two judge-eligible families ⇒ two reviewers,
 one per family; one family ⇒ ONE reviewer plus the plan's note copied into the
 recorded review. Two same-family reviewers cost double for zero extra signal.
-This governs the reviewers YOU spawn (small-diff pair, integration reviewer);
-Phase A shard counts come from the engine's sharding. (d) **Every re-review
+This governs the reviewers YOU spawn for a small diff and the integration
+reviewer; for a LARGE diff the shard count comes from `prepare_review`'s plan
+(`planReviewShards`), not from you. (d) **Every re-review
 carries the previous round's conclusion**: the adviser's goal re-review gets
 the old draft + its own objections + what changed; round N+1 gets the previous
 verdict and findings (the gate injects them as the `Review scope for this
 round` block). Settled-and-unchanged material gets a consistency scan, not a
 re-derivation — it never narrows what a reviewer may look at, and a settled
 conclusion may always be reopened with evidence.
+(e) **Reviewers run in disposable snapshots, and findings stream.** Call
+`prepare_review` before spawning — with one label per reviewer for a small diff,
+and for a large one it shards the change itself: each reviewer gets its own
+throwaway worktree holding exactly
+the change under review, plus a finding-stream file. Inside its copy a reviewer
+SHOULD verify by doing — mutation analysis included — and must restore before
+finishing; `record_review` re-derives each snapshot's tree and downgrades a
+READY from a reviewer that left edits behind (BLOCKED still stands). Because
+the reviewer holds a copy, **you keep fixing the real worktree while it runs**:
+take streamed P0/P1/P2 that carry evidence (confirm each in the code first),
+leave Nits for the verdict. The main worktree still has exactly one writer —
+you; `run_wave_workflow` workers stay strictly read-only.
+When `prepare_review` reports isolation UNAVAILABLE, dispatch
+`agents/reviewer-readonly.md` instead of `reviewer` (its `tools:` allowlist
+cannot write, which is the only mechanical guard available — pi-subagents has no
+per-call tool denylist) and do NOT apply fixes until the verdict is recorded.
 
 ### Wave daily — parallel editing for everyday tasks (not just decompose)
 
@@ -101,7 +131,7 @@ parallel-safe: spawn multiple read-only subagents concurrently, and overlap
 exploration with editing. Only the main agent writes to the worktree.
 
 Both loops are AGENT-DRIVEN: you start the review loop yourself once edits
-are complete (auto-sharded via the engine) and you propose `/decompose`
+are complete (sharded by `prepare_review`, not by the engine) and you propose `/decompose`
 yourself when a task outgrows one session — the slash commands are only
 optional explicit triggers, never the expected entry. The user approves at
 two points only: decompose initiation and the module table.

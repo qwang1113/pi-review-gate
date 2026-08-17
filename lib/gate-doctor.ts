@@ -1,6 +1,6 @@
 /**
  * /gate-doctor — read-only health check for the optimizations this package
- * ships: the pdw engine (parallel review / wave daily), the agent model
+ * ships: the pdw engine (wave daily / decompose — review no longer uses it),
  * chains, the opencode-go provider allowlist, the precommit runner, the git
  * hooks, the user-global config fallback, the L5 language gate, the Copilot
  * gh compatibility path, and the command registry.
@@ -45,13 +45,25 @@ export interface ProbeResult<T = string> {
   error?: string;
 }
 
+/**
+ * The engine still ships for WAVE workers and the decompose module loop.
+ * Review does not use it any more (it discards a per-agent `cwd`, so a reviewer
+ * could not hold its own snapshot of the change under review — see
+ * docs/handoff-remove-pdw.md), so a FAIL here no longer blocks reviewing.
+ */
 export function checkPdwEngine(result: ProbeResult): DoctorCheck {
   if (result.ok) {
     return {
       id: "pdw-engine",
       title: "pdw workflow engine loads",
       status: "PASS",
-      evidence: [result.value ?? "@quintinshaw/pi-dynamic-workflows imports, runWorkflow exported"],
+      // Two lines: what loaded, and what it is still FOR. The scope note must
+      // not depend on the caller omitting a value — a reader seeing only
+      // "runWorkflow exported" would still assume review depends on it.
+      evidence: [
+        result.value ?? "@quintinshaw/pi-dynamic-workflows imports, runWorkflow exported",
+        "used by wave workers and the decompose module loop; review runs on plain subagents",
+      ],
     };
   }
   return {
@@ -61,6 +73,7 @@ export function checkPdwEngine(result: ProbeResult): DoctorCheck {
     evidence: [result.error ?? "engine unavailable"],
     advice: [
       "re-install the package so its node_modules land next to the extension code: `pi install` it, or run `scripts/install-package.mjs` / `npm install` in the package repo",
+      "only wave workers (`/plan-next`) and the decompose module loop need it — review runs on plain subagents",
     ],
   };
 }

@@ -436,8 +436,18 @@ const UPDATE_INDEX_CHUNK = 500;
  * DIFFABLE handle on "the tree the last READY review was bound to": the
  * fingerprint digest mixes submodules in and is therefore not a git object,
  * whereas this OID can be fed straight to `git diff`.
+ *
+ * `extraExcludePathspecs` drops additional paths from the tree, on top of the
+ * gate-owned ones. The gate itself never passes any — its exclusion set is
+ * fixed and must stay that way — but a REVIEW SNAPSHOT
+ * (lib/review-snapshot.ts) has to ignore the `node_modules` symlink it
+ * created for the test suite: `.gitignore` entries are usually written
+ * `node_modules/`, which matches a directory and NOT a symlink, so `git add
+ * -A` would stage it and every snapshot would look modified the instant it
+ * was built (measured: every verification returned DRIFTED, which would have
+ * downgraded every READY).
  */
-export function worktreeTreeOid(cwd: string): string {
+export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly string[] = []): string {
   let shadowDir: string | undefined;
   try {
     // --path-format=absolute is REQUIRED: bare `--git-path index` is relative
@@ -567,7 +577,7 @@ export function worktreeTreeOid(cwd: string): string {
 
     git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
-    git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
+    git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS, ...extraExcludePathspecs], env);
 
     const tree = git(cwd, ["write-tree"], env);
     // Guard against a future git printing warnings on stdout: only a bare

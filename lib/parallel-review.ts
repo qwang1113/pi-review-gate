@@ -1,25 +1,23 @@
 /**
- * Parallel shard review (plane 1 of the parallel loop).
+ * Review planning — how a change is split, and what each reviewer is told.
  *
- * Tiered parallel review: small diffs (<20 files AND <500 lines) use the
- * default TWO cross-family reviewers without pdw; large diffs auto-shard to
- * ≤4 parallel reviewers via
- * the pdw workflow engine. Each shard reviewer audits a DISJOINT set of
- * changed files and receives a per-shard diff for context. Shard verdicts
- * carry NO docSync — the integration review that follows attests it. Worst
- * verdict wins.
+ * Tiered: small diffs (<20 files AND <500 lines) get the default cross-family
+ * reviewers over the whole change; large diffs are split into ≤4 DISJOINT
+ * groups covering every changed file. Shard verdicts carry NO docSync — the
+ * integration review that follows attests it. Worst verdict wins.
  *
- * HARD DEPENDENCY: the pdw engine is the ONLY execution path. A missing or
- * broken engine throws `PdwUnavailableError` (installation guidance) — there
- * is no serial fallback.
- *
- * All shard planning is a pure function over file names so it can be pinned by
- * tests without a workflow engine.
+ * NO ENGINE HERE. Reviews are dispatched by the extension (`prepare_review` +
+ * plain subagents), because the pdw engine discards a per-agent `cwd` and a
+ * reviewer must hold its OWN snapshot of the change it judges (see
+ * docs/handoff-remove-pdw.md). Every function in this file is pure over file
+ * names and strings, so the split and the reviewer contract can be pinned by
+ * tests with no workflow engine, no git and no filesystem.
  */
 
-import { sanitizeInjectedWorkflowText } from "./pdw-bridge.ts";
-import type { PdwModule } from "./pdw-bridge.ts";
-import { buildRunProgressCallbacks, createProgressSink, newPdwRunId } from "./pdw-progress.ts";
+// Pure module: no engine, no snapshots, no I/O. Reviews are dispatched by the
+// extension (prepare_review + subagents); this file only decides HOW to split
+// them and WHAT to say to each reviewer.
+import { buildStreamDirective } from "./review-stream.ts";
 
 /** Tiered trigger thresholds: a diff meeting either bound triggers sharding. */
 export const SHARD_THRESHOLD_FILES = 20;
@@ -40,8 +38,7 @@ export interface ReviewShard {
   files: string[];
   /** One-line context for the shard reviewer (why this shard exists). */
   note: string;
-  /** Per-shard diff context for tiered review (absent for small diffs). */
-  diff?: string;
+
 }
 
 export interface ShardReviewPlan {
@@ -49,6 +46,11 @@ export interface ShardReviewPlan {
   fileCount: number;
 }
 
+/**
+ * Shape of a shard reviewer's structured verdict. Handed to the spawned
+ * reviewer as its `outputSchema` (see SHARD_VERDICT_SCHEMA below); the recorded
+ * verdict itself is parsed by the gate's own all-fence parser.
+ */
 export interface ShardVerdict {
   gate: "READY" | "BLOCKED" | "NEEDS_HUMAN";
   findings: Array<{
@@ -59,8 +61,6 @@ export interface ShardVerdict {
   }>;
   notes?: string;
 }
-
-export const DEFAULT_REVIEWER_MODEL = "anthropic/claude-fable-5:max";
 
 /**
  * Split changed files into balanced, disjoint review shards.
@@ -136,8 +136,25 @@ export const SHARD_VERDICT_SCHEMA = {
   required: ["gate", "findings"],
 } as const;
 
-/** Build the review prompt handed to one shard reviewer. */
-export function buildShardPrompt(shard: ReviewShard, goalText?: string, repoRoot?: string): string {
+/**
+ * Build the review prompt handed to one shard reviewer.
+ *
+ * `isolation` is the SAFETY-CRITICAL argument. A shard that got its own
+ * snapshot may edit and mutate freely; a shard running in the LIVE worktree
+ * (isolation unavailable) must be told the opposite, because the engine-level
+ * denylist only removes the edit/write TOOLS — `bash` stays, and a reviewer
+ * that had been promised "you are in a disposable copy" would happily rewrite
+ * the user's files through it. Omitting the argument therefore means "no
+ * snapshot": the read-only contract is the DEFAULT, and the permissive one has
+ * to be granted explicitly.
+ */
+export function buildShardPrompt(
+  shard: ReviewShard,
+  goalText?: string,
+  repoRoot?: string,
+  isolation?: { streamPath: string },
+): string {
+  const streamPath = isolation?.streamPath;
   const lines = [
     "You are a shard reviewer in a PARALLEL review run. Audit ONLY the files listed below — other files are covered by other reviewers. Read each file in the worktree, verify from the code (never guess), and report findings with file paths and line numbers.",
     "",
@@ -145,21 +162,20 @@ export function buildShardPrompt(shard: ReviewShard, goalText?: string, repoRoot
     shard.files.map((f) => `- ${f}`).join("\n"),
     "",
     "Review for: correctness, edge cases, test coverage quality, doc sync for THIS shard's behavior, unintended side effects, and impossibility claims (TODO/FIXME/skipped tests).",
-    "Do NOT edit any file. Do NOT run tests that write files. bash is read-only inspection only.",
+    isolation
+      // In a THROWAWAY SNAPSHOT of the change under review, mutation analysis
+      // (delete the code, prove the test fails) is the strongest check there is.
+      ? "You are running inside a disposable snapshot worktree of the change under review — NOT the user's live worktree. You may edit files and run tests freely, including mutation analysis: delete or break the code a test claims to cover and confirm the test actually fails. RESTORE every mutation before you finish: the gate re-derives this snapshot's tree afterwards, and a snapshot left modified means your final checks ran against your own edits, so a READY from you will not be accepted. Write scratch files OUTSIDE the snapshot (use $TMPDIR), and never write under `node_modules` (it is a symlink to the real repository). Never run git commit/push or any gh command."
+      // No snapshot: this IS the user's worktree and the main agent may be
+      // working in it. Read-only, exactly as before snapshot isolation existed.
+      : "You are reading the USER'S LIVE WORKTREE — snapshot isolation was unavailable for this run, and the main agent may be editing it right now. Do NOT edit any file. Do NOT run tests that write files. `bash` is read-only inspection only (git diff/log/show, reading files). Never run git commit/push or any gh command. Report what you find; verifying by mutation is not available this round.",
   ];
-  if (shard.diff) {
-    lines.push(
-      "",
-      "### Diff context (for reference only — review the actual files in the worktree)",
-      "",
-      "The diff below shows the exact changes in this shard. Use it for orientation, but",
-      "always verify against the live files — the diff may have drifted.",
-      "",
-      "```diff",
-      shard.diff,
-      "```",
-    );
-  }
+  if (streamPath) lines.push("", buildStreamDirective(streamPath));
+  // NOTE: the `diff` field and its prompt block are gone. Nothing produces a
+  // per-shard diff any more, and nothing should: the reviewer holds a snapshot
+  // of the change, so it runs `git diff HEAD` against the real thing instead of
+  // reading a copy that may have drifted. Keeping a dead field invites someone
+  // to "restore" the weaker path.
   if (goalText && goalText.trim()) {
     lines.push("", "Loop goal (accept the change against it, criterion by criterion):", goalText.trim());
   }
@@ -172,219 +188,37 @@ export function buildShardPrompt(shard: ReviewShard, goalText?: string, repoRoot
   return lines.join("\n");
 }
 
-export interface ShardWorkflowOptions {
-  /** Absolute path of the worktree the reviewers read. */
-  cwd: string;
-  shards: readonly ReviewShard[];
-  goalText?: string;
-  /** Per-agent model (default claude-fable-5:max). */
-  model?: string;
-  concurrency?: number;
-  /** Injected agent registry (tests). */
-  agentRegistry?: unknown;
-  /** Injected agent runner (tests; production uses pdw's default WorkflowAgent). */
-  agent?: unknown;
-  /**
-   * Live progress callback (the tool layer's `onUpdate`). `text` is a
-   * one-line status; `progress` is a 0-100 percentage when known. Fired on
-   * every engine event (agent start/end/fail, phase, log).
-   */
-  onProgress?: (text: string, progress?: number) => void;
-  /** Shared model registry from the host session (pdw resolves models against it). */
-  modelRegistry?: unknown;
-  /**
-   * Forced engine handle (tests). When provided, bypasses loadPdw entirely:
-   * null forces the PdwUnavailableError path deterministically.
-   */
-  pdwOverride?: PdwModule | null;
-}
-
-export type ShardReviewOutcome =
-  | {
-      ok: true;
-      shards: Array<{ label: string; output: string; verdict: ShardVerdict | null }>;
-      durationMs: number;
-      agentCount: number;
-      /** Shard labels whose agent call failed (recoverable-null per pdw contract). */
-      failedShards?: string[];
-      /** Run identity — the engine log and the ndjson progress file share it. */
-      runId: string;
-      /** Absolute path of the live ndjson progress file (.pi/pdw-progress/). */
-      progressFile: string;
-      /** Best-effort engine log path (~/.pi/workflows/projects/<key>/runs/). */
-      engineLogFile: string;
-    }
-  | {
-      ok: false;
-      reason: "workflow-failed";
-      error?: string;
-      /** Run identity + artifacts, also on failure so the caller can locate them. */
-      runId: string;
-      progressFile: string;
-      engineLogFile: string;
-    };
-
-/**
- * Run the parallel shard review via pdw. The engine is a hard dependency:
- * a missing engine THROWS PdwUnavailableError (installation guidance). A
- * workflow that throws (bad script, agent failure) resolves
- * `ok: false` with `workflow-failed` and the error message.
- */
-export async function runParallelShardReview(
-  opts: ShardWorkflowOptions,
-): Promise<ShardReviewOutcome> {
-  const { loadPdw, PdwUnavailableError, resolveBestModel, registryHasModels } = await import("./pdw-bridge.ts");
-  // Hard dependency: no serial fallback. A missing/broken engine throws
-  // PdwUnavailableError (installation guidance) instead of degrading.
-  if (opts.pdwOverride === null) throw new PdwUnavailableError(new Error("forced by test"));
-  const pdw = opts.pdwOverride !== undefined ? opts.pdwOverride : await loadPdw();
-
-  // The pinned judge model may not exist in the user's models.json (bare
-  // "claude-fable-5" style ids resolve against the host session's registry;
-  // pdw's own resolver would fall back to an unauthenticated provider and
-  // every shard would fail). Resolve the first candidate the registry can
-  // actually run, keeping the pinned default as the final fallback.
-  const model = await resolveBestModel(
-    [opts.model ?? DEFAULT_REVIEWER_MODEL, "onekey/gpt-5.6-sol", "onekey/deepseek-v4-pro"],
-    opts.modelRegistry,
-  );
-
-  const script = generateShardReviewScript({
-    shards: opts.shards,
-    goalText: opts.goalText,
-    model,
-  });
-
-  // Run identity + live progress. The sink OWNS the runId: the engine log
-  // (~/.pi/workflows/projects/<key>/runs/, persistLogs defaults true), the
-  // ndjson progress file (.pi/pdw-progress/) and the tool's onUpdate
-  // streaming all share it. Persist each shard reviewer's full transcript so
-  // the user can open it from the /resume session picker.
-  const runId = newPdwRunId();
-  const sink = createProgressSink(opts.cwd, runId);
-  sink.setTotal(opts.shards.length);
-  const progressCallbacks = buildRunProgressCallbacks(sink, {
-    total: opts.shards.length,
-    onProgress: opts.onProgress,
-  });
-
-  const runOptions: Record<string, unknown> = {
-    cwd: opts.cwd,
-    args: {},
-    mainModel: model,
-    runId,
-    concurrency: opts.concurrency ?? Math.min(4, Math.max(1, opts.shards.length)),
-    agentRetries: 1,
-    persistAgentSessions: true,
-    // Shard reviewers audit a live worktree: they must never write to it.
-    // (agents/reviewer.md allows edit/write; the engine-level denylist is the
-    // mechanical backstop on top of the prompt.)
-    excludeTools: ["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"],
-    ...progressCallbacks,
-  };
-  if (opts.agentRegistry) runOptions.agentRegistry = opts.agentRegistry;
-  if (opts.agent) runOptions.agent = opts.agent;
-  // pi's ModelRegistry is a sync facade over an async runtime: before the
-  // fallback warms, getAll() returns [] and pdw fails with "No models
-  // available" — reproduced as every shard failing inside the extension while
-  // the same run worked engine-side. Only hand the registry over when it
-  // actually has models; pdw then builds its own disk-backed registry from
-  // the same ~/.pi/agent/models.json.
-  if (opts.modelRegistry && registryHasModels(opts.modelRegistry)) {
-    runOptions.modelRegistry = opts.modelRegistry;
-  }
-
-  // NOTE: PdwUnavailableError is intentionally NOT caught here — it propagates
-  // to the tool layer, which reports the installation error. Only workflow
-  // execution failures resolve as ok:false.
-  try {
-    const result = await pdw.runWorkflow(script, runOptions);
-    const raw = Array.isArray(result.result) ? result.result : [];
-    const entries = raw.filter(
-      (entry): entry is { label: string; result: unknown } =>
-        typeof entry === "object" && entry !== null && typeof (entry as { label?: unknown }).label === "string",
-    );
-    const failedLabels = entries.filter((e) => e.result === null).map((e) => e.label);
-    const shards = entries
-      .filter((e) => e.result !== null)
-      .map((entry) => {
-        // PRODUCTION SHAPE: pdw's default WorkflowAgent returns the structured
-        // value ITSELF for a schema'd agent() (resolveStructuredOutput's
-        // capture.value) — not a {text, structured} wrapper. Tests inject a
-        // runner that mirrors that shape; tolerate both defensively.
-        const result = entry.result as unknown;
-        const structured =
-          typeof result === "object" && result !== null && "structured" in (result as Record<string, unknown>)
-            ? (result as Record<string, unknown>).structured
-            : result;
-        const text =
-          typeof result === "object" && result !== null && typeof (result as Record<string, unknown>).text === "string"
-            ? ((result as Record<string, unknown>).text as string)
-            : JSON.stringify(structured ?? null);
-        return {
-          label: entry.label,
-          output: text,
-          verdict: parseShardVerdict(structured),
-        };
-      });
-    if (shards.length === 0 && failedLabels.length > 0) {
-      return {
-        ok: false,
-        reason: "workflow-failed",
-        error: `all shard reviewers failed (${failedLabels.join(", ")})`,
-        runId,
-        progressFile: sink.progressFile,
-        engineLogFile: sink.engineLogFile,
-      };
-    }
-    return {
-      ok: true,
-      shards,
-      durationMs: result.durationMs,
-      agentCount: result.agentCount,
-      failedShards: failedLabels,
-      runId,
-      progressFile: sink.progressFile,
-      engineLogFile: sink.engineLogFile,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      reason: "workflow-failed",
-      error: (err as Error).message,
-      runId,
-      progressFile: sink.progressFile,
-      engineLogFile: sink.engineLogFile,
-    };
-  } finally {
-    // Terminal event: the ndjson file is complete and tail -f readers can stop.
-    sink.done();
-  }
-}
-
-/** Parse a structured shard result into a verdict, tolerating malformed data. */
-export function parseShardVerdict(structured: unknown): ShardVerdict | null {
-  if (typeof structured !== "object" || structured === null) return null;
-  const s = structured as Record<string, unknown>;
-  if (s.gate !== "READY" && s.gate !== "BLOCKED" && s.gate !== "NEEDS_HUMAN") return null;
-  const findings = Array.isArray(s.findings)
-    ? s.findings.filter((f): f is ShardVerdict["findings"][number] => {
-        if (typeof f !== "object" || f === null) return false;
-        const rec = f as Record<string, unknown>;
-        return (
-          typeof rec.file === "string" &&
-          typeof rec.line === "number" &&
-          (rec.severity === "P0" || rec.severity === "P1" || rec.severity === "P2" || rec.severity === "Nit") &&
-          typeof rec.issue === "string"
-        );
-      })
-    : [];
-  return {
-    gate: s.gate,
-    findings,
-    notes: typeof s.notes === "string" ? s.notes : undefined,
-  };
-}
+// NOTE: `runParallelShardReview` and `generateShardReviewScript` used to live
+// here. Review does NOT run through the pdw engine any more.
+//
+// WHY (measured, not assumed): the engine discards a per-agent `cwd` — its
+// `runCwd` comes only from its own `isolation: "worktree"`, which checks out
+// HEAD and therefore does not contain the change under review. Shard reviewers
+// could never hold their own snapshot of what they were judging, so they shared
+// the live worktree: colliding with each other, with the main agent's fixes,
+// and with the tree the gate fingerprints. Keeping the engine here would have
+// meant one shared snapshot and read-only shards — i.e. giving up mutation
+// analysis, the strongest check a reviewer has.
+//
+// Reviews are now dispatched as ordinary subagents: pi-subagents honors a
+// per-call `cwd` and enforces a structured `outputSchema`, so every reviewer
+// gets its own disposable WRITABLE snapshot. `prepare_review` (the extension)
+// computes the shard plan with `planReviewShards` below, so the split stays
+// mechanical rather than improvised by whoever is spawning.
+//
+// What remains here is pure and used in production: the tiered threshold, the
+// shard planner, the per-shard prompt, the verdict SCHEMA handed to each spawned
+// reviewer, and the record merger.
+//
+// `parseShardVerdict` and `DEFAULT_REVIEWER_MODEL` were deleted with the engine:
+// the engine parsed structured results itself and needed a model spec for the
+// script, whereas a spawned reviewer's verdict is parsed by the gate's own
+// all-fence parser (`lib/verdict-parse.ts`) and its model comes from the pinned
+// agent definition. Keeping them "just in case" is exactly the dead code this
+// repo's reviewers keep (correctly) flagging.
+//
+// The engine is still a hard dependency for wave workers and the decompose
+// module loop — docs/handoff-remove-pdw.md plans its retirement there.
 
 /**
  * Render every shard's full raw output as one recordable review block — the
@@ -408,42 +242,5 @@ export function formatShardReviewRecord(
     .join("\n\n---\n\n");
 }
 
-/**
- * Generate the workflow script source for a parallel shard review run.
- * Pure string builder so tests can pin the script's shape without an engine.
- */
-export function generateShardReviewScript(args: {
-  shards: readonly ReviewShard[];
-  goalText?: string;
-  model?: string;
-}): string {
-  const model = args.model ?? DEFAULT_REVIEWER_MODEL;
-  const shardDefs = args.shards.map((shard) => ({
-    label: shard.label,
-    // Sanitize injected DATA: the engine's determinism blocklist is a plain
-    // regex over the whole script and would reject diff/goal text that merely
-    // mentions Date.now / Math.random / new Date() (see pdw-bridge.ts).
-    prompt: sanitizeInjectedWorkflowText(buildShardPrompt(shard, args.goalText)),
-  }));
-  return `export const meta = {
-  name: 'parallel_shard_review',
-  description: 'Parallel L3 shard review of a change',
-  phases: [{ title: 'Shard reviews' }],
-}
-
-const VERDICT_SCHEMA = ${JSON.stringify(SHARD_VERDICT_SCHEMA, null, 2)}
-
-const shardDefs = ${JSON.stringify(shardDefs, null, 2)}
-
-phase('Shard reviews')
-const results = await parallel(shardDefs.map((def) => () =>
-  agent(def.prompt, {
-    label: def.label,
-    model: ${JSON.stringify(model)},
-    schema: VERDICT_SCHEMA,
-  }).then((r) => ({ label: def.label, result: r })),
-))
-
-return results
-`;
-}
+// (`generateShardReviewScript` deleted with the engine review path — see the
+// note above. Nothing generates a workflow script for reviews any more.)

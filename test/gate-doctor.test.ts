@@ -48,6 +48,21 @@ test("checkPdwEngine: loadable engine passes, failure fails with reinstall advic
   assert.equal(fail.status, "FAIL");
   assert.equal(fail.evidence[0], "module not found");
   assert.ok(fail.advice?.[0]?.includes("re-install"));
+  // The engine's SCOPE shrank: review runs on plain subagents now, so a missing
+  // engine no longer blocks reviewing. The advice must say which paths need it,
+  // or a user reads FAIL as "the gate is broken".
+  assert.ok(
+    fail.advice?.some((a) => /wave/i.test(a) && /decompose/i.test(a)),
+    "the advice must scope the dependency to wave + decompose",
+  );
+  assert.ok(
+    fail.advice?.some((a) => /review runs on plain subagents/i.test(a)),
+    "the advice must say review is unaffected",
+  );
+  assert.ok(
+    pass.evidence.some((e) => /wave|decompose/i.test(e)),
+    "the PASS evidence must name what the engine is still for",
+  );
 });
 
 // ---------- model-chains ----------

@@ -15,8 +15,32 @@ verify round (the protocol is encoded in the `/plan-verify` command prompt,
 `lib/workflow-commands.ts`; the plan-state schema is validated by the
 extension's `lib/plan-state.ts` — resolve it under
 `<package-root>/lib/` — a local-path `pi install` points at the repo itself — or
-`~/.pi/agent/npm/pi-review-gate/lib/` — npm/global install). You are
-read-only: you never edit, never fix, never ship.
+`~/.pi/agent/npm/pi-review-gate/lib/` — npm/global install). You never fix and
+never ship: your job is the verdict, not the patch.
+
+## Where you run: a disposable snapshot
+
+The gate materializes ONE throwaway git worktree per shard reviewer, holding
+exactly the change under review, and runs you inside it. Every repository file
+you touch there is a private copy — not the user's, not another shard's — so:
+
+- **Mutation analysis is expected, not forbidden.** Break the code a test
+  claims to cover and confirm the test actually fails; run the suite as often
+  as you like. "The test exists" is not evidence that it tests anything.
+- **Restore every mutation before you finish.** The gate re-derives your
+  snapshot's tree afterwards: if it changed, your final checks ran against your
+  own edits, so a READY from you is NOT accepted (a BLOCKED still is).
+- **Keep scratch files outside the snapshot** (`$TMPDIR`) — a stray file counts
+  as a modified snapshot.
+- **TWO paths are shared with the real repository — do not write to either.**
+  `node_modules` is a symlink into the real repo (so the suite can run), and
+  `.git` is shared because a snapshot is a linked worktree — which means
+  `.git/hooks` is the REAL repo's hook layer. Never write under `node_modules`
+  and never run an installer (`scripts/install-git-hooks.sh`, the package
+  postinstall, `npm install`): doing so once repointed the real repo's hooks at
+  a snapshot that was then deleted. The drift check cannot see either path.
+- **Never** run `git commit`, `git push` or any `gh` command. Shipping is the
+  main session's, and it is gated.
 
 ## Your scope
 

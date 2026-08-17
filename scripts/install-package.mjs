@@ -23,7 +23,7 @@
  */
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -101,6 +101,15 @@ function installHooksHere() {
   if (!isGitRepo(process.cwd())) {
     log("current directory is not a git repo — skipping git-hook install");
     log(`per-repo hooks: run 'bash ${join(ROOT, "scripts", "install-git-hooks.sh")}' inside a repo`);
+    return;
+  }
+  // A review snapshot is a linked worktree that SHARES .git/hooks with the real
+  // checkout, so installing from inside one repoints the real repo's hooks at a
+  // directory that is deleted with the round — breaking the L3 layer for every
+  // later commit. The shell installer refuses too; this check keeps the reason
+  // visible where the install is triggered.
+  if (process.cwd().includes(`${sep}.pi${sep}review-snapshots${sep}`)) {
+    log("inside a review snapshot — refusing to install git hooks (.git/hooks is shared with the real checkout)");
     return;
   }
   log("current directory is a git repo — installing git hooks");

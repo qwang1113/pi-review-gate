@@ -2,10 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { runParallelShardReview } from "../lib/parallel-review.ts";
+// (review no longer runs on the engine — see the note below)
 import { runWaveWorkflow } from "../lib/plan-parallel.ts";
 import { isModelAllowed, resolveBestModel } from "../lib/pdw-bridge.ts";
 
@@ -45,116 +45,19 @@ test("USER REQUIREMENT: opencode-go may only run deepseek-v4-flash", () => {
   assert.equal(isModelAllowed({ provider: "opencode-go" }), false);
 });
 
-test("runParallelShardReview really fans out through the workflow engine", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "pdw-review-"));
-  const updates: Array<{ text: string; progress?: number }> = [];
-  const outcome = await runParallelShardReview({
-    cwd,
-    shards: [
-      { label: "shard-1", files: ["a.ts"], note: "1 file(s)" },
-      { label: "shard-2", files: ["b.ts"], note: "1 file(s)" },
-      { label: "shard-3", files: ["c.ts"], note: "1 file(s)" },
-    ],
-    goalText: "criterion: tests pass",
-    agent: stubRunner({
-      "shard-1": { gate: "READY", findings: [], notes: "clean" },
-      "shard-2": { gate: "READY", findings: [] },
-      "shard-3": { gate: "BLOCKED", findings: [{ file: "c.ts", line: 2, severity: "P1", issue: "bug" }] },
-    }),
-    onProgress: (text: string, progress?: number) => {
-      updates.push({ text, progress });
-    },
-  });
-  assert.equal(outcome.ok, true);
-  if (!outcome.ok) return;
-  assert.equal(outcome.shards.length, 3);
-  assert.equal(outcome.agentCount, 3);
-  const byLabel = new Map(outcome.shards.map((s) => [s.label, s]));
-  assert.equal(byLabel.get("shard-1")!.verdict!.gate, "READY");
-  assert.equal(byLabel.get("shard-3")!.verdict!.gate, "BLOCKED");
-  assert.equal(byLabel.get("shard-3")!.verdict!.findings.length, 1);
-  assert.match(outcome.shards[0].output, /READY/);
-  // Progress wiring: the run owns a runId, an ndjson event file and the
-  // engine log path; the event file records real engine callbacks.
-  assert.match(outcome.runId, /^run-/);
-  assert.ok(outcome.progressFile.endsWith(`${outcome.runId}.ndjson`));
-  assert.ok(outcome.progressFile.includes(join(cwd, ".pi", "pdw-progress")));
-  assert.ok(existsSync(outcome.progressFile), "ndjson progress file must exist");
-  assert.ok(outcome.engineLogFile.includes(join("workflows", "projects")));
-  assert.ok(outcome.engineLogFile.endsWith(`${outcome.runId}.log`));
-  assert.ok(existsSync(outcome.engineLogFile), "engine log must persist (persistLogs default true)");
-  const lines = readFileSync(outcome.progressFile, "utf8")
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => JSON.parse(l) as { type: string });
-  const types = lines.map((e) => e.type);
-  assert.ok(types.includes("agent-start"), "ndjson must record agent starts");
-  assert.ok(types.includes("agent-end"), "ndjson must record agent ends");
-  assert.equal(lines[lines.length - 1].type, "run-end", "ndjson must end with the terminal event");
-  // The onUpdate stream carries label/status text and a bounded progress pct.
-  assert.ok(updates.length >= 3, `expected live progress updates, got ${updates.length}`);
-  assert.ok(updates.some((u) => /shard-\d/.test(u.text)), "updates must name shard labels");
-  assert.ok(updates.some((u) => /done|FAILED/.test(u.text)), "updates must carry per-agent status");
-  for (const u of updates) {
-    if (u.progress !== undefined) {
-      assert.ok(Number.isInteger(u.progress) && u.progress >= 0 && u.progress <= 100);
-    }
-  }
-  const lastPct = [...updates].reverse().find((u) => u.progress !== undefined);
-  assert.equal(lastPct?.progress, 100, "the last percentage-carrying update must report 100%");
-  // Cleanup: remove the engine log the run persisted under the user home.
-  try {
-    // Remove the whole project dir (runs/ + locks), not just the log.
-    rmSync(dirname(dirname(outcome.engineLogFile)), { recursive: true, force: true });
-  } catch {
-    // Best-effort test hygiene.
-  }
-});
-
-test("runParallelShardReview surfaces a workflow failure as ok:false", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "pdw-review-fail-"));
-  const runner = {
-    run: async () => {
-      throw new Error("boom");
-    },
-  };
-  const outcome = await runParallelShardReview({
-    cwd,
-    shards: [{ label: "shard-1", files: ["a.ts"], note: "1 file(s)" }],
-    agent: runner,
-  });
-  assert.equal(outcome.ok, false);
-  if (!outcome.ok) {
-    assert.equal(outcome.reason, "workflow-failed");
-    // pdw's parallel() folds a failing agent into null; the caller sees a
-    // descriptive "all shard reviewers failed" summary instead of the raw throw.
-    assert.match(outcome.error ?? "", /failed/);
-    // Diagnostic paths survive failures too (goal exit criterion 4).
-    assert.match(outcome.runId, /^run-/);
-    assert.ok(outcome.progressFile.endsWith(`${outcome.runId}.ndjson`));
-    assert.ok(outcome.engineLogFile.endsWith(`${outcome.runId}.log`));
-    assert.ok(existsSync(outcome.progressFile), "ndjson must exist even when the run fails");
-    try {
-      // Remove the whole project dir (runs/ + locks), not just the log.
-      rmSync(dirname(dirname(outcome.engineLogFile)), { recursive: true, force: true });
-    } catch {
-      // Best-effort test hygiene.
-    }
-  }
-});
-
-test("runParallelShardReview THROWS with install guidance when the engine is missing", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "pdw-missing-"));
-  await assert.rejects(
-    runParallelShardReview({
-      cwd,
-      shards: [{ label: "shard-1", files: ["a.ts"], note: "1 file(s)" }],
-      pdwOverride: null,
-    }),
-    /pdw engine \(@quintinshaw\/pi-dynamic-workflows\) is not available/,
-  );
-});
+// REVIEW-SIDE ENGINE TESTS REMOVED WITH THE PATH THEY COVERED.
+//
+// `runParallelShardReview` is gone: the engine discards a per-agent `cwd`
+// (verified against workflow.js — its `runCwd` comes only from its own
+// `isolation: "worktree"`, a checkout of HEAD without the change under
+// review), so shard reviewers could not hold their own snapshot of what they
+// were judging. Reviews now go through `prepare_review` + plain subagents,
+// which honor a per-call cwd; the shard PLAN is still pure and still tested in
+// test/parallel-review.test.ts, and the snapshot/verification behaviour in
+// test/review-snapshot.test.ts + test/extension-structure.test.ts.
+//
+// The wave-worker tests below stay: `run_wave_workflow` still runs on the
+// engine (docs/handoff-remove-pdw.md plans that migration separately).
 
 test("runWaveWorkflow THROWS with install guidance when the engine is missing", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "pdw-wave-missing-"));

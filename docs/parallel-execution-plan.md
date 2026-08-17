@@ -112,9 +112,17 @@ cost bug where small diffs were unnecessarily sharded is gone.
   validation: **zero changes** (structural tests pin this).
 - Timing-regression tests: iteration count and mechanism untouched; their
   stability under parallel scheduling is verified (see §7).
-- Single-writer: L2 fixes are merged by the main agent; concurrent writers
-  never share one worktree. (Parallel wave workers are read-only and deliver
-  patches — see §8.)
+- Single-writer, restated: **the MAIN WORKTREE has exactly one writer** (the
+  main agent). Concurrent writers never share it. Parallel wave workers stay
+  read-only and deliver patches (see §8). Reviewers are no longer an exception
+  to be argued about: each one runs in its OWN disposable snapshot worktree
+  (`lib/review-snapshot.ts`), so its writes — mutation analysis, test runs —
+  land in a copy that is discarded at the end of the round. That is what lets
+  the main agent keep fixing while a review runs, and what removes the old
+  collision between two parallel same-worktree reviewers.
+  Integrity is mechanical, not honour-based: the snapshot's tree is re-derived
+  when the reviewer finishes, and a READY from a reviewer that left its own
+  edits behind is downgraded to BLOCKED (its findings stay valid).
 - **One runtime npm dependency, required and shipped with the package**: `@quintinshaw/pi-dynamic-workflows`
   (the engine — a HARD dependency, there is no serial fallback).
   `@earendil-works/pi-ai` / `@earendil-works/pi-coding-agent` / `typebox` are
@@ -142,11 +150,19 @@ its pacing when a CPU-heavy check (tsc, build) is concurrent.
 
 The two remaining serial bottlenecks were (a) the single full-diff reviewer
 round and (b) one-worker-at-a-time module implementation. Both are now
-parallelized on top of `@quintinshaw/pi-dynamic-workflows` (pdw), the
-engine — the ONLY execution path (§6): there is no serial protocol to fall
-back to.
+parallelized, but NOT on the same substrate — and the split is forced, not
+chosen:
 
-### 8.1 Plane 1 — parallel shard review (read-only fan-out)
+- **Module implementation (waves) + the decompose loop** run on
+  `@quintinshaw/pi-dynamic-workflows` (pdw), a hard dependency with no serial
+  fallback (§6).
+- **Review** runs on plain subagents. The engine discards a per-agent `cwd`, so
+  a shard reviewer could not hold its own snapshot of the change it judges;
+  `prepare_review` shards the diff and materializes one writable snapshot per
+  reviewer instead. Rationale, evidence and the plan to retire the engine
+  entirely: `docs/handoff-remove-pdw.md`.
+
+### 8.1 Plane 1 — parallel shard review (snapshot-isolated fan-out)
 
 `lib/parallel-review.ts`. The review uses a **tiered trigger**
 (`shouldShardReview(fileCount, lineCount)`, thresholds exported as
@@ -155,19 +171,19 @@ back to.
 - **Small diff** (<20 files AND <500 changed lines): TWO cross-family
   reviewers over the full change — no pdw engine, no sharding. Each attests
   `docSync` itself (no separate integration review on this path).
-- **Large diff** (≥20 files OR ≥500 changed lines): the diff is split into
-  ≤4 disjoint shards (`planReviewShards`, weight-balanced); a pdw workflow
-  runs one L3 reviewer per shard in parallel (no `agentType` binding — the
-  shard prompt itself carries the reviewer role and the engine-level
-  excludeTools list is the write protection; the model is resolved from
-  `DEFAULT_REVIEWER_MODEL` with a fallback candidate list via
-  `resolveBestModel`, so a pinned model missing from the user's models.json
-  never falls back to an unauthenticated provider; `resolveBestModel` also
-  enforces the hard-coded cost allowlist `isModelAllowed` — the opencode-go
-  provider may only run `deepseek-v4-flash` (every other opencode-go model
-  is billed per-use and explicitly forbidden), while all other providers are
-  unrestricted), each with a
-  structured-output schema that carries NO docSync (a shard cannot attest the
+- **Large diff** (≥20 files OR ≥500 changed lines): `prepare_review` splits the
+  diff into ≤4 disjoint shards (`planReviewShards`) covering every changed
+  file, materializes ONE disposable writable snapshot per shard
+  (`lib/review-snapshot.ts`) and returns each shard's cwd, finding-stream path,
+  file list and ready-made task text. The main agent spawns one ordinary
+  subagent per shard — all in the same turn, each with its own `cwd`. Write
+  protection is no longer a denylist but ISOLATION: a reviewer may edit and run
+  mutation analysis inside its copy, and the gate re-derives that snapshot's
+  tree afterwards (a modified snapshot loses its READY). The reviewer model
+  comes from the pinned agent definition (`agents/reviewer.md`), and the
+  opencode-go cost allowlist (`isModelAllowed`: only `deepseek-v4-flash`) is
+  enforced where judges are chosen (`lib/review-fanout.ts`). Each shard
+  verdict carries NO docSync (a shard cannot attest the
   whole change). The main agent records every shard's full raw output in ONE
   `record_review` call (worst verdict wins, same as serial), then runs ONE
   integration reviewer over the whole change whose record — alone — carries
@@ -203,11 +219,15 @@ main agent.
 
 A pdw run used to be a black box: the tools awaited `runWorkflow` with no
 callbacks and `persistLogs: false` explicitly disabled the engine's default
-log. Every parallel run now wires the engine's live callbacks
+log. The remaining engine consumer — `run_wave_workflow`; review left the engine,
+so `run_parallel_shard_review` no longer exists — wires the engine's live
+callbacks
 (`onLog` / `onPhase` / `onRuntimeEvent` / `onAgentStart` / `onAgentEnd`)
-through `lib/pdw-progress.ts` (`createProgressSink`) to three surfaces:
+through `lib/pdw-progress.ts` (`createProgressSink`) to three surfaces
+(spawned reviewers surface through `.pi-subagents/artifacts` instead, which is
+what the TUI widget reads):
 
-1. **Live streaming in the tool card** — both tools pass `onProgress` to the
+1. **Live streaming in the tool card** — the wave tool passes `onProgress` to the
 extension `onUpdate` protocol: each agent start/end pushes a one-line status
 (`[run-…] 1/3 agents · active: shard-2 · last: shard-1 done ([model] 12.3s, 1234
 tok)`) plus a 0–100 `details.progress` (carried on the same `onUpdate` events;
@@ -261,10 +281,13 @@ Every outcome (success AND failure) carries `runId`, `progressFile` and
    runs `scripts/install-package.mjs`: agents → `~/.pi/agent/agents/`, and
    git hooks when the current dir is a repo), then restart Pi / `/reload`.
 2. In a real pi session on this repo: run `/review` on a **small** change
-   (<20 files, <500 lines) and confirm TWO cross-family reviewers run with no pdw
-   engine (worst verdict wins); then run `/review` on a change with ≥20 files or ≥500 lines and
-   confirm the engine auto-shards and runs the reviewers concurrently (watch
-   the pdw run panel), then record Phase A and run the integration review.
+   (<20 files, <500 lines) and confirm the labels you pass to `prepare_review`
+   are the reviewers that run (worst verdict wins); then run `/review` on a
+   change with ≥20 files or ≥500 lines and confirm `prepare_review` returns ≤4
+   disjoint shards covering every changed file, each with its own snapshot cwd
+   and stream file, that the reviewers run concurrently (watch the sub-agent
+   panel), and that a snapshot left modified loses its READY. Then record every
+   shard output in ONE `record_review` and run the integration review.
 3. In a real pi session with a multi-module plan: run `/plan-next` and
    confirm one wave dispatches several read-only workers concurrently and
    their patches apply. Also test a **wave daily** dispatch: define 2–4

@@ -1439,9 +1439,10 @@ test("restore() collects the migration result from loadSidecar, not from a secon
 test("session_start surfaces the migration notice and clears the flag", () => {
   const at = SRC.indexOf('pi.on("session_start"');
   assert.ok(at >= 0, "session_start handler must exist");
-  // 7000: the P-multi reset block, no-UI mode forcing, and the normal-mode
-  // no-arm comment at the handler head push the notice section past 6000.
-  const body = SRC.slice(at, at + 7000);
+  // The window is a reading heuristic, not a contract: the P-multi reset
+  // block, no-UI mode forcing, the normal-mode no-arm comment and the
+  // snapshot cleanup at the handler head keep pushing the notice section down.
+  const body = SRC.slice(at, at + 8400);
   assert.match(body, /if \(fingerprintMigrated\)/,
     "an invalidated binding must be explained, not silently applied");
   assert.match(body, /FINGERPRINT_MIGRATION_NOTICE/);
@@ -1706,14 +1707,179 @@ test("the extension never calls require() (ESM type-stripped runtime)", () => {
 
 // ---- Tiered parallel review trigger ----
 
-test("tiered trigger: shouldShardReview is imported and used in run_parallel_shard_review", () => {
-  assert.match(SRC, /shouldShardReview/);
-  assert.match(SRC, /SHARD_THRESHOLD_FILES/);
-  assert.match(SRC, /SHARD_THRESHOLD_LINES/);
-  assert.match(SRC, /countDiffLines/);
-  assert.match(SRC, /addDiffContext/);
-  assert.match(SRC, /tier: "single"/);
-  assert.match(SRC, /tier: "parallel"/);
+test("tiered trigger: prepare_review shards a large diff ITSELF (mechanical, not improvised)", () => {
+  // Review moved off the engine, which moved the fan-out decision to the main
+  // agent — and "it split the diff into disjoint groups covering every file" is
+  // not something a prompt can guarantee. So the tool computes the split.
+  const at = SRC.indexOf('name: "prepare_review"');
+  assert.ok(at > 0, "prepare_review must exist");
+  // Window covers the whole handler: it now plans, snapshots AND renders each
+  // shard's task text, so it is long by design.
+  const body = SRC.slice(at, at + 16000);
+  assert.match(body, /shouldShardReview\(fileCount, lineCount\)/, "the tiered threshold decides");
+  assert.match(body, /planReviewShards\(/, "the split must come from the tested planner");
+  assert.match(body, /listChangedFiles\(target\.root\)/);
+  assert.match(body, /countDiffLines\(target\.root/);
+  assert.match(body, /tier: "single"|tier = "sharded"/);
+  // Each shard's ready-made task text comes from the same pure builder, so the
+  // file list the reviewer is told to audit cannot drift from the plan.
+  assert.match(body, /buildShardPrompt\(shard/);
+  // The merged record shape stays a single source of truth.
+  assert.match(body, /formatShardReviewRecord\(/);
+  // And the engine path is really gone.
+  assert.doesNotMatch(SRC, /runParallelShardReview/);
+  assert.doesNotMatch(SRC, /run_parallel_shard_review"/);
+});
+
+test("STALE TREE: a READY cannot bind to a tree the reviewer never saw", () => {
+  // The fail-open this feature would otherwise CREATE: the agent is told to
+  // fix while the review runs, so at record time the worktree can differ from
+  // what the reviewer read. Binding the READY to the current fingerprint would
+  // approve unreviewed code, while every doc promised "the gate asks for
+  // another round". The comparison makes that promise mechanical.
+  const at = SRC.indexOf('name: "record_review"');
+  const body = SRC.slice(at, at + 12000);
+  assert.match(body, /reviewedTree\.get\(targetRoot\)/, "record_review must know what was reviewed");
+  // The DECISION is a pure function now (lib/verdict-guards.ts), because the
+  // inline version was only shape-locked here — a mutation neutralized it with
+  // the suite still green. This asserts the WIRING; the truth table lives in
+  // test/verdict-guards.test.ts, where a mutant actually dies.
+  assert.match(body, /applyVerdictGuards\(\{/, "the guards must be applied");
+  assert.match(body, /snapshotDrifts,/, "drift facts must be handed to the guard");
+  assert.match(body, /parsed\.verdict = guarded\.verdict/, "the guarded verdict must be the one recorded");
+  assert.match(body, /STALE TREE/, "the user must be told why a READY did not bind");
+  // Fail closed when the tree cannot be read: unknown is never treated as same.
+  assert.match(body, /catch \{ currentTree = undefined; \}/);
+
+  // Every dispatch path must register what its reviewers saw. There is now
+  // exactly ONE such path — prepare_review — because the engine path (which
+  // could not give a reviewer its own snapshot) is gone.
+  assert.match(SRC, /reviewedTree\.set\(target\.root, snaps\[0\]!\.tree\)/, "prepare_review path");
+  // …and a dispatch WITHOUT isolation must clear it, or a stale value from an
+  // earlier round would block an honest READY.
+  assert.match(SRC, /reviewedTree\.delete\(target\.root\)/);
+  assert.match(SRC, /reviewedTree\.clear\(\)/, "session_start must not leak a previous session's tree");
+});
+
+test("REGRESSION: splitting record_review calls cannot skip snapshot verification", () => {
+  // Two reviewers = two record_review calls. An earlier version consumed and
+  // deleted every snapshot on the FIRST call, so the second reviewer's verdict
+  // was recorded unverified and a drifted READY could ship.
+  const verifyAt = SRC.indexOf("function verifyPreparedSnapshots(");
+  assert.ok(verifyAt > 0, "verification must be separable from cleanup");
+  const verifyBody = SRC.slice(verifyAt, SRC.indexOf("function releasePreparedSnapshots("));
+  assert.doesNotMatch(verifyBody, /preparedSnapshots\.delete/, "verifying must NOT drop the set");
+  assert.doesNotMatch(verifyBody, /removeReviewSnapshot/, "verifying must not destroy the evidence");
+
+  // record_review verifies; only a NEW round (or session start) releases.
+  const recAt = SRC.indexOf('name: "record_review"');
+  const recBody = SRC.slice(recAt, recAt + 12000);
+  assert.match(recBody, /verifyPreparedSnapshots\(targetRoot\)/);
+  assert.doesNotMatch(recBody, /releasePreparedSnapshots\(/, "record_review must not clear the round");
+  const prepAt = SRC.indexOf('name: "prepare_review"');
+  assert.match(SRC.slice(prepAt, prepAt + 12000), /releasePreparedSnapshots\(target\.root\)/);
+});
+
+test("REGRESSION: drift found at prepare time WITHDRAWS a standing READY", () => {
+  // The laundering path: record a READY, then prepare the next round — if the
+  // previous round's drift only became an informational note, the untrustworthy
+  // READY would still be sitting in the state, ready to ship.
+  const prepAt = SRC.indexOf('name: "prepare_review"');
+  const body = SRC.slice(prepAt, prepAt + 12000);
+  assert.match(body, /stale\.length > 0/);
+  assert.match(body, /st\.review\.verdict === "READY"/);
+  assert.match(body, /verdict: "BLOCKED", fingerprint: null/);
+});
+test("SNAPSHOT INTEGRITY: record_review verifies the round's snapshots MECHANICALLY", () => {
+  // The check must not depend on the agent pasting a helper's output: an
+  // honour-based integrity check is no check at all.
+  const at = SRC.indexOf('name: "record_review"');
+  assert.ok(at > 0, "record_review must exist");
+  const body = SRC.slice(at, SRC.indexOf('name: "run_precommit"', at));
+  assert.match(body, /verifyPreparedSnapshots\(targetRoot\)/, "every prepared snapshot must be verified here");
+  // Tighten-only: drift may withhold a READY, never manufacture one. The
+  // decision itself is behaviourally tested in test/verdict-guards.test.ts
+  // (mutating it there fails 2 cases); here we only pin that record_review
+  // routes through it and records ITS verdict.
+  assert.match(body, /applyVerdictGuards\(\{/);
+  assert.match(body, /parsed\.verdict = guarded\.verdict/);
+  assert.doesNotMatch(body, /snapshotDrifts[\s\S]{0,120}parsed\.verdict = "READY"/);
+  // Drift parked by an out-of-order prepare_review must still be consumed here,
+  // or a polluted READY could be laundered by calling prepare first.
+  assert.match(body, /pendingDrift\.get\(targetRoot\)/);
+  assert.match(body, /pendingDrift\.delete\(targetRoot\)/);
+  // The reason has to reach the transcript, not only the details payload.
+  assert.match(body, /SNAPSHOT INTEGRITY/);
+
+  // Cleanup is a SEPARATE step from verification (see the call-splitting
+  // regression below): a round is released when the next one is prepared, not
+  // when its first verdict is recorded.
+  const releaseAt = SRC.indexOf("function releasePreparedSnapshots(");
+  assert.ok(releaseAt > 0);
+  const release = SRC.slice(releaseAt, releaseAt + 900);
+  assert.match(release, /verifyPreparedSnapshots\(repoRoot\)/);
+  assert.match(release, /removeReviewSnapshot\(snap, repoRoot\)/);
+  assert.match(release, /preparedSnapshots\.delete\(repoRoot\)/);
+});
+
+test("REGRESSION: prepare_review REFUSES a partial plan, and the refusal is wired", () => {
+  // Round 4 extracted the DECISION into lib/verdict-guards.ts (behaviourally
+  // tested there). Round 5 found the other half: neutralizing the WIRING
+  // (`if (planDecision.kind === "partial")` → `if (false)`) still left the whole
+  // suite green. A guard nobody notices missing is not a guard, so the wiring is
+  // pinned here — shape assertions are the only lever on extension-internal
+  // control flow, so they must be specific.
+  const at = SRC.indexOf('name: "prepare_review"');
+  assert.ok(at > 0);
+  const body = SRC.slice(at, at + 16000);
+
+  // 1. The decision comes from the tested pure function, over SANITIZED labels
+  //    on both sides (comparing raw labels to sanitized instances once flagged
+  //    `a/b` as a failed reviewer and refused a perfectly good plan).
+  assert.match(body, /decideSnapshotPlan\(labels, snaps\.map\(\(s\) => s\.instance\)\)/);
+  assert.match(body, /\.map\(\(l\) => safeLabel\(l\)\)/, "labels must be sanitized before planning");
+
+  // 2. Partial ⇒ refuse. The branch must exist, must be an ERROR (not a
+  //    best-effort continue), must name what failed, and must not leave the
+  //    successful snapshots behind.
+  const partialAt = body.indexOf('planDecision.kind === "partial"');
+  assert.ok(partialAt > 0, "the partial branch must exist and be keyed on the decision");
+  const partialBody = body.slice(partialAt, partialAt + 1800);
+  assert.match(partialBody, /removeReviewSnapshot\(snap, target\.root\)/, "clean up what was created");
+  assert.match(partialBody, /isError: true/, "a partial plan must FAIL the call");
+  assert.match(partialBody, /planDecision\.failedLabels/, "the failed reviewers must be named");
+  assert.match(partialBody, /Refusing a/i);
+  // It must NOT hand back a usable plan on this path.
+  assert.doesNotMatch(partialBody, /preparedSnapshots\.set/);
+  assert.doesNotMatch(partialBody, /reviewedTree\.set/);
+
+  // 3. "none" is the other decision, and it is a SOFT fallback (not an error):
+  //    reviewing in place under the old rules is still reviewing.
+  const noneAt = body.indexOf('planDecision.kind === "none"');
+  assert.ok(noneAt > 0 && noneAt !== partialAt, "the none branch must be distinct from partial");
+});
+
+test("prepare_review hands out per-reviewer isolation and fails SOFT", () => {
+  const at = SRC.indexOf('name: "prepare_review"');
+  assert.ok(at > 0, "prepare_review must be registered");
+  const body = SRC.slice(at, at + 16000);
+  // One snapshot per label — never one shared copy for several reviewers.
+  assert.match(body, /for \(const label of labels\)[\s\S]{0,200}createReviewSnapshot\(/);
+  assert.match(body, /buildStreamConsumerDirective\(/, "the agent must be told how to consume the stream");
+  assert.match(body, /buildStreamDirective\(/, "the reviewer instruction must be handed over");
+  // The verdict SCHEMA must reach the agent, not merely be re-exported: a
+  // spawned reviewer only produces machine-checkable output if it is handed an
+  // `outputSchema`. Reverting this to an unused export would otherwise be
+  // invisible — the schema's own shape test would still pass.
+  assert.match(body, /JSON\.stringify\(SHARD_VERDICT_SCHEMA/, "the schema must be printed for the agent");
+  assert.match(body, /outputSchema/, "and named as the outputSchema to spawn with");
+  // A host without worktree support must keep reviewing under the OLD rules,
+  // not silently lose the safety they provided — and the mechanical half of that
+  // fallback is a static read-only agent, because pi-subagents has no per-call
+  // tool denylist.
+  assert.match(body, /isolation UNAVAILABLE/);
+  assert.match(body, /reviewer-readonly/, "the fallback must name the agent that CANNOT write");
+  assert.match(body, /do NOT apply fixes until/i);
 });
 
 // P0 regression (pi package layout): pi loads the extension entry IN PLACE via
