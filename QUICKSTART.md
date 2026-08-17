@@ -90,7 +90,7 @@ agent：调 set_gate_mode("loop")
 | `/review`、`/precommit` | 显式触发 review / precommit |
 | `/gate-reset` | 重置门禁状态 |
 | `/gate-lesson <text>` | 记录经验教训 |
-| `/gate-doctor` | 只读体检：逐项检查优化是否生效（pdw 引擎、模型链、opencode-go 白名单、precommit runner、git hooks、全局配置、L5 门、Copilot gh、命令注册），输出 PASS/FAIL/WARN + 证据 + 修复建议 |
+| `/gate-doctor` | 只读体检：逐项检查优化是否生效（模型链、opencode-go 白名单、precommit runner、git hooks、全局配置、L5 门、Copilot gh、命令注册），输出 PASS/FAIL/WARN + 证据 + 修复建议 |
 
 ## 7. 成本须知
 
@@ -99,4 +99,4 @@ agent：调 set_gate_mode("loop")
 - review 不跑 pdw 引擎（引擎不支持 per-agent cwd，reviewer 就拿不到自己的快照）：全部由 `prepare_review` + 子代理直接 spawn；
 - 小 diff（<20 文件且 <500 行）：你传的 label 就是 reviewer 数量；
 - 大 diff：`prepare_review` 自己分片（最多 4 片、不重叠且覆盖全量）+ 一次集成 review；
-- wave/decompose 仍跑引擎（待拆，见 `docs/handoff-remove-pdw.md`）。
+- wave/decompose 不跑引擎：`prepare_wave` + `worker-readonly` 子代理（同一 turn 并发、只读、无 edit/write/bash）+ `apply_wave_patches` 验证补丁（pdw 引擎已整体退役，见 `docs/handoff-remove-pdw.md`）。

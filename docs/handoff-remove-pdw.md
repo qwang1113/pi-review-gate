@@ -1,12 +1,14 @@
 # Handoff: retire the pdw engine (step 2)
 
-Step 1 (shipped in the PR that adds this file) moved **review** off
-`@quintinshaw/pi-dynamic-workflows` and onto plain subagents with per-reviewer
-snapshots. This document hands over step 2: doing the same for the remaining two
-consumers and dropping the dependency.
-
-Read it with `docs/parallel-execution-plan.md` (the original design) and
-`AGENTS.md` (the project principles that change at the end of step 2).
+> **STATUS: COMPLETE (2026-08-17).** The 7 items in `## Remaining work` shipped
+> together in the "retire the pdw engine" PR: wave + decompose run on plain
+> subagents (`prepare_wave` / `apply_wave_patches` / `agents/worker-readonly.md`),
+> `lib/pdw-bridge.ts` / `lib/pdw-progress.ts` are deleted
+> (`isModelAllowed` moved to `lib/model-allowlist.ts`), the dependency is out of
+> `package.json` / `scripts/install-package.mjs`, the doctor check is gone, and
+> the docs (AGENTS.md, README, QUICKSTART, SKILL.md, parallel-execution-plan §8)
+> now describe subagents as the only execution path. This document is kept as
+> the record of why the migration happened.
 
 ## Motivation
 

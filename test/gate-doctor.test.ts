@@ -4,7 +4,6 @@ import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, accessSync, readdi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  checkPdwEngine,
   checkModelChains,
   checkOpencodeGoStore,
   checkGlobalConfig,
@@ -38,32 +37,8 @@ const PASS_FACTS = {
   allowed: () => true,
 };
 
-// ---------- pdw-engine ----------
-
-test("checkPdwEngine: loadable engine passes, failure fails with reinstall advice", () => {
-  const pass = checkPdwEngine({ ok: true, value: "runWorkflow exported" });
-  assert.equal(pass.status, "PASS");
-  assert.ok(pass.evidence.some((e) => e.includes("runWorkflow")));
-  const fail = checkPdwEngine({ ok: false, error: "module not found" });
-  assert.equal(fail.status, "FAIL");
-  assert.equal(fail.evidence[0], "module not found");
-  assert.ok(fail.advice?.[0]?.includes("re-install"));
-  // The engine's SCOPE shrank: review runs on plain subagents now, so a missing
-  // engine no longer blocks reviewing. The advice must say which paths need it,
-  // or a user reads FAIL as "the gate is broken".
-  assert.ok(
-    fail.advice?.some((a) => /wave/i.test(a) && /decompose/i.test(a)),
-    "the advice must scope the dependency to wave + decompose",
-  );
-  assert.ok(
-    fail.advice?.some((a) => /review runs on plain subagents/i.test(a)),
-    "the advice must say review is unaffected",
-  );
-  assert.ok(
-    pass.evidence.some((e) => /wave|decompose/i.test(e)),
-    "the PASS evidence must name what the engine is still for",
-  );
-});
+// (the pdw-engine check and its tests were deleted with the engine itself —
+// step 2 of docs/handoff-remove-pdw.md)
 
 // ---------- model-chains ----------
 
@@ -270,7 +245,6 @@ function baseDeps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
     hooksDir,
     workflowCommandCount: 15,
     isNonEnglishText,
-    probePdw: async () => ({ ok: true }),
     probeGh: async () => ({ ok: true, value: "gh version 2.40.0" }),
     readFile: (p) => { try { return readFileSync(p, "utf8"); } catch { return undefined; } },
     exists: (p) => { try { accessSync(p); return true; } catch { return false; } },
@@ -283,7 +257,7 @@ test("runGateDoctor: healthy environment reports every check, all PASS", async (
   const checks = await runGateDoctor(baseDeps());
   const ids = checks.map((c) => c.id);
   assert.deepEqual(ids, [
-    "pdw-engine", "model-chains", "opencode-go", "global-config",
+    "model-chains", "opencode-go", "global-config",
     "precommit-runner", "git-hooks", "l5-language", "copilot-gh", "commands",
   ]);
   for (const c of checks) {
@@ -293,7 +267,6 @@ test("runGateDoctor: healthy environment reports every check, all PASS", async (
 
 test("runGateDoctor: broken environment surfaces FAILs, one IO failure never throws", async () => {
   const deps = baseDeps({
-    probePdw: async () => ({ ok: false, error: "PdwUnavailableError: engine missing" }),
     probeGh: async () => ({ ok: false, error: "ENOENT" }),
     modelsStorePath: join(tmpdir(), "does-not-exist.json"),
     workflowCommandCount: 1,
@@ -301,11 +274,10 @@ test("runGateDoctor: broken environment surfaces FAILs, one IO failure never thr
   });
   const checks = await runGateDoctor(deps);
   const byId = new Map(checks.map((c) => [c.id, c]));
-  assert.equal(byId.get("pdw-engine")?.status, "FAIL");
   assert.equal(byId.get("model-chains")?.status, "FAIL");
   assert.equal(byId.get("commands")?.status, "FAIL");
   assert.equal(byId.get("copilot-gh")?.status, "WARN");
-  assert.equal(checks.length, 9, "one broken check must not suppress the rest");
+  assert.equal(checks.length, 8, "one broken check must not suppress the rest");
 });
 
 test("runGateDoctor: an agent whose frontmatter pins no model is not counted as a chain", async () => {
@@ -330,12 +302,12 @@ test("runGateDoctor: model-chain check degrades to WARN when registry facts are 
 
 test("formatDoctorReport: header, per-check lines and summary", () => {
   const checks: DoctorCheck[] = [
-    { id: "pdw-engine", title: "pdw workflow engine loads", status: "PASS", evidence: ["ok"] },
+    { id: "model-chains", title: "agent model chains resolve to a usable model", status: "PASS", evidence: ["ok"] },
     { id: "git-hooks", title: "L3 git hooks installed", status: "FAIL", evidence: ["pre-commit: missing"], advice: ["run the installer"] },
   ];
   const report = formatDoctorReport(checks, "gate-doctor", new Date("2026-08-17T00:00:00.000Z"));
   assert.ok(report.startsWith("gate-doctor — pi-review-gate health report (2026-08-17T00:00:00.000Z)"));
-  assert.ok(report.includes("✓ [PASS] pdw-engine"));
+  assert.ok(report.includes("✓ [PASS] model-chains"));
   assert.ok(report.includes("    · ok"));
   assert.ok(report.includes("✗ [FAIL] git-hooks"));
   assert.ok(report.includes("    → run the installer"));

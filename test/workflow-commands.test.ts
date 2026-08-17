@@ -168,12 +168,17 @@ test("the orchestration commands keep the single-writer contract", () => {
 
   const next = buildWorkflowPrompt("plan-next");
   assert.match(next, /exactly ONE WAVE/, "plan-next advances one wave at a time");
-  assert.match(next, /run_wave_workflow tool/, "the wave runs through the parallel patch-first tool");
+  assert.match(next, /prepare_wave tool/, "the wave is prepared by the subagent-flow tool");
+  assert.match(next, /worker-readonly/, "workers are the static read-only subagent");
+  assert.match(next, /IN THE SAME TURN \(async:true, never one after the other\)/, "workers are spawned concurrently in one turn");
+  assert.match(next, /apply_wave_patches/, "the apply tool validates and persists the patches");
   assert.match(next, /pre-checks git apply/, "patches are validated before they touch the worktree");
   assert.match(next, /validates ownership/, "patches must stay inside owned_paths");
-  assert.match(next, /HARD dependency/, "pdw is the only execution path");
+  assert.match(next, /--recount/, "apply must use git apply --recount (LLM hunks miscount their @@ headers)");
   assert.match(next, /NO further confirmation/, "the approved module table authorizes wave dispatch");
-  assert.doesNotMatch(next, /fall back to the serial protocol/, "no serial fallback exists");
+  assert.doesNotMatch(next, /pdw engine|HARD dep(?:endency)?/, "the engine must not be mentioned as a dependency");
+  assert.doesNotMatch(next, /serial protocol|serial fallback/, "no engine, no serial fallback language");
+  assert.match(next, /engine: \"subagents\"/, "the parallel ledger records the subagents engine");
   assert.match(next, /never guess a repair/, "malformed state must fail closed");
   assert.match(next, /must not read the diff/, "the driver's context stays bounded");
   assert.doesNotMatch(next, /docs\/requirement-orchestration/, "plan-next is self-contained too");

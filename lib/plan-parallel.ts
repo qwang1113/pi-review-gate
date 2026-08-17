@@ -5,12 +5,12 @@
  * latency bottleneck. Plane 2 keeps the "exactly one writer in the worktree"
  * invariant while parallelizing the expensive part:
  *
- *   wave workers (read-only, edit/write AND bash excluded) each produce unified
- *   git diffs for their module → the main agent VALIDATES every patch (declared
- *   path ∪ diff headers ⊆ owned_paths, `git apply --check`) and applies them
- *   in sequence with per-patch validation (no cross-patch rollback transaction)
- *   → records status/worklog. The worktree still has exactly one writer: the
- *   main agent.
+ *   wave workers (read-only: tools allowlist has no edit/write/bash) each
+ *   produce unified git diffs for their module → the main agent VALIDATES
+ *   every patch (declared path ∪ diff headers ⊆ owned_paths, `git apply
+ *   --check`) and applies them in sequence with per-patch validation (no
+ *   cross-patch rollback transaction) → records status/worklog. The worktree
+ *   still has exactly one writer: the main agent.
  *
  * Wave daily: the agent may dispatch wave workers for ANY task that can be
  * split into ≤4 modules with disjoint owned_paths, not just decompose plans.
@@ -19,17 +19,20 @@
  * whose dependencies are implemented/ accepted form the next wave and run
  * concurrently (bounded by `maxWaveSize`).
  *
- * HARD DEPENDENCY: like plane 1, the pdw engine is the only execution path —
- * a missing engine throws `PdwUnavailableError` (installation guidance), never
- * a serial one-worker-per-step protocol.
+ * NO ENGINE HERE. The wave runs as N ordinary subagents of the static
+ * READ-ONLY agent `agents/worker-readonly.md` (pi-subagents has no per-call
+ * tool denylist, so the worker's read-only-ness lives in its `tools:`
+ * allowlist — see `agents/worker.md` for the SERIAL single-writer role, which
+ * a wave must never launch). What remains in this file is pure and tested:
+ * the wave computation, the worker prompt, the structured-output schema, the
+ * patch-ownership validation and the git-apply helpers. The plan/apply flow
+ * lives in the extension tools `prepare_wave` + `apply_wave_patches` (see
+ * docs/handoff-remove-pdw.md, step 2).
  */
 import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLAN_DIR } from "./plan-state.ts";
-import { sanitizeInjectedWorkflowText } from "./pdw-bridge.ts";
-import type { PdwModule } from "./pdw-bridge.ts";
-import { buildRunProgressCallbacks, createProgressSink, newPdwRunId } from "./pdw-progress.ts";
 
 /** A module's minimal shape for wave planning. */
 export interface WaveModule {
@@ -153,190 +156,21 @@ export function buildWaveWorkerPrompt(args: {
     "  * Deleted file: `--- a/<path>` / `+++ /dev/null` and `@@ -1,N +0,0 @@` with - lines.",
     "  Do NOT include diff headers like `diff --git ...`, index lines, or ---/+++ timestamps.",
     "- summary: one line — what you implemented and any deviation or out-of-scope need.",
-    "- selfcheck: for EVERY must_have in your brief, met (true/false) and evidence (a command you ran and its output, a test that would fail without the change, the exact symbol).",
+    "- selfcheck: for EVERY must_have in your brief, met (true/false) and evidence (a command you would run and its expected output, a test that would fail without the change, the exact symbol).",
   );
   return lines.join("\n");
 }
 
-export interface WaveWorkflowOptions {
-  cwd: string;
-  modules: Array<{
-    id: string;
-    title: string;
-    ownedPaths: string[];
-    worklogPath: string;
-    model: string;
-    goalText?: string;
-  }>;
-  concurrency?: number;
-  agentRegistry?: unknown;
-  /** Injected agent runner (tests; production uses pdw's default WorkflowAgent). */
-  agent?: unknown;
-  /** Shared model registry from the host session (pdw resolves models against it). */
-  modelRegistry?: unknown;
-  /**
-   * Forced engine handle (tests). When provided, bypasses loadPdw entirely:
-   * null forces the PdwUnavailableError path deterministically.
-   */
-  pdwOverride?: PdwModule | null;
-  /**
-   * Live progress callback (the tool layer's `onUpdate`). `text` is a
-   * one-line status; `progress` is a 0-100 percentage when known.
-   */
-  onProgress?: (text: string, progress?: number) => void;
-}
-
-export type WaveWorkflowOutcome =
-  | {
-      ok: true;
-      results: WaveWorkerResult[];
-      /** Module ids whose worker agent call failed (recoverable-null per pdw contract). */
-      failedModules?: string[];
-      durationMs: number;
-      agentCount: number;
-      /** Run identity — the engine log and the ndjson progress file share it. */
-      runId: string;
-      /** Absolute path of the live ndjson progress file (.pi/pdw-progress/). */
-      progressFile: string;
-      /** Best-effort engine log path (~/.pi/workflows/projects/<key>/runs/). */
-      engineLogFile: string;
-    }
-  | {
-      ok: false;
-      reason: "workflow-failed";
-      error?: string;
-      /** Run identity + artifacts, also on failure so the caller can locate them. */
-      runId: string;
-      progressFile: string;
-      engineLogFile: string;
-    };
-
-/**
- * Run one wave of parallel workers via pdw. Workers are read-only (edit/write
- * excluded at the engine level); their structured output carries the patches.
- */
-export async function runWaveWorkflow(
-  opts: WaveWorkflowOptions,
-): Promise<WaveWorkflowOutcome> {
-  const { loadPdw, PdwUnavailableError, resolveBestModel, registryHasModels } = await import("./pdw-bridge.ts");  // Hard dependency: no serial fallback. A missing/broken engine throws
-  // PdwUnavailableError (installation guidance) instead of degrading.
-  if (opts.pdwOverride === null) throw new PdwUnavailableError(new Error("forced by test"));
-  const pdw = opts.pdwOverride !== undefined ? opts.pdwOverride : await loadPdw();
-
-  const defs = await Promise.all(
-    opts.modules.map(async (m) => ({
-      moduleId: m.id,
-      prompt: sanitizeInjectedWorkflowText(buildWaveWorkerPrompt({
-        moduleId: m.id,
-        title: m.title,
-        ownedPaths: m.ownedPaths,
-        worklogPath: m.worklogPath,
-        goalText: m.goalText,
-      })),
-      model: await resolveBestModel(
-        [m.model, "onekey/deepseek-v4-pro", "onekey/grok-4.6"],
-        opts.modelRegistry,
-      ),
-    })),
-  );
-
-  const script = `export const meta = {
-  name: 'wave_workers',
-  description: 'Parallel patch-first module workers',
-  phases: [{ title: 'Wave workers' }],
-}
-
-const WAVE_SCHEMA = ${JSON.stringify(WAVE_WORKER_SCHEMA, null, 2)}
-
-const defs = ${JSON.stringify(defs, null, 2)}
-
-phase('Wave workers')
-const results = await parallel(defs.map((def) => () =>
-  agent(def.prompt, {
-    label: def.moduleId,
-    model: def.model,
-    schema: WAVE_SCHEMA,
-  }).then((r) => ({ moduleId: def.moduleId, result: r })),
-))
-
-return results
-`;
-
-  // Run identity + live progress (same wiring as runParallelShardReview).
-  const runId = newPdwRunId();
-  const sink = createProgressSink(opts.cwd, runId);
-  sink.setTotal(opts.modules.length);
-  const progressCallbacks = buildRunProgressCallbacks(sink, {
-    total: opts.modules.length,
-    onProgress: opts.onProgress,
-  });
-
-  const runOptions: Record<string, unknown> = {
-    cwd: opts.cwd,
-    args: {},
-    runId,
-    concurrency: opts.concurrency ?? Math.min(4, Math.max(1, opts.modules.length)),
-    agentRetries: 1,
-    persistAgentSessions: true,
-    // Wave workers must be READ-ONLY: edit/write AND bash are excluded at the
-    // engine level. agents/worker.md's "only writer" system prompt describes
-    // the SERIAL role and must not leak into concurrent waves — so no
-    // agentType binding here, the task prompt carries the read-only role.
-    excludeTools: [
-      "bash",
-      "edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit",
-    ],
-    ...progressCallbacks,
-  };
-  if (opts.agentRegistry) runOptions.agentRegistry = opts.agentRegistry;
-  if (opts.agent) runOptions.agent = opts.agent;
-  // Same sync-facade guard as runParallelShardReview: an unwarmed pi
-  // ModelRegistry reports no models and pdw fails every worker with
-  // "No models available"; let pdw build its own disk-backed registry.
-  if (opts.modelRegistry && registryHasModels(opts.modelRegistry)) {
-    runOptions.modelRegistry = opts.modelRegistry;
-  }
-
-  try {
-    const result = await pdw.runWorkflow(script, runOptions);
-    const raw = Array.isArray(result.result) ? result.result : [];
-    const entries = raw.filter(
-      (entry): entry is { moduleId: string; result: unknown } =>
-        typeof entry === "object" && entry !== null && typeof (entry as { moduleId?: unknown }).moduleId === "string",
-    );
-    // A recoverable-null worker call (pdw's parallel contract) means the
-    // module FAILED — it must never be mistaken for "nothing to change".
-    const failedModules = entries.filter((e) => e.result === null).map((e) => e.moduleId);
-    const results = entries
-      .filter((e) => e.result !== null)
-      .map((entry) => {
-        const r = entry.result as { structured?: unknown } | null;
-        return parseWaveWorkerResult(entry.moduleId, r?.structured ?? entry.result);
-      });
-    return {
-      ok: true,
-      results,
-      failedModules,
-      durationMs: result.durationMs,
-      agentCount: result.agentCount,
-      runId,
-      progressFile: sink.progressFile,
-      engineLogFile: sink.engineLogFile,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      reason: "workflow-failed",
-      error: (err as Error).message,
-      runId,
-      progressFile: sink.progressFile,
-      engineLogFile: sink.engineLogFile,
-    };
-  } finally {
-    // Terminal event: the ndjson file is complete and tail -f readers can stop.
-    sink.done();
-  }
-}
+// NOTE: `runWaveWorkflow` and the pdw engine wrapper used to live here. The
+// engine is gone (docs/handoff-remove-pdw.md, step 2): a wave now runs as N
+// ordinary subagents of `agents/worker-readonly.md` — one per module, spawned
+// by the MAIN AGENT in the SAME turn (async), with `WAVE_WORKER_SCHEMA` as
+// each spawn's outputSchema. The extension tools `prepare_wave` (plan + per-
+// module ready-made task text) and `apply_wave_patches` (ownership validation
+// + patch persistence + git apply --check + failedModules) split the old
+// runWaveWorkflow contract into the prepare → spawn → verify shape that
+// reviews already use. The pure layer below (prompt, schema, ownership,
+// apply) is unchanged and still unit-tested.
 
 /** Parse a worker's structured result, tolerating malformed output. */
 export function parseWaveWorkerResult(moduleId: string, structured: unknown): WaveWorkerResult {
@@ -487,4 +321,67 @@ export function writeWavePatches(planDir: string, moduleId: string, patches: rea
 /** Resolve the plan directory for a repo (repo-root-relative `.pi/plan`). */
 export function planDirFor(cwd: string): string {
   return join(cwd, PLAN_DIR);
+}
+
+// ---------- apply_wave_patches reconciliation (pure, tested) ----------
+
+/**
+ * Wave modules whose id is NOT in the plan. With a plan in play, the wave may
+ * only contain planned modules — an unplanned id means the driver invented
+ * the wave (or passed a stale list), and its owned_paths were never
+ * user-approved. Fail-closed: apply_wave_patches refuses such a list.
+ */
+export function unplannedModuleIds(
+  modules: readonly { id: string }[],
+  planIds: ReadonlySet<string>,
+): string[] {
+  return modules.filter((m) => !planIds.has(m.id)).map((m) => m.id);
+}
+
+/**
+ * Result entries whose moduleId is not part of the wave. A worker answering
+ * for the wrong module (or the driver mixing two waves' results) must never
+ * be silently dropped — that would mislead the failedModules report.
+ */
+export function unknownResultModuleIds(
+  results: readonly { moduleId: string }[],
+  waveIds: ReadonlySet<string>,
+): string[] {
+  return results.filter((r) => !waveIds.has(r.moduleId)).map((r) => r.moduleId);
+}
+
+/**
+ * ModuleIds that appear more than once in the results array. A driver passing
+ * two results for one module is a handoff defect (two workers answering the
+ * same module, or a duplicated entry); the previous behavior silently
+ * last-wins via the Map — fail-closed instead.
+ */
+export function duplicateResultModuleIds(results: readonly { moduleId: string }[]): string[] {
+  const seen = new Set<string>();
+  const dupes = new Set<string>();
+  for (const r of results) {
+    if (seen.has(r.moduleId)) dupes.add(r.moduleId);
+    else seen.add(r.moduleId);
+  }
+  return [...dupes];
+}
+
+/**
+ * Owned paths for the wave, taken from the plan when one is given: the driver
+ * cannot redefine a module's owned paths after the user approved them.
+ * Falls back to the caller-declared paths only for modules absent from the
+ * plan (defensive; callers that pass a state_file already reject those).
+ */
+export function ownedPathsFromPlan(
+  modules: readonly { id: string; ownedPaths: string[] }[],
+  plan?: { modules: readonly { id: string; owned_paths: string[] }[] },
+): Map<string, string[]> {
+  const ownedBy = new Map(modules.map((m) => [m.id, m.ownedPaths]));
+  if (!plan) return ownedBy;
+  const byState = new Map(plan.modules.map((m) => [m.id, m.owned_paths]));
+  for (const m of modules) {
+    const owned = byState.get(m.id);
+    if (owned) ownedBy.set(m.id, owned);
+  }
+  return ownedBy;
 }

@@ -693,34 +693,31 @@ npx pi-review-gate-install-hooks
 `scripts/install-global.sh` was retired when the repo became a pi package;
 use `pi install` above instead.
 
-### Parallel execution: subagents for review, the engine for waves
+### Parallel execution: everything on subagents (no engine)
+
+**Everything runs on plain subagents — no workflow engine.**
 
 **Review runs on plain subagents.** Each reviewer needs its own disposable
-snapshot of the change, which needs a per-call `cwd` — and the workflow engine
-discards a per-agent `cwd` (its isolation option checks out HEAD, which does not
-contain the uncommitted change under review). So `prepare_review` shards the
-diff (`planReviewShards`), materializes one writable snapshot per reviewer, and
-the agent spawns them directly. See `docs/handoff-remove-pdw.md`.
+snapshot of the change, which needs a per-call `cwd` — and the retired
+`@quintinshaw/pi-dynamic-workflows` engine discarded a per-agent `cwd` (its
+isolation option checks out HEAD, which does not contain the uncommitted
+change under review). `prepare_review` shards the diff (`planReviewShards`),
+materializes one writable snapshot per reviewer, and the agent spawns them
+directly. REVIEW uses a **tiered trigger**: small diffs (<20 files AND <500
+lines) run the default two cross-family reviewers with no engine overhead;
+large diffs are sharded into ≤4 parallel reviewers, each in its own snapshot
+(see `docs/handoff-remove-pdw.md`).
 
-**The decompose module loop and wave daily** (ad-hoc parallel editing) run
-through the
-[pi-dynamic-workflows](https://github.com/QuintinShaw/pi-dynamic-workflows)
-engine — a HARD dependency that ships with this extension (a package
-`dependencies` entry; see `docs/parallel-execution-plan.md`
-§8): wave workers implement
-module groups concurrently (patch-first — workers are read-only and the main
-session applies their validated patches). REVIEW uses a **tiered trigger**:
-small diffs (<20 files AND <500 lines) run the default two cross-family
-reviewers with no engine
-overhead; large diffs are sharded into ≤4 parallel reviewers by
-`prepare_review` (reviews do NOT run on the engine — it discards a per-agent
-`cwd`, so a reviewer could not hold its own snapshot; see
-`docs/handoff-remove-pdw.md`). Wave
-workers are **not decompose-exclusive** — the agent may dispatch a wave for
-any task that can be split into 2–4 independent sub-tasks with disjoint file
-ownership. The agent asks you only when it proposes a decompose. If the
-engine is missing, the gate's parallel tools
-report a clear installation error — there is no serial fallback.
+**The decompose module loop and wave daily** (ad-hoc parallel editing) also
+run on plain subagents: `prepare_wave` reconciles the wave (fail-closed —
+`computeWave` + worklog existence) and hands back one ready-made task per
+module; the agent spawns ONE `worker-readonly` subagent per module IN THE SAME
+TURN (async, `WAVE_WORKER_SCHEMA` as outputSchema — its `tools:` allowlist has
+no edit/write/bash, so it cannot touch the worktree), then `apply_wave_patches`
+re-validates ownership, persists the patches and pre-checks `git apply`.
+Wave workers are **not decompose-exclusive** — the agent may dispatch a wave
+for any task that can be split into 2–4 independent sub-tasks with disjoint
+file ownership. The agent asks you only when it proposes a decompose.
 
 ### Upgrading: fingerprint algorithm migrations
 
@@ -779,8 +776,8 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
 
 **Tiered trigger — small diff fast, large diff parallel.** The review
 auto-decides by diff size before spawning: small diffs (<20 files AND
-<500 changed lines) run the default TWO cross-family reviewers with no pdw
-engine overhead (each attests `docSync` itself); large diffs (≥20 files OR
+<500 changed lines) run the default TWO cross-family reviewers with no engine
+overhead (each attests `docSync` itself); large diffs (≥20 files OR
 ≥500 changed lines)
 are sharded by `prepare_review` itself (`planReviewShards`: ≤4 disjoint groups
 covering every changed file, each with its own writable snapshot), spawned as
@@ -1131,7 +1128,7 @@ gated **per repo**:
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
 | `/gate-reset` | Reset gate state (mode returns to undecided — the agent re-decides via `set_gate_mode`; also clears the agent-downgrade lock) |
 | `/gate-lesson <text>` | Append a lesson to `.pi/review-gate-lessons.md` (self-improvement log) |
-| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — pdw engine (wave daily / decompose; review runs on plain subagents), agent model chains, opencode-go models-store prune, precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
+| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — agent model chains, opencode-go models-store prune, precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
 
 ### sd0x-dev-flow workflow commands
 
@@ -1578,8 +1575,8 @@ second line of defence.
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
 | `run_precommit --mode full` (this repo) | ~100 s | Dominated by the two timing loops in the suite; typecheck runs CONCURRENTLY with `npm test` — the timing loops themselves are not reducible |
-| **A review round (small diff)** | **~3 min reviewer, precommit first** | Two cross-family reviewers, no pdw engine — <20 files AND <500 lines; precommit runs BEFORE the review (see the loop protocol); see `docs/parallel-execution-plan.md` |
-| **A review round (large diff)** | **≤4 parallel shard reviewers, precommit first** | Sharded by `prepare_review` (`planReviewShards`), one writable snapshot each, spawned as plain subagents + one integration review; no pdw engine; see `docs/parallel-execution-plan.md` |
+| **A review round (small diff)** | **~3 min reviewer, precommit first** | Two cross-family reviewers, no engine — <20 files AND <500 lines; precommit runs BEFORE the review (see the loop protocol); see `docs/parallel-execution-plan.md` |
+| **A review round (large diff)** | **≤4 parallel shard reviewers, precommit first** | Sharded by `prepare_review` (`planReviewShards`), one writable snapshot each, spawned as plain subagents + one integration review; no engine; see `docs/parallel-execution-plan.md` |
 
 **Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
 ran six consecutive times on this repo (typecheck concurrent with `npm test`,
@@ -1640,7 +1637,7 @@ lib/review-snapshot.ts        one disposable git-worktree snapshot per reviewer 
 lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
 lib/verdict-guards.ts         the two READY guards as a pure truth table: snapshot drift + stale reviewed tree (tighten-only)
 lib/parallel-review.ts        review planning only: tiered threshold, shard planner, per-shard prompt, verdict parser, record merger (pure, no engine)
-docs/handoff-remove-pdw.md    step-2 handoff: retiring the pdw engine from wave + decompose
+docs/handoff-remove-pdw.md    step-2 record: the pdw engine was retired from wave + decompose (subagents everywhere)
 lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
 lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)

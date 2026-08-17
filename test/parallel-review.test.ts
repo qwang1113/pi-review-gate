@@ -220,13 +220,23 @@ test("REGRESSION: this module is PURE — no engine, no snapshots, no I/O", () =
 
 test("REGRESSION: wave workers stay strictly read-only (bash included)", () => {
   // Scope guard for the shard-review unban: patch-first waves depend on
-  // workers producing diffs, never touching the worktree. Deleting this
-  // denylist would silently turn every wave worker into a concurrent writer.
-  const src = readFileSync(join(ROOT, "lib", "plan-parallel.ts"), "utf8");
-  const at = src.indexOf("excludeTools");
-  assert.ok(at > 0, "wave workers must keep an engine-level denylist");
-  const body = src.slice(at, at + 300);
-  for (const tool of ["bash", "edit", "write"]) {
-    assert.match(body, new RegExp(`"${tool}"`), `wave workers must not get ${tool}`);
+  // workers producing diffs, never touching the worktree. The engine-level
+  // denylist is gone (docs/handoff-remove-pdw.md step 2), so the worker's
+  // read-only-ness must live in the static agent definition — pi-subagents
+  // has no per-call tool denylist.
+  const worker = readFileSync(join(ROOT, "agents", "worker-readonly.md"), "utf8");
+  const toolsLine = worker.split(/\r?\n/).find((l) => l.startsWith("tools:")) ?? "";
+  assert.match(toolsLine, /\bread\b/, "the worker must be able to read the worklog and code");
+  for (const forbidden of ["bash", "edit", "write"]) {
+    assert.doesNotMatch(toolsLine, new RegExp(`\\b${forbidden}\\b`, "i"),
+      `worker-readonly must not list ${forbidden}`);
   }
+  // The engine's old denylist must not linger in lib/plan-parallel.ts either.
+  const src = readFileSync(join(ROOT, "lib", "plan-parallel.ts"), "utf8");
+  const codeLines = src.split("\n").filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"));
+  assert.equal(
+    codeLines.some((l) => l.includes("excludeTools") || l.includes("pdw-bridge")),
+    false,
+    "engine coupling must not come back into the wave layer",
+  );
 });

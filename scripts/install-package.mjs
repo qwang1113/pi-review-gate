@@ -19,7 +19,7 @@
  * Idempotent and fail-soft: a broken HOME or non-git cwd is not an error —
  * the extension still loads, and the README explains how to install hooks
  * per repo (`npx pi-review-gate-install-hooks` or the shipped script). A
- * missing `pi` CLU or a registration failure logs guidance instead of aborting.
+ * missing `pi` CLI or a registration failure logs guidance instead of aborting.
  */
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
@@ -162,12 +162,11 @@ function registerCompanions() {
     }
   }
 }
-
 /**
  * USER REQUIREMENT — cost guard: the opencode-go provider bills per model
  * and ONLY deepseek-v4-flash is approved. Its models-store entry (a pi
  * provider cache) lists every billable model, so this prunes the cache to
- * flash alone on install. The code-level allowlist (lib/pdw-bridge.ts
+ * flash alone on install. The code-level allowlist (lib/model-allowlist.ts
  * isModelAllowed) is the real backstop — this pruning only stops the
  * registry from even offering the expensive ids. Idempotent: a cache that
  * is already flash-only (or absent) is left untouched. Fail-soft: any IO

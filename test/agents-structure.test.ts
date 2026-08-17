@@ -59,7 +59,7 @@ const MID_TIER_FALLBACK =
   /^fallbackModels: claude-opus-5,\s*opencode-go\/deepseek-v4-flash$/m;
 
 test("L2 execution roles (worker/planner/fixer) pin the exact mid-tier chain at max thinking", () => {
-  for (const f of ["worker.md", "planner.md", "fixer.md"]) {
+  for (const f of ["worker.md", "worker-readonly.md", "planner.md", "fixer.md"]) {
     const body = frontmatter(f);
     assert.match(body, MID_TIER_CHAIN, `${f}: L2 primary must be claude-sonnet-5`);
     assert.match(body, /^thinking: max$/m, `${f}: L2 executes at max thinking`);
@@ -338,6 +338,49 @@ test("the read-only reviewer variant CANNOT write, and says why it exists", () =
   assert.match(fm, /^thinking: max$/m);
 });
 
+test("the parallel wave worker variant exists and is read-only by construction", () => {
+  // With the pdw engine gone, a wave worker must be a static subagent whose
+  // tools: allowlist simply cannot write — pi-subagents has no per-call tool
+  // denylist, so the allowlist is the ONLY mechanical guard.
+  const file = "worker-readonly.md";
+  const fm = frontmatter(file);
+  const toolsLine = fm.split("\n").find((l) => l.startsWith("tools:"))!;
+  for (const allowed of ["read", "grep", "find", "ls"]) {
+    assert.match(toolsLine, new RegExp(`\\b${allowed}\\b`), `${file} must keep ${allowed}`);
+  }
+  for (const forbidden of ["edit", "write", "bash"]) {
+    assert.doesNotMatch(
+      toolsLine,
+      new RegExp(`\\b${forbidden}\\b`, "i"),
+      `${file}: a parallel wave worker must never ${forbidden} — patch-first collapses otherwise`,
+    );
+  }
+  const src = readFileSync(join(AGENTS, file), "utf8");
+  assert.match(src, /no edit\/write\/bash|no `edit`,/i, "the file must name the exact forbidden tools");
+  assert.match(src, /SERIAL single-writer|`worker` is the SERIAL/i, "the variant must distinguish itself from the serial worker");
+  assert.match(src, /patch-first/i, "the patch-first contract must be in the variant");
+  assert.match(src, /owned_paths/, "every diff must stay inside the module's owned paths");
+  assert.match(src, /Never.{0,60}git commit/, "shipping stays with the main session");
+  // Same execution tier as the writable worker — the parallel lane must not
+  // be weaker than the serial one.
+  assert.match(fm, /^model: claude-sonnet-5$/m);
+  assert.match(fm, /^thinking: max$/m);
+});
+
+test("AGENTS.md and SKILL.md make subagents the only execution path", () => {
+  for (const file of [AGENTS_MD, SKILL_MD]) {
+    const src = readFileSync(file, "utf8");
+    assert.match(
+      src,
+      /subagents? is\/are the only execution path|Everything runs on plain subagents|No engine is involved anywhere/i,
+      `${file} must declare that subagents are the only execution path`,
+    );
+  }
+  // …and must not resurrect the engine as a dependency.
+  const src = readFileSync(AGENTS_MD, "utf8");
+  assert.doesNotMatch(src, /HARD dependency.*engine|engine.*HARD dep(?:endency)?/i);
+});
+
 test("the step-2 handoff document exists with its required sections", () => {
   // A handoff that is prose nobody can accept is worthless; the sections are
   // the checkable part.
@@ -361,6 +404,8 @@ test("the step-2 handoff document exists with its required sections", () => {
   }
   // The one thing that must NOT be deleted with the bridge.
   assert.match(doc, /isModelAllowed` must survive|isModelAllowed\*\* must survive/);
+  // Step 2 is done: the handoff records completion and the sections survived.
+  assert.match(doc, /STATUS: COMPLETE/, "the handoff must record that step 2 shipped");
 });
 test("REGRESSION: the snapshot contract is stated everywhere a reviewer reads it", () => {
   // Unbanning reviewer writes is only safe because of two paired promises:

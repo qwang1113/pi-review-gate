@@ -7,7 +7,7 @@ import {
   parseAgentFrontmatter,
   type RegistryFacts,
 } from "../lib/model-diagnose.ts";
-import { isModelAllowed } from "../lib/pdw-bridge.ts";
+import { isModelAllowed } from "../lib/model-allowlist.ts";
 
 const REVIEWER_FRONTMATTER = `---
 name: reviewer

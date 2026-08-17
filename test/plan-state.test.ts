@@ -372,4 +372,15 @@ test("parallel ledger: absent on older runs, validated when present (schema stay
     const result = parsePlanState(raw);
     assert.equal(result.ok, false, `must reject ${JSON.stringify(bad).slice(0, 60)}`);
   }
+
+  // …but the historical "pdw" value still parses (pre-2026-08-17 runs) and
+  // the current "subagents" value round-trips.
+  const legacyPdw = { ...withParallel, parallel: { engine: "pdw" as const, waves: withParallel.parallel?.waves ?? [] } };
+  const parsedPdw = parsePlanState(serialize(legacyPdw));
+  assert.ok(parsedPdw.ok, parsedPdw.ok ? "" : parsedPdw.error);
+
+  const subagents = { ...withParallel, parallel: { engine: "subagents" as const, waves: withParallel.parallel?.waves ?? [] } };
+  const parsedSubagents = parsePlanState(serialize(subagents));
+  assert.ok(parsedSubagents.ok, parsedSubagents.ok ? "" : parsedSubagents.error);
+  assert.deepEqual(parsedSubagents.ok && parsedSubagents.state.parallel?.engine, "subagents");
 });

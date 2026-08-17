@@ -111,8 +111,9 @@ export interface PlanState {
   /**
    * Optional parallel-execution ledger (schema stays 1: absent on older runs,
    * so pre-parallel state files parse unchanged). Each wave records which
-   * modules ran together, how they ran (always via the pdw engine — it is a
-   * hard dependency), and
+   * modules ran together, how they ran (subagent spawns of
+   * `agents/worker-readonly.md`; older runs record the retired pdw engine),
+   * and
    * where their patch artifacts landed. Written by the driver (/plan-next),
    * read by /plan-status and reviewers.
    */
@@ -131,7 +132,8 @@ export interface PlanWaveRecord {
 }
 
 export interface PlanParallelState {
-  engine: "pdw";
+  /** Execution substrate: "subagents" now; "pdw" parses for history (pre-2026-08-17 runs). */
+  engine: "subagents" | "pdw";
   waves: PlanWaveRecord[];
 }
 
@@ -228,8 +230,8 @@ type ParallelParseResult = { ok: true; value: PlanParallelState | undefined } | 
 function parseParallelState(raw: unknown): ParallelParseResult {
   if (raw === undefined) return { ok: true, value: undefined };
   if (!isRecord(raw)) return { ok: false, error: "plan field \"parallel\" must be an object" };
-  if (raw.engine !== "pdw") {
-    return { ok: false, error: "plan field \"parallel.engine\" must be \"pdw\"" };
+  if (raw.engine !== "subagents" && raw.engine !== "pdw") {
+    return { ok: false, error: "plan field \"parallel.engine\" must be \"subagents\" (or the legacy \"pdw\")" };
   }
   if (!Array.isArray(raw.waves)) return { ok: false, error: "plan field \"parallel.waves\" must be an array" };
   const waves: PlanWaveRecord[] = [];

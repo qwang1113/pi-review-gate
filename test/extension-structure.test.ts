@@ -1731,6 +1731,34 @@ test("tiered trigger: prepare_review shards a large diff ITSELF (mechanical, not
   assert.doesNotMatch(SRC, /run_parallel_shard_review"/);
 });
 
+test("wave tools: prepare_wave + apply_wave_patches replace the engine tool", () => {
+  // Step 2 of docs/handoff-remove-pdw.md: the pdw engine tool is gone. The
+  // wave flow is prepare_wave (reconcile + ready-made tasks) → the main agent
+  // spawns worker-readonly subagents → apply_wave_patches (ownership +
+  // persistence + git apply --check).
+  const at = SRC.indexOf('name: "prepare_wave"');
+  assert.ok(at > 0, "prepare_wave must exist");
+  const body = SRC.slice(at, SRC.indexOf('name: "apply_wave_patches"'));
+  assert.match(body, /computeWave/, "prepare_wave must reconcile the wave against the plan");
+  assert.match(body, /WAVE_WORKER_SCHEMA/, "prepare_wave must hand out the worker output schema");
+  assert.match(body, /worker-readonly/, "the tasks must name the read-only worker agent");
+  assert.match(body, /IN THE SAME TURN/, "the spawn directive must be same-turn concurrent");
+  const applyAt = SRC.indexOf('name: "apply_wave_patches"');
+  assert.ok(applyAt > 0, "apply_wave_patches must exist");
+  const applyBody = SRC.slice(applyAt, applyAt + 8000);
+  assert.match(applyBody, /validatePatchOwnership/, "ownership is re-validated mechanically");
+  assert.match(applyBody, /writeWavePatches/, "patches are persisted under .pi/plan/patches/");
+  assert.match(applyBody, /checkPatchApplies/, "git apply is pre-checked");
+  assert.match(applyBody, /FAILED MODULES/, "a missing result is a failed module, never applied");
+  assert.match(applyBody, /unplannedModuleIds/, "unplanned-module rejection must be wired to apply_wave_patches");
+  assert.match(applyBody, /unknownResultModuleIds/, "unknown-result rejection must be wired to apply_wave_patches");
+  assert.match(applyBody, /duplicateResultModuleIds/, "duplicate-result rejection must be wired to apply_wave_patches");
+  assert.match(applyBody, /ownedPathsFromPlan/, "ownership must come from the plan through the pure helper");
+  // The engine tool must not come back.
+  assert.equal(SRC.includes("run_wave_workflow"), false, "the pdw wave tool is gone");
+  assert.equal(SRC.includes("runWaveWorkflow"), false, "the engine wrapper is gone from the extension");
+});
+
 test("STALE TREE: a READY cannot bind to a tree the reviewer never saw", () => {
   // The fail-open this feature would otherwise CREATE: the agent is told to
   // fix while the review runs, so at record time the worktree can differ from

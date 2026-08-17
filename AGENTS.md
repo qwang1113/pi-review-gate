@@ -11,13 +11,13 @@ default, make it safe by default rather than adding a switch.
 
 ### Parallel loop (the only execution path, agent-initiated)
 
-**Review runs on subagents; the decompose module loop and wave daily run on the
-engine.** That split is not a preference — it is what the two layers can
-actually do:
+**Everything runs on plain subagents** — review, the decompose module loop
+and wave daily. That is not a preference: the two layers need a per-call
+`cwd` and per-spawn structured output, and pi-subagents provides both:
 
 - **Review → plain subagents** (`prepare_review` + `pi-subagents`). Each
   reviewer needs its OWN disposable snapshot of the change under review, which
-  needs a per-call `cwd`. The `@quintinshaw/pi-dynamic-workflows` engine
+  needs a per-call `cwd`. The retired `@quintinshaw/pi-dynamic-workflows` engine
   **discards** a per-agent `cwd` (its `runCwd` comes only from its own
   `isolation: "worktree"`, a checkout of HEAD without the uncommitted change),
   so reviewers on the engine had to share the live worktree — colliding with
@@ -25,20 +25,26 @@ actually do:
   therefore shards through the pure `planReviewShards` inside `prepare_review`
   and the agent spawns one subagent per shard, each with its own writable
   snapshot. Details: `docs/handoff-remove-pdw.md`.
-- **Decompose module loop + wave daily → the pdw engine**, still a HARD
-  dependency that ships with this extension (installed via the package's
-  `postinstall` — `scripts/install-package.mjs`, which also copies `agents/*.md`
-  to `~/.pi/agent/agents/`, registers the companion pi packages (`pi-subagents`,
+- **Decompose module loop + wave daily → plain subagents of the static
+  READ-ONLY agent `agents/worker-readonly.md`.** The pdw engine is retired
+  (step 2 of `docs/handoff-remove-pdw.md`): it discarded a per-agent `cwd`, and
+  its `excludeTools` denylist is not a pi-subagents capability, so the worker's
+  read-only-ness lives in its `tools:` allowlist (read/grep/find/ls — no
+  edit/write/bash). `prepare_wave` reconciles the wave fail-closed (`computeWave`
+  + worklog existence) and hands back one ready-made task per module; the agent
+  spawns one `worker-readonly` per module IN THE SAME TURN (async) with
+  `WAVE_WORKER_SCHEMA` as each spawn's outputSchema. Then `apply_wave_patches`
+  re-validates ownership (declared path ∪ diff headers ⊆ owned_paths), persists
+  the patches under `.pi/plan/patches/<module>/` and pre-checks `git apply`;
+  the agent applies them — the worktree still has exactly one writer.
+  `scripts/install-package.mjs` (the postinstall) still copies `agents/*.md` to
+  `~/.pi/agent/agents/`, registers the companion pi packages (`pi-subagents`,
   `pi-opencode-bridge` for the opencode-go provider) via `pi install` when
-  missing, and installs the git hooks when the current dir is a repo).
-  `/plan-next` dispatches patch-first wave workers (`run_wave_workflow`); a
-  missing engine there is an installation error, never a slow lane. Retiring it
-  from these two paths as well is planned in `docs/handoff-remove-pdw.md`.
+  missing, and installs the git hooks when the current dir is a repo.
 
 The agent decides when a task is large enough to propose `/decompose` (evidence
 + estimate → user consent → module-table approval) — there is no serial
-protocol. Design record: `docs/parallel-execution-plan.md` §8; engine contract:
-`lib/pdw-bridge.ts`.
+protocol. Design record: `docs/parallel-execution-plan.md` §8.
 
 ### Model tiers — capability × cost × cross-family diversity
 
@@ -105,7 +111,7 @@ READY from a reviewer that left edits behind (BLOCKED still stands). Because
 the reviewer holds a copy, **you keep fixing the real worktree while it runs**:
 take streamed P0/P1/P2 that carry evidence (confirm each in the code first),
 leave Nits for the verdict. The main worktree still has exactly one writer —
-you; `run_wave_workflow` workers stay strictly read-only.
+you; wave workers (`worker-readonly`) stay strictly read-only.
 When `prepare_review` reports isolation UNAVAILABLE, dispatch
 `agents/reviewer-readonly.md` instead of `reviewer` (its `tools:` allowlist
 cannot write, which is the only mechanical guard available — pi-subagents has no
@@ -119,11 +125,14 @@ ownership. The patch-first protocol is the same:
 
 1. **Define modules ad-hoc** — each with an id, title, `owned_paths` (disjoint),
    and a task description. No formal plan state needed.
-2. **Dispatch the wave** — call `run_wave_workflow` with the module list.
-   Workers run in parallel (read-only, edit/write excluded), each producing
-   unified git diffs.
-3. **Validate and apply** — `validatePatchOwnership` + `git apply --check`,
-   then `git apply`. Failed patches are sent back for one retry.
+2. **Dispatch the wave** — call `prepare_wave` with the module list; then
+   spawn ONE `worker-readonly` subagent per module IN THE SAME TURN (async),
+   each with its ready-made task and `WAVE_WORKER_SCHEMA` as outputSchema.
+   Workers run in parallel (strictly read-only — their `tools:` allowlist has
+   no edit/write/bash), each producing unified git diffs.
+3. **Validate and apply** — `apply_wave_patches` re-checks ownership
+   (`validatePatchOwnership` + `git apply --check`), then you `git apply`.
+   Failed patches are sent back for one retry.
 4. **The worktree still has exactly one writer: the main agent.**
 
 Read-only exploration (recon, code reading, `adviser`) is inherently
@@ -131,7 +140,7 @@ parallel-safe: spawn multiple read-only subagents concurrently, and overlap
 exploration with editing. Only the main agent writes to the worktree.
 
 Both loops are AGENT-DRIVEN: you start the review loop yourself once edits
-are complete (sharded by `prepare_review`, not by the engine) and you propose `/decompose`
+are complete (sharded by `prepare_review`) and you propose `/decompose`
 yourself when a task outgrows one session — the slash commands are only
 optional explicit triggers, never the expected entry. The user approves at
 two points only: decompose initiation and the module table.

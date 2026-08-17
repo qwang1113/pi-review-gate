@@ -57,13 +57,14 @@ test("package.json is a publishable pi package (manifest, peers, postinstall)", 
   for (const dir of [...(pi.extensions ?? []), ...(pi.skills ?? [])]) {
     assert.ok(existsSync(join(ROOT, dir)), `pi manifest path missing: ${dir}`);
   }
-  // pi ecosystem peers must not be bundled; pdw stays a runtime dependency.
+  // pi ecosystem peers must not be bundled; the pdw engine is retired (step 2
+  // of docs/handoff-remove-pdw.md) and must NOT be a dependency any more.
   const peers = (pkg.peerDependencies ?? {}) as Record<string, string>;
   for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"]) {
     assert.equal(peers[name], "*", `${name} must be a "*" peerDependency`);
   }
   const deps = (pkg.dependencies ?? {}) as Record<string, string>;
-  assert.ok(deps["@quintinshaw/pi-dynamic-workflows"], "pdw must stay a runtime dependency");
+  assert.equal(deps["@quintinshaw/pi-dynamic-workflows"], undefined, "the pdw engine was retired (docs/handoff-remove-pdw.md step 2)");
   // Companion pi packages (the working platform): pinned as runtime deps so a
   // fresh `pi install pi-review-gate` resolves them and the postinstall
   // registers them via `pi install` — must match scripts/install-package.mjs

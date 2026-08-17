@@ -6,8 +6,9 @@
  *
  * Nothing here decides a gate verdict — it is diagnostics only. The
  * provider allowlist (opencode-go → deepseek-v4-flash only, USER
- * REQUIREMENT) is applied the same way `resolveBestModel` applies it, so
- * the diagnosis never names a model the resolver would refuse.
+ * REQUIREMENT, `lib/model-allowlist.ts`) is applied the same way the
+ * resolver applies it, so the diagnosis never names a model the resolver
+ * would refuse.
  */
 export interface ModelChainEntry {
   /** Agent role — the agents/*.md basename (reviewer, adviser, ...). */
@@ -28,7 +29,7 @@ export interface RegistryFacts {
   /** Providers with configured credentials (auth.json keys). */
   authedProviders: ReadonlySet<string>;
   /**
-   * Provider allowlist predicate (lib/pdw-bridge.ts isModelAllowed): a
+   * Provider allowlist predicate (lib/model-allowlist.ts isModelAllowed): a
    * model the resolver would refuse must not show as usable here.
    */
   allowed: (model: { provider: string; id: string }) => boolean;
