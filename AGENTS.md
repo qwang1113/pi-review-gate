@@ -36,25 +36,32 @@ frontmatter in `agents/*.md` is the single source of truth and
 
 - **Strong tier — judging** (`reviewer`, `adviser`, `module-reviewer`,
   `arbiter`): `claude-fable-5` primary, fallback chain `claude-opus-5 →
-  onekey/gpt-5.6-sol → onekey/glm-5.3 → onekey/grok-4.6` (≥2 families —
-  cross-family fallback so the judge never shares the main agent's blind
-  spots), `thinking: max`.
+  opencode-go/deepseek-v4-flash`, `thinking: max`.
 - **Mid tier — coding & orchestration** (`worker`, `planner`, `fixer`):
-  `claude-sonnet-5` primary, fallback `deepseek-v4-pro → deepseek-v4-flash →
-  onekey/grok-4.6 → onekey/glm-5.3 → claude-opus-5`, `thinking: max`.
-  `deepseek-v4-flash` at `max` thinking is strong enough for execution; grok /
-  opus / glm are equally valid execution fallbacks.
+  `claude-sonnet-5` primary, fallback `claude-opus-5 →
+  opencode-go/deepseek-v4-flash`, `thinking: max`.
 - **Cheap tier — reading & scanning** (`triage`, `recon`): `claude-haiku-4-5`
-  primary, fallback `deepseek-v4-flash`, `thinking: low`/off. `recon` is the
+  primary, fallback `opencode-go/deepseek-v4-flash`, `thinking: low`/off. `recon` is the
   strictly read-only recon agent (tools: read/grep/find/ls) — delegate heavy
   reading, code search and doc exploration to it so expensive models never pay
   token cost for scanning.
+
+> **Why the chains are short.** pi-subagents requires every fallback in the
+> chain to RESOLVE in the active model registry — one unresolvable pin
+> (a provider that is not configured) fails the whole agent launch. The
+> chains therefore pin only providers the package can rely on (anthropic /
+> opencode-go) plus the flash fallback; a user who configures onekey /
+> deepseek / oc-sdk-go can extend the chains in `~/.pi/agent/agents/*.md`
+> (the postinstall copies them from this repo — edits there are
+> overwrite-owned on the next install).
 
 **Cross-review protocol (user policy):** (a) BEFORE calling
 `propose_loop_goal`, run the draft goal through ONE cross-family reviewer;
 fix BLOCKED objections before submitting. (b) The review that ends a round
 runs **two reviewers from different model families by default** —
-`claude-fable-5` (anthropic) + `onekey/gpt-5.6-sol` (openai), both `max`
+`claude-fable-5` (anthropic) + the best available different-family model
+(e.g. `onekey/gpt-5.6-sol` once onekey is configured; without it, a single
+reviewer is the accepted fallback and is declared in a Note), both `max`
 thinking, falling down the pinned chains if unavailable — record BOTH
 outputs via `record_review` (worst wins; fail-closed semantics
 unchanged). A single reviewer is acceptable only when no different-family

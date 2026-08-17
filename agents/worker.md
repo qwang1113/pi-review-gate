@@ -2,7 +2,7 @@
 name: worker
 description: Implements exactly one module of a decomposed requirement inside its owned paths, then self-checks every must_have against reality
 model: claude-sonnet-5
-fallbackModels: deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash, oc-sdk-go/deepseek-v4-flash, onekey/deepseek-v4-flash, onekey/grok-4.6, onekey/glm-5.3, claude-opus-5
+fallbackModels: claude-opus-5, opencode-go/deepseek-v4-flash
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true

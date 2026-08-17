@@ -19,20 +19,25 @@ thinking, with a fallback priority list (first available wins):
   you should **proactively consult** it whenever a decision is non-trivial,
   ambiguous, risky, or you feel stuck. It does not gate; it advises on
   direction. Consulting early is cheaper than a failed review later.
-  Model priority: Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6.
+  Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
+  chains in agents/*.md).
 - **`reviewer`** (`agents/reviewer.md`, gatekeeper, *after* a diff exists) —
   independent audit that emits the JSON verdict the gate records.
-  Model priority: Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6.
+  Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
+  chains in agents/*.md).
 
 Thinking is a single value (`max`, the highest valid pi level); it is not a
 fallback list. If a model doesn't support `max`, pi clamps it down.
 
 **Default two-reviewer final pass (cross-family).** The review that ends a
 round runs **two reviewers by default**, from **different model families**:
-`claude-fable-5` (anthropic) as reviewer A and `onekey/gpt-5.6-sol` (openai)
-as reviewer B, both at `max` thinking — so the two audits do not share the
-main agent's blind spots. If a model is unavailable, fall down the pinned
-chains (see the tables above), keeping the two families distinct. Record BOTH
+`claude-fable-5` (anthropic) as reviewer A and the best available
+different-family model as reviewer B (e.g. `onekey/gpt-5.6-sol` once onekey
+is configured; without a second family, a single reviewer is the accepted
+fallback — declared in a Note), both at `max` thinking — so the two audits
+do not share the main agent's blind spots. If a model is unavailable, fall
+down the pinned chains (see the tables above), keeping the two families
+distinct. Record BOTH
 full
 outputs via `record_review` (worst verdict wins; the gate's fail-closed
 semantics are unchanged). Pick the second reviewer with `rankJudges` from
@@ -235,8 +240,7 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
    **Triage first (L1, large diffs)**: for anything but a tiny diff, spawn
    the `triage` agent (async, cheap: `claude-haiku-4-5` →
-   `deepseek/deepseek-v4-flash` → `oc-sdk-go/deepseek-v4-flash` →
-   `onekey/deepseek-v4-flash`) over the same diff and hand its findings to the
+   `opencode-go/deepseek-v4-flash`) over the same diff and hand its findings to the
    reviewer as input. Triage output carries NO verdict — never feed it to
    `record_review`; the reviewer owns the verdict.
 
@@ -318,19 +322,16 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
 
 - **L1 cheap/fast** (`triage`, `recon`, `claude-haiku-4-5` →
-  `deepseek/deepseek-v4-flash` → `oc-sdk-go/deepseek-v4-flash` →
-  `onekey/deepseek-v4-flash`, **thinking `low`/off**) — mechanical pre-scan, code/doc
+  `opencode-go/deepseek-v4-flash`, **thinking `low`/off**) — mechanical pre-scan, code/doc
   search, heavy reading. Advisory only; carries no verdict. The main agent
   delegates heavy reading to `recon` so expensive models never pay token cost
   for scanning.
 - **L2 execution** (`worker` / `planner` / `fixer`, `claude-sonnet-5` →
-  `deepseek/deepseek-v4-pro` → `deepseek/deepseek-v4-flash` →
-  `oc-sdk-go/deepseek-v4-flash` → `onekey/deepseek-v4-flash` → `grok-4.6` →
-  `glm-5.3` →
-  `claude-opus-5`, **thinking `max`**) — implements findings / modules into a
+  `claude-opus-5` → `opencode-go/deepseek-v4-flash`, **thinking `max`**) — implements findings / modules into a
   diff; you review and merge it (single writer stays with you).
-  `deepseek-v4-flash` at `max` thinking is strong enough for execution; grok /
-  opus / glm are equally valid execution fallbacks.
+  (Chains are short because pi-subagents requires every fallback to resolve;
+  a user who configures deepseek / oc-sdk-go / onekey can extend them in
+  `~/.pi/agent/agents/*.md`.)
 - **L3 judgment** (reviewer / adviser / module-reviewer / arbiter, `max`
   thinking) — the only tier whose verdicts may be recorded. Never delegate
   the verdict to a cheaper model.

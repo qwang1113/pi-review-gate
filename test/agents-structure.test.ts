@@ -36,7 +36,7 @@ test("L3 judges (reviewer/adviser/arbiter/module-reviewer) think at max — the 
 test("L1 triage is read-only, cheap-tier, low-thinking, and defined without verdict power", () => {
   const body = frontmatter("triage.md");
   assert.match(body, /^model: claude-haiku-4-5$/m, "L1 primary must be the cheap model");
-  assert.match(body, /^fallbackModels: deepseek\/deepseek-v4-flash,\s*oc-sdk-go\/deepseek-v4-flash,\s*onekey\/deepseek-v4-flash$/m, "L1 fallback follows user priority: self deepseek > opencode go > onekey");
+  assert.match(body, /^fallbackModels: opencode-go\/deepseek-v4-flash$/m, "L1 fallback is the one approved cheap fallback (opencode-go only runs flash)");
   assert.match(body, /^thinking: low$/m, "L1 must run at low/off thinking, never max");
   assert.doesNotMatch(body, /tools:.*\b(edit|write)\b/, "triage must be read-only");
 });
@@ -56,7 +56,7 @@ test("L2 fixer is the execution tier: write-capable, mid-tier, max thinking, nev
 const MID_TIER_CHAIN =
   /^model: claude-sonnet-5$/m;
 const MID_TIER_FALLBACK =
-  /^fallbackModels: deepseek\/deepseek-v4-pro,\s*deepseek\/deepseek-v4-flash,\s*oc-sdk-go\/deepseek-v4-flash,\s*onekey\/deepseek-v4-flash,\s*onekey\/grok-4\.6,\s*onekey\/glm-5\.3,\s*claude-opus-5$/m;
+  /^fallbackModels: claude-opus-5,\s*opencode-go\/deepseek-v4-flash$/m;
 
 test("L2 execution roles (worker/planner/fixer) pin the exact mid-tier chain at max thinking", () => {
   for (const f of ["worker.md", "planner.md", "fixer.md"]) {
@@ -73,7 +73,7 @@ test("L2 execution roles (worker/planner/fixer) pin the exact mid-tier chain at 
 
 test("L3 judge roles pin the exact strong-tier chain (model + fallbacks + max thinking)", () => {
   const STRONG_FALLBACK =
-    /^fallbackModels: claude-opus-5,\s*onekey\/gpt-5\.6-sol,\s*onekey\/glm-5\.3,\s*onekey\/grok-4\.6$/m;
+    /^fallbackModels: claude-opus-5,\s*opencode-go\/deepseek-v4-flash$/m;
   for (const f of ["reviewer.md", "adviser.md", "module-reviewer.md", "arbiter.md"]) {
     const body = frontmatter(f);
     assert.match(body, /^model: claude-fable-5$/m, `${f}: L3 primary must be claude-fable-5`);
@@ -137,7 +137,7 @@ test("recon is the cheap read-only tier: cheap model, low/off thinking, no write
   assert.ok(existsSync(join(AGENTS, "recon.md")), "agents/recon.md must exist");
   const body = frontmatter("recon.md");
   assert.match(body, /^model: claude-haiku-4-5$/m, "recon primary must be the cheap model");
-  assert.match(body, /^fallbackModels: deepseek\/deepseek-v4-flash,\s*oc-sdk-go\/deepseek-v4-flash,\s*onekey\/deepseek-v4-flash$/m, "recon fallback follows user priority: self deepseek > opencode go > onekey");
+  assert.match(body, /^fallbackModels: opencode-go\/deepseek-v4-flash$/m, "recon fallback is the one approved cheap fallback (opencode-go only runs flash)");
   const thinking = body.match(/^thinking: (\S+)/m)?.[1];
   assert.ok(thinking && ["off", "low"].includes(thinking), `recon thinking '${thinking}' must be off or low`);
   assert.doesNotMatch(body, /tools:.*\b(edit|write|bash)\b/, "recon must be strictly read-only (no edit/write/bash)");

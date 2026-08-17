@@ -21,7 +21,7 @@
  * per repo (`npx pi-review-gate-install-hooks` or the shipped script). A
  * missing `pi` CLU or a registration failure logs guidance instead of aborting.
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,10 +154,62 @@ function registerCompanions() {
   }
 }
 
+/**
+ * USER REQUIREMENT — cost guard: the opencode-go provider bills per model
+ * and ONLY deepseek-v4-flash is approved. Its models-store entry (a pi
+ * provider cache) lists every billable model, so this prunes the cache to
+ * flash alone on install. The code-level allowlist (lib/pdw-bridge.ts
+ * isModelAllowed) is the real backstop — this pruning only stops the
+ * registry from even offering the expensive ids. Idempotent: a cache that
+ * is already flash-only (or absent) is left untouched. Fail-soft: any IO
+ * error logs guidance and never fails the install.
+ */
+function pruneOpenCodeGoModels() {
+  const storePath = join(AGENT_DIR, "models-store.json");
+  let raw;
+  try {
+    if (!existsSync(storePath)) return;
+    raw = readFileSync(storePath, "utf8");
+  } catch (e) {
+    log(`  ✗ could not read ${storePath}: ${e.message} — leaving it untouched`);
+    return;
+  }
+  let store;
+  try {
+    store = JSON.parse(raw);
+  } catch (e) {
+    log(`  ✗ ${storePath} is not valid JSON — leaving it untouched`);
+    return;
+  }
+  if (typeof store !== "object" || store === null || Array.isArray(store)) return;
+  const og = store["opencode-go"];
+  if (!og || typeof og !== "object" || !Array.isArray(og.models)) return;
+  const before = og.models.length;
+  og.models = og.models.filter((m) => m && typeof m === "object" && m.id === "deepseek-v4-flash");
+  if (og.models.length === before) return; // already flash-only
+  try {
+    // Keep one backup so a mistaken prune is reversible (never clobber an
+    // existing one — the first prune's backup is the interesting one).
+    if (!existsSync(`${storePath}.bak`)) copyFileSync(storePath, `${storePath}.bak`);
+    const tmp = `${storePath}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(store, null, 1));
+    renameSync(tmp, storePath);
+    log(`pruned opencode-go models-store to deepseek-v4-flash only (${before} → ${og.models.length}; backup at ${storePath}.bak)`);
+  } catch (e) {
+    log(`  ✗ could not write pruned ${storePath}: ${e.message} — the code-level allowlist still guards model choice`);
+  }
+}
+
 try {
   installAgents();
 } catch (e) {
   log(`  ✗ agent install failed: ${e.message}`);
+}
+
+try {
+  pruneOpenCodeGoModels();
+} catch (e) {
+  log(`  ✗ models-store prune failed: ${e.message}`);
 }
 try {
   registerCompanions();

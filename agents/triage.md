@@ -2,7 +2,7 @@
 name: triage
 description: Cheap fast pre-scan of a diff for obvious problems — advisory input for the reviewer, never a verdict. Use for a large diff or before the full review round.
 model: claude-haiku-4-5
-fallbackModels: deepseek/deepseek-v4-flash, oc-sdk-go/deepseek-v4-flash, onekey/deepseek-v4-flash
+fallbackModels: opencode-go/deepseek-v4-flash
 thinking: low
 systemPromptMode: replace
 inheritProjectContext: true

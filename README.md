@@ -249,9 +249,9 @@ definitions** — decided up front, not re-selected per task:
 
 | Role | When | Gates? | Model priority (first = preferred) | Thinking |
 |------|------|--------|-------------------------------------|----------|
-| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6 | `max` |
-| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6 | `max` |
-| **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6 | `max` |
+| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → Opus 5 → opencode-go/flash | `max` |
+| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | Fable 5 → Opus 5 → opencode-go/flash | `max` |
+| **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | Fable 5 → Opus 5 → opencode-go/flash | `max` |
 
 `thinking` is a single value, not a fallback list; `max` is the highest valid
 pi level (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — pi clamps
@@ -267,12 +267,15 @@ and numbers in `docs/parallel-execution-plan.md`:
 
 | Tier | Models (first = preferred) | Role | Verdict power |
 |---|---|---|---|
-| **L1 cheap/fast** | `claude-haiku-4-5` → `deepseek-v4-flash` | `agents/triage.md` — diff pre-scan, mechanical checklist; `agents/recon.md` — strictly read-only code/doc search and heavy reading. Thinking `low`/off. | none — advisory input for the reviewer |
-| **L2 execution** | `claude-sonnet-5` → `deepseek-v4-pro` → `deepseek-v4-flash` → `grok-4.6` → `glm-5.3` → `claude-opus-5` | `agents/worker.md`, `agents/planner.md`, `agents/fixer.md` — implements modules/findings into a diff the main agent merges. Thinking `max`. | none — output reviewed by the main agent |
+| **L1 cheap/fast** | `claude-haiku-4-5` → `opencode-go/deepseek-v4-flash` | `agents/triage.md` — diff pre-scan, mechanical checklist; `agents/recon.md` — strictly read-only code/doc search and heavy reading. Thinking `low`/off. | none — advisory input for the reviewer |
+| **L2 execution** | `claude-sonnet-5` → `claude-opus-5` → `opencode-go/deepseek-v4-flash` | `agents/worker.md`, `agents/planner.md`, `agents/fixer.md` — implements modules/findings into a diff the main agent merges. Thinking `max`. | none — output reviewed by the main agent |
 
-Model IDs resolve against the configured providers (`~/.pi/agent/models.json`,
-onekey gateway; `oc-sdk-go` comes from the `pi-opencode-bridge` package;
-`deepseek/…` is the user's own DeepSeek subscription). Protocol rules (in the
+The chains are deliberately short: pi-subagents requires every fallback to
+resolve in the active registry, so the pinned chains name only providers the
+package can rely on (anthropic / opencode-go) plus the flash fallback. A user
+who configures a onekey gateway / oc-sdk-go (`pi-opencode-bridge`) / a
+DeepSeek subscription can extend the chains in
+`~/.pi/agent/agents/*.md`. Protocol rules (in the
 `review-loop`
 skill, all default-on): triage findings feed the reviewer but never
 `record_review`; a low-risk change (docs / formatting / one-line) may be

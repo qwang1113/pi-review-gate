@@ -169,10 +169,10 @@ test("adviser is pinned to the user's priority list at max thinking, and stays a
   const adviser = readFileSync(join(ROOT, "agents", "adviser.md"), "utf8");
   assert.match(adviser, /name:\s*adviser/);
   assert.match(adviser, JUDGE_THINKING);
-  // Priority: fable-5 > opus-5 > gpt-5.6-sol > glm-5.3 > grok-4.6 — the
-  // cross-family chain (anthropic → openai → zhipu → xai) the user chose.
+  // Priority: fable-5 > opus-5 > opencode-go/flash — the resolvable chain
+  // (pi-subagents requires every fallback to resolve; see AGENTS.md).
   assert.match(adviser, /model:\s*claude-fable-5/);
-  assert.match(adviser, /fallbackModels:\s*claude-opus-5,\s*onekey\/gpt-5\.6-sol,\s*onekey\/glm-5\.3,\s*onekey\/grok-4\.6/);
+  assert.match(adviser, /fallbackModels:\s*claude-opus-5,\s*opencode-go\/deepseek-v4-flash/);
   // Consultant, not a gatekeeper: no record_review tool, no gate verdicts.
   assert.doesNotMatch(adviser, /tools:.*record_review/);
   assert.match(adviser, /not an executor and not a gatekeeper/i);
@@ -182,10 +182,10 @@ test("reviewer override is pinned to the user's priority list at max thinking an
   const reviewer = readFileSync(join(ROOT, "agents", "reviewer.md"), "utf8");
   assert.match(reviewer, /name:\s*reviewer/);
   assert.match(reviewer, JUDGE_THINKING);
-  // Priority: fable-5 > opus-5 > gpt-5.6-sol > glm-5.3 > grok-4.6 (same chain
-  // as the adviser — keep both agents in step when this list moves).
+  // Priority: fable-5 > opus-5 > opencode-go/flash (same chain as the
+  // adviser — keep both agents in step when this list moves).
   assert.match(reviewer, /model:\s*claude-fable-5/);
-  assert.match(reviewer, /fallbackModels:\s*claude-opus-5,\s*onekey\/gpt-5\.6-sol,\s*onekey\/glm-5\.3,\s*onekey\/grok-4\.6/);
+  assert.match(reviewer, /fallbackModels:\s*claude-opus-5,\s*opencode-go\/deepseek-v4-flash/);
   // Reviewer IS the gatekeeper: it must instruct ending with a JSON gate verdict.
   assert.match(reviewer, /"gate":\s*"READY"/);
 });
