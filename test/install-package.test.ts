@@ -317,3 +317,43 @@ test("postinstall registers ALL companions when settings.json has none", () => {
   assert.ok(specs.length >= 8, `expected ≥8 companions, got ${specs.length}`);
   assert.deepEqual(installs, specs.map((s) => `install ${s}`));
 });
+
+test("postinstall prunes the opencode-go models-store to deepseek-v4-flash only (USER REQUIREMENT)", () => {
+  const home = makeHome();
+  const agentDir = join(home, ".pi", "agent");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, "models-store.json"), JSON.stringify({
+    "opencode-go": {
+      models: [
+        { id: "deepseek-v4-flash" }, { id: "deepseek-v4-pro" },
+        { id: "qwen3.8-max" }, { id: "gpt-5.6-luna" },
+      ],
+    },
+    "onekey": { models: [{ id: "gpt-5.6-sol" }] }, // other providers untouched
+  }));
+  const res = runInstaller(home);
+  assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
+  assert.match(res.stdout, /pruned opencode-go models-store/);
+  const store = JSON.parse(readFileSync(join(agentDir, "models-store.json"), "utf8")) as {
+    "opencode-go": { models: Array<{ id: string }> };
+    onekey: { models: Array<{ id: string }> };
+  };
+  assert.deepEqual(store["opencode-go"].models.map((m) => m.id), ["deepseek-v4-flash"]);
+  assert.deepEqual(store.onekey.models.map((m) => m.id), ["gpt-5.6-sol"], "other providers must be untouched");
+  // Backup exists and a second run is a no-op (idempotent).
+  assert.ok(existsSync(join(agentDir, "models-store.json.bak")));
+  const again = runInstaller(home);
+  assert.equal(again.status, 0);
+  assert.doesNotMatch(again.stdout, /pruned opencode-go models-store/, "already flash-only → no prune");
+});
+
+test("postinstall prune is fail-soft: corrupt models-store is left untouched", () => {
+  const home = makeHome();
+  const agentDir = join(home, ".pi", "agent");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, "models-store.json"), "{ not json");
+  const res = runInstaller(home);
+  assert.equal(res.status, 0, "a corrupt store must not fail the install");
+  assert.match(res.stdout, /not valid JSON/);
+  assert.equal(readFileSync(join(agentDir, "models-store.json"), "utf8"), "{ not json");
+});

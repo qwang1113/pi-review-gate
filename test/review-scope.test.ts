@@ -149,3 +149,73 @@ test("a full directive says so plainly and never claims anything is pre-approved
   assert.doesNotMatch(text, /Already reviewed/);
   assert.doesNotMatch(text, /re-checked one by one/);
 });
+
+test("an incremental directive carries the SETTLED conclusion of the previous round", () => {
+  // The point of an incremental round: what the last verdict settled and the
+  // increment did not touch is not re-argued at max thinking every round.
+  const d = decideReviewScope({
+    baseTree: "T",
+    changedFiles: ["src/a.ts"],
+    changedLines: 3,
+    previouslyReviewedFiles: reviewed,
+  });
+  const text = formatReviewScopeDirective(d, ["f1"], {
+    verdict: "READY",
+    at: "2026-08-17T01:00:00.000Z",
+    rounds: 2,
+  });
+  assert.match(text, /SETTLED last round/);
+  assert.match(text, /verdict READY/);
+  // A running count, worded as such: it is NOT a claim about which round
+  // produced the READY verdict (later rounds are included in the count).
+  assert.match(text, /2 round\(s\) recorded so far/);
+  assert.match(text, /2026-08-17T01:00:00\.000Z/);
+  assert.match(text, new RegExp(reviewed[0]!.replace(/[/.]/g, "\\$&")), "it must name what was covered");
+  assert.match(text, /Do not re-derive or re-litigate it/);
+  // …but the reviewer's authority is untouched: it may always reopen it.
+  assert.match(text, /reopen it/);
+  assert.match(text, /not a bar on your authority/);
+});
+
+test("no settled conclusion is claimed when none was passed, or on a FULL round", () => {
+  const incremental = formatReviewScopeDirective(
+    decideReviewScope({
+      baseTree: "T",
+      changedFiles: ["src/a.ts"],
+      changedLines: 3,
+      previouslyReviewedFiles: reviewed,
+    }),
+    [],
+  );
+  assert.doesNotMatch(incremental, /SETTLED/, "without a previous verdict nothing is settled");
+
+  // A full round re-derives everything by definition: a settled claim there
+  // would be exactly the false reassurance the escalation exists to prevent.
+  const full = formatReviewScopeDirective(decideReviewScope({}), [], {
+    verdict: "READY",
+    rounds: 9,
+  });
+  assert.match(full, /FULL deep review/);
+  assert.doesNotMatch(full, /SETTLED/);
+});
+
+test("reviewedFiles is echoed on every decision (the settled scope must be nameable)", () => {
+  const inc = decideReviewScope({
+    baseTree: "T",
+    changedFiles: ["src/a.ts"],
+    changedLines: 3,
+    previouslyReviewedFiles: reviewed,
+  });
+  assert.deepEqual(inc.reviewedFiles, reviewed);
+  assert.deepEqual(decideReviewScope({}).reviewedFiles, []);
+});
+
+test("a FULL round still lists the previous findings to re-check one by one", () => {
+  // The findings block is independent of the scope branch — escalating to a
+  // full review must not drop last round's open findings on the floor.
+  const text = formatReviewScopeDirective(decideReviewScope({}), ["f1", "f2"]);
+  assert.match(text, /FULL deep review/);
+  assert.match(text, /re-checked one by one/);
+  assert.match(text, /"f1"; "f2"/);
+  assert.doesNotMatch(text, /SETTLED/, "a full round settles nothing in advance");
+});

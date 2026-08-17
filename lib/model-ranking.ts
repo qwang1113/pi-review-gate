@@ -113,6 +113,20 @@ export function capabilityOf(modelId: string): number {
   return cap ? cap.score : 0;
 }
 
+/**
+ * Capability score of a family that is ALREADY known (no id parsing).
+ *
+ * Callers that hold a `ModelFamily` must use this instead of round-tripping
+ * the family name through `capabilityOf`: the id regexes do not all accept
+ * their own family name (`familyOf("meta")` is "unknown", because the token
+ * is spelled `meta-`/`llama`), which silently scored that family 0 and could
+ * drop the stronger of two candidate families.
+ */
+export function capabilityOfFamily(family: ModelFamily): number {
+  const cap = CAP_BY_FAMILY.get(family);
+  return cap ? cap.score : 0;
+}
+
 export interface Candidate {
   /** Model id as it appears in the local registry (e.g. "deepseek-v4-pro"). */
   id: string;

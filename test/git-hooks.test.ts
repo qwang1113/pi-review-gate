@@ -10,6 +10,11 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PRE_COMMIT = join(ROOT, "hooks", "pre-commit");
 const COMMIT_MSG = join(ROOT, "hooks", "commit-msg");
 
+/** Throwaway HOME for hermetic hook tests (the hook reads the user-global
+ *  config from ~/.pi/review-gate.json). Tests that exercise the global
+ *  config pass their own HOME explicitly. */
+const emptyHome = mkdtempSync(join(tmpdir(), "rg-hooks-home-"));
+
 const tempDirs: string[] = [];
 function makeDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "rg-hook-"));
@@ -42,7 +47,13 @@ function writeState(dir: string, state: object, withChangedFile = false) {
 }
 
 function runPreCommit(dir: string, env: Record<string, string> = {}) {
-  return spawnSync("bash", [PRE_COMMIT], { cwd: dir, encoding: "utf8", env: { ...process.env, ...env } });
+  // HERMETIC HOME: the hook now reads the user-global config
+  // (~/.pi/review-gate.json) for docSync. Point HOME at a throwaway dir so a
+  // real user config cannot flip these tests; the docSync-global tests below
+  // pass their own HOME explicitly.
+  return spawnSync("bash", [PRE_COMMIT], {
+    cwd: dir, encoding: "utf8", env: { ...process.env, HOME: emptyHome, ...env },
+  });
 }
 
 /** Must track lib/fingerprint.ts FINGERPRINT_VERSION; a stale value here would
@@ -407,6 +418,28 @@ test("docSync explicitly disabled → READY+PASS without attestation commits", (
   assert.equal(runPreCommit(dir).status, 0);
 });
 
+test("docSync: user-global config (~/.pi/review-gate.json) is the hook's fallback", () => {
+  // Global false + no project config → hook honors the global (releases).
+  const globalHome = mkdtempSync(join(tmpdir(), "rg-hooks-global-"));
+  mkdirSync(join(globalHome, ".pi"), { recursive: true });
+  writeFileSync(join(globalHome, ".pi", "review-gate.json"), JSON.stringify({ docSync: false }));
+  const dir = repoWithMatchingGates(); // no project config
+  assert.equal(runPreCommit(dir, { HOME: globalHome }).status, 0,
+    "a global docSync:false must release the attestation requirement");
+  // Project explicit true beats global false (project wins field-by-field).
+  const dir2 = repoWithMatchingGates({}, { docSync: true });
+  const res = runPreCommit(dir2, { HOME: globalHome });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /docSync enforced/,
+    "an explicit project docSync:true must override the global false");
+  // Corrupt global config → default enforced (fail-safe).
+  const badHome = mkdtempSync(join(tmpdir(), "rg-hooks-global-bad-"));
+  mkdirSync(join(badHome, ".pi"), { recursive: true });
+  writeFileSync(join(badHome, ".pi", "review-gate.json"), "{ nope");
+  assert.equal(runPreCommit(dir, { HOME: badHome }).status, 1,
+    "a corrupt global config must fall back to the enforced default");
+});
+
 test("docSync on → UPDATED / NOT_NEEDED attestation commits (default and explicit)", () => {
   for (const att of ["UPDATED", "NOT_NEEDED"]) {
     const dflt = repoWithMatchingGates({ docSync: att });
@@ -423,7 +456,7 @@ test("docSync on → UPDATED / NOT_NEEDED attestation commits (default and expli
 
 /** pre-push re-execs pre-commit with the stricter lane requirement set. */
 function runPrePush(dir: string) {
-  return spawnSync("bash", [join(ROOT, "hooks", "pre-push")], { cwd: dir, encoding: "utf8", env: { ...process.env } });
+  return spawnSync("bash", [join(ROOT, "hooks", "pre-push")], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: emptyHome } });
 }
 
 test("fast lane PASS: commit allowed, PUSH blocked", () => {

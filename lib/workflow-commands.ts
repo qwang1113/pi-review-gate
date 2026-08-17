@@ -46,7 +46,9 @@ export const WORKFLOW_COMMANDS = {
       "Execute the review loop for the current worktree changes, through the pdw workflow engine (the ONLY execution path — no serial protocol exists). " +
       "AUTONOMOUS PROTOCOL: you run this loop on your own whenever code/doc edits are complete and need the gate — this command is only an explicit trigger; " +
       "do not wait for the user to call it before reviewing your own finished work. " +
-      "Steps: (1) collect the changed files and call the run_parallel_shard_review tool with the loop goal text — it auto-shards " +
+      "Steps: (0) FIRST run the trusted precommit lane — `run_precommit` (fast for an intermediate round, full for the final round before shipping) — and " +
+      "confirm it PASSES before spending the expensive judge's time: a FAIL is cheaper to fix before the review, and the reviewer must never be the " +
+      "first one to find a test failure. (1) then collect the changed files and call the run_parallel_shard_review tool with the loop goal text — it auto-shards " +
       "large diffs (planReviewShards, ≤4 shards) and runs the L3 reviewers in parallel; the shard plan needs NO user confirmation. " +
       "(2) record Phase A: feed the tool's returned shard record (EVERY shard's full raw output) to record_review in ONE call " +
       "(shard fences carry no docSync by design — worst verdict wins); a shard in the tool's failedShards produced NO verdict — " +
@@ -54,8 +56,16 @@ export const WORKFLOW_COMMANDS = {
       "(3) only if Phase A was READY, run ONE integration reviewer over the whole change (cross-shard seams, duplicated " +
       "abstractions, the loop goal criterion by criterion) and record ITS output ALONE, because it carries the single docSync " +
       "attestation. Fix every P0-P2 finding and re-review until READY (later rounds reuse the same shards). " +
-      "Do not run precommit unless the review becomes READY. Treat this as an explicit request to execute the review loop, " +
-      "not merely explain it.",
+      "Small diffs (<20 files AND <500 lines) skip the engine: spawn the cross-family reviewers as async subagents IN THE SAME TURN " +
+      "(both async:true, never one after the other) after the precommit PASS, and run precommit and the review serially — precommit first, always. " +
+      "HOW MANY REVIEWERS: the gate computes this from the host's real model registry (planFanoutFromFacts, lib/review-fanout.ts) and " +
+      "appends the decision to this prompt as a 'Reviewer fan-out for this round' block — follow it. Two judge-eligible FAMILIES ⇒ spawn two, " +
+      "one per family. Only ONE family ⇒ spawn ONE reviewer and copy the plan's note into the recorded review: a second same-family reviewer " +
+      "doubles the cost while sharing the first one's blind spots, and passing it off as a cross-family double review would be a lie. " +
+      "This governs the reviewers you spawn yourself; Phase A shard counts come from the engine's sharding. " +
+      "RE-REVIEW: a later round hands the reviewer the previous round's verdict and findings (the gate's 'Review scope for this round' block) — " +
+      "settled, unchanged material gets a consistency scan, not a re-derivation. " +
+      "Treat this as an explicit request to execute the review loop, not merely explain it.",
       invocation,
     ),
   },
@@ -205,8 +215,8 @@ export const WORKFLOW_COMMANDS = {
       "If the wave is empty and modules remain pending, report the blocker (a dependency that never reached implemented) and stop. " +
       "Spawn a COLD planner subagent that reads only the plan state, the brief and the loop goal, and APPENDS each dispatched module's task brief to its worklog " +
       "(preserving any execution log, self-check and review sections already there), and returns ONE instruction per module: run <module id>, replan with a reason, or 'all modules implemented'. " +
-      "Then dispatch the whole wave: call the run_wave_workflow tool (modules = the wave as JSON " +
-      "[{id, title, ownedPaths, worklogPath, model}] with each module's worklog path under .pi/plan/worklog/, " +
+      "Then dispatch the whole wave: call the run_wave_workflow tool (modules = the wave as a structured " +
+      "ARRAY of objects [{id, title, ownedPaths, worklogPath, model}] — NOT a JSON string — with each module's worklog path under .pi/plan/worklog/, " +
       "and state_file = .pi/plan/state.json so the tool verifies the wave against computeWave). " +
       "The tool runs the wave's workers IN PARALLEL (read-only, edit/write excluded), validates ownership, persists patches under .pi/plan/patches/ " +
       "and pre-checks git apply. The pdw engine is a HARD dependency: if the tool reports the engine missing, stop and fix the install " +

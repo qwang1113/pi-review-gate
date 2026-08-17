@@ -19,26 +19,43 @@ thinking, with a fallback priority list (first available wins):
   you should **proactively consult** it whenever a decision is non-trivial,
   ambiguous, risky, or you feel stuck. It does not gate; it advises on
   direction. Consulting early is cheaper than a failed review later.
-  Model priority: Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6.
+  Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
+  chains in agents/*.md).
 - **`reviewer`** (`agents/reviewer.md`, gatekeeper, *after* a diff exists) —
   independent audit that emits the JSON verdict the gate records.
-  Model priority: Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6.
+  Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
+  chains in agents/*.md).
 
 Thinking is a single value (`max`, the highest valid pi level); it is not a
 fallback list. If a model doesn't support `max`, pi clamps it down.
 
 **Default two-reviewer final pass (cross-family).** The review that ends a
 round runs **two reviewers by default**, from **different model families**:
-`claude-fable-5` (anthropic) as reviewer A and `onekey/gpt-5.6-sol` (openai)
-as reviewer B, both at `max` thinking — so the two audits do not share the
-main agent's blind spots. If a model is unavailable, fall down the pinned
-chains (see the tables above), keeping the two families distinct. Record BOTH
+`claude-fable-5` (anthropic) as reviewer A and the best available
+different-family model as reviewer B (e.g. `onekey/gpt-5.6-sol` once onekey
+is configured; without a second family, a single reviewer is the accepted
+fallback — declared in a Note), both at `max` thinking — so the two audits
+do not share the main agent's blind spots. If a model is unavailable, fall
+down the pinned chains (see the tables above), keeping the two families
+distinct. Record BOTH
 full
 outputs via `record_review` (worst verdict wins; the gate's fail-closed
 semantics are unchanged). Pick the second reviewer with `rankJudges` from
 `lib/model-ranking.ts` when a choice exists; a single reviewer is the
 acceptable fallback only when a different-family model is genuinely
 unavailable, and that fact goes in a Note.
+
+**Never spawn two reviewers of the SAME family.** The count is not yours to
+guess: the gate computes it from this host's real model registry
+(`planFanoutFromFacts`, `lib/review-fanout.ts`) and injects the decision into
+both the `/review` prompt and the auto-continuation resume text — two
+judge-eligible families ⇒ spawn two, one per family; one family ⇒ spawn ONE
+and copy the plan's note into the recorded review. A second same-family
+reviewer doubles the cost while sharing the first one's blind spots, and
+calling that a cross-family double review would be false. Scope: this governs
+the reviewers YOU spawn (the small-diff pair and the integration reviewer);
+the number of Phase A shard reviewers is decided by the engine's sharding, not
+by this rule.
 
 Why these models? `lib/model-ranking.ts` scores model families from public
 capability leaderboards (Artificial Analysis Intelligence Index, LMArena Elo,
@@ -78,6 +95,26 @@ a goal you know is uncheckable. This is protocol, not a gate: the extension
 does not enforce it, but the `reviewer` WILL flag a goal whose criteria
 cannot be judged objectively (P2) and an uncheckable criterion that made the
 work go astray (P1).
+
+**Every re-review carries the previous round's conclusion.** A re-review that
+starts from zero pays full price for questions that were already answered, so
+hand the reviewer what is already settled and let it spend its budget on what
+changed:
+
+- **Goal re-review (adviser).** When you revise a draft after BLOCKED
+  objections, the second consultation gets three things: the previous draft,
+  the adviser's own objection list, and what you changed for each one. Ask it
+  to verify exactly that — is each objection resolved, and does the new wording
+  introduce a side effect — not to re-derive the whole goal.
+- **Round N+1 (reviewer).** Hand over the previous round's verdict and its
+  findings. The gate already injects this as the `Review scope for this round`
+  block: what a previous READY verdict settled, what is new since, and which
+  findings must be re-checked one by one. Pass that block through to the
+  reviewer verbatim.
+- **What "settled" buys**: settled-and-unchanged material gets a consistency
+  scan, not a re-derivation. It never narrows what the reviewer MAY look at,
+  never weakens its authority, and it may always reopen a settled conclusion
+  when it has evidence the conclusion was wrong.
 
 **Where**: `.pi/loop-goal.md`. That path sits inside the gate-owned `.pi/`
 scope (`GATE_EXCLUDE_PATHSPECS` / `isGateOwnedPath`, `lib/fingerprint.ts`),
@@ -169,15 +206,14 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    the real question, not your preferred answer. Fold its input in before you
    commit to an approach. Skip only for trivial, low-risk changes.
 
-2. **Parallel round — precommit ⇄ review** — with the edits finished, run
-   the reviewer and precommit **concurrently** instead of serially:
+2. **Precommit first, review second** — with the edits finished, run the
+   trusted precommit BEFORE spending the expensive judge's time:
 
-   - Spawn the reviewer subagent `async: true`, then call **`run_precommit`**
-     while it works. The runner schedules itself (no flags): any `lint:fix`
-     script runs FIRST and alone (it edits files, so nothing may read the
-     worktree before it finishes), then lint/typecheck/build/test run in
-     parallel with declaration-order output. Steps whose inputs have not
-     changed reuse their previous PASS and report `cached`.
+   - Call **`run_precommit`** first. The runner schedules itself (no flags):
+     any `lint:fix` script runs FIRST and alone (it edits files, so nothing
+     may read the worktree before it finishes), then lint/typecheck/build/
+     test run in parallel with declaration-order output. Steps whose inputs
+     have not changed reuse their previous PASS and report `cached`.
    - **Pick the lane.** The default `fast` lane runs lint + typecheck + build
      + only the tests RELATED to the changed files — seconds instead of
      minutes, and enough to clear a `git commit`. Use `mode: "full"` for the
@@ -185,16 +221,16 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
      `declare_done` all require a run whose tests were not narrowed, and the
      gate will say so if you try. Running every intermediate round in `full`
      just pays for the whole suite on every typo fix.
-   - **Why this is safe**: the verdict binds to the worktree fingerprint
-     either way — the worst a race can do is discard a verdict, never ship
-     unverified work. If a repo's checks write files (snapshots, build
-     artifacts) while the reviewer reads, the fingerprint moves and the round
-     repeats: a wasted round, accepted and documented in
-     `docs/parallel-execution-plan.md`.
-   - Precommit still matters for two measured reasons: tests catch the cheap
-     defect class the reviewer would otherwise spend minutes finding (a test
-     failure is far cheaper to fix than a BLOCKED verdict), and a FAIL is
-     cheaper to fix before the expensive judge looks.
+   - **Why precommit first, not concurrent**: precommit is cheap (seconds to
+     a couple of minutes) and catches the cheap defect class the reviewer
+     would otherwise spend minutes finding; the review is EXPENSIVE (two
+     top-tier judges at max thinking). A FAIL is cheaper to fix before the
+     expensive judge looks — the reviewer must never be the first one to
+     find a test failure, and a review spent on a red tree is pure waste.
+     (An earlier design ran both concurrently to save wall time; it was
+     abandoned because a precommit FAIL made the concurrent review a wasted
+     round — the expensive half of the loop was paid for a tree that could
+     not ship.)
 
    FAIL / `NO CHECKS RUN` ⇒ fix and re-run; only then continue to the review.
    `NO CHECKS RUN` is NOT a pass — tell the user real checks are missing.
@@ -222,7 +258,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
    - **Small diff** (< 20 files AND < 500 changed lines): TWO cross-family
      reviewers (default fable-5 + gpt-5.6-sol, both max) over the full change
-     — no pdw engine, no sharding; each attests `docSync` itself.
+     — no pdw engine, no sharding; each attests `docSync` itself. **Spawn
+     BOTH in the SAME turn with `async: true`** — never one after the other:
+     serial spawns double the review wall time for zero additional signal.
    - **Large diff** (≥ 20 files OR ≥ 500 changed lines): auto-shard with
      `run_parallel_shard_review` (≤ 4 reviewers, each with its own files AND
      per-shard diff context), then ONE integration review over the whole
@@ -234,8 +272,7 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
    **Triage first (L1, large diffs)**: for anything but a tiny diff, spawn
    the `triage` agent (async, cheap: `claude-haiku-4-5` →
-   `deepseek/deepseek-v4-flash` → `oc-sdk-go/deepseek-v4-flash` →
-   `onekey/deepseek-v4-flash`) over the same diff and hand its findings to the
+   `opencode-go/deepseek-v4-flash`) over the same diff and hand its findings to the
    reviewer as input. Triage output carries NO verdict — never feed it to
    `record_review`; the reviewer owns the verdict.
 
@@ -305,6 +342,14 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    must be bound to the SAME (current) fingerprint; if anything edited the
    worktree since, run the affected step again.
 
+   **The fingerprint is content-addressed and staging-invariant.** `git add`,
+   `git commit` and any branch switch that does NOT rewrite working-tree files
+   leave it untouched, so a READY review and a precommit PASS survive all
+   three: never re-run a review to "rebuild the binding" after staging or
+   committing — that is a wasted round at top-tier model prices. Only a change
+   to the WORKING TREE's file contents invalidates it (an edit, a lint:fix run,
+   or a checkout that does rewrite files).
+
    It also rejects while a Copilot cycle is still open or the loop goal is
    unapproved — those are completion requirements, not ship requirements.
 
@@ -317,19 +362,16 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
 
 - **L1 cheap/fast** (`triage`, `recon`, `claude-haiku-4-5` →
-  `deepseek/deepseek-v4-flash` → `oc-sdk-go/deepseek-v4-flash` →
-  `onekey/deepseek-v4-flash`, **thinking `low`/off**) — mechanical pre-scan, code/doc
+  `opencode-go/deepseek-v4-flash`, **thinking `low`/off**) — mechanical pre-scan, code/doc
   search, heavy reading. Advisory only; carries no verdict. The main agent
   delegates heavy reading to `recon` so expensive models never pay token cost
   for scanning.
 - **L2 execution** (`worker` / `planner` / `fixer`, `claude-sonnet-5` →
-  `deepseek/deepseek-v4-pro` → `deepseek/deepseek-v4-flash` →
-  `oc-sdk-go/deepseek-v4-flash` → `onekey/deepseek-v4-flash` → `grok-4.6` →
-  `glm-5.3` →
-  `claude-opus-5`, **thinking `max`**) — implements findings / modules into a
+  `claude-opus-5` → `opencode-go/deepseek-v4-flash`, **thinking `max`**) — implements findings / modules into a
   diff; you review and merge it (single writer stays with you).
-  `deepseek-v4-flash` at `max` thinking is strong enough for execution; grok /
-  opus / glm are equally valid execution fallbacks.
+  (Chains are short because pi-subagents requires every fallback to resolve;
+  a user who configures deepseek / oc-sdk-go / onekey can extend them in
+  `~/.pi/agent/agents/*.md`.)
 - **L3 judgment** (reviewer / adviser / module-reviewer / arbiter, `max`
   thinking) — the only tier whose verdicts may be recorded. Never delegate
   the verdict to a cheaper model.
@@ -357,11 +399,14 @@ ship gate checks the repo the command actually runs in.
 
 So once a session has edited more than one repo, `record_review` and
 `run_precommit` **require** an explicit `"repo": "<absolute path>"` — they
-refuse to guess. **Run the loops concurrently**: repos share no state (own
-sidecar, own fingerprint, own verdict), so spawn repo A's reviewer and repo
-B's reviewer in parallel, run both precommits while they work, record each
-verdict against its own repo, and ship each repo when its own gates pass.
-Only the final `declare_done` needs every repo green.
+refuse to guess. **Run the loops concurrently — each repo precommit-first**:
+repos share no state (own sidecar, own fingerprint, own verdict), so for
+EACH repo run its precommit to a PASS first, then spawn its reviewer; the
+two repos' loops may interleave (A's precommit while B's reviewer runs is
+fine — that is parallelism ACROSS repos, never a review and a precommit of
+the SAME repo overlapping). Record each verdict against its own repo, and
+ship each repo when its own gates pass. Only the final `declare_done` needs
+every repo green.
 
 Without that argument the tools used to fall back to the repo you edited LAST,
 and only an edit could move that target. Real consequence: a session that
@@ -560,9 +605,11 @@ lets this skip worktrees entirely without ever putting a verdict at risk.
   中文。例外保持英文原样：代码、标识符、文件路径、shell 命令，以及协议固定英文
   标记——裁决 JSON 的 `READY`/`BLOCKED`/`NEEDS_HUMAN`、precommit 的 `## Overall:`
   sentinel、commit message（翻译它们会破坏门禁解析）。
-- **Commit/PR 英文（L5，advisory）**：commit message 和 PR 的 title/description 必须用
-  英文。门禁不再硬拦截（提取启发式对 heredoc 等复杂 shell 写法可能误判），但会发出
-  警告，且 reviewer 审核时会把非英文的 commit/PR 文案记为 P1 finding。请直接用英文写。
+- **Commit/PR 英文（L5，强制）**：commit message 和 PR 的 title/description 必须用
+  英文。门禁**硬拦截**非英文为主的文案（majority-body 判定，少数外来词可通过；
+  报错信息带逃生说明：会话内由用户 `/gate-bypass <reason>` 放行，`REVIEW_GATE_BYPASS=1`
+  仅对会话外的 git hooks 层提交有效），reviewer 审核时也会把非英文的
+  commit/PR 文案记为 P1 finding。请直接用英文写。
   （注意：这与 L4 不矛盾——面向用户的聊天用中文，commit/PR 用英文。）
 - Never edit `.env`, key files, or credentials (hard-blocked anyway).
 - Never put AI attribution in commit messages (hard-blocked anyway).

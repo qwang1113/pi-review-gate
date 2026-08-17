@@ -13,11 +13,12 @@
  *                          strict Simplified-Chinese LANGUAGE_DIRECTIVE every
  *                          turn (thinking in Chinese too); protocol English
  *                          tokens (verdict enum, commit msgs, code) exempt.
- *   L5 Commit/PR English — ADVISORY: tool_call warns (never blocks) when a git
- *                          commit message or PR title/body looks non-English;
- *                          the per-turn LANGUAGE_DIRECTIVE instructs the agent
- *                          to write ship text in English and the reviewer
- *                          checks it during review.
+ *   L5 Commit/PR English — HARD: tool_call blocks a git commit message or
+ *                          PR title/body that is predominantly non-English
+ *                          (majority-body policy; escape hatch named in the
+ *                          reason); the per-turn LANGUAGE_DIRECTIVE instructs
+ *                          the agent to write ship text in English and the
+ *                          reviewer checks it during review too.
  *   L6 Test-label English — pre-commit (scripts/scan-test-labels.cjs) blocks a
  *                          staged it/test/describe label written in a non-Latin
  *                          script, unless a `// review-gate: allow-non-english`
@@ -47,7 +48,7 @@ import {
   existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
   mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -71,7 +72,7 @@ import {
   requiresFullPrecommit,
   type ShipCommandKind,
 } from "../lib/constants.ts";
-import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
+import { defaultProjectConfig, globalConfigPath, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
 import { buildAgentsWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
@@ -81,7 +82,7 @@ import {
   resolveCommandRepos,
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
-import { firstNonEnglish, containsNonLatinLetter } from "../lib/lang-detect.ts";
+import { firstNonEnglish, containsNonLatinLetter, isNonEnglishText } from "../lib/lang-detect.ts";
 import {
   failedStepNames,
   receiptTotalMs,
@@ -99,6 +100,7 @@ import {
   decideReviewScope,
   formatReviewScopeDirective,
   type ReviewScopeDecision,
+  type SettledConclusion,
 } from "../lib/review-scope.ts";
 import {
   advisoryChangeToken,
@@ -175,6 +177,22 @@ import {
   type ModuleBucket,
 } from "../lib/requirement-size.ts";
 import { fitDialogMessage } from "../lib/dialog-budget.ts";
+import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "../lib/model-diagnose.ts";
+import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "../lib/gate-doctor.ts";
+import {
+  buildStallNotice,
+  evaluateStall,
+  progressSignature,
+  STALL_MOTION_MAX_AGE_SEC,
+  STALL_REPEAT_LIMIT,
+  type StallState,
+} from "../lib/loop-stall.ts";
+import {
+  formatFanoutDirective,
+  planFanoutFromFacts,
+  type JudgeFacts,
+} from "../lib/review-fanout.ts";
+import { isModelAllowed, loadPdw } from "../lib/pdw-bridge.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_HISTORY_QUERY,
@@ -184,8 +202,11 @@ import {
   armCopilotReview,
   copilotProblems,
   decideCopilotSupport,
+  decidePrView,
   evaluateCopilot,
   isCopilotOutstanding,
+  isUnknownJsonFieldError,
+  PR_VIEW_JSON_FIELDS,
   parseCopilotHistoryProbe,
   parseCopilotPayload,
   parseNameWithOwner,
@@ -289,6 +310,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   let state: GateState = emptyState(null, DEFAULT_MAX_ROUNDS);
   let cwd = process.cwd();
   let continuationsInjected = 0; // total auto-continuation injections (persisted)
+  // L2 stall breaker (in-memory by design: a restart is itself a change of
+  // circumstances, and a stale stall must never outlive the session).
+  let loopStall: StallState | undefined;
+  let stallNoticeShown = false;
   /**
    * L7/L8 continuations spent on COMPLETION-only work (waiting for Copilot,
    * negotiating the goal). Separate budget on purpose: a Copilot review that
@@ -721,6 +746,72 @@ export default function reviewGate(pi: ExtensionAPI) {
     return last.fingerprints.slice(0, 20);
   }
 
+  /**
+   * The conclusion the previous round already reached, so the next reviewer
+   * builds on it instead of re-deriving it. Only the READY verdict the
+   * increment is measured against qualifies: an unapproved tree has settled
+   * nothing. Undefined when there is no such review (⇒ a full round anyway).
+   */
+  function settledConclusion(st: GateState): SettledConclusion | undefined {
+    const base = st.lastReadyReview;
+    if (!base) return undefined;
+    // `rounds` is the recorded-round COUNT at directive time, not the round
+    // that produced the verdict (rounds recorded after it are included) — the
+    // directive words it that way too.
+    return { verdict: "READY", at: base.at, rounds: st.rounds.length };
+  }
+
+  /**
+   * Reviewer fan-out facts. The session's own model registry is AUTHORITATIVE:
+   * it includes built-in catalogs (anthropic) that never appear in
+   * models-store.json. The disk view is partial, so it may CONFIRM that judges
+   * exist but must never be the basis for claiming there are none — that
+   * mistake once reported every built-in judge chain as unavailable while the
+   * review was literally running on one of them.
+   *
+   * Cached because before_agent_start receives no ctx (hence no registry), and
+   * a registry does not change within a session.
+   */
+  let registryJudgeFacts: JudgeFacts | undefined;
+
+  function readFileSafeFs(p: string): string | undefined {
+    try { return readFileSync(p, "utf8"); } catch { return undefined; }
+  }
+
+  /** Warm the authoritative facts from any ctx that carries a registry. */
+  function rememberJudgeFacts(registry: unknown): void {
+    if (registryJudgeFacts || registry === undefined) return;
+    try {
+      // No file reader: registry-only, so a disk fallback can never be
+      // mistaken for the authoritative view.
+      const facts = factsFromRegistry(registry, homedir(), () => undefined);
+      if (facts.models.length > 0) registryJudgeFacts = facts;
+    } catch { /* unusable registry — stay on the disk view */ }
+  }
+
+  /**
+   * How many reviewers this host can actually field, as a fact the gate
+   * computed. Prompt-only: it never selects a model (the pin in the agent file
+   * does that), never records a verdict and never touches the ship gate.
+   * Returns undefined when the facts are too weak to say anything true.
+   */
+  function fanoutDirective(): string | undefined {
+    try {
+      if (registryJudgeFacts) {
+        const plan = planFanoutFromFacts(registryJudgeFacts);
+        return plan ? formatFanoutDirective(plan) : undefined;
+      }
+      const plan = planFanoutFromFacts(factsFromRegistry(undefined, homedir(), readFileSafeFs));
+      // Partial view — CONFIRM ONLY. models-store.json omits built-in catalogs
+      // (anthropic), so this view can prove that two judge families exist but
+      // never that a second one is missing: "only one family" drawn from it
+      // would suppress a double review that was actually possible, and put a
+      // false note into the recorded verdict. Denial in any form (SINGLE or
+      // NONE) therefore stays silent until the real registry is warmed.
+      return plan && plan.crossFamily ? formatFanoutDirective(plan) : undefined;
+    } catch { return undefined; }
+  }
+
   function classifier(): LlmClassifier {
     if (!llmClassifier || llmClassifierModel !== projectConfig.llmGuards.model) {
       llmClassifier = createLlmClassifier(projectConfig.llmGuards.model);
@@ -882,6 +973,29 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* display-only */ }
   }
 
+  /**
+   * Is a subagent demonstrably still working? Read from the same artifact scan
+   * the TUI widget uses, so the breaker and the display can never disagree.
+   *
+   * Only FRESH runs count (`STALL_MOTION_MAX_AGE_SEC`): a run that has been
+   * "running" for hours is the hung case the breaker exists for, not motion.
+   * Any failure to scan yields false — the breaker keeps its normal behavior
+   * rather than being silently disabled by an unreadable directory.
+   */
+  function subagentInMotion(): boolean {
+    try {
+      // `maxAgeSec` only prunes FINISHED runs from the scan (lib/ui-widget.ts:
+      // a running run is always kept). The age bound that matters here is the
+      // explicit predicate below — the option merely keeps the scan cheap.
+      const agents = scanAgentArtifacts(pathJoin(cwd, ".pi-subagents", "artifacts"), Date.now(), {
+        maxAgeSec: STALL_MOTION_MAX_AGE_SEC,
+      });
+      return agents.some((a) => a.state === "running" && a.ageSec <= STALL_MOTION_MAX_AGE_SEC);
+    } catch {
+      return false;
+    }
+  }
+
   // ---------- user-visible output channels ----------
   //
   // Two rules, both learned the hard way (see lib/dialog-budget.ts):
@@ -968,6 +1082,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     loopArmed = mode === "loop";
     continuationsInjected = 0;
     completionContinuations = 0;
+    loopStall = undefined; // a mode decision is a change of circumstances
+    stallNoticeShown = false;
     persist(ctx);
   }
 
@@ -1137,6 +1253,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the mode's defining behavior; explore below never gets this branch.
     if (state.taskMode === "normal") return;
 
+    // /gate-bypass (user-authorized, reason logged in state): the L1 ship gate
+    // steps aside for the rest of the session. The git hooks mirror it via
+    // REVIEW_GATE_BYPASS=1 for commits made OUTSIDE Pi; inside the session
+    // this is the only in-session escape. (Missing before 2026-08-16: the
+    // command set state.bypass but L1 never consulted it, so a bypassed
+    // session still blocked every ship — only the hooks honored it.)
+    if (state.bypass.active) return;
+
     // Explore mode does NOT block bash — investigations need diagnostic
     // commands. Ship commands below stay FULLY gated in every mode except the
     // normal mode: explore only relaxes auto-continuation and
@@ -1201,13 +1325,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // short-circuits; the block loop treats it as "state missing".)
     if (!anyChange) return;
 
-    // AI attribution (HARD) + English-language (L5, ADVISORY) checks on commit
-    // messages and PR title/description. L5 no longer hard-blocks: extraction
-    // heuristics can mis-read complex shell forms (e.g. `-m "$(cat <<'EOF' …)"`
-    // heredocs), so a wrong language guess must not stop a legitimate ship.
-    // Instead we warn, the per-turn LANGUAGE_DIRECTIVE tells the agent to write
-    // ship text in English, and the reviewer checks commit/PR language.
-    const l5Advisories: string[] = [];
+    // AI attribution (HARD) + English-language (L5, HARD) checks on commit
+    // messages and PR title/description. L5 HARD: a predominantly non-English
+    // commit message or PR title/body blocks the ship (the majority-body
+    // policy keeps minority foreign tokens passing; the escape hatch is named
+    // in every reason so a wrong guess never strands a legitimate commit).
     for (const s of ships) {
       if (s.kind === "commit") {
         const msgs = extractCommitMessages(s.segment);
@@ -1230,9 +1352,20 @@ export default function reviewGate(pi: ExtensionAPI) {
             };
           }
         }
+        // L5 HARD (user policy): predominantly non-English commit messages
+        // block the ship — same majority-body policy that used to be advisory
+        // only. The escape hatch is named in the reason: a wrong guess must
+        // never permanently strand a legitimate commit.
         const nonEn = firstNonEnglish(msgs);
         if (nonEn) {
-          l5Advisories.push(`commit message is predominantly non-English: "${nonEn.slice(0, 60)}"`);
+          return {
+            block: true,
+            reason:
+              `review-gate: commit message is predominantly non-English: "${nonEn.slice(0, 60)}". ` +
+              "Commit messages must be English — rewrite it (git commit --amend). " +
+              "Escape hatch: the user may run /gate-bypass <reason> (in-session; REVIEW_GATE_BYPASS=1 " +
+              "only applies outside the session, at the git-hook layer).",
+          };
         } else if (msgs.length > 0 && projectConfig.llmGuards.englishCheck
           && !msgs.some(containsNonLatinLetter)
           && await classifyNonEnglish(classifier(), msgs) === true) {
@@ -1240,30 +1373,38 @@ export default function reviewGate(pi: ExtensionAPI) {
           // 100% Latin script may still be romanized non-English (pinyin/romaji).
           // Only run the semantic check when there is NO non-Latin letter at all
           // — a minority foreign word already passes under the majority policy.
-          l5Advisories.push("commit message reads as romanized non-English (semantic check)");
+          return {
+            block: true,
+            reason:
+              "review-gate: commit message reads as romanized non-English (semantic check). " +
+              "Rewrite it in English. Escape hatch: the user may run /gate-bypass <reason> " +
+              "(in-session; REVIEW_GATE_BYPASS=1 only applies outside the session).",
+          };
         }
       } else if (s.kind === "pr-create" || s.kind === "pr-edit") {
         const prTexts = extractPrTextFields(s.segment);
         const nonEn = firstNonEnglish(prTexts);
         if (nonEn) {
-          l5Advisories.push(`PR title/description is predominantly non-English: "${nonEn.slice(0, 60)}"`);
+          return {
+            block: true,
+            reason:
+              `review-gate: PR title/description is predominantly non-English: "${nonEn.slice(0, 60)}". ` +
+              "PR text must be English — rewrite it (gh pr edit --title/--body). " +
+              "Escape hatch: the user may run /gate-bypass <reason> (in-session; REVIEW_GATE_BYPASS=1 " +
+              "only applies outside the session, at the git-hook layer).",
+          };
         } else if (prTexts.length > 0 && projectConfig.llmGuards.englishCheck
           && !prTexts.some(containsNonLatinLetter)
           && await classifyNonEnglish(classifier(), prTexts) === true) {
-          l5Advisories.push("PR title/description reads as romanized non-English (semantic check)");
+          return {
+            block: true,
+            reason:
+              "review-gate: PR title/description reads as romanized non-English (semantic check). " +
+              "Rewrite it in English. Escape hatch: the user may run /gate-bypass <reason> " +
+              "(in-session; REVIEW_GATE_BYPASS=1 only applies outside the session).",
+          };
         }
       }
-    }
-    if (l5Advisories.length > 0) {
-      // Advisory only — never a block. Surface to the user; the reviewer is
-      // instructed to flag non-English ship text during review.
-      try {
-        ctx.ui.notify(
-          "review-gate (L5 advisory): " + l5Advisories.join("; ") +
-            " — commit/PR text must be English. Consider amending (git commit --amend / gh pr edit).",
-          "warning",
-        );
-      } catch { /* headless UI — advisory is best-effort */ }
     }
 
     // P-multi: check every repo this command ships FROM (checkRoots was
@@ -1585,11 +1726,24 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** The PR for the repo's current branch, or the reason there is none. */
   async function resolveOpenPr(dir: string, signal?: AbortSignal): Promise<{ pr?: PrSummary; error?: string }> {
-    const res = await runGh(["gh", "pr", "view", "--json", "number,headRefOid,url,state"], dir, { signal });
-    if (!res.ok) return { error: ghError(res, "`gh pr view` failed (gh missing, not authenticated, or no PR)") };
-    const pr = parsePrView(res.stdout);
-    if (!pr) return { error: "`gh pr view` returned no recognizable pull request" };
-    return { pr };
+    // gh's --json field whitelist is version-dependent: `headRefOid` exists
+    // only in newer gh builds. Legacy gh (measured: 2.4.0) rejects the modern
+    // list with `Unknown JSON field: "headRefOid"` BEFORE even looking up
+    // the PR — so only retry with the legacy list when that whitelist error
+    // is actually what failed (the decision logic lives in the pure
+    // lib/copilot-review.ts decidePrView; it also makes sure THE RETRY's
+    // error is reported when it fails — the whitelist error would mask the
+    // real cause, e.g. "no pull requests found"). `analyzeCopilot` anchors
+    // proof on timestamps when head is absent (documented fallback).
+    const modern = await runGh(["gh", "pr", "view", "--json", PR_VIEW_JSON_FIELDS.modern], dir, { signal });
+    const decision = decidePrView(
+      modern,
+      isUnknownJsonFieldError(modern.stderr)
+        ? await runGh(["gh", "pr", "view", "--json", PR_VIEW_JSON_FIELDS.legacy], dir, { signal })
+        : undefined,
+    );
+    if (decision.ok) return { pr: decision.pr };
+    return { error: decision.error };
   }
 
   /** owner/name for the repo, preferring gh's own answer over URL parsing. */
@@ -2380,8 +2534,11 @@ export default function reviewGate(pi: ExtensionAPI) {
           },
         });
         if (!outcome.ok) {
+          // One diagnosis call, hoisted (the helper reads agent files — never
+          // pay for it twice on an error path).
+          const diag = modelDiagnosisLines(ctx.modelRegistry);
           return {
-            content: [{ type: "text", text: `parallel shard review failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` }],
+            content: [{ type: "text", text: `parallel shard review failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` + (diag.length ? `\n\n${diag.join("\n")}` : "") }],
             details: {
               available: false,
               reason: outcome.reason,
@@ -2408,8 +2565,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           },
         };
       } catch (err) {
+        const diag = modelDiagnosisLines(ctx.modelRegistry);
         return {
-          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` }],
+          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` + (diag.length ? `\n\n${diag.join("\n")}` : "") }],
           details: { available: false, reason: "tool-failed", error: (err as Error).message },
         };
       }
@@ -2427,10 +2585,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       "The pdw engine is a HARD dependency: when it is unavailable the tool reports an installation error — there is no serial fallback.",
     parameters: Type.Object({
       repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
-      modules: Type.String({
+      modules: Type.Array(Type.Object({
+        id: Type.String({ description: "Module id (must match the plan state when state_file is given)" }),
+        title: Type.String(),
+        ownedPaths: Type.Array(Type.String({ description: "Disjoint file paths this module owns" })),
+        worklogPath: Type.String({ description: "Path under .pi/plan/worklog/ (module brief + must-haves)" }),
+        model: Type.String({ description: "Worker model spec" }),
+      }), {
         description:
-          "JSON array of wave modules: [{id, title, ownedPaths: string[], worklogPath, model}] " +
-          "— the next wave is every pending module whose depends_on are implemented/accepted (≤4).",
+          "The wave modules — the next wave is every pending module whose depends_on are implemented/accepted (≤4).",
       }),
       goal: Type.Optional(Type.String({ description: "Loop goal text handed to every worker" })),
       state_file: Type.Optional(Type.String({
@@ -2443,17 +2606,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     async execute(_id, params, _signal, onUpdate, ctx) {
       const cwd = params.repo ?? ctx.cwd ?? process.cwd();
       try {
-        let modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model: string }>;
-        try {
-          const parsed = JSON.parse(params.modules);
-          if (!Array.isArray(parsed)) throw new Error("modules must be a JSON array");
-          modules = parsed as typeof modules;
-        } catch (err) {
-          return {
-            content: [{ type: "text", text: `run_wave_workflow: bad modules JSON — ${(err as Error).message}` }],
-            details: { available: false, reason: "bad-modules" },
-          };
-        }
+        // TypeBox validated the shape at the parameter layer — modules is a
+        // real array now, no JSON round-trip (was a JSON string until 2026-08-16).
+        const modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model: string }> =
+          params.modules;
         // Fail-closed wave reconciliation: when a plan state file is supplied,
         // the wave MUST equal computeWave(state) — the driver cannot invent one.
         // Check BEFORE dispatching so an invented wave never burns a run.
@@ -2594,6 +2750,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      // Precommit runs BEFORE the review every round, so this is the earliest
+      // reliable place to warm the authoritative model facts the fan-out
+      // directive needs (before_agent_start receives no ctx, hence no registry).
+      rememberJudgeFacts((ctx as { modelRegistry?: unknown }).modelRegistry);
       // Available in every mode: explore allows edits/bash, so the agent may
       // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
@@ -2685,8 +2845,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       const pushNote = outcome.verdict === "PASS" && outcome.testScope !== "full"
         ? ' This clears a `git commit`; `git push` / `gh pr create` need a run with mode "full".'
         : "";
+      // testScope skipped = the test step was DROPPED (no related-test
+      // strategy), so the commit-time PASS never executed the suite. This
+      // must be loud: a user seeing only "PASS" would reasonably assume
+      // tests ran.
+      const skippedNote = outcome.verdict === "PASS" && outcome.testScope === "skipped"
+        ? " ⚠️ WARNING: NO tests ran in this lane — the test script could not be narrowed to related tests and was skipped entirely; this PASS did NOT execute the test suite. A `git push` / `gh pr create` requires a full run that does."
+        : "";
       const detail =
-        outcome.verdict === "PASS" ? `PASS ${lane} (${outcome.checksRun} checks ran, 0 failed).${pushNote}`
+        outcome.verdict === "PASS" ? `PASS ${lane} (${outcome.checksRun} checks ran, 0 failed).${pushNote}${skippedNote}`
         : outcome.verdict === "FAIL" ? `FAIL ${lane} (${outcome.checksFailed}/${outcome.checksRun} checks failed).`
         : outcome.verdict === "NO_CHECKS_RUN" ? `NO CHECKS RUN ${lane} — zero runnable checks; this is NOT a pass. Configure real checks or /gate-bypass.`
         : `ERROR (${outcome.error ?? "runner could not be trusted"}) — fail-closed.`;
@@ -2836,6 +3003,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       // history — it cannot loosen the ship gate.
       continuationsInjected = 0;
       completionContinuations = 0;
+      loopStall = undefined; // a completed task is real progress
+      stallNoticeShown = false;
       persist(ctx as unknown as ExtensionContext);
       return {
         content: [{ type: "text", text: `review-gate: done accepted. ${params.summary}` }],
@@ -4099,6 +4268,43 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
 
+    // L2 circuit breaker: an unmet gate justifies another turn only while
+    // something is still MOVING. When the fingerprint, both verdicts, the round
+    // count and the unmet list are all unchanged for STALL_REPEAT_LIMIT
+    // evaluations in a row, the blocker is external (provider out of quota,
+    // subagent launch failure, unreachable model) and another injection would
+    // only burn the budget telling the agent to retry the impossible — the
+    // observed 7-injection quota burn. Stop injecting and name the cause.
+    // Tighten-only: no verdict is granted, ship commands stay blocked.
+    const stall = evaluateStall(
+      loopStall,
+      progressSignature({
+        fingerprint: fp.unavailable ? "" : fp.digest,
+        reviewVerdict: state.review.verdict,
+        precommitVerdict: state.precommit.verdict,
+        rounds: state.rounds.length,
+        problems: [...problems, ...completion],
+      }),
+      STALL_REPEAT_LIMIT,
+      // A running reviewer is why the signature is unchanged: the verdict it
+      // will produce does not exist yet. Cutting the loop off there would
+      // orphan the very review the gate is waiting for, so observable work in
+      // flight counts as motion — until it is too old to be believable.
+      { inMotion: subagentInMotion() },
+    );
+    loopStall = stall;
+    if (stall.stalled) {
+      // Once per stall, not once per turn: the state persists in `loopStall`,
+      // and any real progress resets both the count and this flag.
+      if (!stallNoticeShown) {
+        stallNoticeShown = true;
+        try { ctx.ui.notify(buildStallNotice(stall.repeats), "warning"); } catch { /* headless */ }
+      }
+      updateWidget(ctx);
+      return;
+    }
+    stallNoticeShown = false;
+
     if (problems.length > 0) continuationsInjected += 1;
     else completionContinuations += 1;
     // R10: fire the strategic-reset checklist BEFORE persist so the fired flag
@@ -4135,6 +4341,14 @@ export default function reviewGate(pi: ExtensionAPI) {
                 "turn instead of re-asking. Do not summarize; execute.")) +
         (!sessionEdited && !state.scopeLimit
           ? "\nIf these unmet gates target PRE-EXISTING changes this session never made, you may call request_scope_limit — the USER decides whether session-only coverage suffices."
+          : "") +
+        // How many reviewers this host can actually field. It rides the RESUME
+        // message itself — not only the per-turn system prompt — because this
+        // is the message that drives the autonomous loop, and the observed
+        // waste (two same-family reviewers billed as a cross-family pair)
+        // happened on exactly this path, with nobody typing /review.
+        (state.review.verdict !== "READY"
+          ? ((d) => (d ? `\n${d}` : ""))(fanoutDirective())
           : "") +
         reset,
       { deliverAs: "followUp" },
@@ -4354,13 +4568,83 @@ export default function reviewGate(pi: ExtensionAPI) {
           ctx.ui.notify(`Agent is busy. Retry ${command.usage} when it is idle.`, "warning");
           return;
         }
-        pi.sendUserMessage(buildWorkflowPrompt(name, args ?? ""));
+        // Any command handler is a chance to warm the authoritative model
+        // facts: before_agent_start (the other injection point) gets no ctx.
+        rememberJudgeFacts((ctx as { modelRegistry?: unknown }).modelRegistry);
+        // /review dispatches the reviewers, so it carries the fan-out decision
+        // as a computed fact rather than a rule the agent may reinterpret.
+        const fanout = name === "review" ? fanoutDirective() : undefined;
+        pi.sendUserMessage(
+          buildWorkflowPrompt(name, args ?? "") + (fanout ? `\n\n${fanout}` : ""),
+        );
       },
     });
   }
 
   for (const name of Object.keys(WORKFLOW_COMMANDS) as WorkflowCommandName[]) {
     registerWorkflowCommand(name);
+  }
+
+  /** Read-only model-chain diagnosis for /gate-status. Best-effort: any IO
+   *  failure yields no lines (diagnostics never block, never gate).
+   *
+   *  PRIMARY facts source is the session's own model registry (the SAME
+   *  facts pdw-bridge resolves against — it includes built-in catalogs
+   *  like anthropic that never appear in models-store.json; reading only
+   *  the store mis-reported every built-in judge chain as BLOCKED while
+   *  the review was literally running on fable-5). File reads are a
+   *  fallback when the registry exposes nothing. */
+  function modelDiagnosisLines(registry?: unknown): string[] {
+    try {
+      const home = homedir();
+      const agentsDir = pathJoin(home, ".pi", "agent", "agents");
+      const agentFiles = readdirSync(agentsDir).filter((f) => f.endsWith(".md"));
+      const authedProviders = new Set<string>();
+      const models: Array<{ provider: string; id: string }> = [];
+      const facts: RegistryFacts = { models, authedProviders, allowed: isModelAllowed };
+      const reg = registry as { getAll?: () => unknown[]; hasConfiguredAuth?: (m: unknown) => boolean } | undefined;
+      const all = reg?.getAll?.() ?? [];
+      if (Array.isArray(all) && all.length > 0) {
+        // Symmetric with pdw-bridge's hasAuth guard: a registry without
+        // hasConfiguredAuth skips the auth filter entirely (treating every
+        // provider as authed would be wrong — the missing method is the
+        // signal that auth is not part of this registry's contract).
+        const authCheckable = typeof reg?.hasConfiguredAuth === "function";
+        for (const m of all) {
+          const obj = m as { provider?: unknown; id?: unknown };
+          if (typeof obj.provider !== "string" || typeof obj.id !== "string") continue;
+          models.push({ provider: obj.provider, id: obj.id });
+          if (!authCheckable || reg!.hasConfiguredAuth!(obj)) authedProviders.add(obj.provider);
+        }
+      }
+      if (models.length === 0) {
+        // Fallback: disk files (a host session without a usable registry).
+        try {
+          const store = JSON.parse(
+            readFileSync(pathJoin(home, ".pi", "agent", "models-store.json"), "utf8"),
+          ) as Record<string, { models?: Array<{ provider?: string; id?: string }> }>;
+          for (const prov of Object.keys(store)) {
+            for (const m of store[prov]?.models ?? []) {
+              if (typeof m.provider === "string" && typeof m.id === "string") {
+                models.push({ provider: m.provider, id: m.id });
+              }
+            }
+          }
+        } catch { /* no store — empty registry */ }
+        try {
+          const auth = JSON.parse(
+            readFileSync(pathJoin(home, ".pi", "agent", "auth.json"), "utf8"),
+          ) as Record<string, unknown>;
+          for (const k of Object.keys(auth)) authedProviders.add(k);
+        } catch { /* no auth — no provider looks usable */ }
+      }
+      const entries = agentFiles
+        .map((f) => diagnoseChain(f.replace(/\.md$/, ""), readFileSync(pathJoin(agentsDir, f), "utf8"), facts))
+        .filter((e) => e.chain.length > 0);
+      return entries.length === 0 ? [] : formatModelDiagnosis(entries).split("\n");
+    } catch {
+      return []; // diagnostics only — never block the status readout
+    }
   }
 
   pi.registerCommand("gate-status", {
@@ -4374,7 +4658,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         `precommit: ${state.precommit.verdict}` +
           (state.precommit.verdict === "PASS"
             ? ` [lane ${state.precommit.mode ?? "?"}, tests: ${state.precommit.testScope ?? "unknown"}]` +
-              (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run")
+              (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run") +
+              (state.precommit.testScope === "skipped" ? " — ⚠️ tests were NOT run in this lane" : "")
             : "") +
           (state.precommit.at ? ` (${state.precommit.at})` : ""),
         ...formatPrecommitSummary(lastPrecommitTiming(primaryRepoRoot)),
@@ -4401,6 +4686,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           : []),
         `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
         `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
+        ...modelDiagnosisLines(ctx.modelRegistry),
         // Explore: ship commands stay fully gated (L1), but declare_done and
         // auto-continuation are advisory. Normal: the ship gate is OFF.
         state.taskMode === "normal"
@@ -4470,6 +4756,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       loopArmed = true;
       continuationsInjected = 0;
       completionContinuations = 0;
+      loopStall = undefined;
+      stallNoticeShown = false;
       agentDowngradesLocked = false;
       lastRunAborted = false;
       scopeLimitDeclined = false;
@@ -4506,6 +4794,63 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch (e) {
         ctx.ui.notify(`review-gate: could not write lesson log: ${(e as Error).message}`, "error");
       }
+    },
+  });
+
+  // /gate-doctor — read-only health check: verifies every optimization this
+  // package ships actually works in the CURRENT environment (pdw engine, model
+  // chains, opencode-go prune, precommit runner, git hooks, global config
+  // fallback, L5 gate, Copilot gh, command registry). Pure diagnostics: it
+  // reads files and probes executables, writes NOTHING, and never feeds a
+  // gate verdict.
+  pi.registerCommand("gate-doctor", {
+    description: "Diagnose whether all optimizations are live (read-only health check)",
+    handler: async (_args, ctx) => {
+      const home = homedir();
+      const packageRoot = pathJoin(pathDirname(fileURLToPath(import.meta.url)), "..");
+      const readFileSafe = (p: string): string | undefined => {
+        try { return readFileSync(p, "utf8"); } catch { return undefined; }
+      };
+      // git rev-parse --git-path hooks resolves the real hooks dir (worktrees,
+      // core.hooksPath); unavailable → the hooks check degrades to WARN.
+      let hooksDir: string | undefined;
+      try {
+        const out = execFileSync("git", ["rev-parse", "--git-path", "hooks"], {
+          cwd, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+        if (out.length > 0) hooksDir = pathResolve(cwd, out);
+      } catch { /* git unavailable — hooks unverifiable */ }
+      const checks = await runGateDoctor({
+        homeDir: home,
+        packageRoot,
+        agentsDir: pathJoin(home, ".pi", "agent", "agents"),
+        modelsStorePath: pathJoin(home, ".pi", "agent", "models-store.json"),
+        globalConfigPath: globalConfigPath(home),
+        registryFacts: factsFromRegistry(ctx.modelRegistry, home, readFileSafe),
+        hooksDir,
+        workflowCommandCount: Object.keys(WORKFLOW_COMMANDS).length,
+        isNonEnglishText,
+        probePdw: async () => {
+          try { await loadPdw(); return { ok: true }; }
+          catch (e) { return { ok: false, error: (e as Error).message }; }
+        },
+        probeGh: async () => {
+          try {
+            const out = execFileSync("gh", ["--version"], {
+              encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
+            });
+            return { ok: true, value: out.split(/\r?\n/)[0] ?? "" };
+          } catch (e) {
+            const err = e as { code?: unknown; message?: unknown };
+            return { ok: false, error: err.code === "ENOENT" ? "gh not installed" : String(err.message ?? err.code ?? e) };
+          }
+        },
+        readFile: readFileSafe,
+        exists: existsSync,
+        readdir: (p) => { try { return readdirSync(p); } catch { return undefined; } },
+      });
+      const attention = checks.filter((c) => c.status !== "PASS").length;
+      ctx.ui.notify(formatDoctorReport(checks), attention ? "warning" : "info");
     },
   });
 
@@ -4674,7 +5019,17 @@ export default function reviewGate(pi: ExtensionAPI) {
         // re-checked. Only rendered while a review is actually outstanding —
         // once the gate is satisfied there is nothing to scope.
         (problems.length && state.review.verdict !== "READY"
-          ? `\n${formatReviewScopeDirective(reviewScopeFor(primaryRepoRoot, state), previousRoundFindings(state))}\n`
+          ? `\n${formatReviewScopeDirective(reviewScopeFor(primaryRepoRoot, state), previousRoundFindings(state), settledConclusion(state))}\n`
+          : "") +
+        // How many reviewers to spawn, decided from this host's real model
+        // registry. Also on the RESUME message (agent_settled) — deliberately
+        // both, not redundantly: the resume drives the autonomous loop, while
+        // this per-turn prompt is the ONLY carrier on turns the user drives
+        // directly (a paused loop, an exhausted continuation budget, a plain
+        // "go review it" without /review). A reviewer pair is far more
+        // expensive than the ~90 tokens of overlap on a resumed turn.
+        (problems.length && state.review.verdict !== "READY"
+          ? ((d) => (d ? `\n${d}\n` : ""))(fanoutDirective())
           : "") +
         // The fast lane clears a commit but not a push/PR, and finding that
         // out at push time wastes a round. Say it while the lane still shows.

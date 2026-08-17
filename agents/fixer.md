@@ -2,7 +2,7 @@
 name: fixer
 description: Implements reviewer findings into a concrete diff — execution tier (L2). The main agent reviews and merges its output; it never records verdicts.
 model: claude-sonnet-5
-fallbackModels: deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash, oc-sdk-go/deepseek-v4-flash, onekey/deepseek-v4-flash, onekey/grok-4.6, onekey/glm-5.3, claude-opus-5
+fallbackModels: claude-opus-5, opencode-go/deepseek-v4-flash
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true

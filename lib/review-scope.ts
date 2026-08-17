@@ -46,8 +46,28 @@ export interface ReviewScopeDecision {
    * forces `full`: "already reviewed" cannot be claimed for them.
    */
   unreviewedFiles: string[];
+  /** Files the previous approved review covered (empty when unknown). */
+  reviewedFiles: string[];
   /** One human-readable sentence explaining the decision. */
   reason: string;
+}
+
+/**
+ * What the PREVIOUS round already concluded, so a re-review can build on it
+ * instead of re-deriving it. Carrying the settled conclusion forward is the
+ * whole point of an incremental round: without it the reviewer re-litigates
+ * questions it already answered, at max thinking, every round.
+ */
+export interface SettledConclusion {
+  /** The verdict that was recorded ("READY" for the tree we build on). */
+  verdict: string;
+  /** ISO timestamp of that verdict, when known. */
+  at?: string;
+  /**
+   * Review rounds recorded SO FAR — a running count, not the round that
+   * produced the verdict (rounds recorded after it are included).
+   */
+  rounds?: number;
 }
 
 export interface IncrementInput {
@@ -70,13 +90,16 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
   const changedFiles = input.changedFiles ?? [];
   const changedLines = input.changedLines ?? 0;
 
+  const reviewedFiles = input.previouslyReviewedFiles ?? [];
+
   const full = (reason: string): ReviewScopeDecision => {
-    const seen = new Set(input.previouslyReviewedFiles ?? []);
+    const seen = new Set(reviewedFiles);
     return {
       scope: "full",
       changedFiles,
       changedLines,
       unreviewedFiles: changedFiles.filter((f) => !seen.has(f)),
+      reviewedFiles,
       reason,
     };
   };
@@ -103,7 +126,7 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
 
   // A file the previous review never covered has no "already reviewed" status
   // to inherit, so the increment cannot stand on its own.
-  const seen = new Set(input.previouslyReviewedFiles ?? []);
+  const seen = new Set(reviewedFiles);
   const unreviewedFiles = changedFiles.filter((f) => !seen.has(f));
   if (unreviewedFiles.length > 0) {
     return {
@@ -111,6 +134,7 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
       changedFiles,
       changedLines,
       unreviewedFiles,
+      reviewedFiles,
       reason:
         `increment touches ${unreviewedFiles.length} file(s) the previous review never covered ` +
         `(${unreviewedFiles.slice(0, 5).join(", ")}${unreviewedFiles.length > 5 ? ", …" : ""}) — full deep review`,
@@ -122,6 +146,7 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
     changedFiles,
     changedLines,
     unreviewedFiles: [],
+    reviewedFiles,
     reason:
       `increment is ${changedFiles.length} file(s) / ${changedLines} line(s) inside already-reviewed files ` +
       `— deep-read the increment, re-check last round's findings, scan the rest for consistency`,
@@ -140,6 +165,7 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
 export function formatReviewScopeDirective(
   decision: ReviewScopeDecision,
   openFindings: string[],
+  settled?: SettledConclusion,
 ): string {
   const lines: string[] = ["Review scope for this round:"];
   if (decision.scope === "incremental") {
@@ -151,6 +177,24 @@ export function formatReviewScopeDirective(
       `- Hand the reviewer the FULL diff as context anyway — an incremental round narrows what must be ` +
         `re-derived, never what may be looked at.`,
     );
+    // The settled conclusion is what makes a re-review cheap: state plainly
+    // that it stands, so the reviewer builds on it instead of re-arguing it.
+    if (settled) {
+      const covered = decision.reviewedFiles.length
+        ? `${decision.reviewedFiles.length} file(s): ${decision.reviewedFiles.slice(0, 20).join(", ")}` +
+          (decision.reviewedFiles.length > 20 ? ", …" : "")
+        : "the change as it stood then";
+      lines.push(
+        `- SETTLED last round — verdict ${settled.verdict}` +
+          (settled.rounds ? `, ${settled.rounds} round(s) recorded so far` : "") +
+          (settled.at ? ` (${settled.at})` : "") +
+          `, covering ${covered}.`,
+        `- Carry that conclusion forward: what it settled and the increment did not touch stays settled. ` +
+          `Do not re-derive or re-litigate it — report it as MET/unchanged and spend the round on the increment ` +
+          `and on the previous findings listed below. If you find real evidence the settled conclusion was WRONG, ` +
+          `say so and reopen it: carrying it forward is an economy, not a bar on your authority.`,
+      );
+    }
   } else {
     lines.push(`- FULL deep review. ${decision.reason}.`);
   }

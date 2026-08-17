@@ -318,7 +318,78 @@ function parseJson(raw: string): unknown {
   try { return JSON.parse(raw); } catch { return undefined; }
 }
 
-/** Parse `gh pr view --json number,headRefOid,url,state`. */
+/**
+ * `gh pr view --json` field sets, versioned by gh's own field whitelist.
+ * `headRefOid` only exists in newer gh builds; legacy gh (measured: 2.4.0)
+ * rejects the modern list with `Unknown JSON field: "headRefOid"` and the
+ * gate must retry with the legacy list — `analyzeCopilot` then anchors proof
+ * on timestamps instead of the commit (documented fallback).
+ */
+export const PR_VIEW_JSON_FIELDS: Readonly<{ modern: string; legacy: string }> = Object.freeze({
+  modern: "number,headRefOid,url,state",
+  legacy: "number,url,state",
+});
+
+/** True when gh rejects a --json field list it does not know (version drift). */
+export function isUnknownJsonFieldError(stderr: string): boolean {
+  return /Unknown JSON field/.test(stderr);
+}
+
+/** First non-empty stderr line (gh's real cause), else the fallback text. */
+export function firstErrorLine(stderr: string, fallback: string): string {
+  const line = stderr.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
+  return line ? line.slice(0, 200) : fallback;
+}
+
+export interface GhCommandResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+export type PrViewDecision =
+  | { ok: true; pr: PrSummary }
+  | { ok: false; error: string };
+
+/**
+ * Decide the `gh pr view` outcome from the modern and (optional) legacy
+ * attempts. Pure so the version-drift control flow is behavior-testable:
+ *
+ *  - modern ok      → its payload wins (unparseable ⇒ its own error).
+ *  - modern failed  → the retry with the legacy field list happens ONLY for
+ *    the field-whitelist error (`Unknown JSON field: "headRefOid"`, legacy
+ *    gh); any other failure is the real cause and is reported as-is.
+ *  - modern whitelist-failed, legacy ok → legacy payload wins (head null;
+ *    `analyzeCopilot` then anchors proof on timestamps).
+ *  - modern whitelist-failed, legacy also failed → THE LEGACY error is
+ *    reported — the whitelist error would mask the real cause (e.g.
+ *    "no pull requests found for branch \"main\"").
+ */
+export function decidePrView(
+  modern: GhCommandResult,
+  legacy: GhCommandResult | undefined,
+  fallbackText = "`gh pr view` failed (gh missing, not authenticated, or no PR)",
+): PrViewDecision {
+  if (modern.ok) {
+    const pr = parsePrView(modern.stdout);
+    if (pr) return { ok: true, pr };
+    return { ok: false, error: "`gh pr view` returned no recognizable pull request" };
+  }
+  if (!isUnknownJsonFieldError(modern.stderr)) {
+    return { ok: false, error: firstErrorLine(modern.stderr, fallbackText) };
+  }
+  if (!legacy) {
+    return { ok: false, error: firstErrorLine(modern.stderr, fallbackText) };
+  }
+  if (!legacy.ok) {
+    return { ok: false, error: firstErrorLine(legacy.stderr, fallbackText) };
+  }
+  const pr = parsePrView(legacy.stdout);
+  if (!pr) return { ok: false, error: "`gh pr view` returned no recognizable pull request" };
+  return { ok: true, pr };
+}
+
+/** Parse `gh pr view --json number,headRefOid,url,state` (head optional). */
 export function parsePrView(raw: string): PrSummary | undefined {
   const obj = asRecord(parseJson(raw));
   if (!obj) return undefined;

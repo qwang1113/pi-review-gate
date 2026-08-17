@@ -2,7 +2,7 @@
 name: recon
 description: Cheap read-only reconnaissance agent — searches and reads code/docs on the cheap tier (thinking off/low). Delegate heavy reading, code search, and doc exploration to recon; it never writes, never edits, never judges.
 model: claude-haiku-4-5
-fallbackModels: deepseek/deepseek-v4-flash, oc-sdk-go/deepseek-v4-flash, onekey/deepseek-v4-flash
+fallbackModels: opencode-go/deepseek-v4-flash
 thinking: low
 systemPromptMode: replace
 inheritProjectContext: true

@@ -2,6 +2,8 @@
 
 **Quality gates for [Pi](https://github.com/earendil-works/pi-coding-agent)** — ship-gate hard blocking, persistent gate state, auto-continuing review loop. Globally installable.
 
+> **新用户？先读 [QUICKSTART.md](QUICKSTART.md)（5 分钟上手），再看本文件。**
+
 > Quality gates the model can't skip: `git commit`, `git push`, `gh pr create`, and `gh pr edit`
 > are **hard-blocked** at the `tool_call` layer until an independent review is
 > READY **and** precommit PASSes — both bound to the exact worktree state they
@@ -54,17 +56,28 @@ L2  Auto-continuation     agent_settled → if gates unmet, inject
                           [REVIEW_GATE_RESUME] follow-up (recursion-guarded,
                           max 10 rounds, plateau detection; a user ESC abort
                           — "Operation aborted" — pauses the loop until the
-                          user's next message)
+                          user's next message). A STALL BREAKER stops the
+                          injections when nothing moves (same fingerprint,
+                          verdicts, round count and unmet list 3x in a row —
+                          i.e. an external blocker such as provider quota);
+                          a freshly running subagent counts as motion, so a
+                          live review is never orphaned. Tighten-only: no
+                          verdict is granted and ship stays blocked.
+                          The resume text also carries the reviewer FAN-OUT
+                          computed from the host's model registry (one judge
+                          family ⇒ ONE reviewer + a declared note)
 L3  Git hooks             pre-commit / pre-push / commit-msg verify the gate
                           sidecar even for commits made outside Pi
 L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
                           strict Simplified-Chinese directive every turn
                           (thinking in Chinese too; protocol English tokens
                           READY/BLOCKED/commit-msg/code stay exempt)
-L5  Commit/PR English     tool_call → ADVISORY warning when a git commit message
+L5  Commit/PR English     tool_call → HARD block when a git commit message
                           or PR title/body is PREDOMINANTLY non-English (majority
-                          body); the language directive (L4) + reviewer enforce
-                          English ship text; a minority foreign token passes
+                          body; in-session escape: /gate-bypass, outside:
+                          REVIEW_GATE_BYPASS=1 (git hooks only)); the language
+                          directive (L4) + reviewer enforce English ship text;
+                          a minority foreign token passes
 L6  Test-label English    pre-commit → block a staged it/test/describe label
                           that is PREDOMINANTLY non-Latin, unless a
                           `// review-gate: allow-non-english` (line) or `-file`
@@ -245,9 +258,9 @@ definitions** — decided up front, not re-selected per task:
 
 | Role | When | Gates? | Model priority (first = preferred) | Thinking |
 |------|------|--------|-------------------------------------|----------|
-| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6 | `max` |
-| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6 | `max` |
-| **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | Fable 5 → Opus 5 → GPT-5.6 Sol → GLM-5.3 → Grok 4.6 | `max` |
+| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → Opus 5 → opencode-go/flash | `max` |
+| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | Fable 5 → Opus 5 → opencode-go/flash | `max` |
+| **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | Fable 5 → Opus 5 → opencode-go/flash | `max` |
 
 `thinking` is a single value, not a fallback list; `max` is the highest valid
 pi level (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — pi clamps
@@ -263,12 +276,15 @@ and numbers in `docs/parallel-execution-plan.md`:
 
 | Tier | Models (first = preferred) | Role | Verdict power |
 |---|---|---|---|
-| **L1 cheap/fast** | `claude-haiku-4-5` → `deepseek-v4-flash` | `agents/triage.md` — diff pre-scan, mechanical checklist; `agents/recon.md` — strictly read-only code/doc search and heavy reading. Thinking `low`/off. | none — advisory input for the reviewer |
-| **L2 execution** | `claude-sonnet-5` → `deepseek-v4-pro` → `deepseek-v4-flash` → `grok-4.6` → `glm-5.3` → `claude-opus-5` | `agents/worker.md`, `agents/planner.md`, `agents/fixer.md` — implements modules/findings into a diff the main agent merges. Thinking `max`. | none — output reviewed by the main agent |
+| **L1 cheap/fast** | `claude-haiku-4-5` → `opencode-go/deepseek-v4-flash` | `agents/triage.md` — diff pre-scan, mechanical checklist; `agents/recon.md` — strictly read-only code/doc search and heavy reading. Thinking `low`/off. | none — advisory input for the reviewer |
+| **L2 execution** | `claude-sonnet-5` → `claude-opus-5` → `opencode-go/deepseek-v4-flash` | `agents/worker.md`, `agents/planner.md`, `agents/fixer.md` — implements modules/findings into a diff the main agent merges. Thinking `max`. | none — output reviewed by the main agent |
 
-Model IDs resolve against the configured providers (`~/.pi/agent/models.json`,
-onekey gateway; `oc-sdk-go` comes from the `pi-opencode-bridge` package;
-`deepseek/…` is the user's own DeepSeek subscription). Protocol rules (in the
+The chains are deliberately short: pi-subagents requires every fallback to
+resolve in the active registry, so the pinned chains name only providers the
+package can rely on (anthropic / opencode-go) plus the flash fallback. A user
+who configures a onekey gateway / oc-sdk-go (`pi-opencode-bridge`) / a
+DeepSeek subscription can extend the chains in
+`~/.pi/agent/agents/*.md`. Protocol rules (in the
 `review-loop`
 skill, all default-on): triage findings feed the reviewer but never
 `record_review`; a low-risk change (docs / formatting / one-line) may be
@@ -560,6 +576,18 @@ Per-project config lives in `.pi/review-gate.json`:
 Every field is validated independently; a missing/corrupt config silently
 falls back to defaults and can never loosen the gate.
 
+**User-global config (`~/.pi/review-gate.json`) is the fallback layer.** The
+same file shape may be placed in the user's home directory; the effective
+config is merged **field-by-field** in the order defaults ← global ← project
+(project values win). Sub-objects merge at their own level: `llmGuards` /
+`arbiter` / `copilotReview` merge field-by-field, and `precommit` merges
+**per step** (`lint` / `typecheck` / `build` / `test` — a step the project
+mentions replaces that step only; an explicit `null` skip wins). The git
+pre-commit hook reads the same two files for its `docSync` mirror (project
+wins, then global, then the enforced default), so the extension and the hook
+never disagree. A project that states nothing uses the user's global
+preferences; a machine without either file runs the documented defaults.
+
 ### Enforced code↔doc sync (`docSync`, default ON)
 
 A mechanical "a `.md` file was touched" rule would be satisfied by appending a
@@ -731,7 +759,8 @@ The loop protocol (also available as the `review-loop` skill):
 
 ```
 edit code (batch related edits — the loop is billed per ROUND, not per line)
-  → spawn the reviewer (async) + call run_precommit — they run CONCURRENTLY
+  → run_precommit first (cheap checks before the expensive judge)
+  → spawn the reviewer(s) — two cross-family, SAME turn, async
   → call record_review with the FULL reviewer output      # all fences parsed, worst wins
   → BLOCKED? fix everything, then start again from precommit
   → READY?  call declare_done                             # re-validated server-side
@@ -747,15 +776,16 @@ are auto-sharded into ≤4 parallel reviewers via the pdw engine, then one
 integration review over the whole change. The thresholds are constants in
 `lib/parallel-review.ts` (`SHARD_THRESHOLD_FILES` / `SHARD_THRESHOLD_LINES`).
 
-**Why the review and precommit may overlap.** The runner schedules itself
-(no flags): any `lint:fix` script runs FIRST — it edits files, so the
-worktree stabilizes before anything reads it — then the remaining checks
-(lint/typecheck/build/test) run in parallel with declaration-order output.
-The reviewer therefore runs concurrently (spawn it `async`, then call
-`run_precommit`), and the verdict binds to the worktree fingerprint either
-way: the worst a race can do is discard a verdict — never ship unverified
-work. A FAIL still takes priority over the review: fix it before spending
-the expensive judge's time. Design record and measured numbers:
+**Precommit runs FIRST, review second — never concurrently.** The runner
+schedules itself (no flags): any `lint:fix` script runs FIRST — it edits
+files, so the worktree stabilizes before anything reads it — then the
+remaining checks (lint/typecheck/build/test) run in parallel with
+declaration-order output. The review then spends the expensive judges'
+(max thinking) time only on a tree the cheap checks already confirmed
+green. This order is deliberate: a precommit FAIL is cheaper to fix before
+the expensive judge looks, and a review spent on a red tree is a fully
+wasted round — an earlier design ran both concurrently to save wall time
+and was abandoned for exactly that reason. Design record:
 `docs/parallel-execution-plan.md`.
 
 The reviewer should end with a fenced JSON verdict:
@@ -1089,6 +1119,7 @@ gated **per repo**:
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
 | `/gate-reset` | Reset gate state (mode returns to undecided — the agent re-decides via `set_gate_mode`; also clears the agent-downgrade lock) |
 | `/gate-lesson <text>` | Append a lesson to `.pi/review-gate-lessons.md` (self-improvement log) |
+| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — pdw engine (parallel review / wave daily), agent model chains, opencode-go models-store prune, precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
 
 ### sd0x-dev-flow workflow commands
 
@@ -1366,20 +1397,24 @@ only — no blocking, no command rewriting** (`lib/edit-discipline.ts`):
    never pays for it, and nothing is ever blocked. All three sites are skipped
    in normal mode (the step-aside adds no extension text).
 
-### Commit/PR English gate (L5, advisory)
+### Commit/PR English gate (L5, HARD)
 
 Complementary to L4: while L4 makes user-facing *chat* Simplified Chinese, L5
-asks for **commit messages and PR title/description in English**. It is
-**advisory, not a hard block**: `-m`/`--title`/`--body` extraction is a
-heuristic and can mis-read complex shell forms (e.g. a heredoc-substituted
-message `git commit -m "$(cat <<'EOF' … EOF)"`), so a wrong language guess must
-never stop a legitimate ship. The check uses a **majority-body policy**
+requires **commit messages and PR title/description in English** and it is a
+**hard block**: a predominantly non-English commit message or PR title/body
+returns `block: true` at the tool layer, with the escape hatches named in the
+reason (`/gate-bypass` in-session; `REVIEW_GATE_BYPASS=1` only outside the
+session, where the git hooks honor it) so a wrong guess never strands a
+legitimate
+ship. (It was advisory until 2026-08-16 — user policy hardened it; the
+extraction heuristic concern is bounded by the majority-body policy below
+plus the escape hatch.) The check uses a **majority-body policy**
 (`lib/lang-detect.ts`): after stripping non-prose (code fences, inline code,
 URLs, Markdown link destinations, HTML tags) it counts letters and flags the
 text only when a **non-Latin script** (CJK, Kana, Hangul, Cyrillic, …) is the
 **majority** of them — so a mostly-English body with a **stray/minority** quoted
 foreign term (e.g. one `确认中`) **passes**, while a predominantly non-Latin body
-warns. Each text (title, body, each commit message) is judged **separately** so
+blocks. Each text (title, body, each commit message) is judged **separately** so
 a long English body can't mask a fully non-English title. The pure-Latin
 romanized-language semantic layer runs only when the text has **zero** non-Latin
 letters. Counting is **asymmetric** so markup can't hide a non-Latin body:
@@ -1387,9 +1422,10 @@ non-Latin letters are counted over the **full** text (a `确认中` inside a cod
 fence still counts), while Latin letters are counted over **prose only** (a big
 Latin code block can't dilute the ratio). Known conservative side-effect: an
 English text quoting a **large** non-Latin code sample can tip to "majority
-non-Latin" — advisory-only for L5 (a warning), and a deliberate non-English test
-label can be exempted with the L6 bypass marker. Enforcement lives with the humans-in-the-loop: the L4 language
-directive instructs the agent to write ship text in English every turn, and the
+non-Latin" and block — use the escape hatch or rephrase; a deliberate
+non-English test label can be exempted with the L6 bypass marker. Enforcement
+is layered: the L4 language directive instructs the agent to write ship text in
+English every turn, the tool layer blocks, and the
 reviewer treats a **predominantly** non-English commit message or PR title/body
 as a **P1 finding** (a single minority foreign token is **not** a finding). If a
 non-English PR body can only be fixed by an action the gate itself blocks (the
@@ -1529,8 +1565,8 @@ second line of defence.
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
 | `run_precommit --mode full` (this repo) | ~100 s | Dominated by the two timing loops in the suite; typecheck runs CONCURRENTLY with `npm test` — the timing loops themselves are not reducible |
-| **A review round (small diff)** | **~3 min reviewer ⇄ precommit, overlapped** | Two cross-family reviewers, no pdw engine — <20 files AND <500 lines; see `docs/parallel-execution-plan.md` |
-| **A review round (large diff)** | **≤4 parallel shard reviewers ⇄ precommit** | Auto-sharded via pdw engine + one integration review; see `docs/parallel-execution-plan.md` |
+| **A review round (small diff)** | **~3 min reviewer, precommit first** | Two cross-family reviewers, no pdw engine — <20 files AND <500 lines; precommit runs BEFORE the review (see the loop protocol); see `docs/parallel-execution-plan.md` |
+| **A review round (large diff)** | **≤4 parallel shard reviewers, precommit first** | Auto-sharded via pdw engine + one integration review; see `docs/parallel-execution-plan.md` |
 
 **Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
 ran six consecutive times on this repo (typecheck concurrent with `npm test`,
@@ -1578,13 +1614,17 @@ agents/reviewer.md            gatekeeper reviewer override, pinned model @ max
 lib/model-ranking.ts          leaderboard-scored judge ranking (reference for the pins)
 scripts/fetch-leaderboard.mjs opt-in, gate-external leaderboard fetcher (the only network I/O)
 lib/shell-lex.ts              quote-aware shell lexer (segments + dequoted tokens)
-lib/lang-detect.ts            L5: non-Latin-script detection for commit/PR English advisory
+lib/lang-detect.ts            L5: non-Latin-script detection for the commit/PR English hard gate
 scripts/scan-test-labels.cjs  L6: non-English test-label scanner (pre-commit, staged content)
 lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count/testScope table → PASS/FAIL/ERROR) + failedStepNames / stepTimings (diagnostics only)
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)
 lib/fingerprint.ts            worktree fingerprint (content-addressed git tree hash; staging-invariant) + tree increments for incremental review
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
-lib/review-scope.ts           incremental-review scoping + escalation thresholds (pure)
+lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
+lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running subagent, notice text (pure)
+lib/review-fanout.ts          reviewer fan-out planning from registry facts (one family ⇒ ONE reviewer + declared note; pure)
+lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
+lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)
 lib/blocked-marker.ts         .blocked marker ownership (record failure, reclaim only our own/orphans)
 lib/verdict-parse.ts          all-fence worst-wins verdict parser

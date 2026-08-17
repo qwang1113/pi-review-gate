@@ -208,12 +208,25 @@ try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch {
 
 // Per-project docSync knob (defense-in-depth mirror of unmetRequirements).
 // Default ON; only an explicit `"docSync": false` in a valid config disables.
-// Missing/corrupt config ⇒ default (enforced) — fail-safe, never fail-open.
-let docSyncEnforced = true;
-try {
-  const cfg = JSON.parse(readFileSync(".pi/review-gate.json", "utf8"));
-  if (cfg && typeof cfg === "object" && cfg.docSync === false) docSyncEnforced = false;
-} catch { /* no config — default enforced */ }
+// The user-global config (~/.pi/review-gate.json) is the FALLBACK — the
+// project config wins when it states the field, exactly like the extension's
+// field-by-field merge. Missing/corrupt config ⇒ default (enforced) —
+// fail-safe, never fail-open.
+function readDocSyncFlag(path) {
+  try {
+    const cfg = JSON.parse(readFileSync(path, "utf8"));
+    if (cfg && typeof cfg === "object" && typeof cfg.docSync === "boolean") return cfg.docSync;
+  } catch { /* missing/corrupt — fall through */ }
+  return undefined;
+}
+const projectDocSync = readDocSyncFlag(".pi/review-gate.json");
+const globalDocSync = readDocSyncFlag(
+  require("node:os").homedir() + "/.pi/review-gate.json"
+);
+const docSyncEnforced =
+  projectDocSync !== undefined ? projectDocSync
+  : globalDocSync !== undefined ? globalDocSync
+  : true;
 
 // Lane requirement. pre-push re-execs this hook with REVIEW_GATE_REQUIRE_FULL=1
 // because publishing needs a precommit run whose tests were not narrowed; a
