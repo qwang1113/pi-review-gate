@@ -56,8 +56,15 @@ export const WORKFLOW_COMMANDS = {
       "(3) only if Phase A was READY, run ONE integration reviewer over the whole change (cross-shard seams, duplicated " +
       "abstractions, the loop goal criterion by criterion) and record ITS output ALONE, because it carries the single docSync " +
       "attestation. Fix every P0-P2 finding and re-review until READY (later rounds reuse the same shards). " +
-      "Small diffs (<20 files AND <500 lines) skip the engine: spawn the two cross-family reviewers as async subagents IN THE SAME TURN " +
+      "Small diffs (<20 files AND <500 lines) skip the engine: spawn the cross-family reviewers as async subagents IN THE SAME TURN " +
       "(both async:true, never one after the other) after the precommit PASS, and run precommit and the review serially — precommit first, always. " +
+      "HOW MANY REVIEWERS: the gate computes this from the host's real model registry (planFanoutFromFacts, lib/review-fanout.ts) and " +
+      "appends the decision to this prompt as a 'Reviewer fan-out for this round' block — follow it. Two judge-eligible FAMILIES ⇒ spawn two, " +
+      "one per family. Only ONE family ⇒ spawn ONE reviewer and copy the plan's note into the recorded review: a second same-family reviewer " +
+      "doubles the cost while sharing the first one's blind spots, and passing it off as a cross-family double review would be a lie. " +
+      "This governs the reviewers you spawn yourself; Phase A shard counts come from the engine's sharding. " +
+      "RE-REVIEW: a later round hands the reviewer the previous round's verdict and findings (the gate's 'Review scope for this round' block) — " +
+      "settled, unchanged material gets a consistency scan, not a re-derivation. " +
       "Treat this as an explicit request to execute the review loop, not merely explain it.",
       invocation,
     ),

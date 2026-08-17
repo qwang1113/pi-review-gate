@@ -31,13 +31,18 @@ agent：调 set_gate_mode("loop")
   → 问你目标（一次一题，N of M）→ propose_loop_goal 弹窗让你批准
   → 改代码
   → run_precommit（fast）→ 全绿
-  → 双 reviewer（两个不同模型族的 max 思考模型）→ record_review
+  → reviewer（本机有两个可判模型族就跑两个，只有一族就跑一个并在 Note 里声明）→ record_review
   → BLOCKED？修 → 再来一轮；READY？declare_done → 提交
 ```
 
 - **先 precommit 后 review**：便宜的检查先跑，贵的审核只花在绿树上。
 - 每轮按 ROUND 计费：**把相关改动批量做完再触发一轮**，比十个小轮省十倍。
 - 最终轮用 `run_precommit mode=full`（push/PR/declare_done 要求测试没被收窄）。
+- **指纹是内容寻址且 staging-invariant**：`git add`、`git commit`、以及**不改写工作区文件的**切分支
+  都**不会**动它，READY + PASS 依然有效——**不要为了"重建绑定"而重跑一轮 review**（那是纯浪费）。
+  只有工作区文件内容变化才会让指纹变化（编辑、lint:fix、或一次会改写文件的 checkout）。
+- **复审要带上一轮结论**：第 N+1 轮把上一轮的 verdict 与 findings 交给 reviewer；
+  已定论且未改动的部分只做一致性扫描，不重新论证（门禁会自动注入这段 scope）。
 
 ## 4. 配置（可选）
 
@@ -57,6 +62,8 @@ agent：调 set_gate_mode("loop")
 | `docSync enforced` | 代码改动缺文档 attestation | reviewer 在 verdict 里给 `UPDATED`/`NOT_NEEDED` |
 | commit/PR 文案非英文 | L5 硬拦截（majority-body 判定） | 改成英文；或你执行 `/gate-bypass <reason>` |
 | `Unknown JSON field: "headRefOid"` | gh 版本过老 | 已自动 fallback（升级 gh 更佳） |
+| 模型 429 / 额度耗尽，循环空转 | provider 限流，注入再多也没用 | 熔断器会在连续无进展后停止注入并提示；`/model` 切到其它 provider（如 anthropic），你的下一条消息即恢复循环 |
+| agents 副本与仓库不同步（正文过时） | `~/.pi/agent/agents/*.md` 落后于本仓库 | 重跑 `node scripts/install-package.mjs`（幂等）；用 `/gate-doctor` 检出 |
 | 想完全绕过 | — | 你执行 `/gate-bypass <reason>`（会话内）或会话外用 `REVIEW_GATE_BYPASS=1`（仅 hooks 层） |
 
 ## 6. 常用命令
@@ -73,7 +80,7 @@ agent：调 set_gate_mode("loop")
 
 ## 7. 成本须知
 
-- review 用顶级推理模型（默认跨族双审），**按轮计费**——批量编辑再触发；
+- review 用顶级推理模型（有两族就跨族双审，只有一族就单审 + Note），**按轮计费**——批量编辑再触发；
 - `opencode-go` provider 在代码层面**只允许 deepseek-v4-flash**（其余模型按次计费且被显式禁止）；
-- 小 diff（<20 文件且 <500 行）不经过并行引擎，直接双 reviewer；
+- 小 diff（<20 文件且 <500 行）不经过并行引擎，直接 spawn reviewer；
 - 大 diff 自动分片（≤4 片并行）+ 一次集成 review。

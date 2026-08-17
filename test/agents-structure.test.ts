@@ -213,3 +213,91 @@ test("SKILL.md and AGENTS.md default the final review to TWO cross-family review
     assert.match(src, /worst(-| )wins/i, `${file} must keep worst-wins for multiple verdicts`);
   }
 });
+
+test("REGRESSION: no agent names an extension tool, in its allowlist OR in its prose", () => {
+  // `tools:` is a STRICT allowlist that does not load extension code, so an
+  // extension-provided tool listed there fails the whole launch. Observed:
+  // every reviewer run ended as `failed` with "requested unavailable child
+  // tools: intercom" — the verdict text survived only because it had already
+  // been written to the artifact file.
+  //
+  // The prose matters just as much: an agent told to "use `intercom` when
+  // blocked" will try, fail, and stall on a capability that does not exist.
+  // Frontmatter and body are therefore checked with ONE full-text assertion.
+  const EXTENSION_TOOLS = ["intercom"];
+  for (const file of readdirSync(AGENTS).filter((f) => f.endsWith(".md"))) {
+    const src = readFileSync(join(AGENTS, file), "utf8");
+    // Anchored on the FRONTMATTER (not any line that happens to start with
+    // "tools:"), so a body line can never satisfy the existence check.
+    assert.match(frontmatter(file), /^tools:/m, `${file} must declare tools:`);
+    for (const tool of EXTENSION_TOOLS) {
+      assert.doesNotMatch(
+        src,
+        // Case-insensitive: prose capitalizes ("Intercom") at sentence start.
+        new RegExp(`\\b${tool}\\b`, "i"),
+        `${file}: "${tool}" is an extension tool — a child agent cannot get it. ` +
+          `Listing it under tools: fails the launch, and promising it in the prose ` +
+          `makes the agent stall on a channel it does not have`,
+      );
+    }
+  }
+});
+
+test("REGRESSION: the protocol forbids a SAME-family reviewer pair, in all four places", () => {
+  // Observed: a host with exactly one judge-eligible family still spawned two
+  // `claude-fable-5` reviewers and called it a cross-family double review.
+  // The rule has to exist wherever the agent might read it.
+  const REVIEWER_MD = join(AGENTS, "reviewer.md");
+  for (const file of [SKILL_MD, AGENTS_MD, REVIEWER_MD]) {
+    const src = readFileSync(file, "utf8");
+    assert.match(
+      src,
+      /same[- ]family/i,
+      `${file} must rule out a same-family reviewer pair explicitly`,
+    );
+    assert.match(
+      src,
+      /review-fanout\.ts|planFanoutFromFacts/,
+      `${file} must point at the module that COMPUTES the reviewer count`,
+    );
+  }
+  // …and in the /review command prompt the extension actually sends.
+  const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
+  assert.match(commands, /same[- ]family/i, "/review prompt must state the rule");
+
+  // Scope guard: shard counts belong to the engine, not to this rule.
+  const skill = readFileSync(SKILL_MD, "utf8");
+  // Whitespace-tolerant: these files are hard-wrapped prose, so a rule may
+  // legitimately straddle a line break.
+  assert.match(skill, /shard\s+reviewers\s+is\s+decided\s+by\s+the\s+engine/i);
+});
+
+test("REGRESSION: every re-review must carry the previous round's conclusion", () => {
+  // Without this, round N+1 re-derives what round N already settled — the
+  // most expensive way to learn nothing new.
+  for (const file of [SKILL_MD, AGENTS_MD]) {
+    const src = readFileSync(file, "utf8");
+    assert.match(
+      src,
+      /carries\s+the\s+previous\s+round's\s+conclusion/i,
+      `${file} must require re-reviews to carry the previous conclusion`,
+    );
+    // Specific enough to actually lock the ADVISER's goal re-review: a bare
+    // /adviser/ match is vacuous in files that name the agent many times.
+    assert.match(
+      src,
+      /adviser[^.]{0,400}?(objection|goal re-review)|goal re-review[^.]{0,200}?adviser/is,
+      `${file} must require the adviser's goal re-review to carry its own objections`,
+    );
+    assert.match(
+      src,
+      /consistency\s+scan/i,
+      `${file} must say settled material gets a scan, not a re-derivation`,
+    );
+  }
+  // The reviewer must be told it may still reopen a settled conclusion:
+  // an economy that silently removed authority would be a gate weakening.
+  const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
+  assert.match(reviewer, /re-litigate/i);
+  assert.match(reviewer, /reopen it/i);
+});

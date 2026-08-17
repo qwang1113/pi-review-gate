@@ -100,6 +100,7 @@ import {
   decideReviewScope,
   formatReviewScopeDirective,
   type ReviewScopeDecision,
+  type SettledConclusion,
 } from "../lib/review-scope.ts";
 import {
   advisoryChangeToken,
@@ -178,6 +179,19 @@ import {
 import { fitDialogMessage } from "../lib/dialog-budget.ts";
 import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "../lib/model-diagnose.ts";
 import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "../lib/gate-doctor.ts";
+import {
+  buildStallNotice,
+  evaluateStall,
+  progressSignature,
+  STALL_MOTION_MAX_AGE_SEC,
+  STALL_REPEAT_LIMIT,
+  type StallState,
+} from "../lib/loop-stall.ts";
+import {
+  formatFanoutDirective,
+  planFanoutFromFacts,
+  type JudgeFacts,
+} from "../lib/review-fanout.ts";
 import { isModelAllowed, loadPdw } from "../lib/pdw-bridge.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
@@ -296,6 +310,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   let state: GateState = emptyState(null, DEFAULT_MAX_ROUNDS);
   let cwd = process.cwd();
   let continuationsInjected = 0; // total auto-continuation injections (persisted)
+  // L2 stall breaker (in-memory by design: a restart is itself a change of
+  // circumstances, and a stale stall must never outlive the session).
+  let loopStall: StallState | undefined;
+  let stallNoticeShown = false;
   /**
    * L7/L8 continuations spent on COMPLETION-only work (waiting for Copilot,
    * negotiating the goal). Separate budget on purpose: a Copilot review that
@@ -728,6 +746,72 @@ export default function reviewGate(pi: ExtensionAPI) {
     return last.fingerprints.slice(0, 20);
   }
 
+  /**
+   * The conclusion the previous round already reached, so the next reviewer
+   * builds on it instead of re-deriving it. Only the READY verdict the
+   * increment is measured against qualifies: an unapproved tree has settled
+   * nothing. Undefined when there is no such review (⇒ a full round anyway).
+   */
+  function settledConclusion(st: GateState): SettledConclusion | undefined {
+    const base = st.lastReadyReview;
+    if (!base) return undefined;
+    // `rounds` is the recorded-round COUNT at directive time, not the round
+    // that produced the verdict (rounds recorded after it are included) — the
+    // directive words it that way too.
+    return { verdict: "READY", at: base.at, rounds: st.rounds.length };
+  }
+
+  /**
+   * Reviewer fan-out facts. The session's own model registry is AUTHORITATIVE:
+   * it includes built-in catalogs (anthropic) that never appear in
+   * models-store.json. The disk view is partial, so it may CONFIRM that judges
+   * exist but must never be the basis for claiming there are none — that
+   * mistake once reported every built-in judge chain as unavailable while the
+   * review was literally running on one of them.
+   *
+   * Cached because before_agent_start receives no ctx (hence no registry), and
+   * a registry does not change within a session.
+   */
+  let registryJudgeFacts: JudgeFacts | undefined;
+
+  function readFileSafeFs(p: string): string | undefined {
+    try { return readFileSync(p, "utf8"); } catch { return undefined; }
+  }
+
+  /** Warm the authoritative facts from any ctx that carries a registry. */
+  function rememberJudgeFacts(registry: unknown): void {
+    if (registryJudgeFacts || registry === undefined) return;
+    try {
+      // No file reader: registry-only, so a disk fallback can never be
+      // mistaken for the authoritative view.
+      const facts = factsFromRegistry(registry, homedir(), () => undefined);
+      if (facts.models.length > 0) registryJudgeFacts = facts;
+    } catch { /* unusable registry — stay on the disk view */ }
+  }
+
+  /**
+   * How many reviewers this host can actually field, as a fact the gate
+   * computed. Prompt-only: it never selects a model (the pin in the agent file
+   * does that), never records a verdict and never touches the ship gate.
+   * Returns undefined when the facts are too weak to say anything true.
+   */
+  function fanoutDirective(): string | undefined {
+    try {
+      if (registryJudgeFacts) {
+        const plan = planFanoutFromFacts(registryJudgeFacts);
+        return plan ? formatFanoutDirective(plan) : undefined;
+      }
+      const plan = planFanoutFromFacts(factsFromRegistry(undefined, homedir(), readFileSafeFs));
+      // Partial view — CONFIRM ONLY. models-store.json omits built-in catalogs
+      // (anthropic), so this view can prove that two judge families exist but
+      // never that a second one is missing: "only one family" drawn from it
+      // would suppress a double review that was actually possible, and put a
+      // false note into the recorded verdict. Denial in any form (SINGLE or
+      // NONE) therefore stays silent until the real registry is warmed.
+      return plan && plan.crossFamily ? formatFanoutDirective(plan) : undefined;
+    } catch { return undefined; }
+  }
+
   function classifier(): LlmClassifier {
     if (!llmClassifier || llmClassifierModel !== projectConfig.llmGuards.model) {
       llmClassifier = createLlmClassifier(projectConfig.llmGuards.model);
@@ -889,6 +973,29 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* display-only */ }
   }
 
+  /**
+   * Is a subagent demonstrably still working? Read from the same artifact scan
+   * the TUI widget uses, so the breaker and the display can never disagree.
+   *
+   * Only FRESH runs count (`STALL_MOTION_MAX_AGE_SEC`): a run that has been
+   * "running" for hours is the hung case the breaker exists for, not motion.
+   * Any failure to scan yields false — the breaker keeps its normal behavior
+   * rather than being silently disabled by an unreadable directory.
+   */
+  function subagentInMotion(): boolean {
+    try {
+      // `maxAgeSec` only prunes FINISHED runs from the scan (lib/ui-widget.ts:
+      // a running run is always kept). The age bound that matters here is the
+      // explicit predicate below — the option merely keeps the scan cheap.
+      const agents = scanAgentArtifacts(pathJoin(cwd, ".pi-subagents", "artifacts"), Date.now(), {
+        maxAgeSec: STALL_MOTION_MAX_AGE_SEC,
+      });
+      return agents.some((a) => a.state === "running" && a.ageSec <= STALL_MOTION_MAX_AGE_SEC);
+    } catch {
+      return false;
+    }
+  }
+
   // ---------- user-visible output channels ----------
   //
   // Two rules, both learned the hard way (see lib/dialog-budget.ts):
@@ -975,6 +1082,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     loopArmed = mode === "loop";
     continuationsInjected = 0;
     completionContinuations = 0;
+    loopStall = undefined; // a mode decision is a change of circumstances
+    stallNoticeShown = false;
     persist(ctx);
   }
 
@@ -2641,6 +2750,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      // Precommit runs BEFORE the review every round, so this is the earliest
+      // reliable place to warm the authoritative model facts the fan-out
+      // directive needs (before_agent_start receives no ctx, hence no registry).
+      rememberJudgeFacts((ctx as { modelRegistry?: unknown }).modelRegistry);
       // Available in every mode: explore allows edits/bash, so the agent may
       // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
@@ -2890,6 +3003,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       // history — it cannot loosen the ship gate.
       continuationsInjected = 0;
       completionContinuations = 0;
+      loopStall = undefined; // a completed task is real progress
+      stallNoticeShown = false;
       persist(ctx as unknown as ExtensionContext);
       return {
         content: [{ type: "text", text: `review-gate: done accepted. ${params.summary}` }],
@@ -4153,6 +4268,43 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
 
+    // L2 circuit breaker: an unmet gate justifies another turn only while
+    // something is still MOVING. When the fingerprint, both verdicts, the round
+    // count and the unmet list are all unchanged for STALL_REPEAT_LIMIT
+    // evaluations in a row, the blocker is external (provider out of quota,
+    // subagent launch failure, unreachable model) and another injection would
+    // only burn the budget telling the agent to retry the impossible — the
+    // observed 7-injection quota burn. Stop injecting and name the cause.
+    // Tighten-only: no verdict is granted, ship commands stay blocked.
+    const stall = evaluateStall(
+      loopStall,
+      progressSignature({
+        fingerprint: fp.unavailable ? "" : fp.digest,
+        reviewVerdict: state.review.verdict,
+        precommitVerdict: state.precommit.verdict,
+        rounds: state.rounds.length,
+        problems: [...problems, ...completion],
+      }),
+      STALL_REPEAT_LIMIT,
+      // A running reviewer is why the signature is unchanged: the verdict it
+      // will produce does not exist yet. Cutting the loop off there would
+      // orphan the very review the gate is waiting for, so observable work in
+      // flight counts as motion — until it is too old to be believable.
+      { inMotion: subagentInMotion() },
+    );
+    loopStall = stall;
+    if (stall.stalled) {
+      // Once per stall, not once per turn: the state persists in `loopStall`,
+      // and any real progress resets both the count and this flag.
+      if (!stallNoticeShown) {
+        stallNoticeShown = true;
+        try { ctx.ui.notify(buildStallNotice(stall.repeats), "warning"); } catch { /* headless */ }
+      }
+      updateWidget(ctx);
+      return;
+    }
+    stallNoticeShown = false;
+
     if (problems.length > 0) continuationsInjected += 1;
     else completionContinuations += 1;
     // R10: fire the strategic-reset checklist BEFORE persist so the fired flag
@@ -4189,6 +4341,14 @@ export default function reviewGate(pi: ExtensionAPI) {
                 "turn instead of re-asking. Do not summarize; execute.")) +
         (!sessionEdited && !state.scopeLimit
           ? "\nIf these unmet gates target PRE-EXISTING changes this session never made, you may call request_scope_limit — the USER decides whether session-only coverage suffices."
+          : "") +
+        // How many reviewers this host can actually field. It rides the RESUME
+        // message itself — not only the per-turn system prompt — because this
+        // is the message that drives the autonomous loop, and the observed
+        // waste (two same-family reviewers billed as a cross-family pair)
+        // happened on exactly this path, with nobody typing /review.
+        (state.review.verdict !== "READY"
+          ? ((d) => (d ? `\n${d}` : ""))(fanoutDirective())
           : "") +
         reset,
       { deliverAs: "followUp" },
@@ -4408,7 +4568,15 @@ export default function reviewGate(pi: ExtensionAPI) {
           ctx.ui.notify(`Agent is busy. Retry ${command.usage} when it is idle.`, "warning");
           return;
         }
-        pi.sendUserMessage(buildWorkflowPrompt(name, args ?? ""));
+        // Any command handler is a chance to warm the authoritative model
+        // facts: before_agent_start (the other injection point) gets no ctx.
+        rememberJudgeFacts((ctx as { modelRegistry?: unknown }).modelRegistry);
+        // /review dispatches the reviewers, so it carries the fan-out decision
+        // as a computed fact rather than a rule the agent may reinterpret.
+        const fanout = name === "review" ? fanoutDirective() : undefined;
+        pi.sendUserMessage(
+          buildWorkflowPrompt(name, args ?? "") + (fanout ? `\n\n${fanout}` : ""),
+        );
       },
     });
   }
@@ -4588,6 +4756,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       loopArmed = true;
       continuationsInjected = 0;
       completionContinuations = 0;
+      loopStall = undefined;
+      stallNoticeShown = false;
       agentDowngradesLocked = false;
       lastRunAborted = false;
       scopeLimitDeclined = false;
@@ -4849,7 +5019,17 @@ export default function reviewGate(pi: ExtensionAPI) {
         // re-checked. Only rendered while a review is actually outstanding —
         // once the gate is satisfied there is nothing to scope.
         (problems.length && state.review.verdict !== "READY"
-          ? `\n${formatReviewScopeDirective(reviewScopeFor(primaryRepoRoot, state), previousRoundFindings(state))}\n`
+          ? `\n${formatReviewScopeDirective(reviewScopeFor(primaryRepoRoot, state), previousRoundFindings(state), settledConclusion(state))}\n`
+          : "") +
+        // How many reviewers to spawn, decided from this host's real model
+        // registry. Also on the RESUME message (agent_settled) — deliberately
+        // both, not redundantly: the resume drives the autonomous loop, while
+        // this per-turn prompt is the ONLY carrier on turns the user drives
+        // directly (a paused loop, an exhausted continuation budget, a plain
+        // "go review it" without /review). A reviewer pair is far more
+        // expensive than the ~90 tokens of overlap on a resumed turn.
+        (problems.length && state.review.verdict !== "READY"
+          ? ((d) => (d ? `\n${d}\n` : ""))(fanoutDirective())
           : "") +
         // The fast lane clears a commit but not a push/PR, and finding that
         // out at push time wastes a round. Say it while the lane still shows.

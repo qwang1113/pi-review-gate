@@ -151,6 +151,123 @@ test("L2: agent_settled auto-continuation with recursion guard", () => {
   assert.match(SRC, /REVIEW_GATE_RESUME/);
 });
 
+test("L2 STALL BREAKER: no-progress circuit breaker precedes every continuation injection", () => {
+  // REGRESSION: when the judge provider ran out of quota, seven consecutive
+  // continuations fired ("4/10 … 10/10") while nothing could change, burning
+  // the whole budget on an external blocker the agent could not fix.
+  const start = SRC.indexOf('pi.on("agent_settled"');
+  assert.ok(start >= 0, "agent_settled handler must exist");
+  const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
+  const breakerAt = SRC.indexOf("evaluateStall(", start);
+  const bumpAt = SRC.indexOf("continuationsInjected += 1", start);
+  assert.ok(breakerAt > 0, "the stall breaker must run in agent_settled");
+  assert.ok(breakerAt < bumpAt, "the breaker must precede the budget increment");
+  assert.ok(breakerAt < injectAt, "the breaker must precede the RESUME injection");
+  // It may only STOP the loop talking to itself — never grant a verdict.
+  const body = SRC.slice(breakerAt, injectAt);
+  assert.doesNotMatch(body, /verdict\s*=\s*"(READY|PASS)"/, "the breaker must never grant a verdict");
+  assert.doesNotMatch(body, /bypass\.active\s*=\s*true/, "the breaker must never open the ship gate");
+  assert.match(body, /buildStallNotice\(/, "the user must be told why the loop stopped");
+  // Real progress must re-arm it: every reset site clears the stall state.
+  const clears = SRC.match(/loopStall = undefined/g) ?? [];
+  assert.ok(clears.length >= 3, `stall state must be cleared at every progress site (found ${clears.length})`);
+});
+
+test("L2 STALL BREAKER: a running subagent counts as motion (never orphan a live review)", () => {
+  // Without this, the breaker trips on the loop's OWN review: while an async
+  // reviewer runs, the fingerprint, both verdicts, the round count and the
+  // unmet list are all necessarily unchanged.
+  const start = SRC.indexOf('pi.on("agent_settled"');
+  const breakerAt = SRC.indexOf("evaluateStall(", start);
+  const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
+  const call = SRC.slice(breakerAt, injectAt);
+  assert.match(call, /inMotion:\s*subagentInMotion\(\)/, "the breaker must be told about work in flight");
+  // The motion probe must be bounded in age, or a hung run would disable the
+  // breaker permanently — the exact failure it exists to catch.
+  const probeAt = SRC.indexOf("function subagentInMotion(");
+  assert.ok(probeAt > 0, "subagentInMotion must exist");
+  const probe = SRC.slice(probeAt, probeAt + 900);
+  assert.match(probe, /STALL_MOTION_MAX_AGE_SEC/, "motion credit must expire with age");
+  assert.match(probe, /state === "running"/, "only RUNNING subagents count as motion");
+});
+
+test("FAN-OUT: the reviewer count is injected on BOTH dispatch paths", () => {
+  // The observed waste (two same-family reviewers billed as a cross-family
+  // pair) happened in the AUTONOMOUS loop, where nobody types /review — so
+  // the command prompt alone is not enough.
+  assert.match(SRC, /from "\.\.\/lib\/review-fanout\.ts"/);
+
+  const cmdAt = SRC.indexOf("function registerWorkflowCommand(");
+  assert.ok(cmdAt > 0, "the workflow command registrar must exist");
+  const cmdBody = SRC.slice(cmdAt, cmdAt + 1200);
+  assert.match(cmdBody, /name === "review"/, "only /review carries the fan-out decision");
+  assert.match(cmdBody, /fanoutDirective\(\)/, "/review must append the computed plan");
+
+  // (a) the literal [REVIEW_GATE_RESUME] message the autonomous loop runs on.
+  const settledAt = SRC.indexOf('pi.on("agent_settled"');
+  assert.ok(settledAt > 0, "agent_settled handler must exist");
+  const resumeAt = SRC.indexOf("REVIEW_GATE_RESUME", settledAt);
+  const sendEnd = SRC.indexOf('{ deliverAs: "followUp" }', resumeAt);
+  assert.ok(sendEnd > resumeAt, "the resume sendUserMessage must be locatable");
+  const resumeMessage = SRC.slice(resumeAt, sendEnd);
+  assert.match(resumeMessage, /fanoutDirective\(\)/, "the RESUME message itself must carry the plan");
+  assert.match(
+    resumeMessage,
+    /state\.review\.verdict !== "READY"/,
+    "only while a review is outstanding",
+  );
+
+  // (b) the per-turn prompt, which is the only carrier on user-driven turns
+  // (paused loop, exhausted continuation budget, a plain "go review it").
+  const promptAt = SRC.indexOf('pi.on("before_agent_start"');
+  assert.ok(promptAt > 0);
+  const promptBody = SRC.slice(promptAt);
+  assert.match(promptBody, /fanoutDirective\(\)/, "the per-turn prompt must carry the plan too");
+  const fanoutInPrompt = promptBody.indexOf("fanoutDirective()");
+  const guard = promptBody.slice(Math.max(0, fanoutInPrompt - 400), fanoutInPrompt);
+  assert.match(guard, /state\.review\.verdict !== "READY"/, "only inject while a review is outstanding");
+});
+
+test("FAN-OUT: a partial (disk) model view may confirm judges, never deny them", () => {
+  // Reading only models-store.json misses built-in catalogs (anthropic), so a
+  // "no judge available" conclusion drawn from it would be a false alarm —
+  // the same mistake that once reported every built-in chain as BLOCKED.
+  const at = SRC.indexOf("function fanoutDirective(");
+  assert.ok(at > 0, "fanoutDirective must exist");
+  const body = SRC.slice(at, at + 1200);
+  assert.match(body, /registryJudgeFacts/, "the authoritative registry view must be preferred");
+  assert.match(
+    body,
+    /plan\.crossFamily \? formatFanoutDirective/,
+    "the disk fallback may only CONFIRM a cross-family pair — claiming SINGLE from it " +
+      "would suppress a double review that was actually possible and record a false note",
+  );
+  assert.doesNotMatch(
+    body.slice(body.indexOf("factsFromRegistry(undefined")),
+    /plan\.reviewers\.length > 0/,
+    "a non-empty plan is NOT enough: a SINGLE plan from the partial view is a denial",
+  );
+  // The authoritative view is warmed from real ctx registries, not invented.
+  assert.match(SRC, /rememberJudgeFacts\(\(ctx as \{ modelRegistry\?: unknown \}\)\.modelRegistry\)/);
+});
+
+test("INCREMENTAL: the settled conclusion of the previous round is handed to the reviewer", () => {
+  // A re-review that starts from zero pays full price for questions already
+  // answered. The gate must state what the last READY verdict settled.
+  const at = SRC.indexOf("formatReviewScopeDirective(reviewScopeFor(");
+  assert.ok(at > 0, "the scope directive must be injected");
+  assert.match(
+    SRC.slice(at, at + 240),
+    /settledConclusion\(state\)/,
+    "the previous conclusion must travel with the scope block",
+  );
+  const fnAt = SRC.indexOf("function settledConclusion(");
+  assert.ok(fnAt > 0, "settledConclusion must exist");
+  const fn = SRC.slice(fnAt, fnAt + 500);
+  assert.match(fn, /lastReadyReview/, "only an APPROVED tree has settled anything");
+  assert.match(fn, /if \(!base\) return undefined/, "no approved review ⇒ nothing is settled");
+});
+
 test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits arm the loop flag)", () => {
   // Explore-mode edits set loopArmed = true in tool_result; only the explore
   // early-return keeps auto-continuation off. If someone reorders the checks,

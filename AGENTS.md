@@ -66,6 +66,20 @@ thinking, falling down the pinned chains if unavailable — record BOTH
 outputs via `record_review` (worst wins; fail-closed semantics
 unchanged). A single reviewer is acceptable only when no different-family
 model is available, and that must be stated in a Note.
+(c) **Never two reviewers of the same family.** The count is computed by the
+gate from this host's real model registry (`planFanoutFromFacts`,
+`lib/review-fanout.ts`) and injected into both the `/review` prompt and the
+auto-continuation resume text: two judge-eligible families ⇒ two reviewers,
+one per family; one family ⇒ ONE reviewer plus the plan's note copied into the
+recorded review. Two same-family reviewers cost double for zero extra signal.
+This governs the reviewers YOU spawn (small-diff pair, integration reviewer);
+Phase A shard counts come from the engine's sharding. (d) **Every re-review
+carries the previous round's conclusion**: the adviser's goal re-review gets
+the old draft + its own objections + what changed; round N+1 gets the previous
+verdict and findings (the gate injects them as the `Review scope for this
+round` block). Settled-and-unchanged material gets a consistency scan, not a
+re-derivation — it never narrows what a reviewer may look at, and a settled
+conclusion may always be reopened with evidence.
 
 ### Wave daily — parallel editing for everyday tasks (not just decompose)
 

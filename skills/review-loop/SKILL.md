@@ -45,6 +45,18 @@ semantics are unchanged). Pick the second reviewer with `rankJudges` from
 acceptable fallback only when a different-family model is genuinely
 unavailable, and that fact goes in a Note.
 
+**Never spawn two reviewers of the SAME family.** The count is not yours to
+guess: the gate computes it from this host's real model registry
+(`planFanoutFromFacts`, `lib/review-fanout.ts`) and injects the decision into
+both the `/review` prompt and the auto-continuation resume text — two
+judge-eligible families ⇒ spawn two, one per family; one family ⇒ spawn ONE
+and copy the plan's note into the recorded review. A second same-family
+reviewer doubles the cost while sharing the first one's blind spots, and
+calling that a cross-family double review would be false. Scope: this governs
+the reviewers YOU spawn (the small-diff pair and the integration reviewer);
+the number of Phase A shard reviewers is decided by the engine's sharding, not
+by this rule.
+
 Why these models? `lib/model-ranking.ts` scores model families from public
 capability leaderboards (Artificial Analysis Intelligence Index, LMArena Elo,
 LiveBench) and can rank candidates by capability, optionally rewarding
@@ -83,6 +95,26 @@ a goal you know is uncheckable. This is protocol, not a gate: the extension
 does not enforce it, but the `reviewer` WILL flag a goal whose criteria
 cannot be judged objectively (P2) and an uncheckable criterion that made the
 work go astray (P1).
+
+**Every re-review carries the previous round's conclusion.** A re-review that
+starts from zero pays full price for questions that were already answered, so
+hand the reviewer what is already settled and let it spend its budget on what
+changed:
+
+- **Goal re-review (adviser).** When you revise a draft after BLOCKED
+  objections, the second consultation gets three things: the previous draft,
+  the adviser's own objection list, and what you changed for each one. Ask it
+  to verify exactly that — is each objection resolved, and does the new wording
+  introduce a side effect — not to re-derive the whole goal.
+- **Round N+1 (reviewer).** Hand over the previous round's verdict and its
+  findings. The gate already injects this as the `Review scope for this round`
+  block: what a previous READY verdict settled, what is new since, and which
+  findings must be re-checked one by one. Pass that block through to the
+  reviewer verbatim.
+- **What "settled" buys**: settled-and-unchanged material gets a consistency
+  scan, not a re-derivation. It never narrows what the reviewer MAY look at,
+  never weakens its authority, and it may always reopen a settled conclusion
+  when it has evidence the conclusion was wrong.
 
 **Where**: `.pi/loop-goal.md`. That path sits inside the gate-owned `.pi/`
 scope (`GATE_EXCLUDE_PATHSPECS` / `isGateOwnedPath`, `lib/fingerprint.ts`),
@@ -309,6 +341,14 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    rejects if any gate is unmet. Both the precommit PASS and the READY review
    must be bound to the SAME (current) fingerprint; if anything edited the
    worktree since, run the affected step again.
+
+   **The fingerprint is content-addressed and staging-invariant.** `git add`,
+   `git commit` and any branch switch that does NOT rewrite working-tree files
+   leave it untouched, so a READY review and a precommit PASS survive all
+   three: never re-run a review to "rebuild the binding" after staging or
+   committing — that is a wasted round at top-tier model prices. Only a change
+   to the WORKING TREE's file contents invalidates it (an edit, a lint:fix run,
+   or a checkout that does rewrite files).
 
    It also rejects while a Copilot cycle is still open or the loop goal is
    unapproved — those are completion requirements, not ship requirements.

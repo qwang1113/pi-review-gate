@@ -56,7 +56,16 @@ L2  Auto-continuation     agent_settled → if gates unmet, inject
                           [REVIEW_GATE_RESUME] follow-up (recursion-guarded,
                           max 10 rounds, plateau detection; a user ESC abort
                           — "Operation aborted" — pauses the loop until the
-                          user's next message)
+                          user's next message). A STALL BREAKER stops the
+                          injections when nothing moves (same fingerprint,
+                          verdicts, round count and unmet list 3x in a row —
+                          i.e. an external blocker such as provider quota);
+                          a freshly running subagent counts as motion, so a
+                          live review is never orphaned. Tighten-only: no
+                          verdict is granted and ship stays blocked.
+                          The resume text also carries the reviewer FAN-OUT
+                          computed from the host's model registry (one judge
+                          family ⇒ ONE reviewer + a declared note)
 L3  Git hooks             pre-commit / pre-push / commit-msg verify the gate
                           sidecar even for commits made outside Pi
 L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
@@ -1611,7 +1620,11 @@ lib/precommit-receipt.ts      pure receipt validator (exit/verdict/count/testSco
 lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obfuscation)
 lib/fingerprint.ts            worktree fingerprint (content-addressed git tree hash; staging-invariant) + tree increments for incremental review
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
-lib/review-scope.ts           incremental-review scoping + escalation thresholds (pure)
+lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
+lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running subagent, notice text (pure)
+lib/review-fanout.ts          reviewer fan-out planning from registry facts (one family ⇒ ONE reviewer + declared note; pure)
+lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
+lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)
 lib/blocked-marker.ts         .blocked marker ownership (record failure, reclaim only our own/orphans)
 lib/verdict-parse.ts          all-fence worst-wins verdict parser
