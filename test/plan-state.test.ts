@@ -348,7 +348,7 @@ test("parallel ledger: absent on older runs, validated when present (schema stay
   // A well-formed parallel ledger round-trips.
   const withParallel = planOf([moduleOf()], {
     parallel: {
-      engine: "pdw",
+      engine: "subagents",
       waves: [
         { modules: ["M-01"], status: "applied", patches_dir: ".pi/plan/patches/M-01", note: "clean apply" },
       ],
@@ -363,21 +363,25 @@ test("parallel ledger: absent on older runs, validated when present (schema stay
   for (const bad of [
     { engine: "turbo", waves: [] },
     { engine: "serial", waves: [], note: "no serial engine exists in v3 — must be rejected" },
-    { engine: "pdw", waves: "nope" },
-    { engine: "pdw", waves: [{ modules: [], status: "applied", patches_dir: "p" }] },
-    { engine: "pdw", waves: [{ modules: ["M-01"], status: "halfway", patches_dir: "p" }] },
-    { engine: "pdw", waves: [{ modules: ["M-01"], status: "applied", patches_dir: "" }] },
+    { engine: "pdw", waves: [], note: "retired engine value no longer parses — compatibility removed" },
+    { engine: "subagents", waves: "nope" },
+    { engine: "subagents", waves: [{ modules: [], status: "applied", patches_dir: "p" }] },
+    { engine: "subagents", waves: [{ modules: ["M-01"], status: "halfway", patches_dir: "p" }] },
+    { engine: "subagents", waves: [{ modules: ["M-01"], status: "applied", patches_dir: "" }] },
   ]) {
     const raw = JSON.stringify({ ...withParallel, parallel: bad });
     const result = parsePlanState(raw);
     assert.equal(result.ok, false, `must reject ${JSON.stringify(bad).slice(0, 60)}`);
   }
 
-  // …but the historical "pdw" value still parses (pre-2026-08-17 runs) and
-  // the current "subagents" value round-trips.
-  const legacyPdw = { ...withParallel, parallel: { engine: "pdw" as const, waves: withParallel.parallel?.waves ?? [] } };
-  const parsedPdw = parsePlanState(serialize(legacyPdw));
-  assert.ok(parsedPdw.ok, parsedPdw.ok ? "" : parsedPdw.error);
+  // Only the current "subagents" value is accepted and round-trips; the
+  // retired "pdw" value (written by pre-2026-08-17 runs) no longer parses.
+  // Serialized directly so the historical on-disk shape is exercised.
+  const legacyPdwRaw = JSON.stringify({
+    ...withParallel,
+    parallel: { engine: "pdw", waves: withParallel.parallel?.waves ?? [] },
+  });
+  assert.equal(parsePlanState(legacyPdwRaw).ok, false, "legacy pdw engine must be rejected");
 
   const subagents = { ...withParallel, parallel: { engine: "subagents" as const, waves: withParallel.parallel?.waves ?? [] } };
   const parsedSubagents = parsePlanState(serialize(subagents));

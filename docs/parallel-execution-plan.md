@@ -247,8 +247,8 @@ artifacts are best-effort diagnostics.
 - The `@quintinshaw/pi-dynamic-workflows` dependency is REMOVED (package.json
   and `scripts/install-package.mjs`); `lib/pdw-bridge.ts` and
   `lib/pdw-progress.ts` are deleted. `.pi/plan/state.json`'s parallel ledger
-  records `engine: "subagents"` (the legacy `"pdw"` value still parses for
-  historical runs).
+  records `engine: "subagents"` — the retired legacy `"pdw"` value no longer
+  parses (the parse-time compatibility was removed with the engine).
 - Wave workers are read-only by construction: `agents/worker-readonly.md`'s
   `tools:` allowlist has no edit/write/bash — the mechanical guarantee
   (pi-subagents has no per-call tool denylist).
