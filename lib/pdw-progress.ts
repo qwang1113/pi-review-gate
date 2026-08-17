@@ -1,6 +1,7 @@
 /**
- * Progress sink for pdw embedded runs (run_parallel_shard_review /
- * run_wave_workflow).
+ * Progress sink for pdw embedded runs — now only `run_wave_workflow` (review
+ * left the engine, so `run_parallel_shard_review` no longer exists; this file
+ * retires with the engine, see docs/handoff-remove-pdw.md).
  *
  * The engine's runWorkflow accepts live callbacks (onLog / onPhase /
  * onRuntimeEvent / onAgentStart / onAgentEnd) that pi-review-gate previously

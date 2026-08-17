@@ -1606,3 +1606,59 @@ test("a sparse-checkout (skip-worktree) repo can now be fingerprinted at all", (
     "a skip-worktree repository must produce a usable fingerprint");
   assert.match(fp.digest, /^[0-9a-f]{40}$/);
 });
+
+test("REGRESSION: the hook installer REFUSES to run from a review snapshot", () => {
+  // A review snapshot is a LINKED WORKTREE, so `.git/hooks` is the real repo's
+  // hook layer, not a copy. Installing from inside one repointed the real hooks
+  // at a snapshot directory that was then deleted with the round — after which
+  // every commit died with "No such file or directory" from .git/hooks/pre-commit.
+  // (Observed for real while committing this very change.)
+  const repo = makeGitRepo();
+  const snapshot = join(repo, ".pi", "review-snapshots", "rg-review-snap-XXXX", "integration");
+  mkdirSync(snapshot, { recursive: true });
+  // Make the snapshot path a real git worktree of the same repo, so
+  // `rev-parse --show-toplevel` resolves there exactly as it does in production.
+  execFileSync("git", ["worktree", "add", "--detach", "-f", snapshot, "HEAD"], {
+    cwd: repo,
+    stdio: "ignore",
+  });
+
+  const refused = spawnSync("bash", [join(ROOT, "scripts", "install-git-hooks.sh")], {
+    cwd: snapshot,
+    encoding: "utf8",
+    env: { ...process.env, HOME: emptyHome },
+  });
+  assert.notEqual(refused.status, 0, "installing from a snapshot must FAIL");
+  assert.match(refused.stderr, /refusing to install hooks from a review snapshot/);
+  assert.match(refused.stderr, /shared with the real checkout/);
+  // …and it must not have touched the shared hook dir.
+  assert.equal(existsSync(join(repo, ".git", "hooks", "pre-commit")), false,
+    "the refusal must happen BEFORE any hook is written");
+
+  // The same installer still works from the real worktree.
+  const ok = spawnSync("bash", [join(ROOT, "scripts", "install-git-hooks.sh")], {
+    cwd: repo,
+    encoding: "utf8",
+    env: { ...process.env, HOME: emptyHome },
+  });
+  assert.equal(ok.status, 0, ok.stderr);
+  const installed = readFileSync(join(repo, ".git", "hooks", "pre-commit"), "utf8");
+  assert.match(installed, /pi-review-gate:installed/);
+  // Assert the hook points at THIS package's real hook, by exact path.
+  //
+  // The obvious version of this check — `doesNotMatch(installed, /review-snapshots/)`
+  // — is environment-dependent and was wrong: a reviewer runs the suite INSIDE a
+  // snapshot, so ROOT itself contains `review-snapshots` and a perfectly correct
+  // install then "failed". Same family as the earlier /tmp divergence: never
+  // assert on a substring of the absolute path the test happens to live at.
+  assert.ok(
+    installed.includes(join(ROOT, "hooks", "pre-commit")),
+    `the installed hook must exec this package's hook, got:\n${installed}`,
+  );
+  // …and never the TEST repo's snapshot copy (that is the failure being guarded).
+  assert.equal(installed.includes(snapshot), false, "the hook must not point into a snapshot");
+
+  try {
+    execFileSync("git", ["worktree", "remove", "--force", snapshot], { cwd: repo, stdio: "ignore" });
+  } catch { /* the dir is inside the temp repo and removed with it */ }
+});

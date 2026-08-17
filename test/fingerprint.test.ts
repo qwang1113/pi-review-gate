@@ -1,7 +1,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -1335,4 +1335,61 @@ test("FINGERPRINT_VERSION is a positive integer", () => {
   assert.equal(typeof FINGERPRINT_VERSION, "number");
   assert.ok(Number.isSafeInteger(FINGERPRINT_VERSION));
   assert.ok(FINGERPRINT_VERSION >= 2, "must be at least 2 (v1 was pre-versioning)");
+});
+
+test("REGRESSION: the gate's own tree computation is UNCHANGED by the extra-exclude option", () => {
+  // `worktreeTreeOid` grew an optional second argument for review snapshots
+  // (they must ignore the node_modules symlink they create). The gate itself
+  // must never pass one: its exclusion set is fixed, and a caller that could
+  // widen it could hide a changed file from the fingerprint — a fail-open.
+  const repo = makeRepo();
+  try {
+    writeFileSync(join(repo, "a.txt"), "changed\n");
+    const withDefault = worktreeTreeOid(repo);
+    const withEmpty = worktreeTreeOid(repo, []);
+    assert.equal(withDefault, withEmpty, "the default must behave exactly as before");
+
+    // The option genuinely excludes when asked — that is why it exists.
+    mkdirSync(join(repo, "scaffold"), { recursive: true });
+    writeFileSync(join(repo, "scaffold", "x.txt"), "added by tooling\n");
+    assert.notEqual(worktreeTreeOid(repo), withDefault, "a new file must move the tree");
+    assert.equal(
+      worktreeTreeOid(repo, [":/scaffold"]),
+      withDefault,
+      "an excluded path must not move the tree",
+    );
+
+    // No production caller may pass extra excludes. Scan EVERY production
+    // surface, not just lib/: extensions/ and scripts/ call the gate's
+    // primitives too, and a widened exclusion there would hide a changed file
+    // from the fingerprint just as effectively.
+    const root = resolve(import.meta.dirname ?? ".", "..");
+    // review-snapshot.ts is the one sanctioned caller; fingerprint.ts holds the
+    // declaration itself (its parameter list is not a call).
+    const exempt = new Set(["review-snapshot.ts", "fingerprint.ts"]);
+    const sources: string[] = [];
+    for (const dirName of ["lib", "extensions", "scripts"]) {
+      const dir = join(root, dirName);
+      let names: string[];
+      try { names = readdirSync(dir); } catch { continue; }
+      for (const f of names) {
+        if (!/\.(ts|mjs|cjs|js)$/.test(f) || exempt.has(f)) continue;
+        sources.push(join(dir, f));
+      }
+    }
+    assert.ok(sources.length > 20, `expected many production sources, found ${sources.length}`);
+    for (const file of sources) {
+      const src = readFileSync(file, "utf8");
+      // [\s\S] so a call broken across lines cannot slip through the guard.
+      for (const m of src.matchAll(/worktreeTreeOid\(([\s\S]*?)\)/g)) {
+        assert.equal(
+          m[1]!.includes(","),
+          false,
+          `${file}: only review snapshots may widen the exclusion set`,
+        );
+      }
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

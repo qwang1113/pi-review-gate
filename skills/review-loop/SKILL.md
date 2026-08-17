@@ -53,9 +53,9 @@ judge-eligible families ⇒ spawn two, one per family; one family ⇒ spawn ONE
 and copy the plan's note into the recorded review. A second same-family
 reviewer doubles the cost while sharing the first one's blind spots, and
 calling that a cross-family double review would be false. Scope: this governs
-the reviewers YOU spawn (the small-diff pair and the integration reviewer);
-the number of Phase A shard reviewers is decided by the engine's sharding, not
-by this rule.
+the reviewers YOU spawn for a small diff plus the integration reviewer; for a
+large diff the shard count comes from `prepare_review`'s plan
+(`planReviewShards`), not from this rule.
 
 Why these models? `lib/model-ranking.ts` scores model families from public
 capability leaderboards (Artificial Analysis Intelligence Index, LMArena Elo,
@@ -191,8 +191,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
     expected entry:
     - **Review**: whenever your edits are complete and the change needs the
       gate, start the review loop on your own (step 2/3 below) — do not wait
-      for the user to type `/review`. The pdw engine auto-shards; the shard
-      plan needs no user confirmation.
+      for the user to type `/review`. `prepare_review` shards a large diff for
+      you; the shard plan needs no user confirmation.
     - **Decompose**: whenever you detect a complex task (too big for one
       session, scope growing mid-task), propose it yourself with evidence and
       a module estimate (step 0 of the module-loop section) and wait for the
@@ -241,9 +241,48 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
    **Waiting-window discipline**: while the reviewer runs (~3 min) and while
-   Copilot waits (up to 20 min), do useful parallel work — other repos'
-   loops, PR description drafts, `[NIT_DEFERRED]` bookkeeping, a triage
-   sweep. Never idle-poll a running subagent.
+   Copilot waits (up to 20 min), do useful parallel work — first of all its
+   OWN streamed findings (below), then other repos' loops, PR description
+   drafts, `[NIT_DEFERRED]` bookkeeping, a triage sweep. Never idle-poll a
+   running subagent.
+
+3a. **Prepare isolation + streaming** — call `prepare_review` with one label
+   per reviewer you are about to spawn (use the fan-out plan's count). It
+   materializes a DISPOSABLE snapshot worktree per reviewer — holding exactly
+   the change under review — and returns each one's `cwd` and finding-stream
+   path. Spawn each reviewer with its own `cwd`, and paste its stream
+   directive into the task.
+
+   Why it exists: a reviewer here verifies by DOING (it mutates code to prove
+   a test really fails), and it used to do that in your worktree — fighting
+   you, the other reviewer, and the fingerprint. In its own copy it can verify
+   as hard as it likes, and you can keep working.
+
+   What it buys you: **fix the streamed findings while the review is still
+   running.** Read each stream file between waits (`subagent_wait` with a
+   ~60s timeout → read → fix → wait again; never a tight poll). Act on
+   P0/P1/P2 that carry evidence — confirm each one in the code yourself first
+   — and leave Nits for the verdict. Fixing mid-review moves the worktree, and
+   the gate ENFORCES the consequence: it compares the tree the reviewers
+   actually read with the tree at record time, so a READY that no longer covers
+   your worktree is recorded as BLOCKED (`STALE TREE`). That is the normal,
+   fail-closed outcome — and the next round is short, because you have already
+   done its fix work.
+
+   Stream lines are EVIDENCE, never a decision: a line carrying a verdict key
+   is rejected, and only the reviewer's final output goes to `record_review`.
+   `record_review` re-derives each snapshot's tree: a reviewer that left its
+   mutation in place has its READY downgraded to BLOCKED (its findings still
+   count), so re-run that one in a fresh snapshot.
+
+   If `prepare_review` reports isolation UNAVAILABLE, the reviewers would be
+   reading YOUR live worktree, so fall back to the old rules for that round:
+   **dispatch `reviewer-readonly` instead of `reviewer`** (its `tools:` allowlist
+   has no edit/write, so it physically cannot touch the worktree — that is the
+   mechanical half; choosing it is yours to honor, because pi-subagents has no
+   per-call tool denylist), and do NOT apply fixes until the verdict is
+   recorded. If it reports a PARTIAL failure (some shards got no snapshot) it
+   refuses the whole plan on purpose — retry rather than review a subset.
 
 3. **Review** — spawn an independent reviewer over the current diff
    (`git diff HEAD` + untracked files). **By default spawn TWO reviewers from
@@ -253,18 +292,27 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    end its output with a fenced JSON
    verdict:
 
-   **Tiered trigger (small diff fast, large diff parallel)**: decide BEFORE
-   spawning, by diff size — `shouldShardReview(fileCount, lineCount)`:
+   **Tiered trigger (small diff fast, large diff parallel)** — you do NOT decide
+   this: `prepare_review` does, from the diff size
+   (`shouldShardReview(fileCount, lineCount)`):
 
-   - **Small diff** (< 20 files AND < 500 changed lines): TWO cross-family
-     reviewers (default fable-5 + gpt-5.6-sol, both max) over the full change
-     — no pdw engine, no sharding; each attests `docSync` itself. **Spawn
-     BOTH in the SAME turn with `async: true`** — never one after the other:
+   - **Small diff** (< 20 files AND < 500 changed lines): the labels you pass
+     are the reviewers — TWO cross-family ones by default (see the fan-out
+     rule), each over the full change, each attesting `docSync` itself. **Spawn
+     them in the SAME turn with `async: true`** — never one after the other:
      serial spawns double the review wall time for zero additional signal.
-   - **Large diff** (≥ 20 files OR ≥ 500 changed lines): auto-shard with
-     `run_parallel_shard_review` (≤ 4 reviewers, each with its own files AND
-     per-shard diff context), then ONE integration review over the whole
-     change that carries the `docSync` attestation.
+   - **Large diff** (≥ 20 files OR ≥ 500 changed lines): `prepare_review` shards
+     it for you with `planReviewShards` (≤ 4 disjoint groups covering every
+     changed file) and returns each shard's snapshot cwd, stream path, file list
+     and ready-made task text. Spawn one reviewer per shard, all in the same
+     turn, each with its own cwd; merge every shard output into ONE
+     `record_review` call; then run ONE integration review over the whole change
+     that carries the `docSync` attestation.
+
+   Reviews do NOT run on the pdw engine — it discards a per-agent `cwd`, so a
+   shard reviewer could never hold its own snapshot of the change it judges (see
+   `docs/handoff-remove-pdw.md`). The engine still drives wave workers and the
+   decompose module loop.
 
    The thresholds are exported constants (`SHARD_THRESHOLD_FILES` /
    `SHARD_THRESHOLD_LINES` in `lib/parallel-review.ts`) — never invent your
@@ -379,17 +427,18 @@ Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
   one-line may be reviewed by an L1 agent whose verdict IS recorded.
   Judging "low-risk" is yours; a misjudged call is a P1 finding for the L3
   reviewer.
-- **Split review = tiered by diff size**: the review loop runs through the
-  workflow engine for LARGE diffs — `planReviewShards` splits ≥20-file or
-  ≥500-line diffs into ≤4 disjoint shards, L3 reviewers audit shards in
-  parallel (shard fences WITHOUT docSync) → record ALL shard outputs in ONE
-  `record_review` → then ONE integration reviewer recorded alone (it carries
-  the docSync attestation). Small diffs (<20 files AND <500 lines) run the
-  default TWO cross-family reviewers with no pdw engine overhead — see the
-  Tiered trigger in step 3. Worst wins. No user confirmation is needed for the
-  shard plan.
-  There is NO serial protocol: the engine is a hard dependency, and a
-  missing engine is an installation error, not a fallback.
+- **Split review = tiered by diff size**, and it does NOT use the pdw engine:
+  `prepare_review` splits ≥20-file or ≥500-line diffs with `planReviewShards`
+  into ≤4 disjoint groups covering every changed file, hands each shard its own
+  writable snapshot + stream, and you spawn one subagent per shard in ONE turn
+  (shard fences WITHOUT docSync) → record ALL shard outputs in ONE
+  `record_review` → then ONE integration reviewer recorded alone (it carries the
+  docSync attestation). Small diffs (<20 files AND <500 lines) run the default
+  TWO cross-family reviewers over the whole change — see the Tiered trigger in
+  step 3. Worst wins. No user confirmation is needed for the shard plan.
+  The engine is a hard dependency for WAVES and the decompose module loop only;
+  it cannot host reviews because it discards a per-agent `cwd`
+  (`docs/handoff-remove-pdw.md`).
 
 ## Working across several repos
 
@@ -497,7 +546,8 @@ with clearly disjoint file ownership:
 - **No cross-patch rollback.** Patches are applied in sequence with per-patch
   validation. A failed patch is sent back to its worker for one retry, never
   silently edited by the main agent.
-- **The engine is a HARD dependency.** A missing engine throws
+- **The engine is a HARD dependency for WAVES** (and the decompose module
+  loop) — not for review, which runs on plain subagents. A missing engine throws
   `PdwUnavailableError` (installation guidance) — there is no serial fallback.
 
 ### Example: daily wave dispatch

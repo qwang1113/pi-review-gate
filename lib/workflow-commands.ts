@@ -43,28 +43,37 @@ export const WORKFLOW_COMMANDS = {
     usage: "/review [focus]",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Execute the review loop for the current worktree changes, through the pdw workflow engine (the ONLY execution path — no serial protocol exists). " +
+      "Execute the review loop for the current worktree changes. Reviews run as plain subagents (NOT the pdw engine — it discards a per-agent cwd, so a " +
+      "reviewer could never hold its own snapshot of the change it judges). " +
       "AUTONOMOUS PROTOCOL: you run this loop on your own whenever code/doc edits are complete and need the gate — this command is only an explicit trigger; " +
       "do not wait for the user to call it before reviewing your own finished work. " +
       "Steps: (0) FIRST run the trusted precommit lane — `run_precommit` (fast for an intermediate round, full for the final round before shipping) — and " +
       "confirm it PASSES before spending the expensive judge's time: a FAIL is cheaper to fix before the review, and the reviewer must never be the " +
-      "first one to find a test failure. (1) then collect the changed files and call the run_parallel_shard_review tool with the loop goal text — it auto-shards " +
-      "large diffs (planReviewShards, ≤4 shards) and runs the L3 reviewers in parallel; the shard plan needs NO user confirmation. " +
-      "(2) record Phase A: feed the tool's returned shard record (EVERY shard's full raw output) to record_review in ONE call " +
-      "(shard fences carry no docSync by design — worst verdict wins); a shard in the tool's failedShards produced NO verdict — " +
-      "its files MUST be covered by the integration review that follows. " +
-      "(3) only if Phase A was READY, run ONE integration reviewer over the whole change (cross-shard seams, duplicated " +
-      "abstractions, the loop goal criterion by criterion) and record ITS output ALONE, because it carries the single docSync " +
-      "attestation. Fix every P0-P2 finding and re-review until READY (later rounds reuse the same shards). " +
-      "Small diffs (<20 files AND <500 lines) skip the engine: spawn the cross-family reviewers as async subagents IN THE SAME TURN " +
-      "(both async:true, never one after the other) after the precommit PASS, and run precommit and the review serially — precommit first, always. " +
+      "first one to find a test failure. (1) then call prepare_review: it decides the tier from the diff size, and for a LARGE diff it shards the change " +
+      "itself (planReviewShards, ≤4 disjoint groups covering every changed file) and returns each reviewer's snapshot cwd, stream path, file list and " +
+      "ready-made task text — you do NOT invent the split. (2) spawn ONE reviewer per returned entry, ALL IN THE SAME TURN (async:true, never one after " +
+      "the other), each with its own cwd. (3) merge EVERY reviewer's full raw output into ONE record_review call (worst verdict wins; shard fences carry " +
+      "no docSync by design). A reviewer that produced NO verdict (crashed, was interrupted) leaves its files UNREVIEWED — name them and make sure the " +
+      "integration review that follows covers them, or re-run that shard. " +
+      "(4) only if that was READY, run ONE integration reviewer over the whole change (cross-shard seams, duplicated abstractions, " +
+      "the loop goal criterion by criterion) and record ITS output ALONE, because it carries the single docSync attestation. Fix every P0-P2 finding and " +
+      "re-review until READY. For a small diff the labels you pass to prepare_review ARE the reviewers (see the fan-out rule) and there is no separate " +
+      "integration pass. Precommit and review stay serial — precommit first, always. " +
       "HOW MANY REVIEWERS: the gate computes this from the host's real model registry (planFanoutFromFacts, lib/review-fanout.ts) and " +
       "appends the decision to this prompt as a 'Reviewer fan-out for this round' block — follow it. Two judge-eligible FAMILIES ⇒ spawn two, " +
       "one per family. Only ONE family ⇒ spawn ONE reviewer and copy the plan's note into the recorded review: a second same-family reviewer " +
       "doubles the cost while sharing the first one's blind spots, and passing it off as a cross-family double review would be a lie. " +
-      "This governs the reviewers you spawn yourself; Phase A shard counts come from the engine's sharding. " +
+      "This governs the reviewers you spawn for a small diff plus the integration reviewer; for a large diff the count comes from prepare_review's shard plan. " +
       "RE-REVIEW: a later round hands the reviewer the previous round's verdict and findings (the gate's 'Review scope for this round' block) — " +
       "settled, unchanged material gets a consistency scan, not a re-derivation. " +
+      "ISOLATION + STREAMING: before spawning reviewers yourself, call prepare_review with one label per reviewer — each gets its OWN disposable " +
+      "snapshot worktree (spawn it with that cwd) and its own finding-stream file. " +
+      "Because the reviewer holds a frozen copy, KEEP FIXING the real worktree while it runs: between waits, read the stream and fix streamed " +
+      "P0/P1/P2 that carry evidence (confirm each in the code first), leaving Nits for the verdict. Cadence: subagent_wait with a ~60s timeout → " +
+      "read the stream → fix → wait again; never poll in a tight loop. Stream lines are evidence, never a verdict — only the reviewer's final " +
+      "output goes to record_review, which re-derives each snapshot's tree and downgrades a READY from a reviewer that left its own edits behind. " +
+      "Fixing mid-review moves the worktree, so a READY may no longer bind and the gate asks for another round — that is the normal outcome, and " +
+      "you have already done its fix work. " +
       "Treat this as an explicit request to execute the review loop, not merely explain it.",
       invocation,
     ),

@@ -693,19 +693,29 @@ npx pi-review-gate-install-hooks
 `scripts/install-global.sh` was retired when the repo became a pi package;
 use `pi install` above instead.
 
-### Parallel loop engine (the only execution path)
+### Parallel execution: subagents for review, the engine for waves
 
-The review loop, the decompose module loop, and **wave daily** (ad-hoc parallel
-editing) all run through the
+**Review runs on plain subagents.** Each reviewer needs its own disposable
+snapshot of the change, which needs a per-call `cwd` — and the workflow engine
+discards a per-agent `cwd` (its isolation option checks out HEAD, which does not
+contain the uncommitted change under review). So `prepare_review` shards the
+diff (`planReviewShards`), materializes one writable snapshot per reviewer, and
+the agent spawns them directly. See `docs/handoff-remove-pdw.md`.
+
+**The decompose module loop and wave daily** (ad-hoc parallel editing) run
+through the
 [pi-dynamic-workflows](https://github.com/QuintinShaw/pi-dynamic-workflows)
 engine — a HARD dependency that ships with this extension (a package
 `dependencies` entry; see `docs/parallel-execution-plan.md`
-§8): shard reviewers fan out across L3 models, and wave workers implement
+§8): wave workers implement
 module groups concurrently (patch-first — workers are read-only and the main
-session applies their validated patches). The engine uses a **tiered trigger**:
+session applies their validated patches). REVIEW uses a **tiered trigger**:
 small diffs (<20 files AND <500 lines) run the default two cross-family
 reviewers with no engine
-overhead; large diffs are auto-sharded into ≤4 parallel reviewers. Wave
+overhead; large diffs are sharded into ≤4 parallel reviewers by
+`prepare_review` (reviews do NOT run on the engine — it discards a per-agent
+`cwd`, so a reviewer could not hold its own snapshot; see
+`docs/handoff-remove-pdw.md`). Wave
 workers are **not decompose-exclusive** — the agent may dispatch a wave for
 any task that can be split into 2–4 independent sub-tasks with disjoint file
 ownership. The agent asks you only when it proposes a decompose. If the
@@ -772,7 +782,9 @@ auto-decides by diff size before spawning: small diffs (<20 files AND
 <500 changed lines) run the default TWO cross-family reviewers with no pdw
 engine overhead (each attests `docSync` itself); large diffs (≥20 files OR
 ≥500 changed lines)
-are auto-sharded into ≤4 parallel reviewers via the pdw engine, then one
+are sharded by `prepare_review` itself (`planReviewShards`: ≤4 disjoint groups
+covering every changed file, each with its own writable snapshot), spawned as
+plain subagents, then one
 integration review over the whole change. The thresholds are constants in
 `lib/parallel-review.ts` (`SHARD_THRESHOLD_FILES` / `SHARD_THRESHOLD_LINES`).
 
@@ -1119,7 +1131,7 @@ gated **per repo**:
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
 | `/gate-reset` | Reset gate state (mode returns to undecided — the agent re-decides via `set_gate_mode`; also clears the agent-downgrade lock) |
 | `/gate-lesson <text>` | Append a lesson to `.pi/review-gate-lessons.md` (self-improvement log) |
-| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — pdw engine (parallel review / wave daily), agent model chains, opencode-go models-store prune, precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
+| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — pdw engine (wave daily / decompose; review runs on plain subagents), agent model chains, opencode-go models-store prune, precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
 
 ### sd0x-dev-flow workflow commands
 
@@ -1152,7 +1164,8 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | Tool | Purpose |
 |------|---------|
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal` + a reason). The agent's pick IS the classification — no classifier model reviews it. On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) `loop` and `explore` apply directly with source `auto`, while `normal` still pops the confirm dialog. Everything delegates to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. |
-| `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). |
+| `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). It also re-derives the tree of every snapshot `prepare_review` handed out this round: a reviewer that finished with its snapshot MODIFIED ran its last checks against its own edits, so its READY is downgraded to BLOCKED (its findings stay valid, and a BLOCKED verdict is unaffected). Mechanical, so the agent cannot forget it. |
+| `prepare_review` | Materialize ONE disposable git-worktree snapshot per reviewer about to be spawned, holding exactly the change under review (same shadow-index tree the fingerprint uses; `node_modules` symlinked so the suite runs — the ONE shared path, which the prompts forbid writing to; the approved loop goal copied in because `.pi/` is excluded from that tree). A READY recorded after the worktree moved (mid-review fixes) does NOT bind: the gate compares the tree the reviewers read with the tree at record time and downgrades to BLOCKED, so an approval can never cover code no reviewer saw. Returns each reviewer's `cwd` and its append-only finding-stream path. Inside its own copy a reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. Fail-soft: a host where `git worktree` refuses gets an explicit "isolation unavailable" reply and the old read-only rules. |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. Output is never inlined into the reply — a failing suite can emit megabytes. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
 | `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it); then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 and its body is withheld from the prompt. |
@@ -1566,7 +1579,7 @@ second line of defence.
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
 | `run_precommit --mode full` (this repo) | ~100 s | Dominated by the two timing loops in the suite; typecheck runs CONCURRENTLY with `npm test` — the timing loops themselves are not reducible |
 | **A review round (small diff)** | **~3 min reviewer, precommit first** | Two cross-family reviewers, no pdw engine — <20 files AND <500 lines; precommit runs BEFORE the review (see the loop protocol); see `docs/parallel-execution-plan.md` |
-| **A review round (large diff)** | **≤4 parallel shard reviewers, precommit first** | Auto-sharded via pdw engine + one integration review; see `docs/parallel-execution-plan.md` |
+| **A review round (large diff)** | **≤4 parallel shard reviewers, precommit first** | Sharded by `prepare_review` (`planReviewShards`), one writable snapshot each, spawned as plain subagents + one integration review; no pdw engine; see `docs/parallel-execution-plan.md` |
 
 **Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
 ran six consecutive times on this repo (typecheck concurrent with `npm test`,
@@ -1623,6 +1636,11 @@ lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
 lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running subagent, notice text (pure)
 lib/review-fanout.ts          reviewer fan-out planning from registry facts (one family ⇒ ONE reviewer + declared note; pure)
+lib/review-snapshot.ts        one disposable git-worktree snapshot per reviewer (under the repo's gate-owned .pi/, NOT /tmp — a /tmp path changed path-sensitive test behavior) + post-run tree verification + orphan reclaim
+lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
+lib/verdict-guards.ts         the two READY guards as a pure truth table: snapshot drift + stale reviewed tree (tighten-only)
+lib/parallel-review.ts        review planning only: tiered threshold, shard planner, per-shard prompt, verdict parser, record merger (pure, no engine)
+docs/handoff-remove-pdw.md    step-2 handoff: retiring the pdw engine from wave + decompose
 lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
 lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)

@@ -61,10 +61,13 @@ test("workflow prompts delimit arguments as untrusted JSON data", () => {
 
 test("review and precommit aliases use the trusted gate protocol", () => {
   assert.match(buildWorkflowPrompt("review"), /record_review/);
-  assert.match(buildWorkflowPrompt("review"), /run_parallel_shard_review/, "review always runs through the pdw engine");
-  assert.match(buildWorkflowPrompt("review"), /auto-shards/, "large diffs are sharded automatically");
-  assert.match(buildWorkflowPrompt("review"), /NO user confirmation/, "the shard plan needs no confirmation");
-  assert.match(buildWorkflowPrompt("review"), /no serial protocol exists/, "no serial fallback exists — the engine is the only path");
+  // Review runs on plain subagents now: the engine discarded a per-agent cwd,
+  // so a shard reviewer could never hold its own snapshot of the change.
+  assert.match(buildWorkflowPrompt("review"), /prepare_review/, "prepare_review is the entry point");
+  assert.match(buildWorkflowPrompt("review"), /NOT the pdw engine/, "the engine path must be named as gone");
+  assert.doesNotMatch(buildWorkflowPrompt("review"), /run_parallel_shard_review/);
+  assert.match(buildWorkflowPrompt("review"), /shards the change/, "large diffs are sharded by the tool");
+  assert.match(buildWorkflowPrompt("review"), /you do NOT invent the split/, "the split is mechanical");
   assert.match(buildWorkflowPrompt("review"), /AUTONOMOUS PROTOCOL/, "review runs on its own — the command is only an explicit trigger");
   assert.match(buildWorkflowPrompt("precommit"), /run_precommit with mode=full/);
   assert.match(buildWorkflowPrompt("precommit-fast"), /run_precommit with mode=fast/);
@@ -79,14 +82,15 @@ test("review prompt runs precommit FIRST and spawns both reviewers in the same t
   assert.match(prompt, /run_precommit/,
     "the trusted precommit tool must be named");
   assert.ok(
-    prompt.indexOf("run_precommit") < prompt.indexOf("run_parallel_shard_review"),
-    "precommit must be scheduled BEFORE the review engine call",
+    prompt.indexOf("run_precommit") < prompt.indexOf("prepare_review"),
+    "precommit must be scheduled BEFORE any reviewer is prepared or spawned",
   );
   assert.doesNotMatch(prompt, /Do not run precommit unless the review becomes READY/,
     "the old concurrent-protocol sentence must be gone");
-  // Small diffs: both cross-family reviewers in the SAME turn, async.
-  assert.match(prompt, /both async:true, never one after the other/,
-    "the two reviewers must be spawned in the same turn");
+  // Every reviewer of a round goes out in the SAME turn, small diff or sharded:
+  // serial spawns double the wall time for zero extra signal.
+  assert.match(prompt, /ALL IN THE SAME TURN \(async:true, never one after \s*the other\)/,
+    "the reviewers must be spawned in one turn");
 });
 
 test("shipping helpers are deterministic dry-run unless extension grants execute", () => {

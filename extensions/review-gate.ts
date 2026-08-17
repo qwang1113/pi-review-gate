@@ -192,6 +192,16 @@ import {
   planFanoutFromFacts,
   type JudgeFacts,
 } from "../lib/review-fanout.ts";
+import {
+  createReviewSnapshot,
+  pruneOrphanSnapshots,
+  removeReviewSnapshot,
+  safeLabel,
+  verifySnapshot,
+  type ReviewSnapshot,
+} from "../lib/review-snapshot.ts";
+import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
+import { applyVerdictGuards, decideSnapshotPlan } from "../lib/verdict-guards.ts";
 import { isModelAllowed, loadPdw } from "../lib/pdw-bridge.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
@@ -237,7 +247,8 @@ import {
 import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "../lib/workflow-commands.ts";
 import {
   planReviewShards,
-  runParallelShardReview,
+  buildShardPrompt,
+  SHARD_VERDICT_SCHEMA,
   formatShardReviewRecord,
   shouldShardReview,
   SHARD_THRESHOLD_FILES,
@@ -787,6 +798,76 @@ export default function reviewGate(pi: ExtensionAPI) {
       const facts = factsFromRegistry(registry, homedir(), () => undefined);
       if (facts.models.length > 0) registryJudgeFacts = facts;
     } catch { /* unusable registry — stay on the disk view */ }
+  }
+
+  /**
+   * Snapshots prepared for the CURRENT round of a repo, per reviewer instance.
+   *
+   * In memory by design: a snapshot is worthless once the session that spawned
+   * its reviewers is gone, and a stale entry must never outlive it. Orphans on
+   * disk are reclaimed by age (`pruneOrphanSnapshots`).
+   */
+  const preparedSnapshots = new Map<string, ReviewSnapshot[]>();
+
+  /**
+   * Drift discovered when a round was RELEASED but whose verdict had not been
+   * recorded yet, per repo.
+   *
+   * Agents do not always call in the tidy order prepare → spawn → record: a
+   * prepare for the next round can land before the previous round's output is
+   * recorded. The snapshots are gone by then and the new ones are clean, so the
+   * drift would silently disappear — laundering an untrustworthy READY. Parking
+   * it here keeps the finding alive until a record_review consumes it.
+   */
+  const pendingDrift = new Map<string, string[]>();
+
+  /**
+   * The tree THIS round's reviewers actually looked at, per repo.
+   *
+   * Set when snapshots are handed out (prepare_review) or when the shard
+   * engine materializes its own. It is the missing half of the mid-review-fix
+   * story: the agent is now told to fix WHILE a review runs, so by the time
+   * `record_review` computes the worktree fingerprint the tree can be one no
+   * reviewer ever saw — and binding a READY to it would approve unreviewed
+   * code. Comparing against this value makes the documented "the gate asks for
+   * another round" outcome mechanical instead of aspirational.
+   */
+  const reviewedTree = new Map<string, string>();
+
+  /**
+   * Verify the snapshots prepared for `repoRoot`.
+   *
+   * Called from record_review, so the integrity check is MECHANICAL: the agent
+   * cannot forget it, and a reviewer that left its mutation in place cannot
+   * have that fact quietly omitted from the record.
+   *
+   * It deliberately does NOT drop the set. Two reviewers mean two
+   * `record_review` calls, and an earlier version deleted every snapshot on
+   * the first one — so the second reviewer's verdict was recorded with no
+   * verification at all, and a drifted READY could ship by simply splitting
+   * the calls. The set is cleared when the NEXT round is prepared, by the
+   * shard tool, or at session start.
+   */
+  function verifyPreparedSnapshots(repoRoot: string): string[] {
+    const snaps = preparedSnapshots.get(repoRoot) ?? [];
+    const drifts: string[] = [];
+    for (const snap of snaps) {
+      try {
+        const check = verifySnapshot(snap);
+        if (!check.clean) drifts.push(check.summary);
+      } catch { /* an unreadable snapshot is reported by verifySnapshot itself */ }
+    }
+    return drifts;
+  }
+
+  /** Verify, then destroy, the snapshots of a finished round. */
+  function releasePreparedSnapshots(repoRoot: string): string[] {
+    const drifts = verifyPreparedSnapshots(repoRoot);
+    for (const snap of preparedSnapshots.get(repoRoot) ?? []) {
+      try { removeReviewSnapshot(snap, repoRoot); } catch { /* best-effort */ }
+    }
+    preparedSnapshots.delete(repoRoot);
+    return drifts;
   }
 
   /**
@@ -2177,6 +2258,275 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
   });
 
+  // ---------- prepare_review tool (snapshot isolation for spawned reviewers) ----------
+
+  pi.registerTool({
+    name: "prepare_review",
+    label: "Prepare Review",
+    description:
+      "Plan the review and materialize one disposable WRITABLE snapshot worktree per reviewer, then " +
+      "return each one's cwd, finding-stream path and file list. ALWAYS call this before spawning " +
+      "reviewers — review no longer runs through the pdw engine (it discards a per-agent cwd, so a " +
+      "shard reviewer could never get its own copy of the change). For a LARGE diff this tool does the " +
+      "sharding itself (planReviewShards: disjoint groups covering every changed file), so the split is " +
+      "computed, not improvised; spawn one reviewer per returned shard in the SAME turn (async), each " +
+      "with its own cwd. Inside its snapshot a reviewer may edit and run tests freely (mutation " +
+      "analysis) while YOU keep fixing the real worktree from its streamed findings. record_review " +
+      "verifies every snapshot afterwards and refuses a READY from a reviewer that left edits behind, " +
+      "or whose tree no longer matches your worktree.",
+    parameters: Type.Object({
+      labels: Type.Optional(Type.Array(Type.String(), {
+        description:
+          "One label per reviewer for a SMALL diff (e.g. [\"anthropic\",\"openai\"] or " +
+          "[\"integration\"]) — use the fan-out plan's count. Ignored for a large diff: the shard plan " +
+          "decides the labels there.",
+      })),
+      max_shards: Type.Optional(Type.Integer({
+        description: "Shard cap for a large diff (default 4).",
+      })),
+      repo: Type.Optional(Type.String({
+        description: "Absolute repo path (required once the session edited several repos)",
+      })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, _ctx) {
+      const target = resolveToolRepo(params.repo);
+      if (!target.ok) {
+        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      }
+
+      // SHARD PLANNING LIVES HERE, not in the agent's head. Moving review off
+      // the engine moved the fan-out decision to the main agent, and "it split
+      // the diff into disjoint groups covering every file" is not something a
+      // prompt can guarantee. planReviewShards is a pure, tested function; the
+      // tool runs it and hands back the groups, so the split is a fact.
+      let shardPlan: { label: string; files: string[]; note: string }[] | undefined;
+      let tier: "single" | "sharded" = "single";
+      let fileCount = 0;
+      let lineCount = 0;
+      const changed = await listChangedFiles(target.root);
+      if (changed.ok && changed.files.length > 0) {
+        fileCount = changed.files.length;
+        const lines = await countDiffLines(target.root, changed.files);
+        lineCount = lines.ok ? lines.lines : 0;
+        if (shouldShardReview(fileCount, lineCount)) {
+          tier = "sharded";
+          shardPlan = planReviewShards(changed.files, {
+            maxShards: params.max_shards ?? 4,
+          }).shards.map((s) => ({ label: s.label, files: s.files, note: s.note }));
+        }
+      }
+
+      // SANITIZE FIRST, then deduplicate — both with the same helper the
+      // snapshot uses. Sanitizing up front means the labels we plan with are
+      // exactly the labels the snapshots report, so the partial-failure check
+      // compares like with like (comparing raw against sanitized would flag
+      // `a/b` → `a-b` as a failed reviewer and refuse a good plan). Dedup
+      // matters because the stream filename is derived from the label: `a/b`
+      // and `a-b` would otherwise share one stream file.
+      const seenLabels = new Set<string>();
+      const labels = (shardPlan ? shardPlan.map((s) => s.label) : (params.labels ?? []))
+        .filter((l) => l.trim() !== "")
+        .map((l) => safeLabel(l))
+        .filter((l) => {
+          if (seenLabels.has(l)) return false;
+          seenLabels.add(l);
+          return true;
+        });
+      if (labels.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text:
+              "review-gate: prepare_review needs at least one reviewer label for a small diff " +
+              "(a large diff is labelled by the shard plan). Use the fan-out plan's count.",
+          }],
+          details: {},
+          isError: true,
+        };
+      }
+      // A previous round's snapshots would otherwise linger for the session.
+      // Their drift still matters: if the last round's verdict was READY and a
+      // reviewer turns out to have left edits behind, that READY was never
+      // trustworthy — withdraw it rather than downgrade it to a note (the
+      // laundering path: prepare a new round and the old drift disappears).
+      const stale = releasePreparedSnapshots(target.root);
+      if (stale.length > 0) {
+        const st = stateForRepo(target.root);
+        if (st.review.verdict === "READY") {
+          st.review = { ...st.review, verdict: "BLOCKED", fingerprint: null };
+          persistRepo(_ctx as unknown as ExtensionContext, target.root);
+        } else {
+          // Not READY *yet*. The verdict for those drifted snapshots may still
+          // be recorded AFTER this call (agents do prepare-then-record out of
+          // order), and by then the snapshots are gone and the new ones are
+          // clean — so the drift would vanish. Park it: the next record_review
+          // consumes it and downgrades, exactly as if the snapshot were still
+          // on disk. This is the laundering window shard-2 found.
+          pendingDrift.set(target.root, [...(pendingDrift.get(target.root) ?? []), ...stale]);
+        }
+      }
+      // Reclaim what crashed sessions left in /tmp; cheap and silent.
+      try { pruneOrphanSnapshots(target.root); } catch { /* best-effort */ }
+
+      reviewedTree.delete(target.root);
+      const runId = `review-${Date.now().toString(36)}`;
+      // ONE tree for the whole round, computed once. Two reasons, both real:
+      //  - cost: worktreeTreeOid is the expensive shadow-index pass, and doing
+      //    it per snapshot paid for it up to 4 times;
+      //  - correctness: if the worktree changed between snapshots, the reviewers
+      //    would be judging DIFFERENT trees while `reviewedTree` records only
+      //    one — the stale-tree guard would then be blind to the others.
+      // Unavailable ⇒ let each snapshot resolve it (fail-soft, as before).
+      let roundTree: string | undefined;
+      try { roundTree = worktreeTreeOid(target.root); } catch { roundTree = undefined; }
+      const snaps: ReviewSnapshot[] = [];
+      const unsnapshotted: string[] = [];
+      for (const label of labels) {
+        const snap = createReviewSnapshot({
+          repoRoot: target.root,
+          instance: label,
+          runId,
+          ...(roundTree ? { tree: roundTree } : {}),
+        });
+        if (snap) snaps.push(snap);
+        else unsnapshotted.push(label);
+      }
+      // PARTIAL FAILURE IS NOT SILENT. Dropping a shard whose snapshot failed
+      // would leave its files unreviewed while the round still looked complete
+      // — the worst shape a review gate can have. Fail the whole call instead:
+      // the caller retries (or reviews without isolation, deliberately).
+      // The decision is pure + tested (lib/verdict-guards.ts): the inline
+      // version had zero coverage, so neutralizing it changed no test.
+      const planDecision = decideSnapshotPlan(labels, snaps.map((s) => s.instance));
+      if (planDecision.kind === "partial") {
+        for (const snap of snaps) {
+          try { removeReviewSnapshot(snap, target.root); } catch { /* best-effort */ }
+        }
+        return {
+          content: [{
+            type: "text",
+            text:
+              `review-gate: snapshot creation failed for ${planDecision.failedLabels.length} of ` +
+              `${labels.length} reviewer(s) (${planDecision.failedLabels.join(", ")}). Refusing a ` +
+              "PARTIAL plan: shipping the rest " +
+              "would leave those files unreviewed while the round looked complete. All snapshots for " +
+              "this attempt were removed — retry prepare_review (transient: disk, a stale worktree " +
+              "registration, a concurrent prune), or review without isolation on purpose by spawning " +
+              "`reviewer-readonly` over the whole change.",
+          }],
+          details: { isolated: false, partial: true, failedLabels: planDecision.failedLabels },
+          isError: true,
+        };
+      }
+      if (planDecision.kind === "none") {
+        // Fail-soft, and SAY so: without isolation the reviewer must not edit,
+        // and the agent must not fix while it runs.
+        return {
+          content: [{
+            type: "text",
+            text:
+              "review-gate: snapshot isolation UNAVAILABLE here (git worktree refused — no commit yet, " +
+              "no worktree support, or a read-only filesystem). The reviewers would be reading YOUR live " +
+              "worktree, so:\n" +
+              "- Spawn the `reviewer-readonly` agent instead of `reviewer`. Its tool allowlist has no " +
+              "edit/write, so it CANNOT touch the worktree — that is the mechanical half; choosing it is " +
+              "yours to honor (pi-subagents has no per-call tool denylist).\n" +
+              "- Do NOT apply fixes until the verdict is recorded: the reviewer is reading the same tree " +
+              "you would be editing, and mutation analysis is unavailable to it this round.\n" +
+              "The gate itself is unchanged — this only costs you the parallel fix window.",
+          }],
+          // No snapshot ⇒ nothing recorded about what the reviewers will see,
+          // and any stale value from an earlier round must not survive to
+          // block an honest READY.
+          details: { isolated: false },
+        };
+      }
+      preparedSnapshots.set(target.root, snaps);
+      // What the reviewers of this round will actually have seen. Every
+      // snapshot shares one tree (see roundTree above); if they somehow do not,
+      // record NOTHING rather than a value that covers only some reviewers — the
+      // guard must never claim more than it can prove.
+      const trees = new Set(snaps.map((s) => s.tree));
+      if (trees.size === 1) reviewedTree.set(target.root, snaps[0]!.tree);
+      else reviewedTree.delete(target.root);
+      const byLabel = new Map((shardPlan ?? []).map((s) => [s.label, s]));
+      const lines = [
+        tier === "sharded"
+          ? `review-gate: LARGE diff (${fileCount} file(s), ~${lineCount} line(s)) — sharded into ` +
+            `${snaps.length} disjoint group(s) covering every changed file (planReviewShards). ` +
+            `Snapshots ready (tree ${snaps[0]!.tree.slice(0, 12)}).`
+          : `review-gate: ${snaps.length} snapshot(s) ready (tree ${snaps[0]!.tree.slice(0, 12)}).`,
+        ...(stale.length ? [`Note: a previous round's snapshot had drifted — ${stale.join("; ")}`] : []),
+        "Spawn ONE reviewer per entry below, all in the SAME turn (async), each with its own cwd:",
+        ...snaps.map((s) => {
+          const shard = byLabel.get(s.instance);
+          return (
+            `- ${s.instance}: cwd=${s.dir}\n  stream=${s.streamPath}` +
+            (shard ? `\n  files (${shard.note}): ${shard.files.join(", ")}` : "")
+          );
+        }),
+        "",
+        buildStreamConsumerDirective(snaps.map((s) => s.streamPath)),
+        "",
+        // For a sharded run, hand over the READY-MADE per-shard task text: the
+        // file list, the snapshot contract and the stream directive have to
+        // match the plan exactly, and retyping them per shard is where drift
+        // (and "I'll just review everything") creeps in.
+        ...(shardPlan
+          ? shardPlan.flatMap((shard) => {
+              const snap = snaps.find((s) => s.instance === shard.label);
+              if (!snap) return [];
+              return [
+                `--- task text for ${shard.label} (cwd=${snap.dir}) ---`,
+                buildShardPrompt(shard, readLoopGoal(target.root).text || undefined, undefined, {
+                  streamPath: snap.streamPath,
+                }),
+                "",
+              ];
+            })
+          : [
+              "Give each reviewer this instruction block (substituting its own stream path):",
+              buildStreamDirective(snaps[0]!.streamPath),
+            ]),
+        "",
+        "The reviewer works in a disposable copy: mutation analysis is encouraged, but it MUST restore " +
+          "every mutation and keep scratch files outside the snapshot ($TMPDIR), and never write under " +
+          "node_modules (a symlink to the real repo). record_review re-derives each snapshot's tree and " +
+          "will not accept a READY from a reviewer that left edits behind.",
+        "",
+        "Spawn each reviewer with this `outputSchema` so a malformed verdict fails at the source " +
+          "instead of arriving as unparseable prose:",
+        "```json",
+        JSON.stringify(SHARD_VERDICT_SCHEMA, null, 2),
+        "```",
+        ...(tier === "sharded"
+          ? [
+              "",
+              "Merge ALL shard outputs into ONE record_review call, in this exact shape (worst verdict " +
+                "wins; shard verdicts carry no docSync — the integration reviewer that follows attests it):",
+              formatShardReviewRecord(
+                snaps.map((s) => ({ label: s.instance, output: '{"gate":"…","findings":[…]}' })),
+              ),
+            ]
+          : []),
+      ];
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        details: {
+          isolated: true,
+          tier,
+          fileCount,
+          lineCount,
+          snapshots: snaps.map((s) => ({
+            label: s.instance,
+            cwd: s.dir,
+            stream: s.streamPath,
+            ...(byLabel.get(s.instance) ? { files: byLabel.get(s.instance)!.files } : {}),
+          })),
+        },
+      };
+    },
+  });
   // ---------- record_review tool ----------
 
   pi.registerTool({
@@ -2234,6 +2584,36 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Scope THIS round was judged under — computed BEFORE the new verdict
       // overwrites the baseline, or it would always read as "nothing new".
       const scopeNow = reviewScopeFor(targetRoot, st);
+      // SNAPSHOT INTEGRITY — mechanical, not honour-based. Every snapshot this
+      // round's reviewers ran in is re-derived here: one that no longer holds
+      // the tree it was built from means that reviewer's last checks ran
+      // against its OWN edits, so its approval is not evidence. Downgrade to
+      // BLOCKED rather than reject the call: the findings it produced are real
+      // and worth keeping, and BLOCKED ships nothing. Tighten-only — this can
+      // withhold a READY, never grant one.
+      // Drift from THIS round's snapshots, plus any parked by an out-of-order
+      // prepare_review for the round whose verdict is only arriving now.
+      const parked = pendingDrift.get(targetRoot) ?? [];
+      pendingDrift.delete(targetRoot);
+      const snapshotDrifts = [...verifyPreparedSnapshots(targetRoot), ...parked];
+      // The DECISION itself is a pure function (lib/verdict-guards.ts) so the
+      // truth table is behaviourally tested — an inline version was only
+      // shape-locked, and a mutation experiment showed it could be neutralized
+      // with the whole suite still green.
+      const reviewed = reviewedTree.get(targetRoot);
+      let currentTree: string | undefined;
+      if (reviewed && parsed.verdict === "READY") {
+        try { currentTree = worktreeTreeOid(targetRoot); } catch { currentTree = undefined; }
+      }
+      const guarded = applyVerdictGuards({
+        verdict: parsed.verdict,
+        snapshotDrifts,
+        ...(reviewed ? { reviewedTree: reviewed } : {}),
+        ...(currentTree ? { currentTree } : {}),
+      });
+      const driftBlocked = guarded.driftBlocked;
+      const staleTree = guarded.staleTree;
+      parsed.verdict = guarded.verdict as typeof parsed.verdict;
       st.review = {
         verdict: parsed.verdict,
         fingerprint: parsed.verdict === "READY" ? fp.digest : null,
@@ -2330,9 +2710,29 @@ export default function reviewGate(pi: ExtensionAPI) {
           // READY for the wrong one and read the resulting block as sabotage.
           text: `review-gate: recorded verdict ${parsed.verdict} for ${targetRoot} ` +
             `(round ${st.rounds.length}/${st.maxRounds}, findings: ${parsed.findingsTotal ?? "?"}).${note}` +
+            (driftBlocked
+              ? "\nSNAPSHOT INTEGRITY: the reviewer reported READY but left its snapshot modified, so its " +
+                "final checks ran against its own edits — the verdict is recorded as BLOCKED. " +
+                `Re-run that reviewer in a fresh snapshot (prepare_review). ${snapshotDrifts.join("; ")}`
+              : snapshotDrifts.length
+                ? `\nSNAPSHOT INTEGRITY: ${snapshotDrifts.join("; ")} (verdict was not READY, so it stands).`
+                : "") +
+            (staleTree
+              ? "\nSTALE TREE: the reviewer approved a tree that is no longer what you have — your " +
+                `mid-review fixes changed it (${staleTree}). The READY cannot bind to code no reviewer ` +
+                "saw, so it is recorded as BLOCKED. This is the expected outcome of fixing while the " +
+                "review runs: those fixes are already in, so the next round is short. Re-review the " +
+                "current tree (prepare_review → spawn → record_review)."
+              : "") +
             (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : ""),
         }],
-        details: { verdict: parsed.verdict, round: st.rounds.length, repo: repoLabel(targetRoot) },
+        details: {
+          verdict: parsed.verdict,
+          round: st.rounds.length,
+          repo: repoLabel(targetRoot),
+          ...(snapshotDrifts.length ? { snapshotDrift: snapshotDrifts } : {}),
+          ...(staleTree ? { staleTree } : {}),
+        },
       };
     },
   });
@@ -2378,201 +2778,28 @@ export default function reviewGate(pi: ExtensionAPI) {
     });
   }
 
-  /** Compute per-shard diffs for a set of shards. */
-  async function addDiffContext(
-    cwd: string,
-    shards: Array<{ label: string; files: string[]; note: string }>,
-  ): Promise<Array<{ label: string; files: string[]; note: string; diff?: string }>> {
-    const { execFile } = await import("node:child_process");
-    const results = await Promise.all(
-      shards.map(async (shard) => {
-        if (shard.files.length === 0) return { ...shard };
-        try {
-          const diff = await new Promise<string>((resolve, reject) => {
-            execFile(
-              "git", ["diff", "HEAD", "--", ...shard.files],
-              { cwd, maxBuffer: 4 * 1024 * 1024 },
-              (err, stdout) => {
-                if (err) reject(err);
-                else resolve(stdout);
-              },
-            );
-          });
-          // Cap at 8KB to keep the prompt manageable (the reviewer reads the
-          // actual files anyway; the diff is orientation only).
-          const capped = diff.length > 8192
-            ? diff.slice(0, 8192) + "\n... (diff truncated at 8KB — review the worktree files)"
-            : diff;
-          return { ...shard, diff: capped };
-        } catch {
-          return { ...shard }; // diff unavailable — reviewer reads worktree files
-        }
-      }),
-    );
-    return results;
-  }
+  // `addDiffContext` and `buildSingleShardPrompt` died with the engine review
+  // path. Neither has a caller any more, and neither is needed:
+  //  - per-shard diff context is pointless when the reviewer holds a snapshot of
+  //    the change — it runs `git diff HEAD` itself, against the real thing;
+  //  - the small-diff prompt now comes from `buildShardPrompt` (one source of
+  //    truth for the reviewer contract) via `prepare_review`.
+  // Deleting them beats keeping "maybe useful later" code that no test covers.
 
-  /**
-   * Build a single-shard review prompt (no pdw) for small diffs. The prompt
-   * instructs the agent to run the DEFAULT TWO cross-family reviewers (fable-5
-   * + gpt-5.6-sol chains, both at max thinking) and return both fenced
-   * verdicts — each WITH docSync (there is no separate integration review on
-   * the small-diff path, so the reviewers attest code↔doc themselves) — so
-   * the caller can feed them to record_review unchanged (worst wins).
-   */
-  function buildSingleShardPrompt(
-    files: string[],
-    fileCount: number,
-    lineCount: number,
-    goalText?: string,
-  ): string {
-    const lines = [
-      "## Two-reviewer review (tiered trigger: small diff)",
-      "",
-      `The diff is ${fileCount} file(s), ~${lineCount} line(s) — below the parallel-shard threshold `,
-      `(${SHARD_THRESHOLD_FILES} files / ${SHARD_THRESHOLD_LINES} lines).`,
-      "Run TWO reviewers from different model families over the full change " +
-        "(default: claude-fable-5/anthropic + onekey/gpt-5.6-sol/openai, both max thinking; " +
-        "fall down the pinned chains if unavailable):",
-      "",
-      "### Changed files",
-      ...files.map((f) => `- ${f}`),
-      "",
-      "Each reviewer subagent follows the same instructions as a shard reviewer:",
-      "- Read every changed file in the worktree.",
-      "- Verify from the code (never guess).",
-      "- Report findings with file paths and line numbers.",
-      "- Return a fenced JSON verdict WITH docSync (UPDATED | NOT_NEEDED) — there is NO separate " +
-        "integration review on the small-diff path, so each reviewer attests code↔doc itself.",
-      "- Do NOT edit any file. Do NOT run tests that write files.",
-      "",
-      "Record BOTH full outputs via record_review (worst verdict wins).",
-    ];
-    if (goalText && goalText.trim()) {
-      lines.push("", "### Loop goal", goalText.trim());
-    }
-    return lines.join("\n");
-  }
-
-  pi.registerTool({
-    name: "run_parallel_shard_review",
-    label: "Run Parallel Shard Review",
-    description:
-      "Run the parallel shard review via the pdw workflow engine: multiple L3 reviewers audit DISJOINT " +
-      "shards of the change concurrently, each returning a verdict fence WITHOUT docSync. Returns the " +
-      "combined shard record: record it in ONE record_review call (worst verdict wins), then run ONE " +
-      "integration reviewer over the whole change recorded ALONE (it carries the docSync attestation). " +
-      "SMALL DIFFS (<20 files AND <500 lines) skip the pdw engine entirely — the tool returns a " +
-      "two-reviewer prompt the agent runs with standard reviewer subagents (two cross-family reviewers, worst wins). " +
-      "The pdw engine is a HARD dependency: when it is unavailable the tool reports an installation " +
-      "error — there is no serial fallback.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
-      goal: Type.Optional(Type.String({ description: "Loop goal text handed to every shard reviewer" })),
-      max_shards: Type.Optional(Type.Integer({ description: "Shard count cap (default 4)" })),
-      model: Type.Optional(Type.String({ description: "Reviewer model spec override (default: pinned judge with fallback resolution)" })),
-    }),
-    async execute(_id, params, _signal, onUpdate, ctx) {
-      const cwd = params.repo ?? ctx.cwd ?? process.cwd();
-      try {
-        const filesResult = await listChangedFiles(cwd);
-        if (!filesResult.ok) {
-          return {
-            content: [{ type: "text", text: `parallel shard review failed: ${filesResult.error}.` }],
-            details: { available: false, reason: "not-a-git-repo", error: filesResult.error },
-          };
-        }
-        const files = filesResult.files;
-        if (files.length === 0) {
-          return {
-            content: [{ type: "text", text: "parallel shard review: no changed files." }],
-            details: { available: true, shards: [], reason: "no-changes" },
-          };
-        }
-
-        // Tiered trigger: count lines and decide whether to shard.
-        const lineResult = await countDiffLines(cwd, files);
-        const lineCount = lineResult.ok ? lineResult.lines : 0;
-        const shouldShard = shouldShardReview(files.length, lineCount);
-
-        if (!shouldShard) {
-          // Small diff: single-shard review without pdw.
-          const prompt = buildSingleShardPrompt(files, files.length, lineCount, params.goal ?? undefined);
-          return {
-            content: [{
-              type: "text",
-              text:
-                `## Tiered trigger: small diff (${files.length} file(s), ~${lineCount} line(s))\n` +
-                `Below the parallel-shard threshold (${SHARD_THRESHOLD_FILES} files / ${SHARD_THRESHOLD_LINES} lines).\n` +
-                `Run TWO cross-family reviewers (not pdw) over the full change — worst verdict wins:\n\n` +
-                prompt,
-            }],
-            details: {
-              available: true,
-              shardCount: 1,
-              tier: "single",
-              fileCount: files.length,
-              lineCount,
-            },
-          };
-        }
-
-        // Large diff: shard and add per-shard diff context.
-        const plan = planReviewShards(files, { maxShards: params.max_shards ?? 4 });
-        const shardsWithDiff = await addDiffContext(cwd, plan.shards);
-        const outcome = await runParallelShardReview({
-          cwd,
-          shards: shardsWithDiff,
-          goalText: params.goal ?? undefined,
-          model: params.model ?? undefined,
-          modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
-          onProgress: (text: string, progress?: number) => {
-            onUpdate?.({
-              content: [{ type: "text", text }],
-              details: progress !== undefined ? { progress } : {},
-            });
-          },
-        });
-        if (!outcome.ok) {
-          // One diagnosis call, hoisted (the helper reads agent files — never
-          // pay for it twice on an error path).
-          const diag = modelDiagnosisLines(ctx.modelRegistry);
-          return {
-            content: [{ type: "text", text: `parallel shard review failed: ${outcome.reason}${outcome.error ? ` — ${outcome.error}` : ""}.` + (diag.length ? `\n\n${diag.join("\n")}` : "") }],
-            details: {
-              available: false,
-              reason: outcome.reason,
-              error: outcome.error ?? null,
-              runId: outcome.runId,
-              progressFile: outcome.progressFile,
-              engineLogFile: outcome.engineLogFile,
-            },
-          };
-        }
-        const record = formatShardReviewRecord(outcome.shards);
-        return {
-          content: [{ type: "text", text: record }],
-          details: {
-            available: true,
-            shardCount: outcome.shards.length,
-            tier: "parallel",
-            failedShards: outcome.failedShards ?? [],
-            durationMs: outcome.durationMs,
-            agentCount: outcome.agentCount,
-            runId: outcome.runId,
-            progressFile: outcome.progressFile,
-            engineLogFile: outcome.engineLogFile,
-          },
-        };
-      } catch (err) {
-        const diag = modelDiagnosisLines(ctx.modelRegistry);
-        return {
-          content: [{ type: "text", text: `parallel shard review failed: ${(err as Error).message}. If the pdw engine is missing, re-install the package (\`pi install\` it, or run \`npm install\` / \`scripts/install-package.mjs\` in its repo — the engine ships as a dependency).` + (diag.length ? `\n\n${diag.join("\n")}` : "") }],
-          details: { available: false, reason: "tool-failed", error: (err as Error).message },
-        };
-      }
-    },
-  });
+  // NOTE: `run_parallel_shard_review` used to live here. Review no longer runs
+  // through the pdw engine at all — the engine DISCARDS a per-agent `cwd`
+  // (workflow.js: runCwd comes only from its own `isolation:"worktree"`, which
+  // checks out HEAD and therefore does NOT contain the change under review), so
+  // shard reviewers could never get their own snapshot of the work being
+  // judged. They shared the live worktree instead: fighting each other, the
+  // main agent, and the tree the gate fingerprints.
+  //
+  // Reviews are now dispatched as ordinary subagents (pi-subagents honors a
+  // per-call `cwd` and enforces a structured `outputSchema`), one disposable
+  // WRITABLE snapshot each, with `prepare_review` computing the shard plan so
+  // the split stays mechanical. The engine remains a hard dependency for wave
+  // workers and the decompose module loop — see docs/handoff-remove-pdw.md for
+  // the plan to retire it there too.
 
   pi.registerTool({
     name: "run_wave_workflow",
@@ -4366,6 +4593,23 @@ export default function reviewGate(pi: ExtensionAPI) {
     sessionRepos.clear();
     sessionRepos.add(primaryRepoRoot);
     repoStateCache.clear();
+    // A new session inherits nothing from the last one's reviewers: any
+    // snapshot still on disk belongs to a run that is over (this is the
+    // "session exit" cleanup — done on the next start, because a crashed
+    // session never gets to run one). Age-bounded and prefix-scoped.
+    preparedSnapshots.clear();
+    // …and with them the record of what those reviewers saw. A tree left over
+    // from a previous session would make the stale-tree guard reject the next
+    // HONEST READY with a misleading "STALE TREE" — tighten-only, but it burns
+    // a whole round for nothing.
+    reviewedTree.clear();
+    // Parked drift dies with the session too, for the same reason: its snapshots
+    // are long gone, the verdict it was waiting to qualify was never recorded,
+    // and keeping it would downgrade the NEXT session's first honest READY. The
+    // in-memory design is deliberate (an unrecorded round is simply lost, which
+    // fails closed — nothing was approved).
+    pendingDrift.clear();
+    try { pruneOrphanSnapshots(primaryRepoRoot); } catch { /* best-effort */ }
     // USER REQUIREMENT: "no changes" for the first classification means THIS
     // session — a new session starts with a clean edit slate even if the
     // worktree carries pre-existing changes from before (they still arm the

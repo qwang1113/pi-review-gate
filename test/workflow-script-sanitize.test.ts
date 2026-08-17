@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { sanitizeInjectedWorkflowText } from "../lib/pdw-bridge.ts";
-import { generateShardReviewScript } from "../lib/parallel-review.ts";
+
 
 /**
  * pdw's workflow-script validator (parseWorkflowScript) rejects a script whose
@@ -35,18 +35,15 @@ test("sanitize leaves unrelated text untouched", () => {
   assert.equal(sanitizeInjectedWorkflowText("new Date(now - ageMs)"), "new Date(now - ageMs)");
 });
 
-test("generateShardReviewScript output never trips the blocklist, even with dirty goal/diff", () => {
-  const dirtyGoal = "goal mentions Date.now() and Math.random() and new Date()";
-  const shards = [
-    {
-      id: "s1",
-      label: "shard-1",
-      files: ["extensions/review-gate.ts"],
-      description: "diff includes Date.now() call sites",
-      lineCount: 100,
-      note: "",
-    },
-  ];
-  const script = generateShardReviewScript({ shards, goalText: dirtyGoal, model: "claude-fable-5" });
+test("WAVE worklog text never trips the blocklist, even when the module brief is dirty", () => {
+  // The review path no longer generates a workflow script (reviews run as plain
+  // subagents), so the shard-script case is gone. Wave workers DO still run on
+  // the engine, and their task text carries user prose — that is now the surface
+  // this sanitizer protects.
+  const dirty = "module brief mentions Date.now() and Math.random() and new Date()";
+  const sanitized = sanitizeInjectedWorkflowText(dirty);
+  assert.ok(!BLOCKLIST.test(sanitized), `sanitized text still trips the blocklist:\n${sanitized}`);
+  // Embedding it in a script-shaped string must stay clean too.
+  const script = `const brief = ${JSON.stringify(sanitized)}\nreturn brief`;
   assert.ok(!BLOCKLIST.test(script), `generated script trips the blocklist:\n${script}`);
 });
