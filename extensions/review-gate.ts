@@ -72,7 +72,7 @@ import {
   requiresFullPrecommit,
   type ShipCommandKind,
 } from "../lib/constants.ts";
-import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
+import { defaultProjectConfig, globalConfigPath, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
 import { buildAgentsWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
@@ -82,7 +82,7 @@ import {
   resolveCommandRepos,
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
-import { firstNonEnglish, containsNonLatinLetter } from "../lib/lang-detect.ts";
+import { firstNonEnglish, containsNonLatinLetter, isNonEnglishText } from "../lib/lang-detect.ts";
 import {
   failedStepNames,
   receiptTotalMs,
@@ -177,7 +177,8 @@ import {
 } from "../lib/requirement-size.ts";
 import { fitDialogMessage } from "../lib/dialog-budget.ts";
 import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "../lib/model-diagnose.ts";
-import { isModelAllowed } from "../lib/pdw-bridge.ts";
+import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "../lib/gate-doctor.ts";
+import { isModelAllowed, loadPdw } from "../lib/pdw-bridge.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_HISTORY_QUERY,
@@ -4623,6 +4624,63 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch (e) {
         ctx.ui.notify(`review-gate: could not write lesson log: ${(e as Error).message}`, "error");
       }
+    },
+  });
+
+  // /gate-doctor — read-only health check: verifies every optimization this
+  // package ships actually works in the CURRENT environment (pdw engine, model
+  // chains, opencode-go prune, precommit runner, git hooks, global config
+  // fallback, L5 gate, Copilot gh, command registry). Pure diagnostics: it
+  // reads files and probes executables, writes NOTHING, and never feeds a
+  // gate verdict.
+  pi.registerCommand("gate-doctor", {
+    description: "Diagnose whether all optimizations are live (read-only health check)",
+    handler: async (_args, ctx) => {
+      const home = homedir();
+      const packageRoot = pathJoin(pathDirname(fileURLToPath(import.meta.url)), "..");
+      const readFileSafe = (p: string): string | undefined => {
+        try { return readFileSync(p, "utf8"); } catch { return undefined; }
+      };
+      // git rev-parse --git-path hooks resolves the real hooks dir (worktrees,
+      // core.hooksPath); unavailable → the hooks check degrades to WARN.
+      let hooksDir: string | undefined;
+      try {
+        const out = execFileSync("git", ["rev-parse", "--git-path", "hooks"], {
+          cwd, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+        if (out.length > 0) hooksDir = pathResolve(cwd, out);
+      } catch { /* git unavailable — hooks unverifiable */ }
+      const checks = await runGateDoctor({
+        homeDir: home,
+        packageRoot,
+        agentsDir: pathJoin(home, ".pi", "agent", "agents"),
+        modelsStorePath: pathJoin(home, ".pi", "agent", "models-store.json"),
+        globalConfigPath: globalConfigPath(home),
+        registryFacts: factsFromRegistry(ctx.modelRegistry, home, readFileSafe),
+        hooksDir,
+        workflowCommandCount: Object.keys(WORKFLOW_COMMANDS).length,
+        isNonEnglishText,
+        probePdw: async () => {
+          try { await loadPdw(); return { ok: true }; }
+          catch (e) { return { ok: false, error: (e as Error).message }; }
+        },
+        probeGh: async () => {
+          try {
+            const out = execFileSync("gh", ["--version"], {
+              encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
+            });
+            return { ok: true, value: out.split(/\r?\n/)[0] ?? "" };
+          } catch (e) {
+            const err = e as { code?: unknown; message?: unknown };
+            return { ok: false, error: err.code === "ENOENT" ? "gh not installed" : String(err.message ?? err.code ?? e) };
+          }
+        },
+        readFile: readFileSafe,
+        exists: existsSync,
+        readdir: (p) => { try { return readdirSync(p); } catch { return undefined; } },
+      });
+      const attention = checks.filter((c) => c.status !== "PASS").length;
+      ctx.ui.notify(formatDoctorReport(checks), attention ? "warning" : "info");
     },
   });
 

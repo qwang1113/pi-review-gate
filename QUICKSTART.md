@@ -69,6 +69,7 @@ agent：调 set_gate_mode("loop")
 | `/review`、`/precommit` | 显式触发 review / precommit |
 | `/gate-reset` | 重置门禁状态 |
 | `/gate-lesson <text>` | 记录经验教训 |
+| `/gate-doctor` | 只读体检：逐项检查优化是否生效（pdw 引擎、模型链、opencode-go 白名单、precommit runner、git hooks、全局配置、L5 门、Copilot gh、命令注册），输出 PASS/FAIL/WARN + 证据 + 修复建议 |
 
 ## 7. 成本须知
 

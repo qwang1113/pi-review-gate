@@ -1110,6 +1110,7 @@ gated **per repo**:
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
 | `/gate-reset` | Reset gate state (mode returns to undecided — the agent re-decides via `set_gate_mode`; also clears the agent-downgrade lock) |
 | `/gate-lesson <text>` | Append a lesson to `.pi/review-gate-lessons.md` (self-improvement log) |
+| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — pdw engine (parallel review / wave daily), agent model chains, opencode-go models-store prune, precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
 
 ### sd0x-dev-flow workflow commands
 
