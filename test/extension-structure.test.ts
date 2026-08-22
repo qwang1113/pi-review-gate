@@ -234,7 +234,7 @@ test("FAN-OUT: a partial (disk) model view may confirm judges, never deny them",
   // the same mistake that once reported every built-in chain as BLOCKED.
   const at = SRC.indexOf("function fanoutDirective(");
   assert.ok(at > 0, "fanoutDirective must exist");
-  const body = SRC.slice(at, at + 1200);
+  const body = SRC.slice(at, at + 3000);
   assert.match(body, /registryJudgeFacts/, "the authoritative registry view must be preferred");
   assert.match(
     body,
@@ -242,6 +242,19 @@ test("FAN-OUT: a partial (disk) model view may confirm judges, never deny them",
     "the disk fallback may only CONFIRM a cross-family pair — claiming SINGLE from it " +
       "would suppress a double review that was actually possible and record a false note",
   );
+  // The slot-aware planner gates the user-slot path on the reviewer auto switch
+  // OFF and keeps the capability planner for the default — so auto:true stays
+  // identical to today's path by construction.
+  const planAt = SRC.indexOf("function planForFacts(");
+  assert.ok(planAt > 0, "planForFacts must exist");
+  const planner = SRC.slice(planAt, planAt + 1600);
+  assert.match(planner, /planConfiguredReviewFanout/, "production planner must use the shared configured helper");
+  assert.match(planner, /reviewer\.auto === false/, "slot path must be gated on auto OFF");
+  assert.match(planner, /slots\.length > 0/, "empty slot list must fall back to the default path");
+  assert.match(planner, /planFanoutFromFacts/, "default path must keep the capability planner");
+  // The slot-source sentence lives ONCE, in the helper (round-12 Nit): a second
+  // copy here silently drifted from what lib/review-fanout.ts stamps.
+  assert.doesNotMatch(planner, /REVIEWER SLOT SOURCE/, "the slot-source stamp must not be duplicated in the extension");
   assert.doesNotMatch(
     body.slice(body.indexOf("factsFromRegistry(undefined")),
     /plan\.reviewers\.length > 0/,
@@ -249,6 +262,203 @@ test("FAN-OUT: a partial (disk) model view may confirm judges, never deny them",
   );
   // The authoritative view is warmed from real ctx registries, not invented.
   assert.match(SRC, /rememberJudgeFacts\(\(ctx as \{ modelRegistry\?: unknown \}\)\.modelRegistry\)/);
+});
+
+test("FAN-OUT wiring: slotSource stamp, config arg order, disk-fallback guards are all asserted", () => {
+  // round-2 P2: deleting the slotSource stamp or swapping the
+  // effectiveAgentsConfig(global, project) argument order left the suite
+  // green (shard-3 mutation); removing the notify block or reverting the disk
+  // fallback to planForFacts also stayed green (shard-1 mutations).
+  const planAt = SRC.indexOf("function planForFacts(");
+  const planner = SRC.slice(planAt, planAt + 1600);
+  // The stamp itself now lives ONCE, in planConfiguredReviewFanout
+  // (lib/review-fanout.ts), where test/review-fanout.test.ts pins its FULL text
+  // behaviorally. Here we only pin that the extension DELEGATES and never grows
+  // a second copy of that sentence (round-12 Nit).
+  assert.match(planner, /return planConfiguredReviewFanout\(facts, reviewer\)/, "the slotted path must delegate to the shared helper");
+  assert.doesNotMatch(planner, /plan\.slotSource =/, "the slot-source stamp must not be duplicated in the extension");
+  assert.match(planner, /effectiveAgentsConfig\(projectConfig\.agentsGlobal, projectConfig\.agentsProject\)/, "config layering must be global-first, project-second");
+  // The disk-fallback branch must (1) use the DEFAULT planner, not the slotted
+  // one, and (2) stay SILENT when the user pinned slots (a default-path spec
+  // would contradict the pin).
+  const fanoutAt = SRC.indexOf("function fanoutDirective(");
+  const fn = SRC.slice(fanoutAt, fanoutAt + 3000);
+  const fallbackStart = fn.indexOf("factsFromRegistry(undefined");
+  assert.ok(fallbackStart > 0);
+  const fallback = fn.slice(Math.max(0, fallbackStart - 700), fallbackStart + 200);
+  assert.match(fallback, /planFanoutFromFacts\(factsFromRegistry\(undefined/, "the disk view must use the DEFAULT planner");
+  assert.doesNotMatch(fallback, /planForFacts\(factsFromRegistry\(undefined/, "the slotted path must never run on the disk view");
+  assert.match(fallback, /rv\.auto === false && rv\.slots\.length > 0\) return undefined/, "pinned slots must silence the disk fallback");
+  // The round-1 notify block must stay (a rejected chain must reach the user).
+  const layersAt = SRC.indexOf("function ensureModelLayersRendered(");
+  // (round-2 corrupt-guard: the fail-safe branches add ~12 lines, so the
+  // window must comfortably cover the whole function.)
+  const layers = SRC.slice(layersAt, layersAt + 6500);
+  assert.match(layers, /ctx\.ui\.notify\(/, "layer problems must be notified");
+  assert.match(layers, /problems\.slice\(0, 5\)/, "the notification must be bounded");
+  // And the cross-layer reviewer-readonly guard (round-2 P2) + its dedup (round-3).
+  assert.match(layers, /\["reviewer-readonly"\] = \{ auto: true, slots: \[\], source: "default"/, "global explicit reviewer-readonly must not be shadowed by a project follow");
+  // The guard's DECISION CONDITION itself must be asserted, not just the
+  // assignment: `if (true)` would pass the assignment regex and override the
+  // project's explicit config (round-3 P2 mutation).
+  assert.match(
+    layers,
+    /if \(explicitRR\(globalRaw\) && !explicitRR\(projectRaw\) && !map\["reviewer-readonly"\]\?\.malformed\)/,
+    "the cross-layer guard must gate on BOTH layers' explicit config and skip malformed entries",
+  );
+  assert.match(layers, /lastLayerNotifyText/, "the notify dedup guard must exist (round-3 Nit)");
+  // The dedup CONDITION must be asserted too: `if (true)` would re-notify on
+  // every session start (round-3 P2 mutation).
+  assert.match(
+    layers,
+    /if \(text !== lastLayerNotifyText\)/,
+    "identical problems must not re-notify on every session start",
+  );
+  // The STATE WRITE must be asserted too: deleting `lastLayerNotifyText = text;`
+  // makes the dedup a no-op while every condition regex stays green (round-4 P2).
+  assert.match(layers, /lastLayerNotifyText = text;/, "the dedup state must be recorded");
+});
+
+test("corrupt config layer keeps the last render — BOTH layers, fail-safe (round-12 P1)", () => {
+  // Goal criterion 3: a corrupt/malformed `agents` section in EITHER layer must
+  // keep the last rendered chains. Round-12 P1 mutation: turning both guards
+  // into `if (false)` kept the WHOLE suite green — the consumer of
+  // agentsGlobalCorrupt / agentsProjectCorrupt had no coverage at all
+  // (test/project-config.test.ts only proves the flags are SET), so the
+  // restoreDefault sweep could silently clobber a valid render.
+  const layersAt = SRC.indexOf("function ensureModelLayersRendered(");
+  assert.ok(layersAt > 0, "ensureModelLayersRendered must exist");
+  const layers = SRC.slice(layersAt, layersAt + 6500);
+  // Each guard must read the PARSED flag (an `if (false)` / inlined re-parse
+  // no longer matches) and must SKIP its own render via the else branch —
+  // falling through to applyAgentConfigLayer is exactly the clobber.
+  assert.match(
+    layers,
+    /if \(projectConfig\.agentsGlobalCorrupt\) \{[\s\S]{0,400}?\} else \{[\s\S]{0,900}?applyAgentConfigLayer\(/,
+    "a corrupt GLOBAL layer must skip its render, not fall through to applyAgentConfigLayer",
+  );
+  assert.match(
+    layers,
+    // The project branch carries the cross-layer reviewer-readonly guard
+    // between the `else` and its render call, hence the wider window.
+    /if \(projectConfig\.agentsProjectCorrupt\) \{[\s\S]{0,400}?\} else \{[\s\S]{0,5000}?applyAgentConfigLayer\(/,
+    "a corrupt PROJECT layer must skip its render, not fall through to applyAgentConfigLayer",
+  );
+  // The user must SEE the fail-safe (both messages feed the bounded notify).
+  assert.match(layers, /global: ~\/\.pi\/review-gate\.json is corrupt/, "the global fail-safe must be reported");
+  assert.match(layers, /project: \.pi\/review-gate\.json is corrupt/, "the project fail-safe must be reported");
+  // Goal criterion 5: strings added by this change are English.
+  assert.doesNotMatch(layers, /[\u4e00-\u9fff]/, "the model-config layer must not add non-English diagnostics");
+});
+
+test("explicitRR rejects malformed values (null / array) — not just the call site (round-4 P2)", () => {
+  // Round-3 P2 mutation: replacing the explicitRR body with a bare
+  // `typeof raw === "object"` check kept the whole suite green — the
+  // predicate BODY must be asserted, not only its call site.
+  const layersAt = SRC.indexOf("function ensureModelLayersRendered(");
+  assert.ok(layersAt > 0, "ensureModelLayersRendered must exist");
+  const layers = SRC.slice(layersAt, layersAt + 5000);
+  const fnAt = layers.indexOf("const explicitRR");
+  assert.ok(fnAt > 0, "explicitRR must exist");
+  const body = layers.slice(fnAt, fnAt + 1200);
+  assert.match(body, /raw === null/, "null must not count as an explicit config");
+  assert.match(body, /Array\.isArray\(raw\)/, "an array must not count as an explicit config");
+  // The INNER guard (the reviewer-readonly VALUE itself) must also be
+  // asserted — round-10 P1 mutation: weakening it to a bare typeof check
+  // kept the suite green because only the OUTER raw guards were covered.
+  assert.match(body, /typeof rr !== "object" \|\| rr === null \|\| Array\.isArray\(rr\)/, "the rr VALUE must be a non-null non-array object");
+});
+
+test("explicitRR: CR/LF slot strings are invalid, like parseAgentsSection (round-11)", () => {
+  // Round-11 P2: parseAgentsSection rejects CR/LF slots; the cross-layer
+  // guard must apply the same rule or a malformed project entry could
+  // wrongly suppress the global reviewer-readonly follow.
+  const layers = SRC.slice(SRC.indexOf("function ensureModelLayersRendered("), SRC.indexOf("function ensureModelLayersRendered(") + 8000);
+  const fnAt = layers.indexOf("const explicitRR");
+  assert.ok(fnAt > 0);
+  const body = layers.slice(fnAt, fnAt + 1600);
+  assert.match(body, /!\/\[\\r\\n\]\/\.test/, "CR/LF slots must not count as an explicit config");
+});
+
+test("MODEL WIDGET: deployed lookup is project-first, frontmatter-scoped, with slots[0]/'?' fallback", () => {
+  // round-1 P2: modelConfigWidgetLines had NO coverage at all. The data path
+  // matters because it decides what the belowEditor widget CLAIMS is in force.
+  const at = SRC.indexOf("function modelConfigWidgetLines(");
+  assert.ok(at > 0, "modelConfigWidgetLines must exist");
+  const fn = SRC.slice(at, at + 2600);
+  assert.match(fn, /findProjectAgentText\(projectDir, name\)/, "project layer must be looked up FIRST, by identity");
+  // `model:` must be scoped to the frontmatter block, and the block must come
+  // from the SHARED delimiter authority (round-12 R3 P2: a local strict regex
+  // here disagreed with the lenient identity lookup two lines above, so a file
+  // found by identity could still fail to yield its deployed model).
+  assert.match(fn, /frontmatterBlock\(text\)/, "the frontmatter block must come from lib/model-config.ts");
+  assert.doesNotMatch(fn, /\^---\\r\?\\n/, "no local delimiter regex may compete with the shared one");
+  assert.match(fn, /\^model:\\s\*\(\.\+\)\$\/m/, "`model:` must be matched only inside that block");
+  assert.match(
+    fn,
+    /deployed\(name\) \?\? \(s\.auto === false && s\.slots\.length > 0 \? s\.slots\[0\]! : "\?"\)/,
+    "fallback order: deployed file → slots[0] (auto OFF) → '?'",
+  );
+  assert.match(fn, /\["reviewer", "adviser"\]/, "the widget shows exactly reviewer + adviser");
+  assert.match(fn, /display-only/, "never breaks the TUI");
+});
+
+test("MODEL WIDGET wiring reaches the real updateWidget path", async () => {
+  const at = SRC.indexOf("function updateWidget(");
+  assert.ok(at > 0);
+  const body = SRC.slice(at, at + 900);
+  assert.match(body, /modelConfigWidgetLines\(\)/);
+  assert.match(body, /ctx\.ui\.setWidget\("review-gate-agents"/);
+});
+
+test("MODEL DIAGNOSIS: project outranks global, registry auth gates, disk fallback", () => {
+  // round-1 P2: the rewritten modelDiagnosisLines had no coverage either.
+  const at = SRC.indexOf("function modelDiagnosisLines(");
+  assert.ok(at > 0, "modelDiagnosisLines must exist");
+  const fn = SRC.slice(at, at + 4200);
+  assert.match(fn, /findProjectAgentText\(projectAgentsDir, name\)/, "effective chain = project file first (by identity)");
+  assert.match(fn, /hasConfiguredAuth/, "registry auth must gate the authed set");
+  assert.match(fn, /models-store\.json/, "disk fallback reads the provider store");
+  assert.match(fn, /auth\.json/, "disk fallback reads auth");
+});
+
+test("GLOBAL LAYER: the extension re-applies model config (both layers) at session start", () => {
+  // Publish-path fallback for exit criterion 2: scripts/install-package.mjs
+  // cannot import the TS module under node_modules, so the extension must own
+  // the layer render — and must do so for BOTH layers (global AND the current
+  // repo's project layer, which outranks global), EVEN when the `agents`
+  // section is absent, to sweep stale generated overrides after the user
+  // deletes it.
+  const at = SRC.indexOf("function ensureModelLayersRendered(");
+  assert.ok(at > 0, "ensureModelLayersRendered must exist (renamed from ensureGlobalModelLayerRendered)");
+  assert.ok(SRC.indexOf("ensureGlobalModelLayerRendered") === -1, "the old name must be gone");
+  const fn = SRC.slice(at, at + 5000);
+  assert.match(fn, /effectiveAgentsConfig\(projectConfig\.agentsGlobal \?\? undefined, undefined\)/);
+  assert.match(fn, /effectiveAgentsConfig\(undefined, projectConfig\.agentsProject \?\? undefined\)/);
+  assert.match(fn, /applyAgentConfigLayer\(/);
+  assert.match(fn, /pathJoin\(primaryRepoRoot, "\.pi", "agents"\)/);
+  const sessionAt = SRC.indexOf("pi.on(\"session_start\"");
+  assert.ok(sessionAt > 0);
+  const body = SRC.slice(sessionAt, sessionAt + 3000);
+  assert.match(body, /ensureModelLayersRendered\(ctx\)/, "must be invoked at session start with the UI context");
+  // Project-layer base must be the BUILT-IN package agents dir, never the
+  // already-rendered global layer. Scope BOTH asserts to the PROJECT block
+  // (round-9 P2: the old window was 800 chars while the sourceDir line sits
+  // ~2200 chars past the block comment — the mutation sailed through).
+  const layerBlock = SRC.slice(at, at + 5000);
+  const projStart = layerBlock.indexOf("// Project layer of the CURRENT repo");
+  assert.ok(projStart > 0);
+  const projectBlock = layerBlock.slice(projStart, projStart + 3500);
+  assert.match(
+    projectBlock,
+    /sourceDir: pathJoin\(packageRoot, "\.\.", "agents"\)/,
+    "the project sourceDir must be the built-in defaults",
+  );
+  assert.doesNotMatch(
+    projectBlock,
+    /sourceDir: pathJoin\(homedir\(/,
+    "the global rendered dir must never be the project source",
+  );
 });
 
 test("INCREMENTAL: the settled conclusion of the previous round is handed to the reviewer", () => {

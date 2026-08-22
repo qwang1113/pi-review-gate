@@ -26,8 +26,10 @@ thinking, with a fallback priority list (first available wins):
   Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
   chains in agents/*.md).
 
-Thinking is a single value (`max`, the highest valid pi level); it is not a
-fallback list. If a model doesn't support `max`, pi clamps it down.
+`thinking: max` in the built-in agent frontmatter is the default-chain
+setting. When model-chain configuration is enabled, each configured slot may
+carry its own `:thinking` suffix; the renderer validates and preserves
+those suffixes per slot. The default-chain value is not a fallback list.
 
 **Default two-reviewer final pass (cross-family).** The review that ends a
 round runs **two reviewers by default**, from **different model families**:
@@ -62,7 +64,9 @@ capability leaderboards (Artificial Analysis Intelligence Index, LMArena Elo,
 LiveBench) and can rank candidates by capability, optionally rewarding
 cross-family diversity so a judge doesn't share the main agent's blind spots.
 It is a **reference for choosing the pinned models**, not a runtime selector —
-the models above are fixed in the agent definitions. Refresh the underlying
+the chains above are the built-in defaults in the agent definitions, and the
+`agents` config layer (see the **Model tiers** section) can
+override them per agent. Refresh the underlying
 scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
 
 ## The loop goal — the exit contract
@@ -83,18 +87,19 @@ unapproved goal **blocks commit/push/PR** and its body is withheld from your
 prompt (a leftover goal from a previous task is exactly what that prevents).
 Editing the file afterwards drops the approval — renegotiate and re-submit.
 
-**Pre-review the draft goal (single cross-family reviewer, C1).** Before you
-submit a goal for approval, run the draft through ONE cross-family reviewer —
-a different model family than your own session model, so goal-shaped blind
-spots get caught. The reviewer critiques the draft against: (a) is every
-criterion checkable by a command or concrete observation, (b) is the scope
-sized to the change, (c) do non-goals actually fence off the edges, (d) does
-it match what the user asked. If the reviewer raises BLOCKED-level objections,
-fix the draft and re-review before calling `propose_loop_goal` — never submit
-a goal you know is uncheckable. This is protocol, not a gate: the extension
-does not enforce it, but the `reviewer` WILL flag a goal whose criteria
-cannot be judged objectively (P2) and an uncheckable criterion that made the
-work go astray (P1).
+**Pre-review the draft goal (adviser pre-review, merged rule).** Before you
+submit a goal for approval, run the draft through ONE independent **`adviser`**
+review — the goal pre-review rule merged into AGENTS.md's cross-review
+protocol (one rule, adviser is authoritative, not two parallel ones). "Pass" means
+the adviser records **no unresolved P1**. The adviser critiques the draft
+against: (a) is every criterion checkable by a command or concrete observation,
+(b) is the scope sized to the change, (c) do non-goals actually fence off the
+edges, (d) does it match what the user asked. If the adviser raises P1-level
+objections, fix the draft and re-review before calling `propose_loop_goal` —
+never submit a goal you know is uncheckable. This is protocol, not a gate: the
+extension does not enforce it, but the `reviewer` WILL flag a goal whose
+criteria cannot be judged objectively (P2) and an uncheckable criterion that
+made the work go astray (P1).
 
 **Every re-review carries the previous round's conclusion.** A re-review that
 starts from zero pays full price for questions that were already answered, so
@@ -437,6 +442,23 @@ Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
   step 3. Worst wins. No user confirmation is needed for the shard plan.
   No engine is involved anywhere (the pdw engine is retired —
   `docs/handoff-remove-pdw.md`).
+
+**The reviewer models are configurable — honor the slot-driven double review.**
+The double-review pair is computed by the gate from the host registry
+(`planFanoutFromFacts`) UNLESS the `agents.reviewer` config (project
+`.pi/review-gate.json` over `~/.pi/review-gate.json`) has its `auto` switch
+OFF — then the pair is the first two usable **slots** the user pinned,
+skipping same-family duplicates so the two reviewers still come from
+different model families (`planSlottedReviewFanout`, whose source line is
+injected in the fan-out directive). With `auto` OFF and an EMPTY slot list the gate falls back to the
+capability-ranked default path — an empty slot list is never a silent
+no-review state. Never second-guess the injected pair; it is a fact the gate
+computed.
+Model chains live in the `agents` section of those config files and
+are rendered (with per-model `:thinking` suffixes) into `.pi/agents/*.md`
+(project) and `~/.pi/agent/agents/*.md` (global) by the extension at session
+start — so agent frontmatter can change under you; trust the directive, not
+a memorized pin.
 
 ## Working across several repos
 

@@ -75,7 +75,7 @@ import {
 import { defaultProjectConfig, globalConfigPath, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
-import { buildAgentsWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
+import { buildAgentsWidget, buildModelConfigWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveShipRepos,
@@ -189,9 +189,20 @@ import {
 } from "../lib/loop-stall.ts";
 import {
   formatFanoutDirective,
+  planConfiguredReviewFanout,
   planFanoutFromFacts,
+  type FanoutPlan,
   type JudgeFacts,
 } from "../lib/review-fanout.ts";
+import {
+  effectiveAgentsConfig,
+  applyAgentConfigLayer,
+  loadRegistry,
+  KNOWN_AGENTS,
+  projectAgentIdentity,
+  frontmatterBlock,
+} from "../lib/model-config.ts";
+import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
 import {
   createReviewSnapshot,
   pruneOrphanSnapshots,
@@ -283,6 +294,34 @@ import {
 
 const ENTRY_TYPE = "review-gate-state";
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
+
+/**
+ * Read the PROJECT-layer agent file that actually shadows `name` at runtime:
+ * pi-subagents loads every `.md` under <repo>/.pi/agents and registers it
+ * under its frontmatter `name`, so a custom-named file (e.g. custom.md with
+ * `name: reviewer`) DOES override the global reviewer — the widget and
+ * /gate-status must find it by IDENTITY, not by basename (round-11 P2).
+ *
+ * LAST match wins, like everyone else who resolves this: pi-subagents builds
+ * `projectMap.set(agent.name, agent)` (agents.ts:1885) and gate-doctor fills
+ * `projectByIdentity` with the same overwriting Map. Returning the FIRST match
+ * meant that with two project files claiming one `name`, the widget could show
+ * a file the runtime does not actually deploy.
+ */
+function findProjectAgentText(projectAgentsDir: string, name: string): string | undefined {
+  let found: string | undefined;
+  try {
+    for (const f of readdirSync(projectAgentsDir)) {
+      if (!f.endsWith(".md")) continue;
+      let text: string | undefined;
+      try {
+        text = readFileSync(pathJoin(projectAgentsDir, f), "utf8");
+      } catch { continue; }
+      if (projectAgentIdentity(text) === name) found = text;
+    }
+  } catch { /* dir missing/unreadable — no project layer */ }
+  return found;
+}
 
 /** Detect commits ahead of the upstream tracking branch or main/master. P0: also
     checks @{upstream} so local commits ahead of remote on any branch are caught. */
@@ -881,20 +920,48 @@ export default function reviewGate(pi: ExtensionAPI) {
    * computed. Prompt-only: it never selects a model (the pin in the agent file
    * does that), never records a verdict and never touches the ship gate.
    * Returns undefined when the facts are too weak to say anything true.
+   *
+   * Honors the `agents.reviewer` config: with its auto switch OFF the plan is
+   * driven by the user's slot list (see planSlottedReviewFanout); otherwise
+   * today's capability-ranked default applies unchanged.
    */
+  function planForFacts(facts: JudgeFacts): FanoutPlan | undefined {
+    const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
+    const reviewer = map.reviewer;
+    if (reviewer && reviewer.auto === false && reviewer.slots.length > 0) {
+      // planConfiguredReviewFanout ALREADY stamps slotSource with the deciding
+      // layer and the slot list (lib/review-fanout.ts). Re-stamping it here was
+      // a second copy of the same sentence that could drift from the helper's.
+      return planConfiguredReviewFanout(facts, reviewer);
+    }
+    return planFanoutFromFacts(facts);
+  }
+
   function fanoutDirective(): string | undefined {
     try {
+      // (a) authoritative: the warmed runtime registry view wins outright.
       if (registryJudgeFacts) {
-        const plan = planFanoutFromFacts(registryJudgeFacts);
+        const plan = planForFacts(registryJudgeFacts);
         return plan ? formatFanoutDirective(plan) : undefined;
       }
+      // (b) partial (disk) view — CONFIRM ONLY. models-store.json omits built-in
+      // catalogs (anthropic), so this view can prove that two judge families
+      // exist but never that a second one is missing: "only one family" drawn
+      // from it would suppress a double review that was actually possible, and
+      // put a false note into the recorded verdict. Denial in any form (SINGLE
+      // or NONE) therefore stays silent until the real registry is warmed.
+      // The SLOT path is never taken on this view either: the disk cannot prove
+      // which of the user's slots are authenticated/usable, so a slotted plan
+      // built on it could silently skip a slot the real registry would accept
+      // and let a LOWER-priority slot speak for the pair (round-1 P2). And when
+      // the user HAS pinned slots (reviewer auto OFF + non-empty list), the
+      // default-path specs would CONTRADICT that pin — so the fallback stays
+      // silent too, rather than injecting specs the user never chose (round-2
+      // P2; the authoritative registry warms up within a turn anyway).
+      const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
+      const rv = map.reviewer;
+      if (rv.auto === false && rv.slots.length > 0) return undefined;
       const plan = planFanoutFromFacts(factsFromRegistry(undefined, homedir(), readFileSafeFs));
-      // Partial view — CONFIRM ONLY. models-store.json omits built-in catalogs
-      // (anthropic), so this view can prove that two judge families exist but
-      // never that a second one is missing: "only one family" drawn from it
-      // would suppress a double review that was actually possible, and put a
-      // false note into the recorded verdict. Denial in any form (SINGLE or
-      // NONE) therefore stays silent until the real registry is warmed.
       return plan && plan.crossFamily ? formatFanoutDirective(plan) : undefined;
     } catch { return undefined; }
   }
@@ -1045,13 +1112,216 @@ export default function reviewGate(pi: ExtensionAPI) {
   let lastUiCtx: ExtensionContext | undefined;
   let lastAgentsWidget = "";
 
+  let lastLayerNotifyText = "";
+  /** Disk registry merged with the SESSION's runtime registry. The runtime
+   *  view is authoritative (built-in anthropic catalogs never reach
+   *  models-store.json — same lesson as `registryJudgeFacts`): validating a
+   *  slot against the disk view alone refused legal built-in chains and left
+   * a stale render deployed (round-2 P1). */
+  function modelConfigRegistry(ctx: ExtensionContext): ModelRegistry {
+    const merged = loadRegistry();
+    try {
+      const reg = (ctx as { modelRegistry?: unknown }).modelRegistry as { getAll?: () => unknown[] } | undefined;
+      const all = typeof reg?.getAll === "function" ? reg.getAll() : [];
+      for (const m of all) {
+        const obj = m as { provider?: unknown; id?: unknown; reasoning?: unknown; thinkingLevelMap?: unknown };
+        if (typeof obj.provider !== "string" || typeof obj.id !== "string") continue;
+        const list = (merged[obj.provider] ??= [] as RegistryModelInfo[]);
+        // The runtime entry REPLACES any same-id disk entry — the runtime view
+        // is authoritative, and keeping the disk metadata could preserve a
+        // stale thinkingLevelMap that refuses levels the live registry
+        // supports (round-3 P1).
+        const tlm = obj.thinkingLevelMap;
+        const info: RegistryModelInfo = {
+          id: obj.id,
+          ...(typeof obj.reasoning === "boolean" ? { reasoning: obj.reasoning } : {}),
+          // Filter the map the same way loadRegistry / factsFromRegistry do:
+          // a bare cast let a malformed value (a number, an object) through as
+          // if it were a valid mapping, and validateSpec then ACCEPTED a level
+          // the filtered semantics refuse (deployed ≠ validated).
+          thinkingLevelMap: typeof tlm === "object" && tlm !== null && !Array.isArray(tlm)
+            ? Object.fromEntries(
+                Object.entries(tlm).filter(([, mapped]) => mapped === null || typeof mapped === "string"),
+              ) as Record<string, string | null>
+            : undefined,
+        };
+        const idx = list.findIndex((e) => e.id === obj.id);
+        if (idx >= 0) list[idx] = info;
+        else list.push(info);
+      }
+    } catch { /* runtime registry unusable — the disk view stands */ }
+    return merged;
+  }
+
+  /**
+   * Re-apply BOTH model-config layers once per session start: global
+   * (~/.pi/agent/agents) AND the current repo's project layer
+   * (<primaryRepoRoot>/.pi/agents, which outranks global).
+   *
+   * `scripts/install-package.mjs` imports lib/model-config.ts through a
+   * stripped data URL (which works under node_modules), so the postinstall DOES
+   * render the global layer on a published install — but only the extension
+   * ever renders the PROJECT layer, and only the extension re-renders after the
+   * config changes between installs.
+   *
+   * It also sweeps stale generated overrides when the `agents` section is gone:
+   * every agent then defaults to auto:true, whose renderer deletes generated
+   * products in that layer. Hand-written / upstream copies are never touched
+   * (no marker). Idempotent (the same slots re-render the same overlay) and
+   * fail-soft (a render failure never blocks a session); a corrupt layer keeps
+   * the last good render instead of sweeping it.
+   */
+  function ensureModelLayersRendered(ctx: ExtensionContext): void {
+    const problems: string[] = [];
+    try {
+      const packageRoot = pathDirname(fileURLToPath(import.meta.url));
+      // Global layer. A CORRUPT config file keeps the last good render:
+      // treating it as "no agents section" would sweep every generated chain
+      // back to the upstream default and clobber the last valid render
+      // (corrupt ≠ absent for the renderer).
+      if (projectConfig.agentsGlobalCorrupt) {
+        problems.push("global: ~/.pi/review-gate.json is corrupt or its agents section is invalid — keeping the last rendered model chains (fail-safe)");
+      } else {
+        const { map, diagnostics } = effectiveAgentsConfig(projectConfig.agentsGlobal ?? undefined, undefined);
+        problems.push(...diagnostics);
+        problems.push(...projectConfig.agentsDiagnostics.filter((d) => d.startsWith("global:")));
+        const res = applyAgentConfigLayer({
+          agents: map,
+          targetDir: pathJoin(homedir(), ".pi", "agent", "agents"),
+          // Infrastructure layer: restore the upstream default on cleanup.
+          restoreDefault: true,
+          sourceDir: pathJoin(packageRoot, "..", "agents"),
+          registry: modelConfigRegistry(ctx),
+        });
+        problems.push(...res.errors, ...res.warnings);
+      }
+      // Project layer of the CURRENT repo (project outranks global) — same
+      // fail-safe: a corrupt project file keeps the last project render.
+      if (projectConfig.agentsProjectCorrupt) {
+        problems.push("project: .pi/review-gate.json is corrupt or its agents section is invalid — keeping the last rendered model chains (fail-safe)");
+      } else {
+        const { map, diagnostics } = effectiveAgentsConfig(undefined, projectConfig.agentsProject ?? undefined);
+        problems.push(...diagnostics);
+        problems.push(...projectConfig.agentsDiagnostics.filter((d) => d.startsWith("project:")));
+        // Cross-layer guard (round-2 P2): the single-layer follow rule makes a
+        // project `reviewer` implicitly shadow a GLOBAL explicit
+        // `reviewer-readonly` (deployed chain ≠ effective chain, reproduced
+        // with a real run). When the global layer explicitly configures
+        // reviewer-readonly and the project layer does NOT, the project render
+        // must not materialize a followed copy of the project reviewer.
+        const globalRaw = projectConfig.agentsGlobal;
+        const projectRaw = projectConfig.agentsProject;
+        const explicitRR = (raw: unknown): boolean => {
+          if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+          const rr = (raw as Record<string, unknown>)["reviewer-readonly"];
+          // A VALID explicit entry has at least one meaningful field (auto
+          // boolean and/or a slots key — an empty object, a string or a
+          // number is not a config and must not suppress the follow
+          // (round-8 P2: `"reviewer-readonly": {}` left BOTH layers unrendered
+          // while the effective config still followed the project reviewer).
+          // A `slots` key counts when it is a VALID slot list (array of
+          // non-empty strings — the same shape parseAgentsSection accepts);
+          // `{slots:null}` / `{slots:[1]}` are ignored by the parser, so they
+          // must not suppress the follow either (round-10 P1).
+          if (typeof rr !== "object" || rr === null || Array.isArray(rr)) return false;
+          const e = rr as Record<string, unknown>;
+          const validSlots =
+            Array.isArray(e.slots) &&
+            e.slots.every((s) => typeof s === "string" && s.trim().length > 0 && !/[\r\n]/.test(s));
+          return typeof e.auto === "boolean" || ("slots" in e && validSlots);
+        };
+        // A project entry that is present but MALFORMED (e.g. `{slots:[1]}`)
+        // keeps its last render — effectiveAgentsConfig marked it
+        // malformed:true, and overwriting it with default here would let the
+        // cleanup sweep delete the last good render (round-11 P1). Only a
+        // project layer with NO RR entry at all follows the global one.
+        if (explicitRR(globalRaw) && !explicitRR(projectRaw) && !map["reviewer-readonly"]?.malformed) {
+          map["reviewer-readonly"] = { auto: true, slots: [], source: "default" as const };
+        }
+        const res = applyAgentConfigLayer({
+          agents: map,
+          targetDir: pathJoin(primaryRepoRoot, ".pi", "agents"),
+          // Project-layer base is the BUILT-IN default (package agents dir),
+          // NEVER the already-rendered global layer — a global auto:false slot
+          // render must not leak into a project auto:true shadow (round-7 P1).
+          sourceDir: pathJoin(packageRoot, "..", "agents"),
+          registry: modelConfigRegistry(ctx),
+        });
+        problems.push(...res.errors, ...res.warnings);
+      }
+    } catch (e) {
+      problems.push(`model config layer render failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // A rejected slot chain must never be silent: the fan-out plan still
+    // reads the same config, so the user has to see that the DEPLOYED chain
+    // and the PLANNED chain diverged (round-1 P2). The same problem set is
+    // NOT re-notified on every session start (round-2 Nit).
+    if (problems.length > 0) {
+      const text = `review-gate: model config layer problems (${problems.length}):\n${problems.slice(0, 5).join("\n")}`;
+      if (text !== lastLayerNotifyText) {
+        lastLayerNotifyText = text;
+        try {
+          ctx.ui.notify(text, "warning");
+        } catch { /* headless — no UI to notify */ }
+      }
+    }
+  }
+
+  /**
+   * Current adviser/reviewer model configuration for the belowEditor widget:
+   * the effective spec (the DEPLOYED frontmatter model when a rendered file
+   * exists, else slots[0] when auto is OFF, else "?"), the auto switch state
+   * and the deciding config layer. Display-only — it never throws and never
+   * influences a verdict.
+   */
+  function modelConfigWidgetLines(): string[] {
+    try {
+      const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
+      const deployed = (name: string): string | undefined => {
+        // Project layer wins by IDENTITY (frontmatter `name`), not basename:
+        // pi-subagents registers any .md under <repo>/.pi/agents under its
+        // frontmatter name, so custom.md carrying `name: reviewer` really
+        // shadows the global reviewer (round-11 P1/P2).
+        const projectDir = pathJoin(primaryRepoRoot, ".pi", "agents");
+        const projText = findProjectAgentText(projectDir, name);
+        const text = projText ?? (() => {
+          try {
+            const p = pathJoin(homedir(), ".pi", "agent", "agents", `${name}.md`);
+            return existsSync(p) ? readFileSync(p, "utf8") : undefined;
+          } catch { return undefined; }
+        })();
+        if (text === undefined) return undefined;
+        // Match `model:` only INSIDE the frontmatter block, never a body line
+        // that happens to start with "model:". Same delimiter authority as the
+        // identity lookup above (lib/model-config.ts), so a file found by
+        // identity always has its deployed model read too.
+        const fm = frontmatterBlock(text);
+        const m = fm !== undefined ? /^model:\s*(.+)$/m.exec(fm) : undefined;
+        return m ? m[1]!.trim() : undefined;
+      };
+      const entries = ["reviewer", "adviser"].map((name) => {
+        const s = map[name] ?? { auto: true, slots: [], source: "default" as const };
+        // Show what is actually DEPLOYED (the rendered frontmatter) when there
+        // is one — a validation-refused or never-rendered chain must not be
+        // displayed as if in force. Fall back to the intended slots[0]/?
+        // only when no deployed file exists.
+        const spec = deployed(name) ?? (s.auto === false && s.slots.length > 0 ? s.slots[0]! : "?");
+        return { name, spec, auto: s.auto, source: s.source };
+      });
+      return buildModelConfigWidget(entries);
+    } catch {
+      return []; // display-only — never break the TUI
+    }
+  }
+
   function updateWidget(ctx: ExtensionContext) {
     lastUiCtx = ctx;
     if (!ctx.hasUI) return;
-    // belowEditor — sub-agent runs visible in the TUI (running first, with age).
+    // belowEditor — agent model config, then sub-agent runs (running first).
     try {
       const agents = scanAgentArtifacts(pathJoin(cwd, ".pi-subagents", "artifacts"), Date.now(), { maxAgeSec: 2 * 3600 });
-      const lines = buildAgentsWidget(agents);
+      const modelLines = modelConfigWidgetLines();
+      const lines = [...modelLines, ...(modelLines.length > 0 ? [""] : []), ...buildAgentsWidget(agents)];
       const key = lines.join("\n");
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
@@ -4775,6 +5045,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Anchored at the repo ROOT (matches the runner's own .pi lookup).
     projectConfig = loadProjectConfig(primaryRepoRoot);
     state.maxRounds = projectConfig.maxRounds;
+    // Publish-path fallback for the model-config layers (see
+    // ensureModelLayersRendered): idempotent, fail-soft.
+    ensureModelLayersRendered(ctx);
     // Reflect the precommit config source in the status bar right away.
     updateWidget(ctx);
 
@@ -4984,10 +5257,24 @@ export default function reviewGate(pi: ExtensionAPI) {
   function modelDiagnosisLines(registry?: unknown): string[] {
     try {
       const home = homedir();
-      const agentsDir = pathJoin(home, ".pi", "agent", "agents");
-      const agentFiles = readdirSync(agentsDir).filter((f) => f.endsWith(".md"));
+      const globalAgentsDir = pathJoin(home, ".pi", "agent", "agents");
+      const projectAgentsDir = pathJoin(primaryRepoRoot, ".pi", "agents");
+      // Effective chain = PROJECT layer file when present, else global
+      // (project outranks global, exactly like the runtime load order).
+      const readAgent = (name: string): string | undefined => {
+        // Project layer wins by IDENTITY (frontmatter `name`), not basename:
+        // pi-subagents registers any .md under the project dir under its
+        // frontmatter name, so custom.md carrying `name: reviewer` really
+        // shadows the global reviewer (round-11 P1/P2).
+        const projText = findProjectAgentText(projectAgentsDir, name);
+        if (projText !== undefined) return projText;
+        try {
+          const p = pathJoin(globalAgentsDir, `${name}.md`);
+          return existsSync(p) ? readFileSync(p, "utf8") : undefined;
+        } catch { return undefined; }
+      };
       const authedProviders = new Set<string>();
-      const models: Array<{ provider: string; id: string }> = [];
+      const models: Array<{ provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> }> = [];
       const facts: RegistryFacts = { models, authedProviders, allowed: isModelAllowed };
       const reg = registry as { getAll?: () => unknown[]; hasConfiguredAuth?: (m: unknown) => boolean } | undefined;
       const all = reg?.getAll?.() ?? [];
@@ -4998,9 +5285,19 @@ export default function reviewGate(pi: ExtensionAPI) {
         // signal that auth is not part of this registry's contract).
         const authCheckable = typeof reg?.hasConfiguredAuth === "function";
         for (const m of all) {
-          const obj = m as { provider?: unknown; id?: unknown };
+          const obj = m as { provider?: unknown; id?: unknown; reasoning?: unknown; thinkingLevelMap?: unknown };
           if (typeof obj.provider !== "string" || typeof obj.id !== "string") continue;
-          models.push({ provider: obj.provider, id: obj.id });
+          const tlm = obj.thinkingLevelMap;
+          const thinkingLevelMap =
+            typeof tlm === "object" && tlm !== null && !Array.isArray(tlm)
+              ? Object.fromEntries(Object.entries(tlm).filter(([, mapped]) => mapped === null || typeof mapped === "string")) as Record<string, string | null>
+              : undefined;
+          models.push({
+            provider: obj.provider,
+            id: obj.id,
+            ...(typeof obj.reasoning === "boolean" ? { reasoning: obj.reasoning } : {}),
+            ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+          });
           if (!authCheckable || reg!.hasConfiguredAuth!(obj)) authedProviders.add(obj.provider);
         }
       }
@@ -5025,9 +5322,43 @@ export default function reviewGate(pi: ExtensionAPI) {
           for (const k of Object.keys(auth)) authedProviders.add(k);
         } catch { /* no auth — no provider looks usable */ }
       }
-      const entries = agentFiles
-        .map((f) => diagnoseChain(f.replace(/\.md$/, ""), readFileSync(pathJoin(agentsDir, f), "utf8"), facts))
-        .filter((e) => e.chain.length > 0);
+      // Diagnose KNOWN agents first, then any user-built/third-party agent
+      // files found in either layer (project outranks global per readAgent).
+      const fileNames = (dir: string): string[] => {
+        try {
+          return readdirSync(dir).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, ""));
+        } catch {
+          return [];
+        }
+      };
+      // The PROJECT layer is enumerated by frontmatter IDENTITY, not basename:
+      // pi-subagents registers a project file under its `name`, so a
+      // `custom.md` carrying `name: foo` is live as `foo`. Enumerating it as
+      // "custom" made readAgent (which resolves by identity) find nothing, and
+      // a project-ONLY agent whose basename differs from its name was invisible
+      // here while gate-doctor's union enumeration did see it.
+      const projectIdentityNames = (dir: string): string[] => {
+        try {
+          const out: string[] = [];
+          for (const f of readdirSync(dir)) {
+            if (!f.endsWith(".md")) continue;
+            try {
+              const id = projectAgentIdentity(readFileSync(pathJoin(dir, f), "utf8"));
+              if (id !== undefined) out.push(id);
+            } catch { /* unreadable file — not loadable either */ }
+          }
+          return out;
+        } catch {
+          return [];
+        }
+      };
+      const allNames = [...new Set([...KNOWN_AGENTS, ...fileNames(globalAgentsDir), ...projectIdentityNames(projectAgentsDir)])];
+      const entries = allNames
+        .map((name) => {
+          const text = readAgent(name);
+          return text ? diagnoseChain(name, text, facts) : null;
+        })
+        .filter((e): e is NonNullable<typeof e> => e !== null && e.chain.length > 0);
       return entries.length === 0 ? [] : formatModelDiagnosis(entries).split("\n");
     } catch {
       return []; // diagnostics only — never block the status readout
@@ -5211,6 +5542,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         homeDir: home,
         packageRoot,
         agentsDir: pathJoin(home, ".pi", "agent", "agents"),
+        // Project-layer overrides outrank the global copies for diagnosis
+        // (round-2 P2) — same per-file precedence pi-subagents loads with.
+        projectAgentsDir: pathJoin(primaryRepoRoot, ".pi", "agents"),
         modelsStorePath: pathJoin(home, ".pi", "agent", "models-store.json"),
         globalConfigPath: globalConfigPath(home),
         registryFacts: factsFromRegistry(ctx.modelRegistry, home, readFileSafe),

@@ -14,6 +14,10 @@ node_modules/
 # Disposable reviewer snapshots + their streamed findings (per round, local).
 .pi/review-snapshots/
 .pi/review-stream/
+# Rendered per-agent model config (project layer of the `agents` section,
+# written and re-applied by the extension at session start) — a personal
+# local override, not history.
+.pi/agents/
 .pi-subagents/
 
 # AGENTS.md is excluded by the global gitignore (sd0x-dev-flow keeps it

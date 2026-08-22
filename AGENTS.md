@@ -74,9 +74,43 @@ frontmatter in `agents/*.md` is the single source of truth and
 > (the postinstall copies them from this repo — edits there are
 > overwrite-owned on the next install).
 
-**Cross-review protocol (user policy):** (a) BEFORE calling
-`propose_loop_goal`, run the draft goal through ONE cross-family reviewer;
-fix BLOCKED objections before submitting. (b) The review that ends a round
+**Model configuration layer (per-agent slots + auto switch, default-on).**
+The agent frontmatter stays the single thing pi-subagents reads, but editing
+models by hand is a frequent, error-prone chore, so a config layer renders
+frontmatter for you — project `.pi/review-gate.json` overrides global
+`~/.pi/review-gate.json` (like precommit), then the built-in default:
+
+- `agents.<name>.auto` — `true` (default) keeps the built-in chain. When set
+  EXPLICITLY at a layer the renderer writes a *default-chain overlay* (marker
+  + the built-in default models) so that layer SHADOWS a lower layer's slot
+  render — flipping a slot off always lands the built-in default, never a
+  leftover lower-priority render. Unconfigured agents are cleaned up instead
+  (any stale generated copy is deleted; the global layer restores the upstream
+  default rather than leaving no file);
+  `false` uses `slots: [spec, ...]` (`slots[0]` = main model, rest =
+  fallbacks). Every slot may carry its own `:thinking` suffix
+  (`claude-fable-5:max`, `onekey/gpt-5.6-sol:high`) for per-model thinking.
+- **Rendering is layered**: project → `<project>/.pi/agents/*.md`, global →
+  `~/.pi/agent/agents/*.md`; `scripts/install-package.mjs` applies only the
+  global layer. Writes validate (resolvable spec, supported thinking level,
+  opencode-go allowlist) and refuse to land on failure.
+- **Double review honors the reviewer slots when auto is OFF**: the fan-out
+  takes the first two usable slots (authenticated + allowed + judge-eligible,
+  skipping same-family duplicates), bypassing the capability ranking.
+- The pi widget (`belowEditor`) always shows the effective
+  `adviser`/`reviewer` models (spec, auto state, deciding layer) — a
+  read-only surface; the config itself is plain JSON in `review-gate.json`.
+- All of this is inert until you configure it: no `agents` section (or all
+  `auto: true`) behaves exactly like today.
+- Project/global layer diagnostics are surfaced when an `agents` section is malformed; invalid model specs never replace the last generated chain.
+
+**Cross-review protocol (user policy):** (a) **Goal pre-review (merged
+rule):** BEFORE calling `propose_loop_goal`, the goal draft must pass ONE
+independent `adviser` review — "pass" means the review records no unresolved
+P1; fix any P1 and re-review before submitting to the user. This merged rule
+replaces the earlier "one cross-family reviewer" goal pre-review (both pinned
+strong; adviser is authoritative), so there is ONE rule, not two parallel ones
+(2026-08-18). (b) The review that ends a round
 runs **two reviewers from different model families by default** —
 `claude-fable-5` (anthropic) + the best available different-family model
 (e.g. `onekey/gpt-5.6-sol` once onekey is configured; without it, a single

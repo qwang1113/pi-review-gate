@@ -250,24 +250,35 @@ export interface ProjectConfig {
    * fallback) unchanged.
    */
   precommit: PrecommitConfig | null;
+  /** Raw per-layer agents sections, kept for lib/model-config layering. */
+  agentsGlobal: Record<string, unknown> | undefined;
+  agentsProject: Record<string, unknown> | undefined;
+  /** True when the layer's file EXISTS but does not parse as a JSON object.
+   *  The model renderer must then KEEP the last good render instead of
+   *  sweeping generated chains back to defaults (fail-safe — a corrupt file
+   *  must look like "no agents section" to field validation but never to the
+   *  renderer; see lib/model-config.ts). */
+  agentsGlobalCorrupt: boolean;
+  agentsProjectCorrupt: boolean;
+  /** Diagnostics for malformed agents sections. */
+  agentsDiagnostics: string[];
 }
 
 export function defaultProjectConfig(): ProjectConfig {
   return {
     maxRounds: DEFAULT_MAX_ROUNDS,
-    // R10 defaults ON here (it is a pure text nudge, cannot loosen the gate).
     thinkHarder: true,
-    // R9 default ON (user policy: features ship enabled). The snapshot is
-    // secret-line-filtered and 40-line capped; disable per project with
-    // `"gitMemory": false` if git output must never re-enter context.
     gitMemory: true,
-    // Default ON: every code change needs an explicit reviewer attestation
-    // (UPDATED | NOT_NEEDED); NOT_NEEDED keeps small fixes low-friction.
     docSync: true,
     llmGuards: defaultLlmGuardsConfig(),
     arbiter: defaultArbiterConfig(),
     copilotReview: defaultCopilotReviewConfig(),
     precommit: null,
+    agentsGlobal: undefined,
+    agentsProject: undefined,
+    agentsGlobalCorrupt: false,
+    agentsProjectCorrupt: false,
+    agentsDiagnostics: [],
   };
 }
 
@@ -281,20 +292,33 @@ export function globalConfigPath(home = homedir()): string {
   return join(home, ".pi", "review-gate.json");
 }
 
-/** Parse one config file; undefined on missing/unreadable/corrupt JSON. */
-function readConfigObject(path: string): Record<string, unknown> | undefined {
+/** Parse one config file; undefined on missing/unreadable/corrupt JSON.
+ *  A file that EXISTS but cannot be USED — unreadable (EACCES, EIO, EISDIR
+ *  …) or not parseable, or parseable but not an object — is recorded in
+ *  `corruptLayers` so callers can tell "no file" (defaults apply, generated
+ *  renders may be swept) from "broken file" (keep the last good state).
+ *  Only ENOENT/ENOTDIR count as genuinely absent: an unreadable file used to
+ *  be indistinguishable from a missing one, so a permission problem could
+ *  sweep a valid render back to the built-in defaults. */
+function readConfigObject(path: string, corruptLayers: Set<"global" | "project">, layer: "global" | "project"): Record<string, unknown> | undefined {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
-  } catch {
-    return undefined; // no file
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException | null)?.code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") corruptLayers.add(layer);
+    return undefined; // no file (ENOENT/ENOTDIR) or an unreadable one (flagged above)
   }
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return undefined;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      corruptLayers.add(layer);
+      return undefined;
+    }
     return parsed as Record<string, unknown>;
   } catch {
-    return undefined; // corrupt JSON — fail-safe: defaults stay
+    corruptLayers.add(layer); // corrupt JSON — fail-safe: defaults stay
+    return undefined;
   }
 }
 
@@ -370,9 +394,39 @@ function applyConfigFields(cfg: ProjectConfig, obj: Record<string, unknown>): vo
  */
 export function loadProjectConfig(cwd: string, homeOverride?: string): ProjectConfig {
   const cfg = defaultProjectConfig();
-  const global = readConfigObject(globalConfigPath(homeOverride ?? homedir()));
-  if (global) applyConfigFields(cfg, global);
-  const project = readConfigObject(projectConfigPath(cwd));
-  if (project) applyConfigFields(cfg, project);
+  const diagnostics = cfg.agentsDiagnostics;
+  const corruptLayers = new Set<"global" | "project">();
+  const global = readConfigObject(globalConfigPath(homeOverride ?? homedir()), corruptLayers, "global");
+  if (global) {
+    applyConfigFields(cfg, global);
+    cfg.agentsGlobal = readAgentsSection(global, diagnostics, "global", corruptLayers);
+  }
+  const project = readConfigObject(projectConfigPath(cwd), corruptLayers, "project");
+  if (project) {
+    applyConfigFields(cfg, project);
+    cfg.agentsProject = readAgentsSection(project, diagnostics, "project", corruptLayers);
+  }
+  cfg.agentsGlobalCorrupt = corruptLayers.has("global");
+  cfg.agentsProjectCorrupt = corruptLayers.has("project");
   return cfg;
+}
+
+/** The raw `agents` section of one config object, or undefined. */
+function readAgentsSection(
+  obj: Record<string, unknown>,
+  diagnostics: string[],
+  layer: "global" | "project",
+  corruptLayers: Set<"global" | "project">,
+): Record<string, unknown> | undefined {
+  if (!Object.prototype.hasOwnProperty.call(obj, "agents")) return undefined;
+  const agents = obj.agents;
+  if (typeof agents !== "object" || agents === null || Array.isArray(agents)) {
+    diagnostics.push(`${layer}: the agents section is not an object; ignored`);
+    // MALFORMED ≠ ABSENT: a non-object agents section must not be treated as
+    // "no agents section" — the renderer would sweep the last rendered chains
+    // back to defaults. Mark the layer corrupt so the fail-safe keep applies.
+    corruptLayers.add(layer);
+    return undefined;
+  }
+  return agents as Record<string, unknown>;
 }
