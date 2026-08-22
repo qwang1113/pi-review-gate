@@ -165,6 +165,15 @@ test("classifyAiAttribution short-circuits false on empty input without an exec 
   assert.equal(called, false);
 });
 
+test("classifyAiAttribution skips the model when there is no ≥2-letter word (placeholder message)", async () => {
+  let called = false;
+  const c = createLlmClassifier(undefined, async () => { called = true; return '{"attribution":"yes"}'; });
+  assert.equal(await classifyAiAttribution(c, ["x"]), false);
+  assert.equal(await classifyAiAttribution(c, ["!"]), false);
+  assert.equal(await classifyAiAttribution(c, ["a b"]), false);
+  assert.equal(called, false, "a bare letter must never reach the model");
+});
+
 // ---------------------------------------------------------------------------
 // classifyNonEnglish
 
@@ -185,6 +194,15 @@ test("classifyNonEnglish short-circuits false on empty input", async () => {
   const c = createLlmClassifier(undefined, async () => { called = true; return '{"english":"no"}'; });
   assert.equal(await classifyNonEnglish(c, []), false);
   assert.equal(called, false);
+});
+
+test("classifyNonEnglish skips the model when there is no ≥2-letter word (placeholder message)", async () => {
+  let called = false;
+  const c = createLlmClassifier(undefined, async () => { called = true; return '{"english":"no"}'; });
+  assert.equal(await classifyNonEnglish(c, ["x"]), false);
+  assert.equal(await classifyNonEnglish(c, ["-."]), false);
+  assert.equal(await classifyNonEnglish(c, ["q q"]), false);
+  assert.equal(called, false, "a bare letter must never reach the model");
 });
 
 // ---------------------------------------------------------------------------
