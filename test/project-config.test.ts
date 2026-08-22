@@ -96,6 +96,31 @@ test("global config alone (no project file) applies; corrupt global keeps defaul
   assert.equal(loadProjectConfig(cwd, home).docSync, true);
 });
 
+test("agents section is carried per layer (project over global over undefined)", () => {
+  const cwd = makeTemp();
+  const home = makeTemp();
+  mkdirSync(join(home, ".pi"), { recursive: true });
+  writeFileSync(join(home, ".pi", "review-gate.json"), JSON.stringify({
+    agents: { worker: { auto: false, slots: ["claude-sonnet-5:max"] } },
+  }));
+  writeConfig(cwd, JSON.stringify({
+    agents: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } },
+  }));
+  const cfg = loadProjectConfig(cwd, home);
+  assert.deepEqual(cfg.agentsGlobal, { worker: { auto: false, slots: ["claude-sonnet-5:max"] } }, "global agents must survive");
+  assert.deepEqual(cfg.agentsProject, { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } }, "project agents must survive");
+  // Defaults keep agents layers undefined when no section is configured.
+  assert.equal(defaultProjectConfig().agentsGlobal, undefined);
+  assert.equal(defaultProjectConfig().agentsProject, undefined);
+  // A non-object `agents` value (string AND array) is ignored with a diagnostic.
+  writeConfig(cwd, JSON.stringify({ agents: "nope" }));
+  assert.equal(loadProjectConfig(cwd, home).agentsProject, undefined);
+  assert.match(loadProjectConfig(cwd, home).agentsDiagnostics.join("\n"), /project: the agents section is not an object/);
+  writeConfig(cwd, JSON.stringify({ agents: ["reviewer"] }));
+  assert.equal(loadProjectConfig(cwd, home).agentsProject, undefined, "array agents must also be ignored");
+  assert.match(loadProjectConfig(cwd, home).agentsDiagnostics.join("\n"), /project: the agents section is not an object/);
+});
+
 test("precommit steps merge ACROSS layers step-by-step (project wins per step)", () => {
   const cwd = makeTemp();
   const home = makeTemp();
@@ -165,18 +190,86 @@ test("copilotReview.owners: REPLACES the default, normalized, junk-safe", () => 
   assert.deepEqual(loadCfg(h).copilotReview.owners, ["onekeyhq"]);
 });
 
-test("corrupt JSON → defaults (fail-safe)", () => {
+test("corrupt JSON → defaults + corrupt flag (renderer must keep last render)", () => {
   const d = makeTemp();
   writeConfig(d, "{maxRounds: broken");
-  assert.deepEqual(loadCfg(d), defaultProjectConfig());
+  const cfg = loadCfg(d);
+  const expected = defaultProjectConfig();
+  expected.agentsProjectCorrupt = true; // file EXISTS but does not parse
+  assert.deepEqual(cfg, expected);
 });
 
-test("non-object JSON (array/number/null) → defaults", () => {
+test("non-object JSON (array/number/null) → defaults + corrupt flag", () => {
   for (const content of ["[1,2]", "42", "null", '"str"']) {
     const d = makeTemp();
     writeConfig(d, content);
-    assert.deepEqual(loadCfg(d), defaultProjectConfig(), content);
+    const expected = defaultProjectConfig();
+    expected.agentsProjectCorrupt = true; // exists-but-not-an-object is corrupt too
+    assert.deepEqual(loadCfg(d), expected, content);
   }
+});
+
+test("corrupt GLOBAL config sets agentsGlobalCorrupt (agentsGlobal stays unset)", () => {
+  const d = makeTemp();
+  const home = makeTemp();
+  mkdirSync(join(home, ".pi"), { recursive: true });
+  writeFileSync(join(home, ".pi", "review-gate.json"), "not json at all");
+  const cfg = loadProjectConfig(d, home);
+  assert.equal(cfg.agentsGlobalCorrupt, true, "existing-but-broken global file must be flagged");
+  assert.equal(cfg.agentsGlobal, undefined);
+  assert.equal(cfg.agentsProjectCorrupt, false, "missing project file is NOT corrupt");
+});
+
+test("a config path that EXISTS but cannot be read is corrupt, not absent (fail-safe)", () => {
+  // Round-12 Nit: readConfigObject swallowed every readFileSync error as "no
+  // file", so an unreadable config looked exactly like an absent one and the
+  // renderer's cleanup sweep could clobber a valid render. Only ENOENT/ENOTDIR
+  // are genuinely absent.
+  //
+  // Round-12 R2 P2: the first version of this test used chmod 000, which root
+  // ignores — the assertion was silently skipped on a root CI/dev box and the
+  // branch stayed unprotected. A DIRECTORY at the config path fails
+  // deterministically for every uid (EISDIR, which is neither ENOENT nor
+  // ENOTDIR), so the corrupt-flag branch is always exercised.
+  const d = makeTemp();
+  const home = makeTemp();
+  mkdirSync(join(home, ".pi", "review-gate.json"), { recursive: true });
+  const cfg = loadProjectConfig(d, home);
+  assert.equal(cfg.agentsGlobalCorrupt, true, "an unreadable global config must be flagged corrupt");
+  assert.equal(cfg.agentsGlobal, undefined);
+  // Same rule for the PROJECT layer.
+  const d2 = makeTemp();
+  mkdirSync(join(d2, ".pi", "review-gate.json"), { recursive: true });
+  const pcfg = loadProjectConfig(d2, makeTemp());
+  assert.equal(pcfg.agentsProjectCorrupt, true, "an unreadable project config must be flagged corrupt");
+  // A genuinely MISSING file stays "absent" (not corrupt) — the sweep may run.
+  const emptyHome = makeTemp();
+  const cfg2 = loadProjectConfig(makeTemp(), emptyHome);
+  assert.equal(cfg2.agentsGlobalCorrupt, false, "a missing global config is absent, not corrupt");
+  assert.equal(cfg2.agentsProjectCorrupt, false, "a missing project config is absent, not corrupt");
+});
+test("malformed agents section (array) flags the layer corrupt, fail-safe", () => {
+  // Round-11 P1: `{"agents":[]}` is valid JSON, so the top-level parse
+  // succeeds — but a non-object agents section must NOT be treated as "no
+  // agents section": the renderer would sweep the last rendered chains
+  // back to defaults. Corrupt-flag the layer so the fail-safe keep applies.
+  const d = makeTemp();
+  const home = makeTemp();
+  mkdirSync(join(home, ".pi"), { recursive: true });
+  writeFileSync(join(home, ".pi", "review-gate.json"), JSON.stringify({ agents: [] }));
+  const cfg = loadProjectConfig(d, home);
+  assert.equal(cfg.agentsGlobalCorrupt, true, "non-object agents section must flag the global layer corrupt");
+  assert.equal(cfg.agentsGlobal, undefined);
+  assert.equal(cfg.agentsProjectCorrupt, false);
+  const proj = makeTemp();
+  writeConfig(proj, JSON.stringify({ agents: "nope" }));
+  // An explicit EMPTY home keeps this hermetic: without it loadProjectConfig
+  // reads the developer's real ~/.pi/review-gate.json as the global layer, so
+  // the result depended on the machine it ran on.
+  const pcfg = loadProjectConfig(proj, makeTemp());
+  assert.equal(pcfg.agentsProjectCorrupt, true, "non-object agents section must flag the project layer corrupt");
+  assert.equal(pcfg.agentsGlobalCorrupt, false, "the empty home has no global config to be corrupt");
+  assert.equal(pcfg.agentsGlobal, undefined, "no global layer leaks in from the real HOME");
 });
 
 // ---------------------------------------------------------------------------

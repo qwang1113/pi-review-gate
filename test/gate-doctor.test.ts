@@ -203,6 +203,45 @@ test("factsFromRegistry: session registry wins, disk store is the fallback", () 
   assert.ok(facts.allowed({ provider: "opencode-go", id: "deepseek-v4-flash" }));
 });
 
+test("factsFromRegistry carries registry model metadata forward", () => {
+  const reg = {
+    getAll: () => [
+      { provider: "anthropic", id: "claude-fable-5", thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } },
+      { provider: "onekey", id: "plain", reasoning: false },
+    ],
+    hasConfiguredAuth: () => true,
+  };
+  const facts = factsFromRegistry(reg, "/nonexistent-home", () => undefined);
+  const fable = facts.models.find((m) => m.id === "claude-fable-5");
+  assert.deepEqual(fable?.thinkingLevelMap, { off: null, xhigh: "xhigh", max: "max" });
+  const plain = facts.models.find((m) => m.id === "plain");
+  assert.equal(plain?.reasoning, false);
+});
+
+test("factsFromRegistry drops malformed thinking map values", () => {
+  const reg = {
+    getAll: () => [{ provider: "p", id: "m", thinkingLevelMap: { high: 123, max: "max" } }],
+    hasConfiguredAuth: () => true,
+  };
+  const facts = factsFromRegistry(reg, "/nonexistent-home", () => undefined);
+  assert.deepEqual(facts.models[0]?.thinkingLevelMap, { max: "max" });
+});
+
+test("factsFromRegistry drops malformed thinkingLevelMap values (null / array) (round-7 Nit)", () => {
+  const reg = {
+    getAll: () => [
+      { provider: "onekey", id: "gpt-5.6-sol", thinkingLevelMap: null },
+      { provider: "xai", id: "grok-4.6", thinkingLevelMap: ["max"] },
+      { provider: "anthropic", id: "claude-fable-5" },
+    ],
+    hasConfiguredAuth: () => true,
+  };
+  const facts = factsFromRegistry(reg, "/nonexistent-home", () => undefined);
+  for (const m of facts.models) {
+    assert.ok(!("thinkingLevelMap" in m), `malformed metadata must not be carried (${m.id})`);
+  }
+});
+
 test("factsFromRegistry: empty registry falls back to models-store.json + auth.json", () => {
   const home = mkdtempSync(join(tmpdir(), "gate-doctor-facts-"));
   mkdirSync(join(home, ".pi", "agent"), { recursive: true });
@@ -265,6 +304,147 @@ test("runGateDoctor: healthy environment reports every check, all PASS", async (
   }
 });
 
+test("runGateDoctor: a project-layer agent override outranks the global copy", async () => {
+  // Round-2 P2: doctor only read ~/.pi/agent/agents, so a project-layer
+  // render (which pi-subagents actually loads first) was invisible — a dead
+  // global chain hid a live project override and vice versa.
+  const deps = baseDeps();
+  // Kill the GLOBAL reviewer chain (unauthenticated provider)…
+  writeFileSync(
+    join(deps.agentsDir, "reviewer.md"),
+    '---\nmodel: "dead/x"\n---\n',
+  );
+  // …and revive it in the project layer with a usable chain. The SAME deps
+  // instance carries the dead global copy: a fresh baseDeps() would ship a
+  // healthy global chain and the PASS would prove nothing (round-11 P1).
+  const projAgents = join(deps.homeDir, "proj-agents");
+  mkdirSync(projAgents, { recursive: true });
+  writeFileSync(
+    join(projAgents, "reviewer.md"),
+    '---\nname: reviewer\ndescription: project reviewer\nmodel: "claude-fable-5"\nfallbackModels: ["opencode-go/deepseek-v4-flash"]\n---\n',
+  );
+  const checks = await runGateDoctor({ ...deps, projectAgentsDir: projAgents });
+  const chains = checks.find((c) => c.id === "model-chains")!;
+  assert.equal(chains.status, "PASS", `project chain must be diagnosed, not the dead global one: ${JSON.stringify(chains)}`);
+  // And the reverse: with NO project layer the dead global chain must FAIL.
+  const noProj = await runGateDoctor(deps);
+  assert.equal(noProj.find((c) => c.id === "model-chains")!.status, "FAIL", "without a project override the dead global chain fails");
+});
+
+test("runGateDoctor: a project-layer-ONLY agent file is diagnosed (pi-subagents loads it)", async () => {
+  // Round-5 P2: the union enumeration — a file with NO global copy still
+  // spawns under pi-subagents' project layer, so a dead chain there must
+  // surface instead of hiding outside the doctor's file list.
+  const projAgents = join(baseDeps().homeDir, "proj-only");
+  mkdirSync(projAgents, { recursive: true });
+  writeFileSync(
+    join(projAgents, "worker.md"),
+    '---\nname: worker\ndescription: test worker\nmodel: "dead/x"\n---\n',
+  );
+  const checks = await runGateDoctor(baseDeps({ projectAgentsDir: projAgents }));
+  const chains = checks.find((c) => c.id === "model-chains")!;
+  assert.equal(chains.status, "FAIL", `the project-only dead chain must be diagnosed: ${JSON.stringify(chains)}`);
+  assert.ok(chains.evidence.some((e) => e.includes("worker")), "evidence names the project-only agent");
+});
+
+test("runGateDoctor: a non-.md global entry never suppresses a project-only agent", async () => {
+  // Round-3 Nit / round-4: globalRoles used to keep every readdir entry
+  // verbatim, so an extensionless file (or a directory) named exactly like a
+  // project agent's identity looked like "there is already a global `worker`"
+  // and the project-ONLY chain was dropped from the diagnosis. Round 4 found
+  // the .filter had no test — removing it left the suite green.
+  const deps = baseDeps();
+  // A stray non-.md entry colliding with the project agent's identity.
+  writeFileSync(join(deps.agentsDir, "worker"), "not an agent file\n");
+  const projAgents = join(deps.homeDir, "proj-only-collide");
+  mkdirSync(projAgents, { recursive: true });
+  writeFileSync(
+    join(projAgents, "worker.md"),
+    '---\nname: worker\ndescription: test worker\nmodel: "dead/x"\n---\n',
+  );
+  const checks = await runGateDoctor({ ...deps, projectAgentsDir: projAgents });
+  const chains = checks.find((c) => c.id === "model-chains")!;
+  assert.equal(chains.status, "FAIL", `the project-only dead chain must still be diagnosed: ${JSON.stringify(chains)}`);
+  assert.ok(
+    chains.evidence.some((e) => e.includes("worker")),
+    `a stray non-.md entry must not hide the project agent: ${JSON.stringify(chains.evidence)}`,
+  );
+});
+test("runGateDoctor: a project override with a nonstandard delimiter is DIAGNOSED, not silently dropped", async () => {
+  // Round-12 R3 P2: the identity lookup used the lenient runtime-parity parser
+  // while `diagnose` pre-checked with a strict `^---\r?\n` regex. A project
+  // file opening with `--- ` (which pi-subagents DOES load) therefore shadowed
+  // the global entry AND was then skipped — the role vanished from the report
+  // and a DEAD live chain came back PASS.
+  const deps = baseDeps();
+  // Global reviewer is healthy; the project layer overrides it with a dead one.
+  const projAgents = join(deps.homeDir, "proj-nonstandard");
+  mkdirSync(projAgents, { recursive: true });
+  writeFileSync(
+    join(projAgents, "reviewer.md"),
+    '--- \nname: reviewer\ndescription: project reviewer\nmodel: "dead/x"\n---\n',
+  );
+  const checks = await runGateDoctor({ ...deps, projectAgentsDir: projAgents });
+  const chains = checks.find((c) => c.id === "model-chains")!;
+  assert.equal(
+    chains.status,
+    "FAIL",
+    `the overriding project chain is dead and must be reported: ${JSON.stringify(chains)}`,
+  );
+  assert.ok(
+    chains.evidence.some((e) => e.includes("reviewer")),
+    `the role must not vanish from the diagnosis: ${JSON.stringify(chains.evidence)}`,
+  );
+});
+test("runGateDoctor: a project file pi-subagents would skip does not shadow the global chain (round-11)", async () => {
+  // Round-11 P2: pi-subagents requires BOTH `name` and `description` in a
+  // frontmatter or it skips the file (agents.ts loadable check) — a
+  // malformed project copy must not hide a healthy global chain.
+  const deps = baseDeps();
+  const projAgents = join(deps.homeDir, "proj-skip");
+  mkdirSync(projAgents, { recursive: true });
+  // Global reviewer is healthy (baseDeps default); the project copy is
+  // missing name/description → pi-subagents ignores it.
+  writeFileSync(join(projAgents, "reviewer.md"), '---\nmodel: "dead/x"\n---\n');
+  const checks = await runGateDoctor({ ...deps, projectAgentsDir: projAgents });
+  const chains = checks.find((c) => c.id === "model-chains")!;
+  assert.equal(chains.status, "PASS", `the unloadable project file must not shadow the global chain: ${JSON.stringify(chains)}`);
+});
+
+test("runGateDoctor: empty-string name/description also counts as unloadable (round-11)", async () => {
+  // Round-11 P2: pi-subagents checks TRUTHINESS after quote parsing, so
+  // `name: ""` / `description: ""` are skipped too — the doctor must not
+  // let such a file shadow the global chain.
+  const deps = baseDeps();
+  const projAgents = join(deps.homeDir, "proj-empty");
+  mkdirSync(projAgents, { recursive: true });
+  writeFileSync(join(projAgents, "reviewer.md"), '---\nname: ""\ndescription: ""\nmodel: "dead/x"\n---\n');
+  const checks = await runGateDoctor({ ...deps, projectAgentsDir: projAgents });
+  const chains = checks.find((c) => c.id === "model-chains")!;
+  assert.equal(chains.status, "PASS", `empty-string required fields must not shadow the global chain: ${JSON.stringify(chains)}`);
+});
+
+test("runGateDoctor: an unreadable PROJECT agents dir FAILs instead of silently dropping the layer", async () => {
+  // round-11 P1: treating an unreadable project dir as "no project layer"
+  // drops every project-override chain and can fake a PASS on a dead global
+  // chain. Round-12 P2: that branch had NO test — disabling it left the whole
+  // gate-doctor suite green.
+  const deps = baseDeps();
+  const projAgents = mkdtempSync(join(tmpdir(), "gate-doctor-proj-unreadable-"));
+  const passthrough = deps.readdir;
+  const checks = await runGateDoctor({
+    ...deps,
+    projectAgentsDir: projAgents,
+    // The dir EXISTS (default `exists`) but cannot be listed.
+    readdir: (p) => (p === projAgents ? undefined : passthrough(p)),
+  });
+  const chains = checks.find((c) => c.id === "model-chains")!;
+  assert.equal(chains.status, "FAIL", `an unreadable project agents dir must FAIL: ${JSON.stringify(chains)}`);
+  assert.ok(
+    chains.evidence.some((e) => e.includes("project agents dir not readable")),
+    `the evidence must name the unreadable project dir: ${JSON.stringify(chains.evidence)}`,
+  );
+});
 test("runGateDoctor: broken environment surfaces FAILs, one IO failure never throws", async () => {
   const deps = baseDeps({
     probeGh: async () => ({ ok: false, error: "ENOENT" }),

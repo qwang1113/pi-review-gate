@@ -253,8 +253,10 @@ it is granted only when every precondition holds.
 
 The gate is only as good as the brain judging the work. Three independent roles
 run on a **top-tier reasoning model at `max` thinking**, each with a fallback
-priority list (first available wins). The models are **pinned in the agent
-definitions** — decided up front, not re-selected per task:
+priority list (first available wins). Those chains are the **built-in
+defaults in the agent definitions** — decided up front, not re-selected per
+task — and the `agents` config layer (see [Model configuration layer](#model-configuration-layer--per-agent-slots-and-the-auto-switch))
+can override any of them per agent:
 
 | Role | When | Gates? | Model priority (first = preferred) | Thinking |
 |------|------|--------|-------------------------------------|----------|
@@ -302,8 +304,9 @@ model doesn't share the main agent's blind spots):
 - **OpenRouter** — keyless catalog (family/availability)
 - **LMArena Elo**, **LiveBench** — keyless datasets
 
-It is a decision aid, **not a runtime selector** — the judge models are fixed in
-the agent frontmatter above. The extension itself is **fail-closed and
+It is a decision aid, **not a runtime selector** — the built-in judge chains
+live in the agent frontmatter above (the `agents` config layer can override
+them per agent). The extension itself is **fail-closed and
 network-free**; ranking is a *pure function over an offline snapshot*. Refresh
 the snapshot out-of-band with
 the **opt-in, gate-external** fetcher:
@@ -316,6 +319,65 @@ node scripts/fetch-leaderboard.mjs --write   # rewrite the snapshot, then: npm t
 node ~/.pi/agent/scripts/pi-review-gate-fetch-leaderboard.mjs --write \
   --snapshot-file ~/.pi/agent/extensions/pi-review-gate/lib/model-ranking.ts
 ```
+
+### Model configuration layer — per-agent slots and the `auto` switch
+
+You edit agent models far more often than the ranking snapshot changes, so the
+models are **configurable per agent** — layered like precommit (project
+`.pi/review-gate.json` overrides global `~/.pi/review-gate.json`, then the
+built-in frontmatter default), with an **`auto` switch** per agent:
+
+```json
+{
+  "agents": {
+    "reviewer": { "auto": false, "slots": ["onekey/gpt-5.6-sol:high", "claude-fable-5:max", "onekey/glm-5.3:high"] },
+    "worker":   { "auto": false, "slots": ["opencode-go/deepseek-v4-flash:high"] }
+  }
+}
+```
+
+- **`auto: true` (default)** — the agent runs on its built-in default chain.
+  When set EXPLICITLY at a layer, the renderer writes a *default-chain
+  overlay* (generated marker + the built-in default models) so that layer
+  SHADOWS a lower layer's slot render — flipping a slot off always lands the
+  built-in default, never a leftover lower-priority render. Unconfigured
+  agents are cleaned up instead (any stale generated copy is deleted).
+- **`auto: false`** — `slots[0]` becomes the main model, `slots[1..]` the
+  fallback chain. With the reviewer's switch OFF the **double review takes the
+  first two usable slots** (authenticated + allowed + judge-eligible, skipping
+  same-family duplicates to keep the cross-family protocol) — the capability
+  ranking is bypassed, so your order is the priority. An `auto: false` entry
+  with an EMPTY slot list is never a silent no-review state: it renders the
+  built-in default chain (shadowing any lower layer's slots) and the fan-out
+  falls back to the capability-ranked path, with a diagnostic at render time
+  so the deployed default is never a surprise.
+- **Per-model thinking levels.** Every slot may carry its own `:thinking`
+  suffix (`claude-fable-5:max`, `onekey/gpt-5.6-sol:high`); the renderer keeps
+  the suffix on each candidate so pi-subagents applies the requested level per
+  retry. A level the registry EXPLICITLY maps to null is refused on save —
+  except `:off` on a `reasoning: false` model, which is always usable (the
+  renderer never consults the map there); missing metadata follows
+  pi-subagents defaults (all levels except `max`, while metadata-backed
+  `xhigh`/`max` must be explicitly listed).
+
+Rendering is layered the way pi-subagents loads agents: the project layer
+renders into `<project>/.pi/agents/*.md` (which outranks user-global) and the
+global layer into `~/.pi/agent/agents/*.md`. `scripts/install-package.mjs`
+applies only the GLOBAL layer (its cwd is not trustworthy), rendering it
+through a stripped data-URL import of `lib/model-config.ts`; the **extension**
+re-applies BOTH layers at every session start — unconditionally, from a repo
+checkout and on a published install alike — so the global layer plus the
+current repo's project layer are always in force. That session-start pass is
+also what sweeps stale generated overrides after you delete the `agents`
+section, and what restores the upstream default when the global layer is
+freed. Every write is validated first and refuses to land on failure.
+
+You configure it by editing the JSON directly — the `agents` section of the
+global layer (`~/.pi/review-gate.json`) or the project layer
+(`.pi/review-gate.json`, which outranks it). The extension validates and
+renders both layers at session start (see above). The pi TUI's below-editor
+widget shows the effective `adviser`/`reviewer` model, its auto state and its
+source layer.
 
 ## Lessons from -dev-flow PR #7, wired in
 
@@ -564,17 +626,24 @@ Per-project config lives in `.pi/review-gate.json`:
   "thinkHarder": true, // one-shot [STRATEGIC_RESET] checklist near the cap
   "gitMemory": true,   // default ON — [GIT_CONTEXT] after compaction; false disables
   "docSync": true,     // default ON — reviewer code↔doc attestation; false disables
-  "llmGuards": {                // LLM semantic guard layer (all tighten-only + fail-back)
-    "model": "deepseek/deepseek-v4-flash", // "provider/model" — fixed default
-    "aiAttribution": true,      // paraphrased AI attribution in commit messages
-    "englishCheck": true,       // romanized non-English in commit/PR/test-label text
-    "shipDetect": true          // extra ship-command layer on suspicious bash
+  "agents": {
+    "reviewer": { "auto": false, "slots": ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] }
+  },
+  "llmGuards": {       // LLM semantic guard layer (all tighten-only + fail-back)
+    "model": "deepseek/deepseek-v4-flash",
+    "aiAttribution": true,
+    "englishCheck": true,
+    "shipDetect": true
   }
 }
 ```
 
 Every field is validated independently; a missing/corrupt config silently
-falls back to defaults and can never loosen the gate.
+falls back to defaults and can never loosen the gate. The `agents`
+section is the one exception: a corrupt file (or a non-object `agents`
+section) keeps the last rendered model chains instead of restoring
+defaults — corrupt ≠ absent, and the sweep must never clobber a valid
+render (fail-safe, same rule the postinstall applies).
 
 **User-global config (`~/.pi/review-gate.json`) is the fallback layer.** The
 same file shape may be placed in the user's home directory; the effective

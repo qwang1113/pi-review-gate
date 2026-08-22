@@ -9,6 +9,7 @@
 import { join } from "node:path";
 import { diagnoseChain, type ModelChainEntry, type RegistryFacts } from "./model-diagnose.ts";
 import { isModelAllowed } from "./model-allowlist.ts";
+import { projectAgentIdentity, frontmatterBlock } from "./model-config.ts";
 
 export type DoctorStatus = "PASS" | "FAIL" | "WARN";
 
@@ -324,6 +325,11 @@ export interface DoctorDeps {
   packageRoot: string;
   /** Where agents/*.md are expected: ~/.pi/agent/agents (postinstall target). */
   agentsDir: string;
+  /** Project-layer agent overrides (<repo>/.pi/agents) — when set, a file
+   *  present there outranks the global copy for chain diagnosis, mirroring
+   *  pi-subagents' load order (round-2 P2: doctor used to report the GLOBAL
+   *  chain while the PROJECT override was what actually spawned). */
+  projectAgentsDir?: string;
   modelsStorePath: string;
   globalConfigPath: string;
   /** Model registry facts (session registry + disk fallback); undefined when
@@ -355,15 +361,30 @@ export function runnerCandidates(packageRoot: string): string[] {
  */
 export function factsFromRegistry(registry: unknown, homeDir: string, readFile: (p: string) => string | undefined): RegistryFacts {
   const authedProviders = new Set<string>();
-  const models: Array<{ provider: string; id: string }> = [];
+  const models: Array<{
+    provider: string;
+    id: string;
+    reasoning?: boolean;
+    thinkingLevelMap?: Record<string, string | null>;
+  }> = [];
   const reg = registry as { getAll?: () => unknown[]; hasConfiguredAuth?: (m: unknown) => boolean } | undefined;
   const all = reg?.getAll?.() ?? [];
   if (Array.isArray(all) && all.length > 0) {
     const authCheckable = typeof reg?.hasConfiguredAuth === "function";
     for (const m of all) {
-      const obj = m as { provider?: unknown; id?: unknown };
+      const obj = m as { provider?: unknown; id?: unknown; reasoning?: unknown; thinkingLevelMap?: unknown };
       if (typeof obj.provider !== "string" || typeof obj.id !== "string") continue;
-      models.push({ provider: obj.provider, id: obj.id });
+      const tlm = obj.thinkingLevelMap;
+      const thinkingLevelMap =
+        typeof tlm === "object" && tlm !== null && !Array.isArray(tlm)
+          ? Object.fromEntries(Object.entries(tlm).filter(([, mapped]) => mapped === null || typeof mapped === "string")) as Record<string, string | null>
+          : undefined;
+      models.push({
+        provider: obj.provider,
+        id: obj.id,
+        ...(typeof obj.reasoning === "boolean" ? { reasoning: obj.reasoning } : {}),
+        ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+      });
       if (!authCheckable || reg!.hasConfiguredAuth!(obj)) authedProviders.add(obj.provider);
     }
   }
@@ -403,19 +424,82 @@ function modelChainCheck(deps: DoctorDeps): DoctorCheck {
       advice: ["re-run the postinstall (scripts/install-package.mjs) — it copies agents/*.md to ~/.pi/agent/agents/"],
     };
   }
-  const agentFiles = files.filter((f) => f.endsWith(".md"));
+  // Project-layer-only files are diagnosed too (round-5 P2): pi-subagents
+  // loads anything under <repo>/.pi/agents, so a file that exists ONLY in
+  // the project layer (no global copy) is still a live chain the doctor
+  // must see — enumerate the UNION, project-first per file below.
+  //
+  // KNOWN LIMITATION (deliberate): this enumeration is FLAT, while
+  // pi-subagents' loadAgentsFromDir walks `listFilesRecursive`
+  // (node_modules/pi-subagents/src/agents/agents.ts:1516). An agent file in a
+  // SUBDIRECTORY of <repo>/.pi/agents is therefore loaded at runtime but not
+  // diagnosed here. Widening this would mean a recursive contract for the
+  // injected `readdir` dep (it returns plain names and cannot report file
+  // types), so it is left flat: the renderer only ever writes FLAT files into
+  // that directory, and a hand-nested file is out of the layer's own scope.
+  let projectFiles: string[] = [];
+  if (deps.projectAgentsDir) {
+    const listed = deps.readdir(deps.projectAgentsDir);
+    if (listed === undefined && deps.exists(deps.projectAgentsDir)) {
+      // The dir EXISTS but is not readable: treating it as "no project
+      // layer" would silently drop every project-override chain and can
+      // fake a PASS on a dead global chain (round-11 P1). Fail like the
+      // unreadable global dir above instead.
+      return {
+        id: "model-chains",
+        title: "agent model chains resolve to a usable model",
+        status: "FAIL",
+        evidence: [`project agents dir not readable: ${deps.projectAgentsDir}`],
+        advice: ["check permissions on <repo>/.pi/agents — project-layer chains are diagnosed too"],
+      };
+    }
+    projectFiles = listed ?? [];
+  }
   const factsAvailable = (deps.registryFacts?.models.length ?? 0) > 0;
   const entries: ModelChainEntry[] = [];
-  for (const f of agentFiles) {
-    const text = deps.readFile(join(deps.agentsDir, f));
-    if (text === undefined) continue; // best-effort: one unreadable agent degrades nothing
-    const role = f.slice(0, -3);
-    // Only agents with a YAML frontmatter can pin a model chain; diagnoseChain
-    // parses the frontmatter itself and yields an empty chain otherwise.
-    if (!/^---\n[\s\S]*?\n---/.test(text)) continue;
+  // pi-subagents registers agents under their frontmatter `name` and lets a
+  // project agent override a global one OF THE SAME NAME (basename is
+  // irrelevant). Build identity → project-text first (round-11 P1: a
+  // custom.md carrying `name: reviewer` really shadows the global reviewer).
+  const projectByIdentity = new Map<string, string>();
+  if (deps.projectAgentsDir) {
+    for (const pf of projectFiles) {
+      if (!pf.endsWith(".md")) continue;
+      const ptext = deps.readFile(join(deps.projectAgentsDir, pf));
+      if (ptext === undefined) continue;
+      const identity = projectAgentIdentity(ptext);
+      if (identity !== undefined) projectByIdentity.set(identity, ptext);
+    }
+  }
+  const diagnose = (role: string, text: string): void => {
+    // Same delimiter authority as projectAgentIdentity above: a stricter local
+    // regex here made an overriding project file shadow the global entry (the
+    // `continue` below) AND then be skipped, so the role vanished from the
+    // diagnosis and a DEAD live chain reported PASS.
+    if (frontmatterBlock(text) === undefined) return;
     const diagnosed = diagnoseChain(role, text, deps.registryFacts ?? { models: [], authedProviders: new Set(), allowed: () => true });
-    if (diagnosed.chain.length === 0) continue; // frontmatter without a model pin is not a chain
-    entries.push(diagnosed);
+    if (diagnosed.chain.length > 0) entries.push(diagnosed);
+  };
+  // Global files, with any same-identity project override winning.
+  for (const f of files) {
+    if (!f.endsWith(".md")) continue;
+    const role = f.slice(0, -3);
+    const projText = projectByIdentity.get(role);
+    if (projText !== undefined) {
+      diagnose(role, projText);
+      continue;
+    }
+    const text = deps.readFile(join(deps.agentsDir, f));
+    if (text === undefined) continue;
+    diagnose(role, text);
+  }
+  // Project-only agents (no global file of the same identity).
+  // Only .md files are agent files (upstream filters the same way), so a stray
+  // extensionless entry must not occupy a project agent's identity here.
+  const globalRoles = new Set(files.filter((f) => f.endsWith(".md")).map((f) => f.slice(0, -3)));
+  for (const [identity, text] of projectByIdentity) {
+    if (globalRoles.has(identity)) continue;
+    diagnose(identity, text);
   }
   return checkModelChains(entries, factsAvailable);
 }

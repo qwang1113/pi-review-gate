@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { KNOWN_AGENTS } from "../lib/model-config.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENTS = join(ROOT, "agents");
@@ -25,6 +26,16 @@ test("every agent frontmatter carries the required fields", () => {
       assert.match(body, new RegExp(`^${key}:`, "m"), `${f}: missing ${key}`);
     }
   }
+});
+
+test("agents/*.md exactly matches KNOWN_AGENTS (config/render see every agent)", () => {
+  // If a new agent file is added without registering it in KNOWN_AGENTS, the
+  // model-config layer, the renderer and the widget silently skip it. Keep the
+  // two in lockstep — both directions.
+  const files = readdirSync(AGENTS).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, "")).sort();
+  const known = [...KNOWN_AGENTS].sort();
+  assert.deepEqual(files, known, "shipped agents must equal KNOWN_AGENTS");
+  assert.ok(files.length >= 11, `expected all 11 agents, found ${files.length}`);
 });
 
 test("L3 judges (reviewer/adviser/arbiter/module-reviewer) think at max — the verdict tier never degrades", () => {
@@ -188,17 +199,29 @@ test("L2 execution fallbacks span families and include the cheap-but-strong flas
 
 // ── Cross-review protocol: goal pre-review + default two-reviewer final ────
 
-test("SKILL.md and AGENTS.md document the pre-goal single cross-family reviewer pass", () => {
+test("SKILL.md and AGENTS.md document the merged pre-goal adviser pre-review pass", () => {
   for (const file of [SKILL_MD, AGENTS_MD]) {
     const src = readFileSync(file, "utf8");
-    // The protocol text must mention both halves: a cross-family reviewer for
-    // the draft goal, and propose_loop_goal as the submission point.
+    // The merged goal pre-review rule (2026-08-18): ONE independent adviser,
+    // "pass" = no unresolved P1, submitted via propose_loop_goal — and NO stray
+    // "cross-family reviewer" pre-goal rule may remain (one rule, not two).
     assert.match(
       src,
-      /(one|single).{0,80}(cross.family|independent).{0,80}(reviewer|critique)/i,
-      `${file} must document the single cross-family reviewer pass`,
+      /ONE\s+independent[^.]{0,60}(adviser)[^.]{0,60}review/i,
+      `${file} must document the adviser goal pre-review`,
     );
+    assert.match(src, /no\s+unresolved\s+P1/i, `${file} must define "pass" = no unresolved P1`);
     assert.match(src, /propose_loop_goal/i, `${file} must reference propose_loop_goal`);
+    // The old rule's EXECUTABLE wording must be gone: the retired SKILL.md
+    // heading ("Pre-review the draft goal (single cross-family reviewer)")
+    // AND the old AGENTS.md imperative ("run the draft goal through ONE
+    // cross-family reviewer"). A HISTORICAL mention ("replaces the earlier
+    // ... pre-review") is fine and must stay — the gate is one rule, not two.
+    assert.doesNotMatch(
+      src,
+      /(pre-review the draft goal \(single cross.family|draft goal through (ONE|one) cross[.\s-]*family\s+reviewer)/i,
+      `${file} must not keep the old cross-family pre-goal rule`,
+    );
   }
 });
 

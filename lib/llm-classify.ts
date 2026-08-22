@@ -87,6 +87,25 @@ export function createLlmClassifier(
   return { exec, provider, model, timeoutMs };
 }
 
+/**
+ * True when the text contains a word of at least two letters — i.e. there is
+ * actual prose a language/attribution verdict could be about.
+ *
+ * Guard for the semantic classifiers: a placeholder message ("x"), a bare
+ * letter or punctuation has no language body to judge, and a model verdict on
+ * it is random — which would block or pass ships nondeterministically.
+ * Romanized non-English (pinyin/romaji/translit) and AI-attribution phrasing
+ * are always multi-letter words, so this never suppresses a real detection.
+ *
+ * CAVEAT (accepted): space-separated single CJK characters ("改 了 些") have no
+ * two-letter run and are skipped here. That is safe by invariant 1 — such text
+ * is non-Latin script, so the DETERMINISTIC language check has already blocked
+ * it before this tighten-only classifier is ever consulted.
+ */
+function hasProseWord(joined: string): boolean {
+  return /\p{L}{2,}/u.test(joined);
+}
+
 /** Wrap untrusted text as data. The tag content is length-capped and the
  * closing tag inside the payload is broken so it cannot terminate the block. */
 function asData(text: string): string {
@@ -176,7 +195,7 @@ export async function classifyAiAttribution(
   messages: readonly string[],
 ): Promise<boolean | undefined> {
   const joined = messages.filter(Boolean).join("\n---\n");
-  if (!joined) return false;
+  if (!joined || !hasProseWord(joined)) return false;
   const q =
     "Does the commit message below contain ANY attribution of authorship or " +
     "assistance to an AI system (an AI assistant, language model, chatbot, or a " +
@@ -200,7 +219,7 @@ export async function classifyNonEnglish(
   texts: readonly string[],
 ): Promise<boolean | undefined> {
   const joined = texts.filter(Boolean).join("\n---\n");
-  if (!joined) return false;
+  if (!joined || !hasProseWord(joined)) return false;
   const q =
     "Is the text below written in ENGLISH? Code identifiers, file paths, URLs, " +
     "numbers, emoji, and borrowed loanwords in otherwise-English prose all count " +
