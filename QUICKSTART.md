@@ -58,13 +58,17 @@ agent：调 set_gate_mode("loop")
 - 项目配置：`.pi/review-gate.json`（每克隆一份）
 - 用户全局兜底：`~/.pi/review-gate.json`（同一文件格式；项目字段优先，逐字段合并）
 - 可用字段：`maxRounds`(3–50)、`thinkHarder`、`gitMemory`、`docSync`(默认开)、
-  `llmGuards`、`arbiter`、`copilotReview`、`precommit`（各步骤的 script/command/skip）
-- 生成器：`/gate-init` 交互式生成 precommit 段。
+  `llmGuards`、`arbiter`、`copilotReview`、`agents`（各角色的 auto/slots 模型槽位，
+  可选）、`precommit`（各步骤的 script/command/skip）
+- 生成器：`/gate-init` 一次性向导生成配置（precommit 各步骤 + 用户点名的 agents
+  槽位与标量字段），项目已有配置为准合并；未点名的字段不写默认值（会遮蔽全局
+  配置）；无效模型 spec 拒绝写入，`/reload` 后渲染生效。
 
 ## 5. 常见"被 block"场景与逃生
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
+| `loop mode requires an approved loop goal BEFORE any edit/write call` | loop 模式（含未决）还没确认目标就动手编辑 | 先逐轮问清“done”的定义 → `propose_loop_goal` 在对话框里确认；批准前 edit/write 一律被拦（`.pi/` 与 `.pi-subagents/` 门禁自有文件除外；explore/normal 模式不要求 goal） |
 | `code review gate is PENDING` | 改完没 review | 走 review 循环（或 `/review`） |
 | `precommit not run` / `FAILED` | 没跑或跑挂了 | `run_precommit`；修失败项 |
 | `fingerprint mismatch` | 审核后又改了文件 | 再 review + 再 precommit |
@@ -77,8 +81,8 @@ agent：调 set_gate_mode("loop")
 | `snapshot isolation UNAVAILABLE` | 本机 `git worktree` 不可用（无提交、权限、非 git 目录） | 按老规矩走：reviewer 不许改文件，你也别在审核期间修；门禁本身不受影响 |
 | `.pi/review-snapshots/` 里堆了 `rg-review-snap-*` | 会话崩溃留下的孤儿快照 | 下次 `prepare_review` 或新会话启动会按时效自动回收；手动清理：`git worktree prune` + `rm -rf .pi/review-snapshots/rg-review-snap-*` |
 | reviewer 改了依赖导致后续 precommit 诡异失败 | 快照里 `node_modules` 是指向真仓库的软链（共享路径之一），写它会穿透 | 重装依赖（`npm ci`）；reviewer 的提示词已明确禁止写 `node_modules` |
-| `git commit` 报 `.git/hooks/pre-commit: No such file or directory` | 有人在快照里跑了安装脚本：快照是 linked worktree，**`.git/hooks` 与真仓库共享**，于是 hook 被指向了随轮删除的快照目录 | 在**真工作树**重跑 `bash scripts/install-git-hooks.sh`；两个安装器现已拒绝从 `.pi/review-snapshots/` 下运行 |
-| 想完全绕过 | — | 你执行 `/gate-bypass <reason>`（会话内）或会话外用 `REVIEW_GATE_BYPASS=1`（仅 hooks 层） |
+| `git commit` 报 `.git/hooks/pre-commit: No such file or directory` | 有人在快照里跑了安装脚本：快照是 linked worktree，**`.git/hooks` 与真仓库共享**，于是 hook 被指向了随轮删除的快照目录 | 在**真工作树**重跑 `bash scripts/install-git-hooks.sh`；两个安装器现已拒绝从含 `rg-review-snap-` 路径段（`.pi/review-snapshots/` 与 tmpdir 回退两种布局）的目录下运行 |
+| 想完全绕过 | — | 你执行 `/gate-bypass <reason>`（会话内）或会话外用 `REVIEW_GATE_BYPASS=1`（仅 hooks 层）；注意 `/gate-bypass` 只解除 L1 ship gate，**解除不了 L8 的 edit/write 硬拦**——未确认 goal 前编辑仍被拦 |
 
 ## 6. 常用命令
 

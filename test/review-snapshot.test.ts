@@ -24,6 +24,7 @@ import {
   removeReviewSnapshot,
   streamPathFor,
   verifySnapshot,
+  isReviewSnapshotPath,
 } from "../lib/review-snapshot.ts";
 
 const HERMETIC_ENV: NodeJS.ProcessEnv = {
@@ -147,21 +148,63 @@ test("an untracked scratch file inside the snapshot counts as drift", () => {
   removeReviewSnapshot(snap!, repo);
 });
 
-test("the loop goal is carried in even though the fingerprint excludes .pi/", () => {
-  // The reviewer accepts the change against the goal criterion by criterion;
-  // a snapshot built strictly from the fingerprinted tree would drop it.
+test("a TRACKED .pi file is still excluded from the snapshot (worktreeTreeOid strips :/.pi)", () => {
+  // The gitignored case above is the easy one. The harder case: a `.pi/`
+  // file that IS committed (git add -f) must still not materialize in the
+  // snapshot — worktreeTreeOid runs `git rm --cached --ignore-unmatch --
+  // :/.pi :/.pi-subagents` before write-tree (lib/fingerprint.ts), and a
+  // regression here would recreate the pi-subagents project-root
+  // misdetection through a tracked file.
+  const repo = track(makeRepo());
+  mkdirSync(join(repo, ".pi"), { recursive: true });
+  writeFileSync(join(repo, ".pi", "tracked.json"), "{}");
+  git(repo, ["add", "-f", ".pi/tracked.json"]);
+  git(repo, ["commit", "-qm", "track a .pi file"]);
+  const snap = createReviewSnapshot({ repoRoot: repo, instance: "integration", runId: "run1" });
+  assert.ok(snap);
+  assert.equal(existsSync(join(snap!.dir, ".pi")), false,
+    "even a TRACKED .pi/ must not materialize in the snapshot");
+  assert.equal(verifySnapshot(snap!).clean, true);
+  removeReviewSnapshot(snap!, repo);
+});
+
+test("the loop goal is NOT carried into the snapshot (goal text rides the spawn task)", () => {
+  // The snapshot used to copy `.pi/loop-goal.md` so the reviewer could read
+  // the acceptance contract. It stopped in 2026-08-23: a snapshot that
+  // contains ANY `.pi/` directory is misdetected by pi-subagents as a
+  // project root (its nearest-project-root probe walks up from the spawn cwd
+  // and the first dir that HAS `.pi/` wins — which is the snapshot itself),
+  // so the project layer of the model config silently vanishes and every
+  // reviewer falls back to the GLOBAL agent definition. The goal text is
+  // injected into the spawn task verbatim by buildShardPrompt, so the file
+  // buys nothing.
   const repo = track(makeRepo());
   mkdirSync(join(repo, ".pi"), { recursive: true });
   writeFileSync(join(repo, ".pi", "loop-goal.md"), "# goal\n- criterion 1\n");
   const snap = createReviewSnapshot({ repoRoot: repo, instance: "integration", runId: "run1" });
   assert.ok(snap);
-  for (const rel of SNAPSHOT_CARRIED_FILES) {
-    assert.ok(existsSync(join(snap!.dir, rel)), `${rel} must be carried into the snapshot`);
-  }
-  assert.match(readFileSync(join(snap!.dir, ".pi", "loop-goal.md"), "utf8"), /criterion 1/);
-  // …and carrying it must NOT make the snapshot look drifted (.pi is excluded).
+  assert.equal(SNAPSHOT_CARRIED_FILES.length, 0, "nothing may be carried under .pi/ anymore");
+  assert.equal(existsSync(join(snap!.dir, ".pi")), false,
+    "a snapshot must not contain a .pi/ directory (pi-subagents project-root misdetection)");
+  // …and the snapshot still verifies clean.
   assert.equal(verifySnapshot(snap!).clean, true);
+  // Path-recognition asserts BEFORE the cleanup: after removal they read as
+  // checking a deleted dir (pure string match, but order matters for readers).
+  assert.equal(isReviewSnapshotPath(snap!.dir), true,
+    "the real snapshot dir must be recognized (and its parent prefix with it)");
+  assert.equal(isReviewSnapshotPath(join(snap!.dir, "..")), true, "the reserved parent itself");
   removeReviewSnapshot(snap!, repo);
+});
+
+test("isReviewSnapshotPath recognizes snapshot worktrees and nothing else", () => {
+  assert.equal(isReviewSnapshotPath("/repo/.pi/review-snapshots/rg-review-snap-abc/shard-1"), true);
+  assert.equal(isReviewSnapshotPath("/repo/.pi/review-snapshots/rg-review-snap-abc/shard-2/sub"), true);
+  assert.equal(isReviewSnapshotPath("/repo/.pi/review-snapshots/other/shard-1"), false, "not our prefix");
+  assert.equal(isReviewSnapshotPath("/repo/.pi/review-stream/review-x-shard-1.jsonl"), false, "streams are not snapshots");
+  assert.equal(isReviewSnapshotPath("/repo/.pi/review-gate.json"), false);
+  assert.equal(isReviewSnapshotPath("/repo/lib/review-snapshot.ts"), false);
+  assert.equal(isReviewSnapshotPath("/repo/.pi/review-snapshots/rg-review-snap-x"), true, "the reserved parent itself");
+  assert.equal(isReviewSnapshotPath("/tmp/rg-review-snap-abc/shard-1"), true, "tmpdir fallback layout (snapshotBaseDir fallback)");
 });
 
 test("the stream path is absolute, per-instance, and inside the gate-owned dir", () => {

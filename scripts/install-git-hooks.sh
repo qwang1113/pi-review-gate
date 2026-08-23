@@ -12,7 +12,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 # every commit (observed exactly once, which is why this guard exists). A
 # reviewer has no business installing anything anyway.
 case "$REPO_ROOT" in
-  */.pi/review-snapshots/*)
+  */rg-review-snap-*)
     echo "refusing to install hooks from a review snapshot ($REPO_ROOT):" >&2
     echo "  .git/hooks is shared with the real checkout, so this would repoint it at" >&2
     echo "  a directory that disappears when the review round ends." >&2

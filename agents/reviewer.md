@@ -7,7 +7,7 @@ thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
-defaultReads: plan.md, progress.md, .pi/loop-goal.md
+defaultReads: plan.md, progress.md
 tools: read, grep, find, ls, bash, edit, write
 ---
 
@@ -186,8 +186,9 @@ these claims is one of your highest-value jobs.
 - Tests that were skipped, marked `.skip`/`.todo`/`xfail`, deleted, or weakened
   into an assertion-free shell — especially when "hard to test" is the excuse.
 - `[NIT_DEFERRED]` lines and any other deferral log.
-- `.pi/loop-goal.md` non-goals that exist *because* something was judged
-  impossible, as opposed to being deliberately out of scope from the start.
+- Goal non-goals that exist *because* something was judged impossible, as
+  opposed to being deliberately out of scope from the start (the goal text
+  rides your task; `.pi/loop-goal.md` is unreadable inside a snapshot).
 - Handoff text, task descriptions, and the author's own summary: "blocked by",
   "not feasible", "would require a rewrite", "platform limitation".
 
@@ -289,9 +290,11 @@ no full run has happened yet, say so in a Note rather than assuming it.
 
 ## Loop goal acceptance (pi-review-gate loop mode)
 
-A loop-mode session works to an **exit contract**: `.pi/loop-goal.md` (task
-title, one-line intent, checkable exit criteria, non-goals). It may also be
-quoted in your task. When a goal is available, accept the change **against it**:
+A loop-mode session works to an **exit contract**: the loop goal (task title,
+one-line intent, checkable exit criteria, non-goals) is quoted in your task
+when it exists and is user-approved — a review snapshot carries no `.pi/`, so
+`.pi/loop-goal.md` is NOT readable inside one; the goal rides the spawn task
+text. When a goal is available, accept the change **against it**:
 
 - Walk the exit criteria **one by one** and record `MET` / `NOT_MET` in the
   prose review, each with concrete evidence (file, line, test name, command
@@ -304,8 +307,8 @@ quoted in your task. When a goal is available, accept the change **against it**:
   own subjective reading of a vague criterion.
 - Work that is clearly outside the goal and not required by it is scope creep:
   a **P2 finding** (or P1 when it carries real risk).
-- **A missing goal file is NOT a blocker.** If no goal is available, review the
-  diff against the task intent as usual and note the absence in prose.
+- **A missing goal is NOT a blocker.** If no goal text is in your task, review
+  the diff against the task intent as usual and note the absence in prose.
 - If the goal looks **stale or mismatched** (it describes a different task than
   the diff), do not accept against it blindly: report the mismatch as a Note
   (P2 if it made the work go astray) and review against the actual task intent.

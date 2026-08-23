@@ -19,6 +19,8 @@ import {
   goalTextHash,
   isLoopGoalConfirmed,
   readLoopGoal,
+  loopGoalEditGate,
+  LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
 } from "../lib/loop-goal.ts";
 
 function repoWithGoal(content?: string, mtimeMs?: number): string {
@@ -251,6 +253,18 @@ test("FLICKER: the goal dialog carries the decision, not the goal text", () => {
   assert.match(dialog, /上方消息/, "the dialog must point at where the full text is");
 });
 
+test("FLICKER: extraUntrusted facts sit BEFORE the title line (truncation cannot eat them)", () => {
+  // Round P2: the bound-repo fact was appended at the END of the dialog, but
+  // fitDialogMessage truncates from the TAIL — the one fact the user must
+  // confirm was the first thing dropped. It must precede the title line.
+  const dialog = buildGoalConfirmMessage("# 目标\n- 标准", "绑定仓库(不可信数据): /some/repo");
+  assert.ok(dialog.indexOf("绑定仓库(不可信数据): /some/repo") < dialog.indexOf("标题（不可信数据）"),
+    "the extra untrusted fact must come BEFORE the title line");
+  const fitted = fitDialogMessage(GOAL_CONFIRM_TITLE, dialog);
+  assert.equal(fitted.truncated, false, "the decision copy + bound repo must fit without truncation");
+  assert.ok(fitted.message.includes("/some/repo"), "the bound repo must survive fitting");
+});
+
 test("FLICKER: a goal whose FIRST LINE is huge still fits, and loses only the agent's text", () => {
   // Worst case for the dialog: the untrusted title line is agent-controlled and
   // unbounded, and CJK costs two cells per character. It must be capped, and it
@@ -273,4 +287,28 @@ test("FLICKER: the mode-downgrade dialog fits the budget, and truncation eats th
   // agent's untrusted reason — never the statement of what "yes" grants.
   assert.match(fitted.message, /全部质量门禁将关闭/);
   assert.match(fitted.message, /锁定 AI 发起的降级请求/);
+});
+
+// ---------------------------------------------------------------------------
+// L8 edit gate — pure decision + block copy
+// ---------------------------------------------------------------------------
+
+test("loopGoalEditGate: loop/undecided require a confirmed goal; explore/normal never do", () => {
+  // loop: the goal is the contract — no confirmation, no edit.
+  assert.equal(loopGoalEditGate({ taskMode: "loop", goalConfirmed: false }), false);
+  assert.equal(loopGoalEditGate({ taskMode: "loop", goalConfirmed: true }), true);
+  // undecided behaves as loop (fail-closed, like every other gate layer).
+  assert.equal(loopGoalEditGate({ taskMode: undefined, goalConfirmed: false }), false);
+  assert.equal(loopGoalEditGate({ taskMode: undefined, goalConfirmed: true }), true);
+  // explore allows small edits during an investigation; normal steps aside.
+  assert.equal(loopGoalEditGate({ taskMode: "explore", goalConfirmed: false }), true);
+  assert.equal(loopGoalEditGate({ taskMode: "normal", goalConfirmed: false }), true);
+});
+
+test("LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK names the path forward (negotiate → adviser → dialog)", () => {
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /loop goal/);
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /propose_loop_goal/);
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /adviser/);
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\.pi\/loop-goal\.md/); // names the real path
+  assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\bblock(er|ed|ing|s)?\b/i, "the reason must not call itself a block");
 });

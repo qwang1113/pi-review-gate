@@ -105,16 +105,45 @@ export const SNAPSHOT_ADDED_PATHSPECS: readonly string[] = Object.freeze([":/nod
  * Paths that must be carried into the snapshot even though the fingerprint
  * excludes them.
  *
- * `.pi/loop-goal.md` is the reviewer's ACCEPTANCE CONTRACT: it walks the exit
- * criteria one by one. But `.pi/` is gate-owned and therefore excluded from
- * the fingerprinted tree (GATE_EXCLUDE_PATHSPECS), so a snapshot built from
- * that tree would silently drop the one file the reviewer is told to read
- * (`defaultReads` in agents/reviewer.md) — the review would still happen, but
- * against the task text alone, and nobody would notice the goal went missing.
+ * DELIBERATELY EMPTY since 2026-08-23. It used to carry `.pi/loop-goal.md`
+ * (the reviewer's acceptance contract), but a snapshot that contains ANY
+ * `.pi/` directory is misdetected by pi-subagents as a project root: its
+ * nearest-project-root probe walks up from the spawn cwd and the first
+ * directory that HAS a `.pi/` wins — and that directory is the snapshot
+ * itself. A snapshot-as-project-root has no `.pi/agents/`, so the project
+ * layer of the model config (the user's per-agent slots) silently vanishes
+ * and every reviewer falls back to the GLOBAL agent definition. The goal
+ * text is injected into the spawn task verbatim by `buildShardPrompt`
+ * (prepare_review), so carrying the file buys nothing that a snapshot
+ * without `.pi/` does not already provide.
  */
-export const SNAPSHOT_CARRIED_FILES: readonly string[] = Object.freeze([
-  join(".pi", "loop-goal.md"),
-]);
+export const SNAPSHOT_CARRIED_FILES: readonly string[] = Object.freeze([]);
+
+/**
+ * Is `abs` a review-snapshot path? Snapshot worktrees live under
+ * `rg-review-snap-*` + `/` + `<instance>` either inside
+ * `<repo>/.pi/review-snapshots/` or (fallback) directly under the system
+ * temp dir. The extension
+ * uses this to stay INERT inside a reviewer's disposable copy: a session
+ * whose cwd is a snapshot must not initialize gate state or write a sidecar
+ * into the snapshot — that would both disturb the judged tree and (by
+ * recreating `.pi/`) re-arm pi-subagents' project-root misdetection.
+ */
+export function isReviewSnapshotPath(abs: string): boolean {
+  const normalized = abs.replace(/\\/g, "/");
+  // Match on the unique prefix segment, not the full layout: the primary
+  // layout is `<repo>/.pi/review-snapshots/rg-review-snap-*/<instance>`,
+  // but snapshotBaseDir falls back to the system temp dir when `.pi/` is
+  // unwritable, yielding `<tmpdir>/rg-review-snap-*/<instance>`. The prefix
+  // appears in both, and `rg-review-snap-` is unique to this gate. (The
+  // segment match is deliberately not anchored tighter: a real checkout
+  // whose path contains the segment is vanishingly unlikely, and the
+  // consequence of a MISS is a fully-active extension inside a snapshot
+  // (workflow layers wrongly enforcing) while a FALSE POSITIVE only makes
+  // the extension inert in an ordinary session — the false-positive
+  // direction is the safer one to err toward.)
+  return normalized.includes("/" + SNAPSHOT_PREFIX);
+}
 
 export interface ReviewSnapshot {
   /** Absolute path of the throwaway worktree the reviewer must run in. */
@@ -234,15 +263,19 @@ export function createReviewSnapshot(opts: CreateSnapshotOptions): ReviewSnapsho
     // the hook installer inside its snapshot repointed those hooks at a
     // directory that was deleted with the round, and every later commit died on
     // a missing hook (observed while committing this change). Both installers
-    // now REFUSE to run from a path under `.pi/review-snapshots/`
-    // (scripts/install-git-hooks.sh, scripts/install-package.mjs), and the
+    // now REFUSE to run from any path containing an `rg-review-snap-` segment
+    // (both the .pi/review-snapshots/ layout and the tmpdir fallback;
+    // scripts/install-git-hooks.sh, scripts/install-package.mjs), and the
     // reviewer prompts name `.git` as shared.
     const modules = join(repoRoot, "node_modules");
     if (existsSync(modules)) {
       try { symlinkSync(modules, join(dir, "node_modules"), "dir"); } catch { /* optional */ }
     }
 
-    // Carry the acceptance contract in (see SNAPSHOT_CARRIED_FILES).
+    // SNAPSHOT_CARRIED_FILES is deliberately EMPTY (see its docblock: a
+    // snapshot containing .pi/ is misdetected by pi-subagents as a project
+    // root). The loop stays as a mechanical guard: re-adding any carry here
+    // trips the "snapshot contains no .pi" test.
     for (const rel of SNAPSHOT_CARRIED_FILES) {
       const src = join(repoRoot, rel);
       if (!existsSync(src)) continue;

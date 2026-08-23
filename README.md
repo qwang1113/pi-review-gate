@@ -91,8 +91,10 @@ L7  Copilot review loop   after a PR is created/updated → request GitHub
 L8  Loop-goal approval    loop mode → the exit contract must be NEGOTIATED with
                           the user and approved in an extension dialog
                           (`propose_loop_goal`); an unapproved goal blocks
-                          commit/push/PR at L1 and its body is withheld from
-                          the prompt
+                          commit/push/PR at L1, blocks edit/write tool calls at
+                          the tool_call layer (per repo — each repo checks its
+                          own goal; undecided mode gates edits too, and the
+                          goal body is withheld from the prompt)
 ```
 
 **Arbiter (circular-block escape).** Layered on top of L1: when the ship gate
@@ -138,6 +140,14 @@ it runs in full rather than leaving the run with zero checks.
 
 The git hooks mirror the split exactly: `pre-commit` accepts any PASS,
 `pre-push` re-execs it with `REVIEW_GATE_REQUIRE_FULL=1`.
+
+One more hard refusal lives in the hooks (defense-in-depth): a commit/push
+whose cwd is **inside a review snapshot** (a path segment `rg-review-snap-*`,
+covering both the repo-local `*/.pi/review-snapshots/rg-review-snap-*` layout
+and the `<tmp>/rg-review-snap-*` fallback) is rejected even without a sidecar —
+a snapshot deliberately carries no `.pi/`, but shares the real repo's `.git`,
+so the "no sidecar → allow" rule would let a reviewer's push ship the real
+repo. `REVIEW_GATE_BYPASS=1` still applies (human escape hatch).
 
 ### Project-level step configuration (`.pi/review-gate.json`)
 
@@ -204,14 +214,48 @@ runner's summary line and the `run_precommit` reply carry the same
 ### Generating the config: `/gate-init`
 
 Run `/gate-init` (when the agent is idle) to generate `.pi/review-gate.json`
-interactively: the agent detects the project's checks (package.json scripts,
-or ecosystem markers when there is no package.json), starts from any existing
-config, and asks you — one step at a time — to confirm or edit each step's
-command (script name, raw command, or explicit skip) plus the fast test's
-`narrow` flag. After confirmation it writes only the `precommit` section and
-reports: the config takes effect immediately (the runner reads the file on
-every run), the status bar shows `precommit: cfg`, and `/reload` is needed for
-the `cfg`/`auto` indicator to appear in the current session.
+interactively — a **one-shot wizard**, not a step-by-step interrogation. The
+agent detects the project's checks (package.json scripts, or ecosystem markers
+when there is no package.json), reads any existing config as the **baseline**
+(project-configured fields always win, never overwritten), and presents ONE
+complete default configuration JSON covering every configurable field:
+
+- **precommit** — each step (lint, typecheck, build, test.fast, test.full) as a
+  script name, a raw shell command, or an explicit skip, plus the fast lane's
+  `narrow` flag;
+- **agents** — *optional*: only roles you explicitly name to customize, as
+  `{ "auto": false, "slots": [...] }` (slot 0 = main model, slots 1.. =
+  fallback chain, max 4, each with an optional `:thinking` suffix). An
+  all-auto agents section is deliberately NOT written: an explicit `auto: true`
+  renders a default-chain overlay in the project layer that silently shadows
+  your **global** per-agent slots (`~/.pi/review-gate.json`) in this project;
+  no `agents` section behaves exactly like all-auto without the shadowing;
+- **scalar fields** — *optional*: only fields you explicitly name
+  (`maxRounds`, `thinkHarder`, `gitMemory`, `docSync`, `llmGuards`, `arbiter`,
+  `copilotReview`). Defaults for unnamed fields are deliberately NOT written:
+  a project-layer default silently shadows your **global**
+  `~/.pi/review-gate.json` value for that project (the same shadowing the
+  `agents` section avoids).
+
+You reply with **ALL your overrides in one message**; the agent applies them,
+validates every model spec (`validateSpec`/`validateSlots` — an unresolvable
+spec, unsupported thinking level, or opencode-go allowlist violation is
+refused and reported back, never written) and every precommit script against
+package.json, then writes the **merged** result: the `precommit` section is
+always written (the required minimum), and `agents`/scalar fields only for
+what you named — never defaults for unnamed fields, they would shadow your
+global config. It then reports: the config takes effect immediately (the
+runner reads the file on every run), the status bar shows `precommit: cfg`,
+and a project `agents`
+section (only when present) is rendered by the extension at session start
+into `<project>/.pi/agents/*.md` — the `~/.pi/agent/agents/*.md` render comes
+from the **global** `~/.pi/review-gate.json`, not from this file — so
+`/reload` is needed for the `cfg`/`auto` indicator and the rendered chains to
+appear in the current session.
+
+**Maintenance contract:** the wizard is the single interactive entry point for
+`.pi/review-gate.json` — whenever a new configurable field is added to the
+config schema, `/gate-init` must be extended to cover it.
 
 ### Per-step result cache
 
@@ -878,7 +922,7 @@ bash output at all: the `run_precommit` tool spawns the trusted runner itself
 and records the result from a verified nonce receipt, so a `## Overall: ✅ PASS`
 sentinel printed by any other command can never grant a PASS.
 
-### Loop goal — the exit contract, negotiated with the user (L8, loop mode only)
+### Loop goal — the exit contract, negotiated with the user (L8; the edit gate also covers undecided mode)
 
 The gates prove the change is *sound*; they say nothing about whether the
 user's *goal* was met. In `loop` mode the extension therefore injects a **Step
@@ -909,6 +953,20 @@ one fact:
   the prompt (only a "a draft exists, renegotiate it" note is injected).
   Blocking at ship time is the point: by `declare_done` the code is already
   pushed and agreeing on the goal would be theatre.
+- **Edits are gated too (since 2026-08-23).** In loop mode (and while the mode
+  is undecided, which behaves as loop) an unconfirmed goal ALSO blocks
+  `edit`/`write` tool calls at the `tool_call` layer — the negotiation must
+  happen BEFORE the work starts, not after. Each repo checks its own goal
+  (one repo's approval never opens another's write surface); `.pi/` and
+  `.pi-subagents/` writes stay exempt so the gate cannot deadlock on its own
+  files. The block message points at the full path: grill → one independent
+  `adviser` pre-review → `propose_loop_goal`. The confirm dialog no longer asks
+  for an optional reason (approval is the whole signal); a REJECTION still asks
+  for the reason, which is carried back to the agent for renegotiation.
+  (One deliberate exception: a REVIEW SNAPSHOT session is inert — the L8 edit
+  gate does not block a reviewer's own mutation analysis inside its disposable
+  copy; the L1 sensitive-file floor and the bash ship gate stay active there.
+  See `docs/subagents-collaboration.md` §5.)
 
 **What deliberately did NOT change.** The L3 git hooks and the verdict logic
 stay blind to the goal: an approval is a *dialog* fact, and a hook cannot show
@@ -920,9 +978,11 @@ never unblock. So the requirement lives in the extension's L1 path and in
   subagents serially in the same worktree — their edits move the worktree
   fingerprint, so a review recorded earlier can no longer ship them; read-only
   subagents may run in parallel), `adviser` advises against it, and `reviewer`
-  accepts against it criterion by criterion. Both agents also read
-  `.pi/loop-goal.md` by default. The main agent stays the writer of record: it
-  runs precommit, the review, and the fixes.
+  accepts against it criterion by criterion. Reviewers get the goal through the
+  spawn task text — a review snapshot deliberately carries no `.pi/` directory,
+  so the goal file is not readable inside one (see `prepare_review`). The main
+  agent stays the writer of record: it runs precommit, the review, and the
+  fixes.
 - **It cannot deadlock the gate.** `.pi/loop-goal.md` lives inside the
   gate-owned `.pi/` scope, which is both excluded from the fingerprint and
   skipped by the extension's edit tracking, so writing or rewriting the goal
@@ -1125,6 +1185,10 @@ gated **per repo**:
   repo. Constructs that cannot be resolved statically (`cd $VAR`, quoted paths
   with spaces, `pushd`, nested `sh -c`) widen the check to every repo the
   session has edited (fail-closed).
+- **Per-repo loop goal (L8)**: editing repo B requires a goal the user
+  approved **for repo B** — `propose_loop_goal`'s `repo` parameter binds a
+  goal to a specific repo (default: the session repo); approving only repo
+  A's goal leaves B's edit/write calls blocked.
 - **Explicit target repo**: `record_review` / `run_precommit` take a `repo`
   argument, and it is **mandatory once the session has edited more than one
   repo** — they refuse to guess. Run the loop once per repo, naming it.
@@ -1231,10 +1295,10 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 |------|---------|
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal` + a reason). The agent's pick IS the classification — no classifier model reviews it. On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) `loop` and `explore` apply directly with source `auto`, while `normal` still pops the confirm dialog. Everything delegates to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. |
 | `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). It also re-derives the tree of every snapshot `prepare_review` handed out this round: a reviewer that finished with its snapshot MODIFIED ran its last checks against its own edits, so its READY is downgraded to BLOCKED (its findings stay valid, and a BLOCKED verdict is unaffected). Mechanical, so the agent cannot forget it. |
-| `prepare_review` | Materialize ONE disposable git-worktree snapshot per reviewer about to be spawned, holding exactly the change under review (same shadow-index tree the fingerprint uses; `node_modules` symlinked so the suite runs — the ONE shared path, which the prompts forbid writing to; the approved loop goal copied in because `.pi/` is excluded from that tree). A READY recorded after the worktree moved (mid-review fixes) does NOT bind: the gate compares the tree the reviewers read with the tree at record time and downgrades to BLOCKED, so an approval can never cover code no reviewer saw. Returns each reviewer's `cwd` and its append-only finding-stream path. Inside its own copy a reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. Fail-soft: a host where `git worktree` refuses gets an explicit "isolation unavailable" reply and the old read-only rules. |
+| `prepare_review` | Materialize ONE disposable git-worktree snapshot per reviewer about to be spawned, holding exactly the change under review (same shadow-index tree the fingerprint uses; `node_modules` symlinked so the suite runs — the ONE shared path, which the prompts forbid writing to). The snapshot deliberately contains NO `.pi/` directory (the goal text rides the spawn task instead): a snapshot that carries `.pi/` is misdetected by pi-subagents as a project root, which silently drops the project layer of the model config (the user's per-agent slots) and makes every reviewer fall back to the GLOBAL agent definition. A READY recorded after the worktree moved (mid-review fixes) does NOT bind: the gate compares the tree the reviewers read with the tree at record time and downgrades to BLOCKED, so an approval can never cover code no reviewer saw. Returns each reviewer's `cwd` and its append-only finding-stream path. Inside its own copy a reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. Fail-soft: a host where `git worktree` refuses gets an explicit "isolation unavailable" reply and the old read-only rules. |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. Output is never inlined into the reply — a failing suite can emit megabytes. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
-| `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it); then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 and its body is withheld from the prompt. |
+| `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it); then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 AND blocks edit/write tool calls until approved (each repo checks its own goal; the `repo` parameter binds the goal to a specific repo — required to unlock edit/write in a second repo, `gitRootOfDir(repo)` decides which one); the confirm dialog no longer asks for an optional reason (a rejection still asks for the reason, carried back for renegotiation). An unapproved goal's body is withheld from the prompt. |
 | `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. It also decides **availability from evidence** (a Copilot review on this PR or in the repo's last 20 PRs ⇒ CONFIRMED; owner in `copilotReview.owners` ⇒ ASSUMED; neither ⇒ UNKNOWN, and a silent Copilot is then released instead of waited for). The request itself is never vetoed by a read-back — those cannot see a dropped request. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. There is **no round cap**; the only budget is the 20-minute wait for a review that never arrives. |
 | `check_copilot_review` | Verify what Copilot's review left open (L7). The extension runs the GraphQL query itself and classifies each thread: resolved ⇒ handled, answered by you ⇒ handled, Copilot spoke last ⇒ still yours (listed with thread IDs and the exact `resolveReviewThread` / reply mutations) — regardless of which commit the review was submitted against, so a push cannot bury a finding. Returns AWAITING / OPEN / SATISFIED — an outcome the agent cannot report for itself. A cycle released with findings still open lists them for you to report to the user. |
 | `request_arbitration` | Contest a ship block the agent believes is **circular** (the only remedy is an action the block forbids). Narrow + fail-closed — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception). |
@@ -1315,6 +1379,8 @@ Configure via `.pi/review-gate.json` → `"arbiter": { "enabled", "model",
 - Ambient `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / … pointing at another repository → ignored: every git call in the fingerprint, its CJS mirror and the divergence checker runs with those variables stripped, so neither the digest nor the staged-divergence verdict can be redirected at a decoy repo
 - Ambient `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` / `GIT_CONFIG_PARAMETERS` / … injecting `core.excludesFile` (or any other setting) → ignored: the whole `GIT_CONFIG*` family is stripped by prefix, so configuration injection cannot hide a real edit from the digest
 - `git commit -a` / `git commit -- <path>` (git publishes a TEMPORARY index) → correctly judged: the hook forwards git's own `GIT_INDEX_FILE` as an explicit argument and the checker verifies it belongs to this repository, so these commits are neither wrongly blocked nor able to ship unreviewed content
+- Commit/push whose cwd is inside a review snapshot worktree (an `rg-review-snap-*` path segment) → blocked even with no sidecar: the snapshot deliberately carries no `.pi/` but shares the real repo's `.git`, so the "no sidecar → allow" rule would let a reviewer's push ship the real repo
+- Loop-mode (or undecided) `edit`/`write` tool call while no USER-approved loop goal exists for the target repo → blocked at tool_call: the negotiation must happen before the work starts, and each repo checks its own goal (see the [Loop goal](#loop-goal--the-exit-contract-negotiated-with-the-user-l8-the-edit-gate-also-covers-undecided-mode) section)
 - Ship command hidden in `bash -c` / `eval` / `xargs` → still detected (over-detection preferred)
 - Ship command obfuscated via `g""it` / `g"i"t` / `git${IFS}commit` / `git$IFS"commit"` / `${x:=git}` / `${x:-g}${y:-it}` / `$(printf git) commit` (dynamic head) / `\g\i\t` / backslash-newline continuation → shell-dequoting + de-obfuscation + dynamic-head detection still catch it (fail-closed)
 - Ship command hidden behind an INLINE git alias (`git -c "alias.ship=commit --no-verify" ship`, attached `-calias.x=commit`, shell-alias body `!git commit`, or `--config-env=alias.x=VAR`) → the alias body is scanned for `commit`/`push` and flagged (fail-closed; opaque config-env bodies default to commit)
@@ -1702,11 +1768,12 @@ lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
 lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running subagent, notice text (pure)
 lib/review-fanout.ts          reviewer fan-out planning from registry facts (one family ⇒ ONE reviewer + declared note; pure)
-lib/review-snapshot.ts        one disposable git-worktree snapshot per reviewer (under the repo's gate-owned .pi/, NOT /tmp — a /tmp path changed path-sensitive test behavior) + post-run tree verification + orphan reclaim
+lib/review-snapshot.ts        one disposable git-worktree snapshot per reviewer (under the repo's gate-owned .pi/, with a tmpdir fallback when .pi/ is unwritable) + post-run tree verification + orphan reclaim
 lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
 lib/verdict-guards.ts         the two READY guards as a pure truth table: snapshot drift + stale reviewed tree (tighten-only)
 lib/parallel-review.ts        review planning only: tiered threshold, shard planner, per-shard prompt, verdict parser, record merger (pure, no engine)
 docs/handoff-remove-pdw.md    step-2 record: the pdw engine was retired from wave + decompose (subagents everywhere)
+docs/subagents-collaboration.md how the gate and pi-subagents cooperate: what is established, what is deliberately NOT used (gate param / worktree isolation), what was added (recommended reviewer models, wave workflowScript skeleton, adviser-hint in the goal block)
 lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
 lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)

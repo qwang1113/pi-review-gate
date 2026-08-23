@@ -82,6 +82,43 @@ test("no sidecar → allow (repos without the extension must not brick)", () => 
   assert.equal(runPreCommit(makeDir()).status, 0);
 });
 
+test("inside a review snapshot worktree → BLOCKED even without a sidecar (shares the real .git)", () => {
+  // A snapshot deliberately carries no .pi/ (the extension is inert there),
+  // so the "no sidecar → allow" rule would let a reviewer's commit/push
+  // ship the REAL repo through the shared .git. Both layouts must fail
+  // closed: the repo-local .pi/review-snapshots/ path and the tmpdir
+  // fallback (<tmp>/rg-review-snap-*/<instance>).
+  const repo = makeGitRepo();
+  const snapLayout = join(repo, ".pi", "review-snapshots", "rg-review-snap-abc", "shard-1");
+  mkdirSync(snapLayout, { recursive: true });
+  const blocked = runPreCommit(snapLayout);
+  assert.equal(blocked.status, 1, "repo-local snapshot layout must fail closed");
+  assert.match(blocked.stderr, /review snapshot worktree/, "the refusal must name the reason");
+
+  const tmpBase = mkdtempSync(join(tmpdir(), "rg-hooks-snap-"));
+  tempDirs.push(tmpBase);
+  const tmpLayout = join(tmpBase, "rg-review-snap-abc", "shard-1");
+  mkdirSync(tmpLayout, { recursive: true });
+  try {
+    const blockedTmp = runPreCommit(tmpLayout);
+    assert.equal(blockedTmp.status, 1, "tmpdir fallback snapshot layout must fail closed");
+    assert.match(blockedTmp.stderr, /review snapshot worktree/, "the refusal must name the reason here too");
+  } finally {
+    rmSync(tmpBase, { recursive: true, force: true });
+  }
+
+  // pre-push re-execs pre-commit with REVIEW_GATE_REQUIRE_FULL=1, so the
+  // snapshot refusal must hold for PUSHES too (the copy claims commit/push).
+  const pushed = runPrePush(snapLayout);
+  assert.equal(pushed.status, 1, "the snapshot refusal must hold for pre-push as well");
+  assert.match(pushed.stderr, /review snapshot worktree/, "pre-push must name the same reason");
+
+  // The same repo from a NORMAL subdir still allows (no sidecar).
+  const plain = join(repo, "src");
+  mkdirSync(plain, { recursive: true });
+  assert.equal(runPreCommit(plain).status, 0, "a plain subdir without a sidecar still allows");
+});
+
 test("gates met → allow", () => {
   const dir = makeGitRepo();
   // Need a dirty file so fingerprint doesn't match clean state.

@@ -122,7 +122,10 @@ function installHooksHere() {
   // directory that is deleted with the round — breaking the L3 layer for every
   // later commit. The shell installer refuses too; this check keeps the reason
   // visible where the install is triggered.
-  if (process.cwd().includes(`${sep}.pi${sep}review-snapshots${sep}`)) {
+  // Both layouts carry an `rg-review-snap-` path segment (repo-local
+  // .pi/review-snapshots/rg-review-snap-<id>/… and the tmpdir fallback
+  // <tmp>/rg-review-snap-<id>/…) — mirroring isReviewSnapshotPath.
+  if (process.cwd().includes(`${sep}rg-review-snap-`)) {
     log("inside a review snapshot — refusing to install git hooks (.git/hooks is shared with the real checkout)");
     return;
   }

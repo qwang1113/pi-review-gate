@@ -168,6 +168,8 @@ import {
   readLoopGoal,
   GOAL_CONFIRM_TITLE,
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
+  LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
+  loopGoalEditGate,
 } from "../lib/loop-goal.ts";
 import {
   assessRequirementSize,
@@ -209,6 +211,7 @@ import {
   removeReviewSnapshot,
   safeLabel,
   verifySnapshot,
+  isReviewSnapshotPath,
   type ReviewSnapshot,
 } from "../lib/review-snapshot.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
@@ -365,6 +368,14 @@ async function commitsAheadOfBase(cwd: string): Promise<number> {
 export default function reviewGate(pi: ExtensionAPI) {
   let state: GateState = emptyState(null, DEFAULT_MAX_ROUNDS);
   let cwd = process.cwd();
+  /**
+   * Set when session_start runs inside a REVIEW SNAPSHOT worktree. The whole
+   * extension goes inert for that session: no state init, no sidecar writes,
+   * and — critically — the tool_call/tool_result hooks must not run either,
+   * otherwise the L8 edit gate would block the reviewer's own mutation
+   * analysis inside its disposable copy (see session_start).
+   */
+  let inertSnapshotSession = false;
   let continuationsInjected = 0; // total auto-continuation injections (persisted)
   // L2 stall breaker (in-memory by design: a restart is itself a change of
   // circumstances, and a stale stall must never outlive the session).
@@ -554,6 +565,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  marker is reclaimed strictly against its OWN path — one repo's successful
    *  write says nothing about another repo's failed one. */
   function persistRepo(ctx: ExtensionContext, root: string) {
+    if (inertSnapshotSession) return; // never write a sidecar into a snapshot
     if (root === primaryRepoRoot) { persist(ctx); return; }
     const s = stateForRepo(root);
     try {
@@ -693,6 +705,14 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  the caller's fail-closed "no gate state" handling applies (a never-
    *  edited repo with uncommitted work blocks shipping from it). */
   function enforcementStateFor(root: string): GateState | undefined {
+    // A snapshot session owns NO gate state by design (session_start early-
+    // returns before init/arming). Returning the untouched empty state here
+    // would make the bash ship gate see hasCodeChange=false for the snapshot
+    // root (which IS primaryRepoRoot for a real reviewer child process) and
+    // let a `git push` through — so an inert session is always treated as
+    // sidecar-less, and the caller's fail-closed "no gate state" handling
+    // (changedFiles) applies.
+    if (inertSnapshotSession) return undefined;
     if (root === primaryRepoRoot) return state;
     const cached = repoStateCache.get(root);
     if (cached) return cached;
@@ -937,13 +957,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     return planFanoutFromFacts(facts);
   }
 
-  function fanoutDirective(): string | undefined {
+  /**
+   * The fan-out plan itself (see fanoutDirective for the view rules).
+   *
+   * Shared by the prompt injection AND the review tools, so a model
+   * recommendation can never disagree with the fan-out directive the agent
+   * was given: one plan, one source.
+   */
+  function fanoutPlan(): FanoutPlan | undefined {
     try {
       // (a) authoritative: the warmed runtime registry view wins outright.
-      if (registryJudgeFacts) {
-        const plan = planForFacts(registryJudgeFacts);
-        return plan ? formatFanoutDirective(plan) : undefined;
-      }
+      if (registryJudgeFacts) return planForFacts(registryJudgeFacts);
       // (b) partial (disk) view — CONFIRM ONLY. models-store.json omits built-in
       // catalogs (anthropic), so this view can prove that two judge families
       // exist but never that a second one is missing: "only one family" drawn
@@ -962,8 +986,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       const rv = map.reviewer;
       if (rv.auto === false && rv.slots.length > 0) return undefined;
       const plan = planFanoutFromFacts(factsFromRegistry(undefined, homedir(), readFileSafeFs));
-      return plan && plan.crossFamily ? formatFanoutDirective(plan) : undefined;
+      return plan && plan.crossFamily ? plan : undefined;
     } catch { return undefined; }
+  }
+
+  function fanoutDirective(): string | undefined {
+    const plan = fanoutPlan();
+    return plan ? formatFanoutDirective(plan) : undefined;
   }
 
   function classifier(): LlmClassifier {
@@ -994,6 +1023,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- persistence ----------
 
   function persist(ctx: ExtensionContext) {
+    // A snapshot session owns NO gate state and must never write one: the
+    // persist path is shared by every tool (propose_loop_goal, set_gate_mode,
+    // run_precommit …), so the inert guard lives HERE rather than per tool —
+    // writing a sidecar into the snapshot would recreate .pi/ (round Nit).
+    if (inertSnapshotSession) return;
     // P-multi: persist the session's repo set so a same-session resume (or
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
@@ -1534,7 +1568,6 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event, ctx) => {
     const input = event.input as Record<string, unknown>;
-
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       const path = coalesceToolPath(input);
       // Match on the NORMALIZED path, not the raw one. `resolve` collapses `.`
@@ -1564,6 +1597,14 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
       }
+      // A snapshot-cwd session is a reviewer the gate itself spawned: the
+      // WORKFLOW layers stay inert there (see session_start) — in particular
+      // the L8 edit gate must NOT block the reviewer's own mutation analysis.
+      // The sensitive-file floor above already ran and stays active in every
+      // session type, and the bash ship gate below also stays active (a
+      // snapshot is a linked worktree sharing the real .git, so a push from
+      // it ships the real repo).
+      if (inertSnapshotSession) return;
       // Normal mode (“as if not installed” — consent-free first classification,
       // /tmp clamp, no-UI session_start, or later user consent): the L6 label check
       // (and its LLM call) is skipped. The sensitive-file guard ABOVE runs in
@@ -1572,14 +1613,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Explore mode does NOT block edits: the system prompt asks the agent to
       // prefer read-only work, but small edits during an investigation are
       // allowed. Sensitive-file and L6 label checks above/below stay active.
-      if (path) {
-        const labelProblem = await checkTestLabels(path, editedTestContent(input, path));
-        if (labelProblem) return { block: true, reason: labelProblem };
-      }
+      //
       // USER REQUIREMENT: a passed edit counts as THIS session's work — from
       // here on, any mode change (including the first classification) goes
-      // through the normal consent rules. Blocked edits (sensitive file / L6)
-      // and normal-mode edits do not set it: they change nothing.
+      // through the normal consent rules. Blocked edits (sensitive file / L6 /
+      // L8 goal) and normal-mode edits do not set it: they change nothing.
       //
       // Gate-owned writes (.pi/, .pi-subagents/) are excluded for the same
       // reason tool_result skips them: everything under those dirs is invisible
@@ -1588,18 +1626,50 @@ export default function reviewGate(pi: ExtensionAPI) {
       // subagent artifact and the project config alike. Counting them would
       // suppress the "changes pre-date this session" hint and force consent for
       // a mode change the agent never earned. mayBeGateOwned pre-filters on
-      // the raw path, so ordinary edits pay no filesystem cost here.
+      // the raw path, so ordinary edits pay no filesystem cost here. The
+      // exemption comes BEFORE the L8 goal gate on purpose: without it the
+      // gate would deadlock on its own files (the goal file itself, the
+      // sidecar, the project config) before a goal can even be approved.
       if (path) {
         const abs = path.startsWith("/") ? path : pathJoin(cwd, path);
-        if (mayBeGateOwned(abs) && isGateOwnedPath(abs, gitRootOfDir(pathDirname(abs)) ?? primaryRepoRoot)) {
+        // nearestExistingDir: a write creating a NEW nested gate-owned path
+        // (e.g. .pi/plan/state.json) must still resolve its repo instead of
+        // losing the exemption to the primary-repo fallback (round P2).
+        if (mayBeGateOwned(abs) && isGateOwnedPath(abs, gitRootOfDir(nearestExistingDir(pathDirname(abs))) ?? primaryRepoRoot)) {
           return;
         }
+      }
+      // L8 edit gate (HARD): in loop mode (or undecided, which behaves as
+      // loop) an edit/write call requires a loop goal the USER approved — for
+      // THE REPO THE WRITE LANDS IN. The goal must be negotiated BEFORE the
+      // work starts: blocking at ship time only is theatre, because by then
+      // the agent has already written its own exit contract. Each repo is
+      // checked against its own sidecar confirmation, so one repo's approved
+      // goal never opens another repo's write surface. Path-less edit calls
+      // cannot be attributed to a repo, so they fail closed against the
+      // primary repo.
+      // (Reaching this line means the write is a normal edit: the sensitive
+      // floor passed above and the gate-owned exemption already returned.)
+      const goalBlock = loopGoalEditBlockFor(absPath);
+      if (goalBlock) return goalBlock;
+      // L6 label check. NOTE the ordering: it runs AFTER the gate-owned
+      // exemption and the L8 goal gate on purpose — a gate-owned write (.pi/
+      // test files included) or a goal-blocked write pays neither the L6
+      // classification nor its LLM call.
+      if (path) {
+        const labelProblem = await checkTestLabels(path, editedTestContent(input, path));
+        if (labelProblem) return { block: true, reason: labelProblem };
       }
       sessionEdited = true;
       return;
     }
 
     if (event.toolName !== "bash") return;
+    // Snapshot sessions keep the L1 ship gate ACTIVE (unlike the other inert
+    // hooks): a reviewer's disposable copy is a linked worktree sharing the
+    // real .git, so `git push`/`git commit` from it ships the real repo. The
+    // snapshot's own uncommitted diff then trips the fail-closed sidecar-less
+    // check below — exactly what should happen if a reviewer tries to ship.
     const command = typeof input.command === "string" ? input.command : "";
     if (!command) return;
 
@@ -2281,21 +2351,97 @@ export default function reviewGate(pi: ExtensionAPI) {
    * contract the user agreed to no longer exists. The raw file is re-read here
    * because the prompt copy is length-capped, and a truncated text cannot be
    * hashed back to the approved one.
+   *
+   * Multi-repo: `root` defaults to the primary repo, but the L8 edit gate
+   * passes the TARGET repo of the write — each repo's goal is checked against
+   * that repo's own sidecar confirmation, so a session editing several repos
+   * cannot satisfy one repo's goal and then write into another.
    */
-  function loopGoalConfirmed(): boolean {
-    const goal = readLoopGoal(primaryRepoRoot);
-    if (!goal.present || !state.loopGoal) return false;
+  function loopGoalConfirmed(root: string = primaryRepoRoot, st: GateState = state): boolean {
+    const goal = readLoopGoal(root);
+    if (!goal.present || !st.loopGoal) return false;
     let raw: string;
     try {
-      raw = readFileSync(pathJoin(primaryRepoRoot, LOOP_GOAL_RELPATH), "utf8");
+      raw = readFileSync(pathJoin(root, LOOP_GOAL_RELPATH), "utf8");
     } catch {
       return false; // unreadable ⇒ unapproved (fail-closed)
     }
-    return isLoopGoalConfirmed(goal, state.loopGoal, raw);
+    return isLoopGoalConfirmed(goal, st.loopGoal, raw);
+  }
+
+  /**
+   * L8 edit-gate decision for ONE edit/write call, or undefined to let it
+   * pass. Kept OUT of the tool_call body on purpose: the structural security
+   * tests forbid EXPLORE branches and negated mode branches inside that
+   * handler (the pre-existing `taskMode === "normal"` early return stays),
+   * and this helper is also where the explore short-circuit lives — explore
+   * never gates on the goal, so it must not pay for the goal lookup either
+   * (gitRootOfDir is a git subprocess; loopGoalConfirmed reads the file
+   * twice).
+   */
+  function loopGoalEditBlockFor(absPath: string | undefined): { block: true; reason: string } | undefined {
+    // explore never gates on the goal (loopGoalEditGate would return true
+    // anyway) — skip the lookup before paying for it.
+    if (state.taskMode === "explore") return undefined;
+    const goalRoot = absPath
+      ? // Every write pays the real per-edit git resolution: a fast path that
+        // attributed anything under primaryRepoRoot to the primary repo would
+        // let an approved primary goal unlock a NESTED independent git repo's
+        // write surface (round P2) — the per-repo binding must be exact.
+        // (~3.6 ms/edit measured; correctness beats the micro-cost.)
+        gitRootOfDir(nearestExistingDir(pathDirname(absPath))) ?? primaryRepoRoot
+      : primaryRepoRoot;
+    const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
+    if (!loopGoalEditGate({ taskMode: state.taskMode, goalConfirmed: loopGoalConfirmed(goalRoot, goalSt) })) {
+      // Name the repo that lacks an approved goal: in a multi-repo session an
+      // anonymous block makes the agent re-approve the PRIMARY goal and stay
+      // blocked forever — the propose_loop_goal `repo` parameter is what
+      // binds a goal to a specific repo.
+      const repoHint = goalRoot === primaryRepoRoot ? "" : ` (repo: ${goalRoot})`;
+      return { block: true, reason: LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK + repoHint };
+    }
+    return undefined;
+  }
+
+  /**
+   * Walk up to the nearest EXISTING ancestor directory. `gitRootOfDir` runs
+   * `git rev-parse`, which fails on a path that does not exist — and a
+   * `write` creating a NEW nested file targets exactly such a path. An
+   * unattributable path falling back to the primary repo is what let repo
+   * A's approved goal open repo B's write surface, so attribution must
+   * first climb to a directory git can actually resolve.
+   */
+  function nearestExistingDir(p: string): string {
+    let d = p;
+    for (;;) {
+      try {
+        if (statSync(d).isDirectory()) return d;
+      } catch { /* does not exist — keep climbing */ }
+      const parent = pathDirname(d);
+      if (parent === d) return d;
+      d = parent;
+    }
+  }
+
+  /**
+   * Goal text handed to spawned reviewers. The prompt copy is capped
+   * (LOOP_GOAL_MAX_CHARS), and a truncated goal's "read the file for the
+   * rest" pointer would dangle — the snapshot carries no `.pi/` any more
+   * (see SNAPSHOT_CARRIED_FILES) — so a truncated goal appends the REAL
+   * file path instead.
+   */
+  function goalTextForReviewers(root: string): string | undefined {
+    const goal = readLoopGoal(root);
+    if (!goal.present) return undefined;
+    if (!goal.truncated) return goal.text;
+    return goal.text + "\n(全文: " + pathJoin(root, LOOP_GOAL_RELPATH) + ")";
   }
   // ---------- track edits & precommit results ----------
 
   pi.on("tool_result", async (event, ctx) => {
+    // Inert in snapshot sessions (see session_start): a reviewer's own edits
+    // inside its disposable copy must not arm or disturb any gate state.
+    if (inertSnapshotSession) return;
     // 1. Edits: only arm gate on success.
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       if (event.isError) {
@@ -2564,7 +2710,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         description: "Absolute repo path (required once the session edited several repos)",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, _ctx) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      // Warm the authoritative registry facts (cheap, cached) so the model
+      // recommendation below never has to fall back to the partial disk view.
+      rememberJudgeFacts((ctx as { modelRegistry?: unknown }).modelRegistry);
       const target = resolveToolRepo(params.repo);
       if (!target.ok) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
@@ -2630,7 +2779,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         const st = stateForRepo(target.root);
         if (st.review.verdict === "READY") {
           st.review = { ...st.review, verdict: "BLOCKED", fingerprint: null };
-          persistRepo(_ctx as unknown as ExtensionContext, target.root);
+          persistRepo(ctx as unknown as ExtensionContext, target.root);
         } else {
           // Not READY *yet*. The verdict for those drifted snapshots may still
           // be recorded AFTER this call (agents do prepare-then-record out of
@@ -2726,6 +2875,27 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (trees.size === 1) reviewedTree.set(target.root, snaps[0]!.tree);
       else reviewedTree.delete(target.root);
       const byLabel = new Map((shardPlan ?? []).map((s) => [s.label, s]));
+      // Model recommendation: the fan-out plan already decided how many
+      // reviewers and from which families — hand the concrete specs to the
+      // agent so it does not re-derive them from the directive text. The 1:1
+      // mapping applies only to a small diff whose labels ARE the reviewers;
+      // a sharded run follows the reviewer agent's pinned chain per shard,
+      // and the plan governs the integration reviewer that follows.
+      const fanout = fanoutPlan();
+      const reviewerModels = new Map<string, string>();
+      if (fanout && fanout.slotSource && fanout.reviewers.length > 0 && !shardPlan && labels.length === fanout.reviewers.length) {
+        fanout.reviewers.forEach((spec, i) => reviewerModels.set(labels[i]!, spec));
+      }
+      // The loop goal rides the task text: the snapshot deliberately carries
+      // no .pi/, so the goal file is unreadable inside one. Computed once and
+      // injected on BOTH branches below — a small-diff reviewer needs the
+      // acceptance contract as much as a shard reviewer does. Only a
+      // USER-APPROVED goal may become the reviewers' contract: the L8 gate
+      // withholds an unapproved goal from the main agent's own prompt, and
+      // reviewers must never be handed a goal the user did not confirm (the
+      // sidecar hash is the approval fact — the raw file is not).
+      const goalSt = target.root === primaryRepoRoot ? state : stateForRepo(target.root);
+      const goalText = loopGoalConfirmed(target.root, goalSt) ? goalTextForReviewers(target.root) : undefined;
       const lines = [
         tier === "sharded"
           ? `review-gate: LARGE diff (${fileCount} file(s), ~${lineCount} line(s)) — sharded into ` +
@@ -2733,6 +2903,32 @@ export default function reviewGate(pi: ExtensionAPI) {
             `Snapshots ready (tree ${snaps[0]!.tree.slice(0, 12)}).`
           : `review-gate: ${snaps.length} snapshot(s) ready (tree ${snaps[0]!.tree.slice(0, 12)}).`,
         ...(stale.length ? [`Note: a previous round's snapshot had drifted — ${stale.join("; ")}`] : []),
+        ...(fanout && fanout.reviewers.length > 0 && fanout.slotSource
+          ? [
+              "",
+              "Recommended reviewer models (fan-out plan — pass as the spawn's `model` override):",
+              ...(reviewerModels.size > 0
+                ? [...reviewerModels.entries()].map(([label, spec]) => `- ${label}: ${spec}`)
+                : [
+                    `- ${fanout.reviewers.join(", ")}`,
+                    ...(shardPlan
+                      ? [
+                          "  For a sharded run each shard follows the reviewer agent's pinned chain; " +
+                            "the plan above governs the integration reviewer that follows.",
+                        ]
+                      : [
+                          "  Your labels do not line up 1:1 with the plan — spawn per the fan-out " +
+                            "directive in your prompt.",
+                        ]),
+                  ]),
+              "",
+            ]
+          : // Without a slotSource the plan's specs are NOT authoritative model
+            // choices — the concrete model a reviewer runs on comes from the
+            // pinned agent chain (lib/review-fanout.ts: the specs are printed
+            // only when plan.slotSource is set, explicitly because handing the
+            // agent an override would seat a cheap-tier model as judge).
+            []),
         "Spawn ONE reviewer per entry below, all in the SAME turn (async), each with its own cwd:",
         ...snaps.map((s) => {
           const shard = byLabel.get(s.instance);
@@ -2744,6 +2940,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         "",
         buildStreamConsumerDirective(snaps.map((s) => s.streamPath)),
         "",
+        // The loop goal rides the task text (the snapshot deliberately carries
+        // no .pi/, so the goal file is unreadable inside it). Injected on BOTH
+        // branches — a small-diff reviewer needs the acceptance contract as
+        // much as a shard reviewer does.
+        ...(goalText ? ["Loop goal (accept the change against it, criterion by criterion):", "```", goalText, "```", ""] : []),
         // For a sharded run, hand over the READY-MADE per-shard task text: the
         // file list, the snapshot contract and the stream directive have to
         // match the plan exactly, and retyping them per shard is where drift
@@ -2754,7 +2955,7 @@ export default function reviewGate(pi: ExtensionAPI) {
               if (!snap) return [];
               return [
                 `--- task text for ${shard.label} (cwd=${snap.dir}) ---`,
-                buildShardPrompt(shard, readLoopGoal(target.root).text || undefined, undefined, {
+                buildShardPrompt(shard, goalText, undefined, {
                   streamPath: snap.streamPath,
                 }),
                 "",
@@ -2798,7 +2999,9 @@ export default function reviewGate(pi: ExtensionAPI) {
             cwd: s.dir,
             stream: s.streamPath,
             ...(byLabel.get(s.instance) ? { files: byLabel.get(s.instance)!.files } : {}),
+            ...(reviewerModels.has(s.instance) ? { model: reviewerModels.get(s.instance) } : {}),
           })),
+          ...(fanout && fanout.slotSource && fanout.reviewers.length > 0 ? { reviewers: fanout.reviewers } : {}),
         },
       };
     },
@@ -3189,7 +3392,11 @@ export default function reviewGate(pi: ExtensionAPI) {
               `returns unified git diffs as structured output.` +
               "\n\nSpawn each worker with this outputSchema (WAVE_WORKER_SCHEMA):\n```json\n" +
               JSON.stringify(WAVE_WORKER_SCHEMA, null, 2) +
-              "\n```\n\n--- task text per module ---\n" +
+              "\n```\n\nReady-made workflowScript skeleton (fill the task text + outputSchema, then run it — keys are the module ids):\n```js\nreturn await runs.all([\n" +
+              modules.map((m) =>
+              `  { key: ${JSON.stringify(m.id)}, agent: "worker-readonly", task: <task text for ${m.id}>, outputSchema: <WAVE_WORKER_SCHEMA — paste the JSON above> },`,
+              ).join("\n") +
+              "\n]);\n```\n\n--- task text per module ---\n" +
               tasks.map((t) => `### ${t.moduleId}\n\n${t.task}`).join("\n\n") +
               "\n\nWhen every worker is back, call apply_wave_patches with:\n" +
               "- modules: the same module array you passed here (id/title/ownedPaths/worklogPath),\n" +
@@ -3666,9 +3873,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       "dialog and, if the user approves, writes .pi/loop-goal.md itself and records the approval. " +
       "Writing that file yourself grants nothing: in loop mode an unapproved goal blocks " +
       "commit/push/PR and its body is withheld from your prompt. Shape: task title, one-line " +
-      "intent, 3–7 checkable exit criteria, non-goals, ISO date.",
+      "intent, 3–7 checkable exit criteria, non-goals, ISO date. `repo` selects WHICH repo the " +
+      "goal binds to (default: this session's repo) — a multi-repo session approves a goal per " +
+      "repo before editing there; one repo's approval never opens another's write surface.",
     parameters: Type.Object({
       goal: Type.String({ description: "The full goal text (Markdown) as agreed with the user" }),
+      repo: Type.Optional(Type.String({
+        description:
+          "Absolute path of the repo this goal binds to (default: the session repo). Required to " +
+          "unlock edit/write in a SECOND repo the session works in.",
+      })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const goalText = normalizeGoalText(String(params.goal ?? ""));
@@ -3690,6 +3904,43 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
+      // Per-repo binding: the goal belongs to the repo the WRITES land in.
+      // Default is the session repo; a multi-repo session passes `repo` so
+      // each repo gets its own contract (the L8 edit gate checks each repo's
+      // own goal + sidecar confirmation, so without this a second repo could
+      // never be unlocked — the block message would point at a dead end).
+      // Deliberately NOT resolveToolRepo: that helper requires the target to
+      // be a repo the session has ALREADY edited, but the whole point of the
+      // goal is to be approved BEFORE the first edit lands.
+      let goalRoot = primaryRepoRoot;
+      const rawRepo = String(params.repo ?? "").trim();
+      if (rawRepo) {
+        const abs = pathResolve(cwd, rawRepo);
+        // A goal bound to a NON-repo path could never satisfy the edit gate
+        // (it checks gitRootOfDir of the target write) — that would be a dead
+        // approval, and writing .pi/ into an arbitrary directory is worse.
+        // Refuse instead of silently recording it.
+        const root = gitRootOfDir(abs);
+        if (!root) {
+          return {
+            content: [{
+              type: "text",
+              text: `review-gate: repo \"${rawRepo}\" (resolved ${abs}) is not inside a readable git repository — ` +
+                "a loop goal can only bind to a real repo.",
+            }],
+            details: { approved: false },
+            isError: true,
+          };
+        }
+        goalRoot = root;
+      }
+      const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
+      // The goal text goes to the TRANSCRIPT; the binding repo must be shown
+      // at CONSENT time (both surfaces), so a repo-scoped approval is never
+      // given for a repo the user was not shown.
+      const repoLine = goalRoot === primaryRepoRoot
+        ? "本仓库 (" + primaryRepoRoot + ")"
+        : goalRoot;
 
       // Consent comes from a dialog the EXTENSION renders — there is no
       // parameter the model could set to claim it. No UI ⇒ no approval; a
@@ -3701,32 +3952,35 @@ export default function reviewGate(pi: ExtensionAPI) {
       // made the terminal flicker). ui.notify renders synchronously, so it is
       // on screen BEFORE the dialog below asks about it; the dialog that
       // follows carries only the decision.
-      showToUser(uiCtx, GOAL_CONFIRM_TITLE, buildGoalTranscriptMessage(goalText));
+      showToUser(uiCtx, GOAL_CONFIRM_TITLE, buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine);
       let approved = false;
       try {
         approved = await confirmBounded(
           uiCtx,
           GOAL_CONFIRM_TITLE,
-          buildGoalConfirmMessage(goalText),
+          buildGoalConfirmMessage(goalText, "绑定仓库(不可信数据): " + repoLine),
           "（目标全文见上方消息）",
         );
       } catch {
         approved = false;
       }
-      // The decision may carry a REASON: the user can confirm with a note
-      // (scope nudges the agent should honor) or reject with the objection
-      // (so the agent renegotiates against the real problem instead of
-      // re-asking). Reason input is best-effort — a headless/no-input
-      // environment simply yields no reason and keeps the old behavior.
+      // The decision may carry a REASON — but only on REJECTION: the user
+      // rejects with the objection so the agent renegotiates against the real
+      // problem instead of re-asking. The CONFIRM path no longer asks for a
+      // reason (the approval is the whole signal; a per-approval input box was
+      // friction with nothing to act on). Reason input is best-effort — a
+      // headless/no-input environment simply yields no reason.
       let reason: string | undefined;
-      try {
-        const reasonTitle = approved
-          ? "认可原因(可留空,将随认可记录)"
-          : "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)";
-        const typed = await uiCtx.ui?.input?.(reasonTitle, approved ? "可选:附言/范围提醒" : "必填:哪里不合适");
-        reason = (typed ?? "").trim() || undefined;
-      } catch {
-        reason = undefined;
+      if (!approved) {
+        try {
+          const typed = await uiCtx.ui?.input?.(
+            "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
+            "必填:哪里不合适",
+          );
+          reason = (typed ?? "").trim() || undefined;
+        } catch {
+          reason = undefined;
+        }
       }
       if (!approved) {
         return {
@@ -3746,7 +4000,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // user saw, not text the agent might swap in afterwards. The path lives
       // in the gate-owned .pi/ scope, so this write never moves the worktree
       // fingerprint and cannot invalidate a READY review or a precommit PASS.
-      const goalPath = pathJoin(primaryRepoRoot, LOOP_GOAL_RELPATH);
+      const goalPath = pathJoin(goalRoot, LOOP_GOAL_RELPATH);
       try {
         mkdirSync(pathDirname(goalPath), { recursive: true });
         writeFileSync(goalPath, goalText + "\n", "utf8");
@@ -3761,13 +4015,14 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
-      state.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString(), ...(reason ? { reason } : {}) };
-      persist(uiCtx);
-      log(`loop goal approved by the user (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
+      goalSt.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString(), ...(reason ? { reason } : {}) };
+      if (goalRoot === primaryRepoRoot) persist(uiCtx);
+      else persistRepo(uiCtx, goalRoot);
+      log(`loop goal approved by the user for ${goalRoot} (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
       return {
         content: [{
           type: "text",
-          text: `review-gate: goal approved and written to ${LOOP_GOAL_RELPATH}. Work to it; if it has to ` +
+          text: `review-gate: goal approved and written to ${LOOP_GOAL_RELPATH} (repo: ${goalRoot}). Work to it; if it has to ` +
             "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
             "yourself drops the approval and blocks shipping)." +
             (reason ? `\nUser's note on approval: ${reason}` : ""),
@@ -4846,6 +5101,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- L2: auto-continuation ----------
 
   pi.on("agent_settled", async (_event, ctx) => {
+    // Inert in snapshot sessions: a reviewer the gate spawned must never be
+    // auto-continued, and its settled turns must not persist a sidecar into
+    // the snapshot (that would recreate .pi/ — the exact regression
+    // isReviewSnapshotPath exists to prevent).
+    if (inertSnapshotSession) return;
     // Explore and normal never auto-continue — that is their defining
     // difference from loop. This check MUST stay before the loopArmed check:
     // explore/normal-mode edits set loopArmed = true in tool_result, and only
@@ -4999,6 +5259,22 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd ?? process.cwd();
+    // INERT INSIDE A REVIEW SNAPSHOT: a reviewer's disposable worktree lives
+    // under `<repo>/.pi/review-snapshots/` + `rg-review-snap-*` + `/` +
+    // `<instance>`, and a session whose cwd is one of those is a subagent the
+    // GATE itself spawned (or a stray shell in the same place). The gate must
+    // not initialize state, persist a sidecar, or prune snapshots there:
+    // writing `.pi/review-gate-state.json` into the judged tree both disturbs
+    // what the reviewer is judging and re-creates the `.pi/` directory that
+    // makes pi-subagents misdetect the snapshot as a project root (which is
+    // how the project layer of the model config — the user's per-agent slots
+    // — silently vanished and every reviewer fell back to the global agent
+    // definition). The parent session owns all gate state; a snapshot session
+    // owns none of it. The inert flag must ALSO stop the tool_call/tool_result
+    // hooks (they are registered unconditionally and would otherwise run the
+    // L8 edit gate against the reviewer's own mutation analysis).
+    inertSnapshotSession = isReviewSnapshotPath(cwd);
+    if (inertSnapshotSession) return;
     // P-multi: re-derive the primary repo and reset per-repo tracking for the
     // new session (a switched session may target a different checkout).
     primaryRepoRoot = gitRootOfDir(cwd) ?? cwd;
@@ -5151,6 +5427,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   pi.on("session_compact", async (_event, ctx) => {
+    // Inert in snapshot sessions (defense-in-depth; see session_start).
+    if (inertSnapshotSession) return;
     // Explore/normal have no enforced loop to resume — a "Resume the loop"
     // nudge would contradict the mode, so skip the gate-resume injection.
     if (state.taskMode === "explore" || state.taskMode === "normal") return;
@@ -5598,6 +5876,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     // tools instead of shell-editing files after a failed tool call. Pure
     // guidance — no enforcement.
     systemPrompt += "\n\n" + EDIT_DISCIPLINE_DIRECTIVE;
+
+    // Inert in snapshot sessions (see session_start): a reviewer the gate
+    // itself spawned must not be told to classify its mode (its allowlist has
+    // no set_gate_mode), handed gate status, or shown the loop goal — the
+    // language directive above still applies (L4 is a global user policy,
+    // not workflow enforcement).
+    if (inertSnapshotSession) return { systemPrompt };
 
     // While the mode is undecided, ask the agent to classify the task
     // IN-SESSION as its first action (set_gate_mode). Enforcement below stays

@@ -9,6 +9,7 @@ import {
   buildWorkflowPrompt,
   parseWorkflowInvocation,
 } from "../lib/workflow-commands.ts";
+import { defaultProjectConfig } from "../lib/project-config.ts";
 
 const EXPECTED = [
   "review",
@@ -124,24 +125,64 @@ test("plan-next passes modules as a structured ARRAY, not a JSON string (tool co
     "the legacy JSON-string phrasing must be gone");
 });
 
-test("gate-init prompts the interactive precommit-config generation flow", () => {
+test("gate-init prompts the one-shot full-configuration wizard", () => {
   const prompt = buildWorkflowPrompt("gate-init");
   // Detection: package.json scripts + ecosystem markers.
   assert.match(prompt, /package.json scripts/);
   assert.match(prompt, /lint:fix\/lint/);
   assert.match(prompt, /Cargo\.toml/);
-  // Per-step confirmation, one at a time, accepting script/command/skip.
-  assert.match(prompt, /ONE STEP AT A TIME/);
+  // One-shot flow: no per-step interrogation, one reply carries all overrides.
+  assert.match(prompt, /ONE-SHOT wizard/);
+  assert.match(prompt, /Do not re-ask step by step/);
+  assert.match(prompt, /ALL their overrides in ONE message/);
+  assert.doesNotMatch(prompt, /ONE STEP AT A TIME/,
+    "the step-by-step interrogation phrasing must be gone (one-shot only)");
+  // Steps still accept script/command/skip and the fast lane keeps narrow.
   assert.match(prompt, /raw shell command/);
   assert.match(prompt, /explicit skip/);
   assert.match(prompt, /narrow/);
-  // Starts from an existing config; writes ONLY the precommit section.
+  // Baseline wins: existing config is merged, never overwritten; the write is
+  // a merge, not an ONLY-precommit file.
   assert.match(prompt, /existing \.pi\/review-gate\.json/);
-  assert.match(prompt, /ONLY the confirmed precommit section/);
-  // Effect + status-bar disclosure, no other files touched.
+  assert.match(prompt, /BASELINE/);
+  assert.match(prompt, /never overwritten/);
+  assert.match(prompt, /never write an ONLY-precommit file/);
+  // Agents: OPTIONAL — only roles the user names get slots + validation; an
+  // all-auto section is never written (it would silently shadow the user's
+  // GLOBAL per-agent slots).
+  assert.match(prompt, /KNOWN_AGENTS/);
+  assert.match(prompt, /"auto": false/);
+  assert.match(prompt, /"slots"/);
+  assert.match(prompt, /NEVER write an all-auto agents section/);
+  assert.match(prompt, /validateSpec\/validateSlots/);
+  // Scalar fields: OPTIONAL — only fields the user names are written;
+  // defaults for unnamed fields would shadow the user's GLOBAL config (the
+  // same shadowing the agents section avoids).
+  assert.match(prompt, /defaultProjectConfig/);
+  assert.match(prompt, /maxRounds/);
+  // MAINTENANCE CONTRACT, mechanically: every configurable scalar in
+  // defaultProjectConfig() must stay named in the wizard — a field added to
+  // the schema that the wizard does not cover fails right here (a silent
+  // shrink OR a silent grow of the config schema both fail). Word-boundary
+  // anchored so a future field whose name is a substring of a common word
+  // cannot satisfy the contract vacuously.
+  const scalars = Object.keys(defaultProjectConfig()).filter(
+    (k) => k !== "precommit" && !k.startsWith("agents"));
+  assert.ok(scalars.length >= 7, `expected at least the 7 documented scalars, got ${scalars.length}`);
+  for (const field of scalars) {
+    assert.match(prompt, new RegExp(`\\b${field}\\b`), `the wizard must name the ${field} scalar`);
+  }
+  assert.match(prompt, /loadRegistry\(\)/, "the wizard must know where the ModelRegistry comes from");
+  assert.match(prompt, /ONLY fields the user explicitly names/);
+  assert.match(prompt, /never write defaults for unnamed fields/);
+  // Maintenance contract: new configurable fields must extend the wizard.
+  assert.match(prompt, /MAINTENANCE CONTRACT/);
+  assert.match(prompt, /MUST be extended to cover it/);
+  // Effect + status-bar disclosure + agent render timing, no other files.
   assert.match(prompt, /takes effect immediately/);
   assert.match(prompt, /precommit: cfg/);
   assert.match(prompt, /\/reload/);
+  assert.match(prompt, /\.pi\/agents\/\*\.md/);
   assert.match(prompt, /Do not change any other file/);
 });
 
