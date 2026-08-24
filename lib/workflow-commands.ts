@@ -285,6 +285,9 @@ export const WORKFLOW_COMMANDS = {
       "their verdict fences MUST omit docSync. Concatenate their FULL raw outputs into a single record_review call. " +
       "Step 3 (Phase B): only if Phase A was READY, spawn ONE integration reviewer over the whole change (cross-module seams, duplicated abstractions, interfaces " +
       "implemented two different ways, the loop goal criterion by criterion) and record ITS output ALONE, because it carries the single docSync attestation. " +
+      "HAND THAT REVIEWER THE GOAL IN ITS TASK TEXT: no ACCEPTANCE judge reads .pi/loop-goal.md by itself (an UNAPPROVED draft must never become an " +
+      "acceptance contract), so paste the goal the USER approved — the one quoted in your own prompt — into the spawn task, exactly as prepare_review does for a " +
+      "snapshot reviewer. Without it the integration reviewer cannot judge criterion by criterion. " +
       "On any failure: assign every finding exactly one owner (an existing module when the whole fix is inside its owned_paths, otherwise a new seam module M-INT-<n>), " +
       "charge the counters, roll every uncharged module back to implemented, set the plan to executing and return — remediation happens through /plan-next, never inline. " +
       "Above 8 charged rounds for a module or for the integration counter, stop and ask the user. " +

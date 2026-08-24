@@ -14,6 +14,7 @@ import {
   effectiveAgentsConfig,
   replaceFrontmatterModels,
   extractFrontmatterChain,
+  frontmatterBlock,
   isGeneratedAgentFile,
   applyAgentConfigLayer,
   supportedThinkingOptions,
@@ -428,6 +429,32 @@ test("replaceFrontmatterModels swaps model/fallback and keeps every other field"
   assert.match(out, /fallbackModels: claude-fable-5:max, onekey\/glm-5\.3:high/);
   assert.match(out, /^---$/m);
   assert.match(out, /Body text stays untouched\./);
+});
+
+test("replaceFrontmatterModels accepts '--- ' openers like the runtime parser does", () => {
+  // pi-subagents' parseFrontmatter only checks startsWith("---") and then
+  // indexOf("\n---", 3), so a file opened with `--- ` / `---\t` really loads
+  // at runtime; the renderer must not refuse it (P1: explicit slots were
+  // silently rejected and the old chain kept deploying).
+  // `--- # note` / `---x` are the round-3 P2 cases: the runtime opens a block on
+  // ANY `---…` line, so a renderer that only tolerated `---[ \t]*` still refused
+  // files that really deploy.
+  for (const opener of ["--- ", "---\t", "--- # note", "---x"]) {
+    const agent = opener + "\nname: reviewer\nmodel: old\n---\nbody";
+    const out = replaceFrontmatterModels(agent, { model: "onekey/gpt-5.6-sol:high", fallbackModels: [] });
+    assert.ok(out, `opener ${JSON.stringify(opener)} must render, not be refused`);
+    assert.match(out!, /model: onekey\/gpt-5\.6-sol:high/, `the model line must be swapped for ${JSON.stringify(opener)}`);
+    // The three frontmatter readers in this file must not diverge: the block
+    // reader and the chain extractor have to accept exactly what the renderer
+    // (and the runtime) accept, or an `auto:true` overlay silently reports "no
+    // parseable frontmatter" for a file that really loads.
+    assert.ok(frontmatterBlock(agent), `frontmatterBlock must accept ${JSON.stringify(opener)}`);
+    assert.deepStrictEqual(
+      extractFrontmatterChain(agent),
+      { model: "old", fallback: [] },
+      `extractFrontmatterChain must accept ${JSON.stringify(opener)}`,
+    );
+  }
 });
 
 test("replaceFrontmatterModels is idempotent and marker-aware", () => {

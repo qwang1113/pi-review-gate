@@ -238,7 +238,12 @@ test("FAN-OUT: a partial (disk) model view may confirm judges, never deny them",
   const at = SRC.indexOf("function fanoutPlan(");
   assert.ok(at > 0, "fanoutPlan must exist");
   const body = SRC.slice(at, at + 3000);
-  assert.match(body, /registryJudgeFacts/, "the authoritative registry view must be preferred");
+  assert.match(
+    body,
+    /if \(registryJudgeFacts\) return planForFacts\(registryJudgeFacts\)/,
+    "the authoritative registry view must route through the SLOT-AWARE planner — " +
+      "a bare planFanoutFromFacts here would silently ignore the user's pinned slots",
+  );
   assert.match(
     body,
     /plan && plan\.crossFamily \? plan : undefined/,
@@ -2202,6 +2207,35 @@ test("prepare_review hands out per-reviewer isolation and fails SOFT", () => {
   assert.match(body, /isolation UNAVAILABLE/);
   assert.match(body, /reviewer-readonly/, "the fallback must name the agent that CANNOT write");
   assert.match(body, /do NOT apply fixes until/i);
+  // The UNAVAILABLE reply is the ONLY goal source for the `reviewer-readonly`
+  // it tells you to spawn: that agent's defaultReads no longer name
+  // .pi/loop-goal.md (an UNAPPROVED draft must never become an acceptance
+  // contract), so dropping the file read without injecting the goal here left
+  // that path contract-less (round-2 P2).
+  const noneStart = body.indexOf('planDecision.kind === "none"');
+  assert.ok(noneStart > 0, "the UNAVAILABLE branch must exist");
+  const isolatedStart = body.indexOf("preparedSnapshots.set", noneStart);
+  assert.ok(isolatedStart > noneStart, "the isolated path must follow the UNAVAILABLE branch");
+  assert.match(
+    body.slice(noneStart, isolatedStart),
+    /goalText/,
+    "the UNAVAILABLE reply must hand the reviewer the approved loop goal — reviewer-readonly has no other source",
+  );
+  // The verdict schema must reach THIS path too: the isolated path hands it
+  // over for every tier, so withholding it here would make the no-isolation
+  // verdict the only unparseable one (round-3 Nit).
+  assert.match(
+    body.slice(noneStart, isolatedStart),
+    /SHARD_VERDICT_SCHEMA/,
+    "the UNAVAILABLE reply must hand over the verdict schema as well",
+  );
+  // …and it must be the APPROVED goal, computed BEFORE the isolation branches
+  // so both paths share one gated source.
+  assert.match(
+    body.slice(0, noneStart),
+    /loopGoalConfirmed\(target\.root, goalSt\) \? goalTextForReviewers\(target\.root\) : undefined/,
+    "the goal must be computed before the isolation branches and gated on the user's approval",
+  );
 });
 
 // P0 regression (pi package layout): pi loads the extension entry IN PLACE via

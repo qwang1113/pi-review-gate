@@ -2822,6 +2822,19 @@ export default function reviewGate(pi: ExtensionAPI) {
       // the caller retries (or reviews without isolation, deliberately).
       // The decision is pure + tested (lib/verdict-guards.ts): the inline
       // version had zero coverage, so neutralizing it changed no test.
+      // The loop goal is the acceptance contract every reviewer is judged
+      // against, and a snapshot carries no .pi/, so the goal file is unreadable
+      // inside one. Computed HERE — before the isolation branches — so the
+      // UNAVAILABLE reply can carry it too: that branch tells you to spawn
+      // `reviewer-readonly`, whose defaultReads no longer name the goal file
+      // (an UNAPPROVED draft must never become an acceptance contract), so the
+      // task text is its ONLY goal source. Only a USER-APPROVED goal may become
+      // the reviewers' contract: the L8 gate withholds an unapproved goal from
+      // the main agent's own prompt, and reviewers must never be handed a goal
+      // the user did not confirm (the sidecar hash is the approval fact — the
+      // raw file is not).
+      const goalSt = target.root === primaryRepoRoot ? state : stateForRepo(target.root);
+      const goalText = loopGoalConfirmed(target.root, goalSt) ? goalTextForReviewers(target.root) : undefined;
       const planDecision = decideSnapshotPlan(labels, snaps.map((s) => s.instance));
       if (planDecision.kind === "partial") {
         for (const snap of snaps) {
@@ -2858,7 +2871,22 @@ export default function reviewGate(pi: ExtensionAPI) {
               "yours to honor (pi-subagents has no per-call tool denylist).\n" +
               "- Do NOT apply fixes until the verdict is recorded: the reviewer is reading the same tree " +
               "you would be editing, and mutation analysis is unavailable to it this round.\n" +
-              "The gate itself is unchanged — this only costs you the parallel fix window.",
+              "The gate itself is unchanged — this only costs you the parallel fix window." +
+              // `reviewer-readonly` does not read the goal file (its defaultReads
+              // dropped it so an UNAPPROVED draft can never become a contract),
+              // so this text is the only place its acceptance contract can come
+              // from on this branch.
+              (goalText
+                ? "\nHand the reviewer this loop goal — its ONLY goal source here — and have it accept " +
+                  "the change criterion by criterion:\n```\n" + goalText + "\n```"
+                : "") +
+              // The verdict SCHEMA is handed over on the isolated path for every
+              // tier; withholding it here would leave THIS path's verdict the
+              // only unparseable one (round-3 Nit, same asymmetry class as the
+              // goal gap above).
+              "\n\nSpawn the reviewer with this `outputSchema` so a malformed verdict fails at the " +
+              "source instead of arriving as unparseable prose:\n```json\n" +
+              JSON.stringify(SHARD_VERDICT_SCHEMA, null, 2) + "\n```",
           }],
           // No snapshot ⇒ nothing recorded about what the reviewers will see,
           // and any stale value from an earlier round must not survive to
@@ -2886,16 +2914,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (fanout && fanout.slotSource && fanout.reviewers.length > 0 && !shardPlan && labels.length === fanout.reviewers.length) {
         fanout.reviewers.forEach((spec, i) => reviewerModels.set(labels[i]!, spec));
       }
-      // The loop goal rides the task text: the snapshot deliberately carries
-      // no .pi/, so the goal file is unreadable inside one. Computed once and
-      // injected on BOTH branches below — a small-diff reviewer needs the
-      // acceptance contract as much as a shard reviewer does. Only a
-      // USER-APPROVED goal may become the reviewers' contract: the L8 gate
-      // withholds an unapproved goal from the main agent's own prompt, and
-      // reviewers must never be handed a goal the user did not confirm (the
-      // sidecar hash is the approval fact — the raw file is not).
-      const goalSt = target.root === primaryRepoRoot ? state : stateForRepo(target.root);
-      const goalText = loopGoalConfirmed(target.root, goalSt) ? goalTextForReviewers(target.root) : undefined;
+      // (goalSt/goalText are computed above, before the isolation branches, so
+      // the UNAVAILABLE reply can carry the contract too.)
       const lines = [
         tier === "sharded"
           ? `review-gate: LARGE diff (${fileCount} file(s), ~${lineCount} line(s)) — sharded into ` +

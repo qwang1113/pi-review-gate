@@ -359,6 +359,20 @@ test("the read-only reviewer variant CANNOT write, and says why it exists", () =
   // Same judge tier as the writable reviewer — the fallback must not be weaker.
   assert.match(fm, /^model: claude-fable-5$/m);
   assert.match(fm, /^thinking: max$/m);
+  // The goal file must NOT be a defaultRead of any JUDGING agent: only a
+  // USER-APPROVED goal may become an acceptance contract, and prepare_review
+  // gates that injection on loopGoalConfirmed(). A defaultRead would hand the
+  // judge the RAW file instead — an unapproved draft included (round-3 P2: the
+  // removal was unlocked, so re-adding the entry broke no test). The adviser is
+  // deliberately excluded: it pre-reviews the DRAFT goal, which is its job.
+  for (const judge of ["reviewer.md", "reviewer-readonly.md", "module-reviewer.md", "arbiter.md"]) {
+    const reads = frontmatter(judge).split("\n").find((l) => l.startsWith("defaultReads:")) ?? "";
+    assert.doesNotMatch(
+      reads,
+      /loop-goal\.md/,
+      `${judge}: the goal must arrive through the approval-gated task text, never as a raw defaultRead`,
+    );
+  }
 });
 
 test("the parallel wave worker variant exists and is read-only by construction", () => {
