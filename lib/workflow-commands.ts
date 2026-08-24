@@ -164,18 +164,34 @@ export const WORKFLOW_COMMANDS = {
     ),
   },
   "gate-init": {
-    description: "Interactively generate .pi/review-gate.json precommit configuration",
+    description: "Interactively generate the full .pi/review-gate.json configuration (precommit + agents + scalar fields)",
     usage: "/gate-init",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Generate the project's .pi/review-gate.json precommit configuration by INTERACTIVE GUIDANCE. " +
+      "Generate the project's .pi/review-gate.json configuration by INTERACTIVE GUIDANCE — a ONE-SHOT wizard, not a step-by-step interrogation. " +
       "First detect the project's checks: read package.json scripts for lint:fix/lint, typecheck, build, test:unit/test; " +
       "if there is no package.json, probe for ecosystem markers (Cargo.toml, go.mod, pyproject.toml/setup.py, deno.json, justfile, Makefile). " +
-      "Read the existing .pi/review-gate.json if present and start from its current values. " +
-      "Then, ONE STEP AT A TIME, ask the user to confirm or edit the suggested value for each step (lint, typecheck, build, test.fast, test.full) " +
-      "— accept a package.json script name, a raw shell command, or an explicit skip; when the fast test uses a script, ask whether to keep narrowing (narrow). " +
-      "After every step is confirmed, write .pi/review-gate.json containing ONLY the confirmed precommit section (no other fields) and tell the user: " +
-      "the config takes effect immediately (the runner reads it on every run), the status bar shows precommit: cfg, and the extension needs /reload for the cfg/auto indicator to appear. " +
+      "Read the existing .pi/review-gate.json if present and treat it as the BASELINE: every field the project already configured wins and is never overwritten. " +
+      "Build ONE complete default configuration JSON covering every configurable field: " +
+      "(1) precommit — the detected per-step values (lint, typecheck, build, test.fast, test.full, plus the fast lane's narrow flag); " +
+      "(2) agents — OPTIONAL: only roles the user explicitly names to customize (the KNOWN_AGENTS list at <package-root>/lib/model-config.ts), as { \"auto\": false, \"slots\": [...] }. " +
+      "NEVER write an all-auto agents section: an explicit auto: true renders a default-chain overlay in the PROJECT layer " +
+      "that silently shadows the user's GLOBAL per-agent slots (~/.pi/review-gate.json) in this project — omit the agents " +
+      "section entirely unless the user names roles to customize; " +
+      "(3) scalar fields — ONLY fields the user explicitly names (from maxRounds, thinkHarder, gitMemory, docSync, llmGuards, arbiter, copilotReview, the defaults live in defaultProjectConfig() at <package-root>/lib/project-config.ts); " +
+      "never write defaults for unnamed fields: a project-layer default silently shadows the user's GLOBAL " +
+      "~/.pi/review-gate.json value for that project (the same shadowing the agents section avoids); " +
+      "(resolve <package-root> exactly as /decompose does: a local-path pi install points at the repo itself; a global/npm install puts it at ~/.pi/agent/npm/pi-review-gate/). " +
+      "Merge the baseline over the defaults, then PRESENT THE WHOLE JSON TO THE USER AT ONCE and let them reply with ALL their overrides in ONE message: " +
+      "precommit steps accept a package.json script name, a raw shell command, or an explicit skip (when the fast test uses a script, also confirm the narrow flag); " +
+      "agents accept naming the roles to customize with { \"auto\": false, \"slots\": [...] } (slot 0 = main model, slots 1.. = fallback chain, max 4 slots, each slot may carry a :thinking suffix); " +
+      "scalar fields accept direct value overrides (note: llmGuards, arbiter and copilotReview are NESTED objects — override them with a complete object, since a wrong shape is silently ignored by the field-by-field merge). " +
+      "Do not re-ask step by step — wait for the single reply, apply the overrides onto the merged JSON, then VALIDATE before writing: " +
+      "every model spec with validateSpec/validateSlots from <package-root>/lib/model-config.ts (the ModelRegistry comes from loadRegistry() at the same module — it reads ~/.pi/agent/models{,-store}.json; an unresolvable spec, an unsupported thinking level, or an opencode-go allowlist violation is refused — report the exact failures and ask the user to fix them, never write an invalid spec), " +
+      "and every precommit script against the project's package.json. " +
+      "Write .pi/review-gate.json with the merge result: the precommit section is always written (the required minimum — never write an ONLY-precommit file when the user named more), and agents/scalar fields are written ONLY for what the user named; never write defaults for unnamed fields, they would shadow the user's global config. Tell the user: " +
+      "the config takes effect immediately (the runner reads it on every run), the status bar shows precommit: cfg, and a PROJECT agents section (only when present) is rendered by the extension at session start into <project>/.pi/agents/*.md — the ~/.pi/agent/agents/*.md render comes from the GLOBAL ~/.pi/review-gate.json, not from this file — so the current session needs /reload for the cfg/auto indicator and the rendered agent chains to appear. " +
+      "MAINTENANCE CONTRACT: this wizard is the single interactive entry point for .pi/review-gate.json — whenever a new configurable field is added to the config schema, this prompt MUST be extended to cover it. " +
       "Do not change any other file.",
       invocation,
     ),
@@ -269,6 +285,9 @@ export const WORKFLOW_COMMANDS = {
       "their verdict fences MUST omit docSync. Concatenate their FULL raw outputs into a single record_review call. " +
       "Step 3 (Phase B): only if Phase A was READY, spawn ONE integration reviewer over the whole change (cross-module seams, duplicated abstractions, interfaces " +
       "implemented two different ways, the loop goal criterion by criterion) and record ITS output ALONE, because it carries the single docSync attestation. " +
+      "HAND THAT REVIEWER THE GOAL IN ITS TASK TEXT: no ACCEPTANCE judge reads .pi/loop-goal.md by itself (an UNAPPROVED draft must never become an " +
+      "acceptance contract), so paste the goal the USER approved — the one quoted in your own prompt — into the spawn task, exactly as prepare_review does for a " +
+      "snapshot reviewer. Without it the integration reviewer cannot judge criterion by criterion. " +
       "On any failure: assign every finding exactly one owner (an existing module when the whole fix is inside its owned_paths, otherwise a new seam module M-INT-<n>), " +
       "charge the counters, roll every uncharged module back to implemented, set the plan to executing and return — remediation happens through /plan-next, never inline. " +
       "Above 8 charged rounds for a module or for the integration counter, stop and ask the user. " +

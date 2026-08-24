@@ -374,6 +374,40 @@ test("postinstall installs git hooks when cwd is a git repo, skips otherwise", (
   assert.match(readFileSync(hook, "utf8"), /pi-review-gate:installed/, "hook must carry the pi-review-gate marker");
 });
 
+test("postinstall refuses to install hooks from inside a review snapshot (both layouts)", () => {
+  const home = makeHome();
+  // repo-local layout: <repo>/.pi/review-snapshots/rg-review-snap-<id>/…
+  const repo = mkdtempSync(join(tmpdir(), "rg-pkg-snap-"));
+  tempDirs.push(repo);
+  execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "ignore" });
+  const snapLayout = join(repo, ".pi", "review-snapshots", "rg-review-snap-abc", "shard-1");
+  mkdirSync(snapLayout, { recursive: true });
+  const resSnap = runInstaller(home, snapLayout);
+  assert.equal(resSnap.status, 0, "snapshot refusal must still exit 0 (postinstall cannot fail the package install)");
+  assert.match(resSnap.stdout + resSnap.stderr, /refusing to install git hooks/,
+    "the refusal must name the snapshot reason");
+  assert.ok(!existsSync(join(repo, ".git", "hooks", "pre-commit")),
+    "hooks must NOT be installed from inside a snapshot (shared .git)");
+
+  // tmpdir fallback layout: <tmp>/rg-review-snap-<id>/… (a git repo there so
+  // the snapshot refusal branch is the one exercised, not the non-repo skip).
+  // Unique parent via mkdtemp: a FIXED path here would make concurrent suite
+  // runs delete each other's working dirs (round P1).
+  const tmpBase = mkdtempSync(join(tmpdir(), "rg-pkg-snaptmp-"));
+  tempDirs.push(tmpBase);
+  const tmpLayout = join(tmpBase, "rg-review-snap-xyz", "shard-1");
+  mkdirSync(tmpLayout, { recursive: true });
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: tmpLayout, stdio: "ignore" });
+    const resTmp = runInstaller(home, tmpLayout);
+    assert.equal(resTmp.status, 0);
+    assert.match(resTmp.stdout + resTmp.stderr, /refusing to install git hooks/,
+      "the tmpdir fallback layout must be refused too");
+  } finally {
+    rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
 // The installed hook is a wrapper that `exec`s the original hook file in the
 // PACKAGE (hooks/ dir), which resolves its scripts as ../scripts/… inside the
 // package — so the package layout (hooks/ + scripts/ siblings) must satisfy
@@ -406,6 +440,38 @@ test("installed pre-commit wrapper resolves the package's fingerprint script", (
     !/cannot compute worktree fingerprint/.test(hook.stderr),
     `hook could not find fingerprint script: ${hook.stderr}`,
   );
+});
+
+test("install-git-hooks.sh itself refuses BOTH snapshot layouts (shell-level guard)", () => {
+  // The mjs postinstall path is covered above; this pins the SHELL installer's
+  // own guard, including the tmpdir fallback layout (round P2: the guard was
+  // widened from */.pi/review-snapshots/* to any rg-review-snap- segment, and
+  // the old pattern still passed every test).
+  const home = makeHome();
+  // repo-local layout — as a REAL linked worktree (a plain subdir does not
+  // make git report the snapshot path as toplevel; a snapshot IS a worktree)
+  const repo = mkdtempSync(join(tmpdir(), "rg-pkg-shellsnap-"));
+  tempDirs.push(repo);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"], { cwd: repo, stdio: "ignore" });
+  const snapLayout = join(repo, ".pi", "review-snapshots", "rg-review-snap-abc", "shard-1");
+  mkdirSync(dirname(snapLayout), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-q", "--detach", snapLayout, "main"], { cwd: repo, stdio: "ignore" });
+  const resSnap = spawnSync("bash", [HOOK_INSTALLER], { cwd: snapLayout, encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(resSnap.status, 1, "shell installer must refuse the repo-local snapshot layout");
+  assert.match(resSnap.stderr, /refusing to install hooks from a review snapshot/);
+  assert.ok(!existsSync(join(repo, ".git", "hooks", "pre-commit")), "hooks must not land in the shared .git");
+  execFileSync("git", ["worktree", "remove", "--force", snapLayout], { cwd: repo, stdio: "ignore" });
+
+  // tmpdir fallback layout (unique parent — never a fixed path)
+  const tmpBase = mkdtempSync(join(tmpdir(), "rg-pkg-shellsnaptmp-"));
+  tempDirs.push(tmpBase);
+  const tmpLayout = join(tmpBase, "rg-review-snap-xyz", "shard-1");
+  mkdirSync(tmpLayout, { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: tmpLayout, stdio: "ignore" });
+  const resTmp = spawnSync("bash", [HOOK_INSTALLER], { cwd: tmpLayout, encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(resTmp.status, 1, "shell installer must refuse the tmpdir fallback layout too");
+  assert.match(resTmp.stderr, /refusing to install hooks from a review snapshot/);
 });
 
 // npm/npx exposes the hook installer as a node_modules/.bin symlink; the

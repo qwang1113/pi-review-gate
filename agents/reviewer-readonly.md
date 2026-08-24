@@ -7,7 +7,7 @@ thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
-defaultReads: plan.md, progress.md, .pi/loop-goal.md
+defaultReads: plan.md, progress.md
 tools: read, grep, find, ls, bash
 ---
 

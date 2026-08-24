@@ -527,7 +527,26 @@ export function replaceFrontmatterModels(
   edit: AgentFrontmatterEdit,
   mark = true,
 ): string | undefined {
-  const m = /^(---\r?\n)([\s\S]*?)(\r?\n---)/.exec(text);
+  // The opener must agree with frontmatterBlock — the single delimiter
+  // authority, a literal port of the runtime parser — which opens a block on
+  // ANY `---…` first line (`startsWith("---")`). A stricter opener here
+  // refuses to RENDER a file the runtime really LOADS, so explicit slots are
+  // dropped while the stale chain keeps deploying: `^---\n` rejected `--- `
+  // (round-2 P1) and `---[ \t]*` still rejected `--- # note` / `---x`
+  // (round-3 P2). `[^\n]*` therefore takes the WHOLE opener line, kept verbatim
+  // in `open` so the render stays byte-faithful.
+  // Residual, deliberate: an EMPTY block (`---\n---`) shares one newline between
+  // opener and close, which this regex cannot split, so it returns undefined
+  // here while frontmatterBlock reports "". What keeps that off the render path
+  // is readBase(): the base is the package's OWN upstream agent file (all 11
+  // KNOWN_AGENTS carry a `model:` line), and a hand-written target is backed up
+  // to <name>.md.bak first. Only a BROKEN install (upstream missing) combined
+  // with a hand-written empty frontmatter reaches it, and then the caller
+  // reports "frontmatter parse failed" and skips the file — fail-soft, but the
+  // message names the wrong cause. Widening the CLOSE to `\r?\n?---` would fix
+  // the split and produce `model: x---` on rebuild (no separating newline), so
+  // the split, not the message, is what would have to be rewritten.
+  const m = /^(---[^\n]*\r?\n)([\s\S]*?)(\r?\n---)/.exec(text);
   if (!m) return undefined;
   const [, open, blockRaw, close] = m;
   // Drop the `model`/`fallbackModels` key AND any block-list continuation
@@ -721,7 +740,12 @@ export function projectAgentIdentity(text: string): string | undefined {
 export function extractFrontmatterChain(
   text: string,
 ): { model: string; fallback: string[] } | undefined {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  // Same opener as replaceFrontmatterModels, for the same reason: the runtime
+  // parser (and frontmatterBlock, its literal port) opens a block on ANY `---…`
+  // first line, so this reader must not refuse a file they accept — an
+  // `auto:true` overlay would then report "no parseable frontmatter" for a file
+  // that really deploys. Same deliberate residual: an EMPTY block is not split.
+  const m = /^---[^\n]*\r?\n([\s\S]*?)\r?\n---/.exec(text);
   if (!m) return undefined;
   const fm = m[1]!;
   const model = /^model:\s*(.+?)\s*$/m.exec(fm)?.[1];

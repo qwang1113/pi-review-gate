@@ -44,11 +44,20 @@ docs/parallel-execution-plan.md §8.)
 | **planner** | one question, then exits | read, grep, find, ls, write | `PLAN.md` (the rendered view), `.pi/loop-goal.md`, the requirement brief | `state.json`, the task brief of the module it dispatches |
 | **worker** | one module (or one remediation) | read, grep, find, ls, bash, edit, write | its own task brief + the code it owns | source files inside `owned_paths`, its own worklog |
 | **module reviewer** | one module, read-only | read, grep, find, ls, bash | `worklog/M-xx.md`, the module diff, its `must_haves` | nothing (returns a verdict) |
-| **integration reviewer** | once per verify round, read-only | read, grep, find, ls, bash | `PLAN.md`, `.pi/loop-goal.md`, the whole diff, cross-module seams | nothing (returns a verdict) |
+| **integration reviewer** | once per verify round, read-only | read, grep, find, ls, bash | `PLAN.md`, the approved loop goal **handed over in its task text**, the whole diff, cross-module seams | nothing (returns a verdict) |
 
 The integration reviewer is the repo's existing `agents/reviewer.md`, briefed
 with the seam checklist of §5.3; the three roles above it are defined in
 `agents/planner.md`, `agents/worker.md` and `agents/module-reviewer.md`.
+No ACCEPTANCE judge — `reviewer`, `reviewer-readonly`, `module-reviewer`,
+`arbiter` — reads `.pi/loop-goal.md` through its own `defaultReads`: only a
+USER-APPROVED goal may become an acceptance contract, and the raw file may hold
+an unapproved draft. (`adviser` is the deliberate exception: it PRE-reviews the
+draft goal, so reading the draft is its job.) The goal therefore travels in the
+spawn's TASK TEXT —
+`prepare_review` injects it (gated on the approval hash) for a snapshot reviewer,
+and `/plan-verify` instructs the driver to paste the approved goal into the
+integration reviewer's task the same way.
 
 The worker is the only role that writes source code, and only one worker runs at
 a time. That is the whole concurrency model.

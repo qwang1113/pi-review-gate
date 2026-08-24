@@ -7,13 +7,15 @@
  * CHECKABLE facts that mean "done", so the same target drives all three roles —
  * the main agent slices work against it, `adviser` advises against it, and
  * `reviewer` accepts against it (an unmet criterion is a P1 finding, which the
- * existing verdict logic already turns into BLOCKED — no new hard gate needed).
+ * verdict logic turns into BLOCKED).
  *
  * DESIGN CONSTRAINTS:
- *  - PROMPT-LEVEL ONLY. Nothing here blocks. A free-text file is not
- *    forgery-resistant, and every hard gate in this project rests on an
- *    objective fact (a nonce receipt, a git fingerprint). Making a self-written
- *    file a ship precondition would add ceremony, not safety.
+ *  - L8 HARD GATE, but bounded: an unconfirmed goal BLOCKS edit/write tool
+ *    calls in loop mode (tool_call layer) and ships at L1. The confirmation
+ *    itself is a dialog fact (the sidecar hash), never something the agent can
+ *    write into the file; the file stays an ordinary repo file, so this is
+ *    ceremony with a real anchor — the USER'S approval — not a self-written
+ *    precondition.
  *  - The file lives at `.pi/loop-goal.md`, INSIDE the gate-owned `.pi/` scope
  *    (see GATE_EXCLUDE_PATHSPECS / isGateOwnedPath in lib/fingerprint.ts).
  *    Both halves of the gate honour that scope: it is excluded from the
@@ -72,7 +74,8 @@ const ABSENT: LoopGoal = Object.freeze({ present: false, text: "", truncated: fa
 // the hash of exactly this text, recorded when the USER approved it in a
 // dialog the extension rendered. The agent can still write the file (it is an
 // ordinary repo file), but writing it grants nothing: an unconfirmed goal has
-// its body withheld from the prompt and blocks shipping in loop mode.
+// its body withheld from the prompt, blocks shipping in loop mode, and blocks
+// edit/write tool calls in loop and undecided mode (L8, tool_call layer).
 
 /** The sidecar record of "the user approved this exact goal text". */
 export interface LoopGoalConfirmation {
@@ -81,11 +84,12 @@ export interface LoopGoalConfirmation {
   /** ISO time of the user's approval. */
   at: string;
   /**
-   * Optional user-supplied reason carried with the decision: the user may
-   * confirm WITH a note (scope nudges the agent should honor) or reject
-   * WITH the reason (so the agent renegotiates against the real objection
-   * instead of re-asking). Never part of the hash — a reason is metadata,
-   * not goal text.
+   * User-supplied reason carried with the decision: recorded only when the
+   * user REJECTS with the objection (so the agent renegotiates against the
+   * real problem instead of re-asking). The confirm path no longer asks
+   * for a reason, so an approval never carries one; this stays optional
+   * for backward compatibility with older sidecars that recorded one.
+   * Never part of the hash — a reason is metadata, not goal text.
    */
   reason?: string;
 }
@@ -174,7 +178,7 @@ export const GOAL_DIALOG_TITLE_MAX_CHARS = 60;
  * thousands of characters long would otherwise eat the whole budget and push
  * the consequence copy out of the dialog.
  */
-export function buildGoalConfirmMessage(goalText: string): string {
+export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: string): string {
   const normalized = normalizeGoalText(goalText);
   const rawTitle = normalized.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "（空）";
   const title = rawTitle.length > GOAL_DIALOG_TITLE_MAX_CHARS
@@ -184,6 +188,11 @@ export function buildGoalConfirmMessage(goalText: string): string {
     "目标全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
     "认可后：扩展把它写入 `" + LOOP_GOAL_RELPATH + "`，reviewer 逐条验收。\n" +
     "不认可就拒绝，然后告诉 AI 哪里不对；它会重新跟你确认后再提交。\n" +
+    // Extra untrusted facts (e.g. the repo a goal binds to) go BEFORE the
+    // title: fitDialogMessage truncates from the TAIL, so appending them at
+    // the end would drop exactly the fact the user must confirm. Capped like
+    // every other untrusted text (a path this long is corrupt anyway).
+    (extraUntrusted ? extraUntrusted.slice(0, 200) + "\n" : "") +
     "标题（不可信数据）: " + title
   );
 }
@@ -194,6 +203,43 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
   "question per turn, labeled \"N of M\", each with your recommended answer — all at once only " +
   "when the user asks for it), then call propose_loop_goal so the USER can " +
   "approve it in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
+
+/**
+ * Edit-block copy for loop mode without a confirmed goal (L8 tool_call gate).
+ *
+ * Unlike the ship block, this runs BEFORE the work starts — the whole point
+ * of the edit gate is that the negotiation happens before the agent can
+ * change a file. It also carries the goal pre-review protocol step: the
+ * merged rule (2026-08-18) requires the draft to pass ONE independent
+ * `adviser` review (no unresolved P1) before propose_loop_goal.
+ */
+export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
+  "review-gate: loop mode requires an approved loop goal BEFORE any edit/write call. " +
+  "Negotiate it first: interview the user about what \"done\" means (ONE question per turn, " +
+  "labeled \"N of M\", each with your recommended answer), have the goal draft pass ONE " +
+  "independent `adviser` review (no unresolved P1), then call propose_loop_goal so the USER " +
+  "approves it in a dialog. (If this session was never meant to run a full loop, classify it " +
+  "first with set_gate_mode: explore/normal do not require a goal.) Writing " +
+  LOOP_GOAL_RELPATH + " yourself does not count.";
+
+/**
+ * Pure decision behind the L8 edit gate: may an edit/write call pass in the
+ * current mode?
+ *
+ * `taskMode` undefined (undecided) behaves as loop — fail-closed, exactly
+ * like every other layer of the gate. explore/normal never require the goal:
+ * explore deliberately allows small edits during an investigation, and normal
+ * steps aside entirely. The caller supplies `goalConfirmed` for the TARGET
+ * repo (see isLoopGoalConfirmed), so a multi-repo session checks each repo's
+ * own goal before writing into it.
+ */
+export function loopGoalEditGate(opts: {
+  taskMode: "normal" | "explore" | "loop" | undefined;
+  goalConfirmed: boolean;
+}): boolean {
+  if (opts.taskMode === "normal" || opts.taskMode === "explore") return true;
+  return opts.goalConfirmed;
+}
 
 /** Read `<repoRoot>/.pi/loop-goal.md`. Never throws: any failure ⇒ absent. */
 export function readLoopGoal(repoRoot: string, now: number = Date.now()): LoopGoal {

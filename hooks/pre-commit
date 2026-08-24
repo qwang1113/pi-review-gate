@@ -15,6 +15,24 @@ if [[ -f "${STATE_FILE}.blocked" ]]; then
   exit 1
 fi
 
+# A review snapshot is a disposable worktree the gate itself created: it
+# deliberately carries no .pi/ (the extension is inert there), but it shares
+# the REAL repo's .git, so a commit/push from it would ship the real repo.
+# Fail closed instead of treating the missing sidecar as "extension not
+# active in this repo" — the sidecar absence is BY DESIGN here, not a sign
+# the gate is off. (REVIEW_GATE_BYPASS=1 above stays the human escape hatch.)
+# Both layouts are covered by one pattern: the repo-local
+# .pi/review-snapshots/rg-review-snap-* path and the tmpdir fallback
+# (<tmp>/rg-review-snap-*/<instance>) both contain an `rg-review-snap-` path
+# segment — mirroring isReviewSnapshotPath in lib/review-snapshot.ts.
+case "$(pwd)" in
+  */rg-review-snap-*)
+    echo "[review-gate] refusing to commit/push from inside a review snapshot worktree (shares the real .git)." >&2
+    echo "[review-gate] Bypass: REVIEW_GATE_BYPASS=1 git commit ..." >&2
+    exit 1
+    ;;
+esac
+
 # No sidecar → extension not active in this repo; allow.
 [[ -f "$STATE_FILE" ]] || exit 0
 

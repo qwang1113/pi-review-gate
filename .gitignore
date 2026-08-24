@@ -23,3 +23,8 @@ node_modules/
 # AGENTS.md is excluded by the global gitignore (sd0x-dev-flow keeps it
 # personal/local by default) — this repo wants it tracked, so re-include it.
 !AGENTS.md
+
+# Catch-all for anything else under .pi/ — the individually-commented rules
+# above document WHY each artifact is ignored (their rationale is the point;
+# git reports this last pattern as the match for everything under .pi/).
+.pi/

@@ -232,16 +232,28 @@ test("FAN-OUT: a partial (disk) model view may confirm judges, never deny them",
   // Reading only models-store.json misses built-in catalogs (anthropic), so a
   // "no judge available" conclusion drawn from it would be a false alarm —
   // the same mistake that once reported every built-in chain as BLOCKED.
-  const at = SRC.indexOf("function fanoutDirective(");
-  assert.ok(at > 0, "fanoutDirective must exist");
+  // The plan now lives in fanoutPlan() — shared by the prompt injection and
+  // the review tools (one plan, one source) — so the structural assertions
+  // pin THAT function; fanoutDirective is a two-line wrapper on it.
+  const at = SRC.indexOf("function fanoutPlan(");
+  assert.ok(at > 0, "fanoutPlan must exist");
   const body = SRC.slice(at, at + 3000);
-  assert.match(body, /registryJudgeFacts/, "the authoritative registry view must be preferred");
   assert.match(
     body,
-    /plan\.crossFamily \? formatFanoutDirective/,
+    /if \(registryJudgeFacts\) return planForFacts\(registryJudgeFacts\)/,
+    "the authoritative registry view must route through the SLOT-AWARE planner — " +
+      "a bare planFanoutFromFacts here would silently ignore the user's pinned slots",
+  );
+  assert.match(
+    body,
+    /plan && plan\.crossFamily \? plan : undefined/,
     "the disk fallback may only CONFIRM a cross-family pair — claiming SINGLE from it " +
       "would suppress a double review that was actually possible and record a false note",
   );
+  const directiveAt = SRC.indexOf("function fanoutDirective()");
+  assert.ok(directiveAt > 0, "the directive wrapper must still exist");
+  const directive = SRC.slice(directiveAt, directiveAt + 300);
+  assert.match(directive, /formatFanoutDirective\(plan\)/, "the wrapper must delegate to the formatter (no hardcoded string)");
   // The slot-aware planner gates the user-slot path on the reviewer auto switch
   // OFF and keeps the capability planner for the default — so auto:true stays
   // identical to today's path by construction.
@@ -281,7 +293,7 @@ test("FAN-OUT wiring: slotSource stamp, config arg order, disk-fallback guards a
   // The disk-fallback branch must (1) use the DEFAULT planner, not the slotted
   // one, and (2) stay SILENT when the user pinned slots (a default-path spec
   // would contradict the pin).
-  const fanoutAt = SRC.indexOf("function fanoutDirective(");
+  const fanoutAt = SRC.indexOf("function fanoutPlan(");
   const fn = SRC.slice(fanoutAt, fanoutAt + 3000);
   const fallbackStart = fn.indexOf("factsFromRegistry(undefined");
   assert.ok(fallbackStart > 0);
@@ -439,8 +451,21 @@ test("GLOBAL LAYER: the extension re-applies model config (both layers) at sessi
   assert.match(fn, /pathJoin\(primaryRepoRoot, "\.pi", "agents"\)/);
   const sessionAt = SRC.indexOf("pi.on(\"session_start\"");
   assert.ok(sessionAt > 0);
-  const body = SRC.slice(sessionAt, sessionAt + 3000);
+  // The call sits ~3900 chars past the handler head (the INERT-snapshot
+  // comment block is ~600 chars), so the window must cover it; the assertion
+  // pins that a snapshot-session early return can never skip the layer
+  // render for real sessions (round-2 P1: deleting the assertion instead of
+  // widening the window left the guard dead).
+  const body = SRC.slice(sessionAt, sessionAt + 4600);
   assert.match(body, /ensureModelLayersRendered\(ctx\)/, "must be invoked at session start with the UI context");
+  // …and AFTER the snapshot early-return: a snapshot session must never
+  // render the model layers into the parent repo's .pi/agents (round P2:
+  // the existence assert alone would survive the call moving above the
+  // inert guard).
+  const inertAt = body.indexOf("inertSnapshotSession");
+  const renderAt = body.indexOf("ensureModelLayersRendered(ctx)");
+  assert.ok(inertAt >= 0 && inertAt < renderAt,
+    "the snapshot early-return must precede the layer render (snapshots never render)");
   // Project-layer base must be the BUILT-IN package agents dir, never the
   // already-rendered global layer. Scope BOTH asserts to the PROJECT block
   // (round-9 P2: the old window was 800 chars while the sourceDir line sits
@@ -484,7 +509,7 @@ test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits
   // explore would silently regain forced continuation.
   const start = SRC.indexOf('pi.on("agent_settled"');
   assert.ok(start >= 0, "agent_settled handler must exist");
-  const body = SRC.slice(start, start + 900);
+  const body = SRC.slice(start, start + 1400);
   const exploreAt = body.indexOf('state.taskMode === "explore"');
   const loopArmedAt = body.indexOf("!loopArmed");
   assert.ok(exploreAt >= 0 && loopArmedAt >= 0, "both checks must exist");
@@ -885,6 +910,17 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
   const loopBlock = body.slice(loopAt, body.indexOf("\n    }", loopAt));
   assert.match(loopBlock, /problems\.push\(/);
   assert.doesNotMatch(loopBlock, /return|block:\s*false/);
+  // The L8 explore short-circuit lives in the helper loopGoalEditBlockFor
+  // (kept OUT of the handler body on purpose — see its docblock): it only
+  // lets EDITS pass in explore. Pin that it exists and that it can never
+  // block (it returns undefined — the ship path is untouched).
+  const helperAt = SRC.indexOf("function loopGoalEditBlockFor");
+  assert.ok(helperAt > 0, "loopGoalEditBlockFor must exist");
+  const helperBody = SRC.slice(helperAt, helperAt + 700);
+  const exploreAt = helperBody.indexOf('state.taskMode === "explore"');
+  assert.ok(exploreAt >= 0, "the helper must short-circuit explore (edits only)");
+  assert.match(helperBody.slice(exploreAt, exploreAt + 120), /return undefined/,
+    "the explore short-circuit must pass edits through, never block them");
 });
 
 test("SECURITY: the sensitive-file guard runs BEFORE the normal-mode edit return (security floor)", () => {
@@ -915,7 +951,7 @@ test("normal mode: prompt-transparent except the language directive; loop resume
   for (const anchor of ['pi.on("agent_settled"', 'pi.on("session_compact"']) {
     const at = SRC.indexOf(anchor);
     assert.ok(at >= 0, anchor);
-    assert.match(SRC.slice(at, at + 700), /taskMode === "explore" \|\| state\.taskMode === "normal"/, anchor);
+    assert.match(SRC.slice(at, at + 1000), /taskMode === "explore" \|\| state\.taskMode === "normal"/, anchor);
   }
 });
 
@@ -1275,7 +1311,12 @@ test("SECURITY: a declined sensitive path is locked, and grants never reach the 
 test("propose_loop_goal: the USER approves in an extension dialog, and the EXTENSION writes the file", () => {
   const start = SRC.indexOf('name: "propose_loop_goal"');
   assert.ok(start > 0, "the tool must be registered");
-  const body = SRC.slice(start, start + 6000);
+  // Bound at the next tool registration so an assertion can never be
+  // satisfied by request_copilot_review's code (round P2: the flat window
+  // overshot into the next tool).
+  const nextTool = SRC.indexOf('name: "request_copilot_review"', start);
+  assert.ok(nextTool > start, "request_copilot_review must follow propose_loop_goal");
+  const body = SRC.slice(start, nextTool);
   assert.match(body, /confirmBounded\(/,
     "the extension must render the approval dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
@@ -1283,7 +1324,7 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   // The approval must describe text the USER saw: the extension writes the
   // file, and the sidecar records the hash of exactly that text.
   assert.match(body, /writeFileSync\(goalPath/);
-  assert.match(body, /state\.loopGoal = \{ hash: goalTextHash\(goalText\)/);
+  assert.match(body, /(?:state|goalSt)\.loopGoal = \{ hash: goalTextHash\(goalText\)/);
   assert.match(body, /LOOP_GOAL_MAX_WRITE_CHARS/, "the goal must be length-bounded");
 });
 
@@ -1294,7 +1335,11 @@ test("propose_loop_goal: confirm/reject may carry a user REASON (input after the
   // persisted with the confirmation and echoed to the agent.
   const start = SRC.indexOf('name: "propose_loop_goal"');
   assert.ok(start > 0);
-  const body = SRC.slice(start, start + 8000);
+  // Bound at the next tool registration (round P2: the flat window overshot
+  // into request_copilot_review's code).
+  const nextTool = SRC.indexOf('name: "request_copilot_review"', start);
+  assert.ok(nextTool > start);
+  const body = SRC.slice(start, nextTool);
   assert.match(body, /uiCtx\.ui\?\..*input/, "a reason input must follow the confirm dialog");
   assert.match(body, /did NOT approve this goal\."/, "rejection path must exist");
   assert.match(body, /Reason: \$\{reason\}/, "rejection reason must reach the agent");
@@ -1361,8 +1406,8 @@ test("every lib export referenced by the extension is imported (no runtime Refer
 test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", () => {
   // If the check were "a confirmation exists", the agent could approve a
   // one-line goal and then rewrite the file into whatever it wanted to ship.
-  assert.match(SRC, /function loopGoalConfirmed\(\)/);
-  assert.match(SRC, /isLoopGoalConfirmed\(goal, state\.loopGoal, raw\)/);
+  assert.match(SRC, /function loopGoalConfirmed\(root: string = primaryRepoRoot, st: GateState = state\)/);
+  assert.match(SRC, /isLoopGoalConfirmed\(goal, st\.loopGoal, raw\)/);
   assert.match(SRC, /return false; \/\/ unreadable/, "an unreadable goal file must fail closed");
 });
 
@@ -1652,7 +1697,7 @@ test("session_start surfaces the migration notice and clears the flag", () => {
   // The window is a reading heuristic, not a contract: the P-multi reset
   // block, no-UI mode forcing, the normal-mode no-arm comment and the
   // snapshot cleanup at the handler head keep pushing the notice section down.
-  const body = SRC.slice(at, at + 8400);
+  const body = SRC.slice(at, at + 9200);
   assert.match(body, /if \(fingerprintMigrated\)/,
     "an invalidated binding must be explained, not silently applied");
   assert.match(body, /FINGERPRINT_MIGRATION_NOTICE/);
@@ -1924,8 +1969,12 @@ test("tiered trigger: prepare_review shards a large diff ITSELF (mechanical, not
   const at = SRC.indexOf('name: "prepare_review"');
   assert.ok(at > 0, "prepare_review must exist");
   // Window covers the whole handler: it now plans, snapshots AND renders each
-  // shard's task text, so it is long by design.
-  const body = SRC.slice(at, at + 16000);
+  // shard's task text, so it is long by design — bounded at the next tool
+  // registration (round P2: the flat window overshot into record_review's
+  // code).
+  const nextTool = SRC.indexOf('name: "record_review"', at);
+  assert.ok(nextTool > at, "record_review must follow prepare_review");
+  const body = SRC.slice(at, nextTool);
   assert.match(body, /shouldShardReview\(fileCount, lineCount\)/, "the tiered threshold decides");
   assert.match(body, /planReviewShards\(/, "the split must come from the tested planner");
   assert.match(body, /listChangedFiles\(target\.root\)/);
@@ -1939,6 +1988,44 @@ test("tiered trigger: prepare_review shards a large diff ITSELF (mechanical, not
   // And the engine path is really gone.
   assert.doesNotMatch(SRC, /runParallelShardReview/);
   assert.doesNotMatch(SRC, /run_parallel_shard_review"/);
+});
+
+test("prepare_review exposes the fan-out model plan and the truncated-goal file pointer", () => {
+  // These two pieces replaced the snapshot-carried .pi/loop-goal.md
+  // (SNAPSHOT_CARRIED_FILES is now empty): the 'Recommended reviewer models'
+  // block renders the fan-out plan's family-deduped result, and a truncated
+  // goal's "read the file for the rest" pointer names the REAL path because
+  // the snapshot carries no .pi/. Both must stay wired or a reviewer
+  // silently loses the model guidance / the goal's tail with nothing failing.
+  const at = SRC.indexOf('name: "prepare_review"');
+  assert.ok(at > 0, "prepare_review must exist");
+  // Bound the window at the NEXT tool registration so an assertion can never
+  // be satisfied by record_review's code (round P2: the flat 24000-char
+  // window overshot into the next tool).
+  const nextTool = SRC.indexOf('name: "record_review"', at);
+  assert.ok(nextTool > at, "record_review must follow prepare_review");
+  const body = SRC.slice(at, nextTool);
+  assert.match(body, /Recommended reviewer models/, "the fan-out model recommendation must be rendered");
+  // The concrete-model hint must be gated on slotSource: on the default path
+  // the specs are NOT authoritative (the pinned agent chain is), and handing
+  // them over as overrides would seat a cheap-tier model as judge (round P1).
+  assert.match(body, /fanout\.reviewers\.length > 0 && fanout\.slotSource/,
+    "the recommendation block must be slotSource-gated");
+  assert.match(body, /fanout && fanout\.slotSource && fanout\.reviewers\.length > 0 \? \{ reviewers: fanout\.reviewers \} : \{\}/,
+    "details.reviewers must be slotSource-gated too (this exact details line, not the map-fill line)");
+  assert.match(body, /fanout\.slotSource && fanout\.reviewers\.length > 0 && !shardPlan/,
+    "per-label model hints must be slotSource-gated too");
+  assert.match(body, /reviewers: fanout\.reviewers/, "details.reviewers must expose the fan-out plan");
+  assert.match(body, /model: reviewerModels\.get\(s\.instance\)/, "each snapshot must expose its recommended model");
+  assert.match(body, /goalTextForReviewers\(target\.root\)/, "the spawn task must carry the goal text");
+  // Only a USER-APPROVED goal may be injected into reviewer tasks (round P2:
+  // an unapproved/edited goal must never become the reviewers' contract).
+  assert.match(body, /loopGoalConfirmed\(target\.root, goalSt\) \? goalTextForReviewers\(target\.root\) : undefined/,
+    "the goal injection must be gated on the user's approval");
+  const lg = SRC.indexOf("function goalTextForReviewers");
+  assert.ok(lg > 0, "goalTextForReviewers must exist");
+  assert.match(SRC.slice(lg, lg + 600), /全文: " \+ pathJoin\(root, LOOP_GOAL_RELPATH\)/,
+    "a truncated goal must point at the REAL file path (relative paths would dangle in a snapshot)");
 });
 
 test("wave tools: prepare_wave + apply_wave_patches replace the engine tool", () => {
@@ -2100,7 +2187,9 @@ test("REGRESSION: prepare_review REFUSES a partial plan, and the refusal is wire
 test("prepare_review hands out per-reviewer isolation and fails SOFT", () => {
   const at = SRC.indexOf('name: "prepare_review"');
   assert.ok(at > 0, "prepare_review must be registered");
-  const body = SRC.slice(at, at + 16000);
+  const nextTool = SRC.indexOf('name: "record_review"', at);
+  assert.ok(nextTool > at);
+  const body = SRC.slice(at, nextTool);
   // One snapshot per label — never one shared copy for several reviewers.
   assert.match(body, /for \(const label of labels\)[\s\S]{0,200}createReviewSnapshot\(/);
   assert.match(body, /buildStreamConsumerDirective\(/, "the agent must be told how to consume the stream");
@@ -2118,6 +2207,35 @@ test("prepare_review hands out per-reviewer isolation and fails SOFT", () => {
   assert.match(body, /isolation UNAVAILABLE/);
   assert.match(body, /reviewer-readonly/, "the fallback must name the agent that CANNOT write");
   assert.match(body, /do NOT apply fixes until/i);
+  // The UNAVAILABLE reply is the ONLY goal source for the `reviewer-readonly`
+  // it tells you to spawn: that agent's defaultReads no longer name
+  // .pi/loop-goal.md (an UNAPPROVED draft must never become an acceptance
+  // contract), so dropping the file read without injecting the goal here left
+  // that path contract-less (round-2 P2).
+  const noneStart = body.indexOf('planDecision.kind === "none"');
+  assert.ok(noneStart > 0, "the UNAVAILABLE branch must exist");
+  const isolatedStart = body.indexOf("preparedSnapshots.set", noneStart);
+  assert.ok(isolatedStart > noneStart, "the isolated path must follow the UNAVAILABLE branch");
+  assert.match(
+    body.slice(noneStart, isolatedStart),
+    /goalText/,
+    "the UNAVAILABLE reply must hand the reviewer the approved loop goal — reviewer-readonly has no other source",
+  );
+  // The verdict schema must reach THIS path too: the isolated path hands it
+  // over for every tier, so withholding it here would make the no-isolation
+  // verdict the only unparseable one (round-3 Nit).
+  assert.match(
+    body.slice(noneStart, isolatedStart),
+    /SHARD_VERDICT_SCHEMA/,
+    "the UNAVAILABLE reply must hand over the verdict schema as well",
+  );
+  // …and it must be the APPROVED goal, computed BEFORE the isolation branches
+  // so both paths share one gated source.
+  assert.match(
+    body.slice(0, noneStart),
+    /loopGoalConfirmed\(target\.root, goalSt\) \? goalTextForReviewers\(target\.root\) : undefined/,
+    "the goal must be computed before the isolation branches and gated on the user's approval",
+  );
 });
 
 // P0 regression (pi package layout): pi loads the extension entry IN PLACE via

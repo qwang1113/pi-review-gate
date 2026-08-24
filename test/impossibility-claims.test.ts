@@ -32,7 +32,7 @@ test("reviewer is told where unlabeled impossibility claims hide", () => {
     /`TODO`, `FIXME`/, // code comments and ship prose
     /\.skip`\/`\.todo`\/`xfail`/, // suppressed tests
     /\[NIT_DEFERRED\]/, // deferral log
-    /`\.pi\/loop-goal\.md` non-goals/, // non-goals born from "can't be done"
+    /Goal non-goals that exist \*because\* something was judged impossible/, // non-goals born from "can't be done"
     /Handoff text, task descriptions/, // the author's own summary
     /"would require a rewrite"/, // the phrasing that usually carries the excuse
   ]) {
