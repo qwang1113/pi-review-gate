@@ -130,6 +130,12 @@ test("no goal ⇒ the Step 0 directive: grill the user, then propose_loop_goal",
   assert.match(text, /\/to-spec/);
   assert.match(text, /\/to-tickets/);
   assert.match(text, /only if the USER runs them/);
+  // Same handover rule as the approved-goal directive: the goal travels as TEXT
+  // pasted into each subagent task, never as a file for the subagent to read
+  // (this prompt had no assertion either, which is how the stale wording
+  // survived here too).
+  assert.match(text, /paste the goal TEXT into each of them/);
+  assert.doesNotMatch(text, /hand the goal file/, "the goal travels as text, not as a file");
 });
 
 test("an APPROVED goal is injected verbatim with the acceptance contract attached", () => {
@@ -145,6 +151,16 @@ test("an APPROVED goal is injected verbatim with the acceptance contract attache
   assert.match(text, /adviser/);
   assert.match(text, /reviewer/);
   assert.match(text, /P1 finding/);
+  // HOW the goal reaches a subagent is load-bearing and was allowed to drift:
+  // an acceptance judge (reviewer / reviewer-readonly / module-reviewer /
+  // arbiter) does NOT read .pi/loop-goal.md — a snapshot carries no .pi/, and
+  // only a goal the USER approved may become a contract — so the directive must
+  // say "paste the TEXT", never "hand over the file". The sibling prompts are
+  // already pinned (extension-structure / workflow-commands); this one, the most
+  // frequently injected of the three, was not, and the stale wording survived
+  // several rounds because of it.
+  assert.match(text, /Paste the goal TEXT into every subagent task/);
+  assert.doesNotMatch(text, /[Hh]and this file to every subagent/, "the goal travels as text, not as a file path");
   assert.doesNotMatch(text, /older than 24h/);
   // The file content is repo data, not gate instructions: it must be framed so
   // a committed goal file cannot be used to talk the agent out of the gate.

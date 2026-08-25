@@ -310,7 +310,7 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "from this prompt.\n" +
   "(Optional accelerators, only if the USER runs them: `/to-spec`, `/grilling` or `/grill-me`, " +
   "`/to-tickets`, `/wayfinder`. Propose the one that fits — never claim to have run one.)\n" +
-  "Then work the goal: slice it into subagent tasks and hand the goal file to each of them — " +
+  "Then work the goal: slice it into subagent tasks and paste the goal TEXT into each of them — " +
   "write-capable subagents run SERIALLY in this worktree (their edits change the worktree, so a " +
   "review recorded before them can no longer ship, and concurrent writers would keep invalidating " +
   "the binding between precommit and review), read-only subagents may run in parallel. You stay " +
@@ -369,8 +369,10 @@ export function buildLoopGoalDirective(goal: LoopGoal, confirmed = false): strin
       ? "⚠ This goal is older than 24h — it may be left over from a previous session. Confirm it " +
         "against what the user is asking for NOW, and renegotiate it if it no longer matches.\n"
       : "") +
-    "Work to these criteria and stop when they are all met. Hand this file to every subagent you " +
-    "spawn: `adviser` advises against the goal, `reviewer` accepts against it criterion by " +
+    "Work to these criteria and stop when they are all met. Paste the goal TEXT into every subagent " +
+    "task you spawn (an acceptance judge does not read the file itself — a snapshot carries no " +
+    "`.pi/`, and only a goal the user approved may become a contract): `adviser` advises against " +
+    "the goal, `reviewer` accepts against it criterion by " +
     "criterion (an unmet criterion is a P1 finding ⇒ BLOCKED). Write-capable subagents run " +
     "SERIALLY in this worktree; read-only ones may run in parallel. If the goal no longer matches " +
     "the user's request, renegotiate it with the user and re-submit it via `propose_loop_goal` — " +

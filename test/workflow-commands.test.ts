@@ -240,8 +240,9 @@ test("plan-verify encodes the two-phase docSync protocol the gate depends on", (
   assert.match(verify, /Above 8/, "the human threshold matches the design");
   assert.doesNotMatch(verify, /docs\/requirement-orchestration/, "plan-verify is self-contained too");
   // The integration reviewer is asked to judge the goal criterion by criterion,
-  // so the prompt MUST also say where that goal comes from: no judging agent
-  // reads .pi/loop-goal.md itself (an unapproved draft must never become an
+  // so the prompt MUST also say where that goal comes from: no ACCEPTANCE judge
+  // (reviewer / reviewer-readonly / module-reviewer / arbiter) reads
+  // .pi/loop-goal.md itself (an unapproved draft must never become an
   // acceptance contract), which left this flow with no goal source at all
   // (round-4 P2). The instruction is the only link.
   assert.match(verify, /HAND THAT REVIEWER THE GOAL IN ITS TASK TEXT/, "the goal must be handed over explicitly");

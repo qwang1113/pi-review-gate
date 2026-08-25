@@ -154,7 +154,9 @@ asking for now, and renegotiate it (grill → `propose_loop_goal`) if it no
 longer matches.
 
 **Slicing the work to subagents**: turn each criterion (or vertical slice) into
-a subagent task and hand the goal file to every subagent you spawn.
+a subagent task and paste the goal TEXT into every subagent you spawn — an
+acceptance judge never reads `.pi/loop-goal.md` itself (a snapshot carries no
+`.pi/`, and only a goal the user approved may become a contract).
 
 ### Parallel exploration — read-only subagents run concurrently
 
@@ -188,8 +190,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 ## Protocol
 
 0. **Goal first (loop mode)** — establish `.pi/loop-goal.md` as described above
-   before you start editing, then work to it. Hand the goal to every subagent,
-   to `adviser`, and to `reviewer`.
+   before you start editing, then work to it. Paste the goal TEXT into every
+   subagent task — `adviser` and `reviewer` included.
 
 0b. **Autonomous protocol (no command needed)** — you drive both loops
     yourself; the slash commands are only explicit triggers, never the
@@ -335,7 +337,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix,
    Nit = optional. Any P0/P1 open ⇒ gate BLOCKED.
 
-   Give the reviewer the loop goal (the file path, or quote it) and require
+   Paste the loop goal TEXT into the reviewer's task (`prepare_review` hands you
+   the approved goal text — for a sharded run it already sits inside each
+   shard's ready-made task) and require
    criterion-by-criterion acceptance: each exit criterion marked MET / NOT_MET
    with evidence, an unmet criterion raised as a P1 finding. A missing goal is
    not a blocker — the reviewer then judges the diff against the task intent.
