@@ -225,6 +225,35 @@ test("SKILL.md and AGENTS.md document the merged pre-goal adviser pre-review pas
   }
 });
 
+test("SKILL.md hands the loop goal to subagents as TEXT, never as a file to read", () => {
+  // An acceptance judge (reviewer / reviewer-readonly / module-reviewer /
+  // arbiter) has no `.pi/loop-goal.md` in its defaultReads, and a review
+  // snapshot deliberately carries no `.pi/` at all, so a subagent told to READ
+  // the goal file silently ends up with no acceptance contract. The rule is
+  // pinned in lib/loop-goal.ts (test/loop-goal.test.ts locks both injected
+  // directives); this locks the SKILL.md copy, whose lack of a fence is exactly
+  // why the stale wording survived several review rounds (PR #25).
+  const src = readFileSync(SKILL_MD, "utf8");
+  // Every place SKILL.md tells the agent to pass the goal on must say TEXT.
+  const handovers = src.match(/[Pp]aste the (loop )?goal TEXT/g) ?? [];
+  assert.ok(
+    handovers.length >= 3,
+    `SKILL.md must tell the agent to paste the goal TEXT at every handover ` +
+      `(slicing, step 0, the reviewer step) — found ${handovers.length}`,
+  );
+  // …and the retired file-handover wording must not come back.
+  assert.doesNotMatch(
+    src,
+    /hand (the goal file|this file)|[Hh]and the goal to every subagent/,
+    "SKILL.md must not tell a subagent to read the goal FILE (a snapshot has no .pi/)",
+  );
+  assert.doesNotMatch(
+    src,
+    /the file path, or quote it/,
+    "the dead 'file path' branch must not reappear in the reviewer step",
+  );
+});
+
 test("SKILL.md and AGENTS.md default the final review to TWO cross-family reviewers", () => {
   for (const file of [SKILL_MD, AGENTS_MD]) {
     const src = readFileSync(file, "utf8");
