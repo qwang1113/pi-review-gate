@@ -54,8 +54,10 @@ frontmatter in `agents/*.md` is the single source of truth and
 `lib/model-ranking.ts` ranks the families:
 
 - **Strong tier — judging** (`reviewer`, `adviser`, `module-reviewer`,
-  `arbiter`): `claude-fable-5` primary, fallback chain `claude-opus-5 →
-  opencode-go/deepseek-v4-flash`, `thinking: max`.
+  `arbiter`, `goal-auditor`): `claude-fable-5` primary, fallback chain
+  `claude-opus-5 → opencode-go/deepseek-v4-flash`, `thinking: max`.
+  `goal-auditor` is the dedicated pre-reviewer of the loop GOAL (read-only
+  tools) whose verdict the gate records mechanically.
 - **Mid tier — coding & orchestration** (`worker`, `planner`, `fixer`):
   `claude-sonnet-5` primary, fallback `claude-opus-5 →
   opencode-go/deepseek-v4-flash`, `thinking: max`.
@@ -104,13 +106,20 @@ frontmatter for you — project `.pi/review-gate.json` overrides global
   `auto: true`) behaves exactly like today.
 - Project/global layer diagnostics are surfaced when an `agents` section is malformed; invalid model specs never replace the last generated chain.
 
-**Cross-review protocol (user policy):** (a) **Goal pre-review (merged
-rule):** BEFORE calling `propose_loop_goal`, the goal draft must pass ONE
-independent `adviser` review — "pass" means the review records no unresolved
-P1; fix any P1 and re-review before submitting to the user. This merged rule
-replaces the earlier "one cross-family reviewer" goal pre-review (both pinned
-strong; adviser is authoritative), so there is ONE rule, not two parallel ones
-(2026-08-18). (b) The review that ends a round
+**Cross-review protocol (user policy):** (a) **Goal pre-review — MECHANICALLY
+ENFORCED (2026-08-25).** The draft goal must pass an audit by the dedicated
+`goal-auditor` role before the user is ever asked to approve it, and this is no
+longer a protocol the agent could skip: `record_goal_prereview` records the
+EXTENSION's own reading of the auditor's JSON fence (PASS ⇔ a `READY` verdict,
+which already implies no unresolved P0/P1), bound to the sha256 of the audited
+text, and `propose_loop_goal` refuses — without rendering any dialog — unless
+that PASS matches the submitted text exactly. A FAIL means: fix the objections
+and re-audit; the revised text needs its own PASS (the record binds to
+content). The goal text itself must be written in **Simplified Chinese**
+(identifiers, paths and code tokens stay English) — the auditor blocks a draft
+that is not. This supersedes both the earlier "one cross-family reviewer" rule
+and the `adviser`-authoritative merge (2026-08-18): the adviser stays a
+consultant and never signs goal verdicts. (b) The review that ends a round
 runs **two reviewers from different model families by default** —
 `claude-fable-5` (anthropic) + the best available different-family model
 (e.g. `onekey/gpt-5.6-sol` once onekey is configured; without it, a single
@@ -128,7 +137,7 @@ recorded review. Two same-family reviewers cost double for zero extra signal.
 This governs the reviewers YOU spawn for a small diff and the integration
 reviewer; for a LARGE diff the shard count comes from `prepare_review`'s plan
 (`planReviewShards`), not from you. (d) **Every re-review
-carries the previous round's conclusion**: the adviser's goal re-review gets
+carries the previous round's conclusion**: the goal-auditor's re-audit gets
 the old draft + its own objections + what changed; round N+1 gets the previous
 verdict and findings (the gate injects them as the `Review scope for this
 round` block). Settled-and-unchanged material gets a consistency scan, not a

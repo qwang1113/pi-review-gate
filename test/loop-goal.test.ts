@@ -21,6 +21,8 @@ import {
   readLoopGoal,
   loopGoalEditGate,
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
+  goalPrereviewPassed,
+  buildGoalPrereviewRefusal,
 } from "../lib/loop-goal.ts";
 
 function repoWithGoal(content?: string, mtimeMs?: number): string {
@@ -321,10 +323,93 @@ test("loopGoalEditGate: loop/undecided require a confirmed goal; explore/normal 
   assert.equal(loopGoalEditGate({ taskMode: "normal", goalConfirmed: false }), true);
 });
 
-test("LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK names the path forward (negotiate → adviser → dialog)", () => {
+test("LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK names the path forward (negotiate → goal-auditor → dialog)", () => {
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /loop goal/);
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /propose_loop_goal/);
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /adviser/);
+  // The pre-review is MECHANICAL now: naming the auditor role alone would not
+  // tell the agent how the gate is actually satisfied.
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /goal-auditor/);
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /record_goal_prereview/);
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /Simplified Chinese/);
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\.pi\/loop-goal\.md/); // names the real path
   assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\bblock(er|ed|ing|s)?\b/i, "the reason must not call itself a block");
+});
+
+test("goalPrereviewPassed: only a PASS bound to THIS exact text opens the dialog", () => {
+  const text = "# 目标\n\n一行意图。\n";
+  const pass = { hash: goalTextHash(text), verdict: "PASS" as const, at: "2026-08-25T00:00:00Z" };
+  assert.equal(goalPrereviewPassed(pass, text), true);
+  // Same text, cosmetic CRLF/trailing-newline differences still pass: the hash
+  // is taken over the NORMALIZED text (that is what the user would approve).
+  assert.equal(goalPrereviewPassed(pass, text.replace(/\n/g, "\r\n") + "\n\n"), true);
+  // Fail-closed on every uncertainty.
+  assert.equal(goalPrereviewPassed(undefined, text), false, "never audited");
+  assert.equal(goalPrereviewPassed({ ...pass, verdict: "FAIL" }, text), false, "a FAIL never opens the dialog");
+  assert.equal(goalPrereviewPassed(pass, text + "\u4e00条新标准\n"), false, "revised text needs a fresh audit");
+  // An invisible in-line edit changes the hash too — this is the case the
+  // refusal copy has to make diagnosable.
+  assert.equal(goalPrereviewPassed(pass, "# 目标 \n\n一行意图。\n"), false, "trailing space inside a line");
+});
+
+test("buildGoalPrereviewRefusal: says WHY, HOW to recover, and echoes the evidence", () => {
+  const text = "# 目标\n\n一行意图。\n";
+  const missing = buildGoalPrereviewRefusal({ goalText: text, auditorInstalled: true, packageAgentsDir: "/pkg/agents" });
+  assert.match(missing, /no goal-auditor pre-review has been recorded/);
+  assert.match(missing, /record_goal_prereview/, "must name the tool that satisfies the gate");
+  assert.match(missing, /Simplified Chinese/, "must state the language rule before another round is burned");
+
+  const failed = buildGoalPrereviewRefusal({
+    record: { hash: goalTextHash(text), verdict: "FAIL", at: "2026-08-25T01:00:00Z" },
+    goalText: text,
+    auditorInstalled: true,
+    packageAgentsDir: "/pkg/agents",
+    repoRoot: "/repos/beta",
+  });
+  assert.match(failed, /FAIL/, "a FAIL must be reported as unresolved objections, not as 'missing'");
+  // A multi-repo session records the audit PER REPO, so the refusal has to say
+  // WHICH repo it checked — an anonymous "this repo" sends the agent to
+  // re-audit the wrong one. The FAIL branch also carries the recorded hash so
+  // the agent can tell which draft was rejected.
+  assert.match(failed, /\/repos\/beta/, "the FAIL refusal must name the repo it checked");
+  assert.match(failed, new RegExp(goalTextHash(text).slice(0, 12)), "and the hash of the audited draft");
+  assert.match(failed, /objections against THIS text/, "a FAIL for the SAME text says the objections stand");
+  // A FAIL recorded for ANOTHER draft must not read as "your draft failed" —
+  // that sends the agent off fixing objections never raised against this text.
+  const failedOther = buildGoalPrereviewRefusal({
+    record: { hash: "c".repeat(64), verdict: "FAIL", at: "2026-08-25T01:00:00Z" },
+    goalText: text,
+    auditorInstalled: true,
+    packageAgentsDir: "/pkg/agents",
+    repoRoot: "/repos/beta",
+  });
+  assert.match(failedOther, /recorded for ANOTHER draft/, "a FAIL bound to different text must say so");
+  assert.match(failedOther, /cccccccccccc/, "and echo the recorded hash");
+  assert.match(failedOther, new RegExp(goalTextHash(text).slice(0, 12)), "and the submitted hash");
+  assert.match(
+    buildGoalPrereviewRefusal({ goalText: text, auditorInstalled: true, packageAgentsDir: null, repoRoot: "/repos/beta" }),
+    /\/repos\/beta/,
+    "the never-audited refusal must name the repo too",
+  );
+
+  // Hash mismatch is the confusing case: both prefixes and the first line have
+  // to be echoed or an invisible whitespace edit is undebuggable.
+  const mismatch = buildGoalPrereviewRefusal({
+    record: { hash: "a".repeat(64), verdict: "PASS", at: "2026-08-25T02:00:00Z" },
+    goalText: text,
+    auditorInstalled: true,
+    packageAgentsDir: "/pkg/agents",
+  });
+  assert.match(mismatch, /DIFFERENT text/);
+  assert.match(mismatch, /aaaaaaaaaaaa/, "echoes the recorded hash prefix");
+  assert.match(mismatch, new RegExp(goalTextHash(text).slice(0, 12)), "echoes the submitted hash prefix");
+  assert.match(mismatch, /# 目标/, "echoes the submitted first line");
+
+  // Bootstrap: the role is not dispatchable yet — the copy must not leave the
+  // agent guessing, and an unresolvable package dir must be SAID, not silent.
+  const noAuditor = buildGoalPrereviewRefusal({ goalText: text, auditorInstalled: false, packageAgentsDir: "/pkg/agents" });
+  assert.match(noAuditor, /BOOTSTRAP/);
+  assert.match(noAuditor, /\/pkg\/agents/);
+  const noDir = buildGoalPrereviewRefusal({ goalText: text, auditorInstalled: false, packageAgentsDir: null });
+  assert.match(noDir, /包内 agents 目录无法定位/);
+  assert.match(noDir, /gate-doctor/);
 });

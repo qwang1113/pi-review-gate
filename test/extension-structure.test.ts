@@ -303,9 +303,10 @@ test("FAN-OUT wiring: slotSource stamp, config arg order, disk-fallback guards a
   assert.match(fallback, /rv\.auto === false && rv\.slots\.length > 0\) return undefined/, "pinned slots must silence the disk fallback");
   // The round-1 notify block must stay (a rejected chain must reach the user).
   const layersAt = SRC.indexOf("function ensureModelLayersRendered(");
-  // (round-2 corrupt-guard: the fail-safe branches add ~12 lines, so the
-  // window must comfortably cover the whole function.)
-  const layers = SRC.slice(layersAt, layersAt + 6500);
+  // (round-2 corrupt-guard: the fail-safe branches add ~12 lines, and the
+  // bootstrap self-heal another ~18, so the window must comfortably cover the
+  // whole function.)
+  const layers = SRC.slice(layersAt, layersAt + 8000);
   assert.match(layers, /ctx\.ui\.notify\(/, "layer problems must be notified");
   assert.match(layers, /problems\.slice\(0, 5\)/, "the notification must be bounded");
   // And the cross-layer reviewer-readonly guard (round-2 P2) + its dedup (round-3).
@@ -444,11 +445,31 @@ test("GLOBAL LAYER: the extension re-applies model config (both layers) at sessi
   const at = SRC.indexOf("function ensureModelLayersRendered(");
   assert.ok(at > 0, "ensureModelLayersRendered must exist (renamed from ensureGlobalModelLayerRendered)");
   assert.ok(SRC.indexOf("ensureGlobalModelLayerRendered") === -1, "the old name must be gone");
-  const fn = SRC.slice(at, at + 5000);
+  // Slice to the function's REAL end (the next top-level `function ` at the
+  // same indentation), not a guessed byte count: a fixed window that stops
+  // short lets a second probe call hide in the tail and defeats the
+  // "called exactly once" assertion below.
+  const fnEnd = SRC.indexOf("\n  function ", at + 1);
+  assert.ok(fnEnd > at, "the next function declaration must bound the window");
+  const fn = SRC.slice(at, fnEnd);
   assert.match(fn, /effectiveAgentsConfig\(projectConfig\.agentsGlobal \?\? undefined, undefined\)/);
   assert.match(fn, /effectiveAgentsConfig\(undefined, projectConfig\.agentsProject \?\? undefined\)/);
   assert.match(fn, /applyAgentConfigLayer\(/);
   assert.match(fn, /pathJoin\(primaryRepoRoot, "\.pi", "agents"\)/);
+  // BOOTSTRAP SELF-HEAL: a role the gate REQUIRES (goal-auditor gates every
+  // goal approval) must be restored when it is missing, or the session
+  // deadlocks with no exit but switching the gate off. The source dir is
+  // PROBED, never a single relative path — an unresolvable source makes the
+  // heal a silent no-op, which is how the deadlock survived review twice.
+  assert.match(fn, /ensureAgentFilesPresent\(\{/, "session start must self-heal missing agent files");
+  assert.match(fn, /sourceDir: existsSync\(packageAgentsDir\) \? packageAgentsDir : null/, "the heal source must be the PROBED package agents dir");
+  assert.match(fn, /agents: KNOWN_AGENTS/, "the heal covers every shipped role, not just goal-auditor");
+  // ONE probe, shared by the renderer and the heal: two independent calls with
+  // different null handling let the render succeed while the heal silently
+  // no-ops (or vice versa) — the failure mode this whole guard exists for.
+  assert.match(fn, /const probedAgentsDir = resolvePackageAgentsDir\(\);/, "the probe runs once");
+  assert.match(fn, /const packageAgentsDir = probedAgentsDir \?\?/, "and both consumers share its result");
+  assert.equal((fn.match(/resolvePackageAgentsDir\(\)/g) ?? []).length, 1, "the probe must not be called twice");
   const sessionAt = SRC.indexOf("pi.on(\"session_start\"");
   assert.ok(sessionAt > 0);
   // The call sits ~3900 chars past the handler head (the INERT-snapshot
@@ -469,15 +490,20 @@ test("GLOBAL LAYER: the extension re-applies model config (both layers) at sessi
   // Project-layer base must be the BUILT-IN package agents dir, never the
   // already-rendered global layer. Scope BOTH asserts to the PROJECT block
   // (round-9 P2: the old window was 800 chars while the sourceDir line sits
-  // ~2200 chars past the block comment — the mutation sailed through).
-  const layerBlock = SRC.slice(at, at + 5000);
+  // ~3400 chars past the block comment — the mutation sailed through). The
+  // window below is sized from that measured offset, so keep it comfortably
+  // ahead of the line it must cover.
+  const layerBlock = SRC.slice(at, at + 9000);
   const projStart = layerBlock.indexOf("// Project layer of the CURRENT repo");
-  assert.ok(projStart > 0);
-  const projectBlock = layerBlock.slice(projStart, projStart + 3500);
+  assert.ok(projStart > 0, "the project-layer block must be inside the window");
+  // To the END of the layer block, not a byte count: the asserted sourceDir
+  // line sits ~3415 chars in, so a fixed 3500-char window left ~50 chars of
+  // slack and would fail for the wrong reason after any small edit here.
+  const projectBlock = layerBlock.slice(projStart);
   assert.match(
     projectBlock,
-    /sourceDir: pathJoin\(packageRoot, "\.\.", "agents"\)/,
-    "the project sourceDir must be the built-in defaults",
+    /sourceDir: packageAgentsDir/,
+    "the project sourceDir must be the built-in defaults (the PROBED package agents dir)",
   );
   assert.doesNotMatch(
     projectBlock,
@@ -1305,6 +1331,55 @@ test("SECURITY: a declined sensitive path is locked, and grants never reach the 
     "sensitive-file grants must never be written into the persisted gate state");
 });
 
+test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict and hashes the text", () => {
+  const start = SRC.indexOf('name: "record_goal_prereview"');
+  assert.ok(start > 0, "the pre-review tool must be registered");
+  const nextTool = SRC.indexOf('name: "propose_loop_goal"', start);
+  assert.ok(nextTool > start, "propose_loop_goal must follow record_goal_prereview");
+  const body = SRC.slice(start, nextTool);
+  // The verdict is READ, never accepted: no `passed`/`verdict` parameter may
+  // exist, or the pre-review becomes an agent self-certification again.
+  assert.match(body, /parseReviewOutput\(params\.auditor_output\)/, "the extension must parse the auditor output itself");
+  assert.match(body, /parsed\.verdict === "READY"/, "PASS is exactly a READY verdict");
+  assert.match(body, /goalTextHash\(goalText\)/, "the extension must hash the submitted text itself");
+  assert.doesNotMatch(body, /params\.(passed|verdict|hash)\b/, "no agent-attested verdict or hash may be read");
+  // Fail-closed: an unparseable fence records NOTHING (a wiped record would
+  // silently downgrade a standing PASS, and a recorded one would be a forgery).
+  const noFence = body.indexOf("if (!parsed)");
+  const write = body.indexOf("goalSt.goalPrereview =");
+  assert.ok(noFence > 0 && write > noFence, "the unparseable guard must precede the sidecar write");
+  // Same repo resolution as propose_loop_goal (never resolveToolRepo, which
+  // requires an already-edited repo and would dead-end a second repo's goal).
+  assert.match(body, /gitRootOfDir\(abs\)/);
+  assert.doesNotMatch(body, /resolveToolRepo\(/, "it must not CALL resolveToolRepo (naming it in the rationale is fine)");
+});
+
+test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {
+  const start = SRC.indexOf('name: "propose_loop_goal"');
+  const nextTool = SRC.indexOf('name: "request_copilot_review"', start);
+  // Without these, a renamed/removed tool would silently make `body` the whole
+  // file (or empty) and every ordering assertion below would pass vacuously.
+  assert.ok(start > 0, "propose_loop_goal must be registered");
+  assert.ok(nextTool > start, "the window must end at the next tool registration");
+  const body = SRC.slice(start, nextTool);
+  const check = body.indexOf("goalPrereviewPassed(");
+  assert.ok(check > 0, "the gate must consult the pre-review record");
+  // Order is the whole point: a check placed after showToUser/confirmBounded
+  // would still parade an unaudited draft in front of the user.
+  const show = body.indexOf("showToUser(");
+  const confirm = body.indexOf("confirmBounded(");
+  const write = body.indexOf("writeFileSync(goalPath");
+  assert.ok(show > check, "the transcript echo must come AFTER the pre-review check");
+  assert.ok(confirm > check, "the dialog must come AFTER the pre-review check");
+  assert.ok(write > check, "the goal file may only be written after the check");
+  assert.match(body, /buildGoalPrereviewRefusal\(/, "the refusal must carry the recovery path");
+  // The user sees that an audit happened, and the repo binding still cannot be
+  // truncated away (the pre-review line is appended AFTER it).
+  assert.match(body, /goal-auditor 预审: PASS @/);
+  const repoFact = body.indexOf('"绑定仓库(不可信数据): " + repoLine');
+  const prereviewLine = body.indexOf('repoLine + "\\n" + prereviewLine');
+  assert.ok(repoFact > 0 && prereviewLine > 0, "both facts must reach the dialog");
+});
 // ---------------------------------------------------------------------------
 // L8 — the loop goal is negotiated with the user, not written by the agent
 

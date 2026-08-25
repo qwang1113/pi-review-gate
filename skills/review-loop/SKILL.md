@@ -9,10 +9,10 @@ Drive changes through the review gate until every gate passes. The gate is
 enforced by the pi-review-gate extension: `git commit`, `git push`, and
 `gh pr create` are hard-blocked until the loop completes.
 
-## Two independent judges, on a stronger model than you
+## Three independent judges, on a stronger model than you
 
 Good judgement comes from a *stronger, independent* brain than the one that
-wrote the code. Both roles are pinned to a top-tier reasoning model at `max`
+wrote the code. All three roles are pinned to a top-tier reasoning model at `max`
 thinking, with a fallback priority list (first available wins):
 
 - **`adviser`** (`agents/adviser.md`, consultant, *before/during* work) —
@@ -23,6 +23,12 @@ thinking, with a fallback priority list (first available wins):
   chains in agents/*.md).
 - **`reviewer`** (`agents/reviewer.md`, gatekeeper, *after* a diff exists) —
   independent audit that emits the JSON verdict the gate records.
+  Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
+  chains in agents/*.md).
+- **`goal-auditor`** (`agents/goal-auditor.md`, gatekeeper, *before the user
+  sees a goal*) — audits the DRAFT exit contract; the gate records ITS verdict
+  via `record_goal_prereview`, and `propose_loop_goal` shows no dialog without
+  a matching PASS. Read-only tools.
   Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
   chains in agents/*.md).
 
@@ -74,8 +80,9 @@ scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
 The gates say the code is *sound*; they say nothing about whether the user's
 goal was *met*. The loop goal closes that hole: one short file, written before
 the work starts, listing the checkable facts that mean **done**. The same file
-then drives all three roles — you slice work against it, `adviser` advises
-against it, `reviewer` accepts against it.
+then drives every role — `goal-auditor` audits the DRAFT before the user ever
+sees it, you slice the work against the approved text, `adviser` advises
+against it, and `reviewer` accepts against it.
 
 **Negotiated, not assumed (L8)**: you do NOT write this file. Grill the user
 first — unless they asked for them all at once, ask ONE question per turn,
@@ -87,28 +94,37 @@ unapproved goal **blocks commit/push/PR** and its body is withheld from your
 prompt (a leftover goal from a previous task is exactly what that prevents).
 Editing the file afterwards drops the approval — renegotiate and re-submit.
 
-**Pre-review the draft goal (adviser pre-review, merged rule).** Before you
-submit a goal for approval, run the draft through ONE independent **`adviser`**
-review — the goal pre-review rule merged into AGENTS.md's cross-review
-protocol (one rule, adviser is authoritative, not two parallel ones). "Pass" means
-the adviser records **no unresolved P1**. The adviser critiques the draft
-against: (a) is every criterion checkable by a command or concrete observation,
-(b) is the scope sized to the change, (c) do non-goals actually fence off the
-edges, (d) does it match what the user asked. If the adviser raises P1-level
-objections, fix the draft and re-review before calling `propose_loop_goal` —
-never submit a goal you know is uncheckable. This is protocol, not a gate: the
-extension does not enforce it, but the `reviewer` WILL flag a goal whose
-criteria cannot be judged objectively (P2) and an uncheckable criterion that
-made the work go astray (P1).
+**Pre-review the draft goal — the extension ENFORCES this.** Before the user is
+asked to approve anything, the draft goes through the dedicated
+**`goal-auditor`** subagent, and its verdict is recorded mechanically:
+
+1. Write the goal in **Simplified Chinese** (technical identifiers, tool names,
+   paths and code tokens stay English).
+2. Dispatch `goal-auditor` with the exact draft pasted into its task. It
+   critiques: (a) is every criterion checkable by a command or concrete
+   observation, (b) is the scope sized to the change, (c) do non-goals actually
+   fence off the edges, (d) does it match what the user asked, plus the
+   language rule.
+3. Hand its **full raw output** to `record_goal_prereview` together with the
+   draft. The EXTENSION parses the auditor's JSON fence (PASS ⇔ a `READY`
+   verdict, i.e. no unresolved P0/P1) and hashes the text itself — you cannot
+   attest the outcome, and an output with no parseable fence records nothing.
+4. `propose_loop_goal` refuses — without showing the user any dialog — unless
+   that PASS is bound to the identical text. A FAIL, or any edit to the draft,
+   means: fix and re-audit.
+
+The `reviewer` remains the second layer: it WILL flag a goal whose criteria
+cannot be judged objectively (P2) and an uncheckable criterion that made the
+work go astray (P1).
 
 **Every re-review carries the previous round's conclusion.** A re-review that
 starts from zero pays full price for questions that were already answered, so
 hand the reviewer what is already settled and let it spend its budget on what
 changed:
 
-- **Goal re-review (adviser).** When you revise a draft after BLOCKED
-  objections, the second consultation gets three things: the previous draft,
-  the adviser's own objection list, and what you changed for each one. Ask it
+- **Goal re-audit (goal-auditor).** When you revise a draft after BLOCKED
+  objections, the second audit gets three things: the previous draft,
+  the auditor's own objection list, and what you changed for each one. Ask it
   to verify exactly that — is each objection resolved, and does the new wording
   introduce a side effect — not to re-derive the whole goal.
 - **Round N+1 (reviewer).** Hand over the previous round's verdict and its
@@ -128,7 +144,9 @@ skipped by edit tracking. Writing or rewriting the goal therefore never changes
 the worktree digest, never arms the doc gate, and can never invalidate a READY
 review or a precommit PASS.
 
-**How to produce it** — interview the user, then submit it with
+**How to produce it** — interview the user, draft in Simplified Chinese, get
+the draft through the `goal-auditor` audit (`record_goal_prereview`), then
+submit it with
 `propose_loop_goal`; sized to the change, a one-line bugfix deserves one
 criterion and three lines:
 
@@ -150,7 +168,8 @@ and `lib/x.ts` no longer reads the sidecar" is.
 
 **Staleness**: a goal file older than 24h may be left over from a previous
 session. The gate flags it in the prompt; confirm it against what the user is
-asking for now, and renegotiate it (grill → `propose_loop_goal`) if it no
+asking for now, and renegotiate it (grill → `goal-auditor` audit →
+`record_goal_prereview` → `propose_loop_goal`) if it no
 longer matches.
 
 **Slicing the work to subagents**: turn each criterion (or vertical slice) into
@@ -428,9 +447,10 @@ Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
   (Chains are short because pi-subagents requires every fallback to resolve;
   a user who configures deepseek / oc-sdk-go / onekey can extend them in
   `~/.pi/agent/agents/*.md`.)
-- **L3 judgment** (reviewer / adviser / module-reviewer / arbiter, `max`
-  thinking) — the only tier whose verdicts may be recorded. Never delegate
-  the verdict to a cheaper model.
+- **L3 judgment** (reviewer / adviser / module-reviewer / arbiter /
+  goal-auditor, `max` thinking) — the only tier whose verdicts may be
+  recorded. `goal-auditor` belongs here because the gate records ITS verdict
+  too (`record_goal_prereview`). Never delegate a verdict to a cheaper model.
 - **Low-risk exception**: a change that is purely docs / formatting /
   one-line may be reviewed by an L1 agent whose verdict IS recorded.
   Judging "low-risk" is yours; a misjudged call is a P1 finding for the L3

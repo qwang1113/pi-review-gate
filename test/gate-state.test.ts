@@ -850,3 +850,46 @@ test("loopGoal: a non-string reason fails closed to ABSENT (not approved)", () =
     assert.equal(loaded?.loopGoal, undefined, JSON.stringify(bad));
   }
 });
+
+// ---------------------------------------------------------------------------
+// goalPrereview — the goal-auditor record propose_loop_goal checks (L8b)
+// ---------------------------------------------------------------------------
+
+test("goalPrereview: a well-formed record round-trips (PASS and FAIL, findingsTotal optional)", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const rec of [
+    { hash: "b".repeat(64), verdict: "PASS", at: "t" },
+    { hash: "b".repeat(64), verdict: "FAIL", at: "t", findingsTotal: 3 },
+    { hash: "b".repeat(64), verdict: "FAIL", at: "t", findingsTotal: null },
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, goalPrereview: rec }));
+    assert.deepEqual(loadSidecar(path)?.goalPrereview, rec, JSON.stringify(rec));
+  }
+});
+
+test("goalPrereview: a malformed record fails closed to ABSENT (never audited)", () => {
+  // Fail-closed direction: dropping the record costs one fresh audit, while
+  // TRUSTING a forged one would open the user's approval dialog for a draft
+  // no auditor ever judged — the exact hole the pre-review closes.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  const bad: unknown[] = [
+    42, null, "PASS", [],
+    { verdict: "PASS", at: "t" },                                  // no hash
+    { hash: "short", verdict: "PASS", at: "t" },                    // not a sha256
+    { hash: "B".repeat(64), verdict: "PASS", at: "t" },             // uppercase hex
+    { hash: "b".repeat(64), verdict: "READY", at: "t" },            // forged verdict word
+    { hash: "b".repeat(64), verdict: "PASS" },                      // no timestamp
+    { hash: "b".repeat(64), verdict: "PASS", at: 7 },               // non-string timestamp
+    { hash: "b".repeat(64), verdict: "PASS", at: "t", findingsTotal: "many" }, // bad count
+  ];
+  for (const rec of bad) {
+    writeFileSync(path, JSON.stringify({ ...base, goalPrereview: rec }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `the sidecar itself must stay valid for ${JSON.stringify(rec)}`);
+    assert.equal(loaded?.goalPrereview, undefined, JSON.stringify(rec));
+  }
+});

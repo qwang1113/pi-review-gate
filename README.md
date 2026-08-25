@@ -90,7 +90,13 @@ L7  Copilot review loop   after a PR is created/updated → request GitHub
                           the ship gate (fixing a finding needs a commit)
 L8  Loop-goal approval    loop mode → the exit contract must be NEGOTIATED with
                           the user and approved in an extension dialog
-                          (`propose_loop_goal`); an unapproved goal blocks
+                          (`propose_loop_goal`). L8b: that dialog is not even
+                          rendered until a dedicated `goal-auditor` audit of the
+                          exact text is recorded as a PASS (a recorded FAIL, or
+                          any edit to the text, still blocks)
+                          (`record_goal_prereview`, the
+                          extension parses the verdict itself);
+                          an unapproved goal blocks
                           commit/push/PR at L1, blocks edit/write tool calls at
                           the tool_call layer (per repo — each repo checks its
                           own goal; undecided mode gates edits too, and the
@@ -295,7 +301,7 @@ it is granted only when every precondition holds.
 
 ## Judges on a stronger model, pinned at `max`
 
-The gate is only as good as the brain judging the work. Three independent roles
+The gate is only as good as the brain judging the work. Four independent roles
 run on a **top-tier reasoning model at `max` thinking**, each with a fallback
 priority list (first available wins). Those chains are the **built-in
 defaults in the agent definitions** — decided up front, not re-selected per
@@ -307,6 +313,7 @@ can override any of them per agent:
 | **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → Opus 5 → opencode-go/flash | `max` |
 | **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | Fable 5 → Opus 5 → opencode-go/flash | `max` |
 | **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | Fable 5 → Opus 5 → opencode-go/flash | `max` |
+| **`goal-auditor`** (`agents/goal-auditor.md`) | *before the user sees a goal* — audits the DRAFT exit contract (checkable criteria, scope, non-goals, match with the ask, Simplified-Chinese rule) | yes — its verdict is recorded by `record_goal_prereview`, and `propose_loop_goal` shows no dialog without a matching PASS | Fable 5 → Opus 5 → opencode-go/flash | `max` |
 
 `thinking` is a single value, not a fallback list; `max` is the highest valid
 pi level (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — pi clamps
@@ -415,6 +422,24 @@ current repo's project layer are always in force. That session-start pass is
 also what sweeps stale generated overrides after you delete the `agents`
 section, and what restores the upstream default when the global layer is
 freed. Every write is validated first and refuses to land on failure.
+
+The same session-start pass also **self-heals missing agent files**: any
+`KNOWN_AGENTS` file absent from `~/.pi/agent/agents/` is copied back from the
+package's own `agents/` directory (gaps only — an existing file is never
+touched, so a configured chain cannot be clobbered). That directory is located
+by PROBING the install layouts (`resolvePackageAgentsDir`: `<here>/agents`,
+`<here>/../agents`, `<here>/../../agents`), the same three-layout approach
+`resolveTrustedRunner` uses for the precommit runner. A candidate counts only
+when it actually holds this package's roles (it must contain `reviewer.md`):
+the third probe reaches two levels up, where an unrelated `agents/` folder can
+live, and adopting one would feed foreign files to the renderer AND the heal.
+A single relative path
+resolves only in the dev repo, and a source that silently fails to resolve
+would make both the render and the heal quiet no-ops. Without the heal a newly
+shipped role only appears after the next postinstall, which for `goal-auditor`
+would mean no goal could be approved (and, in loop mode, no edit made) until
+then; when the probe fails, that is reported by `/gate-doctor` and by the goal
+refusal copy rather than passing silently.
 
 You configure it by editing the JSON directly — the `agents` section of the
 global layer (`~/.pi/review-gate.json`) or the project layer
@@ -942,10 +967,33 @@ one fact:
   answer, all at once only when the user asks for it — until nothing is left
   silently assumed. Facts are the agent's job (read the repo, run the tools);
   only decisions go to the user.
-- **Then `propose_loop_goal`.** The **extension** shows the negotiated text in
+- **Then the goal-auditor — mechanically (since 2026-08-25).** The draft goes to
+  the dedicated `goal-auditor` subagent, whose FULL raw output is handed to
+  `record_goal_prereview`. The **extension** parses the auditor's JSON fence
+  itself (PASS ⇔ a `READY` verdict, which verdict-parse already withholds from
+  a fence carrying unresolved P0/P1, and a salvaged fence can never be READY)
+  and hashes the audited text itself — there is no `passed` parameter, so the
+  agent cannot ATTEST the outcome (it can only carry the auditor's output, the
+  same trust boundary as `record_review`: a hand-written `auditor_output` is
+  not defended against, see the limits list below). A FAIL means: fix the
+  objections and re-audit; the revised text needs its own PASS. The goal text
+  is written in **Simplified Chinese** (identifiers, paths and code tokens stay
+  English); the auditor blocks a draft that is not.
+- **Then `propose_loop_goal`.** It first checks the sidecar's pre-review record
+  and REFUSES — with no transcript echo, no dialog and no file write — unless a
+  PASS is bound to the exact submitted text (missing or hash-mismatched both
+  fail closed; there is no TTL). The refusal names the repo it checked and the
+  submitted first line; on a HASH MISMATCH it also echoes both hash prefixes,
+  so an invisible whitespace edit is diagnosable. Only
+  then does the **extension** show the negotiated text in
   a confirm dialog, and only if the user approves does the extension write
   `.pi/loop-goal.md` and record the sha256 of exactly that text in the sidecar.
-  There is no `confirmed` parameter the model could set.
+  There is no `confirmed` parameter the model could set. The dialog also shows
+  the pre-review fact (`goal-auditor 预审: PASS @ …`), appended AFTER the
+  repo-binding line so the 200-char `extraUntrusted` cap eats the pre-review
+  sentence FIRST. The repo binding itself is only at risk from a
+  pathologically long repo path (measured: it survives up to ~182 chars), which
+  is a property of that line's own length, not of the appended sentence.
 - **Approval binds to CONTENT.** Editing the file afterwards changes the hash
   and drops the approval — the contract the user agreed to no longer exists.
 - **Unapproved ⇒ blocked and unquoted.** In loop mode an unapproved goal blocks
@@ -959,8 +1007,9 @@ one fact:
   happen BEFORE the work starts, not after. Each repo checks its own goal
   (one repo's approval never opens another's write surface); `.pi/` and
   `.pi-subagents/` writes stay exempt so the gate cannot deadlock on its own
-  files. The block message points at the full path: grill → one independent
-  `adviser` pre-review → `propose_loop_goal`. The confirm dialog no longer asks
+  files. The block message points at the full path: grill → draft in Simplified
+  Chinese → `goal-auditor` audit → `record_goal_prereview` →
+  `propose_loop_goal`. The confirm dialog no longer asks
   for an optional reason (approval is the whole signal); a REJECTION still asks
   for the reason, which is carried back to the agent for renegotiation.
   (One deliberate exception: a REVIEW SNAPSHOT session is inert — the L8 edit
@@ -1261,7 +1310,7 @@ gated **per repo**:
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
 | `/gate-reset` | Reset gate state (mode returns to undecided — the agent re-decides via `set_gate_mode`; also clears the agent-downgrade lock) |
 | `/gate-lesson <text>` | Append a lesson to `.pi/review-gate-lessons.md` (self-improvement log) |
-| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — agent model chains, opencode-go models-store prune, precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
+| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — agent model chains, `goal-auditor` dispatchability (the role that gates goal approval), opencode-go models-store prune, precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
 
 ### sd0x-dev-flow workflow commands
 
@@ -1298,7 +1347,8 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | `prepare_review` | Materialize ONE disposable git-worktree snapshot per reviewer about to be spawned, holding exactly the change under review (same shadow-index tree the fingerprint uses; `node_modules` symlinked so the suite runs — the ONE shared path, which the prompts forbid writing to). The snapshot deliberately contains NO `.pi/` directory (the goal text rides the spawn task instead): a snapshot that carries `.pi/` is misdetected by pi-subagents as a project root, which silently drops the project layer of the model config (the user's per-agent slots) and makes every reviewer fall back to the GLOBAL agent definition. A READY recorded after the worktree moved (mid-review fixes) does NOT bind: the gate compares the tree the reviewers read with the tree at record time and downgrades to BLOCKED, so an approval can never cover code no reviewer saw. Returns each reviewer's `cwd` and its append-only finding-stream path. Inside its own copy a reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. Fail-soft: a host where `git worktree` refuses gets an explicit "isolation unavailable" reply and the old read-only rules. |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. Output is never inlined into the reply — a failing suite can emit megabytes. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
-| `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it); then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 AND blocks edit/write tool calls until approved (each repo checks its own goal; the `repo` parameter binds the goal to a specific repo — required to unlock edit/write in a second repo, `gitRootOfDir(repo)` decides which one); the confirm dialog no longer asks for an optional reason (a rejection still asks for the reason, carried back for renegotiation). An unapproved goal's body is withheld from the prompt. |
+| `record_goal_prereview` | Record the dedicated `goal-auditor` role's audit of a DRAFT goal (L8b). Pass the draft text plus the auditor's FULL raw output: the **extension** parses the JSON fence itself (PASS ⇔ a `READY` verdict — verdict-parse already downgrades a READY carrying unresolved P0/P1, and a salvaged fence is never READY) and computes the text hash itself, so there is no `passed`/`hash` parameter an agent could set. No parseable fence ⇒ `isError` and **nothing** is written (fail-closed). BLOCKED/NEEDS_HUMAN ⇒ a FAIL record. Latest-only by design, and repo-resolved exactly like `propose_loop_goal` (`gitRootOfDir`, never `resolveToolRepo` — a goal is audited before the first edit lands). |
+| `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it), and draft it in Simplified Chinese. **REQUIRED FIRST (L8b):** the draft must carry a `record_goal_prereview` PASS bound to the exact submitted text, or this tool refuses with `isError` and renders NO dialog at all (a recorded FAIL blocks too). Then the **extension** shows the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 AND blocks edit/write tool calls until approved (each repo checks its own goal; the `repo` parameter binds the goal to a specific repo — required to unlock edit/write in a second repo, `gitRootOfDir(repo)` decides which one); the confirm dialog no longer asks for an optional reason (a rejection still asks for the reason, carried back for renegotiation). An unapproved goal's body is withheld from the prompt. |
 | `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. It also decides **availability from evidence** (a Copilot review on this PR or in the repo's last 20 PRs ⇒ CONFIRMED; owner in `copilotReview.owners` ⇒ ASSUMED; neither ⇒ UNKNOWN, and a silent Copilot is then released instead of waited for). The request itself is never vetoed by a read-back — those cannot see a dropped request. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. There is **no round cap**; the only budget is the 20-minute wait for a review that never arrives. |
 | `check_copilot_review` | Verify what Copilot's review left open (L7). The extension runs the GraphQL query itself and classifies each thread: resolved ⇒ handled, answered by you ⇒ handled, Copilot spoke last ⇒ still yours (listed with thread IDs and the exact `resolveReviewThread` / reply mutations) — regardless of which commit the review was submitted against, so a push cannot bury a finding. Returns AWAITING / OPEN / SATISFIED — an outcome the agent cannot report for itself. A cycle released with findings still open lists them for you to report to the user. |
 | `request_arbitration` | Contest a ship block the agent believes is **circular** (the only remedy is an action the block forbids). Narrow + fail-closed — see [Arbiter](#arbiter-a-narrow-fail-closed-gate-exception). |
@@ -1460,12 +1510,16 @@ including a content hash, by editing the checker too):
   payloads, so file-based messages skip the in-session attribution/L5 checks.
   The commit-msg git hook (L3) still scans the FINAL message file and remains
   the deterministic backstop for attribution.
-- Fabricating the reviewer output fed to `record_review` — the reviewer is a
-  subagent whose transcript necessarily transits the main agent, so the verdict
-  rests on the cooperative assumption (the main agent can equally write the
-  sidecar directly). Making it unforgeable would require the extension to spawn
-  the reviewer itself and verify a receipt, like `run_precommit` (future
-  hardening), not a runtime source check.
+- Fabricating the reviewer output fed to `record_review` — or the
+  `auditor_output` fed to `record_goal_prereview` — the reviewer and the
+  goal-auditor are subagents whose transcripts necessarily transit the main
+  agent, so both verdicts rest on the cooperative assumption (the main agent
+  can equally write the sidecar directly). What the extension DOES guarantee is
+  that no agent-attested boolean is accepted: it parses the verdict fence and
+  computes the text hash itself, so a forgery has to counterfeit a whole
+  reviewer output rather than flip a flag. Making it unforgeable would require
+  the extension to spawn the judge itself and verify a receipt, like
+  `run_precommit` (future hardening), not a runtime source check.
 - **Git's content-transformation pipeline as a hidden fingerprint input.** The
   digest asks *git* what the worktree contains, so anything that reconfigures
   git's answer — `core.excludesFile`, `.gitattributes` filters/eol with the
@@ -1756,6 +1810,7 @@ lib/copilot-review.ts         L7 post-PR Copilot review cycle: bot identity, pay
                               classification, state machine (pure; no IO, no clock, never throws)
 agents/adviser.md             consulting subagent, pinned model @ max (proactively consulted)
 agents/reviewer.md            gatekeeper reviewer override, pinned model @ max
+agents/goal-auditor.md        dedicated loop-GOAL pre-reviewer (read-only tools), pinned model @ max
 lib/model-ranking.ts          leaderboard-scored judge ranking (reference for the pins)
 scripts/fetch-leaderboard.mjs opt-in, gate-external leaderboard fetcher (the only network I/O)
 lib/shell-lex.ts              quote-aware shell lexer (segments + dequoted tokens)
@@ -1773,7 +1828,7 @@ lib/review-stream.ts          streamed findings: append-only jsonl protocol, ver
 lib/verdict-guards.ts         the two READY guards as a pure truth table: snapshot drift + stale reviewed tree (tighten-only)
 lib/parallel-review.ts        review planning only: tiered threshold, shard planner, per-shard prompt, verdict parser, record merger (pure, no engine)
 docs/handoff-remove-pdw.md    step-2 record: the pdw engine was retired from wave + decompose (subagents everywhere)
-docs/subagents-collaboration.md how the gate and pi-subagents cooperate: what is established, what is deliberately NOT used (gate param / worktree isolation), what was added (recommended reviewer models, wave workflowScript skeleton, adviser-hint in the goal block)
+docs/subagents-collaboration.md how the gate and pi-subagents cooperate: what is established, what is deliberately NOT used (gate param / worktree isolation), what was added (recommended reviewer models, wave workflowScript skeleton, the L8b goal pre-review collaboration)
 lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
 lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)

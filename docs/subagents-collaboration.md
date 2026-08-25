@@ -39,6 +39,16 @@
 - `lib/plan-state.ts` 是 `.pi/plan/state.json` 的 schema 权威;planner / module-reviewer / integration reviewer 都由 agent spawn,扩展提供 schema、任务契约与 worklog 约定。
 - 与 mission 机制的关系:wave worklog(`.pi/plan/worklog/`)是 repo 内持久化,pi-subagents 的 mission 是运行时记录;两者互补,不做合并。
 
+### 1.5 目标预审(L8b, 2026-08-25)
+
+| 环节 | 扩展负责(事实) | agent 负责(spawn) | 扩展验证 |
+| --- | --- | --- | --- |
+| 角色可用性 | 会话启动时从探测到的包内 `agents/` 幂等自愈缺失的 KNOWN_AGENTS 文件(`resolvePackageAgentsDir` + `ensureAgentFilesPresent`) | spawn 专职 `goal-auditor` 审目标草案 | `/gate-doctor` 诊断角色是否可派发; 探测失败进诊断与拒绝文案, 绝不静默 no-op |
+| 裁决录入 | — | 把 auditor 的**完整原始输出**交给 `record_goal_prereview` | 扩展自行 `parseReviewOutput` 解析(PASS ⇔ `READY`)并自行 `goalTextHash`; 无可解析 fence ⇒ isError 且不写 sidecar |
+| 用户批准 | 在**弹任何对话框之前**校验 `goalPrereview`(缺失/hash 不匹配 ⇒ isError) | 用与审核时**一字不改**的文本调 `propose_loop_goal` | 批准对话框同时展示预审事实(`goal-auditor 预审: PASS @ …`) |
+
+关键设计:**任何 agent 自证布尔值都不被接受**——工具参数里根本没有 `passed`/`hash`,与 `record_review` 的信任边界一致(伪造整份 auditor 输出仍在非目标内)。
+
 ## 2. 刻意不用的机制(以及为什么)
 
 ### 2.1 pi-subagents 的 `worktree: true` 隔离 — review 不用
@@ -53,13 +63,14 @@
 
 reviewer 在 snapshot 内可以自由 mutation;给它们硬预算会在评审中途被掐断,产出半截 verdict(不可用)。只读角色(recon/triage/worker-readonly)天然短命,不需要预算。
 
-## 3. 本次新增的增强(2026-08-23)
+## 3. 新增的增强(2026-08-23 起, 含 2026-08-25 的 L8b)
 
 ### 3.1 L8 硬 gate:edit/write 前必须先有用户确认的 loop goal
 
 - 之前:loop-goal 只是 prompt 约束("PROMPT-LEVEL ONLY")——agent 可以先编辑、后补目标,ship 时才被拦,协商变成走过场。
 - 现在:`tool_call` 对 `edit`/`write` 硬拦(loop 与 undecided 模式;目标文件所属 repo 各自检查自己的 goal;`.pi/`/`.pi-subagents/` 写入豁免防自举死锁;explore/normal 不拦;敏感文件检查永远最先)。
-- 协作面:拦截文案指引完整协商路径——逐轮提问 → **adviser 预审**(协议要求)→ `propose_loop_goal` 对话框。reviewer 仍逐条验收 goal(criterion → P1 → BLOCKED)。
+- 协作面:拦截文案指引完整协商路径——逐轮提问 → 中文起草 → **`goal-auditor` 预审**→ `record_goal_prereview` → `propose_loop_goal` 对话框。reviewer 仍逐条验收 goal(criterion → P1 → BLOCKED)。
+- **L8b(2026-08-25):预审从协议升级为机械门禁。** 专职 `goal-auditor` 子代理审目标草案,扩展**自行**解析其 JSON fence 裁决(PASS ⇔ `READY`)并自行计算文本 hash 写入 sidecar `goalPrereview`;没有任何 `passed` 参数可供 agent 自证。`propose_loop_goal` 在**弹任何对话框之前**校验该记录,缺失或 hash 不匹配一律 isError 硬拒(fail-closed,无 TTL)。角色缺失不会死锁:会话启动时从探测到的包内 `agents/` 幂等自愈缺失的 KNOWN_AGENTS 文件,探测失败则进 `/gate-doctor` 诊断与拒绝文案。
 - `propose_loop_goal` 确认流程简化:**确认不再弹"可选原因"输入框**(批准本身就是信号);**拒绝仍必填原因**(转达给 agent 供重新协商)。
 
 ### 3.2 prepare_review 返回推荐 model(仅 slot 模式)

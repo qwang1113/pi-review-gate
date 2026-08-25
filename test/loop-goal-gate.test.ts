@@ -34,6 +34,16 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // be found by walking up from the fixture.
 const INSTALL = mkdtempSync(join(tmpdir(), "rg-lg-install-"));
 const dirs: string[] = [INSTALL];
+// HERMETIC HOME for the whole file: session_start renders the model layers and
+// self-heals missing agent files into `~/.pi/agent/agents`, so a test run must
+// never reach the developer's real home (nor depend on their global config).
+// Today the shared INSTALL fixture ships no `agents/` so the probe finds
+// nothing — but that is a property of the fixture, not a guarantee, and this
+// makes the isolation mechanical instead of incidental.
+const TEST_HOME = mkdtempSync(join(tmpdir(), "rg-lg-HOME-"));
+dirs.push(TEST_HOME);
+const REAL_HOME = process.env.HOME;
+process.env.HOME = TEST_HOME;
 before(() => {
   mkdirSync(join(INSTALL, "extensions"), { recursive: true });
   mkdirSync(join(INSTALL, "lib"), { recursive: true });
@@ -45,12 +55,36 @@ before(() => {
   symlinkSync(join(ROOT, "node_modules", "typebox"), join(INSTALL, "node_modules", "typebox"));
 });
 after(() => {
+  if (REAL_HOME === undefined) delete process.env.HOME;
+  else process.env.HOME = REAL_HOME;
   for (const d of dirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* */ }
   }
 });
 
 const { default: reviewGate } = await import(join(INSTALL, "extensions", "review-gate.ts"));
+
+// A SECOND fixture that also ships `agents/`, so the bootstrap self-heal is
+// actually reachable. The shared INSTALL above deliberately has none (its
+// probe returns null), which is why every other test in this file leaves the
+// user's agent dir alone — the heal must only ever be exercised against an
+// isolated HOME, never the developer's real one.
+const INSTALL_WITH_AGENTS = mkdtempSync(join(tmpdir(), "rg-lg-install-agents-"));
+dirs.push(INSTALL_WITH_AGENTS);
+before(() => {
+  mkdirSync(join(INSTALL_WITH_AGENTS, "extensions"), { recursive: true });
+  mkdirSync(join(INSTALL_WITH_AGENTS, "lib"), { recursive: true });
+  mkdirSync(join(INSTALL_WITH_AGENTS, "agents"), { recursive: true });
+  copyFileSync(join(ROOT, "extensions", "review-gate.ts"), join(INSTALL_WITH_AGENTS, "extensions", "review-gate.ts"));
+  for (const f of readdirSync(join(ROOT, "lib"))) {
+    copyFileSync(join(ROOT, "lib", f), join(INSTALL_WITH_AGENTS, "lib", f));
+  }
+  for (const f of readdirSync(join(ROOT, "agents"))) {
+    copyFileSync(join(ROOT, "agents", f), join(INSTALL_WITH_AGENTS, "agents", f));
+  }
+  mkdirSync(join(INSTALL_WITH_AGENTS, "node_modules"), { recursive: true });
+  symlinkSync(join(ROOT, "node_modules", "typebox"), join(INSTALL_WITH_AGENTS, "node_modules", "typebox"));
+});
 
 function git(dir: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
@@ -235,10 +269,231 @@ function editCall(handlers: Map<string, (event: unknown, ctx: unknown) => unknow
   return handlers.get("tool_call")!({ toolName: "edit", input: { path } }, ctx);
 }
 
+/** A goal-auditor reply the EXTENSION will read as a pass (READY, no P0/P1). */
+const AUDITOR_PASS = 'The draft is checkable and scoped.\n\n```json\n{"gate": "READY", "findings": []}\n```';
+/** …and one it must read as a fail. */
+const AUDITOR_FAIL = 'Criterion 1 cannot be judged.\n\n```json\n{"gate": "BLOCKED", "findings": [{"severity": "P1", "issue": "不可检查"}]}\n```';
+
+/** Drive the L8b pre-review exactly like the agent does, before proposing. */
+async function recordPrereview(pi: ToolMap, ctx: unknown, goal: string, repo?: string, output = AUDITOR_PASS) {
+  return tool(pi, "record_goal_prereview")(
+    "id",
+    repo ? { goal, auditor_output: output, repo } : { goal, auditor_output: output },
+    undefined,
+    undefined,
+    ctx,
+  );
+}
+
 async function approveGoal(pi: ToolMap, ctx: unknown, goal: string, repo?: string) {
+  await recordPrereview(pi, ctx, goal, repo);
   const result = await tool(pi, "propose_loop_goal")("id", repo ? { goal, repo } : { goal }, undefined, undefined, ctx);
   assert.equal((result as { details: { approved?: boolean } }).details.approved, true, "goal must be approved by the mock dialog");
 }
+
+test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS — no dialog at all", async () => {
+  // The whole point of the mechanical pre-review: the user must never be asked
+  // to approve a draft no auditor judged. A refusal that still rendered the
+  // dialog would leave the old "protocol the agent can skip" behavior intact.
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const { handlers, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  let dialogs = 0;
+  const shown: string[] = [];
+  const uiCtx = ctx as {
+    ui: {
+      confirm: (t: string, m: string) => Promise<boolean>;
+      // NOTE the signature: notify takes (message, type) — capturing the SECOND
+      // argument here would silently record the severity and leave the
+      // transcript surface untested.
+      notify?: (message: string, type?: string) => unknown;
+    };
+  };
+  const notify = uiCtx.ui.notify?.bind(uiCtx.ui);
+  uiCtx.ui.notify = (message: string, type?: string) => { shown.push(String(message)); return notify?.(message, type); };
+  uiCtx.ui.confirm = async (_t, m) => { dialogs++; shown.push(String(m)); return true; };
+
+  const noAudit = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT }, undefined, undefined, ctx);
+  assert.equal((noAudit as { isError?: boolean }).isError, true, "an unaudited goal must be refused");
+  assert.equal((noAudit as { details: { approved?: boolean } }).details.approved, false);
+  assert.equal(dialogs, 0, "the user must not be asked about an unaudited draft");
+  assert.match(JSON.stringify(noAudit), /record_goal_prereview/, "the refusal must name the recovery path");
+  assert.equal(readSidecar(repo).loopGoal, undefined, "no approval may be recorded");
+  // The isolated HOME has no goal-auditor, so the refusal offers the BOOTSTRAP
+  // remedy — and a project copy must clear it by frontmatter IDENTITY, not by
+  // filename: pi-subagents dispatches project agents by their declared `name`.
+  assert.match(JSON.stringify(noAudit), /BOOTSTRAP/, "a missing role must be called out");
+  const projectAgents = join(repo, ".pi", "agents");
+  mkdirSync(projectAgents, { recursive: true });
+  writeFileSync(join(projectAgents, "custom.md"), "---\nname: goal-auditor\ndescription: local override\n---\nbody\n");
+  const renamedRole = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT }, undefined, undefined, ctx);
+  assert.equal((renamedRole as { isError?: boolean }).isError, true, "still refused — the audit itself is what is missing");
+  assert.doesNotMatch(
+    JSON.stringify(renamedRole),
+    /BOOTSTRAP/,
+    "but a project file DECLARING name: goal-auditor is dispatchable, so the bootstrap remedy must not be offered",
+  );
+  rmSync(projectAgents, { recursive: true, force: true });
+
+  // A FAIL verdict is recorded, but it does not open the dialog either.
+  await recordPrereview(pi, ctx, GOAL_TEXT, undefined, AUDITOR_FAIL);
+  assert.equal((readSidecar(repo).goalPrereview as { verdict?: string } | undefined)?.verdict, "FAIL");
+  const afterFail = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT }, undefined, undefined, ctx);
+  assert.equal((afterFail as { isError?: boolean }).isError, true, "a FAIL keeps the dialog shut");
+  assert.equal(dialogs, 0);
+
+  // An auditor reply with NO parseable fence must record nothing (fail-closed)
+  // — otherwise a truncated or hand-written reply could look like an audit.
+  const unparseable = await recordPrereview(pi, ctx, GOAL_TEXT, undefined, "Looks good to me, ship it.");
+  assert.equal((unparseable as { isError?: boolean }).isError, true);
+  assert.equal((readSidecar(repo).goalPrereview as { verdict?: string } | undefined)?.verdict, "FAIL",
+    "the previous record must survive an unparseable submission");
+
+  // PASS for the audited text opens the dialog — and only for THAT text.
+  await recordPrereview(pi, ctx, GOAL_TEXT);
+  const edited = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT + "\n2. 又一条" }, undefined, undefined, ctx);
+  assert.equal((edited as { isError?: boolean }).isError, true, "editing after the PASS needs a fresh audit");
+  assert.match(JSON.stringify(edited), /DIFFERENT text/);
+  assert.equal(dialogs, 0);
+
+  const approved = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT }, undefined, undefined, ctx);
+  assert.equal((approved as { details: { approved?: boolean } }).details.approved, true);
+  assert.equal(dialogs, 1, "the audited text reaches the user exactly once");
+  // Exit criterion 5: the user must SEE that an independent audit passed — and
+  // see it after the repo binding, which is the consent-critical fact the
+  // dialog budget must never truncate away.
+  // BOTH surfaces must carry it: the transcript echo (notify) is where the
+  // user actually reads the goal, and the dialog is where consent is given.
+  // Asserting only the joined text would let one of them go dark.
+  const carriers = shown.filter((m) => /goal-auditor 预审: PASS @ \d{4}-\d{2}-\d{2}T/.test(m));
+  assert.equal(carriers.length, 2, `both the transcript and the dialog must show the pre-review fact: ${JSON.stringify(shown)}`);
+  for (const surface of carriers) {
+    // Assert the repo binding is PRESENT before comparing positions: with a
+    // bare `indexOf(...) < indexOf(...)` a vanished repo line yields -1, which
+    // is less than any index, so the ordering check would pass vacuously
+    // exactly when the consent-critical fact went missing.
+    const repoAt = surface.indexOf("仓库");
+    const prereviewAt = surface.indexOf("goal-auditor 预审");
+    assert.ok(repoAt >= 0, `the repo binding must be on this surface: ${surface}`);
+    assert.ok(prereviewAt >= 0, `the pre-review line must be on this surface: ${surface}`);
+    assert.ok(
+      repoAt < prereviewAt,
+      "the pre-review line must come AFTER the repo binding on every surface",
+    );
+  }
+});
+
+test("L8b BOOTSTRAP: session start heals a MISSING goal-auditor into the agents dir (idempotently)", async () => {
+  // The role that gates every goal approval must become dispatchable on its
+  // own, or a fresh install deadlocks: no auditor ⇒ no PASS ⇒ no dialog ⇒ (in
+  // loop mode) no edits either. Structural assertions cannot prove that; this
+  // drives the real session_start against an ISOLATED home.
+  const fakeHome = mkdtempSync(join(tmpdir(), "rg-lg-home-"));
+  dirs.push(fakeHome);
+  const realHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  try {
+    const { default: gateWithAgents } = await import(join(INSTALL_WITH_AGENTS, "extensions", "review-gate.ts"));
+    const repo = makeRepo();
+    const pi = makeMockPi(repo);
+    gateWithAgents(pi as never);
+    const agentsDir = join(fakeHome, ".pi", "agent", "agents");
+    assert.equal(existsSync(join(agentsDir, "goal-auditor.md")), false, "precondition: the role is missing");
+
+    await pi.handlers.get("session_start")!({}, pi.ctx);
+    assert.equal(existsSync(join(agentsDir, "goal-auditor.md")), true, "session start must restore the gate-critical role");
+    const healed = readFileSync(join(agentsDir, "goal-auditor.md"), "utf8");
+    assert.match(healed, /name: goal-auditor/, "and it must be the real role file, not an empty placeholder");
+
+    // Idempotent + gaps-only: a local edit must survive the next session start.
+    writeFileSync(join(agentsDir, "goal-auditor.md"), healed + "\n<!-- local note -->\n");
+    await pi.handlers.get("session_start")!({}, pi.ctx);
+    assert.match(
+      readFileSync(join(agentsDir, "goal-auditor.md"), "utf8"),
+      /local note/,
+      "the heal fills gaps; it must never overwrite an existing file",
+    );
+  } finally {
+    if (realHome === undefined) delete process.env.HOME;
+    else process.env.HOME = realHome;
+  }
+});
+
+test("L8b BOOTSTRAP: an unlocatable package agents dir is REPORTED, never a silent no-op", async () => {
+  // Exit criterion 4 in one assertion: when the probe cannot find the package's
+  // own agents/ (the shared INSTALL fixture ships none), the heal must SAY so.
+  // A silent no-op is exactly how a missing gate role turns into an
+  // unexplainable deadlock.
+  const fakeHome = mkdtempSync(join(tmpdir(), "rg-lg-home-quiet-"));
+  dirs.push(fakeHome);
+  const realHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  const problems: string[] = [];
+  try {
+    const repo = makeRepo();
+    const pi = makeMockPi(repo);
+    reviewGate(pi as never);
+    const uiCtx = pi.ctx as { ui: { notify?: (message: string, type?: string) => unknown } };
+    const notify = uiCtx.ui.notify?.bind(uiCtx.ui);
+    uiCtx.ui.notify = (message: string, type?: string) => { problems.push(String(message)); return notify?.(message, type); };
+
+    await pi.handlers.get("session_start")!({}, pi.ctx);
+    assert.equal(
+      existsSync(join(fakeHome, ".pi", "agent", "agents", "goal-auditor.md")),
+      false,
+      "precondition: this fixture ships no agents/, so nothing can be healed",
+    );
+    assert.match(
+      problems.join("\n"),
+      /包内 agents 目录无法定位/,
+      `the failed probe must surface a diagnostic: ${JSON.stringify(problems)}`,
+    );
+  } finally {
+    if (realHome === undefined) delete process.env.HOME;
+    else process.env.HOME = realHome;
+  }
+});
+
+test("L8b: record_goal_prereview refuses an empty goal and a non-repo `repo`, recording nothing", async () => {
+  // Both are dead-approval guards: a record bound to empty text or parked in a
+  // non-repo directory could never satisfy propose_loop_goal, so recording one
+  // would only look like progress.
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const { handlers, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+
+  const empty = await tool(pi, "record_goal_prereview")("id", { goal: "   \n\t ", auditor_output: AUDITOR_PASS }, undefined, undefined, ctx);
+  assert.equal((empty as { isError?: boolean }).isError, true, "an empty draft cannot be audited");
+  assert.equal(readSidecar(repo).goalPrereview, undefined, "nothing may be recorded");
+
+  // Same length cap propose_loop_goal enforces: auditing a draft the approval
+  // tool can never accept would burn a whole audit round for a PASS that is
+  // structurally unusable.
+  const huge = "# 目标\n\n" + "卡".repeat(20001);
+  const tooLong = await tool(pi, "record_goal_prereview")("id", { goal: huge, auditor_output: AUDITOR_PASS }, undefined, undefined, ctx);
+  assert.equal((tooLong as { isError?: boolean }).isError, true, "an over-long draft must be refused BEFORE it is audited");
+  assert.match(JSON.stringify(tooLong), /20000/, "the refusal must name the limit");
+  assert.equal(readSidecar(repo).goalPrereview, undefined, "and record nothing");
+
+  const notARepo = mkdtempSync(join(dirname(repo), "rg-norepo-pre-"));
+  dirs.push(notARepo);
+  const badRepo = await tool(pi, "record_goal_prereview")(
+    "id",
+    { goal: GOAL_TEXT, auditor_output: AUDITOR_PASS, repo: notARepo },
+    undefined, undefined, ctx,
+  );
+  assert.equal((badRepo as { isError?: boolean }).isError, true, "a non-repo path must be refused");
+  assert.equal(readSidecar(repo).goalPrereview, undefined, "and it must not land in the session repo either");
+
+  // NEEDS_HUMAN is a FAIL, not a pass: only READY opens the dialog.
+  const needsHuman = 'Cannot judge this alone.\n\n```json\n{"gate": "NEEDS_HUMAN", "findings": []}\n```';
+  await recordPrereview(pi, ctx, GOAL_TEXT, undefined, needsHuman);
+  assert.equal((readSidecar(repo).goalPrereview as { verdict?: string } | undefined)?.verdict, "FAIL");
+});
 
 test("L8: loop mode with NO confirmed goal blocks edit/write; approval unblocks it", async () => {
   const repo = makeRepo();
@@ -257,7 +512,7 @@ test("L8: loop mode with NO confirmed goal blocks edit/write; approval unblocks 
   assert.ok(blocked && (blocked as { block?: boolean }).block === true,
     "undecided (loop-equivalent) edit must be blocked without a confirmed goal");
   assert.match(JSON.stringify(blocked), /loop goal/, "block must name the goal");
-  assert.match(JSON.stringify(blocked), /adviser/, "block must carry the adviser pre-review hint");
+  assert.match(JSON.stringify(blocked), /goal-auditor/, "block must carry the goal-auditor pre-review step");
 
   // A path-less edit/write call cannot be attributed to a repo, so it must
   // fail closed against the PRIMARY repo's goal (round P2: untested branch).
@@ -409,6 +664,9 @@ test("L8: the confirm path no longer asks for a reason (reject still does)", asy
 
   // Reject path: the input box must still be shown and the reason recorded.
   (ctx as { ui: { confirm: (t: string, m: string) => Promise<boolean> } }).ui.confirm = async () => false;
+  // The revised text is a DIFFERENT draft, so it needs its own audit before
+  // the dialog can be reached at all (L8b binds to content).
+  await recordPrereview(pi, ctx, GOAL_TEXT + "\n(revised)");
   const rejected = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT + "\n(revised)" }, undefined, undefined, ctx);
   assert.equal((rejected as { details: { approved?: boolean } }).details.approved, false);
   assert.equal(inputs, 1, "rejecting a goal must ask for the reason");
@@ -622,6 +880,14 @@ test("L8: propose_loop_goal refuses a NON-repo repo param and shows the binding 
   const refused = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT, repo: notARepo }, undefined, undefined, ctx);
   assert.equal((refused as { isError?: boolean }).isError, true, "a non-repo repo param must be refused");
   assert.equal((refused as { details: { approved?: boolean } }).details.approved, false);
+  // Assert the REASON, not just the shape: L8b's pre-review refusal returns the
+  // same isError/approved:false envelope, so a shape-only assertion would stay
+  // green even if the repo guard were deleted entirely.
+  assert.match(
+    JSON.stringify(refused),
+    /not inside a readable git repository/,
+    "the refusal must be the REPO guard, not the pre-review guard standing in for it",
+  );
 
   // The consent dialog must name the binding repo (repo-scoped approval).
   let dialogText = "";
@@ -630,6 +896,7 @@ test("L8: propose_loop_goal refuses a NON-repo repo param and shows the binding 
     return true;
   };
   const repoB = makeRepo();
+  await recordPrereview(pi, ctx, GOAL_TEXT, repoB);
   await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT, repo: repoB }, undefined, undefined, ctx);
   assert.match(dialogText, new RegExp(repoB.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     "the consent dialog must name the repo the goal binds to");

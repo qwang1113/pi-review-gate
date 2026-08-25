@@ -6,10 +6,10 @@
  * (The pdw engine check was deleted with the engine itself — step 2 of
  * docs/handoff-remove-pdw.md.)
  */
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { diagnoseChain, type ModelChainEntry, type RegistryFacts } from "./model-diagnose.ts";
 import { isModelAllowed } from "./model-allowlist.ts";
-import { projectAgentIdentity, frontmatterBlock } from "./model-config.ts";
+import { projectAgentIdentity, frontmatterBlock, resolvePackageAgentsDir } from "./model-config.ts";
 
 export type DoctorStatus = "PASS" | "FAIL" | "WARN";
 
@@ -355,6 +355,97 @@ export function runnerCandidates(packageRoot: string): string[] {
 }
 
 /**
+ * Absolute path of the postinstall script, for copy that tells a user how to
+ * restore a missing agent role by hand.
+ */
+export function installScriptPath(packageRoot: string): string {
+  return installScriptPathFrom(resolvePackageAgentsDir(), packageRoot);
+}
+
+/**
+ * Pure half of {@link installScriptPath}, with the probe result injected.
+ *
+ * The remediation command is the MANUAL escape hatch out of a bootstrap
+ * deadlock, so a path that does not exist turns the only exit into a
+ * `Cannot find module`. It prefers the PROBED package dir (any copy pointing
+ * at the install script embeds the helper-resolved path) and falls back to the
+ * doctor's own packageRoot — `scripts/` is a sibling of `agents/`, one level
+ * under the package root, never two. Split out so BOTH branches (probe found /
+ * probe failed) are reachable from a test.
+ */
+export function installScriptPathFrom(agentsDir: string | null, packageRoot: string): string {
+  const root = agentsDir ? dirname(agentsDir) : packageRoot;
+  return join(root, "scripts", "install-package.mjs");
+}
+
+/**
+ * Is the `goal-auditor` role dispatchable?
+ *
+ * This one has teeth the other agent files do not: `propose_loop_goal` refuses
+ * to show the approval dialog without a recorded audit from it, so a missing
+ * file means no goal can be approved — and in loop mode an unapproved goal
+ * blocks edits too. The extension self-heals the file at session start; this
+ * check is the observability for the case where the heal could not find the
+ * package's own agents dir (or the user removed the file mid-session).
+ *
+ * BOTH layers are resolved by frontmatter IDENTITY, because that is what
+ * pi-subagents actually dispatches on: a file called custom.md declaring
+ * `name: goal-auditor` IS the role, while a `goal-auditor.md` whose
+ * frontmatter lacks name+description (or names another role) is skipped at
+ * load time. Judging by filename would therefore cut both ways — a false
+ * PASS on a broken file and a false MISSING on a renamed one — in the one
+ * check whose entire job is to catch an undispatchable gate role.
+ */
+export function goalAuditorCheck(deps: DoctorDeps): DoctorCheck {
+  /**
+   * File in `dir` whose frontmatter declares `name: goal-auditor`. LAST match
+   * wins, exactly like pi-subagents' own `projectMap.set(name, agent)` — with
+   * two files claiming the role, this must name the one the runtime deploys.
+   */
+  const identityFileIn = (dir: string): string | undefined => {
+    let found: string | undefined;
+    for (const f of deps.readdir(dir) ?? []) {
+      if (!f.endsWith(".md")) continue;
+      const text = deps.readFile(join(dir, f));
+      if (text && projectAgentIdentity(text) === "goal-auditor") found = join(dir, f);
+    }
+    return found;
+  };
+  const globalFile = identityFileIn(deps.agentsDir);
+  const inGlobal = globalFile !== undefined;
+  const projectIdentityFile = deps.projectAgentsDir ? identityFileIn(deps.projectAgentsDir) : undefined;
+  // IDENTITY ONLY — no filename fallback in either layer: pi-subagents skips a
+  // file whose frontmatter lacks name+description (or declares another role),
+  // so `goal-auditor.md` alone is NOT evidence of dispatchability, and passing
+  // on it would be a false PASS for the one check meant to catch an
+  // undispatchable gate role.
+  const inProject = projectIdentityFile !== undefined;
+  const evidence = [
+    inGlobal
+      ? `found (declares name: goal-auditor): ${globalFile}`
+      : `MISSING: no agent in ${deps.agentsDir} declares name: goal-auditor`,
+    ...(projectIdentityFile ? [`found (by frontmatter name): ${projectIdentityFile}`] : []),
+    ...(deps.projectAgentsDir && !projectIdentityFile
+      ? [`no project agent declares name: goal-auditor in ${deps.projectAgentsDir}`]
+      : []),
+  ];
+  if (inGlobal || inProject) {
+    return { id: "goal-auditor", title: "goal-auditor role is dispatchable (gates goal approval)", status: "PASS", evidence };
+  }
+  return {
+    id: "goal-auditor",
+    title: "goal-auditor role is dispatchable (gates goal approval)",
+    status: "FAIL",
+    evidence,
+    advice: [
+      "start a new session: the extension self-heals missing agent files from the package's agents/ dir",
+      `if it stays missing the package agents dir could not be located (包内 agents 目录无法定位) — re-run the postinstall: node ${installScriptPath(deps.packageRoot)}`,
+      "without it propose_loop_goal cannot be satisfied, and loop mode blocks edits on an unapproved goal",
+    ],
+  };
+}
+
+/**
  * Build RegistryFacts from the session model registry, falling back to disk
  * files (~/.pi/agent/models-store.json + auth.json) when the registry is
  * empty. Same contract as the extension's modelDiagnosisLines facts.
@@ -519,6 +610,7 @@ export async function runGateDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   const gh = await deps.probeGh();
   return [
     modelChainCheck(deps),
+    goalAuditorCheck(deps),
     checkOpencodeGoStore(deps.readFile(deps.modelsStorePath), deps.exists(`${deps.modelsStorePath}.bak`)),
     checkGlobalConfig(deps.readFile(deps.globalConfigPath)),
     checkPrecommitRunner(runnerCandidates(deps.packageRoot), deps.exists),
