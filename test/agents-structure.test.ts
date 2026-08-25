@@ -35,13 +35,36 @@ test("agents/*.md exactly matches KNOWN_AGENTS (config/render see every agent)",
   const files = readdirSync(AGENTS).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, "")).sort();
   const known = [...KNOWN_AGENTS].sort();
   assert.deepEqual(files, known, "shipped agents must equal KNOWN_AGENTS");
-  assert.ok(files.length >= 11, `expected all 11 agents, found ${files.length}`);
+  assert.ok(files.length >= 12, `expected all 12 agents, found ${files.length}`);
 });
 
-test("L3 judges (reviewer/adviser/arbiter/module-reviewer) think at max — the verdict tier never degrades", () => {
-  for (const f of ["reviewer.md", "adviser.md", "arbiter.md", "module-reviewer.md"]) {
+test("L3 judges (reviewer/adviser/arbiter/module-reviewer/goal-auditor) think at max — the verdict tier never degrades", () => {
+  for (const f of ["reviewer.md", "adviser.md", "arbiter.md", "module-reviewer.md", "goal-auditor.md"]) {
     assert.match(frontmatter(f), /^thinking: max$/m, `${f}: L3 must think at max`);
   }
+});
+
+test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its verdict", () => {
+  // It gates every goal approval, so a silent downgrade to a cheap model (or a
+  // write-capable tool list) would weaken the one judgement the user relies on
+  // before granting the session's exit contract.
+  const body = frontmatter("goal-auditor.md");
+  assert.match(body, /^model: claude-fable-5$/m, "the goal auditor must stay on the strong judging chain");
+  assert.match(body, /^fallbackModels: claude-opus-5, opencode-go\/deepseek-v4-flash$/m, "same fallback chain as the other judges");
+  assert.doesNotMatch(body, /tools:.*\b(edit|write|bash)\b/, "the auditor audits text; it must not be able to write");
+  const src = readFileSync(join(AGENTS, "goal-auditor.md"), "utf8");
+  // Its output IS the gate record, so the two rules the parser depends on must
+  // be stated: exactly one fence, and never a quoted example fence (the parser
+  // keeps the WORST verdict across all fences).
+  assert.match(src, /exactly ONE/i, "the prompt must demand a single fence");
+  assert.match(src, /[Nn]ever quote an example verdict fence/, "a quoted BLOCKED example would poison a real PASS");
+  assert.match(src, /Simplified Chinese/, "the goal-language rule lives in the auditor's checklist");
+  // The file must itself OBEY the rule it teaches: `parseReviewOutput` scans
+  // every fence and keeps the worst, and a system prompt is quoted back by
+  // models, so an example fence here can poison a real PASS. Zero fences — the
+  // verdict shape is shown unfenced ON PURPOSE.
+  const fences = (src.match(/^```/gm) ?? []).length;
+  assert.equal(fences, 0, `the auditor prompt must contain NO code fences, found ${fences}`);
 });
 
 test("L1 triage is read-only, cheap-tier, low-thinking, and defined without verdict power", () => {
@@ -199,28 +222,50 @@ test("L2 execution fallbacks span families and include the cheap-but-strong flas
 
 // ── Cross-review protocol: goal pre-review + default two-reviewer final ────
 
-test("SKILL.md and AGENTS.md document the merged pre-goal adviser pre-review pass", () => {
+test("SKILL.md and AGENTS.md document the MECHANICAL goal pre-review (goal-auditor)", () => {
   for (const file of [SKILL_MD, AGENTS_MD]) {
     const src = readFileSync(file, "utf8");
-    // The merged goal pre-review rule (2026-08-18): ONE independent adviser,
-    // "pass" = no unresolved P1, submitted via propose_loop_goal — and NO stray
-    // "cross-family reviewer" pre-goal rule may remain (one rule, not two).
-    assert.match(
-      src,
-      /ONE\s+independent[^.]{0,60}(adviser)[^.]{0,60}review/i,
-      `${file} must document the adviser goal pre-review`,
-    );
-    assert.match(src, /no\s+unresolved\s+P1/i, `${file} must define "pass" = no unresolved P1`);
+    // 2026-08-25: the pre-review is no longer protocol the agent could skip.
+    // The docs must name the dedicated role, the recording tool and the
+    // refusal — a doc that only says "consult someone first" would describe
+    // the retired, skippable rule.
+    assert.match(src, /goal-auditor/, `${file} must name the dedicated goal-auditor role`);
+    assert.match(src, /record_goal_prereview/, `${file} must name the tool that records the audit`);
     assert.match(src, /propose_loop_goal/i, `${file} must reference propose_loop_goal`);
-    // The old rule's EXECUTABLE wording must be gone: the retired SKILL.md
-    // heading ("Pre-review the draft goal (single cross-family reviewer)")
-    // AND the old AGENTS.md imperative ("run the draft goal through ONE
-    // cross-family reviewer"). A HISTORICAL mention ("replaces the earlier
-    // ... pre-review") is fine and must stay — the gate is one rule, not two.
+    // Scoped to the PRE-REVIEW passage, not the whole file: a file-wide match
+    // for "refuses" or "Simplified Chinese" is satisfied by unrelated prose
+    // elsewhere, so deleting the rule itself would leave these green (the same
+    // "a bare match is vacuous" standard this file already applies below).
+    // Anchored on the RECORDING TOOL — the token that only appears where the
+    // mechanical rule is described ("goal-auditor" alone also names the role in
+    // model-tier tables and role rosters). A file may mention the tool more
+    // than once, so EVERY occurrence gets a window and the rule must hold in at
+    // least one of them: that keeps the assertion honest (deleting the rule
+    // fails it) without breaking when the tool is referenced elsewhere.
+    const windows: string[] = [];
+    for (let i = src.indexOf("record_goal_prereview"); i !== -1; i = src.indexOf("record_goal_prereview", i + 1)) {
+      windows.push(src.slice(Math.max(0, i - 1500), i + 2000));
+    }
+    assert.ok(windows.length > 0, `${file} must contain the pre-review passage`);
+    // Each rule is checked against the BEST window for that rule, so a failure
+    // names the rule that is actually missing instead of blaming whichever one
+    // the combined window happened to miss.
+    assert.ok(
+      windows.some((w) => /refuse|refuses|拒绝/i.test(w)),
+      `${file} must state IN THE PRE-REVIEW PASSAGE that propose_loop_goal REFUSES without a matching PASS`,
+    );
+    // The language rule the user added (2026-08-25).
+    assert.ok(
+      windows.some((w) => /Simplified Chinese|简体中文/i.test(w)),
+      `${file} must carry the Chinese goal-text rule where the pre-review is described`,
+    );
+    // The retired rules' EXECUTABLE wording must be gone: neither the old
+    // cross-family pre-goal reviewer nor the adviser-authoritative merge may
+    // still read as the operative instruction (a HISTORICAL mention is fine).
     assert.doesNotMatch(
       src,
-      /(pre-review the draft goal \(single cross.family|draft goal through (ONE|one) cross[.\s-]*family\s+reviewer)/i,
-      `${file} must not keep the old cross-family pre-goal rule`,
+      /(pre-review the draft goal \(single cross.family|draft goal through (ONE|one) cross[.\s-]*family\s+reviewer|must pass ONE\s+independent `?adviser)/i,
+      `${file} must not keep a retired pre-goal rule as the operative instruction`,
     );
   }
 });
@@ -342,12 +387,17 @@ test("REGRESSION: every re-review must carry the previous round's conclusion", (
       /carries\s+the\s+previous\s+round's\s+conclusion/i,
       `${file} must require re-reviews to carry the previous conclusion`,
     );
-    // Specific enough to actually lock the ADVISER's goal re-review: a bare
-    // /adviser/ match is vacuous in files that name the agent many times.
+    // Specific enough to actually lock the AUDITOR's goal re-audit: a bare
+    // /goal-auditor/ match is vacuous in files that name the role many times.
     assert.match(
       src,
-      /adviser[^.]{0,400}?(objection|goal re-review)|goal re-review[^.]{0,200}?adviser/is,
-      `${file} must require the adviser's goal re-review to carry its own objections`,
+      // `re-review` must not match inside "pre-reviewer" (a word both files use
+      // for the ROLE), or the rule this locks could be deleted with the test
+      // still green — hence the word boundary and the required "objection".
+      // The span crosses sentence boundaries (the rule is a heading followed by
+      // its explanation), so it is bounded by DISTANCE, not by `[^.]`.
+      /goal re-(audit|review)\b[\s\S]{0,400}?objection|goal-auditor[\s\S]{0,400}?\bobjection/is,
+      `${file} must require the goal-auditor's re-audit to carry its own objections`,
     );
     assert.match(
       src,
@@ -392,8 +442,11 @@ test("the read-only reviewer variant CANNOT write, and says why it exists", () =
   // USER-APPROVED goal may become an acceptance contract, and prepare_review
   // gates that injection on loopGoalConfirmed(). A defaultRead would hand the
   // judge the RAW file instead — an unapproved draft included (round-3 P2: the
-  // removal was unlocked, so re-adding the entry broke no test). The adviser is
-  // deliberately excluded: it pre-reviews the DRAFT goal, which is its job.
+  // removal was unlocked, so re-adding the entry broke no test). Two roles are
+  // deliberately excluded: `adviser` consults on a draft goal, and
+  // `goal-auditor` AUDITS the draft — reading the raw (possibly unapproved)
+  // file is precisely their job, while an ACCEPTANCE judge must only ever see
+  // the text the user approved, handed to it in the spawn task.
   for (const judge of ["reviewer.md", "reviewer-readonly.md", "module-reviewer.md", "arbiter.md"]) {
     const reads = frontmatter(judge).split("\n").find((l) => l.startsWith("defaultReads:")) ?? "";
     assert.doesNotMatch(

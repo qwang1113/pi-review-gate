@@ -170,7 +170,10 @@ import {
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
   loopGoalEditGate,
+  goalPrereviewPassed,
+  buildGoalPrereviewRefusal,
 } from "../lib/loop-goal.ts";
+import type { GoalPrereviewRecord } from "../lib/loop-goal.ts";
 import {
   assessRequirementSize,
   buildDecomposeSuggestion,
@@ -203,6 +206,8 @@ import {
   KNOWN_AGENTS,
   projectAgentIdentity,
   frontmatterBlock,
+  resolvePackageAgentsDir,
+  ensureAgentFilesPresent,
 } from "../lib/model-config.ts";
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
 import {
@@ -1209,6 +1214,27 @@ export default function reviewGate(pi: ExtensionAPI) {
     const problems: string[] = [];
     try {
       const packageRoot = pathDirname(fileURLToPath(import.meta.url));
+      // The package's own agents/ directory, found by PROBING the install
+      // layouts (resolvePackageAgentsDir) rather than trusting one relative
+      // path: `<packageRoot>/../agents` is only correct in some layouts, and a
+      // source that silently fails to resolve turns both the render and the
+      // self-heal below into no-ops. Resolved ONCE and shared, so the renderer
+      // and the heal can never disagree about where the defaults live — the
+      // legacy relative path stays as a last-resort fallback for both.
+      const probedAgentsDir = resolvePackageAgentsDir();
+      const packageAgentsDir = probedAgentsDir ?? pathJoin(packageRoot, "..", "agents");
+      const globalAgentsDir = pathJoin(homedir(), ".pi", "agent", "agents");
+      // BOOTSTRAP SELF-HEAL (before any rendering): a role the gate REQUIRES —
+      // goal-auditor gates every goal approval — must be dispatchable, or the
+      // session deadlocks with no exit but switching the gate off. Filling only
+      // the GAPS is idempotent and never clobbers a configured chain.
+      const healed = ensureAgentFilesPresent({
+        sourceDir: existsSync(packageAgentsDir) ? packageAgentsDir : null,
+        targetDir: globalAgentsDir,
+        agents: KNOWN_AGENTS,
+      });
+      if (healed.copied.length > 0) log(`self-healed missing agent files: ${healed.copied.join(", ")}`);
+      problems.push(...healed.problems);
       // Global layer. A CORRUPT config file keeps the last good render:
       // treating it as "no agents section" would sweep every generated chain
       // back to the upstream default and clobber the last valid render
@@ -1221,10 +1247,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         problems.push(...projectConfig.agentsDiagnostics.filter((d) => d.startsWith("global:")));
         const res = applyAgentConfigLayer({
           agents: map,
-          targetDir: pathJoin(homedir(), ".pi", "agent", "agents"),
+          targetDir: globalAgentsDir,
           // Infrastructure layer: restore the upstream default on cleanup.
           restoreDefault: true,
-          sourceDir: pathJoin(packageRoot, "..", "agents"),
+          sourceDir: packageAgentsDir,
           registry: modelConfigRegistry(ctx),
         });
         problems.push(...res.errors, ...res.warnings);
@@ -1278,7 +1304,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // Project-layer base is the BUILT-IN default (package agents dir),
           // NEVER the already-rendered global layer — a global auto:false slot
           // render must not leak into a project auto:true shadow (round-7 P1).
-          sourceDir: pathJoin(packageRoot, "..", "agents"),
+          sourceDir: packageAgentsDir,
           registry: modelConfigRegistry(ctx),
         });
         problems.push(...res.errors, ...res.warnings);
@@ -3880,6 +3906,127 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
+  // ---------- record_goal_prereview tool (L8b — the goal-auditor's verdict) ----------
+
+  pi.registerTool({
+    name: "record_goal_prereview",
+    label: "Record Goal Pre-review",
+    description:
+      "Record the dedicated `goal-auditor` subagent's audit of a DRAFT loop goal. propose_loop_goal " +
+      "refuses to show the user's approval dialog until this records a PASS for the IDENTICAL text, " +
+      "so the flow is: draft (in Simplified Chinese) → dispatch goal-auditor with that draft → record " +
+      "its FULL raw output here → propose_loop_goal. The EXTENSION parses the auditor's JSON fence " +
+      "itself (PASS only for a READY verdict; a fence with unresolved P0/P1 is already downgraded to " +
+      "BLOCKED) and hashes the draft itself — there is no `passed` parameter you could set, and a " +
+      "hand-written verdict is not a review. A FAIL means: fix the objections, re-audit the revised " +
+      "text (its hash differs, so it needs its own PASS).",
+    parameters: Type.Object({
+      goal: Type.String({ description: "The FULL draft goal text that was audited (the exact text you will submit)" }),
+      auditor_output: Type.String({ description: "Complete raw output from the goal-auditor subagent" }),
+      repo: Type.Optional(Type.String({
+        description:
+          "Absolute path of the repo this goal binds to (default: the session repo) — must match the " +
+          "repo you pass to propose_loop_goal.",
+      })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const goalText = normalizeGoalText(String(params.goal ?? ""));
+      if (goalText.length === 0) {
+        return {
+          content: [{ type: "text", text: "review-gate: record_goal_prereview rejected — the goal text is empty." }],
+          details: { recorded: false },
+          isError: true,
+        };
+      }
+      // Same cap as propose_loop_goal: auditing a draft the approval tool can
+      // never accept would burn a full audit round to produce a PASS that is
+      // structurally unusable.
+      if (goalText.length > LOOP_GOAL_MAX_WRITE_CHARS) {
+        return {
+          content: [{
+            type: "text",
+            text: `review-gate: record_goal_prereview rejected — the goal is ${goalText.length} chars, over the ` +
+              `${LOOP_GOAL_MAX_WRITE_CHARS} limit propose_loop_goal enforces. Shorten it BEFORE auditing: an ` +
+              "exit contract is 3–7 checkable criteria, not a design doc.",
+          }],
+          details: { recorded: false },
+          isError: true,
+        };
+      }
+      // SAME resolution as propose_loop_goal, deliberately NOT resolveToolRepo:
+      // that helper requires a repo the session already EDITED, but a goal (and
+      // therefore its audit) is recorded before the first edit lands. Using it
+      // here would make a second repo's goal impossible to pre-review — a dead
+      // end with no way out.
+      let goalRoot = primaryRepoRoot;
+      const rawRepo = String(params.repo ?? "").trim();
+      if (rawRepo) {
+        const abs = pathResolve(cwd, rawRepo);
+        const root = gitRootOfDir(abs);
+        if (!root) {
+          return {
+            content: [{
+              type: "text",
+              text: `review-gate: repo "${rawRepo}" (resolved ${abs}) is not inside a readable git repository — ` +
+                "a goal pre-review can only bind to a real repo.",
+            }],
+            details: { recorded: false },
+            isError: true,
+          };
+        }
+        goalRoot = root;
+      }
+      const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
+
+      // The EXTENSION reads the verdict; the agent only carries the output.
+      // parseReviewOutput already encodes the two rules that matter here: a
+      // READY carrying unresolved P0/P1 is contradictory and becomes BLOCKED,
+      // and a fence we could not fully parse can never come back READY.
+      const parsed = parseReviewOutput(params.auditor_output);
+      if (!parsed) {
+        return {
+          content: [{
+            type: "text",
+            text: "review-gate: no recognizable verdict in the goal-auditor's output — NOTHING was recorded " +
+              "(fail-closed). The auditor must end its reply with exactly ONE fenced JSON verdict, e.g.\n" +
+              `\`\`\`json\n{"gate":"READY"|"BLOCKED","findings":[{"severity":"P1","issue":"…"}]}\n\`\`\`\n` +
+              "Common causes: the reply was pure prose with no fence, it was truncated before the fence, " +
+              "or an unescaped straight quote inside a string broke the JSON. Re-run the audit — do not " +
+              "hand-write the verdict.",
+          }],
+          details: { recorded: false },
+          isError: true,
+        };
+      }
+      const passed = parsed.verdict === "READY";
+      const record: GoalPrereviewRecord = {
+        hash: goalTextHash(goalText),
+        verdict: passed ? "PASS" : "FAIL",
+        at: new Date().toISOString(),
+        findingsTotal: parsed.findingsTotal,
+      };
+      // Latest-only by design: an audit of a DIFFERENT draft replaces this one,
+      // so the record always describes the text most recently judged.
+      goalSt.goalPrereview = record;
+      if (goalRoot === primaryRepoRoot) persist(ctx as unknown as ExtensionContext);
+      else persistRepo(ctx as unknown as ExtensionContext, goalRoot);
+      log(`goal pre-review recorded for ${goalRoot}: ${record.verdict} (${goalText.length} chars, findings: ${parsed.findingsTotal ?? "unparseable"})`);
+      return {
+        content: [{
+          type: "text",
+          text: passed
+            ? `review-gate: goal pre-review PASS recorded (${record.hash.slice(0, 12)}…). Call propose_loop_goal with ` +
+              "the IDENTICAL text — any edit changes the hash and needs a fresh audit."
+            : `review-gate: goal pre-review FAIL recorded (verdict ${parsed.verdict}, ` +
+              `${parsed.findingsTotal ?? "unparseable"} findings). propose_loop_goal stays blocked: fix the ` +
+              "auditor's P0/P1 objections, then re-audit the revised draft (hand it the previous draft, its " +
+              "objections, and what you changed for each).",
+        }],
+        details: { recorded: true, verdict: record.verdict, findingsTotal: parsed.findingsTotal ?? null },
+      };
+    },
+  });
+
   // ---------- propose_loop_goal tool (L8 — the user approves the contract) ----------
 
   pi.registerTool({
@@ -3889,7 +4036,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       "Submit the NEGOTIATED loop goal (this session's exit contract) for the user's approval. " +
       "Interview the user first — ONE question per turn, labeled \"N of M\", each with your " +
       "recommended answer (all at once only when the user asks for it) — and only " +
-      "submit what they actually agreed to. The extension shows the text in a confirmation " +
+      "submit what they actually agreed to. Write the goal in SIMPLIFIED CHINESE (technical " +
+      "identifiers, paths and code tokens stay English). REQUIRED FIRST: the draft must pass a " +
+      "dedicated `goal-auditor` audit recorded via record_goal_prereview — this tool refuses " +
+      "(no dialog at all) unless the sidecar holds a PASS for the IDENTICAL text. " +
+      "The extension shows the text in a confirmation " +
       "dialog and, if the user approves, writes .pi/loop-goal.md itself and records the approval. " +
       "Writing that file yourself grants nothing: in loop mode an unapproved goal blocks " +
       "commit/push/PR and its body is withheld from your prompt. Shape: task title, one-line " +
@@ -3955,6 +4106,44 @@ export default function reviewGate(pi: ExtensionAPI) {
         goalRoot = root;
       }
       const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
+
+      // L8b GOAL PRE-REVIEW — fail-closed, and BEFORE any user-facing surface.
+      // The user should only ever be asked about a draft a dedicated auditor
+      // already judged: without this the pre-review was protocol the agent
+      // could simply skip, and the dialog is exactly what it would skip it for.
+      // Placed ahead of showToUser/confirm so a refusal costs the user nothing
+      // — no transcript spam, no dialog, no file write.
+      if (!goalPrereviewPassed(goalSt.goalPrereview, goalText)) {
+        const packageAgentsDir = resolvePackageAgentsDir();
+        // Dispatchability is what matters, not a filename: pi-subagents keys
+        // agents by their frontmatter `name`, so a copy called custom.md that
+        // declares `name: goal-auditor` IS dispatchable and must not be
+        // reported as missing. EVERY layer is resolved that way — the same
+        // rule gate-doctor applies — so the two never disagree.
+        const auditorInstalled =
+          findProjectAgentText(pathJoin(homedir(), ".pi", "agent", "agents"), "goal-auditor") !== undefined ||
+          // Both project layers are consulted: pi-subagents loads them from the
+          // SESSION's project root, while a multi-repo goal binds to goalRoot —
+          // checking only one of them would show (or hide) the bootstrap hint
+          // against the wrong directory. This flag is advisory copy only; it
+          // never affects the refusal itself.
+          [pathJoin(goalRoot, ".pi", "agents"), pathJoin(primaryRepoRoot, ".pi", "agents")]
+            .some((dir) => findProjectAgentText(dir, "goal-auditor") !== undefined);
+        return {
+          content: [{
+            type: "text",
+            text: buildGoalPrereviewRefusal({
+              ...(goalSt.goalPrereview ? { record: goalSt.goalPrereview } : {}),
+              goalText,
+              auditorInstalled,
+              repoRoot: goalRoot,
+              packageAgentsDir,
+            }),
+          }],
+          details: { approved: false, prereview: goalSt.goalPrereview?.verdict ?? "NONE" },
+          isError: true,
+        };
+      }
       // The goal text goes to the TRANSCRIPT; the binding repo must be shown
       // at CONSENT time (both surfaces), so a repo-scoped approval is never
       // given for a repo the user was not shown.
@@ -3972,13 +4161,26 @@ export default function reviewGate(pi: ExtensionAPI) {
       // made the terminal flicker). ui.notify renders synchronously, so it is
       // on screen BEFORE the dialog below asks about it; the dialog that
       // follows carries only the decision.
-      showToUser(uiCtx, GOAL_CONFIRM_TITLE, buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine);
+      // The pre-review fact is shown to the USER too: the approval is more
+      // informed when it is visible that an independent auditor already passed
+      // THIS text. It goes AFTER the repo line on purpose — the dialog budget
+      // truncates from the tail, and the repo binding is the consent-critical
+      // fact that must never be the thing that gets cut.
+      // The record is guaranteed to exist here: goalPrereviewPassed() above
+      // already required a PASS bound to this text, so this reads it directly
+      // rather than advertising a fallback state that cannot occur.
+      const prereviewLine = "goal-auditor 预审: PASS @ " + goalSt.goalPrereview!.at;
+      showToUser(
+        uiCtx,
+        GOAL_CONFIRM_TITLE,
+        buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" + prereviewLine,
+      );
       let approved = false;
       try {
         approved = await confirmBounded(
           uiCtx,
           GOAL_CONFIRM_TITLE,
-          buildGoalConfirmMessage(goalText, "绑定仓库(不可信数据): " + repoLine),
+          buildGoalConfirmMessage(goalText, "绑定仓库(不可信数据): " + repoLine + "\n" + prereviewLine),
           "（目标全文见上方消息）",
         );
       } catch {
@@ -5252,11 +5454,14 @@ export default function reviewGate(pi: ExtensionAPI) {
                 "question, call pause_for_question and END the turn — do not re-ask; the user's " +
                 "next message resumes the loop. Otherwise interview the user now, ONE question per " +
                 "turn labeled \"N of M\" (each with your recommended answer; all at once only when " +
-                "the user asks for it), then call propose_loop_goal for approval. " +
+                "the user asks for it), draft it in Simplified Chinese, get it through the " +
+                "`goal-auditor` audit (record_goal_prereview), then call propose_loop_goal for " +
+                "approval. " +
                 "Do not summarize; execute."
               : "Continue: work these off — Copilot threads get a fix + resolve or a reply explaining " +
-                "why not (check_copilot_review verifies), an unapproved goal gets negotiated and " +
-                "submitted via propose_loop_goal. If you already asked the user a question and are " +
+                "why not (check_copilot_review verifies), an unapproved goal gets negotiated, " +
+                "drafted in Simplified Chinese, audited by `goal-auditor` (record_goal_prereview) and " +
+                "only then submitted via propose_loop_goal. If you already asked the user a question and are " +
                 "waiting on their answer (e.g. grill questions), call pause_for_question and END the " +
                 "turn instead of re-asking. Do not summarize; execute.")) +
         (!sessionEdited && !state.scopeLimit

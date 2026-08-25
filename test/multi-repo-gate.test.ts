@@ -30,6 +30,13 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // does not reach the repo, and a global /tmp/node_modules only helps when
 // tmpdir() IS /tmp).
 const INSTALL = mkdtempSync(join(tmpdir(), "rg-ext-install-"));
+// HERMETIC HOME (same rationale as loop-goal-gate.test.ts): session_start
+// renders model layers and self-heals agent files into `~/.pi/agent/agents`,
+// so the suite must never touch the developer's real home or depend on their
+// global config.
+const TEST_HOME = mkdtempSync(join(tmpdir(), "rg-ext-HOME-"));
+const REAL_HOME = process.env.HOME;
+process.env.HOME = TEST_HOME;
 before(() => {
   mkdirSync(join(INSTALL, "extensions"), { recursive: true });
   mkdirSync(join(INSTALL, "lib"), { recursive: true });
@@ -41,6 +48,9 @@ before(() => {
   symlinkSync(join(ROOT, "node_modules", "typebox"), join(INSTALL, "node_modules", "typebox"));
 });
 after(() => {
+  if (REAL_HOME === undefined) delete process.env.HOME;
+  else process.env.HOME = REAL_HOME;
+  try { rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* */ }
   for (const d of [INSTALL, ...(globalThis as { __rgDirs?: string[] }).__rgDirs ?? []]) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* */ }
   }

@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
-import type { LoopGoalConfirmation } from "./loop-goal.ts";
+import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
 import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
@@ -217,6 +217,17 @@ export interface GateState {
    * keep judging code facts only.
    */
   loopGoal?: LoopGoalConfirmation;
+  /**
+   * L8b: the goal-auditor PRE-REVIEW of the current draft (hash + verdict +
+   * time, written only by record_goal_prereview after the EXTENSION parsed the
+   * auditor's JSON fence — never an agent-attested boolean).
+   *
+   * Absent ⇒ the draft was never audited: propose_loop_goal refuses to show
+   * the approval dialog. Like {@link loopGoal} it stays out of
+   * {@link unmetRequirements} — the git hooks cannot show a dialog, so a
+   * pre-review requirement there could never be unblocked.
+   */
+  goalPrereview?: GoalPrereviewRecord;
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of
    *  them. Ship enforcement never reads it; absence just narrows the
@@ -365,6 +376,24 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
          typeof parsed.loopGoal.at !== "string" ||
          (parsed.loopGoal.reason !== undefined && typeof parsed.loopGoal.reason !== "string"))) {
       delete parsed.loopGoal;
+    }
+    // L8b: a MALFORMED pre-review record is treated as ABSENT — fail-closed
+    // here means "never audited", so a truncated or shape-broken record costs
+    // one fresh goal-auditor round instead of opening a dialog. This is a
+    // SHAPE check, not an anti-forgery one: a well-formed record whose hash
+    // matches the submitted text is honoured, exactly like `loopGoal`
+    // (fabricating one is the same excluded class as writing the sidecar
+    // directly — see the threat model in the README).
+    if (parsed.goalPrereview !== undefined &&
+        (typeof parsed.goalPrereview !== "object" || parsed.goalPrereview === null ||
+         typeof parsed.goalPrereview.hash !== "string" ||
+         !/^[0-9a-f]{64}$/.test(parsed.goalPrereview.hash) ||
+         (parsed.goalPrereview.verdict !== "PASS" && parsed.goalPrereview.verdict !== "FAIL") ||
+         typeof parsed.goalPrereview.at !== "string" ||
+         (parsed.goalPrereview.findingsTotal !== undefined &&
+          parsed.goalPrereview.findingsTotal !== null &&
+          typeof parsed.goalPrereview.findingsTotal !== "number"))) {
+      delete parsed.goalPrereview;
     }
     const migrated = migrateFingerprintVersion(parsed);
     if (out) out.migrated = migrated;

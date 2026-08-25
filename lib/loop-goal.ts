@@ -95,6 +95,32 @@ export interface LoopGoalConfirmation {
 }
 
 /**
+ * The sidecar record of "the dedicated `goal-auditor` role pre-reviewed THIS
+ * exact draft" (L8b — written only by record_goal_prereview).
+ *
+ * The verdict is the EXTENSION's own reading of the auditor's JSON fence
+ * (parseReviewOutput), never a boolean the agent attested: an agent-supplied
+ * `passed` flag would make the pre-review a self-certification, which is the
+ * hole this record exists to close. Like {@link LoopGoalConfirmation} it binds
+ * to CONTENT — the hash of the text that was judged — so revising the draft
+ * after a PASS drops the pass, which is exactly the "fix it and re-review"
+ * loop the protocol asks for.
+ *
+ * Only the LATEST audit is kept (latest-only by design): recording a FAIL for
+ * draft B after a PASS for draft A means draft A needs a fresh audit.
+ */
+export interface GoalPrereviewRecord {
+  /** sha256 of the NORMALIZED draft text the auditor judged (goalTextHash). */
+  hash: string;
+  /** PASS ⇔ the extension parsed a READY verdict from the auditor's output. */
+  verdict: "PASS" | "FAIL";
+  /** ISO time the extension recorded this audit. */
+  at: string;
+  /** Findings the auditor reported (null when the fence was unparseable). */
+  findingsTotal?: number | null;
+}
+
+/**
  * Canonical form the hash is taken over: line endings unified and outer
  * whitespace trimmed, so a trailing newline or a CRLF checkout does not
  * invalidate a goal the user really did approve. Anything else — a reworded
@@ -127,6 +153,84 @@ export function isLoopGoalConfirmed(
   const text = fileText ?? (goal.truncated ? undefined : goal.text);
   if (text === undefined) return false;
   return goalTextHash(text) === confirmation.hash;
+}
+
+/**
+ * L8b decision: may `propose_loop_goal` show the approval dialog for this text?
+ *
+ * Fail-closed on every uncertainty — no record, a FAIL record, or a record
+ * bound to DIFFERENT text all mean "not pre-reviewed". There is deliberately
+ * no TTL: the binding is to content, so an old PASS for the identical text is
+ * still a PASS for that text, and any edit invalidates it by hash.
+ */
+export function goalPrereviewPassed(
+  record: GoalPrereviewRecord | undefined,
+  goalText: string,
+): boolean {
+  if (!record || record.verdict !== "PASS") return false;
+  return goalTextHash(goalText) === record.hash;
+}
+
+/** Inputs for {@link buildGoalPrereviewRefusal} — all facts the EXTENSION derived. */
+export interface GoalPrereviewRefusalContext {
+  /** The pre-review record for the target repo (absent ⇒ never audited). */
+  record?: GoalPrereviewRecord;
+  /** The goal text that was just submitted. */
+  goalText: string;
+  /** Is `goal-auditor.md` dispatchable (present in a global/project agents dir)? */
+  auditorInstalled: boolean;
+  /** Package agents dir, or null when the layout probe could not locate it. */
+  packageAgentsDir: string | null;
+  /**
+   * Repo the record was looked up in. A multi-repo session records the audit
+   * per repo, so an anonymous "for this repo" leaves the agent guessing WHICH
+   * one is missing it — the same trap the edit gate's repo hint exists for.
+   */
+  repoRoot?: string;
+}
+
+/**
+ * Agent-facing refusal copy for a goal submitted without a matching PASS.
+ *
+ * It has to answer three questions at once, or the agent burns a round
+ * guessing: WHY this was refused (missing vs. hash-mismatched), HOW to fix it
+ * (the full recovery path), and — when the mismatch is invisible — WHAT text
+ * the recorded hash belongs to. Trailing whitespace inside a line survives
+ * normalizeGoalText, so "the same text" can hash differently with nothing to
+ * see; echoing both hash prefixes plus the submitted first line makes that
+ * diagnosable instead of maddening.
+ */
+export function buildGoalPrereviewRefusal(ctx: GoalPrereviewRefusalContext): string {
+  const submittedHash = goalTextHash(ctx.goalText);
+  const firstLine = normalizeGoalText(ctx.goalText).split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+  const why = !ctx.record
+    ? `no goal-auditor pre-review has been recorded for ${ctx.repoRoot ?? "this repo"}`
+    : ctx.record.verdict !== "PASS"
+      // Echo BOTH hashes here too: a FAIL recorded for a DIFFERENT draft would
+      // otherwise read as "your draft failed" and send the agent off fixing
+      // objections that were never raised against this text.
+      ? `the last recorded pre-review for ${ctx.repoRoot ?? "this repo"} is FAIL (recorded ${ctx.record.hash.slice(0, 12)}… at ${ctx.record.at}, submitted ${submittedHash.slice(0, 12)}…)` +
+        (ctx.record.hash === submittedHash
+          ? " — the auditor's objections against THIS text are not resolved yet"
+          : " — note the hashes differ: that FAIL was recorded for ANOTHER draft, so this text has never been audited")
+      : `the recorded PASS belongs to DIFFERENT text (recorded ${ctx.record.hash.slice(0, 12)}… at ${ctx.record.at}, submitted ${submittedHash.slice(0, 12)}…) — even an invisible trailing space changes the hash`;
+  const bootstrap = !ctx.auditorInstalled
+    ? "\nBOOTSTRAP: `goal-auditor` is not dispatchable yet (no goal-auditor.md in the global or project agents dir). " +
+      (ctx.packageAgentsDir
+        ? `Start a new session (the extension self-heals missing agent files from ${ctx.packageAgentsDir} at session start) or copy it from there now.`
+        : "The extension could NOT locate the package agents directory (包内 agents 目录无法定位) — run `/gate-doctor` to see the probe result and reinstall the package.")
+    : "";
+  return (
+    "review-gate: propose_loop_goal refused — " + why + ". The user's approval dialog is not shown until a " +
+    "dedicated `goal-auditor` audit of THIS exact text passes.\n" +
+    "Recovery path: revise the draft against the objections → dispatch the `goal-auditor` subagent (paste the " +
+    "draft into its task) → record its FULL raw output with `record_goal_prereview` → call propose_loop_goal " +
+    "again with the identical text.\n" +
+    "The goal text submitted to the user must be written in Simplified Chinese (technical identifiers, tool " +
+    "names, file paths and code tokens stay English) — the auditor blocks a draft that is not.\n" +
+    "Submitted first line: " + (firstLine.slice(0, 120) || "(empty)") +
+    bootstrap
+  );
 }
 
 export const GOAL_CONFIRM_TITLE = "review-gate: AI 提交了本次任务的目标（退出条约）——是否认可？";
@@ -201,7 +305,10 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
 export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
   "loop goal not confirmed by the user — interview the user about what \"done\" means (ONE " +
   "question per turn, labeled \"N of M\", each with your recommended answer — all at once only " +
-  "when the user asks for it), then call propose_loop_goal so the USER can " +
+  "when the user asks for it), draft it in Simplified Chinese (identifiers, paths and code " +
+  "tokens stay English), get that exact draft through the `goal-auditor` subagent and record its " +
+  "full raw output with `record_goal_prereview` — propose_loop_goal is refused without a recorded " +
+  "PASS for the identical text — then call propose_loop_goal so the USER can " +
   "approve it in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
 /**
@@ -209,18 +316,22 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
  *
  * Unlike the ship block, this runs BEFORE the work starts — the whole point
  * of the edit gate is that the negotiation happens before the agent can
- * change a file. It also carries the goal pre-review protocol step: the
- * merged rule (2026-08-18) requires the draft to pass ONE independent
- * `adviser` review (no unresolved P1) before propose_loop_goal.
+ * change a file. It also carries the goal pre-review step, which is MECHANICAL
+ * since 2026-08-25 (it superseded the 2026-08-18 `adviser` merged rule): the
+ * draft must be audited by the dedicated `goal-auditor` role and recorded via
+ * `record_goal_prereview`, or propose_loop_goal refuses without a dialog.
  */
 export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
   "review-gate: loop mode requires an approved loop goal BEFORE any edit/write call. " +
   "Negotiate it first: interview the user about what \"done\" means (ONE question per turn, " +
-  "labeled \"N of M\", each with your recommended answer), have the goal draft pass ONE " +
-  "independent `adviser` review (no unresolved P1), then call propose_loop_goal so the USER " +
-  "approves it in a dialog. (If this session was never meant to run a full loop, classify it " +
-  "first with set_gate_mode: explore/normal do not require a goal.) Writing " +
-  LOOP_GOAL_RELPATH + " yourself does not count.";
+  "labeled \"N of M\", each with your recommended answer), write the goal in Simplified Chinese " +
+  "(technical identifiers, paths and code tokens stay English), then have the DEDICATED " +
+  "`goal-auditor` subagent audit that exact draft and record its full raw output with " +
+  "`record_goal_prereview` — propose_loop_goal refuses to show the user's dialog without a " +
+  "recorded PASS for the identical text (a FAIL means: fix the objections and re-audit). Then " +
+  "call propose_loop_goal so the USER approves it in a dialog. (If this session was never meant " +
+  "to run a full loop, classify it first with set_gate_mode: explore/normal do not require a " +
+  "goal.) Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
 /**
  * Pure decision behind the L8 edit gate: may an edit/write call pass in the
@@ -303,8 +414,15 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "answers open the next round; stop when nothing is left silently assumed. Facts are YOUR job " +
   "(read the repo, run tools) — only decisions go to the user. Sized to the change: a one-line " +
   "bugfix is one question, not a questionnaire.\n" +
-  "2. Then call `propose_loop_goal` with the negotiated goal: task title, one-line intent, 3–7 " +
-  "checkable exit criteria, non-goals, ISO date. The EXTENSION shows it to the user for " +
+  "2. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
+  "tokens stay English): task title, one-line intent, 3–7 checkable exit criteria, non-goals, " +
+  "ISO date.\n" +
+  "3. PRE-REVIEW it mechanically: dispatch the dedicated `goal-auditor` subagent with that exact " +
+  "draft pasted into its task, then record its FULL raw output with `record_goal_prereview`. The " +
+  "extension parses the auditor's JSON fence itself — a FAIL means fix the objections and " +
+  "re-audit (the revised text needs its own PASS, the record binds to content).\n" +
+  "4. Then call `propose_loop_goal` with the PASSED text. It refuses without a matching PASS. " +
+  "The EXTENSION shows it to the user for " +
   "approval and writes `" + LOOP_GOAL_RELPATH + "` itself. Writing that file yourself grants " +
   "nothing — an unapproved goal blocks commit/push/PR in loop mode and its body is withheld " +
   "from this prompt.\n" +
@@ -375,7 +493,9 @@ export function buildLoopGoalDirective(goal: LoopGoal, confirmed = false): strin
     "the goal, `reviewer` accepts against it criterion by " +
     "criterion (an unmet criterion is a P1 finding ⇒ BLOCKED). Write-capable subagents run " +
     "SERIALLY in this worktree; read-only ones may run in parallel. If the goal no longer matches " +
-    "the user's request, renegotiate it with the user and re-submit it via `propose_loop_goal` — " +
+    "the user's request, renegotiate it with the user, put the REVISED text through the " +
+    "`goal-auditor` audit again (`record_goal_prereview` — the pass binds to content, so any edit " +
+    "needs a fresh one) and only then re-submit it via `propose_loop_goal` — " +
     "the path is gate-excluded, so updating it never invalidates a review, but editing the file " +
     "yourself drops the approval and blocks shipping until the user approves the new text."
   );

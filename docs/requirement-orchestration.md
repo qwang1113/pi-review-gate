@@ -52,8 +52,10 @@ with the seam checklist of §5.3; the three roles above it are defined in
 No ACCEPTANCE judge — `reviewer`, `reviewer-readonly`, `module-reviewer`,
 `arbiter` — reads `.pi/loop-goal.md` through its own `defaultReads`: only a
 USER-APPROVED goal may become an acceptance contract, and the raw file may hold
-an unapproved draft. (`adviser` is the deliberate exception: it PRE-reviews the
-draft goal, so reading the draft is its job.) The goal therefore travels in the
+an unapproved draft. (`goal-auditor` and `adviser` are the deliberate
+exceptions: the auditor AUDITS the draft goal — the gate records its verdict
+via `record_goal_prereview` — and the adviser consults on it, so reading the
+draft is precisely their job.) The goal therefore travels in the
 spawn's TASK TEXT —
 `prepare_review` injects it (gated on the approval hash) for a snapshot reviewer,
 and `/plan-verify` instructs the driver to paste the approved goal into the

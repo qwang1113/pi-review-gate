@@ -28,7 +28,10 @@ bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 ```
 你：实现分页功能
 agent：调 set_gate_mode("loop")
-  → 问你目标（一次一题，N of M）→ propose_loop_goal 弹窗让你批准
+  → 问你目标（一次一题，N of M）→ 用简体中文起草目标
+  → 派 goal-auditor 子代理预审该草案 → record_goal_prereview 记录其裁决
+     （不通过就改草案重审；没有匹配的 PASS 就**不会弹任何对话框**骚扰你）
+  → propose_loop_goal 弹窗让你批准（窗中会显示“goal-auditor 预审: PASS @ …”）
   → 改代码
   → run_precommit（fast）→ 全绿
   → prepare_review（每个 reviewer 一个一次性快照 + 一个 findings 流文件）
@@ -68,7 +71,9 @@ agent：调 set_gate_mode("loop")
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| `loop mode requires an approved loop goal BEFORE any edit/write call` | loop 模式（含未决）还没确认目标就动手编辑 | 先逐轮问清“done”的定义 → `propose_loop_goal` 在对话框里确认；批准前 edit/write 一律被拦（`.pi/` 与 `.pi-subagents/` 门禁自有文件除外；explore/normal 模式不要求 goal） |
+| `loop mode requires an approved loop goal BEFORE any edit/write call` | loop 模式（含未决）还没确认目标就动手编辑 | 先逐轮问清“done”的定义 → 中文起草 → goal-auditor 预审（`record_goal_prereview`）→ `propose_loop_goal` 在对话框里确认；批准前 edit/write 一律被拦（`.pi/` 与 `.pi-subagents/` 门禁自有文件除外；explore/normal 模式不要求 goal） |
+| `propose_loop_goal refused — no goal-auditor pre-review has been recorded` （或 `…belongs to DIFFERENT text`） | 目标草案没经预审，或预审后改过字（hash 变了） | 派 `goal-auditor` 审该段**原文**，把它的完整原始输出交给 `record_goal_prereview`，再用**一字不改**的文本重提；FAIL 就先改掉 P0/P1 再重审 |
+| `goal-auditor` 角色不可派发（拒绝文案里的 BOOTSTRAP 段） | `~/.pi/agent/agents/goal-auditor.md` 缺失 | 开一个新会话（扩展会在启动时从包内 `agents/` 幂等自愈）；仍缺失就跑 `/gate-doctor` 看诊断行给出的 `node …/scripts/install-package.mjs` |
 | `code review gate is PENDING` | 改完没 review | 走 review 循环（或 `/review`） |
 | `precommit not run` / `FAILED` | 没跑或跑挂了 | `run_precommit`；修失败项 |
 | `fingerprint mismatch` | 审核后又改了文件 | 再 review + 再 precommit |
@@ -94,7 +99,7 @@ agent：调 set_gate_mode("loop")
 | `/review`、`/precommit` | 显式触发 review / precommit |
 | `/gate-reset` | 重置门禁状态 |
 | `/gate-lesson <text>` | 记录经验教训 |
-| `/gate-doctor` | 只读体检：逐项检查优化是否生效（模型链、opencode-go 白名单、precommit runner、git hooks、全局配置、L5 门、Copilot gh、命令注册），输出 PASS/FAIL/WARN + 证据 + 修复建议 |
+| `/gate-doctor` | 只读体检：逐项检查优化是否生效（模型链、goal-auditor 角色可派发性、opencode-go 白名单、precommit runner、git hooks、全局配置、L5 门、Copilot gh、命令注册），输出 PASS/FAIL/WARN + 证据 + 修复建议 |
 
 ## 7. 成本须知
 
