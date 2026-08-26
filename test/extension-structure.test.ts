@@ -1078,7 +1078,9 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   // The tool must pass the target repo root and its AbortSignal through
   // (P1 fix: process.cwd() can differ from ctx.cwd under pi --cwd; P-multi:
   // the target may be the active non-session repo).
-  assert.match(SRC, /await runTrustedPrecommit\(targetDir, targetRoot, mode, _signal\)/);
+  // `_onUpdate` travels too: the runner's log is streamed while it runs, so a
+  // multi-minute precommit is no longer a silent tool call.
+  assert.match(SRC, /await runTrustedPrecommit\(targetDir, targetRoot, mode, _signal, _onUpdate\)/);
   assert.doesNotMatch(SRC, /async function runTrustedPrecommit[^{]*\{\s*\n\s*const cwd = process\.cwd\(\)/);
 });
 
@@ -1092,13 +1094,18 @@ test("the runner's output is CAPTURED to a file descriptor, never discarded", ()
     "the precommit runner's output must not be thrown away");
   const start = SRC.indexOf("async function runTrustedPrecommit");
   assert.ok(start > 0);
-  const body = SRC.slice(start, start + 6000);
+  const body = SRC.slice(start, start + 8000);
   assert.match(body, /openSync\(tmpLog/, "capture via a file descriptor");
   // A pipe would deadlock: the runner is detached and long-lived, and a full
   // 64KB pipe buffer blocks its next write forever if nobody drains it.
   assert.doesNotMatch(body, /stdio:\s*\[[^\]]*"pipe"/, "never a pipe for the detached runner");
   assert.match(body, /rmSync\(dir, \{ recursive: true, force: true \}\)/,
     "the temp receipt dir is still destroyed after every run");
+  // Liveness comes from READING that file, never from a second write channel:
+  // the tail polls the log and its stop() does a final read, so an aborted or
+  // timed-out run still forwards what the killed runner wrote last.
+  assert.match(body, /tailLogFile\(tmpLog/, "the run log is tailed for live output");
+  assert.match(body, /tail\?\.stop\(\)/, "the tail is stopped (final flush) on every exit path");
 });
 
 test("the run log is anchored to the REPO ROOT, or it would invalidate its own PASS", () => {

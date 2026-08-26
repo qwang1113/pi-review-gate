@@ -1,7 +1,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -10,6 +10,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER = join(ROOT, "scripts", "precommit-runner.mjs");
 
 const tempDirs: string[] = [];
+/** Scratch files written OUTSIDE a fixture (a receipt inside it perturbs the tree). */
+const tempFiles: string[] = [];
 function makeDir(pkg?: object): string {
   const dir = mkdtempSync(join(tmpdir(), "rg-pc-"));
   tempDirs.push(dir);
@@ -18,6 +20,7 @@ function makeDir(pkg?: object): string {
 }
 after(() => {
   for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
+  for (const f of tempFiles) rmSync(f, { force: true });
 });
 
 function run(dir: string, extra: string[] = []) {
@@ -539,4 +542,325 @@ test("config: lane-only narrow:false keeps the detected test and runs it in full
   const full = runReceipt(bad, ["--mode", "full"]);
   assert.equal(full.code, 1);
   assert.equal(full.receipt!.verdict, "FAIL");
+});
+
+// ---------------------------------------------------------------------------
+// jest `.pi` ignore injection — END TO END, with a real spawned jest stand-in
+// ---------------------------------------------------------------------------
+
+/**
+ * Write a fake `node_modules/.bin/jest` that answers `--showConfig` with a
+ * real-shaped config and passes any other invocation.
+ *
+ * This is what pins the injection to a SPAWNABLE binary: the resolver used for
+ * shell command strings returns a shell-QUOTED path, and passing that to
+ * `spawnSync` (argv, no shell) fails with ENOENT — which `spawnSync` reports
+ * in `result.error` instead of throwing, so the feature would degrade to
+ * silently never injecting. A unit test on the pure helpers cannot see that;
+ * only actually spawning the binary can.
+ */
+function writeFakeJest(dir: string, patterns: string[]): void {
+  const bin = join(dir, "node_modules", ".bin");
+  mkdirSync(bin, { recursive: true });
+  const jest = join(bin, "jest");
+  const config = JSON.stringify({ configs: [{ testPathIgnorePatterns: patterns }] });
+  writeFileSync(jest, `#!/bin/sh\nif [ "$1" = "--showConfig" ]; then\n  echo '${config}'\n  exit 0\nfi\nexit 0\n`);
+  chmodSync(jest, 0o755);
+}
+
+test("jest ignore injection actually spawns jest and merges its own patterns", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "jest" } });
+  writeFakeJest(dir, ["/node_modules/", "<rootDir>/e2e/"]);
+
+  const { out } = run(dir, ["--mode", "full"]);
+
+  // The plan preamble prints the command that will run: injection visible there
+  // proves `jest --showConfig` was really spawned and parsed.
+  assert.match(out, /--testPathIgnorePatterns '<rootDir>\/\.pi\/'/, "the .pi exclusion must reach the command");
+  assert.match(out, /--testPathIgnorePatterns '\/node_modules\/'/, "the repo's own patterns must be preserved");
+  assert.match(out, /--testPathIgnorePatterns '<rootDir>\/e2e\/'/, "the repo's own patterns must be preserved");
+  assert.match(out, /npm run test -- --testPathIgnorePatterns/, "npm needs -- to forward the args");
+  assert.doesNotMatch(out, /injection skipped/, "a spawnable jest must not fall into the skip branch");
+});
+
+test("a non-jest test script never triggers a jest --showConfig probe", () => {
+  // Spawning jest for a vitest/node --test project costs a process for a result
+  // that can never be used, and its skip note would describe a jest problem the
+  // project does not have.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "vitest run" } });
+  const bin = join(dir, "node_modules", ".bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "vitest"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  // A jest that RECORDS every invocation: it must never be called.
+  const probeLog = join(dir, "jest-probe.log");
+  writeFileSync(join(bin, "jest"), `#!/bin/sh\necho called >> ${probeLog}\nexit 0\n`, { mode: 0o755 });
+
+  const { out } = run(dir, ["--mode", "full"]);
+
+  assert.ok(!existsSync(probeLog), "jest must not be spawned for a non-jest test script");
+  assert.doesNotMatch(out, /showConfig/, "no jest-specific note belongs in this project's log");
+});
+
+test("a jest whose --showConfig fails injects NOTHING (never a CLI override)", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "jest" } });
+  const bin = join(dir, "node_modules", ".bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "jest"), "#!/bin/sh\nexit 3\n");
+  chmodSync(join(bin, "jest"), 0o755);
+
+  const { out } = run(dir, ["--mode", "full"]);
+
+  // Injecting only `.pi` here would REPLACE the repo's own patterns (jest CLI
+  // overrides config), silently running suites the project excludes.
+  assert.doesNotMatch(out, /--testPathIgnorePatterns/, "no patterns known ⇒ no CLI override at all");
+  assert.match(out, /injection skipped: jest --showConfig failed/, "the reason must be recorded in the log");
+});
+
+test("a compound test script is never rewritten, even with a working jest", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "jest && echo done" } });
+  writeFakeJest(dir, ["/node_modules/"]);
+
+  const { out } = run(dir, ["--mode", "full"]);
+
+  assert.doesNotMatch(out, /--testPathIgnorePatterns/, "a compound script must be left byte-for-byte alone");
+});
+
+// ---------------------------------------------------------------------------
+// Live step output — visible WHILE a step runs, in declaration order, once
+// ---------------------------------------------------------------------------
+
+test("a legacy oversized cache tail is bounded on REPLAY, not just on write", () => {
+  // The write-side bound only covers caches this version wrote. An entry left
+  // by an earlier version still holds an unbounded tail, and replaying it into
+  // the receipt reproduces the >1 MiB rejection that turns a PASS into ERROR.
+  //
+  // The fixture MUST be a real git worktree: the per-step cache is keyed on a
+  // git tree digest, so in a non-git directory `computeInputDigests` returns
+  // null, nothing is ever cached, and this test would pass while exercising
+  // no cache path at all.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "echo hi" } });
+  // Neutralise host git config: a global `commit.gpgsign`, `core.hooksPath`
+  // or `init.templateDir` would otherwise make this fixture's commit fail on
+  // someone else's machine.
+  const git = (...args: string[]) => execFileSync("git", [
+    "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-c", "gpg.format=openpgp", ...args,
+  ], { cwd: dir, stdio: "ignore" });
+  git("init", "-q", "--template=");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "t");
+  git("config", "commit.gpgsign", "false");
+  // `.pi/` is gate-owned per-machine state (the README tells users to ignore
+  // it): leaving it untracked would perturb the tree digest between runs and
+  // turn the cache hit this test depends on into a miss.
+  writeFileSync(join(dir, ".gitignore"), ".pi/\n");
+  git("add", "-A");
+  git("commit", "-qm", "init");
+
+  // The receipt must live OUTSIDE the fixture: written inside, it changes the
+  // worktree between runs, the per-step digest changes with it, and the cache
+  // hit this test exists to exercise never happens.
+  const runOutside = (tag: string) => {
+    const receipt = join(tmpdir(), `rg-legacy-cache-${tag}-${process.pid}.json`);
+    tempFiles.push(receipt);
+    const res = spawnSync("node", [RUNNER, "--cwd", dir, "--mode", "full", "--receipt", receipt, "--nonce", "n0nce"], { encoding: "utf8" });
+    const parsed = JSON.parse(readFileSync(receipt, "utf8")) as Record<string, unknown>;
+    return { code: res.status, receipt: parsed, path: receipt, out: res.stdout + res.stderr };
+  };
+
+  // First run populates the cache legitimately...
+  const first = runOutside("first");
+  assert.equal(first.code, 0, "first run must pass");
+  const cachePath = join(dir, ".pi", "precommit-cache.json");
+  const cache = JSON.parse(readFileSync(cachePath, "utf8"));
+  const entries = cache.entries ?? {};
+  const keys = Object.keys(entries);
+  assert.ok(keys.length > 0, "the fixture must actually produce cache entries (git tree digest available)");
+
+  // ...then we forge a pre-bounding entry with a huge single-line tail.
+  const huge = "x".repeat(1_100_000);
+  let forged = 0;
+  for (const key of keys) {
+    const bucket = entries[key];
+    if (bucket && typeof bucket === "object") { bucket.tail = huge; forged++; }
+  }
+  assert.ok(forged > 0, "a legacy-shaped entry must actually be forged");
+  writeFileSync(cachePath, JSON.stringify(cache));
+
+  const second = runOutside("second");
+  assert.equal(second.code, 0, "second run must pass");
+  const steps = second.receipt.steps as Array<Record<string, unknown>>;
+  assert.ok(steps.some((s) => s.cached === true), "the second run must actually hit the cache");
+
+  const size = statSync(second.path).size;
+  assert.ok(size <= 1024 * 1024, `receipt must stay under the extension's 1 MiB limit, got ${size}`);
+  for (const step of steps) {
+    const tail = typeof step.tail === "string" ? step.tail : "";
+    assert.ok(Buffer.byteLength(tail, "utf8") <= 64 * 1024, "a replayed tail must be bounded");
+  }
+});
+
+test("a command that selects its own jest config is NOT rewritten (reason recorded)", () => {
+  // Reproducing an explicit selection means reimplementing jest's CLI parsing,
+  // and every divergence would query a DIFFERENT config than the run uses — then
+  // override the real config's patterns with what we read. So the contract is
+  // narrowed: explicit selection ⇒ no injection, and say why.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "jest --config custom.json" } });
+  const bin = join(dir, "node_modules", ".bin");
+  mkdirSync(bin, { recursive: true });
+  // The stand-in records its ARGV: the test step itself legitimately runs jest,
+  // so what must be absent is a `--showConfig` probe, not every invocation.
+  const probeLog = join(dir, "jest-probe.log");
+  writeFileSync(join(bin, "jest"), `#!/bin/sh\necho "$@" >> ${probeLog}\nexit 0\n`, { mode: 0o755 });
+
+  const { out } = run(dir, ["--mode", "full"]);
+
+  assert.doesNotMatch(out, /--testPathIgnorePatterns/, "an explicitly configured command must be left verbatim");
+  const probed = existsSync(probeLog) ? readFileSync(probeLog, "utf8") : "";
+  assert.ok(!probed.includes("--showConfig"), "no showConfig probe is worth running when the result cannot be used");
+  assert.match(out, /selects its own jest config/, "the reason must tell the user what to do");
+});
+
+test("a configured compound test command records WHY injection was skipped", () => {
+  // With a working jest present, `jestIgnoreArgsCache` is non-empty — so the
+  // preamble must not fall through to claiming the exclusion is in effect for
+  // a command that was never rewritten.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "jest && echo done" } });
+  writeFakeJest(dir, ["/node_modules/"]);
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { test: { script: "test" } },
+  }));
+
+  const { out } = run(dir, ["--mode", "full"]);
+
+  assert.doesNotMatch(out, /jest runs exclude/, "must not claim an exclusion this run does not have");
+  assert.match(out, /not a single jest command/, "the real skip reason must be recorded");
+});
+
+test("a project-CONFIGURED non-test step is never rewritten either", () => {
+  // The configured path is a second entry point: `.pi/review-gate.json` can
+  // point lint/typecheck/build at a script that is a plain `jest` command.
+  // Only the test step may be rewritten, whichever path collected it.
+  const dir = makeDir({
+    name: "t", version: "1.0.0",
+    scripts: { lint: "jest", test: "jest" },
+  });
+  writeFakeJest(dir, ["/node_modules/"]);
+  writeReviewGateConfig(dir, JSON.stringify({
+    precommit: { lint: { script: "lint" } },
+  }));
+
+  const { out } = run(dir, ["--mode", "full"]);
+
+  const planLine = (step: string) => out.split("\n").find((l) => l.includes(`· ${step}:`)) ?? "";
+  assert.doesNotMatch(planLine("lint"), /--testPathIgnorePatterns/, "a configured lint step must keep its command verbatim");
+  assert.match(planLine("test"), /--testPathIgnorePatterns/, "the test step is still injected");
+});
+
+test("jest ignore injection touches the TEST step only, never lint/typecheck/build", () => {
+  // The exclusion exists so a TEST run skips the disposable copies under
+  // .pi/review-snapshots/. A lint/typecheck/build script that happens to be a
+  // plain `jest` invocation is a different job; rewriting it would also change
+  // its cache command key (and, for lint:fix, the command the fix stage keys on).
+  const dir = makeDir({
+    name: "t", version: "1.0.0",
+    scripts: { lint: "jest", typecheck: "jest", test: "jest" },
+  });
+  writeFakeJest(dir, ["/node_modules/"]);
+
+  const { out } = run(dir, ["--mode", "full"]);
+
+  const planLine = (step: string) => out.split("\n").find((l) => l.includes(`· ${step}:`)) ?? "";
+  assert.match(planLine("test"), /--testPathIgnorePatterns/, "the test step must be injected");
+  assert.doesNotMatch(planLine("lint"), /--testPathIgnorePatterns/, "lint must be left alone");
+  assert.doesNotMatch(planLine("typecheck"), /--testPathIgnorePatterns/, "typecheck must be left alone");
+});
+
+test("a multibyte character split across child stdout chunks is not corrupted", async () => {
+  // The runner used to do `full += buffer`, decoding every chunk on its own:
+  // a character split across two writes became U+FFFD in the log BEFORE the
+  // extension's tail ever saw it, so no downstream decoding could repair it.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "node split.js" } });
+  // Write the 3 bytes of ▶ in two separate stdout writes, with a gap so they
+  // land in different chunks.
+  writeFileSync(join(dir, "split.js"), [
+    "const b = Buffer.from('▶ marker\\n', 'utf8');",
+    "process.stdout.write(b.subarray(0, 2));",
+    "setTimeout(() => process.stdout.write(b.subarray(2)), 150);",
+  ].join("\n"));
+
+  const log = join(dir, "live.log");
+  const fd = openSync(log, "a");
+  const child = spawn("node", [RUNNER, "--cwd", dir, "--mode", "full", "--receipt", join(dir, "r.json"), "--nonce", "n0nce"], {
+    stdio: ["ignore", fd, fd],
+  });
+  try {
+    await new Promise((r) => child.on("close", r));
+    const text = readFileSync(log, "utf8");
+    assert.ok(!text.includes("\uFFFD"), "a split character must never reach the log as U+FFFD");
+    assert.match(text, /▶ marker/, "the character must be reassembled intact");
+  } finally {
+    closeSync(fd);
+    if (child.exitCode === null) child.kill();
+  }
+});
+test("--json stdout stays pure JSON even in receipt mode", () => {
+  // `--json` output is PARSED by its caller, so no diagnostic may precede the
+  // object — not the step blocks, not the plan preamble, not live output.
+  // Passing --json together with --receipt used to emit all three.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "echo hi" } });
+  const receipt = join(dir, "receipt.json");
+  const res = spawnSync("node", [RUNNER, "--cwd", dir, "--mode", "full", "--json", "--receipt", receipt, "--nonce", "n0nce"], { encoding: "utf8" });
+
+  const parsed = JSON.parse(res.stdout); // throws if anything preceded the object
+  assert.equal(parsed.verdict, "PASS");
+  assert.doesNotMatch(res.stdout, /▶ test/, "no step block may precede the JSON");
+  assert.doesNotMatch(res.stdout, /# Precommit plan/, "no plan preamble may precede the JSON");
+});
+
+
+test("a running step's output is written to the log before the step finishes", async () => {
+  // The whole point of criterion 5: the extension tails this log, so output
+  // buffered until close leaves a long check looking hung. This drives a step
+  // that prints, waits, then prints again, and reads the log MID-RUN.
+  const dir = makeDir({
+    name: "t", version: "1.0.0",
+    // Markers live in FILES, never in the command text: `npm run` echoes the
+    // script body, which would make each marker appear twice for reasons that
+    // have nothing to do with streaming.
+    scripts: { test: "cat early.txt; sleep 3; cat late.txt" },
+  });
+  writeFileSync(join(dir, "early.txt"), "EARLY-MARKER\n");
+  writeFileSync(join(dir, "late.txt"), "LATE-MARKER\n");
+  const log = join(dir, "live.log");
+  const out = openSync(log, "a");
+  const receipt = join(dir, "receipt.json");
+  // Receipt mode is what the extension uses (streaming=true); stdio goes to a
+  // file descriptor exactly like runTrustedPrecommit does.
+  const child = spawn("node", [RUNNER, "--cwd", dir, "--mode", "full", "--receipt", receipt, "--nonce", "n0nce"], {
+    stdio: ["ignore", out, out],
+  });
+  try {
+    // Poll for the early marker while the child is provably still running.
+    let sawEarlyWhileRunning = false;
+    for (let i = 0; i < 40 && child.exitCode === null; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (readFileSync(log, "utf8").includes("EARLY-MARKER")) {
+        sawEarlyWhileRunning = child.exitCode === null;
+        break;
+      }
+    }
+    assert.ok(sawEarlyWhileRunning, "early output must reach the log while the step is still running");
+
+    await new Promise((r) => child.on("close", r));
+    const text = readFileSync(log, "utf8");
+    assert.match(text, /LATE-MARKER/, "the rest of the output must land too");
+    // Streamed once, then closed — never printed a second time at close.
+    assert.equal(text.match(/EARLY-MARKER/g)?.length, 1, "live output must not be duplicated at close");
+    assert.equal(text.match(/LATE-MARKER/g)?.length, 1, "live output must not be duplicated at close");
+    assert.match(text, /▶ test —/, "the ordered block header is still written");
+    assert.match(text, /◀ test — pass/, "the ordered block is still closed");
+  } finally {
+    closeSync(out);
+    if (child.exitCode === null) child.kill();
+  }
 });

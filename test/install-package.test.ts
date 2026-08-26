@@ -374,6 +374,111 @@ test("postinstall is idempotent (re-run succeeds and is stable)", () => {
   );
 });
 
+
+// ---------------------------------------------------------------------------
+// Fleet keybindings — pi-subagents global subagent config smart-merge
+// ---------------------------------------------------------------------------
+
+function fleetConfigPath(home: string): string {
+  return join(home, ".pi", "agent", "extensions", "subagent", "config.json");
+}
+
+function assertDefaultFleetBindings(cfg: Record<string, unknown>): void {
+  const fb = cfg.fleetKeybindings as Record<string, string[]>;
+  assert.deepEqual(fb, { pageUp: ["ctrl+b"], pageDown: ["ctrl+f", "ctrl+d"] });
+  // pi-subagents validateFleetKeybindingsConfig structure: actions must be
+  // supported Fleet actions and values non-empty string arrays.
+  for (const [action, bindings] of Object.entries(fb)) {
+    assert.ok(["pageUp", "pageDown"].includes(action), `unsupported action: ${action}`);
+    assert.ok(Array.isArray(bindings) && bindings.length > 0 && bindings.every((b) => typeof b === "string" && b.trim() !== ""),
+      `bad bindings for ${action}`);
+    // isValidKeyId mirror: base ∈ a-z/0-9/Key values, modifiers ⊆ ctrl/shift/alt/super.
+    for (const binding of bindings) {
+      const parts = binding.toLowerCase().split("+");
+      const base = parts.pop() ?? "";
+      assert.match(base, /^[a-z0-9]$/, `invalid key base: ${base}`);
+      assert.ok(parts.every((m) => ["ctrl", "shift", "alt", "super"].includes(m)), `invalid modifier in: ${binding}`);
+    }
+  }
+}
+
+test("postinstall writes default fleet keybindings when subagent config is missing", () => {
+  const home = makeHome();
+  const res = runInstaller(home);
+  assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
+
+  const cfg = JSON.parse(readFileSync(fleetConfigPath(home), "utf8"));
+  assertDefaultFleetBindings(cfg);
+  // saveConfig parity: tab indentation + trailing newline.
+  const raw = readFileSync(fleetConfigPath(home), "utf8");
+  assert.ok(raw.startsWith("{\n\t"), "config must use tab indentation");
+  assert.ok(raw.endsWith("\n"), "config must end with a newline");
+  assert.match(res.stdout, /fleet keybindings written/, "installer must log the write");
+});
+
+test("postinstall merges fleetKeybindings into an existing config, preserving other fields", () => {
+  const home = makeHome();
+  const cfgPath = fleetConfigPath(home);
+  mkdirSync(dirname(cfgPath), { recursive: true });
+  writeFileSync(cfgPath, JSON.stringify({ mode: "pruned", forkContext: { mode: "full" } }, null, 2));
+
+  const res = runInstaller(home);
+  assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
+
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+  assertDefaultFleetBindings(cfg);
+  assert.deepEqual(cfg.mode, "pruned", "existing top-level fields must be preserved");
+  assert.deepEqual(cfg.forkContext, { mode: "full" }, "existing nested fields must be preserved");
+  assert.match(res.stdout, /fleet keybindings merged/, "installer must log the merge");
+});
+
+test("postinstall leaves an existing fleetKeybindings completely alone", () => {
+  const home = makeHome();
+  const cfgPath = fleetConfigPath(home);
+  mkdirSync(dirname(cfgPath), { recursive: true });
+  writeFileSync(cfgPath, JSON.stringify({ fleetKeybindings: { close: ["ctrl+q"] }, other: 1 }));
+
+  const res = runInstaller(home);
+  assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
+
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+  assert.deepEqual(cfg.fleetKeybindings, { close: ["ctrl+q"] }, "user's bindings must win");
+  assert.equal(cfg.other, 1);
+  assert.match(res.stdout, /already configured/, "installer must say bindings are kept");
+});
+
+test("postinstall skips a corrupt or non-object subagent config with a warning (never clobbers)", () => {
+  for (const bad of ["{not json", "[1,2,3]", '"just a string"']) {
+    const home = makeHome();
+    const cfgPath = fleetConfigPath(home);
+    mkdirSync(dirname(cfgPath), { recursive: true });
+    writeFileSync(cfgPath, bad);
+
+    const res = runInstaller(home);
+    assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
+    assert.equal(readFileSync(cfgPath, "utf8"), bad, "corrupt config must be left byte-for-byte untouched");
+    assert.match(res.stdout, /leaving it untouched/, "installer must warn about the corrupt config");
+  }
+});
+
+test("fleet keybindings install is idempotent (re-run is stable)", () => {
+  const home = makeHome();
+  const first = runInstaller(home);
+  assert.equal(first.status, 0, `first run failed: ${first.stderr}`);
+  // Snapshot BEFORE the second run: comparing two post-run reads would pass
+  // even if the re-run rewrote the file.
+  const afterFirst = readFileSync(fleetConfigPath(home), "utf8");
+
+  const second = runInstaller(home);
+  assert.equal(second.status, 0, `second run failed: ${second.stderr}`);
+  assert.equal(
+    readFileSync(fleetConfigPath(home), "utf8"),
+    afterFirst,
+    "re-run must not change the config",
+  );
+  assert.match(first.stdout, /fleet keybindings written/, "first run creates");
+  assert.match(second.stdout, /already configured/, "second run skips");
+});
 test("postinstall installs git hooks when cwd is a git repo, skips otherwise", () => {
   const home = makeHome();
   // Non-git cwd: no hooks, still exit 0.

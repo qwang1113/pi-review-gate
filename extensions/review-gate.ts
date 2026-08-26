@@ -96,6 +96,7 @@ import {
   formatPrecommitSummary,
   lastPrecommitTiming,
 } from "../lib/gate-timings.ts";
+import { tailLogFile } from "../lib/precommit-tail.ts";
 import {
   decideReviewScope,
   formatReviewScopeDirective,
@@ -3184,7 +3185,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       // — in the wrong dir.
       // targetDir is where the checks RUN; targetRoot is the repo the run log
       // belongs to (`.pi/` is only gate-owned at the root — see keepRunLog).
-      const outcome = await runTrustedPrecommit(targetDir, targetRoot, mode, _signal);
+      // `_onUpdate` streams the runner's log while it runs (plan preamble first,
+      // then each check's output) — a precommit used to be a silent multi-minute
+      // tool call with no way to see what it was doing.
+      const outcome = await runTrustedPrecommit(targetDir, targetRoot, mode, _signal, _onUpdate);
 
       if (outcome.verdict === "PASS") {
         // Bind PASS to the fingerprint recomputed AFTER the runner finished
@@ -5868,6 +5872,8 @@ async function runTrustedPrecommit(
   repoRoot: string,
   mode: "fast" | "full",
   abortSignal?: AbortSignal,
+  /** Live-output sink: the tool's `onUpdate`, when the caller wants streaming. */
+  onUpdate?: (partial: { content: { type: "text"; text: string }[]; details: undefined }) => void,
 ): Promise<PrecommitOutcome> {
   // `logPath` is filled in as soon as the run log has been kept, so every
   // failure path below still tells the agent where to look.
@@ -5908,6 +5914,15 @@ async function runTrustedPrecommit(
           // principal is outside the threat model (see README).
           env: { ...process.env } },
       );
+      // Live output: TAIL the log the runner is writing (see lib/precommit-tail.ts
+      // for why this is a poll and not a pipe). The runner writes its plan
+      // preamble before the first check, so the agent sees what is about to run
+      // instead of a silent tool call for minutes.
+      const tail = onUpdate
+        ? tailLogFile(tmpLog, (text) => {
+            onUpdate({ content: [{ type: "text", text }], details: undefined });
+          })
+        : undefined;
       const timer = setTimeout(() => { timedOut = true; killProcessTree(child); }, 20 * 60 * 1000);
       const onAbort = () => { aborted = true; killProcessTree(child); };
       abortSignal?.addEventListener("abort", onAbort, { once: true });
@@ -5916,6 +5931,9 @@ async function runTrustedPrecommit(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        // Stop BEFORE the log is kept: stop() does a final read, so the last
+        // lines a killed runner wrote between two ticks still reach the agent.
+        tail?.stop();
         abortSignal?.removeEventListener("abort", onAbort);
         // The child holds its own duplicate of this descriptor; closing ours
         // once it is gone just releases our handle.

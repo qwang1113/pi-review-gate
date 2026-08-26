@@ -168,6 +168,54 @@ function installHooksHere() {
 }
 
 /**
+ * Write pi-subagents' fleet-inspector keybindings into the GLOBAL subagent
+ * config (pi-subagents reads only <agentDir>/extensions/subagent/config.json;
+ * there is no project-level file). The fleet inspector is where a subagent's
+ * full session history can be scrolled; MacBooks have no PageUp/PageDown, so
+ * the defaults bind vim-style Ctrl+b (up) / Ctrl+f, Ctrl+d (down) instead.
+ *
+ * Smart-merge, never clobber: the file is created when missing, the
+ * fleetKeybindings field is added when absent (all other fields preserved),
+ * and an EXISTING fleetKeybindings field is left completely alone — the
+ * user's own bindings win. A file that does not parse, or is not a JSON
+ * object (including an array), is skipped with a warning — never overwritten.
+ */
+const DEFAULT_FLEET_KEYBINDINGS = {
+  fleetKeybindings: {
+    pageUp: ["ctrl+b"],
+    pageDown: ["ctrl+f", "ctrl+d"],
+  },
+};
+
+function installFleetKeybindings() {
+  const configPath = join(AGENT_DIR, "extensions", "subagent", "config.json");
+  if (!existsSync(configPath)) {
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, `${JSON.stringify(DEFAULT_FLEET_KEYBINDINGS, null, "\t")}\n`, "utf8");
+    log(`fleet keybindings written (${configPath})`);
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    log(`  ⚠ subagent config at ${configPath} is not valid JSON — leaving it untouched`);
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    log(`  ⚠ subagent config at ${configPath} is not a JSON object — leaving it untouched`);
+    return;
+  }
+  if (parsed.fleetKeybindings !== undefined) {
+    log("fleet keybindings already configured — keeping the user's bindings");
+    return;
+  }
+  parsed.fleetKeybindings = DEFAULT_FLEET_KEYBINDINGS.fleetKeybindings;
+  writeFileSync(configPath, `${JSON.stringify(parsed, null, "\t")}\n`, "utf8");
+  log(`fleet keybindings merged into ${configPath}`);
+}
+
+/**
  * Register companion pi packages (pi-subagents, pi-opencode-bridge) that this
  * extension needs at runtime, so `pi install pi-review-gate` alone yields a
  * working review loop. Reads the user's ~/.pi/agent/settings.json packages
@@ -341,5 +389,10 @@ try {
   installHooksHere();
 } catch (e) {
   log(`  ✗ hook install failed: ${e.message}`);
+}
+try {
+  installFleetKeybindings();
+} catch (e) {
+  log(`  ✗ fleet keybindings install failed: ${e.message}`);
 }
 log("done (extension + skills load natively via the pi package manifest)");
