@@ -68,6 +68,7 @@ export const KNOWN_AGENTS: readonly string[] = Object.freeze([
   "recon",
   "goal-auditor",
 ]);
+export const REVIEW_JUDGE_GROUP: readonly string[] = Object.freeze(["reviewer", "module-reviewer", "reviewer-readonly"]);
 
 /**
  * Locate the `agents/` directory INSIDE this package.
@@ -563,19 +564,37 @@ export function effectiveAgentsConfig(
     }
   }
 
-  // reviewer-readonly follows reviewer's chain when reviewer is EXPLICITLY
-  // configured (auto:false OR auto:true) and reviewer-readonly is not
-  // configured on its own: the isolation-unavailable dispatch path
-  // (prepare_review → reviewer-readonly) must run on the SAME effective chain.
-  // Following auto:true to a higher layer also lets the project SHADOW a
-  // global auto:false reviewer-readonly slot render.
-  const rv = map.reviewer;
-  const rr = map["reviewer-readonly"];
-  if (rv && rv.source !== "default" && rr && rr.source === "default") {
-    // Copy the slot ARRAY (deep), never share it: callers may mutate slots
-    // in place, and sharing would silently edit reviewer's chain through
-    // reviewer-readonly (and vice versa).
-    map["reviewer-readonly"] = { ...rv, slots: [...rv.slots] };
+  // REVIEW_JUDGE_GROUP shares a single chain: configuring ANY of
+  // reviewer / reviewer-readonly / module-reviewer propagates to the
+  // other two that remain `default`. The winner is chosen by
+  // project > global > default, then by group order
+  // reviewer > module-reviewer > reviewer-readonly, so a higher layer
+  // always wins and the project layer can shadow the global one.
+  // Both `auto:false + slots` and an explicit `auto:true` (default-chain
+  // overlay) count as "explicit" and are propagated; `malformed` is
+  // propagated too so the fail-safe (keep last render) still holds.
+  const explicitGroupMembers = REVIEW_JUDGE_GROUP.filter((name) => validNames.includes(name) && map[name] && map[name]!.source !== "default");
+  if (explicitGroupMembers.length > 0) {
+    const sourcePriority = (s: string): number => (s === "project" ? 2 : s === "global" ? 1 : 0);
+    explicitGroupMembers.sort((a, b) => {
+      const pa = sourcePriority(map[a]!.source);
+      const pb = sourcePriority(map[b]!.source);
+      if (pa !== pb) return pb - pa;
+      const ma = !!map[a]!.malformed;
+      const mb = !!map[b]!.malformed;
+      if (ma !== mb) return ma ? 1 : -1;
+      return REVIEW_JUDGE_GROUP.indexOf(a) - REVIEW_JUDGE_GROUP.indexOf(b);
+    });
+    const winnerName = explicitGroupMembers[0]!;
+    const winner = map[winnerName]!;
+    for (const name of REVIEW_JUDGE_GROUP) {
+      if (!validNames.includes(name)) continue;
+      const entry = map[name];
+      if (!entry || entry.source !== "default") continue;
+      // Deep-copy slots so callers can mutate one chain without leaking
+      // into the winner or its siblings.
+      map[name] = { ...winner, slots: [...winner.slots] };
+    }
   }
   return { map, diagnostics };
 }

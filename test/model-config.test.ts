@@ -406,6 +406,109 @@ test("reviewer-readonly follow does NOT share the slots array (deep copy)", () =
   assert.equal(map.reviewer!.slots[0], "onekey/gpt-5.6-sol:high", "reviewer's chain is isolated");
 });
 
+test("REVIEW_JUDGE_GROUP: single module-reviewer propagates to reviewer and reviewer-readonly", () => {
+  const { map } = effectiveAgentsConfig(undefined, {
+    "module-reviewer": { auto: false, slots: ["onekey/gpt-5.6-sol:high"] },
+  });
+  assert.deepEqual(map.reviewer!.slots, ["onekey/gpt-5.6-sol:high"]);
+  assert.deepEqual(map["reviewer-readonly"]!.slots, ["onekey/gpt-5.6-sol:high"]);
+  assert.deepEqual(map["module-reviewer"]!.slots, ["onekey/gpt-5.6-sol:high"]);
+  assert.equal(map.reviewer!.source, "project");
+  assert.equal(map["reviewer-readonly"]!.source, "project");
+});
+
+test("REVIEW_JUDGE_GROUP: single reviewer-readonly propagates to the other two", () => {
+  const { map } = effectiveAgentsConfig(undefined, {
+    "reviewer-readonly": { auto: false, slots: ["onekey/gpt-5.6-sol:high"] },
+  });
+  assert.deepEqual(map.reviewer!.slots, ["onekey/gpt-5.6-sol:high"]);
+  assert.deepEqual(map["reviewer-readonly"]!.slots, ["onekey/gpt-5.6-sol:high"]);
+  assert.deepEqual(map["module-reviewer"]!.slots, ["onekey/gpt-5.6-sol:high"]);
+});
+
+test("REVIEW_JUDGE_GROUP: explicit auto:true propagates to the whole group", () => {
+  const { map } = effectiveAgentsConfig(undefined, { reviewer: { auto: true } });
+  assert.equal(map.reviewer!.auto, true);
+  assert.equal(map["reviewer-readonly"]!.auto, true);
+  assert.equal(map["module-reviewer"]!.auto, true);
+  assert.equal(map.reviewer!.source, "project");
+  assert.equal(map["reviewer-readonly"]!.source, "project");
+  assert.equal(map["module-reviewer"]!.source, "project");
+});
+
+test("REVIEW_JUDGE_GROUP: project wins over global", () => {
+  const { map } = effectiveAgentsConfig(
+    { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:low"] } },
+    { "module-reviewer": { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } },
+  );
+  // Winner is the project member (module-reviewer high); default members follow it.
+  // reviewer stays global low because it already has an explicit global entry.
+  assert.deepEqual(map.reviewer!.slots, ["onekey/gpt-5.6-sol:low"]);
+  assert.equal(map.reviewer!.source, "global");
+  assert.deepEqual(map["module-reviewer"]!.slots, ["onekey/gpt-5.6-sol:high"]);
+  assert.equal(map["module-reviewer"]!.source, "project");
+  // reviewer-readonly was default, so it follows the project winner.
+  assert.deepEqual(map["reviewer-readonly"]!.slots, ["onekey/gpt-5.6-sol:high"]);
+  assert.equal(map["reviewer-readonly"]!.source, "project");
+});
+
+test("REVIEW_JUDGE_GROUP: conflict keeps explicit chains, only default members are filled", () => {
+  const { map } = effectiveAgentsConfig(undefined, {
+    reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] },
+    "module-reviewer": { auto: false, slots: ["onekey/glm-5.3:high"] },
+  });
+  // Both explicit stay as-is; readonly was default so it follows the winner (reviewer, higher group priority).
+  assert.deepEqual(map.reviewer!.slots, ["onekey/gpt-5.6-sol:high"]);
+  assert.deepEqual(map["module-reviewer"]!.slots, ["onekey/glm-5.3:high"]);
+  assert.deepEqual(map["reviewer-readonly"]!.slots, ["onekey/gpt-5.6-sol:high"]);
+});
+
+test("REVIEW_JUDGE_GROUP: deep copy isolation across all three members", () => {
+  const { map } = effectiveAgentsConfig(undefined, {
+    reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] },
+  });
+  const rv = map.reviewer!.slots;
+  const rr = map["reviewer-readonly"]!.slots;
+  const mr = map["module-reviewer"]!.slots;
+  assert.notEqual(rv, rr);
+  assert.notEqual(rv, mr);
+  assert.notEqual(rr, mr);
+  rr[0] = "onekey/glm-5.3:high";
+  assert.equal(map.reviewer!.slots[0], "onekey/gpt-5.6-sol:high");
+  assert.equal(map["module-reviewer"]!.slots[0], "onekey/gpt-5.6-sol:high");
+});
+
+test("REVIEW_JUDGE_GROUP: validNames subset does not crash", () => {
+  // Regression for the TypeError when validNames is a strict subset.
+  assert.doesNotThrow(() => {
+    const { map } = effectiveAgentsConfig(undefined, { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } }, ["reviewer"]);
+    assert.equal(map.reviewer!.slots[0], "onekey/gpt-5.6-sol:high");
+    assert.equal(map["reviewer-readonly"], undefined, "members outside validNames stay absent");
+    assert.equal(map["module-reviewer"], undefined, "members outside validNames stay absent");
+  });
+});
+
+test("REVIEW_JUDGE_GROUP: malformed propagates to the whole group and keeps last render", () => {
+  const { map } = effectiveAgentsConfig(undefined, { reviewer: { slots: [1 as unknown as string] } });
+  assert.equal(map.reviewer!.malformed, true);
+  assert.equal(map["reviewer-readonly"]!.malformed, true, "malformed winner must propagate to default siblings");
+  assert.equal(map["module-reviewer"]!.malformed, true);
+  // Mutating the follower must not leak back.
+  map["reviewer-readonly"]!.slots.push("x");
+  assert.equal(map.reviewer!.slots.includes("x"), false);
+});
+
+test("REVIEW_JUDGE_GROUP: valid member is preferred over malformed winner", () => {
+  const { map } = effectiveAgentsConfig(undefined, {
+    reviewer: { slots: [1 as unknown as string] },
+    "module-reviewer": { auto: false, slots: ["onekey/glm-5.3:high"] },
+  });
+  assert.equal(map.reviewer!.malformed, true, "reviewer stays malformed");
+  assert.equal(map["module-reviewer"]!.slots[0], "onekey/glm-5.3:high");
+  assert.equal(map["reviewer-readonly"]!.slots[0], "onekey/glm-5.3:high", "default member follows the valid winner, not the malformed one");
+  assert.equal(map["reviewer-readonly"]!.malformed, undefined, "follower of a valid winner is not malformed");
+});
+
 // ---------------------------------------------------------------------------
 // frontmatter rendering
 // ---------------------------------------------------------------------------

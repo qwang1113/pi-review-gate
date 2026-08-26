@@ -309,14 +309,16 @@ test("FAN-OUT wiring: slotSource stamp, config arg order, disk-fallback guards a
   const layers = SRC.slice(layersAt, layersAt + 8000);
   assert.match(layers, /ctx\.ui\.notify\(/, "layer problems must be notified");
   assert.match(layers, /problems\.slice\(0, 5\)/, "the notification must be bounded");
-  // And the cross-layer reviewer-readonly guard (round-2 P2) + its dedup (round-3).
-  assert.match(layers, /\["reviewer-readonly"\] = \{ auto: true, slots: \[\], source: "default"/, "global explicit reviewer-readonly must not be shadowed by a project follow");
+  // And the cross-layer REVIEW_JUDGE_GROUP guard (reviewer / reviewer-readonly / module-reviewer) + its dedup (round-3).
+  assert.match(SRC, /REVIEW_JUDGE_GROUP/, "extension must use REVIEW_JUDGE_GROUP from lib/model-config.ts");
+  assert.match(layers, /for \(const name of REVIEW_JUDGE_GROUP\)/, "the guard must iterate the group");
+  assert.match(layers, /map\[name\] = \{ auto: true, slots: \[\], source: "default"/, "global explicit group member must not be shadowed by a project follow");
   // The guard's DECISION CONDITION itself must be asserted, not just the
   // assignment: `if (true)` would pass the assignment regex and override the
   // project's explicit config (round-3 P2 mutation).
   assert.match(
     layers,
-    /if \(explicitRR\(globalRaw\) && !explicitRR\(projectRaw\) && !map\["reviewer-readonly"\]\?\.malformed\)/,
+    /if \(explicitFor\(globalRaw, name\) && !explicitFor\(projectRaw, name\) && !map\[name\]\?\.malformed\)/,
     "the cross-layer guard must gate on BOTH layers' explicit config and skip malformed entries",
   );
   assert.match(layers, /lastLayerNotifyText/, "the notify dedup guard must exist (round-3 Nit)");
@@ -365,29 +367,29 @@ test("corrupt config layer keeps the last render — BOTH layers, fail-safe (rou
 });
 
 test("explicitRR rejects malformed values (null / array) — not just the call site (round-4 P2)", () => {
-  // Round-3 P2 mutation: replacing the explicitRR body with a bare
+  // Round-3 P2 mutation: replacing the explicitFor body with a bare
   // `typeof raw === "object"` check kept the whole suite green — the
   // predicate BODY must be asserted, not only its call site.
   const layersAt = SRC.indexOf("function ensureModelLayersRendered(");
   assert.ok(layersAt > 0, "ensureModelLayersRendered must exist");
   const layers = SRC.slice(layersAt, layersAt + 5000);
-  const fnAt = layers.indexOf("const explicitRR");
-  assert.ok(fnAt > 0, "explicitRR must exist");
+  const fnAt = layers.indexOf("const explicitFor");
+  assert.ok(fnAt > 0, "explicitFor must exist");
   const body = layers.slice(fnAt, fnAt + 1200);
   assert.match(body, /raw === null/, "null must not count as an explicit config");
   assert.match(body, /Array\.isArray\(raw\)/, "an array must not count as an explicit config");
-  // The INNER guard (the reviewer-readonly VALUE itself) must also be
+  // The INNER guard (the per-name VALUE itself) must also be
   // asserted — round-10 P1 mutation: weakening it to a bare typeof check
   // kept the suite green because only the OUTER raw guards were covered.
-  assert.match(body, /typeof rr !== "object" \|\| rr === null \|\| Array\.isArray\(rr\)/, "the rr VALUE must be a non-null non-array object");
+  assert.match(body, /typeof entry !== "object" \|\| entry === null \|\| Array\.isArray\(entry\)/, "the entry VALUE must be a non-null non-array object");
 });
 
 test("explicitRR: CR/LF slot strings are invalid, like parseAgentsSection (round-11)", () => {
   // Round-11 P2: parseAgentsSection rejects CR/LF slots; the cross-layer
   // guard must apply the same rule or a malformed project entry could
-  // wrongly suppress the global reviewer-readonly follow.
+  // wrongly suppress the global group follow.
   const layers = SRC.slice(SRC.indexOf("function ensureModelLayersRendered("), SRC.indexOf("function ensureModelLayersRendered(") + 8000);
-  const fnAt = layers.indexOf("const explicitRR");
+  const fnAt = layers.indexOf("const explicitFor");
   assert.ok(fnAt > 0);
   const body = layers.slice(fnAt, fnAt + 1600);
   assert.match(body, /!\/\[\\r\\n\]\/\.test/, "CR/LF slots must not count as an explicit config");

@@ -204,6 +204,7 @@ import {
   applyAgentConfigLayer,
   loadRegistry,
   KNOWN_AGENTS,
+  REVIEW_JUDGE_GROUP,
   projectAgentIdentity,
   frontmatterBlock,
   resolvePackageAgentsDir,
@@ -1263,40 +1264,29 @@ export default function reviewGate(pi: ExtensionAPI) {
         const { map, diagnostics } = effectiveAgentsConfig(undefined, projectConfig.agentsProject ?? undefined);
         problems.push(...diagnostics);
         problems.push(...projectConfig.agentsDiagnostics.filter((d) => d.startsWith("project:")));
-        // Cross-layer guard (round-2 P2): the single-layer follow rule makes a
-        // project `reviewer` implicitly shadow a GLOBAL explicit
-        // `reviewer-readonly` (deployed chain ≠ effective chain, reproduced
-        // with a real run). When the global layer explicitly configures
-        // reviewer-readonly and the project layer does NOT, the project render
-        // must not materialize a followed copy of the project reviewer.
+        // Cross-layer guard for REVIEW_JUDGE_GROUP (reviewer / reviewer-readonly / module-reviewer):
+        // the single-layer group-follow makes a project `reviewer` (or any group winner)
+        // implicitly shadow a GLOBAL explicit entry for another group member
+        // (deployed chain ≠ effective chain, reproduced with a real run for RR).
+        // When the global layer explicitly configures a group member and the project
+        // layer does NOT explicitly configure THAT member, the project render must
+        // not materialize a followed copy for that member.
         const globalRaw = projectConfig.agentsGlobal;
         const projectRaw = projectConfig.agentsProject;
-        const explicitRR = (raw: unknown): boolean => {
+        const explicitFor = (raw: unknown, name: string): boolean => {
           if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
-          const rr = (raw as Record<string, unknown>)["reviewer-readonly"];
-          // A VALID explicit entry has at least one meaningful field (auto
-          // boolean and/or a slots key — an empty object, a string or a
-          // number is not a config and must not suppress the follow
-          // (round-8 P2: `"reviewer-readonly": {}` left BOTH layers unrendered
-          // while the effective config still followed the project reviewer).
-          // A `slots` key counts when it is a VALID slot list (array of
-          // non-empty strings — the same shape parseAgentsSection accepts);
-          // `{slots:null}` / `{slots:[1]}` are ignored by the parser, so they
-          // must not suppress the follow either (round-10 P1).
-          if (typeof rr !== "object" || rr === null || Array.isArray(rr)) return false;
-          const e = rr as Record<string, unknown>;
+          const entry = (raw as Record<string, unknown>)[name];
+          if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+          const e = entry as Record<string, unknown>;
           const validSlots =
             Array.isArray(e.slots) &&
             e.slots.every((s) => typeof s === "string" && s.trim().length > 0 && !/[\r\n]/.test(s));
           return typeof e.auto === "boolean" || ("slots" in e && validSlots);
         };
-        // A project entry that is present but MALFORMED (e.g. `{slots:[1]}`)
-        // keeps its last render — effectiveAgentsConfig marked it
-        // malformed:true, and overwriting it with default here would let the
-        // cleanup sweep delete the last good render (round-11 P1). Only a
-        // project layer with NO RR entry at all follows the global one.
-        if (explicitRR(globalRaw) && !explicitRR(projectRaw) && !map["reviewer-readonly"]?.malformed) {
-          map["reviewer-readonly"] = { auto: true, slots: [], source: "default" as const };
+        for (const name of REVIEW_JUDGE_GROUP) {
+          if (explicitFor(globalRaw, name) && !explicitFor(projectRaw, name) && !map[name]?.malformed) {
+            map[name] = { auto: true, slots: [], source: "default" as const };
+          }
         }
         const res = applyAgentConfigLayer({
           agents: map,

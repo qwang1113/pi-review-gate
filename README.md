@@ -392,7 +392,8 @@ built-in frontmatter default), with an **`auto` switch** per agent:
   overlay* (generated marker + the built-in default models) so that layer
   SHADOWS a lower layer's slot render — flipping a slot off always lands the
   built-in default, never a leftover lower-priority render. Unconfigured
-  agents are cleaned up instead (any stale generated copy is deleted).
+  agents are cleaned up instead (any stale generated copy is deleted) —
+  **except for the judge group** `reviewer` / `reviewer-readonly` / `module-reviewer`, which share a single chain (see below).
 - **`auto: false`** — `slots[0]` becomes the main model, `slots[1..]` the
   fallback chain. With the reviewer's switch OFF the **double review takes the
   first two usable slots** (authenticated + allowed + judge-eligible, skipping
@@ -402,6 +403,7 @@ built-in frontmatter default), with an **`auto` switch** per agent:
   built-in default chain (shadowing any lower layer's slots) and the fan-out
   falls back to the capability-ranked path, with a diagnostic at render time
   so the deployed default is never a surprise.
+- **Judge group sharing.** `reviewer`, `reviewer-readonly` and `module-reviewer` share one model chain: configuring ANY one of them (either `auto:false + slots` or an explicit `auto:true` overlay) makes the other two that remain `default` follow the same chain (deep-copied). The winner is `project > global`, then `reviewer > module-reviewer > reviewer-readonly`; a higher layer always wins and `malformed` entries lose to a valid winner in the same layer. This means a project-level `module-reviewer` slot also sets the `reviewer` chain and therefore the double-review fan-out, and the three `agents/*.md` files are rendered/cleaned together — a project `auto:true` overlay also shadows a lower layer's slots for the whole group.
 - **Per-model thinking levels.** Every slot may carry its own `:thinking`
   suffix (`claude-fable-5:max`, `onekey/gpt-5.6-sol:high`); the renderer keeps
   the suffix on each candidate so pi-subagents applies the requested level per
