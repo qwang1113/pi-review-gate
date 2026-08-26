@@ -39,18 +39,25 @@
  * does not recurse `**` and tests may be silently skipped.
  */
 
-import { execSync, execFileSync, spawn } from "node:child_process";
+import { execSync, execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { StringDecoder } from "node:string_decoder";
 import { readPrecommitConfig } from "./precommit-config.mjs";
 import {
   detectsMdConsumingBuild,
   intersectWithScriptPaths,
+  jestIgnoreArgs,
+  hasJestConfigSelection,
+  boundedTail,
+  createCaptureAccumulator,
+  maybeInjectJestIgnore,
   parseTestScript,
   planFastTests,
   runTestsByPathCommand,
   shellQuote,
+  splitTokens,
   stepInputScope,
 } from "./precommit-plan.mjs";
 import {
@@ -112,10 +119,27 @@ const steps = [];
 // its complete stdout+stderr immediately AFTER, so the log stays useful even
 // when the process is killed mid-run. Interactive humans (no --receipt) keep
 // the original compact output.
-const streaming = Boolean(receiptPath && nonce);
+// `--json` always wins: that mode's stdout is PARSED by its caller, so no
+// diagnostic may precede the JSON object — not the step blocks, not the plan
+// preamble, not live output. (Passing --json together with --receipt used to
+// emit both, leaving stdout unparseable.)
+const streaming = Boolean(receiptPath && nonce) && !asJson;
 
 function stream(line) {
   if (streaming) console.log(line);
+}
+
+/**
+ * Write a raw chunk (no added newline) as LIVE step output.
+ *
+ * The ordered `▶ … ◀` blocks below remain the log's structure; this writes the
+ * body of the block that is currently OPEN, as the child produces it, instead
+ * of only at close. Without it a 4-minute test step wrote nothing at all until
+ * it finished — which is exactly what made a precommit look hung to the agent
+ * tailing this log.
+ */
+function streamRaw(text) {
+  if (streaming && text !== "") process.stdout.write(text);
 }
 
 // ---- parallel execution, declaration-order presentation ----
@@ -131,6 +155,26 @@ function stream(line) {
 const pending = []; // declaration-order slots; null until that step finished
 let nextToPresent = 0;
 
+// LIVE OUTPUT, without breaking that order. Only the step the log is
+// currently AT (`nextToPresent`) may stream: its `▶` block is open, so its
+// body can be written as it arrives. Steps that finish out of order keep
+// buffering exactly as before and are presented when their turn comes, so the
+// log still reads lint → typecheck → build → test and nothing is printed twice.
+const running = new Map(); // idx -> { name, cmd, full, streamed, headerPrinted }
+
+function pumpLive() {
+  const cur = running.get(nextToPresent);
+  if (!cur) return;
+  if (!cur.headerPrinted) {
+    stream(`\n▶ ${cur.name} — ${cur.cmd}`);
+    cur.headerPrinted = true;
+  }
+  if (cur.full.length > cur.streamed) {
+    streamRaw(cur.full.slice(cur.streamed));
+    cur.streamed = cur.full.length;
+  }
+}
+
 function present(idx, lines, step) {
   pending[idx] = { lines, step: { ...step, source: plan[idx]?.source ?? "detected" } };
   while (nextToPresent < pending.length && pending[nextToPresent]) {
@@ -139,6 +183,9 @@ function present(idx, lines, step) {
     steps.push(unit.step);
     nextToPresent++;
   }
+  // The step the log is now AT may already be running with output buffered:
+  // flush it so liveness resumes immediately instead of at its close.
+  pumpLive();
 }
 
 function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
@@ -160,35 +207,59 @@ function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
     // The old spawnSync had a 64MB maxBuffer that turned pathological output
     // into a hard failure; the streamed version caps capture the same way,
     // but truncates with a marker instead of failing the step.
-    let full = "";
-    let captureTruncated = false;
     const MAX_CAPTURE = 64 * 1024 * 1024;
-    const onData = (d) => {
-      if (captureTruncated) return;
-      if (full.length + d.length > MAX_CAPTURE) {
-        full = `${full.slice(0, MAX_CAPTURE)}\n…[output truncated at 64MB]…\n`;
-        captureTruncated = true;
-        return;
-      }
-      full += d;
-    };
-    child.stdout.on("data", onData);
-    child.stderr.on("data", onData);
+    // Registered so `pumpLive` can stream this step's body while it is the one
+    // the log is at. `full` is re-published on every fragment because the entry
+    // holds a snapshot, not a live reference to the accumulator.
+    const live = { name, cmd, full: "", streamed: 0, headerPrinted: false };
+    running.set(idx, live);
+    // ONE decoder per stream, kept across chunks. A child's stdout chunk
+    // boundary lands wherever the kernel put it, so decoding each chunk on its
+    // own turns a split multibyte character into U+FFFD — permanently, and
+    // BEFORE the log is written, which no decoding downstream (the extension's
+    // tail) can repair. stdout and stderr get their own decoder: they are
+    // independent byte streams and must not share a partial-sequence buffer.
+    const outDecoder = new StringDecoder("utf8");
+    const errDecoder = new StringDecoder("utf8");
+    // Byte-accurate cap + post-truncation flush policy live in a pure unit
+    // (precommit-plan.mjs) so both rules are unit-testable without a 64 MiB run.
+    const capture = createCaptureAccumulator(MAX_CAPTURE, () => {
+      live.full = capture.text;
+      pumpLive();
+    });
+    const onData = (decoder) => (d) => capture.push(d.length, decoder.write(d));
+    // Flushed on EVERY exit path, and deliberately not gated on
+    // `captureTruncated`: the remainder is at most a few bytes of a character
+    // the child was killed in the middle of, and dropping it silently is how
+    // the last line of an aborted run goes missing.
+    const flushDecoders = () => { capture.flush(outDecoder.end()); capture.flush(errDecoder.end()); };
+    child.stdout.on("data", onData(outDecoder));
+    child.stderr.on("data", onData(errDecoder));
     child.on("error", () => { /* spawn failure surfaces via close with non-zero */ });
     child.on("close", (code, signal) => {
       const passed = code === 0;
       const durationMs = Date.now() - started;
-      const lines = [
-        `\n▶ ${name} — ${cmd}`,
-        full,
-        `◀ ${name} — ${passed ? "pass" : "fail"} (${durationMs}ms, exit ${code ?? `signal ${signal}`})`,
-      ];
+      // Flush BEFORE the block is closed: a child killed mid-character leaves an
+      // incomplete sequence buffered in its decoder, and it belongs in the log.
+      flushDecoders();
+      const full = capture.text;
+      running.delete(idx);
+      live.full = full;
+      const closing = `◀ ${name} — ${passed ? "pass" : "fail"} (${durationMs}ms, exit ${code ?? `signal ${signal}`})`;
+      // A step that already streamed live must not have its body reprinted:
+      // emit only what the last pump did not cover, plus the closing marker.
+      const lines = live.headerPrinted
+        ? [full.slice(live.streamed), closing].filter((l) => l !== "")
+        : [`\n▶ ${name} — ${cmd}`, full, closing];
       const status = passed ? "pass" : "fail";
       // Keyed on the DECLARED command, not on `cmd`: the `nice` prefix is a
       // scheduling detail that depends on how many steps happened to run in
       // parallel, and letting it into the key would miss on every run.
       cacheRecord(cache, {
-        name, command, scope: cacheScope, digests, status, durationMs, tail: full,
+        // Bounded for the same reason as the receipt: a cache entry is replayed
+        // into a later run's log, so an unbounded tail would persist 64 MiB of
+        // output in `.pi/precommit-cache.json` and reprint it on every hit.
+        name, command, scope: cacheScope, digests, status, durationMs, tail: boundedTail(full),
       });
       present(idx, lines, {
         name,
@@ -198,8 +269,11 @@ function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
         cached: false,
         cacheScope,
         // The receipt stays a BOUNDED structured summary; the unbounded full text
-        // lives in the streamed log. Two channels, two jobs.
-        tail: full.split("\n").slice(-40).join("\n"),
+        // lives in the streamed log. Two channels, two jobs. Bounded in BYTES as
+        // well as lines: one un-newlined 64 MiB line is still one line, and the
+        // extension refuses any receipt over 1 MiB — which would turn a genuinely
+        // passing run into ERROR.
+        tail: boundedTail(full),
       });
       resolve();
     });
@@ -208,10 +282,15 @@ function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
 
 /** Present a step whose recorded PASS was reused instead of re-running it. */
 function cachedStep(name, command, idx, entry, cacheScope) {
+  // Bound on READ as well as on write: a cache file written by an earlier
+  // version (or by hand) still holds an unbounded tail, and replaying it into
+  // the receipt reproduces the oversized-receipt failure the write-side bound
+  // was added to prevent — a genuine PASS rejected as ERROR.
+  const tail = boundedTail(entry.tail ?? "");
   present(idx, [
     `\n▶ ${name} — ${command}`,
     `⚡ cache hit — inputs (${cacheScope}) unchanged since ${entry.at}; reusing the recorded PASS`,
-    entry.tail ?? "",
+    tail,
     `◀ ${name} — pass (cached, originally ${entry.durationMs}ms)`,
   ], {
     name,
@@ -220,7 +299,7 @@ function cachedStep(name, command, idx, entry, cacheScope) {
     durationMs: 0,
     cached: true,
     cacheScope,
-    tail: entry.tail ?? "",
+    tail,
   });
 }
 
@@ -256,6 +335,66 @@ const pm = existsSync(join(cwd, "bun.lockb")) ? "bun"
   : "npm";
 const runPrefix = pm === "npm" ? "npm run" : pm === "bun" ? "bun run" : pm;
 
+
+// ---- jest `.pi` ignore injection (see precommit-plan.mjs for the pure half) ----
+//
+// jest's default testMatch would scan `.pi/review-snapshots/` — disposable
+// copies of the worktree whose test files are NOT meant to run. Read the
+// repo's own testPathIgnorePatterns via `jest --showConfig` (the authoritative
+// source), merge `<rootDir>/.pi/` in, and pass the combined list via CLI. A
+// repo whose showConfig cannot run gets NO injection (never a CLI override
+// that would silently drop the repo's own exclusions) and a recorded reason.
+//
+// The query must describe the SAME configuration as the run. Rather than
+// reproduce an explicit selection (which means reimplementing jest's CLI
+// parsing — see `hasJestConfigSelection`), a command that selects its config
+// explicitly is skipped with a reason. The merge therefore only ever happens
+// where a bare `--showConfig` provably describes the command's own config.
+let jestIgnoreNote = "";
+let jestIgnoreArgsCache;
+function resolveJestIgnoreInjection(body, spawnFn = spawnSync) {
+  const source = typeof body === "string" ? body : "";
+  const parsed = parseTestScript(source);
+  // Not a single jest command ⇒ nothing to inject into: return before spawning
+  // anything. Querying `--showConfig` for a vitest/node --test script costs a
+  // process for a result that can never be used, and its "skipped" note would
+  // describe a jest problem the project does not have. The per-step reason from
+  // `maybeInjectJestIgnore` already explains why such a step is not rewritten.
+  if (parsed?.runner !== "jest") return "";
+  if (hasJestConfigSelection(splitTokens(source))) {
+    jestIgnoreNote = "jest ignore injection skipped: the test command selects its own jest config " +
+      "(add <rootDir>/.pi/ to that config's testPathIgnorePatterns)";
+    return "";
+  }
+  if (jestIgnoreArgsCache !== undefined) return jestIgnoreArgsCache;
+  const remember = (value) => { jestIgnoreArgsCache = value; return value; };
+  // RAW path, not `resolveRunnerBin`: this is an argv entry, and a shell-quoted
+  // path would spawn a file whose name literally contains the quotes (ENOENT).
+  const bin = runnerBinPath("jest");
+  if (!bin) {
+    jestIgnoreNote = "jest ignore injection skipped: no local jest bin";
+    return remember("");
+  }
+  // Bare query: reaching here proves the command uses default config discovery.
+  const r = spawnFn(bin, ["--showConfig"], { cwd, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] });
+  if (r.error || r.status !== 0) {
+    // `spawnSync` reports a failed spawn in `error`, not by throwing.
+    const why = r.error ? r.error.code ?? r.error.message : `exit ${r.status ?? "unknown"}`;
+    jestIgnoreNote = `jest ignore injection skipped: jest --showConfig failed (${why})`;
+    return remember("");
+  }
+  let patterns;
+  try {
+    patterns = JSON.parse(r.stdout)?.configs?.[0]?.testPathIgnorePatterns;
+  } catch { patterns = undefined; }
+  if (!Array.isArray(patterns)) {
+    jestIgnoreNote = "jest ignore injection skipped: showConfig output lacks testPathIgnorePatterns";
+    return remember("");
+  }
+  jestIgnoreNote = "";
+  return remember(jestIgnoreArgs(patterns));
+}
+
 function collectStep(stepName, scriptNames) {
   const scripts = pkg?.scripts ?? {};
   const found = scriptNames.find((s) => typeof scripts[s] === "string");
@@ -276,7 +415,19 @@ function collectStep(stepName, scriptNames) {
   }
 
   anyRan = true;
-  const entry = { name: stepName, command: `${runPrefix} ${found}`, isFix: found === "lint:fix", idx, script: found, body, source: "detected" };
+  // ONLY the test step. The exclusion exists so a test run does not execute the
+  // disposable copies under `.pi/review-snapshots/`; a lint/typecheck/build
+  // script that happens to be a plain `jest` invocation is a different job, and
+  // rewriting it would also change its cache command key (and, for `lint:fix`,
+  // the command whose edits the fix stage is keyed on).
+  const injected = stepName === "test"
+    ? maybeInjectJestIgnore({ command: `${runPrefix} ${found}`, body, pm, ignoreArgs: resolveJestIgnoreInjection(body) })
+    : { command: `${runPrefix} ${found}`, injected: false };
+  // Keep the SPECIFIC reason when there already is one: the resolver's note
+  // (why `jest --showConfig` failed) is the actionable half, and the generic
+  // per-step reason would otherwise replace it with a pointer to itself.
+  if (!injected.injected && injected.reason && stepName === "test" && !jestIgnoreNote) jestIgnoreNote = injected.reason;
+  const entry = { name: stepName, command: injected.command, isFix: found === "lint:fix", idx, script: found, body, source: "detected" };
   plan.push(entry);
   return entry;
 }
@@ -303,6 +454,12 @@ function collectConfigured(stepName, scriptNames, configured) {
   if (typeof configured.script === "string" && configured.script !== "") {
     const scripts = pkg?.scripts ?? {};
     if (typeof scripts[configured.script] === "string") {
+      // NO jest injection here on purpose: this function collects the NON-test
+      // steps only (lint / typecheck / build — the test step goes through
+      // `collectTestConfigured`), and the `.pi` exclusion is scoped to the test
+      // step. A configured `lint` that happens to be a plain `jest` command must
+      // keep its command verbatim, or its cache key (and, for `lint:fix`, the
+      // command the fix stage is keyed on) changes for an unrelated reason.
       const entry = {
         name: stepName,
         command: `${runPrefix} ${configured.script}`,
@@ -360,12 +517,26 @@ function changedFiles() {
   }
 }
 
-/** Locate a test runner binary inside the project, or null. */
-function resolveRunnerBin(runner) {
-  if (runner === "node-test") return shellQuote(process.execPath);
+/**
+ * Locate a test runner binary inside the project as a RAW path, or null.
+ *
+ * Separate from `resolveRunnerBin` on purpose: a shell-quoted path is correct
+ * for a command STRING (`execSync`) and wrong for an argv entry (`spawnSync`,
+ * no shell), where the quotes become part of the filename and the spawn fails
+ * with ENOENT. `spawnSync` reports that in `result.error` rather than throwing,
+ * so the mistake degrades silently into never injecting anything.
+ */
+function runnerBinPath(runner) {
+  if (runner === "node-test") return process.execPath;
   if (runner !== "jest" && runner !== "vitest") return null;
   const local = join(cwd, "node_modules", ".bin", runner);
-  return existsSync(local) ? shellQuote(local) : null;
+  return existsSync(local) ? local : null;
+}
+
+/** Locate a test runner binary inside the project, quoted for a shell command. */
+function resolveRunnerBin(runner) {
+  const path = runnerBinPath(runner);
+  return path === null ? null : shellQuote(path);
 }
 
 /**
@@ -379,6 +550,10 @@ function narrowTestStep(entry) {
   const files = changedFiles();
   const fast = planFastTests({
     parsed: parseTestScript(entry.body),
+    // Raw tokens so the planner can see an explicit jest config selection: the
+    // enumeration would otherwise run under the DEFAULT config and hand back a
+    // related set from the wrong one.
+    tokens: splitTokens(typeof entry.body === "string" ? entry.body : ""),
     changedFiles: files,
     fullCommand: entry.command,
     resolveBin: resolveRunnerBin,
@@ -398,9 +573,14 @@ function narrowTestStep(entry) {
   // jest two-step: enumerate the related tests, intersect with the script's
   // own path filter (jest ignores --testPathPattern when --findRelatedTests is
   // present, so the intersection has to happen here), then run by exact path.
+  // The enumeration itself must skip `.pi` too: a snapshot copy of a changed
+  // source would otherwise enumerate its own test twin as a related test.
+  // Same config context as the step being narrowed (entry.body is the script).
+  const listIgnore = resolveJestIgnoreInjection(entry.body);
+  const listCommand = listIgnore ? `${fast.listCommand} ${listIgnore}` : fast.listCommand;
   let listed;
   try {
-    listed = execSync(fast.listCommand, {
+    listed = execSync(listCommand, {
       cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5 * 60 * 1000,
     });
   } catch {
@@ -421,7 +601,7 @@ function narrowTestStep(entry) {
     return { testScope: "related", note: "no related tests" };
   }
 
-  entry.command = runTestsByPathCommand({ env: fast.env, bin: fast.bin, flags: fast.flags, files: related });
+  entry.command = runTestsByPathCommand({ env: fast.env, bin: fast.bin, flags: fast.flags, files: related, ignore: listIgnore });
   return { testScope: "related", note: `${related.length} related test file(s)` };
 }
 
@@ -476,12 +656,33 @@ function collectTestConfigured() {
   }
   let entry;
   if (typeof effectiveStep.command === "string" && effectiveStep.command !== "") {
-    entry = { name: "test", command: effectiveStep.command, idx, source: "config" };
+    // A configured RAW command IS the command: ignore args append directly
+    // (no package-manager passthrough). The single-jest boundary still holds —
+    // a compound configured command is left byte-for-byte alone.
+    const rawInjected = maybeInjectJestIgnore({
+      command: effectiveStep.command,
+      body: effectiveStep.command,
+      pm: "direct",
+      ignoreArgs: resolveJestIgnoreInjection(effectiveStep.command),
+    });
+    // Record WHY injection was skipped. Without it the plan preamble falls
+    // through to "jest runs exclude <rootDir>/.pi/" whenever showConfig merely
+    // succeeded — claiming an exclusion this run does not actually have.
+    if (!rawInjected.injected && rawInjected.reason && !jestIgnoreNote) jestIgnoreNote = rawInjected.reason;
+    entry = { name: "test", command: rawInjected.command, idx, source: "config" };
     plan.push(entry);
   } else if (typeof effectiveStep.script === "string" && effectiveStep.script !== "") {
     const scripts = pkg?.scripts ?? {};
     if (typeof scripts[effectiveStep.script] === "string") {
-      entry = { name: "test", command: `${runPrefix} ${effectiveStep.script}`, idx, source: "config" };
+      const configuredTestBody = scripts[effectiveStep.script];
+      const scriptInjected = maybeInjectJestIgnore({
+        command: `${runPrefix} ${effectiveStep.script}`,
+        body: configuredTestBody,
+        pm,
+        ignoreArgs: resolveJestIgnoreInjection(configuredTestBody),
+      });
+      if (!scriptInjected.injected && scriptInjected.reason && !jestIgnoreNote) jestIgnoreNote = scriptInjected.reason;
+      entry = { name: "test", command: scriptInjected.command, idx, source: "config" };
       plan.push(entry);
     } else {
       plan.push({
@@ -714,6 +915,32 @@ for (const s of plan) if (!s.command) skipStep(s.name, s.reason, s.idx);
 
 const runnable = plan.filter((s) => s.command);
 for (const s of runnable) s.cacheScope = stepInputScope(s.name, s.command, mdConsumingBuild);
+
+// ---- plan preamble: what this run is ABOUT to do ----
+//
+// Written BEFORE the first check starts, because this log is the only live
+// window into a detached runner: the extension tails this file and forwards
+// it, so an empty log until the first step finished meant a run that looked
+// hung for minutes. Steps skipped (no script, configured skip) are listed
+// too — knowing a check does NOT run is as useful as knowing it does.
+//
+// `--json` mode stays PURE JSON on stdout (a caller parses it), so the
+// preamble is suppressed there — the extension does not use --json.
+if (!asJson) {
+  console.log(`# Precommit plan (${mode}) — ${runnable.length} step(s) to run`);
+  for (const s of plan) {
+    if (s.command) console.log(`  · ${s.name}: ${s.command}`);
+    else console.log(`  · ${s.name}: skipped (${s.reason ?? "no reason recorded"})`);
+  }
+  if (jestIgnoreNote) console.log(`  · note: ${jestIgnoreNote}`);
+  // Claim the exclusion only when the TEST step's own command carries it. Any
+  // other step matching the string (a lint script that greps for it, say) would
+  // otherwise produce a user-visible claim about a run that never got it.
+  else if (plan.some((s) => s.name === "test" && typeof s.command === "string" && s.command.includes("--testPathIgnorePatterns"))) {
+    console.log("  · note: jest runs exclude <rootDir>/.pi/ (merged with the repo's own testPathIgnorePatterns)");
+  }
+  console.log("");
+}
 
 function lookupHit(s) {
   return cacheLookup(cache, {

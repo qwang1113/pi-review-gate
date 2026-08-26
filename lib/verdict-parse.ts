@@ -84,9 +84,60 @@ function recoverFenceVerdict(body: string): FenceVerdict | undefined {
   return { verdict: safeVerdict, findingsTotal: null, findingFingerprints: [], hasP0P1: false };
 }
 
+/**
+ * Escape ONLY the raw control characters (< 0x20) that sit INSIDE a JSON
+ * string value, so a fence whose strings contain unescaped newlines/tabs
+ * (a common LLM output defect — e.g. a multi-line `notes` field) can be
+ * re-parsed as valid JSON. Everything else is left byte-for-byte alone:
+ * structure tokens, whitespace between tokens, and already-escaped
+ * sequences (`\"`, `\\`, `\n`, …) are copied verbatim.
+ *
+ * Safety: this never invents structure. If the body is damaged beyond raw
+ * control characters inside strings, the re-parse fails and the caller
+ * falls through to recoverFenceVerdict (fail-closed).
+ */
+function escapeControlCharsInStrings(body: string): string {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (inString) {
+      if (ch === "\\") {
+        // Escape prefix: copy it and the escaped char verbatim.
+        out += ch;
+        if (i + 1 < body.length) { out += body[i + 1]; i++; }
+        continue;
+      }
+      if (ch === '"') { inString = false; out += ch; continue; }
+      const code = ch.charCodeAt(0);
+      if (code < 0x20) {
+        out += code === 0x0a ? "\\n" : code === 0x0d ? "\\r" : code === 0x09 ? "\\t" :
+          `\\u${code.toString(16).padStart(4, "0")}`;
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') { inString = true; out += ch; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+
 function parseJsonFence(body: string): FenceVerdict | undefined {
   let data: unknown;
-  try { data = JSON.parse(body); } catch { return recoverFenceVerdict(body); }
+  try { data = JSON.parse(body); }
+  catch {
+    // LLM fences routinely embed raw newlines inside string values (a
+    // multi-line `notes`/`text` field). JSON forbids them, which used to
+    // drop the whole verdict into recoverFenceVerdict — losing every finding
+    // and downgrading a legitimate READY to BLOCKED. Escape only the
+    // string-internal control characters and re-parse; a body damaged
+    // beyond that still falls through to recovery (fail-closed).
+    try { data = JSON.parse(escapeControlCharsInStrings(body)); }
+    catch { return recoverFenceVerdict(body); }
+  }
   if (typeof data !== "object" || data === null) return undefined;
   const obj = data as Record<string, unknown>;
   const gateRaw = obj.gate ?? obj.verdict ?? obj.status;

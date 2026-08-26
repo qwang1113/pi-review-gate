@@ -97,6 +97,46 @@ test("recovery: fence with no gate token at all → still undefined", () => {
   assert.equal(parseReviewOutput('```json\n{"notes":"just prose, no verdict"}\n```'), undefined);
 });
 
+// ---- raw-control-character salvage (string-internal newlines/tabs) ----
+
+test("salvage: READY fence with raw newlines in a string stays READY with findings", () => {
+  const out = "```json\n{\"gate\":\"READY\",\"findings\":[{\"severity\":\"P2\",\"issue\":\"line1\nline2\"}]}\n```";
+  const p = parseReviewOutput(out);
+  assert.equal(p!.verdict, "READY");
+  assert.equal(p!.findingsTotal, 1);
+});
+
+test("salvage: BLOCKED fence with raw newlines stays BLOCKED", () => {
+  const out = "```json\n{\"gate\":\"BLOCKED\",\"findings\":[{\"severity\":\"P1\",\"issue\":\"a\nb\"}]}\n```";
+  const p = parseReviewOutput(out);
+  assert.equal(p!.verdict, "BLOCKED");
+  assert.equal(p!.findingsTotal, 1);
+});
+
+test("salvage: body damaged beyond raw control chars still recovers fail-closed", () => {
+  // Unterminated string: escaping cannot repair it, so recoverFenceVerdict
+  // salvages the gate word — READY downgrades to BLOCKED, findings untrusted.
+  const out = "```json\n{\"gate\":\"READY\",\"findings\":[{\"severity\":\"P2\",\"issue\":\"unterminated\n}]}\n```";
+  const p = parseReviewOutput(out);
+  assert.equal(p!.verdict, "BLOCKED");
+  assert.equal(p!.findingsTotal, null);
+});
+
+test("salvage: properly escaped backslash-n sequences are unaffected", () => {
+  const out = "```json\n{\"gate\":\"READY\",\"findings\":[{\"severity\":\"P2\",\"issue\":\"line1\\nline2\"}]}\n```";
+  const p = parseReviewOutput(out);
+  assert.equal(p!.verdict, "READY");
+  assert.equal(p!.findingsTotal, 1);
+});
+
+test("salvage: salvaged READY carrying P0/P1 findings still downgrades to BLOCKED", () => {
+  // Escaping succeeds, but the shared P1 fix must not fail open: a READY
+  // fence with unresolved P0/P1 findings is contradictory and becomes BLOCKED.
+  const out = "```json\n{\"gate\":\"READY\",\"findings\":[{\"severity\":\"P1\",\"issue\":\"x\ny\"}]}\n```";
+  const p = parseReviewOutput(out);
+  assert.equal(p!.verdict, "BLOCKED");
+});
+
 // ---- docSync attestation parsing ----
 
 test("docSync: valid attestations parse (docSync and doc_sync spellings, case-insensitive)", () => {
