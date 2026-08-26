@@ -191,146 +191,6 @@ test("L2 STALL BREAKER: a running subagent counts as motion (never orphan a live
   assert.match(probe, /state === "running"/, "only RUNNING subagents count as motion");
 });
 
-test("FAN-OUT: the reviewer count is injected on BOTH dispatch paths", () => {
-  // The observed waste (two same-family reviewers billed as a cross-family
-  // pair) happened in the AUTONOMOUS loop, where nobody types /review — so
-  // the command prompt alone is not enough.
-  assert.match(SRC, /from "\.\.\/lib\/review-fanout\.ts"/);
-
-  const cmdAt = SRC.indexOf("function registerWorkflowCommand(");
-  assert.ok(cmdAt > 0, "the workflow command registrar must exist");
-  const cmdBody = SRC.slice(cmdAt, cmdAt + 1200);
-  assert.match(cmdBody, /name === "review"/, "only /review carries the fan-out decision");
-  assert.match(cmdBody, /fanoutDirective\(\)/, "/review must append the computed plan");
-
-  // (a) the literal [REVIEW_GATE_RESUME] message the autonomous loop runs on.
-  const settledAt = SRC.indexOf('pi.on("agent_settled"');
-  assert.ok(settledAt > 0, "agent_settled handler must exist");
-  const resumeAt = SRC.indexOf("REVIEW_GATE_RESUME", settledAt);
-  const sendEnd = SRC.indexOf('{ deliverAs: "followUp" }', resumeAt);
-  assert.ok(sendEnd > resumeAt, "the resume sendUserMessage must be locatable");
-  const resumeMessage = SRC.slice(resumeAt, sendEnd);
-  assert.match(resumeMessage, /fanoutDirective\(\)/, "the RESUME message itself must carry the plan");
-  assert.match(
-    resumeMessage,
-    /state\.review\.verdict !== "READY"/,
-    "only while a review is outstanding",
-  );
-
-  // (b) the per-turn prompt, which is the only carrier on user-driven turns
-  // (paused loop, exhausted continuation budget, a plain "go review it").
-  const promptAt = SRC.indexOf('pi.on("before_agent_start"');
-  assert.ok(promptAt > 0);
-  const promptBody = SRC.slice(promptAt);
-  assert.match(promptBody, /fanoutDirective\(\)/, "the per-turn prompt must carry the plan too");
-  const fanoutInPrompt = promptBody.indexOf("fanoutDirective()");
-  const guard = promptBody.slice(Math.max(0, fanoutInPrompt - 400), fanoutInPrompt);
-  assert.match(guard, /state\.review\.verdict !== "READY"/, "only inject while a review is outstanding");
-});
-
-test("FAN-OUT: a partial (disk) model view may confirm judges, never deny them", () => {
-  // Reading only models-store.json misses built-in catalogs (anthropic), so a
-  // "no judge available" conclusion drawn from it would be a false alarm —
-  // the same mistake that once reported every built-in chain as BLOCKED.
-  // The plan now lives in fanoutPlan() — shared by the prompt injection and
-  // the review tools (one plan, one source) — so the structural assertions
-  // pin THAT function; fanoutDirective is a two-line wrapper on it.
-  const at = SRC.indexOf("function fanoutPlan(");
-  assert.ok(at > 0, "fanoutPlan must exist");
-  const body = SRC.slice(at, at + 3000);
-  assert.match(
-    body,
-    /if \(registryJudgeFacts\) return planForFacts\(registryJudgeFacts\)/,
-    "the authoritative registry view must route through the SLOT-AWARE planner — " +
-      "a bare planFanoutFromFacts here would silently ignore the user's pinned slots",
-  );
-  assert.match(
-    body,
-    /plan && plan\.crossFamily \? plan : undefined/,
-    "the disk fallback may only CONFIRM a cross-family pair — claiming SINGLE from it " +
-      "would suppress a double review that was actually possible and record a false note",
-  );
-  const directiveAt = SRC.indexOf("function fanoutDirective()");
-  assert.ok(directiveAt > 0, "the directive wrapper must still exist");
-  const directive = SRC.slice(directiveAt, directiveAt + 300);
-  assert.match(directive, /formatFanoutDirective\(plan\)/, "the wrapper must delegate to the formatter (no hardcoded string)");
-  // The slot-aware planner gates the user-slot path on the reviewer auto switch
-  // OFF and keeps the capability planner for the default — so auto:true stays
-  // identical to today's path by construction.
-  const planAt = SRC.indexOf("function planForFacts(");
-  assert.ok(planAt > 0, "planForFacts must exist");
-  const planner = SRC.slice(planAt, planAt + 1600);
-  assert.match(planner, /planConfiguredReviewFanout/, "production planner must use the shared configured helper");
-  assert.match(planner, /reviewer\.auto === false/, "slot path must be gated on auto OFF");
-  assert.match(planner, /slots\.length > 0/, "empty slot list must fall back to the default path");
-  assert.match(planner, /planFanoutFromFacts/, "default path must keep the capability planner");
-  // The slot-source sentence lives ONCE, in the helper (round-12 Nit): a second
-  // copy here silently drifted from what lib/review-fanout.ts stamps.
-  assert.doesNotMatch(planner, /REVIEWER SLOT SOURCE/, "the slot-source stamp must not be duplicated in the extension");
-  assert.doesNotMatch(
-    body.slice(body.indexOf("factsFromRegistry(undefined")),
-    /plan\.reviewers\.length > 0/,
-    "a non-empty plan is NOT enough: a SINGLE plan from the partial view is a denial",
-  );
-  // The authoritative view is warmed from real ctx registries, not invented.
-  assert.match(SRC, /rememberJudgeFacts\(\(ctx as \{ modelRegistry\?: unknown \}\)\.modelRegistry\)/);
-});
-
-test("FAN-OUT wiring: slotSource stamp, config arg order, disk-fallback guards are all asserted", () => {
-  // round-2 P2: deleting the slotSource stamp or swapping the
-  // effectiveAgentsConfig(global, project) argument order left the suite
-  // green (shard-3 mutation); removing the notify block or reverting the disk
-  // fallback to planForFacts also stayed green (shard-1 mutations).
-  const planAt = SRC.indexOf("function planForFacts(");
-  const planner = SRC.slice(planAt, planAt + 1600);
-  // The stamp itself now lives ONCE, in planConfiguredReviewFanout
-  // (lib/review-fanout.ts), where test/review-fanout.test.ts pins its FULL text
-  // behaviorally. Here we only pin that the extension DELEGATES and never grows
-  // a second copy of that sentence (round-12 Nit).
-  assert.match(planner, /return planConfiguredReviewFanout\(facts, reviewer\)/, "the slotted path must delegate to the shared helper");
-  assert.doesNotMatch(planner, /plan\.slotSource =/, "the slot-source stamp must not be duplicated in the extension");
-  assert.match(planner, /effectiveAgentsConfig\(projectConfig\.agentsGlobal, projectConfig\.agentsProject\)/, "config layering must be global-first, project-second");
-  // The disk-fallback branch must (1) use the DEFAULT planner, not the slotted
-  // one, and (2) stay SILENT when the user pinned slots (a default-path spec
-  // would contradict the pin).
-  const fanoutAt = SRC.indexOf("function fanoutPlan(");
-  const fn = SRC.slice(fanoutAt, fanoutAt + 3000);
-  const fallbackStart = fn.indexOf("factsFromRegistry(undefined");
-  assert.ok(fallbackStart > 0);
-  const fallback = fn.slice(Math.max(0, fallbackStart - 700), fallbackStart + 200);
-  assert.match(fallback, /planFanoutFromFacts\(factsFromRegistry\(undefined/, "the disk view must use the DEFAULT planner");
-  assert.doesNotMatch(fallback, /planForFacts\(factsFromRegistry\(undefined/, "the slotted path must never run on the disk view");
-  assert.match(fallback, /rv\.auto === false && rv\.slots\.length > 0\) return undefined/, "pinned slots must silence the disk fallback");
-  // The round-1 notify block must stay (a rejected chain must reach the user).
-  const layersAt = SRC.indexOf("function ensureModelLayersRendered(");
-  // (round-2 corrupt-guard: the fail-safe branches add ~12 lines, and the
-  // bootstrap self-heal another ~18, so the window must comfortably cover the
-  // whole function.)
-  const layers = SRC.slice(layersAt, layersAt + 8000);
-  assert.match(layers, /ctx\.ui\.notify\(/, "layer problems must be notified");
-  assert.match(layers, /problems\.slice\(0, 5\)/, "the notification must be bounded");
-  // And the cross-layer reviewer-readonly guard (round-2 P2) + its dedup (round-3).
-  assert.match(layers, /\["reviewer-readonly"\] = \{ auto: true, slots: \[\], source: "default"/, "global explicit reviewer-readonly must not be shadowed by a project follow");
-  // The guard's DECISION CONDITION itself must be asserted, not just the
-  // assignment: `if (true)` would pass the assignment regex and override the
-  // project's explicit config (round-3 P2 mutation).
-  assert.match(
-    layers,
-    /if \(explicitRR\(globalRaw\) && !explicitRR\(projectRaw\) && !map\["reviewer-readonly"\]\?\.malformed\)/,
-    "the cross-layer guard must gate on BOTH layers' explicit config and skip malformed entries",
-  );
-  assert.match(layers, /lastLayerNotifyText/, "the notify dedup guard must exist (round-3 Nit)");
-  // The dedup CONDITION must be asserted too: `if (true)` would re-notify on
-  // every session start (round-3 P2 mutation).
-  assert.match(
-    layers,
-    /if \(text !== lastLayerNotifyText\)/,
-    "identical problems must not re-notify on every session start",
-  );
-  // The STATE WRITE must be asserted too: deleting `lastLayerNotifyText = text;`
-  // makes the dedup a no-op while every condition regex stays green (round-4 P2).
-  assert.match(layers, /lastLayerNotifyText = text;/, "the dedup state must be recorded");
-});
 
 test("corrupt config layer keeps the last render — BOTH layers, fail-safe (round-12 P1)", () => {
   // Goal criterion 3: a corrupt/malformed `agents` section in EITHER layer must
@@ -866,7 +726,9 @@ test("USER REQUIREMENT: /tmp first classification clamps via scratchFirstMode; /
   }
   // /tmp makes NO classifier call at all: it can never reach loop, and the
   // /decompose hint is only ever surfaced under loop.
-  assert.match(SRC, /if \(piSelf\) \{[\s\S]{0,600}?effective = scratchFirstMode\(requested\);[\s\S]{0,40}?\} else \{[\s\S]{0,400}?await classifyRequirementSize\(/);
+  // The decompose hint and its requirement-size classifier are gone (2026-08-26);
+  // the /tmp clamp (scratchFirstMode) stays.
+  assert.match(SRC, /if \(piSelf\) \{[\s\S]{0,600}?effective = scratchFirstMode\(requested\);/);
   // The guard layer must document that it deliberately holds NO gate-mode
   // classifier, so a future round does not "restore" one.
   const CLASSIFY = readFileSync(join(ROOT, "lib", "llm-classify.ts"), "utf8");
@@ -2031,107 +1893,11 @@ test("the extension never calls require() (ESM type-stripped runtime)", () => {
   // that line runs (a small-diff single-shard prompt did exactly this until
   // the constants were imported instead). The extension must import statically.
   assert.doesNotMatch(SRC, /require\(/);
-  assert.match(SRC, /SHARD_THRESHOLD_FILES/);
-  assert.match(SRC, /SHARD_THRESHOLD_LINES/);
-});
-
-// ---- Tiered parallel review trigger ----
-
-test("tiered trigger: prepare_review shards a large diff ITSELF (mechanical, not improvised)", () => {
-  // Review moved off the engine, which moved the fan-out decision to the main
-  // agent — and "it split the diff into disjoint groups covering every file" is
-  // not something a prompt can guarantee. So the tool computes the split.
-  const at = SRC.indexOf('name: "prepare_review"');
-  assert.ok(at > 0, "prepare_review must exist");
-  // Window covers the whole handler: it now plans, snapshots AND renders each
-  // shard's task text, so it is long by design — bounded at the next tool
-  // registration (round P2: the flat window overshot into record_review's
-  // code).
-  const nextTool = SRC.indexOf('name: "record_review"', at);
-  assert.ok(nextTool > at, "record_review must follow prepare_review");
-  const body = SRC.slice(at, nextTool);
-  assert.match(body, /shouldShardReview\(fileCount, lineCount\)/, "the tiered threshold decides");
-  assert.match(body, /planReviewShards\(/, "the split must come from the tested planner");
-  assert.match(body, /listChangedFiles\(target\.root\)/);
-  assert.match(body, /countDiffLines\(target\.root/);
-  assert.match(body, /tier: "single"|tier = "sharded"/);
-  // Each shard's ready-made task text comes from the same pure builder, so the
-  // file list the reviewer is told to audit cannot drift from the plan.
-  assert.match(body, /buildShardPrompt\(shard/);
-  // The merged record shape stays a single source of truth.
-  assert.match(body, /formatShardReviewRecord\(/);
-  // And the engine path is really gone.
-  assert.doesNotMatch(SRC, /runParallelShardReview/);
-  assert.doesNotMatch(SRC, /run_parallel_shard_review"/);
-});
-
-test("prepare_review exposes the fan-out model plan and the truncated-goal file pointer", () => {
-  // These two pieces replaced the snapshot-carried .pi/loop-goal.md
-  // (SNAPSHOT_CARRIED_FILES is now empty): the 'Recommended reviewer models'
-  // block renders the fan-out plan's family-deduped result, and a truncated
-  // goal's "read the file for the rest" pointer names the REAL path because
-  // the snapshot carries no .pi/. Both must stay wired or a reviewer
-  // silently loses the model guidance / the goal's tail with nothing failing.
-  const at = SRC.indexOf('name: "prepare_review"');
-  assert.ok(at > 0, "prepare_review must exist");
-  // Bound the window at the NEXT tool registration so an assertion can never
-  // be satisfied by record_review's code (round P2: the flat 24000-char
-  // window overshot into the next tool).
-  const nextTool = SRC.indexOf('name: "record_review"', at);
-  assert.ok(nextTool > at, "record_review must follow prepare_review");
-  const body = SRC.slice(at, nextTool);
-  assert.match(body, /Recommended reviewer models/, "the fan-out model recommendation must be rendered");
-  // The concrete-model hint must be gated on slotSource: on the default path
-  // the specs are NOT authoritative (the pinned agent chain is), and handing
-  // them over as overrides would seat a cheap-tier model as judge (round P1).
-  assert.match(body, /fanout\.reviewers\.length > 0 && fanout\.slotSource/,
-    "the recommendation block must be slotSource-gated");
-  assert.match(body, /fanout && fanout\.slotSource && fanout\.reviewers\.length > 0 \? \{ reviewers: fanout\.reviewers \} : \{\}/,
-    "details.reviewers must be slotSource-gated too (this exact details line, not the map-fill line)");
-  assert.match(body, /fanout\.slotSource && fanout\.reviewers\.length > 0 && !shardPlan/,
-    "per-label model hints must be slotSource-gated too");
-  assert.match(body, /reviewers: fanout\.reviewers/, "details.reviewers must expose the fan-out plan");
-  assert.match(body, /model: reviewerModels\.get\(s\.instance\)/, "each snapshot must expose its recommended model");
-  assert.match(body, /goalTextForReviewers\(target\.root\)/, "the spawn task must carry the goal text");
-  // Only a USER-APPROVED goal may be injected into reviewer tasks (round P2:
-  // an unapproved/edited goal must never become the reviewers' contract).
-  assert.match(body, /loopGoalConfirmed\(target\.root, goalSt\) \? goalTextForReviewers\(target\.root\) : undefined/,
-    "the goal injection must be gated on the user's approval");
-  const lg = SRC.indexOf("function goalTextForReviewers");
-  assert.ok(lg > 0, "goalTextForReviewers must exist");
-  assert.match(SRC.slice(lg, lg + 600), /全文: " \+ pathJoin\(root, LOOP_GOAL_RELPATH\)/,
-    "a truncated goal must point at the REAL file path (relative paths would dangle in a snapshot)");
-});
-
-test("wave tools: prepare_wave + apply_wave_patches replace the engine tool", () => {
-  // Step 2 of docs/handoff-remove-pdw.md: the pdw engine tool is gone. The
-  // wave flow is prepare_wave (reconcile + ready-made tasks) → the main agent
-  // spawns worker-readonly subagents → apply_wave_patches (ownership +
-  // persistence + git apply --check).
-  const at = SRC.indexOf('name: "prepare_wave"');
-  assert.ok(at > 0, "prepare_wave must exist");
-  const body = SRC.slice(at, SRC.indexOf('name: "apply_wave_patches"'));
-  assert.match(body, /computeWave/, "prepare_wave must reconcile the wave against the plan");
-  assert.match(body, /WAVE_WORKER_SCHEMA/, "prepare_wave must hand out the worker output schema");
-  assert.match(body, /worker-readonly/, "the tasks must name the read-only worker agent");
-  assert.match(body, /IN THE SAME TURN/, "the spawn directive must be same-turn concurrent");
-  const applyAt = SRC.indexOf('name: "apply_wave_patches"');
-  assert.ok(applyAt > 0, "apply_wave_patches must exist");
-  const applyBody = SRC.slice(applyAt, applyAt + 8000);
-  assert.match(applyBody, /validatePatchOwnership/, "ownership is re-validated mechanically");
-  assert.match(applyBody, /writeWavePatches/, "patches are persisted under .pi/plan/patches/");
-  assert.match(applyBody, /checkPatchApplies/, "git apply is pre-checked");
-  assert.match(applyBody, /FAILED MODULES/, "a missing result is a failed module, never applied");
-  assert.match(applyBody, /unplannedModuleIds/, "unplanned-module rejection must be wired to apply_wave_patches");
-  assert.match(applyBody, /unknownResultModuleIds/, "unknown-result rejection must be wired to apply_wave_patches");
-  assert.match(applyBody, /duplicateResultModuleIds/, "duplicate-result rejection must be wired to apply_wave_patches");
-  assert.match(applyBody, /ownedPathsFromPlan/, "ownership must come from the plan through the pure helper");
-  // The engine tool must not come back.
-  assert.equal(SRC.includes("run_wave_workflow"), false, "the pdw wave tool is gone");
-  assert.equal(SRC.includes("runWaveWorkflow"), false, "the engine wrapper is gone from the extension");
+  assert.match(SRC, /REVIEW_VERDICT_SCHEMA/);
 });
 
 test("STALE TREE: a READY cannot bind to a tree the reviewer never saw", () => {
+
   // The fail-open this feature would otherwise CREATE: the agent is told to
   // fix while the review runs, so at record time the worktree can differ from
   // what the reviewer read. Binding the READY to the current fingerprint would
@@ -2293,7 +2059,7 @@ test("SNAPSHOT PIN: a reviewer cannot be spawned outside its snapshot", () => {
   const prep = SRC.slice(prepAt, prepAt + 20000);
   assert.match(prep, /subagent\(\{ agent: "reviewer", async: true, cwd: /,
     "the spawn calls must be copyable, not described in prose");
-  assert.match(prep, /Do NOT dispatch reviewers through `workflowScript`/);
+  assert.match(prep, /Do NOT dispatch the reviewer through `workflowScript`/);
 });
 
 
@@ -2312,7 +2078,7 @@ test("REGRESSION: prepare_review REFUSES a partial plan, and the refusal is wire
   //    on both sides (comparing raw labels to sanitized instances once flagged
   //    `a/b` as a failed reviewer and refused a perfectly good plan).
   assert.match(body, /decideSnapshotPlan\(labels, snaps\.map\(\(s\) => s\.instance\)\)/);
-  assert.match(body, /\.map\(\(l\) => safeLabel\(l\)\)/, "labels must be sanitized before planning");
+  assert.match(body, /const labels = \[label\]/, "ONE instance label per round");
 
   // 2. Partial ⇒ refuse. The branch must exist, must be an ERROR (not a
   //    best-effort continue), must name what failed, and must not leave the
@@ -2341,14 +2107,14 @@ test("prepare_review hands out per-reviewer isolation and fails SOFT", () => {
   assert.ok(nextTool > at);
   const body = SRC.slice(at, nextTool);
   // One snapshot per label — never one shared copy for several reviewers.
-  assert.match(body, /for \(const label of labels\)[\s\S]{0,200}createReviewSnapshot\(/);
+  assert.match(body, /for \(const instance of labels\)[\s\S]{0,200}createReviewSnapshot\(/);
   assert.match(body, /buildStreamConsumerDirective\(/, "the agent must be told how to consume the stream");
-  assert.match(body, /buildStreamDirective\(/, "the reviewer instruction must be handed over");
+  assert.match(body, /buildReviewPrompt\(/, "the reviewer instruction comes from the shared pure builder");
   // The verdict SCHEMA must reach the agent, not merely be re-exported: a
   // spawned reviewer only produces machine-checkable output if it is handed an
   // `outputSchema`. Reverting this to an unused export would otherwise be
   // invisible — the schema's own shape test would still pass.
-  assert.match(body, /JSON\.stringify\(SHARD_VERDICT_SCHEMA/, "the schema must be printed for the agent");
+  assert.match(body, /JSON\.stringify\(REVIEW_VERDICT_SCHEMA/, "the schema must be printed for the agent");
   assert.match(body, /outputSchema/, "and named as the outputSchema to spawn with");
   // A host without worktree support must keep reviewing under the OLD rules,
   // not silently lose the safety they provided — and the mechanical half of that
@@ -2376,7 +2142,7 @@ test("prepare_review hands out per-reviewer isolation and fails SOFT", () => {
   // verdict the only unparseable one (round-3 Nit).
   assert.match(
     body.slice(noneStart, isolatedStart),
-    /SHARD_VERDICT_SCHEMA/,
+    /REVIEW_VERDICT_SCHEMA/,
     "the UNAVAILABLE reply must hand over the verdict schema as well",
   );
   // …and it must be the APPROVED goal, computed BEFORE the isolation branches

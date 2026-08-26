@@ -8,9 +8,8 @@
  *
  *   1. It fights the main agent. Nothing may be fixed while a review runs,
  *      so the loop is strictly serial: review (minutes) THEN fix (minutes).
- *   2. It fights the other reviewer. The small-diff path spawns TWO
- *      cross-family reviewers in parallel, both allowed to write, both doing
- *      mutation analysis on the same files.
+ *   2. It fights the reviewer. The single-review path runs ONE reviewer in
+ *      the snapshot, allowed to write, doing mutation analysis on the files.
  *   3. It fights the gate. Every write changes the very tree being judged and
  *      can invalidate the precommit PASS; a reviewer that dies mid-mutation
  *      leaves the user's code in the mutated state.
@@ -113,7 +112,7 @@ export const SNAPSHOT_ADDED_PATHSPECS: readonly string[] = Object.freeze([":/nod
  * itself. A snapshot-as-project-root has no `.pi/agents/`, so the project
  * layer of the model config (the user's per-agent slots) silently vanishes
  * and every reviewer falls back to the GLOBAL agent definition. The goal
- * text is injected into the spawn task verbatim by `buildShardPrompt`
+ * text is injected into the spawn task verbatim by `buildReviewPrompt`
  * (prepare_review), so carrying the file buys nothing that a snapshot
  * without `.pi/` does not already provide.
  */
@@ -150,7 +149,7 @@ export interface ReviewSnapshot {
   dir: string;
   /** Tree OID the snapshot was materialized from (the fingerprinted tree). */
   tree: string;
-  /** Instance label, unique per reviewer of one round. */
+  /** Instance label, unique for the round's single reviewer. */
   instance: string;
   /**
    * ABSOLUTE path, inside the REAL repo, of this instance's finding stream.
@@ -166,7 +165,7 @@ export interface ReviewSnapshot {
 export interface CreateSnapshotOptions {
   /** Repo root whose worktree is under review. */
   repoRoot: string;
-  /** Unique label for this reviewer instance (e.g. "shard-1", "integration"). */
+  /** Unique label for this reviewer instance (e.g. "review"). */
   instance: string;
   /** Run id grouping the instances of one round. */
   runId: string;
@@ -246,7 +245,7 @@ export function createReviewSnapshot(opts: CreateSnapshotOptions): ReviewSnapsho
 
     // The suite must actually run: node_modules is gitignored, so it is not in
     // the tree. A symlink is enough (Node resolves through it) and costs
-    // nothing, unlike copying a dependency tree per reviewer.
+    // nothing, unlike copying a dependency tree per round.
     //
     // SHARED PATH #1 of 2 — stated honestly rather than glossed over. This
     // symlink points at the REAL node_modules, so a reviewer that wrote under

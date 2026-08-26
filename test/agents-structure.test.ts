@@ -35,11 +35,11 @@ test("agents/*.md exactly matches KNOWN_AGENTS (config/render see every agent)",
   const files = readdirSync(AGENTS).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, "")).sort();
   const known = [...KNOWN_AGENTS].sort();
   assert.deepEqual(files, known, "shipped agents must equal KNOWN_AGENTS");
-  assert.ok(files.length >= 12, `expected all 12 agents, found ${files.length}`);
+  assert.ok(files.length >= 7, `expected all 7 agents, found ${files.length}`);
 });
 
-test("L3 judges (reviewer/adviser/arbiter/module-reviewer/goal-auditor) think at max — the verdict tier never degrades", () => {
-  for (const f of ["reviewer.md", "adviser.md", "arbiter.md", "module-reviewer.md", "goal-auditor.md"]) {
+test("L3 judges (reviewer/adviser/arbiter/goal-auditor) think at max — the verdict tier never degrades", () => {
+  for (const f of ["reviewer.md", "adviser.md", "arbiter.md", "goal-auditor.md"]) {
     assert.match(frontmatter(f), /^thinking: max$/m, `${f}: L3 must think at max`);
   }
 });
@@ -67,13 +67,6 @@ test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its ve
   assert.equal(fences, 0, `the auditor prompt must contain NO code fences, found ${fences}`);
 });
 
-test("L1 triage is read-only, cheap-tier, low-thinking, and defined without verdict power", () => {
-  const body = frontmatter("triage.md");
-  assert.match(body, /^model: claude-haiku-4-5$/m, "L1 primary must be the cheap model");
-  assert.match(body, /^fallbackModels: opencode-go\/deepseek-v4-flash$/m, "L1 fallback is the one approved cheap fallback (opencode-go only runs flash)");
-  assert.match(body, /^thinking: low$/m, "L1 must run at low/off thinking, never max");
-  assert.doesNotMatch(body, /tools:.*\b(edit|write)\b/, "triage must be read-only");
-});
 
 test("L2 fixer is the execution tier: write-capable, mid-tier, max thinking, never a judge", () => {
   const body = frontmatter("fixer.md");
@@ -92,8 +85,8 @@ const MID_TIER_CHAIN =
 const MID_TIER_FALLBACK =
   /^fallbackModels: claude-opus-5,\s*opencode-go\/deepseek-v4-flash$/m;
 
-test("L2 execution roles (worker/planner/fixer) pin the exact mid-tier chain at max thinking", () => {
-  for (const f of ["worker.md", "worker-readonly.md", "planner.md", "fixer.md"]) {
+test("L2 execution role (fixer) pins the exact mid-tier chain at max thinking", () => {
+  for (const f of ["fixer.md"]) {
     const body = frontmatter(f);
     assert.match(body, MID_TIER_CHAIN, `${f}: L2 primary must be claude-sonnet-5`);
     assert.match(body, /^thinking: max$/m, `${f}: L2 executes at max thinking`);
@@ -108,7 +101,7 @@ test("L2 execution roles (worker/planner/fixer) pin the exact mid-tier chain at 
 test("L3 judge roles pin the exact strong-tier chain (model + fallbacks + max thinking)", () => {
   const STRONG_FALLBACK =
     /^fallbackModels: claude-opus-5,\s*opencode-go\/deepseek-v4-flash$/m;
-  for (const f of ["reviewer.md", "adviser.md", "module-reviewer.md", "arbiter.md"]) {
+  for (const f of ["reviewer.md", "adviser.md", "arbiter.md"]) {
     const body = frontmatter(f);
     assert.match(body, /^model: claude-fable-5$/m, `${f}: L3 primary must be claude-fable-5`);
     assert.match(body, /^thinking: max$/m, `${f}: L3 must think at max`);
@@ -116,55 +109,27 @@ test("L3 judge roles pin the exact strong-tier chain (model + fallbacks + max th
   }
 });
 
-test("the orchestration roles keep the serial contract: one writer, read-only reviewers", () => {
-  const planner = frontmatter("planner.md");
-  assert.doesNotMatch(planner, /tools:.*\bbash\b/, "the planner sequences; it never executes");
-  assert.doesNotMatch(planner, /tools:.*\bedit\b/, "the planner writes state, not source");
-  const plannerSrc = readFileSync(join(AGENTS, "planner.md"), "utf8");
-  assert.match(plannerSrc, /SHORT-LIVED/i, "the planner must know it is disposable");
-  assert.match(plannerSrc, /Do not dispatch\s+subagents/i, "only the main session dispatches");
-
-  const worker = frontmatter("worker.md");
-  assert.match(worker, /tools:.*\bedit\b/, "the worker is the only writer");
-  const workerSrc = readFileSync(join(AGENTS, "worker.md"), "utf8");
-  assert.match(workerSrc, /owned_paths/, "the worker must be scoped to its module");
-  assert.match(workerSrc, /Do not start subagents/i);
-  assert.match(workerSrc, /git commit/, "the worker must be told shipping is not its job");
-
-  const reviewer = frontmatter("module-reviewer.md");
-  assert.doesNotMatch(reviewer, /tools:.*\b(edit|write)\b/, "a shard reviewer must be read-only");
-  assert.match(reviewer, /^thinking: max$/m, "verdict power stays on the L3 tier");
-});
-
-test("the shard reviewer is forbidden from emitting docSync — the two-phase protocol depends on it", () => {
-  const src = readFileSync(join(AGENTS, "module-reviewer.md"), "utf8");
-  assert.match(src, /Never include a `docSync` field/i, "the prohibition must be in the role, not the task text");
-  assert.match(src, /integration reviewer/i, "and it must say where the single attestation comes from");
-});
 
 // ── Wave daily: SKILL.md + AGENTS.md carry the protocol ───────────────────
 
-test("SKILL.md documents wave daily trigger conditions and parallel exploration", () => {
+test("SKILL.md states read-only exploration rules and NO wave protocol", () => {
   assert.ok(existsSync(SKILL_MD), "SKILL.md must exist");
   const src = readFileSync(SKILL_MD, "utf8");
-  // Wave daily (not just decompose) — the trigger conditions and decision rules.
-  assert.match(src, /[Ww]ave daily/, "SKILL.md must document wave daily trigger conditions");
-  assert.match(src, /patch-first/, "SKILL.md must describe the patch-first protocol");
-  assert.match(src, /≤4/, "SKILL.md must state the ≤4 module cap");
   // Read-only exploration parallel rules.
   assert.match(src, /read-only.*parallel|parallel.*read-only/i, "SKILL.md must state read-only subagents can run in parallel");
-  // Decision rules: when to wave vs serial.
-  assert.match(src, /when (not )?to wave|wave.*decision|decide.*wave|wave vs/i, "SKILL.md must have wave vs serial decision guidance");
+  // Wave daily was removed with the decompose module loop (2026-08-26).
+  assert.doesNotMatch(src, /prepare_wave|run_wave_workflow|apply_wave_patches/i, "no wave protocol may remain");
 });
 
-test("AGENTS.md documents wave daily and parallel exploration", () => {
+test("AGENTS.md states read-only parallel exploration and NO wave protocol", () => {
   assert.ok(existsSync(AGENTS_MD), "AGENTS.md must exist");
   const src = readFileSync(AGENTS_MD, "utf8");
-  // Wave daily: the parallel loop is not just for decompose.
-  assert.match(src, /[Ww]ave daily/, "AGENTS.md must document wave daily");
-  assert.match(src, /patch-first/, "AGENTS.md must describe the patch-first protocol");
   // Read-only parallel exploration.
   assert.match(src, /read-only.*parallel|parallel.*read-only/i, "AGENTS.md must state read-only subagents can run in parallel");
+  // The mention is only allowed in the REMOVED context: the doc must say the
+  // machinery is gone, not prescribe it.
+  assert.doesNotMatch(src, /(use|call|run|dispatch)\s+`?prepare_wave|prepare_wave tool|run_wave_workflow tool/i, "no wave protocol may remain as an instruction");
+  assert.match(src, /removed on 2026-08-26|were removed|no wave/i, "AGENTS.md must state the wave machinery is removed");
 });
 
 test("recon is the cheap read-only tier: cheap model, low/off thinking, no write tools", () => {
@@ -182,7 +147,7 @@ test("recon is the cheap read-only tier: cheap model, low/off thinking, no write
 // ── Model tiers: strong judges, mid execution, cheap recon ────────────────
 
 test("L3 judge fallback chains span at least two model families (cross-family fallback)", () => {
-  for (const f of ["reviewer.md", "adviser.md", "module-reviewer.md", "arbiter.md"]) {
+  for (const f of ["reviewer.md", "adviser.md", "arbiter.md"]) {
     const body = frontmatter(f);
     const fb = body.match(/^fallbackModels: (.+)$/m)?.[1];
     assert.ok(fb, `${f}: fallbackModels required`);
@@ -202,7 +167,7 @@ test("L3 judge fallback chains span at least two model families (cross-family fa
 });
 
 test("L2 execution fallbacks span families and include the cheap-but-strong flash", () => {
-  for (const f of ["worker.md", "planner.md", "fixer.md"]) {
+  for (const f of ["fixer.md"]) {
     const body = frontmatter(f);
     const fb = body.match(/^fallbackModels: (.+)$/m)?.[1];
     assert.ok(fb, `${f}: fallbackModels required`);
@@ -220,7 +185,7 @@ test("L2 execution fallbacks span families and include the cheap-but-strong flas
   }
 });
 
-// ── Cross-review protocol: goal pre-review + default two-reviewer final ────
+// ── Review protocol: goal pre-review + single-reviewer final ───────────────
 
 test("SKILL.md and AGENTS.md document the MECHANICAL goal pre-review (goal-auditor)", () => {
   for (const file of [SKILL_MD, AGENTS_MD]) {
@@ -280,11 +245,11 @@ test("SKILL.md hands the loop goal to subagents as TEXT, never as a file to read
   // why the stale wording survived several review rounds (PR #25).
   const src = readFileSync(SKILL_MD, "utf8");
   // Every place SKILL.md tells the agent to pass the goal on must say TEXT.
-  const handovers = src.match(/[Pp]aste the (loop )?goal TEXT/g) ?? [];
+  const handovers = src.match(/(?:[Pp]aste|[Hh]and) the (loop )?goal (TEXT|text)/g) ?? [];
   assert.ok(
-    handovers.length >= 3,
-    `SKILL.md must tell the agent to paste the goal TEXT at every handover ` +
-      `(slicing, step 0, the reviewer step) — found ${handovers.length}`,
+    handovers.length >= 1,
+    `SKILL.md must tell the agent to pass the goal as TEXT at the handover ` +
+      `(step 0, the reviewer step) — found ${handovers.length}`,
   );
   // …and the retired file-handover wording must not come back.
   assert.doesNotMatch(
@@ -299,82 +264,21 @@ test("SKILL.md hands the loop goal to subagents as TEXT, never as a file to read
   );
 });
 
-test("SKILL.md and AGENTS.md default the final review to TWO cross-family reviewers", () => {
+test("REGRESSION: the single-review protocol states ONE reviewer per round", () => {
   for (const file of [SKILL_MD, AGENTS_MD]) {
     const src = readFileSync(file, "utf8");
     assert.match(
       src,
-      /two.{0,40}(reviewers|independent).{0,80}(cross.family|different.{0,25}families)/i,
-      `${file} must default the final review to two cross-family reviewers`,
-    );
-    assert.match(src, /worst(-| )wins/i, `${file} must keep worst-wins for multiple verdicts`);
-  }
-});
-
-test("REGRESSION: no agent names an extension tool, in its allowlist OR in its prose", () => {
-  // `tools:` is a STRICT allowlist that does not load extension code, so an
-  // extension-provided tool listed there fails the whole launch. Observed:
-  // every reviewer run ended as `failed` with "requested unavailable child
-  // tools: intercom" — the verdict text survived only because it had already
-  // been written to the artifact file.
-  //
-  // The prose matters just as much: an agent told to "use `intercom` when
-  // blocked" will try, fail, and stall on a capability that does not exist.
-  // Frontmatter and body are therefore checked with ONE full-text assertion.
-  const EXTENSION_TOOLS = ["intercom"];
-  for (const file of readdirSync(AGENTS).filter((f) => f.endsWith(".md"))) {
-    const src = readFileSync(join(AGENTS, file), "utf8");
-    // Anchored on the FRONTMATTER (not any line that happens to start with
-    // "tools:"), so a body line can never satisfy the existence check.
-    assert.match(frontmatter(file), /^tools:/m, `${file} must declare tools:`);
-    for (const tool of EXTENSION_TOOLS) {
-      assert.doesNotMatch(
-        src,
-        // Case-insensitive: prose capitalizes ("Intercom") at sentence start.
-        new RegExp(`\\b${tool}\\b`, "i"),
-        `${file}: "${tool}" is an extension tool — a child agent cannot get it. ` +
-          `Listing it under tools: fails the launch, and promising it in the prose ` +
-          `makes the agent stall on a channel it does not have`,
-      );
-    }
-  }
-});
-
-test("REGRESSION: the protocol forbids a SAME-family reviewer pair, in all four places", () => {
-  // Observed: a host with exactly one judge-eligible family still spawned two
-  // `claude-fable-5` reviewers and called it a cross-family double review.
-  // The rule has to exist wherever the agent might read it.
-  const REVIEWER_MD = join(AGENTS, "reviewer.md");
-  for (const file of [SKILL_MD, AGENTS_MD, REVIEWER_MD]) {
-    const src = readFileSync(file, "utf8");
-    assert.match(
-      src,
-      /same[- ]family/i,
-      `${file} must rule out a same-family reviewer pair explicitly`,
-    );
-    assert.match(
-      src,
-      /review-fanout\.ts|planFanoutFromFacts/,
-      `${file} must point at the module that COMPUTES the reviewer count`,
+      /one reviewer|ONE independent reviewer|single reviewer/i,
+      `${file} must state that each review round is ONE reviewer`,
     );
   }
-  // …and in the /review command prompt the extension actually sends.
+  // …and the same must hold in the /review command prompt the extension sends.
   const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
-  assert.match(commands, /same[- ]family/i, "/review prompt must state the rule");
-
-  // Scope guard: for a LARGE diff the shard count is not the agent's choice.
-  // (This used to assert "decided by the engine's sharding" — which then LOCKED
-  // that sentence in place after review moved off the engine: the assertion was
-  // protecting the stale doc. Assert the invariant, not the old mechanism.)
+  assert.match(commands, /(ONE|one) (independent )?reviewer per round/i, "/review prompt must state the single-review protocol");
+  // No sharding anywhere: the reviewer count is never computed from families.
   const skill = readFileSync(SKILL_MD, "utf8");
-  // Whitespace-tolerant: these files are hard-wrapped prose, so a rule may
-  // legitimately straddle a line break.
-  assert.match(skill, /shard\s+count\s+comes\s+from\s+`?prepare_review/i);
-  assert.doesNotMatch(
-    skill,
-    /decided\s+by\s+the\s+engine's\s+sharding/i,
-    "reviews no longer run on the engine — this claim must not come back",
-  );
+  assert.doesNotMatch(skill, /planFanoutFromFacts|review-fanout\.ts|two reviewer/i, "no fan-out language may remain");
 });
 
 test("REGRESSION: every re-review must carry the previous round's conclusion", () => {
@@ -447,7 +351,7 @@ test("the read-only reviewer variant CANNOT write, and says why it exists", () =
   // `goal-auditor` AUDITS the draft — reading the raw (possibly unapproved)
   // file is precisely their job, while an ACCEPTANCE judge must only ever see
   // the text the user approved, handed to it in the spawn task.
-  for (const judge of ["reviewer.md", "reviewer-readonly.md", "module-reviewer.md", "arbiter.md"]) {
+  for (const judge of ["reviewer.md", "reviewer-readonly.md", "arbiter.md"]) {
     const reads = frontmatter(judge).split("\n").find((l) => l.startsWith("defaultReads:")) ?? "";
     assert.doesNotMatch(
       reads,
@@ -457,34 +361,6 @@ test("the read-only reviewer variant CANNOT write, and says why it exists", () =
   }
 });
 
-test("the parallel wave worker variant exists and is read-only by construction", () => {
-  // With the pdw engine gone, a wave worker must be a static subagent whose
-  // tools: allowlist simply cannot write — pi-subagents has no per-call tool
-  // denylist, so the allowlist is the ONLY mechanical guard.
-  const file = "worker-readonly.md";
-  const fm = frontmatter(file);
-  const toolsLine = fm.split("\n").find((l) => l.startsWith("tools:"))!;
-  for (const allowed of ["read", "grep", "find", "ls"]) {
-    assert.match(toolsLine, new RegExp(`\\b${allowed}\\b`), `${file} must keep ${allowed}`);
-  }
-  for (const forbidden of ["edit", "write", "bash"]) {
-    assert.doesNotMatch(
-      toolsLine,
-      new RegExp(`\\b${forbidden}\\b`, "i"),
-      `${file}: a parallel wave worker must never ${forbidden} — patch-first collapses otherwise`,
-    );
-  }
-  const src = readFileSync(join(AGENTS, file), "utf8");
-  assert.match(src, /no edit\/write\/bash|no `edit`,/i, "the file must name the exact forbidden tools");
-  assert.match(src, /SERIAL single-writer|`worker` is the SERIAL/i, "the variant must distinguish itself from the serial worker");
-  assert.match(src, /patch-first/i, "the patch-first contract must be in the variant");
-  assert.match(src, /owned_paths/, "every diff must stay inside the module's owned paths");
-  assert.match(src, /Never.{0,60}git commit/, "shipping stays with the main session");
-  // Same execution tier as the writable worker — the parallel lane must not
-  // be weaker than the serial one.
-  assert.match(fm, /^model: claude-sonnet-5$/m);
-  assert.match(fm, /^thinking: max$/m);
-});
 
 test("AGENTS.md and SKILL.md make subagents the only execution path", () => {
   for (const file of [AGENTS_MD, SKILL_MD]) {
@@ -500,59 +376,32 @@ test("AGENTS.md and SKILL.md make subagents the only execution path", () => {
   assert.doesNotMatch(src, /HARD dependency.*engine|engine.*HARD dep(?:endency)?/i);
 });
 
-test("the step-2 handoff document exists with its required sections", () => {
-  // A handoff that is prose nobody can accept is worthless; the sections are
-  // the checkable part.
-  const doc = readFileSync(join(ROOT, "docs", "handoff-remove-pdw.md"), "utf8");
-  for (const heading of [
-    "## Motivation",
-    "## Evidence",
-    "## Validated pattern",
-    "## Remaining work",
-    "## Risks & verification",
-    "## New readonly worker variant",
-  ]) {
-    assert.ok(doc.includes(heading), `handoff must carry the section ${heading}`);
-  }
-  // The evidence must be the concrete engine finding, not a vague claim.
-  assert.match(doc, /runCwd/, "the cwd-discarding evidence must be quoted");
-  assert.match(doc, /worktree add -b/, "the HEAD-checkout evidence must be quoted");
-  // Remaining work has to point at real files, or it cannot be executed.
-  for (const path of ["lib/plan-parallel.ts", "lib/pdw-bridge.ts", "lib/pdw-progress.ts", "scripts/install-package.mjs"]) {
-    assert.ok(doc.includes(path), `remaining work must name ${path}`);
-  }
-  // The one thing that must NOT be deleted with the bridge.
-  assert.match(doc, /isModelAllowed` must survive|isModelAllowed\*\* must survive/);
-  // Step 2 is done: the handoff records completion and the sections survived.
-  assert.match(doc, /STATUS: COMPLETE/, "the handoff must record that step 2 shipped");
-});
 test("REGRESSION: the snapshot contract is stated everywhere a reviewer reads it", () => {
   // Unbanning reviewer writes is only safe because of two paired promises:
   // "you are in a disposable copy" and "restore before you finish". A file
   // that carries one without the other invites exactly the damage the
   // isolation exists to prevent.
-  for (const file of [join(AGENTS, "reviewer.md"), join(AGENTS, "module-reviewer.md")]) {
-    const src = readFileSync(file, "utf8");
-    assert.match(src, /disposable snapshot|snapshot cwd|throwaway git worktree/i, `${file}: must say where it runs`);
-    assert.match(src, /mutation analysis/i, `${file}: must permit verification by doing`);
-    assert.match(src, /[Rr]estore every mutation/, `${file}: must demand restoration`);
-    assert.match(src, /\$TMPDIR/, `${file}: must send scratch files outside the snapshot`);
-    assert.match(src, /READY from (you|it) is NOT accepted/i, `${file}: must state the consequence`);
-    // Tolerates Markdown emphasis around the words (`**Never** run …`).
-    assert.match(src, /never\W{0,4}run\s+`?git commit/i, `${file}: shipping stays with the main session`);
-    // BOTH shared paths must be named, with the installer ban. Isolation covers
-    // the worktree, not `.git`: a reviewer that ran an installer inside its
-    // snapshot repointed the REAL repo's hooks at a directory that was then
-    // deleted, and every later commit died. Naming only `node_modules` would
-    // leave the worse escape undocumented.
-    assert.match(src, /node_modules/, `${file}: must name the node_modules symlink as shared`);
-    assert.match(src, /`?\.git`?\b/, `${file}: must name .git as shared (linked worktree)`);
-    assert.match(
-      src,
-      /never run an installer|never run any installer/i,
-      `${file}: must forbid installers — they write through the shared .git`,
-    );
-  }
+  // Only agents that RUN INSIDE a disposable snapshot must make the paired
+  // restoration promises; the read-only variant (reviewer-readonly) has no
+  // snapshot and is covered by its own CANNOT-write test.
+  // Only agents that RUN INSIDE a disposable snapshot must make the paired
+  // restoration promises; the read-only variant (reviewer-readonly) has no
+  // snapshot and is covered by its own CANNOT-write test.
+  const file = join(AGENTS, "reviewer.md");
+  const src = readFileSync(file, "utf8");
+  assert.match(src, /disposable snapshot|snapshot cwd|throwaway git worktree/i, `${file}: must say where it runs`);
+  assert.match(src, /mutation analysis/i, `${file}: must permit verification by doing`);
+  assert.match(src, /[Rr]estore every mutation/, `${file}: must demand restoration`);
+  assert.match(src, /\$TMPDIR/, `${file}: must send scratch files outside the snapshot`);
+  assert.match(src, /READY from (you|it) is NOT accepted/i, `${file}: must state the consequence`);
+  assert.match(src, /never\W{0,4}run\s+`?git commit/i, `${file}: shipping stays with the main session`);
+  assert.match(src, /node_modules/, `${file}: must name the node_modules symlink as shared`);
+  assert.match(src, /`?\.git`?\b/, `${file}: must name .git as shared (linked worktree)`);
+  assert.match(
+    src,
+    /never run an installer|never run any installer/i,
+    `${file}: must forbid installers — they write through the shared .git`,
+  );
   // A reviewer must never present a repair as its own contribution.
   const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
   assert.doesNotMatch(

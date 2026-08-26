@@ -4,7 +4,7 @@
  * precommit runner, the git hooks, the user-global config fallback, the L5
  * language gate, the Copilot gh compatibility path, and the command registry.
  * (The pdw engine check was deleted with the engine itself — step 2 of
- * docs/handoff-remove-pdw.md.)
+ * docs/parallel-execution-plan.md.)
  */
 import { dirname, join } from "node:path";
 import { diagnoseChain, type ModelChainEntry, type RegistryFacts } from "./model-diagnose.ts";
@@ -305,7 +305,7 @@ export function checkCommandRegistry(count: number): DoctorCheck {
       id: "commands",
       title: "workflow command registry populated",
       status: "PASS",
-      evidence: [`${count} workflow commands registered (/review, /plan-next, …)`],
+      evidence: [`${count} workflow commands registered (/review, …)`],
     };
   }
   return {

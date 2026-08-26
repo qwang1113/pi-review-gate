@@ -34,8 +34,8 @@ agent：调 set_gate_mode("loop")
   → propose_loop_goal 弹窗让你批准（窗中会显示“goal-auditor 预审: PASS @ …”）
   → 改代码
   → run_precommit（fast）→ 全绿
-  → prepare_review（每个 reviewer 一个一次性快照 + 一个 findings 流文件）
-  → reviewer 在快照里审（本机有两个可判模型族就跑两个，只有一族就跑一个并在 Note 里声明）
+  → prepare_review（一个一次性快照 + 一个 findings 流文件）
+  → reviewer 在快照里审（每轮一个 reviewer，审整个 diff）
      同时：agent 边读流式 findings 边修（不用等审完）
   → record_review（顺带机械校验快照有没有被 reviewer 改脏）
   → BLOCKED？修 → 再来一轮；READY？declare_done → 提交
@@ -49,7 +49,7 @@ agent：调 set_gate_mode("loop")
   只有工作区文件内容变化才会让指纹变化（编辑、lint:fix、或一次会改写文件的 checkout）。
 - **复审要带上一轮结论**：第 N+1 轮把上一轮的 verdict 与 findings 交给 reviewer；
   已定论且未改动的部分只做一致性扫描，不重新论证（门禁会自动注入这段 scope）。
-- **reviewer 跑在一次性快照里，你可以边审边修**：`prepare_review` 给每个 reviewer 开一个独立
+- **reviewer 跑在一次性快照里，你可以边审边修**：`prepare_review` 给唯一 reviewer 开一个独立
   git worktree（内容 = 待审改动，`node_modules` 软链）。它在里面随便改、随便跑变异测试，
   碰不到你的工作树；你则可以把它已确认的 P0/P1/P2（带证据的）当场修掉。代价：边修边审会让
   工作树变动，READY 可能对不上指纹 → 门禁要求再来一轮（但那一轮的修复工作你已经做完了）。
@@ -103,9 +103,7 @@ agent：调 set_gate_mode("loop")
 
 ## 7. 成本须知
 
-- review 用顶级推理模型（有两族就跨族双审，只有一族就单审 + Note），**按轮计费**——批量编辑再触发；
+- review 用顶级推理模型（每轮一个 reviewer，审整个 diff），**按轮计费**——批量编辑再触发；
 - `opencode-go` provider 在代码层面**只允许 deepseek-v4-flash**（其余模型按次计费且被显式禁止）；
-- review 不跑 pdw 引擎（引擎不支持 per-agent cwd，reviewer 就拿不到自己的快照）：全部由 `prepare_review` + 子代理直接 spawn；
-- 小 diff（<20 文件且 <500 行）：你传的 label 就是 reviewer 数量；
-- 大 diff：`prepare_review` 自己分片（最多 4 片、不重叠且覆盖全量）+ 一次集成 review；
-- wave/decompose 不跑引擎：`prepare_wave` + `worker-readonly` 子代理（同一 turn 并发、只读、无 edit/write/bash）+ `apply_wave_patches` 验证补丁（pdw 引擎已整体退役，见 `docs/handoff-remove-pdw.md`）。
+- review 不跑 pdw 引擎（引擎不支持 per-agent cwd，reviewer 就拿不到自己的快照）：由 `prepare_review` + 子代理直接 spawn，**每轮一个 reviewer 一个快照**，不分片、不双审；
+- decompose / wave daily 已移除（2026-08-26）：大的任务切成同一单审循环的连续轮次，无模块表、无波次调度、无 plan 状态。

@@ -321,10 +321,10 @@ test("loadRegistry: the FIRST source's metadata is never overwritten by a later 
 test("parseAgentsSection accepts valid entries and reports diagnostics", () => {
   const r = parseAgentsSection({
     reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] },
-    worker: { slots: ["opencode-go/deepseek-v4-flash:high"] }, // auto defaults true
+    fixer: { slots: ["opencode-go/deepseek-v4-flash:high"] }, // auto defaults true
   });
   assert.deepEqual(r.sections.reviewer, { auto: false, slots: ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] });
-  assert.deepEqual(r.sections.worker, { slots: ["opencode-go/deepseek-v4-flash:high"] });
+  assert.deepEqual(r.sections.fixer, { slots: ["opencode-go/deepseek-v4-flash:high"] });
   assert.equal(r.diagnostics.length, 0);
 });
 
@@ -336,25 +336,25 @@ test("parseAgentsSection truncates slots beyond MAX_SLOTS with a diagnostic", ()
 });
 
 test("parseAgentsSection tolerates corrupt entries without throwing", () => {
-  const r = parseAgentsSection({ reviewer: "nope", worker: { slots: "not-an-array" }, garbage: 42 });
+  const r = parseAgentsSection({ reviewer: "nope", fixer: { slots: "not-an-array" }, garbage: 42 });
   // A KNOWN agent with a non-object entry is malformed (keeps the last
   // render, round-11 P1); an unknown name is dropped entirely.
   assert.deepEqual(r.sections.reviewer, { malformed: true }, "a non-object entry for a known agent is malformed");
-  assert.deepEqual(r.sections.worker, { malformed: true });
+  assert.deepEqual(r.sections.fixer, { malformed: true });
   assert.equal(r.sections.garbage, undefined, "an unknown agent name is dropped");
   assert.ok(r.diagnostics.length >= 1);
 });
 
 test("effectiveAgentsConfig layers defaults ← global ← project and labels the source", () => {
-  const globalRaw = { agents: { reviewer: { auto: false, slots: ["claude-fable-5:max"] }, worker: { auto: false, slots: ["claude-sonnet-5:max"] } } };
+  const globalRaw = { agents: { reviewer: { auto: false, slots: ["claude-fable-5:max"] }, fixer: { auto: false, slots: ["claude-sonnet-5:max"] } } };
   const projectRaw = { agents: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } } };
   const { map } = effectiveAgentsConfig(globalRaw.agents, projectRaw.agents);
   const reviewer = map.reviewer!;
   assert.equal(reviewer.auto, false);
   assert.deepEqual(reviewer.slots, ["onekey/gpt-5.6-sol:high"], "project wins over global for the same agent");
   assert.equal(reviewer.source, "project");
-  assert.deepEqual(map.worker!.slots, ["claude-sonnet-5:max"], "unset in project falls through to global");
-  assert.equal(map.worker!.source, "global");
+  assert.deepEqual(map.fixer!.slots, ["claude-sonnet-5:max"], "unset in project falls through to global");
+  assert.equal(map.fixer!.source, "global");
   assert.deepEqual(map.adviser!.slots, [], "unset anywhere is default");
   assert.equal(map.adviser!.auto, true);
   assert.equal(map.adviser!.source, "default");

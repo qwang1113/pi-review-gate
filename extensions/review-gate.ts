@@ -143,7 +143,6 @@ import {
   classifyAiAttribution,
   classifyNonEnglish,
   classifyShipCommand,
-  classifyRequirementSize,
   createVerdictMemo,
   isSuspiciousShipCandidate,
   type LlmClassifier,
@@ -174,13 +173,6 @@ import {
   buildGoalPrereviewRefusal,
 } from "../lib/loop-goal.ts";
 import type { GoalPrereviewRecord } from "../lib/loop-goal.ts";
-import {
-  assessRequirementSize,
-  buildDecomposeSuggestion,
-  countExitCriteria,
-  detectTouchedDirs,
-  type ModuleBucket,
-} from "../lib/requirement-size.ts";
 import { fitDialogMessage } from "../lib/dialog-budget.ts";
 import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "../lib/model-diagnose.ts";
 import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "../lib/gate-doctor.ts";
@@ -192,13 +184,6 @@ import {
   STALL_REPEAT_LIMIT,
   type StallState,
 } from "../lib/loop-stall.ts";
-import {
-  formatFanoutDirective,
-  planConfiguredReviewFanout,
-  planFanoutFromFacts,
-  type FanoutPlan,
-  type JudgeFacts,
-} from "../lib/review-fanout.ts";
 import {
   effectiveAgentsConfig,
   applyAgentConfigLayer,
@@ -270,29 +255,9 @@ import {
 } from "../lib/blocked-marker.ts";
 import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "../lib/workflow-commands.ts";
 import {
-  planReviewShards,
-  buildShardPrompt,
-  SHARD_VERDICT_SCHEMA,
-  formatShardReviewRecord,
-  shouldShardReview,
-  SHARD_THRESHOLD_FILES,
-  SHARD_THRESHOLD_LINES,
+  buildReviewPrompt,
+  REVIEW_VERDICT_SCHEMA,
 } from "../lib/parallel-review.ts";
-import { parsePlanState, PLAN_DIR } from "../lib/plan-state.ts";
-import {
-  WAVE_WORKER_SCHEMA,
-  buildWaveWorkerPrompt,
-  computeWave,
-  writeWavePatches,
-  parseWaveWorkerResult,
-  validatePatchOwnership,
-  checkPatchApplies,
-  planDirFor,
-  ownedPathsFromPlan,
-  unplannedModuleIds,
-  unknownResultModuleIds,
-  duplicateResultModuleIds,
-} from "../lib/plan-parallel.ts";
 import {
   parseArbitrableAction,
   tokenAuthorizes,
@@ -408,13 +373,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   // able to re-pop the dialog until the user gives in). /gate-mode and
   // /gate-reset clear it. In-memory only — never persisted.
   let agentDowngradesLocked = false;
-  // The user's FIRST real message, captured cache-only so the
-  // requirement-size classifier (the /decompose suggestion) sees the actual
-  // request, not the agent's paraphrase. Input handler stores text; it never
-  // decides anything (no classifier call, no mode write) — the gate mode is
-  // decided exclusively in set_gate_mode, by the agent itself.
-  // undefined = not captured yet (e.g. print/JSON mode).
-  let firstUserInput: string | undefined;
   // USER REQUIREMENT ("no changes" = THIS session, not pre-existing ones):
   // tracks whether THIS session has edited anything yet. session_start resets
   // it; a passed edit tool_call sets it. Distinct from state.hasCodeChange/
@@ -431,46 +389,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   // discipline.ts). This targets the recurring "edit failed → shell edits the
   // file" workaround without policing ordinary bash usage.
   let editFailurePending = false;
-  // Oversized-requirement detection (lib/requirement-size.ts). The classifier
-  // runs ONCE, piggybacking on the first set_gate_mode call so it costs no
-  // extra latency point; `unavailable` records that it was consulted and could
-  // not answer, which the injected text must disclose rather than hide.
-  let requirementBucket: ModuleBucket | undefined;
-  let requirementClassifierUnavailable = false;
-  // At most ONE decompose suggestion per session, across both checkpoints.
-  // Rationale: there is no tool for the user to press "no" with, so a decline
-  // is invisible to the gate; but a user who saw the suggestion and went on to
-  // negotiate a loop goal has, in effect, already answered. Suggesting once is
-  // therefore the honest reading of "never ask twice" — and it is strictly
-  // quieter than the alternative.
-  // In-memory only, like the other session flags: a restart mid-session can
-  // re-ask once. Persisting it would mean writing gate state for a suggestion
-  // that changes nothing, and the cost of the rare duplicate is one sentence.
-  let decomposeSuggestedAt: "first-message" | "loop-goal" | null = null;
-  // Tracked separately from the real suggestion: an evidence-free "the
-  // classifier is down" notice must not spend the session's one ask (see the
-  // checkpoint below).
-  let degradedNoticeShown = false;
-  let topLevelDirsCache: string[] | undefined;
-  /**
-   * The repo's own top-level directories, so "how many areas does this touch?"
-   * is answered against reality rather than against a path-shaped regex.
-   * Hidden and vendored directories are excluded: nobody decomposes a
-   * requirement because it mentioned `node_modules/`. Read once per session
-   * (the set does not meaningfully change mid-run) and never throws — an
-   * unreadable repo simply contributes no directory signal.
-   */
-  const repoTopLevelDirs = (): string[] => {
-    if (topLevelDirsCache) return topLevelDirsCache;
-    try {
-      topLevelDirsCache = readdirSync(primaryRepoRoot, { withFileTypes: true })
-        .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules")
-        .map((e) => e.name);
-    } catch {
-      topLevelDirsCache = [];
-    }
-    return topLevelDirsCache;
-  };
   // USER REQUIREMENT (ESC = pause): when the user aborts a run (ESC — the
   // TUI's "Operation aborted"), the L2 auto-continuation must NOT steamroll
   // that explicit human stop with a [REVIEW_GATE_RESUME] follow-up. agent_end
@@ -859,36 +777,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     return { verdict: "READY", at: base.at, rounds: st.rounds.length };
   }
 
-  /**
-   * Reviewer fan-out facts. The session's own model registry is AUTHORITATIVE:
-   * it includes built-in catalogs (anthropic) that never appear in
-   * models-store.json. The disk view is partial, so it may CONFIRM that judges
-   * exist but must never be the basis for claiming there are none — that
-   * mistake once reported every built-in judge chain as unavailable while the
-   * review was literally running on one of them.
-   *
-   * Cached because before_agent_start receives no ctx (hence no registry), and
-   * a registry does not change within a session.
-   */
-  let registryJudgeFacts: JudgeFacts | undefined;
-
-  function readFileSafeFs(p: string): string | undefined {
-    try { return readFileSync(p, "utf8"); } catch { return undefined; }
-  }
-
-  /** Warm the authoritative facts from any ctx that carries a registry. */
-  function rememberJudgeFacts(registry: unknown): void {
-    if (registryJudgeFacts || registry === undefined) return;
-    try {
-      // No file reader: registry-only, so a disk fallback can never be
-      // mistaken for the authoritative view.
-      const facts = factsFromRegistry(registry, homedir(), () => undefined);
-      if (facts.models.length > 0) registryJudgeFacts = facts;
-    } catch { /* unusable registry — stay on the disk view */ }
-  }
 
   /**
-   * Snapshots prepared for the CURRENT round of a repo, per reviewer instance.
+   * Snapshots prepared for the CURRENT round of a repo, for the round's single reviewer.
    *
    * In memory by design: a snapshot is worthless once the session that spawned
    * its reviewers is gone, and a stale entry must never outlive it. Orphans on
@@ -924,8 +815,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   /**
    * The tree THIS round's reviewers actually looked at, per repo.
    *
-   * Set when snapshots are handed out (prepare_review) or when the shard
-   * engine materializes its own. It is the missing half of the mid-review-fix
+   * Set when a snapshot is handed out (prepare_review). It is the missing
    * story: the agent is now told to fix WHILE a review runs, so by the time
    * `record_review` computes the worktree fingerprint the tree can be one no
    * reviewer ever saw — and binding a READY to it would approve unreviewed
@@ -941,12 +831,11 @@ export default function reviewGate(pi: ExtensionAPI) {
    * cannot forget it, and a reviewer that left its mutation in place cannot
    * have that fact quietly omitted from the record.
    *
-   * It deliberately does NOT drop the set. Two reviewers mean two
-   * `record_review` calls, and an earlier version deleted every snapshot on
-   * the first one — so the second reviewer's verdict was recorded with no
-   * verification at all, and a drifted READY could ship by simply splitting
-   * the calls. The set is cleared when the NEXT round is prepared, by the
-   * shard tool, or at session start.
+   * It deliberately does NOT drop the set: an earlier version deleted every
+   * snapshot on the first `record_review` call, so a verdict recorded
+   * afterwards could ship with no verification at all — a drifted READY could
+   * pass by splitting calls. The set is cleared when the NEXT round is
+   * prepared, or at
    */
   function verifyPreparedSnapshots(repoRoot: string): string[] {
     const snaps = preparedSnapshots.get(repoRoot) ?? [];
@@ -974,65 +863,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     return drifts;
   }
 
-  /**
-   * How many reviewers this host can actually field, as a fact the gate
-   * computed. Prompt-only: it never selects a model (the pin in the agent file
-   * does that), never records a verdict and never touches the ship gate.
-   * Returns undefined when the facts are too weak to say anything true.
-   *
-   * Honors the `agents.reviewer` config: with its auto switch OFF the plan is
-   * driven by the user's slot list (see planSlottedReviewFanout); otherwise
-   * today's capability-ranked default applies unchanged.
-   */
-  function planForFacts(facts: JudgeFacts): FanoutPlan | undefined {
-    const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-    const reviewer = map.reviewer;
-    if (reviewer && reviewer.auto === false && reviewer.slots.length > 0) {
-      // planConfiguredReviewFanout ALREADY stamps slotSource with the deciding
-      // layer and the slot list (lib/review-fanout.ts). Re-stamping it here was
-      // a second copy of the same sentence that could drift from the helper's.
-      return planConfiguredReviewFanout(facts, reviewer);
-    }
-    return planFanoutFromFacts(facts);
-  }
-
-  /**
-   * The fan-out plan itself (see fanoutDirective for the view rules).
-   *
-   * Shared by the prompt injection AND the review tools, so a model
-   * recommendation can never disagree with the fan-out directive the agent
-   * was given: one plan, one source.
-   */
-  function fanoutPlan(): FanoutPlan | undefined {
-    try {
-      // (a) authoritative: the warmed runtime registry view wins outright.
-      if (registryJudgeFacts) return planForFacts(registryJudgeFacts);
-      // (b) partial (disk) view — CONFIRM ONLY. models-store.json omits built-in
-      // catalogs (anthropic), so this view can prove that two judge families
-      // exist but never that a second one is missing: "only one family" drawn
-      // from it would suppress a double review that was actually possible, and
-      // put a false note into the recorded verdict. Denial in any form (SINGLE
-      // or NONE) therefore stays silent until the real registry is warmed.
-      // The SLOT path is never taken on this view either: the disk cannot prove
-      // which of the user's slots are authenticated/usable, so a slotted plan
-      // built on it could silently skip a slot the real registry would accept
-      // and let a LOWER-priority slot speak for the pair (round-1 P2). And when
-      // the user HAS pinned slots (reviewer auto OFF + non-empty list), the
-      // default-path specs would CONTRADICT that pin — so the fallback stays
-      // silent too, rather than injecting specs the user never chose (round-2
-      // P2; the authoritative registry warms up within a turn anyway).
-      const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-      const rv = map.reviewer;
-      if (rv.auto === false && rv.slots.length > 0) return undefined;
-      const plan = planFanoutFromFacts(factsFromRegistry(undefined, homedir(), readFileSafeFs));
-      return plan && plan.crossFamily ? plan : undefined;
-    } catch { return undefined; }
-  }
-
-  function fanoutDirective(): string | undefined {
-    const plan = fanoutPlan();
-    return plan ? formatFanoutDirective(plan) : undefined;
-  }
 
   function classifier(): LlmClassifier {
     if (!llmClassifier || llmClassifierModel !== projectConfig.llmGuards.model) {
@@ -1188,8 +1018,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   let lastLayerNotifyText = "";
   /** Disk registry merged with the SESSION's runtime registry. The runtime
    *  view is authoritative (built-in anthropic catalogs never reach
-   *  models-store.json — same lesson as `registryJudgeFacts`): validating a
-   *  slot against the disk view alone refused legal built-in chains and left
+   *  models-store.json): validating a
    * a stale render deployed (round-2 P1). */
   function modelConfigRegistry(ctx: ExtensionContext): ModelRegistry {
     const merged = loadRegistry();
@@ -1346,8 +1175,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch (e) {
       problems.push(`model config layer render failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-    // A rejected slot chain must never be silent: the fan-out plan still
-    // reads the same config, so the user has to see that the DEPLOYED chain
+    // A rejected slot chain must never be silent: the renderer reads the
+    // same config, so the user has to see that the DEPLOYED chain and the
     // and the PLANNED chain diverged (round-1 P2). The same problem set is
     // NOT re-notified on every session start (round-2 Nit).
     if (problems.length > 0) {
@@ -1726,7 +1555,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
     // ---------- reviewer snapshot pin (HARD) ----------
     //
-    // `prepare_review` hands out one disposable worktree per reviewer and
+    // `prepare_review` hands out one disposable worktree for the reviewer and
     // prints its cwd; whether the reviewer is actually SPAWNED there used to be
     // pure honour. It was not honoured — for a whole session — and the failure
     // hides itself: a reviewer left in the live worktree never touches its
@@ -2822,89 +2651,37 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "prepare_review",
     label: "Prepare Review",
     description:
-      "Plan the review and materialize one disposable WRITABLE snapshot worktree per reviewer, then " +
-      "return each one's cwd, finding-stream path and file list. ALWAYS call this before spawning " +
-      "reviewers — review no longer runs through the pdw engine (it discards a per-agent cwd, so a " +
-      "shard reviewer could never get its own copy of the change). For a LARGE diff this tool does the " +
-      "sharding itself (planReviewShards: disjoint groups covering every changed file), so the split is " +
-      "computed, not improvised; spawn one reviewer per returned shard in the SAME turn (async), each " +
-      "with its own cwd. Inside its snapshot a reviewer may edit and run tests freely (mutation " +
-      "analysis) while YOU keep fixing the real worktree from its streamed findings. record_review " +
-      "verifies every snapshot afterwards and refuses a READY from a reviewer that left edits behind, " +
-      "or whose tree no longer matches your worktree.",
+      "Materialize ONE disposable WRITABLE snapshot worktree for the single reviewer of this round, then " +
+      "return its cwd, finding-stream path, file list and ready-made task text. ALWAYS call this before " +
+      "spawning the reviewer — review no longer runs through the pdw engine (it discards a per-agent " +
+      "cwd, so a reviewer could never get its own copy of the change). One reviewer, one snapshot: " +
+      "no split, one reviewer — everything the reviewer judges is the whole change. Inside the " +
+      "snapshot the reviewer may edit and run tests freely (mutation analysis) while YOU keep fixing " +
+      "the real worktree from its streamed findings. record_review verifies the snapshot afterwards " +
+      "and refuses a READY from a reviewer that left edits behind, or whose tree no longer matches " +
+      "your worktree.",
     parameters: Type.Object({
-      labels: Type.Optional(Type.Array(Type.String(), {
-        description:
-          "One label per reviewer for a SMALL diff (e.g. [\"anthropic\",\"openai\"] or " +
-          "[\"integration\"]) — use the fan-out plan's count. Ignored for a large diff: the shard plan " +
-          "decides the labels there.",
-      })),
-      max_shards: Type.Optional(Type.Integer({
-        description: "Shard cap for a large diff (default 4).",
-      })),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      // Warm the authoritative registry facts (cheap, cached) so the model
-      // recommendation below never has to fall back to the partial disk view.
-      rememberJudgeFacts((ctx as { modelRegistry?: unknown }).modelRegistry);
       const target = resolveToolRepo(params.repo);
       if (!target.ok) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
 
-      // SHARD PLANNING LIVES HERE, not in the agent's head. Moving review off
-      // the engine moved the fan-out decision to the main agent, and "it split
-      // the diff into disjoint groups covering every file" is not something a
-      // prompt can guarantee. planReviewShards is a pure, tested function; the
-      // tool runs it and hands back the groups, so the split is a fact.
-      let shardPlan: { label: string; files: string[]; note: string }[] | undefined;
-      let tier: "single" | "sharded" = "single";
+      // ONE reviewer per round: the file list is the whole change, no split.
       let fileCount = 0;
-      let lineCount = 0;
       const changed = await listChangedFiles(target.root);
       if (changed.ok && changed.files.length > 0) {
         fileCount = changed.files.length;
-        const lines = await countDiffLines(target.root, changed.files);
-        lineCount = lines.ok ? lines.lines : 0;
-        if (shouldShardReview(fileCount, lineCount)) {
-          tier = "sharded";
-          shardPlan = planReviewShards(changed.files, {
-            maxShards: params.max_shards ?? 4,
-          }).shards.map((s) => ({ label: s.label, files: s.files, note: s.note }));
-        }
       }
 
-      // SANITIZE FIRST, then deduplicate — both with the same helper the
-      // snapshot uses. Sanitizing up front means the labels we plan with are
-      // exactly the labels the snapshots report, so the partial-failure check
-      // compares like with like (comparing raw against sanitized would flag
-      // `a/b` → `a-b` as a failed reviewer and refuse a good plan). Dedup
-      // matters because the stream filename is derived from the label: `a/b`
-      // and `a-b` would otherwise share one stream file.
-      const seenLabels = new Set<string>();
-      const labels = (shardPlan ? shardPlan.map((s) => s.label) : (params.labels ?? []))
-        .filter((l) => l.trim() !== "")
-        .map((l) => safeLabel(l))
-        .filter((l) => {
-          if (seenLabels.has(l)) return false;
-          seenLabels.add(l);
-          return true;
-        });
-      if (labels.length === 0) {
-        return {
-          content: [{
-            type: "text",
-            text:
-              "review-gate: prepare_review needs at least one reviewer label for a small diff " +
-              "(a large diff is labelled by the shard plan). Use the fan-out plan's count.",
-          }],
-          details: {},
-          isError: true,
-        };
-      }
+      // The single instance label for this round's snapshot.
+      const label = safeLabel("review");
+      const labels = [label];
+
       // A previous round's snapshots would otherwise linger for the session.
       // Their drift still matters: if the last round's verdict was READY and a
       // reviewer turns out to have left edits behind, that READY was never
@@ -2919,10 +2696,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         } else {
           // Not READY *yet*. The verdict for those drifted snapshots may still
           // be recorded AFTER this call (agents do prepare-then-record out of
-          // order), and by then the snapshots are gone and the new ones are
+          // order), and by then the snapshots are gone and the new one is
           // clean — so the drift would vanish. Park it: the next record_review
           // consumes it and downgrades, exactly as if the snapshot were still
-          // on disk. This is the laundering window shard-2 found.
+          // on disk.
           pendingDrift.set(target.root, [...(pendingDrift.get(target.root) ?? []), ...stale]);
         }
       }
@@ -2931,41 +2708,29 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       reviewedTree.delete(target.root);
       const runId = `review-${Date.now().toString(36)}`;
-      // ONE tree for the whole round, computed once. Two reasons, both real:
-      //  - cost: worktreeTreeOid is the expensive shadow-index pass, and doing
-      //    it per snapshot paid for it up to 4 times;
-      //  - correctness: if the worktree changed between snapshots, the reviewers
-      //    would be judging DIFFERENT trees while `reviewedTree` records only
-      //    one — the stale-tree guard would then be blind to the others.
-      // Unavailable ⇒ let each snapshot resolve it (fail-soft, as before).
+      // ONE tree for the whole round, computed once.
       let roundTree: string | undefined;
       try { roundTree = worktreeTreeOid(target.root); } catch { roundTree = undefined; }
       const snaps: ReviewSnapshot[] = [];
       const unsnapshotted: string[] = [];
-      for (const label of labels) {
+      for (const instance of labels) {
         const snap = createReviewSnapshot({
           repoRoot: target.root,
-          instance: label,
+          instance,
           runId,
           ...(roundTree ? { tree: roundTree } : {}),
         });
         if (snap) snaps.push(snap);
-        else unsnapshotted.push(label);
+        else unsnapshotted.push(instance);
       }
-      // PARTIAL FAILURE IS NOT SILENT. Dropping a shard whose snapshot failed
-      // would leave its files unreviewed while the round still looked complete
-      // — the worst shape a review gate can have. Fail the whole call instead:
-      // the caller retries (or reviews without isolation, deliberately).
-      // The decision is pure + tested (lib/verdict-guards.ts): the inline
-      // version had zero coverage, so neutralizing it changed no test.
-      // The loop goal is the acceptance contract every reviewer is judged
+      // The loop goal is the acceptance contract the reviewer is judged
       // against, and a snapshot carries no .pi/, so the goal file is unreadable
       // inside one. Computed HERE — before the isolation branches — so the
       // UNAVAILABLE reply can carry it too: that branch tells you to spawn
       // `reviewer-readonly`, whose defaultReads no longer name the goal file
       // (an UNAPPROVED draft must never become an acceptance contract), so the
       // task text is its ONLY goal source. Only a USER-APPROVED goal may become
-      // the reviewers' contract: the L8 gate withholds an unapproved goal from
+      // the reviewer's contract: the L8 gate withholds an unapproved goal from
       // the main agent's own prompt, and reviewers must never be handed a goal
       // the user did not confirm (the sidecar hash is the approval fact — the
       // raw file is not).
@@ -3000,7 +2765,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             type: "text",
             text:
               "review-gate: snapshot isolation UNAVAILABLE here (git worktree refused — no commit yet, " +
-              "no worktree support, or a read-only filesystem). The reviewers would be reading YOUR live " +
+              "no worktree support, or a read-only filesystem). The reviewer would be reading YOUR live " +
               "worktree, so:\n" +
               "- Spawn the `reviewer-readonly` agent instead of `reviewer`. Its tool allowlist has no " +
               "edit/write, so it CANNOT touch the worktree — that is the mechanical half; choosing it is " +
@@ -3016,177 +2781,77 @@ export default function reviewGate(pi: ExtensionAPI) {
                 ? "\nHand the reviewer this loop goal — its ONLY goal source here — and have it accept " +
                   "the change criterion by criterion:\n```\n" + goalText + "\n```"
                 : "") +
-              // The verdict SCHEMA is handed over on the isolated path for every
-              // tier; withholding it here would leave THIS path's verdict the
-              // only unparseable one (round-3 Nit, same asymmetry class as the
-              // goal gap above).
               "\n\nSpawn the reviewer with this `outputSchema` so a malformed verdict fails at the " +
               "source instead of arriving as unparseable prose:\n```json\n" +
-              JSON.stringify(SHARD_VERDICT_SCHEMA, null, 2) + "\n```",
+              JSON.stringify(REVIEW_VERDICT_SCHEMA, null, 2) + "\n```",
           }],
-          // No snapshot ⇒ nothing recorded about what the reviewers will see,
-          // and any stale value from an earlier round must not survive to
-          // block an honest READY.
           details: { isolated: false },
         };
       }
       preparedSnapshots.set(target.root, snaps);
-      // What the reviewers of this round will actually have seen. Every
-      // snapshot shares one tree (see roundTree above); if they somehow do not,
-      // record NOTHING rather than a value that covers only some reviewers — the
-      // guard must never claim more than it can prove.
+      // What the reviewer of this round will actually have seen.
       const trees = new Set(snaps.map((s) => s.tree));
       if (trees.size === 1) reviewedTree.set(target.root, snaps[0]!.tree);
       else reviewedTree.delete(target.root);
-      const byLabel = new Map((shardPlan ?? []).map((s) => [s.label, s]));
-      // Model recommendation: the fan-out plan already decided how many
-      // reviewers and from which families — hand the concrete specs to the
-      // agent so it does not re-derive them from the directive text. The 1:1
-      // mapping applies only to a small diff whose labels ARE the reviewers;
-      // a sharded run follows the reviewer agent's pinned chain per shard,
-      // and the plan governs the integration reviewer that follows.
-      const fanout = fanoutPlan();
-      const reviewerModels = new Map<string, string>();
-      if (fanout && fanout.slotSource && fanout.reviewers.length > 0 && !shardPlan && labels.length === fanout.reviewers.length) {
-        fanout.reviewers.forEach((spec, i) => reviewerModels.set(labels[i]!, spec));
-      }
-      // (goalSt/goalText are computed above, before the isolation branches, so
-      // the UNAVAILABLE reply can carry the contract too.)
+      const snap = snaps[0]!;
       const lines = [
-        tier === "sharded"
-          ? `review-gate: LARGE diff (${fileCount} file(s), ~${lineCount} line(s)) — sharded into ` +
-            `${snaps.length} disjoint group(s) covering every changed file (planReviewShards). ` +
-            `Snapshots ready (tree ${snaps[0]!.tree.slice(0, 12)}).`
-          : `review-gate: ${snaps.length} snapshot(s) ready (tree ${snaps[0]!.tree.slice(0, 12)}).`,
+        `review-gate: ${snaps.length} snapshot(s) ready (tree ${snap.tree.slice(0, 12)}).` +
+          (fileCount > 0 ? ` ${fileCount} file(s) to review.` : ""),
         ...(stale.length ? [`Note: a previous round's snapshot had drifted — ${stale.join("; ")}`] : []),
-        ...(fanout && fanout.reviewers.length > 0 && fanout.slotSource
-          ? [
-              "",
-              "Recommended reviewer models (fan-out plan — pass as the spawn's `model` override):",
-              ...(reviewerModels.size > 0
-                ? [...reviewerModels.entries()].map(([label, spec]) => `- ${label}: ${spec}`)
-                : [
-                    `- ${fanout.reviewers.join(", ")}`,
-                    ...(shardPlan
-                      ? [
-                          "  For a sharded run each shard follows the reviewer agent's pinned chain; " +
-                            "the plan above governs the integration reviewer that follows.",
-                        ]
-                      : [
-                          "  Your labels do not line up 1:1 with the plan — spawn per the fan-out " +
-                            "directive in your prompt.",
-                        ]),
-                  ]),
-              "",
-            ]
-          : // Without a slotSource the plan's specs are NOT authoritative model
-            // choices — the concrete model a reviewer runs on comes from the
-            // pinned agent chain (lib/review-fanout.ts: the specs are printed
-            // only when plan.slotSource is set, explicitly because handing the
-            // agent an override would seat a cheap-tier model as judge).
-            []),
-        // COPYABLE CALLS, NOT A DESCRIPTION. This block used to read "spawn one
+        // COPYABLE CALL, NOT A DESCRIPTION. This block used to read "spawn one
         // reviewer per entry below, each with its own cwd" followed by a list —
         // and that is exactly how a whole session of reviews ended up in the
         // live worktree: the agent reached for the ONE dispatch shape the host
         // prompt recommends for parallel work (a single workflowScript), whose
         // sandbox cannot carry a per-child cwd at all. The spawn guard now
-        // refuses that shape; printing the calls it WILL accept is the other
+        // refuses that shape; printing the call it WILL accept is the other
         // half, so the correct path needs no translation.
-        "Spawn these reviewers as SEPARATE top-level `subagent` calls, all in the SAME turn. Copy each " +
-          "call as-is (the `task` text for each one is below):",
-        ...snaps.map((s) => {
-          const shard = byLabel.get(s.instance);
-          const model = reviewerModels.get(s.instance);
-          return (
-            `- ${s.instance}: subagent({ agent: "reviewer", async: true, cwd: "${s.dir}"` +
-            (model ? `, model: "${model}"` : "") +
-            ", task: <its task text below>, outputSchema: <the schema below> })" +
-            `\n  stream=${s.streamPath}` +
-            (shard ? `\n  files (${shard.note}): ${shard.files.join(", ")}` : "")
-          );
-        }),
+        "Spawn the reviewer as ONE top-level `subagent` call. Copy it as-is (the `task` text is below):",
+        `- subagent({ agent: "reviewer", async: true, cwd: "${snap.dir}", task: <its task text below>, outputSchema: <the schema below> })` +
+          `\n  stream=${snap.streamPath}` +
+          (changed.ok ? `\n  files (${changed.files.length}): ${changed.files.join(", ")}` : ""),
         "",
-        "Do NOT dispatch reviewers through `workflowScript`/`workflowScriptPath`: its sandbox exposes " +
-          "`runs.run(key, { agent, task, worktree?, gate? })` with NO per-child `cwd`, so every reviewer " +
-          "would share one directory — your live worktree — while the snapshots sit untouched and verify " +
-          "as \"clean\". The gate blocks that shape while snapshots are open; separate top-level calls in " +
+        "Do NOT dispatch the reviewer through `workflowScript`/`workflowScriptPath`: its sandbox exposes ",
+          "`runs.run(key, { agent, task, worktree?, gate? })` with NO per-child `cwd`, so the reviewer ",
+          "would share one directory — your live worktree — while the snapshot sits untouched and verifies ",
+          "as \"clean\". The gate blocks that shape while a snapshot is open; separate top-level calls in ",
           "one turn run just as parallel.",
         "",
-        buildStreamConsumerDirective(snaps.map((s) => s.streamPath)),
+        buildStreamConsumerDirective([snap.streamPath]),
         "",
         // The loop goal rides the task text (the snapshot deliberately carries
-        // no .pi/, so the goal file is unreadable inside it). Injected on BOTH
-        // branches — a small-diff reviewer needs the acceptance contract as
-        // much as a shard reviewer does.
+        // no .pi/, so the goal file is unreadable inside it).
         ...(goalText ? ["Loop goal (accept the change against it, criterion by criterion):", "```", goalText, "```", ""] : []),
-        // For a sharded run, hand over the READY-MADE per-shard task text: the
-        // file list, the snapshot contract and the stream directive have to
-        // match the plan exactly, and retyping them per shard is where drift
-        // (and "I'll just review everything") creeps in.
-        ...(shardPlan
-          ? shardPlan.flatMap((shard) => {
-              const snap = snaps.find((s) => s.instance === shard.label);
-              if (!snap) return [];
-              return [
-                `--- task text for ${shard.label} (cwd=${snap.dir}) ---`,
-                buildShardPrompt(shard, goalText, undefined, {
-                  streamPath: snap.streamPath,
-                }),
-                "",
-              ];
-            })
-          : [
-              // A shard reviewer gets the pwd instruction inside its ready-made
-              // task text (buildShardPrompt); a small-diff reviewer's task is
-              // written by YOU, so the instruction has to be handed over here —
-              // otherwise the second proof of isolation would exist only as a
-              // schema field description, which is the half of a contract
-              // models skip.
-              "Give each reviewer this instruction block (substituting its own stream path):",
-              buildStreamDirective(snaps[0]!.streamPath),
-              "",
-              "Also put this in every reviewer's task text: \"Run `pwd` and report exactly what it " +
-                "printed in the verdict's `cwd` field — do not copy the path from this task text. The " +
-                "gate matches it against the snapshot prepared for you.\"",
-            ]),
+        // Hand over the READY-MADE task text: the file list, the snapshot
+        // contract and the stream directive have to match exactly, and
+        // retyping them is where drift creeps in.
+        `--- task text (cwd=${snap.dir}) ---`,
+        buildReviewPrompt("review", changed.ok ? changed.files : [], goalText, undefined, {
+          streamPath: snap.streamPath,
+        }),
         "",
-        "The reviewer works in a disposable copy: mutation analysis is encouraged, but it MUST restore " +
-          "every mutation and keep scratch files outside the snapshot ($TMPDIR), and never write under " +
-          "node_modules (a symlink to the real repo). record_review re-derives each snapshot's tree and " +
+        "The reviewer works in a disposable copy: mutation analysis is encouraged, but it MUST restore ",
+          "every mutation and keep scratch files outside the snapshot ($TMPDIR), and never write under ",
+          "node_modules (a symlink to the real repo). record_review re-derives the snapshot's tree and ",
           "will not accept a READY from a reviewer that left edits behind.",
         "",
-        "Spawn each reviewer with this `outputSchema` so a malformed verdict fails at the source " +
+        "Spawn the reviewer with this `outputSchema` so a malformed verdict fails at the source ",
           "instead of arriving as unparseable prose:",
         "```json",
-        JSON.stringify(SHARD_VERDICT_SCHEMA, null, 2),
+        JSON.stringify(REVIEW_VERDICT_SCHEMA, null, 2),
         "```",
-        ...(tier === "sharded"
-          ? [
-              "",
-              "Merge ALL shard outputs into ONE record_review call, in this exact shape (worst verdict " +
-                "wins; shard verdicts carry no docSync — the integration reviewer that follows attests it):",
-              formatShardReviewRecord(
-                snaps.map((s) => ({ label: s.instance, output: '{"gate":"…","findings":[…]}' })),
-              ),
-            ]
-          : []),
       ];
       return {
         content: [{ type: "text", text: lines.join("\n") }],
         details: {
           isolated: true,
-          tier,
           fileCount,
-          lineCount,
           snapshots: snaps.map((s) => ({
             label: s.instance,
             cwd: s.dir,
             stream: s.streamPath,
-            ...(byLabel.get(s.instance) ? { files: byLabel.get(s.instance)!.files } : {}),
-            ...(reviewerModels.has(s.instance) ? { model: reviewerModels.get(s.instance) } : {}),
+            ...(changed.ok ? { files: changed.files } : {}),
           })),
-          ...(fanout && fanout.slotSource && fanout.reviewers.length > 0 ? { reviewers: fanout.reviewers } : {}),
         },
       };
     },
@@ -3442,7 +3107,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- parallel loop tools: wave planning + patch application ----------
+  // ---------- review tooling: change collection + snapshot materialization ----------
 
   /** Collect changed files: tracked edits vs HEAD plus untracked, repo-relative. */
   async function listChangedFiles(
@@ -3466,344 +3131,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     return { ok: true, files: [...new Set([...tracked.lines, ...untracked.lines])] };
   }
 
-  /** Count total lines in the unified diff of the given files. */
-  async function countDiffLines(
-    cwd: string,
-    files: string[],
-  ): Promise<{ ok: true; lines: number } | { ok: false; error: string }> {
-    const { execFile } = await import("node:child_process");
-    return new Promise((resolve) => {
-      execFile("git", ["diff", "HEAD", "--", ...files], { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
-        if (err) {
-          resolve({ ok: false, error: String(err.message ?? err).split("\n")[0] });
-        } else {
-          resolve({ ok: true, lines: stdout.split("\n").length - 1 }); // trailing newline
-        }
-      });
-    });
-  }
 
-  // `addDiffContext` and `buildSingleShardPrompt` died with the engine review
-  // path. Neither has a caller any more, and neither is needed:
-  //  - per-shard diff context is pointless when the reviewer holds a snapshot of
-  //    the change — it runs `git diff HEAD` itself, against the real thing;
-  //  - the small-diff prompt now comes from `buildShardPrompt` (one source of
-  //    truth for the reviewer contract) via `prepare_review`.
-  // Deleting them beats keeping "maybe useful later" code that no test covers.
-
-  // NOTE: `run_parallel_shard_review` used to live here; review no longer runs
-  // through the pdw engine at all (it DISCARDS a per-agent `cwd`, so a reviewer
-  // could not hold its own snapshot of the change — see the comment on
-  // prepare_review). The engine is now RETIRED ENTIRELY (docs/handoff-remove-pdw.md,
-  // step 2): wave workers and the decompose module loop run as ordinary
-  // subagents of the static READ-ONLY agent `agents/worker-readonly.md` (its
-  // `tools:` allowlist has no edit/write/bash — pi-subagents has no per-call
-  // tool denylist, so the allowlist IS the mechanical read-only guarantee).
-  //
-  // The extension cannot spawn subagents itself, so the wave flow mirrors
-  // prepare_review → spawn → record_review:
-  //   1. `prepare_wave`  — fail-closed reconciliation (computeWave + worklog
-  //      existence), then hands back per-module ready-made task text and the
-  //      output schema;
-  //   2. the MAIN AGENT spawns one `worker-readonly` per module, ALL IN THE
-  //      SAME TURN (async), with WAVE_WORKER_SCHEMA as each spawn's
-  //      outputSchema;
-  //   3. `apply_wave_patches` — re-validates every patch (declared path ∪ diff
-  //      headers ⊆ owned_paths), persists them under .pi/plan/patches/<module>/
-  //      and runs `git apply --check`; a module without a result is FAILED,
-  //      never "nothing to change". The MAIN AGENT applies the patches with
-  //      `git apply` and records each module's status.
-
-  pi.registerTool({
-    name: "prepare_wave",
-    label: "Prepare Wave",
-    description:
-      "Prepare one wave of patch-first parallel module workers without the pdw engine: fail-closed reconciliation " +
-      "(state_file ⇒ the module list must equal computeWave(state); every worklog must exist), then return one " +
-      "ready-made task text per module plus the WAVE_WORKER_SCHEMA outputSchema. YOU then spawn ONE " +
-      "`worker-readonly` subagent per module in the SAME turn (async) — its tools: allowlist has no " +
-      "edit/write/bash, so it cannot touch the worktree and only returns unified git diffs as structured output. " +
-      "When the workers are back, call apply_wave_patches with your results array and git apply the clean patches.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
-      modules: Type.Array(Type.Object({
-        id: Type.String({ description: "Module id (must match the plan state when state_file is given)" }),
-        title: Type.String(),
-        ownedPaths: Type.Array(Type.String({ description: "Disjoint file paths this module owns" })),
-        worklogPath: Type.String({ description: "Path under .pi/plan/worklog/ (module brief + must-haves)" }),
-        model: Type.Optional(Type.String({ description: "Legacy worker model spec — the worker's model now comes from agents/worker-readonly.md's pinned chain; kept for call-site compatibility" })),
-      }), {
-        description:
-          "The wave modules — the next wave is every pending module whose depends_on are implemented/accepted (≤4).",
-      }),
-      goal: Type.Optional(Type.String({ description: "Loop goal text handed to every worker" })),
-      state_file: Type.Optional(Type.String({
-        description:
-          "Absolute path of .pi/plan/state.json. When given, the tool RE-COMPUTES the wave from the " +
-          "plan (computeWave) and refuses to prepare a modules list that is not exactly that wave " +
-          "(fail-closed; the driver must not invent the wave).",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const cwd = params.repo ?? ctx.cwd ?? process.cwd();
-      try {
-        const modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string; model?: string }> =
-          params.modules;
-        // Fail-closed wave reconciliation: when a plan state file is supplied,
-        // the wave MUST equal computeWave(state) — the driver cannot invent one.
-        // Check BEFORE returning task text so an invented wave never burns a run.
-        if (params.state_file) {
-          try {
-            const parsed = parsePlanState(readFileSync(params.state_file, "utf8"));
-            if (!parsed.ok) {
-              return {
-                content: [{ type: "text", text: `prepare_wave: plan state invalid — ${parsed.error}.` }],
-                details: { available: false, reason: "invalid-plan-state", error: parsed.error },
-              };
-            }
-            const expected = computeWave(parsed.state.modules);
-            const actual = modules.map((m) => m.id).sort();
-            const want = [...expected.wave].sort();
-            if (actual.length !== want.length || actual.some((id, i) => id !== want[i])) {
-              return {
-                content: [{
-                  type: "text",
-                  text: `prepare_wave: module list ${JSON.stringify(actual)} does not match the computed wave ${JSON.stringify(want)}. Re-run with the computed wave.`,
-                }],
-                details: { available: false, reason: "wave-mismatch", expectedWave: want },
-              };
-            }
-          } catch (err) {
-            return {
-              content: [{ type: "text", text: `prepare_wave: state_file check failed — ${(err as Error).message}.` }],
-              details: { available: false, reason: "tool-failed", error: (err as Error).message },
-            };
-          }
-        }
-        // Fail-closed worklog check: every wave worker is told to "read the
-        // worklog first", so a missing worklog file (a decompose driver that
-        // never wrote .pi/plan/worklog/<id>.md) makes every worker fail or
-        // hallucinate its brief. Refuse to prepare instead of burning a run.
-        const worklogPlanDir = pathJoin(cwd, PLAN_DIR);
-        const missingWorklogs = modules
-          .filter((m) => !existsSync(pathJoin(worklogPlanDir, m.worklogPath)))
-          .map((m) => pathJoin(worklogPlanDir, m.worklogPath));
-        if (missingWorklogs.length > 0) {
-          return {
-            content: [{
-              type: "text",
-              text: `prepare_wave: worklog file(s) missing — ${missingWorklogs.join(", ")}. Create them (module brief + must-haves) before preparing the wave.`,
-            }],
-            details: { available: false, reason: "missing-worklogs", worklogs: missingWorklogs },
-          };
-        }
-        const goalText = params.goal?.trim() || undefined;
-        const tasks = modules.map((m) => ({
-          moduleId: m.id,
-          task: buildWaveWorkerPrompt({
-            moduleId: m.id,
-            title: m.title,
-            ownedPaths: m.ownedPaths,
-            worklogPath: m.worklogPath,
-            goalText,
-          }),
-        }));
-        return {
-          content: [{
-            type: "text",
-            text:
-              `wave prepared: ${modules.length} module(s). Spawn ONE \`worker-readonly\` subagent per module below, ` +
-              `ALL IN THE SAME TURN (async:true, never one after the other), each with the ready-made task text. ` +
-              `The worker's tools: allowlist has no edit/write/bash, so it cannot touch the worktree — it only ` +
-              `returns unified git diffs as structured output.` +
-              "\n\nSpawn each worker with this outputSchema (WAVE_WORKER_SCHEMA):\n```json\n" +
-              JSON.stringify(WAVE_WORKER_SCHEMA, null, 2) +
-              "\n```\n\nReady-made workflowScript skeleton (fill the task text + outputSchema, then run it — keys are the module ids):\n```js\nreturn await runs.all([\n" +
-              modules.map((m) =>
-              `  { key: ${JSON.stringify(m.id)}, agent: "worker-readonly", task: <task text for ${m.id}>, outputSchema: <WAVE_WORKER_SCHEMA — paste the JSON above> },`,
-              ).join("\n") +
-              "\n]);\n```\n\n--- task text per module ---\n" +
-              tasks.map((t) => `### ${t.moduleId}\n\n${t.task}`).join("\n\n") +
-              "\n\nWhen every worker is back, call apply_wave_patches with:\n" +
-              "- modules: the same module array you passed here (id/title/ownedPaths/worklogPath),\n" +
-              "- results: your workers' structured outputs verbatim — [{moduleId, patches: [{path, diff}], summary, selfcheck}],\n" +
-              "- state_file: the same path (so owned_paths stay the plan's, fail-closed).\n" +
-              "Then git apply (with --recount) the patches whose applies=true and record each module's status.",
-          }],
-          details: { available: true, moduleCount: modules.length },
-        };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `prepare_wave failed: ${(err as Error).message}.` }],
-          details: { available: false, reason: "tool-failed", error: (err as Error).message },
-        };
-      }
-    },
-  });
-
-  pi.registerTool({
-    name: "apply_wave_patches",
-    label: "Apply Wave Patches",
-    description:
-      "Validate and persist the patches your wave workers produced: re-check every patch against its module's " +
-      "owned paths (declared path AND diff headers), persist them under .pi/plan/patches/<module>/ and run " +
-      "`git apply --check` for each. A module with NO result entry is reported as FAILED, never as \"nothing " +
-      "to change\". After this returns, YOU apply the patches whose applies=true with `git apply --recount` " +
-      "— the worktree has exactly one writer: you.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({ description: "Absolute repo path (defaults to the session cwd)" })),
-      modules: Type.Array(Type.Object({
-        id: Type.String(),
-        title: Type.String(),
-        ownedPaths: Type.Array(Type.String()),
-        worklogPath: Type.String(),
-      }), {
-        description: "The same module array you passed to prepare_wave (id/title/ownedPaths/worklogPath).",
-      }),
-      results: Type.Array(Type.Object({
-        moduleId: Type.String({ description: "Module id this worker produced patches for" }),
-        patches: Type.Array(Type.Object({
-          path: Type.String(),
-          diff: Type.String(),
-        })),
-        summary: Type.Optional(Type.String()),
-        selfcheck: Type.Optional(Type.Array(Type.Object({
-          must_have: Type.String(),
-          met: Type.Boolean(),
-          evidence: Type.String(),
-        }))),
-      }), {
-        description: "Your wave workers' structured outputs, verbatim, one entry per module.",
-      }),
-      state_file: Type.Optional(Type.String({
-        description:
-          "Absolute path of .pi/plan/state.json. When given, each module's owned_paths come from the plan " +
-          "(the driver cannot redefine them) and every result moduleId must exist in the plan.",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const cwd = params.repo ?? ctx.cwd ?? process.cwd();
-      try {
-        const modules: Array<{ id: string; title: string; ownedPaths: string[]; worklogPath: string }> = params.modules;
-        const results: Array<{ moduleId: string; patches: Array<{ path: string; diff: string }>; summary?: string; selfcheck?: Array<{ must_have: string; met: boolean; evidence: string }> }> =
-          params.results;
-        // Fail-closed: every module must have a result entry — a missing result
-        // is a FAILED module (the worker crashed or returned nothing), never
-        // "nothing to change".
-        const resultsBy = new Map(results.map((r) => [r.moduleId, r]));
-        const failedModules = modules.filter((m) => !resultsBy.has(m.id)).map((m) => m.id);
-        // When a plan state is given, ownership comes from the plan, not the
-        // caller: the driver cannot redefine a module's owned paths after the
-        // user approved them.
-        let planState: { modules: Array<{ id: string; owned_paths: string[] }> } | undefined;
-        if (params.state_file) {
-          const parsed = parsePlanState(readFileSync(params.state_file, "utf8"));
-          if (!parsed.ok) {
-            return {
-              content: [{ type: "text", text: `apply_wave_patches: plan state invalid — ${parsed.error}.` }],
-              details: { available: false, reason: "invalid-plan-state", error: parsed.error },
-            };
-          }
-          const unplanned = unplannedModuleIds(modules, new Set(parsed.state.modules.map((m) => m.id)));
-          if (unplanned.length > 0) {
-            return {
-              content: [{
-                type: "text",
-                text: `apply_wave_patches: module(s) not in the plan — ${unplanned.join(", ")}. The wave must only contain planned modules (their owned_paths were approved); re-run prepare_wave with the computed wave.`,
-              }],
-              details: { available: false, reason: "module-not-in-plan", modules: unplanned },
-            };
-          }
-          planState = parsed.state;
-        }
-        // Ownership comes from the plan (when given) or from the caller: the
-        // driver cannot redefine a module's owned paths after the user approved
-        // them. A single pure function owns both branches.
-        const ownedBy = ownedPathsFromPlan(modules, planState);
-        // Fail-closed: a result for a module that is not in this wave — or TWO
-        // results for the same module — is a handoff defect; refuse instead of
-        // silently dropping/replacing an entry (which would mislead the
-        // failedModules report).
-        const unknownResults = unknownResultModuleIds(results, new Set(modules.map((m) => m.id)));
-        if (unknownResults.length > 0) {
-          return {
-            content: [{
-              type: "text",
-              text: `apply_wave_patches: result(s) for module(s) not in this wave — ${unknownResults.join(", ")}. Every result must belong to a module of the prepared wave.`,
-            }],
-            details: { available: false, reason: "unknown-result-module", modules: unknownResults },
-          };
-        }
-        const duplicates = duplicateResultModuleIds(results);
-        if (duplicates.length > 0) {
-          return {
-            content: [{
-              type: "text",
-              text: `apply_wave_patches: duplicate result(s) for the same module — ${duplicates.join(", ")}. Each module may receive exactly one result.`,
-            }],
-            details: { available: false, reason: "duplicate-result-module", modules: duplicates },
-          };
-        }
-        const planDir = planDirFor(cwd);
-        const perModule = modules.map((m) => {
-          const r = resultsBy.get(m.id);
-          if (!r) {
-            return {
-              moduleId: m.id,
-              summary: "",
-              selfcheck: [],
-              patchCount: 0,
-              patchFiles: [] as string[],
-              ownershipOk: false,
-              ownershipViolations: [] as string[],
-              applies: [] as boolean[],
-              failed: true,
-            };
-          }
-          const parsed = parseWaveWorkerResult(m.id, r as Record<string, unknown>);
-          const ownership = validatePatchOwnership(parsed.patches, ownedBy.get(m.id) ?? m.ownedPaths);
-          // Fail-closed: a patch that violates owned_paths is NOT persisted and
-          // NOT pre-checked — it must never be applied by accident.
-          const patchFiles = ownership.ok ? writeWavePatches(planDir, m.id, parsed.patches) : [];
-          return {
-            moduleId: m.id,
-            summary: parsed.summary,
-            selfcheck: parsed.selfcheck,
-            patchCount: parsed.patches.length,
-            patchFiles,
-            ownershipOk: ownership.ok,
-            ownershipViolations: ownership.ok ? [] : ownership.violations,
-            applies: [] as boolean[],
-          };
-        });
-        // Fill git apply --check results (parallel checks; only for
-        // ownership-OK modules).
-        const applyStatus = await Promise.all(
-          perModule.map((m) => Promise.all(m.patchFiles.map((f) => checkPatchApplies(cwd, f)))),
-        );
-        perModule.forEach((m, i) => {
-          m.applies = applyStatus[i];
-        });
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(perModule, null, 2) +
-              (failedModules.length ? `\n\nFAILED MODULES (no result, do NOT mark implemented): ${failedModules.join(", ")}` : ""),
-          }],
-          details: {
-            available: true,
-            moduleCount: perModule.length,
-            failedModules,
-          },
-        };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `apply_wave_patches failed: ${(err as Error).message}.` }],
-          details: { available: false, reason: "tool-failed", error: (err as Error).message },
-        };
-      }
-    },
-  });
   // ---------- run_precommit tool (the ONLY path to a PASS) ----------
 
   pi.registerTool({
@@ -3823,10 +3151,6 @@ export default function reviewGate(pi: ExtensionAPI) {
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      // Precommit runs BEFORE the review every round, so this is the earliest
-      // reliable place to warm the authoritative model facts the fan-out
-      // directive needs (before_agent_start receives no ctx, hence no registry).
-      rememberJudgeFacts((ctx as { modelRegistry?: unknown }).modelRegistry);
       // Available in every mode: explore allows edits/bash, so the agent may
       // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
@@ -5143,15 +4467,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
   // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
 
-  // Cache-only capture of the user's first real message, feeding the
-  // requirement-size classifier its primary signal. This
-  // handler ONLY stores text — it never intercepts, transforms, classifies,
-  // or writes mode state; all decisions stay inside set_gate_mode (the
-  // input-transform/decision flow is deliberately not resurrected).
   pi.on("input", (event, ctx) => {
-    if (firstUserInput === undefined && event.source === "interactive") {
-      firstUserInput = event.text;
-    }
     // A fresh user message resets the edit-failure nudge window.
     editFailurePending = false;
     // A real user message resumes an ESC-abort pause: the user is speaking
@@ -5225,19 +4541,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       ) {
         if (piSelf) {
           // /tmp is scratch space: it can never reach loop via the agent, and the
-          // /decompose suggestion is only ever surfaced under loop. Asking the
+          // /tmp is scratch space: it can never reach loop via the agent. Asking the
           // model here would spend up to the full guard timeout on an answer
           // nobody reads, so a scratch session makes NO LLM call at all — the
           // same promise the pre-refactor code kept.
           effective = scratchFirstMode(requested);
         } else {
-          // Requirement-size hint (the /decompose suggestion) — unrelated to the
-          // mode: it reads the user's first message, starts nothing and blocks
-          // nothing. It runs here because this is the one point where the
-          // session's first message is known and the work has not begun.
-          const sizeBucket = await classifyRequirementSize(classifier(), firstUserInput);
-          requirementBucket = sizeBucket;
-          requirementClassifierUnavailable = sizeBucket === undefined;
         }
       }
       // Defense in depth: even if the first-classification block was skipped
@@ -5647,14 +4956,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         (!sessionEdited && !state.scopeLimit
           ? "\nIf these unmet gates target PRE-EXISTING changes this session never made, you may call request_scope_limit — the USER decides whether session-only coverage suffices."
           : "") +
-        // How many reviewers this host can actually field. It rides the RESUME
-        // message itself — not only the per-turn system prompt — because this
-        // is the message that drives the autonomous loop, and the observed
-        // waste (two same-family reviewers billed as a cross-family pair)
-        // happened on exactly this path, with nobody typing /review.
-        (state.review.verdict !== "READY"
-          ? ((d) => (d ? `\n${d}` : ""))(fanoutDirective())
-          : "") +
         reset,
       { deliverAs: "followUp" },
     );
@@ -5914,14 +5215,8 @@ export default function reviewGate(pi: ExtensionAPI) {
           ctx.ui.notify(`Agent is busy. Retry ${command.usage} when it is idle.`, "warning");
           return;
         }
-        // Any command handler is a chance to warm the authoritative model
-        // facts: before_agent_start (the other injection point) gets no ctx.
-        rememberJudgeFacts((ctx as { modelRegistry?: unknown }).modelRegistry);
-        // /review dispatches the reviewers, so it carries the fan-out decision
-        // as a computed fact rather than a rule the agent may reinterpret.
-        const fanout = name === "review" ? fanoutDirective() : undefined;
         pi.sendUserMessage(
-          buildWorkflowPrompt(name, args ?? "") + (fanout ? `\n\n${fanout}` : ""),
+          buildWorkflowPrompt(name, args ?? ""),
         );
       },
     });
@@ -6335,39 +5630,6 @@ export default function reviewGate(pi: ExtensionAPI) {
       const goalConfirmed = loopGoalConfirmed();
       systemPrompt += "\n\n" + buildLoopGoalDirective(goal, goalConfirmed);
 
-      // Oversized-requirement checkpoints. Both are cheap: the model side was
-      // already computed at set_gate_mode time, the structural side is
-      // counting. The suggestion is prompt-only — it starts nothing, blocks
-      // nothing, and asks the agent to put the choice to the user.
-      if (decomposeSuggestedAt === null && !sessionEdited) {
-        const atLoopGoal = goal.present && goalConfirmed;
-        const requirementText = atLoopGoal ? goal.text : (firstUserInput ?? "");
-        const assessment = assessRequirementSize({
-          // Only an APPROVED goal's criteria count: a draft the user has not
-          // accepted is not yet a contract, and counting it would let the
-          // agent's own draft trigger the suggestion.
-          criteriaCount: atLoopGoal ? countExitCriteria(goal.text) : undefined,
-          touchedDirs: detectTouchedDirs(requirementText, repoTopLevelDirs()),
-          moduleBucket: requirementBucket,
-          classifierUnavailable: requirementClassifierUnavailable,
-        });
-        if (assessment.oversized) {
-          // A suggestion backed by evidence is the one ask this session gets.
-          decomposeSuggestedAt = atLoopGoal ? "loop-goal" : "first-message";
-          systemPrompt += "\n\n" + buildDecomposeSuggestion(assessment, decomposeSuggestedAt);
-        } else if (assessment.degraded && !degradedNoticeShown) {
-          // Classifier down and no structural threshold fired: still say so
-          // once (user requirement — silence and "nothing to report" are
-          // indistinguishable, and the point is that the user decides). But
-          // this notice carries NO evidence, so it must not consume the real
-          // ask: a later approved loop goal with 6 criteria is exactly the
-          // signal the session most needs, and skipping a content-free notice
-          // is not an answer to it.
-          degradedNoticeShown = true;
-          systemPrompt +=
-            "\n\n" + buildDecomposeSuggestion(assessment, atLoopGoal ? "loop-goal" : "first-message");
-        }
-      }
     }
 
     if (!gateArmed && problems.length === 0) {
@@ -6395,9 +5657,9 @@ export default function reviewGate(pi: ExtensionAPI) {
             "before shipping.\n"
           : "") +
         "You are ENCOURAGED to proactively consult the `adviser` subagent (a stronger, " +
-        "independent second opinion, pinned to a top-tier model at xhigh thinking) BEFORE " +
+        "independent second opinion, pinned to a top-tier model at max thinking) BEFORE " +
         "and DURING non-trivial, ambiguous, or risky work \u2014 consulting early is cheaper " +
-        "than a failed review later. The `reviewer` (also a top-tier model at xhigh) is the " +
+        "than a failed review later. The `reviewer` (also a top-tier model at max) is the " +
         "independent gatekeeper that emits the recorded verdict.\n" +
         "Prohibited while gates are unmet (sd0x-dev-flow auto-loop rules): claiming a fix " +
         "is done without re-reviewing; asking for permission to continue the loop; citing " +
@@ -6430,16 +5692,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         // once the gate is satisfied there is nothing to scope.
         (problems.length && state.review.verdict !== "READY"
           ? `\n${formatReviewScopeDirective(reviewScopeFor(primaryRepoRoot, state), previousRoundFindings(state), settledConclusion(state))}\n`
-          : "") +
-        // How many reviewers to spawn, decided from this host's real model
-        // registry. Also on the RESUME message (agent_settled) — deliberately
-        // both, not redundantly: the resume drives the autonomous loop, while
-        // this per-turn prompt is the ONLY carrier on turns the user drives
-        // directly (a paused loop, an exhausted continuation budget, a plain
-        // "go review it" without /review). A reviewer pair is far more
-        // expensive than the ~90 tokens of overlap on a resumed turn.
-        (problems.length && state.review.verdict !== "READY"
-          ? ((d) => (d ? `\n${d}\n` : ""))(fanoutDirective())
           : "") +
         // The fast lane clears a commit but not a push/PR, and finding that
         // out at push time wastes a round. Say it while the lane still shows.

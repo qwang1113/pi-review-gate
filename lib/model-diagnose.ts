@@ -28,7 +28,7 @@ export interface RegistryFacts {
   /**
    * Every model the registry knows: { provider, id }. `thinkingLevelMap` is
    * optional (registry-provided only): level → mapped level, null when the
-   * level is unsupported — lets the slotted fan-out skip a slot whose pinned
+   * level is unsupported — lets the config layer skip a slot whose pinned
    * `:thinking` level the renderer would refuse (round-4 P2).
    */
   models: Array<{
@@ -167,7 +167,7 @@ function candidateOk(
 
 /**
  * Trailing `:thinking` level of a spec, or null. Mirrors `specThinking` in
- * lib/review-fanout.ts and uses the SAME level list (lib/model-config.ts).
+ * lib/model-config.ts and uses the SAME level list there.
  * A spec with NO colon has no suffix: `lastIndexOf(":") + 1` is 0 there, so
  * the old copy read the whole spec as its own suffix and a bare id that
  * happens to be a level word (`max`) was truncated to `ma` by

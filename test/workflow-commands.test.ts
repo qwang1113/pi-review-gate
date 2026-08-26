@@ -23,10 +23,6 @@ const EXPECTED = [
   "load-pr-review",
   "watch-ci",
   "gate-init",
-  "decompose",
-  "plan-next",
-  "plan-status",
-  "plan-verify",
 ];
 
 test("workflow command catalog exposes the high-value sd0x-dev-flow ports", () => {
@@ -63,23 +59,22 @@ test("workflow prompts delimit arguments as untrusted JSON data", () => {
 test("review and precommit aliases use the trusted gate protocol", () => {
   assert.match(buildWorkflowPrompt("review"), /record_review/);
   // Review runs on plain subagents now: the engine discarded a per-agent cwd,
-  // so a shard reviewer could never hold its own snapshot of the change.
+  // so the reviewer could never hold its own snapshot of the change.
   assert.match(buildWorkflowPrompt("review"), /prepare_review/, "prepare_review is the entry point");
   assert.match(buildWorkflowPrompt("review"), /NOT the pdw engine/, "the engine path must be named as gone");
   assert.doesNotMatch(buildWorkflowPrompt("review"), /run_parallel_shard_review/);
-  assert.match(buildWorkflowPrompt("review"), /shards the change/, "large diffs are sharded by the tool");
-  assert.match(buildWorkflowPrompt("review"), /you do NOT invent the split/, "the split is mechanical");
+  assert.match(buildWorkflowPrompt("review"), /one reviewer per round/, "one reviewer, no split");
   assert.match(buildWorkflowPrompt("review"), /AUTONOMOUS PROTOCOL/, "review runs on its own — the command is only an explicit trigger");
   assert.match(buildWorkflowPrompt("precommit"), /run_precommit with mode=full/);
   assert.match(buildWorkflowPrompt("precommit-fast"), /run_precommit with mode=fast/);
 });
 
-test("review prompt runs precommit FIRST and spawns both reviewers in the same turn (protocol fix)", () => {
+test("review prompt runs precommit FIRST and spawns the single reviewer (protocol fix)", () => {
   const prompt = buildWorkflowPrompt("review");
   // The protocol is precommit-first: the review must never be the first one
   // to find a test failure, and a review spent on a red tree is wasted.
   assert.match(prompt, /FIRST run the trusted precommit lane/,
-    "precommit must come before the reviewers");
+    "precommit must come before the reviewer");
   assert.match(prompt, /run_precommit/,
     "the trusted precommit tool must be named");
   assert.ok(
@@ -88,10 +83,13 @@ test("review prompt runs precommit FIRST and spawns both reviewers in the same t
   );
   assert.doesNotMatch(prompt, /Do not run precommit unless the review becomes READY/,
     "the old concurrent-protocol sentence must be gone");
-  // Every reviewer of a round goes out in the SAME turn, small diff or sharded:
-  // serial spawns double the wall time for zero extra signal.
-  assert.match(prompt, /ALL IN THE SAME TURN \(async:true, never one after \s*the other\)/,
-    "the reviewers must be spawned in one turn");
+  // ONE reviewer per round, spawned as its own top-level call with the snapshot cwd.
+  assert.match(prompt, /ONE reviewer subagent/,
+    "exactly one reviewer per round");
+  assert.match(prompt, /OWN top-level subagent call carrying that cwd/,
+    "the reviewer must be a top-level call (per-child cwd)");
+  assert.doesNotMatch(prompt, /ALL IN THE SAME TURN \(async:true, never one after \s*the other\)/,
+    "the two-reviewer serial/parallel framing must be gone");
 });
 
 test("shipping helpers are deterministic dry-run unless extension grants execute", () => {
@@ -113,16 +111,6 @@ test("analysis helpers explicitly avoid mutation by default", () => {
   assert.match(buildWorkflowPrompt("risk-assess"), /analysis-only: do not edit or ship/i);
   assert.match(buildWorkflowPrompt("load-pr-review"), /analysis-only/);
   assert.match(buildWorkflowPrompt("watch-ci"), /Do not push/);
-});
-
-test("plan-next passes modules as a structured ARRAY, not a JSON string (tool contract)", () => {
-  const prompt = buildWorkflowPrompt("plan-next");
-  assert.match(prompt, /structured ARRAY of objects/,
-    "the prompt must describe the structured modules parameter");
-  assert.match(prompt, /NOT a JSON string/,
-    "the old JSON-string encoding must be explicitly ruled out");
-  assert.doesNotMatch(prompt, /the wave as JSON/,
-    "the legacy JSON-string phrasing must be gone");
 });
 
 test("gate-init prompts the one-shot full-configuration wizard", () => {
@@ -186,77 +174,12 @@ test("gate-init prompts the one-shot full-configuration wizard", () => {
   assert.match(prompt, /Do not change any other file/);
 });
 
-test("the orchestration commands keep the single-writer contract", () => {
-  const decompose = buildWorkflowPrompt("decompose", "build the whole thing");
-  assert.match(decompose, /disjoint/, "disjoint ownership is the real split criterion");
-  assert.match(decompose, /acyclic/);
-  assert.match(decompose, /ONCE for edits and approval/, "the table is negotiated once, not per module");
-  assert.match(decompose, /do not dispatch a worker/i);
-  assert.match(decompose, /"build the whole thing"/, "the requirement stays inside the untrusted data block");
-  // Self-contained contract: no repo-local doc dependency — the design doc
-  // lives only in this repository, the extension must work in any repository.
-  assert.doesNotMatch(decompose, /docs\/requirement-orchestration/, "no repo-local doc reference");
-  assert.match(decompose, /SELF-CONTAINED/, "the prompt states its own contract");
-  assert.match(decompose, /lib\/plan-state\.ts/, "the schema authority is the shipped lib");
-  // Agent-initiated entry: the agent may initiate decompose when it detects a
-  // complex task, but only after the user's EXPLICIT consent.
-  assert.match(decompose, /AUTONOMOUS PROTOCOL/, "decompose is agent-initiated by default");
-  assert.match(decompose, /AUTONOMOUS EXECUTION/, "after approval the agent drives waves and verify itself");
-  assert.match(decompose, /INITIATE/, "the agent may initiate decompose itself");
-  assert.match(decompose, /EXPLICIT consent/, "initiating requires the user's consent");
-  assert.match(decompose, /module-count estimate/, "the initiation carries an estimate");
-  assert.match(decompose, /second, separate confirmation/, "table approval is a second gate");
-
-  const next = buildWorkflowPrompt("plan-next");
-  assert.match(next, /exactly ONE WAVE/, "plan-next advances one wave at a time");
-  assert.match(next, /prepare_wave tool/, "the wave is prepared by the subagent-flow tool");
-  assert.match(next, /worker-readonly/, "workers are the static read-only subagent");
-  assert.match(next, /IN THE SAME TURN \(async:true, never one after the other\)/, "workers are spawned concurrently in one turn");
-  assert.match(next, /apply_wave_patches/, "the apply tool validates and persists the patches");
-  assert.match(next, /pre-checks git apply/, "patches are validated before they touch the worktree");
-  assert.match(next, /validates ownership/, "patches must stay inside owned_paths");
-  assert.match(next, /--recount/, "apply must use git apply --recount (LLM hunks miscount their @@ headers)");
-  assert.match(next, /NO further confirmation/, "the approved module table authorizes wave dispatch");
-  assert.doesNotMatch(next, /pdw engine|HARD dep(?:endency)?/, "the engine must not be mentioned as a dependency");
-  assert.doesNotMatch(next, /serial protocol|serial fallback/, "no engine, no serial fallback language");
-  assert.match(next, /engine: \"subagents\"/, "the parallel ledger records the subagents engine");
-  assert.match(next, /never guess a repair/, "malformed state must fail closed");
-  assert.match(next, /must not read the diff/, "the driver's context stays bounded");
-  assert.doesNotMatch(next, /docs\/requirement-orchestration/, "plan-next is self-contained too");
-
-  const status = buildWorkflowPrompt("plan-status");
-  assert.match(status, /Read-only/);
-  assert.match(status, /never re-print past review text/i);
-});
-
-test("plan-verify encodes the two-phase docSync protocol the gate depends on", () => {
-  const verify = buildWorkflowPrompt("plan-verify");
-  assert.match(verify, /run_precommit mode=full ONCE/, "one merged precommit per round");
-  assert.match(verify, /MUST omit docSync/, "shard fences must not carry an attestation");
-  assert.match(verify, /record ITS output ALONE/, "Phase B is recorded alone so its docSync survives merging");
-  assert.match(verify, /single record_review call/, "Phase A shards are recorded together");
-  assert.match(verify, /seam module M-INT-<n>/, "every finding gets exactly one owner");
-  assert.match(verify, /never inline/, "remediation goes back through /plan-next");
-  assert.match(verify, /Above 8/, "the human threshold matches the design");
-  assert.doesNotMatch(verify, /docs\/requirement-orchestration/, "plan-verify is self-contained too");
-  // The integration reviewer is asked to judge the goal criterion by criterion,
-  // so the prompt MUST also say where that goal comes from: no ACCEPTANCE judge
-  // (reviewer / reviewer-readonly / module-reviewer / arbiter) reads
-  // .pi/loop-goal.md itself (an unapproved draft must never become an
-  // acceptance contract), which left this flow with no goal source at all
-  // (round-4 P2). The instruction is the only link.
-  assert.match(verify, /HAND THAT REVIEWER THE GOAL IN ITS TASK TEXT/, "the goal must be handed over explicitly");
-  assert.match(verify, /the USER approved/, "and it must be the APPROVED goal, not the raw file");
-});
-
-test("the review-loop skill keeps the orchestration contract self-contained", () => {
+test("the review-loop skill keeps the single-review contract self-contained", () => {
   const skill = readFileSync(
     join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "skills", "review-loop", "SKILL.md"),
     "utf8",
   );
-  assert.doesNotMatch(skill, /docs\/requirement-orchestration/, "the skill must not depend on the repo-local doc");
-  assert.match(skill, /SELF-CONTAINED/, "the skill states the self-contained contract");
-  assert.match(skill, /lib\/plan-state\.ts/, "the schema authority is the shipped lib");
-  assert.match(skill, /Agent-initiated entry/, "the skill documents the agent-initiated entry");
-  assert.match(skill, /EXPLICIT consent/, "initiating requires the user's consent");
+  assert.doesNotMatch(skill, /docs\/requirement-orchestration/, "the skill must not depend on the retired orchestration doc");
+  assert.doesNotMatch(skill, /lib\/plan-state\.ts/, "the schema authority module is gone in the single-review protocol");
+  assert.doesNotMatch(skill, /prepare_wave|plan-parallel|wave daily|\/decompose/, "no wave/decompose path remains");
 });
