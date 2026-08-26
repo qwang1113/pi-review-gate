@@ -21,7 +21,7 @@
  * per repo (`npx pi-review-gate-install-hooks` or the shipped script). A
  * missing `pi` CLI or a registration failure logs guidance instead of aborting.
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,17 @@ const ROOT = resolve(HERE, "..");
 const AGENT_DIR = join(homedir(), ".pi", "agent");
 const AGENTS_DST = join(AGENT_DIR, "agents");
 const PI_SETTINGS_PATH = join(AGENT_DIR, "settings.json");
+
+// Agent basenames this package USED to ship but no longer does. An upgrade
+// must delete their copies from AGENTS_DST: pi-subagents loads every *.md
+// there, so a retired agent would otherwise keep running after the update.
+const RETIRED_AGENTS = [
+  "module-reviewer.md",
+  "planner.md",
+  "triage.md",
+  "worker.md",
+  "worker-readonly.md",
+];
 
 /**
  * Companion pi packages this extension needs at runtime. Each entry is a
@@ -109,6 +120,23 @@ function installAgents() {
     }
   }
   log(`sub-agents installed (${count} files → ${AGENTS_DST})`);
+
+  // Retired agents shipped by OLDER versions of this package must not linger:
+  // pi-subagents loads every *.md in AGENTS_DST, so a leftover
+  // module-reviewer.md / triage.md would keep running after an upgrade.
+  let removed = 0;
+  for (const f of RETIRED_AGENTS) {
+    const dst = join(AGENTS_DST, f);
+    if (!existsSync(dst)) continue;
+    try {
+      unlinkSync(dst);
+      removed += 1;
+      log(`  removed retired agent ${f}`);
+    } catch (e) {
+      log(`  ✗ could not remove retired agent ${f}: ${e.message}`);
+    }
+  }
+  if (removed) log(`retired agents removed (${removed} → ${AGENTS_DST})`);
 }
 
 function installHooksHere() {

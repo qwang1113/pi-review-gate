@@ -3,7 +3,7 @@
  * MECHANICAL fact instead of a sentence in a prompt.
  *
  * THE BUG THIS EXISTS FOR (measured, in this repo, over several rounds).
- * `prepare_review` materializes one disposable worktree per reviewer and prints
+ * `prepare_review` materializes one disposable worktree for the reviewer and prints
  * each one's `cwd`. Whether a reviewer actually RUNS there was, until now,
  * entirely up to the spawning agent remembering to pass `cwd`. It did not — for
  * an entire session — and the failure was SILENT in the worst possible
@@ -47,15 +47,14 @@
 /**
  * Agents whose spawn MUST be pinned to a snapshot.
  *
- * The judge roles, and only them. An `adviser`, a `recon` or a wave
- * `worker-readonly` reads the live worktree by design — blocking those would
+ * The judge roles, and only them. An `adviser` or a `recon`
+ * reads the live worktree by design — blocking those would
  * cost the parallel exploration the loop depends on and buy nothing, because
  * they never issue a verdict the gate records.
  */
 export const REVIEWER_AGENT_NAMES: readonly string[] = Object.freeze([
   "reviewer",
   "reviewer-readonly",
-  "module-reviewer",
 ]);
 
 /** Tool name that dispatches subagents (pi-subagents registers exactly this). */
@@ -141,7 +140,10 @@ export function isReviewerAgentName(raw: string): boolean {
  * over-matching costs nothing.
  */
 export function reviewerAgentInScript(script: string): string | undefined {
-  const fieldRe = /\bagent\s*:\s*["'`]([^"'`]+)["'`]/g;
+  // Quoted OR bare values: `agent: "reviewer"` and `agent: reviewer` (a bare
+  // identifier — common in generated/short scripts) must both be caught, or a
+  // workflow could dispatch a judge role without the gate ever seeing it.
+  const fieldRe = /\bagent\s*:\s*["'`]?([A-Za-z0-9_.\-/]+)["'`]?/g;
   let m: RegExpExecArray | null;
   let sawField = false;
   while ((m = fieldRe.exec(script)) !== null) {
@@ -158,17 +160,17 @@ export function reviewerAgentInScript(script: string): string | undefined {
 /**
  * Render the snapshot list as copyable spawn calls for a block reason.
  *
- * `agent` is a PARAMETER, not a constant: a block that names `module-reviewer`
+ * `agent` is a PARAMETER, not a constant: a block that names `reviewer-readonly`
  * and then hands back a call spawning `reviewer` would be copied verbatim (that
  * is the point of a copyable shape) and silently dispatch the wrong role — in
- * the decompose module loop, the wrong judge entirely.
+ * the single-review protocol, the wrong judge entirely.
  */
 function spawnShapes(snapshots: readonly PreparedSnapshotRef[], agent: string): string {
   return snapshots
     .map(
       (s) =>
         `  subagent({ agent: "${agent}", async: true, cwd: "${s.dir}", ` +
-        `task: "<the ${s.label} task text from prepare_review>", outputSchema: <SHARD_VERDICT_SCHEMA> })`,
+        `task: "<the ${s.label} task text from prepare_review>", outputSchema: <REVIEW_VERDICT_SCHEMA> })`,
     )
     .join("\n");
 }
@@ -194,9 +196,8 @@ export function decideReviewerSpawn(input: ReviewerSpawnInput): ReviewerSpawnDec
   // NOTE what is deliberately NOT here: an "every snapshot is already booked ⇒
   // let anything through" shortcut. It looked like a kindness (do not strand a
   // retry) and was a hole big enough to drive the original bug back through:
-  // after a sharded round every snapshot is booked, and the INTEGRATION
-  // reviewer that follows would then be free to run in the live worktree with
-  // its READY still accepted — record-time evidence exists for all the shard
+  // after a round every snapshot is booked, and nothing would stop a
+  // later-scheduled judge from running in the live worktree with
   // snapshots, so nothing complains. A retry does not need the shortcut: a
   // spawn that carries a snapshot cwd is allowed below whether that snapshot
   // was booked before or not.
@@ -262,13 +263,11 @@ export function decideReviewerSpawn(input: ReviewerSpawnInput): ReviewerSpawnDec
       (open.length > 0
         ? "Re-issue this call with one of the open snapshots:\n" +
           spawnShapes(open, normalizeAgentName(agent))
-        : // Every snapshot of this round already has a reviewer — which is what
-          // an INTEGRATION review after a sharded round looks like. It needs a
-          // snapshot of its own; re-using one is allowed (same tree) but a
-          // fresh prepare_review is the honest call.
-          "Every snapshot of this round already has a reviewer. If this is the integration review, " +
-          "call prepare_review again for it; otherwise re-use one of this round's snapshots (same " +
-          "tree):\n" + spawnShapes(snapshots, normalizeAgentName(agent))),
+        : // Every snapshot of this round already has a reviewer. Re-using one
+          // is allowed (same tree) but a fresh prepare_review is the honest call.
+          "Every snapshot of this round already has a reviewer. Call prepare_review again for" +
+          " a fresh one, or re-use one of this round's snapshots (same tree):\n" +
+          spawnShapes(snapshots, normalizeAgentName(agent))),
   };
 }
 
@@ -326,9 +325,9 @@ export interface SnapshotUsageResult {
 /**
  * Did every snapshot this round actually get a reviewer?
  *
- * PER SNAPSHOT, not per round: with four shards, one correctly-pinned reviewer
- * must not vouch for the three that were never entered — those files would be
- * unreviewed while the round reported full coverage.
+ * PER SNAPSHOT, not per round: the one reviewer of a round must never vouch
+ * for a snapshot that was never entered — the change would be unreviewed
+ * while the round reported full coverage.
  *
  * Two independent kinds of evidence, either of which suffices:
  *   - the spawn was observed and booked (`consumed`), or

@@ -100,7 +100,7 @@ test("postinstall copies agents/*.md into ~/.pi/agent/agents/", () => {
   assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
 
   const agentsDir = join(home, ".pi", "agent", "agents");
-  for (const f of ["reviewer.md", "adviser.md", "recon.md", "triage.md"]) {
+  for (const f of ["reviewer.md", "reviewer-readonly.md", "adviser.md", "arbiter.md", "fixer.md", "recon.md", "goal-auditor.md"]) {
     assert.ok(existsSync(join(agentsDir, f)), `${f} missing from installed agents dir`);
   }
   // The installed copy must be the SHIPPED version (repo is the source of truth).
@@ -121,6 +121,26 @@ test("postinstall overwrites stale agent copies (repo is the single source of tr
   assert.equal(readFileSync(join(agentsDir, "reviewer.md"), "utf8"),
     readFileSync(join(ROOT, "agents", "reviewer.md"), "utf8"),
     "stale reviewer.md must be overwritten with the shipped version");
+  assert.equal(readFileSync(join(agentsDir, "custom-unmanaged.md"), "utf8"), "keep me",
+    "unmanaged agent files must be left alone");
+});
+
+test("postinstall removes retired agents left by older versions", () => {
+  const home = makeHome();
+  const agentsDir = join(home, ".pi", "agent", "agents");
+  mkdirSync(agentsDir, { recursive: true });
+  // Files an older package version shipped and since retired — an upgrade
+  // must delete them so pi-subagents stops loading the retired roles.
+  for (const f of ["module-reviewer.md", "planner.md", "triage.md", "worker.md", "worker-readonly.md"]) {
+    writeFileSync(join(agentsDir, f), "leftover from an older release");
+  }
+  writeFileSync(join(agentsDir, "custom-unmanaged.md"), "keep me"); // not ours — untouched
+
+  const res = runInstaller(home);
+  assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
+  for (const f of ["module-reviewer.md", "planner.md", "triage.md", "worker.md", "worker-readonly.md"]) {
+    assert.ok(!existsSync(join(agentsDir, f)), `${f} must be removed (retired agent)`);
+  }
   assert.equal(readFileSync(join(agentsDir, "custom-unmanaged.md"), "utf8"), "keep me",
     "unmanaged agent files must be left alone");
 });

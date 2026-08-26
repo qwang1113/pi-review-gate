@@ -9,82 +9,44 @@ Drive changes through the review gate until every gate passes. The gate is
 enforced by the pi-review-gate extension: `git commit`, `git push`, and
 `gh pr create` are hard-blocked until the loop completes.
 
-## Three independent judges, on a stronger model than you
+## One independent judge, on a stronger model than you
 
 Good judgement comes from a *stronger, independent* brain than the one that
-wrote the code. All three roles are pinned to a top-tier reasoning model at `max`
-thinking, with a fallback priority list (first available wins):
+wrote the code. The single review role is pinned to a top-tier reasoning model
+at `max` thinking, with a fallback priority list (first available wins):
 
 - **`adviser`** (`agents/adviser.md`, consultant, *before/during* work) —
   you should **proactively consult** it whenever a decision is non-trivial,
   ambiguous, risky, or you feel stuck. It does not gate; it advises on
   direction. Consulting early is cheaper than a failed review later.
-  Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
-  chains in agents/*.md).
+  Model priority: Fable 5 → Opus 5 → deepseek-v4-flash.
 - **`reviewer`** (`agents/reviewer.md`, gatekeeper, *after* a diff exists) —
   independent audit that emits the JSON verdict the gate records.
-  Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
-  chains in agents/*.md).
-- **`goal-auditor`** (`agents/goal-auditor.md`, gatekeeper, *before the user
-  sees a goal*) — audits the DRAFT exit contract; the gate records ITS verdict
-  via `record_goal_prereview`, and `propose_loop_goal` shows no dialog without
-  a matching PASS. Read-only tools.
-  Model priority: Fable 5 → Opus 5 → opencode-go/flash (see the pinned
-  chains in agents/*.md).
+  Model priority: Fable 5 → Opus 5 → deepseek-v4-flash.
 
-`thinking: max` in the built-in agent frontmatter is the default-chain
-setting. When model-chain configuration is enabled, each configured slot may
-carry its own `:thinking` suffix; the renderer validates and preserves
-those suffixes per slot. The default-chain value is not a fallback list.
+Thinking is a single value (`max`, the highest valid pi level); it is not a
+fallback list. If a model doesn't support `max`, pi clamps it down.
 
-**Default two-reviewer final pass (cross-family).** The review that ends a
-round runs **two reviewers by default**, from **different model families**:
-`claude-fable-5` (anthropic) as reviewer A and the best available
-different-family model as reviewer B (e.g. `onekey/gpt-5.6-sol` once onekey
-is configured; without a second family, a single reviewer is the accepted
-fallback — declared in a Note), both at `max` thinking — so the two audits
-do not share the main agent's blind spots. If a model is unavailable, fall
-down the pinned chains (see the tables above), keeping the two families
-distinct. Record BOTH
-full
-outputs via `record_review` (worst verdict wins; the gate's fail-closed
-semantics are unchanged). Pick the second reviewer with `rankJudges` from
-`lib/model-ranking.ts` when a choice exists; a single reviewer is the
-acceptable fallback only when a different-family model is genuinely
-unavailable, and that fact goes in a Note.
+**Single-reviewer round.** Each review round is ONE reviewer over the WHOLE
+change — no second reviewer, no split, no different-family audit. One
+snapshot, one verdict, one `record_review` call. This is by design (user
+decision 2026-08-26): parallel/multi-judge patterns were removed
+because they multiplied cost without adding an independent signal that a single
+strong reviewer does not already provide.
 
-**Never spawn two reviewers of the SAME family.** The count is not yours to
-guess: the gate computes it from this host's real model registry
-(`planFanoutFromFacts`, `lib/review-fanout.ts`) and injects the decision into
-both the `/review` prompt and the auto-continuation resume text — two
-judge-eligible families ⇒ spawn two, one per family; one family ⇒ spawn ONE
-and copy the plan's note into the recorded review. A second same-family
-reviewer doubles the cost while sharing the first one's blind spots, and
-calling that a cross-family double review would be false. Scope: this governs
-the reviewers YOU spawn for a small diff plus the integration reviewer; for a
-large diff the shard count comes from `prepare_review`'s plan
-(`planReviewShards`), not from this rule.
-
-Why these models? `lib/model-ranking.ts` scores model families from public
-capability leaderboards (Artificial Analysis Intelligence Index, LMArena Elo,
-LiveBench) and can rank candidates by capability, optionally rewarding
-cross-family diversity so a judge doesn't share the main agent's blind spots.
-It is a **reference for choosing the pinned models**, not a runtime selector —
-the chains above are the built-in defaults in the agent definitions, and the
-`agents` config layer (see the **Model tiers** section) can
-override them per agent. Refresh the underlying
-scores with `node scripts/fetch-leaderboard.mjs` (opt-in, network).
+The pinned chains above are the single source of truth for model selection (agent
+frontmatter in `agents/*.md`); refresh decisions for those pins are a human
+choice, not a runtime selector.
 
 ## The loop goal — the exit contract
 
 The gates say the code is *sound*; they say nothing about whether the user's
 goal was *met*. The loop goal closes that hole: one short file, written before
 the work starts, listing the checkable facts that mean **done**. The same file
-then drives every role — `goal-auditor` audits the DRAFT before the user ever
-sees it, you slice the work against the approved text, `adviser` advises
-against it, and `reviewer` accepts against it.
+then drives both roles — you slice work against it, `adviser` advises
+against it, `reviewer` accepts against it.
 
-**Negotiated, not assumed (L8)**: you do NOT write this file. Grill the user
+**Negotiated, not assumed**: you do NOT write this file. Grill the user
 first — unless they asked for them all at once, ask ONE question per turn,
 labeled "N of M", give your own recommended answer, wait for the reply, repeat
 until nothing is silently assumed — then call **`propose_loop_goal`** with what they
@@ -94,49 +56,6 @@ unapproved goal **blocks commit/push/PR** and its body is withheld from your
 prompt (a leftover goal from a previous task is exactly what that prevents).
 Editing the file afterwards drops the approval — renegotiate and re-submit.
 
-**Pre-review the draft goal — the extension ENFORCES this.** Before the user is
-asked to approve anything, the draft goes through the dedicated
-**`goal-auditor`** subagent, and its verdict is recorded mechanically:
-
-1. Write the goal in **Simplified Chinese** (technical identifiers, tool names,
-   paths and code tokens stay English).
-2. Dispatch `goal-auditor` with the exact draft pasted into its task. It
-   critiques: (a) is every criterion checkable by a command or concrete
-   observation, (b) is the scope sized to the change, (c) do non-goals actually
-   fence off the edges, (d) does it match what the user asked, plus the
-   language rule.
-3. Hand its **full raw output** to `record_goal_prereview` together with the
-   draft. The EXTENSION parses the auditor's JSON fence (PASS ⇔ a `READY`
-   verdict, i.e. no unresolved P0/P1) and hashes the text itself — you cannot
-   attest the outcome, and an output with no parseable fence records nothing.
-4. `propose_loop_goal` refuses — without showing the user any dialog — unless
-   that PASS is bound to the identical text. A FAIL, or any edit to the draft,
-   means: fix and re-audit.
-
-The `reviewer` remains the second layer: it WILL flag a goal whose criteria
-cannot be judged objectively (P2) and an uncheckable criterion that made the
-work go astray (P1).
-
-**Every re-review carries the previous round's conclusion.** A re-review that
-starts from zero pays full price for questions that were already answered, so
-hand the reviewer what is already settled and let it spend its budget on what
-changed:
-
-- **Goal re-audit (goal-auditor).** When you revise a draft after BLOCKED
-  objections, the second audit gets three things: the previous draft,
-  the auditor's own objection list, and what you changed for each one. Ask it
-  to verify exactly that — is each objection resolved, and does the new wording
-  introduce a side effect — not to re-derive the whole goal.
-- **Round N+1 (reviewer).** Hand over the previous round's verdict and its
-  findings. The gate already injects this as the `Review scope for this round`
-  block: what a previous READY verdict settled, what is new since, and which
-  findings must be re-checked one by one. Pass that block through to the
-  reviewer verbatim.
-- **What "settled" buys**: settled-and-unchanged material gets a consistency
-  scan, not a re-derivation. It never narrows what the reviewer MAY look at,
-  never weakens its authority, and it may always reopen a settled conclusion
-  when it has evidence the conclusion was wrong.
-
 **Where**: `.pi/loop-goal.md`. That path sits inside the gate-owned `.pi/`
 scope (`GATE_EXCLUDE_PATHSPECS` / `isGateOwnedPath`, `lib/fingerprint.ts`),
 which both halves of the gate honour: it is excluded from the fingerprint and
@@ -144,9 +63,7 @@ skipped by edit tracking. Writing or rewriting the goal therefore never changes
 the worktree digest, never arms the doc gate, and can never invalidate a READY
 review or a precommit PASS.
 
-**How to produce it** — interview the user, draft in Simplified Chinese, get
-the draft through the `goal-auditor` audit (`record_goal_prereview`), then
-submit it with
+**How to produce it** — interview the user, then submit it with
 `propose_loop_goal`; sized to the change, a one-line bugfix deserves one
 criterion and three lines:
 
@@ -161,6 +78,15 @@ criterion and three lines:
   observable facts prove this task is done, (2) how each one is verified (a
   command or a concrete observation), (3) what is explicitly out of scope.
 
+**Pre-review the draft goal (MECHANICAL, goal-auditor).** Before you
+submit a goal for approval, run the draft through the dedicated `goal-auditor`
+subagent (read-only; see `agents/goal-auditor.md`), then record its FULL raw
+output with `record_goal_prereview`. The extension parses the auditor's JSON
+fence itself and `propose_loop_goal` REFUSES to show the user's approval dialog
+unless a PASS is recorded for the IDENTICAL text (bound by content hash). A
+FAIL means fix the objections and re-audit the revised text — it needs its own
+PASS. The goal text must be written in **Simplified Chinese**; identifiers,
+paths and code tokens stay English.
 **Shape**: task title · one-line intent · 3–7 checkable exit criteria ·
 non-goals · ISO date. A criterion must be judgeable by a command or a concrete
 observation — "code quality is good" is not a criterion, "`node --test` passes
@@ -168,14 +94,12 @@ and `lib/x.ts` no longer reads the sidecar" is.
 
 **Staleness**: a goal file older than 24h may be left over from a previous
 session. The gate flags it in the prompt; confirm it against what the user is
-asking for now, and renegotiate it (grill → `goal-auditor` audit →
-`record_goal_prereview` → `propose_loop_goal`) if it no
-longer matches.
+asking for now, and renegotiate it (grill → `goal-auditor` re-audit →
+`record_goal_prereview` → `propose_loop_goal`) if it no longer matches — the
+audit binds to the revised text, so any edit needs a fresh PASS.
 
 **Slicing the work to subagents**: turn each criterion (or vertical slice) into
-a subagent task and paste the goal TEXT into every subagent you spawn — an
-acceptance judge never reads `.pi/loop-goal.md` itself (a snapshot carries no
-`.pi/`, and only a goal the user approved may become a contract).
+a subagent task and hand the goal text to every subagent you spawn.
 
 ### Parallel exploration — read-only subagents run concurrently
 
@@ -209,54 +133,53 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 ## Protocol
 
 0. **Goal first (loop mode)** — establish `.pi/loop-goal.md` as described above
-   before you start editing, then work to it. Paste the goal TEXT into every
-   subagent task — `adviser` and `reviewer` included.
+   before you start editing, then work to it. Hand the goal text to every
+   subagent, to `adviser`, and to `reviewer` (as TEXT in the spawn task, never
+   as a file path: a snapshot carries no `.pi/`).
 
-0b. **Autonomous protocol (no command needed)** — you drive both loops
+0b. **Autonomous protocol (no command needed)** — you drive the loop
     yourself; the slash commands are only explicit triggers, never the
     expected entry:
     - **Review**: whenever your edits are complete and the change needs the
       gate, start the review loop on your own (step 2/3 below) — do not wait
-      for the user to type `/review`. `prepare_review` shards a large diff for
-      you; the shard plan needs no user confirmation.
-    - **Decompose**: whenever you detect a complex task (too big for one
-      session, scope growing mid-task), propose it yourself with evidence and
-      a module estimate (step 0 of the module-loop section) and wait for the
-      user's consent — do not wait for `/decompose`. Once the module table is
-      approved, drive the whole plan yourself: `/plan-next` waves and
-      `/plan-verify` rounds run back-to-back until accepted or a human
-      decision is required.
+      for the user to type `/review`. ONE reviewer per round; no split plan
+      needs user confirmation (there is no plan).
 
 1. **Consult (recommended, not gated)** — before or during non-trivial work,
    ask the `adviser` subagent about the design, tradeoffs, and risks. Feed it
    the real question, not your preferred answer. Fold its input in before you
    commit to an approach. Skip only for trivial, low-risk changes.
 
-2. **Precommit first, review second** — with the edits finished, run the
-   trusted precommit BEFORE spending the expensive judge's time:
+2. **One round — precommit first, then the single review** — everything runs on plain subagents (no engine is involved anywhere) with the edits finished:
 
-   - Call **`run_precommit`** first. The runner schedules itself (no flags):
-     any `lint:fix` script runs FIRST and alone (it edits files, so nothing
-     may read the worktree before it finishes), then lint/typecheck/build/
-     test run in parallel with declaration-order output. Steps whose inputs
-     have not changed reuse their previous PASS and report `cached`.
-   - **Pick the lane.** The default `fast` lane runs lint + typecheck + build
-     + only the tests RELATED to the changed files — seconds instead of
-     minutes, and enough to clear a `git commit`. Use `mode: "full"` for the
-     LAST round before you ship: `git push`, `gh pr create/edit` and
-     `declare_done` all require a run whose tests were not narrowed, and the
-     gate will say so if you try. Running every intermediate round in `full`
-     just pays for the whole suite on every typo fix.
-   - **Why precommit first, not concurrent**: precommit is cheap (seconds to
-     a couple of minutes) and catches the cheap defect class the reviewer
-     would otherwise spend minutes finding; the review is EXPENSIVE (two
-     top-tier judges at max thinking). A FAIL is cheaper to fix before the
-     expensive judge looks — the reviewer must never be the first one to
-     find a test failure, and a review spent on a red tree is pure waste.
-     (An earlier design ran both concurrently to save wall time; it was
-     abandoned because a precommit FAIL made the concurrent review a wasted
-     round — the expensive half of the loop was paid for a tree that could
-     not ship.)
+   - FIRST run the trusted precommit lane — `run_precommit` (fast for an
+     intermediate round, full for the final round before shipping) — and
+     confirm it PASSES before spending the expensive judge's time: a FAIL is
+     cheaper to fix before the review, and the reviewer must never be the
+     first one to find a test failure.
+   - Then call `prepare_review`: it materializes ONE disposable WRITABLE
+     snapshot of the change and returns the reviewer's snapshot cwd,
+     finding-stream path, file list and ready-made task text — one reviewer per round.
+   - Spawn ONE reviewer subagent as its OWN top-level `subagent` call carrying
+     that `cwd`. The gate BLOCKS a reviewer spawn that names no snapshot, and
+     blocks reviewers dispatched through `workflowScript`/`workflowScriptPath`
+     entirely (that sandbox has no per-child cwd, so every reviewer would land
+     in one shared directory — your live worktree).
+   - Feed the reviewer's FULL raw output to `record_review` in ONE call — it
+     is the only verdict of this round. Worst-verdict semantics still apply if
+     multiple fences appear (the parser keeps the worst), and an absent
+     `docSync` means the round is incomplete (fails closed).
+
+   **Why this is safe**: the verdict binds to the worktree fingerprint either
+   way — the worst a race can do is discard a verdict, never ship unverified
+   work. If a repo's checks write files (snapshots, build artifacts) while the
+   reviewer reads, the fingerprint moves and the round repeats: a wasted
+   round, accepted and documented in `docs/parallel-execution-plan.md`.
+
+   Precommit still matters for two measured reasons: tests catch the cheap
+   defect class the reviewer would otherwise spend minutes finding (a test
+   failure is far cheaper to fix than a BLOCKED verdict), and a FAIL is
+   cheaper to fix before the expensive judge looks.
 
    FAIL / `NO CHECKS RUN` ⇒ fix and re-run; only then continue to the review.
    `NO CHECKS RUN` is NOT a pass — tell the user real checks are missing.
@@ -266,117 +189,38 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
-   **Waiting-window discipline**: while the reviewer runs (~3 min) and while
-   Copilot waits (up to 20 min), do useful parallel work — first of all its
-   OWN streamed findings (below), then other repos' loops, PR description
-   drafts, `[NIT_DEFERRED]` bookkeeping, a triage sweep. Never idle-poll a
-   running subagent.
+   **Waiting-window discipline**: while the reviewer runs, do useful parallel
+   work — other repos' loops, PR description drafts, `[NIT_DEFERRED]`
+   bookkeeping. Never idle-poll a running subagent. Because the reviewer holds
+   a frozen copy, KEEP FIXING the real worktree while it runs: between waits,
+   read the stream and fix streamed P0/P1/P2 that carry evidence (confirm each
+   in the code first), leaving Nits for the verdict. Cadence:
+   `subagent_wait` with a ~60s timeout → read the stream → fix → wait again;
+   never poll in a tight loop.
 
-3a. **Prepare isolation + streaming** — call `prepare_review` with one label
-   per reviewer you are about to spawn (use the fan-out plan's count). It
-   materializes a DISPOSABLE snapshot worktree per reviewer — holding exactly
-   the change under review — and returns each one's `cwd` and finding-stream
-   path. Spawn each reviewer as its OWN top-level `subagent` call carrying that
-   `cwd`, and paste its stream directive into the task.
-
-   **The `cwd` is enforced, not advised.** While snapshots are open the gate
-   blocks any `reviewer` / `reviewer-readonly` / `module-reviewer` spawn that is
-   not pointed at one of them, and it blocks dispatching reviewers through
-   `workflowScript`/`workflowScriptPath` entirely — that sandbox's
-   `runs.run(key, { agent, task, worktree?, gate? })` has NO per-child `cwd`, so
-   every reviewer would share one directory. Spawn N separate top-level calls in
-   ONE turn; they run just as parallel. This is not hypothetical: a whole
-   session of reviews once ran in the live worktree because the `cwd` was left
-   off, and an untouched snapshot verifies as "clean", so nothing complained.
-   `record_review` now also requires evidence that each snapshot was entered —
-   the spawn the gate observed, or the `cwd` the reviewer reports in its verdict
-   (from its own `pwd`) — and withholds a READY for any snapshot with neither
-   (`SNAPSHOT UNUSED`).
-
-   Why it exists: a reviewer here verifies by DOING (it mutates code to prove
-   a test really fails), and it used to do that in your worktree — fighting
-   you, the other reviewer, and the fingerprint. In its own copy it can verify
-   as hard as it likes, and you can keep working.
-
-   What it buys you: **fix the streamed findings while the review is still
-   running.** Read each stream file between waits (`subagent_wait` with a
-   ~60s timeout → read → fix → wait again; never a tight poll). Act on
-   P0/P1/P2 that carry evidence — confirm each one in the code yourself first
-   — and leave Nits for the verdict. Fixing mid-review moves the worktree, and
-   the gate ENFORCES the consequence: it compares the tree the reviewers
-   actually read with the tree at record time, so a READY that no longer covers
-   your worktree is recorded as BLOCKED (`STALE TREE`). That is the normal,
-   fail-closed outcome — and the next round is short, because you have already
-   done its fix work.
-
-   Stream lines are EVIDENCE, never a decision: a line carrying a verdict key
-   is rejected, and only the reviewer's final output goes to `record_review`.
-   `record_review` re-derives each snapshot's tree: a reviewer that left its
-   mutation in place has its READY downgraded to BLOCKED (its findings still
-   count), so re-run that one in a fresh snapshot.
-
-   If `prepare_review` reports isolation UNAVAILABLE, the reviewers would be
-   reading YOUR live worktree, so fall back to the old rules for that round:
-   **dispatch `reviewer-readonly` instead of `reviewer`** (its `tools:` allowlist
-   has no edit/write, so it physically cannot touch the worktree — that is the
-   mechanical half; choosing it is yours to honor, because pi-subagents has no
-   per-call tool denylist), and do NOT apply fixes until the verdict is
-   recorded. If it reports a PARTIAL failure (some shards got no snapshot) it
-   refuses the whole plan on purpose — retry rather than review a subset.
-
-3. **Review** — spawn an independent reviewer over the current diff
-   (`git diff HEAD` + untracked files). **By default spawn TWO reviewers from
-   different model families** (see "Default two-reviewer final pass" above);
-   run them in parallel and record both via `record_review` (worst wins). The
-   reviewer must NOT be fed your own conclusions (fresh eyes only) and must
-   end its output with a fenced JSON
+3. **Review** — the reviewer runs over the current diff (`git diff HEAD` +
+   untracked files) inside its snapshot. The reviewer must NOT be fed your own
+   conclusions (fresh eyes only) and must end its output with a fenced JSON
    verdict:
 
-   **Tiered trigger (small diff fast, large diff parallel)** — you do NOT decide
-   this: `prepare_review` does, from the diff size
-   (`shouldShardReview(fileCount, lineCount)`):
-
-   - **Small diff** (< 20 files AND < 500 changed lines): the labels you pass
-     are the reviewers — TWO cross-family ones by default (see the fan-out
-     rule), each over the full change, each attesting `docSync` itself. **Spawn
-     them in the SAME turn with `async: true`** — never one after the other:
-     serial spawns double the review wall time for zero additional signal.
-   - **Large diff** (≥ 20 files OR ≥ 500 changed lines): `prepare_review` shards
-     it for you with `planReviewShards` (≤ 4 disjoint groups covering every
-     changed file) and returns each shard's snapshot cwd, stream path, file list
-     and ready-made task text. Spawn one reviewer per shard as separate
-     top-level calls in the same turn, each with its own `cwd` (the gate blocks
-     any other shape); merge every shard output into ONE
-     `record_review` call; then run ONE integration review over the whole change
-     that carries the `docSync` attestation.
-
-   No engine is involved anywhere — the pdw engine is retired
-   (`docs/handoff-remove-pdw.md`); wave workers (`worker-readonly`) and the
-   decompose module loop run on plain subagents too.
-
-   The thresholds are exported constants (`SHARD_THRESHOLD_FILES` /
-   `SHARD_THRESHOLD_LINES` in `lib/parallel-review.ts`) — never invent your
-   own split rule.
-
-   **Triage first (L1, large diffs)**: for anything but a tiny diff, spawn
-   the `triage` agent (async, cheap: `claude-haiku-4-5` →
-   `opencode-go/deepseek-v4-flash`) over the same diff and hand its findings to the
-   reviewer as input. Triage output carries NO verdict — never feed it to
-   `record_review`; the reviewer owns the verdict.
-
    ```json
-   {"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
+   {"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "cwd": "<its real pwd>", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
    ```
 
    Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix,
    Nit = optional. Any P0/P1 open ⇒ gate BLOCKED.
 
-   Paste the loop goal TEXT into the reviewer's task (`prepare_review` hands you
-   the approved goal text — for a sharded run it already sits inside each
-   shard's ready-made task) and require
-   criterion-by-criterion acceptance: each exit criterion marked MET / NOT_MET
-   with evidence, an unmet criterion raised as a P1 finding. A missing goal is
-   not a blocker — the reviewer then judges the diff against the task intent.
+   Every re-review carries the previous round's conclusion: the gate injects
+   a 'Review scope for this round' block (the prior verdict and findings, what
+   is new since). Settled-and-unchanged material gets a consistency scan, not
+   a re-derivation — it never narrows what a reviewer may look at, and a
+   settled conclusion may always be reopened with evidence.
+
+   Give the reviewer the loop goal TEXT (the file path is unreadable inside a
+   snapshot) and require criterion-by-criterion acceptance: each exit criterion
+   marked MET / NOT_MET with evidence, an unmet criterion raised as a P1
+   finding. A missing goal is not a blocker — the reviewer then judges the
+   diff against the task intent.
 
    **Hand over your "impossible" list.** Anything you gave up on, worked
    around, or declared infeasible this round — a skipped/removed test, a
@@ -397,7 +241,11 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
 4. **Record** — call the `record_review` tool with the reviewer's FULL raw
    output (the gate parses every fence; the worst verdict wins — never
-   summarize or trim it).
+   summarize or trim it). The same call checks the snapshot: it re-derives the
+   snapshot's tree, downgrades a READY from a reviewer that left its own edits
+   behind, and withholds a READY for any snapshot with no evidence it was
+   entered at all (SNAPSHOT UNUSED — the spawn the gate observed, or the `pwd`
+   the reviewer reports in its verdict).
 
 5. **Fix** — if BLOCKED: fix ALL findings (P0-P2; Nits at your judgment),
    then go to step 2 again (fixing edits files, so precommit must run again
@@ -409,7 +257,7 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    [NIT_DEFERRED] file:line | issue | reason: <why> | <ISO date>
    ```
 
-6. **Copilot review (L7, once a PR exists)** — a successful `gh pr create`,
+6. **Copilot review (once a PR exists)** — a successful `gh pr create`,
    `gh pr edit` or `git push` opens a Copilot review cycle for that repo. Call
    **`request_copilot_review`**, then **`check_copilot_review`** (the extension
    runs `gh` itself — you cannot report this outcome). AWAITING ⇒ do something
@@ -432,14 +280,6 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    must be bound to the SAME (current) fingerprint; if anything edited the
    worktree since, run the affected step again.
 
-   **The fingerprint is content-addressed and staging-invariant.** `git add`,
-   `git commit` and any branch switch that does NOT rewrite working-tree files
-   leave it untouched, so a READY review and a precommit PASS survive all
-   three: never re-run a review to "rebuild the binding" after staging or
-   committing — that is a wasted round at top-tier model prices. Only a change
-   to the WORKING TREE's file contents invalidates it (an edit, a lint:fix run,
-   or a checkout that does rewrite files).
-
    It also rejects while a Copilot cycle is still open or the loop goal is
    unapproved — those are completion requirements, not ship requirements.
 
@@ -451,53 +291,19 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
 Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
 
-- **L1 cheap/fast** (`triage`, `recon`, `claude-haiku-4-5` →
-  `opencode-go/deepseek-v4-flash`, **thinking `low`/off**) — mechanical pre-scan, code/doc
-  search, heavy reading. Advisory only; carries no verdict. The main agent
-  delegates heavy reading to `recon` so expensive models never pay token cost
-  for scanning.
-- **L2 execution** (`worker` / `planner` / `fixer`, `claude-sonnet-5` →
-  `claude-opus-5` → `opencode-go/deepseek-v4-flash`, **thinking `max`**) — implements findings / modules into a
-  diff; you review and merge it (single writer stays with you).
-  (Chains are short because pi-subagents requires every fallback to resolve;
-  a user who configures deepseek / oc-sdk-go / onekey can extend them in
-  `~/.pi/agent/agents/*.md`.)
-- **L3 judgment** (reviewer / adviser / module-reviewer / arbiter /
-  goal-auditor, `max` thinking) — the only tier whose verdicts may be
-  recorded. `goal-auditor` belongs here because the gate records ITS verdict
-  too (`record_goal_prereview`). Never delegate a verdict to a cheaper model.
-- **Low-risk exception**: a change that is purely docs / formatting /
-  one-line may be reviewed by an L1 agent whose verdict IS recorded.
-  Judging "low-risk" is yours; a misjudged call is a P1 finding for the L3
-  reviewer.
-- **Split review = tiered by diff size**, and it runs on plain subagents:
-  `prepare_review` splits ≥20-file or ≥500-line diffs with `planReviewShards`
-  into ≤4 disjoint groups covering every changed file, hands each shard its own
-  writable snapshot + stream, and you spawn one subagent per shard in ONE turn
-  (shard fences WITHOUT docSync) → record ALL shard outputs in ONE
-  `record_review` → then ONE integration reviewer recorded alone (it carries the
-  docSync attestation). Small diffs (<20 files AND <500 lines) run the default
-  TWO cross-family reviewers over the whole change — see the Tiered trigger in
-  step 3. Worst wins. No user confirmation is needed for the shard plan.
-  No engine is involved anywhere (the pdw engine is retired —
-  `docs/handoff-remove-pdw.md`).
-
-**The reviewer models are configurable — honor the slot-driven double review.**
-The double-review pair is computed by the gate from the host registry
-(`planFanoutFromFacts`) UNLESS the `agents.reviewer` config (project
-`.pi/review-gate.json` over `~/.pi/review-gate.json`) has its `auto` switch
-OFF — then the pair is the first two usable **slots** the user pinned,
-skipping same-family duplicates so the two reviewers still come from
-different model families (`planSlottedReviewFanout`, whose source line is
-injected in the fan-out directive). With `auto` OFF and an EMPTY slot list the gate falls back to the
-capability-ranked default path — an empty slot list is never a silent
-no-review state. Never second-guess the injected pair; it is a fact the gate
-computed.
-Model chains live in the `agents` section of those config files and
-are rendered (with per-model `:thinking` suffixes) into `.pi/agents/*.md`
-(project) and `~/.pi/agent/agents/*.md` (global) by the extension at session
-start — so agent frontmatter can change under you; trust the directive, not
-a memorized pin.
+- **L1 cheap/fast** (`recon`, `claude-haiku-4-5` →
+  `opencode-go/deepseek-v4-flash`, **thinking `low`/off**) — mechanical
+  code/doc search, heavy reading. Advisory only; carries no verdict. The main
+  agent delegates heavy reading to `recon` so expensive models never pay token
+  cost for scanning.
+- **L2 execution** (`fixer`, `claude-sonnet-5` →
+  `claude-opus-5` → `opencode-go/deepseek-v4-flash`, **thinking `max`**) —
+  implements findings into a diff; you review and merge it (single writer
+  stays with you).
+- **L3 judgment** (reviewer / adviser / arbiter / goal-auditor, `max` thinking) — the only
+  tier whose verdicts may be recorded. Never delegate the verdict to a
+  cheaper model.
+- No split review of any kind: one reviewer, one snapshot, one verdict.
 
 ## Working across several repos
 
@@ -507,20 +313,14 @@ ship gate checks the repo the command actually runs in.
 
 So once a session has edited more than one repo, `record_review` and
 `run_precommit` **require** an explicit `"repo": "<absolute path>"` — they
-refuse to guess. **Run the loops concurrently — each repo precommit-first**:
-repos share no state (own sidecar, own fingerprint, own verdict), so for
-EACH repo run its precommit to a PASS first, then spawn its reviewer; the
-two repos' loops may interleave (A's precommit while B's reviewer runs is
-fine — that is parallelism ACROSS repos, never a review and a precommit of
-the SAME repo overlapping). Record each verdict against its own repo, and
-ship each repo when its own gates pass. Only the final `declare_done` needs
+refuse to guess. **Run the loops per repo, precommit-first per repo**: repos
+share no state (own sidecar, own fingerprint, own verdict), so repo A's
+precommit and repo B's reviewer may interleave, but each repo's OWN
+precommit must finish before its reviewer is prepared (an edit from the
+lint:fix step invalidates that repo's review binding — reviewing first
+throws the review away). Record each verdict against its own repo, and ship
+each repo when its own gates pass. Only the final `declare_done` needs
 every repo green.
-
-Without that argument the tools used to fall back to the repo you edited LAST,
-and only an edit could move that target. Real consequence: a session that
-edited B last kept recording READY for B while trying to commit A, and A
-reported `code review gate is PENDING` after every single round — an
-unbreakable loop that looks exactly like the gate resetting itself.
 
 If a block message says a READY is recorded on a different repo than the one
 you are shipping, that is this mistake: re-review the blocked repo and record
@@ -541,196 +341,21 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
 
 - **Batch the work.** Finish a coherent unit before triggering review. Ten
   one-line fixes reviewed separately cost ten rounds; reviewed together, one.
-- **Pre-triage cheaply.** For a large diff, a fast cheap model can catch the
-  obvious problems first. A triage pass is *not* a review: it produces no
-  verdict and must never be fed to `record_review`.
 - **Keep re-reviews focused.** For a small fix-up round, give the reviewer the
   previous findings, the fix diff, and the affected files in full — rather
   than re-reading the whole tree. Use a full review for structural changes;
   the verdict still binds to the complete worktree fingerprint either way.
   This trades review breadth for latency — do not use it to hide a change.
 
-## Wave daily — parallel editing for everyday tasks
-
-Wave workers are **not just for decompose**. The patch-first protocol described
-below works for ANY task that can be split into independent sub-tasks with
-disjoint file ownership. The protocol is the same; the only difference is that
-decompose has a formal module table and plan state, while a daily wave is
-ad-hoc — you define the modules, dispatch them, and apply their patches.
-
-### When to wave vs when to serialize
-
-| Condition | Decision |
-|---|---|
-| Task fits in one session, no module split needed | **Serialize.** One writer, one pass. |
-| Task has 2–4 independent sub-tasks, each scoped to disjoint files | **Wave.** Patch-first workers in parallel. |
-| Sub-tasks share files or have ordering dependencies | **Serialize.** Wave requires disjoint owned_paths and a DAG. |
-| Task is a single large change with no natural split | **Serialize.** A wave with one module is just overhead. |
-| Task is too large for one session (>5 modules or unknown scope) | **Decompose.** Formal module table, plan state, verify rounds. |
-
-### Wave daily trigger
-
-When you detect a task that can be split into 2–4 independent sub-tasks, each
-with clearly disjoint file ownership:
-
-1. **Define the modules.** Each module needs: an id, a one-line title, its
-   `owned_paths` (disjoint from other modules), and its task description.
-   Modules with no dependencies all run in the same wave.
-2. **Dispatch the wave.** Call `prepare_wave` with the module list, then spawn
-   ONE `worker-readonly` subagent per module IN THE SAME TURN (async), each
-   with its ready-made task and `WAVE_WORKER_SCHEMA` as outputSchema. All
-   workers run in parallel (strictly read-only — no edit/write/bash in their
-   allowlist); each returns unified git diffs for its owned paths.
-3. **Validate and apply.** For each worker's patches: `validatePatchOwnership`
-   (declared path ∪ diff headers ⊆ owned_paths), `git apply --check`, then
-   `git apply`. A patch that fails is sent back to its worker for one retry —
-   never silently edited.
-4. **Record.** The worktree still has exactly one writer: you. After all
-   patches apply, the worktree is ready for precommit and review.
-
-### Patch-first protocol (daily wave)
-
-> This is the SAME protocol as the decompose wave — the workers and the
-> patch-first mechanics are identical.
-> The only difference is that daily waves have no formal plan state or
-> verify rounds; the main agent defines the modules ad-hoc.
-
-- **Workers are READ-ONLY.** Their `tools:` allowlist has no
-  edit/write/bash (`agents/worker-readonly.md` — enforced at launch, since
-  pi-subagents has no per-call tool denylist). Each worker reads its owned
-  paths and produces unified git diffs.
-- **≤4 modules per wave.** `computeWave` caps the wave at 4; a 5th module
-  waits for the next wave.
-- **Patch-first.** Workers produce diffs; the main agent validates and applies
-  them. No worker ever writes to the worktree directly.
-- **Ownership is mechanically binding.** `validatePatchOwnership` checks both
-  the declared `path` field AND the diff's own `+++ b/...` / `--- a/...`
-  headers against the module's `owned_paths`. A patch that escapes ownership
-  is rejected — the main agent must not apply it.
-- **No cross-patch rollback.** Patches are applied in sequence with per-patch
-  validation. A failed patch is sent back to its worker for one retry, never
-  silently edited by the main agent.
-- **Wave workers are strictly read-only** — `agents/worker-readonly.md`'s
-  `tools:` allowlist has no edit/write/bash (pi-subagents has no per-call tool
-  denylist; the allowlist is the mechanical guarantee). The pdw engine that
-  used to enforce this is retired (`docs/handoff-remove-pdw.md`); a worker that
-  returns no result makes its module FAIL (never "nothing to change"), and
-  there is no serial fallback.
-
-### Example: daily wave dispatch
-
-```
-Task: add pagination to list endpoints (3 files, 2 independent sub-tasks)
-
-Module A: backend pagination — owned_paths: ["src/api/list.ts", "src/db/query.ts"]
-Module B: frontend pagination — owned_paths: ["src/ui/ListPage.tsx", "src/ui/ListPage.test.tsx"]
-
-Wave: [A, B] — no dependencies, dispatch in parallel
-→ Worker A returns patch for src/api/list.ts and src/db/query.ts
-→ Worker B returns patch for src/ui/ListPage.tsx and src/ui/ListPage.test.tsx
-→ Main agent validates ownership, git apply --check, applies both patches
-→ Precommit + review as usual
-```
-
-### Wave daily vs decompose
-
-| Aspect | Wave daily | Decompose |
-|---|---|---|
-| Module table | Ad-hoc, defined by the agent | Formal, approved by the user |
-| Plan state | None | `.pi/plan/state.json` |
-| Verify rounds | Standard review loop | Two-phase (module + integration) |
-| Round cap | Standard (10 rounds) | Per-module (8 charged rounds) |
-| When to use | 2–4 independent sub-tasks, one session | 5+ modules, multiple sessions |
-
-### Exploration parallelization
-
-Read-only exploration (recon, code reading, `adviser` consultation) is
-inherently parallel-safe:
-
-- **Spawn in parallel.** Multiple read-only subagents can read different parts
-  of the codebase concurrently. Each reads its own files; no writes happen.
-- **Overlap with editing.** While a read-only subagent surveys the code, you
-  can concurrently edit a different file. The single-writer invariant holds —
-  only YOU write to the worktree.
-- **Merge results.** Collect findings from all parallel subagents; fold them
-  into your decisions before committing to an approach.
-- **Cost discipline.** Read-only subagents run on cheap models (L1/L2);
-  parallel exploration is cheap per-agent and the wall-clock win is real.
-
-## Very large requirements: the wave-parallel module loop
-
-When one request is too big for a single session, do not stretch the loop —
-split the requirement. The contract is SELF-CONTAINED: it lives in the
-commands themselves (`lib/workflow-commands.ts`) and the state module
-`lib/plan-state.ts` (the schema authority — resolve it at
-`<package-root>/lib/plan-state.ts`; a local-path `pi install` points at the
-repo itself, a global/npm install at `~/.pi/agent/npm/pi-review-gate/lib/`) —
-no repo-local doc is required; the extension must work in any repository. `/decompose`, `/plan-next`,
-`/plan-status` and `/plan-verify` drive it. The shape:
-
-0. **Agent-initiated entry** — you may initiate `/decompose` yourself whenever
-you detect a complex task (a requirement too big for one session, or scope
-growing complex mid-task), not only when the gate's size hint fires.
-Initiating is a REQUEST, not an action: present the evidence (exit-criteria
-count, directories spanned, module estimate) plus your own module-count
-estimate and wait for the user's EXPLICIT consent before writing the brief or
-spawning the planner. The module-table approval below is the second, separate
-confirmation.
-
-1. `/decompose` — a cold planner proposes a module table (id, intent,
-   `owned_paths`, `depends_on`, `must_haves`, model, thinking, risk). Show it
-   to the user ONCE, whole, for approval. Plan-time modules must own disjoint
-   paths and form a DAG; that, not a token estimate, is what makes a split
-   real. Approved state lands in `.pi/plan/state.json`.
-2. `/plan-next`, repeatedly — the planner cold-starts from the state, writes
-   the next WAVE's task briefs, and returns one instruction per module. A wave
-   is every pending module whose `depends_on` are all implemented/accepted
-   (≤4 per wave). Call `prepare_wave` (`lib/plan-parallel.ts` + the extension
-   tools) to reconcile the wave fail-closed and get one ready-made task per
-   module; spawn ONE `worker-readonly` subagent per module IN THE SAME TURN
-   (async) with `WAVE_WORKER_SCHEMA` as outputSchema — each worker is strictly
-   READ-ONLY (no edit/write/bash in its allowlist) and returns unified git
-   diffs for its `owned_paths`. Then call `apply_wave_patches` with your
-   workers' structured outputs: it validates (`validatePatchOwnership` + `git
-   apply --check`), persists patches under `.pi/plan/patches/`, and you apply
-   them in sequence with per-patch validation and record each
-   module's status plus a one-line result. A worker that returns no result
-   means its module FAILED — never applied. **You are a driver here**: never read the diff,
-   the source or the worker's transcript. The planner is disposable precisely
-   because everything that matters is on disk, so a planner that runs out of
-   context costs nothing.
-3. `/plan-verify` — one round: `run_precommit` full ONCE, then Phase A (one
-   module reviewer per module, parallel, read-only) recorded together, then
-   Phase B (the integration reviewer over the whole change) recorded ALONE.
-
-**The docSync protocol is the part that will bite you.** `record_review`
-merges equal-severity fences and DROPS `docSync` when they disagree, and an
-absent attestation fails closed. So Phase A fences must omit `docSync`
-entirely (a shard reviewer cannot attest to the whole change), and Phase B must
-be its own `record_review` call so its attestation survives intact. Two calls
-per verify round is the price; it is why the round cap matters on a long plan.
-
-On any failure the round ABORTS: every finding gets exactly one owner (an
-existing module, or a seam module `M-INT-<n>` when the fix crosses ownership),
-the counters are charged, uncharged modules roll back to `implemented`, and
-remediation goes through `/plan-next` — never inline. Above 8 charged rounds
-for a module or for the integration counter, stop and ask the user.
-
-Serial by decision: exactly one writer in the worktree at a time. That is what
-lets this skip worktrees entirely without ever putting a verdict at risk.
-
 ## Rules
 
-- **输出语言（L4，强制）**：所有面向用户的文字用严格简体中文，thinking 也尽量用
+- **输出语言（强制）**：所有面向用户的文字用严格简体中文，thinking 也尽量用
   中文。例外保持英文原样：代码、标识符、文件路径、shell 命令，以及协议固定英文
   标记——裁决 JSON 的 `READY`/`BLOCKED`/`NEEDS_HUMAN`、precommit 的 `## Overall:`
   sentinel、commit message（翻译它们会破坏门禁解析）。
-- **Commit/PR 英文（L5，强制）**：commit message 和 PR 的 title/description 必须用
-  英文。门禁**硬拦截**非英文为主的文案（majority-body 判定，少数外来词可通过；
-  报错信息带逃生说明：会话内由用户 `/gate-bypass <reason>` 放行，`REVIEW_GATE_BYPASS=1`
-  仅对会话外的 git hooks 层提交有效），reviewer 审核时也会把非英文的
-  commit/PR 文案记为 P1 finding。请直接用英文写。
-  （注意：这与 L4 不矛盾——面向用户的聊天用中文，commit/PR 用英文。）
+- **Commit/PR 英文**：commit message 和 PR 的 title/description 必须用
+  英文。门禁在 tool_call 层硬拦截（L5 HARD）以非英文为主的提交文案，
+  且 reviewer 审核时会把非英文的 commit/PR 文案记为 P1 finding。请直接用英文写。
 - Never edit `.env`, key files, or credentials (hard-blocked anyway).
 - Never put AI attribution in commit messages (hard-blocked anyway).
 - Max 10 rounds (per-project override via `.pi/review-gate.json` `maxRounds`,

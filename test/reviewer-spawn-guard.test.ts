@@ -60,8 +60,8 @@ test("agent references normalize to the bare agent name", () => {
   }
 });
 
-test("all three judge roles are pinned", () => {
-  assert.deepEqual([...REVIEWER_AGENT_NAMES], ["reviewer", "reviewer-readonly", "module-reviewer"]);
+test("the judge roles are pinned", () => {
+  assert.deepEqual([...REVIEWER_AGENT_NAMES], ["reviewer", "reviewer-readonly"]);
 });
 
 // ---------- when the guard stays out of the way ----------
@@ -77,7 +77,7 @@ test("a non-subagent tool is never touched", () => {
 });
 
 test("read-only roles keep running in the live worktree while a review is open", () => {
-  for (const agent of ["adviser", "recon", "worker-readonly"]) {
+  for (const agent of ["adviser", "recon"]) {
     assert.equal(spawn({ agent, task: "read the code" }).kind, "ignore", agent);
   }
 });
@@ -96,7 +96,7 @@ test("REGRESSION: booking every snapshot does NOT open a hole for the next revie
   assert.equal(d.kind, "block");
   if (d.kind !== "block") return;
   assert.match(d.reason, /already has a reviewer/);
-  assert.match(d.reason, /call prepare_review again/);
+  assert.match(d.reason, /Call prepare_review again|call prepare_review again/i);
 });
 
 test("a retry that carries a booked snapshot's cwd is still allowed", () => {
@@ -140,18 +140,17 @@ test("a relative cwd is resolved before it is compared", () => {
 });
 
 test("the other judge roles are pinned too", () => {
-  for (const agent of ["reviewer-readonly", "module-reviewer", "agents/reviewer.md"]) {
+  for (const agent of ["reviewer-readonly", "agents/reviewer.md"]) {
     assert.equal(spawn({ agent, task: "review" }).kind, "block", agent);
   }
 });
 
 test("REGRESSION: the block prints a call that spawns the SAME role", () => {
-  // A copyable shape is copied verbatim, so a block that names `module-reviewer`
-  // and hands back `agent: "reviewer"` dispatches the wrong judge — in the
-  // decompose module loop, an entirely different reviewer. Round 1 fixed this
-  // and round 2 found the fix had no test: hard-coding "reviewer" back survived
-  // the whole suite.
-  for (const agent of ["module-reviewer", "reviewer-readonly"]) {
+  // A copyable shape is copied verbatim, so a block that names `reviewer-readonly`
+  // and hands back `agent: "reviewer"` dispatches the wrong judge.
+  // Round 1 fixed this and round 2 found the fix had no test: hard-coding
+  // "reviewer" back survived the whole suite.
+  for (const agent of ["reviewer-readonly"]) {
     const d = spawn({ agent, task: "review" });
     assert.equal(d.kind, "block");
     if (d.kind !== "block") continue;
@@ -217,7 +216,7 @@ test("prose about reviewers does not block a workflow that dispatches none", () 
 test("a script with no agent field falls back to a word-boundary scan", () => {
   assert.equal(reviewerAgentInScript("spawn the reviewer now"), "reviewer");
   assert.equal(reviewerAgentInScript("the reviewers will read this"), undefined);
-  assert.equal(reviewerAgentInScript('runs.run("a", { agent: "module-reviewer" })'), "module-reviewer");
+  assert.equal(reviewerAgentInScript('runs.run("a", { agent: "reviewer-readonly" })'), "reviewer-readonly");
 });
 
 test("REGRESSION: a workflow FILE is judged by its contents, not its name", () => {
@@ -241,7 +240,7 @@ test("a neutrally-named workflow of read-only children still passes", () => {
     snapshots: SNAPS,
     consumed: [],
     resolve: (p) => pathResolve(REPO, p),
-    readScript: () => 'await runs.all([{key:"a", agent:"worker-readonly", task:"patch"}]);',
+    readScript: () => 'await runs.all([{key:"a", agent:"recon", task:"explore"}]);',
   });
   assert.equal(d.kind, "ignore");
 });
@@ -261,7 +260,7 @@ test("the cwd a reviewer reports is read out of its verdict fence", () => {
   assert.deepEqual(extractVerdictCwds(out), [SNAP_A.dir]);
 });
 
-test("every fence contributes its cwd (one record can carry several shards)", () => {
+test("every fence contributes its cwd (one record can carry several fences)", () => {
   const out =
     "### shard-1\n```json\n" + JSON.stringify({ gate: "READY", cwd: SNAP_A.dir, findings: [] }) + "\n```\n" +
     "### shard-2\n```json\n" + JSON.stringify({ gate: "READY", cwd: SNAP_B.dir, findings: [] }) + "\n```";

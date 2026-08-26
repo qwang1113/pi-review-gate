@@ -2,10 +2,10 @@
  * Provider-level model allowlist — standalone module.
  *
  * Moved here when `lib/pdw-bridge.ts` was deleted with the pdw engine (step 2
- * of `docs/handoff-remove-pdw.md`): the allowlist is a USER REQUIREMENT that
+ * of `docs/parallel-execution-plan.md`): the allowlist is a USER REQUIREMENT that
  * must survive the engine, because it still guards where judges are chosen
- * (`lib/review-fanout.ts`), the /gate-doctor facts (`lib/gate-doctor.ts`,
- * `lib/model-diagnose.ts`) and the extension's own fan-out facts
+ * (`lib/model-config.ts`), the /gate-doctor facts (`lib/gate-doctor.ts`,
+ * `lib/model-diagnose.ts`) and the extension's own model-config facts
  * (`extensions/review-gate.ts`).
  */
 export function isModelAllowed(model: unknown): boolean {

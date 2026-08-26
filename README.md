@@ -27,7 +27,7 @@ For the *git hooks* (defense-in-depth outside Pi), the sidecar records *who* cho
 
 ### LLM semantic guard layer (DeepSeek V4 Flash)
 
-A fast, cheap model (`deepseek/deepseek-v4-flash`, configurable via `llmGuards.model`) gives **three guards** an additional **semantic layer**, and backs the advisory requirement-size hint. It is deliberately **not** used to classify the gate mode — that decision belongs to the agent, bounded by the rule engine (see Gate modes). Design invariants, enforced by construction in `lib/llm-classify.ts`:
+A fast, cheap model (`deepseek/deepseek-v4-flash`, configurable via `llmGuards.model`) gives **three guards** an additional **semantic layer**. It is deliberately **not** used to classify the gate mode — that decision belongs to the agent, bounded by the rule engine (see Gate modes). Design invariants, enforced by construction in `lib/llm-classify.ts`:
 
 1. **Tighten-only** — an LLM verdict can only *add* a block or pick the safer side of an ambiguous case. Deterministic checks run first and short-circuit; the LLM is never asked to *approve* something a deterministic check blocked.
 2. **Fail-back** — timeout (8s), spawn failure, or unparseable output degrade each guard to its exact pre-LLM deterministic behavior. No network ⇒ no regression.
@@ -63,9 +63,9 @@ L2  Auto-continuation     agent_settled → if gates unmet, inject
                           a freshly running subagent counts as motion, so a
                           live review is never orphaned. Tighten-only: no
                           verdict is granted and ship stays blocked.
-                          The resume text also carries the reviewer FAN-OUT
-                          computed from the host's model registry (one judge
-                          family ⇒ ONE reviewer + a declared note)
+                          The resume text also carries the single-review
+                          contract: ONE reviewer per round, no exceptions
+                          (one reviewer, one snapshot, one verdict)
 L3  Git hooks             pre-commit / pre-push / commit-msg verify the gate
                           sidecar even for commits made outside Pi
 L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
@@ -329,8 +329,8 @@ and numbers in `docs/parallel-execution-plan.md`:
 
 | Tier | Models (first = preferred) | Role | Verdict power |
 |---|---|---|---|
-| **L1 cheap/fast** | `claude-haiku-4-5` → `opencode-go/deepseek-v4-flash` | `agents/triage.md` — diff pre-scan, mechanical checklist; `agents/recon.md` — strictly read-only code/doc search and heavy reading. Thinking `low`/off. | none — advisory input for the reviewer |
-| **L2 execution** | `claude-sonnet-5` → `claude-opus-5` → `opencode-go/deepseek-v4-flash` | `agents/worker.md`, `agents/planner.md`, `agents/fixer.md` — implements modules/findings into a diff the main agent merges. Thinking `max`. | none — output reviewed by the main agent |
+| **L1 cheap/fast** | `claude-haiku-4-5` → `opencode-go/deepseek-v4-flash` | `agents/recon.md` — strictly read-only code/doc search and heavy reading. Thinking `low`/off. | none — advisory input for the reviewer |
+| **L2 execution** | `claude-sonnet-5` → `claude-opus-5` → `opencode-go/deepseek-v4-flash` | `agents/fixer.md` — implements findings into a diff the main agent merges. Thinking `max`. | none — output reviewed by the main agent |
 
 The chains are deliberately short: pi-subagents requires every fallback to
 resolve in the active registry, so the pinned chains name only providers the
@@ -339,41 +339,22 @@ who configures a onekey gateway / oc-sdk-go (`pi-opencode-bridge`) / a
 DeepSeek subscription can extend the chains in
 `~/.pi/agent/agents/*.md`. Protocol rules (in the
 `review-loop`
-skill, all default-on): triage findings feed the reviewer but never
-`record_review`; a low-risk change (docs / formatting / one-line) may be
-reviewed by an L1 agent whose verdict IS recorded; very large diffs may be
-split across parallel reviewers, merged worst-wins.
+skill, all default-on): every review round is ONE
+reviewer over the whole change.
 
-### "Which model is strongest?" — leaderboard reference for the pins
+### "Which model is strongest?" — pinned chains, chosen up front
 
-`lib/model-ranking.ts` is the *reference* used to choose the pinned models. It
-scores model **families** from public capability leaderboards and can rank
-candidates by **capability × cross-family diversity** (a strong different-family
-model doesn't share the main agent's blind spots):
+The model chains above are the single source of truth for every role.
+They were chosen by capability reasoning (public leaderboards such as
+Artificial Analysis, LMArena, LiveBench) but are **pins, not a runtime
+selector**: the extension is fail-closed and network-free, and the agent
+frontmatter (with its `agents` config layer) is what actually runs. Refresh
+the pins deliberately — there is no out-of-band fetcher to re-score them.
 
-- **Artificial Analysis** — Intelligence Index (0–100), free API key
-- **OpenRouter** — keyless catalog (family/availability)
-- **LMArena Elo**, **LiveBench** — keyless datasets
-
-It is a decision aid, **not a runtime selector** — the built-in judge chains
-live in the agent frontmatter above (the `agents` config layer can override
-them per agent). The extension itself is **fail-closed and
-network-free**; ranking is a *pure function over an offline snapshot*. Refresh
-the snapshot out-of-band with
-the **opt-in, gate-external** fetcher:
-
-```bash
-export ARTIFICIAL_ANALYSIS_API_KEY=...   # free key from artificialanalysis.ai/api
-node scripts/fetch-leaderboard.mjs           # dry-run: print the family table
-node scripts/fetch-leaderboard.mjs --write   # rewrite the snapshot, then: npm test
-# after a GLOBAL install the ranking lib lives elsewhere; point the fetcher at it:
-node ~/.pi/agent/scripts/pi-review-gate-fetch-leaderboard.mjs --write \
-  --snapshot-file ~/.pi/agent/extensions/pi-review-gate/lib/model-ranking.ts
-```
 
 ### Model configuration layer — per-agent slots and the `auto` switch
 
-You edit agent models far more often than the ranking snapshot changes, so the
+You edit agent models more often than the extension re-renders them, so the
 models are **configurable per agent** — layered like precommit (project
 `.pi/review-gate.json` overrides global `~/.pi/review-gate.json`, then the
 built-in frontmatter default), with an **`auto` switch** per agent:
@@ -382,7 +363,7 @@ built-in frontmatter default), with an **`auto` switch** per agent:
 {
   "agents": {
     "reviewer": { "auto": false, "slots": ["onekey/gpt-5.6-sol:high", "claude-fable-5:max", "onekey/glm-5.3:high"] },
-    "worker":   { "auto": false, "slots": ["opencode-go/deepseek-v4-flash:high"] }
+    "fixer":    { "auto": false, "slots": ["opencode-go/deepseek-v4-flash:high"] }
   }
 }
 ```
@@ -394,14 +375,12 @@ built-in frontmatter default), with an **`auto` switch** per agent:
   built-in default, never a leftover lower-priority render. Unconfigured
   agents are cleaned up instead (any stale generated copy is deleted).
 - **`auto: false`** — `slots[0]` becomes the main model, `slots[1..]` the
-  fallback chain. With the reviewer's switch OFF the **double review takes the
-  first two usable slots** (authenticated + allowed + judge-eligible, skipping
-  same-family duplicates to keep the cross-family protocol) — the capability
-  ranking is bypassed, so your order is the priority. An `auto: false` entry
+  fallback chain. With the reviewer's switch OFF the first usable slot
+  (authenticated + allowed + judge-eligible) is the reviewer's model —
+  your order is the priority. An `auto: false` entry
   with an EMPTY slot list is never a silent no-review state: it renders the
-  built-in default chain (shadowing any lower layer's slots) and the fan-out
-  falls back to the capability-ranked path, with a diagnostic at render time
-  so the deployed default is never a surprise.
+  built-in default chain (shadowing any lower layer's slots), with a
+  diagnostic at render time so the deployed default is never a surprise.
 - **Per-model thinking levels.** Every slot may carry its own `:thinking`
   suffix (`claude-fable-5:max`, `onekey/gpt-5.6-sol:high`); the renderer keeps
   the suffix on each candidate so pi-subagents applies the requested level per
@@ -831,31 +810,23 @@ npx pi-review-gate-install-hooks
 `scripts/install-global.sh` was retired when the repo became a pi package;
 use `pi install` above instead.
 
-### Parallel execution: everything on subagents (no engine)
+### Single-review loop: everything on subagents (no engine)
 
 **Everything runs on plain subagents — no workflow engine.**
 
-**Review runs on plain subagents.** Each reviewer needs its own disposable
-snapshot of the change, which needs a per-call `cwd` — and the retired
-`@quintinshaw/pi-dynamic-workflows` engine discarded a per-agent `cwd` (its
-isolation option checks out HEAD, which does not contain the uncommitted
-change under review). `prepare_review` shards the diff (`planReviewShards`),
-materializes one writable snapshot per reviewer, and the agent spawns them
-directly. REVIEW uses a **tiered trigger**: small diffs (<20 files AND <500
-lines) run the default two cross-family reviewers with no engine overhead;
-large diffs are sharded into ≤4 parallel reviewers, each in its own snapshot
-(see `docs/handoff-remove-pdw.md`).
+**Review runs one reviewer per round.** The single reviewer needs its own
+disposable snapshot of the change, which needs a per-call `cwd` — and the
+retired `@quintinshaw/pi-dynamic-workflows` engine discarded a per-agent
+`cwd` (its isolation option checks out HEAD, which does not contain the
+uncommitted change under review). `prepare_review` materializes ONE writable
+snapshot and returns its `cwd`, stream path, file list and ready-made task
+text; the agent spawns ONE reviewer subagent carrying that `cwd`. One
+reviewer, one snapshot, no second reviewer.
 
-**The decompose module loop and wave daily** (ad-hoc parallel editing) also
-run on plain subagents: `prepare_wave` reconciles the wave (fail-closed —
-`computeWave` + worklog existence) and hands back one ready-made task per
-module; the agent spawns ONE `worker-readonly` subagent per module IN THE SAME
-TURN (async, `WAVE_WORKER_SCHEMA` as outputSchema — its `tools:` allowlist has
-no edit/write/bash, so it cannot touch the worktree), then `apply_wave_patches`
-re-validates ownership, persists the patches and pre-checks `git apply`.
-Wave workers are **not decompose-exclusive** — the agent may dispatch a wave
-for any task that can be split into 2–4 independent sub-tasks with disjoint
-file ownership. The agent asks you only when it proposes a decompose.
+**The decompose module loop and wave daily were removed (2026-08-26).**
+There is no module table, no wave scheduling, and no plan state to consult:
+large tasks are sliced by the agent into sequential rounds of the same
+single-review loop.
 
 ### Upgrading: fingerprint algorithm migrations
 
@@ -905,23 +876,17 @@ The loop protocol (also available as the `review-loop` skill):
 ```
 edit code (batch related edits — the loop is billed per ROUND, not per line)
   → run_precommit first (cheap checks before the expensive judge)
-  → spawn the reviewer(s) — two cross-family, SAME turn, async
+  → spawn ONE reviewer (its own snapshot cwd, top-level subagent call)
   → call record_review with the FULL reviewer output      # all fences parsed, worst wins
   → BLOCKED? fix everything, then start again from precommit
   → READY?  call declare_done                             # re-validated server-side
   → ship    (git commit now passes the gate)
 ```
 
-**Tiered trigger — small diff fast, large diff parallel.** The review
-auto-decides by diff size before spawning: small diffs (<20 files AND
-<500 changed lines) run the default TWO cross-family reviewers with no engine
-overhead (each attests `docSync` itself); large diffs (≥20 files OR
-≥500 changed lines)
-are sharded by `prepare_review` itself (`planReviewShards`: ≤4 disjoint groups
-covering every changed file, each with its own writable snapshot), spawned as
-plain subagents, then one
-integration review over the whole change. The thresholds are constants in
-`lib/parallel-review.ts` (`SHARD_THRESHOLD_FILES` / `SHARD_THRESHOLD_LINES`).
+**One reviewer per round, whatever the diff size.** There is no tiering:
+`prepare_review` materializes ONE writable snapshot for the whole change,
+regardless of how many files or lines it spans, and the reviewer audits it all.
+The verdict schema is `REVIEW_VERDICT_SCHEMA` in `lib/parallel-review.ts`.
 
 **Precommit runs FIRST, review second — never concurrently.** The runner
 schedules itself (no flags): any `lint:fix` script runs FIRST — it edits
@@ -940,6 +905,7 @@ The reviewer should end with a fenced JSON verdict:
 ```json
 {"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN",
  "cwd": "<the reviewer's own pwd — proof of which snapshot it ran in>",
+ "docSync": "UPDATED" | "NOT_NEEDED",
  "findings": [{"file": "src/x.ts", "line": 42, "severity": "P1", "issue": "..."}]}
 ```
 
@@ -1345,7 +1311,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 |------|---------|
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal` + a reason). The agent's pick IS the classification — no classifier model reviews it. On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) `loop` and `explore` apply directly with source `auto`, while `normal` still pops the confirm dialog. Everything delegates to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. |
 | `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). It also re-derives the tree of every snapshot `prepare_review` handed out this round: a reviewer that finished with its snapshot MODIFIED ran its last checks against its own edits, so its READY is downgraded to BLOCKED (its findings stay valid, and a BLOCKED verdict is unaffected). It further requires, PER SNAPSHOT, evidence that the snapshot was ever *entered* — the spawn the gate observed, or the `cwd` a reviewer reports in its verdict (its own `pwd`, a required field) — and records a READY as BLOCKED (`SNAPSHOT UNUSED`) for any snapshot with neither, because a reviewer that never opened its copy leaves it pristine and pristine reads as "clean". Mechanical, so the agent cannot forget it. |
-| `prepare_review` | Materialize ONE disposable git-worktree snapshot per reviewer about to be spawned, holding exactly the change under review (same shadow-index tree the fingerprint uses; `node_modules` symlinked so the suite runs — the ONE shared path, which the prompts forbid writing to). The snapshot deliberately contains NO `.pi/` directory (the goal text rides the spawn task instead): a snapshot that carries `.pi/` is misdetected by pi-subagents as a project root, which silently drops the project layer of the model config (the user's per-agent slots) and makes every reviewer fall back to the GLOBAL agent definition. A READY recorded after the worktree moved (mid-review fixes) does NOT bind: the gate compares the tree the reviewers read with the tree at record time and downgrades to BLOCKED, so an approval can never cover code no reviewer saw. Returns each reviewer's `cwd` and its append-only finding-stream path as a **copyable top-level `subagent` call** — and while those snapshots are open the gate BLOCKS any reviewer spawn that does not name one of them, including every reviewer dispatched through `workflowScript`/`workflowScriptPath` (that sandbox has no per-child `cwd`, so they would all share your live worktree). Inside its own copy a reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. Fail-soft: a host where `git worktree` refuses gets an explicit "isolation unavailable" reply and the old read-only rules. |
+| `prepare_review` | Materialize ONE disposable git-worktree snapshot for the single reviewer about to be spawned, holding exactly the change under review (same shadow-index tree the fingerprint uses; `node_modules` symlinked so the suite runs — the ONE shared path, which the prompts forbid writing to). The snapshot deliberately contains NO `.pi/` directory (the goal text rides the spawn task instead): a snapshot that carries `.pi/` is misdetected by pi-subagents as a project root, which silently drops the project layer of the model config (the user's per-agent slots) and makes the reviewer fall back to the GLOBAL agent definition. A READY recorded after the worktree moved (mid-review fixes) does NOT bind: the gate compares the tree the reviewer read with the tree at record time and downgrades to BLOCKED, so an approval can never cover code no reviewer saw. Returns the reviewer's `cwd` and its append-only finding-stream path as a **copyable top-level `subagent` call** — and while the snapshot is open the gate BLOCKS any reviewer spawn that does not name it, including every reviewer dispatched through `workflowScript`/`workflowScriptPath` (that sandbox has no per-child `cwd`, so they would all share your live worktree). Inside its own copy the reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. Fail-soft: a host where `git worktree` refuses gets an explicit "isolation unavailable" reply and the old read-only rules. |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. Output is never inlined into the reply — a failing suite can emit megabytes. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
 | `record_goal_prereview` | Record the dedicated `goal-auditor` role's audit of a DRAFT goal (L8b). Pass the draft text plus the auditor's FULL raw output: the **extension** parses the JSON fence itself (PASS ⇔ a `READY` verdict — verdict-parse already downgrades a READY carrying unresolved P0/P1, and a salvaged fence is never READY) and computes the text hash itself, so there is no `passed`/`hash` parameter an agent could set. No parseable fence ⇒ `isError` and **nothing** is written (fail-closed). BLOCKED/NEEDS_HUMAN ⇒ a FAIL record. Latest-only by design, and repo-resolved exactly like `propose_loop_goal` (`gitRootOfDir`, never `resolveToolRepo` — a goal is audited before the first edit lands). |
@@ -1431,8 +1397,8 @@ Configure via `.pi/review-gate.json` → `"arbiter": { "enabled", "model",
 - Ambient `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` / `GIT_CONFIG_PARAMETERS` / … injecting `core.excludesFile` (or any other setting) → ignored: the whole `GIT_CONFIG*` family is stripped by prefix, so configuration injection cannot hide a real edit from the digest
 - `git commit -a` / `git commit -- <path>` (git publishes a TEMPORARY index) → correctly judged: the hook forwards git's own `GIT_INDEX_FILE` as an explicit argument and the checker verifies it belongs to this repository, so these commits are neither wrongly blocked nor able to ship unreviewed content
 - Commit/push whose cwd is inside a review snapshot worktree (an `rg-review-snap-*` path segment) → blocked even with no sidecar: the snapshot deliberately carries no `.pi/` but shares the real repo's `.git`, so the "no sidecar → allow" rule would let a reviewer's push ship the real repo
-- Reviewer spawned outside the snapshot prepared for it (no `cwd`, a `cwd` that is not one of this round's snapshots, or dispatched through `workflowScript`/`workflowScriptPath`, whose sandbox has no per-child `cwd`) → the spawn is **blocked at `tool_call`** with the correct call printed. Non-judge roles (`adviser`, `recon`, `worker-readonly`) and management actions keep running: only the reviewer family is pinned
-- Snapshot prepared but never entered (no spawn observed for it AND no verdict reporting it as its own `pwd`) → any READY is recorded as **BLOCKED** (`SNAPSHOT UNUSED`), per snapshot: with four shards, one entered snapshot does not vouch for the other three. This is the fail-closed half of the drift check — drift proves a reviewer CHANGED its copy, and says nothing about one that never opened it (an untouched snapshot verifies as "clean")
+- Reviewer spawned outside the snapshot prepared for it (no `cwd`, a `cwd` that is not this round's snapshot, or dispatched through `workflowScript`/`workflowScriptPath`, whose sandbox has no per-child `cwd`) → the spawn is **blocked at `tool_call`** with the correct call printed. Non-judge roles (`adviser`, `recon`) and management actions keep running: only the reviewer family is pinned
+- Snapshot prepared but never entered (no spawn observed for it AND no verdict reporting it as its own `pwd`) → any READY is recorded as **BLOCKED** (`SNAPSHOT UNUSED`). This is the fail-closed half of the drift check — drift proves a reviewer CHANGED its copy, and says nothing about one that never opened it (an untouched snapshot verifies as "clean")
 - Loop-mode (or undecided) `edit`/`write` tool call while no USER-approved loop goal exists for the target repo → blocked at tool_call: the negotiation must happen before the work starts, and each repo checks its own goal (see the [Loop goal](#loop-goal--the-exit-contract-negotiated-with-the-user-l8-the-edit-gate-also-covers-undecided-mode) section)
 - Ship command hidden in `bash -c` / `eval` / `xargs` → still detected (over-detection preferred)
 - Ship command obfuscated via `g""it` / `g"i"t` / `git${IFS}commit` / `git$IFS"commit"` / `${x:=git}` / `${x:-g}${y:-it}` / `$(printf git) commit` (dynamic head) / `\g\i\t` / backslash-newline continuation → shell-dequoting + de-obfuscation + dynamic-head detection still catch it (fail-closed)
@@ -1767,8 +1733,7 @@ second line of defence.
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
 | `run_precommit --mode full` (this repo) | ~100 s | Dominated by the two timing loops in the suite; typecheck runs CONCURRENTLY with `npm test` — the timing loops themselves are not reducible |
-| **A review round (small diff)** | **~3 min reviewer, precommit first** | Two cross-family reviewers, no engine — <20 files AND <500 lines; precommit runs BEFORE the review (see the loop protocol); see `docs/parallel-execution-plan.md` |
-| **A review round (large diff)** | **≤4 parallel shard reviewers, precommit first** | Sharded by `prepare_review` (`planReviewShards`), one writable snapshot each, spawned as plain subagents + one integration review; no engine; see `docs/parallel-execution-plan.md` |
+| **A review round (any diff size)** | **~3 min reviewer, precommit first** | ONE reviewer, one disposable snapshot, no engine — precommit runs BEFORE the review (see the loop protocol); see `docs/parallel-execution-plan.md` |
 
 **Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
 ran six consecutive times on this repo (typecheck concurrent with `npm test`,
@@ -1814,8 +1779,6 @@ lib/copilot-review.ts         L7 post-PR Copilot review cycle: bot identity, pay
 agents/adviser.md             consulting subagent, pinned model @ max (proactively consulted)
 agents/reviewer.md            gatekeeper reviewer override, pinned model @ max
 agents/goal-auditor.md        dedicated loop-GOAL pre-reviewer (read-only tools), pinned model @ max
-lib/model-ranking.ts          leaderboard-scored judge ranking (reference for the pins)
-scripts/fetch-leaderboard.mjs opt-in, gate-external leaderboard fetcher (the only network I/O)
 lib/shell-lex.ts              quote-aware shell lexer (segments + dequoted tokens)
 lib/lang-detect.ts            L5: non-Latin-script detection for the commit/PR English hard gate
 scripts/scan-test-labels.cjs  L6: non-English test-label scanner (pre-commit, staged content)
@@ -1825,14 +1788,12 @@ lib/fingerprint.ts            worktree fingerprint (content-addressed git tree h
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
 lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running subagent, notice text (pure)
-lib/review-fanout.ts          reviewer fan-out planning from registry facts (one family ⇒ ONE reviewer + declared note; pure)
-lib/review-snapshot.ts        one disposable git-worktree snapshot per reviewer (under the repo's gate-owned .pi/, with a tmpdir fallback when .pi/ is unwritable) + post-run tree verification + orphan reclaim
+lib/review-snapshot.ts        one disposable git-worktree snapshot for the single reviewer (under the repo's gate-owned .pi/, with a tmpdir fallback when .pi/ is unwritable) + post-run tree verification + orphan reclaim
 lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
 lib/verdict-guards.ts         the two READY guards as a pure truth table: snapshot drift + stale reviewed tree (tighten-only)
 lib/reviewer-spawn-guard.ts   the snapshot pin as a pure truth table: refuse a reviewer spawn that names no snapshot (workflow dispatch included), and require per-snapshot evidence of use at record time (tighten-only)
-lib/parallel-review.ts        review planning only: tiered threshold, shard planner, per-shard prompt, verdict parser, record merger (pure, no engine)
-docs/handoff-remove-pdw.md    step-2 record: the pdw engine was retired from wave + decompose (subagents everywhere)
-docs/subagents-collaboration.md how the gate and pi-subagents cooperate: what is established, what is deliberately NOT used (gate param / worktree isolation), what was added (recommended reviewer models, wave workflowScript skeleton, the L8b goal pre-review collaboration)
+lib/parallel-review.ts        single-review contract: reviewer prompt + verdict schema (pure, no engine)
+docs/subagents-collaboration.md how the gate and pi-subagents cooperate: what is established, what is deliberately NOT used (gate param / worktree isolation), what was added (the single-review spawn shape, the L8b goal pre-review collaboration)
 lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
 lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)

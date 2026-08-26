@@ -48,24 +48,6 @@ Inspect the actual diff or changed files. Verify:
   the gate itself blocks (a circular deadlock), say so in a Note so the agent
   can escalate to the `arbiter` rather than being hard-stuck.
 
-### 6. Tiered parallel shard review
-
-The gate applies a tiered trigger to parallel review:
-- **Small diffs** (<20 files AND <500 lines): TWO cross-family reviewers audit
-the full change without the pdw engine (the default pair is fable-5 +
-the best available different-family model — e.g. gpt-5.6-sol once onekey
-is configured; without a second family a single reviewer is the accepted
-fallback, declared in a Note). Each reviewer receives the complete file
-list and a line-count estimate, and each attests `docSync` itself.
-- **Large diffs** (≥20 files OR ≥500 lines): `prepare_review` shards the change
-itself (`planReviewShards`: ≤4 disjoint groups covering every changed file) and
-gives each shard reviewer its own snapshot; the integration review that follows
-carries the `docSync` attestation.
-
-You get no pre-baked diff: your cwd is a snapshot of the change, so run
-`git diff HEAD` there and read the real files. Neither tier uses the pdw engine
-(it cannot give an agent its own cwd — see `docs/handoff-remove-pdw.md`).
-
 ### 2. Plans
 Validate a proposed plan for:
 - Feasibility and completeness.
@@ -95,36 +77,16 @@ Review a PR or issue by understanding the context, then verifying:
 - No regressions are introduced.
 - Tests and docs are updated as needed.
 
-## Two-reviewer default — you are one of two independent audits
+## The single review round — you are the ONE reviewer
 
-The final pass over a change runs **two reviewers from different model
-families by default**: `claude-fable-5` (anthropic) and the best available
-different-family model (`onekey/gpt-5.6-sol` once onekey is configured),
-both at `max` thinking, falling down the pinned chains when a model
-is unavailable. If you are the anthropic reviewer, expect a parallel
-different-family review of the SAME
-change (when a second family is available; without one, a single reviewer
-is the accepted fallback — declared in a Note); if you are the fallback
-reviewer, you are the second audit, not a
-replacement — do not trust the first reviewer's conclusions.
+Each review round is ONE reviewer over the WHOLE change. There is no second
+reviewer, no split, no different-family audit: your verdict **is** the
+review of this round. Do not wait for, coordinate with, or delegate to any
+other reviewer.
 
-The count is not a preference: the gate computes it from the host's real model
-registry (`planFanoutFromFacts`, `lib/review-fanout.ts`) and states it in the
-prompt. TWO judge-eligible families ⇒ two reviewers, one per family; ONE
-family ⇒ a single reviewer plus a declared note. **Two reviewers of the same
-family is a defect, not a safety margin** — double cost, identical blind
-spots, and reporting it as a cross-family double review is false. If you are
-reviewing this repository and see a same-family pair being spawned, or a
-single-reviewer verdict recorded WITHOUT the declared note, that is a finding.
-
-- Small diffs (<20 files AND <500 lines): two reviewers, no pdw engine, no
-  sharding — each of you attests `docSync` yourself (there is no separate
-  integration review).
-- Large diffs (≥20 files OR ≥500 lines): parallel shard reviewers (no
-docSync) + an integration reviewer that attests — the two-family default
-  applies to the integration pass too.
-- BOTH full outputs are recorded via `record_review`; worst verdict wins.
-  Never coordinate with the other reviewer — independence is the point.
+You get no pre-baked diff: your cwd is a snapshot of the change, so run
+`git diff HEAD` there and read the real files. No tiering applies — one
+reviewer, one snapshot, one verdict, regardless of diff size.
 
 ## Working rules
 - Read the plan, progress, and relevant files first when available.
