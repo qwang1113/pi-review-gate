@@ -159,6 +159,39 @@ test("SHARD_VERDICT_SCHEMA is the shape handed to a spawned reviewer", () => {
   assert.equal("docSync" in schema.properties, false);
 });
 
+test("the verdict must carry the reviewer's REAL cwd (second proof of isolation)", () => {
+  // Evidence, not decoration: the gate matches this against the snapshot it
+  // prepared, which is how a reviewer that ran in the live worktree — or was
+  // pointed correctly and then `cd`-ed away — stops being able to approve.
+  const schema = SHARD_VERDICT_SCHEMA as unknown as {
+    properties: Record<string, { description?: string }>;
+    required: readonly string[];
+  };
+  assert.ok(schema.required.includes("cwd"), "an optional cwd is the one models would omit");
+  assert.match(schema.properties.cwd.description ?? "", /pwd/);
+
+  const prompt = buildShardPrompt(
+    { label: "shard-1", files: ["src/a.ts"], note: "1 file(s)" },
+    undefined,
+    undefined,
+    { streamPath: "/repo/.pi/review-stream/run-shard-1.jsonl" },
+  );
+  // A copied path proves nothing about where the review happened, so the
+  // prompt has to demand a measured one.
+  assert.match(prompt, /run `pwd`/);
+  assert.match(prompt, /do NOT copy the path out of this task text/i);
+  assert.match(prompt, /"cwd": "<your real pwd>"/);
+  assert.match(prompt, /gate checks it against the snapshot prepared for you/);
+
+  // …and the NO-isolation branch must not promise a check that cannot happen:
+  // it just told the reviewer there is no snapshot this round.
+  const bare = buildShardPrompt({ label: "shard-1", files: ["src/a.ts"], note: "1 file(s)" });
+  assert.match(bare, /run `pwd`/, "the pwd is still recorded without isolation");
+  assert.doesNotMatch(bare, /the snapshot prepared for you/,
+    "promising a snapshot check with no snapshot contradicts the same prompt");
+  assert.match(bare, /gate does not match it against one/);
+});
+
 test("formatShardReviewRecord joins every shard and wraps bare JSON in a fence", () => {
   const record = formatShardReviewRecord([
     { label: "shard-1", output: '{"gate":"READY","findings":[]}' },

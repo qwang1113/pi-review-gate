@@ -326,8 +326,15 @@ survives. Keep each finding's `issue` to one concise sentence; put any long
 reasoning in the prose section that follows, not inside the JSON.
 
 ```json
-{"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "findings": [{"file": "src/x.ts", "line": 42, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
+{"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "cwd": "<your real pwd>", "findings": [{"file": "src/x.ts", "line": 42, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
 ```
+
+**`cwd` (REQUIRED):** run `pwd` and report what it printed — never copy a path
+out of your task text. When the gate prepared a disposable snapshot for you,
+this is how it proves the review happened INSIDE that snapshot; a snapshot with
+no evidence of use has its READY withheld (`SNAPSHOT UNUSED`). Measuring it
+also catches the case nobody else can see: being pointed at the snapshot
+correctly and then `cd`-ing somewhere else.
 
 **`docSync` (REQUIRED whenever the review covers code changes):** attest the
 code↔documentation relationship of THIS change. "Docs" here means the

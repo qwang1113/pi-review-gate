@@ -159,6 +159,26 @@ When `prepare_review` reports isolation UNAVAILABLE, dispatch
 `agents/reviewer-readonly.md` instead of `reviewer` (its `tools:` allowlist
 cannot write, which is the only mechanical guard available — pi-subagents has no
 per-call tool denylist) and do NOT apply fixes until the verdict is recorded.
+(f) **The snapshot `cwd` is MECHANICALLY enforced (2026-08-26).** Spawn every
+reviewer as its OWN top-level `subagent` call carrying the `cwd`
+`prepare_review` printed for it. While snapshots are open the gate blocks a
+`reviewer`/`reviewer-readonly`/`module-reviewer` spawn that names no snapshot,
+and blocks dispatching reviewers through `workflowScript`/`workflowScriptPath`
+at all: that sandbox's `runs.run(key, { agent, task, worktree?, gate? })` has NO
+per-child `cwd`, so every reviewer would land in one shared directory — in
+practice your live worktree. N separate top-level calls in ONE turn are just as
+parallel. This exists because it already happened: an entire session's reviewers
+ran in the live worktree, and because a reviewer that never enters its snapshot
+leaves it pristine, `verifySnapshot` called every one of them "clean".
+`record_review` therefore also demands evidence that each snapshot was ENTERED —
+the spawn the gate observed, or the `cwd` the reviewer reports in its verdict
+(measured with `pwd`, a required field of `SHARD_VERDICT_SCHEMA`) — and
+withholds a READY for any snapshot with neither (`SNAPSHOT UNUSED`).
+A `cwd` that points anywhere else — including another repo's snapshot — is
+refused just as a missing one is: the check runs once over the UNION of every
+repo's open snapshots, so a multi-repo session may pin each reviewer to its own
+repo's snapshot, but while ANY snapshot is open no judge role runs unpinned.
+Decision logic: `lib/reviewer-spawn-guard.ts` (pure, truth-tabled).
 
 ### Wave daily — parallel editing for everyday tasks (not just decompose)
 

@@ -276,8 +276,22 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    per reviewer you are about to spawn (use the fan-out plan's count). It
    materializes a DISPOSABLE snapshot worktree per reviewer — holding exactly
    the change under review — and returns each one's `cwd` and finding-stream
-   path. Spawn each reviewer with its own `cwd`, and paste its stream
-   directive into the task.
+   path. Spawn each reviewer as its OWN top-level `subagent` call carrying that
+   `cwd`, and paste its stream directive into the task.
+
+   **The `cwd` is enforced, not advised.** While snapshots are open the gate
+   blocks any `reviewer` / `reviewer-readonly` / `module-reviewer` spawn that is
+   not pointed at one of them, and it blocks dispatching reviewers through
+   `workflowScript`/`workflowScriptPath` entirely — that sandbox's
+   `runs.run(key, { agent, task, worktree?, gate? })` has NO per-child `cwd`, so
+   every reviewer would share one directory. Spawn N separate top-level calls in
+   ONE turn; they run just as parallel. This is not hypothetical: a whole
+   session of reviews once ran in the live worktree because the `cwd` was left
+   off, and an untouched snapshot verifies as "clean", so nothing complained.
+   `record_review` now also requires evidence that each snapshot was entered —
+   the spawn the gate observed, or the `cwd` the reviewer reports in its verdict
+   (from its own `pwd`) — and withholds a READY for any snapshot with neither
+   (`SNAPSHOT UNUSED`).
 
    Why it exists: a reviewer here verifies by DOING (it mutates code to prove
    a test really fails), and it used to do that in your worktree — fighting
@@ -330,8 +344,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    - **Large diff** (≥ 20 files OR ≥ 500 changed lines): `prepare_review` shards
      it for you with `planReviewShards` (≤ 4 disjoint groups covering every
      changed file) and returns each shard's snapshot cwd, stream path, file list
-     and ready-made task text. Spawn one reviewer per shard, all in the same
-     turn, each with its own cwd; merge every shard output into ONE
+     and ready-made task text. Spawn one reviewer per shard as separate
+     top-level calls in the same turn, each with its own `cwd` (the gate blocks
+     any other shape); merge every shard output into ONE
      `record_review` call; then run ONE integration review over the whole change
      that carries the `docSync` attestation.
 

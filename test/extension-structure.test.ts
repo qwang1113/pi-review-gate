@@ -1772,7 +1772,7 @@ test("session_start surfaces the migration notice and clears the flag", () => {
   // The window is a reading heuristic, not a contract: the P-multi reset
   // block, no-UI mode forcing, the normal-mode no-arm comment and the
   // snapshot cleanup at the handler head keep pushing the notice section down.
-  const body = SRC.slice(at, at + 9200);
+  const body = SRC.slice(at, at + 9600);
   assert.match(body, /if \(fingerprintMigrated\)/,
     "an invalidated binding must be explained, not silently applied");
   assert.match(body, /FINGERPRINT_MIGRATION_NOTICE/);
@@ -2146,7 +2146,13 @@ test("STALE TREE: a READY cannot bind to a tree the reviewer never saw", () => {
   // test/verdict-guards.test.ts, where a mutant actually dies.
   assert.match(body, /applyVerdictGuards\(\{/, "the guards must be applied");
   assert.match(body, /snapshotDrifts,/, "drift facts must be handed to the guard");
-  assert.match(body, /parsed\.verdict = guarded\.verdict/, "the guarded verdict must be the one recorded");
+  // The guarded verdict must be what the LAST guard consumes and what is
+  // recorded: the chain is applyVerdictGuards → decideSnapshotUsage → recorded.
+  // A shortcut back to `parsed.verdict = guarded.verdict` would silently drop
+  // the snapshot-usage guard.
+  assert.match(body, /decideSnapshotUsage\(\{[\s\S]{0,200}verdict: guarded\.verdict/,
+    "the snapshot-usage guard must consume the guarded verdict");
+  assert.match(body, /parsed\.verdict = usage\.verdict/, "the guarded verdict must be the one recorded");
   assert.match(body, /STALE TREE/, "the user must be told why a READY did not bind");
   // Fail closed when the tree cannot be read: unknown is never treated as same.
   assert.match(body, /catch \{ currentTree = undefined; \}/);
@@ -2202,7 +2208,7 @@ test("SNAPSHOT INTEGRITY: record_review verifies the round's snapshots MECHANICA
   // (mutating it there fails 2 cases); here we only pin that record_review
   // routes through it and records ITS verdict.
   assert.match(body, /applyVerdictGuards\(\{/);
-  assert.match(body, /parsed\.verdict = guarded\.verdict/);
+  assert.match(body, /parsed\.verdict = usage\.verdict/);
   assert.doesNotMatch(body, /snapshotDrifts[\s\S]{0,120}parsed\.verdict = "READY"/);
   // Drift parked by an out-of-order prepare_review must still be consumed here,
   // or a polluted READY could be laundered by calling prepare first.
@@ -2221,6 +2227,75 @@ test("SNAPSHOT INTEGRITY: record_review verifies the round's snapshots MECHANICA
   assert.match(release, /removeReviewSnapshot\(snap, repoRoot\)/);
   assert.match(release, /preparedSnapshots\.delete\(repoRoot\)/);
 });
+
+test("SNAPSHOT PIN: a reviewer cannot be spawned outside its snapshot", () => {
+  // The measured failure this pins: every reviewer of a session was spawned
+  // WITHOUT a cwd, so all of them read the live worktree while their snapshots
+  // stayed untouched — and an untouched snapshot verifies as "clean", so the
+  // gate reported isolation for reviews that never happened in it. The decision
+  // is behaviourally tested in test/reviewer-spawn-guard.test.ts; what has to be
+  // pinned HERE is the wiring, because neutralizing it is invisible otherwise.
+  const hookAt = SRC.indexOf('pi.on("tool_call"');
+  assert.ok(hookAt > 0, "the tool_call hook must exist");
+  const hook = SRC.slice(hookAt, SRC.indexOf('pi.on("tool_result"'));
+  assert.match(hook, /decideReviewerSpawn\(\{/, "the spawn guard must run on tool_call");
+  assert.match(hook, /if \(decision\.kind === "block"\) return \{ block: true/,
+    "a refused spawn must actually be blocked, not merely logged");
+  assert.match(hook, /consumedSnapshots\.set\(owner, seen\)/,
+    "an allowed spawn must be booked as evidence for record_review");
+  // ONE decision over the union of every repo's open snapshots. A per-repo
+  // loop blocked repo B's correctly-pinned reviewer because repo A's snapshot
+  // list did not contain it — a multi-repo session could not review at all.
+  // Match the BEHAVIOUR-BEARING part, not the type annotation's spelling: an
+  // equivalent `Array<{…}>` refactor is not a regression, and a reviewer
+  // (correctly) called the stricter version brittle. What matters is that the
+  // list is built across repos and handed to ONE decision.
+  assert.match(hook, /const openSnapshots\b/);
+  assert.match(hook, /openSnapshots\.push\(/);
+  assert.match(hook, /snapshots: openSnapshots,/, "the union must be what the decision sees");
+  assert.match(hook, /ownerOfDir\.set\(canonicalPath\(snap\.dir\), snapRoot\)/,
+    "the booking must land on the repo that owns the snapshot");
+  // Both sides of every path comparison go through realpath: a tmpdir-fallback
+  // snapshot is handed out as /var/… and reported back as /private/var/… on
+  // macOS, and raw equality would drop the reviewer's own evidence.
+  assert.match(hook, /resolve: \(p\) => canonicalPath\(pathResolve\(cwd, p\)\)/);
+  // The guard must run BEFORE the bash-only section, whose mode/bypass returns
+  // switch workflow enforcement off: a review that silently ran in the wrong
+  // tree is worthless in every mode, and snapshots exist only because the agent
+  // itself called prepare_review.
+  const pinAt = hook.indexOf("decideReviewerSpawn");
+  const bashOnlyAt = hook.indexOf('if (event.toolName !== "bash") return;');
+  assert.ok(pinAt > 0, "the spawn guard must be wired into the hook");
+  assert.ok(bashOnlyAt > pinAt, "the snapshot pin must not sit behind the mode returns");
+
+  // Bookings must die with their round, or the next round's fresh snapshots
+  // would inherit "already reviewed in".
+  const releaseAt = SRC.indexOf("function releasePreparedSnapshots(");
+  assert.match(SRC.slice(releaseAt, releaseAt + 900), /consumedSnapshots\.delete\(repoRoot\)/);
+  // …and the session_start clear must actually be IN session_start: matching it
+  // anywhere in the file passed even after the call was moved out (measured by a
+  // reviewer), which is a comment masquerading as an assertion.
+  const startAt = SRC.indexOf('pi.on("session_start"');
+  const startBody = SRC.slice(startAt, SRC.indexOf('pi.on("session_compact"', startAt));
+  assert.match(startBody, /consumedSnapshots\.clear\(\)/, "session_start must not leak bookings");
+
+  // record_review must consume BOTH kinds of evidence.
+  const recAt = SRC.indexOf('name: "record_review"');
+  const rec = SRC.slice(recAt, SRC.indexOf('name: "run_precommit"', recAt));
+  assert.match(rec, /decideSnapshotUsage\(\{/);
+  assert.match(rec, /consumed: \[\.\.\.\(consumedSnapshots\.get\(targetRoot\) \?\? \[\]\)\]/);
+  assert.match(rec, /verdictCwds: extractVerdictCwds\(params\.reviewer_output\)/);
+  assert.match(rec, /SNAPSHOT UNUSED/, "the reason must reach the transcript, not just details");
+
+  // prepare_review must hand out calls that CAN carry a cwd, and say why the
+  // workflow shape cannot.
+  const prepAt = SRC.indexOf('name: "prepare_review"');
+  const prep = SRC.slice(prepAt, prepAt + 20000);
+  assert.match(prep, /subagent\(\{ agent: "reviewer", async: true, cwd: /,
+    "the spawn calls must be copyable, not described in prose");
+  assert.match(prep, /Do NOT dispatch reviewers through `workflowScript`/);
+});
+
 
 test("REGRESSION: prepare_review REFUSES a partial plan, and the refusal is wired", () => {
   // Round 4 extracted the DECISION into lib/verdict-guards.ts (behaviourally

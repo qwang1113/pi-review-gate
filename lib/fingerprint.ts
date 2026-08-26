@@ -577,7 +577,17 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
 
     git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
-    git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS, ...extraExcludePathspecs], env);
+    // `-f` is REQUIRED, not defensive. A review snapshot is a linked worktree
+    // living under `.pi/review-snapshots/`, so `add -A` stages it as a GITLINK
+    // whose content matches neither the working tree nor HEAD — and plain
+    // `git rm --cached` refuses exactly that ("use -f to force removal"),
+    // failing the whole tree computation. Measured: with any snapshot on disk,
+    // worktreeTreeOid threw, `record_review` read the current tree as
+    // unreadable, and EVERY READY prepared through prepare_review was
+    // downgraded to BLOCKED with "STALE TREE: current tree unreadable".
+    // `--cached` keeps this inside the throwaway shadow index: no working-tree
+    // file is ever removed.
+    git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS, ...extraExcludePathspecs], env);
 
     const tree = git(cwd, ["write-tree"], env);
     // Guard against a future git printing warnings on stdout: only a bare

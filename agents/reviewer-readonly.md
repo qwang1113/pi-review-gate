@@ -57,4 +57,5 @@ impossibility claim" discipline, the same output format (Correct / Verified /
 Blocker / Note), the same incremental-round rules (carry the previous round's
 settled conclusion forward), the same loop-goal acceptance criterion by
 criterion, and the same fenced JSON gate verdict — including `docSync` when you
-are the reviewer that attests it.
+are the reviewer that attests it, and the REQUIRED `cwd` field (run `pwd` and
+report what it printed; never copy a path out of your task text).
