@@ -100,8 +100,11 @@ test("the impossibility rule stays prompt-level: no new verdict JSON field", () 
   const keysIn = (s: string) => [...s.matchAll(/"([A-Za-z_]+)":/g)].map((m) => m[1]).sort();
   assert.deepEqual(
     keysIn(verdictLine!.slice(0, cut)),
-    ["docSync", "gate"],
-    "verdict schema must gain no extra top-level key beyond gate/docSync/findings",
+    // `cwd` is the ONE addition since this test was written, and it comes from
+    // the snapshot pin (evidence that the review ran inside its snapshot), not
+    // from the impossibility rule — which still costs the verdict no field.
+    ["cwd", "docSync", "gate"],
+    "verdict schema must gain no extra top-level key beyond gate/docSync/cwd/findings",
   );
   assert.deepEqual(
     keysIn(verdictLine!.slice(cut)),

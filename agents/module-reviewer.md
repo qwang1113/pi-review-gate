@@ -72,8 +72,13 @@ here wastes a round.
 Emit your verdict as a JSON fence:
 
 ```json
-{"gate": "READY|BLOCKED|NEEDS_HUMAN", "findings": [{"file": "...", "line": 1, "severity": "P1", "issue": "..."}]}
+{"gate": "READY|BLOCKED|NEEDS_HUMAN", "cwd": "<your real pwd>", "findings": [{"file": "...", "line": 1, "severity": "P1", "issue": "..."}]}
 ```
+
+**`cwd` is REQUIRED and MEASURED:** run `pwd` and report what it printed, never
+a path copied from your task text. When the gate prepared a snapshot for you it
+matches this against it; a snapshot with no evidence of use has its READY
+withheld.
 
 **Never include a `docSync` field.** Not `"NOT_NEEDED"`, not `"UPDATED"`, not
 any value. You see one shard of the change and have no basis to attest to the

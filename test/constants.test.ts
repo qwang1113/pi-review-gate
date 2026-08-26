@@ -225,6 +225,42 @@ test("TS and CJS fingerprint implementations agree (drift guard)", () => {
   }
 });
 
+// The parity check above holds no review snapshot, so all three copies could
+// share the same snapshot bug and still agree. That is not hypothetical: `-f`
+// was added to lib/fingerprint.ts alone, and a reviewer found the hook path
+// (this CJS copy) still failing closed with the very error the fix removed —
+// the extension recorded READY while `git commit` stayed impossible.
+test("TS and CJS agree with a DIRTY review snapshot on disk (the hook path must not fail closed)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-drift-snap-"));
+  try {
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+    git("init");
+    git("config", "core.excludesFile", "/dev/null");
+    writeFileSync(join(dir, "code.ts"), "// v1\n");
+    git("add", "code.ts");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init");
+    writeFileSync(join(dir, "code.ts"), "// v2 uncommitted\n");
+
+    // A snapshot exactly as prepare_review leaves it: a linked worktree under
+    // the gate-owned path, holding the uncommitted change (i.e. DIRTY — a clean
+    // one does not reproduce the failure).
+    const snapshot = join(dir, ".pi", "review-snapshots", "rg-review-snap-fixture", "one");
+    mkdirSync(join(dir, ".pi", "review-snapshots"), { recursive: true });
+    git("worktree", "add", "--detach", "-q", snapshot, "HEAD");
+    writeFileSync(join(snapshot, "code.ts"), "// v2 uncommitted\n");
+
+    const tsFp = computeFingerprint(dir);
+    const cjsFp = JSON.parse(
+      execFileSync("node", [join(ROOT, "scripts", "compute-fingerprint.cjs"), dir], { encoding: "utf8" }),
+    );
+    assert.equal(tsFp.unavailable, false, "the TS copy must still compute a digest");
+    assert.equal(cjsFp.unavailable, false, "the CJS copy (the hook path) must still compute a digest");
+    assert.equal(cjsFp.digest, tsFp.digest, "a snapshot must not make the two copies disagree");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The parity check above contains no submodule, so both implementations could
 // omit submodule coverage identically and still agree. Exercise that path
 // explicitly: assert parity AND that both actually detect submodule content.

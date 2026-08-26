@@ -316,7 +316,12 @@ function indexTree(cwd) {
   return withScratchIndex(cwd, (scratch) => {
     seedScratchIndex(cwd, scratch);
     const env = { ...gitBaseEnv(), GIT_INDEX_FILE: scratch };
-    git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
+    // `-f`: same reason as lib/fingerprint.ts and compute-fingerprint.cjs — a
+    // review snapshot is a GITLINK git refuses to unstage without it, and this
+    // checker failing closed is indistinguishable (to the user) from a real
+    // staged-vs-reviewed divergence. `--cached` + a scratch index: no
+    // working-tree file is touched.
+    git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
     return git(cwd, ["write-tree"], env);
   });
 }

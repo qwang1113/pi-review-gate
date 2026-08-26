@@ -222,7 +222,14 @@ function worktreeTreeOid(cwd) {
 
     git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
-    git(cwd, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
+    // `-f` mirrors lib/fingerprint.ts (parity is the whole point of this file):
+    // a review snapshot is a linked worktree under `.pi/review-snapshots/`,
+    // staged by `add -A` as a GITLINK matching neither the working tree nor
+    // HEAD, and plain `git rm --cached` refuses exactly that. Without the flag
+    // THIS copy — the one the L3 pre-commit hook runs — fails closed while the
+    // extension already recorded READY, moving the deadlock instead of fixing
+    // it. `--cached` keeps it inside the throwaway shadow index.
+    git(cwd, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", ...GATE_EXCLUDE_PATHSPECS], env);
 
     const tree = git(cwd, ["write-tree"], env);
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) {

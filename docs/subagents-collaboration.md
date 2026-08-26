@@ -10,8 +10,9 @@
 
 | 环节 | 扩展负责(事实) | agent 负责(spawn) | 扩展验证 |
 | --- | --- | --- | --- |
-| 分片 | `prepare_review` 用 `planReviewShards` 把大 diff 切成 ≤4 个不相交组(纯函数,测试锁定) | 每 shard spawn 一个 reviewer,同 turn async,各自带 cwd | — |
+| 分片 | `prepare_review` 用 `planReviewShards` 把大 diff 切成 ≤4 个不相交组(纯函数,测试锁定) | 每 shard spawn 一个 reviewer,同 turn async,**各自一个顶层调用并带 cwd** | — |
 | 快照隔离 | 每个 reviewer 一个**可写**的 disposable snapshot worktree(含未提交改动)+ finding-stream 文件 | spawn 时传 snapshot 的 cwd | `record_review` 重派生每个 snapshot 的树,拒绝"留下编辑痕迹的 READY" |
+| **cwd 强制**(2026-08-26 新增) | 快照存在期间,`tool_call` 硬拦截未指向快照的 reviewer spawn,并**整体禁止**用 `workflowScript`/`workflowScriptPath` 派发 reviewer(该沙箱 `runs.run` 无 per-child `cwd`,所有 reviewer 会共用一个目录) | 逐个顶层 spawn,复制 `prepare_review` 打印的调用 | `record_review` 逐快照要求"被真正进入"的证据:放行时记下的 spawn,或 verdict 里 reviewer 自报的 `pwd`;两者皆无则 READY 降级 BLOCKED(`SNAPSHOT UNUSED`) |
 | 评审契约 | 每 shard 的 ready-made 任务文本(`buildShardPrompt`,含快照契约、mutation 许可/禁止、stream 指令、**goal 文本**) | 原样使用,不重打 | — |
 | 结构化输出 | `SHARD_VERDICT_SCHEMA` 作为每个 spawn 的 outputSchema | 填到 spawn 上 | `record_review` 用全 fence 解析器(worst wins) |
 | 双评审 | `planFanoutFromFacts`(模型注册表)→ fan-out 计划注入 prompt + **prepare_review 返回推荐 model**(本次新增) | 按计划数 spawn,跨 family | 计划注明单评审 fallback 及 Note |
@@ -80,6 +81,8 @@ fan-out 计划(注册表事实)决定双评审的 family 构成,但 agent 此前
 ### 3.3 prepare_wave 返回可粘贴的 workflowScript 骨架
 
 返回文本直接给出一段 `runs.all([...])` 骨架,key 即 module id,agent 只需填入任务文本与 `WAVE_WORKER_SCHEMA`——消除手工拼模块列表的错误源。
+
+**仅限 wave**:wave worker 是只读的,在真实 repo 里读代码、只吐 patch,所以共用一个 cwd 无害。reviewer 相反——每个必须待在自己的快照里,而 workflowScript 沙箱给不了 per-child `cwd`,所以快照存在期间用 workflowScript 派发 reviewer 会被硬拦截(见 §1.1 的 cwd 强制行)。
 
 ## 4. 边界原则(防回归)
 

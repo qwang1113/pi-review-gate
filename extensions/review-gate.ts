@@ -221,6 +221,11 @@ import {
 } from "../lib/review-snapshot.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
 import { applyVerdictGuards, decideSnapshotPlan } from "../lib/verdict-guards.ts";
+import {
+  decideReviewerSpawn,
+  decideSnapshotUsage,
+  extractVerdictCwds,
+} from "../lib/reviewer-spawn-guard.ts";
 import { isModelAllowed } from "../lib/model-allowlist.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
@@ -564,6 +569,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (a === b) return true;
     try { return realpathSync(a) === realpathSync(b); } catch { return false; }
   }
+  /** Resolve a path through symlinks, or return it unchanged when it cannot be
+   *  resolved (a path that does not exist is not an error here — the caller is
+   *  comparing strings, not opening files).
+   *
+   *  Load-bearing for the snapshot pin on macOS: `snapshotBaseDir` falls back to
+   *  the system temp dir, where `prepare_review` prints `/var/folders/…` while a
+   *  reviewer's own `pwd` prints `/private/var/folders/…`. Comparing the raw
+   *  strings would silently lose the reviewer's self-reported evidence and
+   *  could withhold an honest READY. */
+  function canonicalPath(p: string): string {
+    try { return realpathSync(p); } catch { return p; }
+  }
   /** Persist a repo's state: the primary repo goes through persist() (session
    *  entry + widget + .blocked handling); other repos write their own sidecar
    *  (the same fail-closed .blocked marker on write failure). Each repo's
@@ -880,6 +897,19 @@ export default function reviewGate(pi: ExtensionAPI) {
   const preparedSnapshots = new Map<string, ReviewSnapshot[]>();
 
   /**
+   * Snapshot dirs a reviewer was demonstrably spawned INTO, per repo.
+   *
+   * Booked by the tool_call guard the moment it lets a correctly-pinned
+   * reviewer through, and read back by `record_review`: a snapshot with no
+   * entry here and no reviewer that named it as its cwd was never used, which
+   * means that part of the change was judged somewhere else (or not at all).
+   *
+   * In memory, cleared with the snapshots themselves — a booking that outlived
+   * its round would vouch for a reviewer that never ran in THIS one.
+   */
+  const consumedSnapshots = new Map<string, Set<string>>();
+
+  /**
    * Drift discovered when a round was RELEASED but whose verdict had not been
    * recorded yet, per repo.
    *
@@ -937,6 +967,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       try { removeReviewSnapshot(snap, repoRoot); } catch { /* best-effort */ }
     }
     preparedSnapshots.delete(repoRoot);
+    // The spawn bookings die with the round they describe: kept around, they
+    // would tell the NEXT round that a snapshot it just created had already
+    // been reviewed in.
+    consumedSnapshots.delete(repoRoot);
     return drifts;
   }
 
@@ -1688,6 +1722,82 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       sessionEdited = true;
       return;
+    }
+
+    // ---------- reviewer snapshot pin (HARD) ----------
+    //
+    // `prepare_review` hands out one disposable worktree per reviewer and
+    // prints its cwd; whether the reviewer is actually SPAWNED there used to be
+    // pure honour. It was not honoured — for a whole session — and the failure
+    // hides itself: a reviewer left in the live worktree never touches its
+    // snapshot, so `verifySnapshot` finds the tree unchanged and calls it
+    // "clean". The gate verified an untouched copy while the review happened
+    // somewhere else entirely. Saying "each with its own cwd" one more time in
+    // a prompt cannot fix that, so the spawn is refused here instead.
+    //
+    // Placed BEFORE the mode returns below on purpose: this is not workflow
+    // enforcement (which normal mode switches off), it is the integrity of a
+    // tool the agent itself invoked — snapshots exist only because
+    // prepare_review was called, and a review that silently ran against the
+    // wrong tree is worthless in every mode. It costs nothing when no review is
+    // in flight: with no prepared snapshots the map is empty and this returns
+    // immediately.
+    if (preparedSnapshots.size > 0) {
+      // ONE decision over EVERY open snapshot, not one decision per repo. A
+      // per-repo loop refused a perfectly good spawn in a multi-repo session:
+      // repo A's snapshots do not contain repo B's, so B's correctly-pinned
+      // reviewer looked like an unpinned one to A and was blocked before B was
+      // ever consulted. Deciding once over the union also makes the block
+      // reason list every snapshot the agent could legitimately have meant.
+      const openSnapshots: { label: string; dir: string }[] = [];
+      const ownerOfDir = new Map<string, string>();
+      const booked: string[] = [];
+      const multiRepo = preparedSnapshots.size > 1;
+      for (const [snapRoot, snaps] of preparedSnapshots) {
+        for (const snap of snaps) {
+          openSnapshots.push({
+            label: multiRepo ? `${repoLabel(snapRoot)}:${snap.instance}` : snap.instance,
+            dir: canonicalPath(snap.dir),
+          });
+          ownerOfDir.set(canonicalPath(snap.dir), snapRoot);
+        }
+        booked.push(...(consumedSnapshots.get(snapRoot) ?? []));
+      }
+      const decision = decideReviewerSpawn({
+        toolName: event.toolName,
+        params: input,
+        snapshots: openSnapshots,
+        consumed: booked,
+        resolve: (p) => canonicalPath(pathResolve(cwd, p)),
+        // Judge a workflow FILE by its contents: matching only the file NAME
+        // let a neutrally-named workflow dispatch reviewers untouched. Bounded
+        // and fail-soft — an unreadable or oversized file falls back to the
+        // name, and reading a script the agent is about to execute anyway adds
+        // no new trust boundary.
+        readScript: (p) => {
+          try {
+            // Resolve like pi-subagents does: a relative workflowScriptPath is
+            // taken against the CALL's own `cwd` when it has one, not the
+            // session's. Reading the wrong file silently degrades the content
+            // check back to name matching (a reviewer measured this).
+            const base = typeof input.cwd === "string" && input.cwd.trim() !== ""
+              ? pathResolve(cwd, input.cwd)
+              : cwd;
+            const abs = pathResolve(base, p);
+            if (statSync(abs).size > 512 * 1024) return undefined;
+            return readFileSync(abs, "utf8");
+          } catch { return undefined; }
+        },
+      });
+      if (decision.kind === "block") return { block: true, reason: decision.reason };
+      if (decision.kind === "allow") {
+        const owner = ownerOfDir.get(decision.snapshotDir);
+        if (owner) {
+          const seen = consumedSnapshots.get(owner) ?? new Set<string>();
+          seen.add(decision.snapshotDir);
+          consumedSnapshots.set(owner, seen);
+        }
+      }
     }
 
     if (event.toolName !== "bash") return;
@@ -2975,14 +3085,33 @@ export default function reviewGate(pi: ExtensionAPI) {
             // only when plan.slotSource is set, explicitly because handing the
             // agent an override would seat a cheap-tier model as judge).
             []),
-        "Spawn ONE reviewer per entry below, all in the SAME turn (async), each with its own cwd:",
+        // COPYABLE CALLS, NOT A DESCRIPTION. This block used to read "spawn one
+        // reviewer per entry below, each with its own cwd" followed by a list —
+        // and that is exactly how a whole session of reviews ended up in the
+        // live worktree: the agent reached for the ONE dispatch shape the host
+        // prompt recommends for parallel work (a single workflowScript), whose
+        // sandbox cannot carry a per-child cwd at all. The spawn guard now
+        // refuses that shape; printing the calls it WILL accept is the other
+        // half, so the correct path needs no translation.
+        "Spawn these reviewers as SEPARATE top-level `subagent` calls, all in the SAME turn. Copy each " +
+          "call as-is (the `task` text for each one is below):",
         ...snaps.map((s) => {
           const shard = byLabel.get(s.instance);
+          const model = reviewerModels.get(s.instance);
           return (
-            `- ${s.instance}: cwd=${s.dir}\n  stream=${s.streamPath}` +
+            `- ${s.instance}: subagent({ agent: "reviewer", async: true, cwd: "${s.dir}"` +
+            (model ? `, model: "${model}"` : "") +
+            ", task: <its task text below>, outputSchema: <the schema below> })" +
+            `\n  stream=${s.streamPath}` +
             (shard ? `\n  files (${shard.note}): ${shard.files.join(", ")}` : "")
           );
         }),
+        "",
+        "Do NOT dispatch reviewers through `workflowScript`/`workflowScriptPath`: its sandbox exposes " +
+          "`runs.run(key, { agent, task, worktree?, gate? })` with NO per-child `cwd`, so every reviewer " +
+          "would share one directory — your live worktree — while the snapshots sit untouched and verify " +
+          "as \"clean\". The gate blocks that shape while snapshots are open; separate top-level calls in " +
+          "one turn run just as parallel.",
         "",
         buildStreamConsumerDirective(snaps.map((s) => s.streamPath)),
         "",
@@ -3008,8 +3137,18 @@ export default function reviewGate(pi: ExtensionAPI) {
               ];
             })
           : [
+              // A shard reviewer gets the pwd instruction inside its ready-made
+              // task text (buildShardPrompt); a small-diff reviewer's task is
+              // written by YOU, so the instruction has to be handed over here —
+              // otherwise the second proof of isolation would exist only as a
+              // schema field description, which is the half of a contract
+              // models skip.
               "Give each reviewer this instruction block (substituting its own stream path):",
               buildStreamDirective(snaps[0]!.streamPath),
+              "",
+              "Also put this in every reviewer's task text: \"Run `pwd` and report exactly what it " +
+                "printed in the verdict's `cwd` field — do not copy the path from this task text. The " +
+                "gate matches it against the snapshot prepared for you.\"",
             ]),
         "",
         "The reviewer works in a disposable copy: mutation analysis is encouraged, but it MUST restore " +
@@ -3138,7 +3277,37 @@ export default function reviewGate(pi: ExtensionAPI) {
       });
       const driftBlocked = guarded.driftBlocked;
       const staleTree = guarded.staleTree;
-      parsed.verdict = guarded.verdict as typeof parsed.verdict;
+      // GUARD 3 — WAS THE SNAPSHOT EVER ENTERED? Drift proves a reviewer
+      // CHANGED its copy; it says nothing about a reviewer that never opened
+      // it. That is the silent failure this repo actually hit: reviewers
+      // spawned without a `cwd` judged the live worktree, their snapshots
+      // stayed pristine, and pristine reads as "clean". So each snapshot must
+      // show evidence of use — the spawn the guard observed, or a verdict that
+      // reported that directory as its own `pwd`.
+      //
+      // A verdict arriving AFTER the next round was prepared is judged against
+      // that round's snapshots (the previous ones are gone). That fails closed,
+      // like the parked-drift path above: the fix is to record a round's
+      // verdict before preparing the next one.
+      // Every path is canonicalized on BOTH sides before comparison: the
+      // snapshot dir the gate handed out, the dirs booked at spawn, and the
+      // pwd a reviewer reported. On macOS a tmpdir-fallback snapshot is printed
+      // as `/var/folders/…` and reported back as `/private/var/folders/…`, so
+      // raw string equality would drop honest evidence and withhold a good
+      // READY.
+      const roundSnapshots = (preparedSnapshots.get(targetRoot) ?? []).map((s) => ({
+        label: s.instance,
+        dir: canonicalPath(s.dir),
+      }));
+      const usage = decideSnapshotUsage({
+        verdict: guarded.verdict,
+        snapshots: roundSnapshots,
+        consumed: [...(consumedSnapshots.get(targetRoot) ?? [])].map(canonicalPath),
+        verdictCwds: extractVerdictCwds(params.reviewer_output).map(canonicalPath),
+      });
+      const unusedSnapshots = usage.unusedLabels;
+      const unusedBlocked = usage.verdict !== guarded.verdict;
+      parsed.verdict = usage.verdict as typeof parsed.verdict;
       st.review = {
         verdict: parsed.verdict,
         fingerprint: parsed.verdict === "READY" ? fp.digest : null,
@@ -3249,6 +3418,16 @@ export default function reviewGate(pi: ExtensionAPI) {
                 "review runs: those fixes are already in, so the next round is short. Re-review the " +
                 "current tree (prepare_review → spawn → record_review)."
               : "") +
+            (unusedSnapshots.length
+              ? `\nSNAPSHOT UNUSED: no reviewer was observed running in ${unusedSnapshots.join(", ")} ` +
+                "— neither a spawn pinned to it nor a verdict reporting it as its own `pwd`. A reviewer " +
+                "outside its snapshot judges your live worktree, and the untouched snapshot then verifies " +
+                "as \"clean\", so this cannot be treated as coverage" +
+                (unusedBlocked
+                  ? ". The READY is recorded as BLOCKED. Re-run: prepare_review → one top-level " +
+                    "`subagent` call per snapshot WITH its `cwd` → record_review."
+                  : " (the verdict was not READY, so it stands).")
+              : "") +
             (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : ""),
         }],
         details: {
@@ -3256,6 +3435,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           round: st.rounds.length,
           repo: repoLabel(targetRoot),
           ...(snapshotDrifts.length ? { snapshotDrift: snapshotDrifts } : {}),
+          ...(unusedSnapshots.length ? { snapshotUnused: unusedSnapshots } : {}),
           ...(staleTree ? { staleTree } : {}),
         },
       };
@@ -5512,6 +5692,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // "session exit" cleanup — done on the next start, because a crashed
     // session never gets to run one). Age-bounded and prefix-scoped.
     preparedSnapshots.clear();
+    // The spawn bookings describe those same dead rounds — a booking that
+    // survived would let a new round's snapshot pass as "already reviewed in".
+    consumedSnapshots.clear();
     // …and with them the record of what those reviewers saw. A tree left over
     // from a previous session would make the stale-tree guard reject the next
     // HONEST READY with a misleading "STALE TREE" — tighten-only, but it burns

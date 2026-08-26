@@ -449,6 +449,41 @@ test("a deinit'd submodule does not brick the fingerprint", (t) => {
   assert.equal(computeFingerprint(parent).digest, fp.digest);
 });
 
+test("REGRESSION: a DIRTY review snapshot on disk does not break the tree computation", () => {
+  // MEASURED, and the dirtiness is the whole point — an earlier version of this
+  // test added a CLEAN linked worktree and therefore passed with and without
+  // the fix (a reviewer caught that: the mutant survived).
+  //
+  // A real snapshot is never clean: prepare_review does `read-tree <worktree
+  // tree>` + `checkout-index`, so the copy holds the UNCOMMITTED change. Git
+  // stages a linked worktree as a GITLINK (160000) whose content then matches
+  // neither the working tree nor HEAD, and plain `git rm --cached` refuses
+  // exactly that ("use -f to force removal"). worktreeTreeOid threw, so
+  // record_review saw "current tree unreadable" and downgraded EVERY READY
+  // that had gone through prepare_review as STALE TREE.
+  //
+  // Probed here before writing this: clean snapshot → the removal succeeds
+  // either way; dirty snapshot → it fails without `-f`, with or without the
+  // repo's ignore rules. Hence: dirty, and `disableGlobalExcludes` only so the
+  // fixture never depends on the developer's global ignore file.
+  const dir = makeRepo();
+  disableGlobalExcludes(dir);
+  writeFileSync(join(dir, "file.ts"), "// v1");
+  const before = worktreeTreeOid(dir);
+
+  const snapshot = join(dir, ".pi", "review-snapshots", "rg-review-snap-fixture", "one");
+  mkdirSync(dirname(snapshot), { recursive: true });
+  execFileSync("git", ["worktree", "add", "--detach", "-q", snapshot, "HEAD"], { cwd: dir, stdio: "ignore" });
+  // What createReviewSnapshot leaves behind: the change under review, uncommitted.
+  writeFileSync(join(snapshot, "file.ts"), "// v1");
+  try {
+    const after = worktreeTreeOid(dir);
+    assert.equal(after, before, "an excluded snapshot must not move the tree — or fail it");
+  } finally {
+    execFileSync("git", ["worktree", "remove", "--force", snapshot], { cwd: dir, stdio: "ignore" });
+  }
+});
+
 test("unstaged edit changes fingerprint", () => {
   const dir = makeRepo();
   writeFileSync(join(dir, "file.ts"), "// v1");

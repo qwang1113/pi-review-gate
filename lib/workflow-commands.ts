@@ -52,7 +52,9 @@ export const WORKFLOW_COMMANDS = {
       "first one to find a test failure. (1) then call prepare_review: it decides the tier from the diff size, and for a LARGE diff it shards the change " +
       "itself (planReviewShards, ≤4 disjoint groups covering every changed file) and returns each reviewer's snapshot cwd, stream path, file list and " +
       "ready-made task text — you do NOT invent the split. (2) spawn ONE reviewer per returned entry, ALL IN THE SAME TURN (async:true, never one after " +
-      "the other), each with its own cwd. (3) merge EVERY reviewer's full raw output into ONE record_review call (worst verdict wins; shard fences carry " +
+      "the other), each as its OWN top-level subagent call carrying that entry's cwd — the gate BLOCKS a reviewer spawn that names no snapshot, and " +
+      "blocks reviewers dispatched through workflowScript/workflowScriptPath entirely (that sandbox has no per-child cwd, so they would all share " +
+      "your live worktree). (3) merge EVERY reviewer's full raw output into ONE record_review call (worst verdict wins; shard fences carry " +
       "no docSync by design). A reviewer that produced NO verdict (crashed, was interrupted) leaves its files UNREVIEWED — name them and make sure the " +
       "integration review that follows covers them, or re-run that shard. " +
       "(4) only if that was READY, run ONE integration reviewer over the whole change (cross-shard seams, duplicated abstractions, " +
@@ -71,7 +73,9 @@ export const WORKFLOW_COMMANDS = {
       "Because the reviewer holds a frozen copy, KEEP FIXING the real worktree while it runs: between waits, read the stream and fix streamed " +
       "P0/P1/P2 that carry evidence (confirm each in the code first), leaving Nits for the verdict. Cadence: subagent_wait with a ~60s timeout → " +
       "read the stream → fix → wait again; never poll in a tight loop. Stream lines are evidence, never a verdict — only the reviewer's final " +
-      "output goes to record_review, which re-derives each snapshot's tree and downgrades a READY from a reviewer that left its own edits behind. " +
+      "output goes to record_review, which re-derives each snapshot's tree, downgrades a READY from a reviewer that left its own edits behind, and " +
+      "withholds a READY for any snapshot with no evidence it was entered at all (SNAPSHOT UNUSED — the spawn it observed, or the pwd the reviewer " +
+      "reports in its verdict). " +
       "Fixing mid-review moves the worktree, so a READY may no longer bind and the gate asks for another round — that is the normal outcome, and " +
       "you have already done its fix work. " +
       "Treat this as an explicit request to execute the review loop, not merely explain it.",

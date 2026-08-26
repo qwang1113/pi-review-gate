@@ -53,6 +53,17 @@ export interface ShardReviewPlan {
  */
 export interface ShardVerdict {
   gate: "READY" | "BLOCKED" | "NEEDS_HUMAN";
+  /**
+   * The directory the reviewer ACTUALLY ran in, from its own `pwd`.
+   *
+   * Second, independent piece of evidence that the reviewer was inside the
+   * snapshot prepared for it (the first is the spawn the gate observed). It
+   * also catches the case the spawn guard cannot see: a reviewer pointed at its
+   * snapshot correctly that then `cd`-ed into the live worktree. The prompt
+   * insists on a real `pwd` rather than copying the path out of the task text,
+   * because a copied value proves nothing.
+   */
+  cwd: string;
   findings: Array<{
     file: string;
     line: number;
@@ -118,6 +129,12 @@ export const SHARD_VERDICT_SCHEMA = {
   type: "object",
   properties: {
     gate: { type: "string", enum: ["READY", "BLOCKED", "NEEDS_HUMAN"] },
+    cwd: {
+      type: "string",
+      description:
+        "Absolute path you actually ran in, taken from your own `pwd` — not copied from the task text. " +
+        "The gate checks it against the snapshot prepared for you.",
+    },
     findings: {
       type: "array",
       items: {
@@ -133,7 +150,10 @@ export const SHARD_VERDICT_SCHEMA = {
     },
     notes: { type: "string" },
   },
-  required: ["gate", "findings"],
+  // `cwd` is REQUIRED: it is one of the two independent proofs that the
+  // reviewer ran inside its snapshot, and an optional field would simply be
+  // omitted by the models that most need to be checked.
+  required: ["gate", "cwd", "findings"],
 } as const;
 
 /**
@@ -182,7 +202,20 @@ export function buildShardPrompt(
   lines.push(
     "",
     "OUTPUT: fenced JSON verdict FIRST (the gate parses it; no docSync field — the integration reviewer attests docs), then a prose review below the fence.",
-    'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
+    // The reviewer's own `pwd` is EVIDENCE, and only if it is measured: a value
+    // copied out of this prompt would prove nothing about where the review
+    // actually happened, which is precisely the failure this field exists for.
+    //
+    // The SECOND sentence is branch-specific. Promising "the gate checks it
+    // against the snapshot prepared for you" on the no-isolation branch
+    // contradicts the paragraph above it (which just said there is no snapshot
+    // this round) and could push a literal-minded reviewer into a needless
+    // non-READY.
+    'Before you answer, run `pwd` and put its output in the verdict\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
+      (isolation
+        ? " The gate checks it against the snapshot prepared for you, and a reviewer that ran outside its snapshot cannot approve the change."
+        : " There is no snapshot this round, so this only records where you read; the gate does not match it against one."),
+    'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "cwd": "<your real pwd>", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",
   );
   return lines.join("\n");
