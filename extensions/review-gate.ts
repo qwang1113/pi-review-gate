@@ -3062,18 +3062,37 @@ export default function reviewGate(pi: ExtensionAPI) {
       // outside every reviewed range while its tree still ships. The READY's
       // commitSha is used when it is an ancestor of HEAD (the normal chain).
       // When it is NOT an ancestor the chain was rewritten (squash/rebase):
-      // fall back to the checkpoint's parent — that range covers the WHOLE
-      // new chain since the checkpoint base, so no content escapes review.
-      // (Round-12: an explicit rejection here was removed — it refused
-      // legitimate squash + checkpoint flows; the fallback is always
-      // well-defined because prepare_review requires a checkpoint.)
+      // walk the new chain from the checkpoint's parent to find the SQUASH
+      // POINT — the newest commit whose tree equals the reviewed tree — and
+      // baseline from there, so the range covers the whole new chain (the
+      // squash commit plus every checkpoint after it). No matching tree
+      // (a content-changing rebase) falls back to the branch base so the
+      // review covers everything.
       const lastReviewed = st.review?.verdict === "READY" ? st.review.commitSha : undefined;
       let baseline: string | undefined;
       if (lastReviewed) {
         try {
           execFileSync("git", ["merge-base", "--is-ancestor", lastReviewed, "HEAD"], { cwd: root, stdio: "ignore" });
           baseline = lastReviewed;
-        } catch { /* chain rewritten — fall through to the checkpoint baseline */ }
+        } catch {
+          // Chain rewritten: find the squash point by tree identity.
+          let cur = st.checkpoint.prevSha;
+          for (let i = 0; i < 100 && cur; i++) {
+            try {
+              const tree = execFileSync("git", ["rev-parse", `${cur}^{tree}`], { cwd: root, encoding: "utf8" }).trim();
+              if (tree === st.review.fingerprint) { baseline = cur; break; }
+              cur = execFileSync("git", ["rev-parse", `${cur}^`], { cwd: root, encoding: "utf8" }).trim();
+            } catch { cur = ""; }
+          }
+          if (!baseline) {
+            // No commit carries the reviewed tree — a content-changing
+            // rewrite. Cover everything from the branch base.
+            try {
+              baseline = execFileSync(
+                "git", ["merge-base", "main", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+            } catch { /* fall through to the checkpoint baseline */ }
+          }
+        }
       }
       if (!baseline) {
         baseline =
