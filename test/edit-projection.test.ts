@@ -86,7 +86,7 @@ test("no content and no fragments yields empty string", () => {
 });
 
 // ---------------------------------------------------------------------------
-// hashline edit format (pi-hashline-readmap replaces pi's edit tool with
+// hashline edit format (pi-hashline-edit-pro replaces pi's edit tool with
 // anchor-based items: set_line / replace_lines / insert_after). Regression:
 // the edit-time L6 label check silently passed EVERY hashline edit because
 // extractEditFragments only knew oldText/newText and the projection came back

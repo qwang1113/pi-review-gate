@@ -8,6 +8,7 @@ systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
 defaultReads: plan.md, progress.md
+defaultContext: fresh
 tools: read, grep, find, ls, bash
 ---
 

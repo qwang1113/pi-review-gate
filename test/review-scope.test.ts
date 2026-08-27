@@ -219,3 +219,43 @@ test("a FULL round still lists the previous findings to re-check one by one", ()
   assert.match(text, /"f1"; "f2"/);
   assert.doesNotMatch(text, /SETTLED/, "a full round settles nothing in advance");
 });
+
+test("reviewer audience rewords the agent-facing sentences without duplicating the block", () => {
+  // Goal criterion 1: the SAME directive now rides the reviewer's own task
+  // text. Only the sentences that address the reader change — the decision,
+  // the increment and the findings list must stay identical to the
+  // agent-facing version, or the two surfaces drift apart.
+  const d = decideReviewScope({
+    baseTree: "T",
+    changedFiles: ["src/a.ts"],
+    changedLines: 3,
+    previouslyReviewedFiles: reviewed,
+  });
+  const settled = { verdict: "READY", at: "2026-08-27T00:00:00.000Z", rounds: 2 };
+  const agent = formatReviewScopeDirective(d, ["f1"], settled, "agent");
+  const reviewer = formatReviewScopeDirective(d, ["f1"], settled, "reviewer");
+  // Reviewer-facing phrasing: addressed to YOU, not about "the reviewer".
+  assert.match(reviewer, /You still have the FULL diff as context/);
+  assert.match(reviewer, /not a bar on your authority/);
+  assert.doesNotMatch(reviewer, /Hand the reviewer the FULL diff/);
+  // Agent-facing phrasing is unchanged from before.
+  assert.match(agent, /Hand the reviewer the FULL diff as context/);
+  assert.match(agent, /not a bar on your authority/);
+  // The facts are identical across audiences: decision line, increment,
+  // settled conclusion and the findings to re-check.
+  for (const fact of [
+    "INCREMENTAL",
+    "src/a.ts",
+    "SETTLED last round",
+    '"f1"',
+  ]) {
+    assert.match(agent, new RegExp(fact));
+    assert.match(reviewer, new RegExp(fact));
+  }
+});
+
+test("reviewer audience: a full decision still says FULL deep review", () => {
+  const text = formatReviewScopeDirective(decideReviewScope({}), [], undefined, "reviewer");
+  assert.match(text, /FULL deep review/);
+  assert.doesNotMatch(text, /Hand the reviewer/);
+});

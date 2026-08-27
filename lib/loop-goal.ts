@@ -118,8 +118,145 @@ export interface GoalPrereviewRecord {
   at: string;
   /** Findings the auditor reported (null when the fence was unparseable). */
   findingsTotal?: number | null;
+  /**
+   * The findings VERBATIM (severity + issue), when the fence parsed. Persisted
+   * so a RE-audit of a revised draft can be handed the previous audit's
+   * objections (goal criterion 2: incremental re-audit) — fingerprints alone
+   * can look a finding up, they cannot carry it into the next task text.
+   */
+  findings?: Array<{ severity: string; issue: string }>;
+  /**
+   * The NORMALIZED draft text that was judged, when known. A re-audit of a
+   * revised draft must be able to diff against the old draft, not just its
+   * hash — the hash proves the texts differ, the text says how.
+   */
+  draft?: string;
+  /**
+   * Wall-clock milliseconds this audit took, when the agent reported when it
+   * dispatched the auditor (goal criterion 6: first-vs-re-audit timing).
+   * Absent on older records — diagnostic only, never a ship input.
+   */
+  durationMs?: number;
 }
 
+/**
+ * The carryover block shown when an audit REPLACES a record for a DIFFERENT
+ * draft: the previous verdict and its findings, so the agent can hand them to
+ * the auditor on the re-audit (plus what changed since — which only the agent
+ * knows). Undefined when there is no previous record at all. A prior audit
+ * with zero parsed findings still carries its VERDICT — an unqualified PASS
+ * or FAIL is itself a conclusion worth not re-deriving. Pure so the shape is
+ * testable.
+ */
+export function formatGoalPrereviewCarryover(prev: GoalPrereviewRecord): string | undefined {
+  const findings = prev.findings ?? [];
+  const lines = [
+    "Goal-auditor re-audit carryover — the PREVIOUS audit judged a DIFFERENT draft of this goal:",
+    `- Previous verdict: ${prev.verdict} (${findings.length} finding(s), ${prev.at}).`,
+    ...(findings.length
+      ? [
+          "- Previous findings, one by one — the revised draft must address each:",
+          ...findings.map((f) => `  - ${f.severity}: ${f.issue}`),
+        ]
+      : ["- The previous audit reported no findings — confirm that still holds."]),
+    ...(prev.draft
+      ? [
+          "- The PREVIOUS draft (judged then):",
+          "```",
+          prev.draft,
+          "```",
+        ]
+      : []),
+    "- Also tell the auditor what changed in the draft since that audit.",
+  ];
+  return lines.join("\n");
+}
+
+/**
+ * Line-level diff between two drafts: which lines were removed and which
+ * were added (in order, best-effort alignment). Enough to tell a re-auditor
+ * mechanically WHAT changed in the draft — the previous draft, its findings
+ * and this delta are the whole carryover contract. Pure so it is testable.
+ */
+export function diffDraftLines(before: string, after: string): { removed: string[]; added: string[] } {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  const removed: string[] = [];
+  const added: string[] = [];
+  // Two-pointer scan with a small lookahead for insertions/deletions in the
+  // middle of a block — an exact LCS is overkill for drafts a few KB long.
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    // Look ahead: is the next b-line the current a-line (an insertion)?
+    if (a[i] === b[j + 1]) { added.push(b[j]!); j++; continue; }
+    if (b[j] === a[i + 1]) { removed.push(a[i]!); i++; continue; }
+    removed.push(a[i]!);
+    added.push(b[j]!);
+    i++;
+    j++;
+  }
+  for (; i < a.length; i++) removed.push(a[i]!);
+  for (; j < b.length; j++) added.push(b[j]!);
+  return { removed, added };
+}
+
+/**
+ * The ready-made task text for a goal-auditor audit, built by the gate.
+ *
+ * Goal criterion 2 (mechanically injected re-audit): `record_goal_prereview`
+ * replies with this COMPLETE task template. The carryover block (previous
+ * verdict + findings + previous draft) and the mechanically computed draft
+ * delta ride along, so the auditor is told what changed without anyone
+ * hand-writing it; the fresh-context transcript pointer is included too.
+ * The first audit of a goal (no previous record) gets the plain template.
+ */
+export function buildGoalAuditTask(
+  draft: string,
+  opts: {
+    carryover?: string;
+    prevDraft?: string;
+    sessionDir?: string;
+    sessionId?: string;
+  } = {},
+): string {
+  const lines = [
+    "You are goal-auditor. Audit the draft loop goal below as the exit contract for this session.",
+    "",
+    "Spawn this auditor with `context: \"fresh\"` explicitly (round-10 P1: a global",
+    "defaultSubagentContext would override the agent's own defaultContext).",
+    "",
+    ...(opts.carryover ? [opts.carryover, ""] : []),
+    "===== 待审计的 goal 草稿 =====",
+    draft,
+    ...(opts.prevDraft
+      ? (() => {
+          const { removed, added } = diffDraftLines(opts.prevDraft!, draft);
+          const parts: string[] = [];
+          if (removed.length) parts.push("Removed lines:", ...removed.map((l) => `  - ${l}`));
+          if (added.length) parts.push("Added lines:", ...added.map((l) => `  + ${l}`));
+          if (!parts.length) parts.push("(no line-level changes detected)");
+          return ["", "===== 与上一版草稿的机械差异 (diff vs previous draft) =====", ...parts, ""];
+        })()
+      : []),
+    "",
+    "审计标准: 退出标准是否可检查(falsifiable)、是否覆盖用户核心诉求、Non-goals 是否明确、有无内部矛盾或与仓库现状冲突的表述。",
+    ...(opts.sessionDir && opts.sessionId
+      ? [
+          "",
+          `You run context:\"fresh\" — if the audit needs the main session's conversation, read it on demand from ${opts.sessionDir} (file named <timestamp>_${opts.sessionId}.jsonl).`,
+        ]
+      : []),
+    "",
+    "输出一个 fenced JSON verdict(放在输出最前):",
+    '```json',
+    '{"gate":"READY"|"BLOCKED","findings":[{"severity":"P0"|"P1"|"P2","issue":"..."}]}',
+    '```',
+    "READY 仅当草稿无未解决 P0/P1 异议。findings 为空表示无异议。",
+  ];
+  return lines.join("\n");
+}
 /**
  * Canonical form the hash is taken over: line endings unified and outer
  * whitespace trimmed, so a trailing newline or a CRLF checkout does not
@@ -223,8 +360,9 @@ export function buildGoalPrereviewRefusal(ctx: GoalPrereviewRefusalContext): str
   return (
     "review-gate: propose_loop_goal refused — " + why + ". The user's approval dialog is not shown until a " +
     "dedicated `goal-auditor` audit of THIS exact text passes.\n" +
-    "Recovery path: revise the draft against the objections → dispatch the `goal-auditor` subagent (paste the " +
-    "draft into its task) → record its FULL raw output with `record_goal_prereview` → call propose_loop_goal " +
+    "Recovery path: revise the draft against the objections → call `prepare_goal_audit` with the revised " +
+    "draft (it returns the ready-made auditor task with the carryover + draft delta) → dispatch the " +
+    "`goal-auditor` subagent with that task → record its FULL raw output with `record_goal_prereview` → " +
     "again with the identical text.\n" +
     "The goal text submitted to the user must be written in Simplified Chinese (technical identifiers, tool " +
     "names, file paths and code tokens stay English) — the auditor blocks a draft that is not.\n" +
@@ -306,8 +444,9 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
   "loop goal not confirmed by the user — interview the user about what \"done\" means (ONE " +
   "question per turn, labeled \"N of M\", each with your recommended answer — all at once only " +
   "when the user asks for it), draft it in Simplified Chinese (identifiers, paths and code " +
-  "tokens stay English), get that exact draft through the `goal-auditor` subagent and record its " +
-  "full raw output with `record_goal_prereview` — propose_loop_goal is refused without a recorded " +
+  "tokens stay English), call `prepare_goal_audit` with that exact draft and dispatch the " +
+  "`goal-auditor` subagent with its ready-made task, then record its full raw output with " +
+  "`record_goal_prereview` — propose_loop_goal is refused without a recorded " +
   "PASS for the identical text — then call propose_loop_goal so the USER can " +
   "approve it in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
@@ -325,8 +464,9 @@ export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
   "review-gate: loop mode requires an approved loop goal BEFORE any edit/write call. " +
   "Negotiate it first: interview the user about what \"done\" means (ONE question per turn, " +
   "labeled \"N of M\", each with your recommended answer), write the goal in Simplified Chinese " +
-  "(technical identifiers, paths and code tokens stay English), then have the DEDICATED " +
-  "`goal-auditor` subagent audit that exact draft and record its full raw output with " +
+  "(technical identifiers, paths and code tokens stay English), call `prepare_goal_audit` with " +
+  "that exact draft, dispatch the `goal-auditor` subagent with its ready-made task, and record its " +
+  "full raw output with " +
   "`record_goal_prereview` — propose_loop_goal refuses to show the user's dialog without a " +
   "recorded PASS for the identical text (a FAIL means: fix the objections and re-audit). Then " +
   "call propose_loop_goal so the USER approves it in a dialog. (If this session was never meant " +
@@ -417,8 +557,10 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "2. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
   "tokens stay English): task title, one-line intent, 3–7 checkable exit criteria, non-goals, " +
   "ISO date.\n" +
-  "3. PRE-REVIEW it mechanically: dispatch the dedicated `goal-auditor` subagent with that exact " +
-  "draft pasted into its task, then record its FULL raw output with `record_goal_prereview`. The " +
+  "3. PRE-REVIEW it mechanically: call `prepare_goal_audit` with the draft to get the ready-made " +
+  "auditor task (it carries the carryover + draft delta when this is a re-audit of a revised " +
+  "draft), dispatch the dedicated `goal-auditor` subagent with that task, then record its FULL " +
+  "raw output with `record_goal_prereview`. The " +
   "extension parses the auditor's JSON fence itself — a FAIL means fix the objections and " +
   "re-audit (the revised text needs its own PASS, the record binds to content).\n" +
   "4. Then call `propose_loop_goal` with the PASSED text. It refuses without a matching PASS. " +

@@ -10,7 +10,7 @@
  *
  * Input shapes handled:
  *  - pi's vanilla edit: `edits: [{oldText, newText}]` (and bare old/newText).
- *  - the hashline edit engine (pi-hashline-readmap REPLACES pi's edit tool,
+ *  - the hashline edit engine (pi-hashline-edit-pro REPLACES pi's edit tool,
  *    so this is what a real session sends): `set_line`, `replace_lines`,
  *    `insert_after`, each anchor-based (`{anchor, new_text}` …). An
  *    unrecognized hashline item is still folded in as raw text — scanning
@@ -29,7 +29,7 @@ export interface EditFragment {
   newText: string;
 }
 
-/** Copy of pi-hashline-readmap's HashlineEditItem variants (local, deduped). */
+/** Copy of pi-hashline-edit-pro's HashlineEditItem variants (local, deduped). */
 interface HashlineEditItem {
   set_line?: { anchor: string; new_text: string };
   replace_lines?: { start_anchor: string; end_anchor: string; new_text: string };
@@ -138,7 +138,7 @@ export function projectEditedContent(
   readFile: () => string | undefined,
 ): string {
   if (typeof input.content === "string") return input.content;
-  // Hashline-form edits (pi-hashline-readmap replaces pi's edit tool with
+  // Hashline-form edits (pi-hashline-edit-pro replaces pi's edit tool with
   // anchor-based items): each item folds its new_text into the projection
   // directly. Pure add-ons — no oldText carrier, so they never "fail to
   // match" and drop content.

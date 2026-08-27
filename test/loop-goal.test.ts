@@ -23,6 +23,9 @@ import {
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
   goalPrereviewPassed,
   buildGoalPrereviewRefusal,
+  formatGoalPrereviewCarryover,
+  buildGoalAuditTask,
+  diffDraftLines,
 } from "../lib/loop-goal.ts";
 
 function repoWithGoal(content?: string, mtimeMs?: number): string {
@@ -412,4 +415,86 @@ test("buildGoalPrereviewRefusal: says WHY, HOW to recover, and echoes the eviden
   const noDir = buildGoalPrereviewRefusal({ goalText: text, auditorInstalled: false, packageAgentsDir: null });
   assert.match(noDir, /包内 agents 目录无法定位/);
   assert.match(noDir, /gate-doctor/);
+});
+
+test("formatGoalPrereviewCarryover carries the previous audit's findings verbatim (goal criterion 2)", () => {
+  const prev = {
+    hash: "aa",
+    verdict: "FAIL" as const,
+    at: "2026-08-27T00:00:00.000Z",
+    findingsTotal: 2,
+    findings: [
+      { severity: "P1", issue: "标准3缺少测试锁定" },
+      { severity: "P2", issue: "模板入口未指明" },
+    ],
+  };
+  const block = formatGoalPrereviewCarryover(prev);
+  assert.ok(block, "a record with findings produces a carryover block");
+  assert.match(block, /PREVIOUS audit judged a DIFFERENT draft/);
+  assert.match(block, /Previous verdict: FAIL \(2 finding\(s\)/);
+  assert.match(block, /P1: 标准3缺少测试锁定/);
+  assert.match(block, /P2: 模板入口未指明/);
+  assert.match(block, /what changed in the draft since that audit/);
+});
+
+test("formatGoalPrereviewCarryover: zero findings still carry the verdict; the old draft rides along", () => {
+  // A prior PASS/FAIL with no parsed findings is still a conclusion — the
+  // re-audit must not re-derive it from zero. The judged draft text rides
+  // along so the re-audit can diff against the actual old text.
+  const block = formatGoalPrereviewCarryover({
+    hash: "aa",
+    verdict: "PASS",
+    at: "2026-08-27T00:00:00.000Z",
+    draft: "# 目标\n\n退出标准: 一条。",
+  });
+  assert.ok(block, "a verdict is carried even with zero findings");
+  assert.match(block, /Previous verdict: PASS \(0 finding\(s\)/);
+  assert.match(block, /reported no findings — confirm that still holds/);
+  assert.match(block, /# 目标/);
+  assert.match(block, /退出标准: 一条/);
+});
+
+test("buildGoalAuditTask: the gate builds the complete auditor task, carryover + transcript ride along", () => {
+  const task = buildGoalAuditTask("# 目标\n\n标准一。", {
+    carryover: "Goal-auditor re-audit carryover — …",
+    sessionDir: "/home/u/.pi/agent/sessions/--repo--",
+    sessionId: "sess-9",
+  });
+  assert.match(task, /You are goal-auditor/);
+  assert.match(task, /Goal-auditor re-audit carryover/);
+  assert.match(task, /===== 待审计的 goal 草稿 =====/);
+  assert.match(task, /# 目标/);
+  assert.match(task, /sess-9/);
+  assert.match(task, /\{"gate":"READY"\|"BLOCKED"/);
+  // First audit (no carryover, no session): plain template, no stale claims.
+  const first = buildGoalAuditTask("# 目标");
+  assert.doesNotMatch(first, /carryover/i);
+  assert.doesNotMatch(first, /sess-/);
+});
+
+test("buildGoalAuditTask: the draft delta is computed mechanically and injected (round-4 P1)", () => {
+  const prev = "# 目标\n\n## 退出标准\n1. 旧标准。\n2. 不变标准。";
+  const next = "# 目标\n\n## 退出标准\n1. 新标准(修订)。\n2. 不变标准。\n3. 新增标准。";
+  const task = buildGoalAuditTask(next, { prevDraft: prev });
+  assert.match(task, /===== 与上一版草稿的机械差异/);
+  assert.match(task, /Removed lines:/);
+  assert.match(task, /- 1\. 旧标准/);
+  assert.match(task, /Added lines:/);
+  assert.match(task, /\+ 1\. 新标准\(修订\)/);
+  assert.match(task, /\+ 3\. 新增标准/);
+  // No prevDraft → no delta block at all.
+  const first = buildGoalAuditTask(next);
+  assert.doesNotMatch(first, /机械差异/);
+});
+
+test("diffDraftLines: pure line diff, insertion and deletion both detected", () => {
+  const { removed, added } = diffDraftLines(
+    "a\nb\nc",
+    "a\nX\nb\nc\nY",
+  );
+  assert.deepEqual(removed, []);
+  assert.deepEqual(added, ["X", "Y"]);
+  const del = diffDraftLines("a\nb\nc", "a\nc");
+  assert.deepEqual(del.removed, ["b"]);
+  assert.deepEqual(del.added, []);
 });

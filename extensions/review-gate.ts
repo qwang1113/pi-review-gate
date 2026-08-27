@@ -128,7 +128,9 @@ import {
   unmetRequirements,
   type GateState,
 } from "../lib/gate-state.ts";
-import { parseReviewOutput, parsePrecommitOutput } from "../lib/verdict-parse.ts";
+import { parseReviewOutput, parsePrecommitOutput, parseFenceFindings } from "../lib/verdict-parse.ts";
+import { buildAdviserBrief, countAdviserConclusions, parseAdviserConclusions, type AdviserConclusion } from "../lib/adviser-brief.ts";
+import { sessionDirForCwd } from "../lib/session-dir.ts";
 import {
   evaluateModeChange,
   buildModeConfirmMessage,
@@ -166,6 +168,8 @@ import {
   isLoopGoalConfirmed,
   normalizeGoalText,
   readLoopGoal,
+  formatGoalPrereviewCarryover,
+  buildGoalAuditTask,
   GOAL_CONFIRM_TITLE,
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
@@ -257,6 +261,8 @@ import {
 import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "../lib/workflow-commands.ts";
 import {
   buildReviewPrompt,
+  formatPrecommitBaseline,
+  extractPrecommitBaseline,
   REVIEW_VERDICT_SCHEMA,
 } from "../lib/parallel-review.ts";
 import {
@@ -2760,7 +2766,29 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       if (planDecision.kind === "none") {
         // Fail-soft, and SAY so: without isolation the reviewer must not edit,
-        // and the agent must not fix while it runs.
+        // and the agent must not fix while it runs. The READY-MADE task text
+        // still rides along — scope, fresh-context transcript pointer and
+        // precommit baseline must reach the readonly reviewer too (round-8
+        // P1: this branch used to omit all three).
+        const st = stateForRepo(target.root);
+        const scopeNow = reviewScopeFor(target.root, st);
+        const readonlyTask = buildReviewPrompt(
+          "review",
+          changed.ok ? changed.files : [],
+          goalText,
+          undefined,
+          // No isolation: buildReviewPrompt's default is the READ-ONLY contract.
+          undefined,
+          formatReviewScopeDirective(
+            scopeNow,
+            previousRoundFindings(st),
+            settledConclusion(st),
+            "reviewer",
+          ),
+          scopeNow.scope,
+          { dir: sessionDirFor(ctx, cwd), id: st.sessionId ?? "unknown" },
+          precommitBaselineFor(target.root, st),
+        );
         return {
           content: [{
             type: "text",
@@ -2768,20 +2796,15 @@ export default function reviewGate(pi: ExtensionAPI) {
               "review-gate: snapshot isolation UNAVAILABLE here (git worktree refused — no commit yet, " +
               "no worktree support, or a read-only filesystem). The reviewer would be reading YOUR live " +
               "worktree, so:\n" +
-              "- Spawn the `reviewer-readonly` agent instead of `reviewer`. Its tool allowlist has no " +
+              "- Spawn the `reviewer-readonly` agent instead of `reviewer` (with `context: \"fresh\"` —" +
+              "  round-10 P1: an explicit context beats any global default). Its tool allowlist has no " +
               "edit/write, so it CANNOT touch the worktree — that is the mechanical half; choosing it is " +
               "yours to honor (pi-subagents has no per-call tool denylist).\n" +
               "- Do NOT apply fixes until the verdict is recorded: the reviewer is reading the same tree " +
               "you would be editing, and mutation analysis is unavailable to it this round.\n" +
-              "The gate itself is unchanged — this only costs you the parallel fix window." +
-              // `reviewer-readonly` does not read the goal file (its defaultReads
-              // dropped it so an UNAPPROVED draft can never become a contract),
-              // so this text is the only place its acceptance contract can come
-              // from on this branch.
-              (goalText
-                ? "\nHand the reviewer this loop goal — its ONLY goal source here — and have it accept " +
-                  "the change criterion by criterion:\n```\n" + goalText + "\n```"
-                : "") +
+              "- The task text below carries the full contract (scope, transcript pointer, precommit " +
+              "baseline, goal) — pass it to `reviewer-readonly` verbatim.\n" +
+              "\n--- task text (readonly round, no snapshot) ---\n" + readonlyTask +
               "\n\nSpawn the reviewer with this `outputSchema` so a malformed verdict fails at the " +
               "source instead of arriving as unparseable prose:\n```json\n" +
               JSON.stringify(REVIEW_VERDICT_SCHEMA, null, 2) + "\n```",
@@ -2795,6 +2818,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (trees.size === 1) reviewedTree.set(target.root, snaps[0]!.tree);
       else reviewedTree.delete(target.root);
       const snap = snaps[0]!;
+      const scopeNow = reviewScopeFor(target.root, stateForRepo(target.root));
       const lines = [
         `review-gate: ${snaps.length} snapshot(s) ready (tree ${snap.tree.slice(0, 12)}).` +
           (fileCount > 0 ? ` ${fileCount} file(s) to review.` : ""),
@@ -2808,7 +2832,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         // refuses that shape; printing the call it WILL accept is the other
         // half, so the correct path needs no translation.
         "Spawn the reviewer as ONE top-level `subagent` call. Copy it as-is (the `task` text is below):",
-        `- subagent({ agent: "reviewer", async: true, cwd: "${snap.dir}", task: <its task text below>, outputSchema: <the schema below> })` +
+        // context: "fresh" is EXPLICIT (round-10 P1): pi-subagents' global
+        // defaultSubagentContext would otherwise override the agent's own
+        // defaultContext and could silently restore full transcript forks.
+        `- subagent({ agent: "reviewer", async: true, context: "fresh", cwd: "${snap.dir}", task: <its task text below>, outputSchema: <the schema below> })` +
           `\n  stream=${snap.streamPath}` +
           (changed.ok ? `\n  files (${changed.files.length}): ${changed.files.join(", ")}` : ""),
         "",
@@ -2827,9 +2854,35 @@ export default function reviewGate(pi: ExtensionAPI) {
         // contract and the stream directive have to match exactly, and
         // retyping them is where drift creeps in.
         `--- task text (cwd=${snap.dir}) ---`,
-        buildReviewPrompt("review", changed.ok ? changed.files : [], goalText, undefined, {
-          streamPath: snap.streamPath,
-        }),
+        buildReviewPrompt(
+          "review",
+          changed.ok ? changed.files : [],
+          goalText,
+          undefined,
+          { streamPath: snap.streamPath },
+          // Incremental review (goal criterion 1): THIS round's scope, worded
+          // for the reviewer. Computed against the last READY baseline before
+          // the snapshot is handed out; with no baseline it resolves to a
+          // FULL block (one line), which still tells the reviewer why.
+          formatReviewScopeDirective(
+            scopeNow,
+            previousRoundFindings(stateForRepo(target.root)),
+            settledConclusion(stateForRepo(target.root)),
+            "reviewer",
+          ),
+          // The DECISION kind (not the directive text) drives the opening
+          // instruction: a no-baseline round still gets a non-empty FULL
+          // directive, and must still open with "Audit the WHOLE change".
+          scopeNow.scope,
+          {
+            dir: sessionDirFor(ctx, cwd),
+            id: stateForRepo(target.root).sessionId ?? "unknown",
+          },
+          // Trusted-checks baseline (user ask): precommit already ran the
+          // full suite + typecheck — hand the reviewer the facts so it does
+          // not re-run them.
+          precommitBaselineFor(target.root, stateForRepo(target.root)),
+        ),
         "",
         "The reviewer works in a disposable copy: mutation analysis is encouraged, but it MUST restore ",
           "every mutation and keep scratch files outside the snapshot ($TMPDIR), and never write under ",
@@ -2854,6 +2907,213 @@ export default function reviewGate(pi: ExtensionAPI) {
             ...(changed.ok ? { files: changed.files } : {}),
           })),
         },
+      };
+    },
+  });
+
+  // ---------- prepare_adviser tool (incremental advisory — goal criterion 3) ----------
+
+  /** The session dir pi is ACTUALLY using: the live manager knows the final
+   *  --session-dir / env / settings selection (round-10 P1). Fallbacks stay
+   *  in lib/session-dir.ts for contexts without a manager.
+   */
+  function sessionDirFor(ctx: unknown, cwd: string): string {
+    const sm = (ctx as { sessionManager?: { getSessionDir?: () => string } })?.sessionManager;
+    return sessionDirForCwd(cwd, undefined, sm?.getSessionDir?.());
+  }
+
+  /**
+   * The LAST conclusion an adviser appended for this goal, if any. Lines are
+   * JSON; malformed ones are skipped and only a conclusion for THIS goal
+   * (the artifact is named per goal, so this is belt-and-braces) counts.
+   */
+  function readLastAdviserConclusion(artifactPath: string, goalHash: string): AdviserConclusion | undefined {
+    try {
+      return parseAdviserConclusions(readFileSync(artifactPath, "utf8"), goalHash);
+    } catch { /* no artifact yet */ }
+    return undefined;
+  }
+
+  // sessionDirForCwd lives in lib/session-dir.ts (realpath-resolved, matching
+  // pi's session-manager encoding — round-4 P1) so it is unit-testable.
+
+  /**
+   * The trusted-checks block for the reviewer's task text: what precommit
+   * already verified (sidecar verdict + cache steps), so the reviewer does
+   * not re-run the full suite.
+   *
+   * SAFETY (round-9 P1): the baseline is only trusted when the recorded PASS
+   * is bound to the CURRENT worktree fingerprint — a PASS for an older tree
+   * proves nothing about this change, and claiming it would suppress exactly
+   * the verification this round needs. Cache entries recorded AFTER the PASS
+   * itself are skipped (they belong to a later tree). Undefined when no
+   * matching PASS is on record — the reviewer then decides on its own.
+   */
+  function precommitBaselineFor(root: string, st: GateState): string | undefined {
+    let digest: string | undefined;
+    try {
+      const fp = computeFingerprint(root);
+      digest = fp.unavailable ? undefined : fp.digest;
+    } catch { digest = undefined; }
+    let cacheRaw: string | undefined;
+    try { cacheRaw = readFileSync(pathJoin(root, ".pi", "precommit-cache.json"), "utf8"); } catch { /* no cache */ }
+    // The pure decision (fingerprint match + stale-entry filter + wording) is
+    // in lib/parallel-review.ts so the safety behavior is testable.
+    return extractPrecommitBaseline(st.precommit, digest, cacheRaw);
+  }
+
+  pi.registerTool({
+    name: "prepare_adviser",
+    label: "Prepare Adviser Brief",
+    description:
+      "Hand back the ready-made task text for an `adviser` subagent consultation on the CURRENT loop goal. " +
+      "Call this before dispatching `adviser`: the brief carries (a) the main session's transcript location " +
+      "for ON-DEMAND reading (the adviser runs context:\"fresh\" — it no longer inherits a fork of this " +
+      "conversation), (b) the artifact path where the adviser appends its conclusion, and (c) when a " +
+      "previous consultation of this goal exists, that conclusion plus the files changed since, so the " +
+      "adviser settles what already stands instead of re-arguing it from zero. First consultation of a " +
+      "goal is a full brief.",
+    parameters: Type.Object({
+      repo: Type.Optional(Type.String({
+        description: "Absolute repo path (required once the session edited several repos)",
+      })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const target = resolveToolRepo(params.repo);
+      if (!target.ok) {
+        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      }
+      const st = stateForRepo(target.root);
+      // goalText (display) may be capped for the prompt; the ARTIFACT identity
+      // must hash the FULL approved text, or distinct long goals would share
+      // one conclusion file (round-4 P1).
+      const confirmed = loopGoalConfirmed(target.root, st);
+      // Identity hashes the RAW FILE content, never the capped display text:
+      // readLoopGoal() truncates past LOOP_GOAL_MAX_CHARS, and two distinct
+      // long goals must not share one conclusion artifact (round-5 P1).
+      let fullGoalRaw: string | undefined;
+      try { fullGoalRaw = readFileSync(pathJoin(target.root, LOOP_GOAL_RELPATH), "utf8"); } catch { /* no goal file */ }
+      const goalText = confirmed ? goalTextForReviewers(target.root) : undefined;
+      const goalHash = confirmed && fullGoalRaw
+        ? goalTextHash(fullGoalRaw)
+        // No approved goal: a STABLE per-session identity (sessionId is set at
+        // session start; "anon" is the defensive fallback) so repeated
+        // consultations within one session reuse each other's conclusions —
+        // a fresh random id every call would defeat the incremental contract.
+        : `no-goal-${st.sessionId ?? "anon"}`;
+      const artifactPath = pathJoin(target.root, ".pi", "review-stream", `adviser-${goalHash}.jsonl`);
+      // The artifact must be writable on the FIRST consultation too — review
+      // snapshots create this directory, but an adviser consult can precede
+      // any review.
+      try { mkdirSync(pathDirname(artifactPath), { recursive: true }); } catch { /* best-effort */ }
+      const previous = readLastAdviserConclusion(artifactPath, goalHash);
+      // Baseline advance is CONFIRMATION-BASED (round-3 P1): the baseline must
+      // never advance past a consultation that appended no conclusion — its
+      // examined changes would silently vanish from the next brief while an
+      // older conclusion is carried forward. The gate cannot observe the
+      // adviser's write, so it counts VALID conclusions in the artifact:
+      //   - count > baseline.confirmed ⇒ the last consultation SUCCEEDED ⇒
+      //     changed files are computed against baseline.tree (that consult's
+      //     START) and the baseline advances;
+      //   - count ≤ baseline.confirmed ⇒ the last consultation ABORTED ⇒
+      //     compute against baseline.prevTree (the last CONFIRMED start) so
+      //     its changes are re-listed, and do NOT advance. prevTree null ⇒
+      //     nothing is confirmed yet (cross-session first advance) ⇒ full
+      //     re-check (round-4 P1).
+      const artifactRaw = (() => {
+        try { return readFileSync(artifactPath, "utf8"); } catch { return ""; }
+      })();
+      const confirmedCount = countAdviserConclusions(artifactRaw, goalHash);
+      const baseline = st.adviserBaselines?.[goalHash];
+      const baseTree = baseline
+        ? confirmedCount > baseline.confirmed ? baseline.tree : baseline.prevTree
+        : undefined;
+      let changedFiles: string[] | null = null;
+      if (!baseTree) {
+        // No baseline for this goal in this state. An OLDER conclusion may
+        // still exist (cross-session artifact): the increment vs it cannot be
+        // computed, so demand a full re-check (null) — never pretend "no
+        // changes" against a conclusion this session never saw.
+        changedFiles = previous ? null : [];
+      } else {
+        const inc = incrementSinceTree(target.root, baseTree);
+        if (inc) changedFiles = inc.files;
+        // else: stays null → brief demands a full check
+      }
+      // Advance ONLY on confirmed success (a conclusion beyond the last
+      // count). prevTree = the start the just-confirmed consultation read
+      // (baseline.tree), so an aborted NEXT consultation rolls back to
+      // exactly this confirmed point instead of hiding its changes.
+      if (!baseline || confirmedCount > baseline.confirmed) {
+        try {
+          const treeNow = worktreeTreeOid(target.root);
+          st.adviserBaselines = {
+            ...(st.adviserBaselines ?? {}),
+            [goalHash]: { tree: treeNow, prevTree: baseline ? baseline.tree : null, confirmed: confirmedCount },
+          };
+        } catch { /* keep the old baseline */ }
+      }
+      persistRepo(ctx as unknown as ExtensionContext, target.root);
+      const brief = buildAdviserBrief({
+        goalHash,
+        sessionDir: sessionDirFor(ctx, cwd),
+        sessionId: st.sessionId ?? "unknown",
+        artifactPath,
+        ...(previous ? { previous } : {}),
+        changedFiles,
+        ...(goalText ? { goalText } : {}),
+      });
+      return {
+        content: [{ type: "text", text: `adviser brief ready (${previous ? "incremental" : "full"}):\n\n${brief}` }],
+        details: { incremental: !!previous, artifactPath, changedFiles },
+      };
+    },
+  });
+
+  // ---------- prepare_goal_audit tool (the auditor's ready-made task, PRE-dispatch) ----------
+
+  pi.registerTool({
+    name: "prepare_goal_audit",
+    label: "Prepare Goal Audit Task",
+    description:
+      "Hand back the ready-made task text for a `goal-auditor` audit of a DRAFT loop goal — call this BEFORE " +
+      "dispatching the auditor. The task carries the draft, the audit criteria, the fresh-context transcript " +
+      "pointer, and — when a previous audit of a DIFFERENT draft is on record — the carryover block (previous " +
+      "verdict + findings + previous draft) and the mechanically computed draft delta, so a re-audit judges " +
+      "the increment instead of re-deriving the whole contract. record_goal_prereview stays a pure record; " +
+      "this is where the task text comes from.",
+    parameters: Type.Object({
+      goal: Type.String({ description: "The FULL draft goal text to be audited (the exact text you will submit)" }),
+      repo: Type.Optional(Type.String({
+        description: "Absolute repo path (required once the session edited several repos)",
+      })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const target = resolveToolRepo(params.repo);
+      if (!target.ok) {
+        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      }
+      const draft = normalizeGoalText(String(params.goal ?? ""));
+      if (!draft) {
+        return {
+          content: [{ type: "text", text: "review-gate: prepare_goal_audit rejected — the goal text is empty." }],
+          details: {},
+          isError: true,
+        };
+      }
+      const st = stateForRepo(target.root);
+      const newHash = goalTextHash(draft);
+      const prev = st.goalPrereview;
+      const carryover = prev && prev.hash !== newHash ? formatGoalPrereviewCarryover(prev) : undefined;
+      const taskText = buildGoalAuditTask(draft, {
+        ...(carryover ? { carryover } : {}),
+        ...(prev?.draft ? { prevDraft: prev.draft } : {}),
+        sessionDir: sessionDirFor(ctx, cwd),
+        sessionId: st.sessionId ?? "unknown",
+      });
+      return {
+        content: [{ type: "text", text: `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n\n${taskText}` }],
+        details: { reaudit: !!carryover, hash: newHash.slice(0, 12) },
       };
     },
   });
@@ -3422,7 +3682,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     description:
       "Record the dedicated `goal-auditor` subagent's audit of a DRAFT loop goal. propose_loop_goal " +
       "refuses to show the user's approval dialog until this records a PASS for the IDENTICAL text, " +
-      "so the flow is: draft (in Simplified Chinese) → dispatch goal-auditor with that draft → record " +
+      "so the flow is: draft (in Simplified Chinese) → call `prepare_goal_audit` for the ready-made " +
+      "auditor task (carryover + draft delta on a re-audit) → dispatch goal-auditor with it → record " +
       "its FULL raw output here → propose_loop_goal. The EXTENSION parses the auditor's JSON fence " +
       "itself (PASS only for a READY verdict; a fence with unresolved P0/P1 is already downgraded to " +
       "BLOCKED) and hashes the draft itself — there is no `passed` parameter you could set, and a " +
@@ -3435,6 +3696,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         description:
           "Absolute path of the repo this goal binds to (default: the session repo) — must match the " +
           "repo you pass to propose_loop_goal.",
+      })),
+      auditStartedAt: Type.Optional(Type.String({
+        description:
+          "ISO timestamp of when you DISPATCHED the goal-auditor (the wall-clock start of this audit). " +
+          "Goal criterion 6 records first-vs-re-audit durations, and the gate cannot see the dispatch " +
+          "— the tool only records verdicts. Omit on re-records of the same audit.",
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -3507,30 +3774,70 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       const passed = parsed.verdict === "READY";
+      const newHash = goalTextHash(goalText);
+      const findings = parseFenceFindings(params.auditor_output);
+      // Wall-clock duration of THIS audit, when the agent reported when it
+      // dispatched the auditor (goal criterion 6). Parsed leniently: a bogus
+      // timestamp records no duration rather than failing the record.
+      const startedAt = typeof params.auditStartedAt === "string" ? Date.parse(params.auditStartedAt) : NaN;
+      // A future timestamp (clock skew, a typo) records NO duration rather
+      // than a negative one that would poison the timing diagnostic.
+      const now = Date.now();
+      const durationMs = Number.isFinite(startedAt) && startedAt > 0 && startedAt <= now ? now - startedAt : undefined;
       const record: GoalPrereviewRecord = {
-        hash: goalTextHash(goalText),
+        hash: newHash,
         verdict: passed ? "PASS" : "FAIL",
         at: new Date().toISOString(),
         findingsTotal: parsed.findingsTotal,
+        ...(findings.length ? { findings } : {}),
+        draft: normalizeGoalText(goalText),
+        ...(durationMs !== undefined ? { durationMs } : {}),
       };
-      // Latest-only by design: an audit of a DIFFERENT draft replaces this one,
-      // so the record always describes the text most recently judged.
+      // Re-audit carryover (goal criterion 2): replacing a record for a
+      // DIFFERENT draft means this audit is a re-audit — hand the previous
+      // verdict and its findings back so the agent can put them in the
+      // auditor's task text. Same-hash re-records (a PASS retried) carry
+      // nothing: there is no revised draft to judge.
+      const prev = goalSt.goalPrereview;
+      const carryover = prev && prev.hash !== newHash ? formatGoalPrereviewCarryover(prev) : undefined;
+      // Latest-only for the CHECK (propose_loop_goal matches the CURRENT
+      // draft's PASS), but EVERY audit is persisted in the history (goal
+      // criterion 2: PASS or FAIL, oldest first) so the re-audit chain and
+      // its carryover data survive newer drafts.
+      goalSt.goalPrereviewHistory = [...(goalSt.goalPrereviewHistory ?? []), record];
       goalSt.goalPrereview = record;
       if (goalRoot === primaryRepoRoot) persist(ctx as unknown as ExtensionContext);
       else persistRepo(ctx as unknown as ExtensionContext, goalRoot);
       log(`goal pre-review recorded for ${goalRoot}: ${record.verdict} (${goalText.length} chars, findings: ${parsed.findingsTotal ?? "unparseable"})`);
+      // Wall-clock since the previous audit — the incremental-economy datum
+      // (goal criterion 6, (a)): re-audits of a revised draft should be
+      // measurably cheaper than first audits. Diagnostic only.
+      const prevAt = prev?.at ? Date.parse(prev.at) : NaN;
+      const auditGapMin = Number.isFinite(prevAt)
+        ? Math.round((Date.now() - prevAt) / 60000)
+        : null;
       return {
         content: [{
           type: "text",
-          text: passed
-            ? `review-gate: goal pre-review PASS recorded (${record.hash.slice(0, 12)}…). Call propose_loop_goal with ` +
-              "the IDENTICAL text — any edit changes the hash and needs a fresh audit."
-            : `review-gate: goal pre-review FAIL recorded (verdict ${parsed.verdict}, ` +
-              `${parsed.findingsTotal ?? "unparseable"} findings). propose_loop_goal stays blocked: fix the ` +
-              "auditor's P0/P1 objections, then re-audit the revised draft (hand it the previous draft, its " +
-              "objections, and what you changed for each).",
+          text:
+            (passed
+              ? `review-gate: goal pre-review PASS recorded (${record.hash.slice(0, 12)}…). Call propose_loop_goal with ` +
+                "the IDENTICAL text — any edit changes the hash and needs a fresh audit."
+              : `review-gate: goal pre-review FAIL recorded (verdict ${parsed.verdict}, ` +
+                `${parsed.findingsTotal ?? "unparseable"} findings). propose_loop_goal stays blocked: fix the ` +
+                "auditor's P0/P1 objections, then re-audit the revised draft.") +
+            (durationMs !== undefined
+              ? `\n(This audit took ${Math.round(durationMs / 1000)}s — report auditStartedAt to record durations.)`
+              : "") +
+            (auditGapMin !== null
+              ? `\n(Re-audit: ${auditGapMin} min since the previous audit of a different draft.)`
+              : "") +
+            (carryover
+              ? "\nRe-audit context: call `prepare_goal_audit` with the REVISED draft BEFORE dispatching the " +
+                "auditor — it returns the ready-made task with this audit's carryover and the draft delta."
+              : "")
         }],
-        details: { recorded: true, verdict: record.verdict, findingsTotal: parsed.findingsTotal ?? null },
+        details: { recorded: true, verdict: record.verdict, findingsTotal: parsed.findingsTotal ?? null, reaudit: !!carryover, auditGapMin, durationMs: durationMs ?? null },
       };
     },
   });
@@ -4970,8 +5277,9 @@ export default function reviewGate(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd ?? process.cwd();
     // INERT INSIDE A REVIEW SNAPSHOT: a reviewer's disposable worktree lives
-    // under `<repo>/.pi/review-snapshots/` + `rg-review-snap-*` + `/` +
-    // `<instance>`, and a session whose cwd is one of those is a subagent the
+    // under `~/.pi/review-snapshots/<repo-key>/` (fallbacks: the repo's own
+    // `.pi/review-snapshots/` and tmpdir) + `rg-review-snap-*` + `/` + `<instance>`,
+    // and a session whose cwd is one of those is a subagent the
     // GATE itself spawned (or a stray shell in the same place). The gate must
     // not initialize state, persist a sidecar, or prune snapshots there:
     // writing `.pi/review-gate-state.json` into the judged tree both disturbs

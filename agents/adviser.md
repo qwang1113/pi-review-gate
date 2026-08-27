@@ -7,7 +7,7 @@ thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
-defaultContext: fork
+defaultContext: fresh
 tools: read, grep, find, ls, bash, contact_supervisor
 defaultReads: context.md, plan.md, .pi/loop-goal.md
 ---

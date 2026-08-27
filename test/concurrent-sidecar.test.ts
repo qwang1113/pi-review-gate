@@ -71,6 +71,38 @@ test("concurrent sidecar: an unverifiable digest drops the foreign verdict (fail
   }
 });
 
+test("concurrent sidecar: foreign goal audits and adviser baselines survive even with NO READY/PASS candidate (round-9 P1)", () => {
+  const mine = armed("mine"); // PENDING + NOT_RUN — nothing to inherit verdict-wise
+  const theirs = armed("theirs");
+  const audit = { hash: "a".repeat(64), verdict: "FAIL" as const, at: "2026-01-01T00:00:00.000Z" };
+  const audit2 = { hash: "b".repeat(64), verdict: "PASS" as const, at: "2026-01-01T00:00:00.000Z" };
+  theirs.goalPrereview = audit2;
+  theirs.goalPrereviewHistory = [audit, audit2];
+  theirs.adviserBaselines = { g1: { tree: "t1", prevTree: null, confirmed: 1 } };
+  const merged = mergeConcurrentBindings(mine, theirs, () => DIGEST);
+  assert.deepEqual(merged.goalPrereviewHistory, [audit, audit2], "foreign audits must survive without a READY candidate");
+  assert.deepEqual(merged.goalPrereview, audit2);
+  assert.deepEqual(merged.adviserBaselines, theirs.adviserBaselines);
+  assert.equal(merged.review.verdict, "PENDING", "verdict carry-over semantics are unchanged");
+  assert.equal(merged.precommit.verdict, "NOT_RUN");
+});
+
+test("concurrent sidecar: same-goal adviser baseline keeps the NEWER one, not last-writer-wins (round-10 P1)", () => {
+  const mine = armed("mine");
+  const theirs = armed("theirs");
+  mine.adviserBaselines = { g1: { tree: "new-tree", prevTree: null, confirmed: 2 } };
+  theirs.adviserBaselines = { g1: { tree: "old-tree", prevTree: null, confirmed: 1 } };
+  const merged = mergeConcurrentBindings(mine, theirs, () => DIGEST);
+  assert.deepEqual(merged.adviserBaselines, { g1: { tree: "new-tree", prevTree: null, confirmed: 2 } }, "the newer (higher-confirmed) baseline must win");
+  // And the reverse direction: a newer disk baseline still wins over ours.
+  const mine2 = armed("mine");
+  const theirs2 = armed("theirs");
+  mine2.adviserBaselines = { g1: { tree: "old-tree", prevTree: null, confirmed: 1 } };
+  theirs2.adviserBaselines = { g1: { tree: "new-tree", prevTree: null, confirmed: 2 } };
+  const merged2 = mergeConcurrentBindings(mine2, theirs2, () => DIGEST);
+  assert.deepEqual(merged2.adviserBaselines, { g1: { tree: "new-tree", prevTree: null, confirmed: 2 } });
+});
+
 test("concurrent sidecar: the digest is not computed unless a foreign verdict is at stake", () => {
   let calls = 0;
   const digest = () => { calls++; return DIGEST; };

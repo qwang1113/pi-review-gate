@@ -11,13 +11,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
   SNAPSHOT_CARRIED_FILES,
   SNAPSHOT_DIR,
   SNAPSHOT_PREFIX,
+  repoSnapshotKey,
   snapshotBaseDir,
   createReviewSnapshot,
   pruneOrphanSnapshots,
@@ -298,29 +299,46 @@ test("the snapshot's own index is populated, so `git diff HEAD` shows the change
   removeReviewSnapshot(snap!, repo);
 });
 
-test("snapshots live under the repo's gate-owned .pi/, never in the system temp dir", () => {
-  // A snapshot's absolute path is visible to the code under review, so a /tmp
-  // location changes path-sensitive behaviour: reviewing THIS repo inside a
-  // /tmp snapshot produced 4 failures that do not exist in the real worktree
-  // (its pi-self guard treats /tmp as scratch) — false-BLOCKED noise that costs
-  // a whole round. `.pi/` is excluded from the fingerprint, so it is invisible
-  // to the review, and it sits on the same filesystem.
+test("snapshots live outside every repo: ~/.pi/review-snapshots/<repo-key>/ (user requirement 2026-08-27)", () => {
+  // Outside every repo root, whole-tree test discovery (jest default testMatch
+  // from rootDir, a bare `node --test`, an IDE scan) can NEVER reach the
+  // snapshot's own test/ copy — no matter who runs the suite. `~/.pi` is a
+  // dot-directory too, so bare `node --test` additionally skips it.
+  // NOT /tmp: this repo's pi-self guard treats /tmp as scratch — measured 4
+  // false failures reviewing inside a /tmp snapshot.
   const repo = track(makeRepo());
-  assert.equal(snapshotBaseDir(repo), join(repo, ".pi", SNAPSHOT_DIR));
-  const snap = createReviewSnapshot({ repoRoot: repo, instance: "integration", runId: "run1" });
+  const home = track(mkdtempSync(join(tmpdir(), "rg-snap-home-")));
+  const base = join(home, ".pi", SNAPSHOT_DIR, repoSnapshotKey(repo));
+  assert.equal(snapshotBaseDir(repo, home), base);
+  // Home inside the repo must NOT host snapshots (round-11 P1): containment
+  // guarantee — the repo-local fallback is used instead.
+  const homeInRepo = track(mkdtempSync(join(tmpdir(), "rg-snap-homeinrepo-")));
+  const repo2 = track(makeRepo());
+  assert.equal(snapshotBaseDir(repo2, repo2), join(repo2, ".pi", SNAPSHOT_DIR));
+  // Round-12/13 P1 regression: PHYSICAL containment — a home that is a
+  // not-yet-existing path reached through a symlink INTO repoRoot must still
+  // drop the home candidate (mkdirSync would follow the symlink into the repo).
+  const repo3 = track(makeRepo());
+  const linkDir = track(join(tmpdir(), "rg-snap-link-into-repo"));
+  rmSync(linkDir, { recursive: true, force: true });
+  symlinkSync(repo3, linkDir);
+  const homeViaSymlink = join(linkDir, "not-yet", "home");
+  assert.equal(snapshotBaseDir(repo3, homeViaSymlink), join(repo3, ".pi", SNAPSHOT_DIR),
+    "a symlinked-into-repo home must fall back to the repo-local layout");
+  rmSync(linkDir, { recursive: true, force: true });
+  const snap = createReviewSnapshot({ repoRoot: repo, instance: "integration", runId: "run1", home });
   assert.ok(snap);
-  assert.ok(
-    snap!.dir.startsWith(join(repo, ".pi", SNAPSHOT_DIR)),
-    `snapshot escaped the gate-owned dir: ${snap!.dir}`,
-  );
+  assert.ok(snap!.dir.startsWith(base), `snapshot escaped the home base: ${snap!.dir}`);
+  assert.ok(!snap!.dir.startsWith(join(repo, ".pi")), "snapshot must not live inside the repo");
   // Not a direct child of the temp ROOT (this test's repo happens to live in
   // the temp dir, so the check is about the snapshot's PARENT, not the prefix).
   assert.notEqual(dirname(dirname(snap!.dir)), tmpdir());
-  // Living inside the repo must NOT make the repo look modified.
+  // Living outside the repo must NOT make the repo look modified.
   assert.equal(verifySnapshot(snap!).clean, true);
   const outerTree = execFileSync("git", ["status", "--porcelain"], {
     cwd: repo, encoding: "utf8", env: HERMETIC_ENV,
   });
-  assert.doesNotMatch(outerTree, /review-snapshots/, ".pi/ is gate-owned; it must not show up as a change");
+  assert.doesNotMatch(outerTree, /review-snapshots/, "snapshots are outside the repo; git status must stay clean");
   removeReviewSnapshot(snap!, repo);
+  assert.ok(!existsSync(snap!.dir), "removeReviewSnapshot must take the worktree with it");
 });

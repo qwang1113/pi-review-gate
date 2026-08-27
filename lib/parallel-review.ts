@@ -13,6 +13,125 @@
  * tests with no workflow engine, no git and no filesystem.
  */
 
+/**
+ * One step of the recorded precommit (cache entry), for the baseline block.
+ */
+export interface PrecommitBaselineStep {
+  name: string;
+  command: string;
+  status: string;
+  durationMs?: number;
+}
+
+/**
+ * The recorded precommit facts, as read by `prepare_review` from the sidecar
+ * and the precommit cache.
+ */
+export interface PrecommitBaselineFact {
+  verdict: string;
+  mode?: string;
+  testScope?: string;
+  at?: string;
+  steps: PrecommitBaselineStep[];
+}
+
+/**
+ * The trusted-checks block injected into the reviewer's task text.
+ *
+ * The full suite and typecheck ALREADY ran as part of precommit before this
+ * review was prepared; a reviewer re-running them burns minutes per round for
+ * zero new information. The block states what was verified and when, and
+ * steers the reviewer to targeted tests + mutation checks on the code under
+ * scrutiny, with an explicit reopen clause for evidence of staleness. Pure
+ * over strings so the wording is testable.
+ */
+export function formatPrecommitBaseline(f: PrecommitBaselineFact): string {
+  const lines = [
+    "PRE-COMMIT BASELINE — these checks ALREADY ran and passed before this review was prepared:",
+    `- precommit: ${f.verdict}` +
+      ((f.mode || f.testScope || f.at)
+        ? ` (${[f.mode ? `mode ${f.mode}` : "", f.testScope ? `tests ${f.testScope}` : "", f.at ?? ""].filter(Boolean).join(", ")})`
+        : ""),
+    ...f.steps.map((s) =>
+      `- ${s.name}: ${s.status} — \`${s.command}\`` +
+      (s.durationMs !== undefined ? ` (${Math.round(s.durationMs / 1000)}s)` : "")),
+    // The TRUST wording is lane-aware (round-9 P1): a FULL pass means the
+    // whole suite ran on this tree — do not re-run it. A FAST/related lane
+    // covered only the related tests, so the reviewer may need to re-run
+    // things; it must never be talked out of verification the lane did not
+    // provide.
+    ...(f.testScope === "full"
+      ? [
+          "TRUST IT — do NOT re-run the full suite or typecheck: that is exactly the time the baseline just",
+          "spent, for zero new signal. Run ONLY targeted tests for the files you examine (e.g. `node --test",
+          "test/<file>.test.ts`) and mutation checks on the specific code under scrutiny.",
+        ]
+      : [
+          `The recorded precommit is the ${f.testScope ?? "unknown"} lane — it covered only the related tests,`,
+          "not the whole suite. Run the targeted tests for the files you examine; re-run the full suite or",
+          "typecheck only if you have reason to doubt the fast lane.",
+        ]),
+    "If you have evidence a baseline step is stale for THIS change, say so and re-run only that one step.",
+  ];
+  return lines.join("\n");
+}
+
+/**
+ * The sidecar precommit fields the baseline trusts (subset of GateState.precommit).
+ */
+export interface PrecommitBaselineRecord {
+  verdict: string;
+  fingerprint?: string | null;
+  mode?: string;
+  testScope?: string;
+  at?: string | null;
+}
+
+/**
+ * Decide the baseline facts from the sidecar record, the CURRENT worktree
+ * fingerprint digest and the raw precommit-cache file body.
+ *
+ * PURE and behaviorally testable (round-10 P1): the fingerprint match is
+ * what makes a recorded PASS this round's evidence (a PASS for an older tree
+ * yields undefined), and cache entries recorded AFTER the PASS are stale and
+ * skipped. Undefined ⇒ the reviewer must decide on its own.
+ */
+export function extractPrecommitBaseline(
+  pc: PrecommitBaselineRecord | undefined,
+  currentDigest: string | undefined,
+  cacheRaw: string | undefined,
+): string | undefined {
+  if (!pc || pc.verdict !== "PASS" || !pc.fingerprint) return undefined;
+  if (currentDigest === undefined || pc.fingerprint !== currentDigest) return undefined;
+  const steps: PrecommitBaselineStep[] = [];
+  if (cacheRaw) {
+    try {
+      const cache = JSON.parse(cacheRaw);
+      const passAt = pc.at ? Date.parse(pc.at) : NaN;
+      for (const [name, e] of Object.entries((cache as { entries?: Record<string, Record<string, unknown>> }).entries ?? {})) {
+        if (e && typeof e.command === "string" && (e.status === "pass" || e.status === "skip")) {
+          const entryAt = typeof e.at === "string" ? Date.parse(e.at) : NaN;
+          if (Number.isFinite(passAt) && Number.isFinite(entryAt) && entryAt > passAt) continue;
+          steps.push({
+            name,
+            command: e.command,
+            status: e.status === "pass" ? "passed" : "skipped",
+            ...(typeof e.durationMs === "number" ? { durationMs: e.durationMs } : {}),
+          });
+        }
+      }
+    } catch { /* unparseable cache: the verdict line alone still helps */ }
+  }
+  return formatPrecommitBaseline({
+    verdict: pc.verdict,
+    ...(pc.mode ? { mode: pc.mode } : {}),
+    ...(pc.testScope ? { testScope: pc.testScope } : {}),
+    ...(pc.at ? { at: pc.at } : {}),
+    steps,
+  });
+}
+
+
 // Pure module: no engine, no snapshots, no I/O. Reviews are dispatched by the
 // extension (prepare_review + subagents); this file only decides WHAT to say
 // to the reviewer and what verdict shape to hand it as its outputSchema.
@@ -107,10 +226,23 @@ export function buildReviewPrompt(
   goalText?: string,
   repoRoot?: string,
   isolation?: { streamPath: string },
+  scopeDirective?: string,
+  /**
+   * The DECISION kind driving the opening instruction (round-3 P1 fix): a
+   * non-empty scopeDirective does NOT imply incremental — prepare_review
+   * always passes a formatted directive, and a no-baseline/escalated round
+   * yields a FULL block. Only an explicit "incremental" opens with the
+   * increment wording; anything else audits the whole change.
+   */
+  scopeKind?: "full" | "incremental",
+  session?: { dir: string; id: string },
+  precommitBaseline?: string,
 ): string {
   const streamPath = isolation?.streamPath;
   const lines = [
-    "You are the reviewer of this round. Audit the WHOLE change listed below — nothing else covers it. Read each file in the worktree, verify from the code (never guess), and report findings with file paths and line numbers.",
+    scopeKind === "incremental"
+      ? "You are the reviewer of this round. Audit the INCREMENT listed below — the files that changed since the last READY review — and re-check every finding the scope block lists. Deep-audit the increment and those findings; material already settled and unchanged gets a consistency scan, not a re-derivation. You keep FULL-diff visibility and authority: reopen any settled conclusion you can contradict with evidence. Verify from the code (never guess), and report findings with file paths and line numbers."
+      : "You are the reviewer of this round. Audit the WHOLE change listed below — nothing else covers it. Read each file in the worktree, verify from the code (never guess), and report findings with file paths and line numbers.",
     "",
     `Changed files (${files.length}):`,
     files.map((f) => `- ${f}`).join("\n"),
@@ -133,6 +265,37 @@ export function buildReviewPrompt(
   if (goalText && goalText.trim()) {
     lines.push("", "Loop goal (accept the change against it, criterion by criterion):", goalText.trim());
   }
+
+  // Incremental scope (round 2+ with a READY baseline): the directive above
+  // tells the reviewer what was already settled, what is new this round, and
+  // which findings must be re-checked. Absent (no baseline, escalation to
+  // full, or a caller that did not compute one) the reviewer audits the whole
+  // change as the opening line says.
+  if (scopeDirective && scopeDirective.trim()) {
+    lines.push("", scopeDirective.trim());
+  }
+
+  // Fresh-context pointer (goal criterion 4): the reviewer no longer forks
+  // the main session, so when the conversation itself matters it reads the
+  // transcript ON DEMAND instead of inheriting it.
+  if (session) {
+    lines.push(
+      "",
+      `Main session transcript (fresh context — read ON DEMAND if you need the conversation, not inherited):`
+      + ` ${session.dir} (file named <timestamp>_${session.id}.jsonl)`
+    );
+  }
+
+
+
+  // Trusted-checks baseline (user ask, 2026-08-27): precommit already ran the
+  // full suite + typecheck before the review was prepared — the reviewer
+  // re-running them wastes minutes per round. Injected only when a PASS is on
+  // record; absent, the reviewer decides on its own.
+  if (precommitBaseline && precommitBaseline.trim()) {
+    lines.push("", precommitBaseline.trim());
+  }
+
   lines.push(
     "",
     "OUTPUT: fenced JSON verdict FIRST (the gate parses it; docSync is REQUIRED on the single-review path), then a prose review below the fence.",

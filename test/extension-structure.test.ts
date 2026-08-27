@@ -1223,6 +1223,43 @@ test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict
   assert.doesNotMatch(body, /resolveToolRepo\(/, "it must not CALL resolveToolRepo (naming it in the rationale is fine)");
 });
 
+test("goal criterion 3: prepare_adviser is registered and hands back a brief with artifact + session pointer", () => {
+  const start = SRC.indexOf('name: "prepare_adviser"');
+  assert.ok(start > 0, "the adviser brief tool must be registered");
+  const body = SRC.slice(start, start + 6000);
+  assert.match(body, /buildAdviserBrief\(/, "the brief comes from the shared pure builder");
+  assert.match(body, /adviser-\$\{goalHash\}\.jsonl/, "the artifact path is per goal");
+  assert.match(body, /mkdirSync\(pathDirname\(artifactPath\), \{ recursive: true \}\)/, "the artifact dir is created before the first consultation");
+  assert.match(body, /adviserBaselines/, "the changed-files baseline is persisted per goal for the next consultation");
+  assert.match(body, /readLastAdviserConclusion\(artifactPath, goalHash\)/, "readback goes through the tested pure parser (parseAdviserConclusions)");
+});
+
+test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor task BEFORE dispatch", () => {
+  // The round-5 P1: record_goal_prereview only runs AFTER the audit, so it
+  // could never supply the task that produced the audit it records. The
+  // task template therefore lives in a PRE-dispatch tool.
+  const start = SRC.indexOf('name: "prepare_goal_audit"');
+  assert.ok(start > 0, "the pre-dispatch audit task tool must be registered");
+  const body = SRC.slice(start, start + 6000);
+  assert.match(body, /buildGoalAuditTask\(draft, \{/, "the template comes from the shared pure builder");
+  assert.match(body, /formatGoalPrereviewCarryover\(prev\)/, "re-audits carry the previous audit's conclusion");
+  assert.match(body, /prev\?\.draft/, "the previous draft rides along for the mechanical delta");
+});
+
+test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline into the reviewer task", () => {
+  // The reviewer must be handed the precommit facts (and steered to targeted
+  // tests) instead of re-running the full suite. The SAFETY behavior (a PASS
+  // for an OLDER tree is never this round's evidence; stale cache entries
+  // are dropped) lives in the pure extractPrecommitBaseline, which is
+  // behaviorally tested in test/parallel-review.test.ts; this test pins the
+  // wiring: prepare_review hands the baseline to the task text.
+  const start = SRC.indexOf('name: "prepare_review"');
+  const body = SRC.slice(start, start + 24000);
+  assert.match(body, /precommitBaselineFor\(target\.root, stateForRepo\(target\.root\)\)/, "the baseline rides the task text");
+  assert.match(body, /extractPrecommitBaseline\(st\.precommit, digest, cacheRaw\)/, "the safety decision is the pure function");
+  assert.match(body, /computeFingerprint\(root\)/, "the current tree fingerprint is measured, not guessed");
+});
+
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {
   const start = SRC.indexOf('name: "propose_loop_goal"');
   const nextTool = SRC.indexOf('name: "request_copilot_review"', start);
@@ -2064,8 +2101,14 @@ test("SNAPSHOT PIN: a reviewer cannot be spawned outside its snapshot", () => {
   // workflow shape cannot.
   const prepAt = SRC.indexOf('name: "prepare_review"');
   const prep = SRC.slice(prepAt, prepAt + 20000);
-  assert.match(prep, /subagent\(\{ agent: "reviewer", async: true, cwd: /,
-    "the spawn calls must be copyable, not described in prose");
+  assert.match(prep, /subagent\(\{ agent: "reviewer", async: true, context: "fresh", cwd: /,
+    "the spawn calls must be copyable, not described in prose, and carry the explicit fresh context");
+  assert.match(prep, /context: "fresh", cwd: /);
+  // Round-15 Nit: BOTH copyable spawn shapes (prepare_review's and the spawn
+  // guard's spawnShapes) must carry the explicit context — the frontmatter
+  // default is the real mechanism, the copyable examples just must not drift.
+  const guardSrc = readFileSync(join(ROOT, "lib", "reviewer-spawn-guard.ts"), "utf8");
+  assert.match(guardSrc, /context: \"fresh\", cwd: /, "spawnShapes' copyable example must match prepare_review's shape");
   assert.match(prep, /Do NOT dispatch the reviewer through `workflowScript`/);
 });
 

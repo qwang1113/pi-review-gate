@@ -41,8 +41,11 @@
 
 ```
 prepare_review → (snapshotDir, streamPath, files, taskText, REVIEW_VERDICT_SCHEMA)
-  → subagent({ agent: "reviewer", async: true, cwd: snapshotDir,
+  → subagent({ agent: "reviewer", async: true, context: "fresh", cwd: snapshotDir,
                task: taskText, outputSchema: REVIEW_VERDICT_SCHEMA })
+  # context: "fresh" 是显式的（round-10 P1）：全局 defaultSubagentContext
+  # 会覆盖 agent 的 defaultContext，只有显式字段才赢；transcript 指针
+  # 在 taskText 内按需读取
   → record_review(reviewer output)   # 一轮一次
 ```
 

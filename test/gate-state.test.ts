@@ -869,6 +869,30 @@ test("goalPrereview: a well-formed record round-trips (PASS and FAIL, findingsTo
   }
 });
 
+test("goalPrereviewHistory: every audit persists, PASS or FAIL; malformed entries dropped per-entry (goal criterion 2)", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  const rec = (verdict: string, hash: string) => ({ hash, verdict, at: "t" });
+  const history = [
+    rec("FAIL", "a".repeat(64)),
+    rec("PASS", "b".repeat(64)),
+  ];
+  writeFileSync(path, JSON.stringify({ ...base, goalPrereview: history[1], goalPrereviewHistory: history }));
+  const loaded = loadSidecar(path);
+  assert.deepEqual(loaded?.goalPrereviewHistory, history, "FAIL and PASS audits both survive");
+  assert.deepEqual(loaded?.goalPrereview, history[1], "the latest record still drives the PASS check");
+
+  // A malformed entry (bad hash) is dropped; the rest of the chain survives.
+  const mixed = [...history, { hash: "short", verdict: "PASS", at: "t" }];
+  writeFileSync(path, JSON.stringify({ ...base, goalPrereview: history[1], goalPrereviewHistory: mixed }));
+  assert.deepEqual(loadSidecar(path)?.goalPrereviewHistory, history);
+
+  // A non-array history fails closed to ABSENT.
+  writeFileSync(path, JSON.stringify({ ...base, goalPrereviewHistory: "nope" }));
+  assert.equal(loadSidecar(path)?.goalPrereviewHistory, undefined);
+});
+
 test("goalPrereview: a malformed record fails closed to ABSENT (never audited)", () => {
   // Fail-closed direction: dropping the record costs one fresh audit, while
   // TRUSTING a forged one would open the user's approval dialog for a draft
@@ -885,6 +909,35 @@ test("goalPrereview: a malformed record fails closed to ABSENT (never audited)",
     { hash: "b".repeat(64), verdict: "PASS" },                      // no timestamp
     { hash: "b".repeat(64), verdict: "PASS", at: 7 },               // non-string timestamp
     { hash: "b".repeat(64), verdict: "PASS", at: "t", findingsTotal: "many" }, // bad count
+  ];
+  for (const rec of bad) {
+    writeFileSync(path, JSON.stringify({ ...base, goalPrereview: rec }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `the sidecar itself must stay valid for ${JSON.stringify(rec)}`);
+    assert.equal(loaded?.goalPrereview, undefined, JSON.stringify(rec));
+  }
+});
+
+test("goalPrereview: findings/draft/durationMs shape is validated (round-2 P1: severity, malformed arrays)", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  const good = {
+    hash: "b".repeat(64),
+    verdict: "FAIL" as const,
+    at: "t",
+    findings: [{ severity: "P1", issue: "x" }],
+    draft: "# 目标",
+    durationMs: 123456,
+  };
+  writeFileSync(path, JSON.stringify({ ...base, goalPrereview: good }));
+  assert.deepEqual(loadSidecar(path)?.goalPrereview, good);
+  const bad = [
+    { ...good, findings: [{ severity: 7, issue: "x" }] },        // severity not a string
+    { ...good, findings: [{ severity: "P1" }] },                  // issue missing
+    { ...good, findings: "P1" },                                  // not an array
+    { ...good, draft: 7 },
+    { ...good, durationMs: "fast" },
   ];
   for (const rec of bad) {
     writeFileSync(path, JSON.stringify({ ...base, goalPrereview: rec }));

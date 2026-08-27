@@ -416,7 +416,9 @@ function collectStep(stepName, scriptNames) {
 
   anyRan = true;
   // ONLY the test step. The exclusion exists so a test run does not execute the
-  // disposable copies under `.pi/review-snapshots/`; a lint/typecheck/build
+  // disposable copies under `.pi/review-snapshots/` (repo-local fallback; the
+  // default `~/.pi/review-snapshots/` layout is outside the repo and out of
+  // reach of any whole-tree scan); a lint/typecheck/build
   // script that happens to be a plain `jest` invocation is a different job, and
   // rewriting it would also change its cache command key (and, for `lint:fix`,
   // the command whose edits the fix stage is keyed on).

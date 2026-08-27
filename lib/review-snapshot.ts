@@ -36,9 +36,11 @@
  * before. Isolation is an optimization and a safety net, never a gate.
  */
 
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   copyFileSync,
+  realpathSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -47,8 +49,8 @@ import {
   rmSync,
   symlinkSync,
 } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { basename, dirname, join, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { gitBaseEnv, worktreeTreeOid } from "./fingerprint.ts";
 
 /** Directory name (under the repo's gate-owned `.pi/`) for finding streams. */
@@ -64,28 +66,72 @@ export const SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 export const SNAPSHOT_DIR = "review-snapshots";
 
 /**
- * Where snapshots live: inside the repo's gate-owned `.pi/`, NOT in `/tmp`.
- *
- * `/tmp` was the obvious choice and it was wrong: a snapshot's absolute path is
- * visible to the code under review, and path-sensitive behaviour then differs
- * between the snapshot and the real worktree. Measured here — this repo's own
- * `pi-self` guard treats any `/tmp/…` path as a scratch location, so reviewing
- * THIS repository inside a `/tmp` snapshot produced 4 failures that do not
- * exist in the real tree: pure false-BLOCKED noise that costs a whole round.
- *
- * `.pi/` is excluded from the fingerprint (GATE_EXCLUDE_PATHSPECS), so
- * snapshots living there cannot disturb the tree under review, and they sit on
- * the same filesystem as the repo (fast `checkout-index`, working symlinks).
- * Falls back to the system temp dir when `.pi/` cannot be created.
+ * Deterministic per-repo key for a SHARED snapshot base: several repos
+ * configured with one `snapshotsDir` must not prune each other's live
+ * snapshots, so each repo gets its own subdirectory keyed by a stable
+ * hash of its root path.
  */
-export function snapshotBaseDir(repoRoot: string): string {
-  const preferred = join(repoRoot, ".pi", SNAPSHOT_DIR);
-  try {
-    mkdirSync(preferred, { recursive: true });
-    return preferred;
-  } catch {
-    return tmpdir();
+export function repoSnapshotKey(repoRoot: string): string {
+  const h = createHash("sha256").update(repoRoot).digest("hex");
+  return `repo-${h.slice(0, 12)}`;
+}
+
+/**
+ * Where snapshots live. Default: `~/.pi/review-snapshots/<repo-key>/` —
+ * OUTSIDE every repo (user requirement 2026-08-27), so no whole-tree test
+ * discovery (jest's default testMatch, a bare `node --test`, an IDE scan)
+ * can ever reach the snapshot's own `test/` copy, no matter who runs the
+ * suite or whether they know about snapshots. `~/.pi` is a dot-directory
+ * (bare `node --test` skips it) AND sits outside every repo root (jest
+ * starts from `rootDir` and never leaves it).
+ *
+ * NOT `/tmp`: a snapshot's absolute path is visible to the code under
+ * review, and path-sensitive behaviour then differs between the snapshot
+ * and the real worktree. Measured here — this repo's own `pi-self` guard
+ * treats any `/tmp/…` path as a scratch location, so reviewing THIS
+ * repository inside a `/tmp` snapshot produced 4 failures that do not
+ * exist in the real tree: pure false-BLOCKED noise that costs a whole
+ * round.
+ *
+ * The base is SHARED across repos (one `~/.pi/review-snapshots/`), so each
+ * repo nests under its own `repoSnapshotKey(repoRoot)` subdirectory and
+ * pruning never touches another repo's live snapshots.
+ *
+ * Falls back to the repo's own `.pi/` when the home dir cannot be written,
+ * and to the system temp dir when neither can be created. `home` is
+ * injectable so tests never touch the real home directory.
+ */
+export function snapshotBaseDir(repoRoot: string, home: string = homedir()): string {
+  // Round-11/12/13 P1: the home candidate is only valid OUTSIDE this repo,
+  // and the check must be PHYSICAL. realpath fails for a not-yet-existing
+  // home (e.g. ~/.pi/review-snapshots on first run) — resolve the nearest
+  // EXISTING ancestor, then reattach the missing segments. That also
+  // catches a symlinked ancestor that lands inside repoRoot.
+  const canonDeep = (p: string): string => {
+    const missing: string[] = [];
+    let cur = p;
+    for (;;) {
+      try { return join(realpathSync(cur), ...missing.reverse()); } catch { /* keep walking up */ }
+      const parent = dirname(cur);
+      if (parent === cur) return p; // filesystem root unreachable: keep lexical
+      missing.push(basename(cur));
+      cur = parent;
+    }
+  };
+  const canonHome = canonDeep(home);
+  const canonRepo = canonDeep(repoRoot);
+  const homeInsideRepo = canonHome === canonRepo || canonHome.startsWith(canonRepo + sep);
+  const candidates = [
+    ...(homeInsideRepo ? [] : [join(home, ".pi", SNAPSHOT_DIR, repoSnapshotKey(repoRoot))]),
+    join(repoRoot, ".pi", SNAPSHOT_DIR),
+  ];
+  for (const preferred of candidates) {
+    try {
+      mkdirSync(preferred, { recursive: true });
+      return preferred;
+    } catch { /* try the next candidate */ }
   }
+  return tmpdir();
 }
 
 /**
@@ -131,10 +177,10 @@ export const SNAPSHOT_CARRIED_FILES: readonly string[] = Object.freeze([]);
 export function isReviewSnapshotPath(abs: string): boolean {
   const normalized = abs.replace(/\\/g, "/");
   // Match on the unique prefix segment, not the full layout: the primary
-  // layout is `<repo>/.pi/review-snapshots/rg-review-snap-*/<instance>`,
-  // but snapshotBaseDir falls back to the system temp dir when `.pi/` is
-  // unwritable, yielding `<tmpdir>/rg-review-snap-*/<instance>`. The prefix
-  // appears in both, and `rg-review-snap-` is unique to this gate. (The
+  // layout is `~/.pi/review-snapshots/<repo-key>/rg-review-snap-*/<instance>`
+  // (user requirement 2026-08-27), with fallbacks under
+  // `<repo>/.pi/review-snapshots/` and `<tmpdir>/`. The prefix appears in
+  // all of them, and `rg-review-snap-` is unique to this gate. (The
   // segment match is deliberately not anchored tighter: a real checkout
   // whose path contains the segment is vanishingly unlikely, and the
   // consequence of a MISS is a fully-active extension inside a snapshot
@@ -171,6 +217,8 @@ export interface CreateSnapshotOptions {
   runId: string;
   /** Pre-computed fingerprint tree, when the caller already has one. */
   tree?: string;
+  /** Home dir for the snapshot base (default: the real one) — tests inject a sandbox. */
+  home?: string;
 }
 
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
@@ -219,7 +267,7 @@ export function createReviewSnapshot(opts: CreateSnapshotOptions): ReviewSnapsho
     const tree = opts.tree ?? worktreeTreeOid(repoRoot);
     // mkdtemp reserves the name; `git worktree add` insists the path is empty
     // or absent, so hand it a fresh child of the reserved directory.
-    const parent = mkdtempSync(join(snapshotBaseDir(repoRoot), SNAPSHOT_PREFIX));
+    const parent = mkdtempSync(join(snapshotBaseDir(repoRoot, opts.home), SNAPSHOT_PREFIX));
     dir = join(parent, safeLabel(instance));
 
     // --no-checkout: start EMPTY. Checking out HEAD first and overlaying the

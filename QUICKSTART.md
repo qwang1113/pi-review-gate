@@ -29,7 +29,7 @@ bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 你：实现分页功能
 agent：调 set_gate_mode("loop")
   → 问你目标（一次一题，N of M）→ 用简体中文起草目标
-  → 派 goal-auditor 子代理预审该草案 → record_goal_prereview 记录其裁决
+  → 调 prepare_goal_audit 取任务文本 → 派 goal-auditor 子代理预审该草案 → record_goal_prereview 记录其裁决
      （不通过就改草案重审；没有匹配的 PASS 就**不会弹任何对话框**骚扰你）
   → propose_loop_goal 弹窗让你批准（窗中会显示“goal-auditor 预审: PASS @ …”）
   → 改代码
@@ -71,8 +71,8 @@ agent：调 set_gate_mode("loop")
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| `loop mode requires an approved loop goal BEFORE any edit/write call` | loop 模式（含未决）还没确认目标就动手编辑 | 先逐轮问清“done”的定义 → 中文起草 → goal-auditor 预审（`record_goal_prereview`）→ `propose_loop_goal` 在对话框里确认；批准前 edit/write 一律被拦（`.pi/` 与 `.pi-subagents/` 门禁自有文件除外；explore/normal 模式不要求 goal） |
-| `propose_loop_goal refused — no goal-auditor pre-review has been recorded` （或 `…belongs to DIFFERENT text`） | 目标草案没经预审，或预审后改过字（hash 变了） | 派 `goal-auditor` 审该段**原文**，把它的完整原始输出交给 `record_goal_prereview`，再用**一字不改**的文本重提；FAIL 就先改掉 P0/P1 再重审 |
+| `loop mode requires an approved loop goal BEFORE any edit/write call` | loop 模式（含未决）还没确认目标就动手编辑 | 先逐轮问清“done”的定义 → 中文起草 → `prepare_goal_audit` 取任务文本 → goal-auditor 预审（`record_goal_prereview`）→ `propose_loop_goal` 在对话框里确认；批准前 edit/write 一律被拦（`.pi/` 与 `.pi-subagents/` 门禁自有文件除外；explore/normal 模式不要求 goal） |
+| `propose_loop_goal refused — no goal-auditor pre-review has been recorded` （或 `…belongs to DIFFERENT text`） | 目标草案没经预审，或预审后改过字（hash 变了） | 调 `prepare_goal_audit` 审该段**原文**取回任务文本（重审时自动带上一轮结论与草稿差异），把它的完整原始输出交给 `record_goal_prereview`，再用**一字不改**的文本重提；FAIL 就先改掉 P0/P1 再重审 |
 | `goal-auditor` 角色不可派发（拒绝文案里的 BOOTSTRAP 段） | `~/.pi/agent/agents/goal-auditor.md` 缺失 | 开一个新会话（扩展会在启动时从包内 `agents/` 幂等自愈）；仍缺失就跑 `/gate-doctor` 看诊断行给出的 `node …/scripts/install-package.mjs` |
 | `code review gate is PENDING` | 改完没 review | 走 review 循环（或 `/review`） |
 | `precommit not run` / `FAILED` | 没跑或跑挂了 | `run_precommit`；修失败项 |
@@ -84,9 +84,9 @@ agent：调 set_gate_mode("loop")
 | agents 副本与仓库不同步（正文过时） | `~/.pi/agent/agents/*.md` 落后于本仓库 | 重跑 `node scripts/install-package.mjs`（幂等）；用 `/gate-doctor` 检出 |
 | `SNAPSHOT INTEGRITY: … DRIFTED` | reviewer 做完变异测试没还原（或把草稿文件写进了快照） | 重新 `prepare_review` 拿一个干净快照，重跑那一个 reviewer；它的 findings 仍然有效 |
 | `snapshot isolation UNAVAILABLE` | 本机 `git worktree` 不可用（无提交、权限、非 git 目录） | 按老规矩走：reviewer 不许改文件，你也别在审核期间修；门禁本身不受影响 |
-| `.pi/review-snapshots/` 里堆了 `rg-review-snap-*` | 会话崩溃留下的孤儿快照 | 下次 `prepare_review` 或新会话启动会按时效自动回收；手动清理：`git worktree prune` + `rm -rf .pi/review-snapshots/rg-review-snap-*` |
+| `~/.pi/review-snapshots/<repo-key>/` 里堆了 `rg-review-snap-*` | 会话崩溃留下的孤儿快照 | 下次 `prepare_review` 或新会话启动会按时效自动回收；手动清理：`git worktree prune` + `rm -rf ~/.pi/review-snapshots/<repo-key>/rg-review-snap-*` |
 | reviewer 改了依赖导致后续 precommit 诡异失败 | 快照里 `node_modules` 是指向真仓库的软链（共享路径之一），写它会穿透 | 重装依赖（`npm ci`）；reviewer 的提示词已明确禁止写 `node_modules` |
-| `git commit` 报 `.git/hooks/pre-commit: No such file or directory` | 有人在快照里跑了安装脚本：快照是 linked worktree，**`.git/hooks` 与真仓库共享**，于是 hook 被指向了随轮删除的快照目录 | 在**真工作树**重跑 `bash scripts/install-git-hooks.sh`；两个安装器现已拒绝从含 `rg-review-snap-` 路径段（`.pi/review-snapshots/` 与 tmpdir 回退两种布局）的目录下运行 |
+| `git commit` 报 `.git/hooks/pre-commit: No such file or directory` | 有人在快照里跑了安装脚本：快照是 linked worktree，**`.git/hooks` 与真仓库共享**，于是 hook 被指向了随轮删除的快照目录 | 在**真工作树**重跑 `bash scripts/install-git-hooks.sh`；两个安装器现已拒绝从含 `rg-review-snap-` 路径段（`~/.pi/review-snapshots/`、`.pi/review-snapshots/` 与 tmpdir 回退三种布局）的目录下运行 |
 | 想完全绕过 | — | 你执行 `/gate-bypass <reason>`（会话内）或会话外用 `REVIEW_GATE_BYPASS=1`（仅 hooks 层）；注意 `/gate-bypass` 只解除 L1 ship gate，**解除不了 L8 的 edit/write 硬拦**——未确认 goal 前编辑仍被拦 |
 
 ## 6. 常用命令

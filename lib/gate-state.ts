@@ -100,6 +100,30 @@ export interface GateState {
    * it mixes submodule digests in, so it is not a git object and cannot be
    * diffed. Absent ⇒ the next round is a full review (fail-safe).
    */
+  /**
+   * Worktree tree OID at the last `prepare_adviser` call for this repo, keyed
+   * by goal hash.
+   *
+   * Lets the NEXT adviser consultation of the SAME goal be told what changed
+   * since the previous one (goal criterion 3: incremental advisory), without
+   * a consultation of a DIFFERENT goal overwriting the baseline. It is
+   * DIAGNOSTIC INPUT only, like `lastReadyReview` — it never feeds the ship
+   * decision. Absent ⇒ the next consultation gets an empty changed-files
+   * list and treats the previous conclusion as still standing.
+   */
+  /**
+   * Per-goal advisory baseline: the worktree tree the changed-files list of
+   * the NEXT consultation is computed against. `tree` is the tree at the
+   * last consultation START (optimistic); `prevTree` is the last CONFIRMED
+   * consultation start (rollback target — a consultation that never appended
+   * a conclusion must not hide its changes, round-3 P1) or null when NO
+   * consultation is confirmed yet (cross-session first advance: the old
+   * artifact's conclusions are NOT proof the current one succeeded — the
+   * next round then falls back to a full re-check, round-4 P1); `confirmed`
+   * is the number of valid conclusions the artifact held when the baseline
+   * last advanced.
+   */
+  adviserBaselines?: Record<string, { tree: string; prevTree: string | null; confirmed: number }>;
   lastReadyReview?: {
     treeOid: string;
     files?: string[];
@@ -228,6 +252,14 @@ export interface GateState {
    * pre-review requirement there could never be unblocked.
    */
   goalPrereview?: GoalPrereviewRecord;
+  /**
+   * L8b audit HISTORY (goal criterion 2): every goal-auditor audit ever
+   * recorded, PASS or FAIL, oldest first — `goalPrereview` above is only the
+   * latest record. Persisted so a re-audit chain is inspectable (and the
+   * per-draft carryover data survives) even after newer drafts replaced the
+   * singular record.
+   */
+  goalPrereviewHistory?: GoalPrereviewRecord[];
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of
    *  them. Ship enforcement never reads it; absence just narrows the
@@ -384,16 +416,35 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     // matches the submitted text is honoured, exactly like `loopGoal`
     // (fabricating one is the same excluded class as writing the sidecar
     // directly — see the threat model in the README).
-    if (parsed.goalPrereview !== undefined &&
-        (typeof parsed.goalPrereview !== "object" || parsed.goalPrereview === null ||
-         typeof parsed.goalPrereview.hash !== "string" ||
-         !/^[0-9a-f]{64}$/.test(parsed.goalPrereview.hash) ||
-         (parsed.goalPrereview.verdict !== "PASS" && parsed.goalPrereview.verdict !== "FAIL") ||
-         typeof parsed.goalPrereview.at !== "string" ||
-         (parsed.goalPrereview.findingsTotal !== undefined &&
-          parsed.goalPrereview.findingsTotal !== null &&
-          typeof parsed.goalPrereview.findingsTotal !== "number"))) {
+    function isGoalPrereviewRecord(x: unknown): boolean {
+      const r = x as GoalPrereviewRecord | null | undefined;
+      return !!r && typeof r === "object" &&
+        typeof r.hash === "string" &&
+        /^[0-9a-f]{64}$/.test(r.hash) &&
+        (r.verdict === "PASS" || r.verdict === "FAIL") &&
+        typeof r.at === "string" &&
+        (r.findingsTotal === undefined || r.findingsTotal === null || typeof r.findingsTotal === "number") &&
+        (r.findings === undefined ||
+          (Array.isArray(r.findings) &&
+            r.findings.every((f) =>
+              typeof f === "object" && f !== null &&
+              typeof (f as { issue?: unknown }).issue === "string" &&
+              typeof (f as { severity?: unknown }).severity === "string"))) &&
+        (r.draft === undefined || typeof r.draft === "string") &&
+        (r.durationMs === undefined || typeof r.durationMs === "number");
+    }
+    if (parsed.goalPrereview !== undefined && !isGoalPrereviewRecord(parsed.goalPrereview)) {
       delete parsed.goalPrereview;
+    }
+    // L8b history (goal criterion 2: EVERY audit is persisted, PASS or FAIL,
+    // not just the latest). Malformed entries are dropped per-entry, keeping
+    // the rest of the history intact.
+    if (parsed.goalPrereviewHistory !== undefined) {
+      if (!Array.isArray(parsed.goalPrereviewHistory)) {
+        delete parsed.goalPrereviewHistory;
+      } else {
+        parsed.goalPrereviewHistory = parsed.goalPrereviewHistory.filter(isGoalPrereviewRecord);
+      }
     }
     const migrated = migrateFingerprintVersion(parsed);
     if (out) out.migrated = migrated;
@@ -501,8 +552,30 @@ export function mergeConcurrentBindings(
   currentDigest: () => string | null,
 ): GateState {
   if (!disk) return mine;
+  // Round-8/9 P1: auxiliary diagnostic state merges INDEPENDENTLY of any
+  // review/precommit candidate — a concurrent session's goal audits and
+  // adviser baselines must survive this session's next persist even when
+  // neither side carries a READY/PASS to inherit. When nothing aux is at
+  // stake, keep the caller's own object (identity-stable: no copy needed).
+  const hasAux =
+    (disk.goalPrereview && (!mine.goalPrereview || disk.goalPrereview.at > mine.goalPrereview.at)) ||
+    !!disk.goalPrereviewHistory?.length ||
+    (disk.adviserBaselines && Object.keys(disk.adviserBaselines).length > 0);
+  let merged = mine;
+  if (hasAux) {
+    merged = { ...mine };
+    if (disk.goalPrereview && (!mine.goalPrereview || disk.goalPrereview.at > mine.goalPrereview.at)) {
+      merged.goalPrereview = disk.goalPrereview;
+    }
+    if (disk.goalPrereviewHistory?.length) {
+      merged.goalPrereviewHistory = mergeGoalPrereviewHistories(mine.goalPrereviewHistory, disk.goalPrereviewHistory);
+    }
+      if (disk.adviserBaselines && Object.keys(disk.adviserBaselines).length) {
+        merged.adviserBaselines = mergeAdviserBaselines(mine.adviserBaselines, disk.adviserBaselines);
+    }
+  }
   // Same session (or an unidentifiable file): our own last write — replace it.
-  if (!disk.sessionId || disk.sessionId === mine.sessionId) return mine;
+  if (!disk.sessionId || disk.sessionId === mine.sessionId) return merged;
 
   const candidateReview =
     // PENDING = "no verdict yet". BLOCKED / NEEDS_HUMAN are verdicts, and a
@@ -517,16 +590,16 @@ export function mergeConcurrentBindings(
     disk.precommit.verdict === "PASS" &&
     typeof disk.precommit.fingerprint === "string" &&
     disk.precommit.fingerprint.length > 0;
-  if (!candidateReview && !candidatePrecommit) return mine;
+  if (!candidateReview && !candidatePrecommit) return merged;
 
   const digest = currentDigest();
-  if (!digest) return mine;
+  if (!digest) return merged;
   const keepReview = candidateReview && disk.review.fingerprint === digest;
   const keepPrecommit = candidatePrecommit && disk.precommit.fingerprint === digest;
-  if (!keepReview && !keepPrecommit) return mine;
+  if (!keepReview && !keepPrecommit) return merged;
 
   return {
-    ...mine,
+    ...merged,
     review: keepReview ? { ...disk.review } : mine.review,
     precommit: keepPrecommit ? { ...disk.precommit } : mine.precommit,
     // The incremental-review baseline must survive the carry-over too,
@@ -534,6 +607,45 @@ export function mergeConcurrentBindings(
     // the tree it describes was already reviewed.
     ...(keepReview && disk.lastReadyReview ? { lastReadyReview: disk.lastReadyReview } : {}),
   };
+}
+
+/**
+ * Union of two audit histories, deduped by (hash, verdict, at), oldest
+ * first. A concurrent session's audits must not be erased by this session's
+ * persist (round-8 P1).
+ */
+function mergeGoalPrereviewHistories(
+  a: GoalPrereviewRecord[] | undefined,
+  b: GoalPrereviewRecord[] | undefined,
+): GoalPrereviewRecord[] {
+  const seen = new Set<string>();
+  const out: GoalPrereviewRecord[] = [];
+  for (const rec of [...(a ?? []), ...(b ?? [])]) {
+    const key = `${rec.hash}|${rec.verdict}|${rec.at}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(rec);
+  }
+  return out.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : 0));
+}
+
+/**
+ * Per-goal adviser baselines, merged key-by-key. `confirmed` counts VALID
+ * conclusions and only grows, so the baseline with the higher count is the
+ * newer one — a concurrent disk write must never overwrite a baseline THIS
+ * session just advanced (round-10 P1: plain spread made the disk copy win
+ * even when it was older).
+ */
+function mergeAdviserBaselines(
+  a: Record<string, { tree: string; prevTree: string | null; confirmed: number }> | undefined,
+  b: Record<string, { tree: string; prevTree: string | null; confirmed: number }> | undefined,
+): Record<string, { tree: string; prevTree: string | null; confirmed: number }> {
+  const out = { ...(a ?? {}), ...(b ?? {}) };
+  for (const [key, mineVal] of Object.entries(a ?? {})) {
+    const diskVal = b?.[key];
+    if (diskVal && diskVal.confirmed < mineVal.confirmed) out[key] = mineVal;
+  }
+  return out;
 }
 
 /**

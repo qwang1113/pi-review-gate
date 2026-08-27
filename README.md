@@ -2,6 +2,10 @@
 
 **Quality gates for [Pi](https://github.com/earendil-works/pi-coding-agent)** — ship-gate hard blocking, persistent gate state, auto-continuing review loop. Globally installable.
 
+**Requires Node ≥ 22.19.0** (declared in `package.json` `engines`; the
+`pi-hashline-edit-pro` companion needs it — the previous readmap companion
+accepted Node 20).
+
 > **新用户？先读 [QUICKSTART.md](QUICKSTART.md)（5 分钟上手），再看本文件。**
 
 > Quality gates the model can't skip: `git commit`, `git push`, `gh pr create`, and `gh pr edit`
@@ -149,11 +153,26 @@ The git hooks mirror the split exactly: `pre-commit` accepts any PASS,
 
 One more hard refusal lives in the hooks (defense-in-depth): a commit/push
 whose cwd is **inside a review snapshot** (a path segment `rg-review-snap-*`,
-covering both the repo-local `*/.pi/review-snapshots/rg-review-snap-*` layout
-and the `<tmp>/rg-review-snap-*` fallback) is rejected even without a sidecar —
+covering the default `~/.pi/review-snapshots/<repo-key>/rg-review-snap-*` layout
+plus the repo-local `*/.pi/review-snapshots/` and `<tmp>/` fallbacks) is
+rejected even without a sidecar —
 a snapshot deliberately carries no `.pi/`, but shares the real repo's `.git`,
 so the "no sidecar → allow" rule would let a reviewer's push ship the real
 repo. `REVIEW_GATE_BYPASS=1` still applies (human escape hatch).
+
+**Review snapshots live OUTSIDE every repo by default** —
+`~/.pi/review-snapshots/<repo-key>/` (one subdir per repo, keyed by a stable
+hash of the repo root). That is a physical guarantee, not a config: whole-tree
+test discovery starts from a repo's root (jest `rootDir`, a bare `node --test`)
+and can never reach a path outside it, so the snapshot's own `test/` copy is
+never executed twice — no matter who runs the suite or whether they know
+snapshots exist. `~/.pi` is also a dot-directory, which bare `node --test`
+skips anyway. NOT `/tmp`: this repo's `pi-self` guard treats any `/tmp/…`
+path as scratch, and reviewing inside a `/tmp` snapshot was measured to fail
+4 tests that pass in the real tree. Falls back to the repo's own
+`.pi/review-snapshots/` when the home dir is unwritable, then to the system
+temp dir; the preset `jest` block in `package.json` still excludes `node_modules`
+and `.pi` for that fallback layout.
 
 ### Project-level step configuration (`.pi/review-gate.json`)
 
@@ -299,6 +318,20 @@ files or 500 changed lines**, touches a file no previous review covered, or
 cannot be computed at all. Incremental is never the default and never inferred:
 it is granted only when every precondition holds.
 
+
+The same economy now covers the other two review roles. The **goal-auditor**
+persists every audit's verdict, findings (verbatim) and judged draft; a
+re-audit of a revised draft gets a carryover block with the previous verdict,
+findings and draft, and `prepare_goal_audit` replies with the complete
+ready-made auditor task. The **adviser** runs on `prepare_adviser`, which
+hands back a brief carrying the transcript pointer (fresh context — read on
+demand, never inherited), the conclusion artifact the adviser appends to with
+its `bash` tool, and — from the second consultation of a goal — the previous
+conclusion plus the files changed since. All three roles run
+`context:"fresh"` and read the main session's transcript on demand
+(`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`) instead of forking
+it. First audits/consultations are full; later ones are incremental, exactly
+like reviewer rounds.
 ## Judges on a stronger model, pinned at `max`
 
 The gate is only as good as the brain judging the work. Four independent roles
@@ -790,7 +823,7 @@ on `pi install` / `npm install` and:
    already-present packages are left untouched): `pi-subagents` (the
    spawn-reviewer protocol), `pi-opencode-bridge` (the opencode-go provider),
    `pi-anthropic-oauth`, `pi-mcp-adapter`, `pi-notify`, `pi-vim`,
-   `pi-web-access`, `@narumitw/pi-lsp` and `pi-hashline-readmap`.
+   `pi-web-access`, `@narumitw/pi-lsp` and `pi-hashline-edit-pro`.
 3. if the current directory is a git repo, installs the git hooks into it
    (idempotent; chained, never clobbered).
 4. writes pi-subagents' **fleet-inspector keybindings** into the global subagent config
@@ -943,8 +976,10 @@ one fact:
   answer, all at once only when the user asks for it — until nothing is left
   silently assumed. Facts are the agent's job (read the repo, run the tools);
   only decisions go to the user.
-- **Then the goal-auditor — mechanically (since 2026-08-25).** The draft goes to
-  the dedicated `goal-auditor` subagent, whose FULL raw output is handed to
+- **Then the goal-auditor — mechanically (since 2026-08-25).** The agent calls
+  `prepare_goal_audit` with the draft to get the ready-made auditor task (with
+  the previous audit's carryover + draft delta on a re-audit), dispatches the
+  dedicated `goal-auditor` subagent with it, and hands the FULL raw output to
   `record_goal_prereview`. The **extension** parses the auditor's JSON fence
   itself (PASS ⇔ a `READY` verdict, which verdict-parse already withholds from
   a fence carrying unresolved P0/P1, and a salvaged fence can never be READY)
@@ -1797,7 +1832,7 @@ lib/fingerprint.ts            worktree fingerprint (content-addressed git tree h
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
 lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running subagent, notice text (pure)
-lib/review-snapshot.ts        one disposable git-worktree snapshot for the single reviewer (under the repo's gate-owned .pi/, with a tmpdir fallback when .pi/ is unwritable) + post-run tree verification + orphan reclaim
+lib/review-snapshot.ts        one disposable git-worktree snapshot for the single reviewer (default `~/.pi/review-snapshots/<repo-key>/` — outside every repo, with repo-`.pi/` and tmpdir fallbacks) + post-run tree verification + orphan reclaim
 lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
 lib/verdict-guards.ts         the two READY guards as a pure truth table: snapshot drift + stale reviewed tree (tighten-only)
 lib/reviewer-spawn-guard.ts   the snapshot pin as a pure truth table: refuse a reviewer spawn that names no snapshot (workflow dispatch included), and require per-snapshot evidence of use at record time (tighten-only)

@@ -16,7 +16,7 @@ const HOOK_INSTALLER = join(ROOT, "scripts", "install-git-hooks.sh");
 const COMPANION_EXPECTED = [
   "@narumitw/pi-lsp",
   "pi-anthropic-oauth",
-  "pi-hashline-readmap",
+  "pi-hashline-edit-pro",
   "pi-mcp-adapter",
   "pi-notify",
   "pi-opencode-bridge",
@@ -666,7 +666,7 @@ test("postinstall registers missing companion packages via pi install", () => {
     "npm:pi-vim",
     "npm:pi-web-access",
     "npm:@narumitw/pi-lsp",
-    "npm:pi-hashline-readmap",
+    "npm:pi-hashline-edit-pro",
   ];
   assert.deepEqual(installs, expectedMissing.map((s) => `install ${s}`));
 });
@@ -684,7 +684,7 @@ test("postinstall registers several missing companions (partial home)", () => {
     "npm:pi-vim",
     "npm:pi-web-access",
     "npm:@narumitw/pi-lsp",
-    "npm:pi-hashline-readmap",
+    "npm:pi-hashline-edit-pro",
   ];
   assert.deepEqual(installs, expectedMissing.map((s) => `install ${s}`));
 });
@@ -701,7 +701,7 @@ test("postinstall skips companions already present in settings.json", () => {
     "npm:pi-vim",
     "npm:pi-web-access",
     "npm:@narumitw/pi-lsp",
-    "npm:pi-hashline-readmap",
+    "npm:pi-hashline-edit-pro",
   ];
   const { status, stderr, installs } = runInstallerWithFakePi(home, all);
   assert.equal(status, 0, `installer failed: ${stderr}`);
