@@ -163,7 +163,11 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
      intermediate round, full for the final round before shipping) — and
      confirm it PASSES before spending the expensive judge's time: a FAIL is
      cheaper to fix before the review, and the reviewer must never be the
-     first one to find a test failure.
+     first one to find a test failure. **Do NOT manually run the full suite
+     or typecheck first**: the full lane runs lint/typecheck/build/the
+     complete suite in one shot, and its input cache reuses an unchanged set
+     in seconds. Use targeted tests for files you are actively editing; let
+     `run_precommit` be the single full gate (round-12 user ask).
    - Then **`review_checkpoint`** — the ONLY commit allowed before a READY.
      It commits everything with the precommit PASS in hand and records the
      sha; the review unit is the immutable commit range `baseline..HEAD`.

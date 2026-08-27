@@ -23,6 +23,11 @@ WHOLE change:
   `review_spawn` → `review_send` → `review_watch` → `record_review`). You
   commit the change as a checkpoint FIRST (`review_checkpoint` — the only
   commit allowed before a READY; it requires a full precommit PASS). The
+  full precommit ALREADY ran typecheck + build + the complete suite on that
+  exact content — **never manually re-run the full suite or `tsc`** before a
+  checkpoint (the runner caches by input: unchanged content reuses the
+  recorded PASS in seconds). Develop with targeted tests only; let
+  `run_precommit` be the single full gate. The
   reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
   starts at the last REVIEWED commit, so a chain of checkpoints since the
   last READY is all covered (round-9 P1); there is no second reviewer of

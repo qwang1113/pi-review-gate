@@ -2745,7 +2745,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           content: [{
             type: "text",
             text: `review-gate: checkpoint committed ${sha.slice(0, 12)} — \"${message}\". This commit is the review unit for the next round (baseline..HEAD).` +
-              `\n\nCHECKPOINT_SHA=${sha}\nFiles: ${sweptIn.length} — ${sweptIn.slice(0, 20).join(", ")}${sweptIn.length > 20 ? " …" : ""}`,
+              `\n\nCHECKPOINT_SHA=${sha}\nFiles: ${sweptIn.length} — ${sweptIn.slice(0, 20).join(", ")}${sweptIn.length > 20 ? " …" : ""}` +
+              "\n\nThe required full precommit already ran typecheck + build + the COMPLETE test suite on this exact content " +
+              "(cache: an unchanged input set is reused in seconds — do NOT manually re-run the full suite or `tsc`; " +
+              "run only targeted tests for files you keep editing, and let run_precommit be the single full gate).",
           }],
           details: { committed: true, sha },
         };
