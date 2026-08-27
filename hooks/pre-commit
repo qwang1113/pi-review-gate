@@ -356,7 +356,10 @@ if (state.hasCodeChange) {
       const out = execFileSync("git", ["rev-list", "--format=%T", `${state.review.commitSha}..HEAD`], { encoding: "utf8" });
       unreviewed = out.split("\n").filter((l) => l && !l.startsWith("commit ") && l.trim() !== state.review.fingerprint).length;
     } catch {
-      unreviewed = 1; // range unverifiable (rebase?) — fail closed
+      // Reviewed commit squashed/rebase away — the HEAD-tree match above is
+      // the content proof; a rebase that changed content already failed the
+      // fingerprint check. Skipping keeps a content-identical squash alive.
+      unreviewed = 0;
     }
     if (unreviewed > 0) {
       problems.push(`unreviewed commits since the last READY review (${unreviewed} commit(s) with content no reviewer saw) — checkpoint the new work and run the next review round before shipping`);

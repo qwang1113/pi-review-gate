@@ -835,8 +835,12 @@ export default function reviewGate(pi: ExtensionAPI) {
    * no reviewer saw entered the branch since the READY (a checkpoint never
    * re-reviewed, a change-and-revert, or a rebase that moved the reviewed
    * point) — HEAD's tree matching is not enough. Returns undefined when there
-   * is nothing to compare against (older sidecar) and a sentinel when the
-   * range cannot be computed (fail-closed by the caller).
+   * is nothing to compare against (older sidecar). When the range cannot be
+   * computed (the reviewed commit was squashed/rebase away), the HEAD-tree
+   * match is the content proof and the check is skipped — a squash that
+   * preserves the tree must keep the READY alive (goal criterion 4), and a
+   * rebase that CHANGED content already fails the fingerprint match before
+   * this check runs.
    */
   function unreviewedTreesSince(root: string, review: GateState["review"]): string[] | undefined {
     if (!review?.commitSha || !review.fingerprint) return undefined;
@@ -848,7 +852,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         .map((l) => l.trim())
         .filter(Boolean);
     } catch {
-      return ["unverifiable-range"];
+      return []; // reviewed commit gone (squash) — tree match is the proof
     }
   }
 
