@@ -221,6 +221,7 @@ import {
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
 import { isModelAllowed } from "../lib/model-allowlist.ts";
+import { squashPointBaseline, branchBaseBaseline } from "../lib/review-baseline.ts";
 import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_HISTORY_QUERY,
@@ -3075,23 +3076,14 @@ export default function reviewGate(pi: ExtensionAPI) {
           execFileSync("git", ["merge-base", "--is-ancestor", lastReviewed, "HEAD"], { cwd: root, stdio: "ignore" });
           baseline = lastReviewed;
         } catch {
-          // Chain rewritten: find the squash point by tree identity.
-          let cur = st.checkpoint.prevSha;
-          for (let i = 0; i < 100 && cur; i++) {
-            try {
-              const tree = execFileSync("git", ["rev-parse", `${cur}^{tree}`], { cwd: root, encoding: "utf8" }).trim();
-              if (tree === st.review.fingerprint) { baseline = cur; break; }
-              cur = execFileSync("git", ["rev-parse", `${cur}^`], { cwd: root, encoding: "utf8" }).trim();
-            } catch { cur = ""; }
-          }
-          if (!baseline) {
-            // No commit carries the reviewed tree — a content-changing
-            // rewrite. Cover everything from the branch base.
-            try {
-              baseline = execFileSync(
-                "git", ["merge-base", "main", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-            } catch { /* fall through to the checkpoint baseline */ }
-          }
+          // Chain rewritten: find the squash point by tree identity (pure
+          // logic in lib/review-baseline.ts, pinned by tests — round-12 P2);
+          // a clean miss falls back to the branch base, then the checkpoint
+          // baseline below.
+          baseline = st.checkpoint?.prevSha && st.review.fingerprint
+            ? squashPointBaseline(root, st.review.fingerprint, st.checkpoint!.prevSha)
+            : undefined;
+          if (!baseline) baseline = branchBaseBaseline(root);
         }
       }
       if (!baseline) {
