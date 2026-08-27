@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { assembleGitMemory, buildGitMemory, GIT_MEMORY_MAX_LINES } from "../lib/git-memory.ts";
+import { hermeticGitEnv } from "./helpers/git.ts";
 
 const tempDirs: string[] = [];
 function makeTemp(): string {
@@ -18,7 +19,7 @@ after(() => {
 });
 
 function git(cwd: string, ...args: string[]): void {
-  execFileSync("git", args, { cwd, stdio: "ignore" });
+  execFileSync("git", args, { cwd, stdio: "ignore", env: hermeticGitEnv() });
 }
 
 function makeRepo(): string {

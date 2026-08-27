@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, realpathSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { hermeticGitEnv } from "./helpers/git.ts";
 
 const { gitRootOfDir, resolveShipRepos, resolveToolRepoTarget } = await import(
   join(resolve(import.meta.dirname ?? "."), "..", "lib", "repo-resolve.ts")
@@ -12,7 +13,7 @@ const { gitRootOfDir, resolveShipRepos, resolveToolRepoTarget } = await import(
 // ---- fixture helpers -------------------------------------------------------
 
 function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: hermeticGitEnv() }).trim();
 }
 
 /** Create a throwaway git repo under one shared temp parent (so repos are

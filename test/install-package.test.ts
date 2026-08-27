@@ -5,6 +5,10 @@ import { mkdtempSync, existsSync, mkdirSync, writeFileSync, readFileSync, rmSync
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { neutraliseHostGitConfig } from "./helpers/git.ts";
+
+// 11 fixture git calls spread over the file; neutralise the host config once.
+neutraliseHostGitConfig();
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALLER = join(ROOT, "scripts", "install-package.mjs");

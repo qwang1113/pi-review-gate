@@ -16,6 +16,7 @@ import {
   COMMIT_MSG_FORBIDDEN,
 } from "../lib/constants.ts";
 import { computeFingerprint, FINGERPRINT_VERSION, GIT_LOCATION_ENV, gitBaseEnv } from "../lib/fingerprint.ts";
+import { hermeticGitEnv } from "./helpers/git.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -194,7 +195,7 @@ test("TS and CJS fingerprint implementations agree (drift guard)", () => {
   const dir = mkdtempSync(join(tmpdir(), "rg-drift-"));
   try {
     const git = (...args: string[]) =>
-      execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+      execFileSync("git", args, { cwd: dir, stdio: "ignore", env: hermeticGitEnv() });
     git("init");
     git("config", "core.excludesFile", "/dev/null");
     // Mixed shape: committed + staged + unstaged + untracked + gate-owned.
@@ -233,7 +234,7 @@ test("TS and CJS fingerprint implementations agree (drift guard)", () => {
 test("TS and CJS agree with a DIRTY review snapshot on disk (the hook path must not fail closed)", () => {
   const dir = mkdtempSync(join(tmpdir(), "rg-drift-snap-"));
   try {
-    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore", env: hermeticGitEnv() });
     git("init");
     git("config", "core.excludesFile", "/dev/null");
     writeFileSync(join(dir, "code.ts"), "// v1\n");
@@ -267,24 +268,24 @@ test("TS and CJS agree with a DIRTY review snapshot on disk (the hook path must 
 test("TS and CJS agree on a repo WITH a dirty submodule (parity covers submodules)", (t) => {
   const parent = mkdtempSync(join(tmpdir(), "rg-drift-par-"));
   const sub = mkdtempSync(join(tmpdir(), "rg-drift-sub-"));
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, stdio: "ignore", env: hermeticGitEnv() });
   const commit = (cwd: string, msg: string) =>
-    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", msg], { cwd, stdio: "ignore" });
+    git(cwd, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", msg);
   try {
     for (const d of [parent, sub]) {
-      execFileSync("git", ["init"], { cwd: d, stdio: "ignore" });
-      execFileSync("git", ["config", "core.excludesFile", "/dev/null"], { cwd: d, stdio: "ignore" });
+      git(d, "init");
+      git(d, "config", "core.excludesFile", "/dev/null");
     }
     writeFileSync(join(sub, "s.ts"), "// sub v1\n");
-    execFileSync("git", ["add", "s.ts"], { cwd: sub, stdio: "ignore" });
+    git(sub, "add", "s.ts");
     commit(sub, "sub init");
 
     writeFileSync(join(parent, "app.ts"), "// base\n");
-    execFileSync("git", ["add", "app.ts"], { cwd: parent, stdio: "ignore" });
+    git(parent, "add", "app.ts");
     commit(parent, "init");
     try {
-      execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", sub, "sm"], {
-        cwd: parent, stdio: "ignore",
-      });
+      git(parent, "-c", "protocol.file.allow=always", "submodule", "add", sub, "sm");
     } catch {
       t.skip("submodule add unsupported in this environment");
       return;
@@ -318,24 +319,24 @@ test("TS and CJS agree on a repo WITH a dirty submodule (parity covers submodule
 test("TS (subdirectory) and CJS (repo root) agree on a repo with a submodule", (t) => {
   const parent = mkdtempSync(join(tmpdir(), "rg-cwd-par-"));
   const sub = mkdtempSync(join(tmpdir(), "rg-cwd-sub-"));
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, stdio: "ignore", env: hermeticGitEnv() });
   const commit = (cwd: string, msg: string) =>
-    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", msg], { cwd, stdio: "ignore" });
+    git(cwd, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", msg);
   try {
     for (const d of [parent, sub]) {
-      execFileSync("git", ["init"], { cwd: d, stdio: "ignore" });
-      execFileSync("git", ["config", "core.excludesFile", "/dev/null"], { cwd: d, stdio: "ignore" });
+      git(d, "init");
+      git(d, "config", "core.excludesFile", "/dev/null");
     }
     writeFileSync(join(sub, "s.ts"), "// sub v1\n");
-    execFileSync("git", ["add", "s.ts"], { cwd: sub, stdio: "ignore" });
+    git(sub, "add", "s.ts");
     commit(sub, "sub init");
 
     writeFileSync(join(parent, "app.ts"), "// base\n");
-    execFileSync("git", ["add", "app.ts"], { cwd: parent, stdio: "ignore" });
+    git(parent, "add", "app.ts");
     commit(parent, "init");
     try {
-      execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", sub, "sm"], {
-        cwd: parent, stdio: "ignore",
-      });
+      git(parent, "-c", "protocol.file.allow=always", "submodule", "add", sub, "sm");
     } catch {
       t.skip("submodule add unsupported in this environment");
       return;

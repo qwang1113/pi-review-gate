@@ -5,6 +5,11 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { neutraliseHostGitConfig } from "./helpers/git.ts";
+
+// 100 fixture git calls live in this file (and the hooks under test shell out
+// to git themselves), so neutralise the host config once for the process.
+neutraliseHostGitConfig();
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PRE_COMMIT = join(ROOT, "hooks", "pre-commit");

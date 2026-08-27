@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { goalTextHash } from "../lib/loop-goal.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { isPiSelfPath } from "../lib/pi-self.ts";
+import { hermeticGitEnv } from "./helpers/git.ts";
 
 // ---------------------------------------------------------------------------
 // Behavioral regression for the loop goal's core promise: writing
@@ -87,7 +88,7 @@ before(() => {
 });
 
 function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: hermeticGitEnv() }).trim();
 }
 
 function makeRepoAt(base: string): string {

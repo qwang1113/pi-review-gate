@@ -5,6 +5,7 @@ import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, 
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { git as hermeticGit, hermeticGitEnv } from "./helpers/git.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER = join(ROOT, "scripts", "precommit-runner.mjs");
@@ -496,12 +497,12 @@ test("config: fast test narrowing SUCCEEDS → testScope related (entry.body wir
   mkdirSync(binDir, { recursive: true });
   writeFileSync(join(binDir, "vitest"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   // A git repo with a changed source file, so the related set is derivable.
-  execFileSync("git", ["init", "-q"], { cwd: dir });
-  execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
-  execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+  hermeticGit(dir, ["init", "-q"], { quiet: true });
+  hermeticGit(dir, ["config", "user.email", "t@t"], { quiet: true });
+  hermeticGit(dir, ["config", "user.name", "t"], { quiet: true });
   writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
-  execFileSync("git", ["add", "-A"], { cwd: dir });
-  execFileSync("git", ["commit", "-qm", "init"], { cwd: dir });
+  hermeticGit(dir, ["add", "-A"], { quiet: true });
+  hermeticGit(dir, ["commit", "-qm", "init"], { quiet: true });
   writeFileSync(join(dir, "a.ts"), "export const a = 2;\n");
   writeReviewGateConfig(dir, JSON.stringify({
     precommit: { test: { fast: { script: "test" } } },
@@ -644,7 +645,7 @@ test("a legacy oversized cache tail is bounded on REPLAY, not just on write", ()
   // someone else's machine.
   const git = (...args: string[]) => execFileSync("git", [
     "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-c", "gpg.format=openpgp", ...args,
-  ], { cwd: dir, stdio: "ignore" });
+  ], { cwd: dir, stdio: "ignore", env: hermeticGitEnv() });
   git("init", "-q", "--template=");
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "t");

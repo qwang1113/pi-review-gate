@@ -8,6 +8,7 @@ import {
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { hermeticGitEnv } from "./helpers/git.ts";
 
 // ---------------------------------------------------------------------------
 // Regression test for the P-multi fix: the ship gate must bind to the repo a
@@ -62,7 +63,7 @@ const { default: reviewGate } = await import(join(INSTALL, "extensions", "review
 // ---- fixtures ---------------------------------------------------------------
 
 function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: hermeticGitEnv() }).trim();
 }
 function makeRepo(parent: string, name: string): string {
   const root = join(parent, name);

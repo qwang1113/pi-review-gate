@@ -5,6 +5,11 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
+import { neutraliseHostGitConfig } from "./helpers/git.ts";
+
+// ~90 fixture git calls live in this file, so neutralise the host config once
+// for the whole process instead of threading `env:` through each of them.
+neutraliseHostGitConfig();
 
 const requireCjs = createRequire(import.meta.url);
 

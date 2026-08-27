@@ -5,6 +5,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync 
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { neutraliseHostGitConfig } from "./helpers/git.ts";
+
+// 13 fixture git calls spread over the file; neutralise the host config once.
+neutraliseHostGitConfig();
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SCANNER = join(ROOT, "scripts", "scan-test-labels.cjs");

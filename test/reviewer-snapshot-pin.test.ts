@@ -24,6 +24,7 @@ import {
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { hermeticGitEnv } from "./helpers/git.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALL = mkdtempSync(join(tmpdir(), "rg-pin-install-"));
@@ -54,7 +55,7 @@ after(() => {
 const { default: reviewGate } = await import(join(INSTALL, "extensions", "review-gate.ts"));
 
 function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: hermeticGitEnv() }).trim();
 }
 
 /** A repo with one commit AND an uncommitted edit (a review needs a change). */

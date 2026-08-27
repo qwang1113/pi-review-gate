@@ -16,6 +16,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { hermeticGitEnv } from "./helpers/git.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER = join(ROOT, "scripts", "precommit-runner.mjs");
@@ -26,7 +27,7 @@ after(() => {
 });
 
 function git(dir: string, args: string[]): void {
-  execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  execFileSync("git", args, { cwd: dir, stdio: "ignore", env: hermeticGitEnv() });
 }
 
 /** A real git repo whose only checks are cheap shell commands. */
@@ -223,8 +224,8 @@ test("running from a SUBDIRECTORY still anchors on the repo root", () => {
   const dir = makeRepo({ typecheck: "true" });
   mkdirSync(join(dir, "sub"), { recursive: true });
   writeFileSync(join(dir, "sub", "package.json"), JSON.stringify({ name: "s", version: "1.0.0", scripts: { typecheck: "true" } }));
-  execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
-  execFileSync("git", ["commit", "-qm", "sub"], { cwd: dir, stdio: "ignore" });
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-qm", "sub"]);
 
   const sub = join(dir, "sub");
   const first = run(sub);

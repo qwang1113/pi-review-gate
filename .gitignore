@@ -19,6 +19,10 @@ node_modules/
 # local override, not history.
 .pi/agents/
 .pi-subagents/
+# Harness run-continuation state (one file per session, rewritten as the run
+# progresses) — same category as the gate's own `.pi/` artifacts: live local
+# state, never repository history.
+.omo/
 
 # AGENTS.md is excluded by the global gitignore (sd0x-dev-flow keeps it
 # personal/local by default) — this repo wants it tracked, so re-include it.
