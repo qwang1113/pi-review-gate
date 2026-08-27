@@ -830,6 +830,14 @@ export default function reviewGate(pi: ExtensionAPI) {
    * sleep: the agent can end its turn and do other work; the wake arrives
    * as a new turn. review_spawn registers this AUTOMATICALLY; review_watch
    * exists to re-register with a custom label.
+   *
+   * Round-14 P1: the listener RE-ARMS ITSELF after a signal — a judge pane
+   * is reused for every round of its life (the same title ⇒ same channel),
+   * and a one-shot listener would leave rounds 2..N with no wake-up while
+   * the docs promise "no review_watch call needed". The re-arm happens only
+   * when the agent did not replace the handle in the meantime (the
+   * activeWatchers identity check), so a manual review_watch with a custom
+   * label keeps its label until the next signal.
    */
   function registerWatch(channel: string, label: string): void {
     activeWatchers.get(channel)?.cancel();
@@ -845,6 +853,8 @@ export default function reviewGate(pi: ExtensionAPI) {
           display: true,
         }, { triggerTurn: true, deliverAs: "steer" });
       } catch { /* the session may be shutting down — the listener is gone anyway */ }
+      // Re-arm for the NEXT round on the same pane (round-14 P1).
+      if (activeWatchers.get(channel) === undefined) registerWatch(channel, label);
     });
   }
   /** HEAD commit tree OID — the content-boundary every ship binding compares against (round-8 P1). */

@@ -1375,6 +1375,11 @@ test("review_watch: the wake-up listener is registered with triggerTurn semantic
   assert.match(helper, /triggerTurn: true/, "wakes an idle session");
   assert.match(helper, /deliverAs: "steer"/, "delivered as a steer");
   assert.match(helper, /activeWatchers/, "per-channel registry");
+  // Round-14 P1: the listener must RE-ARM after a signal — the judge pane is
+  // reused across rounds, so a one-shot listener leaves rounds 2..N silent
+  // while the docs promise wake-ups without review_watch calls.
+  assert.match(helper, /registerWatch\(channel, label\);/,
+    "the listener re-arms itself for the next round on the same pane");
   const spawnAt = SRC.indexOf('name: "review_spawn"');
   const spawnBody = SRC.slice(spawnAt, spawnAt + 6000);
   assert.match(spawnBody, /registerWatch\(child\.doneChannel, title\)/,
