@@ -1364,11 +1364,21 @@ test("review_checkpoint: the pre-review commit channel is registered with its co
 test("review_watch: the wake-up listener is registered with triggerTurn semantics", () => {
   const at = SRC.indexOf('name: "review_watch"');
   assert.ok(at >= 0, "review_watch must be registered");
-  const body = SRC.slice(at, at + 3200);
-  assert.match(body, /waitForSignalAsync/, "listens on the child's done channel");
-  assert.match(body, /triggerTurn: true/, "wakes an idle session");
-  assert.match(body, /deliverAs: "steer"/, "delivered as a steer");
-  assert.match(body, /activeWatchers/, "per-channel registry");
+  // Round-14 (user ask): the registration logic lives in the shared
+  // registerWatch helper; review_spawn calls it AUTOMATICALLY, review_watch
+  // only re-registers with a custom label. The wake must be a new turn —
+  // never polling, never sleeping on the agent side.
+  const helperAt = SRC.indexOf("function registerWatch(");
+  assert.ok(helperAt >= 0, "registerWatch helper must exist");
+  const helper = SRC.slice(helperAt, helperAt + 1800);
+  assert.match(helper, /waitForSignalAsync/, "listens on the child's done channel");
+  assert.match(helper, /triggerTurn: true/, "wakes an idle session");
+  assert.match(helper, /deliverAs: "steer"/, "delivered as a steer");
+  assert.match(helper, /activeWatchers/, "per-channel registry");
+  const spawnAt = SRC.indexOf('name: "review_spawn"');
+  const spawnBody = SRC.slice(spawnAt, spawnAt + 6000);
+  assert.match(spawnBody, /registerWatch\(child\.doneChannel, title\)/,
+    "review_spawn registers the completion listener automatically");
   // session_shutdown must cancel the listeners (no leaked tmux wait-for)
   const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
   assert.ok(shutdownAt >= 0);

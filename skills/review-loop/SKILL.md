@@ -206,13 +206,13 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
-   **Waiting-window discipline**: while the reviewer runs, do useful parallel
-   work — other repos' loops, PR description drafts, `[NIT_DEFERRED]`
-   bookkeeping. Never idle-poll the judge child: `review_watch` wakes this
-   session on the done signal. Because the reviewed range is immutable,
-   KEEP FIXING the real worktree while it runs: read the finding stream and
-   fix streamed P0/P1/P2 that carry evidence (confirm each in the code
-   first), leaving Nits for the verdict.
+   **Waiting-window discipline**: `review_spawn` auto-registers the
+   completion listener — send the task, END YOUR TURN, and the done signal
+   wakes this session as a new turn. Never sleep or poll while a judge
+   child runs; keep doing useful work: fix streamed P0/P1/P2 from the
+   finding stream (confirm each in the code first), other repos' loops, PR
+   description drafts, `[NIT_DEFERRED]` bookkeeping. Because the reviewed
+   range is immutable, the worktree edits never invalidate the round.
 
 3. **Review** — the reviewer audits the COMMIT RANGE `baseline..HEAD` (the
    immutable checkpoint commits) with `git show`/`git diff`; it may verify by

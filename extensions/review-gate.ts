@@ -821,6 +821,32 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   interface ReviewTarget { baseline: string; head: string; tree: string; }
   const reviewTargets = new Map<string, ReviewTarget>();
+
+  /**
+   * Register the completion listener for a judge child's done channel. One
+   * listener per channel (a re-registration replaces the old handle). When
+   * the child signals `tmux wait-for -S <channel>`, THIS session is woken
+   * via pi.sendMessage(triggerTurn, deliverAs:"steer") — no polling, no
+   * sleep: the agent can end its turn and do other work; the wake arrives
+   * as a new turn. review_spawn registers this AUTOMATICALLY; review_watch
+   * exists to re-register with a custom label.
+   */
+  function registerWatch(channel: string, label: string): void {
+    activeWatchers.get(channel)?.cancel();
+    const handle = waitForSignalAsync(channel);
+    activeWatchers.set(channel, handle);
+    handle.promise.then((signalled) => {
+      if (activeWatchers.get(channel) === handle) activeWatchers.delete(channel);
+      if (!signalled) return;
+      try {
+        pi.sendMessage({
+          customType: "review-gate",
+          content: `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`,
+          display: true,
+        }, { triggerTurn: true, deliverAs: "steer" });
+      } catch { /* the session may be shutting down — the listener is gone anyway */ }
+    });
+  }
   /** HEAD commit tree OID — the content-boundary every ship binding compares against (round-8 P1). */
   function headCommitTree(root: string): string {
     try {
@@ -2772,9 +2798,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       "Spawn a judge child (reviewer / adviser / goal-auditor) as its OWN pi process in a tmux pane " +
       "of the main window's right column (pane layout, not a detached session). The child runs with " +
       "no review-gate extension, its role definition + judge protocol as system prompt, the configured " +
-      "model, and --exclude-tools edit,write. Returns the pane id and the done/inbox channels; call " +
-      "review_watch with the done channel after sending the task so the session is woken when the " +
-      "child finishes.",
+      "model, and --exclude-tools edit,write. Returns the pane id and the done/inbox channels; the " +
+      "completion listener is registered AUTOMATICALLY (the done signal wakes this session as a new " +
+      "turn — send the task, end your turn, keep working; no review_watch call, no polling, no sleep).",
     parameters: Type.Object({
       role: Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }),
       title: Type.String({
@@ -2847,16 +2873,24 @@ export default function reviewGate(pi: ExtensionAPI) {
         const list = childSessions.get(root) ?? [];
         list.push(child);
         childSessions.set(root, list);
+        // Round-14 (user ask): the completion listener is registered HERE —
+        // spawn → send → wake is automatic, no review_watch call needed.
+        // The agent ends its turn and does other work; the done signal
+        // wakes this session as a new turn (never sleep, never poll).
+        registerWatch(child.doneChannel, title);
         return {
           content: [{
             type: "text",
             text: `review-gate: ${role} child spawned as pane ${child.paneId} (${title}).\n` +
-              `- done channel: ${child.doneChannel} (register with review_watch after sending the task)\n` +
+              `- done channel: ${child.doneChannel} (completion listener ALREADY registered — ` +
+              `the done signal wakes this session; no review_watch call needed)\n` +
               `- inbox: ${child.inboxPath}\n` +
               `- system prompt: ${files.sysPromptPath}\n` +
-              `Send the task text as a single line referencing its file, then call review_watch.`,
+              `Send the task text as a single line referencing its file, then end your turn: while the ` +
+              `child works, keep doing useful work (its streamed findings, other repos); the wake message ` +
+              `arrives as a new turn.`,
           }],
-          details: { spawned: true, paneId: child.paneId, role, title, doneChannel: child.doneChannel, inboxPath: child.inboxPath },
+          details: { spawned: true, paneId: child.paneId, role, title, doneChannel: child.doneChannel, inboxPath: child.inboxPath, watching: true },
         };
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
@@ -2875,11 +2909,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_watch",
     label: "Watch Review Child",
     description:
-      "Register a background listener on a judge child's completion channel. When the child runs " +
-      "`tmux wait-for -S <channel>` (its protocol requires it after finishing), the listener wakes " +
-      "THIS session via pi.sendMessage(triggerTurn) — you are notified without polling. Call once " +
-      "per round after sending the task; the wake message names the child. Listeners are cancelled " +
-      "on session shutdown.",
+      "Register a background listener on a judge child's completion channel. review_spawn registers " +
+      "this AUTOMATICALLY — call this tool only to re-register with a custom label. When the child " +
+      "runs `tmux wait-for -S <channel>`, the listener wakes THIS session via " +
+      "pi.sendMessage(triggerTurn) — a new turn, no polling, no sleep: end your turn and do other " +
+      "work while the child runs. Listeners are cancelled on session shutdown.",
     parameters: Type.Object({
       channel: Type.String({
         description: "The done channel the child will signal (e.g. rg-reviewer-done)",
@@ -2899,23 +2933,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       // One listener per channel; a re-watch replaces the old handle.
-      activeWatchers.get(channel)?.cancel();
-      const handle = waitForSignalAsync(channel);
-      activeWatchers.set(channel, handle);
-      handle.promise.then((signalled) => {
-        if (activeWatchers.get(channel) === handle) activeWatchers.delete(channel);
-        if (!signalled) return;
-        // Wake the main session: a custom message with triggerTurn that
-        // arrives as a steer — the agent is idle by now (it called this tool
-        // and went back to work), so this fires immediately.
-        try {
-          pi.sendMessage({
-            customType: "review-gate",
-            content: `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`,
-            display: true,
-          }, { triggerTurn: true, deliverAs: "steer" });
-        } catch { /* the session may be shutting down — the listener is gone anyway */ }
-      });
+      registerWatch(channel, label);
       return {
         content: [{
           type: "text",
