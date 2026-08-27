@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { parseReviewOutput, parsePrecommitOutput } = await import(
+const { parseReviewOutput, parsePrecommitOutput, parseFenceFindings } = await import(
   new URL("../lib/verdict-parse.ts", import.meta.url).pathname
 );
 
@@ -203,4 +203,46 @@ test("precommit: worst wins (FAIL > NO_CHECKS_RUN > PASS)", () => {
 
 test("precommit: no sentinel → null", () => {
   assert.equal(parsePrecommitOutput("random output"), null);
+});
+
+// ---- parseFenceFindings (goal criterion 2: re-audit carryover) ----
+
+test("parseFenceFindings extracts severity + issue from a single fence", () => {
+  const out =
+    '```json\n{"gate":"READY","findings":[{"severity":"P2","issue":"one"},{"severity":"P1","issue":"two"}]}\n```';
+  assert.deepEqual(parseFenceFindings(out), [
+    { severity: "P2", issue: "one" },
+    { severity: "P1", issue: "two" },
+  ]);
+});
+
+test("parseFenceFindings merges findings across multiple fences", () => {
+  const out =
+    '```json\n{"gate":"BLOCKED","findings":[{"severity":"P1","issue":"a"}]}\n``` ' +
+    '```json\n{"gate":"READY","findings":[{"severity":"P2","issue":"b"}]}\n```';
+  assert.deepEqual(parseFenceFindings(out), [
+    { severity: "P1", issue: "a" },
+    { severity: "P2", issue: "b" },
+  ]);
+});
+
+test("parseFenceFindings: no findings, no fences, or unparseable fences → empty", () => {
+  assert.deepEqual(parseFenceFindings('```json\n{"gate":"READY"}\n```'), []);
+  assert.deepEqual(parseFenceFindings("no fence here"), []);
+  // An unparseable fence is skipped, not fatal.
+  assert.deepEqual(parseFenceFindings("```json\n{broken\n```"), []);
+  // Findings without an `issue` string are skipped (cannot be carried).
+  assert.deepEqual(parseFenceFindings('```json\n{"gate":"BLOCKED","findings":[{"severity":"P1"}]}\n```'), []);
+});
+
+test("parseFenceFindings salvages raw control chars inside strings, like parseReviewOutput does", () => {
+  // A fence whose issue string contains a REAL newline parses via the verdict
+  // parser's salvage; the findings extractor must not lose what the verdict
+  // parser keeps — the carryover depends on it.
+  const out =
+    '```json\n{"gate":"BLOCKED","findings":[{"severity":"P1","issue":"line one\nline two"}]}\n```';
+  const got = parseFenceFindings(out);
+  assert.equal(got.length, 1);
+  assert.equal(got[0]!.severity, "P1");
+  assert.equal(got[0]!.issue, "line one\nline two");
 });

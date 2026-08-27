@@ -9,6 +9,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 import {
   REVIEW_VERDICT_SCHEMA,
   buildReviewPrompt,
+  formatPrecommitBaseline,
+  extractPrecommitBaseline,
 } from "../lib/parallel-review.ts";
 
 test("buildReviewPrompt names the changed files and sets the snapshot contract", () => {
@@ -175,4 +177,152 @@ test("REGRESSION: this module is PURE — no engine, no snapshots, no I/O, no sh
   ]) {
     assert.ok(src.includes(kept), `${kept} must survive the engine removal`);
   }
+});
+
+test("scopeDirective rides the task text when given (goal criterion 1)", () => {
+  const scope =
+    "Review scope for this round:\n- INCREMENTAL. small increment.\n- SETTLED last round — verdict READY.";
+  const withScope = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, scope);
+  assert.match(withScope, /Review scope for this round:/);
+  assert.match(withScope, /INCREMENTAL/);
+  assert.match(withScope, /SETTLED last round/);
+  // The scope block is injected whole, not re-worded.
+  assert.ok(withScope.includes(scope), "the directive is embedded verbatim");
+  // Absent → the prompt says nothing about scope (round 1 / no baseline).
+  const plain = buildReviewPrompt("review", ["src/a.ts"]);
+  assert.doesNotMatch(plain, /Review scope for this round:/);
+});
+
+test("opening instruction is scope-aware: incremental rounds audit the INCREMENT, full rounds the WHOLE change (round-2/3 P1)", () => {
+  const scope =
+    "Review scope for this round:\n- INCREMENTAL. small increment.\n- SETTLED last round — verdict READY.";
+  const incremental = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, scope, "incremental");
+  assert.match(incremental, /Audit the INCREMENT/);
+  assert.doesNotMatch(incremental, /Audit the WHOLE change/);
+  assert.match(incremental, /consistency scan, not a re-derivation/);
+  assert.match(incremental, /reopen any settled conclusion you can contradict with evidence/);
+  // The changed-files list stays the full visible set — the increment narrows
+  // FOCUS, never authority (non-goal: reviewer scope is guidance, not a fence).
+  assert.match(incremental, /src\/a\.ts/);
+
+  // REGRESSION (round-3 P1): a non-empty FULL directive must STILL open with
+  // WHOLE — prepare_review always passes a formatted directive, even when
+  // there is no READY baseline. Keying on the directive being non-empty made
+  // every production round open with the INCREMENT wording.
+  const fullDirective =
+    "Review scope for this round:\n- FULL deep review. no previous READY review to build on — full deep review.";
+  const full = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, fullDirective, "full");
+  assert.match(full, /Audit the WHOLE change/);
+  assert.doesNotMatch(full, /Audit the INCREMENT/);
+
+  // Absent scopeKind (older callers) defaults to the whole-change wording.
+  const legacy = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, fullDirective);
+  assert.match(legacy, /Audit the WHOLE change/);
+});
+
+test("session pointer rides the task text when given (goal criterion 4)", () => {
+  const withSession = buildReviewPrompt(
+    "review",
+    ["src/a.ts"],
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { dir: "/home/u/.pi/agent/sessions/--repo--", id: "sess-1" },
+  );
+  assert.match(withSession, /Main session transcript/);
+  assert.match(withSession, /--repo--/);
+  assert.match(withSession, /sess-1/);
+  assert.match(withSession, /ON DEMAND/);
+  const plain = buildReviewPrompt("review", ["src/a.ts"]);
+  assert.doesNotMatch(plain, /Main session transcript/);
+});
+
+test("formatPrecommitBaseline states what was verified and steers to targeted tests (user ask 2026-08-27)", () => {
+  const block = formatPrecommitBaseline({
+    verdict: "PASS",
+    mode: "full",
+    testScope: "full",
+    at: "2026-08-27T00:00:00.000Z",
+    steps: [
+      { name: "typecheck", command: "npm run typecheck", status: "passed", durationMs: 3428 },
+      { name: "test", command: "npm run test", status: "passed", durationMs: 131859 },
+    ],
+  });
+  assert.match(block, /PRE-COMMIT BASELINE/);
+  assert.match(block, /PASS \(mode full, tests full/);
+  assert.match(block, /typecheck: passed — `npm run typecheck` \(3s\)/);
+  assert.match(block, /test: passed — `npm run test` \(132s\)/);
+  assert.match(block, /do NOT re-run the full suite or typecheck/);
+  assert.match(block, /Run ONLY targeted tests/);
+  assert.match(block, /re-run only that one step/);
+  // The baseline rides the reviewer task text when given, absent otherwise.
+  const withBaseline = buildReviewPrompt(
+    "review",
+    ["src/a.ts"],
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    block,
+  );
+  assert.match(withBaseline, /PRE-COMMIT BASELINE/);
+  const plain = buildReviewPrompt("review", ["src/a.ts"]);
+  assert.doesNotMatch(plain, /PRE-COMMIT BASELINE/);
+});
+
+test("formatPrecommitBaseline: lane-aware wording — a fast/related PASS must not suppress verification (round-9 P1)", () => {
+  const fast = formatPrecommitBaseline({
+    verdict: "PASS",
+    mode: "fast",
+    testScope: "related",
+    at: "2026-08-27T00:00:00.000Z",
+    steps: [{ name: "test", command: "npm run test", status: "passed" }],
+  });
+  assert.doesNotMatch(fast, /do NOT re-run the full suite/);
+  assert.match(fast, /related lane — it covered only the related tests/);
+  assert.match(fast, /re-run the full suite or/);
+  assert.match(fast, /only if you have reason to doubt the fast lane/);
+  const full = formatPrecommitBaseline({
+    verdict: "PASS",
+    mode: "full",
+    testScope: "full",
+    at: "2026-08-27T00:00:00.000Z",
+    steps: [],
+  });
+  assert.match(full, /TRUST IT — do NOT re-run the full suite or typecheck/);
+});
+
+test("extractPrecommitBaseline: behavioral safety — fingerprint match, stale-entry filter (round-10 P1)", () => {
+  const pass = {
+    verdict: "PASS",
+    fingerprint: "fp1",
+    mode: "full",
+    testScope: "full",
+    at: "2026-08-27T00:00:00.000Z",
+  };
+  const cache = JSON.stringify({
+    schema: 1,
+    entries: {
+      typecheck: { command: "npm run typecheck", status: "pass", at: "2026-08-27T00:00:00.000Z" },
+      test: { command: "npm run test", status: "pass", at: "2026-08-27T01:00:00.000Z" }, // AFTER the pass: stale
+    },
+  });
+  // Matching fingerprint: baseline with only the pre-pass entry.
+  const ok = extractPrecommitBaseline(pass, "fp1", cache);
+  assert.ok(ok);
+  assert.match(ok, /typecheck: passed/);
+  assert.doesNotMatch(ok, /test: passed/, "an entry recorded after the PASS is stale and must be dropped");
+  // Mismatched fingerprint (a PASS for an older tree): no baseline at all.
+  assert.equal(extractPrecommitBaseline(pass, "fp2", cache), undefined);
+  assert.equal(extractPrecommitBaseline(pass, undefined, cache), undefined);
+  // Not a PASS: no baseline.
+  assert.equal(extractPrecommitBaseline({ verdict: "FAIL", fingerprint: "fp1" }, "fp1", cache), undefined);
+  // Corrupt cache body: the verdict line alone still yields a baseline.
+  const degraded = extractPrecommitBaseline(pass, "fp1", "{broken");
+  assert.ok(degraded);
+  assert.match(degraded, /PRE-COMMIT BASELINE/);
 });

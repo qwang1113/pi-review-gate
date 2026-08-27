@@ -44,6 +44,19 @@ test("L3 judges (reviewer/adviser/arbiter/goal-auditor) think at max — the ver
   }
 });
 
+test("incremental-review roles run context: fresh — nothing forks the main session (goal criterion 4)", () => {
+  // The three review roles no longer inherit a fork of the whole main
+  // conversation: their task text carries the goal, the scope, and the
+  // transcript location to read ON DEMAND. A regression to fork would
+  // silently re-add the token/time cost the incremental contract removes.
+  for (const f of ["reviewer.md", "adviser.md", "goal-auditor.md"]) {
+    assert.match(frontmatter(f), /^defaultContext: fresh$/m, `${f}: must default to fresh context`);
+  }
+  // The judging roles that stay fork-based do so deliberately (arbiter needs
+  // the block context; recon inherits cheaply).
+  assert.doesNotMatch(frontmatter("arbiter.md"), /^defaultContext: fresh$/m);
+});
+
 test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its verdict", () => {
   // It gates every goal approval, so a silent downgrade to a cheap model (or a
   // write-capable tool list) would weaken the one judgement the user relies on

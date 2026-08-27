@@ -578,8 +578,9 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
     // `-f` is REQUIRED, not defensive. A review snapshot is a linked worktree
-    // living under `.pi/review-snapshots/`, so `add -A` stages it as a GITLINK
-    // whose content matches neither the working tree nor HEAD — and plain
+    // (default `~/.pi/review-snapshots/<repo-key>/`, repo-`.pi` or tmpdir on
+    // fallback), so `add -A` stages it as a GITLINK whose content matches
+    // neither the working tree nor HEAD — and plain
     // `git rm --cached` refuses exactly that ("use -f to force removal"),
     // failing the whole tree computation. Measured: with any snapshot on disk,
     // worktreeTreeOid threw, `record_review` read the current tree as

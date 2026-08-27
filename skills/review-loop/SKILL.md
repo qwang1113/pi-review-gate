@@ -79,9 +79,10 @@ criterion and three lines:
   command or a concrete observation), (3) what is explicitly out of scope.
 
 **Pre-review the draft goal (MECHANICAL, goal-auditor).** Before you
-submit a goal for approval, run the draft through the dedicated `goal-auditor`
-subagent (read-only; see `agents/goal-auditor.md`), then record its FULL raw
-output with `record_goal_prereview`. The extension parses the auditor's JSON
+submit a goal for approval, call `prepare_goal_audit` with the draft to get the ready-made
+auditor task (it carries the previous audit's carryover + draft delta on a re-audit), dispatch
+the dedicated `goal-auditor` subagent (read-only; see `agents/goal-auditor.md`) with that task,
+then record its FULL raw output with `record_goal_prereview`. The extension parses the auditor's JSON
 fence itself and `propose_loop_goal` REFUSES to show the user's approval dialog
 unless a PASS is recorded for the IDENTICAL text (bound by content hash). A
 FAIL means fix the objections and re-audit the revised text — it needs its own
@@ -146,10 +147,14 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
       needs user confirmation (there is no plan).
 
 1. **Consult (recommended, not gated)** — before or during non-trivial work,
-   ask the `adviser` subagent about the design, tradeoffs, and risks. Feed it
-   the real question, not your preferred answer. Fold its input in before you
-   commit to an approach. Skip only for trivial, low-risk changes.
-
+   call `prepare_adviser` FIRST and paste its brief into the `adviser`
+   subagent call (the brief carries the fresh-context transcript pointer,
+   the conclusion artifact path, and — from the second consultation of the
+   goal on — the previous consultation's conclusion and the files changed
+   since; the adviser appends its conclusion to the artifact for the next
+   time). Feed it the real question, not your preferred answer. Fold its
+   input in before you commit to an approach. Skip only for trivial,
+   low-risk changes.
 2. **One round — precommit first, then the single review** — everything runs on plain subagents (no engine is involved anywhere) with the edits finished:
 
    - FIRST run the trusted precommit lane — `run_precommit` (fast for an
@@ -210,11 +215,23 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix,
    Nit = optional. Any P0/P1 open ⇒ gate BLOCKED.
 
-   Every re-review carries the previous round's conclusion: the gate injects
-   a 'Review scope for this round' block (the prior verdict and findings, what
-   is new since). Settled-and-unchanged material gets a consistency scan, not
-   a re-derivation — it never narrows what a reviewer may look at, and a
-   settled conclusion may always be reopened with evidence.
+   Every re-review carries the previous round's conclusion: `prepare_review`
+   embeds a 'Review scope for this round' block in the ready-made task text
+   (the prior verdict and findings, what is new since the last READY tree,
+   and the findings to re-check one by one). First round = full review;
+   later rounds = incremental: settled-and-unchanged material gets a
+   consistency scan, not a re-derivation — it never narrows what a reviewer
+   may look at, and a settled conclusion may always be reopened with
+   evidence. The reviewer runs `context:"fresh"`; the task text names the
+   main session's transcript to read ON DEMAND when the conversation
+   matters, instead of inheriting it.
+
+   Goal-auditor re-audits and adviser consultations work the same way:
+   `prepare_goal_audit` replies to a re-audit of a DIFFERENT draft with a
+   carryover block (previous verdict + findings verbatim) to paste into the
+   auditor's task; `prepare_adviser` hands back the adviser's brief with the
+   previous consultation's conclusion and the files changed since (full
+   brief when there is no history).
 
    Give the reviewer the loop goal TEXT (the file path is unreadable inside a
    snapshot) and require criterion-by-criterion acceptance: each exit criterion

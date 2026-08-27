@@ -169,7 +169,7 @@ function spawnShapes(snapshots: readonly PreparedSnapshotRef[], agent: string): 
   return snapshots
     .map(
       (s) =>
-        `  subagent({ agent: "${agent}", async: true, cwd: "${s.dir}", ` +
+        `  subagent({ agent: "${agent}", async: true, context: "fresh", cwd: "${s.dir}", ` +
         `task: "<the ${s.label} task text from prepare_review>", outputSchema: <REVIEW_VERDICT_SCHEMA> })`,
     )
     .join("\n");

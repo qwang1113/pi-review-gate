@@ -406,7 +406,9 @@ export function runTestsByPathCommand({ env, bin, flags, files, ignore = "" }) {
  * Build the jest CLI `--testPathIgnorePatterns` argument list: the repo's
  * OWN existing patterns (from `jest --showConfig`) plus the gate's `.pi`
  * exclusion, so a full/fast jest run never scans `.pi/review-snapshots/`
- * (disposable review copies whose test files would otherwise be executed).
+ * (repo-local fallback layout; the default `~/.pi/review-snapshots/` is
+ * outside the repo, so whole-tree discovery cannot reach it at all —
+ * disposable review copies whose test files would otherwise be executed).
  *
  * Pure: the caller is responsible for obtaining `existingPatterns` (via
  * `jest --showConfig`) and for deciding whether injection may happen at all

@@ -213,6 +213,54 @@ export function parseReviewOutput(text: string): ParsedVerdict | undefined {
 }
 
 /**
+ * One finding as the auditor/reviewer wrote it (severity + issue prose).
+ */
+export interface FenceFinding {
+  severity: string;
+  issue: string;
+}
+
+/**
+ * Extract the raw findings from every parseable JSON fence in the text.
+ *
+ * `parseReviewOutput` deliberately keeps only fingerprints — enough to look a
+ * finding up, not to carry it anywhere. A RE-audit (goal criterion 2) needs the
+ * previous round's objections verbatim so the auditor can judge whether each
+ * was actually addressed; the gate persists these alongside the verdict.
+ * Unparseable fences are skipped (their verdict already failed closed).
+ */
+export function parseFenceFindings(text: string): FenceFinding[] {
+  const out: FenceFinding[] = [];
+  const fenceRe = /```(?:json)?\s*\n([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(text)) !== null) {
+    let obj: unknown;
+    try { obj = JSON.parse(m[1]!); }
+    catch {
+      // Same salvage as parseJsonFence: raw control chars inside string
+      // values (a routine LLM defect) must not lose the findings the verdict
+      // parser itself keeps.
+      try { obj = JSON.parse(escapeControlCharsInStrings(m[1]!)); }
+      catch { continue; /* unparseable fence: skip */ }
+    }
+    if (obj && Array.isArray((obj as Record<string, unknown>).findings)) {
+      for (const f of (obj as Record<string, unknown>).findings as unknown[]) {
+        if (f && typeof f === "object" && typeof (f as Record<string, unknown>).issue === "string") {
+          out.push({
+            severity: typeof (f as Record<string, unknown>).severity === "string"
+              ? (f as Record<string, unknown>).severity as string
+              : "P2",
+            issue: (f as Record<string, unknown>).issue as string,
+          });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+
+/**
  * Parse precommit runner output. Only `## Overall:` sentinels.
  * FAIL > NO_CHECKS_RUN > PASS. FAIL is terminal.
  */

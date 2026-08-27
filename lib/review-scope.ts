@@ -153,28 +153,44 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
   };
 }
 
+/** Who the scope block is written for. */
+export type ScopeAudience = "agent" | "reviewer";
+
 /**
- * The block injected into the agent's prompt so the reviewer it spawns is told
- * exactly what it may lean on.
+ * The scope block that says exactly what this round may lean on.
  *
- * Written as an instruction to the AGENT (which passes it to the reviewer)
- * because the gate cannot address the subagent directly. It never says "skip"
- * anything: the reviewer keeps the whole diff and the same verdict authority,
- * it is only told where the new risk is.
+ * TWO AUDIENCES, ONE SOURCE. The gate cannot address a subagent directly, so
+ * this block was originally written as an instruction to the AGENT (the
+ * turn-end status text, which the agent then passes on). It is now also
+ * injected verbatim into the reviewer's OWN task text by `prepare_review`,
+ * where second-person phrasing about "the reviewer" would read as an
+ * instruction about somebody else. `audience` switches only those sentences —
+ * the decision, the increment and the findings list stay identical, because a
+ * second copy of this text is exactly how the two surfaces would drift apart.
+ *
+ * It never says "skip" anything: the reader keeps the whole diff and the same
+ * verdict authority, it is only told where the new risk is.
  */
 export function formatReviewScopeDirective(
   decision: ReviewScopeDecision,
   openFindings: string[],
   settled?: SettledConclusion,
+  audience: ScopeAudience = "agent",
 ): string {
   const lines: string[] = ["Review scope for this round:"];
+  // Direct addresses, worded for whoever reads the block. The agent passes it
+  // on ("Hand the reviewer…"); the reviewer reads it as instructions to
+  // itself ("You…"). Everything else is shared verbatim.
+  // The one sentence that MUST switch: it names the reader as a THIRD person
+  // for the agent and a SECOND person for the reviewer. Everything else reads
+  // correctly for both — "your authority" is the reader's own either way.
   if (decision.scope === "incremental") {
     lines.push(
       `- INCREMENTAL. ${decision.reason}.`,
       `- Already reviewed and unchanged since the last READY verdict: everything outside the increment. ` +
         `Give it a consistency scan, not a re-derivation.`,
       `- This round's increment (deep-review these): ${decision.changedFiles.join(", ")}.`,
-      `- Hand the reviewer the FULL diff as context anyway — an incremental round narrows what must be ` +
+      `- ${audience === "reviewer" ? "You still have the FULL diff as context" : "Hand the reviewer the FULL diff as context anyway"} — an incremental round narrows what must be ` +
         `re-derived, never what may be looked at.`,
     );
     // The settled conclusion is what makes a re-review cheap: state plainly

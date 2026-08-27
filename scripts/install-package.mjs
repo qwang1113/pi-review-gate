@@ -55,8 +55,8 @@ const RETIRED_AGENTS = [
  * The list is the extension's WORKING PLATFORM: subagents (pi-subagents),
  * provider keys (pi-opencode-bridge / pi-anthropic-oauth), editor
  * integration (pi-vim, @narumitw/pi-lsp), MCP tooling (pi-mcp-adapter,
- * pi-web-access), notifications (pi-notify), and leaderboard/readmap data
- * (pi-hashline-readmap). Every entry is also pinned in package.json
+ * pi-web-access), notifications (pi-notify), and the hashline editor
+ * (pi-hashline-edit-pro). Every entry is also pinned in package.json
  * dependencies so the whole platform resolves on `npm install` / `pi install`.
  */
 const COMPANION_PACKAGES = [
@@ -68,7 +68,7 @@ const COMPANION_PACKAGES = [
   "npm:pi-vim",
   "npm:pi-web-access",
   "npm:@narumitw/pi-lsp",
-  "npm:pi-hashline-readmap",
+  "npm:pi-hashline-edit-pro"
 ];
 
 
@@ -150,7 +150,8 @@ function installHooksHere() {
   // directory that is deleted with the round — breaking the L3 layer for every
   // later commit. The shell installer refuses too; this check keeps the reason
   // visible where the install is triggered.
-  // Both layouts carry an `rg-review-snap-` path segment (repo-local
+  // All layouts carry an `rg-review-snap-` path segment (default
+  // ~/.pi/review-snapshots/<repo-key>/rg-review-snap-<id>/…, repo-local
   // .pi/review-snapshots/rg-review-snap-<id>/… and the tmpdir fallback
   // <tmp>/rg-review-snap-<id>/…) — mirroring isReviewSnapshotPath.
   if (process.cwd().includes(`${sep}rg-review-snap-`)) {

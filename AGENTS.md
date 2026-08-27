@@ -190,13 +190,27 @@ submitted text exactly. A FAIL means: fix the objections and re-audit; the
 revised text needs its own PASS (the record binds to content). The goal text
 must be written in **Simplified Chinese** (identifiers, paths and code tokens
 stay English) — the auditor blocks a draft that is not.
-(b) **Every re-review carries the previous round's conclusion**: the
-goal-auditor's re-audit gets the old draft + its own objections + what
-changed; round N+1 gets the previous verdict and findings (the gate injects
-them as the 'Review scope for this round' block). Settled-and-unchanged
-material gets a consistency scan, not a re-derivation — it never narrows
-what a reviewer may look at, and a settled conclusion may always be reopened
-with evidence.
+(b) **Every re-review carries the previous round's conclusion — MECHANICALLY**:
+the goal-auditor's re-audit gets the old draft + its own objections + what
+changed (`record_goal_prereview` persists every audit's verdict, findings
+verbatim and the judged draft; `prepare_goal_audit` — called BEFORE
+dispatching the auditor — returns the ready-made task text carrying the
+previous verdict + findings + previous draft and the mechanically computed
+draft delta); round N+1 gets the
+previous verdict and findings (the gate injects them as the 'Review scope
+for this round' block, now embedded in `prepare_review`'s ready-made task
+text). Settled-and-unchanged material gets a consistency scan, not a
+re-derivation — it never narrows what a reviewer may look at, and a settled
+conclusion may always be reopened with evidence. This is the INCREMENTAL
+review contract: first round full, later rounds focused on the increment.
+(b2) **Fresh context, read on demand — MECHANICALLY.** The three review
+roles (reviewer, adviser, goal-auditor) run `context:"fresh"` — they never
+fork the main session's whole conversation. Their task text carries the
+transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
+to grep on demand. `prepare_adviser` hands back the adviser's ready-made
+brief: transcript pointer + a conclusion artifact the adviser appends to,
+plus — from the second consultation of a goal on — the previous conclusion
+and the files changed since (no history ⇒ full brief).
 (c) **Reviewers run in disposable snapshots, and findings stream.** Call
 `prepare_review` before spawning — it materializes ONE throwaway worktree
 holding exactly the change under review, plus a finding-stream file. Inside
