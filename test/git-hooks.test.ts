@@ -1732,6 +1732,10 @@ test("REGRESSION: the hook installer REFUSES to run from a review snapshot", () 
 // reviewed commit must block even when HEAD's tree matches — a
 // change-and-revert or a never-re-reviewed checkpoint ships unreviewed
 // content otherwise). Behavior tests, not token-presence tests.
+// The hook gates this branch on problems.length === 0 — a length guard, not
+// error-message wording: any problem raised by the review checks above keeps
+// the unreviewed-commit branch off (fail-safe; rephrasing a message can never
+// re-gate it).
 // ---------------------------------------------------------------------------
 
 test("unreviewed-commit check: a content-changing commit after the reviewed commit BLOCKS", () => {
@@ -1802,4 +1806,29 @@ test("round-10 P1: docSync enforcement survives the unreviewed-commit branch (co
   assert.equal(res.status, 1);
   assert.match(res.stderr, /docSync enforced/,
     "docSync must still block when commitSha is present (it was unreachable before the fix)");
+});
+
+test("unreviewed-commit check: a fingerprint mismatch keeps the branch off (guard is problems.length === 0)", () => {
+  const dir = makeGitRepo();
+  writeFileSync(join(dir, "code.ts"), "export const v = 1;\n");
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "reviewed"], { cwd: dir, stdio: "ignore" });
+  const reviewedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+  // A real unreviewed commit sits on top, but the review fingerprint is stale:
+  // the fingerprint chain already raised a problem, so the unreviewed-commit
+  // branch must NOT run — it would only pile a second message on the real
+  // cause. A per-message guard (p.includes("fingerprint")) would depend on
+  // that exact wording; problems.length === 0 cannot.
+  writeFileSync(join(dir, "code.ts"), "export const v = 2;\n");
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "unreviewed"], { cwd: dir, stdio: "ignore" });
+  writeState(dir, {
+    ...readyState(dir),
+    review: { verdict: "READY", fingerprint: "wrong-fp", commitSha: reviewedSha, at: "t", docSync: "NOT_NEEDED" },
+  });
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /fingerprint mismatch/);
+  assert.doesNotMatch(res.stderr, /unreviewed commits since the last READY/,
+    "a fingerprint problem must keep the unreviewed-commit branch off (length guard, not message matching)");
 });

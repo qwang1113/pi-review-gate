@@ -343,10 +343,13 @@ if (state.hasCodeChange) {
   // NOT an else-if on the fingerprint chain — chaining it keyed on the mere
   // presence of review.commitSha swallowed the docSync branch behind it
   // (record_review always sets commitSha on READY, so docSync was unreachable
-  // at the hook layer). Runs only when the review already passed the
-  // fingerprint checks above.
+  // at the hook layer). It runs only when the review passed every check
+  // above, expressed directly as problems.length === 0 — a length guard, not
+  // a match on error-message wording: rephrasing a message or inserting a
+  // new problem type above cannot silently re-gate (or fail to gate) this
+  // branch.
   if (state.review.verdict === "READY" && state.review.commitSha && state.review.fingerprint &&
-      !problems.some((p) => p.includes("fingerprint") || p.includes("docSync"))) {
+      problems.length === 0) {
     // Commits since the reviewed commit whose tree differs from the reviewed
     // tree are content no reviewer saw — HEAD's tree matching alone cannot
     // see a change-and-revert or a never-re-reviewed checkpoint.
