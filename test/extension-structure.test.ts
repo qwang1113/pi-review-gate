@@ -181,7 +181,8 @@ test("L2 STALL BREAKER: a running subagent counts as motion (never orphan a live
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   const call = SRC.slice(breakerAt, injectAt);
-  assert.match(call, /inMotion:\s*subagentInMotion\(\)/, "the breaker must be told about work in flight");
+  assert.match(call, /inMotion:\s*subagentInMotion\(\)\s*\|\|\s*judgeChildInMotion\(\)/,
+    "the breaker must be told about work in flight (subagents OR tmux judge children)");
   // The motion probe must be bounded in age, or a hung run would disable the
   // breaker permanently — the exact failure it exists to catch.
   const probeAt = SRC.indexOf("function subagentInMotion(");
@@ -189,6 +190,15 @@ test("L2 STALL BREAKER: a running subagent counts as motion (never orphan a live
   const probe = SRC.slice(probeAt, probeAt + 900);
   assert.match(probe, /STALL_MOTION_MAX_AGE_SEC/, "motion credit must expire with age");
   assert.match(probe, /state === "running"/, "only RUNNING subagents count as motion");
+  // Round-16 P2: tmux judge children are motion too — and their probe must
+  // carry the SAME freshness bound (a hung-but-alive pane must not disable
+  // the breaker forever; the goal-auditor flagged exactly that hazard).
+  const judgeAt = SRC.indexOf("function judgeChildInMotion(");
+  assert.ok(judgeAt > 0, "judgeChildInMotion must exist");
+  const judgeProbe = SRC.slice(judgeAt, judgeAt + 900);
+  assert.match(judgeProbe, /STALL_MOTION_MAX_AGE_SEC/, "judge-child motion credit must expire with age");
+  assert.match(judgeProbe, /Date\.parse\(c\.spawnedAt\)/, "freshness is measured from the spawn timestamp");
+  assert.match(judgeProbe, /Number\.isFinite/, "an unparseable spawnedAt must fail closed (no motion)");
 });
 
 
@@ -1189,12 +1199,20 @@ test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict
 test("goal criterion 3: prepare_adviser is registered and hands back a brief with artifact + session pointer", () => {
   const start = SRC.indexOf('name: "prepare_adviser"');
   assert.ok(start > 0, "the adviser brief tool must be registered");
-  const body = SRC.slice(start, start + 6000);
+  const body = SRC.slice(start, start + 9000); // room for the done-channel wiring at the tool's tail
   assert.match(body, /buildAdviserBrief\(/, "the brief comes from the shared pure builder");
   assert.match(body, /adviser-\$\{goalHash\}\.jsonl/, "the artifact path is per goal");
   assert.match(body, /mkdirSync\(pathDirname\(artifactPath\), \{ recursive: true \}\)/, "the artifact dir is created before the first consultation");
   assert.match(body, /adviserBaselines/, "the changed-files baseline is persisted per goal for the next consultation");
   assert.match(body, /readLastAdviserConclusion\(artifactPath, goalHash\)/, "readback goes through the tested pure parser (parseAdviserConclusions)");
+  // Round-16 P1: the done channel must be passed INTO the builder call (the
+  // suggested-title line ALSO spells the channel, so pin the builder window,
+  // not the whole tool body).
+  const briefCall = body.indexOf("buildAdviserBrief({");
+  assert.ok(briefCall > 0);
+  assert.match(body.slice(briefCall, briefCall + 700), /doneChannel: doneChannelFor\(`adviser-\$\{goalHash\.slice\(0, 6\)\}`\)/,
+    "the brief embeds the derived channel");
+  assert.match(body, /建议 title: \"\$\{adviserTitle\}\"/, "the output names the suggested title");
 });
 
 test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor task BEFORE dispatch", () => {
@@ -1203,10 +1221,17 @@ test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor tas
   // task template therefore lives in a PRE-dispatch tool.
   const start = SRC.indexOf('name: "prepare_goal_audit"');
   assert.ok(start > 0, "the pre-dispatch audit task tool must be registered");
-  const body = SRC.slice(start, start + 6000);
+  const body = SRC.slice(start, start + 9000); // room for the done-channel wiring at the tool's tail
   assert.match(body, /buildGoalAuditTask\(draft, \{/, "the template comes from the shared pure builder");
   assert.match(body, /formatGoalPrereviewCarryover\(prev\)/, "re-audits carry the previous audit's conclusion");
   assert.match(body, /prev\?\.draft/, "the previous draft rides along for the mechanical delta");
+  // Round-16 P1: the task embeds the derived channel; the output names the
+  // suggested title so the main session spawns with the matching listener.
+  const auditCall = body.indexOf("buildGoalAuditTask(draft, {");
+  assert.ok(auditCall > 0);
+  assert.match(body.slice(auditCall, auditCall + 700), /doneChannel: doneChannelFor\(`goal-audit-\$\{newHash\.slice\(0, 6\)\}`\)/,
+    "the task embeds the derived channel");
+  assert.match(body, /建议 title: \"\$\{auditTitle\}\"/, "the output names the suggested title");
 });
 
 test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline into the reviewer task", () => {
@@ -1221,6 +1246,13 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   assert.match(body, /precommitBaselineFor\(root, st\)/, "the baseline rides the task text");
   assert.match(body, /extractPrecommitBaseline\(st\.precommit, digest, cacheRaw\)/, "the safety decision is the pure function");
   assert.match(body, /computeFingerprint\(root\)/, "the current tree fingerprint is measured, not guessed");
+  // Round-16 P1: the reviewer task embeds the derived channel; the output
+  // names the suggested title → channel so the spawned listener matches.
+  const promptCall = body.indexOf("const task = buildReviewPrompt(");
+  assert.ok(promptCall > 0);
+  assert.match(body.slice(promptCall, promptCall + 900), /doneChannelFor\(`review-\$\{runId\.slice\(-6\)\}`\)/,
+    "the reviewer task embeds the derived channel");
+  assert.match(body, /建议 title: \"review-\$\{runId\.slice\(-6\)\}\"/, "the output names the suggested title");
 });
 
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {

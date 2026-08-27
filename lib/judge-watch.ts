@@ -22,7 +22,7 @@
  *    (session_start) on the same extension instance.
  */
 
-import type { WaitHandle } from "./tmux-session.js";
+import type { WaitHandle } from "./tmux-session.ts";
 
 /** Waits on a channel; returns a cancellable handle (waitForSignalAsync). */
 export type WatchWaiter = (channel: string, timeoutMs?: number) => WaitHandle;

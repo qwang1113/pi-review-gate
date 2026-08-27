@@ -77,7 +77,6 @@ test("anyPaneAlive: any live child counts as motion, injected predicate (round-1
   assert.equal(anyPaneAlive(kids, () => false), false);
   // Empty registry ⇒ no motion.
   assert.equal(anyPaneAlive([], () => true), false);
-  // Default predicate = the real paneAlive: exercising it needs a live
   // Default predicate = the real paneAlive; an empty list never calls it
   // (so this is safe without a tmux server) yet still yields false.
   assert.equal(anyPaneAlive([], paneAlive), false);
