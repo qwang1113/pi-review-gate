@@ -369,43 +369,6 @@ test("effectiveAgentsConfig ignores unknown agent names", () => {
   assert.equal(map["not-an-agent"], undefined);
 });
 
-test("reviewer-readonly follows reviewer's slots when not configured on its own", () => {
-  const { map } = effectiveAgentsConfig(
-    undefined,
-    { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] } },
-  );
-  const rv = map.reviewer!;
-  const rr = map["reviewer-readonly"]!;
-  assert.equal(rv.auto, false);
-  assert.equal(rr.auto, false, "reviewer-readonly mirrors reviewer on isolation fallback");
-  assert.deepEqual(rr.slots, ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"]);
-  assert.equal(rr.source, "project");
-});
-
-test("reviewer-readonly keeps its OWN config when explicitly set (no blind follow)", () => {
-  const { map } = effectiveAgentsConfig(
-    undefined,
-    {
-      reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol"] },
-      "reviewer-readonly": { auto: false, slots: ["claude-fable-5:max"] },
-    },
-  );
-  assert.deepEqual(map["reviewer-readonly"]!.slots, ["claude-fable-5:max"]);
-  assert.equal(map["reviewer-readonly"]!.source, "project");
-});
-
-test("reviewer-readonly follow does NOT share the slots array (deep copy)", () => {
-  const { map } = effectiveAgentsConfig(undefined, {
-    reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] },
-  });
-  const reviewerSlots = map.reviewer!.slots;
-  const rrSlots = map["reviewer-readonly"]!.slots;
-  assert.notEqual(reviewerSlots, rrSlots, "arrays must not be shared");
-  // Mutating the follower's chain must not leak back into reviewer.
-  rrSlots[0] = "onekey/glm-5.3:high";
-  assert.equal(map.reviewer!.slots[0], "onekey/gpt-5.6-sol:high", "reviewer's chain is isolated");
-});
-
 // ---------------------------------------------------------------------------
 // frontmatter rendering
 // ---------------------------------------------------------------------------
@@ -908,16 +871,6 @@ test("a malformed agent ENTRY keeps the last render instead of sweeping it (roun
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test("an EMPTY agent entry stays absent — it must not block the RR follow (round-8 P2)", () => {
-  // Round-8 P2: `"reviewer-readonly": {}` is not a config and must NOT
-  // suppress the reviewer-readonly follow; only entries WITH fields but no
-  // valid one are malformed (round-11).
-  const r = parseAgentsSection({ "reviewer-readonly": {} });
-  assert.deepEqual(r.sections, {}, "an empty object is not a config entry");
-  const withFields = parseAgentsSection({ "reviewer-readonly": { slots: [1] } });
-  assert.deepEqual(withFields.sections["reviewer-readonly"], { malformed: true });
 });
 
 test("non-object and invalid-slots entries are malformed, never swept (round-11 P1)", () => {

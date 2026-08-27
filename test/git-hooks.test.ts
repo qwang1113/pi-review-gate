@@ -6,6 +6,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
+import { createRequire } from "node:module";
 
 // 100 fixture git calls live in this file (and the hooks under test shell out
 // to git themselves), so neutralise the host config once for the process.
@@ -65,19 +66,38 @@ function runPreCommit(dir: string, env: Record<string, string> = {}) {
  *  make every fixture take the migration path instead of the gate logic. */
 const FP_VERSION = 2;
 
-const READY = {
-  schema: 1,
-  fingerprintVersion: FP_VERSION,
-  sessionId: "test-session",
-  hasCodeChange: true,
-  hasDocChange: false,
-  review: { verdict: "READY", fingerprint: "x", at: "t" },
-  precommit: { verdict: "PASS", fingerprint: "x", at: "t" },
-  rounds: [],
-  maxRounds: 10,
-  bypass: { active: false, reason: null, at: null },
-  updatedAt: "t",
-};
+// Round-8 P1: bindings are COMMIT TREES — the fixture must carry the repo's
+// actual HEAD tree OID or every "gates met" case reads as mismatched.
+interface ReadyFixture {
+  fingerprintVersion: number;
+  [k: string]: unknown;
+}
+
+function readyState(dir: string): ReadyFixture {
+  // Worktree-tree OID (not HEAD's): works in repos without a commit and
+  // equals the content a commit would publish — the round-8 binding unit.
+  const req = createRequire(import.meta.url);
+  const { worktreeTreeOid } = req("../scripts/compute-fingerprint.cjs") as {
+    worktreeTreeOid: (cwd: string) => string;
+  };
+  let tree = "";
+  try {
+    tree = worktreeTreeOid(dir); // non-git dirs → "" (hook exits before comparing)
+  } catch { /* makeDir() fixtures: schema/bypass paths exit before fingerprint */ }
+  return {
+    schema: 1,
+    fingerprintVersion: FP_VERSION,
+    sessionId: "test-session",
+    hasCodeChange: true,
+    hasDocChange: false,
+    review: { verdict: "READY", fingerprint: tree, at: "t" },
+    precommit: { verdict: "PASS", fingerprint: tree, at: "t" },
+    rounds: [],
+    maxRounds: 10,
+    bypass: { active: false, reason: null, at: null },
+    updatedAt: "t",
+  };
+}
 
 // ---------------------------------------------------------------------------
 // pre-commit
@@ -128,7 +148,7 @@ test("gates met → allow", () => {
   const dir = makeGitRepo();
   // Need a dirty file so fingerprint doesn't match clean state.
   // Use withChangedFile so state's fingerprint matches the current worktree.
-  writeState(dir, READY, /*withChangedFile=*/ true);
+  writeState(dir, readyState(dir), /*withChangedFile=*/ true);
   // READY review + PASS precommit with fingerprint "x" won't match
   // current worktree fingerprint → blocked by fingerprint mismatch.
   // We need the fingerprint in state to match. Let's set it to a dummy
@@ -143,13 +163,13 @@ test("gates met + matching fingerprints → allow", () => {
   const dir = makeGitRepo();
   // Clean repo, no changes → fingerprint is stable.
   // Set hasCodeChange to false so the hook skips the gate completely.
-  writeState(dir, { ...READY, hasCodeChange: false, hasDocChange: false });
+  writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false });
   assert.equal(runPreCommit(dir).status, 0);
 });
 
 test("review not READY → block", () => {
   const dir = makeGitRepo();
-  writeState(dir, { ...READY, review: { verdict: "PENDING", fingerprint: null, at: null } });
+  writeState(dir, { ...readyState(dir), review: { verdict: "PENDING", fingerprint: null, at: null } });
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /review is PENDING/);
@@ -157,7 +177,7 @@ test("review not READY → block", () => {
 
 test("precommit NO_CHECKS_RUN → block (PR #7 lesson 3)", () => {
   const dir = makeGitRepo();
-  writeState(dir, { ...READY, precommit: { verdict: "NO_CHECKS_RUN", fingerprint: null, at: "t" } });
+  writeState(dir, { ...readyState(dir), precommit: { verdict: "NO_CHECKS_RUN", fingerprint: null, at: "t" } });
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /zero checks/);
@@ -174,14 +194,14 @@ test("corrupt sidecar → block (fail closed)", () => {
 
 test("unknown schema → block (fail closed)", () => {
   const dir = makeDir(); // no git needed for schema test
-  writeState(dir, { ...READY, schema: 42 });
+  writeState(dir, { ...readyState(dir), schema: 42 });
   assert.equal(runPreCommit(dir).status, 1);
 });
 
 test("user-chosen explore mode makes hook gates advisory", () => {
   const dir = makeGitRepo();
   writeState(dir, {
-    ...READY,
+    ...readyState(dir),
     taskMode: "explore",
     taskModeSource: "user",
     review: { verdict: "PENDING", fingerprint: null, at: null },
@@ -193,7 +213,7 @@ test("user-chosen explore mode makes hook gates advisory", () => {
 test("user-chosen normal mode makes hook gates advisory", () => {
   const dir = makeGitRepo();
   writeState(dir, {
-    ...READY,
+    ...readyState(dir),
     taskMode: "normal",
     taskModeSource: "user",
     review: { verdict: "PENDING", fingerprint: null, at: null },
@@ -209,7 +229,7 @@ test("SECURITY: agent/auto-set normal must NOT make the hook advisory", () => {
   for (const extra of [{ taskModeSource: "auto" }, {}]) {
     const dir = makeGitRepo();
     writeState(dir, {
-      ...READY,
+      ...readyState(dir),
       taskMode: "normal",
       ...extra,
       review: { verdict: "PENDING", fingerprint: null, at: null },
@@ -228,7 +248,7 @@ test("SECURITY: auto-classified explore must NOT make the hook advisory", () => 
   for (const extra of [{ taskModeSource: "auto" }, {}]) {
     const dir = makeGitRepo();
     writeState(dir, {
-      ...READY,
+      ...readyState(dir),
       taskMode: "explore",
       ...extra,
       review: { verdict: "PENDING", fingerprint: null, at: null },
@@ -243,7 +263,7 @@ test("SECURITY: auto-classified explore must NOT make the hook advisory", () => 
 test("SECURITY: forged taskModeSource values fail closed", () => {
   const dir = makeGitRepo();
   writeState(dir, {
-    ...READY,
+    ...readyState(dir),
     taskMode: "explore",
     taskModeSource: "root",
     review: { verdict: "PENDING", fingerprint: null, at: null },
@@ -258,7 +278,7 @@ test("SECURITY: unknown taskMode values fail closed (whitelist, incl. retired 'r
   for (const taskMode of ["free", "readonly"]) {
     const dir = makeGitRepo();
     writeState(dir, {
-      ...READY,
+      ...readyState(dir),
       taskMode,
       taskModeSource: "user",
       review: { verdict: "PENDING", fingerprint: null, at: null },
@@ -274,7 +294,7 @@ test("pausedQuestion: valid shape is accepted (pause never affects the hook's sh
   const dir = makeGitRepo();
   // Gates fully met (no tracked changes) + a well-formed pause → still allow.
   writeState(dir, {
-    ...READY,
+    ...readyState(dir),
     hasCodeChange: false,
     hasDocChange: false,
     pausedQuestion: { question: "Which auth provider?", at: "t" },
@@ -285,7 +305,7 @@ test("pausedQuestion: valid shape is accepted (pause never affects the hook's sh
 test("pausedQuestion: gates unmet stay blocked even while paused (no fail-open)", () => {
   const dir = makeGitRepo();
   writeState(dir, {
-    ...READY,
+    ...readyState(dir),
     review: { verdict: "PENDING", fingerprint: null, at: null },
     pausedQuestion: { question: "q", at: "t" },
   });
@@ -297,7 +317,7 @@ test("pausedQuestion: gates unmet stay blocked even while paused (no fail-open)"
 test("SECURITY: malformed pausedQuestion shapes fail closed (tampered sidecar)", () => {
   for (const bad of ["str", 42, { question: 1, at: "t" }, { question: "q" }, { at: "t" }]) {
     const dir = makeGitRepo();
-    writeState(dir, { ...READY, hasCodeChange: false, hasDocChange: false, pausedQuestion: bad });
+    writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false, pausedQuestion: bad });
     const res = runPreCommit(dir);
     assert.equal(res.status, 1, JSON.stringify(bad));
     assert.match(res.stderr, /shape\/verdict invalid/);
@@ -309,7 +329,7 @@ test("scopeLimit: valid shape is accepted (arming flags in the sidecar decide th
   // A user-granted scope limit with no session edits disarms the gate
   // (hasCodeChange/hasDocChange false) — the hook must allow that state.
   writeState(dir, {
-    ...READY,
+    ...readyState(dir),
     hasCodeChange: false,
     hasDocChange: false,
     review: { verdict: "PENDING", fingerprint: null, at: null },
@@ -322,7 +342,7 @@ test("scopeLimit: valid shape is accepted (arming flags in the sidecar decide th
 test("scopeLimit: session edits stay fully gated even under a scope limit (no fail-open)", () => {
   const dir = makeGitRepo();
   writeState(dir, {
-    ...READY,
+    ...readyState(dir),
     review: { verdict: "PENDING", fingerprint: null, at: null },
     scopeLimit: { preexistingFiles: ["src/old.ts"], sessionFiles: ["src/new.ts"], at: "t" },
   });
@@ -334,7 +354,7 @@ test("scopeLimit: session edits stay fully gated even under a scope limit (no fa
 test("sessionEditedFiles: valid shape accepted; malformed shapes fail closed", () => {
   const ok = makeGitRepo();
   writeState(ok, {
-    ...READY,
+    ...readyState(ok),
     hasCodeChange: false,
     hasDocChange: false,
     sessionEditedFiles: ["src/new.ts"],
@@ -343,7 +363,7 @@ test("sessionEditedFiles: valid shape accepted; malformed shapes fail closed", (
 
   for (const bad of ["str", 42, [1], ["ok", null]]) {
     const dir = makeGitRepo();
-    writeState(dir, { ...READY, hasCodeChange: false, hasDocChange: false, sessionEditedFiles: bad });
+    writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false, sessionEditedFiles: bad });
     const res = runPreCommit(dir);
     assert.equal(res.status, 1, JSON.stringify(bad));
     assert.match(res.stderr, /shape\/verdict invalid/);
@@ -361,7 +381,7 @@ test("SECURITY: malformed scopeLimit shapes fail closed (tampered sidecar)", () 
     { sessionFiles: [], at: "t" },
   ]) {
     const dir = makeGitRepo();
-    writeState(dir, { ...READY, hasCodeChange: false, hasDocChange: false, scopeLimit: bad });
+    writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false, scopeLimit: bad });
     const res = runPreCommit(dir);
     assert.equal(res.status, 1, JSON.stringify(bad));
     assert.match(res.stderr, /shape\/verdict invalid/);
@@ -370,14 +390,14 @@ test("SECURITY: malformed scopeLimit shapes fail closed (tampered sidecar)", () 
 
 test("explore does not bypass unknown or malformed sidecar schemas", () => {
   const unknown = makeDir();
-  writeState(unknown, { ...READY, schema: 999, taskMode: "explore" });
+  writeState(unknown, { ...readyState(unknown), schema: 999, taskMode: "explore" });
   const unknownRes = runPreCommit(unknown);
   assert.equal(unknownRes.status, 1);
   assert.match(unknownRes.stderr, /unknown gate schema/);
 
   const malformed = makeDir();
   writeState(malformed, {
-    ...READY,
+    ...readyState(malformed),
     taskMode: "explore",
     hasCodeChange: "yes",
     review: { verdict: "FORGED" },
@@ -404,20 +424,20 @@ test("explore does not bypass unknown or malformed sidecar schemas", () => {
 
 test("bypass active in state → allow", () => {
   const dir = makeDir();
-  writeState(dir, { ...READY, review: { verdict: "PENDING", fingerprint: null, at: null }, bypass: { active: true, reason: "hotfix", at: "t" } });
+  writeState(dir, { ...readyState(dir), review: { verdict: "PENDING", fingerprint: null, at: null }, bypass: { active: true, reason: "hotfix", at: "t" } });
   assert.equal(runPreCommit(dir).status, 0);
 });
 
 test("REVIEW_GATE_BYPASS=1 env → allow", () => {
   const dir = makeDir();
-  writeState(dir, { ...READY, review: { verdict: "BLOCKED", fingerprint: null, at: "t" } });
+  writeState(dir, { ...readyState(dir), review: { verdict: "BLOCKED", fingerprint: null, at: "t" } });
   assert.equal(runPreCommit(dir, { REVIEW_GATE_BYPASS: "1" }).status, 0);
 });
 
 test("no changes tracked → allow even without verdicts", () => {
   const dir = makeDir();
   writeState(dir, {
-    ...READY,
+    ...readyState(dir),
     hasCodeChange: false,
     review: { verdict: "PENDING", fingerprint: null, at: null },
     precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
@@ -441,7 +461,7 @@ function repoWithMatchingGates(extraReview: object = {}, extraConfig?: object, e
   mkdirSync(join(dir, ".pi"), { recursive: true });
   if (extraConfig) writeFileSync(join(dir, ".pi", "review-gate.json"), JSON.stringify(extraConfig));
   writeFileSync(join(dir, ".pi", "review-gate-state.json"), JSON.stringify({
-    ...READY,
+    ...readyState(dir),
     review: { verdict: "READY", fingerprint: fp, at: "t", ...extraReview },
     precommit: { verdict: "PASS", fingerprint: fp, at: "t", ...extraPrecommit },
   }));
@@ -570,7 +590,7 @@ test("docSync: corrupt project config → default ENFORCED (fail-safe, never fai
 test("fingerprint mismatch on review → block", () => {
   const dir = makeGitRepo();
   // State says hasCodeChange=true + review READY but fingerprint won't match clean repo.
-  writeState(dir, { ...READY, review: { verdict: "READY", fingerprint: "wrong-fp", at: "t" } });
+  writeState(dir, { ...readyState(dir), review: { verdict: "READY", fingerprint: "wrong-fp", at: "t" } });
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /fingerprint mismatch/);
@@ -584,7 +604,7 @@ test("fingerprint mismatch on review → block", () => {
 // only thing that can block is the L6 label scan, then stage a test file.
 function repoForLabelGate(testFileName: string, testFileContent: string): string {
   const dir = makeGitRepo();
-  writeState(dir, { ...READY, hasCodeChange: false, hasDocChange: false });
+  writeState(dir, { ...readyState(dir), hasCodeChange: false, hasDocChange: false });
   writeFileSync(join(dir, testFileName), testFileContent);
   execFileSync("git", ["add", testFileName], { cwd: dir, stdio: "ignore" });
   return dir;
@@ -613,7 +633,7 @@ test("state-level bypass (/gate-bypass) disables L6 too", () => {
   // circuit ALL ship blocking including L6 (documented /gate-bypass escape).
   const dir = makeGitRepo();
   writeState(dir, {
-    ...READY, hasCodeChange: true,
+    ...readyState(dir), hasCodeChange: true,
     review: { verdict: "PENDING", fingerprint: null, at: null },
     bypass: { active: true, reason: "hotfix", at: "t" },
   });
@@ -730,7 +750,7 @@ function repoBoundToCurrentFingerprint(mutate: (dir: string) => void): string {
   );
   mkdirSync(join(dir, ".pi"), { recursive: true });
   writeFileSync(join(dir, ".pi", "review-gate-state.json"), JSON.stringify({
-    ...READY,
+    ...readyState(dir),
     review: { verdict: "READY", fingerprint: fp.digest, at: "t", docSync: "NOT_NEEDED" },
     precommit: { verdict: "PASS", fingerprint: fp.digest, at: "t" },
   }));
@@ -982,14 +1002,16 @@ function repoWithSubmodule(mutate: (parent: string, sub: string) => void): strin
   }
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "add sm"], { cwd: parent, stdio: "ignore" });
   mutate(parent, join(parent, "sm"));
-  const fp = JSON.parse(
-    execFileSync("node", [join(ROOT, "scripts", "compute-fingerprint.cjs"), parent], { encoding: "utf8" }),
-  );
+  const req = createRequire(import.meta.url);
+  const { worktreeTreeOid } = req("../scripts/compute-fingerprint.cjs") as {
+    worktreeTreeOid: (cwd: string) => string;
+  };
+  const tree = worktreeTreeOid(parent); // round-8: bindings are commit trees
   mkdirSync(join(parent, ".pi"), { recursive: true });
   writeFileSync(join(parent, ".pi", "review-gate-state.json"), JSON.stringify({
-    ...READY,
-    review: { verdict: "READY", fingerprint: fp.digest, at: "t", docSync: "NOT_NEEDED" },
-    precommit: { verdict: "PASS", fingerprint: fp.digest, at: "t" },
+    ...readyState(parent),
+    review: { verdict: "READY", fingerprint: tree, at: "t", docSync: "NOT_NEEDED" },
+    precommit: { verdict: "PASS", fingerprint: tree, at: "t" },
   }));
   return parent;
 }
@@ -1158,7 +1180,7 @@ function installHookTree(omit: string[]): string {
 
 test("MISSING staged-divergence checker → commit fails CLOSED", () => {
   const dir = makeGitRepo();
-  writeState(dir, READY, /*withChangedFile=*/ true);
+  writeState(dir, readyState(dir), /*withChangedFile=*/ true);
   const hook = installHookTree(["check-staged-divergence.cjs"]);
   const res = spawnSync("bash", [hook], { cwd: dir, encoding: "utf8" });
   assert.notEqual(res.status, 0, "a partial install must not be silently tolerated");
@@ -1168,7 +1190,7 @@ test("MISSING staged-divergence checker → commit fails CLOSED", () => {
 
 test("MISSING checker still honors an explicit bypass (escape hatch stays)", () => {
   const dir = makeGitRepo();
-  writeState(dir, READY, /*withChangedFile=*/ true);
+  writeState(dir, readyState(dir), /*withChangedFile=*/ true);
   const hook = installHookTree(["check-staged-divergence.cjs"]);
   const res = spawnSync("bash", [hook], {
     cwd: dir, encoding: "utf8", env: { ...process.env, REVIEW_GATE_BYPASS: "1" },
@@ -1179,7 +1201,7 @@ test("MISSING checker still honors an explicit bypass (escape hatch stays)", () 
 test("MISSING L6 label scanner still only warns (style gate keeps warn-and-skip)", () => {
   const dir = makeGitRepo();
   // A bypassing sidecar isolates this to the scanner-missing branch.
-  writeState(dir, { ...READY, bypass: { active: true, reason: "test", at: "t" } }, true);
+  writeState(dir, { ...readyState(dir), bypass: { active: true, reason: "test", at: "t" } }, true);
   const hook = installHookTree(["scan-test-labels.cjs"]);
   const res = spawnSync("bash", [hook], { cwd: dir, encoding: "utf8" });
   assert.equal(res.status, 0, "a missing style scanner must never brick an older install");
@@ -1463,7 +1485,7 @@ test("a legitimate not-yet-created index path inside the git dir is still accept
 
 test("hook reports a MIGRATION (not a code change) for an unversioned binding", () => {
   const dir = makeGitRepo();
-  const { fingerprintVersion, ...unversioned } = READY; // pre-migration sidecar
+  const { fingerprintVersion, ...unversioned } = readyState(dir); // pre-migration sidecar
   void fingerprintVersion;
   writeState(dir, unversioned, /*withChangedFile=*/ true);
   const res = runPreCommit(dir);
@@ -1478,7 +1500,7 @@ test("hook reports a MIGRATION (not a code change) for an unversioned binding", 
 
 test("hook reports a MIGRATION for a binding from a different algorithm version", () => {
   const dir = makeGitRepo();
-  writeState(dir, { ...READY, fingerprintVersion: FP_VERSION + 1 }, true);
+  writeState(dir, { ...readyState(dir), fingerprintVersion: FP_VERSION + 1 }, true);
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, new RegExp(`a v${FP_VERSION + 1} binding`));
@@ -1488,7 +1510,7 @@ test("hook reports a MIGRATION for a binding from a different algorithm version"
 test("a forged non-integer fingerprintVersion is rejected by the shape check", () => {
   // Must not compare "equal" to the running version by type coercion.
   const dir = makeGitRepo();
-  writeState(dir, { ...READY, fingerprintVersion: "2" }, true);
+  writeState(dir, { ...readyState(dir), fingerprintVersion: "2" }, true);
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /shape\/verdict invalid/);
@@ -1498,7 +1520,7 @@ test("no migration noise for a clean repo with no tracked changes", () => {
   // The migration check must not fire when there is nothing to gate; an
   // unversioned sidecar on an idle repo is not an error state.
   const dir = makeGitRepo();
-  const { fingerprintVersion, ...unversioned } = READY;
+  const { fingerprintVersion, ...unversioned } = readyState(dir);
   void fingerprintVersion;
   writeState(dir, { ...unversioned, hasCodeChange: false, hasDocChange: false });
   assert.equal(runPreCommit(dir).status, 0);
@@ -1509,7 +1531,7 @@ test("the current-version fixture does NOT take the migration path", () => {
   // every other hook test would silently exercise migration instead of gate
   // logic. Here the fingerprint simply mismatches, which is the normal path.
   const dir = makeGitRepo();
-  writeState(dir, READY, true);
+  writeState(dir, readyState(dir), true);
   const res = runPreCommit(dir);
   assert.ok(!/fingerprint algorithm mismatch/.test(res.stderr),
     `FP_VERSION (${FP_VERSION}) drifted from the shipped algorithm: ${res.stderr}`);
@@ -1703,4 +1725,81 @@ test("REGRESSION: the hook installer REFUSES to run from a review snapshot", () 
   try {
     execFileSync("git", ["worktree", "remove", "--force", snapshot], { cwd: repo, stdio: "ignore" });
   } catch { /* the dir is inside the temp repo and removed with it */ }
+});
+
+// ---------------------------------------------------------------------------
+// Round-9 P1: unreviewed-commit check (content-changing commits after the
+// reviewed commit must block even when HEAD's tree matches — a
+// change-and-revert or a never-re-reviewed checkpoint ships unreviewed
+// content otherwise). Behavior tests, not token-presence tests.
+// ---------------------------------------------------------------------------
+
+test("unreviewed-commit check: a content-changing commit after the reviewed commit BLOCKS", () => {
+  const dir = makeGitRepo();
+  // Reviewed commit C: state records commitSha + its tree.
+  writeFileSync(join(dir, "code.ts"), "export const v = 1;\n");
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "reviewed"], { cwd: dir, stdio: "ignore" });
+  const reviewedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+  const reviewedTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim();
+  // New checkpoint AFTER the review with DIFFERENT content, then a revert
+  // that restores the reviewed tree — HEAD tree matches, content shipped.
+  writeFileSync(join(dir, "code.ts"), "export const v = 2;\n");
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "unreviewed"], { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, "code.ts"), "export const v = 1;\n");
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "revert"], { cwd: dir, stdio: "ignore" });
+  const headTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim();
+  assert.equal(headTree, reviewedTree, "fixture: HEAD tree equals the reviewed tree (change-and-revert)");
+  writeState(dir, {
+    ...readyState(dir),
+    review: { verdict: "READY", fingerprint: reviewedTree, commitSha: reviewedSha, at: "t", docSync: "NOT_NEEDED" },
+    precommit: { verdict: "PASS", fingerprint: headTree, at: "t" },
+  });
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /unreviewed commits since the last READY/);
+});
+
+test("unreviewed-commit check: a squash of the reviewed tree does NOT block", () => {
+  const dir = makeGitRepo();
+  writeFileSync(join(dir, "code.ts"), "export const v = 1;\n");
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "reviewed"], { cwd: dir, stdio: "ignore" });
+  const reviewedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+  const reviewedTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim();
+  // Content-identical squash commit on top (same tree, new commit).
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "squash"], { cwd: dir, stdio: "ignore" });
+  const headTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim();
+  assert.equal(headTree, reviewedTree);
+  writeState(dir, {
+    ...readyState(dir),
+    review: { verdict: "READY", fingerprint: reviewedTree, commitSha: reviewedSha, at: "t", docSync: "NOT_NEEDED" },
+    precommit: { verdict: "PASS", fingerprint: headTree, at: "t" },
+  });
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 0, `squash must keep the READY alive: ${res.stderr}`);
+});
+
+test("round-10 P1: docSync enforcement survives the unreviewed-commit branch (commitSha present, no attestation)", () => {
+  // v10-1 regression: the unreviewed-commit check was chained as an else-if
+  // keyed on the mere presence of review.commitSha, swallowing the docSync
+  // branch behind it — record_review always sets commitSha on READY, so
+  // docSync was unreachable at the hook layer. The check must be standalone.
+  const dir = makeGitRepo();
+  writeFileSync(join(dir, "code.ts"), "export const v = 1;\n");
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "reviewed"], { cwd: dir, stdio: "ignore" });
+  const reviewedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+  const reviewedTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim();
+  writeState(dir, {
+    ...readyState(dir),
+    review: { verdict: "READY", fingerprint: reviewedTree, commitSha: reviewedSha, at: "t" }, // NO docSync
+    precommit: { verdict: "PASS", fingerprint: reviewedTree, at: "t" },
+  });
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /docSync enforced/,
+    "docSync must still block when commitSha is present (it was unreachable before the fix)");
 });

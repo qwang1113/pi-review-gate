@@ -117,6 +117,13 @@ if (!nullableString(state.sessionId) ||
     // value must be a real version number (a forged non-integer must not slip
     // through and later compare "equal" to the running algorithm).
     (state.fingerprintVersion !== undefined && !Number.isInteger(state.fingerprintVersion)) ||
+    // Optional review_checkpoint record: present must be well-formed (sha is
+    // a 40-hex git object id, at an ISO timestamp) — it becomes trust-bearing
+    // when prepare_review computes baseline..HEAD from it (round-5 Nit).
+    (state.checkpoint !== undefined &&
+      !(typeof state.checkpoint === "object" && state.checkpoint !== null &&
+        typeof state.checkpoint.sha === "string" && /^[0-9a-f]{40}$/.test(state.checkpoint.sha) &&
+        typeof state.checkpoint.at === "string")) ||
     typeof state.updatedAt !== "string") {
   console.error("[review-gate] gate state shape/verdict invalid — failing closed.");
   process.exit(1);
@@ -137,6 +144,9 @@ set -e
 # Resolve helper scripts relative to the hook location.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FP_SCRIPT="${HOOK_DIR}/../scripts/compute-fingerprint.cjs"
+# The node block requires it by path; make it absolute (node resolves
+# relative requires against its own cwd, which is the repo, not the hook).
+FP_SCRIPT="$(cd "$(dirname "$FP_SCRIPT")" && pwd)/$(basename "$FP_SCRIPT")"
 LABEL_SCRIPT="${HOOK_DIR}/../scripts/scan-test-labels.cjs"
 
 # Test-label English gate (L6). Missing script → warn+skip (NOT fail-closed):
@@ -212,8 +222,9 @@ if [[ -z "$FP_JSON" ]]; then
   }
 fi
 
-node - "$STATE_FILE" "$FP_JSON" <<'NODE'
+node - "$STATE_FILE" "$FP_JSON" "$FP_SCRIPT" <<'NODE'
 const { readFileSync } = require("node:fs");
+const { worktreeTreeOid: worktreeTreeOidOf } = require(process.argv[4]);
 
 const statePath = process.argv[2];
 const fpJson = process.argv[3];
@@ -274,15 +285,19 @@ if (typeof state.hasCodeChange !== "boolean" || typeof state.hasDocChange !== "b
 if (state.bypass && state.bypass.active) process.exit(0);
 if (!state.hasCodeChange && !state.hasDocChange) process.exit(0);
 
+// Round-8 P1: bindings are COMMIT TREES now (review.fingerprint and
+// precommit.fingerprint hold git tree OIDs, not worktree digests). The
+// comparison target is the WORKTREE TREE — the exact content this commit
+// would publish (== the reviewed checkpoint tree at ship time).
 let currentFp;
 let runningVersion;
 try {
   const fp = JSON.parse(fpJson);
   if (fp.unavailable) throw new Error("fingerprint unavailable");
-  currentFp = fp.digest;
   runningVersion = fp.version;
+  currentFp = worktreeTreeOidOf(process.cwd());
 } catch {
-  console.error("[review-gate] cannot compute worktree fingerprint — failing closed.");
+  console.error("[review-gate] cannot compute the worktree tree — failing closed.");
   process.exit(1);
 }
 
@@ -323,6 +338,29 @@ if (state.hasCodeChange) {
              state.review.docSync !== "UPDATED" && state.review.docSync !== "NOT_NEEDED") {
     // docSync knob: the READY review must carry a code↔doc attestation.
     problems.push("docSync enforced: READY review lacks a code↔doc attestation (UPDATED | NOT_NEEDED)");
+  }
+  // Round-9 P1 / round-10 P1: the unreviewed-commit check is a STANDALONE if,
+  // NOT an else-if on the fingerprint chain — chaining it keyed on the mere
+  // presence of review.commitSha swallowed the docSync branch behind it
+  // (record_review always sets commitSha on READY, so docSync was unreachable
+  // at the hook layer). Runs only when the review already passed the
+  // fingerprint checks above.
+  if (state.review.verdict === "READY" && state.review.commitSha && state.review.fingerprint &&
+      !problems.some((p) => p.includes("fingerprint") || p.includes("docSync"))) {
+    // Commits since the reviewed commit whose tree differs from the reviewed
+    // tree are content no reviewer saw — HEAD's tree matching alone cannot
+    // see a change-and-revert or a never-re-reviewed checkpoint.
+    let unreviewed = 0;
+    try {
+      const { execFileSync } = require("node:child_process");
+      const out = execFileSync("git", ["rev-list", "--format=%T", `${state.review.commitSha}..HEAD`], { encoding: "utf8" });
+      unreviewed = out.split("\n").filter((l) => l && !l.startsWith("commit ") && l.trim() !== state.review.fingerprint).length;
+    } catch {
+      unreviewed = 1; // range unverifiable (rebase?) — fail closed
+    }
+    if (unreviewed > 0) {
+      problems.push(`unreviewed commits since the last READY review (${unreviewed} commit(s) with content no reviewer saw) — checkpoint the new work and run the next review round before shipping`);
+    }
   }
 
   // Fail-closed: only an explicit PASS bound to the current fingerprint passes.

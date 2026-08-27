@@ -13,24 +13,22 @@ import {
   extractPrecommitBaseline,
 } from "../lib/parallel-review.ts";
 
-test("buildReviewPrompt names the changed files and sets the snapshot contract", () => {
+test("buildReviewPrompt names the changed files and sets the COMMIT contract", () => {
   const prompt = buildReviewPrompt(
     "review",
     ["src/a.ts", "src/b.ts"],
     "criterion 1: tests pass",
     undefined,
-    { streamPath: "/repo/.pi/review-stream/r-review.jsonl" },
+    { streamPath: "/repo/.pi/review-stream/r-review.jsonl", commitRange: "abc123..def456" },
   );
-  assert.match(prompt, /Audit the WHOLE change/);
+  assert.match(prompt, /Audit the COMMIT RANGE abc123\.\.def456/);
   assert.match(prompt, /src\/a\.ts/);
   assert.match(prompt, /src\/b\.ts/);
-  // The reviewer works in a disposable snapshot, so mutation analysis is
-  // ENCOURAGED — but it must restore, and it must know why (the tree check).
-  assert.match(prompt, /disposable snapshot worktree/);
-  assert.match(prompt, /mutation analysis/i);
-  assert.match(prompt, /RESTORE every mutation/);
-  assert.match(prompt, /READY from you will not be accepted/);
-  // Shipping stays out of a reviewer's hands, snapshot or not.
+  // The change under review is immutable history; the judge never writes.
+  assert.match(prompt, /no edit\/write tools/);
+  assert.match(prompt, /THROWAWAY worktree under \$TMPDIR/);
+  assert.match(prompt, /ADVISORY/);
+  // Shipping stays out of a reviewer's hands.
   assert.match(prompt, /Never run git commit\/push/);
   assert.match(prompt, /docSync is REQUIRED on the single-review path/);
   assert.match(prompt, /criterion 1: tests pass/);
@@ -45,13 +43,13 @@ test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no i
     ["src/a.ts"],
     undefined,
     undefined,
-    { streamPath: "/repo/.pi/review-stream/run-review.jsonl" },
+    { streamPath: "/repo/.pi/review-stream/run-review.jsonl", commitRange: "abc123..def456" },
   );
   assert.match(isolated, /STREAM YOUR FINDINGS AS YOU CONFIRM THEM/);
   assert.match(isolated, /\/repo\/\.pi\/review-stream\/run-review\.jsonl/);
   assert.match(isolated, /NEVER put a verdict in the stream/);
-  assert.match(isolated, /disposable snapshot worktree/);
-  assert.match(isolated, /You may edit files and run tests freely/);
+  assert.match(isolated, /abc123\.\.def456/);
+  assert.match(isolated, /no edit\/write tools/);
 
   // REGRESSION: without a snapshot the reviewer is in the USER'S worktree and
   // the engine-level denylist only removes edit/write TOOLS — bash stays. A
@@ -75,13 +73,13 @@ test("REGRESSION: no pre-baked diff is ever pasted into a review prompt", () => 
     ["src/a.ts"],
     undefined,
     undefined,
-    { streamPath: "/repo/.pi/review-stream/r-review.jsonl" },
+    { streamPath: "/repo/.pi/review-stream/r-review.jsonl", commitRange: "abc123..def456" },
   );
   assert.doesNotMatch(prompt, /Diff context/);
   assert.doesNotMatch(prompt, /```diff/);
   assert.doesNotMatch(prompt, /the diff may have drifted/);
   // The replacement instruction has to be there instead.
-  assert.match(prompt, /disposable snapshot worktree/);
+  assert.match(prompt, /git show/);
 });
 
 test("REVIEW_VERDICT_SCHEMA is the shape handed to a spawned reviewer", () => {
@@ -117,22 +115,22 @@ test("the verdict must carry the reviewer's REAL cwd (second proof of isolation)
     ["src/a.ts"],
     undefined,
     undefined,
-    { streamPath: "/repo/.pi/review-stream/run-review.jsonl" },
+    { streamPath: "/repo/.pi/review-stream/run-review.jsonl", commitRange: "abc123..def456" },
   );
   // A copied path proves nothing about where the review happened, so the
   // prompt has to demand a measured one.
   assert.match(prompt, /run `pwd`/);
   assert.match(prompt, /do NOT copy the path out of this task text/i);
   assert.match(prompt, /"cwd": "<your real pwd>"/);
-  assert.match(prompt, /gate checks it against the snapshot prepared for you/);
+  assert.match(prompt, /matches it against the pane it spawned you in/);
 
   // …and the NO-isolation branch must not promise a check that cannot happen:
   // it just told the reviewer there is no snapshot this round.
   const bare = buildReviewPrompt("review", ["src/a.ts"]);
   assert.match(bare, /run `pwd`/, "the pwd is still recorded without isolation");
-  assert.doesNotMatch(bare, /the snapshot prepared for you/,
-    "promising a snapshot check with no snapshot contradicts the same prompt");
-  assert.match(bare, /gate does not match it against one/);
+  assert.doesNotMatch(bare, /pane it spawned you in/,
+    "promising a pane check with no pane contradicts the same prompt");
+  assert.match(bare, /does not match it against one/);
 });
 
 test("REGRESSION: this module is PURE — no engine, no snapshots, no I/O, no sharding", () => {
@@ -193,7 +191,7 @@ test("scopeDirective rides the task text when given (goal criterion 1)", () => {
   assert.doesNotMatch(plain, /Review scope for this round:/);
 });
 
-test("opening instruction is scope-aware: incremental rounds audit the INCREMENT, full rounds the WHOLE change (round-2/3 P1)", () => {
+test("opening instruction is scope-aware: incremental rounds audit the INCREMENT, full rounds the COMMIT RANGE (round-2/3 P1)", () => {
   const scope =
     "Review scope for this round:\n- INCREMENTAL. small increment.\n- SETTLED last round — verdict READY.";
   const incremental = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, scope, "incremental");
@@ -212,12 +210,12 @@ test("opening instruction is scope-aware: incremental rounds audit the INCREMENT
   const fullDirective =
     "Review scope for this round:\n- FULL deep review. no previous READY review to build on — full deep review.";
   const full = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, fullDirective, "full");
-  assert.match(full, /Audit the WHOLE change/);
+  assert.match(full, /Audit the COMMIT RANGE baseline\.\.HEAD below/);
   assert.doesNotMatch(full, /Audit the INCREMENT/);
 
-  // Absent scopeKind (older callers) defaults to the whole-change wording.
+  // Absent scopeKind (older callers) still opens with the commit-range wording.
   const legacy = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, fullDirective);
-  assert.match(legacy, /Audit the WHOLE change/);
+  assert.match(legacy, /Audit the COMMIT RANGE baseline\.\.HEAD below/);
 });
 
 test("session pointer rides the task text when given (goal criterion 4)", () => {

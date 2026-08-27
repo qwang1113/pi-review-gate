@@ -1,6 +1,6 @@
 # 交接:增量核验架构(adviser/goal-auditor/reviewer 复用上轮上下文)
 
-**交接日期**: 2026-08-27
+**交接日期**: 2026-08-27（注意：同日稍后执行模型切换到 checkpoint commit + tmux judge 子会话，见 `docs/execution-model.md`；本文的快照隔离措辞为切换前版本）
 **交接人**: 上一会话(pi-review-gate 仓库,分支 `feat/incremental-review-context`)
 **接手事项**: 完成 review 确认与发布(commit → PR),以及标准 6 的遗留测量。
 

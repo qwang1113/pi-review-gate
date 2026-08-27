@@ -34,27 +34,29 @@ agent：调 set_gate_mode("loop")
   → propose_loop_goal 弹窗让你批准（窗中会显示“goal-auditor 预审: PASS @ …”）
   → 改代码
   → run_precommit（fast）→ 全绿
-  → prepare_review（一个一次性快照 + 一个 findings 流文件）
-  → reviewer 在快照里审（每轮一个 reviewer，审整个 diff）
-     同时：agent 边读流式 findings 边修（不用等审完）
-  → record_review（顺带机械校验快照有没有被 reviewer 改脏）
+  → review_checkpoint（把改动提交为 checkpoint——READY 前唯一的 commit 通道）
+  → prepare_review（计算不可变审核范围 baseline..HEAD + findings 流文件）
+  → review_spawn 开 tmux 子会话审（每轮一个 reviewer，审整个 commit 范围）
+     同时：agent 边读流式 findings 边修（不用等审完；review_watch 完成即唤醒）
+  → record_review（机械校验：未 prepare ⇒ 不授予；HEAD 已移动 ⇒ STALE ⇒ BLOCKED）
   → BLOCKED？修 → 再来一轮；READY？declare_done → 提交
 ```
 
 - **先 precommit 后 review**：便宜的检查先跑，贵的审核只花在绿树上。
 - 每轮按 ROUND 计费：**把相关改动批量做完再触发一轮**，比十个小轮省十倍。
 - 最终轮用 `run_precommit mode=full`（push/PR/declare_done 要求测试没被收窄）。
-- **指纹是内容寻址且 staging-invariant**：`git add`、`git commit`、以及**不改写工作区文件的**切分支
-  都**不会**动它，READY + PASS 依然有效——**不要为了"重建绑定"而重跑一轮 review**（那是纯浪费）。
-  只有工作区文件内容变化才会让指纹变化（编辑、lint:fix、或一次会改写文件的 checkout）。
+- **绑定是内容寻址的 commit tree**：`git add`、`git commit`、切分支、以及 squash checkpoint
+  链（内容不变）都不会破坏绑定，READY + PASS 依然有效——**不要为了"重建绑定"而重跑一轮
+  review**（那是纯浪费）。只有提交内容变化（新的 checkpoint / 编辑 / lint:fix 改写）才会
+  让绑定失效。
 - **复审要带上一轮结论**：第 N+1 轮把上一轮的 verdict 与 findings 交给 reviewer；
   已定论且未改动的部分只做一致性扫描，不重新论证（门禁会自动注入这段 scope）。
-- **reviewer 跑在一次性快照里，你可以边审边修**：`prepare_review` 给唯一 reviewer 开一个独立
-  git worktree（内容 = 待审改动，`node_modules` 软链）。它在里面随便改、随便跑变异测试，
-  碰不到你的工作树；你则可以把它已确认的 P0/P1/P2（带证据的）当场修掉。代价：边修边审会让
-  工作树变动，READY 可能对不上指纹 → 门禁要求再来一轮（但那一轮的修复工作你已经做完了）。
-- **快照完整性是机械校验的**：reviewer 必须在结束前还原所有变异；`record_review` 会重算快照
-  tree，发现没还原就把该审的 READY 降为 BLOCKED（findings 仍然算数）。
+- **reviewer 审的是不可变 commit 范围，你可以边审边修**：先 `review_checkpoint` 把改动提交成
+  checkpoint（READY 前唯一的 commit 通道，要求 precommit full 通过），reviewer 审
+  `baseline..HEAD`。被审历史不可变，你边读流式 findings 边修真实工作树，互不干扰。
+- **审核目标是机械校验的**：`record_review` 验证本轮确实 prepare 过（否则不授予 READY）、
+  HEAD 没有越过被审提交（越了 ⇒ STALE ⇒ BLOCKED，findings 仍然算数）；READY 绑定被审
+  commit 的 TREE（内容绑定——之后把 checkpoint 链 squash 成一个提交，READY 依然有效）。
 
 ## 4. 配置（可选）
 
@@ -82,11 +84,11 @@ agent：调 set_gate_mode("loop")
 | `Unknown JSON field: "headRefOid"` | gh 版本过老 | 已自动 fallback（升级 gh 更佳） |
 | 模型 429 / 额度耗尽，循环空转 | provider 限流，注入再多也没用 | 熔断器会在连续无进展后停止注入并提示；`/model` 切到其它 provider（如 anthropic），你的下一条消息即恢复循环 |
 | agents 副本与仓库不同步（正文过时） | `~/.pi/agent/agents/*.md` 落后于本仓库 | 重跑 `node scripts/install-package.mjs`（幂等）；用 `/gate-doctor` 检出 |
-| `SNAPSHOT INTEGRITY: … DRIFTED` | reviewer 做完变异测试没还原（或把草稿文件写进了快照） | 重新 `prepare_review` 拿一个干净快照，重跑那一个 reviewer；它的 findings 仍然有效 |
-| `snapshot isolation UNAVAILABLE` | 本机 `git worktree` 不可用（无提交、权限、非 git 目录） | 按老规矩走：reviewer 不许改文件，你也别在审核期间修；门禁本身不受影响 |
-| `~/.pi/review-snapshots/<repo-key>/` 里堆了 `rg-review-snap-*` | 会话崩溃留下的孤儿快照 | 下次 `prepare_review` 或新会话启动会按时效自动回收；手动清理：`git worktree prune` + `rm -rf ~/.pi/review-snapshots/<repo-key>/rg-review-snap-*` |
-| reviewer 改了依赖导致后续 precommit 诡异失败 | 快照里 `node_modules` 是指向真仓库的软链（共享路径之一），写它会穿透 | 重装依赖（`npm ci`）；reviewer 的提示词已明确禁止写 `node_modules` |
-| `git commit` 报 `.git/hooks/pre-commit: No such file or directory` | 有人在快照里跑了安装脚本：快照是 linked worktree，**`.git/hooks` 与真仓库共享**，于是 hook 被指向了随轮删除的快照目录 | 在**真工作树**重跑 `bash scripts/install-git-hooks.sh`；两个安装器现已拒绝从含 `rg-review-snap-` 路径段（`~/.pi/review-snapshots/`、`.pi/review-snapshots/` 与 tmpdir 回退三种布局）的目录下运行 |
+| `STALE`（record_review 报 BLOCKED） | prepare 之后又有新 checkpoint 提交，reviewer 审的是更旧的 commit | 把新改动并入再提交 checkpoint，重跑一轮；旧 findings 仍然有效 |
+| 未 prepare 直接 record_review | 裁决没有可绑定的审核目标 | 按流程走：checkpoint → prepare_review → 送审 → record_review |
+| `tmux unavailable` | 宿主没有 tmux（judge 子会话的硬依赖） | 安装 tmux（`brew install tmux`）；没有 tmux 时门禁 fail-closed，judge 无法启动 |
+| `~/.pi/review-snapshots/<repo-key>/` 里堆了 `rg-review-snap-*` | 旧版本遗留的孤儿快照（新模型不再创建快照） | 手动清理：`git worktree prune` + `rm -rf ~/.pi/review-snapshots/<repo-key>/rg-review-snap-*` |
+| `git commit` 报 `.git/hooks/pre-commit: No such file or directory` | 有人在旧快照里跑了安装脚本：快照是 linked worktree，**`.git/hooks` 与真仓库共享** | 在**真工作树**重跑 `bash scripts/install-git-hooks.sh` |
 | 想完全绕过 | — | 你执行 `/gate-bypass <reason>`（会话内）或会话外用 `REVIEW_GATE_BYPASS=1`（仅 hooks 层）；注意 `/gate-bypass` 只解除 L1 ship gate，**解除不了 L8 的 edit/write 硬拦**——未确认 goal 前编辑仍被拦 |
 
 ## 6. 常用命令
@@ -105,5 +107,5 @@ agent：调 set_gate_mode("loop")
 
 - review 用顶级推理模型（每轮一个 reviewer，审整个 diff），**按轮计费**——批量编辑再触发；
 - `opencode-go` provider 在代码层面**只允许 deepseek-v4-flash**（其余模型按次计费且被显式禁止）；
-- review 不跑 pdw 引擎（引擎不支持 per-agent cwd，reviewer 就拿不到自己的快照）：由 `prepare_review` + 子代理直接 spawn，**每轮一个 reviewer 一个快照**，不分片、不双审；
+- review 不跑 pdw 引擎，也不走子代理派发：judge 角色由 `review_spawn` 在 tmux 子会话（独立 pi 进程，不带门禁扩展）里跑，**每轮一个 reviewer 一个 commit 范围**，不分片、不双审；子代理调度 judge 角色会被硬拦截；
 - decompose / wave daily 已移除（2026-08-26）：大的任务切成同一单审循环的连续轮次，无模块表、无波次调度、无 plan 状态。

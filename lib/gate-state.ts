@@ -73,11 +73,25 @@ export interface GateState {
    */
   fingerprintVersion?: number;
   sessionId: string | null;
+  /**
+   * The last review_checkpoint commit (sha + wall-clock time). The review
+   * unit of the new execution model: prepare_review computes baseline..HEAD
+   * against this, and record_review binds a READY to the reviewed commit's
+   * tree. Written only by review_checkpoint; absent before the first one.
+   */
+  checkpoint?: { sha: string; prevSha: string; at: string };
   hasCodeChange: boolean;
   hasDocChange: boolean;
   review: {
     verdict: GateVerdict;
     fingerprint: string | null; // worktree fingerprint the verdict is bound to
+    /**
+     * Round-9 P1: the COMMIT sha the READY was bound to (the reviewed HEAD at
+     * record time). prepare_review uses it as the incremental baseline so a
+     * chain of checkpoints since the last READY is ALL covered by the next
+     * range; absent on older sidecars (fall back to checkpoint.prevSha).
+     */
+    commitSha?: string;
     at: string | null;
     /**
      * Reviewer's code↔doc attestation from the verdict JSON. Optional for
@@ -699,6 +713,15 @@ export function unmetRequirements(
      * guarantee did not exist when it was written, so it cannot be claimed.
      */
     requireFullTests?: boolean;
+    /**
+     * Round-9 P1: trees of the commits between the last READY's reviewed
+     * commit and HEAD that DIFFER from the reviewed tree. Non-empty ⇒
+     * content no reviewer saw has entered the branch since the READY —
+     * the reviewed tree still matches only if every later commit is a
+     * no-content (squash) rewrite of the same tree. Computed by the caller
+     * (this function is pure); absent ⇒ not checked (older callers).
+     */
+    unreviewedCommits?: string[];
   },
 ): string[] {
   if (!state) return ["gate state missing (fail-closed)"];
@@ -725,6 +748,15 @@ export function unmetRequirements(
       problems.push(`code review gate is ${state.review.verdict} (need READY)`);
     } else if (state.review.fingerprint !== currentFingerprint) {
       problems.push("code was modified after the last READY review (fingerprint mismatch)");
+    } else if (opts?.unreviewedCommits && opts.unreviewedCommits.length > 0) {
+      // Round-9 P1: the tree matches but content-changing commits landed
+      // after the reviewed commit (a checkpoint that was never re-reviewed,
+      // or a rebase that moved the reviewed point). HEAD's tree alone cannot
+      // see them — a change-and-revert still shipped unreviewed content.
+      problems.push(
+        `unreviewed commits since the last READY review (${opts.unreviewedCommits.length} commit(s) with content no reviewer saw) — ` +
+        "checkpoint the new work and run the next review round before shipping",
+      );
     } else if (opts?.requireDocSync && state.review.docSync === undefined) {
       // Fail-closed: enforcement is on and the READY review carries no
       // attestation (older review, or reviewer omitted the field) → unmet.

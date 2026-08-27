@@ -1,8 +1,17 @@
 # Single-review loop & model tiers — implemented design
 
-**Status**: single-review loop implemented 2026-08-26, replacing the
-earlier multi-reviewer and module-planning machinery. One reviewer per
-round, one disposable snapshot, one `record_review` call.
+> **SUPERSEDED 2026-08-27** — the execution model moved to **checkpoint
+> commits + tmux judge children**: judge roles run as their own pi processes
+> in tmux panes (`review_spawn`), the review unit is the immutable commit
+> range `baseline..HEAD` (`review_checkpoint` → `prepare_review`), and
+> `record_review` binds a READY to the reviewed commit's TREE (STALE when
+> HEAD moves). See `docs/execution-model.md` + `docs/judge-protocol.md` for
+> the current model. This file is kept as the historical design record of
+> the snapshot-based loop (2026-08-26 → 2026-08-27).
+
+**Status (historical)**: single-review loop implemented 2026-08-26,
+replacing the earlier multi-reviewer and module-planning machinery. One
+reviewer per round, one disposable snapshot, one `record_review` call.
 
 ## 1. Three principles
 
@@ -37,11 +46,14 @@ The runtime source of truth is the configuration, not any models-store cache.
 
 ## 3. The pipeline (one round)
 
+> Current (2026-08-27) pipeline — snapshot pipeline below is historical:
+
 ```
 edit code (batch related edits — the loop is billed per ROUND, not per line)
   → run_precommit first (cheap checks before the expensive judge)
-  → prepare_review (ONE snapshot of the change; returns cwd, stream, file list, task)
-  → spawn ONE reviewer as its own top-level subagent call carrying that cwd
+  → review_checkpoint (commits the change; the only commit before a READY)
+  → prepare_review (registers baseline..HEAD; returns stream path + task text)
+  → review_spawn / review_send / review_watch (ONE tmux judge child)
   → read the finding stream while it works; fix streamed P0/P1/P2 with evidence
   → record_review with the FULL reviewer output (all fences parsed; worst wins)
   → BLOCKED? fix everything, then start again from precommit
@@ -56,10 +68,13 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
 - **Isolation + streaming**: the reviewer holds a frozen copy, so the main
   agent keeps fixing the real worktree from streamed findings (confirm each in
   the code first; leave Nits for the verdict).
-- **Snapshot pin is mechanical**: `lib/reviewer-spawn-guard.ts` blocks a
-  reviewer spawn naming no snapshot, blocks `workflowScript` dispatch of
-  reviewers entirely (no per-child `cwd`), and `record_review` withholds a
-  READY for a snapshot with no evidence it was entered (`SNAPSHOT UNUSED`).
+- **Commit target is mechanical** (2026-08-27): judge-role subagent dispatch
+  (`subagent` / `workflowScript` / `workflowScriptPath`) is HARD-blocked;
+  `record_review` withholds a READY when the round was never prepared and
+  downgrades a READY to BLOCKED as STALE when HEAD moved past the reviewed
+  commit. (Historical: the snapshot pin in `lib/reviewer-spawn-guard.ts`
+  blocked un-pinned reviewer spawns and withheld READYs for snapshots never
+  entered — that module and the snapshot machinery were retired.)
 
 ## 5. Latency & cost
 
@@ -86,35 +101,43 @@ and pacing by design. Verification on 2026-08-10 (branch
 consecutive runs — three before and three after adding the `nice` yield for
 non-test steps — all six PASS. Wall-clock on this repo: ~138-157 s.
 
-## 8. Architecture: one reviewer, one snapshot, no engine
+## 8. Architecture (historical): one reviewer, one snapshot, no engine
 
-**Status**: implemented 2026-08-26.
+**Status (historical)**: implemented 2026-08-26; superseded 2026-08-27 by
+tmux judge children over checkpoint commit ranges (see the banner).
 
 The serial bottlenecks of the old design (multi-reviewer, module-loop)
 were removed by user decision. What remains:
 
-### 8.1 The single review round
+### 8.1 The single review round (current)
 
 `lib/parallel-review.ts` holds the pure reviewer contract: the verdict schema
 (`REVIEW_VERDICT_SCHEMA`, with the required `cwd` evidence field) and the
 prompt builder (`buildReviewPrompt`). `extensions/review-gate.ts`'s
-`prepare_review` materializes ONE disposable WRITABLE snapshot per round,
-regardless of diff size, and returns the reviewer's cwd, finding-stream path,
-file list and ready-made task text. The reviewer audits the whole change.
+`prepare_review` registers ONE commit target (`baseline..HEAD`) per round,
+regardless of diff size, and returns the finding-stream path, the ready-made
+task text and the tmux spawn instructions. The reviewer audits the whole
+commit range. (Historical: `prepare_review` used to materialize one
+disposable WRITABLE snapshot worktree and return its `cwd`.)
 
-### 8.2 Snapshot integrity, mechanically
+### 8.2 Commit-target integrity, mechanically (current)
 
-`lib/review-snapshot.ts` creates and verifies the snapshot; `record_review`
-re-derives its tree (a READY from a reviewer that left edits behind is
-downgraded) and demands evidence the snapshot was entered (the spawn the gate
-observed, or the `cwd` the reviewer reports — `SNAPSHOT UNUSED` otherwise).
+`record_review` verifies the registered target: a READY with no prepared
+target is withheld, a READY whose HEAD moved past the reviewed commit is
+downgraded to BLOCKED (STALE), and a READY binds to the reviewed commit's
+TREE (content binding — squash preserves it). (Historical: `lib/review-snapshot.ts`
+created and verified snapshots; drift and `SNAPSHOT UNUSED` checks were
+retired with it.)
 
-### 8.3 No engine — subagents only
+### 8.3 No engine — tmux judge children (current)
 
-Reviews are dispatched as ordinary subagents: pi-subagents honors a per-call
-`cwd` and enforces a structured `outputSchema`, so the reviewer gets its own
-disposable WRITABLE snapshot. A missing engine is not a concern — there is no
-engine to miss.
+Reviews are dispatched as their OWN pi processes in tmux panes of the main
+session (`lib/tmux-session.ts` spawns the pane; `lib/judge-prompt.ts` builds
+the launcher and task files). The child loads no review-gate extension and
+runs `--exclude-tools edit,write`; its context is reused across rounds until
+a READY lands, and the done channel wakes the main session
+(`review_watch`). (Historical: reviews were dispatched as plain subagents
+with a per-call `cwd` into the snapshot.)
 
 #### Post-install verification checklist
 
@@ -122,7 +145,7 @@ engine to miss.
    runs `scripts/install-package.mjs`: agents → `~/.pi/agent/agents/`, and
    git hooks when the current dir is a repo), then restart Pi / `/reload`.
 2. In a real pi session on this repo: run `/review` on any change and confirm
-   ONE reviewer runs inside its own snapshot, then record its verdict in one
-   `record_review` call.
+   ONE reviewer runs as a tmux judge child over the checkpoint commit range,
+   then record its verdict in one `record_review` call.
 3. Record wall-clock numbers and compare against the ~190 s baseline; update
    this section when measured.

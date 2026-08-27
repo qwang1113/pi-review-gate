@@ -35,7 +35,7 @@ test("agents/*.md exactly matches KNOWN_AGENTS (config/render see every agent)",
   const files = readdirSync(AGENTS).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, "")).sort();
   const known = [...KNOWN_AGENTS].sort();
   assert.deepEqual(files, known, "shipped agents must equal KNOWN_AGENTS");
-  assert.ok(files.length >= 7, `expected all 7 agents, found ${files.length}`);
+  assert.ok(files.length >= 6, `expected all 6 agents, found ${files.length}`);
 });
 
 test("L3 judges (reviewer/adviser/arbiter/goal-auditor) think at max — the verdict tier never degrades", () => {
@@ -329,59 +329,20 @@ test("REGRESSION: every re-review must carry the previous round's conclusion", (
   assert.match(reviewer, /reopen it/i);
 });
 
-test("the read-only reviewer variant CANNOT write, and says why it exists", () => {
-  // pi-subagents has no per-call tool denylist, so "please do not edit" is only
-  // a request. A static agent whose allowlist lacks edit/write is the one
-  // mechanical guard available for the no-isolation fallback.
-  const file = "reviewer-readonly.md";
-  const fm = frontmatter(file);
-  const toolsLine = fm.split("\n").find((l) => l.startsWith("tools:"))!;
-  assert.ok(toolsLine, "the variant must declare tools:");
-  for (const forbidden of ["edit", "write"]) {
-    assert.doesNotMatch(
-      toolsLine,
-      new RegExp(`\\b${forbidden}\\b`, "i"),
-      `${file}: the point of this agent is that it cannot ${forbidden}`,
-    );
-  }
-  // It still needs to READ and to inspect.
-  for (const needed of ["read", "grep", "bash"]) {
-    assert.match(toolsLine, new RegExp(`\\b${needed}\\b`), `${file} must keep ${needed}`);
-  }
-  const src = readFileSync(join(AGENTS, file), "utf8");
-  assert.match(src, /read-only inspection/i);
-  assert.match(src, /[Mm]utation analysis is NOT available/);
-  assert.match(src, /no per-call tool denylist/i, "it must state WHY a separate agent is needed");
-  // Same judge tier as the writable reviewer — the fallback must not be weaker.
-  assert.match(fm, /^model: claude-fable-5$/m);
-  assert.match(fm, /^thinking: max$/m);
-  // The goal file must NOT be a defaultRead of any JUDGING agent: only a
-  // USER-APPROVED goal may become an acceptance contract, and prepare_review
-  // gates that injection on loopGoalConfirmed(). A defaultRead would hand the
-  // judge the RAW file instead — an unapproved draft included (round-3 P2: the
-  // removal was unlocked, so re-adding the entry broke no test). Two roles are
-  // deliberately excluded: `adviser` consults on a draft goal, and
-  // `goal-auditor` AUDITS the draft — reading the raw (possibly unapproved)
-  // file is precisely their job, while an ACCEPTANCE judge must only ever see
-  // the text the user approved, handed to it in the spawn task.
-  for (const judge of ["reviewer.md", "reviewer-readonly.md", "arbiter.md"]) {
-    const reads = frontmatter(judge).split("\n").find((l) => l.startsWith("defaultReads:")) ?? "";
-    assert.doesNotMatch(
-      reads,
-      /loop-goal\.md/,
-      `${judge}: the goal must arrive through the approval-gated task text, never as a raw defaultRead`,
-    );
-  }
-});
-
-
-test("AGENTS.md and SKILL.md make subagents the only execution path", () => {
+test("AGENTS.md and SKILL.md make judge roles tmux children — the only review path", () => {
+  // 2026-08-27 model: judge roles run as their own pi processes in tmux
+  // panes (review_spawn); subagent dispatch of a judge role is HARD-blocked.
   for (const file of [AGENTS_MD, SKILL_MD]) {
     const src = readFileSync(file, "utf8");
     assert.match(
       src,
-      /subagents? is\/are the only execution path|Everything runs on plain subagents|No engine is involved anywhere/i,
-      `${file} must declare that subagents are the only execution path`,
+      /tmux|review_spawn/i,
+      `${file} must declare the tmux judge-child execution path`,
+    );
+    assert.match(
+      src,
+      /BLOCKS judge roles|HARD-?blocked/i,
+      `${file} must state that judge-role dispatch is blocked`,
     );
   }
   // …and must not resurrect the engine as a dependency.
@@ -389,32 +350,22 @@ test("AGENTS.md and SKILL.md make subagents the only execution path", () => {
   assert.doesNotMatch(src, /HARD dependency.*engine|engine.*HARD dep(?:endency)?/i);
 });
 
-test("REGRESSION: the snapshot contract is stated everywhere a reviewer reads it", () => {
-  // Unbanning reviewer writes is only safe because of two paired promises:
-  // "you are in a disposable copy" and "restore before you finish". A file
-  // that carries one without the other invites exactly the damage the
-  // isolation exists to prevent.
-  // Only agents that RUN INSIDE a disposable snapshot must make the paired
-  // restoration promises; the read-only variant (reviewer-readonly) has no
-  // snapshot and is covered by its own CANNOT-write test.
-  // Only agents that RUN INSIDE a disposable snapshot must make the paired
-  // restoration promises; the read-only variant (reviewer-readonly) has no
-  // snapshot and is covered by its own CANNOT-write test.
+test("REGRESSION: the commit-isolation contract is stated where a reviewer reads it", () => {
+  // Reviewer writes were unban-able under snapshots only because of paired
+  // promises (disposable copy + restore). The tmux-judge model replaces the
+  // copy with the COMMIT: isolation comes from immutable history, so the
+  // paired promises are now "judge the range, not the worktree" + "no write
+  // surface". A file that carries one without the other invites the same
+  // damage the isolation exists to prevent.
   const file = join(AGENTS, "reviewer.md");
   const src = readFileSync(file, "utf8");
-  assert.match(src, /disposable snapshot|snapshot cwd|throwaway git worktree/i, `${file}: must say where it runs`);
-  assert.match(src, /mutation analysis/i, `${file}: must permit verification by doing`);
-  assert.match(src, /[Rr]estore every mutation/, `${file}: must demand restoration`);
-  assert.match(src, /\$TMPDIR/, `${file}: must send scratch files outside the snapshot`);
-  assert.match(src, /READY from (you|it) is NOT accepted/i, `${file}: must state the consequence`);
-  assert.match(src, /never\W{0,4}run\s+`?git commit/i, `${file}: shipping stays with the main session`);
-  assert.match(src, /node_modules/, `${file}: must name the node_modules symlink as shared`);
-  assert.match(src, /`?\.git`?\b/, `${file}: must name .git as shared (linked worktree)`);
-  assert.match(
-    src,
-    /never run an installer|never run any installer/i,
-    `${file}: must forbid installers — they write through the shared .git`,
-  );
+  assert.match(src, /baseline\.\.HEAD|commit range/i, `${file}: must say WHAT it judges`);
+  assert.match(src, /git show|git diff/i, `${file}: must read the range via git, not the live tree`);
+  assert.match(src, /No EDIT tools|no write surface/i, `${file}: must state it has no edit surface in the shared worktree`);
+  assert.match(src, /worktree add/i, `${file}: must verify in a throwaway checkout`);
+  assert.match(src, /\$TMPDIR/, `${file}: must keep scratch worktrees outside the repo`);
+  assert.match(src, /never run `?git commit/i, `${file}: shipping stays with the main session`);
+  assert.match(src, /ADVISORY/, `${file}: live-worktree test runs are declared advisory`);
   // A reviewer must never present a repair as its own contribution.
   const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
   assert.doesNotMatch(
@@ -438,7 +389,7 @@ test("REGRESSION: isolation + streaming are documented in every protocol surface
   // The /review prompt the extension actually sends carries it too.
   const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
   assert.match(commands, /prepare_review/);
-  assert.match(commands, /never poll in a tight loop/i);
+  assert.match(commands, /never poll in a tight loop|no polling/i);
   // And the design record no longer contradicts the implementation.
   const plan = readFileSync(join(ROOT, "docs", "parallel-execution-plan.md"), "utf8");
   assert.match(plan, /MAIN WORKTREE has exactly one writer/i);

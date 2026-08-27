@@ -439,9 +439,9 @@ const UPDATE_INDEX_CHUNK = 500;
  *
  * `extraExcludePathspecs` drops additional paths from the tree, on top of the
  * gate-owned ones. The gate itself never passes any — its exclusion set is
- * fixed and must stay that way — but a REVIEW SNAPSHOT
- * (lib/review-snapshot.ts) has to ignore the `node_modules` symlink it
- * created for the test suite: `.gitignore` entries are usually written
+ * fixed and must stay that way — but a legacy review snapshot from an older
+ * install (pre-2026-08-27) still needs `node_modules` ignored: the snapshot
+ * symlinked it for the test suite, `.gitignore` entries are usually written
  * `node_modules/`, which matches a directory and NOT a symlink, so `git add
  * -A` would stage it and every snapshot would look modified the instant it
  * was built (measured: every verification returned DRIFTED, which would have
@@ -577,10 +577,11 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
 
     git(cwd, ["add", "-A", "--", REPO_ROOT_PATHSPEC], env);
     git(cwd, ["add", "-A", "--renormalize", "--", REPO_ROOT_PATHSPEC], env);
-    // `-f` is REQUIRED, not defensive. A review snapshot is a linked worktree
-    // (default `~/.pi/review-snapshots/<repo-key>/`, repo-`.pi` or tmpdir on
-    // fallback), so `add -A` stages it as a GITLINK whose content matches
-    // neither the working tree nor HEAD — and plain
+    // `-f` is REQUIRED, not defensive. A legacy review snapshot (older
+    // installs; the 2026-08-27 model creates none) is a linked worktree under
+    // `~/.pi/review-snapshots/<repo-key>/` (repo-`.pi` or tmpdir on fallback),
+    // so `add -A` stages it as a GITLINK whose content matches neither the
+    // working tree nor HEAD — and plain
     // `git rm --cached` refuses exactly that ("use -f to force removal"),
     // failing the whole tree computation. Measured: with any snapshot on disk,
     // worktreeTreeOid threw, `record_review` read the current tree as

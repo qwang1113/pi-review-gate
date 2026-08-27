@@ -104,7 +104,7 @@ test("postinstall copies agents/*.md into ~/.pi/agent/agents/", () => {
   assert.equal(res.status, 0, `installer failed: ${res.stderr}`);
 
   const agentsDir = join(home, ".pi", "agent", "agents");
-  for (const f of ["reviewer.md", "reviewer-readonly.md", "adviser.md", "arbiter.md", "fixer.md", "recon.md", "goal-auditor.md"]) {
+  for (const f of ["reviewer.md", "adviser.md", "arbiter.md", "fixer.md", "recon.md", "goal-auditor.md"]) {
     assert.ok(existsSync(join(agentsDir, f)), `${f} missing from installed agents dir`);
   }
   // The installed copy must be the SHIPPED version (repo is the source of truth).

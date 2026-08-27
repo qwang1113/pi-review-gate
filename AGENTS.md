@@ -11,24 +11,33 @@ default, make it safe by default rather than adding a switch.
 
 ### Single-review loop (the only execution path, agent-initiated)
 
-**Everything runs on plain subagents** — the review is the only parallel
-loop. That is not a preference: the reviewer needs a per-call `cwd`, and
-pi-subagents provides it. Each review round is ONE reviewer over the WHOLE
-change, in its OWN disposable snapshot worktree:
+**Judge roles run as tmux children** — the review is the only parallel
+loop, and each round runs in its OWN pi process: a tmux pane of the main
+session's right column, spawned by the extension itself (`review_spawn`).
+The judge child loads NO review-gate extension and runs with
+`--exclude-tools edit,write`; it stays alive across rounds, so its context
+is reused until a READY lands. Each review round is ONE reviewer over the
+WHOLE change:
 
-- **Review → plain subagent** (`prepare_review` + `reviewer`). One snapshot
-  per round; one snapshot, one reviewer, no second reviewer of any kind. The
-  `cwd`; you spawn ONE `reviewer` subagent carrying that `cwd`. `record_review`
-  re-derives the snapshot's tree and downgrades a READY from a reviewer that
-  left edits behind, or withholds one for any snapshot with no evidence it
-  was entered (SNAPSHOT UNUSED).
+- **Review → tmux judge child** (`review_checkpoint` → `prepare_review` →
+  `review_spawn` → `review_send` → `review_watch` → `record_review`). You
+  commit the change as a checkpoint FIRST (`review_checkpoint` — the only
+  commit allowed before a READY; it requires a full precommit PASS). The
+  reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
+  starts at the last REVIEWED commit, so a chain of checkpoints since the
+  last READY is all covered (round-9 P1); there is no second reviewer of
+  any kind. `record_review` verifies HEAD is still the reviewed commit (a
+  new checkpoint after prepare ⇒ STALE ⇒ BLOCKED) and binds a READY to the
+  reviewed commit's TREE (content binding — squash preserves it); the ship
+  gates additionally refuse content-changing commits after the reviewed one
+  (unreviewed content can never ship).
 - **No decompose, no module loop, no wave daily.** The module-planning
   machinery and its wave tools were removed 2026-08-26. Large tasks are
   still sliced by YOU into sequential rounds of the same single review
   loop; there is no module table, no plan state, no planner.
 
-Detail: `docs/parallel-execution-plan.md`; runtime contract:
-`lib/review-snapshot.ts` + `lib/reviewer-spawn-guard.ts`.
+Detail: `docs/execution-model.md` + `docs/judge-protocol.md`; runtime
+contract: `lib/tmux-session.ts` + `lib/judge-prompt.ts`.
 
 The review loop is AGENT-DRIVEN: you start it yourself once edits
 are complete (one `prepare_review` → one spawn → one `record_review`) — the
@@ -211,46 +220,36 @@ to grep on demand. `prepare_adviser` hands back the adviser's ready-made
 brief: transcript pointer + a conclusion artifact the adviser appends to,
 plus — from the second consultation of a goal on — the previous conclusion
 and the files changed since (no history ⇒ full brief).
-(c) **Reviewers run in disposable snapshots, and findings stream.** Call
-`prepare_review` before spawning — it materializes ONE throwaway worktree
-holding exactly the change under review, plus a finding-stream file. Inside
-its copy a reviewer SHOULD verify by doing — mutation analysis included — and
-must restore before finishing; `record_review` re-derives the snapshot's tree
-and downgrades a READY from a reviewer that left edits behind (BLOCKED still
-stands). Because the reviewer holds a copy, **you keep fixing the real
-worktree while it runs**: take streamed P0/P1/P2 that carry evidence (confirm
-each in the code first), leave Nits for the verdict. When `prepare_review`
-reports isolation UNAVAILABLE, dispatch `agents/reviewer-readonly.md`
-instead of `reviewer` (its `tools:` allowlist cannot write, which is the only
-mechanical guard available — pi-subagents has no per-call tool denylist) and
-do NOT apply fixes until the verdict is recorded.
-(d) **The snapshot `cwd` is MECHANICALLY ENFORCED.** Spawn the reviewer as
-its OWN top-level `subagent` call carrying the `cwd` `prepare_review`
-printed for it. While a snapshot is open the gate blocks a
-`reviewer`/`reviewer-readonly` spawn that names no snapshot, and blocks
-dispatching reviewers through `workflowScript`/`workflowScriptPath`
-at all: that sandbox's `runs.run(key, { agent, task, worktree?, gate? })` has
-NO per-child `cwd`, so the reviewer would land in one shared directory — in
-practice your live worktree. The single reviewer is one top-level `subagent`
-call. This exists because it already happened: an entire session's
-reviewers ran in the live worktree. `record_review` therefore also demands
-evidence that the snapshot was ENTERED — the spawn the gate observed, or the
-`cwd` the reviewer reports in its verdict (measured with `pwd`, a required
-field of the verdict schema) — and withholds a READY for any snapshot with
-neither (`SNAPSHOT UNUSED`). A `cwd` that points anywhere else — including
-another repo's snapshot — is refused just as a missing one is: the check
-runs once over the UNION of every repo's open snapshots, so a multi-repo
-session may pin each reviewer to its own repo's snapshot, but while ANY
-snapshot is open no judge role runs unpinned. Decision logic:
-`lib/reviewer-spawn-guard.ts` (pure, truth-tabled).
+(c) **The reviewer judges a COMMIT RANGE, and findings stream.** Call
+`prepare_review` AFTER the checkpoint — it computes `baseline..HEAD` (the
+immutable commits under review) and a finding-stream file. Inside its own
+copy a reviewer SHOULD verify by doing — mutation analysis included — and
+must restore before finishing. Because the reviewed range is immutable,
+**you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
+that carry evidence (confirm each in the code first), leave Nits for the
+verdict. The verdict arrives through the done channel and wakes this
+session (`review_watch`); the reviewer may ask questions through its inbox.
+(d) **The judge child runs as a tmux pane — MECHANICALLY ENFORCED.**
+`review_spawn` creates a fresh pi process in a pane of the main session's
+tmux (right column, stacked below the first judge); a judge role dispatched
+through `subagent` / `workflowScript` / `workflowScriptPath` is HARD-blocked
+(the workflow sandbox has no per-child isolation, so the judge would land in
+one shared cwd — your live worktree, the exact failure this ends). The
+single reviewer is one `review_spawn` call per round. `record_review`
+withholds a READY unless the round was PREPARED (a registered
+`baseline..HEAD` target) and the verdict carries the pane's `cwd` (measured
+with `pwd`, a required field of the verdict schema). While a judge child is
+open, `declare_done` requires closing it out (`record_review` /
+`review_close`). No tmux available ⇒ fail-closed (no judge can run).
 
 ### Read-only exploration — parallel-safe
 
-Read-only subagents (recon, code reading, analysis, `adviser`) are
-inherently parallel-safe: they never write to the worktree, so they cannot
-invalidate a binding or race with each other. Spawn several concurrently,
-overlap exploration with your own edits, and merge the findings. Only the
-main agent writes to the worktree.
+Read-only subagents (recon, code reading, analysis) are inherently
+parallel-safe: they never write to the worktree, so they cannot invalidate
+a binding or race with each other. Spawn several concurrently, overlap
+exploration with your own edits, and merge the findings. Only the main
+agent writes to the worktree. (Adviser consultations run as tmux judge
+children, not subagents — see the review protocol above.)
 
 ### Wave daily — removed
 

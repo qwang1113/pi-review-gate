@@ -83,11 +83,12 @@ test("review prompt runs precommit FIRST and spawns the single reviewer (protoco
   );
   assert.doesNotMatch(prompt, /Do not run precommit unless the review becomes READY/,
     "the old concurrent-protocol sentence must be gone");
-  // ONE reviewer per round, spawned as its own top-level call with the snapshot cwd.
-  assert.match(prompt, /ONE reviewer subagent/,
+  // ONE reviewer per round, spawned as its own tmux judge child (2026-08-27
+  // model: judge roles are tmux children; subagent dispatch is hard-blocked).
+  assert.match(prompt, /ONE reviewer/,
     "exactly one reviewer per round");
-  assert.match(prompt, /OWN top-level subagent call carrying that cwd/,
-    "the reviewer must be a top-level call (per-child cwd)");
+  assert.match(prompt, /review_spawn/,
+    "the reviewer must be spawned as a tmux judge child");
   assert.doesNotMatch(prompt, /ALL IN THE SAME TURN \(async:true, never one after \s*the other\)/,
     "the two-reviewer serial/parallel framing must be gone");
 });
