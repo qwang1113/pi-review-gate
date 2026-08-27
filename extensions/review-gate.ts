@@ -3061,7 +3061,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       // since the last READY would otherwise leave the earlier one's content
       // outside every reviewed range while its tree still ships. The READY's
       // commitSha is used when it is an ancestor of HEAD (the normal chain);
-      // otherwise (rebase/force) fail closed with a clean error.
+      // a content-identical squash makes it disappear while the reviewed TREE
+      // still matches HEAD — that is the squash-survival promise (goal
+      // criterion 4), so fall through to the checkpoint baseline instead of
+      // failing; only a rewrite that CHANGED content (tree mismatch) fails
+      // closed here.
       const lastReviewed = st.review?.verdict === "READY" ? st.review.commitSha : undefined;
       let baseline: string | undefined;
       if (lastReviewed) {
@@ -3069,15 +3073,22 @@ export default function reviewGate(pi: ExtensionAPI) {
           execFileSync("git", ["merge-base", "--is-ancestor", lastReviewed, "HEAD"], { cwd: root, stdio: "ignore" });
           baseline = lastReviewed;
         } catch {
-          return {
-            content: [{
-              type: "text",
-              text: "review-gate: prepare_review rejected — the last READY's reviewed commit is not an ancestor of HEAD " +
-                `(${lastReviewed.slice(0, 12)}). History was rewritten since the review; checkpoint the new base and review again.`,
-            }],
-            details: { prepared: false },
-            isError: true,
-          };
+          const headTree = headCommitTree(root);
+          if (headTree && headTree !== st.review.fingerprint) {
+            return {
+              content: [{
+                type: "text",
+                text: "review-gate: prepare_review rejected — the last READY's reviewed commit is not an ancestor of HEAD " +
+                  `(${lastReviewed.slice(0, 12)}) and HEAD's tree differs from the reviewed tree. History was rewritten with new content; ` +
+                  "checkpoint the new base and review again.",
+              }],
+              details: { prepared: false },
+              isError: true,
+            };
+          }
+          // Tree matches (content-identical squash): the old chain is gone but
+          // the reviewed content is exactly what HEAD holds — baseline falls
+          // through to the checkpoint's parent below.
         }
       }
       if (!baseline) {
