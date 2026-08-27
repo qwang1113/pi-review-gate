@@ -257,6 +257,20 @@ export function paneAlive(paneId: string): boolean {
 }
 
 /**
+ * Is ANY of the given judge children alive? Pure over an injected liveness
+ * predicate (defaults to paneAlive) so the stall-breaker's motion check is
+ * testable without a tmux server. The fresh-age bound lives at the caller
+ * (spawnedAt vs STALL_MOTION_MAX_AGE_SEC) — a hung-but-alive pane must not
+ * count as motion forever (round-16 P2).
+ */
+export function anyPaneAlive(
+  children: ReadonlyArray<{ paneId: string }>,
+  isAlive: (paneId: string) => boolean = paneAlive,
+): boolean {
+  return children.some((c) => isAlive(c.paneId));
+}
+
+/**
  * Send ONE message to a pane: a single line of text plus Enter.
  *
  * SINGLE-LINE BY DESIGN (measured pitfall): pi's TUI treats an embedded

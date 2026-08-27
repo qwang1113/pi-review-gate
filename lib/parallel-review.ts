@@ -237,6 +237,14 @@ export function buildReviewPrompt(
   scopeKind?: "full" | "incremental",
   session?: { dir: string; id: string },
   precommitBaseline?: string,
+  /**
+   * The done channel the reviewer will signal (doneChannelFor(title)).
+   * Embedded so the child never has to GUESS the channel (round-16 P1: the
+   * protocol promises 'channel 由任务文本给出' but the task text did not
+   * carry it — the child guessed wrong and the main session was never
+   * woken).
+   */
+  doneChannel?: string,
 ): string {
   const streamPath = isolation?.streamPath;
   const range = isolation?.commitRange ?? "baseline..HEAD";
@@ -316,6 +324,12 @@ export function buildReviewPrompt(
     // eslint-disable-next-line max-len
     'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "cwd": "<your real pwd>", "docSync": "UPDATED"|"NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",
+    ...(doneChannel
+      ? [
+          "",
+          `完成信号(必须):当你完成本轮审核、输出最终 verdict 之后,运行 tmux wait-for -S ${doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
+        ]
+      : []),
   );
   return lines.join("\n");
 }

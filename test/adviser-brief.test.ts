@@ -26,6 +26,15 @@ test("first consultation: full brief with transcript pointer + artifact path", (
   assert.match(text, /No previous consultation exists/);
   // Nothing about a previous round is claimed.
   assert.doesNotMatch(text, /PREVIOUS consultation/);
+  assert.doesNotMatch(text, /完成信号/); // no channel → no signal instruction
+});
+
+test("round-16 P1: the done channel is embedded at the end of the brief", () => {
+  const text = buildAdviserBrief({ ...base, doneChannel: "rg-adviser-abc123-done" });
+  assert.match(text, /完成信号/);
+  assert.match(text, /tmux wait-for -S rg-adviser-abc123-done/);
+  // The instruction is at the END (after the artifact/output contract).
+  assert.ok(text.indexOf("tmux wait-for -S rg-adviser-abc123-done") > text.indexOf("artifact:"));
 });
 
 test("later consultation: previous verdict + points injected, changed files called out", () => {

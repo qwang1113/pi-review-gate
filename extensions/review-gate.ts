@@ -91,9 +91,10 @@ import {
   paneCurrentPath,
   capturePane,
   sendMessage,
+  anyPaneAlive,
   tmuxAvailable,
-  type WaitHandle,
 } from "../lib/tmux-session.ts";
+import { createWatchRegistry } from "../lib/judge-watch.ts";
 import {
   writeJudgeSpawnFiles,
   doneChannelFor,
@@ -797,7 +798,19 @@ export default function reviewGate(pi: ExtensionAPI) {
    * makes main-session polling unnecessary. Cancelled on session_shutdown so
    * a reload/resume never leaks a tmux wait-for process.
    */
-  const activeWatchers = new Map<string, WaitHandle>();
+  // The watcher registry (lib/judge-watch.ts) owns the handle map and the
+  // shutdown latch: a signal that resolves while session_shutdown is
+  // clearing the registry must not re-arm an orphan listener (round-16 Nit).
+  const watchRegistry = createWatchRegistry(
+    (channel) => waitForSignalAsync(channel),
+    (label, channel) => {
+      pi.sendMessage({
+        customType: "review-gate",
+        content: `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`,
+        display: true,
+      }, { triggerTurn: true, deliverAs: "steer" });
+    },
+  );
   /**
    * Judge child sessions spawned by review_spawn: repo root → children.
    * In-memory for now (persisted listing lands with the declare_done residual
@@ -840,22 +853,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * label keeps its label until the next signal.
    */
   function registerWatch(channel: string, label: string): void {
-    activeWatchers.get(channel)?.cancel();
-    const handle = waitForSignalAsync(channel);
-    activeWatchers.set(channel, handle);
-    handle.promise.then((signalled) => {
-      if (activeWatchers.get(channel) === handle) activeWatchers.delete(channel);
-      if (!signalled) return;
-      try {
-        pi.sendMessage({
-          customType: "review-gate",
-          content: `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`,
-          display: true,
-        }, { triggerTurn: true, deliverAs: "steer" });
-      } catch { /* the session may be shutting down — the listener is gone anyway */ }
-      // Re-arm for the NEXT round on the same pane (round-14 P1).
-      if (activeWatchers.get(channel) === undefined) registerWatch(channel, label);
-    });
+    watchRegistry.register(channel, label);
   }
   /** HEAD commit tree OID — the content-boundary every ship binding compares against (round-8 P1). */
   function headCommitTree(root: string): string {
@@ -1296,6 +1294,30 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Is a tmux judge child (reviewer / adviser / goal-auditor pane) still in
+   * flight? The stall breaker must not cut the loop off while a judge is
+   * working — its verdict is exactly what the unchanged signature is waiting
+   * for (round-16 P2: only subagentInMotion was consulted, so a waiting
+   * main session tripped the breaker with 'check provider status' while the
+   * reviewer was mid-round).
+   *
+   * Freshness bound like subagentInMotion's: a pane that has been alive
+   * since before STALL_MOTION_MAX_AGE_SEC is the HUNG case the breaker
+   * exists for, not motion (goal-auditor P2: alive-forever must not
+   * disable the breaker).
+   */
+  function judgeChildInMotion(): boolean {
+    const cutoff = Date.now() - STALL_MOTION_MAX_AGE_SEC * 1000;
+    const fresh = [...childSessions.values()]
+      .flat()
+      .filter((c) => {
+        const at = Date.parse(c.spawnedAt);
+        return Number.isFinite(at) && at >= cutoff;
+      });
+    return anyPaneAlive(fresh);
   }
 
   // ---------- user-visible output channels ----------
@@ -3038,11 +3060,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     async execute(_id, params, _signal) {
       const paneId = String(params.paneId ?? "");
       // P2 (round-6): cancel the child's done-channel listener so no wake
-      // fires for a dead pane, and no tmux wait-for process leaks.
       const child = [...childSessions.values()].flat().find((c) => c.paneId === paneId);
       if (child) {
-        activeWatchers.get(child.doneChannel)?.cancel();
-        activeWatchers.get(child.inboxChannel)?.cancel(); // round-7 Nit
+        watchRegistry.active.get(child.doneChannel)?.cancel();
+        watchRegistry.active.get(child.inboxChannel)?.cancel(); // round-7 Nit
       }
       const ok = killPane(paneId);
       for (const [root, list] of childSessions) {
@@ -3178,6 +3199,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         scopeNow.scope,
         { dir: sessionDirFor(ctx, cwd), id: st.sessionId ?? "unknown" },
         precommitBaselineFor(root, st),
+        // Round-16 P1: the done channel the reviewer will signal is EMBEDDED
+        // in the task text — the child never has to guess it, and the main
+        // session's listener (registered on the same derived channel) matches.
+        doneChannelFor(`review-${runId.slice(-6)}`),
       );
       // Register the review target: record_review verifies HEAD is still the
       // reviewed commit and binds a READY to the reviewed tree.
@@ -3186,9 +3211,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
         `stream=${streamPath}`,
         "Spawn the reviewer as a judge child (tmux pane), then send the task and register the wake-up:",
+        `- 建议 title: "review-${runId.slice(-6)}" → done channel: ${doneChannelFor(`review-${runId.slice(-6)}`)}（任务文本末尾已嵌入该 channel；请用此 title 调 review_spawn，监听即与子会话信号匹配）`,
         `- review_spawn({ role: "reviewer", title: "review-${runId.slice(-6)}", repo: "${root}" }) → returns paneId + doneChannel`,
         `- 把下面的任务文本写入文件，然后 review_send({ paneId, text: "读取 <task 文件> 并执行" })`,
         "- review_watch({ channel: <doneChannel> })  ← 完成信号到达时本会话会被主动唤醒",
+        "  (review_spawn 已自动注册该监听;review_watch 仅用于自定义 label 重新注册)",
         "",
         "--- task text ---",
         task,
@@ -3363,10 +3390,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(previous ? { previous } : {}),
         changedFiles,
         ...(goalText ? { goalText } : {}),
+        // Round-16 P1: the done channel is EMBEDDED in the brief so the
+        // adviser never guesses it; spawn with the suggested title below.
+        doneChannel: doneChannelFor(`adviser-${goalHash.slice(0, 6)}`),
       });
+      const adviserTitle = `adviser-${goalHash.slice(0, 6)}`;
       return {
-        content: [{ type: "text", text: `adviser brief ready (${previous ? "incremental" : "full"}):\n\n${brief}` }],
-        details: { incremental: !!previous, artifactPath, changedFiles },
+        content: [{ type: "text", text:
+          `adviser brief ready (${previous ? "incremental" : "full"}):\n` +
+          `- 建议 title: "${adviserTitle}" → done channel: ${doneChannelFor(adviserTitle)}（brief 末尾已嵌入该 channel；请用此 title 调 review_spawn）\n\n${brief}` }],
+        details: { incremental: !!previous, artifactPath, changedFiles, title: adviserTitle, doneChannel: doneChannelFor(adviserTitle) },
       };
     },
   });
@@ -3411,10 +3444,17 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(prev?.draft ? { prevDraft: prev.draft } : {}),
         sessionDir: sessionDirFor(ctx, cwd),
         sessionId: st.sessionId ?? "unknown",
+        // Round-16 P1: the done channel is EMBEDDED in the task text so the
+        // auditor never guesses it; spawn with the suggested title below and
+        // the listener (doneChannelFor) matches the signal.
+        doneChannel: doneChannelFor(`goal-audit-${newHash.slice(0, 6)}`),
       });
+      const auditTitle = `goal-audit-${newHash.slice(0, 6)}`;
       return {
-        content: [{ type: "text", text: `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n\n${taskText}` }],
-        details: { reaudit: !!carryover, hash: newHash.slice(0, 12) },
+        content: [{ type: "text", text:
+          `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n` +
+          `- 建议 title: "${auditTitle}" → done channel: ${doneChannelFor(auditTitle)}（任务文本末尾已嵌入该 channel；请用此 title 调 review_spawn）\n\n${taskText}` }],
+        details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle, doneChannel: doneChannelFor(auditTitle) },
       };
     },
   });
@@ -5475,7 +5515,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // will produce does not exist yet. Cutting the loop off there would
       // orphan the very review the gate is waiting for, so observable work in
       // flight counts as motion — until it is too old to be believable.
-      { inMotion: subagentInMotion() },
+      { inMotion: subagentInMotion() || judgeChildInMotion() },
     );
     loopStall = stall;
     if (stall.stalled) {
@@ -5539,6 +5579,10 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd ?? process.cwd();
+    // A new session may register watchers again — session_shutdown latched
+    // the registry shut (round-16 Nit); the latch must not survive into
+    // the resumed/reloaded session or its wake-ups would never arm.
+    watchRegistry.reset();
     // (Snapshot sessions were retired 2026-08-27: judge roles run as tmux
     // child processes that never load this extension, so no inert-session
     // special-case is needed — there is nothing to make inert.)
@@ -5696,9 +5740,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     disarmUiRefreshTimer();
     // Cancel every background channel listener — a reloaded/resumed session
     // must not keep tmux wait-for processes alive, and a stale listener
-    // would wake the NEW session about an OLD child.
-    for (const handle of activeWatchers.values()) handle.cancel();
-    activeWatchers.clear();
+    // would wake the NEW session about an OLD child. The registry latches
+    // shutdown so a signal already in flight cannot re-arm an orphan
+    // listener (round-16 Nit); session_start calls reset().
+    watchRegistry.shutdown();
     // Judge children are tmux panes — they survive the session by design
     // (the human can see and interrupt them), so shutdown only drops the
     // registry, not the panes. A fresh session rebuilds it on demand.

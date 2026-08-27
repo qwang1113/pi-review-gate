@@ -33,6 +33,26 @@ test("buildReviewPrompt names the changed files and sets the COMMIT contract", (
   assert.match(prompt, /docSync is REQUIRED on the single-review path/);
   assert.match(prompt, /criterion 1: tests pass/);
   assert.match(prompt, /READY.*BLOCKED.*NEEDS_HUMAN/);
+  assert.doesNotMatch(prompt, /完成信号/); // no channel → no signal instruction
+});
+
+test("round-16 P1: the done channel is embedded at the end of the reviewer task", () => {
+  const prompt = buildReviewPrompt(
+    "review",
+    ["src/a.ts"],
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    "rg-review-abc123-done",
+  );
+  assert.match(prompt, /完成信号/);
+  assert.match(prompt, /tmux wait-for -S rg-review-abc123-done/);
+  // The instruction is at the END (after the OUTPUT/verdict contract).
+  assert.ok(prompt.indexOf("tmux wait-for -S rg-review-abc123-done") > prompt.indexOf("Verdict shape"));
 });
 
 test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no isolation is READ-ONLY", () => {

@@ -120,6 +120,11 @@ export interface AdviserBriefInput {
   changedFiles: string[] | null;
   /** The approved loop goal this consultation argues against, when approved. */
   goalText?: string;
+  /**
+   * The done channel the adviser will signal (doneChannelFor(title)).
+   * Embedded so the child never has to GUESS the channel (round-16 P1).
+   */
+  doneChannel?: string;
 }
 
 /**
@@ -187,6 +192,12 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
     "  the next consultation, which is fail-closed, not silent.",
     "",
     "OUTPUT: your recommendation in prose first, then the JSON line above (copy it into the artifact).",
+    ...(input.doneChannel
+      ? [
+          "",
+          `完成信号(必须):当你完成本轮咨询、输出最终结论之后,运行 tmux wait-for -S ${input.doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
+        ]
+      : []),
   );
   return lines.join("\n");
 }

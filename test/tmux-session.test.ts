@@ -15,6 +15,7 @@ import {
   MAX_SESSION_NAME,
   TMUX_SESSION_PREFIX,
   capturePane,
+  anyPaneAlive,
   hostInTmux,
   killPane,
   killSession,
@@ -65,6 +66,21 @@ test("TMUX_SESSION_PREFIX keeps gate sessions identifiable", () => {
 
 test("hostInTmux reflects the environment", () => {
   assert.equal(typeof hostInTmux(), "boolean");
+});
+
+test("anyPaneAlive: any live child counts as motion, injected predicate (round-16 P2)", () => {
+  const kids = [{ paneId: "%1" }, { paneId: "%2" }];
+  // One live child ⇒ motion (the stall breaker must not trip while a
+  // judge pane is mid-round).
+  assert.equal(anyPaneAlive(kids, (id) => id === "%1"), true);
+  // All dead ⇒ no motion.
+  assert.equal(anyPaneAlive(kids, () => false), false);
+  // Empty registry ⇒ no motion.
+  assert.equal(anyPaneAlive([], () => true), false);
+  // Default predicate = the real paneAlive: exercising it needs a live
+  // Default predicate = the real paneAlive; an empty list never calls it
+  // (so this is safe without a tmux server) yet still yields false.
+  assert.equal(anyPaneAlive([], paneAlive), false);
 });
 
 const integration = test("tmux integration: pane spawn→send→signal→capture→kill", { skip: !tmuxAvailable() }, async () => {

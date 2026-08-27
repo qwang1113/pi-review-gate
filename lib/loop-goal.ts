@@ -219,6 +219,14 @@ export function buildGoalAuditTask(
     prevDraft?: string;
     sessionDir?: string;
     sessionId?: string;
+    /**
+     * The done channel the auditor will signal (doneChannelFor(title)).
+     * Embedded so the child never has to GUESS the channel (round-16 P1:
+     * the protocol promises 'channel 由任务文本给出' but the task text
+     * did not carry it — the child guessed wrong and the main session was
+     * never woken).
+     */
+    doneChannel?: string;
   } = {},
 ): string {
   const lines = [
@@ -254,6 +262,12 @@ export function buildGoalAuditTask(
     '{"gate":"READY"|"BLOCKED","findings":[{"severity":"P0"|"P1"|"P2","issue":"..."}]}',
     '```',
     "READY 仅当草稿无未解决 P0/P1 异议。findings 为空表示无异议。",
+    ...(opts.doneChannel
+      ? [
+          "",
+          `完成信号(必须):当你完成本轮审计、输出最终 verdict 之后,运行 tmux wait-for -S ${opts.doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
+        ]
+      : []),
   ];
   return lines.join("\n");
 }

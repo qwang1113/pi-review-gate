@@ -1370,15 +1370,25 @@ test("review_watch: the wake-up listener is registered with triggerTurn semantic
   // never polling, never sleeping on the agent side.
   const helperAt = SRC.indexOf("function registerWatch(");
   assert.ok(helperAt >= 0, "registerWatch helper must exist");
-  const helper = SRC.slice(helperAt, helperAt + 1800);
-  assert.match(helper, /waitForSignalAsync/, "listens on the child's done channel");
-  assert.match(helper, /triggerTurn: true/, "wakes an idle session");
-  assert.match(helper, /deliverAs: "steer"/, "delivered as a steer");
-  assert.match(helper, /activeWatchers/, "per-channel registry");
+  const helper = SRC.slice(helperAt, helperAt + 400);
+  assert.match(helper, /watchRegistry\.register\(channel, label\)/,
+    "the helper delegates to the watch registry (lib/judge-watch.ts)");
+  // The registry is wired with the REAL tmux waiter and the pi wake: the
+  // wait + wake + re-arm logic lives in lib/judge-watch.ts (pinned
+  // behaviorally by test/judge-watch.test.ts), the extension only binds the
+  // runtime pieces.
+  const registryAt = SRC.indexOf("createWatchRegistry(");
+  assert.ok(registryAt >= 0, "createWatchRegistry must exist");
+  const registry = SRC.slice(registryAt, registryAt + 900);
+  assert.match(registry, /waitForSignalAsync/, "listens on the child's done channel");
+  assert.match(registry, /triggerTurn: true/, "wakes an idle session");
+  assert.match(registry, /deliverAs: "steer"/, "delivered as a steer");
   // Round-14 P1: the listener must RE-ARM after a signal — the judge pane is
   // reused across rounds, so a one-shot listener leaves rounds 2..N silent
-  // while the docs promise wake-ups without review_watch calls.
-  assert.match(helper, /registerWatch\(channel, label\);/,
+  // while the docs promise wake-ups without review_watch calls. The re-arm
+  // (and the round-16 shutdown latch) live in lib/judge-watch.ts.
+  const watchLib = readFileSync(join(ROOT, "lib", "judge-watch.ts"), "utf8");
+  assert.match(watchLib, /register\(channel, label\);/,
     "the listener re-arms itself for the next round on the same pane");
   const spawnAt = SRC.indexOf('name: "review_spawn"');
   const spawnBody = SRC.slice(spawnAt, spawnAt + 6000);
@@ -1388,7 +1398,14 @@ test("review_watch: the wake-up listener is registered with triggerTurn semantic
   const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
   assert.ok(shutdownAt >= 0);
   const shutdown = SRC.slice(shutdownAt, shutdownAt + 1200);
-  assert.match(shutdown, /activeWatchers/, "shutdown cancels the background listeners");
+  assert.match(shutdown, /watchRegistry\.shutdown\(\)/,
+    "shutdown cancels the background listeners via the registry");
+  // Round-16 Nit: shutdown latches the registry; a resumed session must be
+  // able to arm watchers again (session_start calls reset()).
+  const startAt = SRC.indexOf('pi.on("session_start"');
+  assert.ok(startAt >= 0);
+  assert.match(SRC.slice(startAt, startAt + 600), /watchRegistry\.reset\(\)/,
+    "a new session re-opens watcher registration");
 });
 
 test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", () => {
