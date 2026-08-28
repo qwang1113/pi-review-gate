@@ -3318,7 +3318,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // killing the pane alone relies on tmux's SIGHUP reaching pi, and a
       // wrapper that has already exited leaves nothing to hang up. Closing the
       // pane afterwards is the backstop (and what removes the screen).
-      const terminated = child ? terminateJudgeSession({ pidPath: child.pidPath }) : { signalled: false };
+      const terminated = child
+        ? terminateJudgeSession({ pidPath: child.pidPath, exitCodePath: child.exitCodePath })
+        : { signalled: false };
       const ok = killPane(paneId);
       for (const [root, list] of childSessions) {
         childSessions.set(root, list.filter((c) => c.paneId !== paneId));

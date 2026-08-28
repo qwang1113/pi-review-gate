@@ -200,14 +200,25 @@ export function readStderrTail(stderrPath: string, maxLines = 20): string | unde
  * leader and pi runs as its CHILD, so signalling the pid alone kills the
  * wrapper and leaves pi orphaned. Negative pid = the whole group.
  *
- * Best-effort by contract: an already-finished session (no pid file, dead pid,
- * unsignalable group) is a SUCCESSFUL no-op — closing a judge twice must not
- * fail (idempotence is what `review_close` promises).
+ * A FINISHED SESSION IS NEVER SIGNALLED (round-1 P1, reviewer). `exit-code`
+ * means the wrapper already returned, so that pid no longer belongs to us —
+ * and the OS may well have handed it to somebody else. Signalling its group
+ * then kills an unrelated process tree. This is the same rule
+ * `readJudgeSessionState` follows (exit-code wins over a live pid); applying
+ * it in only one of the two places is what made the pair unsound.
+ *
+ * Best-effort by contract: an already-finished session (recorded exit code,
+ * no pid file, dead pid, unsignalable group) is a SUCCESSFUL no-op — closing
+ * a judge twice must not fail (idempotence is what `review_close` promises).
  */
 export function terminateJudgeSession(
-  paths: Pick<JudgeSessionPaths, "pidPath">,
+  paths: Pick<JudgeSessionPaths, "pidPath"> & Partial<Pick<JudgeSessionPaths, "exitCodePath">>,
   kill: (target: number, signal: NodeJS.Signals) => void = (t, s) => process.kill(t, s),
 ): { signalled: boolean; pid?: number } {
+  // Finished ⇒ nothing of ours is left running; the pid is not ours to signal.
+  if (paths.exitCodePath !== undefined && readTrimmed(paths.exitCodePath) !== undefined) {
+    return { signalled: false };
+  }
   const rawPid = readTrimmed(paths.pidPath);
   if (rawPid === undefined || !/^\d+$/.test(rawPid)) return { signalled: false };
   const pid = Number(rawPid);

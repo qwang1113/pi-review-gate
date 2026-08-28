@@ -227,6 +227,13 @@ export function paneWindowLabel(pane: string | undefined): string | undefined {
  */
 export function spawnJudgePane(opts: SpawnPaneOptions): SpawnPaneResult {
   const title = `${TMUX_SESSION_PREFIX}${safeSessionName(opts.title)}`;
+  // `target` may name a session, a window or a pane — but an EMPTY one is not
+  // "no preference", it is "the user's active pane" as far as tmux is
+  // concerned, and the split would land in whatever window they are watching.
+  if (opts.target !== undefined && opts.target.trim() === "") {
+    return { ok: false, error: "spawnJudgePane: empty target — refusing to split the user's active pane" };
+  }
+
   try {
     // NO RETENTION OPTION IS SET HERE — deliberately (2026-08-28).
     //
@@ -329,6 +336,25 @@ function rememberJudgePane(paneId: string): void {
 }
 
 /**
+ * A tmux pane id is `%<digits>` — and NOTHING else may reach a `-t` flag.
+ *
+ * THE INCIDENT THIS PREVENTS (2026-08-28, measured on a throwaway server).
+ * `tmux send-keys -t "" -l hello` does NOT fail: an empty target means "no
+ * target given", so tmux delivers to the server's ACTIVE pane — whichever
+ * window the USER happens to be looking at. A judge child ran exactly that
+ * (its shell variable had come out empty) and typed `hello` into the user's
+ * unrelated session, which then submitted it as a real message.
+ *
+ * An empty or malformed pane id must therefore never be handed to tmux and
+ * quietly turned into "the user's current pane". Writes fail loudly, reads
+ * report a pane that does not exist — both are safe; delivering it somewhere
+ * else is not.
+ */
+export function isPaneId(paneId: unknown): paneId is string {
+  return typeof paneId === "string" && /^%\d+$/.test(paneId);
+}
+
+/**
  * Does a pane with this id still EXIST?
  *
  * PANE EXISTENCE IS THE WHOLE TEST (2026-08-28). The judge panes carry no
@@ -343,6 +369,7 @@ function rememberJudgePane(paneId: string): void {
  * the shell that happens to display it.
  */
 export function paneAlive(paneId: string): boolean {
+  if (!isPaneId(paneId)) return false; // never let a bad id resolve to the user's pane
   const res = tmuxSync(["display-message", "-p", "-t", paneId, "#{pane_id}"], 10_000);
   return res.status === 0 && res.stdout.trim() === paneId;
 }
@@ -376,6 +403,11 @@ export function anyPaneAlive(
  * literal, so the word "Enter" would be typed as text (measured).
  */
 export function sendMessage(paneId: string, text: string): boolean {
+  // A WRITE to a bad target is the dangerous case: tmux would deliver it to
+  // whatever pane the user is looking at (measured). Fail loudly instead.
+  if (!isPaneId(paneId)) {
+    throw new Error(`sendMessage: refusing to send to an invalid pane id ${JSON.stringify(paneId)} — tmux would deliver it to the user's active pane`);
+  }
   if (text.includes("\n") || text.includes("\r")) {
     throw new Error("sendMessage: multi-line text would be shredded by pi's TUI — write it to a file and reference the file in a single line instead");
   }
@@ -387,6 +419,9 @@ export function sendMessage(paneId: string, text: string): boolean {
 
 /** Send raw key names (e.g. "C-c") — for interrupting a stuck child. */
 export function sendRawKeys(paneId: string, keys: string): boolean {
+  if (!isPaneId(paneId)) {
+    throw new Error(`sendRawKeys: refusing to send to an invalid pane id ${JSON.stringify(paneId)} — tmux would deliver it to the user's active pane`);
+  }
   const res = tmuxSync(["send-keys", "-t", paneId, keys], 10_000);
   return res.status === 0;
 }
@@ -398,6 +433,7 @@ export interface CaptureOptions {
 
 /** Read the pane's current visible text (plus optional scrollback). */
 export function capturePane(paneId: string, opts: CaptureOptions = {}): string | undefined {
+  if (!isPaneId(paneId)) return undefined; // reading the user's pane is not "capture"
   const args = ["capture-pane", "-p", "-t", paneId];
   if (opts.history && opts.history > 0) args.push("-S", `-${opts.history}`);
   const res = tmuxSync(args, 15_000);
@@ -410,6 +446,7 @@ export function capturePane(paneId: string, opts: CaptureOptions = {}): string |
  * comparisons must canonicalize on both sides.
  */
 export function paneCurrentPath(paneId: string): string | undefined {
+  if (!isPaneId(paneId)) return undefined;
   const res = tmuxSync(["display-message", "-p", "-t", paneId, "#{pane_current_path}"], 10_000);
   if (res.status !== 0) return undefined;
   const out = res.stdout.trim();
@@ -418,6 +455,8 @@ export function paneCurrentPath(paneId: string): string | undefined {
 
 /** Kill a judge pane. Best-effort; false when it was already gone. */
 export function killPane(paneId: string): boolean {
+  // A kill aimed at "" would close the pane the USER is looking at.
+  if (!isPaneId(paneId)) return false;
   const res = tmuxSync(["kill-pane", "-t", paneId], 10_000);
   return res.status === 0;
 }
@@ -497,8 +536,10 @@ export function killSession(name: string): boolean {
 
 /**
  * Block until the child signals completion via `tmux wait-for -S <channel>`.
- * Returns true when the signal arrived, false on timeout (callers then check
- * paneAlive / capturePane to decide whether the child is slow or dead).
+ * Returns true when the signal arrived, false on timeout — on timeout the
+ * caller asks the child's SESSION whether it finished (`exit-code` / `pid`
+ * via lib/judge-session.ts), never the pane: the signal is an accelerator,
+ * and a child that ended without signalling took its pane with it.
  * Synchronous on purpose for tool handlers; extension background listeners
  * should use waitForSignalAsync instead (round-1 F12: spawnSync would block
  * the whole extension process for the full timeout).

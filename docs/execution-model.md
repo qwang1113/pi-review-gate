@@ -41,13 +41,18 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   `tmux display-message -p -t <新paneId> '#{window_id}'` 等于**本会话自己的
   window**而不是被聚焦的那个；做完把焦点还回去。**这个实验是唯一的端到端
   证伪手段，必须人工跑**：`test/tmux-session.test.ts` 里的自动化部分是
-  **源码文本 pin**（断言 split-window / set-option 带 `-t`、所有
+  **源码文本 pin**（断言 split-window 带 `-t`、**不存在**任何
+  `set-option … remain-on-exit`、所有
   display-message 带 `-t`、ownPaneId 两条解析路径存在）加一个真 tmux 下的
   ownPaneId 集成用例；模块内的 tmux 执行器不可注入，所以祖先链回退路径未被
   自动化覆盖。
   2026-08-28 实测：用户聚焦 `@39/@4`，新 judge pane 落在本会话的 `@365` —— 通过。
 - `split-window -d`：新 pane 不抢焦点。
-- pane id（`%N`）是显示句柄：send/capture 按 pane id。
+- pane id（`%N`）是显示句柄：send/capture 按 pane id。**pane id 必须匹配
+  `^%\d+$`，否则一律拒绝**（`isPaneId`）：`tmux send-keys -t ""` 不会报错，
+  而是投递到**服务器当前聚焦的 pane**——2026-08-28 实测，一个 judge 子会话
+  的探针脚本因 `$pane` 为空，把 `hello` 打进了用户另一个无关会话并被提交。
+  写操作（send）抛错，读操作（capture/alive/kill）视为 pane 不存在。
 - 主会话不在 tmux 内时降级为独立 session（同样不设任何保留选项）。
 - **pane 只是壳子，被管理的是 pi 会话**（2026-08-28，用户要求）：不再设置
   `remain-on-exit`。该选项是 **window 级**的，为 judge 设置会连带影响

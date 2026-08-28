@@ -41,6 +41,7 @@
 import { chmodSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { AgentsConfigMap } from "./model-config.ts";
 import { extractFrontmatterChain, resolvePackageAgentsDir } from "./model-config.ts";
@@ -330,10 +331,24 @@ export function writeJudgeSpawnFiles(input: JudgeSpawnInput): JudgeSpawnFiles {
   writeFileSync(launcherPath, launcher, "utf8");
   try { chmodSync(launcherPath, 0o755); } catch { /* best-effort */ }
 
-  const sessionDir = join(workDir, "sessions");
-  const pidPath = join(workDir, "pid");
-  const exitCodePath = join(workDir, "exit-code");
-  const stderrPath = join(workDir, "stderr.log");
+  // ONE DIRECTORY PER RUN — never a shared one (round-1 P1, reviewer).
+  //
+  // These artifacts ARE the session's state, and `exit-code` in particular is
+  // read as "this session finished". A second spawn under the same title
+  // (fresh:true, a re-dispatched auditor) would inherit the previous run's
+  // exit-code and be classified as finished before it drew its first frame —
+  // reproduced by the reviewer. A stale transcript is the same trap one level
+  // down: a child that crashes before writing anything would hand back the
+  // PREVIOUS run's verdict.
+  //
+  // Clearing the files would be a race (the old judge may still be writing);
+  // a fresh directory cannot collide, and it keeps the previous run readable.
+  const runDir = join(workDir, "runs", `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}`);
+  mkdirSync(runDir, { recursive: true });
+  const sessionDir = join(runDir, "sessions");
+  const pidPath = join(runDir, "pid");
+  const exitCodePath = join(runDir, "exit-code");
+  const stderrPath = join(runDir, "stderr.log");
 
   const env: Record<string, string> = {
     RG_SP_FILE: sysPromptPath,

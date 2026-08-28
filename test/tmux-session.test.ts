@@ -17,6 +17,7 @@ import {
   capturePane,
   anyPaneAlive,
   hostInTmux,
+  isPaneId,
   killPane,
   killSession,
   paneAlive,
@@ -212,6 +213,40 @@ const integration = test("tmux integration: pane spawn→send→signal→capture
     killSession(sess);
     rmSync(work, { recursive: true, force: true });
   }
+});
+
+/**
+ * THE "hello" INCIDENT (user report, 2026-08-28).
+ *
+ * A judge child ran `tmux send-keys -t "$pane" -l hello` with `$pane` empty.
+ * tmux does not reject an empty target — it treats it as "no target" and
+ * delivers to the server's ACTIVE pane, so the text was typed into the USER's
+ * unrelated session and submitted there as a real message. Verified on a
+ * throwaway server: `send-keys -t ""` returns rc=0 and lands on the focused
+ * pane.
+ *
+ * Every pane entry point must therefore refuse a non-`%<digits>` id: writes
+ * throw, reads report "no such pane". None of them may reach tmux.
+ */
+test("pane operations refuse an empty or malformed pane id (never the user's active pane)", () => {
+  const bad = ["", "   ", "%", "%1a", "abc", "sess:0.1", "0", "-t"];
+  for (const id of bad) {
+    assert.equal(isPaneId(id), false, `${JSON.stringify(id)} is not a pane id`);
+    // Reads degrade to "this pane does not exist" — they never query tmux.
+    assert.equal(paneAlive(id), false, `paneAlive(${JSON.stringify(id)})`);
+    assert.equal(capturePane(id), undefined, `capturePane(${JSON.stringify(id)})`);
+    assert.equal(paneCurrentPath(id), undefined, `paneCurrentPath(${JSON.stringify(id)})`);
+    assert.equal(killPane(id), false, `killPane(${JSON.stringify(id)})`);
+    // Writes fail LOUDLY: a silently misdelivered keystroke is the incident.
+    assert.throws(() => sendMessage(id, "hello"), /invalid pane id/, `sendMessage(${JSON.stringify(id)})`);
+    assert.throws(() => sendRawKeys(id, "C-c"), /invalid pane id/, `sendRawKeys(${JSON.stringify(id)})`);
+  }
+  assert.equal(isPaneId("%0"), true);
+  assert.equal(isPaneId("%106"), true);
+  // An empty spawn target would split whatever window the user is watching.
+  const spawned = spawnJudgePane({ title: "t", cwd: process.cwd(), command: "true", target: "" });
+  assert.equal(spawned.ok, false);
+  assert.match(spawned.error ?? "", /empty target/);
 });
 
 const dyingPane = test("tmux integration: a finished judge takes its pane with it, and the window stays clean (user ask 2026-08-28)", { skip: !tmuxAvailable() }, async () => {
