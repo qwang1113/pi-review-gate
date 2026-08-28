@@ -22,13 +22,18 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 /** The well-known bell channel. Content-free by design — payload is in the file. */
 export const ATTENTION_CHANNEL = "rg-user-attention";
-/** Same (repo, reason) is published at most once per window. */
+/**
+ * An UNHANDLED (repo, reason) is published at most once per window. Once a
+ * listener has consumed the event, a new publish is allowed immediately — by
+ * design: the spam this throttle exists to stop is the same unanswered request
+ * ringing over and over, and a consumed event means somebody was already told.
+ */
 export const ATTENTION_THROTTLE_MS = 60_000;
 /** An unhandled event stops waking anybody after this long. */
 export const ATTENTION_TTL_MS = 10 * 60_000;
@@ -78,6 +83,10 @@ export function sideEffectsEnabled(
 ): boolean {
   if (env.RG_NO_SIDE_EFFECTS === "1") return false;
   if (env.NODE_ENV === "test") return false;
+  // Round-17 P2 (reviewer, measured): `node --test` does NOT set NODE_ENV — it
+  // sets NODE_TEST_CONTEXT ("child-v8"/"top-level"), so the NODE_ENV branch
+  // alone left test silence resting on the incidental isTTY check.
+  if (env.NODE_TEST_CONTEXT) return false;
   if (env.CI) return false;
   if (!env.TMUX) return false;
   return isTTY === true;
@@ -112,7 +121,15 @@ function saveEvents(events: AttentionEvent[], deps: AttentionDeps): void {
     }
     const path = deps.statePath ?? defaultStatePath();
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, raw);
+    // Round-17 Nit (reviewer): write ATOMICALLY. The bell wakes every listener
+    // at once, so concurrent read-modify-writes overlap; a torn file used to
+    // parse as empty and silently drop pending events. rename(2) within the
+    // same directory is atomic, so a reader sees either the old or the new
+    // file, never a half-written one. (A duplicate wake remains possible —
+    // acceptable for a convenience channel; losing events was not.)
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, raw);
+    renameSync(tmp, path);
   } catch {
     /* best-effort: attention is a convenience, never a gate */
   }

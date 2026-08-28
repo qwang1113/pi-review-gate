@@ -93,12 +93,11 @@ import {
   sendMessage,
   anyPaneAlive,
   tmuxAvailable,
-  signalChannel,
   ownPaneId,
   paneWindowLabel,
 } from "../lib/tmux-session.ts";
 import { createWatchRegistry } from "../lib/judge-watch.ts";
-import { attentionText, consumeAttention, publishAttention, sideEffectsEnabled } from "../lib/attention.ts";
+import { ATTENTION_CHANNEL, attentionText, consumeAttention, publishAttention, sideEffectsEnabled } from "../lib/attention.ts";
 import {
   writeJudgeSpawnFiles,
   doneChannelFor,
@@ -808,7 +807,21 @@ export default function reviewGate(pi: ExtensionAPI) {
   // session registers a listener on it at session_start (re-arm semantics
   // like registerWatch), so an observer session is woken instead of having
   // to poll panes.
-  const USER_ATTENTION_CHANNEL = "rg-user-attention";
+  // Round-17 P2 (reviewer): ONE definition of the channel name. The publisher
+  // (lib/attention.ts defaultSignal) and this listener must never be able to
+  // drift apart — a rename here used to split the bell from its listener with
+  // nothing failing.
+  const USER_ATTENTION_CHANNEL = ATTENTION_CHANNEL;
+
+  /**
+   * Who WE are for the self-wake filter. Round-17 Nit (reviewer): a shared
+   * "unknown-session" fallback made two id-less hosts look like the SAME
+   * session, so each would silently swallow the other's events. The pid is
+   * unique per process, which is exactly the granularity the filter needs.
+   */
+  function attentionIdentity(): string {
+    return state.sessionId ?? `unknown-${process.pid}`;
+  }
 
   /**
    * Cross-session attention (round-17 P0 rewrite). The bell is content-free,
@@ -823,7 +836,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     try {
       const pane = ownPaneId();
       publishAttention({
-        fromSessionId: state.sessionId ?? "unknown-session",
+        fromSessionId: attentionIdentity(),
         fromPane: pane,
         fromWindow: paneWindowLabel(pane),
         repo: repo ?? cwd,
@@ -844,7 +857,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // payload and stay SILENT for our own / already handled / expired
         // events — otherwise this session wakes itself in a loop while the
         // message claims another session needs the user (measured).
-        const event = consumeAttention(state.sessionId ?? "unknown-session");
+        const event = consumeAttention(attentionIdentity());
         if (!event) return;
         content = `[review-gate] 需要用户介入 — ${attentionText(event)}（去该窗口批准/回答）。`;
       } else if (inbox) {

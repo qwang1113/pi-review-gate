@@ -234,8 +234,12 @@ must restore before finishing. Because the reviewed range is immutable,
 that carry evidence (confirm each in the code first), leave Nits for the
 verdict. WAITING-WINDOW DISCIPLINE (v3): (1) 有可实现的确定性工作(代码/测试/
 文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后
-才阻塞等待——bash 里 `tmux wait-for <doneChannel>`(turn 不结束;macOS 无
-timeout 时用轮询变体 `while ! tmux wait-for -t 5 <chan>; do :; done`);
+才阻塞等待——bash 里 `tmux wait-for <doneChannel>`,**不加任何标志**,用 bash
+工具自己的 `timeout` 参数做上限(turn 不结束)。`tmux wait-for` **没有
+`-t` 超时选项**：`wait-for -t 5 <chan>` 会以 `unknown flag -t` 在 7ms 内
+报错返回，包成 `while ! tmux wait-for -t 5 <chan>; do :; done` 就是空转
+轮询(实测:120 次循环共 0.5s,看上去像等了 10 分钟实则没等);
+无标志的 `tmux wait-for <chan>` 才真阻塞(实测 3.015s 等到信号)。
 (3) 兜底:必须结束 turn 时,registerWatch 唤醒与 RESUME 都会拉起你——那
 不算错误,但空转应避免。
 The verdict arrives through the done channel and wakes this

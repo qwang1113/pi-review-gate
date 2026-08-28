@@ -209,8 +209,11 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    **Waiting-window discipline (v3)**:
    1. 有可实现的确定性工作(代码/测试/文档/其他 repo 事务)→ 优先做掉,不要进入等待。
    2. 确认没有任何可做的工作后,才进入阻塞等待——bash 里 `tmux wait-for
-      <doneChannel>`(turn 不结束;macOS 无 timeout 命令时用轮询变体
-      `while ! tmux wait-for -t 5 <chan>; do :; done`)。
+      <doneChannel>`，**不加任何标志**，用 bash 工具自己的 `timeout` 参数
+      做上限(turn 不结束)。⚠️ `tmux wait-for` **没有 `-t` 超时选项**：
+      `wait-for -t 5 <chan>` 以 `unknown flag -t` 在 7ms 内报错返回，所以
+      `while ! tmux wait-for -t 5 <chan>; do :; done` 是空转轮询，不是等待
+      (实测:120 次循环共 0.5s)；无标志形式才真阻塞(实测 3.015s)。
    3. 兜底:若必须结束 turn(如工具超时限制),门禁的唤醒(registerWatch)与
       RESUME 都会拉起你——那不算错误,但空转应避免。
    无论哪种方式,不要 sleep 或轮询 pane 屏幕;有流式 P0/P1/P2 时边等边修

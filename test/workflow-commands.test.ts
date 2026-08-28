@@ -184,3 +184,20 @@ test("the review-loop skill keeps the single-review contract self-contained", ()
   assert.doesNotMatch(skill, /lib\/plan-state\.ts/, "the schema authority module is gone in the single-review protocol");
   assert.doesNotMatch(skill, /prepare_wave|plan-parallel|wave daily|\/decompose/, "no wave/decompose path remains");
 });
+
+test("the waiting discipline never teaches a `tmux wait-for -t` timeout (there is none)", () => {
+  // Measured 2026-08-28: `tmux wait-for -t 5 <chan>` fails with `unknown flag
+  // -t` in ~7ms, so the polling variant the docs used to recommend was a BUSY
+  // LOOP that only LOOKED like waiting (120 iterations in 0.5s). The flagless
+  // form is the one that blocks (measured 3.015s until the signal).
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  for (const rel of [["skills", "review-loop", "SKILL.md"], ["AGENTS.md"]]) {
+    const text = readFileSync(join(root, ...rel), "utf8");
+    const bad = text.match(/tmux wait-for -t \d/g) ?? [];
+    const inWarning = /没有\s*\*{0,2}\s*`?-t`?\s*超时选项/.test(text);
+    if (bad.length > 0) {
+      assert.ok(inWarning, `${rel.join("/")} mentions \`wait-for -t\` — only allowed as the documented WARNING`);
+    }
+    assert.match(text, /tmux wait-for\s+<(doneChannel|chan)>/, `${rel.join("/")} keeps the flagless blocking form`);
+  }
+});

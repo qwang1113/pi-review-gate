@@ -90,6 +90,12 @@ test("(d) test / non-interactive hosts produce NO external side effect", () => {
   assert.equal(sideEffectsEnabled(tty, false), false, "not a TTY (headless pi -p)");
   assert.equal(sideEffectsEnabled({}, true), false, "no tmux");
   assert.equal(sideEffectsEnabled(tty, true), true, "interactive tmux host publishes");
+  // Round-17 P2 (reviewer, measured): `node --test` sets NODE_TEST_CONTEXT, NOT
+  // NODE_ENV — without this branch the suite's silence rested on isTTY alone.
+  assert.equal(sideEffectsEnabled({ ...tty, NODE_TEST_CONTEXT: "child-v8" }, true), false, "node --test child");
+  assert.equal(sideEffectsEnabled({ ...tty, NODE_TEST_CONTEXT: "top-level" }, true), false, "node --test top level");
+  // And the real runtime this very test executes in must be silent:
+  assert.equal(sideEffectsEnabled(process.env, true), false, "THIS test process may not fire side effects");
 });
 
 test("(e) wake text and notification carry origin + repo + reason", () => {
@@ -111,4 +117,26 @@ test("the state file keeps a bounded, JSON-parseable history", () => {
   const events = h.state().events;
   assert.ok(events.length <= 20, `history is bounded (got ${events.length})`);
   assert.ok(events.every((e) => typeof e.id === "string" && typeof e.createdAt === "string"));
+});
+
+test("the REAL state file is written atomically and round-trips through publish/consume", async () => {
+  // Round-17 Nit (reviewer): the bell wakes every listener at once, so
+  // read-modify-writes overlap; a torn file used to parse as empty and drop
+  // pending events. rename(2) makes a reader see the old or the new file only.
+  const { mkdtempSync, readdirSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "rg-attention-"));
+  const statePath = join(dir, "nested", "state.json");
+  const deps = { statePath, sideEffects: () => true, signal: () => {}, notify: () => {} };
+
+  const pub = publishAttention({ ...input, fromSessionId: OTHER }, deps);
+  assert.equal(pub.status, "sent");
+  assert.deepEqual(readdirSync(join(dir, "nested")), ["state.json"], "no .tmp file is left behind");
+  JSON.parse(readFileSync(statePath, "utf8"));
+
+  assert.equal(consumeAttention(OTHER, deps), undefined, "still filters our own events through the real file");
+  const got = consumeAttention(SELF, deps);
+  assert.equal(got?.reason, input.reason, "another session reads the payload back from disk");
+  assert.equal(consumeAttention(SELF, deps), undefined, "the handled mark survived the write");
 });

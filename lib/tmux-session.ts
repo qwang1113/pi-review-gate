@@ -212,18 +212,12 @@ export function paneWindowLabel(pane: string | undefined): string | undefined {
   return out === "" ? undefined : out;
 }
 
-/**
- * Best-effort signal on a well-known channel (round-17 user ask: the
- * cross-session user-attention channel rg-user-attention). The SIGNALLER
- * side must never block or throw: a missing listener is the normal case —
- * `tmux wait-for -S <chan>` with no waiter just exits. Timeout stays short
- * so a wedged tmux server cannot stall a dialog.
+/*
+ * (round-17) `signalChannel` was removed with the attention rewrite: the only
+ * caller published a BARE broadcast, which is exactly what caused the self-wake
+ * loop. Signalling now belongs to lib/attention.ts, where the bell always
+ * carries a payload and passes the sideEffectsEnabled() gate.
  */
-export function signalChannel(channel: string): void {
-  try {
-    tmuxSync(["wait-for", "-S", channel], 5_000);
-  } catch { /* best-effort — no listener is fine */ }
-}
 
 /**
  * Create a judge pane in the main session's current window: right column for

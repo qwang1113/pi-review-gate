@@ -1297,9 +1297,17 @@ test("round-17: cross-session user-attention is signalled on dialogs/pauses and 
   const fnAt = SRC.indexOf("function notifyUserAttention(");
   assert.ok(fnAt > 0, "notifyUserAttention must exist");
   const fn = SRC.slice(fnAt, fnAt + 900);
-  assert.match(SRC, /const USER_ATTENTION_CHANNEL = "rg-user-attention";/, "the fixed cross-session channel");
+  // Round-17 P2 (reviewer): the channel name has ONE definition — the extension
+  // listens on exactly the constant lib/attention.ts signals, so a rename can
+  // never split the bell from its listener.
+  assert.match(SRC, /const USER_ATTENTION_CHANNEL = ATTENTION_CHANNEL;/, "the channel comes from the publisher's own constant");
+  assert.doesNotMatch(SRC, /USER_ATTENTION_CHANNEL = "rg-user-attention"/, "no duplicated literal");
   assert.match(fn, /publishAttention\(\{/, "the event goes through the payload publisher");
-  assert.match(fn, /fromSessionId: state\.sessionId/, "the payload identifies the sender (self-wake filter)");
+  assert.match(fn, /fromSessionId: attentionIdentity\(\)/, "the payload identifies the sender (self-wake filter)");
+  // Round-17 Nit (reviewer): two id-less hosts must not share one identity, or
+  // each would swallow the other's events as "its own".
+  assert.match(SRC, /function attentionIdentity\(\): string \{[\s\S]{0,120}unknown-\$\{process\.pid\}/,
+    "an id-less host still gets a UNIQUE identity");
   assert.match(fn, /fromWindow: paneWindowLabel\(pane\)/, "the payload carries the origin window label");
   assert.match(fn, /reason,/, "the payload carries the reason");
   assert.doesNotMatch(fn, /osascript/, "notification delivery belongs to lib/attention.ts, behind its guards");
@@ -1328,7 +1336,7 @@ test("round-17: cross-session user-attention is signalled on dialogs/pauses and 
   const regAt = SRC.indexOf("createWatchRegistry(");
   const reg = SRC.slice(regAt, regAt + 1600);
   assert.match(reg, /channel === USER_ATTENTION_CHANNEL/, "attention wakes carry their own message");
-  assert.match(reg, /const event = consumeAttention\(state\.sessionId/, "the listener reads the payload");
+  assert.match(reg, /const event = consumeAttention\(attentionIdentity\(\)\)/, "the listener reads the payload with the SAME identity the publisher stamps");
   assert.match(reg, /if \(!event\) return;/, "our own / handled / expired events wake nobody");
   assert.match(reg, /\$\{attentionText\(event\)\}/, "the wake text carries origin + repo + reason");
 });
