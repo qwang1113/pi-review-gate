@@ -80,8 +80,9 @@ criterion and three lines:
 
 **Pre-review the draft goal (MECHANICAL, goal-auditor).** Before you
 submit a goal for approval, call `prepare_goal_audit` with the draft to get the ready-made
-auditor task (it carries the previous audit's carryover + draft delta on a re-audit), dispatch
-the dedicated `goal-auditor` subagent (read-only; see `agents/goal-auditor.md`) with that task,
+auditor task (it carries the previous audit's carryover + draft delta on a re-audit), spawn
+the dedicated `goal-auditor` as a tmux judge child via `review_spawn` (read-only; see
+`agents/goal-auditor.md`) with that task,
 then record its FULL raw output with `record_goal_prereview`. The extension parses the auditor's JSON
 fence itself and `propose_loop_goal` REFUSES to show the user's approval dialog
 unless a PASS is recorded for the IDENTICAL text (bound by content hash). A

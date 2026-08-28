@@ -65,7 +65,8 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
 
 - **Precommit first**: `run_precommit` (fast lane for intermediates, full for
   the final round) must PASS before the reviewer runs.
-- **Isolation + streaming**: the reviewer holds a frozen copy, so the main
+- **Immutability + streaming**: the reviewer judges a COMMIT RANGE (immutable
+  git history), so the main
   agent keeps fixing the real worktree from streamed findings (confirm each in
   the code first; leave Nits for the verdict).
 - **Commit target is mechanical** (2026-08-27): judge-role subagent dispatch
@@ -88,9 +89,10 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
 
 - Binding, fail-closed, fingerprint, verdict/docSync parsing, receipt
   validation: **zero changes** (structural tests pin this).
-- Single-writer: the MAIN WORKTREE has exactly one writer — the main agent. Each reviewer sits in its OWN disposable snapshot worktree and restores it before finishing.
-- No engine anywhere: reviews run as plain subagents; the pdw engine was
-  retired entirely.
+- Single-writer: the MAIN WORKTREE has exactly one writer — the main agent. The reviewer judges an immutable commit range and, when it needs to run something, checks that range out into its OWN throwaway worktree.
+- No engine anywhere: reviews run as tmux judge children (their own pi
+  processes); the pdw engine was retired entirely, and judge-role subagent
+  dispatch is hard-blocked.
 - Verdicts only from L3.
 
 ## 7. Parallel-stability verification

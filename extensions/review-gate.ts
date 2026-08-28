@@ -3734,7 +3734,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         content: [{ type: "text", text:
           `adviser brief ready (${previous ? "incremental" : "full"}):\n` +
           `- 建议 title: "${adviserTitle}" → done channel: ${doneChannelFor(adviserTitle)},inbox: ${adviserInboxPath} (channel ${adviserInboxChannel})（brief 末尾已嵌入 done channel 与 inbox 提问指令）\n` +
-          `- 可选:review_watch({ channel: "${adviserInboxChannel}", label: "${adviserTitle}-inbox" }) 注册提问接收端\n` +
+          `- 提问接收端已由 review_spawn 自动注册(channel ${adviserInboxChannel});子会话发问时本会话会被唤醒\n` +
           "- 等待纪律:咨询期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于咨询结果的事才等。\n" +
           (goalTruncated ? `- 注意:brief 中的 loop goal 因长度被截断;落盘 task 文件时请用 read 读取 ${pathJoin(target.root, LOOP_GOAL_RELPATH)} 全文替换截断部分。\n` : "") +
           `\n${brief}` }],
@@ -3798,7 +3798,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         content: [{ type: "text", text:
           `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n` +
           `- 建议 title: "${auditTitle}" → done channel: ${doneChannelFor(auditTitle)},inbox: ${auditInboxPath} (channel ${auditInboxChannel})（任务文本末尾已嵌入 done channel 与 inbox 提问指令）\n` +
-          `- 可选:review_watch({ channel: "${auditInboxChannel}", label: "${auditTitle}-inbox" }) 注册提问接收端\n` +
+          `- 提问接收端已由 review_spawn 自动注册(channel ${auditInboxChannel});子会话发问时本会话会被唤醒\n` +
           "- 等待纪律:审计期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于审计结果的事才等。\n\n" +
           `${taskText}` }],
         details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle, doneChannel: doneChannelFor(auditTitle), inboxChannel: auditInboxChannel },

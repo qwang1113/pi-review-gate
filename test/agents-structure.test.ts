@@ -390,8 +390,14 @@ test("REGRESSION: isolation + streaming are documented in every protocol surface
   const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
   assert.match(commands, /prepare_review/);
   assert.match(commands, /never poll in a tight loop|no polling/i);
-  // And the design record no longer contradicts the implementation.
+  // And the design record no longer contradicts the implementation. The
+  // single-writer rule survived the model change; the SNAPSHOT it used to be
+  // phrased in terms of did not (2026-08-27: the reviewer judges an immutable
+  // commit range and uses a throwaway worktree only when it runs something).
   const plan = readFileSync(join(ROOT, "docs", "parallel-execution-plan.md"), "utf8");
   assert.match(plan, /MAIN WORKTREE has exactly one writer/i);
-  assert.match(plan, /own disposable snapshot worktree/i);
+  assert.match(plan, /immutable commit range/i,
+    "the boundary is stated in terms of the CURRENT model");
+  assert.doesNotMatch(plan, /reviewer sits in its OWN disposable snapshot/i,
+    "the retired snapshot phrasing must not come back as current guidance");
 });

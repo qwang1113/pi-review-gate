@@ -1216,7 +1216,8 @@ test("goal criterion 3: prepare_adviser is registered and hands back a brief wit
     "the brief embeds the inbox path");
   assert.match(body, /建议 title: \"\$\{adviserTitle\}\"/, "the output names the suggested title");
   assert.match(body, /inboxChannelFor\(adviserTitle\)/, "the inbox channel derives from the same title");
-  assert.match(body, /review_watch\(\{ channel: \"\$\{adviserInboxChannel\}\"/, "the output suggests registering the inbox receiver");
+  assert.match(body, /提问接收端已由 review_spawn 自动注册/,
+    "the output says the inbox receiver is already registered (review_spawn does it)");
   // Round-17 P2: pinning the WORDS "等待纪律" alone let a wrong claim survive
   // (that edits do not depend on goal approval — pre-approval edits are hard
   // blocked). Pin the corrected substance instead.
@@ -1247,7 +1248,8 @@ test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor tas
     "the task embeds the inbox path");
   assert.match(body, /建议 title: \"\$\{auditTitle\}\"/, "the output names the suggested title");
   assert.match(body, /inboxChannelFor\(auditTitle\)/, "the inbox channel derives from the same title");
-  assert.match(body, /review_watch\(\{ channel: \"\$\{auditInboxChannel\}\"/, "the output suggests registering the inbox receiver");
+  assert.match(body, /提问接收端已由 review_spawn 自动注册/,
+    "the output says the inbox receiver is already registered (review_spawn does it)");
   assert.match(body, /等待纪律/, "the waiting discipline is part of the auditor flow");
   assert.match(body, /第一次 goal 批准前编辑\/写工具仍被门禁拦截,属预期/,
     "the pre-approval reality is stated, not the refuted claim");

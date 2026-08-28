@@ -29,7 +29,7 @@ bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 你：实现分页功能
 agent：调 set_gate_mode("loop")
   → 问你目标（一次一题，N of M）→ 用简体中文起草目标
-  → 调 prepare_goal_audit 取任务文本 → 派 goal-auditor 子代理预审该草案 → record_goal_prereview 记录其裁决
+  → 调 prepare_goal_audit 取任务文本 → review_spawn 开 goal-auditor tmux 子会话预审该草案 → record_goal_prereview 记录其裁决
      （不通过就改草案重审；没有匹配的 PASS 就**不会弹任何对话框**骚扰你）
   → propose_loop_goal 弹窗让你批准（窗中会显示“goal-auditor 预审: PASS @ …”）
   → 改代码
