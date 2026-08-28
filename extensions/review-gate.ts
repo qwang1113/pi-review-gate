@@ -3353,6 +3353,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       const inboxPath = pathJoin(root, ".pi", "tmux-sessions", `rg-${reviewTitle}`, "inbox.jsonl");
       const inboxChannel = inboxChannelFor(reviewTitle);
       const scopeNow = reviewScopeFor(root, st);
+      // Round-18 polish gate: persist a supplied reason BEFORE building the
+      // task, so the reviewer of THIS round sees the reason that authorized it.
+      if (polish.required && (params.reason ?? "").trim()) {
+        st.lastPolishReason = {
+          reason: (params.reason ?? "").trim(),
+          at: new Date().toISOString(),
+          round: st.rounds.length + 1,
+        };
+        persistRepo(ctx as unknown as ExtensionContext, root);
+      }
       const task = buildReviewPrompt(
         "review",
         files,
@@ -3377,16 +3387,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         // reviewer, who judges whether the round deserves to exist.
         st.lastPolishReason,
       );
-      // Round-18: a supplied reason is PERSISTED — the next round's reviewer
-      // sees it even if this round never completes.
-      if (polish.required && (params.reason ?? "").trim()) {
-        st.lastPolishReason = {
-          reason: (params.reason ?? "").trim(),
-          at: new Date().toISOString(),
-          round: st.rounds.length + 1,
-        };
-        persistRepo(ctx as unknown as ExtensionContext, root);
-      }
       // Register the review target: record_review verifies HEAD is still the
       // reviewed commit and binds a READY to the reviewed tree.
       reviewTargets.set(root, { baseline, head, tree });
@@ -4175,10 +4175,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       for (const root of sessionRepos) {
         const st = root === primaryRepoRoot ? state : stateForRepo(root);
         st.rounds = [];
+        st.lastPolishReason = undefined;
         st.strategicResetFired = false;
         if (root !== primaryRepoRoot) persistRepo(ctx as unknown as ExtensionContext, root);
       }
       state.rounds = [];
+      state.lastPolishReason = undefined;
       state.strategicResetFired = false;
       // P1 fix: the L2 auto-continuation budget must reset with the task too.
       // continuationsInjected is capped against maxRounds in agent_settled; if
@@ -5699,8 +5701,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (problems.length === 0 && completion.length === 0) return;
     // Budgets are checked per source: gate problems against maxRounds,
     // completion-only continuations against their own cap.
-    if (problems.length > 0 && continuationsInjected >= state.maxRounds) return;
-    if (problems.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP) return;
 
     // USER REQUIREMENT: the user aborted this run (ESC — "Operation aborted").
     // Injecting a continuation would override an explicit human stop, so the
@@ -5744,8 +5744,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (childSnapshots.length > 0) {
       const childVerdict = classifyChildren(childSnapshots, Date.now());
       const childNotice = buildChildWaitNotice(childVerdict, doneChannelsByPane);
-      if (childNotice && Date.now() - lastChildNoticeAt >= CHILD_NOTICE_MIN_MS) {
-        lastChildNoticeAt = Date.now();
+      const notifyNow = childVerdict.terminated.length > 0 || Date.now() - lastChildNoticeAt >= CHILD_NOTICE_MIN_MS;
+      if (childNotice && notifyNow) {
+        // A terminal child is never throttled: recovery must happen even when
+        // the review continuation budget is exhausted or another notice fired
+        // moments ago. Only a genuinely in-flight child is rate-limited.
+        if (childVerdict.terminated.length === 0) lastChildNoticeAt = Date.now();
         pi.sendUserMessage(
           `[REVIEW_GATE_CHILD_${childVerdict.terminated.length > 0 ? "ENDED" : "HOST_WAIT"}] ${childNotice}\n\n` +
           (childVerdict.terminated.length > 0
@@ -5756,6 +5760,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         return;
       }
     }
+    // Review-round budget is checked AFTER the child watchdog above. A child
+    // may already be dead or silent even when the continuation cap is reached;
+    // the main session must still inspect its output and recover instead of
+    // returning to idle before the independent termination判据 run.
+    if (problems.length > 0 && continuationsInjected >= state.maxRounds) return;
+    if (problems.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP) return;
 
     // L2 circuit breaker: an unmet gate justifies another turn only while
     // something is still MOVING. When the fingerprint, both verdicts, the round
@@ -5847,15 +5857,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the registry shut (round-16 Nit); the latch must not survive into
     // the resumed/reloaded session or its wake-ups would never arm.
     watchRegistry.reset();
-    // Round-18 (user ask): DIRECTED attention — listen ONLY on our own
-    // channel (the one our children publish to). A session with no id has no
-    // address and registers nothing. P0 guard: EVERY external side effect —
-    // listener included — goes through the one sideEffectsEnabled() predicate
-    // (interactive tmux host, not a test/CI/headless run).
-    const attentionChannel = myAttentionChannel();
-    if (attentionChannel && sideEffectsEnabled()) {
-      watchRegistry.register(attentionChannel, "子会话用户注意");
-    }
     // (Snapshot sessions were retired 2026-08-27: judge roles run as tmux
     // child processes that never load this extension, so no inert-session
     // special-case is needed — there is nothing to make inert.)
@@ -5884,6 +5885,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
     state.sessionId = sessionId;
+    // Round-18 (user ask): DIRECTED attention — register only after the
+    // session id is restored, otherwise myAttentionChannel() is undefined
+    // and a real parent-directed wake would be missed on startup/resume.
+    const attentionChannel = myAttentionChannel();
+    if (attentionChannel && sideEffectsEnabled()) {
+      watchRegistry.register(attentionChannel, "子会话用户注意");
+    }
 
     // Per-project overrides (sd0x-dev-flow R6): maxRounds is clamped to [3,50]
     // by the loader, so a forged config cannot make the cap unreachable.

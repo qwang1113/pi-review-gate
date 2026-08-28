@@ -230,6 +230,39 @@ test("pausedQuestion: malformed shapes fail toward NOT paused (loop stays armed)
     assert.equal(loaded?.pausedQuestion, undefined, JSON.stringify(bad));
   }
 });
+test("round-18 polish fields round-trip and malformed values are dropped", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const s = emptyState("s", 10);
+  s.rounds = [{
+    round: 1, findingsTotal: 1, fingerprints: [], verdict: "READY", at: "t",
+    polishFiles: ["src/a.ts"], blockingFiles: ["src/b.ts"],
+  }];
+  s.lastPolishReason = { reason: "修复该文件的重复 P2", at: "t", round: 2 };
+  writeFileSync(path, JSON.stringify(s));
+  const loaded = loadSidecar(path)!;
+  assert.deepEqual(loaded.rounds[0]?.polishFiles, ["src/a.ts"]);
+  assert.deepEqual(loaded.rounds[0]?.blockingFiles, ["src/b.ts"]);
+  assert.deepEqual(loaded.lastPolishReason, s.lastPolishReason);
+  for (const bad of [
+    { ...s, lastPolishReason: "bad" },
+    { ...s, lastPolishReason: { reason: 1, at: "t", round: 1 } },
+    { ...s, rounds: [{ ...s.rounds[0]!, polishFiles: "bad" }] },
+    { ...s, rounds: [{ ...s.rounds[0]!, blockingFiles: [1] }] },
+  ]) {
+    writeFileSync(path, JSON.stringify(bad));
+    const sanitized = loadSidecar(path)!;
+    assert.ok(sanitized);
+    if (typeof bad.lastPolishReason !== "object" || bad.lastPolishReason === null || typeof (bad.lastPolishReason as { reason?: unknown }).reason !== "string") {
+      assert.equal(sanitized.lastPolishReason, undefined, "malformed reason is dropped");
+    } else {
+      assert.deepEqual(sanitized.lastPolishReason, s.lastPolishReason);
+    }
+    assert.equal(typeof sanitized.rounds[0]?.polishFiles === "string", false);
+    assert.equal(Array.isArray(sanitized.rounds[0]?.blockingFiles) && typeof sanitized.rounds[0]?.blockingFiles[0] === "number", false);
+  }
+});
+
 
 test("pausedQuestion NEVER affects the ship authority (tighten-only invariant)", () => {
   // A pause only relaxes auto-continuation; unmetRequirements must be blind

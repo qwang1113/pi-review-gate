@@ -1319,7 +1319,7 @@ test("round-18: attention is DIRECTED — a child publishes to its parent's chan
   // LISTEN side: session_start registers OUR OWN channel (absent when the
   // session has no id), still behind the ONE sideEffectsEnabled() predicate.
   const startAt = SRC.indexOf('pi.on("session_start"');
-  const startBody = SRC.slice(startAt, startAt + 1200);
+  const startBody = SRC.slice(startAt, startAt + 5000);
   assert.match(startBody, /myAttentionChannel\(\)/, "session_start derives our own attention channel");
   assert.match(startBody, /watchRegistry\.register\(attentionChannel, "子会话用户注意"\)/,
     "session_start listens ONLY on our own channel");
@@ -1667,7 +1667,7 @@ test("waiting for Copilot spends its OWN continuation budget, not the review loo
   assert.match(SRC, /let completionContinuations = 0/);
   assert.match(SRC, /COMPLETION_CONTINUATION_CAP/);
   const settledStart = SRC.indexOf('pi.on("agent_settled"');
-  const body = SRC.slice(settledStart, settledStart + 4000);
+  const body = SRC.slice(settledStart, settledStart + 9000);
   assert.match(body, /problems\.length > 0 && continuationsInjected >= state\.maxRounds/);
   assert.match(body, /problems\.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP/);
 });
