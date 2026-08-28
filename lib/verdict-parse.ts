@@ -23,11 +23,14 @@ export interface ParsedVerdict {
   /**
    * The directory the reviewer says it ran in (its own `pwd`), verbatim.
    *
-   * Carried through so the GATE can check it. The verdict schema and the task
-   * text both promise that check, and until round-9 nothing performed it: a
-   * fence claiming any cwd at all parsed to the same READY (reviewer-
-   * reproduced with `/evil/elsewhere`). Identity evidence nobody verifies is
-   * worse than none, because it is believed.
+   * Carried through so the GATE can check it against the repo the round was
+   * prepared for. The schema and the task text both state that check, and
+   * until round-9 nothing performed it: a fence claiming any cwd at all parsed
+   * to the same READY (reviewer-reproduced with `/evil/elsewhere`). A stated
+   * check that does not run is worse than none, because it is believed.
+   *
+   * This parser does not judge the value — it is self-reported, and weighing
+   * it is the gate's job.
    */
   cwd?: string;
 }
@@ -38,7 +41,17 @@ interface FenceVerdict {
   findingFingerprints: string[];
   hasP0P1: boolean;
   docSync?: DocSyncAttestation;
-  cwd?: string;
+  cwd: string | undefined;
+  /**
+   * Sticky: two fences reported DIFFERENT directories somewhere in this fold.
+   *
+   * Needed because `undefined` alone is ambiguous — it means both "nobody
+   * reported one" and "the reports contradicted". `worse()` folds pairwise, so
+   * without this flag a later agreeing fence resurrects a cwd that an earlier
+   * contradiction had already destroyed (measured: /evil, /repo, /repo folded
+   * back to /repo). A contradiction never un-happens.
+   */
+  cwdConflict: boolean;
 }
 
 const SEVERITY: Record<string, number> = { BLOCKED: 3, NEEDS_HUMAN: 2, READY: 1 };
@@ -49,13 +62,15 @@ function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
   if (!a) return b;
   const bWorse = SEVERITY[b.verdict] > SEVERITY[a.verdict];
   if (bWorse) return b;
+  const cwdConflict = a.cwdConflict || b.cwdConflict ||
+    (a.cwd !== undefined && b.cwd !== undefined && a.cwd !== b.cwd);
   // Equal severity: merge — accumulate findings and hasP0P1. docSync and cwd
   // merge conservatively: agreeing fences keep the value, disagreeing fences
   // drop it (absent blocks under enforcement — fail-closed on contradiction).
   //
   // cwd MUST be merged, not dropped: the reviewer protocol explicitly allows
   // repeating the identical verdict first and last (agents/reviewer.md), and
-  // rebuilding without the field turned that honest habit into a CWD PROOF
+  // rebuilding without the field turned that honest habit into a CWD CHECK
   // FAILED — a gate that punishes the format it recommends.
   return {
     verdict: a.verdict,
@@ -63,13 +78,16 @@ function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
     findingFingerprints: [...a.findingFingerprints, ...b.findingFingerprints],
     hasP0P1: a.hasP0P1 || b.hasP0P1,
     docSync: a.docSync === b.docSync ? a.docSync : undefined,
-    // Only a CONTRADICTION destroys the proof. A fence that simply omits cwd
+    // Only a CONTRADICTION destroys the report. A fence that simply omits cwd
     // (a terse opening fence before the full one, say) contradicts nothing, so
     // it must not erase the value the other fence did report — that would be
     // the same false rejection this merge exists to prevent.
-    cwd: a.cwd !== undefined && b.cwd !== undefined && a.cwd !== b.cwd
-      ? undefined
-      : a.cwd ?? b.cwd,
+    //
+    // The conflict is STICKY (see cwdConflict): folding is pairwise, so a
+    // contradiction that is only remembered as `undefined` gets overwritten by
+    // the next agreeing fence.
+    cwd: cwdConflict ? undefined : a.cwd ?? b.cwd,
+    cwdConflict,
   };
 }
 
@@ -104,7 +122,15 @@ function recoverFenceVerdict(body: string): FenceVerdict | undefined {
   if (!verdict) return undefined;
   // Salvaged READY is untrustworthy (possible hidden P0/P1) → downgrade.
   const safeVerdict = verdict === "READY" ? "BLOCKED" : verdict;
-  return { verdict: safeVerdict, findingsTotal: null, findingFingerprints: [], hasP0P1: false };
+  // No cwd is recovered ON PURPOSE: this body is malformed, untrusted text.
+  // A loose regex "recovering" a directory from it would manufacture the very
+  // evidence the check is meant to weigh, out of the input we trust least. It
+  // costs an honest reviewer nothing — a salvaged READY is already downgraded
+  // above, and the cwd check only runs on READY.
+  return {
+    verdict: safeVerdict, findingsTotal: null, findingFingerprints: [],
+    hasP0P1: false, cwd: undefined, cwdConflict: false,
+  };
 }
 
 /**
@@ -206,7 +232,11 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
   const cwdRaw = obj.cwd;
   const cwd = typeof cwdRaw === "string" && cwdRaw.trim() !== "" ? cwdRaw.trim() : undefined;
 
-  return { verdict, findingsTotal, findingFingerprints: fingerprints, hasP0P1, docSync, cwd };
+  // cwdConflict starts false: a single fence cannot contradict itself.
+  return {
+    verdict, findingsTotal, findingFingerprints: fingerprints, hasP0P1, docSync,
+    cwd, cwdConflict: false,
+  };
 }
 
 /**

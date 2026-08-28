@@ -345,15 +345,16 @@ export function buildReviewPrompt(
   lines.push(
     "",
     "OUTPUT: fenced JSON verdict FIRST (the gate parses it; docSync is REQUIRED on the single-review path), then a prose review below the fence.",
-    // The reviewer's own `pwd` is EVIDENCE, and only if it is measured: a value
-    // copied out of this prompt would prove nothing about where the review
-    // actually happened, which is precisely the failure this field exists for.
+    // The prompt asks for a MEASURED `pwd`, not one copied out of this text —
+    // a copied value says nothing about where the review actually happened,
+    // and only a measured one makes the check below meaningful.
     //
-    // BOTH branches say the gate compares it, because since round-9 it
-    // actually does — `record_review` matches the reported cwd against the
-    // repo the judge child was spawned in and downgrades a READY that cannot
-    // prove where it ran. Telling the reviewer otherwise on one branch would
-    // be the same class of lie this field exists to catch.
+    // BOTH branches make the same promise, because since round-9 the gate
+    // really does compare it: `record_review` checks the reported cwd against
+    // the repo THIS ROUND WAS PREPARED FOR and downgrades a READY that reports
+    // something else. (That is all it does — see the `cwd` field's doc
+    // comment.) Telling the reviewer otherwise on one branch would be the same
+    // class of lie this field exists to catch.
     'Before you answer, run `pwd` and put its output in the verdict\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
       " The gate matches it against the repo this round was prepared for" +
       (isolation

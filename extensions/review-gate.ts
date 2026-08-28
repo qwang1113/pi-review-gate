@@ -1738,12 +1738,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
 
     if (event.toolName !== "bash") return;
-    // The L1 ship gate runs in EVERY session that loads this extension. A
-    // judge child does not load it at all (see session_start), but any
-    // throwaway worktree it creates is a linked worktree sharing the real
-    // .git — so if such a session ever did load the gate, a `git push` from
-    // it would trip the fail-closed sidecar-less check below, which is
-    // exactly what should happen.
+    // L1 (the ship gate). What actually gates it is right below: `normal` mode
+    // and an active `/gate-bypass` both return BEFORE any ship detection, so
+    // "this session loads the extension" is not by itself enough — do not
+    // claim otherwise here (round-12 P1: the previous rewrite did, and /tmp
+    // sessions are clamped to normal, making the claim plainly false).
     const command = typeof input.command === "string" ? input.command : "";
     if (!command) return;
 
@@ -3888,7 +3887,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // canonicalPath exists for exactly this: /var vs /private/var would
           // otherwise withhold an honest reviewer's READY.
           if (canonicalPath(claimed) !== canonicalPath(targetRoot)) {
-            cwdMismatch = `the verdict's cwd ${JSON.stringify(claimed)} is not the repo the judge was spawned in (${targetRoot})`;
+            cwdMismatch = `the verdict's cwd ${JSON.stringify(claimed)} is not the repo this round was prepared for (${targetRoot})`;
           }
         }
         if (cwdMismatch) parsed.verdict = "BLOCKED";

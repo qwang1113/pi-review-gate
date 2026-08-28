@@ -294,13 +294,32 @@ test("cwd survives equal-severity aggregation, and contradictions drop it", () =
   assert.equal(parseReviewOutput(`${terse}\n${fence("/repo")}`).cwd, "/repo", "terse first");
   assert.equal(parseReviewOutput(`${fence("/repo")}\n${terse}`).cwd, "/repo", "terse last");
   assert.equal(parseReviewOutput(`${terse}\n${terse}`).cwd, undefined, "nobody reported one");
+
+  // A contradiction never un-happens. Folding is PAIRWISE, so remembering it
+  // only as `undefined` let the next agreeing fence resurrect the value:
+  // /evil + /repo + /repo folded back to "/repo" — the contradiction, washed
+  // out by repetition. It must survive from ANY position in the sequence.
+  for (const [label, fences] of [
+    ["first", [fence("/evil"), fence("/repo"), fence("/repo")]],
+    ["middle", [fence("/repo"), fence("/evil"), fence("/repo")]],
+    ["last", [fence("/repo"), fence("/repo"), fence("/evil")]],
+  ] as Array<[string, string[]]>) {
+    assert.equal(parseReviewOutput(fences.join("\n")).cwd, undefined,
+      `a contradiction in ${label} position must stick`);
+  }
+  // …while three genuinely agreeing fences still keep it.
+  assert.equal(
+    parseReviewOutput([fence("/repo"), terse, fence("/repo")].join("\n")).cwd,
+    "/repo",
+    "agreement interrupted by silence is still agreement",
+  );
 });
 
 /**
  * Round-11 P2 (reviewer-measured): a fence whose JSON is broken falls to the
  * salvage path, which recovers ONLY the gate word — no cwd. That is correct
  * and must stay correct: salvage reads untrusted, malformed text, so a loose
- * regex "recovering" a cwd from it would manufacture identity evidence out of
+ * regex "recovering" a cwd from it would fabricate a report out of
  * exactly the input we trust least. It costs no honest reviewer anything,
  * because a salvaged READY is already downgraded before the cwd check runs.
  */
@@ -308,7 +327,7 @@ test("salvage recovers the gate word but never a cwd", () => {
   const broken = '```json\n{"gate":"READY","cwd":"/repo","notes":"he said "hi" there"}\n```';
   const salvaged = parseReviewOutput(broken);
   assert.equal(salvaged.verdict, "BLOCKED", "a salvaged READY is downgraded — pre-existing rule");
-  assert.equal(salvaged.cwd, undefined, "malformed text must not become identity evidence");
+  assert.equal(salvaged.cwd, undefined, "malformed text must not become a reported cwd");
 });
 
 /**
