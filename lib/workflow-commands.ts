@@ -39,32 +39,32 @@ function withInvocation(base: string, invocation: WorkflowInvocation): string {
 
 export const WORKFLOW_COMMANDS = {
   review: {
-    description: "Review current changes with the enforced independent review loop (one reviewer, one snapshot; no engine)",
+    description: "Review current changes with the enforced independent review loop (one reviewer, one commit range; no engine)",
     usage: "/review [focus]",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Execute the review loop for the current worktree changes. Each round is ONE independent reviewer over the WHOLE change, run as a plain subagent " +
-      "(NOT the pdw engine — it discards a per-agent cwd, so a reviewer could never hold its own snapshot of the change it judges). " +
+      "Execute the review loop for the current worktree changes. Each round is ONE independent reviewer over the WHOLE change, run as a tmux judge child " +
+      "(NOT a subagent — judge-role subagent dispatch is hard-blocked; NOT the pdw engine, which is retired). " +
       "AUTONOMOUS PROTOCOL: you run this loop on your own whenever code/doc edits are complete and need the gate — this command is only an explicit trigger; " +
       "do not wait for the user to call it before reviewing your own finished work. " +
       "Steps: (0) FIRST run the trusted precommit lane — `run_precommit` (fast for an intermediate round, full for the final round before shipping) — and " +
       "confirm it PASSES before spending the expensive judge's time: a FAIL is cheaper to fix before the review, and the reviewer must never be the " +
-      "first one to find a test failure. (1) then call prepare_review: it materializes ONE disposable WRITABLE snapshot of the change and returns " +
-      "the reviewer's snapshot cwd, finding-stream path, file list and ready-made task text — one reviewer per round. " +
-      "(2) spawn ONE reviewer subagent as its OWN top-level subagent call carrying that cwd — the gate BLOCKS a reviewer spawn that names no snapshot, and " +
-      "blocks reviewers dispatched through workflowScript/workflowScriptPath entirely (that sandbox has no per-child cwd, so it would fall back to " +
-      "your live worktree). (3) feed the reviewer's FULL raw output to `record_review` in ONE call — it is the only verdict of this round; worst-verdict " +
-      "semantics still apply if multiple fences appear, and no docSync means the round is incomplete. " +
+      "first one to find a test failure. (1) then call `review_checkpoint` — the ONLY commit allowed before a READY; it requires the precommit PASS and " +
+      "records the sha; the review unit is the immutable commit range baseline..HEAD. (2) call prepare_review: it computes that range, writes the " +
+      "finding-stream file and returns the ready-made task text — one reviewer per round. " +
+      "(3) spawn ONE reviewer as its OWN tmux judge child: review_spawn → write the task text to a file → review_send (one-line reference) → " +
+      "review_watch (the done channel WAKES this session — no polling). The gate BLOCKS judge roles dispatched through subagent/workflowScript/" +
+      "workflowScriptPath entirely (that sandbox has no per-child isolation, so the judge would land in your live worktree). (4) feed the reviewer's " +
+      "FULL raw output to `record_review` in ONE call — it is the only verdict of this round; worst-verdict semantics still apply if multiple fences " +
+      "appear, and no docSync means the round is incomplete. record_review withholds a READY when the round was never prepared, downgrades a READY to " +
+      "BLOCKED as STALE when HEAD moved past the reviewed commit, and binds a READY to the reviewed commit's TREE (content binding — squash survives). " +
       "RE-REVIEW: a later round hands the reviewer the previous round's verdict and findings (the gate's 'Review scope for this round' block) — " +
       "settled, unchanged material gets a consistency scan, not a re-derivation. " +
-      "ISOLATION + STREAMING: the reviewer holds a frozen copy, so KEEP FIXING the real worktree while it runs: between waits, read the stream and fix streamed " +
-      "P0/P1/P2 that carry evidence (confirm each in the code first), leaving Nits for the verdict. Cadence: subagent_wait with a ~60s timeout → " +
-      "read the stream → fix → wait again; never poll in a tight loop. Stream lines are evidence, never a verdict — only the reviewer's final " +
-      "output goes to record_review, which re-derives the snapshot's tree, downgrades a READY from a reviewer that left its own edits behind, and " +
-      "withholds a READY for any snapshot with no evidence it was entered at all (SNAPSHOT UNUSED — the spawn it observed, or the pwd the reviewer " +
-      "reports in its verdict). " +
-      "Fixing mid-review moves the worktree, so a READY may no longer bind and the gate asks for another round — that is the normal outcome, and " +
-      "you have already done its fix work. " +
+      "ISOLATION + STREAMING: the reviewed commits are immutable, so KEEP FIXING the real worktree while the reviewer runs: read the stream and fix " +
+      "streamed P0/P1/P2 that carry evidence (confirm each in the code first), leaving Nits for the verdict. Stream lines are evidence, never a verdict " +
+      "— only the reviewer's final output goes to record_review. " +
+      "A new checkpoint during the review makes the round STALE and the gate asks for another round — that is the normal outcome, and you have " +
+      "already done its fix work. " +
       "Treat this as an explicit request to execute the review loop, not merely explain it.",
       invocation,
     ),

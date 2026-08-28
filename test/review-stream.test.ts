@@ -117,7 +117,7 @@ test("the consumer directive pins the cadence and the fix discipline", () => {
   // and state it as ENFORCED, because it is (the stale-tree comparison in
   // record_review). The earlier wording promised a round that no code produced.
   assert.match(text, /ENFORCES the consequence/);
-  assert.match(text, /STALE TREE/);
+  assert.match(text, /STALE/);
   assert.match(text, /recorded as BLOCKED/);
   assert.match(text, /Stream lines are never a verdict/);
 });

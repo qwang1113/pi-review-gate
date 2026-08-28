@@ -22,8 +22,10 @@
  * mistakes it for the reviewer's own runtime.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+
+import { writeFileAtomic } from "./atomic-write.ts";
 import type { StepTiming } from "./precommit-receipt.ts";
 
 /** Repo-root-relative path of the log. Under `.pi/` — gate-owned. */
@@ -104,9 +106,7 @@ function trim(path: string): void {
   const lines = readFileSync(path, "utf8").split("\n").filter((l) => l !== "");
   if (lines.length <= TIMINGS_MAX_RECORDS + TIMINGS_TRIM_SLACK) return;
   const kept = lines.slice(-TIMINGS_MAX_RECORDS);
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, `${kept.join("\n")}\n`);
-  renameSync(tmp, path);
+  writeFileAtomic(path, `${kept.join("\n")}\n`);
 }
 
 /**

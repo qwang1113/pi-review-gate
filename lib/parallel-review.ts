@@ -225,7 +225,7 @@ export function buildReviewPrompt(
   files: string[],
   goalText?: string,
   repoRoot?: string,
-  isolation?: { streamPath: string },
+  isolation?: { streamPath: string; commitRange: string },
   scopeDirective?: string,
   /**
    * The DECISION kind driving the opening instruction (round-3 P1 fix): a
@@ -237,24 +237,47 @@ export function buildReviewPrompt(
   scopeKind?: "full" | "incremental",
   session?: { dir: string; id: string },
   precommitBaseline?: string,
+  /**
+   * The done channel the reviewer will signal (doneChannelFor(title)).
+   * Embedded so the child never has to GUESS the channel (round-16 P1: the
+   * protocol promises 'channel 由任务文本给出' but the task text did not
+   * carry it — the child guessed wrong and the main session was never
+   * woken).
+   */
+  doneChannel?: string,
+  /**
+   * The inbox question channel (path + signal channel) embedded for the
+   * child, so it can ask the main session WITHOUT guessing (round-16 P2: the
+   * protocol promises the inbox path/channel are given by the task text, but
+   * no builder carried them). channel = inboxChannelFor(title), i.e.
+   * rg-<title>-inbox — never literal "<channel>-inbox" concatenation.
+   */
+  inbox?: { path: string; channel: string },
+  /**
+   * The reason the MAIN session gave for opening this round while the gate
+   * was already met (round-18 polish gate). Injected verbatim so the
+   * reviewer can judge whether this round should exist at all.
+   */
+  polishReason?: { reason: string; at: string; round: number } | undefined,
 ): string {
   const streamPath = isolation?.streamPath;
+  const range = isolation?.commitRange ?? "baseline..HEAD";
   const lines = [
     scopeKind === "incremental"
       ? "You are the reviewer of this round. Audit the INCREMENT listed below — the files that changed since the last READY review — and re-check every finding the scope block lists. Deep-audit the increment and those findings; material already settled and unchanged gets a consistency scan, not a re-derivation. You keep FULL-diff visibility and authority: reopen any settled conclusion you can contradict with evidence. Verify from the code (never guess), and report findings with file paths and line numbers."
-      : "You are the reviewer of this round. Audit the WHOLE change listed below — nothing else covers it. Read each file in the worktree, verify from the code (never guess), and report findings with file paths and line numbers.",
+      : `You are the reviewer of this round. Audit the COMMIT RANGE ${range} below — immutable git history, and the ONLY thing this round judges. Read it with \`git show\` / \`git diff ${range}\`, verify from the code (never guess), and report findings with file paths and line numbers.`,
     "",
-    `Changed files (${files.length}):`,
+    `Changed files (${files.length}) in ${range}:`,
     files.map((f) => `- ${f}`).join("\n"),
     "",
     "Review for: correctness, edge cases, test coverage quality, doc sync for the behavior you see, unintended side effects, and impossibility claims (TODO/FIXME/skipped tests).",
+    // Commit isolation (2026-08-27 execution model): the change under review
+    // is IMMUTABLE git history, so the main session may keep editing the
+    // worktree while the review runs — its new edits simply are not part of
+    // the judged range. Verification happens in a THROWAWAY checkout.
     isolation
-      // In a THROWAWAY SNAPSHOT of the change under review, mutation analysis
-      // (delete the code, prove the test fails) is the strongest check there is.
-      ? "You are running inside a disposable snapshot worktree of the change under review — NOT the user's live worktree. You may edit files and run tests freely, including mutation analysis: delete or break the code a test claims to cover and confirm the test actually fails. RESTORE every mutation before you finish: the gate re-derives this snapshot's tree afterwards, and a snapshot left modified means your final checks ran against your own edits, so a READY from you will not be accepted. Write scratch files OUTSIDE the snapshot (use $TMPDIR), and never write under `node_modules` (it is a symlink to the real repository). Never run git commit/push or any gh command."
-      // No snapshot: this IS the user's worktree and the main agent may be
-      // working in it. Read-only, exactly as before snapshot isolation existed.
-      : "You are reading the USER'S LIVE WORKTREE — snapshot isolation was unavailable for this run, and the main agent may be editing it right now. Do NOT edit any file. Do NOT run tests that write files. `bash` is read-only inspection only (git diff/log/show, reading files). Never run git commit/push or any gh command. Report what you find; verifying by mutation is not available this round.",
+      ? `You are reviewing COMMIT RANGE ${range}: immutable git history — the main session may keep editing the worktree while you judge (its new edits are not part of your range). Judge the range with \`git show\` / \`git diff\`, NEVER the live tree. You have no edit/write tools (edit/write are excluded); \`bash\` is read-only inspection. To run tests or mutations, check the reviewed commit out into a THROWAWAY worktree under $TMPDIR (\`git worktree add <tmp> HEAD\`) and run there — never installers inside it (.git is shared). A test run directly in the live worktree is ADVISORY: the main session may be editing it, so results may be polluted. Never run git commit/push or any gh command.`
+      : "You are reading the USER'S LIVE WORKTREE, and the main agent may be working in it. Do NOT edit any file. Do NOT run tests that write files. `bash` is read-only inspection only (git diff/log/show, reading files). Never run git commit/push or any gh command. Report what you find.",
   ];
   if (streamPath) lines.push("", buildStreamDirective(streamPath));
   // NOTE: the `diff` field and its prompt block are gone. Nothing produces a
@@ -273,6 +296,17 @@ export function buildReviewPrompt(
   // change as the opening line says.
   if (scopeDirective && scopeDirective.trim()) {
     lines.push("", scopeDirective.trim());
+  }
+
+  // Round-18 polish gate: this round exists only because the main session
+  // said WHY. Give the reviewer that reason verbatim — it is part of what
+  // this round is judged against ("does this round deserve to exist?").
+  if (polishReason && polishReason.reason.trim()) {
+    lines.push(
+      "",
+      `REASON FOR THIS ROUND (given by the main session while the gate was already met, round ${polishReason.round} at ${polishReason.at}):`
+      + ` ${polishReason.reason.trim()}`
+    );
   }
 
   // Fresh-context pointer (goal criterion 4): the reviewer no longer forks
@@ -310,11 +344,29 @@ export function buildReviewPrompt(
     // non-READY.
     'Before you answer, run `pwd` and put its output in the verdict\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
       (isolation
-        ? " The gate checks it against the snapshot prepared for you, and a reviewer that ran outside its snapshot cannot approve the change."
-        : " There is no snapshot this round, so this only records where you read; the gate does not match it against one."),
+        ? " The gate matches it against the pane it spawned you in (the shared repo root)."
+        : " This only records where you read; the gate does not match it against one."),
     // eslint-disable-next-line max-len
     'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "cwd": "<your real pwd>", "docSync": "UPDATED"|"NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",
+    // Round-17 (user ask): output discipline — the gate consumes ONLY the
+    // verdict fence and the finding stream; prose beyond a 5-line summary is
+    // wasted tokens.
+    "输出纪律:verdict fence 在最前,其后最多 5 行结论要点(每条一句);不复述任务、不复述代码、不写过程叙事;详细证据放 findings 流(evidence 字段),不要写进正文。",
+    ...(doneChannel
+      ? [
+          "",
+          `完成信号(必须):当你完成本轮审核、输出最终 verdict 之后,运行 tmux wait-for -S ${doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
+        ]
+      : []),
+    ...(inbox
+      ? [
+          "",
+          `- 提问通道(需要决策/澄清任务时):把一行 JSON 追加到 ${inbox.path}:`,
+          '  {"type":"question","text":"……"}',
+          `  然后运行 tmux wait-for -S ${inbox.channel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)。提问后继续等待回复,不要自行假定答案。`,
+        ]
+      : []),
   );
   return lines.join("\n");
 }

@@ -16,8 +16,10 @@
  *  - "No checks run" (precommit NO_CHECKS_RUN) = not passed (PR #7 lesson 3).
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { writeFileAtomic } from "./atomic-write.ts";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
@@ -57,6 +59,13 @@ export interface RoundRecord {
    */
   verdict?: Exclude<GateVerdict, "PENDING">;
   at: string;
+  /**
+   * Files that had P2/Nit findings this round (round-18 polish gate).
+   * Absent on older sidecars ⇒ treated as empty (never triggers).
+   */
+  polishFiles?: string[];
+  /** Files that had P0/P1 findings this round (resets a file's streak). */
+  blockingFiles?: string[];
 }
 
 export interface GateState {
@@ -73,11 +82,25 @@ export interface GateState {
    */
   fingerprintVersion?: number;
   sessionId: string | null;
+  /**
+   * The last review_checkpoint commit (sha + wall-clock time). The review
+   * unit of the new execution model: prepare_review computes baseline..HEAD
+   * against this, and record_review binds a READY to the reviewed commit's
+   * tree. Written only by review_checkpoint; absent before the first one.
+   */
+  checkpoint?: { sha: string; prevSha: string; at: string };
   hasCodeChange: boolean;
   hasDocChange: boolean;
   review: {
     verdict: GateVerdict;
     fingerprint: string | null; // worktree fingerprint the verdict is bound to
+    /**
+     * Round-9 P1: the COMMIT sha the READY was bound to (the reviewed HEAD at
+     * record time). prepare_review uses it as the incremental baseline so a
+     * chain of checkpoints since the last READY is ALL covered by the next
+     * range; absent on older sidecars (fall back to checkpoint.prevSha).
+     */
+    commitSha?: string;
     at: string | null;
     /**
      * Reviewer's code↔doc attestation from the verdict JSON. Optional for
@@ -151,6 +174,13 @@ export interface GateState {
     testScope?: TestScope;
   };
   rounds: RoundRecord[];
+  /**
+   * The last polish-gate `reason` the agent supplied to prepare_review
+   * (round-18). Injected into the NEXT reviewer's task text so the judge can
+   * see why this round exists. Absent on older sidecars ⇒ no reason to
+   * carry forward (and no trigger either — the rounds are the trigger).
+   */
+  lastPolishReason?: { reason: string; at: string; round: number };
   maxRounds: number;
   bypass: {
     active: boolean;
@@ -336,6 +366,28 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         delete parsed.lastReadyReview;
       }
     }
+    // Round-18 polish gate: malformed per-round file lists and the last
+    // reason are DROPPED (absent means 'no trigger / nothing to carry',
+    // which is the safe direction for both).
+    if (Array.isArray(parsed.rounds)) {
+      for (const r of parsed.rounds as unknown as Array<Record<string, unknown>>) {
+        if (r.polishFiles !== undefined &&
+            (!Array.isArray(r.polishFiles) || !r.polishFiles.every((v) => typeof v === "string"))) {
+          delete r.polishFiles;
+        }
+        if (r.blockingFiles !== undefined &&
+            (!Array.isArray(r.blockingFiles) || !r.blockingFiles.every((v) => typeof v === "string"))) {
+          delete r.blockingFiles;
+        }
+      }
+    }
+    if (parsed.lastPolishReason !== undefined) {
+      const p = parsed.lastPolishReason as Record<string, unknown> | null;
+      if (!p || typeof p !== "object" || typeof p.reason !== "string" ||
+          typeof p.at !== "string" || typeof p.round !== "number") {
+        delete parsed.lastPolishReason;
+      }
+    }
     if (!Array.isArray(parsed.rounds)) return undefined;
     if (!parsed.bypass || typeof parsed.bypass.active !== "boolean") return undefined;
     // Optional field. Unknown values are removed so consumers fall back to
@@ -487,12 +539,9 @@ export const FINGERPRINT_MIGRATION_NOTICE =
 
 export function saveSidecar(path: string, state: GateState): void {
   state.updatedAt = new Date().toISOString();
-  mkdirSync(dirname(path), { recursive: true });
   // Atomic write: temp + rename, so a crashed write can't leave a truncated
-  // JSON that a fail-open parser might half-read.
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
-  renameSync(tmp, path);
+  // JSON that a fail-open parser might half-read (lib/atomic-write.ts).
+  writeFileAtomic(path, JSON.stringify(state, null, 2) + "\n");
 }
 
 /**
@@ -699,6 +748,15 @@ export function unmetRequirements(
      * guarantee did not exist when it was written, so it cannot be claimed.
      */
     requireFullTests?: boolean;
+    /**
+     * Round-9 P1: trees of the commits between the last READY's reviewed
+     * commit and HEAD that DIFFER from the reviewed tree. Non-empty ⇒
+     * content no reviewer saw has entered the branch since the READY —
+     * the reviewed tree still matches only if every later commit is a
+     * no-content (squash) rewrite of the same tree. Computed by the caller
+     * (this function is pure); absent ⇒ not checked (older callers).
+     */
+    unreviewedCommits?: string[];
   },
 ): string[] {
   if (!state) return ["gate state missing (fail-closed)"];
@@ -725,6 +783,15 @@ export function unmetRequirements(
       problems.push(`code review gate is ${state.review.verdict} (need READY)`);
     } else if (state.review.fingerprint !== currentFingerprint) {
       problems.push("code was modified after the last READY review (fingerprint mismatch)");
+    } else if (opts?.unreviewedCommits && opts.unreviewedCommits.length > 0) {
+      // Round-9 P1: the tree matches but content-changing commits landed
+      // after the reviewed commit (a checkpoint that was never re-reviewed,
+      // or a rebase that moved the reviewed point). HEAD's tree alone cannot
+      // see them — a change-and-revert still shipped unreviewed content.
+      problems.push(
+        `unreviewed commits since the last READY review (${opts.unreviewedCommits.length} commit(s) with content no reviewer saw) — ` +
+        "checkpoint the new work and run the next review round before shipping",
+      );
     } else if (opts?.requireDocSync && state.review.docSync === undefined) {
       // Fail-closed: enforcement is on and the READY review carries no
       // attestation (older review, or reviewer omitted the field) → unmet.

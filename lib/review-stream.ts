@@ -9,9 +9,9 @@
  *
  * WHAT THIS DOES. Every reviewer instance appends one JSON line per CONFIRMED
  * finding to its own stream file, and the main agent reads that file while it
- * waits. Snapshot isolation (lib/review-snapshot.ts) is what makes acting on
- * them safe: the reviewer is reading a frozen copy, so the main agent may fix
- * the live worktree immediately.
+ * waits. The reviewed COMMIT RANGE is immutable (2026-08-27 model), which is
+ * what makes acting on them safe: the reviewer judges fixed commits, so the
+ * main agent may fix the live worktree immediately.
  *
  * WHY A PLAIN APPEND-ONLY FILE. It is the lowest common denominator every
  * model gets right with one `>>` redirection, it survives a crashed reviewer
@@ -148,9 +148,10 @@ export function actionableFindings(findings: readonly StreamFinding[]): StreamFi
 }
 
 /**
- * The instruction handed to a reviewer. Absolute path on purpose: the
- * reviewer's cwd is its snapshot, so a relative path would write into the
- * snapshot's own `.pi/` — a stream that looks alive and delivers nothing.
+ * The instruction handed to a reviewer. Absolute path on purpose: the judge
+ * child's cwd is the repo root (a tmux pane), and a relative path would
+ * depend on its startup directory — a stream that looks alive and delivers
+ * nothing.
  */
 export function buildStreamDirective(streamPath: string): string {
   return [
@@ -182,10 +183,10 @@ export function buildStreamConsumerDirective(streamPaths: readonly string[]): st
     "- Fix streamed P0/P1/P2 that carry evidence, and open the file to confirm the finding " +
       "yourself first — a reviewer occasionally withdraws an item in its final output.",
     "- Leave Nits until the verdict lands.",
-    "- Your fixes change the worktree while the reviewer reads a frozen snapshot: that is " +
-      "intended and safe. The gate ENFORCES the consequence mechanically — it compares the tree the " +
-      "reviewer actually read with the tree at record time, and a READY that no longer covers your " +
-      "worktree is recorded as BLOCKED (\"STALE TREE\"). That is the normal, fail-closed outcome: the " +
+    "- Your fixes change the worktree while the reviewer judges the immutable commit range: that is " +
+      "intended and safe. The gate ENFORCES the consequence mechanically — it compares the reviewed " +
+      "commit's tree with the tree at record time, and a READY whose HEAD moved is recorded as " +
+      "BLOCKED (STALE). That is the normal, fail-closed outcome: the " +
       "next round is short because its fixes are already in.",
     "- Record the verdict from the reviewer's FINAL output only. Stream lines are never a verdict.",
   ].join("\n");

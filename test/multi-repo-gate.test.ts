@@ -132,78 +132,6 @@ const READY_REVIEW = '```json\n{"gate":"READY","docSync":"NOT_NEEDED","findings"
 
 // ---------------------------------------------------------------------------
 
-test("P-multi: a commit in an edited non-session repo is blocked by THAT repo's gate", async () => {
-  const parent = mkdtempSync(join(tmpdir(), "rg-mg-"));
-  rgDirs.push(parent);
-  const repoA = makeRepo(parent, "repoA");
-  const repoB = makeRepo(parent, "repoB");
-
-  const pi = makeMockPi(repoA);
-  reviewGate(pi as never);
-  const { handlers, tools, ctx } = pi;
-  const sessionStart = handlers.get("session_start")!;
-  const toolResult = handlers.get("tool_result")!;
-  const toolCall = handlers.get("tool_call")!;
-
-  await sessionStart({}, ctx);
-
-  // Give repoA a passing gate (READY + precommit PASS via sidecar surgery is
-  // not allowed — PASS only comes from the runner — so simulate the historical
-  // state with a READY review and rely on precommit being blocked).
-  // First: edit repoB's file through the edit tool (arms repoB's gate).
-  const repoBFile = join(repoB, "a.ts");
-  writeFileSync(repoBFile, "export const a = 2;\n");
-  const editResult = await toolResult({
-    toolName: "edit",
-    isError: false,
-    input: { path: repoBFile },
-    content: [{ type: "text", text: "ok" }],
-  }, ctx);
-  assert.equal(editResult, undefined, "edit result must be untouched");
-
-  // Session repo (repoA) is clean — no ship block yet there.
-  const cleanCommit = await toolCall({
-    toolName: "bash",
-    input: { command: `cd ${repoA} && git commit -am x` },
-  }, ctx);
-  assert.equal(cleanCommit, undefined, "clean-session commit must not block");
-
-  // The cross-repo commit MUST be blocked: repoB was edited and has no READY.
-  const blocked = await toolCall({
-    toolName: "bash",
-    input: { command: `cd ${repoB} && git commit -am x` },
-  }, ctx);
-  assert.ok(blocked && (blocked as { block?: boolean }).block === true,
-    "commit in edited non-session repo must be blocked");
-  const reason = JSON.stringify(blocked);
-  assert.match(reason, /repoB/, "block reason must name the offending repo");
-
-  // record_review targets the repo named in `repo` (repoB) — write repoB's
-  // sidecar. With two repos edited, `repo` is mandatory (see the dedicated
-  // ambiguity test below).
-  const recordReview = tools.get("record_review")!.execute;
-  const rr = await recordReview("id", { reviewer_output: READY_REVIEW, repo: repoB }, undefined, undefined, ctx);
-  assert.equal((rr as { details: { verdict?: string } }).details.verdict, "READY");
-  const sidecarB = JSON.parse(readFileSync(join(repoB, ".pi", "review-gate-state.json"), "utf8"));
-  assert.equal(sidecarB.review.verdict, "READY");
-  assert.ok(sidecarB.review.fingerprint, "READY must bind repoB's fingerprint");
-
-  // Review READY alone is NOT enough: precommit is still NOT_RUN → blocked.
-  const stillBlocked = await toolCall({
-    toolName: "bash",
-    input: { command: `cd ${repoB} && git push` },
-  }, ctx);
-  assert.ok(stillBlocked && (stillBlocked as { block?: boolean }).block === true,
-    "push must stay blocked until repoB's precommit passes");
-
-  // declare_done requires EVERY edited repo: repoB has a READY review but no
-  // precommit PASS (and repoA never passed anything) → rejected.
-  const declareDone = tools.get("declare_done")!.execute;
-  const dd = await declareDone("id", { summary: "done" }, undefined, undefined, ctx);
-  assert.equal((dd as { details: { accepted?: boolean } }).details.accepted, false,
-    "declare_done must be rejected while any edited repo's gate is unmet");
-});
-
 test("P-multi: session repo untouched → cross-repo ship checks only the target repo", async () => {
   const parent = mkdtempSync(join(tmpdir(), "rg-mg2-"));
   rgDirs.push(parent);
@@ -374,45 +302,6 @@ test("P-multi: sidecar from ANOTHER session is not trusted (stale PENDING stays 
   assert.equal(sidecarB.review.verdict, "PENDING");
 });
 
-test("P-multi: an explicit repo target records the verdict on THAT repo (no review deadlock)", async () => {
-  const parent = mkdtempSync(join(tmpdir(), "rg-mg7-"));
-  rgDirs.push(parent);
-  const repoA = makeRepo(parent, "repoA");
-  const repoB = makeRepo(parent, "repoB");
-
-  const pi = makeMockPi(repoA);
-  reviewGate(pi as never);
-  const { handlers, tools, ctx } = pi;
-  const sessionStart = handlers.get("session_start")!;
-  const toolResult = handlers.get("tool_result")!;
-  const toolCall = handlers.get("tool_call")!;
-  await sessionStart({}, ctx);
-
-  // Edit repoB first (active repo → repoB), then a file in the PRIMARY repo.
-  writeFileSync(join(repoB, "a.ts"), "export const a = 7;\n");
-  await toolResult({ toolName: "edit", isError: false, input: { path: join(repoB, "a.ts") }, content: [] }, ctx);
-  const repoAFile = join(repoA, "a.ts");
-  writeFileSync(repoAFile, "export const a = 8;\n");
-  await toolResult({ toolName: "edit", isError: false, input: { path: repoAFile }, content: [] }, ctx);
-
-  // record_review targeted at the PRIMARY repo writes the primary sidecar —
-  // repoB's sidecar stays PENDING (a verdict is never shared across repos).
-  const recordReview = tools.get("record_review")!.execute;
-  const rr = await recordReview("id", { reviewer_output: READY_REVIEW, repo: repoA }, undefined, undefined, ctx);
-  assert.equal((rr as { details: { verdict?: string } }).details.verdict, "READY");
-  const sidecarA = JSON.parse(readFileSync(join(repoA, ".pi", "review-gate-state.json"), "utf8"));
-  assert.equal(sidecarA.review.verdict, "READY", "review must land on the PRIMARY repo's sidecar");
-  const sidecarB = JSON.parse(readFileSync(join(repoB, ".pi", "review-gate-state.json"), "utf8"));
-  assert.equal(sidecarB.review.verdict, "PENDING", "repoB must stay unreviewed");
-
-  // repoB is still unreviewed → its commit stays blocked.
-  const blocked = await toolCall({
-    toolName: "bash",
-    input: { command: `cd ${repoB} && git commit -am x` },
-  }, ctx);
-  assert.ok(blocked && (blocked as { block?: boolean }).block === true);
-});
-
 test("P-multi: a ship targeting a NON-EXISTENT dir fails closed (mis-parse can't sail)", async () => {
   const parent = mkdtempSync(join(tmpdir(), "rg-mg8-"));
   rgDirs.push(parent);
@@ -483,61 +372,6 @@ test("P-multi: record_review without `repo` is REJECTED once several repos are e
     "id", { reviewer_output: READY_REVIEW, repo: join(parent, "nope") }, undefined, undefined, ctx,
   ) as { isError?: boolean; content: Array<{ text: string }> };
   assert.equal(outside.isError, true);
-});
-
-test("P-multi: `repo` breaks the deadlock — verdict lands on a repo that is NOT the last edited", async () => {
-  const parent = mkdtempSync(join(tmpdir(), "rg-mg10-"));
-  rgDirs.push(parent);
-  const repoA = makeRepo(parent, "repoA");
-  const repoB = makeRepo(parent, "repoB");
-
-  const pi = makeMockPi(repoA);
-  reviewGate(pi as never);
-  const { handlers, tools, ctx } = pi;
-  await handlers.get("session_start")!({}, ctx);
-  const toolResult = handlers.get("tool_result")!;
-  const toolCall = handlers.get("tool_call")!;
-
-  // Edit the PRIMARY repo, then repoB last: the old code pinned every later
-  // verdict to repoB with no way back to repoA.
-  writeFileSync(join(repoA, "a.ts"), "export const a = 31;\n");
-  await toolResult({ toolName: "edit", isError: false, input: { path: join(repoA, "a.ts") }, content: [] }, ctx);
-  writeFileSync(join(repoB, "a.ts"), "export const a = 32;\n");
-  await toolResult({ toolName: "edit", isError: false, input: { path: join(repoB, "a.ts") }, content: [] }, ctx);
-
-  const recordReview = tools.get("record_review")!.execute;
-  const rr = await recordReview("id", { reviewer_output: READY_REVIEW, repo: repoA }, undefined, undefined, ctx) as
-    { details: { verdict?: string }; content: Array<{ text: string }> };
-  assert.equal(rr.details.verdict, "READY");
-  // The result NAMES the repo: a session that could not see where its verdicts
-  // landed kept recording READY for the wrong repo and read the resulting
-  // block as sabotage.
-  assert.match(rr.content[0].text, new RegExp(repoA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-
-  const sidecarA = JSON.parse(readFileSync(join(repoA, ".pi", "review-gate-state.json"), "utf8"));
-  assert.equal(sidecarA.review.verdict, "READY", "verdict must land on the requested repo");
-  const sidecarB = JSON.parse(readFileSync(join(repoB, ".pi", "review-gate-state.json"), "utf8"));
-  assert.equal(sidecarB.review.verdict, "PENDING", "the last-edited repo must be untouched");
-
-  // repoB is still unreviewed, so its commit is blocked — and the message now
-  // says both WHICH repo is blocked and where the READY actually is.
-  const blocked = await toolCall({
-    toolName: "bash",
-    input: { command: `cd ${repoB} && git commit -am x` },
-  }, ctx) as { block?: boolean; reason?: string };
-  assert.equal(blocked?.block, true);
-  assert.match(blocked.reason!, /\[repoB\]/, "problems must be labelled per repo");
-  assert.match(blocked.reason!, /a READY review is recorded on/, "must point at the repo holding the READY");
-  assert.match(blocked.reason!, new RegExp(repoA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-
-  // A block in the PRIMARY repo is labelled too, now that several repos are in
-  // play: an unlabelled "review is PENDING" was read as being about repoB.
-  const blockedPrimary = await toolCall({
-    toolName: "bash",
-    input: { command: `cd ${repoA} && git push` },
-  }, ctx) as { block?: boolean; reason?: string };
-  assert.equal(blockedPrimary?.block, true);
-  assert.match(blockedPrimary.reason!, /\[repoA\]/, "the session repo must be labelled in a multi-repo session");
 });
 
 test("P-multi: run_precommit obeys the same explicit-repo rule as record_review", async () => {

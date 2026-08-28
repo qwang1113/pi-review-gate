@@ -29,8 +29,9 @@
  */
 
 import { hostname } from "node:os";
-import { dirname } from "node:path";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
+
+import { writeFileAtomic } from "./atomic-write.ts";
 
 import { CONCURRENT_SESSION_WINDOW_MS } from "./constants.ts";
 
@@ -172,10 +173,7 @@ export function reconcileBlockedOwners(
 /** Atomic write, so a concurrent upsert can never leave truncated JSON that a
  *  later parse would reject forever (an unparsable marker is never removed). */
 function writeMarkerAtomically(path: string, marker: BlockedMarker): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(marker, null, 2) + "\n");
-  renameSync(tmp, path);
+  writeFileAtomic(path, JSON.stringify(marker, null, 2) + "\n");
 }
 
 /** File content, or null when the marker does not exist (an EMPTY file is

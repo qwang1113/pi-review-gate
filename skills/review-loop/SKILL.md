@@ -29,8 +29,8 @@ fallback list. If a model doesn't support `max`, pi clamps it down.
 
 **Single-reviewer round.** Each review round is ONE reviewer over the WHOLE
 change — no second reviewer, no split, no different-family audit. One
-snapshot, one verdict, one `record_review` call. This is by design (user
-decision 2026-08-26): parallel/multi-judge patterns were removed
+checkpoint commit range, one verdict, one `record_review` call. This is by
+design (user decision 2026-08-26): parallel/multi-judge patterns were removed
 because they multiplied cost without adding an independent signal that a single
 strong reviewer does not already provide.
 
@@ -104,21 +104,22 @@ a subagent task and hand the goal text to every subagent you spawn.
 
 ### Parallel exploration — read-only subagents run concurrently
 
-Read-only subagents (recon, code reading, analysis, `adviser`) are inherently
+Read-only subagents (recon, code reading, analysis) are inherently
 parallel-safe: they never write to the worktree, so they cannot invalidate a
 binding or race with each other. When you need to explore several areas of the
 codebase, spawn them in parallel — each reads its own files and returns
 findings; you merge the results. Exploration and editing may also overlap:
 while a read-only subagent surveys the code, you can concurrently edit a
 different file (the single-writer invariant still holds — only YOU write).
+(Adviser consultations run as tmux judge children, not subagents.)
 
 ### Serial writers — exactly one writer in the worktree
 
 Write-capable subagents run **serially in this worktree**: their edits change
 the worktree like any other, so a review recorded before them can no longer
-ship (the fingerprint moved), and concurrent writers would keep invalidating
-the binding between precommit and review. Read-only subagents (recon, analysis,
-`adviser`) may run in parallel. You stay the single writer of record: you run
+ship (the binding tree moved), and concurrent writers would keep invalidating
+the binding between precommit and review. Read-only subagents (recon,
+analysis) may run in parallel. You stay the single writer of record: you run
 precommit, you run the review, you fix findings — never delegate the gate
 itself.
 
@@ -135,8 +136,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
 0. **Goal first (loop mode)** — establish `.pi/loop-goal.md` as described above
    before you start editing, then work to it. Hand the goal text to every
-   subagent, to `adviser`, and to `reviewer` (as TEXT in the spawn task, never
-   as a file path: a snapshot carries no `.pi/`).
+   subagent, to `adviser`, and to `reviewer` (as TEXT in the task, never as a
+   file path: the task carries the approved text, not a pointer to the
+   possibly-stale file).
 
 0b. **Autonomous protocol (no command needed)** — you drive the loop
     yourself; the slash commands are only explicit triggers, never the
@@ -147,39 +149,49 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
       needs user confirmation (there is no plan).
 
 1. **Consult (recommended, not gated)** — before or during non-trivial work,
-   call `prepare_adviser` FIRST and paste its brief into the `adviser`
-   subagent call (the brief carries the fresh-context transcript pointer,
-   the conclusion artifact path, and — from the second consultation of the
-   goal on — the previous consultation's conclusion and the files changed
-   since; the adviser appends its conclusion to the artifact for the next
-   time). Feed it the real question, not your preferred answer. Fold its
-   input in before you commit to an approach. Skip only for trivial,
-   low-risk changes.
-2. **One round — precommit first, then the single review** — everything runs on plain subagents (no engine is involved anywhere) with the edits finished:
+   call `prepare_adviser` FIRST and send its brief to the `adviser` judge
+   child (the brief carries the fresh-context transcript pointer, the
+   conclusion artifact path, and — from the second consultation of the goal
+   on — the previous consultation's conclusion and the files changed since;
+   the adviser appends its conclusion to the artifact for the next time).
+   Feed it the real question, not your preferred answer. Fold its input in
+   before you commit to an approach. Skip only for trivial, low-risk
+   changes.
+2. **One round — precommit first, checkpoint, then the single tmux review** — with the edits finished:
 
    - FIRST run the trusted precommit lane — `run_precommit` (fast for an
      intermediate round, full for the final round before shipping) — and
      confirm it PASSES before spending the expensive judge's time: a FAIL is
      cheaper to fix before the review, and the reviewer must never be the
-     first one to find a test failure.
-   - Then call `prepare_review`: it materializes ONE disposable WRITABLE
-     snapshot of the change and returns the reviewer's snapshot cwd,
-     finding-stream path, file list and ready-made task text — one reviewer per round.
-   - Spawn ONE reviewer subagent as its OWN top-level `subagent` call carrying
-     that `cwd`. The gate BLOCKS a reviewer spawn that names no snapshot, and
-     blocks reviewers dispatched through `workflowScript`/`workflowScriptPath`
-     entirely (that sandbox has no per-child cwd, so every reviewer would land
-     in one shared directory — your live worktree).
+     first one to find a test failure. **Do NOT manually run the full suite
+     or typecheck first**: the full lane runs lint/typecheck/build/the
+     complete suite in one shot, and its input cache reuses an unchanged set
+     in seconds. Use targeted tests for files you are actively editing; let
+     `run_precommit` be the single full gate (round-12 user ask).
+   - Then **`review_checkpoint`** — the ONLY commit allowed before a READY.
+     It commits everything with the precommit PASS in hand and records the
+     sha; the review unit is the immutable commit range `baseline..HEAD`.
+   - Then call `prepare_review`: it computes the range, writes the
+     finding-stream file and returns the ready-made task text — one reviewer per round.
+   - Spawn ONE reviewer as its OWN tmux judge child:
+     `review_spawn({ role: "reviewer", title: "review-<short>", repo })` →
+     write the task text to a file → `review_send({ paneId, text: "读取 <file> 并执行" })`
+     → `review_watch({ channel })` (the done channel WAKES this session —
+     no polling). The gate BLOCKS judge roles dispatched through
+     `subagent`/`workflowScript`/`workflowScriptPath` entirely (that sandbox
+     has no per-child isolation — the judge would land in your live worktree).
    - Feed the reviewer's FULL raw output to `record_review` in ONE call — it
      is the only verdict of this round. Worst-verdict semantics still apply if
      multiple fences appear (the parser keeps the worst), and an absent
      `docSync` means the round is incomplete (fails closed).
 
-   **Why this is safe**: the verdict binds to the worktree fingerprint either
-   way — the worst a race can do is discard a verdict, never ship unverified
-   work. If a repo's checks write files (snapshots, build artifacts) while the
-   reviewer reads, the fingerprint moves and the round repeats: a wasted
-   round, accepted and documented in `docs/parallel-execution-plan.md`.
+   **Why this is safe**: the verdict binds to the reviewed commit's TREE
+   (content binding — squash/amend preserving the tree keeps the READY
+   alive), and `record_review` re-checks HEAD is still the reviewed commit
+   (a new checkpoint after prepare ⇒ STALE ⇒ BLOCKED). The worst a race can
+   do is discard a verdict, never ship unverified work: the reviewed range
+   is immutable, so you may keep fixing the worktree while the reviewer
+   runs.
 
    Precommit still matters for two measured reasons: tests catch the cheap
    defect class the reviewer would otherwise spend minutes finding (a test
@@ -194,17 +206,30 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
-   **Waiting-window discipline**: while the reviewer runs, do useful parallel
-   work — other repos' loops, PR description drafts, `[NIT_DEFERRED]`
-   bookkeeping. Never idle-poll a running subagent. Because the reviewer holds
-   a frozen copy, KEEP FIXING the real worktree while it runs: between waits,
-   read the stream and fix streamed P0/P1/P2 that carry evidence (confirm each
-   in the code first), leaving Nits for the verdict. Cadence:
-   `subagent_wait` with a ~60s timeout → read the stream → fix → wait again;
-   never poll in a tight loop.
-
-3. **Review** — the reviewer runs over the current diff (`git diff HEAD` +
-   untracked files) inside its snapshot. The reviewer must NOT be fed your own
+   **Waiting-window discipline (v4)** — 主会话是门禁的最后监督者,门禁未通过
+   前不得停止自动循环(round-18 存活不变量):
+   1. 有可实现的确定性工作(代码/测试/文档/其他 repo 事务)→ 优先做掉,不要进入等待。
+   2. 确认没有任何可做的工作后,才进入阻塞等待——在**一次 bash 调用**里同时
+      托管三条判据:
+      a. done channel 信号:`tmux wait-for <doneChannel>`(无标志;⚠️ 没有
+         `-t` 超时选项,`wait-for -t 5 <chan>` 会以 `unknown flag -t` 报错返回,
+         包成 `while ! tmux wait-for -t 5 <chan>; do :; done` 就是空转轮询,不是等待);
+         用 bash 工具自己的 `timeout` 参数做上限,
+         turn 不结束;
+      b. pane 退出/死亡:`tmux display-message -p -t <paneId> '#{pane_dead}'`
+         (remain-on-exit 保证退出后可观测);
+      c. verdict 已产出但未发信号:capture-pane 里已出现 verdict fence
+         (实测失败模式——子会话完成但忘记发完成信号,主会话空等);
+      任一命中即结束等待:review_read 读取输出继续流程,或 review_close 后
+      重新派发。
+   3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不发
+      信号)。`agent_settled` 会注入托管等待指令;主动托管远比被动拉起可靠。
+   不要 sleep 或高频轮询 pane 屏幕;有流式 P0/P1/P2 时边等边修(先确认再改)。
+   因为审核范围是 immutable commit,工作区编辑不失效本轮。
+3. **Review** — the reviewer audits the COMMIT RANGE `baseline..HEAD` (the
+   immutable checkpoint commits) with `git show`/`git diff`; it may verify by
+   doing in a throwaway `$TMPDIR` copy (mutation analysis included) and must
+   restore before finishing. The reviewer must NOT be fed your own
    conclusions (fresh eyes only) and must end its output with a fenced JSON
    verdict:
 
@@ -233,8 +258,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    previous consultation's conclusion and the files changed since (full
    brief when there is no history).
 
-   Give the reviewer the loop goal TEXT (the file path is unreadable inside a
-   snapshot) and require criterion-by-criterion acceptance: each exit criterion
+   Give the reviewer the loop goal TEXT (as prepared — never a pointer to the
+   possibly-stale file) and require criterion-by-criterion acceptance: each exit criterion
    marked MET / NOT_MET with evidence, an unmet criterion raised as a P1
    finding. A missing goal is not a blocker — the reviewer then judges the
    diff against the task intent.
@@ -258,11 +283,12 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
 4. **Record** — call the `record_review` tool with the reviewer's FULL raw
    output (the gate parses every fence; the worst verdict wins — never
-   summarize or trim it). The same call checks the snapshot: it re-derives the
-   snapshot's tree, downgrades a READY from a reviewer that left its own edits
-   behind, and withholds a READY for any snapshot with no evidence it was
-   entered at all (SNAPSHOT UNUSED — the spawn the gate observed, or the `pwd`
-   the reviewer reports in its verdict).
+   summarize or trim it). The same call verifies the commit target: it
+   withholds a READY when the round was never prepared (no registered
+   `baseline..HEAD`), downgrades a READY to BLOCKED when HEAD moved past the
+   reviewed commit (STALE), and binds the READY to the reviewed commit's
+   TREE — content binding, so a later squash of the checkpoint chain keeps
+   it valid.
 
 5. **Fix** — if BLOCKED: fix ALL findings (P0-P2; Nits at your judgment),
    then go to step 2 again (fixing edits files, so precommit must run again
@@ -294,8 +320,10 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
 7. **Done** — call `declare_done`. It re-validates everything server-side and
    rejects if any gate is unmet. Both the precommit PASS and the READY review
-   must be bound to the SAME (current) fingerprint; if anything edited the
-   worktree since, run the affected step again.
+   must be bound to the SAME (current) tree — the reviewed HEAD commit tree;
+   if a new checkpoint landed since the READY, run the affected step again.
+   It also rejects while a judge child session is still open: finish the
+   round (`record_review` / `review_close`) first.
 
    It also rejects while a Copilot cycle is still open or the loop goal is
    unapproved — those are completion requirements, not ship requirements.
@@ -306,7 +334,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
 ## Model tiers — cheap models read, mid models execute, strong models judge
 
-Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
+Design record: `docs/execution-model.md` + `docs/judge-protocol.md`. Three
+tiers, all default-on:
 
 - **L1 cheap/fast** (`recon`, `claude-haiku-4-5` →
   `opencode-go/deepseek-v4-flash`, **thinking `low`/off**) — mechanical
@@ -320,12 +349,12 @@ Design record: `docs/parallel-execution-plan.md`. Three tiers, all default-on:
 - **L3 judgment** (reviewer / adviser / arbiter / goal-auditor, `max` thinking) — the only
   tier whose verdicts may be recorded. Never delegate the verdict to a
   cheaper model.
-- No split review of any kind: one reviewer, one snapshot, one verdict.
+- No split review of any kind: one reviewer, one commit range, one verdict.
 
 ## Working across several repos
 
 Every repo has its OWN gate: its own review verdict, its own precommit PASS,
-its own worktree fingerprint. A verdict never transfers between repos, and the
+its own reviewed tree. A verdict never transfers between repos, and the
 ship gate checks the repo the command actually runs in.
 
 So once a session has edited more than one repo, `record_review` and

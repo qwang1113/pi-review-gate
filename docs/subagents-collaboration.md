@@ -1,5 +1,11 @@
 # 门禁与 pi-subagents 的协作
 
+> **SUPERSEDED 2026-08-27** — judge 角色不再以子代理形式派发：它们作为
+> tmux 子会话（独立 pi 进程，`review_spawn`）运行，审核单元是 checkpoint
+> commit 范围（`baseline..HEAD`）；子代理调度 judge 角色被硬拦截。当前
+> 模型见 `docs/execution-model.md` + `docs/judge-protocol.md`。本文保留为
+> 2026-08-26 快照模型的协作记录。
+
 > 本文记录 gate 与 pi-subagents 协作的**已建立事实**与**刻意不用**的部分，
 > 供 review 与维护者对照实现。2026-08-26 起审阅流程为**单审**（一个
 > reviewer / 一轮 / 一次 record_review）；多审、多模块计划均已移除。

@@ -52,10 +52,10 @@ The classifier child process is **fully isolated**: `pi -p --no-session --no-ext
 
 ```
 L1  Ship gate (HARD)      tool_call → block git commit/push, gh pr create/edit
-                          until review READY + precommit PASS on the
-                          current worktree fingerprint; publishing (push, gh
-                          pr, declare_done) additionally requires a precommit
-                          run whose tests were NOT narrowed
+                          until review READY + precommit PASS bound to the
+                          reviewed HEAD commit tree (content binding);
+                          publishing (push, gh pr, declare_done) additionally
+                          requires a precommit run whose tests were NOT narrowed
 L2  Auto-continuation     agent_settled → if gates unmet, inject
                           [REVIEW_GATE_RESUME] follow-up (recursion-guarded,
                           max 10 rounds, plateau detection; a user ESC abort
@@ -69,7 +69,7 @@ L2  Auto-continuation     agent_settled → if gates unmet, inject
                           verdict is granted and ship stays blocked.
                           The resume text also carries the single-review
                           contract: ONE reviewer per round, no exceptions
-                          (one reviewer, one snapshot, one verdict)
+                          (one reviewer, one commit range, one verdict)
 L3  Git hooks             pre-commit / pre-push / commit-msg verify the gate
                           sidecar even for commits made outside Pi
 L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
@@ -151,28 +151,17 @@ it runs in full rather than leaving the run with zero checks.
 The git hooks mirror the split exactly: `pre-commit` accepts any PASS,
 `pre-push` re-execs it with `REVIEW_GATE_REQUIRE_FULL=1`.
 
-One more hard refusal lives in the hooks (defense-in-depth): a commit/push
-whose cwd is **inside a review snapshot** (a path segment `rg-review-snap-*`,
-covering the default `~/.pi/review-snapshots/<repo-key>/rg-review-snap-*` layout
-plus the repo-local `*/.pi/review-snapshots/` and `<tmp>/` fallbacks) is
-rejected even without a sidecar —
-a snapshot deliberately carries no `.pi/`, but shares the real repo's `.git`,
-so the "no sidecar → allow" rule would let a reviewer's push ship the real
-repo. `REVIEW_GATE_BYPASS=1` still applies (human escape hatch).
-
-**Review snapshots live OUTSIDE every repo by default** —
-`~/.pi/review-snapshots/<repo-key>/` (one subdir per repo, keyed by a stable
-hash of the repo root). That is a physical guarantee, not a config: whole-tree
-test discovery starts from a repo's root (jest `rootDir`, a bare `node --test`)
-and can never reach a path outside it, so the snapshot's own `test/` copy is
-never executed twice — no matter who runs the suite or whether they know
-snapshots exist. `~/.pi` is also a dot-directory, which bare `node --test`
-skips anyway. NOT `/tmp`: this repo's `pi-self` guard treats any `/tmp/…`
-path as scratch, and reviewing inside a `/tmp` snapshot was measured to fail
-4 tests that pass in the real tree. Falls back to the repo's own
-`.pi/review-snapshots/` when the home dir is unwritable, then to the system
-temp dir; the preset `jest` block in `package.json` still excludes `node_modules`
-and `.pi` for that fallback layout.
+One more hard refusal lives in the hooks (defense-in-depth, legacy): a
+commit/push whose cwd is **inside a review snapshot** (a path segment
+`rg-review-snap-*`, covering the default
+`~/.pi/review-snapshots/<repo-key>/rg-review-snap-*` layout plus the
+repo-local `*/.pi/review-snapshots/` and `<tmp>/` fallbacks) is rejected even
+without a sidecar — a snapshot from an older install carries no `.pi/` but
+shares the real repo's `.git`, so the "no sidecar → allow" rule would let a
+reviewer's push ship the real repo. The 2026-08-27 execution model no longer
+creates snapshots (reviewers judge immutable commit ranges as tmux judge
+children), so this check only guards leftovers of older installs.
+`REVIEW_GATE_BYPASS=1` still applies (human escape hatch).
 
 ### Project-level step configuration (`.pi/review-gate.json`)
 
@@ -358,7 +347,7 @@ than a failed review later, so the extension's per-turn reminder and the
 ### Execution tiers (L1/L2) — cheap models read, mid models execute
 
 Beyond the L3 judges, two cheaper tiers do the mechanical work; design record
-and numbers in `docs/parallel-execution-plan.md`:
+and numbers in `docs/parallel-execution-plan.md` (historical):
 
 | Tier | Models (first = preferred) | Role | Verdict power |
 |---|---|---|---|
@@ -852,18 +841,27 @@ npx pi-review-gate-install-hooks
 `scripts/install-global.sh` was retired when the repo became a pi package;
 use `pi install` above instead.
 
-### Single-review loop: everything on subagents (no engine)
+### Single-review loop: judge roles as tmux children (2026-08-27 model)
 
-**Everything runs on plain subagents — no workflow engine.**
+**Judge roles (reviewer / adviser / goal-auditor) run as their own pi
+processes in tmux panes of the main session — no workflow engine, no
+subagent dispatch.**
 
-**Review runs one reviewer per round.** The single reviewer needs its own
-disposable snapshot of the change, which needs a per-call `cwd` — and the
-retired `@quintinshaw/pi-dynamic-workflows` engine discarded a per-agent
-`cwd` (its isolation option checks out HEAD, which does not contain the
-uncommitted change under review). `prepare_review` materializes ONE writable
-snapshot and returns its `cwd`, stream path, file list and ready-made task
-text; the agent spawns ONE reviewer subagent carrying that `cwd`. One
-reviewer, one snapshot, no second reviewer.
+**Review runs one reviewer per round.** The review unit is the immutable
+COMMIT RANGE `baseline..HEAD`: the agent commits the change as a checkpoint
+first (`review_checkpoint` — the only commit allowed before a READY; it
+requires a full precommit PASS), then `prepare_review` computes the range and
+hands back the ready-made task text. `review_spawn` creates the judge child
+(a fresh pi process in a tmux pane, no review-gate extension loaded,
+`--exclude-tools edit,write`); the agent sends the task, registers
+`review_watch` on the done channel (the completion signal WAKES the main
+session — no polling), and records the verdict with `record_review`, which
+binds a READY to the reviewed commit's TREE (content binding — squash
+preserves it) and downgrades a READY whose HEAD moved (STALE) to BLOCKED.
+Because the reviewed range is immutable, the agent keeps fixing the real
+worktree while the reviewer runs. Subagent dispatch of judge roles is
+HARD-blocked (a judge as a subagent would run in the live worktree with no
+isolation). One reviewer, one commit range, no second reviewer.
 
 **The decompose module loop and wave daily were removed (2026-08-26).**
 There is no module table, no wave scheduling, and no plan state to consult:
@@ -918,7 +916,9 @@ The loop protocol (also available as the `review-loop` skill):
 ```
 edit code (batch related edits — the loop is billed per ROUND, not per line)
   → run_precommit first (cheap checks before the expensive judge)
-  → spawn ONE reviewer (its own snapshot cwd, top-level subagent call)
+  → review_checkpoint (commits the change — requires the precommit PASS)
+  → prepare_review (computes baseline..HEAD + task text)
+  → review_spawn / review_send / review_watch (ONE tmux judge child)
   → call record_review with the FULL reviewer output      # all fences parsed, worst wins
   → BLOCKED? fix everything, then start again from precommit
   → READY?  call declare_done                             # re-validated server-side
@@ -926,8 +926,8 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
 ```
 
 **One reviewer per round, whatever the diff size.** There is no tiering:
-`prepare_review` materializes ONE writable snapshot for the whole change,
-regardless of how many files or lines it spans, and the reviewer audits it all.
+`prepare_review` registers ONE commit range for the whole change, regardless
+of how many files or lines it spans, and the reviewer audits it all.
 The verdict schema is `REVIEW_VERDICT_SCHEMA` in `lib/parallel-review.ts`.
 
 **Precommit runs FIRST, review second — never concurrently.** The runner
@@ -940,13 +940,13 @@ green. This order is deliberate: a precommit FAIL is cheaper to fix before
 the expensive judge looks, and a review spent on a red tree is a fully
 wasted round — an earlier design ran both concurrently to save wall time
 and was abandoned for exactly that reason. Design record:
-`docs/parallel-execution-plan.md`.
+`docs/execution-model.md`.
 
 The reviewer should end with a fenced JSON verdict:
 
 ```json
 {"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN",
- "cwd": "<the reviewer's own pwd — proof of which snapshot it ran in>",
+ "cwd": "<the judge child's own pwd — proof of the pane it ran in>",
  "docSync": "UPDATED" | "NOT_NEEDED",
  "findings": [{"file": "src/x.ts", "line": 42, "severity": "P1", "issue": "..."}]}
 ```
@@ -1039,7 +1039,7 @@ never unblock. So the requirement lives in the extension's L1 path and in
   fingerprint, so a review recorded earlier can no longer ship them; read-only
   subagents may run in parallel), `adviser` advises against it, and `reviewer`
   accepts against it criterion by criterion. Reviewers get the goal through the
-  spawn task text — a review snapshot deliberately carries no `.pi/` directory,
+  spawn task text — the judge child never reads the sidecar directly,
   so the goal file is not readable inside one (see `prepare_review`). The main
   agent stays the writer of record: it runs precommit, the review, and the
   fixes.
@@ -1354,8 +1354,8 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | Tool | Purpose |
 |------|---------|
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal` + a reason). The agent's pick IS the classification — no classifier model reviews it. On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) `loop` and `explore` apply directly with source `auto`, while `normal` still pops the confirm dialog. Everything delegates to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. |
-| `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). It also re-derives the tree of every snapshot `prepare_review` handed out this round: a reviewer that finished with its snapshot MODIFIED ran its last checks against its own edits, so its READY is downgraded to BLOCKED (its findings stay valid, and a BLOCKED verdict is unaffected). It further requires, PER SNAPSHOT, evidence that the snapshot was ever *entered* — the spawn the gate observed, or the `cwd` a reviewer reports in its verdict (its own `pwd`, a required field) — and records a READY as BLOCKED (`SNAPSHOT UNUSED`) for any snapshot with neither, because a reviewer that never opened its copy leaves it pristine and pristine reads as "clean". Mechanical, so the agent cannot forget it. |
-| `prepare_review` | Materialize ONE disposable git-worktree snapshot for the single reviewer about to be spawned, holding exactly the change under review (same shadow-index tree the fingerprint uses; `node_modules` symlinked so the suite runs — the ONE shared path, which the prompts forbid writing to). The snapshot deliberately contains NO `.pi/` directory (the goal text rides the spawn task instead): a snapshot that carries `.pi/` is misdetected by pi-subagents as a project root, which silently drops the project layer of the model config (the user's per-agent slots) and makes the reviewer fall back to the GLOBAL agent definition. A READY recorded after the worktree moved (mid-review fixes) does NOT bind: the gate compares the tree the reviewer read with the tree at record time and downgrades to BLOCKED, so an approval can never cover code no reviewer saw. Returns the reviewer's `cwd` and its append-only finding-stream path as a **copyable top-level `subagent` call** — and while the snapshot is open the gate BLOCKS any reviewer spawn that does not name it, including every reviewer dispatched through `workflowScript`/`workflowScriptPath` (that sandbox has no per-child `cwd`, so they would all share your live worktree). Inside its own copy the reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. Fail-soft: a host where `git worktree` refuses gets an explicit "isolation unavailable" reply and the old read-only rules. |
+| `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). It verifies the COMMIT TARGET mechanically (2026-08-27 model): a READY is withheld when the round was never prepared (no registered `baseline..HEAD` target), downgraded to BLOCKED as STALE when HEAD moved past the reviewed commit (a new checkpoint landed after prepare), and bound to the reviewed commit's TREE (content binding — a later squash of the checkpoint chain preserves it). The verdict's `cwd` must match the spawned judge pane's `pwd` (a required field of the verdict schema). Mechanical, so the agent cannot forget it. |
+| `prepare_review` | Register the COMMIT target for the single reviewer of this round (2026-08-27 model): requires the checkpoint from `review_checkpoint` (the only commit allowed before a READY), computes the immutable range `baseline..HEAD`, writes the append-only finding-stream file and returns the ready-made task text plus the tmux spawn instructions (`review_spawn` → `review_send` → `review_watch`). Inside its own copy the reviewer SHOULD verify by doing — mutation analysis included, then restore — while the main agent keeps fixing the real worktree and consumes the stream as it lands. A READY recorded after HEAD moved (a new checkpoint during the review) does NOT bind: `record_review` compares HEAD with the registered reviewed commit and downgrades to BLOCKED (STALE), so an approval can never cover commits no reviewer saw. Round-18 POLISH GATE: when the last two recorded rounds both verdict READY, or the same file has carried P2/Nit findings in three consecutive rounds, the tool REFUSES a `reason`-less call; the supplied reason is persisted (`lastPolishReason`) and injected into the next reviewer's task text, so a "polish" round is visible to the independent judge. |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. The full output is never inlined into the reply — a failing suite can emit megabytes — but the run is **no longer silent while it happens**: the runner writes a **plan preamble** (every step and the exact command, plus the ones it is skipping and why) BEFORE the first check starts, then streams the running step's stdout/stderr as it arrives, and the extension **tails that log and forwards it through the tool's `onUpdate`**, so a multi-minute precommit shows live progress instead of nothing. Liveness is a *read* of the log, never a second write channel: the runner's stdio stays a file descriptor (a pipe would deadlock the detached runner at its 64KB buffer), and the tail's final flush on stop is what makes an aborted or timed-out run's log complete. The ordered `▶ … ◀` blocks still read in declaration order — only the step the log is currently at streams, so nothing is printed twice. Receipt and cache tails are bounded in BYTES as well as lines (one un-newlined 64 MiB line is still one line, and a receipt over 1 MiB is refused — which would turn a passing run into ERROR). The **test** step additionally gets `<rootDir>/.pi/` excluded so a run never executes the disposable test copies under `.pi/review-snapshots/`. That rewrite is deliberately narrow, because the jest CLI flag OVERRIDES the config value: it happens only for a single simple `jest` command that uses **default config discovery**, and the repo's own `testPathIgnorePatterns` (read from `jest --showConfig`) are merged in rather than replaced. A command that selects its own config (`--config`, `--rootDir`, `--projects`, `--selectProjects`, …), a compound or non-jest script, or a `--showConfig` that cannot be read are all left **verbatim**, with the reason recorded in the log — reproducing jest's own CLI parsing well enough to query the right config is not something the gate should be guessing at, and a wrong guess would silently drop the exclusions the project actually relies on. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
 | `record_goal_prereview` | Record the dedicated `goal-auditor` role's audit of a DRAFT goal (L8b). Pass the draft text plus the auditor's FULL raw output: the **extension** parses the JSON fence itself (PASS ⇔ a `READY` verdict — verdict-parse already downgrades a READY carrying unresolved P0/P1, and a salvaged fence is never READY) and computes the text hash itself, so there is no `passed`/`hash` parameter an agent could set. No parseable fence ⇒ `isError` and **nothing** is written (fail-closed). BLOCKED/NEEDS_HUMAN ⇒ a FAIL record. Latest-only by design, and repo-resolved exactly like `propose_loop_goal` (`gitRootOfDir`, never `resolveToolRepo` — a goal is audited before the first edit lands). |
@@ -1440,9 +1440,9 @@ Configure via `.pi/review-gate.json` → `"arbiter": { "enabled", "model",
 - Ambient `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / … pointing at another repository → ignored: every git call in the fingerprint, its CJS mirror and the divergence checker runs with those variables stripped, so neither the digest nor the staged-divergence verdict can be redirected at a decoy repo
 - Ambient `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` / `GIT_CONFIG_PARAMETERS` / … injecting `core.excludesFile` (or any other setting) → ignored: the whole `GIT_CONFIG*` family is stripped by prefix, so configuration injection cannot hide a real edit from the digest
 - `git commit -a` / `git commit -- <path>` (git publishes a TEMPORARY index) → correctly judged: the hook forwards git's own `GIT_INDEX_FILE` as an explicit argument and the checker verifies it belongs to this repository, so these commits are neither wrongly blocked nor able to ship unreviewed content
-- Commit/push whose cwd is inside a review snapshot worktree (an `rg-review-snap-*` path segment) → blocked even with no sidecar: the snapshot deliberately carries no `.pi/` but shares the real repo's `.git`, so the "no sidecar → allow" rule would let a reviewer's push ship the real repo
-- Reviewer spawned outside the snapshot prepared for it (no `cwd`, a `cwd` that is not this round's snapshot, or dispatched through `workflowScript`/`workflowScriptPath`, whose sandbox has no per-child `cwd`) → the spawn is **blocked at `tool_call`** with the correct call printed. Non-judge roles (`adviser`, `recon`) and management actions keep running: only the reviewer family is pinned
-- Snapshot prepared but never entered (no spawn observed for it AND no verdict reporting it as its own `pwd`) → any READY is recorded as **BLOCKED** (`SNAPSHOT UNUSED`). This is the fail-closed half of the drift check — drift proves a reviewer CHANGED its copy, and says nothing about one that never opened it (an untouched snapshot verifies as "clean")
+- Commit/push whose cwd is inside a review snapshot worktree (an `rg-review-snap-*` path segment) → blocked even with no sidecar (legacy guard for older installs' leftovers: such a worktree carries no `.pi/` but shares the real repo's `.git`; the 2026-08-27 model creates no snapshots)
+- Judge roles (`reviewer` / `adviser` / `goal-auditor`) dispatched through `subagent` / `workflowScript` / `workflowScriptPath` → the dispatch is **blocked at `tool_call`** (the workflow sandbox has no per-child isolation, so the judge would land in the live worktree); the agent is steered to the tmux flow (`review_spawn`). Management actions and non-judge roles (`recon`) keep running
+- Round never prepared (no registered `baseline..HEAD` target when the verdict arrives) → any READY is recorded as **BLOCKED** — a verdict with nothing to bind to cannot ship. HEAD moved past the prepared commit → **BLOCKED** (STALE): the reviewer judged an older commit and the change has since grown
 - Loop-mode (or undecided) `edit`/`write` tool call while no USER-approved loop goal exists for the target repo → blocked at tool_call: the negotiation must happen before the work starts, and each repo checks its own goal (see the [Loop goal](#loop-goal--the-exit-contract-negotiated-with-the-user-l8-the-edit-gate-also-covers-undecided-mode) section)
 - Ship command hidden in `bash -c` / `eval` / `xargs` → still detected (over-detection preferred)
 - Ship command obfuscated via `g""it` / `g"i"t` / `git${IFS}commit` / `git$IFS"commit"` / `${x:=git}` / `${x:-g}${y:-it}` / `$(printf git) commit` (dynamic head) / `\g\i\t` / backslash-newline continuation → shell-dequoting + de-obfuscation + dynamic-head detection still catch it (fail-closed)
@@ -1777,14 +1777,14 @@ second line of defence.
 | `git commit` hooks | ~0.4 s (56 files) / ~2 s (9k files) | Four checks, each fail-closed |
 | `run_precommit --mode fast` (this repo) | ~2 s cold, ~0.1 s fully cached | lint + typecheck + build + related tests only |
 | `run_precommit --mode full` (this repo) | ~100 s | Dominated by the two timing loops in the suite; typecheck runs CONCURRENTLY with `npm test` — the timing loops themselves are not reducible |
-| **A review round (any diff size)** | **~3 min reviewer, precommit first** | ONE reviewer, one disposable snapshot, no engine — precommit runs BEFORE the review (see the loop protocol); see `docs/parallel-execution-plan.md` |
+| **A review round (any diff size)** | **~3 min reviewer, precommit first** | ONE reviewer, one commit range, no engine — precommit runs BEFORE the review (see the loop protocol); see `docs/execution-model.md` |
 
 **Parallel-stability verification (2026-08-10)**: `run_precommit --mode full`
 ran six consecutive times on this repo (typecheck concurrent with `npm test`,
 which contains the two timing regressions) — all six PASS; wall clock
 138–157 s, on par with the serial baseline (`npm test` ~137 s + typecheck
 ~2 s). The parallel win lands on multi-step repos; see
-`docs/parallel-execution-plan.md` §7.
+`docs/parallel-execution-plan.md` §7 (historical).
 
 The practical consequence: batching edits into fewer, larger review rounds
 saves far more wall time than any micro-optimization here, because the loop is
@@ -1832,10 +1832,9 @@ lib/fingerprint.ts            worktree fingerprint (content-addressed git tree h
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
 lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running subagent, notice text (pure)
-lib/review-snapshot.ts        one disposable git-worktree snapshot for the single reviewer (default `~/.pi/review-snapshots/<repo-key>/` — outside every repo, with repo-`.pi/` and tmpdir fallbacks) + post-run tree verification + orphan reclaim
 lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
-lib/verdict-guards.ts         the two READY guards as a pure truth table: snapshot drift + stale reviewed tree (tighten-only)
-lib/reviewer-spawn-guard.ts   the snapshot pin as a pure truth table: refuse a reviewer spawn that names no snapshot (workflow dispatch included), and require per-snapshot evidence of use at record time (tighten-only)
+lib/tmux-session.ts           judge-child lifecycle: tmux pane spawn/stack, liveness, single-line send, capture, wait-for signal (done channel), session fallback
+lib/judge-prompt.ts            judge role resolution (repo → package → ~/.pi/agent/agents), model spec, launcher files, judge-role dispatch detection for the subagent block
 lib/parallel-review.ts        single-review contract: reviewer prompt + verdict schema (pure, no engine)
 docs/subagents-collaboration.md how the gate and pi-subagents cooperate: what is established, what is deliberately NOT used (gate param / worktree isolation), what was added (the single-review spawn shape, the L8b goal pre-review collaboration)
 lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
