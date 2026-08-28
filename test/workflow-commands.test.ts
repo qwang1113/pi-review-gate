@@ -238,13 +238,22 @@ function flagShape(mention: string): string {
   const tokens = mention.replace(/^tmux\s+/, "").trim().split(/\s+/).filter(Boolean);
   const shape = ["wait-for"];
   let i = 1;
-  while (i < tokens.length && /^-[A-Za-z]$/.test(tokens[i]!)) {
+  // ANY token starting with `-` is a flag token (round-17 P2, reviewer): the
+  // earlier /^-[A-Za-z]$/ rule read `-t5`, `--timeout 5` and `-St` as the
+  // CHANNEL, so they inherited the blocking form's blessing — fail-open, in the
+  // exact bug class this guard exists for, and `-t5` is the more idiomatic way
+  // to write the broken flag. Unknown spellings now fail CLOSED.
+  while (i < tokens.length && tokens[i]!.startsWith("-")) {
     const flag = tokens[i]!;
-    if (/^\d+$/.test(tokens[i + 1] ?? "")) {
-      shape.push(`${flag} <n>`);
+    const attached = /^(-{1,2}[A-Za-z][A-Za-z-]*?)(\d+)$/.exec(flag);
+    if (attached) {
+      shape.push(`${attached[1]} <n>`); // -t5
+      i += 1;
+    } else if (/^\d+$/.test(tokens[i + 1] ?? "")) {
+      shape.push(`${flag} <n>`); // -t 5 / --timeout 5
       i += 2;
     } else {
-      shape.push(flag);
+      shape.push(flag); // -S, -St, --long
       i += 1;
     }
   }
