@@ -64,6 +64,11 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   **启动时刻是 PID 身份的一部分**：wrapper 若在写 `exit-code` 前被杀，只剩
   一个 pid 文件，此时该 PID 被系统复用就会被误判为"judge 还活着"，
   `review_close` 会把 SIGTERM 发给陌生进程的整个进程组——实测复现过）、
+  **身份无法确认时两个读取方向相反**（实测：`ps` 若不输出，launcher 会写出
+  `"<pid> "` 这种退化记录，把它当作"多半是我们的"就等于没设防）：存活判定
+  **宽松**（退回 `kill -0`，判错只是让一轮流程乱掉），终止判定 **fail closed**
+  （不发信号，`review_close` 仍会关 pane、由 tmux 挂断进程组；判错则会杀掉
+  别人的进程树）。
   `exit-code`（pi 退出码，其
   **存在**即"已结束"的权威事实）、`stderr.log`（崩溃诊断）、
   `sessions/*.jsonl`（结论所在）。`exit-code` 优先于 pid 判定，避免 PID 复用

@@ -118,20 +118,46 @@ function defaultProcessStart(pid: number): string | undefined {
 }
 
 /**
- * Is this pid STILL the process the launcher recorded?
+ * Is this pid still the process the launcher recorded?
  *
- * With a recorded start time this is exact. Without one (an older pid file) it
- * degrades to plain existence — the pre-existing behaviour, no worse than it
- * was, and the launcher writes the timestamp from now on.
+ * THREE ANSWERS, because "I cannot tell" is not "yes" (round-1 P1, reviewer:
+ * with a `ps` stub that printed nothing, the launcher wrote `"30327 "` — a
+ * record indistinguishable from the old no-timestamp format — and the identity
+ * guard silently FAILED OPEN, restoring the very hazard it was added for).
+ *
+ *   "ours"         the recorded start time still matches — this is our process
+ *   "not-ours"     it does not match, or the pid is gone — recycled or dead
+ *   "unverifiable" no start time was recorded (ps unavailable, empty, or an
+ *                  older pid file): identity CANNOT be established
+ *
+ * Callers decide what to do with "unverifiable", and they decide differently
+ * on purpose — see readJudgeSessionState (lenient) vs terminateJudgeSession
+ * (fail closed).
  */
-function isRecordedProcess(
+type PidIdentity = "ours" | "not-ours" | "unverifiable";
+
+/**
+ * Why `terminateJudgeSession` did (or did not) signal. Four of these five are
+ * successful no-ops — the caller must not report them as "terminated", and
+ * `unverifiable` in particular is worth surfacing: it means the pane close is
+ * now the ONLY thing ending that judge.
+ */
+export type TerminateReason =
+  | "signalled"
+  | "finished"
+  | "no-pid"
+  | "not-ours"
+  | "unverifiable"
+  | "unsignalable";
+
+function identifyProcess(
   record: PidRecord,
-  pidAlive: (pid: number) => boolean,
   processStart: (pid: number) => string | undefined,
-): boolean {
-  if (record.startedAt === undefined) return pidAlive(record.pid);
+): PidIdentity {
+  if (record.startedAt === undefined) return "unverifiable";
   const current = processStart(record.pid);
-  return current !== undefined && current === record.startedAt;
+  if (current === undefined) return "not-ours"; // the process is gone
+  return current === record.startedAt ? "ours" : "not-ours";
 }
 
 
@@ -163,8 +189,15 @@ export function readJudgeSessionState(
   // "running" means OUR recorded process is still there — not merely that
   // something holds that pid number now (round-1 P1: a crashed wrapper leaves
   // a pid file, and a recycled pid would read as a live judge forever).
+  //
+  // LENIENT on "unverifiable" (no recorded start time): falling back to plain
+  // liveness. Getting this wrong declares a WORKING judge dead and sends the
+  // main session off to read a conclusion that does not exist yet — disruptive,
+  // but it destroys nothing. The termination path makes the opposite trade.
+  const identity = identifyProcess(record, processStart);
+  const running = identity === "unverifiable" ? pidAlive(record.pid) : identity === "ours";
   return {
-    lifecycle: isRecordedProcess(record, pidAlive, processStart) ? "running" : "vanished",
+    lifecycle: running ? "running" : "vanished",
     pid: record.pid,
   };
 }
@@ -285,10 +318,18 @@ export function readStderrTail(stderrPath: string, maxLines = 20): string | unde
  * Signalling in either case would SIGTERM a stranger's entire process group.
  * `readJudgeSessionState` applies the same two rules — the pair must agree.
  *
+ * FAIL CLOSED WHEN IDENTITY CANNOT BE ESTABLISHED (round-1 P1, reviewer: a
+ * `ps` that produces nothing makes the launcher write a record with no start
+ * time, and treating that as "probably ours" restores the whole hazard). The
+ * cost of refusing is small and bounded — `review_close` still closes the
+ * pane, and tmux hangs up the process group that way — while the cost of
+ * guessing wrong is somebody else's process tree.
+ *
  * Best-effort by contract: an already-finished session (recorded exit code,
- * no pid file, a pid that is not ours any more, unsignalable group) is a
- * SUCCESSFUL no-op — closing a judge twice must not fail (idempotence is what
- * `review_close` promises).
+ * no pid file, a pid that is not ours any more, an unverifiable identity, an
+ * unsignalable group) is a SUCCESSFUL no-op — closing a judge twice must not
+ * fail (idempotence is what `review_close` promises). `reason` says which of
+ * those it was, so the caller can report it honestly.
  */
 export function terminateJudgeSession(
   // BOTH paths are REQUIRED (round-2 P2): with an optional exitCodePath a
@@ -297,31 +338,36 @@ export function terminateJudgeSession(
   // enforces it instead of the documentation asking for it.
   paths: Pick<JudgeSessionPaths, "pidPath" | "exitCodePath">,
   kill: (target: number, signal: NodeJS.Signals) => void = (t, s) => process.kill(t, s),
-  pidAlive: (pid: number) => boolean = defaultPidAlive,
   processStart: (pid: number) => string | undefined = defaultProcessStart,
-): { signalled: boolean; pid?: number } {
+): { signalled: boolean; pid?: number; reason: TerminateReason } {
   // Finished ⇒ nothing of ours is left running; the pid is not ours to signal.
   if (readTrimmed(paths.exitCodePath) !== undefined) {
-    return { signalled: false };
+    return { signalled: false, reason: "finished" };
   }
   const record = readPidRecord(paths.pidPath);
-  if (record === undefined) return { signalled: false };
-  if (record.pid <= 1) return { signalled: false }; // never signal pid 0/1 (own group / init)
-  // The crash path: a pid file with no exit code, whose process is gone or has
-  // been recycled. Nothing of ours is running, so there is nothing to signal.
-  if (!isRecordedProcess(record, pidAlive, processStart)) return { signalled: false, pid: record.pid };
+  if (record === undefined) return { signalled: false, reason: "no-pid" };
+  if (record.pid <= 1) return { signalled: false, reason: "no-pid" }; // never signal pid 0/1
+  const identity = identifyProcess(record, processStart);
+  if (identity === "not-ours") {
+    // The crash path: a pid file with no exit code, whose process is gone or
+    // has been recycled. Nothing of ours is running, so nothing to signal.
+    return { signalled: false, pid: record.pid, reason: "not-ours" };
+  }
+  if (identity === "unverifiable") {
+    return { signalled: false, pid: record.pid, reason: "unverifiable" };
+  }
   const pid = record.pid;
   try {
     kill(-pid, "SIGTERM");
-    return { signalled: true, pid };
+    return { signalled: true, pid, reason: "signalled" };
   } catch {
     // The group may already be gone, or be unsignalable — try the bare pid so
     // a wrapper that is NOT a group leader still gets terminated.
     try {
       kill(pid, "SIGTERM");
-      return { signalled: true, pid };
+      return { signalled: true, pid, reason: "signalled" };
     } catch {
-      return { signalled: false, pid };
+      return { signalled: false, pid, reason: "unsignalable" };
     }
   }
 }

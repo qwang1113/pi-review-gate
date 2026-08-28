@@ -3320,20 +3320,32 @@ export default function reviewGate(pi: ExtensionAPI) {
       // pane afterwards is the backstop (and what removes the screen).
       const terminated = child
         ? terminateJudgeSession({ pidPath: child.pidPath, exitCodePath: child.exitCodePath })
-        : { signalled: false };
+        // Not a registered child (e.g. the extension reloaded): there is no
+        // recorded session to terminate, only a pane to close.
+        : { signalled: false, reason: "no-pid" as const };
       const ok = killPane(paneId);
       for (const [root, list] of childSessions) {
         childSessions.set(root, list.filter((c) => c.paneId !== paneId));
       }
       cancelChildWaitTimer();
       // Idempotent BY CONTRACT: an already-finished child (nothing to signal,
-      // pane already gone) is a successful close, not an error.
-      const how = terminated.signalled
-        ? `session terminated (pid group ${terminated.pid})`
-        : "session already ended";
+      // pane already gone) is a successful close, not an error. The reason is
+      // reported honestly — "already ended" and "could not be verified" are
+      // very different facts, and the second one means the pane close was the
+      // only thing that ended this judge.
+      const how = ((): string => {
+        switch (terminated.reason) {
+          case "signalled": return `session terminated (pid group ${terminated.pid})`;
+          case "finished": return "session had already exited (exit code on record)";
+          case "no-pid": return "session recorded no pid (never started, or already cleaned up)";
+          case "not-ours": return `recorded pid ${terminated.pid} is no longer this judge — not signalled`;
+          case "unverifiable": return `pid ${terminated.pid} could not be verified as this judge (no start time recorded) — NOT signalled; the pane close is what ends it`;
+          case "unsignalable": return `pid ${terminated.pid} could not be signalled`;
+        }
+      })();
       return {
         content: [{ type: "text", text: `review-gate: ${how}; pane ${paneId} ${ok ? "closed" : "already gone"}.` }],
-        details: { closed: true, paneClosed: ok, sessionSignalled: terminated.signalled },
+        details: { closed: true, paneClosed: ok, sessionSignalled: terminated.signalled, reason: terminated.reason },
       };
     },
   });

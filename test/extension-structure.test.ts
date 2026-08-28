@@ -1474,13 +1474,23 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
   // review_close: terminate the SESSION (its process group), then the screen.
   const closeAt = SRC.indexOf('name: "review_close"');
   assert.ok(closeAt > 0);
-  const close = SRC.slice(closeAt, closeAt + 3000);
+  // 4200, not 3000: the honest-outcome switch pushed the return statement past
+  // the old window, and a too-short slice silently stops covering the
+  // assertions below instead of failing loudly.
+  const close = SRC.slice(closeAt, closeAt + 4200);
   const terminateAt = close.indexOf("terminateJudgeSession(");
   const killAt = close.indexOf("killPane(paneId)");
   assert.ok(terminateAt > 0 && killAt > 0, "both the session termination and the pane close exist");
   assert.ok(terminateAt < killAt, "the session is terminated BEFORE its pane is closed");
-  assert.match(close, /details: \{ closed: true/,
+  assert.match(close, /closed: true/,
     "closing an already-finished child still reports success (idempotent)");
+  // The outcome is reported HONESTLY: "already ended" and "identity could not
+  // be verified" are different facts, and the second means the pane close was
+  // the only thing that ended the judge.
+  assert.match(close, /case "unverifiable":/,
+    "an unverifiable pid is surfaced, not silently reported as terminated");
+  assert.match(close, /reason: terminated\.reason/,
+    "the reason travels in the tool result details");
 });
 
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {

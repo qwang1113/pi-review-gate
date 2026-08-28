@@ -92,11 +92,11 @@ test("terminate: a RECYCLED pid is never signalled (the reviewer's reproduction)
     const res = terminateJudgeSession(
       paths(dir),
       () => { calls++; },
-      () => true,
-      () => "Mon Jan  1 00:00:00 2020",
+      () => "Mon Jan  1 00:00:00 2020",   // that pid started at a different time
     );
     assert.equal(calls, 0, "signalling a stranger's process group is the accident this prevents");
     assert.equal(res.signalled, false);
+    assert.equal(res.reason, "not-ours");
     assert.equal(res.pid, 4242);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -107,9 +107,46 @@ test("terminate: the SAME process (start time matches) is still signalled — th
     const started = "Fri Aug 28 10:00:00 2026";
     writeFileSync(join(dir, "pid"), `4242 ${started}`);
     const seen: number[] = [];
-    const res = terminateJudgeSession(paths(dir), (t) => { seen.push(t); }, () => true, () => started);
+    const res = terminateJudgeSession(paths(dir), (t) => { seen.push(t); }, () => started);
     assert.equal(res.signalled, true);
     assert.deepEqual(seen, [-4242], "still the whole group");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+/**
+ * FAIL CLOSED WHEN IDENTITY CANNOT BE ESTABLISHED (round-1 P1, reviewer).
+ *
+ * The reviewer put a `ps` stub on PATH that exits 0 printing nothing. The
+ * launcher then wrote `"30327 "` — indistinguishable from the old format — and
+ * the identity guard silently FAILED OPEN, signalling `-30326`, i.e. exactly
+ * the unrelated-process-group hazard the guard exists to prevent.
+ *
+ * The two readers deliberately disagree about this state, because their
+ * failure modes differ: mis-reading liveness disrupts a round, mis-directing a
+ * SIGTERM destroys somebody else's work.
+ */
+test("terminate: an UNVERIFIABLE identity is never signalled (ps produced no start time)", () => {
+  const dir = workdir();
+  try {
+    // Exactly what the launcher writes when `ps` prints nothing.
+    writeFileSync(join(dir, "pid"), "30327 ");
+    let calls = 0;
+    const res = terminateJudgeSession(paths(dir), () => { calls++; }, () => undefined);
+    assert.equal(calls, 0, "an unverifiable pid must never be signalled — this was the fail-open hole");
+    assert.equal(res.signalled, false);
+    assert.equal(res.reason, "unverifiable");
+    assert.equal(res.pid, 30327);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("lifecycle: an unverifiable identity stays LENIENT (a running judge is not declared dead)", () => {
+  const dir = workdir();
+  try {
+    writeFileSync(join(dir, "pid"), "30327 ");
+    // Liveness still decides here: killing a round because `ps` is unavailable
+    // would be its own bug, and nothing is destroyed by being wrong this way.
+    assert.equal(readJudgeSessionState(paths(dir), () => true, () => undefined).lifecycle, "running");
+    assert.equal(readJudgeSessionState(paths(dir), () => false, () => undefined).lifecycle, "vanished");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -258,11 +295,10 @@ test("stderr: the tail is bounded, and a missing log is simply absent", () => {
 test("terminate: signals the process GROUP, not the bare pid (pi is the wrapper's child)", () => {
   const dir = workdir();
   try {
-    writeFileSync(join(dir, "pid"), "4242");
+    const started = "Fri Aug 28 10:00:00 2026";
+    writeFileSync(join(dir, "pid"), `4242 ${started}`);
     const seen: Array<{ target: number; signal: string }> = [];
-    // pidAlive/processStart are injected: this pid record has no start time,
-    // so identity degrades to liveness, and the fake pid must read as alive.
-    const res = terminateJudgeSession(paths(dir), (target, signal) => { seen.push({ target, signal }); }, () => true);
+    const res = terminateJudgeSession(paths(dir), (target, signal) => { seen.push({ target, signal }); }, () => started);
     assert.equal(res.signalled, true);
     assert.deepEqual(seen, [{ target: -4242, signal: "SIGTERM" }], "negative pid = the whole group");
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -271,12 +307,13 @@ test("terminate: signals the process GROUP, not the bare pid (pi is the wrapper'
 test("terminate: falls back to the bare pid when the group cannot be signalled", () => {
   const dir = workdir();
   try {
-    writeFileSync(join(dir, "pid"), "4242");
+    const started = "Fri Aug 28 10:00:00 2026";
+    writeFileSync(join(dir, "pid"), `4242 ${started}`);
     const seen: number[] = [];
     const res = terminateJudgeSession(paths(dir), (target) => {
       seen.push(target);
       if (target < 0) throw new Error("ESRCH: no such process group");
-    }, () => true);
+    }, () => started);
     assert.equal(res.signalled, true);
     assert.deepEqual(seen, [-4242, 4242]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -299,7 +336,7 @@ test("terminate: a FINISHED session is never signalled, even with a pid on file 
     let calls = 0;
     const res = terminateJudgeSession(paths(dir), () => { calls++; });
     assert.equal(calls, 0, "a finished session must not be signalled at all");
-    assert.deepEqual(res, { signalled: false });
+    assert.deepEqual(res, { signalled: false, reason: "finished" });
     // Same input, same answer as the lifecycle reader — the two must agree.
     assert.equal(readJudgeSessionState(paths(dir), () => true).lifecycle, "finished");
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -320,11 +357,20 @@ test("terminate: an already-finished child is a successful no-op (review_close i
   const dir = workdir();
   try {
     // No pid file at all.
-    assert.deepEqual(terminateJudgeSession(paths(dir), () => { throw new Error("must not be called"); }), { signalled: false });
-    // A dead pid: both signals fail, and that is still not an error.
-    writeFileSync(join(dir, "pid"), "4242");
-    const res = terminateJudgeSession(paths(dir), () => { throw new Error("ESRCH"); });
+    assert.deepEqual(
+      terminateJudgeSession(paths(dir), () => { throw new Error("must not be called"); }),
+      { signalled: false, reason: "no-pid" },
+    );
+    // A pid whose recorded process is gone: nothing of ours is running, so
+    // nothing is signalled — and that is still a successful close.
+    writeFileSync(join(dir, "pid"), "4242 Fri Aug 28 10:00:00 2026");
+    const res = terminateJudgeSession(
+      paths(dir),
+      () => { throw new Error("must not be called"); },
+      () => undefined,   // ps: no such process
+    );
     assert.equal(res.signalled, false);
+    assert.equal(res.reason, "not-ours");
     assert.equal(res.pid, 4242);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -336,7 +382,7 @@ test("terminate: pid 0 and 1 are never signalled (0 = our own group, 1 = init)",
       writeFileSync(join(dir, "pid"), dangerous);
       assert.deepEqual(
         terminateJudgeSession(paths(dir), () => { throw new Error("must not be called"); }),
-        { signalled: false },
+        { signalled: false, reason: "no-pid" },
         `pid ${dangerous} must never be signalled`,
       );
     }
@@ -429,8 +475,14 @@ const launcherIntegration = test("tmux integration: the generated launcher recor
     execFileSync("tmux", ["send-keys", "-t", pane, "Enter"], { encoding: "utf8" });
 
     // --- after it ENDS ---
-    for (let i = 0; i < 80 && !existsSync(files.exitCodePath); i++) await new Promise((r) => setTimeout(r, 50));
-    assert.ok(existsSync(files.exitCodePath), "the exit code was recorded after the child returned");
+    // Wait for CONTENT, not merely for the file to appear: `printf` creates it
+    // and fills it as two observable steps, and an empty exit-code reads as
+    // "not recorded yet" (which it accurately is).
+    const exitRecorded = (): boolean => {
+      try { return readFileSync(files.exitCodePath, "utf8").trim() !== ""; } catch { return false; }
+    };
+    for (let i = 0; i < 80 && !exitRecorded(); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(exitRecorded(), "the exit code was recorded after the child returned");
     assert.equal(readFileSync(inputFile, "utf8"), "interactive-input-reaches-pi", "the child received the keystrokes");
     const ended = readJudgeSessionState(files);
     assert.equal(ended.lifecycle, "finished");
