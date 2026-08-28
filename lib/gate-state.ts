@@ -16,8 +16,10 @@
  *  - "No checks run" (precommit NO_CHECKS_RUN) = not passed (PR #7 lesson 3).
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { writeFileAtomic } from "./atomic-write.ts";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
@@ -501,12 +503,9 @@ export const FINGERPRINT_MIGRATION_NOTICE =
 
 export function saveSidecar(path: string, state: GateState): void {
   state.updatedAt = new Date().toISOString();
-  mkdirSync(dirname(path), { recursive: true });
   // Atomic write: temp + rename, so a crashed write can't leave a truncated
-  // JSON that a fail-open parser might half-read.
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
-  renameSync(tmp, path);
+  // JSON that a fail-open parser might half-read (lib/atomic-write.ts).
+  writeFileAtomic(path, JSON.stringify(state, null, 2) + "\n");
 }
 
 /**

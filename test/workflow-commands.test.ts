@@ -193,11 +193,21 @@ test("the waiting discipline never teaches a `tmux wait-for -t` timeout (there i
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   for (const rel of [["skills", "review-loop", "SKILL.md"], ["AGENTS.md"]]) {
     const text = readFileSync(join(root, ...rel), "utf8");
-    const bad = text.match(/tmux wait-for -t \d/g) ?? [];
-    const inWarning = /没有\s*\*{0,2}\s*`?-t`?\s*超时选项/.test(text);
-    if (bad.length > 0) {
-      assert.ok(inWarning, `${rel.join("/")} mentions \`wait-for -t\` — only allowed as the documented WARNING`);
-    }
+    // Round-17 P2 (reviewer): a file-wide "is the warning present somewhere"
+    // check does NOT bite — the reviewer re-added the busy loop as a
+    // RECOMMENDATION and the suite stayed green. Judge each occurrence IN
+    // PLACE: the line carrying `wait-for -t` (or the line before it, since the
+    // docs wrap) must itself mark the form as broken.
+    const lines = text.split("\n");
+    const NEGATIVE = /没有|不是|空转|报错|unknown flag|——就是|错误/;
+    lines.forEach((line, i) => {
+      if (!/tmux wait-for -t \d/.test(line)) return;
+      // The LINE ITSELF must mark it broken. Looking at neighbours is too weak:
+      // the surrounding discipline text says 空转/错误 for its own reasons, which
+      // let a freshly added recommendation inherit an innocent-looking context.
+      assert.match(line, NEGATIVE,
+        `${rel.join("/")}:${i + 1} teaches \`wait-for -t\` without marking it broken ON THAT LINE — that flag does not exist`);
+    });
     assert.match(text, /tmux wait-for\s+<(doneChannel|chan)>/, `${rel.join("/")} keeps the flagless blocking form`);
   }
 });

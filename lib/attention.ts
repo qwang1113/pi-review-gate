@@ -22,8 +22,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { writeFileAtomic } from "./atomic-write.ts";
 import { homedir } from "node:os";
 
 /** The well-known bell channel. Content-free by design — payload is in the file. */
@@ -119,17 +121,12 @@ function saveEvents(events: AttentionEvent[], deps: AttentionDeps): void {
       deps.writeState(raw);
       return;
     }
-    const path = deps.statePath ?? defaultStatePath();
-    mkdirSync(dirname(path), { recursive: true });
-    // Round-17 Nit (reviewer): write ATOMICALLY. The bell wakes every listener
-    // at once, so concurrent read-modify-writes overlap; a torn file used to
-    // parse as empty and silently drop pending events. rename(2) within the
-    // same directory is atomic, so a reader sees either the old or the new
-    // file, never a half-written one. (A duplicate wake remains possible —
-    // acceptable for a convenience channel; losing events was not.)
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, raw);
-    renameSync(tmp, path);
+    // Round-17 Nit (reviewer): write ATOMICALLY, through the shared helper.
+    // The bell wakes every listener at once, so concurrent read-modify-writes
+    // overlap; a torn file used to parse as empty and silently drop pending
+    // events. (A duplicate wake remains possible — acceptable for a
+    // convenience channel; losing events was not.)
+    writeFileAtomic(deps.statePath ?? defaultStatePath(), raw);
   } catch {
     /* best-effort: attention is a convenience, never a gate */
   }
