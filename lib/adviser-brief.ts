@@ -3,7 +3,7 @@
  *
  * Goal criterion 3 (adviser conclusion storage + injection): the gate hands
  * the main agent a ready-made adviser task template carrying (a) the main
- * session's transcript path — the adviser runs `context:"fresh"` and reads it
+ * session's transcript path — the adviser is its own pi process and reads it
  * ON DEMAND instead of inheriting a fork of the whole conversation — and
  * (b) the artifact path where the adviser appends its own conclusion. The
  * NEXT consultation of the same goal reads that file back and injects the
@@ -135,7 +135,7 @@ export interface AdviserBriefInput {
 }
 
 /**
- * Build the task text the main agent pastes into its `adviser` subagent call.
+ * Build the task text the main agent sends to its `adviser` tmux judge child.
  *
  * First consultation of a goal: full brief. Later ones: the previous verdict
  * and points ride along, changed files are called out, and the adviser is told
@@ -146,10 +146,7 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
   const lines = [
     "You are `adviser`, consulting on the CURRENT loop goal of the main session.",
     "",
-    "Spawn this adviser with `context: \"fresh\"` explicitly (round-10 P1: a global",
-    "defaultSubagentContext would override the agent's own defaultContext).",
-    "",
-    "CONTEXT MODEL (incremental, not fork): you run with `context:\"fresh\"` — the",
+    "CONTEXT MODEL: you run as a tmux judge child — your own pi process, so the",
     "main session's conversation is NOT inherited. Read it on demand instead:",
     `- session dir: ${input.sessionDir}`,
     `- session id:  ${input.sessionId} (find the file named <timestamp>_${input.sessionId}.jsonl, grep/read the parts you need)`,

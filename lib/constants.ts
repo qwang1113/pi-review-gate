@@ -198,5 +198,5 @@ export const STRATEGIC_RESET_CHECKLIST =
   "2) Challenge the current assumption — what if the opposite is true?\n" +
   "3) Search the codebase for similar patterns that are already solved.\n" +
   "4) Consider a fundamentally different approach, not an incremental fix.\n" +
-  "5) Consult the adviser subagent with the full problem statement.\n" +
+  "5) Consult the adviser (a tmux judge child) with the full problem statement.\n" +
   "If still blocked at the cap, escalate to the user.";

@@ -3622,7 +3622,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "prepare_adviser",
     label: "Prepare Adviser Brief",
     description:
-      "Hand back the ready-made task text for an `adviser` subagent consultation on the CURRENT loop goal. " +
+      "Hand back the ready-made task text for an `adviser` consultation on the CURRENT loop goal — the adviser runs as a tmux judge child (`review_spawn`), not as a subagent. " +
       "Call this before dispatching `adviser`: the brief carries (a) the main session's transcript location " +
       "for ON-DEMAND reading (the adviser runs context:\"fresh\" — it no longer inherits a fork of this " +
       "conversation), (b) the artifact path where the adviser appends its conclusion, and (c) when a " +
@@ -3975,7 +3975,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // break the tie). Plateau below stays for the stuck-on-same-finding case.
         loopArmed = false;
         note = ` Oscillation detected (${countOscillations(st.rounds)} READY→BLOCKED flips) — ` +
-          "the review is not converging. Escalate to the user or consult the adviser subagent " +
+          "the review is not converging. Escalate to the user or consult the adviser (a tmux judge child) " +
           "instead of burning more rounds.";
       } else if (isPlateaued(st.rounds, PLATEAU_ROUNDS)) {
         loopArmed = false;
@@ -4343,7 +4343,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "record_goal_prereview",
     label: "Record Goal Pre-review",
     description:
-      "Record the dedicated `goal-auditor` subagent's audit of a DRAFT loop goal. propose_loop_goal " +
+      "Record the dedicated `goal-auditor` judge child's audit of a DRAFT loop goal. propose_loop_goal " +
       "refuses to show the user's approval dialog until this records a PASS for the IDENTICAL text, " +
       "so the flow is: draft (in Simplified Chinese) → call `prepare_goal_audit` for the ready-made " +
       "auditor task (carryover + draft delta on a re-audit) → dispatch goal-auditor with it → record " +
@@ -4354,7 +4354,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       "text (its hash differs, so it needs its own PASS).",
     parameters: Type.Object({
       goal: Type.String({ description: "The FULL draft goal text that was audited (the exact text you will submit)" }),
-      auditor_output: Type.String({ description: "Complete raw output from the goal-auditor subagent" }),
+      auditor_output: Type.String({ description: "Complete raw output from the goal-auditor judge child" }),
       repo: Type.Optional(Type.String({
         description:
           "Absolute path of the repo this goal binds to (default: the session repo) — must match the " +
@@ -6710,7 +6710,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             "declare_done and git commit/push/gh pr require EVERY edited repo to pass its own review + precommit " +
             "before shipping.\n"
           : "") +
-        "You are ENCOURAGED to proactively consult the `adviser` subagent (a stronger, " +
+        "You are ENCOURAGED to proactively consult the `adviser` judge child (a stronger, " +
         "independent second opinion, pinned to a top-tier model at max thinking) BEFORE " +
         "and DURING non-trivial, ambiguous, or risky work \u2014 consulting early is cheaper " +
         "than a failed review later. The `reviewer` (also a top-tier model at max) is the " +

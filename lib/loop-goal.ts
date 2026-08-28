@@ -239,8 +239,9 @@ export function buildGoalAuditTask(
   const lines = [
     "You are goal-auditor. Audit the draft loop goal below as the exit contract for this session.",
     "",
-    "Spawn this auditor with `context: \"fresh\"` explicitly (round-10 P1: a global",
-    "defaultSubagentContext would override the agent's own defaultContext).",
+    "You run as a tmux judge child: your own pi process, with none of the main",
+    "session's conversation. Everything you need is in this task text, plus the",
+    "repository and the transcript pointer below.",
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
     "===== 待审计的 goal 草稿 =====",
@@ -260,7 +261,7 @@ export function buildGoalAuditTask(
     ...(opts.sessionDir && opts.sessionId
       ? [
           "",
-          `You run context:\"fresh\" — if the audit needs the main session's conversation, read it on demand from ${opts.sessionDir} (file named <timestamp>_${opts.sessionId}.jsonl).`,
+          `You do NOT inherit the main session's conversation — if the audit needs it, read it on demand from ${opts.sessionDir} (file named <timestamp>_${opts.sessionId}.jsonl).`,
         ]
       : []),
     "",
@@ -394,7 +395,7 @@ export function buildGoalPrereviewRefusal(ctx: GoalPrereviewRefusalContext): str
     "dedicated `goal-auditor` audit of THIS exact text passes.\n" +
     "Recovery path: revise the draft against the objections → call `prepare_goal_audit` with the revised " +
     "draft (it returns the ready-made auditor task with the carryover + draft delta) → dispatch the " +
-    "`goal-auditor` subagent with that task → record its FULL raw output with `record_goal_prereview` → " +
+    "`goal-auditor` as a tmux judge child (`review_spawn`) with that task → record its FULL raw output with `record_goal_prereview` → " +
     "again with the identical text.\n" +
     "The goal text submitted to the user must be written in Simplified Chinese (technical identifiers, tool " +
     "names, file paths and code tokens stay English) — the auditor blocks a draft that is not.\n" +
@@ -477,7 +478,7 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
   "question per turn, labeled \"N of M\", each with your recommended answer — all at once only " +
   "when the user asks for it), draft it in Simplified Chinese (identifiers, paths and code " +
   "tokens stay English), call `prepare_goal_audit` with that exact draft and dispatch the " +
-  "`goal-auditor` subagent with its ready-made task, then record its full raw output with " +
+  "`goal-auditor` as a tmux judge child with its ready-made task, then record its full raw output with " +
   "`record_goal_prereview` — propose_loop_goal is refused without a recorded " +
   "PASS for the identical text — then call propose_loop_goal so the USER can " +
   "approve it in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
@@ -497,7 +498,7 @@ export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
   "Negotiate it first: interview the user about what \"done\" means (ONE question per turn, " +
   "labeled \"N of M\", each with your recommended answer), write the goal in Simplified Chinese " +
   "(technical identifiers, paths and code tokens stay English), call `prepare_goal_audit` with " +
-  "that exact draft, dispatch the `goal-auditor` subagent with its ready-made task, and record its " +
+  "that exact draft, spawn the `goal-auditor` as a tmux judge child with its ready-made task, and record its " +
   "full raw output with " +
   "`record_goal_prereview` — propose_loop_goal refuses to show the user's dialog without a " +
   "recorded PASS for the identical text (a FAIL means: fix the objections and re-audit). Then " +
@@ -591,7 +592,7 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "ISO date.\n" +
   "3. PRE-REVIEW it mechanically: call `prepare_goal_audit` with the draft to get the ready-made " +
   "auditor task (it carries the carryover + draft delta when this is a re-audit of a revised " +
-  "draft), dispatch the dedicated `goal-auditor` subagent with that task, then record its FULL " +
+  "draft), spawn the dedicated `goal-auditor` as a tmux judge child with that task, then record its FULL " +
   "raw output with `record_goal_prereview`. The " +
   "extension parses the auditor's JSON fence itself — a FAIL means fix the objections and " +
   "re-audit (the revised text needs its own PASS, the record binds to content).\n" +
@@ -661,9 +662,9 @@ export function buildLoopGoalDirective(goal: LoopGoal, confirmed = false): strin
       ? "⚠ This goal is older than 24h — it may be left over from a previous session. Confirm it " +
         "against what the user is asking for NOW, and renegotiate it if it no longer matches.\n"
       : "") +
-    "Work to these criteria and stop when they are all met. Paste the goal TEXT into every subagent " +
-    "task you spawn (an acceptance judge does not read the file itself — a snapshot carries no " +
-    "`.pi/`, and only a goal the user approved may become a contract): `adviser` advises against " +
+    "Work to these criteria and stop when they are all met. Paste the goal TEXT into every judge child " +
+    "and subagent task you spawn (an acceptance judge does not read the file itself — it does not " +
+    "inherit your context, and only a goal the user approved may become a contract): `adviser` advises against " +
     "the goal, `reviewer` accepts against it criterion by " +
     "criterion (an unmet criterion is a P1 finding ⇒ BLOCKED). Write-capable subagents run " +
     "SERIALLY in this worktree; read-only ones may run in parallel. If the goal no longer matches " +

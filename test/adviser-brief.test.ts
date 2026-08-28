@@ -16,8 +16,12 @@ const base = {
 
 test("first consultation: full brief with transcript pointer + artifact path", () => {
   const text = buildAdviserBrief(base);
-  // Fresh-context contract: session dir + id for ON-DEMAND reads.
-  assert.match(text, /context:"fresh"/);
+  // Fresh-context contract: session dir + id for ON-DEMAND reads. Pinned as the
+  // FACT (no inherited conversation), not as the subagent parameter it used to
+  // be phrased in — the adviser is a tmux judge child, which has no such knob.
+  assert.match(text, /conversation is NOT inherited/);
+  assert.doesNotMatch(text, /context:\s*"fresh"/,
+    "no subagent-only parameter may be prescribed to a judge child");
   assert.match(text, /--repo--/);
   assert.match(text, /sess-9/);
   // The conclusion artifact is named and the write is explicit.

@@ -1,16 +1,17 @@
 /**
  * Review contract — the ONE reviewer per round, and what it is told.
  *
- * Every review round is a single reviewer over the WHOLE change, holding its
- * OWN disposable snapshot (created by the extension's `prepare_review`), and
- * its verdict is the only one the gate records (`record_review` parses every
- * fence; worst verdict wins if multiple appear).
+ * Every review round is a single reviewer over the WHOLE change, judging an
+ * IMMUTABLE COMMIT RANGE (`baseline..HEAD`, registered by the extension's
+ * `prepare_review`), and its verdict is the only one the gate records
+ * (`record_review` parses every fence; worst verdict wins if multiple appear).
  *
- * NO ENGINE HERE. Reviews are dispatched by the extension (`prepare_review` +
- * plain subagents), because the pdw engine discards a per-agent `cwd` and a
- * reviewer must hold its OWN snapshot of the change it judges. Every function
- * in this file is pure over strings, so the reviewer contract can be pinned by
- * tests with no workflow engine, no git and no filesystem.
+ * NO ENGINE HERE. The reviewer runs as a tmux judge child — its own pi process
+ * (`review_spawn`) — and judge-role subagent dispatch is hard-blocked, because
+ * that sandbox has no per-child isolation and would land the judge in the live
+ * worktree. Every function in this file is pure over strings, so the reviewer
+ * contract can be pinned by tests with no workflow engine, no git and no
+ * filesystem.
  */
 
 /**
@@ -132,8 +133,8 @@ export function extractPrecommitBaseline(
 }
 
 
-// Pure module: no engine, no snapshots, no I/O. Reviews are dispatched by the
-// extension (prepare_review + subagents); this file only decides WHAT to say
+// Pure module: no engine, no I/O. The extension spawns the reviewer as a tmux
+// judge child (prepare_review + review_spawn); this file only decides WHAT to say
 // to the reviewer and what verdict shape to hand it as its outputSchema.
 import { buildStreamDirective } from "./review-stream.ts";
 
@@ -147,10 +148,10 @@ export interface ReviewVerdict {
   /**
    * The directory the reviewer ACTUALLY ran in, from its own `pwd`.
    *
-   * Second, independent piece of evidence that the reviewer was inside the
-   * snapshot prepared for it (the first is the spawn the gate observed). It
-   * also catches the case the spawn guard cannot see: a reviewer pointed at its
-   * snapshot correctly that then `cd`-ed into the live worktree. The prompt
+   * Second, independent piece of evidence that the reviewer really is the
+   * judge child the gate spawned (the first is the spawn itself): the value
+   * must match the pane's own working directory. It also catches the case the
+   * spawn guard cannot see — a judge that `cd`-ed somewhere else. The prompt
    * insists on a real `pwd` rather than copying the path out of the task text,
    * because a copied value proves nothing.
    */
@@ -184,7 +185,7 @@ export const REVIEW_VERDICT_SCHEMA = {
       type: "string",
       description:
         "Absolute path you actually ran in, taken from your own `pwd` — not copied from the task text. " +
-        "The gate checks it against the snapshot prepared for you.",
+        "The gate checks it against the pane it spawned you in.",
     },
     docSync: { type: "string", enum: ["UPDATED", "NOT_NEEDED"] },
     findings: {
@@ -203,7 +204,7 @@ export const REVIEW_VERDICT_SCHEMA = {
     notes: { type: "string" },
   },
   // `cwd` is REQUIRED: it is one of the two independent proofs that the
-  // reviewer ran inside its snapshot, and an optional field would simply be
+  // reviewer is the judge child the gate spawned, and an optional field would simply be
   // omitted by the models that most need to be checked.
   required: ["gate", "cwd", "docSync", "findings"],
 } as const;
@@ -211,14 +212,14 @@ export const REVIEW_VERDICT_SCHEMA = {
 /**
  * Build the review prompt handed to the ONE reviewer.
  *
- * `isolation` is the SAFETY-CRITICAL argument. A reviewer that got its own
- * snapshot may edit and mutate freely; a reviewer running in the LIVE worktree
- * (isolation unavailable) must be told the opposite, because the engine-level
- * denylist only removes the edit/write TOOLS — `bash` stays, and a reviewer
- * that had been promised "you are in a disposable copy" would happily rewrite
- * the user's files through it. Omitting the argument therefore means "no
- * snapshot": the read-only contract is the DEFAULT, and the permissive one has
- * to be granted explicitly.
+ * `isolation` is the SAFETY-CRITICAL argument. It says the reviewer runs as
+ * its own judge child, so it may check the reviewed range out into a THROWAWAY
+ * worktree and mutate freely there; a reviewer with no isolation must be told
+ * the opposite, because the engine-level denylist only removes the edit/write
+ * TOOLS — `bash` stays, and a reviewer that had been promised "you may edit
+ * freely" would happily rewrite the user's files through it. Omitting the
+ * argument therefore means "no isolation": the read-only contract is the
+ * DEFAULT, and the permissive one has to be granted explicitly.
  */
 export function buildReviewPrompt(
   label: string,
@@ -281,9 +282,10 @@ export function buildReviewPrompt(
   ];
   if (streamPath) lines.push("", buildStreamDirective(streamPath));
   // NOTE: the `diff` field and its prompt block are gone. Nothing produces a
-  // per-reviewer diff any more, and nothing should: the reviewer holds a snapshot
-  // of the change, so it runs `git diff HEAD` against the real thing instead of
-  // reading a copy that may have drifted. Keeping a dead field invites someone
+  // per-reviewer diff any more, and nothing should: the reviewer judges an
+  // immutable commit range, so it runs `git show` / `git diff baseline..HEAD`
+  // against real history instead of reading a copy that may have drifted.
+  // Keeping a dead field invites someone
   // to "restore" the weaker path.
   if (goalText && goalText.trim()) {
     lines.push("", "Loop goal (accept the change against it, criterion by criterion):", goalText.trim());

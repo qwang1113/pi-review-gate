@@ -164,7 +164,7 @@ test("an APPROVED goal is injected verbatim with the acceptance contract attache
   // already pinned (extension-structure / workflow-commands); this one, the most
   // frequently injected of the three, was not, and the stale wording survived
   // several rounds because of it.
-  assert.match(text, /Paste the goal TEXT into every subagent task/);
+  assert.match(text, /Paste the goal TEXT into every judge child (?:\n\s*)?and subagent task/);
   assert.doesNotMatch(text, /[Hh]and this file to every subagent/, "the goal travels as text, not as a file path");
   assert.doesNotMatch(text, /older than 24h/);
   // The file content is repo data, not gate instructions: it must be framed so

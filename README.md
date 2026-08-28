@@ -1025,9 +1025,10 @@ one fact:
   `propose_loop_goal`. The confirm dialog no longer asks
   for an optional reason (approval is the whole signal); a REJECTION still asks
   for the reason, which is carried back to the agent for renegotiation.
-  (One deliberate exception: a REVIEW SNAPSHOT session is inert — the L8 edit
-  gate does not block a reviewer's own mutation analysis inside its disposable
-  copy; the L1 sensitive-file floor and the bash ship gate stay active there.
+  (One deliberate exception: a judge child's own THROWAWAY worktree is inert —
+  the L8 edit gate does not block a reviewer's mutation analysis inside the
+  disposable checkout it made of the reviewed range; the L1 sensitive-file
+  floor and the bash ship gate stay active there.
   See `docs/subagents-collaboration.md` §5.)
 
 **What deliberately did NOT change.** The L3 git hooks and the verdict logic
