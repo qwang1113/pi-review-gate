@@ -368,13 +368,6 @@ async function commitsAheadOfBase(cwd: string): Promise<number> {
 export default function reviewGate(pi: ExtensionAPI) {
   let state: GateState = emptyState(null, DEFAULT_MAX_ROUNDS);
   let cwd = process.cwd();
-  /**
-   * Set when session_start runs inside a REVIEW SNAPSHOT worktree. The whole
-   * extension goes inert for that session: no state init, no sidecar writes,
-   * and — critically — the tool_call/tool_result hooks must not run either,
-   * otherwise the L8 edit gate would block the reviewer's own mutation
-   * analysis inside its disposable copy (see session_start).
-   */
   let continuationsInjected = 0; // total auto-continuation injections (persisted)
   // L2 stall breaker (in-memory by design: a restart is itself a change of
   // circumstances, and a stale stall must never outlive the session).
@@ -3624,7 +3617,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     description:
       "Hand back the ready-made task text for an `adviser` consultation on the CURRENT loop goal — the adviser runs as a tmux judge child (`review_spawn`), not as a subagent. " +
       "Call this before dispatching `adviser`: the brief carries (a) the main session's transcript location " +
-      "for ON-DEMAND reading (the adviser runs context:\"fresh\" — it no longer inherits a fork of this " +
+      "for ON-DEMAND reading (as its own pi process the adviser does not inherit this " +
       "conversation), (b) the artifact path where the adviser appends its conclusion, and (c) when a " +
       "previous consultation of this goal exists, that conclusion plus the files changed since, so the " +
       "adviser settles what already stands instead of re-arguing it from zero. First consultation of a " +
@@ -3886,6 +3879,31 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         if (staleTarget) parsed.verdict = "BLOCKED";
       }
+      // THE cwd PROOF IS NOW ACTUALLY CHECKED (round-9 P1, reviewer-
+      // reproduced). The verdict schema and the task text have always demanded
+      // a real `pwd` and promised the gate matches it against the pane the
+      // judge was spawned in — but nothing did, so a fence claiming
+      // `/evil/elsewhere` produced exactly the same READY. An identity proof
+      // nobody verifies is worse than none, because it is believed.
+      //
+      // The judge pane is spawned with `cwd: root`, so the expected answer is
+      // this repo's root. Compared through realpath, because /var vs /private/var
+      // (macOS) would otherwise fail a perfectly honest reviewer.
+      let cwdMismatch: string | undefined;
+      if (parsed.verdict === "READY") {
+        const claimed = parsed.cwd;
+        if (claimed === undefined || claimed.trim() === "") {
+          cwdMismatch = "the verdict carries no `cwd` (a required field: run `pwd` and report it)";
+        } else {
+          // canonicalPath exists for exactly this: /var vs /private/var would
+          // otherwise withhold an honest reviewer's READY.
+          if (canonicalPath(claimed) !== canonicalPath(targetRoot)) {
+            cwdMismatch = `the verdict's cwd ${JSON.stringify(claimed)} is not the repo the judge was spawned in (${targetRoot})`;
+          }
+        }
+        if (cwdMismatch) parsed.verdict = "BLOCKED";
+      }
+
       const bindTree = parsed.verdict === "READY" ? reviewTargets.get(targetRoot)?.tree ?? null : null;
       st.review = {
         verdict: parsed.verdict,
@@ -3939,8 +3957,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(recorded.blockingFiles.length > 0 ? { blockingFiles: recorded.blockingFiles } : {}),
       });
       // Observability: what this round cost and how much of the change it had
-      // to judge. The duration is an UPPER BOUND — the reviewer is a subagent
-      // the extension never sees, so all it can measure is the wall clock
+      // to judge. The duration is an UPPER BOUND — the reviewer is its own pi
+      // process in a pane, which the extension does not watch turn by turn,
+      // so all it can measure is the wall clock
       // since the previous gate event (see lib/gate-timings.ts).
       appendTiming(targetRoot, {
         kind: "review",
@@ -4001,6 +4020,12 @@ export default function reviewGate(pi: ExtensionAPI) {
                 "review runs: those fixes are already in, so the next round is short. Re-review the " +
                 "current head (review_checkpoint → prepare_review → review_spawn → record_review)."
               : "") +
+            (cwdMismatch
+              ? `\nCWD PROOF FAILED: ${cwdMismatch}. The verdict schema requires the judge's own \`pwd\`, ` +
+                "and the gate matches it against the repo the judge child was spawned in — a READY that " +
+                "cannot prove where it was produced is recorded as BLOCKED. If the reviewer ended inside " +
+                "its throwaway worktree, have it report the spawn cwd (the shared repo root) instead."
+              : "") +
             (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : ""),
         }],
         details: {
@@ -4013,7 +4038,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- review tooling: change collection + snapshot materialization ----------
+  // ---------- review tooling: change collection ----------
 
   /** Collect changed files: tracked edits vs HEAD plus untracked, repo-relative. */
   async function listChangedFiles(

@@ -339,15 +339,14 @@ export function buildReviewPrompt(
     // copied out of this prompt would prove nothing about where the review
     // actually happened, which is precisely the failure this field exists for.
     //
-    // The SECOND sentence is branch-specific. Promising "the gate checks it
-    // against the snapshot prepared for you" on the no-isolation branch
-    // contradicts the paragraph above it (which just said there is no snapshot
-    // this round) and could push a literal-minded reviewer into a needless
-    // non-READY.
+    // BOTH branches say the gate compares it, because since round-9 it
+    // actually does — `record_review` matches the reported cwd against the
+    // repo the judge child was spawned in and downgrades a READY that cannot
+    // prove where it ran. Telling the reviewer otherwise on one branch would
+    // be the same class of lie this field exists to catch.
     'Before you answer, run `pwd` and put its output in the verdict\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
-      (isolation
-        ? " The gate matches it against the pane it spawned you in (the shared repo root)."
-        : " This only records where you read; the gate does not match it against one."),
+      " The gate matches it against the repo you were spawned in" +
+      (isolation ? " (the shared repo root)." : "."),
     // eslint-disable-next-line max-len
     'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "cwd": "<your real pwd>", "docSync": "UPDATED"|"NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",

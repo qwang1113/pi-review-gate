@@ -254,7 +254,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    later rounds = incremental: settled-and-unchanged material gets a
    consistency scan, not a re-derivation — it never narrows what a reviewer
    may look at, and a settled conclusion may always be reopened with
-   evidence. The reviewer runs `context:"fresh"`; the task text names the
+   evidence. The reviewer is its own pi process and inherits none of this
+   session's conversation; the task text names the
    main session's transcript to read ON DEMAND when the conversation
    matters, instead of inheriting it.
 

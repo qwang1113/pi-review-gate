@@ -20,6 +20,16 @@ export interface ParsedVerdict {
    * blocks when enforcement is on, it never passes).
    */
   docSync?: DocSyncAttestation;
+  /**
+   * The directory the reviewer says it ran in (its own `pwd`), verbatim.
+   *
+   * Carried through so the GATE can check it. The verdict schema and the task
+   * text both promise that check, and until round-9 nothing performed it: a
+   * fence claiming any cwd at all parsed to the same READY (reviewer-
+   * reproduced with `/evil/elsewhere`). Identity evidence nobody verifies is
+   * worse than none, because it is believed.
+   */
+  cwd?: string;
 }
 
 interface FenceVerdict {
@@ -28,6 +38,7 @@ interface FenceVerdict {
   findingFingerprints: string[];
   hasP0P1: boolean;
   docSync?: DocSyncAttestation;
+  cwd?: string;
 }
 
 const SEVERITY: Record<string, number> = { BLOCKED: 3, NEEDS_HUMAN: 2, READY: 1 };
@@ -179,7 +190,11 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
     docSync = docSyncRaw.trim().toUpperCase() as DocSyncAttestation;
   }
 
-  return { verdict, findingsTotal, findingFingerprints: fingerprints, hasP0P1, docSync };
+  // `cwd` travels verbatim — the gate compares it, this parser does not judge it.
+  const cwdRaw = obj.cwd;
+  const cwd = typeof cwdRaw === "string" && cwdRaw.trim() !== "" ? cwdRaw.trim() : undefined;
+
+  return { verdict, findingsTotal, findingFingerprints: fingerprints, hasP0P1, docSync, cwd };
 }
 
 /**
@@ -209,6 +224,7 @@ export function parseReviewOutput(text: string): ParsedVerdict | undefined {
     findingsTotal: result.findingsTotal,
     findingFingerprints: result.findingFingerprints,
     docSync: result.docSync,
+    cwd: result.cwd,
   };
 }
 

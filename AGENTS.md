@@ -219,8 +219,9 @@ re-derivation — it never narrows what a reviewer may look at, and a settled
 conclusion may always be reopened with evidence. This is the INCREMENTAL
 review contract: first round full, later rounds focused on the increment.
 (b2) **Fresh context, read on demand — MECHANICALLY.** The three review
-roles (reviewer, adviser, goal-auditor) run `context:"fresh"` — they never
-fork the main session's whole conversation. Their task text carries the
+roles (reviewer, adviser, goal-auditor) each run as their OWN pi process in a
+tmux pane — they never
+inherit the main session's conversation. Their task text carries the
 transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
 to grep on demand. `prepare_adviser` hands back the adviser's ready-made
 brief: transcript pointer + a conclusion artifact the adviser appends to,

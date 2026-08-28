@@ -1456,6 +1456,28 @@ test("round-17: review_spawn reuses an alive same-role child and drops dead pane
     "the killed pane leaves the registry");
 });
 
+/**
+ * Round-9 P1 (reviewer, reproduced with `/evil/elsewhere`): the verdict schema
+ * and the task text promised that the gate matches the reviewer's `cwd`
+ * against the pane it was spawned in — and nothing did. A promise of identity
+ * evidence that nobody checks is worse than no promise, because it is trusted.
+ */
+test("record_review actually enforces the cwd proof it demands", () => {
+  const at = SRC.indexOf('name: "record_review"');
+  assert.ok(at > 0, "record_review must be registered");
+  // Wide enough to reach the reply text: the check is near the top of the
+  // handler, the message that explains it is far below.
+  const body = SRC.slice(at, at + 14000);
+  assert.match(body, /parsed\.cwd/, "the claimed cwd is read from the parsed verdict");
+  assert.match(body, /canonicalPath\(claimed\) !== canonicalPath\(targetRoot\)/,
+    "…and compared with the repo the judge was spawned in, through realpath");
+  assert.match(body, /cwdMismatch = "the verdict carries no `cwd`/,
+    "a missing cwd is itself a failure (fail-closed), not a pass");
+  assert.match(body, /if \(cwdMismatch\) parsed\.verdict = "BLOCKED";/,
+    "a READY that cannot prove where it ran is downgraded");
+  assert.match(body, /CWD PROOF FAILED/, "and the agent is told why");
+});
+
 test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is only its screen", () => {
   // review_spawn must RECORD the session-side paths at spawn time. A reused
   // pane is rebound to each round's title while its pi process keeps writing

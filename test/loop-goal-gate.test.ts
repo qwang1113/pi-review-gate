@@ -756,7 +756,7 @@ test("L8: a NESTED independent repo is not unlocked by the primary repo's goal",
 });
 
 test("L8: snapshot ship gate holds when the snapshot IS the process cwd (real reviewer child)", async () => {
-  // A real reviewer subagent is a `pi` child process spawned with cwd = the
+  // A real reviewer child is a `pi` process spawned with cwd = the
   // snapshot, so primaryRepoRoot resolves to the snapshot root — the exact
   // scenario where returning the untouched empty state for the primary repo
   // let `git push` through (round P1). The in-process mock normally keeps

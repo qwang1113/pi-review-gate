@@ -84,7 +84,8 @@ test("round-16 P2: the inbox question channel is embedded at the end of the revi
 });
 
 test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no isolation is READ-ONLY", () => {
-  // Relative would land in the snapshot's own .pi/, where the main agent
+  // Relative would land in whatever directory the judge happens to be in — its
+  // own throwaway worktree, say — where the main agent
   // never looks: the stream would appear to work and deliver nothing.
   const isolated = buildReviewPrompt(
     "review",
@@ -99,7 +100,7 @@ test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no i
   assert.match(isolated, /abc123\.\.def456/);
   assert.match(isolated, /no edit\/write tools/);
 
-  // REGRESSION: without a snapshot the reviewer is in the USER'S worktree and
+  // REGRESSION: without isolation the reviewer is in the USER'S worktree and
   // the engine-level denylist only removes edit/write TOOLS — bash stays. A
   // prompt that still promised "disposable copy, edit freely" turned that into
   // a fail-open: the reviewer would rewrite the user's files through bash.
@@ -112,8 +113,8 @@ test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no i
 });
 
 test("REGRESSION: no pre-baked diff is ever pasted into a review prompt", () => {
-  // The reviewer holds a SNAPSHOT of the change, so it reads the real thing with
-  // `git diff HEAD`. The old path pasted a per-shard diff "for orientation" that
+  // The reviewer judges an immutable commit range, so it reads the real thing
+  // with `git show` / `git diff baseline..HEAD`. The old path pasted a per-shard diff "for orientation" that
   // could already have drifted; the field and the prompt block are gone, and
   // this test keeps them gone.
   const prompt = buildReviewPrompt(
@@ -147,10 +148,11 @@ test("REVIEW_VERDICT_SCHEMA is the shape handed to a spawned reviewer", () => {
   assert.ok(schema.required.includes("docSync"), "docSync must be required")
 });
 
-test("the verdict must carry the reviewer's REAL cwd (second proof of isolation)", () => {
-  // Evidence, not decoration: the gate matches this against the snapshot it
-  // prepared, which is how a reviewer that ran in the live worktree — or was
-  // pointed correctly and then `cd`-ed away — stops being able to approve.
+test("the verdict must carry the reviewer's REAL cwd (identity proof the gate enforces)", () => {
+  // Evidence, not decoration: since round-9 `record_review` matches this
+  // against the repo the judge child was spawned in and downgrades a READY
+  // that cannot prove where it ran (before that, nothing checked it and a
+  // fence claiming any path produced the same READY).
   const schema = REVIEW_VERDICT_SCHEMA as unknown as {
     properties: Record<string, { description?: string }>;
     required: readonly string[];
@@ -170,20 +172,22 @@ test("the verdict must carry the reviewer's REAL cwd (second proof of isolation)
   assert.match(prompt, /run `pwd`/);
   assert.match(prompt, /do NOT copy the path out of this task text/i);
   assert.match(prompt, /"cwd": "<your real pwd>"/);
-  assert.match(prompt, /matches it against the pane it spawned you in/);
+  assert.match(prompt, /matches it against the repo you were spawned in/);
 
-  // …and the NO-isolation branch must not promise a check that cannot happen:
-  // it just told the reviewer there is no snapshot this round.
+  // BOTH branches must promise the same thing, because the gate checks
+  // unconditionally. A branch that says "this is not checked" would be the
+  // very kind of unverified claim this field exists to catch.
   const bare = buildReviewPrompt("review", ["src/a.ts"]);
-  assert.match(bare, /run `pwd`/, "the pwd is still recorded without isolation");
-  assert.doesNotMatch(bare, /pane it spawned you in/,
-    "promising a pane check with no pane contradicts the same prompt");
-  assert.match(bare, /does not match it against one/);
+  assert.match(bare, /run `pwd`/, "the pwd is still demanded without isolation");
+  assert.match(bare, /matches it against the repo you were spawned in/,
+    "the promise is the same on both branches — the check is unconditional");
+  assert.doesNotMatch(bare, /does not match it against one/,
+    "the retired 'not checked' wording must not come back");
 });
 
 test("REGRESSION: this module is PURE — no engine, no snapshots, no I/O, no sharding", () => {
   // Review dispatch moved out of here on purpose: the engine dropped per-agent
-  // cwd, so isolation had to move to the caller (prepare_review + subagents).
+  // cwd, so spawning moved to the caller (prepare_review + review_spawn).
   // If engine or filesystem coupling ever comes back into this file, the
   // review path silently regains the collisions that made reviewer writes
   // unsafe. And the single-review contract has NO sharding left to plan.

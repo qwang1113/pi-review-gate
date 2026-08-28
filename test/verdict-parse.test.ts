@@ -266,6 +266,31 @@ test("parseFenceFileFindings: findings without a severity or a file are skipped"
   ]);
 });
 
+/**
+ * Round-9 P1 (reviewer, reproduced): the schema and the task text have always
+ * required the judge's own `pwd` and promised the gate matches it against the
+ * pane — but the parser DROPPED the field, so a fence claiming any cwd at all
+ * produced an identical READY. The parser now carries it verbatim; the gate
+ * does the comparing.
+ */
+test("cwd travels verbatim so the gate can check the judge's identity", () => {
+  const withCwd = parseReviewOutput('```json\n{"gate":"READY","cwd":"/repo/root","docSync":"NOT_NEEDED","findings":[]}\n```');
+  assert.equal(withCwd.cwd, "/repo/root");
+
+  // A dishonest value is NOT the parser's call — it must reach the gate intact.
+  const elsewhere = parseReviewOutput('```json\n{"gate":"READY","cwd":"/evil/elsewhere","docSync":"NOT_NEEDED","findings":[]}\n```');
+  assert.equal(elsewhere.cwd, "/evil/elsewhere");
+
+  // Absent / blank / non-string ⇒ absent, so the gate sees "no proof offered".
+  for (const fence of [
+    '```json\n{"gate":"READY","docSync":"NOT_NEEDED","findings":[]}\n```',
+    '```json\n{"gate":"READY","cwd":"   ","docSync":"NOT_NEEDED","findings":[]}\n```',
+    '```json\n{"gate":"READY","cwd":42,"docSync":"NOT_NEEDED","findings":[]}\n```',
+  ]) {
+    assert.equal(parseReviewOutput(fence).cwd, undefined, fence);
+  }
+});
+
 test("parseFenceFileFindings: unparseable fences are skipped, not fatal", () => {
   assert.deepEqual(parseFenceFileFindings("```json\n{broken\n```"), []);
   assert.deepEqual(parseFenceFileFindings("no fence"), []);
