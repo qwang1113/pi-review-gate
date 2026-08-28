@@ -240,7 +240,8 @@ turn 不结束;⚠️ `tmux wait-for` **没有 `-t` 超时选项**——`wait-fo
 以 `unknown flag -t` 在 7ms 内报错返回,包成 `while ! tmux wait-for -t 5 <chan>;
 do :; done` 就是空转轮询,实测 120 次循环仅 0.5s)、子会话是否已结束
 (`test -s <workDir>/exit-code`——2026-08-28 起 pane 会随 judge 一起消失,
-不再用 `#{pane_dead}`),
+不再用 `#{pane_dead}`;崩溃的子会话可能来不及写 exit-code,它同样算已结束——
+主会话按「记录的那个进程是否还在」判定,见 lib/judge-session.ts),
 以及它的 session jsonl 里是否已出现 verdict fence(子会话已产出结论但未发信号是
 实测过的失败模式);任一命中即结束等待并继续。(3) **禁止**用结束 turn 把
 唤醒责任交给子会话——子会话可能报错/崩溃/永远不发信号,而主会话是门禁的

@@ -1468,6 +1468,18 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
   assert.match(read, /readJudgeConclusion\(child\.sessionDir\)/,
     "the conclusion is parsed from the RECORDED session dir");
   assert.match(read, /readStderrTail\(child\.stderrPath\)/, "crash context survives the pane");
+
+  // Round-5 P1: the child snapshot must SUPPLY lastActivityAt. It was declared
+  // on the interface but never passed, so classifyChildren timed every judge
+  // from its spawn and called a still-streaming review "silent".
+  const settledAt = SRC.indexOf("const childSnapshots: ChildSnapshot[] = []");
+  assert.ok(settledAt > 0, "the snapshot construction must exist");
+  const snapshots = SRC.slice(settledAt, settledAt + 1600);
+  assert.match(snapshots, /lastActivityAt: lastActivityAt\(/,
+    "activity is read from the session's own writes, not left undefined");
+  assert.match(snapshots, /sessionDir: c\.sessionDir, stderrPath: c\.stderrPath/,
+    "…from the transcript and stderr of THAT child");
+  assert.match(snapshots, /\[c\.inboxPath\]/, "…and its inbox");
   assert.match(read, /const screen = running \? capturePane/,
     "the pane is only captured while the session is actually running");
 

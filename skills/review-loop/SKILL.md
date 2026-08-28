@@ -218,7 +218,10 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
          turn 不结束;
       b. 子会话已结束:`test -s <workDir>/exit-code`(2026-08-28 起 pane 会
          随 judge 一起消失,不再用 `#{pane_dead}` 判定;exit-code 的存在
-         就是"已结束"的权威事实,里面还带着退出码);
+         就是"已结束"的权威事实,里面还带着退出码)。
+         ⚠️ 崩溃的子会话可能**根本没来得及写 exit-code**——它同样是"已结束",
+         由主会话侧按「记录的那个进程是否还在」判定(见 lib/judge-session.ts);
+         手工探测时可用 `kill -0 <pid 文件里的第一段>` 作为补充判据;
       c. verdict 已产出但未发信号:子会话的 session jsonl 里已出现
          verdict fence(实测失败模式——子会话完成但忘记发完成信号,主会话空等);
       任一命中即结束等待:review_read 读取输出继续流程,或 review_close 后

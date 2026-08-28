@@ -103,6 +103,7 @@ import {
   readJudgeSessionState,
   readJudgeConclusion,
   readStderrTail,
+  lastActivityAt,
   terminateJudgeSession,
 } from "../lib/judge-session.ts";
 import { polishReasonRequired, recordedFindingsFrom } from "../lib/polish-gate.ts";
@@ -5882,6 +5883,15 @@ export default function reviewGate(pi: ExtensionAPI) {
             const s = readJudgeSessionState({ pidPath: c.pidPath, exitCodePath: c.exitCodePath });
             return s.lifecycle === "running" || s.lifecycle === "unknown";
           })(),
+          // Round-5 P1: this was NEVER supplied, so every child was timed from
+          // its spawn and any review longer than STALL_MOTION_MAX_AGE_SEC was
+          // declared silent — while it was still streaming findings. The
+          // session's own writes (transcript above all, plus stderr and inbox)
+          // are the evidence that it is working.
+          lastActivityAt: lastActivityAt(
+            { sessionDir: c.sessionDir, stderrPath: c.stderrPath },
+            [c.inboxPath],
+          ),
         });
         doneChannelsByPane.set(c.paneId, c.doneChannel);
       }

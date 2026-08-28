@@ -61,12 +61,14 @@
 ## 贯穿机制
 
 - **状态同步（主动唤醒，非轮询）**：子会话完成时按协议执行 `tmux wait-for -S <chan>`（通过 bash）。
-  主会话每轮发送任务后调用 **`review_watch`**（参数：channel、可选 label）注册后台监听——
-  扩展在进程内 `waitForSignalAsync` 等待信号，exit 回调调用
+  `review_spawn` **自动注册**该监听（done 与 inbox 两条），`review_watch` 只在需要自定义 label
+  时才手动调用——扩展在进程内 `waitForSignalAsync` 等待信号，exit 回调调用
   `pi.sendMessage({customType:"review-gate", ...}, { triggerTurn: true, deliverAs: "steer" })`，
   主会话空闲时立即被唤醒（官方 file-trigger 模式），不需要轮询或碰巧检查。
-  session_shutdown 时取消全部监听。子会话退出/崩溃由 `tmux set-hook -t <pane> pane-exited` 通知，
-  wait 超时后查 `paneAlive` 兜底。子会话有疑问时写入
+  session_shutdown 时取消全部监听。**完成信号只是加速器**：子会话退出/崩溃由它自己的落盘物判定
+  （`exit-code` 存在，或记录的进程已不在——死了、或 pid 被复用给了别人；见
+  `lib/judge-session.ts`），不再依赖 `pane-exited` hook 或 `paneAlive`——pane 现在随 judge
+  一起消失，本就无从探测。子会话有疑问时写入
   inbox 文件（`.pi/tmux-sessions/<id>/inbox.jsonl`），主会话读到后回复。
 - **消息送达（单行 + 文件）**：pi TUI 会把粘贴的多行文本按行拆成多条消息，所以任务文本一律落盘
   （`.pi/tmux-sessions/<id>/task-<n>.md`），send 只发单行指令（"读取文件 X 并执行"）。

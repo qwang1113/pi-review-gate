@@ -120,7 +120,7 @@ export function buildChildWaitNotice(
       ...verdict.terminated.map(({ child, reason }) =>
         `- ${child.role} ${child.title}（pane ${child.paneId}）— ${
           reason === "session-ended"
-            ? "pi 会话已结束（exit-code 已落盘或 pid 已消失）"
+            ? "pi 会话已结束（exit-code 已落盘，或记录的那个进程已不在）"
             : "静默超过上限"
         }。用 review_read 读取它已产出的输出：有结论就据此继续（record_review / record_goal_prereview），没有结论就 review_close 后重新派发。`,
       ),

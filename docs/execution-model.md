@@ -132,11 +132,16 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   `pause_for_question` 等待用户回答、所有门禁与 goal 均完成。
 - **子会话终止的三条独立判据**（round-18，实测失败模式：子会话已输出 verdict
   但未发完成信号，主会话阻塞空等）：(a) done channel 信号；(b) **pi 会话已结束**
-  （`exit-code` 文件出现，或记录的 `pid` 已消失——2026-08-28 起不再用
+  （`exit-code` 文件出现，或**记录的那个进程已不在**——死了，或该 pid 已被
+  系统复用给别人，启动时刻对不上；2026-08-28 起不再用
   `#{pane_dead}`：pane 已随 judge 一起消失，且启动即崩的 judge 本就无 pane
   可查）；(c) 静默超过
-  `STALL_MOTION_MAX_AGE_SEC`（lib/loop-stall.ts，600 秒，按 spawnedAt/
-  lastActivityAt 计时）。任一命中主会话自行恢复推进——子会话的完成信号是
+  `STALL_MOTION_MAX_AGE_SEC`（lib/loop-stall.ts，600 秒）。这条按
+  `lastActivityAt` 计时，而它取自**子会话自己的写入**（transcript / stderr /
+  inbox 中最新的 mtime）；只有一次都没写过时才回退到 `spawnedAt`。曾经没有
+  任何地方提供 `lastActivityAt`，于是一律按 spawnedAt 计时——**超过 10 分钟
+  的 review 会被误判为静默，哪怕它正在流式输出 findings**（实测遇到过）。
+  任一命中主会话自行恢复推进——子会话的完成信号是
   **加速器，不是前提**。
 - **结论取数**：子会话仍在运行时读 pane 屏幕；**已结束时读它自己的 transcript**
   ——`sessionDir`（**启动时记录**，绝不按当前 title 反推：复用 pane 会重绑

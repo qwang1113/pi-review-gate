@@ -324,6 +324,39 @@ export function readJudgeConclusion(sessionDir: string): JudgeConclusion {
   return { text: texts[texts.length - 1]!, hasVerdict: false, transcriptPath };
 }
 
+/**
+ * When did this session last show a sign of life?
+ *
+ * WHY THIS EXISTS (round-5 P1, reviewer — and observed in this very session).
+ * `classifyChildren` ends a wait when a child has been silent past
+ * `STALL_MOTION_MAX_AGE_SEC`, measured from `lastActivityAt` and falling back
+ * to `spawnedAt`. Nothing ever SUPPLIED `lastActivityAt`, so every judge was
+ * timed from its spawn: any review lasting longer than the bound was declared
+ * silent while it was still streaming findings. The main session then reports
+ * a working judge as stalled.
+ *
+ * The evidence is what the session writes as it works — its transcript above
+ * all (every assistant turn appends to it), plus stderr and the inbox. The
+ * newest mtime among them is the last moment this judge demonstrably did
+ * something. `undefined` means it has not written anything yet, and the caller
+ * falls back to the spawn time (correct for a child that never started).
+ */
+export function lastActivityAt(
+  paths: Pick<JudgeSessionPaths, "sessionDir" | "stderrPath">,
+  alsoWatch: readonly string[] = [],
+): string | undefined {
+  const candidates = [newestTranscript(paths.sessionDir), paths.stderrPath, ...alsoWatch];
+  let newest: number | undefined;
+  for (const path of candidates) {
+    if (!path) continue;
+    try {
+      const { mtimeMs } = statSync(path);
+      if (newest === undefined || mtimeMs > newest) newest = mtimeMs;
+    } catch { /* not written yet — not evidence, not an error */ }
+  }
+  return newest === undefined ? undefined : new Date(newest).toISOString();
+}
+
 /** Tail of the judge's stderr log — crash context once the pane is gone. */
 export function readStderrTail(stderrPath: string, maxLines = 20): string | undefined {
   const raw = readTrimmed(stderrPath);

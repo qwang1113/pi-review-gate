@@ -12,7 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync, chmodSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync, chmodSync, existsSync, readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,10 +22,13 @@ import {
   newestTranscript,
   readJudgeConclusion,
   readStderrTail,
+  lastActivityAt,
   terminateJudgeSession,
 } from "../lib/judge-session.ts";
 import { spawnJudgePane, killPane, killSession, tmuxAvailable, paneAlive } from "../lib/tmux-session.ts";
 import { writeJudgeSpawnFiles } from "../lib/judge-prompt.ts";
+import { classifyChildren } from "../lib/child-watch.ts";
+import { STALL_MOTION_MAX_AGE_SEC } from "../lib/loop-stall.ts";
 
 function workdir(): string {
   return mkdtempSync(join(tmpdir(), "rg-judge-session-"));
@@ -323,6 +326,76 @@ test("conclusion: a transcript with no assistant output is reported as empty, no
     assert.equal(got.text, undefined);
     assert.equal(got.hasVerdict, false);
     assert.ok(got.transcriptPath, "the transcript it looked at is still reported");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+/**
+ * Round-5 P1 (reviewer), and observed live: `lastActivityAt` was documented on
+ * ChildSnapshot but never SUPPLIED, so classifyChildren timed every judge from
+ * its spawn and declared any review longer than STALL_MOTION_MAX_AGE_SEC
+ * "silent" — while it was still streaming findings.
+ */
+test("activity: the newest write among transcript, stderr and inbox is the sign of life", () => {
+  const dir = workdir();
+  try {
+    const sessions = join(dir, "sessions");
+    mkdirSync(sessions, { recursive: true });
+    const old = new Date(Date.now() - 60 * 60 * 1000);
+
+    writeFileSync(join(sessions, "s.jsonl"), assistantLine("working"));
+    utimesSync(join(sessions, "s.jsonl"), old, old);
+    const onlyTranscript = lastActivityAt({ sessionDir: sessions, stderrPath: join(dir, "stderr.log") });
+    // Compare against the mtime the filesystem actually stored: utimesSync
+    // rounds, so the source Date can differ by a millisecond.
+    const storedMtime = new Date(statSync(join(sessions, "s.jsonl")).mtimeMs).toISOString();
+    assert.equal(onlyTranscript, storedMtime, "the transcript alone is already evidence");
+
+    // A newer write anywhere else wins — any of them proves the judge is alive.
+    writeFileSync(join(dir, "stderr.log"), "still going");
+    const withStderr = lastActivityAt({ sessionDir: sessions, stderrPath: join(dir, "stderr.log") });
+    assert.ok(withStderr! > onlyTranscript!, "a newer stderr write moves the timestamp forward");
+
+    const inbox = join(dir, "inbox.jsonl");
+    writeFileSync(inbox, '{"type":"question"}');
+    const withInbox = lastActivityAt({ sessionDir: sessions, stderrPath: join(dir, "stderr.log") }, [inbox]);
+    assert.ok(withInbox! >= withStderr!, "extra watched paths count too");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("activity: a session that has written nothing yet reports no activity (caller falls back to spawnedAt)", () => {
+  const dir = workdir();
+  try {
+    assert.equal(
+      lastActivityAt({ sessionDir: join(dir, "sessions"), stderrPath: join(dir, "stderr.log") }),
+      undefined,
+      "no writes yet is not an error — a just-spawned child simply has no activity",
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("activity: a long-running judge that is still writing is NOT classified as silent", () => {
+  const dir = workdir();
+  try {
+    const sessions = join(dir, "sessions");
+    mkdirSync(sessions, { recursive: true });
+    writeFileSync(join(sessions, "s.jsonl"), assistantLine("streaming a finding right now"));
+    // Spawned far beyond the silence bound — exactly the case that misfired.
+    const spawnedAt = new Date(Date.now() - (STALL_MOTION_MAX_AGE_SEC + 600) * 1000).toISOString();
+    const child = {
+      title: "reviewer-long",
+      paneId: "%1",
+      role: "reviewer",
+      spawnedAt,
+      alive: true,
+      lastActivityAt: lastActivityAt({ sessionDir: sessions, stderrPath: join(dir, "stderr.log") }),
+    };
+    const verdict = classifyChildren([child], Date.now());
+    assert.equal(verdict.terminated.length, 0, "a judge that just wrote must not be declared silent");
+    assert.equal(verdict.inFlight.length, 1);
+
+    // Without the activity stamp it WOULD be — that is the bug being pinned.
+    const { lastActivityAt: _drop, ...noActivity } = child;
+    assert.equal(classifyChildren([noActivity], Date.now()).terminated[0]?.reason, "silent-timeout");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
