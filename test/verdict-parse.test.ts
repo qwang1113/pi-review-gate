@@ -316,6 +316,29 @@ test("cwd survives equal-severity aggregation, and contradictions drop it", () =
 });
 
 /**
+ * The sticky conflict flag is DROPPED when a worse fence replaces the fold
+ * wholesale. That is safe only because the fold is monotonic — a verdict never
+ * gets better — so a forgotten conflict can never reach the cwd check, which
+ * runs on READY alone. This test makes that argument checkable instead of
+ * merely asserted in a comment.
+ */
+test("a dropped cwd conflict can never resurface as an approved READY", () => {
+  const F = (gate: string, cwd?: string): string =>
+    '```json\n{"gate":"' + gate + '"' + (cwd ? `,"cwd":"${cwd}"` : "") +
+    ',"docSync":"NOT_NEEDED","findings":[]}\n```';
+
+  // Contradiction, then a WORSE fence (takes over and forgets the conflict),
+  // then agreeing READY fences trying to bring the verdict back.
+  for (const heavier of ["BLOCKED", "NEEDS_HUMAN"]) {
+    const out = parseReviewOutput(
+      [F("READY", "/evil"), F("READY", "/repo"), F(heavier, "/x"), F("READY", "/repo")].join("\n"),
+    );
+    assert.notEqual(out.verdict, "READY",
+      `${heavier} must hold — the fold is monotonic, so the cwd check is never reached`);
+  }
+});
+
+/**
  * Round-11 P2 (reviewer-measured): a fence whose JSON is broken falls to the
  * salvage path, which recovers ONLY the gate word — no cwd. That is correct
  * and must stay correct: salvage reads untrusted, malformed text, so a loose

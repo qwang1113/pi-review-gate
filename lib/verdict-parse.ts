@@ -61,10 +61,16 @@ const SEVERITY: Record<string, number> = { BLOCKED: 3, NEEDS_HUMAN: 2, READY: 1 
 function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
   if (!a) return b;
   const bWorse = SEVERITY[b.verdict] > SEVERITY[a.verdict];
+  // Taking b wholesale drops a's cwdConflict — deliberately safe: the fold is
+  // MONOTONIC (a verdict only ever gets worse), so once this branch is taken
+  // the result can never return to READY, and the cwd check runs on READY
+  // only. A forgotten conflict therefore cannot influence any decision.
   if (bWorse) return b;
   const cwdConflict = a.cwdConflict || b.cwdConflict ||
     (a.cwd !== undefined && b.cwd !== undefined && a.cwd !== b.cwd);
-  // Equal severity: merge — accumulate findings and hasP0P1. docSync and cwd
+  // b is NOT worse (equal, or lighter — this branch covers both, despite what
+  // the historical "equal severity" wording suggested): keep a's verdict and
+  // fold b's evidence in. docSync and cwd
   // merge conservatively: agreeing fences keep the value, disagreeing fences
   // drop it (absent blocks under enforcement — fail-closed on contradiction).
   //
