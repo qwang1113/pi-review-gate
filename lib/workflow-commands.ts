@@ -53,7 +53,8 @@ export const WORKFLOW_COMMANDS = {
       "records the sha; the review unit is the immutable commit range baseline..HEAD. (2) call prepare_review: it computes that range, writes the " +
       "finding-stream file and returns the ready-made task text — one reviewer per round. " +
       "(3) spawn ONE reviewer as its OWN tmux judge child: review_spawn → write the task text to a file → review_send (one-line reference) → " +
-      "review_watch (the done channel WAKES this session — no polling). The gate BLOCKS judge roles dispatched through subagent/workflowScript/" +
+      "then just wait — review_spawn ALREADY registered the done/inbox listeners, so the completion signal WAKES this session with no polling " +
+      "and no review_watch call (that tool only re-registers with a custom label). The gate BLOCKS judge roles dispatched through subagent/workflowScript/" +
       "workflowScriptPath entirely (that sandbox has no per-child isolation, so the judge would land in your live worktree). (4) feed the reviewer's " +
       "FULL raw output to `record_review` in ONE call — it is the only verdict of this round; worst-verdict semantics still apply if multiple fences " +
       "appear, and no docSync means the round is incomplete. record_review withholds a READY when the round was never prepared, downgrades a READY to " +

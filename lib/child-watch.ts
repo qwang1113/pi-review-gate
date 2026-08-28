@@ -48,8 +48,13 @@ export interface ChildSnapshot {
    */
   alive: boolean;
   /**
-   * ISO timestamp of the child's last OBSERVED activity (finding stream write,
-   * inbox append, pane output change). Absent ⇒ fall back to `spawnedAt`.
+   * ISO timestamp of the child's last OBSERVED activity — in production the
+   * newest write among its transcript, `stderr.log` and inbox
+   * (`lastActivityAt()` in lib/judge-session.ts).
+   *
+   * Absent ⇒ fall back to `spawnedAt`. Anything OLDER than `spawnedAt` is
+   * ignored as well: not every watched file is per-run, so a stale mtime must
+   * not be mistaken for this run's activity.
    */
   lastActivityAt?: string;
 }
@@ -63,10 +68,27 @@ export interface ChildWaitVerdict {
   terminated: Array<{ child: ChildSnapshot; reason: ChildWaitReason }>;
 }
 
+/**
+ * How long has this child been silent?
+ *
+ * ACTIVITY OLDER THAN THE SPAWN IS NOT ACTIVITY (round-6 P1, reviewer,
+ * reproduced): the watched files are not all per-run — the inbox lives at
+ * `<workDir>/inbox.jsonl` and survives a same-title respawn — so a stale mtime
+ * from a PREVIOUS run would otherwise be read as this run's last sign of life.
+ * A judge spawned seconds ago was declared silent-timeout on the spot.
+ *
+ * Clamping to `spawnedAt` is the honest reading: whatever happened before this
+ * process existed says nothing about it. A missing or unparseable stamp falls
+ * back to the spawn time the same way.
+ */
 function ageSec(child: ChildSnapshot, nowMs: number): number {
-  const stamp = Date.parse(child.lastActivityAt ?? child.spawnedAt);
-  if (!Number.isFinite(stamp)) return Number.POSITIVE_INFINITY;
-  return Math.max(0, (nowMs - stamp) / 1000);
+  const spawned = Date.parse(child.spawnedAt);
+  const activity = child.lastActivityAt === undefined ? NaN : Date.parse(child.lastActivityAt);
+  const usable = Number.isFinite(activity) && (!Number.isFinite(spawned) || activity > spawned)
+    ? activity
+    : spawned;
+  if (!Number.isFinite(usable)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, (nowMs - usable) / 1000);
 }
 
 /**
@@ -134,8 +156,10 @@ export function buildChildWaitNotice(
         return `- ${child.role} ${child.title}（pane ${child.paneId}${channel ? `, done channel ${channel}` : ""}）`;
       }),
       "等待纪律：先做完可以做的确定性工作；确认没有可做的工作后，用 bash 托管等待——" +
-        "在一次 bash 调用里同时盯三件事（done channel 信号、子会话的 `exit-code` 文件是否出现、" +
-        "以及它的 session jsonl 里是否已经出现 verdict fence），任一命中就结束等待并继续。" +
+        "在一次 bash 调用里同时盯三件事（done channel 信号；子会话是否已结束——" +
+        "`exit-code` 文件出现，或它记录的进程已不在（`kill -0 <pid 文件第一段>`，" +
+        "崩溃的子会话来不及写 exit-code）；以及它的 session jsonl 里是否已经出现 " +
+        "verdict fence），任一命中就结束等待并继续。" +
         "不要结束 turn 把唤醒责任交给子会话：它可能已经退出或永远不会发信号。",
     );
   }

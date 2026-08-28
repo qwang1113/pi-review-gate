@@ -176,8 +176,10 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    - Spawn ONE reviewer as its OWN tmux judge child:
      `review_spawn({ role: "reviewer", title: "review-<short>", repo })` →
      write the task text to a file → `review_send({ paneId, text: "读取 <file> 并执行" })`
-     → `review_watch({ channel })` (the done channel WAKES this session —
-     no polling). The gate BLOCKS judge roles dispatched through
+     — the done/inbox listeners were ALREADY registered by `review_spawn`, so the
+     completion signal WAKES this session with no polling and no `review_watch`
+     call (that tool is only for re-registering with a custom label).
+     The gate BLOCKS judge roles dispatched through
      `subagent`/`workflowScript`/`workflowScriptPath` entirely (that sandbox
      has no per-child isolation — the judge would land in your live worktree).
    - Feed the reviewer's FULL raw output to `record_review` in ONE call — it

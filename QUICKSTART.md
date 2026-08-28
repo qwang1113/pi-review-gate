@@ -37,7 +37,7 @@ agent：调 set_gate_mode("loop")
   → review_checkpoint（把改动提交为 checkpoint——READY 前唯一的 commit 通道）
   → prepare_review（计算不可变审核范围 baseline..HEAD + findings 流文件）
   → review_spawn 开 tmux 子会话审（每轮一个 reviewer，审整个 commit 范围）
-     同时：agent 边读流式 findings 边修（不用等审完；review_watch 完成即唤醒）
+     同时：agent 边读流式 findings 边修（不用等审完；完成信号会主动唤醒，监听在 spawn 时已注册）
   → record_review（机械校验：未 prepare ⇒ 不授予；HEAD 已移动 ⇒ STALE ⇒ BLOCKED）
   → BLOCKED？修 → 再来一轮；READY？declare_done → 提交
 ```

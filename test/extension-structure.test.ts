@@ -1273,13 +1273,19 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
     "the reviewer task embeds the derived channel");
   assert.match(body, /建议 title: \"\$\{reviewTitle\}\"/, "the output names the suggested title");
   // Round-16 P2: the inbox question channel is embedded in the task AND the
-  // output names path + channel + a review_watch suggestion (receiver side).
+  // output names its path + channel. Round-6 (2026-08-28): it no longer tells
+  // the agent to REGISTER that receiver — review_spawn already did, and
+  // presenting review_watch as a required step is exactly the stale guidance
+  // criterion 5 keeps catching.
   const inboxPathDecl = body.indexOf("const inboxPath = pathJoin(root");
   assert.ok(inboxPathDecl > 0, "prepare_review must compute the inbox path");
   assert.match(body.slice(promptCall, promptCall + 1400), /\{ path: inboxPath, channel: inboxChannel \}/,
     "the reviewer task embeds the inbox question channel");
   assert.match(body, /inboxChannelFor\(reviewTitle\)/, "the inbox channel derives from the same title");
-  assert.match(body, /review_watch\(\{ channel: \"\$\{inboxChannel\}\"/, "the output suggests registering the inbox receiver");
+  assert.match(body, /done 与 inbox 的监听已由 review_spawn 自动注册/,
+    "the output says the listeners are already registered");
+  assert.doesNotMatch(body, /- review_watch\(\{ channel: <doneChannel> \}\)/,
+    "…and no longer presents review_watch as a step of the flow");
   // Round-17: waiting discipline (work while the child runs) is spelled out,
   // and a truncated goal gets an explicit read-and-replace instruction.
   assert.match(body, /等待纪律/, "the waiting discipline is part of the spawn flow");

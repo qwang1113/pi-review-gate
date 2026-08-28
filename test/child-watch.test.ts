@@ -29,6 +29,31 @@ test("an ENDED pi session ends the wait immediately (no signal needed)", () => {
   assert.equal(v.terminated[0]!.child.paneId, "%10");
 });
 
+/**
+ * Round-6 P1 (reviewer, reproduced): not every watched file is per-run — the
+ * inbox lives at `<workDir>/inbox.jsonl` and survives a same-title respawn. A
+ * stale mtime from the PREVIOUS run was therefore read as this run's activity,
+ * and a judge spawned seconds ago was declared silent-timeout immediately.
+ */
+test("activity older than the spawn is ignored (a stale inbox must not kill a fresh child)", () => {
+  const child = fresh({
+    spawnedAt: new Date(NOW - 5_000).toISOString(),                    // just started
+    lastActivityAt: new Date(NOW - 60 * 60 * 1000).toISOString(),      // last run's file
+  });
+  const v = classifyChildren([child], NOW);
+  assert.equal(v.terminated.length, 0, "a child spawned seconds ago is never silent");
+  assert.equal(v.inFlight.length, 1);
+});
+
+test("activity NEWER than the spawn still counts (that is the whole point of the stamp)", () => {
+  const child = fresh({
+    spawnedAt: new Date(NOW - (STALL_MOTION_MAX_AGE_SEC + 600) * 1000).toISOString(),
+    lastActivityAt: new Date(NOW - 5_000).toISOString(),
+  });
+  assert.equal(classifyChildren([child], NOW).inFlight.length, 1,
+    "a long-running judge that just wrote is working, not silent");
+});
+
 test("a live child SILENT past STALL_MOTION_MAX_AGE_SEC ends the wait (the measured no-signal finish)", () => {
   const child = fresh({ spawnedAt: new Date(NOW - (STALL_MOTION_MAX_AGE_SEC + 1) * 1000).toISOString() });
   const v = classifyChildren([child], NOW);

@@ -853,9 +853,10 @@ first (`review_checkpoint` — the only commit allowed before a READY; it
 requires a full precommit PASS), then `prepare_review` computes the range and
 hands back the ready-made task text. `review_spawn` creates the judge child
 (a fresh pi process in a tmux pane, no review-gate extension loaded,
-`--exclude-tools edit,write`); the agent sends the task, registers
-`review_watch` on the done channel (the completion signal WAKES the main
-session — no polling), and records the verdict with `record_review`, which
+`--exclude-tools edit,write`); the agent sends the task and waits — the
+done/inbox listeners were registered by `review_spawn` itself, so the
+completion signal WAKES the main session with no polling — then records the
+verdict with `record_review`, which
 binds a READY to the reviewed commit's TREE (content binding — squash
 preserves it) and downgrades a READY whose HEAD moved (STALE) to BLOCKED.
 Because the reviewed range is immutable, the agent keeps fixing the real
@@ -918,7 +919,7 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
   → run_precommit first (cheap checks before the expensive judge)
   → review_checkpoint (commits the change — requires the precommit PASS)
   → prepare_review (computes baseline..HEAD + task text)
-  → review_spawn / review_send / review_watch (ONE tmux judge child)
+  → review_spawn / review_send (ONE tmux judge child; the wake-up listener comes with the spawn)
   → call record_review with the FULL reviewer output      # all fences parsed, worst wins
   → BLOCKED? fix everything, then start again from precommit
   → READY?  call declare_done                             # re-validated server-side

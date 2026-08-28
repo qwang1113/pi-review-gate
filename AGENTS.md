@@ -20,7 +20,8 @@ is reused until a READY lands. Each review round is ONE reviewer over the
 WHOLE change:
 
 - **Review → tmux judge child** (`review_checkpoint` → `prepare_review` →
-  `review_spawn` → `review_send` → `review_watch` → `record_review`). You
+  `review_spawn` → `review_send` → `record_review`；done/inbox 的监听由
+  `review_spawn` 自动注册，`review_watch` 只在需要自定义 label 时才用）。You
   commit the change as a checkpoint FIRST (`review_checkpoint` — the only
   commit allowed before a READY; it requires a full precommit PASS). The
   full precommit ALREADY ran typecheck + build + the complete suite on that
@@ -248,7 +249,8 @@ do :; done` 就是空转轮询,实测 120 次循环仅 0.5s)、子会话是否�
 最后监督者,门禁未通过前不得停止自动循环(存活不变量);`agent_settled` 会
 注入托管等待指令,但主动托管远比被动拉起可靠。
 The verdict arrives through the done channel and wakes this
-session (`review_watch`); the reviewer may ask questions through its inbox.
+session (the listener `review_spawn` registered for you); the reviewer may ask
+questions through its inbox.
 (d) **The judge child runs as a tmux pane — MECHANICALLY ENFORCED.**
 `review_spawn` runs the judge as a pi process in a pane of the main session's
 tmux (right column, stacked below the first judge); a judge role dispatched

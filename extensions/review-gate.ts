@@ -418,7 +418,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!hasChildren) return;
       try {
         pi.sendUserMessage(
-          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的 done channel、exit-code 文件与静默上限；读取已有输出并继续，不要结束 turn。",
+          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的 done channel、是否已结束（exit-code 文件出现，或记录的进程已不在）与静默上限；读取已有输出并继续，不要结束 turn。",
           { deliverAs: "followUp" },
         );
       } catch { /* session was replaced or shut down */ }
@@ -1751,7 +1751,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             judgeName
               ? `review-gate: \`${judgeName}\` is a judge role and runs ONLY as a tmux judge child — ` +
                 "subagent dispatch for it is retired (2026-08-27 execution model). Use the tmux flow: " +
-                "review_checkpoint → prepare_review → review_spawn → review_send → review_watch → " +
+                "review_checkpoint → prepare_review → review_spawn → review_send → " +
                 "record_review. (A judge dispatched as a subagent would run in your live worktree " +
                 "with no isolation at all — the exact failure the model was built to end.)"
               : "review-gate: workflowScriptPath could not be read, so a judge role inside it cannot be ruled out — failing closed. Read the script, then dispatch non-judge work through it or use the tmux flow for judge roles.",
@@ -3359,7 +3359,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     description:
       "Compute the review unit (checkpoint baseline..HEAD), write the finding stream path and hand " +
       "back the ready-made task text for the ONE reviewer of this round, plus the tmux spawn flow " +
-      "(review_spawn → review_send → review_watch). ALWAYS call this before spawning the reviewer — " +
+      "(review_spawn → review_send; the wake-up listener comes with the spawn). ALWAYS call this before spawning the reviewer — " +
       "review no longer runs through subagents. One reviewer, one commit range: no split, one " +
       "reviewer — everything the reviewer judges is the whole change in baseline..HEAD. Call " +
       "review_checkpoint first: the reviewed range is defined by the last checkpoint sha.",
@@ -3536,9 +3536,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         `- 建议 title: "${reviewTitle}" → done channel: ${doneChannelFor(reviewTitle)},inbox: ${inboxPath} (channel ${inboxChannel})（任务文本末尾已嵌入 done channel 与 inbox 提问指令；请用此 title 调 review_spawn，监听即与子会话信号匹配）`,
         `- review_spawn({ role: "reviewer", title: "${reviewTitle}", repo: "${root}" }) → returns paneId + doneChannel`,
         `- 把下面的任务文本写入文件，然后 review_send({ paneId, text: "读取 <task 文件> 并执行" })`,
-        "- review_watch({ channel: <doneChannel> })  ← 完成信号到达时本会话会被主动唤醒",
-        "  (review_spawn 已自动注册该监听;review_watch 仅用于自定义 label 重新注册)",
-        `- 可选:review_watch({ channel: "${inboxChannel}", label: "${reviewTitle}-inbox" }) 注册提问接收端——子会话按任务文本的提问指令发信号时唤醒本会话`,
+        "- 然后就等：done 与 inbox 的监听已由 review_spawn 自动注册，完成信号会主动唤醒本会话",
+        "  (review_watch 仅在需要自定义 label 时才调用，正常流程用不到)",
         ...(goalTruncated
           ? [
               `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${pathJoin(root, LOOP_GOAL_RELPATH)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,
