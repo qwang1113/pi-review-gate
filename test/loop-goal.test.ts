@@ -156,9 +156,9 @@ test("an APPROVED goal is injected verbatim with the acceptance contract attache
   assert.match(text, /adviser/);
   assert.match(text, /reviewer/);
   assert.match(text, /P1 finding/);
-  // HOW the goal reaches a subagent is load-bearing and was allowed to drift:
-  // an acceptance judge (reviewer / reviewer-readonly / module-reviewer /
-  // arbiter) does NOT read .pi/loop-goal.md — a snapshot carries no .pi/, and
+  // HOW the goal reaches a judge child is load-bearing and was allowed to
+  // drift: an acceptance judge (reviewer / adviser / goal-auditor) does NOT
+  // read .pi/loop-goal.md — it does not inherit this session's context, and
   // only a goal the USER approved may become a contract — so the directive must
   // say "paste the TEXT", never "hand over the file". The sibling prompts are
   // already pinned (extension-structure / workflow-commands); this one, the most

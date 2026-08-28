@@ -285,16 +285,39 @@ test("cwd survives equal-severity aggregation, and contradictions drop it", () =
   // dropping it is fail-closed (the gate blocks a READY with no cwd).
   const contradictory = parseReviewOutput(`${fence("/repo")}\n${fence("/evil/elsewhere")}`);
   assert.equal(contradictory.cwd, undefined, "a contradiction is not evidence");
+
+  // But SILENCE is not contradiction: a terse fence that omits cwd must not
+  // erase the value the other one reported. Treating absence as disagreement
+  // reintroduced the same false rejection, in a shape reviewers actually
+  // produce (short opening fence, full closing fence).
+  const terse = '```json\n{"gate":"READY","docSync":"NOT_NEEDED","findings":[]}\n```';
+  assert.equal(parseReviewOutput(`${terse}\n${fence("/repo")}`).cwd, "/repo", "terse first");
+  assert.equal(parseReviewOutput(`${fence("/repo")}\n${terse}`).cwd, "/repo", "terse last");
+  assert.equal(parseReviewOutput(`${terse}\n${terse}`).cwd, undefined, "nobody reported one");
+});
+
+/**
+ * Round-11 P2 (reviewer-measured): a fence whose JSON is broken falls to the
+ * salvage path, which recovers ONLY the gate word — no cwd. That is correct
+ * and must stay correct: salvage reads untrusted, malformed text, so a loose
+ * regex "recovering" a cwd from it would manufacture identity evidence out of
+ * exactly the input we trust least. It costs no honest reviewer anything,
+ * because a salvaged READY is already downgraded before the cwd check runs.
+ */
+test("salvage recovers the gate word but never a cwd", () => {
+  const broken = '```json\n{"gate":"READY","cwd":"/repo","notes":"he said "hi" there"}\n```';
+  const salvaged = parseReviewOutput(broken);
+  assert.equal(salvaged.verdict, "BLOCKED", "a salvaged READY is downgraded — pre-existing rule");
+  assert.equal(salvaged.cwd, undefined, "malformed text must not become identity evidence");
 });
 
 /**
  * Round-9 P1 (reviewer, reproduced): the schema and the task text have always
- * required the judge's own `pwd` and promised the gate matches it against the
- * pane — but the parser DROPPED the field, so a fence claiming any cwd at all
- * produced an identical READY. The parser now carries it verbatim; the gate
- * does the comparing.
+ * required the judge's own `pwd` and said the gate checks it — but the parser
+ * DROPPED the field, so a fence claiming any cwd at all produced an identical
+ * READY. The parser now carries it verbatim; the gate does the comparing.
  */
-test("cwd travels verbatim so the gate can check the judge's identity", () => {
+test("cwd travels verbatim so the gate can run its check", () => {
   const withCwd = parseReviewOutput('```json\n{"gate":"READY","cwd":"/repo/root","docSync":"NOT_NEEDED","findings":[]}\n```');
   assert.equal(withCwd.cwd, "/repo/root");
 
@@ -302,7 +325,7 @@ test("cwd travels verbatim so the gate can check the judge's identity", () => {
   const elsewhere = parseReviewOutput('```json\n{"gate":"READY","cwd":"/evil/elsewhere","docSync":"NOT_NEEDED","findings":[]}\n```');
   assert.equal(elsewhere.cwd, "/evil/elsewhere");
 
-  // Absent / blank / non-string ⇒ absent, so the gate sees "no proof offered".
+  // Absent / blank / non-string ⇒ absent, so the gate sees "nothing reported".
   for (const fence of [
     '```json\n{"gate":"READY","docSync":"NOT_NEEDED","findings":[]}\n```',
     '```json\n{"gate":"READY","cwd":"   ","docSync":"NOT_NEEDED","findings":[]}\n```',

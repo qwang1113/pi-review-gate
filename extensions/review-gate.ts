@@ -2501,9 +2501,9 @@ export default function reviewGate(pi: ExtensionAPI) {
   /**
    * Goal text handed to spawned reviewers. The prompt copy is capped
    * (LOOP_GOAL_MAX_CHARS), and a truncated goal's "read the file for the
-   * rest" pointer would dangle — the snapshot carries no `.pi/` any more
-   * (see SNAPSHOT_CARRIED_FILES) — so a truncated goal appends the REAL
-   * file path instead.
+   * rest" pointer would be useless without an absolute location — a judge
+   * child may be reading from a throwaway worktree of its own — so a
+   * truncated goal appends the REAL file path instead.
    */
   function goalTextForReviewers(root: string): { text: string; truncated: boolean } | undefined {
     const goal = readLoopGoal(root);
@@ -3636,9 +3636,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         // a fresh random id every call would defeat the incremental contract.
         : `no-goal-${st.sessionId ?? "anon"}`;
       const artifactPath = pathJoin(target.root, ".pi", "review-stream", `adviser-${goalHash}.jsonl`);
-      // The artifact must be writable on the FIRST consultation too — review
-      // snapshots create this directory, but an adviser consult can precede
-      // any review.
+      // The artifact must be writable on the FIRST consultation too:
+      // `prepare_review` creates this directory for its finding stream, but an
+      // adviser consult can precede any review.
       try { mkdirSync(pathDirname(artifactPath), { recursive: true }); } catch { /* best-effort */ }
       const previous = readLastAdviserConclusion(artifactPath, goalHash);
       // Baseline advance is CONFIRMATION-BASED (round-3 P1): the baseline must
@@ -3863,18 +3863,18 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         if (staleTarget) parsed.verdict = "BLOCKED";
       }
-      // THE cwd PROOF IS NOW ACTUALLY CHECKED (round-9 P1, reviewer-
-      // reproduced). The verdict schema and the task text have always demanded
-      // a real `pwd` and promised the gate checks it — but nothing did, so a
-      // fence claiming `/evil/elsewhere` produced exactly the same READY. An
-      // identity proof nobody verifies is worse than none: it is believed.
+      // THE cwd CHECK (round-9 P1, reviewer-reproduced). The schema and the
+      // task text have always demanded a real `pwd` and said the gate checks
+      // it — but nothing did, so a fence claiming `/evil/elsewhere` produced
+      // exactly the same READY. A stated check that does not run is worse than
+      // no check, because it is believed.
       //
-      // SCOPE, stated honestly (round-10 P1): this compares the reported
-      // string with the repo the round was prepared for. It catches a verdict
-      // produced against the wrong repo or carried over from another review —
-      // it does NOT measure the pane, so a fabricated value equal to the root
-      // passes. Measuring `paneCurrentPath` would not help either: a finished
-      // judge's pane is already gone when its verdict is recorded.
+      // WHAT IT IS (round-11 P1): a consistency check on a SELF-REPORTED
+      // value. It rejects a report that does not match the repo this round was
+      // prepared for — a review run against the wrong repo. It proves nothing
+      // about who produced the verdict: any value equal to the root passes.
+      // Reading `paneCurrentPath` would not change that either, since a
+      // finished judge's pane is gone by the time its verdict is recorded.
       //
       // The judge pane is spawned with `cwd: root`, so the expected answer is
       // this repo's root. Compared through realpath, because /var vs /private/var
@@ -4011,10 +4011,10 @@ export default function reviewGate(pi: ExtensionAPI) {
                 "current head (review_checkpoint → prepare_review → review_spawn → record_review)."
               : "") +
             (cwdMismatch
-              ? `\nCWD PROOF FAILED: ${cwdMismatch}. The verdict schema requires the judge's own \`pwd\`, ` +
-                "and the gate matches it against the repo the judge child was spawned in — a READY that " +
-                "cannot prove where it was produced is recorded as BLOCKED. If the reviewer ended inside " +
-                "its throwaway worktree, have it report the spawn cwd (the shared repo root) instead."
+              ? `\nCWD CHECK FAILED: ${cwdMismatch}. The verdict schema requires the judge's own \`pwd\`, ` +
+                "and the gate compares it with the repo this round was prepared for — a READY reporting a " +
+                "different directory is recorded as BLOCKED. If the reviewer ended inside its throwaway " +
+                "worktree, have it `cd` back to the repo root and report that instead."
               : "") +
             (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : ""),
         }],

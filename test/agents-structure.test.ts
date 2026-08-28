@@ -248,10 +248,10 @@ test("SKILL.md and AGENTS.md document the MECHANICAL goal pre-review (goal-audit
   }
 });
 
-test("SKILL.md hands the loop goal to subagents as TEXT, never as a file to read", () => {
-  // An acceptance judge (reviewer / reviewer-readonly / module-reviewer /
-  // arbiter) has no `.pi/loop-goal.md` in its defaultReads, and a review
-  // snapshot deliberately carries no `.pi/` at all, so a subagent told to READ
+test("SKILL.md hands the loop goal over as TEXT, never as a file to read", () => {
+  // An acceptance judge (reviewer / adviser / goal-auditor) has no
+  // `.pi/loop-goal.md` in its defaultReads and may be reading from a throwaway
+  // worktree of its own, so a judge told to READ
   // the goal file silently ends up with no acceptance contract. The rule is
   // pinned in lib/loop-goal.ts (test/loop-goal.test.ts locks both injected
   // directives); this locks the SKILL.md copy, whose lack of a fence is exactly
@@ -268,7 +268,7 @@ test("SKILL.md hands the loop goal to subagents as TEXT, never as a file to read
   assert.doesNotMatch(
     src,
     /hand (the goal file|this file)|[Hh]and the goal to every subagent/,
-    "SKILL.md must not tell a subagent to read the goal FILE (a snapshot has no .pi/)",
+    "SKILL.md must not tell a judge to read the goal FILE (it may not have one)",
   );
   assert.doesNotMatch(
     src,

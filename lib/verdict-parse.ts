@@ -63,7 +63,13 @@ function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
     findingFingerprints: [...a.findingFingerprints, ...b.findingFingerprints],
     hasP0P1: a.hasP0P1 || b.hasP0P1,
     docSync: a.docSync === b.docSync ? a.docSync : undefined,
-    cwd: a.cwd === b.cwd ? a.cwd : undefined,
+    // Only a CONTRADICTION destroys the proof. A fence that simply omits cwd
+    // (a terse opening fence before the full one, say) contradicts nothing, so
+    // it must not erase the value the other fence did report — that would be
+    // the same false rejection this merge exists to prevent.
+    cwd: a.cwd !== undefined && b.cwd !== undefined && a.cwd !== b.cwd
+      ? undefined
+      : a.cwd ?? b.cwd,
   };
 }
 

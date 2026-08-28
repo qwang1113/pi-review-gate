@@ -313,11 +313,9 @@ test("GLOBAL LAYER: the extension re-applies model config (both layers) at sessi
   assert.equal((fn.match(/resolvePackageAgentsDir\(\)/g) ?? []).length, 1, "the probe must not be called twice");
   const sessionAt = SRC.indexOf("pi.on(\"session_start\"");
   assert.ok(sessionAt > 0);
-  // The call sits ~3900 chars past the handler head (the INERT-snapshot
-  // comment block is ~600 chars), so the window must cover it; the assertion
-  // pins that a snapshot-session early return can never skip the layer
-  // render for real sessions (round-2 P1: deleting the assertion instead of
-  // widening the window left the guard dead).
+  // The call sits a few thousand chars past the handler head, so the window
+  // must be wide enough to cover it (round-2 P1: deleting the assertion
+  // instead of widening the window left the guard dead).
   const body = SRC.slice(sessionAt, sessionAt + 4600);
   assert.match(body, /ensureModelLayersRendered\(ctx\)/, "must be invoked at session start with the UI context");
   // Project-layer base must be the BUILT-IN package agents dir, never the
@@ -1458,13 +1456,13 @@ test("round-17: review_spawn reuses an alive same-role child and drops dead pane
 
 /**
  * Round-9 P1 (reviewer, reproduced with `/evil/elsewhere`): the verdict schema
- * and the task text promised that the gate checks the reviewer's `cwd` — and
- * nothing did. A promise of identity evidence that nobody checks is worse than
- * no promise, because it is trusted. Round-10: what it checks is now stated
- * exactly (reported string vs the prepared repo), not dressed up as a pane
- * measurement it never performs.
+ * and the task text said the gate checks the reviewer's `cwd` — and nothing
+ * did. A stated check that does not run is worse than none, because it is
+ * believed. Round-11: it is now described as what it is — a consistency check
+ * on a self-reported value, which rejects a mismatching report and proves
+ * nothing about who produced the verdict.
  */
-test("record_review actually enforces the cwd proof it demands", () => {
+test("record_review actually runs the cwd check it demands", () => {
   const at = SRC.indexOf('name: "record_review"');
   assert.ok(at > 0, "record_review must be registered");
   // Wide enough to reach the reply text: the check is near the top of the
@@ -1472,12 +1470,12 @@ test("record_review actually enforces the cwd proof it demands", () => {
   const body = SRC.slice(at, at + 14000);
   assert.match(body, /parsed\.cwd/, "the claimed cwd is read from the parsed verdict");
   assert.match(body, /canonicalPath\(claimed\) !== canonicalPath\(targetRoot\)/,
-    "…and compared with the repo the judge was spawned in, through realpath");
+    "…and compared with the repo the round was prepared for, through realpath");
   assert.match(body, /cwdMismatch = "the verdict carries no `cwd`/,
     "a missing cwd is itself a failure (fail-closed), not a pass");
   assert.match(body, /if \(cwdMismatch\) parsed\.verdict = "BLOCKED";/,
-    "a READY that cannot prove where it ran is downgraded");
-  assert.match(body, /CWD PROOF FAILED/, "and the agent is told why");
+    "a READY reporting the wrong directory is downgraded");
+  assert.match(body, /CWD CHECK FAILED/, "and the agent is told why");
 });
 
 test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is only its screen", () => {

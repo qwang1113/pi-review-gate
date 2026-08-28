@@ -148,11 +148,12 @@ test("REVIEW_VERDICT_SCHEMA is the shape handed to a spawned reviewer", () => {
   assert.ok(schema.required.includes("docSync"), "docSync must be required")
 });
 
-test("the verdict must carry the reviewer's REAL cwd (identity proof the gate enforces)", () => {
-  // Evidence, not decoration: since round-9 `record_review` matches this
-  // against the repo the judge child was spawned in and downgrades a READY
-  // that cannot prove where it ran (before that, nothing checked it and a
-  // fence claiming any path produced the same READY).
+test("the verdict must carry the reviewer's REAL cwd (a check the gate runs)", () => {
+  // Since round-9 `record_review` compares this with the repo the round was
+  // prepared for and downgrades a READY that reports something else (before
+  // that, nothing checked it and a fence claiming any path produced the same
+  // READY). It is a consistency check on a self-reported value — it rejects a
+  // mismatching report and proves nothing about who wrote the verdict.
   const schema = REVIEW_VERDICT_SCHEMA as unknown as {
     properties: Record<string, { description?: string }>;
     required: readonly string[];

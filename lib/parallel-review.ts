@@ -148,20 +148,21 @@ export interface ReviewVerdict {
   /**
    * The directory the reviewer ACTUALLY ran in, from its own `pwd`.
    *
-   * What it actually proves, stated exactly (round-10 P1): `record_review`
-   * compares this string with the REPO the round was prepared for, and
-   * downgrades a READY that does not match. That catches the honest failure
-   * mode — a verdict produced against the wrong repo, or pasted in from a
-   * review of something else — and nothing more.
+   * What it is, stated without embellishment (round-11 P1): a self-reported
+   * consistency check. `record_review` compares this string with the repo the
+   * round was prepared for and downgrades a READY that does not match. So it
+   * rejects a MISMATCHING report — a review run against the wrong repo — and
+   * nothing else.
    *
-   * It is NOT a measurement of the judge's pane, and calling it one would be
-   * the same over-claim the field itself exists to punish: the gate never
-   * reads `paneCurrentPath` here, so a fabricated value equal to the repo root
-   * passes. Measuring the pane is also unreliable in the current model, where
-   * a finished judge's pane is already gone by the time the verdict lands.
+   * It proves nothing. The value is supplied by the reviewed party, and the
+   * gate never reads `paneCurrentPath`, so any value equal to the repo root
+   * passes, fabricated or not. Calling it identity evidence would be the same
+   * over-claim the field exists to catch. (Measuring the pane would not fix
+   * that either: a finished judge's pane is gone before the verdict lands.)
    *
-   * The prompt insists on a real `pwd` rather than copying the path out of the
-   * task text, because a copied value proves nothing.
+   * The prompt still insists on a real `pwd` rather than copying the path out
+   * of the task text — an honest reviewer reports what it measured, and that
+   * is the case this check can act on.
    */
   cwd: string;
   /**
@@ -211,9 +212,10 @@ export const REVIEW_VERDICT_SCHEMA = {
     },
     notes: { type: "string" },
   },
-  // `cwd` is REQUIRED: it is one of the two independent proofs that the
-  // reviewer is the judge child the gate spawned, and an optional field would simply be
-  // omitted by the models that most need to be checked.
+  // `cwd` is REQUIRED so that a mismatching report is actually visible: an
+  // optional field would simply be omitted by the models that most need the
+  // check. It is a consistency check on a self-reported value, not proof of
+  // who produced the verdict — see the field's doc comment.
   required: ["gate", "cwd", "docSync", "findings"],
 } as const;
 
