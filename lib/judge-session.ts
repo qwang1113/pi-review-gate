@@ -152,12 +152,23 @@ export type TerminateReason =
 
 function identifyProcess(
   record: PidRecord,
+  pidAlive: (pid: number) => boolean,
   processStart: (pid: number) => string | undefined,
 ): PidIdentity {
-  if (record.startedAt === undefined) return "unverifiable";
+  if (record.startedAt === undefined) return "unverifiable"; // nothing to compare against
   const current = processStart(record.pid);
-  if (current === undefined) return "not-ours"; // the process is gone
-  return current === record.startedAt ? "ours" : "not-ours";
+  if (current !== undefined) return current === record.startedAt ? "ours" : "not-ours";
+
+  // `ps` gave no answer, and that has TWO very different causes (round-2 P1,
+  // reviewer, reproduced): the process is genuinely gone, or the query itself
+  // failed (ps unavailable, empty output, sandboxed). Conflating them cost a
+  // LIVE judge its life — it was classified `vanished`, and the registry sweep
+  // closes vanished children.
+  //
+  // Liveness is the tie-breaker: something IS holding the pid ⇒ we simply
+  // cannot tell whether it is ours ("unverifiable"); nothing holds it ⇒ our
+  // process really is gone ("not-ours").
+  return pidAlive(record.pid) ? "unverifiable" : "not-ours";
 }
 
 
@@ -194,7 +205,7 @@ export function readJudgeSessionState(
   // liveness. Getting this wrong declares a WORKING judge dead and sends the
   // main session off to read a conclusion that does not exist yet — disruptive,
   // but it destroys nothing. The termination path makes the opposite trade.
-  const identity = identifyProcess(record, processStart);
+  const identity = identifyProcess(record, pidAlive, processStart);
   const running = identity === "unverifiable" ? pidAlive(record.pid) : identity === "ours";
   return {
     lifecycle: running ? "running" : "vanished",
@@ -339,6 +350,7 @@ export function terminateJudgeSession(
   paths: Pick<JudgeSessionPaths, "pidPath" | "exitCodePath">,
   kill: (target: number, signal: NodeJS.Signals) => void = (t, s) => process.kill(t, s),
   processStart: (pid: number) => string | undefined = defaultProcessStart,
+  pidAlive: (pid: number) => boolean = defaultPidAlive,
 ): { signalled: boolean; pid?: number; reason: TerminateReason } {
   // Finished ⇒ nothing of ours is left running; the pid is not ours to signal.
   if (readTrimmed(paths.exitCodePath) !== undefined) {
@@ -347,7 +359,7 @@ export function terminateJudgeSession(
   const record = readPidRecord(paths.pidPath);
   if (record === undefined) return { signalled: false, reason: "no-pid" };
   if (record.pid <= 1) return { signalled: false, reason: "no-pid" }; // never signal pid 0/1
-  const identity = identifyProcess(record, processStart);
+  const identity = identifyProcess(record, pidAlive, processStart);
   if (identity === "not-ours") {
     // The crash path: a pid file with no exit code, whose process is gone or
     // has been recycled. Nothing of ours is running, so nothing to signal.

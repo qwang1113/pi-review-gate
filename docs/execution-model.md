@@ -68,7 +68,11 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   `"<pid> "` 这种退化记录，把它当作"多半是我们的"就等于没设防）：存活判定
   **宽松**（退回 `kill -0`，判错只是让一轮流程乱掉），终止判定 **fail closed**
   （不发信号，`review_close` 仍会关 pane、由 tmux 挂断进程组；判错则会杀掉
-  别人的进程树）。
+  别人的进程树）。判定分三态（`ours` / `not-ours` / `unverifiable`），且
+  **`ps` 查不到时必须用存活性做裁决**：pid 仍被占用 ⇒ 只是问不出来
+  （`unverifiable`），无人占用 ⇒ 进程确实没了（`not-ours`）。把两者混为一谈
+  会把**还在跑的 judge** 判成 vanished，而 registry 清扫会关掉 vanished 的
+  子会话——实测复现过。
   `exit-code`（pi 退出码，其
   **存在**即"已结束"的权威事实）、`stderr.log`（崩溃诊断）、
   `sessions/*.jsonl`（结论所在）。`exit-code` 优先于 pid 判定，避免 PID 复用

@@ -114,17 +114,58 @@ test("terminate: the SAME process (start time matches) is still signalled — th
 });
 
 /**
- * FAIL CLOSED WHEN IDENTITY CANNOT BE ESTABLISHED (round-1 P1, reviewer).
+ * IDENTITY, AND WHAT TO DO WHEN IT CANNOT BE ESTABLISHED.
  *
- * The reviewer put a `ps` stub on PATH that exits 0 printing nothing. The
- * launcher then wrote `"30327 "` — indistinguishable from the old format — and
- * the identity guard silently FAILED OPEN, signalling `-30326`, i.e. exactly
- * the unrelated-process-group hazard the guard exists to prevent.
+ * Two reviewer-reproduced failures shaped the tests below.
  *
- * The two readers deliberately disagree about this state, because their
- * failure modes differ: mis-reading liveness disrupts a round, mis-directing a
- * SIGTERM destroys somebody else's work.
+ * (1) FAIL OPEN (round-1 P1): a `ps` stub that exits 0 printing nothing makes
+ *     the launcher write `"30327 "` — indistinguishable from the old,
+ *     timestamp-less format. Treating that as "probably ours" signalled
+ *     `-30326`: the unrelated-process-group hazard, restored.
+ *
+ * (2) CONFLATING "GONE" WITH "CANNOT ASK" (round-2 P1): `ps` returns nothing
+ *     both when the process is gone AND when the query fails. Treating the
+ *     second as "not ours" declared a LIVE judge `vanished`, and the registry
+ *     sweep closes vanished children — it would kill a working judge.
+ *
+ * Hence three states, liveness as the tie-breaker, and the two readers
+ * deliberately disagreeing about "unverifiable": mis-reading liveness disrupts
+ * a round, mis-directing a SIGTERM destroys somebody else's work.
  */
+test("lifecycle: a LIVE judge whose start time cannot be queried stays running (ps failure is not death)", () => {
+  const dir = workdir();
+  try {
+    writeFileSync(join(dir, "pid"), "42890 Fri Aug 28 10:00:00 2026");
+    const state = readJudgeSessionState(
+      paths(dir),
+      () => true,        // the process IS alive
+      () => undefined,   // but ps cannot say when it started
+    );
+    assert.equal(state.lifecycle, "running",
+      "a working judge must not be declared dead just because ps failed — the sweep would kill it");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("lifecycle: a GONE process with an unqueryable start time is still vanished", () => {
+  const dir = workdir();
+  try {
+    writeFileSync(join(dir, "pid"), "42890 Fri Aug 28 10:00:00 2026");
+    const state = readJudgeSessionState(paths(dir), () => false, () => undefined);
+    assert.equal(state.lifecycle, "vanished", "nothing holds the pid — our process really is gone");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("terminate: a live pid with an unqueryable start time is UNVERIFIABLE, never signalled", () => {
+  const dir = workdir();
+  try {
+    writeFileSync(join(dir, "pid"), "42890 Fri Aug 28 10:00:00 2026");
+    let calls = 0;
+    const res = terminateJudgeSession(paths(dir), () => { calls++; }, () => undefined, () => true);
+    assert.equal(calls, 0);
+    assert.equal(res.reason, "unverifiable", "cannot prove it is ours ⇒ do not signal its group");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("terminate: an UNVERIFIABLE identity is never signalled (ps produced no start time)", () => {
   const dir = workdir();
   try {
@@ -524,7 +565,6 @@ test("a same-title respawn gets a clean slate (no inherited exit-code or transcr
     assert.equal(readJudgeSessionState(first).lifecycle, "finished");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
-
 
 const terminateIntegration = test("tmux integration: termination reaches pi through the process GROUP (not via tmux tearing the pane down)", { skip: !tmuxAvailable() }, async () => {
   const work = mkdtempSync(join(tmpdir(), "rg-term-"));
