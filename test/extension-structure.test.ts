@@ -1210,9 +1210,16 @@ test("goal criterion 3: prepare_adviser is registered and hands back a brief wit
   // not the whole tool body).
   const briefCall = body.indexOf("buildAdviserBrief({");
   assert.ok(briefCall > 0);
-  assert.match(body.slice(briefCall, briefCall + 700), /doneChannel: doneChannelFor\(`adviser-\$\{goalHash\.slice\(0, 6\)\}`\)/,
+  assert.match(body.slice(briefCall, briefCall + 900), /doneChannel: doneChannelFor\(`adviser-\$\{goalHash\.slice\(0, 6\)\}`\)/,
     "the brief embeds the derived channel");
+  assert.match(body.slice(briefCall, briefCall + 900), /inboxPath: pathJoin\(target\.root, "\.pi", "tmux-sessions", `rg-adviser-\$\{goalHash\.slice\(0, 6\)\}`, "inbox\.jsonl"\)/,
+    "the brief embeds the inbox path");
   assert.match(body, /建议 title: \"\$\{adviserTitle\}\"/, "the output names the suggested title");
+  assert.match(body, /inboxChannelFor\(adviserTitle\)/, "the inbox channel derives from the same title");
+  assert.match(body, /review_watch\(\{ channel: \"\$\{adviserInboxChannel\}\"/, "the output suggests registering the inbox receiver");
+  assert.match(body, /等待纪律/, "the waiting discipline is part of the adviser flow");
+  assert.match(body, /落盘 task 文件时请用 read 读取 \$\{pathJoin\(target\.root, LOOP_GOAL_RELPATH\)\}/,
+    "a truncated goal must be completed from the file when writing the brief");
 });
 
 test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor task BEFORE dispatch", () => {
@@ -1229,9 +1236,14 @@ test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor tas
   // suggested title so the main session spawns with the matching listener.
   const auditCall = body.indexOf("buildGoalAuditTask(draft, {");
   assert.ok(auditCall > 0);
-  assert.match(body.slice(auditCall, auditCall + 700), /doneChannel: doneChannelFor\(`goal-audit-\$\{newHash\.slice\(0, 6\)\}`\)/,
+  assert.match(body.slice(auditCall, auditCall + 900), /doneChannel: doneChannelFor\(`goal-audit-\$\{newHash\.slice\(0, 6\)\}`\)/,
     "the task embeds the derived channel");
+  assert.match(body.slice(auditCall, auditCall + 900), /inboxPath: pathJoin\(target\.root, "\.pi", "tmux-sessions", `rg-goal-audit-\$\{newHash\.slice\(0, 6\)\}`, "inbox\.jsonl"\)/,
+    "the task embeds the inbox path");
   assert.match(body, /建议 title: \"\$\{auditTitle\}\"/, "the output names the suggested title");
+  assert.match(body, /inboxChannelFor\(auditTitle\)/, "the inbox channel derives from the same title");
+  assert.match(body, /review_watch\(\{ channel: \"\$\{auditInboxChannel\}\"/, "the output suggests registering the inbox receiver");
+  assert.match(body, /等待纪律/, "the waiting discipline is part of the auditor flow");
 });
 
 test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline into the reviewer task", () => {
@@ -1250,9 +1262,22 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   // names the suggested title → channel so the spawned listener matches.
   const promptCall = body.indexOf("const task = buildReviewPrompt(");
   assert.ok(promptCall > 0);
-  assert.match(body.slice(promptCall, promptCall + 900), /doneChannelFor\(`review-\$\{runId\.slice\(-6\)\}`\)/,
+  assert.match(body.slice(promptCall, promptCall + 1200), /doneChannelFor\(reviewTitle\)/,
     "the reviewer task embeds the derived channel");
-  assert.match(body, /建议 title: \"review-\$\{runId\.slice\(-6\)\}\"/, "the output names the suggested title");
+  assert.match(body, /建议 title: \"\$\{reviewTitle\}\"/, "the output names the suggested title");
+  // Round-16 P2: the inbox question channel is embedded in the task AND the
+  // output names path + channel + a review_watch suggestion (receiver side).
+  const inboxPathDecl = body.indexOf("const inboxPath = pathJoin(root");
+  assert.ok(inboxPathDecl > 0, "prepare_review must compute the inbox path");
+  assert.match(body.slice(promptCall, promptCall + 1400), /\{ path: inboxPath, channel: inboxChannel \}/,
+    "the reviewer task embeds the inbox question channel");
+  assert.match(body, /inboxChannelFor\(reviewTitle\)/, "the inbox channel derives from the same title");
+  assert.match(body, /review_watch\(\{ channel: \"\$\{inboxChannel\}\"/, "the output suggests registering the inbox receiver");
+  // Round-17: waiting discipline (work while the child runs) is spelled out,
+  // and a truncated goal gets an explicit read-and-replace instruction.
+  assert.match(body, /等待纪律/, "the waiting discipline is part of the spawn flow");
+  assert.match(body, /落盘 task 文件时请用 read 读取 \$\{pathJoin\(root, LOOP_GOAL_RELPATH\)\}/,
+    "a truncated goal must be completed from the file when writing the task");
 });
 
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {
@@ -1426,6 +1451,10 @@ test("review_watch: the wake-up listener is registered with triggerTurn semantic
   const spawnBody = SRC.slice(spawnAt, spawnAt + 6000);
   assert.match(spawnBody, /registerWatch\(child\.doneChannel, title\)/,
     "review_spawn registers the completion listener automatically");
+  // Round-17 (goal-auditor P2): the inbox question channel is auto-registered
+  // too — a child question wakes the session without a manual review_watch.
+  assert.match(spawnBody, /registerWatch\(child\.inboxChannel, `\$\{title\}-inbox`\)/,
+    "review_spawn registers the question listener automatically");
   // session_shutdown must cancel the listeners (no leaked tmux wait-for)
   const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
   assert.ok(shutdownAt >= 0);

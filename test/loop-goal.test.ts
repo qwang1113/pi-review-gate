@@ -478,6 +478,20 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
   assert.doesNotMatch(first, /carryover/i);
   assert.doesNotMatch(first, /sess-/);
   assert.doesNotMatch(first, /完成信号/); // no channel → no signal instruction
+
+test("buildGoalAuditTask: round-16 P2 inbox question channel is embedded when provided", () => {
+  const task = buildGoalAuditTask("# 目标\n\n标准一。", {
+    doneChannel: "rg-goal-audit-abc123-done",
+    inboxPath: "/repo/.pi/tmux-sessions/rg-goal-audit-abc123/inbox.jsonl",
+    inboxChannel: "rg-goal-audit-abc123-inbox",
+  });
+  assert.match(task, /提问通道/);
+  assert.match(task, /rg-goal-audit-abc123\/inbox\.jsonl/);
+  assert.match(task, /tmux wait-for -S rg-goal-audit-abc123-inbox/);
+  assert.doesNotMatch(task, /wait-for -S <channel>-inbox/);
+  const plain = buildGoalAuditTask("# 目标");
+  assert.doesNotMatch(plain, /提问通道/);
+});
 });
 
 test("buildGoalAuditTask: the draft delta is computed mechanically and injected (round-4 P1)", () => {

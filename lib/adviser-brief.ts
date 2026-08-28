@@ -125,6 +125,13 @@ export interface AdviserBriefInput {
    * Embedded so the child never has to GUESS the channel (round-16 P1).
    */
   doneChannel?: string;
+  /**
+   * The inbox question channel (path + signal channel), embedded so the
+   * adviser can ask the main session without guessing (round-16 P2).
+   * channel = inboxChannelFor(title), i.e. rg-<title>-inbox.
+   */
+  inboxPath?: string;
+  inboxChannel?: string;
 }
 
 /**
@@ -196,6 +203,14 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
       ? [
           "",
           `完成信号(必须):当你完成本轮咨询、输出最终结论之后,运行 tmux wait-for -S ${input.doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
+        ]
+      : []),
+    ...(input.inboxPath && input.inboxChannel
+      ? [
+          "",
+          `- 提问通道(需要决策/澄清任务时):把一行 JSON 追加到 ${input.inboxPath}:`,
+          '  {"type":"question","text":"……"}',
+          `  然后运行 tmux wait-for -S ${input.inboxChannel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)。提问后继续等待回复,不要自行假定答案。`,
         ]
       : []),
   );

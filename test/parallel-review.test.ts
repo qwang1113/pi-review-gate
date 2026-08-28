@@ -53,6 +53,32 @@ test("round-16 P1: the done channel is embedded at the end of the reviewer task"
   assert.match(prompt, /tmux wait-for -S rg-review-abc123-done/);
   // The instruction is at the END (after the OUTPUT/verdict contract).
   assert.ok(prompt.indexOf("tmux wait-for -S rg-review-abc123-done") > prompt.indexOf("Verdict shape"));
+
+test("round-16 P2: the inbox question channel is embedded at the end of the reviewer task", () => {
+  const prompt = buildReviewPrompt(
+    "review",
+    ["src/a.ts"],
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    "rg-review-abc123-done",
+    { path: "/repo/.pi/tmux-sessions/rg-review-abc123/inbox.jsonl", channel: "rg-review-abc123-inbox" },
+  );
+  assert.match(prompt, /提问通道/);
+  assert.match(prompt, /\/repo\/\.pi\/tmux-sessions\/rg-review-abc123\/inbox\.jsonl/);
+  assert.match(prompt, /tmux wait-for -S rg-review-abc123-inbox/);
+  // The channel is the FULL derived value (inboxChannelFor(title)) — never
+  // literal "<channel>-inbox" concatenation (double-suffix trap).
+  assert.match(prompt, /rg-review-abc123-inbox/);
+  assert.doesNotMatch(prompt, /wait-for -S <channel>-inbox/);
+  // No inbox param → no question-path instruction.
+  const plain = buildReviewPrompt("review", [], undefined, undefined, undefined, undefined, undefined, undefined, undefined);
+  assert.doesNotMatch(plain, /提问通道/);
+});
 });
 
 test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no isolation is READ-ONLY", () => {

@@ -2910,6 +2910,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         // The agent ends its turn and does other work; the done signal
         // wakes this session as a new turn (never sleep, never poll).
         registerWatch(child.doneChannel, title);
+        // Round-17 (goal-auditor P2): the inbox question channel is ALSO
+        // auto-registered — a child question wakes this session without the
+        // main session having to remember a review_watch call. The two wake
+        // paths (done / question) are now symmetric.
+        registerWatch(child.inboxChannel, `${title}-inbox`);
         return {
           content: [{
             type: "text",
@@ -3183,6 +3188,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* stream is optional */ }
       const goalSt = root === primaryRepoRoot ? state : stateForRepo(root);
       const goalText = loopGoalConfirmed(root, goalSt) ? goalTextForReviewers(root) : undefined;
+      const reviewTitle = `review-${runId.slice(-6)}`;
+      // Round-16 P2: the inbox question channel is embedded too — path and
+      // signal channel (inboxChannelFor(title), NEVER literal -inbox
+      // concatenation) so the child can ask without guessing.
+      const inboxPath = pathJoin(root, ".pi", "tmux-sessions", `rg-${reviewTitle}`, "inbox.jsonl");
+      const inboxChannel = inboxChannelFor(reviewTitle);
+      const goalTruncated = goalText?.includes("…[truncated") === true;
       const scopeNow = reviewScopeFor(root, st);
       const task = buildReviewPrompt(
         "review",
@@ -3202,7 +3214,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         // Round-16 P1: the done channel the reviewer will signal is EMBEDDED
         // in the task text — the child never has to guess it, and the main
         // session's listener (registered on the same derived channel) matches.
-        doneChannelFor(`review-${runId.slice(-6)}`),
+        doneChannelFor(reviewTitle),
+        { path: inboxPath, channel: inboxChannel },
       );
       // Register the review target: record_review verifies HEAD is still the
       // reviewed commit and binds a READY to the reviewed tree.
@@ -3211,11 +3224,18 @@ export default function reviewGate(pi: ExtensionAPI) {
         `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
         `stream=${streamPath}`,
         "Spawn the reviewer as a judge child (tmux pane), then send the task and register the wake-up:",
-        `- 建议 title: "review-${runId.slice(-6)}" → done channel: ${doneChannelFor(`review-${runId.slice(-6)}`)}（任务文本末尾已嵌入该 channel；请用此 title 调 review_spawn，监听即与子会话信号匹配）`,
-        `- review_spawn({ role: "reviewer", title: "review-${runId.slice(-6)}", repo: "${root}" }) → returns paneId + doneChannel`,
+        `- 建议 title: "${reviewTitle}" → done channel: ${doneChannelFor(reviewTitle)},inbox: ${inboxPath} (channel ${inboxChannel})（任务文本末尾已嵌入 done channel 与 inbox 提问指令；请用此 title 调 review_spawn，监听即与子会话信号匹配）`,
+        `- review_spawn({ role: "reviewer", title: "${reviewTitle}", repo: "${root}" }) → returns paneId + doneChannel`,
         `- 把下面的任务文本写入文件，然后 review_send({ paneId, text: "读取 <task 文件> 并执行" })`,
         "- review_watch({ channel: <doneChannel> })  ← 完成信号到达时本会话会被主动唤醒",
         "  (review_spawn 已自动注册该监听;review_watch 仅用于自定义 label 重新注册)",
+        `- 可选:review_watch({ channel: "${inboxChannel}", label: "${reviewTitle}-inbox" }) 注册提问接收端——子会话按任务文本的提问指令发信号时唤醒本会话`,
+        ...(goalTruncated
+          ? [
+              `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${pathJoin(root, LOOP_GOAL_RELPATH)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,
+            ]
+          : []),
+        "- 等待纪律:子会话审核期间,继续做可实现的工作(编辑/测试不依赖 goal 批准——checkpoint 才需要);只有真正阻塞于审核结果的事才等。",
         "",
         "--- task text ---",
         task,
@@ -3393,13 +3413,23 @@ export default function reviewGate(pi: ExtensionAPI) {
         // Round-16 P1: the done channel is EMBEDDED in the brief so the
         // adviser never guesses it; spawn with the suggested title below.
         doneChannel: doneChannelFor(`adviser-${goalHash.slice(0, 6)}`),
+        // Round-16 P2: inbox path + signal channel embedded too.
+        inboxPath: pathJoin(target.root, ".pi", "tmux-sessions", `rg-adviser-${goalHash.slice(0, 6)}`, "inbox.jsonl"),
+        inboxChannel: inboxChannelFor(`adviser-${goalHash.slice(0, 6)}`),
       });
       const adviserTitle = `adviser-${goalHash.slice(0, 6)}`;
+      const adviserInboxPath = pathJoin(target.root, ".pi", "tmux-sessions", `rg-${adviserTitle}`, "inbox.jsonl");
+      const adviserInboxChannel = inboxChannelFor(adviserTitle);
+      const goalTruncated = goalText?.includes("…[truncated") === true;
       return {
         content: [{ type: "text", text:
           `adviser brief ready (${previous ? "incremental" : "full"}):\n` +
-          `- 建议 title: "${adviserTitle}" → done channel: ${doneChannelFor(adviserTitle)}（brief 末尾已嵌入该 channel；请用此 title 调 review_spawn）\n\n${brief}` }],
-        details: { incremental: !!previous, artifactPath, changedFiles, title: adviserTitle, doneChannel: doneChannelFor(adviserTitle) },
+          `- 建议 title: "${adviserTitle}" → done channel: ${doneChannelFor(adviserTitle)},inbox: ${adviserInboxPath} (channel ${adviserInboxChannel})（brief 末尾已嵌入 done channel 与 inbox 提问指令）\n` +
+          `- 可选:review_watch({ channel: "${adviserInboxChannel}", label: "${adviserTitle}-inbox" }) 注册提问接收端\n` +
+          "- 等待纪律:咨询期间继续做可实现的工作(编辑/测试不依赖 goal 批准——checkpoint 才需要);只有真正阻塞于咨询结果的事才等。\n" +
+          (goalTruncated ? `- 注意:brief 中的 loop goal 因长度被截断;落盘 task 文件时请用 read 读取 ${pathJoin(target.root, LOOP_GOAL_RELPATH)} 全文替换截断部分。\n` : "") +
+          `\n${brief}` }],
+        details: { incremental: !!previous, artifactPath, changedFiles, title: adviserTitle, doneChannel: doneChannelFor(adviserTitle), inboxChannel: adviserInboxChannel },
       };
     },
   });
@@ -3448,13 +3478,21 @@ export default function reviewGate(pi: ExtensionAPI) {
         // auditor never guesses it; spawn with the suggested title below and
         // the listener (doneChannelFor) matches the signal.
         doneChannel: doneChannelFor(`goal-audit-${newHash.slice(0, 6)}`),
+        // Round-16 P2: inbox path + signal channel embedded too.
+        inboxPath: pathJoin(target.root, ".pi", "tmux-sessions", `rg-goal-audit-${newHash.slice(0, 6)}`, "inbox.jsonl"),
+        inboxChannel: inboxChannelFor(`goal-audit-${newHash.slice(0, 6)}`),
       });
       const auditTitle = `goal-audit-${newHash.slice(0, 6)}`;
+      const auditInboxPath = pathJoin(target.root, ".pi", "tmux-sessions", `rg-${auditTitle}`, "inbox.jsonl");
+      const auditInboxChannel = inboxChannelFor(auditTitle);
       return {
         content: [{ type: "text", text:
           `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n` +
-          `- 建议 title: "${auditTitle}" → done channel: ${doneChannelFor(auditTitle)}（任务文本末尾已嵌入该 channel；请用此 title 调 review_spawn）\n\n${taskText}` }],
-        details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle, doneChannel: doneChannelFor(auditTitle) },
+          `- 建议 title: "${auditTitle}" → done channel: ${doneChannelFor(auditTitle)},inbox: ${auditInboxPath} (channel ${auditInboxChannel})（任务文本末尾已嵌入 done channel 与 inbox 提问指令）\n` +
+          `- 可选:review_watch({ channel: "${auditInboxChannel}", label: "${auditTitle}-inbox" }) 注册提问接收端\n` +
+          "- 等待纪律:审计期间继续做可实现的工作(编辑/测试不依赖 goal 批准——checkpoint 才需要);只有真正阻塞于审计结果的事才等。\n\n" +
+          `${taskText}` }],
+        details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle, doneChannel: doneChannelFor(auditTitle), inboxChannel: auditInboxChannel },
       };
     },
   });

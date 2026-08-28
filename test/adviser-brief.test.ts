@@ -35,6 +35,21 @@ test("round-16 P1: the done channel is embedded at the end of the brief", () => 
   assert.match(text, /tmux wait-for -S rg-adviser-abc123-done/);
   // The instruction is at the END (after the artifact/output contract).
   assert.ok(text.indexOf("tmux wait-for -S rg-adviser-abc123-done") > text.indexOf("artifact:"));
+
+test("round-16 P2: the inbox question channel is embedded at the end of the brief when provided", () => {
+  const text = buildAdviserBrief({
+    ...base,
+    doneChannel: "rg-adviser-abc123-done",
+    inboxPath: "/repo/.pi/tmux-sessions/rg-adviser-abc123/inbox.jsonl",
+    inboxChannel: "rg-adviser-abc123-inbox",
+  });
+  assert.match(text, /提问通道/);
+  assert.match(text, /rg-adviser-abc123\/inbox\.jsonl/);
+  assert.match(text, /tmux wait-for -S rg-adviser-abc123-inbox/);
+  assert.doesNotMatch(text, /wait-for -S <channel>-inbox/);
+  const plain = buildAdviserBrief(base);
+  assert.doesNotMatch(plain, /提问通道/);
+});
 });
 
 test("later consultation: previous verdict + points injected, changed files called out", () => {
