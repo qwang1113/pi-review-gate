@@ -148,12 +148,20 @@ export interface ReviewVerdict {
   /**
    * The directory the reviewer ACTUALLY ran in, from its own `pwd`.
    *
-   * Second, independent piece of evidence that the reviewer really is the
-   * judge child the gate spawned (the first is the spawn itself): the value
-   * must match the pane's own working directory. It also catches the case the
-   * spawn guard cannot see — a judge that `cd`-ed somewhere else. The prompt
-   * insists on a real `pwd` rather than copying the path out of the task text,
-   * because a copied value proves nothing.
+   * What it actually proves, stated exactly (round-10 P1): `record_review`
+   * compares this string with the REPO the round was prepared for, and
+   * downgrades a READY that does not match. That catches the honest failure
+   * mode — a verdict produced against the wrong repo, or pasted in from a
+   * review of something else — and nothing more.
+   *
+   * It is NOT a measurement of the judge's pane, and calling it one would be
+   * the same over-claim the field itself exists to punish: the gate never
+   * reads `paneCurrentPath` here, so a fabricated value equal to the repo root
+   * passes. Measuring the pane is also unreliable in the current model, where
+   * a finished judge's pane is already gone by the time the verdict lands.
+   *
+   * The prompt insists on a real `pwd` rather than copying the path out of the
+   * task text, because a copied value proves nothing.
    */
   cwd: string;
   /**
@@ -185,7 +193,7 @@ export const REVIEW_VERDICT_SCHEMA = {
       type: "string",
       description:
         "Absolute path you actually ran in, taken from your own `pwd` — not copied from the task text. " +
-        "The gate checks it against the pane it spawned you in.",
+        "The gate checks it against the repo this round was prepared for.",
     },
     docSync: { type: "string", enum: ["UPDATED", "NOT_NEEDED"] },
     findings: {
@@ -345,8 +353,10 @@ export function buildReviewPrompt(
     // prove where it ran. Telling the reviewer otherwise on one branch would
     // be the same class of lie this field exists to catch.
     'Before you answer, run `pwd` and put its output in the verdict\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
-      " The gate matches it against the repo you were spawned in" +
-      (isolation ? " (the shared repo root)." : "."),
+      " The gate matches it against the repo this round was prepared for" +
+      (isolation
+        ? " (the shared repo root), so `cd` back there before you answer if you ended up inside your throwaway worktree."
+        : "."),
     // eslint-disable-next-line max-len
     'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "cwd": "<your real pwd>", "docSync": "UPDATED"|"NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",

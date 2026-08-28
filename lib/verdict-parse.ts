@@ -49,15 +49,21 @@ function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
   if (!a) return b;
   const bWorse = SEVERITY[b.verdict] > SEVERITY[a.verdict];
   if (bWorse) return b;
-  // Equal severity: merge — accumulate findings and hasP0P1. docSync merges
-  // conservatively: agreeing fences keep the value, disagreeing fences drop
-  // it (absent blocks under enforcement — fail-closed on contradiction).
+  // Equal severity: merge — accumulate findings and hasP0P1. docSync and cwd
+  // merge conservatively: agreeing fences keep the value, disagreeing fences
+  // drop it (absent blocks under enforcement — fail-closed on contradiction).
+  //
+  // cwd MUST be merged, not dropped: the reviewer protocol explicitly allows
+  // repeating the identical verdict first and last (agents/reviewer.md), and
+  // rebuilding without the field turned that honest habit into a CWD PROOF
+  // FAILED — a gate that punishes the format it recommends.
   return {
     verdict: a.verdict,
     findingsTotal: (a.findingsTotal ?? 0) + (b.findingsTotal ?? 0),
     findingFingerprints: [...a.findingFingerprints, ...b.findingFingerprints],
     hasP0P1: a.hasP0P1 || b.hasP0P1,
     docSync: a.docSync === b.docSync ? a.docSync : undefined,
+    cwd: a.cwd === b.cwd ? a.cwd : undefined,
   };
 }
 

@@ -702,13 +702,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  the caller's fail-closed "no gate state" handling applies (a never-
    *  edited repo with uncommitted work blocks shipping from it). */
   function enforcementStateFor(root: string): GateState | undefined {
-    // A snapshot session owns NO gate state by design (session_start early-
-    // returns before init/arming). Returning the untouched empty state here
-    // would make the bash ship gate see hasCodeChange=false for the snapshot
-    // root (which IS primaryRepoRoot for a real reviewer child process) and
-    // let a `git push` through — so an inert session is always treated as
-    // sidecar-less, and the caller's fail-closed "no gate state" handling
-    // (changedFiles) applies.
+    // The session's OWN repo answers from the in-memory state; any other repo
+    // must produce a sidecar written by THIS session, or the caller's
+    // fail-closed "no gate state" handling applies.
     if (root === primaryRepoRoot) return state;
     const cached = repoStateCache.get(root);
     if (cached) return cached;
@@ -1024,10 +1020,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- persistence ----------
 
   function persist(ctx: ExtensionContext) {
-    // A snapshot session owns NO gate state and must never write one: the
-    // persist path is shared by every tool (propose_loop_goal, set_gate_mode,
-    // run_precommit …), so the inert guard lives HERE rather than per tool —
-    // writing a sidecar into the snapshot would recreate .pi/ (round Nit).
     // P-multi: persist the session's repo set so a same-session resume (or
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
@@ -1635,14 +1627,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
       }
-      // A snapshot-cwd session is a reviewer the gate itself spawned: the
-      // WORKFLOW layers stay inert there (see session_start) — in particular
-      // the L8 edit gate must NOT block the reviewer's own mutation analysis.
-      // The sensitive-file floor above already ran and stays active in every
-      // session type, and the bash ship gate below also stays active (a
-      // snapshot is a linked worktree sharing the real .git, so a push from
-      // it ships the real repo).
-        // Normal mode (“as if not installed” — consent-free first classification,
+      // Normal mode (“as if not installed” — consent-free first classification,
       // /tmp clamp, no-UI session_start, or later user consent): the L6 label check
       // (and its LLM call) is skipped. The sensitive-file guard ABOVE runs in
       // every mode: it is a security floor, not workflow enforcement.
@@ -1753,11 +1738,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
 
     if (event.toolName !== "bash") return;
-    // Snapshot sessions keep the L1 ship gate ACTIVE (unlike the other inert
-    // hooks): a reviewer's disposable copy is a linked worktree sharing the
-    // real .git, so `git push`/`git commit` from it ships the real repo. The
-    // snapshot's own uncommitted diff then trips the fail-closed sidecar-less
-    // check below — exactly what should happen if a reviewer tries to ship.
+    // The L1 ship gate runs in EVERY session that loads this extension. A
+    // judge child does not load it at all (see session_start), but any
+    // throwaway worktree it creates is a linked worktree sharing the real
+    // .git — so if such a session ever did load the gate, a `git push` from
+    // it would trip the fail-closed sidecar-less check below, which is
+    // exactly what should happen.
     const command = typeof input.command === "string" ? input.command : "";
     if (!command) return;
 
@@ -2531,8 +2517,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- track edits & precommit results ----------
 
   pi.on("tool_result", async (event, ctx) => {
-    // Inert in snapshot sessions (see session_start): a reviewer's own edits
-    // inside its disposable copy must not arm or disturb any gate state.
     // 1. Edits: only arm gate on success.
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       if (event.isError) {
@@ -3881,10 +3865,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       // THE cwd PROOF IS NOW ACTUALLY CHECKED (round-9 P1, reviewer-
       // reproduced). The verdict schema and the task text have always demanded
-      // a real `pwd` and promised the gate matches it against the pane the
-      // judge was spawned in — but nothing did, so a fence claiming
-      // `/evil/elsewhere` produced exactly the same READY. An identity proof
-      // nobody verifies is worse than none, because it is believed.
+      // a real `pwd` and promised the gate checks it — but nothing did, so a
+      // fence claiming `/evil/elsewhere` produced exactly the same READY. An
+      // identity proof nobody verifies is worse than none: it is believed.
+      //
+      // SCOPE, stated honestly (round-10 P1): this compares the reported
+      // string with the repo the round was prepared for. It catches a verdict
+      // produced against the wrong repo or carried over from another review —
+      // it does NOT measure the pane, so a fabricated value equal to the root
+      // passes. Measuring `paneCurrentPath` would not help either: a finished
+      // judge's pane is already gone when its verdict is recorded.
       //
       // The judge pane is spawned with `cwd: root`, so the expected answer is
       // this repo's root. Compared through realpath, because /var vs /private/var
@@ -6663,8 +6653,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // tools instead of shell-editing files after a failed tool call. Pure
     // guidance — no enforcement.
     systemPrompt += "\n\n" + EDIT_DISCIPLINE_DIRECTIVE;
-
-    // Inert in snapshot sessions (see session_start): a reviewer the gate
 
     // While the mode is undecided, ask the agent to classify the task
     // IN-SESSION as its first action (set_gate_mode). Enforcement below stays

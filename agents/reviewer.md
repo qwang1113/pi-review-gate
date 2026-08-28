@@ -281,8 +281,9 @@ reasoning in the prose section that follows, not inside the JSON.
 ```
 
 **`cwd` (REQUIRED):** run `pwd` and report what it printed — never copy a
-path out of your task text. It is your identity evidence: the gate matches it
-against the pane it spawned you in (the shared repo root).
+path out of your task text. The gate matches it against the repo the round was
+prepared for (the shared repo root) and downgrades a READY that does not
+match — so if you ended up inside a throwaway worktree, `cd` back first.
 
 **`docSync` (REQUIRED whenever the review covers code changes):** attest the
 code↔documentation relationship of THIS change. "Docs" here means the

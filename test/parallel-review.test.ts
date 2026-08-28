@@ -172,14 +172,16 @@ test("the verdict must carry the reviewer's REAL cwd (identity proof the gate en
   assert.match(prompt, /run `pwd`/);
   assert.match(prompt, /do NOT copy the path out of this task text/i);
   assert.match(prompt, /"cwd": "<your real pwd>"/);
-  assert.match(prompt, /matches it against the repo you were spawned in/);
+  assert.match(prompt, /matches it against the repo this round was prepared for/);
+  assert.doesNotMatch(prompt, /against the pane/,
+    "the check does not measure the pane — claiming it does is the over-claim this field punishes");
 
   // BOTH branches must promise the same thing, because the gate checks
   // unconditionally. A branch that says "this is not checked" would be the
   // very kind of unverified claim this field exists to catch.
   const bare = buildReviewPrompt("review", ["src/a.ts"]);
   assert.match(bare, /run `pwd`/, "the pwd is still demanded without isolation");
-  assert.match(bare, /matches it against the repo you were spawned in/,
+  assert.match(bare, /matches it against the repo this round was prepared for/,
     "the promise is the same on both branches — the check is unconditional");
   assert.doesNotMatch(bare, /does not match it against one/,
     "the retired 'not checked' wording must not come back");

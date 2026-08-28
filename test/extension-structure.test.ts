@@ -1458,9 +1458,11 @@ test("round-17: review_spawn reuses an alive same-role child and drops dead pane
 
 /**
  * Round-9 P1 (reviewer, reproduced with `/evil/elsewhere`): the verdict schema
- * and the task text promised that the gate matches the reviewer's `cwd`
- * against the pane it was spawned in — and nothing did. A promise of identity
- * evidence that nobody checks is worse than no promise, because it is trusted.
+ * and the task text promised that the gate checks the reviewer's `cwd` — and
+ * nothing did. A promise of identity evidence that nobody checks is worse than
+ * no promise, because it is trusted. Round-10: what it checks is now stated
+ * exactly (reported string vs the prepared repo), not dressed up as a pane
+ * measurement it never performs.
  */
 test("record_review actually enforces the cwd proof it demands", () => {
   const at = SRC.indexOf('name: "record_review"');

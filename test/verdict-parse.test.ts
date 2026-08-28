@@ -267,6 +267,27 @@ test("parseFenceFileFindings: findings without a severity or a file are skipped"
 });
 
 /**
+ * Round-10 P1 (reviewer, reproduced): equal-severity aggregation rebuilt the
+ * verdict WITHOUT cwd, so a reviewer that repeats its identical verdict first
+ * and last — a format `agents/reviewer.md` explicitly calls safe — lost the
+ * proof and was blocked by the very check meant to protect it. A gate that
+ * punishes the format it recommends is worse than no gate.
+ */
+test("cwd survives equal-severity aggregation, and contradictions drop it", () => {
+  const fence = (cwd: string): string =>
+    '```json\n{"gate":"READY","cwd":"' + cwd + '","docSync":"NOT_NEEDED","findings":[]}\n```';
+
+  const repeated = parseReviewOutput(`${fence("/repo")}\n\nprose in between\n\n${fence("/repo")}`);
+  assert.equal(repeated.verdict, "READY");
+  assert.equal(repeated.cwd, "/repo", "agreeing fences must keep the proof");
+
+  // Two fences that disagree about where the review ran prove nothing —
+  // dropping it is fail-closed (the gate blocks a READY with no cwd).
+  const contradictory = parseReviewOutput(`${fence("/repo")}\n${fence("/evil/elsewhere")}`);
+  assert.equal(contradictory.cwd, undefined, "a contradiction is not evidence");
+});
+
+/**
  * Round-9 P1 (reviewer, reproduced): the schema and the task text have always
  * required the judge's own `pwd` and promised the gate matches it against the
  * pane — but the parser DROPPED the field, so a fence claiming any cwd at all
