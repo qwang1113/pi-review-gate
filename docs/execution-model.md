@@ -47,12 +47,18 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   自动化覆盖。
   2026-08-28 实测：用户聚焦 `@39/@4`，新 judge pane 落在本会话的 `@365` —— 通过。
 - `split-window -d`：新 pane 不抢焦点。
-- pane id（`%N`）是唯一操作句柄：send/capture/kill/liveness 全部按
-  pane id。
-- 主会话不在 tmux 内时降级为独立 session（原子 `new-session … \;`
-  形式设置 remain-on-exit，快速死亡的子进程不带走会话）。
-- liveness 用 `#{pane_dead}` 判别（remain-on-exit 的 pane 在进程退出后
-  仍存在，`has-session`/`display-message` 会误报为活）。
+- pane id（`%N`）是显示句柄：send/capture 按 pane id。
+- 主会话不在 tmux 内时降级为独立 session（同样不设任何保留选项）。
+- **pane 只是壳子，被管理的是 pi 会话**（2026-08-28，用户要求）：不再设置
+  `remain-on-exit`。该选项是 **window 级**的，为 judge 设置会连带影响
+  同一 window 里**用户自己的 pane**——退出后不消失、显示
+  `Pane is dead (status 0)`，这正是它被移除的原因。judge 退出后 pane 随之
+  消失，右列不再堆积死 pane。
+- liveness 与结论都来自**会话自身的落盘物**（`lib/judge-session.ts`）：
+  `pid`（launcher 自身 PID，进程组 leader）、`exit-code`（pi 退出码，其
+  **存在**即"已结束"的权威事实）、`stderr.log`（崩溃诊断）、
+  `sessions/*.jsonl`（结论所在）。`exit-code` 优先于 pid 判定，避免 PID 复用
+  把已结束的会话误判为运行中。
 
 ## 子会话
 
@@ -100,18 +106,26 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   `sideEffectsEnabled()`——测试 / CI / 非 TTY / 无 tmux 一律静默。
 - **主会话存活不变量**（round-18，用户硬约束）：门禁未通过前主会话**不得**
   停止自动循环。`agent_settled` 不再 `if (judgeChildInMotion()) return;` 放任
-  idle——改为 `classifyChildren()`（lib/child-watch.ts）托管：pane 死亡或静默
+  idle——改为 `classifyChildren()`（lib/child-watch.ts）托管：会话已结束或静默
   超时的子会话**立即结束等待**（注入 `REVIEW_GATE_CHILD_ENDED`：review_read
   读取已有输出继续 / review_close 后重新派发）；仍在飞的子会话注入
   `REVIEW_GATE_CHILD_HOST_WAIT`（先做确定性工作；无可做时用一次 bash 同时盯
   三条判据，见下）。仅三类情形允许停止：用户显式中止（ESC）、
   `pause_for_question` 等待用户回答、所有门禁与 goal 均完成。
 - **子会话终止的三条独立判据**（round-18，实测失败模式：子会话已输出 verdict
-  但未发完成信号，主会话阻塞空等）：(a) done channel 信号；(b) pane 退出/
-  死亡（`#{pane_dead}`，remain-on-exit 保证可观测）；(c) 静默超过
+  但未发完成信号，主会话阻塞空等）：(a) done channel 信号；(b) **pi 会话已结束**
+  （`exit-code` 文件出现，或记录的 `pid` 已消失——2026-08-28 起不再用
+  `#{pane_dead}`：pane 已随 judge 一起消失，且启动即崩的 judge 本就无 pane
+  可查）；(c) 静默超过
   `STALL_MOTION_MAX_AGE_SEC`（lib/loop-stall.ts，600 秒，按 spawnedAt/
   lastActivityAt 计时）。任一命中主会话自行恢复推进——子会话的完成信号是
   **加速器，不是前提**。
+- **结论取数**：子会话仍在运行时读 pane 屏幕；**已结束时读它自己的 transcript**
+  ——`sessionDir`（**启动时记录**，绝不按当前 title 反推：复用 pane 会重绑
+  title，而 jsonl 仍写在首轮目录）下**顶层**（不递归，避开
+  `subagent-artifacts/`）mtime 最新的 `*.jsonl`，取**最后一条含 verdict fence
+  的 assistant 文本**——实测最后一条常是"已发出完成信号"之类的收尾语，取
+  "最后一条"会丢掉 verdict 本身。
 - **复用与 channel 重绑**：每轮 `prepare_review` 生成新 title 与新 channel，
   而 `review_spawn` 复用同角色 pane；复用时会把 pane **重绑**到本轮 channel
   （取消旧监听、注册新监听、inbox 路径随之迁移），因此 prepare_review 的

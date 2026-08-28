@@ -20,12 +20,12 @@ test("an alive fresh child is in flight", () => {
   assert.equal(v.terminated.length, 0);
 });
 
-test("a DEAD pane ends the wait immediately (no signal needed)", () => {
+test("an ENDED pi session ends the wait immediately (no signal needed)", () => {
   const child = fresh({ alive: false });
   const v = classifyChildren([child], NOW);
   assert.equal(v.inFlight.length, 0);
   assert.equal(v.terminated.length, 1);
-  assert.equal(v.terminated[0]!.reason, "pane-dead");
+  assert.equal(v.terminated[0]!.reason, "session-ended");
   assert.equal(v.terminated[0]!.child.paneId, "%10");
 });
 
@@ -73,7 +73,8 @@ test("buildChildWaitNotice names the terminated child, the recovery action and t
   const notice = buildChildWaitNotice(v, new Map([["%3", "rg-review-live-done"]]));
   assert.ok(notice, "a notice is produced");
   assert.match(notice, /review-dead/, "the dead child is named");
-  assert.match(notice, /pane 已退出/, "pane-dead reason is stated");
+  assert.match(notice, /pi 会话已结束/, "session-ended reason is stated in SESSION terms");
+  assert.doesNotMatch(notice, /pane_dead|capture-pane/, "the hosted wait no longer teaches pane-level probes");
   assert.match(notice, /audit-silent/, "the silent child is named");
   assert.match(notice, /静默超过上限/, "silent-timeout reason is stated");
   assert.match(notice, /review_read/, "the recovery action (read its output) is stated");

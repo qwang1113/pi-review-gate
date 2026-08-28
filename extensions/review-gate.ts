@@ -99,6 +99,12 @@ import {
 import { createWatchRegistry } from "../lib/judge-watch.ts";
 import { attentionChannelFor, attentionText, consumeAttention, parentSessionId, publishAttention, sideEffectsEnabled } from "../lib/attention.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
+import {
+  readJudgeSessionState,
+  readJudgeConclusion,
+  readStderrTail,
+  terminateJudgeSession,
+} from "../lib/judge-session.ts";
 import { polishReasonRequired, recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   writeJudgeSpawnFiles,
@@ -411,7 +417,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!hasChildren) return;
       try {
         pi.sendUserMessage(
-          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的 done channel、pane_dead 与静默上限；读取已有输出并继续，不要结束 turn。",
+          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的 done channel、exit-code 文件与静默上限；读取已有输出并继续，不要结束 turn。",
           { deliverAs: "followUp" },
         );
       } catch { /* session was replaced or shut down */ }
@@ -918,6 +924,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     inboxChannel: string;
     inboxPath: string;
     spawnedAt: string;
+    /**
+     * The session-side artifacts, captured AT SPAWN TIME and never re-derived.
+     *
+     * A reused pane is rebound to each round's title, but the child's pi
+     * process keeps writing to the paths it was STARTED with — deriving them
+     * from the current title reads an empty directory (measured 2026-08-28).
+     */
+    sessionDir: string;
+    pidPath: string;
+    exitCodePath: string;
+    stderrPath: string;
   }
   const childSessions = new Map<string, JudgeChild[]>();
   /**
@@ -2963,10 +2980,21 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
-      // Round-17 (user ask): dead panes (pane_dead=1) are dropped from the
-      // registry so they never block a fresh spawn or a reuse hit.
+      // Children whose SESSION has ended are dropped from the registry, so a
+      // finished judge never blocks a fresh spawn or answers a reuse hit.
+      //
+      // Judged by the session, not the pane (2026-08-28): a judge that ended
+      // takes its pane with it, but a pane can also outlive nothing at all —
+      // the exit-code/pid record is the fact. Any pane still lingering for a
+      // dropped child is closed here rather than left stacking up in the
+      // column, which is what the old pane-only sweep did.
       for (const [repoRoot, list] of childSessions) {
-        const alive = list.filter((c) => paneAlive(c.paneId));
+        const alive = list.filter((c) => {
+          const s = readJudgeSessionState({ pidPath: c.pidPath, exitCodePath: c.exitCodePath });
+          if (s.lifecycle === "running" || s.lifecycle === "unknown") return true;
+          killPane(c.paneId);
+          return false;
+        });
         if (alive.length !== list.length) childSessions.set(repoRoot, alive);
       }
       // The round's title and its derived channels/paths — computed ONCE here
@@ -3066,6 +3094,13 @@ export default function reviewGate(pi: ExtensionAPI) {
           inboxChannel: inboxChannelFor(title),
           inboxPath: pathJoin(workDir, "inbox.jsonl"),
           spawnedAt: new Date().toISOString(),
+          // Session-side artifacts, taken from the launcher writer itself —
+          // these paths are what this child will actually write to, for as
+          // long as it lives, no matter which title later rounds rebind it to.
+          sessionDir: files.sessionDir,
+          pidPath: files.pidPath,
+          exitCodePath: files.exitCodePath,
+          stderrPath: files.stderrPath,
         };
         const list = childSessions.get(root) ?? [];
         list.push(child);
@@ -3182,9 +3217,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_read",
     label: "Read Judge Child",
     description:
-      "Read a judge child's pane output (plus optional scrollback), its liveness (pane_dead), its cwd, " +
-      "and any inbox questions the child posted. The pane is a screen, not a channel: parse it for " +
-      "YOUR marker (a verdict fence), never for byte-exact equivalence.",
+      "Read a judge child: its SESSION state (running / finished + exit code — from the child's own " +
+      "pid & exit-code files, not from its pane), its conclusion, its cwd, and any inbox questions. " +
+      "While the session runs you get the live pane screen; once it has ended you get the conclusion " +
+      "parsed from its session transcript (the last assistant text carrying a verdict fence) plus the " +
+      "tail of its stderr — the pane may already be gone, the transcript is not.",
     parameters: Type.Object({
       paneId: Type.String({ description: "The pane id returned by review_spawn" }),
       history: Type.Optional(Type.Integer({ description: "Scrollback lines before the visible screen (default 0)" })),
@@ -3192,24 +3229,62 @@ export default function reviewGate(pi: ExtensionAPI) {
     async execute(_id, params, _signal) {
       const paneId = String(params.paneId ?? "");
       const history = typeof params.history === "number" ? params.history : 0;
-      const alive = paneAlive(paneId);
-      const output = capturePane(paneId, { history });
-      const cwd = paneCurrentPath(paneId);
       const child = [...childSessions.values()].flat().find((c) => c.paneId === paneId);
+      const cwd = paneCurrentPath(paneId);
+
+      // The SESSION decides liveness; the pane is only asked what it can show.
+      // An unregistered pane (spawned before a reload) has no artifacts to read
+      // — fall back to pane existence so the tool still answers.
+      const state = child
+        ? readJudgeSessionState({ pidPath: child.pidPath, exitCodePath: child.exitCodePath })
+        : undefined;
+      const running = state ? state.lifecycle === "running" || state.lifecycle === "unknown" : paneAlive(paneId);
+
       let inbox = "";
       if (child) {
         try {
           inbox = existsSync(child.inboxPath) ? readFileSync(child.inboxPath, "utf8") : "";
         } catch { /* inbox is optional */ }
       }
+
+      // A running child is best read live (the screen shows work in progress);
+      // an ended one is read from disk, because its pane is gone the moment it
+      // exits and `capture-pane` would return nothing at all.
+      const screen = running ? capturePane(paneId, { history }) : undefined;
+      const conclusion = child && !running ? readJudgeConclusion(child.sessionDir) : undefined;
+      const stderrTail = child && !running ? readStderrTail(child.stderrPath) : undefined;
+
+      const header = state
+        ? `review-gate: judge session ${child?.title ?? paneId} — ${state.lifecycle}` +
+          (state.exitCode !== undefined ? ` (exit ${state.exitCode})` : "") +
+          ` [pane ${paneId}]${cwd ? ` cwd=${cwd}` : ""}`
+        : `review-gate: pane ${paneId} alive=${running}${cwd ? ` cwd=${cwd}` : ""} (not a registered judge child)`;
+
+      const body: string[] = [];
+      if (screen !== undefined) {
+        body.push(`--- pane output (${history > 0 ? `history ${history} + ` : ""}screen) ---\n${screen}`);
+      }
+      if (conclusion) {
+        body.push(
+          conclusion.text !== undefined
+            ? `--- conclusion (${conclusion.hasVerdict ? "verdict fence" : "NO verdict fence — last message, may be a sign-off"}` +
+              `, from ${conclusion.transcriptPath}) ---\n${conclusion.text}`
+            : `--- no conclusion on disk (transcript ${conclusion.transcriptPath ?? "missing"}) — the child produced no assistant output ---`,
+        );
+      }
+      if (stderrTail) body.push(`--- stderr (tail) ---\n${stderrTail}`);
+      if (screen === undefined && !conclusion) body.push("--- nothing to read (no pane, no recorded session) ---");
+      if (child && inbox) body.push(`--- inbox ---\n${inbox}`);
+
       return {
-        content: [{
-          type: "text",
-          text: `review-gate: pane ${paneId} alive=${alive}${cwd ? ` cwd=${cwd}` : ""}\n` +
-            (output !== undefined ? `--- pane output (${history > 0 ? `history ${history} + ` : ""}screen) ---\n${output}` : "--- no pane output (dead?) ---") +
-            (child && inbox ? `\n--- inbox ---\n${inbox}` : ""),
-        }],
-        details: { alive, hasInbox: Boolean(child && inbox) },
+        content: [{ type: "text", text: [header, ...body].join("\n") }],
+        details: {
+          alive: running,
+          lifecycle: state?.lifecycle,
+          exitCode: state?.exitCode,
+          hasVerdict: conclusion?.hasVerdict ?? false,
+          hasInbox: Boolean(child && inbox),
+        },
       };
     },
   });
@@ -3218,9 +3293,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_close",
     label: "Close Judge Child",
     description:
-      "Kill a judge child's pane and drop it from the session registry. Use it at task completion (before " +
-      "declare_done) or to rebuild a child with a fresh perspective; children that crashed keep their " +
-      "pane (remain-on-exit) until closed.",
+      "Terminate a judge child's pi SESSION (its process group) and close the pane that displayed it, " +
+      "then drop it from the registry. Use it at task completion (before declare_done) or to rebuild a " +
+      "child with a fresh perspective. Idempotent: a child that already finished — its pane is gone the " +
+      "moment it exits — still closes successfully; its transcript and stderr stay on disk either way.",
     parameters: Type.Object({
       paneId: Type.String({ description: "The pane id returned by review_spawn" }),
       repo: Type.Optional(Type.String({
@@ -3235,14 +3311,27 @@ export default function reviewGate(pi: ExtensionAPI) {
         watchRegistry.active.get(child.doneChannel)?.cancel();
         watchRegistry.active.get(child.inboxChannel)?.cancel(); // round-7 Nit
       }
+      // TERMINATE THE SESSION FIRST, THEN CLOSE ITS SCREEN.
+      //
+      // The launcher is the pane's process-group leader and pi runs as its
+      // child, so signalling the group is what actually ends the judge;
+      // killing the pane alone relies on tmux's SIGHUP reaching pi, and a
+      // wrapper that has already exited leaves nothing to hang up. Closing the
+      // pane afterwards is the backstop (and what removes the screen).
+      const terminated = child ? terminateJudgeSession({ pidPath: child.pidPath }) : { signalled: false };
       const ok = killPane(paneId);
       for (const [root, list] of childSessions) {
         childSessions.set(root, list.filter((c) => c.paneId !== paneId));
       }
       cancelChildWaitTimer();
+      // Idempotent BY CONTRACT: an already-finished child (nothing to signal,
+      // pane already gone) is a successful close, not an error.
+      const how = terminated.signalled
+        ? `session terminated (pid group ${terminated.pid})`
+        : "session already ended";
       return {
-        content: [{ type: "text", text: ok ? `review-gate: pane ${paneId} closed.` : `review-gate: pane ${paneId} already gone.` }],
-        details: { closed: ok },
+        content: [{ type: "text", text: `review-gate: ${how}; pane ${paneId} ${ok ? "closed" : "already gone"}.` }],
+        details: { closed: true, paneClosed: ok, sessionSignalled: terminated.signalled },
       };
     },
   });
@@ -5769,7 +5858,14 @@ export default function reviewGate(pi: ExtensionAPI) {
           paneId: c.paneId,
           role: c.role,
           spawnedAt: c.spawnedAt,
-          alive: paneAlive(c.paneId),
+          // Criterion (b) reads the SESSION, not the pane: a judge that ended
+          // without signalling is detected by its own exit-code/pid records,
+          // which survive the pane that displayed it. `unknown` (nothing
+          // written yet) counts as alive — a just-spawned child is not "ended".
+          alive: ((): boolean => {
+            const s = readJudgeSessionState({ pidPath: c.pidPath, exitCodePath: c.exitCodePath });
+            return s.lifecycle === "running" || s.lifecycle === "unknown";
+          })(),
         });
         doneChannelsByPane.set(c.paneId, c.doneChannel);
       }

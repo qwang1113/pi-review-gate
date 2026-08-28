@@ -238,9 +238,10 @@ verdict. WAITING-WINDOW DISCIPLINE (v4): (1) 有可实现的确定性工作(代�
 (`tmux wait-for <doneChannel>`,无标志,用 bash 工具自己的 `timeout` 参数做上限,
 turn 不结束;⚠️ `tmux wait-for` **没有 `-t` 超时选项**——`wait-for -t 5 <chan>`
 以 `unknown flag -t` 在 7ms 内报错返回,包成 `while ! tmux wait-for -t 5 <chan>;
-do :; done` 就是空转轮询,实测 120 次循环仅 0.5s)、pane 退出/死亡
-(`tmux display-message -p -t <paneId> '#{pane_dead}'`),
-以及 capture-pane 里是否已出现 verdict fence(子会话已产出结论但未发信号是
+do :; done` 就是空转轮询,实测 120 次循环仅 0.5s)、子会话是否已结束
+(`test -s <workDir>/exit-code`——2026-08-28 起 pane 会随 judge 一起消失,
+不再用 `#{pane_dead}`),
+以及它的 session jsonl 里是否已出现 verdict fence(子会话已产出结论但未发信号是
 实测过的失败模式);任一命中即结束等待并继续。(3) **禁止**用结束 turn 把
 唤醒责任交给子会话——子会话可能报错/崩溃/永远不发信号,而主会话是门禁的
 最后监督者,门禁未通过前不得停止自动循环(存活不变量);`agent_settled` 会
@@ -256,7 +257,8 @@ one shared cwd — your live worktree, the exact failure this ends). The
 single reviewer is one `review_spawn` call per round. **Singleton per role,
 reused across rounds**: `review_spawn` does NOT open a new pane every round —
 an alive same-role child in the same repo is REUSED (that is how the judge's
-context carries over until a READY), dead panes are dropped first, and
+context carries over until a READY), children whose SESSION has ended are
+dropped first (and any pane they left behind is closed), and
 `fresh: true` kills the old pane before spawning a new one. A reused pane is
 REBOUND to the round's own channels (the previous listeners are dropped, the
 new done/inbox channels are registered, the inbox path moves with it), so

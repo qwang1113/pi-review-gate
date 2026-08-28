@@ -242,6 +242,22 @@ export interface JudgeSpawnFiles {
   /** Absolute path of the written launcher script. */
   launcherPath: string;
   /**
+   * Absolute path of the child's session-transcript directory (`--session-dir`).
+   *
+   * The CALLER MUST RECORD THIS AT SPAWN TIME. A judge pane is reused across
+   * rounds and rebound to each round's title, but its transcript keeps landing
+   * in the directory of the round that STARTED it — deriving the path from the
+   * current title later reads an empty directory (measured 2026-08-28).
+   */
+  sessionDir: string;
+  /** Absolute path of the file the launcher writes its own pid to. */
+  pidPath: string;
+  /** Absolute path of the file the launcher writes pi's exit code to. */
+  exitCodePath: string;
+  /** Absolute path of the file pi's stderr is teed into. */
+  stderrPath: string;
+
+  /**
    * Environment pairs to pass to the pane via `tmux split-window -e` /
    * `new-session -e` (values reach the launcher WITHOUT shell interpolation).
    */
@@ -284,38 +300,70 @@ export function writeJudgeSpawnFiles(input: JudgeSpawnInput): JudgeSpawnFiles {
     "#!/bin/bash",
     '# Every value arrives via environment (RG_*), never via string interpolation:',
     '# a config-supplied value can not become shell syntax (round-1 F8).',
+    '#',
+    '# NOT `exec` (2026-08-28): this wrapper has to OUTLIVE pi by the few',
+    '# milliseconds it takes to record how pi ended. Those records — pid,',
+    '# exit-code, stderr.log — are what makes the judge SESSION observable',
+    '# without the tmux pane having to survive it. The pane may vanish the',
+    '# instant pi exits; the files stay.',
     'SP="$(cat "$RG_SP_FILE")"',
     'cd "$RG_REPO_ROOT"',
-    "exec pi --no-extensions --no-skills -e npm:pi-subagents \\",
+    '# This wrapper IS the pane process group leader; pi runs as its child, so',
+    '# killing this pid\'s process group takes pi with it (review_close).',
+    'printf %s "$$" > "$RG_PID_FILE"',
+    '# stderr is TEED, not swallowed: a crash stays visible in the pane AND',
+    '# lands on disk for a main session reading it after the pane is gone.',
+    'exec 2> >(tee -a "$RG_STDERR_FILE" >&2)',
+    "pi --no-extensions --no-skills -e npm:pi-subagents \\",
     '  --system-prompt "$SP" \\',
     '  --model "$RG_MODEL" \\',
     "  --exclude-tools edit,write \\",
     '  --name "$RG_TITLE" \\',
     '  --session-dir "$RG_SESS_DIR"',
+    'rg_ec=$?',
+    '# Written LAST and in one shot: its existence is the "session finished"',
+    '# fact the main session polls for.',
+    'printf %s "$rg_ec" > "$RG_EXIT_FILE"',
+    'exit "$rg_ec"',
   ].join("\n");
+
   writeFileSync(launcherPath, launcher, "utf8");
   try { chmodSync(launcherPath, 0o755); } catch { /* best-effort */ }
+
+  const sessionDir = join(workDir, "sessions");
+  const pidPath = join(workDir, "pid");
+  const exitCodePath = join(workDir, "exit-code");
+  const stderrPath = join(workDir, "stderr.log");
 
   const env: Record<string, string> = {
     RG_SP_FILE: sysPromptPath,
     RG_REPO_ROOT: repoRoot,
     RG_MODEL: model,
     RG_TITLE: title,
-    RG_SESS_DIR: join(workDir, "sessions"),
+    RG_SESS_DIR: sessionDir,
     RG_LAUNCHER: launcherPath,
+    RG_PID_FILE: pidPath,
+    RG_EXIT_FILE: exitCodePath,
+    RG_STDERR_FILE: stderrPath,
     // Round-18: the child learns who spawned it via the environment, so its
     // attention events are DIRECTED to that one parent (never broadcast).
     ...(input.parentSessionId ? { RG_PARENT_SESSION: input.parentSessionId } : {}),
   };
 
+
   return {
     sysPromptPath,
     launcherPath,
+    sessionDir,
+    pidPath,
+    exitCodePath,
+    stderrPath,
     env,
     // Fixed string — the launcher path travels as RG_LAUNCHER, so an
     // apostrophe in a path can never become shell syntax (round-2 P2).
     command: 'exec /bin/bash "$RG_LAUNCHER"',
   };
+
 }
 
 // ---------------------------------------------------------------------------

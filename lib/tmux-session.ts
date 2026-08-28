@@ -16,8 +16,9 @@
  *
  * THE MEASURED PITFALLS THIS FILE EXISTS TO PREVENT (all reproduced during
  * round 1 of the tmux migration):
- *  - a child that dies at startup destroys a session created in the same
- *    call unless remain-on-exit is set ATOMICALLY (`… \; set-option …`);
+ *  - a pane/session is a DISPLAY, never the record of what ran in it: a judge
+ *    that dies at startup takes its pane with it, so its outcome must be read
+ *    from the session's own artifacts (lib/judge-session.ts), not from tmux;
  *  - '.' in a session name makes every -t target fail (tmux parses it as the
  *    pane separator) — an unkillable orphan that listGateSessions keeps
  *    reporting; '.' and ':' are therefore forbidden in names;
@@ -227,33 +228,19 @@ export function paneWindowLabel(pane: string | undefined): string | undefined {
 export function spawnJudgePane(opts: SpawnPaneOptions): SpawnPaneResult {
   const title = `${TMUX_SESSION_PREFIX}${safeSessionName(opts.title)}`;
   try {
-    // remain-on-exit is a WINDOW option and must be set BEFORE the split:
-    // a judge that dies at startup would otherwise vanish with the pane
-    // before a post-split set-option could run (round-2 P1, measured: the
-    // pre-set window option retains the dead pane with pane_dead=1).
-    // The option is set on the window the split LANDS in, and that window is
-    // named EXPLICITLY in both cases (round-17 P1, reproduced on a throwaway
-    // server): an untargeted set-option follows the server's ACTIVE pane — the
-    // window the USER happens to focus — so it mutated an unrelated window
-    // while the judge's own window kept no dying-pane retention at all.
-    const optArgs = ["set-option", "-w", "remain-on-exit", "on"];
-    if (opts.target) {
-      // target may be a session, window, or pane id — resolve it to a window.
-      // If it cannot be resolved the spawn is about to fail anyway: SKIP the
-      // option rather than falling back to an untargeted set-option that
-      // would mutate an unrelated window (round-4 Nit).
-      const win = tmuxSync(["display-message", "-p", "-t", opts.target, "#{window_id}"], 10_000);
-      if (win.status === 0 && win.stdout.trim() !== "") {
-        optArgs.splice(2, 0, "-t", win.stdout.trim());
-      } else {
-        return { ok: false, error: `cannot resolve target ${opts.target} for the split` };
-      }
-    } else {
-      // No target ⇒ the split lands in OUR window, so the option must too.
-      const own = ownWindowId();
-      if (own) optArgs.splice(2, 0, "-t", own);
-    }
-    tmuxSync(optArgs, 10_000);
+    // NO RETENTION OPTION IS SET HERE — deliberately (2026-08-28).
+    //
+    // This used to set `remain-on-exit on`, and because that is a WINDOW
+    // option it applied to EVERY pane of the window the judge landed in —
+    // including the MAIN session's own pane. The measured consequence: the
+    // user's own pane stopped closing on exit ("Pane is dead (status 0)")
+    // and every finished judge left a dead pane stacking up in the column.
+    //
+    // A judge's exit is now observed from the SESSION's own artifacts
+    // (`pid` / `exit-code` / `stderr.log` written by its launcher, read via
+    // lib/judge-session.ts), so the pane no longer has to survive its child
+    // to stay diagnosable. The pane is a display shell: it appears with the
+    // judge and disappears with it.
 
     // Column ownership (round-2 Nit → round-7 P2): ONE decision, made here.
     // A window with no live anchor CARVES the right column (-h 35%); later
@@ -317,10 +304,9 @@ function firstJudgePaneOfWindow(): string | undefined {
   const win = windowIdOfCurrentPane();
   if (!win) return undefined;
   const pane = judgePaneByWindow.get(win);
-  // EXISTENCE, not liveness: remain-on-exit keeps crashed judge panes around
-  // on purpose, and tmux happily splits a dead pane (measured rc=0), so a
-  // liveness test would cost the column exactly when a judge crashes
-  // (round-3 P2). A pane that no longer exists is forgotten.
+  // The anchor is remembered only while its pane EXISTS. Panes now disappear
+  // with their judge, so a vanished anchor simply means the column is free to
+  // be carved again by the next spawn.
   if (pane) {
     const exists = tmuxSync(["display-message", "-p", "-t", pane, "#{pane_id}"], 10_000);
     if (exists.status === 0 && exists.stdout.trim() === pane) return pane;
@@ -343,15 +329,24 @@ function rememberJudgePane(paneId: string): void {
 }
 
 /**
- * Is a pane with this id alive AND its process not dead? A remain-on-exit
- * pane stays around after its child exits — display-message still succeeds,
- * so liveness must be judged by #{pane_dead}, not by target resolution
- * (round-2 P1: paneAlive reported true for a pane whose process had exited).
+ * Does a pane with this id still EXIST?
+ *
+ * PANE EXISTENCE IS THE WHOLE TEST (2026-08-28). The judge panes carry no
+ * retention option any more, so a pane whose process exits is torn down by
+ * tmux immediately: `display-message -t <gone pane>` fails, and that failure
+ * IS the liveness answer. The old discriminator (a retained pane that had to
+ * be told apart from a live one) no longer has anything to discriminate.
+ *
+ * This is a DISPLAY-level probe only. Whether the judge SESSION finished —
+ * and with which exit code — is answered by the session's own artifacts
+ * (`pid` / `exit-code` under its workDir, see lib/judge-session.ts), never by
+ * the shell that happens to display it.
  */
 export function paneAlive(paneId: string): boolean {
-  const res = tmuxSync(["display-message", "-p", "-t", paneId, "#{pane_dead}"], 10_000);
-  return res.status === 0 && res.stdout.trim() === "0";
+  const res = tmuxSync(["display-message", "-p", "-t", paneId, "#{pane_id}"], 10_000);
+  return res.status === 0 && res.stdout.trim() === paneId;
 }
+
 
 /**
  * Is ANY of the given judge children alive? Pure over an injected liveness
@@ -459,13 +454,14 @@ export interface SpawnSessionResult {
 export function spawnSession(opts: SpawnSessionOptions): SpawnSessionResult {
   const name = safeSessionName(opts.name);
   try {
-    // Atomic form (round-1 F1): remain-on-exit must be set in the SAME tmux
-    // invocation — a child that dies at startup would otherwise destroy the
-    // session before a follow-up set-option could run. The `\;` sequence is
-    // one tmux command line, and its exit status is honored.
+    // No retention option (2026-08-28): the session's pane closes with its
+    // child, exactly like the pane path. What the child DID is recorded by
+    // the child itself (pid / exit-code / stderr.log + its session jsonl),
+    // so nothing has to be kept alive for the main session to read it.
     const args = ["new-session", "-d", "-s", name, "-c", opts.cwd];
     if (opts.env) for (const [k, v] of Object.entries(opts.env)) args.push("-e", `${k}=${v}`);
-    args.push(opts.command, ";", "set-option", "-t", name, "remain-on-exit", "on");
+    args.push(opts.command);
+
     const res = tmuxSync(args, 20_000);
     if (res.status !== 0) {
       return { ok: false, error: res.stderr.trim() || `tmux new-session exited ${res.status}` };
@@ -477,14 +473,17 @@ export function spawnSession(opts: SpawnSessionOptions): SpawnSessionResult {
 }
 
 /**
- * Is a gate-owned session with this name alive AND its pane process not dead?
- * Same #{pane_dead} discriminator as paneAlive — a remain-on-exit session
- * survives its child, so has-session alone would report a dead child as alive.
+ * Does a gate-owned session with this name still exist? Same rule as
+ * paneAlive: with no retention option a session whose child exits is torn
+ * down by tmux, so resolving the target IS the liveness answer. The judge
+ * session's own outcome (finished? which exit code?) comes from its
+ * artifacts, not from this probe.
  */
 export function sessionAlive(name: string): boolean {
-  const res = tmuxSync(["display-message", "-p", "-t", safeSessionName(name), "#{pane_dead}"], 10_000);
-  return res.status === 0 && res.stdout.trim() === "0";
+  const res = tmuxSync(["has-session", "-t", safeSessionName(name)], 10_000);
+  return res.status === 0;
 }
+
 
 /** Kill a gate-owned session. Best-effort; false when it was already gone. */
 export function killSession(name: string): boolean {

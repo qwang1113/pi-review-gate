@@ -33,7 +33,7 @@ import {
   ownPaneId,
   ownWindowId,
 } from "../lib/tmux-session.ts";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -101,14 +101,15 @@ test("ownPaneId/ownWindowId: both resolution paths are pinned in the source (rou
   // The untargeted split must carry -t <own> (never the server's active pane).
   const spawn = src.slice(src.indexOf("export function spawnJudgePane"), src.indexOf("export function spawnJudgePane") + 3500);
   assert.match(spawn, /"-t", own/, "untargeted splits anchor on our own pane");
-  // Round-17 P1 (reviewer, reproduced on a throwaway server): the WINDOW
-  // option took the same untargeted path and landed on the user's focused
-  // window — our judge window kept no dying-pane retention at all.
-  const optAt = spawn.indexOf('const optArgs = ["set-option"');
-  assert.ok(optAt > 0, "the remain-on-exit option must be set");
-  const optBlock = spawn.slice(optAt, optAt + 1200);
-  assert.match(optBlock, /\} else \{[\s\S]*ownWindowId\(\)[\s\S]*optArgs\.splice\(2, 0, "-t", own\)/,
-    "with no explicit target the option is pinned to OUR window");
+  // 2026-08-28 (user ask): the WINDOW option is GONE, and its absence is the
+  // invariant now. `remain-on-exit` is a window option, so setting it for the
+  // judge also stopped the USER's own pane from closing on exit — the pane is
+  // a display shell, and a judge's outcome is read from its session artifacts
+  // (lib/judge-session.ts) instead. Nothing in this module may set it again.
+  assert.doesNotMatch(src, /set-option[^\n]*remain-on-exit/,
+    "no tmux retention option may be set anywhere in this module");
+  assert.doesNotMatch(src, /"#\{pane_dead\}"/,
+    "liveness is session-side now: no pane_dead probe may come back");
   // P0 (round-17): the async listener must NOT keep the event loop alive —
   // an unsignalled channel otherwise hangs headless/test/CI processes
   // (measured: precommit workers stuck with leaked `tmux wait-for` children).
@@ -213,15 +214,12 @@ const integration = test("tmux integration: pane spawn→send→signal→capture
   }
 });
 
-const dyingPane = test("tmux integration: pane-mode remain-on-exit retains a fast-dying judge (round-3 P2)", { skip: !tmuxAvailable() }, async () => {
+const dyingPane = test("tmux integration: a finished judge takes its pane with it, and the window stays clean (user ask 2026-08-28)", { skip: !tmuxAvailable() }, async () => {
   const work = mkdtempSync(join(tmpdir(), "rg-tmux-diepane-"));
   const sess = `rg-diepane-${Date.now().toString(36)}`;
   try {
-    // Round-5 P2: create the target session with RAW tmux so remain-on-exit
-    // is NOT already on its window — the old spawnSession-based setup made
-    // the test pass even with the -t derivation deleted (mutation-verified
-    // by the reviewer). With a raw session, only the pre-split set-option
-    // (targeted at this window) can retain the dying pane.
+    // Raw tmux, so the target window carries NO retention option of its own:
+    // whatever we observe here was decided by spawnJudgePane alone.
     execFileSync("tmux", ["new-session", "-d", "-s", sess, "-c", work, "sleep 300"], { encoding: "utf8" });
     const spawned = spawnJudgePane({
       title: "dying",
@@ -232,38 +230,48 @@ const dyingPane = test("tmux integration: pane-mode remain-on-exit retains a fas
     assert.equal(spawned.ok, true, spawned.error ?? "spawn failed");
     const pane = spawned.paneId!;
     await new Promise((r) => setTimeout(r, 800));
-    // the pane SURVIVES (retained for diagnosis) but is DEAD — pre-split
-    // set-option is what makes this measurable; -t derivation means the
-    // option lands on the split's own window (round-4 P2).
-    assert.equal(paneAlive(pane), false);
-    const dead = execFileSync("tmux", ["display-message", "-p", "-t", pane, "#{pane_dead}"], { encoding: "utf8" });
-    assert.equal(dead.trim(), "1");
+
+    // (1) The judge's pane is GONE — no dead pane is left stacking up in the
+    // column, and no "Pane is dead (status 0)" shell the user has to close.
+    assert.equal(paneAlive(pane), false, "a finished judge leaves no pane behind");
+    const listed = execFileSync("tmux", ["list-panes", "-t", sess, "-F", "#{pane_id}"], { encoding: "utf8" });
+    assert.ok(!listed.split("\n").includes(pane), "the pane is really removed, not merely unresolvable");
+
+    // (2) THE REGRESSION THIS TEST EXISTS FOR: the window option was never
+    // written. `remain-on-exit` is a WINDOW option, so setting it for the judge
+    // also kept the USER's own pane alive after exit — the reported bug.
+    const winOpt = execFileSync("tmux", ["show-options", "-w", "-t", sess, "remain-on-exit"], { encoding: "utf8" });
+    assert.equal(winOpt.trim(), "", "spawning a judge must not write remain-on-exit onto the window");
+
+    // (3) And the consequence users actually feel: an ordinary pane of that
+    // same window still closes by itself when its process exits.
+    const userPane = execFileSync("tmux", ["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", sess, "sh -c 'exit 0'"], { encoding: "utf8" }).trim();
+    await new Promise((r) => setTimeout(r, 800));
+    assert.equal(paneAlive(userPane), false, "a user's own pane must still close on exit");
   } finally {
     killSession(sess);
     rmSync(work, { recursive: true, force: true });
   }
 });
 
-const dying = test("tmux integration: remain-on-exit is atomic (round-1 F1)", { skip: !tmuxAvailable() }, async () => {
+const dying = test("tmux integration: a session whose child exits is torn down (no retention)", { skip: !tmuxAvailable() }, async () => {
   const work = mkdtempSync(join(tmpdir(), "rg-tmux-die-"));
   const sess = `rg-die-${Date.now().toString(36)}`;
   try {
-    // A child that dies at startup must NOT take the session with it: the
-    // remain-on-exit option is set in the SAME tmux invocation, and the
-    // result must not claim ok for a session that is already gone.
+    // The headless fallback path follows the same rule as the pane path: the
+    // session is a display, so it ends with its child. What the child DID is
+    // recorded by the child (pid / exit-code / transcript), not by tmux.
     const res = spawnSession({ name: sess, cwd: work, command: "exit 3" });
     assert.equal(res.ok, true, res.error ?? "spawn failed");
     assert.equal(res.name, sess);
-    // The child needs a beat to exit; then the session SURVIVES
-    // (remain-on-exit keeps the pane for diagnosis) but the pane is DEAD,
-    // so liveness is false.
     await new Promise((r) => setTimeout(r, 800));
-    assert.equal(sessionAlive(sess), false);
-    // reaching here means has-session exited 0 → the session exists
-    execFileSync("tmux", ["has-session", "-t", sess], { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] });
+    assert.equal(sessionAlive(sess), false, "the session ends with its child");
+    const has = spawnSync("tmux", ["has-session", "-t", sess], { encoding: "utf8" });
+    assert.notEqual(has.status, 0, "no lingering session is left on the server");
   } finally {
     killSession(sess);
     rmSync(work, { recursive: true, force: true });
   }
 });
+
 

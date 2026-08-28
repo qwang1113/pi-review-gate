@@ -1416,10 +1416,16 @@ test("round-17: review_spawn reuses an alive same-role child and drops dead pane
   const spawnAt = SRC.indexOf('name: "review_spawn"');
   assert.ok(spawnAt > 0);
   const spawn = SRC.slice(spawnAt, spawnAt + 9000);
-  // Dead panes are cleaned from the registry first (never block a spawn).
+  // Finished children are cleaned from the registry first (never block a spawn),
+  // and the sweep is judged SESSION-side — a pane probe cannot tell a judge that
+  // ended from one that never started (2026-08-28).
   assert.match(spawn, /childSessions\.set\(repoRoot, alive\)/,
-    "dead panes (pane_dead=1) are filtered out of the registry");
-  assert.match(spawn, /paneAlive\(c\.paneId\)/, "liveness is judged per pane");
+    "ended children are filtered out of the registry");
+  assert.match(spawn, /readJudgeSessionState\(\{ pidPath: c\.pidPath, exitCodePath: c\.exitCodePath \}\)/,
+    "the sweep asks the session's own artifacts, not the pane");
+  assert.doesNotMatch(spawn, /paneAlive\(c\.paneId\)/, "no pane-level liveness may come back");
+  assert.match(spawn, /killPane\(c\.paneId\)/,
+    "a lingering pane of a finished child is closed, not left stacking up");
   // Reuse: same role + alive pane ⇒ return the existing child, no spawn.
   assert.match(spawn, /\.find\(\(c\) => c\.role === role && !params\.fresh\)/,
     "an alive same-role child is reused unless fresh:true");
@@ -1440,6 +1446,41 @@ test("round-17: review_spawn reuses an alive same-role child and drops dead pane
   assert.match(spawn, /killPane\(stale\.paneId\)/, "fresh:true kills the old pane before spawning");
   assert.match(spawn, /childSessions\.set\(root, \(childSessions\.get\(root\) \?\? \[\]\)\.filter\(/,
     "the killed pane leaves the registry");
+});
+
+test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is only its screen", () => {
+  // review_spawn must RECORD the session-side paths at spawn time. A reused
+  // pane is rebound to each round's title while its pi process keeps writing
+  // to the paths it started with — re-deriving them from the current title
+  // reads an empty directory (measured on this repo's own audit panes).
+  const spawnAt = SRC.indexOf('name: "review_spawn"');
+  const spawn = SRC.slice(spawnAt, spawnAt + 11000);
+  for (const field of ["sessionDir: files.sessionDir", "pidPath: files.pidPath", "exitCodePath: files.exitCodePath", "stderrPath: files.stderrPath"]) {
+    assert.ok(spawn.includes(field), `review_spawn must record ${field} at spawn time`);
+  }
+
+  // review_read: live session ⇒ the screen; ended session ⇒ the transcript,
+  // because the pane is GONE the moment the judge exits.
+  const readAt = SRC.indexOf('name: "review_read"');
+  assert.ok(readAt > 0);
+  const read = SRC.slice(readAt, readAt + 4500);
+  assert.match(read, /readJudgeSessionState\(/, "liveness comes from the session's artifacts");
+  assert.match(read, /readJudgeConclusion\(child\.sessionDir\)/,
+    "the conclusion is parsed from the RECORDED session dir");
+  assert.match(read, /readStderrTail\(child\.stderrPath\)/, "crash context survives the pane");
+  assert.match(read, /const screen = running \? capturePane/,
+    "the pane is only captured while the session is actually running");
+
+  // review_close: terminate the SESSION (its process group), then the screen.
+  const closeAt = SRC.indexOf('name: "review_close"');
+  assert.ok(closeAt > 0);
+  const close = SRC.slice(closeAt, closeAt + 3000);
+  const terminateAt = close.indexOf("terminateJudgeSession(");
+  const killAt = close.indexOf("killPane(paneId)");
+  assert.ok(terminateAt > 0 && killAt > 0, "both the session termination and the pane close exist");
+  assert.ok(terminateAt < killAt, "the session is terminated BEFORE its pane is closed");
+  assert.match(close, /details: \{ closed: true/,
+    "closing an already-finished child still reports success (idempotent)");
 });
 
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {
@@ -1610,7 +1651,10 @@ test("review_watch: the wake-up listener is registered with triggerTurn semantic
   assert.match(watchLib, /register\(channel, label\);/,
     "the listener re-arms itself for the next round on the same pane");
   const spawnAt = SRC.indexOf('name: "review_spawn"');
-  const spawnBody = SRC.slice(spawnAt, spawnAt + 9000);
+  // 11000, not 9000: recording the child's session-side artifact paths made
+  // review_spawn longer, and a too-short window silently stops covering the
+  // registration calls this test exists to pin.
+  const spawnBody = SRC.slice(spawnAt, spawnAt + 11000);
   assert.match(spawnBody, /registerWatch\(child\.doneChannel, title\)/,
     "review_spawn registers the completion listener automatically");
   // Round-17 (goal-auditor P2): the inbox question channel is auto-registered

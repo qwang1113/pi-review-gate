@@ -14,10 +14,13 @@
  * all three:
  *
  *   (a) the done channel fired (the fast path);
- *   (b) the child's pane is dead (`#{pane_dead}` — remain-on-exit keeps the pane
- *       around precisely so this is observable);
- *   (c) the child has been silent past `STALL_MOTION_MAX_AGE_SEC` (a live pane
- *       that stopped being evidence of motion).
+ *   (b) the child's SESSION ended — its own `exit-code` file exists, or the
+ *       pid it recorded is gone (lib/judge-session.ts). This is deliberately
+ *       NOT a pane probe: the pane is a display shell that disappears with
+ *       its child, and a judge that never got to write anything is exactly
+ *       the case a pane could not report either;
+ *   (c) the child has been silent past `STALL_MOTION_MAX_AGE_SEC` (a running
+ *       session that stopped being evidence of motion).
  *
  * Any of them means: stop waiting, read what the child DID produce, and carry
  * on. Pure decision logic so every branch is testable without tmux.
@@ -32,7 +35,15 @@ export interface ChildSnapshot {
   role: string;
   /** ISO timestamp of the spawn. */
   spawnedAt: string;
-  /** `#{pane_dead} === "0"` — false when the pane is dead OR unresolvable. */
+  /**
+   * Is the child's pi SESSION still running? Decided from the session's own
+   * artifacts (`readJudgeSessionState`), never from its pane: `finished` /
+   * `vanished` are both false, `running` is true.
+   *
+   * `unknown` (nothing recorded yet) is reported as ALIVE — a session that was
+   * spawned microseconds ago has not written its pid yet, and calling that
+   * "ended" would abandon every judge at birth.
+   */
   alive: boolean;
   /**
    * ISO timestamp of the child's last OBSERVED activity (finding stream write,
@@ -41,7 +52,7 @@ export interface ChildSnapshot {
   lastActivityAt?: string;
 }
 
-export type ChildWaitReason = "pane-dead" | "silent-timeout";
+export type ChildWaitReason = "session-ended" | "silent-timeout";
 
 export interface ChildWaitVerdict {
   /** Children that are demonstrably still working (fresh + alive). */
@@ -59,10 +70,11 @@ function ageSec(child: ChildSnapshot, nowMs: number): number {
 /**
  * Split the children into "still working" and "wait is over".
  *
- * A dead pane is terminal immediately — there is nothing left to wait for. A
- * live pane that has been silent past the freshness bound is treated the same
- * way: it either finished without signalling (the measured case) or hung, and
- * both are resolved by reading its output rather than by waiting longer.
+ * An ended session is terminal immediately — there is nothing left to wait
+ * for. A session still running but silent past the freshness bound is treated
+ * the same way: it either finished without signalling (the measured case) or
+ * hung, and both are resolved by reading its output rather than by waiting
+ * longer.
  */
 export function classifyChildren(
   children: readonly ChildSnapshot[],
@@ -73,7 +85,7 @@ export function classifyChildren(
   const terminated: Array<{ child: ChildSnapshot; reason: ChildWaitReason }> = [];
   for (const child of children) {
     if (!child.alive) {
-      terminated.push({ child, reason: "pane-dead" });
+      terminated.push({ child, reason: "session-ended" });
       continue;
     }
     if (ageSec(child, nowMs) > maxSilenceSec) {
@@ -105,8 +117,8 @@ export function buildChildWaitNotice(
       "子会话的等待已结束（未依赖它主动发信号）：",
       ...verdict.terminated.map(({ child, reason }) =>
         `- ${child.role} ${child.title}（pane ${child.paneId}）— ${
-          reason === "pane-dead"
-            ? "pane 已退出/死亡"
+          reason === "session-ended"
+            ? "pi 会话已结束（exit-code 已落盘或 pid 已消失）"
             : "静默超过上限"
         }。用 review_read 读取它已产出的输出：有结论就据此继续（record_review / record_goal_prereview），没有结论就 review_close 后重新派发。`,
       ),
@@ -120,8 +132,8 @@ export function buildChildWaitNotice(
         return `- ${child.role} ${child.title}（pane ${child.paneId}${channel ? `, done channel ${channel}` : ""}）`;
       }),
       "等待纪律：先做完可以做的确定性工作；确认没有可做的工作后，用 bash 托管等待——" +
-        "在一次 bash 调用里同时盯三件事（done channel 信号、`tmux display-message -p -t <pane> '#{pane_dead}'`、" +
-        "以及 capture-pane 里是否已经出现 verdict fence），任一命中就结束等待并继续。" +
+        "在一次 bash 调用里同时盯三件事（done channel 信号、子会话的 `exit-code` 文件是否出现、" +
+        "以及它的 session jsonl 里是否已经出现 verdict fence），任一命中就结束等待并继续。" +
         "不要结束 turn 把唤醒责任交给子会话：它可能已经退出或永远不会发信号。",
     );
   }

@@ -216,10 +216,11 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
          包成 `while ! tmux wait-for -t 5 <chan>; do :; done` 就是空转轮询,不是等待);
          用 bash 工具自己的 `timeout` 参数做上限,
          turn 不结束;
-      b. pane 退出/死亡:`tmux display-message -p -t <paneId> '#{pane_dead}'`
-         (remain-on-exit 保证退出后可观测);
-      c. verdict 已产出但未发信号:capture-pane 里已出现 verdict fence
-         (实测失败模式——子会话完成但忘记发完成信号,主会话空等);
+      b. 子会话已结束:`test -s <workDir>/exit-code`(2026-08-28 起 pane 会
+         随 judge 一起消失,不再用 `#{pane_dead}` 判定;exit-code 的存在
+         就是"已结束"的权威事实,里面还带着退出码);
+      c. verdict 已产出但未发信号:子会话的 session jsonl 里已出现
+         verdict fence(实测失败模式——子会话完成但忘记发完成信号,主会话空等);
       任一命中即结束等待:review_read 读取输出继续流程,或 review_close 后
       重新派发。
    3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不发
