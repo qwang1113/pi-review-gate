@@ -200,8 +200,14 @@ test("the waiting discipline never teaches a `tmux wait-for -t` timeout (there i
     // docs wrap) must itself mark the form as broken.
     const lines = text.split("\n");
     const NEGATIVE = /没有|不是|空转|报错|unknown flag|——就是|错误/;
+    // Round-17 Nit (reviewer): a negative keyword alone is evadable — "无
+    // timeout 命令时用 ..." contains 没有/无 yet still RECOMMENDS the busy loop.
+    // A line that recommends the form is rejected no matter what else it says.
+    const RECOMMENDS = /推荐|建议|请用|改用|备选|可以用|应该用|变体|use this|instead/;
     lines.forEach((line, i) => {
       if (!/tmux wait-for -t \d/.test(line)) return;
+      assert.doesNotMatch(line, RECOMMENDS,
+        `${rel.join("/")}:${i + 1} RECOMMENDS \`wait-for -t\` — that flag does not exist (it fails with "unknown flag -t")`);
       // The LINE ITSELF must mark it broken. Looking at neighbours is too weak:
       // the surrounding discipline text says 空转/错误 for its own reasons, which
       // let a freshly added recommendation inherit an innocent-looking context.

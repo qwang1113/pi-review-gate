@@ -3,8 +3,10 @@
  *
  * Round-17 (reviewer): the attention test proved a round trip, not ATOMICITY —
  * it still passed when tmp+rename was reverted to a plain writeFileSync. This
- * file pins the property itself: the target path is only ever created by a
- * rename, so a concurrent reader never observes a partial file.
+ * file pins the property itself: the write goes through a temp sibling that is
+ * consumed by the rename, so a concurrent reader never observes a partial file.
+ * The stale-temp test is the falsifiable one — it is what fails when the
+ * tmp+rename is reverted to an in-place write.
  */
 
 import test from "node:test";
@@ -27,11 +29,12 @@ test("writeFileAtomic creates parent directories and lands the content", () => {
   assert.deepEqual(readdirSync(join(dir, "nested", "deep")), ["state.json"], "no temp file survives");
 });
 
-test("the target is REPLACED via its temp sibling — never written in place", () => {
-  // The falsifiable part: while the temp file exists the target still holds the
-  // OLD bytes, which is exactly what a plain writeFileSync cannot promise. We
-  // observe it by pre-creating the temp path's content and checking that the
-  // target only changes at the end.
+test("the temp sibling lives in the target directory and is consumed by the write", () => {
+  // SCOPE (round-17 Nit, reviewer): this test pins the temp-name CONTRACT —
+  // same directory (rename is only atomic within a filesystem) and nothing left
+  // behind. It does NOT prove atomicity on its own and passes under a plain
+  // writeFileSync; the stale-temp test below is what fails when the tmp+rename
+  // is reverted.
   const dir = scratch();
   const path = join(dir, "state.json");
   writeFileAtomic(path, "v1");
@@ -52,7 +55,10 @@ test("the temp name is pid-scoped, so two processes never collide", () => {
   assert.equal(a, "/tmp/x.json.tmp-111");
 });
 
-test("an existing stale temp file does not block the write", () => {
+test("a crashed run's stale temp file is consumed, not left behind (THE atomicity pin)", () => {
+  // This is the falsifiable one: reverting writeFileAtomic to an in-place
+  // `writeFileSync(path, content)` leaves the pre-seeded temp file untouched,
+  // so the directory listing gains a second entry and this test fails.
   const dir = scratch();
   const path = join(dir, "state.json");
   writeFileSync(tempPathFor(path), "leftover from a crashed run");
