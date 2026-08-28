@@ -227,6 +227,13 @@ export interface JudgeSpawnInput {
   title: string;
   /** Directory that will hold the system prompt and task files. */
   workDir: string;
+  /**
+   * The SPAWNING session's id, delivered as RG_PARENT_SESSION. A child that
+   * loads this extension later publishes directed attention events only to
+   * this parent (round-18: directed parent notify instead of a global
+   * broadcast).
+   */
+  parentSessionId?: string;
 }
 
 export interface JudgeSpawnFiles {
@@ -296,6 +303,9 @@ export function writeJudgeSpawnFiles(input: JudgeSpawnInput): JudgeSpawnFiles {
     RG_TITLE: title,
     RG_SESS_DIR: join(workDir, "sessions"),
     RG_LAUNCHER: launcherPath,
+    // Round-18: the child learns who spawned it via the environment, so its
+    // attention events are DIRECTED to that one parent (never broadcast).
+    ...(input.parentSessionId ? { RG_PARENT_SESSION: input.parentSessionId } : {}),
   };
 
   return {

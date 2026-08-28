@@ -82,18 +82,36 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   "-inbox" 后缀）；主会话监听 inbox 通道回复。
 - **流式 findings**：追加到 `.pi/review-stream/<round>.jsonl`
   （仅证据，禁止 verdict 形状的行）。
-- **跨会话用户注意**（`rg-user-attention`）：`propose_loop_goal` 弹窗与
-  `pause_for_question` 会广播一次"需要用户介入"，其他会话被唤醒并提示用户
-  去哪个窗口。tmux 信号是**无载荷的全局广播，发送者自己也在监听**，所以
-  事件本身走旁路文件（`lib/attention.ts`，全局 `~/.pi/agent/
-  review-gate-attention.json`——跨 repo 会话必须读得到）：载荷含
-  `fromSessionId/fromPane/fromWindow/repo/reason/createdAt/handledAt`。
-  监听端 `consumeAttention()` 丢弃**自己发的**事件（否则自唤醒回环，实测
-  每两次工具调用被插一条"其他会话需要用户介入"）、已 handled 的事件与超时
-  事件；同一 `(repo, reason)` 在节流窗口内只发一次（实测通知中心堆过 10+
-  条相同横幅）。所有外部副作用（tmux 信号、osascript 通知、session_start
-  的监听注册）统一经 `sideEffectsEnabled()`——测试 / CI / 非 TTY / 无 tmux
-  一律静默，测试可用 `RG_NO_SIDE_EFFECTS=1` 显式关闭。
+- **定向 parent 用户注意**（round-18）：`propose_loop_goal` 弹窗与
+  `pause_for_question` 只通知**启动本会话的那个会话**（parent），不再全局广播。
+  parent 标识在启动时经环境变量 `RG_PARENT_SESSION` 传入；子会话发布到
+  `rg-attention-<parentSessionId>`（`attentionChannelFor()` 派生，按目标
+  session id 寻址，两个会话永不共享一个 bell）；每个会话只在 `session_start`
+  注册**自己的** channel（无 session id 的匿名宿主不注册，也无地址可被唤醒）。
+  没有 parent 的独立会话 `publishAttention` 直接返回 `no-parent`，不写文件、
+  不发信号——**永远不会唤醒无关会话**（round-17 实测：`nvim(@1) onchain：等待
+  回答提问` 打进毫无关系的会话）。事件仍走旁路文件（全局
+  `~/.pi/agent/review-gate-attention.json`，跨 repo 可读）：载荷含
+  `fromSessionId/toSessionId/fromPane/fromWindow/repo/reason/createdAt/
+  handledAt`；消费端只取**发给自己的**事件。同一 `(repo, reason, parent)` 在
+  节流窗口内只发一次；已 handled / 超时事件忽略。**无 macOS 通知**：
+  `osascript` 已从代码中移除（用户要求），唤醒就是 parent 会话 transcript 里
+  的一条消息。所有外部副作用（tmux 信号、监听注册）统一经
+  `sideEffectsEnabled()`——测试 / CI / 非 TTY / 无 tmux 一律静默。
+- **主会话存活不变量**（round-18，用户硬约束）：门禁未通过前主会话**不得**
+  停止自动循环。`agent_settled` 不再 `if (judgeChildInMotion()) return;` 放任
+  idle——改为 `classifyChildren()`（lib/child-watch.ts）托管：pane 死亡或静默
+  超时的子会话**立即结束等待**（注入 `REVIEW_GATE_CHILD_ENDED`：review_read
+  读取已有输出继续 / review_close 后重新派发）；仍在飞的子会话注入
+  `REVIEW_GATE_CHILD_HOST_WAIT`（先做确定性工作；无可做时用一次 bash 同时盯
+  三条判据，见下）。仅三类情形允许停止：用户显式中止（ESC）、
+  `pause_for_question` 等待用户回答、所有门禁与 goal 均完成。
+- **子会话终止的三条独立判据**（round-18，实测失败模式：子会话已输出 verdict
+  但未发完成信号，主会话阻塞空等）：(a) done channel 信号；(b) pane 退出/
+  死亡（`#{pane_dead}`，remain-on-exit 保证可观测）；(c) 静默超过
+  `STALL_MOTION_MAX_AGE_SEC`（lib/loop-stall.ts，600 秒，按 spawnedAt/
+  lastActivityAt 计时）。任一命中主会话自行恢复推进——子会话的完成信号是
+  **加速器，不是前提**。
 - **复用与 channel 重绑**：每轮 `prepare_review` 生成新 title 与新 channel，
   而 `review_spawn` 复用同角色 pane；复用时会把 pane **重绑**到本轮 channel
   （取消旧监听、注册新监听、inbox 路径随之迁移），因此 prepare_review 的

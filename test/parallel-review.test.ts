@@ -239,6 +239,16 @@ test("scopeDirective rides the task text when given (goal criterion 1)", () => {
   assert.doesNotMatch(plain, /Review scope for this round:/);
 });
 
+test("round-18: the polish-gate REASON rides the task text verbatim, absent when not given", () => {
+  const reason = { reason: "把 P2 修干净再收尾", at: "2026-08-28T06:00:00.000Z", round: 4 };
+  const withReason = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { path: "x", channel: "y" }, reason);
+  assert.match(withReason, /REASON FOR THIS ROUND/);
+  assert.match(withReason, /把 P2 修干净再收尾/);
+  assert.match(withReason, /round 4/);
+  const plain = buildReviewPrompt("review", ["src/a.ts"]);
+  assert.doesNotMatch(plain, /REASON FOR THIS ROUND/, "no reason, no block");
+});
+
 test("opening instruction is scope-aware: incremental rounds audit the INCREMENT, full rounds the COMMIT RANGE (round-2/3 P1)", () => {
   const scope =
     "Review scope for this round:\n- INCREMENTAL. small increment.\n- SETTLED last round — verdict READY.";

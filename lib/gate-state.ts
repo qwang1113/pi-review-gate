@@ -59,6 +59,13 @@ export interface RoundRecord {
    */
   verdict?: Exclude<GateVerdict, "PENDING">;
   at: string;
+  /**
+   * Files that had P2/Nit findings this round (round-18 polish gate).
+   * Absent on older sidecars ⇒ treated as empty (never triggers).
+   */
+  polishFiles?: string[];
+  /** Files that had P0/P1 findings this round (resets a file's streak). */
+  blockingFiles?: string[];
 }
 
 export interface GateState {
@@ -167,6 +174,13 @@ export interface GateState {
     testScope?: TestScope;
   };
   rounds: RoundRecord[];
+  /**
+   * The last polish-gate `reason` the agent supplied to prepare_review
+   * (round-18). Injected into the NEXT reviewer's task text so the judge can
+   * see why this round exists. Absent on older sidecars ⇒ no reason to
+   * carry forward (and no trigger either — the rounds are the trigger).
+   */
+  lastPolishReason?: { reason: string; at: string; round: number };
   maxRounds: number;
   bypass: {
     active: boolean;
@@ -350,6 +364,28 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         (Array.isArray(b.files) && b.files.every((f: unknown) => typeof f === "string"));
       if (!b || typeof b !== "object" || Array.isArray(b) || !validOid || !validFiles || typeof b.at !== "string") {
         delete parsed.lastReadyReview;
+      }
+    }
+    // Round-18 polish gate: malformed per-round file lists and the last
+    // reason are DROPPED (absent means 'no trigger / nothing to carry',
+    // which is the safe direction for both).
+    if (Array.isArray(parsed.rounds)) {
+      for (const r of parsed.rounds as unknown as Array<Record<string, unknown>>) {
+        if (r.polishFiles !== undefined &&
+            (!Array.isArray(r.polishFiles) || !r.polishFiles.every((v) => typeof v === "string"))) {
+          delete r.polishFiles;
+        }
+        if (r.blockingFiles !== undefined &&
+            (!Array.isArray(r.blockingFiles) || !r.blockingFiles.every((v) => typeof v === "string"))) {
+          delete r.blockingFiles;
+        }
+      }
+    }
+    if (parsed.lastPolishReason !== undefined) {
+      const p = parsed.lastPolishReason as Record<string, unknown> | null;
+      if (!p || typeof p !== "object" || typeof p.reason !== "string" ||
+          typeof p.at !== "string" || typeof p.round !== "number") {
+        delete parsed.lastPolishReason;
       }
     }
     if (!Array.isArray(parsed.rounds)) return undefined;

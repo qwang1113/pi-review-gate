@@ -68,7 +68,7 @@ test("P0 round-17: re-registering the SAME channel+label is idempotent (no leake
   // in uv__io_poll and precommit never returned.
   const f = fakeWait();
   const registry = createWatchRegistry(f.wait, () => {});
-  for (let i = 0; i < 5; i++) registry.register("rg-user-attention", "跨会话用户注意");
+  for (let i = 0; i < 5; i++) registry.register("rg-child-done", "子会话完成");
   assert.equal(f.calls.length, 1, "only the FIRST registration may spawn a waiter");
   assert.equal(f.calls[0]!.cancelled, false, "the live handle is never cancelled by a no-op re-register");
   assert.equal(registry.active.size, 1);

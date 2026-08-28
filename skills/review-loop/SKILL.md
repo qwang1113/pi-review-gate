@@ -206,18 +206,26 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
-   **Waiting-window discipline (v3)**:
+   **Waiting-window discipline (v4)** — 主会话是门禁的最后监督者,门禁未通过
+   前不得停止自动循环(round-18 存活不变量):
    1. 有可实现的确定性工作(代码/测试/文档/其他 repo 事务)→ 优先做掉,不要进入等待。
-   2. 确认没有任何可做的工作后,才进入阻塞等待——bash 里 `tmux wait-for
-      <doneChannel>`，**不加任何标志**，用 bash 工具自己的 `timeout` 参数
-      做上限(turn 不结束)。⚠️ `tmux wait-for` **没有 `-t` 超时选项**：
-      `wait-for -t 5 <chan>` 以 `unknown flag -t` 在 7ms 内报错返回，所以
-      `while ! tmux wait-for -t 5 <chan>; do :; done` 是空转轮询，不是等待
-      (实测:120 次循环共 0.5s)；无标志形式才真阻塞(实测 3.015s)。
-   3. 兜底:若必须结束 turn(如工具超时限制),门禁的唤醒(registerWatch)与
-      RESUME 都会拉起你——那不算错误,但空转应避免。
-   无论哪种方式,不要 sleep 或轮询 pane 屏幕;有流式 P0/P1/P2 时边等边修
-   (先确认再改)。因为审核范围是 immutable commit,工作区编辑不失效本轮。
+   2. 确认没有任何可做的工作后,才进入阻塞等待——在**一次 bash 调用**里同时
+      托管三条判据:
+      a. done channel 信号:`tmux wait-for <doneChannel>`(无标志;⚠️ 没有
+         `-t` 超时选项,`wait-for -t 5 <chan>` 会以 `unknown flag -t` 报错返回,
+         包成 `while ! tmux wait-for -t 5 <chan>; do :; done` 就是空转轮询,不是等待);
+         用 bash 工具自己的 `timeout` 参数做上限,
+         turn 不结束;
+      b. pane 退出/死亡:`tmux display-message -p -t <paneId> '#{pane_dead}'`
+         (remain-on-exit 保证退出后可观测);
+      c. verdict 已产出但未发信号:capture-pane 里已出现 verdict fence
+         (实测失败模式——子会话完成但忘记发完成信号,主会话空等);
+      任一命中即结束等待:review_read 读取输出继续流程,或 review_close 后
+      重新派发。
+   3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不发
+      信号)。`agent_settled` 会注入托管等待指令;主动托管远比被动拉起可靠。
+   不要 sleep 或高频轮询 pane 屏幕;有流式 P0/P1/P2 时边等边修(先确认再改)。
+   因为审核范围是 immutable commit,工作区编辑不失效本轮。
 3. **Review** — the reviewer audits the COMMIT RANGE `baseline..HEAD` (the
    immutable checkpoint commits) with `git show`/`git diff`; it may verify by
    doing in a throwaway `$TMPDIR` copy (mutation analysis included) and must

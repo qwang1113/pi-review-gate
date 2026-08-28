@@ -253,6 +253,12 @@ export function buildReviewPrompt(
    * rg-<title>-inbox — never literal "<channel>-inbox" concatenation.
    */
   inbox?: { path: string; channel: string },
+  /**
+   * The reason the MAIN session gave for opening this round while the gate
+   * was already met (round-18 polish gate). Injected verbatim so the
+   * reviewer can judge whether this round should exist at all.
+   */
+  polishReason?: { reason: string; at: string; round: number } | undefined,
 ): string {
   const streamPath = isolation?.streamPath;
   const range = isolation?.commitRange ?? "baseline..HEAD";
@@ -290,6 +296,17 @@ export function buildReviewPrompt(
   // change as the opening line says.
   if (scopeDirective && scopeDirective.trim()) {
     lines.push("", scopeDirective.trim());
+  }
+
+  // Round-18 polish gate: this round exists only because the main session
+  // said WHY. Give the reviewer that reason verbatim — it is part of what
+  // this round is judged against ("does this round deserve to exist?").
+  if (polishReason && polishReason.reason.trim()) {
+    lines.push(
+      "",
+      `REASON FOR THIS ROUND (given by the main session while the gate was already met, round ${polishReason.round} at ${polishReason.at}):`
+      + ` ${polishReason.reason.trim()}`
+    );
   }
 
   // Fresh-context pointer (goal criterion 4): the reviewer no longer forks

@@ -259,6 +259,49 @@ export function parseFenceFindings(text: string): FenceFinding[] {
   return out;
 }
 
+/**
+ * One finding with its FILE, for the polish-gate file-level counting.
+ *
+ * `parseFenceFindings` deliberately carries only severity + issue (the
+ * re-audit carryover needs objections verbatim, not locations). The polish
+ * gate (round-18) counts how many consecutive rounds a FILE keeps showing up
+ * in P2/Nit findings, which needs severity AND file per finding; unparseable
+ * fences are skipped exactly like the verdict parser.
+ */
+export interface FenceFileFinding {
+  severity: string;
+  file: string;
+}
+
+export function parseFenceFileFindings(text: string): FenceFileFinding[] {
+  const out: FenceFileFinding[] = [];
+  const fenceRe = /```(?:json)?\s*\n([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(text)) !== null) {
+    let obj: unknown;
+    try { obj = JSON.parse(m[1]!); }
+    catch {
+      try { obj = JSON.parse(escapeControlCharsInStrings(m[1]!)); }
+      catch { continue; }
+    }
+    if (obj && Array.isArray((obj as Record<string, unknown>).findings)) {
+      for (const f of (obj as Record<string, unknown>).findings as unknown[]) {
+        if (f && typeof f === "object" && typeof (f as Record<string, unknown>).severity === "string") {
+          const file = (f as Record<string, unknown>).file;
+          // A finding with no file cannot feed the file-level streak — skip
+          // it like the verdict parser skips unparseable entries.
+          if (typeof file !== "string" || file.trim() === "") continue;
+          out.push({
+            severity: (f as Record<string, unknown>).severity as string,
+            file,
+          });
+        }
+      }
+    }
+  }
+  return out;
+}
+
 
 /**
  * Parse precommit runner output. Only `## Overall:` sentinels.

@@ -97,7 +97,9 @@ import {
   paneWindowLabel,
 } from "../lib/tmux-session.ts";
 import { createWatchRegistry } from "../lib/judge-watch.ts";
-import { ATTENTION_CHANNEL, attentionText, consumeAttention, publishAttention, sideEffectsEnabled } from "../lib/attention.ts";
+import { attentionChannelFor, attentionText, consumeAttention, parentSessionId, publishAttention, sideEffectsEnabled } from "../lib/attention.ts";
+import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
+import { polishReasonRequired, recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   writeJudgeSpawnFiles,
   doneChannelFor,
@@ -151,7 +153,7 @@ import {
   unmetRequirements,
   type GateState,
 } from "../lib/gate-state.ts";
-import { parseReviewOutput, parsePrecommitOutput, parseFenceFindings } from "../lib/verdict-parse.ts";
+import { parseReviewOutput, parsePrecommitOutput, parseFenceFindings, parseFenceFileFindings } from "../lib/verdict-parse.ts";
 import { buildAdviserBrief, countAdviserConclusions, parseAdviserConclusions, type AdviserConclusion } from "../lib/adviser-brief.ts";
 import { sessionDirForCwd } from "../lib/session-dir.ts";
 import {
@@ -379,6 +381,12 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   let completionContinuations = 0;
   const COMPLETION_CONTINUATION_CAP = 12;
+  // Round-18: hosted judge-child wait notices are throttled (one per minute
+  // per state), NOT counted against the continuation budget — they repeat
+  // only while the agent keeps ending turns instead of hosting the wait, and
+  // the stall breaker must stay the sole arbiter of the review budget.
+  let lastChildNoticeAt = 0;
+  const CHILD_NOTICE_MIN_MS = 60_000;
   let loopArmed = true; // /gate-bypass or NEEDS_HUMAN disarms auto-continuation
   // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
   // session_start; a missing/corrupt config file falls back to safe defaults.
@@ -801,17 +809,17 @@ export default function reviewGate(pi: ExtensionAPI) {
    * makes main-session polling unnecessary. Cancelled on session_shutdown so
    * a reload/resume never leaks a tmux wait-for process.
    */
-  // Round-17 (user ask): CROSS-SESSION user-attention — a fixed well-known
-  // channel any session running this extension may signal when a HUMAN
-  // decision is needed (goal approval dialog, pause_for_question). Every
-  // session registers a listener on it at session_start (re-arm semantics
-  // like registerWatch), so an observer session is woken instead of having
-  // to poll panes.
-  // Round-17 P2 (reviewer): ONE definition of the channel name. The publisher
-  // (lib/attention.ts defaultSignal) and this listener must never be able to
-  // drift apart — a rename here used to split the bell from its listener with
-  // nothing failing.
-  const USER_ATTENTION_CHANNEL = ATTENTION_CHANNEL;
+  // Round-18 (user ask): DIRECTED parent attention. A session never wakes
+  // unrelated sessions: it publishes only to the channel of the session that
+  // SPAWNED it (RG_PARENT_SESSION), and it listens only on its OWN channel.
+  // A session with no parent publishes nothing at all. The channel is derived
+  // from the target session id, so the bell and the listener can never drift.
+  //
+  // We only LISTEN when we have a session id — an anonymous host has no
+  // address, so nobody can (or should) wake it.
+  function myAttentionChannel(): string | undefined {
+    return state.sessionId ? attentionChannelFor(state.sessionId) : undefined;
+  }
 
   /**
    * Who WE are for the self-wake filter. Round-17 Nit (reviewer): a shared
@@ -824,12 +832,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * Cross-session attention (round-17 P0 rewrite). The bell is content-free,
-   * so the EVENT rides a side-channel file (lib/attention.ts): the payload
-   * carries the originating session, so the listener can drop its OWN events
-   * (the measured self-wake loop), the (repo, reason) throttle stops the
-   * notification spam (10+ identical banners), and every side effect is gated
-   * by sideEffectsEnabled() so tests and headless hosts stay silent.
+   * Directed attention (round-18): tell the session that SPAWNED us that a
+   * human decision is needed. Without a parent this is a silent no-op
+   * ("no-parent") — a standalone session never wakes anybody. No macOS
+   * notification, no osascript: the wake is the parent's transcript message.
    * Never throws and never blocks a dialog.
    */
   function notifyUserAttention(reason: string, repo?: string): void {
@@ -837,6 +843,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const pane = ownPaneId();
       publishAttention({
         fromSessionId: attentionIdentity(),
+        toSessionId: parentSessionId(),
         fromPane: pane,
         fromWindow: paneWindowLabel(pane),
         repo: repo ?? cwd,
@@ -852,14 +859,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     (label, channel) => {
       const inbox = channel.endsWith("-inbox");
       let content: string;
-      if (channel === USER_ATTENTION_CHANNEL) {
-        // P0: the bell is a global broadcast the SENDER also hears. Read the
-        // payload and stay SILENT for our own / already handled / expired
-        // events — otherwise this session wakes itself in a loop while the
-        // message claims another session needs the user (measured).
+      if (myAttentionChannel() !== undefined && channel === myAttentionChannel()) {
+        // Directed: only events ADDRESSED to us (a child we spawned) are
+        // consumed; events for other sessions are invisible by address.
         const event = consumeAttention(attentionIdentity());
         if (!event) return;
-        content = `[review-gate] 需要用户介入 — ${attentionText(event)}（去该窗口批准/回答）。`;
+        content = `[review-gate] 子会话需要用户介入 — ${attentionText(event)}（去该窗口批准/回答）。`;
       } else if (inbox) {
         content = `[review-gate] 子会话 ${label} 提问（channel ${channel}）— review_read 读取 inbox 并回复。`;
       } else {
@@ -3002,6 +3007,8 @@ export default function reviewGate(pi: ExtensionAPI) {
           agents,
           title,
           workDir,
+          // Round-18: the child learns who spawned it (directed attention).
+          parentSessionId: state.sessionId ?? undefined,
         });
         // Round-7 P2: layout is decided inside spawnJudgePane (no anchor ⇒
         // carve the right column; anchor ⇒ stack) — the caller no longer
@@ -3221,6 +3228,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
+      reason: Type.Optional(Type.String({
+        description: "REQUIRED when the polish gate is armed (consecutive READY rounds or the same file in P2/Nit for 3 rounds): why is THIS round worth a review while the gate is already met? Persisted and shown to the next reviewer.",
+      })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const target = resolveToolRepo(params.repo);
@@ -3235,6 +3245,26 @@ export default function reviewGate(pi: ExtensionAPI) {
           details: { prepared: false },
           isError: true,
         };
+      }
+      // Round-18 polish gate (user ask, B-tier): when the gate is
+      // demonstrably met (or a file keeps being polished), the next round
+      // must carry an explicit reason. Refuse WITHOUT rendering anything
+      // (no dialog, no task text) — the refusal itself tells the agent what
+      // to do.
+      const polish = polishReasonRequired(st.rounds);
+      if (polish.required) {
+        const given = (params.reason ?? "").trim();
+        if (!given) {
+          return {
+            content: [{ type: "text", text:
+              `review-gate: prepare_review REFUSED — ${polish.why}。\n` +
+              "提供非空 reason 参数后重试（理由会写入 gate state，并出现在下一轮 reviewer 的任务文本里，接受独立审核）。\n" +
+              `当前状态：${st.rounds.length} 个已记录 round，最近一轮 verdict=${st.rounds[st.rounds.length - 1]?.verdict ?? "(none)"}。`
+            }],
+            details: { prepared: false, polishRequired: true, why: polish.why },
+            isError: true,
+          };
+        }
       }
       // Round-8 P1: the baseline is the checkpoint's PARENT (prevSha) — the
       // checkpoint itself is the HEAD under review, so baseline..HEAD is the
@@ -3343,7 +3373,20 @@ export default function reviewGate(pi: ExtensionAPI) {
         // session's listener (registered on the same derived channel) matches.
         doneChannelFor(reviewTitle),
         { path: inboxPath, channel: inboxChannel },
+        // Round-18 polish gate: the reason for THIS round travels to the
+        // reviewer, who judges whether the round deserves to exist.
+        st.lastPolishReason,
       );
+      // Round-18: a supplied reason is PERSISTED — the next round's reviewer
+      // sees it even if this round never completes.
+      if (polish.required && (params.reason ?? "").trim()) {
+        st.lastPolishReason = {
+          reason: (params.reason ?? "").trim(),
+          at: new Date().toISOString(),
+          round: st.rounds.length + 1,
+        };
+        persistRepo(ctx as unknown as ExtensionContext, root);
+      }
       // Register the review target: record_review verifies HEAD is still the
       // reviewed commit and binds a READY to the reviewed tree.
       reviewTargets.set(root, { baseline, head, tree });
@@ -3742,12 +3785,20 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
       }
+      // Round-18 polish gate: record which files carried P2/Nit vs P0/P1
+      // findings this round (severity + file from the RAW reviewer output,
+      // never line counts). The next prepare_review derives the file streak
+      // from these.
+      const fileFindings = parseFenceFileFindings(params.reviewer_output);
+      const recorded = recordedFindingsFrom(fileFindings);
       st.rounds.push({
         round: st.rounds.length + 1,
         findingsTotal: parsed.findingsTotal,
         fingerprints: parsed.findingFingerprints,
         verdict: parsed.verdict,
         at: new Date().toISOString(),
+        ...(recorded.polishFiles.length > 0 ? { polishFiles: recorded.polishFiles } : {}),
+        ...(recorded.blockingFiles.length > 0 ? { blockingFiles: recorded.blockingFiles } : {}),
       });
       // Observability: what this round cost and how much of the change it had
       // to judge. The duration is an UPPER BOUND — the reviewer is a subagent
@@ -5667,14 +5718,44 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
 
-    // Round-17 (user ask): while a FRESH judge child is in flight the loop
-    // is waiting on PURPOSE — the done/inbox signal wakes this session, so a
-    // resume nudge would push the agent to "continue" with nothing to do
-    // (measured: repeated noise next to the wait). Skip the injection. The
-    // freshness bound keeps a hung-but-alive pane from suppressing the
-    // breaker forever: once spawnedAt ages past STALL_MOTION_MAX_AGE_SEC
-    // this returns false and the stall path below fires normally.
-    if (judgeChildInMotion()) return;
+    // Round-18 (user ask): the main session must HOST the wait itself — a
+    // judge child's completion signal is an ACCELERATOR, never a
+    // precondition. The old early return let the session fall back to idle
+    // while a child was in flight, which (measured twice this session)
+    // deadlocked the loop when the child finished WITHOUT signalling.
+    // Classify the children: dead/silent ones end their wait NOW (read what
+    // they produced and carry on), live fresh ones are HOSTED (the agent
+    // keeps doing deterministic work or blocks in bash on the three
+    // criteria) — never idle.
+    const childSnapshots: ChildSnapshot[] = [];
+    const doneChannelsByPane = new Map<string, string>();
+    for (const list of childSessions.values()) {
+      for (const c of list) {
+        childSnapshots.push({
+          title: c.title,
+          paneId: c.paneId,
+          role: c.role,
+          spawnedAt: c.spawnedAt,
+          alive: paneAlive(c.paneId),
+        });
+        doneChannelsByPane.set(c.paneId, c.doneChannel);
+      }
+    }
+    if (childSnapshots.length > 0) {
+      const childVerdict = classifyChildren(childSnapshots, Date.now());
+      const childNotice = buildChildWaitNotice(childVerdict, doneChannelsByPane);
+      if (childNotice && Date.now() - lastChildNoticeAt >= CHILD_NOTICE_MIN_MS) {
+        lastChildNoticeAt = Date.now();
+        pi.sendUserMessage(
+          `[REVIEW_GATE_CHILD_${childVerdict.terminated.length > 0 ? "ENDED" : "HOST_WAIT"}] ${childNotice}\n\n` +
+          (childVerdict.terminated.length > 0
+            ? "Continue: read the child's output and drive the loop forward. Do not summarize; execute."
+            : "Waiting discipline: do all deterministic work first; only when nothing is left, block in ONE bash call watching the three criteria. Never end the turn and leave the wake-up to the child."),
+          { deliverAs: "followUp" },
+        );
+        return;
+      }
+    }
 
     // L2 circuit breaker: an unmet gate justifies another turn only while
     // something is still MOVING. When the fingerprint, both verdicts, the round
@@ -5766,14 +5847,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the registry shut (round-16 Nit); the latch must not survive into
     // the resumed/reloaded session or its wake-ups would never arm.
     watchRegistry.reset();
-    // Round-17 (user ask): listen for cross-session user-attention signals —
-    // a goal-approval dialog or pause_for_question in ANY session running
-    // this extension wakes this one. P0 guard: EVERY external side effect —
+    // Round-18 (user ask): DIRECTED attention — listen ONLY on our own
+    // channel (the one our children publish to). A session with no id has no
+    // address and registers nothing. P0 guard: EVERY external side effect —
     // listener included — goes through the one sideEffectsEnabled() predicate
-    // (interactive tmux host, not a test/CI/headless run), so a non-interactive
-    // process neither spawns a `tmux wait-for` nor fires notifications.
-    if (sideEffectsEnabled()) {
-      watchRegistry.register(USER_ATTENTION_CHANNEL, "跨会话用户注意");
+    // (interactive tmux host, not a test/CI/headless run).
+    const attentionChannel = myAttentionChannel();
+    if (attentionChannel && sideEffectsEnabled()) {
+      watchRegistry.register(attentionChannel, "子会话用户注意");
     }
     // (Snapshot sessions were retired 2026-08-27: judge roles run as tmux
     // child processes that never load this extension, so no inert-session

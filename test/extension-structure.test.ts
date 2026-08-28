@@ -1289,28 +1289,23 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
     "a truncated goal must be completed from the file when writing the task");
 });
 
-test("round-17: cross-session user-attention is signalled on dialogs/pauses and listened for at session_start", () => {
-  // SIGNAL side (P0 round-17 rewrite): the tmux bell carries no payload, so
-  // the EVENT is published through lib/attention.ts with the originating
-  // session/pane/window + repo + reason. A bare signalChannel here would be
-  // the self-wake loop and the notification spam coming back.
+test("round-18: attention is DIRECTED — a child publishes to its parent's channel, the session listens only on its own", () => {
+  // SIGNAL side: the event is published through lib/attention.ts with the
+  // PARENT from the environment (RG_PARENT_SESSION) — never a global bell.
   const fnAt = SRC.indexOf("function notifyUserAttention(");
   assert.ok(fnAt > 0, "notifyUserAttention must exist");
   const fn = SRC.slice(fnAt, fnAt + 900);
-  // Round-17 P2 (reviewer): the channel name has ONE definition — the extension
-  // listens on exactly the constant lib/attention.ts signals, so a rename can
-  // never split the bell from its listener.
-  assert.match(SRC, /const USER_ATTENTION_CHANNEL = ATTENTION_CHANNEL;/, "the channel comes from the publisher's own constant");
-  assert.doesNotMatch(SRC, /USER_ATTENTION_CHANNEL = "rg-user-attention"/, "no duplicated literal");
   assert.match(fn, /publishAttention\(\{/, "the event goes through the payload publisher");
   assert.match(fn, /fromSessionId: attentionIdentity\(\)/, "the payload identifies the sender (self-wake filter)");
-  // Round-17 Nit (reviewer): two id-less hosts must not share one identity, or
-  // each would swallow the other's events as "its own".
-  assert.match(SRC, /function attentionIdentity\(\): string \{[\s\S]{0,120}unknown-\$\{process\.pid\}/,
-    "an id-less host still gets a UNIQUE identity");
+  assert.match(fn, /toSessionId: parentSessionId\(\)/, "the payload is addressed to the PARENT from the environment");
   assert.match(fn, /fromWindow: paneWindowLabel\(pane\)/, "the payload carries the origin window label");
   assert.match(fn, /reason,/, "the payload carries the reason");
-  assert.doesNotMatch(fn, /osascript/, "notification delivery belongs to lib/attention.ts, behind its guards");
+  assert.doesNotMatch(fn, /osascript/, "no macOS notification is fired from the extension");
+  // The channel is DERIVED from the parent session id — no shared constant
+  // that could drift, and no global broadcast channel at all.
+  assert.match(SRC, /function myAttentionChannel\(\): string \| undefined/, "the listener address is OUR session's own channel");
+  assert.match(SRC, /attentionChannelFor\(state\.sessionId\)/, "the channel derives from our session id");
+  assert.doesNotMatch(SRC, /rg-user-attention/, "the global broadcast channel is GONE");
   // propose_loop_goal: signalled right before the approval dialog renders.
   const goalAt = SRC.indexOf('name: "propose_loop_goal"');
   const goalBody = SRC.slice(goalAt, goalAt + 24000);
@@ -1320,51 +1315,82 @@ test("round-17: cross-session user-attention is signalled on dialogs/pauses and 
   // pause_for_question: signalled when the pause is recorded, with its own reason.
   const pauseAt = SRC.indexOf('name: "pause_for_question"');
   const pauseBody = SRC.slice(pauseAt, pauseAt + 8000);
-  assert.match(pauseBody, /notifyUserAttention\("等待回答提问"\)/, "a pause signals attention with its reason");
-  // LISTEN side: session_start registers the listener (re-arm semantics).
+  assert.match(pauseBody, /notifyUserAttention\(\"等待回答提问\"\)/, "a pause signals attention with its reason");
+  // LISTEN side: session_start registers OUR OWN channel (absent when the
+  // session has no id), still behind the ONE sideEffectsEnabled() predicate.
   const startAt = SRC.indexOf('pi.on("session_start"');
   const startBody = SRC.slice(startAt, startAt + 1200);
-  assert.match(startBody, /watchRegistry\.register\(USER_ATTENTION_CHANNEL, "跨会话用户注意"\)/,
-    "session_start listens for cross-session attention");
-  // P0 (round-17): every external side effect — listener included — goes
-  // through the ONE sideEffectsEnabled() predicate, so a headless / test / CI
-  // process neither spawns a `tmux wait-for` nor fires a notification.
-  assert.match(startBody, /if \(sideEffectsEnabled\(\)\) \{/,
+  assert.match(startBody, /myAttentionChannel\(\)/, "session_start derives our own attention channel");
+  assert.match(startBody, /watchRegistry\.register\(attentionChannel, "子会话用户注意"\)/,
+    "session_start listens ONLY on our own channel");
+  assert.match(startBody, /if \(attentionChannel && sideEffectsEnabled\(\)\) \{/,
     "the attention listener is guarded by sideEffectsEnabled()");
-  // The wake handler must CONSUME the payload and stay silent for its own /
-  // handled / expired events — that filter IS the self-wake fix (P0).
+  // The wake handler consumes the payload addressed to us and stays silent
+  // for other sessions' events (directed delivery).
   const regAt = SRC.indexOf("createWatchRegistry(");
   const reg = SRC.slice(regAt, regAt + 1600);
-  assert.match(reg, /channel === USER_ATTENTION_CHANNEL/, "attention wakes carry their own message");
+  assert.match(reg, /channel === myAttentionChannel\(\)/, "attention wakes are recognized by OUR channel");
   assert.match(reg, /const event = consumeAttention\(attentionIdentity\(\)\)/, "the listener reads the payload with the SAME identity the publisher stamps");
   assert.match(reg, /if \(!event\) return;/, "our own / handled / expired events wake nobody");
   assert.match(reg, /\$\{attentionText\(event\)\}/, "the wake text carries origin + repo + reason");
+  // Spawn side: the child receives RG_PARENT_SESSION so it knows who to wake.
+  const spawnAt = SRC.indexOf('name: "review_spawn"');
+  const spawn = SRC.slice(spawnAt, spawnAt + 9000);
+  assert.match(spawn, /parentSessionId: state\.sessionId \?\? undefined/, "the child is told who spawned it");
 });
 
-test("round-17: agent_settled skips the RESUME injection while a fresh judge child is in flight", () => {
+test("round-18: prepare_review carries the polish-gate reason — parameter, refusal, persistence, reviewer injection", () => {
+  const start = SRC.indexOf('name: "prepare_review"');
+  assert.ok(start > 0, "prepare_review must exist");
+  const body = SRC.slice(start, start + 9000);
+  // The tool accepts a `reason` parameter.
+  assert.match(body, /reason: Type\.Optional\(Type\.String\(/, "prepare_review accepts a reason");
+  // The refusal path consults the pure decision module and demands the reason.
+  assert.match(body, /polishReasonRequired\(st\.rounds\)/, "the polish gate decides from the recorded rounds");
+  assert.match(body, /prepare_review REFUSED/, "the refusal text is explicit");
+  assert.match(body, /params\.reason \?\? ""\)\.trim\(\)/, "the reason is trimmed before judging");
+  // A supplied reason is persisted into gate state for the NEXT reviewer.
+  assert.match(body, /st\.lastPolishReason = \{/, "the reason is persisted");
+  assert.match(body, /lastPolishReason/, "the reviewer task receives the stored reason");
+  // record_review records per-file finding severities for the file streak.
+  const recAt = SRC.indexOf('name: "record_review"');
+  assert.ok(recAt > 0);
+  const recBody = SRC.slice(recAt, recAt + 9000);
+  assert.match(recBody, /parseFenceFileFindings\(params\.reviewer_output\)/, "record_review parses severity+file per round");
+  assert.match(recBody, /recordedFindingsFrom\(fileFindings\)/, "the file lists are derived for the streak");
+  assert.match(recBody, /polishFiles: recorded\.polishFiles/, "P2/Nit files are stored on the round");
+  assert.match(recBody, /blockingFiles: recorded\.blockingFiles/, "P0/P1 files are stored on the round");
+});
+
+test("round-18: agent_settled HOSTS the judge-child wait — never returns to idle on a child in flight", () => {
   const settledAt = SRC.indexOf('pi.on("agent_settled"');
   assert.ok(settledAt > 0);
   const settled = SRC.slice(settledAt, settledAt + 16000);
   const injectAt = settled.indexOf("pi.sendUserMessage(");
   assert.ok(injectAt > 0, "agent_settled must have an injection site");
-  // Waiting on a judge child is the CORRECT discipline: the done/inbox
-  // signal wakes the session, so a resume nudge would push the agent to
-  // 'continue' with nothing to do. The early return must sit BEFORE the
-  // injection; the freshness bound (judgeChildInMotion) keeps the breaker
-  // alive for hung panes.
-  const earlyExit = settled.indexOf("if (judgeChildInMotion()) return;");
-  assert.ok(earlyExit > 0 && earlyExit < injectAt,
-    "a fresh judge child suppresses the resume injection (the done signal wakes the session)");
-  // The stall path must stay reachable for OLD judge panes: the early return
-  // cannot come after the breaker block.
+  // The liveness invariant (user requirement, round-18): while gates are unmet
+  // the main session must KEEP driving, never fall back to idle. The old early
+  // return (`if (judgeChildInMotion()) return;`) is GONE — a fresh child now
+  // produces a HOST_WAIT injection instead.
+  assert.doesNotMatch(settled, /if \(judgeChildInMotion\(\)\) return;/,
+    "the old early return that left the session idle is removed");
+  // The child classification drives the injection: dead/silent children end
+  // the wait (recovery), live ones get the hosted-wait discipline.
+  assert.match(settled, /classifyChildren\(childSnapshots, Date\.now\(\)\)/, "children are classified by the pure module");
+  assert.match(settled, /REVIEW_GATE_CHILD_\$\{/, "the child injection marker is built by template");
+  assert.match(settled, /"ENDED" : "HOST_WAIT"|terminated\.length > 0 \? "ENDED"/, "a dead/silent child produces the ENDED marker");
+  assert.match(settled, /HOST_WAIT/, "an in-flight child produces the HOST_WAIT marker");
+  assert.match(settled, /Never end the turn and leave the wake-up to the child/, "the discipline text is explicit");
+  // The stall path stays reachable for children that are NOT involved.
   const stallAt = settled.indexOf("evaluateStall(");
-  assert.ok(earlyExit < stallAt, "the early return precedes the stall breaker");
+  assert.ok(stallAt > 0, "the stall breaker still exists");
+  assert.ok(injectAt < stallAt, "the injection precedes the breaker block");
 });
 
 test("round-17: review_spawn reuses an alive same-role child and drops dead panes", () => {
   const spawnAt = SRC.indexOf('name: "review_spawn"');
   assert.ok(spawnAt > 0);
-  const spawn = SRC.slice(spawnAt, spawnAt + 7000);
+  const spawn = SRC.slice(spawnAt, spawnAt + 9000);
   // Dead panes are cleaned from the registry first (never block a spawn).
   assert.match(spawn, /childSessions\.set\(repoRoot, alive\)/,
     "dead panes (pane_dead=1) are filtered out of the registry");

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { parseReviewOutput, parsePrecommitOutput, parseFenceFindings } = await import(
+const { parseReviewOutput, parsePrecommitOutput, parseFenceFindings, parseFenceFileFindings } = await import(
   new URL("../lib/verdict-parse.ts", import.meta.url).pathname
 );
 
@@ -245,4 +245,28 @@ test("parseFenceFindings salvages raw control chars inside strings, like parseRe
   assert.equal(got.length, 1);
   assert.equal(got[0]!.severity, "P1");
   assert.equal(got[0]!.issue, "line one\nline two");
+});
+
+// ---- parseFenceFileFindings (round-18 polish gate: severity + file) ----
+
+test("parseFenceFileFindings extracts severity + file per finding (polish gate input)", () => {
+  const out =
+    '```json\n{"gate":"READY","findings":[{"file":"src/a.ts","severity":"P2","issue":"one"},{"file":"src/b.ts","severity":"Nit","issue":"two"}]}\n```';
+  assert.deepEqual(parseFenceFileFindings(out), [
+    { severity: "P2", file: "src/a.ts" },
+    { severity: "Nit", file: "src/b.ts" },
+  ]);
+});
+
+test("parseFenceFileFindings: findings without a severity or a file are skipped", () => {
+  const out =
+    '```json\n{"gate":"BLOCKED","findings":[{"file":"a.ts","severity":"P1","issue":"x"},{"file":"b.ts","issue":"no-sev"},{"severity":"P2","issue":"no-file"}]}\n```';
+  assert.deepEqual(parseFenceFileFindings(out), [
+    { severity: "P1", file: "a.ts" },
+  ]);
+});
+
+test("parseFenceFileFindings: unparseable fences are skipped, not fatal", () => {
+  assert.deepEqual(parseFenceFileFindings("```json\n{broken\n```"), []);
+  assert.deepEqual(parseFenceFileFindings("no fence"), []);
 });

@@ -1,24 +1,28 @@
 /**
- * Cross-session user-attention events (round-17 P0).
+ * DIRECTED parent attention — a child session wakes the session that STARTED it.
  *
- * A `tmux wait-for` signal is an UNADDRESSED GLOBAL BROADCAST with no payload:
- * the sender listens on the same channel, so it woke ITSELF in a loop while the
- * message claimed "another session needs you", and the macOS notification —
- * fired per event with no identity, no throttle and no environment guard —
- * piled up 10+ identical banners (both measured from user screenshots).
+ * WHY NOT A BROADCAST (user requirement, round-18). The previous design signalled
+ * one well-known channel (`rg-user-attention`) that EVERY session listened on, so
+ * an unrelated session's goal dialog interrupted whoever happened to be working —
+ * measured: `nvim(@1) onchain：等待回答提问` landing in a session that had no
+ * relationship to it whatsoever. A wake-up is only ever meaningful for the ONE
+ * session that is responsible for the waiting child, so addressing is now
+ * explicit:
  *
- * The fix separates the BELL from the EVENT:
- *  - the tmux signal stays a content-free bell;
- *  - the event itself is written to a side-channel file (id, originating
- *    session/pane/window, repo, reason, timestamps);
- *  - the listener reads the payload and IGNORES its own events (no self-wake),
- *    events already handled, and events past their TTL;
- *  - the same (repo, reason) is published at most once per throttle window;
- *  - every external side effect (tmux signal + osascript) goes through
- *    `sideEffectsEnabled()`, so tests and non-interactive hosts stay silent.
+ *  - the parent stamps its own session id into the child's environment
+ *    (`RG_PARENT_SESSION`) when it spawns it;
+ *  - the child publishes to `rg-attention-<parentSessionId>` and nowhere else;
+ *  - every session listens on ITS OWN channel only;
+ *  - a session with no parent publishes NOTHING (status "no-parent") — a
+ *    standalone session can never wake anybody.
  *
- * The state file is GLOBAL, not per-repo: the whole point is that a session in
- * ANOTHER repo can see the event, which a `<repo>/.pi/` file could not deliver.
+ * NO SYSTEM NOTIFICATIONS. macOS `osascript` banners are gone entirely (user
+ * requirement): the wake message in the parent's transcript is the whole channel.
+ *
+ * The payload still rides a side-channel FILE because a tmux signal carries no
+ * data. The file is global (`~/.pi/agent/…`) so a parent in another repo can read
+ * an event addressed to it, and every event names both endpoints, so a consumer
+ * takes only what is addressed to itself.
  */
 
 import { execFileSync } from "node:child_process";
@@ -28,8 +32,24 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { homedir } from "node:os";
 
-/** The well-known bell channel. Content-free by design — payload is in the file. */
-export const ATTENTION_CHANNEL = "rg-user-attention";
+/** Environment variable carrying the SPAWNING session's id into a child. */
+export const PARENT_SESSION_ENV = "RG_PARENT_SESSION";
+
+/**
+ * The channel a session listens on / a child signals. Derived from the TARGET
+ * session id, so two sessions can never share one bell.
+ */
+export function attentionChannelFor(sessionId: string): string {
+  const safe = sessionId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 60);
+  return `rg-attention-${safe}`;
+}
+
+/** The parent session id this process was started by, if any. */
+export function parentSessionId(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env[PARENT_SESSION_ENV]?.trim();
+  return raw && raw.length > 0 ? raw : undefined;
+}
+
 /**
  * An UNHANDLED (repo, reason) is published at most once per window. Once a
  * listener has consumed the event, a new publish is allowed immediately — by
@@ -45,6 +65,8 @@ export const ATTENTION_KEEP = 20;
 export interface AttentionEvent {
   id: string;
   fromSessionId: string;
+  /** The session this event is ADDRESSED to (the parent). */
+  toSessionId: string;
   fromPane?: string;
   /** Human-facing origin label, e.g. `tmax(@365)`. */
   fromWindow?: string;
@@ -56,6 +78,8 @@ export interface AttentionEvent {
 
 export interface AttentionInput {
   fromSessionId: string;
+  /** Parent session id; absent ⇒ nothing is published. */
+  toSessionId?: string;
   fromPane?: string;
   fromWindow?: string;
   repo: string;
@@ -68,16 +92,15 @@ export interface AttentionDeps {
   readState?: () => string | undefined;
   writeState?: (raw: string) => void;
   signal?: (channel: string) => void;
-  notify?: (title: string, body: string) => void;
   sideEffects?: () => boolean;
 }
 
-export type PublishStatus = "sent" | "throttled" | "disabled";
+export type PublishStatus = "sent" | "throttled" | "disabled" | "no-parent";
 
 /**
  * One gate for every external side effect. Tests and non-interactive hosts
- * (headless `pi -p`, CI, a piped stdout) must never fire osascript or a tmux
- * signal: the P0 report measured real notifications escaping from test runs.
+ * (headless `pi -p`, CI, a piped stdout) must never fire a tmux signal: the P0
+ * report measured real side effects escaping from test runs.
  */
 export function sideEffectsEnabled(
   env: NodeJS.ProcessEnv = process.env,
@@ -122,17 +145,15 @@ function saveEvents(events: AttentionEvent[], deps: AttentionDeps): void {
       return;
     }
     // Round-17 Nit (reviewer): write ATOMICALLY, through the shared helper.
-    // The bell wakes every listener at once, so concurrent read-modify-writes
-    // overlap; a torn file used to parse as empty and silently drop pending
-    // events. (A duplicate wake remains possible — acceptable for a
-    // convenience channel; losing events was not.)
+    // Concurrent read-modify-writes overlap; a torn file used to parse as empty
+    // and silently drop pending events.
     writeFileAtomic(deps.statePath ?? defaultStatePath(), raw);
   } catch {
     /* best-effort: attention is a convenience, never a gate */
   }
 }
 
-/** The wake/notification text — origin + repo + reason, so the user knows where to go. */
+/** The wake text — origin + repo + reason, so the user knows where to go. */
 export function attentionText(e: AttentionEvent): string {
   const origin = e.fromWindow ?? e.fromPane ?? e.fromSessionId.slice(0, 8);
   const repo = e.repo.split("/").filter(Boolean).pop() ?? e.repo;
@@ -140,11 +161,16 @@ export function attentionText(e: AttentionEvent): string {
 }
 
 /**
- * Record an attention event and ring the bell. Returns what actually happened
- * so callers (and tests) can tell a throttled or disabled publish from a real
- * one. Never throws: attention must not break a dialog.
+ * Record an attention event and ring the PARENT's bell. Returns what actually
+ * happened so callers (and tests) can tell a throttled, disabled or
+ * parent-less publish from a real one. Never throws: attention must not break
+ * a dialog, and it is never a gate condition.
  */
 export function publishAttention(input: AttentionInput, deps: AttentionDeps = {}): { status: PublishStatus; event?: AttentionEvent } {
+  // No parent ⇒ nobody to tell. A standalone session stays silent instead of
+  // waking unrelated sessions (the whole point of the directed rewrite).
+  const parent = input.toSessionId?.trim();
+  if (!parent) return { status: "no-parent" };
   const now = deps.now ? deps.now() : Date.now();
   const enabled = deps.sideEffects ? deps.sideEffects() : sideEffectsEnabled();
   if (!enabled) return { status: "disabled" };
@@ -154,6 +180,7 @@ export function publishAttention(input: AttentionInput, deps: AttentionDeps = {}
     (e) =>
       e.repo === input.repo &&
       e.reason === input.reason &&
+      e.toSessionId === parent &&
       !e.handledAt &&
       now - Date.parse(e.createdAt) < ATTENTION_THROTTLE_MS,
   );
@@ -162,6 +189,7 @@ export function publishAttention(input: AttentionInput, deps: AttentionDeps = {}
   const event: AttentionEvent = {
     id: `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     fromSessionId: input.fromSessionId,
+    toSessionId: parent,
     fromPane: input.fromPane,
     fromWindow: input.fromWindow,
     repo: input.repo,
@@ -170,27 +198,24 @@ export function publishAttention(input: AttentionInput, deps: AttentionDeps = {}
   };
   saveEvents([...events, event], deps);
 
-  const text = attentionText(event);
   try {
-    (deps.signal ?? defaultSignal)(ATTENTION_CHANNEL);
+    (deps.signal ?? defaultSignal)(attentionChannelFor(parent));
   } catch { /* no listener is the normal case */ }
-  try {
-    (deps.notify ?? defaultNotify)(`review-gate · ${event.fromWindow ?? "pi"}`, text);
-  } catch { /* non-macOS or no osascript */ }
   return { status: "sent", event };
 }
 
 /**
- * The listener side: the newest event that is NOT ours, NOT handled and NOT
- * expired — marked handled as it is returned (so it wakes exactly one session
- * once). `undefined` means "stay silent and re-arm": that is what kills the
- * self-wake loop the P0 report measured.
+ * The listener side: the newest event ADDRESSED TO US that is not ours, not
+ * handled and not expired — marked handled as it is returned (so it wakes
+ * exactly one session once). `undefined` means "stay silent and re-arm".
  */
 export function consumeAttention(selfSessionId: string, deps: AttentionDeps = {}): AttentionEvent | undefined {
   const now = deps.now ? deps.now() : Date.now();
   const events = loadEvents(deps);
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;
+    // Directed delivery: an event addressed to somebody else is invisible.
+    if (e.toSessionId !== selfSessionId) continue;
     if (e.fromSessionId === selfSessionId) continue;
     if (e.handledAt) continue;
     if (now - Date.parse(e.createdAt) > ATTENTION_TTL_MS) continue;
@@ -204,12 +229,4 @@ export function consumeAttention(selfSessionId: string, deps: AttentionDeps = {}
 
 function defaultSignal(channel: string): void {
   execFileSync("tmux", ["wait-for", "-S", channel], { stdio: "ignore", timeout: 5_000 });
-}
-
-function defaultNotify(title: string, body: string): void {
-  const esc = (s: string) => s.replace(/["\\]/g, "\\$&");
-  execFileSync("osascript", ["-e", `display notification "${esc(body)}" with title "${esc(title)}"`], {
-    stdio: "ignore",
-    timeout: 5_000,
-  });
 }

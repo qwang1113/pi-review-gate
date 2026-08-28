@@ -532,7 +532,7 @@ export function waitForSignalAsync(channel: string, timeoutMs = 0): WaitHandle {
     // P0 (round-17): a listener must NEVER keep the event loop alive —
     // headless / test / CI processes would hang forever on an unsignalled
     // channel (measured: precommit workers stuck in uv__io_poll with 30
-    // leaked `tmux wait-for rg-user-attention` children). unref lets the
+    // leaked `tmux wait-for` children). unref lets the
     // process exit; the child dies with the tmux server or on cancel.
     child.unref();
     const timer = timeoutMs > 0

@@ -232,16 +232,19 @@ copy a reviewer SHOULD verify by doing — mutation analysis included — and
 must restore before finishing. Because the reviewed range is immutable,
 **you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
 that carry evidence (confirm each in the code first), leave Nits for the
-verdict. WAITING-WINDOW DISCIPLINE (v3): (1) 有可实现的确定性工作(代码/测试/
+verdict. WAITING-WINDOW DISCIPLINE (v4): (1) 有可实现的确定性工作(代码/测试/
 文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后
-才阻塞等待——bash 里 `tmux wait-for <doneChannel>`,**不加任何标志**,用 bash
-工具自己的 `timeout` 参数做上限(turn 不结束)。`tmux wait-for` **没有
-`-t` 超时选项**：`wait-for -t 5 <chan>` 会以 `unknown flag -t` 在 7ms 内
-报错返回，包成 `while ! tmux wait-for -t 5 <chan>; do :; done` 就是空转
-轮询(实测:120 次循环共 0.5s,看上去像等了 10 分钟实则没等);
-无标志的 `tmux wait-for <chan>` 才真阻塞(实测 3.015s 等到信号)。
-(3) 兜底:必须结束 turn 时,registerWatch 唤醒与 RESUME 都会拉起你——那
-不算错误,但空转应避免。
+才阻塞等待——在**一次 bash 调用**里同时托管三条判据:done channel 信号
+(`tmux wait-for <doneChannel>`,无标志,用 bash 工具自己的 `timeout` 参数做上限,
+turn 不结束;⚠️ `tmux wait-for` **没有 `-t` 超时选项**——`wait-for -t 5 <chan>`
+以 `unknown flag -t` 在 7ms 内报错返回,包成 `while ! tmux wait-for -t 5 <chan>;
+do :; done` 就是空转轮询,实测 120 次循环仅 0.5s)、pane 退出/死亡
+(`tmux display-message -p -t <paneId> '#{pane_dead}'`),
+以及 capture-pane 里是否已出现 verdict fence(子会话已产出结论但未发信号是
+实测过的失败模式);任一命中即结束等待并继续。(3) **禁止**用结束 turn 把
+唤醒责任交给子会话——子会话可能报错/崩溃/永远不发信号,而主会话是门禁的
+最后监督者,门禁未通过前不得停止自动循环(存活不变量);`agent_settled` 会
+注入托管等待指令,但主动托管远比被动拉起可靠。
 The verdict arrives through the done channel and wakes this
 session (`review_watch`); the reviewer may ask questions through its inbox.
 (d) **The judge child runs as a tmux pane — MECHANICALLY ENFORCED.**
