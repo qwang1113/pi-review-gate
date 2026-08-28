@@ -241,12 +241,19 @@ timeout 时用轮询变体 `while ! tmux wait-for -t 5 <chan>; do :; done`);
 The verdict arrives through the done channel and wakes this
 session (`review_watch`); the reviewer may ask questions through its inbox.
 (d) **The judge child runs as a tmux pane — MECHANICALLY ENFORCED.**
-`review_spawn` creates a fresh pi process in a pane of the main session's
+`review_spawn` runs the judge as a pi process in a pane of the main session's
 tmux (right column, stacked below the first judge); a judge role dispatched
 through `subagent` / `workflowScript` / `workflowScriptPath` is HARD-blocked
 (the workflow sandbox has no per-child isolation, so the judge would land in
 one shared cwd — your live worktree, the exact failure this ends). The
-single reviewer is one `review_spawn` call per round. `record_review`
+single reviewer is one `review_spawn` call per round. **Singleton per role,
+reused across rounds**: `review_spawn` does NOT open a new pane every round —
+an alive same-role child in the same repo is REUSED (that is how the judge's
+context carries over until a READY), dead panes are dropped first, and
+`fresh: true` kills the old pane before spawning a new one. A reused pane is
+REBOUND to the round's own channels (the previous listeners are dropped, the
+new done/inbox channels are registered, the inbox path moves with it), so
+`prepare_review`'s ready-made task text is usable as-is. `record_review`
 withholds a READY unless the round was PREPARED (a registered
 `baseline..HEAD` target) and the verdict carries the pane's `cwd` (measured
 with `pwd`, a required field of the verdict schema). While a judge child is

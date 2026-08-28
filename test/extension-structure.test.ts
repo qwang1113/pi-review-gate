@@ -1217,7 +1217,12 @@ test("goal criterion 3: prepare_adviser is registered and hands back a brief wit
   assert.match(body, /建议 title: \"\$\{adviserTitle\}\"/, "the output names the suggested title");
   assert.match(body, /inboxChannelFor\(adviserTitle\)/, "the inbox channel derives from the same title");
   assert.match(body, /review_watch\(\{ channel: \"\$\{adviserInboxChannel\}\"/, "the output suggests registering the inbox receiver");
+  // Round-17 P2: pinning the WORDS "等待纪律" alone let a wrong claim survive
+  // (that edits do not depend on goal approval — pre-approval edits are hard
+  // blocked). Pin the corrected substance instead.
   assert.match(body, /等待纪律/, "the waiting discipline is part of the adviser flow");
+  assert.match(body, /第一次 goal 批准前编辑\/写工具仍被门禁拦截,属预期/,
+    "the pre-approval reality is stated, not the refuted claim");
   assert.match(body, /落盘 task 文件时请用 read 读取 \$\{pathJoin\(target\.root, LOOP_GOAL_RELPATH\)\}/,
     "a truncated goal must be completed from the file when writing the brief");
 });
@@ -1244,6 +1249,8 @@ test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor tas
   assert.match(body, /inboxChannelFor\(auditTitle\)/, "the inbox channel derives from the same title");
   assert.match(body, /review_watch\(\{ channel: \"\$\{auditInboxChannel\}\"/, "the output suggests registering the inbox receiver");
   assert.match(body, /等待纪律/, "the waiting discipline is part of the auditor flow");
+  assert.match(body, /第一次 goal 批准前编辑\/写工具仍被门禁拦截,属预期/,
+    "the pre-approval reality is stated, not the refuted claim");
 });
 
 test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline into the reviewer task", () => {
@@ -1276,6 +1283,8 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   // Round-17: waiting discipline (work while the child runs) is spelled out,
   // and a truncated goal gets an explicit read-and-replace instruction.
   assert.match(body, /等待纪律/, "the waiting discipline is part of the spawn flow");
+  assert.match(body, /第一次 goal 批准前编辑\/写工具仍被门禁拦截,属预期/,
+    "prepare_review states the pre-approval reality too (round-17 P2: it was the one left behind)");
   assert.match(body, /落盘 task 文件时请用 read 读取 \$\{pathJoin\(root, LOOP_GOAL_RELPATH\)\}/,
     "a truncated goal must be completed from the file when writing the task");
 });

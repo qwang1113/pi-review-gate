@@ -108,11 +108,13 @@ export interface SpawnPaneOptions {
   /**
    * tmux target for the split (session/window, or a pane id).
    *
-   * WITHOUT an explicit target tmux splits the pane that owns TMUX_PANE —
-   * the MAIN session's pane — so the SECOND judge would land below the main
-   * pane instead of stacking in the right column (round-2 finding,
-   * measured). The module remembers the first judge pane per window and
-   * stacks later judges on it automatically; pass a target explicitly only
+   * WITHOUT an explicit target tmux resolves the split against the SERVER'S
+   * ACTIVE pane — whichever window the USER currently focuses (round-17,
+   * confirmed with data; the older "it follows TMUX_PANE" reading is
+   * REFUTED). The module therefore always names a target itself: the
+   * remembered first judge pane of our window, else ownPaneId().
+   * Later judges stack on that remembered pane automatically; pass a target
+   * explicitly only
    * to redirect a split elsewhere (tests use an isolated session).
    */
   target?: string;
@@ -235,22 +237,27 @@ export function spawnJudgePane(opts: SpawnPaneOptions): SpawnPaneResult {
     // a judge that dies at startup would otherwise vanish with the pane
     // before a post-split set-option could run (round-2 P1, measured: the
     // pre-set window option retains the dead pane with pane_dead=1).
-    // The option is set on the window the split lands in — derived from
-    // opts.target when one names another session (round-3 P2: an untargeted
-    // set-option hits the TMUX_PANE window, mutating the caller's own
-    // window and leaving pane-mode retention untested).
+    // The option is set on the window the split LANDS in, and that window is
+    // named EXPLICITLY in both cases (round-17 P1, reproduced on a throwaway
+    // server): an untargeted set-option follows the server's ACTIVE pane — the
+    // window the USER happens to focus — so it mutated an unrelated window
+    // while the judge's own window kept no dying-pane retention at all.
     const optArgs = ["set-option", "-w", "remain-on-exit", "on"];
     if (opts.target) {
       // target may be a session, window, or pane id — resolve it to a window.
       // If it cannot be resolved the spawn is about to fail anyway: SKIP the
       // option rather than falling back to an untargeted set-option that
-      // would mutate the caller's own window (round-4 Nit).
+      // would mutate an unrelated window (round-4 Nit).
       const win = tmuxSync(["display-message", "-p", "-t", opts.target, "#{window_id}"], 10_000);
       if (win.status === 0 && win.stdout.trim() !== "") {
         optArgs.splice(2, 0, "-t", win.stdout.trim());
       } else {
         return { ok: false, error: `cannot resolve target ${opts.target} for the split` };
       }
+    } else {
+      // No target ⇒ the split lands in OUR window, so the option must too.
+      const own = ownWindowId();
+      if (own) optArgs.splice(2, 0, "-t", own);
     }
     tmuxSync(optArgs, 10_000);
 

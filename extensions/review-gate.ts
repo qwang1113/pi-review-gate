@@ -3349,7 +3349,7 @@ export default function reviewGate(pi: ExtensionAPI) {
               `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${pathJoin(root, LOOP_GOAL_RELPATH)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,
             ]
           : []),
-        "- 等待纪律:子会话审核期间,继续做可实现的工作(编辑/测试不依赖 goal 批准——checkpoint 才需要);只有真正阻塞于审核结果的事才等。",
+        "- 等待纪律:子会话审核期间,继续做可实现的确定性工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);确认没有可做的工作后才阻塞等待审核结果。",
         "",
         "--- task text ---",
         task,

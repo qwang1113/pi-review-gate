@@ -101,6 +101,14 @@ test("ownPaneId/ownWindowId: both resolution paths are pinned in the source (rou
   // The untargeted split must carry -t <own> (never the server's active pane).
   const spawn = src.slice(src.indexOf("export function spawnJudgePane"), src.indexOf("export function spawnJudgePane") + 3500);
   assert.match(spawn, /"-t", own/, "untargeted splits anchor on our own pane");
+  // Round-17 P1 (reviewer, reproduced on a throwaway server): the WINDOW
+  // option took the same untargeted path and landed on the user's focused
+  // window — our judge window kept no dying-pane retention at all.
+  const optAt = spawn.indexOf('const optArgs = ["set-option"');
+  assert.ok(optAt > 0, "the remain-on-exit option must be set");
+  const optBlock = spawn.slice(optAt, optAt + 1200);
+  assert.match(optBlock, /\} else \{[\s\S]*ownWindowId\(\)[\s\S]*optArgs\.splice\(2, 0, "-t", own\)/,
+    "with no explicit target the option is pinned to OUR window");
   // P0 (round-17): the async listener must NOT keep the event loop alive —
   // an unsignalled channel otherwise hangs headless/test/CI processes
   // (measured: precommit workers stuck with leaked `tmux wait-for` children).

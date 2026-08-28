@@ -39,9 +39,12 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
 - **验收实验（唯一能证伪归属修复的实验）**：先把用户焦点切到*别的*窗口
   （`tmux select-window -t <other>`），再 `review_spawn` 一个 judge，断言
   `tmux display-message -p -t <新paneId> '#{window_id}'` 等于**本会话自己的
-  window**而不是被聚焦的那个；做完把焦点还回去。自动化版本见
-  `test/tmux-session.test.ts`：注入假 tmux 执行器，断言 split-window 命令行
-  含 `-t <ownPaneId>`，且 env 缺失时 ownPaneId 来自祖先链。
+  window**而不是被聚焦的那个；做完把焦点还回去。**这个实验是唯一的端到端
+  证伪手段，必须人工跑**：`test/tmux-session.test.ts` 里的自动化部分是
+  **源码文本 pin**（断言 split-window / set-option 带 `-t`、所有
+  display-message 带 `-t`、ownPaneId 两条解析路径存在）加一个真 tmux 下的
+  ownPaneId 集成用例；模块内的 tmux 执行器不可注入，所以祖先链回退路径未被
+  自动化覆盖。
   2026-08-28 实测：用户聚焦 `@39/@4`，新 judge pane 落在本会话的 `@365` —— 通过。
 - `split-window -d`：新 pane 不抢焦点。
 - pane id（`%N`）是唯一操作句柄：send/capture/kill/liveness 全部按
