@@ -398,10 +398,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (childWaitTimer) clearTimeout(childWaitTimer);
     childWaitTimer = undefined;
   }
-  function scheduleChildWaitRecheck(ctx: ExtensionContext, delayMs: number): void {
+  function scheduleChildWaitRecheck(delayMs: number): void {
     if (childWaitTimer) return;
     childWaitTimer = setTimeout(() => {
       childWaitTimer = undefined;
+      // Re-check every legal stop condition at callback time. The timer is
+      // deliberately referenced, but it must never revive a user-paused or
+      // user-aborted session, or a task whose child has already been closed.
+      if (state.pausedQuestion || lastRunAborted || !loopArmed || state.bypass.active) return;
+      const hasChildren = [...childSessions.values()].some((list) => list.length > 0);
+      if (!hasChildren) return;
       try {
         pi.sendUserMessage(
           "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的 done channel、pane_dead 与静默上限；读取已有输出并继续，不要结束 turn。",
@@ -411,7 +417,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     }, Math.max(1_000, delayMs));
     // Deliberately keep this timer referenced: it is the main-session liveness
     // anchor while the child may have stopped without signalling.
-    void ctx;
   }
   let loopArmed = true; // /gate-bypass or NEEDS_HUMAN disarms auto-continuation
   // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
@@ -3232,6 +3237,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const ok = killPane(paneId);
       for (const [root, list] of childSessions) {
         childSessions.set(root, list.filter((c) => c.paneId !== paneId));
+      cancelChildWaitTimer();
       }
       return {
         content: [{ type: "text", text: ok ? `review-gate: pane ${paneId} closed.` : `review-gate: pane ${paneId} already gone.` }],
@@ -5777,7 +5783,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // burn review budget while the child is still legitimately in flight.
           // The referenced timer is the main session's liveness anchor and
           // re-checks independently when this throttle window expires.
-          scheduleChildWaitRecheck(ctx, CHILD_NOTICE_MIN_MS - (Date.now() - lastChildNoticeAt));
+          scheduleChildWaitRecheck(CHILD_NOTICE_MIN_MS - (Date.now() - lastChildNoticeAt));
           return;
         }
         cancelChildWaitTimer();

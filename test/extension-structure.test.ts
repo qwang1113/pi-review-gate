@@ -1362,6 +1362,30 @@ test("round-18: prepare_review carries the polish-gate reason — parameter, ref
   assert.match(recBody, /blockingFiles: recorded\.blockingFiles/, "P0/P1 files are stored on the round");
 });
 
+test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", () => {
+  const scheduleAt = SRC.indexOf("function scheduleChildWaitRecheck(");
+  assert.ok(scheduleAt > 0, "the child-wait watchdog must exist");
+  const schedule = SRC.slice(scheduleAt, scheduleAt + 1800);
+  assert.match(schedule, /state\.pausedQuestion/, "watchdog respects pause_for_question");
+  assert.match(schedule, /lastRunAborted/, "watchdog respects ESC abort");
+  assert.match(schedule, /!loopArmed/, "watchdog respects the loop latch");
+  assert.match(schedule, /state\.bypass\.active/, "watchdog respects bypass state");
+  assert.match(schedule, /childSessions\.values\(\)/, "watchdog rechecks that children still exist");
+  assert.match(schedule, /deliverAs: "followUp"/, "watchdog resumes through the normal follow-up queue");
+  assert.doesNotMatch(schedule, /\.unref\(\)/, "the hosted-wait timer keeps the main session alive");
+  const childAt = SRC.indexOf("const childSnapshots");
+  const childBlock = SRC.slice(childAt, SRC.indexOf("// L2 circuit breaker", childAt));
+  assert.match(childBlock, /if \(!notifyNow\)/, "the throttled hosted wait has a distinct branch");
+  assert.match(childBlock, /scheduleChildWaitRecheck\(/, "the throttled branch schedules a self-owned recheck");
+  assert.match(childBlock, /return;/, "the throttled branch does not fall through to RESUME");
+  const closeAt = SRC.indexOf('name: "review_close"');
+  const closeBody = SRC.slice(closeAt, closeAt + 3000);
+  assert.match(closeBody, /cancelChildWaitTimer\(\)/, "review_close cancels the watchdog");
+  const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
+  const shutdownBody = SRC.slice(shutdownAt, shutdownAt + 500);
+  assert.match(shutdownBody, /cancelChildWaitTimer\(\)/, "session_shutdown cancels the watchdog");
+});
+
 test("round-18: agent_settled HOSTS the judge-child wait — never returns to idle on a child in flight", () => {
   const settledAt = SRC.indexOf('pi.on("agent_settled"');
   assert.ok(settledAt > 0);
