@@ -199,6 +199,18 @@ export function ownWindowId(): string | undefined {
 }
 
 /**
+ * `name(@id)` of the window a pane lives in — the human-facing origin label
+ * for cross-session attention (round-17 P0: a notification with no session
+ * identity told the user nothing about WHERE to go). Always -t.
+ */
+export function paneWindowLabel(pane: string | undefined): string | undefined {
+  if (!pane) return undefined;
+  const res = tmuxSync(["display-message", "-p", "-t", pane, "#{window_name}(#{window_id})"], 5_000);
+  const out = res.status === 0 ? res.stdout.trim() : "";
+  return out === "" ? undefined : out;
+}
+
+/**
  * Best-effort signal on a well-known channel (round-17 user ask: the
  * cross-session user-attention channel rg-user-attention). The SIGNALLER
  * side must never block or throw: a missing listener is the normal case —

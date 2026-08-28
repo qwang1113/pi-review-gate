@@ -35,6 +35,13 @@ export interface WatchRegistry {
   active: ReadonlyMap<string, WaitHandle>;
   /** Register (or replace) the listener for one channel. No-op after shutdown. */
   register(channel: string, label: string): void;
+  /**
+   * Drop ONE channel's listener (cancel + forget). Round-17: a reused judge
+   * pane is rebound to the round's own channels, so the previous round's
+   * listener must go — otherwise a stale `tmux wait-for` lingers and a signal
+   * on it wakes the session for a round that no longer exists.
+   */
+  unregister(channel: string): void;
   /** session_shutdown: latch shutdown, cancel handles, clear the registry. */
   shutdown(): void;
   /** session_start: a new session may register watchers again. */
@@ -80,6 +87,12 @@ export function createWatchRegistry(waiter: WatchWaiter, wake: WatchWake): Watch
     });
   }
 
+  function unregister(channel: string): void {
+    active.get(channel)?.cancel();
+    active.delete(channel);
+    activeLabels.delete(channel);
+  }
+
   function shutdown(): void {
     shuttingDown = true;
     for (const handle of active.values()) handle.cancel();
@@ -91,5 +104,5 @@ export function createWatchRegistry(waiter: WatchWaiter, wake: WatchWake): Watch
     shuttingDown = false;
   }
 
-  return { active, register, shutdown, reset };
+  return { active, register, unregister, shutdown, reset };
 }

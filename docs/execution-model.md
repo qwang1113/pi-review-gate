@@ -79,6 +79,22 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   "-inbox" 后缀）；主会话监听 inbox 通道回复。
 - **流式 findings**：追加到 `.pi/review-stream/<round>.jsonl`
   （仅证据，禁止 verdict 形状的行）。
+- **跨会话用户注意**（`rg-user-attention`）：`propose_loop_goal` 弹窗与
+  `pause_for_question` 会广播一次"需要用户介入"，其他会话被唤醒并提示用户
+  去哪个窗口。tmux 信号是**无载荷的全局广播，发送者自己也在监听**，所以
+  事件本身走旁路文件（`lib/attention.ts`，全局 `~/.pi/agent/
+  review-gate-attention.json`——跨 repo 会话必须读得到）：载荷含
+  `fromSessionId/fromPane/fromWindow/repo/reason/createdAt/handledAt`。
+  监听端 `consumeAttention()` 丢弃**自己发的**事件（否则自唤醒回环，实测
+  每两次工具调用被插一条"其他会话需要用户介入"）、已 handled 的事件与超时
+  事件；同一 `(repo, reason)` 在节流窗口内只发一次（实测通知中心堆过 10+
+  条相同横幅）。所有外部副作用（tmux 信号、osascript 通知、session_start
+  的监听注册）统一经 `sideEffectsEnabled()`——测试 / CI / 非 TTY / 无 tmux
+  一律静默，测试可用 `RG_NO_SIDE_EFFECTS=1` 显式关闭。
+- **复用与 channel 重绑**：每轮 `prepare_review` 生成新 title 与新 channel，
+  而 `review_spawn` 复用同角色 pane；复用时会把 pane **重绑**到本轮 channel
+  （取消旧监听、注册新监听、inbox 路径随之迁移），因此 prepare_review 的
+  任务文本可直接使用，不需手工改 channel 名。
 
 ## 审核单元
 

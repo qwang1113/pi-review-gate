@@ -149,3 +149,24 @@ test("manual replace: an agent-side review_watch keeps its own label until the n
   assert.equal(f.calls[0]!.cancelled, true);
   assert.equal(f.calls[2]!.cancelled, false, "the replacement handle re-arms for the next round");
 });
+
+test("unregister: drops ONE channel (cancel + forget) without touching the others", async () => {
+  // Round-17: a reused judge pane is rebound to the round's own channels, so
+  // the previous round's listener must be dropped — a lingering `tmux wait-for`
+  // would otherwise wake the session for a round that no longer exists.
+  const wakes: Array<[string, string]> = [];
+  const f = fakeWait();
+  const registry = createWatchRegistry(f.wait, (label, channel) => { wakes.push([label, channel]); });
+  registry.register("rg-old-done", "old");
+  registry.register("rg-new-done", "new");
+  registry.unregister("rg-old-done");
+  assert.equal(f.calls[0]!.cancelled, true, "the dropped channel's handle is cancelled");
+  assert.equal(registry.active.has("rg-old-done"), false, "and forgotten");
+  assert.equal(registry.active.has("rg-new-done"), true, "the other channel survives");
+  await f.flush();
+  assert.deepEqual(wakes, [], "a cancelled handle wakes nobody and never re-arms");
+  assert.equal(f.calls.length, 2, "no re-arm for the dropped channel");
+  // A dropped channel can be registered again (a later round may reuse it).
+  registry.register("rg-old-done", "old");
+  assert.equal(f.calls.length, 3);
+});

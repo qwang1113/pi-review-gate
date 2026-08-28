@@ -1281,39 +1281,47 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
 });
 
 test("round-17: cross-session user-attention is signalled on dialogs/pauses and listened for at session_start", () => {
-  // SIGNAL side: a fixed well-known channel + a best-effort notifier (tmux
-  // wait-for -S rg-user-attention + macOS osascript) used by the two
-  // 'human needed' moments.
+  // SIGNAL side (P0 round-17 rewrite): the tmux bell carries no payload, so
+  // the EVENT is published through lib/attention.ts with the originating
+  // session/pane/window + repo + reason. A bare signalChannel here would be
+  // the self-wake loop and the notification spam coming back.
   const fnAt = SRC.indexOf("function notifyUserAttention(");
   assert.ok(fnAt > 0, "notifyUserAttention must exist");
   const fn = SRC.slice(fnAt, fnAt + 900);
   assert.match(SRC, /const USER_ATTENTION_CHANNEL = "rg-user-attention";/, "the fixed cross-session channel");
-  assert.match(fn, /signalChannel\(USER_ATTENTION_CHANNEL\)/, "signals via the tmux helper");
-  assert.match(fn, /osascript/, "macOS convenience notification");
+  assert.match(fn, /publishAttention\(\{/, "the event goes through the payload publisher");
+  assert.match(fn, /fromSessionId: state\.sessionId/, "the payload identifies the sender (self-wake filter)");
+  assert.match(fn, /fromWindow: paneWindowLabel\(pane\)/, "the payload carries the origin window label");
+  assert.match(fn, /reason,/, "the payload carries the reason");
+  assert.doesNotMatch(fn, /osascript/, "notification delivery belongs to lib/attention.ts, behind its guards");
   // propose_loop_goal: signalled right before the approval dialog renders.
   const goalAt = SRC.indexOf('name: "propose_loop_goal"');
   const goalBody = SRC.slice(goalAt, goalAt + 24000);
   const dialogAt = goalBody.indexOf("confirmBounded(");
-  const signalAt = goalBody.indexOf("notifyUserAttention();");
+  const signalAt = goalBody.indexOf("notifyUserAttention(\"等待 goal 批准\"");
   assert.ok(signalAt > 0 && signalAt < dialogAt, "the approval dialog signals attention before rendering");
-  // pause_for_question: signalled when the pause is recorded.
+  // pause_for_question: signalled when the pause is recorded, with its own reason.
   const pauseAt = SRC.indexOf('name: "pause_for_question"');
   const pauseBody = SRC.slice(pauseAt, pauseAt + 8000);
-  assert.match(pauseBody, /notifyUserAttention\(\)/, "a pause signals attention");
+  assert.match(pauseBody, /notifyUserAttention\("等待回答提问"\)/, "a pause signals attention with its reason");
   // LISTEN side: session_start registers the listener (re-arm semantics).
   const startAt = SRC.indexOf('pi.on("session_start"');
   const startBody = SRC.slice(startAt, startAt + 1200);
   assert.match(startBody, /watchRegistry\.register\(USER_ATTENTION_CHANNEL, "跨会话用户注意"\)/,
     "session_start listens for cross-session attention");
-  // P0 (round-17): only an INTERACTIVE tmux host may register — a headless /
-  // test / CI process must never spawn a listener (leaked `tmux wait-for`
-  // children kept processes alive and precommit never returned).
-  assert.match(startBody, /if \(tmuxAvailable\(\) && process\.stdout\.isTTY\) \{/,
-    "the attention listener is guarded by an interactive-tmux check");
-  // The wake message is specialised for the attention channel.
+  // P0 (round-17): every external side effect — listener included — goes
+  // through the ONE sideEffectsEnabled() predicate, so a headless / test / CI
+  // process neither spawns a `tmux wait-for` nor fires a notification.
+  assert.match(startBody, /if \(sideEffectsEnabled\(\)\) \{/,
+    "the attention listener is guarded by sideEffectsEnabled()");
+  // The wake handler must CONSUME the payload and stay silent for its own /
+  // handled / expired events — that filter IS the self-wake fix (P0).
   const regAt = SRC.indexOf("createWatchRegistry(");
-  assert.match(SRC.slice(regAt, regAt + 1000), /channel === USER_ATTENTION_CHANNEL/,
-    "attention wakes carry their own message");
+  const reg = SRC.slice(regAt, regAt + 1600);
+  assert.match(reg, /channel === USER_ATTENTION_CHANNEL/, "attention wakes carry their own message");
+  assert.match(reg, /const event = consumeAttention\(state\.sessionId/, "the listener reads the payload");
+  assert.match(reg, /if \(!event\) return;/, "our own / handled / expired events wake nobody");
+  assert.match(reg, /\$\{attentionText\(event\)\}/, "the wake text carries origin + repo + reason");
 });
 
 test("round-17: agent_settled skips the RESUME injection while a fresh judge child is in flight", () => {
@@ -1348,6 +1356,15 @@ test("round-17: review_spawn reuses an alive same-role child and drops dead pane
   assert.match(spawn, /\.find\(\(c\) => c\.role === role && !params\.fresh\)/,
     "an alive same-role child is reused unless fresh:true");
   assert.match(spawn, /reusing existing \$\{role\} child pane/, "the reuse path is announced");
+  // Measured this round: prepare_review mints a NEW title + channels each
+  // round, so a reused pane MUST be rebound to them — otherwise the ready-made
+  // task text names a done channel nobody listens on and the verdict never
+  // wakes the session.
+  assert.match(spawn, /const rebound = title !== existing\.title;/, "a new title rebinds the reused pane");
+  assert.match(spawn, /watchRegistry\.unregister\(existing\.doneChannel\)/, "the previous done listener is dropped");
+  assert.match(spawn, /watchRegistry\.unregister\(existing\.inboxChannel\)/, "the previous inbox listener is dropped");
+  assert.match(spawn, /existing\.inboxPath = inboxPath;/, "the inbox moves with the rebind (review_read follows it)");
+  assert.match(spawn, /registerWatch\(existing\.doneChannel, existing\.title\)/, "this round's channels are listened on");
   assert.match(spawn, /fresh: Type\.Optional\(Type\.Boolean/, "fresh:true is an explicit escape hatch");
   assert.match(spawn, /spawnJudgePane\(\{/, "a real spawn still exists for the no-reuse case");
   // Spec C: fresh:true kills the old same-role pane FIRST (singleton invariant).
@@ -1513,7 +1530,7 @@ test("review_watch: the wake-up listener is registered with triggerTurn semantic
   // runtime pieces.
   const registryAt = SRC.indexOf("createWatchRegistry(");
   assert.ok(registryAt >= 0, "createWatchRegistry must exist");
-  const registry = SRC.slice(registryAt, registryAt + 900);
+  const registry = SRC.slice(registryAt, registryAt + 1800);
   assert.match(registry, /waitForSignalAsync/, "listens on the child's done channel");
   assert.match(registry, /triggerTurn: true/, "wakes an idle session");
   assert.match(registry, /deliverAs: "steer"/, "delivered as a steer");

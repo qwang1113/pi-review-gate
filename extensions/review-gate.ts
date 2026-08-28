@@ -94,8 +94,11 @@ import {
   anyPaneAlive,
   tmuxAvailable,
   signalChannel,
+  ownPaneId,
+  paneWindowLabel,
 } from "../lib/tmux-session.ts";
 import { createWatchRegistry } from "../lib/judge-watch.ts";
+import { attentionText, consumeAttention, publishAttention, sideEffectsEnabled } from "../lib/attention.ts";
 import {
   writeJudgeSpawnFiles,
   doneChannelFor,
@@ -808,15 +811,25 @@ export default function reviewGate(pi: ExtensionAPI) {
   const USER_ATTENTION_CHANNEL = "rg-user-attention";
 
   /**
-   * Best-effort cross-session attention signal + macOS notification. Never
-   * throws and never blocks a dialog: this is a convenience channel, not a
-   * gate.
+   * Cross-session attention (round-17 P0 rewrite). The bell is content-free,
+   * so the EVENT rides a side-channel file (lib/attention.ts): the payload
+   * carries the originating session, so the listener can drop its OWN events
+   * (the measured self-wake loop), the (repo, reason) throttle stops the
+   * notification spam (10+ identical banners), and every side effect is gated
+   * by sideEffectsEnabled() so tests and headless hosts stay silent.
+   * Never throws and never blocks a dialog.
    */
-  function notifyUserAttention(): void {
-    signalChannel(USER_ATTENTION_CHANNEL);
+  function notifyUserAttention(reason: string, repo?: string): void {
     try {
-      execFileSync("osascript", ["-e", 'display notification "review-gate: 需要用户介入" with title "review-gate"'], { stdio: "ignore", timeout: 5_000 });
-    } catch { /* non-macOS or no osascript — best-effort */ }
+      const pane = ownPaneId();
+      publishAttention({
+        fromSessionId: state.sessionId ?? "unknown-session",
+        fromPane: pane,
+        fromWindow: paneWindowLabel(pane),
+        repo: repo ?? cwd,
+        reason,
+      });
+    } catch { /* attention is a convenience, never a gate */ }
   }
   // The watcher registry (lib/judge-watch.ts) owns the handle map and the
   // shutdown latch: a signal that resolves while session_shutdown is
@@ -824,17 +837,22 @@ export default function reviewGate(pi: ExtensionAPI) {
   const watchRegistry = createWatchRegistry(
     (channel) => waitForSignalAsync(channel),
     (label, channel) => {
-      const attention = channel === USER_ATTENTION_CHANNEL;
       const inbox = channel.endsWith("-inbox");
-      pi.sendMessage({
-        customType: "review-gate",
-        content: attention
-          ? `[review-gate] 其他会话需要用户介入（channel ${channel}）— 检查各 tmux 窗口的子会话是否需要批准/回答。`
-          : inbox
-          ? `[review-gate] 子会话 ${label} 提问（channel ${channel}）— review_read 读取 inbox 并回复。`
-          : `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`,
-        display: true,
-      }, { triggerTurn: true, deliverAs: "steer" });
+      let content: string;
+      if (channel === USER_ATTENTION_CHANNEL) {
+        // P0: the bell is a global broadcast the SENDER also hears. Read the
+        // payload and stay SILENT for our own / already handled / expired
+        // events — otherwise this session wakes itself in a loop while the
+        // message claims another session needs the user (measured).
+        const event = consumeAttention(state.sessionId ?? "unknown-session");
+        if (!event) return;
+        content = `[review-gate] 需要用户介入 — ${attentionText(event)}（去该窗口批准/回答）。`;
+      } else if (inbox) {
+        content = `[review-gate] 子会话 ${label} 提问（channel ${channel}）— review_read 读取 inbox 并回复。`;
+      } else {
+        content = `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`;
+      }
+      pi.sendMessage({ customType: "review-gate", content, display: true }, { triggerTurn: true, deliverAs: "steer" });
     },
   );
   /**
@@ -2901,6 +2919,14 @@ export default function reviewGate(pi: ExtensionAPI) {
         const alive = list.filter((c) => paneAlive(c.paneId));
         if (alive.length !== list.length) childSessions.set(repoRoot, alive);
       }
+      // The round's title and its derived channels/paths — computed ONCE here
+      // (the `rg-` prefix is added by spawnJudgePane and the channel helpers,
+      // so titles never read rg-rg-…), because BOTH the reuse rebind below and
+      // the spawn path need them.
+      const title = String(params.title ?? role).replace(/[^A-Za-z0-9._-]/g, "-");
+      const doneChannel = doneChannelFor(title);
+      const inboxChannel = inboxChannelFor(title);
+      const inboxPath = pathJoin(root, ".pi", "tmux-sessions", `rg-${title}`, "inbox.jsonl");
       // Round-17 (user ask): REUSE — same repo + same role + alive pane ⇒ no
       // new spawn; the execution model promises the child's context carries
       // over across rounds until READY, so a fresh pi process every round
@@ -2909,14 +2935,34 @@ export default function reviewGate(pi: ExtensionAPI) {
       const existing = (childSessions.get(root) ?? [])
         .find((c) => c.role === role && !params.fresh);
       if (existing) {
+        // Round-17 (measured this round): prepare_review mints a NEW title +
+        // channels every round, but a reused pane kept the FIRST round's
+        // channels — so the ready-made task text embedded a done channel
+        // nobody listened on, and the completion signal never arrived unless
+        // the agent hand-edited it. REBIND the pane to this round's channels:
+        // drop the previous listeners, register the new ones, and move the
+        // inbox with it (review_read follows inboxPath).
+        const rebound = title !== existing.title;
+        if (rebound) {
+          watchRegistry.unregister(existing.doneChannel);
+          watchRegistry.unregister(existing.inboxChannel);
+          mkdirSync(pathDirname(inboxPath), { recursive: true });
+          existing.title = title;
+          existing.doneChannel = doneChannel;
+          existing.inboxChannel = inboxChannel;
+          existing.inboxPath = inboxPath;
+        }
+        registerWatch(existing.doneChannel, existing.title);
+        registerWatch(existing.inboxChannel, `${existing.title}-inbox`);
         return {
           content: [{ type: "text", text:
-            `review-gate: reusing existing ${role} child pane ${existing.paneId} (${existing.title}) — context carries over across rounds.\n` +
-            `- done channel: ${existing.doneChannel} (listener ${watchRegistry.active.has(existing.doneChannel) ? "registered" : "re-register now via review_watch"})\n` +
-            `- inbox: ${existing.inboxPath}\n` +
-            "- 用 review_send 发送本轮任务文本即可(fresh:true 可强制新建 pane)。",
+            `review-gate: reusing existing ${role} child pane ${existing.paneId} — context carries over across rounds.\n` +
+            (rebound ? `- 重绑到本轮 title "${title}"(旧 channel 的监听已取消)。\n` : "") +
+            `- done channel: ${existing.doneChannel}(监听已注册)\n` +
+            `- inbox: ${existing.inboxPath}(channel ${existing.inboxChannel})\n` +
+            "- 用 review_send 发送本轮任务文本即可；prepare_review 的任务文本可直接使用(fresh:true 可强制新建 pane)。",
           }],
-          details: { spawned: false, reused: true, paneId: existing.paneId, title: existing.title, role, doneChannel: existing.doneChannel, inboxPath: existing.inboxPath },
+          details: { spawned: false, reused: true, rebound, paneId: existing.paneId, title: existing.title, role, doneChannel: existing.doneChannel, inboxPath: existing.inboxPath },
         };
       }
       // Round-17 (spec C): fresh:true keeps the SINGLETON invariant — one
@@ -2934,7 +2980,6 @@ export default function reviewGate(pi: ExtensionAPI) {
       // P2 (round-6): the title is the RAW label — the rg- prefix is added
       // ONCE by spawnJudgePane and by the channel derivations, so titles and
       // channels never read rg-rg-….
-      const title = String(params.title ?? role).replace(/[^A-Za-z0-9._-]/g, "-");
       const workDir = pathJoin(root, ".pi", "tmux-sessions", `rg-${title}`);
       try {
         const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
@@ -4402,7 +4447,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Round-17 (user ask): a goal-approval dialog is EXACTLY a 'human
       // needed' moment — signal the cross-session channel (best-effort) so an
       // observer session can wake and point the user here.
-      notifyUserAttention();
+      notifyUserAttention("等待 goal 批准", goalRoot);
       showToUser(
         uiCtx,
         GOAL_CONFIRM_TITLE,
@@ -4872,7 +4917,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Round-17 (user ask): a pause is EXACTLY a 'human needed' moment —
       // signal the cross-session channel (best-effort) so an observer
       // session can wake and point the user at this pane.
-      notifyUserAttention();
+      notifyUserAttention("等待回答提问");
       // Explore/normal have no auto-continuation to pause — the agent can
       // simply ask and end its turn. Informational no-op, never an error.
       if (state.taskMode === "explore" || state.taskMode === "normal") {
@@ -5710,11 +5755,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     watchRegistry.reset();
     // Round-17 (user ask): listen for cross-session user-attention signals —
     // a goal-approval dialog or pause_for_question in ANY session running
-    // this extension wakes this one. P0 guard: only in an INTERACTIVE tmux
-    // host — a headless / test / CI process must never spawn a listener
-    // (the registry is idempotent and the handle is unref'd, but a
-    // non-interactive run has nobody to wake).
-    if (tmuxAvailable() && process.stdout.isTTY) {
+    // this extension wakes this one. P0 guard: EVERY external side effect —
+    // listener included — goes through the one sideEffectsEnabled() predicate
+    // (interactive tmux host, not a test/CI/headless run), so a non-interactive
+    // process neither spawns a `tmux wait-for` nor fires notifications.
+    if (sideEffectsEnabled()) {
       watchRegistry.register(USER_ATTENTION_CHANNEL, "跨会话用户注意");
     }
     // (Snapshot sessions were retired 2026-08-27: judge roles run as tmux
