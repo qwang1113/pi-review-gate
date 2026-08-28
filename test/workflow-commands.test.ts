@@ -207,30 +207,45 @@ test("the review-loop skill keeps the single-review contract self-contained", ()
  * leniency certified real breakage (`too many arguments`), while an unchecked
  * server start made it pass vacuously on hosts where tmux could not start.
  *
- * What survives is the part that was never evaded: a SNAPSHOT. Every occurrence
- * in the shipped text is listed with its exact count. It is decidable, needs no
- * tmux, never skips, and has no fail-open mode — any new or changed occurrence
- * fails until a human updates the list, which is precisely the moment a human
- * looks at the command and notices `-t` is not a flag.
+ * What survives is the part that was never evaded: a SNAPSHOT. Every
+ * `tmux wait-for` command in a CODE SPAN of the shipped text — inline or fenced,
+ * wrapped or not — is listed with its exact count. It is decidable, needs no
+ * tmux and never skips: any new or changed command fails until a human updates
+ * the list, which is precisely the moment a human re-reads it and notices `-t`
+ * is not a flag.
+ *
+ * What it does NOT cover, deliberately: prose that merely mentions the mechanism
+ * ("the tmux wait-for process"). Reading prose is what made the executed guard
+ * unsound, and prose is not what an agent copies and runs.
  */
 
-/** Everything this package SHIPS as instruction text (recursive, .md + .ts). */
+/**
+ * Everything this package SHIPS as instruction text, recursively.
+ *
+ * The extension filter follows what each directory actually CONTAINS (round-17
+ * Nit, reviewer): hooks/ holds extensionless shell scripts and scripts/ holds
+ * .cjs/.mjs/.sh, so filtering those two on `.md|.ts` advertised a reach the
+ * filter could not deliver — a `tmux wait-for -t 5` line in hooks/pre-commit
+ * was invisible.
+ */
 function shippedInstructionFiles(root: string): string[] {
   const out: string[] = [];
-  const walk = (rel: string): void => {
+  const TEXTUAL = /\.(md|ts|mjs|cjs|sh)$/;
+  const walk = (rel: string, everyFile: boolean): void => {
     const abs = join(root, rel);
     if (!existsSync(abs)) return;
     for (const entry of readdirSync(abs, { withFileTypes: true })) {
       const child = join(rel, entry.name);
       if (entry.isDirectory()) {
         if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
-        walk(child);
-      } else if (/\.(md|ts)$/.test(entry.name)) {
+        walk(child, everyFile);
+      } else if (everyFile || TEXTUAL.test(entry.name)) {
         out.push(child);
       }
     }
   };
-  for (const top of ["docs", "lib", "extensions", "skills", "agents", "hooks", "scripts"]) walk(top);
+  for (const top of ["docs", "lib", "extensions", "skills", "agents", "scripts"]) walk(top, false);
+  walk("hooks", true); // extensionless shell hooks ship too
   for (const file of ["AGENTS.md", "README.md", "QUICKSTART.md"]) {
     if (existsSync(join(root, file))) out.push(file);
   }
@@ -240,25 +255,55 @@ function shippedInstructionFiles(root: string): string[] {
 /**
  * Every `tmux wait-for …` COMMAND the shipped text teaches, with its location.
  *
- * Only backticked spans count. That is the reviewer's diagnosis of why the
- * previous (executed) guard failed: scanning raw prose also scoops sentences
- * like "a tmux wait-for process (cleanup)", which are not commands at all, and
- * a checker forced to tolerate those has to be lenient enough to let real
- * breakage through too. A command this package TEACHES is always in a code
- * span, so that is the only place worth reading.
+ * CODE SPANS ONLY — inline backticks AND fenced blocks, both allowed to wrap
+ * across lines. That boundary is the reviewer's diagnosis of why the executed
+ * guard failed: scanning raw prose also scoops sentences like "a tmux wait-for
+ * process (cleanup)", and a checker forced to tolerate those has to be lenient
+ * enough to let real breakage through too. A command this package TEACHES is
+ * always in a code span; prose ABOUT the mechanism is not a command and is
+ * deliberately out of reach.
+ *
+ * Round-17 P2 (reviewer): the first version read single-line inline spans only,
+ * so a fenced block and a wrapped span both slipped a broken command past a
+ * green suite — and SKILL.md already wraps commands that way, so the shape was
+ * native, not contrived. Whitespace inside a command is normalised so a wrap
+ * cannot change its identity.
  */
 function waitForOccurrences(root: string): Array<{ rel: string; line: number; cmd: string }> {
   const found: Array<{ rel: string; line: number; cmd: string }> = [];
   for (const rel of shippedInstructionFiles(root)) {
     const text = readFileSync(join(root, rel), "utf8");
-    text.split("\n").forEach((line, i) => {
-      for (const span of line.matchAll(/`([^`]*)`/g)) {
-        const inner = span[1] ?? "";
-        for (const m of inner.matchAll(/tmux wait-for[^。;]*/g)) {
-          found.push({ rel, line: i + 1, cmd: m[0].trim() });
+    const lineOf = (index: number) => text.slice(0, index).split("\n").length;
+    // An executable SCRIPT is code end to end — there is no "code span" inside
+    // it, and a `backtick` there means command substitution, not markup. So the
+    // whole file is scanned. (Round-17: the reviewer slipped `tmux wait-for -t 5`
+    // into hooks/pre-commit as a comment and the span-only reader never saw it.)
+    if (!/\.(md|ts)$/.test(rel)) {
+      text.split("\n").forEach((line, i) => {
+        for (const m of line.matchAll(/tmux wait-for[^。;\n]*/g)) {
+          found.push({ rel, line: i + 1, cmd: m[0].trim().replace(/\s+/g, " ") });
         }
+      });
+      continue;
+    }
+    // Fenced blocks first, then inline spans in what remains, so a ``` fence is
+    // never mistaken for an empty inline span.
+    const fences: Array<[number, number]> = [];
+    for (const fence of text.matchAll(/```[\s\S]*?```/g)) {
+      const start = fence.index ?? 0;
+      fences.push([start, start + fence[0].length]);
+      for (const m of fence[0].matchAll(/tmux wait-for[^。;\n]*/g)) {
+        found.push({ rel, line: lineOf(start + (m.index ?? 0)), cmd: m[0].trim().replace(/\s+/g, " ") });
       }
-    });
+    }
+    const inFence = (i: number) => fences.some(([a, b]) => i >= a && i < b);
+    for (const span of text.matchAll(/`([^`]*)`/g)) {
+      const start = span.index ?? 0;
+      if (inFence(start)) continue;
+      for (const m of (span[1] ?? "").matchAll(/tmux wait-for[^。;]*/g)) {
+        found.push({ rel, line: lineOf(start), cmd: m[0].trim().replace(/\s+/g, " ") });
+      }
+    }
   }
   return found;
 }
@@ -281,6 +326,7 @@ const SHIPPED_WAIT_FOR = new Map<string, number>([
   ["AGENTS.md::tmux wait-for <doneChannel>", 1],
   ["AGENTS.md::tmux wait-for", 1],
   ["skills/review-loop/SKILL.md::tmux wait-for -t 5 <chan>", 1],
+  ["skills/review-loop/SKILL.md::tmux wait-for <doneChannel>", 1],
   ["skills/review-loop/SKILL.md::tmux wait-for", 1],
   // The SIGNAL side (-S never blocks): docs, judge prompts and the runtime.
   ["docs/dev-flow.md::tmux wait-for -S <chan>", 1],
@@ -293,6 +339,9 @@ const SHIPPED_WAIT_FOR = new Map<string, number>([
   ["lib/adviser-brief.ts::tmux wait-for -S ${input.doneChannel}(通过 bash 执行,无任何附加说明)", 1],
   ["lib/adviser-brief.ts::tmux wait-for -S ${input.inboxChannel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)", 1],
   ["lib/attention.ts::tmux wait-for", 1],
+  ["lib/judge-prompt.ts::tmux wait-for -S <channel>-inbox（channel 由任务文本给出）唤醒主会话", 1],
+  ["lib/judge-prompt.ts::tmux wait-for -S <channel>（channel 由任务文本给出， 通过 bash 执行，无任何附加说明）", 1],
+  ["lib/judge-watch.ts::tmux wait-for -S * <channel>", 1],
   ["lib/judge-watch.ts::tmux wait-for", 1],
   ["lib/loop-goal.ts::tmux wait-for -S ${opts.doneChannel}(通过 bash 执行,无任何附加说明)", 1],
   ["lib/loop-goal.ts::tmux wait-for -S ${opts.inboxChannel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)", 1],
