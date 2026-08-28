@@ -405,7 +405,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Re-check every legal stop condition at callback time. The timer is
       // deliberately referenced, but it must never revive a user-paused or
       // user-aborted session, or a task whose child has already been closed.
-      if (state.taskMode === "explore" || state.taskMode === "normal" || state.pausedQuestion || lastRunAborted || !loopArmed || state.bypass.active) return;
+      if (state.taskMode === "explore" || state.taskMode === "normal" ||
+          state.pausedQuestion || lastRunAborted || !loopArmed || state.bypass.active) return;
       const hasChildren = [...childSessions.values()].some((list) => list.length > 0);
       if (!hasChildren) return;
       try {
