@@ -60,7 +60,11 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   `Pane is dead (status 0)`，这正是它被移除的原因。judge 退出后 pane 随之
   消失，右列不再堆积死 pane。
 - liveness 与结论都来自**会话自身的落盘物**（`lib/judge-session.ts`）：
-  `pid`（launcher 自身 PID，进程组 leader）、`exit-code`（pi 退出码，其
+  `pid`（内容为 `<PID> <启动时刻>`——launcher 自身 PID 即进程组 leader；
+  **启动时刻是 PID 身份的一部分**：wrapper 若在写 `exit-code` 前被杀，只剩
+  一个 pid 文件，此时该 PID 被系统复用就会被误判为"judge 还活着"，
+  `review_close` 会把 SIGTERM 发给陌生进程的整个进程组——实测复现过）、
+  `exit-code`（pi 退出码，其
   **存在**即"已结束"的权威事实）、`stderr.log`（崩溃诊断）、
   `sessions/*.jsonl`（结论所在）。`exit-code` 优先于 pid 判定，避免 PID 复用
   把已结束的会话误判为运行中。

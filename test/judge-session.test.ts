@@ -62,6 +62,66 @@ test("lifecycle: a live recorded pid is 'running'", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+/**
+ * THE CRASH PATH (round-1 P1, reviewer-reproduced): a wrapper killed BEFORE it
+ * could record an exit code leaves a pid file and nothing else. Once the OS
+ * reassigns that number, "the pid is alive" is not "our judge is running" —
+ * and signalling its GROUP would SIGTERM a stranger's whole process tree.
+ *
+ * The recorded START TIME is what distinguishes them.
+ */
+test("lifecycle: a RECYCLED pid (alive, but not the process we recorded) is 'vanished'", () => {
+  const dir = workdir();
+  try {
+    writeFileSync(join(dir, "pid"), "4242 Fri Aug 28 10:00:00 2026");
+    const state = readJudgeSessionState(
+      paths(dir),
+      () => true,                              // the number is in use…
+      () => "Mon Jan  1 00:00:00 2020",        // …by a process that started elsewhen
+    );
+    assert.equal(state.lifecycle, "vanished");
+    assert.equal(state.pid, 4242);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("terminate: a RECYCLED pid is never signalled (the reviewer's reproduction)", () => {
+  const dir = workdir();
+  try {
+    writeFileSync(join(dir, "pid"), "4242 Fri Aug 28 10:00:00 2026");
+    let calls = 0;
+    const res = terminateJudgeSession(
+      paths(dir),
+      () => { calls++; },
+      () => true,
+      () => "Mon Jan  1 00:00:00 2020",
+    );
+    assert.equal(calls, 0, "signalling a stranger's process group is the accident this prevents");
+    assert.equal(res.signalled, false);
+    assert.equal(res.pid, 4242);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("terminate: the SAME process (start time matches) is still signalled — the guard is not a blanket refusal", () => {
+  const dir = workdir();
+  try {
+    const started = "Fri Aug 28 10:00:00 2026";
+    writeFileSync(join(dir, "pid"), `4242 ${started}`);
+    const seen: number[] = [];
+    const res = terminateJudgeSession(paths(dir), (t) => { seen.push(t); }, () => true, () => started);
+    assert.equal(res.signalled, true);
+    assert.deepEqual(seen, [-4242], "still the whole group");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("lifecycle: a pid file with NO start time degrades to plain liveness (older format, never crashes)", () => {
+  const dir = workdir();
+  try {
+    writeFileSync(join(dir, "pid"), "4242");
+    assert.equal(readJudgeSessionState(paths(dir), () => true, () => undefined).lifecycle, "running");
+    assert.equal(readJudgeSessionState(paths(dir), () => false, () => undefined).lifecycle, "vanished");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("lifecycle: a recorded pid that is gone is 'vanished' (crashed without recording an exit code)", () => {
   const dir = workdir();
   try {
@@ -200,7 +260,9 @@ test("terminate: signals the process GROUP, not the bare pid (pi is the wrapper'
   try {
     writeFileSync(join(dir, "pid"), "4242");
     const seen: Array<{ target: number; signal: string }> = [];
-    const res = terminateJudgeSession(paths(dir), (target, signal) => { seen.push({ target, signal }); });
+    // pidAlive/processStart are injected: this pid record has no start time,
+    // so identity degrades to liveness, and the fake pid must read as alive.
+    const res = terminateJudgeSession(paths(dir), (target, signal) => { seen.push({ target, signal }); }, () => true);
     assert.equal(res.signalled, true);
     assert.deepEqual(seen, [{ target: -4242, signal: "SIGTERM" }], "negative pid = the whole group");
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -214,7 +276,7 @@ test("terminate: falls back to the bare pid when the group cannot be signalled",
     const res = terminateJudgeSession(paths(dir), (target) => {
       seen.push(target);
       if (target < 0) throw new Error("ESRCH: no such process group");
-    });
+    }, () => true);
     assert.equal(res.signalled, true);
     assert.deepEqual(seen, [-4242, 4242]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -431,7 +493,8 @@ const terminateIntegration = test("tmux integration: termination reaches pi thro
       // could never observe the group delivery. A handler is reset to the
       // default in the child, so only the wrapper survives the signal.
       "trap ':' TERM",
-      'printf %s "$$" > "$RG_PID_FILE"',
+      // Same pid record shape the real launcher writes: pid + start time.
+      'printf \'%s %s\' "$$" "$(ps -o lstart= -p $$ | tr -d \'\\n\')" > "$RG_PID_FILE"',
       "sleep 120 &",
       'printf %s "$!" > "$RG_CHILD_PID_FILE"',
       'wait $!',
@@ -458,7 +521,10 @@ const terminateIntegration = test("tmux integration: termination reaches pi thro
     for (let i = 0; i < 40 && !(existsSync(pidPath) && existsSync(childPidPath)); i++) {
       await new Promise((r) => setTimeout(r, 50));
     }
-    const wrapperPid = Number(readFileSync(pidPath, "utf8").trim());
+    // The pid record is `<pid> <start time>` — take the pid off the front.
+    const pidRecord = readFileSync(pidPath, "utf8").trim();
+    const wrapperPid = Number(pidRecord.split(" ")[0]);
+    assert.match(pidRecord, /^\d+ \w/, "the launcher records a start time alongside the pid");
     const childPid = Number(readFileSync(childPidPath, "utf8").trim());
     assert.ok(wrapperPid > 1 && childPid > 1, "both pids were recorded");
     const alive = (pid: number): boolean => {

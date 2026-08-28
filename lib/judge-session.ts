@@ -24,6 +24,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 /** Files a judge session writes about itself (all under its workDir). */
@@ -75,6 +76,66 @@ function readTrimmed(path: string): string | undefined {
 }
 
 /**
+ * The pid file's content: the launcher's pid AND the moment that process
+ * started, separated by one space (`12345 Fri Aug 28 16:50:21 2026`).
+ *
+ * WHY THE TIMESTAMP (round-1 P1, reviewer, reproduced). A pid alone is not an
+ * identity. A wrapper that is killed BEFORE it can record an exit code leaves
+ * a pid file behind and nothing else; once the OS hands that number to an
+ * unrelated process, "the pid is alive" reads as "our judge is running" and
+ * `review_close` would signal that stranger's whole process GROUP. The start
+ * time is what makes the pid an identity: a recycled pid always has a
+ * different one.
+ */
+interface PidRecord {
+  pid: number;
+  /** Absent for a pid file written before this format (degrade, never crash). */
+  startedAt?: string;
+}
+
+function readPidRecord(pidPath: string): PidRecord | undefined {
+  const raw = readTrimmed(pidPath);
+  if (raw === undefined) return undefined;
+  const space = raw.indexOf(" ");
+  const pidPart = space === -1 ? raw : raw.slice(0, space);
+  if (!/^\d+$/.test(pidPart)) return undefined;
+  const startedAt = space === -1 ? undefined : raw.slice(space + 1).trim();
+  return { pid: Number(pidPart), ...(startedAt ? { startedAt } : {}) };
+}
+
+/** When did this pid start? `undefined` when it does not exist any more. */
+function defaultProcessStart(pid: number): string | undefined {
+  try {
+    const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 5_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out === "" ? undefined : out;
+  } catch {
+    return undefined; // no such process (or ps unavailable)
+  }
+}
+
+/**
+ * Is this pid STILL the process the launcher recorded?
+ *
+ * With a recorded start time this is exact. Without one (an older pid file) it
+ * degrades to plain existence — the pre-existing behaviour, no worse than it
+ * was, and the launcher writes the timestamp from now on.
+ */
+function isRecordedProcess(
+  record: PidRecord,
+  pidAlive: (pid: number) => boolean,
+  processStart: (pid: number) => string | undefined,
+): boolean {
+  if (record.startedAt === undefined) return pidAlive(record.pid);
+  const current = processStart(record.pid);
+  return current !== undefined && current === record.startedAt;
+}
+
+
+/**
  * What is this judge session doing — decided from ITS OWN artifacts.
  *
  * ORDER MATTERS. `exit-code` is checked FIRST and wins outright: it is written
@@ -85,17 +146,27 @@ function readTrimmed(path: string): string | undefined {
 export function readJudgeSessionState(
   paths: Pick<JudgeSessionPaths, "pidPath" | "exitCodePath">,
   pidAlive: (pid: number) => boolean = defaultPidAlive,
+  processStart: (pid: number) => string | undefined = defaultProcessStart,
 ): JudgeSessionState {
   const rawExit = readTrimmed(paths.exitCodePath);
-  const rawPid = readTrimmed(paths.pidPath);
-  const pid = rawPid !== undefined && /^\d+$/.test(rawPid) ? Number(rawPid) : undefined;
+  const record = readPidRecord(paths.pidPath);
 
   if (rawExit !== undefined) {
     const parsed = /^-?\d+$/.test(rawExit) ? Number(rawExit) : undefined;
-    return { lifecycle: "finished", ...(parsed !== undefined ? { exitCode: parsed } : {}), ...(pid !== undefined ? { pid } : {}) };
+    return {
+      lifecycle: "finished",
+      ...(parsed !== undefined ? { exitCode: parsed } : {}),
+      ...(record ? { pid: record.pid } : {}),
+    };
   }
-  if (pid === undefined) return { lifecycle: "unknown" };
-  return { lifecycle: pidAlive(pid) ? "running" : "vanished", pid };
+  if (record === undefined) return { lifecycle: "unknown" };
+  // "running" means OUR recorded process is still there — not merely that
+  // something holds that pid number now (round-1 P1: a crashed wrapper leaves
+  // a pid file, and a recycled pid would read as a live judge forever).
+  return {
+    lifecycle: isRecordedProcess(record, pidAlive, processStart) ? "running" : "vanished",
+    pid: record.pid,
+  };
 }
 
 /**
@@ -200,16 +271,24 @@ export function readStderrTail(stderrPath: string, maxLines = 20): string | unde
  * leader and pi runs as its CHILD, so signalling the pid alone kills the
  * wrapper and leaves pi orphaned. Negative pid = the whole group.
  *
- * A FINISHED SESSION IS NEVER SIGNALLED (round-1 P1, reviewer). `exit-code`
- * means the wrapper already returned, so that pid no longer belongs to us —
- * and the OS may well have handed it to somebody else. Signalling its group
- * then kills an unrelated process tree. This is the same rule
- * `readJudgeSessionState` follows (exit-code wins over a live pid); applying
- * it in only one of the two places is what made the pair unsound.
+ * THE PID MUST STILL BE OURS. Two independent ways it can stop being ours,
+ * and BOTH must be checked before a group signal (round-1 P1, both reproduced
+ * by reviewers):
+ *
+ *   - `exit-code` exists: the wrapper already returned, so the number is free
+ *     for the OS to reassign;
+ *   - no `exit-code`, but the recorded start time no longer matches: the
+ *     wrapper was killed BEFORE it could record anything, and something else
+ *     now holds that pid. This is the crash path, and it is exactly the case
+ *     a naive "is the pid alive?" test gets wrong.
+ *
+ * Signalling in either case would SIGTERM a stranger's entire process group.
+ * `readJudgeSessionState` applies the same two rules — the pair must agree.
  *
  * Best-effort by contract: an already-finished session (recorded exit code,
- * no pid file, dead pid, unsignalable group) is a SUCCESSFUL no-op — closing
- * a judge twice must not fail (idempotence is what `review_close` promises).
+ * no pid file, a pid that is not ours any more, unsignalable group) is a
+ * SUCCESSFUL no-op — closing a judge twice must not fail (idempotence is what
+ * `review_close` promises).
  */
 export function terminateJudgeSession(
   // BOTH paths are REQUIRED (round-2 P2): with an optional exitCodePath a
@@ -218,15 +297,20 @@ export function terminateJudgeSession(
   // enforces it instead of the documentation asking for it.
   paths: Pick<JudgeSessionPaths, "pidPath" | "exitCodePath">,
   kill: (target: number, signal: NodeJS.Signals) => void = (t, s) => process.kill(t, s),
+  pidAlive: (pid: number) => boolean = defaultPidAlive,
+  processStart: (pid: number) => string | undefined = defaultProcessStart,
 ): { signalled: boolean; pid?: number } {
   // Finished ⇒ nothing of ours is left running; the pid is not ours to signal.
   if (readTrimmed(paths.exitCodePath) !== undefined) {
     return { signalled: false };
   }
-  const rawPid = readTrimmed(paths.pidPath);
-  if (rawPid === undefined || !/^\d+$/.test(rawPid)) return { signalled: false };
-  const pid = Number(rawPid);
-  if (pid <= 1) return { signalled: false }; // never signal pid 0/1 (whole-session / init)
+  const record = readPidRecord(paths.pidPath);
+  if (record === undefined) return { signalled: false };
+  if (record.pid <= 1) return { signalled: false }; // never signal pid 0/1 (own group / init)
+  // The crash path: a pid file with no exit code, whose process is gone or has
+  // been recycled. Nothing of ours is running, so there is nothing to signal.
+  if (!isRecordedProcess(record, pidAlive, processStart)) return { signalled: false, pid: record.pid };
+  const pid = record.pid;
   try {
     kill(-pid, "SIGTERM");
     return { signalled: true, pid };
