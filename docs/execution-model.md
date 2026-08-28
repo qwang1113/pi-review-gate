@@ -25,11 +25,24 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
 
 ## 布局：pane 而非 session
 
-- 主会话在 tmux 内（`$TMUX` 存在）：第一个 judge 在**当前 window**
-  切右列（`split-window -h -p 35`），后续 judge 以第一个 judge 的
-  pane id 为 target 垂直切分（`split-window -v -p 50 -t <paneId>`）——
-  **必须传 target**，否则 tmux 按 `TMUX_PANE` 解析，第二个 judge 会
-  落到主 pane 下方而不是右列（round-2 实测）。
+- 主会话在 tmux 内（`$TMUX` 存在）：第一个 judge 在**本会话自己的 window**
+  切右列（`split-window -h -p 35 -t <ownPaneId()>`），后续 judge 以第一个
+  judge 的 pane id 为 target 垂直切分（`split-window -v -p 50 -t <paneId>`）。
+- **所有 tmux 调用一律显式 `-t`，禁止依赖“当前 pane”语义**（split-window、
+  display-message、select-pane、respawn 等）。根因（2026-08-28 用数据确证）：
+  无 `-t` 时 tmux 回退到 **server 的 active pane**，而它就是“用户此刻聚焦的
+  窗口”——于是 judge pane 跟着用户焦点跑，落对落错全看 spawn 那一刻用户在看
+  哪个窗口，这解释了此前全部“间歇性”。锚点定位见 `ownPaneId()`：
+  `TMUX_PANE`（实测在扩展进程里有值）为快路径，进程祖先链（`list-panes -a -F
+  '#{pane_pid} #{pane_id}'` 建 pid→pane 映射后沿 ppid 上溯）为 env 缺失/失效
+  时的回退；“当前窗口”一律走 `ownWindowId()`（`display-message -p -t`）。
+- **验收实验（唯一能证伪归属修复的实验）**：先把用户焦点切到*别的*窗口
+  （`tmux select-window -t <other>`），再 `review_spawn` 一个 judge，断言
+  `tmux display-message -p -t <新paneId> '#{window_id}'` 等于**本会话自己的
+  window**而不是被聚焦的那个；做完把焦点还回去。自动化版本见
+  `test/tmux-session.test.ts`：注入假 tmux 执行器，断言 split-window 命令行
+  含 `-t <ownPaneId>`，且 env 缺失时 ownPaneId 来自祖先链。
+  2026-08-28 实测：用户聚焦 `@39/@4`，新 judge pane 落在本会话的 `@365` —— 通过。
 - `split-window -d`：新 pane 不抢焦点。
 - pane id（`%N`）是唯一操作句柄：send/capture/kill/liveness 全部按
   pane id。

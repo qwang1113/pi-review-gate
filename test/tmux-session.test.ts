@@ -107,6 +107,12 @@ test("ownPaneId/ownWindowId: both resolution paths are pinned in the source (rou
   const waitAsync = src.slice(src.indexOf("export function waitForSignalAsync"), src.indexOf("export function waitForSignalAsync") + 1200);
   assert.match(waitAsync, /child\.unref\(\)/, "the listener child must be unref'd");
   assert.match(waitAsync, /cancel: \(\) => \{[\s\S]*child\?\.kill\(\)/, "cancel must kill the child");
+  // Round-17 root cause (confirmed with data): an UNTARGETED tmux call falls
+  // back to the server's active pane — i.e. whatever window the USER focuses —
+  // so judge panes followed the user's focus. Ban "current pane" semantics
+  // repo-wide: every display-message in this module carries -t.
+  const bareQueries = src.match(/"display-message", "-p", "#/g) ?? [];
+  assert.equal(bareQueries.length, 0, "every display-message must pass an explicit -t target");
 });
 
 const ownPaneIntegration = test("ownPaneId resolves to a live pane inside tmux", { skip: !tmuxAvailable() }, () => {

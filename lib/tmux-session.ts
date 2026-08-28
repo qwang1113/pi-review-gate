@@ -142,6 +142,18 @@ function tmuxSync(args: string[], timeoutMs = 15_000): { status: number; stdout:
  * fall back to the server's ACTIVE pane, which other windows' activity
  * steals).
  *
+ * ROOT CAUSE, confirmed with data (2026-08-28): the server's active pane is
+ * whatever window the USER currently focuses, so every untargeted tmux call
+ * followed the user's focus — a judge spawned while the user looked at the
+ * main-session window (@39) landed THERE; the ones that landed correctly were
+ * spawned while the user happened to focus this session's window. That is the
+ * whole "intermittency". Hence: every tmux call passes an explicit -t and
+ * "current pane" semantics are banned.
+ *
+ * Measured in this host (2026-08-28): process.env.TMUX_PANE IS set in the
+ * extension process, so path 1 hits; path 2 is the fallback for a missing or
+ * stale value (pi respawned into another pane, env inherited from a dead one).
+ *
  * Resolution order:
  *  1. process.env.TMUX_PANE — when set and still alive, it is exactly the
  *     pane pi runs in;
