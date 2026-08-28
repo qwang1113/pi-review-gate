@@ -15,7 +15,9 @@
  *
  *   (a) the done channel fired (the fast path);
  *   (b) the child's SESSION ended — its own `exit-code` file exists, or the
- *       pid it recorded is gone (lib/judge-session.ts). This is deliberately
+ *       process it recorded is no longer there (died, or its pid was recycled
+ *       and now belongs to somebody else — lib/judge-session.ts). This is
+ *       deliberately
  *       NOT a pane probe: the pane is a display shell that disappears with
  *       its child, and a judge that never got to write anything is exactly
  *       the case a pane could not report either;

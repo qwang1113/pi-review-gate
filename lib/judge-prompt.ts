@@ -251,7 +251,11 @@ export interface JudgeSpawnFiles {
    * current title later reads an empty directory (measured 2026-08-28).
    */
   sessionDir: string;
-  /** Absolute path of the file the launcher writes its own pid to. */
+  /**
+   * Absolute path of the pid record: `<pid> <start time>` of the launcher.
+   * The start time travels with the number because a pid alone is not an
+   * identity — see lib/judge-session.ts.
+   */
   pidPath: string;
   /** Absolute path of the file the launcher writes pi's exit code to. */
   exitCodePath: string;

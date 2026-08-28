@@ -11,7 +11,10 @@
  * The entity is the pi session. It records what it did on disk, under its own
  * work directory:
  *
- *   pid          the launcher's pid, written at startup (process-group leader)
+ *   pid          `<pid> <start time>` of the launcher (the pane's process-group
+ *                leader), written at startup. The start time is part of the
+ *                IDENTITY: a pid alone cannot tell our judge apart from
+ *                whoever the OS handed that number to next
  *   exit-code    pi's exit status, written after pi returns — its EXISTENCE is
  *                the authoritative "this session finished" fact
  *   stderr.log   pi's stderr, teed while it runs (crash diagnosis after the
@@ -39,9 +42,17 @@ export interface JudgeSessionPaths {
 export type JudgeLifecycle =
   /** `exit-code` exists — the session finished and said how. */
   | "finished"
-  /** No `exit-code`, but the recorded pid is gone — it died without recording. */
+  /**
+   * No `exit-code`, and the recorded process is not there any more — either it
+   * died without recording, or its pid now belongs to somebody else (a
+   * recycled pid with a different start time is NOT our judge).
+   */
   | "vanished"
-  /** The recorded pid is alive. */
+  /**
+   * The recorded process is still there. When identity cannot be established
+   * at all (see `PidIdentity`), plain liveness decides — deliberately lenient,
+   * because declaring a working judge dead is its own kind of damage.
+   */
   | "running"
   /** Nothing on disk yet (spawned microseconds ago, or the launcher failed). */
   | "unknown";
@@ -103,7 +114,16 @@ function readPidRecord(pidPath: string): PidRecord | undefined {
   return { pid: Number(pidPart), ...(startedAt ? { startedAt } : {}) };
 }
 
-/** When did this pid start? `undefined` when it does not exist any more. */
+/**
+ * When did this pid start?
+ *
+ * `undefined` IS AMBIGUOUS BY NATURE, and callers must treat it as such: it
+ * means "ps did not answer", which covers BOTH "no such process" and "the
+ * query itself failed" (ps missing, restricted, sandboxed, empty output).
+ * There is no way to tell them apart from here — `identifyProcess` resolves
+ * the ambiguity by consulting liveness, and conflating the two is exactly the
+ * bug that once declared a live judge `vanished`.
+ */
 function defaultProcessStart(pid: number): string | undefined {
   try {
     const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
@@ -113,7 +133,7 @@ function defaultProcessStart(pid: number): string | undefined {
     }).trim();
     return out === "" ? undefined : out;
   } catch {
-    return undefined; // no such process (or ps unavailable)
+    return undefined; // no such process, OR ps unavailable — indistinguishable
   }
 }
 
