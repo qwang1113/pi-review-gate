@@ -127,8 +127,11 @@ function defaultProcessStart(pid: number): string | undefined {
  *
  *   "ours"         the recorded start time still matches — this is our process
  *   "not-ours"     it does not match, or the pid is gone — recycled or dead
- *   "unverifiable" no start time was recorded (ps unavailable, empty, or an
- *                  older pid file): identity CANNOT be established
+ *   "unverifiable" identity CANNOT be established, for either of TWO reasons:
+ *                  no start time was recorded at all (older pid file, or the
+ *                  launcher's own `ps` produced nothing), OR one was recorded
+ *                  but cannot be queried NOW while something still holds the
+ *                  pid (ps unavailable, restricted, empty output)
  *
  * Callers decide what to do with "unverifiable", and they decide differently
  * on purpose — see readJudgeSessionState (lenient) vs terminateJudgeSession
@@ -201,7 +204,8 @@ export function readJudgeSessionState(
   // something holds that pid number now (round-1 P1: a crashed wrapper leaves
   // a pid file, and a recycled pid would read as a live judge forever).
   //
-  // LENIENT on "unverifiable" (no recorded start time): falling back to plain
+  // LENIENT on "unverifiable" (no start time recorded, or one recorded that
+  // cannot be queried now): falling back to plain
   // liveness. Getting this wrong declares a WORKING judge dead and sends the
   // main session off to read a conclusion that does not exist yet — disruptive,
   // but it destroys nothing. The termination path makes the opposite trade.
