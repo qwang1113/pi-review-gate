@@ -56,8 +56,13 @@ interface FenceVerdict {
 
 const SEVERITY: Record<string, number> = { BLOCKED: 3, NEEDS_HUMAN: 2, READY: 1 };
 
-/** P0-4: aggregate findings across equal-severity fences. The first verdict
-    is kept but hasP0P1 accumulates, so READY+READY with P1 in either → BLOCKED. */
+/** P0-4: fold one fence into the running worst verdict. A STRICTLY worse fence
+    replaces the fold; every NON-WORSE one (equal severity OR lighter) is merged
+    into it, keeping the worse verdict and accumulating the evidence — so
+    READY+READY with a P1 in either becomes BLOCKED, and a NEEDS_HUMAN followed
+    by a READY stays NEEDS_HUMAN with both fences' findings.
+    The lighter branch is not a curiosity: the sticky cwd conflict has to
+    survive it (round-13 P1 — the doc said "equal-severity" and hid it). */
 function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
   if (!a) return b;
   const bWorse = SEVERITY[b.verdict] > SEVERITY[a.verdict];

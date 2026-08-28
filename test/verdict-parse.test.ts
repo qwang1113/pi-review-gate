@@ -316,6 +316,27 @@ test("cwd survives equal-severity aggregation, and contradictions drop it", () =
 });
 
 /**
+ * Round-13 P1 (reviewer): worse()'s doc said it "aggregates equal-severity
+ * fences", which hid a branch that really exists — a LIGHTER fence is folded
+ * in too, keeping the worse verdict and accumulating the evidence. The
+ * argument for dropping the sticky cwd conflict depends on that branch, so it
+ * gets a test rather than only a corrected sentence.
+ */
+test("a lighter fence is folded in: the worse verdict holds, the evidence adds up", () => {
+  const F = (gate: string, findings: unknown[]): string =>
+    '```json\n{"gate":"' + gate + '","cwd":"/repo","docSync":"NOT_NEEDED","findings":' +
+    JSON.stringify(findings) + "}\n```";
+
+  const out = parseReviewOutput([
+    F("NEEDS_HUMAN", [{ file: "a.ts", line: 1, severity: "P2", issue: "x" }]),
+    F("READY", [{ file: "b.ts", line: 2, severity: "Nit", issue: "y" }]),
+  ].join("\n"));
+
+  assert.equal(out.verdict, "NEEDS_HUMAN", "a lighter fence must not soften the verdict");
+  assert.equal(out.findingsTotal, 2, "…and its findings are still counted");
+});
+
+/**
  * The sticky conflict flag is DROPPED when a worse fence replaces the fold
  * wholesale. That is safe only because the fold is monotonic — a verdict never
  * gets better — so a forgotten conflict can never reach the cwd check, which
