@@ -387,6 +387,32 @@ export default function reviewGate(pi: ExtensionAPI) {
   // the stall breaker must stay the sole arbiter of the review budget.
   let lastChildNoticeAt = 0;
   const CHILD_NOTICE_MIN_MS = 60_000;
+  /**
+   * Gate-owned hosted-wait watchdog. It is intentionally NOT `unref()`'d:
+   * while a child is in flight, the main session must remain alive even if the
+   * child never signals. A single timer replaces the old fall-through RESUME
+   * noise; session_shutdown cancels it.
+   */
+  let childWaitTimer: ReturnType<typeof setTimeout> | undefined;
+  function cancelChildWaitTimer(): void {
+    if (childWaitTimer) clearTimeout(childWaitTimer);
+    childWaitTimer = undefined;
+  }
+  function scheduleChildWaitRecheck(ctx: ExtensionContext, delayMs: number): void {
+    if (childWaitTimer) return;
+    childWaitTimer = setTimeout(() => {
+      childWaitTimer = undefined;
+      try {
+        pi.sendUserMessage(
+          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的 done channel、pane_dead 与静默上限；读取已有输出并继续，不要结束 turn。",
+          { deliverAs: "followUp" },
+        );
+      } catch { /* session was replaced or shut down */ }
+    }, Math.max(1_000, delayMs));
+    // Deliberately keep this timer referenced: it is the main-session liveness
+    // anchor while the child may have stopped without signalling.
+    void ctx;
+  }
   let loopArmed = true; // /gate-bypass or NEEDS_HUMAN disarms auto-continuation
   // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
   // session_start; a missing/corrupt config file falls back to safe defaults.
@@ -5745,7 +5771,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       const childVerdict = classifyChildren(childSnapshots, Date.now());
       const childNotice = buildChildWaitNotice(childVerdict, doneChannelsByPane);
       const notifyNow = childVerdict.terminated.length > 0 || Date.now() - lastChildNoticeAt >= CHILD_NOTICE_MIN_MS;
-      if (childNotice && notifyNow) {
+      if (childNotice) {
+        if (!notifyNow) {
+          // Do not fall through to the generic RESUME injection: that would
+          // burn review budget while the child is still legitimately in flight.
+          // The referenced timer is the main session's liveness anchor and
+          // re-checks independently when this throttle window expires.
+          scheduleChildWaitRecheck(ctx, CHILD_NOTICE_MIN_MS - (Date.now() - lastChildNoticeAt));
+          return;
+        }
+        cancelChildWaitTimer();
         // A terminal child is never throttled: recovery must happen even when
         // the review continuation budget is exhausted or another notice fired
         // moments ago. Only a genuinely in-flight child is rate-limited.
@@ -5759,6 +5794,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         );
         return;
       }
+      cancelChildWaitTimer();
     }
     // Review-round budget is checked AFTER the child watchdog above. A child
     // may already be dead or silent even when the continuation cap is reached;
@@ -6009,6 +6045,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    // Round-18: stop the referenced child-wait watchdog with the session.
+    cancelChildWaitTimer();
     // The old session runtime is being torn down (reason: quit | reload |
     // new | resume | fork). Every ctx this instance captured is now stale
     // and THROWS on access, so the widget-refresh timer must stop ticking
