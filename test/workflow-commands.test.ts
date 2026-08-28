@@ -189,191 +189,123 @@ test("the review-loop skill keeps the single-review contract self-contained", ()
 });
 
 /**
- * Every `tmux wait-for …` this package SHIPS, held to a reviewed snapshot.
+ * The `tmux wait-for` FLAG SHAPES this package teaches.
  *
  * History (round-17): the docs recommended `while ! tmux wait-for -t 5 <chan>;
  * do :; done` as a timeout variant. That flag does not exist — each iteration
  * failed with `unknown flag -t` in ~7ms, so 120 iterations took 0.5s and only
  * LOOKED like waiting; the flagless form blocks properly (measured 3.015s to a
- * probe signal, then 77s / 3m32s / 2m55s / 9m43s waiting for real verdicts).
+ * probe signal, then minutes-long real waits once it was fixed).
  *
- * FOUR guards were tried before this one, and the reviewer broke each in a
- * single line: file-wide keyword presence → line-context keywords →
- * NEGATIVE+RECOMMENDS token pair → a tmux-executed probe. The keyword guards
- * failed because no token list decides whether a sentence RECOMMENDS something.
- * The probe failed for a subtler reason worth keeping written down: extracting
- * "commands" from prose also scoops sentences like "the tmux wait-for process",
- * so its verdict had to be lenient enough to let those pass — and that same
- * leniency certified real breakage (`too many arguments`), while an unchecked
- * server start made it pass vacuously on hosts where tmux could not start.
+ * FIVE guards were tried before this one, and the reviewer broke every one:
+ * file-wide keyword presence → line-context keywords → NEGATIVE+RECOMMENDS
+ * tokens → a tmux-executed probe → a per-file sentence snapshot with an
+ * ever-growing extractor (inline spans, then fences, then wrapped spans, then
+ * whole-file scans for scripts). Each round closed the routes the reviewer had
+ * demonstrated while the CLASS of route stayed open, and the extractor drifted
+ * into a markup parser living in a test file.
  *
- * What survives is the part that was never evaded: a SNAPSHOT. Every
- * `tmux wait-for` command in a CODE SPAN of the shipped text — inline or fenced,
- * wrapped or not — is listed with its exact count. It is decidable, needs no
- * tmux and never skips: any new or changed command fails until a human updates
- * the list, which is precisely the moment a human re-reads it and notices `-t`
- * is not a flag.
- *
- * What it does NOT cover, deliberately: prose that merely mentions the mechanism
- * ("the tmux wait-for process"). Reading prose is what made the executed guard
- * unsound, and prose is not what an agent copies and runs.
+ * This is the reviewer's own prescription, and it is strictly smaller: read an
+ * explicit list of files, ignore markup entirely, and normalise every mention
+ * to its FLAG SHAPE. Wrapping, quoting, fencing, interpolation and JSDoc stars
+ * all collapse into the same shape, so there is nothing left to evade with
+ * formatting — only a genuinely new flag shape fails, which is exactly the
+ * thing worth a human's attention.
  */
 
+/** Files that TEACH the handshake: the two instruction files + the prompt builders. */
+const HANDSHAKE_SOURCES = [
+  "AGENTS.md",
+  join("skills", "review-loop", "SKILL.md"),
+  join("docs", "execution-model.md"),
+  join("docs", "judge-protocol.md"),
+  join("lib", "judge-prompt.ts"),
+  join("lib", "parallel-review.ts"),
+  join("lib", "loop-goal.ts"),
+  join("lib", "adviser-brief.ts"),
+];
+
 /**
- * Everything this package SHIPS as instruction text, recursively.
+ * `tmux wait-for -S ${chan}(通过 bash 执行)` → `wait-for -S <arg>`.
  *
- * The extension filter follows what each directory actually CONTAINS (round-17
- * Nit, reviewer): hooks/ holds extensionless shell scripts and scripts/ holds
- * .cjs/.mjs/.sh, so filtering those two on `.md|.ts` advertised a reach the
- * filter could not deliver — a `tmux wait-for -t 5` line in hooks/pre-commit
- * was invisible.
+ * Only flags survive normalisation: an argument is `<arg>`, a numeric flag
+ * operand is `<n>`, and anything after the first argument is prose. That is why
+ * this version cannot be evaded by formatting — and why the JSDoc artifact the
+ * reviewer found (`wait-for -S * <channel>`) collapses into the ordinary
+ * `-S` shape instead of becoming a blessed "command" nobody could run.
  */
-function shippedInstructionFiles(root: string): string[] {
-  const out: string[] = [];
-  const TEXTUAL = /\.(md|ts|mjs|cjs|sh)$/;
-  const walk = (rel: string, everyFile: boolean): void => {
-    const abs = join(root, rel);
-    if (!existsSync(abs)) return;
-    for (const entry of readdirSync(abs, { withFileTypes: true })) {
-      const child = join(rel, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
-        walk(child, everyFile);
-      } else if (everyFile || TEXTUAL.test(entry.name)) {
-        out.push(child);
-      }
+function flagShape(mention: string): string {
+  const tokens = mention.replace(/^tmux\s+/, "").trim().split(/\s+/).filter(Boolean);
+  const shape = ["wait-for"];
+  let i = 1;
+  while (i < tokens.length && /^-[A-Za-z]$/.test(tokens[i]!)) {
+    const flag = tokens[i]!;
+    if (/^\d+$/.test(tokens[i + 1] ?? "")) {
+      shape.push(`${flag} <n>`);
+      i += 2;
+    } else {
+      shape.push(flag);
+      i += 1;
     }
-  };
-  for (const top of ["docs", "lib", "extensions", "skills", "agents", "scripts"]) walk(top, false);
-  walk("hooks", true); // extensionless shell hooks ship too
-  for (const file of ["AGENTS.md", "README.md", "QUICKSTART.md"]) {
-    if (existsSync(join(root, file))) out.push(file);
   }
-  return out.sort();
+  if (i < tokens.length) shape.push("<arg>");
+  return shape.join(" ");
 }
 
-/**
- * Every `tmux wait-for …` COMMAND the shipped text teaches, with its location.
- *
- * CODE SPANS ONLY — inline backticks AND fenced blocks, both allowed to wrap
- * across lines. That boundary is the reviewer's diagnosis of why the executed
- * guard failed: scanning raw prose also scoops sentences like "a tmux wait-for
- * process (cleanup)", and a checker forced to tolerate those has to be lenient
- * enough to let real breakage through too. A command this package TEACHES is
- * always in a code span; prose ABOUT the mechanism is not a command and is
- * deliberately out of reach.
- *
- * Round-17 P2 (reviewer): the first version read single-line inline spans only,
- * so a fenced block and a wrapped span both slipped a broken command past a
- * green suite — and SKILL.md already wraps commands that way, so the shape was
- * native, not contrived. Whitespace inside a command is normalised so a wrap
- * cannot change its identity.
- */
-function waitForOccurrences(root: string): Array<{ rel: string; line: number; cmd: string }> {
-  const found: Array<{ rel: string; line: number; cmd: string }> = [];
-  for (const rel of shippedInstructionFiles(root)) {
-    const text = readFileSync(join(root, rel), "utf8");
-    const lineOf = (index: number) => text.slice(0, index).split("\n").length;
-    // An executable SCRIPT is code end to end — there is no "code span" inside
-    // it, and a `backtick` there means command substitution, not markup. So the
-    // whole file is scanned. (Round-17: the reviewer slipped `tmux wait-for -t 5`
-    // into hooks/pre-commit as a comment and the span-only reader never saw it.)
-    if (!/\.(md|ts)$/.test(rel)) {
-      text.split("\n").forEach((line, i) => {
-        for (const m of line.matchAll(/tmux wait-for[^。;\n]*/g)) {
-          found.push({ rel, line: i + 1, cmd: m[0].trim().replace(/\s+/g, " ") });
-        }
-      });
-      continue;
-    }
-    // Fenced blocks first, then inline spans in what remains, so a ``` fence is
-    // never mistaken for an empty inline span.
-    const fences: Array<[number, number]> = [];
-    for (const fence of text.matchAll(/```[\s\S]*?```/g)) {
-      const start = fence.index ?? 0;
-      fences.push([start, start + fence[0].length]);
-      for (const m of fence[0].matchAll(/tmux wait-for[^。;\n]*/g)) {
-        found.push({ rel, line: lineOf(start + (m.index ?? 0)), cmd: m[0].trim().replace(/\s+/g, " ") });
+/** Every mention, normalised, with where it sits. Markup is irrelevant here. */
+function shapesInHandshakeSources(root: string): Array<{ rel: string; line: number; shape: string; text: string }> {
+  const found: Array<{ rel: string; line: number; shape: string; text: string }> = [];
+  for (const rel of HANDSHAKE_SOURCES) {
+    const abs = join(root, rel);
+    if (!existsSync(abs)) continue;
+    readFileSync(abs, "utf8").split("\n").forEach((line, i) => {
+      for (const m of line.matchAll(/tmux wait-for[^。;\n`]*/g)) {
+        const text = m[0].trim();
+        found.push({ rel, line: i + 1, shape: flagShape(text), text });
       }
-    }
-    const inFence = (i: number) => fences.some(([a, b]) => i >= a && i < b);
-    for (const span of text.matchAll(/`([^`]*)`/g)) {
-      const start = span.index ?? 0;
-      if (inFence(start)) continue;
-      for (const m of (span[1] ?? "").matchAll(/tmux wait-for[^。;]*/g)) {
-        found.push({ rel, line: lineOf(start), cmd: m[0].trim().replace(/\s+/g, " ") });
-      }
-    }
+    });
   }
   return found;
 }
 
 /**
- * The reviewed snapshot: `file::command` → how many times it may appear.
- *
- * The COUNT is load-bearing. Keying on file+command alone let a SECOND
- * occurrence of the same text reuse the first one's blessing — measured, and
- * exactly the hole the reviewer walked through.
- *
- * The two `-t` entries are the DOCUMENTED BROKEN EXAMPLES: the docs name the
- * form in order to warn against it. Everything else here is a form that works.
+ * The reviewed shapes. `-t <n>` is here ONLY because both instruction files
+ * name it as the broken example — hence the count, which is what stops a new
+ * `-t` usage from inheriting the warning's blessing (measured: without a count,
+ * duplicating a blessed line passed).
  */
-const SHIPPED_WAIT_FOR = new Map<string, number>([
-  // The waiting discipline: the flagless BLOCKING form, plus the two
-  // deliberately-broken `-t` examples the text warns against.
-  ["AGENTS.md::tmux wait-for -t 5 <chan>", 1],
-  ["AGENTS.md::tmux wait-for <chan>", 1],
-  ["AGENTS.md::tmux wait-for <doneChannel>", 1],
-  ["AGENTS.md::tmux wait-for", 1],
-  ["skills/review-loop/SKILL.md::tmux wait-for -t 5 <chan>", 1],
-  ["skills/review-loop/SKILL.md::tmux wait-for <doneChannel>", 1],
-  ["skills/review-loop/SKILL.md::tmux wait-for", 1],
-  // The SIGNAL side (-S never blocks): docs, judge prompts and the runtime.
-  ["docs/dev-flow.md::tmux wait-for -S <chan>", 1],
-  ["docs/execution-model.md::tmux wait-for -S <chan>", 1],
-  ["docs/execution-model.md::tmux wait-for -S <inbox-chan>", 1],
-  ["docs/judge-protocol.md::tmux wait-for -S <channel>", 1],
-  ["docs/judge-protocol.md::tmux wait-for -S <channel>-inbox", 1],
-  ["extensions/review-gate.ts::tmux wait-for -S <channel>", 2],
-  ["extensions/review-gate.ts::tmux wait-for", 1],
-  ["lib/adviser-brief.ts::tmux wait-for -S ${input.doneChannel}(通过 bash 执行,无任何附加说明)", 1],
-  ["lib/adviser-brief.ts::tmux wait-for -S ${input.inboxChannel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)", 1],
-  ["lib/attention.ts::tmux wait-for", 1],
-  ["lib/judge-prompt.ts::tmux wait-for -S <channel>-inbox（channel 由任务文本给出）唤醒主会话", 1],
-  ["lib/judge-prompt.ts::tmux wait-for -S <channel>（channel 由任务文本给出， 通过 bash 执行，无任何附加说明）", 1],
-  ["lib/judge-watch.ts::tmux wait-for -S * <channel>", 1],
-  ["lib/judge-watch.ts::tmux wait-for", 1],
-  ["lib/loop-goal.ts::tmux wait-for -S ${opts.doneChannel}(通过 bash 执行,无任何附加说明)", 1],
-  ["lib/loop-goal.ts::tmux wait-for -S ${opts.inboxChannel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)", 1],
-  ["lib/parallel-review.ts::tmux wait-for -S ${doneChannel}(通过 bash 执行,无任何附加说明)", 1],
-  ["lib/parallel-review.ts::tmux wait-for -S ${inbox.channel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)", 1],
-  ["lib/tmux-session.ts::tmux wait-for -S <channel>", 1],
-  ["lib/tmux-session.ts::tmux wait-for <channel>", 1],
-  ["lib/tmux-session.ts::tmux wait-for rg-user-attention", 1],
+const ALLOWED_SHAPES = new Map<string, number | "any">([
+  ["wait-for", "any"],            // prose mentioning the mechanism
+  ["wait-for <arg>", "any"],      // the BLOCKING form — the whole point
+  ["wait-for -S <arg>", "any"],   // the signal form (never blocks)
+  ["wait-for -t <n> <arg>", 2],   // the documented counterexample, twice
 ]);
 
-test("every shipped `tmux wait-for` occurrence matches the reviewed snapshot", () => {
+test("every taught `tmux wait-for` matches a reviewed flag shape", () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const mentions = shapesInHandshakeSources(root);
+  assert.ok(mentions.length > 0, "the handshake must still be taught somewhere");
+
   const counts = new Map<string, number>();
-  const where = new Map<string, string>();
-  for (const { rel, line, cmd } of waitForOccurrences(root)) {
-    const key = `${rel}::${cmd}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-    if (!where.has(key)) where.set(key, `${rel}:${line}`);
+  for (const { rel, line, shape, text } of mentions) {
+    const budget = ALLOWED_SHAPES.get(shape);
+    assert.ok(budget !== undefined,
+      `${rel}:${line} teaches a NEW tmux wait-for shape \`${shape}\` (from \`${text}\`). ` +
+      "Check it against `man tmux` — there is no -t timeout flag, and the flagless " +
+      "form is the blocking one — then add the shape to ALLOWED_SHAPES.");
+    const used = (counts.get(shape) ?? 0) + 1;
+    counts.set(shape, used);
+    if (budget !== "any") {
+      assert.ok(used <= budget,
+        `${rel}:${line} is occurrence ${used} of shape \`${shape}\`, which is blessed ${budget}× ` +
+        "(it is a documented BROKEN example, not a form to use).");
+    }
   }
 
-  for (const [key, actual] of counts) {
-    const blessed = SHIPPED_WAIT_FOR.get(key);
-    assert.ok(blessed !== undefined,
-      `${where.get(key)} ships a NEW \`tmux wait-for\` form: \`${key.split("::")[1]}\`. ` +
-      "Check it against `man tmux` (there is no -t timeout flag — the flagless form " +
-      "is the blocking one), then add it to SHIPPED_WAIT_FOR.");
-    assert.equal(actual, blessed,
-      `${key} occurs ${actual}× but the snapshot blesses ${blessed}× — a new occurrence ` +
-      "must be reviewed, not inherited from an existing one.");
-  }
-  for (const [key] of SHIPPED_WAIT_FOR) {
-    assert.ok(counts.has(key), `SHIPPED_WAIT_FOR lists ${key}, which no longer appears — drop it`);
+  for (const [shape, budget] of ALLOWED_SHAPES) {
+    if (budget === "any") continue;
+    assert.equal(counts.get(shape) ?? 0, budget,
+      `shape \`${shape}\` is blessed ${budget}× but occurs ${counts.get(shape) ?? 0}× — update ALLOWED_SHAPES`);
   }
 });
 
