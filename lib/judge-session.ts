@@ -212,11 +212,15 @@ export function readStderrTail(stderrPath: string, maxLines = 20): string | unde
  * a judge twice must not fail (idempotence is what `review_close` promises).
  */
 export function terminateJudgeSession(
-  paths: Pick<JudgeSessionPaths, "pidPath"> & Partial<Pick<JudgeSessionPaths, "exitCodePath">>,
+  // BOTH paths are REQUIRED (round-2 P2): with an optional exitCodePath a
+  // caller could silently opt out of the never-signal-a-finished-session rule,
+  // which is the whole protection against signalling a recycled pid. The type
+  // enforces it instead of the documentation asking for it.
+  paths: Pick<JudgeSessionPaths, "pidPath" | "exitCodePath">,
   kill: (target: number, signal: NodeJS.Signals) => void = (t, s) => process.kill(t, s),
 ): { signalled: boolean; pid?: number } {
   // Finished ⇒ nothing of ours is left running; the pid is not ours to signal.
-  if (paths.exitCodePath !== undefined && readTrimmed(paths.exitCodePath) !== undefined) {
+  if (readTrimmed(paths.exitCodePath) !== undefined) {
     return { signalled: false };
   }
   const rawPid = readTrimmed(paths.pidPath);

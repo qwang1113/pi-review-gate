@@ -204,10 +204,13 @@ export function ownWindowId(): string | undefined {
 /**
  * `name(@id)` of the window a pane lives in — the human-facing origin label
  * for cross-session attention (round-17 P0: a notification with no session
- * identity told the user nothing about WHERE to go). Always -t.
+ * identity told the user nothing about WHERE to go). Always -t, and only ever
+ * for a real pane id: an arbitrary string here would resolve to SOME session
+ * (measured round-2: `paneWindowLabel("unrelated")` labelled an unrelated
+ * one), so the notification would point the user at the wrong window.
  */
 export function paneWindowLabel(pane: string | undefined): string | undefined {
-  if (!pane) return undefined;
+  if (!isPaneId(pane)) return undefined;
   const res = tmuxSync(["display-message", "-p", "-t", pane, "#{window_name}(#{window_id})"], 5_000);
   const out = res.status === 0 ? res.stdout.trim() : "";
   return out === "" ? undefined : out;

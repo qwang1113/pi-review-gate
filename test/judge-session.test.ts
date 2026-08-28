@@ -220,6 +220,40 @@ test("terminate: falls back to the bare pid when the group cannot be signalled",
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+/**
+ * Round-2 P1 (reviewer, mutation-verified): the exit-code guard had NO
+ * behavioural test — deleting it left the whole file green. This is the test
+ * that fails when it is removed.
+ *
+ * The rule: a recorded exit code means the wrapper already returned, so that
+ * pid is not ours any more. Signalling its GROUP after the OS recycled the
+ * number would kill an unrelated process tree.
+ */
+test("terminate: a FINISHED session is never signalled, even with a pid on file (PID reuse)", () => {
+  const dir = workdir();
+  try {
+    writeFileSync(join(dir, "pid"), "4242");
+    writeFileSync(join(dir, "exit-code"), "0");
+    let calls = 0;
+    const res = terminateJudgeSession(paths(dir), () => { calls++; });
+    assert.equal(calls, 0, "a finished session must not be signalled at all");
+    assert.deepEqual(res, { signalled: false });
+    // Same input, same answer as the lifecycle reader — the two must agree.
+    assert.equal(readJudgeSessionState(paths(dir), () => true).lifecycle, "finished");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("terminate: a non-zero exit code is equally final (a crashed judge is not re-signalled)", () => {
+  const dir = workdir();
+  try {
+    writeFileSync(join(dir, "pid"), "4242");
+    writeFileSync(join(dir, "exit-code"), "7");
+    let calls = 0;
+    terminateJudgeSession(paths(dir), () => { calls++; });
+    assert.equal(calls, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("terminate: an already-finished child is a successful no-op (review_close is idempotent)", () => {
   const dir = workdir();
   try {
@@ -378,20 +412,35 @@ test("a same-title respawn gets a clean slate (no inherited exit-code or transcr
 });
 
 
-const terminateIntegration = test("tmux integration: terminating the session takes pi (the wrapper's child) with it", { skip: !tmuxAvailable() }, async () => {
+const terminateIntegration = test("tmux integration: termination reaches pi through the process GROUP (not via tmux tearing the pane down)", { skip: !tmuxAvailable() }, async () => {
   const work = mkdtempSync(join(tmpdir(), "rg-term-"));
   const sess = `rg-term-${Date.now().toString(36)}`;
   try {
     execFileSync("tmux", ["new-session", "-d", "-s", sess, "-c", work, "sleep 300"], { encoding: "utf8" });
-    // The launcher's shape, reduced to what this test is about: record own pid,
-    // run a long-lived CHILD (pi's stand-in), wait for it.
+    // THE WRAPPER IGNORES SIGTERM — this is what makes the test able to FAIL
+    // (round-2 P1, reviewer, mutation-verified). With a wrapper that dies on
+    // TERM, killing only the wrapper collapses its pane, and tmux then reaps
+    // the child anyway: the wrapper-only implementation the goal forbids would
+    // pass. Trapping TERM in the wrapper removes tmux from the equation —
+    // only a signal delivered to the GROUP can reach the child.
     const launcher = join(work, "start.sh");
     writeFileSync(launcher, [
       "#!/bin/bash",
+      // A HANDLER, not `trap '' TERM`: an ignored signal (SIG_IGN) is
+      // INHERITED across exec, so `sleep` would ignore TERM too and the test
+      // could never observe the group delivery. A handler is reset to the
+      // default in the child, so only the wrapper survives the signal.
+      "trap ':' TERM",
       'printf %s "$$" > "$RG_PID_FILE"',
       "sleep 120 &",
       'printf %s "$!" > "$RG_CHILD_PID_FILE"',
       'wait $!',
+      // The handler makes `wait` return as soon as TERM arrives, so without
+      // this the wrapper would fall off the end and exit — and the test could
+      // not tell "the group was signalled" from "the wrapper died and tmux
+      // reaped everything". Staying alive is what proves the child's death
+      // came from the signal, not from the pane collapsing.
+      "sleep 300",
     ].join("\n"));
     chmodSync(launcher, 0o755);
 
@@ -417,15 +466,22 @@ const terminateIntegration = test("tmux integration: terminating the session tak
     };
     assert.ok(alive(childPid), "the stand-in for pi is running before we terminate");
 
-    const res = terminateJudgeSession({ pidPath });
+    // exitCodePath points at a file that does NOT exist here: this session is
+    // still running, so the guard must let the signal through.
+    const res = terminateJudgeSession({ pidPath, exitCodePath: join(work, "exit-code") });
     assert.equal(res.signalled, true);
     assert.equal(res.pid, wrapperPid);
 
-    for (let i = 0; i < 40 && (alive(wrapperPid) || alive(childPid)); i++) {
+    // THE DISCRIMINATING ASSERTION: the child must die. It can only have
+    // received the signal through the process GROUP — the wrapper ignores
+    // TERM and is still alive, so tmux never tore the pane (and its children)
+    // down. `kill(pid)` instead of `kill(-pid)` leaves this child running.
+    for (let i = 0; i < 60 && alive(childPid); i++) {
       await new Promise((r) => setTimeout(r, 50));
     }
-    assert.equal(alive(wrapperPid), false, "the launcher is gone");
-    assert.equal(alive(childPid), false, "and pi did NOT survive as an orphan — the group was signalled");
+    assert.equal(alive(childPid), false, "pi (the wrapper's child) was terminated via the process GROUP");
+    assert.equal(alive(wrapperPid), true,
+      "and the wrapper — which ignores TERM — is still up, proving tmux did not do the cleanup for us");
 
     killPane(spawned.paneId!);
   } finally {

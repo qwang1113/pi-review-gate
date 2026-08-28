@@ -32,6 +32,7 @@ import {
   waitForSignal,
   waitForSignalAsync,
   ownPaneId,
+  paneWindowLabel,
   ownWindowId,
 } from "../lib/tmux-session.ts";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -237,6 +238,10 @@ test("pane operations refuse an empty or malformed pane id (never the user's act
     assert.equal(capturePane(id), undefined, `capturePane(${JSON.stringify(id)})`);
     assert.equal(paneCurrentPath(id), undefined, `paneCurrentPath(${JSON.stringify(id)})`);
     assert.equal(killPane(id), false, `killPane(${JSON.stringify(id)})`);
+    // Round-2 P1: this one was missed the first time — an arbitrary string
+    // resolves to SOME session, so an attention notice would name the wrong
+    // window (the reviewer measured `paneWindowLabel("unrelated")` doing it).
+    assert.equal(paneWindowLabel(id), undefined, `paneWindowLabel(${JSON.stringify(id)})`);
     // Writes fail LOUDLY: a silently misdelivered keystroke is the incident.
     assert.throws(() => sendMessage(id, "hello"), /invalid pane id/, `sendMessage(${JSON.stringify(id)})`);
     assert.throws(() => sendRawKeys(id, "C-c"), /invalid pane id/, `sendRawKeys(${JSON.stringify(id)})`);
