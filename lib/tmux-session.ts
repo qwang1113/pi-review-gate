@@ -136,6 +136,70 @@ function tmuxSync(args: string[], timeoutMs = 15_000): { status: number; stdout:
 }
 
 /**
+ * The pane this extension process runs IN — the deterministic anchor for
+ * untargeted split-window / window_id queries (round-17 P1: judge panes
+ * intermittently landed in the WRONG window because untargeted tmux calls
+ * fall back to the server's ACTIVE pane, which other windows' activity
+ * steals).
+ *
+ * Resolution order:
+ *  1. process.env.TMUX_PANE — when set and still alive, it is exactly the
+ *     pane pi runs in;
+ *  2. process-ancestry match — `tmux list-panes -a -F '#{pane_pid}
+ *     #{pane_id}'` builds a pid→pane map, then walk process.pid up via ppid
+ *     (bounded) until a pid owned by a pane is hit (works when TMUX_PANE is
+ *     missing or stale);
+ *  3. undefined — callers keep the legacy behavior.
+ * Never throws.
+ */
+export function ownPaneId(): string | undefined {
+  const env = process.env.TMUX_PANE?.trim();
+  if (env && paneAlive(env)) return env;
+  try {
+    const out = execFileSync("tmux", ["list-panes", "-a", "-F", "#{pane_pid} #{pane_id}"], { encoding: "utf8", timeout: 10_000 });
+    const byPid = new Map<string, string>();
+    for (const line of out.split("\n")) {
+      const m = line.trim().match(/^(\d+)\s+(\S+)$/);
+      if (m) byPid.set(m[1]!, m[2]!);
+    }
+    let pid = String(process.pid);
+    for (let depth = 0; depth < 32; depth++) {
+      const pane = byPid.get(pid);
+      if (pane) return pane;
+      const ppid = execFileSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8", timeout: 5_000 }).trim();
+      if (!ppid || ppid === pid) break;
+      pid = ppid;
+    }
+  } catch { /* fall through to legacy */ }
+  return undefined;
+}
+
+/**
+ * The window THIS session's pane lives in (ownPaneId anchored) — the key
+ * for per-window judge-anchor bookkeeping. Round-17 P1: never a bare
+ * display-message (that reads the server's active pane); always -t.
+ */
+export function ownWindowId(): string | undefined {
+  const pane = ownPaneId();
+  if (!pane) return undefined;
+  const res = tmuxSync(["display-message", "-p", "-t", pane, "#{window_id}"], 10_000);
+  return res.status === 0 && res.stdout.trim() !== "" ? res.stdout.trim() : undefined;
+}
+
+/**
+ * Best-effort signal on a well-known channel (round-17 user ask: the
+ * cross-session user-attention channel rg-user-attention). The SIGNALLER
+ * side must never block or throw: a missing listener is the normal case —
+ * `tmux wait-for -S <chan>` with no waiter just exits. Timeout stays short
+ * so a wedged tmux server cannot stall a dialog.
+ */
+export function signalChannel(channel: string): void {
+  try {
+    tmuxSync(["wait-for", "-S", channel], 5_000);
+  } catch { /* best-effort — no listener is fine */ }
+}
+
+/**
  * Create a judge pane in the main session's current window: right column for
  * the first child, vertical split for subsequent ones. Returns the pane id —
  * the ONLY targeting handle for every later operation.
@@ -183,7 +247,14 @@ export function spawnJudgePane(opts: SpawnPaneOptions): SpawnPaneResult {
     else {
       const anchor = firstJudgePaneOfWindow();
       if (anchor) args.push("-v", "-p", "50", "-t", anchor);
-      else args.push("-h", "-p", "35");
+      else {
+        // Round-17 P1: an untargeted split falls back to the server's ACTIVE
+        // pane — other windows' activity steals it and the judge lands in the
+        // WRONG window. Anchor the split on OUR OWN pane (deterministic).
+        const own = ownPaneId();
+        if (own) args.push("-h", "-p", "35", "-t", own);
+        else args.push("-h", "-p", "35");
+      }
     }
     if (opts.env) for (const [k, v] of Object.entries(opts.env)) args.push("-e", `${k}=${v}`);
     args.push("-P", "-F", "#{pane_id}", "-c", opts.cwd, opts.command);
@@ -212,8 +283,9 @@ export function spawnJudgePane(opts: SpawnPaneOptions): SpawnPaneResult {
 const judgePaneByWindow = new Map<string, string>();
 
 function windowIdOfCurrentPane(): string | undefined {
-  const res = tmuxSync(["display-message", "-p", "#{window_id}"], 10_000);
-  return res.status === 0 && res.stdout.trim() !== "" ? res.stdout.trim() : undefined;
+  // Round-17 P1: never a bare display-message (server-active dependent);
+  // always anchored on our own pane.
+  return ownWindowId();
 }
 
 function firstJudgePaneOfWindow(): string | undefined {
@@ -432,6 +504,12 @@ export function waitForSignalAsync(channel: string, timeoutMs = 0): WaitHandle {
     child = spawn("tmux", ["wait-for", channel], {
       stdio: ["ignore", "ignore", "ignore"],
     });
+    // P0 (round-17): a listener must NEVER keep the event loop alive —
+    // headless / test / CI processes would hang forever on an unsignalled
+    // channel (measured: precommit workers stuck in uv__io_poll with 30
+    // leaked `tmux wait-for rg-user-attention` children). unref lets the
+    // process exit; the child dies with the tmux server or on cancel.
+    child.unref();
     const timer = timeoutMs > 0
       ? setTimeout(() => {
           cancelled = true;

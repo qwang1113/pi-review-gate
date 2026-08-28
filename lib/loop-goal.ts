@@ -269,6 +269,9 @@ export function buildGoalAuditTask(
     '{"gate":"READY"|"BLOCKED","findings":[{"severity":"P0"|"P1"|"P2","issue":"..."}]}',
     '```',
     "READY 仅当草稿无未解决 P0/P1 异议。findings 为空表示无异议。",
+    // Round-17 (user ask): output discipline — auditor output beyond the
+    // fence + 3 lines is wasted tokens.
+    "输出纪律:只输出 fence + ≤3 行结论要点;不复述任务、不复述代码、不写过程叙事。",
     ...(opts.doneChannel
       ? [
           "",

@@ -232,7 +232,13 @@ copy a reviewer SHOULD verify by doing — mutation analysis included — and
 must restore before finishing. Because the reviewed range is immutable,
 **you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
 that carry evidence (confirm each in the code first), leave Nits for the
-verdict. The verdict arrives through the done channel and wakes this
+verdict. WAITING-WINDOW DISCIPLINE (v3): (1) 有可实现的确定性工作(代码/测试/
+文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后
+才阻塞等待——bash 里 `tmux wait-for <doneChannel>`(turn 不结束;macOS 无
+timeout 时用轮询变体 `while ! tmux wait-for -t 5 <chan>; do :; done`);
+(3) 兜底:必须结束 turn 时,registerWatch 唤醒与 RESUME 都会拉起你——那
+不算错误,但空转应避免。
+The verdict arrives through the done channel and wakes this
 session (`review_watch`); the reviewer may ask questions through its inbox.
 (d) **The judge child runs as a tmux pane — MECHANICALLY ENFORCED.**
 `review_spawn` creates a fresh pi process in a pane of the main session's

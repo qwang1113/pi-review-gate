@@ -206,14 +206,15 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
-   **Waiting-window discipline**: `review_spawn` auto-registers the
-   completion listener — send the task, END YOUR TURN, and the done signal
-   wakes this session as a new turn. Never sleep or poll while a judge
-   child runs; keep doing useful work: fix streamed P0/P1/P2 from the
-   finding stream (confirm each in the code first), other repos' loops, PR
-   description drafts, `[NIT_DEFERRED]` bookkeeping. Because the reviewed
-   range is immutable, the worktree edits never invalidate the round.
-
+   **Waiting-window discipline (v3)**:
+   1. 有可实现的确定性工作(代码/测试/文档/其他 repo 事务)→ 优先做掉,不要进入等待。
+   2. 确认没有任何可做的工作后,才进入阻塞等待——bash 里 `tmux wait-for
+      <doneChannel>`(turn 不结束;macOS 无 timeout 命令时用轮询变体
+      `while ! tmux wait-for -t 5 <chan>; do :; done`)。
+   3. 兜底:若必须结束 turn(如工具超时限制),门禁的唤醒(registerWatch)与
+      RESUME 都会拉起你——那不算错误,但空转应避免。
+   无论哪种方式,不要 sleep 或轮询 pane 屏幕;有流式 P0/P1/P2 时边等边修
+   (先确认再改)。因为审核范围是 immutable commit,工作区编辑不失效本轮。
 3. **Review** — the reviewer audits the COMMIT RANGE `baseline..HEAD` (the
    immutable checkpoint commits) with `git show`/`git diff`; it may verify by
    doing in a throwaway `$TMPDIR` copy (mutation analysis included) and must

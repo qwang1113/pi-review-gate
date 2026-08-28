@@ -1280,6 +1280,83 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
     "a truncated goal must be completed from the file when writing the task");
 });
 
+test("round-17: cross-session user-attention is signalled on dialogs/pauses and listened for at session_start", () => {
+  // SIGNAL side: a fixed well-known channel + a best-effort notifier (tmux
+  // wait-for -S rg-user-attention + macOS osascript) used by the two
+  // 'human needed' moments.
+  const fnAt = SRC.indexOf("function notifyUserAttention(");
+  assert.ok(fnAt > 0, "notifyUserAttention must exist");
+  const fn = SRC.slice(fnAt, fnAt + 900);
+  assert.match(SRC, /const USER_ATTENTION_CHANNEL = "rg-user-attention";/, "the fixed cross-session channel");
+  assert.match(fn, /signalChannel\(USER_ATTENTION_CHANNEL\)/, "signals via the tmux helper");
+  assert.match(fn, /osascript/, "macOS convenience notification");
+  // propose_loop_goal: signalled right before the approval dialog renders.
+  const goalAt = SRC.indexOf('name: "propose_loop_goal"');
+  const goalBody = SRC.slice(goalAt, goalAt + 24000);
+  const dialogAt = goalBody.indexOf("confirmBounded(");
+  const signalAt = goalBody.indexOf("notifyUserAttention();");
+  assert.ok(signalAt > 0 && signalAt < dialogAt, "the approval dialog signals attention before rendering");
+  // pause_for_question: signalled when the pause is recorded.
+  const pauseAt = SRC.indexOf('name: "pause_for_question"');
+  const pauseBody = SRC.slice(pauseAt, pauseAt + 8000);
+  assert.match(pauseBody, /notifyUserAttention\(\)/, "a pause signals attention");
+  // LISTEN side: session_start registers the listener (re-arm semantics).
+  const startAt = SRC.indexOf('pi.on("session_start"');
+  const startBody = SRC.slice(startAt, startAt + 1200);
+  assert.match(startBody, /watchRegistry\.register\(USER_ATTENTION_CHANNEL, "跨会话用户注意"\)/,
+    "session_start listens for cross-session attention");
+  // P0 (round-17): only an INTERACTIVE tmux host may register — a headless /
+  // test / CI process must never spawn a listener (leaked `tmux wait-for`
+  // children kept processes alive and precommit never returned).
+  assert.match(startBody, /if \(tmuxAvailable\(\) && process\.stdout\.isTTY\) \{/,
+    "the attention listener is guarded by an interactive-tmux check");
+  // The wake message is specialised for the attention channel.
+  const regAt = SRC.indexOf("createWatchRegistry(");
+  assert.match(SRC.slice(regAt, regAt + 1000), /channel === USER_ATTENTION_CHANNEL/,
+    "attention wakes carry their own message");
+});
+
+test("round-17: agent_settled skips the RESUME injection while a fresh judge child is in flight", () => {
+  const settledAt = SRC.indexOf('pi.on("agent_settled"');
+  assert.ok(settledAt > 0);
+  const settled = SRC.slice(settledAt, settledAt + 16000);
+  const injectAt = settled.indexOf("pi.sendUserMessage(");
+  assert.ok(injectAt > 0, "agent_settled must have an injection site");
+  // Waiting on a judge child is the CORRECT discipline: the done/inbox
+  // signal wakes the session, so a resume nudge would push the agent to
+  // 'continue' with nothing to do. The early return must sit BEFORE the
+  // injection; the freshness bound (judgeChildInMotion) keeps the breaker
+  // alive for hung panes.
+  const earlyExit = settled.indexOf("if (judgeChildInMotion()) return;");
+  assert.ok(earlyExit > 0 && earlyExit < injectAt,
+    "a fresh judge child suppresses the resume injection (the done signal wakes the session)");
+  // The stall path must stay reachable for OLD judge panes: the early return
+  // cannot come after the breaker block.
+  const stallAt = settled.indexOf("evaluateStall(");
+  assert.ok(earlyExit < stallAt, "the early return precedes the stall breaker");
+});
+
+test("round-17: review_spawn reuses an alive same-role child and drops dead panes", () => {
+  const spawnAt = SRC.indexOf('name: "review_spawn"');
+  assert.ok(spawnAt > 0);
+  const spawn = SRC.slice(spawnAt, spawnAt + 7000);
+  // Dead panes are cleaned from the registry first (never block a spawn).
+  assert.match(spawn, /childSessions\.set\(repoRoot, alive\)/,
+    "dead panes (pane_dead=1) are filtered out of the registry");
+  assert.match(spawn, /paneAlive\(c\.paneId\)/, "liveness is judged per pane");
+  // Reuse: same role + alive pane ⇒ return the existing child, no spawn.
+  assert.match(spawn, /\.find\(\(c\) => c\.role === role && !params\.fresh\)/,
+    "an alive same-role child is reused unless fresh:true");
+  assert.match(spawn, /reusing existing \$\{role\} child pane/, "the reuse path is announced");
+  assert.match(spawn, /fresh: Type\.Optional\(Type\.Boolean/, "fresh:true is an explicit escape hatch");
+  assert.match(spawn, /spawnJudgePane\(\{/, "a real spawn still exists for the no-reuse case");
+  // Spec C: fresh:true kills the old same-role pane FIRST (singleton invariant).
+  assert.match(spawn, /if \(params\.fresh\) \{/, "fresh:true has its own branch");
+  assert.match(spawn, /killPane\(stale\.paneId\)/, "fresh:true kills the old pane before spawning");
+  assert.match(spawn, /childSessions\.set\(root, \(childSessions\.get\(root\) \?\? \[\]\)\.filter\(/,
+    "the killed pane leaves the registry");
+});
+
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {
   const start = SRC.indexOf('name: "propose_loop_goal"');
   const nextTool = SRC.indexOf('name: "request_copilot_review"', start);
@@ -1448,7 +1525,7 @@ test("review_watch: the wake-up listener is registered with triggerTurn semantic
   assert.match(watchLib, /register\(channel, label\);/,
     "the listener re-arms itself for the next round on the same pane");
   const spawnAt = SRC.indexOf('name: "review_spawn"');
-  const spawnBody = SRC.slice(spawnAt, spawnAt + 6000);
+  const spawnBody = SRC.slice(spawnAt, spawnAt + 9000);
   assert.match(spawnBody, /registerWatch\(child\.doneChannel, title\)/,
     "review_spawn registers the completion listener automatically");
   // Round-17 (goal-auditor P2): the inbox question channel is auto-registered

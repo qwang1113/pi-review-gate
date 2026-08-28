@@ -93,6 +93,7 @@ import {
   sendMessage,
   anyPaneAlive,
   tmuxAvailable,
+  signalChannel,
 } from "../lib/tmux-session.ts";
 import { createWatchRegistry } from "../lib/judge-watch.ts";
 import {
@@ -798,15 +799,40 @@ export default function reviewGate(pi: ExtensionAPI) {
    * makes main-session polling unnecessary. Cancelled on session_shutdown so
    * a reload/resume never leaks a tmux wait-for process.
    */
+  // Round-17 (user ask): CROSS-SESSION user-attention — a fixed well-known
+  // channel any session running this extension may signal when a HUMAN
+  // decision is needed (goal approval dialog, pause_for_question). Every
+  // session registers a listener on it at session_start (re-arm semantics
+  // like registerWatch), so an observer session is woken instead of having
+  // to poll panes.
+  const USER_ATTENTION_CHANNEL = "rg-user-attention";
+
+  /**
+   * Best-effort cross-session attention signal + macOS notification. Never
+   * throws and never blocks a dialog: this is a convenience channel, not a
+   * gate.
+   */
+  function notifyUserAttention(): void {
+    signalChannel(USER_ATTENTION_CHANNEL);
+    try {
+      execFileSync("osascript", ["-e", 'display notification "review-gate: 需要用户介入" with title "review-gate"'], { stdio: "ignore", timeout: 5_000 });
+    } catch { /* non-macOS or no osascript — best-effort */ }
+  }
   // The watcher registry (lib/judge-watch.ts) owns the handle map and the
   // shutdown latch: a signal that resolves while session_shutdown is
   // clearing the registry must not re-arm an orphan listener (round-16 Nit).
   const watchRegistry = createWatchRegistry(
     (channel) => waitForSignalAsync(channel),
     (label, channel) => {
+      const attention = channel === USER_ATTENTION_CHANNEL;
+      const inbox = channel.endsWith("-inbox");
       pi.sendMessage({
         customType: "review-gate",
-        content: `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`,
+        content: attention
+          ? `[review-gate] 其他会话需要用户介入（channel ${channel}）— 检查各 tmux 窗口的子会话是否需要批准/回答。`
+          : inbox
+          ? `[review-gate] 子会话 ${label} 提问（channel ${channel}）— review_read 读取 inbox 并回复。`
+          : `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`,
         display: true,
       }, { triggerTurn: true, deliverAs: "steer" });
     },
@@ -2414,11 +2440,14 @@ export default function reviewGate(pi: ExtensionAPI) {
    * (see SNAPSHOT_CARRIED_FILES) — so a truncated goal appends the REAL
    * file path instead.
    */
-  function goalTextForReviewers(root: string): string | undefined {
+  function goalTextForReviewers(root: string): { text: string; truncated: boolean } | undefined {
     const goal = readLoopGoal(root);
     if (!goal.present) return undefined;
-    if (!goal.truncated) return goal.text;
-    return goal.text + "\n(全文: " + pathJoin(root, LOOP_GOAL_RELPATH) + ")";
+    // Use readLoopGoal's OWN truncated boolean — never sniff the display
+    // marker string (round-17 Nit: the marker is display, the fact is the
+    // flag).
+    if (!goal.truncated) return { text: goal.text, truncated: false };
+    return { text: goal.text + "\n(全文: " + pathJoin(root, LOOP_GOAL_RELPATH) + ")", truncated: true };
   }
   // ---------- track edits & precommit results ----------
 
@@ -2841,6 +2870,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
+      fresh: Type.Optional(Type.Boolean({
+        description: "Force a NEW pane even when an alive same-role child exists (default: reuse — the child's context carries over across rounds)",
+      })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const target = resolveToolRepo(params.repo);
@@ -2862,6 +2894,42 @@ export default function reviewGate(pi: ExtensionAPI) {
           details: { spawned: false },
           isError: true,
         };
+      }
+      // Round-17 (user ask): dead panes (pane_dead=1) are dropped from the
+      // registry so they never block a fresh spawn or a reuse hit.
+      for (const [repoRoot, list] of childSessions) {
+        const alive = list.filter((c) => paneAlive(c.paneId));
+        if (alive.length !== list.length) childSessions.set(repoRoot, alive);
+      }
+      // Round-17 (user ask): REUSE — same repo + same role + alive pane ⇒ no
+      // new spawn; the execution model promises the child's context carries
+      // over across rounds until READY, so a fresh pi process every round
+      // would re-read protocol/code/goal from zero (measured: pane
+      // accumulation, huge token cost). fresh:true forces a new pane.
+      const existing = (childSessions.get(root) ?? [])
+        .find((c) => c.role === role && !params.fresh);
+      if (existing) {
+        return {
+          content: [{ type: "text", text:
+            `review-gate: reusing existing ${role} child pane ${existing.paneId} (${existing.title}) — context carries over across rounds.\n` +
+            `- done channel: ${existing.doneChannel} (listener ${watchRegistry.active.has(existing.doneChannel) ? "registered" : "re-register now via review_watch"})\n` +
+            `- inbox: ${existing.inboxPath}\n` +
+            "- 用 review_send 发送本轮任务文本即可(fresh:true 可强制新建 pane)。",
+          }],
+          details: { spawned: false, reused: true, paneId: existing.paneId, title: existing.title, role, doneChannel: existing.doneChannel, inboxPath: existing.inboxPath },
+        };
+      }
+      // Round-17 (spec C): fresh:true keeps the SINGLETON invariant — one
+      // alive pane per role per session — by killing the old same-role pane
+      // (and cancelling its listeners) before the new spawn.
+      if (params.fresh) {
+        const stale = (childSessions.get(root) ?? []).find((c) => c.role === role);
+        if (stale) {
+          watchRegistry.active.get(stale.doneChannel)?.cancel();
+          watchRegistry.active.get(stale.inboxChannel)?.cancel();
+          killPane(stale.paneId);
+          childSessions.set(root, (childSessions.get(root) ?? []).filter((c) => c.paneId !== stale.paneId));
+        }
       }
       // P2 (round-6): the title is the RAW label — the rg- prefix is added
       // ONCE by spawnJudgePane and by the channel derivations, so titles and
@@ -3187,14 +3255,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       const streamPath = pathJoin(root, ".pi", "review-stream", `${runId}-review.jsonl`);
       try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* stream is optional */ }
       const goalSt = root === primaryRepoRoot ? state : stateForRepo(root);
-      const goalText = loopGoalConfirmed(root, goalSt) ? goalTextForReviewers(root) : undefined;
+      const goalForReview = loopGoalConfirmed(root, goalSt) ? goalTextForReviewers(root) : undefined;
+      const goalText = goalForReview?.text;
+      const goalTruncated = goalForReview?.truncated === true;
       const reviewTitle = `review-${runId.slice(-6)}`;
       // Round-16 P2: the inbox question channel is embedded too — path and
       // signal channel (inboxChannelFor(title), NEVER literal -inbox
       // concatenation) so the child can ask without guessing.
       const inboxPath = pathJoin(root, ".pi", "tmux-sessions", `rg-${reviewTitle}`, "inbox.jsonl");
       const inboxChannel = inboxChannelFor(reviewTitle);
-      const goalTruncated = goalText?.includes("…[truncated") === true;
       const scopeNow = reviewScopeFor(root, st);
       const task = buildReviewPrompt(
         "review",
@@ -3341,7 +3410,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       // long goals must not share one conclusion artifact (round-5 P1).
       let fullGoalRaw: string | undefined;
       try { fullGoalRaw = readFileSync(pathJoin(target.root, LOOP_GOAL_RELPATH), "utf8"); } catch { /* no goal file */ }
-      const goalText = confirmed ? goalTextForReviewers(target.root) : undefined;
+      const goalForReview = confirmed ? goalTextForReviewers(target.root) : undefined;
+      const goalText = goalForReview?.text;
       const goalHash = confirmed && fullGoalRaw
         ? goalTextHash(fullGoalRaw)
         // No approved goal: a STABLE per-session identity (sessionId is set at
@@ -3420,13 +3490,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       const adviserTitle = `adviser-${goalHash.slice(0, 6)}`;
       const adviserInboxPath = pathJoin(target.root, ".pi", "tmux-sessions", `rg-${adviserTitle}`, "inbox.jsonl");
       const adviserInboxChannel = inboxChannelFor(adviserTitle);
-      const goalTruncated = goalText?.includes("…[truncated") === true;
+      const goalTruncated = goalForReview?.truncated === true;
       return {
         content: [{ type: "text", text:
           `adviser brief ready (${previous ? "incremental" : "full"}):\n` +
           `- 建议 title: "${adviserTitle}" → done channel: ${doneChannelFor(adviserTitle)},inbox: ${adviserInboxPath} (channel ${adviserInboxChannel})（brief 末尾已嵌入 done channel 与 inbox 提问指令）\n` +
           `- 可选:review_watch({ channel: "${adviserInboxChannel}", label: "${adviserTitle}-inbox" }) 注册提问接收端\n` +
-          "- 等待纪律:咨询期间继续做可实现的工作(编辑/测试不依赖 goal 批准——checkpoint 才需要);只有真正阻塞于咨询结果的事才等。\n" +
+          "- 等待纪律:咨询期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于咨询结果的事才等。\n" +
           (goalTruncated ? `- 注意:brief 中的 loop goal 因长度被截断;落盘 task 文件时请用 read 读取 ${pathJoin(target.root, LOOP_GOAL_RELPATH)} 全文替换截断部分。\n` : "") +
           `\n${brief}` }],
         details: { incremental: !!previous, artifactPath, changedFiles, title: adviserTitle, doneChannel: doneChannelFor(adviserTitle), inboxChannel: adviserInboxChannel },
@@ -3490,7 +3560,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n` +
           `- 建议 title: "${auditTitle}" → done channel: ${doneChannelFor(auditTitle)},inbox: ${auditInboxPath} (channel ${auditInboxChannel})（任务文本末尾已嵌入 done channel 与 inbox 提问指令）\n` +
           `- 可选:review_watch({ channel: "${auditInboxChannel}", label: "${auditTitle}-inbox" }) 注册提问接收端\n` +
-          "- 等待纪律:审计期间继续做可实现的工作(编辑/测试不依赖 goal 批准——checkpoint 才需要);只有真正阻塞于审计结果的事才等。\n\n" +
+          "- 等待纪律:审计期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于审计结果的事才等。\n\n" +
           `${taskText}` }],
         details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle, doneChannel: doneChannelFor(auditTitle), inboxChannel: auditInboxChannel },
       };
@@ -4329,6 +4399,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       // already required a PASS bound to this text, so this reads it directly
       // rather than advertising a fallback state that cannot occur.
       const prereviewLine = "goal-auditor 预审: PASS @ " + goalSt.goalPrereview!.at;
+      // Round-17 (user ask): a goal-approval dialog is EXACTLY a 'human
+      // needed' moment — signal the cross-session channel (best-effort) so an
+      // observer session can wake and point the user here.
+      notifyUserAttention();
       showToUser(
         uiCtx,
         GOAL_CONFIRM_TITLE,
@@ -4795,6 +4869,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           "one short line pointing at it (or only the context the parameter did not carry) and " +
           "END the turn.";
 
+      // Round-17 (user ask): a pause is EXACTLY a 'human needed' moment —
+      // signal the cross-session channel (best-effort) so an observer
+      // session can wake and point the user at this pane.
+      notifyUserAttention();
       // Explore/normal have no auto-continuation to pause — the agent can
       // simply ask and end its turn. Informational no-op, never an error.
       if (state.taskMode === "explore" || state.taskMode === "normal") {
@@ -5531,6 +5609,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
 
+    // Round-17 (user ask): while a FRESH judge child is in flight the loop
+    // is waiting on PURPOSE — the done/inbox signal wakes this session, so a
+    // resume nudge would push the agent to "continue" with nothing to do
+    // (measured: repeated noise next to the wait). Skip the injection. The
+    // freshness bound keeps a hung-but-alive pane from suppressing the
+    // breaker forever: once spawnedAt ages past STALL_MOTION_MAX_AGE_SEC
+    // this returns false and the stall path below fires normally.
+    if (judgeChildInMotion()) return;
+
     // L2 circuit breaker: an unmet gate justifies another turn only while
     // something is still MOVING. When the fingerprint, both verdicts, the round
     // count and the unmet list are all unchanged for STALL_REPEAT_LIMIT
@@ -5621,6 +5708,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the registry shut (round-16 Nit); the latch must not survive into
     // the resumed/reloaded session or its wake-ups would never arm.
     watchRegistry.reset();
+    // Round-17 (user ask): listen for cross-session user-attention signals —
+    // a goal-approval dialog or pause_for_question in ANY session running
+    // this extension wakes this one. P0 guard: only in an INTERACTIVE tmux
+    // host — a headless / test / CI process must never spawn a listener
+    // (the registry is idempotent and the handle is unref'd, but a
+    // non-interactive run has nobody to wake).
+    if (tmuxAvailable() && process.stdout.isTTY) {
+      watchRegistry.register(USER_ATTENTION_CHANNEL, "跨会话用户注意");
+    }
     // (Snapshot sessions were retired 2026-08-27: judge roles run as tmux
     // child processes that never load this extension, so no inert-session
     // special-case is needed — there is nothing to make inert.)

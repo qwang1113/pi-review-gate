@@ -48,6 +48,8 @@ test("round-16 P2: the inbox question channel is embedded at the end of the brie
   assert.match(text, /tmux wait-for -S rg-adviser-abc123-inbox/);
   assert.doesNotMatch(text, /wait-for -S <channel>-inbox/);
   const plain = buildAdviserBrief(base);
+  // Round-17: output discipline is part of the brief.
+  assert.match(text, /输出纪律:结论 \+ 要点列表/, "the discipline is pinned in the brief");
   assert.doesNotMatch(plain, /提问通道/);
 });
 });

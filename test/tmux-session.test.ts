@@ -30,6 +30,8 @@ import {
   tmuxAvailable,
   waitForSignal,
   waitForSignalAsync,
+  ownPaneId,
+  ownWindowId,
 } from "../lib/tmux-session.ts";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -81,6 +83,40 @@ test("anyPaneAlive: any live child counts as motion, injected predicate (round-1
   // (so this is safe without a tmux server) yet still yields false.
   assert.equal(anyPaneAlive([], paneAlive), false);
 });
+
+test("ownPaneId/ownWindowId: both resolution paths are pinned in the source (round-17 P1)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const src = readFileSync(join(fileURLToPath(new URL("..", import.meta.url)), "lib", "tmux-session.ts"), "utf8");
+  // Path 1: TMUX_PANE env, validated alive before use.
+  assert.match(src, /process\.env\.TMUX_PANE\?\..*trim\(\)/, "env is the first candidate");
+  assert.match(src, /env && paneAlive\(env\)/, "an env hit must pass the liveness check");
+  // Path 2: process-ancestry match against list-panes -a + ppid walk.
+  assert.match(src, /\["list-panes", "-a", "-F", "#\{pane_pid\} #\{pane_id\}"\]/, "the pid→pane map source");
+  assert.match(src, /execFileSync\("ps", \["-o", "ppid=", "-p", pid\]/, "the ppid walk");
+  // ownWindowId must be anchored on ownPaneId, never a bare display-message.
+  assert.match(src, /function ownWindowId\(\)[^}]*ownPaneId\(\)/, "ownWindowId anchors on ownPaneId");
+  assert.doesNotMatch(src.slice(src.indexOf("function ownWindowId"), src.indexOf("function ownWindowId") + 400), /display-message", "-p", "#\{window_id\}"/, "no bare window_id query");
+  // The untargeted split must carry -t <own> (never the server's active pane).
+  const spawn = src.slice(src.indexOf("export function spawnJudgePane"), src.indexOf("export function spawnJudgePane") + 3500);
+  assert.match(spawn, /"-t", own/, "untargeted splits anchor on our own pane");
+  // P0 (round-17): the async listener must NOT keep the event loop alive —
+  // an unsignalled channel otherwise hangs headless/test/CI processes
+  // (measured: precommit workers stuck with leaked `tmux wait-for` children).
+  const waitAsync = src.slice(src.indexOf("export function waitForSignalAsync"), src.indexOf("export function waitForSignalAsync") + 1200);
+  assert.match(waitAsync, /child\.unref\(\)/, "the listener child must be unref'd");
+  assert.match(waitAsync, /cancel: \(\) => \{[\s\S]*child\?\.kill\(\)/, "cancel must kill the child");
+});
+
+const ownPaneIntegration = test("ownPaneId resolves to a live pane inside tmux", { skip: !tmuxAvailable() }, () => {
+  const own = ownPaneId();
+  assert.ok(own && own.startsWith("%"), "ownPaneId must resolve inside tmux");
+  assert.equal(paneAlive(own), true, "the resolved pane must be alive");
+  const win = ownWindowId();
+  assert.ok(win && win.startsWith("@"), "ownWindowId must resolve to a window id");
+});
+
 
 const integration = test("tmux integration: pane spawn→send→signal→capture→kill", { skip: !tmuxAvailable() }, async () => {
   const work = mkdtempSync(join(tmpdir(), "rg-tmux-test-"));

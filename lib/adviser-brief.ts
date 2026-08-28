@@ -199,6 +199,9 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
     "  the next consultation, which is fail-closed, not silent.",
     "",
     "OUTPUT: your recommendation in prose first, then the JSON line above (copy it into the artifact).",
+    // Round-17 (user ask): output discipline — conclusion + point list only,
+    // detailed argumentation goes into the artifact JSON line.
+    "输出纪律:结论 + 要点列表(每条一句),不写过程叙事;详细论证放 artifact 的 JSON 行。",
     ...(input.doneChannel
       ? [
           "",

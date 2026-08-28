@@ -126,6 +126,15 @@ test("F5 pin: embedded protocol keeps every rule of docs/judge-protocol.md", () 
   assert.ok(JUDGE_COMMON_PROTOCOL.includes("做不到的验证明说"));
 });
 
+test("round-17: output discipline is part of the shared protocol (gate consumes only fence + stream)", () => {
+  assert.match(JUDGE_COMMON_PROTOCOL, /输出纪律/, "the discipline section exists");
+  assert.match(JUDGE_COMMON_PROTOCOL, /verdict JSON fence/, "the fence is the mechanical contract");
+  assert.match(JUDGE_COMMON_PROTOCOL, /findings 流文件/, "the finding stream is the evidence channel");
+  assert.match(JUDGE_COMMON_PROTOCOL, /最多 5 行结论要点/, "prose beyond a 5-line summary is wasted");
+  assert.match(JUDGE_COMMON_PROTOCOL, /fence \+ ≤3 行/, "goal-auditor is capped tighter");
+  assert.match(JUDGE_COMMON_PROTOCOL, /不复述任务/, "no task/process retelling");
+});
+
 test("modelSpecFor: explicit slots[0] wins; auto:true uses the frontmatter default", () => {
   const dir = sandbox();
   try {

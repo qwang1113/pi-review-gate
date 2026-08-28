@@ -61,7 +61,9 @@ judge 角色从 pi-subagents 的 subagent 调用迁移到 tmux 子会话中的�
   `pi.sendMessage(..., { triggerTurn: true, deliverAs: "steer" })`
   主动唤醒主会话——不轮询。
 - **提问**：子会话写 inbox 文件（一行 JSON）后运行
-  `tmux wait-for -S <chan>-inbox`；主会话监听 inbox 通道回复。
+  `tmux wait-for -S <inbox-chan>`；inbox-chan = inboxChannelFor(title)，
+  即 `rg-<title>-inbox`（独立 channel，**不是** done channel 字面加
+  "-inbox" 后缀）；主会话监听 inbox 通道回复。
 - **流式 findings**：追加到 `.pi/review-stream/<round>.jsonl`
   （仅证据，禁止 verdict 形状的行）。
 

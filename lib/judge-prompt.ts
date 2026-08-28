@@ -89,7 +89,17 @@ export const JUDGE_COMMON_PROTOCOL = `## 运行形态（tmux 子会话）
 - 结构清晰：先结论后论证；标注文件路径与行号。
 - 严重度分级：P0 破坏性 / 安全 / 数据问题；P1 应修；P2 值得修；Nit 风格。
 - 遵守 docs/coding-standards.md：你审核的代码、你给出的建议，都以它为准绳
-  （深模块、KISS/DRY/YAGNI、卫语句、命名自解释、不写聪明代码……）。`;
+  （深模块、KISS/DRY/YAGNI、卫语句、命名自解释、不写聪明代码……）。
+
+## 输出纪律（token 预算）
+- 主会话机械消费的只有：verdict JSON fence（record_review / record_goal_prereview
+  只解析 fence）与 findings 流文件（每行 JSON 证据）。fence 之外的 prose 不被
+  消费——写长 prose 是纯 token 浪费。
+- 最终输出格式固定：verdict fence 在最前；其后最多 5 行结论要点（每条一句）；
+  findings 每条 ≤2 行（含 file/line/severity/issue）；notes ≤5 行，只写结论与
+  关键证据。不复述任务、不复述代码、不写客套与过程叙事。详细证据放 findings
+  流（evidence 字段），不要写进 pane 正文。
+- goal-auditor：只输出 fence + ≤3 行要点；adviser：结论 + 要点列表，同样不写过程。`;
 
 /** Judge roles that run as tmux child sessions (not subagents). */
 export const JUDGE_ROLES: readonly string[] = Object.freeze([

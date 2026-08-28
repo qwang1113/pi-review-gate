@@ -55,9 +55,23 @@ test("register: one listener per channel, a re-registration cancels the old hand
   registry.register("rg-x-done", "x");
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0]!.channel, "rg-x-done");
-  registry.register("rg-x-done", "x");
+  // A DIFFERENT label replaces the handle (manual review_watch).
+  registry.register("rg-x-done", "custom");
   assert.equal(f.calls.length, 2);
   assert.equal(f.calls[0]!.cancelled, true, "the replaced handle must be cancelled");
+});
+
+test("P0 round-17: re-registering the SAME channel+label is idempotent (no leaked waiters)", () => {
+  // session_start re-registers the cross-session attention channel on every
+  // session; without idempotency each call spawned another `tmux wait-for`
+  // that never ends — measured: 30 leaked children kept test processes alive
+  // in uv__io_poll and precommit never returned.
+  const f = fakeWait();
+  const registry = createWatchRegistry(f.wait, () => {});
+  for (let i = 0; i < 5; i++) registry.register("rg-user-attention", "跨会话用户注意");
+  assert.equal(f.calls.length, 1, "only the FIRST registration may spawn a waiter");
+  assert.equal(f.calls[0]!.cancelled, false, "the live handle is never cancelled by a no-op re-register");
+  assert.equal(registry.active.size, 1);
 });
 
 test("signal: wakes the session and RE-ARMS for the next round on the same channel", async () => {

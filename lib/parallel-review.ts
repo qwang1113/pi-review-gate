@@ -332,6 +332,10 @@ export function buildReviewPrompt(
     // eslint-disable-next-line max-len
     'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "cwd": "<your real pwd>", "docSync": "UPDATED"|"NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",
+    // Round-17 (user ask): output discipline — the gate consumes ONLY the
+    // verdict fence and the finding stream; prose beyond a 5-line summary is
+    // wasted tokens.
+    "输出纪律:verdict fence 在最前,其后最多 5 行结论要点(每条一句);不复述任务、不复述代码、不写过程叙事;详细证据放 findings 流(evidence 字段),不要写进正文。",
     ...(doneChannel
       ? [
           "",

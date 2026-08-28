@@ -78,6 +78,8 @@ test("round-16 P2: the inbox question channel is embedded at the end of the revi
   // No inbox param → no question-path instruction.
   const plain = buildReviewPrompt("review", [], undefined, undefined, undefined, undefined, undefined, undefined, undefined);
   assert.doesNotMatch(plain, /提问通道/);
+  // Round-17: output discipline is part of the task text.
+  assert.match(prompt, /输出纪律:verdict fence 在最前,其后最多 5 行结论要点/, "the discipline is pinned in the task");
 });
 });
 

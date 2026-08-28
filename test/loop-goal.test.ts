@@ -490,6 +490,8 @@ test("buildGoalAuditTask: round-16 P2 inbox question channel is embedded when pr
   assert.match(task, /tmux wait-for -S rg-goal-audit-abc123-inbox/);
   assert.doesNotMatch(task, /wait-for -S <channel>-inbox/);
   const plain = buildGoalAuditTask("# 目标");
+  // Round-17: output discipline is part of the task text.
+  assert.match(task, /输出纪律:只输出 fence \+ ≤3 行结论要点/, "the discipline is pinned in the task");
   assert.doesNotMatch(plain, /提问通道/);
 });
 });

@@ -43,15 +43,29 @@ export interface WatchRegistry {
 
 export function createWatchRegistry(waiter: WatchWaiter, wake: WatchWake): WatchRegistry {
   const active = new Map<string, WaitHandle>();
+  // P0 (round-17): label per channel for idempotent re-registration.
+  const activeLabels = new Map<string, string>();
   let shuttingDown = false;
 
   function register(channel: string, label: string): void {
     if (shuttingDown) return;
-    active.get(channel)?.cancel();
+    // P0 (round-17): IDEMPOTENT — the same channel with the same label is
+    // never re-spawned (session_start re-registers the attention channel on
+    // every session; without this guard each re-registration cancelled and
+    // re-spawned a tmux wait-for, and N session simulations leaked N
+    // never-ending children that kept test processes alive). A DIFFERENT
+    // label (manual review_watch) still replaces the handle.
+    const existing = active.get(channel);
+    if (existing && activeLabels.get(channel) === label) return;
+    existing?.cancel();
     const handle = waiter(channel);
     active.set(channel, handle);
+    activeLabels.set(channel, label);
     handle.promise.then((signalled) => {
-      if (active.get(channel) === handle) active.delete(channel);
+      if (active.get(channel) === handle) {
+        active.delete(channel);
+        activeLabels.delete(channel);
+      }
       if (!signalled) return;
       try {
         wake(label, channel);
@@ -70,6 +84,7 @@ export function createWatchRegistry(waiter: WatchWaiter, wake: WatchWake): Watch
     shuttingDown = true;
     for (const handle of active.values()) handle.cancel();
     active.clear();
+    activeLabels.clear();
   }
 
   function reset(): void {
