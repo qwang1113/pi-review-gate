@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { tmuxAvailable } from "../lib/tmux-session.ts";
 
 import {
   WORKFLOW_COMMANDS,
@@ -185,35 +188,126 @@ test("the review-loop skill keeps the single-review contract self-contained", ()
   assert.doesNotMatch(skill, /prepare_wave|plan-parallel|wave daily|\/decompose/, "no wave/decompose path remains");
 });
 
-test("the waiting discipline never teaches a `tmux wait-for -t` timeout (there is none)", () => {
-  // Measured 2026-08-28: `tmux wait-for -t 5 <chan>` fails with `unknown flag
-  // -t` in ~7ms, so the polling variant the docs used to recommend was a BUSY
-  // LOOP that only LOOKED like waiting (120 iterations in 0.5s). The flagless
-  // form is the one that blocks (measured 3.015s until the signal).
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  for (const rel of [["skills", "review-loop", "SKILL.md"], ["AGENTS.md"]]) {
-    const text = readFileSync(join(root, ...rel), "utf8");
-    // Round-17 P2 (reviewer): a file-wide "is the warning present somewhere"
-    // check does NOT bite — the reviewer re-added the busy loop as a
-    // RECOMMENDATION and the suite stayed green. Judge each occurrence IN
-    // PLACE: the line carrying `wait-for -t` (or the line before it, since the
-    // docs wrap) must itself mark the form as broken.
-    const lines = text.split("\n");
-    const NEGATIVE = /没有|不是|空转|报错|unknown flag|——就是|错误/;
-    // Round-17 Nit (reviewer): a negative keyword alone is evadable — "无
-    // timeout 命令时用 ..." contains 没有/无 yet still RECOMMENDS the busy loop.
-    // A line that recommends the form is rejected no matter what else it says.
-    const RECOMMENDS = /推荐|建议|请用|改用|备选|可以用|应该用|变体|use this|instead/;
-    lines.forEach((line, i) => {
-      if (!/tmux wait-for -t \d/.test(line)) return;
-      assert.doesNotMatch(line, RECOMMENDS,
-        `${rel.join("/")}:${i + 1} RECOMMENDS \`wait-for -t\` — that flag does not exist (it fails with "unknown flag -t")`);
-      // The LINE ITSELF must mark it broken. Looking at neighbours is too weak:
-      // the surrounding discipline text says 空转/错误 for its own reasons, which
-      // let a freshly added recommendation inherit an innocent-looking context.
-      assert.match(line, NEGATIVE,
-        `${rel.join("/")}:${i + 1} teaches \`wait-for -t\` without marking it broken ON THAT LINE — that flag does not exist`);
+/**
+ * Every `tmux wait-for …` this package SHIPS, judged by tmux itself.
+ *
+ * History (round-17): the docs recommended `while ! tmux wait-for -t 5 <chan>;
+ * do :; done` as a timeout variant. That flag does not exist — each iteration
+ * failed with `unknown flag -t` in ~7ms, so 120 iterations took 0.5s and only
+ * LOOKED like waiting; the flagless form blocks properly (measured 3.015s to a
+ * signal, and 77s/3m32s/2m55s waiting for real verdicts afterwards).
+ *
+ * Three successive keyword pins were each evaded by the reviewer in one line
+ * (file-wide presence → line context → NEGATIVE+RECOMMENDS token pair), because
+ * a token list cannot decide whether a sentence RECOMMENDS something. The
+ * reviewer's verdict on the tool was accepted rather than extended: the fact is
+ * EXECUTABLE, so tmux decides it, and every occurrence must be in a reviewed
+ * snapshot so a new one cannot appear unnoticed.
+ */
+
+/** Files that SHIP instructions (docs, skills, and the judge prompts we generate). */
+function shippedInstructionFiles(root: string): string[] {
+  const out: string[] = ["AGENTS.md", join("skills", "review-loop", "SKILL.md")];
+  for (const dir of ["docs", "lib", "extensions"]) {
+    const abs = join(root, dir);
+    if (!existsSync(abs)) continue;
+    for (const name of readdirSync(abs)) {
+      if (/\.(md|ts)$/.test(name)) out.push(join(dir, name));
+    }
+  }
+  return out;
+}
+
+/** Every `tmux wait-for …` occurrence, with the file and line it sits on. */
+function waitForOccurrences(root: string): Array<{ rel: string; line: number; cmd: string }> {
+  const found: Array<{ rel: string; line: number; cmd: string }> = [];
+  for (const rel of shippedInstructionFiles(root)) {
+    const text = readFileSync(join(root, rel), "utf8");
+    text.split("\n").forEach((line, i) => {
+      for (const m of line.matchAll(/tmux wait-for[^`。\n,;)]*/g)) {
+        found.push({ rel, line: i + 1, cmd: m[0].trim() });
+      }
     });
-    assert.match(text, /tmux wait-for\s+<(doneChannel|chan)>/, `${rel.join("/")} keeps the flagless blocking form`);
+  }
+  return found;
+}
+
+/**
+ * The reviewed snapshot: HOW MANY times each file may name a form tmux
+ * REJECTS, because it is documented there as the broken example. The count
+ * matters — keying on file+command alone let a SECOND occurrence of the same
+ * text reuse the first one's blessing, which is exactly how the reviewer's
+ * next evasion would have slipped through. Any extra occurrence, in any file,
+ * fails the test until a human raises the number deliberately.
+ */
+const DOCUMENTED_COUNTEREXAMPLES = new Map<string, number>([
+  ["AGENTS.md::tmux wait-for -t 5 <chan>", 1],
+  ["skills/review-loop/SKILL.md::tmux wait-for -t 5 <chan>", 1],
+]);
+
+test("tmux itself accepts every wait-for form the docs teach (counterexamples are snapshotted)", { skip: !tmuxAvailable() }, () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const occurrences = waitForOccurrences(root);
+  assert.ok(occurrences.length > 0, "the docs must still teach the wait-for handshake");
+
+  /** How many rejected occurrences of each key we have already blessed. */
+  const seen = new Map<string, number>();
+  // A private socket: this never touches the user's tmux server, and the
+  // syntax check needs a live one (`unknown flag` is reported by the server).
+  const socket = `rg-doctest-${process.pid}`;
+  const tmux = (args: string[]) =>
+    spawnSync("tmux", ["-L", socket, ...args], { encoding: "utf8", timeout: 10_000 });
+  tmux(["new-session", "-d", "-s", "probe", "sh", "-c", "sleep 30"]);
+  try {
+    for (const { rel, line, cmd } of occurrences) {
+      // Replace the doc placeholder with a real channel name, then ask tmux to
+      // parse it. `-S` (signal) never blocks, so it is the safe probe form:
+      // we are judging FLAGS, and flags are parsed before anything blocks.
+      const probe = cmd
+        .replace(/<[^>]*>/g, "rg-doctest-chan")
+        .replace(/^tmux /, "")
+        .split(/\s+/)
+        .filter((t) => t !== "");
+      const signalForm = probe[0] === "wait-for" && !probe.includes("-S")
+        ? [probe[0]!, "-S", ...probe.slice(1)]
+        : probe;
+      const res = tmux(signalForm);
+      const rejected = /unknown flag|unknown option|usage:/i.test(`${res.stderr}${res.stdout}`);
+      const key = `${rel}::${cmd}`;
+      if (rejected) {
+        const budget = DOCUMENTED_COUNTEREXAMPLES.get(key) ?? 0;
+        const used = (seen.get(key) ?? 0) + 1;
+        seen.set(key, used);
+        assert.ok(used <= budget,
+          `${rel}:${line} ships \`${cmd}\`, which tmux REJECTS (${res.stderr.trim()}) — ` +
+          `occurrence ${used} of an allowed ${budget}. Fix the text, or — if it is ` +
+          "deliberately a broken example — raise its count in DOCUMENTED_COUNTEREXAMPLES " +
+          "with a reviewer's blessing.");
+      }
+    }
+  } finally {
+    tmux(["kill-server"]);
+  }
+});
+
+test("the snapshot of broken examples stays honest (no stale entry, no silent growth)", () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  // How often each key actually occurs in the shipped text.
+  const counts = new Map<string, number>();
+  for (const { rel, cmd } of waitForOccurrences(root)) {
+    const key = `${rel}::${cmd}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  for (const [allowed, budget] of DOCUMENTED_COUNTEREXAMPLES) {
+    const actual = counts.get(allowed) ?? 0;
+    assert.ok(actual > 0,
+      `DOCUMENTED_COUNTEREXAMPLES still lists ${allowed}, which no longer appears — drop it`);
+    assert.equal(actual, budget,
+      `${allowed} occurs ${actual}× but is blessed ${budget}× — the snapshot must match the text exactly`);
+  }
+  // The blocking form must survive in the two files that teach the discipline.
+  for (const rel of ["AGENTS.md", join("skills", "review-loop", "SKILL.md")]) {
+    assert.match(readFileSync(join(root, rel), "utf8"), /tmux wait-for\s+<(doneChannel|chan)>/,
+      `${rel} keeps the flagless blocking form`);
   }
 });
