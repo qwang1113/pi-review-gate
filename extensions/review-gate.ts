@@ -405,7 +405,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Re-check every legal stop condition at callback time. The timer is
       // deliberately referenced, but it must never revive a user-paused or
       // user-aborted session, or a task whose child has already been closed.
-      if (state.pausedQuestion || lastRunAborted || !loopArmed || state.bypass.active) return;
+      if (state.taskMode === "explore" || state.taskMode === "normal" || state.pausedQuestion || lastRunAborted || !loopArmed || state.bypass.active) return;
       const hasChildren = [...childSessions.values()].some((list) => list.length > 0);
       if (!hasChildren) return;
       try {
@@ -3237,8 +3237,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       const ok = killPane(paneId);
       for (const [root, list] of childSessions) {
         childSessions.set(root, list.filter((c) => c.paneId !== paneId));
-      cancelChildWaitTimer();
       }
+      cancelChildWaitTimer();
       return {
         content: [{ type: "text", text: ok ? `review-gate: pane ${paneId} closed.` : `review-gate: pane ${paneId} already gone.` }],
         details: { closed: ok },
@@ -5800,7 +5800,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         );
         return;
       }
-      cancelChildWaitTimer();
     }
     // Review-round budget is checked AFTER the child watchdog above. A child
     // may already be dead or silent even when the continuation cap is reached;

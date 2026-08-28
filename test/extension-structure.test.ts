@@ -1367,6 +1367,7 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
   assert.ok(scheduleAt > 0, "the child-wait watchdog must exist");
   const schedule = SRC.slice(scheduleAt, scheduleAt + 1800);
   assert.match(schedule, /state\.pausedQuestion/, "watchdog respects pause_for_question");
+  assert.match(schedule, /state\.taskMode === "explore" \|\| state\.taskMode === "normal"/, "watchdog respects explore/normal mode");
   assert.match(schedule, /lastRunAborted/, "watchdog respects ESC abort");
   assert.match(schedule, /!loopArmed/, "watchdog respects the loop latch");
   assert.match(schedule, /state\.bypass\.active/, "watchdog respects bypass state");
