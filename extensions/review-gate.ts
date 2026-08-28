@@ -3339,7 +3339,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           case "finished": return "session had already exited (exit code on record)";
           case "no-pid": return "session recorded no pid (never started, or already cleaned up)";
           case "not-ours": return `recorded pid ${terminated.pid} is no longer this judge — not signalled`;
-          case "unverifiable": return `pid ${terminated.pid} could not be verified as this judge (no start time recorded) — NOT signalled; the pane close is what ends it`;
+          // TWO causes, and the message must not claim only the first: no start
+          // time was recorded, OR one was but it cannot be queried right now.
+          case "unverifiable": return `pid ${terminated.pid} could not be verified as this judge (its start time was not recorded, or cannot be queried now) — NOT signalled; closing the pane is what ends it`;
           case "unsignalable": return `pid ${terminated.pid} could not be signalled`;
         }
       })();

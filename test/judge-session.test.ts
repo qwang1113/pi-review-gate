@@ -172,7 +172,10 @@ test("terminate: an UNVERIFIABLE identity is never signalled (ps produced no sta
     // Exactly what the launcher writes when `ps` prints nothing.
     writeFileSync(join(dir, "pid"), "30327 ");
     let calls = 0;
-    const res = terminateJudgeSession(paths(dir), () => { calls++; }, () => undefined);
+    // pidAlive is injected too: with no recorded start time the answer is
+    // `unverifiable` either way, and pinning it keeps the test independent of
+    // whether pid 30327 happens to exist on the machine running it.
+    const res = terminateJudgeSession(paths(dir), () => { calls++; }, () => undefined, () => false);
     assert.equal(calls, 0, "an unverifiable pid must never be signalled — this was the fail-open hole");
     assert.equal(res.signalled, false);
     assert.equal(res.reason, "unverifiable");
@@ -408,7 +411,8 @@ test("terminate: an already-finished child is a successful no-op (review_close i
     const res = terminateJudgeSession(
       paths(dir),
       () => { throw new Error("must not be called"); },
-      () => undefined,   // ps: no such process
+      () => undefined,   // ps: cannot answer
+      () => false,       // and nothing holds the pid ⇒ the process really is gone
     );
     assert.equal(res.signalled, false);
     assert.equal(res.reason, "not-ours");
