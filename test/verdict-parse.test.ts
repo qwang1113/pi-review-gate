@@ -316,6 +316,35 @@ test("cwd survives equal-severity aggregation, and contradictions drop it", () =
 });
 
 /**
+ * Round-14 P2 (reviewer-measured): the SAME finding reported in two fences is
+ * one finding. Summing blindly made `isPlateaued` read the output's SHAPE
+ * instead of its content — repeated→single→single looked like the count was
+ * shrinking, so a real plateau went undetected — and repeating the verdict
+ * first and last is a format the reviewer protocol recommends.
+ */
+test("the same finding in two fences counts once", () => {
+  const F = (findings: unknown[]): string =>
+    '```json\n{"gate":"BLOCKED","cwd":"/repo","docSync":"NOT_NEEDED","findings":' +
+    JSON.stringify(findings) + "}\n```";
+  const boom = { file: "a.ts", line: 12, severity: "P1", issue: "boom" };
+  const other = { file: "b.ts", line: 20, severity: "P2", issue: "other" };
+
+  const repeated = parseReviewOutput(`${F([boom])}\n\nprose\n\n${F([boom])}`);
+  assert.equal(repeated.findingsTotal, 1, "one finding, reported twice, is one finding");
+  assert.deepEqual(repeated.findingFingerprints, ["a.ts#1#boom"], "…and one fingerprint");
+
+  // Distinct findings still add up, and a partial overlap counts the union.
+  assert.equal(parseReviewOutput(`${F([boom])}\n${F([other])}`).findingsTotal, 2);
+  assert.equal(parseReviewOutput(`${F([boom])}\n${F([boom, other])}`).findingsTotal, 2);
+
+  // A finding with neither file nor issue produces no fingerprint, so it
+  // cannot be deduplicated — the total must still be the plain sum, never
+  // recomputed from the fingerprint count (which would report 0 findings).
+  const bare = parseReviewOutput(`${F([{ line: 1, severity: "P2" }])}\n${F([{ line: 1, severity: "P2" }])}`);
+  assert.equal(bare.findingsTotal, 2, "unfingerprintable findings are counted, not dropped");
+});
+
+/**
  * Round-13 P1 (reviewer): worse()'s doc said it "aggregates equal-severity
  * fences", which hid a branch that really exists — a LIGHTER fence is folded
  * in too, keeping the worse verdict and accumulating the evidence. The

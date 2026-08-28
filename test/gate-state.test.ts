@@ -521,6 +521,32 @@ test("plateau: same findings 3 rounds, non-decreasing → true", () => {
   assert.ok(isPlateaued(rounds, 3));
 });
 
+/**
+ * Round-14 P2 (reviewer-measured): plateau detection must depend on the
+ * FINDINGS, not on how the reviewer formatted its output. Before
+ * `parseReviewOutput` deduplicated across fences, a round whose reviewer
+ * repeated its verdict fence scored double, and the next honest round looked
+ * like convergence (2 → 1) — so a genuine plateau went undetected. This pins
+ * the parser's contract from the consumer's side.
+ */
+test("plateau: a repeated verdict fence must not read as convergence", () => {
+  const repeatedThenSingle = [
+    round(1, 1, ["a.ts#1#boom"]), // what a deduplicated repeated-fence round yields
+    round(2, 1, ["a.ts#1#boom"]),
+    round(3, 1, ["a.ts#1#boom"]),
+  ];
+  assert.ok(isPlateaued(repeatedThenSingle, 3), "identical rounds are a plateau");
+
+  // The pre-fix shape, kept explicit: an inflated first round makes the same
+  // three rounds look like they are shrinking.
+  const inflated = [
+    round(1, 2, ["a.ts#1#boom", "a.ts#1#boom"]),
+    round(2, 1, ["a.ts#1#boom"]),
+    round(3, 1, ["a.ts#1#boom"]),
+  ];
+  assert.ok(!isPlateaued(inflated, 3), "double counting hides the plateau — hence the dedup");
+});
+
 test("converging (totals decreasing) → not plateaued", () => {
   const rounds = [round(1, 5, ["a#1#x"]), round(2, 3, ["a#1#x"]), round(3, 1, ["a#1#x"])];
   assert.ok(!isPlateaued(rounds, 3));

@@ -71,6 +71,10 @@ function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
   // the result can never return to READY, and the cwd check runs on READY
   // only. A forgotten conflict therefore cannot influence any decision.
   if (bWorse) return b;
+  const mergedFingerprints = [...new Set([...a.findingFingerprints, ...b.findingFingerprints])];
+  const duplicateFindings =
+    a.findingFingerprints.length + b.findingFingerprints.length - mergedFingerprints.length;
+
   const cwdConflict = a.cwdConflict || b.cwdConflict ||
     (a.cwd !== undefined && b.cwd !== undefined && a.cwd !== b.cwd);
   // b is NOT worse (equal, or lighter — this branch covers both, despite what
@@ -85,8 +89,20 @@ function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
   // FAILED — a gate that punishes the format it recommends.
   return {
     verdict: a.verdict,
-    findingsTotal: (a.findingsTotal ?? 0) + (b.findingsTotal ?? 0),
-    findingFingerprints: [...a.findingFingerprints, ...b.findingFingerprints],
+    // The SAME finding reported in two fences is one finding, not two — same
+    // reason the identical repeated verdict must not be read as a
+    // contradiction: repeating the verdict first and last is a format the
+    // reviewer protocol recommends, and counting it twice made
+    // `isPlateaued` a function of the output's SHAPE rather than its content
+    // (measured: repeated→single→single looked like findings shrinking, so a
+    // real plateau went undetected).
+    //
+    // Deduplication is by fingerprint, and the total is reduced by exactly the
+    // number of duplicates removed — never recomputed from the fingerprint
+    // count, because a finding with neither `file` nor `issue` is counted but
+    // produces no fingerprint.
+    findingsTotal: (a.findingsTotal ?? 0) + (b.findingsTotal ?? 0) - duplicateFindings,
+    findingFingerprints: mergedFingerprints,
     hasP0P1: a.hasP0P1 || b.hasP0P1,
     docSync: a.docSync === b.docSync ? a.docSync : undefined,
     // Only a CONTRADICTION destroys the report. A fence that simply omits cwd
