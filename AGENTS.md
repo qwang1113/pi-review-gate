@@ -312,15 +312,23 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 ### 架构规范：新建文件 600 行硬拦，存量只提醒
 
 `review_checkpoint` / precommit 会拦下**本次新增**且超过 600 行的源文件
-（`lib/file-size-gate.ts`）。存量大文件只输出提醒 —— 8659 行的
-`extensions/review-gate.ts` 不是一次写出来的，是几十次「只加 100 行」累积的；
-收尾时硬逼着拆只会拆得更烂。
+（`lib/file-size-gate.ts`）。判定发生在 `review_checkpoint` / precommit 时，
+而不是编辑当下（那时文件还写了一半，硬拦只会逼人盲目重构），且只判源码扩展名
+——Markdown、JSON、锁文件与 fixture 不判长度。存量大文件只输出提醒 ——
+近 9000 行（截至 2026-08-29）的 `extensions/review-gate.ts` 不是一次写出来的，
+是几十次「只加 100 行」累积的；收尾时硬逼着拆只会拆得更烂。
 
 配套的两道人审关卡：`goal-auditor` 在**目标阶段**就否掉会造成架构劣化的方案
 （往超大文件里堆新职责、复制门禁已有的规则、把逻辑埋在无法单测的入口里、
 根本没说新代码落在哪），`reviewer` 把架构/抽象/模块化/语义化写进**代码改动
 审查主清单**，可以直接出 P1。写新功能时先想清楚它落在哪个模块，而不是落在
 「我正好打开的那个文件」。
+
+「落在哪个模块」不该靠猜：`docs/module-map.md` 是这份地图 —— 它写清了
+`extensions/review-gate.ts` 与 `lib/` 各模块的职责分工（含 L1–L8 每层落在哪、
+工具族为什么注册在 `lib/orchestrator-*-tools.ts` 而不是扩展里），以及 `hooks/`
+/ `scripts/` / `agents/` / `test/` 的落点约定。动手前先查它，别先打开编辑器；
+新增或删除 `lib/` 模块时，同一轮改动里顺手同步它那张速查表。
 
 ### Read-only exploration — parallel-safe
 

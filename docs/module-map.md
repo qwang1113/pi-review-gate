@@ -1,0 +1,373 @@
+# 模块地图（module-map）
+
+> 日期：2026-08-29 · 事实基准：本文所有结构性断言都能用文中给出的命令在
+> 仓库里当场复核。数字（文件数、工具数、行数）是**快照**，命令是**判据**——
+> 两者不一致时以命令输出为准。
+
+这份文档只回答一个问题：**「我这段新代码该落在哪个文件？」**
+
+它不是 API 手册（每个模块头部的块注释才是，而且写得比这里详细），也不是
+执行流程说明（那是 `docs/execution-model.md` 与 `docs/judge-protocol.md`）。
+它是一张地图：先告诉你门禁被切成了哪几个职责域、每个域的边界在哪，再给一张
+`lib/` 全量模块的速查表，让你在动手前 30 秒内找到落点。
+
+写新功能时先想清楚它落在哪个模块，而不是落在「我正好打开的那个文件」——
+`extensions/review-gate.ts` 的近 9000 行就是几十次「只加 100 行」累积出来的。
+
+---
+
+## 一、`extensions/review-gate.ts` 是什么
+
+它是**扩展入口**：pi 的生命周期事件在这里接线，绝大多数 gate 工具在这里注册。
+它**不是**「所有关卡与所有工具的唯一入口」——这个误解会直接把新代码引到错误
+的文件里。
+
+### 1.1 它接线的生命周期事件
+
+| 事件 | 门禁在这里做什么 |
+| --- | --- |
+| `session_start` | 恢复 sidecar 状态、判定会话模式、装配常驻指令 |
+| `before_agent_start` | 每轮注入 L4 语言指令、goal 摘要、per-turn 协议提醒 |
+| `tool_call` | L1 ship 拦截、敏感文件拦截、L5 文案判定 |
+| `tool_result` | 追踪本轮编辑、记录 precommit 结果、编辑纪律 nudge、附加提示 |
+| `input` | 用户真的说话了：重置编辑失败 nudge、解除 ESC 暂停 |
+| `agent_end` | ESC 中止检测，喂给 L2 的暂停判定 |
+| `agent_settled` | L2 自动续跑（递归保护、轮次上限、平台期停止） |
+| `turn_end` | 本轮编辑/提交状态对账（哪些改动仍在武装门禁） |
+| `session_shutdown` | 收尾清理（watcher、临时资源） |
+| `session_compact` | 压缩后重新注入门禁状态与 git 记忆 |
+
+核对（这张表的完整判据）：`grep -n 'pi\.on("' extensions/review-gate.ts` —— 当前 10 个。
+
+### 1.2 工具注册分两处（重要）
+
+- **扩展直接注册 21 个** gate 工具：
+  按族看（快照，权威判据是下面的命令）：审查链（`judge_submit`、
+  `review_checkpoint`、`review_spawn`、`review_watch`、`review_send`、
+  `prepare_review`、`record_review`、`run_precommit`）、目标链
+  （`propose_loop_goal`、`prepare_goal_audit`、`record_goal_prereview`）、
+  adviser（`prepare_adviser`）、Copilot（`request_copilot_review`、
+  `check_copilot_review`）、会话与用户（`setup_workspace`、`declare_done`、
+  `ask_user`、`set_gate_mode`、`request_scope_limit`、
+  `request_sensitive_edit`、`request_arbitration`）。
+  核对：`grep -c 'name: "' extensions/review-gate.ts` → 当前 21；
+  逐个看用 `grep -n 'name: "' extensions/review-gate.ts`。
+
+- **13 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+  - `lib/judge-session-tools.ts`：`judge_read` / `judge_close` / `judge_wait`
+    （作用于一个**已存在**的 judge 会话的三个工具）。
+  - `lib/orchestrator-tools.ts`：`orchestrator_plan`、`orchestrator_status`、
+    `orchestrator_notify`。
+  - `lib/orchestrator-read-tools.ts`：`orchestrator_read`、`orchestrator_key`。
+  - `lib/orchestrator-session-tools.ts`：`orchestrator_spawn`、
+    `orchestrator_send`、`orchestrator_wait`、`orchestrator_close`、
+    `orchestrator_relay`。
+  核对：`grep -rln 'name: "[a-z_]*"' lib/*.ts` → 上面四个文件；
+  `grep -rhn 'name: "' lib/*.ts | wc -l` → 13。
+
+这些模块都经同一道 **seam** 接进扩展：`lib/tool-host.ts` 定义那个 host 类型
+（`lib/orchestrator-deps.ts` 只是把它 re-export，因为编排工具是第一批搬出去
+的，但 host 是共享的东西、不属于编排这个领域），每个模块导出一个
+`register<Family>Tools(host, deps)`，扩展只负责把自己拥有的东西（门禁状态、
+仓库根、UI 通道）通过 `deps` 传进去。
+
+这不是特例，是**这个仓库正在走的路**：`lib/judge-session-tools.ts` 的头注释
+直接写明它是 orchestrator 那一批搬迁的续集，理由就是 AGENTS.md 那条架构规范
+——扩展是一次次「就在这儿再加个工具体」堆到近 9000 行的。**新工具族请照抄这
+个形状**：判定逻辑在 `lib/`，工具注册也在 `lib/`，扩展只提供依赖。
+
+### 1.3 命令
+
+- 扩展直接注册 6 个门禁命令：`/gate-status`、`/gate-bypass`、`/gate-mode`、
+  `/gate-reset`、`/gate-lesson`、`/gate-doctor`。
+- 工作流命令（`/review`、`/precommit`、`/precommit-fast`、`/verify`、
+  `/next-step`、`/risk-assess`、`/smart-commit`、`/create-pr`、
+  `/load-pr-review`、`/watch-ci`、`/gate-init`）的**定义与提示词**在
+  `lib/workflow-commands.ts`，扩展只是循环注册它们。
+  → 加一条工作流命令：改 `lib/workflow-commands.ts`，不必碰扩展。
+
+---
+
+## 二、L1–L8：每层落在哪
+
+关卡不是一层一个文件，而是「判定在 `lib/`、接线在扩展、纵深防御在
+`hooks/` 与 `scripts/`」的分工。
+
+| 层 | 是什么 | 接线/执行在哪 | 判定逻辑在哪 |
+| --- | --- | --- | --- |
+| **L1** ship gate（硬拦） | 未过门禁前拦下 `git commit` / `git push` / `gh pr create` / `gh pr edit` | 扩展 `tool_call` | `lib/ship-detect.ts`、`lib/shell-lex.ts`、`lib/constants.ts`、`lib/repo-resolve.ts`、`lib/fingerprint.ts` |
+| **L2** 自动续跑 | 门禁未满足时重新触发一轮 | 扩展 `agent_settled` | `lib/gate-state.ts`（未满足项）、`lib/loop-stall.ts`（断路器） |
+| **L3** git 钩子 | 离开 pi 也有效的纵深防御 | `hooks/pre-commit`、`hooks/pre-push`、`hooks/commit-msg` | `scripts/compute-fingerprint.cjs`、`scripts/check-staged-divergence.cjs`（钩子不依赖 TypeScript） |
+| **L4** 输出语言 | 每轮无条件注入简体中文指令 | 扩展 `before_agent_start` | `lib/constants.ts` 的 `LANGUAGE_DIRECTIVE` |
+| **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | 扩展 `tool_call` + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
+| **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
+| **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账 | 扩展工具 `request_copilot_review` / `check_copilot_review` | `lib/copilot-review.ts` |
+| **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | 扩展工具 `propose_loop_goal` / `record_goal_prereview` | `lib/loop-goal.ts` |
+
+> **落点指引**：加一条新的**判定规则**（什么该拦、什么该放）→ 落在
+> `lib/` 里对应的纯模块，并配一个 `test/*.test.ts`；只有「把判定接到某个
+> 事件上」这一步才改扩展。规则写进工具体里等于没有单测。
+
+---
+
+## 三、职责域
+
+### 域 1：关卡判定与 ship 拦截
+
+`ship-detect.ts` 判断一条命令行里是否含 ship 操作，`shell-lex.ts` 是它的底座
+（引号、续行、here-doc、命令替换——正则做不对这件事，所以有一个真正的词法
+器）。`file-size-gate.ts` 是架构标准里唯一的机械规则（新建源码文件 600 行硬
+拦、存量只提醒）。`polish-gate.ts` 管「连续 READY 还在打磨」的再审理由，
+`loop-stall.ts` 是 L2 的断路器，`git-rewrite.ts` 解开「只改 commit message」
+与 L5 的互锁，`blocked-marker.ts` 在 sidecar 写不进去时 fail-closed，
+`sensitive-grant.ts` 与 `arbitration.ts` 是两个**受限的放行口子**（一次性
+敏感文件授权、独立 arbiter 裁决循环拦截）。`task-mode.ts` 定义模式强弱序
+（normal < explore < loop < orchestrator）与升降级规则，`pi-self.ts` 让
+`/tmp` 草稿会话不自动进 loop，`workspace-branch.ts` 是 `setup_workspace` 与
+`declare_done` 背后的工作区/分支事实。
+
+> **落点**：新的拦截规则 → 新建一个 `lib/<rule>.ts` 纯模块（facts in,
+> decision out）+ 同名单测；只有接线改扩展。新的**放行**口子要格外小心：
+> 现有两个（`sensitive-grant` / `arbitration`）都是 fail-closed 且带限额，
+> 照这个形状写。
+
+### 域 2：语言与文本守卫
+
+`lang-detect.ts` 是 L5 的唯一实现——**一条规则**：任何非拉丁字母即拒；调用
+方只是传不同的 `kind` 来决定措辞。`llm-classify.ts` 是语义第二意见
+（DeepSeek V4 Flash），契约上 **TIGHTEN-ONLY**：只能加拦，永远不能解掉确定性
+检查已经下的拦。`text-appeal.ts` 是启发式拦截的申诉口子，
+`edit-projection.ts` 把 edit/write 的入参投影成改后全文，让标签检查看得到
+上下文。
+
+> **落点**：改英文判定 → 只改 `lang-detect.ts`（改别处会分叉出第二套规则）；
+> 加语义判定 → 走 `llm-classify.ts`，并保住 TIGHTEN-ONLY 不变量。
+
+### 域 3：judge 子进程与审查协议
+
+judge（reviewer / adviser / goal-auditor）是**自己的 pi 进程**：
+`judge-process.ts` 是进程基座（`pi -p --session-id`，确定性会话 id 让同一角色
+跨轮续接同一 transcript），`judge-session.ts` 把「会话」而不是「面板」当作被
+管理实体，`judge-lifecycle.ts` 是 `judge_submit` 背后的纯决策（会话文件放哪、
+何时算完成、审计裁决是否阻塞），`judge-prompt.ts` 装配系统提示（角色定义 +
+共同协议），`judge-watch.ts` / `child-watch.ts` 负责「它退出了就唤醒主会话」
+且不依赖子进程守规矩；`judge-session-tools.ts` 是作用于**已存在**会话的那三个
+工具（`judge_read` / `judge_close` / `judge_wait`）的实现与注册——注意它们不
+在扩展里，见 §1.2。
+
+审查内容侧：`parallel-review.ts` 持有审查契约（一轮一个 reviewer，判不可变的
+`baseline..HEAD`），`review-baseline.ts` 在链被 squash/rebase 后按内容找回基
+线，`review-scope.ts` 决定增量多大就升级成整轮深审，`review-stream.ts` 让
+findings 边审边流出，`verdict-parse.ts` 解析裁决（review 只认 JSON fence，
+precommit 只认 `## Overall:` sentinel），`adviser-brief.ts` 组装 adviser 的
+brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致。
+
+> **落点**：改「judge 怎么被启动/等待/唤醒」→ `judge-*.ts`；改「它被告知
+> 什么、它的产物怎么解析」→ `judge-prompt.ts` / `parallel-review.ts` /
+> `verdict-parse.ts`；改角色的**行为定义** → `agents/<role>.md`，不是代码。
+
+### 域 4：orchestrator 编排层
+
+21 个模块，按「决策 / 执行 / 工具」三层切开：
+
+- **纯决策**：`orchestrator-gate.ts`（14 条硬约束）、
+  `orchestrator-boundaries.ts`（文件边界代数——两个任务能否并行只由它回答）、
+  `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
+  `orchestrator-wait.ts`（「有事发生」对子会话意味着什么）、
+  `orchestrator-registry.ts`（编排只能操作门禁替它创建的东西）、
+  `orchestration-id.ts`（编排的稳定地址，接力换人后子会话无感）。
+- **与真实机器打交道**：`orchestrator-tmux.ts`（所有 tmux 命令的唯一构造
+  处）、`orchestrator-wiring.ts`（跑 tmux、读写 plan、加删 worktree、取
+  attention 事件）、`orchestrator-delivery.ts`（投递任务并**校验真的送达**才
+  报成功）、`orchestrator-pane-read.ts`（读子会话屏幕）、
+  `orchestrator-keys.ts`（按键，封闭键位表）、`orchestrator-notify.ts`
+  （桌面通知，唯一入口 + 节流）、`orchestrator-guard.ts`（tmux backstop：
+  拦手写 tmux）。
+- **工具与接线**：`orchestrator-tools.ts`（plan / status / notify）、
+  `orchestrator-read-tools.ts`（read / key）、
+  `orchestrator-session-tools.ts`（wait / close / relay 的决策 + 五个会话工具
+  的注册）、
+  `orchestrator-dispatch.ts`（spawn / send）、`orchestrator-tool-kit.ts`
+  （每个工具的共用前置：模式、pane 实况、plan 可用性）、
+  `orchestrator-deps.ts`（编排工具要的依赖集合，host 类型在 `tool-host.ts`）、
+  `orchestrator-directives.ts`（项目经理拿全套契约，子会话只拿一句话）。
+
+> **落点**：新的编排**规则** → `orchestrator-gate.ts` 或
+> `orchestrator-boundaries.ts`（能被单测点名的那种）；新的**能力**（读、按
+> 键、投递之类的原子动作）→ 单独一个 `lib/orchestrator-<能力>.ts` + 在对应
+> 的 `*-tools.ts` 里注册。tmux 命令**只**在 `orchestrator-tmux.ts` 里拼。
+
+### 域 5：precommit 与 checkpoint
+
+`precommit-receipt.ts` 是信任边界的纯校验（回执 + spawn 结果 ⇒ 真 PASS/FAIL
+还是协议错误），`precommit-tail.ts` 实时 tail runner 的日志文件（runner 走文
+件不走管道，管道会把它挂死），`progress-stream.ts` 给长耗时工具发实时进度，
+`gate-timings.ts` 把每个门禁事件写成 `.pi/gate-timings.jsonl` 的一行。真正
+**跑**检查的是 `scripts/precommit-runner.mjs`（见第四节）。
+
+> **落点**：加/改一条 precommit 检查 → `scripts/precommit-runner.mjs` 与
+> `scripts/precommit-plan.mjs`（纯规划逻辑，可单测），不在 `lib/`。
+
+### 域 6：持久化与指纹
+
+`gate-state.ts` 是状态机与 sidecar（`.pi/review-gate-state.json`）的读写、
+未满足项计算与并发绑定合并；`fingerprint.ts` 是「代码现在长什么样」的稳定
+哈希（内容寻址、暂存无关），门禁的每个裁决都绑在它上面；`atomic-write.ts`
+是所有状态文件共用的「写临时文件再 rename」；`repo-resolve.ts` 让裁决绑到
+编辑真正发生的那个仓库；`project-config.ts` 解析 `.pi/review-gate.json`；
+`git-memory.ts` 在上下文压缩后重新注入过滤过的 git 快照。
+
+> **落点**：新的状态字段 → `gate-state.ts`（并想清楚它是否该进指纹）；
+> 新的项目级开关 → `project-config.ts`；**任何**状态文件写入都要走
+> `atomic-write.ts`。注意：`lib/fingerprint.ts` 与
+> `scripts/compute-fingerprint.cjs` 是同一算法的两份实现（钩子不能 import
+> TypeScript），改一边必须同步另一边——`test/constants.test.ts` 会比对。
+
+### 域 7：模型配置与诊断
+
+`model-config.ts` 把 `review-gate.json` 的 `agents` 段渲染成 `agents/*.md`
+的 frontmatter（项目层盖全局层），`model-allowlist.ts` 是 provider 级允许名
+单，`model-diagnose.ts` 回答「我的审查实际跑在哪个模型上」，`gate-doctor.ts`
+是 `/gate-doctor` 的只读体检，`ui-widget.ts` 构造 editor 下方那条只读面板。
+
+> **落点**：除 `model-config.ts` 会把配置渲染进 `agents/*.md` 之外，这一域
+> 全是**诊断**：它们永远不产生门禁裁决。想让某个诊断「顺手拦一下」时，请把
+> 它写成域 1 的一条规则，而不是让诊断带上拦截权。
+
+### 域 8：用户交互与提示注入
+
+`ask-user.ts` 是采访模型（逐题推进、上限、跳过与「在聊天里回答」的语义），
+`agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
+`dialog-budget.ts` 管确认对话框的渲染行数预算（宿主不截断，长度得自己管），
+`attention.ts` 是定向唤醒：子会话只唤醒对它负责的那**一个**会话，禁止广播。
+
+> **落点**：想让 agent 改掉某个行为习惯，先问这是不是**提示**能解决的——
+> 是就改 `agent-directives.ts`，不是就写成域 1 的机械规则。系统级通知只有
+> 编排层能发（`orchestrator-notify.ts`），别在 `attention.ts` 里加广播。
+
+### 域 9：通用基础设施
+
+`constants.ts` 是全仓唯一的共享常量（代码/文档扩展名、敏感文件模式、ship 命
+令种类、语言指令、轮次上限）——`test/constants.test.ts` 用结构性测试逼着每个
+消费方 import 它而不是自己再写一份列表。`poll-wait.ts` 是通用等待骨架（探
+测、发布、按判据或预算停），判据由调用方注入：judge 等待与编排等待共用它。
+`workflow-commands.ts` 定义工作流命令及其提示词，含 `--execute` 授权字的严格
+解析。`tool-host.ts` 是每个 `lib/` 工具注册模块共用的 host 类型 seam。
+
+> **落点**：任何「扩展名列表」「敏感路径」类的常量 → `constants.ts`，不要
+> 在本地再声明一份（这是被明文记过的历史事故）。任何新的等待循环 →
+> 复用 `poll-wait.ts` 并只写自己的判据。
+
+---
+
+## 四、`lib/` 之外的目录
+
+| 目录 | 承担什么 | 什么时候往这里加东西 |
+| --- | --- | --- |
+| `hooks/` | L3 纵深防御：`pre-commit`（校验 sidecar 与指纹、跑标签扫描与暂存分叉检查）、`pre-push`（同一套 + full lane 要求）、`commit-msg`（AI 署名 + L5 英文，覆盖编辑器里写的 message） | 新增一条**离开 pi 也必须成立**的检查；bash 写成，不能 import TypeScript |
+| `scripts/` | 跑得起来的执行体：`precommit-runner.mjs`（确定性质量门）、`precommit-plan.mjs`（纯规划，可单测）、`precommit-cache.mjs`（按输入摘要缓存每步）、`precommit-config.mjs`（读 `.pi/review-gate.json` 的 precommit 段）、`compute-fingerprint.cjs`（钩子用的指纹，镜像 `lib/fingerprint.ts`）、`check-staged-divergence.cjs`、`scan-test-labels.cjs`（L6）、`install-git-hooks.sh`、`install-package.mjs` | **新增一条 precommit 检查**（改 runner + plan）；新增钩子要用的、不能依赖 TypeScript 的逻辑（CJS/MJS） |
+| `agents/` | 六个角色定义：`reviewer`、`adviser`、`goal-auditor`、`arbiter`、`fixer`、`recon`。frontmatter 是模型链、thinking、工具集的**单一事实源** | **新增或调整一个 judge 角色**：先改这里的 md，模型链由 `lib/model-config.ts` 渲染/校验 |
+| `test/` | `*.test.ts` + `test/helpers/`（`git.ts`、`fake-orchestration.ts`、`gate-env.ts`——后者在测试载入时清掉继承来的 `RG_*` / `REVIEW_GATE_*` 环境变量，否则父会话的门禁状态会污染被测门禁）。约定是**一个 lib 模块一个同名测试文件**，另有 `extension-structure.test.ts` / `agents-structure.test.ts` 这类结构性测试守住跨文件不变量 | 新建 `lib/foo.ts` 就同时新建 `test/foo.test.ts`；测试若会读门禁状态，先 `neutraliseGateEnv()` |
+| `skills/` | `skills/review-loop`：随包分发给 pi 的技能，描述审查循环怎么跑 | 面向**使用者**的操作指南（而不是门禁自身的判定）放这里 |
+
+---
+
+## 五、`lib/` 全量速查表（77 个模块）
+
+**维护指令（这张表没有机械约束，只有这一条）**：在 `lib/` 下**新增或删除**一个
+模块时，**同一轮改动里**顺手加/删这里的一行——否则这张表会静静地过时。
+随时可核对条目数：`ls lib/*.ts | wc -l`（当前 77，与本表条目一一对应）。
+
+| 模块 | 一句话职责 |
+| --- | --- |
+| `adviser-brief.ts` | 组装 adviser 咨询的 brief：主会话 transcript 指针 + 结论落盘路径，第二次起带上轮结论与其后改动 |
+| `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表 |
+| `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限 |
+| `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义 |
+| `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
+| `attention.ts` | 定向 attention：子会话只唤醒对它负责的那一个会话，禁止广播 |
+| `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交 |
+| `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
+| `constants.ts` | 全仓唯一的共享常量：代码/文档扩展名、敏感文件模式、ship 命令种类、语言指令、轮次上限 |
+| `copilot-review.ts` | L7：PR 之后的 Copilot 审查闭环（请求、等待、逐 thread 消账） |
+| `dialog-budget.ts` | 确认对话框的渲染行数预算——宿主不截断，长度必须自己管 |
+| `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |
+| `edit-projection.ts` | 从 edit/write 入参投影出改后完整文件内容，供标签检查看到上下文 |
+| `file-size-gate.ts` | 新建源码文件 600 行硬拦、存量超阈值只提醒的纯判定 |
+| `fingerprint.ts` | 工作区指纹：内容寻址、暂存无关，门禁裁决与它绑定 |
+| `gate-doctor.ts` | `/gate-doctor` 的只读体检：模型链、provider 允许名单、precommit runner、git 钩子、命令注册表 |
+| `gate-state.ts` | 门禁状态机与 sidecar 读写、未满足项计算、并发绑定合并 |
+| `gate-timings.ts` | `.pi/gate-timings.jsonl` 可观测日志，每个门禁事件一行 |
+| `git-memory.ts` | 上下文压缩后重新注入过滤、截断过的 git 状态快照 |
+| `git-rewrite.ts` | 识别「只改 message」的历史重写，解开 L5 与门禁互锁的死结 |
+| `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：会话文件放哪、何时算完成、审计裁决是否阻塞 |
+| `judge-process.ts` | judge 子进程基座：`pi -p --session-id` 的确定性会话 id 与进程管理 |
+| `judge-prompt.ts` | judge 子会话的系统提示装配：角色定义 + 共同协议 |
+| `judge-session.ts` | 把 judge「会话」当作被管理实体：transcript、run 目录、自述状态文件 |
+| `judge-session-tools.ts` | 作用于**已存在**的 judge 会话的三个工具（`judge_read` / `judge_close` / `judge_wait`）及其注册 |
+| `judge-watch.ts` | judge 完成的唤醒登记，键在进程退出事件上 |
+| `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
+| `llm-classify.ts` | 语义第二意见（DeepSeek V4 Flash），契约上只能加拦（TIGHTEN-ONLY） |
+| `loop-goal.ts` | L8：loop 会话退出契约的文件、审批记录与注入 |
+| `loop-stall.ts` | L2 自动续跑的断路器：外部阻塞（限流、模型不可达）时停止空转 |
+| `model-allowlist.ts` | provider 级模型允许名单，独立模块以便跨引擎存活 |
+| `model-config.ts` | 每个 agent 的模型链配置层：把 `review-gate.json` 的 `agents` 段渲染成 frontmatter |
+| `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |
+| `orchestration-id.ts` | 编排 id：编排的稳定地址（不是 session id），接力换人后子会话无感 |
+| `orchestrator-boundaries.ts` | 文件边界代数：两个任务能否并行的唯一判据 |
+| `orchestrator-delivery.ts` | 任务投递：写任务文件 + argv 启动，并校验真的送达才报成功 |
+| `orchestrator-deps.ts` | 编排工具需要的依赖集合；host 类型本身住在 `tool-host.ts`，这里只 re-export |
+| `orchestrator-directives.ts` | 编排两侧的指令：项目经理拿全套契约，子会话只拿一句话 |
+| `orchestrator-dispatch.ts` | dispatch 半边：`orchestrator_spawn` / `orchestrator_send` |
+| `orchestrator-gate.ts` | 编排的 14 条硬约束，写成纯决策以便逐条单测 |
+| `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
+| `orchestrator-keys.ts` | 在子会话里按键（封闭键位表），让项目经理能选中非默认项 |
+| `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
+| `orchestrator-pane-read.ts` | 读子会话屏幕，含对话框选项与当前高亮项 |
+| `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash |
+| `orchestrator-read-tools.ts` | 注册 `orchestrator_read` / `orchestrator_key` 两个原子工具 |
+| `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西 |
+| `orchestrator-relay.ts` | 自我接力：只有后继者能关掉前任 |
+| `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close / relay），并注册五个会话工具——spawn / send 的实现在 `orchestrator-dispatch.ts` |
+| `orchestrator-tmux.ts` | 所有 tmux 命令的唯一构造处——项目经理永远不手写 tmux |
+| `orchestrator-tool-kit.ts` | 编排工具的共用前置：模式校验、pane 实况、plan 可用性 |
+| `orchestrator-tools.ts` | plan / status / notify 三个不碰 tmux 的工具 |
+| `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据） |
+| `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、加删 worktree、取 attention 事件 |
+| `parallel-review.ts` | 审查契约：一轮一个 reviewer、判不可变的 `baseline..HEAD`，以及交给它的任务文本 |
+| `pi-self.ts` | `/tmp` 草稿会话识别：这类会话不由 agent 自行进入 loop |
+| `polish-gate.ts` | 连续 READY 或同一文件反复打磨时，再审必须给出理由 |
+| `poll-wait.ts` | 通用等待骨架（探测、发布、按判据或预算停），判据由调用方注入 |
+| `precommit-receipt.ts` | precommit 回执的纯校验：真 PASS/FAIL 还是协议错误 |
+| `precommit-tail.ts` | precommit runner 日志的实时 tail（runner 走文件而非管道） |
+| `progress-stream.ts` | 长耗时门禁工具的实时进度输出 |
+| `project-config.ts` | 每项目门禁配置 `.pi/review-gate.json` 的解析与层叠 |
+| `repo-resolve.ts` | 多仓解析：裁决绑定到编辑真正发生的那个仓库 |
+| `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
+| `review-scope.ts` | 增量审查定档：增量多大就升级为整轮深审的阈值 |
+| `review-stream.ts` | findings 流：reviewer 边审边发，主会话边修 |
+| `sensitive-grant.ts` | 敏感文件的一次性用户授权：限定路径、限时、用后即焚 |
+| `session-dir.ts` | pi 的 session-dir 编码约定，fresh-context 角色据此找到主会话 transcript |
+| `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |
+| `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit） |
+| `task-mode.ts` | 会话门禁模式模型：normal < explore < loop < orchestrator 与升降级规则 |
+| `text-appeal.ts` | 启发式文本拦截的申诉口子（A 类） |
+| `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |
+| `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条只读面板） |
+| `verdict-parse.ts` | 裁决解析：review 只认 JSON fence，precommit 只认 `## Overall:` sentinel |
+| `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
+| `workspace-branch.ts` | `setup_workspace` 与 `declare_done` 背后的工作区与分支事实 |
+
+---
+
+## 六、动手前的四个自问
+
+1. **它是判定还是接线？** 判定进 `lib/` 的纯模块（facts in, decision out）
+   并配单测；只有把判定挂到事件上这一步才碰 `extensions/review-gate.ts`。
+2. **它离开 pi 还必须成立吗？** 必须 → `hooks/` + `scripts/`（bash / CJS /
+   MJS，不能 import TypeScript）；不必须 → `lib/`。
+3. **它是新工具族吗？** 是 → 照 `lib/judge-session-tools.ts` 与
+   `lib/orchestrator-*-tools.ts` 的形状：判定与工具注册都在 `lib/`，经
+   `lib/tool-host.ts` 那道 seam 拿依赖，别再往那个近 9000 行的文件里加。
+4. **它有同名测试吗？** 没有就说明它被埋在了测不动的地方——这正是
+   `reviewer` 可以直接开 P1 的情形。
