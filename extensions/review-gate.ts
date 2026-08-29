@@ -93,6 +93,7 @@ import {
 import { createProcessWatchRegistry, rememberChildProcess, forgetChildProcess, waitForProcessExit } from "../lib/judge-watch.ts";
 import {
   judgeWorkDirFor,
+  decideJudgeDispatch,
   judgeRunDirName,
   evaluateJudgeWait,
   clampWaitTimeout,
@@ -2885,7 +2886,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** What one dispatch of a judge round produced (or why it could not). */
   interface JudgeDispatch {
     ok: boolean;
+    /** The role's session already had a transcript — this round continues it. */
     reused: boolean;
+    /** Refused because the role is still working on its previous round. */
+    busy?: boolean;
     sessionId?: string;
     sessionDir?: string;
     runDir?: string;
@@ -2893,6 +2897,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     sysPromptPath?: string;
     error?: string;
   }
+
+  /** Does this role's session dir already hold a transcript to continue? */
+  function hasTranscript(sessionDir: string): boolean {
+    try {
+      return readdirSync(sessionDir).some((f) => f.endsWith(".jsonl"));
+    } catch {
+      return false; // no dir yet ⇒ nothing to continue
+    }
+  }
+
 
   /**
    * Dispatch ONE round to a judge role — the single place a judge process is
@@ -2926,21 +2940,31 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (alive.length !== list.length) childSessions.set(repoRoot, alive);
     }
     const sessionId = judgeSessionIdFor(role, shortRepoHash(root));
-    const existing = (childSessions.get(root) ?? [])
-      .find((c) => c.role === role && c.sessionId === sessionId && !opts.fresh);
-    if (existing) {
-      existing.title = title;
-      existing.spawnedAt = new Date().toISOString();
-      registerWatch(existing.sessionId, title);
+    // STABLE per role+repo (B5) — identity, not a per-round path. Each round's
+    // own artifacts live under `runs/<ts>-<rand>/`.
+    const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root)));
+    const sessionDir = pathJoin(workDir, "sessions");
+    const running = (childSessions.get(root) ?? [])
+      .find((c) => c.role === role && c.sessionId === sessionId && judgeProcessAlive(c.child));
+    // The decision itself is a pure function (lib/judge-lifecycle.ts): a round
+    // is DELIVERED or REFUSED, never silently dropped.
+    const decision = decideJudgeDispatch({
+      aliveSameRole: running !== undefined,
+      fresh: opts.fresh === true,
+      hasTranscript: hasTranscript(sessionDir),
+    });
+    if (decision.action === "refuse-busy") {
       return {
-        ok: true,
-        reused: true,
-        sessionId: existing.sessionId,
-        sessionDir: existing.sessionDir,
-        stdoutPath: existing.stdoutPath,
+        ok: false,
+        reused: decision.continuesSession,
+        sessionId: running?.sessionId ?? sessionId,
+        sessionDir: running?.sessionDir ?? sessionDir,
+        stdoutPath: running?.stdoutPath,
+        busy: true,
+        error: `${role} 仍在处理上一轮任务，本轮未提交。等它结束（完成会唤醒本会话，或用 review_wait 阻塞等待）后重新提交；确实要丢弃它就传 fresh:true。`,
       };
     }
-    if (opts.fresh) {
+    if (decision.action === "kill-and-spawn") {
       const stale = (childSessions.get(root) ?? []).find((c) => c.role === role);
       if (stale) {
         watchRegistry.unregister(stale.sessionId);
@@ -2949,8 +2973,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         childSessions.set(root, (childSessions.get(root) ?? []).filter((c) => c.sessionId !== stale.sessionId));
       }
     }
-    // STABLE per role+repo (B5). Rounds vary under `runs/<ts>-<rand>/`.
-    const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root)));
     try {
       const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
       const files = writeJudgeSpawnFiles({
@@ -2961,7 +2983,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         workDir,
         parentSessionId: state.sessionId ?? undefined,
       });
-      const sessionDir = pathJoin(workDir, "sessions");
+      // "Reused" is a fact about the SESSION, not about the process: the
+      // transcript decided it above, before this round could add to it.
+      const continuesSession = decision.continuesSession;
       const runDir = pathJoin(workDir, "runs", judgeRunDirName(new Date(), randomBytes(3).toString("hex")));
       const stdoutPath = pathJoin(runDir, "stdout.log");
       const stderrPath = pathJoin(runDir, "stderr.log");
@@ -3020,7 +3044,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       registerWatch(sessionId, title);
       return {
         ok: true,
-        reused: false,
+        reused: continuesSession,
         sessionId,
         sessionDir,
         runDir,
@@ -3079,12 +3103,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     description:
       "Submit one round of work to a judge role — the ONE entry point for reviewer / adviser / " +
       "goal-auditor. The gate owns everything procedural: the session id and its directory " +
-      "(derived from role+repo, so the judge's context carries across rounds), reuse vs. spawn vs. " +
-      "kill, the completion listener, and the mechanical recording of the verdict. You pass WHO and " +
-      "WHAT; you never pass a session id, a title, or a directory. Returns once the round is " +
-      "SUBMITTED (run dir + findings stream), not when the judge is done: the verdict arrives " +
-      "through the judge's process exit, which wakes this session as a new turn. Keep working " +
-      "meanwhile; use review_wait only when nothing else is left to do.",
+      "(derived from role+repo, so the judge's context carries across rounds), spawn vs. resume vs. " +
+      "kill, and the completion listener. You pass WHO and WHAT; you never pass a session id, a " +
+      "title or a directory. It returns as soon as the round is SUBMITTED, not when the judge is " +
+      "done — the judge's process exit wakes this session as a new turn, and you then read the " +
+      "verdict with review_read (or review_wait, when nothing else is left to do). A role that is " +
+      "still working REFUSES the round (nothing is silently dropped): wait for it, or pass " +
+      "fresh:true to discard it.",
     parameters: Type.Object({
       role: Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }),
       task: Type.String({
@@ -3094,7 +3119,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         description: "Absolute repo path (required once the session edited several repos)",
       })),
       fresh: Type.Optional(Type.Boolean({
-        description: "Discard this role's running session and start a new one (default: reuse, so its context carries over)",
+        description: "Kill the role's RUNNING process and dispatch this round anyway. Its transcript (and therefore its context) survives — this abandons the round in flight, not the conversation.",
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, _ctx) {
@@ -3124,9 +3149,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       const title = `${role}-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
       const dispatch = dispatchJudgeRound({ root, role, title, task, fresh: params.fresh === true });
       if (!dispatch.ok) {
+        // A busy role is a normal state with a next step, not a malfunction —
+        // the reason text already says what to do, so it stands alone.
+        const lead = dispatch.busy ? "review-gate: " : "review-gate: judge_submit 失败 — ";
         return {
-          content: [{ type: "text", text: `review-gate: judge_submit failed — ${dispatch.error ?? "the judge process could not start"}.` }],
-          details: { submitted: false },
+          content: [{ type: "text", text: `${lead}${dispatch.error ?? "judge 进程未能启动"}` }],
+          details: { submitted: false, busy: dispatch.busy === true },
           isError: true,
         };
       }
@@ -3135,7 +3163,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         `review-gate: ${role} 已受理本轮任务（${dispatch.reused ? "复用同一会话，上下文延续" : "新会话"}）。`,
         `- stdout: ${dispatch.stdoutPath ?? child?.stdoutPath ?? "(pending)"}`,
         `- transcript: ${dispatch.sessionDir ?? child?.sessionDir ?? "(pending)"}`,
-        "- 结论由进程退出触发，门禁机械解析并落库，完成时唤醒本会话；无需等待，先去做别的确定性工作。",
+        "- 进程退出即完成，届时会唤醒本会话；用 review_read({role}) 取结论。现在别等，先做别的确定性工作。",
       ];
       return {
         content: [{ type: "text", text: lines.join("\n") }],
@@ -3290,88 +3318,54 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_send",
     label: "Send to Judge Session",
     description:
-      "Send a message to a judge child's SESSION — implemented as a RESUME: a new pi process is " +
-      "spawned with the same session id, so the child wakes with its full context and processes " +
-      "the message. Requires the child's process to have EXITED (a running child cannot be " +
-      "interrupted mid-turn; use review_close to kill one). Multi-line text is fine — it rides " +
-      "a file passed as an @file reference.",
+      "ADVANCED / internal entry: send a follow-up (typically the answer to a judge's question) to " +
+      "a role's session. It is the same operation as judge_submit — a resume under the same session " +
+      "id, so the judge wakes with its full context — and judge_submit is the normal path. " +
+      "Requires the role's process to have EXITED: a non-interactive judge reads its task once, at " +
+      "spawn, and cannot be interrupted mid-turn.",
     parameters: Type.Object({
-      sessionId: Type.String({ description: "The session id returned by review_spawn" }),
+      role: Type.Optional(Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" })),
+      sessionId: Type.Optional(Type.String({ description: "Internal key; prefer role" })),
       text: Type.String({ description: "The follow-up message (any length; written to a file)" }),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const sessionId = String(params.sessionId ?? "");
+    async execute(_id, params, _signal, _onUpdate, _ctx) {
+      const role = params.role ? String(params.role) : undefined;
+      const wantedId = params.sessionId ? String(params.sessionId) : undefined;
       const text = String(params.text ?? "");
-      if (!sessionId) {
-        return { content: [{ type: "text", text: "review-gate: review_send rejected — the session id is empty." }], details: { sent: false }, isError: true };
+      if (!role && !wantedId) {
+        return { content: [{ type: "text", text: "review-gate: review_send needs a role (reviewer / adviser / goal-auditor)." }], details: { sent: false, sessionId: undefined as string | undefined }, isError: true };
       }
       if (!text.trim()) {
-        return { content: [{ type: "text", text: "review-gate: review_send rejected — the message is empty." }], details: { sent: false }, isError: true };
+        return { content: [{ type: "text", text: "review-gate: review_send rejected — the message is empty." }], details: { sent: false, sessionId: undefined as string | undefined }, isError: true };
       }
       const target = resolveToolRepo(params.repo);
-      if (!target.ok) return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      if (!target.ok) return { content: [{ type: "text", text: target.error }], details: { sent: false, sessionId: undefined as string | undefined }, isError: true };
       const root = target.root;
-      const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+      const child = findJudgeChild(root, role, wantedId);
       if (!child) {
-        return { content: [{ type: "text", text: `review-gate: no registered judge child with session id ${sessionId}.` }], details: { sent: false }, isError: true };
+        return { content: [{ type: "text", text: `review-gate: no judge child on record for ${role ?? wantedId}.` }], details: { sent: false, sessionId: undefined as string | undefined }, isError: true };
       }
-      if (judgeProcessAlive(child.child)) {
+      // A resume IS a dispatch under the same session id — so it goes through
+      // the same owner, which allocates a FRESH run dir. Reusing the previous
+      // round's exit-code/stdout files would make review_wait report "done"
+      // instantly and hand back the PREVIOUS round's verdict.
+      const dispatch = dispatchJudgeRound({ root, role: child.role, title: child.title, task: text });
+      if (!dispatch.ok) {
         return {
-          content: [{ type: "text", text: `review-gate: judge session ${sessionId} is still RUNNING — it cannot be sent a message mid-turn. Wait for its exit (its wake will arrive), or review_close it first.` }],
-          details: { sent: false, running: true },
+          content: [{ type: "text", text: `review-gate: review_send did not deliver — ${dispatch.error ?? "the judge process could not start"}` }],
+          details: { sent: false, sessionId: dispatch.sessionId },
           isError: true,
         };
       }
-      // RESUME: same session id, new message. The child wakes with its
-      // full context and continues.
-      try {
-        const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-        // Same STABLE work dir as the original dispatch (B5): a title-derived
-        // dir here would write this resume's system prompt into a directory
-        // the session never reads.
-        const workDir = pathJoin(root, judgeWorkDirFor(child.role, shortRepoHash(root)));
-        const files = writeJudgeSpawnFiles({ repoRoot: root, role: child.role, agents, title: child.title, workDir });
-        const spawned = spawnJudgeProcess({
-          role: child.role,
-          repoRoot: root,
-          sessionId,
-          sysPromptPath: files.sysPromptPath,
-          model: files.model,
-          sessionDir: child.sessionDir,
-          taskText: text,
-          parentSessionId: state.sessionId ?? undefined,
-          title: child.title,
-        });
-        if (!spawned.ok || !spawned.child) {
-          return { content: [{ type: "text", text: `review-gate: review_send resume failed — ${spawned.error ?? "no child"}` }], details: { sent: false }, isError: true };
-        }
-        // Rebind the child's live process + tee its output to the SAME logs
-        // (one stdout/stderr per session, not per round — resume appends).
-        child.child = spawned.child;
-        child.spawnedAt = new Date().toISOString();
-        try {
-          const outFd = openSync(child.stdoutPath, "a");
-          const errFd = openSync(child.stderrPath, "a");
-          (spawned.child.stdout as NodeJS.ReadableStream | null)?.on("data", (d: Buffer) => writeSync(outFd, d));
-          (spawned.child.stderr as NodeJS.ReadableStream | null)?.on("data", (d: Buffer) => writeSync(errFd, d));
-          spawned.child.on("close", () => { try { closeSync(outFd); closeSync(errFd); } catch { /* best-effort */ } });
-        } catch { /* logs are best-effort */ }
-        try {
-          if (spawned.child.pid) writeFileSync(child.pidPath, `${spawned.child.pid} ${new Date().toString()}\n`, "utf8");
-          spawned.child.on("exit", (code) => {
-            try { writeFileSync(child.exitCodePath, String(code ?? -1), "utf8"); } catch { /* best-effort */ }
-          });
-        } catch { /* best-effort */ }
-        rememberChildProcess(sessionId, spawned.child);
-        registerWatch(sessionId, child.title);
-        return { content: [{ type: "text", text: `review-gate: resumed judge session ${sessionId} with the message (context carried over).` }], details: { sent: true, resumed: true, sessionId }, };
-      } catch (err) {
-        return { content: [{ type: "text", text: `review-gate: review_send failed — ${err instanceof Error ? err.message : String(err)}` }], details: { sent: false }, isError: true };
-      }
+      return {
+        content: [{ type: "text", text: `review-gate: ${child.role} 已收到本轮消息（同一 session 续接，上下文保留）。` }],
+        details: { sent: true, sessionId: dispatch.sessionId },
+      };
     },
+
   });
 
   pi.registerTool({
@@ -3395,7 +3389,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "review-gate: review_read needs a role (reviewer / adviser / goal-auditor)." }], details: { found: false, alive: false, lifecycle: "unknown" as const, exitCode: undefined, hasVerdict: false }, isError: true };
       }
       const target = resolveToolRepo(params.repo);
-      const root = target.ok ? target.root : primaryRepoRoot;
+      // Never guess the repo: with several in play, reading the wrong repo's
+      // judge is a silently wrong answer.
+      if (!target.ok) {
+        return { content: [{ type: "text", text: target.error }], details: { found: false, alive: false, lifecycle: "unknown" as const, exitCode: undefined, hasVerdict: false }, isError: true };
+      }
+      const root = target.root;
       const history = typeof params.history === "number" ? params.history : 200;
       const child = findJudgeChild(root, role, sessionId);
       if (!child) {
@@ -3451,8 +3450,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     description:
       "Terminate a judge role's pi PROCESS (SIGTERM; its transcript stays on disk, so the same role " +
       "can be resumed later) and drop it from the registry. Use it at task completion (before " +
-      "declare_done) or to rebuild a role with a fresh perspective. Idempotent: an already-finished " +
-      "child still closes successfully.",
+      "declare_done) or to stop a round that has gone off the rails. NOT a memory wipe: the next " +
+      "dispatch of this role resumes the same conversation. Idempotent: an already-finished child " +
+      "still closes successfully.",
     parameters: Type.Object({
       role: Type.Optional(Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" })),
       sessionId: Type.Optional(Type.String({ description: "Internal key; prefer role" })),
@@ -3467,7 +3467,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "review-gate: review_close needs a role (reviewer / adviser / goal-auditor)." }], details: { closed: false, terminated: false, sessionId: undefined as string | undefined }, isError: true };
       }
       const target = resolveToolRepo(params.repo);
-      const root = target.ok ? target.root : primaryRepoRoot;
+      // Never guess the repo: closing another repo's judge is destructive.
+      if (!target.ok) {
+        return { content: [{ type: "text", text: target.error }], details: { closed: false, terminated: false, sessionId: undefined as string | undefined }, isError: true };
+      }
+      const root = target.root;
       const child = findJudgeChild(root, role, wantedId);
       if (!child) {
         return { content: [{ type: "text", text: `review-gate: no judge child on record for ${role ?? wantedId} — nothing to close.` }], details: { closed: true, terminated: false, sessionId: undefined as string | undefined }, isError: false };
@@ -3519,7 +3523,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "review-gate: review_wait needs a role (reviewer / adviser / goal-auditor)." }], details: { done: false, reason: undefined as string | undefined, role: undefined as string | undefined, hasVerdict: false }, isError: true };
       }
       const target = resolveToolRepo(params.repo);
-      const root = target.ok ? target.root : primaryRepoRoot;
+      // Never guess the repo: waiting on the wrong repo's judge returns a
+      // verdict that belongs to another change.
+      if (!target.ok) {
+        return { content: [{ type: "text", text: target.error }], details: { done: false, reason: undefined as string | undefined, role: undefined as string | undefined, hasVerdict: false }, isError: true };
+      }
+      const root = target.root;
       const child = findJudgeChild(root, role, wantedId);
       if (!child) {
         return {
@@ -4656,12 +4665,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       const findings = parseFenceFindings(params.auditor_output);
       // ONE adjudication for the record, the reply and the gate (B2): a READY
       // without P0/P1 is a PASS no matter how many P2/Nit findings ride along.
-      // The audit ROUND is the length of this goal's audit history — the gate
-      // counts, so the agent never has to (and cannot miscount).
+      // The audit ROUND counts audits of the GOAL being negotiated now — the
+      // gate counts, so the agent never has to (and cannot miscount). It is
+      // not the length of goalPrereviewHistory: that is append-only across
+      // every goal this repo ever had.
+      goalSt.goalAuditRound = (goalSt.goalAuditRound ?? 0) + 1;
       const adjudication = adjudicateGoalAudit({
         verdict: parsed.verdict,
         findings,
-        round: (goalSt.goalPrereviewHistory?.length ?? 0) + 1,
+        round: goalSt.goalAuditRound,
       });
       const passed = adjudication.pass;
       // Wall-clock duration of THIS audit, when the agent reported when it
@@ -4949,6 +4961,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       goalSt.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString(), ...(reason ? { reason } : {}) };
+      // This goal's negotiation is over, so its audit count ends with it: the
+      // NEXT goal's first audit must announce round 1, not round N+1.
+      delete goalSt.goalAuditRound;
       if (goalRoot === primaryRepoRoot) persist(uiCtx);
       else persistRepo(uiCtx, goalRoot);
       log(`loop goal approved by the user for ${goalRoot} (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
@@ -6269,6 +6284,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
     state.sessionId = sessionId;
+    // A new session negotiates its OWN goal: whatever audit rounds a previous
+    // session spent on its draft do not carry into this one's count.
+    delete state.goalAuditRound;
 
     // Per-project overrides (sd0x-dev-flow R6): maxRounds is clamped to [3,50]
     // by the loader, so a forged config cannot make the cap unreachable.

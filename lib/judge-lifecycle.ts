@@ -52,6 +52,50 @@ function safePathPart(raw: string): string {
   return raw.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "judge";
 }
 
+/** What the gate knows about a role before it dispatches a round to it. */
+export interface JudgeDispatchSituation {
+  /** Is a process of this role still running in this repo? */
+  aliveSameRole: boolean;
+  /** Did the caller ask to discard the incumbent? */
+  fresh: boolean;
+  /** Does the role's session dir already hold a transcript? */
+  hasTranscript: boolean;
+}
+
+export interface JudgeDispatchDecision {
+  /**
+   * `refuse-busy`  the role is mid-round and CANNOT be handed this one;
+   * `kill-and-spawn`  discard the incumbent, then start the round;
+   * `spawn`  start the round (continuing the session when one exists).
+   */
+  action: "refuse-busy" | "kill-and-spawn" | "spawn";
+  /** Will this round continue an existing conversation? */
+  continuesSession: boolean;
+}
+
+/**
+ * Decide what dispatching a round to a role means right now.
+ *
+ * THE RULE THIS ENCODES (round-1 P1): a round is either DELIVERED or REFUSED —
+ * never silently dropped. A non-interactive judge reads its task once, at
+ * spawn, so a running one cannot receive anything; answering "submitted"
+ * there left the agent waiting on a round that was never handed over, and the
+ * previous round's exit then looked like this round's completion.
+ *
+ * Reuse of CONTEXT is a separate question and does not depend on a live
+ * process: it comes from the transcript the session id re-opens.
+ */
+export function decideJudgeDispatch(situation: JudgeDispatchSituation): JudgeDispatchDecision {
+  const continuesSession = situation.hasTranscript;
+  if (situation.aliveSameRole) {
+    return situation.fresh
+      ? { action: "kill-and-spawn", continuesSession }
+      : { action: "refuse-busy", continuesSession };
+  }
+  return { action: "spawn", continuesSession };
+}
+
+
 /** What the extension can observe about a running judge round. */
 export interface JudgeWaitProbe {
   /** Does the recorded process still exist? */

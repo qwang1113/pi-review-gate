@@ -1184,6 +1184,20 @@ test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict
   // and the same call produces the sentence the agent reads.
   assert.match(body, /adjudicateGoalAudit\(\{/, "the extension adjudicates the audit itself");
   assert.match(body, /const passed = adjudication\.pass/, "PASS comes from that single adjudication");
+  // The round counter belongs to THIS goal's negotiation, not to the repo's
+  // append-only audit history (which spans every goal it ever had).
+  assert.match(body, /goalSt\.goalAuditRound = \(goalSt\.goalAuditRound \?\? 0\) \+ 1/,
+    "the gate counts this goal's audits itself");
+  assert.doesNotMatch(body, /round: \(goalSt\.goalPrereviewHistory\?\.length/,
+    "the cumulative history must not be used as the round number");
+  // …and the count ends with the negotiation: an approved goal resets it, so
+  // the next goal's first audit is round 1.
+  const proposeAt = SRC.indexOf('name: "propose_loop_goal"');
+  const propose = SRC.slice(proposeAt, proposeAt + 12000);
+  assert.match(propose, /delete goalSt\.goalAuditRound/, "approval ends this goal's audit count");
+  const sessionStartAt = SRC.indexOf('pi.on("session_start"');
+  const sessionStart = SRC.slice(sessionStartAt, sessionStartAt + 4000);
+  assert.match(sessionStart, /delete state\.goalAuditRound/, "a new session starts its own count");
   assert.match(body, /goalTextHash\(goalText\)/, "the extension must hash the submitted text itself");
   assert.doesNotMatch(body, /params\.(passed|verdict|hash)\b/, "no agent-attested verdict or hash may be read");
   // Fail-closed: an unparseable fence records NOTHING (a wiped record would
@@ -1308,7 +1322,7 @@ test("attention stays DIRECTED and file-based — no tmux signal, no global broa
   const pauseBody = SRC.slice(pauseAt, pauseAt + 8000);
   assert.match(pauseBody, /notifyUserAttention\(\"等待回答提问\"\)/, "a pause signals attention with its reason");
   // Spawn side: the child receives RG_PARENT_SESSION so it knows who to wake.
-  const spawnAt = SRC.indexOf('name: "review_spawn"');
+  const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
   const spawn = SRC.slice(spawnAt, spawnAt + 9000);
   assert.match(spawn, /parentSessionId: state\.sessionId \?\? undefined/, "the child is told who spawned it");
 });
@@ -1414,13 +1428,21 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo, reuse, fresh-k
   assert.match(body, /judgeProcessAlive\(c\.child\)/,
     "the sweep asks the live PROCESS (exitCode), not a pane");
   assert.doesNotMatch(body, /paneAlive|readJudgeSessionState\(\{ pidPath: c\.pidPath/, "no pane-level liveness may come back");
-  // Reuse: same role + same session id + alive process ⇒ no new spawn.
-  assert.match(body, /\.find\(\(c\) => c\.role === role && c\.sessionId === sessionId && !opts\.fresh\)/,
-    "an alive same-role session is reused unless fresh:true");
-  assert.match(body, /registerWatch\(existing\.sessionId, title\)/, "the exit watcher is re-registered for the next round");
+  // A RUNNING same-role judge cannot receive the round (a non-interactive pi
+  // reads its task once, at spawn), so the dispatch is REFUSED rather than
+  // reported as submitted — the failure this prevents is an agent waiting
+  // forever on a round that was never delivered.
+  assert.match(body, /judgeProcessAlive\(c\.child\)\);/, "the busy check asks the live process");
+  assert.match(body, /decideJudgeDispatch\(\{/, "the deliver-or-refuse decision is the pure function's");
+  assert.match(body, /if \(decision\.action === "refuse-busy"\) \{/, "a busy role refuses the round");
+  assert.match(body, /busy: true/, "the refusal is flagged as busy, not as a crash");
+  assert.match(body, /if \(decision\.action === "kill-and-spawn"\) \{/, "fresh:true takes the kill path");
+  // Context reuse is a property of the SESSION: a re-spawn under the same
+  // session id continues the transcript that is already on disk.
+  assert.match(body, /hasTranscript: hasTranscript\(sessionDir\)/,
+    "reuse is decided by the transcript, not by a live process");
   assert.match(body, /spawnJudgeProcess\(\{/, "a real spawn still exists for the no-reuse case");
   // fresh:true kills the old same-role process FIRST (singleton invariant).
-  assert.match(body, /if \(opts\.fresh\) \{/, "fresh has its own branch");
   assert.match(body, /kill\?\.\("SIGTERM"\)/, "fresh kills the old process before spawning");
   assert.match(body, /childSessions\.set\(root, \(childSessions\.get\(root\) \?\? \[\]\)\.filter\(/,
     "the killed process leaves the registry");
@@ -1475,13 +1497,13 @@ test("record_review actually runs the cwd check it demands", () => {
 });
 
 test("user ask 2026-08-28: the judge SESSION is the managed entity, the process is the substrate", () => {
-  // review_spawn must RECORD the session-side paths at spawn time (the
+  // The dispatcher must RECORD the session-side paths at spawn time (the
   // transcript dir, stdout/stderr logs, pid/exit-code for cross-session
   // takeover).
-  const spawnAt = SRC.indexOf('name: "review_spawn"');
+  const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
   const spawn = SRC.slice(spawnAt, spawnAt + 11000);
   for (const field of ["sessionDir", "stdoutPath", "stderrPath", "pidPath", "exitCodePath"]) {
-    assert.ok(spawn.includes(field), `review_spawn must record ${field} at spawn time`);
+    assert.ok(spawn.includes(field), `a dispatched round must record ${field} at spawn time`);
   }
 
   // review_read: live process ⇒ tail of the stdout log; ended ⇒ the

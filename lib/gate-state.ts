@@ -290,6 +290,16 @@ export interface GateState {
    * singular record.
    */
   goalPrereviewHistory?: GoalPrereviewRecord[];
+  /**
+   * Audits of the CURRENT goal (B2), counted by the gate so the agent never
+   * has to. It counts the lineage being negotiated right now — every revision
+   * of one draft — and resets when that negotiation ends (a goal the user
+   * approved) or when a new session starts negotiating. It is deliberately
+   * NOT `goalPrereviewHistory.length`: that history is append-only across
+   * every goal the repo ever had, so it would announce "round 22" on the
+   * third audit of today's draft.
+   */
+  goalAuditRound?: number;
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of
    *  them. Ship enforcement never reads it; absence just narrows the

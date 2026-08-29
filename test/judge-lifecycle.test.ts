@@ -8,6 +8,7 @@ import {
   clampWaitTimeout,
   adjudicateGoalAudit,
   isBlockingSeverity,
+  decideJudgeDispatch,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
   JUDGE_WAIT_DEFAULT_TIMEOUT_MS,
 } from "../lib/judge-lifecycle.ts";
@@ -123,6 +124,43 @@ test("a BLOCKED verdict never passes, however empty its findings", () => {
 test("NEEDS_HUMAN never passes", () => {
   assert.equal(adjudicateGoalAudit({ verdict: "NEEDS_HUMAN", findings: [], round: 1 }).pass, false);
 });
+
+// ---- a round is delivered or refused, never silently dropped ----
+
+test("a running judge REFUSES the round — it cannot receive one mid-turn", () => {
+  const decision = decideJudgeDispatch({ aliveSameRole: true, fresh: false, hasTranscript: true });
+  assert.equal(decision.action, "refuse-busy");
+});
+
+test("fresh:true discards the incumbent and starts the round", () => {
+  const decision = decideJudgeDispatch({ aliveSameRole: true, fresh: true, hasTranscript: true });
+  assert.equal(decision.action, "kill-and-spawn");
+});
+
+test("no live process ⇒ spawn, and an existing transcript means the session continues", () => {
+  assert.deepEqual(
+    decideJudgeDispatch({ aliveSameRole: false, fresh: false, hasTranscript: true }),
+    { action: "spawn", continuesSession: true },
+  );
+  assert.deepEqual(
+    decideJudgeDispatch({ aliveSameRole: false, fresh: false, hasTranscript: false }),
+    { action: "spawn", continuesSession: false },
+  );
+});
+
+test("context reuse never depends on a live process", () => {
+  // The bug this pins: 'reused' used to mean 'a process was still running',
+  // which silently dropped the round it claimed to have accepted.
+  for (const alive of [true, false]) {
+    for (const fresh of [true, false]) {
+      assert.equal(
+        decideJudgeDispatch({ aliveSameRole: alive, fresh, hasTranscript: true }).continuesSession,
+        true,
+      );
+    }
+  }
+});
+
 
 test("the round number is shown and never drops below 1", () => {
   assert.match(adjudicateGoalAudit({ verdict: "READY", findings: [], round: 0 }).message, /第 1 轮审计/);
