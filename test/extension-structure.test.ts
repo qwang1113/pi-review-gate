@@ -1180,7 +1180,10 @@ test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict
   // The verdict is READ, never accepted: no `passed`/`verdict` parameter may
   // exist, or the pre-review becomes an agent self-certification again.
   assert.match(body, /parseReviewOutput\(params\.auditor_output\)/, "the extension must parse the auditor output itself");
-  assert.match(body, /parsed\.verdict === "READY"/, "PASS is exactly a READY verdict");
+  // B2: ONE mechanical adjudication decides PASS — a READY without P0/P1 —
+  // and the same call produces the sentence the agent reads.
+  assert.match(body, /adjudicateGoalAudit\(\{/, "the extension adjudicates the audit itself");
+  assert.match(body, /const passed = adjudication\.pass/, "PASS comes from that single adjudication");
   assert.match(body, /goalTextHash\(goalText\)/, "the extension must hash the submitted text itself");
   assert.doesNotMatch(body, /params\.(passed|verdict|hash)\b/, "no agent-attested verdict or hash may be read");
   // Fail-closed: an unparseable fence records NOTHING (a wiped record would
@@ -1383,30 +1386,69 @@ test("round-18: agent_settled HOSTS the judge-child wait — never returns to id
   assert.ok(injectAt < stallAt, "the injection precedes the breaker block");
 });
 
-test("review_spawn reuses an alive same-role SESSION and drops finished processes", () => {
-  const spawnAt = SRC.indexOf('name: "review_spawn"');
-  assert.ok(spawnAt > 0);
-  const spawn = SRC.slice(spawnAt, spawnAt + 9000);
+test("judge_submit is the agent's single judge entry and hides every process detail", () => {
+  const at = SRC.indexOf('name: "judge_submit"');
+  assert.ok(at > 0, "judge_submit must be registered");
+  const body = SRC.slice(at, SRC.indexOf('name: "review_spawn"', at));
+  // The agent says WHO and WHAT. Anything procedural is the gate's business.
+  assert.match(body, /role: Type\.Enum\(\{ reviewer/, "the role is the addressing key");
+  assert.match(body, /task: Type\.String\(/, "the task text is the other input");
+  assert.doesNotMatch(body, /sessionId: Type\./, "the agent never passes a session id");
+  assert.doesNotMatch(body, /title: Type\./, "the agent never passes a title");
+  assert.match(body, /const title = `\$\{role\}-/, "the gate derives the display title itself");
+  assert.match(body, /dispatchJudgeRound\(\{ root, role, title, task/, "dispatch is delegated to the one spawn owner");
+});
+
+test("dispatchJudgeRound owns identity: stable dir per role+repo, reuse, fresh-kill", () => {
+  const at = SRC.indexOf("function dispatchJudgeRound(");
+  assert.ok(at > 0, "the single dispatch owner must exist");
+  const body = SRC.slice(at, at + 9000);
+  // B5: the work dir is derived from role+repo — NEVER from the round's title,
+  // which gave pi a new --session-dir every round and restarted the session.
+  assert.match(body, /judgeWorkDirFor\(role, shortRepoHash\(root\)\)/,
+    "the work dir is a function of role+repo");
+  assert.doesNotMatch(body, /judge-sessions", `rg-\$\{title\}`/, "no title-derived session dir may come back");
   // Finished children are cleaned from the registry first (never block a spawn).
-  assert.match(spawn, /childSessions\.set\(repoRoot, alive\)/,
+  assert.match(body, /childSessions\.set\(repoRoot, alive\)/,
     "ended children are filtered out of the registry");
-  assert.match(spawn, /judgeProcessAlive\(c\.child\)/,
+  assert.match(body, /judgeProcessAlive\(c\.child\)/,
     "the sweep asks the live PROCESS (exitCode), not a pane");
-  assert.doesNotMatch(spawn, /paneAlive|readJudgeSessionState\(\{ pidPath: c\.pidPath/, "no pane-level liveness may come back");
-  // Reuse: same role + same session id + alive process ⇒ return the existing
-  // child, no new spawn — the SESSION id IS the continuation.
-  assert.match(spawn, /\.find\(\(c\) => c\.role === role && c\.sessionId === sessionId && !params\.fresh\)/,
+  assert.doesNotMatch(body, /paneAlive|readJudgeSessionState\(\{ pidPath: c\.pidPath/, "no pane-level liveness may come back");
+  // Reuse: same role + same session id + alive process ⇒ no new spawn.
+  assert.match(body, /\.find\(\(c\) => c\.role === role && c\.sessionId === sessionId && !opts\.fresh\)/,
     "an alive same-role session is reused unless fresh:true");
-  assert.match(spawn, /reusing existing \$\{role\} child session/, "the reuse path is announced");
-  assert.match(spawn, /registerWatch\(existing\.sessionId, existing\.title\)/, "the exit watcher is re-registered for the next round");
-  assert.match(spawn, /fresh: Type\.Optional\(Type\.Boolean/, "fresh:true is an explicit escape hatch");
-  assert.match(spawn, /spawnJudgeProcess\(\{/, "a real spawn still exists for the no-reuse case");
-  // Spec C: fresh:true kills the old same-role process FIRST (singleton invariant).
-  assert.match(spawn, /if \(params\.fresh\) \{/, "fresh:true has its own branch");
-  assert.match(spawn, /kill\?\.\("SIGTERM"\)/, "fresh:true kills the old process before spawning");
-  assert.match(spawn, /childSessions\.set\(root, \(childSessions\.get\(root\) \?\? \[\]\)\.filter\(/,
+  assert.match(body, /registerWatch\(existing\.sessionId, title\)/, "the exit watcher is re-registered for the next round");
+  assert.match(body, /spawnJudgeProcess\(\{/, "a real spawn still exists for the no-reuse case");
+  // fresh:true kills the old same-role process FIRST (singleton invariant).
+  assert.match(body, /if \(opts\.fresh\) \{/, "fresh has its own branch");
+  assert.match(body, /kill\?\.\("SIGTERM"\)/, "fresh kills the old process before spawning");
+  assert.match(body, /childSessions\.set\(root, \(childSessions\.get\(root\) \?\? \[\]\)\.filter\(/,
     "the killed process leaves the registry");
 });
+
+test("review_read / review_close / review_wait address a judge by ROLE", () => {
+  for (const tool of ["review_read", "review_close", "review_wait"]) {
+    const at = SRC.indexOf(`name: "${tool}"`);
+    assert.ok(at > 0, `${tool} must be registered`);
+    const body = SRC.slice(at, at + 4000);
+    assert.match(body, /role: Type\.Optional\(Type\.Enum\(\{ reviewer/, `${tool} takes a role`);
+    assert.match(body, /findJudgeChild\(root, role, /, `${tool} resolves the child by role`);
+  }
+});
+
+test("review_wait applies the three end-of-round criteria and returns the wait discipline", () => {
+  const at = SRC.indexOf('name: "review_wait"');
+  const body = SRC.slice(at, at + 4000);
+  assert.match(body, /clampWaitTimeout\(params\.timeoutMs\)/, "the blocking window is clamped by the gate");
+  assert.match(body, /probeJudgeRound\(child\)/, "the loop probes with the shared criteria");
+  assert.match(body, /WAIT_DISCIPLINE_HINT/, "the reply carries the wait discipline");
+  const probeAt = SRC.indexOf("function probeJudgeRound(");
+  const probe = SRC.slice(probeAt, probeAt + 1200);
+  assert.match(probe, /evaluateJudgeWait\(\{/, "the criteria live in the pure module");
+  assert.match(probe, /existsSync\(child\.exitCodePath\)/, "the exit-code file is one criterion");
+  assert.match(probe, /child\.stdoutPath/, "the fence criterion reads stdout, where the fence is plain text");
+});
+
 
 /**
  * Round-9 P1 (reviewer, reproduced with `/evil/elsewhere`): the verdict schema
@@ -1638,10 +1680,10 @@ test("review_watch: the wake-up watcher is registered with triggerTurn semantics
   const watchLib = readFileSync(join(ROOT, "lib", "judge-watch.ts"), "utf8");
   assert.match(watchLib, /function register\(sessionId: string, label: string\): void \{/,
     "the watcher registers per session id");
-  const spawnAt = SRC.indexOf('name: "review_spawn"');
-  const spawnBody = SRC.slice(spawnAt, spawnAt + 11000);
-  assert.match(spawnBody, /registerWatch\(child\.sessionId, title\)/,
-    "review_spawn registers the completion watcher automatically");
+  const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
+  const dispatchBody = SRC.slice(dispatchAt, dispatchAt + 9000);
+  assert.match(dispatchBody, /registerWatch\(sessionId, title\)/,
+    "every dispatched round registers the completion watcher automatically");
   // session_shutdown must cancel the watchers.
   const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
   assert.ok(shutdownAt >= 0);
