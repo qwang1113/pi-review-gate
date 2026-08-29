@@ -107,6 +107,34 @@ test("a clean run says nothing about fail-fast", () => {
   assert.doesNotMatch(out, /fail-fast/);
 });
 
+test("a failing lint:fix aborts the whole run — stage 2 never starts", () => {
+  // lint:fix runs ALONE, before everything else. Its failure already decides
+  // the verdict, so spending minutes on stage 2 only confirms it.
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    scripts: { "lint:fix": "exit 1", typecheck: "sleep 20; exit 0", test: "sleep 20; exit 0" },
+  });
+  const started = Date.now();
+  const { code, out } = run(dir, ["--mode", "full"]);
+  const elapsedMs = Date.now() - started;
+  assert.equal(code, 1);
+  assert.match(out, /- ❌ lint/);
+  assert.match(out, /- ⏭️ typecheck \(aborted/);
+  assert.match(out, /- ⏭️ test \(aborted/);
+  assert.ok(elapsedMs < 15000, `stage 2 still ran (${elapsedMs}ms)`);
+});
+
+test("a lone failure says nothing about aborting checks that never existed", () => {
+  // The banner must describe a real event: with no peer to stop, "remaining
+  // checks were aborted" would be a claim about a run that did not happen.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 1" } });
+  const { out } = run(dir, ["--mode", "full"]);
+  assert.match(out, /## Overall: ❌ FAIL/);
+  assert.doesNotMatch(out, /fail-fast/);
+});
+
+
 
 test("lint pass + test fail → FAIL (any failure wins)", () => {
   const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "exit 0", test: "exit 1" } });

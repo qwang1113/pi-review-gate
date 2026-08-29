@@ -373,11 +373,15 @@ test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits
   assert.ok(exploreAt < loopArmedAt, "explore early-return must precede the loopArmed check");
 });
 
-test("pause_for_question: agent-requested loop pause is registered and tighten-only", () => {
-  assert.match(SRC, /name: "pause_for_question"/);
-  // The pause persists (survives a restart while waiting for the user)…
-  const toolStart = SRC.indexOf('name: "pause_for_question"');
+test("ask_user is the ONE way to reach the user, and pause_for_question is gone", () => {
+  assert.match(SRC, /name: "ask_user"/);
+  assert.doesNotMatch(SRC, /name: "pause_for_question"/,
+    "the second asking entry point must not come back");
+  const toolStart = SRC.indexOf('name: "ask_user"');
   const toolBody = SRC.slice(toolStart, SRC.indexOf('name: "request_scope_limit"', toolStart));
+  // Calling it PAUSES when anything is left unanswered, and the pause persists
+  // (it must survive a restart while the user is away).
+  assert.match(toolBody, /const pending = needsUserReply\(answers\)/);
   assert.match(toolBody, /state\.pausedQuestion = \{/);
   assert.match(toolBody, /loopArmed = false/);
   assert.match(toolBody, /persist\(/);
@@ -386,44 +390,29 @@ test("pause_for_question: agent-requested loop pause is registered and tighten-o
   assert.doesNotMatch(SRC, /unmetRequirements\([^)]*pausedQuestion/);
 });
 
-test("pause_for_question: the QUESTION reaches the user, not just the state file", () => {
-  // REGRESSION (the bug this test exists for): the question was written to
+test("ask_user: the QUESTIONS reach the user, and silence is never an answer", () => {
+  // REGRESSION this inherits: a question used to be written to
   // `state.pausedQuestion` and nowhere else, while the tool result told the
-  // agent it had been "delivered to the user verbatim". The agent then wrote
-  // "see the question above" and the user saw a warning with no question in it.
-  const toolStart = SRC.indexOf('name: "pause_for_question"');
+  // agent it had been "delivered to the user verbatim" — the user saw a
+  // warning with no question in it.
+  const toolStart = SRC.indexOf('name: "ask_user"');
   const toolBody = SRC.slice(toolStart, SRC.indexOf('name: "request_scope_limit"', toolStart));
-
-  // The SAME text that is filed into state must be the text the user is shown
-  // — the regression was precisely that only the state copy existed.
-  assert.match(toolBody, /const askUser = \([^)]*\)[^=]*=>\s*showToUser\(ctx, lead, [^;]*question\)/,
-    "the question itself must be handed to showToUser");
-  assert.match(toolBody, /state\.pausedQuestion = \{ question: question\.slice\(/,
-    "the state copy and the shown copy must come from the same `question`");
-  // Every return path must show it BEFORE returning: no branch may file the
-  // pause away and answer the agent without the user ever seeing the question.
-  // (`\s+` matters: the branch returns are indented deeper than the tail one.)
-  const beforeReturns = toolBody.split(/\n\s+return \{/).slice(0, -1);
-  assert.equal(beforeReturns.length, 4,
-    `expected 4 return paths (empty-question reject + 3 ask paths), found ${beforeReturns.length}`);
-  for (const branch of beforeReturns) {
-    assert.ok(/= askUser\(/.test(branch) || /if \(!question\)/.test(branch),
-      "each return path either rejects an empty question or shows it first");
-  }
-
-  // The tool result must report what ACTUALLY happened rather than asserting
-  // delivery unconditionally: a headless session can show nothing.
-  assert.match(toolBody, /const delivered = askUser\(/);
-  assert.match(toolBody, /deliveryNote\(delivered\)/, "the reply text must branch on real delivery");
+  assert.match(toolBody, /showToUser\(uiCtx, "───── AI 有问题要问你 ─────"/,
+    "the questions themselves are shown, not just filed");
+  // The interview: one dialog per question, with its N / M progress.
+  assert.match(toolBody, /progressLabel\(index, questions\.length\)/);
+  assert.match(toolBody, /uiCtx\.ui\?\.select\?\.\(/, "options ⇒ a choice dialog");
+  assert.match(toolBody, /uiCtx\.ui\?\.input\?\.\(/, "no options ⇒ free text");
+  // A dismissed dialog or a broken UI is NOT consent: it becomes an
+  // unanswered question, which pauses the loop.
+  assert.match(toolBody, /picked = undefined; \/\/ a broken dialog is silence, never an answer/);
+  assert.match(toolBody, /kind: "deferred-to-chat"/);
+  // The answers come back in one piece, unanswered ones marked.
+  assert.match(toolBody, /formatAnswers\(answers\)/);
   assert.doesNotMatch(toolBody, /ALREADY been delivered to the user verbatim/,
     "never claim delivery that did not happen");
-
-  // Every return path (loop, explore/normal, already-paused) shows the
-  // question — a mode difference must not silently swallow it.
-  const showCalls = [...toolBody.matchAll(/= askUser\(/g)].length;
-  assert.equal(showCalls, 3,
-    `all three return paths (explore/normal, already-paused, loop) must show it (found ${showCalls})`);
 });
+
 
 test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an extra turn", () => {
   // pi.sendMessage inside a tool is queued, not rendered: with
@@ -474,19 +463,17 @@ test("PAUSE ORDER: pausedQuestion early-return precedes the RESUME injection in 
   assert.match(beforeInject, /if \(state\.pausedQuestion\) return;/);
 });
 
-test("RESUME text: the unmet-gates branch also tells a waiting agent to pause_for_question", () => {
-  // An agent that ASKED a grill/decision question but did not (yet) call
-  // pause_for_question has no pausedQuestion set, so the auto-continuation
-  // fires. The unmet-gates resume text must then REMIND it to pause instead
-  // of blindly continuing to work — otherwise the follow-up steers the agent
-  // away from the question it is already waiting on (live regression: agent
-  // asked "决策 3 of 3", RESUME said only "Continue: fix → re-review …").
+test("RESUME text: the unmet-gates branch points a waiting agent at ask_user", () => {
+  // An agent that needs the user but has not asked yet gets the
+  // auto-continuation. The resume text must name the tool that asks AND
+  // pauses, or the follow-up just steers it back into working blind (live
+  // regression: agent asked "决策 3 of 3" in prose, RESUME said only
+  // "Continue: fix → re-review …").
   const start = SRC.indexOf('pi.on("agent_settled"');
   const end = SRC.indexOf("// ---------- lifecycle ----------", start);
   const body = SRC.slice(start, end);
-  // The main branch (problems > 0) must mention pause_for_question.
-  assert.match(body, /problems\.length > 0[\s\S]{0,800}?pause_for_question/s,
-    "unmet-gates resume must advise pause_for_question when the agent waits on the user");
+  assert.match(body, /problems\.length > 0[\s\S]{0,800}?ask_user/s,
+    "unmet-gates resume must point at ask_user when the agent needs the user");
 });
 
 test("pause resume: any non-extension input clears the pause (interactive AND rpc users)", () => {
@@ -1317,8 +1304,8 @@ test("attention stays DIRECTED and file-based — no tmux signal, no global broa
   const dialogAt = goalBody.indexOf("confirmBounded(");
   const signalAt = goalBody.indexOf("notifyUserAttention(\"等待 goal 批准\"");
   assert.ok(signalAt > 0 && signalAt < dialogAt, "the approval dialog signals attention before rendering");
-  // pause_for_question: signalled when the pause is recorded, with its own reason.
-  const pauseAt = SRC.indexOf('name: "pause_for_question"');
+  // ask_user: signalled when the interview starts, with its own reason.
+  const pauseAt = SRC.indexOf('name: "ask_user"');
   const pauseBody = SRC.slice(pauseAt, pauseAt + 8000);
   assert.match(pauseBody, /notifyUserAttention\(\"等待回答提问\"\)/, "a pause signals attention with its reason");
   // Spawn side: the child receives RG_PARENT_SESSION so it knows who to wake.

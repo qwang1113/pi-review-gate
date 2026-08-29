@@ -101,6 +101,17 @@ import {
   WAIT_DISCIPLINE_HINT,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
 } from "../lib/judge-lifecycle.ts";
+import {
+  normalizeQuestions,
+  progressLabel,
+  buildChoiceList,
+  interpretChoice,
+  formatAnswers,
+  formatTranscriptSummary,
+  needsUserReply,
+  MAX_QUESTIONS,
+  type AskAnswer,
+} from "../lib/ask-user.ts";
 import { parentSessionId, publishAttention } from "../lib/attention.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
 import {
@@ -2618,7 +2629,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
         loopArmed = true;
         // The agent resumed working on its own — a standing question pause
-        // (pause_for_question) is moot; clear it so the loop enforces again.
+        // (ask_user) is moot; clear it so the loop enforces again.
         if (state.pausedQuestion) delete state.pausedQuestion;
         dirty = true;
         clearBypassToken(); // any edit invalidates a standing arbiter bypass
@@ -4028,7 +4039,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
 
-      // The agent is running the loop again — a standing pause_for_question
+      // The agent is running the loop again — a standing ask_user
       // pause is moot (liveness: a stale pause would silently swallow the
       // next auto-continuation after a BLOCKED verdict).
       // P-multi: the verdict binds to ONE repo — `repo` when given, else the
@@ -5301,114 +5312,130 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- pause_for_question tool (agent-requested loop pause) ----------
+  // ---------- ask_user tool (the ONE way to reach the user) ----------
 
   pi.registerTool({
-    name: "pause_for_question",
-    label: "Pause For Question",
+    name: "ask_user",
+    label: "Ask The User",
     description:
-      "Pause the review-gate auto-continuation loop because you hit a GENUINE blocker only the " +
-      "user can resolve (ambiguous requirement, a product/design decision between valid options, " +
-      "missing credentials or access). Waiting on the user's answer to a question you already " +
-      "asked — e.g. the grill questions while negotiating the loop goal — is such a blocker: " +
-      "call this instead of re-asking. The extension shows the `question` parameter to the user " +
-      "IN FULL, as a notification in the transcript, so do NOT repeat it " +
-      "in your reply — write one short line pointing at it (\"see the question above\") or add only " +
-      "the context the parameter does not carry, then END the turn. If the tool result says the " +
-      "question could NOT be shown, write it out in your reply instead. The pause " +
-      "clears automatically on the user's next message. The " +
-      "ship gate is NOT affected — git commit/push and gh pr stay blocked while gates are unmet. " +
-      "Do NOT use this to ask permission to continue routine loop work, to skip a review round, " +
-      "or to end the task — those remain prohibited.",
+      "Ask the user something — the ONE entry point for every moment that needs a human: " +
+      "requirement ambiguity, a product/design decision, scope trade-offs, how to handle a " +
+      "conflict, the goal interview. CALLING IT PAUSES: the loop stops until the user has " +
+      "answered, so ask instead of guessing, and never write a question into your reply and end " +
+      "the turn (that costs a whole iteration and the user may not even read it as a question). " +
+      "The gate runs the interview: one question at a time with its N / M progress, choices when " +
+      "you give options, free text otherwise, plus 'answer in chat' and 'skip the rest' for the " +
+      "user. Every answer comes back at once, unanswered ones marked. Write questions that stand " +
+      "on their own, with the options AND your recommendation. When later questions depend on the " +
+      "answer to an earlier one (pick an architecture, then its details), call ask_user AGAIN for " +
+      "the follow-up round instead of guessing the branch.",
     parameters: Type.Object({
-      question: Type.String({
-        description:
-          "The COMPLETE question the user must answer, including the options and your recommendation. " +
-          "It is rendered to the user verbatim, so it must stand on its own — your reply should not restate it.",
-      }),
+      questions: Type.Array(
+        Type.Object({
+          text: Type.String({ description: "The complete question, with the context the user needs to decide" }),
+          options: Type.Optional(Type.Array(Type.String(), {
+            description: "The choices, when this is a pick rather than free text",
+          })),
+          recommended: Type.Optional(Type.String({
+            description: "Your own recommendation (one of `options` when you give options)",
+          })),
+        }),
+        { description: `1-${MAX_QUESTIONS} questions, asked in order` },
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const question = params.question.trim();
-      if (!question) {
+      const questions = normalizeQuestions(params.questions);
+      if (!questions.length) {
         return {
-          content: [{ type: "text", text: "review-gate: pause rejected — provide the actual question the user must answer." }],
-          details: {},
+          content: [{ type: "text", text: "review-gate: ask_user rejected — no question in the list. Write the actual question (options + your recommendation) and call again." }],
+          details: { asked: 0, answered: 0, pending: false },
           isError: true,
         };
       }
-      // THE POINT OF THIS TOOL IS THAT THE USER SEES THE QUESTION.
-      //
-      // REGRESSION THIS FIXES: the question used to be stored in
-      // `state.pausedQuestion` and nowhere else, while the tool result told the
-      // agent it had been "delivered to the user verbatim". The agent duly
-      // wrote "see the question above" — and the user saw a bare warning with no
-      // question in it. Every channel that claims delivery must actually
-      // deliver, and the result text below reports what really happened.
-      const banner = "───── AI 需要你回答 ─────\n";
-      const askUser = (lead: string): boolean => showToUser(ctx, lead, banner + question);
-      // Honesty extends to the edges: a question past the notice cap is shown
-      // CLIPPED, so the agent is told to carry the rest itself rather than
-      // being assured the user saw everything. The banner is part of what
-      // showToUser measures, so it is part of what decides "clipped".
-      const clipped = banner.length + question.length > USER_NOTICE_MAX_CHARS;
-      const deliveryNote = (delivered: boolean) => !delivered
-        ? "WARNING: the question could NOT be shown (no interactive UI). Write " +
-          "the COMPLETE question out in your reply instead, then END the turn."
-        : clipped
-        ? `WARNING: the question exceeded the ${USER_NOTICE_MAX_CHARS}-character notice cap and was ` +
-          "shown CLIPPED. Put whatever was cut off in your reply, keep future questions shorter, " +
-          "then END the turn."
-        : "Your question was shown to the user in full, so do NOT repeat it in your reply. Write " +
-          "one short line pointing at it (or only the context the parameter did not carry) and " +
-          "END the turn.";
-
-      // Round-17 (user ask): a pause is EXACTLY a 'human needed' moment —
-      // signal the cross-session channel (best-effort) so an observer
-      // session can wake and point the user at this pane.
+      const uiCtx = ctx as unknown as {
+        ui?: {
+          select?: (title: string, options: string[]) => Promise<string | undefined>;
+          input?: (title: string, placeholder?: string) => Promise<string | undefined>;
+          notify?: (message: string, type?: "info" | "warning" | "error") => void;
+        };
+      };
+      // The user must SEE the questions even when no dialog can be rendered
+      // (headless), and the transcript is where the Q&A stays readable after
+      // the dialogs close.
+      showToUser(uiCtx, "───── AI 有问题要问你 ─────", questions.map((q, i) =>
+        `${progressLabel(i, questions.length)} ${q.text}` +
+        (q.options?.length ? `\n   选项：${q.options.join(" / ")}` : "") +
+        (q.recommended ? `\n   推荐：${q.recommended}` : "")).join("\n"));
       notifyUserAttention("等待回答提问");
-      // Explore/normal have no auto-continuation to pause — the agent can
-      // simply ask and end its turn. Informational no-op, never an error.
-      if (state.taskMode === "explore" || state.taskMode === "normal") {
-        const delivered = askUser(`review-gate: AI 有一个问题在等你回答（${state.taskMode} 模式，本来就没有自动循环）。`);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: no enforced loop in "${state.taskMode}" mode — auto-continuation is already off. ${deliveryNote(delivered)}`,
-          }],
-          details: { mode: state.taskMode, delivered },
-        };
+
+      const answers: AskAnswer[] = [];
+      let skipRest = false;
+      for (const [index, q] of questions.entries()) {
+        if (skipRest) {
+          answers.push({ question: q.text, kind: "skipped" });
+          continue;
+        }
+        const title = `问题 ${progressLabel(index, questions.length)}`;
+        const choices = buildChoiceList(q);
+        let picked: string | undefined;
+        try {
+          picked = choices.length
+            ? await uiCtx.ui?.select?.(`${title}\n${q.text}`, choices)
+            : await uiCtx.ui?.input?.(`${title}\n${q.text}`, q.recommended ?? "");
+        } catch {
+          picked = undefined; // a broken dialog is silence, never an answer
+        }
+        // Free text has no choice list, so a non-empty string IS the answer;
+        // the choice vocabulary only applies to select dialogs.
+        const meaning = choices.length
+          ? interpretChoice(picked, q)
+          : picked === undefined || picked.trim() === ""
+            ? { kind: "dismissed" as const }
+            : { kind: "answered" as const, answer: picked.trim() };
+        if (meaning.kind === "skip-rest") {
+          skipRest = true;
+          answers.push({ question: q.text, kind: "skipped" });
+          continue;
+        }
+        if (meaning.kind === "answered") {
+          answers.push({ question: q.text, kind: "answered", answer: meaning.answer });
+          continue;
+        }
+        // Deferred or dismissed both mean "not answered here" — the user
+        // answers in chat, so the loop must wait for that message.
+        answers.push({ question: q.text, kind: "deferred-to-chat" });
       }
-      if (state.pausedQuestion) {
-        const delivered = askUser("review-gate: AI 又提了一个问题（循环已处于暂停中）。");
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: the loop is ALREADY paused for an earlier question, so this call did not " +
-              `change the pause state. ${deliveryNote(delivered)}`,
-          }],
-          details: { alreadyPaused: true, delivered },
+
+      // The interview is gate state: the record survives the dialogs, and an
+      // interrupted one stays inspectable.
+      state.askUser = { at: new Date().toISOString(), answers };
+      const pending = needsUserReply(answers);
+      if (pending) {
+        // Anything unanswered ⇒ the loop stops and waits for the user's next
+        // message — the same pause the loop has always honoured.
+        state.pausedQuestion = {
+          question: answers.filter((a) => a.kind !== "answered").map((a) => a.question).join("\n").slice(0, 2000),
+          at: new Date().toISOString(),
         };
+        loopArmed = false;
+      } else {
+        delete state.pausedQuestion;
       }
-      // Loop (or undecided → behaves as loop): record the pause. Persisted so
-      // it survives a restart while waiting; the ship gate ignores it entirely
-      // (unmetRequirements never reads pausedQuestion — tighten-only).
-      state.pausedQuestion = { question: question.slice(0, 2000), at: new Date().toISOString() };
-      loopArmed = false;
       persist(ctx as unknown as ExtensionContext);
-      const delivered = askUser("review-gate: AI 申请暂停循环等待你的回答 — 你的下一条消息会自动恢复循环（ship 命令仍被拦截）。");
+      showToUser(uiCtx, "───── 采访结束 ─────", formatTranscriptSummary(answers));
       return {
         content: [{
           type: "text",
-          text:
-            "review-gate: loop PAUSED — auto-continuation is off until the user's next message. " +
-            `${deliveryNote(delivered)} Do not keep working. ` +
-            "Ship commands stay blocked while gates are unmet. The pause clears automatically when the " +
-            "user replies (or on your next code/doc edit).",
+          text: `review-gate: ask_user 采访完成（${formatTranscriptSummary(answers)}）。\n${formatAnswers(answers)}\n` +
+            (pending
+              ? "有问题没在对话框里答完 — 循环已暂停，等用户的下一条消息；不要替他决定。"
+              : "全部已答 — 按答案继续。"),
         }],
-        details: { paused: true, delivered },
+        details: { asked: questions.length, answered: answers.filter((a) => a.kind === "answered").length, pending },
       };
     },
   });
+
 
   // ---------- request_scope_limit tool (user-consented gate fence narrowing) ----------
 
@@ -5704,7 +5731,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (event.source !== "extension") lastRunAborted = false;
     // A real user message (interactive TUI or an RPC driver — never
     // "extension", which is how the gate injects its own [REVIEW_GATE_RESUME]
-    // follow-ups) answers a standing pause_for_question pause: clear it and
+    // follow-ups) answers a standing ask_user pause: clear it and
     // re-arm auto-continuation so the loop enforces again from this turn on.
     if (state.pausedQuestion && event.source !== "extension") {
       delete state.pausedQuestion;
@@ -6045,7 +6072,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // explore/normal-mode edits set loopArmed = true in tool_result, and only
     // this early return keeps the continuation loop off.
     if (state.taskMode === "explore" || state.taskMode === "normal") return;
-    // Paused for a user question (pause_for_question): defense-in-depth —
+    // Paused for a user question (ask_user): defense-in-depth —
     // loopArmed is in-memory and resets on restart, but the persisted pause
     // must keep auto-continuation off until the user actually replies.
     if (state.pausedQuestion) return;
@@ -6073,8 +6100,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     // Goal-only continuation: the ONLY remaining item is the unapproved loop
     // goal. If the agent already grilled the user and is waiting for the
-    // answer, it must pause_for_question instead of re-asking — the resume
-    // text below says so explicitly.
+    // answer, ask_user already paused the loop — the resume text below
+    // points at it instead of re-asking.
     const goalOnly =
       problems.length === 0 &&
       completion.length === 1 &&
@@ -6088,7 +6115,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Injecting a continuation would override an explicit human stop, so the
     // loop pauses instead; the user's next message resumes it (input handler
     // clears the flag). Tighten-only — ship commands stay blocked while gates
-    // are unmet, exactly like pause_for_question.
+    // are unmet, exactly like an ask_user pause.
     if (lastRunAborted) {
       try {
         ctx.ui.notify(
@@ -6218,28 +6245,19 @@ export default function reviewGate(pi: ExtensionAPI) {
         [...problems, ...completion].map((p) => `- ${p}`).join("\n") +
         (problems.length > 0
           ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
-            "Continue: fix → re-review → record_review → precommit → declare_done. " +
-            "If you already asked the user a question and are waiting on their answer " +
-            "(grill questions while negotiating the loop goal, a product/design decision, " +
-            "missing access) — call pause_for_question with the COMPLETE question and END the " +
-            "turn instead of re-asking or working on. The user's next message resumes the loop. " +
-            "Do not summarize; execute."
+            "Continue: fix → judge_submit({role:\"reviewer\"}) → declare_done. " +
+            "Need the user (ambiguity, a design decision, missing access)? Call ask_user — it asks " +
+            "them and pauses the loop until they answer. Do not summarize; execute."
           : `\n(completion continuation ${completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
             (goalOnly
-              ? "The only open item is the unapproved loop goal. If you already asked the user a " +
-                "question, call pause_for_question and END the turn — do not re-ask; the user's " +
-                "next message resumes the loop. Otherwise interview the user now, ONE question per " +
-                "turn labeled \"N of M\" (each with your recommended answer; all at once only when " +
-                "the user asks for it), draft it in Simplified Chinese, get it through the " +
-                "`goal-auditor` audit (record_goal_prereview), then call propose_loop_goal for " +
-                "approval. " +
-                "Do not summarize; execute."
+              ? "The only open item is the unapproved loop goal. Interview the user with ask_user " +
+                "(the gate runs the interview and pauses for their answers), draft the goal in " +
+                "Simplified Chinese, get it through the `goal-auditor` audit, then call " +
+                "propose_loop_goal for approval. Do not summarize; execute."
               : "Continue: work these off — Copilot threads get a fix + resolve or a reply explaining " +
-                "why not (check_copilot_review verifies), an unapproved goal gets negotiated, " +
-                "drafted in Simplified Chinese, audited by `goal-auditor` (record_goal_prereview) and " +
-                "only then submitted via propose_loop_goal. If you already asked the user a question and are " +
-                "waiting on their answer (e.g. grill questions), call pause_for_question and END the " +
-                "turn instead of re-asking. Do not summarize; execute.")) +
+                "why not (check_copilot_review verifies), an unapproved goal gets negotiated with " +
+                "ask_user, drafted in Simplified Chinese, audited by `goal-auditor` and only then " +
+                "submitted via propose_loop_goal. Do not summarize; execute.")) +
         (!sessionEdited && !state.scopeLimit
           ? "\nIf these unmet gates target PRE-EXISTING changes this session never made, you may call request_scope_limit — the USER decides whether session-only coverage suffices."
           : "") +
@@ -6440,7 +6458,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       pi.sendMessage({
         customType: "review-gate-resume",
         content:
-          "[REVIEW_GATE_PAUSED] Context compacted. The review loop is PAUSED (pause_for_question), " +
+          "[REVIEW_GATE_PAUSED] Context compacted. The review loop is PAUSED (ask_user), " +
           `awaiting the user's answer to: "${state.pausedQuestion.question.slice(0, 500)}"\n` +
           "Do not resume the loop on your own — wait for the user's reply (it clears the pause automatically). " +
           "Ship commands remain blocked while gates are unmet.",
@@ -6950,12 +6968,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         "is done without re-reviewing; asking for permission to continue the loop; citing " +
         "context length or token budget as a reason to skip review; outputting a polished " +
         "completion-style summary. Brief status lines are fine; execute the next step.\n" +
-        "EXCEPTION — genuine blockers: if progress is stopped by a question only the user can " +
-        "answer (ambiguous requirement, a product decision, missing access), call " +
-        "pause_for_question — put the COMPLETE question (options + your recommendation) in the " +
-        "`question` parameter, then end the turn with a one-line pointer instead of repeating it. " +
-        "Auto-continuation pauses until the user replies; ship commands stay blocked. Never " +
-        "use it to ask permission to continue routine loop work.\n" +
+        "Anything that needs the user — an ambiguous requirement, a product decision, scope, " +
+        "missing access — goes through `ask_user`: it asks them (options + your recommendation) " +
+        "and pauses the loop until they answer. Never write the question into your reply and end " +
+        "the turn; that costs an iteration and may not read as a question at all. Ship commands " +
+        "stay blocked either way, and asking permission to continue routine loop work is not a " +
+        "use for it.\n" +
         (state.pausedQuestion
           ? `Loop currently PAUSED awaiting the user's answer to: "${state.pausedQuestion.question.slice(0, 200)}". ` +
             "If the user has replied, continue the loop; otherwise end the turn after asking.\n"

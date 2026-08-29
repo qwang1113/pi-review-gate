@@ -231,6 +231,42 @@ test("pausedQuestion: malformed shapes fail toward NOT paused (loop stays armed)
   }
 });
 
+test("goalAuditRound: a corrupt counter is dropped, so the count restarts at 1", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of ["3", -1, Number.NaN, Number.POSITIVE_INFINITY, null, {}]) {
+    writeFileSync(path, JSON.stringify({ ...base, goalAuditRound: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.goalAuditRound, undefined, JSON.stringify(bad));
+  }
+  writeFileSync(path, JSON.stringify({ ...base, goalAuditRound: 3 }));
+  assert.equal(loadSidecar(path)?.goalAuditRound, 3, "a real count survives");
+});
+
+test("askUser: a malformed interview record is dropped whole", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of [
+    "string",
+    { answers: [] }, // no timestamp
+    { at: "t" }, // no answers
+    { at: "t", answers: [{ question: 42, kind: "answered" }] },
+    { at: "t", answers: [{ question: "q", kind: "made-up" }] },
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, askUser: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.askUser, undefined, JSON.stringify(bad));
+  }
+  const good = { at: "2026-08-29T00:00:00.000Z", answers: [{ question: "q", kind: "answered", answer: "a" }] };
+  writeFileSync(path, JSON.stringify({ ...base, askUser: good }));
+  assert.deepEqual(loadSidecar(path)?.askUser, good, "a real record survives");
+});
+
+
 /**
  * Round-15 P1 (reviewer-measured): a persisted `findingsTotal` reaches
  * `isPlateaued`, which guards only against `null` and then compares

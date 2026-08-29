@@ -1056,9 +1056,29 @@ if (fix) {
 }
 
 // ---- stage 2: everything else, in parallel, keyed on the post-fix tree ----
+//
+// Fail-fast reaches ACROSS the stages: a failing fix step already decided the
+// verdict, and stage 2 would just spend minutes confirming it. Its steps are
+// reported as aborted — the same word the killed parallel peers get, because
+// it is the same fact: they never ran.
+const fixFailed = steps.some((s) => s.name === fix?.name && s.status === "fail");
 const toRun = [];
 for (const s of runnable) {
   if (s === fix) continue;
+  if (fixFailed) {
+    abortedSteps.add(s.idx);
+    present(s.idx, [`\n⏭ ${s.name} — aborted (${failFastBy ?? fix?.name} failed)`], {
+      name: s.name,
+      command: s.command,
+      status: "skip",
+      reason: `aborted — ${failFastBy ?? fix?.name} failed (fail-fast)`,
+      durationMs: 0,
+      cached: false,
+      cacheScope: s.cacheScope,
+      tail: "",
+    });
+    continue;
+  }
   const hit = lookupHit(s);
   if (hit) cachedStep(s.name, s.command, s.idx, hit, s.cacheScope);
   else toRun.push(s);
@@ -1075,9 +1095,11 @@ saveCache(repoRoot, cache);
 // `anyFail` is derived from the (declaration-ordered) steps, not from return
 // values: parallel steps cannot report back through the old boolean channel.
 // Say it out loud when the run stopped early: a reader who sees three checks
-// and four steps must not have to guess which ones never finished.
-if (failFastBy) {
-  stream(`\n⏹ fail-fast: ${failFastBy} failed — remaining checks were aborted, not run.`);
+// and four steps must not have to guess which ones never finished. Only when
+// something was ACTUALLY aborted — a failure with no peer left to stop is
+// just a failure, and claiming otherwise describes a run that did not happen.
+if (failFastBy && abortedSteps.size > 0) {
+  stream(`\n⏹ fail-fast: ${failFastBy} failed — ${abortedSteps.size} remaining check(s) aborted, not run.`);
 }
 
 const anyFail = steps.some((s) => s.status === "fail");
@@ -1135,8 +1157,8 @@ if (asJson) {
   console.log("");
   // The run stopped at the first failure: say which check ended it, so the
   // aborted steps above read as "never ran", not as "passed".
-  if (failFastBy) {
-    console.log(`⏹ fail-fast: ${failFastBy} failed — remaining checks were aborted, not run.`);
+  if (failFastBy && abortedSteps.size > 0) {
+    console.log(`⏹ fail-fast: ${failFastBy} failed — ${abortedSteps.size} remaining check(s) aborted, not run.`);
     console.log("");
   }
   // testScope skipped means the fast lane dropped the test step entirely: a

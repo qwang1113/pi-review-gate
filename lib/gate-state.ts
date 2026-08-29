@@ -205,8 +205,8 @@ export interface GateState {
    */
   strategicResetFired?: boolean;
   /**
-   * Agent-requested loop pause (pause_for_question tool): the agent hit a
-   * genuine blocker only the user can resolve, so L2 auto-continuation is
+   * The loop pause an `ask_user` interview leaves behind: something the user
+   * has not answered yet, so L2 auto-continuation is
    * paused until the user's next interactive message. This NEVER affects the
    * ship gate — unmetRequirements() ignores it entirely; a paused loop still
    * blocks git commit/push and gh pr. Persisted so the pause survives a
@@ -215,6 +215,16 @@ export interface GateState {
   pausedQuestion?: {
     question: string;
     at: string;
+  };
+  /**
+   * The last `ask_user` interview: what was asked and what came back, kept so
+   * the Q&A survives the dialogs that carried it (they leave no transcript of
+   * their own) and an interrupted interview stays inspectable. Diagnostic
+   * only — no enforcement path reads it.
+   */
+  askUser?: {
+    at: string;
+    answers: { question: string; kind: "answered" | "skipped" | "deferred-to-chat"; answer?: string }[];
   };
   /**
    * USER-GRANTED review-scope limit (request_scope_limit tool): the user
@@ -524,6 +534,25 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
       } else {
         parsed.goalPrereviewHistory = parsed.goalPrereviewHistory.filter(isGoalPrereviewRecord);
       }
+    }
+    // The goal's audit round is a plain counter; anything else on disk is
+    // corruption, and dropping it restarts the count rather than printing
+    // "第 NaN 轮审计".
+    if (parsed.goalAuditRound !== undefined &&
+      (typeof parsed.goalAuditRound !== "number" || !Number.isFinite(parsed.goalAuditRound) || parsed.goalAuditRound < 0)) {
+      delete parsed.goalAuditRound;
+    }
+    // The ask_user record is diagnostic, so a malformed one is dropped whole:
+    // no enforcement path reads it, and half a record answers nothing.
+    if (parsed.askUser !== undefined) {
+      const rec = parsed.askUser as { at?: unknown; answers?: unknown };
+      const ok = !!rec && typeof rec === "object" && typeof rec.at === "string" &&
+        Array.isArray(rec.answers) &&
+        rec.answers.every((a) =>
+          typeof a === "object" && a !== null &&
+          typeof (a as { question?: unknown }).question === "string" &&
+          ["answered", "skipped", "deferred-to-chat"].includes(String((a as { kind?: unknown }).kind)));
+      if (!ok) delete parsed.askUser;
     }
     const migrated = migrateFingerprintVersion(parsed);
     if (out) out.migrated = migrated;
