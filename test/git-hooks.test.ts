@@ -6,11 +6,17 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 import { createRequire } from "node:module";
 
 // 100 fixture git calls live in this file (and the hooks under test shell out
 // to git themselves), so neutralise the host config once for the process.
 neutraliseHostGitConfig();
+// The hooks under test read the gate's OWN variables (RG_STATE_VARIANT picks
+// which sidecar file counts). Inside a gate session — an orchestrator child
+// has one — those would travel into every fixture and make the hook look for
+// a sidecar the fixture never wrote, i.e. allow everything.
+neutraliseGateEnv();
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PRE_COMMIT = join(ROOT, "hooks", "pre-commit");
