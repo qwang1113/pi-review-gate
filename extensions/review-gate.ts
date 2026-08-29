@@ -396,6 +396,44 @@ async function commitsAheadOfBase(cwd: string): Promise<number> {
 }
 
 export default function reviewGate(pi: ExtensionAPI) {
+  /**
+   * Every tool's own `execute`, captured as it is registered.
+   *
+   * `judge_submit` runs the submission chain (precommit → checkpoint →
+   * prepare → dispatch) by CALLING those tools, not by re-implementing them:
+   * one implementation, one set of mechanical checks, no second copy to drift.
+   * The tools stay registered as advanced entries.
+   */
+  type ToolExecute = (
+    id: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    onUpdate: unknown,
+    ctx: unknown,
+  ) => Promise<{ content?: { type: string; text: string }[]; details?: Record<string, unknown>; isError?: boolean }>;
+  const toolExecutes = new Map<string, ToolExecute>();
+  // Intercepted ONCE, here, rather than at 24 registration sites: every tool
+  // this extension registers is captured on its way through, so the chain can
+  // never call a stale copy of one.
+  const registerToolUpstream = pi.registerTool.bind(pi) as (spec: unknown) => unknown;
+  (pi as { registerTool: (spec: unknown) => unknown }).registerTool = (spec: unknown) => {
+    const s = spec as { name?: string; execute?: unknown };
+    if (typeof s?.name === "string" && typeof s?.execute === "function") {
+      toolExecutes.set(s.name, s.execute as ToolExecute);
+    }
+    return registerToolUpstream(spec);
+  };
+  /** Call another gate tool internally; a missing tool is a programming error. */
+  async function callTool(name: string, params: Record<string, unknown>, ctx: unknown) {
+    const run = toolExecutes.get(name);
+    if (!run) throw new Error(`review-gate: internal tool ${name} is not registered`);
+    return run(`internal-${name}`, params, undefined, undefined, ctx);
+  }
+  /** The text a tool result carries (its content joined). */
+  function toolText(result: { content?: { type: string; text: string }[] }): string {
+    return (result.content ?? []).map((c) => c.text).join("\n");
+  }
+
   let state: GateState = emptyState(null, DEFAULT_MAX_ROUNDS);
   let cwd = process.cwd();
   let continuationsInjected = 0; // total auto-continuation injections (persisted)
@@ -904,8 +942,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   const watchRegistry = createProcessWatchRegistry(
     (child) => waitForProcessExit(child),
     (label, sessionId) => {
-      const content = `[review-gate] 子会话 ${label} 完成（session ${sessionId}）— 读取其输出并继续。`;
-      pi.sendMessage({ customType: "review-gate", content, display: true }, { triggerTurn: true, deliverAs: "steer" });
+      // The judge finished: the gate reads its verdict and records it BEFORE
+      // waking the session, so the agent never has to carry the output from
+      // one tool to another (and cannot mis-carry it).
+      void recordJudgeConclusion(sessionId).then((recorded) => {
+        const content = `[review-gate] 子会话 ${label} 完成（session ${sessionId}）。` +
+          (recorded ? `\n${recorded}` : " 用 review_read({role}) 读它的输出并继续。");
+        pi.sendMessage({ customType: "review-gate", content, display: true }, { triggerTurn: true, deliverAs: "steer" });
+      });
     },
   );
   /**
@@ -1034,9 +1078,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       logBranchOp(st, { op: "checkout", from: work, to: base, at: new Date().toISOString() });
       execFileSync("git", ["merge", "--no-ff", work, "-m", `merge ${work} into ${base}`], { cwd: primaryRepoRoot, encoding: "utf8" });
       delete st.mergeConflict;
+      // Back to the work branch: leaving the session standing on the base
+      // would make its NEXT checkpoint illegal (a commit may only land on the
+      // work branch), for no reason the agent could see.
+      try {
+        execFileSync("git", ["checkout", work], { cwd: primaryRepoRoot, encoding: "utf8" });
+        logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
+      } catch { /* the merge landed; where we stand is diagnostics */ }
       persist(ctx);
       return { ok: true, text: `merged ${work} into ${base}` };
-    } catch {
+    } catch (err) {
       // Conflicted (or the merge failed for another reason): leave NOTHING
       // half-applied. Abort, go back to the work branch, and report.
       let files: string[] = [];
@@ -1048,14 +1099,24 @@ export default function reviewGate(pi: ExtensionAPI) {
         execFileSync("git", ["checkout", work], { cwd: primaryRepoRoot, encoding: "utf8" });
         logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
       } catch { /* best-effort: the branch may already be checked out */ }
-      st.mergeConflict = { branch: work, base, files, at: new Date().toISOString() };
+      // A merge can fail for reasons that are NOT a conflict (a missing ref, a
+      // hook refusing the merge commit). Reporting those as "conflict" sends
+      // the agent looking for conflict markers that do not exist.
+      const conflicted = files.length > 0;
+      if (conflicted) {
+        st.mergeConflict = { branch: work, base, files, at: new Date().toISOString() };
+      }
       persist(ctx);
       return {
         ok: false,
-        text: `review-gate: declare_done 被拒 — ${work} 合并回 ${base} 有冲突，合并已中止（工作区回到 ${work}，无残留）。\n` +
-          (files.length ? `冲突文件：\n${files.map((f) => `  ${f}`).join("\n")}\n` : "") +
-          `处理方式：把 ${base} 合进 ${work} 并解决冲突后重新 declare_done；` +
-          "或用 ask_user 让用户决定「本次不合并」（理由会记进 gate state）。",
+        text: conflicted
+          ? `review-gate: declare_done 被拒 — ${work} 合并回 ${base} 有冲突，合并已中止（工作区回到 ${work}，无残留）。\n` +
+            `冲突文件：\n${files.map((f) => `  ${f}`).join("\n")}\n` +
+            `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
+            "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
+          : `review-gate: declare_done 被拒 — 合并 ${work} → ${base} 失败（不是冲突：没有未解决路径），已中止并回到 ${work}。` +
+            `\n${(err instanceof Error ? err.message : String(err)).split("\n")[0]}` +
+            "\n先手动确认两条分支的状态，再重试。",
       };
     }
   }
@@ -2922,20 +2983,19 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const root = target.root;
-      // A checkpoint IS a commit, so it obeys the same branch rule as one:
-      // this session's work lands on this session's branch, or nowhere.
-      // (Exempt only when the gate never took over the branches — a session
-      // that predates setup_workspace has no work branch to check against,
-      // and the bash-level commit gate already refuses those.)
-      if (state.workBranch) {
-        const where = commitBranchAllowed({ workBranch: state.workBranch, currentBranch: currentBranch(root) });
-        if (!where.allowed) {
-          return {
-            content: [{ type: "text", text: `review-gate: review_checkpoint rejected — ${where.reason}` }],
-            details: { committed: false },
-            isError: true,
-          };
-        }
+      // A checkpoint IS a commit, so it obeys the same branch rule — and
+      // FAIL-CLOSED, like every other commit: no work branch on record means
+      // no commit, or a session with no branch of its own would quietly
+      // checkpoint onto whatever it started on (main included). The branch is
+      // compared against the TARGET repo's own record, not the primary's.
+      const checkpointState = root === primaryRepoRoot ? state : stateForRepo(root);
+      const where = commitBranchAllowed({ workBranch: checkpointState.workBranch, currentBranch: currentBranch(root) });
+      if (!where.allowed) {
+        return {
+          content: [{ type: "text", text: `review-gate: review_checkpoint rejected — ${where.reason}` }],
+          details: { committed: false },
+          isError: true,
+        };
       }
       const message = String(params.message ?? "").trim();
       if (message.length === 0) {
@@ -3082,6 +3142,78 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   // ---------- review_spawn / review_send / review_read / review_close ----------
+
+  /**
+   * Everything that has to happen BEFORE a reviewer can judge, run by the gate.
+   *
+   * The agent used to do this by hand — run_precommit, review_checkpoint,
+   * prepare_review, review_spawn — four calls in a fixed order, each with its
+   * own failure mode, none of them creative work. Now it says what it changed
+   * and the gate does the rest, or sends the round back with the reason.
+   *
+   * Each step is the TOOL's own implementation (`callTool`), never a copy:
+   * the mechanical checks (precommit receipt, English message, checkpoint
+   * marker, baseline..HEAD) all still run exactly once, where they live.
+   */
+  async function submitForReview(input: {
+    root: string;
+    note: string;
+    message?: string;
+    ctx: unknown;
+  }): Promise<{ ok: true; taskText: string } | { ok: false; text: string }> {
+    // 1. It has to build. A full lane, because a checkpoint that only ran the
+    //    related tests cannot clear the ship gate later anyway.
+    const pre = await callTool("run_precommit", { mode: "full", repo: input.root }, input.ctx);
+    if (pre.details?.verdict !== "PASS") {
+      return {
+        ok: false,
+        text: "review-gate: 本轮未送审 — precommit 没过。\n" + toolText(pre) +
+          "\n修好后重新 judge_submit({role:\"reviewer\"})；无需手动再跑 precommit。",
+      };
+    }
+    // 2. Freeze it. The reviewed unit is a commit, and the message says so —
+    //    a checkpoint must be recognizable as one in the history.
+    const message = checkpointMessage(input.message ?? input.note);
+    const commit = await callTool("review_checkpoint", { message, repo: input.root }, input.ctx);
+    if (commit.details?.committed === false || commit.isError) {
+      return {
+        ok: false,
+        text: "review-gate: 本轮未送审 — checkpoint 提交被拒。\n" + toolText(commit),
+      };
+    }
+    // 3. Compute the range and the findings stream, and take the ready-made
+    //    reviewer task text.
+    const prepared = await callTool("prepare_review", { repo: input.root }, input.ctx);
+    if (prepared.details?.prepared === false || prepared.isError) {
+      return {
+        ok: false,
+        text: "review-gate: 本轮未送审 — prepare_review 被拒。\n" + toolText(prepared),
+      };
+    }
+    const preparedText = toolText(prepared);
+    const taskText = preparedText.slice(preparedText.indexOf("--- task text ---") + "--- task text ---".length).trim()
+      || preparedText;
+    return {
+      ok: true,
+      taskText: `本轮改动说明（来自主会话）：\n${input.note}\n\n${taskText}`,
+    };
+  }
+
+  /**
+   * The checkpoint's commit message.
+   *
+   * A checkpoint must be identifiable AS a checkpoint in the history (user
+   * requirement): the marker is the gate's to add, not the agent's to
+   * remember. An agent-written subject keeps its own wording behind it.
+   */
+  function checkpointMessage(raw: string): string {
+    const lines = raw.trim().split("\n");
+    const subject = (lines[0] ?? "").trim().slice(0, 100) || "record this round for review";
+    const body = lines.slice(1).join("\n").trim();
+    const marked = /^checkpoint\b|^chore\(checkpoint\)/i.test(subject) ? subject : `checkpoint: ${subject}`;
+    return body ? `${marked}\n\n${body}` : marked;
+  }
+
 
   /** What one dispatch of a judge round produced (or why it could not). */
   interface JudgeDispatch {
@@ -3256,6 +3388,40 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * Read a finished judge's conclusion and RECORD it — the gate's job, not
+   * the agent's.
+   *
+   * The agent used to copy the reviewer's output into record_review by hand:
+   * a transcription step with nothing creative in it, which could silently
+   * carry the wrong round's text. The recording tools keep every mechanical
+   * check they had (fence parsing, no-prepare refusal, STALE detection, cwd
+   * match, tree binding) — this only removes the copying.
+   *
+   * Returns the recorded summary, or undefined when there was nothing to
+   * record (no fence yet, an adviser, an unknown child) — the caller then
+   * simply tells the agent to read the child.
+   */
+  async function recordJudgeConclusion(sessionId: string): Promise<string | undefined> {
+    try {
+      const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+      if (!child || child.role === "adviser") return undefined; // an adviser's conclusion is advice, not a verdict
+      const conclusion = readJudgeConclusion(child.sessionDir);
+      if (!conclusion?.hasVerdict || !conclusion.text) return undefined;
+      if (child.role === "reviewer") {
+        // No live tool ctx here (this runs from a process-exit callback), so
+        // the last one the session bound is what persists the record.
+        if (!lastUiCtx) return undefined;
+        const result = await callTool("record_review", { reviewer_output: conclusion.text }, lastUiCtx);
+        return toolText(result);
+      }
+      return undefined; // goal-auditor: the draft it judged is the agent's to submit
+    } catch {
+      return undefined; // recording is best-effort; the wake still happens
+    }
+  }
+
+
   /** The judge child of one role in one repo, if the registry still holds it. */
   function judgeChildByRole(root: string, role: string): JudgeChild | undefined {
     return (childSessions.get(root) ?? []).find((c) => c.role === role);
@@ -3313,8 +3479,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     parameters: Type.Object({
       role: Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }),
       task: Type.String({
-        description: "The task text for THIS round (what to review / audit / advise on)",
+        description:
+          "reviewer: what you changed this round, in your words (the gate wraps it in the review " +
+          "task it builds). adviser / goal-auditor: the question or the draft to judge.",
       }),
+      message: Type.Optional(Type.String({
+        description:
+          "reviewer only: the checkpoint commit message (English, Conventional Commits). The gate " +
+          "adds the checkpoint marker itself; omit it and the gate writes one from your task text.",
+      })),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
@@ -3322,7 +3495,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         description: "Kill the role's RUNNING process and dispatch this round anyway. Its transcript (and therefore its context) survives — this abandons the round in flight, not the conversation.",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, _ctx) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const target = resolveToolRepo(params.repo);
       if (!target.ok) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
@@ -3344,10 +3517,27 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
+      // SUBMITTING FOR REVIEW IS A CHAIN, and the gate runs all of it: the
+      // agent describes its change, the gate proves it builds (precommit),
+      // freezes it (checkpoint), computes the reviewed range (prepare) and
+      // only then dispatches. Any step failing sends the round back with the
+      // reason — nothing half-submitted, no manual four-step dance.
+      let reviewTask = task;
+      if (role === "reviewer") {
+        const chain = await submitForReview({ root, note: task, message: params.message ? String(params.message) : undefined, ctx });
+        if (!chain.ok) {
+          return {
+            content: [{ type: "text", text: chain.text }],
+            details: { submitted: false, busy: false },
+            isError: true,
+          };
+        }
+        reviewTask = chain.taskText;
+      }
       // The title is a DISPLAY label the gate derives itself (B5: it must not
       // reach the session's directory, or every round starts a new session).
       const title = `${role}-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
-      const dispatch = dispatchJudgeRound({ root, role, title, task, fresh: params.fresh === true });
+      const dispatch = dispatchJudgeRound({ root, role, title, task: reviewTask, fresh: params.fresh === true });
       if (!dispatch.ok) {
         // A busy role is a normal state with a next step, not a malfunction —
         // the reason text already says what to do, so it stands alone.
@@ -4628,9 +4818,18 @@ export default function reviewGate(pi: ExtensionAPI) {
   pi.registerTool({
     name: "declare_done",
     label: "Declare Done",
-    description: "Declare the current task complete. Re-validates all gates server-side; rejects if unmet.",
+    description:
+      "Declare the current task complete. Re-validates every gate server-side, then LANDS the work: " +
+      "the gate merges this session's work branch into the base the user confirmed. A merge " +
+      "conflict is reported with its files and refuses completion — resolve it and call again, or " +
+      "pass waiveMerge to ask the user to leave the branch unmerged.",
     parameters: Type.Object({
       summary: Type.String({ description: "One-paragraph completion summary" }),
+      waiveMerge: Type.Optional(Type.String({
+        description:
+          "Ask the USER to finish WITHOUT merging the work branch (they confirm in a dialog, and " +
+          "the reason is recorded). Use it only when they chose to handle the merge themselves.",
+      })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       // P-multi: completion requires EVERY repo this session has edited to
@@ -4724,6 +4923,29 @@ export default function reviewGate(pi: ExtensionAPI) {
           details: { accepted: false, problems },
           isError: true,
         };
+      }
+      // The USER's escape hatch from the merge, and it is theirs: the agent
+      // can only ASK. A waiver granted in a dialog is recorded with its
+      // reason, so "why is this branch still unmerged?" has an answer.
+      const waiveReason = String(params.waiveMerge ?? "").trim();
+      if (waiveReason && state.workBranch && !state.mergeWaived) {
+        const granted = await confirmBounded(
+          ctx as unknown as { ui?: { confirm?: (t: string, m: string) => Promise<boolean> } },
+          "review-gate: 本次不把工作分支合并回基准分支？",
+          `工作分支 ${state.workBranch} → 基准 ${state.baseBranch ?? "(未记录)"}\n` +
+          `理由（不可信数据）：${waiveReason.slice(0, 300)}\n` +
+          "选 Yes：分支留在原地，由你自己处理合并。",
+        );
+        if (granted) {
+          state.mergeWaived = { at: new Date().toISOString(), reason: waiveReason.slice(0, 300) };
+          persist(ctx as unknown as ExtensionContext);
+        } else {
+          return {
+            content: [{ type: "text", text: "review-gate: 用户没有同意跳过合并 — 先解决合并（或让用户确认后重试）。" }],
+            details: { accepted: false, problems: ["merge waiver declined by the user"] },
+            isError: true,
+          };
+        }
       }
       // The gates are met — now the work has to LAND. The gate follows its own
       // branch log back to the base the user confirmed and merges the work
@@ -5792,16 +6014,36 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       const uiCtx = ctx as unknown as {
+        hasUI?: boolean;
         ui?: {
           select?: (title: string, options: string[]) => Promise<string | undefined>;
           input?: (title: string, placeholder?: string) => Promise<string | undefined>;
           notify?: (message: string, type?: "info" | "warning" | "error") => void;
         };
       };
+      // NO UI AT ALL (print / json / headless RPC): pi hands extensions a
+      // no-op UI whose dialogs resolve to undefined and whose notify does
+      // nothing — so "did notify exist?" is not the question, `hasUI` is
+      // (the same discriminator request_scope_limit uses). Asking there and
+      // reporting a finished interview is how a headless session ends up
+      // paused, waiting for answers to questions nobody was ever shown.
+      if (uiCtx.hasUI !== true) {
+        state.pausedQuestion = {
+          question: questions.map((q) => q.text).join("\n").slice(0, 2000),
+          at: new Date().toISOString(),
+        };
+        loopArmed = false;
+        persist(ctx as unknown as ExtensionContext);
+        return {
+          content: [{ type: "text", text: buildNoDialogNotice(questions) }],
+          details: { asked: questions.length, answered: 0, pending: true },
+          isError: true,
+        };
+      }
       // The user must SEE the questions even when no dialog can be rendered
       // (headless), and the transcript is where the Q&A stays readable after
       // the dialogs close.
-      const shown = showToUser(uiCtx, "───── AI 有问题要问你 ─────", questions.map((q, i) =>
+      showToUser(uiCtx, "───── AI 有问题要问你 ─────", questions.map((q, i) =>
         `${progressLabel(i, questions.length)} ${q.text}` +
         (q.options?.length ? `\n   选项：${q.options.join(" / ")}` : "") +
         (q.recommended ? `\n   推荐：${q.recommended}` : "")).join("\n"));
@@ -5872,10 +6114,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         loopArmed = true;
       }
       persist(ctx as unknown as ExtensionContext);
-      // NO dialog rendered and nothing shown: the questions reached nobody.
-      // Saying "interview complete" here (and pausing) is what left a
-      // headless session waiting forever on answers it never asked for.
-      if (!anyDialog && !shown) {
+      // A UI existed but every dialog came back empty (they were all
+      // dismissed, or the host refused to render them): the questions still
+      // reached nobody, so the agent carries them itself.
+      if (!anyDialog) {
         return {
           content: [{ type: "text", text: buildNoDialogNotice(questions) }],
           details: { asked: questions.length, answered: 0, pending: true },

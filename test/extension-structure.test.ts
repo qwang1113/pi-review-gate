@@ -416,9 +416,15 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
   assert.match(toolBody, /resumeFrom\(state\.askUser, questions\)/, "an interrupted interview resumes");
   assert.match(toolBody, /state\.askUser = \{ at: new Date\(\)\.toISOString\(\), answers: \[\.\.\.answers\] \};[\s\S]{0,120}persist\(/,
     "each answer is persisted as it arrives");
-  // No dialog rendered at all (headless / RPC) ⇒ the questions reached
-  // nobody, and the agent is told to carry them itself.
-  assert.match(toolBody, /if \(!anyDialog && !shown\) \{/, "the no-dialog case is detected");
+  // NO UI at all (print / json / headless RPC): pi's no-op UI still HAS a
+  // notify, so "did notify exist?" proves nothing — `hasUI` is the
+  // discriminator, and the questions go back to the agent unasked.
+  assert.match(toolBody, /if \(uiCtx\.hasUI !== true\) \{/, "headless is detected by hasUI");
+  assert.doesNotMatch(toolBody, /!anyDialog && !shown/,
+    "a notify-based headless probe must not come back");
+  // A UI that rendered nothing (every dialog dismissed / refused) is the same
+  // fact from the other side.
+  assert.match(toolBody, /if \(!anyDialog\) \{/, "an interview nobody answered is reported as such");
   assert.match(toolBody, /buildNoDialogNotice\(questions\)/, "and hands the questions back to the agent");
 });
 
@@ -1957,7 +1963,9 @@ test("every enforcement path computes a FRESH fingerprint", () => {
   // Each of these can block a ship, end a task, or bind a verdict, so none of
   // them may read a memoized value.
   const anchors: Array<[string, number]> = [
-    ['name: "declare_done"', 1200],
+    // 2200: declare_done's own description + the merge-waiver dialog sit
+    // between the tool name and its first fingerprint call.
+    ['name: "declare_done"', 2200],
     ['name: "record_review"', 6000],
     ['name: "request_arbitration"', 4000],
     ['pi.on("agent_settled"', 1200],
@@ -2408,6 +2416,25 @@ test("declare_done lands the work itself, and a conflict stops it honestly", () 
   assert.match(finish, /"merge", "--abort"/);
   assert.match(finish, /st\.mergeConflict = \{/);
   assert.match(finish, /ok: false/);
-  assert.match(finish, /mergeWaived/, "the user's waiver is honoured and on record");
+  assert.match(finish, /st\.mergeWaived/, "a waiver already on record skips the merge");
+  // A merge failure that is NOT a conflict must not be reported as one.
+  assert.match(finish, /const conflicted = files\.length > 0/);
+  // …and the waiver must be WRITABLE, by the user, or the escape hatch the
+  // refusal points at does not exist (round-4 P1: it was read-only).
+  assert.match(body, /waiveMerge/, "declare_done takes the waiver request");
+  assert.match(body, /confirmBounded\(/, "the USER grants it, in a dialog");
+  assert.match(body, /state\.mergeWaived = \{ at: new Date\(\)\.toISOString\(\), reason:/,
+    "a granted waiver is recorded with its reason");
 });
+
+test("review_checkpoint is fail-closed about the branch it commits on", () => {
+  const at = SRC.indexOf('name: "review_checkpoint"');
+  const body = SRC.slice(at, at + 4000);
+  assert.match(body, /const checkpointState = root === primaryRepoRoot \? state : stateForRepo\(root\)/,
+    "the TARGET repo's own work branch decides");
+  assert.match(body, /commitBranchAllowed\(\{ workBranch: checkpointState\.workBranch/);
+  assert.doesNotMatch(body, /if \(state\.workBranch\) \{[\s\S]{0,200}?commitBranchAllowed/,
+    "no work branch on record must REFUSE, not exempt (round-4 P1)");
+});
+
 
