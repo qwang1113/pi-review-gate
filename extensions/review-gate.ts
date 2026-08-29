@@ -83,7 +83,7 @@ import {
   resolveCommandRepos,
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
-import { firstNonEnglish, firstNonEnglishCommitMessage, containsNonLatinLetter, isNonEnglishText } from "../lib/lang-detect.ts";
+import { firstNonEnglish, nonEnglishCommitMessage, containsNonLatinLetter, isNonEnglishText } from "../lib/lang-detect.ts";
 import {
   spawnJudgeProcess,
   judgeSessionIdFor,
@@ -2070,7 +2070,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         // can no longer dilute a non-English subject (observed 2026-08-29).
         // The escape hatch is named in the reason: a wrong guess must never
         // permanently strand a legitimate commit.
-        const nonEn = firstNonEnglishCommitMessage(msgs);
+        //
+        // The paragraphs are JOINED first, exactly as git builds the message
+        // from repeated -m: only the FIRST paragraph's first line is a subject.
+        // Judging each -m as its own subject would reject a legal English
+        // commit that merely mentions a foreign term in a later paragraph.
+        const nonEn = nonEnglishCommitMessage(msgs.join("\n\n"));
         if (nonEn) {
           return {
             block: true,
@@ -3059,7 +3064,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // L5: the SUBJECT line is judged strictly (any non-Latin letter rejects),
       // the body keeps the majority policy — a long English body must never
       // dilute a non-English subject again (observed 2026-08-29).
-      const nonEn = firstNonEnglishCommitMessage([message]);
+      const nonEn = nonEnglishCommitMessage(message);
       if (nonEn) {
         return {
           content: [{
@@ -3268,11 +3273,22 @@ export default function reviewGate(pi: ExtensionAPI) {
    * A checkpoint must be identifiable AS a checkpoint in the history (user
    * requirement): the marker is the gate's to add, not the agent's to
    * remember. An agent-written subject keeps its own wording behind it.
+   *
+   * The agent's round note is usually CHINESE (this project's output language),
+   * while L5 requires an English subject — so a non-Latin subject falls back to
+   * the English default instead of dead-ending the round. Without this, omitting
+   * `message` on judge_submit would build a Chinese subject that the gate's own
+   * L5 check then refuses: a default path that can never succeed. The note is
+   * not lost — it stays in the body, where the majority policy allows it.
    */
   function checkpointMessage(raw: string): string {
     const lines = raw.trim().split("\n");
-    const subject = (lines[0] ?? "").trim().slice(0, 100) || "record this round for review";
-    const body = lines.slice(1).join("\n").trim();
+    const firstLine = (lines[0] ?? "").trim().slice(0, 100);
+    // L5: the subject must be English. A non-Latin letter anywhere in it means
+    // this text cannot be a subject at all — keep it in the body instead.
+    const usable = firstLine.length > 0 && !containsNonLatinLetter(firstLine);
+    const subject = usable ? firstLine : "record this round for review";
+    const body = (usable ? lines.slice(1).join("\n") : raw).trim();
     const marked = /^checkpoint\b|^chore\(checkpoint\)/i.test(subject) ? subject : `checkpoint: ${subject}`;
     return body ? `${marked}\n\n${body}` : marked;
   }

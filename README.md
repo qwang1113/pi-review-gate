@@ -76,12 +76,14 @@ L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
                           strict Simplified-Chinese directive every turn
                           (thinking in Chinese too; protocol English tokens
                           READY/BLOCKED/commit-msg/code stay exempt)
-L5  Commit/PR English     tool_call → HARD block when a git commit message
-                          or PR title/body is PREDOMINANTLY non-English (majority
+L5  Commit/PR English     tool_call → HARD block when a commit SUBJECT line
+                          contains ANY non-Latin letter, or when a commit body
+                          / PR title/body is PREDOMINANTLY non-English (majority
                           body; in-session escape: /gate-bypass, outside:
                           REVIEW_GATE_BYPASS=1 (git hooks only)); the language
                           directive (L4) + reviewer enforce English ship text;
-                          a minority foreign token passes
+                          a minority foreign token passes in a BODY, never in
+                          a commit subject
 L6  Test-label English    pre-commit → block a staged it/test/describe label
                           that is PREDOMINANTLY non-Latin, unless a
                           `// review-gate: allow-non-english` (line) or `-file`
@@ -1629,9 +1631,26 @@ URLs, Markdown link destinations, HTML tags) it counts letters and flags the
 text only when a **non-Latin script** (CJK, Kana, Hangul, Cyrillic, …) is the
 **majority** of them — so a mostly-English body with a **stray/minority** quoted
 foreign term (e.g. one `确认中`) **passes**, while a predominantly non-Latin body
-blocks. Each text (title, body, each commit message) is judged **separately** so
-a long English body can't mask a fully non-English title. The pure-Latin
-romanized-language semantic layer runs only when the text has **zero** non-Latin
+blocks. Each text (a PR title, a PR body, one whole commit message) is judged
+**separately**, never concatenated, so a long English text can't mask a fully
+non-English one next to it. Within a single commit message, however, the
+majority policy applies to the message as a whole — which is exactly why the
+subject needs the stricter rule below.
+
+A **commit SUBJECT line is the exception: it is judged strictly** — ANY
+non-Latin letter in it blocks, no majority needed
+(`nonEnglishCommitMessage`, shared by the `git commit` tool_call guard and
+`review_checkpoint`). The majority policy alone was not enough there: a long
+English body full of identifiers and paths diluted a fully Chinese subject
+below the threshold, and the commit shipped (observed 2026-08-29). The subject
+is what every `git log`, blame and changelog shows, so it gets zero tolerance
+while the **body keeps the relaxed majority policy**. Two consequences worth
+knowing: the subject is taken the way `git stripspace` takes it (leading blank
+lines skipped), and repeated `-m` paragraphs are **joined** before the check —
+only the first paragraph's first line is a subject, so a foreign term in a
+later `-m` is body text. PR title/body are NOT affected by the subject rule.
+
+The pure-Latin romanized-language semantic layer runs only when the text has **zero** non-Latin
 letters. Counting is **asymmetric** so markup can't hide a non-Latin body:
 non-Latin letters are counted over the **full** text (a `确认中` inside a code
 fence still counts), while Latin letters are counted over **prose only** (a big

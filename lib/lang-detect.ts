@@ -143,11 +143,26 @@ export interface NonEnglishCommitMessage {
 }
 
 /**
- * L5 for COMMIT MESSAGES: the SUBJECT line is judged STRICTLY, the body keeps
- * the majority policy.
+ * The SUBJECT line of a commit message, as GIT would resolve it.
+ *
+ * `git commit` runs the message through `git stripspace`, which drops leading
+ * blank lines before taking the subject — so the subject of `"\n\n修复问题\n\nbody"`
+ * is `修复问题`, NOT the empty first line. Reading the literal first line would
+ * therefore hand a one-newline bypass to anything that judges the subject.
+ */
+export function commitSubjectLine(message: string): string {
+  for (const line of message.split("\n")) {
+    if (line.trim().length > 0) return line.trim();
+  }
+  return "";
+}
+
+/**
+ * L5 for ONE COMMIT MESSAGE: the SUBJECT line is judged STRICTLY, the body
+ * keeps the majority policy.
  *
  * Why the subject is special (observed 2026-08-29): `firstNonEnglish` judges
- * each string as ONE body by majority, so a long English body — full of
+ * a message as ONE body by majority, so a long English body — full of
  * identifiers, paths and code tokens — diluted a fully Chinese subject below
  * the 50% threshold and `checkpoint: 修掉…` shipped. The subject is the line
  * every log, blame and changelog shows, so it gets a zero-tolerance rule:
@@ -156,18 +171,16 @@ export interface NonEnglishCommitMessage {
  * documented at the top of this file is deliberately NOT reverted for bodies,
  * nor for PR title/body, which keep using `firstNonEnglish`).
  *
- * Each message is judged separately and never concatenated.
+ * Takes ONE WHOLE message, deliberately: a `git commit -m A -m B` builds a
+ * single message whose paragraphs are A and B, so only A is a subject. Judging
+ * each `-m` as its own subject would reject a perfectly legal English commit
+ * that merely mentions a foreign term in its second paragraph — callers must
+ * join the paragraphs with a blank line first, exactly as git does.
  */
-export function firstNonEnglishCommitMessage(
-  messages: readonly string[],
-): NonEnglishCommitMessage | undefined {
-  for (const message of messages) {
-    // The subject is the first line; everything after the blank line is body.
-    // A message with no newline is all subject — and is judged strictly.
-    const subject = message.split("\n", 1)[0] ?? "";
-    if (containsNonLatinLetter(subject)) return { text: subject, part: "subject" };
-    if (isNonEnglishText(message)) return { text: message, part: "body" };
-  }
+export function nonEnglishCommitMessage(message: string): NonEnglishCommitMessage | undefined {
+  const subject = commitSubjectLine(message);
+  if (containsNonLatinLetter(subject)) return { text: subject, part: "subject" };
+  if (isNonEnglishText(message)) return { text: message, part: "body" };
   return undefined;
 }
 

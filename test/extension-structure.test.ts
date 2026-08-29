@@ -975,7 +975,7 @@ test("L5 is HARD: commit & PR title/body language checks BLOCK (majority policy,
     "the advisory notify must be gone");
 
   // Both language branches must actually return block:true.
-  const commitLangAt = SRC.indexOf("firstNonEnglishCommitMessage(msgs)");
+  const commitLangAt = SRC.indexOf('nonEnglishCommitMessage(msgs.join("\\n\\n"))');
   const prLangAt = SRC.indexOf("firstNonEnglish(prTexts)");
   assert.ok(commitLangAt > 0 && prLangAt > commitLangAt,
     "commit language check → PR language check, in order");
@@ -1002,10 +1002,15 @@ test("L5 subject rule: BOTH commit paths share the subject-strict checker", () =
   // checkpoint shipped. The fix is one shared function — if either path drifts
   // back to the whole-message check, a non-English subject slips through THAT
   // path, so both call sites are pinned here.
-  const toolCallPath = SRC.indexOf("firstNonEnglishCommitMessage(msgs)");
-  const checkpointPath = SRC.indexOf("firstNonEnglishCommitMessage([message])");
+  const toolCallPath = SRC.indexOf('nonEnglishCommitMessage(msgs.join("\\n\\n"))');
+  const checkpointPath = SRC.indexOf("nonEnglishCommitMessage(message)");
   assert.ok(toolCallPath > 0, "the tool_call git-commit guard uses the shared checker");
   assert.ok(checkpointPath > 0, "review_checkpoint uses the SAME shared checker");
+  // The tool_call path must JOIN the -m paragraphs the way git builds the
+  // message. Judging each -m as its own subject rejected legal English commits
+  // that merely mention a foreign term in a later paragraph (round-2 P2).
+  assert.doesNotMatch(SRC, /nonEnglishCommitMessage\(msgs\)/,
+    "each -m is a paragraph, not a subject — they must be joined first");
   // The retired whole-message call must be gone from the commit-message paths
   // (PR title/body legitimately keeps `firstNonEnglish(prTexts)`).
   assert.doesNotMatch(SRC, /firstNonEnglish\(msgs\)/,
@@ -1025,6 +1030,24 @@ test("L5 subject rule: BOTH commit paths share the subject-strict checker", () =
       "the refusal names the subject line as the offender");
   }
 });
+
+test("checkpointMessage cannot build a subject its own L5 check would refuse", () => {
+  // Round-2 P2: the agent's round note is Chinese (this project's output
+  // language), so deriving the subject from its first line made the
+  // omit-`message` default path of judge_submit fail the gate's OWN L5 rule —
+  // a default that can never succeed. The note must fall back to the body.
+  const at = SRC.indexOf("function checkpointMessage(");
+  assert.ok(at > 0, "checkpointMessage must exist");
+  const body = SRC.slice(at, at + 1200);
+  assert.match(body, /containsNonLatinLetter\(firstLine\)/,
+    "the derived subject is checked against the same strict rule L5 applies");
+  assert.match(body, /record this round for review/,
+    "a non-Latin note falls back to the English default subject");
+  // The note is not thrown away — it must survive in the body.
+  assert.match(body, /usable \? lines\.slice\(1\)\.join\("\\n"\) : raw/,
+    "the whole note becomes the body when it cannot be a subject");
+});
+
 
 test("commands registered: gate-status, gate-bypass, gate-mode, gate-reset", () => {
   for (const cmd of ["gate-status", "gate-bypass", "gate-mode", "gate-reset"]) {
@@ -1713,7 +1736,7 @@ test("review_checkpoint: the pre-review commit channel is registered with its co
   const body = SRC.slice(at, SRC.indexOf('name: "judge_submit"', at));
   // the gate semantics: bypasses READY only, never precommit
   assert.match(body, /bypasses READY only, never precommit/);
-  assert.match(body, /firstNonEnglishCommitMessage\(\[message\]\)/,
+  assert.match(body, /nonEnglishCommitMessage\(message\)/,
     "L5: message must be English — subject strictly, body by majority");
   assert.match(body, /COMMIT_MSG_FORBIDDEN/, "round-4 P2: AI-attribution guard replicated");
   assert.match(body, /testScope !== "full"/, "round-4 P2: full precommit required");
@@ -1939,7 +1962,7 @@ test("LLM guards: deterministic checks precede every LLM call (tighten-only orde
   // L5 (advisory): Unicode firstNonEnglish must precede the semantic english
   // check — anchored to the commit-msg branch (`msgs`), because the L6
   // edit-time branch also calls classifyNonEnglish earlier in the file.
-  const unicodeCheck = SRC.indexOf("firstNonEnglishCommitMessage(msgs)");
+  const unicodeCheck = SRC.indexOf('nonEnglishCommitMessage(msgs.join("\\n\\n"))');
   const semanticEnglish = SRC.indexOf("classifyNonEnglish(classifier(), msgs)");
   assert.ok(unicodeCheck > 0 && semanticEnglish > unicodeCheck,
     "Unicode script check must precede classifyNonEnglish in the commit branch");
@@ -2004,21 +2027,35 @@ test("the advisory fingerprint memo has exactly one caller: the prompt renderer"
 test("every enforcement path computes a FRESH fingerprint", () => {
   // Each of these can block a ship, end a task, or bind a verdict, so none of
   // them may read a memoized value.
-  const anchors: Array<[string, number]> = [
+  // The extent is either a byte window or an END ANCHOR. Prefer the end
+  // anchor: a byte window silently stops covering its target as soon as
+  // comments grow above it (2026-08-29 — the L5 comments pushed
+  // `computeFingerprint(` past the 9000 window, turning this test red only by
+  // luck; a slightly smaller edit would have made it pass vacuously).
+  const anchors: Array<[string, number | string]> = [
     // 2200: declare_done's own description + the merge-waiver dialog sit
     // between the tool name and its first fingerprint call.
     ['name: "declare_done"', 2200],
     ['name: "record_review"', 6000],
     ['name: "request_arbitration"', 4000],
     ['pi.on("agent_settled"', 1200],
-    // 9000: the P-multi per-repo fingerprint loop sits ~130 lines after the
-    // ship-detection anchor inside the tool_call handler.
-    ["detectShipCommands(command)", 9000],
+    // The P-multi per-repo fingerprint loop sits far below the ship-detection
+    // anchor inside the tool_call handler — bounded by the loop itself, not by
+    // a byte count that every added comment invalidates.
+    ["detectShipCommands(command)", "if (root === primaryRepoRoot) primaryFp = fp;"],
   ];
-  for (const [anchor, window] of anchors) {
+  for (const [anchor, extent] of anchors) {
     const at = SRC.indexOf(anchor);
     assert.ok(at >= 0, `anchor not found: ${anchor}`);
-    const body = SRC.slice(at, at + window);
+    let end: number;
+    if (typeof extent === "number") {
+      end = at + extent;
+    } else {
+      end = SRC.indexOf(extent, at);
+      assert.ok(end > at, `end anchor not found after ${anchor}: ${extent}`);
+      end += extent.length;
+    }
+    const body = SRC.slice(at, end);
     // P-multi: enforcement paths may target a non-session repo, so the
     // fingerprint arg is a variable (root), not the cwd literal — what must
     // hold is a DIRECT computeFingerprint call, never the advisory memo.

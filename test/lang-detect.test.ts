@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import {
   isNonEnglishText,
   firstNonEnglish,
-  firstNonEnglishCommitMessage,
+  nonEnglishCommitMessage,
+  commitSubjectLine,
   analyzeLanguageMix,
   stripNonProse,
   containsNonLatinLetter,
@@ -157,7 +158,7 @@ test("firstNonEnglish handles empty list", () => {
   assert.equal(firstNonEnglish([]), undefined);
 });
 
-// --- firstNonEnglishCommitMessage (subject strict, body majority) ------------
+// --- nonEnglishCommitMessage (subject strict, body majority) -----------------
 //
 // Regression origin (2026-08-29): checkpoint f161146 landed with a fully
 // Chinese subject because the majority check judged the WHOLE message and the
@@ -174,43 +175,74 @@ const DILUTED_SUBJECT = [
   "   and the truncated goal instructions untouched.",
 ].join("\n");
 
-test("firstNonEnglishCommitMessage catches a non-English SUBJECT that the majority check missed", () => {
+test("nonEnglishCommitMessage catches a non-English SUBJECT that the majority check missed", () => {
   // The exact bypass: the whole-message majority check passes...
   assert.equal(firstNonEnglish([DILUTED_SUBJECT]), undefined);
   // ...but the subject-line rule rejects it.
-  const hit = firstNonEnglishCommitMessage([DILUTED_SUBJECT]);
+  const hit = nonEnglishCommitMessage(DILUTED_SUBJECT);
   assert.equal(hit?.part, "subject");
   assert.match(hit?.text ?? "", /^checkpoint: 修掉/);
 });
 
-test("firstNonEnglishCommitMessage rejects even a SINGLE non-Latin letter in the subject", () => {
-  const hit = firstNonEnglishCommitMessage(["feat(api): add 分页"]);
+test("nonEnglishCommitMessage rejects even a SINGLE non-Latin letter in the subject", () => {
+  const hit = nonEnglishCommitMessage("feat(api): add 分页");
   assert.equal(hit?.part, "subject");
   assert.equal(hit?.text, "feat(api): add 分页");
   // The majority policy alone would have let this through — that is the point.
   assert.equal(firstNonEnglish(["feat(api): add 分页"]), undefined);
 });
 
-test("firstNonEnglishCommitMessage passes an English subject with a minority foreign term in the BODY", () => {
+test("nonEnglishCommitMessage passes an English subject with a minority foreign term in the BODY", () => {
   const msg = [
     "feat(api): add pagination to list endpoints",
     "",
     "The client team calls this 分页, but the body stays English overall so the",
     "majority policy documented for bodies keeps applying unchanged here.",
   ].join("\n");
-  assert.equal(firstNonEnglishCommitMessage([msg]), undefined);
+  assert.equal(nonEnglishCommitMessage(msg), undefined);
 });
 
-test("firstNonEnglishCommitMessage still flags a predominantly non-English BODY", () => {
+test("nonEnglishCommitMessage still flags a predominantly non-English BODY", () => {
   const msg = "fix(auth): handle expired tokens\n\n这个提交修复了刷新令牌过期之后无法续期的问题，并补充了相应的回归测试。";
-  const hit = firstNonEnglishCommitMessage([msg]);
+  const hit = nonEnglishCommitMessage(msg);
   assert.equal(hit?.part, "body");
 });
 
-test("firstNonEnglishCommitMessage judges each message separately and handles an empty list", () => {
-  assert.equal(firstNonEnglishCommitMessage([]), undefined);
-  assert.equal(firstNonEnglishCommitMessage(["fix bug", "add test"]), undefined);
+test("nonEnglishCommitMessage handles empty and subject-only messages", () => {
+  assert.equal(nonEnglishCommitMessage(""), undefined);
+  assert.equal(nonEnglishCommitMessage("fix bug"), undefined);
   // A single-line (subject-only) message is judged strictly too.
-  assert.equal(firstNonEnglishCommitMessage(["fix bug", "修复问题"])?.part, "subject");
+  assert.equal(nonEnglishCommitMessage("修复问题")?.part, "subject");
+});
+
+// --- the two bypasses found in review (2026-08-29, round 2) ------------------
+
+test("commitSubjectLine skips leading blank lines, exactly as git stripspace does", () => {
+  // A single leading newline used to make the subject look empty, so a Chinese
+  // subject sailed through while git still recorded it AS the subject.
+  assert.equal(commitSubjectLine("\n\n修复问题\n\nEnglish body here."), "修复问题");
+  assert.equal(commitSubjectLine("fix: thing\n\nbody"), "fix: thing");
+  assert.equal(commitSubjectLine("   \n  fix: padded  \n"), "fix: padded");
+  assert.equal(commitSubjectLine(""), "");
+  assert.equal(commitSubjectLine("\n\n\n"), "");
+});
+
+test("nonEnglishCommitMessage closes the leading-blank-line subject bypass", () => {
+  const hit = nonEnglishCommitMessage("\n\n修复问题\n\nA long English body that would otherwise dominate the majority count here.");
+  assert.equal(hit?.part, "subject", "the real subject is judged, not the empty first line");
+  assert.equal(hit?.text, "修复问题");
+});
+
+test("nonEnglishCommitMessage judges a multi -m message as ONE message, not many subjects", () => {
+  // `git commit -m A -m B` produces "A\n\nB": only A is a subject. Judging each
+  // -m as its own subject would reject this legal English commit.
+  const paragraphs = [
+    "feat(api): add pagination to list endpoints",
+    "The client team calls this 分页, but the body stays English overall so the majority policy applies.",
+  ];
+  assert.equal(nonEnglishCommitMessage(paragraphs.join("\n\n")), undefined,
+    "a foreign term in the SECOND paragraph is body text, not a subject");
+  // ...while a Chinese FIRST paragraph is still caught.
+  assert.equal(nonEnglishCommitMessage(["修复问题", "English body."].join("\n\n"))?.part, "subject");
 });
 
