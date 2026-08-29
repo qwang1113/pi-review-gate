@@ -1012,11 +1012,13 @@ test("a message-only rewrite is not a content change, at L1 and in the branch ru
   // literal shape of that `return` with a regex the real call could never
   // satisfy, so re-adding the return kept the suite green. The guard is now a
   // WINDOW: whatever the exemption block ends up containing, no `return` may
-  // stand between the decision and the per-repo checks it must not skip.
-  const problemsAt = callBody.indexOf("const problems: string[] = []", exemptionAt);
-  assert.ok(problemsAt > exemptionAt, "the per-repo checks must follow the exemption");
-  const betweenExemptionAndChecks = callBody.slice(exemptionAt, problemsAt);
-  assert.doesNotMatch(betweenExemptionAndChecks, /\breturn\b/,
+  // stand between the decision and the LAST check it must not skip. Round-5
+  // P2: the window used to stop at `const problems`, so a return one line
+  // later escaped it and skipped exactly the same three checks.
+  const lastCheckAt = callBody.indexOf("LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK", exemptionAt);
+  assert.ok(lastCheckAt > exemptionAt, "the loop-goal ship gate must follow the exemption");
+  const beforeTheChecksAreDone = callBody.slice(exemptionAt, lastCheckAt);
+  assert.doesNotMatch(beforeTheChecksAreDone, /\breturn\b/,
     "the exemption must never return from the ship gate — that drops the branch rule with it");
   assert.match(callBody, /const unmet = messageOnlyRewrite \? \[\] : unmetRequirements\(/,
     "only the content requirements are skipped");
