@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeQuestions,
+  interpretFreeText,
+  resumeFrom,
+  buildNoDialogNotice,
   progressLabel,
   buildChoiceList,
   interpretChoice,
@@ -121,3 +124,78 @@ test("the loop waits whenever anything went unanswered", () => {
   assert.equal(needsUserReply([{ question: "a", kind: "deferred-to-chat" }]), true);
   assert.equal(needsUserReply([]), false);
 });
+
+// ---- free text carries the same escapes as a choice list ----
+
+test("typed escapes mean what the choice rows mean", () => {
+  assert.deepEqual(interpretFreeText("!skip"), { kind: "skip-rest" });
+  assert.deepEqual(interpretFreeText("  !CHAT "), { kind: "deferred-to-chat" });
+  assert.deepEqual(interpretFreeText("用 A 方案"), { kind: "answered", answer: "用 A 方案" });
+});
+
+test("empty text and a dismissed input are silence, not an answer", () => {
+  assert.deepEqual(interpretFreeText(""), { kind: "dismissed" });
+  assert.deepEqual(interpretFreeText("   "), { kind: "dismissed" });
+  assert.deepEqual(interpretFreeText(undefined), { kind: "dismissed" });
+});
+
+// ---- an interrupted interview resumes instead of restarting ----
+
+const QS = [{ text: "范围？" }, { text: "分支？" }, { text: "交付？" }];
+
+test("settled answers carry over; the first unsettled question is where it resumes", () => {
+  const stored = {
+    at: "t",
+    answers: [
+      { question: "范围？", kind: "answered" as const, answer: "A" },
+      { question: "分支？", kind: "unanswered" as const },
+    ],
+  };
+  const carried = resumeFrom(stored, QS);
+  assert.equal(carried.length, 1, "only the settled prefix carries over");
+  assert.equal(carried[0].answer, "A");
+});
+
+test("a different question list is a different interview — nothing carries over", () => {
+  const stored = { at: "t", answers: [{ question: "别的问题", kind: "answered" as const, answer: "A" }] };
+  assert.deepEqual(resumeFrom(stored, QS), []);
+});
+
+test("no stored progress means a fresh interview", () => {
+  assert.deepEqual(resumeFrom(undefined, QS), []);
+  assert.deepEqual(resumeFrom({ at: "t", answers: [] }, QS), []);
+});
+
+test("a skip is settled too — it does not re-ask", () => {
+  const stored = {
+    at: "t",
+    answers: [
+      { question: "范围？", kind: "answered" as const, answer: "A" },
+      { question: "分支？", kind: "skipped" as const },
+    ],
+  };
+  assert.equal(resumeFrom(stored, QS).length, 2);
+});
+
+// ---- an environment with no dialogs must say so ----
+
+test("the no-dialog notice hands the questions back to the agent, in full", () => {
+  const notice = buildNoDialogNotice([{ text: "范围？", options: ["A", "B"], recommended: "A" }]);
+  assert.match(notice, /没能展示给用户/);
+  assert.match(notice, /写进你的回复/);
+  assert.match(notice, /范围？/);
+  assert.match(notice, /选项：A \/ B/);
+  assert.match(notice, /推荐：A/);
+});
+
+test("an unanswered question reads as unanswered, never as 'ask me in chat'", () => {
+  const text = formatAnswers([{ question: "范围？", kind: "unanswered" }]);
+  assert.match(text, /没有得到回答/);
+  assert.doesNotMatch(text, /选择在聊天里/);
+  assert.match(formatTranscriptSummary([{ question: "q", kind: "unanswered" }]), /未作答 1/);
+});
+
+test("an unanswered question keeps the loop waiting", () => {
+  assert.equal(needsUserReply([{ question: "a", kind: "unanswered" }]), true);
+});
+

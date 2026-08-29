@@ -89,6 +89,39 @@ export interface GateState {
    * tree. Written only by review_checkpoint; absent before the first one.
    */
   checkpoint?: { sha: string; prevSha: string; at: string };
+  /**
+   * The worktree the session STARTED in, when it was not clean. Recorded at
+   * session start and cleared once `setup_workspace` settled it with the
+   * user. While it stands unsettled, loop-mode edits are refused: changes the
+   * session did not make must not silently become part of what it ships.
+   */
+  worktreeDirty?: { files: string[]; at: string; settled?: boolean };
+  /**
+   * The branch this session's work must end up in — the user confirms it
+   * (`setup_workspace`), the gate merges into it (`declare_done`).
+   */
+  baseBranch?: string;
+  /**
+   * The branch this session commits on. Absent ⇒ commits are refused
+   * (fail-closed): a session must never commit onto whatever branch it
+   * happened to start on.
+   */
+  workBranch?: string;
+  /**
+   * Append-only audit of every branch/worktree operation the gate performed:
+   * where the session came from, what it discarded, where its checkpoints
+   * landed, which base and work branch were chosen. This is what makes the
+   * final merge a lookup instead of a guess.
+   */
+  branchOps?: import("./workspace-branch.ts").BranchOp[];
+  /**
+   * A merge the gate started and could not finish. `declare_done` refuses
+   * while it stands: the conflict is the agent's to resolve (or the user's to
+   * waive), never the gate's to guess at.
+   */
+  mergeConflict?: { branch: string; base: string; files: string[]; at: string };
+  /** The user waived the merge for this session (escape hatch, on record). */
+  mergeWaived?: { at: string; reason: string };
   hasCodeChange: boolean;
   hasDocChange: boolean;
   review: {
@@ -224,7 +257,7 @@ export interface GateState {
    */
   askUser?: {
     at: string;
-    answers: { question: string; kind: "answered" | "skipped" | "deferred-to-chat"; answer?: string }[];
+    answers: import("./ask-user.ts").AskAnswer[];
   };
   /**
    * USER-GRANTED review-scope limit (request_scope_limit tool): the user
@@ -551,7 +584,10 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         rec.answers.every((a) =>
           typeof a === "object" && a !== null &&
           typeof (a as { question?: unknown }).question === "string" &&
-          ["answered", "skipped", "deferred-to-chat"].includes(String((a as { kind?: unknown }).kind)));
+          ["answered", "skipped", "deferred-to-chat", "unanswered"].includes(String((a as { kind?: unknown }).kind)) &&
+          // An `answer` that is not text would be replayed into the agent's
+          // prompt as the user's words — it must be a string or absent.
+          ((a as { answer?: unknown }).answer === undefined || typeof (a as { answer?: unknown }).answer === "string"));
       if (!ok) delete parsed.askUser;
     }
     const migrated = migrateFingerprintVersion(parsed);

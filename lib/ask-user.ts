@@ -40,18 +40,31 @@ export type AnswerKind =
   /** They cut the interview short before reaching this one. */
   | "skipped"
   /** They asked to answer this one in chat instead of a dialog. */
-  | "deferred-to-chat";
+  | "deferred-to-chat"
+  /**
+   * The dialog closed without a choice (ESC), or there was no dialog to show
+   * at all. Deliberately distinct from "deferred": the user did not ask for
+   * anything, so the reply must not claim they did.
+   */
+  | "unanswered";
 
 export interface AskAnswer {
   question: string;
   kind: AnswerKind;
-  /** The chosen option or the typed text; absent for skipped/deferred. */
+  /** The chosen option or the typed text; absent unless answered. */
   answer?: string;
 }
 
-/** The two escape hatches every question offers (user ask). */
+/** The escape hatches every question offers (user ask). */
 export const SKIP_REST_CHOICE = "⏭ 跳过后续问题";
 export const ANSWER_IN_CHAT_CHOICE = "💬 我想在聊天里详细回答";
+
+/** Typed into a free-text question, these mean the same as the choices above. */
+export const SKIP_REST_INPUT = "!skip";
+export const ANSWER_IN_CHAT_INPUT = "!chat";
+
+/** The hint a free-text dialog shows, so its escapes are discoverable. */
+export const FREE_TEXT_HINT = `直接输入答案；${ANSWER_IN_CHAT_INPUT}=改在聊天里答，${SKIP_REST_INPUT}=跳过后续`;
 
 /**
  * Clean up what the agent submitted: drop empties, cap sizes and counts.
@@ -132,6 +145,21 @@ export function interpretChoice(picked: string | undefined, q: AskQuestion): Cho
 }
 
 /**
+ * What free text MEANS. A free-text dialog has no choice list, so its escapes
+ * are typed (`!chat`, `!skip`) — without them, criterion 5's two exits would
+ * exist for choice questions only.
+ */
+export function interpretFreeText(typed: string | undefined): ChoiceMeaning {
+  if (typed === undefined) return { kind: "dismissed" };
+  const trimmed = typed.trim();
+  if (trimmed === "") return { kind: "dismissed" };
+  if (trimmed.toLowerCase() === SKIP_REST_INPUT) return { kind: "skip-rest" };
+  if (trimmed.toLowerCase() === ANSWER_IN_CHAT_INPUT) return { kind: "deferred-to-chat" };
+  return { kind: "answered", answer: trimmed };
+}
+
+
+/**
  * The interview as the agent reads it back: every question with its answer,
  * including the ones nobody answered. Silence is reported as silence.
  */
@@ -144,7 +172,9 @@ export function formatAnswers(answers: AskAnswer[]): string {
         ? `→ ${a.answer}`
         : a.kind === "deferred-to-chat"
           ? "→ 用户选择在聊天里详细回答（等他的下一条消息）"
-          : "→ 用户跳过";
+          : a.kind === "skipped"
+            ? "→ 用户跳过"
+            : "→ 没有得到回答（对话框被关闭，或环境没有对话框）";
       return `${head}\n${body}`;
     })
     .join("\n");
@@ -155,9 +185,11 @@ export function formatTranscriptSummary(answers: AskAnswer[]): string {
   const answered = answers.filter((a) => a.kind === "answered").length;
   const skipped = answers.filter((a) => a.kind === "skipped").length;
   const deferred = answers.filter((a) => a.kind === "deferred-to-chat").length;
+  const unanswered = answers.filter((a) => a.kind === "unanswered").length;
   const parts = [`已回答 ${answered}`];
   if (deferred) parts.push(`转聊天 ${deferred}`);
   if (skipped) parts.push(`跳过 ${skipped}`);
+  if (unanswered) parts.push(`未作答 ${unanswered}`);
   return `${parts.join(" · ")}（共 ${answers.length} 问）`;
 }
 
@@ -169,3 +201,52 @@ export function formatTranscriptSummary(answers: AskAnswer[]): string {
 export function needsUserReply(answers: AskAnswer[]): boolean {
   return answers.some((a) => a.kind !== "answered");
 }
+
+/** An interview in progress, persisted so an interrupted one can continue. */
+export interface AskProgress {
+  at: string;
+  answers: AskAnswer[];
+}
+
+/**
+ * Where to pick a repeated interview up.
+ *
+ * The gate persists progress after EVERY question, so a session that died
+ * mid-interview (or an agent that re-submitted the same list) resumes at the
+ * first unanswered question instead of asking the user everything again. The
+ * stored run must match this call question-for-question — a different list is
+ * a different interview, and reusing its answers would attribute the user's
+ * words to a question they never saw.
+ */
+export function resumeFrom(stored: AskProgress | undefined, questions: AskQuestion[]): AskAnswer[] {
+  if (!stored?.answers?.length) return [];
+  const sameInterview = stored.answers.length <= questions.length &&
+    stored.answers.every((a, i) => a.question === questions[i]?.text);
+  if (!sameInterview) return [];
+  // Only a PREFIX of settled answers carries over: the first unsettled one is
+  // where the interview resumes.
+  const carried: AskAnswer[] = [];
+  for (const a of stored.answers) {
+    if (a.kind === "answered" || a.kind === "skipped") carried.push(a);
+    else break;
+  }
+  return carried;
+}
+
+/**
+ * The reply for an environment with no dialogs at all (headless / RPC).
+ *
+ * The failure this prevents was measured: the tool reported a completed
+ * interview, paused the loop, and waited for answers to questions the user
+ * was never shown. When nothing could be rendered, the agent must be told to
+ * carry the questions itself.
+ */
+export function buildNoDialogNotice(questions: AskQuestion[]): string {
+  return "review-gate: 这个环境没有可用的对话框（headless / RPC），问题一个都没能展示给用户。\n" +
+    "把下面的问题原样写进你的回复，然后结束本轮，等用户回答：\n" +
+    questions.map((q, i) =>
+      `${progressLabel(i, questions.length)} ${q.text}` +
+      (q.options?.length ? `\n   选项：${q.options.join(" / ")}` : "") +
+      (q.recommended ? `\n   推荐：${q.recommended}` : "")).join("\n");
+}
+

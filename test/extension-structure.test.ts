@@ -411,7 +411,17 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
   assert.match(toolBody, /formatAnswers\(answers\)/);
   assert.doesNotMatch(toolBody, /ALREADY been delivered to the user verbatim/,
     "never claim delivery that did not happen");
+  // Progress is persisted after EVERY question, so an interview that dies
+  // mid-way resumes instead of asking the user everything again.
+  assert.match(toolBody, /resumeFrom\(state\.askUser, questions\)/, "an interrupted interview resumes");
+  assert.match(toolBody, /state\.askUser = \{ at: new Date\(\)\.toISOString\(\), answers: \[\.\.\.answers\] \};[\s\S]{0,120}persist\(/,
+    "each answer is persisted as it arrives");
+  // No dialog rendered at all (headless / RPC) ⇒ the questions reached
+  // nobody, and the agent is told to carry them itself.
+  assert.match(toolBody, /if \(!anyDialog && !shown\) \{/, "the no-dialog case is detected");
+  assert.match(toolBody, /buildNoDialogNotice\(questions\)/, "and hands the questions back to the agent");
 });
+
 
 
 test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an extra turn", () => {
@@ -2335,3 +2345,69 @@ test("P2: checkpoint carries prevSha so the documented checkpoint→prepare flow
   const ext = SRC.slice(SRC.indexOf('name: "review_checkpoint"'));
   assert.match(ext, /prevSha/);
 });
+
+test("a dirty worktree the session did not create blocks edits until it is settled", () => {
+  const start = SRC.indexOf("function loopGoalEditBlockFor(");
+  const body = SRC.slice(start, start + 3000);
+  assert.match(body, /state\.worktreeDirty && !state\.worktreeDirty\.settled/,
+    "unsettled pre-existing changes block edits");
+  assert.match(body, /setup_workspace/, "and the block names the tool that settles them");
+  // Recorded at session start, from git itself — not from anything the agent says.
+  const startAt = SRC.indexOf("function recordSessionStartWorkspace(");
+  const record = SRC.slice(startAt, startAt + 1500);
+  assert.match(record, /dirtyFiles\(primaryRepoRoot\)/);
+  assert.match(record, /op: "checkout", from: null, to: branch/,
+    "the starting branch opens the audit trail");
+});
+
+test("setup_workspace settles the worktree and the branches, and records both", () => {
+  const at = SRC.indexOf('name: "setup_workspace"');
+  assert.ok(at > 0, "setup_workspace must be registered");
+  const body = SRC.slice(at, SRC.indexOf('name: "ask_user"', at));
+  // The three-way choice is the USER's, and a dismissed dialog settles nothing.
+  assert.match(body, /interpretWorktreeChoice\(picked\)/);
+  assert.match(body, /if \(!choice\) \{/, "no choice ⇒ nothing is settled");
+  // "I handled it" is verified, not believed.
+  assert.match(body, /choice === "handled"[\s\S]{0,400}?dirtyFiles\(root\)/);
+  // Discarding is the GATE's action, and it is recorded.
+  assert.match(body, /"checkout", "--", "\."/);
+  assert.match(body, /"clean", "-fd"/);
+  assert.match(body, /op: "worktree_discard"/);
+  // Branch decisions are recorded as they happen.
+  assert.match(body, /op: "base_branch_set"/);
+  assert.match(body, /op: "work_branch_set"/);
+  assert.match(body, /isProtectedBranch\(here\)/, "main/master is never worked on directly");
+});
+
+test("a commit may only land on this session's OWN work branch (fail-closed)", () => {
+  // Checked PER REPO, inside the ship loop: a commit in repo B must never be
+  // judged against repo A's work branch.
+  const start = SRC.indexOf("// WHERE the commit lands, per repo");
+  assert.ok(start > 0, "the per-repo branch check must exist in the ship loop");
+  const body = SRC.slice(start, start + 1200);
+  assert.match(body, /ships\.some\(\(s\) => s\.kind === "commit"\)/);
+  assert.match(body, /commitBranchAllowed\(\{/);
+  assert.match(body, /workBranch: \(root === primaryRepoRoot \? state : stateForRepo\(root\)\)\.workBranch/,
+    "each repo answers with its OWN work branch");
+  assert.match(body, /currentBranch: currentBranch\(root\)/);
+  // The pure decision refuses when no work branch is on record — pinned in
+  // test/workspace-branch.test.ts; here we only pin that the gate ASKS.
+  assert.match(body, /if \(!where\.allowed\) \{/);
+});
+
+test("declare_done lands the work itself, and a conflict stops it honestly", () => {
+  const at = SRC.indexOf('name: "declare_done"');
+  const body = SRC.slice(at, at + 9000);
+  assert.match(body, /const finish = finishWorkBranch\(/, "the gate merges, the agent does not");
+  const finishAt = SRC.indexOf("function finishWorkBranch(");
+  const finish = SRC.slice(finishAt, finishAt + 3000);
+  assert.match(finish, /decideFinish\(\{/, "the decision is the pure function's");
+  assert.match(finish, /"merge", "--no-ff"/);
+  // A conflict leaves NOTHING half-applied: abort, return to the work branch,
+  // record what conflicted, refuse.
+  assert.match(finish, /"merge", "--abort"/);
+  assert.match(finish, /st\.mergeConflict = \{/);
+  assert.match(finish, /ok: false/);
+  assert.match(finish, /mergeWaived/, "the user's waiver is honoured and on record");
+});
+

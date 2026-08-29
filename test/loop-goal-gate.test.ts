@@ -292,6 +292,8 @@ async function approveGoal(pi: ToolMap, ctx: unknown, goal: string, repo?: strin
   assert.equal((result as { details: { approved?: boolean } }).details.approved, true, "goal must be approved by the mock dialog");
 }
 
+
+
 test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS — no dialog at all", async () => {
   // The whole point of the mechanical pre-review: the user must never be asked
   // to approve a draft no auditor judged. A refusal that still rendered the
@@ -738,6 +740,13 @@ test("L8: a NESTED independent repo is not unlocked by the primary repo's goal",
   writeFileSync(join(nested, "n.ts"), "export const n = 1;\n");
   git(nested, "add", "n.ts");
   git(nested, "commit", "-m", "init");
+  // The nested repo is this FIXTURE's own scaffolding, not work the session
+  // found lying around: ignore it in repo A, or the pre-existing-changes gate
+  // (pinned in extension-structure.test.ts) blocks the edit before the goal
+  // layer this test is about is ever reached.
+  writeFileSync(join(repoA, ".gitignore"), "nested/\n");
+  git(repoA, "add", ".gitignore");
+  git(repoA, "commit", "-m", "ignore the nested fixture repo");
   const fileA = join(repoA, "a.ts");
   const nestedFile = join(nested, "n.ts");
   const pi = makeMockPi(repoA);
