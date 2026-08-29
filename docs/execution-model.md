@@ -78,9 +78,9 @@
 - **主会话存活不变量**（round-18，用户硬约束）：门禁未通过前主会话**不得**
   停止自动循环。`agent_settled` 的 `classifyChildren()`（lib/child-watch.ts）
   托管等待：进程已退出或静默超时的子会话**立即结束等待**（注入
-  `REVIEW_GATE_CHILD_ENDED`：review_read 读取已有输出继续 / review_close
+  `REVIEW_GATE_CHILD_ENDED`：judge_read 读取已有输出继续 / judge_close
   后重新派发）；仍在飞的子会话注入 `REVIEW_GATE_CHILD_HOST_WAIT`
-  （先做确定性工作；确实没别的可做时调 `review_wait({role})`，它在门禁里
+  （先做确定性工作；确实没别的可做时调 `judge_wait({role})`，它在门禁里
   跑同样的三条判据并把结论带回来）。仅三类
   情形允许停止：用户显式中止（ESC）、`ask_user` 等待用户回答、
   所有门禁与 goal 均完成。
@@ -98,6 +98,19 @@
   最新的 `*.jsonl`，取**最后一条含 verdict fence 的 assistant 文本**。
 - **排查**：`tail -f <runDir>/stdout.log`（实时）、grep sessionDir 的
   jsonl（结构化输入输出）、`pi --export <jsonl> <out.html>`（完整回顾）。
+- **等待期的可见性（2026-08-29 起，默认开启）**：耗时工具通过 `execute` 的第
+  4 个参数 `onUpdate` 发**进度快照**（`lib/progress-stream.ts`，节流 2s）：
+  `judge_wait`（每次探测重发 stdout 尾部 + findings 计数）、`judge_submit`
+  的送审链（precommit → checkpoint → prepare → spawn，逐步报）、
+  `run_precommit`（runner 日志作为步骤尾部）、`declare_done`（门禁复检 →
+  合并）、`request_copilot_review` / `check_copilot_review`（每次网络调用一
+  步）。进度只进 partialResult，**不进** agent 拿到的 tool result——两条通
+  道回答不同的问题。`tool_call` 钩子没有 `onUpdate`，所以 6 处 LLM 判定
+  （L5 语义 / L6 标签 / ship 分类 / AI 署名）改用状态栏：超过 ~3s 才提示一
+  次，结束即清除。
+- **`judge_wait` 的返回值**：本轮结束 ⇒ 结论正文 + 本轮 stdout 尾部；未结束
+  或超时 ⇒ 当前进度（stdout 尾部 + findings 流最近几条）。它与上面的流式快
+  照互不替代：快照给人看，返回值给 agent 读。
 
 ## 审核单元
 

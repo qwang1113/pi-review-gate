@@ -247,7 +247,7 @@ must restore before finishing. Because the reviewed range is immutable,
 that carry evidence (confirm each in the code first), leave Nits for the
 verdict. WAITING-WINDOW DISCIPLINE: (1) 有可实现的确定性工作(代码/测试/
 文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后再调
-`review_wait({role})`——门禁在里面跑三条判据(进程退出 / exit-code 落盘 /
+`judge_wait({role})`——门禁在里面跑三条判据(进程退出 / exit-code 落盘 /
 本轮 stdout 里出现明文 fence,任一命中即返回)并把已读结论带回来,不需要你
 手写 bash;(3) **禁止**用结束 turn 把唤醒责任交给子会话——子会话可能报错/
 崩溃/永远不退,而主会话是门禁的最后监督者,门禁未通过前不得停止自动循环
@@ -273,7 +273,7 @@ it first. The recording withholds a READY unless the round was PREPARED (a
 registered `baseline..HEAD` target) and the verdict carries the child's `cwd`
 (measured with `pwd`, a required field of the verdict schema). While a judge
 child is open, `declare_done` requires closing it out (its verdict is
-recorded on exit, or `review_close({role})`).
+recorded on exit, or `judge_close({role})`).
 
 ### Read-only exploration — parallel-safe
 

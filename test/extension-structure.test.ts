@@ -7,6 +7,29 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
 
+/**
+ * The source window from `start` up to the next `end` anchor, with BOTH
+ * anchors asserted.
+ *
+ * A fixed byte window (`SRC.slice(at, at + 900)`) rots silently: the source
+ * grows, the window stops reaching the code it was written to cover, and the
+ * test keeps passing while asserting nothing. An end ANCHOR cannot rot
+ * quietly — when it stops closing the window, this fails and says so.
+ */
+function windowOf(start: string, end: string | RegExp, label: string, from = 0): string {
+  const at = SRC.indexOf(start, from);
+  assert.ok(at >= 0, `${label}: start anchor ${JSON.stringify(start)} not found`);
+  const rest = SRC.slice(at + start.length);
+  const rel = typeof end === "string" ? rest.indexOf(end) : rest.search(end);
+  assert.ok(rel >= 0, `${label}: end anchor ${String(end)} no longer closes the window`);
+  return SRC.slice(at, at + start.length + rel);
+}
+
+/** The body of one registered tool: from its `name:` line to the next one. */
+function toolBodyOf(tool: string): string {
+  return windowOf(`name: "${tool}"`, /\n  pi\.registerTool\(\{|\n  \/\/ -{4,}/, `tool ${tool}`);
+}
+
 test("loop goal: injected ONLY in loop mode, before the unarmed early-return", () => {
   // The Step 0 directive has to reach the agent while the worktree is still
   // clean (that is the whole point — set the exit contract BEFORE editing), so
@@ -1119,9 +1142,11 @@ test("run_precommit is async and abortable — never a sync spawn that freezes t
   // The tool must pass the target repo root and its AbortSignal through
   // (P1 fix: process.cwd() can differ from ctx.cwd under pi --cwd; P-multi:
   // the target may be the active non-session repo).
-  // `_onUpdate` travels too: the runner's log is streamed while it runs, so a
-  // multi-minute precommit is no longer a silent tool call.
-  assert.match(SRC, /await runTrustedPrecommit\(targetDir, targetRoot, mode, _signal, _onUpdate\)/);
+  // The live sink travels too, wrapped in a progress reporter: the runner's
+  // log streams under a step line that names the lane and its elapsed time,
+  // so a multi-minute precommit is no longer a silent tool call.
+  assert.match(SRC, /await runTrustedPrecommit\(targetDir, targetRoot, mode, signal, \(partial\) => \{/);
+  assert.match(SRC, /title: `review-gate: precommit \(\$\{mode\}\)`/);
   assert.doesNotMatch(SRC, /async function runTrustedPrecommit[^{]*\{\s*\n\s*const cwd = process\.cwd\(\)/);
 });
 
@@ -1174,7 +1199,11 @@ test("precommit replies POINT AT the log; they never inline the runner's output"
   const body = SRC.slice(start, SRC.indexOf('name: "declare_done"'));
   assert.match(body, /Full output: \$\{outcome\.logPath\}/, "every reply names the log");
   assert.match(body, /outcome\.failedSteps/, "failed check names help locate the section");
-  assert.doesNotMatch(body, /\.tail/, "step output must never be inlined into the reply");
+  // The runner's output goes to the LIVE channel (progress.tail → onUpdate)
+  // and to the log file — never into the returned text, which is what the
+  // agent's context pays for.
+  assert.doesNotMatch(body, /text: [^\n]*outcome\.(tail|output)/, "step output must never be inlined into the reply");
+  assert.match(body, /progress\.tail\(partial\.content/, "…it goes to the live progress channel instead");
 });
 
 test("failed-step names are diagnostics: read AFTER the verdict, never fed into it", () => {
@@ -1303,7 +1332,7 @@ test("goal criterion 3: prepare_adviser is registered and hands back a brief wit
   assert.match(body, /judge_submit\(\{role:\\"adviser\\"/, "the header names the normal path");
   assert.doesNotMatch(body, /review_spawn\(\{ role: "adviser"/, "no manual spawn recipe");
   // The waiting discipline moved to where it is mechanically useful
-  // (review_wait's own reply), so the header no longer teaches it. What must
+  // (judge_wait's own reply), so the header no longer teaches it. What must
   // survive is the truncated-goal pointer: a brief with half a goal in it
   // sends the adviser off the wrong contract.
   assert.match(body, /需要全文时读 \$\{pathJoin\(target\.root, LOOP_GOAL_RELPATH\)\}/,
@@ -1445,11 +1474,9 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
   assert.match(childBlock, /if \(!notifyNow\)/, "the throttled hosted wait has a distinct branch");
   assert.match(childBlock, /scheduleChildWaitRecheck\(/, "the throttled branch schedules a self-owned recheck");
   assert.match(childBlock, /return;/, "the throttled branch does not fall through to RESUME");
-  const closeAt = SRC.indexOf('name: "review_close"');
-  const closeBody = SRC.slice(closeAt, closeAt + 3000);
-  assert.match(closeBody, /cancelChildWaitTimer\(\)/, "review_close cancels the watchdog");
-  const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
-  const shutdownBody = SRC.slice(shutdownAt, shutdownAt + 500);
+  const closeBody = toolBodyOf("judge_close");
+  assert.match(closeBody, /cancelChildWaitTimer\(\)/, "judge_close cancels the watchdog");
+  const shutdownBody = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown handler");
   assert.match(shutdownBody, /cancelChildWaitTimer\(\)/, "session_shutdown cancels the watchdog");
 });
 
@@ -1526,27 +1553,77 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo, reuse, fresh-k
     "the killed process leaves the registry");
 });
 
-test("review_read / review_close / review_wait address a judge by ROLE", () => {
-  for (const tool of ["review_read", "review_close", "review_wait"]) {
-    const at = SRC.indexOf(`name: "${tool}"`);
-    assert.ok(at > 0, `${tool} must be registered`);
-    const body = SRC.slice(at, at + 4000);
+test("judge_read / judge_close / judge_wait address a judge by ROLE", () => {
+  for (const tool of ["judge_read", "judge_close", "judge_wait"]) {
+    const body = toolBodyOf(tool);
     assert.match(body, /role: Type\.Optional\(Type\.Enum\(\{ reviewer/, `${tool} takes a role`);
     assert.match(body, /findJudgeChild\(root, role, /, `${tool} resolves the child by role`);
   }
+  // The old names are RETIRED — no alias, no compatibility shim.
+  for (const gone of ["review_read", "review_close", "review_wait"]) {
+    assert.ok(!SRC.includes(`name: "${gone}"`), `${gone} must no longer be registered`);
+  }
 });
 
-test("review_wait applies the three end-of-round criteria and returns the wait discipline", () => {
-  const at = SRC.indexOf('name: "review_wait"');
-  const body = SRC.slice(at, at + 4000);
+test("judge_wait applies the three end-of-round criteria and returns conclusion + progress", () => {
+  const body = toolBodyOf("judge_wait");
   assert.match(body, /clampWaitTimeout\(params\.timeoutMs\)/, "the blocking window is clamped by the gate");
   assert.match(body, /probeJudgeRound\(child\)/, "the loop probes with the shared criteria");
-  assert.match(body, /WAIT_DISCIPLINE_HINT/, "the reply carries the wait discipline");
-  const probeAt = SRC.indexOf("function probeJudgeRound(");
-  const probe = SRC.slice(probeAt, probeAt + 1200);
+  // User decision 6.2: the RETURN carries the round's own output — the shared
+  // formatter decides which half (conclusion vs. progress), so the tool must
+  // not assemble a reply of its own.
+  assert.match(body, /formatJudgeWaitReply\(\{/, "the reply is built by the pure formatter");
+  assert.match(body, /stdoutTail: readLogTail\(child\.stdoutPath\)/, "both branches carry this round's stdout tail");
+  assert.match(body, /findings: recentStreamFindings\(child\.streamPath\)/,
+    "the unfinished branch carries the newest streamed findings");
+  const probe = windowOf("function probeJudgeRound(", "\n  }", "probeJudgeRound");
   assert.match(probe, /evaluateJudgeWait\(\{/, "the criteria live in the pure module");
   assert.match(probe, /existsSync\(child\.exitCodePath\)/, "the exit-code file is one criterion");
   assert.match(probe, /child\.stdoutPath/, "the fence criterion reads stdout, where the fence is plain text");
+});
+
+test("STREAMING: every long-running gate tool publishes progress on its own onUpdate", () => {
+  // Measured (.pi/gate-timings.jsonl): a review round is 8.9 min at the
+  // median, a full precommit 92s. Each of these used to be a silent call.
+  for (const tool of [
+    "judge_wait", "judge_submit", "run_precommit", "declare_done",
+    "request_copilot_review", "check_copilot_review",
+  ]) {
+    const body = toolBodyOf(tool);
+    assert.match(body, /createProgressReporter\(\{/, `${tool} must open a progress reporter`);
+    assert.match(body, /onUpdate: onUpdate as ToolUpdate \| undefined/,
+      `${tool} must stream to the onUpdate IT was given`);
+    assert.match(body, /progress\.step\(/, `${tool} must name at least one step`);
+  }
+});
+
+test("STREAMING: the LLM guards announce themselves only when slow, on the status bar", () => {
+  // A `tool_call` hook has no onUpdate at all (that is a tool's channel), so
+  // the six guard calls use the status line — and only past the threshold,
+  // or a 200ms round-trip would narrate itself.
+  const guarded = SRC.match(/await withSlowNotice\(/g) ?? [];
+  assert.ok(guarded.length >= 5, `every LLM guard call must be wrapped (found ${guarded.length})`);
+  for (const call of [
+    /classifyNonEnglish\(classifier\(\), labels\)/,
+    /classifyShipCommand\(classifier\(\), command\)/,
+    /classifyAiAttribution\(classifier\(\), msgs\)/,
+    /classifyNonEnglish\(classifier\(\), msgs\)/,
+    /classifyNonEnglish\(classifier\(\), prTexts\)/,
+  ]) {
+    assert.match(SRC, new RegExp(`withSlowNotice\\([\\s\\S]{0,300}${call.source}`),
+      `this classifier call must run inside a slow-notice: ${call}`);
+  }
+  assert.match(SRC, /statusNotice\(llmNoticeUi\(ctx\), LLM_STATUS_KEY\)/,
+    "the sink is the gate's own status line, cleared when the call ends");
+});
+
+test("STREAMING: progress text is a partial result only — it never enters a tool's return", () => {
+  // The two channels answer different questions: onUpdate is for the human
+  // watching, the return value is what the agent's context pays for.
+  for (const tool of ["judge_wait", "judge_submit", "run_precommit", "declare_done"]) {
+    const body = toolBodyOf(tool);
+    assert.doesNotMatch(body, /text: renderProgress\(/, `${tool} must not return a progress frame`);
+  }
 });
 
 
@@ -1584,11 +1661,9 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the process 
     assert.ok(spawn.includes(field), `a dispatched round must record ${field} at spawn time`);
   }
 
-  // review_read: live process ⇒ tail of the stdout log; ended ⇒ the
+  // judge_read: live process ⇒ tail of the stdout log; ended ⇒ the
   // transcript + stderr, because the process is gone but its records are not.
-  const readAt = SRC.indexOf('name: "review_read"');
-  assert.ok(readAt > 0);
-  const read = SRC.slice(readAt, readAt + 4500);
+  const read = toolBodyOf("judge_read");
   assert.match(read, /readJudgeSessionState\(/, "liveness comes from the session's artifacts");
   assert.match(read, /judgeProcessAlive\(child\.child\)/, "the live PROCESS's exitCode decides running");
   assert.match(read, /readJudgeConclusion\(child\.sessionDir\)/,
@@ -1607,10 +1682,8 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the process 
     "…from the transcript and stderr of THAT child");
   assert.match(snapshots, /\[c\.stdoutPath\]/, "…and its stdout log");
 
-  // review_close: terminate the PROCESS (SIGTERM), then drop the registry.
-  const closeAt = SRC.indexOf('name: "review_close"');
-  assert.ok(closeAt > 0);
-  const close = SRC.slice(closeAt, closeAt + 3600);
+  // judge_close: terminate the PROCESS (SIGTERM), then drop the registry.
+  const close = toolBodyOf("judge_close");
   assert.match(close, /kill\?\.\("SIGTERM"\)/, "the live process is SIGTERMed");
   assert.match(close, /closed: true/,
     "closing an already-finished child still reports success (idempotent)");
@@ -2569,12 +2642,14 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
 
 
 test("judge_submit runs the whole submission chain, and cannot dead-end on it", () => {
-  const at = SRC.indexOf("async function submitForReview(");
-  assert.ok(at > 0, "the chain must exist");
-  const body = SRC.slice(at, at + 3500);
+  const body = windowOf("async function submitForReview(", "\n  /**", "submitForReview");
   // Each step is the TOOL's own execute — one implementation, one set of
   // mechanical checks.
-  assert.match(body, /callTool\("run_precommit", \{ mode: "full"/);
+  assert.match(body, /callTool\(\s*"run_precommit",\s*\{ mode: "full"/);
+  // …and each step reports itself, so a stalled round shows WHERE it stalled.
+  for (const step of [/step\("precommit \(full\)"\)/, /step\("checkpoint 提交"\)/, /step\("prepare/]) {
+    assert.match(body, step, "every chain step publishes progress");
+  }
   assert.match(body, /callTool\("review_checkpoint", \{ message, repo: input\.root \}/);
   assert.match(body, /callTool\(\s*"prepare_review"/);
   // A CLEAN worktree means the round is already frozen — treating it as a
@@ -2585,8 +2660,7 @@ test("judge_submit runs the whole submission chain, and cannot dead-end on it", 
   // The polish gate's reason must be able to travel, or a round after two
   // READYs could never be submitted through the one sanctioned entry (round-5 P1).
   assert.match(body, /input\.reason \? \{ reason: input\.reason \} : \{\}/);
-  const submitAt = SRC.indexOf('name: "judge_submit"');
-  const submit = SRC.slice(submitAt, submitAt + 5000);
+  const submit = toolBodyOf("judge_submit");
   assert.match(submit, /reason: Type\.Optional/, "judge_submit takes the polish reason");
   assert.match(submit, /reason: params\.reason \? String\(params\.reason\) : undefined/,
     "and passes it into the chain");

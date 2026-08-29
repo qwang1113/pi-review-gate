@@ -29,7 +29,7 @@ export const TOOL_DECISION_TABLE =
   "| 审 goal 草稿 | `judge_submit({role:\"goal-auditor\", task})` |\n" +
   "| 自己决定不了的设计取舍 | `judge_submit({role:\"adviser\", task})` |\n" +
   "| 工作区有别人的改动 / 还没有工作分支 | `setup_workspace()` |\n" +
-  "| 看 judge 的状态或结论 | `review_read({role})`；实在没别的可做才 `review_wait({role})` |\n" +
+  "| 看 judge 的状态或结论 | `judge_read({role})`；实在没别的可做才 `judge_wait({role})` |\n" +
   "| 任务做完了 | `declare_done({summary})` — 门禁自己合分支 |\n" +
   "| 要改敏感文件 / 缩小审查范围 | `request_sensitive_edit` / `request_scope_limit` |";
 

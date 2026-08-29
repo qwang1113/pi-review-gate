@@ -231,7 +231,7 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
          由主会话侧按「记录的那个进程是否还在」判定(见 lib/judge-session.ts);
       c. verdict 已产出但进程未退:子会话的 session jsonl 里已出现
          verdict fence(实测失败模式——子会话完成但进程未退出,主会话空等);
-      任一命中即结束等待:review_read 读取输出继续流程,或 review_close 后
+      任一命中即结束等待:judge_read 读取输出继续流程,或 judge_close 后
       重新派发。
    3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不退)。
       `agent_settled` 会注入托管等待指令;主动托管远比被动拉起可靠。
@@ -333,7 +333,7 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    must be bound to the SAME (current) tree — the reviewed HEAD commit tree;
    if a new checkpoint landed since the READY, run the affected step again.
    It also rejects while a judge child session is still open: finish the
-   round (`record_review` / `review_close`) first.
+   round (`record_review` / `judge_close`) first.
 
    It also rejects while a Copilot cycle is still open or the loop goal is
    unapproved — those are completion requirements, not ship requirements.

@@ -100,9 +100,19 @@ import {
   clampWaitTimeout,
   hasJudgeFence,
   adjudicateGoalAudit,
-  WAIT_DISCIPLINE_HINT,
+  formatJudgeWaitReply,
+  tailLines,
+  WAIT_STDOUT_TAIL_LINES,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
 } from "../lib/judge-lifecycle.ts";
+import {
+  createProgressReporter,
+  type ProgressReporter,
+  withSlowNotice,
+  statusNotice,
+  type SlowNoticeSink,
+  type ToolUpdate,
+} from "../lib/progress-stream.ts";
 import {
   normalizeQuestions,
   resumeFrom,
@@ -264,7 +274,7 @@ import {
   ensureAgentFilesPresent,
 } from "../lib/model-config.ts";
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
-import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
+import { buildStreamConsumerDirective, buildStreamDirective, parseStream } from "../lib/review-stream.ts";
 import { isModelAllowed } from "../lib/model-allowlist.ts";
 import { squashPointBaseline, branchBaseBaseline } from "../lib/review-baseline.ts";
 import {
@@ -433,10 +443,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     return registerToolUpstream(spec);
   };
   /** Call another gate tool internally; a missing tool is a programming error. */
-  async function callTool(name: string, params: Record<string, unknown>, ctx: unknown) {
+  async function callTool(
+    name: string,
+    params: Record<string, unknown>,
+    ctx: unknown,
+    /** Live-output sink forwarded to the called tool (the chain streams). */
+    onUpdate?: ToolUpdate,
+  ) {
     const run = toolExecutes.get(name);
     if (!run) throw new Error(`review-gate: internal tool ${name} is not registered`);
-    return run(`internal-${name}`, params, undefined, undefined, ctx);
+    return run(`internal-${name}`, params, undefined, onUpdate, ctx);
   }
   /** The text a tool result carries (its content joined). */
   function toolText(result: { content?: { type: string; text: string }[] }): string {
@@ -972,7 +988,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // one tool to another (and cannot mis-carry it).
       void recordJudgeConclusion(sessionId).then((recorded) => {
         const content = `[review-gate] 子会话 ${label} 完成（session ${sessionId}）。` +
-          (recorded ? `\n${recorded}` : " 用 review_read({role}) 读它的输出并继续。");
+          (recorded ? `\n${recorded}` : " 用 judge_read({role}) 读它的输出并继续。");
         pi.sendMessage({ customType: "review-gate", content, display: true }, { triggerTurn: true, deliverAs: "steer" });
       });
     },
@@ -1001,6 +1017,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     pidPath: string;
     /** exit-code file — the authoritative 'session finished' fact. */
     exitCodePath: string;
+    /** This round's findings stream, when the role has one (judge_wait reads it). */
+    streamPath?: string;
   }
   const childSessions = new Map<string, JudgeChild[]>();
   /**
@@ -1745,7 +1763,26 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  (lib/llm-classify.ts documents why a failed call is never remembered). */
   const labelCheckMemo = createVerdictMemo();
 
-  async function checkTestLabels(path: string, content: string): Promise<string | undefined> {
+  /** Status-bar line the gate owns for its LLM-guard notices. */
+  const LLM_STATUS_KEY = "review-gate-llm";
+  /**
+   * The status bar of a HOOK's context.
+   *
+   * A `tool_call` handler has no `onUpdate` (that is a tool's channel), so a
+   * multi-second classification would look like a frozen editor. The status
+   * line is the one surface a hook has, and `withSlowNotice` only ever uses
+   * it when the call is actually slow.
+   */
+  function llmNoticeUi(ctx: unknown): { setStatus?: (key: string, text: string | undefined) => void } | undefined {
+    return (ctx as { ui?: { setStatus?: (key: string, text: string | undefined) => void } } | undefined)?.ui;
+  }
+
+  async function checkTestLabels(
+    path: string,
+    content: string,
+    /** Status-bar sink: an L6 classification slower than ~3s says so. */
+    notice?: SlowNoticeSink,
+  ): Promise<string | undefined> {
     if (!content) return undefined;
     let analyze: ((p: string, src: string) => { violations: Array<{ line: number; label: string }>; latinLabels: Array<{ line: number; label: string }> }) | undefined;
     let isTest: ((p: string) => boolean) | undefined;
@@ -1791,7 +1828,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       const key = labelCheckMemo.key(labels);
       let verdict = labelCheckMemo.get(key);
       if (verdict === undefined) {
-        verdict = await classifyNonEnglish(classifier(), labels);
+        verdict = await withSlowNotice(
+          notice,
+          "review-gate: 正在做 L6 测试标签分类（语义判定）…",
+          () => classifyNonEnglish(classifier(), labels),
+        );
         labelCheckMemo.remember(key, verdict);
       }
       if (verdict === true) {
@@ -1887,7 +1928,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       // test files included) or a goal-blocked write pays neither the L6
       // classification nor its LLM call.
       if (path) {
-        const labelProblem = await checkTestLabels(path, editedTestContent(input, path));
+        const labelProblem = await checkTestLabels(
+          path,
+          editedTestContent(input, path),
+          statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
+        );
         if (labelProblem) return { block: true, reason: labelProblem };
       }
       sessionEdited = true;
@@ -1953,6 +1998,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     // sessions are clamped to normal, making the claim plainly false).
     const command = typeof input.command === "string" ? input.command : "";
     if (!command) return;
+    // The ship path runs up to three LLM guards before it can answer; each is
+    // a few seconds, and a blocked bash call with no explanation reads as a
+    // hang. Same status-bar sink as the L6 label check.
+    const shipNotice = statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY);
 
     // Normal mode (user-confirmed, or the consent-free /tmp scratchFirstMode
     // first classification which maps loop / missing picks to normal):
@@ -2019,7 +2068,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         anyChange &&
         isSuspiciousShipCandidate(command)
       ) {
-        const kind = await classifyShipCommand(classifier(), command);
+        const kind = await withSlowNotice(
+          shipNotice,
+          "review-gate: 正在做 ship 命令语义判定…",
+          () => classifyShipCommand(classifier(), command),
+        );
         if (kind !== undefined && kind !== "none") {
           ships.push({ kind, segment: command });
         }
@@ -2056,7 +2109,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         // AI attribution ("pair-programmed with an assistant"). Failure → pass
         // (exact pre-LLM behavior).
         if (msgs.length > 0 && projectConfig.llmGuards.aiAttribution) {
-          if (await classifyAiAttribution(classifier(), msgs) === true) {
+          const attributed = await withSlowNotice(
+            shipNotice,
+            "review-gate: 正在做 AI 署名语义判定…",
+            () => classifyAiAttribution(classifier(), msgs),
+          );
+          if (attributed === true) {
             return {
               block: true,
               reason: "review-gate: commit message contains AI attribution (semantic check). Rewrite without it.",
@@ -2090,7 +2148,11 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         } else if (msgs.length > 0 && projectConfig.llmGuards.englishCheck
           && !msgs.some(containsNonLatinLetter)
-          && await classifyNonEnglish(classifier(), msgs) === true) {
+          && await withSlowNotice(
+            shipNotice,
+            "review-gate: 正在做 L5 语义判定（罗马化非英文）…",
+            () => classifyNonEnglish(classifier(), msgs),
+          ) === true) {
           // L5 blind spot: the majority-body check passed, but a message that is
           // 100% Latin script may still be romanized non-English (pinyin/romaji).
           // Only run the semantic check when there is NO non-Latin letter at all
@@ -2117,7 +2179,11 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         } else if (prTexts.length > 0 && projectConfig.llmGuards.englishCheck
           && !prTexts.some(containsNonLatinLetter)
-          && await classifyNonEnglish(classifier(), prTexts) === true) {
+          && await withSlowNotice(
+            shipNotice,
+            "review-gate: 正在做 L5 语义判定（罗马化非英文）…",
+            () => classifyNonEnglish(classifier(), prTexts),
+          ) === true) {
           return {
             block: true,
             reason:
@@ -3193,7 +3259,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- review_spawn / review_send / review_read / review_close ----------
+  // ---------- review_spawn / review_send / judge_read / judge_close ----------
 
   /**
    * Everything that has to happen BEFORE a reviewer can judge, run by the gate.
@@ -3213,17 +3279,30 @@ export default function reviewGate(pi: ExtensionAPI) {
     message?: string;
     reason?: string;
     ctx: unknown;
+    /** Progress sink for the chain (each step publishes as it starts/ends). */
+    progress?: ProgressReporter;
   }): Promise<{ ok: true; taskText: string; streamPath?: string } | { ok: false; text: string }> {
     // 1. It has to build. A full lane, because a checkpoint that only ran the
     //    related tests cannot clear the ship gate later anyway.
-    const pre = await callTool("run_precommit", { mode: "full", repo: input.root }, input.ctx);
+    input.progress?.step("precommit (full)");
+    const pre = await callTool(
+      "run_precommit",
+      { mode: "full", repo: input.root },
+      input.ctx,
+      // The runner's live log is this step's tail: the 92s (median) precommit
+      // is where the chain spends most of its time, so it is where the human
+      // needs to see something moving.
+      input.progress ? (partial) => input.progress?.tail(partial.content.map((c) => c.text).join("\n")) : undefined,
+    );
     if (pre.details?.verdict !== "PASS") {
+      input.progress?.fail(String(pre.details?.verdict ?? "no verdict"));
       return {
         ok: false,
         text: "review-gate: 本轮未送审 — precommit 没过。\n" + toolText(pre) +
           "\n修好后重新 judge_submit({role:\"reviewer\"})；无需手动再跑 precommit。",
       };
     }
+    input.progress?.done("PASS");
     // 2. Freeze it. The reviewed unit is a commit, and the message says so —
     //    a checkpoint must be recognizable as one in the history.
     //
@@ -3234,28 +3313,34 @@ export default function reviewGate(pi: ExtensionAPI) {
     //    already in, so every retry died at this step. Only a REFUSAL
     //    (isError) stops the chain.
     const message = checkpointMessage(input.message ?? input.note);
+    input.progress?.step("checkpoint 提交");
     const commit = await callTool("review_checkpoint", { message, repo: input.root }, input.ctx);
     if (commit.isError) {
+      input.progress?.fail("被拒");
       return {
         ok: false,
         text: "review-gate: 本轮未送审 — checkpoint 提交被拒。\n" + toolText(commit),
       };
     }
+    input.progress?.done(typeof commit.details?.sha === "string" ? String(commit.details.sha).slice(0, 12) : "worktree 已冻结");
     // 3. Compute the range and the findings stream, and take the ready-made
     //    reviewer task text. `reason` rides along for the polish gate: without
     //    it a round after two READYs could never be submitted through the one
     //    sanctioned entry point.
+    input.progress?.step("prepare（算 baseline..HEAD）");
     const prepared = await callTool(
       "prepare_review",
       { repo: input.root, ...(input.reason ? { reason: input.reason } : {}) },
       input.ctx,
     );
     if (prepared.details?.prepared === false || prepared.isError) {
+      input.progress?.fail("被拒");
       return {
         ok: false,
         text: "review-gate: 本轮未送审 — prepare_review 被拒。\n" + toolText(prepared),
       };
     }
+    input.progress?.done(typeof prepared.details?.range === "string" ? String(prepared.details.range) : "范围已注册");
     const taskText = extractTaskText(toolText(prepared));
     return {
       ok: true,
@@ -3347,6 +3432,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     title: string;
     task: string;
     fresh?: boolean;
+    /** This round's findings stream, recorded on the child for judge_wait. */
+    streamPath?: string;
   }): JudgeDispatch {
     const { root, role, task } = opts;
     const title = opts.title.replace(/[^A-Za-z0-9._-]/g, "-") || role;
@@ -3379,7 +3466,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         sessionDir: running?.sessionDir ?? sessionDir,
         stdoutPath: running?.stdoutPath,
         busy: true,
-        error: `${role} 仍在处理上一轮任务，本轮未提交。等它结束（完成会唤醒本会话，或用 review_wait 阻塞等待）后重新提交；确实要丢弃它就传 fresh:true。`,
+        error: `${role} 仍在处理上一轮任务，本轮未提交。等它结束（完成会唤醒本会话，或用 judge_wait 阻塞等待）后重新提交；确实要丢弃它就传 fresh:true。`,
       };
     }
     if (decision.action === "kill-and-spawn") {
@@ -3440,6 +3527,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         stderrPath,
         pidPath,
         exitCodePath,
+        streamPath: opts.streamPath,
       };
       // Tee stdout/stderr to this round's logs: stdout is where the verdict
       // fence is readable as PLAIN text (the transcript escapes it), stderr is
@@ -3541,7 +3629,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // "no recognizable verdict" — technically fail-closed, but it reads as
       // a parse error when the judge simply asked something.
       if (!/"gate"\s*:\s*"(READY|BLOCKED|NEEDS_HUMAN)"/.test(roundOutput)) {
-        return `${child.role} 提了一个问题（没有 verdict）。用 review_read({role:"${child.role}"}) 看问题，` +
+        return `${child.role} 提了一个问题（没有 verdict）。用 judge_read({role:"${child.role}"}) 看问题，` +
           `再用 judge_submit({role:"${child.role}", task:<你的回答>}) 带着答案续接同一会话。`;
       }
       if (child.role === "reviewer") {
@@ -3597,18 +3685,35 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the old hand-written `grep '"gate":"READY"'` never matched anything.
    */
   function probeJudgeRound(child: JudgeChild) {
-    let stdoutTail = "";
-    try {
-      if (existsSync(child.stdoutPath)) {
-        const raw = readFileSync(child.stdoutPath, "utf8");
-        stdoutTail = raw.slice(-8000);
-      }
-    } catch { /* an unreadable log simply does not satisfy the criterion */ }
     return evaluateJudgeWait({
       processAlive: judgeProcessAlive(child.child),
       exitCodeExists: existsSync(child.exitCodePath),
-      stdoutTail,
+      stdoutTail: readLogTail(child.stdoutPath),
     });
+  }
+
+  /** Last bytes of a log file; an unreadable/absent log reads as empty. */
+  function readLogTail(path: string, maxBytes = 8000): string {
+    try {
+      if (!existsSync(path)) return "";
+      return readFileSync(path, "utf8").slice(-maxBytes);
+    } catch { return ""; }
+  }
+
+  /**
+   * The findings a judge has streamed so far, newest last, one line each.
+   *
+   * Evidence only: the stream never carries a verdict (parseStream rejects
+   * verdict-shaped lines), so showing it while a round is still open cannot
+   * leak a conclusion the gate has not recorded.
+   */
+  function recentStreamFindings(streamPath: string | undefined): string[] {
+    if (!streamPath) return [];
+    try {
+      if (!existsSync(streamPath)) return [];
+      return parseStream(readFileSync(streamPath, "utf8")).findings
+        .map((f) => `[${f.severity}] ${f.location ? `${f.location} — ` : ""}${f.issue}`.slice(0, 300));
+    } catch { return []; }
   }
 
 
@@ -3623,7 +3728,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       "kill, and the completion listener. You pass WHO and WHAT; you never pass a session id, a " +
       "title or a directory. It returns as soon as the round is SUBMITTED, not when the judge is " +
       "done — the judge's process exit wakes this session as a new turn, and you then read the " +
-      "verdict with review_read (or review_wait, when nothing else is left to do). A role that is " +
+      "verdict with judge_read (or judge_wait, when nothing else is left to do). A role that is " +
       "still working REFUSES the round (nothing is silently dropped): wait for it, or pass " +
       "fresh:true to discard it.",
     parameters: Type.Object({
@@ -3654,7 +3759,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         description: "Kill the role's RUNNING process and dispatch this round anyway. Its transcript (and therefore its context) survives — this abandons the round in flight, not the conversation.",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, onUpdate, ctx) {
       const target = resolveToolRepo(params.repo);
       if (!target.ok) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
@@ -3688,6 +3793,13 @@ export default function reviewGate(pi: ExtensionAPI) {
        * reports it in the reply; criterion 1 requires it in the return.
        */
       let streamPath: string | undefined;
+      // Live progress for the whole submission: precommit → checkpoint →
+      // prepare → dispatch. Each step publishes as it starts and as it ends,
+      // so a round that stalls shows WHERE it stalled.
+      const progress = createProgressReporter({
+        title: `review-gate: judge_submit(${role})`,
+        onUpdate: onUpdate as ToolUpdate | undefined,
+      });
       if (role === "reviewer") {
         const chain = await submitForReview({
           root,
@@ -3695,6 +3807,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           message: params.message ? String(params.message) : undefined,
           reason: params.reason ? String(params.reason) : undefined,
           ctx,
+          progress,
         });
         if (!chain.ok) {
           return {
@@ -3744,10 +3857,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       // The title is a DISPLAY label the gate derives itself (B5: it must not
       // reach the session's directory, or every round starts a new session).
       const title = `${role}-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
-      const dispatch = dispatchJudgeRound({ root, role, title, task: reviewTask, fresh: params.fresh === true });
+      progress.step(`spawn ${role}`);
+      const dispatch = dispatchJudgeRound({ root, role, title, task: reviewTask, fresh: params.fresh === true, streamPath });
       if (!dispatch.ok) {
         // A busy role is a normal state with a next step, not a malfunction —
         // the reason text already says what to do, so it stands alone.
+        progress.fail(dispatch.busy ? "该 role 仍在跑上一轮" : "spawn 失败");
         const lead = dispatch.busy ? "review-gate: " : "review-gate: judge_submit 失败 — ";
         return {
           content: [{ type: "text", text: `${lead}${dispatch.error ?? "judge 进程未能启动"}` }],
@@ -3755,6 +3870,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
+      progress.done(dispatch.reused ? "已受理（续接同一会话）" : "已受理（新会话）");
       // The round is ACCEPTED — only now is the audited draft on record. A
       // refused submission (a busy role, a failed spawn) must never replace
       // the draft a running audit is judging: its verdict would be recorded
@@ -3769,7 +3885,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         `- stdout: ${dispatch.stdoutPath ?? child?.stdoutPath ?? "(pending)"}`,
         `- transcript: ${dispatch.sessionDir ?? child?.sessionDir ?? "(pending)"}`,
         ...(streamPath ? [`- findings 流（边审边修）: ${streamPath}`] : []),
-        "- 进程退出即完成，届时会唤醒本会话；用 review_read({role}) 取结论。现在别等，先做别的确定性工作。",
+        "- 进程退出即完成，届时会唤醒本会话；用 judge_read({role}) 取结论。现在别等，先做别的确定性工作。",
       ];
       return {
         content: [{ type: "text", text: lines.join("\n") }],
@@ -3957,9 +4073,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       // A resume IS a dispatch under the same session id — so it goes through
       // the same owner, which allocates a FRESH run dir. Reusing the previous
-      // round's exit-code/stdout files would make review_wait report "done"
+      // round's exit-code/stdout files would make judge_wait report "done"
       // instantly and hand back the PREVIOUS round's verdict.
-      const dispatch = dispatchJudgeRound({ root, role: child.role, title: child.title, task: text });
+      const dispatch = dispatchJudgeRound({ root, role: child.role, title: child.title, task: text, streamPath: child.streamPath });
       if (!dispatch.ok) {
         return {
           content: [{ type: "text", text: `review-gate: review_send did not deliver — ${dispatch.error ?? "the judge process could not start"}` }],
@@ -3976,7 +4092,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "review_read",
+    name: "judge_read",
     label: "Read Judge Child",
     description:
       "Read a judge child by ROLE (a snapshot, never a wait): its session state (running / " +
@@ -3993,7 +4109,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const role = params.role ? String(params.role) : undefined;
       const sessionId = params.sessionId ? String(params.sessionId) : undefined;
       if (!role && !sessionId) {
-        return { content: [{ type: "text", text: "review-gate: review_read needs a role (reviewer / adviser / goal-auditor)." }], details: { found: false, alive: false, lifecycle: "unknown" as const, exitCode: undefined, hasVerdict: false }, isError: true };
+        return { content: [{ type: "text", text: "review-gate: judge_read needs a role (reviewer / adviser / goal-auditor)." }], details: { found: false, alive: false, lifecycle: "unknown" as const, exitCode: undefined, hasVerdict: false }, isError: true };
       }
       const target = resolveToolRepo(params.repo);
       // Never guess the repo: with several in play, reading the wrong repo's
@@ -4052,7 +4168,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "review_close",
+    name: "judge_close",
     label: "Close Judge Child",
     description:
       "Terminate a judge role's pi PROCESS (SIGTERM; its transcript stays on disk, so the same role " +
@@ -4071,7 +4187,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const role = params.role ? String(params.role) : undefined;
       const wantedId = params.sessionId ? String(params.sessionId) : undefined;
       if (!role && !wantedId) {
-        return { content: [{ type: "text", text: "review-gate: review_close needs a role (reviewer / adviser / goal-auditor)." }], details: { closed: false, terminated: false, sessionId: undefined as string | undefined }, isError: true };
+        return { content: [{ type: "text", text: "review-gate: judge_close needs a role (reviewer / adviser / goal-auditor)." }], details: { closed: false, terminated: false, sessionId: undefined as string | undefined }, isError: true };
       }
       const target = resolveToolRepo(params.repo);
       // Never guess the repo: closing another repo's judge is destructive.
@@ -4108,7 +4224,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "review_wait",
+    name: "judge_wait",
     label: "Wait For Judge",
     description:
       "Block until a judge role's current round is over, then return what it produced. This is the " +
@@ -4125,11 +4241,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         description: `Blocking window in ms (default 300000, hard cap ${JUDGE_WAIT_MAX_TIMEOUT_MS})`,
       })),
     }),
-    async execute(_id, params, signal) {
+    async execute(_id, params, signal, onUpdate) {
       const role = params.role ? String(params.role) : undefined;
       const wantedId = params.sessionId ? String(params.sessionId) : undefined;
       if (!role && !wantedId) {
-        return { content: [{ type: "text", text: "review-gate: review_wait needs a role (reviewer / adviser / goal-auditor)." }], details: { done: false, reason: undefined as string | undefined, role: undefined as string | undefined, hasVerdict: false }, isError: true };
+        return { content: [{ type: "text", text: "review-gate: judge_wait needs a role (reviewer / adviser / goal-auditor)." }], details: { done: false, reason: undefined as string | undefined, role: undefined as string | undefined, hasVerdict: false }, isError: true };
       }
       const target = resolveToolRepo(params.repo);
       // Never guess the repo: waiting on the wrong repo's judge returns a
@@ -4147,23 +4263,47 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       const budgetMs = clampWaitTimeout(params.timeoutMs);
-      const deadline = Date.now() + budgetMs;
+      const startedAt = Date.now();
+      const deadline = startedAt + budgetMs;
+      // The blackest box in the loop: a review round is 8.9 minutes at the
+      // median. Every probe tick republishes what the judge has written so
+      // far, so waiting shows motion instead of a frozen call.
+      const progress = createProgressReporter({
+        title: `review-gate: 等待 ${child.role} 本轮结束`,
+        onUpdate: onUpdate as ToolUpdate | undefined,
+      });
+      progress.step(`${child.role} 运行中`);
+      const publishProgress = (): void => {
+        const findings = recentStreamFindings(child.streamPath);
+        progress.tail([
+          tailLines(readLogTail(child.stdoutPath), WAIT_STDOUT_TAIL_LINES),
+          findings.length ? `findings: ${findings.length} 条，最新 ${findings[findings.length - 1]}` : "",
+        ].filter(Boolean).join("\n"));
+      };
       let outcome = probeJudgeRound(child);
+      publishProgress();
       while (!outcome.done && Date.now() < deadline && signal?.aborted !== true) {
         await new Promise((r) => setTimeout(r, 2000));
         outcome = probeJudgeRound(child);
+        publishProgress();
       }
+      progress.done(outcome.done ? outcome.reason : "未结束");
       const conclusion = outcome.done ? readJudgeConclusion(child.sessionDir) : undefined;
-      const head = outcome.done
-        ? `review-gate: ${child.role} 本轮已结束（判据：${outcome.reason}）。`
-        : `review-gate: ${child.role} 仍在运行（等待 ${Math.round(budgetMs / 1000)}s 未命中任一判据）。`;
-      const body = conclusion?.text
-        ? `--- 结论（${conclusion.hasVerdict ? "含 verdict fence" : "无 fence，可能只是收尾语"}）---\n${conclusion.text}`
-        : outcome.done
-          ? "--- 该会话没有留下结论文本；用 review_read 看 stdout / stderr ---"
-          : "";
+      // The RETURN is the agent's channel (user decision 6.2): a finished
+      // round hands back the conclusion plus this round's stdout tail; an
+      // unfinished one hands back the progress so far — the same tail plus
+      // the newest streamed findings — instead of a bare "not done yet".
+      const text = formatJudgeWaitReply({
+        role: child.role,
+        done: outcome.done,
+        reason: outcome.reason,
+        waitedMs: Date.now() - startedAt,
+        stdoutTail: readLogTail(child.stdoutPath),
+        conclusion: conclusion ? { text: conclusion.text, hasVerdict: conclusion.hasVerdict } : undefined,
+        findings: recentStreamFindings(child.streamPath),
+      });
       return {
-        content: [{ type: "text", text: [head, body, WAIT_DISCIPLINE_HINT].filter(Boolean).join("\n") }],
+        content: [{ type: "text", text }],
         details: {
           done: outcome.done,
           reason: outcome.reason,
@@ -4895,7 +5035,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           "unblocks only that repo.",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       // Available in every mode: explore allows edits/bash, so the agent may
       // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
@@ -4929,10 +5069,20 @@ export default function reviewGate(pi: ExtensionAPI) {
       // — in the wrong dir.
       // targetDir is where the checks RUN; targetRoot is the repo the run log
       // belongs to (`.pi/` is only gate-owned at the root — see keepRunLog).
-      // `_onUpdate` streams the runner's log while it runs (plan preamble first,
-      // then each check's output) — a precommit used to be a silent multi-minute
-      // tool call with no way to see what it was doing.
-      const outcome = await runTrustedPrecommit(targetDir, targetRoot, mode, _signal, _onUpdate);
+      // Live progress: the runner's own log (plan preamble first, then each
+      // check's output) is shown UNDER a step line that carries the lane and
+      // the elapsed time — a precommit used to be a silent multi-minute call
+      // with no way to see what it was doing. The frames go to `onUpdate`
+      // only; the verdict text below is what the agent gets.
+      const progress = createProgressReporter({
+        title: `review-gate: precommit (${mode})`,
+        onUpdate: onUpdate as ToolUpdate | undefined,
+      });
+      progress.step(mode === "full" ? "lint + typecheck + build + 全量测试" : "lint + typecheck + build + 相关测试");
+      const outcome = await runTrustedPrecommit(targetDir, targetRoot, mode, signal, (partial) => {
+        progress.tail(partial.content.map((c) => c.text).join("\n"));
+      });
+      progress.done(outcome.verdict);
 
       if (outcome.verdict === "PASS") {
         // Bind PASS to the fingerprint recomputed AFTER the runner finished
@@ -5055,7 +5205,15 @@ export default function reviewGate(pi: ExtensionAPI) {
           "the reason is recorded). Use it only when they chose to handle the merge themselves.",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, onUpdate, ctx) {
+      // Completion re-runs every gate and then MERGES — minutes of work in
+      // the worst case, and a merge conflict is exactly when the human wants
+      // to see what happened. One step per phase.
+      const progress = createProgressReporter({
+        title: "review-gate: declare_done",
+        onUpdate: onUpdate as ToolUpdate | undefined,
+      });
+      progress.step("门禁复检");
       // P-multi: completion requires EVERY repo this session has edited to
       // pass its own review + precommit — a multi-repo task is not done while
       // any of its repos still holds unreviewed work.
@@ -5087,13 +5245,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // done while a judge child session is still open — its context may hold
       // a pending verdict or an unanswered question, and dropping it silently
       // strands a process (and its expensive model context). The round
-      // must be closed out with record_review / review_close first. In loop
+      // must be closed out with record_review / judge_close first. In loop
       // mode this is a hard requirement; explore/normal report it as
       // advisory via the branch below.
       for (const [root, list] of childSessions) {
         if (list.length > 0) {
           problems.push(`[${repoLabel(root)}] ${list.length} judge child session(s) still open (` +
-            `${list.map((c) => c.sessionId).join(", ")}) — finish the round (record_review / review_close) ` +
+            `${list.map((c) => c.sessionId).join(", ")}) — finish the round (record_review / judge_close) ` +
             "before declaring done");
         }
       }
@@ -5132,6 +5290,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       if (problems.length > 0) {
+        progress.fail(`${problems.length} 项未满足`);
         return {
           content: [{
             type: "text",
@@ -5148,6 +5307,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
+      progress.done("全部满足");
       // The USER's escape hatch from the merge, and it is theirs: the agent
       // can only ASK. A waiver granted in a dialog is recorded with its
       // reason, so "why is this branch still unmerged?" has an answer.
@@ -5175,14 +5335,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       // branch log back to the base the user confirmed and merges the work
       // branch into it. A conflict is not the gate's to resolve: it stops,
       // records what conflicted, and hands the list back.
+      progress.step(`合并工作分支 → ${state.baseBranch ?? "(基准未记录)"}`);
       const finish = finishWorkBranch(ctx as unknown as ExtensionContext);
       if (!finish.ok) {
+        progress.fail("冲突/未完成");
         return {
           content: [{ type: "text", text: finish.text }],
           details: { accepted: false, problems: [finish.text] },
           isError: true,
         };
       }
+      progress.done("已合并");
       loopArmed = false;
       // A completed unit of work closes its review loop. Session-log analysis
       // showed multi-task sessions accumulating a single ever-growing round
@@ -5654,7 +5817,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     parameters: Type.Object({
       repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
     }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       // resolveToolRepo takes only `requested`; a second "tool name" argument
       // was being passed and silently dropped (TS2554, now caught by
       // `npm run typecheck`). The resolver's error already lists every
@@ -5679,8 +5842,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       // only bound left is the wait timeout, which fires when there is no
       // feedback to lose.
 
+      // Network minutes, one gh call after another: show which one is in
+      // flight instead of a silent tool call.
+      const progress = createProgressReporter({
+        title: "review-gate: request_copilot_review",
+        onUpdate: onUpdate as ToolUpdate | undefined,
+      });
+      progress.step("解析当前分支的 PR");
       const resolved = await resolveOpenPr(dir, signal);
       if (!resolved.pr) {
+        progress.fail("没有可用的 PR");
         const abandoned = copilotAbandonedText(st.copilot);
         st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
           `no Copilot review possible: ${resolved.error}`, nowIso);
@@ -5701,7 +5872,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       // request goes out either way (it is cheap, and a repo nobody has asked
       // yet can only start producing evidence once someone asks). It decides
       // how long a silent Copilot is worth waiting for.
+      progress.step("查 Copilot 支持情况");
       const support = await resolveCopilotSupport(dir, slug, st, { signal });
+      progress.step("请求 Copilot 审查");
       const requested = await requestCopilotReviewer(dir, pr, slug, signal);
       if (!requested.ok) {
         // An abort is the user pressing ESC, not GitHub refusing: it proves
@@ -5739,6 +5912,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // yet", and using it as a veto declared healthy repos unsupported.
       // Availability is judged by evidence (above) and by whether a review
       // actually shows up (check_copilot_review).
+      progress.done(`PR #${pr.number} 已请求`);
       st.copilot = recordCopilotRequest(st.copilot, {
         pr: pr.number,
         head: pr.head,
@@ -5782,7 +5956,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     parameters: Type.Object({
       repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
     }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, onUpdate, ctx) {
+      // Copilot answers in "usually less than 30 seconds" — but the poll can
+      // run through several attempts, so each one announces itself.
+      const progress = createProgressReporter({
+        title: "review-gate: check_copilot_review",
+        onUpdate: onUpdate as ToolUpdate | undefined,
+      });
       const target = resolveToolRepo(params.repo);
       if ("error" in target) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
@@ -5822,6 +6002,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       const dir = repoDirFor(root);
+      progress.step("解析当前分支的 PR");
       const resolved = await resolveOpenPr(dir, signal);
       if (!resolved.pr) {
         const abandoned = copilotAbandonedText(st.copilot);
@@ -5865,6 +6046,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       let support: CopilotSupport = "CONFIRMED";
       let supportResolved = false;
       for (let attempt = 0; attempt < COPILOT_CHECK_ATTEMPTS; attempt++) {
+        progress.step(`轮询 PR #${pr.number} 的 Copilot 回复（第 ${attempt + 1}/${COPILOT_CHECK_ATTEMPTS} 次）`);
         if (signal?.aborted) break;
         payload = await fetchCopilotPayload(dir, slug, pr.number, signal);
         if (payload) {
@@ -5898,6 +6080,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
       }
 
+      progress.done(payload ? String(next.status) : "查询失败");
       if (!payload) {
         // The GraphQL query failed outright (no gh, no permission, API down).
         // Releasing is the fail-SAFE direction here: this requirement must

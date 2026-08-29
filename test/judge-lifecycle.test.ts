@@ -11,6 +11,10 @@ import {
   decideJudgeDispatch,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
   JUDGE_WAIT_DEFAULT_TIMEOUT_MS,
+  formatJudgeWaitReply,
+  tailLines,
+  WAIT_FINDINGS_SHOWN,
+  WAIT_STDOUT_TAIL_LINES,
 } from "../lib/judge-lifecycle.ts";
 
 // ---- B5: the work dir is a function of role+repo, never of the round ----
@@ -174,4 +178,64 @@ test("severity classification covers the forms judges actually write", () => {
   assert.equal(isBlockingSeverity("Nit"), false);
   assert.equal(isBlockingSeverity("P10"), false);
   assert.equal(isBlockingSeverity(""), false);
+});
+
+// ---- user decision 6.2: what judge_wait RETURNS in each branch ----
+
+const REPLY_BASE = {
+  role: "reviewer",
+  waitedMs: 300_000,
+  stdoutTail: "line A\nline B\n",
+  findings: [],
+} as const;
+
+test("a finished round returns the conclusion AND this round's stdout tail", () => {
+  const text = formatJudgeWaitReply({
+    ...REPLY_BASE,
+    done: true,
+    reason: "exit-code",
+    conclusion: { text: '```json\n{"gate":"READY"}\n```', hasVerdict: true },
+  });
+  assert.match(text, /本轮已结束（判据：exit-code）/);
+  assert.match(text, /含 verdict fence/);
+  assert.match(text, /"gate":"READY"/, "the conclusion body is returned verbatim");
+  assert.match(text, /stdout 尾部/, "…and never instead of the stdout tail");
+  assert.match(text, /line B/);
+});
+
+test("a finished round with no conclusion says so instead of pretending silence is output", () => {
+  const text = formatJudgeWaitReply({ ...REPLY_BASE, done: true, reason: "process-gone" });
+  assert.match(text, /没有留下结论文本/);
+  assert.match(text, /line B/, "the stdout tail is still the evidence of what happened");
+});
+
+test("an unfinished round returns PROGRESS: stdout tail plus the newest findings", () => {
+  const findings = Array.from({ length: WAIT_FINDINGS_SHOWN + 3 }, (_, i) => `[P1] a.ts:${i} — issue ${i}`);
+  const text = formatJudgeWaitReply({ ...REPLY_BASE, done: false, reason: "pending", findings });
+  assert.match(text, /仍在运行（等待 300s 未命中任一判据）/);
+  assert.match(text, new RegExp(`findings 最近 ${WAIT_FINDINGS_SHOWN} 条`));
+  assert.match(text, /issue 7/, "the NEWEST findings are the ones shown");
+  assert.doesNotMatch(text, /issue 0/, "…and the oldest are dropped, not the newest");
+  assert.doesNotMatch(text, /--- 结论/, "an unfinished round has no conclusion to report");
+});
+
+test("an unfinished round with an empty stream still reports the two channels honestly", () => {
+  const text = formatJudgeWaitReply({ ...REPLY_BASE, done: false, reason: "pending", stdoutTail: "" });
+  assert.match(text, /stdout 尚无输出/);
+  assert.match(text, /findings 流暂无内容/);
+});
+
+test("every reply carries the wait discipline", () => {
+  for (const done of [true, false]) {
+    assert.match(formatJudgeWaitReply({ ...REPLY_BASE, done, reason: "pending" }), /等待纪律/);
+  }
+});
+
+test("tailLines keeps the LAST n lines and leaves shorter text intact", () => {
+  const long = Array.from({ length: WAIT_STDOUT_TAIL_LINES + 10 }, (_, i) => `l${i}`).join("\n");
+  const tail = tailLines(long, WAIT_STDOUT_TAIL_LINES);
+  assert.equal(tail.split("\n").length, WAIT_STDOUT_TAIL_LINES);
+  assert.match(tail, /l49$/);
+  assert.equal(tailLines("a\nb", 40), "a\nb");
+  assert.equal(tailLines("", 40), "");
 });

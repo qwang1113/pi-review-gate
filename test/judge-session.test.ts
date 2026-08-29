@@ -467,7 +467,7 @@ test("terminate: a non-zero exit code is equally final (a crashed judge is not r
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("terminate: an already-finished child is a successful no-op (review_close is idempotent)", () => {
+test("terminate: an already-finished child is a successful no-op (judge_close is idempotent)", () => {
   const dir = workdir();
   try {
     // No pid file at all.

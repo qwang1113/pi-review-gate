@@ -102,7 +102,7 @@ test("buildChildWaitNotice names the terminated child, the recovery action and t
   assert.doesNotMatch(notice, /pane_dead|capture-pane/, "the hosted wait no longer teaches pane-level probes");
   assert.match(notice, /audit-silent/, "the silent child is named");
   assert.match(notice, /静默超过上限/, "silent-timeout reason is stated");
-  assert.match(notice, /review_read/, "the recovery action (read its output) is stated");
+  assert.match(notice, /judge_read/, "the recovery action (read its output) is stated");
   assert.match(notice, /review-live/, "the in-flight child is named");
   assert.match(notice, /review-live/, "its session id is named");
   assert.match(notice, /不要结束 turn/, "the hosted-wait discipline is explicit");

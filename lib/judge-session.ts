@@ -94,7 +94,7 @@ function readTrimmed(path: string): string | undefined {
  * identity. A wrapper that is killed BEFORE it can record an exit code leaves
  * a pid file behind and nothing else; once the OS hands that number to an
  * unrelated process, "the pid is alive" reads as "our judge is running" and
- * `review_close` would signal that stranger's whole process GROUP. The start
+ * `judge_close` would signal that stranger's whole process GROUP. The start
  * time is what makes the pid an identity: a recycled pid always has a
  * different one.
  */
@@ -389,14 +389,14 @@ export function readStderrTail(stderrPath: string, maxLines = 20): string | unde
  * FAIL CLOSED WHEN IDENTITY CANNOT BE ESTABLISHED (round-1 P1, reviewer: a
  * `ps` that produces nothing makes the launcher write a record with no start
  * time, and treating that as "probably ours" restores the whole hazard). The
- * cost of refusing is small and bounded — `review_close` still closes the
- * pane, and tmux hangs up the process group that way — while the cost of
+ * cost of refusing is small and bounded — `judge_close` still drops the
+ * session from the registry, and the process exits on its own — while the cost of
  * guessing wrong is somebody else's process tree.
  *
  * Best-effort by contract: an already-finished session (recorded exit code,
  * no pid file, a pid that is not ours any more, an unverifiable identity, an
  * unsignalable group) is a SUCCESSFUL no-op — closing a judge twice must not
- * fail (idempotence is what `review_close` promises). `reason` says which of
+ * fail (idempotence is what `judge_close` promises). `reason` says which of
  * those it was, so the caller can report it honestly.
  */
 export function terminateJudgeSession(
