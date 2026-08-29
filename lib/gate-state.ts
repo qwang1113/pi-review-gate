@@ -260,6 +260,17 @@ export interface GateState {
     answers: import("./ask-user.ts").AskAnswer[];
   };
   /**
+   * A-class text appeals (lib/text-appeal.ts): how many were spent (a quota
+   * SHARED with `gh pr edit` arbitration), which contents were already
+   * decided (so a refused text cannot be re-rolled), and the single live
+   * content-bound pass, if one was granted.
+   *
+   * Persisted because all three are anti-abuse facts: an in-memory quota
+   * would reset on every restart, and a refused text could be appealed again
+   * by killing the session. Absent ⇒ nothing appealed yet.
+   */
+  appeals?: import("./text-appeal.ts").AppealRecord;
+  /**
    * USER-GRANTED review-scope limit (request_scope_limit tool): the user
    * confirmed via an extension-rendered dialog that the gate only needs to
    * cover THIS session's own edits — pre-existing worktree/branch changes
@@ -589,6 +600,25 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
           // prompt as the user's words — it must be a string or absent.
           ((a as { answer?: unknown }).answer === undefined || typeof (a as { answer?: unknown }).answer === "string"));
       if (!ok) delete parsed.askUser;
+    }
+    // APPEALS are anti-abuse bookkeeping, so a malformed record is dropped
+    // WHOLE and the session starts from zero spent appeals. That is the safe
+    // direction for the pass (a forged one would authorize content no arbiter
+    // ever saw) and the honest one for the quota: a record the gate cannot
+    // read is not evidence that anything was spent.
+    if (parsed.appeals !== undefined) {
+      const a = parsed.appeals as { used?: unknown; decided?: unknown; pass?: unknown };
+      const decisionsOk = !!a && typeof a === "object" &&
+        typeof a.used === "number" && Number.isFinite(a.used) && a.used >= 0 &&
+        !!a.decided && typeof a.decided === "object" && !Array.isArray(a.decided) &&
+        Object.entries(a.decided as Record<string, unknown>).every(([digest, decision]) =>
+          /^[0-9a-f]{64}$/.test(digest) &&
+          ["GATE_WINS", "AGENT_WINS", "HUMAN"].includes(String(decision)));
+      const p = a?.pass as { digest?: unknown; kind?: unknown; issuedAt?: unknown } | undefined;
+      const passOk = p === undefined ||
+        (!!p && typeof p === "object" && typeof p.digest === "string" && /^[0-9a-f]{64}$/.test(p.digest) &&
+          typeof p.kind === "string" && typeof p.issuedAt === "string");
+      if (!decisionsOk || !passOk) delete parsed.appeals;
     }
     // WORKSPACE + BRANCH facts decide where commits may land and what gets
     // merged, so a corrupt one must not be believed. Each is dropped

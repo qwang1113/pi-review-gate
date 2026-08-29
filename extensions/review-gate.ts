@@ -83,7 +83,26 @@ import {
   resolveCommandRepos,
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
-import { firstNonEnglish, nonEnglishCommitMessage, containsNonLatinLetter, isNonEnglishText } from "../lib/lang-detect.ts";
+import {
+  judgeEnglish,
+  firstNonEnglishText,
+  nonEnglishCommitMessage,
+  containsNonLatinLetter,
+  l5BlockReason,
+} from "../lib/lang-detect.ts";
+import {
+  APPEAL_HINT,
+  appealDigest,
+  appealPassAuthorizes,
+  consumeAppealPass,
+  emptyAppealRecord,
+  admitAppeal,
+  recordAppealDecision,
+  buildTextAppealPrompt,
+  TEXT_APPEAL_SYSTEM_PROMPT,
+  type AppealKind,
+  type AppealableBlock,
+} from "../lib/text-appeal.ts";
 import {
   spawnJudgeProcess,
   judgeSessionIdFor,
@@ -113,6 +132,7 @@ import {
   type SlowNoticeSink,
   type ToolUpdate,
 } from "../lib/progress-stream.ts";
+import { pollUntil } from "../lib/poll-wait.ts";
 import {
   normalizeQuestions,
   resumeFrom,
@@ -851,12 +871,54 @@ export default function reviewGate(pi: ExtensionAPI) {
   let concurrentSessionNotice: string | null = null;
   // The most recent ship command the gate BLOCKED, so request_arbitration can
   // only contest a real block (not an agent-invented one).
-  let lastBlockedShip: { command: string; problems: string[]; blockReason: string } | null = null;
-  // Per-session arbitration request count (capped by projectConfig.arbiter).
-  let arbitrationsUsed = 0;
+  let lastBlockedShip: { command: string; problems: string[]; blockReason: string; at: number } | null = null;
+  // The most recent A-class TEXT block (lib/text-appeal.ts), for the same
+  // reason: an appeal contests a block that actually happened, never a
+  // hypothetical one.
+  let lastBlockedText: (AppealableBlock & { at: number }) | null = null;
   // Re-roll prevention: decisions cached by (commandDigest#round). A GATE_WINS /
   // HUMAN outcome cannot be re-requested for the same action+round.
   const arbitrationDecisions = new Map<string, "GATE_WINS" | "AGENT_WINS" | "HUMAN">();
+
+  /** Appeals + arbitrations spent this session (persisted, so a restart does
+   *  not hand the agent a fresh quota). */
+  function appealsUsed(): number {
+    return state.appeals?.used ?? 0;
+  }
+  /** Spend one slot of the SHARED quota (the `gh pr edit` arbitration path;
+   *  a text appeal spends its slot through recordAppealDecision). */
+  function spendArbitration(ctx: unknown): void {
+    state.appeals = { ...(state.appeals ?? emptyAppealRecord()), used: appealsUsed() + 1 };
+    persist(ctx as unknown as ExtensionContext);
+  }
+
+  /**
+   * Refuse one A-class text — unless an appeal already passed this EXACT
+   * content, in which case the pass is consumed and the text goes through.
+   *
+   * Every A-class refusal goes through here, so three things cannot drift
+   * apart: the appeal hint in the reason, the record of what was blocked
+   * (an appeal may only contest a real block) and the pass lookup.
+   */
+  function refuseText(
+    kind: AppealKind,
+    text: string,
+    reason: string,
+    ctx: unknown,
+  ): string | undefined {
+    const digest = appealDigest(kind, text);
+    if (appealPassAuthorizes(state.appeals, digest)) {
+      // Single-use: spend it here, at the one place that can prove the
+      // content is the content the arbiter judged.
+      state.appeals = consumeAppealPass(state.appeals);
+      persist(ctx as unknown as ExtensionContext);
+      appendLesson(`appeal pass consumed (${kind})`);
+      return undefined;
+    }
+    const full = `review-gate: ${reason} ${APPEAL_HINT}`;
+    lastBlockedText = { kind, text, reason: full, at: Date.now() };
+    return full;
+  }
 
   /** Clear any standing bypass token (called whenever the worktree or review
    *  round changes, so a token can never outlive the exact state it was for). */
@@ -1780,6 +1842,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function checkTestLabels(
     path: string,
     content: string,
+    /** The hook's context: status-bar notices, and persisting a spent appeal pass. */
+    ctx: unknown,
     /** Status-bar sink: an L6 classification slower than ~3s says so. */
     notice?: SlowNoticeSink,
   ): Promise<string | undefined> {
@@ -1816,8 +1880,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { res = analyze(path, content); } catch { return undefined; }
     if (res.violations.length > 0) {
       const v = res.violations[0];
-      return `review-gate: non-English test label (L6) in ${path}:${v.line}: "${v.label.slice(0, 60)}". ` +
-        "Test descriptions must be English. Use `// review-gate: allow-non-english` on the line above to exempt one case.";
+      return refuseText("test-label", v.label,
+        `${l5BlockReason({ kind: "test-label", text: v.label })} 位置 ${path}:${v.line}。` +
+        "测试描述必须是英文；确属特例时在上一行加 `// review-gate: allow-non-english`。", ctx);
     }
     // Unicode check passed — flash semantic layer for romanized non-English.
     if (projectConfig.llmGuards.englishCheck && res.latinLabels.length > 0) {
@@ -1836,8 +1901,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         labelCheckMemo.remember(key, verdict);
       }
       if (verdict === true) {
-        return `review-gate: test label reads as romanized non-English (L6, semantic check) in ${path}. ` +
-          "Test descriptions must be English. Use `// review-gate: allow-non-english` to exempt a deliberate case.";
+        return refuseText("test-label", labels.join("\n"),
+          `test label reads as romanized non-English (L6, semantic check) in ${path}. ` +
+          "测试描述必须是英文；确属特例时用 `// review-gate: allow-non-english` 豁免。", ctx);
       }
     }
     return undefined;
@@ -1931,6 +1997,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         const labelProblem = await checkTestLabels(
           path,
           editedTestContent(input, path),
+          ctx,
           statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
         );
         if (labelProblem) return { block: true, reason: labelProblem };
@@ -2087,10 +2154,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!anyChange) return;
 
     // AI attribution (HARD) + English-language (L5, HARD) checks on commit
-    // messages and PR title/description. L5 HARD: a predominantly non-English
-    // commit message or PR title/body blocks the ship (the majority-body
-    // policy keeps minority foreign tokens passing; the escape hatch is named
-    // in every reason so a wrong guess never strands a legitimate commit).
+    // messages and PR title/description. Both are A-CLASS: heuristics the gate
+    // can get wrong, so every refusal here carries the appeal route
+    // (lib/text-appeal.ts) and is recorded as an appealable block.
     for (const s of ships) {
       if (s.kind === "commit") {
         // (WHERE a commit lands is checked per REPO, in the checkRoots loop
@@ -2099,10 +2165,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         const msgs = extractCommitMessages(s.segment);
         for (const msg of msgs) {
           if (COMMIT_MSG_FORBIDDEN.some((re) => re.test(msg))) {
-            return {
-              block: true,
-              reason: "review-gate: commit message contains AI attribution. Rewrite without it.",
-            };
+            const reason = refuseText("ai-attribution", msg,
+              "commit message contains AI attribution. Rewrite without it.", ctx);
+            if (reason) return { block: true, reason };
           }
         }
         // Guard #2 (tighten-only): regexes missed — ask flash about paraphrased
@@ -2115,37 +2180,30 @@ export default function reviewGate(pi: ExtensionAPI) {
             () => classifyAiAttribution(classifier(), msgs),
           );
           if (attributed === true) {
-            return {
-              block: true,
-              reason: "review-gate: commit message contains AI attribution (semantic check). Rewrite without it.",
-            };
+            const reason = refuseText("ai-attribution", msgs.join("\n\n"),
+              "commit message contains AI attribution (semantic check). Rewrite without it.", ctx);
+            if (reason) return { block: true, reason };
           }
         }
-        // L5 HARD (user policy): non-English commit messages block the ship.
-        // The SUBJECT line is judged strictly (any non-Latin letter rejects);
-        // the body keeps the majority policy that used to be advisory only.
-        // Same function as review_checkpoint, so a single `-m "subject\n\nbody"`
-        // can no longer dilute a non-English subject (observed 2026-08-29).
-        // The escape hatch is named in the reason: a wrong guess must never
-        // permanently strand a legitimate commit.
+        // L5 (HARD): a commit message must be English — no non-Latin letter,
+        // subject or body. The two parts share one rule and differ only in
+        // what the reason points at.
         //
         // The paragraphs are JOINED first, exactly as git builds the message
         // from repeated -m: only the FIRST paragraph's first line is a subject.
-        // Judging each -m as its own subject would reject a legal English
-        // commit that merely mentions a foreign term in a later paragraph.
-        const nonEn = nonEnglishCommitMessage(msgs.join("\n\n"));
+        const whole = msgs.join("\n\n");
+        const nonEn = nonEnglishCommitMessage(whole);
         if (nonEn) {
-          return {
-            block: true,
-            reason:
-              (nonEn.part === "subject"
-                ? `review-gate: the commit SUBJECT line is not English: "${nonEn.text.slice(0, 60)}". ` +
-                  "The subject must contain no non-Latin letters at all (the body may keep a minority foreign term). "
-                : `review-gate: commit message is predominantly non-English: "${nonEn.text.slice(0, 60)}". `) +
-              "Commit messages must be English — rewrite it (git commit --amend). " +
-              "Escape hatch: the user may run /gate-bypass <reason> (in-session; REVIEW_GATE_BYPASS=1 " +
-              "only applies outside the session, at the git-hook layer).",
-          };
+          const reason = refuseText(
+            nonEn.part === "subject" ? "commit-subject" : "commit-body",
+            nonEn.text,
+            l5BlockReason({
+              kind: nonEn.part === "subject" ? "commit-subject" : "commit-body",
+              text: nonEn.text,
+            }) + " 用英文重写（git commit --amend）。",
+            ctx,
+          );
+          if (reason) return { block: true, reason };
         } else if (msgs.length > 0 && projectConfig.llmGuards.englishCheck
           && !msgs.some(containsNonLatinLetter)
           && await withSlowNotice(
@@ -2153,30 +2211,21 @@ export default function reviewGate(pi: ExtensionAPI) {
             "review-gate: 正在做 L5 语义判定（罗马化非英文）…",
             () => classifyNonEnglish(classifier(), msgs),
           ) === true) {
-          // L5 blind spot: the majority-body check passed, but a message that is
-          // 100% Latin script may still be romanized non-English (pinyin/romaji).
-          // Only run the semantic check when there is NO non-Latin letter at all
-          // — a minority foreign word already passes under the majority policy.
-          return {
-            block: true,
-            reason:
-              "review-gate: commit message reads as romanized non-English (semantic check). " +
-              "Rewrite it in English. Escape hatch: the user may run /gate-bypass <reason> " +
-              "(in-session; REVIEW_GATE_BYPASS=1 only applies outside the session).",
-          };
+          // L5 blind spot: the letters are all Latin, but the text may still
+          // be romanized non-English (pinyin/romaji). Only worth asking when
+          // there is no non-Latin letter at all — otherwise the hard rule
+          // above already answered.
+          const reason = refuseText("romanized", whole,
+            "commit message reads as romanized non-English (semantic check). Rewrite it in English.", ctx);
+          if (reason) return { block: true, reason };
         }
       } else if (s.kind === "pr-create" || s.kind === "pr-edit") {
         const prTexts = extractPrTextFields(s.segment);
-        const nonEn = firstNonEnglish(prTexts);
+        const nonEn = firstNonEnglishText("pr-text", prTexts);
         if (nonEn) {
-          return {
-            block: true,
-            reason:
-              `review-gate: PR title/description is predominantly non-English: "${nonEn.slice(0, 60)}". ` +
-              "PR text must be English — rewrite it (gh pr edit --title/--body). " +
-              "Escape hatch: the user may run /gate-bypass <reason> (in-session; REVIEW_GATE_BYPASS=1 " +
-              "only applies outside the session, at the git-hook layer).",
-          };
+          const reason = refuseText("pr-text", nonEn.text,
+            l5BlockReason(nonEn) + " 用英文重写（gh pr edit --title/--body）。", ctx);
+          if (reason) return { block: true, reason };
         } else if (prTexts.length > 0 && projectConfig.llmGuards.englishCheck
           && !prTexts.some(containsNonLatinLetter)
           && await withSlowNotice(
@@ -2184,13 +2233,9 @@ export default function reviewGate(pi: ExtensionAPI) {
             "review-gate: 正在做 L5 语义判定（罗马化非英文）…",
             () => classifyNonEnglish(classifier(), prTexts),
           ) === true) {
-          return {
-            block: true,
-            reason:
-              "review-gate: PR title/description reads as romanized non-English (semantic check). " +
-              "Rewrite it in English. Escape hatch: the user may run /gate-bypass <reason> " +
-              "(in-session; REVIEW_GATE_BYPASS=1 only applies outside the session).",
-          };
+          const reason = refuseText("romanized", prTexts.join("\n\n"),
+            "PR title/description reads as romanized non-English (semantic check). Rewrite it in English.", ctx);
+          if (reason) return { block: true, reason };
         }
       }
     }
@@ -2311,7 +2356,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       problems.map((p) => `  - ${p}`).join("\n") +
       (ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "") +
       crossRepoVerdictHint(blockedUnreviewed);
-    lastBlockedShip = { command, problems, blockReason };
+    lastBlockedShip = { command, problems, blockReason, at: Date.now() };
 
     return {
       block: true,
@@ -2344,6 +2389,62 @@ export default function reviewGate(pi: ExtensionAPI) {
       bodyFileDigest: bodyFileDigest(action.bodyFilePaths),
     };
   }
+
+  /**
+   * Hear an appeal against an A-class TEXT block (lib/text-appeal.ts).
+   *
+   * Same shape as the `gh pr edit` arbitration below it — an independent
+   * arbiter process, fail-closed on any failure — but what it may grant is a
+   * CONTENT-bound single-use pass, never a command. The four brakes live in
+   * the pure module; this function only does the I/O around them.
+   */
+  async function arbitrateText(
+    block: AppealableBlock,
+    argument: string,
+    ctx: unknown,
+  ): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError?: boolean }> {
+    const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
+    const digest = appealDigest(block.kind, block.text);
+    const admission = admitAppeal(state.appeals, digest, projectConfig.arbiter.maxPerSession);
+    if (!admission.ok) return deny(`review-gate: ${admission.reason}`);
+
+    const verdict = await runArbiter(
+      projectConfig.arbiter.model,
+      buildTextAppealPrompt(block, argument),
+      undefined,
+      undefined,
+      TEXT_APPEAL_SYSTEM_PROMPT,
+    );
+    // Fail-closed: a spawn failure, a timeout or an unparseable answer is a
+    // GATE_WINS — and it still SPENDS the quota, so a broken arbiter cannot be
+    // retried into a grant.
+    const decision = verdict?.decision ?? "GATE_WINS";
+    state.appeals = recordAppealDecision(state.appeals, digest, block.kind, decision, new Date().toISOString());
+    persist(ctx as unknown as ExtensionContext);
+    appendLesson(`text appeal (${block.kind}) decision=${decision} reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} text=${block.text.slice(0, 120)}`);
+    if (decision === "AGENT_WINS") {
+      return {
+        content: [{
+          type: "text",
+          text: `review-gate: 仲裁者判定 AGENT_WINS — ${verdict?.reason ?? ""}\n` +
+            "已对这段内容发放一次性通行证：把**完全相同**的文本再提交一次即可通过（改一个字就失效）。" +
+            "它只放行这段文本，不影响代码审查与 precommit 门禁。",
+        }],
+        details: { decision, kind: block.kind, used: appealsUsed() },
+      };
+    }
+    if (decision === "HUMAN") {
+      return deny(
+        `review-gate: 仲裁者把判断交给人 — ${verdict?.reason ?? ""}\n` +
+        "本次不放行。要么改文案，要么请用户直接定夺（这条已计入配额）。",
+      );
+    }
+    return deny(
+      `review-gate: 仲裁者判定 GATE_WINS — ${verdict?.reason ?? "无有效裁决（fail-closed）"}。` +
+      "按门禁要求改文案；同一段内容不能再申诉。",
+    );
+  }
+
 
   function bodyFileDigest(paths: readonly string[]): string {
     if (paths.length === 0) return "";
@@ -3121,28 +3222,22 @@ export default function reviewGate(pi: ExtensionAPI) {
       // the AI-attribution guard — so this tool must replicate it.
       const attribution = COMMIT_MSG_FORBIDDEN.some((re) => re.test(message));
       if (attribution) {
-        return {
-          content: [{ type: "text", text: "review-gate: review_checkpoint rejected — commit message contains AI attribution. Rewrite without it." }],
-          details: { committed: false },
-          isError: true,
-        };
+        const reason = refuseText("ai-attribution", message,
+          "review_checkpoint rejected — commit message contains AI attribution. Rewrite without it.", ctx);
+        if (reason) {
+          return { content: [{ type: "text", text: reason }], details: { committed: false }, isError: true };
+        }
       }
-      // L5: the SUBJECT line is judged strictly (any non-Latin letter rejects),
-      // the body keeps the majority policy — a long English body must never
-      // dilute a non-English subject again (observed 2026-08-29).
+      // L5 (HARD): the same single rule as the bash commit path, through the
+      // same function — no non-Latin letter in subject or body.
       const nonEn = nonEnglishCommitMessage(message);
       if (nonEn) {
-        return {
-          content: [{
-            type: "text",
-            text: nonEn.part === "subject"
-              ? `review-gate: review_checkpoint rejected — the SUBJECT line is not English (\"${nonEn.text.slice(0, 60)}\"). ` +
-                "The subject must be English with no non-Latin letters at all (the body may keep a minority foreign term). Rewrite it."
-              : `review-gate: review_checkpoint rejected — the message body is predominantly non-English (\"${nonEn.text.slice(0, 60)}\"). Write it in English.`,
-          }],
-          details: { committed: false },
-          isError: true,
-        };
+        const kind: AppealKind = nonEn.part === "subject" ? "commit-subject" : "commit-body";
+        const reason = refuseText(kind, nonEn.text,
+          `review_checkpoint rejected — ${l5BlockReason({ kind, text: nonEn.text })} 用英文重写。`, ctx);
+        if (reason) {
+          return { content: [{ type: "text", text: reason }], details: { committed: false }, isError: true };
+        }
       }
       const st = stateForRepo(root);
       if (st.precommit.verdict !== "PASS") {
@@ -4263,8 +4358,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       const budgetMs = clampWaitTimeout(params.timeoutMs);
-      const startedAt = Date.now();
-      const deadline = startedAt + budgetMs;
       // The blackest box in the loop: a review round is 8.9 minutes at the
       // median. Every probe tick republishes what the judge has written so
       // far, so waiting shows motion instead of a frozen call.
@@ -4273,20 +4366,24 @@ export default function reviewGate(pi: ExtensionAPI) {
         onUpdate: onUpdate as ToolUpdate | undefined,
       });
       progress.step(`${child.role} 运行中`);
-      const publishProgress = (): void => {
-        const findings = recentStreamFindings(child.streamPath);
-        progress.tail([
-          tailLines(readLogTail(child.stdoutPath), WAIT_STDOUT_TAIL_LINES),
-          findings.length ? `findings: ${findings.length} 条，最新 ${findings[findings.length - 1]}` : "",
-        ].filter(Boolean).join("\n"));
-      };
-      let outcome = probeJudgeRound(child);
-      publishProgress();
-      while (!outcome.done && Date.now() < deadline && signal?.aborted !== true) {
-        await new Promise((r) => setTimeout(r, 2000));
-        outcome = probeJudgeRound(child);
-        publishProgress();
-      }
+      // The LOOP is generic (lib/poll-wait.ts); only these three criteria are
+      // this tool's own — that is the whole point of the split, so the next
+      // waiter (different criteria, same skeleton) reuses it instead of
+      // copying a subtly different timeout.
+      const waited = await pollUntil({
+        probe: () => probeJudgeRound(child),
+        isDone: (o) => o.done,
+        budgetMs,
+        signal,
+        onProbe: () => {
+          const findings = recentStreamFindings(child.streamPath);
+          progress.tail([
+            tailLines(readLogTail(child.stdoutPath), WAIT_STDOUT_TAIL_LINES),
+            findings.length ? `findings: ${findings.length} 条，最新 ${findings[findings.length - 1]}` : "",
+          ].filter(Boolean).join("\n"));
+        },
+      });
+      const outcome = waited.observation;
       progress.done(outcome.done ? outcome.reason : "未结束");
       const conclusion = outcome.done ? readJudgeConclusion(child.sessionDir) : undefined;
       // The RETURN is the agent's channel (user decision 6.2): a finished
@@ -4297,7 +4394,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         role: child.role,
         done: outcome.done,
         reason: outcome.reason,
-        waitedMs: Date.now() - startedAt,
+        waitedMs: waited.waitedMs,
         stdoutTail: readLogTail(child.stdoutPath),
         conclusion: conclusion ? { text: conclusion.text, hasVerdict: conclusion.hasVerdict } : undefined,
         findings: recentStreamFindings(child.streamPath),
@@ -7040,14 +7137,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "request_arbitration",
     label: "Request Arbitration",
     description:
-      "Contest a review-gate ship block you believe is MEANINGLESS or CIRCULAR (the only way " +
-      "to satisfy the gate is an action the gate forbids). ONLY a lone `gh pr edit` limited to " +
-      "--title/--body/--body-file is arbitrable — never git commit/push or gh pr create. An " +
-      "INDEPENDENT arbiter (you cannot write its verdict) rules: GATE_WINS (comply), AGENT_WINS " +
-      "(one single-use bypass of this exact command), or HUMAN (a human decides). Call this only " +
-      "AFTER the gate has actually blocked the command.",
+      "Contest a review-gate block you believe is a MISJUDGEMENT. Two things are contestable, " +
+      "both only AFTER the gate actually blocked: (a) a TEXT the language/attribution heuristics " +
+      "refused (commit subject/body, PR title/body, romanized non-English, AI attribution, test " +
+      "label) — a granted appeal passes THAT EXACT CONTENT once; (b) a ship block on a lone " +
+      "`gh pr edit` limited to --title/--body/--body-file that is genuinely CIRCULAR. Never " +
+      "git commit/push or gh pr create, and never a FACT the gate observed (no workspace, no " +
+      "approved goal, unmet review gate, sensitive file) — those have a correct next step. " +
+      "An INDEPENDENT arbiter (you cannot write its verdict) rules GATE_WINS / AGENT_WINS / " +
+      "HUMAN. Quota: 3 per session, shared; a refused content cannot be appealed twice.",
     parameters: Type.Object({
-      argument: Type.String({ description: "Your case for why this specific block is circular/meaningless — cite evidence (e.g. the offending text is pre-existing)." }),
+      argument: Type.String({ description: "Your case for why this specific block is a misjudgement / circular — cite evidence (e.g. the non-Latin text is a quoted filename)." }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
@@ -7055,7 +7155,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!projectConfig.arbiter.enabled) {
         return deny("review-gate: arbitration is disabled for this project (arbiter.enabled=false). GATE_WINS — comply with the gate.");
       }
-      // Must contest a REAL, recent block.
+      // Must contest a REAL, recent block — and the MOST RECENT one, when both
+      // kinds happened: that is the block the agent is actually stuck on.
+      if (!lastBlockedShip && !lastBlockedText) {
+        return deny("review-gate: 没有可申诉的拦截。先把命令/编辑真跑一次——申诉只受理已经发生的拦截。");
+      }
+      if (lastBlockedText && (!lastBlockedShip || lastBlockedText.at >= lastBlockedShip.at)) {
+        return arbitrateText(lastBlockedText, String(params.argument ?? ""), ctx);
+      }
       if (!lastBlockedShip) {
         return deny("review-gate: no ship block to arbitrate. Run the command first; arbitration only contests an actual block.");
       }
@@ -7063,8 +7170,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!parsed.ok) {
         return deny(`review-gate: this block is NOT arbitrable — ${parsed.reason}. Only a lone \`gh pr edit\` (title/body) qualifies; git commit/push and gh pr create must go through the full gate.`);
       }
-      // Per-session cap and re-roll prevention.
-      if (arbitrationsUsed >= projectConfig.arbiter.maxPerSession) {
+      // Per-session cap (SHARED with text appeals, and persisted) and re-roll
+      // prevention.
+      if (appealsUsed() >= projectConfig.arbiter.maxPerSession) {
         return deny(`review-gate: arbitration limit reached (${projectConfig.arbiter.maxPerSession}/session). Escalate to the user or /gate-bypass.`);
       }
       const fp = computeFingerprint(cwd);
@@ -7082,7 +7190,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         return deny(`review-gate: this exact action was already arbitrated this round → ${cached}. Re-rolling is not allowed; change the action or comply with the gate.`);
       }
 
-      arbitrationsUsed += 1;
+      spendArbitration(ctx);
 
       // Gather TRUSTED ground-truth evidence ourselves (the arbiter is tool-less).
       const currentPr = gatherPrText(parsed.action);
@@ -7102,7 +7210,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Fail-closed: any spawn/parse failure → GATE_WINS.
       const decision = verdict?.decision ?? "GATE_WINS";
       arbitrationDecisions.set(decisionKey, decision);
-      appendLesson(`arbitration #${arbitrationsUsed} decision=${decision} reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} cmd=${lastBlockedShip.command.slice(0, 200)} arg=${params.argument.slice(0, 200)}`);
+      appendLesson(`arbitration #${appealsUsed()} decision=${decision} reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} cmd=${lastBlockedShip.command.slice(0, 200)} arg=${params.argument.slice(0, 200)}`);
 
       if (decision === "AGENT_WINS") {
         const bindings = await computeTokenBindings(parsed.action, fp.digest);
@@ -7145,15 +7253,15 @@ export default function reviewGate(pi: ExtensionAPI) {
             round: bindings.round, commandDigest: bindings.commandDigest, bodyFileDigest: bindings.bodyFileDigest,
             issuedAt: Date.now(), ttlMs: BYPASS_TOKEN_TTL_MS, consumed: false,
           };
-          appendLesson(`arbitration #${arbitrationsUsed} HUMAN→allow-once`);
+          appendLesson(`arbitration #${appealsUsed()} HUMAN→allow-once`);
           return { content: [{ type: "text", text: "review-gate: human allowed this exact `gh pr edit` ONCE. Run the same command now." }], details: { decision: "HUMAN", human: "allow-once" } };
         }
         if (choice === "Pause gate and wait") {
           loopArmed = false;
-          appendLesson(`arbitration #${arbitrationsUsed} HUMAN→pause`);
+          appendLesson(`arbitration #${appealsUsed()} HUMAN→pause`);
           return { content: [{ type: "text", text: "review-gate: gate PAUSED by the human — auto-continuation disarmed. No bypass issued. Wait for further instructions." }], details: { decision: "HUMAN", human: "pause" } };
         }
-        appendLesson(`arbitration #${arbitrationsUsed} HUMAN→gate-wins`);
+        appendLesson(`arbitration #${appealsUsed()} HUMAN→gate-wins`);
         return deny("review-gate: human ruled GATE_WINS — comply with the gate.");
       }
 
@@ -7901,7 +8009,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       sensitiveDeclinedPaths.clear();
       clearBypassToken();
       lastBlockedShip = null;
-      arbitrationsUsed = 0;
+      lastBlockedText = null;
+      // A user-initiated reset clears the appeal ledger too: quota, decided
+      // contents and any live pass. It is the user's own call, and leaving a
+      // pass behind would let it authorize content after the reset.
+      delete state.appeals;
       arbitrationDecisions.clear();
       persist(ctx);
       ctx.ui.notify("review-gate: state reset", "info");
@@ -7965,7 +8077,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         registryFacts: factsFromRegistry(ctx.modelRegistry, home, readFileSafe),
         hooksDir,
         workflowCommandCount: Object.keys(WORKFLOW_COMMANDS).length,
-        isNonEnglishText,
+        nonEnglish: (text) => judgeEnglish("commit-body", text) !== undefined,
         probeGh: async () => {
           try {
             const out = execFileSync("gh", ["--version"], {

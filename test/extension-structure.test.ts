@@ -972,85 +972,75 @@ test("re-roll is blocked for ANY prior decision (including AGENT_WINS)", () => {
 test("a standing arbiter token is cleared on any edit / new round / gate-reset", () => {
   assert.match(SRC, /clearBypassToken\(\);\s*\/\/ any edit invalidates/);
   // gate-reset clears it and the arbitration bookkeeping.
-  const resetAt = SRC.indexOf('registerCommand("gate-reset"');
-  // Window sized to the whole handler — it grows as more session state is reset.
-  const resetRegion = SRC.slice(resetAt, resetAt + 900);
+
+  // Anchored on the handler's real end, not a byte count: the reset list
+  // grows as more session state appears.
+  const resetRegion = windowOf('registerCommand("gate-reset"', "ctx.ui.notify", "gate-reset handler");
   assert.match(resetRegion, /clearBypassToken\(\)/);
-  assert.match(resetRegion, /arbitrationsUsed = 0/);
+  // The appeal ledger (quota + decided contents + live pass) is persisted, so
+  // the reset must delete it rather than zero an in-memory counter.
+  assert.match(resetRegion, /delete state\.appeals/);
+  assert.match(resetRegion, /lastBlockedText = null/);
   assert.match(resetRegion, /arbitrationDecisions\.clear\(\)/);
 });
 
-test("L5 is HARD: commit & PR title/body language checks BLOCK (majority policy, escape hatch named)", () => {
-  // commit messages AND gh pr create title/body are language-checked.
-  assert.match(SRC, /firstNonEnglish/);
+test("L5 is ONE hard rule: every call site judges through the shared function", () => {
+  // 2026-08-29: the four call sites used to run three different policies
+  // (strict subject, majority body, majority PR text, scanner labels). They
+  // now differ only in the `kind` they pass.
   assert.match(SRC, /extractPrTextFields/);
-  // Applied to both ship kinds.
   assert.match(SRC, /s\.kind === "pr-create" \|\| s\.kind === "pr-edit"/);
-  // User policy (2026-08-16): L5 upgraded from advisory to HARD — a
-  // predominantly non-English commit message or PR title/body returns
-  // block:true. The majority-body policy keeps minority foreign tokens
-  // passing, and the reason names the escape hatch so a wrong guess never
-  // strands a legitimate commit.
-  assert.match(SRC, /L5 HARD/);
-  assert.doesNotMatch(SRC, /l5Advisories/,
-    "the advisory collection must be gone — every language branch blocks");
-  assert.doesNotMatch(SRC, /review-gate \(L5 advisory\)/,
-    "the advisory notify must be gone");
-
-  // Both language branches must actually return block:true.
-  const commitLangAt = SRC.indexOf('nonEnglishCommitMessage(msgs.join("\\n\\n"))');
-  const prLangAt = SRC.indexOf("firstNonEnglish(prTexts)");
-  assert.ok(commitLangAt > 0 && prLangAt > commitLangAt,
-    "commit language check → PR language check, in order");
-  const commitRegion = SRC.slice(commitLangAt, prLangAt);
-  assert.match(commitRegion, /block: true/,
-    "a non-English commit message must block the ship");
-  assert.match(commitRegion, /\/gate-bypass <reason>/,
-    "the commit block must name the in-session escape hatch");
-  assert.match(commitRegion, /REVIEW_GATE_BYPASS=1/,
-    "the commit block must also name the out-of-session hook bypass");
-  const prRegion = SRC.slice(prLangAt, prLangAt + 1600);
-  assert.match(prRegion, /block: true/,
-    "a non-English PR title/body must block the ship");
-  assert.match(prRegion, /gh pr edit --title\/--body/,
-    "the PR block must point at the fix");
-
-  // AI-attribution stays a hard block too (double barrier).
-  assert.match(SRC, /AI attribution[\s\S]*?block:\s*true/);
+  assert.match(SRC, /nonEnglishCommitMessage\(whole\)/, "bash commit path");
+  assert.match(SRC, /nonEnglishCommitMessage\(message\)/, "review_checkpoint path");
+  assert.match(SRC, /firstNonEnglishText\("pr-text", prTexts\)/, "PR title/body path");
+  assert.match(SRC, /l5BlockReason\(\{ kind: "test-label"/, "L6 label path");
+  // The retired majority machinery must be gone — a leftover call would
+  // reintroduce the dilution hole it was removed for.
+  for (const gone of [/\bisNonEnglishText\b/, /\bfirstNonEnglish\(/, /\banalyzeLanguageMix\b/]) {
+    assert.doesNotMatch(SRC, gone, `the majority-policy API must be retired (${gone})`);
+  }
+  const langDetect = readFileSync(join(ROOT, "lib", "lang-detect.ts"), "utf8");
+  for (const gone of ["analyzeLanguageMix", "stripNonProse", "NON_LATIN_MAJORITY"]) {
+    assert.ok(!langDetect.includes(gone), `${gone} must be gone from lib/lang-detect.ts`);
+  }
+  // Advisory L5 died long ago; it must not come back.
+  assert.doesNotMatch(SRC, /l5Advisories/);
+  assert.doesNotMatch(SRC, /review-gate \(L5 advisory\)/);
 });
 
-test("L5 subject rule: BOTH commit paths share the subject-strict checker", () => {
-  // 2026-08-29 regression: `firstNonEnglish` judged the WHOLE message by
-  // majority, so a long English body diluted a Chinese subject and the
-  // checkpoint shipped. The fix is one shared function — if either path drifts
-  // back to the whole-message check, a non-English subject slips through THAT
-  // path, so both call sites are pinned here.
-  const toolCallPath = SRC.indexOf('nonEnglishCommitMessage(msgs.join("\\n\\n"))');
-  const checkpointPath = SRC.indexOf("nonEnglishCommitMessage(message)");
-  assert.ok(toolCallPath > 0, "the tool_call git-commit guard uses the shared checker");
-  assert.ok(checkpointPath > 0, "review_checkpoint uses the SAME shared checker");
-  // The tool_call path must JOIN the -m paragraphs the way git builds the
-  // message. Judging each -m as its own subject rejected legal English commits
-  // that merely mention a foreign term in a later paragraph (round-2 P2).
-  assert.doesNotMatch(SRC, /nonEnglishCommitMessage\(msgs\)/,
-    "each -m is a paragraph, not a subject — they must be joined first");
-  // The retired whole-message call must be gone from the commit-message paths
-  // (PR title/body legitimately keeps `firstNonEnglish(prTexts)`).
-  assert.doesNotMatch(SRC, /firstNonEnglish\(msgs\)/,
-    "the commit path must not fall back to the diluted whole-message check");
-  assert.doesNotMatch(SRC, /firstNonEnglish\(\[message\]\)/,
-    "review_checkpoint must not fall back to the diluted whole-message check");
-  assert.match(SRC, /firstNonEnglish\(prTexts\)/,
-    "PR title/body keeps the majority policy — the subject rule is commit-only");
-
-  // Both refusals must name the SUBJECT explicitly: a reason that only says
-  // "predominantly non-English" would send the agent to rewrite the body.
-  for (const at of [toolCallPath, checkpointPath]) {
-    const region = SRC.slice(at, at + 1400);
-    assert.match(region, /nonEn\.part === "subject"/,
-      "the reason branches on which part failed");
-    assert.match(region, /SUBJECT line is not English/,
-      "the refusal names the subject line as the offender");
+test("A-class blocks are appealable; B-class facts are NOT", () => {
+  // The dividing line (user requirement): a HEURISTIC the gate can get wrong
+  // gets an appeal route; a FACT it observed does not, or the appeal becomes
+  // the way to argue past the process.
+  const aClass: Array<[string, RegExp]> = [
+    ["commit subject/body", /refuseText\(\s*\n?\s*nonEn\.part === "subject" \? "commit-subject" : "commit-body"/],
+    ["PR text", /refuseText\("pr-text"/],
+    ["romanized", /refuseText\("romanized"/],
+    ["AI attribution", /refuseText\("ai-attribution"/],
+    ["test label", /refuseText\("test-label"/],
+  ];
+  for (const [what, pattern] of aClass) {
+    assert.match(SRC, pattern, `${what} must refuse through the appealable path`);
+  }
+  // refuseText is the ONLY place the hint is attached, so the route and the
+  // record of the block can never drift apart.
+  const refuse = windowOf("function refuseText(", "\n  }", "refuseText");
+  assert.match(refuse, /APPEAL_HINT/, "the reason carries the appeal route");
+  assert.match(refuse, /lastBlockedText = \{/, "the block is recorded for the appeal");
+  assert.match(refuse, /appealPassAuthorizes\(state\.appeals, digest\)/, "a granted pass is honoured");
+  assert.match(refuse, /consumeAppealPass\(/, "…exactly once");
+  // B-class: these reasons state the correct next step and must not offer an
+  // appeal instead.
+  for (const factBlock of [
+    "先调 setup_workspace",
+    "LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK",
+    "is a judge role and runs ONLY as its own pi process",
+    "matches a sensitive-file pattern",
+  ]) {
+    const at = SRC.indexOf(factBlock);
+    assert.ok(at > 0, `the B-class block must exist: ${factBlock}`);
+    assert.ok(!SRC.slice(at, at + 600).includes("APPEAL_HINT"),
+      `a FACT must not offer an appeal: ${factBlock}`);
   }
 });
 
@@ -1569,6 +1559,12 @@ test("judge_wait applies the three end-of-round criteria and returns conclusion 
   const body = toolBodyOf("judge_wait");
   assert.match(body, /clampWaitTimeout\(params\.timeoutMs\)/, "the blocking window is clamped by the gate");
   assert.match(body, /probeJudgeRound\(child\)/, "the loop probes with the shared criteria");
+  // The wait SKELETON is generic (lib/poll-wait.ts) and this tool only injects
+  // its own criteria — the next waiter (orchestrator_wait: attention events, a
+  // child's own completion) reuses the loop instead of copying it.
+  assert.match(body, /await pollUntil\(\{/, "the loop itself comes from the shared waiter");
+  assert.match(body, /isDone: \(o\) => o\.done/, "…with this tool's criteria injected");
+  assert.doesNotMatch(body, /while \(!outcome\.done/, "no hand-rolled wait loop may come back");
   // User decision 6.2: the RETURN carries the round's own output — the shared
   // formatter decides which half (conclusion vs. progress), so the tool must
   // not assemble a reply of its own.
@@ -2048,15 +2044,15 @@ test("LLM guards: deterministic checks precede every LLM call (tighten-only orde
   assert.ok(forbidden > 0 && semanticAttr > forbidden,
     "regex attribution check must precede classifyAiAttribution");
 
-  // L5 (advisory): Unicode firstNonEnglish must precede the semantic english
-  // check — anchored to the commit-msg branch (`msgs`), because the L6
-  // edit-time branch also calls classifyNonEnglish earlier in the file.
-  const unicodeCheck = SRC.indexOf('nonEnglishCommitMessage(msgs.join("\\n\\n"))');
+  // L5: the deterministic script check must precede the semantic one —
+  // anchored to the commit-msg branch (`msgs`), because the L6 edit-time
+  // branch also calls classifyNonEnglish earlier in the file.
+  const unicodeCheck = SRC.indexOf("nonEnglishCommitMessage(whole)");
   const semanticEnglish = SRC.indexOf("classifyNonEnglish(classifier(), msgs)");
   assert.ok(unicodeCheck > 0 && semanticEnglish > unicodeCheck,
     "Unicode script check must precede classifyNonEnglish in the commit branch");
   // same ordering in the PR branch
-  const unicodePr = SRC.indexOf("firstNonEnglish(prTexts)");
+  const unicodePr = SRC.indexOf('firstNonEnglishText("pr-text", prTexts)');
   const semanticPr = SRC.indexOf("classifyNonEnglish(classifier(), prTexts)");
   assert.ok(unicodePr > 0 && semanticPr > unicodePr,
     "Unicode script check must precede classifyNonEnglish in the PR branch");
@@ -2310,30 +2306,22 @@ test("REGRESSION: resolveOpenPr must fall back for gh versions without headRefOi
     "the legacy retry must be conditional on the field-whitelist error (P2: never retry for a real failure)");
 });
 
-test("L5 is HARD: non-English commit/PR text blocks the ship with the escape hatch named", () => {
-  // User policy (2026-08-16): L5 upgraded from advisory to hard block — the
-  // same majority-body detection, but a hit now returns block:true, and the
-  // reason must name the escape hatch so a wrong guess never strands a
-  // legitimate commit.
-  const callStart = SRC.indexOf('pi.on("tool_call"');
-  const callBody = SRC.slice(callStart, SRC.indexOf('pi.on("tool_result"', callStart));
-  assert.match(callBody, /L5 HARD: a predominantly non-English/,
-    "the L5 section must be marked HARD");
-  assert.match(callBody, /commit message is predominantly non-English/,
-    "a non-English commit message must block");
-  assert.match(callBody, /\/gate-bypass <reason>/,
-    "the commit block reason must name the in-session escape hatch");
-  assert.match(callBody, /REVIEW_GATE_BYPASS=1/,
-    "the out-of-session hook bypass must be named too");
-  assert.match(callBody, /PR title\/description is predominantly non-English/,
-    "a non-English PR title/body must block");
-  assert.match(callBody, /gh pr edit --title\/--body/,
-    "the PR block reason must point at the fix");
+test("L5 is HARD at the ship gate, and says how to fix or contest each refusal", () => {
+  // L5 blocks the ship (user policy 2026-08-16) and now uses ONE rule
+  // everywhere (2026-08-29). Because the rule is hard, every refusal has to
+  // carry both routes: the fix, and the appeal for a genuine misjudgement.
+  const callBody = windowOf('pi.on("tool_call"', 'pi.on("tool_result"', "tool_call handler");
+  assert.match(callBody, /L5 \(HARD\)/, "the L5 section must be marked HARD");
+  assert.match(callBody, /l5BlockReason\(/, "the wording comes from the shared function");
+  assert.match(callBody, /git commit --amend/, "the commit refusal points at the fix");
+  assert.match(callBody, /gh pr edit --title\/--body/, "the PR refusal points at the fix");
+  assert.match(callBody, /refuseText\(/, "…and every refusal carries the appeal route");
   assert.doesNotMatch(callBody, /advisory only — never a block/,
     "the advisory-only rationale must be gone");
-  const blocks = callBody.split("block: true").length - 1;
-  assert.ok(blocks >= 6, `expected the L5 blocks to exist alongside the others (got ${blocks} total block:true sites)`);
+  assert.doesNotMatch(callBody, /predominantly non-English/,
+    "the majority-policy wording must be gone with the policy");
 });
+
 
 test("REGRESSION: /gate-bypass actually disarms the L1 ship gate in-session", () => {
   // The /gate-bypass command wrote state.bypass but L1 never consulted it —

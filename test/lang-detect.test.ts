@@ -2,16 +2,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  isNonEnglishText,
-  firstNonEnglish,
+  judgeEnglish,
+  firstNonEnglishText,
   nonEnglishCommitMessage,
   commitSubjectLine,
-  analyzeLanguageMix,
-  stripNonProse,
   containsNonLatinLetter,
+  l5BlockReason,
+  L5_QUOTE_LENGTH,
+  type L5Kind,
 } from "../lib/lang-detect.ts";
 
-// --- predominantly non-English (majority body) must be flagged -------------
+const KINDS: L5Kind[] = ["commit-subject", "commit-body", "pr-text", "test-label"];
+
+// --- the hard rule: ANY non-Latin letter refuses, on EVERY surface ----------
 
 for (const t of [
   "修复登录",             // Chinese (all CJK letters)
@@ -28,8 +31,11 @@ for (const t of [
   "ਪੰਜਾਬੀ",             // Gurmukhi
   "தமிழ்",              // Tamil
 ]) {
-  test(`non-English flagged (majority): ${t}`, () => {
-    assert.equal(isNonEnglishText(t), true);
+  test(`non-English refused on every kind: ${t}`, () => {
+    for (const kind of KINDS) {
+      assert.equal(judgeEnglish(kind, t)?.kind, kind);
+      assert.equal(judgeEnglish(kind, t)?.text, t);
+    }
   });
 }
 
@@ -43,186 +49,91 @@ for (const t of [
   "feat(auth): add JWT",
   "refactor lib/ship-detect.ts",
   "Über-fast cache (co-operate)",
-  "",                            // empty = nothing to flag
+  "「fix」",                     // fullwidth punctuation, no letters at all
+  "release 🚀 v2",
+  "",                            // empty = nothing to judge
   "   ",
 ]) {
   test(`English/Latin passes: ${JSON.stringify(t)}`, () => {
-    assert.equal(isNonEnglishText(t), false);
+    for (const kind of KINDS) assert.equal(judgeEnglish(kind, t), undefined);
   });
 }
 
-// --- majority-body policy: a MINORITY foreign token passes -----------------
+// --- what the hard rule CHANGED: a minority foreign token no longer passes --
 
 for (const t of [
-  "add 功能",                                 // 3 Latin vs 2 CJK → Latin-dominant
-  "「fix」",                                   // fullwidth punctuation, no letters → passes
-  "Endpoint adds pendingReward (确认中) field", // one quoted CJK term in English prose
-  "English 中文",                              // exactly 50% letters → passes (not majority)
+  "add 功能",
+  "Endpoint adds pendingReward (确认中) field",
+  "English 中文",
 ]) {
-  test(`minority-foreign passes: ${JSON.stringify(t)}`, () => {
-    assert.equal(isNonEnglishText(t), false);
+  test(`a minority foreign token is refused too (majority policy retired): ${JSON.stringify(t)}`, () => {
+    assert.ok(judgeEnglish("commit-body", t), "the ratio no longer decides anything");
   });
 }
 
-// --- majority-body policy: a MAJORITY non-Latin body fails -----------------
-
-for (const t of [
-  "中文 English 说明文字更多",   // more CJK than Latin
-  "确认中 确认中 ok",           // 4 CJK vs 2 Latin
-]) {
-  test(`majority-foreign flagged: ${JSON.stringify(t)}`, () => {
-    assert.equal(isNonEnglishText(t), true);
-  });
-}
-
-// --- analyzeLanguageMix boundary -------------------------------------------
-
-test("exactly 50% non-Latin letters is LATIN_DOMINANT (not majority)", () => {
-  const m = analyzeLanguageMix("ab中文"); // 2 Latin, 2 CJK
-  assert.equal(m.latinLetters, 2);
-  assert.equal(m.nonLatinLetters, 2);
-  assert.equal(m.verdict, "LATIN_DOMINANT");
+test("markup is not a hiding place: code fences, inline code and HTML all count", () => {
+  for (const t of ["```\n确认中\n```", "`确认中`", "<确认中>", "[text](https://例子.com)"]) {
+    assert.ok(judgeEnglish("pr-text", t), `${t} must not pass by being wrapped`);
+  }
 });
 
-test("just over 50% non-Latin letters is NON_LATIN_MAJORITY", () => {
-  const m = analyzeLanguageMix("ab中文字"); // 2 Latin, 3 CJK
-  assert.equal(m.verdict, "NON_LATIN_MAJORITY");
-});
+// --- containsNonLatinLetter (the primitive) ---------------------------------
 
-test("no letters at all is NO_LETTERS (passes)", () => {
-  const m = analyzeLanguageMix("123 !@# 「」 😀");
-  assert.equal(m.totalLetters, 0);
-  assert.equal(m.verdict, "NO_LETTERS");
-  assert.equal(isNonEnglishText("123 !@# 「」 😀"), false);
-});
-
-// --- non-prose stripping ----------------------------------------------------
-
-test("fenced code block does not dilute a non-Latin body", () => {
-  // A big Latin code fence must not mask a mostly-Chinese prose body.
-  const text = "说明文字全部是中文的正文内容\n```\nconst x = someVeryLongLatinIdentifierList = 1;\n```";
-  assert.equal(isNonEnglishText(text), true);
-});
-
-test("a fully non-Latin body hidden in a code fence is STILL flagged (asymmetric count)", () => {
-  // Reviewer P1: wrapping the whole non-English body in markup must not pass it.
-  assert.equal(isNonEnglishText("```\n确认中确认中\n```"), true);
-  assert.equal(isNonEnglishText("`确认中确认中`"), true);
-  assert.equal(isNonEnglishText("<确认中确认中>"), true);
-});
-
-test("non-Latin letters count even inside code; Latin code does not dilute them", () => {
-  const m = analyzeLanguageMix("```\nconst x = veryLongLatinIdentifier = 1;\n```\n确认中的说明");
-  // Latin code stripped from the denominator; the CJK prose is the majority.
-  assert.equal(m.verdict, "NON_LATIN_MAJORITY");
-});
-
-test("inline code and URLs are stripped before counting", () => {
-  const stripped = stripNonProse("see `constVar` at https://example.com/path中文");
-  assert.ok(!stripped.includes("constVar"));
-  assert.ok(!stripped.includes("example.com"));
-});
-
-test("markdown link keeps visible text, drops destination", () => {
-  const stripped = stripNonProse("[click here](https://例子.com/中文路径)");
-  assert.ok(stripped.includes("click here"));
-  assert.ok(!stripped.includes("例子"));
-});
-
-// --- containsNonLatinLetter -------------------------------------------------
-
-test("containsNonLatinLetter true for any non-Latin letter", () => {
+test("containsNonLatinLetter is true for any non-Latin letter, false for pure Latin", () => {
   assert.equal(containsNonLatinLetter("mostly english 确"), true);
-});
-test("containsNonLatinLetter false for pure Latin/ASCII", () => {
   assert.equal(containsNonLatinLetter("fix login bug café"), false);
-});
-test("containsNonLatinLetter scans the FULL text incl. code/URLs (disables romanized fallback)", () => {
-  // A non-Latin letter anywhere means the text is not pure-Latin, so the
-  // romanized-non-English semantic fallback must not run.
   assert.equal(containsNonLatinLetter("english `变量` prose"), true);
+  assert.equal(containsNonLatinLetter(""), false);
 });
 
-// --- firstNonEnglish --------------------------------------------------------
+// --- firstNonEnglishText ----------------------------------------------------
 
-test("firstNonEnglish returns the first offending string", () => {
-  assert.equal(firstNonEnglish(["fix bug", "修复问题说明", "add test"]), "修复问题说明");
-});
-test("firstNonEnglish ignores a minority-foreign string", () => {
-  assert.equal(firstNonEnglish(["fix bug", "add 功能", "add test"]), undefined);
-});
-test("firstNonEnglish returns undefined when all English", () => {
-  assert.equal(firstNonEnglish(["fix bug", "add test"]), undefined);
-});
-test("firstNonEnglish handles empty list", () => {
-  assert.equal(firstNonEnglish([]), undefined);
+test("firstNonEnglishText returns the FIRST offending string, judged separately", () => {
+  const hit = firstNonEnglishText("pr-text", ["fix bug", "修复问题说明", "add test"]);
+  assert.equal(hit?.text, "修复问题说明");
+  assert.equal(hit?.kind, "pr-text");
 });
 
-// --- nonEnglishCommitMessage (subject strict, body majority) -----------------
-//
-// Regression origin (2026-08-29): checkpoint f161146 landed with a fully
-// Chinese subject because the majority check judged the WHOLE message and the
-// long English body diluted the subject below the 50% threshold.
+test("firstNonEnglishText returns undefined when every string is English", () => {
+  assert.equal(firstNonEnglishText("pr-text", ["fix bug", "add test"]), undefined);
+  assert.equal(firstNonEnglishText("pr-text", []), undefined);
+});
 
-/** The real message that slipped through: Chinese subject, English-heavy body. */
-const DILUTED_SUBJECT = [
-  "checkpoint: 修掉上一轮重构遗留的 2 条非阻塞 P2 提示文案（纯文案 + 死变量清理，无行为改动）：",
-  "",
-  "1. extensions/review-gate.ts record_review STALE TARGET: replace the manual",
-  "   review_checkpoint -> prepare_review -> review_spawn -> record_review chain",
-  "   with one judge_submit call. The STALE cause and the short-next-round line",
-  "   are preserved verbatim, and prepare_review keeps stream, waiting discipline",
-  "   and the truncated goal instructions untouched.",
-].join("\n");
+test("a long English text cannot mask a short non-English one", () => {
+  const long = "A very long English PR description ".repeat(20);
+  assert.ok(firstNonEnglishText("pr-text", [long, "标题"]), "each string is judged on its own");
+});
 
-test("nonEnglishCommitMessage catches a non-English SUBJECT that the majority check missed", () => {
-  // The exact bypass: the whole-message majority check passes...
-  assert.equal(firstNonEnglish([DILUTED_SUBJECT]), undefined);
-  // ...but the subject-line rule rejects it.
-  const hit = nonEnglishCommitMessage(DILUTED_SUBJECT);
+// --- nonEnglishCommitMessage: one rule, two locations -----------------------
+
+test("a non-English SUBJECT is reported as the subject, not as the whole message", () => {
+  const hit = nonEnglishCommitMessage("修复问题\n\nA long English body that explains the change.");
   assert.equal(hit?.part, "subject");
-  assert.match(hit?.text ?? "", /^checkpoint: 修掉/);
+  assert.equal(hit?.text, "修复问题");
 });
 
-test("nonEnglishCommitMessage rejects even a SINGLE non-Latin letter in the subject", () => {
+test("a single non-Latin letter in the subject is enough", () => {
   const hit = nonEnglishCommitMessage("feat(api): add 分页");
   assert.equal(hit?.part, "subject");
-  assert.equal(hit?.text, "feat(api): add 分页");
-  // The majority policy alone would have let this through — that is the point.
-  assert.equal(firstNonEnglish(["feat(api): add 分页"]), undefined);
 });
 
-test("nonEnglishCommitMessage passes an English subject with a minority foreign term in the BODY", () => {
+test("an English subject with a foreign term in the BODY is reported as the body", () => {
   const msg = [
-    "feat(api): add pagination to list endpoints",
+    "fix(api): handle expired refresh tokens",
     "",
-    "The client team calls this 分页, but the body stays English overall so the",
-    "majority policy documented for bodies keeps applying unchanged here.",
+    "The upstream error string is 确认中, quoted verbatim here.",
   ].join("\n");
-  assert.equal(nonEnglishCommitMessage(msg), undefined);
-});
-
-test("nonEnglishCommitMessage still flags a predominantly non-English BODY", () => {
-  const msg = "fix(auth): handle expired tokens\n\n这个提交修复了刷新令牌过期之后无法续期的问题，并补充了相应的回归测试。";
   const hit = nonEnglishCommitMessage(msg);
-  assert.equal(hit?.part, "body");
+  assert.equal(hit?.part, "body", "the body obeys the same hard rule (appealable, not exempt)");
 });
 
-test("nonEnglishCommitMessage handles empty and subject-only messages", () => {
-  assert.equal(nonEnglishCommitMessage(""), undefined);
+test("a fully English message passes, empty and subject-only included", () => {
   assert.equal(nonEnglishCommitMessage("fix bug"), undefined);
-  // A single-line (subject-only) message is judged strictly too.
-  assert.equal(nonEnglishCommitMessage("修复问题")?.part, "subject");
+  assert.equal(nonEnglishCommitMessage(""), undefined);
+  assert.equal(nonEnglishCommitMessage("fix(api): add pagination\n\nWhy: the list endpoint timed out."), undefined);
 });
-
-// --- the two bypasses found in review (2026-08-29, round 2) ------------------
 
 test("commitSubjectLine skips leading blank lines, as git stripspace does", () => {
-  // A single leading newline used to make the subject look empty, so a Chinese
-  // subject sailed through while git still recorded it AS the subject.
-  // (Known, harmless divergence: stripspace preserves a line's leading indent
-  // and this trims it. Indentation carries no letters, so L5 is unaffected —
-  // only the echoed text in a refusal differs.)
   assert.equal(commitSubjectLine("\n\n修复问题\n\nEnglish body here."), "修复问题");
   assert.equal(commitSubjectLine("fix: thing\n\nbody"), "fix: thing");
   assert.equal(commitSubjectLine("   \n  fix: padded  \n"), "fix: padded");
@@ -230,22 +141,30 @@ test("commitSubjectLine skips leading blank lines, as git stripspace does", () =
   assert.equal(commitSubjectLine("\n\n\n"), "");
 });
 
-test("nonEnglishCommitMessage closes the leading-blank-line subject bypass", () => {
-  const hit = nonEnglishCommitMessage("\n\n修复问题\n\nA long English body that would otherwise dominate the majority count here.");
-  assert.equal(hit?.part, "subject", "the real subject is judged, not the empty first line");
+test("the leading-blank-line subject bypass stays closed", () => {
+  const hit = nonEnglishCommitMessage("\n\n修复问题\n\nAn English body that follows it.");
+  assert.equal(hit?.part, "subject");
   assert.equal(hit?.text, "修复问题");
 });
 
-test("nonEnglishCommitMessage judges a multi -m message as ONE message, not many subjects", () => {
-  // `git commit -m A -m B` produces "A\n\nB": only A is a subject. Judging each
-  // -m as its own subject would reject this legal English commit.
-  const paragraphs = [
-    "feat(api): add pagination to list endpoints",
-    "The client team calls this 分页, but the body stays English overall so the majority policy applies.",
-  ];
-  assert.equal(nonEnglishCommitMessage(paragraphs.join("\n\n")), undefined,
-    "a foreign term in the SECOND paragraph is body text, not a subject");
-  // ...while a Chinese FIRST paragraph is still caught.
+test("a multi -m message is ONE message: only its first paragraph holds a subject", () => {
+  const paragraphs = ["fix(api): add pagination", "Why: the list endpoint timed out."];
+  assert.equal(nonEnglishCommitMessage(paragraphs.join("\n\n")), undefined);
   assert.equal(nonEnglishCommitMessage(["修复问题", "English body."].join("\n\n"))?.part, "subject");
 });
 
+// --- the shared block sentence ---------------------------------------------
+
+test("l5BlockReason names the surface and quotes a bounded prefix", () => {
+  const long = "确".repeat(200);
+  const text = l5BlockReason({ kind: "commit-subject", text: long });
+  assert.match(text, /the commit SUBJECT line is not English/);
+  assert.match(text, /L5 accepts no non-Latin letters at all/);
+  assert.ok(text.includes("确".repeat(L5_QUOTE_LENGTH)), "the quote is capped, not the whole text");
+  assert.ok(!text.includes("确".repeat(L5_QUOTE_LENGTH + 1)));
+});
+
+test("every kind has its own sentence", () => {
+  const seen = new Set(KINDS.map((kind) => l5BlockReason({ kind, text: "x" })));
+  assert.equal(seen.size, KINDS.length, "no two surfaces share a reason");
+});

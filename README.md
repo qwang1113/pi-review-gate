@@ -76,16 +76,16 @@ L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
                           strict Simplified-Chinese directive every turn
                           (thinking in Chinese too; protocol English tokens
                           READY/BLOCKED/commit-msg/code stay exempt)
-L5  Commit/PR English     tool_call → HARD block when a commit SUBJECT line
-                          contains ANY non-Latin letter, or when a commit body
-                          / PR title/body is PREDOMINANTLY non-English (majority
-                          body; in-session escape: /gate-bypass, outside:
-                          REVIEW_GATE_BYPASS=1 (git hooks only)); the language
-                          directive (L4) + reviewer enforce English ship text;
-                          a minority foreign token passes in a BODY, never in
-                          a commit subject
+L5  Commit/PR English     tool_call → HARD block when a commit subject/body or
+                          a PR title/body contains ANY non-Latin letter (one
+                          rule, one implementation: lib/lang-detect.ts). A
+                          misjudgement is contestable with request_arbitration
+                          (content-bound single-use pass, 3 per session);
+                          in-session escape: /gate-bypass, outside:
+                          REVIEW_GATE_BYPASS=1 (git hooks only). The language
+                          directive (L4) + reviewer enforce English ship text
 L6  Test-label English    pre-commit → block a staged it/test/describe label
-                          that is PREDOMINANTLY non-Latin, unless a
+                          containing ANY non-Latin letter, unless a
                           `// review-gate: allow-non-english` (line) or `-file`
                           marker exempts it
 L7  Copilot review loop   after a PR is created/updated → request GitHub
@@ -1617,53 +1617,49 @@ only — no blocking, no command rewriting** (`lib/edit-discipline.ts`):
 ### Commit/PR English gate (L5, HARD)
 
 Complementary to L4: while L4 makes user-facing *chat* Simplified Chinese, L5
-requires **commit messages and PR title/description in English** and it is a
-**hard block**: a predominantly non-English commit message or PR title/body
-returns `block: true` at the tool layer, with the escape hatches named in the
-reason (`/gate-bypass` in-session; `REVIEW_GATE_BYPASS=1` only outside the
-session, where the git hooks honor it) so a wrong guess never strands a
-legitimate
-ship. (It was advisory until 2026-08-16 — user policy hardened it; the
-extraction heuristic concern is bounded by the majority-body policy below
-plus the escape hatch.) The check uses a **majority-body policy**
-(`lib/lang-detect.ts`): after stripping non-prose (code fences, inline code,
-URLs, Markdown link destinations, HTML tags) it counts letters and flags the
-text only when a **non-Latin script** (CJK, Kana, Hangul, Cyrillic, …) is the
-**majority** of them — so a mostly-English body with a **stray/minority** quoted
-foreign term (e.g. one `确认中`) **passes**, while a predominantly non-Latin body
-blocks. Each text (a PR title, a PR body, one whole commit message) is judged
-**separately**, never concatenated, so a long English text can't mask a fully
-non-English one next to it. Within a single commit message, however, the
-majority policy applies to the message as a whole — which is exactly why the
-subject needs the stricter rule below.
+requires **commit messages and PR title/description in English**, and it is a
+**hard block**.
 
-A **commit SUBJECT line is the exception: it is judged strictly** — ANY
-non-Latin letter in it blocks, no majority needed
-(`nonEnglishCommitMessage`, shared by the `git commit` tool_call guard and
-`review_checkpoint`). The majority policy alone was not enough there: a long
-English body full of identifiers and paths diluted a fully Chinese subject
-below the threshold, and the commit shipped (observed 2026-08-29). The subject
-is what every `git log`, blame and changelog shows, so it gets zero tolerance
-while the **body keeps the relaxed majority policy**. Two consequences worth
-knowing: the subject is taken the way `git stripspace` takes it (leading blank
-lines skipped), and repeated `-m` paragraphs are **joined** before the check —
-only the first paragraph's first line is a subject, so a foreign term in a
-later `-m` is body text. PR title/body are NOT affected by the subject rule.
+**One rule, one implementation** (`judgeEnglish` in `lib/lang-detect.ts`,
+mirrored in the CJS scanner for L6): a text containing **any non-Latin letter**
+(CJK, Kana, Hangul, Cyrillic, …) is refused. The four call sites — the
+`git commit` tool_call guard, `review_checkpoint`, PR title/body, test labels —
+differ only in the `kind` they pass, which decides the wording of the block.
+The whole text is scanned, markup included, so wrapping a body in a code fence
+is not a bypass. ASCII, identifiers, digits, punctuation, URLs, emoji and
+Latin-with-diacritics (café, naïve) all pass. Each text (a PR title, a PR body,
+one whole commit message) is judged **separately**, never concatenated, so a
+long English text cannot mask a short non-English one; within one commit
+message the **subject** is reported separately from the body, because that is
+the line every `git log`, blame and changelog shows. The subject is taken the
+way `git stripspace` takes it (leading blank lines skipped), and repeated `-m`
+paragraphs are **joined** first — only the first paragraph's first line is a
+subject.
 
-The pure-Latin romanized-language semantic layer runs only when the text has **zero** non-Latin
-letters. Counting is **asymmetric** so markup can't hide a non-Latin body:
-non-Latin letters are counted over the **full** text (a `确认中` inside a code
-fence still counts), while Latin letters are counted over **prose only** (a big
-Latin code block can't dilute the ratio). Known conservative side-effect: an
-English text quoting a **large** non-Latin code sample can tip to "majority
-non-Latin" and block — use the escape hatch or rephrase; a deliberate
-non-English test label can be exempted with the L6 bypass marker. Enforcement
-is layered: the L4 language directive instructs the agent to write ship text in
-English every turn, the tool layer blocks, and the
-reviewer treats a **predominantly** non-English commit message or PR title/body
-as a **P1 finding** (a single minority foreign token is **not** a finding). If a
-non-English PR body can only be fixed by an action the gate itself blocks (the
-circular deadlock), the agent can escalate via the
+The **ratio policy is retired** (2026-08-29). It failed a text only when a
+non-Latin script was the majority of its letters, which let a long English body
+dilute a fully Chinese subject below the threshold and ship (observed), and it
+forced every reader to know which of two policies applied where.
+
+A hard rule is only humane when a wrong one can be contested, so **every L5/L6
+refusal is appealable**: `request_arbitration` puts the refused text to an
+independent arbiter, and a granted appeal issues a **content-bound, single-use
+pass** for exactly that text (`lib/text-appeal.ts`). Four brakes keep it from
+becoming the cheap path: only a block that actually happened can be contested;
+the appeal binds to the sha256 of the content and a refused content is locked;
+a per-session quota of 3, **shared** with `gh pr edit` arbitration and persisted
+in the sidecar; and each appeal costs a real arbiter call. The same line divides
+the rest of the gate: a **fact** it observed (no workspace, no approved goal,
+unmet review gate, sensitive file) is never appealable — those have a correct
+next step.
+
+The pure-Latin **romanized** semantic layer (pinyin/romaji written in Latin
+letters) runs only when the text has **zero** non-Latin letters, and its
+refusals are appealable too. Enforcement stays layered: the L4 directive
+instructs the agent to write ship text in English every turn, the tool layer
+blocks, and the reviewer treats a non-English commit message or PR title/body as
+a **P1 finding**. If a non-English PR body can only be fixed by an action the
+gate itself blocks (the circular deadlock), the agent can also escalate via the
 [arbiter](#arbiter-a-narrow-fail-closed-gate-exception).
 
 ### Test-label English gate (L6)
@@ -1672,10 +1668,10 @@ Test descriptions must be **English** too. Enforced at the `pre-commit` hook
 (L3) layer by `scripts/scan-test-labels.cjs`, which scans the **staged** content
 of test files (`*.test.*`, `*.spec.*`, or under `__tests__/`, JS/TS only) for
 `it(…)` / `test(…)` / `describe(…)` (incl. `.only`/`.skip` chains) whose
-string-literal description is **predominantly** a non-Latin script. Same
-majority-body detection as L5 (`lib/lang-detect.ts`, mirrored in the CJS
-scanner), so diacritics/emoji/digits pass, a minority foreign token passes, and
-only a label whose letters are **mostly** another writing system is blocked.
+string-literal description contains **any non-Latin letter**. Same hard rule as
+L5 (`lib/lang-detect.ts`, mirrored in the CJS scanner because a git hook runs
+that file with plain node), so diacritics, emoji and digits pass while any
+CJK/Kana/Hangul/Cyrillic letter is blocked.
 
 When a test description legitimately must be non-English, exempt it with a
 bypass marker — recognized **only in `//` line comments**:
