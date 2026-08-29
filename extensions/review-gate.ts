@@ -2997,11 +2997,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_checkpoint",
     label: "Review Checkpoint",
     description:
-      "Commit the current worktree as a checkpoint commit — the ONLY way to commit before a READY " +
+      "ADVANCED / internal: `judge_submit({role:\"reviewer\"})` runs this itself as step 2 of the " +
+      "submission chain (and stamps the checkpoint marker on the subject) — call it directly only " +
+      "to freeze work without submitting it. " +
+      "Commits the current worktree as a checkpoint commit — the ONLY way to commit before a READY " +
       "review. Requires a precommit PASS (it bypasses READY only, never precommit), validates the " +
-      "message is English (L5), commits everything (git add -A), and records the commit sha. " +
-      "Every later review round judges baseline..HEAD, so checkpoints are the review unit: commit " +
-      "after each batch of fixes, before sending the round to the reviewer.",
+      "message is English (L5), commits everything (git add -A), records the commit sha and the " +
+      "branch it landed on, and refuses any branch that is not this session's work branch. " +
+      "Every review round judges baseline..HEAD, so checkpoints are the review unit.",
     parameters: Type.Object({
       message: Type.String({ description: "English commit message (Conventional Commits style)" }),
       repo: Type.Optional(Type.String({
@@ -4137,12 +4140,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "prepare_review",
     label: "Prepare Review",
     description:
-      "Compute the review unit (checkpoint baseline..HEAD), write the finding stream path and hand " +
-      "back the ready-made task text for the ONE reviewer of this round, plus the spawn flow " +
-      "(review_spawn; the wake-up listener comes with the spawn). ALWAYS call this before spawning the reviewer — " +
-      "review no longer runs through subagents. One reviewer, one commit range: no split, one " +
-      "reviewer — everything the reviewer judges is the whole change in baseline..HEAD. Call " +
-      "review_checkpoint first: the reviewed range is defined by the last checkpoint sha.",
+      "ADVANCED / internal: `judge_submit({role:\"reviewer\"})` runs this itself as step 3 of the " +
+      "submission chain — call it directly only to inspect the range and the task text without " +
+      "dispatching anyone. " +
+      "Computes the review unit (checkpoint baseline..HEAD), writes the findings-stream path and " +
+      "hands back the ready-made task text for the ONE reviewer of this round. One reviewer, one " +
+      "commit range: no split — everything the reviewer judges is the whole change in " +
+      "baseline..HEAD, which is defined by the last checkpoint sha.",
     parameters: Type.Object({
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
@@ -4392,9 +4396,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "prepare_adviser",
     label: "Prepare Adviser Brief",
     description:
-      "Hand back the ready-made task text for an `adviser` consultation on the CURRENT loop goal — the adviser runs as its own pi process (`review_spawn`), not as a subagent. " +
-      "Call this before dispatching `adviser`: the brief carries (a) the main session's transcript location " +
-      "for ON-DEMAND reading (as its own pi process the adviser does not inherit this conversation), " +
+      "ADVANCED / internal: `judge_submit({role:\"adviser\", task:<your question>})` calls this itself " +
+      "and dispatches the adviser — call it directly only to read the brief without consulting anyone. " +
+      "Builds the brief for an `adviser` consultation on the CURRENT loop goal: (a) the main " +
+      "session's transcript location for ON-DEMAND reading (as its own pi process the adviser does " +
+      "not inherit this conversation), " +
       "(b) the artifact path where the adviser appends its conclusion, and (c) when a previous " +
       "consultation of this goal exists, that conclusion plus the files changed since, so the adviser " +
       "settles what already stands instead of re-arguing it from zero. First consultation of a goal is a full brief.",
@@ -4509,12 +4515,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "prepare_goal_audit",
     label: "Prepare Goal Audit Task",
     description:
-      "Hand back the ready-made task text for a `goal-auditor` audit of a DRAFT loop goal — call this BEFORE " +
-      "dispatching the auditor. The task carries the draft, the audit criteria, the fresh-context transcript " +
+      "ADVANCED / internal: `judge_submit({role:\"goal-auditor\", task:<draft>})` calls this itself, " +
+      "dispatches the auditor, adjudicates and records the verdict — call it directly only to read " +
+      "the audit task without dispatching anyone. " +
+      "Builds the task for a `goal-auditor` audit of a DRAFT loop goal: the draft, the audit " +
+      "criteria, the fresh-context transcript " +
       "pointer, and — when a previous audit of a DIFFERENT draft is on record — the carryover block (previous " +
       "verdict + findings + previous draft) and the mechanically computed draft delta, so a re-audit judges " +
-      "the increment instead of re-deriving the whole contract. record_goal_prereview stays a pure record; " +
-      "this is where the task text comes from.",
+      "the increment instead of re-deriving the whole contract.",
     parameters: Type.Object({
       goal: Type.String({ description: "The FULL draft goal text to be audited (the exact text you will submit)" }),
       repo: Type.Optional(Type.String({
@@ -4561,9 +4569,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "record_review",
     label: "Record Review",
     description:
-      "Record the verdict of an independent code/doc review. Pass the FULL raw output of a REAL, " +
+      "ADVANCED / internal: the gate records the verdict ITSELF when the reviewer's process exits " +
+      "(from that round's own output), so you do not call this in the normal flow — only when you " +
+      "have a reviewer output the gate could not read. " +
+      "Records the verdict of an independent code/doc review. Pass the FULL raw output of a REAL, " +
       "independent reviewer run (do not hand-write the verdict). The gate parses every JSON fence " +
-      "(worst verdict wins). Call after every review round.",
+      "(worst verdict wins).",
     parameters: Type.Object({
       reviewer_output: Type.String({ description: "Complete raw output from the reviewer" }),
       repo: Type.Optional(Type.String({
@@ -4832,7 +4843,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "run_precommit",
     label: "Run Precommit",
     description:
-      "Run the trusted precommit checks and record the verdict. This is the ONLY way to " +
+      "ADVANCED / internal: `judge_submit({role:\"reviewer\"})` runs this itself as step 1 of the " +
+      "submission chain — call it directly only to check the lane on its own. " +
+      "Runs the trusted precommit checks and records the verdict. This is the ONLY way to " +
       "record a precommit PASS — the gate never trusts a PASS parsed from bash output. " +
       "The extension spawns the bundled runner itself and verifies a private nonce receipt.",
     parameters: Type.Object({
@@ -5175,15 +5188,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "record_goal_prereview",
     label: "Record Goal Pre-review",
     description:
-      "Record the dedicated `goal-auditor` judge child's audit of a DRAFT loop goal. propose_loop_goal " +
-      "refuses to show the user's approval dialog until this records a PASS for the IDENTICAL text, " +
-      "so the flow is: draft (in Simplified Chinese) → call `prepare_goal_audit` for the ready-made " +
-      "auditor task (carryover + draft delta on a re-audit) → dispatch goal-auditor with it → record " +
-      "its FULL raw output here → propose_loop_goal. The EXTENSION parses the auditor's JSON fence " +
-      "itself (PASS only for a READY verdict; a fence with unresolved P0/P1 is already downgraded to " +
-      "BLOCKED) and hashes the draft itself — there is no `passed` parameter you could set, and a " +
-      "hand-written verdict is not a review. A FAIL means: fix the objections, re-audit the revised " +
-      "text (its hash differs, so it needs its own PASS).",
+      "ADVANCED / internal: the gate records a goal audit ITSELF when the auditor's process exits, " +
+      "against the draft it dispatched — the normal flow is " +
+      "`judge_submit({role:\"goal-auditor\", task:<draft>})` → propose_loop_goal. Call this directly " +
+      "only when you have an auditor output the gate could not read. " +
+      "Records the audit of a DRAFT loop goal; propose_loop_goal " +
+      "refuses to show the user's approval dialog until a PASS is recorded for the IDENTICAL text. " +
+      "The EXTENSION parses the auditor's JSON fence " +
+      "itself (PASS ⇔ a READY verdict with no unresolved P0/P1) and hashes the draft itself — there " +
+      "is no `passed` parameter you could set, and a " +
+      "hand-written verdict is not a review. A failed audit means: fix the objections and submit the " +
+      "revised text (its hash differs, so it needs its own PASS).",
     parameters: Type.Object({
       goal: Type.String({ description: "The FULL draft goal text that was audited (the exact text you will submit)" }),
       auditor_output: Type.String({ description: "Complete raw output from the goal-auditor judge child" }),

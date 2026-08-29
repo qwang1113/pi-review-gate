@@ -1346,7 +1346,7 @@ test("round-18: prepare_review carries the polish-gate reason — parameter, ref
   // record_review records per-file finding severities for the file streak.
   const recAt = SRC.indexOf('name: "record_review"');
   assert.ok(recAt > 0);
-  const recBody = SRC.slice(recAt, recAt + 9000);
+  const recBody = SRC.slice(recAt, recAt + 10000);
   assert.match(recBody, /parseFenceFileFindings\(params\.reviewer_output\)/, "record_review parses severity+file per round");
   assert.match(recBody, /recordedFindingsFrom\(fileFindings\)/, "the file lists are derived for the streak");
   assert.match(recBody, /polishFiles: recorded\.polishFiles/, "P2/Nit files are stored on the round");
@@ -2513,5 +2513,26 @@ test("a judge's verdict is recorded from THIS round's output, never the transcri
   // though the judge simply asked something.
   assert.match(wider, /提了一个问题（没有 verdict）/, "a question fence is reported as a question");
   assert.match(body, /child\.role === "adviser"/, "advice is not a verdict");
+});
+
+
+test("every advanced entry says it is one, and none teaches the retired manual flow", () => {
+  // The tool list is the surface an agent reads EVERY turn: a description
+  // still saying "call this before spawning the reviewer" is enough to send
+  // it back to the four-step dance judge_submit replaced.
+  const advanced = [
+    "run_precommit", "review_checkpoint", "prepare_review", "record_review",
+    "prepare_goal_audit", "prepare_adviser", "record_goal_prereview",
+  ];
+  for (const tool of advanced) {
+    const at = SRC.indexOf(`name: "${tool}"`);
+    assert.ok(at > 0, `${tool} must be registered`);
+    const desc = SRC.slice(at, SRC.indexOf("parameters: Type.Object({", at));
+    assert.match(desc, /ADVANCED \/ internal/, `${tool}'s description must say it is an advanced entry`);
+    assert.match(desc, /judge_submit|the gate records/, `${tool} must point at the normal path`);
+    assert.doesNotMatch(desc, /review_spawn/, `${tool} must not teach the retired spawn call`);
+    assert.doesNotMatch(desc, /ALWAYS call this before|Call this before dispatching|Call after every review round/,
+      `${tool} must not teach the retired manual ordering`);
+  }
 });
 
