@@ -9,6 +9,11 @@ import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { hermeticGitEnv } from "./helpers/git.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
+
+// Same reason as loop-goal-gate.test.ts: the extension runs for real here, so
+// the surrounding gate session's own variables must not reach it.
+neutraliseGateEnv();
 
 // ---------------------------------------------------------------------------
 // Regression test for the P-multi fix: the ship gate must bind to the repo a

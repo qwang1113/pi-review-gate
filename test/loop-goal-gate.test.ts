@@ -12,6 +12,12 @@ import { goalTextHash } from "../lib/loop-goal.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { isPiSelfPath } from "../lib/pi-self.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
+
+// This file boots a REAL pi process with the extension loaded. It must decide
+// the gate's state from the fixture alone, so the variables the surrounding
+// gate session sets (RG_STATE_VARIANT & co.) are cleared before any spawn.
+neutraliseGateEnv();
 
 // ---------------------------------------------------------------------------
 // Behavioral regression for the loop goal's core promise: writing

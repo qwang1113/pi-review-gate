@@ -15,43 +15,20 @@
  * Types only: this module contains no behavior at all.
  */
 
-import type { TSchema } from "typebox";
 import type { AttentionEvent } from "./attention.ts";
 import type { OrchestratorPlan } from "./orchestrator-plan.ts";
 import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
 import type { TaskMode } from "./task-mode.ts";
 
-/** Result shape the pi tool runtime expects. */
-export interface ToolReply {
-  content: Array<{ type: "text"; text: string }>;
-  /** Present-but-undefined is required by the host's own result type. */
-  details: Record<string, unknown> | undefined;
-  isError?: boolean;
-}
-
 /**
- * Just enough of the pi extension API to register a tool.
- *
- * `parameters` is typed as typebox's `TSchema` (rather than `unknown`) so the
- * real `ExtensionAPI` satisfies this interface structurally: the host's own
- * signature is generic over the schema, and a widened `unknown` would make it
- * incompatible.
+ * The tool-registration seam moved to lib/tool-host.ts once a SECOND family
+ * of tools (the judge tools) started registering through it — a shared host
+ * type living in the orchestrator's own header would have made every other
+ * module import "orchestrator" to mean "pi". Re-exported here so every
+ * existing `import type { ToolHost, ToolReply } from "./orchestrator-deps.ts"`
+ * keeps resolving.
  */
-export interface ToolHost {
-  registerTool(definition: {
-    name: string;
-    label: string;
-    description: string;
-    parameters: TSchema;
-    execute: (
-      id: string,
-      params: Record<string, unknown>,
-      signal: { readonly aborted: boolean } | undefined,
-      onUpdate: unknown,
-      ctx: unknown,
-    ) => Promise<ToolReply>;
-  }): void;
-}
+export type { ToolHost, ToolReply } from "./tool-host.ts";
 
 /** One tmux invocation, already validated by lib/orchestrator-tmux.ts. */
 export interface TmuxRunResult {

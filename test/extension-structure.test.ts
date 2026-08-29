@@ -6,6 +6,19 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
+/**
+ * The judge tools that observe/end a session moved to lib/ (they are wired
+ * from the extension, not written in it). Their structural rules did not
+ * move with them — they are asserted here, against the module that now owns
+ * them, so a rule cannot quietly disappear along with the code it covers.
+ */
+const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
+const JUDGE_SESSION_TOOLS = new Set(["judge_read", "judge_close", "judge_wait"]);
+
+/** Which source owns a given tool's body. */
+function sourceOf(tool: string): string {
+  return JUDGE_SESSION_TOOLS.has(tool) ? JUDGE_TOOLS_SRC : SRC;
+}
 
 /**
  * The source window from `start` up to the next `end` anchor, with BOTH
@@ -16,18 +29,53 @@ const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
  * test keeps passing while asserting nothing. An end ANCHOR cannot rot
  * quietly — when it stops closing the window, this fails and says so.
  */
-function windowOf(start: string, end: string | RegExp, label: string, from = 0): string {
-  const at = SRC.indexOf(start, from);
+function windowIn(src: string, start: string, end: string | RegExp, label: string, from = 0): string {
+  const at = src.indexOf(start, from);
   assert.ok(at >= 0, `${label}: start anchor ${JSON.stringify(start)} not found`);
-  const rest = SRC.slice(at + start.length);
+  const rest = src.slice(at + start.length);
   const rel = typeof end === "string" ? rest.indexOf(end) : rest.search(end);
   assert.ok(rel >= 0, `${label}: end anchor ${String(end)} no longer closes the window`);
-  return SRC.slice(at, at + start.length + rel);
+  return src.slice(at, at + start.length + rel);
 }
 
-/** The body of one registered tool: from its `name:` line to the next one. */
+function windowOf(start: string, end: string | RegExp, label: string, from = 0): string {
+  return windowIn(SRC, start, end, label, from);
+}
+
+/**
+ * A lib/ tool module splits a tool in two: the REGISTRATION (name, label,
+ * description, schema) and the HANDLER it dispatches to. A rule about what a
+ * tool does would land in neither window alone, so the two are read together.
+ */
+const JUDGE_TOOL_HANDLERS: Record<string, string> = {
+  judge_read: "async function doRead(",
+  judge_close: "async function doClose(",
+  judge_wait: "async function doWait(",
+};
+
+/**
+ * The body of one registered tool: from its `name:` line to the next one,
+ * plus — for a lib/ tool module — the handler that registration points at.
+ *
+ * Registration reads `pi.registerTool` in the extension and `host.registerTool`
+ * in a lib/ tool module; the last tool of a module is closed by the end of
+ * its registration function (`\n}`).
+ */
 function toolBodyOf(tool: string): string {
-  return windowOf(`name: "${tool}"`, /\n  pi\.registerTool\(\{|\n  \/\/ -{4,}/, `tool ${tool}`);
+  const registration = windowIn(
+    sourceOf(tool),
+    `name: "${tool}"`,
+    /\n  pi\.registerTool\(\{|\n  host\.registerTool\(\{|\n  \/\/ -{4,}|\n\}/,
+    `tool ${tool}`,
+  );
+  const handler = JUDGE_TOOL_HANDLERS[tool];
+  if (!handler) return registration;
+  return `${registration}\n${windowIn(JUDGE_TOOLS_SRC, handler, "\n}", `handler of ${tool}`)}`;
+}
+
+/** The extension's wiring of the judge session tools — deps, nothing else. */
+function judgeToolsWiring(): string {
+  return windowOf("registerJudgeSessionTools(pi, {", "\n  });", "judge tools wiring");
 }
 
 test("loop goal: injected ONLY in loop mode, before the unarmed early-return", () => {
@@ -1515,8 +1563,15 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
   assert.match(childBlock, /if \(!notifyNow\)/, "the throttled hosted wait has a distinct branch");
   assert.match(childBlock, /scheduleChildWaitRecheck\(/, "the throttled branch schedules a self-owned recheck");
   assert.match(childBlock, /return;/, "the throttled branch does not fall through to RESUME");
+  // judge_close still cancels the watchdog — the tool body now says so
+  // through its dep (it lives in lib/judge-session-tools.ts), and the
+  // extension's wiring is what binds that dep to the timer itself. Both
+  // halves are asserted: either one alone would let the cancel silently
+  // become a no-op.
   const closeBody = toolBodyOf("judge_close");
-  assert.match(closeBody, /cancelChildWaitTimer\(\)/, "judge_close cancels the watchdog");
+  assert.match(closeBody, /deps\.cancelWaitTimer\(\)/, "judge_close cancels the watchdog");
+  assert.match(judgeToolsWiring(), /cancelWaitTimer: \(\) => cancelChildWaitTimer\(\)/,
+    "…and the wiring binds that dep to the gate's own timer");
   const shutdownBody = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown handler");
   assert.match(shutdownBody, /cancelChildWaitTimer\(\)/, "session_shutdown cancels the watchdog");
 });
@@ -1595,21 +1650,42 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo, reuse, fresh-k
 });
 
 test("judge_read / judge_close / judge_wait address a judge by ROLE", () => {
+  // One role enum, shared by the three tools (a fourth spelling of it is how
+  // two of them would silently start accepting different roles).
+  assert.match(
+    JUDGE_TOOLS_SRC,
+    /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(\{ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" \}\)\)/,
+    "the shared role parameter is the three judge roles",
+  );
   for (const tool of ["judge_read", "judge_close", "judge_wait"]) {
     const body = toolBodyOf(tool);
-    assert.match(body, /role: Type\.Optional\(Type\.Enum\(\{ reviewer/, `${tool} takes a role`);
-    assert.match(body, /findJudgeChild\(root, role, /, `${tool} resolves the child by role`);
+    assert.match(body, /role: ROLE_PARAM/, `${tool} takes a role`);
+    assert.match(
+      JUDGE_TOOLS_SRC,
+      new RegExp(`addressJudge\\(deps, params, "${tool}"\\)`),
+      `${tool} addresses its judge through the shared resolver`,
+    );
   }
+  // Role wins over a session id, and the lookup itself is the extension's
+  // (the registry lives there) — the tools only ever ASK for it.
+  assert.match(
+    JUDGE_TOOLS_SRC,
+    /deps\.findChild\(addressed\.root, addressed\.role, addressed\.sessionId\)/,
+    "the child is resolved by role first, in the repo that was addressed",
+  );
+  assert.match(judgeToolsWiring(), /findChild: \(root, role, sessionId\) => findJudgeChild\(root, role, sessionId\)/,
+    "…and the wiring answers it from the extension's own registry");
   // The old names are RETIRED — no alias, no compatibility shim.
   for (const gone of ["review_read", "review_close", "review_wait"]) {
-    assert.ok(!SRC.includes(`name: "${gone}"`), `${gone} must no longer be registered`);
+    assert.ok(!SRC.includes(`name: "${gone}"`), `${gone} must no longer be registered in the extension`);
+    assert.ok(!JUDGE_TOOLS_SRC.includes(`name: "${gone}"`), `${gone} must no longer be registered in lib/`);
   }
 });
 
 test("judge_wait applies the three end-of-round criteria and returns conclusion + progress", () => {
   const body = toolBodyOf("judge_wait");
-  assert.match(body, /clampWaitTimeout\(params\.timeoutMs\)/, "the blocking window is clamped by the gate");
-  assert.match(body, /probeJudgeRound\(child\)/, "the loop probes with the shared criteria");
+  assert.match(body, /clampWaitTimeout\(.*params\.timeoutMs/, "the blocking window is clamped by the gate");
+  assert.match(body, /probeJudgeRound\(deps, child\)/, "the loop probes with the shared criteria");
   // The wait SKELETON is generic (lib/poll-wait.ts) and this tool only injects
   // its own criteria — the next waiter (orchestrator_wait: attention events, a
   // child's own completion) reuses the loop instead of copying it.
@@ -1620,13 +1696,18 @@ test("judge_wait applies the three end-of-round criteria and returns conclusion 
   // formatter decides which half (conclusion vs. progress), so the tool must
   // not assemble a reply of its own.
   assert.match(body, /formatJudgeWaitReply\(\{/, "the reply is built by the pure formatter");
-  assert.match(body, /stdoutTail: readLogTail\(child\.stdoutPath\)/, "both branches carry this round's stdout tail");
-  assert.match(body, /findings: recentStreamFindings\(child\.streamPath\)/,
+  assert.match(body, /stdoutTail: readLogTail\(deps, child\.stdoutPath\)/, "both branches carry this round's stdout tail");
+  assert.match(body, /findings: recentStreamFindings\(deps, child\.streamPath\)/,
     "the unfinished branch carries the newest streamed findings");
-  const probe = windowOf("function probeJudgeRound(", "\n  }", "probeJudgeRound");
+  const probe = windowIn(JUDGE_TOOLS_SRC, "export function probeJudgeRound(", "\n}", "probeJudgeRound");
   assert.match(probe, /evaluateJudgeWait\(\{/, "the criteria live in the pure module");
-  assert.match(probe, /existsSync\(child\.exitCodePath\)/, "the exit-code file is one criterion");
+  assert.match(probe, /deps\.fileExists\(child\.exitCodePath\)/, "the exit-code file is one criterion");
   assert.match(probe, /child\.stdoutPath/, "the fence criterion reads stdout, where the fence is plain text");
+  // The criterion is EXISTENCE, not readability: an empty exit-code file
+  // still means the round is over, so the wiring may not answer it with a
+  // content read.
+  assert.match(judgeToolsWiring(), /fileExists: \(path\) => existsSync\(path\)/,
+    "the wiring answers the exit-code criterion with existsSync");
 });
 
 test("STREAMING: every long-running gate tool publishes progress on its own onUpdate", () => {
@@ -1710,12 +1791,23 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the process 
 
   // judge_read: live process ⇒ tail of the stdout log; ended ⇒ the
   // transcript + stderr, because the process is gone but its records are not.
+  // The tool ASKS for each of those facts (it owns no filesystem of its own);
+  // the extension's wiring is what points each question at the RECORDED path
+  // of that child. Both halves are asserted — a dep bound to the wrong path
+  // would read another round's records while the tool still looked right.
   const read = toolBodyOf("judge_read");
-  assert.match(read, /readJudgeSessionState\(/, "liveness comes from the session's artifacts");
+  const wiring = judgeToolsWiring();
+  assert.match(read, /deps\.sessionState\(child\)/, "liveness comes from the session's artifacts");
+  assert.match(wiring, /sessionState: \(child\) => readJudgeSessionState\(\{ pidPath: child\.pidPath, exitCodePath: child\.exitCodePath \}\)/,
+    "…which are that child's own pid / exit-code records");
   assert.match(read, /judgeProcessAlive\(child\.child\)/, "the live PROCESS's exitCode decides running");
-  assert.match(read, /readJudgeConclusion\(child\.sessionDir\)/,
+  assert.match(read, /!running \? deps\.conclusion\(child\) : undefined/,
+    "the conclusion is read only once the process is gone");
+  assert.match(wiring, /conclusion: \(child\) => readJudgeConclusion\(child\.sessionDir\)/,
     "the conclusion is parsed from the RECORDED session dir");
-  assert.match(read, /readStderrTail\(child\.stderrPath\)/, "crash context survives the process");
+  assert.match(read, /!running \? deps\.stderrTail\(child\) : undefined/, "crash context survives the process");
+  assert.match(wiring, /stderrTail: \(child\) => readStderrTail\(child\.stderrPath\)/,
+    "…read from that child's own stderr log");
 
   // Round-5 P1: the child snapshot must SUPPLY lastActivityAt. It was declared
   // on the interface but never passed, so classifyChildren timed every judge
