@@ -37,6 +37,29 @@ import type { TaskMode } from "./task-mode.ts";
 /** Repo-root-relative location of the goal file (gate-excluded via `.pi/`). */
 export const LOOP_GOAL_RELPATH = ".pi/loop-goal.md";
 
+/**
+ * The goal file for ONE session — per sidecar variant (R-10).
+ *
+ * The measured problem: an orchestration child shares the supervisor's
+ * worktree, so it wrote its approved goal into the SUPERVISOR's
+ * `.pi/loop-goal.md`. With one child that is merely surprising; with two
+ * serial children it is data loss, because the second child's approval
+ * overwrites the first one's — and the reviewer verifies against that very
+ * file. The sidecar solved the same problem for gate state (F4) by moving the
+ * CHILD, and the goal file now follows it: same variable
+ * (`RG_STATE_VARIANT`), same shape, same reason.
+ *
+ * A session with no variant (the ordinary case) keeps the plain path, so
+ * nothing about a normal loop session changes.
+ */
+export function loopGoalRelPath(variant?: string): string {
+  const safe = variant
+    ? variant.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 64)
+    : "";
+  return safe.length > 0 ? `.pi/loop-goal.${safe}.md` : LOOP_GOAL_RELPATH;
+}
+
+
 /** Max characters of goal text injected into the system prompt. */
 export const LOOP_GOAL_MAX_CHARS = 1500;
 
@@ -503,9 +526,15 @@ export function loopGoalEditGate(opts: {
   return opts.goalConfirmed;
 }
 
-/** Read `<repoRoot>/.pi/loop-goal.md`. Never throws: any failure ⇒ absent. */
-export function readLoopGoal(repoRoot: string, now: number = Date.now()): LoopGoal {
-  const path = join(repoRoot, LOOP_GOAL_RELPATH);
+/**
+ * Read this session's goal file. Never throws: any failure ⇒ absent.
+ *
+ * `variant` selects the per-session file (R-10); omitted ⇒ the plain
+ * `.pi/loop-goal.md`, which is what an ordinary loop session uses.
+ */
+export function readLoopGoal(repoRoot: string, now: number = Date.now(), variant?: string): LoopGoal {
+  const path = join(repoRoot, loopGoalRelPath(variant));
+
   let raw: string;
   try {
     raw = readFileSync(path, "utf8").trim();

@@ -943,3 +943,42 @@ test("a running step's output is written to the log before the step finishes", a
     if (child.exitCode === null) child.kill();
   }
 });
+
+// ---------------------------------------------------------------------------
+// R-15 — the session's identity must not travel into a step
+// ---------------------------------------------------------------------------
+
+test("R-15: a step does NOT inherit the gate's session variables", () => {
+  // The measured failure: an orchestration child runs with
+  // `RG_STATE_VARIANT=<child id>` and `RG_GATE_MODE=loop`; the runner spawned
+  // the suite as a plain child, the suite inherited both, and the gate's own
+  // fixtures then looked for a sidecar that did not exist and allowed
+  // everything. 55 failures on a tree that was 1918/1918 green in a plain
+  // shell — and, because a failing precommit means no checkpoint and no
+  // review, a lane that could not finish at all.
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    // The step FAILS on purpose: a failing step has its full output streamed,
+    // which is how the test can read what the environment looked like inside.
+    scripts: {
+      test: "sh -c 'echo VARIANT=[$RG_STATE_VARIANT] MODE=[$RG_GATE_MODE] HOME_SET=[${HOME:+yes}]; exit 1'",
+    },
+  });
+  const receipt = join(dir, "receipt.json");
+  const res = spawnSync("node", [RUNNER, "--cwd", dir, "--receipt", receipt, "--nonce", "N1"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      RG_STATE_VARIANT: "t1-child",
+      RG_GATE_MODE: "loop",
+      REVIEW_GATE_BYPASS: "1",
+    },
+  });
+
+  const out = res.stdout + res.stderr;
+  assert.match(out, /VARIANT=\[\]/, "the child's sidecar variant must not reach the suite");
+  assert.match(out, /MODE=\[\]/, "nor the gate mode it was started in");
+  assert.match(out, /HOME_SET=\[yes\]/, "while everything the step legitimately needs is still there");
+});
+

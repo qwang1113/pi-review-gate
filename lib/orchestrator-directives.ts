@@ -60,15 +60,31 @@ export const ORCHESTRATOR_DIRECTIVE =
   "\n" +
   "### 别把等待写成结束 turn\n" +
   "派完任务就输出总结、结束 turn，是这个角色最容易犯也最贵的错：子会话弹了对话框没人管，" +
-  "用户得亲自来转告。正确做法是 `orchestrator_wait` —— 它在 attention 事件 / 子会话完成 / " +
-  "pane 消失 / 预算用完 任一命中时**必然返回**（默认 300s，上限 900s）。真要用户拍板时用 `ask_user`。\n" +
+  "用户得亲自来转告。正确做法是 `orchestrator_wait` —— 它在 attention 事件 / 门禁探针发现的状态变化 / " +
+  "子会话完成 / pane 消失 / 预算用完 任一命中时**必然返回**（默认 300s，上限 900s）。" +
+  "真要用户拍板时用 `ask_user`。\n" +
+  "\n" +
+  "### 你不需要自己盯 pane\n" +
+  "门禁自带一个状态探针：它周期性看每个子会话，把 `waiting-input`（在等人答）、`idle`" +
+  "（停了但没 declare_done）、`dead`（pane 没了）都变成**事件**投给你 —— 这三种情况子会话自己" +
+  "是不会喊的。所以：\n" +
+  "- **永远不要自己去跑 `tmux capture-pane` 轮询**（也跑不了，bash 里的 tmux 会被拦）；\n" +
+  "- 每次 `orchestrator_wait` 的回执都带**全部子会话的健康快照**（状态、静止了多久、当前框标题），" +
+  "以及**是哪个子会话**在找你 —— 不用再逐个 `orchestrator_read` 去猜；\n" +
+  "- 没人答的框会按 10s→30s→60s **再叫你**，不会叫一次就沉默。\n" +
   "\n" +
   "### 收到 attention 之后的标准动作\n" +
   "attention 事件只带一句 reason（比如「等待回答提问」），**不带问题正文** —— 所以：\n" +
   "1. `orchestrator_read({ childId })` 看它的屏幕与门禁状态（回执会标明每条信息的来源）；\n" +
   "2. 是选项框就 `orchestrator_key({ childId, index })` 选中并提交（门禁会按完复读校验命中，" +
-  "命中不了报失败而不是谎报成功）；不是选项框就 `orchestrator_send` 回它；\n" +
-  "3. 该由真人拍板的（丢工作区、敏感文件、范围变更）不要代答 —— `orchestrator_notify` 叫用户。";
+  "命中不了报失败而不是谎报成功；提交用哪个键也由门禁决定）；不是选项框就 `orchestrator_send` 回它 —— " +
+  "**框还开着时门禁会拒绝投文本**（文本里的换行会被 TUI 当成「提交当前高亮项」，那是替它答了一次）；\n" +
+  "3. 要它执行一条 slash 命令（比如 `/gate-bypass`）用 `orchestrator_send({ kind: \"command\" })`：" +
+  "门禁会等它空闲下来再投，并在回执里说明这次是「被执行」还是「排进 steering 队列」；\n" +
+  "4. 代批它的 goal 用 `orchestrator_send({ approveGoal: true })` —— 门禁比对的是**它 sidecar 里的真实草稿**，" +
+  "不是你手抄的文本；\n" +
+  "5. 该由真人拍板的（丢工作区、敏感文件、范围变更）不要代答 —— `orchestrator_notify` 叫用户。";
+
 
 
 /**
@@ -110,6 +126,50 @@ export function buildOrchestratorExitBlock(problems: readonly string[]): string 
     "\n\n现在还差这些才能 `declare_done`：\n" +
     problems.map((p) => `- ${p}`).join("\n")
   );
+}
+
+
+/**
+ * The orchestrator's OWN continuation nudge (R-3).
+ *
+ * The loop's `[REVIEW_GATE_RESUME]` was firing at project managers with
+ * criteria they can never satisfy — "code review gate is PENDING", "precommit
+ * has not run", "the loop goal is unconfirmed" — all read out of the
+ * supervisor's own sidecar, which will never hold a review or a precommit
+ * because constraint 2 forbids it from writing code. A supervisor that obeyed
+ * it would negotiate a goal it does not need and submit its children's work
+ * as its own; the one that did not obey it merely burned turns arguing with
+ * the gate. Its continuation is the PLAN, plus whatever the state probe has
+ * to say about its children.
+ */
+export function buildOrchestratorResume(opts: {
+  problems: readonly string[];
+  /** One line per child the probe wants the supervisor to look at. */
+  news: readonly string[];
+  /** The full health snapshot, already rendered. */
+  health: string;
+}): string {
+  const parts = ["[ORCHESTRATION_RESUME] 编排还没结束 —— 这是 plan 维度的判据，不是 loop 那套。"];
+  if (opts.news.length > 0) {
+    parts.push(
+      "**有子会话需要你**（门禁探针自己发现的，不是它们主动喊的）：",
+      ...opts.news.map((n) => `- ${n}`),
+      "先 `orchestrator_read({ childId })` 看它到底卡在哪，再 `orchestrator_key` 或 `orchestrator_send` 处理。",
+    );
+  }
+  if (opts.problems.length > 0) {
+    parts.push(
+      "还没做完的事：",
+      ...opts.problems.map((p) => `- ${p}`),
+    );
+  }
+  parts.push(
+    "子会话现状：",
+    opts.health,
+    "下一步只有三种：派活（`orchestrator_spawn`）、处理某个子会话（`orchestrator_read`/`_key`/`_send`）、" +
+    "或者 `orchestrator_wait` 继续盯。别结束 turn 把盯梢丢回给用户，也别去给自己找 review 或 loop goal。",
+  );
+  return parts.join("\n");
 }
 
 

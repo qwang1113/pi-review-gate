@@ -603,6 +603,58 @@ test("install-git-hooks.sh itself refuses BOTH snapshot layouts (shell-level gua
   assert.match(resTmp.stderr, /refusing to install hooks from a review snapshot/);
 });
 
+test("R-28: the installer refuses an ORCHESTRATION worktree — the incident that broke a whole repo", () => {
+  // What happened on 2026-08-30: a child session installed the hooks from
+  // inside its gate-created worktree under $TMPDIR/rg-orchestration/…, which
+  // repointed the SHARED `.git/hooks` at that directory. When
+  // `orchestrator_close` removed the worktree, every session in the
+  // repository lost the ability to commit — including an innocent third child
+  // mid-merge, which could not repair itself either.
+  const home = makeHome();
+  const repo = mkdtempSync(join(tmpdir(), "rg-pkg-orch-"));
+  tempDirs.push(repo);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"], { cwd: repo, stdio: "ignore" });
+
+  const orchBase = mkdtempSync(join(tmpdir(), "rg-orchestration-"));
+  tempDirs.push(orchBase);
+  const worktree = join(orchBase, "rg-orchestration", "t2-lane-abc");
+  mkdirSync(dirname(worktree), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-q", "--detach", worktree, "main"], { cwd: repo, stdio: "ignore" });
+
+  const refused = spawnSync("bash", [HOOK_INSTALLER], {
+    cwd: worktree,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home },
+  });
+  assert.equal(refused.status, 1, "the repository's hooks belong to the main worktree");
+  assert.match(refused.stderr, /refusing to install hooks from an orchestration worktree/);
+  assert.ok(!existsSync(join(repo, ".git", "hooks", "pre-commit")),
+    "and nothing was written into the SHARED hooks dir");
+  execFileSync("git", ["worktree", "remove", "--force", worktree], { cwd: repo, stdio: "ignore" });
+});
+
+test("R-28: installing from the MAIN worktree writes into the COMMON git dir, once", () => {
+  const home = makeHome();
+  const repo = mkdtempSync(join(tmpdir(), "rg-pkg-common-"));
+  tempDirs.push(repo);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"], { cwd: repo, stdio: "ignore" });
+
+  const installed = spawnSync("bash", [HOOK_INSTALLER], {
+    cwd: repo,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home },
+  });
+  assert.equal(installed.status, 0, installed.stderr);
+  const hook = join(repo, ".git", "hooks", "pre-commit");
+  assert.ok(existsSync(hook), "the hook lands in the repository's shared hooks dir");
+  // And it points at the PACKAGE's stable hooks/ path — never at a worktree
+  // that could be deleted underneath it.
+  assert.match(readFileSync(hook, "utf8"), new RegExp(join(ROOT, "hooks", "pre-commit").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+
 // npm/npx exposes the hook installer as a node_modules/.bin symlink; the
 // installer must resolve it to the real file so ../hooks resolves to the
 // package's hooks/ dir, not node_modules/.

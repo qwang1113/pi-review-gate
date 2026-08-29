@@ -529,6 +529,48 @@ export function maybeInjectJestIgnore({ command, body, pm, ignoreArgs }) {
 }
 
 
+/**
+ * Environment-variable prefixes that carry LIVE SESSION STATE (R-15).
+ *
+ * Kept in sync with test/helpers/gate-env.ts by construction: both strip the
+ * same two prefixes, because both answer the same question — a child process
+ * that is not the session must not inherit the session's identity.
+ */
+export const SESSION_ENV_PREFIXES = Object.freeze(["RG_", "REVIEW_GATE_"]);
+
+/**
+ * The environment a precommit STEP runs in.
+ *
+ * THE MEASURED FAILURE (R-15, and it hit every orchestration child). A child
+ * session is started with `RG_STATE_VARIANT=<child id>` and
+ * `RG_GATE_MODE=loop` so it owns its own sidecar; the precommit runner then
+ * spawned the test suite as a plain child, which inherited both. Inside the
+ * suite, the gate's own fixtures looked for `.pi/review-gate-state.<variant>
+ * .json`, did not find it, took the "no sidecar ⇒ the extension is not active
+ * here ⇒ allow" path, and every "this must be BLOCKED" assertion failed. Same
+ * HEAD, same code: 1918/1918 green in a plain shell, 55 failures inside an
+ * orchestration child. The consequence was not a red suite but a DEAD LANE —
+ * no precommit PASS means no checkpoint, no review and no declare_done.
+ *
+ * A test process is not a gate session. It is given a clean environment, and
+ * a test that genuinely wants one of these variables sets it explicitly.
+ */
+export function stepEnv(env) {
+  const out = {};
+  for (const [key, value] of Object.entries(env ?? {})) {
+    if (SESSION_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+/** Which keys {@link stepEnv} would remove — for the receipt and for tests. */
+export function strippedSessionEnvKeys(env) {
+  return Object.keys(env ?? {}).filter((key) =>
+    SESSION_ENV_PREFIXES.some((prefix) => key.startsWith(prefix)));
+}
+
+
 /** Single-quote a path for `bash -c`. */
 export function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;

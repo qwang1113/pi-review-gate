@@ -30,12 +30,18 @@
  * touches tmux (lib/orchestrator-tmux.ts builds the argv).
  */
 
-import type { PaneDialog, PaneSnapshot } from "./orchestrator-pane-read.ts";
+import {
+  dialogIsOpen,
+  dialogSignature,
+  type PaneDialog,
+  type PaneSnapshot,
+} from "./orchestrator-pane-read.ts";
+
 
 /** The keys an orchestrator may press. Deliberately a short, closed list. */
 export type LowLevelKey =
   | "up" | "down" | "left" | "right"
-  | "enter" | "escape" | "tab" | "space" | "backspace";
+  | "enter" | "kpenter" | "submit" | "escape" | "tab" | "space" | "backspace";
 
 /**
  * Agent-facing name → the name tmux's `send-keys` understands.
@@ -43,6 +49,14 @@ export type LowLevelKey =
  * A closed map, not a passthrough: `send-keys` treats any unknown word as
  * literal text, so a typo would silently type "escpae" into the child's
  * composer instead of dismissing its dialog.
+ *
+ * `submit` is not a key at all — it is the INTENT "answer this dialog", and
+ * the gate picks the key (R-8). Measured on 2026-08-29: a pi confirmation
+ * dialog ignored both `Enter` and `C-m` from `send-keys` and only moved on
+ * `KPEnter`. The orchestrator pressed `enter`, nothing happened, and the
+ * low-level receipt said the press went out — so it waited 600s on a dialog
+ * that had never been answered. A caller must not have to know which byte a
+ * TUI accepts; it says "submit" and the gate tries the alternatives in order.
  */
 export const TMUX_KEY_NAMES: Readonly<Record<LowLevelKey, string>> = Object.freeze({
   up: "Up",
@@ -50,11 +64,22 @@ export const TMUX_KEY_NAMES: Readonly<Record<LowLevelKey, string>> = Object.free
   left: "Left",
   right: "Right",
   enter: "Enter",
+  kpenter: "KPEnter",
+  submit: "Enter",
   escape: "Escape",
   tab: "Tab",
   space: "Space",
   backspace: "BSpace",
 });
+
+/**
+ * The keys "submit" means, in the order they are tried.
+ *
+ * Ordinary `Enter` first because it is what works everywhere else; `KPEnter`
+ * second because it is what worked when `Enter` did not. Each attempt is
+ * followed by a re-read, so at most one of them lands.
+ */
+export const SUBMIT_KEY_ORDER: readonly LowLevelKey[] = Object.freeze(["enter", "kpenter"]);
 
 const KEY_ALIASES: Readonly<Record<string, LowLevelKey>> = Object.freeze({
   up: "up", k: "up", arrowup: "up",
@@ -62,11 +87,14 @@ const KEY_ALIASES: Readonly<Record<string, LowLevelKey>> = Object.freeze({
   left: "left", arrowleft: "left",
   right: "right", arrowright: "right",
   enter: "enter", return: "enter", cr: "enter",
+  kpenter: "kpenter", kpent: "kpenter", numpadenter: "kpenter",
+  submit: "submit", confirm: "submit", ok: "submit",
   escape: "escape", esc: "escape",
   tab: "tab",
   space: "space",
   backspace: "backspace", bspace: "backspace",
 });
+
 
 /** Normalize one agent-supplied key name, or `undefined` when unknown. */
 export function normalizeKey(raw: unknown): LowLevelKey | undefined {
@@ -254,15 +282,70 @@ export function verifyHighlight(
   return { ok: true, note: `高亮已落在第 ${target} 项（${label}）` };
 }
 
-/** After Enter: the dialog must be GONE, otherwise nothing was answered. */
-export function verifyDismissed(after: PaneSnapshot | undefined, label: string): KeyVerification {
-  if (after?.dialog && after.dialog.options.length >= 2) {
+/**
+ * After the submit: was THIS dialog answered?
+ *
+ * The question is about IDENTITY, not presence (R-5). A three-question
+ * interview opens question 2 the instant question 1 is answered, so "a dialog
+ * is still on screen" was reported as a failure for two answers that had in
+ * fact landed — and an orchestrator that retried on that receipt would have
+ * pressed its key into the NEXT question. What proves the submit is that the
+ * dialog on screen is no longer the one we answered: gone, or a different one.
+ */
+export function verifyDismissed(
+  before: PaneSnapshot | undefined,
+  after: PaneSnapshot | undefined,
+  label: string,
+): KeyVerification {
+  const previous = dialogSignature(before?.dialog);
+  const current = dialogSignature(after?.dialog);
+  if (current && previous && current === previous) {
     return {
       ok: false,
       reason:
-        `按下 Enter 之后对话框还在 —— 无法确认「${label}」真的被提交了。` +
+        `提交之后屏幕上还是同一个对话框（标题与选项都没变）—— 无法确认「${label}」真的被提交了。` +
         "不谎报成功：请 `orchestrator_read` 看现状，必要时用低层按键处理。",
+    };
+  }
+  if (current) {
+    return {
+      ok: true,
+      note: `「${label}」已提交（上一个框已消失，屏幕上换成了另一个框：${after?.dialog?.title ?? "（无标题）"}）`,
     };
   }
   return { ok: true, note: `对话框已关闭，「${label}」已提交` };
 }
+
+// ---------------------------------------------------------------------------
+// The low-level path — honest about what it cannot know (R-8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Did the screen change across a low-level key press?
+ *
+ * The low-level path deliberately performs no hit check (the gate does not
+ * know what the caller wanted). It does know one thing though, and withholding
+ * it is what cost 600s of waiting on an unanswered dialog: whether ANYTHING on
+ * screen moved. "Nothing changed" is a fact, not an opinion, and it belongs in
+ * the receipt.
+ */
+export function describeScreenChange(
+  before: PaneSnapshot | undefined,
+  after: PaneSnapshot | undefined,
+): { changed: boolean; note: string } {
+  if (!before || !after) {
+    return {
+      changed: false,
+      note: "按下前后至少有一次读不到屏幕 —— 无法判断这次按键有没有生效（不当作生效）。",
+    };
+  }
+  if (before.text === after.text) {
+    const stuck = dialogIsOpen(after)
+      ? "对话框仍然原样停在那里 —— 这个键很可能在这个 TUI 里根本不生效，" +
+        "改用 `index`/`match`（门禁会自己选能提交的键），别再重复按。"
+      : "这次按键在屏幕上没有产生任何变化 —— 不要据此认为它生效了。";
+    return { changed: false, note: `按下前后屏幕**完全没有变化**。${stuck}` };
+  }
+  return { changed: true, note: "按下前后屏幕有变化（变化本身不代表这就是你想要的结果，自己看下面的正文）。" };
+}
+

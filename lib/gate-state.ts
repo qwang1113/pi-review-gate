@@ -89,7 +89,21 @@ export interface GateState {
    * against this, and record_review binds a READY to the reviewed commit's
    * tree. Written only by review_checkpoint; absent before the first one.
    */
-  checkpoint?: { sha: string; prevSha: string; at: string };
+  checkpoint?: {
+    sha: string;
+    prevSha: string;
+    at: string;
+    /**
+     * This round reached the checkpoint WITHOUT a precommit PASS, on the
+     * user's `/gate-bypass` authorization (R-22).
+     *
+     * Recorded so the fact survives the round: the reviewer is told, and
+     * `declare_done` repeats it. A bypass the user granted is legitimate; a
+     * bypass nobody can see afterwards is not.
+     */
+    precommitBypassed?: boolean;
+  };
+
   /**
    * The worktree the session STARTED in, when it was not clean. Recorded at
    * session start and cleared once `setup_workspace` settled it with the

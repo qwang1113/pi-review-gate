@@ -124,6 +124,43 @@ test("CONSTRAINT 7: only a task that will run ALONGSIDE another gets a worktree"
 // CONSTRAINT 8 — a proxied goal stays inside the task
 // ---------------------------------------------------------------------------
 
+test("R-6: an English word pair with a slash is NOT a path — three measured false positives", () => {
+  // Each of these refused a perfectly good goal in the second run, and the
+  // orchestrator's only way through was to REWRITE the child's goal text —
+  // which is how the hand-copied-text hole (R-7) came to be used at all.
+  const boundaries = ["lib/orchestrator", "test"];
+  for (const prose of ["状态机有 running/ended 两态", "窗口用 slice/window 表达", "接口是 windowIn/windowOf"]) {
+    assert.deepEqual(extractPathLikeTokens(prose, boundaries), [], `"${prose}" names no file`);
+  }
+  // …while a real path in the same sentence still registers.
+  assert.deepEqual(
+    extractPathLikeTokens("状态机 running/ended 落在 lib/orchestrator/state.ts", boundaries),
+    ["lib/orchestrator/state.ts"],
+  );
+});
+
+test("R-6: a NON-GOALS section is not a claim on those files — writing one must not be punished", () => {
+  const boundaries = ["docs"];
+  const goal = [
+    "退出标准：",
+    "1. 更新 docs/module-map.md",
+    "",
+    "非目标：不修改 extensions/review-gate.ts 与 lib/",
+    "不改 README.md / QUICKSTART.md",
+  ].join("\n");
+  assert.deepEqual(extractPathLikeTokens(goal, boundaries), ["docs/module-map.md"],
+    "only what the goal promises to TOUCH counts");
+});
+
+test("R-6: an extension-less path is recognized when the TASK declared its root", () => {
+  // `docs/module-map` has no extension, so the only honest way to know it is
+  // a path is that the task itself declared `docs` as a boundary.
+  assert.deepEqual(extractPathLikeTokens("整理 docs/module-map 这一节", ["docs"]), ["docs/module-map"]);
+  assert.deepEqual(extractPathLikeTokens("整理 docs/module-map 这一节", ["lib"]), [],
+    "without that declaration it stays prose, rather than becoming a guess");
+});
+
+
 test("path extraction is conservative — prose and URLs are not paths", () => {
   const found = extractPathLikeTokens(
     "改 lib/orchestrator/plan.ts 与 test/plan.test.ts，参考 https://example.com/docs/x.md，别碰 --force",
@@ -228,14 +265,45 @@ test("CONSTRAINT 11: a decision the user was never told about blocks the exit", 
   }));
   assert.ok(problems.some((p) => /约束 11/.test(p)));
 
+  // R-29 — "the user was TOLD" is NOT "the question was settled". Measured on
+  // 2026-08-30: a decision was registered, notified, answered by the user in
+  // chat, and never written back to the plan; nothing noticed, and the
+  // orchestration reached wrap-up with a dangling question that even the
+  // human reviewing the run mis-read.
   const notified = orchestratorDoneProblems(doneFacts({
     plan: planOf({
       tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], status: "done" }],
       decisions: [{ id: "d1", question: "丢弃工作区？", notifiedAt: NOW }],
     }),
   }));
-  assert.deepEqual(notified, [], "once the user HAS the question, waiting for their answer is fine");
+  assert.equal(notified.length, 1, "notified-but-unresolved is its own blocker now");
+  assert.match(notified[0]!, /R-29/);
+  assert.match(notified[0]!, /resolve-decision/, "and it names the way out");
+
+  const resolved = orchestratorDoneProblems(doneFacts({
+    plan: planOf({
+      tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], status: "done" }],
+      decisions: [{ id: "d1", question: "丢弃工作区？", notifiedAt: NOW, resolvedAt: NOW, answer: "C" }],
+    }),
+  }));
+  assert.deepEqual(resolved, [], "an answer written back into the plan clears it");
 });
+
+test("R-29: a decision declares what the plan must become, and the blocker repeats it", () => {
+  const problems = orchestratorDoneProblems(doneFacts({
+    plan: planOf({
+      tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], status: "done" }],
+      decisions: [{
+        id: "d1",
+        question: "要不要扩边界到 scripts/？",
+        notifiedAt: NOW,
+        planEffect: "若答 B，任务 a 的边界要加 scripts/",
+      }],
+    }),
+  }));
+  assert.match(problems.join("\n"), /任务 a 的边界要加 scripts\//);
+});
+
 
 test("CONSTRAINT 10: an unsettled work branch blocks, and a waiver releases it", () => {
   const blocked = orchestratorDoneProblems(doneFacts({

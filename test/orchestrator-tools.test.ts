@@ -230,38 +230,67 @@ test("a spawn that cannot be registered is ROLLED BACK", async () => {
 // send / close / relay
 // ---------------------------------------------------------------------------
 
-test("CONSTRAINT 8: a proxied goal outside the task boundary is refused", async () => {
+test("CONSTRAINT 8 / R-7: the boundary check reads the child's SIDECAR draft, not the caller's text", async () => {
   const h = harness({ plan: planFrom(), approved: true });
   await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
-  const childId = h.runtime().children[0]!.id;
+  const child = h.runtime().children[0]!;
+  const childId = child.id;
+  const setDraft = (draft: string): void => {
+    h.setSidecar(child.cwd, child.stateVariant, { goalPrereview: { verdict: "PASS", at: "now", draft } });
+  };
 
-  // F11 — a proxied approval now has to ANSWER the child's dialog, so there
-  // has to BE one. Without it the tool refuses instead of reporting success:
-  // the old code passed the boundary check and said "已过边界比对", which read
-  // as "approved" while the dialog sat untouched in the pane.
-  const withoutDialog = await h.call("orchestrator_send", {
-    childId, approveGoal: "重构 lib/plan/state.ts，补测试",
-  });
+  // R-7 — with no draft on record there is nothing the GATE can check, so it
+  // refuses. It never falls back to the text the caller typed: that fallback
+  // is exactly how an abridged goal passed the check while the FULL goal was
+  // approved on the user's behalf.
+  const noDraft = await h.call("orchestrator_send", { childId, approveGoal: true });
+  assert.equal(noDraft.isError, true, "no sidecar draft ⇒ no proxy approval");
+  assert.match(text(noDraft), /sidecar/);
+
+  setDraft("重构 lib/plan/state.ts，补测试");
+  // F11 — a proxied approval has to ANSWER the child's dialog, so there has to
+  // BE one. Without it the tool refuses instead of reporting success: the old
+  // code passed the boundary check and said "已过边界比对", which read as
+  // "approved" while the dialog sat untouched in the pane.
+  const withoutDialog = await h.call("orchestrator_send", { childId, approveGoal: true });
   assert.equal(withoutDialog.isError, true, "F11: no dialog on screen ⇒ nothing was approved");
   assert.equal(withoutDialog.details?.boundaryOk, true, "the boundary check itself passed");
   assert.equal(withoutDialog.details?.approved, false, "and the receipt says so plainly");
 
-  h.openDialog(h.runtime().children[0]!.paneId, "认可这个 goal 吗？", ["Yes", "No"]);
-  const inside = await h.call("orchestrator_send", {
-    childId, approveGoal: "重构 lib/plan/state.ts，补测试",
-  });
-  assert.notEqual(inside.isError, true);
+  h.openDialog(child.paneId, "认可这个 goal 吗？", ["Yes", "No"]);
+  const inside = await h.call("orchestrator_send", { childId, approveGoal: true });
+  assert.notEqual(inside.isError, true, text(inside));
   assert.equal(inside.details?.approved, true);
-  assert.match(h.render(h.runtime().children[0]!.paneId), /answered: Yes/, "the dialog was really answered");
+  assert.match(h.render(child.paneId), /answered: Yes/, "the dialog was really answered");
 
-
+  // A draft that reaches OUTSIDE the task is refused on what the CHILD wrote,
+  // so a tidied-up copy in the caller's hand changes nothing.
+  setDraft("顺手改 extensions/review-gate.ts");
+  h.openDialog(child.paneId, "认可这个 goal 吗？", ["Yes", "No"]);
   const outside = await h.call("orchestrator_send", {
-    childId, approveGoal: "顺手改 extensions/review-gate.ts",
+    childId,
+    approveGoal: "只改 lib/plan/state.ts（这份手抄稿完全在边界内）",
   });
-  assert.equal(outside.isError, true);
+  assert.equal(outside.isError, true, "the SIDECAR draft decides, not the pretty copy");
   assert.match(text(outside), /范围变更/);
   assert.deepEqual(outside.details?.outside, ["extensions/review-gate.ts"]);
 });
+
+test("R-7: a caller-supplied text that differs from the sidecar draft is REPORTED, never compared", async () => {
+  const h = harness({ plan: planFrom(), approved: true });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
+  const child = h.runtime().children[0]!;
+  h.setSidecar(child.cwd, child.stateVariant, {
+    goalPrereview: { draft: "退出标准 1..7，非目标若干\n只动 lib/plan/state.ts" },
+  });
+  h.openDialog(child.paneId, "认可这个 goal 吗？", ["Yes", "No"]);
+
+  const reply = await h.call("orchestrator_send", { childId: child.id, approveGoal: "删减版：只留 3 条退出标准" });
+  assert.notEqual(reply.isError, true, text(reply));
+  assert.match(text(reply), /不一致/, "the mismatch is named — that was the silent hole");
+  assert.match(text(reply), /退出标准 1\.\.7/, "and the receipt shows what was ACTUALLY approved");
+});
+
 
 test("CONSTRAINT 13: only a child the GATE spawned is addressable at all", async () => {
   // The bash guard stops the agent typing `split-window`; the registry is the

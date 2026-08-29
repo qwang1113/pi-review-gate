@@ -198,8 +198,13 @@ test("F14: a dead pane still ends the wait — the child cannot be waited on for
   h.killPane(child!.paneId);
   const waited = await h.call("orchestrator_wait", { timeoutMs: 1000 });
   assert.equal(waited.details?.done, true);
-  assert.equal(waited.details?.reason, "pane-gone");
+  // The gate's own probe now sees the death first and NAMES the child (R-4),
+  // rather than reporting an anonymous "a pane is gone".
+  assert.equal(waited.details?.reason, "probe");
+  assert.equal(waited.details?.childId, child!.id);
+  assert.match(text(waited), /dead/);
 });
+
 
 // ---------------------------------------------------------------------------
 // F1 / F5 / O-1 — the smaller ones, end to end

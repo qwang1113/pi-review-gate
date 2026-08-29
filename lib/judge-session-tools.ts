@@ -355,9 +355,15 @@ async function doWait(
       ].filter(Boolean).join("\n"));
     },
   });
-  const outcome = waited.observation;
+  // A budget that expires while the FIRST probe is still running leaves no
+  // observation at all (lib/poll-wait.ts). That is not "finished", and it is
+  // not an error either — it is "we could not measure anything in the time
+  // you gave us", which the reply below states as such.
+  const outcome: JudgeWaitOutcome = waited.observation ?? { done: false, reason: "pending" };
+
   progress.done(outcome.done ? outcome.reason : "未结束");
   const conclusion = outcome.done ? deps.conclusion(child) : undefined;
+
   // The RETURN is the agent's channel (user decision 6.2): a finished round
   // hands back the conclusion plus this round's stdout tail; an unfinished
   // one hands back the progress so far — the same tail plus the newest
