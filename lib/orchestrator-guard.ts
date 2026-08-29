@@ -119,25 +119,57 @@ const TRANSPARENT_PREFIXES: ReadonlySet<string> = new Set([
 const NESTED_SHELL = /^(?:(?:ba|z|da|k)?sh|eval|xargs|watch)$/;
 
 /**
- * Blank out quoted regions, preserving length and everything outside them.
+ * Blank out quoted regions, preserving everything outside them.
  *
  * Used for the raw-command sweep: what is left is the text the shell will
  * treat as SYNTAX, so `$(tmux kill-server)` and `(cd /x && tmux kill-server)`
- * stay visible while `echo "tmux kill-server"` becomes `echo `. A backslash
- * escapes the next character, exactly as the shell reads it.
+ * stay visible while `echo "tmux kill-server"` becomes `echo `.
+ *
+ * The quoting rules are the shell's, not an approximation, because getting
+ * them wrong costs a FALSE POSITIVE on the most ordinary command in this
+ * repository — a commit message about the rule itself:
+ *  - inside DOUBLE quotes a backslash escapes the next character, so `\"`
+ *    does NOT close the quote (`git commit -m "say \"tmux kill-server\" is
+ *    refused"` stays one quoted string);
+ *  - inside SINGLE quotes nothing escapes — the next `'` always closes;
+ *  - outside quotes a backslash escapes the next character.
+ *
+ * An UNCLOSED quote blanks the rest of the line. That is fail-open, and
+ * deliberately so: an unterminated quote is a syntax error, so the shell runs
+ * nothing at all.
+ *
+ * COMMENTS and HERE-DOC bodies are blanked for the same reason quotes are:
+ * they are text the shell does not execute, and leaving them in made
+ * `tmux list-panes # then kill-server by hand` a hard block.
  */
 function blankQuoted(raw: string): string {
+  // Here-doc bodies first — they can contain anything, including quotes that
+  // would otherwise unbalance the scan below. Same delimiter shapes as
+  // lib/shell-lex.ts handles.
+  const withoutHeredocs = raw.replace(
+    /<<-?\s*(?:\\)?['"]?([A-Za-z0-9_-]+)['"]?[\s\S]*?^\s*\1\s*$/gm,
+    " ",
+  );
   let out = "";
   let quote: '"' | "'" | null = null;
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i]!;
+  for (let i = 0; i < withoutHeredocs.length; i++) {
+    const ch = withoutHeredocs[i]!;
     if (quote) {
+      // Double quotes honour backslash escapes; single quotes are literal.
+      if (quote === '"' && ch === "\\" && i + 1 < withoutHeredocs.length) { out += "  "; i++; continue; }
       if (ch === quote) { quote = null; out += " "; continue; }
       out += " ";
       continue;
     }
-    if (ch === "\\" && i + 1 < raw.length) { out += "  "; i++; continue; }
+    if (ch === "\\" && i + 1 < withoutHeredocs.length) { out += "  "; i++; continue; }
     if (ch === '"' || ch === "'") { quote = ch; out += " "; continue; }
+    // An unquoted `#` that STARTS a word begins a comment: blank to end of
+    // line. `foo#bar` is not a comment, so the previous character decides.
+    if (ch === "#" && (i === 0 || /\s/.test(withoutHeredocs[i - 1]!))) {
+      while (i < withoutHeredocs.length && withoutHeredocs[i] !== "\n") { out += " "; i++; }
+      if (i < withoutHeredocs.length) out += "\n";
+      continue;
+    }
     out += ch;
   }
   return out;

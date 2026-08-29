@@ -139,6 +139,8 @@ test("SECURITY: shell PUNCTUATION does not hide the command either", () => {
     "{ tmux kill-server; }",
     "if true; then tmux kill-window; fi",
     'xargs -I{} sh -c "tmux kill-server"',
+    // A trailing comment does not make the command in front of it a comment.
+    "tmux kill-server # oops",
   ]) {
     const hit = detectForbiddenTmux(cmd, LOOP);
     assert.ok(hit, `${cmd} must not slip through`);
@@ -154,6 +156,19 @@ test("the raw pass keeps quoted text OUT, so ordinary prose still commits", () =
     'echo "tmux kill-server"',
     "(cd /tmp && tmux list-panes)",
     "git log --oneline | grep new-session",
+    // The shell's real quoting rules matter here, not an approximation: a
+    // backslash-escaped quote inside double quotes does NOT close the string,
+    // and mis-reading it would have made the most ordinary command in this
+    // repository — a commit message about this very rule — a hard block.
+    'git commit -m "say \\"tmux kill-server\\" is refused"',
+    "git commit -m 'do not run tmux kill-server'",
+    // An unterminated quote is a syntax error, so the shell runs nothing.
+    'echo "unterminated tmux kill-server',
+    // Comments and here-doc bodies are text the shell never executes, so
+    // they are blanked like quotes — otherwise annotating a command, or
+    // writing a doc through a here-doc, would be a hard block.
+    "tmux list-panes # then kill-server by hand",
+    "cat <<EOF\ntmux kill-server\nEOF",
   ]) {
     assert.equal(detectForbiddenTmux(cmd, LOOP), undefined, `${cmd} must pass`);
   }
