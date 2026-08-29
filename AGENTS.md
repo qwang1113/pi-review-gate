@@ -15,7 +15,7 @@ default, make it safe by default rather than adding a switch.
 loop, and each round runs in its OWN non-interactive pi process (`pi -p`
 with a deterministic `--session-id`), spawned by the extension itself
 (`judge_submit`). The judge child loads NO review-gate extension and runs with
-The judge child loads NO review-gate extension and runs with
+It runs with
 `--exclude-tools edit,write`; its session id is DETERMINISTIC per role+repo,
 so re-spawning with the same `--session-id` continues the same session — its
 context is reused across rounds until a READY lands. Each review round is ONE

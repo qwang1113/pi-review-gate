@@ -338,6 +338,10 @@ test("LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK names the path forward (negotiate → goa
   assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /prepare_goal_audit|record_goal_prereview/,
     "the agent no longer drives the audit by hand");
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /Simplified Chinese/);
+  // The ONE asking tool must be named: an agent told to "negotiate" without it
+  // writes the question into its reply and ends the turn (the exact iteration
+  // this replaced).
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /ask_user/, "the negotiation names the asking tool");
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\.pi\/loop-goal\.md/); // names the real path
   assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\bblock(er|ed|ing|s)?\b/i, "the reason must not call itself a block");
 });
@@ -362,7 +366,8 @@ test("buildGoalPrereviewRefusal: says WHY, HOW to recover, and echoes the eviden
   const text = "# 目标\n\n一行意图。\n";
   const missing = buildGoalPrereviewRefusal({ goalText: text, auditorInstalled: true, packageAgentsDir: "/pkg/agents" });
   assert.match(missing, /no goal-auditor pre-review has been recorded/);
-  assert.match(missing, /record_goal_prereview/, "must name the tool that satisfies the gate");
+  assert.match(missing, /judge_submit\(\{role:"goal-auditor"/, "must name the call that satisfies the gate");
+  assert.doesNotMatch(missing, /tmux|review_spawn/, "the retired dispatch path must not come back");
   assert.match(missing, /Simplified Chinese/, "must state the language rule before another round is burned");
 
   const failed = buildGoalPrereviewRefusal({

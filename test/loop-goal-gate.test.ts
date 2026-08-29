@@ -322,7 +322,7 @@ test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS —
   assert.equal((noAudit as { isError?: boolean }).isError, true, "an unaudited goal must be refused");
   assert.equal((noAudit as { details: { approved?: boolean } }).details.approved, false);
   assert.equal(dialogs, 0, "the user must not be asked about an unaudited draft");
-  assert.match(JSON.stringify(noAudit), /record_goal_prereview/, "the refusal must name the recovery path");
+  assert.match(JSON.stringify(noAudit), /judge_submit/, "the refusal must name the recovery path");
   assert.equal(readSidecar(repo).loopGoal, undefined, "no approval may be recorded");
   // The isolated HOME has no goal-auditor, so the refusal offers the BOOTSTRAP
   // remedy — and a project copy must clear it by frontmatter IDENTITY, not by

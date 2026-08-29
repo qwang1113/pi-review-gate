@@ -1229,17 +1229,18 @@ test("goal criterion 3: prepare_adviser is registered and hands back a brief wit
   assert.ok(briefCall > 0);
   assert.doesNotMatch(body.slice(briefCall, briefCall + 900), /doneChannel|inboxPath|inboxChannel/,
     "the brief embeds no tmux channel (process exit is the completion signal)");
-  assert.match(body, /建议 title: \"\$\{adviserTitle\}\"/, "the output names the suggested title");
-  assert.match(body, /session id 由 review_spawn 按 role\+repo 派生/,
-    "the session id is the resume key and derives mechanically");
-  // Round-17 P2: pinning the WORDS "等待纪律" alone let a wrong claim survive
-  // (that edits do not depend on goal approval — pre-approval edits are hard
-  // blocked). Pin the corrected substance instead.
-  assert.match(body, /等待纪律/, "the waiting discipline is part of the adviser flow");
-  assert.match(body, /第一次 goal 批准前编辑\/写工具仍被门禁拦截,属预期/,
-    "the pre-approval reality is stated, not the refuted claim");
-  assert.match(body, /落盘 task 文件时请用 read 读取 \$\{pathJoin\(target\.root, LOOP_GOAL_RELPATH\)\}/,
-    "a truncated goal must be completed from the file when writing the brief");
+  // The brief is PAYLOAD now: judge_submit calls this tool and takes what
+  // follows the marker, so the marker must be there and the header must point
+  // at the normal path rather than teaching a manual spawn.
+  assert.match(body, /TASK_TEXT_MARKER/, "the payload is delimited for the chain");
+  assert.match(body, /judge_submit\(\{role:\\"adviser\\"/, "the header names the normal path");
+  assert.doesNotMatch(body, /review_spawn\(\{ role: "adviser"/, "no manual spawn recipe");
+  // The waiting discipline moved to where it is mechanically useful
+  // (review_wait's own reply), so the header no longer teaches it. What must
+  // survive is the truncated-goal pointer: a brief with half a goal in it
+  // sends the adviser off the wrong contract.
+  assert.match(body, /需要全文时读 \$\{pathJoin\(target\.root, LOOP_GOAL_RELPATH\)\}/,
+    "a truncated goal is pointed at its file");
 });
 
 test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor task BEFORE dispatch", () => {
@@ -1258,12 +1259,11 @@ test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor tas
   assert.ok(auditCall > 0);
   assert.doesNotMatch(body.slice(auditCall, auditCall + 900), /doneChannel|inboxPath|inboxChannel/,
     "the task embeds no tmux channel (process exit is the completion signal)");
-  assert.match(body, /建议 title: \"\$\{auditTitle\}\"/, "the output names the suggested title");
-  assert.match(body, /session id 由 review_spawn 按 role\+repo 派生/,
-    "the session id is the resume key and derives mechanically");
-  assert.match(body, /等待纪律/, "the waiting discipline is part of the auditor flow");
-  assert.match(body, /第一次 goal 批准前编辑\/写工具仍被门禁拦截,属预期/,
-    "the pre-approval reality is stated, not the refuted claim");
+  // Same shape as the adviser brief: PAYLOAD behind the marker, header
+  // pointing at the one call that dispatches and records.
+  assert.match(body, /TASK_TEXT_MARKER/, "the payload is delimited for the chain");
+  assert.match(body, /judge_submit\(\{role:\\"goal-auditor\\"/, "the header names the normal path");
+  assert.doesNotMatch(body, /review_spawn\(\{ role: "goal-auditor"/, "no manual spawn recipe");
 });
 
 test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline into the reviewer task", () => {
@@ -2472,7 +2472,12 @@ test("a judge's verdict is recorded from THIS round's output, never the transcri
   assert.doesNotMatch(body, /readJudgeConclusion\(child\.sessionDir\)/,
     "the whole-session transcript must not decide this round (round-5 P1)");
   assert.match(body, /hasJudgeFence\(roundOutput\)/, "no fence this round ⇒ nothing is recorded");
-  assert.match(body, /repo: repoOfChild\(child\)/, "the record names its repo explicitly");
+  const wider = SRC.slice(at, at + 3000);
+  assert.match(wider, /repo: repoOfChild\(child\)/, "the record names its repo explicitly");
+  // A question is not a verdict: it must NOT be pushed through the recorder,
+  // where it would surface as "no recognizable verdict" (a parse error) even
+  // though the judge simply asked something.
+  assert.match(wider, /提了一个问题（没有 verdict）/, "a question fence is reported as a question");
   assert.match(body, /child\.role === "adviser"/, "advice is not a verdict");
 });
 

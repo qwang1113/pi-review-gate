@@ -327,6 +327,13 @@ import {
   type TokenBindings,
 } from "../lib/arbitration.ts";
 
+/**
+ * Separates a prepare tool's human-facing header from the task text a judge
+ * actually receives. One marker for all three roles, so the submission chain
+ * has one way to find the payload.
+ */
+const TASK_TEXT_MARKER = "--- task text ---";
+
 const ENTRY_TYPE = "review-gate-state";
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
 
@@ -435,6 +442,22 @@ export default function reviewGate(pi: ExtensionAPI) {
   function toolText(result: { content?: { type: string; text: string }[] }): string {
     return (result.content ?? []).map((c) => c.text).join("\n");
   }
+
+  /**
+   * The payload a `prepare_*` tool built, split off its human-facing header.
+   *
+   * All three prepare tools end their header with this marker, so the chain
+   * extracts one way for every role. A result WITHOUT the marker is handed
+   * over whole rather than silently truncated — a judge that receives a
+   * header instead of its task is a wasted round either way, but a
+   * mis-sliced one is harder to notice.
+   */
+  function extractTaskText(prepared: string): string {
+    const at = prepared.indexOf(TASK_TEXT_MARKER);
+    if (at < 0) return prepared;
+    return prepared.slice(at + TASK_TEXT_MARKER.length).trim() || prepared;
+  }
+
 
   let state: GateState = emptyState(null, DEFAULT_MAX_ROUNDS);
   let cwd = process.cwd();
@@ -980,6 +1003,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     exitCodePath: string;
   }
   const childSessions = new Map<string, JudgeChild[]>();
+  /**
+   * The goal draft a running audit is judging, per repo. The verdict binds to
+   * the draft's CONTENT, so the gate has to remember which text it dispatched
+   * — the auditor's output alone cannot say what it audited.
+   */
+  const pendingGoalAudits = new Map<string, { draft: string; startedAt: string }>();
   /**
    * Review targets registered by prepare_review (commit mode): repo root →
    * the reviewed baseline..HEAD plus HEAD's tree. record_review consumes it:
@@ -3206,9 +3235,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         text: "review-gate: 本轮未送审 — prepare_review 被拒。\n" + toolText(prepared),
       };
     }
-    const preparedText = toolText(prepared);
-    const taskText = preparedText.slice(preparedText.indexOf("--- task text ---") + "--- task text ---".length).trim()
-      || preparedText;
+    const taskText = extractTaskText(toolText(prepared));
     return {
       ok: true,
       taskText: `本轮改动说明（来自主会话）：\n${input.note}\n\n${taskText}`,
@@ -3447,6 +3474,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // judged. The per-round stdout log contains this round and nothing else.
       const roundOutput = readRoundStdout(child.stdoutPath);
       if (!roundOutput || !hasJudgeFence(roundOutput)) return undefined;
+      // A QUESTION is not a verdict. Feeding it to the recorder would answer
+      // "no recognizable verdict" — technically fail-closed, but it reads as
+      // a parse error when the judge simply asked something.
+      if (!/"gate"\s*:\s*"(READY|BLOCKED|NEEDS_HUMAN)"/.test(roundOutput)) {
+        return `${child.role} 提了一个问题（没有 verdict）。用 review_read({role:"${child.role}"}) 看问题，` +
+          `再用 judge_submit({role:"${child.role}", task:<你的回答>}) 带着答案续接同一会话。`;
+      }
       if (child.role === "reviewer") {
         // No live tool ctx here (this runs from a process-exit callback), so
         // the last one the session bound is what persists the record. The repo
@@ -3456,7 +3490,19 @@ export default function reviewGate(pi: ExtensionAPI) {
         const result = await callTool("record_review", { reviewer_output: roundOutput, repo: repoOfChild(child) }, lastUiCtx);
         return toolText(result);
       }
-      return undefined; // goal-auditor: the draft it judged is the agent's to submit
+      // A goal audit is recorded the same way, against the draft the gate
+      // dispatched — the record binds to that text's hash, so remembering it
+      // is the gate's job, not the agent's to re-paste.
+      const pending = pendingGoalAudits.get(repoOfChild(child));
+      if (!pending || !lastUiCtx) return undefined;
+      pendingGoalAudits.delete(repoOfChild(child));
+      const audit = await callTool("record_goal_prereview", {
+        goal: pending.draft,
+        auditor_output: roundOutput,
+        auditStartedAt: pending.startedAt,
+        repo: repoOfChild(child),
+      }, lastUiCtx);
+      return toolText(audit);
     } catch {
       return undefined; // recording is best-effort; the wake still happens
     }
@@ -3586,6 +3632,35 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
         reviewTask = chain.taskText;
+      }
+      // The other two roles are the same shape: the gate builds the task the
+      // judge receives (carryover, criteria, transcript pointer, findings
+      // stream) from what the agent SAID, so the agent never assembles a
+      // judge's brief by hand.
+      if (role === "goal-auditor") {
+        const prepared = await callTool("prepare_goal_audit", { goal: task, repo: root }, ctx);
+        if (prepared.isError) {
+          return {
+            content: [{ type: "text", text: "review-gate: 本轮未受理 — goal 审计任务无法生成。\n" + toolText(prepared) }],
+            details: { submitted: false, busy: false },
+            isError: true,
+          };
+        }
+        reviewTask = extractTaskText(toolText(prepared));
+        // The draft is what the verdict will be recorded AGAINST (the record
+        // binds to its hash), so it is remembered with the round.
+        pendingGoalAudits.set(root, { draft: task, startedAt: new Date().toISOString() });
+      }
+      if (role === "adviser") {
+        const prepared = await callTool("prepare_adviser", { repo: root }, ctx);
+        if (prepared.isError) {
+          return {
+            content: [{ type: "text", text: "review-gate: 本轮未受理 — adviser brief 无法生成。\n" + toolText(prepared) }],
+            details: { submitted: false, busy: false },
+            isError: true,
+          };
+        }
+        reviewTask = `你要回答的问题（来自主会话）：\n${task}\n\n${extractTaskText(toolText(prepared))}`;
       }
       // The title is a DISPLAY label the gate derives itself (B5: it must not
       // reach the session's directory, or every round starts a new session).
@@ -4191,7 +4266,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           : []),
         "- 等待纪律:子会话审核期间,继续做可实现的确定性工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);确认没有可做的工作后才阻塞等待审核结果。",
         "",
-        "--- task text ---",
+        TASK_TEXT_MARKER,
         task,
         "",
         "The reviewer judges the COMMIT RANGE (immutable): you may keep fixing the worktree while it ",
@@ -4370,12 +4445,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text:
           `adviser brief ready (${previous ? "incremental" : "full"}):\n` +
-          `- 建议 title: "${adviserTitle}"（session id 由 review_spawn 按 role+repo 派生）\n` +
-          `- review_spawn({ role: "adviser", title: "${adviserTitle}", task: <brief> }) 后进程退出即完成，唤醒自动注册\n` +
-          "- 提问:adviser 输出 question fence 退出后,用 review_send({ sessionId, text: <答案> }) 恢复同一会话\n" +
-          "- 等待纪律:咨询期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于咨询结果的事才等。\n" +
-          (goalTruncated ? `- 注意:brief 中的 loop goal 因长度被截断;落盘 task 文件时请用 read 读取 ${pathJoin(target.root, LOOP_GOAL_RELPATH)} 全文替换截断部分。\n` : "") +
-          `\n${brief}` }],
+          "- 正常路径是 `judge_submit({role:\"adviser\", task:<你的问题>})`——它内部就调这个工具并派出 adviser。" +
+          "单独调本工具只在你要自己拿 brief 时才需要。\n" +
+          (goalTruncated ? `- 注意:brief 中的 loop goal 因长度被截断;需要全文时读 ${pathJoin(target.root, LOOP_GOAL_RELPATH)}。\n` : "") +
+          `${TASK_TEXT_MARKER}\n${brief}` }],
         details: { incremental: !!previous, artifactPath, changedFiles, title: adviserTitle },
       };
     },
@@ -4426,11 +4499,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text:
           `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n` +
-          `- 建议 title: "${auditTitle}"（session id 由 review_spawn 按 role+repo 派生）\n` +
-          `- review_spawn({ role: "goal-auditor", title: "${auditTitle}", task: <下面的任务文本> }) 后进程退出即完成，唤醒自动注册\n` +
-          "- 提问:auditor 输出 question fence 退出后,用 review_send({ sessionId, text: <答案> }) 恢复同一会话\n" +
-          "- 等待纪律:审计期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于审计结果的事才等。\n\n" +
-          `${taskText}` }],
+          "- 正常路径是 `judge_submit({role:\"goal-auditor\", task:<草稿>})`——它内部就调这个工具，" +
+          "自己派 auditor、解析并记录裁决。单独调本工具只在你要自己拿任务文本时才需要。\n" +
+          `${TASK_TEXT_MARKER}\n${taskText}` }],
         details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle },
       };
     },

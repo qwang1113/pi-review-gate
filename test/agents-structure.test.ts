@@ -405,3 +405,32 @@ test("REGRESSION: isolation + streaming are documented in every protocol surface
   assert.doesNotMatch(plan, /reviewer sits in its OWN disposable snapshot/i,
     "the retired snapshot phrasing must not come back as current guidance");
 });
+
+test("every judge role is told that findings carry BLOCKERS ONLY", () => {
+  // The adjudication is mechanical (no open P0/P1 ⇒ pass), so a non-blocking
+  // entry in `findings` is noise the main agent still has to triage — and a
+  // P2 is where a real blocker goes to hide. All three role definitions, the
+  // protocol doc and the copy embedded in the judge's system prompt must say
+  // so, or one surface teaching the old habit is enough to keep it.
+  const surfaces = [
+    join(AGENTS, "reviewer.md"),
+    join(AGENTS, "goal-auditor.md"),
+    join(AGENTS, "adviser.md"),
+    join(ROOT, "docs", "judge-protocol.md"),
+    join(ROOT, "lib", "judge-prompt.ts"),
+  ];
+  for (const file of surfaces) {
+    const src = readFileSync(file, "utf8");
+    assert.match(
+      src,
+      /BLOCKERS ONLY|只写阻塞项|does NOT belong in `findings`/,
+      `${file} must state that findings carry blockers only`,
+    );
+    assert.match(
+      src,
+      /P2|Nit/,
+      `${file} must name what does NOT belong there`,
+    );
+  }
+});
+

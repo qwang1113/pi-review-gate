@@ -76,6 +76,12 @@ Consulting you early is cheaper than a failed review later. Encourage it.
 
 ## Output shape
 
+If you list findings at all, list BLOCKERS ONLY (P0/P1) — the gate adjudicates
+mechanically and a non-blocking entry is noise the agent still has to answer
+for. Everything else belongs in your prose, where advice is supposed to live.
+And never soften a real blocker into a P2: if it must be fixed, say so.
+
+
 ```
 Question at stake:
 - the one real decision, stated plainly

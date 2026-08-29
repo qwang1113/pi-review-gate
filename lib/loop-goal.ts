@@ -367,9 +367,10 @@ export function buildGoalPrereviewRefusal(ctx: GoalPrereviewRefusalContext): str
   return (
     "review-gate: propose_loop_goal refused — " + why + ". The user's approval dialog is not shown until a " +
     "dedicated `goal-auditor` audit of THIS exact text passes.\n" +
-    "Recovery path: revise the draft against the objections → call `prepare_goal_audit` with the revised " +
-    "draft (it returns the ready-made auditor task with the carryover + draft delta) → dispatch the " +
-    "`goal-auditor` as a tmux judge child (`review_spawn`) with that task → record its FULL raw output with `record_goal_prereview` → " +
+    "Recovery path: revise the draft against the objections → " +
+    "`judge_submit({role:\"goal-auditor\", task:<the revised draft>})` (the gate builds the auditor's " +
+    "task with the carryover and the draft delta, dispatches it, adjudicates the verdict and records " +
+    "the PASS) → call propose_loop_goal " +
     "again with the identical text.\n" +
     "The goal text submitted to the user must be written in Simplified Chinese (technical identifiers, tool " +
     "names, file paths and code tokens stay English) — the auditor blocks a draft that is not.\n" +
