@@ -117,14 +117,17 @@
 `ship-detect.ts` 判断一条命令行里是否含 ship 操作，`shell-lex.ts` 是它的底座
 （引号、续行、here-doc、命令替换——正则做不对这件事，所以有一个真正的词法
 器）。`file-size-gate.ts` 是架构标准里唯一的机械规则（新建源码文件 600 行硬
-拦、存量只提醒）。`polish-gate.ts` 管「连续 READY 还在打磨」的再审理由，
+拦、存量只提醒，判定点是 `review_checkpoint` 那一刻，不在 precommit runner
+里）。`polish-gate.ts` 管「连续 READY 还在打磨」的再审理由，
 `loop-stall.ts` 是 L2 的断路器，`git-rewrite.ts` 解开「只改 commit message」
 与 L5 的互锁，`blocked-marker.ts` 在 sidecar 写不进去时 fail-closed，
 `sensitive-grant.ts` 与 `arbitration.ts` 是两个**受限的放行口子**（一次性
 敏感文件授权、独立 arbiter 裁决循环拦截）。`task-mode.ts` 定义模式强弱序
 （normal < explore < loop < orchestrator）与升降级规则，`pi-self.ts` 让
 `/tmp` 草稿会话不自动进 loop，`workspace-branch.ts` 是 `setup_workspace` 与
-`declare_done` 背后的工作区/分支事实。
+`declare_done` 背后的工作区/分支事实。两条**带自己层号**的关卡也在这一域：
+`copilot-review.ts`（L7，PR 之后的 Copilot 审查闭环）与 `loop-goal.ts`（L8，
+用户批准的退出契约）——它们的接线见 §2 的层表。
 
 > **落点**：新的拦截规则 → 新建一个 `lib/<rule>.ts` 纯模块（facts in,
 > decision out）+ 同名单测；只有接线改扩展。新的**放行**口子要格外小心：
@@ -133,14 +136,21 @@
 
 ### 域 2：语言与文本守卫
 
-`lang-detect.ts` 是 L5 的唯一实现——**一条规则**：任何非拉丁字母即拒；调用
-方只是传不同的 `kind` 来决定措辞。`llm-classify.ts` 是语义第二意见
+`lang-detect.ts` 持有 L5 的规则本身——**一条规则**：任何非拉丁字母即拒；调用
+方只是传不同的 `kind` 来决定措辞。**但它不是这条规则唯一的实现**：钩子层不能
+import TypeScript，所以 `hooks/commit-msg`（内联的一段 node，判编辑器里写的
+commit message）与 `scripts/scan-test-labels.cjs`（L6 的测试标签扫描）各自
+带着一份自称 mirror 的同规则副本——而且**没有 parity 测试兜底**（不像
+`fingerprint` 的两份实现有 `test/constants.test.ts` 比对摘要）。
+`llm-classify.ts` 是语义第二意见
 （DeepSeek V4 Flash），契约上 **TIGHTEN-ONLY**：只能加拦，永远不能解掉确定性
 检查已经下的拦。`text-appeal.ts` 是启发式拦截的申诉口子，
 `edit-projection.ts` 把 edit/write 的入参投影成改后全文，让标签检查看得到
 上下文。
 
-> **落点**：改英文判定 → 只改 `lang-detect.ts`（改别处会分叉出第二套规则）；
+> **落点**：改英文判定 → 规则改 `lang-detect.ts`，然后**必须同步那两份镜像**
+> （`hooks/commit-msg`、`scripts/scan-test-labels.cjs`）——只改 TypeScript 那份，
+> 钩子层会静默停在旧规则，而且没有测试会告诉你。别在第四个地方再写一份；
 > 加语义判定 → 走 `llm-classify.ts`，并保住 TIGHTEN-ONLY 不变量。
 
 ### 域 3：judge 子进程与审查协议
@@ -175,6 +185,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
   `orchestrator-wait.ts`（「有事发生」对子会话意味着什么）、
   `orchestrator-registry.ts`（编排只能操作门禁替它创建的东西）、
+  `orchestrator-relay.ts`（自我接力：只有后继者能关掉前任）、
   `orchestration-id.ts`（编排的稳定地址，接力换人后子会话无感）。
 - **与真实机器打交道**：`orchestrator-tmux.ts`（所有 tmux 命令的唯一构造
   处）、`orchestrator-wiring.ts`（跑 tmux、读写 plan、加删 worktree、取
@@ -185,8 +196,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   拦手写 tmux）。
 - **工具与接线**：`orchestrator-tools.ts`（plan / status / notify）、
   `orchestrator-read-tools.ts`（read / key）、
-  `orchestrator-session-tools.ts`（wait / close / relay 的决策 + 五个会话工具
-  的注册）、
+  `orchestrator-session-tools.ts`（五个会话工具的注册与编排——wait / close /
+  relay 各自的判定分别住在 `orchestrator-wait.ts` / `orchestrator-registry.ts`
+  / `orchestrator-relay.ts`）、
   `orchestrator-dispatch.ts`（spawn / send）、`orchestrator-tool-kit.ts`
   （每个工具的共用前置：模式、pane 实况、plan 可用性）、
   `orchestrator-deps.ts`（编排工具要的依赖集合，host 类型在 `tool-host.ts`）、
@@ -239,7 +251,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 `ask-user.ts` 是采访模型（逐题推进、上限、跳过与「在聊天里回答」的语义），
 `agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
 `dialog-budget.ts` 管确认对话框的渲染行数预算（宿主不截断，长度得自己管），
-`attention.ts` 是定向唤醒：子会话只唤醒对它负责的那**一个**会话，禁止广播。
+`attention.ts` 是定向唤醒：子会话只唤醒对它负责的那**一个**会话，禁止广播；
+`edit-discipline.ts` 识别「edit/write 失败后改用 bash 写文件」这个习惯，只在
+工具结果里追加一句 nudge——**它不拦任何东西**，是这一域里最典型的提示级手段。
 
 > **落点**：想让 agent 改掉某个行为习惯，先问这是不是**提示**能解决的——
 > 是就改 `agent-directives.ts`，不是就写成域 1 的机械规则。系统级通知只有
@@ -267,7 +281,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `hooks/` | L3 纵深防御：`pre-commit`（校验 sidecar 与指纹、跑标签扫描与暂存分叉检查）、`pre-push`（同一套 + full lane 要求）、`commit-msg`（AI 署名 + L5 英文，覆盖编辑器里写的 message） | 新增一条**离开 pi 也必须成立**的检查；bash 写成，不能 import TypeScript |
 | `scripts/` | 跑得起来的执行体：`precommit-runner.mjs`（确定性质量门）、`precommit-plan.mjs`（纯规划，可单测）、`precommit-cache.mjs`（按输入摘要缓存每步）、`precommit-config.mjs`（读 `.pi/review-gate.json` 的 precommit 段）、`compute-fingerprint.cjs`（钩子用的指纹，镜像 `lib/fingerprint.ts`）、`check-staged-divergence.cjs`、`scan-test-labels.cjs`（L6）、`install-git-hooks.sh`、`install-package.mjs` | **新增一条 precommit 检查**（改 runner + plan）；新增钩子要用的、不能依赖 TypeScript 的逻辑（CJS/MJS） |
 | `agents/` | 六个角色定义：`reviewer`、`adviser`、`goal-auditor`、`arbiter`、`fixer`、`recon`。frontmatter 是模型链、thinking、工具集的**单一事实源** | **新增或调整一个 judge 角色**：先改这里的 md，模型链由 `lib/model-config.ts` 渲染/校验 |
-| `test/` | `*.test.ts` + `test/helpers/`（`git.ts`、`fake-orchestration.ts`、`gate-env.ts`——后者在测试载入时清掉继承来的 `RG_*` / `REVIEW_GATE_*` 环境变量，否则父会话的门禁状态会污染被测门禁）。约定是**一个 lib 模块一个同名测试文件**，另有 `extension-structure.test.ts` / `agents-structure.test.ts` 这类结构性测试守住跨文件不变量 | 新建 `lib/foo.ts` 就同时新建 `test/foo.test.ts`；测试若会读门禁状态，先 `neutraliseGateEnv()` |
+| `test/` | `*.test.ts` + `test/helpers/`（`git.ts`、`fake-orchestration.ts`、`gate-env.ts`——后者在测试载入时清掉继承来的 `RG_*` / `REVIEW_GATE_*` 环境变量，否则父会话的门禁状态会污染被测门禁）。约定是**一个 lib 模块一个同名测试文件**（少数执行/接线模块并进相邻的分组测试），另有 `extension-structure.test.ts` / `agents-structure.test.ts` 这类结构性测试守住跨文件不变量 | 新建 `lib/foo.ts` 就同时新建 `test/foo.test.ts`；测试若会读门禁状态，先 `neutraliseGateEnv()` |
 | `skills/` | `skills/review-loop`：随包分发给 pi 的技能，描述审查循环怎么跑 | 面向**使用者**的操作指南（而不是门禁自身的判定）放这里 |
 
 ---
@@ -369,5 +383,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 3. **它是新工具族吗？** 是 → 照 `lib/judge-session-tools.ts` 与
    `lib/orchestrator-*-tools.ts` 的形状：判定与工具注册都在 `lib/`，经
    `lib/tool-host.ts` 那道 seam 拿依赖，别再往那个近 9000 行的文件里加。
-4. **它有同名测试吗？** 没有就说明它被埋在了测不动的地方——这正是
-   `reviewer` 可以直接开 P1 的情形。
+4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态（77 个模块里 63 个有），
+   其余 14 个（多是编排层的执行/接线模块）并进相邻的分组测试。真正的判据不是
+   文件名对不对，而是**这条规则能不能被一个测试单独点名**——做不到，就说明它
+   被埋在了工具体或接线里，`reviewer` 可以直接开 P1。

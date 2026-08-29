@@ -311,8 +311,8 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 ### 架构规范：新建文件 600 行硬拦，存量只提醒
 
-`review_checkpoint` / precommit 会拦下**本次新增**且超过 600 行的源文件
-（`lib/file-size-gate.ts`）。判定发生在 `review_checkpoint` / precommit 时，
+`review_checkpoint`（`judge_submit` 内部走的也是它）会拦下**本次新增**且超过
+600 行的源文件（`lib/file-size-gate.ts`）。判定发生在提交 checkpoint 那一刻，
 而不是编辑当下（那时文件还写了一半，硬拦只会逼人盲目重构），且只判源码扩展名
 ——Markdown、JSON、锁文件与 fixture 不判长度。存量大文件只输出提醒 ——
 近 9000 行（截至 2026-08-29）的 `extensions/review-gate.ts` 不是一次写出来的，
