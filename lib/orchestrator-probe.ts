@@ -65,8 +65,15 @@ export const PROBE_QUEUE_MAX = 20;
 export interface ChildProbe {
   /** Observe every open child once; queue whatever is newsworthy. */
   observe(now?: number): { health: ChildHealth[]; events: ProbeEvent[] };
-  /** Take the queued events (they are then considered delivered). */
-  drain(now?: number): ProbeEvent[];
+  /**
+   * Take the queued events (they are then considered delivered).
+   *
+   * `childId` narrows it to ONE child and LEAVES the rest queued — a
+   * supervisor waiting on a single child must not silently drop the news
+   * about its siblings, which is the same class of loss R-16 was.
+   */
+  drain(opts?: { now?: number; childId?: string }): ProbeEvent[];
+
   /** How many events are waiting to be delivered. */
   pending(now?: number): number;
   /** The most recent snapshot, without re-observing. */
@@ -208,13 +215,20 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
       return { health: snapshot, events: raised };
     },
 
-    drain(nowArg?: number) {
-      const now = nowArg ?? deps.now();
+    drain(opts?: { now?: number; childId?: string }) {
+      const now = opts?.now ?? deps.now();
       prune(now);
-      const taken = queue;
-      queue = [];
+      const wanted = opts?.childId;
+      if (!wanted) {
+        const taken = queue;
+        queue = [];
+        return taken;
+      }
+      const taken = queue.filter((e) => e.childId === wanted);
+      queue = queue.filter((e) => e.childId !== wanted);
       return taken;
     },
+
 
     pending(nowArg?: number) {
       prune(nowArg ?? deps.now());

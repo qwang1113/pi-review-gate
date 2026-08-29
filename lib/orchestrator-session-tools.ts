@@ -142,15 +142,24 @@ async function doWait(
     const open = runtime.children.filter((c) => !c.closedAt);
     const childPanes = open.map((c) => c.paneId);
     const observed = childProbe.observe(deps.now());
-    const health = childId
-      ? observed.health.filter((h) => h.childId === childId)
-      : observed.health;
+    // The snapshot is ALWAYS the whole family, even when the wait is scoped
+    // to one child: "which of them wants me" is the question the old receipt
+    // could not answer (R-4), and a scoped wait is exactly when a supervisor
+    // is most likely to be blind to the other one.
+    const health = observed.health;
+
+
 
     // The gate's OWN events first: they name the child and the state, and
     // they are the only signal that exists for a child that stopped quietly.
-    const manufactured = childProbe
-      .drain(deps.now())
-      .filter((e) => !childId || e.childId === childId);
+    // A wait scoped to ONE child takes only that child's events and leaves
+    // its siblings' queued — dropping them here would be the same silent
+    // loss R-16 is about, just with a different queue.
+    const manufactured = childProbe.drain({
+      now: deps.now(),
+      ...(childId ? { childId } : {}),
+    });
+
     if (manufactured.length > 0) {
       return { probeEvents: manufactured, done: false, paneAlive: true, health };
     }

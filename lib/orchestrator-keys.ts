@@ -291,14 +291,26 @@ export function verifyHighlight(
  * fact landed — and an orchestrator that retried on that receipt would have
  * pressed its key into the NEXT question. What proves the submit is that the
  * dialog on screen is no longer the one we answered: gone, or a different one.
+ *
+ * A screen that could NOT be read proves nothing, and must never be read as
+ * "the dialog is gone" — that is how a receipt starts lying again.
  */
 export function verifyDismissed(
   before: PaneSnapshot | undefined,
   after: PaneSnapshot | undefined,
   label: string,
 ): KeyVerification {
+  if (!after) {
+    return {
+      ok: false,
+      reason:
+        `提交之后读不到子会话的屏幕（capture-pane 失败）—— 无法确认「${label}」是否真的被提交。` +
+        "不猜：先 `orchestrator_read` 看现状再决定要不要重试。",
+    };
+  }
   const previous = dialogSignature(before?.dialog);
-  const current = dialogSignature(after?.dialog);
+  const current = dialogSignature(after.dialog);
+
   if (current && previous && current === previous) {
     return {
       ok: false,

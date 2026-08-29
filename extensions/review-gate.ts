@@ -3664,7 +3664,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       // A bypass is the USER's authorization, and it now covers this
       // prerequisite too — but it never hides: the round is recorded as
       // bypassed, the reviewer is told, and declare_done says so.
+      //
+      // SCOPE, stated because it is easy to miss (round-1 Nit): the bypass is
+      // a SESSION-level switch, not a one-shot token. Once the user grants it,
+      // every later checkpoint in that session skips this prerequisite too —
+      // which is why each of them stamps `precommitBypassed` and why the
+      // receipt below says so out loud rather than only the first time.
       const precommitBypassed = st.bypass.active;
+
       if (!precommitBypassed && st.precommit.verdict !== "PASS") {
         return {
           content: [{
@@ -3815,7 +3822,10 @@ export default function reviewGate(pi: ExtensionAPI) {
               (precommitBypassed
                 // R-22: never let a bypassed round read like a clean one.
                 ? "\n\n**本轮 precommit 被 `/gate-bypass` 覆盖**（用户授权）：全量测试并没有在这份内容上跑过。" +
-                  "这条事实已经记进 checkpoint，reviewer 与 declare_done 都会看到 —— 请在送审说明里写清 bypass 的理由。"
+                  "这条事实已经记进 checkpoint，reviewer 与 declare_done 都会看到 —— 请在送审说明里写清 bypass 的理由。" +
+                  "注意 bypass 是**会话级**的：在本会话里它对之后每一次 checkpoint 同样生效，" +
+                  "根因修好之后请让用户 `/gate-reset`（或重开会话），别让它一直挂着。"
+
                 : "\n\nThe required full precommit already ran typecheck + build + the COMPLETE test suite on this exact content " +
                   "(cache: an unchanged input set is reused in seconds — do NOT manually re-run the full suite or `tsc`; " +
                   "run only targeted tests for files you keep editing, and let run_precommit be the single full gate).") +
@@ -5436,7 +5446,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       // any of its repos still holds unreviewed work.
       const problems: string[] = [];
       if (orchestratorMode) {
+        // WHAT THIS DELIBERATELY DOES NOT CHECK (round-1 Nit, recorded rather
+        // than silently accepted): unreviewed changes a serial child left in
+        // the shared worktree are invisible to THIS exit check now. That is a
+        // tidiness risk, not a hole — a supervisor writes no code (constraint
+        // 2) and every ship still goes through the SESSION that made the
+        // change, with its own review and precommit. If an orchestrator is
+        // ever allowed to commit, this layer has to be reconsidered.
         problems.push(...orchestrationDoneProblems());
+
       } else {
 
       for (const root of sessionRepos) {

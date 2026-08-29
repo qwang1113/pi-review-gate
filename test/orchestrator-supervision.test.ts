@@ -119,6 +119,27 @@ test("R-23: a frozen screen is NOT idle while a judge round is in flight", async
   assert.match(text(waited), /judge 子进程/, "and the reason names the structured fact it used");
 });
 
+test("R-16: waiting on ONE child never discards what the gate learned about the others", async () => {
+  const h = fakeOrchestration({ plan: samplePlan(), approved: true });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "串行任务" });
+  await h.call("orchestrator_spawn", { taskId: "b", task: "并行任务" });
+  const [first, second] = h.runtime().children;
+  h.openDialog(first!.paneId, "A 在问", ["Yes", "No"]);
+  h.openDialog(second!.paneId, "B 也在问", ["Yes", "No"]);
+  await settle(h, 5_000);
+
+  // A wait scoped to the FIRST child must not eat the second one's event: a
+  // dropped event is a child left waiting in front of a dialog forever, which
+  // is exactly the failure this round exists to end.
+  const scoped = await h.call("orchestrator_wait", { childId: first!.id, timeoutMs: 1000 });
+  assert.equal(scoped.details?.childId, first!.id);
+
+  const rest = await h.call("orchestrator_wait", { timeoutMs: 1000 });
+  assert.equal(rest.details?.done, true, "the sibling's request survived");
+  assert.equal(rest.details?.childId, second!.id);
+});
+
+
 test("R-23: a pane that vanished is reported as dead, by name", async () => {
   const { h, child } = await spawned();
   h.killPane(child.paneId);

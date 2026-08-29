@@ -282,6 +282,12 @@ test("R-5: the SAME dialog still on screen means NOT answered; a DIFFERENT one m
   assert.match((moved as { note: string }).note, /换成了另一个框/);
 
   assert.equal(verifyDismissed(before, parsePaneSnapshot("answered: Yes"), "Yes").ok, true);
+
+  // A screen that could not be read is NOT evidence that the dialog is gone.
+  const unreadable = verifyDismissed(before, undefined, "Yes");
+  assert.equal(unreadable.ok, false, "an unreadable screen must never read as a successful submit");
+  assert.match((unreadable as { reason: string }).reason, /读不到/);
+
 });
 
 

@@ -3015,7 +3015,8 @@ test("R-30: declare_done and orchestrator_status answer with the SAME function, 
   // answers to one question; here it was a functional deadlock.
   const body = toolBodyOf("declare_done");
   assert.match(body, /const orchestratorMode = state\.taskMode === "orchestrator"/);
-  assert.match(body, /if \(orchestratorMode\) \{\s*\n\s*problems\.push\(\.\.\.orchestrationDoneProblems\(\)\);/,
+  assert.match(body, /if \(orchestratorMode\) \{[\s\S]{0,600}?problems\.push\(\.\.\.orchestrationDoneProblems\(\)\);/,
+
     "in orchestrator mode the PLAN is the whole criterion");
   assert.match(body, /orchestrator_status/,
     "and the refusal points at the tool that lists the very same items");
