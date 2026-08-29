@@ -32,6 +32,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import type { TaskMode } from "./task-mode.ts";
 
 /** Repo-root-relative location of the goal file (gate-excluded via `.pi/`). */
 export const LOOP_GOAL_RELPATH = ".pi/loop-goal.md";
@@ -484,15 +485,21 @@ export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
  * `taskMode` undefined (undecided) behaves as loop — fail-closed, exactly
  * like every other layer of the gate. explore/normal never require the goal:
  * explore deliberately allows small edits during an investigation, and normal
- * steps aside entirely. The caller supplies `goalConfirmed` for the TARGET
- * repo (see isLoopGoalConfirmed), so a multi-repo session checks each repo's
- * own goal before writing into it.
+ * steps aside entirely. `orchestrator` is exempt for a different reason: its
+ * exit contract is the PLAN (lib/orchestrator-plan.ts), approved in its own
+ * dialog, and its write surface is closed far tighter than L8 could — an
+ * orchestrator may only touch its plan and handoff docs, never code. Making
+ * it also demand a loop goal would ask the user to approve two contracts for
+ * one session. The caller supplies `goalConfirmed` for the TARGET repo (see
+ * isLoopGoalConfirmed), so a multi-repo session checks each repo's own goal
+ * before writing into it.
  */
 export function loopGoalEditGate(opts: {
-  taskMode: "normal" | "explore" | "loop" | undefined;
+  taskMode: TaskMode | undefined;
   goalConfirmed: boolean;
 }): boolean {
   if (opts.taskMode === "normal" || opts.taskMode === "explore") return true;
+  if (opts.taskMode === "orchestrator") return true;
   return opts.goalConfirmed;
 }
 

@@ -163,7 +163,24 @@ import {
   type DirtyFile,
   type BranchOp,
 } from "../lib/workspace-branch.ts";
-import { parentSessionId, publishAttention } from "../lib/attention.ts";
+import { attentionTarget, publishAttention } from "../lib/attention.ts";
+// ---- orchestration layer (project-manager role). Everything but these few
+// wires lives in lib/orchestrator-*.ts, deliberately: this file is the
+// repository's own worst example of the architecture rule this round adds.
+import { newOrchestrationId, orchestrationIdFromEnv } from "../lib/orchestration-id.ts";
+import { detectForbiddenTmux } from "../lib/orchestrator-guard.ts";
+import { orchestratorDoneProblems, orchestratorWriteBlock } from "../lib/orchestrator-gate.ts";
+import {
+  ORCHESTRATOR_DIRECTIVE,
+  CHILD_OF_ORCHESTRATOR_DIRECTIVE,
+  ORCHESTRATOR_NEEDS_TMUX,
+} from "../lib/orchestrator-directives.ts";
+import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
+import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
+import { registerOrchestratorSessionTools } from "../lib/orchestrator-session-tools.ts";
+import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
+import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
 import {
   readJudgeSessionState,
@@ -231,6 +248,8 @@ import {
   buildModeConfirmMessage,
   normalizeTaskMode,
   scratchFirstMode,
+  isEnforcedMode,
+  requestedModeFromEnv,
   GATE_MODE_DECISION_DIRECTIVE,
   MODE_CONFIRM_TITLE,
   type TaskMode,
@@ -1021,21 +1040,101 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * Directed attention (round-18): tell the session that SPAWNED us that a
-   * human decision is needed. Without a parent this is a silent no-op
-   * ("no-parent") — a standalone session never wakes anybody. No macOS
-   * notification, no osascript: the wake is the parent's transcript message.
-   * Never throws and never blocks a dialog.
+   * Directed attention (round-18): wake the ONE session responsible for us —
+   * the orchestration we belong to (`RG_ORCHESTRATION_ID`) if there is one,
+   * otherwise the session that SPAWNED us (`RG_PARENT_SESSION`). Addressing
+   * the orchestration is what keeps a child reaching the CURRENT orchestrator
+   * after a relay handed the role to a successor. With neither this is a
+   * silent no-op ("no-parent") — a standalone session never wakes anybody. No
+   * macOS notification, no osascript: the wake is the target's transcript
+   * message. (Notifying the HUMAN is a different, orchestrator-only channel —
+   * lib/orchestrator-notify.ts.) Never throws and never blocks a dialog.
    */
   function notifyUserAttention(reason: string, repo?: string): void {
     try {
       publishAttention({
         fromSessionId: attentionIdentity(),
-        toSessionId: parentSessionId(),
+        toSessionId: attentionTarget(),
         repo: repo ?? cwd,
         reason,
       });
     } catch { /* attention is a convenience, never a gate */ }
+  }
+
+  // ---------- orchestration layer (the project-manager role) ----------
+  //
+  // Only the WIRING is here. The plan, the constraints, the tmux commands,
+  // the tools and their prompts all live in lib/orchestrator-*.ts — this file
+  // is the repository's own worst example of the architecture rule this round
+  // introduces, so the orchestration layer deliberately does not grow it.
+  //
+  // The orchestration id is an ADDRESS, not an identity: a relay successor
+  // inherits the predecessor's id from its environment, which is what keeps
+  // every child reaching whoever currently holds the role. A session started
+  // without one mints its own the first time it needs it.
+  let orchestrationIdValue: string | undefined = orchestrationIdFromEnv();
+  function currentOrchestrationId(): string {
+    if (!orchestrationIdValue) orchestrationIdValue = newOrchestrationId(primaryRepoRoot, Date.now());
+    return orchestrationIdValue;
+  }
+  /** Started BY an orchestrator as a worker (not as its relay successor). */
+  function isOrchestrationChild(): boolean {
+    return orchestrationIdFromEnv() !== undefined && readInheritance().predecessorPane === undefined;
+  }
+  // The most recent ExtensionContext, so the orchestration tools can persist
+  // and raise dialogs. tool_call fires immediately before every tool body, so
+  // it is always fresh by the time one of them runs.
+  let latestCtx: ExtensionContext | undefined;
+  function persistOrchestration(runtime: OrchestratorRuntime): void {
+    state.orchestrator = runtime;
+    if (latestCtx) persist(latestCtx);
+  }
+  const orchestratorDeps = createOrchestratorDeps({
+    repoRoot: primaryRepoRoot,
+    taskMode: () => state.taskMode,
+    loadRuntime: () => state.orchestrator,
+    storeRuntime: persistOrchestration,
+    orchestrationId: currentOrchestrationId,
+    confirm: (title, message) => confirmBounded(latestCtx ?? {}, title, message),
+    branchFacts: () => ({
+      workBranch: state.workBranch,
+      baseBranch: state.baseBranch,
+      // "Settled", not "already merged": declare_done merges AFTER these
+      // checks, so requiring a completed merge here could never pass.
+      mergeSettled: Boolean(state.baseBranch) && !state.mergeConflict,
+      mergeWaived: Boolean(state.mergeWaived),
+    }),
+    sessionTranscriptPath: () => {
+      try {
+        const dir = sessionDirForCwd(cwd);
+        return state.sessionId ? `${dir}/${state.sessionId}.jsonl` : undefined;
+      } catch { return undefined; }
+    },
+  });
+  registerOrchestratorStateTools(pi, orchestratorDeps);
+  registerOrchestratorSessionTools(pi, orchestratorDeps);
+  /** Constraints 3, 4, 10 and 11 — the orchestration's own exit contract. */
+  function orchestrationDoneProblems(): string[] {
+    if (state.taskMode !== "orchestrator") return [];
+    const runtime = state.orchestrator ?? emptyRuntime(currentOrchestrationId());
+    const branch = orchestratorDeps.branchFacts();
+    const panes = (() => {
+      try {
+        const self = orchestratorDeps.ownPane();
+        if (!self) return [] as string[];
+        const listed = orchestratorDeps.tmux(["list-panes", "-t", self, "-F", "#{pane_id}"]);
+        return listed.ok ? listed.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [];
+      } catch { return [] as string[]; }
+    })();
+    return orchestratorDoneProblems({
+      plan: readPlanFile(primaryRepoRoot).plan,
+      runtime,
+      alivePaneIds: panes,
+      workBranch: branch.workBranch,
+      baseBranch: branch.baseBranch,
+      mergeSettled: branch.mergeSettled,
+      mergeWaived: branch.mergeWaived,
+    });
   }
   // The watcher registry (lib/judge-watch.ts) owns the handle map and the
   // shutdown latch: a signal that resolves while session_shutdown is
@@ -1969,6 +2068,9 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- L1: tool_call — sensitive files + ship gate ----------
 
   pi.on("tool_call", async (event, ctx) => {
+    // Keep the newest context for the orchestration tools (persist + dialogs);
+    // this hook runs immediately before every tool body, including theirs.
+    latestCtx = ctx as unknown as ExtensionContext;
     const input = event.input as Record<string, unknown>;
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       const path = coalesceToolPath(input);
@@ -2046,6 +2148,22 @@ export default function reviewGate(pi: ExtensionAPI) {
       // floor passed above and the gate-owned exemption already returned.)
       const goalBlock = loopGoalEditBlockFor(absPath);
       if (goalBlock) return goalBlock;
+      // CONSTRAINT 2 — an orchestrator does not write code. Only its plan
+      // (already exempt above, it lives under `.pi/`) and its handoff /
+      // report documents pass; everything else is delegated work. Placed
+      // after the L8 goal gate so the two never disagree about which refusal
+      // the author sees first.
+      if (state.taskMode === "orchestrator" && path) {
+        const rel = absPath && absPath.startsWith(primaryRepoRoot + "/")
+          ? absPath.slice(primaryRepoRoot.length + 1)
+          : path;
+        const orchestratorBlock = orchestratorWriteBlock({
+          relPath: rel,
+          taskMode: state.taskMode,
+          relayHandoffPath: state.orchestrator?.relay?.handoffPath,
+        });
+        if (orchestratorBlock) return { block: true, reason: orchestratorBlock };
+      }
       // L6 label check. NOTE the ordering: it runs AFTER the gate-owned
       // exemption and the L8 goal gate on purpose — a gate-owned write (.pi/
       // test files included) or a goal-blocked write pays neither the L6
@@ -2133,6 +2251,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     // commit-message checks, and LLM ship classification are all off. This is
     // the mode's defining behavior; explore below never gets this branch.
     if (state.taskMode === "normal") return;
+
+    // tmux BACKSTOP (task book §4.3). Placed ABOVE /gate-bypass on purpose:
+    // a bypass is the user's escape from the SHIP gate, and it was never a
+    // licence to destroy their working environment. The destructive
+    // subcommands are refused in every gated mode; the three the
+    // orchestration tools replace are redirected only in orchestrator mode,
+    // where a tool exists to do the same thing correctly. The gate's own tmux
+    // calls never pass through here — they are argv, not bash.
+    const tmuxHit = detectForbiddenTmux(command, {
+      orchestratorMode: state.taskMode === "orchestrator",
+    });
+    if (tmuxHit) return { block: true, reason: tmuxHit.reason };
 
     // /gate-bypass (user-authorized, reason logged in state): the L1 ship gate
     // steps aside for the rest of the session. The git hooks mirror it via
@@ -3400,6 +3530,44 @@ export default function reviewGate(pi: ExtensionAPI) {
             isError: true,
           };
         }
+        // FILE-SIZE gate (task book §9). Runs HERE, at the checkpoint, not at
+        // edit time: blocking mid-write would fire while a file is half
+        // written and force a blind restructure, whereas at the checkpoint
+        // the whole shape exists and splitting it is mechanical. Only a NEW
+        // oversized file blocks — an existing one gets a reminder, because it
+        // grew a hundred lines at a time and forcing a rushed split at the
+        // end of a task produces worse modules than the sprawl.
+        const sizeFacts = paths
+          .filter(isSizeJudgedFile)
+          .map((p) => {
+            let content: string;
+            try {
+              content = readFileSync(pathResolve(root, p), "utf8");
+            } catch {
+              return undefined; // deleted (or unreadable): nothing to judge
+            }
+            const lines = content.length === 0 ? 0 : content.replace(/\n$/, "").split("\n").length;
+            let isNew = false;
+            try {
+              execFileSync("git", ["cat-file", "-e", `HEAD:${p}`], { cwd: root, stdio: "ignore" });
+            } catch {
+              isNew = true; // not in HEAD ⇒ this change creates it
+            }
+            return { path: p, lines, isNew };
+          })
+          .filter((f): f is { path: string; lines: number; isNew: boolean } => f !== undefined);
+        const sizeCheck = fileSizeVerdict(sizeFacts);
+        if (sizeCheck.blocking.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: "review-gate: review_checkpoint rejected — " + formatFileSizeVerdict(sizeCheck),
+            }],
+            details: { committed: false, oversizedNewFiles: sizeCheck.blocking.length },
+            isError: true,
+          };
+        }
+
         const sweptIn = paths;
         execFileSync("git", ["add", "-A"], { cwd: root, encoding: "utf8" });
         execFileSync("git", ["commit", "-m", message], {
@@ -3435,7 +3603,8 @@ export default function reviewGate(pi: ExtensionAPI) {
               `\n\nCHECKPOINT_SHA=${sha}\nFiles: ${sweptIn.length} — ${sweptIn.slice(0, 20).join(", ")}${sweptIn.length > 20 ? " …" : ""}` +
               "\n\nThe required full precommit already ran typecheck + build + the COMPLETE test suite on this exact content " +
               "(cache: an unchanged input set is reused in seconds — do NOT manually re-run the full suite or `tsc`; " +
-              "run only targeted tests for files you keep editing, and let run_precommit be the single full gate).",
+              "run only targeted tests for files you keep editing, and let run_precommit be the single full gate)." +
+              (sizeCheck.advisory.length ? "\n\n" + formatFileSizeVerdict(sizeCheck) : ""),
           }],
           details: { committed: true, sha },
         };
@@ -5464,6 +5633,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (state.taskMode === "loop" && !loopGoalConfirmed()) {
         completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
       }
+      // Orchestration exit contract (constraints 3, 4, 10, 11): the question
+      // is whether the WHOLE job is finished, not whether this session kept
+      // its own promises — an orchestrator that writes no code would
+      // otherwise sail through every gate above with its plan half-run.
+      completionProblems.push(...orchestrationDoneProblems());
       problems.push(...completionProblems);
       if (state.taskMode === "explore" || state.taskMode === "normal") {
         // Explore's defining behavior: the agent may end the task on its own
@@ -7061,19 +7235,56 @@ export default function reviewGate(pi: ExtensionAPI) {
       "(first classification is remapped to normal; later agent loop upgrades are rejected; only " +
       "the user can force loop via /gate-mode). Downgrades after the first classification pop a " +
       "confirmation dialog for the user — you cannot approve it yourself, and a declined " +
-      "dialog locks further agent-initiated downgrades for this session.",
+      "dialog locks further agent-initiated downgrades for this session. " +
+      "\"orchestrator\" is the PROJECT-MANAGER role — loop plus the orchestration constraints " +
+      "(you write no code, a plan the user approved authorizes every child session, and " +
+      "declare_done additionally requires an empty task queue and no live children). Pick it " +
+      "only when the user asked you to supervise rather than to build; it requires tmux.",
     parameters: Type.Object({
-      mode: Type.String({ description: '"loop" | "explore" | "normal"' }),
+      mode: Type.String({ description: '"loop" | "explore" | "normal" | "orchestrator"' }),
       reason: Type.String({ description: "One-line justification (shown to the user as untrusted data)" }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const requested = normalizeTaskMode(params.mode.trim());
       if (requested === undefined) {
         return {
-          content: [{ type: "text", text: 'review-gate: unknown mode — use "loop", "explore", or "normal".' }],
+          content: [{ type: "text", text: 'review-gate: unknown mode — use "loop", "explore", "normal", or "orchestrator".' }],
           details: {},
           isError: true,
         };
+      }
+      // ORCHESTRATOR PRECONDITIONS. Both are facts about the environment, not
+      // judgements, so they are checked before the rule engine ever runs:
+      //  - no tmux ⇒ the role is impossible (its children ARE panes of the
+      //    user's window, and a relay is a split), so entering it would only
+      //    fail later, one confusing tool call at a time;
+      //  - a session STARTED as somebody's orchestration child must never
+      //    become an orchestrator itself. It would inherit the channel of the
+      //    orchestration supervising it and start answering its own bell.
+      //    A relay successor is exempt: it also carries an orchestration id,
+      //    but it carries a predecessor pane too, which is what makes it the
+      //    intended holder of the role.
+      if (requested === "orchestrator") {
+        if (!process.env.TMUX) {
+          return {
+            content: [{ type: "text", text: ORCHESTRATOR_NEEDS_TMUX }],
+            details: { mode: state.taskMode ?? null },
+            isError: true,
+          };
+        }
+        if (isOrchestrationChild()) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                "review-gate: 本会话是某个编排的**子会话**（环境里带着 RG_ORCHESTRATION_ID），" +
+                "不能自己变成项目经理 —— 那会让它接管管着自己的那个 orchestration 的通知渠道。" +
+                "你就是普通 loop 会话：干活、送审、declare_done；有事项目经理会找你。",
+            }],
+            details: { mode: state.taskMode ?? null },
+            isError: true,
+          };
+        }
       }
       // FIRST CLASSIFICATION: while the mode is undecided and THIS session
       // has not edited anything, the AGENT's own pick IS the classification —
@@ -7152,10 +7363,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           ctx.ui.notify(
             effective === "loop"
               ? `review-gate: 会话类型已判定为循环任务${sourceNote}。可用 /gate-mode 切换。`
-              : effective === "explore"
-                ? `review-gate: 会话类型已判定为探查任务${sourceNote} — gate 仅供参考，AI 可自主结束（commit/push 等 ship 命令仍被完整拦截）。可用 /gate-mode 切换。`
-                : `review-gate: 会话类型已判定为普通任务${sourceNote} — 本会话门禁关闭。可用 /gate-mode 切换。`,
-            effective === "loop" ? "info" : "warning",
+              : effective === "orchestrator"
+                ? `review-gate: 本会话已进入项目经理（orchestrator）模式${sourceNote} — 你负责统筹调度，不写代码；plan 需用户批准后才能开子会话。可用 /gate-mode 切换。`
+                : effective === "explore"
+                  ? `review-gate: 会话类型已判定为探查任务${sourceNote} — gate 仅供参考，AI 可自主结束（commit/push 等 ship 命令仍被完整拦截）。可用 /gate-mode 切换。`
+                  : `review-gate: 会话类型已判定为普通任务${sourceNote} — 本会话门禁关闭。可用 /gate-mode 切换。`,
+            isEnforcedMode(effective) ? "info" : "warning",
           );
         } catch { /* headless */ }
         // Loop mode decided ⇒ deliver the Step 0 loop-goal directive right
@@ -7659,6 +7872,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     // enforcement behaves as loop — never applies to a headless run.
     if (!ctx.hasUI) setTaskMode("normal", "auto", ctx);
 
+    // A SPAWNER may hand a session its starting mode (RG_GATE_MODE): a child
+    // opened by `orchestrator_spawn` is an ordinary loop session, and a relay
+    // successor is an orchestrator. Neither should have to classify itself
+    // into a role somebody else already decided, and a child that guessed
+    // "orchestrator" would take over the very orchestration supervising it.
+    //
+    // It is not a way around the consent rules: it applies only to a session
+    // that is still UNDECIDED and interactive, and only for the two enforced
+    // modes — a spawner can hand out a tighter starting point, never a looser
+    // one. Anything else in the variable is ignored (normalizeTaskMode).
+    if (ctx.hasUI && state.taskMode === undefined) {
+      const requestedBySpawner = requestedModeFromEnv();
+      if (isEnforcedMode(requestedBySpawner) && requestedBySpawner !== undefined) {
+        if (requestedBySpawner !== "orchestrator" || process.env.TMUX) {
+          setTaskMode(requestedBySpawner, "auto", ctx);
+        }
+      }
+    }
+
     // A restored pause survives the restart: keep auto-continuation disarmed
     // until the user's next message clears it (input handler).
     if (state.pausedQuestion) loopArmed = false;
@@ -8063,11 +8295,19 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("gate-mode", {
-    description: "Set task workflow: /gate-mode loop|explore|normal",
+    description: "Set task workflow: /gate-mode loop|explore|normal|orchestrator",
     handler: async (args, ctx) => {
       const mode = normalizeTaskMode((args ?? "").trim());
       if (mode === undefined) {
-        ctx.ui.notify("Usage: /gate-mode loop|explore|normal", "error");
+        ctx.ui.notify("Usage: /gate-mode loop|explore|normal|orchestrator", "error");
+        return;
+      }
+      // The orchestrator role is impossible without tmux — its children ARE
+      // panes of the user's window. Refuse here too, not just in the tool:
+      // the user should be told now, rather than watching every orchestration
+      // tool fail one at a time.
+      if (mode === "orchestrator" && !process.env.TMUX) {
+        ctx.ui.notify(ORCHESTRATOR_NEEDS_TMUX, "error");
         return;
       }
       // /gate-mode is user-invoked — an explicit choice, so source is "user"
@@ -8078,10 +8318,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       ctx.ui.notify(
         mode === "loop"
           ? "review-gate: switched to loop workflow"
-          : mode === "explore"
-            ? "review-gate: switched to explore workflow — gates advisory, AI may self-complete; prefer read-only work (ship commands stay gated)"
-            : "review-gate: switched to NORMAL mode — all quality gates are OFF for this session (as if the extension were not installed)",
-        mode === "loop" ? "info" : "warning",
+          : mode === "orchestrator"
+            ? "review-gate: switched to ORCHESTRATOR (project manager) — plan the work, spawn and supervise child sessions; you write no code yourself"
+            : mode === "explore"
+              ? "review-gate: switched to explore workflow — gates advisory, AI may self-complete; prefer read-only work (ship commands stay gated)"
+              : "review-gate: switched to NORMAL mode — all quality gates are OFF for this session (as if the extension were not installed)",
+        isEnforcedMode(mode) ? "info" : "warning",
       );
     },
   });
@@ -8265,6 +8507,23 @@ export default function reviewGate(pi: ExtensionAPI) {
       const goalConfirmed = loopGoalConfirmed();
       systemPrompt += "\n\n" + buildLoopGoalDirective(goal, goalConfirmed);
 
+    }
+
+    // The orchestration layer's two prompts, and they are deliberately
+    // asymmetric (task book §5). The ORCHESTRATOR gets the whole contract;
+    // a CHILD gets one sentence — telling it about the plan would make it
+    // optimize for the plan instead of for its own task.
+    if (state.taskMode === "orchestrator") {
+      systemPrompt += "\n\n" + ORCHESTRATOR_DIRECTIVE;
+      const inherited = formatInheritanceBrief(readInheritance(), currentOrchestrationId());
+      if (inherited) systemPrompt += "\n\n" + inherited;
+      const orchestrationProblems = orchestrationDoneProblems();
+      if (orchestrationProblems.length) {
+        systemPrompt += "\n\n编排层还差这些才能 declare_done：\n" +
+          orchestrationProblems.map((p) => `- ${p}`).join("\n");
+      }
+    } else if (isOrchestrationChild()) {
+      systemPrompt += "\n\n" + CHILD_OF_ORCHESTRATOR_DIRECTIVE;
     }
 
     if (!gateArmed && problems.length === 0) {

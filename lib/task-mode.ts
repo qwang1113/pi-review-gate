@@ -1,7 +1,15 @@
 /**
  * Session gate-mode model — decided IN-SESSION, with strict up/down rules.
  *
- * MODES (strictness order: normal < explore < loop)
+ * MODES (strictness order: normal < explore < loop < orchestrator)
+ *  - "orchestrator": the PROJECT-MANAGER layer — everything loop enforces,
+ *               plus the orchestration constraints: this session may not
+ *               write code at all (only its plan and handoff docs), it must
+ *               have a plan the USER approved before it may spawn a child
+ *               session, and declare_done additionally requires an empty
+ *               task queue, no live children and no unreported user
+ *               decisions. It requires tmux (its children are panes in the
+ *               user's own window). See lib/orchestrator-*.ts.
  *  - "loop":    the full enforced workflow — review READY + precommit PASS
  *               gate every ship, and auto-continuation keeps the agent in the
  *               fix→review loop until gates pass.
@@ -96,32 +104,70 @@
  *  and an initial explore on a session that already edited.
  */
 
-export type TaskMode = "normal" | "explore" | "loop";
+export type TaskMode = "normal" | "explore" | "loop" | "orchestrator";
 
 /** Normalize a persisted/requested task-mode value; undefined for unknown or
  *  forged input (fail-closed: callers treat unknown as loop behavior). */
 export function normalizeTaskMode(value: unknown): TaskMode | undefined {
-  if (value === "loop" || value === "explore" || value === "normal") return value;
+  if (value === "loop" || value === "explore" || value === "normal" || value === "orchestrator") return value;
   return undefined;
 }
 
-/** First /tmp classification: the agent may never land on loop.
- *  Only an explicit "explore" pick stays explore; loop, normal, or a missing
- *  pick all become normal. */
+/**
+ * Environment variable a SPAWNER stamps into a session it starts, to say what
+ * mode that session is meant to run in.
+ *
+ * It exists because of one requirement (task book §5): a child opened by
+ * `orchestrator_spawn` must be an ordinary loop session, and a relay successor
+ * must be an orchestrator — neither should have to guess, and a child must
+ * never wander into the orchestration role by classifying itself.
+ *
+ * It is NOT a way around the consent rules. It is honoured only on the FIRST
+ * classification of a session that is still clean, and it is read through
+ * {@link normalizeTaskMode}, so an arbitrary value is simply ignored. A
+ * spawner can therefore hand a session a TIGHTER starting point, never a
+ * looser one than it could have chosen for itself.
+ */
+export const GATE_MODE_ENV = "RG_GATE_MODE";
+
+/** The mode a spawner asked this session to start in, if any. */
+export function requestedModeFromEnv(env: NodeJS.ProcessEnv = process.env): TaskMode | undefined {
+  return normalizeTaskMode(env[GATE_MODE_ENV]?.trim());
+}
+
+/**
+ * The modes that run the FULL enforced workflow. Everything the gate blocks
+ * in loop mode it also blocks in orchestrator mode — orchestrator only ADDS
+ * restrictions (no code writing, a plan the user approved, a stricter
+ * declare_done). Callers that mean "enforced" must ask this rather than
+ * comparing to "loop", or every new mode silently opens a hole.
+ */
+export function isEnforcedMode(mode: TaskMode | undefined): boolean {
+  // undefined (undecided) behaves as loop — fail-closed.
+  return mode === undefined || mode === "loop" || mode === "orchestrator";
+}
+
+/** First /tmp classification: the agent may never land on an enforced mode.
+ *  Only an explicit "explore" pick stays explore; loop, orchestrator, normal,
+ *  or a missing pick all become normal. */
 export function scratchFirstMode(
   requested: TaskMode | undefined,
-): Exclude<TaskMode, "loop"> {
+): Exclude<TaskMode, "loop" | "orchestrator"> {
   return requested === "explore" ? "explore" : "normal";
 }
 
 /** Who decided the mode. Only "user" may downgrade the git hooks to advisory. */
 export type TaskModeSource = "auto" | "user";
 
-/** Strictness rank. A change to a HIGHER rank is an upgrade (tighten). */
+/** Strictness rank. A change to a HIGHER rank is an upgrade (tighten).
+ *  `orchestrator` outranks `loop` because it is loop PLUS the orchestration
+ *  constraints: entering it is always a tightening (consent-free), and
+ *  leaving it for loop is a real downgrade that asks the user. */
 export const TASK_MODE_RANK: Readonly<Record<TaskMode, number>> = Object.freeze({
   normal: 0,
   explore: 1,
   loop: 2,
+  orchestrator: 3,
 });
 
 export type ModeChangeDecision =
@@ -199,13 +245,14 @@ export function evaluateModeChange(opts: {
     // normal — which shuts the gate down entirely — always falls through to
     // the consent path below. That asymmetry is what makes it safe to let the
     // agent classify itself: it can only tighten, never switch the gate off.
-    // USER REQUIREMENT (scratch sessions): /tmp never enters loop via the
-    // agent. Callers clamp via scratchFirstMode; if loop still arrives here,
-    // apply normal — reject would leave the session undecided (behaves as loop).
-    if (opts.piSelfTask && requested === "loop") {
+    // USER REQUIREMENT (scratch sessions): /tmp never enters an ENFORCED mode
+    // (loop or orchestrator) via the agent. Callers clamp via
+    // scratchFirstMode; if one still arrives here, apply normal — reject
+    // would leave the session undecided (which behaves as loop).
+    if (opts.piSelfTask && isEnforcedMode(requested)) {
       requested = "normal";
     }
-    if (requested === "loop") return { action: "apply", source: "auto" };
+    if (isEnforcedMode(requested)) return { action: "apply", source: "auto" };
     // First /tmp classification of explore/normal: apply automatically.
     if (opts.piSelfTask && !opts.hasChanges && !opts.downgradesLocked) {
       return { action: "apply", source: "auto" };
@@ -222,15 +269,16 @@ export function evaluateModeChange(opts: {
   }
 
   if (TASK_MODE_RANK[requested] > TASK_MODE_RANK[current]) {
-    // USER REQUIREMENT: /tmp sessions cannot be pulled into loop by the
-    // agent. The user can still /gate-mode loop (that path never calls this).
-    if (opts.piSelfTask && requested === "loop") {
+    // USER REQUIREMENT: /tmp sessions cannot be pulled into an enforced mode
+    // (loop or orchestrator) by the agent. The user can still /gate-mode into
+    // one (that path never calls this).
+    if (opts.piSelfTask && isEnforcedMode(requested)) {
       return {
         action: "reject",
         reason:
-          "this session started in /tmp — scratch sessions cannot enter loop " +
-          "via the agent. Ask the user to run /gate-mode loop if they really " +
-          "want the full review loop here.",
+          `this session started in /tmp — scratch sessions cannot enter "${requested}" ` +
+          "via the agent. Ask the user to run /gate-mode " + requested + " if they really " +
+          "want the full enforced workflow here.",
       };
     }
     // Upgrade — tightening never needs consent. Source stays "auto": for loop
@@ -249,7 +297,15 @@ export function evaluateModeChange(opts: {
 export const MODE_CONFIRM_TITLE = "review-gate: AI 请求降低本会话的门禁级别——是否同意？";
 
 const MODE_CONSEQUENCES: Readonly<Record<TaskMode, string>> = Object.freeze({
-  loop: "", // upgrades never reach the confirm dialog
+  // `orchestrator` is the strictest rank, so it is never a downgrade TARGET
+  // and never reaches the confirm dialog.
+  orchestrator: "",
+  // `loop` IS reachable as a downgrade target since orchestrator outranks it,
+  // so this copy has to say what leaving the orchestration layer gives up.
+  loop:
+    "切换到 loop（循环）模式：解除项目经理专属约束 —— 本会话将可以自己写代码，" +
+    "plan 批准、子会话存活检查等编排层退出条件不再拦 declare_done；" +
+    "强制 review 循环与 ship 拦截照旧。",
   explore:
     "切换到 explore（探查）模式：关闭强制 review 循环与自动继续，AI 可自行判断结束任务；" +
     "commit/push 等 ship 命令仍被完整拦截。",
@@ -317,11 +373,16 @@ export const GATE_MODE_DECISION_DIRECTIVE =
   "running diagnostic commands still counts. Gates become advisory; ship commands stay blocked.\n" +
   '- "normal" — neither development nor research (casual Q&A, quick chores): the gate switches ' +
   "off entirely.\n" +
+  '- "orchestrator" — ONLY when the user asked you to run this session as the PROJECT MANAGER ' +
+  "(plan the work, spawn and supervise child sessions, report back). It is loop plus the " +
+  "orchestration constraints: you may not write code yourself, and you need a plan the user " +
+  "approved before you may spawn anything. It requires a tmux window.\n" +
   'NOTE (scratch sessions): a session STARTED IN /tmp (the scratch dir — ' +
-  'macOS /private/tmp is the same dir) NEVER enters loop via the agent. ' +
+  'macOS /private/tmp is the same dir) NEVER enters an enforced mode ' +
+  '(loop / orchestrator) via the agent. ' +
   'Call set_gate_mode with "normal" when the main purpose is editing or ' +
   'inspecting local pi config (~/.pi), or "explore" for investigation. ' +
-  'A requested "loop" is ignored. Only the user can force loop (/gate-mode). ' +
+  'A requested enforced mode is ignored. Only the user can force one (/gate-mode). ' +
   'A session started OUTSIDE /tmp — including one started in ~/.pi or in ' +
   'the pi-review-gate repo — is NOT path-exempt and runs the full loop.\n' +
   "Your pick IS the classification — no separate model reviews it — so judge honestly and " +

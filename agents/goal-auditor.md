@@ -53,6 +53,27 @@ the CONTRACT ITSELF, before any work starts.
 6. **Internal consistency.** Criteria that contradict each other, a criterion
    that repeats a non-goal, a date that is not ISO, an intent line that promises
    something no criterion checks — all real findings.
+7. **Does the plan degrade the architecture?** This is the cheapest place in
+   the whole loop to catch it: rejecting "keep piling onto the 8000-line file"
+   at the GOAL stage costs one revision, while catching it at review time
+   costs a rushed refactor at the end of a task — which reliably produces
+   worse modules than the sprawl it replaced. Read the files the draft names
+   and check their size and their responsibilities. Raise a **P1** when the
+   goal, as written, would:
+   - add a new responsibility to a file that is already large or already
+     carries several unrelated ones, when a new module is the obvious home;
+   - duplicate a rule the gate already enforces somewhere else (copies
+     diverge, and a diverged enforcement rule is a hole, not a typo);
+   - bury logic where it cannot be unit-tested (inside a host/extension entry
+     point rather than behind a pure seam);
+   - name no landing place at all for a substantial amount of new code — a
+     goal that does not say WHERE the code goes will land it wherever the
+     first edit happens to be.
+   The fix you ask for is concrete: name the module split you expect, or ask
+   the draft to say where the new code lands and how big it may get. Do NOT
+   demand a refactor of pre-existing sprawl the goal did not touch — that is
+   scope creep, and the standard is deliberately asymmetric (new code is held
+   to it, existing code is not).
 
 Verify against the repo before asserting: read the files a criterion names.
 "This criterion is impossible" and "this file does not exist" are claims you
@@ -72,10 +93,11 @@ guessing when the draft hinges on a decision only the user can make.
 
 ## Severity
 
-- **P0/P1** — blocking. The draft must be fixed and re-audited. Any of the six
+- **P0/P1** — blocking. The draft must be fixed and re-audited. Any of the seven
   checks above can earn one: an uncheckable criterion, a scope that misses what
   the user asked for, a non-goal that excludes it, a goal aimed at the wrong
-  problem, a draft that is not in Simplified Chinese, or an internal
+  problem, a draft that is not in Simplified Chinese, a plan that would degrade
+  the architecture, or an internal
   contradiction that would make acceptance ambiguous.
 - **P2 / Nit** — advisory polish, and it does NOT belong in `findings`. The
   gate adjudicates mechanically: no open P0/P1 means PASS, so a non-blocking

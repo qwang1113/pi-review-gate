@@ -4,6 +4,8 @@ import {
   buildModeConfirmMessage,
   evaluateModeChange,
   GATE_MODE_DECISION_DIRECTIVE,
+  isEnforcedMode,
+  requestedModeFromEnv,
   MODE_REASON_MAX_CHARS,
   normalizeTaskMode,
   scratchFirstMode,
@@ -30,6 +32,7 @@ test("normalizeTaskMode accepts only the canonical modes", () => {
   assert.equal(normalizeTaskMode("loop"), "loop");
   assert.equal(normalizeTaskMode("explore"), "explore");
   assert.equal(normalizeTaskMode("normal"), "normal");
+  assert.equal(normalizeTaskMode("orchestrator"), "orchestrator");
 });
 
 test("normalizeTaskMode fails closed on unknown or non-string values", () => {
@@ -38,9 +41,61 @@ test("normalizeTaskMode fails closed on unknown or non-string values", () => {
   }
 });
 
-test("rank order is normal < explore < loop", () => {
+test("rank order is normal < explore < loop < orchestrator", () => {
   assert.ok(TASK_MODE_RANK.normal < TASK_MODE_RANK.explore);
   assert.ok(TASK_MODE_RANK.explore < TASK_MODE_RANK.loop);
+  assert.ok(TASK_MODE_RANK.loop < TASK_MODE_RANK.orchestrator,
+    "orchestrator is loop PLUS the orchestration constraints — entering it is always a tightening");
+});
+
+test("isEnforcedMode names the modes that run the full workflow", () => {
+  assert.equal(isEnforcedMode("loop"), true);
+  assert.equal(isEnforcedMode("orchestrator"), true);
+  assert.equal(isEnforcedMode(undefined), true, "undecided behaves as loop — fail-closed");
+  assert.equal(isEnforcedMode("explore"), false);
+  assert.equal(isEnforcedMode("normal"), false);
+});
+
+test("a SPAWNER may hand over a starting mode, but only a tighter one", () => {
+  assert.equal(requestedModeFromEnv({ RG_GATE_MODE: "loop" } as NodeJS.ProcessEnv), "loop");
+  assert.equal(requestedModeFromEnv({ RG_GATE_MODE: "orchestrator" } as NodeJS.ProcessEnv), "orchestrator");
+  for (const forged of ["", "  ", "sudo", "LOOP", "normal-ish"]) {
+    assert.equal(requestedModeFromEnv({ RG_GATE_MODE: forged } as NodeJS.ProcessEnv), undefined,
+      `${JSON.stringify(forged)} must be ignored, not become a mode`);
+  }
+  assert.equal(requestedModeFromEnv({} as NodeJS.ProcessEnv), undefined);
+  // The looser values still PARSE — the caller is what refuses to apply them
+  // (it only honours isEnforcedMode picks), and that split is deliberate:
+  // this function reports what was asked, it does not grant it.
+  assert.equal(requestedModeFromEnv({ RG_GATE_MODE: "normal" } as NodeJS.ProcessEnv), "normal");
+  assert.equal(isEnforcedMode(requestedModeFromEnv({ RG_GATE_MODE: "normal" } as NodeJS.ProcessEnv)), false);
+});
+
+test("orchestrator is reachable as a first classification and as an upgrade, with no dialog", () => {
+  assert.deepEqual(decide({ current: undefined, requested: "orchestrator" }),
+    { action: "apply", source: "auto" }, "it is the strictest mode — tightening never needs consent");
+  assert.deepEqual(decide({ current: "loop", requested: "orchestrator" }),
+    { action: "apply", source: "auto" });
+  assert.deepEqual(decide({ current: "explore", requested: "orchestrator" }),
+    { action: "apply", source: "auto" });
+});
+
+test("SECURITY: leaving orchestrator is a real downgrade and asks the user", () => {
+  for (const requested of ["loop", "explore", "normal"] as const) {
+    assert.deepEqual(decide({ current: "orchestrator", requested }), { action: "confirm" },
+      `orchestrator→${requested} gives up the orchestration constraints`);
+  }
+});
+
+test("USER REQUIREMENT: /tmp never enters orchestrator via the agent either", () => {
+  assert.deepEqual(
+    decide({ current: undefined, requested: "orchestrator", piSelfTask: true }),
+    { action: "apply", source: "auto" },
+    "the first classification is clamped to normal, not left undecided",
+  );
+  const later = decide({ current: "explore", requested: "orchestrator", piSelfTask: true });
+  assert.equal(later.action, "reject");
+  if (later.action === "reject") assert.match(later.reason, /orchestrator/);
 });
 
 // ---------------------------------------------------------------------------
@@ -290,7 +345,12 @@ test("the undecided-session directive instructs an in-session set_gate_mode call
   // It must also spell out the one direction the agent cannot take itself.
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /always asks the USER to confirm/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /\/tmp/);
-  assert.match(GATE_MODE_DECISION_DIRECTIVE, /NEVER enters loop/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /NEVER enters an enforced mode/);
+  // The fourth mode has to be discoverable, and bounded to the one situation
+  // it belongs in — otherwise a session classifies itself into a supervisor
+  // role nobody asked for.
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /"orchestrator" — ONLY when the user asked you/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /requires a tmux window/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /NOT path-exempt/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /except in \/tmp/);
   assert.doesNotMatch(GATE_MODE_DECISION_DIRECTIVE, /always allowed later/);

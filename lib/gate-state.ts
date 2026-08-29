@@ -232,6 +232,16 @@ export interface GateState {
    */
   taskModeSource?: TaskModeSource;
   /**
+   * The orchestration this session runs, when it is an orchestrator
+   * (lib/orchestrator-registry.ts). Holds the child registry, the user's plan
+   * approval and the notification throttle — everything that has to survive a
+   * turn boundary and be readable by a relay successor.
+   *
+   * Optional: an ordinary loop session never writes it, and older sidecars
+   * simply have none.
+   */
+  orchestrator?: import("./orchestrator-registry.ts").OrchestratorRuntime;
+  /**
    * sd0x-dev-flow R10 ("Think Harder") port: whether the one-shot strategic
    * reset checklist has fired for this state lifetime. Optional so schema-1
    * sidecars written by older versions still validate; absent ⇒ not fired.

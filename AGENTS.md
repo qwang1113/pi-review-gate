@@ -275,6 +275,45 @@ registered `baseline..HEAD` target) and the verdict carries the child's `cwd`
 child is open, `declare_done` requires closing it out (its verdict is
 recorded on exit, or `judge_close({role})`).
 
+### 项目经理（orchestrator）模式 —— 编排层，2026-08-29 新增
+
+一轮上下文做不完的大需求，交给一个**只负责统筹**的会话：
+`set_gate_mode("orchestrator")`（需要 tmux；子会话就是用户那个 window 里的
+pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之上：进入不需要确认，
+离开要用户确认。
+
+设计铁律只有一句（用户原话）：**能提供工具的，就不要让会话自己组装。** 项目经理
+只表达意图，门禁负责实现 —— 它不手写 tmux 命令、不写等待脚本、不自己拼通知。
+工具集：`orchestrator_plan` / `_spawn` / `_send` / `_wait` / `_notify` /
+`_relay` / `_close` / `_status`（判定逻辑在 `lib/orchestrator-*.ts`，
+`extensions/review-gate.ts` 只接线）。
+
+对**其他会话**来说，只有三件事需要知道：
+
+1. **plan 是编排层的 loop goal**：`.pi/orchestrator-plan.json` 自己写不算数，
+   批准绑定在内容 hash 上（与 loop goal 同一机制）。
+2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
+   只被多注入一句「有项目经理在管这轮任务」。plan、调度细节一律不注入 —— 知道
+   plan 会让它为 plan 而不是为自己的任务做优化。
+3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
+   换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。
+
+系统通知（OSC 777/9/99）**只有项目经理能发**，且带节流 —— 单一入口 + 只推给
+用户本人，与 `lib/attention.ts` 禁止的「任何会话都能广播」是相反的形态。
+
+### 架构规范：新建文件 600 行硬拦，存量只提醒
+
+`review_checkpoint` / precommit 会拦下**本次新增**且超过 600 行的源文件
+（`lib/file-size-gate.ts`）。存量大文件只输出提醒 —— 8659 行的
+`extensions/review-gate.ts` 不是一次写出来的，是几十次「只加 100 行」累积的；
+收尾时硬逼着拆只会拆得更烂。
+
+配套的两道人审关卡：`goal-auditor` 在**目标阶段**就否掉会造成架构劣化的方案
+（往超大文件里堆新职责、复制门禁已有的规则、把逻辑埋在无法单测的入口里、
+根本没说新代码落在哪），`reviewer` 把架构/抽象/模块化/语义化写进**代码改动
+审查主清单**，可以直接出 P1。写新功能时先想清楚它落在哪个模块，而不是落在
+「我正好打开的那个文件」。
+
 ### Read-only exploration — parallel-safe
 
 Read-only subagents (recon, code reading, analysis) are inherently

@@ -1,5 +1,5 @@
 /**
- * DIRECTED parent attention — a child session wakes the session that STARTED it.
+ * DIRECTED attention — a child session wakes the ONE session responsible for it.
  *
  * WHY NOT A BROADCAST (user requirement, round-18). The previous design signalled
  * one well-known channel (`rg-user-attention`) that EVERY session listened on, so
@@ -9,15 +9,29 @@
  * session that is responsible for the waiting child, so addressing is now
  * explicit:
  *
- *  - the parent stamps its own session id into the child's environment
- *    (`RG_PARENT_SESSION`) when it spawns it;
- *  - the child publishes to `rg-attention-<parentSessionId>` and nowhere else;
- *  - every session listens on ITS OWN channel only;
- *  - a session with no parent publishes NOTHING (status "no-parent") — a
+ *  - the spawner stamps an ADDRESS into the child's environment — the
+ *    orchestration id (`RG_ORCHESTRATION_ID`) when the child belongs to an
+ *    orchestration, otherwise its own session id (`RG_PARENT_SESSION`);
+ *  - the child publishes to `rg-attention-<address>` and nowhere else;
+ *  - every session listens on ITS OWN address only;
+ *  - a session with no address publishes NOTHING (status "no-parent") — a
  *    standalone session can never wake anybody.
  *
- * NO SYSTEM NOTIFICATIONS. macOS `osascript` banners are gone entirely (user
- * requirement): the wake message in the parent's transcript is the whole channel.
+ * WHY TWO ADDRESS KINDS (2026-08-29). A judge child never outlives the round
+ * that dispatched it, so the spawning session id is the right address for it.
+ * An ORCHESTRATOR's child does outlive its spawner: the relay protocol hands
+ * the orchestration to a successor session, and a child stamped with the old
+ * session id would keep ringing a retired bell (measured: zero delivered
+ * events over a full night of orchestration). {@link attentionTargetId} in
+ * lib/orchestration-id.ts is the single resolution rule — orchestration id
+ * first, spawning session id second.
+ *
+ * SYSTEM NOTIFICATIONS ARE NOT THIS CHANNEL. This module never raises a
+ * desktop banner: an attention event addresses ONE pi session, and the wake
+ * message in that session's transcript is the whole delivery. Notifying the
+ * HUMAN is a separate, single-entry channel owned by the orchestrator
+ * (lib/orchestrator-notify.ts) — the user requirement this replaced was the
+ * old BROADCAST banner, which any session could fire at everybody.
  *
  * The payload still rides a side-channel FILE because a tmux signal carries no
  * data. The file is global (`~/.pi/agent/…`) so a parent in another repo can read
@@ -29,6 +43,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { homedir } from "node:os";
+import { ORCHESTRATION_ID_ENV, attentionTargetId } from "./orchestration-id.ts";
 
 /** Environment variable carrying the SPAWNING session's id into a child. */
 export const PARENT_SESSION_ENV = "RG_PARENT_SESSION";
@@ -46,6 +61,20 @@ export function attentionChannelFor(sessionId: string): string {
 export function parentSessionId(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const raw = env[PARENT_SESSION_ENV]?.trim();
   return raw && raw.length > 0 ? raw : undefined;
+}
+
+/**
+ * The ADDRESS this process publishes attention to — the one resolution rule
+ * for both child kinds (see the header). An orchestration id beats a parent
+ * session id, so a child that outlives its spawner keeps reaching whoever
+ * currently holds the orchestration; `undefined` means "standalone, publish
+ * nothing".
+ */
+export function attentionTarget(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return attentionTargetId({
+    orchestrationId: env[ORCHESTRATION_ID_ENV],
+    parentSessionId: parentSessionId(env),
+  });
 }
 
 /**

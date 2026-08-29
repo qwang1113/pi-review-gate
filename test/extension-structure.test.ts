@@ -755,11 +755,13 @@ test("explore workflow: advisory completion, no edit/bash blocking, ship gate in
 
 test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed normal may", () => {
   // Ship commands (git commit/push, gh pr) must stay fully gated in explore:
-  // it only relaxes declare_done and auto-continuation. Two mode branches are
-  // permitted in tool_call, and neither loosens anything for explore:
-  //   normal — the early return (consent-free first classification, /tmp
-  //            clamp, no-UI session_start, or later user consent);
-  //   loop   — the L8 loop-goal ship block, which only ADDS a requirement.
+  // it only relaxes declare_done and auto-continuation. Three mode branches are
+  // permitted in tool_call, and none loosens anything for explore:
+  //   normal       — the early return (consent-free first classification, /tmp
+  //                  clamp, no-UI session_start, or later user consent);
+  //   loop         — the L8 loop-goal ship block, which only ADDS a requirement;
+  //   orchestrator — the write restriction and the tmux backstop tier, both of
+  //                  which only ADD a refusal (pinned individually below).
   const start = SRC.indexOf('pi.on("tool_call"');
   assert.ok(start >= 0, "tool_call handler must exist");
   // Slice the HANDLER only (it closes with `\n  });` at handler indentation),
@@ -772,14 +774,32 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
   assert.doesNotMatch(body, /taskMode\s*!==/,
     "tool_call must not use negated mode branches");
   const modeBranches = [...body.matchAll(/taskMode\s*===\s*"(\w+)"/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(modeBranches)].sort(), ["loop", "normal"],
-    "the only tool_call mode branches are normal (step aside) and loop (goal block)");
+  assert.deepEqual([...new Set(modeBranches)].sort(), ["loop", "normal", "orchestrator"],
+    "the only tool_call mode branches are normal (step aside), loop (goal block) and " +
+    "orchestrator (which only ADDS restrictions)");
   // The loop branch must only PUSH a requirement — its own block body must not
   // return (i.e. it can never wave a ship through, only add to `problems`).
   const loopAt = body.indexOf('taskMode === "loop"');
   const loopBlock = body.slice(loopAt, body.indexOf("\n    }", loopAt));
   assert.match(loopBlock, /problems\.push\(/);
   assert.doesNotMatch(loopBlock, /return|block:\s*false/);
+  // The two ORCHESTRATOR sites, pinned individually. Both can only tighten:
+  // one refuses a write outside the plan/handoff surface (constraint 2), the
+  // other merely tells the tmux backstop which tier to apply. Neither has a
+  // pass-through return, so orchestrator mode can never loosen L1.
+  const orchestratorSites = [...body.matchAll(/state\.taskMode === "orchestrator"/g)];
+  assert.equal(orchestratorSites.length, 2,
+    "exactly two orchestrator sites in tool_call: the write block and the tmux guard tier");
+  const writeSite = body.slice(orchestratorSites[0]!.index!, orchestratorSites[0]!.index! + 700);
+  assert.match(writeSite, /orchestratorWriteBlock\(\{/,
+    "the first orchestrator site is the write restriction (constraint 2)");
+  assert.match(writeSite, /return \{ block: true, reason: orchestratorBlock \}/,
+    "the write restriction can only BLOCK, never wave a write through");
+  const guardSite = body.slice(Math.max(0, orchestratorSites[1]!.index! - 300), orchestratorSites[1]!.index! + 200);
+  assert.match(guardSite, /detectForbiddenTmux\(/,
+    "the second orchestrator site only selects the tmux backstop tier");
+  assert.doesNotMatch(guardSite, /return;/,
+    "the tmux backstop must not contain a pass-through return");
   // The L8 explore short-circuit lives in the helper loopGoalEditBlockFor
   // (kept OUT of the handler body on purpose — see its docblock): it only
   // lets EDITS pass in explore. Pin that it exists and that it can never
@@ -1417,14 +1437,17 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
 });
 
 test("attention stays DIRECTED and file-based — no tmux signal, no global broadcast", () => {
-  // SIGNAL side: the event is published through lib/attention.ts with the
-  // PARENT from the environment (RG_PARENT_SESSION) — never a global bell.
+  // SIGNAL side: the event is published through lib/attention.ts, addressed by
+  // attentionTarget() — the ORCHESTRATION this session belongs to
+  // (RG_ORCHESTRATION_ID) if there is one, otherwise the spawning session
+  // (RG_PARENT_SESSION). Never a global bell.
   const fnAt = SRC.indexOf("function notifyUserAttention(");
   assert.ok(fnAt > 0, "notifyUserAttention must exist");
   const fn = SRC.slice(fnAt, fnAt + 450);
   assert.match(fn, /publishAttention\(\{/, "the event goes through the payload publisher");
   assert.match(fn, /fromSessionId: attentionIdentity\(\)/, "the payload identifies the sender (self-wake filter)");
-  assert.match(fn, /toSessionId: parentSessionId\(\)/, "the payload is addressed to the PARENT from the environment");
+  assert.match(fn, /toSessionId: attentionTarget\(\)/,
+    "the payload is addressed by attentionTarget(): the ORCHESTRATION it belongs to, else the spawning session");
   assert.match(fn, /reason,/, "the payload carries the reason");
   assert.doesNotMatch(fn, /osascript/, "no macOS notification is fired from the extension");
   assert.doesNotMatch(fn, /waitForSignalAsync|wait-for/, "no tmux signal is fired from the extension");
@@ -1818,7 +1841,15 @@ test("every lib export referenced by the extension is imported (no runtime Refer
       if (imported.has(name)) continue;
       // Referenced as a bare identifier (not a property access, not a substring
       // of a longer name) and not declared locally in the extension itself?
-      const used = new RegExp(`(?<![A-Za-z0-9_$.])${name}(?![A-Za-z0-9_$])`);
+      //
+      // An object-literal KEY (`parentSessionId: state.sessionId`) is not a
+      // reference to anything and must not count — the extension passes such
+      // keys to other libs' option objects all the time. Excluding a name
+      // followed by `:` also excludes the rare `cond ? someExport : x`
+      // ternary; that direction is safe (it can only HIDE a usage, never
+      // invent one), and `npm run typecheck` catches the real thing as
+      // TS2304, which is the guarantee this heuristic is only backing up.
+      const used = new RegExp(`(?<![A-Za-z0-9_$.])${name}(?![A-Za-z0-9_$])(?!\\s*:)`);
       const declared = new RegExp(`(?:const|let|var|function|class|interface|type|enum)\\s+${name}\\b`);
       if (used.test(code) && !declared.test(code)) missing.push(`${file} → ${name}`);
     }
@@ -2706,3 +2737,95 @@ test("every advanced entry says it is one, and none teaches the retired manual f
   }
 });
 
+// ---------------------------------------------------------------------------
+// The orchestration layer's WIRING.
+//
+// Everything it decides is unit-tested in lib/orchestrator-*.ts; what cannot
+// be unit-tested is that the extension actually CALLS those decisions, and in
+// the right place. These tests cover exactly that seam.
+// ---------------------------------------------------------------------------
+
+test("the orchestration layer is wired in, and its logic did NOT land in this file", () => {
+  // The point of the split: this file is the repository's own worst example of
+  // the architecture rule this round introduces, so the orchestration layer
+  // must not grow it.
+  assert.match(SRC, /registerOrchestratorStateTools\(pi, orchestratorDeps\)/);
+  assert.match(SRC, /registerOrchestratorSessionTools\(pi, orchestratorDeps\)/);
+  for (const banned of ["buildSpawnPaneArgv", "buildSendMessageArgv", "scheduleNextTasks", "parsePlan("]) {
+    assert.ok(!SRC.includes(banned),
+      `${banned} belongs in lib/orchestrator-*.ts — the extension only wires the layer up`);
+  }
+});
+
+test("the orchestration deps hand over only what the EXTENSION owns", () => {
+  const deps = windowOf("createOrchestratorDeps({", "});", "orchestrator deps");
+  assert.match(deps, /taskMode: \(\) => state\.taskMode/);
+  assert.match(deps, /loadRuntime: \(\) => state\.orchestrator/);
+  assert.match(deps, /orchestrationId: currentOrchestrationId/);
+  // Constraint 10's fact is "settled", never "already merged": declare_done
+  // merges AFTER the checks, so demanding a completed merge would deadlock.
+  assert.match(deps, /mergeSettled: Boolean\(state\.baseBranch\) && !state\.mergeConflict/);
+});
+
+test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets one line", () => {
+  const block = windowOf('if (state.taskMode === "orchestrator") {', "\n    }\n", "orchestration prompt");
+  assert.match(block, /ORCHESTRATOR_DIRECTIVE/);
+  assert.match(block, /formatInheritanceBrief/, "a relay successor is told what it inherited");
+  assert.match(block, /isOrchestrationChild\(\)/);
+  assert.match(block, /CHILD_OF_ORCHESTRATOR_DIRECTIVE/);
+  // A child must NOT be handed the plan: knowing it makes it optimize for the
+  // plan instead of for its own task (task book §5, a user requirement).
+  const childBranch = block.slice(block.indexOf("isOrchestrationChild()"));
+  // (`(?<!CHILD_OF_)` so the child's OWN one-liner does not match the
+  // orchestrator's directive by being a suffix of it.)
+  assert.doesNotMatch(childBranch, /(?<!CHILD_OF_)ORCHESTRATOR_DIRECTIVE|formatPlanSummary|orchestrationDoneProblems/);
+});
+
+test("declare_done consults the ORCHESTRATION's exit contract, not just this session's gates", () => {
+  const body = toolBodyOf("declare_done");
+  assert.match(body, /completionProblems\.push\(\.\.\.orchestrationDoneProblems\(\)\)/,
+    "an orchestrator writes no code, so every ordinary gate would pass with its plan half-run");
+  const helper = windowOf("function orchestrationDoneProblems()", "\n  }", "orchestrationDoneProblems");
+  assert.match(helper, /if \(state\.taskMode !== "orchestrator"\) return \[\]/,
+    "it must be inert for every other mode");
+});
+
+test("set_gate_mode refuses orchestrator where the role is impossible or unsafe", () => {
+  const body = toolBodyOf("set_gate_mode");
+  const guard = body.slice(body.indexOf('if (requested === "orchestrator")'));
+  assert.ok(guard.length > 0, "the orchestrator preconditions must exist");
+  assert.match(guard, /!process\.env\.TMUX/, "its children ARE panes — no tmux, no role");
+  assert.match(guard, /ORCHESTRATOR_NEEDS_TMUX/);
+  assert.match(guard, /isOrchestrationChild\(\)/,
+    "a child must never take over the orchestration that supervises it");
+});
+
+test("a spawner's requested mode applies only to a clean, undecided, interactive session", () => {
+  const block = windowOf("const requestedBySpawner = requestedModeFromEnv()", "\n    }\n", "spawner mode");
+  assert.match(SRC, /if \(ctx\.hasUI && state\.taskMode === undefined\) \{\n\s*const requestedBySpawner/,
+    "it is a FIRST classification only — never a way to re-decide a session");
+  assert.match(block, /isEnforcedMode\(requestedBySpawner\)/,
+    "a spawner may hand over a tighter starting point, never a looser one");
+  assert.match(block, /!== "orchestrator" \|\| process\.env\.TMUX/);
+});
+
+test("the file-size gate runs at the CHECKPOINT, and only new files can block it", () => {
+  const body = toolBodyOf("review_checkpoint");
+  assert.match(body, /fileSizeVerdict\(sizeFacts\)/);
+  assert.match(body, /isNew = true/, "membership in HEAD is what makes a file new");
+  const blockAt = body.indexOf("sizeCheck.blocking.length > 0");
+  assert.ok(blockAt > 0, "an oversized NEW file must refuse the checkpoint");
+  assert.ok(body.indexOf("git\", [\"add\", \"-A\"") > blockAt,
+    "the refusal has to happen BEFORE anything is staged");
+  assert.match(body, /sizeCheck\.advisory\.length \? "\\n\\n" \+ formatFileSizeVerdict/,
+    "an existing oversized file is a reminder carried on the SUCCESS reply, never a block");
+});
+
+test("the tmux backstop sits above /gate-bypass", () => {
+  const handler = SRC.slice(SRC.indexOf('pi.on("tool_call"'));
+  const guardAt = handler.indexOf("detectForbiddenTmux(");
+  const bypassAt = handler.indexOf("if (state.bypass.active) return;");
+  assert.ok(guardAt > 0 && bypassAt > 0);
+  assert.ok(guardAt < bypassAt,
+    "a bypass is the user's escape from the SHIP gate — it was never a licence to destroy their tmux session");
+});
