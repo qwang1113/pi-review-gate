@@ -14,8 +14,8 @@
 等待循环本身不在这里：`lib/poll-wait.ts` 的 `pollUntil` 是通用骨架（探测 → 发布 → 命中判据或预算到点），
 judge 等待与子会话等待共用它，只是判据不同。
 
-> 历史溯源：本文出现的 R-xx / F-xx 编号沿用上面这几个模块**头注释里**的编号（端到端复盘的内部编号，
-> 复盘文本本身见 `docs/e2e-findings-2026-08-29.md`，该文件按现象叙述、不带这些编号）。
+> 历史溯源：本文出现的 R-xx / F-xx 编号沿用上面这几个模块**头注释里**的编号（编排能力两轮端到端复盘的内部编号，
+> 逐条现象与证据就写在那些头注释里，本仓库没有一份收录这套编号的独立复盘文档）。
 > 每一条保守规则都对应一次实测死锁，去掉它们不是"简化"，是把死锁装回去。
 
 ---
@@ -271,7 +271,9 @@ attention 事件存在一个**全局**文件里（`lib/attention.ts`，`~/.pi/ag
    文案明确要求：有确定性的活先做掉，没有就再调一次 `orchestrator_wait`，**别结束 turn 把盯梢丢回给用户**。
 3. **命中判据**（`done: true`）：说明是**哪个**子会话、判据是什么；是 attention 时附事件 id 与销账时间；
    `attention` / `probe` 两种判据还会追加下一步 —— 事件里没有问题正文，去 `orchestrator_read({ childId })` 读屏，
-   再用 `orchestrator_key` 答。
+   再用 `orchestrator_key` 答。**注意这两种判据给的 `childId` 不是同一种标识**：`probe` 给的是登记句柄
+   （`ChildSession.id`，可以直接传给 `orchestrator_read`），而 `attention` 给的是事件的来源 **pane id**
+   （`fromPane`）—— 先在同一条回执的健康快照里按 `paneId` 找到对应的 `childId`，再去读它。
 
 `details` 里稳定返回：`reason`、`waitedMs`、`ignored`（丢弃条数）、`settled`（判为已办成的条数）、
 `health`、`done`，以及命中时的 `childId`。
