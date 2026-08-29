@@ -41,19 +41,21 @@
 
 ### 1.2 工具注册分两处（重要）
 
-- **扩展直接注册 21 个** gate 工具：
+- **扩展直接注册 18 个** gate 工具：
   按族看（快照，权威判据是下面的命令）：审查链（`judge_submit`、
-  `review_checkpoint`、`review_spawn`、`review_watch`、`review_send`、
+  `review_checkpoint`、
   `prepare_review`、`record_review`、`run_precommit`）、目标链
   （`propose_loop_goal`、`prepare_goal_audit`、`record_goal_prereview`）、
   adviser（`prepare_adviser`）、Copilot（`request_copilot_review`、
   `check_copilot_review`）、会话与用户（`setup_workspace`、`declare_done`、
   `ask_user`、`set_gate_mode`、`request_scope_limit`、
   `request_sensitive_edit`、`request_arbitration`）。
-  核对：`grep -c 'name: "' extensions/review-gate.ts` → 当前 21；
+  核对：`grep -c 'name: "' extensions/review-gate.ts` → 当前 18；
   逐个看用 `grep -n 'name: "' extensions/review-gate.ts`。
 
-- **13 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+- **16 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+  - `lib/judge-relay-tools.ts`：`review_spawn`、`review_watch`、`review_send`
+    （把一件事**转交**给 judge 进程的三个工具）。
   - `lib/judge-session-tools.ts`：`judge_read` / `judge_close` / `judge_wait`
     （作用于一个**已存在**的 judge 会话的三个工具）。
   - `lib/orchestrator-tools.ts`：`orchestrator_plan`、`orchestrator_status`、
@@ -62,8 +64,8 @@
   - `lib/orchestrator-session-tools.ts`：`orchestrator_spawn`、
     `orchestrator_send`、`orchestrator_wait`、`orchestrator_close`、
     `orchestrator_relay`。
-  核对：`grep -rln 'name: "[a-z_]*"' lib/*.ts` → 上面四个文件；
-  `grep -rhn 'name: "' lib/*.ts | wc -l` → 13。
+  核对：`grep -rln 'name: "[a-z_]*"' lib/*.ts` → 上面五个文件；
+  `grep -rh 'name: "' lib/*.ts | wc -l` → 16。
 
 这些模块都经同一道 **seam** 接进扩展：`lib/tool-host.ts` 定义那个 host 类型
 （`lib/orchestrator-deps.ts` 只是把它 re-export，因为编排工具是第一批搬出去
@@ -162,8 +164,10 @@ judge（reviewer / adviser / goal-auditor）是**自己的 pi 进程**：
 何时算完成、审计裁决是否阻塞），`judge-prompt.ts` 装配系统提示（角色定义 +
 共同协议），`judge-watch.ts` / `child-watch.ts` 负责「它退出了就唤醒主会话」
 且不依赖子进程守规矩；`judge-session-tools.ts` 是作用于**已存在**会话的那三个
-工具（`judge_read` / `judge_close` / `judge_wait`）的实现与注册——注意它们不
-在扩展里，见 §1.2。
+工具（`judge_read` / `judge_close` / `judge_wait`）的实现与注册，
+`judge-relay-tools.ts` 则是把一件事**转交**给 judge 进程的那三个
+（`review_spawn` / `review_watch` / `review_send`）——注意这六个工具都不在扩展
+里，见 §1.2。
 
 审查内容侧：`parallel-review.ts` 持有审查契约（一轮一个 reviewer，判不可变的
 `baseline..HEAD`），`review-baseline.ts` 在链被 squash/rebase 后按内容找回基
@@ -252,8 +256,10 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 `agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
 `dialog-budget.ts` 管确认对话框的渲染行数预算（宿主不截断，长度得自己管），
 `attention.ts` 是定向唤醒：子会话只唤醒对它负责的那**一个**会话，禁止广播；
-`edit-discipline.ts` 识别「edit/write 失败后改用 bash 写文件」这个习惯，只在
-工具结果里追加一句 nudge——**它不拦任何东西**，是这一域里最典型的提示级手段。
+`edit-discipline.ts` 管「edit/write 失败后改用 bash 写文件」这个习惯，两条通道
+都用：`tool_result` 里追加 `EDIT_FAILURE_NUDGE` / `BASH_WRITE_NUDGE`，以及每轮
+随系统提示注入的 `EDIT_DISCIPLINE_DIRECTIVE`（与 `agent-directives.ts` 同一条
+通道）——**两者都不拦任何东西**，是这一域里最典型的提示级手段。
 
 > **落点**：想让 agent 改掉某个行为习惯，先问这是不是**提示**能解决的——
 > 是就改 `agent-directives.ts`，不是就写成域 1 的机械规则。系统级通知只有
@@ -286,11 +292,11 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 
 ---
 
-## 五、`lib/` 全量速查表（77 个模块）
+## 五、`lib/` 全量速查表（78 个模块）
 
 **维护指令（这张表没有机械约束，只有这一条）**：在 `lib/` 下**新增或删除**一个
 模块时，**同一轮改动里**顺手加/删这里的一行——否则这张表会静静地过时。
-随时可核对条目数：`ls lib/*.ts | wc -l`（当前 77，与本表条目一一对应）。
+随时可核对条目数：`ls lib/*.ts | wc -l`（当前 78，与本表条目一一对应）。
 
 | 模块 | 一句话职责 |
 | --- | --- |
@@ -317,6 +323,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：会话文件放哪、何时算完成、审计裁决是否阻塞 |
 | `judge-process.ts` | judge 子进程基座：`pi -p --session-id` 的确定性会话 id 与进程管理 |
 | `judge-prompt.ts` | judge 子会话的系统提示装配：角色定义 + 共同协议 |
+| `judge-relay-tools.ts` | 把一件事**转交**给 judge 进程的三个工具（`review_spawn` / `review_watch` / `review_send`）及其注册 |
 | `judge-session.ts` | 把 judge「会话」当作被管理实体：transcript、run 目录、自述状态文件 |
 | `judge-session-tools.ts` | 作用于**已存在**的 judge 会话的三个工具（`judge_read` / `judge_close` / `judge_wait`）及其注册 |
 | `judge-watch.ts` | judge 完成的唤醒登记，键在进程退出事件上 |
@@ -383,7 +390,10 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 3. **它是新工具族吗？** 是 → 照 `lib/judge-session-tools.ts` 与
    `lib/orchestrator-*-tools.ts` 的形状：判定与工具注册都在 `lib/`，经
    `lib/tool-host.ts` 那道 seam 拿依赖，别再往那个近 9000 行的文件里加。
-4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态（77 个模块里 63 个有），
-   其余 14 个（多是编排层的执行/接线模块）并进相邻的分组测试。真正的判据不是
+4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态（78 个模块里 64 个有）；
+   其余 14 个里多数并进相邻的分组测试（`test/orchestrator-atoms.test.ts`、
+   `test/orchestrator-tools.test.ts`、`test/extension-structure.test.ts`），
+   但个别模块——`agent-directives.ts`、`orchestrator-dispatch.ts`——在 `test/`
+   下**零引用**，正是本问说的那种情形。真正的判据不是
    文件名对不对，而是**这条规则能不能被一个测试单独点名**——做不到，就说明它
    被埋在了工具体或接线里，`reviewer` 可以直接开 P1。

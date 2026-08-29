@@ -14,10 +14,18 @@ const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
  */
 const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
 const JUDGE_SESSION_TOOLS = new Set(["judge_read", "judge_close", "judge_wait"]);
+/**
+ * The other half of the same family: the tools that RELAY to a judge session
+ * (a round, a follow-up, a completion watcher) moved to lib/ the same way.
+ */
+const RELAY_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-relay-tools.ts"), "utf8");
+const JUDGE_RELAY_TOOLS = new Set(["review_spawn", "review_watch", "review_send"]);
 
 /** Which source owns a given tool's body. */
 function sourceOf(tool: string): string {
-  return JUDGE_SESSION_TOOLS.has(tool) ? JUDGE_TOOLS_SRC : SRC;
+  if (JUDGE_SESSION_TOOLS.has(tool)) return JUDGE_TOOLS_SRC;
+  if (JUDGE_RELAY_TOOLS.has(tool)) return RELAY_TOOLS_SRC;
+  return SRC;
 }
 
 /**
@@ -51,6 +59,9 @@ const JUDGE_TOOL_HANDLERS: Record<string, string> = {
   judge_read: "async function doRead(",
   judge_close: "async function doClose(",
   judge_wait: "async function doWait(",
+  review_spawn: "async function doSpawn(",
+  review_watch: "async function doWatch(",
+  review_send: "async function doSend(",
 };
 
 /**
@@ -59,23 +70,31 @@ const JUDGE_TOOL_HANDLERS: Record<string, string> = {
  *
  * Registration reads `pi.registerTool` in the extension and `host.registerTool`
  * in a lib/ tool module; the last tool of a module is closed by the end of
- * its registration function (`\n}`).
+ * its registration function (`\n}`). The handler is read from the SAME source
+ * as the registration, so a tool cannot be matched against another module's
+ * handler of the same name.
  */
 function toolBodyOf(tool: string): string {
+  const src = sourceOf(tool);
   const registration = windowIn(
-    sourceOf(tool),
+    src,
     `name: "${tool}"`,
     /\n  pi\.registerTool\(\{|\n  host\.registerTool\(\{|\n  \/\/ -{4,}|\n\}/,
     `tool ${tool}`,
   );
   const handler = JUDGE_TOOL_HANDLERS[tool];
   if (!handler) return registration;
-  return `${registration}\n${windowIn(JUDGE_TOOLS_SRC, handler, "\n}", `handler of ${tool}`)}`;
+  return `${registration}\n${windowIn(src, handler, "\n}", `handler of ${tool}`)}`;
 }
 
 /** The extension's wiring of the judge session tools — deps, nothing else. */
 function judgeToolsWiring(): string {
   return windowOf("registerJudgeSessionTools(pi, {", "\n  });", "judge tools wiring");
+}
+
+/** The extension's wiring of the judge RELAY tools — deps, nothing else. */
+function relayToolsWiring(): string {
+  return windowOf("registerJudgeRelayTools(pi, {", "\n  });", "judge relay tools wiring");
 }
 
 test("loop goal: injected ONLY in loop mode, before the unarmed early-return", () => {
@@ -1602,9 +1621,13 @@ test("round-18: agent_settled HOSTS the judge-child wait — never returns to id
 });
 
 test("judge_submit is the agent's single judge entry and hides every process detail", () => {
-  const at = SRC.indexOf('name: "judge_submit"');
-  assert.ok(at > 0, "judge_submit must be registered");
-  const body = SRC.slice(at, SRC.indexOf('name: "review_spawn"', at));
+  assert.ok(SRC.includes('name: "judge_submit"'), "judge_submit must be registered");
+  // The window ends where the relay tools' WIRING begins. The old end anchor
+  // was `name: "review_spawn"` — it left this file with the tools it named,
+  // and a bare indexOf of a vanished anchor returns -1, which silently widens
+  // the slice to the rest of the file instead of failing. windowOf asserts
+  // both ends.
+  const body = windowOf('name: "judge_submit"', "\n  registerJudgeRelayTools(pi, {", "judge_submit body");
   // The agent says WHO and WHAT. Anything procedural is the gate's business.
   assert.match(body, /role: Type\.Enum\(\{ reviewer/, "the role is the addressing key");
   assert.match(body, /task: Type\.String\(/, "the task text is the other input");
@@ -1681,6 +1704,49 @@ test("judge_read / judge_close / judge_wait address a judge by ROLE", () => {
     assert.ok(!JUDGE_TOOLS_SRC.includes(`name: "${gone}"`), `${gone} must no longer be registered in lib/`);
   }
 });
+
+test("review_spawn / review_watch / review_send are lib/ tools the extension only WIRES", () => {
+  // The move is only real if the extension stopped owning these bodies: a
+  // second registration left behind would shadow the module's, and the unit
+  // tests would then pin code nobody runs.
+  for (const tool of ["review_spawn", "review_watch", "review_send"]) {
+    assert.ok(RELAY_TOOLS_SRC.includes(`name: "${tool}"`), `${tool} must be registered in lib/judge-relay-tools.ts`);
+    assert.ok(!SRC.includes(`name: "${tool}"`), `${tool} must no longer be registered in the extension`);
+  }
+  // One role enum, shared by the two tools that take it (a second spelling is
+  // how they would silently start accepting different roles).
+  assert.match(
+    RELAY_TOOLS_SRC,
+    /const JUDGE_ROLE_ENUM = Type\.Enum\(\{ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" \}\)/,
+    "the shared role parameter is the three judge roles",
+  );
+  assert.match(toolBodyOf("review_spawn"), /role: JUDGE_ROLE_ENUM/, "review_spawn takes the shared role");
+  assert.match(toolBodyOf("review_send"), /role: Type\.Optional\(JUDGE_ROLE_ENUM\)/,
+    "review_send takes the same role, optionally");
+  // The refusals stay the module's, and the role list stays the ONE list.
+  assert.match(RELAY_TOOLS_SRC, /import \{ JUDGE_ROLES \} from "\.\/judge-prompt\.ts"/,
+    "the accepted roles are the shared constant, never a copy");
+  // Everything the tools cannot own arrives through deps — and every dep is
+  // bound to the extension's own owner, so none of them can drift into a
+  // second implementation.
+  const wiring = relayToolsWiring();
+  assert.match(wiring, /resolveRepo: \(requested\) => resolveToolRepo\(requested\)/, "the repo resolution stays the gate's");
+  assert.match(wiring, /dispatchRound: \(request\) => dispatchJudgeRound\(request\)/,
+    "a round is dispatched by the ONE spawn owner (identity, reuse, fresh-kill)");
+  assert.match(wiring, /childByRole: \(root, role\) => judgeChildByRole\(root, role\)/, "the registry answers by role");
+  assert.match(wiring, /findChild: \(root, role, sessionId\) => findJudgeChild\(root, role, sessionId\)/,
+    "…and by role-or-id, with the role winning");
+  assert.match(wiring, /childBySessionId: \(sessionId\) => \[\.\.\.childSessions\.values\(\)\]\.flat\(\)/,
+    "review_watch is addressed by the internal key alone, so its lookup spans every repo");
+  assert.match(wiring, /registerWatch: \(sessionId, label\) => registerWatch\(sessionId, label\)/,
+    "the completion watcher is registered by the extension's own helper");
+  // A resume is a DISPATCH under the same session id (a fresh run dir), not a
+  // write into the previous round's files — round-9's "instantly done" bug.
+  assert.match(toolBodyOf("review_send"),
+    /deps\.dispatchRound\(\{ root, role: child\.role, title: child\.title, task: text, streamPath: child\.streamPath \}\)/,
+    "review_send resumes through the same dispatch owner, keeping the round's stream");
+});
+
 
 test("judge_wait applies the three end-of-round criteria and returns conclusion + progress", () => {
   const body = toolBodyOf("judge_wait");
@@ -1982,8 +2048,15 @@ test("review_checkpoint: the pre-review commit channel is registered with its co
 });
 
 test("review_watch: the wake-up watcher is registered with triggerTurn semantics", () => {
-  const at = SRC.indexOf('name: "review_watch"');
-  assert.ok(at >= 0, "review_watch must be registered");
+  // The tool itself moved to lib/judge-relay-tools.ts; the WAKE-UP mechanism
+  // it re-registers did not — so the registration is asserted against the
+  // module that owns it, and the helper + registry against the extension.
+  assert.ok(RELAY_TOOLS_SRC.includes('name: "review_watch"'), "review_watch must be registered");
+  const watchBody = toolBodyOf("review_watch");
+  assert.match(watchBody, /deps\.registerWatch\(sessionId, label\)/,
+    "the tool reaches the helper through its dep, and nothing else");
+  assert.match(relayToolsWiring(), /registerWatch: \(sessionId, label\) => registerWatch\(sessionId, label\)/,
+    "…and the wiring binds that dep to the extension's own helper");
   // Round-14 (user ask): the registration logic lives in the shared
   // registerWatch helper; review_spawn calls it AUTOMATICALLY, review_watch
   // only re-registers with a custom label. The wake must be a new turn —
@@ -2743,8 +2816,8 @@ test("review_checkpoint is fail-closed about the branch it commits on", () => {
 
 
 test("judge_submit builds the task for EVERY role, and a goal audit streams its findings", () => {
-  const at = SRC.indexOf('name: "judge_submit"');
-  const body = SRC.slice(at, SRC.indexOf('name: "review_spawn"', at));
+  // Same asserted window as the entry test above: the relay wiring closes it.
+  const body = windowOf('name: "judge_submit"', "\n  registerJudgeRelayTools(pi, {", "judge_submit body");
   // The agent hands over a draft or a question; the gate builds what the
   // judge actually receives.
   assert.match(body, /callTool\("prepare_goal_audit", \{ goal: task, repo: root \}/);
