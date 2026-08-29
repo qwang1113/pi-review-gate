@@ -1036,9 +1036,11 @@ test("checkpointMessage cannot build a subject its own L5 check would refuse", (
   // language), so deriving the subject from its first line made the
   // omit-`message` default path of judge_submit fail the gate's OWN L5 rule —
   // a default that can never succeed. The note must fall back to the body.
-  const at = SRC.indexOf("function checkpointMessage(");
+  // Anchor at the JSDoc, not the `function` line: the contract this test pins
+  // is stated in the doc comment ABOVE the implementation.
+  const at = SRC.indexOf("The checkpoint's commit message.");
   assert.ok(at > 0, "checkpointMessage must exist");
-  const body = SRC.slice(at, at + 1200);
+  const body = SRC.slice(at, SRC.indexOf("interface JudgeDispatch", at));
   assert.match(body, /containsNonLatinLetter\(firstLine\)/,
     "the derived subject is checked against the same strict rule L5 applies");
   assert.match(body, /record this round for review/,
@@ -1046,6 +1048,13 @@ test("checkpointMessage cannot build a subject its own L5 check would refuse", (
   // The note is not thrown away — it must survive in the body.
   assert.match(body, /usable \? lines\.slice\(1\)\.join\("\\n"\) : raw/,
     "the whole note becomes the body when it cannot be a subject");
+  // Round-3 P2: the fallback is a HALF fix and the comment must say so — the
+  // body rule still refuses a mostly-Chinese note, so `message` stays required
+  // in practice. A comment claiming the body "passes" was measurably false.
+  assert.match(body, /HALF fix/,
+    "the comment must not overstate what the fallback buys");
+  assert.doesNotMatch(body, /where the majority policy allows it/,
+    "the retired false claim must not come back");
 });
 
 

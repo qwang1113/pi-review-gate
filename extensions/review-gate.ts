@@ -3275,11 +3275,18 @@ export default function reviewGate(pi: ExtensionAPI) {
    * remember. An agent-written subject keeps its own wording behind it.
    *
    * The agent's round note is usually CHINESE (this project's output language),
-   * while L5 requires an English subject — so a non-Latin subject falls back to
-   * the English default instead of dead-ending the round. Without this, omitting
-   * `message` on judge_submit would build a Chinese subject that the gate's own
-   * L5 check then refuses: a default path that can never succeed. The note is
-   * not lost — it stays in the body, where the majority policy allows it.
+   * while L5 requires an English subject — so a non-Latin first line falls back
+   * to the English default subject instead of building one the gate's own L5
+   * check would then refuse. The note itself is kept, as the body.
+   *
+   * This is a HALF fix, deliberately documented as such: it removes the subject
+   * failure, NOT the body one. A note that is mostly Chinese still trips L5's
+   * majority-body rule (measured: a normal round note lands at ~2:1 non-Latin
+   * and is refused as `part: "body"`), so with a Chinese note `message` is in
+   * practice REQUIRED on judge_submit — the fallback buys a usable subject, not
+   * a usable message. Making the body pass would mean either translating the
+   * note (not this function's job) or exempting checkpoint bodies from L5,
+   * which is a policy change the user has not asked for.
    */
   function checkpointMessage(raw: string): string {
     const lines = raw.trim().split("\n");

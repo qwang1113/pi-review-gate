@@ -15,6 +15,12 @@
  * the rough script check is wrong at the margin, the agent may escalate to the
  * arbiter (lib/arbitration.ts) rather than being hard-stuck.
  *
+ * ONE EXCEPTION, and it is deliberate: a commit SUBJECT line is judged
+ * STRICTLY — any non-Latin letter rejects, no majority involved. See
+ * `nonEnglishCommitMessage` below for why (a long English body diluted a fully
+ * Chinese subject and it shipped). The relaxation above still governs bodies,
+ * PR title/description and test labels.
+ *
  * This deliberately ALLOWS: ASCII, code identifiers, numbers, punctuation,
  * URLs, emoji, and Latin text with diacritics (café, naïve). Pure, no I/O,
  * unit-tested.

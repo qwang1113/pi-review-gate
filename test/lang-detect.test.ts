@@ -217,9 +217,12 @@ test("nonEnglishCommitMessage handles empty and subject-only messages", () => {
 
 // --- the two bypasses found in review (2026-08-29, round 2) ------------------
 
-test("commitSubjectLine skips leading blank lines, exactly as git stripspace does", () => {
+test("commitSubjectLine skips leading blank lines, as git stripspace does", () => {
   // A single leading newline used to make the subject look empty, so a Chinese
   // subject sailed through while git still recorded it AS the subject.
+  // (Known, harmless divergence: stripspace preserves a line's leading indent
+  // and this trims it. Indentation carries no letters, so L5 is unaffected —
+  // only the echoed text in a refusal differs.)
   assert.equal(commitSubjectLine("\n\n修复问题\n\nEnglish body here."), "修复问题");
   assert.equal(commitSubjectLine("fix: thing\n\nbody"), "fix: thing");
   assert.equal(commitSubjectLine("   \n  fix: padded  \n"), "fix: padded");
