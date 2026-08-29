@@ -21,6 +21,7 @@ import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
+import { normalizeRuntime } from "./orchestrator-registry.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
@@ -439,6 +440,19 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
       if (!b || typeof b !== "object" || Array.isArray(b) || !validOid || !validFiles || typeof b.at !== "string") {
         delete parsed.lastReadyReview;
       }
+    }
+    // Orchestration runtime. Same threat model as `lastReadyReview` above:
+    // this blob carries the USER'S plan approval (which authorizes spawning
+    // child sessions) and tmux pane ids (which become command targets), and
+    // it lives in an ordinary repo-local file. `normalizeRuntime` validates
+    // it and drops the approval on any doubt — the session then simply has to
+    // ask the user again. The orchestration ID is deliberately NOT taken from
+    // the file: the session re-derives it from its own environment, so a
+    // forged one can never become an attention channel key.
+    if (parsed.orchestrator !== undefined) {
+      const cleaned = normalizeRuntime(parsed.orchestrator, parsed.orchestrator?.orchestrationId ?? "");
+      if (cleaned) parsed.orchestrator = cleaned;
+      else delete parsed.orchestrator;
     }
     // Round-18 polish gate: malformed per-round file lists and the last
     // reason are DROPPED (absent means 'no trigger / nothing to carry',

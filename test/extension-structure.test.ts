@@ -2821,6 +2821,30 @@ test("the file-size gate runs at the CHECKPOINT, and only new files can block it
     "an existing oversized file is a reminder carried on the SUCCESS reply, never a block");
 });
 
+test("SURVIVAL INVARIANT: every ENFORCED mode arms the loop, orchestrator included", () => {
+  // Round-1 P1: `loopArmed = mode === "loop"` disarmed L2 auto-continuation
+  // the moment a session entered orchestrator mode — and that session is the
+  // one that needs the invariant most (it supervises children overnight) and
+  // the one that can never re-arm the old way, because constraint 2 forbids
+  // it from editing code and its plan writes go through a tool, not the edit
+  // path. It could end its turn with children running and gates unmet.
+  const setMode = windowOf("function setTaskMode(", "\n  }", "setTaskMode");
+  assert.match(setMode, /loopArmed = isEnforcedMode\(mode\)/,
+    "arming must ask the helper, not compare to one mode name");
+  assert.doesNotMatch(setMode, /loopArmed = mode === "loop"/);
+  // The two early-return sites must exclude only the ADVISORY modes, so
+  // orchestrator keeps both the watchdog and auto-continuation.
+  for (const anchor of ['pi.on("agent_settled"', "childWaitTimer"]) {
+    const at = SRC.indexOf(anchor);
+    assert.ok(at > 0, `${anchor} must exist`);
+  }
+  const advisoryReturns = [...SRC.matchAll(
+    /state\.taskMode === "explore" \|\| state\.taskMode === "normal"/g,
+  )];
+  assert.ok(advisoryReturns.length >= 2,
+    "the advisory-mode early returns name explore and normal explicitly — orchestrator is never in that set");
+});
+
 test("the tmux backstop sits above /gate-bypass", () => {
   const handler = SRC.slice(SRC.indexOf('pi.on("tool_call"'));
   const guardAt = handler.indexOf("detectForbiddenTmux(");

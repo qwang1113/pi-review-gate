@@ -312,11 +312,25 @@ test("CONSTRAINT 8: a proxied goal outside the task boundary is refused", async 
   assert.deepEqual(outside.details?.outside, ["extensions/review-gate.ts"]);
 });
 
-test("messages only reach REGISTERED children", async () => {
+test("CONSTRAINT 13: only a child the GATE spawned is addressable at all", async () => {
+  // The bash guard stops the agent typing `split-window`; the registry is the
+  // other half. A pane nobody registered — the user's own, another
+  // orchestration's, or one improvised around the tools — cannot be messaged,
+  // waited on or closed, so a hand-made child is not merely discouraged: it
+  // is unusable.
   const h = harness({ plan: planFrom(), approved: true });
-  const reply = await h.call("orchestrator_send", { childId: "ghost", message: "hi" });
-  assert.equal(reply.isError, true);
-  assert.match(text(reply), /没有登记过子会话/);
+  for (const [tool, params] of [
+    ["orchestrator_send", { childId: "ghost", message: "hi" }],
+    ["orchestrator_close", { childId: "%99" }],
+  ] as const) {
+    const reply = await h.call(tool, params);
+    assert.equal(reply.isError, true, `${tool} must refuse an unregistered child`);
+    assert.match(text(reply), /没有登记过子会话/);
+  }
+  // And once the gate DID spawn it, the same calls address it fine.
+  await h.call("orchestrator_spawn", { taskId: "a" });
+  const registered = h.runtime().children[0]!.id;
+  assert.notEqual((await h.call("orchestrator_send", { childId: registered, message: "hi" })).isError, true);
 });
 
 test("closing is limited to registered panes, and cleans up the worktree", async () => {
@@ -367,6 +381,22 @@ test("a relay refuses without a handoff, and hands over everything when it has o
 // ---------------------------------------------------------------------------
 // status + notify
 // ---------------------------------------------------------------------------
+
+test("waiting with NOTHING to wait for is refused, not reported as a dead child", async () => {
+  // The probe's "no live pane" branch means `pane-gone`, which would tell the
+  // orchestrator a child died when it never opened one.
+  const h = harness({ plan: planFrom(), approved: true });
+  const empty = await h.call("orchestrator_wait", {});
+  assert.equal(empty.isError, true);
+  assert.equal(empty.details?.reason, "no-children");
+  assert.match(text(empty), /orchestrator_spawn/, "it points at what to do instead");
+
+  await h.call("orchestrator_spawn", { taskId: "a" });
+  const unknown = await h.call("orchestrator_wait", { childId: "ghost" });
+  assert.equal(unknown.isError, true);
+  assert.equal(unknown.details?.reason, "no-such-child",
+    "waiting on a child that was never registered is a typo, not an end state");
+});
 
 test("status reports the plan, the children and what still blocks the exit", async () => {
   const h = harness({ plan: planFrom(), approved: true });

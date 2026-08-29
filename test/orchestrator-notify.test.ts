@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  EMPTY_NOTIFY_HISTORY,
+  emptyNotifyHistory,
   NOTIFY_BODY_MAX,
   NOTIFY_DEDUP_MS,
   NOTIFY_RATE_MAX,
@@ -82,7 +82,7 @@ test("prepareNotification sanitizes, detects and wraps in one call", () => {
 
 test("the SAME text is not repeated inside the dedup window", () => {
   const key = notifyKey("T", "B");
-  let history: NotifyHistory = { ...EMPTY_NOTIFY_HISTORY, sentAt: [], lastByKey: {} };
+  let history: NotifyHistory = emptyNotifyHistory();
   assert.deepEqual(decideNotify({ history, key, now: T0 }), { send: true });
   history = recordNotify(history, key, T0);
 
@@ -95,7 +95,7 @@ test("the SAME text is not repeated inside the dedup window", () => {
 });
 
 test("DIFFERENT text is not deduped, but the rate limit still bounds it", () => {
-  let history: NotifyHistory = { ...EMPTY_NOTIFY_HISTORY, sentAt: [], lastByKey: {} };
+  let history: NotifyHistory = emptyNotifyHistory();
   for (let i = 0; i < NOTIFY_RATE_MAX; i++) {
     const key = notifyKey("T", `body ${i}`);
     assert.deepEqual(decideNotify({ history, key, now: T0 + i }), { send: true }, `send ${i} must pass`);
@@ -113,7 +113,7 @@ test("DIFFERENT text is not deduped, but the rate limit still bounds it", () => 
 });
 
 test("the history stays bounded — it is persisted in the sidecar", () => {
-  let history: NotifyHistory = { ...EMPTY_NOTIFY_HISTORY, sentAt: [], lastByKey: {} };
+  let history: NotifyHistory = emptyNotifyHistory();
   for (let i = 0; i < 50; i++) history = recordNotify(history, notifyKey("T", `b${i}`), T0 + i * 1000);
   assert.ok(history.sentAt.length <= 50);
   // Advance well past both windows: everything older must be dropped.

@@ -27,7 +27,8 @@
  * the returned runtime into the gate sidecar.
  */
 
-import { EMPTY_NOTIFY_HISTORY, type NotifyHistory } from "./orchestrator-notify.ts";
+import { emptyNotifyHistory, type NotifyHistory } from "./orchestrator-notify.ts";
+import { isPaneId } from "./orchestrator-tmux.ts";
 
 /** One child session, as the orchestration knows it. */
 export interface ChildSession {
@@ -78,7 +79,7 @@ export function emptyRuntime(orchestrationId: string): OrchestratorRuntime {
   return {
     orchestrationId,
     children: [],
-    notify: { ...EMPTY_NOTIFY_HISTORY, sentAt: [], lastByKey: {} },
+    notify: emptyNotifyHistory(),
   };
 }
 
@@ -211,6 +212,99 @@ export function closableChild(
 /** The worktrees the gate created and still has to clean up. */
 export function pendingWorktrees(runtime: OrchestratorRuntime): ChildSession[] {
   return runtime.children.filter((c) => c.worktree && !c.closedAt);
+}
+
+/**
+ * Sanitize a runtime read back from the gate sidecar.
+ *
+ * The sidecar is an ordinary repo-local file, so everything in it is
+ * UNTRUSTED — the same reason `lastReadyReview.treeOid` is validated before it
+ * reaches `git diff`. Two things in here have authority and are therefore
+ * checked hardest:
+ *
+ *  - `approvedPlanHash` IS the user's approval (constraint 1). A forged one
+ *    would let a session spawn children against a plan nobody agreed to, so
+ *    ANY doubt about the blob drops it: the orchestrator simply has to ask
+ *    the user again, which is the fail-closed direction.
+ *  - `paneId` becomes a tmux target. A malformed child is dropped rather than
+ *    kept, because an unaddressable pane cannot be closed or waited on
+ *    anyway — and the builders would refuse it downstream regardless.
+ *
+ * Well-formed children SURVIVE even when the approval is dropped: they are
+ * what `declare_done` counts (constraint 4), and forgetting them would be the
+ * fail-OPEN direction — an orchestration exiting with live work behind it.
+ */
+export function normalizeRuntime(raw: unknown, orchestrationId: string): OrchestratorRuntime | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  const str = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 ? v : undefined);
+
+  // `dropped` is the doubt flag: anything we could not read means the blob is
+  // not the one the gate wrote, so the APPROVAL in it is not trusted either.
+  let dropped = obj.children !== undefined && !Array.isArray(obj.children);
+  const rawChildren = Array.isArray(obj.children) ? obj.children : [];
+  const children: ChildSession[] = [];
+  for (const entry of rawChildren) {
+    if (typeof entry !== "object" || entry === null) { dropped = true; continue; }
+    const c = entry as Record<string, unknown>;
+    const id = str(c.id);
+    const taskId = str(c.taskId);
+    const cwd = str(c.cwd);
+    const createdAt = str(c.createdAt);
+    if (!id || !taskId || !cwd || !createdAt || !isPaneId(c.paneId)) { dropped = true; continue; }
+    // Conditional spreads, not `field: str(...)`: writing an explicit
+    // `undefined` would add a KEY that the original object never had, so a
+    // sanitized runtime would no longer deep-equal the one the gate wrote.
+    const worktree = str(c.worktree);
+    const doneAt = str(c.doneAt);
+    const closedAt = str(c.closedAt);
+    children.push({
+      id, taskId, cwd, createdAt,
+      paneId: c.paneId,
+      ...(worktree ? { worktree } : {}),
+      ...(doneAt ? { doneAt } : {}),
+      ...(closedAt ? { closedAt } : {}),
+    });
+  }
+
+  const notify = obj.notify as Record<string, unknown> | undefined;
+  const sentAt = Array.isArray(notify?.sentAt)
+    ? notify.sentAt.filter((t): t is number => typeof t === "number" && Number.isFinite(t))
+    : [];
+  const lastByKey: Record<string, number> = {};
+  if (notify?.lastByKey && typeof notify.lastByKey === "object" && !Array.isArray(notify.lastByKey)) {
+    for (const [k, v] of Object.entries(notify.lastByKey as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v)) lastByKey[k] = v;
+    }
+  }
+
+  const hash = str(obj.approvedPlanHash);
+  const approvalIntact = !dropped && typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
+
+  const rawRelay = obj.relay as Record<string, unknown> | undefined;
+  const relayHandoff = rawRelay ? str(rawRelay.handoffPath) : undefined;
+  const relayAt = rawRelay ? str(rawRelay.at) : undefined;
+
+  const ownPane = isPaneId(obj.ownPane) ? obj.ownPane : undefined;
+  const approvedPlanAt = approvalIntact ? str(obj.approvedPlanAt) : undefined;
+  const successorPane = isPaneId(rawRelay?.successorPane) ? rawRelay.successorPane : undefined;
+  return {
+    orchestrationId,
+    children,
+    notify: { sentAt, lastByKey },
+    ...(ownPane ? { ownPane } : {}),
+    ...(approvalIntact && hash ? { approvedPlanHash: hash } : {}),
+    ...(approvedPlanAt ? { approvedPlanAt } : {}),
+    ...(relayHandoff && relayAt
+      ? {
+          relay: {
+            handoffPath: relayHandoff,
+            at: relayAt,
+            ...(successorPane ? { successorPane } : {}),
+          },
+        }
+      : {}),
+  };
 }
 
 /** One-screen rendering for `orchestrator_status`. */

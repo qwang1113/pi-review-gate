@@ -1087,7 +1087,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   let latestCtx: ExtensionContext | undefined;
   function persistOrchestration(runtime: OrchestratorRuntime): void {
     state.orchestrator = runtime;
-    if (latestCtx) persist(latestCtx);
+    // No `if (latestCtx)`: an in-memory-only runtime would silently lose the
+    // user's plan approval and the child registry on a restart. persist()
+    // takes the context only to refresh the status widget, so a missing one
+    // costs a redraw, never the record.
+    persist(latestCtx);
   }
   const orchestratorDeps = createOrchestratorDeps({
     repoRoot: primaryRepoRoot,
@@ -1463,7 +1467,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- persistence ----------
 
-  function persist(ctx: ExtensionContext) {
+  // `ctx` is optional because it is used for ONE thing — refreshing the status
+  // widget. A caller that has no context (the orchestration tools persist from
+  // a callback) must still be able to write the record: dropping the write
+  // instead would lose the user's plan approval on a restart.
+  function persist(ctx?: ExtensionContext) {
     // P-multi: persist the session's repo set so a same-session resume (or
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
@@ -1480,7 +1488,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Store continuation count alongside state so it survives restarts.
       pi.appendEntry(ENTRY_TYPE, { state, continuationsInjected });
     } catch { /* older Pi without appendEntry */ }
-    updateWidget(ctx);
+    if (ctx) updateWidget(ctx);
   }
 
   function restore(ctx: ExtensionContext, sessionId: string | null) {
@@ -1941,10 +1949,17 @@ export default function reviewGate(pi: ExtensionAPI) {
   function setTaskMode(mode: TaskMode, source: TaskModeSource, ctx: ExtensionContext) {
     state.taskMode = mode;
     state.taskModeSource = source;
-    // A fresh mode decision supersedes a standing question pause: loop re-arms
-    // (or the mode itself turns auto-continuation off for explore/normal).
+    // A fresh mode decision supersedes a standing question pause: an ENFORCED
+    // mode re-arms (explore/normal turn auto-continuation off by definition).
     delete state.pausedQuestion;
-    loopArmed = mode === "loop";
+    // isEnforcedMode, not `=== "loop"`: an orchestrator session is the one
+    // that needs the survival invariant MOST — it supervises children through
+    // the night — and it is also the one that can never re-arm the old way,
+    // because constraint 2 forbids it from editing code and its plan writes
+    // go through a tool, not the edit path. Disarming it here made
+    // agent_settled and the child watchdog return early, so the session could
+    // end its turn with children still running and gates unmet.
+    loopArmed = isEnforcedMode(mode);
     continuationsInjected = 0;
     completionContinuations = 0;
     loopStall = undefined; // a mode decision is a change of circumstances

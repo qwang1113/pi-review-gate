@@ -20,6 +20,7 @@ import {
   formatPlanSummary,
   parsePlan,
   planHash,
+  PLAN_RELPATH,
   type OrchestratorPlan,
   type TaskStatus,
 } from "./orchestrator-plan.ts";
@@ -92,7 +93,7 @@ async function handlePlanAction(
       deps.saveRuntime({ ...runtime, approvedPlanHash: undefined, approvedPlanAt: undefined });
     }
     return reply(
-      "review-gate: plan 已写入 " + ".pi/orchestrator-plan.json" + "。\n" +
+      `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` +
       formatPlanSummary(parsed.plan) +
       "\n\n" +
       (stillApproved

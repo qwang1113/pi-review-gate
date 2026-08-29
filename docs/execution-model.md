@@ -112,6 +112,40 @@
   或超时 ⇒ 当前进度（stdout 尾部 + findings 流最近几条）。它与上面的流式快
   照互不替代：快照给人看，返回值给 agent 读。
 
+## 编排层：另一种子会话（2026-08-29）
+
+judge 之外还有第二类子会话，两者的形态**恰好相反**，不要混在一起理解：
+
+| | judge 子会话 | 编排子会话 |
+|---|---|---|
+| 形态 | `pi -p` 一次性进程，不占 pane | 交互式 pi，占用户 window 里的一个 pane |
+| 谁开的 | `judge_submit` | `orchestrator_spawn`（唯一入口） |
+| 「有事了」 | 进程退出 | **attention 事件到达** |
+| 正常终态 | 输出 verdict 后退出 | `declare_done` 之后**仍然活着** |
+| 异常终态 | exit-code 文件缺失 | pane 消失 |
+| 等待 | `judge_wait` | `orchestrator_wait` |
+
+关键推论：**编排子会话干完活不会退出**，所以「等进程结束」在这里会永远挂住。
+两个等待共用 `lib/poll-wait.ts` 这一套骨架（probe / 发快照 / 判据或预算命中
+即返回），只是把判据换掉 —— 这正是上一轮把骨架做成判据可注入的原因。
+
+**寻址**：judge 子会话寻址派它的那个 session（`RG_PARENT_SESSION`）是对的
+—— 它活不过这一轮。编排子会话会**活过**开它的会话（接力换人），所以它寻址的
+是稳定的 orchestration id（`RG_ORCHESTRATION_ID`）。`attentionTarget()`
+是唯一的解析规则：orchestration id 优先，回退 parent session，两者都无则
+静默（独立会话叫不醒任何人）。接力时新会话继承同一个 id，因此**子会话完全
+无感、无需重启**。
+
+**接力的不断档保证**：老会话写交接文档 + plan 落盘 → `orchestrator_relay`
+在自己右边开出新会话（继承 id、交接文档路径、以及**老会话 transcript 路径**
+—— 交接文档是自述，原始记录才是查问题时要的）→ 老会话进入 idle →
+**由新会话**调 `orchestrator_close({predecessorPane})` 关掉老会话。只有接任者
+能关前任（前任自己没有那个环境变量），这天然证明新会话已经起来并接手成功。
+
+tmux 命令一律由 `lib/orchestrator-tmux.ts` 构造成 argv 并直接 spawn（无
+shell）；门禁自己的执行路径也过同一份禁止清单，所以「门禁豁免于 bash 拦截」
+不等于「门禁可以做被禁止的事」。
+
 ## 审核单元
 
 送审是**一次调用**：`judge_submit({role:"reviewer", task:<本轮改动说明>})`。

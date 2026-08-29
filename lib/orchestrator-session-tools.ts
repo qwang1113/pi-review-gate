@@ -221,12 +221,29 @@ async function doWait(
   const childId = String(params.childId ?? "").trim();
   const budgetMs = clampChildWaitTimeout(params.timeoutMs);
 
+  // Waiting on NOTHING is a mistake, not an end state: without this the
+  // "no live pane" probe below would report `pane-gone` and the orchestrator
+  // would be told a child died when it never opened one.
+  const openChildren = deps.runtime().children.filter((c) => !c.closedAt);
+  if (openChildren.length === 0) {
+    return fail(
+      "review-gate: 没有可等的子会话 —— 先用 `orchestrator_spawn` 开一个，" +
+      "或者用 `orchestrator_status` 看看现在的状态。",
+      { done: false, reason: "no-children" },
+    );
+  }
+  if (childId && !findChild(deps.runtime(), childId)) {
+    return fail(`review-gate: 没有登记过子会话 "${childId}"。`, { done: false, reason: "no-such-child" });
+  }
+
   const probe = (): ChildWaitObservation => {
     const runtime = deps.runtime();
     const panes = alivePanes(deps);
     const attention = deps.consumeAttention();
     if (attention) {
-      // A child reporting in is news regardless of which child asked.
+      // Any child reporting in is news: an attention event carries its own
+      // origin, and an orchestrator that is told "somebody needs you" while
+      // waiting on child A must not go back to sleep because B asked.
       return { attention, done: false, paneAlive: true };
     }
     if (!childId) {
@@ -238,8 +255,7 @@ async function doWait(
         note: `${live.length} 个子会话在跑`,
       };
     }
-    const child = findChild(runtime, childId);
-    if (!child) return { done: true, paneAlive: false, note: `没有子会话 "${childId}"` };
+    const child = findChild(runtime, childId)!;
     return {
       done: Boolean(child.doneAt),
       paneAlive: !child.closedAt && panes.panes.includes(child.paneId),

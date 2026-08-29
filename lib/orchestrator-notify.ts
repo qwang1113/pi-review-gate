@@ -144,7 +144,18 @@ export type NotifyDecision =
   | { send: true }
   | { send: false; reason: string };
 
-export const EMPTY_NOTIFY_HISTORY: NotifyHistory = Object.freeze({ sentAt: [], lastByKey: {} });
+/**
+ * A fresh, empty history.
+ *
+ * A FUNCTION rather than a frozen constant on purpose: a shared frozen object
+ * invites `{ ...EMPTY, sentAt: [], lastByKey: {} }` at every call site — the
+ * spread reads as if it did something while the override is what actually
+ * makes the containers safe to mutate. Handing back new containers removes
+ * the trap instead of documenting it.
+ */
+export function emptyNotifyHistory(): NotifyHistory {
+  return { sentAt: [], lastByKey: {} };
+}
 
 /** The identity used for de-duplication: the rendered text, nothing else. */
 export function notifyKey(title: string, body: string): string {

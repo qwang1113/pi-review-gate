@@ -12,6 +12,7 @@ import {
   markChildClosed,
   markChildDone,
   newChildId,
+  normalizeRuntime,
   pendingWorktrees,
   registerChild,
   runningTaskIds,
@@ -107,6 +108,76 @@ test("worktrees the gate created are tracked until their child closes", () => {
   assert.deepEqual(pendingWorktrees(runtime).map((c) => c.id), ["a-1"],
     "a child with no gate-created worktree has nothing to clean up");
   assert.deepEqual(pendingWorktrees(markChildClosed(runtime, "a-1", NOW)), []);
+});
+
+// ---------------------------------------------------------------------------
+// Reading the runtime back from the (untrusted) sidecar
+// ---------------------------------------------------------------------------
+
+const GOOD_HASH = "a".repeat(64);
+
+test("a well-formed runtime survives a round trip", () => {
+  const runtime = {
+    ...runtimeWith(child({ id: "a-1", worktree: "/tmp/wt/a" })),
+    approvedPlanHash: GOOD_HASH,
+    approvedPlanAt: NOW,
+    ownPane: "%1",
+    relay: { handoffPath: "docs/h.md", at: NOW, successorPane: "%9" },
+  };
+  const cleaned = normalizeRuntime(JSON.parse(JSON.stringify(runtime)), "orch-abc-1");
+  assert.deepEqual(cleaned, runtime);
+});
+
+test("SECURITY: the orchestration ID comes from the SESSION, never from the file", () => {
+  const cleaned = normalizeRuntime({ orchestrationId: "orch-forged-1", children: [] }, "orch-real-1");
+  assert.equal(cleaned?.orchestrationId, "orch-real-1",
+    "the id is an attention channel key — a forged one must never become an address");
+});
+
+test("SECURITY: a malformed blob loses the user's APPROVAL, not the live children", () => {
+  // The approval authorizes spawning; children are what declare_done counts.
+  // Dropping the approval is fail-closed (ask again); forgetting a live child
+  // would be fail-OPEN (exit with work still running).
+  const cleaned = normalizeRuntime({
+    approvedPlanHash: GOOD_HASH,
+    children: [
+      { id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW },
+      { id: "b-1", taskId: "b", paneId: "not-a-pane", cwd: "/repo", createdAt: NOW },
+    ],
+  }, "orch-abc-1");
+  assert.equal(cleaned?.approvedPlanHash, undefined, "a blob we could not fully read is not an approval");
+  assert.deepEqual(cleaned?.children.map((c) => c.id), ["a-1"],
+    "the unaddressable child is dropped — it could not be closed or waited on anyway");
+});
+
+test("SECURITY: a forged approval hash is refused on shape alone", () => {
+  for (const hash of ["not-a-hash", "", "a".repeat(63), "A".repeat(64), "../../etc"]) {
+    const cleaned = normalizeRuntime({ approvedPlanHash: hash, children: [] }, "orch-abc-1");
+    assert.equal(cleaned?.approvedPlanHash, undefined, `${JSON.stringify(hash)} must not read as an approval`);
+  }
+  assert.equal(
+    normalizeRuntime({ approvedPlanHash: GOOD_HASH, children: [] }, "orch-abc-1")?.approvedPlanHash,
+    GOOD_HASH,
+  );
+});
+
+test("garbage in the notify history and the relay record is dropped, not carried", () => {
+  const cleaned = normalizeRuntime({
+    children: [],
+    notify: { sentAt: [1, "soon", null, 3], lastByKey: { a: 1, b: "later" } },
+    relay: { handoffPath: "docs/h.md" }, // no `at` ⇒ not a relay record
+    ownPane: "%%",
+  }, "orch-abc-1");
+  assert.deepEqual(cleaned?.notify.sentAt, [1, 3]);
+  assert.deepEqual(cleaned?.notify.lastByKey, { a: 1 });
+  assert.equal(cleaned?.relay, undefined);
+  assert.equal(cleaned?.ownPane, undefined);
+});
+
+test("a value that is not an object at all is refused outright", () => {
+  for (const raw of [undefined, null, 42, "runtime", [], true]) {
+    assert.equal(normalizeRuntime(raw, "orch-abc-1"), undefined, `${JSON.stringify(raw)} is not a runtime`);
+  }
 });
 
 test("the status rendering distinguishes the four states a child can be in", () => {

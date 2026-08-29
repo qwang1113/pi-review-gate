@@ -105,15 +105,44 @@ test("the guard follows compound commands and a path to tmux", () => {
   assert.ok(detectForbiddenTmux("ls | tmux new-window", LOOP));
 });
 
-test("QUOTED text is data, not a command", () => {
+test("SECURITY: a wrapper or a nested shell does not hide the command", () => {
+  // All of these were measured PASSING through the first version of this
+  // guard, which only looked at the first token of a segment.
+  for (const cmd of [
+    "FOO=bar tmux kill-server",
+    "TMUX_TMPDIR=/tmp tmux kill-window",
+    "command tmux kill-server",
+    "env tmux kill-server",
+    "env -i tmux kill-server",
+    "sudo -u someone tmux kill-session -t x",
+    "nohup tmux kill-server &",
+    "sh -c 'tmux kill-server'",
+    'bash -c "tmux new-window"',
+    "eval 'tmux kill-session'",
+  ]) {
+    const hit = detectForbiddenTmux(cmd, LOOP);
+    assert.ok(hit, `${cmd} must not slip through`);
+    assert.equal(hit.tier, "forbidden");
+  }
+});
+
+test("QUOTED text is data for the PRECISE path, and the sweep needs tmux nearby", () => {
+  // The fail-closed sweep only engages when the segment actually invokes tmux
+  // or a nested shell, so prose about tmux in an unrelated command stays out.
+  assert.equal(detectForbiddenTmux('git commit -m "do not run kill-session"', LOOP), undefined,
+    "a commit message mentioning a subcommand is not an invocation");
+  assert.equal(detectForbiddenTmux('grep -n "kill-window" notes.md', LOOP), undefined);
+  assert.equal(detectForbiddenTmux('echo "read the tmux manual"', LOOP), undefined,
+    "mentioning tmux without a destructive subcommand is not a hit");
+  // Prose ALONE stays out: with no tmux invocation and no shell in the
+  // segment, there is nothing that could execute.
   assert.equal(detectForbiddenTmux('echo "tmux kill-server"', LOOP), undefined,
-    "prose about a command is not the command");
-  assert.equal(detectForbiddenTmux("git commit -m 'do not tmux kill-session'", LOOP), undefined);
-  assert.equal(
-    detectForbiddenTmux('grep -n "kill-window" notes.md', LOOP),
-    undefined,
-    "a subcommand name inside an unrelated command is not an invocation",
-  );
+    "quoting it into an echo is not running it");
+  // But the moment that same string is piped INTO a shell, it is a command
+  // again — and the payload lives in another segment, so the bare-shell case
+  // sweeps the whole line (the same move lib/ship-detect.ts makes for git).
+  assert.ok(detectForbiddenTmux('echo "tmux kill-server" | sh', LOOP),
+    "piped-to-shell is the classic way to launder a command past a token check");
 });
 
 test("ordinary tmux use is untouched", () => {
