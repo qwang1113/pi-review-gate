@@ -38,16 +38,14 @@ Inspect the actual diff or changed files. Verify:
 - No unintended side effects or regressions.
 - The change is minimal and readable.
 - Ship text language (L5, reviewer-enforced): commit messages and PR
-  title/description for this change must be **predominantly** English. The gate
-  hard-blocks it at the tool layer; YOU are the second layer. Judge by the MAIN BODY,
-  not by the presence of a single foreign token: a commit message or PR
-  title/body whose prose is **mostly** another writing system (the majority of
-  its letters are non-Latin) is a **P1 finding**. A stray, minority foreign word
-  — e.g. one quoted term inside otherwise-English prose, or a proper noun — is
-  NOT a finding. Judge each text (title, body, each commit message) separately.
-  When a text is only borderline non-English and a fix would require an action
-  the gate itself blocks (a circular deadlock), say so in a Note so the agent
-  can escalate to the `arbiter` rather than being hard-stuck.
+  title/description for this change must be English — **any non-Latin letter
+  is a P1 finding** (one rule, 2026-08-29: the old "majority of the letters"
+  ratio is retired). The gate hard-blocks it at the tool layer; YOU are the
+  second layer. Judge each text (title, body, each commit message)
+  separately. If a non-Latin character is genuinely load-bearing (a quoted
+  filename, a pasted error string) the author's route is an appeal
+  (`request_arbitration`, content-bound and single-use), not a quiet pass —
+  say so in the finding rather than waiving it yourself.
 
 ### 2. Plans
 Validate a proposed plan for:

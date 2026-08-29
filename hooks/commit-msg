@@ -31,8 +31,17 @@ try { text = readFileSync(process.argv[2], "utf8"); } catch { process.exit(0); }
 // Mirror of judgeEnglish() in lib/lang-detect.ts: ANY non-Latin letter fails.
 // Git's own comment lines are not the message — and the character that starts
 // them is configurable (`core.commentChar`), so ASK git instead of assuming
-// `#`. "auto" (git picks a char per message) and any read failure fall back to
-// `#`, which is git's default.
+// `#`.
+//
+// KNOWN EDGE, bounded on purpose: with `core.commentChar=auto` git picks a
+// char per message, and reproducing that choice here would mean re-deriving
+// git's candidate list against the buffer it saw. We fall back to `#` (git's
+// default and its first candidate). The cost is that a BODY line starting
+// with the fallback char is skipped by this scan — a narrow fail-open that
+// only exists in the editor path, and one the tool layer (command-line
+// messages) and the reviewer still cover. The opposite choice — scanning
+// everything — would flag a localized git's own help block on every commit,
+// which is a fail-CLOSED that breaks normal use.
 let commentChar = "#";
 try {
   const { execFileSync } = require("node:child_process");

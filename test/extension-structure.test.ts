@@ -1007,13 +1007,28 @@ test("a message-only rewrite is not a content change, at L1 and in the branch ru
   // used to `return` from the whole ship gate, which also dropped the branch
   // rule — so an amend could land on main, on another session's branch, or
   // with no work branch at all.
-  assert.doesNotMatch(callBody, /messageOnlyRewrite\)\s*\{\s*\n\s*appendLesson\([^)]*\);\s*\n\s*return;/,
-    "the exemption must not return from the ship gate");
+  //
+  // Round-4 P1: the first guard written here was VACUOUS — it matched the
+  // literal shape of that `return` with a regex the real call could never
+  // satisfy, so re-adding the return kept the suite green. The guard is now a
+  // WINDOW: whatever the exemption block ends up containing, no `return` may
+  // stand between the decision and the per-repo checks it must not skip.
+  const problemsAt = callBody.indexOf("const problems: string[] = []", exemptionAt);
+  assert.ok(problemsAt > exemptionAt, "the per-repo checks must follow the exemption");
+  const betweenExemptionAndChecks = callBody.slice(exemptionAt, problemsAt);
+  assert.doesNotMatch(betweenExemptionAndChecks, /\breturn\b/,
+    "the exemption must never return from the ship gate — that drops the branch rule with it");
   assert.match(callBody, /const unmet = messageOnlyRewrite \? \[\] : unmetRequirements\(/,
     "only the content requirements are skipped");
-  const branchRuleAt = callBody.indexOf("commitBranchAllowed({");
-  assert.ok(branchRuleAt > exemptionAt,
-    "the branch rule still runs after the exemption was decided");
+  // …and the checks that must survive are all downstream of the decision.
+  for (const [what, anchor] of [
+    ["the branch rule", "commitBranchAllowed({"],
+    ["the fail-closed sidecar check", "gate state missing (fail-closed)"],
+    ["the loop-goal ship gate", "LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK"],
+  ] as const) {
+    const at = callBody.indexOf(anchor, exemptionAt);
+    assert.ok(at > exemptionAt, `${what} must still run after the exemption was decided`);
+  }
   // Every repo the command touches must qualify, and an unresolvable repo set
   // never does (a compound `git -C A … && git -C B …` must not ride on A).
   assert.match(callBody, /\[\.\.\.checkRoots\]\.every\(\(root\) => isMessageOnlyRewrite\(\{/);
