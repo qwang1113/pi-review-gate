@@ -119,10 +119,43 @@ test("SECURITY: a wrapper or a nested shell does not hide the command", () => {
     "sh -c 'tmux kill-server'",
     'bash -c "tmux new-window"',
     "eval 'tmux kill-session'",
+    "sh -c 'tmux killw'",           // a short alias inside a nested shell
   ]) {
     const hit = detectForbiddenTmux(cmd, LOOP);
     assert.ok(hit, `${cmd} must not slip through`);
     assert.equal(hit.tier, "forbidden");
+  }
+});
+
+test("SECURITY: shell PUNCTUATION does not hide the command either", () => {
+  // The lexer erases `$(...)` and backticks outright, and a subshell glues a
+  // `)` to the subcommand token — so none of these reach the precise matcher.
+  // The raw-command pass (quotes blanked) is what catches them.
+  for (const cmd of [
+    "(cd /tmp && tmux kill-server)",
+    "(tmux kill-server)",
+    "$(tmux kill-server)",
+    "`tmux kill-server`",
+    "{ tmux kill-server; }",
+    "if true; then tmux kill-window; fi",
+    'xargs -I{} sh -c "tmux kill-server"',
+  ]) {
+    const hit = detectForbiddenTmux(cmd, LOOP);
+    assert.ok(hit, `${cmd} must not slip through`);
+    assert.equal(hit.tier, "forbidden");
+  }
+});
+
+test("the raw pass keeps quoted text OUT, so ordinary prose still commits", () => {
+  // Blanking quoted regions is what separates syntax from data. Without it,
+  // writing about the rule would trip the rule.
+  for (const cmd of [
+    'git commit -m "docs: explain why tmux kill-server is refused"',
+    'echo "tmux kill-server"',
+    "(cd /tmp && tmux list-panes)",
+    "git log --oneline | grep new-session",
+  ]) {
+    assert.equal(detectForbiddenTmux(cmd, LOOP), undefined, `${cmd} must pass`);
   }
 });
 
@@ -143,6 +176,14 @@ test("QUOTED text is data for the PRECISE path, and the sweep needs tmux nearby"
   // sweeps the whole line (the same move lib/ship-detect.ts makes for git).
   assert.ok(detectForbiddenTmux('echo "tmux kill-server" | sh', LOOP),
     "piped-to-shell is the classic way to launder a command past a token check");
+  // The sweep requires tmux and the subcommand to sit in the SAME command,
+  // so an unrelated word elsewhere on the line cannot trigger it. Without
+  // that adjacency rule, `new` (an alias of new-session) would have made this
+  // perfectly ordinary line a block.
+  assert.equal(detectForbiddenTmux("sh -c 'tmux ls' && echo new", LOOP), undefined,
+    "a bare word on the other side of a separator is not a subcommand");
+  assert.equal(detectForbiddenTmux("git log --oneline | grep new-session", LOOP), undefined,
+    "no tmux in the same command ⇒ nothing to sweep");
 });
 
 test("ordinary tmux use is untouched", () => {

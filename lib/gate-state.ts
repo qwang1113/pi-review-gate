@@ -450,7 +450,11 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     // the file: the session re-derives it from its own environment, so a
     // forged one can never become an attention channel key.
     if (parsed.orchestrator !== undefined) {
-      const cleaned = normalizeRuntime(parsed.orchestrator, parsed.orchestrator?.orchestrationId ?? "");
+      // The id is passed EMPTY on purpose, so this line says what the comment
+      // above claims: nothing about the address survives the file. The session
+      // stamps its own (env-derived) id in when it loads the runtime
+      // (lib/orchestrator-wiring.ts).
+      const cleaned = normalizeRuntime(parsed.orchestrator, "");
       if (cleaned) parsed.orchestrator = cleaned;
       else delete parsed.orchestrator;
     }

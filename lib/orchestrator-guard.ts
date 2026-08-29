@@ -118,6 +118,31 @@ const TRANSPARENT_PREFIXES: ReadonlySet<string> = new Set([
 /** Shell/indirection heads whose ARGUMENT is another command line. */
 const NESTED_SHELL = /^(?:(?:ba|z|da|k)?sh|eval|xargs|watch)$/;
 
+/**
+ * Blank out quoted regions, preserving length and everything outside them.
+ *
+ * Used for the raw-command sweep: what is left is the text the shell will
+ * treat as SYNTAX, so `$(tmux kill-server)` and `(cd /x && tmux kill-server)`
+ * stay visible while `echo "tmux kill-server"` becomes `echo `. A backslash
+ * escapes the next character, exactly as the shell reads it.
+ */
+function blankQuoted(raw: string): string {
+  let out = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]!;
+    if (quote) {
+      if (ch === quote) { quote = null; out += " "; continue; }
+      out += " ";
+      continue;
+    }
+    if (ch === "\\" && i + 1 < raw.length) { out += "  "; i++; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; out += " "; continue; }
+    out += ch;
+  }
+  return out;
+}
+
 /** Drop leading `VAR=value` assignments and transparent wrapper words. */
 function stripCommandPrefixes(tokens: readonly string[]): string[] {
   let i = 0;
@@ -157,21 +182,35 @@ function tmuxInvocation(rawTokens: readonly string[]): { subcommand: string; res
  * shell that carries the whole command as a quoted STRING
  * (`sh -c 'tmux kill-server'`), which the lexer correctly reports as data.
  *
- * The rule is deliberately blunt: the segment mentions tmux AND mentions a
- * destructive subcommand ⇒ refuse. It can false-positive on prose
- * (`echo tmux kill-server`), and that is the right trade: a false positive
- * costs one rewrite, a false negative ends the window the user is watching
- * from. Only the ALWAYS-FORBIDDEN tier is swept — the tool-replaced ones are
- * a redirect, and a redirect fired at a false positive is just confusing.
+ * The match requires `tmux` and the destructive subcommand to sit in the SAME
+ * command (no `|`, `;` or `&` between them) — the same shape
+ * lib/ship-detect.ts uses for `git … commit`. That adjacency is what keeps the
+ * sweep from firing on an unrelated word elsewhere on the line: without it,
+ * `sh -c 'tmux ls' && echo new` would read as `tmux new-session`.
+ *
+ * Only the ALWAYS-FORBIDDEN tier is swept. The tool-replaced ones are a
+ * redirect, and a redirect fired at a false positive is just confusing.
+ * There are two places this sweep is applied, and they cover different
+ * hiding places:
+ *   - the SEGMENT text, when the segment is a nested shell — its payload is a
+ *     quoted string, which the lexer correctly reports as data;
+ *   - the RAW command with quoted regions blanked out, which is where shell
+ *     PUNCTUATION hides things the lexer removed or split: `$(tmux
+ *     kill-server)` and backticks are erased by the substitution
+ *     preprocessing, and `(cd /x && tmux kill-server)` leaves a `)` glued to
+ *     the subcommand token so precise matching misses it.
+ * Blanking quotes in the raw pass is what keeps `echo "tmux kill-server"`
+ * out: quoted text really is data, and the nested-shell pass is what catches
+ * it when a shell is about to execute that data.
  */
-function sweepForbidden(segmentText: string): string | undefined {
-  if (!/\btmux\b/.test(segmentText)) return undefined;
+function sweepForbidden(text: string): string | undefined {
+  // Long forms first, so the reported subcommand is the canonical one.
   for (const sub of ALWAYS_FORBIDDEN) {
-    if (new RegExp(`(?<![A-Za-z0-9_-])${sub}(?![A-Za-z0-9_-])`).test(segmentText)) return sub;
+    if (new RegExp(`\\btmux\\b[^|;&]*?(?<![A-Za-z0-9_-])${sub}(?![A-Za-z0-9_-])`).test(text)) return sub;
   }
   for (const [alias, canonicalName] of Object.entries(TMUX_ALIASES)) {
     if (!ALWAYS_FORBIDDEN.includes(canonicalName)) continue;
-    if (new RegExp(`(?<![A-Za-z0-9_-])${alias}(?![A-Za-z0-9_-])`).test(segmentText)) return canonicalName;
+    if (new RegExp(`\\btmux\\b[^|;&]*?(?<![A-Za-z0-9_-])${alias}(?![A-Za-z0-9_-])`).test(text)) return canonicalName;
   }
   return undefined;
 }
@@ -183,6 +222,20 @@ function sweepForbidden(segmentText: string): string | undefined {
  * the command is fine. The caller decides when to ask: the gate skips this
  * entirely in `normal` mode, exactly like every other bash rule.
  */
+/** The refusal for a call the sweep found hidden rather than spelled out. */
+function hiddenHit(subcommand: string, segment: string): TmuxGuardHit {
+  return {
+    subcommand,
+    tier: "forbidden",
+    segment,
+    reason:
+      `review-gate: 禁止 \`tmux ${subcommand}\` —— 它会破坏或越出用户的 tmux 环境。` +
+      "这条命令把它藏在了包装命令、嵌套 shell 或 shell 语法（子 shell / 命令替换）里，" +
+      "门禁按 fail-closed 处理：宁可误伤一次（改写即可），也不能放过一次搞挂用户 window 的调用。" +
+      "需要开子会话用 `orchestrator_spawn`，接力用 `orchestrator_relay`。",
+  };
+}
+
 export function detectForbiddenTmux(
   command: string,
   opts: { orchestratorMode: boolean },
@@ -200,25 +253,18 @@ export function detectForbiddenTmux(
     if (!invocation) {
       // No readable tmux head. Two shapes still reach tmux: a wrapper whose
       // own options hide it, and a nested shell holding the command as data.
-      const head = stripCommandPrefixes(tokens)[0];
-      const nested = head !== undefined && NESTED_SHELL.test(head.split("/").pop() ?? head);
+      // The nested test looks at the RAW head too, so `xargs -I{} sh -c …`
+      // (where the wrapper's own option hides the shell) is still seen.
+      const strippedHead = stripCommandPrefixes(tokens)[0];
+      const nested = [tokens[0], strippedHead].some(
+        (t) => t !== undefined && NESTED_SHELL.test(t.split("/").pop() ?? t),
+      );
       // A BARE shell token is the piped-to-shell shape (`echo … | sh`), where
       // the payload lives in a DIFFERENT segment — so that case sweeps the
       // whole command line, exactly as lib/ship-detect.ts does for `git`.
       const scope = nested ? `${allText} ${command}` : allText;
       const swept = nested || tokens.some(isTmuxHead) ? sweepForbidden(scope) : undefined;
-      if (swept) {
-        return {
-          subcommand: swept,
-          tier: "forbidden",
-          segment: allText,
-          reason:
-            `review-gate: 禁止 \`tmux ${swept}\` —— 它会破坏或越出用户的 tmux 环境。` +
-            "这条命令把它藏在了包装命令或嵌套 shell 里，门禁按 fail-closed 处理：" +
-            "宁可误伤一次（改写即可），也不能放过一次搞挂用户 window 的调用。" +
-            "需要开子会话用 `orchestrator_spawn`，接力用 `orchestrator_relay`。",
-        };
-      }
+      if (swept) return hiddenHit(swept, allText);
       continue;
     }
     const { subcommand, rest } = invocation;
@@ -272,5 +318,13 @@ export function detectForbiddenTmux(
       };
     }
   }
+  // FINAL fail-closed pass over the RAW command with quoted regions blanked.
+  // This is where shell PUNCTUATION hides a call from everything above: the
+  // lexer erases `$(...)` and backticks entirely, and a subshell leaves `)`
+  // glued to the subcommand token so the precise matcher does not recognize
+  // it. Quoted text stays out (it is data — the nested-shell pass above is
+  // what catches it when a shell is about to run it).
+  const hiddenBySyntax = sweepForbidden(blankQuoted(command));
+  if (hiddenBySyntax) return hiddenHit(hiddenBySyntax, command.trim().slice(0, 200));
   return undefined;
 }
