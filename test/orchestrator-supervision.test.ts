@@ -379,7 +379,10 @@ test("R-17: ONE wait answers everything the hand-rolled capture-pane loop was fo
   h.panes.get(second!.paneId)!.printed.push("Context 30% · esc to interrupt");
   await settle(h, 5_000);
 
-  const waited = await h.call("orchestrator_wait", { timeoutMs: 1000 });
+  // Scoped to ONE child on purpose (round-2 P2): a wait that narrows its
+  // CRITERIA must still hand back the whole family's health, because a
+  // supervisor watching one child is exactly when it is blind to the other.
+  const waited = await h.call("orchestrator_wait", { childId: second!.id, timeoutMs: 1000 });
   const reply = text(waited);
   for (const child of [first!, second!]) {
     assert.match(reply, new RegExp(child.id), `${child.id} is in the snapshot`);
@@ -388,7 +391,13 @@ test("R-17: ONE wait answers everything the hand-rolled capture-pane loop was fo
   assert.match(reply, /working/, "and the one that is fine is not dragged into it");
   assert.match(reply, /当前框「认可这个 goal 吗？」/, "including WHAT it is waiting on");
   const health = waited.details?.health as Array<{ childId: string; state: string }>;
-  assert.equal(health.length, 2, "the snapshot is structured too, not only prose");
+  assert.equal(health.length, 2, "the snapshot is the whole family, even for a scoped wait");
+  assert.deepEqual(
+    health.map((entry) => entry.childId).sort(),
+    [first!.id, second!.id].sort(),
+    "and it is structured, not only prose",
+  );
+
 });
 
 

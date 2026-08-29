@@ -148,8 +148,6 @@ async function doWait(
     // is most likely to be blind to the other one.
     const health = observed.health;
 
-
-
     // The gate's OWN events first: they name the child and the state, and
     // they are the only signal that exists for a child that stopped quietly.
     // A wait scoped to ONE child takes only that child's events and leaves
