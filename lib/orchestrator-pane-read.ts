@@ -61,6 +61,35 @@ const MAX_BLOCK_ROWS = 14;
 /** `1.` / `1)` / `[1]` / `(1)` prefixes — a numbered list is a list too. */
 const NUMBERED = /^\(?\[?(\d{1,2})[\].)]\s+(.*)$/;
 
+/**
+ * The FOOTER a live choice list draws under its rows, and the single fact
+ * that decides whether this module reports a dialog AT ALL (R-1, R-9).
+ *
+ * The measured failure: with no dialog on screen the parser anchored on the
+ * `▶` of the belowEditor sub-agent widget (`▶ reviewer | # Task for reviewer`)
+ * and reported it as "the dialog and its only option". Twice that was merely
+ * noise; the third time a REAL setup_workspace dialog was on screen, the
+ * widget row won (it is further down the pane), `orchestrator_key({match})`
+ * refused because no option matched, and the orchestrator had no way left to
+ * answer — the 25-minute deadlock.
+ *
+ * A rendered choice list always prints its key hints below the rows
+ * (`↑↓ navigate  enter select  esc cancel`), and nothing else in a pane does.
+ * So the footer is the anchor: everything BELOW the last footer line is not
+ * part of a dialog and is cut away before parsing, and a pane with no footer
+ * has NO dialog — reported as such, never guessed at.
+ */
+const DIALOG_FOOTER = /(↑↓|↑\/↓|up\/down)|(\benter\b[^\n]{0,24}\b(select|confirm|submit)\b)/i;
+
+/** Index of the LAST footer line, i.e. the live dialog's. */
+export function findDialogFooter(lines: readonly string[]): number | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (DIALOG_FOOTER.test(lines[i]!)) return i;
+  }
+  return undefined;
+}
+
+
 
 /** One row of a choice list, as it was rendered. */
 export interface PaneOption {
@@ -159,21 +188,58 @@ function rowAt(line: string, contentCol: number): Row | undefined {
   return { raw: line, label, selected };
 }
 
-/** The contiguous run of rows around the anchor, walking both ways. */
+/**
+ * The contiguous run of rows around the anchor, WITH WRAPPED LABELS MERGED
+ * (R-12).
+ *
+ * The measured failure: in a 59-column pane the third option of a three-option
+ * dialog wrapped, its remainder was rendered at column 0, the downward walk
+ * stopped there and the parser reported two options — so `match:"C 不修根因"`
+ * was refused for an option that was plainly on screen.
+ *
+ * A wrapped remainder is recognizable: it is non-empty, it does not start a
+ * row of this list, and it directly follows one. It is appended to that row's
+ * label instead of ending the block. A BLANK line still ends the block (that
+ * is the frame), and two consecutive unattachable lines end it too, so prose
+ * below the list cannot be swallowed.
+ */
 function collectBlock(lines: readonly string[], anchor: { index: number; contentCol: number }): Row[] {
-  const rows: Row[] = [rowAt(lines[anchor.index]!, anchor.contentCol)!];
-  for (let i = anchor.index - 1; i >= 0 && rows.length < MAX_BLOCK_ROWS; i--) {
-    const row = rowAt(lines[i]!, anchor.contentCol);
-    if (!row) break;
-    rows.unshift(row);
+  let first = anchor.index;
+  for (;;) {
+    const prev = first - 1;
+    if (prev < 0) break;
+    if (rowAt(lines[prev]!, anchor.contentCol)) { first = prev; continue; }
+    // A wrapped remainder of the row above it is part of the list too.
+    if (lines[prev]!.trim() !== "" && prev - 1 >= 0 && rowAt(lines[prev - 1]!, anchor.contentCol)) {
+      first = prev - 1;
+      continue;
+    }
+    break;
   }
-  for (let i = anchor.index + 1; i < lines.length && rows.length < MAX_BLOCK_ROWS; i++) {
-    const row = rowAt(lines[i]!, anchor.contentCol);
-    if (!row) break;
-    rows.push(row);
+
+
+  const rows: Row[] = [];
+  for (let i = first; i < lines.length && rows.length <= MAX_BLOCK_ROWS; i++) {
+    const line = lines[i]!;
+    if (line.trim() === "") break;
+    const row = rowAt(line, anchor.contentCol);
+    if (row) {
+      if (rows.length === MAX_BLOCK_ROWS) break;
+      rows.push(row);
+      continue;
+    }
+    // Not a row: a wrapped remainder of the previous one, or the end.
+    const last = rows[rows.length - 1];
+    if (!last) break;
+
+    last.label = `${last.label}${line.trim()}`.slice(0, WRAPPED_LABEL_MAX);
   }
   return rows;
 }
+
+/** Longest label a merged (wrapped) row may reach. */
+const WRAPPED_LABEL_MAX = 300;
+
 
 /**
  * FALLBACK for a list with no visible highlight: a run of two or more lines
@@ -232,11 +298,23 @@ function findTitle(lines: readonly string[], blockStart: number, contentCol: num
 
 
 /**
+ * How far above the footer a dialog's rows may start.
+ *
+ * Bounded so an old, already-answered list further up the scrollback can
+ * never be attached to the CURRENT footer.
+ */
+const DIALOG_REGION_LINES = 30;
+
+/**
  * Parse one `capture-pane` payload.
  *
  * Never throws and never returns "nothing": the raw lines are always part of
  * the result, so a caller whose dialog parse came back empty still has the
  * screen to show the agent.
+ *
+ * A dialog is reported ONLY when the footer is on screen (R-1/R-9), and only
+ * the region ABOVE that footer is parsed — which is what keeps the belowEditor
+ * widget (`▶ reviewer | # Task for reviewer`) out of the option list.
  */
 export function parsePaneSnapshot(raw: string): PaneSnapshot {
   const lines = stripTrailingBlanks(String(raw ?? "").split(/\r?\n/));
@@ -245,11 +323,15 @@ export function parsePaneSnapshot(raw: string): PaneSnapshot {
     text: lines.join("\n"),
     hasContent: lines.some((l) => l.trim().length > 0),
   };
+  const footer = findDialogFooter(lines);
+  if (footer === undefined) return snapshot;
+  const regionStart = Math.max(0, footer - DIALOG_REGION_LINES);
+  const region = lines.slice(regionStart, footer);
   // Preferred path: anchor on the highlighted row and read the whole list off
   // its column. Fallback: a glyph/number list with no visible highlight,
   // which is shown but never acted on automatically.
-  const anchor = findSelectedAnchor(lines);
-  const block = anchor ? collectBlock(lines, anchor) : findGlyphBlock(lines);
+  const anchor = findSelectedAnchor(region);
+  const block = anchor ? collectBlock(region, anchor) : findGlyphBlock(region);
   if (block.length === 0) return snapshot;
 
   const options: PaneOption[] = block.map((row, i) => ({
@@ -262,10 +344,10 @@ export function parsePaneSnapshot(raw: string): PaneSnapshot {
     options,
     ...(selected ? { selectedIndex: selected.index } : {}),
   };
-  const blockStart = lines.indexOf(block[0]!.raw);
+  const blockStart = region.indexOf(block[0]!.raw);
   const title = anchor
-    ? findTitle(lines, blockStart, anchor.contentCol)
-    : findTitle(lines, blockStart, 0);
+    ? findTitle(region, blockStart, anchor.contentCol)
+    : findTitle(region, blockStart, 0);
   if (title) dialog.title = title;
   return { ...snapshot, dialog };
 }
@@ -281,6 +363,22 @@ export function parsePaneSnapshot(raw: string): PaneSnapshot {
 export function dialogIsOpen(snapshot: PaneSnapshot | undefined): boolean {
   return Boolean(snapshot?.dialog && snapshot.dialog.options.length >= 2);
 }
+
+/**
+ * WHICH dialog this is — title plus the option labels, as one string.
+ *
+ * The identity, not the presence, is what tells "answered" from "still
+ * waiting" when a session asks several questions in a row (R-5): the old
+ * check was "is a dialog still on screen", so answering question 1 of a
+ * 3-question interview — which immediately opens question 2 — was reported as
+ * "could not confirm it was submitted". An orchestrator that believed that
+ * receipt and retried would have answered question 2 with question 1's key.
+ */
+export function dialogSignature(dialog: PaneDialog | undefined): string | undefined {
+  if (!dialog) return undefined;
+  return [dialog.title ?? "", ...dialog.options.map((o) => o.label)].join("␟");
+}
+
 
 // ---------------------------------------------------------------------------
 // Startup evidence (F7 / F8 — the receipt must not lie)
@@ -307,6 +405,18 @@ const PI_RUNNING_SIGNATURES: readonly string[] = Object.freeze([
   "thinking",
 ]);
 
+/**
+ * The line pi renders for a message that arrived while a tool was running.
+ *
+ * It is the second delivery lane, and not knowing about it produced a FALSE
+ * NEGATIVE that nearly caused a duplicate delivery (R-14): the message was
+ * sitting in the child's steering queue — visible on screen as
+ * `Steering: 项目经理给你发了一份说明…` — while the receipt said "无法确认子
+ * 会话真的收到". An orchestrator that believes that receipt re-sends, and
+ * re-sending into an open dialog is the R-13 accident.
+ */
+const STEERING_SIGNATURE = /(^|\n)\s*Steering:/;
+
 /** What a delivery check actually observed. Every field is a measurement. */
 export interface StartupEvidence {
   /** The pane rendered anything at all. */
@@ -317,6 +427,8 @@ export interface StartupEvidence {
   markerVisible: boolean;
   /** The child wrote its own gate sidecar — it reached the extension. */
   sidecarPresent: boolean;
+  /** The message is in the child's steering queue (R-14). */
+  steeringQueued?: boolean;
 }
 
 export function emptyStartupEvidence(): StartupEvidence {
@@ -328,25 +440,30 @@ export function readStartupEvidence(
   snapshot: PaneSnapshot | undefined,
   marker: string | undefined,
 ): Omit<StartupEvidence, "sidecarPresent"> {
-  if (!snapshot) return { paneHasContent: false, looksLikePi: false, markerVisible: false };
+  if (!snapshot) {
+    return { paneHasContent: false, looksLikePi: false, markerVisible: false, steeringQueued: false };
+  }
   const text = snapshot.text;
   return {
     paneHasContent: snapshot.hasContent,
     looksLikePi: PI_RUNNING_SIGNATURES.some((sig) => text.includes(sig)),
     markerVisible: Boolean(marker && marker.length > 0 && text.includes(marker)),
+    steeringQueued: STEERING_SIGNATURE.test(text),
   };
 }
 
 /** One line naming exactly what was and was not observed. */
 export function describeStartupEvidence(evidence: StartupEvidence): string {
-  const yes = (v: boolean): string => (v ? "是" : "否");
+  const yes = (v: boolean | undefined): string => (v ? "是" : "否");
   return (
     `pane 有内容=${yes(evidence.paneHasContent)}、` +
     `像 pi 在跑=${yes(evidence.looksLikePi)}、` +
     `任务标记可见=${yes(evidence.markerVisible)}、` +
+    `进了 steering 队列=${yes(evidence.steeringQueued)}、` +
     `子会话 sidecar 已落盘=${yes(evidence.sidecarPresent)}`
   );
 }
+
 
 /** Render a snapshot for the agent, bounded and with the parse spelled out. */
 export function formatPaneSnapshot(snapshot: PaneSnapshot, maxLines = PANE_READ_MAX_LINES): string {

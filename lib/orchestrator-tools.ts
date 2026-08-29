@@ -32,6 +32,8 @@ import {
   orchestratorDoneProblems,
 } from "./orchestrator-gate.ts";
 import { formatChildren } from "./orchestrator-registry.ts";
+import { formatChildHealth } from "./orchestrator-child-state.ts";
+
 import {
   decideNotify,
   notifyKey,
@@ -195,16 +197,29 @@ async function handlePlanAction(
     // format stays readable (d1, d2, …) because the user sees it in a
     // notification and in `orchestrator_status`.
     const id = nextDecisionId(plan);
-    const next = { ...plan, decisions: [...plan.decisions, { id, question }], updatedAt: nowIso };
+    // R-29 — record, at registration time, what the plan will have to become
+    // once this is answered. Without it "the plan does not reflect what the
+    // user decided" is invisible: the second run notified a decision, got an
+    // answer, and only discovered at wrap-up that nothing had been written
+    // back.
+    const planEffect = String(params.planEffect ?? "").trim();
+    const next = {
+      ...plan,
+      decisions: [...plan.decisions, { id, question, ...(planEffect ? { planEffect } : {}) }],
+      updatedAt: nowIso,
+    };
     deps.savePlan(next);
     return reply(
       `review-gate: 已登记待用户决策 "${id}"（id 由门禁生成）。` +
-      "注意：**没通知过用户的决策项会拦住 declare_done**（约束 11）——" +
-      `用 \`orchestrator_notify({ decisionId: "${id}", … })\` 告诉他。`,
-      { decisionId: id },
+      "注意：**没通知过用户的决策项会拦住 declare_done**（约束 11），" +
+      "**通知过但从未 resolve 的也会拦**（R-29）——" +
+      `先用 \`orchestrator_notify({ decisionId: "${id}", … })\` 告诉他，` +
+      `拿到答复后用 \`orchestrator_plan({ action: "resolve-decision", decisionId: "${id}", answer })\` 落回 plan。` +
+      (planEffect ? `\n已记下这条决策一旦拍板需要的 plan 变更：${planEffect}` : ""),
+      { decisionId: id, planEffect: planEffect || undefined },
     );
-
   }
+
 
   if (action === PLAN_ACTIONS["resolve-decision"]) {
     if (!plan) return fail("review-gate: 还没有 plan。");
@@ -265,7 +280,13 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       })),
 
       question: Type.Optional(Type.String({ description: "For action=\"add-decision\"" })),
+      planEffect: Type.Optional(Type.String({
+        description:
+          "For action=\"add-decision\": what the PLAN must become once this is answered " +
+          "(e.g. \"若用户选 B，任务 t3 的边界要加 scripts/\"). Shown until the decision is resolved.",
+      })),
       answer: Type.Optional(Type.String({ description: "For action=\"resolve-decision\"" })),
+
     }),
     async execute(_id, params) {
       const refusal = requireOrchestratorMode(deps);
@@ -311,6 +332,14 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
         "",
         "### 子会话",
         formatChildren(runtime, panes.panes),
+        // R-11 — a human glancing at a pane mis-reads liveness (the second run
+        // produced a "t3 显示 terminated" that was simply wrong). The probe's
+        // structured verdict is the truth, so the status prints it here rather
+        // than leaving the reader to infer it from a pane list.
+        "",
+        "### 子会话现在在干什么（来源：门禁探针）",
+        formatChildHealth(deps.probe().observe().health),
+
         inheritance ? "\n" + inheritance : "",
         "",
         "### 还差什么才能 declare_done",

@@ -27,7 +27,8 @@ test("a criterion that fires immediately returns without sleeping", async () => 
     sleep: clock.sleep,
   });
   assert.equal(res.done, true);
-  assert.equal(res.observation.reason, "exit-code");
+  assert.equal(res.observation?.reason, "exit-code");
+
   assert.equal(probes, 1, "one probe is enough when it already fired");
   assert.equal(res.waitedMs, 0);
 });
@@ -60,7 +61,8 @@ test("a timeout returns the CURRENT observation, not an error", async () => {
   });
   assert.equal(res.done, false);
   assert.equal(res.aborted, false);
-  assert.match(res.observation.note, /still running at 5000ms/, "the last observation comes back");
+  assert.match(String(res.observation?.note), /still running at 5000ms/, "the last observation comes back");
+
   assert.equal(res.waitedMs, 5_000);
 });
 
@@ -129,7 +131,8 @@ test("the criteria are the caller's: the same skeleton serves a different waiter
     sleep: clock.sleep,
   });
   assert.equal(res.done, true);
-  assert.deepEqual(res.observation.events, ["needs-attention"]);
+  assert.deepEqual(res.observation?.events, ["needs-attention"]);
+
 });
 
 test("an async probe is awaited", async () => {
@@ -146,6 +149,72 @@ test("an async probe is awaited", async () => {
   assert.equal(res.done, true);
   assert.equal(probes, 2);
 });
+
+/**
+ * A deadline timer a test controls: `fire()` is the budget expiring.
+ */
+function controllableTimer() {
+  let fire: () => void = () => {};
+  let cancelled = false;
+  return {
+    factory: () => ({
+      promise: new Promise<void>((resolve) => { fire = resolve; }),
+      cancel: () => { cancelled = true; },
+    }),
+    expire: () => fire(),
+    get cancelled() { return cancelled; },
+  };
+}
+
+test("R-16: a probe that NEVER returns cannot hold the call — the budget runs on its own timer", async () => {
+  // The measured failure: `orchestrator_wait` was given `timeoutMs: 900000`,
+  // was still blocking past 1020s, and only an external Escape ended it. A
+  // deadline checked only BETWEEN probes cannot bound a probe that hangs, so
+  // the loop races every await against this timer.
+  const clock = fakeClock();
+  const timer = controllableTimer();
+  const hung = new Promise<{ done: boolean }>(() => { /* never resolves */ });
+
+  const waiting = pollUntil({
+    probe: () => hung,
+    isDone: (o) => o.done,
+    budgetMs: 900_000,
+    now: clock.now,
+    sleep: clock.sleep,
+    deadlineTimer: timer.factory,
+  });
+  timer.expire();
+  const res = await waiting;
+
+  assert.equal(res.done, false);
+  assert.equal(res.stalledInProbe, true, "and it SAYS the probe never came back, rather than inventing a state");
+  assert.equal(res.observation, undefined);
+  assert.equal(timer.cancelled, true, "the timer is always cleaned up");
+});
+
+test("R-16: a budget that expires mid-SLEEP still returns the last observation", async () => {
+  const clock = fakeClock();
+  const timer = controllableTimer();
+  let probes = 0;
+  const waiting = pollUntil({
+    probe: () => { probes += 1; return { done: false, note: `probe ${probes}` }; },
+    isDone: (o) => o.done,
+    budgetMs: 900_000,
+    pollMs: 1_000,
+    now: clock.now,
+    // A sleep that never finishes on its own: only the deadline ends it.
+    sleep: () => new Promise<void>(() => {}),
+    deadlineTimer: timer.factory,
+  });
+  await Promise.resolve();
+  timer.expire();
+  const res = await waiting;
+
+  assert.equal(res.done, false);
+  assert.equal(res.stalledInProbe, false, "one probe DID complete");
+  assert.equal(res.observation?.note, "probe 1", "so the caller gets progress, not silence");
+});
+
 
 test("the default cadence is the UI throttle, so progress and probes agree", () => {
   assert.equal(DEFAULT_POLL_MS, 2000);

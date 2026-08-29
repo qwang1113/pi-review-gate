@@ -182,11 +182,15 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 
 ### 域 4：orchestrator 编排层
 
-21 个模块，按「决策 / 执行 / 工具」三层切开：
+23 个模块，按「决策 / 执行 / 工具」三层切开：
+
 
 - **纯决策**：`orchestrator-gate.ts`（14 条硬约束）、
   `orchestrator-boundaries.ts`（文件边界代数——两个任务能否并行只由它回答）、
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
+  `orchestrator-child-state.ts`（**子会话四态**：working / waiting-input /
+  idle / dead，以及「什么时候该再叫一次」的退避——纯函数，用假屏幕就能单测）、
+
   `orchestrator-wait.ts`（「有事发生」对子会话意味着什么）、
   `orchestrator-registry.ts`（编排只能操作门禁替它创建的东西）、
   `orchestrator-relay.ts`（自我接力：只有后继者能关掉前任）、
@@ -195,7 +199,11 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   处）、`orchestrator-wiring.ts`（跑 tmux、读写 plan、加删 worktree、取
   attention 事件）、`orchestrator-delivery.ts`（投递任务并**校验真的送达**才
   报成功）、`orchestrator-pane-read.ts`（读子会话屏幕）、
-  `orchestrator-keys.ts`（按键，封闭键位表）、`orchestrator-notify.ts`
+  `orchestrator-keys.ts`（按键，封闭键位表）、
+  `orchestrator-probe.ts`（**状态探针**：周期性观察每个子会话，把「没有事件」
+  变成「有事件」——它是无人值守的前提，判定本身在 `orchestrator-child-state.ts`）、
+  `orchestrator-notify.ts`
+
   （桌面通知，唯一入口 + 节流）、`orchestrator-guard.ts`（tmux backstop：
   拦手写 tmux）。
 - **工具与接线**：`orchestrator-tools.ts`（plan / status / notify）、
@@ -336,6 +344,8 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |
 | `orchestration-id.ts` | 编排 id：编排的稳定地址（不是 session id），接力换人后子会话无感 |
 | `orchestrator-boundaries.ts` | 文件边界代数：两个任务能否并行的唯一判据 |
+| `orchestrator-child-state.ts` | 子会话四态（working / waiting-input / idle / dead）与再唤醒退避；判定用结构化真值，不用 token 增长 |
+
 | `orchestrator-delivery.ts` | 任务投递：写任务文件 + argv 启动，并校验真的送达才报成功 |
 | `orchestrator-deps.ts` | 编排工具需要的依赖集合；host 类型本身住在 `tool-host.ts`，这里只 re-export |
 | `orchestrator-directives.ts` | 编排两侧的指令：项目经理拿全套契约，子会话只拿一句话 |
@@ -344,7 +354,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
 | `orchestrator-keys.ts` | 在子会话里按键（封闭键位表），让项目经理能选中非默认项 |
 | `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
-| `orchestrator-pane-read.ts` | 读子会话屏幕，含对话框选项与当前高亮项 |
+| `orchestrator-pane-read.ts` | 读子会话屏幕：只在页脚（`↑↓ navigate enter select`）之上解析对话框，折行选项合并 |
+| `orchestrator-probe.ts` | 状态探针：周期观察每个子会话，进入 waiting-input / idle / dead 时自己生成事件 |
+
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash |
 | `orchestrator-read-tools.ts` | 注册 `orchestrator_read` / `orchestrator_key` 两个原子工具 |
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西 |

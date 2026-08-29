@@ -129,7 +129,8 @@ test("loop goal: set_gate_mode(loop) delivers Step 0 in the same turn it decides
   // as the session's first action — without this the agent could edit for a
   // whole turn before ever seeing the exit contract.
   const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
-  const toolInjectAt = SRC.indexOf("buildLoopGoalDirective(readLoopGoal(");
+  const toolInjectAt = SRC.indexOf("buildLoopGoalDirective(readSessionLoopGoal(");
+
   assert.ok(toolInjectAt > 0 && toolInjectAt < handlerAt, "set_gate_mode must inject the goal too");
   assert.match(SRC.slice(toolInjectAt - 200, toolInjectAt), /effective === "loop"/);
 });
@@ -1436,7 +1437,8 @@ test("goal criterion 3: prepare_adviser is registered and hands back a brief wit
   // (judge_wait's own reply), so the header no longer teaches it. What must
   // survive is the truncated-goal pointer: a brief with half a goal in it
   // sends the adviser off the wrong contract.
-  assert.match(body, /需要全文时读 \$\{pathJoin\(target\.root, LOOP_GOAL_RELPATH\)\}/,
+  assert.match(body, /需要全文时读 \$\{loopGoalPathIn\(target\.root\)\}/,
+
     "a truncated goal is pointed at its file");
 });
 
@@ -1503,7 +1505,8 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   assert.match(body, /等待纪律/, "the waiting discipline is part of the spawn flow");
   assert.match(body, /第一次 goal 批准前编辑\/写工具仍被门禁拦截,属预期/,
     "prepare_review states the pre-approval reality too (round-17 P2: it was the one left behind)");
-  assert.match(body, /落盘 task 文件时请用 read 读取 \$\{pathJoin\(root, LOOP_GOAL_RELPATH\)\}/,
+  assert.match(body, /落盘 task 文件时请用 read 读取 \$\{loopGoalPathIn\(root\)\}/,
+
     "a truncated goal must be completed from the file when writing the task");
 });
 
@@ -2043,7 +2046,13 @@ test("review_checkpoint: the pre-review commit channel is registered with its co
   assert.match(body, /COMMIT_MSG_FORBIDDEN/, "round-4 P2: AI-attribution guard replicated");
   assert.match(body, /testScope !== "full"/, "round-4 P2: full precommit required");
   assert.match(body, /isSensitiveFile/, "round-4 P2: sensitive paths refused");
-  assert.match(body, /st\.checkpoint = \{ sha/, "round-4 P2: sha persisted to gate state");
+  assert.match(body, /st\.checkpoint = \{\s+sha,/, "round-4 P2: sha persisted to gate state");
+  // R-22: a round that skipped precommit on the user's `/gate-bypass` records
+  // that fact ON the checkpoint, so the reviewer and declare_done can see it.
+  assert.match(body, /precommitBypassed: true/, "R-22: a bypassed round is recorded, never silent");
+  assert.match(body, /const precommitBypassed = st\.bypass\.active/,
+    "R-22: the bypass is what releases the precommit prerequisite");
+
   assert.match(body, /REVIEW_GATE_BYPASS: "1"/, "hook bypass is scoped to the child process");
 });
 
@@ -2342,12 +2351,16 @@ test("every enforcement path computes a FRESH fingerprint", () => {
   // `computeFingerprint(` past the 9000 window, turning this test red only by
   // luck; a slightly smaller edit would have made it pass vacuously).
   const anchors: Array<[string, number | string]> = [
-    // 2200: declare_done's own description + the merge-waiver dialog sit
-    // between the tool name and its first fingerprint call.
-    ['name: "declare_done"', 2200],
+    // declare_done's own description, the orchestrator branch (R-30) and the
+    // merge-waiver dialog sit between the tool name and its first fingerprint
+    // call — bounded by the check that FOLLOWS the loop, not by a byte count.
+    ['name: "declare_done"', "// Residual judge children"],
     ['name: "record_review"', 6000],
     ['name: "request_arbitration"', 4000],
-    ['pi.on("agent_settled"', 1200],
+    // Same reason: R-3's orchestrator branch returns before the loop's own
+    // fingerprint, so the window is closed by the block after it.
+    ['pi.on("agent_settled"', "// L7/L8 — completion-only requirements"],
+
     // The P-multi per-repo fingerprint loop sits far below the ship-detection
     // anchor inside the tool_call handler — bounded by the loop itself, not by
     // a byte count that every added comment invalidates.
@@ -2785,7 +2798,8 @@ test("declare_done lands the work itself, and a conflict stops it honestly", () 
   const body = toolBodyOf("declare_done");
   assert.match(body, /const finish = finishWorkBranch\(/, "the gate merges, the agent does not");
   const finishAt = SRC.indexOf("function finishWorkBranch(");
-  const finish = SRC.slice(finishAt, finishAt + 3000);
+  const finish = SRC.slice(finishAt, finishAt + 4500);
+
   assert.match(finish, /decideFinish\(\{/, "the decision is the pure function's");
   assert.match(finish, /"merge", "--no-ff"/);
   // A conflict leaves NOTHING half-applied: abort, return to the work branch,
@@ -2944,7 +2958,16 @@ test("the orchestration deps hand over only what the EXTENSION owns", () => {
 });
 
 test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets one line", () => {
-  const block = windowOf('if (state.taskMode === "orchestrator") {', "\n    }\n", "orchestration prompt");
+  // Anchored INSIDE before_agent_start on purpose: `taskMode === "orchestrator"`
+  // now also branches in agent_settled (R-3 — the loop's RESUME must never
+  // reach a project manager), and that branch appears earlier in the file.
+  const block = windowOf(
+    'if (state.taskMode === "orchestrator") {',
+    "\n    }\n",
+    "orchestration prompt",
+    SRC.indexOf('pi.on("before_agent_start"'),
+  );
+
   assert.match(block, /ORCHESTRATOR_DIRECTIVE/);
   assert.match(block, /formatInheritanceBrief/, "a relay successor is told what it inherited");
   // F13 — the orchestrator branch RETURNS. Falling through appended the loop
@@ -2982,6 +3005,75 @@ test("declare_done consults the ORCHESTRATION's exit contract, not just this ses
   assert.match(helper, /if \(state\.taskMode !== "orchestrator"\) return \[\]/,
     "it must be inert for every other mode");
 });
+
+test("R-30: declare_done and orchestrator_status answer with the SAME function, so they cannot disagree", () => {
+  // Measured on 2026-08-30: with the plan complete, no live children and no
+  // open decisions, `orchestrator_status` said "没有了，可以 declare_done"
+  // while declare_done rejected for "code review gate is PENDING / precommit
+  // has not run" — criteria a project manager can never meet, because
+  // constraint 2 forbids it from writing the code a review would judge. Two
+  // answers to one question; here it was a functional deadlock.
+  const body = toolBodyOf("declare_done");
+  assert.match(body, /const orchestratorMode = state\.taskMode === "orchestrator"/);
+  assert.match(body, /if \(orchestratorMode\) \{[\s\S]{0,600}?problems\.push\(\.\.\.orchestrationDoneProblems\(\)\);/,
+
+    "in orchestrator mode the PLAN is the whole criterion");
+  assert.match(body, /orchestrator_status/,
+    "and the refusal points at the tool that lists the very same items");
+  // The loop-only requirements must be inside the non-orchestrator branch:
+  // a supervisor has no loop goal to approve and no Copilot cycle to close.
+  assert.match(body, /if \(!orchestratorMode\) \{[\s\S]*LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/);
+});
+
+test("R-3: an orchestrator never receives the LOOP's continuation — its criteria are the plan's", () => {
+  // The loop's `[REVIEW_GATE_RESUME]` fired at a project manager twice in the
+  // second run, quoting unmet gates read from the SUPERVISOR's own sidecar —
+  // a review and a precommit it will never have. The nudge could never be
+  // satisfied, so it would have kept firing to the end of the session.
+  const settled = windowOf('pi.on("agent_settled"', "// L7/L8 — completion-only requirements", "agent_settled");
+  assert.match(settled, /if \(state\.taskMode === "orchestrator"\) \{\s*\n\s*orchestratorSettled\(ctx\);\s*\n\s*return;/,
+    "it branches BEFORE the loop's own unmet-requirement computation");
+  const own = windowOf("function orchestratorSettled(", "\n  }", "orchestratorSettled");
+  assert.match(own, /buildOrchestratorResume\(/, "and it has a continuation of its own");
+  assert.match(own, /orchestrationDoneProblems\(\)/, "built from the PLAN");
+  assert.match(own, /startProbeTimer\(ctx\)/, "which also arms the state probe");
+  assert.doesNotMatch(own, /unmetRequirements|LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/,
+    "and never from the loop's gates");
+});
+
+test("R-16/R-23: the background state probe is wired, default-on in orchestrator mode, and cleaned up", () => {
+  const start = windowOf("function startProbeTimer(", "\n  }", "startProbeTimer");
+  assert.match(start, /PROBE_INTERVAL_MS/, "the cadence comes from the probe module, not a literal here");
+  assert.match(start, /state\.taskMode !== "orchestrator"/, "it exists only for the supervising role");
+  assert.match(start, /ctx\.isIdle\?\.\(\)/, "a wake-up mid-turn would be noise");
+  assert.match(start, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");
+  const shutdown = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown");
+  assert.match(shutdown, /stopProbeTimer\(\)/, "a leaked timer would keep waking a session that is gone");
+});
+
+test("R-26: an orchestration CHILD hands the borrowed worktree back on the BASE branch", () => {
+  // The child merged, checked itself back out onto its own intermediate
+  // branch, and left the SUPERVISOR's worktree standing there — so the
+  // project manager's view of its own repository was two commits stale, and
+  // the next serial child would have branched off the wrong baseline.
+  const finish = windowOf("function finishWorkBranch(", "\n  }", "finishWorkBranch");
+  assert.match(finish, /const handBackToBase = isOrchestrationChild\(\)/);
+  assert.match(finish, /if \(!handBackToBase\) \{/,
+    "an ordinary session still returns to its work branch (its next checkpoint depends on it)");
+});
+
+test("R-10: the loop goal file is per SESSION, and every read/write goes through the one helper", () => {
+  assert.match(SRC, /function loopGoalPathIn\(root: string\): string \{\s*\n\s*return pathJoin\(root, loopGoalRelPath\(SESSION_STATE_VARIANT\)\)/);
+  assert.match(SRC, /function readSessionLoopGoal\(root: string\): LoopGoal/);
+  // Nothing may reach the shared path directly any more: two orchestration
+  // children share one worktree, and the second approval would overwrite the
+  // first — the file the reviewer verifies against.
+  const direct = SRC.match(/pathJoin\((?:root|target\.root|goalRoot|primaryRepoRoot), LOOP_GOAL_RELPATH\)/g) ?? [];
+  assert.deepEqual(direct, [], "every goal path is built from the session's own variant");
+  const bareReads = SRC.match(/[^n]readLoopGoal\((?:root|primaryRepoRoot)\)/g) ?? [];
+  assert.deepEqual(bareReads, [], "and every read carries the variant too");
+});
+
 
 test("set_gate_mode refuses orchestrator where the role is impossible or unsafe", () => {
   const body = toolBodyOf("set_gate_mode");

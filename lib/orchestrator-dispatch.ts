@@ -43,19 +43,30 @@ import {
   buildTaskDocument,
   echoMarker,
   planSend,
+  SEND_INLINE_MAX_CHARS,
   taskFileName,
 } from "./orchestrator-delivery.ts";
-import { describeStartupEvidence, type PaneSnapshot } from "./orchestrator-pane-read.ts";
+import {
+  describeStartupEvidence,
+  dialogIsOpen,
+  formatPaneSnapshot,
+  type PaneSnapshot,
+} from "./orchestrator-pane-read.ts";
 import { APPROVE_LABEL_PATTERN } from "./orchestrator-keys.ts";
-import { selectOptionInChild } from "./orchestrator-read-tools.ts";
+import { screenLooksBusy } from "./orchestrator-child-state.ts";
+import { normalizeGoalText } from "./loop-goal.ts";
+import { captureDialog, selectOptionInChild } from "./orchestrator-read-tools.ts";
+import type { ChildSession } from "./orchestrator-registry.ts";
 import {
   alivePanes,
   capturePane,
+  childGateFacts,
   currentPlan,
   toolFail as fail,
   toolReply as reply,
   verifyDelivery,
 } from "./orchestrator-tool-kit.ts";
+
 
 /**
  * May THIS task start right now, and will it run alongside anything?
@@ -286,6 +297,122 @@ function findApprovalOption(snapshot: PaneSnapshot | undefined): number | undefi
   return hits.length === 1 ? hits[0]!.index : undefined;
 }
 
+/**
+ * CONSTRAINT 8, done against the TRUTH (R-7).
+ *
+ * What it used to do: boundary-check the text the CALLER typed into
+ * `approveGoal`, and then press "认可" on whatever was actually on screen.
+ * Those are two different documents. Measured on 2026-08-30: the orchestrator
+ * passed an abridged goal (3 exit criteria, no non-goals section), the check
+ * passed, and the FULL goal (7 criteria) was approved on the user's behalf —
+ * so the mechanical guarantee of constraint 8 rested entirely on the
+ * orchestrator transcribing honestly. Worse, R-6's path false-positives were
+ * actively pushing it to rewrite the text to get through.
+ *
+ * Now the caller expresses INTENT ("approve it") and the gate reads the draft
+ * from the child's own sidecar (`goalPrereview.draft` — the data F10 pointed
+ * at) and checks THAT. A caller-supplied text is not compared and cannot
+ * widen anything; when it differs from the sidecar, the receipt says so,
+ * because a mismatch means the orchestrator was looking at something else.
+ */
+async function approveChildGoal(
+  deps: OrchestratorDeps,
+  child: ChildSession,
+  supplied: unknown,
+): Promise<ToolReply> {
+  const childId = child.id;
+  const { plan } = currentPlan(deps);
+  const task = plan?.tasks.find((t) => t.id === child.taskId);
+  if (!task) {
+    return fail(`review-gate: 找不到子会话 "${childId}" 对应的任务 "${child.taskId}"，无法做边界比对。`);
+  }
+  const draft = childGateFacts(deps, child).goalDraft;
+  if (!draft) {
+    return fail(
+      `review-gate: 代批被拒 —— 读不到子会话 ${childId} sidecar 里的 goal 草稿` +
+      "（`goalPrereview.draft`）。门禁只批**它自己读到的那一份**，不批调用方手抄的文本（R-7）。\n" +
+      "先确认它确实已经把草稿提交给了 goal-auditor / 正在等批准，再重试。",
+      { childId, approved: false, boundaryOk: false },
+    );
+  }
+  const check = proxyGoalProblems(draft, task);
+  if (!check.ok) return fail("review-gate: " + check.reason, { outside: check.outside });
+
+  const suppliedText = typeof supplied === "string" ? supplied.trim() : "";
+  const mismatchNote =
+    suppliedText && normalizeGoalText(suppliedText) !== normalizeGoalText(draft)
+      ? "\n注意：你传进来的文本与 sidecar 里的真实草稿**不一致** —— 门禁比对并批准的是 sidecar 那一份" +
+        "（你手上的可能已经过时了，建议 `orchestrator_read` 重看一遍）。"
+      : "";
+
+  // F11 — the boundary check is only HALF the job. The old code stopped here
+  // and reported "已过边界比对", which the caller reasonably read as
+  // "approved"; in reality the approval dialog was sitting untouched in the
+  // child's pane. Approving means ANSWERING that dialog, verifiably.
+  const snapshot = await captureDialog(deps, child.paneId);
+  const approveIndex = findApprovalOption(snapshot);
+  if (approveIndex === undefined) {
+    // R-18 — do NOT bounce the caller to a path that just failed. The screen
+    // has already been re-read several times here; say which of the two
+    // situations it actually is.
+    const options = snapshot?.dialog?.options ?? [];
+    return fail(
+      "review-gate: 边界比对通过（约束 8，比的是 sidecar 里的真实草稿），**但代批没有真的执行** —— " +
+      (options.length === 0
+        ? "重读了几次，子会话屏幕上都没有待答的对话框（它可能还没提交批准、或者已经被答掉了）。\n" +
+          `先 \`orchestrator_read({ childId: "${childId}" })\` 确认它到底在等什么。`
+        : "屏幕上的框里找不到唯一一个「认可/批准」选项，不能盲按。现有选项：" +
+          options.map((o) => `${o.index}. ${o.label}`).join(" / ") +
+          `\n用 \`orchestrator_key({ childId: "${childId}", index: <第几项> })\` 亲自答它（那条路径带命中校验）。`),
+      { childId, boundaryOk: true, approved: false, options: options.length },
+    );
+  }
+  const answered = await selectOptionInChild(deps, child, { index: approveIndex });
+  if (answered.isError) return answered;
+  return reply(
+    "review-gate: 代批完成 —— 先拿子会话 sidecar 里的真实 goal 草稿过任务边界比对（约束 8），" +
+    "再在它的对话框上选中并提交了「认可」项。" + mismatchNote + "\n" +
+    `被批准的草稿（来源：sidecar goalPrereview.draft，共 ${draft.length} 字）前 200 字：\n${draft.slice(0, 200)}\n\n` +
+    answered.content.map((c) => c.text).join("\n"),
+    { childId, boundaryOk: true, approved: true, draftChars: draft.length },
+  );
+}
+
+
+/**
+ * How long the gate waits for a busy child to free up before it gives up on
+ * delivering a COMMAND (R-20).
+ *
+ * A command typed into a busy session does not run — it lands in the steering
+ * queue as an ordinary message, which is how a `/gate-bypass` "took effect"
+ * without taking effect. Rather than making the orchestrator poll the screen
+ * by hand for the idle window (the hand-run's downgrade), the gate waits for
+ * it here, and REFUSES honestly if it never comes.
+ */
+export const COMMAND_WINDOW_ATTEMPTS = 15;
+export const COMMAND_WINDOW_INTERVAL_MS = 2000;
+
+/** Wait until the child is not visibly running a tool. */
+async function waitForIdleWindow(
+  deps: OrchestratorDeps,
+  paneId: string,
+  attempts = COMMAND_WINDOW_ATTEMPTS,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  for (let attempt = 0; attempt < Math.max(1, attempts); attempt++) {
+    if (attempt > 0) await deps.sleep(COMMAND_WINDOW_INTERVAL_MS);
+    const snapshot = capturePane(deps, paneId);
+    if (!snapshot) return { ok: false, reason: "读不到它的屏幕（capture-pane 失败），不敢投命令" };
+    if (dialogIsOpen(snapshot)) return { ok: false, reason: "它现在有一个打开的对话框，先答框再说" };
+    if (!screenLooksBusy(snapshot.text)) return { ok: true };
+  }
+  return {
+    ok: false,
+    reason:
+      `等了 ${Math.round((COMMAND_WINDOW_INTERVAL_MS * attempts) / 1000)}s 它一直在跑工具 —— ` +
+      "此刻投过去的命令只会排进 steering 队列、当成普通消息读掉，**不会**被执行",
+  };
+}
+
 export async function dispatchSend(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const childId = String(params.childId ?? "").trim();
   const child = findChild(deps.runtime(), childId);
@@ -293,41 +420,51 @@ export async function dispatchSend(deps: OrchestratorDeps, params: Record<string
   if (child.closedAt) return fail(`review-gate: 子会话 "${childId}" 已经关闭了。`);
 
   const message = String(params.message ?? "").trim();
-  const goalText = String(params.approveGoal ?? "").trim();
-  if (!message && !goalText) return fail("review-gate: 要发的内容是空的。");
+  const approveRaw = params.approveGoal;
+  const wantsApproval = approveRaw !== undefined && approveRaw !== false && approveRaw !== "";
+  const kind: "message" | "command" =
+    String(params.kind ?? "").trim().toLowerCase() === "command" ? "command" : "message";
+  if (!message && !wantsApproval) return fail("review-gate: 要发的内容是空的。");
 
   // CONSTRAINT 8 — proxy-approving a child's goal is allowed, but only inside
   // the task's declared boundary. Outside it, this is a scope change, and
   // scope is the user's.
-  if (goalText) {
-    const { plan } = currentPlan(deps);
-    const task = plan?.tasks.find((t) => t.id === child.taskId);
-    if (!task) return fail(`review-gate: 找不到子会话 "${childId}" 对应的任务 "${child.taskId}"，无法做边界比对。`);
-    const check = proxyGoalProblems(goalText, task);
-    if (!check.ok) return fail("review-gate: " + check.reason, { outside: check.outside });
+  if (wantsApproval) return approveChildGoal(deps, child, approveRaw);
 
-    // F11 — the boundary check is only HALF the job. The old code stopped
-    // here and reported "已过边界比对", which the caller reasonably read as
-    // "approved"; in reality the approval dialog was sitting untouched in the
-    // child's pane. Approving means ANSWERING that dialog, verifiably.
-    const snapshot = capturePane(deps, child.paneId);
-    const approveIndex = findApprovalOption(snapshot);
-    if (approveIndex === undefined) {
+  // R-13 — THE ACCIDENT. A dialog was open, a long message went in through
+  // `send-keys`, and the newlines inside it were read by the TUI as "submit
+  // the highlighted row": the child recorded option A as the project
+  // manager's answer while the user had actually decided C, and BOTH receipts
+  // said only that delivery could not be confirmed. Nothing may be typed at a
+  // child that is holding a question.
+  const guard = await captureDialog(deps, child.paneId);
+  if (dialogIsOpen(guard)) {
+    return fail(
+      `review-gate: 子会话 ${childId} 现在有一个**打开的对话框**，拒绝投文本。\n` +
+      "原因是一次真实事故（R-13）：文本经 send-keys 打进去时，其中的换行会被 TUI 当成" +
+      "「提交当前高亮项」，于是编排层替子会话答了一个它根本没打算选的选项，而两边都以为什么都没发生。\n" +
+      `先用 \`orchestrator_read({ childId: "${childId}" })\` 看清这个框，用 \`orchestrator_key\` 答掉它，再发文本。\n\n` +
+      (guard ? formatPaneSnapshot(guard, 40) : ""),
+      { childId, delivered: false, dialogOpen: true },
+    );
+  }
+
+  // R-20 — a COMMAND only runs when it is typed into an idle composer.
+  if (kind === "command") {
+    if (message.includes("\n") || message.length > SEND_INLINE_MAX_CHARS) {
       return fail(
-        "review-gate: 边界比对通过（约束 8），**但代批没有真的执行** —— " +
-        "在子会话屏幕上找不到唯一一个「认可/批准」选项，不能盲按。\n" +
-        `请 \`orchestrator_read({ childId: "${childId}" })\` 看清那个框，` +
-        `再用 \`orchestrator_key({ childId: "${childId}", index: <第几项> })\` 亲自答它（那条路径带命中校验）。`,
-        { childId, boundaryOk: true, approved: false },
+        "review-gate: 命令必须是一行短文本（slash 命令走输入框提交），多行/超长内容请用 `kind: \"message\"` 发。",
+        { childId, delivered: false },
       );
     }
-    const answered = await selectOptionInChild(deps, child, { index: approveIndex });
-    if (answered.isError) return answered;
-    return reply(
-      `review-gate: 代批完成 —— 先过任务边界比对（约束 8），再在子会话的对话框上选中并提交了「认可」项。\n` +
-      (answered.content.map((c) => c.text).join("\n")),
-      { childId, boundaryOk: true, approved: true },
-    );
+    const window = await waitForIdleWindow(deps, child.paneId);
+    if (!window.ok) {
+      return fail(
+        `review-gate: 命令没有投出去 —— ${window.reason}。什么都没发（宁可不发，也不把命令降级成一条消息）。\n` +
+        "稍后重试，或者改用 `kind: \"message\"` 明确地只发一条说明。",
+        { childId, delivered: false, kind },
+      );
+    }
   }
 
   // F7 — long or multi-line text never goes through the keyboard.
@@ -369,10 +506,24 @@ export async function dispatchSend(deps: OrchestratorDeps, params: Record<string
       { childId, delivered: false, evidence: check.evidence },
     );
   }
+  const lane = check.verdict.lane ?? "submitted";
+  // A command that ended up in the queue did NOT run. Saying "delivered"
+  // there is the R-20 trap: the orchestrator waits for an effect that will
+  // never happen.
+  if (kind === "command" && lane === "queued") {
+    return fail(
+      `review-gate: 这条命令**没有被执行** —— 它进了 steering 队列（子会话在投递的瞬间又忙了起来），` +
+      "会被当成一条普通消息读掉。要么稍后重试，要么明确改用 `kind: \"message\"`。",
+      { childId, delivered: true, executed: false, lane, evidence: check.evidence },
+    );
+  }
   return reply(
     `review-gate: 已发给子会话 ${childId}（pane ${child.paneId}）` +
     (mode.kind === "file" ? "，正文写成文件、只把路径敲了进去（长文本不走键盘）" : "") +
-    `。投递已核实：${check.verdict.summary}。`,
-    { childId, delivered: true },
+    `。投递已核实：${check.verdict.summary}。\n` +
+    `送达通道：${lane === "submitted" ? "输入框已提交" : "steering 队列"}` +
+    `（本次意图：${kind === "command" ? "作为命令执行" : "只是一条消息"}）。`,
+    { childId, delivered: true, lane, kind, executed: kind === "command" },
   );
+
 }

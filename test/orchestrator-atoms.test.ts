@@ -12,14 +12,21 @@ import assert from "node:assert/strict";
 
 import {
   dialogIsOpen,
+  dialogSignature,
   parsePaneSnapshot,
   readStartupEvidence,
   describeStartupEvidence,
+  findDialogFooter,
   formatPaneSnapshot,
 } from "../lib/orchestrator-pane-read.ts";
+
 import {
   APPROVE_LABEL_PATTERN,
   normalizeKey,
+  describeScreenChange,
+  SUBMIT_KEY_ORDER,
+  TMUX_KEY_NAMES,
+
   normalizeKeySequence,
   planMoveKeys,
   planSelection,
@@ -56,6 +63,12 @@ import type { AttentionEvent } from "../lib/attention.ts";
 // F3 — reading the screen
 // ---------------------------------------------------------------------------
 
+/**
+ * The key-hint footer every live choice list draws, and the ONLY thing that
+ * makes this module report a dialog at all (R-1/R-9).
+ */
+const FOOTER = "  ↑↓ navigate  enter select  esc cancel";
+
 /** Exactly how pi's own SelectList renders: `"→ "` selected, `"  "` not. */
 const PI_CONFIRM = [
   "review-gate: 认可这个目标吗？",
@@ -63,7 +76,9 @@ const PI_CONFIRM = [
   "",
   "→ Yes",
   "  No",
+  FOOTER,
 ].join("\n");
+
 
 test("F3: a pi confirm dialog is parsed — including the row that carries NO glyph", () => {
   const snapshot = parsePaneSnapshot(PI_CONFIRM);
@@ -85,17 +100,71 @@ test("F3: the LAST dialog on screen wins — an answered one above is scrollback
     "新的问题",
     "  保留",
     "→ 丢弃",
+    FOOTER,
   ].join("\n"));
+
   assert.deepEqual(snapshot.dialog!.options.map((o) => o.label), ["保留", "丢弃"]);
   assert.equal(snapshot.dialog!.selectedIndex, 2);
   assert.equal(snapshot.dialog!.title, "新的问题");
 });
 
 test("F3: a numbered list with no highlight is SHOWN but carries no selected index", () => {
-  const snapshot = parsePaneSnapshot(["请选择：", "1. 第一项", "2. 第二项"].join("\n"));
+  const snapshot = parsePaneSnapshot(["请选择：", "1. 第一项", "2. 第二项", FOOTER].join("\n"));
+
   assert.deepEqual(snapshot.dialog!.options.map((o) => o.label), ["第一项", "第二项"]);
   assert.equal(snapshot.dialog!.selectedIndex, undefined, "nothing may be pressed on this basis");
 });
+
+test("R-1/R-9: WITHOUT the key-hint footer there is no dialog — the widget row is not an option", () => {
+  // The measured pane: a belowEditor sub-agent widget whose `▶` glyph the old
+  // parser anchored on. Twice it merely invented a dialog out of nothing;
+  // the third time a REAL dialog was on screen, the widget (further down the
+  // pane) won, and `orchestrator_key` refused for an option list that did not
+  // exist — with no way left to answer the child. 25 minutes of deadlock.
+  const widgetOnly = parsePaneSnapshot([
+    "did not create, and",
+    "the tests still pass",
+    "",
+    "▶ reviewer | # Task for reviewer | 1517537s",
+  ].join("\n"));
+  assert.equal(widgetOnly.dialog, undefined, "a glyph is not a dialog");
+  assert.equal(dialogIsOpen(widgetOnly), false);
+
+  // The SAME widget under a real dialog changes nothing about the dialog.
+  const withDialog = parsePaneSnapshot([
+    "把当前分支作为本会话的基准分支吗？",
+    "→ 是",
+    "  否",
+    FOOTER,
+    "▶ reviewer | # Task for reviewer | 1517537s",
+  ].join("\n"));
+  assert.deepEqual(withDialog.dialog!.options.map((o) => o.label), ["是", "否"]);
+  assert.equal(withDialog.dialog!.selectedIndex, 1);
+});
+
+test("R-12: a row that WRAPPED in a narrow pane is merged back into one option", () => {
+  const snapshot = parsePaneSnapshot([
+    "怎么办",
+    "→ A 等其他会话修根因",
+    "  B 你自己修",
+    "  C 不修根因，你给一条先交",
+    "付文档的路",
+    FOOTER,
+  ].join("\n"));
+  assert.equal(snapshot.dialog!.options.length, 3, "three options, not two — the third is the one that wrapped");
+  assert.match(snapshot.dialog!.options[2]!.label, /C 不修根因，你给一条先交付文档的路/);
+});
+
+test("R-5: the dialog SIGNATURE is what tells one question from the next", () => {
+  const first = parsePaneSnapshot(["1 / 3 选一个", "→ 甲", "  乙", FOOTER].join("\n"));
+  const same = parsePaneSnapshot(["1 / 3 选一个", "  甲", "→ 乙", FOOTER].join("\n"));
+  const next = parsePaneSnapshot(["2 / 3 再选", "→ 甲", "  乙", FOOTER].join("\n"));
+  assert.equal(dialogSignature(first.dialog), dialogSignature(same.dialog),
+    "moving the highlight is not a different question");
+  assert.notEqual(dialogSignature(first.dialog), dialogSignature(next.dialog));
+  assert.equal(dialogSignature(undefined), undefined);
+});
+
 
 test("F3: ordinary prose is not a dialog, and the raw screen always comes back", () => {
   const prose = "正在读取文件\n分析中……\n没有问题";
@@ -110,7 +179,13 @@ test("F3: an empty pane is empty — that is EVIDENCE, not a parse failure", () 
   const snapshot = parsePaneSnapshot("\n\n   \n");
   assert.equal(snapshot.hasContent, false);
   const evidence = readStartupEvidence(snapshot, "rg-task-a-1");
-  assert.deepEqual(evidence, { paneHasContent: false, looksLikePi: false, markerVisible: false });
+  assert.deepEqual(evidence, {
+    paneHasContent: false,
+    looksLikePi: false,
+    markerVisible: false,
+    steeringQueued: false,
+  });
+
 });
 
 test("F8: startup evidence names exactly what was and was not seen", () => {
@@ -124,6 +199,38 @@ test("F8: startup evidence names exactly what was and was not seen", () => {
 // ---------------------------------------------------------------------------
 // F6 / F11 — pressing a key
 // ---------------------------------------------------------------------------
+
+test("R-8: `submit` is an INTENT, and the gate owns which key it becomes", () => {
+  // Measured on a real pi confirmation dialog: `Enter` and `C-m` did nothing,
+  // only `KPEnter` moved it. A caller must not have to know that — and the
+  // one that pressed `enter` and was told the press went out waited 600s on
+  // an answer it had never given.
+  assert.equal(normalizeKey("submit"), "submit");
+  assert.equal(normalizeKey("KPEnter"), "kpenter");
+  assert.deepEqual([...SUBMIT_KEY_ORDER], ["enter", "kpenter"], "the ordinary key first, the stubborn one second");
+  assert.equal(TMUX_KEY_NAMES.kpenter, "KPEnter");
+  assert.equal(TMUX_KEY_NAMES.submit, "Enter", "the intent starts with the key that usually works");
+});
+
+test("R-8: the low-level receipt reports whether the screen MOVED, and refuses to imply more", () => {
+  const before = parsePaneSnapshot(["认可吗", "→ Yes", "  No", FOOTER].join("\n"));
+  const unchanged = describeScreenChange(before, before);
+  assert.equal(unchanged.changed, false);
+  assert.match(unchanged.note, /完全没有变化/);
+  assert.match(unchanged.note, /index.*match|`index`\/`match`/, "and it points at the path that CAN submit");
+
+  const after = parsePaneSnapshot("answered: Yes");
+  assert.equal(describeScreenChange(before, after).changed, true);
+  assert.equal(describeScreenChange(before, undefined).changed, false,
+    "a screen that could not be read proves nothing either way");
+});
+
+test("R-1: the footer is found at the BOTTOM — an older one further up never wins", () => {
+  const lines = ["旧框", "→ A", FOOTER, "…", "新框", "→ B", FOOTER, "▶ widget"];
+  assert.equal(findDialogFooter(lines), 6);
+  assert.equal(findDialogFooter(["没有任何框"]), undefined);
+});
+
 
 test("F6: only whitelisted key names survive — an unknown one is NEVER typed as text", () => {
   assert.equal(normalizeKey("Esc"), "escape");
@@ -155,17 +262,34 @@ test("F6: a row that does not exist is refused with the size of the list", () =>
 });
 
 test("F11: a highlight that did not land where we aimed is a FAILURE, and nothing is submitted", () => {
-  const after = parsePaneSnapshot(["→ A", "  B", "  C"].join("\n"));
+  const after = parsePaneSnapshot(["→ A", "  B", "  C", FOOTER].join("\n"));
   const verdict = verifyHighlight(after, 3, "C");
   assert.equal(verdict.ok, false);
   assert.match((verdict as { reason: string }).reason, /没有提交任何东西/);
 });
 
-test("F11: a dialog still on screen after Enter means it was NOT answered", () => {
-  const still = parsePaneSnapshot(["→ Yes", "  No"].join("\n"));
-  assert.equal(verifyDismissed(still, "Yes").ok, false);
-  assert.equal(verifyDismissed(parsePaneSnapshot("answered: Yes"), "Yes").ok, true);
+test("R-5: the SAME dialog still on screen means NOT answered; a DIFFERENT one means it was", () => {
+  const before = parsePaneSnapshot(["1 / 3 选一个", "→ Yes", "  No", FOOTER].join("\n"));
+  const unchanged = parsePaneSnapshot(["1 / 3 选一个", "→ Yes", "  No", FOOTER].join("\n"));
+  assert.equal(verifyDismissed(before, unchanged, "Yes").ok, false);
+
+  // The measured case: answering question 1 of an interview immediately opens
+  // question 2. The old "is a dialog still on screen" check called that a
+  // failure, and a retry would have answered question 2 by mistake.
+  const nextQuestion = parsePaneSnapshot(["2 / 3 再选一个", "→ A", "  B", FOOTER].join("\n"));
+  const moved = verifyDismissed(before, nextQuestion, "Yes");
+  assert.equal(moved.ok, true);
+  assert.match((moved as { note: string }).note, /换成了另一个框/);
+
+  assert.equal(verifyDismissed(before, parsePaneSnapshot("answered: Yes"), "Yes").ok, true);
+
+  // A screen that could not be read is NOT evidence that the dialog is gone.
+  const unreadable = verifyDismissed(before, undefined, "Yes");
+  assert.equal(unreadable.ok, false, "an unreadable screen must never read as a successful submit");
+  assert.match((unreadable as { reason: string }).reason, /读不到/);
+
 });
+
 
 test("F11: the approval pattern recognizes an affirmative row and only that", () => {
   assert.ok(APPROVE_LABEL_PATTERN.test("Yes"));
@@ -244,9 +368,28 @@ test("F12: an attention whose dialog is already closed is SETTLED, not news", ()
   assert.equal(open.done, true);
   assert.equal(open.reason, "attention");
 
-  const settled = evaluateChildWait({ attention: event(), attentionStillOpen: false, done: false, paneAlive: true });
+  // R-16 — writing an event off now takes POSITIVE evidence: no dialog AND
+  // the probe saying the child moved on. "I saw no dialog" alone is exactly
+  // the judgement that swallowed two real requests for 17 minutes.
+  const settled = evaluateChildWait({
+    attention: event(),
+    attentionStillOpen: false,
+    originState: "working",
+    done: false,
+    paneAlive: true,
+  });
   assert.equal(settled.done, false);
   assert.equal(settled.reason, "settled-elsewhere");
+
+  const noDialogButStopped = evaluateChildWait({
+    attention: event(),
+    attentionStillOpen: false,
+    originState: "idle",
+    done: false,
+    paneAlive: true,
+  });
+  assert.equal(noDialogButStopped.done, true, "a child that stopped is NEWS, never a settled ghost");
+
 
   // Unknown (the screen could not be read) must never SILENCE a request.
   const unknown = evaluateChildWait({ attention: event(), done: false, paneAlive: true });

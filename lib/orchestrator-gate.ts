@@ -193,27 +193,76 @@ export function worktreeRequirement(execution: TaskExecution): { needed: boolean
 // ---------------------------------------------------------------------------
 
 /**
+ * File extensions that make a token unambiguously a PATH.
+ *
+ * Kept as a closed list rather than "anything after a dot", because the whole
+ * problem R-6 documents is over-eager recognition: `v1.2`, `等等.` and
+ * `README.` are not files.
+ */
+const PATH_EXTENSIONS = new Set([
+  "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "md", "mdx", "yml", "yaml",
+  "toml", "sh", "bash", "zsh", "py", "go", "rs", "java", "rb", "css", "scss",
+  "html", "sql", "txt", "lock", "cjs", "env", "cfg", "ini", "xml", "svg",
+]);
+
+/**
+ * Sentences that are declaring what will NOT be touched.
+ *
+ * A goal that spells out its non-goals is following this repository's own
+ * advice, and R-6 measured exactly that being punished: "非目标：不修改
+ * `extensions/` 与 `lib/`" made the proxy-approval FAIL for naming paths
+ * outside the task — the very paths it promised not to touch.
+ */
+const NEGATION_LINE = /(非目标|不改|不碰|不修改|不动|不涉及|不新增|不删除|不要改|禁止修改|out of scope|non-?goals?)/i;
+
+/**
  * Path-like tokens inside free text.
  *
- * Deliberately conservative: a token counts only when it looks unambiguously
- * like a repo path (has a `/` with path-ish segments, or is a bare filename
- * with an extension). Prose, URLs and command flags are not paths, and a
- * false positive here would block a perfectly good goal — so the check errs
- * toward seeing FEWER paths, and the orchestrator's own judgment plus the
- * user notification cover the rest.
+ * THE BUG THIS REPLACES (R-6, three reproductions): the old extractor treated
+ * ANY token containing a slash as a path, so a goal was refused for naming
+ * `running/ended`, `slice/window` and `windowIn/windowOf` — three ordinary
+ * English word pairs. The orchestrator's only way through was to rewrite the
+ * child's goal text, which is how the hand-copied-text hole (R-7) came to be
+ * used in the first place.
+ *
+ * So a token now counts as a path only when it is one of:
+ *
+ *  - a name with a known source extension (`lib/foo.ts`, `README.md`);
+ *  - an explicit directory (`test/`, `lib/**`);
+ *  - a path whose first segment is a root the TASK ITSELF declared — which is
+ *    the only way to recognize an extension-less path without guessing.
+ *
+ * Lines that are declaring NON-GOALS are skipped entirely.
  */
-export function extractPathLikeTokens(text: string): string[] {
-  const tokens = String(text ?? "").split(/[\s,;:()[\]{}"'`、，。；：]+/).filter(Boolean);
+export function extractPathLikeTokens(text: string, knownRoots: readonly string[] = []): string[] {
+  const roots = new Set(
+    knownRoots
+      .map((b) => String(b ?? "").replace(/^\.\//, "").split("/")[0])
+      .filter((r): r is string => Boolean(r) && r !== "."),
+  );
   const out: string[] = [];
-  for (const raw of tokens) {
-    const token = raw.replace(/^[<(]+|[>).,]+$/g, "");
-    if (!token) continue;
-    if (/^[a-z]+:\/\//i.test(token)) continue;      // URL
-    if (token.startsWith("-")) continue;            // a flag
-    if (token.startsWith("/")) continue;            // absolute: not a repo path
-    const hasSlash = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._*-]+)+$/.test(token);
-    const isFilename = /^[A-Za-z0-9._-]+\.[A-Za-z]{1,6}$/.test(token) && !/^\d+\.\d+$/.test(token);
-    if (hasSlash || isFilename) out.push(token.replace(/\/$/, ""));
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    if (NEGATION_LINE.test(line)) continue;
+    const tokens = line.split(/[\s,;:()[\]{}"'`、，。；：]+/).filter(Boolean);
+    for (const raw of tokens) {
+      const token = raw.replace(/^[<(]+|[>).,]+$/g, "");
+      if (!token) continue;
+      if (/^[a-z]+:\/\//i.test(token)) continue;      // URL
+      if (token.startsWith("-")) continue;            // a flag
+      if (token.startsWith("/")) continue;            // absolute: not a repo path
+      if (!/^[A-Za-z0-9._*/-]+$/.test(token)) continue;
+      const cleaned = token.replace(/\/\*\*?$/, "/");
+      const last = cleaned.split("/").filter(Boolean).pop() ?? "";
+      const dot = last.lastIndexOf(".");
+      const extension = dot > 0 ? last.slice(dot + 1).toLowerCase() : "";
+      const hasKnownExtension = PATH_EXTENSIONS.has(extension);
+      const isExplicitDirectory = cleaned.endsWith("/");
+      const firstSegment = cleaned.split("/")[0] ?? "";
+      const startsAtDeclaredRoot = cleaned.includes("/") && roots.has(firstSegment);
+      if (!hasKnownExtension && !isExplicitDirectory && !startsAtDeclaredRoot) continue;
+      const normalized = cleaned.replace(/\/$/, "");
+      if (normalized) out.push(normalized);
+    }
   }
   return [...new Set(out)];
 }
@@ -231,9 +280,13 @@ export interface ProxyGoalVerdict {
  * the child for. A goal that reaches outside is not a judgement call the
  * orchestrator is allowed to make: it is a scope change, and scope belongs to
  * the human.
+ *
+ * `goalText` is the draft read from the CHILD'S OWN SIDECAR, never a text the
+ * caller typed — see `approveChildGoal` in lib/orchestrator-dispatch.ts for
+ * why that distinction is the whole guarantee (R-7).
  */
 export function proxyGoalProblems(goalText: string, task: PlanTask): ProxyGoalVerdict {
-  const named = extractPathLikeTokens(goalText);
+  const named = extractPathLikeTokens(goalText, task.fileBoundaries);
   const outside = pathsOutsideBoundaries(named, task.fileBoundaries);
   if (outside.length === 0) return { ok: true, outside: [] };
   return {
@@ -242,9 +295,11 @@ export function proxyGoalProblems(goalText: string, task: PlanTask): ProxyGoalVe
     reason:
       `代批被拒（约束 8）：子会话的 goal 提到了任务 "${task.id}" 边界之外的路径 —— ` +
       `${outside.slice(0, 8).join(", ")}。任务边界是 ${task.fileBoundaries.join(", ")}。` +
-      "这是范围变更，不是技术取舍：用 `orchestrator_notify` 通知用户，由他决定是扩边界还是缩 goal。",
+      "这是范围变更，不是技术取舍：用 `orchestrator_notify` 通知用户，由他决定是扩边界还是缩 goal。" +
+      "（注意：门禁比对的是子会话 sidecar 里的真实草稿，改写你手上的副本没有任何作用。）",
   };
 }
+
 
 // ---------------------------------------------------------------------------
 // Constraint 9 — only an orchestrator may notify the human
@@ -369,7 +424,23 @@ export function orchestratorDoneProblems(facts: OrchestratorDoneFacts): string[]
         " —— 用 `orchestrator_notify` 告诉他，再退出（约束 11）",
       );
     }
+    // R-29 — "the user was TOLD" is not "the question was SETTLED". A decision
+    // that was notified and never resolved sailed all the way to wrap-up in
+    // the second run, and nothing ever checked whether the answer had been
+    // written back into the plan. Both halves are named here.
+    const dangling = openDecisions(facts.plan).filter((d) => d.notifiedAt);
+    if (dangling.length > 0) {
+      problems.push(
+        `有 ${dangling.length} 个决策通知过用户、但从未落定：` +
+        dangling
+          .map((d) => `${d.id}${d.planEffect ? `（一旦拍板需要改 plan：${d.planEffect}）` : ""}`)
+          .join(", ") +
+        " —— 用 `orchestrator_plan({ action: \"resolve-decision\", decisionId, answer })` 把答案写回 plan，" +
+        "如果答案要求改 plan（扩边界、加任务），先改 plan 并重新获批（R-29）",
+      );
+    }
   }
+
 
   // Constraint 10 — the work has to land somewhere, or the decision not to
   // land it has to be on the record.

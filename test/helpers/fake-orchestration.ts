@@ -32,6 +32,8 @@
 import assert from "node:assert/strict";
 
 import { registerOrchestratorStateTools } from "../../lib/orchestrator-tools.ts";
+import { createChildProbe, type ChildProbe } from "../../lib/orchestrator-probe.ts";
+
 import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session-tools.ts";
 import { registerOrchestratorReadTools } from "../../lib/orchestrator-read-tools.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
@@ -54,7 +56,17 @@ export interface FakePane {
   dialog?: { title: string; options: string[]; selected: number };
   /** The argv the pane was started with (empty for the orchestrator's own). */
   command: string[];
+  /** The belowEditor widget line, rendered BELOW the dialog (R-1/R-9). */
+  widget?: string;
+  /** Pane width; set it to make long option labels wrap (R-12). */
+  width?: number;
+  /** The key this renderer accepts as "submit" (default `Enter`, R-8). */
+  submitKey?: string;
+  /** Dialogs that open as soon as the current one is answered (R-5). */
+  queuedDialogs?: Array<{ title: string; options: string[]; selected: number }>;
+
   alive: boolean;
+
 }
 
 export interface FakeOrchestrationOptions {
@@ -74,7 +86,12 @@ export interface FakeOrchestrationOptions {
   tmuxBroken?: boolean;
   /** Scratch writes fail (disk full, read-only /tmp…). */
   scratchBroken?: boolean;
+  /** The repo's shared git hooks point INTO this worktree path (R-28). */
+  hooksPointAtWorktree?: string;
+  /** Repairing the hooks fails, so `orchestrator_close` must refuse (R-28). */
+  hookRepairFails?: boolean;
 }
+
 
 export interface FakeOrchestration {
   call(name: string, params?: Record<string, unknown>): Promise<ToolReply>;
@@ -105,7 +122,27 @@ export interface FakeOrchestration {
   pushAttention(event: Partial<AttentionEvent> & { toSessionId: string }): void;
   setSidecar(cwd: string, variant: string | undefined, state: Record<string, unknown>): void;
   render(paneId: string): string;
+  /** Move the fake clock forward (the probe reasons about elapsed time). */
+  advance(ms: number): void;
+  /** Current fake clock, in ms. */
+  now(): number;
+  /** Mark a child cwd as having a judge process in flight (R-23). */
+  setJudgeRunning(cwd: string, running: boolean): void;
+  /** How many times the gate repaired the repository's git hooks (R-28). */
+  hookRepairs(): number;
+
 }
+
+/**
+ * The key-hint footer a real choice list draws under its rows.
+ *
+ * The fake renders it because the PARSER now requires it (R-1/R-9): a pane
+ * with no footer has no dialog, which is what stops the belowEditor widget
+ * (`▶ reviewer | # Task for reviewer`) from being read as "the dialog and its
+ * only option". A test that wants the widget-pollution case renders the
+ * widget below the footer, exactly as a real pane does.
+ */
+export const DIALOG_FOOTER_LINE = "  ↑↓ navigate  enter select  esc cancel";
 
 /** Render a pane the way pi renders one (see the header). */
 function renderPane(pane: FakePane): string {
@@ -113,12 +150,24 @@ function renderPane(pane: FakePane): string {
   if (pane.dialog) {
     lines.push(pane.dialog.title);
     pane.dialog.options.forEach((option, i) => {
-      lines.push(`${i === pane.dialog!.selected ? "→ " : "  "}${option}`);
+      const prefix = i === pane.dialog!.selected ? "→ " : "  ";
+      if (pane.width && option.length + prefix.length > pane.width) {
+        // A narrow pane WRAPS: the remainder is rendered at column 0, which
+        // is what made the old parser drop the third option (R-12).
+        const head = option.slice(0, pane.width - prefix.length);
+        lines.push(`${prefix}${head}`, option.slice(pane.width - prefix.length));
+      } else {
+        lines.push(`${prefix}${option}`);
+      }
     });
+    lines.push(DIALOG_FOOTER_LINE);
   }
   if (pane.buffer) lines.push(`> ${pane.buffer}`);
+  // The belowEditor widget lives BELOW everything, dialog included.
+  if (pane.widget) lines.push(pane.widget);
   return lines.join("\n");
 }
+
 
 export function fakeOrchestration(options: FakeOrchestrationOptions = {}): FakeOrchestration {
   const tools = new Map<string, (params: Record<string, unknown>, signal?: { aborted: boolean }) => Promise<ToolReply>>();
@@ -139,6 +188,10 @@ export function fakeOrchestration(options: FakeOrchestrationOptions = {}): FakeO
   let tmuxBroken = options.tmuxBroken ?? false;
   const childStarts = options.childStarts ?? true;
   const ownPane = options.ownPane ?? "%1";
+  // A movable clock: the four-state probe reasons about how long a screen has
+  // been still, so a test has to be able to let time pass without sleeping.
+  let clock = NOW;
+  const now = (): number => clock;
 
   const panes = new Map<string, FakePane>();
   panes.set(ownPane, { id: ownPane, printed: ["orchestrator"], buffer: "", command: [], alive: true });
@@ -152,19 +205,32 @@ export function fakeOrchestration(options: FakeOrchestrationOptions = {}): FakeO
   const scratch = new Map<string, string>();
   const attention: AttentionEvent[] = [];
   const sidecars = new Map<string, Record<string, unknown>>();
+  const judgeRunning = new Set<string>();
+  const hookNames = ["pre-commit", "pre-push", "commit-msg"];
+  let hooksPointAt: string | undefined = options.hooksPointAtWorktree;
+  let hookRepairs = 0;
+  let probeInstance: ChildProbe | undefined;
   let nextPane = 2;
 
   const sidecarKey = (cwd: string, variant?: string): string => `${cwd}|${variant ?? ""}`;
+
 
   /** Apply one key to a pane, exactly as a TUI would. */
   function pressKey(pane: FakePane, key: string): void {
     if (pane.dialog) {
       const size = pane.dialog.options.length;
+      // Which key SUBMITS is a property of the renderer, and a real one was
+      // measured accepting only `KPEnter` (R-8). A pane can therefore be told
+      // to ignore plain `Enter`, which is what makes the gate's submit
+      // fallback observable instead of assumed.
+      const submitKey = pane.submitKey ?? "Enter";
       if (key === "Up") pane.dialog.selected = (pane.dialog.selected - 1 + size) % size;
       else if (key === "Down") pane.dialog.selected = (pane.dialog.selected + 1) % size;
-      else if (key === "Enter") {
+      else if (key === submitKey) {
         pane.printed.push(`answered: ${pane.dialog.options[pane.dialog.selected]}`);
         delete pane.dialog;
+        const next = pane.queuedDialogs?.shift();
+        if (next) pane.dialog = next;
       } else if (key === "Escape") {
         pane.printed.push("dialog dismissed");
         delete pane.dialog;
@@ -177,9 +243,11 @@ export function fakeOrchestration(options: FakeOrchestrationOptions = {}): FakeO
     }
   }
 
+
   const deps: OrchestratorDeps = {
     repoRoot: "/repo",
-    now: () => NOW,
+    now,
+
     env: () => env,
     taskMode: () => options.taskMode ?? "orchestrator",
     runtime: () => runtime,
@@ -250,13 +318,23 @@ export function fakeOrchestration(options: FakeOrchestrationOptions = {}): FakeO
       return { ok: true, path };
     },
     removeWorktree: (path) => { removed.push(path); },
+    childJudgeRunning: (cwd) => judgeRunning.has(cwd),
+    gitHooksReferencing: (path) => (hooksPointAt === path ? [...hookNames] : []),
+    repairGitHooks: () => {
+      if (options.hookRepairFails) return { ok: false, error: "install-git-hooks.sh failed" };
+      hooksPointAt = undefined;
+      hookRepairs += 1;
+      return { ok: true };
+    },
+    probe: () => (probeInstance ??= createChildProbe(deps)),
     consumeAttention: () => {
       const index = attention.findIndex((e) => e.toSessionId === orchestrationId && !e.handledAt);
       if (index === -1) return undefined;
-      const event = { ...attention[index]!, handledAt: new Date(NOW).toISOString() };
+      const event = { ...attention[index]!, handledAt: new Date(now()).toISOString() };
       attention[index] = event;
       return event;
     },
+
     branchFacts: () => ({ mergeSettled: true, mergeWaived: false }),
     emitNotification: (sequence) => {
       emitted.push(sequence);
@@ -315,7 +393,15 @@ export function fakeOrchestration(options: FakeOrchestrationOptions = {}): FakeO
       const pane = panes.get(paneId);
       return pane ? renderPane(pane) : "";
     },
+    advance: (ms) => { clock += ms; },
+    now: () => clock,
+    setJudgeRunning: (cwd, running) => {
+      if (running) judgeRunning.add(cwd);
+      else judgeRunning.delete(cwd);
+    },
+    hookRepairs: () => hookRepairs,
   };
+
 }
 
 /** A minimal two-task plan: `a` serial, `b` parallel with a disjoint boundary. */

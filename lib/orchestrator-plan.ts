@@ -76,6 +76,19 @@ export interface PlanDecision {
   resolvedAt?: string;
   /** The answer, once it landed. */
   answer?: string;
+  /**
+   * What the PLAN has to become once this is answered (R-29).
+   *
+   * The measured gap: a decision was registered, the user was notified, the
+   * user answered — and nothing connected that answer back to the plan. The
+   * answer was only written down at wrap-up, nobody was reminded that an
+   * approved option required widening a task's boundary, and `declare_done`
+   * checked only that the user had been TOLD, never that the question had
+   * been settled. Recording the intended effect at registration time is what
+   * makes "the plan still does not reflect what you decided" visible.
+   */
+  planEffect?: string;
+
 }
 
 export interface OrchestratorPlan {
@@ -230,6 +243,8 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString()):
       notifiedAt: asString(d.notifiedAt) || undefined,
       resolvedAt: asString(d.resolvedAt) || undefined,
       answer: asString(d.answer) || undefined,
+      planEffect: asString(d.planEffect) || undefined,
+
     });
   }
 

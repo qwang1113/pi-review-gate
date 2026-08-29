@@ -39,10 +39,14 @@
  */
 
 import type { AttentionEvent } from "./attention.ts";
+import type { ChildHealth, ChildState } from "./orchestrator-child-state.ts";
+import { describeProbeEvent, type ProbeEvent } from "./orchestrator-probe.ts";
 
 export type ChildWaitReason =
   /** The child raised an attention event and its dialog is still open. */
   | "attention"
+  /** The gate's own probe manufactured the news (waiting-input / idle / dead). */
+  | "probe"
   /** The child reported its task complete. */
   | "child-done"
   /** Its pane is gone — it died, or the user closed it. */
@@ -51,6 +55,7 @@ export type ChildWaitReason =
   | "settled-elsewhere"
   /** Nothing yet. */
   | "pending";
+
 
 export interface ChildWaitObservation {
   /** The attention event addressed to this orchestration, if one arrived. */
@@ -63,6 +68,17 @@ export interface ChildWaitObservation {
    * never silence a request for help.
    */
   attentionStillOpen?: boolean;
+  /**
+   * What the ORIGIN child is doing right now, per the probe.
+   *
+   * An event may only be written off as "the user answered it themselves"
+   * when the child has demonstrably MOVED ON (it is working again). R-16 was
+   * exactly this judgement made on one weaker fact — "I cannot see a dialog"
+   * — while the dialog was on screen the whole time and merely unparsed.
+   */
+  originState?: ChildState;
+  /** Events the gate's own probe manufactured (already drained). */
+  probeEvents?: ProbeEvent[];
   /** The child reported done (registry doneAt is set). */
   done: boolean;
   /** Its pane still exists right now. */
@@ -71,6 +87,8 @@ export interface ChildWaitObservation {
   livenessUnknown?: boolean;
   /** Free-form progress line for the live snapshot (never a criterion). */
   note?: string;
+  /** The health of every open child at this instant (R-4/R-11/R-23). */
+  health?: ChildHealth[];
 }
 
 export interface ChildWaitDecision {
@@ -78,31 +96,51 @@ export interface ChildWaitDecision {
   reason: ChildWaitReason;
   /** One line the tool can hand straight back to the agent. */
   summary: string;
+  /** WHICH child this is about — the question the old receipt left open. */
+  childId?: string;
 }
 
 /**
  * Evaluate ONE observation.
  *
- * Order matters: an attention event whose dialog is still open is the most
- * informative outcome (the child is asking for something specific), a
- * vanished pane is checked before "still pending" so a dead child can never
- * be waited on to the end of the budget, and UNKNOWN liveness is checked
- * before "vanished" so an unreadable tmux never reads as a death.
+ * ORDER MATTERS, and every step of it was paid for:
+ *
+ *  1. the gate's OWN probe events come first — they name the child and the
+ *     state, and they are the only signal that exists for a child that
+ *     stopped without asking anything (R-23);
+ *  2. an attention event ends the wait unless the child provably moved on;
+ *  3. `done`, then UNKNOWN liveness (never a death, F14), then a vanished
+ *     pane, so a dead child is never waited on to the end of the budget.
  */
 export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitDecision {
+  const manufactured = observation.probeEvents ?? [];
+  if (manufactured.length > 0) {
+    const first = manufactured[0]!;
+    const rest = manufactured.length > 1 ? `（另有 ${manufactured.length - 1} 条同类事件）` : "";
+    return {
+      done: true,
+      reason: "probe",
+      childId: first.childId,
+      summary: `${describeProbeEvent(first)}${rest}`,
+    };
+  }
   if (observation.attention) {
-    if (observation.attentionStillOpen === false) {
+    const from = observation.attention.fromPane;
+    const settled =
+      observation.attentionStillOpen === false && observation.originState === "working";
+    if (settled) {
       return {
         done: false,
         reason: "settled-elsewhere",
         summary:
-          `收到一条 attention（${observation.attention.reason}），但子会话屏幕上已经没有待答的框了 ——` +
-          "多半是用户本人当场答掉了。事件已销账≠事情没办成：继续等。",
+          `收到一条 attention（${observation.attention.reason}），但那个子会话屏幕上已经没有待答的框、而且又在跑了 ——` +
+          "多半是用户本人当场答掉了。事件已销账≠事情没办成：继续等（真没办成的话，探针会按 10s→30s→60s 再叫你）。",
       };
     }
     return {
       done: true,
       reason: "attention",
+      ...(from ? { childId: from } : {}),
       summary: `子会话有事找你：${observation.attention.reason}`,
     };
   }
@@ -125,6 +163,7 @@ export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitD
   }
   return { done: false, reason: "pending", summary: observation.note ?? "子会话仍在工作" };
 }
+
 
 // ---------------------------------------------------------------------------
 // Addressing (F12) — whose event is this?

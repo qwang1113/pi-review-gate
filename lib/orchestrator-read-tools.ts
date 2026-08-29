@@ -28,6 +28,8 @@ import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
 import { buildSendKeysArgv } from "./orchestrator-tmux.ts";
 import { findChild } from "./orchestrator-registry.ts";
+import { formatChildHealth } from "./orchestrator-child-state.ts";
+
 import type { ChildSession } from "./orchestrator-registry.ts";
 import {
   formatPaneSnapshot,
@@ -35,12 +37,15 @@ import {
   type PaneSnapshot,
 } from "./orchestrator-pane-read.ts";
 import {
+  describeScreenChange,
   normalizeKeySequence,
   planSelection,
+  SUBMIT_KEY_ORDER,
   verifyDismissed,
   verifyHighlight,
   type LowLevelKey,
 } from "./orchestrator-keys.ts";
+
 import {
   capturePane,
   childGateFacts,
@@ -124,12 +129,23 @@ async function doRead(deps: OrchestratorDeps, params: Record<string, unknown>): 
     sections.push(formatPaneSnapshot(snapshot));
   }
   sections.push("", ...renderGateFacts(deps, child));
+  // R-11 — the state the PROBE measured, printed next to the screen it was
+  // measured from. A human reading a pane mis-judged a healthy child as
+  // "terminated" during the second run; the structured verdict is what the
+  // waiter acts on, so the read shows the same thing rather than a second
+  // opinion the agent has to reconcile.
+  const health = deps.probe().observe().health.find((h) => h.childId === child.id);
+  if (health) {
+    sections.push("", "### 门禁探针判定的状态（结构化真值，优先于上面的屏幕启发式）", formatChildHealth([health]));
+  }
   return reply(sections.join("\n"), {
     childId: child.id,
     paneRead: Boolean(snapshot),
     dialogOptions: snapshot?.dialog?.options.length ?? 0,
     selectedIndex: snapshot?.dialog?.selectedIndex,
+    ...(health ? { state: health.state } : {}),
   });
+
 }
 
 /** Press keys, then let the TUI repaint before reading the screen back. */
@@ -154,19 +170,51 @@ async function pressAndReRead(
 }
 
 /**
+ * Capture the pane, retrying while the parse comes back WITHOUT a dialog.
+ *
+ * R-18: the same goal-approval dialog (`→ Yes / No`, plainly on screen) was
+ * read three times in a row with three different results — "no options
+ * parsed", then a refusal that recommended the very path that had just
+ * failed, then a clean success. A TUI repaints; a single capture taken mid
+ * repaint is not evidence that there is no dialog. So the read is retried a
+ * few times before anybody concludes anything, and BOTH callers (the key
+ * press and the proxy-approval) go through this one function — which is what
+ * stops the two of them from disagreeing and bouncing the caller between them.
+ */
+export async function captureDialog(
+  deps: OrchestratorDeps,
+  paneId: string,
+  attempts = KEY_SETTLE_ATTEMPTS,
+): Promise<PaneSnapshot | undefined> {
+  let snapshot: PaneSnapshot | undefined;
+  for (let attempt = 0; attempt < Math.max(1, attempts); attempt++) {
+    if (attempt > 0) await deps.sleep(KEY_SETTLE_MS);
+    const current = capturePane(deps, paneId);
+    if (current) snapshot = current;
+    if (current?.dialog) return current;
+  }
+  return snapshot;
+}
+
+/**
  * The HIGH-LEVEL path: select a row by index or by label.
  *
  * Two phases, and the split is the whole point (see lib/orchestrator-keys.ts):
  * move first, confirm the highlight actually landed on the target, and only
  * then submit. Pressing Enter before confirming is what answered a
  * goal-approval dialog by luck in the hand-run.
+ *
+ * SUBMITTING IS THE GATE'S PROBLEM, not the caller's (R-8). A pi confirmation
+ * dialog was measured ignoring `Enter` and `C-m` entirely and moving only on
+ * `KPEnter`, so the submit step tries the alternatives in order and re-reads
+ * after each: the caller says "select this row", never "press this byte".
  */
 export async function selectOptionInChild(
   deps: OrchestratorDeps,
   child: ChildSession,
   request: { index?: number; match?: string },
 ): Promise<ToolReply> {
-  const before = capturePane(deps, child.paneId);
+  const before = await captureDialog(deps, child.paneId);
   if (!before) {
     return fail(`review-gate: 读不到子会话 ${child.id} 的屏幕（capture-pane 失败），拒绝盲按。`);
   }
@@ -188,31 +236,56 @@ export async function selectOptionInChild(
     });
   }
 
-  const submitted = await pressAndReRead(deps, child.paneId, ["enter"]);
-  if (!submitted.ok) {
+  const beforeSubmit = after;
+  const tried: LowLevelKey[] = [];
+  let dismissed = verifyDismissed(beforeSubmit, beforeSubmit, plan.label);
+  let screen: PaneSnapshot | undefined = beforeSubmit;
+  for (const key of SUBMIT_KEY_ORDER) {
+    const submitted = await pressAndReRead(deps, child.paneId, [key]);
+    if (!submitted.ok) {
+      return fail(
+        `review-gate: 高亮已经落在第 ${plan.target} 项（${plan.label}），但提交键 ${key} 没发出去 —— ` +
+        `${submitted.reason}。**没有提交任何东西**，可以重试。`,
+        { childId: child.id, submitted: false },
+      );
+    }
+    tried.push(key);
+    screen = submitted.after;
+    dismissed = verifyDismissed(beforeSubmit, submitted.after, plan.label);
+    if (dismissed.ok) break;
+  }
+  if (!dismissed.ok) {
     return fail(
-      `review-gate: 高亮已经落在第 ${plan.target} 项（${plan.label}），但 Enter 没发出去 —— ${submitted.reason}。` +
-      "**没有提交任何东西**，可以重试。",
-      { childId: child.id, submitted: false },
+      `review-gate: ${dismissed.reason}\n已经试过的提交键：${tried.join(" → ")}（都没让这个框有任何变化）。`,
+      {
+        childId: child.id,
+        submitted: false,
+        submitKeysTried: tried,
+        paneText: screen?.text.slice(-2000),
+      },
     );
   }
-  const dismissed = verifyDismissed(submitted.after, plan.label);
-  if (!dismissed.ok) {
-    return fail("review-gate: " + dismissed.reason, {
-      childId: child.id,
-      submitted: false,
-      paneText: submitted.after?.text.slice(-2000),
-    });
-  }
   return reply(
-    `review-gate: 已在子会话 ${child.id} 选中第 ${plan.target} 项「${plan.label}」并提交。\n` +
+    `review-gate: 已在子会话 ${child.id} 选中第 ${plan.target} 项「${plan.label}」并提交` +
+    `（提交键：${tried.join(" → ")}）。\n` +
     `校验：${highlight.note}；${dismissed.note}（两步都是按完复读屏幕确认的，不是「发出去就算数」）。\n\n` +
-    (submitted.after ? formatPaneSnapshot(submitted.after, 40) : "（按完之后读不到屏幕）"),
-    { childId: child.id, submitted: true, target: plan.target, label: plan.label },
+    (screen ? formatPaneSnapshot(screen, 40) : "（按完之后读不到屏幕）"),
+    { childId: child.id, submitted: true, target: plan.target, label: plan.label, submitKeysTried: tried },
   );
 }
 
-/** The LOW-LEVEL path: press exactly these keys, and report what happened. */
+
+/**
+ * The LOW-LEVEL path: press exactly these keys, and report what happened.
+ *
+ * It performs no hit check by design — the gate does not know what the caller
+ * wanted. It does know whether the screen MOVED, though, and R-8 is what
+ * happens when that fact is withheld: `keys:["enter"]` was sent at a dialog
+ * that ignores `Enter`, the receipt reported the press as delivered, and the
+ * orchestrator waited 600s on an answer it had never given. So the receipt
+ * now states the before/after comparison, and says plainly when nothing
+ * changed.
+ */
 async function pressKeys(
   deps: OrchestratorDeps,
   child: ChildSession,
@@ -220,16 +293,20 @@ async function pressKeys(
 ): Promise<ToolReply> {
   const normalized = normalizeKeySequence(raw);
   if (!normalized.ok) return fail("review-gate: " + normalized.reason);
+  const before = capturePane(deps, child.paneId);
   const pressed = await pressAndReRead(deps, child.paneId, normalized.keys);
   if (!pressed.ok) return fail(`review-gate: 按键发送失败 —— ${pressed.reason}`);
+  const change = describeScreenChange(before, pressed.after);
   return reply(
     `review-gate: 已在子会话 ${child.id} 按下 ${normalized.keys.join(" → ")}。\n` +
-    "低层按键没有「命中校验」可做（门禁不知道你想达成什么），所以这里只给出按完之后的屏幕，" +
-    "由你自己判断是不是想要的结果：\n\n" +
+    "低层按键没有「命中校验」可做（门禁不知道你想达成什么），能给的只有两件事实：\n" +
+    `- ${change.note}\n` +
+    "- 按完之后的屏幕如下，由你自己判断是不是想要的结果：\n\n" +
     (pressed.after ? formatPaneSnapshot(pressed.after, 40) : "（按完之后读不到屏幕）"),
-    { childId: child.id, keys: normalized.keys },
+    { childId: child.id, keys: normalized.keys, screenChanged: change.changed },
   );
 }
+
 
 async function doKey(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const resolved = openChild(deps, params);
@@ -293,10 +370,14 @@ export function registerOrchestratorReadTools(host: ToolHost, deps: Orchestrator
       "Answer a child session's choice dialog. PREFERRED: `index` (the row number " +
       "`orchestrator_read` printed) or `match` (a substring of the row's label) — the gate reads " +
       "the current highlight itself, computes the arrow presses, re-reads the screen to confirm " +
-      "the highlight landed on the row you named, and only THEN presses Enter; anything it " +
-      "cannot confirm is reported as a FAILURE, never as a success. FALLBACK: `keys` presses " +
-      "exact keys (up/down/left/right/enter/escape/tab/space/backspace) with no hit check — use " +
-      "it for things a selection cannot express, such as dismissing a dialog with Escape.",
+      "the highlight landed on the row you named, and only THEN submits — trying `Enter` and, if " +
+      "that dialog ignores it, `KPEnter`, because which byte a TUI accepts is the gate's problem " +
+      "and not yours; anything it cannot confirm is reported as a FAILURE, never as a success. " +
+      "FALLBACK: `keys` presses exact keys (up/down/left/right/enter/kpenter/submit/escape/tab/" +
+      "space/backspace) with no hit check — use it for things a selection cannot express, such as " +
+      "dismissing a dialog with Escape. The low-level receipt states whether the screen changed " +
+      "at all, so a key that does nothing in this TUI is never reported as if it worked.",
+
     parameters: Type.Object({
       childId: Type.String(),
       index: Type.Optional(Type.Integer({ description: "1-based row number to select" })),

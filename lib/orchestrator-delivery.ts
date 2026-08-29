@@ -140,9 +140,22 @@ export type DeliveryKind =
   /** The text was typed into a running session — the echo is the proof. */
   | "send";
 
+/**
+ * WHICH LANE a delivery landed in (R-20).
+ *
+ * The same text has two completely different fates depending on whether the
+ * child was busy: typed into an idle composer it is SUBMITTED (and a
+ * `/gate-bypass …` is executed as a slash command), while a busy child files
+ * it in the steering queue as an ordinary message the agent will read (the
+ * command never runs). The hand-run had to discover that by experiment; the
+ * receipt now says which one happened.
+ */
+export type DeliveryLane = "submitted" | "queued";
+
 export type DeliveryVerdict =
-  | { ok: true; summary: string }
+  | { ok: true; summary: string; lane?: DeliveryLane }
   | { ok: false; reason: string };
+
 
 /**
  * May this delivery be reported as successful?
@@ -176,11 +189,27 @@ export function deliveryVerdict(
         "（上一轮正是这里谎报，导致项目经理空等一整夜。）",
     };
   }
-  if (evidence.markerVisible) return { ok: true, summary: "消息已出现在子会话屏幕上" };
+  if (evidence.markerVisible) {
+    return { ok: true, summary: "消息已出现在子会话屏幕上（作为一条输入被提交）", lane: "submitted" };
+  }
+  // R-14 — the OTHER lane. A message sent while the child is running a tool
+  // goes into its steering queue and is delivered when that tool returns. It
+  // is visible on screen as a `Steering:` line, and treating that as "not
+  // delivered" is what pushed the hand-run toward re-sending (R-13's setup).
+  if (evidence.steeringQueued) {
+    return {
+      ok: true,
+      summary:
+        "消息已进入子会话的 steering 队列（它此刻正在跑工具）—— " +
+        "会在这次工具调用结束后作为一条普通消息送达，**不会**被当成 slash 命令执行",
+      lane: "queued",
+    };
+  }
   return {
     ok: false,
     reason:
-      "消息敲进去了，但屏幕上看不到它 —— 无法确认子会话真的收到（可能没提交、可能被截断）。" +
-      "不回执「已发送」：请 `orchestrator_read` 看现状后重试。",
+      "消息敲进去了，但屏幕上既看不到它、也没有进 steering 队列 —— 无法确认子会话真的收到" +
+      "（可能没提交、可能被截断）。不回执「已发送」：请 `orchestrator_read` 看现状后重试。",
   };
 }
+

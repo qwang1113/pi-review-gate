@@ -58,7 +58,9 @@ import {
   runTestsByPathCommand,
   shellQuote,
   splitTokens,
+  stepEnv,
   stepInputScope,
+
 } from "./precommit-plan.mjs";
 import {
   computeInputDigests,
@@ -254,7 +256,13 @@ function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
     const cmd = yieldCpu ? `nice -n 10 ${command}` : command;
     const child = spawn("bash", ["-c", cmd], {
       cwd,
+      // R-15 — a step is NOT this session. Stripping the gate's own session
+      // variables here is the root fix for the failure that made every
+      // orchestration child unable to reach a precommit PASS (and therefore
+      // unable to finish at all): see `stepEnv` in ./precommit-plan.mjs.
+      env: stepEnv(process.env),
       stdio: ["ignore", "pipe", "pipe"],
+
       timeout: 15 * 60 * 1000,
       // Each step LEADS its own process group, so fail-fast can terminate the
       // whole tree it started (bash → npm → the real command), not just the

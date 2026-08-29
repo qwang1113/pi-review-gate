@@ -13,6 +13,8 @@ import {
   LOOP_GOAL_MAX_CHARS,
   LOOP_GOAL_MISSING_DIRECTIVE,
   LOOP_GOAL_RELPATH,
+  loopGoalRelPath,
+
   LOOP_GOAL_STALE_MS,
   buildGoalConfirmMessage,
   buildLoopGoalDirective,
@@ -501,6 +503,40 @@ test("buildGoalAuditTask: the draft delta is computed mechanically and injected 
   const first = buildGoalAuditTask(next);
   assert.doesNotMatch(first, /机械差异/);
 });
+
+// ---------------------------------------------------------------------------
+// R-10 — one goal file per SESSION, not per worktree
+// ---------------------------------------------------------------------------
+
+test("R-10: a session with a sidecar variant reads and writes its OWN goal file", () => {
+  // The measured problem: an orchestration child shares the supervisor's
+  // worktree, so its approved goal landed in the supervisor's
+  // `.pi/loop-goal.md`. With two serial children that is data loss — the
+  // second approval overwrites the first, and the reviewer verifies against
+  // that very file.
+  assert.equal(loopGoalRelPath(), LOOP_GOAL_RELPATH, "an ordinary session is unchanged");
+  assert.equal(loopGoalRelPath(""), LOOP_GOAL_RELPATH);
+  assert.equal(loopGoalRelPath("t1-abc"), ".pi/loop-goal.t1-abc.md");
+  assert.equal(loopGoalRelPath("../evil/../x"), ".pi/loop-goal.evil-..-x.md",
+
+    "a variant can never escape the .pi/ scope");
+
+  const root = mkdtempSync(join(tmpdir(), "loop-goal-variant-"));
+  try {
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    writeFileSync(join(root, LOOP_GOAL_RELPATH), "监督者的目标", "utf8");
+    writeFileSync(join(root, loopGoalRelPath("t1-abc")), "子会话 t1 的目标", "utf8");
+
+    assert.equal(readLoopGoal(root).text, "监督者的目标");
+    assert.equal(readLoopGoal(root, Date.now(), "t1-abc").text, "子会话 t1 的目标",
+      "two sessions in ONE worktree keep their own contracts");
+    assert.equal(readLoopGoal(root, Date.now(), "t2-def").present, false,
+      "and a third session sees neither of them");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 
 test("diffDraftLines: pure line diff, insertion and deletion both detected", () => {
   const { removed, added } = diffDraftLines(

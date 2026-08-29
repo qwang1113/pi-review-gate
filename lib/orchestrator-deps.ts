@@ -18,6 +18,8 @@
 import type { AttentionEvent } from "./attention.ts";
 import type { OrchestratorPlan } from "./orchestrator-plan.ts";
 import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
+import type { ChildProbe } from "./orchestrator-probe.ts";
+
 import type { TaskMode } from "./task-mode.ts";
 
 /**
@@ -129,6 +131,50 @@ export interface OrchestratorDeps {
   addWorktree(name: string): { ok: true; path: string } | { ok: false; error: string };
   /** Remove one the gate created. Best-effort: never throws. */
   removeWorktree(path: string): void;
+
+  /**
+   * Is a JUDGE process in flight inside that child's worktree?
+   *
+   * The one structured fact that separates "blocked on work it started" from
+   * "stopped" (R-23): a child sitting in `judge_wait` for 550s freezes its
+   * token counter and its screen, and calling that idle would interrupt a
+   * perfectly healthy review round. Answered from the judge run directories,
+   * never from the screen.
+   */
+  childJudgeRunning(cwd: string): boolean;
+
+  /**
+   * The orchestration's ONE state probe (lib/orchestrator-probe.ts).
+   *
+   * Shared rather than created per call, because it carries the per-child
+   * memory the four-state machine compares against — a probe built fresh
+   * inside `orchestrator_wait` would see every screen as "changed" and could
+   * never observe that a child has stopped. The background timer and the
+   * waiter therefore drive the SAME instance, and the event queue is drained
+   * by whichever of them delivers the news.
+   */
+  probe(): ChildProbe;
+
+
+  /**
+   * Which repository-level git hooks currently point INTO this path.
+   *
+   * `.git/hooks` is shared by every linked worktree, so a child that
+   * installed the gate's hooks from inside its own orchestration worktree
+   * repointed them at a directory `orchestrator_close` is about to delete —
+   * and that broke committing for the WHOLE repository (R-28). Empty ⇒
+   * nothing references it and the worktree is safe to remove.
+   */
+  gitHooksReferencing(path: string): string[];
+
+  /**
+   * Re-point the repository's hooks at the MAIN worktree's copy.
+   *
+   * Called before a referenced worktree is removed, so there is never a
+   * window in which the repo cannot commit.
+   */
+  repairGitHooks(): { ok: true } | { ok: false; error: string };
+
 
   /** Take the next attention event addressed to THIS orchestration, if any. */
   consumeAttention(): AttentionEvent | undefined;

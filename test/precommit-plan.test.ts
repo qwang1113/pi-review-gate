@@ -25,7 +25,10 @@ import {
   shellQuote,
   hasJestConfigSelection,
   splitTokens,
+  stepEnv,
   stepInputScope,
+  strippedSessionEnvKeys,
+
 } from "../scripts/precommit-plan.mjs";
 
 // ---------------------------------------------------------------------------
@@ -445,3 +448,36 @@ test("runTestsByPathCommand appends the ignore args when given", () => {
   const plain = runTestsByPathCommand({ env: "", bin: "jest", flags: [], files: ["test/a.test.ts"] });
   assert.ok(!plain.includes("testPathIgnorePatterns"), "no ignore args → unchanged command");
 });
+
+// ---------------------------------------------------------------------------
+// R-15 — a precommit STEP is not the session
+// ---------------------------------------------------------------------------
+
+test("R-15: a step's environment carries no gate session state", () => {
+  // The measured failure, and it hit EVERY orchestration child: a child is
+  // started with `RG_STATE_VARIANT=<child id>` and `RG_GATE_MODE=loop`, the
+  // runner spawned the suite as a plain child, and the suite inherited both.
+  // The gate's own fixtures then looked for a variant sidecar the fixture had
+  // never written, took the "no sidecar ⇒ allow" path, and 55 "must be
+  // BLOCKED" assertions failed. Same HEAD: 1918/1918 green in a plain shell.
+  // The consequence was not a red suite but a DEAD LANE — no precommit PASS
+  // means no checkpoint, no review, no declare_done.
+  const env = {
+    PATH: "/usr/bin",
+    HOME: "/Users/x",
+    RG_STATE_VARIANT: "t1-abc",
+    RG_GATE_MODE: "loop",
+    RG_ORCHESTRATION_ID: "orch-1",
+    REVIEW_GATE_BYPASS: "1",
+  };
+  const cleaned = stepEnv(env);
+  assert.deepEqual(cleaned, { PATH: "/usr/bin", HOME: "/Users/x" },
+    "everything the session owns is removed; everything else is untouched");
+  assert.deepEqual(
+    strippedSessionEnvKeys(env).sort(),
+    ["REVIEW_GATE_BYPASS", "RG_GATE_MODE", "RG_ORCHESTRATION_ID", "RG_STATE_VARIANT"],
+    "and the receipt can name exactly what was dropped",
+  );
+  assert.deepEqual(stepEnv({}), {}, "an empty environment is not a special case");
+});
+
