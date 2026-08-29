@@ -1535,7 +1535,7 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the process 
   // review_close: terminate the PROCESS (SIGTERM), then drop the registry.
   const closeAt = SRC.indexOf('name: "review_close"');
   assert.ok(closeAt > 0);
-  const close = SRC.slice(closeAt, closeAt + 3000);
+  const close = SRC.slice(closeAt, closeAt + 3600);
   assert.match(close, /kill\?\.\("SIGTERM"\)/, "the live process is SIGTERMed");
   assert.match(close, /closed: true/,
     "closing an already-finished child still reports success (idempotent)");
@@ -2437,6 +2437,40 @@ test("review_checkpoint is fail-closed about the branch it commits on", () => {
     "no work branch on record must REFUSE, not exempt (round-4 P1)");
 });
 
+
+
+test("judge_submit builds the task for EVERY role, and a goal audit streams its findings", () => {
+  const at = SRC.indexOf('name: "judge_submit"');
+  const body = SRC.slice(at, SRC.indexOf('name: "review_spawn"', at));
+  // The agent hands over a draft or a question; the gate builds what the
+  // judge actually receives.
+  assert.match(body, /callTool\("prepare_goal_audit", \{ goal: task, repo: root \}/);
+  assert.match(body, /callTool\("prepare_adviser", \{ repo: root \}/);
+  assert.match(body, /extractTaskText\(toolText\(prepared\)\)/);
+  // The audited DRAFT is remembered: the verdict binds to its content, and
+  // the auditor's output alone cannot say what it judged.
+  assert.match(body, /pendingGoalAudits\.set\(root, \{ draft: task, startedAt:/);
+  // Criterion 2: a goal audit streams findings, so the draft can be fixed
+  // while the auditor is still working.
+  assert.match(body, /buildStreamDirective\(streamPath\)/);
+  assert.match(body, /review-stream", `goal-\$\{goalTextHash\(task\)/);
+  // Criterion 1: the stream path comes BACK to the agent — a channel written
+  // but never read is not a channel.
+  assert.match(body, /streamPath,/, "the reply carries the stream path");
+  assert.match(body, /findings 流（边审边修）/, "and names it in the text too");
+  // The audited draft is remembered only after the dispatch is ACCEPTED: a
+  // refused submission must not overwrite what a running audit is judging.
+  const acceptedAt = body.indexOf("if (!dispatch.ok)");
+  const setAt = body.indexOf("pendingGoalAudits.set(root");
+  assert.ok(acceptedAt > 0 && setAt > acceptedAt, "the draft is recorded after the dispatch is accepted");
+  // …and the recording side closes the loop with that same draft.
+  const recAt = SRC.indexOf("async function recordJudgeConclusion(");
+  const rec = SRC.slice(recAt, recAt + 4000);
+  assert.match(rec, /callTool\("record_goal_prereview", \{/);
+  assert.match(rec, /goal: pending\.draft/);
+  assert.match(rec, /auditStartedAt: pending\.startedAt/);
+  assert.match(rec, /pendingGoalAudits\.delete\(/, "a recorded audit does not linger");
+});
 
 
 test("judge_submit runs the whole submission chain, and cannot dead-end on it", () => {

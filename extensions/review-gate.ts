@@ -3192,7 +3192,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     message?: string;
     reason?: string;
     ctx: unknown;
-  }): Promise<{ ok: true; taskText: string } | { ok: false; text: string }> {
+  }): Promise<{ ok: true; taskText: string; streamPath?: string } | { ok: false; text: string }> {
     // 1. It has to build. A full lane, because a checkpoint that only ran the
     //    related tests cannot clear the ship gate later anyway.
     const pre = await callTool("run_precommit", { mode: "full", repo: input.root }, input.ctx);
@@ -3239,6 +3239,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     return {
       ok: true,
       taskText: `本轮改动说明（来自主会话）：\n${input.note}\n\n${taskText}`,
+      // The findings stream is the agent's half of the round: it fixes what
+      // the reviewer confirms WHILE the reviewer works. Dropping the path
+      // here would leave that channel written but unread.
+      ...(typeof prepared.details?.stream === "string" ? { streamPath: prepared.details.stream } : {}),
     };
   }
 
@@ -3346,6 +3350,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         forgetChildProcess(stale.sessionId);
         try { (stale.child as { kill?: (s?: string) => boolean } | undefined)?.kill?.("SIGTERM"); } catch { /* already gone */ }
         childSessions.set(root, (childSessions.get(root) ?? []).filter((c) => c.sessionId !== stale.sessionId));
+        // The killed round's audited draft dies with it: leaving it behind
+        // would let a LATER exit record a verdict against a draft that round
+        // never judged.
+        if (stale.role === "goal-auditor") pendingGoalAudits.delete(root);
       }
     }
     try {
@@ -3473,7 +3481,23 @@ export default function reviewGate(pi: ExtensionAPI) {
       // would then have last round's READY recorded against a tree nobody
       // judged. The per-round stdout log contains this round and nothing else.
       const roundOutput = readRoundStdout(child.stdoutPath);
-      if (!roundOutput || !hasJudgeFence(roundOutput)) return undefined;
+      if (!roundOutput || !hasJudgeFence(roundOutput)) {
+        // A judge that produced NOTHING did not "have output to read": it
+        // crashed, or the model call failed. Say that, with what it left on
+        // stderr — the round has to be dispatched again, and an agent told to
+        // "read its output" reads an empty file and learns nothing.
+        // (Measured: a reviewer died with "Connection error." and an empty
+        // stdout mid-task.)
+        const failed = readJudgeSessionState({ pidPath: child.pidPath, exitCodePath: child.exitCodePath });
+        if (!roundOutput?.trim() || (failed.exitCode !== undefined && failed.exitCode !== 0)) {
+          const why = readStderrTail(child.stderrPath)?.trim().split("\n").slice(-3).join(" ") ?? "";
+          return `${child.role} 本轮没有产出结论` +
+            (failed.exitCode !== undefined ? `（exit ${failed.exitCode}）` : "") +
+            (why ? `：${why.slice(0, 200)}` : "。") +
+            ` 什么都没有记录——用同样的 task 重新 judge_submit({role:"${child.role}"}) 即可（同一 session 续接）。`;
+        }
+        return undefined; // output without a fence: the agent reads it and decides
+      }
       // A QUESTION is not a verdict. Feeding it to the recorder would answer
       // "no recognizable verdict" — technically fail-closed, but it reads as
       // a parse error when the judge simply asked something.
@@ -3616,6 +3640,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       // only then dispatches. Any step failing sends the round back with the
       // reason — nothing half-submitted, no manual four-step dance.
       let reviewTask = task;
+      /**
+       * Where THIS round's findings stream lives — the channel the agent
+       * reads while the judge is still working. Every role that has one
+       * reports it in the reply; criterion 1 requires it in the return.
+       */
+      let streamPath: string | undefined;
       if (role === "reviewer") {
         const chain = await submitForReview({
           root,
@@ -3632,7 +3662,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
         reviewTask = chain.taskText;
+        streamPath = chain.streamPath;
       }
+
       // The other two roles are the same shape: the gate builds the task the
       // judge receives (carryover, criteria, transcript pointer, findings
       // stream) from what the agent SAID, so the agent never assembles a
@@ -3646,10 +3678,15 @@ export default function reviewGate(pi: ExtensionAPI) {
             isError: true,
           };
         }
-        reviewTask = extractTaskText(toolText(prepared));
-        // The draft is what the verdict will be recorded AGAINST (the record
-        // binds to its hash), so it is remembered with the round.
-        pendingGoalAudits.set(root, { draft: task, startedAt: new Date().toISOString() });
+        // A goal audit streams its findings too (criterion 2): the agent can
+        // fix the draft while the auditor is still working, exactly as it
+        // does with a code review.
+        streamPath = pathJoin(root, ".pi", "review-stream", `goal-${goalTextHash(task).slice(0, 12)}.jsonl`);
+        try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
+        reviewTask = `${extractTaskText(toolText(prepared))}\n\n${buildStreamDirective(streamPath)}`;
+        // (The draft is remembered only AFTER the dispatch is accepted —
+        // see below. Recording it here would let a REFUSED submission
+        // overwrite the draft a still-running audit is judging.)
       }
       if (role === "adviser") {
         const prepared = await callTool("prepare_adviser", { repo: root }, ctx);
@@ -3676,11 +3713,20 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
+      // The round is ACCEPTED — only now is the audited draft on record. A
+      // refused submission (a busy role, a failed spawn) must never replace
+      // the draft a running audit is judging: its verdict would be recorded
+      // against text no auditor ever read, and propose_loop_goal would then
+      // show the user an unaudited goal.
+      if (role === "goal-auditor") {
+        pendingGoalAudits.set(root, { draft: task, startedAt: new Date().toISOString() });
+      }
       const child = judgeChildByRole(root, role);
       const lines = [
         `review-gate: ${role} 已受理本轮任务（${dispatch.reused ? "复用同一会话，上下文延续" : "新会话"}）。`,
         `- stdout: ${dispatch.stdoutPath ?? child?.stdoutPath ?? "(pending)"}`,
         `- transcript: ${dispatch.sessionDir ?? child?.sessionDir ?? "(pending)"}`,
+        ...(streamPath ? [`- findings 流（边审边修）: ${streamPath}`] : []),
         "- 进程退出即完成，届时会唤醒本会话；用 review_read({role}) 取结论。现在别等，先做别的确定性工作。",
       ];
       return {
@@ -3692,6 +3738,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           runDir: dispatch.runDir,
           stdoutPath: dispatch.stdoutPath ?? child?.stdoutPath,
           sessionDir: dispatch.sessionDir ?? child?.sessionDir,
+          streamPath,
         },
       };
     },
@@ -4005,6 +4052,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       for (const [repoRoot, list] of childSessions) {
         childSessions.set(repoRoot, list.filter((c) => c.sessionId !== sessionId));
       }
+      // A closed audit takes its draft with it — same reason as fresh:true.
+      if (child.role === "goal-auditor") pendingGoalAudits.delete(root);
       cancelChildWaitTimer();
       const how = running
         ? `${child.role} session terminated (SIGTERM)`
