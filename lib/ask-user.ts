@@ -180,7 +180,27 @@ export function formatAnswers(answers: AskAnswer[]): string {
     .join("\n");
 }
 
-/** A short transcript line so the Q&A stays visible after the dialogs close. */
+/** How much of a question / answer one transcript line shows. */
+export const TRANSCRIPT_QUESTION_CHARS = 60;
+export const TRANSCRIPT_ANSWER_CHARS = 80;
+
+/** One question, shortened to its first line and capped. */
+function short(text: string, max: number): string {
+  const firstLine = text.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+  return firstLine.length > max ? `${firstLine.slice(0, max)}…` : firstLine;
+}
+
+/**
+ * What the interview leaves in the TRANSCRIPT, one line per question.
+ *
+ * The dialogs are gone the moment they close and they write nothing of their
+ * own, so this was the only lasting record of the Q&A — and it used to hold
+ * COUNTS only ("已回答 2（共 2 问）"): neither the user nor the agent could see
+ * afterwards WHAT was asked or WHICH option was chosen (user report,
+ * 2026-08-29). It now shows each question with its answer, in O13 style: one
+ * line each, the question shortened to its first line, the answer as the user
+ * gave it — never the full option list, which is noise once a choice is made.
+ */
 export function formatTranscriptSummary(answers: AskAnswer[]): string {
   const answered = answers.filter((a) => a.kind === "answered").length;
   const skipped = answers.filter((a) => a.kind === "skipped").length;
@@ -190,7 +210,18 @@ export function formatTranscriptSummary(answers: AskAnswer[]): string {
   if (deferred) parts.push(`转聊天 ${deferred}`);
   if (skipped) parts.push(`跳过 ${skipped}`);
   if (unanswered) parts.push(`未作答 ${unanswered}`);
-  return `${parts.join(" · ")}（共 ${answers.length} 问）`;
+  const head = `${parts.join(" · ")}（共 ${answers.length} 问）`;
+  const lines = answers.map((a, i) => {
+    const outcome = a.kind === "answered"
+      ? short(a.answer ?? "", TRANSCRIPT_ANSWER_CHARS)
+      : a.kind === "deferred-to-chat"
+        ? "（转聊天回答）"
+        : a.kind === "skipped"
+          ? "（跳过）"
+          : "（未作答）";
+    return `${progressLabel(i, answers.length)} ${short(a.question, TRANSCRIPT_QUESTION_CHARS)} → ${outcome}`;
+  });
+  return [head, ...lines].join("\n");
 }
 
 /**

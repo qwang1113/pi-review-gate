@@ -208,17 +208,13 @@ test("L2 STALL BREAKER: a running subagent counts as motion (never orphan a live
     "the breaker must be told about work in flight (subagents OR tmux judge children)");
   // The motion probe must be bounded in age, or a hung run would disable the
   // breaker permanently — the exact failure it exists to catch.
-  const probeAt = SRC.indexOf("function subagentInMotion(");
-  assert.ok(probeAt > 0, "subagentInMotion must exist");
-  const probe = SRC.slice(probeAt, probeAt + 900);
+  const probe = windowOf("function subagentInMotion(", "\n  }", "subagentInMotion");
   assert.match(probe, /STALL_MOTION_MAX_AGE_SEC/, "motion credit must expire with age");
   assert.match(probe, /state === "running"/, "only RUNNING subagents count as motion");
   // Round-16 P2: tmux judge children are motion too — and their probe must
   // carry the SAME freshness bound (a hung-but-alive pane must not disable
   // the breaker forever; the goal-auditor flagged exactly that hazard).
-  const judgeAt = SRC.indexOf("function judgeChildInMotion(");
-  assert.ok(judgeAt > 0, "judgeChildInMotion must exist");
-  const judgeProbe = SRC.slice(judgeAt, judgeAt + 900);
+  const judgeProbe = windowOf("function judgeChildInMotion(", "\n  }", "judgeChildInMotion");
   assert.match(judgeProbe, /STALL_MOTION_MAX_AGE_SEC/, "judge-child motion credit must expire with age");
   assert.match(judgeProbe, /Date\.parse\(c\.spawnedAt\)/, "freshness is measured from the spawn timestamp");
   assert.match(judgeProbe, /Number\.isFinite/, "an unparseable spawnedAt must fail closed (no motion)");
@@ -260,9 +256,7 @@ test("corrupt config layer keeps the last render — BOTH layers, fail-safe (rou
 test("MODEL WIDGET: deployed lookup is project-first, frontmatter-scoped, with slots[0]/'?' fallback", () => {
   // round-1 P2: modelConfigWidgetLines had NO coverage at all. The data path
   // matters because it decides what the belowEditor widget CLAIMS is in force.
-  const at = SRC.indexOf("function modelConfigWidgetLines(");
-  assert.ok(at > 0, "modelConfigWidgetLines must exist");
-  const fn = SRC.slice(at, at + 2600);
+  const fn = windowOf("function modelConfigWidgetLines(", "\n  }", "modelConfigWidgetLines");
   assert.match(fn, /findProjectAgentText\(projectDir, name\)/, "project layer must be looked up FIRST, by identity");
   // `model:` must be scoped to the frontmatter block, and the block must come
   // from the SHARED delimiter authority (round-12 R3 P2: a local strict regex
@@ -281,18 +275,14 @@ test("MODEL WIDGET: deployed lookup is project-first, frontmatter-scoped, with s
 });
 
 test("MODEL WIDGET wiring reaches the real updateWidget path", async () => {
-  const at = SRC.indexOf("function updateWidget(");
-  assert.ok(at > 0);
-  const body = SRC.slice(at, at + 2200);
+  const body = windowOf("function updateWidget(", "\n  }", "updateWidget");
   assert.match(body, /modelConfigWidgetLines\(\)/);
   assert.match(body, /ctx\.ui\.setWidget\("review-gate-agents"/);
 });
 
 test("MODEL DIAGNOSIS: project outranks global, registry auth gates, disk fallback", () => {
   // round-1 P2: the rewritten modelDiagnosisLines had no coverage either.
-  const at = SRC.indexOf("function modelDiagnosisLines(");
-  assert.ok(at > 0, "modelDiagnosisLines must exist");
-  const fn = SRC.slice(at, at + 4200);
+  const fn = windowOf("function modelDiagnosisLines(", "\n  }", "modelDiagnosisLines");
   assert.match(fn, /findProjectAgentText\(projectAgentsDir, name\)/, "effective chain = project file first (by identity)");
   assert.match(fn, /hasConfiguredAuth/, "registry auth must gate the authed set");
   assert.match(fn, /models-store\.json/, "disk fallback reads the provider store");
@@ -376,9 +366,7 @@ test("INCREMENTAL: the settled conclusion of the previous round is handed to the
     /settledConclusion\(state\)/,
     "the previous conclusion must travel with the scope block",
   );
-  const fnAt = SRC.indexOf("function settledConclusion(");
-  assert.ok(fnAt > 0, "settledConclusion must exist");
-  const fn = SRC.slice(fnAt, fnAt + 500);
+  const fn = windowOf("function settledConclusion(", "\n  }", "settledConclusion");
   assert.match(fn, /lastReadyReview/, "only an APPROVED tree has settled anything");
   assert.match(fn, /if \(!base\) return undefined/, "no approved review ⇒ nothing is settled");
 });
@@ -459,9 +447,7 @@ test("showToUser renders SYNCHRONOUSLY — sendMessage would queue it and buy an
   // STOP, silently buying another LLM turn — fatal for a tool whose job is to
   // PAUSE the loop, and it shows the user nothing until the turn ends anyway.
   // ui.notify appends to the chat container and requests a render right away.
-  const start = SRC.indexOf("function showToUser");
-  assert.ok(start > 0, "the helper must exist");
-  const body = SRC.slice(start, start + 800);
+  const body = windowOf("function showToUser", "\n  }", "showToUser");
   assert.match(body, /notify\(`\$\{lead\}\\n\$\{clipped\}`, "warning"\)/,
     "the full text must go through ui.notify");
   assert.match(body, /return false/, "no UI must be reported honestly, not swallowed");
@@ -478,8 +464,7 @@ test("FLICKER: every confirm dialog goes through the row budget", () => {
   // spinner frame into a full-screen clear (measured: 29 of 30 frames).
   // confirmBounded applies lib/dialog-budget.ts; nothing may bypass it.
   const helperAt = SRC.indexOf("async function confirmBounded");
-  assert.ok(helperAt > 0, "confirmBounded must exist");
-  assert.match(SRC.slice(helperAt, helperAt + 700), /fitDialogMessage\(/,
+  assert.match(windowOf("async function confirmBounded", "\n  }", "confirmBounded"), /fitDialogMessage\(/,
     "confirmBounded must apply the budget");
 
   // The ONLY places `.confirm(` may appear are the helper's own call and its
@@ -799,9 +784,7 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
   // (kept OUT of the handler body on purpose — see its docblock): it only
   // lets EDITS pass in explore. Pin that it exists and that it can never
   // block (it returns undefined — the ship path is untouched).
-  const helperAt = SRC.indexOf("function loopGoalEditBlockFor");
-  assert.ok(helperAt > 0, "loopGoalEditBlockFor must exist");
-  const helperBody = SRC.slice(helperAt, helperAt + 700);
+  const helperBody = windowOf("function loopGoalEditBlockFor", "\n  }", "loopGoalEditBlockFor");
   const exploreAt = helperBody.indexOf('state.taskMode === "explore"');
   assert.ok(exploreAt >= 0, "the helper must short-circuit explore (edits only)");
   assert.match(helperBody.slice(exploreAt, exploreAt + 120), /return undefined/,
@@ -1008,6 +991,30 @@ test("L5 is ONE hard rule: every call site judges through the shared function", 
   assert.doesNotMatch(SRC, /review-gate \(L5 advisory\)/);
 });
 
+test("a message-only rewrite is not a content change, at L1 and in the branch rule", () => {
+  // The observed deadlock (2026-08-29): a non-English commit message could not
+  // be fixed from inside a session — `git commit --amend` was refused as a
+  // commit, and `git rebase -i` reword was refused because a detached HEAD
+  // names no branch. Both refusals are now answered by facts.
+  const callBody = windowOf('pi.on("tool_call"', 'pi.on("tool_result"', "tool_call handler");
+  assert.match(callBody, /hasAmendFlag\(s\.segment\)/, "the exemption is scoped to an amend");
+  assert.match(callBody, /isMessageOnlyRewrite\(\{/, "…and decided by the pure tree comparison");
+  const exemptionAt = callBody.indexOf("isMessageOnlyRewrite({");
+  const l5At = callBody.indexOf("nonEnglishCommitMessage(whole)");
+  assert.ok(l5At > 0 && l5At < exemptionAt,
+    "L5 must judge the NEW message BEFORE the rewrite is let through");
+  const problemsAt = callBody.indexOf("const problems: string[] = []");
+  assert.ok(problemsAt > exemptionAt, "…and the exemption returns before the content gates run");
+  // The branch rule reads where a rebase will land instead of refusing.
+  const branchFn = windowOf("function currentBranch(", "\n  }", "currentBranch");
+  assert.match(branchFn, /rebaseBranch\(root\)/, "a detached rebase HEAD still names its branch");
+  const rebaseFn = windowOf("function rebaseBranch(", "\n  }", "rebaseBranch");
+  assert.match(rebaseFn, /rebase-merge/, "the sequencer backend");
+  assert.match(rebaseFn, /rebase-apply/, "…and the am backend");
+  assert.match(rebaseFn, /rebaseBranchName\(/, "the parsing is the pure function's");
+});
+
+
 test("A-class blocks are appealable; B-class facts are NOT", () => {
   // The dividing line (user requirement): a HEURISTIC the gate can get wrong
   // gets an appeal route; a FACT it observed does not, or the appeal becomes
@@ -1148,9 +1155,7 @@ test("the runner's output is CAPTURED to a file descriptor, never discarded", ()
   // agent "1/3 checks failed" and nothing else — no check name, no error text.
   assert.doesNotMatch(SRC, /stdio:\s*\["ignore",\s*"ignore",\s*"ignore"\]/,
     "the precommit runner's output must not be thrown away");
-  const start = SRC.indexOf("async function runTrustedPrecommit");
-  assert.ok(start > 0);
-  const body = SRC.slice(start, start + 8000);
+  const body = windowOf("async function runTrustedPrecommit", "\n}", "runTrustedPrecommit");
   assert.match(body, /openSync\(tmpLog/, "capture via a file descriptor");
   // A pipe would deadlock: the runner is detached and long-lived, and a full
   // 64KB pipe buffer blocks its next write forever if nobody drains it.
@@ -1197,8 +1202,7 @@ test("precommit replies POINT AT the log; they never inline the runner's output"
 });
 
 test("failed-step names are diagnostics: read AFTER the verdict, never fed into it", () => {
-  const start = SRC.indexOf("async function runTrustedPrecommit");
-  const body = SRC.slice(start, start + 6000);
+  const body = windowOf("async function runTrustedPrecommit", "\n}", "runTrustedPrecommit");
   const verdictAt = body.indexOf("validatePrecommitReceipt(parsed");
   const stepsAt = body.indexOf("failedStepNames(parsed)");
   assert.ok(verdictAt > 0 && stepsAt > verdictAt,
@@ -1228,9 +1232,7 @@ test("sensitive-file guard wired into tool_call", () => {
 });
 
 test("request_sensitive_edit: the user decides in an extension dialog, not the agent", () => {
-  const start = SRC.indexOf('name: "request_sensitive_edit"');
-  assert.ok(start > 0, "the tool must be registered");
-  const body = SRC.slice(start, start + 6000);
+  const body = toolBodyOf("request_sensitive_edit");
 
   assert.match(body, /confirmBounded\(/, "the extension must render the confirm dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
@@ -1240,8 +1242,7 @@ test("request_sensitive_edit: the user decides in an extension dialog, not the a
 });
 
 test("SECURITY: request_sensitive_edit refuses .git internals before showing any dialog", () => {
-  const start = SRC.indexOf('name: "request_sensitive_edit"');
-  const body = SRC.slice(start, start + 6000);
+  const body = toolBodyOf("request_sensitive_edit");
   const integrityAt = body.indexOf("isGateIntegrityPath");
   const confirmAt = body.indexOf("confirmBounded");
   assert.ok(integrityAt > 0 && confirmAt > 0, "both must exist");
@@ -1281,8 +1282,7 @@ test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict
     "the cumulative history must not be used as the round number");
   // …and the count ends with the negotiation: an approved goal resets it, so
   // the next goal's first audit is round 1.
-  const proposeAt = SRC.indexOf('name: "propose_loop_goal"');
-  const propose = SRC.slice(proposeAt, proposeAt + 12000);
+  const propose = toolBodyOf("propose_loop_goal");
   assert.match(propose, /delete goalSt\.goalAuditRound/, "approval ends this goal's audit count");
   const sessionStartAt = SRC.indexOf('pi.on("session_start"');
   const sessionStart = SRC.slice(sessionStartAt, sessionStartAt + 4000);
@@ -1301,9 +1301,7 @@ test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict
 });
 
 test("goal criterion 3: prepare_adviser is registered and hands back a brief with artifact + session pointer", () => {
-  const start = SRC.indexOf('name: "prepare_adviser"');
-  assert.ok(start > 0, "the adviser brief tool must be registered");
-  const body = SRC.slice(start, start + 9000); // room for the done-channel wiring at the tool's tail
+  const body = toolBodyOf("prepare_adviser");
   assert.match(body, /buildAdviserBrief\(/, "the brief comes from the shared pure builder");
   assert.match(body, /adviser-\$\{goalHash\}\.jsonl/, "the artifact path is per goal");
   assert.match(body, /mkdirSync\(pathDirname\(artifactPath\), \{ recursive: true \}\)/, "the artifact dir is created before the first consultation");
@@ -1333,9 +1331,7 @@ test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor tas
   // The round-5 P1: record_goal_prereview only runs AFTER the audit, so it
   // could never supply the task that produced the audit it records. The
   // task template therefore lives in a PRE-dispatch tool.
-  const start = SRC.indexOf('name: "prepare_goal_audit"');
-  assert.ok(start > 0, "the pre-dispatch audit task tool must be registered");
-  const body = SRC.slice(start, start + 9000); // room for the done-channel wiring at the tool's tail
+  const body = toolBodyOf("prepare_goal_audit");
   assert.match(body, /buildGoalAuditTask\(draft, \{/, "the template comes from the shared pure builder");
   assert.match(body, /formatGoalPrereviewCarryover\(prev\)/, "re-audits carry the previous audit's conclusion");
   assert.match(body, /prev\?\.draft/, "the previous draft rides along for the mechanical delta");
@@ -1359,11 +1355,16 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   // are dropped) lives in the pure extractPrecommitBaseline, which is
   // behaviorally tested in test/parallel-review.test.ts; this test pins the
   // wiring: prepare_review hands the baseline to the task text.
-  const start = SRC.indexOf('name: "prepare_review"');
-  const body = SRC.slice(start, start + 24000);
+  const body = toolBodyOf("prepare_review");
   assert.match(body, /precommitBaselineFor\(root, st\)/, "the baseline rides the task text");
-  assert.match(body, /extractPrecommitBaseline\(st\.precommit, digest, cacheRaw\)/, "the safety decision is the pure function");
-  assert.match(body, /computeFingerprint\(root\)/, "the current tree fingerprint is measured, not guessed");
+  // …and the decision itself lives in the helper, judged in its OWN window
+  // (the tool's window used to be a byte count wide enough to swallow it,
+  // which is how a "prepare_review does X" assertion could pass on code that
+  // is not in prepare_review at all).
+  const baselineFn = windowOf("function precommitBaselineFor(", "\n  }", "precommitBaselineFor");
+  assert.match(baselineFn, /extractPrecommitBaseline\(st\.precommit, digest, cacheRaw\)/,
+    "the safety decision is the pure function");
+  assert.match(baselineFn, /computeFingerprint\(root\)/, "the current tree fingerprint is measured, not guessed");
   // No channel params in the task builder — completion is the process exit;
   // questions ride a fence + resume (2026-08-28). The output names the
   // suggested title; the session id derives mechanically (role+repo).
@@ -1409,14 +1410,12 @@ test("attention stays DIRECTED and file-based — no tmux signal, no global broa
   assert.doesNotMatch(SRC, /rg-user-attention/, "the global broadcast channel is GONE");
   assert.doesNotMatch(SRC, /createWatchRegistry\(/, "the tmux channel watcher registry is GONE");
   // propose_loop_goal: signalled right before the approval dialog renders.
-  const goalAt = SRC.indexOf('name: "propose_loop_goal"');
-  const goalBody = SRC.slice(goalAt, goalAt + 24000);
+  const goalBody = toolBodyOf("propose_loop_goal");
   const dialogAt = goalBody.indexOf("confirmBounded(");
   const signalAt = goalBody.indexOf("notifyUserAttention(\"等待 goal 批准\"");
   assert.ok(signalAt > 0 && signalAt < dialogAt, "the approval dialog signals attention before rendering");
   // ask_user: signalled when the interview starts, with its own reason.
-  const pauseAt = SRC.indexOf('name: "ask_user"');
-  const pauseBody = SRC.slice(pauseAt, pauseAt + 8000);
+  const pauseBody = toolBodyOf("ask_user");
   assert.match(pauseBody, /notifyUserAttention\(\"等待回答提问\"\)/, "a pause signals attention with its reason");
   // Spawn side: the child receives RG_PARENT_SESSION so it knows who to wake.
   const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
@@ -1425,9 +1424,7 @@ test("attention stays DIRECTED and file-based — no tmux signal, no global broa
 });
 
 test("round-18: prepare_review carries the polish-gate reason — parameter, refusal, persistence, reviewer injection", () => {
-  const start = SRC.indexOf('name: "prepare_review"');
-  assert.ok(start > 0, "prepare_review must exist");
-  const body = SRC.slice(start, start + 9000);
+  const body = toolBodyOf("prepare_review");
   // The tool accepts a `reason` parameter.
   assert.match(body, /reason: Type\.Optional\(Type\.String\(/, "prepare_review accepts a reason");
   // The refusal path consults the pure decision module and demands the reason.
@@ -1438,9 +1435,7 @@ test("round-18: prepare_review carries the polish-gate reason — parameter, ref
   assert.match(body, /st\.lastPolishReason = \{/, "the reason is persisted");
   assert.match(body, /lastPolishReason/, "the reviewer task receives the stored reason");
   // record_review records per-file finding severities for the file streak.
-  const recAt = SRC.indexOf('name: "record_review"');
-  assert.ok(recAt > 0);
-  const recBody = SRC.slice(recAt, recAt + 10000);
+  const recBody = toolBodyOf("record_review");
   assert.match(recBody, /parseFenceFileFindings\(params\.reviewer_output\)/, "record_review parses severity+file per round");
   assert.match(recBody, /recordedFindingsFrom\(fileFindings\)/, "the file lists are derived for the streak");
   assert.match(recBody, /polishFiles: recorded\.polishFiles/, "P2/Nit files are stored on the round");
@@ -2394,9 +2389,7 @@ test("publishing paths require a full precommit run; a commit does not", () => {
   assert.ok(shipAt > 0, "the ship path must derive the lane requirement from the detected commands");
 
   // declare_done publishes by implication, so it hardcodes the strict side.
-  const doneAt = SRC.indexOf('name: "declare_done"');
-  assert.ok(doneAt > 0);
-  const doneBody = SRC.slice(doneAt, doneAt + 4000);
+  const doneBody = toolBodyOf("declare_done");
   assert.match(doneBody, /requireFullTests:\s*true/, "declare_done must demand a full run");
 });
 
@@ -2560,8 +2553,7 @@ test("a commit may only land on this session's OWN work branch (fail-closed)", (
 });
 
 test("declare_done lands the work itself, and a conflict stops it honestly", () => {
-  const at = SRC.indexOf('name: "declare_done"');
-  const body = SRC.slice(at, at + 9000);
+  const body = toolBodyOf("declare_done");
   assert.match(body, /const finish = finishWorkBranch\(/, "the gate merges, the agent does not");
   const finishAt = SRC.indexOf("function finishWorkBranch(");
   const finish = SRC.slice(finishAt, finishAt + 3000);
@@ -2584,8 +2576,7 @@ test("declare_done lands the work itself, and a conflict stops it honestly", () 
 });
 
 test("review_checkpoint is fail-closed about the branch it commits on", () => {
-  const at = SRC.indexOf('name: "review_checkpoint"');
-  const body = SRC.slice(at, at + 4000);
+  const body = toolBodyOf("review_checkpoint");
   assert.match(body, /const checkpointState = root === primaryRepoRoot \? state : stateForRepo\(root\)/,
     "the TARGET repo's own work branch decides");
   assert.match(body, /commitBranchAllowed\(\{ workBranch: checkpointState\.workBranch/);

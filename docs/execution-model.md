@@ -135,3 +135,12 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
 - ship 授权（unmetRequirements）：READY 与 precommit PASS 均绑定
   commit tree；push/PR 时验证 HEAD commit tree 与绑定 tree 一致且自
   基线以来无未审核 commit。
+- **只改 message 不改 tree 的改写**（2026-08-29，`lib/git-rewrite.ts`）：
+  `git commit --amend` / `git rebase -i` reword 产出的 commit 与被替换的
+  commit **tree 相同**，不带来任何新内容，所以内容类门禁对它无话可说——
+  L1 与 pre-commit 钩子都放行（钩子只在 commit 路径放行；push 会发布整段
+  历史，`REVIEW_GATE_REQUIRE_FULL=1` 时不豁免）。改写后的 message 仍要过
+  L5：命令行传的由 L1 判，编辑器里写的（含每一次 reword）由 commit-msg
+  钩子判。rebase 中间态的 detached HEAD 按 `.git/rebase-merge/head-name`
+  还原成原分支，分支规则因此不再拦住 reword——这正是从前「修非英文
+  message 的两条路都被门禁堵死、只剩用户跑 /gate-bypass」的死结。

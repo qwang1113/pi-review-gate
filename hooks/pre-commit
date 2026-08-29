@@ -301,6 +301,30 @@ try {
   process.exit(1);
 }
 
+// MESSAGE-ONLY REWRITE (mirror of lib/git-rewrite.ts isMessageOnlyRewrite).
+// `git commit --amend` and a `git rebase -i` reword produce a commit whose
+// TREE is identical to the one it replaces: no content enters the branch, so
+// the content gates below have nothing to judge. Refusing it is what made a
+// non-English commit message unfixable — both repair paths ran through this
+// hook, and the only remaining exit was a human running /gate-bypass. The
+// message itself is still checked (commit-msg hook, L5).
+//
+// TWO CONDITIONS make this sound, and both must hold:
+//  1. COMMIT ONLY. A PUSH publishes the whole history, including commits this
+//     exemption never looked at, so pre-push (which re-execs this hook with
+//     REVIEW_GATE_REQUIRE_FULL=1) must NOT be exempt.
+//  2. The comparison is the WORKTREE tree, while a commit publishes the INDEX.
+//     Those can differ — but the staged-divergence checker above already
+//     refused this commit if they did, so by this line they are the same.
+if (!requireFullTests) {
+  try {
+    const { execFileSync } = require("node:child_process");
+    const headTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
+    if (headTree && headTree === currentFp) process.exit(0);
+  } catch { /* no HEAD (root commit) — the gates below apply as usual */ }
+}
+
+
 // FINGERPRINT ALGORITHM MIGRATION.
 //
 // A digest is only meaningful under the algorithm that produced it. Because a

@@ -118,6 +118,32 @@ test("the summary counts each outcome", () => {
   assert.match(summary, /共 3 问/);
 });
 
+test("the transcript keeps the Q&A itself, not just the counts", () => {
+  // User report 2026-08-29: the dialogs write nothing of their own, so counts
+  // alone left the user unable to see what they had chosen.
+  const summary = formatTranscriptSummary([
+    { question: "本轮交付范围？\n（第二行是补充说明）", kind: "answered", answer: "全做：1+2+3+4" },
+    { question: "申诉入口形态？", kind: "skipped" },
+    { question: "配额存哪？", kind: "deferred-to-chat" },
+    { question: "还有别的吗？", kind: "unanswered" },
+  ]);
+  assert.match(summary, /1 \/ 4 本轮交付范围？ → 全做：1\+2\+3\+4/, "question and chosen answer, one line");
+  assert.doesNotMatch(summary, /第二行是补充说明/, "only the question's first line is kept");
+  assert.match(summary, /2 \/ 4 申诉入口形态？ → （跳过）/);
+  assert.match(summary, /3 \/ 4 配额存哪？ → （转聊天回答）/);
+  assert.match(summary, /4 \/ 4 还有别的吗？ → （未作答）/);
+});
+
+test("a long question or answer is capped, never wrapped over several lines", () => {
+  const summary = formatTranscriptSummary([
+    { question: "q".repeat(200), kind: "answered", answer: "a".repeat(200) },
+  ]);
+  const lines = summary.split("\n");
+  assert.equal(lines.length, 2, "one header line plus one line per question");
+  assert.match(lines[1], /…/, "the overflow is elided");
+  assert.ok(lines[1].length < 200, `the line stays short (${lines[1].length} chars)`);
+});
+
 test("the loop waits whenever anything went unanswered", () => {
   assert.equal(needsUserReply([{ question: "a", kind: "answered", answer: "x" }]), false);
   assert.equal(needsUserReply([{ question: "a", kind: "skipped" }]), true);

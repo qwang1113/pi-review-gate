@@ -133,6 +133,7 @@ import {
   type ToolUpdate,
 } from "../lib/progress-stream.ts";
 import { pollUntil } from "../lib/poll-wait.ts";
+import { isMessageOnlyRewrite, hasAmendFlag, rebaseBranchName } from "../lib/git-rewrite.ts";
 import {
   normalizeQuestions,
   resumeFrom,
@@ -1111,14 +1112,38 @@ export default function reviewGate(pi: ExtensionAPI) {
     watchRegistry.register(sessionId, label);
   }
 
-  /** The current branch name, or undefined on a detached HEAD / no repo. */
+  /**
+   * The branch this repo is working on.
+   *
+   * A rebase in progress is NOT a detached head in any meaningful sense: git
+   * remembers the branch it will land back on, and every commit the rebase
+   * makes belongs to that branch. Reading it is what keeps the branch rule
+   * from blocking `git rebase -i` reword — the very operation an agent needs
+   * to fix a non-English commit message (observed deadlock, 2026-08-29).
+   * A genuine detached HEAD still reports undefined, and the rule still
+   * refuses.
+   */
   function currentBranch(root: string): string | undefined {
     try {
       const name = execFileSync("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-      return name || undefined;
-    } catch {
-      return undefined; // detached HEAD, or not a repo
+      if (name) return name;
+    } catch { /* detached — maybe a rebase; ask git where it came from */ }
+    return rebaseBranch(root);
+  }
+
+  /** The branch a rebase in progress will return to, read from the git dir. */
+  function rebaseBranch(root: string): string | undefined {
+    for (const dir of ["rebase-merge", "rebase-apply"]) {
+      try {
+        const gitPath = execFileSync("git", ["rev-parse", "--git-path", `${dir}/head-name`], {
+          cwd: root, encoding: "utf8",
+        }).trim();
+        if (!gitPath || !existsSync(pathResolve(root, gitPath))) continue;
+        const name = rebaseBranchName(readFileSync(pathResolve(root, gitPath), "utf8"));
+        if (name) return name;
+      } catch { /* no rebase in progress, or an unreadable git dir */ }
     }
+    return undefined;
   }
 
   /** `git status --porcelain`, parsed. An unreadable repo reports clean. */
@@ -1250,6 +1275,19 @@ export default function reviewGate(pi: ExtensionAPI) {
       return execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
     } catch {
       return "";
+    }
+  }
+
+  /**
+   * The tree the NEXT commit would publish — the worktree tree, computed the
+   * same way the ship bindings are (lib/fingerprint.ts). Empty when it cannot
+   * be read, which every caller must treat as "unknown" rather than "equal".
+   */
+  function worktreeTree(root: string): string | undefined {
+    try {
+      return worktreeTreeOid(root) || undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -2240,6 +2278,25 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
     }
 
+    // MESSAGE-ONLY REWRITE (lib/git-rewrite.ts). A `git commit --amend` whose
+    // tree equals HEAD's publishes no content, so the CONTENT gates below have
+    // nothing to judge — and refusing it is what left a non-English commit
+    // message unfixable (the only exit was a human running /gate-bypass).
+    // The message itself was already judged above: L5 and the AI-attribution
+    // guard run BEFORE this, so the rewrite cannot smuggle in a bad message.
+    if (ships.every((s) => s.kind === "commit" && hasAmendFlag(s.segment))) {
+      const target = resolution.repos[0] ?? primaryRepoRoot;
+      if (isMessageOnlyRewrite({
+        amend: true,
+        newTree: worktreeTree(target),
+        replacedTree: headCommitTree(target) || undefined,
+      })) {
+        appendLesson(`message-only rewrite allowed (tree unchanged): ${command.slice(0, 160)}`);
+        return;
+      }
+    }
+
+
     // P-multi: check every repo this command ships FROM (checkRoots was
     // already resolved above, before the short-circuits). Each ship segment's
     // repo is checked with ITS OWN sidecar + fingerprint.
@@ -2358,14 +2415,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       crossRepoVerdictHint(blockedUnreviewed);
     lastBlockedShip = { command, problems, blockReason, at: Date.now() };
 
+    // O13: ONE next-step line. The problems above already say what is unmet;
+    // the arbitration sentence is added only where it can apply at all (a lone
+    // `gh pr edit`), because a ship gate is a FACT — satisfy it, do not argue
+    // with it.
     return {
       block: true,
-      reason:
-        blockReason +
-        "\nRun the review loop to clear the gate, or /gate-bypass <reason>." +
-        (ships.length === 1 && ships[0].kind === "pr-edit"
-          ? "\nIf this block is genuinely CIRCULAR (the only fix requires this exact `gh pr edit`), you may call request_arbitration with your argument."
-          : ""),
+      reason: blockReason + "\n" + (ships.length === 1 && ships[0].kind === "pr-edit"
+        ? "跑完审查循环清掉门禁；若这条拦截确实是循环死结（唯一的修法就是这条 gh pr edit），可 request_arbitration。"
+        : "跑完审查循环清掉门禁（judge_submit → declare_done）。"),
     };
   });
 

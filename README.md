@@ -161,8 +161,8 @@ repo-local `*/.pi/review-snapshots/` and `<tmp>/` fallbacks) is rejected even
 without a sidecar — a snapshot from an older install carries no `.pi/` but
 shares the real repo's `.git`, so the "no sidecar → allow" rule would let a
 reviewer's push ship the real repo. The 2026-08-27 execution model no longer
-creates snapshots (reviewers judge immutable commit ranges as tmux judge
-children), so this check only guards leftovers of older installs.
+creates snapshots (reviewers judge immutable commit ranges as their own pi
+processes), so this check only guards leftovers of older installs.
 `REVIEW_GATE_BYPASS=1` still applies (human escape hatch).
 
 ### Project-level step configuration (`.pi/review-gate.json`)
@@ -843,28 +843,27 @@ npx pi-review-gate-install-hooks
 `scripts/install-global.sh` was retired when the repo became a pi package;
 use `pi install` above instead.
 
-### Single-review loop: judge roles as tmux children (2026-08-27 model)
+### Single-review loop: judge roles as their own pi processes (2026-08-28 model)
 
-**Judge roles (reviewer / adviser / goal-auditor) run as their own pi
-processes in tmux panes of the main session — no workflow engine, no
-subagent dispatch.**
+**Judge roles (reviewer / adviser / goal-auditor) run as their own
+non-interactive pi processes (`pi -p --session-id`) — no tmux pane, no
+workflow engine, no subagent dispatch.**
 
-**Review runs one reviewer per round.** The review unit is the immutable
-COMMIT RANGE `baseline..HEAD`: the agent commits the change as a checkpoint
-first (`review_checkpoint` — the only commit allowed before a READY; it
-requires a full precommit PASS), then `prepare_review` computes the range and
-hands back the ready-made task text. `review_spawn` creates the judge child
-(a fresh pi process in a tmux pane, no review-gate extension loaded,
-`--exclude-tools edit,write`); the agent sends the task and waits — the
-done/inbox listeners were registered by `review_spawn` itself, so the
-completion signal WAKES the main session with no polling — then records the
-verdict with `record_review`, which
-binds a READY to the reviewed commit's TREE (content binding — squash
-preserves it) and downgrades a READY whose HEAD moved (STALE) to BLOCKED.
-Because the reviewed range is immutable, the agent keeps fixing the real
-worktree while the reviewer runs. Subagent dispatch of judge roles is
-HARD-blocked (a judge as a subagent would run in the live worktree with no
-isolation). One reviewer, one commit range, no second reviewer.
+**Review runs one reviewer per round, and the gate runs the whole chain.**
+The agent makes ONE call — `judge_submit({role:"reviewer", task})` — and the
+gate does the rest: a full precommit, the checkpoint commit (the only commit
+allowed before a READY), the `baseline..HEAD` computation, and the dispatch.
+The review unit is that immutable COMMIT RANGE. The judge child is a fresh pi
+process with no review-gate extension loaded and `--exclude-tools edit,write`;
+its session id is deterministic per role+repo, so the next round continues the
+same conversation. Completion is the process EXIT: the gate reads that round's
+output, records the verdict itself (binding a READY to the reviewed commit's
+TREE — content binding, so a squash preserves it; a READY whose HEAD moved is
+STALE ⇒ BLOCKED) and wakes the main session with it. Because the reviewed
+range is immutable, the agent keeps fixing the real worktree while the
+reviewer runs. Subagent dispatch of judge roles is HARD-blocked (a judge as a
+subagent would run in the live worktree with no isolation). One reviewer, one
+commit range, no second reviewer.
 
 **The decompose module loop and wave daily were removed (2026-08-26).**
 There is no module table, no wave scheduling, and no plan state to consult:
@@ -918,13 +917,11 @@ The loop protocol (also available as the `review-loop` skill):
 
 ```
 edit code (batch related edits — the loop is billed per ROUND, not per line)
-  → run_precommit first (cheap checks before the expensive judge)
-  → review_checkpoint (commits the change — requires the precommit PASS)
-  → prepare_review (computes baseline..HEAD + task text)
-  → review_spawn / review_send (ONE tmux judge child; the wake-up listener comes with the spawn)
-  → call record_review with the FULL reviewer output      # all fences parsed, worst wins
-  → BLOCKED? fix everything, then start again from precommit
-  → READY?  call declare_done                             # re-validated server-side
+  → judge_submit({role:"reviewer", task})   # ONE call: the gate runs precommit →
+                                            # checkpoint → baseline..HEAD → dispatch
+  → the judge's process EXIT wakes this session; the gate already recorded the verdict
+  → BLOCKED? fix the findings, then judge_submit again
+  → READY?  call declare_done                             # re-validated server-side, merges the branch
   → ship    (git commit now passes the gate)
 ```
 
@@ -979,12 +976,12 @@ one fact:
   answer, all at once only when the user asks for it — until nothing is left
   silently assumed. Facts are the agent's job (read the repo, run the tools);
   only decisions go to the user.
-- **Then the goal-auditor — mechanically (since 2026-08-25).** The agent calls
-  `prepare_goal_audit` with the draft to get the ready-made auditor task (with
-  the previous audit's carryover + draft delta on a re-audit), spawns the
-  dedicated `goal-auditor` as a tmux judge child (`review_spawn`) with it, and
-  hands the FULL raw output to
-  `record_goal_prereview`. The **extension** parses the auditor's JSON fence
+- **Then the goal-auditor — mechanically (since 2026-08-25).** The agent makes
+  ONE call, `judge_submit({role:"goal-auditor", task:<the full draft>})`: the
+  gate builds the auditor task (with the previous audit's carryover + the draft
+  delta on a re-audit), dispatches the judge as its own pi process, and records
+  the verdict when it exits.
+  The **extension** parses the auditor's JSON fence
   itself (PASS ⇔ a `READY` verdict, which verdict-parse already withholds from
   a fence carrying unresolved P0/P1, and a salvaged fence can never be READY)
   and hashes the audited text itself — there is no `passed` parameter, so the
@@ -1360,7 +1357,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 |------|---------|
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal` + a reason). The agent's pick IS the classification — no classifier model reviews it. On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) `loop` and `explore` apply directly with source `auto`, while `normal` still pops the confirm dialog. Everything delegates to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. |
 | `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). It verifies the COMMIT TARGET mechanically (2026-08-27 model): a READY is withheld when the round was never prepared (no registered `baseline..HEAD` target), downgraded to BLOCKED as STALE when HEAD moved past the reviewed commit (a new checkpoint landed after prepare), and bound to the reviewed commit's TREE (content binding — a later squash of the checkpoint chain preserves it). A READY must also carry the judge's own `pwd` (a required field of the verdict schema), which the gate compares with the repo the round was prepared for — this catches a verdict produced against the wrong repo or carried over from another review; it does not measure the pane, so it is not proof against a fabricated value. Mechanical, so the agent cannot forget it. |
-| `prepare_review` | Register the COMMIT target for the single reviewer of this round (2026-08-27 model): requires the checkpoint from `review_checkpoint` (the only commit allowed before a READY), computes the immutable range `baseline..HEAD`, writes the append-only finding-stream file and returns the ready-made task text plus the tmux spawn instructions (`review_spawn` → `review_send`; the done/inbox listeners come with the spawn, so no `review_watch` call is part of the flow). In a THROWAWAY worktree of its own the reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. A READY recorded after HEAD moved (a new checkpoint during the review) does NOT bind: `record_review` compares HEAD with the registered reviewed commit and downgrades to BLOCKED (STALE), so an approval can never cover commits no reviewer saw. A READY must also carry the judge's own `pwd`, which `record_review` compares with the reviewed repo (see its row above). Round-18 POLISH GATE: when the last two recorded rounds both verdict READY, or the same file has carried P2/Nit findings in three consecutive rounds, the tool REFUSES a `reason`-less call; the supplied reason is persisted (`lastPolishReason`) and injected into the next reviewer's task text, so a "polish" round is visible to the independent judge. |
+| `prepare_review` | ADVANCED / internal — `judge_submit({role:"reviewer"})` runs this itself as step 3 of the chain. Registers the COMMIT target for the single reviewer of this round: requires the checkpoint from `review_checkpoint` (the only commit allowed before a READY), computes the immutable range `baseline..HEAD`, writes the append-only finding-stream file and returns the ready-made task text. In a copy of its own the reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. A READY recorded after HEAD moved (a new checkpoint during the review) does NOT bind: `record_review` compares HEAD with the registered reviewed commit and downgrades to BLOCKED (STALE), so an approval can never cover commits no reviewer saw. A READY must also carry the judge's own `pwd`, which `record_review` compares with the reviewed repo (see its row above). Round-18 POLISH GATE: when the last two recorded rounds both verdict READY, or the same file has carried P2/Nit findings in three consecutive rounds, the tool REFUSES a `reason`-less call; the supplied reason is persisted (`lastPolishReason`) and injected into the next reviewer's task text, so a "polish" round is visible to the independent judge. |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. The full output is never inlined into the reply — a failing suite can emit megabytes — but the run is **no longer silent while it happens**: the runner writes a **plan preamble** (every step and the exact command, plus the ones it is skipping and why) BEFORE the first check starts, then streams the running step's stdout/stderr as it arrives, and the extension **tails that log and forwards it through the tool's `onUpdate`**, so a multi-minute precommit shows live progress instead of nothing. Liveness is a *read* of the log, never a second write channel: the runner's stdio stays a file descriptor (a pipe would deadlock the detached runner at its 64KB buffer), and the tail's final flush on stop is what makes an aborted or timed-out run's log complete. The ordered `▶ … ◀` blocks still read in declaration order — only the step the log is currently at streams, so nothing is printed twice. Receipt and cache tails are bounded in BYTES as well as lines (one un-newlined 64 MiB line is still one line, and a receipt over 1 MiB is refused — which would turn a passing run into ERROR). The **test** step additionally gets `<rootDir>/.pi/` excluded so a run never executes the disposable test copies under `.pi/review-snapshots/`. That rewrite is deliberately narrow, because the jest CLI flag OVERRIDES the config value: it happens only for a single simple `jest` command that uses **default config discovery**, and the repo's own `testPathIgnorePatterns` (read from `jest --showConfig`) are merged in rather than replaced. A command that selects its own config (`--config`, `--rootDir`, `--projects`, `--selectProjects`, …), a compound or non-jest script, or a `--showConfig` that cannot be read are all left **verbatim**, with the reason recorded in the log — reproducing jest's own CLI parsing well enough to query the right config is not something the gate should be guessing at, and a wrong guess would silently drop the exclusions the project actually relies on. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept it clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
 | `record_goal_prereview` | Record the dedicated `goal-auditor` role's audit of a DRAFT goal (L8b). Pass the draft text plus the auditor's FULL raw output: the **extension** parses the JSON fence itself (PASS ⇔ a `READY` verdict — verdict-parse already downgrades a READY carrying unresolved P0/P1, and a salvaged fence is never READY) and computes the text hash itself, so there is no `passed`/`hash` parameter an agent could set. No parseable fence ⇒ `isError` and **nothing** is written (fail-closed). BLOCKED/NEEDS_HUMAN ⇒ a FAIL record. Latest-only by design, and repo-resolved exactly like `propose_loop_goal` (`gitRootOfDir`, never `resolveToolRepo` — a goal is audited before the first edit lands). |
@@ -1446,7 +1443,7 @@ Configure via `.pi/review-gate.json` → `"arbiter": { "enabled", "model",
 - Ambient `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` / `GIT_CONFIG_PARAMETERS` / … injecting `core.excludesFile` (or any other setting) → ignored: the whole `GIT_CONFIG*` family is stripped by prefix, so configuration injection cannot hide a real edit from the digest
 - `git commit -a` / `git commit -- <path>` (git publishes a TEMPORARY index) → correctly judged: the hook forwards git's own `GIT_INDEX_FILE` as an explicit argument and the checker verifies it belongs to this repository, so these commits are neither wrongly blocked nor able to ship unreviewed content
 - Commit/push whose cwd is inside a review snapshot worktree (an `rg-review-snap-*` path segment) → blocked even with no sidecar (legacy guard for older installs' leftovers: such a worktree carries no `.pi/` but shares the real repo's `.git`; the 2026-08-27 model creates no snapshots)
-- Judge roles (`reviewer` / `adviser` / `goal-auditor`) dispatched through `subagent` / `workflowScript` / `workflowScriptPath` → the dispatch is **blocked at `tool_call`** (the workflow sandbox has no per-child isolation, so the judge would land in the live worktree); the agent is steered to the tmux flow (`review_spawn`). Management actions and non-judge roles (`recon`) keep running
+- Judge roles (`reviewer` / `adviser` / `goal-auditor`) dispatched through `subagent` / `workflowScript` / `workflowScriptPath` → the dispatch is **blocked at `tool_call`** (the workflow sandbox has no per-child isolation, so the judge would land in the live worktree); the agent is steered to `judge_submit`. Management actions and non-judge roles (`recon`) keep running
 - Round never prepared (no registered `baseline..HEAD` target when the verdict arrives) → any READY is recorded as **BLOCKED** — a verdict with nothing to bind to cannot ship. HEAD moved past the prepared commit → **BLOCKED** (STALE): the reviewer judged an older commit and the change has since grown
 - Loop-mode (or undecided) `edit`/`write` tool call while no USER-approved loop goal exists for the target repo → blocked at tool_call: the negotiation must happen before the work starts, and each repo checks its own goal (see the [Loop goal](#loop-goal--the-exit-contract-negotiated-with-the-user-l8-the-edit-gate-also-covers-undecided-mode) section)
 - Ship command hidden in `bash -c` / `eval` / `xargs` → still detected (over-detection preferred)
@@ -1530,7 +1527,7 @@ including a content hash, by editing the checker too):
   the deterministic backstop for attribution.
 - Fabricating the reviewer output fed to `record_review` — or the
   `auditor_output` fed to `record_goal_prereview` — the reviewer and the
-  goal-auditor are tmux judge children whose output necessarily transits the main
+  goal-auditor are judge processes whose output necessarily transits the main
   agent, so both verdicts rest on the cooperative assumption (the main agent
   can equally write the sidecar directly). What the extension DOES guarantee is
   that no agent-attested boolean is accepted: it parses the verdict fence and
@@ -1815,7 +1812,7 @@ scope and increment size. `/gate-status` prints the last run's slowest steps.
 It is diagnostics only: nothing reads it back into a decision, it is capped at
 500 records, and it lives under `.pi/` so writing it cannot invalidate the run
 it describes. Review durations are recorded as **upper bounds** (`approximate:
-true`) — the reviewer runs as its own pi process in a tmux pane, which the
+true`) — the reviewer runs as its own non-interactive pi process, which the
 extension does not watch turn by turn, so all it can measure is the wall clock
 since the previous gate event.
 
@@ -1852,7 +1849,12 @@ lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
 lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running subagent, notice text (pure)
 lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
-lib/tmux-session.ts           judge-child lifecycle: tmux pane spawn/stack, liveness, single-line send, capture, wait-for signal (done channel), session fallback
+lib/judge-process.ts          judge-child lifecycle: `pi -p --session-id` spawn (argv, no shell), stdout/stderr tee, liveness from the child's own exitCode
+lib/judge-lifecycle.ts        judge round decisions (pure): work dir per role+repo, dispatch vs. refuse-busy, the three end-of-round criteria, judge_wait's reply, goal-audit adjudication
+lib/poll-wait.ts              the wait skeleton with its criteria injected (pure loop: probe → publish → stop on a criterion, the budget or an abort)
+lib/progress-stream.ts        live tool progress: pure frame rendering + a throttled reporter over `onUpdate`, and the slow-call notice for the LLM guards
+lib/text-appeal.ts            A-class text appeals (pure): content digest, quota + re-roll brakes, the single-use pass, the arbiter brief
+lib/git-rewrite.ts            message-only rewrites (pure): tree-equality test, `--amend` recognition, the branch a rebase will land on
 lib/judge-prompt.ts            judge role resolution (repo → package → ~/.pi/agent/agents), model spec, launcher files, judge-role dispatch detection for the subagent block
 lib/parallel-review.ts        single-review contract: reviewer prompt + verdict schema (pure, no engine)
 docs/subagents-collaboration.md how the gate and pi-subagents cooperate: what is established, what is deliberately NOT used (gate param / worktree isolation), what was added (the single-review spawn shape, the L8b goal pre-review collaboration)
