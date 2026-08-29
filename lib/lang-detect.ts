@@ -130,3 +130,44 @@ export function firstNonEnglish(texts: readonly string[]): string | undefined {
   }
   return undefined;
 }
+
+/** What part of a commit message failed the L5 check. */
+export type CommitMessagePart = "subject" | "body";
+
+/** The offending message plus WHICH part of it failed. */
+export interface NonEnglishCommitMessage {
+  /** The exact text that failed — the subject line, or the whole message. */
+  text: string;
+  /** Which part the verdict came from (drives a precise block reason). */
+  part: CommitMessagePart;
+}
+
+/**
+ * L5 for COMMIT MESSAGES: the SUBJECT line is judged STRICTLY, the body keeps
+ * the majority policy.
+ *
+ * Why the subject is special (observed 2026-08-29): `firstNonEnglish` judges
+ * each string as ONE body by majority, so a long English body — full of
+ * identifiers, paths and code tokens — diluted a fully Chinese subject below
+ * the 50% threshold and `checkpoint: 修掉…` shipped. The subject is the line
+ * every log, blame and changelog shows, so it gets a zero-tolerance rule:
+ * ANY non-Latin letter in it rejects. The body keeps `isNonEnglishText`, so a
+ * minority foreign term in an English explanation still passes (the relaxation
+ * documented at the top of this file is deliberately NOT reverted for bodies,
+ * nor for PR title/body, which keep using `firstNonEnglish`).
+ *
+ * Each message is judged separately and never concatenated.
+ */
+export function firstNonEnglishCommitMessage(
+  messages: readonly string[],
+): NonEnglishCommitMessage | undefined {
+  for (const message of messages) {
+    // The subject is the first line; everything after the blank line is body.
+    // A message with no newline is all subject — and is judged strictly.
+    const subject = message.split("\n", 1)[0] ?? "";
+    if (containsNonLatinLetter(subject)) return { text: subject, part: "subject" };
+    if (isNonEnglishText(message)) return { text: message, part: "body" };
+  }
+  return undefined;
+}
+

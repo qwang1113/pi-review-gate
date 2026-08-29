@@ -83,7 +83,7 @@ import {
   resolveCommandRepos,
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
-import { firstNonEnglish, containsNonLatinLetter, isNonEnglishText } from "../lib/lang-detect.ts";
+import { firstNonEnglish, firstNonEnglishCommitMessage, containsNonLatinLetter, isNonEnglishText } from "../lib/lang-detect.ts";
 import {
   spawnJudgeProcess,
   judgeSessionIdFor,
@@ -2063,16 +2063,22 @@ export default function reviewGate(pi: ExtensionAPI) {
             };
           }
         }
-        // L5 HARD (user policy): predominantly non-English commit messages
-        // block the ship — same majority-body policy that used to be advisory
-        // only. The escape hatch is named in the reason: a wrong guess must
-        // never permanently strand a legitimate commit.
-        const nonEn = firstNonEnglish(msgs);
+        // L5 HARD (user policy): non-English commit messages block the ship.
+        // The SUBJECT line is judged strictly (any non-Latin letter rejects);
+        // the body keeps the majority policy that used to be advisory only.
+        // Same function as review_checkpoint, so a single `-m "subject\n\nbody"`
+        // can no longer dilute a non-English subject (observed 2026-08-29).
+        // The escape hatch is named in the reason: a wrong guess must never
+        // permanently strand a legitimate commit.
+        const nonEn = firstNonEnglishCommitMessage(msgs);
         if (nonEn) {
           return {
             block: true,
             reason:
-              `review-gate: commit message is predominantly non-English: "${nonEn.slice(0, 60)}". ` +
+              (nonEn.part === "subject"
+                ? `review-gate: the commit SUBJECT line is not English: "${nonEn.text.slice(0, 60)}". ` +
+                  "The subject must contain no non-Latin letters at all (the body may keep a minority foreign term). "
+                : `review-gate: commit message is predominantly non-English: "${nonEn.text.slice(0, 60)}". `) +
               "Commit messages must be English — rewrite it (git commit --amend). " +
               "Escape hatch: the user may run /gate-bypass <reason> (in-session; REVIEW_GATE_BYPASS=1 " +
               "only applies outside the session, at the git-hook layer).",
@@ -3050,12 +3056,18 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
-      const nonEn = firstNonEnglish([message]);
+      // L5: the SUBJECT line is judged strictly (any non-Latin letter rejects),
+      // the body keeps the majority policy — a long English body must never
+      // dilute a non-English subject again (observed 2026-08-29).
+      const nonEn = firstNonEnglishCommitMessage([message]);
       if (nonEn) {
         return {
           content: [{
             type: "text",
-            text: `review-gate: review_checkpoint rejected — the message is predominantly non-English (\"${nonEn.slice(0, 60)}\"). Write it in English.`,
+            text: nonEn.part === "subject"
+              ? `review-gate: review_checkpoint rejected — the SUBJECT line is not English (\"${nonEn.text.slice(0, 60)}\"). ` +
+                "The subject must be English with no non-Latin letters at all (the body may keep a minority foreign term). Rewrite it."
+              : `review-gate: review_checkpoint rejected — the message body is predominantly non-English (\"${nonEn.text.slice(0, 60)}\"). Write it in English.`,
           }],
           details: { committed: false },
           isError: true,
@@ -4271,7 +4283,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       const goalText = goalForReview?.text;
       const goalTruncated = goalForReview?.truncated === true;
       // NOTE: no display title is computed here — judge_submit derives the
-      // title (and the deterministic session id) from role+repo itself.
+      // display title itself, and the session id deterministically from
+      // role+repo (that is what makes a role's next round resume its session).
       const scopeNow = reviewScopeFor(root, st);
       // Round-18 polish gate: persist a supplied reason BEFORE building the
       // task, so the reviewer of THIS round sees the reason that authorized it.
@@ -4310,7 +4323,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         `stream=${streamPath}`,
         "ADVANCED / internal：正常路径是一次 judge_submit({ role: \"reviewer\", task: <本轮改动说明> })——",
         "它自己跑 precommit、checkpoint、本 prepare 与派发，并在 judge 进程退出时机械记录 verdict。",
-        "本工具只返回上面的审查范围与下面的任务文本；title 与 session id 由门禁按 role+repo 自行派生。",
+        "本工具只返回上面的审查范围与下面的任务文本；显示用 title 与 session id 都由门禁自行派生（session id 按 role+repo 确定性派生，所以同一 role 的下一轮续用同一会话）。",
         ...(goalTruncated
           ? [
               `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${pathJoin(root, LOOP_GOAL_RELPATH)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,

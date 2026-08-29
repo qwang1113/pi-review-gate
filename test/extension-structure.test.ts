@@ -975,7 +975,7 @@ test("L5 is HARD: commit & PR title/body language checks BLOCK (majority policy,
     "the advisory notify must be gone");
 
   // Both language branches must actually return block:true.
-  const commitLangAt = SRC.indexOf("firstNonEnglish(msgs)");
+  const commitLangAt = SRC.indexOf("firstNonEnglishCommitMessage(msgs)");
   const prLangAt = SRC.indexOf("firstNonEnglish(prTexts)");
   assert.ok(commitLangAt > 0 && prLangAt > commitLangAt,
     "commit language check → PR language check, in order");
@@ -994,6 +994,36 @@ test("L5 is HARD: commit & PR title/body language checks BLOCK (majority policy,
 
   // AI-attribution stays a hard block too (double barrier).
   assert.match(SRC, /AI attribution[\s\S]*?block:\s*true/);
+});
+
+test("L5 subject rule: BOTH commit paths share the subject-strict checker", () => {
+  // 2026-08-29 regression: `firstNonEnglish` judged the WHOLE message by
+  // majority, so a long English body diluted a Chinese subject and the
+  // checkpoint shipped. The fix is one shared function — if either path drifts
+  // back to the whole-message check, a non-English subject slips through THAT
+  // path, so both call sites are pinned here.
+  const toolCallPath = SRC.indexOf("firstNonEnglishCommitMessage(msgs)");
+  const checkpointPath = SRC.indexOf("firstNonEnglishCommitMessage([message])");
+  assert.ok(toolCallPath > 0, "the tool_call git-commit guard uses the shared checker");
+  assert.ok(checkpointPath > 0, "review_checkpoint uses the SAME shared checker");
+  // The retired whole-message call must be gone from the commit-message paths
+  // (PR title/body legitimately keeps `firstNonEnglish(prTexts)`).
+  assert.doesNotMatch(SRC, /firstNonEnglish\(msgs\)/,
+    "the commit path must not fall back to the diluted whole-message check");
+  assert.doesNotMatch(SRC, /firstNonEnglish\(\[message\]\)/,
+    "review_checkpoint must not fall back to the diluted whole-message check");
+  assert.match(SRC, /firstNonEnglish\(prTexts\)/,
+    "PR title/body keeps the majority policy — the subject rule is commit-only");
+
+  // Both refusals must name the SUBJECT explicitly: a reason that only says
+  // "predominantly non-English" would send the agent to rewrite the body.
+  for (const at of [toolCallPath, checkpointPath]) {
+    const region = SRC.slice(at, at + 1400);
+    assert.match(region, /nonEn\.part === "subject"/,
+      "the reason branches on which part failed");
+    assert.match(region, /SUBJECT line is not English/,
+      "the refusal names the subject line as the offender");
+  }
 });
 
 test("commands registered: gate-status, gate-bypass, gate-mode, gate-reset", () => {
@@ -1677,10 +1707,14 @@ test("every lib export referenced by the extension is imported (no runtime Refer
 test("review_checkpoint: the pre-review commit channel is registered with its contract", () => {
   const at = SRC.indexOf('name: "review_checkpoint"');
   assert.ok(at >= 0, "review_checkpoint must be registered");
-  const body = SRC.slice(at, at + 8000);
+  // Slice to the NEXT registered tool, not a fixed byte count: a magic window
+  // silently starts missing assertions as soon as the body grows (it did —
+  // 2026-08-29, when the L5 subject rule added comments above `st.checkpoint`).
+  const body = SRC.slice(at, SRC.indexOf('name: "judge_submit"', at));
   // the gate semantics: bypasses READY only, never precommit
   assert.match(body, /bypasses READY only, never precommit/);
-  assert.match(body, /firstNonEnglish/, "L5: message must be English");
+  assert.match(body, /firstNonEnglishCommitMessage\(\[message\]\)/,
+    "L5: message must be English — subject strictly, body by majority");
   assert.match(body, /COMMIT_MSG_FORBIDDEN/, "round-4 P2: AI-attribution guard replicated");
   assert.match(body, /testScope !== "full"/, "round-4 P2: full precommit required");
   assert.match(body, /isSensitiveFile/, "round-4 P2: sensitive paths refused");
@@ -1905,7 +1939,7 @@ test("LLM guards: deterministic checks precede every LLM call (tighten-only orde
   // L5 (advisory): Unicode firstNonEnglish must precede the semantic english
   // check — anchored to the commit-msg branch (`msgs`), because the L6
   // edit-time branch also calls classifyNonEnglish earlier in the file.
-  const unicodeCheck = SRC.indexOf("firstNonEnglish(msgs)");
+  const unicodeCheck = SRC.indexOf("firstNonEnglishCommitMessage(msgs)");
   const semanticEnglish = SRC.indexOf("classifyNonEnglish(classifier(), msgs)");
   assert.ok(unicodeCheck > 0 && semanticEnglish > unicodeCheck,
     "Unicode script check must precede classifyNonEnglish in the commit branch");
