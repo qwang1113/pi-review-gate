@@ -3286,6 +3286,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           if (!s.sessionEditedFiles.includes(rel)) s.sessionEditedFiles.push(rel);
           if (s.review.verdict === "READY") s.review.verdict = "PENDING";
           if (s.precommit.verdict === "PASS") s.precommit.verdict = "NOT_RUN";
+          // A NEW EDIT UN-FINISHES THE TASK (round-2 hardening). The
+          // completion record is what a supervising orchestrator reads to
+          // decide a child is `done`; a session that starts editing again is
+          // working, whoever asked it to — including a human typing straight
+          // into the pane, which no orchestration tool can observe.
+          if (s.completion) delete s.completion;
           loopArmed = true;
           if (s.pausedQuestion) delete s.pausedQuestion;
           dirty = true;
@@ -3335,6 +3341,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         if (state.review.verdict === "READY") state.review.verdict = "PENDING";
         if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
+        // Same as the cross-repo branch above: editing again means this task
+        // is not finished any more, so the completion an orchestrator reads
+        // must go with it.
+        if (state.completion) delete state.completion;
         loopArmed = true;
         // The agent resumed working on its own — a standing question pause
         // (ask_user) is moot; clear it so the loop enforces again.

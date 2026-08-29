@@ -3155,6 +3155,19 @@ test("R3-5: an accepted declare_done WRITES the completion record, before the lo
     "'this task was completed at T' stays true for the rest of the session");
 });
 
+test("R3-5: a new edit CLEARS the completion record, in both repo branches", () => {
+  // The other half of "written once, never invalidated": an orchestrator
+  // reads this record to call a child `done`, and a session that starts
+  // editing again is working — whoever asked it to, including a human typing
+  // straight into the pane, which no orchestration tool can observe.
+  const edits = SRC.split('if (state.review.verdict === "READY")');
+  assert.ok(edits.length >= 2, "the edit accounting must still exist");
+  const clears = SRC.match(/delete (?:s|state)\.completion;/g) ?? [];
+  assert.equal(clears.length, 2,
+    "both the primary-repo and the cross-repo edit branches must expire it");
+});
+
+
 test("R3-7: the merge asks WHERE it can run before it switches any branch", () => {
   // `git checkout <base>` in a linked worktree fails 100% of the time — the
   // base branch is held by the supervisor's checkout — so both parallel lanes
