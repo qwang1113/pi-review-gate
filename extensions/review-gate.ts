@@ -1936,10 +1936,11 @@ export default function reviewGate(pi: ExtensionAPI) {
           reason:
             judgeName
               ? `review-gate: \`${judgeName}\` is a judge role and runs ONLY as its own pi process — ` +
-                "subagent dispatch for it is retired (2026-08-27 execution model). Use the review_spawn flow: " +
-                "review_checkpoint → prepare_review → review_spawn → record_review. (A judge dispatched as a subagent would run in your live worktree " +
+                "subagent dispatch for it is retired (2026-08-27 execution model). Submit it with " +
+                "`judge_submit({role, task})`: the gate runs the whole chain and dispatches the judge itself. " +
+                "(A judge dispatched as a subagent would run in your live worktree " +
                 "with no isolation at all — the exact failure the model was built to end.)"
-              : "review-gate: workflowScriptPath could not be read, so a judge role inside it cannot be ruled out — failing closed. Read the script, then dispatch non-judge work through it or use the review_spawn flow for judge roles.",
+              : "review-gate: workflowScriptPath could not be read, so a judge role inside it cannot be ruled out — failing closed. Read the script, then dispatch non-judge work through it or submit judge roles with `judge_submit`.",
         };
       }
     }
@@ -3839,14 +3840,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_watch",
     label: "Watch Review Child",
     description:
-      "Register a background watcher on a judge child's completion (its process exit). review_spawn " +
-      "registers this AUTOMATICALLY — call this tool only to re-register with a custom label after a " +
-      "reload, or when the child's process was resumed outside review_send. When the child exits, the " +
-      "watcher wakes THIS session via pi.sendMessage(triggerTurn) — a new turn, no polling, no sleep. " +
-      "Watchers are cancelled on session shutdown.",
+      "ADVANCED / internal: every dispatched round registers its completion watcher itself " +
+      "(judge_submit), so you never call this in the normal flow — only to re-register with a " +
+      "custom label after a reload, or for a process resumed outside the gate. When the child " +
+      "exits, the watcher wakes THIS session via pi.sendMessage(triggerTurn) — a new turn, no " +
+      "polling, no sleep. Watchers are cancelled on session shutdown.",
     parameters: Type.Object({
       sessionId: Type.String({
-        description: "The judge session id to watch (returned by review_spawn)",
+        description: "The judge session id to watch (internal key; roles are addressed by name everywhere else)",
       }),
       label: Type.Optional(Type.String({
         description: "Human-readable child label for the wake message (default: the session id)",
