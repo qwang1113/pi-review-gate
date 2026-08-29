@@ -30,26 +30,21 @@
 
 import { STALL_MOTION_MAX_AGE_SEC } from "./loop-stall.ts";
 
-/** What the extension knows about one judge child at decision time. */
 export interface ChildSnapshot {
   title: string;
-  paneId: string;
+  sessionId: string;
   role: string;
   /** ISO timestamp of the spawn. */
   spawnedAt: string;
   /**
-   * Is the child's pi SESSION still running? Decided from the session's own
-   * artifacts (`readJudgeSessionState`), never from its pane: `finished` /
-   * `vanished` are both false, `running` is true.
-   *
-   * `unknown` (nothing recorded yet) is reported as ALIVE — a session that was
-   * spawned microseconds ago has not written its pid yet, and calling that
-   * "ended" would abandon every judge at birth.
+   * Is the child's pi PROCESS still running? Decided from the live
+   * ChildProcess's exitCode (judgeProcessAlive), not from any display: an
+   * exited process is finished even if its artifacts were never written.
    */
   alive: boolean;
   /**
    * ISO timestamp of the child's last OBSERVED activity — in production the
-   * newest write among its transcript, `stderr.log` and inbox
+   * newest write among its transcript, `stderr.log` and stdout log
    * (`lastActivityAt()` in lib/judge-session.ts).
    *
    * Absent ⇒ fall back to `spawnedAt`. Anything OLDER than `spawnedAt` is
@@ -131,7 +126,7 @@ export function classifyChildren(
  */
 export function buildChildWaitNotice(
   verdict: ChildWaitVerdict,
-  doneChannels: ReadonlyMap<string, string>,
+  sessionIds: ReadonlyMap<string, string>,
 ): string | undefined {
   if (verdict.terminated.length === 0 && verdict.inFlight.length === 0) return undefined;
 
@@ -140,9 +135,9 @@ export function buildChildWaitNotice(
     lines.push(
       "子会话的等待已结束（未依赖它主动发信号）：",
       ...verdict.terminated.map(({ child, reason }) =>
-        `- ${child.role} ${child.title}（pane ${child.paneId}）— ${
+        `- ${child.role} ${child.title}（session ${child.sessionId}）— ${
           reason === "session-ended"
-            ? "pi 会话已结束（exit-code 已落盘，或记录的那个进程已不在）"
+            ? "进程已退出"
             : "静默超过上限"
         }。用 review_read 读取它已产出的输出：有结论就据此继续（record_review / record_goal_prereview），没有结论就 review_close 后重新派发。`,
       ),
@@ -152,14 +147,12 @@ export function buildChildWaitNotice(
     lines.push(
       "以下子会话仍在工作：",
       ...verdict.inFlight.map((child) => {
-        const channel = doneChannels.get(child.paneId);
-        return `- ${child.role} ${child.title}（pane ${child.paneId}${channel ? `, done channel ${channel}` : ""}）`;
+        const label = sessionIds.get(child.sessionId);
+        return `- ${child.role} ${child.title}（session ${child.sessionId}${label ? `, label ${label}` : ""}）`;
       }),
       "等待纪律：先做完可以做的确定性工作；确认没有可做的工作后，用 bash 托管等待——" +
-        "在一次 bash 调用里同时盯三件事（done channel 信号；子会话是否已结束——" +
-        "`exit-code` 文件出现，或它记录的进程已不在（`kill -0 <pid 文件第一段>`，" +
-        "崩溃的子会话来不及写 exit-code）；以及它的 session jsonl 里是否已经出现 " +
-        "verdict fence），任一命中就结束等待并继续。" +
+        "在一次 bash 调用里同时盯三件事（进程是否已退出——`kill -0 <pid 文件第一段>`；",
+      "以及它的 session jsonl 里是否已经出现 verdict fence），任一命中就结束等待并继续。" +
         "不要结束 turn 把唤醒责任交给子会话：它可能已经退出或永远不会发信号。",
     );
   }

@@ -12,8 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync, chmodSync, existsSync, readFileSync, statSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync, existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,8 +24,6 @@ import {
   lastActivityAt,
   terminateJudgeSession,
 } from "../lib/judge-session.ts";
-import { spawnJudgePane, killPane, killSession, tmuxAvailable, paneAlive } from "../lib/tmux-session.ts";
-import { writeJudgeSpawnFiles } from "../lib/judge-prompt.ts";
 import { classifyChildren } from "../lib/child-watch.ts";
 import { STALL_MOTION_MAX_AGE_SEC } from "../lib/loop-stall.ts";
 
@@ -383,7 +380,7 @@ test("activity: a long-running judge that is still writing is NOT classified as 
     const spawnedAt = new Date(Date.now() - (STALL_MOTION_MAX_AGE_SEC + 600) * 1000).toISOString();
     const child = {
       title: "reviewer-long",
-      paneId: "%1",
+      sessionId: "rg-reviewer-long",
       role: "reviewer",
       spawnedAt,
       alive: true,
@@ -507,114 +504,6 @@ test("terminate: pid 0 and 1 are never signalled (0 = our own group, 1 = init)",
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-/**
- * The claim under test is the one that decides whether `review_close` actually
- * closes anything: pi is the launcher's CHILD, so terminating only the recorded
- * pid would leave pi running as an orphan. This runs the real spawn path (the
- * launcher is `exec`ed, which is what makes it the pane's process-group leader)
- * and signals with the real `process.kill`.
- */
-/**
- * The GENERATED launcher, running in a real pane (round-1 P1, reviewer: the
- * earlier tests exercised a hand-written stand-in, so nothing proved that what
- * `writeJudgeSpawnFiles` actually writes behaves this way).
- *
- * `pi` itself is replaced by a stub on PATH — the contract under test belongs
- * to the launcher, not to pi: does it record its pid, keep the pane's TTY
- * usable for an interactive child, tee stderr to disk while still showing it,
- * and record the exit code once the child returns?
- */
-const launcherIntegration = test("tmux integration: the generated launcher records pid/exit-code/stderr and keeps the TTY interactive", { skip: !tmuxAvailable() }, async () => {
-  const work = mkdtempSync(join(tmpdir(), "rg-launcher-"));
-  const sess = `rg-launcher-${Date.now().toString(36)}`;
-  try {
-    execFileSync("tmux", ["new-session", "-d", "-s", sess, "-c", work, "sleep 300"], { encoding: "utf8" });
-
-    // A `pi` stub: draws a screen (so capture-pane has something to find),
-    // writes to stderr (so the tee is exercised), then READS A LINE from the
-    // TTY and exits with a code derived from it.
-    const binDir = join(work, "bin");
-    mkdirSync(binDir, { recursive: true });
-    const stub = join(binDir, "pi");
-    writeFileSync(stub, [
-      "#!/bin/bash",
-      'echo "PI-STUB-SCREEN"',
-      'echo "pi-stub: a warning on stderr" >&2',
-      "read -r line",
-      'printf %s "$line" > "$PI_STUB_INPUT_FILE"',
-      "exit 0",
-    ].join("\n"));
-    chmodSync(stub, 0o755);
-
-    const files = writeJudgeSpawnFiles({
-      repoRoot: work,
-      role: "reviewer",
-      agents: {},
-      title: "launcher-probe",
-      workDir: join(work, "rg-launcher-probe"),
-    });
-
-    const inputFile = join(work, "input.txt");
-    // PATH is forced with `env`, NOT with tmux's `-e` (measured on this host):
-    // the pane's default-shell is fish, which rebuilds PATH from its own config
-    // at startup and drops whatever `-e PATH=` provided — the real `pi` ran
-    // instead of the stub. Ordinary `-e` variables (the RG_* ones the launcher
-    // reads) are unaffected, so they still travel that way. `env` also avoids
-    // shell-specific assignment syntax entirely.
-    const envArgs: string[] = [];
-    for (const [k, v] of Object.entries({ ...files.env, PI_STUB_INPUT_FILE: inputFile })) envArgs.push("-e", `${k}=${v}`);
-    const paneSess = `${sess}-run`;
-    const command = `/usr/bin/env PATH=${binDir}:/usr/bin:/bin /bin/bash ${files.launcherPath}`;
-    execFileSync("tmux", ["new-session", "-d", "-s", paneSess, "-c", work, ...envArgs, command], { encoding: "utf8" });
-    const pane = execFileSync("tmux", ["list-panes", "-t", paneSess, "-F", "#{pane_id}"], { encoding: "utf8" }).trim();
-    assert.match(pane, /^%\d+$/, "a concrete pane id — never an empty target");
-
-    // --- while the session RUNS ---
-    for (let i = 0; i < 60 && !existsSync(files.pidPath); i++) await new Promise((r) => setTimeout(r, 50));
-    assert.ok(existsSync(files.pidPath), "the launcher recorded its pid");
-    const running = readJudgeSessionState(files);
-    assert.equal(running.lifecycle, "running", "a live judge is 'running' from its artifacts alone");
-
-    // Criterion 2: the TUI is NOT broken by the stderr redirection — the pane
-    // still shows the child's screen.
-    let screen = "";
-    for (let i = 0; i < 60 && !screen.includes("PI-STUB-SCREEN"); i++) {
-      screen = execFileSync("tmux", ["capture-pane", "-p", "-t", pane], { encoding: "utf8" });
-      if (!screen.includes("PI-STUB-SCREEN")) await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.match(screen, /PI-STUB-SCREEN/, "capture-pane returns the child's live screen");
-    assert.match(screen, /a warning on stderr/, "stderr is still VISIBLE in the pane (teed, not swallowed)");
-
-    for (let i = 0; i < 60 && !existsSync(files.stderrPath); i++) await new Promise((r) => setTimeout(r, 50));
-    assert.match(readFileSync(files.stderrPath, "utf8"), /a warning on stderr/, "and it also landed on disk");
-
-    // Criterion 2: interactive input still reaches the child.
-    execFileSync("tmux", ["send-keys", "-t", pane, "-l", "interactive-input-reaches-pi"], { encoding: "utf8" });
-    execFileSync("tmux", ["send-keys", "-t", pane, "Enter"], { encoding: "utf8" });
-
-    // --- after it ENDS ---
-    // Wait for CONTENT, not merely for the file to appear: `printf` creates it
-    // and fills it as two observable steps, and an empty exit-code reads as
-    // "not recorded yet" (which it accurately is).
-    const exitRecorded = (): boolean => {
-      try { return readFileSync(files.exitCodePath, "utf8").trim() !== ""; } catch { return false; }
-    };
-    for (let i = 0; i < 80 && !exitRecorded(); i++) await new Promise((r) => setTimeout(r, 50));
-    assert.ok(exitRecorded(), "the exit code was recorded after the child returned");
-    assert.equal(readFileSync(inputFile, "utf8"), "interactive-input-reaches-pi", "the child received the keystrokes");
-    const ended = readJudgeSessionState(files);
-    assert.equal(ended.lifecycle, "finished");
-    assert.equal(ended.exitCode, 0);
-
-    // And the pane is gone on its own — the user's reported bug, end to end.
-    for (let i = 0; i < 40 && paneAlive(pane); i++) await new Promise((r) => setTimeout(r, 50));
-    assert.equal(paneAlive(pane), false, "the finished judge left no pane behind");
-  } finally {
-    killSession(`${sess}-run`);
-    killSession(sess);
-    rmSync(work, { recursive: true, force: true });
-  }
-});
 
 /**
  * Round-1 P1 (reviewer): a second spawn under the SAME title must not inherit
@@ -624,15 +513,20 @@ const launcherIntegration = test("tmux integration: the generated launcher recor
 test("a same-title respawn gets a clean slate (no inherited exit-code or transcript)", () => {
   const root = workdir();
   try {
+    // Two run dirs under the same work dir (the extension mints a fresh run
+    // dir per spawn — the first run's exit-code must not leak into the second).
     const workDir = join(root, "rg-same-title");
-    const first = writeJudgeSpawnFiles({ repoRoot: root, role: "reviewer", agents: {}, title: "same", workDir });
+    const runA = join(workDir, "runs", "a");
+    const runB = join(workDir, "runs", "b");
+    mkdirSync(join(runA, "sessions"), { recursive: true });
+    mkdirSync(join(runB, "sessions"), { recursive: true });
+    const first = paths(runA);
+    const second = paths(runB);
     // The first run finished with a verdict on disk.
     writeFileSync(first.exitCodePath, "0");
-    mkdirSync(first.sessionDir, { recursive: true });
     writeFileSync(join(first.sessionDir, "s.jsonl"), assistantLine('```json\n{"gate":"READY","findings":[]}\n```'));
     assert.equal(readJudgeSessionState(first).lifecycle, "finished");
 
-    const second = writeJudgeSpawnFiles({ repoRoot: root, role: "reviewer", agents: {}, title: "same", workDir });
     assert.notEqual(second.exitCodePath, first.exitCodePath, "the second run gets its own artifact paths");
     assert.equal(readJudgeSessionState(second).lifecycle, "unknown",
       "a fresh spawn must NOT be classified as finished by the previous run's exit-code");
@@ -642,91 +536,4 @@ test("a same-title respawn gets a clean slate (no inherited exit-code or transcr
     assert.equal(readJudgeSessionState(first).lifecycle, "finished");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
-
-const terminateIntegration = test("tmux integration: termination reaches pi through the process GROUP (not via tmux tearing the pane down)", { skip: !tmuxAvailable() }, async () => {
-  const work = mkdtempSync(join(tmpdir(), "rg-term-"));
-  const sess = `rg-term-${Date.now().toString(36)}`;
-  try {
-    execFileSync("tmux", ["new-session", "-d", "-s", sess, "-c", work, "sleep 300"], { encoding: "utf8" });
-    // THE WRAPPER IGNORES SIGTERM — this is what makes the test able to FAIL
-    // (round-2 P1, reviewer, mutation-verified). With a wrapper that dies on
-    // TERM, killing only the wrapper collapses its pane, and tmux then reaps
-    // the child anyway: the wrapper-only implementation the goal forbids would
-    // pass. Trapping TERM in the wrapper removes tmux from the equation —
-    // only a signal delivered to the GROUP can reach the child.
-    const launcher = join(work, "start.sh");
-    writeFileSync(launcher, [
-      "#!/bin/bash",
-      // A HANDLER, not `trap '' TERM`: an ignored signal (SIG_IGN) is
-      // INHERITED across exec, so `sleep` would ignore TERM too and the test
-      // could never observe the group delivery. A handler is reset to the
-      // default in the child, so only the wrapper survives the signal.
-      "trap ':' TERM",
-      // Same pid record shape the real launcher writes: pid + start time.
-      'printf \'%s %s\' "$$" "$(ps -o lstart= -p $$ | tr -d \'\\n\')" > "$RG_PID_FILE"',
-      "sleep 120 &",
-      'printf %s "$!" > "$RG_CHILD_PID_FILE"',
-      'wait $!',
-      // The handler makes `wait` return as soon as TERM arrives, so without
-      // this the wrapper would fall off the end and exit — and the test could
-      // not tell "the group was signalled" from "the wrapper died and tmux
-      // reaped everything". Staying alive is what proves the child's death
-      // came from the signal, not from the pane collapsing.
-      "sleep 300",
-    ].join("\n"));
-    chmodSync(launcher, 0o755);
-
-    const pidPath = join(work, "pid");
-    const childPidPath = join(work, "child-pid");
-    const spawned = spawnJudgePane({
-      title: "term",
-      cwd: work,
-      command: 'exec /bin/bash "$RG_LAUNCHER"',
-      env: { RG_LAUNCHER: launcher, RG_PID_FILE: pidPath, RG_CHILD_PID_FILE: childPidPath },
-      target: sess,
-    });
-    assert.equal(spawned.ok, true, spawned.error ?? "spawn failed");
-
-    for (let i = 0; i < 40 && !(existsSync(pidPath) && existsSync(childPidPath)); i++) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    // The pid record is `<pid> <start time>` — take the pid off the front.
-    const pidRecord = readFileSync(pidPath, "utf8").trim();
-    const wrapperPid = Number(pidRecord.split(" ")[0]);
-    assert.match(pidRecord, /^\d+ \w/, "the launcher records a start time alongside the pid");
-    const childPid = Number(readFileSync(childPidPath, "utf8").trim());
-    assert.ok(wrapperPid > 1 && childPid > 1, "both pids were recorded");
-    const alive = (pid: number): boolean => {
-      try { process.kill(pid, 0); return true; } catch { return false; }
-    };
-    assert.ok(alive(childPid), "the stand-in for pi is running before we terminate");
-
-    // exitCodePath points at a file that does NOT exist here: this session is
-    // still running, so the guard must let the signal through.
-    const res = terminateJudgeSession({ pidPath, exitCodePath: join(work, "exit-code") });
-    assert.equal(res.signalled, true);
-    assert.equal(res.pid, wrapperPid);
-
-    // THE DISCRIMINATING ASSERTION: the child must die. It can only have
-    // received the signal through the process GROUP — the wrapper ignores
-    // TERM and is still alive, so tmux never tore the pane (and its children)
-    // down. `kill(pid)` instead of `kill(-pid)` leaves this child running.
-    for (let i = 0; i < 60 && alive(childPid); i++) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.equal(alive(childPid), false, "pi (the wrapper's child) was terminated via the process GROUP");
-    assert.equal(alive(wrapperPid), true,
-      "and the wrapper — which ignores TERM — is still up, proving tmux did not do the cleanup for us");
-
-    killPane(spawned.paneId!);
-  } finally {
-    killSession(sess);
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-// Node's test runner needs the handle referenced (same idiom as the other
-// integration tests in this repo).
-void terminateIntegration;
-void launcherIntegration;
 

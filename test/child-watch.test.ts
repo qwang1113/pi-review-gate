@@ -7,7 +7,7 @@ import { STALL_MOTION_MAX_AGE_SEC } from "../lib/loop-stall.ts";
 const NOW = Date.parse("2026-08-28T06:00:00.000Z");
 const fresh = (over: Partial<ChildSnapshot> = {}): ChildSnapshot => ({
   title: "review-abc",
-  paneId: "%10",
+  sessionId: "rg-reviewer-abc",
   role: "reviewer",
   spawnedAt: new Date(NOW - 60_000).toISOString(),
   alive: true,
@@ -26,7 +26,7 @@ test("an ENDED pi session ends the wait immediately (no signal needed)", () => {
   assert.equal(v.inFlight.length, 0);
   assert.equal(v.terminated.length, 1);
   assert.equal(v.terminated[0]!.reason, "session-ended");
-  assert.equal(v.terminated[0]!.child.paneId, "%10");
+  assert.equal(v.terminated[0]!.child.sessionId, "rg-reviewer-abc");
 });
 
 /**
@@ -89,21 +89,21 @@ test("empty input is a no-op (undefined notice — never 'idle' advice)", () => 
 test("buildChildWaitNotice names the terminated child, the recovery action and the remaining in-flight ones", () => {
   const v = classifyChildren(
     [
-      fresh({ title: "review-dead", paneId: "%1", role: "reviewer", alive: false }),
-      fresh({ title: "audit-silent", paneId: "%2", role: "goal-auditor", spawnedAt: new Date(NOW - 3600_000).toISOString() }),
-      fresh({ title: "review-live", paneId: "%3", role: "reviewer" }),
+      fresh({ title: "review-dead", sessionId: "rg-reviewer-dead", role: "reviewer", alive: false }),
+      fresh({ title: "audit-silent", sessionId: "rg-auditor-silent", role: "goal-auditor", spawnedAt: new Date(NOW - 3600_000).toISOString() }),
+      fresh({ title: "review-live", sessionId: "rg-reviewer-live", role: "reviewer" }),
     ],
     NOW,
   );
-  const notice = buildChildWaitNotice(v, new Map([["%3", "rg-review-live-done"]]));
+  const notice = buildChildWaitNotice(v, new Map([["rg-reviewer-live", "review-live"]]));
   assert.ok(notice, "a notice is produced");
   assert.match(notice, /review-dead/, "the dead child is named");
-  assert.match(notice, /pi 会话已结束/, "session-ended reason is stated in SESSION terms");
+  assert.match(notice, /进程已退出/, "session-ended reason is stated in PROCESS terms");
   assert.doesNotMatch(notice, /pane_dead|capture-pane/, "the hosted wait no longer teaches pane-level probes");
   assert.match(notice, /audit-silent/, "the silent child is named");
   assert.match(notice, /静默超过上限/, "silent-timeout reason is stated");
   assert.match(notice, /review_read/, "the recovery action (read its output) is stated");
   assert.match(notice, /review-live/, "the in-flight child is named");
-  assert.match(notice, /rg-review-live-done/, "its done channel is named");
+  assert.match(notice, /review-live/, "its session id is named");
   assert.match(notice, /不要结束 turn/, "the hosted-wait discipline is explicit");
 });

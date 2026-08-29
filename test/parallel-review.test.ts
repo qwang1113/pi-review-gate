@@ -36,7 +36,7 @@ test("buildReviewPrompt names the changed files and sets the COMMIT contract", (
   assert.doesNotMatch(prompt, /完成信号/); // no channel → no signal instruction
 });
 
-test("round-16 P1: the done channel is embedded at the end of the reviewer task", () => {
+test("the completion contract is embedded at the end of the reviewer task", () => {
   const prompt = buildReviewPrompt(
     "review",
     ["src/a.ts"],
@@ -47,40 +47,16 @@ test("round-16 P1: the done channel is embedded at the end of the reviewer task"
     undefined,
     undefined,
     undefined,
-    "rg-review-abc123-done",
   );
-  assert.match(prompt, /完成信号/);
-  assert.match(prompt, /tmux wait-for -S rg-review-abc123-done/);
+  assert.match(prompt, /完成/);
+  assert.match(prompt, /进程退出即完成/);
+  assert.match(prompt, /question fence/);
+  assert.match(prompt, /同一 session id 重新拉起/);
   // The instruction is at the END (after the OUTPUT/verdict contract).
-  assert.ok(prompt.indexOf("tmux wait-for -S rg-review-abc123-done") > prompt.indexOf("Verdict shape"));
-
-test("round-16 P2: the inbox question channel is embedded at the end of the reviewer task", () => {
-  const prompt = buildReviewPrompt(
-    "review",
-    ["src/a.ts"],
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    "rg-review-abc123-done",
-    { path: "/repo/.pi/tmux-sessions/rg-review-abc123/inbox.jsonl", channel: "rg-review-abc123-inbox" },
-  );
-  assert.match(prompt, /提问通道/);
-  assert.match(prompt, /\/repo\/\.pi\/tmux-sessions\/rg-review-abc123\/inbox\.jsonl/);
-  assert.match(prompt, /tmux wait-for -S rg-review-abc123-inbox/);
-  // The channel is the FULL derived value (inboxChannelFor(title)) — never
-  // literal "<channel>-inbox" concatenation (double-suffix trap).
-  assert.match(prompt, /rg-review-abc123-inbox/);
-  assert.doesNotMatch(prompt, /wait-for -S <channel>-inbox/);
-  // No inbox param → no question-path instruction.
-  const plain = buildReviewPrompt("review", [], undefined, undefined, undefined, undefined, undefined, undefined, undefined);
-  assert.doesNotMatch(plain, /提问通道/);
+  assert.ok(prompt.indexOf("进程退出即完成") > prompt.indexOf("Verdict shape"));
+  assert.doesNotMatch(prompt, /tmux|wait-for|inbox|channel/);
   // Round-17: output discipline is part of the task text.
   assert.match(prompt, /输出纪律:verdict fence 在最前,其后最多 5 行结论要点/, "the discipline is pinned in the task");
-});
 });
 
 test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no isolation is READ-ONLY", () => {
@@ -248,7 +224,7 @@ test("scopeDirective rides the task text when given (goal criterion 1)", () => {
 
 test("round-18: the polish-gate REASON rides the task text verbatim, absent when not given", () => {
   const reason = { reason: "把 P2 修干净再收尾", at: "2026-08-28T06:00:00.000Z", round: 4 };
-  const withReason = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { path: "x", channel: "y" }, reason);
+  const withReason = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, undefined, undefined, undefined, undefined, reason);
   assert.match(withReason, /REASON FOR THIS ROUND/);
   assert.match(withReason, /把 P2 修干净再收尾/);
   assert.match(withReason, /round 4/);

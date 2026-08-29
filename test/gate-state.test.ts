@@ -230,6 +230,37 @@ test("pausedQuestion: malformed shapes fail toward NOT paused (loop stays armed)
     assert.equal(loaded?.pausedQuestion, undefined, JSON.stringify(bad));
   }
 });
+
+/**
+ * Round-15 P1 (reviewer-measured): a persisted `findingsTotal` reaches
+ * `isPlateaued`, which guards only against `null` and then compares
+ * numerically — and every comparison with NaN is false. A NaN (or an
+ * Infinity that becomes one when folded) would therefore slip past the
+ * unparseable-total guard and let fingerprint overlap alone declare a
+ * plateau. The sidecar is a file, so sanitizing at the parser is not enough.
+ */
+test("a persisted findingsTotal that is not a real count is read as unparseable", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+
+  for (const bad of [Number.NaN, Infinity, -Infinity, -3, "7", {}]) {
+    const s = { ...base, rounds: [{ round: 1, findingsTotal: bad, fingerprints: ["a#1#x"], verdict: "BLOCKED", at: "t" }] };
+    // JSON has no NaN/Infinity literal — they serialize to null, which is
+    // already the fail-closed value, so those two are injected as raw text.
+    const raw = JSON.stringify(s).replace('"findingsTotal":null', `"findingsTotal":${String(bad)}`);
+    writeFileSync(path, raw);
+    const loaded = loadSidecar(path);
+    if (!loaded) continue; // a body JSON.parse rejects outright is also fail-closed
+    assert.equal(loaded.rounds[0]?.findingsTotal, null, `${String(bad)} must not survive as a count`);
+  }
+
+  // A real count still round-trips untouched.
+  const good = { ...base, rounds: [{ round: 1, findingsTotal: 2, fingerprints: ["a#1#x"], verdict: "BLOCKED", at: "t" }] };
+  writeFileSync(path, JSON.stringify(good));
+  assert.equal(loadSidecar(path)?.rounds[0]?.findingsTotal, 2);
+});
+
 test("round-18 polish fields round-trip and malformed values are dropped", () => {
   const dir = makeTemp();
   const path = join(dir, "state.json");

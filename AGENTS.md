@@ -11,17 +11,19 @@ default, make it safe by default rather than adding a switch.
 
 ### Single-review loop (the only execution path, agent-initiated)
 
-**Judge roles run as tmux children** — the review is the only parallel
-loop, and each round runs in its OWN pi process: a tmux pane of the main
-session's right column, spawned by the extension itself (`review_spawn`).
+**Judge roles run as their own pi processes** — the review is the only parallel
+loop, and each round runs in its OWN non-interactive pi process (`pi -p`
+with a deterministic `--session-id`), spawned by the extension itself
+(`review_spawn`). The judge child loads NO review-gate extension and runs with
 The judge child loads NO review-gate extension and runs with
-`--exclude-tools edit,write`; it stays alive across rounds, so its context
-is reused until a READY lands. Each review round is ONE reviewer over the
-WHOLE change:
+`--exclude-tools edit,write`; its session id is DETERMINISTIC per role+repo,
+so re-spawning with the same `--session-id` continues the same session — its
+context is reused across rounds until a READY lands. Each review round is ONE
+reviewer over the WHOLE change:
 
-- **Review → tmux judge child** (`review_checkpoint` → `prepare_review` →
-  `review_spawn` → `review_send` → `record_review`；done/inbox 的监听由
-  `review_spawn` 自动注册，`review_watch` 只在需要自定义 label 时才用）。You
+- **Review → judge child process** (`review_checkpoint` → `prepare_review` →
+  `review_spawn` → `record_review`；进程退出的监听由 `review_spawn`
+  自动注册，`review_watch` 只在需要自定义 label 或 reload 后重挂时才用）。You
   commit the change as a checkpoint FIRST (`review_checkpoint` — the only
   commit allowed before a READY; it requires a full precommit PASS). The
   full precommit ALREADY ran typecheck + build + the complete suite on that
@@ -43,7 +45,7 @@ WHOLE change:
   loop; there is no module table, no plan state, no planner.
 
 Detail: `docs/execution-model.md` + `docs/judge-protocol.md`; runtime
-contract: `lib/tmux-session.ts` + `lib/judge-prompt.ts`.
+contract: `lib/judge-process.ts` + `lib/judge-prompt.ts`.
 
 The review loop is AGENT-DRIVEN: you start it yourself once edits
 are complete (one `prepare_review` → one spawn → one `record_review`) — the
@@ -219,9 +221,7 @@ re-derivation — it never narrows what a reviewer may look at, and a settled
 conclusion may always be reopened with evidence. This is the INCREMENTAL
 review contract: first round full, later rounds focused on the increment.
 (b2) **Fresh context, read on demand — MECHANICALLY.** The three review
-roles (reviewer, adviser, goal-auditor) each run as their OWN pi process in a
-tmux pane — they never
-inherit the main session's conversation. Their task text carries the
+roles (reviewer, adviser, goal-auditor) each run as their OWN pi process (`pi -p --session-id`) — they never
 transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
 to grep on demand. `prepare_adviser` hands back the adviser's ready-made
 brief: transcript pointer + a conclusion artifact the adviser appends to,
@@ -236,42 +236,35 @@ must restore before finishing. Because the reviewed range is immutable,
 that carry evidence (confirm each in the code first), leave Nits for the
 verdict. WAITING-WINDOW DISCIPLINE (v4): (1) 有可实现的确定性工作(代码/测试/
 文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后
-才阻塞等待——在**一次 bash 调用**里同时托管三条判据:done channel 信号
-(`tmux wait-for <doneChannel>`,无标志,用 bash 工具自己的 `timeout` 参数做上限,
-turn 不结束;⚠️ `tmux wait-for` **没有 `-t` 超时选项**——`wait-for -t 5 <chan>`
-以 `unknown flag -t` 在 7ms 内报错返回,包成 `while ! tmux wait-for -t 5 <chan>;
-do :; done` 就是空转轮询,实测 120 次循环仅 0.5s)、子会话是否已结束
-(`test -s <workDir>/exit-code`——2026-08-28 起 pane 会随 judge 一起消失,
-不再用 `#{pane_dead}`;崩溃的子会话可能来不及写 exit-code,它同样算已结束——
+才阻塞等待——在**一次 bash 调用**里同时托管三条判据:进程是否已退出
+(`test -s <workDir>/exit-code`——崩溃的子会话可能来不及写 exit-code,它同样算已结束——
 主会话按「记录的那个进程是否还在」判定,见 lib/judge-session.ts),
-以及它的 session jsonl 里是否已出现 verdict fence(子会话已产出结论但未发信号是
+以及它的 session jsonl 里是否已出现 verdict fence(子会话已产出结论但进程未退出是
 实测过的失败模式);任一命中即结束等待并继续。(3) **禁止**用结束 turn 把
-唤醒责任交给子会话——子会话可能报错/崩溃/永远不发信号,而主会话是门禁的
+唤醒责任交给子会话——子会话可能报错/崩溃/永远不退,而主会话是门禁的
 最后监督者,门禁未通过前不得停止自动循环(存活不变量);`agent_settled` 会
 注入托管等待指令,但主动托管远比被动拉起可靠。
-The verdict arrives through the done channel and wakes this
-session (the listener `review_spawn` registered for you); the reviewer may ask
-questions through its inbox.
-(d) **The judge child runs as a tmux pane — MECHANICALLY ENFORCED.**
-`review_spawn` runs the judge as a pi process in a pane of the main session's
-tmux (right column, stacked below the first judge); a judge role dispatched
+The verdict arrives through the process EXIT and wakes this
+session (the watcher `review_spawn` registered for you); the reviewer may ask
+questions by outputting a question fence and exiting — answer by resuming the same session id.
+(d) **The judge child runs as its own pi process — MECHANICALLY ENFORCED.**
+`review_spawn` runs the judge as `pi -p --session-id <id>` (non-interactive,
+no tmux); a judge role dispatched
 through `subagent` / `workflowScript` / `workflowScriptPath` is HARD-blocked
 (the workflow sandbox has no per-child isolation, so the judge would land in
 one shared cwd — your live worktree, the exact failure this ends). The
 single reviewer is one `review_spawn` call per round. **Singleton per role,
-reused across rounds**: `review_spawn` does NOT open a new pane every round —
+reused across rounds**: `review_spawn` does NOT spawn a new session every round —
 an alive same-role child in the same repo is REUSED (that is how the judge's
-context carries over until a READY), children whose SESSION has ended are
-dropped first (and any pane they left behind is closed), and
-`fresh: true` kills the old pane before spawning a new one. A reused pane is
-REBOUND to the round's own channels (the previous listeners are dropped, the
-new done/inbox channels are registered, the inbox path moves with it), so
-`prepare_review`'s ready-made task text is usable as-is. `record_review`
+context carries over until a READY — the session id is deterministic per role+repo,
+so a re-spawn continues the same session), children whose PROCESS has ended are
+dropped first, and
+`fresh: true` kills the old process before spawning a new one. `record_review`
 withholds a READY unless the round was PREPARED (a registered
-`baseline..HEAD` target) and the verdict carries the pane's `cwd` (measured
+`baseline..HEAD` target) and the verdict carries the child's `cwd` (measured
 with `pwd`, a required field of the verdict schema). While a judge child is
 open, `declare_done` requires closing it out (`record_review` /
-`review_close`). No tmux available ⇒ fail-closed (no judge can run).
+`review_close`).
 
 ### Read-only exploration — parallel-safe
 
@@ -279,8 +272,8 @@ Read-only subagents (recon, code reading, analysis) are inherently
 parallel-safe: they never write to the worktree, so they cannot invalidate
 a binding or race with each other. Spawn several concurrently, overlap
 exploration with your own edits, and merge the findings. Only the main
-agent writes to the worktree. (Adviser consultations run as tmux judge
-children, not subagents — see the review protocol above.)
+agent writes to the worktree. (Adviser consultations run as judge
+child processes, not subagents — see the review protocol above.)
 
 ### Wave daily — removed
 

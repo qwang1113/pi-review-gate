@@ -120,22 +120,10 @@ export interface AdviserBriefInput {
   changedFiles: string[] | null;
   /** The approved loop goal this consultation argues against, when approved. */
   goalText?: string;
-  /**
-   * The done channel the adviser will signal (doneChannelFor(title)).
-   * Embedded so the child never has to GUESS the channel (round-16 P1).
-   */
-  doneChannel?: string;
-  /**
-   * The inbox question channel (path + signal channel), embedded so the
-   * adviser can ask the main session without guessing (round-16 P2).
-   * channel = inboxChannelFor(title), i.e. rg-<title>-inbox.
-   */
-  inboxPath?: string;
-  inboxChannel?: string;
 }
 
 /**
- * Build the task text the main agent sends to its `adviser` tmux judge child.
+ * Build the task text the main agent sends to its `adviser` judge process.
  *
  * First consultation of a goal: full brief. Later ones: the previous verdict
  * and points ride along, changed files are called out, and the adviser is told
@@ -146,7 +134,7 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
   const lines = [
     "You are `adviser`, consulting on the CURRENT loop goal of the main session.",
     "",
-    "CONTEXT MODEL: you run as a tmux judge child — your own pi process, so the",
+    "CONTEXT MODEL: you run as your own pi process (pi -p --session-id) — the",
     "main session's conversation is NOT inherited. Read it on demand instead:",
     `- session dir: ${input.sessionDir}`,
     `- session id:  ${input.sessionId} (find the file named <timestamp>_${input.sessionId}.jsonl, grep/read the parts you need)`,
@@ -199,20 +187,10 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
     // Round-17 (user ask): output discipline — conclusion + point list only,
     // detailed argumentation goes into the artifact JSON line.
     "输出纪律:结论 + 要点列表(每条一句),不写过程叙事;详细论证放 artifact 的 JSON 行。",
-    ...(input.doneChannel
-      ? [
-          "",
-          `完成信号(必须):当你完成本轮咨询、输出最终结论之后,运行 tmux wait-for -S ${input.doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
-        ]
-      : []),
-    ...(input.inboxPath && input.inboxChannel
-      ? [
-          "",
-          `- 提问通道(需要决策/澄清任务时):把一行 JSON 追加到 ${input.inboxPath}:`,
-          '  {"type":"question","text":"……"}',
-          `  然后运行 tmux wait-for -S ${input.inboxChannel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)。提问后继续等待回复,不要自行假定答案。`,
-        ]
-      : []),
+    "",
+    "完成(必须):输出最终结论后正常退出即可——进程退出即完成,主会话以你的输出为准,",
+    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
+    "主会话会带着答案用同一 session id 重新拉起你。",
   );
   return lines.join("\n");
 }

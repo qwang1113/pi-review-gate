@@ -233,17 +233,17 @@ test("steps appear in DECLARATION order in the log — parallel execution, merge
 // ---------------------------------------------------------------------------
 
 test("independent checks run in PARALLEL — wall time is less than the serial sum", () => {
-  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "sleep 1", test: "sleep 1" } });
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "sleep 0.3", test: "sleep 0.3" } });
   const started = Date.now();
   const { code } = run(dir, ["--mode", "full"]);
   const elapsed = Date.now() - started;
   assert.equal(code, 0);
-  // Serial would take ~2s; parallel ~1s. Generous bound against loaded CI.
-  assert.ok(elapsed < 1800, `expected parallel overlap, took ${elapsed}ms`);
+  // Serial would take ~0.6s; parallel ~0.3s. Generous bound against loaded CI.
+  assert.ok(elapsed < 800, `expected parallel overlap, took ${elapsed}ms`);
 });
 
 test("a SLOW earlier-declared step does not reorder the log or the receipt steps", () => {
-  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "echo LINT_BODY; sleep 1.5", test: "echo TEST_BODY" } });
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "echo LINT_BODY; sleep 0.4", test: "echo TEST_BODY" } });
   const { out, receipt } = runReceipt(dir, ["--mode", "full", "--json"]);
   // test finishes long before lint, yet the log and the steps array must
   // present lint first — completion order must never leak into either.
@@ -828,7 +828,7 @@ test("a running step's output is written to the log before the step finishes", a
     // Markers live in FILES, never in the command text: `npm run` echoes the
     // script body, which would make each marker appear twice for reasons that
     // have nothing to do with streaming.
-    scripts: { test: "cat early.txt; sleep 3; cat late.txt" },
+    scripts: { test: "cat early.txt; sleep 1; cat late.txt" },
   });
   writeFileSync(join(dir, "early.txt"), "EARLY-MARKER\n");
   writeFileSync(join(dir, "late.txt"), "LATE-MARKER\n");
@@ -843,8 +843,8 @@ test("a running step's output is written to the log before the step finishes", a
   try {
     // Poll for the early marker while the child is provably still running.
     let sawEarlyWhileRunning = false;
-    for (let i = 0; i < 40 && child.exitCode === null; i++) {
-      await new Promise((r) => setTimeout(r, 100));
+    for (let i = 0; i < 30 && child.exitCode === null; i++) {
+      await new Promise((r) => setTimeout(r, 50));
       if (readFileSync(log, "utf8").includes("EARLY-MARKER")) {
         sawEarlyWhileRunning = child.exitCode === null;
         break;

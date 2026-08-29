@@ -1203,19 +1203,15 @@ test("goal criterion 3: prepare_adviser is registered and hands back a brief wit
   assert.match(body, /mkdirSync\(pathDirname\(artifactPath\), \{ recursive: true \}\)/, "the artifact dir is created before the first consultation");
   assert.match(body, /adviserBaselines/, "the changed-files baseline is persisted per goal for the next consultation");
   assert.match(body, /readLastAdviserConclusion\(artifactPath, goalHash\)/, "readback goes through the tested pure parser (parseAdviserConclusions)");
-  // Round-16 P1: the done channel must be passed INTO the builder call (the
-  // suggested-title line ALSO spells the channel, so pin the builder window,
-  // not the whole tool body).
+  // The builder takes no channel params — completion is the process exit;
+  // questions ride a fence + resume (2026-08-28).
   const briefCall = body.indexOf("buildAdviserBrief({");
   assert.ok(briefCall > 0);
-  assert.match(body.slice(briefCall, briefCall + 900), /doneChannel: doneChannelFor\(`adviser-\$\{goalHash\.slice\(0, 6\)\}`\)/,
-    "the brief embeds the derived channel");
-  assert.match(body.slice(briefCall, briefCall + 900), /inboxPath: pathJoin\(target\.root, "\.pi", "tmux-sessions", `rg-adviser-\$\{goalHash\.slice\(0, 6\)\}`, "inbox\.jsonl"\)/,
-    "the brief embeds the inbox path");
+  assert.doesNotMatch(body.slice(briefCall, briefCall + 900), /doneChannel|inboxPath|inboxChannel/,
+    "the brief embeds no tmux channel (process exit is the completion signal)");
   assert.match(body, /建议 title: \"\$\{adviserTitle\}\"/, "the output names the suggested title");
-  assert.match(body, /inboxChannelFor\(adviserTitle\)/, "the inbox channel derives from the same title");
-  assert.match(body, /提问接收端已由 review_spawn 自动注册/,
-    "the output says the inbox receiver is already registered (review_spawn does it)");
+  assert.match(body, /session id 由 review_spawn 按 role\+repo 派生/,
+    "the session id is the resume key and derives mechanically");
   // Round-17 P2: pinning the WORDS "等待纪律" alone let a wrong claim survive
   // (that edits do not depend on goal approval — pre-approval edits are hard
   // blocked). Pin the corrected substance instead.
@@ -1236,18 +1232,15 @@ test("goal criterion 2: prepare_goal_audit hands back the ready-made auditor tas
   assert.match(body, /buildGoalAuditTask\(draft, \{/, "the template comes from the shared pure builder");
   assert.match(body, /formatGoalPrereviewCarryover\(prev\)/, "re-audits carry the previous audit's conclusion");
   assert.match(body, /prev\?\.draft/, "the previous draft rides along for the mechanical delta");
-  // Round-16 P1: the task embeds the derived channel; the output names the
-  // suggested title so the main session spawns with the matching listener.
+  // No channel params in the builder — completion is the process exit;
+  // questions ride a fence + resume (2026-08-28).
   const auditCall = body.indexOf("buildGoalAuditTask(draft, {");
   assert.ok(auditCall > 0);
-  assert.match(body.slice(auditCall, auditCall + 900), /doneChannel: doneChannelFor\(`goal-audit-\$\{newHash\.slice\(0, 6\)\}`\)/,
-    "the task embeds the derived channel");
-  assert.match(body.slice(auditCall, auditCall + 900), /inboxPath: pathJoin\(target\.root, "\.pi", "tmux-sessions", `rg-goal-audit-\$\{newHash\.slice\(0, 6\)\}`, "inbox\.jsonl"\)/,
-    "the task embeds the inbox path");
+  assert.doesNotMatch(body.slice(auditCall, auditCall + 900), /doneChannel|inboxPath|inboxChannel/,
+    "the task embeds no tmux channel (process exit is the completion signal)");
   assert.match(body, /建议 title: \"\$\{auditTitle\}\"/, "the output names the suggested title");
-  assert.match(body, /inboxChannelFor\(auditTitle\)/, "the inbox channel derives from the same title");
-  assert.match(body, /提问接收端已由 review_spawn 自动注册/,
-    "the output says the inbox receiver is already registered (review_spawn does it)");
+  assert.match(body, /session id 由 review_spawn 按 role\+repo 派生/,
+    "the session id is the resume key and derives mechanically");
   assert.match(body, /等待纪律/, "the waiting discipline is part of the auditor flow");
   assert.match(body, /第一次 goal 批准前编辑\/写工具仍被门禁拦截,属预期/,
     "the pre-approval reality is stated, not the refuted claim");
@@ -1265,27 +1258,18 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   assert.match(body, /precommitBaselineFor\(root, st\)/, "the baseline rides the task text");
   assert.match(body, /extractPrecommitBaseline\(st\.precommit, digest, cacheRaw\)/, "the safety decision is the pure function");
   assert.match(body, /computeFingerprint\(root\)/, "the current tree fingerprint is measured, not guessed");
-  // Round-16 P1: the reviewer task embeds the derived channel; the output
-  // names the suggested title → channel so the spawned listener matches.
+  // No channel params in the task builder — completion is the process exit;
+  // questions ride a fence + resume (2026-08-28). The output names the
+  // suggested title; the session id derives mechanically (role+repo).
   const promptCall = body.indexOf("const task = buildReviewPrompt(");
   assert.ok(promptCall > 0);
-  assert.match(body.slice(promptCall, promptCall + 1200), /doneChannelFor\(reviewTitle\)/,
-    "the reviewer task embeds the derived channel");
+  assert.doesNotMatch(body.slice(promptCall, promptCall + 1200), /doneChannel|inboxPath|inboxChannel/,
+    "the reviewer task embeds no tmux channel (process exit is the completion signal)");
   assert.match(body, /建议 title: \"\$\{reviewTitle\}\"/, "the output names the suggested title");
-  // Round-16 P2: the inbox question channel is embedded in the task AND the
-  // output names its path + channel. Round-6 (2026-08-28): it no longer tells
-  // the agent to REGISTER that receiver — review_spawn already did, and
-  // presenting review_watch as a required step is exactly the stale guidance
-  // criterion 5 keeps catching.
-  const inboxPathDecl = body.indexOf("const inboxPath = pathJoin(root");
-  assert.ok(inboxPathDecl > 0, "prepare_review must compute the inbox path");
-  assert.match(body.slice(promptCall, promptCall + 1400), /\{ path: inboxPath, channel: inboxChannel \}/,
-    "the reviewer task embeds the inbox question channel");
-  assert.match(body, /inboxChannelFor\(reviewTitle\)/, "the inbox channel derives from the same title");
-  assert.match(body, /done 与 inbox 的监听已由 review_spawn 自动注册/,
-    "the output says the listeners are already registered");
-  assert.doesNotMatch(body, /- review_watch\(\{ channel: <doneChannel> \}\)/,
-    "…and no longer presents review_watch as a step of the flow");
+  assert.match(body, /session id 由 review_spawn 按 role\+repo 派生/,
+    "the session id is the resume key and derives mechanically");
+  assert.match(body, /进程退出会主动唤醒本会话/,
+    "the output says the process-exit wake is automatic");
   // Round-17: waiting discipline (work while the child runs) is spelled out,
   // and a truncated goal gets an explicit read-and-replace instruction.
   assert.match(body, /等待纪律/, "the waiting discipline is part of the spawn flow");
@@ -1295,23 +1279,21 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
     "a truncated goal must be completed from the file when writing the task");
 });
 
-test("round-18: attention is DIRECTED — a child publishes to its parent's channel, the session listens only on its own", () => {
+test("attention stays DIRECTED and file-based — no tmux signal, no global broadcast", () => {
   // SIGNAL side: the event is published through lib/attention.ts with the
   // PARENT from the environment (RG_PARENT_SESSION) — never a global bell.
   const fnAt = SRC.indexOf("function notifyUserAttention(");
   assert.ok(fnAt > 0, "notifyUserAttention must exist");
-  const fn = SRC.slice(fnAt, fnAt + 900);
+  const fn = SRC.slice(fnAt, fnAt + 450);
   assert.match(fn, /publishAttention\(\{/, "the event goes through the payload publisher");
   assert.match(fn, /fromSessionId: attentionIdentity\(\)/, "the payload identifies the sender (self-wake filter)");
   assert.match(fn, /toSessionId: parentSessionId\(\)/, "the payload is addressed to the PARENT from the environment");
-  assert.match(fn, /fromWindow: paneWindowLabel\(pane\)/, "the payload carries the origin window label");
   assert.match(fn, /reason,/, "the payload carries the reason");
   assert.doesNotMatch(fn, /osascript/, "no macOS notification is fired from the extension");
-  // The channel is DERIVED from the parent session id — no shared constant
-  // that could drift, and no global broadcast channel at all.
-  assert.match(SRC, /function myAttentionChannel\(\): string \| undefined/, "the listener address is OUR session's own channel");
-  assert.match(SRC, /attentionChannelFor\(state\.sessionId\)/, "the channel derives from our session id");
+  assert.doesNotMatch(fn, /waitForSignalAsync|wait-for/, "no tmux signal is fired from the extension");
+  // The address derives from the parent session id — no global broadcast.
   assert.doesNotMatch(SRC, /rg-user-attention/, "the global broadcast channel is GONE");
+  assert.doesNotMatch(SRC, /createWatchRegistry\(/, "the tmux channel watcher registry is GONE");
   // propose_loop_goal: signalled right before the approval dialog renders.
   const goalAt = SRC.indexOf('name: "propose_loop_goal"');
   const goalBody = SRC.slice(goalAt, goalAt + 24000);
@@ -1322,23 +1304,6 @@ test("round-18: attention is DIRECTED — a child publishes to its parent's chan
   const pauseAt = SRC.indexOf('name: "pause_for_question"');
   const pauseBody = SRC.slice(pauseAt, pauseAt + 8000);
   assert.match(pauseBody, /notifyUserAttention\(\"等待回答提问\"\)/, "a pause signals attention with its reason");
-  // LISTEN side: session_start registers OUR OWN channel (absent when the
-  // session has no id), still behind the ONE sideEffectsEnabled() predicate.
-  const startAt = SRC.indexOf('pi.on("session_start"');
-  const startBody = SRC.slice(startAt, startAt + 5000);
-  assert.match(startBody, /myAttentionChannel\(\)/, "session_start derives our own attention channel");
-  assert.match(startBody, /watchRegistry\.register\(attentionChannel, "子会话用户注意"\)/,
-    "session_start listens ONLY on our own channel");
-  assert.match(startBody, /if \(attentionChannel && sideEffectsEnabled\(\)\) \{/,
-    "the attention listener is guarded by sideEffectsEnabled()");
-  // The wake handler consumes the payload addressed to us and stays silent
-  // for other sessions' events (directed delivery).
-  const regAt = SRC.indexOf("createWatchRegistry(");
-  const reg = SRC.slice(regAt, regAt + 1600);
-  assert.match(reg, /channel === myAttentionChannel\(\)/, "attention wakes are recognized by OUR channel");
-  assert.match(reg, /const event = consumeAttention\(attentionIdentity\(\)\)/, "the listener reads the payload with the SAME identity the publisher stamps");
-  assert.match(reg, /if \(!event\) return;/, "our own / handled / expired events wake nobody");
-  assert.match(reg, /\$\{attentionText\(event\)\}/, "the wake text carries origin + repo + reason");
   // Spawn side: the child receives RG_PARENT_SESSION so it knows who to wake.
   const spawnAt = SRC.indexOf('name: "review_spawn"');
   const spawn = SRC.slice(spawnAt, spawnAt + 9000);
@@ -1418,40 +1383,29 @@ test("round-18: agent_settled HOSTS the judge-child wait — never returns to id
   assert.ok(injectAt < stallAt, "the injection precedes the breaker block");
 });
 
-test("round-17: review_spawn reuses an alive same-role child and drops dead panes", () => {
+test("review_spawn reuses an alive same-role SESSION and drops finished processes", () => {
   const spawnAt = SRC.indexOf('name: "review_spawn"');
   assert.ok(spawnAt > 0);
   const spawn = SRC.slice(spawnAt, spawnAt + 9000);
-  // Finished children are cleaned from the registry first (never block a spawn),
-  // and the sweep is judged SESSION-side — a pane probe cannot tell a judge that
-  // ended from one that never started (2026-08-28).
+  // Finished children are cleaned from the registry first (never block a spawn).
   assert.match(spawn, /childSessions\.set\(repoRoot, alive\)/,
     "ended children are filtered out of the registry");
-  assert.match(spawn, /readJudgeSessionState\(\{ pidPath: c\.pidPath, exitCodePath: c\.exitCodePath \}\)/,
-    "the sweep asks the session's own artifacts, not the pane");
-  assert.doesNotMatch(spawn, /paneAlive\(c\.paneId\)/, "no pane-level liveness may come back");
-  assert.match(spawn, /killPane\(c\.paneId\)/,
-    "a lingering pane of a finished child is closed, not left stacking up");
-  // Reuse: same role + alive pane ⇒ return the existing child, no spawn.
-  assert.match(spawn, /\.find\(\(c\) => c\.role === role && !params\.fresh\)/,
-    "an alive same-role child is reused unless fresh:true");
-  assert.match(spawn, /reusing existing \$\{role\} child pane/, "the reuse path is announced");
-  // Measured this round: prepare_review mints a NEW title + channels each
-  // round, so a reused pane MUST be rebound to them — otherwise the ready-made
-  // task text names a done channel nobody listens on and the verdict never
-  // wakes the session.
-  assert.match(spawn, /const rebound = title !== existing\.title;/, "a new title rebinds the reused pane");
-  assert.match(spawn, /watchRegistry\.unregister\(existing\.doneChannel\)/, "the previous done listener is dropped");
-  assert.match(spawn, /watchRegistry\.unregister\(existing\.inboxChannel\)/, "the previous inbox listener is dropped");
-  assert.match(spawn, /existing\.inboxPath = inboxPath;/, "the inbox moves with the rebind (review_read follows it)");
-  assert.match(spawn, /registerWatch\(existing\.doneChannel, existing\.title\)/, "this round's channels are listened on");
+  assert.match(spawn, /judgeProcessAlive\(c\.child\)/,
+    "the sweep asks the live PROCESS (exitCode), not a pane");
+  assert.doesNotMatch(spawn, /paneAlive|readJudgeSessionState\(\{ pidPath: c\.pidPath/, "no pane-level liveness may come back");
+  // Reuse: same role + same session id + alive process ⇒ return the existing
+  // child, no new spawn — the SESSION id IS the continuation.
+  assert.match(spawn, /\.find\(\(c\) => c\.role === role && c\.sessionId === sessionId && !params\.fresh\)/,
+    "an alive same-role session is reused unless fresh:true");
+  assert.match(spawn, /reusing existing \$\{role\} child session/, "the reuse path is announced");
+  assert.match(spawn, /registerWatch\(existing\.sessionId, existing\.title\)/, "the exit watcher is re-registered for the next round");
   assert.match(spawn, /fresh: Type\.Optional\(Type\.Boolean/, "fresh:true is an explicit escape hatch");
-  assert.match(spawn, /spawnJudgePane\(\{/, "a real spawn still exists for the no-reuse case");
-  // Spec C: fresh:true kills the old same-role pane FIRST (singleton invariant).
+  assert.match(spawn, /spawnJudgeProcess\(\{/, "a real spawn still exists for the no-reuse case");
+  // Spec C: fresh:true kills the old same-role process FIRST (singleton invariant).
   assert.match(spawn, /if \(params\.fresh\) \{/, "fresh:true has its own branch");
-  assert.match(spawn, /killPane\(stale\.paneId\)/, "fresh:true kills the old pane before spawning");
+  assert.match(spawn, /kill\?\.\("SIGTERM"\)/, "fresh:true kills the old process before spawning");
   assert.match(spawn, /childSessions\.set\(root, \(childSessions\.get\(root\) \?\? \[\]\)\.filter\(/,
-    "the killed pane leaves the registry");
+    "the killed process leaves the registry");
 });
 
 /**
@@ -1478,26 +1432,26 @@ test("record_review actually runs the cwd check it demands", () => {
   assert.match(body, /CWD CHECK FAILED/, "and the agent is told why");
 });
 
-test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is only its screen", () => {
-  // review_spawn must RECORD the session-side paths at spawn time. A reused
-  // pane is rebound to each round's title while its pi process keeps writing
-  // to the paths it started with — re-deriving them from the current title
-  // reads an empty directory (measured on this repo's own audit panes).
+test("user ask 2026-08-28: the judge SESSION is the managed entity, the process is the substrate", () => {
+  // review_spawn must RECORD the session-side paths at spawn time (the
+  // transcript dir, stdout/stderr logs, pid/exit-code for cross-session
+  // takeover).
   const spawnAt = SRC.indexOf('name: "review_spawn"');
   const spawn = SRC.slice(spawnAt, spawnAt + 11000);
-  for (const field of ["sessionDir: files.sessionDir", "pidPath: files.pidPath", "exitCodePath: files.exitCodePath", "stderrPath: files.stderrPath"]) {
+  for (const field of ["sessionDir", "stdoutPath", "stderrPath", "pidPath", "exitCodePath"]) {
     assert.ok(spawn.includes(field), `review_spawn must record ${field} at spawn time`);
   }
 
-  // review_read: live session ⇒ the screen; ended session ⇒ the transcript,
-  // because the pane is GONE the moment the judge exits.
+  // review_read: live process ⇒ tail of the stdout log; ended ⇒ the
+  // transcript + stderr, because the process is gone but its records are not.
   const readAt = SRC.indexOf('name: "review_read"');
   assert.ok(readAt > 0);
   const read = SRC.slice(readAt, readAt + 4500);
   assert.match(read, /readJudgeSessionState\(/, "liveness comes from the session's artifacts");
+  assert.match(read, /judgeProcessAlive\(child\.child\)/, "the live PROCESS's exitCode decides running");
   assert.match(read, /readJudgeConclusion\(child\.sessionDir\)/,
     "the conclusion is parsed from the RECORDED session dir");
-  assert.match(read, /readStderrTail\(child\.stderrPath\)/, "crash context survives the pane");
+  assert.match(read, /readStderrTail\(child\.stderrPath\)/, "crash context survives the process");
 
   // Round-5 P1: the child snapshot must SUPPLY lastActivityAt. It was declared
   // on the interface but never passed, so classifyChildren timed every judge
@@ -1509,30 +1463,16 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
     "activity is read from the session's own writes, not left undefined");
   assert.match(snapshots, /sessionDir: c\.sessionDir, stderrPath: c\.stderrPath/,
     "…from the transcript and stderr of THAT child");
-  assert.match(snapshots, /\[c\.inboxPath\]/, "…and its inbox");
-  assert.match(read, /const screen = running \? capturePane/,
-    "the pane is only captured while the session is actually running");
+  assert.match(snapshots, /\[c\.stdoutPath\]/, "…and its stdout log");
 
-  // review_close: terminate the SESSION (its process group), then the screen.
+  // review_close: terminate the PROCESS (SIGTERM), then drop the registry.
   const closeAt = SRC.indexOf('name: "review_close"');
   assert.ok(closeAt > 0);
-  // 4200, not 3000: the honest-outcome switch pushed the return statement past
-  // the old window, and a too-short slice silently stops covering the
-  // assertions below instead of failing loudly.
-  const close = SRC.slice(closeAt, closeAt + 4200);
-  const terminateAt = close.indexOf("terminateJudgeSession(");
-  const killAt = close.indexOf("killPane(paneId)");
-  assert.ok(terminateAt > 0 && killAt > 0, "both the session termination and the pane close exist");
-  assert.ok(terminateAt < killAt, "the session is terminated BEFORE its pane is closed");
+  const close = SRC.slice(closeAt, closeAt + 3000);
+  assert.match(close, /kill\?\.\("SIGTERM"\)/, "the live process is SIGTERMed");
   assert.match(close, /closed: true/,
     "closing an already-finished child still reports success (idempotent)");
-  // The outcome is reported HONESTLY: "already ended" and "identity could not
-  // be verified" are different facts, and the second means the pane close was
-  // the only thing that ended the judge.
-  assert.match(close, /case "unverifiable":/,
-    "an unverifiable pid is surfaced, not silently reported as terminated");
-  assert.match(close, /reason: terminated\.reason/,
-    "the reason travels in the tool result details");
+  assert.match(close, /transcript and logs stay/, "the records remain inspectable after close");
 });
 
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {
@@ -1673,7 +1613,7 @@ test("review_checkpoint: the pre-review commit channel is registered with its co
   assert.match(body, /REVIEW_GATE_BYPASS: "1"/, "hook bypass is scoped to the child process");
 });
 
-test("review_watch: the wake-up listener is registered with triggerTurn semantics", () => {
+test("review_watch: the wake-up watcher is registered with triggerTurn semantics", () => {
   const at = SRC.indexOf('name: "review_watch"');
   assert.ok(at >= 0, "review_watch must be registered");
   // Round-14 (user ask): the registration logic lives in the shared
@@ -1683,42 +1623,31 @@ test("review_watch: the wake-up listener is registered with triggerTurn semantic
   const helperAt = SRC.indexOf("function registerWatch(");
   assert.ok(helperAt >= 0, "registerWatch helper must exist");
   const helper = SRC.slice(helperAt, helperAt + 400);
-  assert.match(helper, /watchRegistry\.register\(channel, label\)/,
+  assert.match(helper, /watchRegistry\.register\(sessionId, label\)/,
     "the helper delegates to the watch registry (lib/judge-watch.ts)");
-  // The registry is wired with the REAL tmux waiter and the pi wake: the
-  // wait + wake + re-arm logic lives in lib/judge-watch.ts (pinned
-  // behaviorally by test/judge-watch.test.ts), the extension only binds the
-  // runtime pieces.
-  const registryAt = SRC.indexOf("createWatchRegistry(");
-  assert.ok(registryAt >= 0, "createWatchRegistry must exist");
+  // The registry is wired with the REAL process-exit waiter and the pi wake:
+  // the wait + wake logic lives in lib/judge-watch.ts (pinned behaviorally
+  // by test/judge-watch.test.ts), the extension only binds the runtime pieces.
+  const registryAt = SRC.indexOf("createProcessWatchRegistry(");
+  assert.ok(registryAt >= 0, "createProcessWatchRegistry must exist");
   const registry = SRC.slice(registryAt, registryAt + 1800);
-  assert.match(registry, /waitForSignalAsync/, "listens on the child's done channel");
+  assert.match(registry, /waitForProcessExit/, "listens on the child's process exit");
   assert.match(registry, /triggerTurn: true/, "wakes an idle session");
   assert.match(registry, /deliverAs: "steer"/, "delivered as a steer");
-  // Round-14 P1: the listener must RE-ARM after a signal — the judge pane is
-  // reused across rounds, so a one-shot listener leaves rounds 2..N silent
-  // while the docs promise wake-ups without review_watch calls. The re-arm
-  // (and the round-16 shutdown latch) live in lib/judge-watch.ts.
+  // The exit-event semantics + idempotency live in lib/judge-watch.ts.
   const watchLib = readFileSync(join(ROOT, "lib", "judge-watch.ts"), "utf8");
-  assert.match(watchLib, /register\(channel, label\);/,
-    "the listener re-arms itself for the next round on the same pane");
+  assert.match(watchLib, /function register\(sessionId: string, label: string\): void \{/,
+    "the watcher registers per session id");
   const spawnAt = SRC.indexOf('name: "review_spawn"');
-  // 11000, not 9000: recording the child's session-side artifact paths made
-  // review_spawn longer, and a too-short window silently stops covering the
-  // registration calls this test exists to pin.
   const spawnBody = SRC.slice(spawnAt, spawnAt + 11000);
-  assert.match(spawnBody, /registerWatch\(child\.doneChannel, title\)/,
-    "review_spawn registers the completion listener automatically");
-  // Round-17 (goal-auditor P2): the inbox question channel is auto-registered
-  // too — a child question wakes the session without a manual review_watch.
-  assert.match(spawnBody, /registerWatch\(child\.inboxChannel, `\$\{title\}-inbox`\)/,
-    "review_spawn registers the question listener automatically");
-  // session_shutdown must cancel the listeners (no leaked tmux wait-for)
+  assert.match(spawnBody, /registerWatch\(child\.sessionId, title\)/,
+    "review_spawn registers the completion watcher automatically");
+  // session_shutdown must cancel the watchers.
   const shutdownAt = SRC.indexOf('pi.on("session_shutdown"');
   assert.ok(shutdownAt >= 0);
   const shutdown = SRC.slice(shutdownAt, shutdownAt + 1200);
   assert.match(shutdown, /watchRegistry\.shutdown\(\)/,
-    "shutdown cancels the background listeners via the registry");
+    "shutdown cancels the background watchers via the registry");
   // Round-16 Nit: shutdown latches the registry; a resumed session must be
   // able to arm watchers again (session_start calls reset()).
   const startAt = SRC.indexOf('pi.on("session_start"');
@@ -2340,9 +2269,10 @@ test("P2: judge-role subagent block covers ALL three dispatch channels", () => {
   assert.match(segment, /input\.workflowScript/);
   assert.match(segment, /input\.workflowScriptPath/);
   assert.match(segment, /judgeRoleInScript/);
-  // The refusal text must steer to the tmux flow, never to a retry of subagent.
-  assert.match(segment, /tmux judge child/);
+  // The refusal text must steer to the review_spawn flow, never to a retry of subagent.
+  assert.match(segment, /runs ONLY as its own pi process/);
   assert.match(segment, /review_checkpoint/);
+  assert.doesNotMatch(segment, /tmux judge child|tmux flow/);
 });
 
 test("P2: checkpoint carries prevSha so the documented checkpoint→prepare flow does not self-lock", () => {

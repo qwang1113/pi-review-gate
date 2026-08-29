@@ -337,11 +337,48 @@ test("the same finding in two fences counts once", () => {
   assert.equal(parseReviewOutput(`${F([boom])}\n${F([other])}`).findingsTotal, 2);
   assert.equal(parseReviewOutput(`${F([boom])}\n${F([boom, other])}`).findingsTotal, 2);
 
+  // Round-15 P2: "same finding" is decided on an EXACT key, never on the
+  // coarse cross-round fingerprint. Two real defects that share a line bucket
+  // and their first 80 issue characters produce ONE fingerprint but must
+  // still count as two findings — the coarse key exists to match a finding to
+  // itself across rounds, and is far too loose to be an identity.
+  const long = "x".repeat(80);
+  const collideA = { file: "a.ts", line: 11, severity: "P1", issue: long + "AAA" };
+  const collideB = { file: "a.ts", line: 19, severity: "P2", issue: long + "BBB" };
+  const collided = parseReviewOutput(`${F([collideA])}\n${F([collideB])}`);
+  assert.equal(collided.findingsTotal, 2, "distinct defects must not merge on a coarse key");
+  assert.equal(collided.findingFingerprints.length, 1, "…while still sharing one coarse fingerprint");
+
+  // The identity includes severity and the exact line, so neither differing
+  // alone may be swallowed.
+  assert.equal(parseReviewOutput(`${F([boom])}\n${F([{ ...boom, severity: "P2" }])}`).findingsTotal, 2);
+  assert.equal(parseReviewOutput(`${F([boom])}\n${F([{ ...boom, line: 13 }])}`).findingsTotal, 2);
+
   // A finding with neither file nor issue produces no fingerprint, so it
   // cannot be deduplicated — the total must still be the plain sum, never
   // recomputed from the fingerprint count (which would report 0 findings).
   const bare = parseReviewOutput(`${F([{ line: 1, severity: "P2" }])}\n${F([{ line: 1, severity: "P2" }])}`);
   assert.equal(bare.findingsTotal, 2, "unfingerprintable findings are counted, not dropped");
+});
+
+/**
+ * `findings_total` is a number the REVIEWER states about itself, so it is
+ * sanitized where it enters rather than trusted downstream. Measured before
+ * the guard: `findings_total: -5` folded with one real finding to a total of
+ * -4, and `isPlateaued` compares totals numerically — a negative count makes
+ * "non-decreasing" meaningless.
+ */
+test("a self-reported findings_total is sanitized at the source", () => {
+  const T = (n: number): string =>
+    '```json\n{"gate":"BLOCKED","cwd":"/repo","findings_total":' + n + "}\n```";
+
+  assert.equal(parseReviewOutput(T(-5)).findingsTotal, 0, "a negative count is not a count");
+  assert.equal(parseReviewOutput(T(2.7)).findingsTotal, 2, "…nor is a fractional one");
+  assert.equal(parseReviewOutput(T(3)).findingsTotal, 3, "a plain count still passes through");
+
+  // And it cannot drag a real fence's total below zero when folded.
+  const real = '```json\n{"gate":"BLOCKED","cwd":"/repo","findings":[{"file":"a.ts","line":12,"severity":"P1","issue":"boom"}]}\n```';
+  assert.equal(parseReviewOutput(`${T(-5)}\n${real}`).findingsTotal, 1);
 });
 
 /**

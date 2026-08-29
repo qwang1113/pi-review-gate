@@ -52,6 +52,13 @@ interface FenceVerdict {
    * back to /repo). A contradiction never un-happens.
    */
   cwdConflict: boolean;
+  /**
+   * EXACT per-finding keys, used only to recognise the same finding reported
+   * in two fences of one output. Deliberately not the coarse `fingerprints`,
+   * which exist to match a finding to itself ACROSS rounds and are too loose
+   * to serve as an identity (round-15 P2).
+   */
+  findingIdentities: string[];
 }
 
 const SEVERITY: Record<string, number> = { BLOCKED: 3, NEEDS_HUMAN: 2, READY: 1 };
@@ -71,9 +78,14 @@ function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
   // the result can never return to READY, and the cwd check runs on READY
   // only. A forgotten conflict therefore cannot influence any decision.
   if (bWorse) return b;
-  const mergedFingerprints = [...new Set([...a.findingFingerprints, ...b.findingFingerprints])];
+  // Counting uses the EXACT identities; the coarse fingerprints are only
+  // deduplicated so a repeated fence cannot inflate the cross-round overlap
+  // denominator. Deciding "same finding" on the coarse key merged genuinely
+  // distinct defects (round-15 P2).
+  const mergedIdentities = [...new Set([...a.findingIdentities, ...b.findingIdentities])];
   const duplicateFindings =
-    a.findingFingerprints.length + b.findingFingerprints.length - mergedFingerprints.length;
+    a.findingIdentities.length + b.findingIdentities.length - mergedIdentities.length;
+  const mergedFingerprints = [...new Set([...a.findingFingerprints, ...b.findingFingerprints])];
 
   const cwdConflict = a.cwdConflict || b.cwdConflict ||
     (a.cwd !== undefined && b.cwd !== undefined && a.cwd !== b.cwd);
@@ -101,8 +113,9 @@ function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
     // number of duplicates removed — never recomputed from the fingerprint
     // count, because a finding with neither `file` nor `issue` is counted but
     // produces no fingerprint.
-    findingsTotal: (a.findingsTotal ?? 0) + (b.findingsTotal ?? 0) - duplicateFindings,
+    findingsTotal: Math.max(0, (a.findingsTotal ?? 0) + (b.findingsTotal ?? 0) - duplicateFindings),
     findingFingerprints: mergedFingerprints,
+    findingIdentities: mergedIdentities,
     hasP0P1: a.hasP0P1 || b.hasP0P1,
     docSync: a.docSync === b.docSync ? a.docSync : undefined,
     // Only a CONTRADICTION destroys the report. A fence that simply omits cwd
@@ -155,7 +168,7 @@ function recoverFenceVerdict(body: string): FenceVerdict | undefined {
   // costs an honest reviewer nothing — a salvaged READY is already downgraded
   // above, and the cwd check only runs on READY.
   return {
-    verdict: safeVerdict, findingsTotal: null, findingFingerprints: [],
+    verdict: safeVerdict, findingsTotal: null, findingFingerprints: [], findingIdentities: [],
     hasP0P1: false, cwd: undefined, cwdConflict: false,
   };
 }
@@ -231,11 +244,24 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
       const s = ((f as Record<string, unknown>).severity as string ?? "").toUpperCase();
       return s === "P0" || s === "P1";
     });
-  } else if (typeof obj.findings_total === "number") {
-    findingsTotal = obj.findings_total;
+  } else if (typeof obj.findings_total === "number" && Number.isFinite(obj.findings_total)) {
+    // A self-reported count, so it is sanitized at the source rather than
+    // trusted: a negative or fractional value is not a number of findings.
+    // Measured before this guard: `findings_total: -5` merged with a real
+    // fence to a total of -4, and `isPlateaued` compares totals numerically.
+    findingsTotal = Math.max(0, Math.floor(obj.findings_total));
   }
 
+  // TWO keys per finding, because they answer different questions (round-15
+  // P2): `fingerprints` is deliberately COARSE — a line bucket and a truncated
+  // issue — so the same problem still matches itself across rounds while the
+  // reviewer rewords it or it drifts a few lines. `identities` is EXACT, and
+  // is the only thing allowed to decide "these two are the same finding" when
+  // folding fences of one output. Using the coarse key for that collapsed
+  // genuinely distinct findings (measured: a.ts:11 and a.ts:19 sharing their
+  // first 80 issue characters counted as one).
   const fingerprints: string[] = [];
+  const identities: string[] = [];
   if (Array.isArray(findings)) {
     for (const f of findings) {
       if (typeof f === "object" && f !== null) {
@@ -244,6 +270,9 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
         const issue = typeof ff.issue === "string" ? ff.issue : typeof ff.title === "string" ? ff.title : "";
         const line = typeof ff.line === "number" ? Math.floor(ff.line / 10) : "";
         if (file || issue) fingerprints.push(`${file}#${line}#${issue.slice(0, 80)}`);
+        const exactLine = typeof ff.line === "number" ? ff.line : "";
+        const severity = typeof ff.severity === "string" ? ff.severity : "";
+        if (file || issue) identities.push(`${file}\u0000${exactLine}\u0000${severity}\u0000${issue}`);
       }
     }
   }
@@ -261,7 +290,8 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
 
   // cwdConflict starts false: a single fence cannot contradict itself.
   return {
-    verdict, findingsTotal, findingFingerprints: fingerprints, hasP0P1, docSync,
+    verdict, findingsTotal, findingFingerprints: fingerprints, findingIdentities: identities,
+    hasP0P1, docSync,
     cwd, cwdConflict: false,
   };
 }

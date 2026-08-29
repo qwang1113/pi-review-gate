@@ -18,7 +18,7 @@ test("first consultation: full brief with transcript pointer + artifact path", (
   const text = buildAdviserBrief(base);
   // Fresh-context contract: session dir + id for ON-DEMAND reads. Pinned as the
   // FACT (no inherited conversation), not as the subagent parameter it used to
-  // be phrased in — the adviser is a tmux judge child, which has no such knob.
+  // be phrased in — the adviser is its own pi process, which has no such knob.
   assert.match(text, /conversation is NOT inherited/);
   assert.doesNotMatch(text, /context:\s*"fresh"/,
     "no subagent-only parameter may be prescribed to a judge child");
@@ -30,32 +30,17 @@ test("first consultation: full brief with transcript pointer + artifact path", (
   assert.match(text, /No previous consultation exists/);
   // Nothing about a previous round is claimed.
   assert.doesNotMatch(text, /PREVIOUS consultation/);
-  assert.doesNotMatch(text, /完成信号/); // no channel → no signal instruction
 });
 
-test("round-16 P1: the done channel is embedded at the end of the brief", () => {
-  const text = buildAdviserBrief({ ...base, doneChannel: "rg-adviser-abc123-done" });
-  assert.match(text, /完成信号/);
-  assert.match(text, /tmux wait-for -S rg-adviser-abc123-done/);
+test("the completion contract is embedded at the end of the brief (exit = done, question = resume)", () => {
+  const text = buildAdviserBrief(base);
+  assert.match(text, /进程退出即完成/);
+  assert.match(text, /同一 session id 重新拉起/);
   // The instruction is at the END (after the artifact/output contract).
-  assert.ok(text.indexOf("tmux wait-for -S rg-adviser-abc123-done") > text.indexOf("artifact:"));
-
-test("round-16 P2: the inbox question channel is embedded at the end of the brief when provided", () => {
-  const text = buildAdviserBrief({
-    ...base,
-    doneChannel: "rg-adviser-abc123-done",
-    inboxPath: "/repo/.pi/tmux-sessions/rg-adviser-abc123/inbox.jsonl",
-    inboxChannel: "rg-adviser-abc123-inbox",
-  });
-  assert.match(text, /提问通道/);
-  assert.match(text, /rg-adviser-abc123\/inbox\.jsonl/);
-  assert.match(text, /tmux wait-for -S rg-adviser-abc123-inbox/);
-  assert.doesNotMatch(text, /wait-for -S <channel>-inbox/);
-  const plain = buildAdviserBrief(base);
+  assert.ok(text.indexOf("进程退出即完成") > text.indexOf("artifact:"));
+  assert.doesNotMatch(text, /tmux|wait-for|channel|inbox/);
   // Round-17: output discipline is part of the brief.
   assert.match(text, /输出纪律:结论 \+ 要点列表/, "the discipline is pinned in the brief");
-  assert.doesNotMatch(plain, /提问通道/);
-});
 });
 
 test("later consultation: previous verdict + points injected, changed files called out", () => {

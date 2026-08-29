@@ -132,9 +132,8 @@ export function extractPrecommitBaseline(
   });
 }
 
-
-// Pure module: no engine, no I/O. The extension spawns the reviewer as a tmux
-// judge child (prepare_review + review_spawn); this file only decides WHAT to say
+// Pure module: no engine, no I/O. The extension spawns the reviewer as its own
+// pi process (prepare_review + review_spawn); this file only decides WHAT to say
 // to the reviewer and what verdict shape to hand it as its outputSchema.
 import { buildStreamDirective } from "./review-stream.ts";
 
@@ -249,22 +248,6 @@ export function buildReviewPrompt(
   session?: { dir: string; id: string },
   precommitBaseline?: string,
   /**
-   * The done channel the reviewer will signal (doneChannelFor(title)).
-   * Embedded so the child never has to GUESS the channel (round-16 P1: the
-   * protocol promises 'channel 由任务文本给出' but the task text did not
-   * carry it — the child guessed wrong and the main session was never
-   * woken).
-   */
-  doneChannel?: string,
-  /**
-   * The inbox question channel (path + signal channel) embedded for the
-   * child, so it can ask the main session WITHOUT guessing (round-16 P2: the
-   * protocol promises the inbox path/channel are given by the task text, but
-   * no builder carried them). channel = inboxChannelFor(title), i.e.
-   * rg-<title>-inbox — never literal "<channel>-inbox" concatenation.
-   */
-  inbox?: { path: string; channel: string },
-  /**
    * The reason the MAIN session gave for opening this round while the gate
    * was already met (round-18 polish gate). Injected verbatim so the
    * reviewer can judge whether this round should exist at all.
@@ -367,20 +350,10 @@ export function buildReviewPrompt(
     // verdict fence and the finding stream; prose beyond a 5-line summary is
     // wasted tokens.
     "输出纪律:verdict fence 在最前,其后最多 5 行结论要点(每条一句);不复述任务、不复述代码、不写过程叙事;详细证据放 findings 流(evidence 字段),不要写进正文。",
-    ...(doneChannel
-      ? [
-          "",
-          `完成信号(必须):当你完成本轮审核、输出最终 verdict 之后,运行 tmux wait-for -S ${doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
-        ]
-      : []),
-    ...(inbox
-      ? [
-          "",
-          `- 提问通道(需要决策/澄清任务时):把一行 JSON 追加到 ${inbox.path}:`,
-          '  {"type":"question","text":"……"}',
-          `  然后运行 tmux wait-for -S ${inbox.channel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)。提问后继续等待回复,不要自行假定答案。`,
-        ]
-      : []),
+    "",
+    "完成(必须):输出最终 verdict 后正常退出即可——进程退出即完成,主会话以你的输出为准,",
+    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
+    "主会话会带着答案用同一 session id 重新拉起你。",
   );
   return lines.join("\n");
 }

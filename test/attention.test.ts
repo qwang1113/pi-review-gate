@@ -97,14 +97,14 @@ test("(f) test / non-interactive hosts produce NO external side effect", () => {
   assert.deepEqual(h.signals, [], "no tmux signal");
   assert.deepEqual(h.state().events, [], "nothing is even recorded");
 
-  // The real predicate: a test run, CI, a piped stdout or a tmux-less host is silent.
+  // The real predicate: a test run, CI, a piped stdout is silent.
   const tty = { TMUX: "/tmp/tmux-501/default" } as NodeJS.ProcessEnv;
   assert.equal(sideEffectsEnabled({ ...tty, NODE_ENV: "test" }, true), false, "NODE_ENV=test");
   assert.equal(sideEffectsEnabled({ ...tty, RG_NO_SIDE_EFFECTS: "1" }, true), false, "explicit opt-out");
   assert.equal(sideEffectsEnabled({ ...tty, CI: "1" }, true), false, "CI");
   assert.equal(sideEffectsEnabled(tty, false), false, "not a TTY (headless pi -p)");
-  assert.equal(sideEffectsEnabled({}, true), false, "no tmux");
-  assert.equal(sideEffectsEnabled(tty, true), true, "interactive tmux host publishes");
+  assert.equal(sideEffectsEnabled({}, true), true, "no tmux is not a silence reason (no tmux signal exists any more)");
+  assert.equal(sideEffectsEnabled(tty, true), true, "an interactive host publishes");
   // Round-17 P2 (reviewer, measured): `node --test` sets NODE_TEST_CONTEXT, NOT
   // NODE_ENV — without this branch the suite's silence rested on isTTY alone.
   assert.equal(sideEffectsEnabled({ ...tty, NODE_TEST_CONTEXT: "child-v8" }, true), false, "node --test child");

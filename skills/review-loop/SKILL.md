@@ -81,7 +81,7 @@ criterion and three lines:
 **Pre-review the draft goal (MECHANICAL, goal-auditor).** Before you
 submit a goal for approval, call `prepare_goal_audit` with the draft to get the ready-made
 auditor task (it carries the previous audit's carryover + draft delta on a re-audit), spawn
-the dedicated `goal-auditor` as a tmux judge child via `review_spawn` (read-only; see
+the dedicated `goal-auditor` as its own pi process via `review_spawn` (read-only; see
 `agents/goal-auditor.md`) with that task,
 then record its FULL raw output with `record_goal_prereview`. The extension parses the auditor's JSON
 fence itself and `propose_loop_goal` REFUSES to show the user's approval dialog
@@ -112,7 +112,7 @@ codebase, spawn them in parallel — each reads its own files and returns
 findings; you merge the results. Exploration and editing may also overlap:
 while a read-only subagent surveys the code, you can concurrently edit a
 different file (the single-writer invariant still holds — only YOU write).
-(Adviser consultations run as tmux judge children, not subagents.)
+(Adviser consultations run as judge child processes, not subagents.)
 
 ### Serial writers — exactly one writer in the worktree
 
@@ -158,7 +158,7 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    Feed it the real question, not your preferred answer. Fold its input in
    before you commit to an approach. Skip only for trivial, low-risk
    changes.
-2. **One round — precommit first, checkpoint, then the single tmux review** — with the edits finished:
+2. **One round — precommit first, checkpoint, then the single review** — with the edits finished:
 
    - FIRST run the trusted precommit lane — `run_precommit` (fast for an
      intermediate round, full for the final round before shipping) — and
@@ -174,12 +174,12 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
      sha; the review unit is the immutable commit range `baseline..HEAD`.
    - Then call `prepare_review`: it computes the range, writes the
      finding-stream file and returns the ready-made task text — one reviewer per round.
-   - Spawn ONE reviewer as its OWN tmux judge child:
-     `review_spawn({ role: "reviewer", title: "review-<short>", repo })` →
-     write the task text to a file → `review_send({ paneId, text: "读取 <file> 并执行" })`
-     — the done/inbox listeners were ALREADY registered by `review_spawn`, so the
-     completion signal WAKES this session with no polling and no `review_watch`
-     call (that tool is only for re-registering with a custom label).
+   - Spawn ONE reviewer as its OWN pi process (no tmux):
+     `review_spawn({ role: "reviewer", title: "review-<short>", repo, task: <任务文本> })` →
+     returns the session id (THE resume key). The process-exit watcher was
+     ALREADY registered by `review_spawn`, so completion WAKES this session
+     with no polling and no `review_watch` call (that tool is only for
+     re-registering after a reload or with a custom label).
      The gate BLOCKS judge roles dispatched through
      `subagent`/`workflowScript`/`workflowScriptPath` entirely (that sandbox
      has no per-child isolation — the judge would land in your live worktree).
@@ -214,24 +214,16 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    1. 有可实现的确定性工作(代码/测试/文档/其他 repo 事务)→ 优先做掉,不要进入等待。
    2. 确认没有任何可做的工作后,才进入阻塞等待——在**一次 bash 调用**里同时
       托管三条判据:
-      a. done channel 信号:`tmux wait-for <doneChannel>`(无标志;⚠️ 没有
-         `-t` 超时选项,`wait-for -t 5 <chan>` 会以 `unknown flag -t` 报错返回,
-         包成 `while ! tmux wait-for -t 5 <chan>; do :; done` 就是空转轮询,不是等待);
-         用 bash 工具自己的 `timeout` 参数做上限,
-         turn 不结束;
-      b. 子会话已结束:`test -s <workDir>/exit-code`(2026-08-28 起 pane 会
-         随 judge 一起消失,不再用 `#{pane_dead}` 判定;exit-code 的存在
-         就是"已结束"的权威事实,里面还带着退出码)。
+      a. 进程是否已退出:`kill -0 <pid 文件第一段>` 或 `test -s <workDir>/exit-code`
+         (exit-code 的存在就是"已结束"的权威事实,里面还带着退出码);
          ⚠️ 崩溃的子会话可能**根本没来得及写 exit-code**——它同样是"已结束",
          由主会话侧按「记录的那个进程是否还在」判定(见 lib/judge-session.ts);
-         手工探测时可用 `kill -0 <pid 文件里的第一段>` 作为补充判据;
-      c. verdict 已产出但未发信号:子会话的 session jsonl 里已出现
-         verdict fence(实测失败模式——子会话完成但忘记发完成信号,主会话空等);
+      c. verdict 已产出但进程未退:子会话的 session jsonl 里已出现
+         verdict fence(实测失败模式——子会话完成但进程未退出,主会话空等);
       任一命中即结束等待:review_read 读取输出继续流程,或 review_close 后
       重新派发。
-   3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不发
-      信号)。`agent_settled` 会注入托管等待指令;主动托管远比被动拉起可靠。
-   不要 sleep 或高频轮询 pane 屏幕;有流式 P0/P1/P2 时边等边修(先确认再改)。
+   3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不退)。
+      `agent_settled` 会注入托管等待指令;主动托管远比被动拉起可靠。
    因为审核范围是 immutable commit,工作区编辑不失效本轮。
 3. **Review** — the reviewer audits the COMMIT RANGE `baseline..HEAD` (the
    immutable checkpoint commits) with `git show`/`git diff`; it may verify by

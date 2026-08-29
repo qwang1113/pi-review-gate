@@ -46,7 +46,7 @@
 
 import {
   existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
-  mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync,
+  mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync, writeSync,
 } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
@@ -84,33 +84,24 @@ import {
 } from "../lib/repo-resolve.ts";
 import { firstNonEnglish, containsNonLatinLetter, isNonEnglishText } from "../lib/lang-detect.ts";
 import {
-  waitForSignalAsync,
-  spawnJudgePane,
-  paneAlive,
-  killPane,
-  paneCurrentPath,
-  capturePane,
-  sendMessage,
-  anyPaneAlive,
-  tmuxAvailable,
-  ownPaneId,
-  paneWindowLabel,
-} from "../lib/tmux-session.ts";
-import { createWatchRegistry } from "../lib/judge-watch.ts";
-import { attentionChannelFor, attentionText, consumeAttention, parentSessionId, publishAttention, sideEffectsEnabled } from "../lib/attention.ts";
+  spawnJudgeProcess,
+  judgeSessionIdFor,
+  shortRepoHash,
+  judgeProcessAlive,
+  type JudgeProcessResult,
+} from "../lib/judge-process.ts";
+import { createProcessWatchRegistry, rememberChildProcess, forgetChildProcess, waitForProcessExit } from "../lib/judge-watch.ts";
+import { parentSessionId, publishAttention } from "../lib/attention.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
 import {
   readJudgeSessionState,
   readJudgeConclusion,
   readStderrTail,
   lastActivityAt,
-  terminateJudgeSession,
 } from "../lib/judge-session.ts";
 import { polishReasonRequired, recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   writeJudgeSpawnFiles,
-  doneChannelFor,
-  inboxChannelFor,
   JUDGE_ROLES,
   judgeRoleInScript,
   normalizeToolName,
@@ -831,23 +822,12 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
   /**
-   * Background done/inbox channel listeners (review_watch): one handle per
-   * channel. When a child signals, the listener wakes THIS session via
-   * pi.sendMessage(triggerTurn) — the "the child finished" notification that
-   * makes main-session polling unnecessary. Cancelled on session_shutdown so
-   * a reload/resume never leaks a tmux wait-for process.
+   * Background judge-completion watchers (review_watch): one handle per
+   * session id. When the child's process exits, the watcher wakes THIS
+   * session via pi.sendMessage(triggerTurn) — the "the child finished"
+   * notification that makes main-session polling unnecessary. Cancelled on
+   * session_shutdown so a reload/resume never leaks a stale listener.
    */
-  // Round-18 (user ask): DIRECTED parent attention. A session never wakes
-  // unrelated sessions: it publishes only to the channel of the session that
-  // SPAWNED it (RG_PARENT_SESSION), and it listens only on its OWN channel.
-  // A session with no parent publishes nothing at all. The channel is derived
-  // from the target session id, so the bell and the listener can never drift.
-  //
-  // We only LISTEN when we have a session id — an anonymous host has no
-  // address, so nobody can (or should) wake it.
-  function myAttentionChannel(): string | undefined {
-    return state.sessionId ? attentionChannelFor(state.sessionId) : undefined;
-  }
 
   /**
    * Who WE are for the self-wake filter. Round-17 Nit (reviewer): a shared
@@ -868,12 +848,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function notifyUserAttention(reason: string, repo?: string): void {
     try {
-      const pane = ownPaneId();
       publishAttention({
         fromSessionId: attentionIdentity(),
         toSessionId: parentSessionId(),
-        fromPane: pane,
-        fromWindow: paneWindowLabel(pane),
         repo: repo ?? cwd,
         reason,
       });
@@ -882,49 +859,40 @@ export default function reviewGate(pi: ExtensionAPI) {
   // The watcher registry (lib/judge-watch.ts) owns the handle map and the
   // shutdown latch: a signal that resolves while session_shutdown is
   // clearing the registry must not re-arm an orphan listener (round-16 Nit).
-  const watchRegistry = createWatchRegistry(
-    (channel) => waitForSignalAsync(channel),
-    (label, channel) => {
-      const inbox = channel.endsWith("-inbox");
-      let content: string;
-      if (myAttentionChannel() !== undefined && channel === myAttentionChannel()) {
-        // Directed: only events ADDRESSED to us (a child we spawned) are
-        // consumed; events for other sessions are invisible by address.
-        const event = consumeAttention(attentionIdentity());
-        if (!event) return;
-        content = `[review-gate] 子会话需要用户介入 — ${attentionText(event)}（去该窗口批准/回答）。`;
-      } else if (inbox) {
-        content = `[review-gate] 子会话 ${label} 提问（channel ${channel}）— review_read 读取 inbox 并回复。`;
-      } else {
-        content = `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`;
-      }
+  // The watcher registry (lib/judge-watch.ts) owns the handle map and the
+  // shutdown latch: a child's PROCESS EXIT is the completion event (no tmux
+  // wait-for channel, no signal the child could forget to send).
+  const watchRegistry = createProcessWatchRegistry(
+    (child) => waitForProcessExit(child),
+    (label, sessionId) => {
+      const content = `[review-gate] 子会话 ${label} 完成（session ${sessionId}）— 读取其输出并继续。`;
       pi.sendMessage({ customType: "review-gate", content, display: true }, { triggerTurn: true, deliverAs: "steer" });
     },
   );
   /**
    * Judge child sessions spawned by review_spawn: repo root → children.
-   * In-memory for now (persisted listing lands with the declare_done residual
-   * check); each entry carries the tmux pane id and the derived channels.
+   * Each entry carries the deterministic session id (the resume key), the
+   * live ChildProcess (liveness = its exitCode), and the per-run artifact
+   * paths (session transcript dir, stdout/stderr logs, pid/exit-code files
+   * for cross-session takeover).
    */
   interface JudgeChild {
-    paneId: string;
+    sessionId: string;
     role: string;
     title: string;
-    doneChannel: string;
-    inboxChannel: string;
-    inboxPath: string;
     spawnedAt: string;
-    /**
-     * The session-side artifacts, captured AT SPAWN TIME and never re-derived.
-     *
-     * A reused pane is rebound to each round's title, but the child's pi
-     * process keeps writing to the paths it was STARTED with — deriving them
-     * from the current title reads an empty directory (measured 2026-08-28).
-     */
+    /** The live child process; liveness is child.exitCode === null. */
+    child?: { exitCode?: number | null; pid?: number };
+    /** Directory pi writes its transcript jsonl into (stable per role). */
     sessionDir: string;
-    pidPath: string;
-    exitCodePath: string;
+    /** Per-run stdout log (this round's raw output). */
+    stdoutPath: string;
+    /** Per-run stderr log (crash diagnosis). */
     stderrPath: string;
+    /** pid record `<pid> <start>` — cross-session takeover (judge-session.ts). */
+    pidPath: string;
+    /** exit-code file — the authoritative 'session finished' fact. */
+    exitCodePath: string;
   }
   const childSessions = new Map<string, JudgeChild[]>();
   /**
@@ -937,24 +905,16 @@ export default function reviewGate(pi: ExtensionAPI) {
   const reviewTargets = new Map<string, ReviewTarget>();
 
   /**
-   * Register the completion listener for a judge child's done channel. One
-   * listener per channel (a re-registration replaces the old handle). When
-   * the child signals `tmux wait-for -S <channel>`, THIS session is woken
-   * via pi.sendMessage(triggerTurn, deliverAs:"steer") — no polling, no
-   * sleep: the agent can end its turn and do other work; the wake arrives
-   * as a new turn. review_spawn registers this AUTOMATICALLY; review_watch
+   * Register the completion watcher for one judge session id. One watcher
+   * per session id (a re-registration replaces the old handle). When the
+   * child's PROCESS EXITS, THIS session is woken via
+   * pi.sendMessage(triggerTurn, deliverAs:"steer") — no polling, no sleep:
+   * the agent can end its turn and do other work; the wake arrives as a
+   * new turn. review_spawn registers this AUTOMATICALLY; review_watch
    * exists to re-register with a custom label.
-   *
-   * Round-14 P1: the listener RE-ARMS ITSELF after a signal — a judge pane
-   * is reused for every round of its life (the same title ⇒ same channel),
-   * and a one-shot listener would leave rounds 2..N with no wake-up while
-   * the docs promise "no review_watch call needed". The re-arm happens only
-   * when the agent did not replace the handle in the meantime (the
-   * activeWatchers identity check), so a manual review_watch with a custom
-   * label keeps its label until the next signal.
    */
-  function registerWatch(channel: string, label: string): void {
-    watchRegistry.register(channel, label);
+  function registerWatch(sessionId: string, label: string): void {
+    watchRegistry.register(sessionId, label);
   }
   /** HEAD commit tree OID — the content-boundary every ship binding compares against (round-8 P1). */
   function headCommitTree(root: string): string {
@@ -1394,14 +1354,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * Is a tmux judge child (reviewer / adviser / goal-auditor pane) still in
+   * Is a judge child process (reviewer / adviser / goal-auditor) still in
    * flight? The stall breaker must not cut the loop off while a judge is
    * working — its verdict is exactly what the unchanged signature is waiting
    * for (round-16 P2: only subagentInMotion was consulted, so a waiting
    * main session tripped the breaker with 'check provider status' while the
    * reviewer was mid-round).
    *
-   * Freshness bound like subagentInMotion's: a pane that has been alive
+   * Freshness bound like subagentInMotion's: a child that has been alive
    * since before STALL_MOTION_MAX_AGE_SEC is the HUNG case the breaker
    * exists for, not motion (goal-auditor P2: alive-forever must not
    * disable the breaker).
@@ -1414,7 +1374,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         const at = Date.parse(c.spawnedAt);
         return Number.isFinite(at) && at >= cutoff;
       });
-    return anyPaneAlive(fresh);
+    return fresh.some((c) => judgeProcessAlive(c.child));
   }
 
   // ---------- user-visible output channels ----------
@@ -1689,9 +1649,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // ---------- judge-role subagent block (HARD) ----------
     //
     // 2026-08-27 execution model: judge roles (reviewer / adviser /
-    // goal-auditor) run ONLY as tmux judge children (review_spawn), never as
+    // goal-auditor) run ONLY as their own pi processes (review_spawn), never as
     // subagents. A subagent call naming a judge role is refused here — the
-    // agent is told to use the tmux flow instead. This is the INVERTED
+    // agent is told to use the review_spawn flow instead. This is the INVERTED
     // successor of the snapshot-pin guard: the same failure it blocked (a
     // judge running in the live worktree where the gate looks) is now blocked
     // by removing the dispatch shape entirely.
@@ -1727,12 +1687,11 @@ export default function reviewGate(pi: ExtensionAPI) {
           block: true,
           reason:
             judgeName
-              ? `review-gate: \`${judgeName}\` is a judge role and runs ONLY as a tmux judge child — ` +
-                "subagent dispatch for it is retired (2026-08-27 execution model). Use the tmux flow: " +
-                "review_checkpoint → prepare_review → review_spawn → review_send → " +
-                "record_review. (A judge dispatched as a subagent would run in your live worktree " +
+              ? `review-gate: \`${judgeName}\` is a judge role and runs ONLY as its own pi process — ` +
+                "subagent dispatch for it is retired (2026-08-27 execution model). Use the review_spawn flow: " +
+                "review_checkpoint → prepare_review → review_spawn → record_review. (A judge dispatched as a subagent would run in your live worktree " +
                 "with no isolation at all — the exact failure the model was built to end.)"
-              : "review-gate: workflowScriptPath could not be read, so a judge role inside it cannot be ruled out — failing closed. Read the script, then dispatch non-judge work through it or use the tmux flow for judge roles.",
+              : "review-gate: workflowScriptPath could not be read, so a judge role inside it cannot be ruled out — failing closed. Read the script, then dispatch non-judge work through it or use the review_spawn flow for judge roles.",
         };
       }
     }
@@ -2918,22 +2877,27 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_spawn",
     label: "Spawn Judge Child",
     description:
-      "Spawn a judge child (reviewer / adviser / goal-auditor) as its OWN pi process in a tmux pane " +
-      "of the main window's right column (pane layout, not a detached session). The child runs with " +
-      "no review-gate extension, its role definition + judge protocol as system prompt, the configured " +
-      "model, and --exclude-tools edit,write. Returns the pane id and the done/inbox channels; the " +
-      "completion listener is registered AUTOMATICALLY (the done signal wakes this session as a new " +
-      "turn — send the task, end your turn, keep working; no review_watch call, no polling, no sleep).",
+      "Spawn a judge child (reviewer / adviser / goal-auditor) as its OWN non-interactive pi process " +
+      "(pi -p --session-id <id>). The child runs with no review-gate extension, its role definition + " +
+      "judge protocol as system prompt, the configured model, and --exclude-tools edit,write. " +
+      "Returns the session id — THE resume key: spawning again with the same session id continues " +
+      "the same session's context (cross-round reuse, question answers, even after the main session " +
+      "restarts). The completion listener is registered AUTOMATICALLY (the child's process exit " +
+      "wakes this session as a new turn — send the task, end your turn, keep working; no review_watch " +
+      "call, no polling, no sleep).",
     parameters: Type.Object({
       role: Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }),
       title: Type.String({
-        description: "Human-readable child label (sanitized; prefix 'rg-' is added; done/inbox channels derive from it)",
+        description: "Human-readable child label (sanitized; used for the session name and diagnostics)",
       }),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
+      task: Type.String({
+        description: "The task text for THIS round (written to a file and passed as an @file argv reference)",
+      }),
       fresh: Type.Optional(Type.Boolean({
-        description: "Force a NEW pane even when an alive same-role child exists (default: reuse — the child's context carries over across rounds)",
+        description: "Force a NEW session even when an alive same-role child exists (default: reuse — the child's context carries over across rounds via the same session id)",
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -2950,92 +2914,57 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: true,
         };
       }
-      if (!tmuxAvailable()) {
+      const task = String(params.task ?? "").trim();
+      if (!task) {
         return {
-          content: [{ type: "text", text: "review-gate: review_spawn rejected — tmux is not available on this host. Install tmux (brew install tmux) or review without a judge child." }],
+          content: [{ type: "text", text: "review-gate: review_spawn rejected — the task text is empty. Write the task first, then pass it." }],
           details: { spawned: false },
           isError: true,
         };
       }
       // Children whose SESSION has ended are dropped from the registry, so a
       // finished judge never blocks a fresh spawn or answers a reuse hit.
-      //
-      // Judged by the session, not the pane (2026-08-28): a judge that ended
-      // takes its pane with it, but a pane can also outlive nothing at all —
-      // the exit-code/pid record is the fact. Any pane still lingering for a
-      // dropped child is closed here rather than left stacking up in the
-      // column, which is what the old pane-only sweep did.
+      // Liveness is the PROCESS's exitCode (we hold the ChildProcess), not a
+      // pane probe and not a pid file.
       for (const [repoRoot, list] of childSessions) {
-        const alive = list.filter((c) => {
-          const s = readJudgeSessionState({ pidPath: c.pidPath, exitCodePath: c.exitCodePath });
-          if (s.lifecycle === "running" || s.lifecycle === "unknown") return true;
-          killPane(c.paneId);
-          return false;
-        });
+        const alive = list.filter((c) => judgeProcessAlive(c.child));
         if (alive.length !== list.length) childSessions.set(repoRoot, alive);
       }
-      // The round's title and its derived channels/paths — computed ONCE here
-      // (the `rg-` prefix is added by spawnJudgePane and the channel helpers,
-      // so titles never read rg-rg-…), because BOTH the reuse rebind below and
-      // the spawn path need them.
+      // The session id is DETERMINISTIC per role+repo — the resume key.
       const title = String(params.title ?? role).replace(/[^A-Za-z0-9._-]/g, "-");
-      const doneChannel = doneChannelFor(title);
-      const inboxChannel = inboxChannelFor(title);
-      const inboxPath = pathJoin(root, ".pi", "tmux-sessions", `rg-${title}`, "inbox.jsonl");
-      // Round-17 (user ask): REUSE — same repo + same role + alive pane ⇒ no
-      // new spawn; the execution model promises the child's context carries
-      // over across rounds until READY, so a fresh pi process every round
-      // would re-read protocol/code/goal from zero (measured: pane
-      // accumulation, huge token cost). fresh:true forces a new pane.
+      const sessionId = judgeSessionIdFor(role, shortRepoHash(root));
+      // REUSE (round-17 semantics, now by session id): same repo + same role
+      // + alive process ⇒ no new spawn; the SAME session id means the child's
+      // context carries over across rounds until READY. fresh:true forces a
+      // new session (kills the old process first).
       const existing = (childSessions.get(root) ?? [])
-        .find((c) => c.role === role && !params.fresh);
+        .find((c) => c.role === role && c.sessionId === sessionId && !params.fresh);
       if (existing) {
-        // Round-17 (measured this round): prepare_review mints a NEW title +
-        // channels every round, but a reused pane kept the FIRST round's
-        // channels — so the ready-made task text embedded a done channel
-        // nobody listened on, and the completion signal never arrived unless
-        // the agent hand-edited it. REBIND the pane to this round's channels:
-        // drop the previous listeners, register the new ones, and move the
-        // inbox with it (review_read follows inboxPath).
-        const rebound = title !== existing.title;
-        if (rebound) {
-          watchRegistry.unregister(existing.doneChannel);
-          watchRegistry.unregister(existing.inboxChannel);
-          mkdirSync(pathDirname(inboxPath), { recursive: true });
-          existing.title = title;
-          existing.doneChannel = doneChannel;
-          existing.inboxChannel = inboxChannel;
-          existing.inboxPath = inboxPath;
-        }
-        registerWatch(existing.doneChannel, existing.title);
-        registerWatch(existing.inboxChannel, `${existing.title}-inbox`);
+        // Reuse: the session id IS the continuation. No channel rebind needed
+        // (there are no channels); re-register the exit watcher for the
+        // next round.
+        existing.title = title;
+        existing.spawnedAt = new Date().toISOString();
+        registerWatch(existing.sessionId, existing.title);
         return {
           content: [{ type: "text", text:
-            `review-gate: reusing existing ${role} child pane ${existing.paneId} — context carries over across rounds.\n` +
-            (rebound ? `- 重绑到本轮 title "${title}"(旧 channel 的监听已取消)。\n` : "") +
-            `- done channel: ${existing.doneChannel}(监听已注册)\n` +
-            `- inbox: ${existing.inboxPath}(channel ${existing.inboxChannel})\n` +
-            "- 用 review_send 发送本轮任务文本即可；prepare_review 的任务文本可直接使用(fresh:true 可强制新建 pane)。",
-          }],
-          details: { spawned: false, reused: true, rebound, paneId: existing.paneId, title: existing.title, role, doneChannel: existing.doneChannel, inboxPath: existing.inboxPath },
+            `review-gate: reusing existing ${role} child session ${existing.sessionId} — context carries over across rounds.\n` +
+            `- 用 review_send({ sessionId, text }) 发送本轮任务文本即可；prepare_review 的任务文本可直接使用(fresh:true 可强制新建会话)。` }],
+          details: { spawned: false, reused: true, sessionId: existing.sessionId, role, title: existing.title },
         };
       }
-      // Round-17 (spec C): fresh:true keeps the SINGLETON invariant — one
-      // alive pane per role per session — by killing the old same-role pane
-      // (and cancelling its listeners) before the new spawn.
+      // fresh:true keeps the SINGLETON invariant — one alive process per
+      // role per repo — by killing the old same-role child first.
       if (params.fresh) {
         const stale = (childSessions.get(root) ?? []).find((c) => c.role === role);
         if (stale) {
-          watchRegistry.active.get(stale.doneChannel)?.cancel();
-          watchRegistry.active.get(stale.inboxChannel)?.cancel();
-          killPane(stale.paneId);
-          childSessions.set(root, (childSessions.get(root) ?? []).filter((c) => c.paneId !== stale.paneId));
+          watchRegistry.unregister(stale.sessionId);
+          forgetChildProcess(stale.sessionId);
+          try { (stale.child as { kill?: (s?: string) => boolean } | undefined)?.kill?.("SIGTERM"); } catch { /* already gone */ }
+          childSessions.set(root, (childSessions.get(root) ?? []).filter((c) => c.sessionId !== stale.sessionId));
         }
       }
-      // P2 (round-6): the title is the RAW label — the rg- prefix is added
-      // ONCE by spawnJudgePane and by the channel derivations, so titles and
-      // channels never read rg-rg-….
-      const workDir = pathJoin(root, ".pi", "tmux-sessions", `rg-${title}`);
+      const workDir = pathJoin(root, ".pi", "judge-sessions", `rg-${title}`);
       try {
         const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
         const files = writeJudgeSpawnFiles({
@@ -3047,64 +2976,81 @@ export default function reviewGate(pi: ExtensionAPI) {
           // Round-18: the child learns who spawned it (directed attention).
           parentSessionId: state.sessionId ?? undefined,
         });
-        // Round-7 P2: layout is decided inside spawnJudgePane (no anchor ⇒
-        // carve the right column; anchor ⇒ stack) — the caller no longer
-        // participates, so the module is the single layout owner.
-        const spawned = spawnJudgePane({
+        // Session dir: STABLE per role (the resume key's home). Each spawn
+        // writes its own task/pid/exit-code under runs/, but the transcript
+        // jsonl accumulates in the same session dir.
+        const sessionDir = pathJoin(workDir, "sessions");
+        const runDir = pathJoin(workDir, "runs", new Date().toISOString().replace(/[:.]/g, "-"));
+        const stdoutPath = pathJoin(runDir, "stdout.log");
+        const stderrPath = pathJoin(runDir, "stderr.log");
+        const pidPath = pathJoin(runDir, "pid");
+        const exitCodePath = pathJoin(runDir, "exit-code");
+        mkdirSync(runDir, { recursive: true });
+        mkdirSync(sessionDir, { recursive: true });
+        const spawned = spawnJudgeProcess({
+          role,
+          repoRoot: root,
+          sessionId,
+          sysPromptPath: files.sysPromptPath,
+          model: files.model,
+          sessionDir,
+          taskText: task,
+          parentSessionId: state.sessionId ?? undefined,
           title,
-          cwd: root,
-          command: files.command,
-          env: files.env,
         });
-        if (!spawned.ok || !spawned.paneId) {
+        if (!spawned.ok || !spawned.child) {
           return {
-            content: [{ type: "text", text: `review-gate: review_spawn failed — ${spawned.error ?? "no pane id"}` }],
+            content: [{ type: "text", text: `review-gate: review_spawn failed — ${spawned.error ?? "no child"}` }],
             details: { spawned: false },
             isError: true,
           };
         }
         const child: JudgeChild = {
-          paneId: spawned.paneId,
+          sessionId,
           role,
           title,
-          doneChannel: doneChannelFor(title),
-          inboxChannel: inboxChannelFor(title),
-          inboxPath: pathJoin(workDir, "inbox.jsonl"),
           spawnedAt: new Date().toISOString(),
-          // Session-side artifacts, taken from the launcher writer itself —
-          // these paths are what this child will actually write to, for as
-          // long as it lives, no matter which title later rounds rebind it to.
-          sessionDir: files.sessionDir,
-          pidPath: files.pidPath,
-          exitCodePath: files.exitCodePath,
-          stderrPath: files.stderrPath,
+          child: spawned.child,
+          sessionDir,
+          stdoutPath,
+          stderrPath,
+          pidPath,
+          exitCodePath,
         };
+        // Tee stdout/stderr to per-run logs (the visible record + crash
+        // diagnosis; jsonl is the structured record).
+        try {
+          const outFd = openSync(stdoutPath, "a");
+          const errFd = openSync(stderrPath, "a");
+          (spawned.child.stdout as NodeJS.ReadableStream | null)?.on("data", (d: Buffer) => writeSync(outFd, d));
+          (spawned.child.stderr as NodeJS.ReadableStream | null)?.on("data", (d: Buffer) => writeSync(errFd, d));
+          spawned.child.on("close", () => { try { closeSync(outFd); closeSync(errFd); } catch { /* best-effort */ } });
+        } catch { /* logs are best-effort */ }
+        // pid + exit-code records for cross-session takeover
+        try {
+          if (spawned.child.pid) writeFileSync(pidPath, `${spawned.child.pid} ${new Date().toString()}\n`, "utf8");
+          spawned.child.on("exit", (code) => {
+            try { writeFileSync(exitCodePath, String(code ?? -1), "utf8"); } catch { /* best-effort */ }
+          });
+        } catch { /* best-effort */ }
         const list = childSessions.get(root) ?? [];
         list.push(child);
         childSessions.set(root, list);
-        // Round-14 (user ask): the completion listener is registered HERE —
-        // spawn → send → wake is automatic, no review_watch call needed.
-        // The agent ends its turn and does other work; the done signal
-        // wakes this session as a new turn (never sleep, never poll).
-        registerWatch(child.doneChannel, title);
-        // Round-17 (goal-auditor P2): the inbox question channel is ALSO
-        // auto-registered — a child question wakes this session without the
-        // main session having to remember a review_watch call. The two wake
-        // paths (done / question) are now symmetric.
-        registerWatch(child.inboxChannel, `${title}-inbox`);
+        // The completion listener is registered HERE — spawn → wake is
+        // automatic. The child's process EXIT wakes this session as a new
+        // turn (never sleep, never poll).
+        rememberChildProcess(sessionId, spawned.child);
+        registerWatch(child.sessionId, title);
         return {
           content: [{
             type: "text",
-            text: `review-gate: ${role} child spawned as pane ${child.paneId} (${title}).\n` +
-              `- done channel: ${child.doneChannel} (completion listener ALREADY registered — ` +
-              `the done signal wakes this session; no review_watch call needed)\n` +
-              `- inbox: ${child.inboxPath}\n` +
+            text: `review-gate: ${role} child spawned as session ${child.sessionId} (${title}).\n` +
+              `- session dir: ${child.sessionDir} (transcript jsonl; resume = same session id)\n` +
+              `- stdout: ${child.stdoutPath}\n` +
               `- system prompt: ${files.sysPromptPath}\n` +
-              `Send the task text as a single line referencing its file, then end your turn: while the ` +
-              `child works, keep doing useful work (its streamed findings, other repos); the wake message ` +
-              `arrives as a new turn.`,
+              `- 任务文本已随 spawn 传入(@file)；进程退出即完成，监听已自动注册，唤醒会作为新 turn 到达。`
           }],
-          details: { spawned: true, paneId: child.paneId, role, title, doneChannel: child.doneChannel, inboxPath: child.inboxPath, watching: true },
+          details: { spawned: true, sessionId: child.sessionId, role, title, sessionDir: child.sessionDir, stdoutPath: child.stdoutPath, watching: true },
         };
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
@@ -3123,69 +3069,129 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_watch",
     label: "Watch Review Child",
     description:
-      "Register a background listener on a judge child's completion channel. review_spawn registers " +
-      "this AUTOMATICALLY — call this tool only to re-register with a custom label. When the child " +
-      "runs `tmux wait-for -S <channel>`, the listener wakes THIS session via " +
-      "pi.sendMessage(triggerTurn) — a new turn, no polling, no sleep: end your turn and do other " +
-      "work while the child runs. Listeners are cancelled on session shutdown.",
+      "Register a background watcher on a judge child's completion (its process exit). review_spawn " +
+      "registers this AUTOMATICALLY — call this tool only to re-register with a custom label after a " +
+      "reload, or when the child's process was resumed outside review_send. When the child exits, the " +
+      "watcher wakes THIS session via pi.sendMessage(triggerTurn) — a new turn, no polling, no sleep. " +
+      "Watchers are cancelled on session shutdown.",
     parameters: Type.Object({
-      channel: Type.String({
-        description: "The done channel the child will signal (e.g. rg-reviewer-done)",
+      sessionId: Type.String({
+        description: "The judge session id to watch (returned by review_spawn)",
       }),
       label: Type.Optional(Type.String({
-        description: "Human-readable child label for the wake message (default: the channel)",
+        description: "Human-readable child label for the wake message (default: the session id)",
       })),
     }),
     async execute(_id, params, _signal, _onUpdate) {
-      const channel = String(params.channel ?? "").trim();
-      const label = String(params.label ?? "").trim() || channel;
-      if (channel.length === 0) {
+      const sessionId = String(params.sessionId ?? "").trim();
+      const label = String(params.label ?? "").trim() || sessionId;
+      if (!sessionId) {
         return {
-          content: [{ type: "text", text: "review-gate: review_watch rejected — the channel is empty." }],
+          content: [{ type: "text", text: "review-gate: review_watch rejected — the session id is empty." }],
           details: { watching: false },
           isError: true,
         };
       }
-      // One listener per channel; a re-watch replaces the old handle.
-      registerWatch(channel, label);
+      const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+      if (!child || !judgeProcessAlive(child.child)) {
+        return {
+          content: [{ type: "text", text: `review-gate: no LIVE judge child with session id ${sessionId} — nothing to watch.` }],
+          details: { watching: false },
+          isError: true,
+        };
+      }
+      // One watcher per session id; a re-watch replaces the old handle.
+      registerWatch(sessionId, label);
       return {
         content: [{
           type: "text",
-          text: `review-gate: watching ${channel} — 完成信号到达时会主动唤醒本会话（无需轮询）。`,
+          text: `review-gate: watching ${sessionId} — 进程退出时会主动唤醒本会话（无需轮询）。`,
         }],
-        details: { watching: true, channel },
+        details: { watching: true, sessionId },
       };
     },
   });
 
   pi.registerTool({
     name: "review_send",
-    label: "Send to Judge Child",
+    label: "Send to Judge Session",
     description:
-      "Send ONE single-line message to a judge child pane (Enter is appended). Multi-line content must " +
-      "ride a FILE — write it (e.g. under .pi/tmux-sessions/<title>/) and send a one-line reference " +
-      "(\"read /path/task.md and execute it\"), because pi's TUI shreds pasted multi-line text into " +
-      "one message per line.",
+      "Send a message to a judge child's SESSION — implemented as a RESUME: a new pi process is " +
+      "spawned with the same session id, so the child wakes with its full context and processes " +
+      "the message. Requires the child's process to have EXITED (a running child cannot be " +
+      "interrupted mid-turn; use review_close to kill one). Multi-line text is fine — it rides " +
+      "a file passed as an @file reference.",
     parameters: Type.Object({
-      paneId: Type.String({ description: "The pane id returned by review_spawn (e.g. %103)" }),
-      text: Type.String({ description: "Single-line message" }),
+      sessionId: Type.String({ description: "The session id returned by review_spawn" }),
+      text: Type.String({ description: "The follow-up message (any length; written to a file)" }),
+      repo: Type.Optional(Type.String({
+        description: "Absolute repo path (required once the session edited several repos)",
+      })),
     }),
-    async execute(_id, params, _signal) {
-      const paneId = String(params.paneId ?? "");
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const sessionId = String(params.sessionId ?? "");
       const text = String(params.text ?? "");
-      try {
-        const ok = sendMessage(paneId, text);
+      if (!sessionId) {
+        return { content: [{ type: "text", text: "review-gate: review_send rejected — the session id is empty." }], details: { sent: false }, isError: true };
+      }
+      if (!text.trim()) {
+        return { content: [{ type: "text", text: "review-gate: review_send rejected — the message is empty." }], details: { sent: false }, isError: true };
+      }
+      const target = resolveToolRepo(params.repo);
+      if (!target.ok) return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
+      const root = target.root;
+      const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+      if (!child) {
+        return { content: [{ type: "text", text: `review-gate: no registered judge child with session id ${sessionId}.` }], details: { sent: false }, isError: true };
+      }
+      if (judgeProcessAlive(child.child)) {
         return {
-          content: [{ type: "text", text: ok ? "review-gate: message sent." : "review-gate: send failed — is the pane still alive?" }],
-          details: { sent: ok },
-          ...(ok ? {} : { isError: true }),
-        };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `review-gate: send rejected — ${err instanceof Error ? err.message : String(err)}` }],
-          details: { sent: false },
+          content: [{ type: "text", text: `review-gate: judge session ${sessionId} is still RUNNING — it cannot be sent a message mid-turn. Wait for its exit (its wake will arrive), or review_close it first.` }],
+          details: { sent: false, running: true },
           isError: true,
         };
+      }
+      // RESUME: same session id, new message. The child wakes with its
+      // full context and continues.
+      try {
+        const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
+        const files = writeJudgeSpawnFiles({ repoRoot: root, role: child.role, agents, title: child.title, workDir: pathJoin(root, ".pi", "judge-sessions", `rg-${child.title}`) });
+        const spawned = spawnJudgeProcess({
+          role: child.role,
+          repoRoot: root,
+          sessionId,
+          sysPromptPath: files.sysPromptPath,
+          model: files.model,
+          sessionDir: child.sessionDir,
+          taskText: text,
+          parentSessionId: state.sessionId ?? undefined,
+          title: child.title,
+        });
+        if (!spawned.ok || !spawned.child) {
+          return { content: [{ type: "text", text: `review-gate: review_send resume failed — ${spawned.error ?? "no child"}` }], details: { sent: false }, isError: true };
+        }
+        // Rebind the child's live process + tee its output to the SAME logs
+        // (one stdout/stderr per session, not per round — resume appends).
+        child.child = spawned.child;
+        child.spawnedAt = new Date().toISOString();
+        try {
+          const outFd = openSync(child.stdoutPath, "a");
+          const errFd = openSync(child.stderrPath, "a");
+          (spawned.child.stdout as NodeJS.ReadableStream | null)?.on("data", (d: Buffer) => writeSync(outFd, d));
+          (spawned.child.stderr as NodeJS.ReadableStream | null)?.on("data", (d: Buffer) => writeSync(errFd, d));
+          spawned.child.on("close", () => { try { closeSync(outFd); closeSync(errFd); } catch { /* best-effort */ } });
+        } catch { /* logs are best-effort */ }
+        try {
+          if (spawned.child.pid) writeFileSync(child.pidPath, `${spawned.child.pid} ${new Date().toString()}\n`, "utf8");
+          spawned.child.on("exit", (code) => {
+            try { writeFileSync(child.exitCodePath, String(code ?? -1), "utf8"); } catch { /* best-effort */ }
+          });
+        } catch { /* best-effort */ }
+        rememberChildProcess(sessionId, spawned.child);
+        registerWatch(sessionId, child.title);
+        return { content: [{ type: "text", text: `review-gate: resumed judge session ${sessionId} with the message (context carried over).` }], details: { sent: true, resumed: true, sessionId }, };
+      } catch (err) {
+        return { content: [{ type: "text", text: `review-gate: review_send failed — ${err instanceof Error ? err.message : String(err)}` }], details: { sent: false }, isError: true };
       }
     },
   });
@@ -3194,53 +3200,42 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_read",
     label: "Read Judge Child",
     description:
-      "Read a judge child: its SESSION state (running / finished + exit code — from the child's own " +
-      "pid & exit-code files, not from its pane), its conclusion, its cwd, and any inbox questions. " +
-      "While the session runs you get the live pane screen; once it has ended you get the conclusion " +
-      "parsed from its session transcript (the last assistant text carrying a verdict fence) plus the " +
-      "tail of its stderr — the pane may already be gone, the transcript is not.",
+      "Read a judge child: its SESSION state (running / finished + exit code — from the live " +
+      "process and its pid/exit-code files), its stdout log (live tail while running), its " +
+      "conclusion parsed from the session transcript (the last assistant text carrying a " +
+      "verdict fence), and the tail of its stderr. The process may already be gone — the " +
+      "transcript and logs are not.",
     parameters: Type.Object({
-      paneId: Type.String({ description: "The pane id returned by review_spawn" }),
-      history: Type.Optional(Type.Integer({ description: "Scrollback lines before the visible screen (default 0)" })),
+      sessionId: Type.String({ description: "The session id returned by review_spawn" }),
+      history: Type.Optional(Type.Integer({ description: "Tail lines of the stdout log (default 200)" })),
     }),
     async execute(_id, params, _signal) {
-      const paneId = String(params.paneId ?? "");
-      const history = typeof params.history === "number" ? params.history : 0;
-      const child = [...childSessions.values()].flat().find((c) => c.paneId === paneId);
-      const cwd = paneCurrentPath(paneId);
-
-      // The SESSION decides liveness; the pane is only asked what it can show.
-      // An unregistered pane (spawned before a reload) has no artifacts to read
-      // — fall back to pane existence so the tool still answers.
-      const state = child
-        ? readJudgeSessionState({ pidPath: child.pidPath, exitCodePath: child.exitCodePath })
-        : undefined;
-      const running = state ? state.lifecycle === "running" || state.lifecycle === "unknown" : paneAlive(paneId);
-
-      let inbox = "";
-      if (child) {
-        try {
-          inbox = existsSync(child.inboxPath) ? readFileSync(child.inboxPath, "utf8") : "";
-        } catch { /* inbox is optional */ }
+      const sessionId = String(params.sessionId ?? "");
+      const history = typeof params.history === "number" ? params.history : 200;
+      const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+      if (!child) {
+        return { content: [{ type: "text", text: `review-gate: no registered judge child with session id ${sessionId}.` }], details: { found: false, alive: false, lifecycle: "unknown" as const, exitCode: undefined, hasVerdict: false }, isError: true };
       }
-
-      // A running child is best read live (the screen shows work in progress);
-      // an ended one is read from disk, because its pane is gone the moment it
-      // exits and `capture-pane` would return nothing at all.
-      const screen = running ? capturePane(paneId, { history }) : undefined;
-      const conclusion = child && !running ? readJudgeConclusion(child.sessionDir) : undefined;
-      const stderrTail = child && !running ? readStderrTail(child.stderrPath) : undefined;
-
-      const header = state
-        ? `review-gate: judge session ${child?.title ?? paneId} — ${state.lifecycle}` +
-          (state.exitCode !== undefined ? ` (exit ${state.exitCode})` : "") +
-          ` [pane ${paneId}]${cwd ? ` cwd=${cwd}` : ""}`
-        : `review-gate: pane ${paneId} alive=${running}${cwd ? ` cwd=${cwd}` : ""} (not a registered judge child)`;
-
+      const running = judgeProcessAlive(child.child);
+      const state = readJudgeSessionState({ pidPath: child.pidPath, exitCodePath: child.exitCodePath });
+      // Live output: tail of the stdout log (the process's stream is teed
+      // there continuously). Simple last-N-lines read (tailLogFile is a
+      // streaming tail for precommit, not a snapshot reader).
+      let stdoutTail: string | undefined;
+      try {
+        if (existsSync(child.stdoutPath)) {
+          const raw = readFileSync(child.stdoutPath, "utf8");
+          const lines = raw.split("\n");
+          stdoutTail = lines.length <= history ? raw : lines.slice(-history).join("\n");
+        }
+      } catch { /* stdout log is optional */ }
+      const conclusion = !running ? readJudgeConclusion(child.sessionDir) : undefined;
+      const stderrTail = !running ? readStderrTail(child.stderrPath) : undefined;
+      const header = `review-gate: judge session ${child.title} (${child.role}) — ${running ? "running" : state.lifecycle}` +
+        (state.exitCode !== undefined ? ` (exit ${state.exitCode})` : "") +
+        ` [session ${sessionId}]`;
       const body: string[] = [];
-      if (screen !== undefined) {
-        body.push(`--- pane output (${history > 0 ? `history ${history} + ` : ""}screen) ---\n${screen}`);
-      }
+      if (stdoutTail) body.push(`--- stdout (tail ${history}) ---\n${stdoutTail}`);
       if (conclusion) {
         body.push(
           conclusion.text !== undefined
@@ -3250,17 +3245,15 @@ export default function reviewGate(pi: ExtensionAPI) {
         );
       }
       if (stderrTail) body.push(`--- stderr (tail) ---\n${stderrTail}`);
-      if (screen === undefined && !conclusion) body.push("--- nothing to read (no pane, no recorded session) ---");
-      if (child && inbox) body.push(`--- inbox ---\n${inbox}`);
-
+      if (!stdoutTail && !conclusion) body.push("--- nothing to read yet (no stdout, no recorded session) ---");
       return {
         content: [{ type: "text", text: [header, ...body].join("\n") }],
         details: {
+          found: true,
           alive: running,
           lifecycle: state?.lifecycle,
           exitCode: state?.exitCode,
           hasVerdict: conclusion?.hasVerdict ?? false,
-          hasInbox: Boolean(child && inbox),
         },
       };
     },
@@ -3270,61 +3263,39 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "review_close",
     label: "Close Judge Child",
     description:
-      "Terminate a judge child's pi SESSION (its process group) and close the pane that displayed it, " +
-      "then drop it from the registry. Use it at task completion (before declare_done) or to rebuild a " +
-      "child with a fresh perspective. Idempotent: a child that already finished — its pane is gone the " +
-      "moment it exits — still closes successfully; its transcript and stderr stay on disk either way.",
+      "Terminate a judge child's pi PROCESS (SIGTERM to the process; the session file stays on disk " +
+      "for later inspection/resume) and drop it from the registry. Use it at task completion (before " +
+      "declare_done) or to rebuild a child with a fresh perspective. Idempotent: an already-finished " +
+      "child still closes successfully; its transcript and logs stay on disk either way.",
     parameters: Type.Object({
-      paneId: Type.String({ description: "The pane id returned by review_spawn" }),
+      sessionId: Type.String({ description: "The session id returned by review_spawn" }),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
     }),
     async execute(_id, params, _signal) {
-      const paneId = String(params.paneId ?? "");
-      // P2 (round-6): cancel the child's done-channel listener so no wake
-      const child = [...childSessions.values()].flat().find((c) => c.paneId === paneId);
-      if (child) {
-        watchRegistry.active.get(child.doneChannel)?.cancel();
-        watchRegistry.active.get(child.inboxChannel)?.cancel(); // round-7 Nit
+      const sessionId = String(params.sessionId ?? "");
+      const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+      if (!child) {
+        return { content: [{ type: "text", text: `review-gate: no registered judge child with session id ${sessionId}.` }], details: { closed: true, terminated: false, sessionId }, isError: false };
       }
-      // TERMINATE THE SESSION FIRST, THEN CLOSE ITS SCREEN.
-      //
-      // The launcher is the pane's process-group leader and pi runs as its
-      // child, so signalling the group is what actually ends the judge;
-      // killing the pane alone relies on tmux's SIGHUP reaching pi, and a
-      // wrapper that has already exited leaves nothing to hang up. Closing the
-      // pane afterwards is the backstop (and what removes the screen).
-      const terminated = child
-        ? terminateJudgeSession({ pidPath: child.pidPath, exitCodePath: child.exitCodePath })
-        // Not a registered child (e.g. the extension reloaded): there is no
-        // recorded session to terminate, only a pane to close.
-        : { signalled: false, reason: "no-pid" as const };
-      const ok = killPane(paneId);
+      // Cancel the exit watcher so no wake fires for a close we initiated.
+      watchRegistry.unregister(child.sessionId);
+      forgetChildProcess(child.sessionId);
+      const running = judgeProcessAlive(child.child);
+      if (running) {
+        try { (child.child as { kill?: (s?: string) => boolean } | undefined)?.kill?.("SIGTERM"); } catch { /* already gone */ }
+      }
       for (const [root, list] of childSessions) {
-        childSessions.set(root, list.filter((c) => c.paneId !== paneId));
+        childSessions.set(root, list.filter((c) => c.sessionId !== sessionId));
       }
       cancelChildWaitTimer();
-      // Idempotent BY CONTRACT: an already-finished child (nothing to signal,
-      // pane already gone) is a successful close, not an error. The reason is
-      // reported honestly — "already ended" and "could not be verified" are
-      // very different facts, and the second one means the pane close was the
-      // only thing that ended this judge.
-      const how = ((): string => {
-        switch (terminated.reason) {
-          case "signalled": return `session terminated (pid group ${terminated.pid})`;
-          case "finished": return "session had already exited (exit code on record)";
-          case "no-pid": return "session recorded no pid (never started, or already cleaned up)";
-          case "not-ours": return `recorded pid ${terminated.pid} is no longer this judge — not signalled`;
-          // TWO causes, and the message must not claim only the first: no start
-          // time was recorded, OR one was but it cannot be queried right now.
-          case "unverifiable": return `pid ${terminated.pid} could not be verified as this judge (its start time was not recorded, or cannot be queried now) — NOT signalled; closing the pane is what ends it`;
-          case "unsignalable": return `pid ${terminated.pid} could not be signalled`;
-        }
-      })();
+      const how = running
+        ? `session ${sessionId} terminated (SIGTERM)`
+        : `session ${sessionId} had already exited`;
       return {
-        content: [{ type: "text", text: `review-gate: ${how}; pane ${paneId} ${ok ? "closed" : "already gone"}.` }],
-        details: { closed: true, paneClosed: ok, sessionSignalled: terminated.signalled, reason: terminated.reason },
+        content: [{ type: "text", text: `review-gate: ${how}; transcript and logs stay at ${child.sessionDir}.` }],
+        details: { closed: true, terminated: running, sessionId },
       };
     },
   });
@@ -3334,8 +3305,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     label: "Prepare Review",
     description:
       "Compute the review unit (checkpoint baseline..HEAD), write the finding stream path and hand " +
-      "back the ready-made task text for the ONE reviewer of this round, plus the tmux spawn flow " +
-      "(review_spawn → review_send; the wake-up listener comes with the spawn). ALWAYS call this before spawning the reviewer — " +
+      "back the ready-made task text for the ONE reviewer of this round, plus the spawn flow " +
+      "(review_spawn; the wake-up listener comes with the spawn). ALWAYS call this before spawning the reviewer — " +
       "review no longer runs through subagents. One reviewer, one commit range: no split, one " +
       "reviewer — everything the reviewer judges is the whole change in baseline..HEAD. Call " +
       "review_checkpoint first: the reviewed range is defined by the last checkpoint sha.",
@@ -3462,11 +3433,6 @@ export default function reviewGate(pi: ExtensionAPI) {
       const goalText = goalForReview?.text;
       const goalTruncated = goalForReview?.truncated === true;
       const reviewTitle = `review-${runId.slice(-6)}`;
-      // Round-16 P2: the inbox question channel is embedded too — path and
-      // signal channel (inboxChannelFor(title), NEVER literal -inbox
-      // concatenation) so the child can ask without guessing.
-      const inboxPath = pathJoin(root, ".pi", "tmux-sessions", `rg-${reviewTitle}`, "inbox.jsonl");
-      const inboxChannel = inboxChannelFor(reviewTitle);
       const scopeNow = reviewScopeFor(root, st);
       // Round-18 polish gate: persist a supplied reason BEFORE building the
       // task, so the reviewer of THIS round sees the reason that authorized it.
@@ -3493,11 +3459,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         scopeNow.scope,
         { dir: sessionDirFor(ctx, cwd), id: st.sessionId ?? "unknown" },
         precommitBaselineFor(root, st),
-        // Round-16 P1: the done channel the reviewer will signal is EMBEDDED
-        // in the task text — the child never has to guess it, and the main
-        // session's listener (registered on the same derived channel) matches.
-        doneChannelFor(reviewTitle),
-        { path: inboxPath, channel: inboxChannel },
         // Round-18 polish gate: the reason for THIS round travels to the
         // reviewer, who judges whether the round deserves to exist.
         st.lastPolishReason,
@@ -3508,12 +3469,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       const lines = [
         `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
         `stream=${streamPath}`,
-        "Spawn the reviewer as a judge child (tmux pane), then send the task and register the wake-up:",
-        `- 建议 title: "${reviewTitle}" → done channel: ${doneChannelFor(reviewTitle)},inbox: ${inboxPath} (channel ${inboxChannel})（任务文本末尾已嵌入 done channel 与 inbox 提问指令；请用此 title 调 review_spawn，监听即与子会话信号匹配）`,
-        `- review_spawn({ role: "reviewer", title: "${reviewTitle}", repo: "${root}" }) → returns paneId + doneChannel`,
-        `- 把下面的任务文本写入文件，然后 review_send({ paneId, text: "读取 <task 文件> 并执行" })`,
-        "- 然后就等：done 与 inbox 的监听已由 review_spawn 自动注册，完成信号会主动唤醒本会话",
-        "  (review_watch 仅在需要自定义 label 时才调用，正常流程用不到)",
+        "Spawn the reviewer as a judge child (its own pi process), then send the task:",
+        `- 建议 title: "${reviewTitle}"（session id 由 review_spawn 按 role+repo 派生）`,
+        `- review_spawn({ role: "reviewer", title: "${reviewTitle}", repo: "${root}", task: <下面的任务文本> }) → 返回 sessionId；进程退出即完成，唤醒已自动注册`,
+        "- 提问:reviewer 输出 question fence 退出后,用 review_send({ sessionId, text: <答案> }) 恢复同一会话",
+        "- 然后就等：进程退出会主动唤醒本会话",
+        "  (review_watch 仅在需要自定义 label 或 reload 后重挂时才调用，正常流程用不到)",
         ...(goalTruncated
           ? [
               `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${pathJoin(root, LOOP_GOAL_RELPATH)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,
@@ -3598,13 +3559,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "prepare_adviser",
     label: "Prepare Adviser Brief",
     description:
-      "Hand back the ready-made task text for an `adviser` consultation on the CURRENT loop goal — the adviser runs as a tmux judge child (`review_spawn`), not as a subagent. " +
+      "Hand back the ready-made task text for an `adviser` consultation on the CURRENT loop goal — the adviser runs as its own pi process (`review_spawn`), not as a subagent. " +
       "Call this before dispatching `adviser`: the brief carries (a) the main session's transcript location " +
-      "for ON-DEMAND reading (as its own pi process the adviser does not inherit this " +
-      "conversation), (b) the artifact path where the adviser appends its conclusion, and (c) when a " +
-      "previous consultation of this goal exists, that conclusion plus the files changed since, so the " +
-      "adviser settles what already stands instead of re-arguing it from zero. First consultation of a " +
-      "goal is a full brief.",
+      "for ON-DEMAND reading (as its own pi process the adviser does not inherit this conversation), " +
+      "(b) the artifact path where the adviser appends its conclusion, and (c) when a previous " +
+      "consultation of this goal exists, that conclusion plus the files changed since, so the adviser " +
+      "settles what already stands instead of re-arguing it from zero. First consultation of a goal is a full brief.",
     parameters: Type.Object({
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
@@ -3695,26 +3655,19 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(previous ? { previous } : {}),
         changedFiles,
         ...(goalText ? { goalText } : {}),
-        // Round-16 P1: the done channel is EMBEDDED in the brief so the
-        // adviser never guesses it; spawn with the suggested title below.
-        doneChannel: doneChannelFor(`adviser-${goalHash.slice(0, 6)}`),
-        // Round-16 P2: inbox path + signal channel embedded too.
-        inboxPath: pathJoin(target.root, ".pi", "tmux-sessions", `rg-adviser-${goalHash.slice(0, 6)}`, "inbox.jsonl"),
-        inboxChannel: inboxChannelFor(`adviser-${goalHash.slice(0, 6)}`),
       });
       const adviserTitle = `adviser-${goalHash.slice(0, 6)}`;
-      const adviserInboxPath = pathJoin(target.root, ".pi", "tmux-sessions", `rg-${adviserTitle}`, "inbox.jsonl");
-      const adviserInboxChannel = inboxChannelFor(adviserTitle);
       const goalTruncated = goalForReview?.truncated === true;
       return {
         content: [{ type: "text", text:
           `adviser brief ready (${previous ? "incremental" : "full"}):\n` +
-          `- 建议 title: "${adviserTitle}" → done channel: ${doneChannelFor(adviserTitle)},inbox: ${adviserInboxPath} (channel ${adviserInboxChannel})（brief 末尾已嵌入 done channel 与 inbox 提问指令）\n` +
-          `- 提问接收端已由 review_spawn 自动注册(channel ${adviserInboxChannel});子会话发问时本会话会被唤醒\n` +
+          `- 建议 title: "${adviserTitle}"（session id 由 review_spawn 按 role+repo 派生）\n` +
+          `- review_spawn({ role: "adviser", title: "${adviserTitle}", task: <brief> }) 后进程退出即完成，唤醒自动注册\n` +
+          "- 提问:adviser 输出 question fence 退出后,用 review_send({ sessionId, text: <答案> }) 恢复同一会话\n" +
           "- 等待纪律:咨询期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于咨询结果的事才等。\n" +
           (goalTruncated ? `- 注意:brief 中的 loop goal 因长度被截断;落盘 task 文件时请用 read 读取 ${pathJoin(target.root, LOOP_GOAL_RELPATH)} 全文替换截断部分。\n` : "") +
           `\n${brief}` }],
-        details: { incremental: !!previous, artifactPath, changedFiles, title: adviserTitle, doneChannel: doneChannelFor(adviserTitle), inboxChannel: adviserInboxChannel },
+        details: { incremental: !!previous, artifactPath, changedFiles, title: adviserTitle },
       };
     },
   });
@@ -3759,25 +3712,17 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(prev?.draft ? { prevDraft: prev.draft } : {}),
         sessionDir: sessionDirFor(ctx, cwd),
         sessionId: st.sessionId ?? "unknown",
-        // Round-16 P1: the done channel is EMBEDDED in the task text so the
-        // auditor never guesses it; spawn with the suggested title below and
-        // the listener (doneChannelFor) matches the signal.
-        doneChannel: doneChannelFor(`goal-audit-${newHash.slice(0, 6)}`),
-        // Round-16 P2: inbox path + signal channel embedded too.
-        inboxPath: pathJoin(target.root, ".pi", "tmux-sessions", `rg-goal-audit-${newHash.slice(0, 6)}`, "inbox.jsonl"),
-        inboxChannel: inboxChannelFor(`goal-audit-${newHash.slice(0, 6)}`),
       });
       const auditTitle = `goal-audit-${newHash.slice(0, 6)}`;
-      const auditInboxPath = pathJoin(target.root, ".pi", "tmux-sessions", `rg-${auditTitle}`, "inbox.jsonl");
-      const auditInboxChannel = inboxChannelFor(auditTitle);
       return {
         content: [{ type: "text", text:
           `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n` +
-          `- 建议 title: "${auditTitle}" → done channel: ${doneChannelFor(auditTitle)},inbox: ${auditInboxPath} (channel ${auditInboxChannel})（任务文本末尾已嵌入 done channel 与 inbox 提问指令）\n` +
-          `- 提问接收端已由 review_spawn 自动注册(channel ${auditInboxChannel});子会话发问时本会话会被唤醒\n` +
+          `- 建议 title: "${auditTitle}"（session id 由 review_spawn 按 role+repo 派生）\n` +
+          `- review_spawn({ role: "goal-auditor", title: "${auditTitle}", task: <下面的任务文本> }) 后进程退出即完成，唤醒自动注册\n` +
+          "- 提问:auditor 输出 question fence 退出后,用 review_send({ sessionId, text: <答案> }) 恢复同一会话\n" +
           "- 等待纪律:审计期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于审计结果的事才等。\n\n" +
           `${taskText}` }],
-        details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle, doneChannel: doneChannelFor(auditTitle), inboxChannel: auditInboxChannel },
+        details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle },
       };
     },
   });
@@ -3983,7 +3928,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // break the tie). Plateau below stays for the stuck-on-same-finding case.
         loopArmed = false;
         note = ` Oscillation detected (${countOscillations(st.rounds)} READY→BLOCKED flips) — ` +
-          "the review is not converging. Escalate to the user or consult the adviser (a tmux judge child) " +
+          "the review is not converging. Escalate to the user or consult the adviser (a judge child process) " +
           "instead of burning more rounds.";
       } else if (isPlateaued(st.rounds, PLATEAU_ROUNDS)) {
         loopArmed = false;
@@ -4251,15 +4196,15 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       // Residual judge children (execution-model standard 5): a task is not
       // done while a judge child session is still open — its context may hold
-      // a pending verdict or an unanswered inbox question, and dropping it
-      // silently strands a pane (and its expensive model context). The round
+      // a pending verdict or an unanswered question, and dropping it silently
+      // strands a process (and its expensive model context). The round
       // must be closed out with record_review / review_close first. In loop
       // mode this is a hard requirement; explore/normal report it as
       // advisory via the branch below.
       for (const [root, list] of childSessions) {
         if (list.length > 0) {
           problems.push(`[${repoLabel(root)}] ${list.length} judge child session(s) still open (` +
-            `${list.map((c) => c.paneId).join(", ")}) — finish the round (record_review / review_close) ` +
+            `${list.map((c) => c.sessionId).join(", ")}) — finish the round (record_review / review_close) ` +
             "before declaring done");
         }
       }
@@ -5880,38 +5825,30 @@ export default function reviewGate(pi: ExtensionAPI) {
     // keeps doing deterministic work or blocks in bash on the three
     // criteria) — never idle.
     const childSnapshots: ChildSnapshot[] = [];
-    const doneChannelsByPane = new Map<string, string>();
+    const sessionIdsBySession = new Map<string, string>();
     for (const list of childSessions.values()) {
       for (const c of list) {
         childSnapshots.push({
           title: c.title,
-          paneId: c.paneId,
+          sessionId: c.sessionId,
           role: c.role,
           spawnedAt: c.spawnedAt,
-          // Criterion (b) reads the SESSION, not the pane: a judge that ended
-          // without signalling is detected by its own exit-code/pid records,
-          // which survive the pane that displayed it. `unknown` (nothing
-          // written yet) counts as alive — a just-spawned child is not "ended".
-          alive: ((): boolean => {
-            const s = readJudgeSessionState({ pidPath: c.pidPath, exitCodePath: c.exitCodePath });
-            return s.lifecycle === "running" || s.lifecycle === "unknown";
-          })(),
-          // Round-5 P1: this was NEVER supplied, so every child was timed from
-          // its spawn and any review longer than STALL_MOTION_MAX_AGE_SEC was
-          // declared silent — while it was still streaming findings. The
-          // session's own writes (transcript above all, plus stderr and inbox)
-          // are the evidence that it is working.
+          // Criterion (b): the live PROCESS's exitCode — an exited child is
+          // finished even if its artifacts were never written.
+          alive: judgeProcessAlive(c.child),
+          // Round-5 P1: activity is the evidence a child is still working —
+          // newest write among its transcript and stderr/stdout logs.
           lastActivityAt: lastActivityAt(
             { sessionDir: c.sessionDir, stderrPath: c.stderrPath },
-            [c.inboxPath],
+            [c.stdoutPath],
           ),
         });
-        doneChannelsByPane.set(c.paneId, c.doneChannel);
+        sessionIdsBySession.set(c.sessionId, c.title);
       }
     }
     if (childSnapshots.length > 0) {
       const childVerdict = classifyChildren(childSnapshots, Date.now());
-      const childNotice = buildChildWaitNotice(childVerdict, doneChannelsByPane);
+      const childNotice = buildChildWaitNotice(childVerdict, sessionIdsBySession);
       const notifyNow = childVerdict.terminated.length > 0 || Date.now() - lastChildNoticeAt >= CHILD_NOTICE_MIN_MS;
       if (childNotice) {
         if (!notifyNow) {
@@ -6062,13 +5999,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
     state.sessionId = sessionId;
-    // Round-18 (user ask): DIRECTED attention — register only after the
-    // session id is restored, otherwise myAttentionChannel() is undefined
-    // and a real parent-directed wake would be missed on startup/resume.
-    const attentionChannel = myAttentionChannel();
-    if (attentionChannel && sideEffectsEnabled()) {
-      watchRegistry.register(attentionChannel, "子会话用户注意");
-    }
 
     // Per-project overrides (sd0x-dev-flow R6): maxRounds is clamped to [3,50]
     // by the loader, so a forged config cannot make the cap unreachable.
@@ -6198,15 +6128,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // so a later subagent-session shutdown cannot leave the widget frozen).
     lastUiCtx = undefined;
     disarmUiRefreshTimer();
-    // Cancel every background channel listener — a reloaded/resumed session
-    // must not keep tmux wait-for processes alive, and a stale listener
-    // would wake the NEW session about an OLD child. The registry latches
-    // shutdown so a signal already in flight cannot re-arm an orphan
-    // listener (round-16 Nit); session_start calls reset().
+    // Cancel every background watcher — a reloaded/resumed session must not
+    // keep stale exit listeners, and a stale listener would wake the NEW
+    // session about an OLD child. The registry latches shutdown so a signal
+    // already in flight cannot re-arm an orphan listener (round-16 Nit);
+    // session_start calls reset().
     watchRegistry.shutdown();
-    // Judge children are tmux panes — they survive the session by design
-    // (the human can see and interrupt them), so shutdown only drops the
-    // registry, not the panes. A fresh session rebuilds it on demand.
+    // Judge children are independent pi processes — they survive the session
+    // by design (their session files persist, so a fresh session can resume
+    // or close them). Shutdown only drops the registry; the processes keep
+    // running and their transcripts stay on disk.
     childSessions.clear();
   });
 

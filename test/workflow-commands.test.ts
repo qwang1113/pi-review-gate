@@ -5,7 +5,6 @@ import { spawnSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { tmuxAvailable } from "../lib/tmux-session.ts";
 
 import {
   WORKFLOW_COMMANDS,
@@ -86,12 +85,12 @@ test("review prompt runs precommit FIRST and spawns the single reviewer (protoco
   );
   assert.doesNotMatch(prompt, /Do not run precommit unless the review becomes READY/,
     "the old concurrent-protocol sentence must be gone");
-  // ONE reviewer per round, spawned as its own tmux judge child (2026-08-27
-  // model: judge roles are tmux children; subagent dispatch is hard-blocked).
+  // ONE reviewer per round, spawned as its own pi process (2026-08-27
+  // model: judge roles are their own pi processes; subagent dispatch is hard-blocked).
   assert.match(prompt, /ONE reviewer/,
     "exactly one reviewer per round");
   assert.match(prompt, /review_spawn/,
-    "the reviewer must be spawned as a tmux judge child");
+    "the reviewer must be spawned via review_spawn");
   assert.doesNotMatch(prompt, /ALL IN THE SAME TURN \(async:true, never one after \s*the other\)/,
     "the two-reviewer serial/parallel framing must be gone");
 });
@@ -189,31 +188,11 @@ test("the review-loop skill keeps the single-review contract self-contained", ()
 });
 
 /**
- * The `tmux wait-for` FLAG SHAPES this package teaches.
- *
- * History (round-17): the docs recommended `while ! tmux wait-for -t 5 <chan>;
- * do :; done` as a timeout variant. That flag does not exist — each iteration
- * failed with `unknown flag -t` in ~7ms, so 120 iterations took 0.5s and only
- * LOOKED like waiting; the flagless form blocks properly (measured 3.015s to a
- * probe signal, then minutes-long real waits once it was fixed).
- *
- * FIVE guards were tried before this one, and the reviewer broke every one:
- * file-wide keyword presence → line-context keywords → NEGATIVE+RECOMMENDS
- * tokens → a tmux-executed probe → a per-file sentence snapshot with an
- * ever-growing extractor (inline spans, then fences, then wrapped spans, then
- * whole-file scans for scripts). Each round closed the routes the reviewer had
- * demonstrated while the CLASS of route stayed open, and the extractor drifted
- * into a markup parser living in a test file.
- *
- * This is the reviewer's own prescription, and it is strictly smaller: read an
- * explicit list of files, ignore markup entirely, and normalise every mention
- * to its FLAG SHAPE. Wrapping, quoting, fencing, interpolation and JSDoc stars
- * all collapse into the same shape, so there is nothing left to evade with
- * formatting — only a genuinely new flag shape fails, which is exactly the
- * thing worth a human's attention.
+ * 2026-08-28 (tmux removal): the judge handshake no longer teaches any tmux
+ * wait-for — completion is the process EXIT, questions are a fence + resume.
+ * The instruction files and prompt builders must not drift back into tmux
+ * signalling (the whole failure class the old flag-shape guard existed for).
  */
-
-/** Files that TEACH the handshake: the two instruction files + the prompt builders. */
 const HANDSHAKE_SOURCES = [
   "AGENTS.md",
   join("skills", "review-loop", "SKILL.md"),
@@ -225,103 +204,21 @@ const HANDSHAKE_SOURCES = [
   join("lib", "adviser-brief.ts"),
 ];
 
-/**
- * `tmux wait-for -S ${chan}(通过 bash 执行)` → `wait-for -S <arg>`.
- *
- * Only flags survive normalisation: an argument is `<arg>`, a numeric flag
- * operand is `<n>`, and anything after the first argument is prose. That is why
- * this version cannot be evaded by formatting — and why the JSDoc artifact the
- * reviewer found (`wait-for -S * <channel>`) collapses into the ordinary
- * `-S` shape instead of becoming a blessed "command" nobody could run.
- */
-function flagShape(mention: string): string {
-  const tokens = mention.replace(/^tmux\s+/, "").trim().split(/\s+/).filter(Boolean);
-  const shape = ["wait-for"];
-  let i = 1;
-  // ANY token starting with `-` is a flag token (round-17 P2, reviewer): the
-  // earlier /^-[A-Za-z]$/ rule read `-t5`, `--timeout 5` and `-St` as the
-  // CHANNEL, so they inherited the blocking form's blessing — fail-open, in the
-  // exact bug class this guard exists for, and `-t5` is the more idiomatic way
-  // to write the broken flag. Unknown spellings now fail CLOSED.
-  while (i < tokens.length && tokens[i]!.startsWith("-")) {
-    const flag = tokens[i]!;
-    const attached = /^(-{1,2}[A-Za-z][A-Za-z-]*?)(\d+)$/.exec(flag);
-    if (attached) {
-      shape.push(`${attached[1]} <n>`); // -t5
-      i += 1;
-    } else if (/^\d+$/.test(tokens[i + 1] ?? "")) {
-      shape.push(`${flag} <n>`); // -t 5 / --timeout 5
-      i += 2;
-    } else {
-      shape.push(flag); // -S, -St, --long
-      i += 1;
-    }
-  }
-  if (i < tokens.length) shape.push("<arg>");
-  return shape.join(" ");
-}
-
-/** Every mention, normalised, with where it sits. Markup is irrelevant here. */
-function shapesInHandshakeSources(root: string): Array<{ rel: string; line: number; shape: string; text: string }> {
-  const found: Array<{ rel: string; line: number; shape: string; text: string }> = [];
+test("the judge handshake never teaches tmux wait-for (process exit is the completion signal)", () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   for (const rel of HANDSHAKE_SOURCES) {
     const abs = join(root, rel);
     if (!existsSync(abs)) continue;
-    readFileSync(abs, "utf8").split("\n").forEach((line, i) => {
-      for (const m of line.matchAll(/tmux wait-for[^。;\n`]*/g)) {
-        const text = m[0].trim();
-        found.push({ rel, line: i + 1, shape: flagShape(text), text });
-      }
-    });
-  }
-  return found;
-}
-
-/**
- * The reviewed shapes. `-t <n>` is here ONLY because both instruction files
- * name it as the broken example — hence the count, which is what stops a new
- * `-t` usage from inheriting the warning's blessing (measured: without a count,
- * duplicating a blessed line passed).
- */
-const ALLOWED_SHAPES = new Map<string, number | "any">([
-  ["wait-for", "any"],            // prose mentioning the mechanism
-  ["wait-for <arg>", "any"],      // the BLOCKING form — the whole point
-  ["wait-for -S <arg>", "any"],   // the signal form (never blocks)
-  ["wait-for -t <n> <arg>", 2],   // the documented counterexample, twice
-]);
-
-test("every taught `tmux wait-for` matches a reviewed flag shape", () => {
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const mentions = shapesInHandshakeSources(root);
-  assert.ok(mentions.length > 0, "the handshake must still be taught somewhere");
-
-  const counts = new Map<string, number>();
-  for (const { rel, line, shape, text } of mentions) {
-    const budget = ALLOWED_SHAPES.get(shape);
-    assert.ok(budget !== undefined,
-      `${rel}:${line} teaches a NEW tmux wait-for shape \`${shape}\` (from \`${text}\`). ` +
-      "Check it against `man tmux` — there is no -t timeout flag, and the flagless " +
-      "form is the blocking one — then add the shape to ALLOWED_SHAPES.");
-    const used = (counts.get(shape) ?? 0) + 1;
-    counts.set(shape, used);
-    if (budget !== "any") {
-      assert.ok(used <= budget,
-        `${rel}:${line} is occurrence ${used} of shape \`${shape}\`, which is blessed ${budget}× ` +
-        "(it is a documented BROKEN example, not a form to use).");
-    }
-  }
-
-  for (const [shape, budget] of ALLOWED_SHAPES) {
-    if (budget === "any") continue;
-    assert.equal(counts.get(shape) ?? 0, budget,
-      `shape \`${shape}\` is blessed ${budget}× but occurs ${counts.get(shape) ?? 0}× — update ALLOWED_SHAPES`);
+    const text = readFileSync(abs, "utf8");
+    assert.doesNotMatch(text, /tmux wait-for/, `${rel} must not teach tmux wait-for`);
+    assert.doesNotMatch(text, /wait-for -S/, `${rel} must not teach the tmux signal form`);
   }
 });
 
-test("the waiting discipline still teaches the flagless blocking form", () => {
+test("the waiting discipline still teaches the process-exit check", () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   for (const rel of ["AGENTS.md", join("skills", "review-loop", "SKILL.md")]) {
-    assert.match(readFileSync(join(root, rel), "utf8"), /tmux wait-for\s+<(doneChannel|chan)>/,
-      `${rel} keeps the flagless blocking form`);
+    assert.match(readFileSync(join(root, rel), "utf8"), /进程退出|exit-code|session id 重新拉起/,
+      `${rel} keeps the process-exit completion contract`);
   }
 });

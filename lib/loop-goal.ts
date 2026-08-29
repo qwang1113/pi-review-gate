@@ -219,28 +219,12 @@ export function buildGoalAuditTask(
     prevDraft?: string;
     sessionDir?: string;
     sessionId?: string;
-    /**
-     * The done channel the auditor will signal (doneChannelFor(title)).
-     * Embedded so the child never has to GUESS the channel (round-16 P1:
-     * the protocol promises 'channel 由任务文本给出' but the task text
-     * did not carry it — the child guessed wrong and the main session was
-     * never woken).
-     */
-    doneChannel?: string;
-    /**
-     * The inbox question channel (path + signal channel), embedded so the
-     * auditor can ask the main session without guessing (round-16 P2).
-     * channel = inboxChannelFor(title), i.e. rg-<title>-inbox.
-     */
-    inboxPath?: string;
-    inboxChannel?: string;
   } = {},
 ): string {
   const lines = [
     "You are goal-auditor. Audit the draft loop goal below as the exit contract for this session.",
     "",
-    "You run as a tmux judge child: your own pi process, with none of the main",
-    "session's conversation. Everything you need is in this task text, plus the",
+    "You run as your own pi process (pi -p --session-id): your own session, with none of the main",
     "repository and the transcript pointer below.",
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
@@ -273,20 +257,10 @@ export function buildGoalAuditTask(
     // Round-17 (user ask): output discipline — auditor output beyond the
     // fence + 3 lines is wasted tokens.
     "输出纪律:只输出 fence + ≤3 行结论要点;不复述任务、不复述代码、不写过程叙事。",
-    ...(opts.doneChannel
-      ? [
-          "",
-          `完成信号(必须):当你完成本轮审计、输出最终 verdict 之后,运行 tmux wait-for -S ${opts.doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
-        ]
-      : []),
-    ...(opts.inboxPath && opts.inboxChannel
-      ? [
-          "",
-          `- 提问通道(需要决策/澄清任务时):把一行 JSON 追加到 ${opts.inboxPath}:`,
-          '  {"type":"question","text":"……"}',
-          `  然后运行 tmux wait-for -S ${opts.inboxChannel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)。提问后继续等待回复,不要自行假定答案。`,
-        ]
-      : []),
+    "",
+    "完成(必须):输出最终 verdict 后正常退出即可——进程退出即完成,主会话以你的输出为准,",
+    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
+    "主会话会带着答案用同一 session id 重新拉起你。",
   ];
   return lines.join("\n");
 }

@@ -379,6 +379,23 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
             (!Array.isArray(r.blockingFiles) || !r.blockingFiles.every((v) => typeof v === "string"))) {
           delete r.blockingFiles;
         }
+        // A persisted total must be a real count. `isPlateaued` only guards
+        // against `null` and then compares numerically, and EVERY comparison
+        // with NaN is false — so a NaN slipping in here would sail past the
+        // unparseable-total guard and let overlap alone declare a plateau.
+        // Anything that is not a finite non-negative number becomes `null`,
+        // which is the guard's own fail-closed value (round-15 P1). The
+        // sidecar is a file: a stale writer or a hand edit can put anything
+        // in it, so the parser's sanitizing is not enough on its own.
+        if (r.findingsTotal !== undefined && r.findingsTotal !== null &&
+            (typeof r.findingsTotal !== "number" ||
+              !Number.isFinite(r.findingsTotal) || r.findingsTotal < 0)) {
+          r.findingsTotal = null;
+        }
+        if (r.fingerprints !== undefined &&
+            (!Array.isArray(r.fingerprints) || !r.fingerprints.every((v) => typeof v === "string"))) {
+          r.fingerprints = [];
+        }
       }
     }
     if (parsed.lastPolishReason !== undefined) {

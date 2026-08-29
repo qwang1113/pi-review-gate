@@ -459,7 +459,6 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
     carryover: "Goal-auditor re-audit carryover — …",
     sessionDir: "/home/u/.pi/agent/sessions/--repo--",
     sessionId: "sess-9",
-    doneChannel: "rg-goal-audit-abc123-done",
   });
   assert.match(task, /You are goal-auditor/);
   assert.match(task, /Goal-auditor re-audit carryover/);
@@ -467,33 +466,16 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
   assert.match(task, /# 目标/);
   assert.match(task, /sess-9/);
   assert.match(task, /\{"gate":"READY"\|"BLOCKED"/);
-  // Round-16 P1: the done channel the child must signal is EMBEDDED in the
-  // task text — the protocol promises 'channel 由任务文本给出' and the task
-  // must actually carry it (it did not; the child guessed and the main
-  // session was never woken).
-  assert.match(task, /tmux wait-for -S rg-goal-audit-abc123-done/);
-  assert.match(task, /完成信号/);
+  // The completion contract is embedded: exit = done, question = resume.
+  assert.match(task, /进程退出即完成/);
+  assert.match(task, /同一 session id 重新拉起/);
+  assert.doesNotMatch(task, /tmux|wait-for|channel|inbox/);
   // First audit (no carryover, no session): plain template, no stale claims.
   const first = buildGoalAuditTask("# 目标");
   assert.doesNotMatch(first, /carryover/i);
   assert.doesNotMatch(first, /sess-/);
-  assert.doesNotMatch(first, /完成信号/); // no channel → no signal instruction
-
-test("buildGoalAuditTask: round-16 P2 inbox question channel is embedded when provided", () => {
-  const task = buildGoalAuditTask("# 目标\n\n标准一。", {
-    doneChannel: "rg-goal-audit-abc123-done",
-    inboxPath: "/repo/.pi/tmux-sessions/rg-goal-audit-abc123/inbox.jsonl",
-    inboxChannel: "rg-goal-audit-abc123-inbox",
-  });
-  assert.match(task, /提问通道/);
-  assert.match(task, /rg-goal-audit-abc123\/inbox\.jsonl/);
-  assert.match(task, /tmux wait-for -S rg-goal-audit-abc123-inbox/);
-  assert.doesNotMatch(task, /wait-for -S <channel>-inbox/);
-  const plain = buildGoalAuditTask("# 目标");
   // Round-17: output discipline is part of the task text.
   assert.match(task, /输出纪律:只输出 fence \+ ≤3 行结论要点/, "the discipline is pinned in the task");
-  assert.doesNotMatch(plain, /提问通道/);
-});
 });
 
 test("buildGoalAuditTask: the draft delta is computed mechanically and injected (round-4 P1)", () => {

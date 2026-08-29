@@ -25,10 +25,8 @@
  * takes only what is addressed to itself.
  */
 
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-
 import { writeFileAtomic } from "./atomic-write.ts";
 import { homedir } from "node:os";
 
@@ -113,7 +111,6 @@ export function sideEffectsEnabled(
   // alone left test silence resting on the incidental isTTY check.
   if (env.NODE_TEST_CONTEXT) return false;
   if (env.CI) return false;
-  if (!env.TMUX) return false;
   return isTTY === true;
 }
 
@@ -227,6 +224,9 @@ export function consumeAttention(selfSessionId: string, deps: AttentionDeps = {}
   return undefined;
 }
 
-function defaultSignal(channel: string): void {
-  execFileSync("tmux", ["wait-for", "-S", channel], { stdio: "ignore", timeout: 5_000 });
+function defaultSignal(_channel: string): void {
+  // tmux wait-for is gone (2026-08-28, process-based judges). The event FILE
+  // is the delivery: a parent session reads it on its own turn boundaries /
+  // polling (consumeAttention). No signal, no wake — attention stays a
+  // convenience, never a gate.
 }
