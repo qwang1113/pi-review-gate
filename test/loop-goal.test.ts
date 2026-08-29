@@ -125,10 +125,12 @@ test("no goal ⇒ the Step 0 directive: grill the user, then propose_loop_goal",
   assert.equal(text, LOOP_GOAL_MISSING_DIRECTIVE);
   assert.match(text, /Step 0/);
   assert.match(text, new RegExp(LOOP_GOAL_RELPATH.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  // USER REQUIREMENT: the goal is NEGOTIATED, not assumed — interview first,
-  // then submit it for the user's approval through the trusted tool.
-  assert.match(text, /GRILL the user first/);
-  assert.match(text, /recommended answer/);
+  // USER REQUIREMENT: the goal is NEGOTIATED, not assumed — ask the user
+  // through the ONE asking tool, then submit it for their approval.
+  assert.match(text, /ASK THE USER FIRST, with `ask_user\(\{questions\}\)`/);
+  assert.match(text, /recommendation/);
+  assert.doesNotMatch(text, /ONE question per turn/,
+    "the gate runs the interview now — the agent does not pace it");
   assert.match(text, /propose_loop_goal/);
   assert.match(text, /Writing that file yourself grants nothing/);
   // The engineering skills stay user-invoked accelerators, never a dependency.
@@ -329,10 +331,12 @@ test("loopGoalEditGate: loop/undecided require a confirmed goal; explore/normal 
 test("LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK names the path forward (negotiate → goal-auditor → dialog)", () => {
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /loop goal/);
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /propose_loop_goal/);
-  // The pre-review is MECHANICAL now: naming the auditor role alone would not
-  // tell the agent how the gate is actually satisfied.
+  // The pre-review is MECHANICAL now, and the gate RUNS it: the copy must name
+  // the one call that satisfies the gate, not the old three-step recipe.
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /goal-auditor/);
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /record_goal_prereview/);
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /judge_submit\(\{role:"goal-auditor"/);
+  assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /prepare_goal_audit|record_goal_prereview/,
+    "the agent no longer drives the audit by hand");
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /Simplified Chinese/);
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\.pi\/loop-goal\.md/); // names the real path
   assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\bblock(er|ed|ing|s)?\b/i, "the reason must not call itself a block");

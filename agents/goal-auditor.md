@@ -77,7 +77,12 @@ guessing when the draft hinges on a decision only the user can make.
   the user asked for, a non-goal that excludes it, a goal aimed at the wrong
   problem, a draft that is not in Simplified Chinese, or an internal
   contradiction that would make acceptance ambiguous.
-- **P2** — advisory polish. Does not block; the main agent may fold it in.
+- **P2 / Nit** — advisory polish, and it does NOT belong in `findings`. The
+  gate adjudicates mechanically: no open P0/P1 means PASS, so a non-blocking
+  entry only makes the agent explain why it is not acting on it. Say it in
+  your ≤3 conclusion lines instead, or not at all. Never dress a real blocker
+  as a P2 to avoid failing a draft — if the goal cannot be accepted with it
+  unfixed, it is a P1.
 
 ## Output contract (mechanically parsed — get this exactly right)
 

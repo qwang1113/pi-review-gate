@@ -2438,3 +2438,41 @@ test("review_checkpoint is fail-closed about the branch it commits on", () => {
 });
 
 
+
+test("judge_submit runs the whole submission chain, and cannot dead-end on it", () => {
+  const at = SRC.indexOf("async function submitForReview(");
+  assert.ok(at > 0, "the chain must exist");
+  const body = SRC.slice(at, at + 3500);
+  // Each step is the TOOL's own execute — one implementation, one set of
+  // mechanical checks.
+  assert.match(body, /callTool\("run_precommit", \{ mode: "full"/);
+  assert.match(body, /callTool\("review_checkpoint", \{ message, repo: input\.root \}/);
+  assert.match(body, /callTool\(\s*"prepare_review"/);
+  // A CLEAN worktree means the round is already frozen — treating it as a
+  // failure stranded the commit and dead-ended every retry (round-5 P1).
+  assert.match(body, /if \(commit\.isError\) \{/);
+  assert.doesNotMatch(body, /commit\.details\?\.committed === false/,
+    "a clean worktree must not fail the chain");
+  // The polish gate's reason must be able to travel, or a round after two
+  // READYs could never be submitted through the one sanctioned entry (round-5 P1).
+  assert.match(body, /input\.reason \? \{ reason: input\.reason \} : \{\}/);
+  const submitAt = SRC.indexOf('name: "judge_submit"');
+  const submit = SRC.slice(submitAt, submitAt + 5000);
+  assert.match(submit, /reason: Type\.Optional/, "judge_submit takes the polish reason");
+  assert.match(submit, /reason: params\.reason \? String\(params\.reason\) : undefined/,
+    "and passes it into the chain");
+});
+
+test("a judge's verdict is recorded from THIS round's output, never the transcript's history", () => {
+  const at = SRC.indexOf("async function recordJudgeConclusion(");
+  const body = SRC.slice(at, at + 1800);
+  // The transcript accumulates every round, so its last fence can belong to a
+  // PREVIOUS one — recording that would bind a READY to a tree nobody judged.
+  assert.match(body, /readRoundStdout\(child\.stdoutPath\)/);
+  assert.doesNotMatch(body, /readJudgeConclusion\(child\.sessionDir\)/,
+    "the whole-session transcript must not decide this round (round-5 P1)");
+  assert.match(body, /hasJudgeFence\(roundOutput\)/, "no fence this round ⇒ nothing is recorded");
+  assert.match(body, /repo: repoOfChild\(child\)/, "the record names its repo explicitly");
+  assert.match(body, /child\.role === "adviser"/, "advice is not a verdict");
+});
+

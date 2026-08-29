@@ -169,3 +169,34 @@ title 每轮不同（`rg-goal-audit-bbbff5` / `rg-goal-audit-6285aa`）→ sessi
 - ❌ `fresh: true` 杀旧进程、多 repo 并发 judge
 - ❌ BLOCKED 路径（reviewer 出 BLOCKED → 修复 → 复审）—— 本次 reviewer 直接 READY
 - ❌ `review_send` resume 语义（进程退出后同 id 带新消息）—— 本次没用它
+
+---
+
+## 修复记录（2026-08-29，「重门禁、轻 Agent」重构）
+
+逐条对应上面的问题。「机械」= 门禁自己做，不再依赖 agent 记得做。
+
+| 编号 | 处置 | 落在哪 |
+| --- | --- | --- |
+| P1 jsonl-fence 判据永不触发 | **已修**：判据改看本轮 `stdout.log`（fence 在那里是明文），三条判据（进程退出 / exit-code 落盘 / stdout 明文 fence）做成纯函数 `evaluateJudgeWait`，并由新工具 `review_wait({role})` 在门禁里跑——agent 不再手写 bash 三判据 | `lib/judge-lifecycle.ts`、`review_wait` |
+| P2 goal-auditor「打地鼠」 | **已修（机械裁决）**：`adjudicateGoalAudit` 一条规则——无 P0/P1 即 PASS，不论 findings 是 P2/Nit；返回文本明说「禁止仅因非阻塞 findings 再审一轮」，并显示**本 goal 的**审计轮次（`goalAuditRound`，批准或新会话后归零）。三个 judge 的提示词同步要求 findings 只写阻塞项 | `lib/judge-lifecycle.ts`、`agents/*.md`、`docs/judge-protocol.md` |
+| P2 首轮 fence 未识别导致重复 spawn | **已随 P1/B5 消失**：结论只从本轮 stdout 读，且 sessionDir 稳定后同一 role 一直是同一段会话；另外「同 role 进程仍在跑」现在是**明确拒绝本轮**，不会再出现「以为没结论就重开一个」 | `dispatchJudgeRound` |
+| P2 `/tmp` 会话切 loop 后编辑时序 | **已修**：`set_gate_mode("loop")` 与 `/gate-mode loop` 两条路径都会记录工作区与分支状态；未确认的脏工作区与未批准的 goal 一样机械拦截 edit/write | `recordSessionStartWorkspace`、`loopGoalEditBlockFor` |
+| P3 编辑锚点错 | **不修**（用户明确）：编辑精度属 agent 能力，门禁不管流程之外的事 | — |
+| P3 precommit 需手动配置 | **不修**：符合设计（按项目配置，`/gate-init` 有向导） | — |
+| P2-4 judge 跨轮 resume 失效（B5） | **已修**：workDir 改为按 role+repoHash 稳定派生（`.pi/judge-sessions/<role>-<repoHash>/`），title 只用于显示与 `runs/<ts>/`；`review_send` 的 resume 走同一条派生。实测同一 role 第二轮续接同一 jsonl（22 → 25 行） | `judgeWorkDirFor`、`dispatchJudgeRound` |
+
+同轮一并落地的用户需求（不在上面的 bug 列表里）：
+
+- **`judge_submit` 单一入口**：agent 只说「交给谁 + 审什么」，门禁管 sessionId /
+  目录 / 复用 / 监听 / 记录。reviewer 的一次调用内跑完 precommit → checkpoint →
+  prepare → 送审，任一步失败带原因打回；judge 退出时门禁自己记录 verdict。
+- **`ask_user` 单一提问入口**（取代 `pause_for_question`）：调用即暂停，门禁逐题
+  弹框、管 N / M 进度、支持「跳过后续」与「改在聊天里答」，答完一次性返回；
+  中断可续问；没有对话框的环境如实把问题交还给 agent。
+- **工作区与分支收归门禁**：`setup_workspace` 一次调用敲定脏工作区（三选一，
+  丢弃由门禁代执行）与基准/工作分支；`branchOps` 审计日志让 `declare_done` 知道
+  把哪条分支合回哪里；冲突则中止、记录、交还。
+- **precommit fail-fast**：任一检查失败立刻终止其余检查（每个 step 独立进程组，
+  杀得干净），被中止的 step 报 `skip` 而不是 `fail`。
+

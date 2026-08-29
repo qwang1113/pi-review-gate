@@ -183,6 +183,14 @@ what would settle it.
 ## Review output format
 Structure your findings clearly, citing file paths and line numbers:
 
+**`findings` carries BLOCKERS ONLY (P0/P1).** The verdict is adjudicated
+mechanically — no open P0/P1 means the round passes — so a non-blocking entry
+in `findings` is noise the main agent still has to triage and answer for. Put
+P2/Nit/optional observations in your notes instead, or leave them out. And do
+not use a P2 to soften something that really blocks: if it must be fixed
+before this ships, it is a P1 and belongs in `findings`.
+
+
 ```
 ## Review
 - Correct: what is already good (with evidence)

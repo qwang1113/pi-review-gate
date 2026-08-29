@@ -72,6 +72,7 @@ import {
   requiresFullPrecommit,
   type ShipCommandKind,
 } from "../lib/constants.ts";
+import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-directives.ts";
 import { defaultProjectConfig, globalConfigPath, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
@@ -97,6 +98,7 @@ import {
   judgeRunDirName,
   evaluateJudgeWait,
   clampWaitTimeout,
+  hasJudgeFence,
   adjudicateGoalAudit,
   WAIT_DISCIPLINE_HINT,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
@@ -3159,6 +3161,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     root: string;
     note: string;
     message?: string;
+    reason?: string;
     ctx: unknown;
   }): Promise<{ ok: true; taskText: string } | { ok: false; text: string }> {
     // 1. It has to build. A full lane, because a checkpoint that only ran the
@@ -3173,17 +3176,30 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     // 2. Freeze it. The reviewed unit is a commit, and the message says so —
     //    a checkpoint must be recognizable as one in the history.
+    //
+    //    A CLEAN worktree is not a failure here: it means this round is
+    //    already frozen (a retry after step 3 failed, or an agent that
+    //    committed through the tool itself). Treating it as one is what turned
+    //    a single refused prepare into a permanent dead end — the commit was
+    //    already in, so every retry died at this step. Only a REFUSAL
+    //    (isError) stops the chain.
     const message = checkpointMessage(input.message ?? input.note);
     const commit = await callTool("review_checkpoint", { message, repo: input.root }, input.ctx);
-    if (commit.details?.committed === false || commit.isError) {
+    if (commit.isError) {
       return {
         ok: false,
         text: "review-gate: 本轮未送审 — checkpoint 提交被拒。\n" + toolText(commit),
       };
     }
     // 3. Compute the range and the findings stream, and take the ready-made
-    //    reviewer task text.
-    const prepared = await callTool("prepare_review", { repo: input.root }, input.ctx);
+    //    reviewer task text. `reason` rides along for the polish gate: without
+    //    it a round after two READYs could never be submitted through the one
+    //    sanctioned entry point.
+    const prepared = await callTool(
+      "prepare_review",
+      { repo: input.root, ...(input.reason ? { reason: input.reason } : {}) },
+      input.ctx,
+    );
     if (prepared.details?.prepared === false || prepared.isError) {
       return {
         ok: false,
@@ -3402,17 +3418,42 @@ export default function reviewGate(pi: ExtensionAPI) {
    * record (no fence yet, an adviser, an unknown child) — the caller then
    * simply tells the agent to read the child.
    */
+  /** This round's raw output, or undefined when the log is unreadable. */
+  function readRoundStdout(path: string): string | undefined {
+    try {
+      return existsSync(path) ? readFileSync(path, "utf8") : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Which repo a judge child belongs to (the registry is keyed by root). */
+  function repoOfChild(child: JudgeChild): string {
+    for (const [root, list] of childSessions) {
+      if (list.some((c) => c.sessionId === child.sessionId)) return root;
+    }
+    return primaryRepoRoot;
+  }
+
+
   async function recordJudgeConclusion(sessionId: string): Promise<string | undefined> {
     try {
       const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
       if (!child || child.role === "adviser") return undefined; // an adviser's conclusion is advice, not a verdict
-      const conclusion = readJudgeConclusion(child.sessionDir);
-      if (!conclusion?.hasVerdict || !conclusion.text) return undefined;
+      // THIS ROUND's output only. The transcript accumulates every round of
+      // the role's session, so its "last verdict fence" can be the PREVIOUS
+      // round's — a judge that exited with a question, a crash or plain prose
+      // would then have last round's READY recorded against a tree nobody
+      // judged. The per-round stdout log contains this round and nothing else.
+      const roundOutput = readRoundStdout(child.stdoutPath);
+      if (!roundOutput || !hasJudgeFence(roundOutput)) return undefined;
       if (child.role === "reviewer") {
         // No live tool ctx here (this runs from a process-exit callback), so
-        // the last one the session bound is what persists the record.
+        // the last one the session bound is what persists the record. The repo
+        // is named explicitly: a multi-repo session refuses an unqualified
+        // record, and this record must not depend on which repo was edited last.
         if (!lastUiCtx) return undefined;
-        const result = await callTool("record_review", { reviewer_output: conclusion.text }, lastUiCtx);
+        const result = await callTool("record_review", { reviewer_output: roundOutput, repo: repoOfChild(child) }, lastUiCtx);
         return toolText(result);
       }
       return undefined; // goal-auditor: the draft it judged is the agent's to submit
@@ -3488,6 +3529,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           "reviewer only: the checkpoint commit message (English, Conventional Commits). The gate " +
           "adds the checkpoint marker itself; omit it and the gate writes one from your task text.",
       })),
+      reason: Type.Optional(Type.String({
+        description:
+          "reviewer only: why THIS round is worth a review when the polish gate is armed (two " +
+          "consecutive READYs, or the same file polished for three rounds). The gate refuses the " +
+          "round without it and tells you so.",
+      })),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
@@ -3524,7 +3571,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // reason — nothing half-submitted, no manual four-step dance.
       let reviewTask = task;
       if (role === "reviewer") {
-        const chain = await submitForReview({ root, note: task, message: params.message ? String(params.message) : undefined, ctx });
+        const chain = await submitForReview({
+          root,
+          note: task,
+          message: params.message ? String(params.message) : undefined,
+          reason: params.reason ? String(params.reason) : undefined,
+          ctx,
+        });
         if (!chain.ok) {
           return {
             content: [{ type: "text", text: chain.text }],
@@ -6950,8 +7003,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         (problems.length > 0
           ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
             "Continue: fix → judge_submit({role:\"reviewer\"}) → declare_done. " +
-            "Need the user (ambiguity, a design decision, missing access)? Call ask_user — it asks " +
-            "them and pauses the loop until they answer. Do not summarize; execute."
+            SETTLED_TOOL_REMINDER + " Do not summarize; execute."
           : `\n(completion continuation ${completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
             (goalOnly
               ? "The only open item is the unapproved loop goal. Interview the user with ask_user " +
@@ -7659,13 +7711,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       systemPrompt:
         systemPrompt +
         "\n\n## Review Gate (enforced)\n" +
-        "pi-review-gate is active. After editing code you MUST: " +
-        "(1) run the precommit runner FIRST (its lint:fix step edits files, and any edit " +
-        "invalidates a review binding — reviewing first throws that review away), " +
-        "(2) run an independent review, (3) call record_review with the FULL reviewer output, " +
-        "(4) fix all findings, then repeat from (1) until READY, (5) call declare_done. " +
-        "Batch related edits before starting a round: the loop is billed per round, not per line. " +
-        "git commit/push and gh pr create/edit are HARD-BLOCKED until gates pass.\n" +
+        "改完就送审：`judge_submit({role:\"reviewer\", task:<本轮改动说明>})` —— 门禁自己跑 " +
+        "precommit、提交 checkpoint、算审查范围、派 reviewer，并在它退出时机械记录 verdict。" +
+        "被打回就按 findings 修，然后再 judge_submit；READY 了就 `declare_done`（门禁自己把工作分支合回基准）。" +
+        "攒一批改动再送审：循环按轮计费，不按行。" +
+        "git commit/push 与 gh pr create/edit 在门禁通过前是硬拦截。\n" +
+        buildAgentDirectives() + "\n" +
         (sessionRepos.size > 1
           ? "Multi-repo session: this session has edited " + sessionRepos.size + " repositories (" +
             [...sessionRepos].join(", ") +

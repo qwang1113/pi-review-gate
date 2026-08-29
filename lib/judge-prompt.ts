@@ -90,9 +90,13 @@ export const JUDGE_COMMON_PROTOCOL = `## 运行形态（独立 pi 进程）
   （深模块、KISS/DRY/YAGNI、卫语句、命名自解释、不写聪明代码……）。
 
 ## 输出纪律（token 预算）
-- 主会话机械消费的只有：verdict JSON fence（record_review / record_goal_prereview
-  只解析 fence）与 findings 流文件（每行 JSON 证据）。fence 之外的 prose 不被
-  消费——写长 prose 是纯 token 浪费。
+- 主会话机械消费的只有：verdict JSON fence（门禁在你的进程退出时自己解析并
+  记录，主会话不转抄）与 findings 流文件（每行 JSON 证据）。fence 之外的
+  prose 不被消费——写长 prose 是纯 token 浪费。
+- **findings 只写阻塞项（P0/P1）**。不阻塞的意见（P2/Nit/可选优化）写进
+  notes 的要点里，或者干脆不写。两条理由：裁决是机械的（无 P0/P1 即通过），
+  非阻塞 findings 只会变成需要转交和解释的噪音；而且「用 P2 提一句」是逃避
+  真正该说的 P1 的常见方式——该阻塞就标 P0/P1，不该阻塞就别占 findings 位。
 - 最终输出格式固定：verdict fence 在最前；其后最多 5 行结论要点（每条一句）；
   findings 每条 ≤2 行（含 file/line/severity/issue）；notes ≤5 行，只写结论与
   关键证据。不复述任务、不复述代码、不写客套与过程叙事。详细证据放 findings

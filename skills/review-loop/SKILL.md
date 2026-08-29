@@ -78,15 +78,21 @@ criterion and three lines:
   observable facts prove this task is done, (2) how each one is verified (a
   command or a concrete observation), (3) what is explicitly out of scope.
 
-**Pre-review the draft goal (MECHANICAL, goal-auditor).** Before you
-submit a goal for approval, call `prepare_goal_audit` with the draft to get the ready-made
-auditor task (it carries the previous audit's carryover + draft delta on a re-audit), spawn
-the dedicated `goal-auditor` as its own pi process via `review_spawn` (read-only; see
-`agents/goal-auditor.md`) with that task,
-then record its FULL raw output with `record_goal_prereview`. The extension parses the auditor's JSON
-fence itself and `propose_loop_goal` REFUSES to show the user's approval dialog
-unless a PASS is recorded for the IDENTICAL text (bound by content hash). A
-FAIL means fix the objections and re-audit the revised text — it needs its own
+**Pre-review the draft goal (MECHANICAL, goal-auditor).** Before you submit a
+goal for approval, hand the draft to the gate:
+
+```
+judge_submit({ role: "goal-auditor", task: "<the full draft>" })
+```
+
+It builds the auditor's task (carrying the previous audit's findings and the
+draft delta on a re-audit), dispatches the dedicated `goal-auditor` as its own
+read-only pi process (see `agents/goal-auditor.md`), parses the verdict and
+records it. **Only P0/P1 block** — a READY carrying P2/Nit findings is a PASS,
+and non-blocking findings never buy another audit round. `propose_loop_goal`
+REFUSES to show the user's approval dialog unless a PASS is recorded for the
+IDENTICAL text (bound by content hash). A failed audit means fix the objections
+and submit the revised text the same way — it needs its own
 PASS. The goal text must be written in **Simplified Chinese**; identifiers,
 paths and code tokens stay English.
 **Shape**: task title · one-line intent · 3–7 checkable exit criteria ·
@@ -96,8 +102,8 @@ and `lib/x.ts` no longer reads the sidecar" is.
 
 **Staleness**: a goal file older than 24h may be left over from a previous
 session. The gate flags it in the prompt; confirm it against what the user is
-asking for now, and renegotiate it (grill → `goal-auditor` re-audit →
-`record_goal_prereview` → `propose_loop_goal`) if it no longer matches — the
+asking for now, and renegotiate it (`ask_user` →
+`judge_submit({role:"goal-auditor"})` → `propose_loop_goal`) if it no longer matches — the
 audit binds to the revised text, so any edit needs a fresh PASS.
 
 **Slicing the work to subagents**: turn each criterion (or vertical slice) into
@@ -158,35 +164,40 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    Feed it the real question, not your preferred answer. Fold its input in
    before you commit to an approach. Skip only for trivial, low-risk
    changes.
-2. **One round — precommit first, checkpoint, then the single review** — with the edits finished:
+2. **One round — ONE call** — with the edits finished:
 
-   - FIRST run the trusted precommit lane — `run_precommit` (fast for an
-     intermediate round, full for the final round before shipping) — and
-     confirm it PASSES before spending the expensive judge's time: a FAIL is
-     cheaper to fix before the review, and the reviewer must never be the
-     first one to find a test failure. **Do NOT manually run the full suite
-     or typecheck first**: the full lane runs lint/typecheck/build/the
-     complete suite in one shot, and its input cache reuses an unchanged set
-     in seconds. Use targeted tests for files you are actively editing; let
-     `run_precommit` be the single full gate (round-12 user ask).
-   - Then **`review_checkpoint`** — the ONLY commit allowed before a READY.
-     It commits everything with the precommit PASS in hand and records the
-     sha; the review unit is the immutable commit range `baseline..HEAD`.
-   - Then call `prepare_review`: it computes the range, writes the
-     finding-stream file and returns the ready-made task text — one reviewer per round.
-   - Spawn ONE reviewer as its OWN pi process (no tmux):
-     `review_spawn({ role: "reviewer", title: "review-<short>", repo, task: <任务文本> })` →
-     returns the session id (THE resume key). The process-exit watcher was
-     ALREADY registered by `review_spawn`, so completion WAKES this session
-     with no polling and no `review_watch` call (that tool is only for
-     re-registering after a reload or with a custom label).
+   ```
+   judge_submit({ role: "reviewer", task: "<what you changed this round>" })
+   ```
+
+   The gate runs the whole chain inside that call and sends the round back
+   with a reason if any step fails:
+
+   - **precommit (full lane)** — a FAIL is cheaper to fix before the review,
+     and the reviewer must never be the first to find a broken test. **Do NOT
+     manually run the full suite or typecheck first**: the lane runs
+     lint/typecheck/build/the complete suite in one shot, and its input cache
+     reuses an unchanged set in seconds. Use targeted tests for files you are
+     actively editing.
+   - **the checkpoint commit** — the only commit allowed before a READY; the
+     gate stamps the checkpoint marker on the subject and records where it
+     landed. The review unit is the immutable range `baseline..HEAD`.
+   - **the range + the findings stream + the reviewer's task text**.
+   - **the dispatch** — ONE reviewer, as its own pi process, with the exit
+     watcher registered. You never pass a session id, a title or a directory.
      The gate BLOCKS judge roles dispatched through
      `subagent`/`workflowScript`/`workflowScriptPath` entirely (that sandbox
      has no per-child isolation — the judge would land in your live worktree).
-   - Feed the reviewer's FULL raw output to `record_review` in ONE call — it
-     is the only verdict of this round. Worst-verdict semantics still apply if
-     multiple fences appear (the parser keeps the worst), and an absent
-     `docSync` means the round is incomplete (fails closed).
+
+   When the reviewer's process exits, the gate reads THIS round's output,
+   records the verdict itself and wakes you with it — you never copy a
+   verdict from one place to another. Worst-verdict semantics still apply if
+   multiple fences appear (the parser keeps the worst), and an absent
+   `docSync` means the round is incomplete (fails closed).
+
+   `run_precommit` / `review_checkpoint` / `prepare_review` / `record_review`
+   stay available as advanced entries for the rare case where you need one on
+   its own; the normal path is the single call above.
 
    **Why this is safe**: the verdict binds to the reviewed commit's TREE
    (content binding — squash/amend preserving the tree keeps the READY
@@ -251,10 +262,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    main session's transcript to read ON DEMAND when the conversation
    matters, instead of inheriting it.
 
-   Goal-auditor re-audits and adviser consultations work the same way:
-   `prepare_goal_audit` replies to a re-audit of a DIFFERENT draft with a
-   carryover block (previous verdict + findings verbatim) to paste into the
-   auditor's task; `prepare_adviser` hands back the adviser's brief with the
+   Goal-auditor re-audits and adviser consultations work the same way: the
+   gate builds a re-audit task carrying the previous verdict and findings
+   verbatim plus the draft delta, and the adviser's brief with the
    previous consultation's conclusion and the files changed since (full
    brief when there is no history).
 
@@ -414,15 +424,14 @@ gate re-arms on *every* edit (`review: READY → PENDING`,
   without re-reviewing; asking permission to continue; citing context length or
   token budget to skip review; outputting a completion-style summary. Brief
   status lines ("Fixed 3 issues, re-reviewing…") are fine.
-- EXCEPTION — genuine blockers: if progress is stopped by a question only the
-  user can answer (ambiguous requirement, a product decision, missing access),
-  put the COMPLETE question (options + your recommendation) in
-  `pause_for_question`'s `question` parameter — the user sees it verbatim, so do
-  NOT repeat it in your reply; write one short line pointing at it and END
-  the turn. Auto-continuation pauses until the user's next message (their reply
-  resumes the loop automatically); ship commands stay blocked throughout. Never
-  use it to ask permission to continue routine loop work — that stays
-  prohibited.
+- ASKING THE USER: anything that needs a human — an ambiguous requirement, a
+  product decision, scope, missing access — goes through `ask_user({questions})`.
+  It runs the interview (one question at a time with its N / M progress, your
+  options and recommendation, plus "answer in chat" and "skip the rest" for
+  them) and PAUSES the loop until the answers come back, all at once. Never
+  write the question into your reply and end the turn: that costs an iteration
+  and may not even read as a question. Ship commands stay blocked throughout,
+  and asking permission to continue routine loop work is still prohibited.
 - SCOPE — pre-existing changes: if the unmet gates demand coverage of dirty
   files or branch commits that PRE-DATE this session (work you never did),
   do NOT silently review the world and do NOT bypass — call

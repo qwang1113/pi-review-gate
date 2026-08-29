@@ -448,14 +448,11 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
 
 /** Ship-block copy for loop mode without a confirmed goal (L1 only). */
 export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
-  "loop goal not confirmed by the user — interview the user about what \"done\" means (ONE " +
-  "question per turn, labeled \"N of M\", each with your recommended answer — all at once only " +
-  "when the user asks for it), draft it in Simplified Chinese (identifiers, paths and code " +
-  "tokens stay English), call `prepare_goal_audit` with that exact draft and dispatch the " +
-  "`goal-auditor` as a tmux judge child with its ready-made task, then record its full raw output with " +
-  "`record_goal_prereview` — propose_loop_goal is refused without a recorded " +
-  "PASS for the identical text — then call propose_loop_goal so the USER can " +
-  "approve it in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
+  "loop goal not confirmed by the user — interview them with `ask_user` (it asks and pauses the " +
+  "loop until they answer), draft the goal in Simplified Chinese (identifiers, paths and code " +
+  "tokens stay English), submit it with `judge_submit({role:\"goal-auditor\", task:<draft>})` — the " +
+  "gate audits, adjudicates and records it — then call propose_loop_goal so the USER approves it " +
+  "in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
 /**
  * Edit-block copy for loop mode without a confirmed goal (L8 tool_call gate).
@@ -464,21 +461,20 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
  * of the edit gate is that the negotiation happens before the agent can
  * change a file. It also carries the goal pre-review step, which is MECHANICAL
  * since 2026-08-25 (it superseded the 2026-08-18 `adviser` merged rule): the
- * draft must be audited by the dedicated `goal-auditor` role and recorded via
- * `record_goal_prereview`, or propose_loop_goal refuses without a dialog.
+ * draft must pass a `goal-auditor` audit, and since 2026-08-29 the gate runs
+ * that audit itself — `judge_submit` dispatches it, adjudicates the verdict
+ * (only P0/P1 block) and records it, so propose_loop_goal has a PASS to match.
  */
 export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
   "review-gate: loop mode requires an approved loop goal BEFORE any edit/write call. " +
-  "Negotiate it first: interview the user about what \"done\" means (ONE question per turn, " +
-  "labeled \"N of M\", each with your recommended answer), write the goal in Simplified Chinese " +
-  "(technical identifiers, paths and code tokens stay English), call `prepare_goal_audit` with " +
-  "that exact draft, spawn the `goal-auditor` as a tmux judge child with its ready-made task, and record its " +
-  "full raw output with " +
-  "`record_goal_prereview` — propose_loop_goal refuses to show the user's dialog without a " +
-  "recorded PASS for the identical text (a FAIL means: fix the objections and re-audit). Then " +
-  "call propose_loop_goal so the USER approves it in a dialog. (If this session was never meant " +
-  "to run a full loop, classify it first with set_gate_mode: explore/normal do not require a " +
-  "goal.) Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
+  "Negotiate it first: ask the user with `ask_user` (it asks them and pauses the loop until " +
+  "they answer), write the goal in Simplified Chinese (technical identifiers, paths and code " +
+  "tokens stay English), then submit it with `judge_submit({role:\"goal-auditor\", task:<the " +
+  "full draft>})` — the gate audits it, adjudicates the verdict (only P0/P1 objections count) " +
+  "and records the PASS propose_loop_goal needs. A failed audit means: fix the objections and submit the revised " +
+  "draft the same way. Then call propose_loop_goal so the USER approves it in a dialog. (If this " +
+  "session was never meant to run a full loop, classify it first with set_gate_mode: " +
+  "explore/normal do not require a goal.) Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
 /**
  * Pure decision behind the L8 edit gate: may an edit/write call pass in the
@@ -555,21 +551,20 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "EXIT CONTRACT: the checkable facts that mean the task is done and the loop may end. It is " +
   "NOT yours to assume — a self-written contract lets you grade yourself against your own " +
   "guess, and a leftover file from a previous task is someone else's contract.\n" +
-  "1. GRILL the user first. Unless the user asked for them all at once, ask ONE question per " +
-  "turn and label it with its position — \"N of M\" — so the user always knows the progress; " +
-  "give your own recommended answer and wait for the reply before asking the next. Their " +
-  "answers open the next round; stop when nothing is left silently assumed. Facts are YOUR job " +
-  "(read the repo, run tools) — only decisions go to the user. Sized to the change: a one-line " +
-  "bugfix is one question, not a questionnaire.\n" +
+  "1. ASK THE USER FIRST, with `ask_user({questions})`: it runs the interview (one question at a " +
+  "time, its N / M progress, your options and recommendation, 'answer in chat' and 'skip the " +
+  "rest' for them) and pauses the loop until the answers come back — all of them at once. " +
+  "Facts are YOUR job (read the repo, run tools); only decisions go to the user. Sized to the " +
+  "change: a one-line bugfix is one question, not a questionnaire. Later questions that depend " +
+  "on an earlier answer are a SECOND ask_user round, not a guess.\n" +
   "2. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
   "tokens stay English): task title, one-line intent, 3–7 checkable exit criteria, non-goals, " +
   "ISO date.\n" +
-  "3. PRE-REVIEW it mechanically: call `prepare_goal_audit` with the draft to get the ready-made " +
-  "auditor task (it carries the carryover + draft delta when this is a re-audit of a revised " +
-  "draft), spawn the dedicated `goal-auditor` as a tmux judge child with that task, then record its FULL " +
-  "raw output with `record_goal_prereview`. The " +
-  "extension parses the auditor's JSON fence itself — a FAIL means fix the objections and " +
-  "re-audit (the revised text needs its own PASS, the record binds to content).\n" +
+  "3. Submit it for audit: `judge_submit({role:\"goal-auditor\", task:<the full draft>})`. The gate " +
+  "builds the auditor's task (with the carryover and the draft delta when this is a re-audit), " +
+  "dispatches it, adjudicates the verdict — only P0/P1 block, non-blocking findings never buy " +
+  "another round — and records the PASS. BLOCKED means: fix the objections and submit the " +
+  "revised draft the same way.\n" +
   "4. Then call `propose_loop_goal` with the PASSED text. It refuses without a matching PASS. " +
   "The EXTENSION shows it to the user for " +
   "approval and writes `" + LOOP_GOAL_RELPATH + "` itself. Writing that file yourself grants " +
@@ -581,7 +576,8 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "write-capable subagents run SERIALLY in this worktree (their edits change the worktree, so a " +
   "review recorded before them can no longer ship, and concurrent writers would keep invalidating " +
   "the binding between precommit and review), read-only subagents may run in parallel. You stay " +
-  "the writer of record: you run precommit, you run the review, you fix the findings. " +
+  "the writer of record: `judge_submit({role:\"reviewer\"})` runs precommit, the checkpoint and the " +
+  "review for you; you fix the findings. " +
   "`adviser` advises against the goal; `reviewer` accepts against it, criterion by criterion.";
 
 /**

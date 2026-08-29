@@ -14,31 +14,35 @@ default, make it safe by default rather than adding a switch.
 **Judge roles run as their own pi processes** — the review is the only parallel
 loop, and each round runs in its OWN non-interactive pi process (`pi -p`
 with a deterministic `--session-id`), spawned by the extension itself
-(`review_spawn`). The judge child loads NO review-gate extension and runs with
+(`judge_submit`). The judge child loads NO review-gate extension and runs with
 The judge child loads NO review-gate extension and runs with
 `--exclude-tools edit,write`; its session id is DETERMINISTIC per role+repo,
 so re-spawning with the same `--session-id` continues the same session — its
 context is reused across rounds until a READY lands. Each review round is ONE
 reviewer over the WHOLE change:
 
-- **Review → judge child process** (`review_checkpoint` → `prepare_review` →
-  `review_spawn` → `record_review`；进程退出的监听由 `review_spawn`
-  自动注册，`review_watch` 只在需要自定义 label 或 reload 后重挂时才用）。You
-  commit the change as a checkpoint FIRST (`review_checkpoint` — the only
-  commit allowed before a READY; it requires a full precommit PASS). The
+- **Review → ONE call**: `judge_submit({role:"reviewer", task:<what you
+  changed this round>})`. The gate runs the whole chain itself — full
+  precommit, the checkpoint commit (it stamps the checkpoint marker), the
+  `baseline..HEAD` computation, the dispatch — and any step that fails sends
+  the round back with the reason instead of leaving it half-submitted. The
   full precommit ALREADY ran typecheck + build + the complete suite on that
-  exact content — **never manually re-run the full suite or `tsc`** before a
-  checkpoint (the runner caches by input: unchanged content reuses the
-  recorded PASS in seconds). Develop with targeted tests only; let
-  `run_precommit` be the single full gate. The
-  reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
+  exact content — **never manually re-run the full suite or `tsc`** before
+  submitting (the runner caches by input: unchanged content reuses the
+  recorded PASS in seconds). Develop with targeted tests only.
+  The reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
   starts at the last REVIEWED commit, so a chain of checkpoints since the
   last READY is all covered (round-9 P1); there is no second reviewer of
-  any kind. `record_review` verifies HEAD is still the reviewed commit (a
-  new checkpoint after prepare ⇒ STALE ⇒ BLOCKED) and binds a READY to the
-  reviewed commit's TREE (content binding — squash preserves it); the ship
-  gates additionally refuse content-changing commits after the reviewed one
-  (unreviewed content can never ship).
+  any kind. When the judge's process exits, the gate reads THIS round's
+  output, records the verdict itself and wakes you with it — you never carry
+  a verdict from one tool to another. The recording keeps every mechanical
+  check: HEAD must still be the reviewed commit (a new checkpoint after
+  prepare ⇒ STALE ⇒ BLOCKED), and a READY binds to the reviewed commit's TREE
+  (content binding — squash preserves it); the ship gates additionally refuse
+  content-changing commits after the reviewed one (unreviewed content can
+  never ship). `run_precommit` / `review_checkpoint` / `prepare_review` /
+  `record_review` stay registered as advanced entries for the rare case where
+  you need one on its own.
 - **No decompose, no module loop, no wave daily.** The module-planning
   machinery and its wave tools were removed 2026-08-26. Large tasks are
   still sliced by YOU into sequential rounds of the same single review
@@ -48,9 +52,15 @@ Detail: `docs/execution-model.md` + `docs/judge-protocol.md`; runtime
 contract: `lib/judge-process.ts` + `lib/judge-prompt.ts`.
 
 The review loop is AGENT-DRIVEN: you start it yourself once edits
-are complete (one `prepare_review` → one spawn → one `record_review`) — the
-slash commands are only optional explicit triggers, never the expected
-entry. The user approves at one point only: the loop goal.
+are complete (one `judge_submit`) — the slash commands are only optional
+explicit triggers, never the expected entry. The user is asked at two points
+only: `ask_user` (the ONE way to reach them — it runs the interview and
+pauses the loop) and the loop-goal approval dialog.
+
+Where work lands is the gate's business too: `setup_workspace` settles a
+dirty worktree and creates this session's work branch (a commit may only land
+on it), and `declare_done` merges that branch back into the base the user
+confirmed — a conflict stops it, records the files and hands them to you.
 
 ## Git workflow guardrails
 
@@ -199,24 +209,25 @@ exists; it is NOT a runtime selector and does NOT change the one-reviewer
 rule. A single reviewer is the norm, and no Note is required about it.
 (a) **Goal pre-review — MECHANICALLY ENFORCED.** The draft goal must pass an
 audit by the dedicated `goal-auditor` role before the user is ever asked to
-approve it, and this is no longer a protocol the agent could skip:
-`record_goal_prereview` records the auditor's JSON fence (PASS ⇔ a `READY`
-verdict), bound to the sha256 of the audited text, and `propose_loop_goal`
+approve it, and the gate runs that audit itself: `judge_submit({role:
+"goal-auditor", task:<the full draft>})` builds the auditor's task, dispatches
+it, adjudicates the verdict and records it. The adjudication is one rule —
+**only P0/P1 block** — so a READY carrying P2/Nit findings is a PASS and
+never buys another audit round (B2: the agent used to volunteer one). The
+record is bound to the sha256 of the audited text, and `propose_loop_goal`
 refuses — without rendering any dialog — unless that PASS matches the
-submitted text exactly. A FAIL means: fix the objections and re-audit; the
-revised text needs its own PASS (the record binds to content). The goal text
-must be written in **Simplified Chinese** (identifiers, paths and code tokens
-stay English) — the auditor blocks a draft that is not.
+submitted text exactly. A failed audit means: fix the objections and submit
+the revised draft the same way (it needs its own PASS — the record binds to
+content). The goal text must be written in **Simplified Chinese** (identifiers,
+paths and code tokens stay English) — the auditor blocks a draft that is not.
 (b) **Every re-review carries the previous round's conclusion — MECHANICALLY**:
 the goal-auditor's re-audit gets the old draft + its own objections + what
-changed (`record_goal_prereview` persists every audit's verdict, findings
-verbatim and the judged draft; `prepare_goal_audit` — called BEFORE
-dispatching the auditor — returns the ready-made task text carrying the
-previous verdict + findings + previous draft and the mechanically computed
-draft delta); round N+1 gets the
-previous verdict and findings (the gate injects them as the 'Review scope
-for this round' block, now embedded in `prepare_review`'s ready-made task
-text). Settled-and-unchanged material gets a consistency scan, not a
+changed (the gate persists every audit's verdict, findings verbatim and the
+judged draft, and builds the re-audit task with that carryover plus the
+mechanically computed draft delta); round N+1 of a code review gets the
+previous verdict and findings the same way (the 'Review scope for this round'
+block in the reviewer's task text). Settled-and-unchanged material gets a
+consistency scan, not a
 re-derivation — it never narrows what a reviewer may look at, and a settled
 conclusion may always be reopened with evidence. This is the INCREMENTAL
 review contract: first round full, later rounds focused on the increment.
@@ -227,44 +238,42 @@ to grep on demand. `prepare_adviser` hands back the adviser's ready-made
 brief: transcript pointer + a conclusion artifact the adviser appends to,
 plus — from the second consultation of a goal on — the previous conclusion
 and the files changed since (no history ⇒ full brief).
-(c) **The reviewer judges a COMMIT RANGE, and findings stream.** Call
-`prepare_review` AFTER the checkpoint — it computes `baseline..HEAD` (the
+(c) **The reviewer judges a COMMIT RANGE, and findings stream.** The chain
+inside `judge_submit` computes `baseline..HEAD` (the
 immutable commits under review) and a finding-stream file. Inside its own
 copy a reviewer SHOULD verify by doing — mutation analysis included — and
 must restore before finishing. Because the reviewed range is immutable,
 **you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
 that carry evidence (confirm each in the code first), leave Nits for the
-verdict. WAITING-WINDOW DISCIPLINE (v4): (1) 有可实现的确定性工作(代码/测试/
-文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后
-才阻塞等待——在**一次 bash 调用**里同时托管三条判据:进程是否已退出
-(`test -s <workDir>/exit-code`——崩溃的子会话可能来不及写 exit-code,它同样算已结束——
-主会话按「记录的那个进程是否还在」判定,见 lib/judge-session.ts),
-以及它的 session jsonl 里是否已出现 verdict fence(子会话已产出结论但进程未退出是
-实测过的失败模式);任一命中即结束等待并继续。(3) **禁止**用结束 turn 把
-唤醒责任交给子会话——子会话可能报错/崩溃/永远不退,而主会话是门禁的
-最后监督者,门禁未通过前不得停止自动循环(存活不变量);`agent_settled` 会
-注入托管等待指令,但主动托管远比被动拉起可靠。
-The verdict arrives through the process EXIT and wakes this
-session (the watcher `review_spawn` registered for you); the reviewer may ask
-questions by outputting a question fence and exiting — answer by resuming the same session id.
+verdict. WAITING-WINDOW DISCIPLINE: (1) 有可实现的确定性工作(代码/测试/
+文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后再调
+`review_wait({role})`——门禁在里面跑三条判据(进程退出 / exit-code 落盘 /
+本轮 stdout 里出现明文 fence,任一命中即返回)并把已读结论带回来,不需要你
+手写 bash;(3) **禁止**用结束 turn 把唤醒责任交给子会话——子会话可能报错/
+崩溃/永远不退,而主会话是门禁的最后监督者,门禁未通过前不得停止自动循环
+(存活不变量)。
+The verdict arrives through the process EXIT: the gate reads THIS round's
+output, records it and wakes this session with the result. The reviewer may ask
+questions by outputting a question fence and exiting — answer by submitting the
+same role again (`judge_submit` resumes the session, context intact).
 (d) **The judge child runs as its own pi process — MECHANICALLY ENFORCED.**
-`review_spawn` runs the judge as `pi -p --session-id <id>` (non-interactive,
+`judge_submit` runs the judge as `pi -p --session-id <id>` (non-interactive,
 no tmux); a judge role dispatched
 through `subagent` / `workflowScript` / `workflowScriptPath` is HARD-blocked
 (the workflow sandbox has no per-child isolation, so the judge would land in
 one shared cwd — your live worktree, the exact failure this ends). The
-single reviewer is one `review_spawn` call per round. **Singleton per role,
-reused across rounds**: `review_spawn` does NOT spawn a new session every round —
-an alive same-role child in the same repo is REUSED (that is how the judge's
-context carries over until a READY — the session id is deterministic per role+repo,
-so a re-spawn continues the same session), children whose PROCESS has ended are
-dropped first, and
-`fresh: true` kills the old process before spawning a new one. `record_review`
-withholds a READY unless the round was PREPARED (a registered
-`baseline..HEAD` target) and the verdict carries the child's `cwd` (measured
-with `pwd`, a required field of the verdict schema). While a judge child is
-open, `declare_done` requires closing it out (`record_review` /
-`review_close`).
+single reviewer is one `judge_submit` call per round; you never pass a session
+id, a title or a directory — the gate derives all three from role+repo.
+**One session per role, continued across rounds**: the session id is
+deterministic per role+repo, so the next round re-opens the SAME transcript
+(that is how a judge's context carries over until a READY). A role whose
+process is still RUNNING refuses the new round rather than dropping it
+(a non-interactive judge reads its task once, at spawn); `fresh: true` kills
+it first. The recording withholds a READY unless the round was PREPARED (a
+registered `baseline..HEAD` target) and the verdict carries the child's `cwd`
+(measured with `pwd`, a required field of the verdict schema). While a judge
+child is open, `declare_done` requires closing it out (its verdict is
+recorded on exit, or `review_close({role})`).
 
 ### Read-only exploration — parallel-safe
 

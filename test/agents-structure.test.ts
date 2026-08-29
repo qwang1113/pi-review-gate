@@ -208,20 +208,23 @@ test("SKILL.md and AGENTS.md document the MECHANICAL goal pre-review (goal-audit
     // refusal — a doc that only says "consult someone first" would describe
     // the retired, skippable rule.
     assert.match(src, /goal-auditor/, `${file} must name the dedicated goal-auditor role`);
-    assert.match(src, /record_goal_prereview/, `${file} must name the tool that records the audit`);
+    // The gate RUNS the audit now, so the docs must name the one call that
+    // does it — naming the internal recording tool would describe a step the
+    // agent no longer performs.
+    assert.match(src, /judge_submit\(\{\s*role:\s*"goal-auditor"/, `${file} must name the call that audits the draft`);
     assert.match(src, /propose_loop_goal/i, `${file} must reference propose_loop_goal`);
     // Scoped to the PRE-REVIEW passage, not the whole file: a file-wide match
     // for "refuses" or "Simplified Chinese" is satisfied by unrelated prose
     // elsewhere, so deleting the rule itself would leave these green (the same
     // "a bare match is vacuous" standard this file already applies below).
-    // Anchored on the RECORDING TOOL — the token that only appears where the
+    // Anchored on the AUDIT CALL — the token that only appears where the
     // mechanical rule is described ("goal-auditor" alone also names the role in
-    // model-tier tables and role rosters). A file may mention the tool more
+    // model-tier tables and role rosters). A file may mention the call more
     // than once, so EVERY occurrence gets a window and the rule must hold in at
     // least one of them: that keeps the assertion honest (deleting the rule
-    // fails it) without breaking when the tool is referenced elsewhere.
+    // fails it) without breaking when the call is referenced elsewhere.
     const windows: string[] = [];
-    for (let i = src.indexOf("record_goal_prereview"); i !== -1; i = src.indexOf("record_goal_prereview", i + 1)) {
+    for (let i = src.indexOf("goal-auditor\""); i !== -1; i = src.indexOf("goal-auditor\"", i + 1)) {
       windows.push(src.slice(Math.max(0, i - 1500), i + 2000));
     }
     assert.ok(windows.length > 0, `${file} must contain the pre-review passage`);
@@ -329,15 +332,16 @@ test("REGRESSION: every re-review must carry the previous round's conclusion", (
   assert.match(reviewer, /reopen it/i);
 });
 
-test("AGENTS.md and SKILL.md make judge roles tmux children — the only review path", () => {
-  // 2026-08-27 model: judge roles run as their own pi processes in tmux
-  // panes (review_spawn); subagent dispatch of a judge role is HARD-blocked.
+test("AGENTS.md and SKILL.md make judge roles their own pi processes — the only review path", () => {
+  // 2026-08-29 model: judge roles run as their own non-interactive pi
+  // processes, dispatched by the gate through judge_submit; subagent dispatch
+  // of a judge role is HARD-blocked.
   for (const file of [AGENTS_MD, SKILL_MD]) {
     const src = readFileSync(file, "utf8");
     assert.match(
       src,
-      /tmux|review_spawn/i,
-      `${file} must declare the tmux judge-child execution path`,
+      /judge_submit/,
+      `${file} must declare the judge-child execution path`,
     );
     assert.match(
       src,

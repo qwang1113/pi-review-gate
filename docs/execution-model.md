@@ -47,9 +47,13 @@
   `exit-code`（**存在**即"已结束"的权威事实）、`stdout.log`、`stderr.log`。
   `lib/judge-session.ts` 的读取逻辑（exit-code 优先、pid 身份三态判定）
   保留，用于**主会话重启后**按 pid 文件接管/清扫孤儿。
-- **复用**（单例 per role per repo）：同 role 且进程存活 ⇒ 不新 spawn，
-  沿用同一 session id（上下文延续）；`fresh: true` 先 SIGTERM 旧进程。
-  已结束的进程先清出 registry。
+- **一轮只能交给一个空闲的 role**：同 role 进程仍在跑 ⇒ 本轮**拒绝受理**
+  （非交互 judge 只在 spawn 时读一次任务，没有中途投递的通道；假装受理
+  就会让主会话等一个从未送达的轮次）。等它退出后再提交，或 `fresh: true`
+  先 SIGTERM 旧进程。
+- **上下文复用靠 session，不靠进程**：已结束的进程先清出 registry，下一轮
+  用同一个 session id 重新 spawn —— pi 追加进同一个 jsonl，上下文原样延续。
+  「是否续接」由该 role 的 sessionDir 里是否已有 transcript 决定。
 - **孤儿接管**：主会话重启后 registry 重建，按 `.pi/judge-sessions/`
   下的 pid/exit-code 文件判定旧进程是否还活着，活着的可继续（同 id
   resume），死了的清理。
@@ -61,12 +65,12 @@
   deliverAs: "steer" })` 主动唤醒主会话——不轮询。
 - **提问**：judge 把问题作为**最后一个 fenced JSON 输出**并退出
   （`{"question": "...", "context": "..."}`）；主会话读到 question fence
-  后带着答案用**同一个 session id** 重新拉起（review_send = resume），
+  后带着答案用**同一个 session id** 重新拉起（再 `judge_submit` 同一 role 即可），
   上下文原样延续。没有 inbox 文件、没有 channel。
 - **流式 findings**：追加到 `.pi/review-stream/<round>.jsonl`
   （仅证据，禁止 verdict 形状的行）。
 - **定向 parent 用户注意**（round-18）：`propose_loop_goal` 弹窗与
-  `pause_for_question` 只通知**启动本会话的那个会话**（parent）。parent
+  `ask_user` 只通知**启动本会话的那个会话**（parent）。parent
   标识在启动时经环境变量 `RG_PARENT_SESSION` 传入；事件走旁路文件
   （`~/.pi/agent/review-gate-attention.json`，跨 repo 可读）。没有
   tmux 信号侧（2026-08-28 起 defaultSignal 为空操作）——文件即送达，
@@ -76,8 +80,9 @@
   托管等待：进程已退出或静默超时的子会话**立即结束等待**（注入
   `REVIEW_GATE_CHILD_ENDED`：review_read 读取已有输出继续 / review_close
   后重新派发）；仍在飞的子会话注入 `REVIEW_GATE_CHILD_HOST_WAIT`
-  （先做确定性工作；无可做时用一次 bash 同时盯三条判据，见下）。仅三类
-  情形允许停止：用户显式中止（ESC）、`pause_for_question` 等待用户回答、
+  （先做确定性工作；确实没别的可做时调 `review_wait({role})`，它在门禁里
+  跑同样的三条判据并把结论带回来）。仅三类
+  情形允许停止：用户显式中止（ESC）、`ask_user` 等待用户回答、
   所有门禁与 goal 均完成。
 - **子会话终止的三条独立判据**（round-18 起，实测失败模式：子会话已输出
   verdict 但进程未退/未退出，主会话阻塞空等）：(a) 进程 exit 事件；
@@ -96,16 +101,24 @@
 
 ## 审核单元
 
-- `review_checkpoint`（门禁工具）：要求 precommit PASS → `git add -A
-  && git commit`（英文 message 校验）→ 记录 commit sha。只绕过
-  READY，不绕过 precommit。普通 `git commit` 在 READY 前仍被拦。
-- `prepare_review`：计算 `baseline..HEAD`（自上次审核基线以来的
-  commit），生成任务文本，注册审核目标。
-- `record_review`：身份证据 = review_spawn 注册的 session id + 子会话
-  产出文件；审核目标仍是 HEAD（审核期间新增 checkpoint ⇒
-  STALE ⇒ BLOCKED）；READY 绑定审核 commit 的 **tree**（内容绑定，
-  squash 重写历史不改变内容时绑定存活；`reset --soft` 实测 tree oid
-  不变）。
+送审是**一次调用**：`judge_submit({role:"reviewer", task:<本轮改动说明>})`。
+门禁在这一次调用里依次跑完下面四步，任一步失败就带原因打回（不留半提交
+状态）；这些工具本身仍然注册着，作为需要单独跑时的高级入口。
+
+- `run_precommit`（full lane）：不过就打回。
+- `review_checkpoint`：`git add -A && git commit`（英文 message 校验，
+  commit 标题由门禁打上 checkpoint 标记）→ 记录 commit sha 与它落在哪条
+  分支（branchOps）。只绕过 READY，不绕过 precommit；普通 `git commit`
+  在 READY 前仍被拦，且只能落在本会话的工作分支上。
+- `prepare_review`：计算 `baseline..HEAD`（自上次审核基线以来的 commit），
+  生成任务文本与 findings 流路径，注册审核目标。
+- dispatch：spawn 或续接该 role 的 session。
+
+verdict **不在返回值里**：judge 进程退出时门禁自己读它的结论并调
+`record_review`——审核目标仍是 HEAD（审核期间新增 checkpoint ⇒ STALE ⇒
+BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重写历史
+不改变内容时绑定存活；`reset --soft` 实测 tree oid 不变）。主会话被唤醒时
+拿到的已经是记录后的结论。
 - ship 授权（unmetRequirements）：READY 与 precommit PASS 均绑定
   commit tree；push/PR 时验证 HEAD commit tree 与绑定 tree 一致且自
   基线以来无未审核 commit。
