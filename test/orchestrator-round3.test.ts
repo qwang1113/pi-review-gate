@@ -155,6 +155,81 @@ test("R3-5b: a completed child that was re-tasked is `working` again", () => {
   assert.equal(second.state, "working", "the completion record is history; the screen moved");
 });
 
+test("round-1 P1: a completion older than the current assignment is history, not a verdict", () => {
+  // The lifecycle hole the first review caught: `declare_done` writes the
+  // completion record once and nothing ever clears it, so a child handed a
+  // SECOND task would be called `done` again the moment its screen settled —
+  // which is exactly what a child STUCK on the new task looks like. `done`
+  // never rings for help, so the one situation a supervisor must hear about
+  // would have been swallowed by the one state that says "all finished".
+  const screen = "上一轮的输出\n> ";
+  const settled = classifyChildState(observation({ screenText: screen }), {}).memory;
+  const stale = classifyChildState(
+    observation({
+      screenText: screen,
+      at: AT + IDLE_AFTER_MS,
+      sidecar: { completedAt: "2026-08-30T04:20:00.000Z" },
+      assignedAt: Date.parse("2026-08-30T05:00:00.000Z"),
+    }),
+    settled,
+  );
+  assert.equal(stale.state, "idle", "it is stuck on the NEW work, and that must ring");
+  assert.match(stale.reason, /早于本次派活/, "and the reason tells the supervisor exactly that");
+
+  // A completion produced by the new round counts immediately.
+  const fresh = classifyChildState(
+    observation({
+      screenText: screen,
+      sidecar: { completedAt: "2026-08-30T05:30:00.000Z" },
+      assignedAt: Date.parse("2026-08-30T05:00:00.000Z"),
+    }),
+    settled,
+  );
+  assert.equal(fresh.state, "done");
+});
+
+test("round-1 P1: an unparseable completion stamp never invents a completion", () => {
+  const screen = "静止\n> ";
+  const settled = classifyChildState(observation({ screenText: screen }), {}).memory;
+  const verdict = classifyChildState(
+    observation({
+      screenText: screen,
+      at: AT + IDLE_AFTER_MS,
+      sidecar: { completedAt: "not a time" },
+    }),
+    settled,
+  );
+  assert.equal(verdict.state, "idle", "a stamp that cannot be compared is not evidence of anything");
+});
+
+test("round-1 P1: giving a finished child new work un-finishes it, in the registry too", async () => {
+  const h = fakeOrchestration({ plan: samplePlan(), approved: true });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
+  const child = h.runtime().children[0]!;
+  h.panes.get(child.paneId)!.printed = ["> 我干完了"];
+  h.setSidecar(child.cwd, child.stateVariant, {
+    completion: { at: new Date(h.now()).toISOString(), merge: "merged" },
+  });
+  h.deps.probe().observe();
+  h.advance(1_000);
+  h.deps.probe().observe();
+  assert.ok(h.runtime().children[0]!.doneAt, "it finished the first task");
+
+  h.advance(1_000);
+  const sent = await h.call("orchestrator_send", { childId: child.id, message: "再干一件事" });
+  assert.notEqual(sent.isError, true, text(sent));
+  const after = h.runtime().children[0]!;
+  assert.equal(after.doneAt, undefined,
+    "otherwise the orchestration could declare_done while this child is still working");
+  assert.ok(after.lastAssignedAt, "and the new assignment is stamped, so the old completion stops counting");
+
+  // The stale completion record is still on disk — and must no longer decide.
+  h.advance(60_000);
+  const health = h.deps.probe().observe().health.find((entry) => entry.childId === child.id)!;
+  assert.notEqual(health.state, "done", "a child sitting on new work is not 'done' because of an old record");
+});
+
+
 test("R3-5b: `done` rings twice and then goes quiet (user decision, option C)", () => {
   const screen = "review-gate: done accepted.\n> ";
   const settledMemory = classifyChildState(observation({ screenText: screen }), {}).memory;

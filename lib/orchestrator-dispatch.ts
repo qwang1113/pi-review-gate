@@ -32,6 +32,7 @@ import {
   findChild,
   lastChildPane,
   liveChildren,
+  markChildAssigned,
   newChildId,
   registerChild,
   runningTaskIds,
@@ -252,6 +253,9 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     stateVariant: childId,
     taskFile: written.path,
     createdAt: new Date(deps.now()).toISOString(),
+    // The spawn IS the first assignment: a completion record older than this
+    // belongs to whatever ran in that worktree before (round-1 P1).
+    lastAssignedAt: new Date(deps.now()).toISOString(),
   }));
   const started = applyTaskStatus(plan!, taskId, "running", { now: new Date(deps.now()).toISOString() });
   if (started.ok) deps.savePlan(started.plan);
@@ -530,6 +534,13 @@ export async function dispatchSend(deps: OrchestratorDeps, params: Record<string
     );
   }
   const lane = check.verdict.lane ?? "submitted";
+  // NEW WORK UN-FINISHES A CHILD (round-1 P1). Whatever this text is — the
+  // next task, a correction, a question — the child has now been handed
+  // something, so its previous completion stops counting: the probe may not
+  // call it `done` again on the strength of a record from the last round, and
+  // the orchestration exit check must see it as ALIVE again. Stamped for the
+  // steering-queue lane too: a queued message is still read by the child.
+  deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
   // A command that ended up in the queue did NOT run. Saying "delivered"
   // there is the R-20 trap: the orchestrator waits for an effect that will
   // never happen.

@@ -64,8 +64,17 @@ judge 等待与子会话等待共用它，只是判据不同。
     没有 judge 子进程、没有完成记录、屏幕指纹也一直没变。判定文案里会带上它是否已经 `declare_done`。
 12. 以上都不满足 → `working`（静止时间还没到阈值）。
 
-被重新派活的已完成子会话会自动回到 `working`（屏幕变了），干完新的一轮再静下来时又是 `done` ——
-完成记录留在盘上不会被清掉，所以这是"每进入一次 `done` 就响一轮铃"，不是一次性开关。
+被重新派活的已完成子会话会回到 `working`（屏幕变了），干完新的一轮再静下来时又是 `done` ——
+所以这是"每进入一次 `done` 就响一轮铃"，不是一次性开关。
+
+**但完成记录必须是关于「当前这次派活」的**（第一轮 review 的 P1）：`declare_done` 写下的记录没有任何路径会清掉它，
+如果不比时间，一个被派了第二件事的子会话只要屏幕一静止就又被判 `done` —— 而那和它**卡在新任务上**长得一模一样，
+于是唯一不响铃的状态会吞掉唯一必须被听见的情况。所以：
+`orchestrator_spawn` 与每一次送达的 `orchestrator_send` 都会在登记表上盖一个 `lastAssignedAt`，
+并**清掉 `doneAt`**（那条 `doneAt` 还会把子会话从编排退出检查里滤掉，等于允许项目经理在它仍在干活时收工）；
+`classifyChildState` 只承认**不早于**这个时间戳的完成记录，早于它的一律当历史 ——
+此时子会话静止到阈值就是 `idle`，判据文案会写明"那条完成记录属于上一轮任务"。
+时间戳解析不出来时退回旧行为（任何完成记录都算数），因为"永远到不了的 `done`"就是 R3-5 那次停摆本身。
 
 ### 1.2 阈值与常量
 
@@ -140,8 +149,10 @@ judge 等待与子会话等待共用它，只是判据不同。
 
 `createChildProbe(deps)` 返回的 `ChildProbe.observe(now?)`，对每个**未关闭**（`closedAt` 为空）的子会话：
 
-1. `capturePane` 抓屏、`structuredFacts` 读结构化真值、`list-panes` 查存活（读不到就是 `undefined`）；
-2. 调 `classifyChildState`，用**上一轮存下来的 memory** 比对；
+1. `capturePane` 抓屏、**读一次**子会话 sidecar（状态真值与落点比对共用这一次读）、`list-panes` 查存活
+   （读不到就是 `undefined`）；
+2. 调 `classifyChildState`，用**上一轮存下来的 memory** 比对，并把 `lastAssignedAt`（没有就退回 `createdAt`）
+   一起传进去，让完成记录能和"当前这次派活"比时间；
 3. 调 `decideChildEvent` 决定要不要响铃，并把新的 memory 写回；
 4. 判成 `done` 且登记表里还没有 `doneAt` 时，**把完成写回登记表**（`markChildDone`）——
    在此之前这个函数全仓没有任何调用方，`doneAt` 永远是空的，于是 `orchestrator_status` 的完成显示、

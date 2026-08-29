@@ -103,8 +103,22 @@ export interface ChildObservation {
   /** Its title, for the health snapshot. */
   dialogTitle?: string;
   sidecar?: ChildSidecarFacts;
-  /** The child reported `declare_done` (registry fact). */
+  /**
+   * The registry says this child reported `declare_done` — and that flag is
+   * dropped again the moment it is given new work, so unlike the sidecar
+   * record it always refers to the CURRENT assignment.
+   */
   done?: boolean;
+  /**
+   * When this child was last GIVEN something to do (ms), if known.
+   *
+   * A completion record older than this belongs to the PREVIOUS assignment
+   * (round-1 P1): without this comparison a child re-tasked after finishing
+   * is reported `done` again as soon as its screen settles — including when
+   * it has merely got stuck, which is the one thing a supervisor must hear
+   * about and the one state that never rings.
+   */
+  assignedAt?: number;
   /** Wall clock of this observation, in ms. */
   at: number;
 }
@@ -241,7 +255,7 @@ export function screenLooksBusy(
  * make a busy child look stopped — the opposite error, and the more expensive
  * one (it interrupts real work).
  */
-export function screenTail(text: string, tailLines: number = ACTIVITY_TAIL_LINES): string {
+function screenTail(text: string, tailLines: number = ACTIVITY_TAIL_LINES): string {
   const lines = String(text).split("\n");
   while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop();
   const count = Math.max(1, Math.floor(tailLines));
@@ -338,12 +352,22 @@ export function classifyChildState(
   // A settled screen is still required: it is what separates "it finished"
   // from "it finished and immediately started something else", and it costs
   // exactly one probe interval.
+  //
+  // AND THE RECORD MUST BE ABOUT THE CURRENT WORK (round-1 P1). `declare_done`
+  // writes that record once and nothing clears it, so a child handed a second
+  // task would otherwise be called `done` again the moment it settled — which
+  // is exactly what a child STUCK on the new work looks like. A completion
+  // older than the assignment is history; the registry flag, which the gate
+  // drops when it assigns new work, needs no such comparison.
   const completedAt = sidecar?.completedAt;
-  const completed = Boolean(completedAt) || observation.done === true;
+  const completedMs = completedAt ? Date.parse(completedAt) : Number.NaN;
+  const completionIsCurrent = Number.isFinite(completedMs) &&
+    (observation.assignedAt === undefined || completedMs >= observation.assignedAt);
+  const completed = completionIsCurrent || observation.done === true;
   if (completed && !changed && !screenLooksBusy(observation.screenText)) {
     return settle(
       "done",
-      completedAt
+      completionIsCurrent
         ? `它自己的 sidecar 记着 declare_done 已被接受（${completedAt}），且画面已静止 —— 任务完成`
         : "登记表里记着它报告过完成，且画面已静止 —— 任务完成",
     );
@@ -362,7 +386,13 @@ export function classifyChildState(
     return settle(
       "idle",
       `画面已 ${Math.round(stableMs / 1000)}s 没有任何变化，没有对话框、没有在跑的标志、也没有 judge 子进程` +
-      (observation.done ? "（它已经报告过 declare_done）" : "（而且它并没有报告 declare_done）"),
+      (observation.done
+        ? "（它已经报告过 declare_done）"
+        : completedAt && !completionIsCurrent
+          // The distinction a supervisor acts on: this child DID finish
+          // something, but that was before the work it is sitting on now.
+          ? `（它 sidecar 里那条完成记录是 ${completedAt}，早于本次派活 —— 属于上一轮任务，本轮它没报完成）`
+          : "（而且它并没有报告 declare_done）"),
     );
   }
   return settle("working", `画面 ${Math.round(stableMs / 1000)}s 没变，还没到 ${Math.round(idleAfter / 1000)}s 的静止阈值`);
@@ -509,7 +539,9 @@ export function formatChildHealth(list: readonly ChildHealth[]): string {
         `${describeChildState(h.state)}，画面已静止 ${since}` +
         (h.lastActivityAt ? `（最后变化 ${h.lastActivityAt}）` : "") +
         (h.dialogTitle ? `，当前框「${h.dialogTitle}」` : "") +
-        (h.done ? "，已报告完成" : "") +
+        // `done` already says it in the state label; repeating it there would
+        // read as two separate facts.
+        (h.done && h.state !== "done" ? "，已报告完成" : "") +
         `\n  依据：${h.reason}` +
         (outside.length > 0
           ? `\n  ⚠ 越界落点（约束 8，按实际改过的文件判）：${outside.slice(0, 8).join("、")}` +

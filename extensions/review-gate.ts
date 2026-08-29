@@ -1492,8 +1492,23 @@ export default function reviewGate(pi: ExtensionAPI) {
         );
       } catch { /* the abort below still runs */ }
       // Leave the OTHER worktree exactly as it was found — an aborted merge
-      // there is not this session's mess to leave behind.
-      try { execFileSync("git", ["merge", "--abort"], { cwd: venue.path, encoding: "utf8" }); } catch { /* nothing to abort */ }
+      // there is not this session's mess to leave behind. Whether the abort
+      // WORKED is reported rather than assumed (round-1 Nit): this is the
+      // module whose whole point is that a receipt never overstates, and
+      // "回到原样" would be the one sentence a human acts on without checking.
+      let aborted = true;
+      try {
+        execFileSync("git", ["merge", "--abort"], { cwd: venue.path, encoding: "utf8" });
+      } catch {
+        // Either there was nothing to abort (the merge failed before it
+        // started) or the abort itself failed. Both are reported the same
+        // honest way: we cannot claim that worktree is untouched.
+        aborted = false;
+      }
+      const restored = aborted
+        ? "，已 abort，那个工作区回到原样"
+        : "，**但 abort 没有成功**（也可能本来就没进入合并状态）—— 请自己去 " +
+          `${venue.path} 看一眼它现在的状态`;
       const conflicted = files.length > 0;
       if (conflicted) st.mergeConflict = { branch: work, base, files, at: new Date().toISOString() };
       persist(ctx);
@@ -1502,12 +1517,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         merge: "none",
         text: conflicted
           ? `review-gate: declare_done 被拒 — ${work} 合并回 ${base} 有冲突（合并在持有基准分支的 worktree ` +
-            `${venue.path} 里执行，已 abort，那个工作区回到原样）。\n` +
+            `${venue.path} 里执行${restored}）。\n` +
             `冲突文件：\n${files.map((f) => `  ${f}`).join("\n")}\n` +
             `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
             "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
           : `review-gate: declare_done 被拒 — 在 worktree ${venue.path} 里合并 ${work} → ${base} 失败` +
-            "（不是冲突：没有未解决路径），已 abort。" +
+            `（不是冲突：没有未解决路径）${restored}。` +
             `\n${(err instanceof Error ? err.message : String(err)).split("\n")[0]}` +
             "\n先手动确认两条分支的状态，再重试。",
       };

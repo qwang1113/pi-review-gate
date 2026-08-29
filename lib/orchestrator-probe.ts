@@ -131,9 +131,9 @@ export interface ChildProbe {
 function structuredFacts(
   deps: OrchestratorDeps,
   child: ChildSession,
+  raw: Record<string, unknown> | undefined,
 ): ChildSidecarFacts {
   const facts: ChildSidecarFacts = { judgeRunning: deps.childJudgeRunning(child.cwd) };
-  const raw = deps.childGateState(child.cwd, child.stateVariant);
   if (!raw) return facts;
   const nested = (key: string): Record<string, unknown> | undefined => {
     const value = raw[key];
@@ -166,8 +166,7 @@ function structuredFacts(
  * its non-goals section promised not to touch a single line of code. What a
  * child WROTE is a fact; what its goal mentions is prose.
  */
-function editedFiles(deps: OrchestratorDeps, child: ChildSession): string[] {
-  const raw = deps.childGateState(child.cwd, child.stateVariant);
+function editedFiles(raw: Record<string, unknown> | undefined): string[] {
   const list = raw?.sessionEditedFiles;
   if (!Array.isArray(list)) return [];
   return list.filter((f): f is string => typeof f === "string" && f.trim().length > 0);
@@ -181,13 +180,30 @@ function editedFiles(deps: OrchestratorDeps, child: ChildSession): string[] {
  * the supervisor to ignore this event.
  */
 function boundaryBreach(
-  deps: OrchestratorDeps,
   child: ChildSession,
   plan: OrchestratorPlan | undefined,
+  raw: Record<string, unknown> | undefined,
 ): string[] {
   const task = plan?.tasks.find((t) => t.id === child.taskId);
   if (!task || task.fileBoundaries.length === 0) return [];
-  return pathsOutsideBoundaries(editedFiles(deps, child), task.fileBoundaries);
+  return pathsOutsideBoundaries(editedFiles(raw), task.fileBoundaries);
+}
+
+/**
+ * When this child was last given work, in ms — `lastAssignedAt`, else its
+ * creation time (a child that was never re-tasked was assigned at spawn).
+ *
+ * Unparseable stamps answer `undefined`, which keeps the old behavior (any
+ * completion record counts) rather than silently making completion
+ * unreachable — a `done` that can never be reached is the R3-5 outage again.
+ */
+function assignedAtMs(child: ChildSession): number | undefined {
+  for (const stamp of [child.lastAssignedAt, child.createdAt]) {
+    if (!stamp) continue;
+    const ms = Date.parse(stamp);
+    if (Number.isFinite(ms)) return ms;
+  }
+  return undefined;
 }
 
 
@@ -274,6 +290,11 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
 
       for (const child of open) {
         const snapshotOfPane = capturePane(deps, child.paneId);
+        // ONE read of the child's sidecar per round: the state facts and the
+        // boundary check both come out of it, and re-reading it per question
+        // would multiply the file IO by the number of children every 10s.
+        const sidecarRaw = deps.childGateState(child.cwd, child.stateVariant);
+        const assignedAt = assignedAtMs(child);
         const previous = memories.get(child.id);
         const verdict = classifyChildState(
           {
@@ -284,9 +305,13 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
             ...(snapshotOfPane ? { screenText: snapshotOfPane.text } : {}),
             dialogOpen: dialogIsOpen(snapshotOfPane),
             ...(snapshotOfPane?.dialog?.title ? { dialogTitle: snapshotOfPane.dialog.title } : {}),
-            sidecar: structuredFacts(deps, child),
+            sidecar: structuredFacts(deps, child, sidecarRaw),
 
             done: Boolean(child.doneAt),
+            // A completion older than the child's current assignment says
+            // nothing about the work it is doing NOW (round-1 P1). Spawn
+            // stamps this too, so the first assignment is covered as well.
+            ...(assignedAt !== undefined ? { assignedAt } : {}),
             at: now,
           },
           previous,
@@ -313,7 +338,7 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
           deps.saveRuntime(markChildDone(deps.runtime(), child.id, new Date(now).toISOString()));
         }
         // R3-1 — constraint 8, judged against what the child actually wrote.
-        const outside = boundaryBreach(deps, child, plan);
+        const outside = boundaryBreach(child, plan, sidecarRaw);
         const fresh = outside.filter((p) => !(memory.breachReported ?? []).includes(p));
         if (fresh.length > 0) {
           memory = { ...memory, breachReported: [...(memory.breachReported ?? []), ...fresh] };
