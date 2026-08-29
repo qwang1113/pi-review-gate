@@ -29,6 +29,16 @@ const REVIEW_PREPARE_SRC = readFileSync(join(ROOT, "lib", "review-prepare-tools.
 const REVIEW_PREPARE_TOOLS = new Set(["prepare_review"]);
 const ADVISORY_PREPARE_SRC = readFileSync(join(ROOT, "lib", "advisory-prepare-tools.ts"), "utf8");
 const ADVISORY_PREPARE_TOOLS = new Set(["prepare_adviser", "prepare_goal_audit"]);
+/**
+ * The L7 Copilot family moved next, split the same way: the two tools that
+ * drive the post-PR review loop in one module, and the `gh` access they run on
+ * in another. The tools reach that access through an injected seam, so a rule
+ * about a gh CALL is asserted against the module that owns the call, and a
+ * rule about what a TOOL does against the module that owns the tool.
+ */
+const COPILOT_TOOLS_SRC = readFileSync(join(ROOT, "lib", "copilot-review-tools.ts"), "utf8");
+const COPILOT_TOOLS = new Set(["request_copilot_review", "check_copilot_review"]);
+const COPILOT_GH_SRC = readFileSync(join(ROOT, "lib", "copilot-gh.ts"), "utf8");
 
 /** Which source owns a given tool's body. */
 function sourceOf(tool: string): string {
@@ -36,6 +46,7 @@ function sourceOf(tool: string): string {
   if (JUDGE_RELAY_TOOLS.has(tool)) return RELAY_TOOLS_SRC;
   if (REVIEW_PREPARE_TOOLS.has(tool)) return REVIEW_PREPARE_SRC;
   if (ADVISORY_PREPARE_TOOLS.has(tool)) return ADVISORY_PREPARE_SRC;
+  if (COPILOT_TOOLS.has(tool)) return COPILOT_TOOLS_SRC;
   return SRC;
 }
 
@@ -76,6 +87,8 @@ const LIB_TOOL_HANDLERS: Record<string, string> = {
   prepare_review: "async function doPrepareReview(",
   prepare_adviser: "async function doPrepareAdviser(",
   prepare_goal_audit: "async function doPrepareGoalAudit(",
+  request_copilot_review: "async function doRequestCopilotReview(",
+  check_copilot_review: "async function doCheckCopilotReview(",
 };
 
 /**
@@ -119,6 +132,11 @@ function REVIEW_PREPARE_WIRING(): string {
 /** The extension's wiring of the two advisory prepare tools — deps, nothing else. */
 function ADVISORY_WIRING(): string {
   return windowOf("registerAdvisoryPrepareTools(pi, {", "\n  });", "advisory prepare tools wiring");
+}
+
+/** The extension's wiring of the two Copilot review tools — deps, nothing else. */
+function COPILOT_WIRING(): string {
+  return windowOf("registerCopilotReviewTools(pi, {", "\n  });", "copilot review tools wiring");
 }
 
 test("loop goal: injected ONLY in loop mode, before the unarmed early-return", () => {
@@ -1934,7 +1952,10 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the process 
 
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {
   const start = SRC.indexOf('name: "propose_loop_goal"');
-  const nextTool = SRC.indexOf('name: "request_copilot_review"', start);
+  // The Copilot tools used to be the next registration here; they moved to
+  // lib/copilot-review-tools.ts, so the window now ends at setup_workspace —
+  // still "the next tool registered in the extension", which is what bounds it.
+  const nextTool = SRC.indexOf('name: "setup_workspace"', start);
   // Without these, a renamed/removed tool would silently make `body` the whole
   // file (or empty) and every ordering assertion below would pass vacuously.
   assert.ok(start > 0, "propose_loop_goal must be registered");
@@ -1965,10 +1986,11 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   const start = SRC.indexOf('name: "propose_loop_goal"');
   assert.ok(start > 0, "the tool must be registered");
   // Bound at the next tool registration so an assertion can never be
-  // satisfied by request_copilot_review's code (round P2: the flat window
-  // overshot into the next tool).
-  const nextTool = SRC.indexOf('name: "request_copilot_review"', start);
-  assert.ok(nextTool > start, "request_copilot_review must follow propose_loop_goal");
+  // satisfied by the next tool's code (round P2: the flat window overshot
+  // into it). That neighbour used to be request_copilot_review; since the
+  // Copilot tools moved to lib/, it is setup_workspace.
+  const nextTool = SRC.indexOf('name: "setup_workspace"', start);
+  assert.ok(nextTool > start, "setup_workspace must follow propose_loop_goal");
   const body = SRC.slice(start, nextTool);
   assert.match(body, /confirmBounded\(/,
     "the extension must render the approval dialog itself");
@@ -1989,8 +2011,9 @@ test("propose_loop_goal: confirm/reject may carry a user REASON (input after the
   const start = SRC.indexOf('name: "propose_loop_goal"');
   assert.ok(start > 0);
   // Bound at the next tool registration (round P2: the flat window overshot
-  // into request_copilot_review's code).
-  const nextTool = SRC.indexOf('name: "request_copilot_review"', start);
+  // into the neighbouring tool's code — request_copilot_review then, and
+  // setup_workspace since the Copilot tools moved to lib/).
+  const nextTool = SRC.indexOf('name: "setup_workspace"', start);
   assert.ok(nextTool > start);
   const body = SRC.slice(start, nextTool);
   assert.match(body, /uiCtx\.ui\?\..*input/, "a reason input must follow the confirm dialog");
@@ -2153,21 +2176,30 @@ test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", (
 
 test("the Copilot tools are TRUSTED: the extension runs gh, the agent cannot report the outcome", () => {
   for (const name of ["request_copilot_review", "check_copilot_review"]) {
-    const start = SRC.indexOf(`name: "${name}"`);
-    assert.ok(start > 0, `${name} must be registered`);
-    const body = SRC.slice(start, start + 7000);
+    // The tools moved to lib/copilot-review-tools.ts; the rule follows the
+    // code (registration + handler, via sourceOf/LIB_TOOL_HANDLERS).
+    const body = toolBodyOf(name);
     // The only parameter is the repo selector — no status, no thread list, no
     // "I handled it" flag the model could fill in.
     assert.doesNotMatch(body, /status\s*:\s*Type\.|threads\s*:\s*Type\.|resolved\s*:\s*Type\./,
       `${name} must not accept an agent-reported outcome`);
-    assert.match(body, /await (resolveOpenPr|fetchCopilotPayload|requestCopilotReviewer)\(/,
+    assert.match(body, /await deps\.gh\.(resolveOpenPr|fetchCopilotPayload|requestCopilotReviewer)\(/,
       `${name} must gather its own evidence via gh`);
+  }
+  // The evidence seam is not a place the agent can reach either: the extension
+  // binds every `gh` member to the real lib/copilot-gh.ts implementation.
+  const wiring = COPILOT_WIRING();
+  for (const call of ["resolveOpenPr", "resolveRepoSlug", "fetchCopilotPayload", "requestCopilotReviewer", "resolveCopilotSupport"]) {
+    assert.match(wiring, new RegExp(`${call}: \\([^)]*\\) =>\\s*\\n?\\s*${call}\\(`),
+      `the wiring must bind ${call} to the extension's own gh call`);
   }
   // gh runs as argv through the async spawn helper (never a shell string, and
   // never a sync spawn that would freeze the host).
-  assert.match(SRC, /async function runGh\(/);
-  assert.match(SRC, /spawn\(argv\[0\], argv\.slice\(1\)/);
-  assert.doesNotMatch(SRC, /runGh\([^)]*shell/);
+  assert.match(COPILOT_GH_SRC, /export async function runGh\(/);
+  assert.match(COPILOT_GH_SRC, /spawn\(argv\[0\], argv\.slice\(1\)/);
+  assert.doesNotMatch(COPILOT_GH_SRC, /runGh\([^)]*shell/);
+  // …and the extension no longer keeps a second copy of any of it.
+  assert.doesNotMatch(SRC, /function runGh\(/, "the gh runner lives in lib/copilot-gh.ts only");
 });
 
 test("SECURITY: the Copilot requirement never touches the SHIP gate (it would deadlock)", () => {
@@ -2476,36 +2508,42 @@ test("availability is judged by evidence, never by surfaces that cannot see a dr
     "parseRestReviewRequests",
     "COPILOT_LANDING_RECHECK_DELAY_MS",
   ]) {
-    assert.equal(SRC.includes(gone), false, `${gone} was disproven by measurement and must stay gone`);
+    // The Copilot family lives in three files now (the extension's arming
+    // site, the tools, the gh access) — a disproven surface must be gone from
+    // ALL of them, not just from the one it used to sit in.
+    for (const [label, src] of [["the extension", SRC], ["the tools module", COPILOT_TOOLS_SRC], ["the gh module", COPILOT_GH_SRC]] as const) {
+      assert.equal(src.includes(gone), false, `${gone} was disproven by measurement and must stay gone (${label})`);
+    }
   }
 
-  const at = SRC.indexOf("const requested = await requestCopilotReviewer(");
+  const at = COPILOT_TOOLS_SRC.indexOf("const requested = await deps.gh.requestCopilotReviewer(");
   assert.ok(at > 0, "the request path must exist");
-  const before = SRC.slice(Math.max(0, at - 900), at);
-  assert.match(before, /resolveCopilotSupport\(dir, slug, st, \{ signal \}\)/,
+  const before = COPILOT_TOOLS_SRC.slice(Math.max(0, at - 900), at);
+  assert.match(before, /deps\.gh\.resolveCopilotSupport\(dir, slug, st\.copilot\?\.supportConfirmed === true, \{ signal \}\)/,
     "availability must be resolved BEFORE a round is spent");
 
   // The request itself is never vetoed by a read-back any more: whatever the
   // availability verdict, the round is recorded and the wait length is what
   // changes.
-  const recordAbs = SRC.indexOf("recordCopilotRequest(st.copilot,", at);
+  const recordAbs = COPILOT_TOOLS_SRC.indexOf("recordCopilotRequest(st.copilot,", at);
   assert.ok(recordAbs > at, "the request must still be recorded");
-  const body = SRC.slice(at, recordAbs);
+  const body = COPILOT_TOOLS_SRC.slice(at, recordAbs);
   assert.doesNotMatch(body, /releaseCopilotReview\(st\.copilot, "UNSUPPORTED",[\s\S]{0,200}land/,
     "a request that 'did not land' must no longer release the requirement");
-  assert.match(SRC.slice(recordAbs, recordAbs + 400), /supportConfirmed: support\.confirmed/,
+  assert.match(COPILOT_TOOLS_SRC.slice(recordAbs, recordAbs + 400), /supportConfirmed: support\.confirmed/,
     "confirmed evidence must be remembered in the sidecar");
 });
 
 test("the Copilot availability probe fails CLOSED: an unreadable gh answer decides nothing", () => {
   const fn = "probeCopilotHistory";
-  const at = SRC.indexOf(`async function ${fn}(`);
+  // The probe moved with the gh access it makes (lib/copilot-gh.ts).
+  const at = COPILOT_GH_SRC.indexOf(`export async function ${fn}(`);
   assert.ok(at > 0, `${fn} must exist`);
   // Bound the window at this function's own closing brace: a fixed character
   // count spills into the neighbour and lets a mutant in THIS function pass
   // unnoticed (only the neighbour's identical line is then matched).
-  const rest = SRC.slice(at + 10);
-  const end = rest.indexOf("\n  }\n");
+  const rest = COPILOT_GH_SRC.slice(at + 10);
+  const end = rest.indexOf("\n}\n");
   assert.ok(end > 0, `${fn} must have a recognizable body`);
   const body = rest.slice(0, end);
   assert.ok(body.length < 1200, `${fn} body window must stay local (got ${body.length})`);
@@ -2517,15 +2555,17 @@ test("the Copilot availability probe fails CLOSED: an unreadable gh answer decid
 
 test("an abort proves nothing about Copilot: it can never release the requirement", () => {
   // ESC is the user leaving, not GitHub refusing.
-  const runGhAt = SRC.indexOf("async function runGh(");
+  // The runner moved to lib/copilot-gh.ts, the tool body to
+  // lib/copilot-review-tools.ts — the rule is asserted against each owner.
+  const runGhAt = COPILOT_GH_SRC.indexOf("export async function runGh(");
   assert.ok(runGhAt > 0, "runGh must exist");
-  const spawnAt = SRC.indexOf("spawn(argv[0]", runGhAt);
-  const guardAt = SRC.indexOf("if (opts.signal?.aborted)", runGhAt);
+  const spawnAt = COPILOT_GH_SRC.indexOf("spawn(argv[0]", runGhAt);
+  const guardAt = COPILOT_GH_SRC.indexOf("if (opts.signal?.aborted)", runGhAt);
   assert.ok(guardAt > 0 && guardAt < spawnAt,
     "an already-aborted signal must short-circuit BEFORE spawning (its listener never fires)");
 
-  const requestAt = SRC.indexOf("const requested = await requestCopilotReviewer(");
-  const body = SRC.slice(requestAt, requestAt + 3500);
+  const requestAt = COPILOT_TOOLS_SRC.indexOf("const requested = await deps.gh.requestCopilotReviewer(");
+  const body = COPILOT_TOOLS_SRC.slice(requestAt, requestAt + 3500);
   assert.match(body, /if \(!requested\.ok\)[\s\S]{0,200}if \(signal\?\.aborted\)[\s\S]{0,400}return \{/,
     "a failed request that was merely aborted must return without releasing");
 });
@@ -2533,12 +2573,11 @@ test("an abort proves nothing about Copilot: it can never release the requiremen
 test("a released Copilot cycle still has to report what it left unhandled", () => {
   // Releasing stops the GATE from blocking; it does not make open findings
   // disappear. The user must hear about them.
-  assert.ok(SRC.indexOf("function copilotUnhandledText(") > 0,
+  assert.ok(COPILOT_TOOLS_SRC.indexOf("export function copilotUnhandledText(") > 0,
     "the unhandled-thread reporter must exist");
-  assert.ok(SRC.indexOf("function copilotAbandonedText(") > 0,
+  assert.ok(COPILOT_TOOLS_SRC.indexOf("export function copilotAbandonedText(") > 0,
     "the payload-less paths need their own reporter (they have only the count)");
-  const checkAt = SRC.indexOf('name: "check_copilot_review"');
-  const checkBody = SRC.slice(checkAt);
+  const checkBody = toolBodyOf("check_copilot_review");
   assert.match(checkBody, /copilotUnhandledText\(analysis\.actionable\)/,
     "the released branch of check_copilot_review must list them");
 
@@ -2546,9 +2585,10 @@ test("a released Copilot cycle still has to report what it left unhandled", () =
   // no PR, no slug, unreadable payload, a refused request, a spent budget.
   // Each of them released in total silence before, even with a sidecar that
   // still recorded open threads. Every `releaseCopilotReview` call in the two
-  // tools must be accompanied by the abandoned-findings notice.
-  const requestAt = SRC.indexOf('name: "request_copilot_review"');
-  const toolsBody = SRC.slice(requestAt, SRC.indexOf('name: "pause_for_question"'));
+  // tools must be accompanied by the abandoned-findings notice. The module
+  // holds nothing BUT those two tools, so it is the whole window now (it used
+  // to be sliced out of the extension, from one tool name to the next).
+  const toolsBody = COPILOT_TOOLS_SRC;
   const releases = toolsBody.split("releaseCopilotReview(st.copilot,").length - 1;
   const notices = toolsBody.split("copilotAbandonedText(st.copilot)").length - 1;
   assert.ok(releases >= 5, `expected the fail-safe release paths to still exist (got ${releases})`);
@@ -2567,9 +2607,10 @@ test("REGRESSION: resolveOpenPr must fall back for gh versions without headRefOi
   // `Unknown JSON field: "headRefOid"` — the audit log showed every Copilot
   // cycle released UNSUPPORTED on request because resolveOpenPr never
   // retried. The modern attempt must be followed by a legacy retry.
-  const at = SRC.indexOf("async function resolveOpenPr(");
+  // The resolution moved with the gh calls it makes (lib/copilot-gh.ts).
+  const at = COPILOT_GH_SRC.indexOf("export async function resolveOpenPr(");
   assert.ok(at > 0, "resolveOpenPr must exist");
-  const body = SRC.slice(at, SRC.indexOf("\n  }\n", at) + 4);
+  const body = COPILOT_GH_SRC.slice(at, COPILOT_GH_SRC.indexOf("\n}\n", at) + 3);
   assert.match(body, /PR_VIEW_JSON_FIELDS\.modern/, "the first attempt must use the modern field set");
   assert.match(body, /PR_VIEW_JSON_FIELDS\.legacy/, "the legacy retry must use the legacy field set");
   assert.match(body, /decidePrView\(/, "the control flow must delegate to the pure decision helper");
@@ -2637,11 +2678,9 @@ test("REGRESSION (P0b): the no-tests-warning is wired into the tool result and /
 test("check_copilot_review leaves a released cycle alone (no resurrection, no gh calls)", () => {
   // The loop this closes: request released the cycle as EXHAUSTED, the next
   // check re-derived it as ARMED, and declare_done was blocked again.
-  const at = SRC.indexOf('name: "check_copilot_review"');
-  assert.ok(at > 0, "the check tool must exist");
-  // Bound the window on the next tool registration, not on a character count.
-  const end = SRC.indexOf("pi.registerTool({", at);
-  const body = SRC.slice(at, end === -1 ? SRC.length : end);
+  // The window is the tool's own registration plus its handler, read from the
+  // module that owns them (lib/copilot-review-tools.ts) — no character count.
+  const body = toolBodyOf("check_copilot_review");
   const guardAt = body.indexOf("!isCopilotOutstanding(settled)");
   assert.ok(guardAt > 0, "a released cycle must short-circuit the whole check");
   for (const laterWork of ["resolveOpenPr(", "fetchCopilotPayload(", "evaluateCopilot("]) {
@@ -2649,7 +2688,7 @@ test("check_copilot_review leaves a released cycle alone (no resurrection, no gh
     assert.ok(workAt > guardAt, `${laterWork} must come AFTER the released short-circuit`);
   }
   assert.doesNotMatch(body.slice(guardAt, body.indexOf("}", body.indexOf("details:", guardAt))),
-    /persistRepo|releaseCopilotReview|armCopilotReview/,
+    /deps\.persist|releaseCopilotReview|armCopilotReview/,
     "the short-circuit must not rewrite the state it reports");
 });
 

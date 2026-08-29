@@ -41,25 +41,27 @@
 
 ### 1.2 工具注册分两处（重要）
 
-- **扩展直接注册 18 个** gate 工具：
+- **扩展直接注册 13 个** gate 工具：
   按族看（快照，权威判据是下面的命令）：审查链（`judge_submit`、
   `review_checkpoint`、
-  `prepare_review`、`record_review`、`run_precommit`）、目标链
-  （`propose_loop_goal`、`prepare_goal_audit`、`record_goal_prereview`）、
-  adviser（`prepare_adviser`）、Copilot（`request_copilot_review`、
-  `check_copilot_review`）、会话与用户（`setup_workspace`、`declare_done`、
+  `record_review`、`run_precommit`）、目标链
+  （`propose_loop_goal`、`record_goal_prereview`）、
+  会话与用户（`setup_workspace`、`declare_done`、
   `ask_user`、`set_gate_mode`、`request_scope_limit`、
   `request_sensitive_edit`、`request_arbitration`）。
-  核对：`grep -c 'name: "' extensions/review-gate.ts` → 当前 15；
+  核对：`grep -c 'name: "' extensions/review-gate.ts` → 当前 13；
   逐个看用 `grep -n 'name: "' extensions/review-gate.ts`。
 
-- **19 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+- **21 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
   - `lib/judge-relay-tools.ts`：`review_spawn`、`review_watch`、`review_send`
     （把一件事**转交**给 judge 进程的三个工具）。
   - `lib/review-prepare-tools.ts`：`prepare_review`（准备 reviewer 要判的那
     一轮：不可变的 `baseline..HEAD`、polish gate、findings 流、review target）。
   - `lib/advisory-prepare-tools.ts`：`prepare_adviser`、`prepare_goal_audit`
     （两个只组装**任务文本**的准备：不算 git 范围，也不登记 review target）。
+  - `lib/copilot-review-tools.ts`：`request_copilot_review`、
+    `check_copilot_review`（L7 的两个工具；它们要打的 gh 电话在
+    `lib/copilot-gh.ts`，经注入的 `gh` seam 调用，所以每条分支都能用假实现单测）。
   - `lib/judge-session-tools.ts`：`judge_read` / `judge_close` / `judge_wait`
     （作用于一个**已存在**的 judge 会话的三个工具）。
   - `lib/orchestrator-tools.ts`：`orchestrator_plan`、`orchestrator_status`、
@@ -68,8 +70,8 @@
   - `lib/orchestrator-session-tools.ts`：`orchestrator_spawn`、
     `orchestrator_send`、`orchestrator_wait`、`orchestrator_close`、
     `orchestrator_relay`。
-  核对：`grep -rln 'name: "[a-z_]*"' lib/*.ts` → 上面七个文件；
-  `grep -rh 'name: "' lib/*.ts | wc -l` → 19。
+  核对：`grep -rln 'name: "[a-z_]*"' lib/*.ts` → 上面八个文件；
+  `grep -rh 'name: "' lib/*.ts | wc -l` → 21。
 
 这些模块都经同一道 **seam** 接进扩展：`lib/tool-host.ts` 定义那个 host 类型
 （`lib/orchestrator-deps.ts` 只是把它 re-export，因为编排工具是第一批搬出去
@@ -107,7 +109,7 @@
 | **L4** 输出语言 | 每轮无条件注入简体中文指令 | 扩展 `before_agent_start` | `lib/constants.ts` 的 `LANGUAGE_DIRECTIVE` |
 | **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | 扩展 `tool_call` + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
 | **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
-| **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账 | 扩展工具 `request_copilot_review` / `check_copilot_review` | `lib/copilot-review.ts` |
+| **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账 | `lib/copilot-review-tools.ts`（工具 `request_copilot_review` / `check_copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线 | `lib/copilot-review.ts` |
 | **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | 扩展工具 `propose_loop_goal` / `record_goal_prereview` | `lib/loop-goal.ts` |
 
 > **落点指引**：加一条新的**判定规则**（什么该拦、什么该放）→ 落在
@@ -308,11 +310,11 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 
 ---
 
-## 五、`lib/` 全量速查表（82 个模块）
+## 五、`lib/` 全量速查表（84 个模块）
 
 **维护指令（这张表没有机械约束，只有这一条）**：在 `lib/` 下**新增或删除**一个
 模块时，**同一轮改动里**顺手加/删这里的一行——否则这张表会静静地过时。
-随时可核对条目数：`ls lib/*.ts | wc -l`（当前 82，与本表条目一一对应）。
+随时可核对条目数：`ls lib/*.ts | wc -l`（当前 84，与本表条目一一对应）。
 
 | 模块 | 一句话职责 |
 | --- | --- |
@@ -326,6 +328,8 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交 |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
 | `constants.ts` | 全仓唯一的共享常量：代码/文档扩展名、敏感文件模式、ship 命令种类、语言指令、轮次上限 |
+| `copilot-gh.ts` | L7 的 gh 访问层：`gh` 以 argv 异步 spawn（超时 + abort），PR / 线程 payload / 可用性探测都在这里 |
+| `copilot-review-tools.ts` | 工具 `request_copilot_review` / `check_copilot_review`：L7 状态机的两个驱动端，gh 访问经注入的 seam |
 | `copilot-review.ts` | L7：PR 之后的 Copilot 审查闭环（请求、等待、逐 thread 消账） |
 | `dialog-budget.ts` | 确认对话框的渲染行数预算——宿主不截断，长度必须自己管 |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |

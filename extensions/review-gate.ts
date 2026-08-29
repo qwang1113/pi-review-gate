@@ -202,6 +202,9 @@ import { registerJudgeRelayTools } from "../lib/judge-relay-tools.ts";
 // module, the two advisory task builders are the other.
 import { registerReviewPrepareTools } from "../lib/review-prepare-tools.ts";
 import { registerAdvisoryPrepareTools } from "../lib/advisory-prepare-tools.ts";
+// The L7 Copilot tools moved the same way: this file wires them, the module
+// owns their bodies (and lib/copilot-gh.ts the `gh` calls they make).
+import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
 import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   writeJudgeSpawnFiles,
@@ -336,33 +339,21 @@ import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
 import { isModelAllowed } from "../lib/model-allowlist.ts";
 // The baseline resolution moved with prepare_review (lib/review-prepare-tools.ts).
+// The Copilot TOOLS and the `gh` access they run on moved out of this file
+// (lib/copilot-review-tools.ts + lib/copilot-gh.ts); what is left here is the
+// arming site and the completion-only problem list.
 import {
-  COPILOT_HISTORY_PR_COUNT,
-  COPILOT_HISTORY_QUERY,
-  COPILOT_REVIEWER_LOGIN,
-  COPILOT_THREADS_QUERY,
-  analyzeCopilot,
   armCopilotReview,
   copilotProblems,
-  decideCopilotSupport,
-  decidePrView,
-  evaluateCopilot,
-  isCopilotOutstanding,
-  isUnknownJsonFieldError,
-  PR_VIEW_JSON_FIELDS,
-  parseCopilotHistoryProbe,
-  parseCopilotPayload,
-  parseNameWithOwner,
   parsePrView,
-  recordCopilotRequest,
-  releaseCopilotReview,
-  slugFromPrUrl,
-  type CopilotPayload,
-  type CopilotReviewState,
-  type CopilotSupport,
-  type CopilotThread,
-  type PrSummary,
 } from "../lib/copilot-review.ts";
+import {
+  fetchCopilotPayload,
+  requestCopilotReviewer,
+  resolveCopilotSupport,
+  resolveOpenPr,
+  resolveRepoSlug,
+} from "../lib/copilot-gh.ts";
 import {
   SENSITIVE_GRANT_TTL_MS,
   addGrant,
@@ -2947,263 +2938,13 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- L7: post-PR Copilot code-review loop ----------
   //
-  // Everything the gate BELIEVES about a Copilot review is gathered here, by
-  // the extension itself: `gh` runs as an argv (never through a shell), in the
-  // target repo, with a timeout, and the JSON is interpreted by the pure
-  // lib/copilot-review.ts rules. The agent drives the loop but can never
-  // report its own review outcome — the same trust split as run_precommit.
-
-  /**
-   * Optimistic poll inside check_copilot_review: a few quick retries catch the
-   * common "Copilot answered while we were talking" case without turning the
-   * tool into a long block. Anything slower is handled by the persistent
-   * AWAITING state and the next continuation.
-   *
-   * Sized against measurements, not folklore: GitHub documents "usually less
-   * than 30 seconds", and an observed real review took 2m43s. 3 x 20s covers
-   * the documented case in a single tool call without pretending to cover the
-   * slow tail.
-   */
-  const COPILOT_CHECK_ATTEMPTS = 3;
-  const COPILOT_CHECK_DELAY_MS = 20000;
-
-  interface GhResult { ok: boolean; stdout: string; stderr: string }
-
-  /**
-   * Run one `gh` invocation. Never throws; a missing or failing gh is an
-   * ordinary result.
-   *
-   * ASYNC on purpose, and for the same reason run_precommit is: a synchronous
-   * spawn blocks the extension host's event loop, so a slow API call would
-   * freeze the session and swallow the user's ESC. The child is killed on
-   * timeout and on abort.
-   */
-  async function runGh(
-    argv: string[],
-    dir: string,
-    opts: { timeoutMs?: number; signal?: AbortSignal } = {},
-  ): Promise<GhResult> {
-    const timeoutMs = opts.timeoutMs ?? 30000;
-    // Already aborted: an AbortSignal never fires for a listener registered
-    // after the fact, so spawning here would run the whole command past the
-    // user's ESC. `ok: false` is also the answer every caller must draw from
-    // an abort — "could not tell", never a negative finding.
-    if (opts.signal?.aborted) {
-      return { ok: false, stdout: "", stderr: "aborted before gh started" };
-    }
-    return await new Promise<GhResult>((resolveResult) => {
-      let child: ChildProcess;
-      try {
-        child = spawn(argv[0], argv.slice(1), {
-          cwd: dir,
-          // GH_PAGER="" keeps gh from piping JSON into a pager; NO_COLOR keeps
-          // ANSI escapes out of the payloads we parse.
-          env: { ...process.env, GH_PAGER: "", NO_COLOR: "1" },
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-      } catch (e) {
-        resolveResult({ ok: false, stdout: "", stderr: e instanceof Error ? e.message : String(e) });
-        return;
-      }
-      let out = "";
-      let err = "";
-      let settled = false;
-      const finish = (r: GhResult) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        opts.signal?.removeEventListener("abort", onAbort);
-        resolveResult(r);
-      };
-      const kill = () => { try { child.kill("SIGKILL"); } catch { /* already gone */ } };
-      const timer = setTimeout(() => {
-        kill();
-        finish({ ok: false, stdout: out, stderr: `gh timed out after ${timeoutMs}ms` });
-      }, timeoutMs);
-      const onAbort = () => { kill(); finish({ ok: false, stdout: out, stderr: "aborted" }); };
-      opts.signal?.addEventListener("abort", onAbort, { once: true });
-      child.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
-      child.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
-      child.on("error", (e: Error) => finish({ ok: false, stdout: out, stderr: e.message }));
-      child.on("close", (code: number | null) => finish({ ok: code === 0, stdout: out, stderr: err }));
-    });
-  }
-
-  /** First meaningful line of gh's stderr, for the tool's explanation text. */
-  function ghError(res: GhResult, fallback: string): string {
-    const line = res.stderr.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
-    return line ? line.slice(0, 200) : fallback;
-  }
-
-  /** The PR for the repo's current branch, or the reason there is none. */
-  async function resolveOpenPr(dir: string, signal?: AbortSignal): Promise<{ pr?: PrSummary; error?: string }> {
-    // gh's --json field whitelist is version-dependent: `headRefOid` exists
-    // only in newer gh builds. Legacy gh (measured: 2.4.0) rejects the modern
-    // list with `Unknown JSON field: "headRefOid"` BEFORE even looking up
-    // the PR — so only retry with the legacy list when that whitelist error
-    // is actually what failed (the decision logic lives in the pure
-    // lib/copilot-review.ts decidePrView; it also makes sure THE RETRY's
-    // error is reported when it fails — the whitelist error would mask the
-    // real cause, e.g. "no pull requests found"). `analyzeCopilot` anchors
-    // proof on timestamps when head is absent (documented fallback).
-    const modern = await runGh(["gh", "pr", "view", "--json", PR_VIEW_JSON_FIELDS.modern], dir, { signal });
-    const decision = decidePrView(
-      modern,
-      isUnknownJsonFieldError(modern.stderr)
-        ? await runGh(["gh", "pr", "view", "--json", PR_VIEW_JSON_FIELDS.legacy], dir, { signal })
-        : undefined,
-    );
-    if (decision.ok) return { pr: decision.pr };
-    return { error: decision.error };
-  }
-
-  /** owner/name for the repo, preferring gh's own answer over URL parsing. */
-  async function resolveRepoSlug(dir: string, pr: PrSummary | undefined, signal?: AbortSignal): Promise<string | null> {
-    const res = await runGh(["gh", "repo", "view", "--json", "nameWithOwner"], dir, { signal });
-    return (res.ok ? parseNameWithOwner(res.stdout) : null) ?? slugFromPrUrl(pr?.url ?? null);
-  }
-
-  /**
-   * Ask GitHub for Copilot's review of one PR (reviews + review threads).
-   * Variables travel as separate argv values — nothing is interpolated into
-   * the query text.
-   */
-  async function fetchCopilotPayload(
-    dir: string,
-    slug: string,
-    prNumber: number,
-    signal?: AbortSignal,
-  ): Promise<CopilotPayload | undefined> {
-    const [owner, name] = slug.split("/");
-    if (!owner || !name) return undefined;
-    const res = await runGh([
-      "gh", "api", "graphql",
-      "-F", `owner=${owner}`,
-      "-F", `name=${name}`,
-      "-F", `number=${prNumber}`,
-      "-f", `query=${COPILOT_THREADS_QUERY}`,
-    ], dir, { signal });
-    if (!res.ok) return undefined;
-    return parseCopilotPayload(res.stdout);
-  }
-
-  /**
-   * Request the Copilot reviewer.
-   *
-   * The argv is FIXED — the only variable is a PR number that came out of
-   * `gh pr view` as an integer. No agent-authored text can reach this command,
-   * which is what makes running a `gh pr edit` (a command the ship gate
-   * blocks) sound here: the gate blocks that command because it can carry PR
-   * title and body text, and this spelling cannot.
-   *
-   * Older `gh` builds have no `@copilot` shorthand, so a failure falls back to
-   * the documented REST review-request endpoint before giving up.
-   */
-  async function requestCopilotReviewer(
-    dir: string,
-    pr: PrSummary,
-    slug: string | null,
-    signal?: AbortSignal,
-  ): Promise<GhResult> {
-    const viaCli = await runGh(["gh", "pr", "edit", String(pr.number), "--add-reviewer", "@copilot"], dir, { signal });
-    if (viaCli.ok || !slug) return viaCli;
-    return await runGh([
-      "gh", "api", "--method", "POST",
-      `repos/${slug}/pulls/${pr.number}/requested_reviewers`,
-      "-f", `reviewers[]=${COPILOT_REVIEWER_LOGIN}`,
-    ], dir, { signal });
-  }
-
-  /**
-   * Availability probe: has Copilot reviewed ANY recent PR in this repo?
-   *
-   * `undefined` when the answer could not be read (gh missing, API refusal,
-   * unparseable payload) — the caller must then assume nothing.
-   *
-   * Replaces a `suggestedActors` capability probe and a pair of
-   * "did the review request land?" read-backs. All three were measured and
-   * found unusable: the capability filter answers a different question
-   * (assignee, not reviewer) and returned no Copilot on a repo Copilot
-   * demonstrably reviews, and a request that GitHub silently drops still
-   * leaves `reviewRequests` empty on every surface — gh JSON, GraphQL and
-   * REST alike — while both request calls report success. Together they made
-   * "unsupported" the near-certain verdict for any PR that had not already
-   * been reviewed by Copilot once.
-   */
-  async function probeCopilotHistory(
-    dir: string,
-    slug: string | null,
-    signal?: AbortSignal,
-  ): Promise<boolean | undefined> {
-    const [owner, name] = (slug ?? "").split("/");
-    if (!owner || !name) return undefined;
-    const res = await runGh([
-      "gh", "api", "graphql",
-      "-F", `owner=${owner}`,
-      "-F", `name=${name}`,
-      "-F", `count=${COPILOT_HISTORY_PR_COUNT}`,
-      "-f", `query=${COPILOT_HISTORY_QUERY}`,
-    ], dir, { signal });
-    if (!res.ok) return undefined;
-    return parseCopilotHistoryProbe(res.stdout);
-  }
-
-  /**
-   * Decide availability for one repo, cheapest evidence first.
-   *
-   * Remembered evidence short-circuits the query entirely; the history probe
-   * only runs when nothing is known yet. `confirmed` tells the caller whether
-   * the answer is worth remembering in the sidecar (policy is not evidence).
-   */
-  async function resolveCopilotSupport(
-    dir: string,
-    slug: string | null,
-    st: GateState,
-    opts: { onPr?: boolean; signal?: AbortSignal } = {},
-  ): Promise<{ support: CopilotSupport; confirmed: boolean }> {
-    const remembered = st.copilot?.supportConfirmed === true;
-    if (remembered || opts.onPr === true) {
-      return { support: "CONFIRMED", confirmed: true };
-    }
-    const history = await probeCopilotHistory(dir, slug, opts.signal);
-    const support = decideCopilotSupport({
-      history,
-      slug,
-      owners: projectConfig.copilotReview.owners,
-    });
-    return { support, confirmed: support === "CONFIRMED" };
-  }
-
-  /**
-   * The thread list an agent must carry to the user when a cycle is released
-   * with findings still open. Released ≠ handled: the gate stops blocking, the
-   * agent still owes the user an explanation.
-   */
-  function copilotUnhandledText(threads: CopilotThread[]): string {
-    if (threads.length === 0) return "";
-    const lines = threads.slice(0, 20).map((t) =>
-      `  - ${t.path ?? "(no file)"}${t.line ? ":" + t.line : ""} — ${t.excerpt}`);
-    return `\n${threads.length} Copilot thread(s) are still unhandled — tell the user about them ` +
-      `before you finish:\n${lines.join("\n")}`;
-  }
-
-  /**
-   * The same duty, for the paths that release WITHOUT a readable payload.
-   *
-   * These are the ones that actually happen: the PR vanished, the slug cannot
-   * be resolved, `gh` lost its credentials, the API refused. They release to
-   * keep the task moving — and used to do it in total silence, even when the
-   * previous check had recorded open Copilot findings. The count is the only
-   * thing left (there is no payload to list from), so the count is what gets
-   * reported.
-   */
-  function copilotAbandonedText(prev: CopilotReviewState | undefined): string {
-    const open = prev?.openThreads ?? 0;
-    if (open <= 0) return "";
-    return `\n${open} Copilot thread(s) were still waiting on you at the last check and are now ` +
-      "being abandoned unverified — tell the user about them before you finish" +
-      `${prev?.pr ? ` (PR #${prev.pr})` : ""}.`;
-  }
+  // The two tools that drive it (`request_copilot_review`,
+  // `check_copilot_review`) live in lib/copilot-review-tools.ts, and the `gh`
+  // access they run on in lib/copilot-gh.ts — their wiring is further down.
+  // What stays here is what the REST of the extension consults: whether the
+  // loop is active for a repo, the completion-only problems it reports, and
+  // the directory `gh` must run in (both closures over this extension's own
+  // project config, primary root and cwd).
 
   /** Is the L7 loop active for this repo's state? (mode + project config) */
   function copilotEnabled(st: GateState): boolean {
@@ -5705,345 +5446,41 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- L7 Copilot review tools (trusted: the extension runs gh) ----------
-
-  pi.registerTool({
-    name: "request_copilot_review",
-    label: "Request Copilot Review",
-    description:
-      "Ask GitHub Copilot to review the current branch's pull request. Call this after a PR was " +
-      "created or updated (the gate arms the requirement on a successful gh pr create / gh pr " +
-      "edit / git push). The extension resolves the PR, requests the review itself, and stamps " +
-      "the authoritative request time. If the repo or account cannot do Copilot code review (no " +
-      "gh, no GitHub remote, no PR, API refusal) the requirement is released as UNSUPPORTED.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
-    }),
-    async execute(_id, params, signal, onUpdate, ctx) {
-      // resolveToolRepo takes only `requested`; a second "tool name" argument
-      // was being passed and silently dropped (TS2554, now caught by
-      // `npm run typecheck`). The resolver's error already lists every
-      // candidate repo, so the tool name added nothing to it.
-      const target = resolveToolRepo(params.repo);
-      if ("error" in target) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const root = target.root;
-      const st = root === primaryRepoRoot ? state : stateForRepo(root);
-      if (!copilotEnabled(st)) {
-        return {
-          content: [{ type: "text", text: "review-gate: the Copilot review loop is off for this repo/mode — nothing to do." }],
-          details: { status: "DISABLED" },
-        };
-      }
-      const nowIso = new Date().toISOString();
-      const dir = repoDirFor(root);
-      // No round budget any more. The old pre-flight check released the cycle
-      // as EXHAUSTED once `rounds` hit the cap — i.e. it stopped asking about
-      // Copilot's comments because the conversation had gone on a while. The
-      // only bound left is the wait timeout, which fires when there is no
-      // feedback to lose.
-
-      // Network minutes, one gh call after another: show which one is in
-      // flight instead of a silent tool call.
-      const progress = createProgressReporter({
-        title: "review-gate: request_copilot_review",
-        onUpdate: onUpdate as ToolUpdate | undefined,
-      });
-      progress.step("解析当前分支的 PR");
-      const resolved = await resolveOpenPr(dir, signal);
-      if (!resolved.pr) {
-        progress.fail("没有可用的 PR");
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          `no Copilot review possible: ${resolved.error}`, nowIso);
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on request: ${resolved.error}`);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: no Copilot review for this repo — ${resolved.error}. Requirement released ` +
-              "(UNSUPPORTED); it is not blocking completion." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED" },
-        };
-      }
-      const pr = resolved.pr;
-      const slug = await resolveRepoSlug(dir, pr, signal);
-      // Availability, from evidence, BEFORE spending a round. Not a veto: the
-      // request goes out either way (it is cheap, and a repo nobody has asked
-      // yet can only start producing evidence once someone asks). It decides
-      // how long a silent Copilot is worth waiting for.
-      progress.step("查 Copilot 支持情况");
-      const support = await resolveCopilotSupport(dir, slug, st, { signal });
-      progress.step("请求 Copilot 审查");
-      const requested = await requestCopilotReviewer(dir, pr, slug, signal);
-      if (!requested.ok) {
-        // An abort is the user pressing ESC, not GitHub refusing: it proves
-        // nothing about Copilot, so it must not release the requirement.
-        if (signal?.aborted) {
-          return {
-            content: [{
-              type: "text",
-              text: "review-gate: aborted before the Copilot review request completed — nothing " +
-                "recorded; call request_copilot_review again.",
-            }],
-            details: { ...(st.copilot ? { status: st.copilot.status } : {}), pr: pr.number },
-          };
-        }
-        const why = ghError(requested, "the review request was refused");
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          `Copilot review could not be requested: ${why}`, nowIso, pr.head);
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on request for PR #${pr.number}: ${why}`);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: Copilot code review is not available for PR #${pr.number} — ${why}. ` +
-              "Requirement released (UNSUPPORTED)." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED", pr: pr.number },
-        };
-      }
-      // NOTE: no read-back here on purpose. Measured on a repository where
-      // GitHub drops the request: `gh pr edit --add-reviewer @copilot` exits
-      // 0, REST POST answers 200, and `reviewRequests` stays empty on all
-      // three surfaces with no ReviewRequestedEvent in the timeline. A
-      // read-back therefore cannot distinguish "dropped" from "not visible
-      // yet", and using it as a veto declared healthy repos unsupported.
-      // Availability is judged by evidence (above) and by whether a review
-      // actually shows up (check_copilot_review).
-      progress.done(`PR #${pr.number} 已请求`);
-      st.copilot = recordCopilotRequest(st.copilot, {
-        pr: pr.number,
-        head: pr.head,
-        nowIso,
-        supportConfirmed: support.confirmed,
-      });
-      persistRepo(ctx as unknown as ExtensionContext, root);
-      loopArmed = true;
-      log(`copilot review requested for PR #${pr.number} (round ${st.copilot.rounds}, ` +
-        `availability ${support.support})`);
-      const waitNote = support.support === "UNKNOWN"
-        ? "No Copilot review has ever appeared on this repository's recent PRs and its owner is not " +
-          "on the allow-list, so if nothing comes back the requirement is released instead of " +
-          "waiting."
-        : "Copilot usually answers within a minute.";
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: Copilot review requested for PR #${pr.number} (round ${st.copilot.rounds}). ` +
-            `${waitNote} Call check_copilot_review to see whether it answered, and what it left open.`,
-        }],
-        details: {
-          status: "AWAITING",
-          pr: pr.number,
-          rounds: st.copilot.rounds,
-          support: support.support,
-        },
-      };
+  /**
+   * The two L7 Copilot tools — `request_copilot_review` (ask for the review,
+   * stamp the authoritative request time) and `check_copilot_review` (read
+   * what it left open, and decide whether the requirement still blocks
+   * completion) — live in lib/copilot-review-tools.ts; only their wiring is
+   * here. They stay TRUSTED across the move: the `gh` calls run in this
+   * process (lib/copilot-gh.ts), never through the agent, so the agent can
+   * still not report its own review outcome.
+   *
+   * What they need from THIS file arrives as this deps object: the repo
+   * resolution, gate state and its persistence, the directory `gh` runs in,
+   * whether the loop is on for a repo (project config + mode), the
+   * auto-continuation arming and the log channel. The GitHub surface is
+   * injected too — one `gh` member per call the tools make — so every branch
+   * they take is unit-testable without a pull request.
+   */
+  registerCopilotReviewTools(pi, {
+    resolveRepo: (requested) => resolveToolRepo(requested),
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    repoDir: (root) => repoDirFor(root),
+    copilotEnabled: (st) => copilotEnabled(st),
+    armLoop: () => { loopArmed = true; },
+    log: (message) => log(message),
+    gh: {
+      resolveOpenPr: (dir, signal) => resolveOpenPr(dir, signal),
+      resolveRepoSlug: (dir, pr, signal) => resolveRepoSlug(dir, pr, signal),
+      fetchCopilotPayload: (dir, slug, prNumber, signal) => fetchCopilotPayload(dir, slug, prNumber, signal),
+      requestCopilotReviewer: (dir, pr, slug, signal) => requestCopilotReviewer(dir, pr, slug, signal),
+      // The allow-list is THIS extension's project config; lib/copilot-gh.ts
+      // carries no configuration of its own.
+      resolveCopilotSupport: (dir, slug, supportConfirmed, opts) =>
+        resolveCopilotSupport(dir, slug, supportConfirmed, projectConfig.copilotReview.owners, opts),
     },
-  });
-
-  pi.registerTool({
-    name: "check_copilot_review",
-    label: "Check Copilot Review",
-    description:
-      "Check what GitHub Copilot's review of the current PR left open. The extension queries the " +
-      "reviews and review threads itself — you cannot report this outcome yourself. A thread " +
-      "counts as handled when it is resolved OR when the last comment in it is yours (the " +
-      "explanation of why it will not be fixed). Returns AWAITING (Copilot has not answered yet), " +
-      "OPEN (threads still waiting on you, listed with their IDs) or SATISFIED.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
-    }),
-    async execute(_id, params, signal, onUpdate, ctx) {
-      // Copilot answers in "usually less than 30 seconds" — but the poll can
-      // run through several attempts, so each one announces itself.
-      const progress = createProgressReporter({
-        title: "review-gate: check_copilot_review",
-        onUpdate: onUpdate as ToolUpdate | undefined,
-      });
-      const target = resolveToolRepo(params.repo);
-      if ("error" in target) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const root = target.root;
-      const st = root === primaryRepoRoot ? state : stateForRepo(root);
-      if (!copilotEnabled(st)) {
-        return {
-          content: [{ type: "text", text: "review-gate: the Copilot review loop is off for this repo/mode — nothing to check." }],
-          details: { status: "DISABLED" },
-        };
-      }
-      // Already released: SATISFIED / UNSUPPORTED / EXHAUSTED are decisions,
-      // not snapshots. Re-running the checks here would spend gh calls to
-      // re-derive a state the gate has already let go — and, before the state
-      // machine grew its terminal short-circuit, could resurrect it and block
-      // `declare_done` on a requirement that was finished.
-      const settled = st.copilot;
-      if (settled && !isCopilotOutstanding(settled)) {
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: the Copilot requirement is already released (${settled.status})` +
-              `${settled.note ? ` — ${settled.note}` : ""}. It is not blocking completion; checking ` +
-              "again changes nothing. A fresh round starts only on a new push / PR update, or if you " +
-              "deliberately call request_copilot_review again." +
-              // A cycle can be released with findings still open (any of the
-              // fail-safe paths below). Repeating the reminder here means the
-              // duty survives a re-check instead of scrolling away.
-              copilotAbandonedText(settled),
-          }],
-          details: {
-            status: settled.status,
-            ...(settled.pr === null ? {} : { pr: settled.pr }),
-            ...(settled.openThreads ? { unhandled: settled.openThreads } : {}),
-          },
-        };
-      }
-      const dir = repoDirFor(root);
-      progress.step("解析当前分支的 PR");
-      const resolved = await resolveOpenPr(dir, signal);
-      if (!resolved.pr) {
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          `no Copilot review possible: ${resolved.error}`, new Date().toISOString());
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on check: ${resolved.error}`);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: no pull request to check — ${resolved.error}. Requirement released ` +
-              "(UNSUPPORTED)." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED" },
-        };
-      }
-      const pr = resolved.pr;
-      const slug = await resolveRepoSlug(dir, pr, signal);
-      if (!slug) {
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          "could not determine the GitHub owner/repo for this PR", new Date().toISOString());
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on check: no owner/repo for PR #${pr.number}`);
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: could not determine owner/repo for this PR. Requirement released " +
-              "(UNSUPPORTED)." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED" },
-        };
-      }
-
-      // Short optimistic poll for the fast path (GitHub documents "usually
-      // less than 30 seconds"). The REAL waiting mechanism is the persistent
-      // AWAITING state plus the L2 continuation: blocking a tool call for
-      // minutes would burn the turn and ignore an ESC in the meantime.
-      let payload: CopilotPayload | undefined;
-      let next = st.copilot ?? armCopilotReview(undefined, new Date().toISOString());
-      let support: CopilotSupport = "CONFIRMED";
-      let supportResolved = false;
-      for (let attempt = 0; attempt < COPILOT_CHECK_ATTEMPTS; attempt++) {
-        progress.step(`轮询 PR #${pr.number} 的 Copilot 回复（第 ${attempt + 1}/${COPILOT_CHECK_ATTEMPTS} 次）`);
-        if (signal?.aborted) break;
-        payload = await fetchCopilotPayload(dir, slug, pr.number, signal);
-        if (payload) {
-          const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
-          // Availability is only worth a query when the PR itself shows
-          // nothing yet, and only once per call. Copilot on THIS PR is the
-          // strongest evidence there is, and it costs no API call at all.
-          if (!supportResolved || analysis.present) {
-            const decided = await resolveCopilotSupport(dir, slug, st, {
-              onPr: analysis.present,
-              signal,
-            });
-            support = decided.support;
-            supportResolved = true;
-            if (decided.confirmed) next = { ...next, supportConfirmed: true };
-          }
-          next = evaluateCopilot(
-            next,
-            analysis,
-            {
-              nowIso: new Date().toISOString(),
-              now: Date.now(),
-              support,
-            },
-          );
-          next = { ...next, pr: pr.number };
-          if (next.status !== "AWAITING") break;
-        }
-        if (attempt < COPILOT_CHECK_ATTEMPTS - 1) {
-          await new Promise((r) => setTimeout(r, COPILOT_CHECK_DELAY_MS));
-        }
-      }
-
-      progress.done(payload ? String(next.status) : "查询失败");
-      if (!payload) {
-        // The GraphQL query failed outright (no gh, no permission, API down).
-        // Releasing is the fail-SAFE direction here: this requirement must
-        // never strand a task over an unreachable API. What it must NOT do is
-        // go quiet about findings an earlier check already found.
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          "the Copilot review query failed (gh missing, unauthenticated, or API refusal)", new Date().toISOString());
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on check: thread query failed for PR #${pr.number}`);
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: could not read the PR's review threads (gh missing, unauthenticated, " +
-              "or API refusal). Requirement released (UNSUPPORTED)." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED" },
-        };
-      }
-
-      st.copilot = next;
-      persistRepo(ctx as unknown as ExtensionContext, root);
-      if (isCopilotOutstanding(next)) loopArmed = true;
-      log(`copilot check for PR #${pr.number}: ${next.status} (availability ${support}` +
-        `${next.note ? `, ${next.note}` : ""})`);
-
-      const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
-      const lines = analysis.actionable.slice(0, 20).map((t) =>
-        `  - ${t.id} ${t.path ?? "(no file)"}${t.line ? ":" + t.line : ""}` +
-        `${t.isOutdated ? " [outdated — the code moved; if that fixed it, resolve the thread]" : ""}\n      ${t.excerpt}`);
-      const text = next.status === "OPEN"
-        ? `review-gate: PR #${pr.number} — ${analysis.actionable.length} Copilot thread(s) waiting on you ` +
-          `(${analysis.resolved} resolved, ${analysis.answered} answered):\n${lines.join("\n")}\n` +
-          "For each: fix it and resolve the thread, or reply in the thread with the reason it will " +
-          "not be fixed. Resolve: gh api graphql -f query='mutation($t:ID!){resolveReviewThread" +
-          "(input:{threadId:$t}){thread{isResolved}}}' -F t=<threadId>. Reply: " +
-          "gh api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply" +
-          "(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}' -F t=<threadId> -F b='<why>'. " +
-          "Then call check_copilot_review again."
-        : next.status === "AWAITING"
-          ? `review-gate: Copilot has not posted its review of PR #${pr.number} yet. Do something useful and ` +
-            "call check_copilot_review again in a minute."
-          // Released with a readable payload. `evaluateCopilot` puts
-          // actionable threads ahead of every release, so this list is
-          // normally empty — it is kept as the belt to the sidecar-count
-          // braces used by the fail-safe paths above, and it costs one call
-          // on data that is already in hand.
-          : `review-gate: Copilot review of PR #${pr.number} — ${next.note ?? next.status}.` +
-            copilotUnhandledText(analysis.actionable);
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          status: next.status,
-          pr: pr.number,
-          actionable: analysis.actionable.length,
-          resolved: analysis.resolved,
-          answered: analysis.answered,
-          support,
-        },
-      };
-    },
+    delay: (ms) => new Promise((r) => setTimeout(r, ms)),
   });
 
   // ---------- setup_workspace tool (dirty worktree + branch, in one call) ----------
