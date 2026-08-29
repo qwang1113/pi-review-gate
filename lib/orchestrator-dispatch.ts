@@ -18,7 +18,7 @@
  */
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
+import { ORCH_BASE_BRANCH_ENV, STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import {
@@ -27,11 +27,12 @@ import {
   parseSpawnedPaneId,
 } from "./orchestrator-tmux.ts";
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
-import { proxyGoalProblems, spawnAuthorization, worktreeRequirement } from "./orchestrator-gate.ts";
+import { proxyApprovalProblems, spawnAuthorization, worktreeRequirement } from "./orchestrator-gate.ts";
 import {
   findChild,
   lastChildPane,
   liveChildren,
+  markChildAssigned,
   newChildId,
   registerChild,
   runningTaskIds,
@@ -173,6 +174,12 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   const verdict = schedulingVerdict(deps, task, panes.panes);
   if (!verdict.ok) return fail(`review-gate: 现在还不能开 "${taskId}" —— ${verdict.reason}`);
 
+  // Read BEFORE the worktree is created: `addWorktree` checks out a fresh
+  // `orch/...` branch, and reading the base afterwards from a child's own
+  // directory would hand it exactly the wrong answer (R3-6).
+  const orchestrationBase = deps.currentBranch();
+
+
   // CONSTRAINT 7 — a child that will run alongside another gets its own
   // worktree, created BY THE GATE (the agent never assembles a git command).
   let worktree: string | undefined;
@@ -207,6 +214,12 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     // F4 — its OWN gate sidecar, so supervisor and worker never overwrite
     // each other's mode, Q&A record and unmet-gate list.
     [STATE_VARIANT_ENV]: childId,
+    // R3-6 — WHERE ITS WORK HAS TO LAND. A child in a gate-created worktree
+    // stands on `orch/<task>-<stamp>`, so "the branch I am on" is the wrong
+    // default for its base: the third run had a whole lane merge into that
+    // scratch branch and stop there. The orchestration's base is known HERE,
+    // so it is stated here rather than guessed there.
+    ...(orchestrationBase ? { [ORCH_BASE_BRANCH_ENV]: orchestrationBase } : {}),
   };
 
   let paneId: string | undefined;
@@ -240,6 +253,9 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     stateVariant: childId,
     taskFile: written.path,
     createdAt: new Date(deps.now()).toISOString(),
+    // The spawn IS the first assignment: a completion record older than this
+    // belongs to whatever ran in that worktree before (round-1 P1).
+    lastAssignedAt: new Date(deps.now()).toISOString(),
   }));
   const started = applyTaskStatus(plan!, taskId, "running", { now: new Date(deps.now()).toISOString() });
   if (started.ok) deps.savePlan(started.plan);
@@ -326,7 +342,8 @@ async function approveChildGoal(
   if (!task) {
     return fail(`review-gate: 找不到子会话 "${childId}" 对应的任务 "${child.taskId}"，无法做边界比对。`);
   }
-  const draft = childGateFacts(deps, child).goalDraft;
+  const facts = childGateFacts(deps, child);
+  const draft = facts.goalDraft;
   if (!draft) {
     return fail(
       `review-gate: 代批被拒 —— 读不到子会话 ${childId} sidecar 里的 goal 草稿` +
@@ -335,14 +352,24 @@ async function approveChildGoal(
       { childId, approved: false, boundaryOk: false },
     );
   }
-  const check = proxyGoalProblems(draft, task);
+  // R3-1 — CONSTRAINT 8 IS JUDGED ON FILES, NOT ON PROSE. The draft is still
+  // read from the child's own sidecar (R-7) and still echoed in the receipt,
+  // but what decides the approval is where this child has actually written:
+  // a documentation goal that quotes the modules it documents is not a scope
+  // change, and treating it as one cost two bypasses in the third run.
+  const check = proxyApprovalProblems(facts.editedFiles, task);
   if (!check.ok) return fail("review-gate: " + check.reason, { outside: check.outside });
 
+  // R3-2 — this note is about a STRING the caller passed, so it may only
+  // appear when one was passed. `approveGoal: true` (the normal call) carries
+  // no text at all, and the third run still saw "你传进来的文本与 sidecar 不
+  // 一致" on a boolean call — sending the orchestrator off to re-read a child
+  // for a copy it never held.
   const suppliedText = typeof supplied === "string" ? supplied.trim() : "";
   const mismatchNote =
     suppliedText && normalizeGoalText(suppliedText) !== normalizeGoalText(draft)
-      ? "\n注意：你传进来的文本与 sidecar 里的真实草稿**不一致** —— 门禁比对并批准的是 sidecar 那一份" +
-        "（你手上的可能已经过时了，建议 `orchestrator_read` 重看一遍）。"
+      ? "\n注意：你在 `approveGoal` 里传的那段**字符串**与 sidecar 里的真实草稿不一致 —— " +
+        "门禁比对并批准的是 sidecar 那一份（你手上的可能已经过时了，建议 `orchestrator_read` 重看一遍）。"
       : "";
 
   // F11 — the boundary check is only HALF the job. The old code stopped here
@@ -507,6 +534,13 @@ export async function dispatchSend(deps: OrchestratorDeps, params: Record<string
     );
   }
   const lane = check.verdict.lane ?? "submitted";
+  // NEW WORK UN-FINISHES A CHILD (round-1 P1). Whatever this text is — the
+  // next task, a correction, a question — the child has now been handed
+  // something, so its previous completion stops counting: the probe may not
+  // call it `done` again on the strength of a record from the last round, and
+  // the orchestration exit check must see it as ALIVE again. Stamped for the
+  // steering-queue lane too: a queued message is still read by the child.
+  deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
   // A command that ended up in the queue did NOT run. Saying "delivered"
   // there is the R-20 trap: the orchestrator waits for an effect that will
   // never happen.

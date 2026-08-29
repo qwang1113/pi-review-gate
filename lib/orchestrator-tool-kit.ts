@@ -131,6 +131,12 @@ export interface ChildGateFacts {
   lines: string[];
   /** The goal draft the child is currently asking about, when there is one. */
   goalDraft?: string;
+  /**
+   * The files this child's session has EDITED — the fact constraint 8 is
+   * judged on since R3-1. Empty when it has not written anything yet (which
+   * is the normal state at goal-approval time, and is not a violation).
+   */
+  editedFiles: string[];
 }
 
 /** Longest goal draft echoed into a read (the whole point is to see it). */
@@ -148,7 +154,7 @@ const GOAL_DRAFT_MAX = 4000;
  */
 export function childGateFacts(deps: OrchestratorDeps, child: ChildSession): ChildGateFacts {
   const raw = deps.childGateState(child.cwd, child.stateVariant);
-  if (!raw) return { present: false, lines: [] };
+  if (!raw) return { present: false, lines: [], editedFiles: [] };
   const lines: string[] = [];
   const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
   const nested = (key: string): Record<string, unknown> | undefined => {
@@ -174,9 +180,22 @@ export function childGateFacts(deps: OrchestratorDeps, child: ChildSession): Chi
   if (prereview) {
     lines.push(`goal 预审：${str(prereview.verdict) ?? "?"} @ ${str(prereview.at) ?? "?"}`);
   }
+  // The actual landings (R3-1). Listed in the read-out too, because "what has
+  // it changed so far" is the question a supervisor asks right before it
+  // approves anything on the child's behalf.
+  const editedFiles = Array.isArray(raw.sessionEditedFiles)
+    ? raw.sessionEditedFiles.filter((f): f is string => typeof f === "string" && f.trim().length > 0)
+    : [];
+  if (editedFiles.length > 0) {
+    lines.push(
+      `已改过的文件（${editedFiles.length}）：${editedFiles.slice(0, 10).join("、")}` +
+      (editedFiles.length > 10 ? " …" : ""),
+    );
+  }
   return {
     present: true,
     lines,
+    editedFiles,
     ...(draft ? { goalDraft: draft.slice(0, GOAL_DRAFT_MAX) } : {}),
   };
 }

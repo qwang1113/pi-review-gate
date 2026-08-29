@@ -284,16 +284,52 @@ function findGlyphBlock(lines: readonly string[]): Row[] {
   return best;
 }
 
-/** The nearest non-empty line above the block that is not itself a row. */
+/** How many lines above the options may belong to the question's text. */
+const TITLE_LOOKBACK_LINES = 6;
+
+/** `问题 3 / 7` — the progress line an interview prints above its question. */
+const QUESTION_PROGRESS = /问题\s*\d+\s*[/／]\s*\d+/;
+
+/**
+ * The question this dialog is asking — its MAIN LINE, not its last (R3-4).
+ *
+ * WHAT WAS WRONG. The old rule was "the nearest non-empty line above the
+ * options", which for any question longer than one line returns its final
+ * fragment. The third run's snapshots labelled dialogs "论表格，不解释判据成因）。
+ * 我推荐 A：…" and "C) 单模块 + 把三个私有 helper 再拆到第三个文件里凑数。" —
+ * the tail of the prose, and an option restated inside the body. The options
+ * parsed correctly; the one-line summary a supervisor reads was useless.
+ *
+ * WHY IT DOES NOT SIMPLY TAKE THE FIRST LINE. A terminal does not mark where
+ * a question begins: above it sits the transcript, with no separator to rely
+ * on. Walking up to "the first line of the block" would happily return a line
+ * of scrollback — trading a bad title for a WRONG one.
+ *
+ * So the block is only re-anchored on evidence: an interview prints `问题 N /
+ * M` above its question, and that header is a boundary nothing else can
+ * imitate. With it, the title is the line right after it (the question's
+ * subject). Without it, the previous behavior stands — the nearest line,
+ * which at worst is a fragment of the right question.
+ */
 function findTitle(lines: readonly string[], blockStart: number, contentCol: number): string | undefined {
-  for (let i = blockStart - 1; i >= 0 && i >= blockStart - 6; i--) {
+  const block: string[] = [];
+  for (let i = blockStart - 1; i >= 0 && i >= blockStart - TITLE_LOOKBACK_LINES; i--) {
     const line = lines[i]!;
-    if (line.trim() === "") continue;
     if (rowAt(line, contentCol)) continue;
     const cleaned = line.trim().replace(/^[│|┃╎┆]\s*/, "").replace(/[│|┃╎┆]$/, "").trim();
-    if (cleaned.length > 0) return cleaned.slice(0, 200);
+    // A blank line ENDS the block: above it is the transcript, not this
+    // dialog's text.
+    if (cleaned.length === 0) {
+      if (block.length > 0) break;
+      continue;
+    }
+    block.unshift(cleaned);
+    if (QUESTION_PROGRESS.test(cleaned)) break;
   }
-  return undefined;
+  if (block.length === 0) return undefined;
+  const progress = block.findIndex((l) => QUESTION_PROGRESS.test(l));
+  const chosen = progress >= 0 ? block[progress + 1] ?? block[progress]! : block[block.length - 1]!;
+  return chosen.slice(0, 200);
 }
 
 

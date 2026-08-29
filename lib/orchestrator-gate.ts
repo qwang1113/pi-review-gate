@@ -192,111 +192,55 @@ export function worktreeRequirement(execution: TaskExecution): { needed: boolean
 // Constraint 8 — a goal approved on the user's behalf stays inside the task
 // ---------------------------------------------------------------------------
 
-/**
- * File extensions that make a token unambiguously a PATH.
- *
- * Kept as a closed list rather than "anything after a dot", because the whole
- * problem R-6 documents is over-eager recognition: `v1.2`, `等等.` and
- * `README.` are not files.
- */
-const PATH_EXTENSIONS = new Set([
-  "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "md", "mdx", "yml", "yaml",
-  "toml", "sh", "bash", "zsh", "py", "go", "rs", "java", "rb", "css", "scss",
-  "html", "sql", "txt", "lock", "cjs", "env", "cfg", "ini", "xml", "svg",
-]);
-
-/**
- * Sentences that are declaring what will NOT be touched.
- *
- * A goal that spells out its non-goals is following this repository's own
- * advice, and R-6 measured exactly that being punished: "非目标：不修改
- * `extensions/` 与 `lib/`" made the proxy-approval FAIL for naming paths
- * outside the task — the very paths it promised not to touch.
- */
-const NEGATION_LINE = /(非目标|不改|不碰|不修改|不动|不涉及|不新增|不删除|不要改|禁止修改|out of scope|non-?goals?)/i;
-
-/**
- * Path-like tokens inside free text.
- *
- * THE BUG THIS REPLACES (R-6, three reproductions): the old extractor treated
- * ANY token containing a slash as a path, so a goal was refused for naming
- * `running/ended`, `slice/window` and `windowIn/windowOf` — three ordinary
- * English word pairs. The orchestrator's only way through was to rewrite the
- * child's goal text, which is how the hand-copied-text hole (R-7) came to be
- * used in the first place.
- *
- * So a token now counts as a path only when it is one of:
- *
- *  - a name with a known source extension (`lib/foo.ts`, `README.md`);
- *  - an explicit directory (`test/`, `lib/**`);
- *  - a path whose first segment is a root the TASK ITSELF declared — which is
- *    the only way to recognize an extension-less path without guessing.
- *
- * Lines that are declaring NON-GOALS are skipped entirely.
- */
-export function extractPathLikeTokens(text: string, knownRoots: readonly string[] = []): string[] {
-  const roots = new Set(
-    knownRoots
-      .map((b) => String(b ?? "").replace(/^\.\//, "").split("/")[0])
-      .filter((r): r is string => Boolean(r) && r !== "."),
-  );
-  const out: string[] = [];
-  for (const line of String(text ?? "").split(/\r?\n/)) {
-    if (NEGATION_LINE.test(line)) continue;
-    const tokens = line.split(/[\s,;:()[\]{}"'`、，。；：]+/).filter(Boolean);
-    for (const raw of tokens) {
-      const token = raw.replace(/^[<(]+|[>).,]+$/g, "");
-      if (!token) continue;
-      if (/^[a-z]+:\/\//i.test(token)) continue;      // URL
-      if (token.startsWith("-")) continue;            // a flag
-      if (token.startsWith("/")) continue;            // absolute: not a repo path
-      if (!/^[A-Za-z0-9._*/-]+$/.test(token)) continue;
-      const cleaned = token.replace(/\/\*\*?$/, "/");
-      const last = cleaned.split("/").filter(Boolean).pop() ?? "";
-      const dot = last.lastIndexOf(".");
-      const extension = dot > 0 ? last.slice(dot + 1).toLowerCase() : "";
-      const hasKnownExtension = PATH_EXTENSIONS.has(extension);
-      const isExplicitDirectory = cleaned.endsWith("/");
-      const firstSegment = cleaned.split("/")[0] ?? "";
-      const startsAtDeclaredRoot = cleaned.includes("/") && roots.has(firstSegment);
-      if (!hasKnownExtension && !isExplicitDirectory && !startsAtDeclaredRoot) continue;
-      const normalized = cleaned.replace(/\/$/, "");
-      if (normalized) out.push(normalized);
-    }
-  }
-  return [...new Set(out)];
-}
-
 export interface ProxyGoalVerdict {
   ok: boolean;
-  /** Paths named by the goal that fall outside the task's declared boundary. */
+  /** Files the child ALREADY edited that fall outside the task's boundary. */
   outside: string[];
   reason?: string;
 }
 
 /**
- * CONSTRAINT 8 — the orchestrator may approve a child's loop goal on the
- * user's behalf, but only while that goal stays inside the task it spawned
- * the child for. A goal that reaches outside is not a judgement call the
- * orchestrator is allowed to make: it is a scope change, and scope belongs to
- * the human.
+ * CONSTRAINT 8, judged against the FILES THE CHILD ACTUALLY EDITED (R3-1).
  *
- * `goalText` is the draft read from the CHILD'S OWN SIDECAR, never a text the
- * caller typed — see `approveChildGoal` in lib/orchestrator-dispatch.ts for
- * why that distinction is the whole guarantee (R-7).
+ * TWO PATCHES AND A THIRD FAILURE. The check used to read the goal TEXT and
+ * treat every path-like token in it as "a file this task will touch". Run 2
+ * refused a goal for naming `running/ended` and `slice/window` (ordinary word
+ * pairs); the patch was to recognize only real-looking paths. Run 2 also
+ * refused a goal for its NON-GOALS section — the paths it promised NOT to
+ * touch; the patch was to skip negated lines. Run 3 then refused a
+ * documentation task whose exit criteria said "可逐条对照
+ * `lib/orchestrator-probe.ts`", while its non-goals swore off editing code
+ * entirely. Two proxy approvals had to bypass the mechanical check.
+ *
+ * Every one of those is the same root cause: PROSE IS NOT A PLAN. A goal
+ * mentions files for a dozen reasons — to quote them, to compare against
+ * them, to promise not to touch them — and no amount of grammar tells the
+ * difference from "will edit".
+ *
+ * So the comparison moved to the one thing that is not prose: the child's own
+ * gate sidecar lists the files this session has EDITED (`sessionEditedFiles`).
+ * A goal that quotes a hundred modules is fine; a child that writes into one
+ * file outside its boundary is not, and the probe keeps checking this on
+ * every round rather than once at approval time — which is a STRONGER
+ * guarantee than the old text scan, not a weaker one: it cannot be talked
+ * around by rewording, and it does not stop watching after the approval.
  */
-export function proxyGoalProblems(goalText: string, task: PlanTask): ProxyGoalVerdict {
-  const named = extractPathLikeTokens(goalText, task.fileBoundaries);
-  const outside = pathsOutsideBoundaries(named, task.fileBoundaries);
+export function proxyApprovalProblems(
+  editedFiles: readonly string[],
+  task: PlanTask,
+): ProxyGoalVerdict {
+  const edited = editedFiles.map((f) => String(f ?? "").trim()).filter(Boolean);
+  const outside = pathsOutsideBoundaries(edited, task.fileBoundaries);
   if (outside.length === 0) return { ok: true, outside: [] };
   return {
     ok: false,
     outside,
     reason:
-      `代批被拒（约束 8）：子会话的 goal 提到了任务 "${task.id}" 边界之外的路径 —— ` +
-      `${outside.slice(0, 8).join(", ")}。任务边界是 ${task.fileBoundaries.join(", ")}。` +
-      "这是范围变更，不是技术取舍：用 `orchestrator_notify` 通知用户，由他决定是扩边界还是缩 goal。" +
-      "（注意：门禁比对的是子会话 sidecar 里的真实草稿，改写你手上的副本没有任何作用。）",
+      `代批被拒（约束 8）：子会话**已经改到**了任务 "${task.id}" 边界之外的文件 —— ` +
+      `${outside.slice(0, 8).join(", ")}${outside.length > 8 ? " 等" : ""}。任务边界是 ${task.fileBoundaries.join(", ")}。` +
+      "这是范围变更，不是技术取舍：用 `orchestrator_notify` 通知用户，由他决定是扩边界还是让子会话回滚这些改动。" +
+      "（判定依据是它 sidecar 里的实际落点 sessionEditedFiles，不是 goal 正文里出现过哪些路径 —— " +
+      "改写 goal 文本不会让这条通过。）",
   };
 }
 

@@ -62,7 +62,25 @@ export interface ChildSession {
   taskFile?: string;
 
   createdAt: string;
-  /** ISO time the child reported its task finished. */
+  /**
+   * ISO time this child was last GIVEN something to do.
+   *
+   * Set at spawn and again by every `orchestrator_send` that reaches it. It
+   * exists because a completion is only evidence about the work it finished:
+   * `declare_done` leaves a record in the child's sidecar that nothing ever
+   * clears, so a child re-tasked after finishing would be reported `done`
+   * again the moment its screen settled — including when it had simply got
+   * STUCK on the new work (round-1 P1). A completion older than this stamp is
+   * history, not a verdict.
+   */
+  lastAssignedAt?: string;
+  /**
+   * ISO time the child reported its task finished.
+   *
+   * Cleared when it is assigned new work: "this session finished something
+   * once" must never keep an ACTIVE child out of the exit check (round-1 P1 —
+   * an orchestration could `declare_done` while a child was still working).
+   */
   doneAt?: string;
   /** ISO time the gate closed its pane. */
   closedAt?: string;
@@ -190,6 +208,42 @@ export function markChildDone(
   return patchChild(runtime, id, { doneAt: at });
 }
 
+/**
+ * Record that a child was GIVEN new work, which un-finishes it.
+ *
+ * Both halves matter and they are the same defect (round-1 P1). A completion
+ * is written once — into the child's sidecar by `declare_done`, and into this
+ * registry by the probe — and nothing ever invalidated either:
+ *
+ *  - the probe would call a re-tasked child `done` again as soon as its
+ *    screen settled, which is indistinguishable from it having got STUCK on
+ *    the new work: the one state that produces no alarm would swallow the one
+ *    situation a supervisor must hear about;
+ *  - `doneAt` filters the child out of the orchestration exit check, so the
+ *    orchestration could `declare_done` while that child was still working.
+ *
+ * Stamping the assignment and dropping `doneAt` fixes both: from here on the
+ * child counts as ACTIVE again, and only a completion NEWER than this stamp
+ * is evidence about the new work.
+ */
+export function markChildAssigned(
+  runtime: OrchestratorRuntime,
+  id: string,
+  at: string = new Date().toISOString(),
+): OrchestratorRuntime {
+  return {
+    ...runtime,
+    children: runtime.children.map((c) => {
+      if (c.id !== id) return c;
+      // `doneAt` is DELETED rather than set to undefined: the runtime is
+      // compared and persisted as plain JSON, and an undefined key would
+      // survive a round-trip as a key that was never there.
+      const { doneAt: _finished, ...rest } = c;
+      return { ...rest, lastAssignedAt: at };
+    }),
+  };
+}
+
 /** Record that the gate closed a child's pane. */
 export function markChildClosed(
   runtime: OrchestratorRuntime,
@@ -272,6 +326,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     // sanitized runtime would no longer deep-equal the one the gate wrote.
     const worktree = str(c.worktree);
     const doneAt = str(c.doneAt);
+    const lastAssignedAt = str(c.lastAssignedAt);
     const closedAt = str(c.closedAt);
     // The variant only ever names a FILE inside `.pi/`, so it is sanitized on
     // the way back in exactly as `sidecarPath` sanitizes it on the way out —
@@ -285,6 +340,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
       ...(worktree ? { worktree } : {}),
       ...(stateVariant ? { stateVariant } : {}),
       ...(taskFile ? { taskFile } : {}),
+      ...(lastAssignedAt ? { lastAssignedAt } : {}),
       ...(doneAt ? { doneAt } : {}),
       ...(closedAt ? { closedAt } : {}),
     });

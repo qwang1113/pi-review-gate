@@ -75,7 +75,14 @@ export type BranchOp =
   | { op: "worktree_discard"; files: string[]; at: string; reason: string }
   | { op: "checkpoint_commit"; sha: string; branch: string; at: string; message: string }
   | { op: "base_branch_set"; branch: string; at: string }
-  | { op: "work_branch_set"; branch: string; base: string; at: string };
+  | { op: "work_branch_set"; branch: string; base: string; at: string }
+  /**
+   * The landing itself. `venue` names the worktree the merge RAN IN when it
+   * was not this one (R3-7): a parallel lane's base branch is held by another
+   * checkout, so the merge happens there, and "who touched that worktree" is
+   * exactly the question this log has to be able to answer afterwards.
+   */
+  | { op: "merge"; work: string; base: string; at: string; venue?: string };
 
 /** Cap: the log is a diagnostic, not a journal — keep the newest entries. */
 export const MAX_BRANCH_OPS = 200;

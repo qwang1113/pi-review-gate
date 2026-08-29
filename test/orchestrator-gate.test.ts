@@ -3,13 +3,12 @@ import assert from "node:assert/strict";
 
 import {
   ORCHESTRATOR_DOC_PATTERN,
-  extractPathLikeTokens,
   formatOrchestrationStatus,
   humanOnlyDecision,
   notifyAuthorization,
   orchestratorDoneProblems,
   orchestratorWriteBlock,
-  proxyGoalProblems,
+  proxyApprovalProblems,
   spawnAuthorization,
   worktreeRequirement,
   type OrchestratorDoneFacts,
@@ -124,69 +123,46 @@ test("CONSTRAINT 7: only a task that will run ALONGSIDE another gets a worktree"
 // CONSTRAINT 8 — a proxied goal stays inside the task
 // ---------------------------------------------------------------------------
 
-test("R-6: an English word pair with a slash is NOT a path — three measured false positives", () => {
-  // Each of these refused a perfectly good goal in the second run, and the
-  // orchestrator's only way through was to REWRITE the child's goal text —
-  // which is how the hand-copied-text hole (R-7) came to be used at all.
-  const boundaries = ["lib/orchestrator", "test"];
-  for (const prose of ["状态机有 running/ended 两态", "窗口用 slice/window 表达", "接口是 windowIn/windowOf"]) {
-    assert.deepEqual(extractPathLikeTokens(prose, boundaries), [], `"${prose}" names no file`);
-  }
-  // …while a real path in the same sentence still registers.
+test("R3-1: constraint 8 is judged on EDITED FILES, so prose about paths cannot refuse a goal", () => {
+  // The measured failure: a documentation task whose exit criteria said "可逐
+  // 条对照 `lib/orchestrator-probe.ts`" and whose non-goals promised not to
+  // touch a line of code was refused for "leaving its boundary". Two proxy
+  // approvals in the third run had to bypass the mechanical check.
+  const task: PlanTask = {
+    id: "t3", title: "supervision doc", fileBoundaries: ["docs"],
+    dependsOn: [], execution: "parallel", status: "running",
+  };
+  // It has only edited a doc — every path its GOAL quotes is irrelevant now.
   assert.deepEqual(
-    extractPathLikeTokens("状态机 running/ended 落在 lib/orchestrator/state.ts", boundaries),
-    ["lib/orchestrator/state.ts"],
+    proxyApprovalProblems(["docs/orchestrator-supervision.md"], task),
+    { ok: true, outside: [] },
   );
 });
 
-test("R-6: a NON-GOALS section is not a claim on those files — writing one must not be punished", () => {
-  const boundaries = ["docs"];
-  const goal = [
-    "退出标准：",
-    "1. 更新 docs/module-map.md",
-    "",
-    "非目标：不修改 extensions/review-gate.ts 与 lib/",
-    "不改 README.md / QUICKSTART.md",
-  ].join("\n");
-  assert.deepEqual(extractPathLikeTokens(goal, boundaries), ["docs/module-map.md"],
-    "only what the goal promises to TOUCH counts");
+test("R3-1: nothing edited yet ⇒ nothing outside the boundary (goal approval happens at step 0)", () => {
+  const task: PlanTask = {
+    id: "a", title: "a", fileBoundaries: ["lib/orchestrator"],
+    dependsOn: [], execution: "serial", status: "running",
+  };
+  assert.deepEqual(proxyApprovalProblems([], task), { ok: true, outside: [] },
+    "a child that has written nothing cannot have breached anything — the probe keeps watching");
 });
 
-test("R-6: an extension-less path is recognized when the TASK declared its root", () => {
-  // `docs/module-map` has no extension, so the only honest way to know it is
-  // a path is that the task itself declared `docs` as a boundary.
-  assert.deepEqual(extractPathLikeTokens("整理 docs/module-map 这一节", ["docs"]), ["docs/module-map"]);
-  assert.deepEqual(extractPathLikeTokens("整理 docs/module-map 这一节", ["lib"]), [],
-    "without that declaration it stays prose, rather than becoming a guess");
-});
-
-
-test("path extraction is conservative — prose and URLs are not paths", () => {
-  const found = extractPathLikeTokens(
-    "改 lib/orchestrator/plan.ts 与 test/plan.test.ts，参考 https://example.com/docs/x.md，别碰 --force",
-  );
-  assert.ok(found.includes("lib/orchestrator/plan.ts"));
-  assert.ok(found.includes("test/plan.test.ts"));
-  assert.ok(!found.some((t) => t.includes("example.com")), "a URL is not a repo path");
-  assert.ok(!found.includes("--force"), "a flag is not a path");
-  assert.deepEqual(extractPathLikeTokens("把这一轮做完，别的都不动"), [],
-    "ordinary prose names no paths at all");
-});
-
-test("CONSTRAINT 8: a goal inside the boundary is approvable; one outside is not", () => {
+test("CONSTRAINT 8: a real landing outside the boundary still refuses, and says whose call it is", () => {
   const task: PlanTask = {
     id: "a", title: "a", fileBoundaries: ["lib/orchestrator", "test"],
     dependsOn: [], execution: "serial", status: "running",
   };
   assert.deepEqual(
-    proxyGoalProblems("重构 lib/orchestrator/plan.ts，补 test/plan.test.ts", task),
+    proxyApprovalProblems(["lib/orchestrator/plan.ts", "test/plan.test.ts"], task),
     { ok: true, outside: [] },
   );
-  const outside = proxyGoalProblems("顺手改一下 extensions/review-gate.ts", task);
+  const outside = proxyApprovalProblems(["extensions/review-gate.ts"], task);
   assert.equal(outside.ok, false);
   assert.deepEqual(outside.outside, ["extensions/review-gate.ts"]);
   assert.match(outside.reason!, /范围变更/, "scope is the human's call, not a technical trade-off");
   assert.match(outside.reason!, /orchestrator_notify/, "and the refusal says what to do instead");
+  assert.match(outside.reason!, /sessionEditedFiles/, "and names the fact it judged, so rewording is not a way through");
 });
 
 // ---------------------------------------------------------------------------
