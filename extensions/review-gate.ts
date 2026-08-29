@@ -3636,7 +3636,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       message: Type.Optional(Type.String({
         description:
           "reviewer only: the checkpoint commit message (English, Conventional Commits). The gate " +
-          "adds the checkpoint marker itself; omit it and the gate writes one from your task text.",
+          "adds the checkpoint marker itself. Omitting it derives the message from your task text, " +
+          "which only works when that text is ENGLISH: L5 rejects a non-Latin subject outright, and " +
+          "a mostly-Chinese task text is refused as a non-English body too. Write this field " +
+          "whenever your round note is not English — that is the normal case in this project.",
       })),
       reason: Type.Optional(Type.String({
         description:

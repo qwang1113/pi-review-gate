@@ -1040,7 +1040,12 @@ test("checkpointMessage cannot build a subject its own L5 check would refuse", (
   // is stated in the doc comment ABOVE the implementation.
   const at = SRC.indexOf("The checkpoint's commit message.");
   assert.ok(at > 0, "checkpointMessage must exist");
-  const body = SRC.slice(at, SRC.indexOf("interface JudgeDispatch", at));
+  // Guard the end anchor: a renamed anchor would make indexOf return -1 and
+  // silently slice to the end of the file, so every assertion below would pass
+  // against unrelated source.
+  const end = SRC.indexOf("interface JudgeDispatch", at);
+  assert.ok(end > at, "the end anchor must still follow checkpointMessage");
+  const body = SRC.slice(at, end);
   assert.match(body, /containsNonLatinLetter\(firstLine\)/,
     "the derived subject is checked against the same strict rule L5 applies");
   assert.match(body, /record this round for review/,
@@ -1742,7 +1747,9 @@ test("review_checkpoint: the pre-review commit channel is registered with its co
   // Slice to the NEXT registered tool, not a fixed byte count: a magic window
   // silently starts missing assertions as soon as the body grows (it did —
   // 2026-08-29, when the L5 subject rule added comments above `st.checkpoint`).
-  const body = SRC.slice(at, SRC.indexOf('name: "judge_submit"', at));
+  const bodyEnd = SRC.indexOf('name: "judge_submit"', at);
+  assert.ok(bodyEnd > at, "the end anchor must still follow review_checkpoint");
+  const body = SRC.slice(at, bodyEnd);
   // the gate semantics: bypasses READY only, never precommit
   assert.match(body, /bypasses READY only, never precommit/);
   assert.match(body, /nonEnglishCommitMessage\(message\)/,
