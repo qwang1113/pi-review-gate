@@ -189,6 +189,10 @@ import {
 // judge_wait) are registered from lib/, like the orchestration tools: this
 // file keeps only what it alone owns and hands the rest over as deps.
 import { registerJudgeSessionTools } from "../lib/judge-session-tools.ts";
+// The judge tools that RELAY to a session (review_spawn / review_watch /
+// review_send) are the other half of the same family, and are registered the
+// same way — the dispatch owner and the child registry reach them as deps.
+import { registerJudgeRelayTools } from "../lib/judge-relay-tools.ts";
 import { polishReasonRequired, recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   writeJudgeSpawnFiles,
@@ -3677,7 +3681,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- review_spawn / review_send / judge_read / judge_close ----------
+  // ---------- judge_submit + the judge tool families' wiring ----------
 
   /**
    * Everything that has to happen BEFORE a reviewer can judge, run by the gate.
@@ -4279,193 +4283,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "review_spawn",
-    label: "Spawn Judge Child",
-    description:
-      "ADVANCED / internal entry: dispatch a judge round with an explicit display title. " +
-      "judge_submit is the normal path and derives the title itself — use this only when a " +
-      "diagnostics label matters. Same mechanics: role+repo decide the session id and its " +
-      "directory, an alive same-role session is reused, the exit listener is registered for you.",
-    parameters: Type.Object({
-      role: Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }),
-      title: Type.String({
-        description: "Human-readable child label (sanitized; display and diagnostics only)",
-      }),
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (required once the session edited several repos)",
-      })),
-      task: Type.String({
-        description: "The task text for THIS round (written to a file and passed as an @file argv reference)",
-      }),
-      fresh: Type.Optional(Type.Boolean({
-        description: "Force a NEW session even when an alive same-role child exists (default: reuse)",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, _ctx) {
-      const target = resolveToolRepo(params.repo);
-      if (!target.ok) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const root = target.root;
-      const role = String(params.role ?? "");
-      if (!JUDGE_ROLES.includes(role as (typeof JUDGE_ROLES)[number])) {
-        return {
-          content: [{ type: "text", text: `review-gate: review_spawn rejected — unknown role "${role}".` }],
-          details: { spawned: false },
-          isError: true,
-        };
-      }
-      const task = String(params.task ?? "").trim();
-      if (!task) {
-        return {
-          content: [{ type: "text", text: "review-gate: review_spawn rejected — the task text is empty. Write the task first, then pass it." }],
-          details: { spawned: false },
-          isError: true,
-        };
-      }
-      const dispatch = dispatchJudgeRound({
-        root,
-        role,
-        title: String(params.title ?? role),
-        task,
-        fresh: params.fresh === true,
-      });
-      if (!dispatch.ok) {
-        return {
-          content: [{ type: "text", text: `review-gate: review_spawn failed — ${dispatch.error ?? "no child"}` }],
-          details: { spawned: false },
-          isError: true,
-        };
-      }
-      const child = judgeChildByRole(root, role);
-      const sessionDir = dispatch.sessionDir ?? child?.sessionDir;
-      const stdoutPath = dispatch.stdoutPath ?? child?.stdoutPath;
-      const text = dispatch.reused
-        ? `review-gate: reusing existing ${role} child session ${dispatch.sessionId} — context carries over across rounds.\n` +
-          `- 本轮任务已提交；进程退出即完成，监听已重新注册。`
-        : `review-gate: ${role} child spawned as session ${dispatch.sessionId} (${child?.title ?? role}).\n` +
-          `- session dir: ${sessionDir} (transcript jsonl; resume = same session id)\n` +
-          `- stdout: ${stdoutPath}\n` +
-          `- 任务文本已随 spawn 传入(@file)；进程退出即完成，监听已自动注册，唤醒会作为新 turn 到达。`;
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          spawned: !dispatch.reused,
-          reused: dispatch.reused,
-          sessionId: dispatch.sessionId,
-          role,
-          title: child?.title,
-          sessionDir,
-          stdoutPath,
-          watching: true,
-        },
-      };
-    },
-  });
-
-
-  // ---------- review_watch tool (the wake-up mechanism) ----------
-
-  pi.registerTool({
-    name: "review_watch",
-    label: "Watch Review Child",
-    description:
-      "ADVANCED / internal: every dispatched round registers its completion watcher itself " +
-      "(judge_submit), so you never call this in the normal flow — only to re-register with a " +
-      "custom label after a reload, or for a process resumed outside the gate. When the child " +
-      "exits, the watcher wakes THIS session via pi.sendMessage(triggerTurn) — a new turn, no " +
-      "polling, no sleep. Watchers are cancelled on session shutdown.",
-    parameters: Type.Object({
-      sessionId: Type.String({
-        description: "The judge session id to watch (internal key; roles are addressed by name everywhere else)",
-      }),
-      label: Type.Optional(Type.String({
-        description: "Human-readable child label for the wake message (default: the session id)",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate) {
-      const sessionId = String(params.sessionId ?? "").trim();
-      const label = String(params.label ?? "").trim() || sessionId;
-      if (!sessionId) {
-        return {
-          content: [{ type: "text", text: "review-gate: review_watch rejected — the session id is empty." }],
-          details: { watching: false },
-          isError: true,
-        };
-      }
-      const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
-      if (!child || !judgeProcessAlive(child.child)) {
-        return {
-          content: [{ type: "text", text: `review-gate: no LIVE judge child with session id ${sessionId} — nothing to watch.` }],
-          details: { watching: false },
-          isError: true,
-        };
-      }
-      // One watcher per session id; a re-watch replaces the old handle.
-      registerWatch(sessionId, label);
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: watching ${sessionId} — 进程退出时会主动唤醒本会话（无需轮询）。`,
-        }],
-        details: { watching: true, sessionId },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "review_send",
-    label: "Send to Judge Session",
-    description:
-      "ADVANCED / internal entry: send a follow-up (typically the answer to a judge's question) to " +
-      "a role's session. It is the same operation as judge_submit — a resume under the same session " +
-      "id, so the judge wakes with its full context — and judge_submit is the normal path. " +
-      "Requires the role's process to have EXITED: a non-interactive judge reads its task once, at " +
-      "spawn, and cannot be interrupted mid-turn.",
-    parameters: Type.Object({
-      role: Type.Optional(Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" })),
-      sessionId: Type.Optional(Type.String({ description: "Internal key; prefer role" })),
-      text: Type.String({ description: "The follow-up message (any length; written to a file)" }),
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (required once the session edited several repos)",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, _ctx) {
-      const role = params.role ? String(params.role) : undefined;
-      const wantedId = params.sessionId ? String(params.sessionId) : undefined;
-      const text = String(params.text ?? "");
-      if (!role && !wantedId) {
-        return { content: [{ type: "text", text: "review-gate: review_send needs a role (reviewer / adviser / goal-auditor)." }], details: { sent: false, sessionId: undefined as string | undefined }, isError: true };
-      }
-      if (!text.trim()) {
-        return { content: [{ type: "text", text: "review-gate: review_send rejected — the message is empty." }], details: { sent: false, sessionId: undefined as string | undefined }, isError: true };
-      }
-      const target = resolveToolRepo(params.repo);
-      if (!target.ok) return { content: [{ type: "text", text: target.error }], details: { sent: false, sessionId: undefined as string | undefined }, isError: true };
-      const root = target.root;
-      const child = findJudgeChild(root, role, wantedId);
-      if (!child) {
-        return { content: [{ type: "text", text: `review-gate: no judge child on record for ${role ?? wantedId}.` }], details: { sent: false, sessionId: undefined as string | undefined }, isError: true };
-      }
-      // A resume IS a dispatch under the same session id — so it goes through
-      // the same owner, which allocates a FRESH run dir. Reusing the previous
-      // round's exit-code/stdout files would make judge_wait report "done"
-      // instantly and hand back the PREVIOUS round's verdict.
-      const dispatch = dispatchJudgeRound({ root, role: child.role, title: child.title, task: text, streamPath: child.streamPath });
-      if (!dispatch.ok) {
-        return {
-          content: [{ type: "text", text: `review-gate: review_send did not deliver — ${dispatch.error ?? "the judge process could not start"}` }],
-          details: { sent: false, sessionId: dispatch.sessionId },
-          isError: true,
-        };
-      }
-      return {
-        content: [{ type: "text", text: `review-gate: ${child.role} 已收到本轮消息（同一 session 续接，上下文保留）。` }],
-        details: { sent: true, sessionId: dispatch.sessionId },
-      };
-    },
-
+  /**
+   * The three tools that RELAY to a judge session — review_spawn (dispatch a
+   * round under an explicit title), review_watch (re-register the completion
+   * watcher) and review_send (resume a role with a follow-up) — live in
+   * lib/judge-relay-tools.ts; only their wiring is here. What they need from
+   * THIS file (the repo resolution, the one dispatch owner, the child
+   * registry and the watch registration) arrives as this deps object, and
+   * nothing else of them does: every rule they apply is unit-testable
+   * without a spawned judge.
+   */
+  registerJudgeRelayTools(pi, {
+    resolveRepo: (requested) => resolveToolRepo(requested),
+    dispatchRound: (request) => dispatchJudgeRound(request),
+    childByRole: (root, role) => judgeChildByRole(root, role),
+    findChild: (root, role, sessionId) => findJudgeChild(root, role, sessionId),
+    // Addressed by the internal key alone, so the lookup spans every repo's
+    // registry — review_watch never receives a repo to narrow it with.
+    childBySessionId: (sessionId) => [...childSessions.values()].flat().find((c) => c.sessionId === sessionId),
+    registerWatch: (sessionId, label) => registerWatch(sessionId, label),
   });
 
   /**
