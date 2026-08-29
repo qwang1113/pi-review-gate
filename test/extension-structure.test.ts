@@ -1003,8 +1003,24 @@ test("a message-only rewrite is not a content change, at L1 and in the branch ru
   const l5At = callBody.indexOf("nonEnglishCommitMessage(whole)");
   assert.ok(l5At > 0 && l5At < exemptionAt,
     "L5 must judge the NEW message BEFORE the rewrite is let through");
-  const problemsAt = callBody.indexOf("const problems: string[] = []");
-  assert.ok(problemsAt > exemptionAt, "…and the exemption returns before the content gates run");
+  // Round-3 P1: the exemption skips the CONTENT gates and nothing else. It
+  // used to `return` from the whole ship gate, which also dropped the branch
+  // rule — so an amend could land on main, on another session's branch, or
+  // with no work branch at all.
+  assert.doesNotMatch(callBody, /messageOnlyRewrite\)\s*\{\s*\n\s*appendLesson\([^)]*\);\s*\n\s*return;/,
+    "the exemption must not return from the ship gate");
+  assert.match(callBody, /const unmet = messageOnlyRewrite \? \[\] : unmetRequirements\(/,
+    "only the content requirements are skipped");
+  const branchRuleAt = callBody.indexOf("commitBranchAllowed({");
+  assert.ok(branchRuleAt > exemptionAt,
+    "the branch rule still runs after the exemption was decided");
+  // Every repo the command touches must qualify, and an unresolvable repo set
+  // never does (a compound `git -C A … && git -C B …` must not ride on A).
+  assert.match(callBody, /\[\.\.\.checkRoots\]\.every\(\(root\) => isMessageOnlyRewrite\(\{/);
+  assert.match(callBody, /!resolution\.ambiguous &&/);
+  // The INDEX is what an amend publishes, so the worktree tree alone is not
+  // evidence: staging a change and restoring the worktree must not qualify.
+  assert.match(callBody, /stagedChanges: hasStagedChanges\(root\)/);
   // The branch rule reads where a rebase will land instead of refusing.
   const branchFn = windowOf("function currentBranch(", "\n  }", "currentBranch");
   assert.match(branchFn, /rebaseBranch\(root\)/, "a detached rebase HEAD still names its branch");
@@ -1051,35 +1067,24 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
   }
 });
 
-test("checkpointMessage cannot build a subject its own L5 check would refuse", () => {
+test("checkpointMessage never builds a message its own L5 check would refuse", () => {
   // Round-2 P2: the agent's round note is Chinese (this project's output
   // language), so deriving the subject from its first line made the
   // omit-`message` default path of judge_submit fail the gate's OWN L5 rule —
-  // a default that can never succeed. The note must fall back to the body.
-  // Anchor at the JSDoc, not the `function` line: the contract this test pins
-  // is stated in the doc comment ABOVE the implementation.
-  const at = SRC.indexOf("The checkpoint's commit message.");
-  assert.ok(at > 0, "checkpointMessage must exist");
-  // Guard the end anchor: a renamed anchor would make indexOf return -1 and
-  // silently slice to the end of the file, so every assertion below would pass
-  // against unrelated source.
-  const end = SRC.indexOf("interface JudgeDispatch", at);
-  assert.ok(end > at, "the end anchor must still follow checkpointMessage");
-  const body = SRC.slice(at, end);
+  // a default that can never succeed. 2026-08-29: with the rule unified
+  // (subject AND body refuse any non-Latin letter), keeping the note as the
+  // BODY reproduced the same impossible default, so a non-English note is now
+  // dropped from the message entirely — it still reaches the reviewer as the
+  // round description.
+  const body = windowOf("The checkpoint's commit message.", "\n  /** What one dispatch", "checkpointMessage");
   assert.match(body, /containsNonLatinLetter\(firstLine\)/,
-    "the derived subject is checked against the same strict rule L5 applies");
+    "the derived subject is checked against the same rule L5 applies");
   assert.match(body, /record this round for review/,
     "a non-Latin note falls back to the English default subject");
-  // The note is not thrown away — it must survive in the body.
-  assert.match(body, /usable \? lines\.slice\(1\)\.join\("\\n"\) : raw/,
-    "the whole note becomes the body when it cannot be a subject");
-  // Round-3 P2: the fallback is a HALF fix and the comment must say so — the
-  // body rule still refuses a mostly-Chinese note, so `message` stays required
-  // in practice. A comment claiming the body "passes" was measurably false.
-  assert.match(body, /HALF fix/,
-    "the comment must not overstate what the fallback buys");
-  assert.doesNotMatch(body, /where the majority policy allows it/,
-    "the retired false claim must not come back");
+  assert.match(body, /containsNonLatinLetter\(rest\) \? "" : rest/,
+    "a non-English body is dropped, not handed to a check that must refuse it");
+  assert.doesNotMatch(body, /HALF fix/, "there is no half fix left to describe");
+  assert.doesNotMatch(body, /majority/, "the retired policy must not be cited");
 });
 
 

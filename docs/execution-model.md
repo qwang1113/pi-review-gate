@@ -137,10 +137,14 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
   基线以来无未审核 commit。
 - **只改 message 不改 tree 的改写**（2026-08-29，`lib/git-rewrite.ts`）：
   `git commit --amend` / `git rebase -i` reword 产出的 commit 与被替换的
-  commit **tree 相同**，不带来任何新内容，所以内容类门禁对它无话可说——
-  L1 与 pre-commit 钩子都放行（钩子只在 commit 路径放行；push 会发布整段
-  历史，`REVIEW_GATE_REQUIRE_FULL=1` 时不豁免）。改写后的 message 仍要过
-  L5：命令行传的由 L1 判，编辑器里写的（含每一次 reword）由 commit-msg
-  钩子判。rebase 中间态的 detached HEAD 按 `.git/rebase-merge/head-name`
-  还原成原分支，分支规则因此不再拦住 reword——这正是从前「修非英文
-  message 的两条路都被门禁堵死、只剩用户跑 /gate-bypass」的死结。
+  commit **tree 相同**（且 index 无暂存改动——`--amend` 发布的是 index），
+  不带来任何新内容，所以**内容类**门禁对它无话可说：L1 与 pre-commit 钩子
+  都跳过内容判定（钩子只在 commit 路径跳过；push 会发布整段历史，
+  `REVIEW_GATE_REQUIRE_FULL=1` 时不豁免）。**只豁免内容类**——提交落在哪条
+  分支（分支规则）、sidecar 缺失的 fail-closed、goal 未批准照旧执行，因为
+  它们问的都不是内容。多仓命令要求每个涉及的 repo 都成立，仓库解析不确定
+  时不豁免。改写后的 message 仍要过 L5：命令行传的由 L1 判，编辑器里写的
+  （含每一次 reword）由 commit-msg 钩子判。rebase 中间态的 detached HEAD
+  按 `.git/rebase-merge/head-name` 还原成原分支——分支规则因此**仍然适用**
+  且不再因「无法确定当前分支」误拦，这正是从前「修非英文 message 的两条路
+  都被门禁堵死、只剩用户跑 /gate-bypass」的死结所在。

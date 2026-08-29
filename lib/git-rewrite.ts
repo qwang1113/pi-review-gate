@@ -16,12 +16,13 @@
  * turned its own rule into an unfixable knot.
  *
  * THE FIX IS AN OBSERVATION, NOT AN EXCEPTION: a commit whose TREE equals the
- * tree of the commit it replaces publishes no content. Every content gate
- * (review binding, precommit binding, unreviewed-commit scan) exists to judge
- * CONTENT, so it has nothing to say about such a commit — and the message it
- * rewrites still goes through L5 at both the tool layer and the commit-msg
- * hook. Nothing is waived: the gates simply do not apply to a no-content
- * commit.
+ * tree of the commit it replaces publishes no content. The CONTENT gates
+ * (review binding, precommit binding, unreviewed-commit scan) exist to judge
+ * content, so they have nothing to say about such a commit — and the message
+ * it rewrites still goes through L5 at both the tool layer and the commit-msg
+ * hook. Nothing else is waived: WHERE the commit lands (the branch rule), the
+ * fail-closed sidecar checks and the loop-goal gate all still apply, because
+ * none of them is a question about content.
  *
  * Pure: the caller supplies the git facts.
  */
@@ -34,28 +35,43 @@ export interface RewriteFacts {
   newTree?: string;
   /** Tree of the commit being replaced (HEAD), or undefined. */
   replacedTree?: string;
+  /**
+   * Does the INDEX hold a staged change relative to the replaced commit?
+   *
+   * REQUIRED, because the two things can disagree: `--amend` publishes the
+   * INDEX while `newTree` is normally a worktree tree, so staging a change and
+   * then restoring the worktree would look like "no content" while the commit
+   * shipped one. `undefined` means the caller did not measure it — treated as
+   * unknown, which fails closed.
+   */
+  stagedChanges?: boolean;
 }
 
 /**
  * True when this commit rewrites a message and nothing else.
  *
- * Fail-closed on missing facts: an unreadable tree proves nothing, so the
- * normal gates apply. The `--amend` requirement keeps the exemption to the
- * shape it was written for — a plain `git commit` with an identical tree is
- * either impossible (git refuses an empty commit) or an explicit
- * `--allow-empty`, which has no reason to skip the gates.
+ * Fail-closed on missing facts: an unreadable tree (or an unmeasured index)
+ * proves nothing, so the normal gates apply. The `--amend` requirement keeps
+ * the exemption to the shape it was written for — a plain `git commit` with an
+ * identical tree is either impossible (git refuses an empty commit) or an
+ * explicit `--allow-empty`, which has no reason to skip the gates.
  */
 export function isMessageOnlyRewrite(facts: RewriteFacts): boolean {
   if (!facts.amend) return false;
   if (!facts.newTree || !facts.replacedTree) return false;
+  if (facts.stagedChanges !== false) return false;
   return facts.newTree === facts.replacedTree;
 }
 
 /**
- * Does this command carry `--amend`? Recognizes the flag as its own token
- * only, so `--amend-something` or an `--amend` inside a quoted message does
- * not count. (The caller passes ONE ship segment, already split by the shared
- * lexer.)
+ * Does this command carry `--amend`?
+ *
+ * A whole-string regex, deliberately: it matches the flag anywhere in the
+ * segment, INCLUDING inside a quoted message (`-m "document --amend"`). That
+ * false positive is harmless — the exemption additionally requires an
+ * unchanged tree AND an empty index diff, so a command that only mentions the
+ * word cannot skip anything it would not have skipped anyway. What the token
+ * boundaries do rule out is `--amend-something` and `--amendment`.
  */
 export function hasAmendFlag(command: string): boolean {
   return /(^|\s)--amend(=[^\s]*)?(\s|$)/.test(command);

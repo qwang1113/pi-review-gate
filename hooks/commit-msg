@@ -29,7 +29,17 @@ const { readFileSync } = require("node:fs");
 let text;
 try { text = readFileSync(process.argv[2], "utf8"); } catch { process.exit(0); }
 // Mirror of judgeEnglish() in lib/lang-detect.ts: ANY non-Latin letter fails.
-const prose = text.split("\n").filter((l) => !l.startsWith("#")).join("\n");
+// Git's own comment lines are not the message — and the character that starts
+// them is configurable (`core.commentChar`), so ASK git instead of assuming
+// `#`. "auto" (git picks a char per message) and any read failure fall back to
+// `#`, which is git's default.
+let commentChar = "#";
+try {
+  const { execFileSync } = require("node:child_process");
+  const configured = execFileSync("git", ["config", "--get", "core.commentChar"], { encoding: "utf8" }).trim();
+  if (configured && configured !== "auto") commentChar = configured[0];
+} catch { /* unset or unreadable — git's default stands */ }
+const prose = text.split("\n").filter((l) => !l.startsWith(commentChar)).join("\n");
 for (const ch of prose.normalize("NFC")) {
   if (/\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch)) {
     console.error(`[review-gate] commit message is not English (found "${ch}") — L5 accepts no non-Latin letters.`);

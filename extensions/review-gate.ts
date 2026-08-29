@@ -1292,6 +1292,25 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * Does the INDEX differ from HEAD? `git diff --cached --quiet HEAD` exits 1
+   * when it does, so a throw means "staged content" — and so does any error,
+   * which is the fail-closed reading: `undefined` (unknown) never authorizes
+   * the message-only exemption.
+   */
+  function hasStagedChanges(root: string): boolean | undefined {
+    try {
+      execFileSync("git", ["diff", "--cached", "--quiet", "HEAD"], {
+        cwd: root, encoding: "utf8", stdio: "ignore",
+      });
+      return false;
+    } catch (err) {
+      // Exit 1 is the documented "there are differences" answer; anything else
+      // (no HEAD, not a repo, git missing) is unknown, not "clean".
+      return (err as { status?: number }).status === 1 ? true : undefined;
+    }
+  }
+
+  /**
    * Round-9 P1: trees of the commits between the last READY's reviewed
    * commit and HEAD that DIFFER from the reviewed tree. Non-empty ⇒ content
    * no reviewer saw entered the branch since the READY (a checkpoint never
@@ -2278,22 +2297,39 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
     }
 
-    // MESSAGE-ONLY REWRITE (lib/git-rewrite.ts). A `git commit --amend` whose
-    // tree equals HEAD's publishes no content, so the CONTENT gates below have
-    // nothing to judge — and refusing it is what left a non-English commit
-    // message unfixable (the only exit was a human running /gate-bypass).
-    // The message itself was already judged above: L5 and the AI-attribution
-    // guard run BEFORE this, so the rewrite cannot smuggle in a bad message.
-    if (ships.every((s) => s.kind === "commit" && hasAmendFlag(s.segment))) {
-      const target = resolution.repos[0] ?? primaryRepoRoot;
-      if (isMessageOnlyRewrite({
+    // MESSAGE-ONLY REWRITE (lib/git-rewrite.ts). A `git commit --amend` that
+    // publishes the tree it replaces adds no content, so the CONTENT gates
+    // have nothing to judge — and refusing it is what left a non-English
+    // commit message unfixable (the only exit was a human running
+    // /gate-bypass).
+    //
+    // IT EXEMPTS THE CONTENT GATES AND NOTHING ELSE (round-3 P1). The branch
+    // rule, the fail-closed sidecar checks and the loop-goal gate below still
+    // run: WHERE a commit lands is not a content question, and this round's
+    // own rebase-aware `currentBranch` is exactly what lets that rule keep
+    // applying during a reword instead of deadlocking on a detached HEAD.
+    //
+    // The message was already judged: L5 and the AI-attribution guard run
+    // ABOVE this, so a rewrite cannot smuggle in a bad message.
+    //
+    // Two measurements, because `--amend` publishes the INDEX while the
+    // fingerprint is a worktree tree: the worktree must equal HEAD's tree AND
+    // the index must hold no staged change. Either alone is bypassable (stage
+    // a change, then restore the worktree).
+    const messageOnlyRewrite =
+      !resolution.ambiguous &&
+      ships.every((s) => s.kind === "commit" && hasAmendFlag(s.segment)) &&
+      // EVERY repo this command touches must qualify: a compound
+      // `git -C A commit --amend && git -C B commit --amend` must not be
+      // exempted by repo A alone.
+      [...checkRoots].every((root) => isMessageOnlyRewrite({
         amend: true,
-        newTree: worktreeTree(target),
-        replacedTree: headCommitTree(target) || undefined,
-      })) {
-        appendLesson(`message-only rewrite allowed (tree unchanged): ${command.slice(0, 160)}`);
-        return;
-      }
+        newTree: worktreeTree(root),
+        replacedTree: headCommitTree(root) || undefined,
+        stagedChanges: hasStagedChanges(root),
+      }));
+    if (messageOnlyRewrite) {
+      appendLesson(`message-only rewrite: content gates skipped (tree unchanged): ${command.slice(0, 160)}`);
     }
 
 
@@ -2333,7 +2369,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
       }
       if (st) {
-        const unmet = unmetRequirements(st, headCommitTree(root), false, {
+        // The CONTENT gates — and the only thing a message-only rewrite is
+        // exempt from, because it publishes no content for them to judge.
+        const unmet = messageOnlyRewrite ? [] : unmetRequirements(st, headCommitTree(root), false, {
           requireDocSync: projectConfig.docSync,
           unreviewedCommits: unreviewedTreesSince(root, st.review),
           requireFullTests,
@@ -3512,28 +3550,27 @@ export default function reviewGate(pi: ExtensionAPI) {
    * requirement): the marker is the gate's to add, not the agent's to
    * remember. An agent-written subject keeps its own wording behind it.
    *
-   * The agent's round note is usually CHINESE (this project's output language),
-   * while L5 requires an English subject — so a non-Latin first line falls back
-   * to the English default subject instead of building one the gate's own L5
-   * check would then refuse. The note itself is kept, as the body.
+   * L5 IS THE CONSTRAINT, AND THIS FUNCTION MUST NOT BUILD A MESSAGE IT WOULD
+   * REFUSE. The agent's round note is usually CHINESE (this project's output
+   * language) while a commit message must be English — subject AND body, since
+   * the rule was unified (2026-08-29). So a note carrying any non-Latin letter
+   * is NOT used as message text at all: the subject falls back to the English
+   * default and the note is DROPPED from the body. Nothing is lost — the same
+   * note is what the reviewer receives as the round's description, verbatim,
+   * in the task text.
    *
-   * This is a HALF fix, deliberately documented as such: it removes the subject
-   * failure, NOT the body one. A note that is mostly Chinese still trips L5's
-   * majority-body rule (measured: a normal round note lands at ~2:1 non-Latin
-   * and is refused as `part: "body"`), so with a Chinese note `message` is in
-   * practice REQUIRED on judge_submit — the fallback buys a usable subject, not
-   * a usable message. Making the body pass would mean either translating the
-   * note (not this function's job) or exempting checkpoint bodies from L5,
-   * which is a policy change the user has not asked for.
+   * The alternative would be a message whose body is guaranteed to be refused
+   * by the gate's own check: a default path that can never succeed, which is
+   * what this function existed to remove in the first place. Writing an
+   * English `message` on judge_submit still gets you a real subject and body.
    */
   function checkpointMessage(raw: string): string {
     const lines = raw.trim().split("\n");
     const firstLine = (lines[0] ?? "").trim().slice(0, 100);
-    // L5: the subject must be English. A non-Latin letter anywhere in it means
-    // this text cannot be a subject at all — keep it in the body instead.
-    const usable = firstLine.length > 0 && !containsNonLatinLetter(firstLine);
-    const subject = usable ? firstLine : "record this round for review";
-    const body = (usable ? lines.slice(1).join("\n") : raw).trim();
+    const usableSubject = firstLine.length > 0 && !containsNonLatinLetter(firstLine);
+    const subject = usableSubject ? firstLine : "record this round for review";
+    const rest = (usableSubject ? lines.slice(1).join("\n") : raw).trim();
+    const body = containsNonLatinLetter(rest) ? "" : rest;
     const marked = /^checkpoint\b|^chore\(checkpoint\)/i.test(subject) ? subject : `checkpoint: ${subject}`;
     return body ? `${marked}\n\n${body}` : marked;
   }
@@ -3894,10 +3931,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       message: Type.Optional(Type.String({
         description:
           "reviewer only: the checkpoint commit message (English, Conventional Commits). The gate " +
-          "adds the checkpoint marker itself. Omitting it derives the message from your task text, " +
-          "which only works when that text is ENGLISH: L5 rejects a non-Latin subject outright, and " +
-          "a mostly-Chinese task text is refused as a non-English body too. Write this field " +
-          "whenever your round note is not English — that is the normal case in this project.",
+          "adds the checkpoint marker itself. Omit it and the gate derives the message from your " +
+          "task text — but only the parts of it that are ENGLISH: L5 accepts no non-Latin letter " +
+          "in a commit message, so a Chinese round note yields the default subject and no body. " +
+          "Write this field whenever you want the history to say something — that is the normal " +
+          "case in this project.",
       })),
       reason: Type.Optional(Type.String({
         description:

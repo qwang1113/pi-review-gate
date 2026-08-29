@@ -309,18 +309,29 @@ try {
 // hook, and the only remaining exit was a human running /gate-bypass. The
 // message itself is still checked (commit-msg hook, L5).
 //
-// TWO CONDITIONS make this sound, and both must hold:
+// THREE CONDITIONS, all of which must hold:
 //  1. COMMIT ONLY. A PUSH publishes the whole history, including commits this
 //     exemption never looked at, so pre-push (which re-execs this hook with
 //     REVIEW_GATE_REQUIRE_FULL=1) must NOT be exempt.
-//  2. The comparison is the WORKTREE tree, while a commit publishes the INDEX.
-//     Those can differ — but the staged-divergence checker above already
-//     refused this commit if they did, so by this line they are the same.
+//  2. The WORKTREE tree equals HEAD's.
+//  3. The INDEX — which is what the commit actually publishes — holds no
+//     staged change either. The staged-divergence checker above already
+//     refuses a divergent index, but this exemption does not lean on that:
+//     measuring both is one cheap git call and removes the dependency
+//     (mirrors isMessageOnlyRewrite in lib/git-rewrite.ts, which requires the
+//     same two facts at the tool layer).
 if (!requireFullTests) {
   try {
     const { execFileSync } = require("node:child_process");
     const headTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
-    if (headTree && headTree === currentFp) process.exit(0);
+    let staged = true;
+    try {
+      // Honors GIT_INDEX_FILE, so `git commit -a`'s temporary index is the
+      // one measured. Exit 1 = differences; any other failure stays "staged".
+      execFileSync("git", ["diff", "--cached", "--quiet", "HEAD"], { stdio: "ignore" });
+      staged = false;
+    } catch { staged = true; }
+    if (headTree && headTree === currentFp && !staged) process.exit(0);
   } catch { /* no HEAD (root commit) — the gates below apply as usual */ }
 }
 
