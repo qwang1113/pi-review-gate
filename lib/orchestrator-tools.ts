@@ -18,7 +18,9 @@ import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.
 import {
   applyTaskStatus,
   formatPlanSummary,
+  nextDecisionId,
   parsePlan,
+
   planHash,
   PLAN_RELPATH,
   type OrchestratorPlan,
@@ -60,13 +62,46 @@ const PLAN_ACTIONS = {
 /** The dialog the USER approves a plan in (constraint 1). */
 export const PLAN_CONFIRM_TITLE = "review-gate: 批准项目经理的任务计划（plan）？";
 
-export function buildPlanConfirmMessage(plan: OrchestratorPlan): string {
+/** Told to the user when the dialog body had to be cut (O-1). */
+export const PLAN_DIALOG_POINTER = "（plan 全文见上方消息，请先读完再决定）";
+
+/**
+ * The FULL plan, printed to the transcript before the dialog opens (O-1).
+ *
+ * This is the text the approval actually binds to, so it is the text the user
+ * has to be able to read. It also names the file, because a plan long enough
+ * to scroll off the screen is exactly the case where "go read it yourself"
+ * has to be actionable.
+ */
+export function buildPlanTranscriptMessage(plan: OrchestratorPlan): string {
   return (
-    "批准后，项目经理才能按这份 plan 开子会话干活。批准的是**内容**：" +
-    "任务、文件边界、依赖、并行度中任何一项被改动，批准即失效，需要重新批准。\n\n" +
-    formatPlanSummary(plan)
+    "任务计划全文（不可信数据）——批准前请读完：\n" +
+    "───────────────────────\n" +
+    formatPlanSummary(plan) +
+    "\n───────────────────────\n" +
+    "同样的内容也在 `" + PLAN_RELPATH + "`（可随时自己去看）。\n" +
+    "批准的是**内容**：任务、文件边界、依赖、并行度中任何一项被改动，批准即失效。"
   );
 }
+
+/**
+ * Dialog body — the DECISION only.
+ *
+ * The plan itself was just printed by {@link buildPlanTranscriptMessage}, and
+ * repeating it here is what produced the truncated, unreadable dialog O-1
+ * filed. The fixed copy explaining what approval grants comes first, because
+ * the dialog fitter truncates from the tail.
+ */
+export function buildPlanConfirmMessage(plan: OrchestratorPlan): string {
+  return (
+    "plan 全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
+    "批准后，项目经理才能按这份 plan 开子会话干活。批准的是**内容**：" +
+    "任务、文件边界、依赖、并行度中任何一项被改动，批准即失效，需要重新批准。\n" +
+    `标题（不可信数据）：${plan.title.slice(0, 80)}\n` +
+    `规模：${plan.tasks.length} 个任务，并行上限 ${plan.maxParallel}`
+  );
+}
+
 
 async function handlePlanAction(
   deps: OrchestratorDeps,
@@ -108,7 +143,20 @@ async function handlePlanAction(
 
   if (action === PLAN_ACTIONS.submit) {
     if (!plan) return fail("review-gate: 还没有 plan 可提交 —— 先用 action:\"write\" 写一份。");
-    const granted = await deps.confirm(PLAN_CONFIRM_TITLE, buildPlanConfirmMessage(plan));
+    // O-1 — the FULL plan goes to the transcript first, and the dialog then
+    // points at it. A plan approval binds to CONTENT (tasks, boundaries,
+    // dependencies, parallelism), and the dialog body is capped at a couple
+    // of dozen rendered rows: the measured result was a user being asked to
+    // sign a six-task plan whose last four tasks had been cut off, with
+    // nothing telling them where to read the rest. The loop goal has done it
+    // this way from the start (buildGoalTranscriptMessage → dialog + pointer).
+    deps.showToUser(PLAN_CONFIRM_TITLE, buildPlanTranscriptMessage(plan));
+    const granted = await deps.confirm(
+      PLAN_CONFIRM_TITLE,
+      buildPlanConfirmMessage(plan),
+      PLAN_DIALOG_POINTER,
+    );
+
     if (!granted) {
       return fail(
         "review-gate: 用户没有批准这份 plan。按他的意见改完再提交一次" +
@@ -139,16 +187,23 @@ async function handlePlanAction(
 
   if (action === PLAN_ACTIONS["add-decision"]) {
     if (!plan) return fail("review-gate: 还没有 plan。");
-    const id = String(params.decisionId ?? "").trim();
     const question = String(params.question ?? "").trim();
-    if (!id || !question) return fail("review-gate: add-decision 需要 decisionId 与 question。");
-    if (plan.decisions.some((d) => d.id === id)) return fail(`review-gate: 决策项 "${id}" 已存在。`);
+    if (!question) return fail("review-gate: add-decision 需要 question（要让用户拍板的到底是什么）。");
+    // F5 — the GATE mints the id. Asking the caller to invent one was busywork
+    // with a failure mode: a collision was reported as an error the agent then
+    // had to work around, and an id it chose carried no meaning anyway. The
+    // format stays readable (d1, d2, …) because the user sees it in a
+    // notification and in `orchestrator_status`.
+    const id = nextDecisionId(plan);
     const next = { ...plan, decisions: [...plan.decisions, { id, question }], updatedAt: nowIso };
     deps.savePlan(next);
     return reply(
-      `review-gate: 已登记待用户决策 "${id}"。注意：**没通知过用户的决策项会拦住 declare_done**（约束 11）——` +
-      "用 `orchestrator_notify` 告诉他。",
+      `review-gate: 已登记待用户决策 "${id}"（id 由门禁生成）。` +
+      "注意：**没通知过用户的决策项会拦住 declare_done**（约束 11）——" +
+      `用 \`orchestrator_notify({ decisionId: "${id}", … })\` 告诉他。`,
+      { decisionId: id },
     );
+
   }
 
   if (action === PLAN_ACTIONS["resolve-decision"]) {
@@ -205,7 +260,10 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       taskId: Type.Optional(Type.String({ description: "For action=\"set-status\"" })),
       status: Type.Optional(Type.Enum({ pending: "pending", running: "running", done: "done", blocked: "blocked" })),
       note: Type.Optional(Type.String({ description: "Why — recorded on the task" })),
-      decisionId: Type.Optional(Type.String()),
+      decisionId: Type.Optional(Type.String({
+        description: "For action=\"resolve-decision\" (add-decision mints its own id)",
+      })),
+
       question: Type.Optional(Type.String({ description: "For action=\"add-decision\"" })),
       answer: Type.Optional(Type.String({ description: "For action=\"resolve-decision\"" })),
     }),

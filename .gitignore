@@ -1,6 +1,12 @@
 node_modules/
 *.log
 .pi/review-gate-state.json
+# Per-session sidecar variants (RG_STATE_VARIANT): an orchestrator's children
+# each own one, so they never share the supervisor's gate state (F4).
+.pi/review-gate-state.*.json
+# The orchestration plan is live run state, like every other `.pi/` artifact.
+.pi/orchestrator-plan.json
+
 .pi/loop-goal.md
 # Per-run gate artifacts: the step cache and the timings log are local
 # diagnostics, not shared state (both live under the fingerprint-excluded

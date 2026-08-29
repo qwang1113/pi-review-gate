@@ -106,8 +106,47 @@ export interface OrchestratorDeps {
   /** The orchestrator's own pane id, from $TMUX_PANE. */
   ownPane(): string | undefined;
 
-  /** Ask the USER; the extension renders the dialog, the tool never claims consent. */
-  confirm(title: string, message: string): Promise<boolean>;
+  /**
+   * Ask the USER; the extension renders the dialog, the tool never claims consent.
+   *
+   * `pointer` is passed straight to the dialog fitter: when the body has to be
+   * truncated it tells the user WHERE the untruncated text is. A caller may
+   * only pass one after it has actually shown that text (see
+   * {@link OrchestratorDeps.showToUser}) — promising a message nobody printed
+   * is the bug O-1 filed against the plan dialog.
+   */
+  confirm(title: string, message: string, pointer?: string): Promise<boolean>;
+
+  /**
+   * Print something to the user's transcript BEFORE a dialog asks about it.
+   *
+   * The plan approval binds to CONTENT (tasks, boundaries, dependencies,
+   * parallelism), and a dialog box cannot hold a six-task plan — O-1 measured
+   * a user being asked to sign a truncated one. The loop goal solved this
+   * years-equivalent ago by printing the full text first and pointing the
+   * dialog at it; the plan now does the same.
+   */
+  showToUser(title: string, text: string): void;
+
+  /**
+   * Write a scratch file OUTSIDE the repository (task documents, F7).
+   *
+   * Outside on purpose: a task file inside the worktree lands in the first
+   * child's `git add -A` checkpoint.
+   */
+  writeScratchFile(name: string, content: string): { ok: true; path: string } | { ok: false; error: string };
+
+  /**
+   * Read a child's OWN gate sidecar as parsed JSON (F10's channel).
+   *
+   * `undefined` when there is none yet — which is itself evidence: a child
+   * that has not written one has not loaded the extension.
+   */
+  childGateState(cwd: string, variant?: string): Record<string, unknown> | undefined;
+
+  /** Injectable sleep, so delivery verification can be tested without waiting. */
+  sleep(ms: number): Promise<void>;
+
 
   /** Create an isolated worktree for a parallel child (constraint 7). */
   addWorktree(name: string): { ok: true; path: string } | { ok: false; error: string };

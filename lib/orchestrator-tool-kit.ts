@@ -13,8 +13,19 @@
  */
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
-import { buildListPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
+import { buildCapturePaneArgv, buildListPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
+import {
+  emptyStartupEvidence,
+  parsePaneSnapshot,
+  readStartupEvidence,
+  type PaneSnapshot,
+  type StartupEvidence,
+} from "./orchestrator-pane-read.ts";
+import { deliveryVerdict, type DeliveryKind, type DeliveryVerdict } from "./orchestrator-delivery.ts";
+
+import type { ChildSession } from "./orchestrator-registry.ts";
 import type { OrchestratorPlan } from "./orchestrator-plan.ts";
+
 
 /**
  * The two result builders.
@@ -90,3 +101,140 @@ export function currentPlan(
   }
   return { plan: read.plan };
 }
+
+/**
+ * READ a child's screen (F3, channel 1).
+ *
+ * `undefined` means tmux could not be read — which is deliberately different
+ * from "the pane is empty": the waiter turns the first into "liveness
+ * unknown, keep waiting" and the second into evidence, and conflating them is
+ * what made a live child look dead (F14).
+ */
+export function capturePane(
+  deps: OrchestratorDeps,
+  paneId: string,
+  lines?: number,
+): PaneSnapshot | undefined {
+  try {
+    const result = deps.tmux(buildCapturePaneArgv(paneId, lines ?? undefined));
+    if (!result.ok) return undefined;
+    return parsePaneSnapshot(result.stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+/** What a child's own gate sidecar says (F3, channel 2 — the exact one). */
+export interface ChildGateFacts {
+  present: boolean;
+  /** Rendered, one fact per line. Empty when there is no sidecar. */
+  lines: string[];
+  /** The goal draft the child is currently asking about, when there is one. */
+  goalDraft?: string;
+}
+
+/** Longest goal draft echoed into a read (the whole point is to see it). */
+const GOAL_DRAFT_MAX = 4000;
+
+/**
+ * Read the STRUCTURED half of a child's state.
+ *
+ * F10 is the reason this exists: when the orchestrator could not read the
+ * child's goal-approval dialog, the draft text was already sitting in the
+ * child's own sidecar under `goalPrereview.draft`. The data was never
+ * missing; the tool was. Everything here is best-effort and clearly labelled
+ * as coming from the sidecar, because it only ever knows about the GATE's own
+ * dialogs — an ordinary question from the child appears nowhere in it.
+ */
+export function childGateFacts(deps: OrchestratorDeps, child: ChildSession): ChildGateFacts {
+  const raw = deps.childGateState(child.cwd, child.stateVariant);
+  if (!raw) return { present: false, lines: [] };
+  const lines: string[] = [];
+  const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+  const nested = (key: string): Record<string, unknown> | undefined => {
+    const value = raw[key];
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  };
+
+  const mode = str(raw.taskMode);
+  if (mode) lines.push(`门禁模式：${mode}`);
+  const branch = str(raw.workBranch);
+  if (branch) lines.push(`工作分支：${branch}${str(raw.baseBranch) ? ` → ${str(raw.baseBranch)}` : ""}`);
+  const review = nested("review");
+  if (review) lines.push(`review 判决：${str(review.verdict) ?? "?"}`);
+  const precommit = nested("precommit");
+  if (precommit) lines.push(`precommit：${str(precommit.verdict) ?? "?"}`);
+  const paused = nested("pausedQuestion");
+  if (paused) lines.push(`它在等用户回答：${str(paused.question) ?? "（问题正文读不到）"}`);
+
+  const prereview = nested("goalPrereview");
+  const draft = prereview ? str(prereview.draft) : undefined;
+  if (prereview) {
+    lines.push(`goal 预审：${str(prereview.verdict) ?? "?"} @ ${str(prereview.at) ?? "?"}`);
+  }
+  return {
+    present: true,
+    lines,
+    ...(draft ? { goalDraft: draft.slice(0, GOAL_DRAFT_MAX) } : {}),
+  };
+}
+
+/** How long a delivery check keeps looking for evidence, and how often. */
+export const DELIVERY_VERIFY_ATTEMPTS = 15;
+export const DELIVERY_VERIFY_INTERVAL_MS = 1000;
+
+export interface DeliveryCheck {
+  verdict: DeliveryVerdict;
+  evidence: StartupEvidence;
+  /** The last screen that was read — handed back so a failure shows it. */
+  snapshot?: PaneSnapshot;
+}
+
+/**
+ * WATCH a delivery until it can be believed, or until the budget runs out
+ * (F7/F8 — the receipt is earned, never assumed).
+ *
+ * It polls rather than checking once because starting a pi session is not
+ * instantaneous, and a single check right after `split-window` would fail on
+ * every healthy spawn. It stops at the FIRST positive evidence: there is
+ * nothing to gain by watching a child that has demonstrably started.
+ *
+ * The evidence itself is judged by lib/orchestrator-delivery.ts, which knows
+ * that a running process proves a SPAWN (the task rode in on the argv) and
+ * proves nothing at all about a typed message.
+ */
+export async function verifyDelivery(
+  deps: OrchestratorDeps,
+  opts: {
+    kind: DeliveryKind;
+    paneId: string;
+    marker?: string;
+    /** Where the child's own sidecar would appear, when it has one. */
+    cwd?: string;
+    stateVariant?: string;
+    attempts?: number;
+    intervalMs?: number;
+  },
+): Promise<DeliveryCheck> {
+  const attempts = Math.max(1, opts.attempts ?? DELIVERY_VERIFY_ATTEMPTS);
+  const interval = Math.max(0, opts.intervalMs ?? DELIVERY_VERIFY_INTERVAL_MS);
+  let evidence: StartupEvidence = emptyStartupEvidence();
+  let snapshot: PaneSnapshot | undefined;
+  let verdict: DeliveryVerdict = deliveryVerdict(opts.kind, evidence);
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await deps.sleep(interval);
+    snapshot = capturePane(deps, opts.paneId);
+    const pane = readStartupEvidence(snapshot, opts.marker);
+    const sidecarPresent = opts.cwd
+      ? Boolean(deps.childGateState(opts.cwd, opts.stateVariant))
+      : false;
+    evidence = { ...pane, sidecarPresent };
+    verdict = deliveryVerdict(opts.kind, evidence);
+    if (verdict.ok) break;
+  }
+  return { verdict, evidence, ...(snapshot ? { snapshot } : {}) };
+}
+

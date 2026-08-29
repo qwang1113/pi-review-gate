@@ -174,10 +174,14 @@ import {
   ORCHESTRATOR_DIRECTIVE,
   CHILD_OF_ORCHESTRATOR_DIRECTIVE,
   ORCHESTRATOR_NEEDS_TMUX,
+  buildOrchestratorExitBlock,
+
 } from "../lib/orchestrator-directives.ts";
 import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
 import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
 import { registerOrchestratorSessionTools } from "../lib/orchestrator-session-tools.ts";
+import { registerOrchestratorReadTools } from "../lib/orchestrator-read-tools.ts";
+
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
@@ -236,7 +240,10 @@ import {
   FINGERPRINT_MIGRATION_NOTICE,
   saveSidecarPreservingConcurrent,
   shouldStrategicReset,
-  sidecarPath,
+  sidecarPath as sidecarPathIn,
+  stateVariantFrom,
+  STATE_VARIANT_ENV,
+
   unmetRequirements,
   type GateState,
 } from "../lib/gate-state.ts";
@@ -383,6 +390,24 @@ import {
  * has one way to find the payload.
  */
 const TASK_TEXT_MARKER = "--- task text ---";
+
+/**
+ * This process's sidecar variant (F4), resolved ONCE from the environment.
+ *
+ * A session an orchestrator spawned carries `RG_STATE_VARIANT`, so it reads
+ * and writes its OWN `.pi/review-gate-state.<variant>.json` instead of
+ * sharing one file with the supervising orchestrator (whose `taskMode`,
+ * `askUser` record and unmet-gate list would otherwise overwrite each
+ * other's). See lib/gate-state.ts for why the CHILD moves rather than the
+ * orchestrator.
+ */
+const SESSION_STATE_VARIANT = stateVariantFrom(process.env);
+
+/** The sidecar this process owns, for any repo it touches. */
+function sidecarPath(root: string): string {
+  return sidecarPathIn(root, ".pi", SESSION_STATE_VARIANT);
+}
+
 
 const ENTRY_TYPE = "review-gate-state";
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
@@ -1055,8 +1080,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       publishAttention({
         fromSessionId: attentionIdentity(),
         toSessionId: attentionTarget(),
+        // F12 — stamp WHERE this came from. The orchestration waiter uses the
+        // origin pane to tell "one of my children is calling" from "an event
+        // that merely happens to be addressed to me": the hand-run measured
+        // `fromPane: None` on every event, which left the waiter with nothing
+        // to filter on and made it return instantly on foreign traffic.
+        fromPane: process.env.TMUX_PANE?.trim() || undefined,
         repo: repo ?? cwd,
         reason,
+
       });
     } catch { /* attention is a convenience, never a gate */ }
   }
@@ -1099,7 +1131,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     loadRuntime: () => state.orchestrator,
     storeRuntime: persistOrchestration,
     orchestrationId: currentOrchestrationId,
-    confirm: (title, message) => confirmBounded(latestCtx ?? {}, title, message),
+    confirm: (title, message, pointer) => confirmBounded(latestCtx ?? {}, title, message, pointer),
+    // O-1 — the plan's full text goes into the TRANSCRIPT before the dialog
+    // asks about it, exactly like the loop goal. A plan approval binds to
+    // content, so a truncated dialog body was asking the user to sign
+    // something they could not read.
+    showToUser: (title, text) => { showToUser(latestCtx ?? {}, title, text); },
+
     branchFacts: () => ({
       workBranch: state.workBranch,
       baseBranch: state.baseBranch,
@@ -1117,6 +1155,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
   registerOrchestratorSessionTools(pi, orchestratorDeps);
+  registerOrchestratorReadTools(pi, orchestratorDeps);
+
   /** Constraints 3, 4, 10 and 11 — the orchestration's own exit contract. */
   function orchestrationDoneProblems(): string[] {
     if (state.taskMode !== "orchestrator") return [];
@@ -2169,14 +2209,20 @@ export default function reviewGate(pi: ExtensionAPI) {
       // after the L8 goal gate so the two never disagree about which refusal
       // the author sees first.
       if (state.taskMode === "orchestrator" && path) {
-        const rel = absPath && absPath.startsWith(primaryRepoRoot + "/")
-          ? absPath.slice(primaryRepoRoot.length + 1)
-          : path;
+        // F2 — a write OUTSIDE the repository is allowed. `absPath` is what
+        // decides it: only a path that resolves inside the repo root is
+        // judged against the in-repo whitelist. A path the resolver could not
+        // make absolute stays fail-closed (treated as in-repo), because
+        // "unknown location" must never buy the wider permission.
+        const insideRepo = !absPath || absPath.startsWith(primaryRepoRoot + "/");
+        const rel = absPath && insideRepo ? absPath.slice(primaryRepoRoot.length + 1) : path;
         const orchestratorBlock = orchestratorWriteBlock({
           relPath: rel,
           taskMode: state.taskMode,
           relayHandoffPath: state.orchestrator?.relay?.handoffPath,
+          outsideRepo: !insideRepo,
         });
+
         if (orchestratorBlock) return { block: true, reason: orchestratorBlock };
       }
       // L6 label check. NOTE the ordering: it runs AFTER the gate-owned
@@ -8532,14 +8578,24 @@ export default function reviewGate(pi: ExtensionAPI) {
       systemPrompt += "\n\n" + ORCHESTRATOR_DIRECTIVE;
       const inherited = formatInheritanceBrief(readInheritance(), currentOrchestrationId());
       if (inherited) systemPrompt += "\n\n" + inherited;
-      const orchestrationProblems = orchestrationDoneProblems();
-      if (orchestrationProblems.length) {
-        systemPrompt += "\n\n编排层还差这些才能 declare_done：\n" +
-          orchestrationProblems.map((p) => `- ${p}`).join("\n");
-      }
-    } else if (isOrchestrationChild()) {
+      // F13 — an orchestrator RETURNS HERE, and that is the whole fix.
+      //
+      // Falling through used to append the loop block, which tells the
+      // session to "negotiate a loop goal → judge_submit reviewer →
+      // declare_done". For a project manager every clause of that is wrong:
+      // its exit contract is the PLAN, not a goal, and constraint 2 forbids
+      // it from writing the code a review would judge. Worse, the unmet-gate
+      // list it was shown ("code review gate PENDING", "precommit has not
+      // run") was read from the sidecar its CHILD had dirtied — two sessions,
+      // one file (F4). Its own contract is the orchestration's, and
+      // orchestratorDoneProblems is where that lives.
+      systemPrompt += "\n\n" + buildOrchestratorExitBlock(orchestrationDoneProblems());
+      return { systemPrompt };
+    }
+    if (isOrchestrationChild()) {
       systemPrompt += "\n\n" + CHILD_OF_ORCHESTRATOR_DIRECTIVE;
     }
+
 
     if (!gateArmed && problems.length === 0) {
       return { systemPrompt };

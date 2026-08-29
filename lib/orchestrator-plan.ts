@@ -440,6 +440,25 @@ export function unreportedDecisions(plan: OrchestratorPlan): PlanDecision[] {
   return plan.decisions.filter((d) => !d.resolvedAt && !d.notifiedAt);
 }
 
+/**
+ * The next decision id (F5) — minted by the GATE, never by the caller.
+ *
+ * Sequential and short (`d1`, `d2`, …) because a human reads it: it appears
+ * in the desktop notification that asks them to decide, and in
+ * `orchestrator_status`. The scan for the highest existing number (rather
+ * than `decisions.length + 1`) keeps it unique even after a decision was
+ * removed by hand from the plan file.
+ */
+export function nextDecisionId(plan: OrchestratorPlan): string {
+  let highest = 0;
+  for (const decision of plan.decisions) {
+    const match = /^d(\d+)$/.exec(decision.id);
+    if (match) highest = Math.max(highest, Number(match[1]));
+  }
+  return `d${highest + 1}`;
+}
+
+
 /** Decisions still waiting on the human (notified or not) — for status output. */
 export function openDecisions(plan: OrchestratorPlan): PlanDecision[] {
   return plan.decisions.filter((d) => !d.resolvedAt);

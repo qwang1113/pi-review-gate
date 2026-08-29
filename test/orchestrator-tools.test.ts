@@ -3,15 +3,20 @@ import assert from "node:assert/strict";
 
 import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
 import { registerOrchestratorSessionTools } from "../lib/orchestrator-session-tools.ts";
-import type { OrchestratorDeps, ToolHost, ToolReply } from "../lib/orchestrator-deps.ts";
-import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
-import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { registerOrchestratorReadTools } from "../lib/orchestrator-read-tools.ts";
+import type { ToolHost, ToolReply } from "../lib/orchestrator-deps.ts";
+import { planHash, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
+import { STATE_VARIANT_ENV } from "../lib/gate-state.ts";
 import { PREDECESSOR_PANE_ENV } from "../lib/orchestrator-relay.ts";
-import type { TaskMode } from "../lib/task-mode.ts";
-
-const NOW = 1_700_000_000_000;
+import {
+  fakeOrchestration,
+  samplePlan,
+  NOW,
+  type FakeOrchestration,
+  type FakeOrchestrationOptions,
+} from "./helpers/fake-orchestration.ts";
 
 const PLAN_INPUT = {
   title: "拆分",
@@ -24,132 +29,48 @@ const PLAN_INPUT = {
 };
 
 function planFrom(input: unknown = PLAN_INPUT): OrchestratorPlan {
-  const parsed = parsePlan(input, new Date(NOW).toISOString());
-  assert.ok(parsed.ok, parsed.problems.join("; "));
-  return parsed.plan!;
+  return samplePlan(input);
 }
 
-interface Harness {
-  call(name: string, params?: Record<string, unknown>): Promise<ToolReply>;
-  deps: OrchestratorDeps;
-  tmuxCalls: string[][];
-  worktrees: string[];
-  removed: string[];
-  confirmAnswers: boolean[];
-  emitted: string[];
-  plan(): OrchestratorPlan | undefined;
-  runtime(): OrchestratorRuntime;
-  setEnv(env: NodeJS.ProcessEnv): void;
+/**
+ * The harness is now the SHARED fake (test/helpers/fake-orchestration.ts):
+ * these tests and the protocol test drive the very same simulated tmux, so a
+ * behavior that only the protocol test exercises cannot silently diverge from
+ * the one this file asserts.
+ */
+type Harness = FakeOrchestration;
+
+function harness(options: FakeOrchestrationOptions = {}): Harness {
+  return fakeOrchestration(options);
 }
 
-function harness(options: {
-  taskMode?: TaskMode;
-  plan?: OrchestratorPlan;
-  approved?: boolean;
-  panes?: string[];
-  ownPane?: string;
-  env?: NodeJS.ProcessEnv;
-  notificationsWork?: boolean;
-} = {}): Harness {
-  const tools = new Map<string, (params: Record<string, unknown>) => Promise<ToolReply>>();
-  const host: ToolHost = {
-    registerTool(def) {
-      tools.set(def.name, (params) =>
-        def.execute("id", params, { aborted: false }, undefined, undefined));
-    },
-  };
-
-  let plan = options.plan;
-  let runtime: OrchestratorRuntime = emptyRuntime("orch-abc-1");
-  if (options.approved && plan) {
-    runtime = { ...runtime, approvedPlanHash: planHash(plan), approvedPlanAt: new Date(NOW).toISOString() };
-  }
-  let env = options.env ?? ({} as NodeJS.ProcessEnv);
-  const panes = options.panes ?? ["%1"];
-  const tmuxCalls: string[][] = [];
-  const worktrees: string[] = [];
-  const removed: string[] = [];
-  const confirmAnswers: boolean[] = [];
-  const emitted: string[] = [];
-  const notificationsWork = options.notificationsWork ?? true;
-  let nextPane = 2;
-
-  const deps: OrchestratorDeps = {
-    repoRoot: "/repo",
-    now: () => NOW,
-    env: () => env,
-    taskMode: () => options.taskMode ?? "orchestrator",
-    runtime: () => runtime,
-    saveRuntime: (next) => { runtime = next; },
-    readPlan: () => ({ plan, problems: [] }),
-    savePlan: (next) => { plan = next; },
-    tmux: (argv) => {
-      tmuxCalls.push([...argv]);
-      if (argv[0] === "list-panes") return { ok: true, stdout: panes.join("\n"), stderr: "" };
-      if (argv[0] === "split-window") {
-        const id = `%${nextPane++}`;
-        panes.push(id);
-        return { ok: true, stdout: `${id}\n`, stderr: "" };
-      }
-      return { ok: true, stdout: "", stderr: "" };
-    },
-    ownPane: () => options.ownPane ?? "%1",
-    confirm: async () => confirmAnswers.shift() ?? false,
-    addWorktree: (name) => {
-      const path = `/tmp/wt/${name}`;
-      worktrees.push(path);
-      return { ok: true, path };
-    },
-    removeWorktree: (path) => { removed.push(path); },
-    consumeAttention: () => undefined,
-    branchFacts: () => ({ mergeSettled: true, mergeWaived: false }),
-    emitNotification: (sequence) => { emitted.push(sequence); return notificationsWork; },
-    fileChars: () => 1000,
-    sessionTranscriptPath: () => "/sessions/self.jsonl",
-  };
-
-  registerOrchestratorStateTools(host, deps);
-  registerOrchestratorSessionTools(host, deps);
-
-  return {
-    async call(name, params = {}) {
-      const tool = tools.get(name);
-      assert.ok(tool, `tool ${name} must be registered`);
-      return tool(params);
-    },
-    deps,
-    tmuxCalls,
-    worktrees,
-    removed,
-    confirmAnswers,
-    emitted,
-    plan: () => plan,
-    runtime: () => runtime,
-    setEnv: (next) => { env = next; },
-  };
-}
 
 function text(reply: ToolReply): string {
   return reply.content.map((c) => c.text).join("\n");
 }
 
-test("all eight orchestration tools are registered", () => {
+test("all ten orchestration tools are registered", () => {
   const registered: string[] = [];
   const host: ToolHost = { registerTool: (def) => { registered.push(def.name); } };
   const stub = harness().deps;
   registerOrchestratorStateTools(host, stub);
   registerOrchestratorSessionTools(host, stub);
+  registerOrchestratorReadTools(host, stub);
   assert.deepEqual(registered.sort(), [
-    "orchestrator_close", "orchestrator_notify", "orchestrator_plan", "orchestrator_relay",
-    "orchestrator_send", "orchestrator_spawn", "orchestrator_status", "orchestrator_wait",
+    "orchestrator_close", "orchestrator_key", "orchestrator_notify", "orchestrator_plan",
+    "orchestrator_read", "orchestrator_relay", "orchestrator_send", "orchestrator_spawn",
+    "orchestrator_status", "orchestrator_wait",
   ]);
 });
+
 
 test("every tool refuses outside orchestrator mode", async () => {
   const h = harness({ taskMode: "loop", plan: planFrom(), approved: true });
   for (const name of [
     "orchestrator_plan", "orchestrator_status", "orchestrator_spawn",
     "orchestrator_send", "orchestrator_wait", "orchestrator_close", "orchestrator_relay",
+    "orchestrator_read", "orchestrator_key",
+
   ]) {
     const reply = await h.call(name, { taskId: "a", childId: "x", handoffPath: "docs/h.md" });
     assert.equal(reply.isError, true, `${name} must refuse`);
@@ -222,7 +143,7 @@ test("the task state machine is enforced through the tool", async () => {
 
 test("CONSTRAINT 1: spawning without an approved plan is refused", async () => {
   const h = harness({ plan: planFrom() });
-  const reply = await h.call("orchestrator_spawn", { taskId: "a" });
+  const reply = await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
   assert.equal(reply.isError, true);
   assert.match(text(reply), /plan 尚未获得用户批准/);
   assert.deepEqual(h.tmuxCalls.filter((c) => c[0] === "split-window"), [], "nothing was opened");
@@ -241,16 +162,31 @@ test("a spawn registers the pane, injects the address and starts the child in LO
   assert.equal(child.taskId, "a");
   assert.equal(child.paneId, "%2");
   assert.equal(h.plan()!.tasks[0]!.status, "running", "the plan follows the spawn");
-  assert.ok(h.tmuxCalls.some((c) => c[0] === "send-keys" && c.includes("开始干活")),
-    "the opening message is delivered");
+  // F7 — the task is a FILE carried in the argv, not keystrokes. Nothing
+  // about the opening message may go through `send-keys`: that is the path
+  // that truncated it and then never submitted it.
+  assert.equal(child.stateVariant, child.id, "F4: the child owns its own gate sidecar");
+  assert.ok(child.taskFile, "the task was written to a file");
+  assert.ok(
+    split.some((arg) => arg === `@${child.taskFile}`),
+    "the task file is the child's first message, via pi's @file argv",
+  );
+  assert.ok(split.includes(`${STATE_VARIANT_ENV}=${child.id}`), "and the variant is injected");
+  assert.deepEqual(
+    h.tmuxCalls.filter((c) => c[0] === "send-keys"),
+    [],
+    "F7/F8: not one keystroke carried the task",
+  );
+  assert.equal(reply.details?.delivered, true, "F8: the receipt is earned, and says so");
+
 });
 
 test("CONSTRAINT 7: a parallel task gets a gate-created worktree; a serial one does not", async () => {
   const h = harness({ plan: planFrom(), approved: true });
-  await h.call("orchestrator_spawn", { taskId: "a" });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
   assert.deepEqual(h.worktrees, [], "the first child runs alone — no isolation needed");
 
-  const second = await h.call("orchestrator_spawn", { taskId: "b" });
+  const second = await h.call("orchestrator_spawn", { taskId: "b", task: "干活 b" });
   assert.equal(second.details?.execution, "parallel");
   assert.deepEqual(h.worktrees, ["/tmp/wt/b"], "a child running alongside another gets its own checkout");
   const split = h.tmuxCalls.filter((c) => c[0] === "split-window")[1]!;
@@ -269,8 +205,8 @@ test("CONSTRAINT 6: a task overlapping a running one is refused with the schedul
     }),
     approved: true,
   });
-  await h.call("orchestrator_spawn", { taskId: "a" });
-  const blocked = await h.call("orchestrator_spawn", { taskId: "b" });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
+  const blocked = await h.call("orchestrator_spawn", { taskId: "b", task: "干活 b" });
   assert.equal(blocked.isError, true);
   assert.match(text(blocked), /约束 6/);
 });
@@ -284,7 +220,7 @@ test("a spawn that cannot be registered is ROLLED BACK", async () => {
     if (argv[0] === "list-panes") return { ok: true, stdout: "%1", stderr: "" };
     return { ok: true, stdout: "", stderr: "" };
   };
-  const reply = await h.call("orchestrator_spawn", { taskId: "b" });
+  const reply = await h.call("orchestrator_spawn", { taskId: "b", task: "干活 b" });
   assert.equal(reply.isError, true);
   assert.match(text(reply), /已回滚/);
   assert.deepEqual(h.runtime().children, []);
@@ -296,13 +232,28 @@ test("a spawn that cannot be registered is ROLLED BACK", async () => {
 
 test("CONSTRAINT 8: a proxied goal outside the task boundary is refused", async () => {
   const h = harness({ plan: planFrom(), approved: true });
-  await h.call("orchestrator_spawn", { taskId: "a" });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
   const childId = h.runtime().children[0]!.id;
 
+  // F11 — a proxied approval now has to ANSWER the child's dialog, so there
+  // has to BE one. Without it the tool refuses instead of reporting success:
+  // the old code passed the boundary check and said "已过边界比对", which read
+  // as "approved" while the dialog sat untouched in the pane.
+  const withoutDialog = await h.call("orchestrator_send", {
+    childId, approveGoal: "重构 lib/plan/state.ts，补测试",
+  });
+  assert.equal(withoutDialog.isError, true, "F11: no dialog on screen ⇒ nothing was approved");
+  assert.equal(withoutDialog.details?.boundaryOk, true, "the boundary check itself passed");
+  assert.equal(withoutDialog.details?.approved, false, "and the receipt says so plainly");
+
+  h.openDialog(h.runtime().children[0]!.paneId, "认可这个 goal 吗？", ["Yes", "No"]);
   const inside = await h.call("orchestrator_send", {
     childId, approveGoal: "重构 lib/plan/state.ts，补测试",
   });
   assert.notEqual(inside.isError, true);
+  assert.equal(inside.details?.approved, true);
+  assert.match(h.render(h.runtime().children[0]!.paneId), /answered: Yes/, "the dialog was really answered");
+
 
   const outside = await h.call("orchestrator_send", {
     childId, approveGoal: "顺手改 extensions/review-gate.ts",
@@ -328,15 +279,15 @@ test("CONSTRAINT 13: only a child the GATE spawned is addressable at all", async
     assert.match(text(reply), /没有登记过子会话/);
   }
   // And once the gate DID spawn it, the same calls address it fine.
-  await h.call("orchestrator_spawn", { taskId: "a" });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
   const registered = h.runtime().children[0]!.id;
   assert.notEqual((await h.call("orchestrator_send", { childId: registered, message: "hi" })).isError, true);
 });
 
 test("closing is limited to registered panes, and cleans up the worktree", async () => {
   const h = harness({ plan: planFrom(), approved: true });
-  await h.call("orchestrator_spawn", { taskId: "a" });
-  await h.call("orchestrator_spawn", { taskId: "b" });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
+  await h.call("orchestrator_spawn", { taskId: "b", task: "干活 b" });
   const parallelChild = h.runtime().children[1]!;
 
   const stranger = await h.call("orchestrator_close", { childId: "%99" });
@@ -391,7 +342,7 @@ test("waiting with NOTHING to wait for is refused, not reported as a dead child"
   assert.equal(empty.details?.reason, "no-children");
   assert.match(text(empty), /orchestrator_spawn/, "it points at what to do instead");
 
-  await h.call("orchestrator_spawn", { taskId: "a" });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
   const unknown = await h.call("orchestrator_wait", { childId: "ghost" });
   assert.equal(unknown.isError, true);
   assert.equal(unknown.details?.reason, "no-such-child",
@@ -400,7 +351,7 @@ test("waiting with NOTHING to wait for is refused, not reported as a dead child"
 
 test("status reports the plan, the children and what still blocks the exit", async () => {
   const h = harness({ plan: planFrom(), approved: true });
-  await h.call("orchestrator_spawn", { taskId: "a" });
+  await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
   const reply = await h.call("orchestrator_status");
   const body = text(reply);
   assert.match(body, /编排状态/);

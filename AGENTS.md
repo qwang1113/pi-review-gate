@@ -284,9 +284,17 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 设计铁律只有一句（用户原话）：**能提供工具的，就不要让会话自己组装。** 项目经理
 只表达意图，门禁负责实现 —— 它不手写 tmux 命令、不写等待脚本、不自己拼通知。
-工具集：`orchestrator_plan` / `_spawn` / `_send` / `_wait` / `_notify` /
-`_relay` / `_close` / `_status`（判定逻辑在 `lib/orchestrator-*.ts`，
+工具集：`orchestrator_plan` / `_spawn` / `_send` / `_read` / `_key` / `_wait` /
+`_notify` / `_relay` / `_close` / `_status`（判定逻辑在 `lib/orchestrator-*.ts`，
 `extensions/review-gate.ts` 只接线）。
+
+`_read` 与 `_key` 是 2026-08-29 端到端验证后补上的两个**原子能力**：attention 事件
+只带一句 reason、不带问题正文，所以项目经理必须能**读**子会话的屏幕（含对话框选项与
+当前高亮项）与它自己的 sidecar，并能**按**下非默认项 —— 缺了这两样，无人值守的问答
+链路在第一跳就死锁。配套的三条铁律：投递不走 send-keys 传长文本（写任务文件、用
+`pi @file` argv 启动）、回执必须先校验对方真的收到（校验不过就报失败，绝不谎报）、
+`orchestrator_wait` 只认「发给本编排且来自本编排已登记子会话」的事件且必然返回。
+
 
 对**其他会话**来说，只有三件事需要知道：
 

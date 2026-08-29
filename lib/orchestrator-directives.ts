@@ -35,6 +35,9 @@ export const ORCHESTRATOR_DIRECTIVE =
   "| 开一个子会话干活 | `orchestrator_spawn({ taskId })` |\n" +
   "| 给子会话发消息 / 代批它的 goal | `orchestrator_send` |\n" +
   "| 等子会话有动静 | `orchestrator_wait` |\n" +
+  "| **看子会话到底在说什么/在问什么** | `orchestrator_read({ childId })` |\n" +
+  "| **答它的选项框（选第 N 项 / 选文本匹配的那项）** | `orchestrator_key({ childId, index })` |\n" +
+
   "| 给用户本人发系统通知 | `orchestrator_notify` |\n" +
   "| 上下文快满了，交接给下一任 | `orchestrator_relay` |\n" +
   "| 关掉某个自己开的子会话 | `orchestrator_close` |\n" +
@@ -58,7 +61,15 @@ export const ORCHESTRATOR_DIRECTIVE =
   "### 别把等待写成结束 turn\n" +
   "派完任务就输出总结、结束 turn，是这个角色最容易犯也最贵的错：子会话弹了对话框没人管，" +
   "用户得亲自来转告。正确做法是 `orchestrator_wait` —— 它在 attention 事件 / 子会话完成 / " +
-  "pane 消失 / 超时 任一命中时返回。真要用户拍板时用 `ask_user`。";
+  "pane 消失 / 预算用完 任一命中时**必然返回**（默认 300s，上限 900s）。真要用户拍板时用 `ask_user`。\n" +
+  "\n" +
+  "### 收到 attention 之后的标准动作\n" +
+  "attention 事件只带一句 reason（比如「等待回答提问」），**不带问题正文** —— 所以：\n" +
+  "1. `orchestrator_read({ childId })` 看它的屏幕与门禁状态（回执会标明每条信息的来源）；\n" +
+  "2. 是选项框就 `orchestrator_key({ childId, index })` 选中并提交（门禁会按完复读校验命中，" +
+  "命中不了报失败而不是谎报成功）；不是选项框就 `orchestrator_send` 回它；\n" +
+  "3. 该由真人拍板的（丢工作区、敏感文件、范围变更）不要代答 —— `orchestrator_notify` 叫用户。";
+
 
 /**
  * The ONE sentence a child session is told. Injected by the gate in the
@@ -68,6 +79,39 @@ export const ORCHESTRATOR_DIRECTIVE =
 export const CHILD_OF_ORCHESTRATOR_DIRECTIVE =
   "注意：本轮任务由一个项目经理会话在统筹，它可能会给你发消息（比如代你确认某个决定）。" +
   "除此之外你就是普通的 loop 会话：按你自己的 goal 干活，该问用户就 `ask_user`。";
+
+/**
+ * The orchestrator's OWN exit block — what the loop block would have said, if
+ * the loop block applied to this role. It does not (F13).
+ *
+ * The loop block instructs a session to negotiate a loop goal, submit its
+ * edits to a reviewer and then `declare_done`. An orchestrator has no edits
+ * (constraint 2 forbids them) and no goal (its contract is the PLAN), so
+ * every clause of it was an instruction to do something it is not allowed to
+ * do — and the "unmet gates" it quoted were read out of the sidecar its own
+ * child had written (F4). This block states the contract that IS its own.
+ *
+ * A function rather than a constant because the outstanding problems are
+ * computed per turn; the copy around them is fixed and pinned by tests.
+ */
+export function buildOrchestratorExitBlock(problems: readonly string[]): string {
+  const head =
+    "## 编排层的退出契约（这是你的门禁，不是 loop 那套）\n" +
+    "你的完成判据是 **plan 全部做完**，不是「你自己这轮干了什么」：" +
+    "不需要协商 loop goal，不需要 `judge_submit` 送审自己的改动（你本来就不写代码），" +
+    "代码的审查由每个子会话在它自己的 loop 里各自完成。\n" +
+    "收尾用 `declare_done` —— 门禁会重新校验：plan 无未完成任务、没有活着的子会话、" +
+    "没有「登记了却从未通知用户」的决策、工作分支的归宿已落定。";
+  if (problems.length === 0) {
+    return head + "\n\n现在没有未决项：plan 做完就可以 `declare_done`。";
+  }
+  return (
+    head +
+    "\n\n现在还差这些才能 `declare_done`：\n" +
+    problems.map((p) => `- ${p}`).join("\n")
+  );
+}
+
 
 /** Shown when `set_gate_mode("orchestrator")` is refused outside tmux. */
 export const ORCHESTRATOR_NEEDS_TMUX =

@@ -129,6 +129,21 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 两个等待共用 `lib/poll-wait.ts` 这一套骨架（probe / 发快照 / 判据或预算命中
 即返回），只是把判据换掉 —— 这正是上一轮把骨架做成判据可注入的原因。
 
+**attention 只是门铃，不是话筒**（2026-08-29 端到端验证的头号发现）：事件只带一句
+reason（如「等待回答提问」），**不带问题正文**。所以醒来之后的标准动作是
+`orchestrator_read({childId})` —— 它同时给两路信息并**分别标注来源**：tmux
+`capture-pane` 的可见文本（含对话框选项与当前高亮项的启发式解析）与子会话自己的
+sidecar（门禁类对话框的结构化真值，比如它正在申请批准的 goal 草稿）。要答选项框用
+`orchestrator_key({childId, index})`：门禁自己读高亮、算方向键次数、**按完复读校验
+命中**，命中不了报失败而不是谎报成功；低层按键（`keys: ["escape"]`）作为兜底。
+
+**投递不走键盘**：`orchestrator_spawn` 把任务正文写成仓库外的任务文件、以
+`pi @<taskfile>` argv 启动子会话（与 `lib/judge-process.ts` 同一机制），因此不存在
+截断、也不需要补 Enter；`orchestrator_send` 的长文本同理。两者在回执成功前都必须
+观察到「对方真的收到并起跑」的证据，观察不到就回执失败并把任务标回 `pending`
+（保留 pane，不误杀）。
+
+
 **寻址**：judge 子会话寻址派它的那个 session（`RG_PARENT_SESSION`）是对的
 —— 它活不过这一轮。编排子会话会**活过**开它的会话（接力换人），所以它寻址的
 是稳定的 orchestration id（`RG_ORCHESTRATION_ID`）。`attentionTarget()`

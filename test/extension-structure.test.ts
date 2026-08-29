@@ -790,7 +790,11 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
   const orchestratorSites = [...body.matchAll(/state\.taskMode === "orchestrator"/g)];
   assert.equal(orchestratorSites.length, 2,
     "exactly two orchestrator sites in tool_call: the write block and the tmux guard tier");
-  const writeSite = body.slice(orchestratorSites[0]!.index!, orchestratorSites[0]!.index! + 700);
+  // The window covers the whole site, comments included: F2 added the
+  // outside-the-repo carve-out and its reasoning, and a window that stopped
+  // short would silently stop pinning the `block: true` return below.
+  const writeSite = body.slice(orchestratorSites[0]!.index!, orchestratorSites[0]!.index! + 1400);
+
   assert.match(writeSite, /orchestratorWriteBlock\(\{/,
     "the first orchestrator site is the write restriction (constraint 2)");
   assert.match(writeSite, /return \{ block: true, reason: orchestratorBlock \}/,
@@ -1443,12 +1447,19 @@ test("attention stays DIRECTED and file-based — no tmux signal, no global broa
   // (RG_PARENT_SESSION). Never a global bell.
   const fnAt = SRC.indexOf("function notifyUserAttention(");
   assert.ok(fnAt > 0, "notifyUserAttention must exist");
-  const fn = SRC.slice(fnAt, fnAt + 450);
+  const fn = SRC.slice(fnAt, fnAt + 900);
+
   assert.match(fn, /publishAttention\(\{/, "the event goes through the payload publisher");
   assert.match(fn, /fromSessionId: attentionIdentity\(\)/, "the payload identifies the sender (self-wake filter)");
   assert.match(fn, /toSessionId: attentionTarget\(\)/,
     "the payload is addressed by attentionTarget(): the ORCHESTRATION it belongs to, else the spawning session");
   assert.match(fn, /reason,/, "the payload carries the reason");
+  // F12 — and WHERE it came from. Without an origin pane the orchestration
+  // waiter has nothing to check ownership against, and it spun on foreign
+  // traffic (measured: `fromPane: None` on every event of the first real run).
+  assert.match(fn, /fromPane: process\.env\.TMUX_PANE/,
+    "the payload stamps its origin pane, so a waiter can tell whose event it is");
+
   assert.doesNotMatch(fn, /osascript/, "no macOS notification is fired from the extension");
   assert.doesNotMatch(fn, /waitForSignalAsync|wait-for/, "no tmux signal is fired from the extension");
   // The address derives from the parent session id — no global broadcast.
@@ -2771,14 +2782,31 @@ test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets o
   const block = windowOf('if (state.taskMode === "orchestrator") {', "\n    }\n", "orchestration prompt");
   assert.match(block, /ORCHESTRATOR_DIRECTIVE/);
   assert.match(block, /formatInheritanceBrief/, "a relay successor is told what it inherited");
-  assert.match(block, /isOrchestrationChild\(\)/);
-  assert.match(block, /CHILD_OF_ORCHESTRATOR_DIRECTIVE/);
+  // F13 — the orchestrator branch RETURNS. Falling through appended the loop
+  // block ("negotiate a loop goal → judge_submit reviewer → declare_done"),
+  // which contradicts constraint 2 clause by clause and quoted the CHILD's
+  // unmet gates out of a shared sidecar. Its contract is the plan.
+  assert.match(block, /buildOrchestratorExitBlock\(orchestrationDoneProblems\(\)\)/,
+    "an orchestrator is told the PLAN's exit contract, not the loop's");
+  assert.match(block, /return \{ systemPrompt \};/,
+    "and it returns before the loop block can be appended");
+
   // A child must NOT be handed the plan: knowing it makes it optimize for the
   // plan instead of for its own task (task book §5, a user requirement).
-  const childBranch = block.slice(block.indexOf("isOrchestrationChild()"));
+  // Searched from the orchestrator prompt block, not from the top of the
+  // file: `isOrchestrationChild()` is also consulted elsewhere, and pinning
+  // the wrong occurrence would make this assertion vacuous.
+  const promptAt = SRC.indexOf('if (state.taskMode === "orchestrator") {\n      systemPrompt +=');
+  assert.ok(promptAt > 0, "the orchestration prompt block must be findable");
+  const childAt = SRC.indexOf("if (isOrchestrationChild()) {", promptAt);
+  assert.ok(childAt > promptAt, "the child branch is its own statement now that the orchestrator returns");
+  const childBranch = SRC.slice(childAt, childAt + 200);
+
+  assert.match(childBranch, /CHILD_OF_ORCHESTRATOR_DIRECTIVE/);
   // (`(?<!CHILD_OF_)` so the child's OWN one-liner does not match the
   // orchestrator's directive by being a suffix of it.)
   assert.doesNotMatch(childBranch, /(?<!CHILD_OF_)ORCHESTRATOR_DIRECTIVE|formatPlanSummary|orchestrationDoneProblems/);
+
 });
 
 test("declare_done consults the ORCHESTRATION's exit contract, not just this session's gates", () => {

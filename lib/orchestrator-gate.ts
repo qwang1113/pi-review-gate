@@ -103,13 +103,30 @@ export function spawnAuthorization(
 export const ORCHESTRATOR_DOC_PATTERN = /^docs\/orchestrator-[A-Za-z0-9._-]+\.md$/;
 
 export function orchestratorWriteBlock(opts: {
-  /** Repo-relative path of the write. */
+  /** Repo-relative path of the write, or the absolute path when outside. */
   relPath: string;
   taskMode: TaskMode | undefined;
   /** The handoff document a relay in progress registered, if any. */
   relayHandoffPath?: string;
+  /**
+   * The write lands OUTSIDE the repository (F2).
+   *
+   * Allowed, and deliberately so. The old whitelist was hard-bound to two
+   * in-repo locations, which collided head-on with the standing practice that
+   * orchestration artifacts must NOT sit in the worktree — a child's
+   * `git add -A` sweeps whatever is there into its checkpoint. A user who
+   * asks for the run report in `/tmp` was refused for following the rule.
+   *
+   * The safety argument is that this permission is narrower than it looks:
+   * an out-of-repo write cannot pollute the worktree, cannot enter a
+   * checkpoint, and cannot reach a tracked file. Sensitive paths (.env,
+   * private keys, credentials) are refused by the gate's own sensitive-file
+   * floor, which runs BEFORE this check and is not weakened by it.
+   */
+  outsideRepo?: boolean;
 }): string | undefined {
   if (opts.taskMode !== "orchestrator") return undefined;
+  if (opts.outsideRepo) return undefined;
   const rel = opts.relPath.replace(/^\.\//, "");
   // The gate-owned scope (the plan itself) is exempt upstream, but repeat it
   // here so this function is honest on its own.
@@ -118,10 +135,13 @@ export function orchestratorWriteBlock(opts: {
   if (opts.relayHandoffPath && rel === opts.relayHandoffPath.replace(/^\.\//, "")) return undefined;
   return (
     `review-gate: 项目经理不写代码 —— "${rel}" 不在可写范围内。` +
-    "编排会话只允许写 plan（.pi/ 下）与交接/汇报文档（docs/orchestrator-*.md）；" +
+    "编排会话在**仓库内**只允许写 plan（.pi/ 下）与交接/汇报文档（docs/orchestrator-*.md）；" +
+    "仓库**外**的绝对路径（比如 /tmp 下的交付物）不受此限，反而是推荐做法 —— " +
+    "编排产物留在工作区会被子会话的 `git add -A` 卷进 checkpoint。" +
     "改代码、解冲突、查历史这类耗上下文的活，用 `orchestrator_spawn` 开子会话去做。"
   );
 }
+
 
 // ---------------------------------------------------------------------------
 // Constraint 7 — parallel work needs its own worktree
@@ -132,10 +152,36 @@ export function orchestratorWriteBlock(opts: {
  *
  * Only a child that will run ALONGSIDE another: two agents editing one
  * worktree invalidate each other's review bindings and race on every file.
- * A serial child is deliberately NOT given one — an extra worktree per task
- * would multiply checkouts for no isolation benefit, and the gate would then
- * have to clean up N of them.
+ *
+ * WHY A SERIAL CHILD SHARING THE ORCHESTRATOR'S WORKTREE IS SAFE (F9/O-2,
+ * settled with the user on 2026-08-29 — this is the argument that decision
+ * rests on, so it is written down rather than assumed).
+ *
+ *  1. ONE WRITER AT A TIME. "Serial" is enforced upstream by the scheduler
+ *     (constraint 6 + `maxParallel`), not merely intended: a second child is
+ *     not spawned while the first one's pane is alive. Two writers never
+ *     coexist in the shared worktree, so the file-level races and the
+ *     review-binding invalidation that motivate constraint 7 cannot occur.
+ *  2. THE SUPERVISOR IS NOT A WRITER. Constraint 2 refuses every code write
+ *     from an orchestrator session ({@link orchestratorWriteBlock}), so the
+ *     one process that is ALWAYS present alongside the child contributes no
+ *     edits at all.
+ *  3. THE ONE THING THEY DID SHARE IS NOW SPLIT. The remaining coupling was
+ *     the gate sidecar — one file per worktree, with a single-valued
+ *     `taskMode` and a single `askUser` record, which the two sessions
+ *     overwrote for each other (F4). Since this round each child is started
+ *     with its own `RG_STATE_VARIANT` and therefore its own
+ *     `.pi/review-gate-state.<variant>.json` (lib/gate-state.ts), so there is
+ *     no shared mutable state left between supervisor and worker — nor
+ *     between two serial children.
+ *
+ * The alternative (a worktree per serial child) was considered and rejected
+ * BY THE USER for a concrete reason: a child's `declare_done` merges its work
+ * branch into the base, and git refuses to check out a branch that another
+ * worktree already holds — so isolating serial children would break the exact
+ * step they exist to reach.
  */
+
 export function worktreeRequirement(execution: TaskExecution): { needed: boolean; reason: string } {
   return execution === "parallel"
     ? { needed: true, reason: "并行任务必须各自独立 worktree（约束 7）：同一 worktree 里两个写者会互相打断 review 绑定" }

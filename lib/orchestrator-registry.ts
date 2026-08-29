@@ -46,6 +46,21 @@ export interface ChildSession {
    * assembled by hand is not in here and is not cleaned up here either.
    */
   worktree?: string;
+  /**
+   * The sidecar variant this child was started with (`RG_STATE_VARIANT`, F4).
+   *
+   * Recorded rather than recomputed because it is how the orchestrator finds
+   * the child's OWN gate state on disk: the file is
+   * `<cwd>/.pi/review-gate-state.<variant>.json`, and guessing it from the id
+   * would silently break the moment the naming changes.
+   */
+  stateVariant?: string;
+  /**
+   * The task document handed to this child at spawn (F7). Kept so a later
+   * read can point a human at what the child was actually asked to do.
+   */
+  taskFile?: string;
+
   createdAt: string;
   /** ISO time the child reported its task finished. */
   doneAt?: string;
@@ -258,10 +273,18 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     const worktree = str(c.worktree);
     const doneAt = str(c.doneAt);
     const closedAt = str(c.closedAt);
+    // The variant only ever names a FILE inside `.pi/`, so it is sanitized on
+    // the way back in exactly as `sidecarPath` sanitizes it on the way out —
+    // the sidecar is untrusted input, and a `../` in here would otherwise be
+    // handed to a path join.
+    const stateVariant = str(c.stateVariant)?.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 64);
+    const taskFile = str(c.taskFile);
     children.push({
       id, taskId, cwd, createdAt,
       paneId: c.paneId,
       ...(worktree ? { worktree } : {}),
+      ...(stateVariant ? { stateVariant } : {}),
+      ...(taskFile ? { taskFile } : {}),
       ...(doneAt ? { doneAt } : {}),
       ...(closedAt ? { closedAt } : {}),
     });

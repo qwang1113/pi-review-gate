@@ -29,6 +29,9 @@ import { consumeAttention, sideEffectsEnabled } from "./attention.ts";
 import type { AttentionEvent } from "./attention.ts";
 import { assertSafeTmuxArgv } from "./orchestrator-tmux.ts";
 import { writeNotification } from "./orchestrator-notify.ts";
+import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
+import { sidecarPath } from "./gate-state.ts";
+
 import { parsePlan, PLAN_RELPATH, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
 import type { BranchFacts, OrchestratorDeps, PlanRead, TmuxRunResult } from "./orchestrator-deps.ts";
@@ -140,6 +143,57 @@ export function emitNotification(sequence: string, env: NodeJS.ProcessEnv = proc
   return true;
 }
 
+/**
+ * Write a task document OUTSIDE the repository (F7).
+ *
+ * Same root as the orchestration worktrees, for the same reason: anything the
+ * gate creates inside the worktree ends up in the first child's `git add -A`
+ * checkpoint. The name is sanitized to a single path segment, so a caller (or
+ * a corrupted registry) can never write outside this directory.
+ */
+export function writeScratchFile(
+  repoRoot: string,
+  name: string,
+  content: string,
+): { ok: true; path: string } | { ok: false; error: string } {
+  const safe = name.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 120);
+  if (!safe) return { ok: false, error: "文件名非法" };
+  try {
+    const dir = join(worktreeRootFor(repoRoot), TASK_FILE_DIRNAME);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, safe);
+    writeFileAtomic(path, content);
+    return { ok: true, path };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * Read a CHILD's own gate sidecar (F3 channel 2 / F10).
+ *
+ * Deliberately raw: this returns the parsed JSON, not a `GateState`, because
+ * the orchestrator only ever displays a handful of fields and validating a
+ * foreign session's file against the full schema would throw away a
+ * half-written one that is still perfectly readable for that purpose.
+ */
+export function readChildGateState(
+  childCwd: string,
+  variant?: string,
+): Record<string, unknown> | undefined {
+  try {
+    const path = sidecarPath(childCwd, ".pi", variant);
+    if (!existsSync(path)) return undefined;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+
 /** Character count of a repo-relative file; undefined when it is not there. */
 export function fileCharsIn(repoRoot: string, relPath: string): number | undefined {
   try {
@@ -161,9 +215,12 @@ export interface OrchestratorHostBindings {
   storeRuntime(runtime: OrchestratorRuntime): void;
   /** The orchestration id this session holds (inherited or freshly minted). */
   orchestrationId(): string;
-  confirm(title: string, message: string): Promise<boolean>;
+  confirm(title: string, message: string, pointer?: string): Promise<boolean>;
+  /** Print text into the user's transcript (the plan's full text, O-1). */
+  showToUser(title: string, text: string): void;
   branchFacts(): BranchFacts;
   sessionTranscriptPath(): string | undefined;
+
   now?(): number;
   env?(): NodeJS.ProcessEnv;
 }
@@ -200,6 +257,11 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
       return pane && pane.length > 0 ? pane : undefined;
     },
     confirm: host.confirm,
+    showToUser: host.showToUser,
+    writeScratchFile: (name, content) => writeScratchFile(host.repoRoot, name, content),
+    childGateState: (childCwd, variant) => readChildGateState(childCwd, variant),
+    sleep: (ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }),
+
     addWorktree: (name) => addWorktree(host.repoRoot, name),
     removeWorktree: (path) => removeWorktree(host.repoRoot, path),
     consumeAttention: (): AttentionEvent | undefined => consumeAttention(host.orchestrationId()),

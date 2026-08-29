@@ -389,9 +389,54 @@ export function emptyState(sessionId: string | null, maxRounds: number): GateSta
   };
 }
 
-export function sidecarPath(cwd: string, configDirName = ".pi"): string {
-  return join(cwd, configDirName, "review-gate-state.json");
+/**
+ * Environment variable that gives a session its OWN sidecar file (F4).
+ *
+ * THE MEASURED PROBLEM. The sidecar is one file per worktree, and `taskMode`
+ * is a single-valued field in it. When an orchestrator supervises a child in
+ * the same worktree, the two sessions write the same file: the orchestrator
+ * records `taskMode: "orchestrator"`, the child records `taskMode: "loop"`,
+ * each `ask_user` record overwrites the other's, and the orchestrator's own
+ * prompt ends up quoting the CHILD's unmet gates ("code review gate PENDING")
+ * as if they were its own. That is F4 and half of F13.
+ *
+ * WHY THE CHILD MOVES AND NOT THE ORCHESTRATOR. The obvious fix is to give
+ * the orchestrator a special file, and it is the wrong way round. The L3 git
+ * hook (`hooks/pre-commit`) resolves the sidecar by this same rule, and a
+ * MISSING variable must fail toward the STRICTER file: with children on the
+ * variant path, a hook that somehow runs without the variable falls back to
+ * the default file — the orchestrator's, an enforced mode with no review —
+ * and blocks. With it the other way round, the same accident would check a
+ * child's commit against a file the child never wrote and let it through. The
+ * fail-closed direction decides it.
+ *
+ * As a bonus this also separates SERIAL children from each other: two
+ * children that run one after another in the same worktree no longer inherit
+ * each other's verdicts.
+ */
+export const STATE_VARIANT_ENV = "RG_STATE_VARIANT";
+
+/** Only these characters may reach a filename. Anything else is dropped. */
+const STATE_VARIANT_SAFE = /[^A-Za-z0-9._-]/g;
+
+/**
+ * The sidecar variant this process runs under, sanitized, or `undefined` for
+ * the default file. Never throws and never returns something that could
+ * escape the `.pi/` directory.
+ */
+export function stateVariantFrom(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env[STATE_VARIANT_ENV]?.trim();
+  if (!raw) return undefined;
+  const safe = raw.replace(STATE_VARIANT_SAFE, "-").replace(/^[.-]+/, "").slice(0, 64);
+  return safe.length > 0 ? safe : undefined;
 }
+
+export function sidecarPath(cwd: string, configDirName = ".pi", variant?: string): string {
+  const safe = variant ? variant.replace(STATE_VARIANT_SAFE, "-").replace(/^[.-]+/, "").slice(0, 64) : "";
+  const name = safe.length > 0 ? `review-gate-state.${safe}.json` : "review-gate-state.json";
+  return join(cwd, configDirName, name);
+}
+
 
 /**
  * Load and validate the sidecar.
