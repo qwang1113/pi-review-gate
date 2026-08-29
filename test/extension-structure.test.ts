@@ -1285,11 +1285,19 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   assert.ok(promptCall > 0);
   assert.doesNotMatch(body.slice(promptCall, promptCall + 1200), /doneChannel|inboxPath|inboxChannel/,
     "the reviewer task embeds no tmux channel (process exit is the completion signal)");
-  assert.match(body, /建议 title: \"\$\{reviewTitle\}\"/, "the output names the suggested title");
-  assert.match(body, /session id 由 review_spawn 按 role\+repo 派生/,
-    "the session id is the resume key and derives mechanically");
-  assert.match(body, /进程退出会主动唤醒本会话/,
-    "the output says the process-exit wake is automatic");
+  // 2026-08-29: prepare_review is an ADVANCED entry — its output must point at
+  // the ONE normal path (judge_submit) instead of teaching the manual spawn.
+  assert.match(body, /ADVANCED \/ internal：正常路径是一次 judge_submit/,
+    "the output names judge_submit as the normal path");
+  const proseEnd = body.indexOf("        TASK_TEXT_MARKER,");
+  assert.ok(proseEnd > 0, "the task-text marker still separates prose from the task");
+  assert.doesNotMatch(body.slice(0, proseEnd),
+    /review_spawn|review_send|review_watch|建议 title/,
+    "the prose above the task text no longer teaches the retired manual dispatch");
+  assert.doesNotMatch(body, /const reviewTitle =/,
+    "the display title is the gate's business — prepare_review computes none");
+  assert.match(body, /stream=\$\{streamPath\}/,
+    "the findings stream path still comes back to the caller");
   // Round-17: waiting discipline (work while the child runs) is spelled out,
   // and a truncated goal gets an explicit read-and-replace instruction.
   assert.match(body, /等待纪律/, "the waiting discipline is part of the spawn flow");

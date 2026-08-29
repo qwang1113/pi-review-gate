@@ -4270,7 +4270,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       const goalForReview = loopGoalConfirmed(root, goalSt) ? goalTextForReviewers(root) : undefined;
       const goalText = goalForReview?.text;
       const goalTruncated = goalForReview?.truncated === true;
-      const reviewTitle = `review-${runId.slice(-6)}`;
+      // NOTE: no display title is computed here — judge_submit derives the
+      // title (and the deterministic session id) from role+repo itself.
       const scopeNow = reviewScopeFor(root, st);
       // Round-18 polish gate: persist a supplied reason BEFORE building the
       // task, so the reviewer of THIS round sees the reason that authorized it.
@@ -4307,12 +4308,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       const lines = [
         `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
         `stream=${streamPath}`,
-        "Spawn the reviewer as a judge child (its own pi process), then send the task:",
-        `- 建议 title: "${reviewTitle}"（session id 由 review_spawn 按 role+repo 派生）`,
-        `- review_spawn({ role: "reviewer", title: "${reviewTitle}", repo: "${root}", task: <下面的任务文本> }) → 返回 sessionId；进程退出即完成，唤醒已自动注册`,
-        "- 提问:reviewer 输出 question fence 退出后,用 review_send({ sessionId, text: <答案> }) 恢复同一会话",
-        "- 然后就等：进程退出会主动唤醒本会话",
-        "  (review_watch 仅在需要自定义 label 或 reload 后重挂时才调用，正常流程用不到)",
+        "ADVANCED / internal：正常路径是一次 judge_submit({ role: \"reviewer\", task: <本轮改动说明> })——",
+        "它自己跑 precommit、checkpoint、本 prepare 与派发，并在 judge 进程退出时机械记录 verdict。",
+        "本工具只返回上面的审查范围与下面的任务文本；title 与 session id 由门禁按 role+repo 自行派生。",
         ...(goalTruncated
           ? [
               `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${pathJoin(root, LOOP_GOAL_RELPATH)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,
@@ -4793,7 +4791,7 @@ export default function reviewGate(pi: ExtensionAPI) {
                 "checkpoint landed after prepare_review, so the READY cannot bind to the change now " +
                 "in place and is recorded as BLOCKED. This is the expected outcome of fixing while the " +
                 "review runs: those fixes are already in, so the next round is short. Re-review the " +
-                "current head (review_checkpoint → prepare_review → review_spawn → record_review)."
+                "current head with ONE call: judge_submit({role:\"reviewer\", task:<what you changed>})."
               : "") +
             (cwdMismatch
               ? `\nCWD CHECK FAILED: ${cwdMismatch}. The verdict schema requires the judge's own \`pwd\`, ` +
