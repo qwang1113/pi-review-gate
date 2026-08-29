@@ -3140,6 +3140,51 @@ test("R-26: an orchestration CHILD hands the borrowed worktree back on the BASE 
     "an ordinary session still returns to its work branch (its next checkpoint depends on it)");
 });
 
+test("R3-5: an accepted declare_done WRITES the completion record, before the loop bookkeeping", () => {
+  // The gate knew the task was finished and wrote that nowhere, so a
+  // supervising orchestrator was reduced to reading the child's terminal —
+  // and read "working" for 725 seconds on a child that had already merged.
+  const done = windowOf('name: "declare_done"', "record_goal_prereview", "declare_done");
+  const write = done.indexOf("state.completion = {");
+  assert.ok(write > 0, "declare_done must record its own acceptance");
+  assert.ok(write > done.indexOf("const finish = finishWorkBranch("),
+    "…after the merge, so `merge:` states how the work actually landed");
+  assert.ok(write < done.indexOf("st.rounds = [];"),
+    "…and before the loop reset, which must never be able to erase it");
+  assert.doesNotMatch(done.slice(write), /delete state\.completion|state\.completion = undefined/,
+    "'this task was completed at T' stays true for the rest of the session");
+});
+
+test("R3-7: the merge asks WHERE it can run before it switches any branch", () => {
+  // `git checkout <base>` in a linked worktree fails 100% of the time — the
+  // base branch is held by the supervisor's checkout — so both parallel lanes
+  // of the third run had to be merged by hand.
+  const finish = windowOf("function finishWorkBranch(", "\n  }", "finishWorkBranch");
+  const venue = finish.indexOf("decideMergeVenue({");
+  assert.ok(venue > 0, "the venue decision must exist");
+  assert.ok(venue < finish.indexOf('["checkout", base]'),
+    "and it must come BEFORE the checkout it exists to avoid");
+  assert.match(finish, /if \(venue\.kind === "worktree"\) return mergeInHoldingWorktree\(/);
+  const holding = windowOf("function mergeInHoldingWorktree(", "\n  }", "mergeInHoldingWorktree");
+  assert.match(holding, /venueRefusal\(/, "a dirty holder is refused, never merged over (user decision)");
+  assert.doesNotMatch(holding, /"checkout"/,
+    "the whole point is that nothing is checked out in somebody else's worktree");
+});
+
+test("R3-6: setup_workspace defaults an orchestration child's base to the DECLARED one", () => {
+  // A lane's worktree stands on `orch/<task>-<stamp>`, so "the branch I am on"
+  // is the one answer that is certainly wrong — a whole lane merged into that
+  // scratch branch and stopped there.
+  const setup = windowOf('name: "setup_workspace"', 'name: "request_scope_limit"', "setup_workspace");
+  assert.match(setup, /const injectedBase = String\(process\.env\[ORCH_BASE_BRANCH_ENV\]/);
+  assert.match(setup, /String\(params\.base \?\? ""\)\.trim\(\) \|\| injectedBase/,
+    "an explicit argument still wins over the injected default");
+  assert.ok(setup.indexOf("injectedBase") < setup.indexOf("if (proposedBase && proposedBase !== here)"),
+    "and the USER still confirms it in the same dialog — an injected default is not a decision made for them");
+});
+
+
+
 test("R-10: the loop goal file is per SESSION, and every read/write goes through the one helper", () => {
   assert.match(SRC, /function loopGoalPathIn\(root: string\): string \{\s*\n\s*return pathJoin\(root, loopGoalRelPath\(SESSION_STATE_VARIANT\)\)/);
   assert.match(SRC, /function readSessionLoopGoal\(root: string\): LoopGoal/);

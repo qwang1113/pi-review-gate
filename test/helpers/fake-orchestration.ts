@@ -90,6 +90,8 @@ export interface FakeOrchestrationOptions {
   hooksPointAtWorktree?: string;
   /** Repairing the hooks fails, so `orchestrator_close` must refuse (R-28). */
   hookRepairFails?: boolean;
+  /** The branch the SUPERVISOR stands on — a child's base branch (R3-6). */
+  currentBranch?: string;
 }
 
 
@@ -320,6 +322,7 @@ export function fakeOrchestration(options: FakeOrchestrationOptions = {}): FakeO
     removeWorktree: (path) => { removed.push(path); },
     childJudgeRunning: (cwd) => judgeRunning.has(cwd),
     gitHooksReferencing: (path) => (hooksPointAt === path ? [...hookNames] : []),
+    currentBranch: () => options.currentBranch ?? "base-branch",
     repairGitHooks: () => {
       if (options.hookRepairFails) return { ok: false, error: "install-git-hooks.sh failed" };
       hooksPointAt = undefined;

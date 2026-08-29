@@ -157,6 +157,13 @@ import {
   type DirtyFile,
   type BranchOp,
 } from "../lib/workspace-branch.ts";
+import {
+  decideMergeVenue,
+  mergeArgv,
+  parseWorktreeList,
+  venueRefusal,
+  type MergeVenue,
+} from "../lib/worktree-merge.ts";
 import { attentionTarget, publishAttention } from "../lib/attention.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
@@ -172,7 +179,7 @@ import {
   buildOrchestratorResume,
 } from "../lib/orchestrator-directives.ts";
 import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
-import { describeProbeEvent, PROBE_INTERVAL_MS } from "../lib/orchestrator-probe.ts";
+import { describeProbeEvent, describeStaleEvent, PROBE_INTERVAL_MS } from "../lib/orchestrator-probe.ts";
 import { formatChildHealth } from "../lib/orchestrator-child-state.ts";
 
 import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
@@ -256,6 +263,7 @@ import {
   sidecarPath as sidecarPathIn,
   stateVariantFrom,
   STATE_VARIANT_ENV,
+  ORCH_BASE_BRANCH_ENV,
 
   unmetRequirements,
   type GateState,
@@ -1214,7 +1222,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.taskMode !== "orchestrator") return [];
     const probe = orchestratorDeps.probe();
     probe.observe();
-    return probe.drain().map(describeProbeEvent);
+    const drained = probe.drain();
+    // Stale events are named too, but as an aside: a supervisor that is woken
+    // by the timer still deserves to know an event was written off rather
+    // than delivered (R3-3), and never to be sent looking for it.
+    return [
+      ...drained.events.map(describeProbeEvent),
+      ...drained.stale.map((s) => `（已作废，不用处理）${describeStaleEvent(s)}`),
+    ];
   }
 
   function stopProbeTimer(): void {
@@ -1422,6 +1437,83 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* never block a session start on bookkeeping */ }
   }
 
+  /** What `finishWorkBranch` reports — including HOW the work landed (R3-5). */
+  type FinishResult = { ok: boolean; text: string; merge: "merged" | "waived" | "none" };
+
+  /** `git worktree list --porcelain`; "" when it cannot be read (⇒ no holder). */
+  function gitWorktreeList(root: string): string {
+    try {
+      return execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: root, encoding: "utf8" });
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * R3-7 — land the work by merging INSIDE the worktree that holds the base.
+   *
+   * This is the only path that works for a parallel orchestration lane: its
+   * base branch is checked out in the supervisor's worktree, so switching to
+   * it here is impossible by git's own rules. Nothing is checked out and no
+   * HEAD is moved — the merge is executed in that directory, on the branch it
+   * is already standing on.
+   *
+   * The safety rule the user set (2026-08-30): touch that worktree ONLY when
+   * it is clean and actually standing on the base. Anything else refuses and
+   * says why, because a merge run over somebody's uncommitted work can lose
+   * it, and no receipt is worth that.
+   */
+  function mergeInHoldingWorktree(
+    ctx: ExtensionContext,
+    venue: Extract<MergeVenue, { kind: "worktree" }>,
+    work: string,
+    base: string,
+  ): FinishResult {
+    const st = state;
+    const refusal = venueRefusal(venue, {
+      base,
+      ...(currentBranch(venue.path) ? { currentBranch: currentBranch(venue.path)! } : {}),
+      dirtyFiles: dirtyFiles(venue.path).map((f) => `${f.status.trim() || "??"} ${f.path}`),
+    });
+    if (refusal) {
+      return { ok: false, merge: "none", text: `review-gate: declare_done 被拒 — ${refusal}` };
+    }
+    try {
+      execFileSync("git", mergeArgv(work, base), { cwd: venue.path, encoding: "utf8" });
+      delete st.mergeConflict;
+      logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString(), venue: venue.path });
+      persist(ctx);
+      return { ok: true, merge: "merged", text: `merged ${work} into ${base} —— ${venue.reason}` };
+    } catch (err) {
+      let files: string[] = [];
+      try {
+        files = parseConflictFiles(
+          execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: venue.path, encoding: "utf8" }),
+        );
+      } catch { /* the abort below still runs */ }
+      // Leave the OTHER worktree exactly as it was found — an aborted merge
+      // there is not this session's mess to leave behind.
+      try { execFileSync("git", ["merge", "--abort"], { cwd: venue.path, encoding: "utf8" }); } catch { /* nothing to abort */ }
+      const conflicted = files.length > 0;
+      if (conflicted) st.mergeConflict = { branch: work, base, files, at: new Date().toISOString() };
+      persist(ctx);
+      return {
+        ok: false,
+        merge: "none",
+        text: conflicted
+          ? `review-gate: declare_done 被拒 — ${work} 合并回 ${base} 有冲突（合并在持有基准分支的 worktree ` +
+            `${venue.path} 里执行，已 abort，那个工作区回到原样）。\n` +
+            `冲突文件：\n${files.map((f) => `  ${f}`).join("\n")}\n` +
+            `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
+            "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
+          : `review-gate: declare_done 被拒 — 在 worktree ${venue.path} 里合并 ${work} → ${base} 失败` +
+            "（不是冲突：没有未解决路径），已 abort。" +
+            `\n${(err instanceof Error ? err.message : String(err)).split("\n")[0]}` +
+            "\n先手动确认两条分支的状态，再重试。",
+      };
+    }
+  }
+
   /**
    * Land this session's work on the branch the user confirmed — the last
    * procedural job of a task, and the gate's, not the agent's.
@@ -1433,20 +1525,32 @@ export default function reviewGate(pi: ExtensionAPI) {
    * refuses. Resolving it is creative work (the agent's), waiving it is a
    * decision (the user's); guessing is neither.
    */
-  function finishWorkBranch(ctx: ExtensionContext): { ok: boolean; text: string } {
+  function finishWorkBranch(ctx: ExtensionContext): FinishResult {
     const st = state;
     if (st.mergeWaived) {
-      return { ok: true, text: `merge waived by the user (${st.mergeWaived.reason})` };
+      return { ok: true, text: `merge waived by the user (${st.mergeWaived.reason})`, merge: "waived" };
     }
     const action = decideFinish({
       workBranch: st.workBranch,
       baseBranch: st.baseBranch,
       workIsAncestorOfBase: isAncestor(primaryRepoRoot, st.workBranch, st.baseBranch),
     });
-    if (action === "no-branching") return { ok: true, text: "no work branch to merge" };
-    if (action === "already-merged") return { ok: true, text: `${st.workBranch} is already in ${st.baseBranch}` };
+    if (action === "no-branching") return { ok: true, text: "no work branch to merge", merge: "none" };
+    if (action === "already-merged") {
+      return { ok: true, text: `${st.workBranch} is already in ${st.baseBranch}`, merge: "none" };
+    }
     const work = st.workBranch as string;
     const base = st.baseBranch as string;
+    // R3-7 — WHERE can this merge even run? In a linked worktree the base
+    // branch is, by construction, checked out somewhere else, and `git
+    // checkout <base>` there fails 100% of the time. Decide the venue first.
+    const venue = decideMergeVenue({
+      base,
+      work,
+      selfPath: primaryRepoRoot,
+      worktrees: parseWorktreeList(gitWorktreeList(primaryRepoRoot)),
+    });
+    if (venue.kind === "worktree") return mergeInHoldingWorktree(ctx, venue, work, base);
     try {
       execFileSync("git", ["checkout", base], { cwd: primaryRepoRoot, encoding: "utf8" });
       logBranchOp(st, { op: "checkout", from: work, to: base, at: new Date().toISOString() });
@@ -1476,8 +1580,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
       } catch { /* the merge landed; where we stand is diagnostics */ }
 
+      logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString() });
       persist(ctx);
-      return { ok: true, text: `merged ${work} into ${base}` };
+      return { ok: true, text: `merged ${work} into ${base}`, merge: "merged" };
     } catch (err) {
       // Conflicted (or the merge failed for another reason): leave NOTHING
       // half-applied. Abort, go back to the work branch, and report.
@@ -1500,6 +1605,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       persist(ctx);
       return {
         ok: false,
+        merge: "none" as const,
         text: conflicted
           ? `review-gate: declare_done 被拒 — ${work} 合并回 ${base} 有冲突，合并已中止（工作区回到 ${work}，无残留）。\n` +
             `冲突文件：\n${files.map((f) => `  ${f}`).join("\n")}\n` +
@@ -4977,6 +5083,22 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       progress.done("已合并");
       loopArmed = false;
+      // R3-5 — RECORD THE COMPLETION, in this session's own sidecar.
+      //
+      // Everything the gate knew about "this task is finished" used to live in
+      // this function's local variables and then evaporate. A supervising
+      // orchestrator was left reading the child's TERMINAL to guess, and it
+      // guessed "working" for 725 seconds on a child that had merged its
+      // branch. This one write is what the `done` state is judged from
+      // (lib/orchestrator-child-state.ts), so it happens BEFORE the loop
+      // bookkeeping below and is never cleared by it.
+      state.completion = {
+        at: new Date().toISOString(),
+        merge: finish.merge,
+        ...(String(params.summary ?? "").trim()
+          ? { summary: String(params.summary).trim().slice(0, 500) }
+          : {}),
+      };
       // A completed unit of work closes its review loop. Session-log analysis
       // showed multi-task sessions accumulating a single ever-growing round
       // counter (e.g. "round 24/10"), which misleads the agent into believing
@@ -5588,7 +5710,15 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       let base = here;
-      const proposedBase = String(params.base ?? "").trim();
+      // R3-6 — an orchestration child's base is DECLARED by its supervisor,
+      // not derived from where it happens to stand. A parallel lane runs in a
+      // gate-created worktree checked out on `orch/<task>-<stamp>`, so the
+      // "current branch" default would make it merge its work into that
+      // scratch branch — which is exactly what happened to a whole lane in the
+      // third run. The agent may still override it, and the USER still
+      // confirms it in the dialog below.
+      const injectedBase = String(process.env[ORCH_BASE_BRANCH_ENV] ?? "").trim();
+      const proposedBase = String(params.base ?? "").trim() || injectedBase;
       if (proposedBase && proposedBase !== here) {
         // The agent knows this session continues an existing feature branch:
         // the base is elsewhere. The USER still confirms it — a wrong base is

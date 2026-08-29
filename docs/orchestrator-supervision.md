@@ -6,7 +6,7 @@
 
 | 模块 | 职责 | 纯度 |
 | --- | --- | --- |
-| `lib/orchestrator-child-state.ts` | 四态判定、重提退避、健康快照的数据形状与渲染 | 纯函数（观测进、状态出；时钟由 `at` 传入） |
+| `lib/orchestrator-child-state.ts` | 五态判定、重提退避、健康快照的数据形状与渲染 | 纯函数（观测进、状态出；时钟由 `at` 传入） |
 | `lib/orchestrator-probe.ts` | 周期观测的 IO 外壳：抓屏、读 sidecar、维护每个子会话的记忆、堆事件队列 | 有 IO，无判定 |
 | `lib/orchestrator-wait.ts` | `orchestrator_wait` 的判定优先级、attention 归属校验、等待预算边界 | 纯函数 |
 | `lib/orchestrator-session-tools.ts` | 把上面三者接成 `orchestrator_wait` 一次调用（`doWait`） | 装配 + 回执文案 |
@@ -20,7 +20,7 @@ judge 等待与子会话等待共用它，只是判据不同。
 
 ---
 
-## 1. 子会话的四种状态
+## 1. 子会话的五种状态
 
 判定入口是纯函数 `classifyChildState(observation, memory, opts)`，返回 `ChildStateVerdict`
 （`state` / `reason` / `stableMs` / 下一轮要带的 `memory`）。
@@ -29,8 +29,16 @@ judge 等待与子会话等待共用它，只是判据不同。
 | --- | --- | --- |
 | `working` | 在产出，或可证明地阻塞在它自己发起的工作上 | 没人，等着就行 |
 | `waiting-input` | 有对话框（或门禁的提问暂停）在等回答 | 项目经理必须去答 |
-| `idle` | 活着、屏幕不动、也没有任何在途工作 —— 它停了 | 项目经理去问它为什么停 |
+| `done` | 它自己的 sidecar 记着 `declare_done` 已被接受，且画面已静止 —— 任务完成 | 项目经理验收：派下一条任务，或 `orchestrator_close` |
+| `idle` | 活着、屏幕不动、也没有任何在途工作 —— 它停了（**没有**完成记录） | 项目经理去问它为什么停 |
 | `dead` | pane 没了 | 项目经理去善后 |
+
+> **`done` 是第三轮补上的（R3-5，P0）。** 在此之前"完成"根本没有判据：一个 reviewer READY、
+> full precommit、`declare_done` 已接受、分支已合并的子会话被判成 `working`，画面静止 **725 秒**
+> 仍不产生任何事件。而同样完成的另一个子会话因为屏幕上恰好残留了别的字被判成 `idle`，47 秒后
+> 正确唤醒了项目经理 —— **一个有信号、一个永远没有，取决于终端上留了什么字**。
+> `working` 是"一切正常"，没人会去看它；那一轮是人盯着"已静止 718s"这个数字**起疑**才发现的。
+> 发现任务做完了，必须是一个信号，而不是一次怀疑。
 
 ### 1.1 判定顺序（顺序即设计）
 
@@ -45,19 +53,28 @@ judge 等待与子会话等待共用它，只是判据不同。
    比屏幕更可信，屏幕滚走了它也还在。
 5. **`dialogOpen === true` 但画面还在动 → `working`。** 先按在跑处理，下一轮探针再定。
 6. **`sidecar.judgeRunning` 为真 → `working`。** 阻塞在 judge 子进程上是正常工作态。
-7. **屏幕上有在跑的标志（`screenLooksBusy`）→ `working`。**
-8. **屏幕指纹相对上一次发生变化 → `working`。**
-9. **指纹读不到（`capture-pane` 失败）→ 沿用上一次的状态**（同第 2 条：没有记录或上次是 `dead` 时退回 `working`）。
-10. **`stableMs >= IDLE_AFTER_MS` → `idle`。** 到这一步才允许说"它停了"：没有对话框、没有在跑标志、
-    没有 judge 子进程、屏幕指纹也一直没变。判定文案里会带上它是否已经 `declare_done`。
-11. 以上都不满足 → `working`（静止时间还没到阈值）。
+7. **`sidecar.completedAt` 存在（或登记表已记 `doneAt`），且指纹相对上一次没变、屏幕末尾也没有在跑的标志
+   → `done`。** 这一步的排位就是全部设计：它**之下**全是屏幕文本 —— 正是把一个已完成子会话判成
+   `working` 725 秒的那些字；它**之上**全是"轮不到它说了算"的情况（有人在等它答、judge 还在跑）。
+   要求画面静止，是为了把"它做完了"和"它做完了又立刻开始下一件事"分开，代价只有一个探针周期。
+8. **屏幕末尾若干行里有在跑的标志（`screenLooksBusy`）→ `working`。**
+9. **屏幕指纹相对上一次发生变化 → `working`。**
+10. **指纹读不到（`capture-pane` 失败）→ 沿用上一次的状态**（同第 2 条：没有记录或上次是 `dead` 时退回 `working`）。
+11. **`stableMs >= IDLE_AFTER_MS` → `idle`。** 到这一步才允许说"它停了"：没有对话框、没有在跑标志、
+    没有 judge 子进程、没有完成记录、屏幕指纹也一直没变。判定文案里会带上它是否已经 `declare_done`。
+12. 以上都不满足 → `working`（静止时间还没到阈值）。
 
-### 1.2 两个阈值
+被重新派活的已完成子会话会自动回到 `working`（屏幕变了），干完新的一轮再静下来时又是 `done` ——
+完成记录留在盘上不会被清掉，所以这是"每进入一次 `done` 就响一轮铃"，不是一次性开关。
+
+### 1.2 阈值与常量
 
 | 常量 | 值 | 作用 |
 | --- | --- | --- |
 | `WAIT_INPUT_STABLE_MS` | 2 000 ms | 对话框要静止这么久，才算"在等人答"而不是"在重绘" |
 | `IDLE_AFTER_MS` | 45 000 ms | 一切都不动这么久，活着的子会话才被判 `idle` |
+| `ACTIVITY_TAIL_LINES` | 12 行 | "在跑的标志"只在屏幕**末尾**这么多行里找（R3-5a） |
+| `DONE_REPORT_LIMIT` / `DONE_REWAKE_MS` | 2 次 / 60 s | `done` 最多响两次铃，间隔 60 秒，之后闭嘴 |
 
 `IDLE_AFTER_MS` 故意给得宽：把在跑的子会话误判成 `idle`，代价是一次假唤醒加一次对真实工作的打断；
 判得慢的代价只是多等一个探针周期。两者不对称，所以偏慢。
@@ -70,9 +87,13 @@ judge 等待与子会话等待共用它，只是判据不同。
 1. **结构化真值（最可信）** —— `ChildSidecarFacts`，由 `lib/orchestrator-probe.ts` 的 `structuredFacts()` 组装：
    - `judgeRunning`：从 judge run 目录读出来的（`OrchestratorDeps.childJudgeRunning`），
      即使子会话还没写过 sidecar 也成立；
-   - `pausedQuestion` / `reviewVerdict` / `precommitVerdict`：从子会话自己的门禁 sidecar
+   - `pausedQuestion` / `reviewVerdict` / `precommitVerdict` / **`completedAt`**：从子会话自己的门禁 sidecar
      （`OrchestratorDeps.childGateState(cwd, stateVariant)`）里取。
+     `completedAt` 来自子会话 `declare_done` 被接受时写下的 `completion` 记录（`at` / `merge` / `summary`），
+     它是 `done` 态的唯一判据 —— 门禁本来就知道这件事，以前只是没写下来（R3-5）。
+     损坏或伪造的 `completion` 在 `loadSidecar` 里被丢掉，方向是安全的：读不出完成记录 = 继续监督。
      这里刻意只取这几项：sidecar 里别的都是诊断信息，全解析一遍会让探针随 schema 演进而反复破。
+     （另有一项**不参与状态判定**：`sessionEditedFiles`，见 §2.6 的约束 8 落点监测。）
 2. **pane 存活**：`tmux list-panes` 的结果，三值 —— 在 / 不在 / **读不到**。读不到单独成一档，绝不折叠成"不在"。
 3. **屏幕（最弱）** —— `capturePane`（默认抓 `PANE_CAPTURE_LINES` = 120 行 scrollback）：
    - `dialogOpen` 来自 `dialogIsOpen(snapshot)`，见下条；
@@ -101,6 +122,12 @@ judge 等待与子会话等待共用它，只是判据不同。
 `Thinking` / `Running` / `esc to cancel` 等）就算有一轮在飞。它被导出，是因为投递侧也要问同一个问题（R-20）：
 往忙碌的子会话里投一条 slash 命令不会执行，只会排进 steering 队列，所以门禁自己等空闲窗口。
 
+**它只看屏幕末尾 `ACTIVITY_TAIL_LINES` 行（R3-5a）。** 以前是整屏 `includes` 匹配，而 pane 上留着这个会话
+打印过的一切 —— 每一轮都会出现的 `Working` / `esc to interrupt` 一旦出现过就永远命中，于是子会话余生都是
+`working`。活动指示是 composer 渲染的，就在屏幕底部；12 行足够覆盖它加上 `belowEditor` 小部件和状态行，
+又把上面的历史输出排除在外。刻意不取 1–2 行：抓屏抓到一帧重绘就会读成"停了"，那是更贵的错误方向
+（去打断真实工作）。末尾的空行会先被剪掉，免得把活动指示挤出窗口。
+
 ---
 
 ## 2. 周期探针：把"不会自己发事件"的状态变成事件
@@ -116,7 +143,11 @@ judge 等待与子会话等待共用它，只是判据不同。
 1. `capturePane` 抓屏、`structuredFacts` 读结构化真值、`list-panes` 查存活（读不到就是 `undefined`）；
 2. 调 `classifyChildState`，用**上一轮存下来的 memory** 比对；
 3. 调 `decideChildEvent` 决定要不要响铃，并把新的 memory 写回；
-4. 把这一轮的判定塞进健康快照 `ChildHealth[]`。
+4. 判成 `done` 且登记表里还没有 `doneAt` 时，**把完成写回登记表**（`markChildDone`）——
+   在此之前这个函数全仓没有任何调用方，`doneAt` 永远是空的，于是 `orchestrator_status` 的完成显示、
+   调度里的"这条任务还在跑吗"、`declare_done` 的存活检查读的全是死字段（R3-5）；
+5. 比对 `sessionEditedFiles` 与该任务的 `fileBoundaries`，有新的越界落点就再产生一条事件（§2.6）；
+6. 把这一轮的判定塞进健康快照 `ChildHealth[]`。
 
 收尾还做两件事：**已经关闭的子会话的 memory 会被删掉**（否则它的退避会永远活着），
 以及队列按 TTL 与上限裁剪。
@@ -138,7 +169,7 @@ memory 存在闭包里而不是落盘，是有意的：它是**观测缓存**（
 
 ### 2.3 什么时候响铃：边沿触发 + 电平重提
 
-`isNewsworthy(state)` 只认三种状态：`waiting-input`、`idle`、`dead`（`working` 从不响铃）。
+`isNewsworthy(state)` 认四种状态：`waiting-input`、`done`、`idle`、`dead`（`working` 从不响铃）。
 
 `decideChildEvent(verdict, previousState, now)` 的规则：
 
@@ -146,6 +177,10 @@ memory 存在闭包里而不是落盘，是有意的：它是**观测缓存**（
 - 状态**没变但仍未解决** → 距上次上报 ≥ `nextRewakeDelayMs(alreadyReported)` 才再响。
   `alreadyReported` 是**已经报过的次数**，所以第一次重提等 10s，第二次 30s，之后每次 60s，
   而且是**从上次上报**开始算，不是从状态变化开始算；
+- **`done` 是终态，单独一套**（用户拍板，2026-08-30）：最多响 `DONE_REPORT_LIMIT` = 2 次，
+  第二次在 `DONE_REWAKE_MS` = 60 秒后，之后彻底闭嘴。理由是两头的：反复催一个已完成的子会话毫无意义
+  （项目经理做什么都不会让它"更完成"），但只响一次又太脆 —— 项目经理可能正卡在**另一个**子会话的长 `wait` 里。
+  `reported` 在状态切换时清零，所以"被重新派活 → 再次完成"会重新获得两次响铃；
 - 响铃时把 `reported + 1` 和 `lastReportedAt` 写进 memory 一起返回 —— 调用方没有"忘记记录已响过"的机会。
 
 为什么要重提：**"事件被取走"不等于"事情被办了"**（F12）。第二轮实测里，一个没人答的对话框在被消费一次之后
@@ -167,6 +202,14 @@ memory 存在闭包里而不是落盘，是有意的：它是**观测缓存**（
 `drain({ now, childId })` 的**指名语义很重要**：带 `childId` 时只取该子会话的事件，
 **兄弟子会话的事件继续留在队列里**。在这里丢掉它们，就是 R-16 那一类静默丢失换个队列重演。
 
+`drain` 返回的是 `{ events, stale }`（R3-3）：出队时会拿**当下**的真值再核一遍，
+子会话已经关闭、或它现在的状态已经不是事件里那个状态，这条就不再当成新闻。
+第三轮复现了三次"回执自相矛盾"：刚答完框、以及 `orchestrator_close` 之后，`orchestrator_wait` 立刻以 0s 返回
+「它进入 waiting-input / idle」，而同一份回执里的健康快照说的是另一回事 —— 没有丢东西，但项目经理会为一个
+已经消失的框白跑一次 `orchestrator_read`。被作废的事件**照样点名**（回执里进"已消费但判为已办成"那一段，
+后台定时器则标成"（已作废，不用处理）"）：静默吞掉正是 R-16 的反面错误。
+越界事件（`kind: "boundary-breach"`）不随状态过期 —— 它说的是已经写下去的文件，不是此刻的状态。
+
 `ChildProbe` 的其余两个方法是只读的：`pending(now?)` 报队列长度，`lastHealth()` 返回最近一次快照而不重新观测。
 
 ### 2.5 与 attention 事件的合流
@@ -178,6 +221,23 @@ memory 存在闭包里而不是落盘，是有意的：它是**观测缓存**（
    `ATTENTION_DRAIN_PER_PROBE` = 8 条，取到第一条**归属通过**的就停）。
 
 探针事件优先，是因为它自带"哪个子会话 + 什么状态 + 判据"；而 attention 只有一句 reason。
+
+### 2.6 约束 8 的落点监测（R3-1）
+
+代批子会话的 goal（`orchestrator_send({ approveGoal: true })`）要求这个 goal 不越出任务边界 —— 那是约束 8。
+判据现在是**子会话 sidecar 里 `sessionEditedFiles` 的实际落点**，不再是 goal 正文里出现过哪些路径。
+
+为什么换：正文判定被打过两次补丁仍然失败。第二轮它把 `running/ended`、`slice/window` 当成路径；
+补丁之后它又拿"非目标"章节里承诺**不碰**的路径去拒绝同一个 goal；第三轮它拒绝了一个文档任务 ——
+退出标准写着「可逐条对照 `lib/orchestrator-probe.ts`」，非目标写着一行代码都不改 ——
+于是那一轮**两次代批只能绕过机械比对**。根因是同一个：**正文不是计划**。一份 goal 提到某个文件可以是引用、
+对照、或者承诺不碰，语法层面分不出来。
+
+代价与补偿：代批发生在子会话的 Step 0，那时它通常一个文件都还没改，落点集合为空 → 事前那道拦截确实消失了。
+所以拦截被挪成**持续监测**：探针每轮比对落点与边界，出现**新的**越界文件就产生一条 `boundary-breach` 事件
+并在健康快照里以「⚠ 越界落点」点名（已经报过的不再重复响铃）。
+这比原来的文本扫描更强而不是更弱 —— 改写 goal 文本绕不过它，而且批准之后它也不会停止监督。
+越界是**范围变更**，仍然是人的决定：项目经理拿 `orchestrator_notify` 通知用户，由用户决定扩边界还是回滚。
 
 ---
 
@@ -200,12 +260,16 @@ memory 存在闭包里而不是落盘，是有意的：它是**观测缓存**（
 | 1 | 有探针事件 | `probe` | 是（取第一条，其余在文案里注明"另有 N 条"） |
 | 2 | 有 attention 事件，且**不能**证明已办成 | `attention` | 是 |
 | 2' | 有 attention 事件，且证明已办成 | `settled-elsewhere` | 否，继续等 |
-| 3 | 子会话报告完成（`doneAt`） | `child-done` | 是 |
+| 3 | 子会话报告完成（登记表的 `doneAt`） | `child-done` | 是 |
 | 4 | 存活读不到（`livenessUnknown`） | `pending` | 否，按"还活着"继续等 |
 | 5 | pane 不在了 | `pane-gone` | 是 |
 | 6 | 其余 | `pending` | 否 |
 
 第 4 条在第 5 条之前，是 F14 的直接产物：**读不到 ≠ 死了**。
+
+第 3 条在第三轮之前是**死判据**：`doneAt` 从来没有被写过（`markChildDone` 全仓无调用方）。
+现在探针判出 `done` 时会写它，所以完成有两条互补的路径能结束等待 —— 探针事件（第 1 条，带判据文案），
+以及登记表事实（第 3 条，即使那条事件已经被别的投递者取走）。
 
 ### 3.3 销账：`handledAt` 与"已销账 ≠ 已办成"
 
@@ -288,16 +352,23 @@ attention 事件存在一个**全局**文件里（`lib/attention.ts`，`~/.pi/ag
 | 字段 | 含义 |
 | --- | --- |
 | `childId` / `taskId` / `paneId` | 是谁、在做 plan 里的哪条任务、在哪个 pane |
-| `state` | 四态之一 |
+| `state` | 五态之一 |
 | `reason` | 一句话说明**判据**，永远是观测事实，不是猜测 |
 | `lastActivityAt` | 屏幕最后一次发生变化的 ISO 时间 |
 | `secondsSinceActivity` | 距那次变化多少秒（监督者真正会读的数字） |
-| `dialogTitle` | 正在等的那个框的标题（有才带） |
-| `done` | 它已经报告过 `declare_done` |
+| `dialogTitle` | 正在等的那个框的标题（有才带）—— 取问题主干，见下 |
+| `done` | 它已经报告过 `declare_done`（判成 `done` 或登记表已记 `doneAt`） |
+| `outsideBoundaries` | 它改到的、任务边界之外的文件（有才带，见 §2.6） |
 
 渲染由 `formatChildHealth(list)` 负责，一个子会话一行加一行"依据："；没有开着的子会话时输出"（当前没有开着的子会话）"。
 同一份快照也出现在 `orchestrator_status` 与 `orchestrator_read` 的回执里（`orchestrator_read` 会把它标为
 "结构化真值，优先于上面的屏幕启发式"）—— 三个工具给的是同一个判定，不需要读者自己去调和两种说法。
+
+**`dialogTitle` 取的是问题主干，不是正文最后一行（R3-4）。** 以前的规则是"选项上方最近的一行非空文本"，
+于是任何多行问题都被显示成它的结尾碎片 —— 第三轮的快照里出现过「论表格，不解释判据成因）。我推荐 A：…」
+和「C) 单模块 + 把三个私有 helper 再拆到第三个文件里凑数。」。现在解析器会向上收集这个文本块，
+遇到采访自己打印的 `问题 N / M` 表头就以它下一行为标题；**没有**这个表头时仍退回旧行为（最近一行）——
+终端不标注问题从哪儿开始，硬往上取第一行会把上面的历史输出当成标题，那是把"难看的标题"换成"错的标题"。
 
 ---
 
@@ -309,7 +380,8 @@ attention 事件存在一个**全局**文件里（`lib/attention.ts`，`~/.pi/ag
 2. 再看 `secondsSinceActivity`。它**不是**健康度指标：`working` + 静止 600s 完全可能是正常的
    （在跑 judge 或长测试）。它只在配合 `state` 时有意义。
 3. 有 `dialogTitle` 就说明有框在等你，标题就是问题的主题。
-4. `done: true` 而 `state: idle` 是**正常终态**：子会话报完 `declare_done` 不会退出，它就停在那儿。
+4. `state: done` 是**正常终态**：子会话报完 `declare_done` 不会退出，它就停在那儿等你验收。
+   它会响两次铃（间隔 60s）然后安静下来，所以别把"很久没再提醒"读成"没做完"。
 
 ### 4.2 状态 → 动作
 
@@ -317,8 +389,9 @@ attention 事件存在一个**全局**文件里（`lib/attention.ts`，`~/.pi/ag
 | --- | --- | --- |
 | `waiting-input`，带 `dialogTitle` | 有选项框在等答案 | `orchestrator_read({ childId })` 读选项，再 `orchestrator_key({ childId, index \| match })` |
 | `waiting-input`，判据是 sidecar 的 `pausedQuestion` | 它在 `ask_user` 上暂停 | 同上先读；框还开着时**不要**投文本（会替它答一次） |
+| `done` | 它跑完了全套并被门禁接受（判据是它 sidecar 里的完成记录） | 验收：派下一条任务，或 `orchestrator_close`；worktree lane 顺手确认成果已进基准 |
 | `idle`，且 `done` 为空 | 它停了但没报完成 | 读屏看它停在哪，用 `orchestrator_send` 问；确认没救就 `orchestrator_close` 后重派 |
-| `idle`，且 `done: true` | 正常做完了 | 派下一条任务，或 `orchestrator_close` |
+| 任意状态 + `⚠ 越界落点` | 它改了任务边界之外的文件 | 这是范围变更：`orchestrator_notify` 让用户拍板（扩边界 or 回滚），别自己批 |
 | `dead` | pane 没了（异常退出或被关） | 它的任务多半没做完：确认状态，必要时重派 |
 | `working`，判据是"沿用上一次的判定" | tmux 读不到，存活未知 | 不是坏消息，但连续多轮如此就自己看一眼 pane |
 
@@ -343,3 +416,25 @@ attention 事件存在一个**全局**文件里（`lib/attention.ts`，`~/.pi/ag
 - **不要用结束 turn 代替等待。** 子会话不会因为你结束了 turn 就有人管；`orchestrator_wait` 必然返回，
   拿它当循环的下一步。
 - **不要把"事件已销账"当成"事情已办完"。** 门禁自己都不这么认，它要两个正面证据。
+- **不要自己 `git merge` 帮子会话把成果送回基准。** 那是门禁欠的活，见 §5；项目经理不动代码仓库。
+
+---
+
+## 5. 并行 lane 的成果怎么回到基准分支（R3-6 / R3-7）
+
+第三轮两条并行 lane 的成果**都是人手工 `git merge` 送回去的**，两处根因都在门禁这边，都已经修掉：
+
+- **基准分支推导退化（R3-6）。** `setup_workspace` 默认把"当前分支"当基准，而 worktree lane 站在门禁自己刚建的
+  `orch/<task>-<stamp>` 上，于是它 `declare_done` 时把成果合进了那个临时分支。现在 `orchestrator_spawn`
+  会把编排的基准分支（项目经理自己所在的分支，**建 worktree 之前**读的）以 `RG_ORCH_BASE_BRANCH` 注入子会话，
+  `setup_workspace` 缺省用它 —— 子会话显式传 `base` 仍然优先，**用户照样在同一个框里确认**。
+- **合并路径必然失败（R3-7）。** 合并跑的是 `git checkout <base>`，而基准分支正被主 worktree 占着，
+  git 直接拒绝（一个分支只能被一个 worktree 检出）。现在 `declare_done` 先判**合并在哪儿执行**
+  （`lib/worktree-merge.ts`，纯函数）：没人占着就照旧在本工作区切过去合；被别的 worktree 占着，
+  就**在那个工作区里就地 merge，不切分支、不动 HEAD**。安全规则是用户定的：只有那个工作区**干净且正停在基准分支上**
+  才动它，否则什么都不做，明说原因（脏文件清单 / 它停在哪个分支），把选择权交回人 —— 在别人有未提交改动的
+  工作区里跑 merge 可能弄丢它们，没有哪张回执值这个价。
+
+对项目经理的意思是：lane 跑完 `declare_done` 之后，成果**应该**已经在基准分支上了。
+如果 `declare_done` 报的是"合并没做"（脏工作区 / 停错分支 / 走了 `waiveMerge`），那是需要人处理的事 ——
+通知用户，别自己动手补。

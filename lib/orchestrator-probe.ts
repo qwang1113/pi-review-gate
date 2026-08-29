@@ -30,7 +30,9 @@
 import type { OrchestratorDeps } from "./orchestrator-deps.ts";
 import { capturePane } from "./orchestrator-tool-kit.ts";
 import { dialogIsOpen } from "./orchestrator-pane-read.ts";
-import type { ChildSession } from "./orchestrator-registry.ts";
+import { markChildDone, type ChildSession } from "./orchestrator-registry.ts";
+import { pathsOutsideBoundaries } from "./orchestrator-boundaries.ts";
+import type { OrchestratorPlan } from "./orchestrator-plan.ts";
 
 import { buildListPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
 import {
@@ -42,15 +44,51 @@ import {
   type ChildStateMemory,
 } from "./orchestrator-child-state.ts";
 
+/** What a manufactured event is ABOUT. */
+export type ProbeEventKind =
+  /** The child entered (or is stuck in) a newsworthy state. */
+  | "state"
+  /**
+   * It edited a file outside its task's declared boundary (R3-1).
+   *
+   * A separate kind because it is not a state at all: a child can breach its
+   * boundary while perfectly healthy, and the supervisor must hear about it
+   * exactly once per new path rather than on every probe.
+   */
+  | "boundary-breach";
+
 /** One manufactured event: a child entered (or is stuck in) a newsworthy state. */
 export interface ProbeEvent {
   childId: string;
   taskId?: string;
   paneId?: string;
+  kind?: ProbeEventKind;
   state: ChildState;
   reason: string;
+  /** The out-of-boundary paths, on a `boundary-breach` event. */
+  paths?: string[];
   /** ms — when the probe raised it. */
   at: number;
+}
+
+/**
+ * An event that was queued and is NOT worth delivering any more (R3-3).
+ *
+ * Measured three times in the third run: an answered dialog, and then a
+ * CLOSED child, each produced a `wait` that returned in 0s announcing news
+ * that the same receipt's health snapshot already contradicted. The event is
+ * dropped — but named, because silently swallowing events is the other half
+ * of the same bug (R-16).
+ */
+export interface StaleProbeEvent {
+  event: ProbeEvent;
+  reason: string;
+}
+
+/** What `drain` hands back: what to act on, and what was written off. */
+export interface DrainedEvents {
+  events: ProbeEvent[];
+  stale: StaleProbeEvent[];
 }
 
 /** How often the background timer runs the probe (user decision, 2026-08-30). */
@@ -72,7 +110,7 @@ export interface ChildProbe {
    * supervisor waiting on a single child must not silently drop the news
    * about its siblings, which is the same class of loss R-16 was.
    */
-  drain(opts?: { now?: number; childId?: string }): ProbeEvent[];
+  drain(opts?: { now?: number; childId?: string }): DrainedEvents;
 
   /** How many events are waiting to be delivered. */
   pending(now?: number): number;
@@ -105,12 +143,51 @@ function structuredFacts(
   };
   const review = nested("review");
   const precommit = nested("precommit");
+  // R3-5 — the completion record. This is the ONLY reason the `done` state can
+  // exist: the child's gate wrote down that `declare_done` was accepted, so a
+  // supervisor never has to infer completion from leftover terminal text.
+  const completion = nested("completion");
   return {
     ...facts,
     pausedQuestion: Boolean(nested("pausedQuestion")),
     ...(typeof review?.verdict === "string" ? { reviewVerdict: review.verdict } : {}),
     ...(typeof precommit?.verdict === "string" ? { precommitVerdict: precommit.verdict } : {}),
+    ...(typeof completion?.at === "string" && completion.at ? { completedAt: completion.at } : {}),
   };
+}
+
+/**
+ * The files a child has actually EDITED, from its own sidecar (R3-1).
+ *
+ * Constraint 8 used to be judged from path-like words in the child's goal
+ * TEXT, which cost two proxy approvals in the third run: a documentation task
+ * whose goal quoted the modules it describes ("可逐条对照
+ * `lib/orchestrator-probe.ts`") was refused for "leaving its boundary" while
+ * its non-goals section promised not to touch a single line of code. What a
+ * child WROTE is a fact; what its goal mentions is prose.
+ */
+function editedFiles(deps: OrchestratorDeps, child: ChildSession): string[] {
+  const raw = deps.childGateState(child.cwd, child.stateVariant);
+  const list = raw?.sessionEditedFiles;
+  if (!Array.isArray(list)) return [];
+  return list.filter((f): f is string => typeof f === "string" && f.trim().length > 0);
+}
+
+/**
+ * The child's out-of-boundary landings, if its task declared boundaries.
+ *
+ * Returns nothing when the plan (or the task) cannot be read: a missing
+ * declaration is not evidence of a breach, and manufacturing one would train
+ * the supervisor to ignore this event.
+ */
+function boundaryBreach(
+  deps: OrchestratorDeps,
+  child: ChildSession,
+  plan: OrchestratorPlan | undefined,
+): string[] {
+  const task = plan?.tasks.find((t) => t.id === child.taskId);
+  if (!task || task.fileBoundaries.length === 0) return [];
+  return pathsOutsideBoundaries(editedFiles(deps, child), task.fileBoundaries);
 }
 
 
@@ -145,6 +222,43 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
     queue = queue.filter((e) => now - e.at <= PROBE_EVENT_TTL_MS).slice(-PROBE_QUEUE_MAX);
   }
 
+  /**
+   * R3-3 — judge every queued event against the CURRENT truth before it wakes
+   * anybody.
+   *
+   * Three reproductions in the third run: right after a dialog was answered,
+   * and twice after a child had been CLOSED, `orchestrator_wait` returned in
+   * 0s announcing "it entered waiting-input / idle" — while the health
+   * snapshot in the SAME receipt said otherwise. Nothing was lost by it, but
+   * the supervisor paid an `orchestrator_read` for a box that no longer
+   * existed, and a receipt that contradicts itself is a receipt nobody can
+   * rely on.
+   *
+   * Dropped events are RETURNED, never swallowed: R-16 was the mirror-image
+   * bug, and the cure for one must not be the other.
+   */
+  function review(taken: readonly ProbeEvent[]): DrainedEvents {
+    const runtime = deps.runtime();
+    const events: ProbeEvent[] = [];
+    const stale: StaleProbeEvent[] = [];
+    for (const event of taken) {
+      const child = runtime.children.find((c) => c.id === event.childId);
+      if (!child || child.closedAt) {
+        stale.push({ event, reason: "这个子会话已经关闭 / 不在登记表里了" });
+        continue;
+      }
+      const current = memories.get(event.childId)?.state;
+      // A boundary breach is about files already written: it does not expire
+      // when the child moves to another state. Only STATE news can go stale.
+      if (event.kind !== "boundary-breach" && current !== undefined && current !== event.state) {
+        stale.push({ event, reason: `它现在是 ${current}，已经不是事件里的 ${event.state} 了` });
+        continue;
+      }
+      events.push(event);
+    }
+    return { events, stale };
+  }
+
   return {
     observe(nowArg?: number) {
       const now = nowArg ?? deps.now();
@@ -153,6 +267,10 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
       const panes = alivePaneIds();
       const raised: ProbeEvent[] = [];
       const snapshot: ChildHealth[] = [];
+      // Read ONCE per round: the boundary check below needs the task
+      // declarations, and re-reading the plan per child would multiply the IO
+      // by the number of panes for a file that cannot change mid-round.
+      const plan = deps.readPlan().plan;
 
       for (const child of open) {
         const snapshotOfPane = capturePane(deps, child.paneId);
@@ -174,17 +292,46 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
           previous,
         );
         const decision = decideChildEvent(verdict, previous?.state, now);
-        memories.set(child.id, decision.memory);
+        let memory = decision.memory;
         if (decision.raise) {
           raised.push({
             childId: child.id,
             taskId: child.taskId,
             paneId: child.paneId,
+            kind: "state",
             state: verdict.state,
             reason: decision.reason,
             at: now,
           });
         }
+        // R3-5 — a completion the probe has SEEN becomes a registry fact.
+        // `markChildDone` had no caller at all, so `doneAt` was never set and
+        // every consumer of it (status, scheduling, the exit check) was dead
+        // code. The probe is the one component that reads the child's sidecar
+        // on a timer, so it is where the fact lands.
+        if (verdict.state === "done" && !child.doneAt) {
+          deps.saveRuntime(markChildDone(deps.runtime(), child.id, new Date(now).toISOString()));
+        }
+        // R3-1 — constraint 8, judged against what the child actually wrote.
+        const outside = boundaryBreach(deps, child, plan);
+        const fresh = outside.filter((p) => !(memory.breachReported ?? []).includes(p));
+        if (fresh.length > 0) {
+          memory = { ...memory, breachReported: [...(memory.breachReported ?? []), ...fresh] };
+          raised.push({
+            childId: child.id,
+            taskId: child.taskId,
+            paneId: child.paneId,
+            kind: "boundary-breach",
+            state: verdict.state,
+            paths: fresh,
+            reason:
+              `它改到了任务 ${child.taskId} 边界之外的文件：${fresh.slice(0, 8).join("、")}` +
+              (fresh.length > 8 ? ` 等 ${fresh.length} 个` : "") +
+              " —— 这是范围变更（约束 8），按实际落点判定，不是按 goal 正文",
+            at: now,
+          });
+        }
+        memories.set(child.id, memory);
         const changedAt = decision.memory.changedAt;
         snapshot.push({
           childId: child.id,
@@ -199,7 +346,8 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
               }
             : {}),
           ...(snapshotOfPane?.dialog?.title ? { dialogTitle: snapshotOfPane.dialog.title } : {}),
-          ...(child.doneAt ? { done: true } : {}),
+          ...(child.doneAt || verdict.state === "done" ? { done: true } : {}),
+          ...(outside.length > 0 ? { outsideBoundaries: outside } : {}),
         });
       }
 
@@ -215,19 +363,21 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
       return { health: snapshot, events: raised };
     },
 
-    drain(opts?: { now?: number; childId?: string }) {
+    drain(opts?: { now?: number; childId?: string }): DrainedEvents {
       const now = opts?.now ?? deps.now();
       prune(now);
       const wanted = opts?.childId;
+      let taken: ProbeEvent[];
       if (!wanted) {
-        const taken = queue;
+        taken = queue;
         queue = [];
-        return taken;
+      } else {
+        taken = queue.filter((e) => e.childId === wanted);
+        queue = queue.filter((e) => e.childId !== wanted);
       }
-      const taken = queue.filter((e) => e.childId === wanted);
-      queue = queue.filter((e) => e.childId !== wanted);
-      return taken;
+      return review(taken);
     },
+
 
 
     pending(nowArg?: number) {
@@ -246,6 +396,13 @@ export function createChildProbe(deps: OrchestratorDeps): ChildProbe {
  * not produce (R-4).
  */
 export function describeProbeEvent(event: ProbeEvent): string {
-  return `子会话 ${event.childId}（task=${event.taskId ?? "?"}，pane ${event.paneId ?? "?"}）进入 ${event.state}：${event.reason}`;
+  const who = `子会话 ${event.childId}（task=${event.taskId ?? "?"}，pane ${event.paneId ?? "?"}）`;
+  if (event.kind === "boundary-breach") return `${who} 越界改文件：${event.reason}`;
+  return `${who}进入 ${event.state}：${event.reason}`;
+}
+
+/** One line per event that was dropped instead of delivered (R3-3). */
+export function describeStaleEvent(stale: StaleProbeEvent): string {
+  return `${describeProbeEvent(stale.event)} —— 已作废：${stale.reason}`;
 }
 

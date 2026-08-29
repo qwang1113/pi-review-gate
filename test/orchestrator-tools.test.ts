@@ -235,8 +235,11 @@ test("CONSTRAINT 8 / R-7: the boundary check reads the child's SIDECAR draft, no
   await h.call("orchestrator_spawn", { taskId: "a", task: "干活 a" });
   const child = h.runtime().children[0]!;
   const childId = child.id;
-  const setDraft = (draft: string): void => {
-    h.setSidecar(child.cwd, child.stateVariant, { goalPrereview: { verdict: "PASS", at: "now", draft } });
+  const setDraft = (draft: string, editedFiles: string[] = []): void => {
+    h.setSidecar(child.cwd, child.stateVariant, {
+      goalPrereview: { verdict: "PASS", at: "now", draft },
+      sessionEditedFiles: editedFiles,
+    });
   };
 
   // R-7 — with no draft on record there is nothing the GATE can check, so it
@@ -263,15 +266,16 @@ test("CONSTRAINT 8 / R-7: the boundary check reads the child's SIDECAR draft, no
   assert.equal(inside.details?.approved, true);
   assert.match(h.render(child.paneId), /answered: Yes/, "the dialog was really answered");
 
-  // A draft that reaches OUTSIDE the task is refused on what the CHILD wrote,
-  // so a tidied-up copy in the caller's hand changes nothing.
-  setDraft("顺手改 extensions/review-gate.ts");
+  // R3-1 — the refusal is about LANDINGS, not prose. A goal may quote any file
+  // it likes (a documentation task must); what refuses the proxy approval is
+  // the child having already written outside its task boundary.
+  setDraft("可逐条对照 extensions/review-gate.ts 与 lib/tmux/x.ts", ["extensions/review-gate.ts"]);
   h.openDialog(child.paneId, "认可这个 goal 吗？", ["Yes", "No"]);
   const outside = await h.call("orchestrator_send", {
     childId,
     approveGoal: "只改 lib/plan/state.ts（这份手抄稿完全在边界内）",
   });
-  assert.equal(outside.isError, true, "the SIDECAR draft decides, not the pretty copy");
+  assert.equal(outside.isError, true, "the child's actual landings decide, not the pretty copy");
   assert.match(text(outside), /范围变更/);
   assert.deepEqual(outside.details?.outside, ["extensions/review-gate.ts"]);
 });

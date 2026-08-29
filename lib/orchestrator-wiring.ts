@@ -334,6 +334,28 @@ export function repairGitHooks(repoRoot: string): { ok: true } | { ok: false; er
 }
 
 
+/**
+ * The branch a checkout is standing on; undefined when detached or unreadable.
+ *
+ * Used at spawn time to tell a child where its work has to LAND (R3-6): the
+ * supervisor's own branch is the orchestration's base, and a child in a
+ * gate-created worktree cannot derive that from anything it can see.
+ */
+export function currentBranchOf(repoRoot: string): string | undefined {
+  try {
+    const out = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    return out && out !== "HEAD" ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+
 /** Character count of a repo-relative file; undefined when it is not there. */
 export function fileCharsIn(repoRoot: string, relPath: string): number | undefined {
   try {
@@ -411,6 +433,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     removeWorktree: (path) => removeWorktree(host.repoRoot, path),
     childJudgeRunning: (childCwd) => childJudgeRunning(childCwd, host.now ? host.now() : Date.now()),
     gitHooksReferencing: (path) => gitHooksReferencing(host.repoRoot, path),
+    currentBranch: () => currentBranchOf(host.repoRoot),
     repairGitHooks: () => repairGitHooks(host.repoRoot),
     probe: () => (probeInstance ??= createChildProbe(deps)),
     consumeAttention: (): AttentionEvent | undefined => consumeAttention(host.orchestrationId()),

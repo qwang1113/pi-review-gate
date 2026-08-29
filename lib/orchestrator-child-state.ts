@@ -1,5 +1,5 @@
 /**
- * WHAT IS THAT CHILD DOING RIGHT NOW — the four-state answer, as a pure
+ * WHAT IS THAT CHILD DOING RIGHT NOW — the five-state answer, as a pure
  * function.
  *
  * THE MEASURED PROBLEM (second end-to-end run, 2026-08-29/30). Both routes
@@ -16,6 +16,28 @@
  *                   "I quietly stopped" (R-23);
  *   dead            its pane vanished and only a later poll noticed.
  *
+ * WHAT THE THIRD RUN ADDED, and it is the reason this file now has FIVE
+ * states (R3-5, P0). A child that had finished everything — reviewer READY,
+ * full precommit, `declare_done` accepted, branch merged — was classified
+ * `working` and produced NO event for 725 seconds. Two independent defects
+ * met:
+ *
+ *   (a) "something is running" was matched against the WHOLE capture, so any
+ *       `Working` / `esc to interrupt` the child had ever printed kept
+ *       matching forever. The signal is now read from the LAST few lines
+ *       only, where a live activity indicator actually is;
+ *   (b) `done` had no criterion at all. The structured truth was already on
+ *       disk — the child's own sidecar records its completion — and nobody
+ *       read it. It is now the FIRST thing consulted once the screen settles.
+ *
+ * The contrast that made it fatal: a sibling that finished the same way was
+ * called `idle` (because its screen happened to hold different text) and woke
+ * the orchestrator after 47s. One had a signal, the other never would have —
+ * decided by which words were left on a terminal. `working` means "all is
+ * well", so nobody goes looking; completion was found by a HUMAN getting
+ * suspicious about a "still for 718s" line. Finding out that the work is done
+ * must be a signal, not a suspicion.
+ *
  * THE TRAP THIS MODULE IS BUILT AROUND (R-23, with a measured counter-example).
  * "The token counter stopped growing" is NOT idleness: a child blocked in
  * `judge_wait` for 550s and a child running a 700s poll loop both look frozen
@@ -26,17 +48,19 @@
  * away the digits that tick on their own.
  *
  * Pure module: observations in, a state out. No tmux, no filesystem, no clock
- * of its own (`at` is passed in), so the whole four-state machine is testable
+ * of its own (`at` is passed in), so the whole five-state machine is testable
  * with fake screens — which is the point, because the last round shipped 1918
  * green unit tests and deadlocked on the first real hop.
  */
 
-/** The four states a registered child can be in. All four were observed. */
+/** The five states a registered child can be in. All five were observed. */
 export type ChildState =
   /** Producing output, or provably blocked on work it started itself. */
   | "working"
   /** A dialog (or a gate pause) is waiting for an answer. */
   | "waiting-input"
+  /** Its own gate sidecar records a completed task — the terminal state. */
+  | "done"
   /** Alive, nothing on screen moving, and nothing in flight — it stopped. */
   | "idle"
   /** Its pane is gone. */
@@ -52,6 +76,15 @@ export interface ChildSidecarFacts {
   reviewVerdict?: string;
   /** Its last precommit verdict, when it has one. */
   precommitVerdict?: string;
+  /**
+   * ISO time its `declare_done` was ACCEPTED — the completion truth (R3-5).
+   *
+   * Written by the child's own gate when the task was declared complete, so
+   * it survives whatever the terminal happens to be showing. This is the one
+   * fact that separates "finished" from "stopped", and reading it is the
+   * whole reason the `done` state can exist.
+   */
+  completedAt?: string;
 }
 
 /** One measurement of one child. Every field is observed, never assumed. */
@@ -87,6 +120,16 @@ export interface ChildStateMemory {
   /** How many times this unresolved state has already woken the orchestrator. */
   reported?: number;
   lastReportedAt?: number;
+  /**
+   * Out-of-boundary files this child was ALREADY reported for (R3-1).
+   *
+   * Constraint 8 no longer reads the goal TEXT, so the boundary is enforced
+   * against what the child actually edited — and that check runs on every
+   * probe rather than once. Remembering which paths were already named is
+   * what keeps a standing breach from ringing every ten seconds while a NEW
+   * one still rings immediately.
+   */
+  breachReported?: string[];
 }
 
 /** The verdict for one child, plus the memory to carry into the next probe. */
@@ -117,8 +160,9 @@ export const IDLE_AFTER_MS = 45_000;
 /**
  * Screen signatures that mean "a turn is in flight".
  *
- * Matched as substrings against the whole capture: the question is "is
- * something running", not "which screen is this".
+ * Matched as substrings, but ONLY against the tail of the capture (see
+ * {@link ACTIVITY_TAIL_LINES}): the question is "is something running RIGHT
+ * NOW", not "did this session ever run anything".
  */
 const IN_FLIGHT_SIGNATURES: readonly string[] = Object.freeze([
   "esc to interrupt",
@@ -131,6 +175,24 @@ const IN_FLIGHT_SIGNATURES: readonly string[] = Object.freeze([
   "Running",
   "esc to cancel",
 ]);
+
+/**
+ * How many lines at the BOTTOM of a capture may carry an activity indicator.
+ *
+ * THE BUG THIS NUMBER FIXES (R3-5a, measured for 725 seconds). The signatures
+ * above used to be matched against the whole screen. A pi pane keeps its
+ * scrollback on screen, so the moment a child had printed `Working` or `esc
+ * to interrupt` ONCE — every child does, every turn — the match held forever
+ * and the child was `working` for the rest of its life. It could finish
+ * everything and never produce an event, because `working` is the state
+ * nobody investigates.
+ *
+ * A live indicator is rendered by the composer, which sits at the bottom of
+ * the pane; 12 lines covers it plus the belowEditor widget and the status
+ * line, and excludes the transcript above. Deliberately not 1–2 lines: a
+ * repaint mid-capture would then read as "idle" and interrupt a healthy turn.
+ */
+export const ACTIVITY_TAIL_LINES = 12;
 
 /**
  * The comparable form of a screen.
@@ -162,9 +224,28 @@ export function screenFingerprint(text: string | undefined): string | undefined 
  * queue as an ordinary message — so the gate waits for the idle window
  * instead of making the orchestrator poll `capture-pane` by hand.
  */
-export function screenLooksBusy(text: string | undefined): boolean {
+export function screenLooksBusy(
+  text: string | undefined,
+  tailLines: number = ACTIVITY_TAIL_LINES,
+): boolean {
   if (!text) return false;
-  return IN_FLIGHT_SIGNATURES.some((sig) => text.includes(sig));
+  const tail = screenTail(text, tailLines);
+  return IN_FLIGHT_SIGNATURES.some((sig) => tail.includes(sig));
+}
+
+/**
+ * The bottom `tailLines` non-blank-terminated lines of a capture.
+ *
+ * Trailing blank lines are dropped FIRST: a pane whose capture ends in ten
+ * empty rows would otherwise push the live indicator out of the window and
+ * make a busy child look stopped — the opposite error, and the more expensive
+ * one (it interrupts real work).
+ */
+export function screenTail(text: string, tailLines: number = ACTIVITY_TAIL_LINES): string {
+  const lines = String(text).split("\n");
+  while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop();
+  const count = Math.max(1, Math.floor(tailLines));
+  return lines.slice(-count).join("\n");
 }
 
 /**
@@ -177,9 +258,13 @@ export function screenLooksBusy(text: string | undefined): boolean {
  *    death, never a promotion);
  *  3. an open dialog or a gate pause is `waiting-input` — the only state that
  *    is somebody else's turn to act;
- *  4. anything provably in flight (a judge round, an "esc to interrupt"
- *    screen, a screen that just changed) is `working`;
- *  5. only when none of the above holds, and the screen has been still long
+ *  4. a judge round in flight is `working` — blocking there is healthy work;
+ *  5. a completion record in the child's OWN sidecar, on a settled screen, is
+ *    `done` — the terminal state, and the one a supervisor must never have to
+ *    guess at (R3-5);
+ *  6. anything else provably in flight (an activity indicator in the screen's
+ *    TAIL, a fingerprint that just changed) is `working`;
+ *  7. only when none of the above holds, and the screen has been still long
  *    enough, is a child called `idle`.
  */
 export function classifyChildState(
@@ -209,6 +294,10 @@ export function classifyChildState(
         ...(memory.state === state && memory.lastReportedAt !== undefined
           ? { lastReportedAt: memory.lastReportedAt }
           : {}),
+        // Boundary reports are about FILES, not about the state machine:
+        // they must survive every transition, or a child that alternates
+        // working/idle would re-report the same breach forever.
+        ...(memory.breachReported ? { breachReported: memory.breachReported } : {}),
       },
     };
   };
@@ -237,6 +326,27 @@ export function classifyChildState(
   }
   if (sidecar?.judgeRunning) {
     return settle("working", "它的 sidecar 显示有 judge 子进程在跑 —— 阻塞在 judge 上是正常工作态（不是 idle）");
+  }
+  // R3-5b — THE COMPLETION CRITERION, and its rank is the whole design.
+  //
+  // Everything ABOVE outranks it, because a finished child that is being
+  // asked something, or that was handed a new round, is not "done" any more
+  // (the record stays on disk, so it falls back to `done` once it settles
+  // again). Everything BELOW it is screen text — which is precisely what
+  // classified a finished child as `working` for 725 seconds.
+  //
+  // A settled screen is still required: it is what separates "it finished"
+  // from "it finished and immediately started something else", and it costs
+  // exactly one probe interval.
+  const completedAt = sidecar?.completedAt;
+  const completed = Boolean(completedAt) || observation.done === true;
+  if (completed && !changed && !screenLooksBusy(observation.screenText)) {
+    return settle(
+      "done",
+      completedAt
+        ? `它自己的 sidecar 记着 declare_done 已被接受（${completedAt}），且画面已静止 —— 任务完成`
+        : "登记表里记着它报告过完成，且画面已静止 —— 任务完成",
+    );
   }
   if (screenLooksBusy(observation.screenText)) {
     return settle("working", "屏幕上有「正在跑」的标志（esc to interrupt / Working / Thinking）");
@@ -291,8 +401,20 @@ export function nextRewakeDelayMs(alreadyReported: number): number {
 
 /** States that are worth waking the orchestrator for. */
 export function isNewsworthy(state: ChildState): boolean {
-  return state === "waiting-input" || state === "idle" || state === "dead";
+  return state === "waiting-input" || state === "idle" || state === "dead" || state === "done";
 }
+
+/**
+ * How a COMPLETED child rings (user decision, 2026-08-30, option C).
+ *
+ * `done` is terminal, so the unresolved-state backoff would just be noise:
+ * there is nothing the orchestrator can do to make a finished child less
+ * finished. But ringing exactly once is fragile — a supervisor busy inside a
+ * long `orchestrator_wait` on ANOTHER child can miss the single event — so it
+ * rings a second time a minute later and then goes quiet for good.
+ */
+export const DONE_REPORT_LIMIT = 2;
+export const DONE_REWAKE_MS = 60_000;
 
 /**
  * Should THIS verdict wake the orchestrator, and why?
@@ -311,8 +433,14 @@ export function decideChildEvent(
   const entered = previousState !== verdict.state;
   const reported = memory.reported ?? 0;
   const last = memory.lastReportedAt;
-  const due = last === undefined || now - last >= nextRewakeDelayMs(reported);
+  const terminal = verdict.state === "done";
+  if (terminal && reported >= DONE_REPORT_LIMIT) return { raise: false, reason: "", memory };
+  const delay = terminal ? DONE_REWAKE_MS : nextRewakeDelayMs(reported);
+  const due = last === undefined || now - last >= delay;
   if (!entered && !due) return { raise: false, reason: "", memory };
+  // Entering `done` a second time (it was re-tasked and finished again) starts
+  // a fresh pair of rings: `settle` resets `reported` on a state change, so
+  // the limit above is per visit to the state, not per lifetime.
   return {
     raise: true,
     reason: verdict.reason,
@@ -347,11 +475,20 @@ export interface ChildHealth {
   dialogTitle?: string;
   /** It reported `declare_done` already. */
   done?: boolean;
+  /**
+   * Files it has edited that fall OUTSIDE its task's declared boundary (R3-1).
+   *
+   * Constraint 8 is enforced against this — what the child actually wrote —
+   * rather than against path-like words in its goal text, which punished
+   * documentation tasks for quoting the files they describe.
+   */
+  outsideBoundaries?: string[];
 }
 
 const STATE_LABELS: Readonly<Record<ChildState, string>> = Object.freeze({
   working: "working（在跑）",
   "waiting-input": "waiting-input（在等人答）",
+  done: "done（任务已完成，declare_done 已被接受）",
   idle: "idle（停了，但没 declare_done）",
   dead: "dead（pane 没了）",
 });
@@ -366,13 +503,18 @@ export function formatChildHealth(list: readonly ChildHealth[]): string {
   return list
     .map((h) => {
       const since = h.secondsSinceActivity === undefined ? "?" : `${h.secondsSinceActivity}s`;
+      const outside = h.outsideBoundaries ?? [];
       return (
         `- ${h.childId}${h.taskId ? `（task=${h.taskId}` : "（"}${h.paneId ? `，pane ${h.paneId}` : ""}）：` +
         `${describeChildState(h.state)}，画面已静止 ${since}` +
         (h.lastActivityAt ? `（最后变化 ${h.lastActivityAt}）` : "") +
         (h.dialogTitle ? `，当前框「${h.dialogTitle}」` : "") +
         (h.done ? "，已报告完成" : "") +
-        `\n  依据：${h.reason}`
+        `\n  依据：${h.reason}` +
+        (outside.length > 0
+          ? `\n  ⚠ 越界落点（约束 8，按实际改过的文件判）：${outside.slice(0, 8).join("、")}` +
+            (outside.length > 8 ? ` 等 ${outside.length} 个` : "")
+          : "")
       );
     })
     .join("\n");

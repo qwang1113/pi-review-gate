@@ -137,6 +137,28 @@ export interface GateState {
   mergeConflict?: { branch: string; base: string; files: string[]; at: string };
   /** The user waived the merge for this session (escape hatch, on record). */
   mergeWaived?: { at: string; reason: string };
+  /**
+   * The COMPLETION record — `declare_done` was accepted (R3-5).
+   *
+   * It exists because a supervisor could not tell a finished child from a
+   * running one: the orchestration probe was reduced to reading the child's
+   * TERMINAL, where "Working" printed an hour ago still matched, and a child
+   * that had merged its branch and closed every gate produced no signal for
+   * 725 seconds. The gate already knew — it had just accepted the completion
+   * — and wrote that fact nowhere. Now it does, in the child's own sidecar,
+   * which the orchestrator reads through `childGateState`.
+   *
+   * Written on ACCEPTANCE only (a rejected `declare_done` records nothing),
+   * and never cleared by the loop reset below it: "this task was completed at
+   * T" stays true even when the session goes on to do something else.
+   */
+  completion?: {
+    at: string;
+    /** How the work branch landed — merged, waived, or nothing to merge. */
+    merge: "merged" | "waived" | "none";
+    /** The one-paragraph summary the agent declared with (bounded). */
+    summary?: string;
+  };
   hasCodeChange: boolean;
   hasDocChange: boolean;
   review: {
@@ -430,6 +452,25 @@ export function emptyState(sessionId: string | null, maxRounds: number): GateSta
  */
 export const STATE_VARIANT_ENV = "RG_STATE_VARIANT";
 
+/**
+ * The base branch an orchestration child's work must end up in (R3-6).
+ *
+ * WHY IT IS INJECTED RATHER THAN INFERRED. `setup_workspace` defaults the
+ * base to "the branch you are standing on". For a child in a gate-created
+ * worktree that branch is `orch/<task>-<stamp>` — a name the gate invented
+ * minutes earlier — so the child dutifully merged its work into the scratch
+ * branch and the lane's output never reached the orchestration's real base.
+ * Measured in the third run: of two parallel lanes, one asked the right
+ * question only because its agent happened to pass `base` itself, and both
+ * lanes ended up merged by hand.
+ *
+ * The orchestrator knows the base at spawn time, so it says so. The child
+ * still SHOWS it to whoever answers the dialog — an injected default is a
+ * default, not a decision made behind anyone's back.
+ */
+export const ORCH_BASE_BRANCH_ENV = "RG_ORCH_BASE_BRANCH";
+
+
 /** Only these characters may reach a filename. Anything else is dropped. */
 const STATE_VARIANT_SAFE = /[^A-Za-z0-9._-]/g;
 
@@ -580,6 +621,19 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
          typeof parsed.pausedQuestion.question !== "string" ||
          typeof parsed.pausedQuestion.at !== "string")) {
       delete parsed.pausedQuestion;
+    }
+    // Malformed completion record → treated as ABSENT, which is the
+    // fail-closed direction here: a supervisor then keeps watching a child it
+    // cannot prove is finished, rather than writing it off (and marking its
+    // plan task done) on a field anything could have written. `merge` is
+    // constrained to the three landings the gate itself records.
+    if (parsed.completion !== undefined) {
+      const c = parsed.completion as Record<string, unknown> | null;
+      const validMerge = c?.merge === "merged" || c?.merge === "waived" || c?.merge === "none";
+      if (!c || typeof c !== "object" || Array.isArray(c) || typeof c.at !== "string" || !c.at ||
+          !validMerge || (c.summary !== undefined && typeof c.summary !== "string")) {
+        delete parsed.completion;
+      }
     }
     // Malformed scope limit → treated as ABSENT (fail-closed: absent means
     // the FULL-scope gate; dropping a forged one can only widen coverage,

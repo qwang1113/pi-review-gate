@@ -198,8 +198,8 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 - **纯决策**：`orchestrator-gate.ts`（14 条硬约束）、
   `orchestrator-boundaries.ts`（文件边界代数——两个任务能否并行只由它回答）、
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
-  `orchestrator-child-state.ts`（**子会话四态**：working / waiting-input /
-  idle / dead，以及「什么时候该再叫一次」的退避——纯函数，用假屏幕就能单测）、
+  `orchestrator-child-state.ts`（**子会话五态**：working / waiting-input /
+  done / idle / dead，以及「什么时候该再叫一次」的退避——纯函数，用假屏幕就能单测）、
 
   `orchestrator-wait.ts`（「有事发生」对子会话意味着什么）、
   `orchestrator-registry.ts`（编排只能操作门禁替它创建的东西）、
@@ -310,7 +310,7 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 
 ---
 
-## 五、`lib/` 全量速查表（84 个模块）
+## 五、`lib/` 全量速查表（85 个模块）
 
 **维护指令（这张表没有机械约束，只有这一条）**：在 `lib/` 下**新增或删除**一个
 模块时，**同一轮改动里**顺手加/删这里的一行——否则这张表会静静地过时。
@@ -357,7 +357,7 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 | `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |
 | `orchestration-id.ts` | 编排 id：编排的稳定地址（不是 session id），接力换人后子会话无感 |
 | `orchestrator-boundaries.ts` | 文件边界代数：两个任务能否并行的唯一判据 |
-| `orchestrator-child-state.ts` | 子会话四态（working / waiting-input / idle / dead）与再唤醒退避；判定用结构化真值，不用 token 增长 |
+| `orchestrator-child-state.ts` | 子会话五态（working / waiting-input / done / idle / dead）与再唤醒退避；判定用结构化真值（含 sidecar 的完成记录），不用 token 增长、也不整屏匹配「在跑」 |
 
 | `orchestrator-delivery.ts` | 任务投递：写任务文件 + argv 启动，并校验真的送达才报成功 |
 | `orchestrator-deps.ts` | 编排工具需要的依赖集合；host 类型本身住在 `tool-host.ts`，这里只 re-export |
@@ -368,7 +368,7 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 | `orchestrator-keys.ts` | 在子会话里按键（封闭键位表），让项目经理能选中非默认项 |
 | `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
 | `orchestrator-pane-read.ts` | 读子会话屏幕：只在页脚（`↑↓ navigate enter select`）之上解析对话框，折行选项合并 |
-| `orchestrator-probe.ts` | 状态探针：周期观察每个子会话，进入 waiting-input / idle / dead 时自己生成事件 |
+| `orchestrator-probe.ts` | 状态探针：周期观察每个子会话，进入 waiting-input / done / idle / dead 时自己生成事件；完成写回登记表 `doneAt`，落点越界另发一条事件；出队时按当下真值作废陈旧事件 |
 
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash |
 | `orchestrator-read-tools.ts` | 注册 `orchestrator_read` / `orchestrator_key` 两个原子工具 |
@@ -404,6 +404,7 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 | `verdict-parse.ts` | 裁决解析：review 只认 JSON fence，precommit 只认 `## Overall:` sentinel |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
 | `workspace-branch.ts` | `setup_workspace` 与 `declare_done` 背后的工作区与分支事实 |
+| `worktree-merge.ts` | 合并**在哪儿**执行：基准分支被别的 worktree 占着时（并行 lane 的常态）就地合并的判定，脏工作区一律拒绝 |
 
 ---
 

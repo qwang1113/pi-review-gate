@@ -231,6 +231,46 @@ test("pausedQuestion: malformed shapes fail toward NOT paused (loop stays armed)
   }
 });
 
+// ---------------------------------------------------------------------------
+// completion — the fact a supervising orchestrator reads (R3-5)
+// ---------------------------------------------------------------------------
+
+test("completion: `declare_done` acceptance round-trips through the sidecar", () => {
+  // This record is the ONLY criterion for the `done` child state: without it
+  // an orchestrator was left inferring completion from leftover terminal
+  // text, and inferred "working" for 725 seconds on a finished child.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const s = emptyState("s", 10);
+  s.completion = { at: "2026-08-30T04:20:00.000Z", merge: "merged", summary: "全部完成" };
+  saveSidecar(path, s);
+  assert.deepEqual(loadSidecar(path)?.completion, s.completion);
+});
+
+test("completion: a malformed record is DROPPED, so the child keeps being supervised", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of [
+    "done!",
+    42,
+    null,
+    [{ at: "t", merge: "merged" }],
+    { merge: "merged" },                       // no time
+    { at: "t" },                               // no landing
+    { at: "t", merge: "shipped" },             // not a landing the gate records
+    { at: "", merge: "merged" },               // empty time
+    { at: "t", merge: "merged", summary: 7 },
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, completion: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar itself must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.completion, undefined,
+      `${JSON.stringify(bad)} must not be able to mark a task done`);
+  }
+});
+
+
 test("goalAuditRound: a corrupt counter is dropped, so the count restarts at 1", () => {
   const dir = makeTemp();
   const path = join(dir, "state.json");

@@ -52,6 +52,7 @@ import {
   type ChildWaitObservation,
 } from "./orchestrator-wait.ts";
 import { formatChildHealth } from "./orchestrator-child-state.ts";
+import { describeStaleEvent } from "./orchestrator-probe.ts";
 import { dialogIsOpen } from "./orchestrator-pane-read.ts";
 
 import { dispatchSend, dispatchSpawn } from "./orchestrator-dispatch.ts";
@@ -91,9 +92,11 @@ const ATTENTION_DRAIN_PER_PROBE = 8;
  * machine rather than a stubbed `tmux() → ok`:
  *
  *  1. THE GATE LOOKS FOR ITSELF. Every poll runs the probe
- *     (lib/orchestrator-probe.ts), so `waiting-input`, `idle` and `dead`
- *     produce events even when no child ever rang — and an unanswered dialog
- *     rings AGAIN on the 10s→30s→60s backoff.
+ *     (lib/orchestrator-probe.ts), so `waiting-input`, `done`, `idle` and
+ *     `dead` produce events even when no child ever rang — and an unanswered
+ *     dialog rings AGAIN on the 10s→30s→60s backoff. `done` was the one that
+ *     did not exist until the third run measured a finished child sitting in
+ *     `working` for 725 seconds with no event at all (R3-5).
  *  2. AN EVENT IS NEVER SWALLOWED. A consumed event ends the wait unless the
  *     child has provably moved on (screen readable, no dialog, and the probe
  *     says it is working again); everything dropped is named in the reply.
@@ -157,9 +160,14 @@ async function doWait(
       now: deps.now(),
       ...(childId ? { childId } : {}),
     });
+    // R3-3 — events that no longer describe reality are named here and never
+    // returned as news: the third run had `wait` announce "it entered
+    // waiting-input" 0s after the box had been answered, contradicting the
+    // health snapshot in its own receipt.
+    for (const dropped of manufactured.stale) settledEvents.push(describeStaleEvent(dropped));
 
-    if (manufactured.length > 0) {
-      return { probeEvents: manufactured, done: false, paneAlive: true, health };
+    if (manufactured.events.length > 0) {
+      return { probeEvents: manufactured.events, done: false, paneAlive: true, health };
     }
 
     // F12 — take at most a bounded number of events per probe, and keep only
@@ -503,9 +511,11 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     description:
       "Block until something actually happens to a child of THIS orchestration — and the gate " +
       "looks for itself rather than only listening: every poll runs a state probe, so a child " +
-      "that raised a dialog (waiting-input), one that quietly STOPPED without declare_done " +
-      "(idle), and one whose pane vanished (dead) each produce an event even when the child never " +
-      "rang. An unanswered request rings again on a 10s→30s→60s backoff. It ALWAYS returns — the " +
+      "that raised a dialog (waiting-input), one that FINISHED its task (done — judged from its " +
+      "own sidecar's completion record, never from leftover screen text), one that quietly " +
+      "STOPPED without declare_done (idle), and one whose pane vanished (dead) each produce an " +
+      "event even when the child never rang. An unanswered request rings again on a 10s→30s→60s " +
+      "backoff; a completion rings twice, 60s apart, and then stays quiet. It ALWAYS returns — the " +
       "budget runs on its own timer — and an interrupt takes effect at once. Events belonging to " +
       "other sessions are dropped and reported; an event is only written off as settled when the " +
       "child provably moved on, and even then it is named in the reply. EVERY reply carries the " +

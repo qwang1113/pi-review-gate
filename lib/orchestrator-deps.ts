@@ -168,6 +168,17 @@ export interface OrchestratorDeps {
   gitHooksReferencing(path: string): string[];
 
   /**
+   * The branch the ORCHESTRATION itself is standing on — the base every
+   * child's work has to end up in (R3-6).
+   *
+   * Read from the supervisor's own worktree at spawn time and injected into
+   * the child, because a child in a gate-created worktree would otherwise
+   * default its base to the `orch/...` branch the gate had just invented for
+   * it, and its lane's output would stop there.
+   */
+  currentBranch(): string | undefined;
+
+  /**
    * Re-point the repository's hooks at the MAIN worktree's copy.
    *
    * Called before a referenced worktree is removed, so there is never a
