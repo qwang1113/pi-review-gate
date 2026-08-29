@@ -20,11 +20,22 @@ const JUDGE_SESSION_TOOLS = new Set(["judge_read", "judge_close", "judge_wait"])
  */
 const RELAY_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-relay-tools.ts"), "utf8");
 const JUDGE_RELAY_TOOLS = new Set(["review_spawn", "review_watch", "review_send"]);
+/**
+ * The PREPARE family moved the same way, split by responsibility: the round a
+ * reviewer judges (a commit range, a findings stream, a review target) in one
+ * module, the two advisory task builders in the other.
+ */
+const REVIEW_PREPARE_SRC = readFileSync(join(ROOT, "lib", "review-prepare-tools.ts"), "utf8");
+const REVIEW_PREPARE_TOOLS = new Set(["prepare_review"]);
+const ADVISORY_PREPARE_SRC = readFileSync(join(ROOT, "lib", "advisory-prepare-tools.ts"), "utf8");
+const ADVISORY_PREPARE_TOOLS = new Set(["prepare_adviser", "prepare_goal_audit"]);
 
 /** Which source owns a given tool's body. */
 function sourceOf(tool: string): string {
   if (JUDGE_SESSION_TOOLS.has(tool)) return JUDGE_TOOLS_SRC;
   if (JUDGE_RELAY_TOOLS.has(tool)) return RELAY_TOOLS_SRC;
+  if (REVIEW_PREPARE_TOOLS.has(tool)) return REVIEW_PREPARE_SRC;
+  if (ADVISORY_PREPARE_TOOLS.has(tool)) return ADVISORY_PREPARE_SRC;
   return SRC;
 }
 
@@ -55,13 +66,16 @@ function windowOf(start: string, end: string | RegExp, label: string, from = 0):
  * description, schema) and the HANDLER it dispatches to. A rule about what a
  * tool does would land in neither window alone, so the two are read together.
  */
-const JUDGE_TOOL_HANDLERS: Record<string, string> = {
+const LIB_TOOL_HANDLERS: Record<string, string> = {
   judge_read: "async function doRead(",
   judge_close: "async function doClose(",
   judge_wait: "async function doWait(",
   review_spawn: "async function doSpawn(",
   review_watch: "async function doWatch(",
   review_send: "async function doSend(",
+  prepare_review: "async function doPrepareReview(",
+  prepare_adviser: "async function doPrepareAdviser(",
+  prepare_goal_audit: "async function doPrepareGoalAudit(",
 };
 
 /**
@@ -82,7 +96,7 @@ function toolBodyOf(tool: string): string {
     /\n  pi\.registerTool\(\{|\n  host\.registerTool\(\{|\n  \/\/ -{4,}|\n\}/,
     `tool ${tool}`,
   );
-  const handler = JUDGE_TOOL_HANDLERS[tool];
+  const handler = LIB_TOOL_HANDLERS[tool];
   if (!handler) return registration;
   return `${registration}\n${windowIn(src, handler, "\n}", `handler of ${tool}`)}`;
 }
@@ -95,6 +109,16 @@ function judgeToolsWiring(): string {
 /** The extension's wiring of the judge RELAY tools — deps, nothing else. */
 function relayToolsWiring(): string {
   return windowOf("registerJudgeRelayTools(pi, {", "\n  });", "judge relay tools wiring");
+}
+
+/** The extension's wiring of `prepare_review` — deps, nothing else. */
+function REVIEW_PREPARE_WIRING(): string {
+  return windowOf("registerReviewPrepareTools(pi, {", "\n  });", "review prepare tools wiring");
+}
+
+/** The extension's wiring of the two advisory prepare tools — deps, nothing else. */
+function ADVISORY_WIRING(): string {
+  return windowOf("registerAdvisoryPrepareTools(pi, {", "\n  });", "advisory prepare tools wiring");
 }
 
 test("loop goal: injected ONLY in loop mode, before the unarmed early-return", () => {
@@ -1418,9 +1442,13 @@ test("goal criterion 3: prepare_adviser is registered and hands back a brief wit
   const body = toolBodyOf("prepare_adviser");
   assert.match(body, /buildAdviserBrief\(/, "the brief comes from the shared pure builder");
   assert.match(body, /adviser-\$\{goalHash\}\.jsonl/, "the artifact path is per goal");
-  assert.match(body, /mkdirSync\(pathDirname\(artifactPath\), \{ recursive: true \}\)/, "the artifact dir is created before the first consultation");
+  // The mkdir itself is now the injected `ensureDir` (the extension wires it to
+  // mkdirSync recursive) — what this pins is unchanged: the directory is created
+  // from the artifact's own dirname, before the first consultation reads it.
+  assert.match(body, /ensureDir\(pathDirname\(artifactPath\)\)/, "the artifact dir is created before the first consultation");
+  assert.match(ADVISORY_WIRING(), /mkdirSync\(path, \{ recursive: true \}\)/, "…and the wiring is a recursive mkdir");
   assert.match(body, /adviserBaselines/, "the changed-files baseline is persisted per goal for the next consultation");
-  assert.match(body, /readLastAdviserConclusion\(artifactPath, goalHash\)/, "readback goes through the tested pure parser (parseAdviserConclusions)");
+  assert.match(body, /readLastAdviserConclusion\(deps, artifactPath, goalHash\)/, "readback goes through the tested pure parser (parseAdviserConclusions)");
   // The builder takes no channel params — completion is the process exit;
   // questions ride a fence + resume (2026-08-28).
   const briefCall = body.indexOf("buildAdviserBrief({");
@@ -1437,7 +1465,7 @@ test("goal criterion 3: prepare_adviser is registered and hands back a brief wit
   // (judge_wait's own reply), so the header no longer teaches it. What must
   // survive is the truncated-goal pointer: a brief with half a goal in it
   // sends the adviser off the wrong contract.
-  assert.match(body, /需要全文时读 \$\{loopGoalPathIn\(target\.root\)\}/,
+  assert.match(body, /需要全文时读 \$\{deps\.loopGoalPath\(target\.root\)\}/,
 
     "a truncated goal is pointed at its file");
 });
@@ -1471,12 +1499,13 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   // behaviorally tested in test/parallel-review.test.ts; this test pins the
   // wiring: prepare_review hands the baseline to the task text.
   const body = toolBodyOf("prepare_review");
-  assert.match(body, /precommitBaselineFor\(root, st\)/, "the baseline rides the task text");
+  assert.match(body, /precommitBaselineFor\(root, st, deps\.readText\)/, "the baseline rides the task text");
   // …and the decision itself lives in the helper, judged in its OWN window
   // (the tool's window used to be a byte count wide enough to swallow it,
   // which is how a "prepare_review does X" assertion could pass on code that
-  // is not in prepare_review at all).
-  const baselineFn = windowOf("function precommitBaselineFor(", "\n  }", "precommitBaselineFor");
+  // is not in prepare_review at all). The helper moved out of the extension
+  // with the tool, so the window is read from the module that owns it now.
+  const baselineFn = windowIn(REVIEW_PREPARE_SRC, "export function precommitBaselineFor(", "\n}", "precommitBaselineFor");
   assert.match(baselineFn, /extractPrecommitBaseline\(st\.precommit, digest, cacheRaw\)/,
     "the safety decision is the pure function");
   assert.match(baselineFn, /computeFingerprint\(root\)/, "the current tree fingerprint is measured, not guessed");
@@ -1491,7 +1520,8 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   // the ONE normal path (judge_submit) instead of teaching the manual spawn.
   assert.match(body, /ADVANCED \/ internal：正常路径是一次 judge_submit/,
     "the output names judge_submit as the normal path");
-  const proseEnd = body.indexOf("        TASK_TEXT_MARKER,");
+  // One indent level shallower now that the handler is a top-level function.
+  const proseEnd = body.indexOf("    TASK_TEXT_MARKER,");
   assert.ok(proseEnd > 0, "the task-text marker still separates prose from the task");
   assert.doesNotMatch(body.slice(0, proseEnd),
     /review_spawn|review_send|review_watch|建议 title/,
@@ -1505,7 +1535,7 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
   assert.match(body, /等待纪律/, "the waiting discipline is part of the spawn flow");
   assert.match(body, /第一次 goal 批准前编辑\/写工具仍被门禁拦截,属预期/,
     "prepare_review states the pre-approval reality too (round-17 P2: it was the one left behind)");
-  assert.match(body, /落盘 task 文件时请用 read 读取 \$\{loopGoalPathIn\(root\)\}/,
+  assert.match(body, /落盘 task 文件时请用 read 读取 \$\{deps\.loopGoalPath\(root\)\}/,
 
     "a truncated goal must be completed from the file when writing the task");
 });
@@ -1556,7 +1586,11 @@ test("round-18: prepare_review carries the polish-gate reason — parameter, ref
   // The refusal path consults the pure decision module and demands the reason.
   assert.match(body, /polishReasonRequired\(st\.rounds\)/, "the polish gate decides from the recorded rounds");
   assert.match(body, /prepare_review REFUSED/, "the refusal text is explicit");
-  assert.match(body, /params\.reason \?\? ""\)\.trim\(\)/, "the reason is trimmed before judging");
+  // The raw param is narrowed once at the handler boundary (the lib tool host
+  // hands over `Record<string, unknown>`), then trimmed everywhere it is judged.
+  assert.match(body, /const reason = typeof params\.reason === "string" \? params\.reason : undefined;/,
+    "the reason parameter is narrowed, not cast");
+  assert.match(body, /\(reason \?\? ""\)\.trim\(\)/, "the reason is trimmed before judging");
   // A supplied reason is persisted into gate state for the NEXT reviewer.
   assert.match(body, /st\.lastPolishReason = \{/, "the reason is persisted");
   assert.match(body, /lastPolishReason/, "the reviewer task receives the stored reason");
@@ -2696,9 +2730,12 @@ test("P2: prepare_review registers the commit target (baseline/head/tree) for re
   // it records the immutable baseline..HEAD range so record_review can verify
   // the reviewer judged exactly the commits that exist, and bind a READY to
   // the reviewed TREE (content binding, squash survives).
-  assert.match(SRC, /reviewTargets\.set\(\s*root,\s*\{\s*baseline,\s*head,\s*tree\s*\}\)/);
-  // The registration must carry the tree, because that is what a READY binds to.
-  assert.match(SRC, /reviewTargets\.set\([^)]*\btree\b/);
+  // prepare_review moved to lib/, so the registration is now split in two and
+  // BOTH halves are asserted: the tool builds the target (with the tree, which
+  // is what a READY binds to), and the extension's wiring is what actually puts
+  // it in the map record_review reads.
+  assert.match(REVIEW_PREPARE_SRC, /deps\.registerReviewTarget\(root, \{ baseline, head, tree \}\)/);
+  assert.match(REVIEW_PREPARE_WIRING(), /registerReviewTarget: \(root, target\) => \{ reviewTargets\.set\(root, target\); \}/);
   // And the map must be consulted inside record_review, not just written.
   assert.match(SRC, /reviewTargets\.get\(targetRoot\)/);
 });
@@ -2916,9 +2953,11 @@ test("every advanced entry says it is one, and none teaches the retired manual f
     "prepare_goal_audit", "prepare_adviser", "record_goal_prereview",
   ];
   for (const tool of advanced) {
-    const at = SRC.indexOf(`name: "${tool}"`);
+    // Three of these now live in lib/ tool modules — the rule follows the code.
+    const src = sourceOf(tool);
+    const at = src.indexOf(`name: "${tool}"`);
     assert.ok(at > 0, `${tool} must be registered`);
-    const desc = SRC.slice(at, SRC.indexOf("parameters: Type.Object({", at));
+    const desc = src.slice(at, src.indexOf("parameters: Type.Object({", at));
     assert.match(desc, /ADVANCED \/ internal/, `${tool}'s description must say it is an advanced entry`);
     assert.match(desc, /judge_submit|the gate records/, `${tool} must point at the normal path`);
     assert.doesNotMatch(desc, /review_spawn/, `${tool} must not teach the retired spawn call`);

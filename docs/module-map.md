@@ -50,12 +50,16 @@
   `check_copilot_review`）、会话与用户（`setup_workspace`、`declare_done`、
   `ask_user`、`set_gate_mode`、`request_scope_limit`、
   `request_sensitive_edit`、`request_arbitration`）。
-  核对：`grep -c 'name: "' extensions/review-gate.ts` → 当前 18；
+  核对：`grep -c 'name: "' extensions/review-gate.ts` → 当前 15；
   逐个看用 `grep -n 'name: "' extensions/review-gate.ts`。
 
-- **16 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+- **19 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
   - `lib/judge-relay-tools.ts`：`review_spawn`、`review_watch`、`review_send`
     （把一件事**转交**给 judge 进程的三个工具）。
+  - `lib/review-prepare-tools.ts`：`prepare_review`（准备 reviewer 要判的那
+    一轮：不可变的 `baseline..HEAD`、polish gate、findings 流、review target）。
+  - `lib/advisory-prepare-tools.ts`：`prepare_adviser`、`prepare_goal_audit`
+    （两个只组装**任务文本**的准备：不算 git 范围，也不登记 review target）。
   - `lib/judge-session-tools.ts`：`judge_read` / `judge_close` / `judge_wait`
     （作用于一个**已存在**的 judge 会话的三个工具）。
   - `lib/orchestrator-tools.ts`：`orchestrator_plan`、`orchestrator_status`、
@@ -64,8 +68,8 @@
   - `lib/orchestrator-session-tools.ts`：`orchestrator_spawn`、
     `orchestrator_send`、`orchestrator_wait`、`orchestrator_close`、
     `orchestrator_relay`。
-  核对：`grep -rln 'name: "[a-z_]*"' lib/*.ts` → 上面五个文件；
-  `grep -rh 'name: "' lib/*.ts | wc -l` → 16。
+  核对：`grep -rln 'name: "[a-z_]*"' lib/*.ts` → 上面七个文件；
+  `grep -rh 'name: "' lib/*.ts | wc -l` → 19。
 
 这些模块都经同一道 **seam** 接进扩展：`lib/tool-host.ts` 定义那个 host 类型
 （`lib/orchestrator-deps.ts` 只是把它 re-export，因为编排工具是第一批搬出去
@@ -174,7 +178,11 @@ judge（reviewer / adviser / goal-auditor）是**自己的 pi 进程**：
 线，`review-scope.ts` 决定增量多大就升级成整轮深审，`review-stream.ts` 让
 findings 边审边流出，`verdict-parse.ts` 解析裁决（review 只认 JSON fence，
 precommit 只认 `## Overall:` sentinel），`adviser-brief.ts` 组装 adviser 的
-brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致。
+brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致。把这些
+拼成一份**判官真正收到的任务文本**的，是两个 prepare 模块：
+`review-prepare-tools.ts`（`prepare_review` —— 算范围、开流、登记 review
+target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
+`prepare_goal_audit` —— 只组装文本，不碰 git 范围）。
 
 > **落点**：改「judge 怎么被启动/等待/唤醒」→ `judge-*.ts`；改「它被告知
 > 什么、它的产物怎么解析」→ `judge-prompt.ts` / `parallel-review.ts` /
@@ -300,15 +308,16 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 
 ---
 
-## 五、`lib/` 全量速查表（78 个模块）
+## 五、`lib/` 全量速查表（82 个模块）
 
 **维护指令（这张表没有机械约束，只有这一条）**：在 `lib/` 下**新增或删除**一个
 模块时，**同一轮改动里**顺手加/删这里的一行——否则这张表会静静地过时。
-随时可核对条目数：`ls lib/*.ts | wc -l`（当前 78，与本表条目一一对应）。
+随时可核对条目数：`ls lib/*.ts | wc -l`（当前 82，与本表条目一一对应）。
 
 | 模块 | 一句话职责 |
 | --- | --- |
 | `adviser-brief.ts` | 组装 adviser 咨询的 brief：主会话 transcript 指针 + 结论落盘路径，第二次起带上轮结论与其后改动 |
+| `advisory-prepare-tools.ts` | 工具 `prepare_adviser` / `prepare_goal_audit`：组装 adviser brief 与 goal 审计任务文本（不碰 git 范围） |
 | `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表 |
 | `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限 |
 | `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义 |
@@ -377,6 +386,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `project-config.ts` | 每项目门禁配置 `.pi/review-gate.json` 的解析与层叠 |
 | `repo-resolve.ts` | 多仓解析：裁决绑定到编辑真正发生的那个仓库 |
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
+| `review-prepare-tools.ts` | 工具 `prepare_review`：算不可变的 `baseline..HEAD`、polish gate、findings 流，并登记裁决要绑定的 review target |
 | `review-scope.ts` | 增量审查定档：增量多大就升级为整轮深审的阈值 |
 | `review-stream.ts` | findings 流：reviewer 边审边发，主会话边修 |
 | `sensitive-grant.ts` | 敏感文件的一次性用户授权：限定路径、限时、用后即焚 |
