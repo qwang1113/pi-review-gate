@@ -70,6 +70,7 @@ import {
   STRATEGIC_RESET_OFFSET,
   STRATEGIC_RESET_CHECKLIST,
   requiresFullPrecommit,
+  TASK_TEXT_MARKER,
   type ShipCommandKind,
 } from "../lib/constants.ts";
 import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-directives.ts";
@@ -196,7 +197,12 @@ import { registerJudgeSessionTools } from "../lib/judge-session-tools.ts";
 // review_send) are the other half of the same family, and are registered the
 // same way — the dispatch owner and the child registry reach them as deps.
 import { registerJudgeRelayTools } from "../lib/judge-relay-tools.ts";
-import { polishReasonRequired, recordedFindingsFrom } from "../lib/polish-gate.ts";
+// The PREPARE family went the same way, split by responsibility: the round a
+// reviewer judges (a commit range, a findings stream, a review target) is one
+// module, the two advisory task builders are the other.
+import { registerReviewPrepareTools } from "../lib/review-prepare-tools.ts";
+import { registerAdvisoryPrepareTools } from "../lib/advisory-prepare-tools.ts";
+import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   writeJudgeSpawnFiles,
   JUDGE_ROLES,
@@ -252,8 +258,7 @@ import {
   type GateState,
 } from "../lib/gate-state.ts";
 import { parseReviewOutput, parsePrecommitOutput, parseFenceFindings, parseFenceFileFindings } from "../lib/verdict-parse.ts";
-import { buildAdviserBrief, countAdviserConclusions, parseAdviserConclusions, type AdviserConclusion } from "../lib/adviser-brief.ts";
-import { sessionDirForCwd } from "../lib/session-dir.ts";
+import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
 import {
   evaluateModeChange,
   buildModeConfirmMessage,
@@ -296,7 +301,7 @@ import {
   normalizeGoalText,
   readLoopGoal,
   formatGoalPrereviewCarryover,
-  buildGoalAuditTask,
+  // buildGoalAuditTask moved with prepare_goal_audit (lib/advisory-prepare-tools.ts).
   GOAL_CONFIRM_TITLE,
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
@@ -330,7 +335,7 @@ import {
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
 import { isModelAllowed } from "../lib/model-allowlist.ts";
-import { squashPointBaseline, branchBaseBaseline } from "../lib/review-baseline.ts";
+// The baseline resolution moved with prepare_review (lib/review-prepare-tools.ts).
 import {
   COPILOT_HISTORY_PR_COUNT,
   COPILOT_HISTORY_QUERY,
@@ -374,9 +379,7 @@ import {
 } from "../lib/blocked-marker.ts";
 import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "../lib/workflow-commands.ts";
 import {
-  buildReviewPrompt,
   formatPrecommitBaseline,
-  extractPrecommitBaseline,
   REVIEW_VERDICT_SCHEMA,
 } from "../lib/parallel-review.ts";
 import {
@@ -391,12 +394,9 @@ import {
   type TokenBindings,
 } from "../lib/arbitration.ts";
 
-/**
- * Separates a prepare tool's human-facing header from the task text a judge
- * actually receives. One marker for all three roles, so the submission chain
- * has one way to find the payload.
- */
-const TASK_TEXT_MARKER = "--- task text ---";
+// TASK_TEXT_MARKER now lives in lib/constants.ts: the two prepare modules
+// WRITE it and `extractTaskText` below READS it, so one definition serves all
+// three instead of a literal per file.
 
 /**
  * This process's sidecar variant (F4), resolved ONCE from the environment.
@@ -4520,443 +4520,76 @@ export default function reviewGate(pi: ExtensionAPI) {
     cancelWaitTimer: () => cancelChildWaitTimer(),
   });
 
-  pi.registerTool({
-    name: "prepare_review",
-    label: "Prepare Review",
-    description:
-      "ADVANCED / internal: `judge_submit({role:\"reviewer\"})` runs this itself as step 3 of the " +
-      "submission chain — call it directly only to inspect the range and the task text without " +
-      "dispatching anyone. " +
-      "Computes the review unit (checkpoint baseline..HEAD), writes the findings-stream path and " +
-      "hands back the ready-made task text for the ONE reviewer of this round. One reviewer, one " +
-      "commit range: no split — everything the reviewer judges is the whole change in " +
-      "baseline..HEAD, which is defined by the last checkpoint sha.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (required once the session edited several repos)",
-      })),
-      reason: Type.Optional(Type.String({
-        description: "REQUIRED when the polish gate is armed (consecutive READY rounds or the same file in P2/Nit for 3 rounds): why is THIS round worth a review while the gate is already met? Persisted and shown to the next reviewer.",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const target = resolveToolRepo(params.repo);
-      if (!target.ok) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const root = target.root;
-      const st = stateForRepo(root);
-      if (!st.checkpoint?.sha) {
-        return {
-          content: [{ type: "text", text: "review-gate: prepare_review rejected — no checkpoint on record. Call review_checkpoint first (commit the current work): the reviewed range is baseline..HEAD, and the baseline is the last checkpoint sha." }],
-          details: { prepared: false },
-          isError: true,
-        };
-      }
-      // Round-18 polish gate (user ask, B-tier): when the gate is
-      // demonstrably met (or a file keeps being polished), the next round
-      // must carry an explicit reason. Refuse WITHOUT rendering anything
-      // (no dialog, no task text) — the refusal itself tells the agent what
-      // to do.
-      const polish = polishReasonRequired(st.rounds);
-      if (polish.required) {
-        const given = (params.reason ?? "").trim();
-        if (!given) {
-          return {
-            content: [{ type: "text", text:
-              `review-gate: prepare_review REFUSED — ${polish.why}。\n` +
-              "提供非空 reason 参数后重试（理由会写入 gate state，并出现在下一轮 reviewer 的任务文本里，接受独立审核）。\n" +
-              `当前状态：${st.rounds.length} 个已记录 round，最近一轮 verdict=${st.rounds[st.rounds.length - 1]?.verdict ?? "(none)"}。`
-            }],
-            details: { prepared: false, polishRequired: true, why: polish.why },
-            isError: true,
-          };
-        }
-      }
-      // Round-8 P1: the baseline is the checkpoint's PARENT (prevSha) — the
-      // checkpoint itself is the HEAD under review, so baseline..HEAD is the
-      // checkpoint's own commits. Old records without prevSha fall back to
-      // `git rev-parse <sha>^`.
-      // Round-9 P1 (unreviewed-commit gap): the baseline must be the LAST
-      // REVIEWED commit, not the latest checkpoint's parent — two checkpoints
-      // since the last READY would otherwise leave the earlier one's content
-      // outside every reviewed range while its tree still ships. The READY's
-      // commitSha is used when it is an ancestor of HEAD (the normal chain).
-      // When it is NOT an ancestor the chain was rewritten (squash/rebase):
-      // walk the new chain from the checkpoint's parent to find the SQUASH
-      // POINT — the newest commit whose tree equals the reviewed tree — and
-      // baseline from there, so the range covers the whole new chain (the
-      // squash commit plus every checkpoint after it). No matching tree
-      // (a content-changing rebase) falls back to the branch base so the
-      // review covers everything.
-      const lastReviewed = st.review?.verdict === "READY" ? st.review.commitSha : undefined;
-      let baseline: string | undefined;
-      if (lastReviewed) {
+  /**
+   * `prepare_review` — the preparation of ONE code-review round (the
+   * immutable baseline..HEAD range, the polish gate, the findings stream and
+   * the review target a verdict later binds to) — lives in
+   * lib/review-prepare-tools.ts; only its wiring is here. What it needs from
+   * THIS file (the repo resolution, gate state and its persistence, the
+   * loop-goal readers, the scope decision, the review-target registry and
+   * three git reads) arrives as this deps object, and nothing else of it
+   * does: every branch it applies is unit-testable without a repository.
+   */
+  registerReviewPrepareTools(pi, {
+    resolveRepo: (requested) => resolveToolRepo(requested),
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    sessionDir: (ctx) => sessionDirFromContext(ctx, cwd),
+    goalConfirmed: (root, st) => loopGoalConfirmed(root, st),
+    goalTextForReviewers: (root) => goalTextForReviewers(root),
+    loopGoalPath: (root) => loopGoalPathIn(root),
+    reviewScope: (root, st) => reviewScopeFor(root, st),
+    previousRoundFindings: (st) => previousRoundFindings(st),
+    settledConclusion: (st) => settledConclusion(st),
+    registerReviewTarget: (root, target) => { reviewTargets.set(root, target); },
+    git: {
+      // Deliberately NOT the `isAncestor` helper above: that one runs with
+      // `encoding: "utf8"` and no `stdio`, which lets git's "fatal: Not a
+      // valid object name" reach the USER's stderr. prepare_review has always
+      // silenced this probe (a rewritten chain is an expected outcome here,
+      // not an error), so the `stdio: "ignore"` is carried over verbatim.
+      isAncestor: (root, maybeAncestor, branch) => {
         try {
-          execFileSync("git", ["merge-base", "--is-ancestor", lastReviewed, "HEAD"], { cwd: root, stdio: "ignore" });
-          baseline = lastReviewed;
+          execFileSync("git", ["merge-base", "--is-ancestor", maybeAncestor, branch], { cwd: root, stdio: "ignore" });
+          return true;
         } catch {
-          // Chain rewritten: find the squash point by tree identity (pure
-          // logic in lib/review-baseline.ts, pinned by tests — round-12 P2);
-          // a clean miss falls back to the branch base, then the checkpoint
-          // baseline below.
-          baseline = st.checkpoint?.prevSha && st.review.fingerprint
-            ? squashPointBaseline(root, st.review.fingerprint, st.checkpoint!.prevSha)
-            : undefined;
-          if (!baseline) baseline = branchBaseBaseline(root);
+          return false;
         }
-      }
-      if (!baseline) {
-        baseline =
-          st.checkpoint.prevSha ||
-          (() => {
-            try {
-              return execFileSync("git", ["rev-parse", `${st.checkpoint!.sha}^`], { cwd: root, encoding: "utf8" }).trim();
-            } catch {
-              // Round-9 P2 / round-10 Nit: a root commit or an unreachable sha
-              // must not throw out of the tool — fall back to the checkpoint
-              // sha itself as the baseline (an empty range at worst: the
-              // reviewer audits the checkpoint commit alone).
-              return st.checkpoint!.sha;
-            }
-          })();
-      }
-      let head = "";
-      let tree = "";
-      try {
-        head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-        tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `review-gate: prepare_review failed — cannot read HEAD: ${err instanceof Error ? err.message : String(err)}` }],
-          details: { prepared: false },
-          isError: true,
-        };
-      }
-      if (head === baseline) {
-        return {
-          content: [{ type: "text", text: "review-gate: prepare_review — HEAD equals the checkpoint baseline, so the range is empty. Call review_checkpoint again after your fixes, then prepare." }],
-          details: { prepared: false },
-          isError: true,
-        };
-      }
-      const range = `${baseline.slice(0, 12)}..${head.slice(0, 12)}`;
-      let files: string[] = [];
-      try {
-        files = execFileSync("git", ["diff", "--name-only", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
-          .trim().split("\n").filter(Boolean);
-      } catch { /* empty file list is still a valid round */ }
-      const runId = `review-${Date.now().toString(36)}`;
-      const streamPath = pathJoin(root, ".pi", "review-stream", `${runId}-review.jsonl`);
-      try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* stream is optional */ }
-      const goalSt = root === primaryRepoRoot ? state : stateForRepo(root);
-      const goalForReview = loopGoalConfirmed(root, goalSt) ? goalTextForReviewers(root) : undefined;
-      const goalText = goalForReview?.text;
-      const goalTruncated = goalForReview?.truncated === true;
-      // NOTE: no display title is computed here — judge_submit derives the
-      // display title itself, and the session id deterministically from
-      // role+repo (that is what makes a role's next round resume its session).
-      const scopeNow = reviewScopeFor(root, st);
-      // Round-18 polish gate: persist a supplied reason BEFORE building the
-      // task, so the reviewer of THIS round sees the reason that authorized it.
-      if (polish.required && (params.reason ?? "").trim()) {
-        st.lastPolishReason = {
-          reason: (params.reason ?? "").trim(),
-          at: new Date().toISOString(),
-          round: st.rounds.length + 1,
-        };
-        persistRepo(ctx as unknown as ExtensionContext, root);
-      }
-      const task = buildReviewPrompt(
-        "review",
-        files,
-        goalText,
-        root,
-        { streamPath, commitRange: range },
-        formatReviewScopeDirective(
-          scopeNow,
-          previousRoundFindings(st),
-          settledConclusion(st),
-          "reviewer",
-        ),
-        scopeNow.scope,
-        { dir: sessionDirFor(ctx, cwd), id: st.sessionId ?? "unknown" },
-        precommitBaselineFor(root, st),
-        // Round-18 polish gate: the reason for THIS round travels to the
-        // reviewer, who judges whether the round deserves to exist.
-        st.lastPolishReason,
-      );
-      // Register the review target: record_review verifies HEAD is still the
-      // reviewed commit and binds a READY to the reviewed tree.
-      reviewTargets.set(root, { baseline, head, tree });
-      const lines = [
-        `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
-        `stream=${streamPath}`,
-        // R-22 — a bypassed round must be legible to the reviewer: it is
-        // judging content the full suite never ran on.
-        ...(st.checkpoint?.precommitBypassed
-          ? [
-              "**本轮的 precommit 被用户的 `/gate-bypass` 覆盖**：全量测试没有在这份内容上跑过。" +
-              "reviewer 请据此调整判断（该验证的部分自己验证），declare_done 时这条也会再提醒一次。",
-            ]
-          : []),
-
-        "ADVANCED / internal：正常路径是一次 judge_submit({ role: \"reviewer\", task: <本轮改动说明> })——",
-        "它自己跑 precommit、checkpoint、本 prepare 与派发，并在 judge 进程退出时机械记录 verdict。",
-        "本工具只返回上面的审查范围与下面的任务文本；显示用 title 与 session id 都由门禁自行派生（session id 按 role+repo 确定性派生，所以同一 role 的下一轮续用同一会话）。",
-        ...(goalTruncated
-          ? [
-              `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${loopGoalPathIn(root)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,
-
-            ]
-          : []),
-        "- 等待纪律:子会话审核期间,继续做可实现的确定性工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);确认没有可做的工作后才阻塞等待审核结果。",
-        "",
-        TASK_TEXT_MARKER,
-        task,
-        "",
-        "The reviewer judges the COMMIT RANGE (immutable): you may keep fixing the worktree while it ",
-        "works. record_review re-checks that HEAD is still the reviewed commit; a new checkpoint ",
-        "after this prepare ⇒ STALE ⇒ BLOCKED.",
-      ];
-      return {
-        content: [{ type: "text", text: lines.join("\n") }],
-        details: {
-          prepared: true,
-          baseline,
-          head,
-          range,
-          fileCount: files.length,
-          stream: streamPath,
-          files,
-        },
-      };
+      },
+      revParse: (root, rev) => execFileSync("git", ["rev-parse", rev], { cwd: root, encoding: "utf8" }).trim(),
+      changedFilesInRange: (root, baseline, head) =>
+        execFileSync("git", ["diff", "--name-only", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
+          .trim().split("\n").filter(Boolean),
+    },
+    readText: (path) => {
+      try { return readFileSync(path, "utf8"); } catch { return undefined; }
     },
   });
 
-  // ---------- prepare_adviser tool (incremental advisory — goal criterion 3) ----------
-
-  /** The session dir pi is ACTUALLY using: the live manager knows the final
-   *  --session-dir / env / settings selection (round-10 P1). Fallbacks stay
-   *  in lib/session-dir.ts for contexts without a manager.
-   */
-  function sessionDirFor(ctx: unknown, cwd: string): string {
-    const sm = (ctx as { sessionManager?: { getSessionDir?: () => string } })?.sessionManager;
-    return sessionDirForCwd(cwd, undefined, sm?.getSessionDir?.());
-  }
-
   /**
-   * The LAST conclusion an adviser appended for this goal, if any. Lines are
-   * JSON; malformed ones are skipped and only a conclusion for THIS goal
-   * (the artifact is named per goal, so this is belt-and-braces) counts.
+   * The two ADVISORY preparations — `prepare_adviser` (the incremental brief
+   * for a consultation on the current goal) and `prepare_goal_audit` (the
+   * auditor's task for a DRAFT goal) — live in lib/advisory-prepare-tools.ts;
+   * only their wiring is here. Neither computes a commit range nor registers
+   * a review target, which is exactly why they are a separate module from the
+   * reviewer's round preparation.
    */
-  function readLastAdviserConclusion(artifactPath: string, goalHash: string): AdviserConclusion | undefined {
-    try {
-      return parseAdviserConclusions(readFileSync(artifactPath, "utf8"), goalHash);
-    } catch { /* no artifact yet */ }
-    return undefined;
-  }
-
-  // sessionDirForCwd lives in lib/session-dir.ts (realpath-resolved, matching
-  // pi's session-manager encoding — round-4 P1) so it is unit-testable.
-
-  /**
-   * The trusted-checks block for the reviewer's task text: what precommit
-   * already verified (sidecar verdict + cache steps), so the reviewer does
-   * not re-run the full suite.
-   *
-   * SAFETY (round-9 P1): the baseline is only trusted when the recorded PASS
-   * is bound to the CURRENT worktree fingerprint — a PASS for an older tree
-   * proves nothing about this change, and claiming it would suppress exactly
-   * the verification this round needs. Cache entries recorded AFTER the PASS
-   * itself are skipped (they belong to a later tree). Undefined when no
-   * matching PASS is on record — the reviewer then decides on its own.
-   */
-  function precommitBaselineFor(root: string, st: GateState): string | undefined {
-    let digest: string | undefined;
-    try {
-      const fp = computeFingerprint(root);
-      digest = fp.unavailable ? undefined : fp.digest;
-    } catch { digest = undefined; }
-    let cacheRaw: string | undefined;
-    try { cacheRaw = readFileSync(pathJoin(root, ".pi", "precommit-cache.json"), "utf8"); } catch { /* no cache */ }
-    // The pure decision (fingerprint match + stale-entry filter + wording) is
-    // in lib/parallel-review.ts so the safety behavior is testable.
-    return extractPrecommitBaseline(st.precommit, digest, cacheRaw);
-  }
-
-  pi.registerTool({
-    name: "prepare_adviser",
-    label: "Prepare Adviser Brief",
-    description:
-      "ADVANCED / internal: `judge_submit({role:\"adviser\", task:<your question>})` calls this itself " +
-      "and dispatches the adviser — call it directly only to read the brief without consulting anyone. " +
-      "Builds the brief for an `adviser` consultation on the CURRENT loop goal: (a) the main " +
-      "session's transcript location for ON-DEMAND reading (as its own pi process the adviser does " +
-      "not inherit this conversation), " +
-      "(b) the artifact path where the adviser appends its conclusion, and (c) when a previous " +
-      "consultation of this goal exists, that conclusion plus the files changed since, so the adviser " +
-      "settles what already stands instead of re-arguing it from zero. First consultation of a goal is a full brief.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (required once the session edited several repos)",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const target = resolveToolRepo(params.repo);
-      if (!target.ok) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const st = stateForRepo(target.root);
-      // goalText (display) may be capped for the prompt; the ARTIFACT identity
-      // must hash the FULL approved text, or distinct long goals would share
-      // one conclusion file (round-4 P1).
-      const confirmed = loopGoalConfirmed(target.root, st);
-      // Identity hashes the RAW FILE content, never the capped display text:
-      // readLoopGoal() truncates past LOOP_GOAL_MAX_CHARS, and two distinct
-      // long goals must not share one conclusion artifact (round-5 P1).
-      let fullGoalRaw: string | undefined;
-      try { fullGoalRaw = readFileSync(loopGoalPathIn(target.root), "utf8"); } catch { /* no goal file */ }
-
-      const goalForReview = confirmed ? goalTextForReviewers(target.root) : undefined;
-      const goalText = goalForReview?.text;
-      const goalHash = confirmed && fullGoalRaw
-        ? goalTextHash(fullGoalRaw)
-        // No approved goal: a STABLE per-session identity (sessionId is set at
-        // session start; "anon" is the defensive fallback) so repeated
-        // consultations within one session reuse each other's conclusions —
-        // a fresh random id every call would defeat the incremental contract.
-        : `no-goal-${st.sessionId ?? "anon"}`;
-      const artifactPath = pathJoin(target.root, ".pi", "review-stream", `adviser-${goalHash}.jsonl`);
-      // The artifact must be writable on the FIRST consultation too:
-      // `prepare_review` creates this directory for its finding stream, but an
-      // adviser consult can precede any review.
-      try { mkdirSync(pathDirname(artifactPath), { recursive: true }); } catch { /* best-effort */ }
-      const previous = readLastAdviserConclusion(artifactPath, goalHash);
-      // Baseline advance is CONFIRMATION-BASED (round-3 P1): the baseline must
-      // never advance past a consultation that appended no conclusion — its
-      // examined changes would silently vanish from the next brief while an
-      // older conclusion is carried forward. The gate cannot observe the
-      // adviser's write, so it counts VALID conclusions in the artifact:
-      //   - count > baseline.confirmed ⇒ the last consultation SUCCEEDED ⇒
-      //     changed files are computed against baseline.tree (that consult's
-      //     START) and the baseline advances;
-      //   - count ≤ baseline.confirmed ⇒ the last consultation ABORTED ⇒
-      //     compute against baseline.prevTree (the last CONFIRMED start) so
-      //     its changes are re-listed, and do NOT advance. prevTree null ⇒
-      //     nothing is confirmed yet (cross-session first advance) ⇒ full
-      //     re-check (round-4 P1).
-      const artifactRaw = (() => {
-        try { return readFileSync(artifactPath, "utf8"); } catch { return ""; }
-      })();
-      const confirmedCount = countAdviserConclusions(artifactRaw, goalHash);
-      const baseline = st.adviserBaselines?.[goalHash];
-      const baseTree = baseline
-        ? confirmedCount > baseline.confirmed ? baseline.tree : baseline.prevTree
-        : undefined;
-      let changedFiles: string[] | null = null;
-      if (!baseTree) {
-        // No baseline for this goal in this state. An OLDER conclusion may
-        // still exist (cross-session artifact): the increment vs it cannot be
-        // computed, so demand a full re-check (null) — never pretend "no
-        // changes" against a conclusion this session never saw.
-        changedFiles = previous ? null : [];
-      } else {
-        const inc = incrementSinceTree(target.root, baseTree);
-        if (inc) changedFiles = inc.files;
-        // else: stays null → brief demands a full check
-      }
-      // Advance ONLY on confirmed success (a conclusion beyond the last
-      // count). prevTree = the start the just-confirmed consultation read
-      // (baseline.tree), so an aborted NEXT consultation rolls back to
-      // exactly this confirmed point instead of hiding its changes.
-      if (!baseline || confirmedCount > baseline.confirmed) {
-        try {
-          const treeNow = headCommitTree(target.root);
-          st.adviserBaselines = {
-            ...(st.adviserBaselines ?? {}),
-            [goalHash]: { tree: treeNow, prevTree: baseline ? baseline.tree : null, confirmed: confirmedCount },
-          };
-        } catch { /* keep the old baseline */ }
-      }
-      persistRepo(ctx as unknown as ExtensionContext, target.root);
-      const brief = buildAdviserBrief({
-        goalHash,
-        sessionDir: sessionDirFor(ctx, cwd),
-        sessionId: st.sessionId ?? "unknown",
-        artifactPath,
-        ...(previous ? { previous } : {}),
-        changedFiles,
-        ...(goalText ? { goalText } : {}),
-      });
-      const adviserTitle = `adviser-${goalHash.slice(0, 6)}`;
-      const goalTruncated = goalForReview?.truncated === true;
-      return {
-        content: [{ type: "text", text:
-          `adviser brief ready (${previous ? "incremental" : "full"}):\n` +
-          "- 正常路径是 `judge_submit({role:\"adviser\", task:<你的问题>})`——它内部就调这个工具并派出 adviser。" +
-          "单独调本工具只在你要自己拿 brief 时才需要。\n" +
-          (goalTruncated ? `- 注意:brief 中的 loop goal 因长度被截断;需要全文时读 ${loopGoalPathIn(target.root)}。\n` : "") +
-
-          `${TASK_TEXT_MARKER}\n${brief}` }],
-        details: { incremental: !!previous, artifactPath, changedFiles, title: adviserTitle },
-      };
+  registerAdvisoryPrepareTools(pi, {
+    resolveRepo: (requested) => resolveToolRepo(requested),
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    sessionDir: (ctx) => sessionDirFromContext(ctx, cwd),
+    goalConfirmed: (root, st) => loopGoalConfirmed(root, st),
+    goalTextForReviewers: (root) => goalTextForReviewers(root),
+    loopGoalPath: (root) => loopGoalPathIn(root),
+    readText: (path) => {
+      try { return readFileSync(path, "utf8"); } catch { return undefined; }
     },
-  });
-
-  // ---------- prepare_goal_audit tool (the auditor's ready-made task, PRE-dispatch) ----------
-
-  pi.registerTool({
-    name: "prepare_goal_audit",
-    label: "Prepare Goal Audit Task",
-    description:
-      "ADVANCED / internal: `judge_submit({role:\"goal-auditor\", task:<draft>})` calls this itself, " +
-      "dispatches the auditor, adjudicates and records the verdict — call it directly only to read " +
-      "the audit task without dispatching anyone. " +
-      "Builds the task for a `goal-auditor` audit of a DRAFT loop goal: the draft, the audit " +
-      "criteria, the fresh-context transcript " +
-      "pointer, and — when a previous audit of a DIFFERENT draft is on record — the carryover block (previous " +
-      "verdict + findings + previous draft) and the mechanically computed draft delta, so a re-audit judges " +
-      "the increment instead of re-deriving the whole contract.",
-    parameters: Type.Object({
-      goal: Type.String({ description: "The FULL draft goal text to be audited (the exact text you will submit)" }),
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (required once the session edited several repos)",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const target = resolveToolRepo(params.repo);
-      if (!target.ok) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const draft = normalizeGoalText(String(params.goal ?? ""));
-      if (!draft) {
-        return {
-          content: [{ type: "text", text: "review-gate: prepare_goal_audit rejected — the goal text is empty." }],
-          details: {},
-          isError: true,
-        };
-      }
-      const st = stateForRepo(target.root);
-      const newHash = goalTextHash(draft);
-      const prev = st.goalPrereview;
-      const carryover = prev && prev.hash !== newHash ? formatGoalPrereviewCarryover(prev) : undefined;
-      const taskText = buildGoalAuditTask(draft, {
-        ...(carryover ? { carryover } : {}),
-        ...(prev?.draft ? { prevDraft: prev.draft } : {}),
-        sessionDir: sessionDirFor(ctx, cwd),
-        sessionId: st.sessionId ?? "unknown",
-      });
-      const auditTitle = `goal-audit-${newHash.slice(0, 6)}`;
-      return {
-        content: [{ type: "text", text:
-          `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n` +
-          "- 正常路径是 `judge_submit({role:\"goal-auditor\", task:<草稿>})`——它内部就调这个工具，" +
-          "自己派 auditor、解析并记录裁决。单独调本工具只在你要自己拿任务文本时才需要。\n" +
-          `${TASK_TEXT_MARKER}\n${taskText}` }],
-        details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle },
-      };
+    ensureDir: (path) => {
+      try { mkdirSync(path, { recursive: true }); } catch { /* best-effort */ }
     },
+    incrementSinceTree: (root, tree) => incrementSinceTree(root, tree),
+    headCommitTree: (root) => headCommitTree(root),
   });
   // ---------- record_review tool ----------
 
