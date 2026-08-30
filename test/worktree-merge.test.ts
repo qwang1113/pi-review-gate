@@ -17,7 +17,10 @@ import assert from "node:assert/strict";
 import {
   branchHolder,
   decideMergeVenue,
-  mergeArgv,
+  squashMergeArgv,
+  squashMergeSubject,
+  squashMergeMessage,
+  parseConventionalSubject,
   parseWorktreeList,
   venueRefusal,
   type MergeVenue,
@@ -118,7 +121,7 @@ test("R3-7: a holder standing on a DIFFERENT branch is refused — the gate does
   assert.match(refusal!, /不会替别的工作区切分支/);
 });
 
-test("R3-7: a clean holder on the base is allowed, and the merge keeps its --no-ff shape", () => {
+test("R3-7: a clean holder on the base is allowed, and the landing is a squash", () => {
   const venue: MergeVenue = { kind: "worktree", path: MAIN, reason: "…" };
   assert.equal(
     venueRefusal(venue, {
@@ -128,11 +131,63 @@ test("R3-7: a clean holder on the base is allowed, and the merge keeps its --no-
     }),
     undefined,
   );
-  assert.deepEqual(
-    mergeArgv("session-01a04f14", "refactor/gate-heavy-agent-light"),
-    ["merge", "--no-ff", "session-01a04f14", "-m", "merge session-01a04f14 into refactor/gate-heavy-agent-light"],
+  // The landing STAGES the squash (no `-m`, no commit); the gate commits it
+  // separately from the derived, ASCII-only message.
+  assert.deepEqual(squashMergeArgv("session-01a04f14"), ["merge", "--squash", "session-01a04f14"]);
+});
+
+test("squash subject — folds the dominant type/scope, always ASCII (L5-safe)", () => {
+  // feat outranks fix/docs; `orchestrator` is the most common underlying scope
+  // once the `checkpoint` marker is stripped back off.
+  const subject = squashMergeSubject("orch/t2-ship-gate-mtfck5jl", [
+    "fix(checkpoint-orchestrator): stop waking the human",
+    "feat(checkpoint-orchestrator): add progress dimension",
+    "docs(checkpoint): sync module map",
+  ]);
+  assert.equal(subject, "feat(orchestrator): land orch-t2-ship-gate-mtfck5jl branch");
+  // No non-Latin letter can appear, whatever the checkpoints held.
+  for (const ch of subject) {
+    assert.ok(!(/\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch)), `non-Latin char: ${ch}`);
+  }
+});
+
+test("squash subject — a scope of only `checkpoint` yields no scope", () => {
+  assert.equal(
+    squashMergeSubject("session-abc", ["docs(checkpoint): a", "docs(checkpoint): b"]),
+    "docs: land session-abc branch",
   );
 });
+
+test("squash subject — nothing parseable falls back to chore", () => {
+  assert.equal(
+    squashMergeSubject("feature/xyz", ["not a conventional subject", "also not one"]),
+    "chore: land feature-xyz branch",
+  );
+});
+
+test("squash subject — a Chinese-tokened branch is sanitized to ASCII", () => {
+  // The branch name is ASCII by policy, but the subject must be robust anyway:
+  // any non-`[a-z0-9-]` is stripped, so L5 holds unconditionally.
+  const subject = squashMergeSubject("会话-01", ["fix(checkpoint): x"]);
+  assert.equal(subject, "fix: land 01 branch");
+});
+
+test("parseConventionalSubject — type/scope extraction", () => {
+  assert.deepEqual(parseConventionalSubject("feat(api): x"), { type: "feat", scope: "api" });
+  assert.deepEqual(parseConventionalSubject("fix!: y"), { type: "fix" });
+  assert.equal(parseConventionalSubject("no colon here"), undefined);
+});
+
+test("squash message — the body names the count and stays English", () => {
+  const { subject, body } = squashMergeMessage("session-abc", "main", [
+    "feat(checkpoint): a",
+    "fix(checkpoint): b",
+  ]);
+  assert.equal(subject, "feat: land session-abc branch");
+  assert.match(body, /2 checkpoints folded/);
+  assert.match(body, /session-abc into main/);
+});
+
 
 test("R3-7: merging in this very worktree is never refused for dirt elsewhere", () => {
   const venue: MergeVenue = { kind: "self", reason: "…" };

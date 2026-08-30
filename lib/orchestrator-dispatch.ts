@@ -244,6 +244,18 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     worktree = created.path;
   }
 
+  // O-1 — the receipt describes the ISOLATION decision in isolation terms, not
+  // in the plan's `execution` vocabulary. The scheduler may run a task that is
+  // `serial` in the plan alongside a sibling that is still going (that is
+  // correct — sharing the main worktree would let two writers clobber each
+  // other's review binding), and echoing `parallel` there made a read-only
+  // receipt look like the plan had been changed. So say WHY the worktree was
+  // (or was not) isolated, from the concurrency fact itself.
+  const concurrentSiblings = runningTaskIds(deps.runtime(), panes.panes).length;
+  const isolationNote = worktree
+    ? `因当前有 ${concurrentSiblings} 个并发子会话，自动使用隔离 worktree（共享主工作区会让两个写者互相打断 review 绑定），worktree=${worktree}`
+    : "在共享主工作区里跑（当前没有需要隔离的并发子会话）";
+
   const cwd = worktree ?? deps.repoRoot;
   const childId = newChildId(taskId, deps.now());
   const marker = buildDeliveryMarker(taskId, deps.now());
@@ -352,7 +364,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   }
 
   return reply(
-    `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动（${verdict.execution}${worktree ? `，worktree=${worktree}` : ""}）。\n` +
+    `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动（${isolationNote}）。\n` +
     `任务 ${taskId} 已置为 running，任务书 ${written.path} 已随 \`pi @file\` 带进去。\n` +
     `投递已核实：${check.verdict.summary}。\n` +
     `${decor.note}\n` +
@@ -365,6 +377,8 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
       paneId,
       execution: verdict.execution,
       worktree,
+      isolated: worktree !== undefined,
+      concurrentSiblings,
       taskFile: written.path,
       delivered: true,
     },

@@ -187,6 +187,13 @@ export interface ChildHealth {
   stateForSeconds?: number;
   /** What it is blocked on while `waiting-judge` (`reviewer`, `precommit`…). */
   waitingFor?: string;
+  /**
+   * Seconds since the last FORWARD PROGRESS, for a `working` child only (E).
+   * The distinguishing reading between "turning the crank" (small) and "wedged
+   * in place" (growing) — a `working` child is otherwise indistinguishable from
+   * a hang. Purely informational: it never makes a child newsworthy.
+   */
+  progressStaleSeconds?: number;
 }
 
 /** Build the health line for one child. */
@@ -201,6 +208,14 @@ export function childHealth(observation: ChildObservation): ChildHealth {
   // a supervisor needs is how long the human (or it) has left it hanging.
   const since = open?.at ?? projection.lastStateSince;
   const sinceMs = since ? Date.parse(since) : Number.NaN;
+  // E — seconds since the child's last FORWARD PROGRESS (a tool call / turn
+  // boundary the child stamped), NOT since its last heartbeat. Undefined until
+  // the child has reported one.
+  const progressAt = projection.lastState?.lastProgressAt;
+  const progressMs = progressAt ? Date.parse(progressAt) : Number.NaN;
+  const progressStale = Number.isFinite(progressMs)
+    ? Math.max(0, Math.round((observation.at - progressMs) / 1000))
+    : undefined;
   return {
     childId: observation.childId,
     state,
@@ -220,6 +235,12 @@ export function childHealth(observation: ChildObservation): ChildHealth {
       : { sessionId: projection.lastState.sessionId }),
     ...(state === "waiting-judge" && projection.lastState?.waitingFor !== undefined
       ? { waitingFor: projection.lastState.waitingFor }
+      : {}),
+    // E — the progress reading, only for a `working` child (the one state that
+    // otherwise cannot be told apart from a hang). It is a READING, never a
+    // wake reason: isNewsworthy is untouched.
+    ...(state === "working" && progressStale !== undefined
+      ? { progressStaleSeconds: progressStale }
       : {}),
   };
 }
@@ -287,6 +308,12 @@ export function describeChildStateDetailed(health: ChildHealth): string {
   }
   if (health.state === "waiting-input" && health.stateForSeconds !== undefined) {
     return `${base}（已等 ${health.stateForSeconds}s）`;
+  }
+  if (health.state === "working" && health.progressStaleSeconds !== undefined) {
+    // A READING, not an alarm: it just names how long since the last real
+    // forward step, so 60 minutes of `working` with no checkpoint reads
+    // differently from a hang. No wake, no suggested action.
+    return `${base}（自上次推进 ${health.progressStaleSeconds}s）`;
   }
   return base;
 }

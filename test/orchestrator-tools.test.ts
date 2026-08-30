@@ -216,6 +216,21 @@ test("the handoff advice is COMPUTED and pushed, and it knows about pending ques
   assert.match(replyText(busy), /先处理完这 1 个待答请求再接力/);
 });
 
+test("F/round-5: over the HARD context threshold, the wait receipt makes handoff the FIRST action", async () => {
+  // Round 5 never drove the orchestrator's own context past ~13%, so the hard
+  // threshold path had no live evidence. Construct it directly: a supervisor
+  // that is nearly full must be told to hand over BEFORE it takes another task.
+  const full = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, contextPercent: 95 });
+  const c = await spawnT1(full);
+  readyChild(full, c);
+  const reply = await full.call("orchestrator_wait", { timeoutMs: 0 });
+  assert.equal(reply.details?.handoffUrgency, "now", "≥90% is the urgent lane");
+  const text = replyText(reply);
+  assert.match(text, /首要动作/, "handing over is the primary action, not a suggestion");
+  assert.match(text, /余量已不足以再带一轮任务/, "and it says WHY: no room to carry another task");
+});
+
+
 test("a vanished pane is `dead`, and the receipt names the assets that survived it", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);

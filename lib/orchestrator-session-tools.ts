@@ -357,10 +357,22 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   }
   if (child.worktree) deps.removeWorktree(child.worktree);
   deps.saveRuntime(markChildClosed(deps.runtime(), child.id, new Date(deps.now()).toISOString()));
+  // O-2 — only remind about the task status when it still NEEDS moving. The
+  // orchestrator usually sets the task `done` before closing; repeating the
+  // reminder for a task that is already terminal is exactly the "make the
+  // agent remember what the gate already knows" noise we avoid. `running` and
+  // `blocked` are the two states a closed child leaves stranded; a missing
+  // plan falls through to the reminder (fail-safe: better a redundant nudge
+  // than a silently stranded task).
+  const closedTask = currentPlan(deps).plan?.tasks.find((t) => t.id === child.taskId);
+  const needsStatusNudge = !closedTask || closedTask.status === "running" || closedTask.status === "blocked";
+  const statusNudge = needsStatusNudge
+    ? "。别忘了把它的任务状态置为 done 或 pending（`orchestrator_plan`）。"
+    : `。任务 ${child.taskId} 当前是 ${closedTask.status}，无需再动。`;
   return reply(
     `review-gate: 子会话 ${child.id}（pane ${child.paneId}）已关闭` +
     (child.worktree ? `，worktree ${child.worktree} 已清理` : "") +
-    "。别忘了把它的任务状态置为 done 或 pending（`orchestrator_plan`）。" + hookNote,
+    statusNudge + hookNote,
     { childId: child.id, hooksRepaired: hookNote.length > 0 },
   );
 

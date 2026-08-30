@@ -69,6 +69,17 @@ reviewer over the WHOLE change:
   `record_review` are **not tools** (2026-08-30, 哲学三): the gate still runs
   every one of those steps inside `judge_submit`, but none of them is
   registered, so there is no second path to sequence by hand.
+  `review_diff` / `review_sandbox` were **evaluated and formally NOT built**
+  (2026-08-31, 哲学三): the judge runs `--no-extensions` so there is nowhere to
+  register them without a judge-side extension entry, and that would re-open the
+  recursion surface `--no-extensions` exists to close. The reviewer's own `git
+  diff` / `git show` are simple read-only commands (not the multi-step ship/tmux
+  flows 哲学一 targets), and its sandbox verification is an inherently
+  reviewer-owned judgement call, not a mechanical sequence the gate can own
+  without becoming the reviewer. The reviewer's throwaway worktrees are the
+  gate's to CLEAN, though, not to build: `judge_submit` points the judge's
+  `$TMPDIR` at a per-session dir and reclaims any worktree under it when the
+  judge exits (谁创建谁回收).
 
 - **No decompose, no module loop, no wave daily.** The module-planning
   machinery and its wave tools were removed 2026-08-26. Large tasks are
@@ -86,8 +97,13 @@ pauses the loop) and the loop-goal approval dialog.
 
 Where work lands is the gate's business too: `setup_workspace` settles a
 dirty worktree and creates this session's work branch (a commit may only land
-on it), and `declare_done` merges that branch back into the base the user
-confirmed — a conflict stops it, records the files and hands them to you.
+on it) — swallowing the whole branch dance, including a best-effort `git
+fetch` + `--ff-only` update of the base — and `declare_done` **squash-merges**
+that branch back into the base the user confirmed (checkpoint history stays off
+the target; the gate composes an English Conventional-Commit subject
+mechanically from the folded checkpoints' own type/scope, so it always
+satisfies L5 without ever using the Chinese goal title) — a conflict stops it,
+records the files and hands them to you.
 
 ## Git workflow guardrails
 
@@ -325,7 +341,10 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   完全无感。旧的全局广播队列已删除。
 - **状态取真值**：子会话侧门禁用 `ctx.isIdle()` / `ctx.getContextUsage()` 上报
   working / waiting-input / **waiting-judge** / idle / done；`dead` 由 pane 消失
-  判定，`stalled` 由心跳超时判定。`screenLooksBusy`、屏幕解析与按键模拟全部删除，
+  判定，`stalled` 由心跳超时判定。`working` 还带一个**进展维度**（第五轮 E）：
+  健康快照给出「自上次推进（工具调用 / turn 边界，不含心跳）以来的时长」，让长时间
+  无进展的 `working` 与卡死可被区分 —— 它只是回执里的一个**读数**，不改变
+  `isNewsworthy`、不叫醒项目经理。`screenLooksBusy`、屏幕解析与按键模拟全部删除，
   tmux 在编排层只剩三件事：**判 pane 存活**、**开关 pane**、**给 pane 上色与标题**
   （纯展示，`select-pane -P/-T` + window 级 `setw pane-border-*`，一律不带 `-g`）。
 - **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：`judge_wait`、
@@ -360,7 +379,11 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    直接退 findings、一个框都不弹**，过了才请用户批准。反过来，**不扩权的改动不再
    重新惊动用户**：边界收窄、同目录内且不与他人相交的文件细化、加依赖、降并行度
    都让批准平移到新内容并记一条审计条目；新增任务、新目录、删依赖、串行改并行、
-   提高并行度一律重批（`lib/orchestrator-plan-approval.ts`）。
+   提高并行度一律重批（`lib/orchestrator-plan-approval.ts`）。这个 plan 审计者是
+   门禁的**内部实现**：项目经理从没派过它、也在任何 `orchestrator_wait` 回执里见不到
+   它，所以裁决记完门禁**自己把它收掉**（谁派谁负责，第五轮 O-6）——`declare_done`
+   不再被一个它从未被告知的 judge child 拦住。`propose_loop_goal` 内部的 goal 审计者
+   同理，也是门禁自收。
 
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
    只被多注入一句「有项目经理在管这轮任务」。plan、调度细节一律不注入 —— 知道

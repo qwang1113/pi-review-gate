@@ -128,6 +128,37 @@ test("the health line carries what a supervisor reads first", () => {
   assert.equal(health.sessionId, "rg-child-c1", "recovery needs the child's own session id");
 });
 
+test("E — a `working` child carries a progress reading, and it never wakes anyone", () => {
+  // Heartbeat is fresh (state reported now), so the child is `working`, not
+  // stalled — but its last FORWARD progress was an hour ago.
+  const records: ChannelRecord[] = [
+    { kind: "state", from: "child", at: iso(), state: "working", lastProgressAt: iso(-3_600_000) },
+  ];
+  const health = childHealth(observe(records));
+  assert.equal(health.state, "working");
+  assert.equal(health.progressStaleSeconds, 3600, "seconds since the last real forward step");
+  // The whole point of round-5 E: it is a READING, not a wake reason.
+  assert.equal(isNewsworthy("working"), false, "a progress reading must not make `working` newsworthy");
+  const rendered = formatChildHealth([health]);
+  assert.match(rendered, /自上次推进 3600s/);
+});
+
+test("E — the progress reading is ONLY for `working` (not idle/done/waiting)", () => {
+  // An idle child with a stale progress stamp shows no reading — the number
+  // only disambiguates the one state that looks like a hang.
+  const idle = childHealth(observe([
+    { kind: "state", from: "child", at: iso(), state: "idle", lastProgressAt: iso(-3_600_000) },
+  ]));
+  assert.equal(idle.state, "idle");
+  assert.equal(idle.progressStaleSeconds, undefined);
+  // A `working` child that never reported progress yet (booting) has no reading.
+  const booting = childHealth(observe([
+    { kind: "state", from: "child", at: iso(), state: "working" },
+  ]));
+  assert.equal(booting.progressStaleSeconds, undefined);
+});
+
+
 test("the rendered snapshot names the state in words, and says so when there is nobody", () => {
   const rendered = formatChildHealth([
     { childId: "c1", state: "waiting-input", quietForSeconds: 12, dialogTitle: "选一个" },

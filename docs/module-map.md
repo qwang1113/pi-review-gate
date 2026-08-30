@@ -405,6 +405,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义 |
 | `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交 |
+| `checkpoint-message.ts` | checkpoint 提交信息（纯函数）：把 `checkpoint` 注入 **scope** 产出合法 Conventional Commits（`type(checkpoint-<scope>)` / `type(checkpoint)` / 非 CC→`chore(checkpoint)` / 已含则幂等），并对非英文 round note 回落英文默认、丢正文（L5 自洽） |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
 | `constants.ts` | 全仓唯一的共享常量：代码/文档扩展名、敏感文件模式、ship 命令种类、语言指令、轮次上限 |
 | `consent-request-tools.ts` | 工具 `request_scope_limit` / `request_sensitive_edit`：两个「请用户放宽门禁」的同意口子，对话与门禁状态经注入的 deps；由 `user-interaction-tools.ts` 转注册 |
@@ -426,7 +427,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `goal-prereview-tools.ts` | **内部实现**（注册在 internalHost）：`record_goal_prereview`——把 goal-auditor 的裁决落成绑定草稿 sha256 的记录；外加两个 goal 工具共用的提交检查（空稿、长度上限、goal 绑定哪个 repo） |
 | `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：两个 host，agent 侧只看得见 `propose_loop_goal` |
 | `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：会话文件放哪、何时算完成、审计裁决是否阻塞 |
-| `judge-process.ts` | judge 子进程基座：`pi -p --session-id` 的确定性会话 id 与进程管理 |
+| `judge-process.ts` | judge 子进程基座：`pi -p --session-id` 的确定性会话 id 与进程管理；并把 judge 的 `$TMPDIR` 指向**每会话专属**的 scratch 目录（`judgeScratchDir`）——reviewer 的临时 review worktree 落在那里，门禁按 `reviewScratchWorktrees` 在 judge 退出后精确回收，绝不误删并行 lane 的活 worktree |
 | `judge-prompt.ts` | judge 子会话的系统提示装配：角色定义 + 共同协议 |
 | `judge-session.ts` | 把 judge「会话」当作被管理实体：transcript、run 目录、自述状态文件 |
 | `judge-session-tools.ts` | 作用于**已存在**的 judge 会话的三个工具（`judge_read` / `judge_close` / `judge_wait`）及其注册 |
@@ -495,7 +496,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `verdict-parse.ts` | 裁决解析：review 只认 JSON fence，precommit 只认 `## Overall:` sentinel |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
 | `workspace-branch.ts` | `setup_workspace` 与 `declare_done` 背后的工作区与分支事实 |
-| `worktree-merge.ts` | 合并**在哪儿**执行：基准分支被别的 worktree 占着时（并行 lane 的常态）就地合并的判定，脏工作区一律拒绝 |
+| `worktree-merge.ts` | 合并**在哪儿**执行：基准分支被别的 worktree 占着时（并行 lane 的常态）就地合并的判定，脏工作区一律拒绝（但真正的护栏是 `git merge --squash` 自身的原子拒绝，脏检查只为更好的报错）；以及 **squash subject 归纳**（从各 checkpoint 的 type/scope 折出主 type/scope，全 ASCII，L5 恒成立） |
 
 ---
 

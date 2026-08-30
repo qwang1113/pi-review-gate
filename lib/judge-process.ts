@@ -29,6 +29,7 @@
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 
 /** Prefix of every gate-owned session id, so orphans are identifiable. */
@@ -60,6 +61,41 @@ export function shortRepoHash(repoRoot: string): string {
     hash = (hash * 31 + repoRoot.charCodeAt(i)) >>> 0;
   }
   return hash.toString(16).padStart(8, "0").slice(0, 10);
+}
+
+/** Name of the dir holding every judge round's scratch worktrees. */
+export const REVIEW_SCRATCH_DIRNAME = "rg-review-scratch";
+
+/**
+ * The gate-owned TMPDIR for one judge session — where its throwaway review
+ * worktrees land, so the GATE can reclaim them (D — "whoever creates it clears
+ * it"). A reviewer verifies by doing (`git worktree add <tmp> HEAD` to run
+ * tests on the reviewed commit), and it was told to build those under $TMPDIR;
+ * pointing $TMPDIR at a per-session dir the gate knows makes the cleanup
+ * deterministic instead of a name-guessing sweep that could delete a
+ * concurrent lane's live review worktree. Keyed by session id, so the reaping
+ * side computes the same path without storing it.
+ */
+export function judgeScratchDir(sessionId: string): string {
+  return join(tmpdir(), REVIEW_SCRATCH_DIRNAME, safeSessionFilePart(sessionId));
+}
+
+/**
+ * The worktree paths from `git worktree list --porcelain` that live under
+ * `scratchDir` — the ones a finished judge left behind. Pure string work so the
+ * reaping decision is unit-testable without a repository.
+ */
+export function reviewScratchWorktrees(porcelain: string, scratchDir: string): string[] {
+  const normalized = scratchDir.replace(/\/+$/, "");
+  const prefix = normalized + "/";
+  const paths: string[] = [];
+  for (const rawLine of String(porcelain ?? "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith("worktree ")) continue;
+    const path = line.slice("worktree ".length).trim();
+    if (path === normalized || path.startsWith(prefix)) paths.push(path);
+  }
+  return paths;
 }
 
 export interface JudgeProcessOptions {
@@ -118,6 +154,8 @@ export function spawnJudgeProcess(opts: JudgeProcessOptions): JudgeProcessResult
   try {
     const { role, repoRoot, sessionId, sysPromptPath, model, sessionDir, taskText } = opts;
     mkdirSync(sessionDir, { recursive: true });
+    const scratchDir = judgeScratchDir(sessionId);
+    mkdirSync(scratchDir, { recursive: true });
 
     // The task file lives next to the transcript dir, one per spawn
     // (timestamped): it records exactly what THIS round asked.
@@ -144,6 +182,10 @@ export function spawnJudgeProcess(opts: JudgeProcessOptions): JudgeProcessResult
       env: {
         ...process.env,
         ...(opts.parentSessionId ? { RG_PARENT_SESSION: opts.parentSessionId } : {}),
+        // D — point the judge's TMPDIR at a gate-owned per-session dir, so the
+        // throwaway review worktrees it builds ("under $TMPDIR") land where the
+        // gate can reclaim them after the process exits.
+        TMPDIR: scratchDir,
       },
     });
 

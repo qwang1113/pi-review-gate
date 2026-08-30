@@ -83,7 +83,6 @@ import {
 } from "../lib/repo-resolve.ts";
 import {
   nonEnglishCommitMessage,
-  containsNonLatinLetter,
   l5BlockReason,
 } from "../lib/lang-detect.ts";
 import {
@@ -104,6 +103,8 @@ import {
   judgeSessionIdFor,
   shortRepoHash,
   judgeProcessAlive,
+  judgeScratchDir,
+  reviewScratchWorktrees,
   type JudgeProcessResult,
 } from "../lib/judge-process.ts";
 import { createProcessWatchRegistry, rememberChildProcess, forgetChildProcess, waitForProcessExit } from "../lib/judge-watch.ts";
@@ -146,7 +147,8 @@ import {
 } from "../lib/workspace-branch.ts";
 import {
   decideMergeVenue,
-  mergeArgv,
+  squashMergeArgv,
+  squashMergeMessage,
   parseWorktreeList,
   venueRefusal,
   type MergeVenue,
@@ -211,6 +213,7 @@ import { registerOrchestratorSessionTools } from "../lib/orchestrator-session-to
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
+import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
 import {
   readJudgeSessionState,
@@ -1278,6 +1281,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(percent === undefined ? {} : { contextPercent: Math.round(percent) }),
         ...(judging ? { waitingFor: judging.role } : {}),
         ...(note === undefined ? {} : { note }),
+        // E — the progress stamp rides on EVERY report (heartbeat included), so
+        // a `working` child re-reported on a timer keeps its last real-progress
+        // time. It only advances on a genuine agent event (see noteChildProgress).
+        ...(lastChildProgressAt === undefined ? {} : { lastProgressAt: new Date(lastChildProgressAt).toISOString() }),
       },
     );
   }
@@ -1289,6 +1296,18 @@ export default function reviewGate(pi: ExtensionAPI) {
   let childHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
   let lastChildReportAt = 0;
   let lastReportedChildState: ChildReportedState | undefined;
+  /**
+   * Epoch ms of the child's last FORWARD PROGRESS (E). Advanced ONLY by a real
+   * agent event — a tool result or a turn boundary — never by the heartbeat, so
+   * a `working` child that keeps turning the crank shows a small "no progress"
+   * reading while one wedged in place shows a growing one. Undefined until the
+   * first event, so a booting session is not reported as stuck.
+   */
+  let lastChildProgressAt: number | undefined;
+  /** Stamp forward progress. Called from the agent-event handlers, not the heartbeat. */
+  function noteChildProgress(): void {
+    if (childBinding()) lastChildProgressAt = Date.now();
+  }
   /**
    * Instructions this session has already acknowledged as RECEIVED.
    *
@@ -1812,6 +1831,104 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * Best-effort refresh of `base` from its remote before a work branch is cut
+   * off it (D — the fetch + `--ff-only` update the AGENTS.md branch dance used
+   * to leave to the agent). setup_workspace expresses the intent ("branch off a
+   * current base"); the gate does the git.
+   *
+   * NEVER fatal, and never anything but a fast-forward: offline is a note, a
+   * DIVERGED base is a note (a merge/rebase/force there is the user's call, not
+   * the gate's). Returns the notes to fold into the setup_workspace receipt.
+   */
+  function refreshBaseBeforeBranch(root: string, base: string): string[] {
+    const notes: string[] = [];
+    let fetched = false;
+    try {
+      execFileSync("git", ["fetch", "--quiet"], { cwd: root, encoding: "utf8" });
+      fetched = true;
+    } catch {
+      notes.push(`基准分支 ${base} 未能从远端更新（git fetch 失败，可能离线）—— 它可能落后于远端。`);
+    }
+    // Fast-forward only, and only when actually standing on base (the common
+    // case at branch-cut time). No upstream ⇒ nothing to fast-forward to.
+    if (fetched && currentBranch(root) === base) {
+      let hasUpstream = false;
+      try {
+        execFileSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], { cwd: root, encoding: "utf8" });
+        hasUpstream = true;
+      } catch { /* no tracking branch */ }
+      if (hasUpstream) {
+        try {
+          execFileSync("git", ["merge", "--ff-only", "@{u}"], { cwd: root, encoding: "utf8" });
+          notes.push(`基准分支 ${base} 已快进到远端最新。`);
+        } catch {
+          notes.push(`基准分支 ${base} 与远端已分叉，门禁不会替你 merge/rebase —— 请自行处理后再开工作分支（本次仍按当前 ${base} 建分支）。`);
+        }
+      }
+    }
+    return notes;
+  }
+
+  /**
+   * THE GATE'S SQUASH LANDING, executed in ONE worktree (`cwd`) — the shared
+   * core of both merge venues (self and holder).
+   *
+   * It folds the work branch into base as a SINGLE commit (the checkpoint
+   * history stays off the target branch) and commits it with a message the
+   * gate DERIVES, never the loop goal's title: that title is Simplified Chinese
+   * and L5 refuses a non-English commit, so the subject is composed from the
+   * checkpoints' own Conventional-Commit type/scope (always ASCII — see
+   * lib/worktree-merge.ts `squashMergeSubject`).
+   *
+   * REVIEW_GATE_BYPASS=1, like the checkpoint commit above: this is a
+   * gate-authored landing of content that already passed a READY review. The
+   * fingerprint hook cannot meaningfully judge a commit made on the BASE branch
+   * (self venue) or inside a FOREIGN holder worktree whose sidecar is not this
+   * review's state (holder venue) — which is exactly why the previous
+   * `--no-ff` merge, a merge commit, never ran these commit hooks at all.
+   */
+  function runSquashLanding(cwd: string, work: string, base: string):
+    | { ok: true }
+    | { ok: false; conflicted: boolean; files: string[]; cleaned: boolean; error?: string } {
+    let subjects: string[] = [];
+    try {
+      subjects = execFileSync("git", ["log", "--format=%s", `${base}..${work}`], { cwd, encoding: "utf8" })
+        .split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+    } catch { /* unreadable range → an empty list still yields a legal chore subject */ }
+    const { subject, body } = squashMergeMessage(work, base, subjects);
+    try {
+      execFileSync("git", squashMergeArgv(work), { cwd, encoding: "utf8" });
+      execFileSync("git", ["commit", "-m", subject, "-m", body], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, REVIEW_GATE_BYPASS: "1" },
+      });
+      return { ok: true };
+    } catch (err) {
+      let files: string[] = [];
+      try {
+        files = parseConflictFiles(
+          execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { cwd, encoding: "utf8" }),
+        );
+      } catch { /* the cleanup below still runs */ }
+      // A `--squash` merge sets no MERGE_HEAD, so `git merge --abort` cannot
+      // undo it; the staged/conflicted state is discarded with `git reset
+      // --hard HEAD` instead. Safe because the venue was verified clean first
+      // (the self venue just checked out `base`; the holder passed venueRefusal).
+      let cleaned = true;
+      try { execFileSync("git", ["merge", "--abort"], { cwd, encoding: "utf8" }); } catch { /* squash: nothing to abort */ }
+      try { execFileSync("git", ["reset", "--hard", "HEAD"], { cwd, encoding: "utf8" }); } catch { cleaned = false; }
+      return {
+        ok: false,
+        conflicted: files.length > 0,
+        files,
+        cleaned,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
    * R3-7 — land the work by merging INSIDE the worktree that holds the base.
    *
    * This is the only path that works for a parallel orchestration lane: its
@@ -1840,55 +1957,36 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (refusal) {
       return { ok: false, merge: "none", text: `review-gate: declare_done 被拒 — ${refusal}` };
     }
-    try {
-      execFileSync("git", mergeArgv(work, base), { cwd: venue.path, encoding: "utf8" });
+    const landed = runSquashLanding(venue.path, work, base);
+    if (landed.ok) {
       delete st.mergeConflict;
       logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString(), venue: venue.path });
       persist(ctx);
-      return { ok: true, merge: "merged", text: `merged ${work} into ${base} —— ${venue.reason}` };
-    } catch (err) {
-      let files: string[] = [];
-      try {
-        files = parseConflictFiles(
-          execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: venue.path, encoding: "utf8" }),
-        );
-      } catch { /* the abort below still runs */ }
-      // Leave the OTHER worktree exactly as it was found — an aborted merge
-      // there is not this session's mess to leave behind. Whether the abort
-      // WORKED is reported rather than assumed (round-1 Nit): this is the
-      // module whose whole point is that a receipt never overstates, and
-      // "回到原样" would be the one sentence a human acts on without checking.
-      let aborted = true;
-      try {
-        execFileSync("git", ["merge", "--abort"], { cwd: venue.path, encoding: "utf8" });
-      } catch {
-        // Either there was nothing to abort (the merge failed before it
-        // started) or the abort itself failed. Both are reported the same
-        // honest way: we cannot claim that worktree is untouched.
-        aborted = false;
-      }
-      const restored = aborted
-        ? "，已 abort，那个工作区回到原样"
-        : "，**但 abort 没有成功**（也可能本来就没进入合并状态）—— 请自己去 " +
-          `${venue.path} 看一眼它现在的状态`;
-      const conflicted = files.length > 0;
-      if (conflicted) st.mergeConflict = { branch: work, base, files, at: new Date().toISOString() };
-      persist(ctx);
-      return {
-        ok: false,
-        merge: "none",
-        text: conflicted
-          ? `review-gate: declare_done 被拒 — ${work} 合并回 ${base} 有冲突（合并在持有基准分支的 worktree ` +
-            `${venue.path} 里执行${restored}）。\n` +
-            `冲突文件：\n${files.map((f) => `  ${f}`).join("\n")}\n` +
-            `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
-            "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
-          : `review-gate: declare_done 被拒 — 在 worktree ${venue.path} 里合并 ${work} → ${base} 失败` +
-            `（不是冲突：没有未解决路径）${restored}。` +
-            `\n${(err instanceof Error ? err.message : String(err)).split("\n")[0]}` +
-            "\n先手动确认两条分支的状态，再重试。",
-      };
+      return { ok: true, merge: "merged", text: `squash-merged ${work} into ${base} —— ${venue.reason}` };
     }
+    // The holder worktree is left exactly as it was found — the squash cleanup
+    // (`reset --hard HEAD`, since a `--squash` sets no MERGE_HEAD to abort) is
+    // reported rather than assumed (round-1 Nit): this is the module whose
+    // whole point is that a receipt never overstates.
+    const restored = landed.cleaned
+      ? "，已回退，那个工作区回到原样"
+      : "，**但回退没有成功** —— 请自己去 " + `${venue.path} 看一眼它现在的状态`;
+    if (landed.conflicted) st.mergeConflict = { branch: work, base, files: landed.files, at: new Date().toISOString() };
+    persist(ctx);
+    return {
+      ok: false,
+      merge: "none",
+      text: landed.conflicted
+        ? `review-gate: declare_done 被拒 — ${work} squash 合并回 ${base} 有冲突（合并在持有基准分支的 worktree ` +
+          `${venue.path} 里执行${restored}）。\n` +
+          `冲突文件：\n${landed.files.map((f) => `  ${f}`).join("\n")}\n` +
+          `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
+          "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
+        : `review-gate: declare_done 被拒 — 在 worktree ${venue.path} 里 squash 合并 ${work} → ${base} 失败` +
+          `（不是冲突：没有未解决路径）${restored}。` +
+          `\n${(landed.error ?? "").split("\n")[0]}` +
+          "\n先手动确认两条分支的状态，再重试。",
+    };
   }
 
   /**
@@ -1931,7 +2029,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     try {
       execFileSync("git", ["checkout", base], { cwd: primaryRepoRoot, encoding: "utf8" });
       logBranchOp(st, { op: "checkout", from: work, to: base, at: new Date().toISOString() });
-      execFileSync("git", ["merge", "--no-ff", work, "-m", `merge ${work} into ${base}`], { cwd: primaryRepoRoot, encoding: "utf8" });
+    } catch (err) {
+      return {
+        ok: false,
+        merge: "none" as const,
+        text: `review-gate: declare_done 被拒 — 切到基准分支 ${base} 失败：` +
+          `${(err instanceof Error ? err.message : String(err)).split("\n")[0]}`,
+      };
+    }
+    const landed = runSquashLanding(primaryRepoRoot, work, base);
+    if (landed.ok) {
       delete st.mergeConflict;
       // WHERE THE WORKTREE IS LEFT STANDING, and it depends on whose worktree
       // it is (R-26).
@@ -1959,40 +2066,32 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString() });
       persist(ctx);
-      return { ok: true, text: `merged ${work} into ${base}`, merge: "merged" };
-    } catch (err) {
-      // Conflicted (or the merge failed for another reason): leave NOTHING
-      // half-applied. Abort, go back to the work branch, and report.
-      let files: string[] = [];
-      try {
-        files = parseConflictFiles(execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: primaryRepoRoot, encoding: "utf8" }));
-      } catch { /* the abort below still runs */ }
-      try { execFileSync("git", ["merge", "--abort"], { cwd: primaryRepoRoot, encoding: "utf8" }); } catch { /* nothing to abort */ }
-      try {
-        execFileSync("git", ["checkout", work], { cwd: primaryRepoRoot, encoding: "utf8" });
-        logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
-      } catch { /* best-effort: the branch may already be checked out */ }
-      // A merge can fail for reasons that are NOT a conflict (a missing ref, a
-      // hook refusing the merge commit). Reporting those as "conflict" sends
-      // the agent looking for conflict markers that do not exist.
-      const conflicted = files.length > 0;
-      if (conflicted) {
-        st.mergeConflict = { branch: work, base, files, at: new Date().toISOString() };
-      }
-      persist(ctx);
-      return {
-        ok: false,
-        merge: "none" as const,
-        text: conflicted
-          ? `review-gate: declare_done 被拒 — ${work} 合并回 ${base} 有冲突，合并已中止（工作区回到 ${work}，无残留）。\n` +
-            `冲突文件：\n${files.map((f) => `  ${f}`).join("\n")}\n` +
-            `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
-            "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
-          : `review-gate: declare_done 被拒 — 合并 ${work} → ${base} 失败（不是冲突：没有未解决路径），已中止并回到 ${work}。` +
-            `\n${(err instanceof Error ? err.message : String(err)).split("\n")[0]}` +
-            "\n先手动确认两条分支的状态，再重试。",
-      };
+      return { ok: true, text: `squash-merged ${work} into ${base}`, merge: "merged" };
     }
+    // The squash failed. runSquashLanding already discarded its staged/
+    // conflicted state (`reset --hard HEAD`, since a `--squash` sets no
+    // MERGE_HEAD to abort); restore the session's own checkout on the work
+    // branch so a later checkpoint is legal again.
+    try {
+      execFileSync("git", ["checkout", work], { cwd: primaryRepoRoot, encoding: "utf8" });
+      logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
+    } catch { /* best-effort: the branch may already be checked out */ }
+    if (landed.conflicted) {
+      st.mergeConflict = { branch: work, base, files: landed.files, at: new Date().toISOString() };
+    }
+    persist(ctx);
+    return {
+      ok: false,
+      merge: "none" as const,
+      text: landed.conflicted
+        ? `review-gate: declare_done 被拒 — ${work} squash 合并回 ${base} 有冲突，已回退（工作区回到 ${work}，无残留）。\n` +
+          `冲突文件：\n${landed.files.map((f) => `  ${f}`).join("\n")}\n` +
+          `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
+          "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
+        : `review-gate: declare_done 被拒 — squash 合并 ${work} → ${base} 失败（不是冲突：没有未解决路径），已回退并回到 ${work}。` +
+          `\n${(landed.error ?? "").split("\n")[0]}` +
+          "\n先手动确认两条分支的状态，再重试。",
+    };
   }
 
   /** Is `maybeAncestor` already contained in `branch`? */
@@ -3074,6 +3173,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- track edits & precommit results ----------
 
   pi.on("tool_result", async (event, ctx) => {
+    // E — a completed tool call is forward progress for the child health reading.
+    noteChildProgress();
     // 1. Edits: only arm gate on success.
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       if (event.isError) {
@@ -3772,6 +3873,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Recording is idempotent: the exit watcher may have got there first, and
     // the pending-draft entry it consumes makes the second call a no-op.
     const note = await recordJudgeConclusion(child.sessionId);
+    // O-6 — WHOEVER DISPATCHED IT CLOSES IT. This goal-auditor is the gate's
+    // OWN internal implementation of `propose_loop_goal`; the agent never asked
+    // for it and never sees it in any receipt. Leaving it registered made
+    // `declare_done` block on "a judge child is still open" that the caller was
+    // never told about (the round-5 P1, in the orchestration twin). Its verdict
+    // is already recorded above, so close it now — the transcript stays on disk
+    // and a re-audit resumes the same session by id.
+    await callTool("judge_close", { role: "goal-auditor", repo: root }, ctx);
 
     input.progress?.done("审计完成");
 
@@ -3868,12 +3977,22 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The SAME wait implementation `judge_wait` uses (process exit, exit-code
     // file, or a verdict fence already in this round's stdout).
     await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx);
+    // O-6 — the gate dispatched this plan auditor internally, so the gate
+    // closes it (the round-5 P1). The orchestrator never asked for a judge
+    // child and never saw one in an `orchestrator_wait` receipt; leaving it
+    // registered made `declare_done` refuse to finish on a child the caller was
+    // never told about. The verdict is recorded from `child.stdoutPath` below
+    // (the close keeps the record object and its paths; only the process and
+    // the registry entry go away), so read the round's output first, THEN drop
+    // it. Placed before every return path so no branch can leak the child.
+    const closeAuditor = () => callTool("judge_close", { role: "goal-auditor", repo: root }, latestCtx);
 
     // THIS round's output only — the transcript accumulates every round of the
     // role's session, so its last fence could belong to a goal audit that ran
     // before this one.
     const output = readRoundStdout(child.stdoutPath);
     const parsed = output ? parseReviewOutput(output) : undefined;
+    await closeAuditor();
     if (!parsed) {
       const why = readStderrTail(child.stderrPath)?.trim().split("\n").slice(-3).join(" ") ?? "";
       return {
@@ -3908,35 +4027,13 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
   /**
-   * The checkpoint's commit message.
-   *
-   * A checkpoint must be identifiable AS a checkpoint in the history (user
-   * requirement): the marker is the gate's to add, not the agent's to
-   * remember. An agent-written subject keeps its own wording behind it.
-   *
-   * L5 IS THE CONSTRAINT, AND THIS FUNCTION MUST NOT BUILD A MESSAGE IT WOULD
-   * REFUSE. The agent's round note is usually CHINESE (this project's output
-   * language) while a commit message must be English — subject AND body, since
-   * the rule was unified (2026-08-29). So a note carrying any non-Latin letter
-   * is NOT used as message text at all: the subject falls back to the English
-   * default and the note is DROPPED from the body. Nothing is lost — the same
-   * note is what the reviewer receives as the round's description, verbatim,
-   * in the task text.
-   *
-   * The alternative would be a message whose body is guaranteed to be refused
-   * by the gate's own check: a default path that can never succeed, which is
-   * what this function existed to remove in the first place. Writing an
-   * English `message` on judge_submit still gets you a real subject and body.
+   * The checkpoint's commit message — the whole rule (Conventional Commits
+   * with the `checkpoint` marker injected into the SCOPE, and the L5
+   * non-English fallback) lives in lib/checkpoint-message.ts, unit-tested
+   * there. This wrapper only names the call site.
    */
   function checkpointMessage(raw: string): string {
-    const lines = raw.trim().split("\n");
-    const firstLine = (lines[0] ?? "").trim().slice(0, 100);
-    const usableSubject = firstLine.length > 0 && !containsNonLatinLetter(firstLine);
-    const subject = usableSubject ? firstLine : "record this round for review";
-    const rest = (usableSubject ? lines.slice(1).join("\n") : raw).trim();
-    const body = containsNonLatinLetter(rest) ? "" : rest;
-    const marked = /^checkpoint\b|^chore\(checkpoint\)/i.test(subject) ? subject : `checkpoint: ${subject}`;
-    return body ? `${marked}\n\n${body}` : marked;
+    return buildCheckpointMessage(raw);
   }
 
 
@@ -3996,7 +4093,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     // which the next spawn re-opens by session id anyway).
     for (const [repoRoot, list] of childSessions) {
       const alive = list.filter((c) => judgeProcessAlive(c.child));
-      if (alive.length !== list.length) childSessions.set(repoRoot, alive);
+      if (alive.length !== list.length) {
+        // D — a dead judge's scratch review worktrees are reclaimed as it is
+        // dropped from the registry.
+        for (const dead of list.filter((c) => !judgeProcessAlive(c.child))) reapReviewScratch(dead.sessionId);
+        childSessions.set(repoRoot, alive);
+      }
     }
     const sessionId = judgeSessionIdFor(role, shortRepoHash(root));
     // STABLE per role+repo (B5) — identity, not a per-round path. Each round's
@@ -4211,6 +4313,27 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch {
       return undefined; // recording is best-effort; the wake still happens
     }
+  }
+
+
+  /**
+   * Reclaim the review worktrees a finished judge left behind (D — "whoever
+   * creates it clears it"). A reviewer verifies by doing (`git worktree add
+   * <tmp> HEAD` under its gate-owned $TMPDIR); the gate set that $TMPDIR to a
+   * per-session dir, so on the judge's exit it can remove exactly those
+   * worktrees — never a concurrent lane's live one. Best-effort and idempotent.
+   */
+  function reapReviewScratch(sessionId: string): void {
+    const scratch = judgeScratchDir(sessionId);
+    try {
+      const list = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: primaryRepoRoot, encoding: "utf8" });
+      for (const wt of reviewScratchWorktrees(list, scratch)) {
+        try { execFileSync("git", ["worktree", "remove", "--force", wt], { cwd: primaryRepoRoot, encoding: "utf8" }); }
+        catch { /* already gone / not a registered worktree — the prune below still runs */ }
+      }
+      try { execFileSync("git", ["worktree", "prune"], { cwd: primaryRepoRoot, encoding: "utf8" }); } catch { /* best effort */ }
+    } catch { /* worktree list unreadable — leave the dir for a later reap */ }
+    try { rmSync(scratch, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 
 
@@ -4452,6 +4575,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       for (const [repoRoot, list] of childSessions) {
         childSessions.set(repoRoot, list.filter((c) => c.sessionId !== sessionId));
       }
+      // D — the judge is gone, so reclaim its scratch review worktrees.
+      reapReviewScratch(sessionId);
     },
     dropPendingAudit: (root) => { pendingGoalAudits.delete(root); },
     cancelWaitTimer: () => cancelChildWaitTimer(),
@@ -5478,6 +5603,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           }
           st.baseBranch = proposedBase;
           logBranchOp(st, { op: "base_branch_set", branch: proposedBase, at: new Date().toISOString() });
+          notes.push(...refreshBaseBeforeBranch(root, proposedBase));
           const work = deriveWorkBranchName(params.branch ? String(params.branch) : here, here);
           if (work !== here) {
             try {
@@ -5550,6 +5676,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       st.baseBranch = base;
       logBranchOp(st, { op: "base_branch_set", branch: base, at: new Date().toISOString() });
+      notes.push(...refreshBaseBeforeBranch(root, base));
 
       // ---- 3. the work branch ----
       const seed = (state.sessionId ?? randomBytes(3).toString("hex")).slice(0, 8);
@@ -6020,6 +6147,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // explore mode still has a supervisor waiting to hear from it — silence
     // is exactly the failure this replaced (a finished child classified
     // `working` for 725 seconds, R3-5).
+    noteChildProgress(); // E — a settled turn is forward progress.
     reportChildState(ctx);
     await drainChildInstructions(ctx);
 
@@ -6508,6 +6636,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // so it is the one event that proves the extension is alive — which is
     // exactly what `stalled` is the absence of. Placed before the early
     // return below for that reason.
+    noteChildProgress(); // E — a turn boundary is forward progress (the timer heartbeat is not).
     reportChildState(ctx);
 
     if (!state.hasCodeChange && !state.hasDocChange) return;

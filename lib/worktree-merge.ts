@@ -133,7 +133,20 @@ export function decideMergeVenue(input: MergeVenueInput): MergeVenue {
   };
 }
 
-/** Why a remote venue cannot be used right now (undefined ⇒ it can). */
+/**
+ * Why a remote venue cannot be used right now (undefined ⇒ it can).
+ *
+ * THE DIRTY CHECK IS ADVISORY, and that is the resolution of the TOCTOU race
+ * that used to be logged as a residual risk (round-4). This function reads the
+ * holder's status, then the caller runs `git merge --squash` — and in the gap
+ * the holder could become dirty. But the safety does NOT rest on this check:
+ * `git merge --squash` REFUSES to run when it would overwrite uncommitted
+ * changes ("Your local changes ... would be overwritten by merge") and touches
+ * nothing when it refuses. So the worst the race can do is turn a clean
+ * pre-check into a git-level refusal that the caller reports and aborts — never
+ * a lost change. This check exists only to give a BETTER message before git
+ * would, not to be the guard; git's own atomicity is the guard.
+ */
 export function venueRefusal(
   venue: MergeVenue,
   facts: { dirtyFiles?: readonly string[]; currentBranch?: string; base: string },
@@ -157,7 +170,107 @@ export function venueRefusal(
   return undefined;
 }
 
-/** The argv for the merge itself, in the venue's own directory. */
-export function mergeArgv(work: string, base: string): string[] {
-  return ["merge", "--no-ff", work, "-m", `merge ${work} into ${base}`];
+/** The argv that STAGES a squash merge (no commit yet), in the venue's dir. */
+export function squashMergeArgv(work: string): string[] {
+  return ["merge", "--squash", work];
 }
+
+/**
+ * WHY SQUASH, AND WHY THE GATE COMMITS IT ITSELF (user, 2026-08-31).
+ *
+ * The landing used to be `git merge --no-ff`, which carried every checkpoint
+ * of the work branch into the target's history — dozens of `type(checkpoint-…)`
+ * commits that are review bookkeeping, not the change. Squash lands the whole
+ * branch as ONE commit and leaves the checkpoints behind. Neither the project
+ * manager nor a human ever assembles the git for it (philosophy one): the gate
+ * runs `git merge --squash` then commits, from the derived message below.
+ *
+ * THE MESSAGE CONFLICT, RESOLVED. A squash needs a fresh subject, but the only
+ * human-authored summary the gate holds is the loop goal's TITLE — which is
+ * Simplified Chinese (this project's output language), and L5 refuses a
+ * non-English commit message. So the subject is NOT the goal title. It is
+ * MECHANICALLY DERIVED from the checkpoints being squashed: their Conventional
+ * Commit `type`/`scope` are folded into a dominant type and a representative
+ * scope, and the subject is composed from those plus the (kebab-case English)
+ * branch name.
+ *
+ * WHY IT ALWAYS SATISFIES L5. Every token that reaches the subject is filtered
+ * to `[a-z0-9-]` (see {@link sanitizeToken}) and the fixed words are English,
+ * so the output can contain no non-Latin letter by construction — L5 passes
+ * unconditionally, no matter what the checkpoint subjects held. The precedence
+ * list is the Conventional Commit convention (a feature outranks a fix, a fix
+ * outranks a refactor, …); an input that parses to nothing lands on `chore`.
+ */
+const TYPE_PRECEDENCE: readonly string[] = [
+  "feat", "fix", "perf", "refactor", "revert",
+  "docs", "test", "build", "ci", "style", "chore",
+];
+
+/** Keep only lowercase Conventional-Commit-safe characters. ASCII by force. */
+function sanitizeToken(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** Parse a Conventional Commit subject into its type and scope, if it is one. */
+export function parseConventionalSubject(
+  subject: string,
+): { type: string; scope?: string } | undefined {
+  const m = /^([A-Za-z][A-Za-z0-9]*)(?:\(([^)]*)\))?!?:\s+.+$/.exec(subject.trim());
+  if (!m) return undefined;
+  return { type: m[1]!.toLowerCase(), ...(m[2] ? { scope: m[2] } : {}) };
+}
+
+/**
+ * The squash commit's subject, folded from the checkpoint subjects.
+ *
+ * `checkpointSubjects` are the first lines of the commits `base..work` — each a
+ * checkpoint the gate itself wrote, so each carries a `checkpoint` scope. The
+ * marker is stripped back off before a representative scope is chosen (a
+ * `checkpoint-orchestrator` checkpoint is really about `orchestrator`).
+ */
+export function squashMergeSubject(
+  work: string,
+  checkpointSubjects: readonly string[],
+): string {
+  const types: string[] = [];
+  const scopeCounts = new Map<string, number>();
+  for (const raw of checkpointSubjects) {
+    const parsed = parseConventionalSubject(raw);
+    if (!parsed) continue;
+    types.push(parsed.type);
+    if (parsed.scope) {
+      // Strip the checkpoint marker back off: `checkpoint` alone → no real
+      // scope, `checkpoint-x` → `x`.
+      const underlying = parsed.scope
+        .replace(/(^|-)checkpoint($|-)/i, "$1$2")
+        .replace(/^-+|-+$/g, "");
+      const clean = sanitizeToken(underlying);
+      if (clean) scopeCounts.set(clean, (scopeCounts.get(clean) ?? 0) + 1);
+    }
+  }
+  const type = TYPE_PRECEDENCE.find((t) => types.includes(t)) ?? "chore";
+  let scope = "";
+  let best = 0;
+  for (const [candidate, count] of scopeCounts) {
+    if (count > best) { best = count; scope = candidate; }
+  }
+  const branch = sanitizeToken(work) || "work";
+  const head = scope ? `${type}(${scope})` : type;
+  return `${head}: land ${branch} branch`;
+}
+
+/** Subject + body for the squash commit. Body is fixed English (ASCII). */
+export function squashMergeMessage(
+  work: string,
+  base: string,
+  checkpointSubjects: readonly string[],
+): { subject: string; body: string } {
+  const subject = squashMergeSubject(work, checkpointSubjects);
+  const n = checkpointSubjects.length;
+  const body =
+    `Squash-merge ${work} into ${base} ` +
+    `(${n} checkpoint${n === 1 ? "" : "s"} folded into one commit; ` +
+    "checkpoint history kept off the target branch).";
+  return { subject, body };
+}
+

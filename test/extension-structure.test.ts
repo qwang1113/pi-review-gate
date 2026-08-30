@@ -1452,25 +1452,21 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
   }
 });
 
-test("checkpointMessage never builds a message its own L5 check would refuse", () => {
-  // Round-2 P2: the agent's round note is Chinese (this project's output
-  // language), so deriving the subject from its first line made the
-  // omit-`message` default path of judge_submit fail the gate's OWN L5 rule —
-  // a default that can never succeed. 2026-08-29: with the rule unified
-  // (subject AND body refuse any non-Latin letter), keeping the note as the
-  // BODY reproduced the same impossible default, so a non-English note is now
-  // dropped from the message entirely — it still reaches the reviewer as the
-  // round description.
-  const body = windowOf("The checkpoint's commit message.", "\n  /** What one dispatch", "checkpointMessage");
-  assert.match(body, /containsNonLatinLetter\(firstLine\)/,
-    "the derived subject is checked against the same rule L5 applies");
-  assert.match(body, /record this round for review/,
-    "a non-Latin note falls back to the English default subject");
-  assert.match(body, /containsNonLatinLetter\(rest\) \? "" : rest/,
-    "a non-English body is dropped, not handed to a check that must refuse it");
-  assert.doesNotMatch(body, /HALF fix/, "there is no half fix left to describe");
-  assert.doesNotMatch(body, /majority/, "the retired policy must not be cited");
+test("the checkpoint message is delegated to the pure, unit-tested lib module", () => {
+  // Round-2 P2 (the impossible default) and the 2026-08-31 scope-injection fix
+  // both live in lib/checkpoint-message.ts now, exercised by
+  // test/checkpoint-message.test.ts (four scope cases + the L5 fallback). The
+  // extension only names the call site — pin the delegation so the logic cannot
+  // silently move back inline.
+  assert.match(SRC, /import \{ buildCheckpointMessage \} from "\.\.\/lib\/checkpoint-message\.ts"/,
+    "the extension imports the pure builder");
+  const at = SRC.indexOf("function checkpointMessage(raw: string): string");
+  assert.ok(at > 0, "the wrapper still exists");
+  const body = SRC.slice(at, at + 200);
+  assert.match(body, /return buildCheckpointMessage\(raw\);/,
+    "the wrapper delegates, it does not re-implement the rule");
 });
+
 
 
 test("commands registered: gate-status, gate-bypass, gate-mode, gate-reset", () => {
@@ -2809,7 +2805,12 @@ test("SECURITY: a new session and /gate-reset both start with no sensitive-file 
 test("no network fetch anywhere in the extension", () => {
   // The extension has "npx" in regex patterns (anti-forgery detection),
   // and import("node:child_process") — both are fine. Only block actual network calls.
-  assert.doesNotMatch(SRC, /\bfetch\b/);
+  // The JS global `fetch(...)` is the thing to block — NOT the string "fetch",
+  // which now appears as a git argv: setup_workspace runs a best-effort `git
+  // fetch` to update the base before branching (D). That is a git subprocess,
+  // not a JS network call, and it degrades to a note when offline.
+  assert.doesNotMatch(SRC, /(?<![.\w"'])fetch\s*\(/, "no JS fetch() network call");
+  assert.match(SRC, /"fetch", "--quiet"/, "the only `fetch` is the best-effort `git fetch` in setup_workspace");
   assert.doesNotMatch(SRC, /import\("https?:/);
   // "npx" inside regex patterns is OK; "npx " (command invocation) is not.
   assert.doesNotMatch(SRC, /['"]npx\s/);
@@ -3526,15 +3527,17 @@ test("declare_done lands the work itself, and a conflict stops it honestly", () 
   const finish = SRC.slice(finishAt, finishAt + 4500);
 
   assert.match(finish, /decideFinish\(\{/, "the decision is the pure function's");
-  assert.match(finish, /"merge", "--no-ff"/);
-  // A conflict leaves NOTHING half-applied: abort, return to the work branch,
-  // record what conflicted, refuse.
-  assert.match(finish, /"merge", "--abort"/);
+  assert.match(finish, /runSquashLanding\(/, "the gate lands via the shared squash helper");
+  // A conflict leaves NOTHING half-applied: the squash cleanup lives in
+  // runSquashLanding; finishWorkBranch reads its verdict and returns to the
+  // work branch.
+  assert.match(finish, /landed\.conflicted/);
   assert.match(finish, /st\.mergeConflict = \{/);
   assert.match(finish, /ok: false/);
   assert.match(finish, /st\.mergeWaived/, "a waiver already on record skips the merge");
-  // A merge failure that is NOT a conflict must not be reported as one.
-  assert.match(finish, /const conflicted = files\.length > 0/);
+  // A merge failure that is NOT a conflict must not be reported as one — the
+  // distinction is carried by the helper's `conflicted` flag.
+  assert.match(finish, /landed\.conflicted\s*\?/, "conflict vs non-conflict is branched on the flag");
   // …and the waiver must be WRITABLE, by the user, or the escape hatch the
   // refusal points at does not exist (round-4 P1: it was read-only).
   assert.match(body, /waiveMerge/, "declare_done takes the waiver request");
@@ -3542,6 +3545,23 @@ test("declare_done lands the work itself, and a conflict stops it honestly", () 
   assert.match(body, /state\.mergeWaived = \{ at: new Date\(\)\.toISOString\(\), reason:/,
     "a granted waiver is recorded with its reason");
 });
+
+test("runSquashLanding squashes, commits with the gate bypass, and cleans up with reset --hard", () => {
+  const at = SRC.indexOf("function runSquashLanding(");
+  assert.ok(at > 0, "the shared squash landing helper exists");
+  const fn = SRC.slice(at, at + 2600);
+  // Stage the squash, then commit it from the DERIVED (ASCII) message — never
+  // the loop goal's Chinese title.
+  assert.match(fn, /squashMergeArgv\(work\)/, "the fold is a --squash stage");
+  assert.match(fn, /squashMergeMessage\(work, base, subjects\)/, "the subject/body are derived from the checkpoints");
+  assert.match(fn, /"commit", "-m", subject, "-m", body/, "the gate commits the squash itself");
+  // A gate-authored landing of already-READY content: the fingerprint hook
+  // cannot judge a commit on the base branch / in a foreign worktree.
+  assert.match(fn, /REVIEW_GATE_BYPASS: "1"/, "the landing bypasses the commit hooks, like the checkpoint commit");
+  // A --squash sets no MERGE_HEAD, so cleanup is a reset --hard, not an abort.
+  assert.match(fn, /"reset", "--hard", "HEAD"/, "squash cleanup discards the staged/conflicted state");
+});
+
 
 test("review_checkpoint is fail-closed about the branch it commits on", () => {
   const body = toolBodyOf("review_checkpoint");

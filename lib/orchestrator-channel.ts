@@ -128,6 +128,16 @@ export interface ChannelStateRecord extends ChannelRecordBase {
    * inferred: "waiting" with no object is just silence with a label.
    */
   waitingFor?: string;
+  /**
+   * ISO time of the child's last FORWARD PROGRESS — a tool call or a turn
+   * boundary, NOT a heartbeat tick (round-5 E). The heartbeat re-reports the
+   * same `working` every 10s, so `lastActivityAt` cannot tell a child that is
+   * turning the crank from one wedged in place. This stamp only advances on a
+   * real agent event, so `working` gets a progress dimension: "60 minutes of
+   * `working` with no checkpoint" stops looking identical to a hang. It is a
+   * READING for the receipt, never a wake reason.
+   */
+  lastProgressAt?: string;
 
 }
 

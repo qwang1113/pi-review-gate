@@ -88,7 +88,7 @@ function stamp(io: ChannelIO): string {
 export function reportState(
   binding: ChildChannelBinding,
   state: ChildReportedState,
-  extra: { contextPercent?: number; dialogTitle?: string; note?: string } = {},
+  extra: { contextPercent?: number; dialogTitle?: string; note?: string; waitingFor?: string; lastProgressAt?: string } = {},
 ): void {
   try {
     appendRecord(binding.io, binding.target, {
