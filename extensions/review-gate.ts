@@ -1405,8 +1405,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       try {
         if (instruction.mode === "interrupt") {
+          // Highest priority (2026-08-31): abort the current turn AND carry
+          // the new message, so the child stops what it was doing and reads
+          // this immediately. A bare interrupt (no text) stays a plain abort.
+          const interruptText = instructText(channelIO, instruction);
           ctx.abort?.();
-          acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
+          if (interruptText) {
+            await pi.sendUserMessage(interruptText, { deliverAs: "steer" });
+            acknowledgeInstruct(binding, instruction.instructId, true, "已中断并立即投递正文 (deliverAs:steer)", "injected");
+          } else {
+            acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
+          }
           continue;
         }
         const text = instructText(channelIO, instruction);
@@ -1864,46 +1873,62 @@ export default function reviewGate(pi: ExtensionAPI) {
    * their outcome lands in the notes the caller folds into the receipt.
    */
   function refreshBaseBeforeBranch(root: string, base: string): string[] {
-    const notes: string[] = [`基准分支 ${base} 的远端更新在后台进行（git fetch 异步执行，不阻塞本次工作区确认）——它可能暂时落后于远端，declare_done 前可手动确认。`];
-    void refreshBaseAsync(root, base).then((result) => {
-      if (result) notes.push(...result);
-    });
+    // The receipt note says the refresh runs in the background; the OUTCOME
+    // lands in .pi/gate-timings.jsonl (kind: base-refresh) so it stays
+    // visible to later sessions / /gate-status / a grep — reviewer P1:
+    // pushing into a local array after the receipt was returned was dead code.
+    const notes: string[] = [`基准分支 ${base} 的远端更新在后台进行（git fetch 异步执行，不阻塞本次工作区确认）——它可能暂时落后于远端，declare_done 前可手动确认；结果会写入 .pi/gate-timings.jsonl。`];
+    void refreshBaseAsync(root, base);
     return notes;
   }
 
   /**
    * The asynchronous half of refreshBaseBeforeBranch: best-effort fetch,
    * then a fast-forward merge of `@{u}` when standing on `base` with an
-   * upstream. Never throws; resolves to the notes describing the outcome.
+   * upstream. Never throws; the outcome is recorded as a base-refresh
+   * timing record so it is actually visible after the receipt returned.
    */
-  async function refreshBaseAsync(root: string, base: string): Promise<string[]> {
-    const notes: string[] = [];
+  async function refreshBaseAsync(root: string, base: string): Promise<void> {
+    const at = new Date().toISOString();
+    let outcome: "fetched-ff" | "diverged" | "offline" | "no-upstream" | "not-on-base" = "offline";
+    let note = "";
     let fetched = false;
     try {
       await runGitAsync(root, ["fetch", "--quiet"]);
       fetched = true;
     } catch {
-      notes.push(`基准分支 ${base} 未能从远端更新（git fetch 失败，可能离线）—— 它可能落后于远端。`);
+      outcome = "offline";
+      note = `基准分支 ${base} 未能从远端更新（git fetch 失败，可能离线）—— 它可能落后于远端。`;
     }
     if (fetched) {
       const branchNow = await currentBranchAsync(root);
-      if (branchNow === base) {
+      if (branchNow !== base) {
+        outcome = "not-on-base";
+        note = `基准分支 ${base} 的远端更新已拉取，但当前已不在 ${base} 上（在 ${branchNow ?? "?"}），跳过 ff-only 合并。`;
+      } else {
         let hasUpstream = false;
         try {
           await runGitAsync(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
           hasUpstream = true;
         } catch { /* no tracking branch */ }
-        if (hasUpstream) {
+        if (!hasUpstream) {
+          outcome = "no-upstream";
+          note = `基准分支 ${base} 没有上游跟踪分支，远端更新已拉取但未合并。`;
+        } else {
           try {
             await runGitAsync(root, ["merge", "--ff-only", "@{u}"]);
-            notes.push(`基准分支 ${base} 已快进到远端最新。`);
+            outcome = "fetched-ff";
+            note = `基准分支 ${base} 已快进到远端最新。`;
           } catch {
-            notes.push(`基准分支 ${base} 与远端已分叉，门禁不会替你 merge/rebase —— 请自行处理后再开工作分支（本次仍按当前 ${base} 建分支）。`);
+            outcome = "diverged";
+            note = `基准分支 ${base} 与远端已分叉，门禁不会替你 merge/rebase —— 请自行处理后再开工作分支（本次仍按当前 ${base} 建分支）。`;
           }
         }
       }
     }
-    return notes;
+    try {
+      appendTiming(root, { kind: "base-refresh", at, repo: root, base, outcome, note });
+    } catch { /* diagnostics only */ }
   }
 
   /** Run a git command async; resolves on success, rejects on failure. */
@@ -5642,7 +5667,15 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
       // ---- 1. the dirty worktree, if there is one ----
-      let files = dirtyFiles(root);
+      // 2026-08-31 (user bug): files THIS SESSION edited through the gate's
+      // edit tools are this session's own work, NOT pre-existing changes —
+      // asking "how do you want to handle these?" about them would make the
+      // user confirm (or worse, discard) work the agent just did. They are
+      // filtered out of the pre-existing set before the dialog; what remains
+      // is genuinely somebody else's (or a previous session's) uncommitted
+      // work, which is exactly what setup_workspace exists to settle.
+      const sessionOwn = new Set(sessionEditedPaths);
+      let files = dirtyFiles(root).filter((f) => !sessionOwn.has(f.path));
       if (files.length) {
         showToUser(uiCtx, "───── 工作区有未提交改动 ─────", describeDirty(files));
         const choices = Object.values(WORKTREE_CHOICES);

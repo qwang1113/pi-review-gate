@@ -3511,6 +3511,18 @@ test("setup_workspace honors params.branch on a protected branch (2026-08-30)", 
     "the dialog names the reuse behavior");
 });
 
+test("setup_workspace filters THIS session's own edits out of the pre-existing dialog (2026-08-31)", () => {
+  // User bug: calling setup_workspace AFTER editing made the gate ask about
+  // (or worse, offer to discard) the session's own work as if it were
+  // pre-existing. The pre-existing set must exclude files the session edited
+  // through the gate's own edit tools (sessionEditedPaths).
+  const body = windowOf('name: "setup_workspace"', "registerUserInteractionTools(pi, {", "setup_workspace");
+  assert.match(body, /sessionOwn = new Set\(sessionEditedPaths\)/,
+    "the session's own edited paths are collected before the dirty check");
+  assert.match(body, /dirtyFiles\(root\)\.filter\(\(f\) => !sessionOwn\.has\(f\.path\)\)/,
+    "the dirty list excludes this session's own edits before the dialog");
+});
+
 test("loop mode decision reminds to setup_workspace before work (2026-08-30)", () => {
   // The worktree/branch used to be settled only at the first judge_submit
   // refusal — far too late, after the edits. The loop-mode decision point

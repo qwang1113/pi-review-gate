@@ -82,7 +82,7 @@ export async function doRequestScopeLimit(
     };
   }
   if (deps.scopeLimitDeclined()) {
-    return deny("review-gate: the user already DECLINED a scope limit this session — do not ask again; satisfy the full gate or let the USER run /gate-bypass.");
+    return deny("review-gate: a scope-limit request was already DECLINED this session (by the user or the project manager) — do not ask again; satisfy the full gate or let the USER run /gate-bypass.");
   }
   if (!uiCtx.hasUI) {
     return deny("review-gate: no interactive UI — narrowing the gate fence requires the user's explicit dialog approval (fail-closed). Ask the user out-of-band.");
@@ -163,7 +163,7 @@ export async function doRequestScopeLimit(
   if (!ok) {
     deps.declineScopeLimit();
     return deny(
-      "review-gate: the user DECLINED the scope limit — the FULL gate applies (pre-existing " +
+      "review-gate: DECLINED the scope limit (by the user or the project manager) — the FULL gate applies (pre-existing " +
       "changes included). Scope requests are now locked for this session; continue the loop and cover everything.",
     );
   }
@@ -239,7 +239,7 @@ export async function doRequestSensitiveEdit(
   }
   if (deps.sensitiveDeclinedPaths.has(absPath)) {
     return deny(
-      `review-gate: the user already DECLINED editing "${raw}" this session — do not ask again. ` +
+      `review-gate: editing "${raw}" was already DECLINED (by the user or the project manager) this session — do not ask again. ` +
       "Tell the user what the file needs and let them edit it themselves.",
     );
   }
@@ -321,7 +321,7 @@ export async function doRequestSensitiveEdit(
   if (!ok) {
     deps.sensitiveDeclinedPaths.add(absPath);
     return deny(
-      `review-gate: the user DECLINED editing "${raw}". This path is now locked for the session — ` +
+      `review-gate: DECLINED editing "${raw}" (by the user or the project manager). This path is now locked for the session — ` +
       "do not ask again. Describe the change you wanted and let the user apply it.",
     );
   }
@@ -362,8 +362,9 @@ export function registerConsentRequestTools(host: ToolHost, deps: ConsentToolDep
     description:
       "Ask the USER whether the review gate may be limited to THIS session's own edits when it " +
       "is demanding coverage of PRE-EXISTING changes (dirty files or branch commits that pre-date " +
-      "this session). The extension shows the user a confirmation dialog — you cannot approve it " +
-      "yourself. If the user agrees, the pre-existing changes recorded at grant time stop arming " +
+      "this session). The extension shows the user a confirmation dialog (in an orchestration, " +
+      "the project manager may answer it on the user's behalf through the channel — whoever " +
+      "answers first wins). If the user agrees, the pre-existing changes recorded at grant time stop arming " +
       "the gate: with no session edits the ship gate disarms entirely; with session edits the " +
       "review scope narrows to the files this session touched (instruct the reviewer accordingly; " +
       "out-of-scope findings become advisory). If the user declines, scope requests lock for the " +
@@ -379,8 +380,10 @@ export function registerConsentRequestTools(host: ToolHost, deps: ConsentToolDep
     label: "Request Sensitive File Edit",
     description:
       "Ask the USER for one-time authorization to edit ONE sensitive file (.env, private key, " +
-      "credentials…) that the gate blocks by default. The extension shows a confirmation dialog — " +
-      "you cannot approve it yourself. A granted authorization covers that EXACT path only, is " +
+      "credentials…) that the gate blocks by default. The extension shows a confirmation dialog " +
+      "(in an orchestration, the project manager may answer it on the user's behalf through the " +
+      "channel — whoever answers first wins; the user's own dialog stays open either way). " +
+      "A granted authorization covers that EXACT path only, is " +
       "consumed by the first edit that SUCCEEDS, and expires after 10 minutes; it is never " +
       "persisted, so it dies with the session. The gate's OWN enforcement is NEVER grantable: " +
       "`.git/` internals (the L3 hooks) and `.pi/review-gate-state.json` / " +

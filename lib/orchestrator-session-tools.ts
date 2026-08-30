@@ -481,7 +481,9 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     description:
       "Say something to a running child session, or stop it. `mode` IS pi's own delivery: " +
       "`steer` cuts into the turn it is in the middle of, `followUp` waits until it finishes and " +
-      "is read next, `interrupt` aborts the current turn and carries no text. Nothing is typed at " +
+      "is read next, `interrupt` is the HIGHEST priority — it aborts the current turn and the " +
+      "message is read immediately (since 2026-08-31 an interrupt carries its text in the same " +
+      "call; a bare abort needed a second followUp to say anything). Nothing is typed at " +
       "a terminal: the text is written to the child's channel and the child's OWN gate injects it " +
       "with `pi.sendUserMessage`, so it cannot be truncated, cannot be split by a newline, and " +
       "cannot be misread by an open dialog as a menu selection (all four were measured). The " +
@@ -492,7 +494,7 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
       mode: Type.Optional(Type.String({
         description: "\"steer\" | \"followUp\" (default) | \"interrupt\"",
       })),
-      message: Type.Optional(Type.String({ description: "Required unless mode is \"interrupt\"" })),
+      message: Type.Optional(Type.String({ description: "The text to deliver. Required for every mode (interrupt included) — say what the child should do instead." })),
     }),
     execute: guarded((params) => dispatchInstruct(deps, params)),
   });
