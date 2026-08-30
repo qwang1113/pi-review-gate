@@ -372,6 +372,11 @@ import {
   type StallState,
 } from "../lib/loop-stall.ts";
 import {
+  decideRevival,
+  buildRevivalMessage,
+  REVIVAL_INTERVAL_MS,
+} from "../lib/session-revival.ts";
+import {
   effectiveAgentsConfig,
   applyAgentConfigLayer,
   loadRegistry,
@@ -710,7 +715,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // anchor while the child may have stopped without signalling.
   }
   let loopArmed = true; // /gate-bypass or NEEDS_HUMAN disarms auto-continuation
-  // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
+  // Re-arm the loop AND clear the arbitration pause together: working again
+  // means the human stop no longer applies (2026-08-30, P1).
+  function armLoop(): void {
+    loopArmed = true;
+    arbitrationPaused = false;
+  }
+  // Arbitration pause (2026-08-30, P1): the revival timer must respect the
+  // third way an arbiter ruling can end — the human picked "Pause gate and
+  // wait" in the dialog. Set in the arbitration tool, cleared by armLoop.
+  let arbitrationPaused = false;
   // session_start; a missing/corrupt config file falls back to safe defaults.
   let projectConfig: ProjectConfig = defaultProjectConfig();
   // A declined downgrade confirmation locks agent-initiated downgrades for the
@@ -1539,6 +1553,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return state.sessionId ? `${dir}/${state.sessionId}.jsonl` : undefined;
       } catch { return undefined; }
     },
+    // Symmetric re-arm (goal 5): the project manager's work is its
+    // orchestration tools — the loop session's work is its edits. The
+    // whole reason `loopArmed` has three re-arm sites on the edit path
+    // and none for the manager is that the manager never edits; here it
+    // re-arms itself by managing.
+    onToolCall: () => { armLoop(); },
+    // Goal 7 — a handoff is a VOLUNTARY exit. The successor inherits the
+    // orchestration; waking the retired session would put two project
+    // managers on one orchestration.
+    onHandoff: () => { handedOffOrchestration = true; },
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
   registerOrchestratorSessionTools(pi, orchestratorDeps);
@@ -1576,6 +1600,20 @@ export default function reviewGate(pi: ExtensionAPI) {
   // forever. The probe manufactures those events, and this timer is what
   // makes it fire even when the supervisor is NOT sitting inside
   // `orchestrator_wait`.
+  // ---- THE REVIVAL TIMER (2026-08-30, survival invariant) ----
+  //
+  // The one clock the invariant rides on. `agent_settled` fires once per
+  // turn and the NEXT turn comes from THIS turn's injection, so a turn that
+  // ends under any of the six guards never gets a second chance — the
+  // event chain is broken and nothing will ever re-trigger it. The loop
+  // session heals because edits re-arm `loopArmed`; an orchestrator writes
+  // no code (constraint 2) and cannot. So the gate keeps its own minute-
+  // level clock, independent of everything the agent did.
+  let revivalTimer: ReturnType<typeof setInterval> | undefined;
+  /** When this session last injected a revival (ms epoch). */
+  let lastRevivalAt: number | undefined;
+  /** A session that handed its orchestration over must not be revived. */
+  let handedOffOrchestration = false;
   let supervisionTimer: ReturnType<typeof setInterval> | undefined;
   let orchestratorContinuations = 0;
   /** The supervisor's own last health read, for the continuation message. */
@@ -1636,6 +1674,65 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * Arm the REVIVAL timer — the survival invariant for BOTH modes,
+   * every 60s. It exists to catch a session that stopped with its exit
+   * contract unmet (provider error, agent that decided it was done early).
+   *
+   * Deliberately independent of the event chain: it does not consume the
+   * continuation budget (`maxRounds`) and ignores the `loop-stall` circuit
+   * breaker — both are right for the INJECTION path they guard, and both
+   * are wrong here, where a stopped session costs nothing per minute and a
+   * silently abandoned task costs the whole run. Human stops (ESC, ask_user,
+   * bypass, arbitration pause) DO stop it — the invariant never overrides a
+   * person.
+   */
+  function startRevivalTimer(ctx: ExtensionContext): void {
+    if (revivalTimer) return;
+    revivalTimer = setInterval(() => {
+      // Same freshness rule as the child heartbeat: `latestCtx` is
+      // refreshed on every tool_call, so a stale captured ctx must never
+      // silently kill the check (a throwing isIdle would be swallowed by
+      // the catch below and the session would never be revived).
+      const live = latestCtx ?? ctx;
+      try {
+        if (state.taskMode === "explore" || state.taskMode === "normal") {
+          stopRevivalTimer();
+          return;
+        }
+        const mode = state.taskMode as "loop" | "orchestrator";
+        // P2: the problems assembly costs a fingerprint (~180ms) — pass it
+        // LAZY so the cheap guards (mode, consent, idle, throttle) run
+        // first, and only a session that might actually be revived pays.
+        let problemsCache: string[] | undefined;
+        const decision = decideRevival({
+          mode,
+          exitProblems: () => (problemsCache ??= sessionExitProblems()),
+          idle: !!live.isIdle?.(),
+          humanStop: {
+            aborted: lastRunAborted,
+            awaitingAnswer: !!state.pausedQuestion,
+            bypassed: state.bypass.active,
+            arbitrationPaused,
+          },
+          handedOff: handedOffOrchestration,
+          lastRevivalAt,
+          now: Date.now(),
+          intervalMs: REVIVAL_INTERVAL_MS,
+        });
+        if (!decision.revive) return;
+        lastRevivalAt = Date.now();
+        pi.sendUserMessage(buildRevivalMessage(mode, problemsCache ?? []), { deliverAs: "followUp" });
+      } catch { /* a revival must never break the session it revives */ }
+    }, REVIVAL_INTERVAL_MS);
+    (revivalTimer as unknown as { unref?: () => void }).unref?.();
+  }
+  function stopRevivalTimer(): void {
+    if (revivalTimer) clearInterval(revivalTimer);
+    revivalTimer = undefined;
+  }
+
+
+  /**
    * Arm the background supervisor (default-on in orchestrator mode, 10s).
    *
    * It only WAKES the session when there is something a supervisor has to act
@@ -1667,6 +1764,35 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * THE UNIFIED EXIT CRITERION (2026-08-30).
+   *
+   * Every place that asks "is this session done?" reads this one function:
+   * `agent_settled` continuation, the revival timer, and `declare_done`.
+   * It used to be two separately-assembled answers — the loop's gate
+   * problems plus completion items, and the orchestration's plan/children/
+   * decisions — which is how one mode could end up with a revival clock
+   * and the other without one. One function, one answer.
+   */
+  function sessionExitProblems(): string[] {
+    if (state.taskMode === "orchestrator") {
+      return orchestrationDoneProblems();
+    }
+    const fp = computeFingerprint(cwd);
+    const problems = (state.hasCodeChange || state.hasDocChange)
+      ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
+      : [];
+    const completion: string[] = [];
+    for (const root of sessionRepos) {
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      for (const p of copilotProblemsFor(st)) {
+        completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+      }
+    }
+    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    return [...problems, ...completion];
+  }
+
+  /**
    * The orchestrator's own `agent_settled` continuation (R-3).
    *
    * Same shape as the loop's, entirely different criteria: the plan, the
@@ -1675,7 +1801,16 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function orchestratorSettled(ctx: ExtensionContext): void {
     startSupervisionTimer(ctx);
-    const problems = orchestrationDoneProblems();
+    startRevivalTimer(ctx);
+    // USER REQUIREMENT (shared with the loop path): the user aborted this
+    // run with ESC — do not override an explicit human stop. The user's
+    // next message clears the flag and the loop resumes.
+    if (lastRunAborted) {
+      try { ctx.ui.notify("review-gate: 检测到手动中止（ESC）— 编排自动续跑已暂停；你的下一条消息会恢复。", "warning"); } catch { /* headless */ }
+      updateWidget(ctx);
+      return;
+    }
+    const problems = sessionExitProblems();
     const news = drainSupervisionNews();
     if (problems.length === 0 && news.length === 0) return;
     if (orchestratorContinuations >= state.maxRounds) return;
@@ -2810,6 +2945,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // end its turn with children still running and gates unmet.
     loopArmed = isEnforcedMode(mode);
     continuationsInjected = 0;
+    orchestratorContinuations = 0; // goal 6 — reset with the loop budget
     completionContinuations = 0;
     loopStall = undefined; // a mode decision is a change of circumstances
     stallNoticeShown = false;
@@ -3413,7 +3549,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // working, whoever asked it to — including a human typing straight
           // into the pane, which no orchestration tool can observe.
           if (s.completion) delete s.completion;
-          loopArmed = true;
+          armLoop();
           if (s.pausedQuestion) delete s.pausedQuestion;
           dirty = true;
           clearBypassToken(); // any edit invalidates a standing arbiter bypass
@@ -3466,7 +3602,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // is not finished any more, so the completion an orchestrator reads
         // must go with it.
         if (state.completion) delete state.completion;
-        loopArmed = true;
+        armLoop();
         // The agent resumed working on its own — a standing question pause
         // (ask_user) is moot; clear it so the loop enforces again.
         if (state.pausedQuestion) delete state.pausedQuestion;
@@ -3550,7 +3686,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             const st = root === primaryRepoRoot ? state : stateForRepo(root);
             st.copilot = armCopilotReview(st.copilot, nowIso);
             persistRepo(ctx as unknown as ExtensionContext, root);
-            loopArmed = true;
+            armLoop();
           }
         }
       }
@@ -5515,6 +5651,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // auto-continuations. Like rounds above, this only clears satisfied
       // history — it cannot loosen the ship gate.
       continuationsInjected = 0;
+      orchestratorContinuations = 0; // goal 6 — reset with the loop budget
       completionContinuations = 0;
       loopStall = undefined; // a completed task is real progress
       stallNoticeShown = false;
@@ -5603,7 +5740,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
     repoDir: (root) => repoDirFor(root),
     copilotEnabled: (st) => copilotEnabled(st),
-    armLoop: () => { loopArmed = true; },
+    armLoop: () => { armLoop(); },
     log: (message) => log(message),
     gh: {
       resolveOpenPr: (dir, signal) => resolveOpenPr(dir, signal),
@@ -6001,7 +6138,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // re-arm auto-continuation so the loop enforces again from this turn on.
     if (state.pausedQuestion && event.source !== "extension") {
       delete state.pausedQuestion;
-      if (state.taskMode !== "explore" && state.taskMode !== "normal") loopArmed = true;
+      if (state.taskMode !== "explore" && state.taskMode !== "normal") armLoop();
       persist(ctx);
     }
   });
@@ -6377,6 +6514,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         if (choice === "Pause gate and wait") {
           loopArmed = false;
+          arbitrationPaused = true; // P1: the revival timer must respect this
           appendLesson(`arbitration #${appealsUsed()} HUMAN→pause`);
           return { content: [{ type: "text", text: "review-gate: gate PAUSED by the human — auto-continuation disarmed. No bypass issued. Wait for further instructions." }], details: { decision: "HUMAN", human: "pause" } };
         }
@@ -6443,6 +6581,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
 
+    // The revival clock for the LOOP session: armed here so a turn that
+    // ends under any of the six guards above still gets its minute-level
+    // second chance. (The orchestrator arms it in orchestratorSettled.)
+    startRevivalTimer(ctx);
     const fp = computeFingerprint(cwd);
     // Ship-gate requirements only exist once this session touched something.
     const problems = (state.hasCodeChange || state.hasDocChange)
@@ -6845,6 +6987,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The supervision probe is a timer this session owns; a leaked one would
     // keep waking a session that is gone.
     stopSupervisionTimer();
+    // The revival timer is this session's own clock; a leaked one would
+    // keep reviving a session that is gone.
+    stopRevivalTimer();
     // Same for the child heartbeat: a leaked timer would keep reporting on
     // behalf of a session that is gone, and its supervisor would read those
     // reports as a healthy child.
@@ -6959,8 +7104,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function resetSessionState(): void {
     state = emptyState(state.sessionId, state.maxRounds);
-    loopArmed = true;
+    armLoop();
     continuationsInjected = 0;
+    orchestratorContinuations = 0; // goal 6 — reset with the loop budget
     completionContinuations = 0;
     loopStall = undefined;
     stallNoticeShown = false;

@@ -561,7 +561,13 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     parameters: Type.Object({
       handoffPath: Type.String({ description: "Repo-relative path, e.g. docs/orchestrator-handoff.md" }),
     }),
-    execute: guarded((params) => doHandoff(deps, params)),
+    execute: guarded((params) => {
+      // Voluntary exit (goal 7): the revival timer must leave this
+      // session alone after it hands over — it is DONE by choice, and
+      // waking it would put two project managers on one orchestration.
+      deps.onHandoff?.();
+      return doHandoff(deps, params);
+    }),
   });
 
 }

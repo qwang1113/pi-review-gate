@@ -3883,7 +3883,7 @@ test("R-3: an orchestrator never receives the LOOP's continuation — its criter
     "it branches BEFORE the loop's own unmet-requirement computation");
   const own = windowOf("function orchestratorSettled(", "\n  }", "orchestratorSettled");
   assert.match(own, /buildOrchestratorResume\(/, "and it has a continuation of its own");
-  assert.match(own, /orchestrationDoneProblems\(\)/, "built from the PLAN");
+  assert.match(own, /sessionExitProblems\(\)/, "built from the UNIFIED exit criterion");
   assert.match(own, /startSupervisionTimer\(ctx\)/, "which also arms the background supervisor");
   assert.doesNotMatch(own, /unmetRequirements|LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/,
     "and never from the loop's gates");
@@ -4045,6 +4045,26 @@ test("SURVIVAL INVARIANT: every ENFORCED mode arms the loop, orchestrator includ
   assert.ok(advisoryReturns.length >= 2,
     "the advisory-mode early returns name explore and normal explicitly — orchestrator is never in that set");
 });
+
+test("REVIVAL TIMER: the human stops it respects are real bindings, not literals", () => {
+  // P1 (2026-08-30): `arbitrationPaused: false` was a literal — the fourth
+  // human stop was advertised in docs/module-map.md but never wired, so an
+  // arbiter ruling that paused the gate still woke the session every 60s.
+  // Every human-stop field the revival timer passes must read REAL state.
+  const revival = windowOf("function startRevivalTimer(", "function stopRevivalTimer", "startRevivalTimer");
+  assert.match(revival, /aborted: lastRunAborted/, "ESC pause reads the real abort flag");
+  assert.match(revival, /awaitingAnswer: !!state\.pausedQuestion/, "ask_user pause reads the real paused question");
+  assert.match(revival, /bypassed: state\.bypass\.active/, "bypass reads the real bypass state");
+  assert.match(revival, /arbitrationPaused,/, "arbitration pause reads the real flag, not a literal false");
+  assert.doesNotMatch(revival, /arbitrationPaused: false/, "no literal false may stand in for the arbitration stop");
+  // And the flag is SET where the human actually pauses, CLEARED where work
+  // resumes — armLoop() is the single re-arm path that clears it.
+  assert.match(SRC, /if \(choice === "Pause gate and wait"\) \{[\s\S]{0,200}?arbitrationPaused = true;/,
+    "the arbitration pause branch sets the flag");
+  const armLoop = windowOf("function armLoop()", "let arbitrationPaused", "armLoop");
+  assert.match(armLoop, /arbitrationPaused = false;/, "armLoop clears the arbitration pause");
+});
+
 
 test("the tmux backstop sits above /gate-bypass", () => {
   const handler = windowIn(

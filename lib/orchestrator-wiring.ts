@@ -394,6 +394,14 @@ export interface OrchestratorHostBindings {
 
   now?(): number;
   env?(): NodeJS.ProcessEnv;
+
+  /**
+   * Fired on every orchestration-tool execution (2026-08-30, symmetric
+   * re-arm). The extension re-arms `loopArmed` here.
+   */
+  onToolCall?(name: string): void;
+  /** Fired when THIS session handed its orchestration to a successor. */
+  onHandoff?(): void;
 }
 
 /**
@@ -470,6 +478,8 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
 
 
     branchFacts: host.branchFacts,
+    onToolCall: host.onToolCall,
+    onHandoff: host.onHandoff,
     emitNotification: (sequence) => emitNotification(sequence, env()),
     fileChars: (relPath) => fileCharsIn(host.repoRoot, relPath),
     sessionTranscriptPath: host.sessionTranscriptPath,
