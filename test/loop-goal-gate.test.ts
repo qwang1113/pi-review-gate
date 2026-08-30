@@ -548,6 +548,18 @@ test("L8: loop mode with NO confirmed goal blocks edit/write; approval unblocks 
   await approveGoal(pi, ctx, GOAL_TEXT);
   const passed = await editCall(handlers, file, ctx);
   assert.equal(passed, undefined, "a confirmed goal must unblock edits");
+
+  // The PATHLESS fail-closed (2026-08-31 P1) is distinct from the goal gate:
+  // even with the goal CONFIRMED, an edit call without a `path` is still
+  // refused — the gate cannot attribute it to any repo, so every path-based
+  // check (sensitive floor, orchestrator restriction, per-repo L8 binding)
+  // would be silently skipped. This pins the fix: removing the fail-closed
+  // block turns this assertion red even though the goal is approved.
+  const pathlessAfterGoal = await handlers.get("tool_call")!({ toolName: "edit", input: {} }, ctx);
+  assert.ok(pathlessAfterGoal && (pathlessAfterGoal as { block?: boolean }).block === true,
+    "a path-less edit call must fail closed EVEN with a confirmed goal");
+  assert.match(JSON.stringify(pathlessAfterGoal), /without a `path`/,
+    "the refusal must name the missing path, not the goal");
 });
 
 test("L8: EXPLICIT loop mode (not just undecided) blocks edits without a goal and unlocks with one", async (t) => {

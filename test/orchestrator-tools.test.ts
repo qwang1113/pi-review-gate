@@ -413,7 +413,7 @@ test("an instruction the child could NOT inject is a failure carrying the child'
   assert.match(replyText(reply), /会话已经结束了/);
 });
 
-test("interrupt needs no text; every other mode does; an unknown mode is refused", async () => {
+test("every mode needs text (interrupt included since 2026-08-31); an unknown mode is refused", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);
   readyChild(world, childId);
@@ -422,9 +422,33 @@ test("interrupt needs no text; every other mode does; an unknown mode is refused
   assert.equal(bad.isError, true);
   assert.match(replyText(bad), /steer \/ followUp \/ interrupt/);
 
-  const empty = await world.call("orchestrator_instruct", { childId, mode: "steer" });
-  assert.equal(empty.isError, true);
-  assert.match(replyText(empty), /要发的内容是空的/);
+  const emptySteer = await world.call("orchestrator_instruct", { childId, mode: "steer" });
+  assert.equal(emptySteer.isError, true);
+  assert.match(replyText(emptySteer), /要发的内容是空的/);
+
+  // 2026-08-31: interrupt now carries its message (highest priority delivery).
+  // A bare interrupt would leave the child stopped with no idea why/next.
+  const emptyInterrupt = await world.call("orchestrator_instruct", { childId, mode: "interrupt" });
+  assert.equal(emptyInterrupt.isError, true);
+  assert.match(replyText(emptyInterrupt), /要发的内容是空的/);
+});
+
+test("interrupt with text delivers as the highest priority (2026-08-31)", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  readyChild(world, childId);
+
+  // interrupt now carries its message — one call means "stop and do THIS now".
+  const unacked = await world.call("orchestrator_instruct", { childId, message: "停下，先处理这个", mode: "interrupt" });
+  assert.equal(unacked.isError, true, replyText(unacked)); // no ack yet ⇒ not delivered
+  assert.match(replyText(unacked), /一直没有回执/);
+
+  // But the instruction IS on the channel, with its mode and full text —
+  // the child's own gate will abort + inject it (deliverAs:steer).
+  const pending = projectionOf(world, childId).pendingInstructs;
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]!.mode, "interrupt", "the mode is interrupt");
+  assert.equal(pending[0]!.text, "停下，先处理这个", "the message rides the interrupt");
 });
 
 // ---------------------------------------------------------------------------
