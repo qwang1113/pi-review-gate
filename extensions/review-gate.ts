@@ -5709,7 +5709,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (isProtectedBranch(here)) {
         // main/master is never a base a session commits onto; the user picks
         // the development branch it should branch from and merge back into.
-        const proposed = `dev/${new Date().toISOString().slice(0, 10)}`;
+        // On a protected branch the base is never the branch itself: the user
+        // picks a dev base to branch from. Honor an explicit branch proposal
+        // (2026-08-30 fix: the auto dev/<date> name ignored params.branch and
+        // collided with a leftover branch from an earlier session).
+        const proposed = params.branch ? deriveWorkBranchName(String(params.branch), `dev/${new Date().toISOString().slice(0, 10)}`)
+          : `dev/${new Date().toISOString().slice(0, 10)}`;
         const picked = await askWorkspace(
           `当前在受保护分支 ${here}，本会话不能直接在它上面开发。基准分支用哪个？`,
           [`从 ${here} 拉一条基准分支 ${proposed}`, `就用 ${here} 作为基准（工作分支仍会另建）`],
@@ -5724,7 +5729,26 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         if (picked.startsWith("从 ")) {
           try {
-            execFileSync("git", ["checkout", "-b", proposed], { cwd: root, encoding: "utf8" });
+            // Reuse an existing base branch instead of colliding with it:
+            // a leftover dev/<date> from an earlier session would otherwise
+            // fail the create and block the whole workspace setup.
+            // Probe by exit code, not by throwing: --verify --quiet exits non-zero
+            // when the ref is missing. execFileSync throws on non-zero, so the
+            // catch below would report "创建基准分支失败" for a branch that
+            // simply does not exist yet — distinguish the two by err.status.
+            let exists = false;
+            try {
+              execFileSync("git", ["rev-parse", "--verify", "--quiet", proposed], { cwd: root, encoding: "utf8" });
+              exists = true;
+            } catch (probeErr) {
+              const status = (probeErr as { status?: number }).status;
+              exists = status !== undefined && status === 0;
+            }
+            if (exists) {
+              execFileSync("git", ["checkout", proposed], { cwd: root, encoding: "utf8" });
+            } else {
+              execFileSync("git", ["checkout", "-b", proposed], { cwd: root, encoding: "utf8" });
+            }
             logBranchOp(st, { op: "checkout", from: here, to: proposed, at: new Date().toISOString() });
             base = proposed;
           } catch (err) {
@@ -5998,8 +6022,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         // this the agent could edit for a whole turn before ever seeing the
         // exit contract it is supposed to establish first.
         const goalNote = effective === "loop"
-          ? "\n\n" + buildLoopGoalDirective(readSessionLoopGoal(primaryRepoRoot), loopGoalConfirmed())
-
+          ? "\n\n" + buildLoopGoalDirective(readSessionLoopGoal(primaryRepoRoot), loopGoalConfirmed()) +
+            // 2026-08-30 (B): the worktree/branch must be settled BEFORE any
+            // real work, not at the first judge_submit refusal. Loop mode is
+            // decided here — remind the agent to settle the workspace now.
+            (!state.workBranch && dirtyFiles(primaryRepoRoot).length > 0
+              ? "\n\n注意：工作区还有未提交改动且尚未建立工作分支 —— 先调 `setup_workspace`（确认基准分支并建工作分支），再开始编辑。"
+              : "")
           : "";
         return {
           content: [{
@@ -6920,13 +6949,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       return {
         systemPrompt:
           systemPrompt +
-          "\n\n## Explore workflow (investigation)\n" +
-          "This is an explore (investigation/troubleshooting) task, not a delivery loop. " +
-          "PREFER read-only work: inspect, run diagnostic/read-only commands, and reason — avoid editing files unless a small change is genuinely needed for the investigation (e.g. a temporary probe). " +
-          "Review/precommit gates are advisory in this mode, auto-continuation is disabled, and you may call declare_done " +
-          "as soon as the task is satisfactorily complete — you decide when it is done. " +
-          "Ship commands (git commit/push, gh pr) remain fully gated; if the task turns into delivery work, ask the user to run /gate-mode loop." +
-          (problems.length ? `\nAdvisory gate status:\n${problems.map((p) => `- ${p}`).join("\n")}` : ""),
+          "\n\n## Explore 工作流（调查/排查）\n" +
+          "这是调查/排查任务，不是交付循环：优先只读工作 —— 查看、运行诊断/只读命令、推理；" +
+          "除非调查确实需要，否则避免改文件（例如临时探针）。" +
+          "本模式下门禁（review/precommit）为 advisory（建议性），自动续跑已禁用，" +
+          "任务满意完成即可自行 `declare_done` —— 由你判断何时算完成。" +
+          "ship 命令（git commit/push、gh pr）仍被完全拦截；" +
+          "若任务变成交付性工作，请让用户运行 /gate-mode loop。" +
+          (problems.length ? `\nAdvisory 门禁状态：\n${problems.map((p) => `- ${p}`).join("\n")}` : ""),
       };
     }
     // Loop goal (Step 0): loop mode works to an explicit exit contract
@@ -6970,9 +7000,19 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
 
 
-    if (!gateArmed && problems.length === 0) {
-      return { systemPrompt };
-    }
+    // LOOP-MODE EVERY-TURN INJECTION (2026-08-30): the situation→tool
+    // decision table and the loop's standing flow must be visible from the
+    // FIRST turn (before any edit arms the gate) and also when the gates are
+    // all green — the two windows where the old gateArmed-only injection
+    // never rendered them. `gateArmed` gates the unmet-problems list below,
+    // not the directives block.
+    const loopDirectives =
+      state.taskMode === "loop"
+        ? "\n\n" + buildAgentDirectives() +
+          "\n改完一个单元就 `judge_submit`，别攒到最后；全绿了还有 copilot 周期和 `declare_done` 收尾。"
+        : "";
+    systemPrompt += loopDirectives;
+
 
     return {
       systemPrompt:
@@ -6983,7 +7023,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         "被打回就按 findings 修，然后再 judge_submit；READY 了就 `declare_done`（门禁自己把工作分支合回基准）。" +
         "攒一批改动再送审：循环按轮计费，不按行。" +
         "git commit/push 与 gh pr create/edit 在门禁通过前是硬拦截。\n" +
-        buildAgentDirectives() + "\n" +
         (sessionRepos.size > 1
           ? "Multi-repo session: this session has edited " + sessionRepos.size + " repositories (" +
             [...sessionRepos].join(", ") +
@@ -7039,7 +7078,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           : "") +
         (problems.length
           ? `Current unmet:\n${problems.map((p) => `- ${p}`).join("\n")}`
-          : "All gates satisfied — you may ship.")
+          : "All gates satisfied — 收尾：跑一次 `declare_done`（门禁合并分支）；若已建 PR，还有 `request_copilot_review` / `check_copilot_review` 周期待收。")
     };
   });
 

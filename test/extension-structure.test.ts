@@ -302,10 +302,12 @@ test("loop goal: injected ONLY in loop mode, before the unarmed early-return", (
   const injectAt = SRC.indexOf("buildLoopGoalDirective(", handlerAt);
   assert.ok(injectAt > 0, "loop-goal directive must be injected in before_agent_start");
   const exploreReturnAt = SRC.indexOf('state.taskMode === "explore"', handlerAt);
-  const unarmedReturnAt = SRC.indexOf("if (!gateArmed && problems.length === 0)", handlerAt);
-  assert.ok(exploreReturnAt > 0 && unarmedReturnAt > 0, "both early-returns must exist");
+  // The unarmed early-return was REMOVED 2026-08-30: the loop directives (goal +
+  // decision table) must reach the FIRST turn before any edit arms the gate.
+  assert.ok(exploreReturnAt > 0, "explore early-return must exist");
+  assert.doesNotMatch(SRC, /if \(!gateArmed && problems\.length === 0\)/,
+    "unarmed early-return removed: loop directives inject on every turn");
   assert.ok(exploreReturnAt < injectAt, "explore must return before the loop-goal injection");
-  assert.ok(injectAt < unarmedReturnAt, "loop goal must be injected before the unarmed early-return");
   // Guarded on loop mode only (explore/normal never see it).
   const guard = SRC.slice(injectAt - 200, injectAt);
   assert.match(guard, /state\.taskMode === "loop"/);
@@ -1039,12 +1041,45 @@ test("the downgrade lock is cleared ONLY by user actions (/gate-mode, gate-reset
     "no command other than /gate-mode may reach the unlock seam");
 });
 
+
+test("loop directives: decision table injects on every turn, incl. unarmed first turn", () => {
+  // The situation→tool table must be visible BEFORE the first edit arms the
+  // gate — that is when the loop's standing flow is first established. It may
+  // no longer sit inside the gateArmed-only return branch.
+  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  assert.ok(handlerAt > 0);
+  const injectAt = SRC.indexOf('state.taskMode === "loop"', handlerAt);
+  assert.ok(injectAt > 0, "loop branch must inject directives");
+  // buildAgentDirectives is called unconditionally for loop, outside any
+  // gateArmed guard.
+  const directivesAt = SRC.indexOf("buildAgentDirectives()", handlerAt);
+  assert.ok(directivesAt > 0, "decision table must be injected in before_agent_start");
+  // The full line: `const loopDirectives = state.taskMode === "loop" ? ...`
+  const line = SRC.slice(directivesAt - 120, directivesAt + 30);
+  assert.match(line, /state\.taskMode === "loop"/, "decision table guarded on loop mode only");
+  // A first turn with NO edits and NO problems must still reach the injection:
+  // no unarmed early-return may come before it.
+  const unarmedEarly = SRC.indexOf("if (!gateArmed && problems.length === 0)", handlerAt);
+  assert.equal(unarmedEarly, -1, "unarmed early-return removed — directives reach every loop turn");
+});
+
+test("loop directives: all-gates-green block names the completion steps", () => {
+  // When problems.length === 0 the injected text must point at the remaining
+  // completion work (declare_done + the Copilot cycle) instead of a bare
+  // "you may ship".
+  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  const greenAt = SRC.indexOf("All gates satisfied", handlerAt);
+  assert.ok(greenAt > 0, "all-green branch must exist");
+  const greenLine = SRC.slice(greenAt, greenAt + 220);
+  assert.match(greenLine, /declare_done/, "green branch names declare_done as the next step");
+  assert.match(greenLine, /request_copilot_review/, "green branch names the Copilot cycle");
+});
 test("explore workflow: advisory completion, no edit/bash blocking, ship gate intact", () => {
   // declare_done is self-accepted in explore.
   assert.match(SRC, /explore task completed by AI judgment/);
   // The system prompt guides toward read-only work instead of hard-blocking.
-  assert.match(SRC, /## Explore workflow/);
-  assert.match(SRC, /PREFER read-only work/);
+  assert.match(SRC, /## Explore 工作流/);
+  assert.match(SRC, /优先只读工作/);
   // The old hard blocks must be gone: no mode-based edit/bash/run_precommit
   // refusal may remain anywhere in the extension.
   assert.doesNotMatch(SRC, /current task is in read-only workflow/);
@@ -3440,6 +3475,46 @@ test("a dirty worktree the session did not create blocks edits until it is settl
     "the starting branch opens the audit trail");
 });
 
+
+test("setup_workspace honors params.branch on a protected branch (2026-08-30)", () => {
+  // On main/master the base is never the branch itself; the auto dev/<date>
+  // name used to IGNORE the agent's branch proposal and collided with a
+  // leftover branch. The proposal must be honored, and an existing base must
+  // be reused (checkout) instead of failing the create (checkout -b).
+  const body = windowOf('name: "setup_workspace"', "registerUserInteractionTools(pi, {", "setup_workspace");
+  const protectedAt = body.indexOf("isProtectedBranch(here)");
+  assert.ok(protectedAt > 0, "protected-branch guard must exist");
+  const branchBlock = body.slice(protectedAt, protectedAt + 2600);
+  // The proposed base honors the agent's branch proposal.
+  assert.match(branchBlock, /params\.branch \? deriveWorkBranchName\(String\(params\.branch\)/,
+    "params.branch must drive the proposed base on a protected branch");
+  // An existing base is reused, not re-created.
+  assert.match(branchBlock, /execFileSync\("git", \["rev-parse", "--verify", "--quiet", proposed\]/,
+    "existing-base probe must exist");
+  assert.match(branchBlock, /exists = status !== undefined && status === 0;/,
+    "missing ref (non-zero) is treated as nonexistent, not as an error");
+  assert.match(branchBlock, /\["checkout", proposed\]/,
+    "an existing base is checked out, not re-created");
+  assert.match(branchBlock, /\["checkout", "-b", proposed\]/,
+    "a new base is still created when it does not exist");
+});
+
+test("loop mode decision reminds to setup_workspace before work (2026-08-30)", () => {
+  // The worktree/branch used to be settled only at the first judge_submit
+  // refusal — far too late, after the edits. The loop-mode decision point
+  // must already nudge the agent to call setup_workspace when the worktree
+  // is dirty and no work branch exists.
+  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  const modeAt = SRC.indexOf('name: "set_gate_mode"');
+  assert.ok(modeAt > 0, "set_gate_mode tool must exist");
+  const goalNoteAt = SRC.indexOf("buildLoopGoalDirective(readSessionLoopGoal(primaryRepoRoot), loopGoalConfirmed())", modeAt);
+  assert.ok(goalNoteAt > 0, "loop decision must build the goal note");
+  const setupNudge = SRC.slice(goalNoteAt, goalNoteAt + 700);
+  assert.match(setupNudge, /setup_workspace/,
+    "loop decision names setup_workspace as the next step");
+  assert.match(setupNudge, /!state\.workBranch && dirtyFiles\(primaryRepoRoot\)\.length > 0/,
+    "the nudge fires only when the worktree is dirty and no branch exists");
+});
 test("setup_workspace settles the worktree and the branches, and records both", () => {
   // The user-interaction family moved to lib/, so the window now closes on
   // the wiring call that replaced it — an anchor that cannot rot silently.

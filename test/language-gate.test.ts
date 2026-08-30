@@ -53,8 +53,11 @@ test("language gate is injected in before_agent_start", () => {
 });
 
 /**
- * The "nothing changed this session" early return: any predicate, then
- * `problems.length === 0`, then `return { systemPrompt }`.
+ * The OLD "nothing changed this session" early return was REMOVED 2026-08-30:
+ * the loop directives (goal + decision table) must reach the FIRST turn, so
+ * the handler now always falls through to the full prompt render. The
+ * language directive's unconditional status is preserved by sitting at the
+ * very top of the handler, before every branch.
  */
 const EARLY_RETURN_RE = /if\s*\([^)]*problems\.length\s*===\s*0\s*\)\s*\{\s*return\s*\{\s*systemPrompt\s*\}/;
 
@@ -70,27 +73,28 @@ const EARLY_RETURN_RE = /if\s*\([^)]*problems\.length\s*===\s*0\s*\)\s*\{\s*retu
  */
 const HANDLER_WINDOW = 9000;
 
-test("language gate is UNCONDITIONAL — injected before the no-changes early return", () => {
+test("language gate is UNCONDITIONAL — injected at the top of before_agent_start", () => {
   // Locate the handler body.
   const start = EXT.indexOf('pi.on("before_agent_start"');
   assert.ok(start >= 0, "handler must exist");
   const body = EXT.slice(start, start + HANDLER_WINDOW);
   const injectAt = body.indexOf("LANGUAGE_DIRECTIVE");
-  // Match the no-changes early return by its SHAPE ("no problems → return the
-  // bare systemPrompt") rather than by the exact predicate text, so the
-  // assertion keeps testing the ordering invariant instead of one spelling of
-  // the condition (it previously broke when the predicate was hoisted into a
-  // `gateArmed` local to skip a redundant fingerprint computation).
-  const earlyReturnAt = body.search(EARLY_RETURN_RE);
-  assert.ok(injectAt >= 0 && earlyReturnAt >= 0, "both the injection and the early return must be present");
-  assert.ok(injectAt < earlyReturnAt,
-    "LANGUAGE_DIRECTIVE must be injected BEFORE the early return, so it applies even with no pending changes");
+  // The language directive is the FIRST thing appended to the system prompt,
+  // before the mode branches and before any return.
+  const firstAppend = body.indexOf("let systemPrompt");
+  assert.ok(injectAt >= 0 && firstAppend >= 0, "injection must exist");
+  assert.ok(injectAt > firstAppend, "LANGUAGE_DIRECTIVE must be appended first");
+  // The old no-changes early return is gone — the handler always falls through
+  // to the full render, so the language directive can never be skipped.
+  assert.doesNotMatch(body, EARLY_RETURN_RE,
+    "no-changes early return removed — every turn renders the full prompt");
 });
 
-test("the no-changes early return still returns the language systemPrompt (not undefined)", () => {
+test("the handler always returns a systemPrompt (never undefined)", () => {
   const start = EXT.indexOf('pi.on("before_agent_start"');
   const body = EXT.slice(start, start + HANDLER_WINDOW);
-  // The early-return branch must return the built systemPrompt object. The
-  // explore workflow adds an earlier branch, so keep enough of the handler.
-  assert.match(body, EARLY_RETURN_RE);
+  // The handler ends with a single `return { systemPrompt: ... }` — the
+  // explore/orchestrator branches return early, but the fall-through path
+  // (loop, child, unarmed) must always produce the full prompt object.
+  assert.match(body, /return\s*\{\s*systemPrompt:/);
 });
