@@ -2766,7 +2766,6 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   pi.on("tool_call", (event, ctx) => evaluateToolCall(shipGateHookDeps, event, ctx));
 
-
   // Compute the current binding material for a parsed arbitrable action: hash
   // each --body-file's (path + content) so replacing the file after issue
   // invalidates the token.

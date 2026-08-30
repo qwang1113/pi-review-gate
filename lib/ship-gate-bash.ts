@@ -28,7 +28,12 @@
  */
 
 import { COMMIT_MSG_FORBIDDEN, requiresFullPrecommit, type ShipCommandKind } from "./constants.ts";
-import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "./ship-detect.ts";
+import {
+  detectShipCommands,
+  extractCommitMessages,
+  extractPrTextFields,
+  type ShipDetection,
+} from "./ship-detect.ts";
 import { resolveShipRepos } from "./repo-resolve.ts";
 import {
   containsNonLatinLetter,
@@ -62,8 +67,9 @@ import type { TaskMode } from "./task-mode.ts";
 import type { AppealKind } from "./text-appeal.ts";
 import type { ToolCallBlock } from "./ship-gate-edit-guard.ts";
 
-/** One ship operation the static parser (or the LLM guard) found. */
-interface ShipDetection { kind: string; segment: string }
+// (The ship-operation shape is lib/ship-detect.ts's own `ShipDetection` — the
+// LLM guard below pushes into the SAME array the static parser filled, so a
+// locally widened copy would quietly stop type-checking what goes in.)
 
 /** The record `request_arbitration` contests — a REAL block, never a guess. */
 export interface BlockedShipRecord {
