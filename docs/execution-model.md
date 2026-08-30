@@ -74,8 +74,10 @@
   （`~/.pi/agent/rg-channels/<orch-id>/<child-id>.jsonl`），带完整选项与正文。
   项目经理与坐在 pane 前的人**任意一方先答即生效**，另一边的框自动撤下。
   上一版的全局 attention 队列（`~/.pi/agent/review-gate-attention.json`）已删除
-  —— 它靠一个收件人字段区分传输，等待方会消费到别人的事件。**无 macOS 通知**
-  （用户要求；给人发桌面通知是编排层独有的另一条通道）。
+  —— 它靠记录上的一个收件人字段区分归属，等待方会消费到别人的事件；现在隔离是
+  **物理的**（一个子会话一个文件），记录里根本没有收件人字段可填错。**这条路径
+  不发任何桌面通知**：给人发通知是编排层独有的另一条通道（`orchestrator_notify`，
+  OSC 777/9/99，只有项目经理能发，且带节流）。
 
 - **主会话存活不变量**（round-18，用户硬约束）：门禁未通过前主会话**不得**
   停止自动循环。`agent_settled` 的 `classifyChildren()`（lib/child-watch.ts）
@@ -114,7 +116,7 @@
   或超时 ⇒ 当前进度（stdout 尾部 + findings 流最近几条）。它与上面的流式快
   照互不替代：快照给人看，返回值给 agent 读。
 
-## 编排层：另一种子会话（2026-08-29）
+## 编排层：另一种子会话（2026-08-29 引入 · 2026-08-30 通道重构）
 
 judge 之外还有第二类子会话，两者的形态**恰好相反**，不要混在一起理解：
 
@@ -122,21 +124,30 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 |---|---|---|
 | 形态 | `pi -p` 一次性进程，不占 pane | 交互式 pi，占用户 window 里的一个 pane |
 | 谁开的 | `judge_submit` | `orchestrator_spawn`（唯一入口） |
-| 「有事了」 | 进程退出 | **attention 事件到达** |
+| 「有事了」 | 进程退出 | **`orchestrator_wait` 的回执**（它自己去读每条通道，把结果推给你） |
+| 状态从哪来 | 进程存活 / `exit-code` 文件 | 六态结构化真值：`working` / `waiting-input` / `idle` / `done` 由子会话自报，`dead`（pane 消失）与 `stalled`（心跳超时）由编排侧从外面判 |
 | 正常终态 | 输出 verdict 后退出 | `declare_done` 之后**仍然活着** |
-| 异常终态 | exit-code 文件缺失 | pane 消失 |
+| 异常终态 | exit-code 文件缺失 | pane 消失（`dead`）或心跳停摆（`stalled`），用 `orchestrator_recover` 复活 |
 | 等待 | `judge_wait` | `orchestrator_wait` |
 
 关键推论：**编排子会话干完活不会退出**，所以「等进程结束」在这里会永远挂住。
 两个等待共用 `lib/poll-wait.ts` 这一套骨架（probe / 发快照 / 判据或预算命中
 即返回），只是把判据换掉 —— 这正是上一轮把骨架做成判据可注入的原因。
 
-**回执就是话筒**（2026-08-30 通道重构）：`orchestrator_wait` 的回执直接带着
-问题正文与**全部选项原文** —— 它是子会话自己写进通道的结构化数据，不是从屏幕上
-解析出来的。所以醒来之后的标准动作是 `orchestrator_answer({childId, answer})`，
-没有「先去读一眼」这一步。（上一版这里是「attention 只是门铃，不是话筒」：事件
-只带一句 reason，醒来后必须 `orchestrator_read` 抓屏解析、再 `orchestrator_key`
-模拟方向键作答。那条链路与它依赖的两个模块已整体删除。）
+**回执就是话筒**（2026-08-30 通道重构）：`orchestrator_wait` 是项目经理**唯一的信息
+入口**，它的回执每次都是同样的五块：全部子会话的健康快照、待答请求（问题正文与
+**全部选项原文**）、死亡/僵死的子会话连同幸存资产与可直接执行的恢复动作、它自己的
+上下文用量与接力时机、以及还差什么才能 `declare_done`。这些都是子会话自己写进通道
+的结构化数据，不是从屏幕上解析出来的，所以醒来之后的标准动作直接就是
+`orchestrator_answer({childId, answer})`，没有「先去读一眼」这一步；阻塞与否只是一个
+参数（`timeoutMs: 0` 即快照），两条路径的回执一字不差。
+
+**被替换掉的是什么**：上一版是「attention 只是门铃，不是话筒」—— 全局 attention 队列
+里的事件只带一句 reason，醒来后必须 `orchestrator_read` 抓屏解析、再 `orchestrator_key`
+模拟方向键作答；旁边还并排站着一个 `orchestrator_status`，与 wait 回答同一个问题，
+agent 每轮都要先挑一个。这三个工具连同它们依赖的抓屏与按键模块已整体删除，取而代之
+的是「凡是项目经理需要知道的，都从它必然会调的那次 wait 里推给它」—— 让 agent
+「记得去查」本身就是设计缺陷。监督层的完整描述见 `docs/orchestrator-supervision.md`。
 
 **投递不走键盘**：`orchestrator_spawn` 把任务正文写成仓库外的任务文件、以
 `pi --session-id <id> @<taskfile>` argv 启动子会话（与 `lib/judge-process.ts`
@@ -146,8 +157,6 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 有它自己的上报，instruct 看它的 `instruct-ack` —— 观察不到就回执失败并把任务标回
 `pending`（保留 pane，不误杀）。
 
-
-
 **寻址**：judge 子会话寻址派它的那个 session（`RG_PARENT_SESSION`）是对的
 —— 它活不过这一轮。编排子会话会**活过**开它的会话（接力换人），所以它寻址的
 是稳定的 orchestration id（`RG_ORCHESTRATION_ID`）。`supervisionTargetId()`
@@ -155,15 +164,32 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 静默（独立会话叫不醒任何人）。接力时新会话继承同一个 id，因此**子会话完全
 无感、无需重启**。
 
-**接力的不断档保证**：老会话写交接文档 + plan 落盘 → `orchestrator_relay`
-在自己右边开出新会话（继承 id、交接文档路径、以及**老会话 transcript 路径**
-—— 交接文档是自述，原始记录才是查问题时要的）→ 老会话进入 idle →
-**由新会话**调 `orchestrator_close({predecessorPane})` 关掉老会话。只有接任者
-能关前任（前任自己没有那个环境变量），这天然证明新会话已经起来并接手成功。
+**接力的不断档保证**：老会话写交接文档 + plan 落盘 →
+`orchestrator_handoff({handoffPath})` 把**这份编排**交给一个新会话（它继承同一个
+orchestration id、交接文档路径，以及**老会话 transcript 路径** —— 交接文档是自述，
+原始记录才是查问题时要的）→ 老会话进入 idle → **由新会话**调
+`orchestrator_close({predecessorPane})` 关掉老会话。只有接任者能关前任（前任自己没有
+那个环境变量），这天然证明新会话已经起来并接手成功。接力的**时机**也不靠项目经理
+自觉：wait 回执第四块按上下文用量直接给判断（≥80% 且手上没有待答请求就是好时机，
+≥90% 则是首要动作）。工具名从上一版的 `orchestrator_relay` 改成 `orchestrator_handoff`，
+因为它交出去的是这份编排本身，不是一个 pane。
 
-tmux 命令一律由 `lib/orchestrator-tmux.ts` 构造成 argv 并直接 spawn（无
-shell）；门禁自己的执行路径也过同一份禁止清单，所以「门禁豁免于 bash 拦截」
-不等于「门禁可以做被禁止的事」。
+接手现场的另一半是 `orchestrator_attach({orchestrationId})`：后继者带着同一个 id 启动
+之后，一次拿回 plan 与任务状态、每个子会话的状态与资产、通道里还没人答的请求，以及
+**孤儿任务**（plan 说 running、却没有存活 pane 在做）—— 那是崩溃或重启唯一会留下的
+不一致，也是项目经理唯一会永远等下去的东西，所以由门禁主动报出来而不是等它自己发现。
+子会话对这一切完全无感：通道是文件路径、不属于任何进程，换人只是换了个打开它们的人。
+
+**tmux 只剩显示器的活**：`lib/orchestrator-tmux.ts` 里现在只有三个构造器 ——
+`list-panes`（判 pane 存活，`dead` 的唯一来源）、`split-window`（开 pane）、
+`kill-pane`（关 pane）。`send-keys` 与 `capture-pane` 的构造器已整体删除，理由是它们
+各自代表一类必然出错的做法：键盘投递会被截断、会漏 Enter、消息里的换行会被开着的
+对话框当成「提交当前高亮项」（等于替子会话答了一个它没打算选的选项）；而屏幕是给人
+看的渲染结果、不是 API —— 它会折行、会滚动、会把状态栏渲染得像菜单，历史输出还一直
+留在那里。`test/orchestrator-tmux.test.ts` 直接对源码断言这两个词不再出现 —— 一个
+「留着没人用」的构造器正是被删掉的路径回来的方式。这些命令一律构造成 argv 直接
+spawn（无 shell）；门禁自己的执行路径也过同一份禁止清单，所以「门禁豁免于 bash
+拦截」不等于「门禁可以做被禁止的事」。
 
 ## 审核单元
 
