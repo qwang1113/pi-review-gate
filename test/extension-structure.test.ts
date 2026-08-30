@@ -3491,8 +3491,8 @@ test("setup_workspace honors params.branch on a protected branch (2026-08-30)", 
   // An existing base is reused, not re-created.
   assert.match(branchBlock, /execFileSync\("git", \["rev-parse", "--verify", "--quiet", proposed\]/,
     "existing-base probe must exist");
-  assert.match(branchBlock, /exists = status !== undefined && status === 0;/,
-    "missing ref (non-zero) is treated as nonexistent, not as an error");
+  assert.match(branchBlock, /catch \{[\s\S]{0,40}?exists = false;/,
+    "a missing ref (catch) is treated as nonexistent, not as an error");
   assert.match(branchBlock, /\["checkout", proposed\]/,
     "an existing base is checked out, not re-created");
   assert.match(branchBlock, /\["checkout", "-b", proposed\]/,

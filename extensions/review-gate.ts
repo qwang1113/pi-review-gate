@@ -5716,8 +5716,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         const proposed = params.branch ? deriveWorkBranchName(String(params.branch), `dev/${new Date().toISOString().slice(0, 10)}`)
           : `dev/${new Date().toISOString().slice(0, 10)}`;
         const picked = await askWorkspace(
-          `当前在受保护分支 ${here}，本会话不能直接在它上面开发。基准分支用哪个？`,
-          [`从 ${here} 拉一条基准分支 ${proposed}`, `就用 ${here} 作为基准（工作分支仍会另建）`],
+          `当前在受保护分支 ${here}，本会话不能直接在它上面开发。基准分支用哪个？（${proposed} 已存在则直接复用）`,
+          [`从 ${here} 拉一条基准分支 ${proposed}（已存在则复用）`, `就用 ${here} 作为基准（工作分支仍会另建）`],
         );
 
         if (!picked) {
@@ -5732,17 +5732,17 @@ export default function reviewGate(pi: ExtensionAPI) {
             // Reuse an existing base branch instead of colliding with it:
             // a leftover dev/<date> from an earlier session would otherwise
             // fail the create and block the whole workspace setup.
-            // Probe by exit code, not by throwing: --verify --quiet exits non-zero
-            // when the ref is missing. execFileSync throws on non-zero, so the
-            // catch below would report "创建基准分支失败" for a branch that
-            // simply does not exist yet — distinguish the two by err.status.
+            // Probe by SUCCESS, not by exit status: --verify --quiet exits
+            // non-zero when the ref is missing and execFileSync throws on
+            // non-zero. A catch therefore means "missing" (a real git
+            // failure then falls through to the checkout below, which will
+            // surface it in the outer catch).
             let exists = false;
             try {
               execFileSync("git", ["rev-parse", "--verify", "--quiet", proposed], { cwd: root, encoding: "utf8" });
               exists = true;
-            } catch (probeErr) {
-              const status = (probeErr as { status?: number }).status;
-              exists = status !== undefined && status === 0;
+            } catch {
+              exists = false;
             }
             if (exists) {
               execFileSync("git", ["checkout", proposed], { cwd: root, encoding: "utf8" });
@@ -6961,10 +6961,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     // Loop goal (Step 0): loop mode works to an explicit exit contract
     // (`.pi/loop-goal.md` — see lib/loop-goal.ts for the full rationale).
-    // Injected AFTER the explore early-return and BEFORE the unarmed one: the
-    // goal must be set while the worktree is still clean, i.e. before the
-    // first edit arms the gate. An UNCONFIRMED goal has its body withheld
-    // (L8) and blocks ships at L1; the hooks stay out of it.
+    // Injected AFTER the explore early-return. The unarmed early-return is
+    // gone (2026-08-30): the goal and the decision table must reach the first
+    // turn, before any edit arms the gate. An UNCONFIRMED goal has its body
+    // withheld (L8) and blocks ships at L1; the hooks stay out of it.
     if (state.taskMode === "loop") {
       const goal = readSessionLoopGoal(primaryRepoRoot);
 
@@ -7078,7 +7078,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           : "") +
         (problems.length
           ? `Current unmet:\n${problems.map((p) => `- ${p}`).join("\n")}`
-          : "All gates satisfied — 收尾：跑一次 `declare_done`（门禁合并分支）；若已建 PR，还有 `request_copilot_review` / `check_copilot_review` 周期待收。")
+          : state.taskMode === "loop"
+            ? "All gates satisfied — 收尾：跑一次 `declare_done`（门禁合并分支）；若已建 PR，还有 `request_copilot_review` / `check_copilot_review` 周期待收。"
+            : "All gates satisfied — you may ship.")
     };
   });
 
