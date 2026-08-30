@@ -1,0 +1,281 @@
+/**
+ * tmux COMMAND CONSTRUCTION — the orchestrator never writes a tmux command,
+ * so this module writes all of them.
+ *
+ * WHY (user requirement, 2026-08-29: "if a tool can be provided, do not make
+ * the session assemble it"). Every tmux failure measured in the hand-run
+ * orchestration came from an improvised command, and the cost of an improvised
+ * tmux command is not a wrong answer — it is the USER'S WORKING ENVIRONMENT.
+ * A stray `kill-session` ends the window they are watching from. So the layout
+ * rules live here, once, as argv arrays, and the agent only expresses intent.
+ *
+ * ARGV, NOT A SHELL STRING. Every builder returns an argument ARRAY for
+ * execFile-style spawning: no shell parses it, so a pane id or a message body
+ * can never become another command. On top of that {@link assertSafeTmuxArgv}
+ * refuses the destructive subcommands outright — the gate's own execution path
+ * is held to the same list the bash guard enforces against the agent
+ * (lib/orchestrator-guard.ts), so "the gate is exempt from the guard" can
+ * never mean "the gate may do the forbidden thing".
+ *
+ * THE LAYOUT (measured against the user's own window):
+ *
+ *     window
+ *     ├─ left column    the orchestrator, alone
+ *     └─ right column   child sessions, stacked vertically
+ *
+ *  - first child, no right column yet → `split-window -h` off the ORCHESTRATOR
+ *    pane, which creates the right column;
+ *  - every later child → `split-window -v` off the LAST child pane, which
+ *    stacks it under the others instead of splitting the orchestrator again;
+ *  - a handoff (giving the orchestration to a successor) → `split-window -h`
+ *    off the orchestrator's own pane, so the successor lands beside it and
+ *    inherits the left column when the old pane is closed.
+ *
+ * Pure module: builds and validates argv. It never spawns anything.
+ */
+
+/** A tmux pane id as tmux itself prints it: `%` followed by digits. */
+const PANE_ID = /^%\d{1,10}$/;
+
+/** tmux subcommands the gate itself must never run (see the header). */
+export const FORBIDDEN_TMUX_SUBCOMMANDS: readonly string[] = Object.freeze([
+  "kill-session",
+  "kill-server",
+  "kill-window",
+  "new-session",
+  "new",
+  "new-window",
+  "neww",
+]);
+
+export class UnsafeTmuxCommand extends Error {}
+
+/** True for a syntactically valid pane id. Fail-closed: anything else is refused. */
+export function isPaneId(value: unknown): value is string {
+  return typeof value === "string" && PANE_ID.test(value);
+}
+
+function requirePane(value: string, what: string): string {
+  if (!isPaneId(value)) {
+    throw new UnsafeTmuxCommand(`${what} 不是合法的 tmux pane id（形如 %12）：${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+/**
+ * Last line of defense before the gate spawns tmux: the argv must not name a
+ * destructive subcommand. Called by every builder AND by the executor, so a
+ * future builder cannot quietly bypass it.
+ */
+export function assertSafeTmuxArgv(argv: readonly string[]): readonly string[] {
+  const sub = argv[0];
+  if (typeof sub !== "string" || sub.length === 0) {
+    throw new UnsafeTmuxCommand("tmux 命令缺少子命令");
+  }
+  if (FORBIDDEN_TMUX_SUBCOMMANDS.includes(sub)) {
+    throw new UnsafeTmuxCommand(
+      `tmux ${sub} 属于禁止清单（会影响用户的 session/window），门禁自己也不执行`,
+    );
+  }
+  // A global option write would change the user's own configuration.
+  if ((sub === "set" || sub === "set-option" || sub === "setw" || sub === "set-window-option") && argv.includes("-g")) {
+    throw new UnsafeTmuxCommand(`tmux ${sub} -g 会改用户全局配置，禁止`);
+  }
+  return argv;
+}
+
+export interface SpawnPaneOptions {
+  /** The orchestrator's OWN pane — the left column. */
+  orchestratorPane: string;
+  /** The last child pane, when a right column already exists. */
+  lastChildPane?: string;
+  /** Working directory for the new pane (a repo root or a worktree). */
+  cwd: string;
+  /** Environment injected into the pane (orchestration id, gate mode…). */
+  env?: Readonly<Record<string, string>>;
+  /** The command the pane runs. Defaults to an interactive `pi`. */
+  command?: readonly string[];
+}
+
+/** `-e K=V` pairs, in a stable order so the argv is testable. */
+function envArgs(env: Readonly<Record<string, string>> | undefined): string[] {
+  if (!env) return [];
+  return Object.keys(env)
+    .sort()
+    .flatMap((key) => ["-e", `${key}=${env[key]}`]);
+}
+
+/**
+ * Open a child session pane, following the layout rules in the header.
+ *
+ * `-P -F '#{pane_id}'` makes tmux PRINT the new pane id, which is how the
+ * registry learns what it just created — guessing it (or listing panes and
+ * diffing) is exactly the improvisation this module removes.
+ */
+export function buildSpawnPaneArgv(opts: SpawnPaneOptions): readonly string[] {
+  const self = requirePane(opts.orchestratorPane, "orchestratorPane");
+  const command = opts.command ?? ["pi"];
+  // First child ⇒ create the right column off the orchestrator (horizontal).
+  // Later children ⇒ stack under the last child (vertical).
+  const [direction, target] = opts.lastChildPane
+    ? ["-v", requirePane(opts.lastChildPane, "lastChildPane")]
+    : ["-h", self];
+  return assertSafeTmuxArgv([
+    "split-window",
+    direction,
+    "-t",
+    target,
+    "-c",
+    opts.cwd,
+    ...envArgs(opts.env),
+    "-P",
+    "-F",
+    "#{pane_id}",
+    ...command,
+  ]);
+}
+
+/**
+ * Open the SUCCESSOR orchestrator beside the current one (handoff).
+ * Always horizontal off the orchestrator's own pane: when the old pane is
+ * closed afterwards, tmux expands the successor into the left column, which
+ * is what makes the handover invisible in the user's layout.
+ */
+export function buildHandoffPaneArgv(opts: {
+  orchestratorPane: string;
+  cwd: string;
+  env?: Readonly<Record<string, string>>;
+  command?: readonly string[];
+}): readonly string[] {
+  const self = requirePane(opts.orchestratorPane, "orchestratorPane");
+  return assertSafeTmuxArgv([
+    "split-window",
+    "-h",
+    "-t",
+    self,
+    "-c",
+    opts.cwd,
+    ...envArgs(opts.env),
+    "-P",
+    "-F",
+    "#{pane_id}",
+    ...(opts.command ?? ["pi"]),
+  ]);
+}
+
+/**
+ * THERE IS NO `send-keys` BUILDER, AND THAT IS THE POINT (2026-08-30).
+ *
+ * Delivering text and pressing keys used to live here. Both are gone, with
+ * every caller, because typing at a TUI is not an API: the measured results
+ * were a truncated task document (F7), a message that was never submitted
+ * (F8), text landing in the composer or the steering queue depending on
+ * timing (R-20), and a confirmation dialog that ignored `Enter` and `C-m` and
+ * accepted only `KPEnter` (R-8).
+ *
+ * Both jobs now go through the channel instead:
+ *
+ *  - a MESSAGE is written to the child's channel and the child's own gate
+ *    injects it with `pi.sendUserMessage` (lib/orchestrator-child-channel.ts);
+ *  - an ANSWER to a dialog is written to the same channel and resolves the
+ *    `ui.select` the child's gate is already awaiting — no keystroke exists
+ *    anywhere in that path.
+ *
+ * What is left in this module is what tmux is genuinely for: creating a pane,
+ * closing a pane, and enumerating which panes exist.
+ */
+
+
+/** Close ONE pane. Panes only — never a window, never a session. */
+export function buildKillPaneArgv(pane: string): readonly string[] {
+  return assertSafeTmuxArgv(["kill-pane", "-t", requirePane(pane, "pane")]);
+}
+
+/**
+ * ── PANE DECORATION (2026-08-30) ──
+ *
+ * Four builders, all cosmetic, and they are the ONLY writes this module makes
+ * that are not about creating, closing or listing a pane. They exist because
+ * the user asked for children to be tellable apart on screen, and because the
+ * gate — not the orchestrator — has to be the one that runs them (philosophy
+ * one: the project manager never assembles a tmux command).
+ *
+ * WHY THIS IS NOT THE FORBIDDEN KIND OF CONFIG WRITE. `assertSafeTmuxArgv`
+ * refuses any option write carrying `-g`, because that is the user's GLOBAL
+ * configuration and no gate has business touching it. These are window- and
+ * pane-scoped: `select-pane -P/-T` affects exactly one pane the registry
+ * created, and `setw -t <pane>` affects the window that pane lives in — the
+ * one the orchestration was invited into. Both are undone on close.
+ *
+ * The colour and title STRINGS are decided in lib/orchestrator-pane-decor.ts;
+ * everything here does is put them in an argv array where no shell can see
+ * them. A title is arbitrary text (a task title), so it travels as its own
+ * argv element and is never concatenated into a command line.
+ */
+
+/** Set one pane's border colour (`-P` is the pane style). */
+export function buildPaneStyleArgv(pane: string, style: string): readonly string[] {
+  return assertSafeTmuxArgv(["select-pane", "-t", requirePane(pane, "pane"), "-P", style]);
+}
+
+/** Set one pane's title — what `pane-border-format` then renders. */
+export function buildPaneTitleArgv(pane: string, title: string): readonly string[] {
+  return assertSafeTmuxArgv(["select-pane", "-t", requirePane(pane, "pane"), "-T", title]);
+}
+
+/**
+ * Turn the label bar on for the WINDOW a pane belongs to.
+ *
+ * Two commands rather than one because tmux takes one option per call; the
+ * caller runs them in order and treats any failure as cosmetic.
+ */
+export function buildShowPaneLabelsArgv(
+  pane: string,
+  status: string,
+  format: string,
+): readonly (readonly string[])[] {
+
+  const target = requirePane(pane, "pane");
+  return [
+    assertSafeTmuxArgv(["setw", "-t", target, "pane-border-status", status]),
+    assertSafeTmuxArgv(["setw", "-t", target, "pane-border-format", format]),
+  ];
+}
+
+/**
+ * Undo it — `-u` restores each option to what the user's own config says,
+ * which is not the same as setting it to a default we invented.
+ */
+export function buildHidePaneLabelsArgv(pane: string): readonly (readonly string[])[] {
+
+  const target = requirePane(pane, "pane");
+  return [
+    assertSafeTmuxArgv(["setw", "-t", target, "-u", "pane-border-status"]),
+    assertSafeTmuxArgv(["setw", "-t", target, "-u", "pane-border-format"]),
+  ];
+}
+
+
+/** List the pane ids of the window a pane belongs to (liveness probing). */
+export function buildListPanesArgv(pane: string): readonly string[] {
+  return assertSafeTmuxArgv([
+    "list-panes",
+    "-t",
+    requirePane(pane, "pane"),
+    "-F",
+    "#{pane_id}",
+  ]);
+}
+
+/** Read back what tmux printed for `-P -F '#{pane_id}'` (or list-panes). */
+export function parsePaneIds(stdout: string): string[] {
+  return String(stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => isPaneId(line));
+}
+
+/** The single pane id a `-P` spawn printed, or undefined when tmux said nothing. */
+export function parseSpawnedPaneId(stdout: string): string | undefined {
+  return parsePaneIds(stdout)[0];
+}

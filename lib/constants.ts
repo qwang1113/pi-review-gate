@@ -198,5 +198,18 @@ export const STRATEGIC_RESET_CHECKLIST =
   "2) Challenge the current assumption — what if the opposite is true?\n" +
   "3) Search the codebase for similar patterns that are already solved.\n" +
   "4) Consider a fundamentally different approach, not an incremental fix.\n" +
-  "5) Consult the adviser subagent with the full problem statement.\n" +
+  "5) Consult the adviser (a tmux judge child) with the full problem statement.\n" +
   "If still blocked at the cap, escalate to the user.";
+
+/**
+ * Separates a prepare tool's human-facing header from the task text a judge
+ * actually receives. One marker for all three roles, so the submission chain
+ * has one way to find the payload.
+ *
+ * It lives HERE rather than in one of the prepare modules because three
+ * places now have to agree on it: `lib/review-prepare-tools.ts` and
+ * `lib/advisory-prepare-tools.ts` WRITE it, and the extension's submission
+ * chain (`extractTaskText`) READS it back out. A second literal is exactly
+ * the code-extension drift this file exists to prevent.
+ */
+export const TASK_TEXT_MARKER = "--- task text ---";

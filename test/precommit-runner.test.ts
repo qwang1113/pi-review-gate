@@ -63,6 +63,79 @@ test("failing test script → ❌ FAIL, exit 1", () => {
   assert.match(out, /## Overall: ❌ FAIL/);
 });
 
+// ---------------------------------------------------------------------------
+// fail-fast: the first failure ends the run (user ask, 2026-08-29)
+// ---------------------------------------------------------------------------
+
+test("a failing check aborts the checks still running, instead of waiting them out", () => {
+  // typecheck fails immediately; test would take 25s. Fail-fast must return in
+  // a fraction of that — and the killed step is reported as aborted, not failed.
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    scripts: { typecheck: "exit 1", test: "sleep 25; exit 0" },
+  });
+  const started = Date.now();
+  const { code, out } = run(dir, ["--mode", "full"]);
+  const elapsedMs = Date.now() - started;
+  assert.equal(code, 1);
+  assert.match(out, /## Overall: ❌ FAIL/);
+  assert.match(out, /aborted — typecheck failed \(fail-fast\)/);
+  assert.match(out, /⏹ fail-fast: typecheck failed/);
+  // The whole point: the run does NOT sit through the other check.
+  assert.ok(elapsedMs < 15000, `fail-fast took ${elapsedMs}ms — it waited for the aborted step`);
+});
+
+test("an aborted step is skipped, never counted as a failed check", () => {
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    scripts: { typecheck: "exit 1", test: "sleep 25; exit 0" },
+  });
+  const { out } = run(dir, ["--mode", "full"]);
+  // One real failure, one abort: reporting the abort as a failure would invent
+  // a second broken check the repo does not have.
+  assert.match(out, /- ❌ typecheck/);
+  assert.match(out, /- ⏭️ test \(aborted/);
+  assert.doesNotMatch(out, /- ❌ test/);
+});
+
+test("a clean run says nothing about fail-fast", () => {
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { typecheck: "exit 0", test: "exit 0" } });
+  const { code, out } = run(dir, ["--mode", "full"]);
+  assert.equal(code, 0);
+  assert.doesNotMatch(out, /fail-fast/);
+});
+
+test("a failing lint:fix aborts the whole run — stage 2 never starts", () => {
+  // lint:fix runs ALONE, before everything else. Its failure already decides
+  // the verdict, so spending minutes on stage 2 only confirms it.
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    scripts: { "lint:fix": "exit 1", typecheck: "sleep 20; exit 0", test: "sleep 20; exit 0" },
+  });
+  const started = Date.now();
+  const { code, out } = run(dir, ["--mode", "full"]);
+  const elapsedMs = Date.now() - started;
+  assert.equal(code, 1);
+  assert.match(out, /- ❌ lint/);
+  assert.match(out, /- ⏭️ typecheck \(aborted/);
+  assert.match(out, /- ⏭️ test \(aborted/);
+  assert.ok(elapsedMs < 15000, `stage 2 still ran (${elapsedMs}ms)`);
+});
+
+test("a lone failure says nothing about aborting checks that never existed", () => {
+  // The banner must describe a real event: with no peer to stop, "remaining
+  // checks were aborted" would be a claim about a run that did not happen.
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 1" } });
+  const { out } = run(dir, ["--mode", "full"]);
+  assert.match(out, /## Overall: ❌ FAIL/);
+  assert.doesNotMatch(out, /fail-fast/);
+});
+
+
+
 test("lint pass + test fail → FAIL (any failure wins)", () => {
   const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "exit 0", test: "exit 1" } });
   // `--mode full`: with another check present, the fast lane would narrow the
@@ -233,17 +306,17 @@ test("steps appear in DECLARATION order in the log — parallel execution, merge
 // ---------------------------------------------------------------------------
 
 test("independent checks run in PARALLEL — wall time is less than the serial sum", () => {
-  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "sleep 1", test: "sleep 1" } });
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "sleep 0.3", test: "sleep 0.3" } });
   const started = Date.now();
   const { code } = run(dir, ["--mode", "full"]);
   const elapsed = Date.now() - started;
   assert.equal(code, 0);
-  // Serial would take ~2s; parallel ~1s. Generous bound against loaded CI.
-  assert.ok(elapsed < 1800, `expected parallel overlap, took ${elapsed}ms`);
+  // Serial would take ~0.6s; parallel ~0.3s. Generous bound against loaded CI.
+  assert.ok(elapsed < 800, `expected parallel overlap, took ${elapsed}ms`);
 });
 
 test("a SLOW earlier-declared step does not reorder the log or the receipt steps", () => {
-  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "echo LINT_BODY; sleep 1.5", test: "echo TEST_BODY" } });
+  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "echo LINT_BODY; sleep 0.4", test: "echo TEST_BODY" } });
   const { out, receipt } = runReceipt(dir, ["--mode", "full", "--json"]);
   // test finishes long before lint, yet the log and the steps array must
   // present lint first — completion order must never leak into either.
@@ -276,10 +349,15 @@ test("a failure in any parallel check still fails the run (any-failure-wins)", (
   const { code, out, receipt } = runReceipt(dir, ["--mode", "full"]);
   assert.equal(code, 1);
   assert.equal(receipt!.verdict, "FAIL");
-  assert.equal(receipt!.checksRun, 2);
   assert.equal(receipt!.checksFailed, 1);
+  // checksRun is NOT pinned to 2 since fail-fast landed: the failing check may
+  // abort its parallel peer before that peer reports, and an aborted step
+  // counts as skipped. What must hold is that the failure decides the run.
+  const checksRun = Number(receipt!.checksRun);
+  assert.ok(checksRun >= 1, `at least the failing check ran (got ${checksRun})`);
   assert.match(out, /## Overall: ❌ FAIL/);
 });
+
 
 test("skipped steps are named in the log too (a skip is not a silent pass)", () => {
   const dir = makeDir({ name: "t", version: "1.0.0", scripts: { test: "exit 0" } });
@@ -828,7 +906,7 @@ test("a running step's output is written to the log before the step finishes", a
     // Markers live in FILES, never in the command text: `npm run` echoes the
     // script body, which would make each marker appear twice for reasons that
     // have nothing to do with streaming.
-    scripts: { test: "cat early.txt; sleep 3; cat late.txt" },
+    scripts: { test: "cat early.txt; sleep 1; cat late.txt" },
   });
   writeFileSync(join(dir, "early.txt"), "EARLY-MARKER\n");
   writeFileSync(join(dir, "late.txt"), "LATE-MARKER\n");
@@ -843,8 +921,8 @@ test("a running step's output is written to the log before the step finishes", a
   try {
     // Poll for the early marker while the child is provably still running.
     let sawEarlyWhileRunning = false;
-    for (let i = 0; i < 40 && child.exitCode === null; i++) {
-      await new Promise((r) => setTimeout(r, 100));
+    for (let i = 0; i < 30 && child.exitCode === null; i++) {
+      await new Promise((r) => setTimeout(r, 50));
       if (readFileSync(log, "utf8").includes("EARLY-MARKER")) {
         sawEarlyWhileRunning = child.exitCode === null;
         break;
@@ -865,3 +943,42 @@ test("a running step's output is written to the log before the step finishes", a
     if (child.exitCode === null) child.kill();
   }
 });
+
+// ---------------------------------------------------------------------------
+// R-15 — the session's identity must not travel into a step
+// ---------------------------------------------------------------------------
+
+test("R-15: a step does NOT inherit the gate's session variables", () => {
+  // The measured failure: an orchestration child runs with
+  // `RG_STATE_VARIANT=<child id>` and `RG_GATE_MODE=loop`; the runner spawned
+  // the suite as a plain child, the suite inherited both, and the gate's own
+  // fixtures then looked for a sidecar that did not exist and allowed
+  // everything. 55 failures on a tree that was 1918/1918 green in a plain
+  // shell — and, because a failing precommit means no checkpoint and no
+  // review, a lane that could not finish at all.
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    // The step FAILS on purpose: a failing step has its full output streamed,
+    // which is how the test can read what the environment looked like inside.
+    scripts: {
+      test: "sh -c 'echo VARIANT=[$RG_STATE_VARIANT] MODE=[$RG_GATE_MODE] HOME_SET=[${HOME:+yes}]; exit 1'",
+    },
+  });
+  const receipt = join(dir, "receipt.json");
+  const res = spawnSync("node", [RUNNER, "--cwd", dir, "--receipt", receipt, "--nonce", "N1"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      RG_STATE_VARIANT: "t1-child",
+      RG_GATE_MODE: "loop",
+      REVIEW_GATE_BYPASS: "1",
+    },
+  });
+
+  const out = res.stdout + res.stderr;
+  assert.match(out, /VARIANT=\[\]/, "the child's sidecar variant must not reach the suite");
+  assert.match(out, /MODE=\[\]/, "nor the gate mode it was started in");
+  assert.match(out, /HOME_SET=\[yes\]/, "while everything the step legitimately needs is still there");
+});
+

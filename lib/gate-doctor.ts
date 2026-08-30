@@ -244,17 +244,17 @@ export function checkGitHooks(probe: HookProbe, names: readonly string[]): Docto
   return { id: "git-hooks", title: "L3 git hooks installed in this repo", status: "PASS", evidence };
 }
 
-/** Self-test the L5 gate function: a Latin body must pass, a non-Latin body must fail. */
-export function checkLangGate(isNonEnglishText: (text: string) => boolean): DoctorCheck {
+/** Self-test the L5 gate function: English text passes, non-Latin text fails. */
+export function checkLangGate(nonEnglish: (text: string) => boolean): DoctorCheck {
   try {
-    const latin = !isNonEnglishText("This commit message is fine.");
-    const nonLatin = isNonEnglishText("这是一条中文提交信息");
+    const latin = !nonEnglish("This commit message is fine.");
+    const nonLatin = nonEnglish("这是一条中文提交信息");
     if (latin && nonLatin) {
       return {
         id: "l5-language",
         title: "L5 commit/PR English gate functional",
         status: "PASS",
-        evidence: ["self-test: Latin body passes, non-Latin-majority body fails"],
+        evidence: ["self-test: English text passes, text with non-Latin letters fails"],
       };
     }
     return {
@@ -337,7 +337,8 @@ export interface DoctorDeps {
   registryFacts?: RegistryFacts;
   hooksDir?: string;
   workflowCommandCount: number;
-  isNonEnglishText: (text: string) => boolean;
+  /** The L5 decision (lib/lang-detect.ts judgeEnglish), injected for the self-test. */
+  nonEnglish: (text: string) => boolean;
   probeGh: () => Promise<ProbeResult>;
   readFile: (path: string) => string | undefined;
   exists: (path: string) => boolean;
@@ -615,7 +616,7 @@ export async function runGateDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
     checkGlobalConfig(deps.readFile(deps.globalConfigPath)),
     checkPrecommitRunner(runnerCandidates(deps.packageRoot), deps.exists),
     checkGitHooks(hookProbeFor(deps), GATE_HOOK_NAMES),
-    checkLangGate(deps.isNonEnglishText),
+    checkLangGate(deps.nonEnglish),
     checkCopilotGh(gh),
     checkCommandRegistry(deps.workflowCommandCount),
   ];

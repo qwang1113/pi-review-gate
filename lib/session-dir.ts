@@ -65,3 +65,21 @@ export function sessionDirForCwd(
   const enc = "--" + resolved.replace(/^[/\\\\]/, "").replace(/[/\\\\:]/g, "-") + "--";
   return join(agentDir, "sessions", enc);
 }
+
+/**
+ * The session dir pi is ACTUALLY using, read off the live session manager.
+ *
+ * Round-10 P1: the manager knows the final `--session-dir` / env / settings
+ * selection, so it is the authoritative answer; {@link sessionDirForCwd} is
+ * the fallback for contexts without one.
+ *
+ * It takes the extension's opaque `ctx` because that is the only place the
+ * manager is reachable from — and it lives HERE, next to the encoding it
+ * falls back to, rather than in the prepare-tool modules: all three prepare
+ * tools hand this pointer to a judge, so a second copy of the lookup is a
+ * second chance for the two to disagree.
+ */
+export function sessionDirFromContext(ctx: unknown, cwd: string): string {
+  const sm = (ctx as { sessionManager?: { getSessionDir?: () => string } })?.sessionManager;
+  return sessionDirForCwd(cwd, undefined, sm?.getSessionDir?.());
+}

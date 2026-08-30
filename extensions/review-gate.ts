@@ -46,7 +46,7 @@
 
 import {
   existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
-  mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync,
+  mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync, writeSync,
 } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
@@ -69,44 +69,204 @@ import {
   OSCILLATION_LIMIT,
   STRATEGIC_RESET_OFFSET,
   STRATEGIC_RESET_CHECKLIST,
-  requiresFullPrecommit,
-  type ShipCommandKind,
+  TASK_TEXT_MARKER,
 } from "../lib/constants.ts";
-import { defaultProjectConfig, globalConfigPath, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
+import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-directives.ts";
+import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
+import { detectShipCommands } from "../lib/ship-detect.ts";
 import { buildAgentsWidget, buildModelConfigWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
-  resolveShipRepos,
   resolveCommandRepos,
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
-import { firstNonEnglish, containsNonLatinLetter, isNonEnglishText } from "../lib/lang-detect.ts";
 import {
-  waitForSignalAsync,
-  spawnJudgePane,
-  paneAlive,
-  killPane,
-  paneCurrentPath,
-  capturePane,
-  sendMessage,
-  anyPaneAlive,
-  tmuxAvailable,
-  ownPaneId,
-  paneWindowLabel,
-} from "../lib/tmux-session.ts";
-import { createWatchRegistry } from "../lib/judge-watch.ts";
-import { attentionChannelFor, attentionText, consumeAttention, parentSessionId, publishAttention, sideEffectsEnabled } from "../lib/attention.ts";
+  nonEnglishCommitMessage,
+  l5BlockReason,
+} from "../lib/lang-detect.ts";
+import {
+  APPEAL_HINT,
+  appealDigest,
+  appealPassAuthorizes,
+  consumeAppealPass,
+  emptyAppealRecord,
+  admitAppeal,
+  recordAppealDecision,
+  buildTextAppealPrompt,
+  TEXT_APPEAL_SYSTEM_PROMPT,
+  type AppealKind,
+  type AppealableBlock,
+} from "../lib/text-appeal.ts";
+import {
+  spawnJudgeProcess,
+  judgeSessionIdFor,
+  shortRepoHash,
+  judgeProcessAlive,
+  judgeScratchDir,
+  reviewScratchWorktrees,
+  type JudgeProcessResult,
+} from "../lib/judge-process.ts";
+import { createProcessWatchRegistry, rememberChildProcess, forgetChildProcess, waitForProcessExit } from "../lib/judge-watch.ts";
+import {
+  judgeWorkDirFor,
+  decideJudgeDispatch,
+  judgeRunDirName,
+  hasJudgeFence,
+} from "../lib/judge-lifecycle.ts";
+import {
+  createProgressReporter,
+  type ProgressReporter,
+  withSlowNotice,
+  statusNotice,
+  type SlowNoticeSink,
+  type ToolUpdate,
+} from "../lib/progress-stream.ts";
+import { rebaseBranchName } from "../lib/git-rewrite.ts";
+// The interview's pure functions are no longer reached from here: `ask_user`
+// lives in lib/user-interaction-tools.ts and imports them itself.
+import { registerUserInteractionTools } from "../lib/user-interaction-tools.ts";
+// The COMMAND layer moved out the same way: every slash command lives in
+// lib/gate-command-tools.ts (+ lib/gate-diagnosis-commands.ts) and is wired
+// from here with one call.
+import { registerGateCommands } from "../lib/gate-command-tools.ts";
+
+import {
+  parsePorcelain,
+  describeDirty,
+  appendBranchOp,
+  deriveWorkBranchName,
+  decideFinish,
+  commitBranchAllowed,
+  parseConflictFiles,
+  interpretWorktreeChoice,
+  isProtectedBranch,
+  WORKTREE_CHOICES,
+  type DirtyFile,
+  type BranchOp,
+} from "../lib/workspace-branch.ts";
+import {
+  decideMergeVenue,
+  squashMergeArgv,
+  squashMergeMessage,
+  parseWorktreeList,
+  venueRefusal,
+  type MergeVenue,
+} from "../lib/worktree-merge.ts";
+// ---- the SUPERVISION CHANNEL (both sides). A child reports on it and reads
+// its instructions from it; an orchestrator reads it and writes answers. It
+// replaced the global attention queue, the screen scraping and send-keys.
+import {
+  instructText,
+  nodeChannelIO,
+  type ChannelIO,
+  type ChildReportedState,
+
+} from "../lib/orchestrator-channel.ts";
+import {
+  acknowledgeInstruct,
+  askThroughChannel,
+  pendingInstructions,
+  reportState,
+  type ChannelDialogRequest,
+  type ChildChannelBinding,
+} from "../lib/orchestrator-child-channel.ts";
+import { supervisionTarget } from "../lib/orchestration-id.ts";
+import type { ToolHost } from "../lib/tool-host.ts";
+// ---- orchestration layer (project-manager role). Everything but these few
+// wires lives in lib/orchestrator-*.ts, deliberately: this file is the
+// repository's own worst example of the architecture rule this round adds.
+import { newOrchestrationId, orchestrationIdFromEnv } from "../lib/orchestration-id.ts";
+import { orchestratorDoneProblems } from "../lib/orchestrator-gate.ts";
+import {
+  ORCHESTRATOR_DIRECTIVE,
+  CHILD_OF_ORCHESTRATOR_DIRECTIVE,
+  ORCHESTRATOR_NEEDS_TMUX,
+  buildOrchestratorExitBlock,
+  buildOrchestratorResume,
+} from "../lib/orchestrator-directives.ts";
+import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
+import { formatPlanSummary, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
+import { contextPercentFromUsage } from "../lib/orchestrator-handoff-advice.ts";
+
+import {
+  adjudicatePlanAudit,
+  buildPlanAuditTask,
+  formatPlanAuditCarryover,
+  formatPlanAuditRefusal,
+  planAuditHash,
+  planAuditPassed,
+  type PlanAuditRecord,
+} from "../lib/orchestrator-plan-audit.ts";
+
+import {
+  decideSupervisionEvents,
+  superviseChildren,
+  type SupervisionMemory,
+} from "../lib/orchestrator-supervisor.ts";
+import { formatChildHealth } from "../lib/orchestrator-child-state.ts";
+
+import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
+import { registerOrchestratorSessionTools } from "../lib/orchestrator-session-tools.ts";
+
+
+import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
+import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
+import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
-import { polishReasonRequired, recordedFindingsFrom } from "../lib/polish-gate.ts";
+import {
+  readJudgeSessionState,
+  readJudgeConclusion,
+  readStderrTail,
+  lastActivityAt,
+} from "../lib/judge-session.ts";
+// The judge tools that observe/end a session (judge_read / judge_close /
+// judge_wait) are registered from lib/, like the orchestration tools: this
+// file keeps only what it alone owns and hands the rest over as deps.
+import { registerJudgeSessionTools } from "../lib/judge-session-tools.ts";
+import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "../lib/judge-lifecycle.ts";
+// The judge tools that RELAY to a session (review_spawn / review_watch /
+// review_send) are the other half of the same family, and are registered the
+// same way — the dispatch owner and the child registry reach them as deps.
+//
+// THE TEN ADVANCED ENTRIES ARE GONE (2026-08-30, philosophy three). There are
+// no longer tools named `review_spawn` / `review_watch` / `review_send`,
+// `prepare_review` / `prepare_adviser` / `prepare_goal_audit`,
+// `run_precommit` / `review_checkpoint`, `record_review` /
+// `record_goal_prereview`. Every one of them was a SECOND path to something
+// `judge_submit` (or `propose_loop_goal`) already does end to end, and the
+// cost of a second path is not redundancy — it is an agent stopping to decide
+// which one applies, every single round.
+//
+// Seven of them are still IMPLEMENTATIONS, registered into `internalHost`
+// instead of into `pi`: the chain calls them so the mechanical checks live in
+// exactly one place, and no model can see the names. The other three
+// (`review_spawn` / `review_watch` / `review_send`) were deleted outright,
+// module included.
+import { registerReviewPrepareTools } from "../lib/review-prepare-tools.ts";
+import { registerAdvisoryPrepareTools } from "../lib/advisory-prepare-tools.ts";
+
+// The L7 Copilot tools moved the same way: this file wires them, the module
+// owns their bodies (and lib/copilot-gh.ts the `gh` calls they make).
+import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
+// The L8 goal family (the agent-facing `propose_loop_goal` and the internal
+// `record_goal_prereview`) moved the same way: this file wires them, the
+// module owns their bodies (and lib/goal-prereview-tools.ts the audit record).
+import { registerGoalTools } from "../lib/goal-tools.ts";
+// The L1 tool_call hook moved the same way — it was the single biggest thing
+// left in this file. lib/ship-gate-hook.ts owns the dispatch (and the
+// judge-role subagent refusal), lib/ship-gate-edit-guard.ts the edit arm and
+// lib/ship-gate-bash.ts the ship gate itself; this file keeps the deps.
+import {
+  evaluateToolCall,
+  type BlockedShipRecord,
+  type ShipGateHookDeps,
+} from "../lib/ship-gate-hook.ts";
+import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   writeJudgeSpawnFiles,
-  doneChannelFor,
-  inboxChannelFor,
   JUDGE_ROLES,
-  judgeRoleInScript,
-  normalizeToolName,
 } from "../lib/judge-prompt.ts";
 import {
   failedStepNames,
@@ -116,11 +276,7 @@ import {
   type StepTiming,
   type TestScope,
 } from "../lib/precommit-receipt.ts";
-import {
-  appendTiming,
-  formatPrecommitSummary,
-  lastPrecommitTiming,
-} from "../lib/gate-timings.ts";
+import { appendTiming } from "../lib/gate-timings.ts";
 import { tailLogFile } from "../lib/precommit-tail.ts";
 import {
   decideReviewScope,
@@ -134,7 +290,6 @@ import {
   computeFingerprint,
   incrementSinceTree,
   isGateOwnedPath,
-  mayBeGateOwned,
   reviewCoverageFiles,
   worktreeTreeOid,
 } from "../lib/fingerprint.ts";
@@ -149,18 +304,23 @@ import {
   FINGERPRINT_MIGRATION_NOTICE,
   saveSidecarPreservingConcurrent,
   shouldStrategicReset,
-  sidecarPath,
+  sidecarPath as sidecarPathIn,
+  stateVariantFrom,
+  STATE_VARIANT_ENV,
+  ORCH_BASE_BRANCH_ENV,
+
   unmetRequirements,
   type GateState,
 } from "../lib/gate-state.ts";
 import { parseReviewOutput, parsePrecommitOutput, parseFenceFindings, parseFenceFileFindings } from "../lib/verdict-parse.ts";
-import { buildAdviserBrief, countAdviserConclusions, parseAdviserConclusions, type AdviserConclusion } from "../lib/adviser-brief.ts";
-import { sessionDirForCwd } from "../lib/session-dir.ts";
+import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
 import {
   evaluateModeChange,
   buildModeConfirmMessage,
   normalizeTaskMode,
   scratchFirstMode,
+  isEnforcedMode,
+  requestedModeFromEnv,
   GATE_MODE_DECISION_DIRECTIVE,
   MODE_CONFIRM_TITLE,
   type TaskMode,
@@ -168,11 +328,8 @@ import {
 } from "../lib/task-mode.ts";
 import {
   createLlmClassifier,
-  classifyAiAttribution,
   classifyNonEnglish,
-  classifyShipCommand,
   createVerdictMemo,
-  isSuspiciousShipCandidate,
   type LlmClassifier,
 } from "../lib/llm-classify.ts";
 import { isPiSelfRoot } from "../lib/pi-self.ts";
@@ -185,27 +342,27 @@ import {
 import { projectEditedContent } from "../lib/edit-projection.ts";
 import {
   LOOP_GOAL_RELPATH,
-  LOOP_GOAL_MAX_WRITE_CHARS,
+  loopGoalRelPath,
+
   buildLoopGoalDirective,
-  buildGoalConfirmMessage,
-  buildGoalTranscriptMessage,
   goalTextHash,
   isLoopGoalConfirmed,
-  normalizeGoalText,
   readLoopGoal,
-  formatGoalPrereviewCarryover,
-  buildGoalAuditTask,
-  GOAL_CONFIRM_TITLE,
+  // buildGoalAuditTask moved with prepare_goal_audit (lib/advisory-prepare-tools.ts);
+  // the goal family's own text builders (transcript/confirm/refusal messages,
+  // the length cap, the carryover) moved with it into lib/goal-tools.ts +
+  // lib/goal-prereview-tools.ts.
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
   loopGoalEditGate,
   goalPrereviewPassed,
-  buildGoalPrereviewRefusal,
 } from "../lib/loop-goal.ts";
-import type { GoalPrereviewRecord } from "../lib/loop-goal.ts";
+import type { LoopGoal } from "../lib/loop-goal.ts";
+
 import { fitDialogMessage } from "../lib/dialog-budget.ts";
-import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "../lib/model-diagnose.ts";
-import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "../lib/gate-doctor.ts";
+// The model-chain diagnosis and the /gate-doctor checks are reached only
+// through lib/gate-diagnosis-commands.ts now — this file wires that module,
+// it no longer runs either diagnosis itself.
 import {
   buildStallNotice,
   evaluateStall,
@@ -226,41 +383,27 @@ import {
 } from "../lib/model-config.ts";
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
-import { isModelAllowed } from "../lib/model-allowlist.ts";
-import { squashPointBaseline, branchBaseBaseline } from "../lib/review-baseline.ts";
+// The model allowlist is consulted by the diagnosis module, not here.
+// The baseline resolution moved with prepare_review (lib/review-prepare-tools.ts).
+// The Copilot TOOLS and the `gh` access they run on moved out of this file
+// (lib/copilot-review-tools.ts + lib/copilot-gh.ts); what is left here is the
+// arming site and the completion-only problem list.
 import {
-  COPILOT_HISTORY_PR_COUNT,
-  COPILOT_HISTORY_QUERY,
-  COPILOT_REVIEWER_LOGIN,
-  COPILOT_THREADS_QUERY,
-  analyzeCopilot,
   armCopilotReview,
   copilotProblems,
-  decideCopilotSupport,
-  decidePrView,
-  evaluateCopilot,
-  isCopilotOutstanding,
-  isUnknownJsonFieldError,
-  PR_VIEW_JSON_FIELDS,
-  parseCopilotHistoryProbe,
-  parseCopilotPayload,
-  parseNameWithOwner,
   parsePrView,
-  recordCopilotRequest,
-  releaseCopilotReview,
-  slugFromPrUrl,
-  type CopilotPayload,
-  type CopilotReviewState,
-  type CopilotSupport,
-  type CopilotThread,
-  type PrSummary,
 } from "../lib/copilot-review.ts";
 import {
-  SENSITIVE_GRANT_TTL_MS,
-  addGrant,
+  fetchCopilotPayload,
+  requestCopilotReviewer,
+  resolveCopilotSupport,
+  resolveOpenPr,
+  resolveRepoSlug,
+} from "../lib/copilot-gh.ts";
+// The TTL and the grant WRITE moved out with request_sensitive_edit; what is
+// left here is the READ side — the edit guard and the grant it consumes.
+import {
   consumeGrant,
-  findGrant,
-  isGateIntegrityPath,
   normalizeSensitivePath,
   type SensitiveGrant,
 } from "../lib/sensitive-grant.ts";
@@ -269,16 +412,14 @@ import {
   recordBlockedMarker,
   reconcileBlockedMarker,
 } from "../lib/blocked-marker.ts";
-import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "../lib/workflow-commands.ts";
+// The workflow-command catalog is read by lib/gate-command-tools.ts, which
+// registers every command in it.
 import {
-  buildReviewPrompt,
   formatPrecommitBaseline,
-  extractPrecommitBaseline,
   REVIEW_VERDICT_SCHEMA,
 } from "../lib/parallel-review.ts";
 import {
   parseArbitrableAction,
-  tokenAuthorizes,
   buildArbiterPrompt,
   runArbiter,
   sha256,
@@ -287,6 +428,46 @@ import {
   type BypassToken,
   type TokenBindings,
 } from "../lib/arbitration.ts";
+
+// TASK_TEXT_MARKER now lives in lib/constants.ts: the two prepare modules
+// WRITE it and `extractTaskText` below READS it, so one definition serves all
+// three instead of a literal per file.
+
+/**
+ * This process's sidecar variant (F4), resolved ONCE from the environment.
+ *
+ * A session an orchestrator spawned carries `RG_STATE_VARIANT`, so it reads
+ * and writes its OWN `.pi/review-gate-state.<variant>.json` instead of
+ * sharing one file with the supervising orchestrator (whose `taskMode`,
+ * `askUser` record and unmet-gate list would otherwise overwrite each
+ * other's). See lib/gate-state.ts for why the CHILD moves rather than the
+ * orchestrator.
+ */
+const SESSION_STATE_VARIANT = stateVariantFrom(process.env);
+
+/** The sidecar this process owns, for any repo it touches. */
+function sidecarPath(root: string): string {
+  return sidecarPathIn(root, ".pi", SESSION_STATE_VARIANT);
+}
+
+/**
+ * The LOOP GOAL this process owns, for any repo it touches (R-10).
+ *
+ * Same variant as the sidecar, for the same measured reason: an orchestration
+ * child shares the supervisor's worktree, so without this two serial children
+ * write their approved goals into ONE file and the second overwrites the
+ * first — while the reviewer verifies against that file.
+ */
+function loopGoalPathIn(root: string): string {
+  return pathJoin(root, loopGoalRelPath(SESSION_STATE_VARIANT));
+}
+
+/** Read THIS session's goal (never another session's copy). */
+function readSessionLoopGoal(root: string): LoopGoal {
+  return readLoopGoal(root, Date.now(), SESSION_STATE_VARIANT);
+}
+
+
 
 const ENTRY_TYPE = "review-gate-state";
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
@@ -359,15 +540,117 @@ async function commitsAheadOfBase(cwd: string): Promise<number> {
 }
 
 export default function reviewGate(pi: ExtensionAPI) {
+  /**
+   * Every tool's own `execute`, captured as it is registered.
+   *
+   * `judge_submit` runs the submission chain (precommit → checkpoint →
+   * prepare → dispatch) by CALLING those tools, not by re-implementing them:
+   * one implementation, one set of mechanical checks, no second copy to drift.
+   * The tools stay registered as advanced entries.
+   */
+  type ToolExecute = (
+    id: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    onUpdate: unknown,
+    ctx: unknown,
+  ) => Promise<{ content?: { type: string; text: string }[]; details?: Record<string, unknown>; isError?: boolean }>;
+  const toolExecutes = new Map<string, ToolExecute>();
+  // Intercepted ONCE, here, rather than at 24 registration sites: every tool
+  // this extension registers is captured on its way through, so the chain can
+  // never call a stale copy of one.
+  const registerToolUpstream = pi.registerTool.bind(pi) as (spec: unknown) => unknown;
+  (pi as { registerTool: (spec: unknown) => unknown }).registerTool = (spec: unknown) => {
+    const s = spec as { name?: string; execute?: unknown };
+    if (typeof s?.name === "string" && typeof s?.execute === "function") {
+      toolExecutes.set(s.name, s.execute as ToolExecute);
+    }
+    return registerToolUpstream(spec);
+  };
+  /**
+   * The INTERNAL host — an implementation the gate runs but does not expose.
+   *
+   * Philosophy three says the ten advanced entries are DELETED, and philosophy
+   * two says the gate still has to perform every step they used to name. Both
+   * hold at once because a tool has two halves: an implementation and a
+   * registration. This host keeps the first and drops the second — the body is
+   * captured into `toolExecutes` (so `judge_submit` and `propose_loop_goal`
+   * still call the ONE implementation, with all its mechanical checks) and
+   * `pi` never learns the name exists, so no agent can be tempted to sequence
+   * the steps by hand.
+   *
+   * Nothing here is a back door: the names are unreachable from a model, and
+   * `test/extension-structure.test.ts` asserts that they are not registered.
+   */
+  function captureInternalTool(spec: unknown): void {
+    const s = spec as { name?: string; execute?: unknown };
+    if (typeof s?.name === "string" && typeof s?.execute === "function") {
+      toolExecutes.set(s.name, s.execute as ToolExecute);
+    }
+  }
+  /** The `lib/` tool modules register through this. */
+  const internalHost: ToolHost = { registerTool: captureInternalTool };
+  /**
+   * A TEST SEAM, and deliberately not a tool surface.
+   *
+   * The internal implementations have to stay reachable by a test — they hold
+   * mechanical checks (the precommit receipt, the L5 message rule, the
+   * checkpoint marker, the audit adjudication) whose behavior is the point of
+   * several suites, and driving them only through the minutes-long chains
+   * that call them would test almost nothing.
+   *
+   * It is not a back door: an agent's world is the TOOL REGISTRY, and nothing
+   * here is in it. `pi` never learns these names, no schema is published for
+   * them, and `test/extension-structure.test.ts` asserts exactly that.
+   */
+  (pi as unknown as { __reviewGateInternalTools?: Map<string, ToolExecute> })
+    .__reviewGateInternalTools = toolExecutes;
+
+  /**
+   * The in-file bodies register through this, which keeps pi's own parameter
+   * typing (the typebox schema flows into `execute`'s params) while the
+   * definition goes nowhere near the model.
+   */
+  const internalTool: typeof pi.registerTool = ((spec: unknown) => {
+    captureInternalTool(spec);
+  }) as typeof pi.registerTool;
+
+
+  /** Call another gate tool internally; a missing tool is a programming error. */
+  async function callTool(
+    name: string,
+    params: Record<string, unknown>,
+    ctx: unknown,
+    /** Live-output sink forwarded to the called tool (the chain streams). */
+    onUpdate?: ToolUpdate,
+  ) {
+    const run = toolExecutes.get(name);
+    if (!run) throw new Error(`review-gate: internal tool ${name} is not registered`);
+    return run(`internal-${name}`, params, undefined, onUpdate, ctx);
+  }
+  /** The text a tool result carries (its content joined). */
+  function toolText(result: { content?: { type: string; text: string }[] }): string {
+    return (result.content ?? []).map((c) => c.text).join("\n");
+  }
+
+  /**
+   * The payload a `prepare_*` tool built, split off its human-facing header.
+   *
+   * All three prepare tools end their header with this marker, so the chain
+   * extracts one way for every role. A result WITHOUT the marker is handed
+   * over whole rather than silently truncated — a judge that receives a
+   * header instead of its task is a wasted round either way, but a
+   * mis-sliced one is harder to notice.
+   */
+  function extractTaskText(prepared: string): string {
+    const at = prepared.indexOf(TASK_TEXT_MARKER);
+    if (at < 0) return prepared;
+    return prepared.slice(at + TASK_TEXT_MARKER.length).trim() || prepared;
+  }
+
+
   let state: GateState = emptyState(null, DEFAULT_MAX_ROUNDS);
   let cwd = process.cwd();
-  /**
-   * Set when session_start runs inside a REVIEW SNAPSHOT worktree. The whole
-   * extension goes inert for that session: no state init, no sidecar writes,
-   * and — critically — the tool_call/tool_result hooks must not run either,
-   * otherwise the L8 edit gate would block the reviewer's own mutation
-   * analysis inside its disposable copy (see session_start).
-   */
   let continuationsInjected = 0; // total auto-continuation injections (persisted)
   // L2 stall breaker (in-memory by design: a restart is itself a change of
   // circumstances, and a stale stall must never outlive the session).
@@ -411,7 +694,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!hasChildren) return;
       try {
         pi.sendUserMessage(
-          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的 done channel、pane_dead 与静默上限；读取已有输出并继续，不要结束 turn。",
+          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的 done channel、是否已结束（exit-code 文件出现，或记录的进程已不在）与静默上限；读取已有输出并继续，不要结束 turn。",
           { deliverAs: "followUp" },
         );
       } catch { /* session was replaced or shut down */ }
@@ -614,7 +897,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     return (
       `\nnote: a READY review is recorded on ${elsewhere.join(", ")} — not on ${blockedRoots.join(", ")}. ` +
       "A verdict counts only for the repo it was recorded against, so it does not unblock this one: " +
-      'review the blocked repo and call record_review (then run_precommit) with "repo": "<that repo path>".'
+      'run the loop for the blocked repo: `judge_submit({role:"reviewer", repo:"<that repo path>", task:<what you changed there>})` ' +
+      "— the gate runs that repo's own precommit, checkpoint and review, and records the verdict against it."
     );
   }
 
@@ -702,13 +986,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  the caller's fail-closed "no gate state" handling applies (a never-
    *  edited repo with uncommitted work blocks shipping from it). */
   function enforcementStateFor(root: string): GateState | undefined {
-    // A snapshot session owns NO gate state by design (session_start early-
-    // returns before init/arming). Returning the untouched empty state here
-    // would make the bash ship gate see hasCodeChange=false for the snapshot
-    // root (which IS primaryRepoRoot for a real reviewer child process) and
-    // let a `git push` through — so an inert session is always treated as
-    // sidecar-less, and the caller's fail-closed "no gate state" handling
-    // (changedFiles) applies.
+    // The session's OWN repo answers from the in-memory state; any other repo
+    // must produce a sidecar written by THIS session, or the caller's
+    // fail-closed "no gate state" handling applies.
     if (root === primaryRepoRoot) return state;
     const cached = repoStateCache.get(root);
     if (cached) return cached;
@@ -746,12 +1026,54 @@ export default function reviewGate(pi: ExtensionAPI) {
   let concurrentSessionNotice: string | null = null;
   // The most recent ship command the gate BLOCKED, so request_arbitration can
   // only contest a real block (not an agent-invented one).
-  let lastBlockedShip: { command: string; problems: string[]; blockReason: string } | null = null;
-  // Per-session arbitration request count (capped by projectConfig.arbiter).
-  let arbitrationsUsed = 0;
+  let lastBlockedShip: BlockedShipRecord | null = null;
+  // The most recent A-class TEXT block (lib/text-appeal.ts), for the same
+  // reason: an appeal contests a block that actually happened, never a
+  // hypothetical one.
+  let lastBlockedText: (AppealableBlock & { at: number }) | null = null;
   // Re-roll prevention: decisions cached by (commandDigest#round). A GATE_WINS /
   // HUMAN outcome cannot be re-requested for the same action+round.
   const arbitrationDecisions = new Map<string, "GATE_WINS" | "AGENT_WINS" | "HUMAN">();
+
+  /** Appeals + arbitrations spent this session (persisted, so a restart does
+   *  not hand the agent a fresh quota). */
+  function appealsUsed(): number {
+    return state.appeals?.used ?? 0;
+  }
+  /** Spend one slot of the SHARED quota (the `gh pr edit` arbitration path;
+   *  a text appeal spends its slot through recordAppealDecision). */
+  function spendArbitration(ctx: unknown): void {
+    state.appeals = { ...(state.appeals ?? emptyAppealRecord()), used: appealsUsed() + 1 };
+    persist(ctx as unknown as ExtensionContext);
+  }
+
+  /**
+   * Refuse one A-class text — unless an appeal already passed this EXACT
+   * content, in which case the pass is consumed and the text goes through.
+   *
+   * Every A-class refusal goes through here, so three things cannot drift
+   * apart: the appeal hint in the reason, the record of what was blocked
+   * (an appeal may only contest a real block) and the pass lookup.
+   */
+  function refuseText(
+    kind: AppealKind,
+    text: string,
+    reason: string,
+    ctx: unknown,
+  ): string | undefined {
+    const digest = appealDigest(kind, text);
+    if (appealPassAuthorizes(state.appeals, digest)) {
+      // Single-use: spend it here, at the one place that can prove the
+      // content is the content the arbiter judged.
+      state.appeals = consumeAppealPass(state.appeals);
+      persist(ctx as unknown as ExtensionContext);
+      appendLesson(`appeal pass consumed (${kind})`);
+      return undefined;
+    }
+    const full = `review-gate: ${reason} ${APPEAL_HINT}`;
+    lastBlockedText = { kind, text, reason: full, at: Date.now() };
+    return full;
+  }
 
   /** Clear any standing bypass token (called whenever the worktree or review
    *  round changes, so a token can never outlive the exact state it was for). */
@@ -835,91 +1157,573 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
   /**
-   * Background done/inbox channel listeners (review_watch): one handle per
-   * channel. When a child signals, the listener wakes THIS session via
-   * pi.sendMessage(triggerTurn) — the "the child finished" notification that
-   * makes main-session polling unnecessary. Cancelled on session_shutdown so
-   * a reload/resume never leaks a tmux wait-for process.
+   * Background judge-completion watchers (review_watch): one handle per
+   * session id. When the child's process exits, the watcher wakes THIS
+   * session via pi.sendMessage(triggerTurn) — the "the child finished"
+   * notification that makes main-session polling unnecessary. Cancelled on
+   * session_shutdown so a reload/resume never leaks a stale listener.
    */
-  // Round-18 (user ask): DIRECTED parent attention. A session never wakes
-  // unrelated sessions: it publishes only to the channel of the session that
-  // SPAWNED it (RG_PARENT_SESSION), and it listens only on its OWN channel.
-  // A session with no parent publishes nothing at all. The channel is derived
-  // from the target session id, so the bell and the listener can never drift.
+
+  // ---------- the CHILD side of the supervision channel ----------
   //
-  // We only LISTEN when we have a session id — an anonymous host has no
-  // address, so nobody can (or should) wake it.
-  function myAttentionChannel(): string | undefined {
-    return state.sessionId ? attentionChannelFor(state.sessionId) : undefined;
+  // A session spawned by an orchestrator reports on ONE file that belongs to
+  // it alone, and reads its instructions from the same file. The agent in
+  // this session knows nothing about any of it: everything below is done by
+  // the gate, on pi's own events, which is the whole reason it can be
+  // trusted. (The ORCHESTRATOR side is lib/orchestrator-supervisor.ts.)
+  //
+  // A session with no orchestration address has no binding at all and every
+  // function here is a silent no-op — a standalone session reports nowhere.
+
+  const channelIO: ChannelIO = nodeChannelIO();
+
+  /** This session's channel, or undefined when it is not somebody's child. */
+  function childBinding(): ChildChannelBinding | undefined {
+    const orchestrationId = supervisionTarget();
+    const childId = process.env[STATE_VARIANT_ENV]?.trim();
+    if (!orchestrationId || !childId) return undefined;
+    return {
+      io: channelIO,
+      target: { orchestrationId, childId },
+      ...(state.sessionId ? { sessionId: state.sessionId } : {}),
+    };
   }
 
   /**
-   * Who WE are for the self-wake filter. Round-17 Nit (reviewer): a shared
-   * "unknown-session" fallback made two id-less hosts look like the SAME
-   * session, so each would silently swallow the other's events. The pid is
-   * unique per process, which is exactly the granularity the filter needs.
+   * Percent of this session's context window in use, when the host says.
+   *
+   * The ARITHMETIC lives in lib/orchestrator-handoff-advice.ts, and it moved
+   * there because the version written here was wrong in a way nothing could
+   * catch: it read `usage.used / usage.max`, while pi returns
+   * `{ tokens, contextWindow, percent }`. The fallback for "percent is null
+   * right after a compaction" therefore could never fire, and its absence is
+   * indistinguishable from its presence — both render the same honest "no
+   * reading" line. A pure function has a test per shape instead.
    */
-  function attentionIdentity(): string {
-    return state.sessionId ?? `unknown-${process.pid}`;
-  }
-
-  /**
-   * Directed attention (round-18): tell the session that SPAWNED us that a
-   * human decision is needed. Without a parent this is a silent no-op
-   * ("no-parent") — a standalone session never wakes anybody. No macOS
-   * notification, no osascript: the wake is the parent's transcript message.
-   * Never throws and never blocks a dialog.
-   */
-  function notifyUserAttention(reason: string, repo?: string): void {
+  function contextPercentOf(ctx: { getContextUsage?: () => unknown } | undefined): number | undefined {
     try {
-      const pane = ownPaneId();
-      publishAttention({
-        fromSessionId: attentionIdentity(),
-        toSessionId: parentSessionId(),
-        fromPane: pane,
-        fromWindow: paneWindowLabel(pane),
-        repo: repo ?? cwd,
-        reason,
-      });
-    } catch { /* attention is a convenience, never a gate */ }
+      return contextPercentFromUsage(ctx?.getContextUsage?.());
+    } catch {
+      return undefined;
+    }
   }
+
+
+  /**
+   * Is a JUDGE this session dispatched still running, and since when?
+   *
+   * This is the fact that turns silence into a statement. The gate is the one
+   * that spawned the judge, so it does not have to infer anything: the child
+   * process is in its own registry, and `exitCode === null` is liveness.
+   */
+  function activeJudgeWait(): { role: string; since: number } | undefined {
+    for (const children of childSessions.values()) {
+      for (const judge of children) {
+        if (judge.child && judge.child.exitCode === null) {
+          const since = Date.parse(judge.spawnedAt);
+          return { role: judge.role, since: Number.isFinite(since) ? since : Date.now() };
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Tell the orchestration what this session is doing.
+   *
+   * Called from `agent_settled`, `turn_end` AND the independent heartbeat
+   * timer — pi's own truth, never a heuristic about a terminal.
+   * `ctx.isIdle()` separates "still streaming" from "stopped", and the gate's
+   * own completion record separates "stopped" from "finished": a child that
+   * ran `declare_done` is `done`, and one that merely went quiet is `idle`.
+   * That distinction is the entire fix for R3-5, where a finished child was
+   * classified `working` and produced no event for 725 seconds.
+   *
+   * ── WAITING-JUDGE (round-4 P0) ──
+   *
+   * A judge round of its own outranks both `working` and `idle`, and it has
+   * to, because BOTH readings were wrong while one was running: streaming
+   * inside `judge_wait` reported `working` while the heartbeat died with it
+   * (⇒ `stalled` ⇒ an `interrupt` suggestion aimed at a live review round),
+   * and a child that dispatched a judge and settled reported `idle` — "it
+   * stopped" — about a session doing exactly what it should. The gate knows
+   * which judge and since when, so it says so.
+   *
+   * THROTTLED, because the heartbeat calls it every tick: a record is written
+   * when the state CHANGES or when the last one is old enough to be worth
+   * refreshing. Without that the channel would grow a line every few seconds
+   * for no new information — and `lastStateSince` (how long a state has held)
+   * is computed from an unbroken run of identical states, so re-reporting is
+   * cheap but not free.
+   */
+  function reportChildState(ctx: ExtensionContext, note?: string, opts: { force?: boolean } = {}): void {
+    const binding = childBinding();
+    if (!binding) return;
+    const streaming = ctx.isIdle?.() === false || ctx.hasPendingMessages?.() === true;
+    const percent = contextPercentOf(ctx as unknown as { getContextUsage?: () => unknown });
+    const judging = activeJudgeWait();
+    const reported: ChildReportedState = judging
+      ? "waiting-judge"
+      : streaming
+        ? "working"
+        : state.completion?.at
+          ? "done"
+          : "idle";
+    const now = Date.now();
+    const changed = reported !== lastReportedChildState;
+    if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
+    lastReportedChildState = reported;
+    lastChildReportAt = now;
+    reportState(
+      binding,
+      reported,
+      {
+        ...(percent === undefined ? {} : { contextPercent: Math.round(percent) }),
+        ...(judging ? { waitingFor: judging.role } : {}),
+        ...(note === undefined ? {} : { note }),
+        // E — the progress stamp rides on EVERY report (heartbeat included), so
+        // a `working` child re-reported on a timer keeps its last real-progress
+        // time. It only advances on a genuine agent event (see noteChildProgress).
+        ...(lastChildProgressAt === undefined ? {} : { lastProgressAt: new Date(lastChildProgressAt).toISOString() }),
+      },
+    );
+  }
+
+  /** How often the heartbeat ticks (drain + a state refresh when it is due). */
+  const CHILD_HEARTBEAT_MS = 10_000;
+  /** How stale an unchanged state report may get before it is rewritten. */
+  const CHILD_STATE_REFRESH_MS = 60_000;
+  let childHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let lastChildReportAt = 0;
+  let lastReportedChildState: ChildReportedState | undefined;
+  /**
+   * Epoch ms of the child's last FORWARD PROGRESS (E). Advanced ONLY by a real
+   * agent event — a tool result or a turn boundary — never by the heartbeat, so
+   * a `working` child that keeps turning the crank shows a small "no progress"
+   * reading while one wedged in place shows a growing one. Undefined until the
+   * first event, so a booting session is not reported as stuck.
+   */
+  let lastChildProgressAt: number | undefined;
+  /** Stamp forward progress. Called from the agent-event handlers, not the heartbeat. */
+  function noteChildProgress(): void {
+    if (childBinding()) lastChildProgressAt = Date.now();
+  }
+  /**
+   * Instructions this session has already acknowledged as RECEIVED.
+   *
+   * In memory rather than derived from the channel because the receipt is
+   * written once per instruction: the projection deliberately keeps an
+   * instruction pending until it is INJECTED, so re-reading it would make the
+   * heartbeat append a duplicate `received` on every tick.
+   */
+  const acknowledgedReceipts = new Set<string>();
+
+
+  /**
+   * THE HEARTBEAT — an independent timer, and the whole point is what it does
+   * NOT depend on.
+   *
+   * Reporting used to ride on `agent_settled` and `turn_end`, which are AGENT
+   * events: they do not fire during a `judge_wait`, a full precommit, or any
+   * long tool call, because all of those happen inside one turn. So the
+   * channel went silent for minutes at a time while the process was perfectly
+   * healthy, the supervisor's 180-second budget expired, and a working child
+   * was reported as lost — twice in one run, ~14 minutes, with `interrupt`
+   * offered as the remedy (round-4 P0, the one defect where following the
+   * gate's own advice made things worse).
+   *
+   * A timer owned by the extension cannot have that failure mode: it ticks
+   * while the agent is blocked, so `stalled` goes back to meaning what it
+   * says — the extension itself is gone.
+   *
+   * It also drains instructions, which is what makes `followUp` deliverable
+   * to a BUSY child: the orchestrator's message is acknowledged within one
+   * tick instead of waiting for the agent to settle (round-4 P1 — a message
+   * that was written, never acknowledged, and silently lost).
+   */
+  function startChildHeartbeat(ctx: ExtensionContext): void {
+    if (childHeartbeatTimer || !childBinding()) return;
+    childHeartbeatTimer = setInterval(() => {
+      const live = latestCtx ?? ctx;
+      try {
+        reportChildState(live);
+      } catch { /* a heartbeat must never break the session it reports on */ }
+      void drainChildInstructions(live).catch(() => { /* best effort */ });
+    }, CHILD_HEARTBEAT_MS);
+  }
+
+  function stopChildHeartbeat(): void {
+    if (childHeartbeatTimer) clearInterval(childHeartbeatTimer);
+    childHeartbeatTimer = undefined;
+  }
+
+
+  /**
+   * Apply whatever the orchestrator has sent, through pi's OWN delivery API.
+   *
+   * `steer` / `followUp` are `sendUserMessage`'s own modes and `interrupt` is
+   * `ctx.abort()`; nothing is typed at a terminal, so nothing can be
+   * truncated, split by a newline, or read by an open dialog as a menu
+   * selection. Every one of those was measured on the `send-keys` path this
+   * replaces (F7, F8, R-20, R-13).
+   *
+   * The acknowledgement is what the orchestrator's receipt is built on, so it
+   * is written from what ACTUALLY happened — a failure is acknowledged as a
+   * failure, never omitted.
+   */
+  async function drainChildInstructions(ctx: ExtensionContext): Promise<void> {
+    const binding = childBinding();
+    if (!binding) return;
+    for (const instruction of pendingInstructions(binding)) {
+      // STAGE ONE — "I have it". Written BEFORE anything is attempted, and
+      // exactly once per instruction, because it answers a different question
+      // than the injection does: it proves this child's gate is alive and has
+      // the message. That is the only honest bar for a `followUp`, whose whole
+      // definition is "read this when you are done" — demanding an injection
+      // from a busy child made the orchestrator's tool fail on a message that
+      // had in fact arrived, and the message was then dropped (round-4 P1).
+      if (!acknowledgedReceipts.has(instruction.instructId)) {
+        acknowledgedReceipts.add(instruction.instructId);
+        acknowledgeInstruct(
+          binding,
+          instruction.instructId,
+          true,
+          `已入队（mode=${instruction.mode}）`,
+          "received",
+        );
+      }
+      try {
+        if (instruction.mode === "interrupt") {
+          ctx.abort?.();
+          acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
+          continue;
+        }
+        const text = instructText(channelIO, instruction);
+        if (!text) {
+          acknowledgeInstruct(
+            binding,
+            instruction.instructId,
+            false,
+            "指令没有正文（也没有可读的溢出文件）",
+            "injected",
+          );
+          continue;
+        }
+        await pi.sendUserMessage(text, { deliverAs: instruction.mode });
+        acknowledgeInstruct(
+          binding,
+          instruction.instructId,
+          true,
+          `pi.sendUserMessage(deliverAs:${instruction.mode})`,
+          "injected",
+        );
+      } catch (error) {
+        acknowledgeInstruct(binding, instruction.instructId, false, (error as Error).message, "injected");
+
+      }
+    }
+  }
+
+  /**
+   * Raise a gate dialog that EITHER the human or the orchestrator may answer.
+   *
+   * This is the single funnel every gate question goes through, and it is why
+   * the orchestrator never needs to read a screen: the request — title, every
+   * option in order, and the full payload (a goal draft, a plan) — is written
+   * into the channel as data. Whoever answers first wins; the other side is
+   * cancelled, so a box the orchestrator answered DISAPPEARS from the user's
+   * screen instead of asking a question that is already settled.
+   *
+   * A session with no orchestration simply renders the dialog, exactly as it
+   * always did.
+   */
+  async function askEitherSide(
+    request: Omit<ChannelDialogRequest, "hasUI">,
+    hasUI: boolean,
+    render: (signal: AbortSignal) => Promise<string | undefined>,
+  ): Promise<string | undefined> {
+    const binding = childBinding();
+    if (!binding) return hasUI ? render(new AbortController().signal) : undefined;
+    const outcome = await askThroughChannel(binding, { ...request, hasUI }, render);
+    return outcome.answer;
+  }
+
+
+  // ---------- orchestration layer (the project-manager role) ----------
+  //
+  // Only the WIRING is here. The plan, the constraints, the tmux commands,
+  // the tools and their prompts all live in lib/orchestrator-*.ts — this file
+  // is the repository's own worst example of the architecture rule this round
+  // introduces, so the orchestration layer deliberately does not grow it.
+  //
+  // The orchestration id is an ADDRESS, not an identity: a relay successor
+  // inherits the predecessor's id from its environment, which is what keeps
+  // every child reaching whoever currently holds the role. A session started
+  // without one mints its own the first time it needs it.
+  let orchestrationIdValue: string | undefined = orchestrationIdFromEnv();
+  function currentOrchestrationId(): string {
+    if (!orchestrationIdValue) orchestrationIdValue = newOrchestrationId(primaryRepoRoot, Date.now());
+    return orchestrationIdValue;
+  }
+  /** Started BY an orchestrator as a worker (not as its relay successor). */
+  function isOrchestrationChild(): boolean {
+    return orchestrationIdFromEnv() !== undefined && readInheritance().predecessorPane === undefined;
+  }
+  // The most recent ExtensionContext, so the orchestration tools can persist
+  // and raise dialogs. tool_call fires immediately before every tool body, so
+  // it is always fresh by the time one of them runs.
+  let latestCtx: ExtensionContext | undefined;
+  function persistOrchestration(runtime: OrchestratorRuntime): void {
+    state.orchestrator = runtime;
+    // No `if (latestCtx)`: an in-memory-only runtime would silently lose the
+    // user's plan approval and the child registry on a restart. persist()
+    // takes the context only to refresh the status widget, so a missing one
+    // costs a redraw, never the record.
+    persist(latestCtx);
+  }
+  const orchestratorDeps = createOrchestratorDeps({
+    repoRoot: primaryRepoRoot,
+    taskMode: () => state.taskMode,
+    loadRuntime: () => state.orchestrator,
+    storeRuntime: persistOrchestration,
+    orchestrationId: currentOrchestrationId,
+    confirm: (title, message, pointer) => confirmBounded(latestCtx ?? {}, title, message, pointer),
+    // O-1 — the plan's full text goes into the TRANSCRIPT before the dialog
+    // asks about it, exactly like the loop goal. A plan approval binds to
+    // content, so a truncated dialog body was asking the user to sign
+    // something they could not read.
+    showToUser: (title, text) => { showToUser(latestCtx ?? {}, title, text); },
+
+    branchFacts: () => ({
+      workBranch: state.workBranch,
+      baseBranch: state.baseBranch,
+      // "Settled", not "already merged": declare_done merges AFTER these
+      // checks, so requiring a completed merge here could never pass.
+      mergeSettled: Boolean(state.baseBranch) && !state.mergeConflict,
+      mergeWaived: Boolean(state.mergeWaived),
+    }),
+    // ROUND-4 P1 — THIS BINDING WAS SIMPLY MISSING. `orchestrator_wait`'s
+    // fourth block (context usage + when to hand over) is computed from it,
+    // and because nothing was passed, all 15+ receipts of the fourth run said
+    // "宿主未提供读数": the orchestrator could not tell whether it had room
+    // for another task round, on the one axis — running long — that defines
+    // unattended work. The reading itself was always available; nobody wired
+    // it. `latestCtx` is refreshed on every tool_call, so it is current by
+    // the time any orchestration tool runs.
+    contextPercent: () => contextPercentOf(latestCtx as unknown as { getContextUsage?: () => unknown }),
+    auditPlan: (plan) => runPlanAudit(plan),
+
+    sessionTranscriptPath: () => {
+      try {
+        const dir = sessionDirForCwd(cwd);
+        return state.sessionId ? `${dir}/${state.sessionId}.jsonl` : undefined;
+      } catch { return undefined; }
+    },
+  });
+  registerOrchestratorStateTools(pi, orchestratorDeps);
+  registerOrchestratorSessionTools(pi, orchestratorDeps);
+
+  /** Constraints 3, 4, 10 and 11 — the orchestration's own exit contract. */
+  function orchestrationDoneProblems(): string[] {
+    if (state.taskMode !== "orchestrator") return [];
+    const runtime = state.orchestrator ?? emptyRuntime(currentOrchestrationId());
+    const branch = orchestratorDeps.branchFacts();
+    const panes = (() => {
+      try {
+        const self = orchestratorDeps.ownPane();
+        if (!self) return [] as string[];
+        const listed = orchestratorDeps.tmux(["list-panes", "-t", self, "-F", "#{pane_id}"]);
+        return listed.ok ? listed.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [];
+      } catch { return [] as string[]; }
+    })();
+    return orchestratorDoneProblems({
+      plan: readPlanFile(primaryRepoRoot).plan,
+      runtime,
+      alivePaneIds: panes,
+      workBranch: branch.workBranch,
+      baseBranch: branch.baseBranch,
+      mergeSettled: branch.mergeSettled,
+      mergeWaived: branch.mergeWaived,
+    });
+  }
+
+  // ---- the state probe: the gate's own eyes on the children (R-16/R-23) ----
+  //
+  // The second orchestration run worked only because a HUMAN ran a
+  // `capture-pane` loop all night: three of the four situations that matter
+  // (a dialog nobody answered, a child that quietly stopped, a vanished pane)
+  // produce no event at all, so an orchestrator that waits for events waits
+  // forever. The probe manufactures those events, and this timer is what
+  // makes it fire even when the supervisor is NOT sitting inside
+  // `orchestrator_wait`.
+  let supervisionTimer: ReturnType<typeof setInterval> | undefined;
+  let orchestratorContinuations = 0;
+  /** The supervisor's own last health read, for the continuation message. */
+  let lastSupervisionHealth: ReturnType<typeof formatChildHealth> = "";
+
+  /** How often the background supervisor re-reads every child's channel. */
+  const SUPERVISION_INTERVAL_MS = 10_000;
+
+  /**
+   * What the children need from the supervisor RIGHT NOW, as text lines.
+   *
+   * The whole read is the channels — no pane is captured, no text is matched.
+   * The event memory lives in the deps (one per orchestration), so the
+   * background timer and `orchestrator_wait` share it and neither re-rings
+   * what the other has already reported.
+   */
+  function drainSupervisionNews(): string[] {
+    if (state.taskMode !== "orchestrator") return [];
+    try {
+      const runtime = orchestratorDeps.runtime();
+      const open = runtime.children.filter((c) => !c.closedAt);
+      if (open.length === 0) return [];
+      const panes = alivePaneIdsForSupervision();
+      const snapshot = superviseChildren({
+        orchestrationId: runtime.orchestrationId,
+        children: open,
+        livePanes: panes,
+        io: channelIO,
+        at: Date.now(),
+      });
+      lastSupervisionHealth = formatChildHealth(snapshot.health);
+      const decided: { events: { summary: string }[]; memory: SupervisionMemory } =
+        decideSupervisionEvents(snapshot, orchestratorDeps.supervisionMemory(), Date.now());
+      orchestratorDeps.saveSupervisionMemory(decided.memory);
+      return decided.events.map((event) => event.summary);
+    } catch {
+      return []; // supervision is a convenience for the timer, never a gate
+    }
+  }
+
+  /** Pane ids that exist right now; `undefined` when tmux cannot be read. */
+  function alivePaneIdsForSupervision(): Set<string> | undefined {
+    const self = process.env.TMUX_PANE?.trim();
+    if (!self) return undefined;
+    try {
+      const out = execFileSync("tmux", ["list-panes", "-t", self, "-F", "#{pane_id}"], {
+        encoding: "utf8", timeout: 5000,
+      });
+      return new Set(out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    } catch {
+      return undefined;
+    }
+  }
+
+  function stopSupervisionTimer(): void {
+    if (supervisionTimer) clearInterval(supervisionTimer);
+    supervisionTimer = undefined;
+  }
+
+  /**
+   * Arm the background supervisor (default-on in orchestrator mode, 10s).
+   *
+   * It only WAKES the session when there is something a supervisor has to act
+   * on, and only while the session is idle — a wake-up delivered mid-turn
+   * would just be noise, and `orchestrator_wait` reads the same channels
+   * itself.
+   */
+  function startSupervisionTimer(ctx: ExtensionContext): void {
+    if (supervisionTimer || state.taskMode !== "orchestrator") return;
+    supervisionTimer = setInterval(() => {
+      try {
+        if (state.taskMode !== "orchestrator") { stopSupervisionTimer(); return; }
+        if (!ctx.isIdle?.()) return;
+        const news = drainSupervisionNews();
+        if (news.length === 0) return;
+        pi.sendMessage({
+          customType: "review-gate",
+          content:
+            "[ORCHESTRATION] 子会话需要你：\n" +
+            news.map((n) => `- ${n}`).join("\n") +
+            "\n调 `orchestrator_wait({ timeoutMs: 0 })` 拿完整回执（问题正文与选项都在里面），" +
+            "再用 `orchestrator_answer` 回；别让它就这么等着。",
+          display: true,
+        }, { triggerTurn: true, deliverAs: "steer" });
+      } catch { /* supervision is a convenience, never a gate */ }
+    }, SUPERVISION_INTERVAL_MS);
+    // Never hold the process open for a supervision timer.
+    (supervisionTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * The orchestrator's own `agent_settled` continuation (R-3).
+   *
+   * Same shape as the loop's, entirely different criteria: the plan, the
+   * children, and the decisions — never a review or a precommit this session
+   * will never have.
+   */
+  function orchestratorSettled(ctx: ExtensionContext): void {
+    startSupervisionTimer(ctx);
+    const problems = orchestrationDoneProblems();
+    const news = drainSupervisionNews();
+    if (problems.length === 0 && news.length === 0) return;
+    if (orchestratorContinuations >= state.maxRounds) return;
+    orchestratorContinuations += 1;
+    pi.sendUserMessage(
+      buildOrchestratorResume({
+        problems,
+        news,
+        health: lastSupervisionHealth,
+      }) + `\n(编排续跑 ${orchestratorContinuations}/${state.maxRounds})`,
+      { deliverAs: "followUp" },
+    );
+  }
+
+
   // The watcher registry (lib/judge-watch.ts) owns the handle map and the
   // shutdown latch: a signal that resolves while session_shutdown is
   // clearing the registry must not re-arm an orphan listener (round-16 Nit).
-  const watchRegistry = createWatchRegistry(
-    (channel) => waitForSignalAsync(channel),
-    (label, channel) => {
-      const inbox = channel.endsWith("-inbox");
-      let content: string;
-      if (myAttentionChannel() !== undefined && channel === myAttentionChannel()) {
-        // Directed: only events ADDRESSED to us (a child we spawned) are
-        // consumed; events for other sessions are invisible by address.
-        const event = consumeAttention(attentionIdentity());
-        if (!event) return;
-        content = `[review-gate] 子会话需要用户介入 — ${attentionText(event)}（去该窗口批准/回答）。`;
-      } else if (inbox) {
-        content = `[review-gate] 子会话 ${label} 提问（channel ${channel}）— review_read 读取 inbox 并回复。`;
-      } else {
-        content = `[review-gate] 子会话 ${label} 完成（channel ${channel}）— 读取其输出并继续。`;
-      }
-      pi.sendMessage({ customType: "review-gate", content, display: true }, { triggerTurn: true, deliverAs: "steer" });
+  // The watcher registry (lib/judge-watch.ts) owns the handle map and the
+  // shutdown latch: a child's PROCESS EXIT is the completion event (no tmux
+  // wait-for channel, no signal the child could forget to send).
+  const watchRegistry = createProcessWatchRegistry(
+    (child) => waitForProcessExit(child),
+    (label, sessionId) => {
+      // The judge finished: the gate reads its verdict and records it BEFORE
+      // waking the session, so the agent never has to carry the output from
+      // one tool to another (and cannot mis-carry it).
+      void recordJudgeConclusion(sessionId).then((recorded) => {
+        const content = `[review-gate] 子会话 ${label} 完成（session ${sessionId}）。` +
+          (recorded ? `\n${recorded}` : " 用 judge_read({role}) 读它的输出并继续。");
+        pi.sendMessage({ customType: "review-gate", content, display: true }, { triggerTurn: true, deliverAs: "steer" });
+      });
     },
   );
   /**
    * Judge child sessions spawned by review_spawn: repo root → children.
-   * In-memory for now (persisted listing lands with the declare_done residual
-   * check); each entry carries the tmux pane id and the derived channels.
+   * Each entry carries the deterministic session id (the resume key), the
+   * live ChildProcess (liveness = its exitCode), and the per-run artifact
+   * paths (session transcript dir, stdout/stderr logs, pid/exit-code files
+   * for cross-session takeover).
    */
   interface JudgeChild {
-    paneId: string;
+    sessionId: string;
     role: string;
     title: string;
-    doneChannel: string;
-    inboxChannel: string;
-    inboxPath: string;
     spawnedAt: string;
+    /** The live child process; liveness is child.exitCode === null. */
+    child?: { exitCode?: number | null; pid?: number };
+    /** Directory pi writes its transcript jsonl into (stable per role). */
+    sessionDir: string;
+    /** Per-run stdout log (this round's raw output). */
+    stdoutPath: string;
+    /** Per-run stderr log (crash diagnosis). */
+    stderrPath: string;
+    /** pid record `<pid> <start>` — cross-session takeover (judge-session.ts). */
+    pidPath: string;
+    /** exit-code file — the authoritative 'session finished' fact. */
+    exitCodePath: string;
+    /** This round's findings stream, when the role has one (judge_wait reads it). */
+    streamPath?: string;
   }
   const childSessions = new Map<string, JudgeChild[]>();
+  /**
+   * The goal draft a running audit is judging, per repo. The verdict binds to
+   * the draft's CONTENT, so the gate has to remember which text it dispatched
+   * — the auditor's output alone cannot say what it audited.
+   */
+  const pendingGoalAudits = new Map<string, { draft: string; startedAt: string }>();
   /**
    * Review targets registered by prepare_review (commit mode): repo root →
    * the reviewed baseline..HEAD plus HEAD's tree. record_review consumes it:
@@ -930,31 +1734,416 @@ export default function reviewGate(pi: ExtensionAPI) {
   const reviewTargets = new Map<string, ReviewTarget>();
 
   /**
-   * Register the completion listener for a judge child's done channel. One
-   * listener per channel (a re-registration replaces the old handle). When
-   * the child signals `tmux wait-for -S <channel>`, THIS session is woken
-   * via pi.sendMessage(triggerTurn, deliverAs:"steer") — no polling, no
-   * sleep: the agent can end its turn and do other work; the wake arrives
-   * as a new turn. review_spawn registers this AUTOMATICALLY; review_watch
+   * Register the completion watcher for one judge session id. One watcher
+   * per session id (a re-registration replaces the old handle). When the
+   * child's PROCESS EXITS, THIS session is woken via
+   * pi.sendMessage(triggerTurn, deliverAs:"steer") — no polling, no sleep:
+   * the agent can end its turn and do other work; the wake arrives as a
+   * new turn. review_spawn registers this AUTOMATICALLY; review_watch
    * exists to re-register with a custom label.
-   *
-   * Round-14 P1: the listener RE-ARMS ITSELF after a signal — a judge pane
-   * is reused for every round of its life (the same title ⇒ same channel),
-   * and a one-shot listener would leave rounds 2..N with no wake-up while
-   * the docs promise "no review_watch call needed". The re-arm happens only
-   * when the agent did not replace the handle in the meantime (the
-   * activeWatchers identity check), so a manual review_watch with a custom
-   * label keeps its label until the next signal.
    */
-  function registerWatch(channel: string, label: string): void {
-    watchRegistry.register(channel, label);
+  function registerWatch(sessionId: string, label: string): void {
+    watchRegistry.register(sessionId, label);
   }
+
+  /**
+   * The branch this repo is working on.
+   *
+   * A rebase in progress is NOT a detached head in any meaningful sense: git
+   * remembers the branch it will land back on, and every commit the rebase
+   * makes belongs to that branch. Reading it is what keeps the branch rule
+   * from blocking `git rebase -i` reword — the very operation an agent needs
+   * to fix a non-English commit message (observed deadlock, 2026-08-29).
+   * A genuine detached HEAD still reports undefined, and the rule still
+   * refuses.
+   */
+  function currentBranch(root: string): string | undefined {
+    try {
+      const name = execFileSync("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+      if (name) return name;
+    } catch { /* detached — maybe a rebase; ask git where it came from */ }
+    return rebaseBranch(root);
+  }
+
+  /** The branch a rebase in progress will return to, read from the git dir. */
+  function rebaseBranch(root: string): string | undefined {
+    for (const dir of ["rebase-merge", "rebase-apply"]) {
+      try {
+        const gitPath = execFileSync("git", ["rev-parse", "--git-path", `${dir}/head-name`], {
+          cwd: root, encoding: "utf8",
+        }).trim();
+        if (!gitPath || !existsSync(pathResolve(root, gitPath))) continue;
+        const name = rebaseBranchName(readFileSync(pathResolve(root, gitPath), "utf8"));
+        if (name) return name;
+      } catch { /* no rebase in progress, or an unreadable git dir */ }
+    }
+    return undefined;
+  }
+
+  /** `git status --porcelain`, parsed. An unreadable repo reports clean. */
+  function dirtyFiles(root: string): DirtyFile[] {
+    try {
+      return parsePorcelain(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Append one entry to the branch audit log (bounded, best-effort). */
+  function logBranchOp(st: GateState, op: BranchOp): void {
+    st.branchOps = appendBranchOp(st.branchOps, op);
+  }
+
+  /**
+   * Record where this session STARTED: the branch it is on and whatever was
+   * already uncommitted. Both are facts the session must not silently absorb
+   * — the dirty worktree blocks edits until `setup_workspace` settles it, and
+   * the branch is the first entry of the trail declare_done follows back.
+   */
+  function recordSessionStartWorkspace(): void {
+    try {
+      const files = dirtyFiles(primaryRepoRoot);
+      if (files.length) {
+        state.worktreeDirty = {
+          files: files.map((f) => `${f.status.trim() || "??"} ${f.path}`).slice(0, 200),
+          at: new Date().toISOString(),
+        };
+      } else {
+        delete state.worktreeDirty;
+      }
+      const branch = currentBranch(primaryRepoRoot);
+      if (branch) {
+        logBranchOp(state, { op: "checkout", from: null, to: branch, at: new Date().toISOString() });
+      }
+    } catch { /* never block a session start on bookkeeping */ }
+  }
+
+  /** What `finishWorkBranch` reports — including HOW the work landed (R3-5). */
+  type FinishResult = { ok: boolean; text: string; merge: "merged" | "waived" | "none" };
+
+  /** `git worktree list --porcelain`; "" when it cannot be read (⇒ no holder). */
+  function gitWorktreeList(root: string): string {
+    try {
+      return execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: root, encoding: "utf8" });
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Best-effort refresh of `base` from its remote before a work branch is cut
+   * off it (D — the fetch + `--ff-only` update the AGENTS.md branch dance used
+   * to leave to the agent). setup_workspace expresses the intent ("branch off a
+   * current base"); the gate does the git.
+   *
+   * NEVER fatal, and never anything but a fast-forward: offline is a note, a
+   * DIVERGED base is a note (a merge/rebase/force there is the user's call, not
+   * the gate's). Returns the notes to fold into the setup_workspace receipt.
+   */
+  function refreshBaseBeforeBranch(root: string, base: string): string[] {
+    const notes: string[] = [];
+    let fetched = false;
+    try {
+      execFileSync("git", ["fetch", "--quiet"], { cwd: root, encoding: "utf8" });
+      fetched = true;
+    } catch {
+      notes.push(`基准分支 ${base} 未能从远端更新（git fetch 失败，可能离线）—— 它可能落后于远端。`);
+    }
+    // Fast-forward only, and only when actually standing on base (the common
+    // case at branch-cut time). No upstream ⇒ nothing to fast-forward to.
+    if (fetched && currentBranch(root) === base) {
+      let hasUpstream = false;
+      try {
+        execFileSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], { cwd: root, encoding: "utf8" });
+        hasUpstream = true;
+      } catch { /* no tracking branch */ }
+      if (hasUpstream) {
+        try {
+          execFileSync("git", ["merge", "--ff-only", "@{u}"], { cwd: root, encoding: "utf8" });
+          notes.push(`基准分支 ${base} 已快进到远端最新。`);
+        } catch {
+          notes.push(`基准分支 ${base} 与远端已分叉，门禁不会替你 merge/rebase —— 请自行处理后再开工作分支（本次仍按当前 ${base} 建分支）。`);
+        }
+      }
+    }
+    return notes;
+  }
+
+  /**
+   * THE GATE'S SQUASH LANDING, executed in ONE worktree (`cwd`) — the shared
+   * core of both merge venues (self and holder).
+   *
+   * It folds the work branch into base as a SINGLE commit (the checkpoint
+   * history stays off the target branch) and commits it with a message the
+   * gate DERIVES, never the loop goal's title: that title is Simplified Chinese
+   * and L5 refuses a non-English commit, so the subject is composed from the
+   * checkpoints' own Conventional-Commit type/scope (always ASCII — see
+   * lib/worktree-merge.ts `squashMergeSubject`).
+   *
+   * REVIEW_GATE_BYPASS=1, like the checkpoint commit above: this is a
+   * gate-authored landing of content that already passed a READY review. The
+   * fingerprint hook cannot meaningfully judge a commit made on the BASE branch
+   * (self venue) or inside a FOREIGN holder worktree whose sidecar is not this
+   * review's state (holder venue) — which is exactly why the previous
+   * `--no-ff` merge, a merge commit, never ran these commit hooks at all.
+   */
+  function runSquashLanding(cwd: string, work: string, base: string):
+    | { ok: true }
+    | { ok: false; conflicted: boolean; files: string[]; cleaned: boolean; error?: string } {
+    let subjects: string[] = [];
+    try {
+      subjects = execFileSync("git", ["log", "--format=%s", `${base}..${work}`], { cwd, encoding: "utf8" })
+        .split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+    } catch { /* unreadable range → an empty list still yields a legal chore subject */ }
+    const { subject, body } = squashMergeMessage(work, base, subjects);
+    try {
+      execFileSync("git", squashMergeArgv(work), { cwd, encoding: "utf8" });
+      execFileSync("git", ["commit", "-m", subject, "-m", body], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, REVIEW_GATE_BYPASS: "1" },
+      });
+      return { ok: true };
+    } catch (err) {
+      let files: string[] = [];
+      try {
+        files = parseConflictFiles(
+          execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { cwd, encoding: "utf8" }),
+        );
+      } catch { /* the cleanup below still runs */ }
+      // A `--squash` merge sets no MERGE_HEAD, so `git merge --abort` cannot
+      // undo it; the staged/conflicted state is discarded with `git reset
+      // --hard HEAD` instead. Safe because the venue was verified clean first
+      // (the self venue just checked out `base`; the holder passed venueRefusal).
+      let cleaned = true;
+      try { execFileSync("git", ["merge", "--abort"], { cwd, encoding: "utf8" }); } catch { /* squash: nothing to abort */ }
+      try { execFileSync("git", ["reset", "--hard", "HEAD"], { cwd, encoding: "utf8" }); } catch { cleaned = false; }
+      return {
+        ok: false,
+        conflicted: files.length > 0,
+        files,
+        cleaned,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * R3-7 — land the work by merging INSIDE the worktree that holds the base.
+   *
+   * This is the only path that works for a parallel orchestration lane: its
+   * base branch is checked out in the supervisor's worktree, so switching to
+   * it here is impossible by git's own rules. Nothing is checked out and no
+   * HEAD is moved — the merge is executed in that directory, on the branch it
+   * is already standing on.
+   *
+   * The safety rule the user set (2026-08-30): touch that worktree ONLY when
+   * it is clean and actually standing on the base. Anything else refuses and
+   * says why, because a merge run over somebody's uncommitted work can lose
+   * it, and no receipt is worth that.
+   */
+  function mergeInHoldingWorktree(
+    ctx: ExtensionContext,
+    venue: Extract<MergeVenue, { kind: "worktree" }>,
+    work: string,
+    base: string,
+  ): FinishResult {
+    const st = state;
+    const refusal = venueRefusal(venue, {
+      base,
+      ...(currentBranch(venue.path) ? { currentBranch: currentBranch(venue.path)! } : {}),
+      dirtyFiles: dirtyFiles(venue.path).map((f) => `${f.status.trim() || "??"} ${f.path}`),
+    });
+    if (refusal) {
+      return { ok: false, merge: "none", text: `review-gate: declare_done 被拒 — ${refusal}` };
+    }
+    const landed = runSquashLanding(venue.path, work, base);
+    if (landed.ok) {
+      delete st.mergeConflict;
+      logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString(), venue: venue.path });
+      persist(ctx);
+      return { ok: true, merge: "merged", text: `squash-merged ${work} into ${base} —— ${venue.reason}` };
+    }
+    // The holder worktree is left exactly as it was found — the squash cleanup
+    // (`reset --hard HEAD`, since a `--squash` sets no MERGE_HEAD to abort) is
+    // reported rather than assumed (round-1 Nit): this is the module whose
+    // whole point is that a receipt never overstates.
+    const restored = landed.cleaned
+      ? "，已回退，那个工作区回到原样"
+      : "，**但回退没有成功** —— 请自己去 " + `${venue.path} 看一眼它现在的状态`;
+    if (landed.conflicted) st.mergeConflict = { branch: work, base, files: landed.files, at: new Date().toISOString() };
+    persist(ctx);
+    return {
+      ok: false,
+      merge: "none",
+      text: landed.conflicted
+        ? `review-gate: declare_done 被拒 — ${work} squash 合并回 ${base} 有冲突（合并在持有基准分支的 worktree ` +
+          `${venue.path} 里执行${restored}）。\n` +
+          `冲突文件：\n${landed.files.map((f) => `  ${f}`).join("\n")}\n` +
+          `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
+          "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
+        : `review-gate: declare_done 被拒 — 在 worktree ${venue.path} 里 squash 合并 ${work} → ${base} 失败` +
+          `（不是冲突：没有未解决路径）${restored}。` +
+          `\n${(landed.error ?? "").split("\n")[0]}` +
+          "\n先手动确认两条分支的状态，再重试。",
+    };
+  }
+
+  /**
+   * Land this session's work on the branch the user confirmed — the last
+   * procedural job of a task, and the gate's, not the agent's.
+   *
+   * It reads its own record (workBranch/baseBranch, both set by
+   * setup_workspace) rather than inferring anything from the current
+   * checkout. Three outcomes, all honest: nothing to merge, merged, or
+   * CONFLICT — and a conflict aborts the merge, records the files and
+   * refuses. Resolving it is creative work (the agent's), waiving it is a
+   * decision (the user's); guessing is neither.
+   */
+  function finishWorkBranch(ctx: ExtensionContext): FinishResult {
+    const st = state;
+    if (st.mergeWaived) {
+      return { ok: true, text: `merge waived by the user (${st.mergeWaived.reason})`, merge: "waived" };
+    }
+    const action = decideFinish({
+      workBranch: st.workBranch,
+      baseBranch: st.baseBranch,
+      workIsAncestorOfBase: isAncestor(primaryRepoRoot, st.workBranch, st.baseBranch),
+    });
+    if (action === "no-branching") return { ok: true, text: "no work branch to merge", merge: "none" };
+    if (action === "already-merged") {
+      return { ok: true, text: `${st.workBranch} is already in ${st.baseBranch}`, merge: "none" };
+    }
+    const work = st.workBranch as string;
+    const base = st.baseBranch as string;
+    // R3-7 — WHERE can this merge even run? In a linked worktree the base
+    // branch is, by construction, checked out somewhere else, and `git
+    // checkout <base>` there fails 100% of the time. Decide the venue first.
+    const venue = decideMergeVenue({
+      base,
+      work,
+      selfPath: primaryRepoRoot,
+      worktrees: parseWorktreeList(gitWorktreeList(primaryRepoRoot)),
+    });
+    if (venue.kind === "worktree") return mergeInHoldingWorktree(ctx, venue, work, base);
+    try {
+      execFileSync("git", ["checkout", base], { cwd: primaryRepoRoot, encoding: "utf8" });
+      logBranchOp(st, { op: "checkout", from: work, to: base, at: new Date().toISOString() });
+    } catch (err) {
+      return {
+        ok: false,
+        merge: "none" as const,
+        text: `review-gate: declare_done 被拒 — 切到基准分支 ${base} 失败：` +
+          `${(err instanceof Error ? err.message : String(err)).split("\n")[0]}`,
+      };
+    }
+    const landed = runSquashLanding(primaryRepoRoot, work, base);
+    if (landed.ok) {
+      delete st.mergeConflict;
+      // WHERE THE WORKTREE IS LEFT STANDING, and it depends on whose worktree
+      // it is (R-26).
+      //
+      // An ordinary session goes back to its work branch: standing on the base
+      // would make its NEXT checkpoint illegal (a commit may only land on the
+      // work branch), for no reason the agent could see.
+      //
+      // An ORCHESTRATION CHILD borrowed this worktree from its supervisor, and
+      // it is finished with it. Measured on 2026-08-30: the child merged, went
+      // back to its own intermediate branch, and left the SUPERVISOR's
+      // worktree standing there — so the project manager's view of its own
+      // repository was two commits stale (`wc -l` on a file that had already
+      // been split, a new module reported as "does not exist"), and the next
+      // serial child spawned from it would have branched off the wrong
+      // baseline. Handing the worktree back on the BASE branch is what makes
+      // "borrowed" honest.
+      const handBackToBase = isOrchestrationChild();
+      try {
+        if (!handBackToBase) {
+          execFileSync("git", ["checkout", work], { cwd: primaryRepoRoot, encoding: "utf8" });
+          logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
+        }
+      } catch { /* the merge landed; where we stand is diagnostics */ }
+
+      logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString() });
+      persist(ctx);
+      return { ok: true, text: `squash-merged ${work} into ${base}`, merge: "merged" };
+    }
+    // The squash failed. runSquashLanding already discarded its staged/
+    // conflicted state (`reset --hard HEAD`, since a `--squash` sets no
+    // MERGE_HEAD to abort); restore the session's own checkout on the work
+    // branch so a later checkpoint is legal again.
+    try {
+      execFileSync("git", ["checkout", work], { cwd: primaryRepoRoot, encoding: "utf8" });
+      logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
+    } catch { /* best-effort: the branch may already be checked out */ }
+    if (landed.conflicted) {
+      st.mergeConflict = { branch: work, base, files: landed.files, at: new Date().toISOString() };
+    }
+    persist(ctx);
+    return {
+      ok: false,
+      merge: "none" as const,
+      text: landed.conflicted
+        ? `review-gate: declare_done 被拒 — ${work} squash 合并回 ${base} 有冲突，已回退（工作区回到 ${work}，无残留）。\n` +
+          `冲突文件：\n${landed.files.map((f) => `  ${f}`).join("\n")}\n` +
+          `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
+          "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
+        : `review-gate: declare_done 被拒 — squash 合并 ${work} → ${base} 失败（不是冲突：没有未解决路径），已回退并回到 ${work}。` +
+          `\n${(landed.error ?? "").split("\n")[0]}` +
+          "\n先手动确认两条分支的状态，再重试。",
+    };
+  }
+
+  /** Is `maybeAncestor` already contained in `branch`? */
+  function isAncestor(root: string, maybeAncestor: string | undefined, branch: string | undefined): boolean {
+    if (!maybeAncestor || !branch) return false;
+    try {
+      execFileSync("git", ["merge-base", "--is-ancestor", maybeAncestor, branch], { cwd: root, encoding: "utf8" });
+      return true;
+    } catch {
+      return false; // not an ancestor, or one of the refs does not exist
+    }
+  }
+
+
   /** HEAD commit tree OID — the content-boundary every ship binding compares against (round-8 P1). */
   function headCommitTree(root: string): string {
     try {
       return execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
     } catch {
       return "";
+    }
+  }
+
+  /**
+   * The tree the NEXT commit would publish — the worktree tree, computed the
+   * same way the ship bindings are (lib/fingerprint.ts). Empty when it cannot
+   * be read, which every caller must treat as "unknown" rather than "equal".
+   */
+  function worktreeTree(root: string): string | undefined {
+    try {
+      return worktreeTreeOid(root) || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Does the INDEX differ from HEAD? `git diff --cached --quiet HEAD` exits 1
+   * when it does, so a throw means "staged content" — and so does any error,
+   * which is the fail-closed reading: `undefined` (unknown) never authorizes
+   * the message-only exemption.
+   */
+  function hasStagedChanges(root: string): boolean | undefined {
+    try {
+      execFileSync("git", ["diff", "--cached", "--quiet", "HEAD"], {
+        cwd: root, encoding: "utf8", stdio: "ignore",
+      });
+      return false;
+    } catch (err) {
+      // Exit 1 is the documented "there are differences" answer; anything else
+      // (no HEAD, not a repo, git missing) is unknown, not "clean".
+      return (err as { status?: number }).status === 1 ? true : undefined;
     }
   }
 
@@ -1012,11 +2201,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- persistence ----------
 
-  function persist(ctx: ExtensionContext) {
-    // A snapshot session owns NO gate state and must never write one: the
-    // persist path is shared by every tool (propose_loop_goal, set_gate_mode,
-    // run_precommit …), so the inert guard lives HERE rather than per tool —
-    // writing a sidecar into the snapshot would recreate .pi/ (round Nit).
+  // `ctx` is optional because it is used for ONE thing — refreshing the status
+  // widget. A caller that has no context (the orchestration tools persist from
+  // a callback) must still be able to write the record: dropping the write
+  // instead would lose the user's plan approval on a restart.
+  function persist(ctx?: ExtensionContext) {
     // P-multi: persist the session's repo set so a same-session resume (or
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
@@ -1033,7 +2222,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Store continuation count alongside state so it survives restarts.
       pi.appendEntry(ENTRY_TYPE, { state, continuationsInjected });
     } catch { /* older Pi without appendEntry */ }
-    updateWidget(ctx);
+    if (ctx) updateWidget(ctx);
   }
 
   function restore(ctx: ExtensionContext, sessionId: string | null) {
@@ -1370,11 +2559,6 @@ export default function reviewGate(pi: ExtensionAPI) {
    * Any failure to scan yields false — the breaker keeps its normal behavior
    * rather than being silently disabled by an unreadable directory.
    */
-  function isJudgeRoleAgent(raw: string): boolean {
-    const tail = raw.trim().split(/[\\/]/).pop() ?? raw;
-    const name = tail.replace(/\.md$/i, "").trim().toLowerCase();
-    return name === "reviewer" || name === "reviewer-readonly" || name === "adviser" || name === "goal-auditor";
-  }
 
   function subagentInMotion(): boolean {
     try {
@@ -1391,14 +2575,14 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * Is a tmux judge child (reviewer / adviser / goal-auditor pane) still in
+   * Is a judge child process (reviewer / adviser / goal-auditor) still in
    * flight? The stall breaker must not cut the loop off while a judge is
    * working — its verdict is exactly what the unchanged signature is waiting
    * for (round-16 P2: only subagentInMotion was consulted, so a waiting
    * main session tripped the breaker with 'check provider status' while the
    * reviewer was mid-round).
    *
-   * Freshness bound like subagentInMotion's: a pane that has been alive
+   * Freshness bound like subagentInMotion's: a child that has been alive
    * since before STALL_MOTION_MAX_AGE_SEC is the HUNG case the breaker
    * exists for, not motion (goal-auditor P2: alive-forever must not
    * disable the breaker).
@@ -1411,7 +2595,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         const at = Date.parse(c.spawnedAt);
         return Number.isFinite(at) && at >= cutoff;
       });
-    return anyPaneAlive(fresh);
+    return fresh.some((c) => judgeProcessAlive(c.child));
   }
 
   // ---------- user-visible output channels ----------
@@ -1429,12 +2613,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** Hard cap on one transcript notice, so nothing can flood the screen. */
   const USER_NOTICE_MAX_CHARS = 4000;
 
-  /**
-   * Max characters of a sensitive path echoed INSIDE the dialog. The path is
-   * agent-chosen, so an unbounded one would push the authorization copy out of
-   * the row budget; the full path is shown in the transcript instead.
-   */
-  const SENSITIVE_PATH_DIALOG_MAX_CHARS = 60;
+  // (The sensitive-path dialog cap moved to lib/consent-request-tools.ts with
+  // the tool that echoes the path — SENSITIVE_PATH_DIALOG_MAX_CHARS.)
 
   /**
    * Put text in front of the USER, in the transcript, RIGHT NOW.
@@ -1472,18 +2652,25 @@ export default function reviewGate(pi: ExtensionAPI) {
   /**
    * `ui.confirm` with the dialog-height budget applied. Never let a caller pass
    * unbounded text straight to the host: that is the flicker bug.
+   *
+   * `signal` is what lets an ORCHESTRATOR's answer take the box off the
+   * user's screen: pi dismisses the dialog when it aborts, and the resolved
+   * `undefined` is then read as "somebody else settled this", not as a
+   * refusal (lib/orchestrator-child-channel.ts owns that distinction).
    */
   async function confirmBounded(
-    uiCtx: { ui?: { confirm?: (title: string, message: string) => Promise<boolean> } },
+    uiCtx: { ui?: { confirm?: (title: string, message: string, opts?: { signal?: AbortSignal }) => Promise<boolean> } },
     title: string,
     message: string,
     pointer?: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     const fitted = pointer === undefined
       ? fitDialogMessage(title, message)
       : fitDialogMessage(title, message, pointer);
-    return (await uiCtx.ui?.confirm?.(title, fitted.message)) === true;
+    return (await uiCtx.ui?.confirm?.(title, fitted.message, signal ? { signal } : undefined)) === true;
   }
+
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
   // user-chosen explore/normal (advisory hook) from an agent selection
   // (hook stays fully enforced). The in-session mode decision is made via the
@@ -1494,10 +2681,17 @@ export default function reviewGate(pi: ExtensionAPI) {
   function setTaskMode(mode: TaskMode, source: TaskModeSource, ctx: ExtensionContext) {
     state.taskMode = mode;
     state.taskModeSource = source;
-    // A fresh mode decision supersedes a standing question pause: loop re-arms
-    // (or the mode itself turns auto-continuation off for explore/normal).
+    // A fresh mode decision supersedes a standing question pause: an ENFORCED
+    // mode re-arms (explore/normal turn auto-continuation off by definition).
     delete state.pausedQuestion;
-    loopArmed = mode === "loop";
+    // isEnforcedMode, not `=== "loop"`: an orchestrator session is the one
+    // that needs the survival invariant MOST — it supervises children through
+    // the night — and it is also the one that can never re-arm the old way,
+    // because constraint 2 forbids it from editing code and its plan writes
+    // go through a tool, not the edit path. Disarming it here made
+    // agent_settled and the child watchdog return early, so the session could
+    // end its turn with children still running and gates unmet.
+    loopArmed = isEnforcedMode(mode);
     continuationsInjected = 0;
     completionContinuations = 0;
     loopStall = undefined; // a mode decision is a change of circumstances
@@ -1534,7 +2728,28 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  (lib/llm-classify.ts documents why a failed call is never remembered). */
   const labelCheckMemo = createVerdictMemo();
 
-  async function checkTestLabels(path: string, content: string): Promise<string | undefined> {
+  /** Status-bar line the gate owns for its LLM-guard notices. */
+  const LLM_STATUS_KEY = "review-gate-llm";
+  /**
+   * The status bar of a HOOK's context.
+   *
+   * A `tool_call` handler has no `onUpdate` (that is a tool's channel), so a
+   * multi-second classification would look like a frozen editor. The status
+   * line is the one surface a hook has, and `withSlowNotice` only ever uses
+   * it when the call is actually slow.
+   */
+  function llmNoticeUi(ctx: unknown): { setStatus?: (key: string, text: string | undefined) => void } | undefined {
+    return (ctx as { ui?: { setStatus?: (key: string, text: string | undefined) => void } } | undefined)?.ui;
+  }
+
+  async function checkTestLabels(
+    path: string,
+    content: string,
+    /** The hook's context: status-bar notices, and persisting a spent appeal pass. */
+    ctx: unknown,
+    /** Status-bar sink: an L6 classification slower than ~3s says so. */
+    notice?: SlowNoticeSink,
+  ): Promise<string | undefined> {
     if (!content) return undefined;
     let analyze: ((p: string, src: string) => { violations: Array<{ line: number; label: string }>; latinLabels: Array<{ line: number; label: string }> }) | undefined;
     let isTest: ((p: string) => boolean) | undefined;
@@ -1568,8 +2783,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { res = analyze(path, content); } catch { return undefined; }
     if (res.violations.length > 0) {
       const v = res.violations[0];
-      return `review-gate: non-English test label (L6) in ${path}:${v.line}: "${v.label.slice(0, 60)}". ` +
-        "Test descriptions must be English. Use `// review-gate: allow-non-english` on the line above to exempt one case.";
+      return refuseText("test-label", v.label,
+        `${l5BlockReason({ kind: "test-label", text: v.label })} 位置 ${path}:${v.line}。` +
+        "测试描述必须是英文；确属特例时在上一行加 `// review-gate: allow-non-english`。", ctx);
     }
     // Unicode check passed — flash semantic layer for romanized non-English.
     if (projectConfig.llmGuards.englishCheck && res.latinLabels.length > 0) {
@@ -1580,459 +2796,74 @@ export default function reviewGate(pi: ExtensionAPI) {
       const key = labelCheckMemo.key(labels);
       let verdict = labelCheckMemo.get(key);
       if (verdict === undefined) {
-        verdict = await classifyNonEnglish(classifier(), labels);
+        verdict = await withSlowNotice(
+          notice,
+          "review-gate: 正在做 L6 测试标签分类（语义判定）…",
+          () => classifyNonEnglish(classifier(), labels),
+        );
         labelCheckMemo.remember(key, verdict);
       }
       if (verdict === true) {
-        return `review-gate: test label reads as romanized non-English (L6, semantic check) in ${path}. ` +
-          "Test descriptions must be English. Use `// review-gate: allow-non-english` to exempt a deliberate case.";
+        return refuseText("test-label", labels.join("\n"),
+          `test label reads as romanized non-English (L6, semantic check) in ${path}. ` +
+          "测试描述必须是英文；确属特例时用 `// review-gate: allow-non-english` 豁免。", ctx);
       }
     }
     return undefined;
   }
 
   // ---------- L1: tool_call — sensitive files + ship gate ----------
+  //
+  // The hook's BODY lives in lib/ship-gate-hook.ts (+ its two arms,
+  // lib/ship-gate-edit-guard.ts and lib/ship-gate-bash.ts). This file keeps
+  // only the wiring and the deps: everything the decision cannot own — the
+  // session cwd, the per-repo gate state, the git measurements, the LLM
+  // classifier, the appeal recorder and the arbiter token — arrives through
+  // one injected object, so every branch of L1 is testable without a session.
+  const shipGateHookDeps: ShipGateHookDeps = {
+    noteContext: (c) => { latestCtx = c as ExtensionContext; },
+    isEditTool: (toolName) => EDIT_TOOL_NAMES.has(toolName),
+    cwd: () => cwd,
+    primaryRepoRoot: () => primaryRepoRoot,
+    taskMode: () => state.taskMode,
+    relayHandoffPath: () => state.orchestrator?.relay?.handoffPath,
+    sensitiveGrants: () => sensitiveGrants,
+    sensitiveDeclined: (absPath) => sensitiveDeclinedPaths.has(absPath),
+    nearestExistingDir,
+    loopGoalEditBlockFor,
+    checkTestLabels: (path, input, ctx) => checkTestLabels(
+      path,
+      editedTestContent(input, path),
+      ctx,
+      statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
+    ),
+    markSessionEdited: () => { sessionEdited = true; },
+    bypassActive: () => state.bypass.active,
+    projectConfig: () => projectConfig,
+    sessionRepos: () => sessionRepos,
+    knownRepoRoots,
+    enforcementStateFor,
+    stateForRepo,
+    repoLabel,
+    currentBranch,
+    worktreeTree,
+    headCommitTree,
+    hasStagedChanges,
+    unreviewedTreesSince,
+    loopGoalConfirmed: () => loopGoalConfirmed(),
+    crossRepoVerdictHint,
+    classifier,
+    notice: (ctx) => statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
+    refuseText,
+    appendLesson,
+    bypassToken: () => bypassToken,
+    setBypassToken: (token) => { bypassToken = token; },
+    clearBypassToken,
+    computeTokenBindings,
+    setLastBlockedShip: (record) => { lastBlockedShip = record; },
+  };
 
-  pi.on("tool_call", async (event, ctx) => {
-    const input = event.input as Record<string, unknown>;
-    if (EDIT_TOOL_NAMES.has(event.toolName)) {
-      const path = coalesceToolPath(input);
-      // Match on the NORMALIZED path, not the raw one. `resolve` collapses `.`
-      // and `..`, so `.pi/./precommit-cache.json` and `a/../.env` cannot slip
-      // past a pattern that anchors on path segments. (The grant lookup below
-      // already keyed on the normalized form; matching the raw string here was
-      // the inconsistency.)
-      const absPath = path ? normalizeSensitivePath(path, cwd) : undefined;
-      if (absPath && isSensitiveFile(absPath)) {
-        // A live grant means the USER already approved this exact path in a
-        // dialog (request_sensitive_edit). It is consumed on the successful
-        // tool_result, so the pass here is for one landing edit only.
-        // `cwd` (the session cwd), not ctx.cwd: the grant is keyed at
-        // request time with the same base, and a mismatched base would make a
-        // relative path miss its own grant.
-        if (!findGrant(sensitiveGrants, absPath, Date.now())) {
-          // absPath in both checks, so the hint matches what the tool would do.
-          const askable = !isGateIntegrityPath(absPath) && !sensitiveDeclinedPaths.has(absPath);
-          return {
-            block: true,
-            reason:
-              `review-gate: "${path}" matches a sensitive-file pattern (.env/keys/credentials). ` +
-              (askable
-                ? "Ask the user to edit it themselves, or call request_sensitive_edit to ask them " +
-                  "for one-time authorization for this exact path."
-                : "Ask the user to edit it themselves — this path cannot be authorized from here."),
-          };
-        }
-      }
-      // A snapshot-cwd session is a reviewer the gate itself spawned: the
-      // WORKFLOW layers stay inert there (see session_start) — in particular
-      // the L8 edit gate must NOT block the reviewer's own mutation analysis.
-      // The sensitive-file floor above already ran and stays active in every
-      // session type, and the bash ship gate below also stays active (a
-      // snapshot is a linked worktree sharing the real .git, so a push from
-      // it ships the real repo).
-        // Normal mode (“as if not installed” — consent-free first classification,
-      // /tmp clamp, no-UI session_start, or later user consent): the L6 label check
-      // (and its LLM call) is skipped. The sensitive-file guard ABOVE runs in
-      // every mode: it is a security floor, not workflow enforcement.
-      if (state.taskMode === "normal") return;
-      // Explore mode does NOT block edits: the system prompt asks the agent to
-      // prefer read-only work, but small edits during an investigation are
-      // allowed. Sensitive-file and L6 label checks above/below stay active.
-      //
-      // USER REQUIREMENT: a passed edit counts as THIS session's work — from
-      // here on, any mode change (including the first classification) goes
-      // through the normal consent rules. Blocked edits (sensitive file / L6 /
-      // L8 goal) and normal-mode edits do not set it: they change nothing.
-      //
-      // Gate-owned writes (.pi/, .pi-subagents/) are excluded for the same
-      // reason tool_result skips them: everything under those dirs is invisible
-      // to a review (excluded from the fingerprint AND from changedFiles), so
-      // no edit there is session WORK — the gate's own sidecar, a loop goal, a
-      // subagent artifact and the project config alike. Counting them would
-      // suppress the "changes pre-date this session" hint and force consent for
-      // a mode change the agent never earned. mayBeGateOwned pre-filters on
-      // the raw path, so ordinary edits pay no filesystem cost here. The
-      // exemption comes BEFORE the L8 goal gate on purpose: without it the
-      // gate would deadlock on its own files (the goal file itself, the
-      // sidecar, the project config) before a goal can even be approved.
-      if (path) {
-        const abs = path.startsWith("/") ? path : pathJoin(cwd, path);
-        // nearestExistingDir: a write creating a NEW nested gate-owned path
-        // (e.g. .pi/plan/state.json) must still resolve its repo instead of
-        // losing the exemption to the primary-repo fallback (round P2).
-        if (mayBeGateOwned(abs) && isGateOwnedPath(abs, gitRootOfDir(nearestExistingDir(pathDirname(abs))) ?? primaryRepoRoot)) {
-          return;
-        }
-      }
-      // L8 edit gate (HARD): in loop mode (or undecided, which behaves as
-      // loop) an edit/write call requires a loop goal the USER approved — for
-      // THE REPO THE WRITE LANDS IN. The goal must be negotiated BEFORE the
-      // work starts: blocking at ship time only is theatre, because by then
-      // the agent has already written its own exit contract. Each repo is
-      // checked against its own sidecar confirmation, so one repo's approved
-      // goal never opens another repo's write surface. Path-less edit calls
-      // cannot be attributed to a repo, so they fail closed against the
-      // primary repo.
-      // (Reaching this line means the write is a normal edit: the sensitive
-      // floor passed above and the gate-owned exemption already returned.)
-      const goalBlock = loopGoalEditBlockFor(absPath);
-      if (goalBlock) return goalBlock;
-      // L6 label check. NOTE the ordering: it runs AFTER the gate-owned
-      // exemption and the L8 goal gate on purpose — a gate-owned write (.pi/
-      // test files included) or a goal-blocked write pays neither the L6
-      // classification nor its LLM call.
-      if (path) {
-        const labelProblem = await checkTestLabels(path, editedTestContent(input, path));
-        if (labelProblem) return { block: true, reason: labelProblem };
-      }
-      sessionEdited = true;
-      return;
-    }
-
-    // ---------- judge-role subagent block (HARD) ----------
-    //
-    // 2026-08-27 execution model: judge roles (reviewer / adviser /
-    // goal-auditor) run ONLY as tmux judge children (review_spawn), never as
-    // subagents. A subagent call naming a judge role is refused here — the
-    // agent is told to use the tmux flow instead. This is the INVERTED
-    // successor of the snapshot-pin guard: the same failure it blocked (a
-    // judge running in the live worktree where the gate looks) is now blocked
-    // by removing the dispatch shape entirely.
-    const subagentTool = normalizeToolName(event.toolName);
-    if (subagentTool === "subagent") {
-      const agentName = typeof input.agent === "string" ? input.agent : "";
-      // Round-8 P1: the top-level agent field is NOT the only channel — a
-      // workflowScript can name a judge role INSIDE its body (runs.run({
-      // agent: "reviewer" })), and the sandbox still cannot give per-child
-      // isolation. Scan the script text with judgeRoleInScript (the retired
-      // guard's own detector, now covering all four judge roles).
-      const script = typeof input.workflowScript === "string" ? input.workflowScript : undefined;
-      const scriptPath = typeof input.workflowScriptPath === "string" ? input.workflowScriptPath : undefined;
-      const scriptText = script !== undefined
-        ? script
-        : scriptPath !== undefined
-          ? (() => {
-              try {
-                const abs = pathResolve(cwd, scriptPath);
-                return readFileSync(abs, "utf8");
-              } catch { return undefined; }
-            })()
-          : undefined;
-      const judgeName = (agentName && isJudgeRoleAgent(agentName))
-        ? agentName
-        : scriptText !== undefined ? judgeRoleInScript(scriptText) : undefined;
-      // Round-9 P2: a workflowScriptPath that cannot be read must FAIL CLOSED
-      // — the catch above yields undefined and no scan would run, letting an
-      // unreadable script dispatch a judge role unchecked.
-      const unreadableScript = scriptPath !== undefined && script === undefined && scriptText === undefined;
-      if (judgeName || unreadableScript) {
-        return {
-          block: true,
-          reason:
-            judgeName
-              ? `review-gate: \`${judgeName}\` is a judge role and runs ONLY as a tmux judge child — ` +
-                "subagent dispatch for it is retired (2026-08-27 execution model). Use the tmux flow: " +
-                "review_checkpoint → prepare_review → review_spawn → review_send → review_watch → " +
-                "record_review. (A judge dispatched as a subagent would run in your live worktree " +
-                "with no isolation at all — the exact failure the model was built to end.)"
-              : "review-gate: workflowScriptPath could not be read, so a judge role inside it cannot be ruled out — failing closed. Read the script, then dispatch non-judge work through it or use the tmux flow for judge roles.",
-        };
-      }
-    }
-
-    if (event.toolName !== "bash") return;
-    // Snapshot sessions keep the L1 ship gate ACTIVE (unlike the other inert
-    // hooks): a reviewer's disposable copy is a linked worktree sharing the
-    // real .git, so `git push`/`git commit` from it ships the real repo. The
-    // snapshot's own uncommitted diff then trips the fail-closed sidecar-less
-    // check below — exactly what should happen if a reviewer tries to ship.
-    const command = typeof input.command === "string" ? input.command : "";
-    if (!command) return;
-
-    // Normal mode (user-confirmed, or the consent-free /tmp scratchFirstMode
-    // first classification which maps loop / missing picks to normal):
-    // the ship gate,
-    // commit-message checks, and LLM ship classification are all off. This is
-    // the mode's defining behavior; explore below never gets this branch.
-    if (state.taskMode === "normal") return;
-
-    // /gate-bypass (user-authorized, reason logged in state): the L1 ship gate
-    // steps aside for the rest of the session. The git hooks mirror it via
-    // REVIEW_GATE_BYPASS=1 for commits made OUTSIDE Pi; inside the session
-    // this is the only in-session escape. (Missing before 2026-08-16: the
-    // command set state.bypass but L1 never consulted it, so a bypassed
-    // session still blocked every ship — only the hooks honored it.)
-    if (state.bypass.active) return;
-
-    // Explore mode does NOT block bash — investigations need diagnostic
-    // commands. Ship commands below stay FULLY gated in every mode except the
-    // normal mode: explore only relaxes auto-continuation and
-    // declare_done, never the ship gate.
-
-    // P0-5: detect ALL ship commands, not just the first. Block if ANY operation
-    // would ship ungated and warn about compound commands.
-    const ships = detectShipCommands(command);
-
-    // P-multi: resolve the repos this command operates on — but ONLY once
-    // there is something to check. A plain command (no ship op, not even a
-    // suspicious git/gh mention) must not pay for the per-segment git
-    // subprocesses in resolveShipRepos.
-    if (ships.length === 0
-      && !(projectConfig.llmGuards.shipDetect && isSuspiciousShipCandidate(command))) {
-      return;
-    }
-    const resolution = resolveShipRepos(command, cwd);
-    const checkRoots = new Set(resolution.repos);
-    if (resolution.ambiguous) {
-      for (const r of sessionRepos) checkRoots.add(r);
-    }
-    let anyChange = false;
-    for (const root of checkRoots) {
-      const st = enforcementStateFor(root);
-      if (st) {
-        if (st.hasCodeChange || st.hasDocChange) { anyChange = true; break; }
-      } else {
-        // Sidecar-less repo: uncommitted work still counts as a change so the
-        // fail-closed "state missing" check below actually runs (an agent that
-        // edited files via bash, not the edit tool, must not short-circuit).
-        // changedFiles() returning UNDEFINED (dir missing / bare repo / .git
-        // internals) is itself unverifiable — count it as a change so the
-        // block loop fails closed instead of silently passing.
-        const files = changedFiles(root);
-        if ((files && files.length > 0) || files === undefined) { anyChange = true; break; }
-      }
-    }
-
-    if (ships.length === 0) {
-      // Guard #4 additional layer (tighten-only): the static parser saw no ship
-      // op, but the command mentions git/gh with dynamic shell constructs the
-      // parser cannot resolve (encodings, aliases, substitutions). Ask flash
-      // whether it would ship; only a positive answer ADDS a detection — "none"
-      // or a failed call changes nothing (the command was passing anyway).
-      if (
-        projectConfig.llmGuards.shipDetect &&
-        anyChange &&
-        isSuspiciousShipCandidate(command)
-      ) {
-        const kind = await classifyShipCommand(classifier(), command);
-        if (kind !== undefined && kind !== "none") {
-          ships.push({ kind, segment: command });
-        }
-      }
-      if (ships.length === 0) return;
-    }
-
-    // Short-circuit: if no changes tracked in any touched repo, no gate to
-    // enforce. (A sidecar-less repo with uncommitted work still fails closed
-    // in the per-repo check below — it has no state here, so it never
-    // short-circuits; the block loop treats it as "state missing".)
-    if (!anyChange) return;
-
-    // AI attribution (HARD) + English-language (L5, HARD) checks on commit
-    // messages and PR title/description. L5 HARD: a predominantly non-English
-    // commit message or PR title/body blocks the ship (the majority-body
-    // policy keeps minority foreign tokens passing; the escape hatch is named
-    // in every reason so a wrong guess never strands a legitimate commit).
-    for (const s of ships) {
-      if (s.kind === "commit") {
-        const msgs = extractCommitMessages(s.segment);
-        for (const msg of msgs) {
-          if (COMMIT_MSG_FORBIDDEN.some((re) => re.test(msg))) {
-            return {
-              block: true,
-              reason: "review-gate: commit message contains AI attribution. Rewrite without it.",
-            };
-          }
-        }
-        // Guard #2 (tighten-only): regexes missed — ask flash about paraphrased
-        // AI attribution ("pair-programmed with an assistant"). Failure → pass
-        // (exact pre-LLM behavior).
-        if (msgs.length > 0 && projectConfig.llmGuards.aiAttribution) {
-          if (await classifyAiAttribution(classifier(), msgs) === true) {
-            return {
-              block: true,
-              reason: "review-gate: commit message contains AI attribution (semantic check). Rewrite without it.",
-            };
-          }
-        }
-        // L5 HARD (user policy): predominantly non-English commit messages
-        // block the ship — same majority-body policy that used to be advisory
-        // only. The escape hatch is named in the reason: a wrong guess must
-        // never permanently strand a legitimate commit.
-        const nonEn = firstNonEnglish(msgs);
-        if (nonEn) {
-          return {
-            block: true,
-            reason:
-              `review-gate: commit message is predominantly non-English: "${nonEn.slice(0, 60)}". ` +
-              "Commit messages must be English — rewrite it (git commit --amend). " +
-              "Escape hatch: the user may run /gate-bypass <reason> (in-session; REVIEW_GATE_BYPASS=1 " +
-              "only applies outside the session, at the git-hook layer).",
-          };
-        } else if (msgs.length > 0 && projectConfig.llmGuards.englishCheck
-          && !msgs.some(containsNonLatinLetter)
-          && await classifyNonEnglish(classifier(), msgs) === true) {
-          // L5 blind spot: the majority-body check passed, but a message that is
-          // 100% Latin script may still be romanized non-English (pinyin/romaji).
-          // Only run the semantic check when there is NO non-Latin letter at all
-          // — a minority foreign word already passes under the majority policy.
-          return {
-            block: true,
-            reason:
-              "review-gate: commit message reads as romanized non-English (semantic check). " +
-              "Rewrite it in English. Escape hatch: the user may run /gate-bypass <reason> " +
-              "(in-session; REVIEW_GATE_BYPASS=1 only applies outside the session).",
-          };
-        }
-      } else if (s.kind === "pr-create" || s.kind === "pr-edit") {
-        const prTexts = extractPrTextFields(s.segment);
-        const nonEn = firstNonEnglish(prTexts);
-        if (nonEn) {
-          return {
-            block: true,
-            reason:
-              `review-gate: PR title/description is predominantly non-English: "${nonEn.slice(0, 60)}". ` +
-              "PR text must be English — rewrite it (gh pr edit --title/--body). " +
-              "Escape hatch: the user may run /gate-bypass <reason> (in-session; REVIEW_GATE_BYPASS=1 " +
-              "only applies outside the session, at the git-hook layer).",
-          };
-        } else if (prTexts.length > 0 && projectConfig.llmGuards.englishCheck
-          && !prTexts.some(containsNonLatinLetter)
-          && await classifyNonEnglish(classifier(), prTexts) === true) {
-          return {
-            block: true,
-            reason:
-              "review-gate: PR title/description reads as romanized non-English (semantic check). " +
-              "Rewrite it in English. Escape hatch: the user may run /gate-bypass <reason> " +
-              "(in-session; REVIEW_GATE_BYPASS=1 only applies outside the session).",
-          };
-        }
-      }
-    }
-
-    // P-multi: check every repo this command ships FROM (checkRoots was
-    // already resolved above, before the short-circuits). Each ship segment's
-    // repo is checked with ITS OWN sidecar + fingerprint.
-    const problems: string[] = [];
-    // Label EVERY problem line once more than one repo is in play. An
-    // unlabelled "code review gate is PENDING" from the primary repo is what
-    // a real multi-repo session read as being about the repo it had just
-    // reviewed; single-repo wording is left untouched.
-    const multiRepo = checkRoots.size > 1 || knownRepoRoots().length > 1;
-    const blockedUnreviewed: string[] = [];
-    // Primary-repo fingerprint for the arbiter token path below (kept from the
-    // loop so we do not re-hash the primary repo).
-    let primaryFp: Fingerprint = { digest: "", head: "", unavailable: true };
-    // Lane requirement for THIS command. A commit is local and reversible, so
-    // the fast lane satisfies it; anything that publishes (push, gh pr) needs a
-    // run whose tests were not narrowed. A compound command is judged by its
-    // strictest segment — `git commit && git push` must satisfy the push rule.
-    const requireFullTests = ships.some((s) => requiresFullPrecommit(s.kind as ShipCommandKind));
-    for (const root of checkRoots) {
-      const st = enforcementStateFor(root);
-      const fp = computeFingerprint(root);
-      if (root === primaryRepoRoot) primaryFp = fp;
-      if (st) {
-        const unmet = unmetRequirements(st, headCommitTree(root), false, {
-          requireDocSync: projectConfig.docSync,
-          unreviewedCommits: unreviewedTreesSince(root, st.review),
-          requireFullTests,
-        });
-        for (const p of unmet) {
-          problems.push(multiRepo ? `[${repoLabel(root)}] ${p}` : p);
-        }
-        // Only a repo that is actually holding this ship up is worth pointing
-        // the cross-repo hint at; a clean repo that simply never needed a
-        // review would make the hint name an innocent bystander.
-        if (unmet.length > 0 && st.review.verdict !== "READY") blockedUnreviewed.push(root);
-      } else {
-        // No sidecar for a non-primary repo: fail-closed when it holds
-        // uncommitted work (an unreviewed diff must not ship through a repo
-        // that never initialized its gate), but allow ships from a clean repo
-        // this session has not touched. changedFiles() returning UNDEFINED
-        // (dir missing / bare repo / .git internals) is UNVERIFIABLE — that
-        // fails closed too (P0: a mis-parsed fake dir must never sail through
-        // on "zero information").
-        const files = changedFiles(root);
-        if (files && files.length > 0) {
-          problems.push(
-            `[${repoLabel(root)}] gate state missing (fail-closed) — ${files.length} uncommitted change(s) but no review-gate sidecar; initialize the gate for that repo (edit a file via the edit tool, then review + precommit there) before shipping`,
-          );
-        } else if (files === undefined) {
-          problems.push(
-            `[${repoLabel(root)}] worktree unverifiable (fail-closed) — not inside a readable git repository and no review-gate sidecar; refusing to ship there`,
-          );
-        }
-      }
-    }
-    // L8 — loop mode ships only against a goal the USER approved. The
-    // negotiation is the point: without it the agent writes its own exit
-    // contract, works to it, and grades itself against it, and a leftover file
-    // from a previous task passes for a contract too. Blocking at ship time
-    // (rather than at declare_done) is what makes the negotiation happen
-    // BEFORE the work lands — by the time `declare_done` runs, the code is
-    // already pushed and agreeing on the goal is theatre.
-    //
-    // L1 only, deliberately: the git hooks judge code facts from the sidecar
-    // and cannot see a dialog, so this requirement never enters
-    // unmetRequirements() (the ship authority they share).
-    if (state.taskMode === "loop" && !loopGoalConfirmed()) {
-      problems.push(multiRepo ? `[${repoLabel(primaryRepoRoot)}] ${LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK}` : LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
-    }
-
-    if (problems.length === 0) return;
-
-    // Single-use arbiter bypass token (lib/arbitration.ts). Only a lone,
-    // in-scope `gh pr edit` (title/body) can EVER match — the token is bound to
-    // the exact command + worktree fingerprint + review round + body-file
-    // content, and is consumed on the first authorized run. It never bypasses
-    // commit/push/pr-create (those are not arbitrable, so no token is ever
-    // issued for them) and never touches the code review loop.
-    if (ships.length === 1 && ships[0].kind === "pr-edit" && bypassToken && !primaryFp.unavailable) {
-      const parsed = parseArbitrableAction(command);
-      if (parsed.ok) {
-        const bindings = await computeTokenBindings(parsed.action, primaryFp.digest);
-        if (tokenAuthorizes(bypassToken, bindings, Date.now())) {
-          bypassToken = { ...bypassToken, consumed: true }; // consume on attempt
-          clearBypassToken();
-          try {
-            ctx.ui.notify("review-gate: single-use arbiter bypass consumed for this `gh pr edit`. Re-review after PR text is fixed.", "warning");
-          } catch { /* headless */ }
-          appendLesson(`arbiter AGENT_WINS bypass consumed: ${desc(command, ships)}`);
-          return;
-        }
-      }
-    }
-
-    // Record this block so request_arbitration can only contest a REAL block.
-    // The cross-repo hint is part of the recorded text: the arbiter should read
-    // exactly what the agent read, and "your READY is on another repo" is the
-    // single most relevant fact when a multi-repo block is being contested.
-    const blockReason =
-      `review-gate: ${desc(command, ships)} blocked — quality gates unmet:\n` +
-      problems.map((p) => `  - ${p}`).join("\n") +
-      (ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "") +
-      crossRepoVerdictHint(blockedUnreviewed);
-    lastBlockedShip = { command, problems, blockReason };
-
-    return {
-      block: true,
-      reason:
-        blockReason +
-        "\nRun the review loop to clear the gate, or /gate-bypass <reason>." +
-        (ships.length === 1 && ships[0].kind === "pr-edit"
-          ? "\nIf this block is genuinely CIRCULAR (the only fix requires this exact `gh pr edit`), you may call request_arbitration with your argument."
-          : ""),
-    };
-  });
-
-  // P0-5: describe compound vs single ship for block/lesson messages.
-  function desc(_command: string, ships: Array<{ kind: string }>): string {
-    return ships.length > 1
-      ? `compound command with ${ships.map((s) => s.kind).join(" + ")}`
-      : ships[0].kind;
-  }
+  pi.on("tool_call", (event, ctx) => evaluateToolCall(shipGateHookDeps, event, ctx));
 
   // Compute the current binding material for a parsed arbitrable action: hash
   // each --body-file's (path + content) so replacing the file after issue
@@ -2047,6 +2878,62 @@ export default function reviewGate(pi: ExtensionAPI) {
       bodyFileDigest: bodyFileDigest(action.bodyFilePaths),
     };
   }
+
+  /**
+   * Hear an appeal against an A-class TEXT block (lib/text-appeal.ts).
+   *
+   * Same shape as the `gh pr edit` arbitration below it — an independent
+   * arbiter process, fail-closed on any failure — but what it may grant is a
+   * CONTENT-bound single-use pass, never a command. The four brakes live in
+   * the pure module; this function only does the I/O around them.
+   */
+  async function arbitrateText(
+    block: AppealableBlock,
+    argument: string,
+    ctx: unknown,
+  ): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError?: boolean }> {
+    const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
+    const digest = appealDigest(block.kind, block.text);
+    const admission = admitAppeal(state.appeals, digest, projectConfig.arbiter.maxPerSession);
+    if (!admission.ok) return deny(`review-gate: ${admission.reason}`);
+
+    const verdict = await runArbiter(
+      projectConfig.arbiter.model,
+      buildTextAppealPrompt(block, argument),
+      undefined,
+      undefined,
+      TEXT_APPEAL_SYSTEM_PROMPT,
+    );
+    // Fail-closed: a spawn failure, a timeout or an unparseable answer is a
+    // GATE_WINS — and it still SPENDS the quota, so a broken arbiter cannot be
+    // retried into a grant.
+    const decision = verdict?.decision ?? "GATE_WINS";
+    state.appeals = recordAppealDecision(state.appeals, digest, block.kind, decision, new Date().toISOString());
+    persist(ctx as unknown as ExtensionContext);
+    appendLesson(`text appeal (${block.kind}) decision=${decision} reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} text=${block.text.slice(0, 120)}`);
+    if (decision === "AGENT_WINS") {
+      return {
+        content: [{
+          type: "text",
+          text: `review-gate: 仲裁者判定 AGENT_WINS — ${verdict?.reason ?? ""}\n` +
+            "已对这段内容发放一次性通行证：把**完全相同**的文本再提交一次即可通过（改一个字就失效）。" +
+            "它只放行这段文本，不影响代码审查与 precommit 门禁。",
+        }],
+        details: { decision, kind: block.kind, used: appealsUsed() },
+      };
+    }
+    if (decision === "HUMAN") {
+      return deny(
+        `review-gate: 仲裁者把判断交给人 — ${verdict?.reason ?? ""}\n` +
+        "本次不放行。要么改文案，要么请用户直接定夺（这条已计入配额）。",
+      );
+    }
+    return deny(
+      `review-gate: 仲裁者判定 GATE_WINS — ${verdict?.reason ?? "无有效裁决（fail-closed）"}。` +
+      "按门禁要求改文案；同一段内容不能再申诉。",
+    );
+  }
+
 
   function bodyFileDigest(paths: readonly string[]): string {
     if (paths.length === 0) return "";
@@ -2141,263 +3028,13 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- L7: post-PR Copilot code-review loop ----------
   //
-  // Everything the gate BELIEVES about a Copilot review is gathered here, by
-  // the extension itself: `gh` runs as an argv (never through a shell), in the
-  // target repo, with a timeout, and the JSON is interpreted by the pure
-  // lib/copilot-review.ts rules. The agent drives the loop but can never
-  // report its own review outcome — the same trust split as run_precommit.
-
-  /**
-   * Optimistic poll inside check_copilot_review: a few quick retries catch the
-   * common "Copilot answered while we were talking" case without turning the
-   * tool into a long block. Anything slower is handled by the persistent
-   * AWAITING state and the next continuation.
-   *
-   * Sized against measurements, not folklore: GitHub documents "usually less
-   * than 30 seconds", and an observed real review took 2m43s. 3 x 20s covers
-   * the documented case in a single tool call without pretending to cover the
-   * slow tail.
-   */
-  const COPILOT_CHECK_ATTEMPTS = 3;
-  const COPILOT_CHECK_DELAY_MS = 20000;
-
-  interface GhResult { ok: boolean; stdout: string; stderr: string }
-
-  /**
-   * Run one `gh` invocation. Never throws; a missing or failing gh is an
-   * ordinary result.
-   *
-   * ASYNC on purpose, and for the same reason run_precommit is: a synchronous
-   * spawn blocks the extension host's event loop, so a slow API call would
-   * freeze the session and swallow the user's ESC. The child is killed on
-   * timeout and on abort.
-   */
-  async function runGh(
-    argv: string[],
-    dir: string,
-    opts: { timeoutMs?: number; signal?: AbortSignal } = {},
-  ): Promise<GhResult> {
-    const timeoutMs = opts.timeoutMs ?? 30000;
-    // Already aborted: an AbortSignal never fires for a listener registered
-    // after the fact, so spawning here would run the whole command past the
-    // user's ESC. `ok: false` is also the answer every caller must draw from
-    // an abort — "could not tell", never a negative finding.
-    if (opts.signal?.aborted) {
-      return { ok: false, stdout: "", stderr: "aborted before gh started" };
-    }
-    return await new Promise<GhResult>((resolveResult) => {
-      let child: ChildProcess;
-      try {
-        child = spawn(argv[0], argv.slice(1), {
-          cwd: dir,
-          // GH_PAGER="" keeps gh from piping JSON into a pager; NO_COLOR keeps
-          // ANSI escapes out of the payloads we parse.
-          env: { ...process.env, GH_PAGER: "", NO_COLOR: "1" },
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-      } catch (e) {
-        resolveResult({ ok: false, stdout: "", stderr: e instanceof Error ? e.message : String(e) });
-        return;
-      }
-      let out = "";
-      let err = "";
-      let settled = false;
-      const finish = (r: GhResult) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        opts.signal?.removeEventListener("abort", onAbort);
-        resolveResult(r);
-      };
-      const kill = () => { try { child.kill("SIGKILL"); } catch { /* already gone */ } };
-      const timer = setTimeout(() => {
-        kill();
-        finish({ ok: false, stdout: out, stderr: `gh timed out after ${timeoutMs}ms` });
-      }, timeoutMs);
-      const onAbort = () => { kill(); finish({ ok: false, stdout: out, stderr: "aborted" }); };
-      opts.signal?.addEventListener("abort", onAbort, { once: true });
-      child.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
-      child.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
-      child.on("error", (e: Error) => finish({ ok: false, stdout: out, stderr: e.message }));
-      child.on("close", (code: number | null) => finish({ ok: code === 0, stdout: out, stderr: err }));
-    });
-  }
-
-  /** First meaningful line of gh's stderr, for the tool's explanation text. */
-  function ghError(res: GhResult, fallback: string): string {
-    const line = res.stderr.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
-    return line ? line.slice(0, 200) : fallback;
-  }
-
-  /** The PR for the repo's current branch, or the reason there is none. */
-  async function resolveOpenPr(dir: string, signal?: AbortSignal): Promise<{ pr?: PrSummary; error?: string }> {
-    // gh's --json field whitelist is version-dependent: `headRefOid` exists
-    // only in newer gh builds. Legacy gh (measured: 2.4.0) rejects the modern
-    // list with `Unknown JSON field: "headRefOid"` BEFORE even looking up
-    // the PR — so only retry with the legacy list when that whitelist error
-    // is actually what failed (the decision logic lives in the pure
-    // lib/copilot-review.ts decidePrView; it also makes sure THE RETRY's
-    // error is reported when it fails — the whitelist error would mask the
-    // real cause, e.g. "no pull requests found"). `analyzeCopilot` anchors
-    // proof on timestamps when head is absent (documented fallback).
-    const modern = await runGh(["gh", "pr", "view", "--json", PR_VIEW_JSON_FIELDS.modern], dir, { signal });
-    const decision = decidePrView(
-      modern,
-      isUnknownJsonFieldError(modern.stderr)
-        ? await runGh(["gh", "pr", "view", "--json", PR_VIEW_JSON_FIELDS.legacy], dir, { signal })
-        : undefined,
-    );
-    if (decision.ok) return { pr: decision.pr };
-    return { error: decision.error };
-  }
-
-  /** owner/name for the repo, preferring gh's own answer over URL parsing. */
-  async function resolveRepoSlug(dir: string, pr: PrSummary | undefined, signal?: AbortSignal): Promise<string | null> {
-    const res = await runGh(["gh", "repo", "view", "--json", "nameWithOwner"], dir, { signal });
-    return (res.ok ? parseNameWithOwner(res.stdout) : null) ?? slugFromPrUrl(pr?.url ?? null);
-  }
-
-  /**
-   * Ask GitHub for Copilot's review of one PR (reviews + review threads).
-   * Variables travel as separate argv values — nothing is interpolated into
-   * the query text.
-   */
-  async function fetchCopilotPayload(
-    dir: string,
-    slug: string,
-    prNumber: number,
-    signal?: AbortSignal,
-  ): Promise<CopilotPayload | undefined> {
-    const [owner, name] = slug.split("/");
-    if (!owner || !name) return undefined;
-    const res = await runGh([
-      "gh", "api", "graphql",
-      "-F", `owner=${owner}`,
-      "-F", `name=${name}`,
-      "-F", `number=${prNumber}`,
-      "-f", `query=${COPILOT_THREADS_QUERY}`,
-    ], dir, { signal });
-    if (!res.ok) return undefined;
-    return parseCopilotPayload(res.stdout);
-  }
-
-  /**
-   * Request the Copilot reviewer.
-   *
-   * The argv is FIXED — the only variable is a PR number that came out of
-   * `gh pr view` as an integer. No agent-authored text can reach this command,
-   * which is what makes running a `gh pr edit` (a command the ship gate
-   * blocks) sound here: the gate blocks that command because it can carry PR
-   * title and body text, and this spelling cannot.
-   *
-   * Older `gh` builds have no `@copilot` shorthand, so a failure falls back to
-   * the documented REST review-request endpoint before giving up.
-   */
-  async function requestCopilotReviewer(
-    dir: string,
-    pr: PrSummary,
-    slug: string | null,
-    signal?: AbortSignal,
-  ): Promise<GhResult> {
-    const viaCli = await runGh(["gh", "pr", "edit", String(pr.number), "--add-reviewer", "@copilot"], dir, { signal });
-    if (viaCli.ok || !slug) return viaCli;
-    return await runGh([
-      "gh", "api", "--method", "POST",
-      `repos/${slug}/pulls/${pr.number}/requested_reviewers`,
-      "-f", `reviewers[]=${COPILOT_REVIEWER_LOGIN}`,
-    ], dir, { signal });
-  }
-
-  /**
-   * Availability probe: has Copilot reviewed ANY recent PR in this repo?
-   *
-   * `undefined` when the answer could not be read (gh missing, API refusal,
-   * unparseable payload) — the caller must then assume nothing.
-   *
-   * Replaces a `suggestedActors` capability probe and a pair of
-   * "did the review request land?" read-backs. All three were measured and
-   * found unusable: the capability filter answers a different question
-   * (assignee, not reviewer) and returned no Copilot on a repo Copilot
-   * demonstrably reviews, and a request that GitHub silently drops still
-   * leaves `reviewRequests` empty on every surface — gh JSON, GraphQL and
-   * REST alike — while both request calls report success. Together they made
-   * "unsupported" the near-certain verdict for any PR that had not already
-   * been reviewed by Copilot once.
-   */
-  async function probeCopilotHistory(
-    dir: string,
-    slug: string | null,
-    signal?: AbortSignal,
-  ): Promise<boolean | undefined> {
-    const [owner, name] = (slug ?? "").split("/");
-    if (!owner || !name) return undefined;
-    const res = await runGh([
-      "gh", "api", "graphql",
-      "-F", `owner=${owner}`,
-      "-F", `name=${name}`,
-      "-F", `count=${COPILOT_HISTORY_PR_COUNT}`,
-      "-f", `query=${COPILOT_HISTORY_QUERY}`,
-    ], dir, { signal });
-    if (!res.ok) return undefined;
-    return parseCopilotHistoryProbe(res.stdout);
-  }
-
-  /**
-   * Decide availability for one repo, cheapest evidence first.
-   *
-   * Remembered evidence short-circuits the query entirely; the history probe
-   * only runs when nothing is known yet. `confirmed` tells the caller whether
-   * the answer is worth remembering in the sidecar (policy is not evidence).
-   */
-  async function resolveCopilotSupport(
-    dir: string,
-    slug: string | null,
-    st: GateState,
-    opts: { onPr?: boolean; signal?: AbortSignal } = {},
-  ): Promise<{ support: CopilotSupport; confirmed: boolean }> {
-    const remembered = st.copilot?.supportConfirmed === true;
-    if (remembered || opts.onPr === true) {
-      return { support: "CONFIRMED", confirmed: true };
-    }
-    const history = await probeCopilotHistory(dir, slug, opts.signal);
-    const support = decideCopilotSupport({
-      history,
-      slug,
-      owners: projectConfig.copilotReview.owners,
-    });
-    return { support, confirmed: support === "CONFIRMED" };
-  }
-
-  /**
-   * The thread list an agent must carry to the user when a cycle is released
-   * with findings still open. Released ≠ handled: the gate stops blocking, the
-   * agent still owes the user an explanation.
-   */
-  function copilotUnhandledText(threads: CopilotThread[]): string {
-    if (threads.length === 0) return "";
-    const lines = threads.slice(0, 20).map((t) =>
-      `  - ${t.path ?? "(no file)"}${t.line ? ":" + t.line : ""} — ${t.excerpt}`);
-    return `\n${threads.length} Copilot thread(s) are still unhandled — tell the user about them ` +
-      `before you finish:\n${lines.join("\n")}`;
-  }
-
-  /**
-   * The same duty, for the paths that release WITHOUT a readable payload.
-   *
-   * These are the ones that actually happen: the PR vanished, the slug cannot
-   * be resolved, `gh` lost its credentials, the API refused. They release to
-   * keep the task moving — and used to do it in total silence, even when the
-   * previous check had recorded open Copilot findings. The count is the only
-   * thing left (there is no payload to list from), so the count is what gets
-   * reported.
-   */
-  function copilotAbandonedText(prev: CopilotReviewState | undefined): string {
-    const open = prev?.openThreads ?? 0;
-    if (open <= 0) return "";
-    return `\n${open} Copilot thread(s) were still waiting on you at the last check and are now ` +
-      "being abandoned unverified — tell the user about them before you finish" +
-      `${prev?.pr ? ` (PR #${prev.pr})` : ""}.`;
-  }
+  // The two tools that drive it (`request_copilot_review`,
+  // `check_copilot_review`) live in lib/copilot-review-tools.ts, and the `gh`
+  // access they run on in lib/copilot-gh.ts — their wiring is further down.
+  // What stays here is what the REST of the extension consults: whether the
+  // loop is active for a repo, the completion-only problems it reports, and
+  // the directory `gh` must run in (both closures over this extension's own
+  // project config, primary root and cwd).
 
   /** Is the L7 loop active for this repo's state? (mode + project config) */
   function copilotEnabled(st: GateState): boolean {
@@ -2436,11 +3073,12 @@ export default function reviewGate(pi: ExtensionAPI) {
    * cannot satisfy one repo's goal and then write into another.
    */
   function loopGoalConfirmed(root: string = primaryRepoRoot, st: GateState = state): boolean {
-    const goal = readLoopGoal(root);
+    const goal = readSessionLoopGoal(root);
     if (!goal.present || !st.loopGoal) return false;
     let raw: string;
     try {
-      raw = readFileSync(pathJoin(root, LOOP_GOAL_RELPATH), "utf8");
+      raw = readFileSync(loopGoalPathIn(root), "utf8");
+
     } catch {
       return false; // unreadable ⇒ unapproved (fail-closed)
     }
@@ -2461,6 +3099,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     // explore never gates on the goal (loopGoalEditGate would return true
     // anyway) — skip the lookup before paying for it.
     if (state.taskMode === "explore") return undefined;
+    // The session started on top of changes it did not make. Until the user
+    // has said what those are (baseline / handled / discarded), an edit would
+    // silently mix them into what this session ships — so it is refused at
+    // the same layer as the unapproved goal.
+    if (state.worktreeDirty && !state.worktreeDirty.settled) {
+      return {
+        block: true,
+        reason:
+          "review-gate: 会话开始时工作区有未提交改动，尚未与用户确认处置——先调 setup_workspace。" +
+          `\n${state.worktreeDirty.files.slice(0, 12).map((f) => `  ${f}`).join("\n")}` +
+          (state.worktreeDirty.files.length > 12 ? `\n  …还有 ${state.worktreeDirty.files.length - 12} 个` : "") +
+          "\nsetup_workspace 会让用户三选一（接受为基线 / 已自行处理重检 / 门禁代执行丢弃），随后建立工作分支。",
+      };
+    }
     const goalRoot = absPath
       ? // Every write pays the real per-edit git resolution: a fast path that
         // attributed anything under primaryRepoRoot to the primary repo would
@@ -2504,24 +3156,25 @@ export default function reviewGate(pi: ExtensionAPI) {
   /**
    * Goal text handed to spawned reviewers. The prompt copy is capped
    * (LOOP_GOAL_MAX_CHARS), and a truncated goal's "read the file for the
-   * rest" pointer would dangle — the snapshot carries no `.pi/` any more
-   * (see SNAPSHOT_CARRIED_FILES) — so a truncated goal appends the REAL
-   * file path instead.
+   * rest" pointer would be useless without an absolute location — a judge
+   * child may be reading from a throwaway worktree of its own — so a
+   * truncated goal appends the REAL file path instead.
    */
   function goalTextForReviewers(root: string): { text: string; truncated: boolean } | undefined {
-    const goal = readLoopGoal(root);
+    const goal = readSessionLoopGoal(root);
     if (!goal.present) return undefined;
     // Use readLoopGoal's OWN truncated boolean — never sniff the display
     // marker string (round-17 Nit: the marker is display, the fact is the
     // flag).
     if (!goal.truncated) return { text: goal.text, truncated: false };
-    return { text: goal.text + "\n(全文: " + pathJoin(root, LOOP_GOAL_RELPATH) + ")", truncated: true };
+    return { text: goal.text + "\n(全文: " + loopGoalPathIn(root) + ")", truncated: true };
+
   }
   // ---------- track edits & precommit results ----------
 
   pi.on("tool_result", async (event, ctx) => {
-    // Inert in snapshot sessions (see session_start): a reviewer's own edits
-    // inside its disposable copy must not arm or disturb any gate state.
+    // E — a completed tool call is forward progress for the child health reading.
+    noteChildProgress();
     // 1. Edits: only arm gate on success.
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       if (event.isError) {
@@ -2604,6 +3257,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           if (!s.sessionEditedFiles.includes(rel)) s.sessionEditedFiles.push(rel);
           if (s.review.verdict === "READY") s.review.verdict = "PENDING";
           if (s.precommit.verdict === "PASS") s.precommit.verdict = "NOT_RUN";
+          // A NEW EDIT UN-FINISHES THE TASK (round-2 hardening). The
+          // completion record is what a supervising orchestrator reads to
+          // decide a child is `done`; a session that starts editing again is
+          // working, whoever asked it to — including a human typing straight
+          // into the pane, which no orchestration tool can observe.
+          if (s.completion) delete s.completion;
           loopArmed = true;
           if (s.pausedQuestion) delete s.pausedQuestion;
           dirty = true;
@@ -2653,9 +3312,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         if (state.review.verdict === "READY") state.review.verdict = "PENDING";
         if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
+        // Same as the cross-repo branch above: editing again means this task
+        // is not finished any more, so the completion an orchestrator reads
+        // must go with it.
+        if (state.completion) delete state.completion;
         loopArmed = true;
         // The agent resumed working on its own — a standing question pause
-        // (pause_for_question) is moot; clear it so the loop enforces again.
+        // (ask_user) is moot; clear it so the loop enforces again.
         if (state.pausedQuestion) delete state.pausedQuestion;
         dirty = true;
         clearBypassToken(); // any edit invalidates a standing arbiter bypass
@@ -2762,15 +3425,20 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- review_checkpoint tool (the pre-review commit channel) ----------
 
-  pi.registerTool({
+  // INTERNAL, not registered (philosophy three): the checkpoint is a step of
+  // `judge_submit`, not a thing to sequence by hand.
+  internalTool({
     name: "review_checkpoint",
     label: "Review Checkpoint",
     description:
-      "Commit the current worktree as a checkpoint commit — the ONLY way to commit before a READY " +
+      "ADVANCED / internal: `judge_submit({role:\"reviewer\"})` runs this itself as step 2 of the " +
+      "submission chain (and stamps the checkpoint marker on the subject) — call it directly only " +
+      "to freeze work without submitting it. " +
+      "Commits the current worktree as a checkpoint commit — the ONLY way to commit before a READY " +
       "review. Requires a precommit PASS (it bypasses READY only, never precommit), validates the " +
-      "message is English (L5), commits everything (git add -A), and records the commit sha. " +
-      "Every later review round judges baseline..HEAD, so checkpoints are the review unit: commit " +
-      "after each batch of fixes, before sending the round to the reviewer.",
+      "message is English (L5), commits everything (git add -A), records the commit sha and the " +
+      "branch it landed on, and refuses any branch that is not this session's work branch. " +
+      "Every review round judges baseline..HEAD, so checkpoints are the review unit.",
     parameters: Type.Object({
       message: Type.String({ description: "English commit message (Conventional Commits style)" }),
       repo: Type.Optional(Type.String({
@@ -2783,6 +3451,20 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const root = target.root;
+      // A checkpoint IS a commit, so it obeys the same branch rule — and
+      // FAIL-CLOSED, like every other commit: no work branch on record means
+      // no commit, or a session with no branch of its own would quietly
+      // checkpoint onto whatever it started on (main included). The branch is
+      // compared against the TARGET repo's own record, not the primary's.
+      const checkpointState = root === primaryRepoRoot ? state : stateForRepo(root);
+      const where = commitBranchAllowed({ workBranch: checkpointState.workBranch, currentBranch: currentBranch(root) });
+      if (!where.allowed) {
+        return {
+          content: [{ type: "text", text: `review-gate: review_checkpoint rejected — ${where.reason}` }],
+          details: { committed: false },
+          isError: true,
+        };
+      }
       const message = String(params.message ?? "").trim();
       if (message.length === 0) {
         return {
@@ -2795,29 +3477,54 @@ export default function reviewGate(pi: ExtensionAPI) {
       // the AI-attribution guard — so this tool must replicate it.
       const attribution = COMMIT_MSG_FORBIDDEN.some((re) => re.test(message));
       if (attribution) {
-        return {
-          content: [{ type: "text", text: "review-gate: review_checkpoint rejected — commit message contains AI attribution. Rewrite without it." }],
-          details: { committed: false },
-          isError: true,
-        };
+        const reason = refuseText("ai-attribution", message,
+          "review_checkpoint rejected — commit message contains AI attribution. Rewrite without it.", ctx);
+        if (reason) {
+          return { content: [{ type: "text", text: reason }], details: { committed: false }, isError: true };
+        }
       }
-      const nonEn = firstNonEnglish([message]);
+      // L5 (HARD): the same single rule as the bash commit path, through the
+      // same function — no non-Latin letter in subject or body.
+      const nonEn = nonEnglishCommitMessage(message);
       if (nonEn) {
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: review_checkpoint rejected — the message is predominantly non-English (\"${nonEn.slice(0, 60)}\"). Write it in English.`,
-          }],
-          details: { committed: false },
-          isError: true,
-        };
+        const kind: AppealKind = nonEn.part === "subject" ? "commit-subject" : "commit-body";
+        const reason = refuseText(kind, nonEn.text,
+          `review_checkpoint rejected — ${l5BlockReason({ kind, text: nonEn.text })} 用英文重写。`, ctx);
+        if (reason) {
+          return { content: [{ type: "text", text: reason }], details: { committed: false }, isError: true };
+        }
       }
       const st = stateForRepo(root);
-      if (st.precommit.verdict !== "PASS") {
+      // R-22 — WHAT `/gate-bypass` COVERS, decided by the user on 2026-08-30.
+      //
+      // The measured deadlock: a child's precommit failed for a reason that
+      // had nothing to do with its change (an environment variable the
+      // orchestration injected poisoned the test subprocess, R-15). The user
+      // authorized `/gate-bypass`, the bypass took effect — and `judge_submit`
+      // still refused, because the bypass only ever covered the SHIP gate. So
+      // the lane had no way to finish: it could not pass precommit, could not
+      // reach a review, and could not close out. Unattended, that is a dead
+      // stop until a human wakes up.
+      //
+      // A bypass is the USER's authorization, and it now covers this
+      // prerequisite too — but it never hides: the round is recorded as
+      // bypassed, the reviewer is told, and declare_done says so.
+      //
+      // SCOPE, stated because it is easy to miss (round-1 Nit): the bypass is
+      // a SESSION-level switch, not a one-shot token. Once the user grants it,
+      // every later checkpoint in that session skips this prerequisite too —
+      // which is why each of them stamps `precommitBypassed` and why the
+      // receipt below says so out loud rather than only the first time.
+      const precommitBypassed = st.bypass.active;
+
+      if (!precommitBypassed && st.precommit.verdict !== "PASS") {
         return {
           content: [{
             type: "text",
-            text: `review-gate: review_checkpoint rejected — precommit is ${st.precommit.verdict}; run run_precommit and get a PASS first (a checkpoint bypasses READY only, never precommit).`,
+            text: `review-gate: checkpoint rejected — precommit is ${st.precommit.verdict} (a checkpoint bypasses READY only, never precommit). ` +
+              "`judge_submit({role:\"reviewer\"})` runs the full lane before this step, so fix what it reported and submit the round again. " +
+              "如果 precommit 是因为与本次改动无关的环境问题失败的，那是用户的决定：让用户 `/gate-bypass <理由>`，" +
+              "bypass 会连这条前置一起覆盖，并把「本轮 precommit 被 bypass」写进记录。",
           }],
           details: { committed: false },
           isError: true,
@@ -2826,16 +3533,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Round-4 P2: dev-flow requires the FULL suite (lint + typecheck +
       // build + test) before a checkpoint and 送审 — a fast-lane PASS would
       // otherwise let a round go to review with the suite never run.
-      if (st.precommit.testScope !== "full") {
+      if (!precommitBypassed && st.precommit.testScope !== "full") {
         return {
           content: [{
             type: "text",
-            text: `review-gate: review_checkpoint rejected — the precommit PASS covers ${st.precommit.testScope ?? "unknown"}; run run_precommit with mode "full" first (dev-flow: 全量通过才允许送审).`,
+            text: `review-gate: checkpoint rejected — the precommit PASS covers ${st.precommit.testScope ?? "unknown"}, not the full suite (dev-flow: 全量通过才允许送审). \`judge_submit({role:"reviewer"})\` always runs the FULL lane, so re-submit the round rather than reusing this narrowed PASS.`,
           }],
           details: { committed: false },
           isError: true,
         };
       }
+
       try {
         // The L3 pre-commit hook would reject this commit (no READY yet). The
         // tool IS the gate here: it verified precommit PASS (full) + English
@@ -2877,6 +3585,44 @@ export default function reviewGate(pi: ExtensionAPI) {
             isError: true,
           };
         }
+        // FILE-SIZE gate (task book §9). Runs HERE, at the checkpoint, not at
+        // edit time: blocking mid-write would fire while a file is half
+        // written and force a blind restructure, whereas at the checkpoint
+        // the whole shape exists and splitting it is mechanical. Only a NEW
+        // oversized file blocks — an existing one gets a reminder, because it
+        // grew a hundred lines at a time and forcing a rushed split at the
+        // end of a task produces worse modules than the sprawl.
+        const sizeFacts = paths
+          .filter(isSizeJudgedFile)
+          .map((p) => {
+            let content: string;
+            try {
+              content = readFileSync(pathResolve(root, p), "utf8");
+            } catch {
+              return undefined; // deleted (or unreadable): nothing to judge
+            }
+            const lines = content.length === 0 ? 0 : content.replace(/\n$/, "").split("\n").length;
+            let isNew = false;
+            try {
+              execFileSync("git", ["cat-file", "-e", `HEAD:${p}`], { cwd: root, stdio: "ignore" });
+            } catch {
+              isNew = true; // not in HEAD ⇒ this change creates it
+            }
+            return { path: p, lines, isNew };
+          })
+          .filter((f): f is { path: string; lines: number; isNew: boolean } => f !== undefined);
+        const sizeCheck = fileSizeVerdict(sizeFacts);
+        if (sizeCheck.blocking.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: "review-gate: review_checkpoint rejected — " + formatFileSizeVerdict(sizeCheck),
+            }],
+            details: { committed: false, oversizedNewFiles: sizeCheck.blocking.length },
+            isError: true,
+          };
+        }
+
         const sweptIn = paths;
         execFileSync("git", ["add", "-A"], { cwd: root, encoding: "utf8" });
         execFileSync("git", ["commit", "-m", message], {
@@ -2894,18 +3640,45 @@ export default function reviewGate(pi: ExtensionAPI) {
         try {
           prevSha = execFileSync("git", ["rev-parse", "HEAD^"], { cwd: root, encoding: "utf8" }).trim();
         } catch { /* root commit: no parent — prepare falls back to <sha>^ */ }
-        st.checkpoint = { sha, prevSha, at: new Date().toISOString() };
+        st.checkpoint = {
+          sha,
+          prevSha,
+          at: new Date().toISOString(),
+          // R-22 — the bypass travels WITH the checkpoint. A round that
+          // skipped precommit on the user's authorization must be legible
+          // later: the reviewer is told, and declare_done says it out loud.
+          ...(precommitBypassed ? { precommitBypassed: true } : {}),
+        };
+
+        // Which branch did this checkpoint land on? declare_done reads the
+        // log to merge the right branch back into the right base.
+        logBranchOp(st, {
+          op: "checkpoint_commit",
+          sha,
+          branch: currentBranch(root) ?? "(detached)",
+          at: new Date().toISOString(),
+          message: message.split("\n")[0].slice(0, 120),
+        });
         persistRepo(ctx as unknown as ExtensionContext, root);
         return {
           content: [{
             type: "text",
             text: `review-gate: checkpoint committed ${sha.slice(0, 12)} — \"${message}\". This commit is the review unit for the next round (baseline..HEAD).` +
               `\n\nCHECKPOINT_SHA=${sha}\nFiles: ${sweptIn.length} — ${sweptIn.slice(0, 20).join(", ")}${sweptIn.length > 20 ? " …" : ""}` +
-              "\n\nThe required full precommit already ran typecheck + build + the COMPLETE test suite on this exact content " +
-              "(cache: an unchanged input set is reused in seconds — do NOT manually re-run the full suite or `tsc`; " +
-              "run only targeted tests for files you keep editing, and let run_precommit be the single full gate).",
+              (precommitBypassed
+                // R-22: never let a bypassed round read like a clean one.
+                ? "\n\n**本轮 precommit 被 `/gate-bypass` 覆盖**（用户授权）：全量测试并没有在这份内容上跑过。" +
+                  "这条事实已经记进 checkpoint，reviewer 与 declare_done 都会看到 —— 请在送审说明里写清 bypass 的理由。" +
+                  "注意 bypass 是**会话级**的：在本会话里它对之后每一次 checkpoint 同样生效，" +
+                  "根因修好之后请让用户 `/gate-reset`（或重开会话），别让它一直挂着。"
+
+                : "\n\nThe required full precommit already ran typecheck + build + the COMPLETE test suite on this exact content " +
+                  "(cache: an unchanged input set is reused in seconds — do NOT manually re-run the full suite or `tsc`; " +
+                  "run only targeted tests for files you keep editing, and let the round's own full lane be the single gate).") +
+              (sizeCheck.advisory.length ? "\n\n" + formatFileSizeVerdict(sizeCheck) : ""),
           }],
-          details: { committed: true, sha },
+          details: { committed: true, sha, precommitBypassed },
+
         };
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
@@ -2918,31 +3691,712 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- review_spawn / review_send / review_read / review_close ----------
+  // ---------- judge_submit + the judge tool families' wiring ----------
+
+  /**
+   * Everything that has to happen BEFORE a reviewer can judge, run by the gate.
+   *
+   * The agent used to do this by hand — run_precommit, review_checkpoint,
+   * prepare_review, review_spawn — four calls in a fixed order, each with its
+   * own failure mode, none of them creative work. Now it says what it changed
+   * and the gate does the rest, or sends the round back with the reason.
+   *
+   * Each step is the TOOL's own implementation (`callTool`), never a copy:
+   * the mechanical checks (precommit receipt, English message, checkpoint
+   * marker, baseline..HEAD) all still run exactly once, where they live.
+   */
+  async function submitForReview(input: {
+    root: string;
+    note: string;
+    message?: string;
+    reason?: string;
+    ctx: unknown;
+    /** Progress sink for the chain (each step publishes as it starts/ends). */
+    progress?: ProgressReporter;
+  }): Promise<{ ok: true; taskText: string; streamPath?: string } | { ok: false; text: string }> {
+    // 1. It has to build. A full lane, because a checkpoint that only ran the
+    //    related tests cannot clear the ship gate later anyway.
+    //
+    //    UNLESS the user issued a `/gate-bypass` (R-22). Then this step is
+    //    SKIPPED rather than run-and-ignored: re-running a precommit that is
+    //    failing for an environment reason costs minutes and changes nothing,
+    //    and the whole point of the bypass is that the user already decided
+    //    this round ships without it. The fact is recorded on the checkpoint
+    //    and repeated to the reviewer.
+    const bypassActive = stateForRepo(input.root).bypass.active;
+    if (bypassActive) {
+      input.progress?.step("precommit (被 /gate-bypass 覆盖，跳过)");
+      input.progress?.done("BYPASSED");
+    } else {
+    input.progress?.step("precommit (full)");
+
+    const pre = await callTool(
+      "run_precommit",
+      { mode: "full", repo: input.root },
+      input.ctx,
+      // The runner's live log is this step's tail: the 92s (median) precommit
+      // is where the chain spends most of its time, so it is where the human
+      // needs to see something moving.
+      input.progress ? (partial) => input.progress?.tail(partial.content.map((c) => c.text).join("\n")) : undefined,
+    );
+    if (pre.details?.verdict !== "PASS") {
+      input.progress?.fail(String(pre.details?.verdict ?? "no verdict"));
+      return {
+        ok: false,
+        text: "review-gate: 本轮未送审 — precommit 没过。\n" + toolText(pre) +
+          "\n修好后重新 judge_submit({role:\"reviewer\"})；无需手动再跑 precommit。" +
+          "\n如果它是因为**与本次改动无关的环境问题**失败的（例如注入的环境变量污染了测试子进程），" +
+          "那是用户的决定：让用户 `/gate-bypass <理由>` —— bypass 会连这条前置一起覆盖，并全程留痕。",
+      };
+    }
+    input.progress?.done("PASS");
+    }
+
+    // 2. Freeze it. The reviewed unit is a commit, and the message says so —
+    //    a checkpoint must be recognizable as one in the history.
+    //
+    //    A CLEAN worktree is not a failure here: it means this round is
+    //    already frozen (a retry after step 3 failed, or an agent that
+    //    committed through the tool itself). Treating it as one is what turned
+    //    a single refused prepare into a permanent dead end — the commit was
+    //    already in, so every retry died at this step. Only a REFUSAL
+    //    (isError) stops the chain.
+    const message = checkpointMessage(input.message ?? input.note);
+    input.progress?.step("checkpoint 提交");
+    const commit = await callTool("review_checkpoint", { message, repo: input.root }, input.ctx);
+    if (commit.isError) {
+      input.progress?.fail("被拒");
+      return {
+        ok: false,
+        text: "review-gate: 本轮未送审 — checkpoint 提交被拒。\n" + toolText(commit),
+      };
+    }
+    input.progress?.done(typeof commit.details?.sha === "string" ? String(commit.details.sha).slice(0, 12) : "worktree 已冻结");
+    // 3. Compute the range and the findings stream, and take the ready-made
+    //    reviewer task text. `reason` rides along for the polish gate: without
+    //    it a round after two READYs could never be submitted through the one
+    //    sanctioned entry point.
+    input.progress?.step("prepare（算 baseline..HEAD）");
+    const prepared = await callTool(
+      "prepare_review",
+      { repo: input.root, ...(input.reason ? { reason: input.reason } : {}) },
+      input.ctx,
+    );
+    if (prepared.details?.prepared === false || prepared.isError) {
+      input.progress?.fail("被拒");
+      return {
+        ok: false,
+        text: "review-gate: 本轮未送审 — prepare_review 被拒。\n" + toolText(prepared),
+      };
+    }
+    input.progress?.done(typeof prepared.details?.range === "string" ? String(prepared.details.range) : "范围已注册");
+    const taskText = extractTaskText(toolText(prepared));
+    return {
+      ok: true,
+      taskText: `本轮改动说明（来自主会话）：\n${input.note}\n\n${taskText}`,
+      // The findings stream is the agent's half of the round: it fixes what
+      // the reviewer confirms WHILE the reviewer works. Dropping the path
+      // here would leave that channel written but unread.
+      ...(typeof prepared.details?.stream === "string" ? { streamPath: prepared.details.stream } : {}),
+    };
+  }
+
+  /**
+   * The GOAL AUDIT, run by the gate from inside `propose_loop_goal`.
+   *
+   * WHY THIS IS NOT A SEPARATE TOOL ANY MORE (philosophy two). The audit was
+   * three calls in a fixed order — `judge_submit({role:"goal-auditor"})`,
+   * wait for the process, then `record_goal_prereview` — and the agent had to
+   * sequence them correctly every time, for a chain in which it makes no
+   * decision at all. It now says only "here is the draft"; the gate builds
+   * the auditor's task, runs the judge process, waits for it to exit, records
+   * the verdict against the exact text it dispatched, and either continues to
+   * the user's dialog or hands the objections back.
+   *
+   * IT BLOCKS, and that is deliberate. `propose_loop_goal` is a minutes-long
+   * call now, because the alternative — return early and make the agent come
+   * back — is exactly the multi-step dance this removes. The findings still
+   * stream while it runs, so the draft can be fixed against real objections
+   * rather than a summary at the end.
+   *
+   * The recording itself is unchanged and still mechanical: the verdict binds
+   * to the sha256 of the audited text (only P0/P1 block), so a PASS can never
+   * belong to a different draft than the one the user is about to see.
+   */
+  async function runGoalAudit(input: {
+    root: string;
+    goalText: string;
+    ctx: unknown;
+    progress?: ProgressReporter;
+  }): Promise<{ ok: true } | { ok: false; text: string }> {
+    const { root, goalText, ctx } = input;
+    input.progress?.step("组装 goal 审计任务");
+    const prepared = await callTool("prepare_goal_audit", { goal: goalText, repo: root }, ctx);
+    if (prepared.isError) {
+      input.progress?.fail("被拒");
+      return { ok: false, text: "review-gate: goal 审计任务无法生成。\n" + toolText(prepared) };
+    }
+    const streamPath = pathJoin(root, ".pi", "review-stream", `goal-${goalTextHash(goalText).slice(0, 12)}.jsonl`);
+    try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
+    const task = `${extractTaskText(toolText(prepared))}\n\n${buildStreamDirective(streamPath)}`;
+    input.progress?.done("已生成");
+
+    input.progress?.step("goal-auditor 审计中（这一步是分钟级的）");
+    const startedAt = new Date().toISOString();
+    const dispatch = dispatchJudgeRound({
+      root,
+      role: "goal-auditor",
+      title: `goal-auditor-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`,
+      task,
+      // A previous audit still running is judging a DIFFERENT draft (this one
+      // has no PASS yet), so it cannot answer the question being asked here.
+      fresh: true,
+      streamPath,
+    });
+    if (!dispatch.ok) {
+      input.progress?.fail("spawn 失败");
+      return { ok: false, text: `review-gate: goal 审计没能启动 — ${dispatch.error ?? "judge 进程未能启动"}` };
+    }
+    // The draft is on record only AFTER the dispatch is accepted: a verdict
+    // must never be recorded against text no auditor ever read.
+    pendingGoalAudits.set(root, { draft: goalText, startedAt });
+    const child = judgeChildByRole(root, "goal-auditor");
+    if (!child) {
+      input.progress?.fail("registry 里找不到刚起的 judge");
+      return { ok: false, text: "review-gate: goal 审计已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。" };
+    }
+    // Wait through the SAME implementation `judge_wait` uses (three criteria:
+    // the process exited, its exit-code file landed, or a verdict fence is
+    // already in this round's stdout). Re-using it means the audit cannot
+    // hang on a criterion the tool would have accepted.
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx);
+    // Recording is idempotent: the exit watcher may have got there first, and
+    // the pending-draft entry it consumes makes the second call a no-op.
+    const note = await recordJudgeConclusion(child.sessionId);
+    // O-6 — WHOEVER DISPATCHED IT CLOSES IT. This goal-auditor is the gate's
+    // OWN internal implementation of `propose_loop_goal`; the agent never asked
+    // for it and never sees it in any receipt. Leaving it registered made
+    // `declare_done` block on "a judge child is still open" that the caller was
+    // never told about (the round-5 P1, in the orchestration twin). Its verdict
+    // is already recorded above, so close it now — the transcript stays on disk
+    // and a re-audit resumes the same session by id.
+    await callTool("judge_close", { role: "goal-auditor", repo: root }, ctx);
+
+    input.progress?.done("审计完成");
+
+    const goalSt = root === primaryRepoRoot ? state : stateForRepo(root);
+    if (goalPrereviewPassed(goalSt.goalPrereview, goalText)) return { ok: true };
+    return {
+      ok: false,
+      text:
+        "review-gate: goal 审计**没过**，用户那一关连问都没问 —— 先按下面的 findings 改草稿，" +
+        "改完直接再调一次 `propose_loop_goal`（门禁会重新审计；裁决绑定文本，改一个字就要重审）。\n\n" +
+        (note ?? `审计记录：${goalSt.goalPrereview?.verdict ?? "NONE"}`) +
+        `\n\nfindings 流：${streamPath}`,
+    };
+  }
+
+  /**
+   * THE PLAN AUDIT, run by the gate from inside `orchestrator_plan`'s submit.
+   *
+   * The goal audit's twin, deliberately identical in shape (philosophy two):
+   * ONE call builds the auditor's task, runs the judge process, waits for it
+   * to exit, reads THIS round's output, adjudicates it and records the verdict
+   * against the plan's canonical hash. The orchestrator submits a plan and
+   * gets back either the user's dialog or a list of objections — it never
+   * sequences an audit by hand, and it never sees a half-finished one.
+   *
+   * WHY A PLAN NEEDS THIS AT ALL: a wrong plan is more expensive than a wrong
+   * goal. It decides what several children may touch, in what order, and how
+   * many run at once — a missed boundary puts two writers in one file. The
+   * user asked for the asymmetry (goal audited, plan not) to be closed.
+   *
+   * IT BLOCKS for minutes, for the same reason `propose_loop_goal` does.
+   *
+   * The ROLE is `goal-auditor` (user decision): the same judgement — "is this
+   * contract checkable, and does it match the repository?" — so no fourth
+   * role, no new agent file, no new model pin.
+   */
+  async function runPlanAudit(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }> {
+    // FAIL-CLOSED AROUND THE WHOLE CHAIN. Anything unexpected in here — a
+    // judge that could not be spawned, an IO error reading its output — must
+    // become "the plan was not audited", never an exception that escapes into
+    // the tool and leaves the orchestrator unable to tell whether a dialog is
+    // about to appear.
+    try {
+      return await auditPlanRound(plan);
+    } catch (error) {
+      return {
+        ok: false,
+        text:
+          `review-gate: plan 审计过程本身出错了（${(error as Error).message}）——` +
+          "什么都没有记录，plan **没有**被送到用户面前。直接再 `submit` 一次即可重跑。",
+      };
+    }
+  }
+
+  async function auditPlanRound(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }> {
+
+    const root = primaryRepoRoot;
+    const hash = planAuditHash(plan);
+    // A re-audit is handed the previous round's verdict and objections — the
+    // same carryover contract the goal audit has: settled material gets a
+    // consistency scan, not a re-derivation.
+    const previous = state.planAudit;
+    const carryover = previous && previous.hash !== hash
+      ? formatPlanAuditCarryover(previous)
+      : undefined;
+    const task = buildPlanAuditTask(plan, {
+      ...(carryover === undefined ? {} : { carryover }),
+      repoRoot: root,
+      ...(state.sessionId ? { sessionId: state.sessionId, sessionDir: sessionDirForCwd(cwd) } : {}),
+    });
+
+    const dispatch = dispatchJudgeRound({
+      root,
+      role: "goal-auditor",
+      title: `plan-auditor-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`,
+      task,
+      // A previous audit still running is judging a DIFFERENT plan (this one
+      // has no PASS yet), so it cannot answer the question being asked here.
+      fresh: true,
+    });
+    if (!dispatch.ok) {
+      return {
+        ok: false,
+        text: `review-gate: plan 审计没能启动 —— ${dispatch.error ?? "judge 进程未能启动"}。plan 没有被送到用户面前。`,
+      };
+    }
+    const child = judgeChildByRole(root, "goal-auditor");
+    if (!child) {
+      return {
+        ok: false,
+        text: "review-gate: plan 审计已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。",
+      };
+    }
+    // The SAME wait implementation `judge_wait` uses (process exit, exit-code
+    // file, or a verdict fence already in this round's stdout).
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx);
+    // O-6 — the gate dispatched this plan auditor internally, so the gate
+    // closes it (the round-5 P1). The orchestrator never asked for a judge
+    // child and never saw one in an `orchestrator_wait` receipt; leaving it
+    // registered made `declare_done` refuse to finish on a child the caller was
+    // never told about. The verdict is recorded from `child.stdoutPath` below
+    // (the close keeps the record object and its paths; only the process and
+    // the registry entry go away), so read the round's output first, THEN drop
+    // it. Placed before every return path so no branch can leak the child.
+    const closeAuditor = () => callTool("judge_close", { role: "goal-auditor", repo: root }, latestCtx);
+
+    // THIS round's output only — the transcript accumulates every round of the
+    // role's session, so its last fence could belong to a goal audit that ran
+    // before this one.
+    const output = readRoundStdout(child.stdoutPath);
+    const parsed = output ? parseReviewOutput(output) : undefined;
+    await closeAuditor();
+    if (!parsed) {
+      const why = readStderrTail(child.stderrPath)?.trim().split("\n").slice(-3).join(" ") ?? "";
+      return {
+        ok: false,
+        text:
+          "review-gate: plan 审计没有产出可解析的裁决，什么都没有记录（fail-closed）——" +
+          "plan **没有**被送到用户面前。\n" +
+          (why ? `审计进程最后的错误输出：${why.slice(0, 200)}\n` : "") +
+          "直接再 `submit` 一次即可重跑审计。",
+      };
+    }
+    const findings = parseFenceFindings(output!);
+    const adjudication = adjudicatePlanAudit(parsed.verdict, findings);
+    const record: PlanAuditRecord = {
+      hash,
+      verdict: adjudication.verdict,
+      at: new Date().toISOString(),
+      findingsTotal: parsed.findingsTotal,
+      ...(findings.length ? { findings } : {}),
+      planText: formatPlanSummary(plan),
+    };
+    state.planAudit = record;
+    persist(latestCtx);
+
+    // The PASS must bind to the plan that was actually judged — the same
+    // content binding the user's approval uses, so a plan edited between the
+    // audit and the dialog cannot ride in on someone else's PASS.
+    if (planAuditPassed(record, plan)) return { ok: true };
+    return { ok: false, text: formatPlanAuditRefusal(record) };
+  }
+
+
+
+  /**
+   * The checkpoint's commit message — the whole rule (Conventional Commits
+   * with the `checkpoint` marker injected into the SCOPE, and the L5
+   * non-English fallback) lives in lib/checkpoint-message.ts, unit-tested
+   * there. This wrapper only names the call site.
+   */
+  function checkpointMessage(raw: string): string {
+    return buildCheckpointMessage(raw);
+  }
+
+
+  /** What one dispatch of a judge round produced (or why it could not). */
+  interface JudgeDispatch {
+    ok: boolean;
+    /** The role's session already had a transcript — this round continues it. */
+    reused: boolean;
+    /** Refused because the role is still working on its previous round. */
+    busy?: boolean;
+    sessionId?: string;
+    sessionDir?: string;
+    runDir?: string;
+    stdoutPath?: string;
+    sysPromptPath?: string;
+    error?: string;
+  }
+
+  /** Does this role's session dir already hold a transcript to continue? */
+  function hasTranscript(sessionDir: string): boolean {
+    try {
+      return readdirSync(sessionDir).some((f) => f.endsWith(".jsonl"));
+    } catch {
+      return false; // no dir yet ⇒ nothing to continue
+    }
+  }
+
+
+  /**
+   * Dispatch ONE round to a judge role — the single place a judge process is
+   * ever started, and the only owner of its identity.
+   *
+   * Identity is a function of role + repo, never of the round: the session id
+   * (the resume key) and the WORK DIR (B5 — a title-derived dir gave pi a new
+   * `--session-dir` every round, so the "resumed" session started from zero)
+   * both come from `role + repoHash`. The title is a display label, and only
+   * reaches `--name` and diagnostics.
+   *
+   * Reuse is the default and is what carries a judge's context across rounds:
+   * an alive same-role process is left running and simply re-watched; a
+   * finished one is dropped and re-spawned under the SAME session id, so pi
+   * appends to the same transcript. `fresh` kills the incumbent first.
+   */
+  function dispatchJudgeRound(opts: {
+    root: string;
+    role: string;
+    title: string;
+    task: string;
+    fresh?: boolean;
+    /** This round's findings stream, recorded on the child for judge_wait. */
+    streamPath?: string;
+  }): JudgeDispatch {
+    const { root, role, task } = opts;
+    const title = opts.title.replace(/[^A-Za-z0-9._-]/g, "-") || role;
+    // Children whose PROCESS has ended are dropped first: a finished judge
+    // must never answer a reuse hit (its context lives in the transcript,
+    // which the next spawn re-opens by session id anyway).
+    for (const [repoRoot, list] of childSessions) {
+      const alive = list.filter((c) => judgeProcessAlive(c.child));
+      if (alive.length !== list.length) {
+        // D — a dead judge's scratch review worktrees are reclaimed as it is
+        // dropped from the registry.
+        for (const dead of list.filter((c) => !judgeProcessAlive(c.child))) reapReviewScratch(dead.sessionId);
+        childSessions.set(repoRoot, alive);
+      }
+    }
+    const sessionId = judgeSessionIdFor(role, shortRepoHash(root));
+    // STABLE per role+repo (B5) — identity, not a per-round path. Each round's
+    // own artifacts live under `runs/<ts>-<rand>/`.
+    const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root)));
+    const sessionDir = pathJoin(workDir, "sessions");
+    const running = (childSessions.get(root) ?? [])
+      .find((c) => c.role === role && c.sessionId === sessionId && judgeProcessAlive(c.child));
+    // The decision itself is a pure function (lib/judge-lifecycle.ts): a round
+    // is DELIVERED or REFUSED, never silently dropped.
+    const decision = decideJudgeDispatch({
+      aliveSameRole: running !== undefined,
+      fresh: opts.fresh === true,
+      hasTranscript: hasTranscript(sessionDir),
+    });
+    if (decision.action === "refuse-busy") {
+      return {
+        ok: false,
+        reused: decision.continuesSession,
+        sessionId: running?.sessionId ?? sessionId,
+        sessionDir: running?.sessionDir ?? sessionDir,
+        stdoutPath: running?.stdoutPath,
+        busy: true,
+        error: `${role} 仍在处理上一轮任务，本轮未提交。等它结束（完成会唤醒本会话，或用 judge_wait 阻塞等待）后重新提交；确实要丢弃它就传 fresh:true。`,
+      };
+    }
+    if (decision.action === "kill-and-spawn") {
+      const stale = (childSessions.get(root) ?? []).find((c) => c.role === role);
+      if (stale) {
+        watchRegistry.unregister(stale.sessionId);
+        forgetChildProcess(stale.sessionId);
+        try { (stale.child as { kill?: (s?: string) => boolean } | undefined)?.kill?.("SIGTERM"); } catch { /* already gone */ }
+        childSessions.set(root, (childSessions.get(root) ?? []).filter((c) => c.sessionId !== stale.sessionId));
+        // The killed round's audited draft dies with it: leaving it behind
+        // would let a LATER exit record a verdict against a draft that round
+        // never judged.
+        if (stale.role === "goal-auditor") pendingGoalAudits.delete(root);
+      }
+    }
+    try {
+      const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
+      const files = writeJudgeSpawnFiles({
+        repoRoot: root,
+        role,
+        agents,
+        title,
+        workDir,
+        parentSessionId: state.sessionId ?? undefined,
+      });
+      // "Reused" is a fact about the SESSION, not about the process: the
+      // transcript decided it above, before this round could add to it.
+      const continuesSession = decision.continuesSession;
+      const runDir = pathJoin(workDir, "runs", judgeRunDirName(new Date(), randomBytes(3).toString("hex")));
+      const stdoutPath = pathJoin(runDir, "stdout.log");
+      const stderrPath = pathJoin(runDir, "stderr.log");
+      const pidPath = pathJoin(runDir, "pid");
+      const exitCodePath = pathJoin(runDir, "exit-code");
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(sessionDir, { recursive: true });
+      const spawned = spawnJudgeProcess({
+        role,
+        repoRoot: root,
+        sessionId,
+        sysPromptPath: files.sysPromptPath,
+        model: files.model,
+        sessionDir,
+        taskText: task,
+        parentSessionId: state.sessionId ?? undefined,
+        title,
+      });
+      if (!spawned.ok || !spawned.child) {
+        return { ok: false, reused: false, error: spawned.error ?? "no child" };
+      }
+      const child: JudgeChild = {
+        sessionId,
+        role,
+        title,
+        spawnedAt: new Date().toISOString(),
+        child: spawned.child,
+        sessionDir,
+        stdoutPath,
+        stderrPath,
+        pidPath,
+        exitCodePath,
+        streamPath: opts.streamPath,
+      };
+      // Tee stdout/stderr to this round's logs: stdout is where the verdict
+      // fence is readable as PLAIN text (the transcript escapes it), stderr is
+      // the crash record.
+      try {
+        const outFd = openSync(stdoutPath, "a");
+        const errFd = openSync(stderrPath, "a");
+        (spawned.child.stdout as NodeJS.ReadableStream | null)?.on("data", (d: Buffer) => writeSync(outFd, d));
+        (spawned.child.stderr as NodeJS.ReadableStream | null)?.on("data", (d: Buffer) => writeSync(errFd, d));
+        spawned.child.on("close", () => { try { closeSync(outFd); closeSync(errFd); } catch { /* best-effort */ } });
+      } catch { /* logs are best-effort */ }
+      try {
+        if (spawned.child.pid) writeFileSync(pidPath, `${spawned.child.pid} ${new Date().toString()}\n`, "utf8");
+        spawned.child.on("exit", (code) => {
+          try { writeFileSync(exitCodePath, String(code ?? -1), "utf8"); } catch { /* best-effort */ }
+        });
+      } catch { /* best-effort */ }
+      const list = childSessions.get(root) ?? [];
+      list.push(child);
+      childSessions.set(root, list);
+      // Completion listener: the child's process EXIT wakes this session as a
+      // new turn. Nobody polls, nobody sleeps.
+      rememberChildProcess(sessionId, spawned.child);
+      registerWatch(sessionId, title);
+      return {
+        ok: true,
+        reused: continuesSession,
+        sessionId,
+        sessionDir,
+        runDir,
+        stdoutPath,
+        sysPromptPath: files.sysPromptPath,
+      };
+    } catch (err) {
+      return { ok: false, reused: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Read a finished judge's conclusion and RECORD it — the gate's job, not
+   * the agent's.
+   *
+   * The agent used to copy the reviewer's output into record_review by hand:
+   * a transcription step with nothing creative in it, which could silently
+   * carry the wrong round's text. The recording tools keep every mechanical
+   * check they had (fence parsing, no-prepare refusal, STALE detection, cwd
+   * match, tree binding) — this only removes the copying.
+   *
+   * Returns the recorded summary, or undefined when there was nothing to
+   * record (no fence yet, an adviser, an unknown child) — the caller then
+   * simply tells the agent to read the child.
+   */
+  /** This round's raw output, or undefined when the log is unreadable. */
+  function readRoundStdout(path: string): string | undefined {
+    try {
+      return existsSync(path) ? readFileSync(path, "utf8") : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Which repo a judge child belongs to (the registry is keyed by root). */
+  function repoOfChild(child: JudgeChild): string {
+    for (const [root, list] of childSessions) {
+      if (list.some((c) => c.sessionId === child.sessionId)) return root;
+    }
+    return primaryRepoRoot;
+  }
+
+
+  async function recordJudgeConclusion(sessionId: string): Promise<string | undefined> {
+    try {
+      const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+      if (!child || child.role === "adviser") return undefined; // an adviser's conclusion is advice, not a verdict
+      // THIS ROUND's output only. The transcript accumulates every round of
+      // the role's session, so its "last verdict fence" can be the PREVIOUS
+      // round's — a judge that exited with a question, a crash or plain prose
+      // would then have last round's READY recorded against a tree nobody
+      // judged. The per-round stdout log contains this round and nothing else.
+      const roundOutput = readRoundStdout(child.stdoutPath);
+      if (!roundOutput || !hasJudgeFence(roundOutput)) {
+        // A judge that produced NOTHING did not "have output to read": it
+        // crashed, or the model call failed. Say that, with what it left on
+        // stderr — the round has to be dispatched again, and an agent told to
+        // "read its output" reads an empty file and learns nothing.
+        // (Measured: a reviewer died with "Connection error." and an empty
+        // stdout mid-task.)
+        const failed = readJudgeSessionState({ pidPath: child.pidPath, exitCodePath: child.exitCodePath });
+        if (!roundOutput?.trim() || (failed.exitCode !== undefined && failed.exitCode !== 0)) {
+          const why = readStderrTail(child.stderrPath)?.trim().split("\n").slice(-3).join(" ") ?? "";
+          return `${child.role} 本轮没有产出结论` +
+            (failed.exitCode !== undefined ? `（exit ${failed.exitCode}）` : "") +
+            (why ? `：${why.slice(0, 200)}` : "。") +
+            ` 什么都没有记录——用同样的 task 重新 judge_submit({role:"${child.role}"}) 即可（同一 session 续接）。`;
+        }
+        return undefined; // output without a fence: the agent reads it and decides
+      }
+      // A QUESTION is not a verdict. Feeding it to the recorder would answer
+      // "no recognizable verdict" — technically fail-closed, but it reads as
+      // a parse error when the judge simply asked something.
+      if (!/"gate"\s*:\s*"(READY|BLOCKED|NEEDS_HUMAN)"/.test(roundOutput)) {
+        return `${child.role} 提了一个问题（没有 verdict）。用 judge_read({role:"${child.role}"}) 看问题，` +
+          `再用 judge_submit({role:"${child.role}", task:<你的回答>}) 带着答案续接同一会话。`;
+      }
+      if (child.role === "reviewer") {
+        // No live tool ctx here (this runs from a process-exit callback), so
+        // the last one the session bound is what persists the record. The repo
+        // is named explicitly: a multi-repo session refuses an unqualified
+        // record, and this record must not depend on which repo was edited last.
+        if (!lastUiCtx) return undefined;
+        const result = await callTool("record_review", { reviewer_output: roundOutput, repo: repoOfChild(child) }, lastUiCtx);
+        return toolText(result);
+      }
+      // A goal audit is recorded the same way, against the draft the gate
+      // dispatched — the record binds to that text's hash, so remembering it
+      // is the gate's job, not the agent's to re-paste.
+      const pending = pendingGoalAudits.get(repoOfChild(child));
+      if (!pending || !lastUiCtx) return undefined;
+      pendingGoalAudits.delete(repoOfChild(child));
+      const audit = await callTool("record_goal_prereview", {
+        goal: pending.draft,
+        auditor_output: roundOutput,
+        auditStartedAt: pending.startedAt,
+        repo: repoOfChild(child),
+      }, lastUiCtx);
+      return toolText(audit);
+    } catch {
+      return undefined; // recording is best-effort; the wake still happens
+    }
+  }
+
+
+  /**
+   * Reclaim the review worktrees a finished judge left behind (D — "whoever
+   * creates it clears it"). A reviewer verifies by doing (`git worktree add
+   * <tmp> HEAD` under its gate-owned $TMPDIR); the gate set that $TMPDIR to a
+   * per-session dir, so on the judge's exit it can remove exactly those
+   * worktrees — never a concurrent lane's live one. Best-effort and idempotent.
+   */
+  function reapReviewScratch(sessionId: string): void {
+    const scratch = judgeScratchDir(sessionId);
+    try {
+      const list = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: primaryRepoRoot, encoding: "utf8" });
+      for (const wt of reviewScratchWorktrees(list, scratch)) {
+        try { execFileSync("git", ["worktree", "remove", "--force", wt], { cwd: primaryRepoRoot, encoding: "utf8" }); }
+        catch { /* already gone / not a registered worktree — the prune below still runs */ }
+      }
+      try { execFileSync("git", ["worktree", "prune"], { cwd: primaryRepoRoot, encoding: "utf8" }); } catch { /* best effort */ }
+    } catch { /* worktree list unreadable — leave the dir for a later reap */ }
+    try { rmSync(scratch, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+
+
+  /** The judge child of one role in one repo, if the registry still holds it. */
+  function judgeChildByRole(root: string, role: string): JudgeChild | undefined {
+    return (childSessions.get(root) ?? []).find((c) => c.role === role);
+  }
+
+  /**
+   * Locate a judge child by ROLE (the agent's vocabulary) or by session id
+   * (the internal key). Role wins when both are given: the agent addresses
+   * roles, and a stale id it copied from an old round would silently read the
+   * wrong session.
+   */
+  function findJudgeChild(root: string, role?: string, sessionId?: string): JudgeChild | undefined {
+    if (role) return judgeChildByRole(root, role);
+    if (sessionId) return [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+    return undefined;
+  }
 
   pi.registerTool({
-    name: "review_spawn",
-    label: "Spawn Judge Child",
+    name: "judge_submit",
+    label: "Submit To Judge",
     description:
-      "Spawn a judge child (reviewer / adviser / goal-auditor) as its OWN pi process in a tmux pane " +
-      "of the main window's right column (pane layout, not a detached session). The child runs with " +
-      "no review-gate extension, its role definition + judge protocol as system prompt, the configured " +
-      "model, and --exclude-tools edit,write. Returns the pane id and the done/inbox channels; the " +
-      "completion listener is registered AUTOMATICALLY (the done signal wakes this session as a new " +
-      "turn — send the task, end your turn, keep working; no review_watch call, no polling, no sleep).",
+      "Submit one round of work to a judge role — the ONE entry point for reviewer / adviser / " +
+      "goal-auditor. The gate owns everything procedural: the session id and its directory " +
+      "(derived from role+repo, so the judge's context carries across rounds), spawn vs. resume vs. " +
+      "kill, and the completion listener. You pass WHO and WHAT; you never pass a session id, a " +
+      "title or a directory. It returns as soon as the round is SUBMITTED, not when the judge is " +
+      "done — the judge's process exit wakes this session as a new turn, and you then read the " +
+      "verdict with judge_read (or judge_wait, when nothing else is left to do). A role that is " +
+      "still working REFUSES the round (nothing is silently dropped): wait for it, or pass " +
+      "fresh:true to discard it.",
     parameters: Type.Object({
       role: Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }),
-      title: Type.String({
-        description: "Human-readable child label (sanitized; prefix 'rg-' is added; done/inbox channels derive from it)",
+      task: Type.String({
+        description:
+          "reviewer: what you changed this round, in your words (the gate wraps it in the review " +
+          "task it builds). adviser / goal-auditor: the question or the draft to judge.",
       }),
+      message: Type.Optional(Type.String({
+        description:
+          "reviewer only: the checkpoint commit message (English, Conventional Commits). The gate " +
+          "adds the checkpoint marker itself. Omit it and the gate derives the message from your " +
+          "task text — but only the parts of it that are ENGLISH: L5 accepts no non-Latin letter " +
+          "in a commit message, so a Chinese round note yields the default subject and no body. " +
+          "Write this field whenever you want the history to say something — that is the normal " +
+          "case in this project.",
+      })),
+      reason: Type.Optional(Type.String({
+        description:
+          "reviewer only: why THIS round is worth a review when the polish gate is armed (two " +
+          "consecutive READYs, or the same file polished for three rounds). The gate refuses the " +
+          "round without it and tells you so.",
+      })),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
       fresh: Type.Optional(Type.Boolean({
-        description: "Force a NEW pane even when an alive same-role child exists (default: reuse — the child's context carries over across rounds)",
+        description: "Kill the role's RUNNING process and dispatch this round anyway. Its transcript (and therefore its context) survives — this abandons the round in flight, not the conversation.",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, onUpdate, ctx) {
       const target = resolveToolRepo(params.repo);
       if (!target.ok) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
@@ -2951,764 +4405,268 @@ export default function reviewGate(pi: ExtensionAPI) {
       const role = String(params.role ?? "");
       if (!JUDGE_ROLES.includes(role as (typeof JUDGE_ROLES)[number])) {
         return {
-          content: [{ type: "text", text: `review-gate: review_spawn rejected — unknown role \"${role}\".` }],
-          details: { spawned: false },
+          content: [{ type: "text", text: `review-gate: judge_submit rejected — unknown role "${role}".` }],
+          details: { submitted: false },
           isError: true,
         };
       }
-      if (!tmuxAvailable()) {
+      const task = String(params.task ?? "").trim();
+      if (!task) {
         return {
-          content: [{ type: "text", text: "review-gate: review_spawn rejected — tmux is not available on this host. Install tmux (brew install tmux) or review without a judge child." }],
-          details: { spawned: false },
+          content: [{ type: "text", text: "review-gate: judge_submit rejected — the task text is empty." }],
+          details: { submitted: false },
           isError: true,
         };
       }
-      // Round-17 (user ask): dead panes (pane_dead=1) are dropped from the
-      // registry so they never block a fresh spawn or a reuse hit.
-      for (const [repoRoot, list] of childSessions) {
-        const alive = list.filter((c) => paneAlive(c.paneId));
-        if (alive.length !== list.length) childSessions.set(repoRoot, alive);
-      }
-      // The round's title and its derived channels/paths — computed ONCE here
-      // (the `rg-` prefix is added by spawnJudgePane and the channel helpers,
-      // so titles never read rg-rg-…), because BOTH the reuse rebind below and
-      // the spawn path need them.
-      const title = String(params.title ?? role).replace(/[^A-Za-z0-9._-]/g, "-");
-      const doneChannel = doneChannelFor(title);
-      const inboxChannel = inboxChannelFor(title);
-      const inboxPath = pathJoin(root, ".pi", "tmux-sessions", `rg-${title}`, "inbox.jsonl");
-      // Round-17 (user ask): REUSE — same repo + same role + alive pane ⇒ no
-      // new spawn; the execution model promises the child's context carries
-      // over across rounds until READY, so a fresh pi process every round
-      // would re-read protocol/code/goal from zero (measured: pane
-      // accumulation, huge token cost). fresh:true forces a new pane.
-      const existing = (childSessions.get(root) ?? [])
-        .find((c) => c.role === role && !params.fresh);
-      if (existing) {
-        // Round-17 (measured this round): prepare_review mints a NEW title +
-        // channels every round, but a reused pane kept the FIRST round's
-        // channels — so the ready-made task text embedded a done channel
-        // nobody listened on, and the completion signal never arrived unless
-        // the agent hand-edited it. REBIND the pane to this round's channels:
-        // drop the previous listeners, register the new ones, and move the
-        // inbox with it (review_read follows inboxPath).
-        const rebound = title !== existing.title;
-        if (rebound) {
-          watchRegistry.unregister(existing.doneChannel);
-          watchRegistry.unregister(existing.inboxChannel);
-          mkdirSync(pathDirname(inboxPath), { recursive: true });
-          existing.title = title;
-          existing.doneChannel = doneChannel;
-          existing.inboxChannel = inboxChannel;
-          existing.inboxPath = inboxPath;
-        }
-        registerWatch(existing.doneChannel, existing.title);
-        registerWatch(existing.inboxChannel, `${existing.title}-inbox`);
-        return {
-          content: [{ type: "text", text:
-            `review-gate: reusing existing ${role} child pane ${existing.paneId} — context carries over across rounds.\n` +
-            (rebound ? `- 重绑到本轮 title "${title}"(旧 channel 的监听已取消)。\n` : "") +
-            `- done channel: ${existing.doneChannel}(监听已注册)\n` +
-            `- inbox: ${existing.inboxPath}(channel ${existing.inboxChannel})\n` +
-            "- 用 review_send 发送本轮任务文本即可；prepare_review 的任务文本可直接使用(fresh:true 可强制新建 pane)。",
-          }],
-          details: { spawned: false, reused: true, rebound, paneId: existing.paneId, title: existing.title, role, doneChannel: existing.doneChannel, inboxPath: existing.inboxPath },
-        };
-      }
-      // Round-17 (spec C): fresh:true keeps the SINGLETON invariant — one
-      // alive pane per role per session — by killing the old same-role pane
-      // (and cancelling its listeners) before the new spawn.
-      if (params.fresh) {
-        const stale = (childSessions.get(root) ?? []).find((c) => c.role === role);
-        if (stale) {
-          watchRegistry.active.get(stale.doneChannel)?.cancel();
-          watchRegistry.active.get(stale.inboxChannel)?.cancel();
-          killPane(stale.paneId);
-          childSessions.set(root, (childSessions.get(root) ?? []).filter((c) => c.paneId !== stale.paneId));
-        }
-      }
-      // P2 (round-6): the title is the RAW label — the rg- prefix is added
-      // ONCE by spawnJudgePane and by the channel derivations, so titles and
-      // channels never read rg-rg-….
-      const workDir = pathJoin(root, ".pi", "tmux-sessions", `rg-${title}`);
-      try {
-        const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-        const files = writeJudgeSpawnFiles({
-          repoRoot: root,
-          role,
-          agents,
-          title,
-          workDir,
-          // Round-18: the child learns who spawned it (directed attention).
-          parentSessionId: state.sessionId ?? undefined,
+      // SUBMITTING FOR REVIEW IS A CHAIN, and the gate runs all of it: the
+      // agent describes its change, the gate proves it builds (precommit),
+      // freezes it (checkpoint), computes the reviewed range (prepare) and
+      // only then dispatches. Any step failing sends the round back with the
+      // reason — nothing half-submitted, no manual four-step dance.
+      let reviewTask = task;
+      /**
+       * Where THIS round's findings stream lives — the channel the agent
+       * reads while the judge is still working. Every role that has one
+       * reports it in the reply; criterion 1 requires it in the return.
+       */
+      let streamPath: string | undefined;
+      // Live progress for the whole submission: precommit → checkpoint →
+      // prepare → dispatch. Each step publishes as it starts and as it ends,
+      // so a round that stalls shows WHERE it stalled.
+      const progress = createProgressReporter({
+        title: `review-gate: judge_submit(${role})`,
+        onUpdate: onUpdate as ToolUpdate | undefined,
+      });
+      if (role === "reviewer") {
+        const chain = await submitForReview({
+          root,
+          note: task,
+          message: params.message ? String(params.message) : undefined,
+          reason: params.reason ? String(params.reason) : undefined,
+          ctx,
+          progress,
         });
-        // Round-7 P2: layout is decided inside spawnJudgePane (no anchor ⇒
-        // carve the right column; anchor ⇒ stack) — the caller no longer
-        // participates, so the module is the single layout owner.
-        const spawned = spawnJudgePane({
-          title,
-          cwd: root,
-          command: files.command,
-          env: files.env,
-        });
-        if (!spawned.ok || !spawned.paneId) {
+        if (!chain.ok) {
           return {
-            content: [{ type: "text", text: `review-gate: review_spawn failed — ${spawned.error ?? "no pane id"}` }],
-            details: { spawned: false },
+            content: [{ type: "text", text: chain.text }],
+            details: { submitted: false, busy: false },
             isError: true,
           };
         }
-        const child: JudgeChild = {
-          paneId: spawned.paneId,
-          role,
-          title,
-          doneChannel: doneChannelFor(title),
-          inboxChannel: inboxChannelFor(title),
-          inboxPath: pathJoin(workDir, "inbox.jsonl"),
-          spawnedAt: new Date().toISOString(),
-        };
-        const list = childSessions.get(root) ?? [];
-        list.push(child);
-        childSessions.set(root, list);
-        // Round-14 (user ask): the completion listener is registered HERE —
-        // spawn → send → wake is automatic, no review_watch call needed.
-        // The agent ends its turn and does other work; the done signal
-        // wakes this session as a new turn (never sleep, never poll).
-        registerWatch(child.doneChannel, title);
-        // Round-17 (goal-auditor P2): the inbox question channel is ALSO
-        // auto-registered — a child question wakes this session without the
-        // main session having to remember a review_watch call. The two wake
-        // paths (done / question) are now symmetric.
-        registerWatch(child.inboxChannel, `${title}-inbox`);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: ${role} child spawned as pane ${child.paneId} (${title}).\n` +
-              `- done channel: ${child.doneChannel} (completion listener ALREADY registered — ` +
-              `the done signal wakes this session; no review_watch call needed)\n` +
-              `- inbox: ${child.inboxPath}\n` +
-              `- system prompt: ${files.sysPromptPath}\n` +
-              `Send the task text as a single line referencing its file, then end your turn: while the ` +
-              `child works, keep doing useful work (its streamed findings, other repos); the wake message ` +
-              `arrives as a new turn.`,
-          }],
-          details: { spawned: true, paneId: child.paneId, role, title, doneChannel: child.doneChannel, inboxPath: child.inboxPath, watching: true },
-        };
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: "text", text: `review-gate: review_spawn failed — ${reason}` }],
-          details: { spawned: false },
-          isError: true,
-        };
+        reviewTask = chain.taskText;
+        streamPath = chain.streamPath;
       }
-    },
-  });
 
-  // ---------- review_watch tool (the wake-up mechanism) ----------
-
-  pi.registerTool({
-    name: "review_watch",
-    label: "Watch Review Child",
-    description:
-      "Register a background listener on a judge child's completion channel. review_spawn registers " +
-      "this AUTOMATICALLY — call this tool only to re-register with a custom label. When the child " +
-      "runs `tmux wait-for -S <channel>`, the listener wakes THIS session via " +
-      "pi.sendMessage(triggerTurn) — a new turn, no polling, no sleep: end your turn and do other " +
-      "work while the child runs. Listeners are cancelled on session shutdown.",
-    parameters: Type.Object({
-      channel: Type.String({
-        description: "The done channel the child will signal (e.g. rg-reviewer-done)",
-      }),
-      label: Type.Optional(Type.String({
-        description: "Human-readable child label for the wake message (default: the channel)",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate) {
-      const channel = String(params.channel ?? "").trim();
-      const label = String(params.label ?? "").trim() || channel;
-      if (channel.length === 0) {
-        return {
-          content: [{ type: "text", text: "review-gate: review_watch rejected — the channel is empty." }],
-          details: { watching: false },
-          isError: true,
-        };
-      }
-      // One listener per channel; a re-watch replaces the old handle.
-      registerWatch(channel, label);
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: watching ${channel} — 完成信号到达时会主动唤醒本会话（无需轮询）。`,
-        }],
-        details: { watching: true, channel },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "review_send",
-    label: "Send to Judge Child",
-    description:
-      "Send ONE single-line message to a judge child pane (Enter is appended). Multi-line content must " +
-      "ride a FILE — write it (e.g. under .pi/tmux-sessions/<title>/) and send a one-line reference " +
-      "(\"read /path/task.md and execute it\"), because pi's TUI shreds pasted multi-line text into " +
-      "one message per line.",
-    parameters: Type.Object({
-      paneId: Type.String({ description: "The pane id returned by review_spawn (e.g. %103)" }),
-      text: Type.String({ description: "Single-line message" }),
-    }),
-    async execute(_id, params, _signal) {
-      const paneId = String(params.paneId ?? "");
-      const text = String(params.text ?? "");
-      try {
-        const ok = sendMessage(paneId, text);
-        return {
-          content: [{ type: "text", text: ok ? "review-gate: message sent." : "review-gate: send failed — is the pane still alive?" }],
-          details: { sent: ok },
-          ...(ok ? {} : { isError: true }),
-        };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `review-gate: send rejected — ${err instanceof Error ? err.message : String(err)}` }],
-          details: { sent: false },
-          isError: true,
-        };
-      }
-    },
-  });
-
-  pi.registerTool({
-    name: "review_read",
-    label: "Read Judge Child",
-    description:
-      "Read a judge child's pane output (plus optional scrollback), its liveness (pane_dead), its cwd, " +
-      "and any inbox questions the child posted. The pane is a screen, not a channel: parse it for " +
-      "YOUR marker (a verdict fence), never for byte-exact equivalence.",
-    parameters: Type.Object({
-      paneId: Type.String({ description: "The pane id returned by review_spawn" }),
-      history: Type.Optional(Type.Integer({ description: "Scrollback lines before the visible screen (default 0)" })),
-    }),
-    async execute(_id, params, _signal) {
-      const paneId = String(params.paneId ?? "");
-      const history = typeof params.history === "number" ? params.history : 0;
-      const alive = paneAlive(paneId);
-      const output = capturePane(paneId, { history });
-      const cwd = paneCurrentPath(paneId);
-      const child = [...childSessions.values()].flat().find((c) => c.paneId === paneId);
-      let inbox = "";
-      if (child) {
-        try {
-          inbox = existsSync(child.inboxPath) ? readFileSync(child.inboxPath, "utf8") : "";
-        } catch { /* inbox is optional */ }
-      }
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: pane ${paneId} alive=${alive}${cwd ? ` cwd=${cwd}` : ""}\n` +
-            (output !== undefined ? `--- pane output (${history > 0 ? `history ${history} + ` : ""}screen) ---\n${output}` : "--- no pane output (dead?) ---") +
-            (child && inbox ? `\n--- inbox ---\n${inbox}` : ""),
-        }],
-        details: { alive, hasInbox: Boolean(child && inbox) },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "review_close",
-    label: "Close Judge Child",
-    description:
-      "Kill a judge child's pane and drop it from the session registry. Use it at task completion (before " +
-      "declare_done) or to rebuild a child with a fresh perspective; children that crashed keep their " +
-      "pane (remain-on-exit) until closed.",
-    parameters: Type.Object({
-      paneId: Type.String({ description: "The pane id returned by review_spawn" }),
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (required once the session edited several repos)",
-      })),
-    }),
-    async execute(_id, params, _signal) {
-      const paneId = String(params.paneId ?? "");
-      // P2 (round-6): cancel the child's done-channel listener so no wake
-      const child = [...childSessions.values()].flat().find((c) => c.paneId === paneId);
-      if (child) {
-        watchRegistry.active.get(child.doneChannel)?.cancel();
-        watchRegistry.active.get(child.inboxChannel)?.cancel(); // round-7 Nit
-      }
-      const ok = killPane(paneId);
-      for (const [root, list] of childSessions) {
-        childSessions.set(root, list.filter((c) => c.paneId !== paneId));
-      }
-      cancelChildWaitTimer();
-      return {
-        content: [{ type: "text", text: ok ? `review-gate: pane ${paneId} closed.` : `review-gate: pane ${paneId} already gone.` }],
-        details: { closed: ok },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "prepare_review",
-    label: "Prepare Review",
-    description:
-      "Compute the review unit (checkpoint baseline..HEAD), write the finding stream path and hand " +
-      "back the ready-made task text for the ONE reviewer of this round, plus the tmux spawn flow " +
-      "(review_spawn → review_send → review_watch). ALWAYS call this before spawning the reviewer — " +
-      "review no longer runs through subagents. One reviewer, one commit range: no split, one " +
-      "reviewer — everything the reviewer judges is the whole change in baseline..HEAD. Call " +
-      "review_checkpoint first: the reviewed range is defined by the last checkpoint sha.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (required once the session edited several repos)",
-      })),
-      reason: Type.Optional(Type.String({
-        description: "REQUIRED when the polish gate is armed (consecutive READY rounds or the same file in P2/Nit for 3 rounds): why is THIS round worth a review while the gate is already met? Persisted and shown to the next reviewer.",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const target = resolveToolRepo(params.repo);
-      if (!target.ok) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const root = target.root;
-      const st = stateForRepo(root);
-      if (!st.checkpoint?.sha) {
-        return {
-          content: [{ type: "text", text: "review-gate: prepare_review rejected — no checkpoint on record. Call review_checkpoint first (commit the current work): the reviewed range is baseline..HEAD, and the baseline is the last checkpoint sha." }],
-          details: { prepared: false },
-          isError: true,
-        };
-      }
-      // Round-18 polish gate (user ask, B-tier): when the gate is
-      // demonstrably met (or a file keeps being polished), the next round
-      // must carry an explicit reason. Refuse WITHOUT rendering anything
-      // (no dialog, no task text) — the refusal itself tells the agent what
-      // to do.
-      const polish = polishReasonRequired(st.rounds);
-      if (polish.required) {
-        const given = (params.reason ?? "").trim();
-        if (!given) {
+      // The other two roles are the same shape: the gate builds the task the
+      // judge receives (carryover, criteria, transcript pointer, findings
+      // stream) from what the agent SAID, so the agent never assembles a
+      // judge's brief by hand.
+      if (role === "goal-auditor") {
+        const prepared = await callTool("prepare_goal_audit", { goal: task, repo: root }, ctx);
+        if (prepared.isError) {
           return {
-            content: [{ type: "text", text:
-              `review-gate: prepare_review REFUSED — ${polish.why}。\n` +
-              "提供非空 reason 参数后重试（理由会写入 gate state，并出现在下一轮 reviewer 的任务文本里，接受独立审核）。\n" +
-              `当前状态：${st.rounds.length} 个已记录 round，最近一轮 verdict=${st.rounds[st.rounds.length - 1]?.verdict ?? "(none)"}。`
-            }],
-            details: { prepared: false, polishRequired: true, why: polish.why },
+            content: [{ type: "text", text: "review-gate: 本轮未受理 — goal 审计任务无法生成。\n" + toolText(prepared) }],
+            details: { submitted: false, busy: false },
             isError: true,
           };
         }
+        // A goal audit streams its findings too (criterion 2): the agent can
+        // fix the draft while the auditor is still working, exactly as it
+        // does with a code review.
+        streamPath = pathJoin(root, ".pi", "review-stream", `goal-${goalTextHash(task).slice(0, 12)}.jsonl`);
+        try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
+        reviewTask = `${extractTaskText(toolText(prepared))}\n\n${buildStreamDirective(streamPath)}`;
+        // (The draft is remembered only AFTER the dispatch is accepted —
+        // see below. Recording it here would let a REFUSED submission
+        // overwrite the draft a still-running audit is judging.)
       }
-      // Round-8 P1: the baseline is the checkpoint's PARENT (prevSha) — the
-      // checkpoint itself is the HEAD under review, so baseline..HEAD is the
-      // checkpoint's own commits. Old records without prevSha fall back to
-      // `git rev-parse <sha>^`.
-      // Round-9 P1 (unreviewed-commit gap): the baseline must be the LAST
-      // REVIEWED commit, not the latest checkpoint's parent — two checkpoints
-      // since the last READY would otherwise leave the earlier one's content
-      // outside every reviewed range while its tree still ships. The READY's
-      // commitSha is used when it is an ancestor of HEAD (the normal chain).
-      // When it is NOT an ancestor the chain was rewritten (squash/rebase):
-      // walk the new chain from the checkpoint's parent to find the SQUASH
-      // POINT — the newest commit whose tree equals the reviewed tree — and
-      // baseline from there, so the range covers the whole new chain (the
-      // squash commit plus every checkpoint after it). No matching tree
-      // (a content-changing rebase) falls back to the branch base so the
-      // review covers everything.
-      const lastReviewed = st.review?.verdict === "READY" ? st.review.commitSha : undefined;
-      let baseline: string | undefined;
-      if (lastReviewed) {
-        try {
-          execFileSync("git", ["merge-base", "--is-ancestor", lastReviewed, "HEAD"], { cwd: root, stdio: "ignore" });
-          baseline = lastReviewed;
-        } catch {
-          // Chain rewritten: find the squash point by tree identity (pure
-          // logic in lib/review-baseline.ts, pinned by tests — round-12 P2);
-          // a clean miss falls back to the branch base, then the checkpoint
-          // baseline below.
-          baseline = st.checkpoint?.prevSha && st.review.fingerprint
-            ? squashPointBaseline(root, st.review.fingerprint, st.checkpoint!.prevSha)
-            : undefined;
-          if (!baseline) baseline = branchBaseBaseline(root);
+      if (role === "adviser") {
+        const prepared = await callTool("prepare_adviser", { repo: root }, ctx);
+        if (prepared.isError) {
+          return {
+            content: [{ type: "text", text: "review-gate: 本轮未受理 — adviser brief 无法生成。\n" + toolText(prepared) }],
+            details: { submitted: false, busy: false },
+            isError: true,
+          };
         }
+        reviewTask = `你要回答的问题（来自主会话）：\n${task}\n\n${extractTaskText(toolText(prepared))}`;
       }
-      if (!baseline) {
-        baseline =
-          st.checkpoint.prevSha ||
-          (() => {
-            try {
-              return execFileSync("git", ["rev-parse", `${st.checkpoint!.sha}^`], { cwd: root, encoding: "utf8" }).trim();
-            } catch {
-              // Round-9 P2 / round-10 Nit: a root commit or an unreachable sha
-              // must not throw out of the tool — fall back to the checkpoint
-              // sha itself as the baseline (an empty range at worst: the
-              // reviewer audits the checkpoint commit alone).
-              return st.checkpoint!.sha;
-            }
-          })();
-      }
-      let head = "";
-      let tree = "";
-      try {
-        head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-        tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
-      } catch (err) {
+      // The title is a DISPLAY label the gate derives itself (B5: it must not
+      // reach the session's directory, or every round starts a new session).
+      const title = `${role}-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
+      progress.step(`spawn ${role}`);
+      const dispatch = dispatchJudgeRound({ root, role, title, task: reviewTask, fresh: params.fresh === true, streamPath });
+      if (!dispatch.ok) {
+        // A busy role is a normal state with a next step, not a malfunction —
+        // the reason text already says what to do, so it stands alone.
+        progress.fail(dispatch.busy ? "该 role 仍在跑上一轮" : "spawn 失败");
+        const lead = dispatch.busy ? "review-gate: " : "review-gate: judge_submit 失败 — ";
         return {
-          content: [{ type: "text", text: `review-gate: prepare_review failed — cannot read HEAD: ${err instanceof Error ? err.message : String(err)}` }],
-          details: { prepared: false },
+          content: [{ type: "text", text: `${lead}${dispatch.error ?? "judge 进程未能启动"}` }],
+          details: { submitted: false, busy: dispatch.busy === true },
           isError: true,
         };
       }
-      if (head === baseline) {
-        return {
-          content: [{ type: "text", text: "review-gate: prepare_review — HEAD equals the checkpoint baseline, so the range is empty. Call review_checkpoint again after your fixes, then prepare." }],
-          details: { prepared: false },
-          isError: true,
-        };
+      progress.done(dispatch.reused ? "已受理（续接同一会话）" : "已受理（新会话）");
+      // The round is ACCEPTED — only now is the audited draft on record. A
+      // refused submission (a busy role, a failed spawn) must never replace
+      // the draft a running audit is judging: its verdict would be recorded
+      // against text no auditor ever read, and propose_loop_goal would then
+      // show the user an unaudited goal.
+      if (role === "goal-auditor") {
+        pendingGoalAudits.set(root, { draft: task, startedAt: new Date().toISOString() });
       }
-      const range = `${baseline.slice(0, 12)}..${head.slice(0, 12)}`;
-      let files: string[] = [];
-      try {
-        files = execFileSync("git", ["diff", "--name-only", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
-          .trim().split("\n").filter(Boolean);
-      } catch { /* empty file list is still a valid round */ }
-      const runId = `review-${Date.now().toString(36)}`;
-      const streamPath = pathJoin(root, ".pi", "review-stream", `${runId}-review.jsonl`);
-      try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* stream is optional */ }
-      const goalSt = root === primaryRepoRoot ? state : stateForRepo(root);
-      const goalForReview = loopGoalConfirmed(root, goalSt) ? goalTextForReviewers(root) : undefined;
-      const goalText = goalForReview?.text;
-      const goalTruncated = goalForReview?.truncated === true;
-      const reviewTitle = `review-${runId.slice(-6)}`;
-      // Round-16 P2: the inbox question channel is embedded too — path and
-      // signal channel (inboxChannelFor(title), NEVER literal -inbox
-      // concatenation) so the child can ask without guessing.
-      const inboxPath = pathJoin(root, ".pi", "tmux-sessions", `rg-${reviewTitle}`, "inbox.jsonl");
-      const inboxChannel = inboxChannelFor(reviewTitle);
-      const scopeNow = reviewScopeFor(root, st);
-      // Round-18 polish gate: persist a supplied reason BEFORE building the
-      // task, so the reviewer of THIS round sees the reason that authorized it.
-      if (polish.required && (params.reason ?? "").trim()) {
-        st.lastPolishReason = {
-          reason: (params.reason ?? "").trim(),
-          at: new Date().toISOString(),
-          round: st.rounds.length + 1,
-        };
-        persistRepo(ctx as unknown as ExtensionContext, root);
-      }
-      const task = buildReviewPrompt(
-        "review",
-        files,
-        goalText,
-        root,
-        { streamPath, commitRange: range },
-        formatReviewScopeDirective(
-          scopeNow,
-          previousRoundFindings(st),
-          settledConclusion(st),
-          "reviewer",
-        ),
-        scopeNow.scope,
-        { dir: sessionDirFor(ctx, cwd), id: st.sessionId ?? "unknown" },
-        precommitBaselineFor(root, st),
-        // Round-16 P1: the done channel the reviewer will signal is EMBEDDED
-        // in the task text — the child never has to guess it, and the main
-        // session's listener (registered on the same derived channel) matches.
-        doneChannelFor(reviewTitle),
-        { path: inboxPath, channel: inboxChannel },
-        // Round-18 polish gate: the reason for THIS round travels to the
-        // reviewer, who judges whether the round deserves to exist.
-        st.lastPolishReason,
-      );
-      // Register the review target: record_review verifies HEAD is still the
-      // reviewed commit and binds a READY to the reviewed tree.
-      reviewTargets.set(root, { baseline, head, tree });
+      const child = judgeChildByRole(root, role);
       const lines = [
-        `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
-        `stream=${streamPath}`,
-        "Spawn the reviewer as a judge child (tmux pane), then send the task and register the wake-up:",
-        `- 建议 title: "${reviewTitle}" → done channel: ${doneChannelFor(reviewTitle)},inbox: ${inboxPath} (channel ${inboxChannel})（任务文本末尾已嵌入 done channel 与 inbox 提问指令；请用此 title 调 review_spawn，监听即与子会话信号匹配）`,
-        `- review_spawn({ role: "reviewer", title: "${reviewTitle}", repo: "${root}" }) → returns paneId + doneChannel`,
-        `- 把下面的任务文本写入文件，然后 review_send({ paneId, text: "读取 <task 文件> 并执行" })`,
-        "- review_watch({ channel: <doneChannel> })  ← 完成信号到达时本会话会被主动唤醒",
-        "  (review_spawn 已自动注册该监听;review_watch 仅用于自定义 label 重新注册)",
-        `- 可选:review_watch({ channel: "${inboxChannel}", label: "${reviewTitle}-inbox" }) 注册提问接收端——子会话按任务文本的提问指令发信号时唤醒本会话`,
-        ...(goalTruncated
-          ? [
-              `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${pathJoin(root, LOOP_GOAL_RELPATH)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,
-            ]
-          : []),
-        "- 等待纪律:子会话审核期间,继续做可实现的确定性工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);确认没有可做的工作后才阻塞等待审核结果。",
-        "",
-        "--- task text ---",
-        task,
-        "",
-        "The reviewer judges the COMMIT RANGE (immutable): you may keep fixing the worktree while it ",
-        "works. record_review re-checks that HEAD is still the reviewed commit; a new checkpoint ",
-        "after this prepare ⇒ STALE ⇒ BLOCKED.",
+        `review-gate: ${role} 已受理本轮任务（${dispatch.reused ? "复用同一会话，上下文延续" : "新会话"}）。`,
+        `- stdout: ${dispatch.stdoutPath ?? child?.stdoutPath ?? "(pending)"}`,
+        `- transcript: ${dispatch.sessionDir ?? child?.sessionDir ?? "(pending)"}`,
+        ...(streamPath ? [`- findings 流（边审边修）: ${streamPath}`] : []),
+        "- 进程退出即完成，届时会唤醒本会话；用 judge_read({role}) 取结论。现在别等，先做别的确定性工作。",
       ];
       return {
         content: [{ type: "text", text: lines.join("\n") }],
         details: {
-          prepared: true,
-          baseline,
-          head,
-          range,
-          fileCount: files.length,
-          stream: streamPath,
-          files,
+          submitted: true,
+          role,
+          reused: dispatch.reused,
+          runDir: dispatch.runDir,
+          stdoutPath: dispatch.stdoutPath ?? child?.stdoutPath,
+          sessionDir: dispatch.sessionDir ?? child?.sessionDir,
+          streamPath,
         },
       };
     },
   });
+  // `review_spawn` / `review_watch` / `review_send` are GONE, module and all
+  // (lib/judge-relay-tools.ts is deleted). Unlike the prepare family they were
+  // not even used internally: `judge_submit` dispatches rounds itself and
+  // registers its own completion watcher, so those three were purely a second
+  // way to ask for the same thing.
 
-  // ---------- prepare_adviser tool (incremental advisory — goal criterion 3) ----------
-
-  /** The session dir pi is ACTUALLY using: the live manager knows the final
-   *  --session-dir / env / settings selection (round-10 P1). Fallbacks stay
-   *  in lib/session-dir.ts for contexts without a manager.
-   */
-  function sessionDirFor(ctx: unknown, cwd: string): string {
-    const sm = (ctx as { sessionManager?: { getSessionDir?: () => string } })?.sessionManager;
-    return sessionDirForCwd(cwd, undefined, sm?.getSessionDir?.());
-  }
 
   /**
-   * The LAST conclusion an adviser appended for this goal, if any. Lines are
-   * JSON; malformed ones are skipped and only a conclusion for THIS goal
-   * (the artifact is named per goal, so this is belt-and-braces) counts.
+   * The three tools that OBSERVE or END a judge session — judge_read,
+   * judge_close, judge_wait — live in lib/judge-session-tools.ts; only their
+   * wiring is here. What they need from THIS file (the repo resolution, the
+   * child registry, the exit watcher, the pending audit, the hosted-wait
+   * watchdog) arrives as this deps object, and nothing else of them does:
+   * every rule they apply is unit-testable without a spawned judge.
    */
-  function readLastAdviserConclusion(artifactPath: string, goalHash: string): AdviserConclusion | undefined {
-    try {
-      return parseAdviserConclusions(readFileSync(artifactPath, "utf8"), goalHash);
-    } catch { /* no artifact yet */ }
-    return undefined;
-  }
-
-  // sessionDirForCwd lives in lib/session-dir.ts (realpath-resolved, matching
-  // pi's session-manager encoding — round-4 P1) so it is unit-testable.
+  registerJudgeSessionTools(pi, {
+    resolveRepo: (requested) => resolveToolRepo(requested),
+    findChild: (root, role, sessionId) => findJudgeChild(root, role, sessionId),
+    sessionState: (child) => readJudgeSessionState({ pidPath: child.pidPath, exitCodePath: child.exitCodePath }),
+    conclusion: (child) => readJudgeConclusion(child.sessionDir),
+    stderrTail: (child) => readStderrTail(child.stderrPath),
+    readText: (path) => {
+      try {
+        if (!existsSync(path)) return undefined;
+        return readFileSync(path, "utf8");
+      } catch { return undefined; }
+    },
+    fileExists: (path) => existsSync(path),
+    cancelWatch: (sessionId) => {
+      // Cancel the exit watcher so no wake fires for a close we initiated.
+      watchRegistry.unregister(sessionId);
+      forgetChildProcess(sessionId);
+    },
+    dropChild: (sessionId) => {
+      for (const [repoRoot, list] of childSessions) {
+        childSessions.set(repoRoot, list.filter((c) => c.sessionId !== sessionId));
+      }
+      // D — the judge is gone, so reclaim its scratch review worktrees.
+      reapReviewScratch(sessionId);
+    },
+    dropPendingAudit: (root) => { pendingGoalAudits.delete(root); },
+    cancelWaitTimer: () => cancelChildWaitTimer(),
+  });
 
   /**
-   * The trusted-checks block for the reviewer's task text: what precommit
-   * already verified (sidecar verdict + cache steps), so the reviewer does
-   * not re-run the full suite.
-   *
-   * SAFETY (round-9 P1): the baseline is only trusted when the recorded PASS
-   * is bound to the CURRENT worktree fingerprint — a PASS for an older tree
-   * proves nothing about this change, and claiming it would suppress exactly
-   * the verification this round needs. Cache entries recorded AFTER the PASS
-   * itself are skipped (they belong to a later tree). Undefined when no
-   * matching PASS is on record — the reviewer then decides on its own.
+   * `prepare_review` — the preparation of ONE code-review round (the
+   * immutable baseline..HEAD range, the polish gate, the findings stream and
+   * the review target a verdict later binds to) — lives in
+   * lib/review-prepare-tools.ts; only its wiring is here. What it needs from
+   * THIS file (the repo resolution, gate state and its persistence, the
+   * loop-goal readers, the scope decision, the review-target registry and
+   * three git reads) arrives as this deps object, and nothing else of it
+   * does: every branch it applies is unit-testable without a repository.
    */
-  function precommitBaselineFor(root: string, st: GateState): string | undefined {
-    let digest: string | undefined;
-    try {
-      const fp = computeFingerprint(root);
-      digest = fp.unavailable ? undefined : fp.digest;
-    } catch { digest = undefined; }
-    let cacheRaw: string | undefined;
-    try { cacheRaw = readFileSync(pathJoin(root, ".pi", "precommit-cache.json"), "utf8"); } catch { /* no cache */ }
-    // The pure decision (fingerprint match + stale-entry filter + wording) is
-    // in lib/parallel-review.ts so the safety behavior is testable.
-    return extractPrecommitBaseline(st.precommit, digest, cacheRaw);
-  }
-
-  pi.registerTool({
-    name: "prepare_adviser",
-    label: "Prepare Adviser Brief",
-    description:
-      "Hand back the ready-made task text for an `adviser` subagent consultation on the CURRENT loop goal. " +
-      "Call this before dispatching `adviser`: the brief carries (a) the main session's transcript location " +
-      "for ON-DEMAND reading (the adviser runs context:\"fresh\" — it no longer inherits a fork of this " +
-      "conversation), (b) the artifact path where the adviser appends its conclusion, and (c) when a " +
-      "previous consultation of this goal exists, that conclusion plus the files changed since, so the " +
-      "adviser settles what already stands instead of re-arguing it from zero. First consultation of a " +
-      "goal is a full brief.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (required once the session edited several repos)",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const target = resolveToolRepo(params.repo);
-      if (!target.ok) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const st = stateForRepo(target.root);
-      // goalText (display) may be capped for the prompt; the ARTIFACT identity
-      // must hash the FULL approved text, or distinct long goals would share
-      // one conclusion file (round-4 P1).
-      const confirmed = loopGoalConfirmed(target.root, st);
-      // Identity hashes the RAW FILE content, never the capped display text:
-      // readLoopGoal() truncates past LOOP_GOAL_MAX_CHARS, and two distinct
-      // long goals must not share one conclusion artifact (round-5 P1).
-      let fullGoalRaw: string | undefined;
-      try { fullGoalRaw = readFileSync(pathJoin(target.root, LOOP_GOAL_RELPATH), "utf8"); } catch { /* no goal file */ }
-      const goalForReview = confirmed ? goalTextForReviewers(target.root) : undefined;
-      const goalText = goalForReview?.text;
-      const goalHash = confirmed && fullGoalRaw
-        ? goalTextHash(fullGoalRaw)
-        // No approved goal: a STABLE per-session identity (sessionId is set at
-        // session start; "anon" is the defensive fallback) so repeated
-        // consultations within one session reuse each other's conclusions —
-        // a fresh random id every call would defeat the incremental contract.
-        : `no-goal-${st.sessionId ?? "anon"}`;
-      const artifactPath = pathJoin(target.root, ".pi", "review-stream", `adviser-${goalHash}.jsonl`);
-      // The artifact must be writable on the FIRST consultation too — review
-      // snapshots create this directory, but an adviser consult can precede
-      // any review.
-      try { mkdirSync(pathDirname(artifactPath), { recursive: true }); } catch { /* best-effort */ }
-      const previous = readLastAdviserConclusion(artifactPath, goalHash);
-      // Baseline advance is CONFIRMATION-BASED (round-3 P1): the baseline must
-      // never advance past a consultation that appended no conclusion — its
-      // examined changes would silently vanish from the next brief while an
-      // older conclusion is carried forward. The gate cannot observe the
-      // adviser's write, so it counts VALID conclusions in the artifact:
-      //   - count > baseline.confirmed ⇒ the last consultation SUCCEEDED ⇒
-      //     changed files are computed against baseline.tree (that consult's
-      //     START) and the baseline advances;
-      //   - count ≤ baseline.confirmed ⇒ the last consultation ABORTED ⇒
-      //     compute against baseline.prevTree (the last CONFIRMED start) so
-      //     its changes are re-listed, and do NOT advance. prevTree null ⇒
-      //     nothing is confirmed yet (cross-session first advance) ⇒ full
-      //     re-check (round-4 P1).
-      const artifactRaw = (() => {
-        try { return readFileSync(artifactPath, "utf8"); } catch { return ""; }
-      })();
-      const confirmedCount = countAdviserConclusions(artifactRaw, goalHash);
-      const baseline = st.adviserBaselines?.[goalHash];
-      const baseTree = baseline
-        ? confirmedCount > baseline.confirmed ? baseline.tree : baseline.prevTree
-        : undefined;
-      let changedFiles: string[] | null = null;
-      if (!baseTree) {
-        // No baseline for this goal in this state. An OLDER conclusion may
-        // still exist (cross-session artifact): the increment vs it cannot be
-        // computed, so demand a full re-check (null) — never pretend "no
-        // changes" against a conclusion this session never saw.
-        changedFiles = previous ? null : [];
-      } else {
-        const inc = incrementSinceTree(target.root, baseTree);
-        if (inc) changedFiles = inc.files;
-        // else: stays null → brief demands a full check
-      }
-      // Advance ONLY on confirmed success (a conclusion beyond the last
-      // count). prevTree = the start the just-confirmed consultation read
-      // (baseline.tree), so an aborted NEXT consultation rolls back to
-      // exactly this confirmed point instead of hiding its changes.
-      if (!baseline || confirmedCount > baseline.confirmed) {
+  registerReviewPrepareTools(internalHost, {
+    resolveRepo: (requested) => resolveToolRepo(requested),
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    sessionDir: (ctx) => sessionDirFromContext(ctx, cwd),
+    goalConfirmed: (root, st) => loopGoalConfirmed(root, st),
+    goalTextForReviewers: (root) => goalTextForReviewers(root),
+    loopGoalPath: (root) => loopGoalPathIn(root),
+    reviewScope: (root, st) => reviewScopeFor(root, st),
+    previousRoundFindings: (st) => previousRoundFindings(st),
+    settledConclusion: (st) => settledConclusion(st),
+    registerReviewTarget: (root, target) => { reviewTargets.set(root, target); },
+    git: {
+      // Deliberately NOT the `isAncestor` helper above: that one runs with
+      // `encoding: "utf8"` and no `stdio`, which lets git's "fatal: Not a
+      // valid object name" reach the USER's stderr. prepare_review has always
+      // silenced this probe (a rewritten chain is an expected outcome here,
+      // not an error), so the `stdio: "ignore"` is carried over verbatim.
+      isAncestor: (root, maybeAncestor, branch) => {
         try {
-          const treeNow = headCommitTree(target.root);
-          st.adviserBaselines = {
-            ...(st.adviserBaselines ?? {}),
-            [goalHash]: { tree: treeNow, prevTree: baseline ? baseline.tree : null, confirmed: confirmedCount },
-          };
-        } catch { /* keep the old baseline */ }
-      }
-      persistRepo(ctx as unknown as ExtensionContext, target.root);
-      const brief = buildAdviserBrief({
-        goalHash,
-        sessionDir: sessionDirFor(ctx, cwd),
-        sessionId: st.sessionId ?? "unknown",
-        artifactPath,
-        ...(previous ? { previous } : {}),
-        changedFiles,
-        ...(goalText ? { goalText } : {}),
-        // Round-16 P1: the done channel is EMBEDDED in the brief so the
-        // adviser never guesses it; spawn with the suggested title below.
-        doneChannel: doneChannelFor(`adviser-${goalHash.slice(0, 6)}`),
-        // Round-16 P2: inbox path + signal channel embedded too.
-        inboxPath: pathJoin(target.root, ".pi", "tmux-sessions", `rg-adviser-${goalHash.slice(0, 6)}`, "inbox.jsonl"),
-        inboxChannel: inboxChannelFor(`adviser-${goalHash.slice(0, 6)}`),
-      });
-      const adviserTitle = `adviser-${goalHash.slice(0, 6)}`;
-      const adviserInboxPath = pathJoin(target.root, ".pi", "tmux-sessions", `rg-${adviserTitle}`, "inbox.jsonl");
-      const adviserInboxChannel = inboxChannelFor(adviserTitle);
-      const goalTruncated = goalForReview?.truncated === true;
-      return {
-        content: [{ type: "text", text:
-          `adviser brief ready (${previous ? "incremental" : "full"}):\n` +
-          `- 建议 title: "${adviserTitle}" → done channel: ${doneChannelFor(adviserTitle)},inbox: ${adviserInboxPath} (channel ${adviserInboxChannel})（brief 末尾已嵌入 done channel 与 inbox 提问指令）\n` +
-          `- 可选:review_watch({ channel: "${adviserInboxChannel}", label: "${adviserTitle}-inbox" }) 注册提问接收端\n` +
-          "- 等待纪律:咨询期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于咨询结果的事才等。\n" +
-          (goalTruncated ? `- 注意:brief 中的 loop goal 因长度被截断;落盘 task 文件时请用 read 读取 ${pathJoin(target.root, LOOP_GOAL_RELPATH)} 全文替换截断部分。\n` : "") +
-          `\n${brief}` }],
-        details: { incremental: !!previous, artifactPath, changedFiles, title: adviserTitle, doneChannel: doneChannelFor(adviserTitle), inboxChannel: adviserInboxChannel },
-      };
+          execFileSync("git", ["merge-base", "--is-ancestor", maybeAncestor, branch], { cwd: root, stdio: "ignore" });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      revParse: (root, rev) => execFileSync("git", ["rev-parse", rev], { cwd: root, encoding: "utf8" }).trim(),
+      changedFilesInRange: (root, baseline, head) =>
+        execFileSync("git", ["diff", "--name-only", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
+          .trim().split("\n").filter(Boolean),
+    },
+    readText: (path) => {
+      try { return readFileSync(path, "utf8"); } catch { return undefined; }
     },
   });
 
-  // ---------- prepare_goal_audit tool (the auditor's ready-made task, PRE-dispatch) ----------
-
-  pi.registerTool({
-    name: "prepare_goal_audit",
-    label: "Prepare Goal Audit Task",
-    description:
-      "Hand back the ready-made task text for a `goal-auditor` audit of a DRAFT loop goal — call this BEFORE " +
-      "dispatching the auditor. The task carries the draft, the audit criteria, the fresh-context transcript " +
-      "pointer, and — when a previous audit of a DIFFERENT draft is on record — the carryover block (previous " +
-      "verdict + findings + previous draft) and the mechanically computed draft delta, so a re-audit judges " +
-      "the increment instead of re-deriving the whole contract. record_goal_prereview stays a pure record; " +
-      "this is where the task text comes from.",
-    parameters: Type.Object({
-      goal: Type.String({ description: "The FULL draft goal text to be audited (the exact text you will submit)" }),
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (required once the session edited several repos)",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const target = resolveToolRepo(params.repo);
-      if (!target.ok) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const draft = normalizeGoalText(String(params.goal ?? ""));
-      if (!draft) {
-        return {
-          content: [{ type: "text", text: "review-gate: prepare_goal_audit rejected — the goal text is empty." }],
-          details: {},
-          isError: true,
-        };
-      }
-      const st = stateForRepo(target.root);
-      const newHash = goalTextHash(draft);
-      const prev = st.goalPrereview;
-      const carryover = prev && prev.hash !== newHash ? formatGoalPrereviewCarryover(prev) : undefined;
-      const taskText = buildGoalAuditTask(draft, {
-        ...(carryover ? { carryover } : {}),
-        ...(prev?.draft ? { prevDraft: prev.draft } : {}),
-        sessionDir: sessionDirFor(ctx, cwd),
-        sessionId: st.sessionId ?? "unknown",
-        // Round-16 P1: the done channel is EMBEDDED in the task text so the
-        // auditor never guesses it; spawn with the suggested title below and
-        // the listener (doneChannelFor) matches the signal.
-        doneChannel: doneChannelFor(`goal-audit-${newHash.slice(0, 6)}`),
-        // Round-16 P2: inbox path + signal channel embedded too.
-        inboxPath: pathJoin(target.root, ".pi", "tmux-sessions", `rg-goal-audit-${newHash.slice(0, 6)}`, "inbox.jsonl"),
-        inboxChannel: inboxChannelFor(`goal-audit-${newHash.slice(0, 6)}`),
-      });
-      const auditTitle = `goal-audit-${newHash.slice(0, 6)}`;
-      const auditInboxPath = pathJoin(target.root, ".pi", "tmux-sessions", `rg-${auditTitle}`, "inbox.jsonl");
-      const auditInboxChannel = inboxChannelFor(auditTitle);
-      return {
-        content: [{ type: "text", text:
-          `goal-auditor task ready (${carryover ? "re-audit with carryover" : "first audit"}):\n` +
-          `- 建议 title: "${auditTitle}" → done channel: ${doneChannelFor(auditTitle)},inbox: ${auditInboxPath} (channel ${auditInboxChannel})（任务文本末尾已嵌入 done channel 与 inbox 提问指令）\n` +
-          `- 可选:review_watch({ channel: "${auditInboxChannel}", label: "${auditTitle}-inbox" }) 注册提问接收端\n` +
-          "- 等待纪律:审计期间继续推进不阻塞的工作(注意:第一次 goal 批准前编辑/写工具仍被门禁拦截,属预期);只有真正阻塞于审计结果的事才等。\n\n" +
-          `${taskText}` }],
-        details: { reaudit: !!carryover, hash: newHash.slice(0, 12), title: auditTitle, doneChannel: doneChannelFor(auditTitle), inboxChannel: auditInboxChannel },
-      };
+  /**
+   * The two ADVISORY preparations — `prepare_adviser` (the incremental brief
+   * for a consultation on the current goal) and `prepare_goal_audit` (the
+   * auditor's task for a DRAFT goal) — live in lib/advisory-prepare-tools.ts;
+   * only their wiring is here. Neither computes a commit range nor registers
+   * a review target, which is exactly why they are a separate module from the
+   * reviewer's round preparation.
+   */
+  registerAdvisoryPrepareTools(internalHost, {
+    resolveRepo: (requested) => resolveToolRepo(requested),
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    sessionDir: (ctx) => sessionDirFromContext(ctx, cwd),
+    goalConfirmed: (root, st) => loopGoalConfirmed(root, st),
+    goalTextForReviewers: (root) => goalTextForReviewers(root),
+    loopGoalPath: (root) => loopGoalPathIn(root),
+    readText: (path) => {
+      try { return readFileSync(path, "utf8"); } catch { return undefined; }
     },
+    ensureDir: (path) => {
+      try { mkdirSync(path, { recursive: true }); } catch { /* best-effort */ }
+    },
+    incrementSinceTree: (root, tree) => incrementSinceTree(root, tree),
+    headCommitTree: (root) => headCommitTree(root),
   });
   // ---------- record_review tool ----------
 
-  pi.registerTool({
+  // INTERNAL, not registered: the gate records a verdict itself when the
+  // reviewer's process exits, from that round's own output.
+  internalTool({
     name: "record_review",
     label: "Record Review",
     description:
-      "Record the verdict of an independent code/doc review. Pass the FULL raw output of a REAL, " +
+      "ADVANCED / internal: the gate records the verdict ITSELF when the reviewer's process exits " +
+      "(from that round's own output), so you do not call this in the normal flow — only when you " +
+      "have a reviewer output the gate could not read. " +
+      "Records the verdict of an independent code/doc review. Pass the FULL raw output of a REAL, " +
       "independent reviewer run (do not hand-write the verdict). The gate parses every JSON fence " +
-      "(worst verdict wins). Call after every review round.",
+      "(worst verdict wins).",
     parameters: Type.Object({
       reviewer_output: Type.String({ description: "Complete raw output from the reviewer" }),
       repo: Type.Optional(Type.String({
@@ -3736,7 +4694,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
 
-      // The agent is running the loop again — a standing pause_for_question
+      // The agent is running the loop again — a standing ask_user
       // pause is moot (liveness: a stale pause would silently swallow the
       // next auto-continuation after a BLOCKED verdict).
       // P-multi: the verdict binds to ONE repo — `repo` when given, else the
@@ -3781,6 +4739,37 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         if (staleTarget) parsed.verdict = "BLOCKED";
       }
+      // THE cwd CHECK (round-9 P1, reviewer-reproduced). The schema and the
+      // task text have always demanded a real `pwd` and said the gate checks
+      // it — but nothing did, so a fence claiming `/evil/elsewhere` produced
+      // exactly the same READY. A stated check that does not run is worse than
+      // no check, because it is believed.
+      //
+      // WHAT IT IS (round-11 P1): a consistency check on a SELF-REPORTED
+      // value. It rejects a report that does not match the repo this round was
+      // prepared for — a review run against the wrong repo. It proves nothing
+      // about who produced the verdict: any value equal to the root passes.
+      // Reading `paneCurrentPath` would not change that either, since a
+      // finished judge's pane is gone by the time its verdict is recorded.
+      //
+      // The judge pane is spawned with `cwd: root`, so the expected answer is
+      // this repo's root. Compared through realpath, because /var vs /private/var
+      // (macOS) would otherwise fail a perfectly honest reviewer.
+      let cwdMismatch: string | undefined;
+      if (parsed.verdict === "READY") {
+        const claimed = parsed.cwd;
+        if (claimed === undefined || claimed.trim() === "") {
+          cwdMismatch = "the verdict carries no `cwd` (a required field: run `pwd` and report it)";
+        } else {
+          // canonicalPath exists for exactly this: /var vs /private/var would
+          // otherwise withhold an honest reviewer's READY.
+          if (canonicalPath(claimed) !== canonicalPath(targetRoot)) {
+            cwdMismatch = `the verdict's cwd ${JSON.stringify(claimed)} is not the repo this round was prepared for (${targetRoot})`;
+          }
+        }
+        if (cwdMismatch) parsed.verdict = "BLOCKED";
+      }
+
       const bindTree = parsed.verdict === "READY" ? reviewTargets.get(targetRoot)?.tree ?? null : null;
       st.review = {
         verdict: parsed.verdict,
@@ -3834,8 +4823,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(recorded.blockingFiles.length > 0 ? { blockingFiles: recorded.blockingFiles } : {}),
       });
       // Observability: what this round cost and how much of the change it had
-      // to judge. The duration is an UPPER BOUND — the reviewer is a subagent
-      // the extension never sees, so all it can measure is the wall clock
+      // to judge. The duration is an UPPER BOUND — the reviewer is its own pi
+      // process in a pane, which the extension does not watch turn by turn,
+      // so all it can measure is the wall clock
       // since the previous gate event (see lib/gate-timings.ts).
       appendTiming(targetRoot, {
         kind: "review",
@@ -3870,7 +4860,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // break the tie). Plateau below stays for the stuck-on-same-finding case.
         loopArmed = false;
         note = ` Oscillation detected (${countOscillations(st.rounds)} READY→BLOCKED flips) — ` +
-          "the review is not converging. Escalate to the user or consult the adviser subagent " +
+          "the review is not converging. Escalate to the user or consult the adviser (a judge child process) " +
           "instead of burning more rounds.";
       } else if (isPlateaued(st.rounds, PLATEAU_ROUNDS)) {
         loopArmed = false;
@@ -3894,7 +4884,13 @@ export default function reviewGate(pi: ExtensionAPI) {
                 "checkpoint landed after prepare_review, so the READY cannot bind to the change now " +
                 "in place and is recorded as BLOCKED. This is the expected outcome of fixing while the " +
                 "review runs: those fixes are already in, so the next round is short. Re-review the " +
-                "current head (review_checkpoint → prepare_review → review_spawn → record_review)."
+                "current head with ONE call: judge_submit({role:\"reviewer\", task:<what you changed>})."
+              : "") +
+            (cwdMismatch
+              ? `\nCWD CHECK FAILED: ${cwdMismatch}. The verdict schema requires the judge's own \`pwd\`, ` +
+                "and the gate compares it with the repo this round was prepared for — a READY reporting a " +
+                "different directory is recorded as BLOCKED. If the reviewer ended inside its throwaway " +
+                "worktree, have it `cd` back to the repo root and report that instead."
               : "") +
             (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : ""),
         }],
@@ -3908,7 +4904,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- review tooling: change collection + snapshot materialization ----------
+  // ---------- review tooling: change collection ----------
 
   /** Collect changed files: tracked edits vs HEAD plus untracked, repo-relative. */
   async function listChangedFiles(
@@ -3935,11 +4931,15 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- run_precommit tool (the ONLY path to a PASS) ----------
 
-  pi.registerTool({
+  // INTERNAL, not registered: precommit is the first step of `judge_submit`,
+  // which always runs the FULL lane before it freezes anything.
+  internalTool({
     name: "run_precommit",
     label: "Run Precommit",
     description:
-      "Run the trusted precommit checks and record the verdict. This is the ONLY way to " +
+      "ADVANCED / internal: `judge_submit({role:\"reviewer\"})` runs this itself as step 1 of the " +
+      "submission chain — call it directly only to check the lane on its own. " +
+      "Runs the trusted precommit checks and records the verdict. This is the ONLY way to " +
       "record a precommit PASS — the gate never trusts a PASS parsed from bash output. " +
       "The extension spawns the bundled runner itself and verifies a private nonce receipt.",
     parameters: Type.Object({
@@ -3951,7 +4951,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           "unblocks only that repo.",
       })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       // Available in every mode: explore allows edits/bash, so the agent may
       // legitimately want to verify its investigation with the trusted runner.
       const mode = params.mode === "full" ? "full" : "fast";
@@ -3985,10 +4985,20 @@ export default function reviewGate(pi: ExtensionAPI) {
       // — in the wrong dir.
       // targetDir is where the checks RUN; targetRoot is the repo the run log
       // belongs to (`.pi/` is only gate-owned at the root — see keepRunLog).
-      // `_onUpdate` streams the runner's log while it runs (plan preamble first,
-      // then each check's output) — a precommit used to be a silent multi-minute
-      // tool call with no way to see what it was doing.
-      const outcome = await runTrustedPrecommit(targetDir, targetRoot, mode, _signal, _onUpdate);
+      // Live progress: the runner's own log (plan preamble first, then each
+      // check's output) is shown UNDER a step line that carries the lane and
+      // the elapsed time — a precommit used to be a silent multi-minute call
+      // with no way to see what it was doing. The frames go to `onUpdate`
+      // only; the verdict text below is what the agent gets.
+      const progress = createProgressReporter({
+        title: `review-gate: precommit (${mode})`,
+        onUpdate: onUpdate as ToolUpdate | undefined,
+      });
+      progress.step(mode === "full" ? "lint + typecheck + build + 全量测试" : "lint + typecheck + build + 相关测试");
+      const outcome = await runTrustedPrecommit(targetDir, targetRoot, mode, signal, (partial) => {
+        progress.tail(partial.content.map((c) => c.text).join("\n"));
+      });
+      progress.done(outcome.verdict);
 
       if (outcome.verdict === "PASS") {
         // Bind PASS to the fingerprint recomputed AFTER the runner finished
@@ -4098,15 +5108,54 @@ export default function reviewGate(pi: ExtensionAPI) {
   pi.registerTool({
     name: "declare_done",
     label: "Declare Done",
-    description: "Declare the current task complete. Re-validates all gates server-side; rejects if unmet.",
+    description:
+      "Declare the current task complete. Re-validates every gate server-side, then LANDS the work: " +
+      "the gate merges this session's work branch into the base the user confirmed. A merge " +
+      "conflict is reported with its files and refuses completion — resolve it and call again, or " +
+      "pass waiveMerge to ask the user to leave the branch unmerged.",
     parameters: Type.Object({
       summary: Type.String({ description: "One-paragraph completion summary" }),
+      waiveMerge: Type.Optional(Type.String({
+        description:
+          "Ask the USER to finish WITHOUT merging the work branch (they confirm in a dialog, and " +
+          "the reason is recorded). Use it only when they chose to handle the merge themselves.",
+      })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, onUpdate, ctx) {
+      // Completion re-runs every gate and then MERGES — minutes of work in
+      // the worst case, and a merge conflict is exactly when the human wants
+      // to see what happened. One step per phase.
+      const progress = createProgressReporter({
+        title: "review-gate: declare_done",
+        onUpdate: onUpdate as ToolUpdate | undefined,
+      });
+      progress.step("门禁复检");
+      // R-30 — THE ORCHESTRATOR'S EXIT CONTRACT IS THE PLAN, and it is the
+      // ONE the status tool already reports. Measured on 2026-08-30: with
+      // every task done, no live children and no open decisions,
+      // `orchestrator_status` said "没有了，可以 declare_done" while
+      // declare_done rejected with "code review gate is PENDING / precommit
+      // has not run" — criteria a project manager can never satisfy, because
+      // constraint 2 forbids it from writing the code a review would judge.
+      // Two answers to one question is a bug wherever it appears; here it was
+      // a functional deadlock, so both callers now run the same function.
+      const orchestratorMode = state.taskMode === "orchestrator";
       // P-multi: completion requires EVERY repo this session has edited to
       // pass its own review + precommit — a multi-repo task is not done while
       // any of its repos still holds unreviewed work.
       const problems: string[] = [];
+      if (orchestratorMode) {
+        // WHAT THIS DELIBERATELY DOES NOT CHECK (round-1 Nit, recorded rather
+        // than silently accepted): unreviewed changes a serial child left in
+        // the shared worktree are invisible to THIS exit check now. That is a
+        // tidiness risk, not a hole — a supervisor writes no code (constraint
+        // 2) and every ship still goes through the SESSION that made the
+        // change, with its own review and precommit. If an orchestrator is
+        // ever allowed to commit, this layer has to be reconsidered.
+        problems.push(...orchestrationDoneProblems());
+
+      } else {
+
       for (const root of sessionRepos) {
         const st = enforcementStateFor(root);
         const fp = computeFingerprint(root);
@@ -4129,18 +5178,22 @@ export default function reviewGate(pi: ExtensionAPI) {
           problems.push(`[${repoLabel(root)}] gate state missing (fail-closed)`);
         }
       }
+      }
+
 
       // Residual judge children (execution-model standard 5): a task is not
       // done while a judge child session is still open — its context may hold
-      // a pending verdict or an unanswered inbox question, and dropping it
-      // silently strands a pane (and its expensive model context). The round
-      // must be closed out with record_review / review_close first. In loop
+      // a pending verdict or an unanswered question, and dropping it silently
+      // strands a process (and its expensive model context). The round
+      // must be closed out first — either the judge exits and the gate
+      // records its verdict, or `judge_close` ends it. In loop
       // mode this is a hard requirement; explore/normal report it as
       // advisory via the branch below.
       for (const [root, list] of childSessions) {
         if (list.length > 0) {
           problems.push(`[${repoLabel(root)}] ${list.length} judge child session(s) still open (` +
-            `${list.map((c) => c.paneId).join(", ")}) — finish the round (record_review / review_close) ` +
+            `${list.map((c) => c.sessionId).join(", ")}) — let the round finish (the gate records its ` +
+            "verdict when the judge exits) or close it with `judge_close({role})` " +
             "before declaring done");
         }
       }
@@ -4151,16 +5204,25 @@ export default function reviewGate(pi: ExtensionAPI) {
       // dialog fact the git hooks cannot see. Both still decide whether the
       // TASK is finished, which is exactly what this tool answers.
       const completionProblems: string[] = [];
-      for (const root of sessionRepos) {
-        const st = root === primaryRepoRoot ? state : stateForRepo(root);
-        for (const p of copilotProblemsFor(st)) {
-          completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+      if (!orchestratorMode) {
+        for (const root of sessionRepos) {
+          const st = root === primaryRepoRoot ? state : stateForRepo(root);
+          for (const p of copilotProblemsFor(st)) {
+            completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+          }
         }
-      }
-      if (state.taskMode === "loop" && !loopGoalConfirmed()) {
-        completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+        if (state.taskMode === "loop" && !loopGoalConfirmed()) {
+          completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+        }
+        // Orchestration exit contract (constraints 3, 4, 10, 11): the question
+        // is whether the WHOLE job is finished, not whether this session kept
+        // its own promises — an orchestrator that writes no code would
+        // otherwise sail through every gate above with its plan half-run.
+        // (In orchestrator mode it was already the ONLY criterion, above.)
+        completionProblems.push(...orchestrationDoneProblems());
       }
       problems.push(...completionProblems);
+
       if (state.taskMode === "explore" || state.taskMode === "normal") {
         // Explore's defining behavior: the agent may end the task on its own
         // judgment. Gate status is reported as advisory only. (Ship commands
@@ -4179,23 +5241,86 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       if (problems.length > 0) {
+        progress.fail(`${problems.length} 项未满足`);
         return {
           content: [{
             type: "text",
             text: "review-gate: declare_done REJECTED — gates unmet:\n" +
               problems.map((p) => `  - ${p}`).join("\n") +
-              "\nComplete the loop (fix → review → record_review → precommit) and try again." +
+              (orchestratorMode
+                // R-30: an orchestrator has no review of its own to run, so
+                // pointing it at the loop would be pointing it at nothing.
+                // These are the SAME items block 5 of the `orchestrator_wait`
+                // receipt lists — one decision function, two surfaces.
+                ? "\n把上面这些做完再退出（这就是 `orchestrator_wait` 回执第 5 块「还差什么」，两处用的是同一个判据函数）。"
+                : "\nComplete the loop (fix → judge_submit({role:\"reviewer\"}) → READY) and try again.") +
               (problems.some((p) => p.includes("modified after the last READY"))
                 ? "\nTip: any code OR doc edit after a READY review invalidates it — including handoff/design/" +
                   "plan docs. Finish ALL edits (docs included) FIRST, then run the final review + precommit " +
                   "as the last steps before declare_done, so the READY fingerprint still matches."
                 : ""),
+
           }],
           details: { accepted: false, problems },
           isError: true,
         };
       }
+      progress.done("全部满足");
+      // The USER's escape hatch from the merge, and it is theirs: the agent
+      // can only ASK. A waiver granted in a dialog is recorded with its
+      // reason, so "why is this branch still unmerged?" has an answer.
+      const waiveReason = String(params.waiveMerge ?? "").trim();
+      if (waiveReason && state.workBranch && !state.mergeWaived) {
+        const granted = await confirmBounded(
+          ctx as unknown as { ui?: { confirm?: (t: string, m: string) => Promise<boolean> } },
+          "review-gate: 本次不把工作分支合并回基准分支？",
+          `工作分支 ${state.workBranch} → 基准 ${state.baseBranch ?? "(未记录)"}\n` +
+          `理由（不可信数据）：${waiveReason.slice(0, 300)}\n` +
+          "选 Yes：分支留在原地，由你自己处理合并。",
+        );
+        if (granted) {
+          state.mergeWaived = { at: new Date().toISOString(), reason: waiveReason.slice(0, 300) };
+          persist(ctx as unknown as ExtensionContext);
+        } else {
+          return {
+            content: [{ type: "text", text: "review-gate: 用户没有同意跳过合并 — 先解决合并（或让用户确认后重试）。" }],
+            details: { accepted: false, problems: ["merge waiver declined by the user"] },
+            isError: true,
+          };
+        }
+      }
+      // The gates are met — now the work has to LAND. The gate follows its own
+      // branch log back to the base the user confirmed and merges the work
+      // branch into it. A conflict is not the gate's to resolve: it stops,
+      // records what conflicted, and hands the list back.
+      progress.step(`合并工作分支 → ${state.baseBranch ?? "(基准未记录)"}`);
+      const finish = finishWorkBranch(ctx as unknown as ExtensionContext);
+      if (!finish.ok) {
+        progress.fail("冲突/未完成");
+        return {
+          content: [{ type: "text", text: finish.text }],
+          details: { accepted: false, problems: [finish.text] },
+          isError: true,
+        };
+      }
+      progress.done("已合并");
       loopArmed = false;
+      // R3-5 — RECORD THE COMPLETION, in this session's own sidecar.
+      //
+      // Everything the gate knew about "this task is finished" used to live in
+      // this function's local variables and then evaporate. A supervising
+      // orchestrator was left reading the child's TERMINAL to guess, and it
+      // guessed "working" for 725 seconds on a child that had merged its
+      // branch. This one write is what the `done` state is judged from
+      // (lib/orchestrator-child-state.ts), so it happens BEFORE the loop
+      // bookkeeping below and is never cleared by it.
+      state.completion = {
+        at: new Date().toISOString(),
+        merge: finish.merge,
+        ...(String(params.summary ?? "").trim()
+          ? { summary: String(params.summary).trim().slice(0, 500) }
+          : {}),
+      };
       // A completed unit of work closes its review loop. Session-log analysis
       // showed multi-task sessions accumulating a single ever-growing round
       // counter (e.g. "round 24/10"), which misleads the agent into believing
@@ -4226,1124 +5351,398 @@ export default function reviewGate(pi: ExtensionAPI) {
       stallNoticeShown = false;
       persist(ctx as unknown as ExtensionContext);
       return {
-        content: [{ type: "text", text: `review-gate: done accepted. ${params.summary}` }],
-        details: { accepted: true },
+        content: [{
+          type: "text",
+          text: `review-gate: done accepted. ${params.summary}` +
+            // R-22 — a round that shipped without a precommit says so, here,
+            // where the human reads the outcome.
+            (state.checkpoint?.precommitBypassed
+              ? "\n注意：本次交付的 checkpoint 是在 `/gate-bypass` 覆盖 precommit 前置的情况下完成的" +
+                "（用户授权，理由已记在 bypass 里）—— 全量测试没有在这份内容上跑过。"
+              : ""),
+        }],
+        details: { accepted: true, precommitBypassed: state.checkpoint?.precommitBypassed === true },
+
       };
     },
   });
 
-  // ---------- record_goal_prereview tool (L8b — the goal-auditor's verdict) ----------
+  /**
+   * The GOAL family — `propose_loop_goal` (L8: the user approves this
+   * session's exit contract) and the internal `record_goal_prereview` (L8b:
+   * the goal-auditor's verdict becomes a record) — lives in
+   * lib/goal-tools.ts + lib/goal-prereview-tools.ts; only its wiring is here.
+   *
+   * TWO HOSTS, deliberately named at the call site: the agent's tool goes to
+   * `pi`, the internal implementation to `internalHost`, which pi never
+   * learns a name from. The audit stays TRUSTED across the move — the fence
+   * is parsed and the draft hashed in THIS process (lib/verdict-parse.ts +
+   * lib/loop-goal.ts), never by the agent.
+   *
+   * What they need from THIS file arrives as this deps object: the repo roots
+   * and their gate state, the persistence, the audit chain (`runGoalAudit` —
+   * dispatch the judge, wait for it, record the verdict), the three
+   * user-facing surfaces (transcript notice, bounded dialog, and the
+   * either-side funnel an orchestrator may answer through), this session's
+   * own loop-goal path, the project-layer agent lookup and the one file write
+   * an approval performs.
+   */
+  registerGoalTools({ agent: pi, internal: internalHost }, {
+    // Getters: session_start re-resolves both, and a goal bound to the
+    // pre-session cwd would be recorded where nothing ever reads it.
+    primaryRepoRoot: () => primaryRepoRoot,
+    cwd: () => cwd,
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    log: (message) => log(message),
+    runGoalAudit: (input) => runGoalAudit(input),
+    showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
+    confirmBounded: (uiCtx, title, message, pointer, signal) =>
+      confirmBounded(uiCtx as ExtensionContext, title, message, pointer, signal),
+    askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
+    loopGoalPath: (root) => loopGoalPathIn(root),
+    loopGoalRelPath: loopGoalRelPath(SESSION_STATE_VARIANT),
+    findProjectAgent: (dir, name) => findProjectAgentText(dir, name),
+    // The directory is created with the file: the goal is the first thing a
+    // session writes into .pi/, so its parent may not exist yet.
+    writeGoalFile: (path, text) => {
+      mkdirSync(pathDirname(path), { recursive: true });
+      writeFileSync(path, text, "utf8");
+    },
+  });
+
+
+  /**
+   * The two L7 Copilot tools — `request_copilot_review` (ask for the review,
+   * stamp the authoritative request time) and `check_copilot_review` (read
+   * what it left open, and decide whether the requirement still blocks
+   * completion) — live in lib/copilot-review-tools.ts; only their wiring is
+   * here. They stay TRUSTED across the move: the `gh` calls run in this
+   * process (lib/copilot-gh.ts), never through the agent, so the agent can
+   * still not report its own review outcome.
+   *
+   * What they need from THIS file arrives as this deps object: the repo
+   * resolution, gate state and its persistence, the directory `gh` runs in,
+   * whether the loop is on for a repo (project config + mode), the
+   * auto-continuation arming and the log channel. The GitHub surface is
+   * injected too — one `gh` member per call the tools make — so every branch
+   * they take is unit-testable without a pull request.
+   */
+  registerCopilotReviewTools(pi, {
+    resolveRepo: (requested) => resolveToolRepo(requested),
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    repoDir: (root) => repoDirFor(root),
+    copilotEnabled: (st) => copilotEnabled(st),
+    armLoop: () => { loopArmed = true; },
+    log: (message) => log(message),
+    gh: {
+      resolveOpenPr: (dir, signal) => resolveOpenPr(dir, signal),
+      resolveRepoSlug: (dir, pr, signal) => resolveRepoSlug(dir, pr, signal),
+      fetchCopilotPayload: (dir, slug, prNumber, signal) => fetchCopilotPayload(dir, slug, prNumber, signal),
+      requestCopilotReviewer: (dir, pr, slug, signal) => requestCopilotReviewer(dir, pr, slug, signal),
+      // The allow-list is THIS extension's project config; lib/copilot-gh.ts
+      // carries no configuration of its own.
+      resolveCopilotSupport: (dir, slug, supportConfirmed, opts) =>
+        resolveCopilotSupport(dir, slug, supportConfirmed, projectConfig.copilotReview.owners, opts),
+    },
+    delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+  });
+
+  // ---------- setup_workspace tool (dirty worktree + branch, in one call) ----------
 
   pi.registerTool({
-    name: "record_goal_prereview",
-    label: "Record Goal Pre-review",
+    name: "setup_workspace",
+    label: "Set Up Workspace",
     description:
-      "Record the dedicated `goal-auditor` subagent's audit of a DRAFT loop goal. propose_loop_goal " +
-      "refuses to show the user's approval dialog until this records a PASS for the IDENTICAL text, " +
-      "so the flow is: draft (in Simplified Chinese) → call `prepare_goal_audit` for the ready-made " +
-      "auditor task (carryover + draft delta on a re-audit) → dispatch goal-auditor with it → record " +
-      "its FULL raw output here → propose_loop_goal. The EXTENSION parses the auditor's JSON fence " +
-      "itself (PASS only for a READY verdict; a fence with unresolved P0/P1 is already downgraded to " +
-      "BLOCKED) and hashes the draft itself — there is no `passed` parameter you could set, and a " +
-      "hand-written verdict is not a review. A FAIL means: fix the objections, re-audit the revised " +
-      "text (its hash differs, so it needs its own PASS).",
+      "Settle where this session works, in ONE call: what to do with changes that were already in " +
+      "the worktree (accept as this session's baseline / you handled them / the gate discards " +
+      "them) and which branch is the BASE this session's work must end up in. The gate asks the " +
+      "user, executes what they choose — including creating the work branch — and records every " +
+      "step in its branch log, which declare_done later follows back to merge. Call it once, " +
+      "early: while a dirty worktree is unsettled, edits are refused, and without a work branch " +
+      "commits are refused.",
     parameters: Type.Object({
-      goal: Type.String({ description: "The FULL draft goal text that was audited (the exact text you will submit)" }),
-      auditor_output: Type.String({ description: "Complete raw output from the goal-auditor subagent" }),
-      repo: Type.Optional(Type.String({
-        description:
-          "Absolute path of the repo this goal binds to (default: the session repo) — must match the " +
-          "repo you pass to propose_loop_goal.",
+      branch: Type.Optional(Type.String({
+        description: "Your proposed work branch name (default: session-<short id>; pass the CURRENT branch to keep working on it)",
       })),
-      auditStartedAt: Type.Optional(Type.String({
-        description:
-          "ISO timestamp of when you DISPATCHED the goal-auditor (the wall-clock start of this audit). " +
-          "Goal criterion 6 records first-vs-re-audit durations, and the gate cannot see the dispatch " +
-          "— the tool only records verdicts. Omit on re-records of the same audit.",
+      base: Type.Optional(Type.String({
+        description: "The branch the work must merge back into (default: the current one, which the user confirms)",
+      })),
+      repo: Type.Optional(Type.String({
+        description: "Absolute repo path (default: this session's repo)",
       })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const goalText = normalizeGoalText(String(params.goal ?? ""));
-      if (goalText.length === 0) {
-        return {
-          content: [{ type: "text", text: "review-gate: record_goal_prereview rejected — the goal text is empty." }],
-          details: { recorded: false },
-          isError: true,
+      const root = params.repo ? (gitRootOfDir(pathResolve(cwd, String(params.repo))) ?? primaryRepoRoot) : primaryRepoRoot;
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      const uiCtx = ctx as unknown as {
+        ui?: {
+          select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
+          notify?: (message: string, type?: "info" | "warning" | "error") => void;
         };
-      }
-      // Same cap as propose_loop_goal: auditing a draft the approval tool can
-      // never accept would burn a full audit round to produce a PASS that is
-      // structurally unusable.
-      if (goalText.length > LOOP_GOAL_MAX_WRITE_CHARS) {
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: record_goal_prereview rejected — the goal is ${goalText.length} chars, over the ` +
-              `${LOOP_GOAL_MAX_WRITE_CHARS} limit propose_loop_goal enforces. Shorten it BEFORE auditing: an ` +
-              "exit contract is 3–7 checkable criteria, not a design doc.",
-          }],
-          details: { recorded: false },
-          isError: true,
-        };
-      }
-      // SAME resolution as propose_loop_goal, deliberately NOT resolveToolRepo:
-      // that helper requires a repo the session already EDITED, but a goal (and
-      // therefore its audit) is recorded before the first edit lands. Using it
-      // here would make a second repo's goal impossible to pre-review — a dead
-      // end with no way out.
-      let goalRoot = primaryRepoRoot;
-      const rawRepo = String(params.repo ?? "").trim();
-      if (rawRepo) {
-        const abs = pathResolve(cwd, rawRepo);
-        const root = gitRootOfDir(abs);
-        if (!root) {
+      };
+      const notes: string[] = [];
+      /**
+       * Every workspace question goes through the channel funnel, so an
+       * orchestration child can be settled by its project manager exactly as
+       * it can by the human sitting in the pane — and neither waits for the
+       * other. A standalone session just renders the dialog, as before.
+       */
+      const askWorkspace = (title: string, choices: string[]): Promise<string | undefined> =>
+        askEitherSide(
+          { dialogKind: "select", topic: "workspace", title, options: choices },
+          typeof uiCtx.ui?.select === "function",
+          (signal) => uiCtx.ui!.select!(title, choices, { signal }),
+        ).catch(() => undefined);
+
+
+      // ---- 1. the dirty worktree, if there is one ----
+      let files = dirtyFiles(root);
+      if (files.length) {
+        showToUser(uiCtx, "───── 工作区有未提交改动 ─────", describeDirty(files));
+        const choices = Object.values(WORKTREE_CHOICES);
+        const picked = await askWorkspace("这些改动怎么处理？", choices);
+        const choice = interpretWorktreeChoice(picked);
+        if (!choice) {
+          // A dismissed dialog decides nothing — and deciding for the user
+          // here would mean either shipping their changes or deleting them.
           return {
-            content: [{
-              type: "text",
-              text: `review-gate: repo "${rawRepo}" (resolved ${abs}) is not inside a readable git repository — ` +
-                "a goal pre-review can only bind to a real repo.",
-            }],
-            details: { recorded: false },
+            content: [{ type: "text", text: "review-gate: 用户没有选择处置方式，工作区仍未确认（编辑保持拦截）。等他回答后重试。" }],
+            details: { settled: false, workBranch: undefined as string | undefined },
             isError: true,
           };
         }
-        goalRoot = root;
-      }
-      const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
-
-      // The EXTENSION reads the verdict; the agent only carries the output.
-      // parseReviewOutput already encodes the two rules that matter here: a
-      // READY carrying unresolved P0/P1 is contradictory and becomes BLOCKED,
-      // and a fence we could not fully parse can never come back READY.
-      const parsed = parseReviewOutput(params.auditor_output);
-      if (!parsed) {
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: no recognizable verdict in the goal-auditor's output — NOTHING was recorded " +
-              "(fail-closed). The auditor must end its reply with exactly ONE fenced JSON verdict, e.g.\n" +
-              `\`\`\`json\n{"gate":"READY"|"BLOCKED","findings":[{"severity":"P1","issue":"…"}]}\n\`\`\`\n` +
-              "Common causes: the reply was pure prose with no fence, it was truncated before the fence, " +
-              "or an unescaped straight quote inside a string broke the JSON. Re-run the audit — do not " +
-              "hand-write the verdict.",
-          }],
-          details: { recorded: false },
-          isError: true,
-        };
-      }
-      const passed = parsed.verdict === "READY";
-      const newHash = goalTextHash(goalText);
-      const findings = parseFenceFindings(params.auditor_output);
-      // Wall-clock duration of THIS audit, when the agent reported when it
-      // dispatched the auditor (goal criterion 6). Parsed leniently: a bogus
-      // timestamp records no duration rather than failing the record.
-      const startedAt = typeof params.auditStartedAt === "string" ? Date.parse(params.auditStartedAt) : NaN;
-      // A future timestamp (clock skew, a typo) records NO duration rather
-      // than a negative one that would poison the timing diagnostic.
-      const now = Date.now();
-      const durationMs = Number.isFinite(startedAt) && startedAt > 0 && startedAt <= now ? now - startedAt : undefined;
-      const record: GoalPrereviewRecord = {
-        hash: newHash,
-        verdict: passed ? "PASS" : "FAIL",
-        at: new Date().toISOString(),
-        findingsTotal: parsed.findingsTotal,
-        ...(findings.length ? { findings } : {}),
-        draft: normalizeGoalText(goalText),
-        ...(durationMs !== undefined ? { durationMs } : {}),
-      };
-      // Re-audit carryover (goal criterion 2): replacing a record for a
-      // DIFFERENT draft means this audit is a re-audit — hand the previous
-      // verdict and its findings back so the agent can put them in the
-      // auditor's task text. Same-hash re-records (a PASS retried) carry
-      // nothing: there is no revised draft to judge.
-      const prev = goalSt.goalPrereview;
-      const carryover = prev && prev.hash !== newHash ? formatGoalPrereviewCarryover(prev) : undefined;
-      // Latest-only for the CHECK (propose_loop_goal matches the CURRENT
-      // draft's PASS), but EVERY audit is persisted in the history (goal
-      // criterion 2: PASS or FAIL, oldest first) so the re-audit chain and
-      // its carryover data survive newer drafts.
-      goalSt.goalPrereviewHistory = [...(goalSt.goalPrereviewHistory ?? []), record];
-      goalSt.goalPrereview = record;
-      if (goalRoot === primaryRepoRoot) persist(ctx as unknown as ExtensionContext);
-      else persistRepo(ctx as unknown as ExtensionContext, goalRoot);
-      log(`goal pre-review recorded for ${goalRoot}: ${record.verdict} (${goalText.length} chars, findings: ${parsed.findingsTotal ?? "unparseable"})`);
-      // Wall-clock since the previous audit — the incremental-economy datum
-      // (goal criterion 6, (a)): re-audits of a revised draft should be
-      // measurably cheaper than first audits. Diagnostic only.
-      const prevAt = prev?.at ? Date.parse(prev.at) : NaN;
-      const auditGapMin = Number.isFinite(prevAt)
-        ? Math.round((Date.now() - prevAt) / 60000)
-        : null;
-      return {
-        content: [{
-          type: "text",
-          text:
-            (passed
-              ? `review-gate: goal pre-review PASS recorded (${record.hash.slice(0, 12)}…). Call propose_loop_goal with ` +
-                "the IDENTICAL text — any edit changes the hash and needs a fresh audit."
-              : `review-gate: goal pre-review FAIL recorded (verdict ${parsed.verdict}, ` +
-                `${parsed.findingsTotal ?? "unparseable"} findings). propose_loop_goal stays blocked: fix the ` +
-                "auditor's P0/P1 objections, then re-audit the revised draft.") +
-            (durationMs !== undefined
-              ? `\n(This audit took ${Math.round(durationMs / 1000)}s — report auditStartedAt to record durations.)`
-              : "") +
-            (auditGapMin !== null
-              ? `\n(Re-audit: ${auditGapMin} min since the previous audit of a different draft.)`
-              : "") +
-            (carryover
-              ? "\nRe-audit context: call `prepare_goal_audit` with the REVISED draft BEFORE dispatching the " +
-                "auditor — it returns the ready-made task with this audit's carryover and the draft delta."
-              : "")
-        }],
-        details: { recorded: true, verdict: record.verdict, findingsTotal: parsed.findingsTotal ?? null, reaudit: !!carryover, auditGapMin, durationMs: durationMs ?? null },
-      };
-    },
-  });
-
-  // ---------- propose_loop_goal tool (L8 — the user approves the contract) ----------
-
-  pi.registerTool({
-    name: "propose_loop_goal",
-    label: "Propose Loop Goal",
-    description:
-      "Submit the NEGOTIATED loop goal (this session's exit contract) for the user's approval. " +
-      "Interview the user first — ONE question per turn, labeled \"N of M\", each with your " +
-      "recommended answer (all at once only when the user asks for it) — and only " +
-      "submit what they actually agreed to. Write the goal in SIMPLIFIED CHINESE (technical " +
-      "identifiers, paths and code tokens stay English). REQUIRED FIRST: the draft must pass a " +
-      "dedicated `goal-auditor` audit recorded via record_goal_prereview — this tool refuses " +
-      "(no dialog at all) unless the sidecar holds a PASS for the IDENTICAL text. " +
-      "The extension shows the text in a confirmation " +
-      "dialog and, if the user approves, writes .pi/loop-goal.md itself and records the approval. " +
-      "Writing that file yourself grants nothing: in loop mode an unapproved goal blocks " +
-      "commit/push/PR and its body is withheld from your prompt. Shape: task title, one-line " +
-      "intent, 3–7 checkable exit criteria, non-goals, ISO date. `repo` selects WHICH repo the " +
-      "goal binds to (default: this session's repo) — a multi-repo session approves a goal per " +
-      "repo before editing there; one repo's approval never opens another's write surface.",
-    parameters: Type.Object({
-      goal: Type.String({ description: "The full goal text (Markdown) as agreed with the user" }),
-      repo: Type.Optional(Type.String({
-        description:
-          "Absolute path of the repo this goal binds to (default: the session repo). Required to " +
-          "unlock edit/write in a SECOND repo the session works in.",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const goalText = normalizeGoalText(String(params.goal ?? ""));
-      if (goalText.length === 0) {
-        return {
-          content: [{ type: "text", text: "review-gate: propose_loop_goal rejected — the goal text is empty." }],
-          details: { approved: false },
-          isError: true,
-        };
-      }
-      if (goalText.length > LOOP_GOAL_MAX_WRITE_CHARS) {
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: propose_loop_goal rejected — the goal is ${goalText.length} chars, over the ` +
-              `${LOOP_GOAL_MAX_WRITE_CHARS} limit. An exit contract is 3–7 checkable criteria, not a design doc.`,
-          }],
-          details: { approved: false },
-          isError: true,
-        };
-      }
-      // Per-repo binding: the goal belongs to the repo the WRITES land in.
-      // Default is the session repo; a multi-repo session passes `repo` so
-      // each repo gets its own contract (the L8 edit gate checks each repo's
-      // own goal + sidecar confirmation, so without this a second repo could
-      // never be unlocked — the block message would point at a dead end).
-      // Deliberately NOT resolveToolRepo: that helper requires the target to
-      // be a repo the session has ALREADY edited, but the whole point of the
-      // goal is to be approved BEFORE the first edit lands.
-      let goalRoot = primaryRepoRoot;
-      const rawRepo = String(params.repo ?? "").trim();
-      if (rawRepo) {
-        const abs = pathResolve(cwd, rawRepo);
-        // A goal bound to a NON-repo path could never satisfy the edit gate
-        // (it checks gitRootOfDir of the target write) — that would be a dead
-        // approval, and writing .pi/ into an arbitrary directory is worse.
-        // Refuse instead of silently recording it.
-        const root = gitRootOfDir(abs);
-        if (!root) {
-          return {
-            content: [{
-              type: "text",
-              text: `review-gate: repo \"${rawRepo}\" (resolved ${abs}) is not inside a readable git repository — ` +
-                "a loop goal can only bind to a real repo.",
-            }],
-            details: { approved: false },
-            isError: true,
-          };
-        }
-        goalRoot = root;
-      }
-      const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
-
-      // L8b GOAL PRE-REVIEW — fail-closed, and BEFORE any user-facing surface.
-      // The user should only ever be asked about a draft a dedicated auditor
-      // already judged: without this the pre-review was protocol the agent
-      // could simply skip, and the dialog is exactly what it would skip it for.
-      // Placed ahead of showToUser/confirm so a refusal costs the user nothing
-      // — no transcript spam, no dialog, no file write.
-      if (!goalPrereviewPassed(goalSt.goalPrereview, goalText)) {
-        const packageAgentsDir = resolvePackageAgentsDir();
-        // Dispatchability is what matters, not a filename: pi-subagents keys
-        // agents by their frontmatter `name`, so a copy called custom.md that
-        // declares `name: goal-auditor` IS dispatchable and must not be
-        // reported as missing. EVERY layer is resolved that way — the same
-        // rule gate-doctor applies — so the two never disagree.
-        const auditorInstalled =
-          findProjectAgentText(pathJoin(homedir(), ".pi", "agent", "agents"), "goal-auditor") !== undefined ||
-          // Both project layers are consulted: pi-subagents loads them from the
-          // SESSION's project root, while a multi-repo goal binds to goalRoot —
-          // checking only one of them would show (or hide) the bootstrap hint
-          // against the wrong directory. This flag is advisory copy only; it
-          // never affects the refusal itself.
-          [pathJoin(goalRoot, ".pi", "agents"), pathJoin(primaryRepoRoot, ".pi", "agents")]
-            .some((dir) => findProjectAgentText(dir, "goal-auditor") !== undefined);
-        return {
-          content: [{
-            type: "text",
-            text: buildGoalPrereviewRefusal({
-              ...(goalSt.goalPrereview ? { record: goalSt.goalPrereview } : {}),
-              goalText,
-              auditorInstalled,
-              repoRoot: goalRoot,
-              packageAgentsDir,
-            }),
-          }],
-          details: { approved: false, prereview: goalSt.goalPrereview?.verdict ?? "NONE" },
-          isError: true,
-        };
-      }
-      // The goal text goes to the TRANSCRIPT; the binding repo must be shown
-      // at CONSENT time (both surfaces), so a repo-scoped approval is never
-      // given for a repo the user was not shown.
-      const repoLine = goalRoot === primaryRepoRoot
-        ? "本仓库 (" + primaryRepoRoot + ")"
-        : goalRoot;
-
-      // Consent comes from a dialog the EXTENSION renders — there is no
-      // parameter the model could set to claim it. No UI ⇒ no approval; a
-      // session without a UI is forced to normal mode at session_start, so
-      // reaching this branch means the UI disappeared, not a headless run.
-      const uiCtx = ctx as unknown as ExtensionContext;
-      // The goal itself is shown in the TRANSCRIPT first: it is the thing the
-      // user has to read, and it is far too tall for a dialog (that is what
-      // made the terminal flicker). ui.notify renders synchronously, so it is
-      // on screen BEFORE the dialog below asks about it; the dialog that
-      // follows carries only the decision.
-      // The pre-review fact is shown to the USER too: the approval is more
-      // informed when it is visible that an independent auditor already passed
-      // THIS text. It goes AFTER the repo line on purpose — the dialog budget
-      // truncates from the tail, and the repo binding is the consent-critical
-      // fact that must never be the thing that gets cut.
-      // The record is guaranteed to exist here: goalPrereviewPassed() above
-      // already required a PASS bound to this text, so this reads it directly
-      // rather than advertising a fallback state that cannot occur.
-      const prereviewLine = "goal-auditor 预审: PASS @ " + goalSt.goalPrereview!.at;
-      // Round-17 (user ask): a goal-approval dialog is EXACTLY a 'human
-      // needed' moment — signal the cross-session channel (best-effort) so an
-      // observer session can wake and point the user here.
-      notifyUserAttention("等待 goal 批准", goalRoot);
-      showToUser(
-        uiCtx,
-        GOAL_CONFIRM_TITLE,
-        buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" + prereviewLine,
-      );
-      let approved = false;
-      try {
-        approved = await confirmBounded(
-          uiCtx,
-          GOAL_CONFIRM_TITLE,
-          buildGoalConfirmMessage(goalText, "绑定仓库(不可信数据): " + repoLine + "\n" + prereviewLine),
-          "（目标全文见上方消息）",
-        );
-      } catch {
-        approved = false;
-      }
-      // The decision may carry a REASON — but only on REJECTION: the user
-      // rejects with the objection so the agent renegotiates against the real
-      // problem instead of re-asking. The CONFIRM path no longer asks for a
-      // reason (the approval is the whole signal; a per-approval input box was
-      // friction with nothing to act on). Reason input is best-effort — a
-      // headless/no-input environment simply yields no reason.
-      let reason: string | undefined;
-      if (!approved) {
-        try {
-          const typed = await uiCtx.ui?.input?.(
-            "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
-            "必填:哪里不合适",
-          );
-          reason = (typed ?? "").trim() || undefined;
-        } catch {
-          reason = undefined;
-        }
-      }
-      if (!approved) {
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: the user did NOT approve this goal." +
-              (reason
-                ? ` Reason: ${reason}. Renegotiate against THAT objection and submit the corrected goal again — `
-                : " Ask what is wrong with it, renegotiate, and submit the corrected goal again — ") +
-              "do not start shipping work in the meantime.",
-          }],
-          details: { approved: false, reason: reason ?? null },
-        };
-      }
-
-      // The EXTENSION writes the file: an approval must describe the text the
-      // user saw, not text the agent might swap in afterwards. The path lives
-      // in the gate-owned .pi/ scope, so this write never moves the worktree
-      // fingerprint and cannot invalidate a READY review or a precommit PASS.
-      const goalPath = pathJoin(goalRoot, LOOP_GOAL_RELPATH);
-      try {
-        mkdirSync(pathDirname(goalPath), { recursive: true });
-        writeFileSync(goalPath, goalText + "\n", "utf8");
-      } catch (e) {
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: could not write ${LOOP_GOAL_RELPATH} (${e instanceof Error ? e.message : String(e)}). ` +
-              "The approval was NOT recorded.",
-          }],
-          details: { approved: false },
-          isError: true,
-        };
-      }
-      goalSt.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString(), ...(reason ? { reason } : {}) };
-      if (goalRoot === primaryRepoRoot) persist(uiCtx);
-      else persistRepo(uiCtx, goalRoot);
-      log(`loop goal approved by the user for ${goalRoot} (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: goal approved and written to ${LOOP_GOAL_RELPATH} (repo: ${goalRoot}). Work to it; if it has to ` +
-            "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
-            "yourself drops the approval and blocks shipping)." +
-            (reason ? `\nUser's note on approval: ${reason}` : ""),
-        }],
-        details: { approved: true, reason: reason ?? null },
-      };
-    },
-  });
-
-  // ---------- L7 Copilot review tools (trusted: the extension runs gh) ----------
-
-  pi.registerTool({
-    name: "request_copilot_review",
-    label: "Request Copilot Review",
-    description:
-      "Ask GitHub Copilot to review the current branch's pull request. Call this after a PR was " +
-      "created or updated (the gate arms the requirement on a successful gh pr create / gh pr " +
-      "edit / git push). The extension resolves the PR, requests the review itself, and stamps " +
-      "the authoritative request time. If the repo or account cannot do Copilot code review (no " +
-      "gh, no GitHub remote, no PR, API refusal) the requirement is released as UNSUPPORTED.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
-    }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      // resolveToolRepo takes only `requested`; a second "tool name" argument
-      // was being passed and silently dropped (TS2554, now caught by
-      // `npm run typecheck`). The resolver's error already lists every
-      // candidate repo, so the tool name added nothing to it.
-      const target = resolveToolRepo(params.repo);
-      if ("error" in target) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const root = target.root;
-      const st = root === primaryRepoRoot ? state : stateForRepo(root);
-      if (!copilotEnabled(st)) {
-        return {
-          content: [{ type: "text", text: "review-gate: the Copilot review loop is off for this repo/mode — nothing to do." }],
-          details: { status: "DISABLED" },
-        };
-      }
-      const nowIso = new Date().toISOString();
-      const dir = repoDirFor(root);
-      // No round budget any more. The old pre-flight check released the cycle
-      // as EXHAUSTED once `rounds` hit the cap — i.e. it stopped asking about
-      // Copilot's comments because the conversation had gone on a while. The
-      // only bound left is the wait timeout, which fires when there is no
-      // feedback to lose.
-
-      const resolved = await resolveOpenPr(dir, signal);
-      if (!resolved.pr) {
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          `no Copilot review possible: ${resolved.error}`, nowIso);
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on request: ${resolved.error}`);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: no Copilot review for this repo — ${resolved.error}. Requirement released ` +
-              "(UNSUPPORTED); it is not blocking completion." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED" },
-        };
-      }
-      const pr = resolved.pr;
-      const slug = await resolveRepoSlug(dir, pr, signal);
-      // Availability, from evidence, BEFORE spending a round. Not a veto: the
-      // request goes out either way (it is cheap, and a repo nobody has asked
-      // yet can only start producing evidence once someone asks). It decides
-      // how long a silent Copilot is worth waiting for.
-      const support = await resolveCopilotSupport(dir, slug, st, { signal });
-      const requested = await requestCopilotReviewer(dir, pr, slug, signal);
-      if (!requested.ok) {
-        // An abort is the user pressing ESC, not GitHub refusing: it proves
-        // nothing about Copilot, so it must not release the requirement.
-        if (signal?.aborted) {
-          return {
-            content: [{
-              type: "text",
-              text: "review-gate: aborted before the Copilot review request completed — nothing " +
-                "recorded; call request_copilot_review again.",
-            }],
-            details: { ...(st.copilot ? { status: st.copilot.status } : {}), pr: pr.number },
-          };
-        }
-        const why = ghError(requested, "the review request was refused");
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          `Copilot review could not be requested: ${why}`, nowIso, pr.head);
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on request for PR #${pr.number}: ${why}`);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: Copilot code review is not available for PR #${pr.number} — ${why}. ` +
-              "Requirement released (UNSUPPORTED)." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED", pr: pr.number },
-        };
-      }
-      // NOTE: no read-back here on purpose. Measured on a repository where
-      // GitHub drops the request: `gh pr edit --add-reviewer @copilot` exits
-      // 0, REST POST answers 200, and `reviewRequests` stays empty on all
-      // three surfaces with no ReviewRequestedEvent in the timeline. A
-      // read-back therefore cannot distinguish "dropped" from "not visible
-      // yet", and using it as a veto declared healthy repos unsupported.
-      // Availability is judged by evidence (above) and by whether a review
-      // actually shows up (check_copilot_review).
-      st.copilot = recordCopilotRequest(st.copilot, {
-        pr: pr.number,
-        head: pr.head,
-        nowIso,
-        supportConfirmed: support.confirmed,
-      });
-      persistRepo(ctx as unknown as ExtensionContext, root);
-      loopArmed = true;
-      log(`copilot review requested for PR #${pr.number} (round ${st.copilot.rounds}, ` +
-        `availability ${support.support})`);
-      const waitNote = support.support === "UNKNOWN"
-        ? "No Copilot review has ever appeared on this repository's recent PRs and its owner is not " +
-          "on the allow-list, so if nothing comes back the requirement is released instead of " +
-          "waiting."
-        : "Copilot usually answers within a minute.";
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: Copilot review requested for PR #${pr.number} (round ${st.copilot.rounds}). ` +
-            `${waitNote} Call check_copilot_review to see whether it answered, and what it left open.`,
-        }],
-        details: {
-          status: "AWAITING",
-          pr: pr.number,
-          rounds: st.copilot.rounds,
-          support: support.support,
-        },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "check_copilot_review",
-    label: "Check Copilot Review",
-    description:
-      "Check what GitHub Copilot's review of the current PR left open. The extension queries the " +
-      "reviews and review threads itself — you cannot report this outcome yourself. A thread " +
-      "counts as handled when it is resolved OR when the last comment in it is yours (the " +
-      "explanation of why it will not be fixed). Returns AWAITING (Copilot has not answered yet), " +
-      "OPEN (threads still waiting on you, listed with their IDs) or SATISFIED.",
-    parameters: Type.Object({
-      repo: Type.Optional(Type.String({ description: "Absolute path of the repository (required once the session edited several repos)" })),
-    }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      const target = resolveToolRepo(params.repo);
-      if ("error" in target) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const root = target.root;
-      const st = root === primaryRepoRoot ? state : stateForRepo(root);
-      if (!copilotEnabled(st)) {
-        return {
-          content: [{ type: "text", text: "review-gate: the Copilot review loop is off for this repo/mode — nothing to check." }],
-          details: { status: "DISABLED" },
-        };
-      }
-      // Already released: SATISFIED / UNSUPPORTED / EXHAUSTED are decisions,
-      // not snapshots. Re-running the checks here would spend gh calls to
-      // re-derive a state the gate has already let go — and, before the state
-      // machine grew its terminal short-circuit, could resurrect it and block
-      // `declare_done` on a requirement that was finished.
-      const settled = st.copilot;
-      if (settled && !isCopilotOutstanding(settled)) {
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: the Copilot requirement is already released (${settled.status})` +
-              `${settled.note ? ` — ${settled.note}` : ""}. It is not blocking completion; checking ` +
-              "again changes nothing. A fresh round starts only on a new push / PR update, or if you " +
-              "deliberately call request_copilot_review again." +
-              // A cycle can be released with findings still open (any of the
-              // fail-safe paths below). Repeating the reminder here means the
-              // duty survives a re-check instead of scrolling away.
-              copilotAbandonedText(settled),
-          }],
-          details: {
-            status: settled.status,
-            ...(settled.pr === null ? {} : { pr: settled.pr }),
-            ...(settled.openThreads ? { unhandled: settled.openThreads } : {}),
-          },
-        };
-      }
-      const dir = repoDirFor(root);
-      const resolved = await resolveOpenPr(dir, signal);
-      if (!resolved.pr) {
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          `no Copilot review possible: ${resolved.error}`, new Date().toISOString());
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on check: ${resolved.error}`);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: no pull request to check — ${resolved.error}. Requirement released ` +
-              "(UNSUPPORTED)." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED" },
-        };
-      }
-      const pr = resolved.pr;
-      const slug = await resolveRepoSlug(dir, pr, signal);
-      if (!slug) {
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          "could not determine the GitHub owner/repo for this PR", new Date().toISOString());
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on check: no owner/repo for PR #${pr.number}`);
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: could not determine owner/repo for this PR. Requirement released " +
-              "(UNSUPPORTED)." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED" },
-        };
-      }
-
-      // Short optimistic poll for the fast path (GitHub documents "usually
-      // less than 30 seconds"). The REAL waiting mechanism is the persistent
-      // AWAITING state plus the L2 continuation: blocking a tool call for
-      // minutes would burn the turn and ignore an ESC in the meantime.
-      let payload: CopilotPayload | undefined;
-      let next = st.copilot ?? armCopilotReview(undefined, new Date().toISOString());
-      let support: CopilotSupport = "CONFIRMED";
-      let supportResolved = false;
-      for (let attempt = 0; attempt < COPILOT_CHECK_ATTEMPTS; attempt++) {
-        if (signal?.aborted) break;
-        payload = await fetchCopilotPayload(dir, slug, pr.number, signal);
-        if (payload) {
-          const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
-          // Availability is only worth a query when the PR itself shows
-          // nothing yet, and only once per call. Copilot on THIS PR is the
-          // strongest evidence there is, and it costs no API call at all.
-          if (!supportResolved || analysis.present) {
-            const decided = await resolveCopilotSupport(dir, slug, st, {
-              onPr: analysis.present,
-              signal,
-            });
-            support = decided.support;
-            supportResolved = true;
-            if (decided.confirmed) next = { ...next, supportConfirmed: true };
+        if (choice === "discard") {
+          try {
+            execFileSync("git", ["checkout", "--", "."], { cwd: root, encoding: "utf8" });
+            execFileSync("git", ["clean", "-fd"], { cwd: root, encoding: "utf8" });
+          } catch (err) {
+            return {
+              content: [{ type: "text", text: `review-gate: 丢弃失败 — ${err instanceof Error ? err.message : String(err)}。工作区仍未确认。` }],
+              details: { settled: false, workBranch: undefined as string | undefined },
+              isError: true,
+            };
           }
-          next = evaluateCopilot(
-            next,
-            analysis,
-            {
-              nowIso: new Date().toISOString(),
-              now: Date.now(),
-              support,
-            },
-          );
-          next = { ...next, pr: pr.number };
-          if (next.status !== "AWAITING") break;
-        }
-        if (attempt < COPILOT_CHECK_ATTEMPTS - 1) {
-          await new Promise((r) => setTimeout(r, COPILOT_CHECK_DELAY_MS));
+          logBranchOp(st, {
+            op: "worktree_discard",
+            files: files.map((f) => f.path).slice(0, 50),
+            at: new Date().toISOString(),
+            reason: "用户在 setup_workspace 中选择丢弃",
+          });
+          files = dirtyFiles(root);
+          notes.push(files.length ? `已丢弃，但仍有 ${files.length} 个改动残留（可能被 .gitignore 覆盖）。` : "改动已丢弃，工作区干净。");
+        } else if (choice === "handled") {
+          files = dirtyFiles(root);
+          if (files.length) {
+            // "I handled it" is a claim the gate CHECKS: still dirty ⇒ still
+            // unsettled, or the edit gate would open on a false statement.
+            st.worktreeDirty = { files: files.map((f) => `${f.status.trim() || "??"} ${f.path}`), at: new Date().toISOString() };
+            persistRepo(ctx as unknown as ExtensionContext, root);
+            return {
+              content: [{ type: "text", text: `review-gate: 重新检测后工作区仍不干净（${files.length} 个改动），未放行。\n${describeDirty(files)}` }],
+              details: { settled: false, workBranch: undefined as string | undefined },
+              isError: true,
+            };
+          }
+          notes.push("用户已自行处理，复检干净。");
+        } else {
+          notes.push(`接受 ${files.length} 个改动为本会话基线（记得提交成 checkpoint）。`);
         }
       }
+      // Settled either way: clean, discarded, or accepted as the baseline.
+      st.worktreeDirty = files.length
+        ? { files: files.map((f) => `${f.status.trim() || "??"} ${f.path}`), at: new Date().toISOString(), settled: true }
+        : undefined;
+      if (!st.worktreeDirty) delete st.worktreeDirty;
 
-      if (!payload) {
-        // The GraphQL query failed outright (no gh, no permission, API down).
-        // Releasing is the fail-SAFE direction here: this requirement must
-        // never strand a task over an unreachable API. What it must NOT do is
-        // go quiet about findings an earlier check already found.
-        const abandoned = copilotAbandonedText(st.copilot);
-        st.copilot = releaseCopilotReview(st.copilot, "UNSUPPORTED",
-          "the Copilot review query failed (gh missing, unauthenticated, or API refusal)", new Date().toISOString());
-        persistRepo(ctx as unknown as ExtensionContext, root);
-        log(`copilot cycle released UNSUPPORTED on check: thread query failed for PR #${pr.number}`);
+      // ---- 2. the base branch ----
+      const here = currentBranch(root);
+      if (!here) {
         return {
-          content: [{
-            type: "text",
-            text: "review-gate: could not read the PR's review threads (gh missing, unauthenticated, " +
-              "or API refusal). Requirement released (UNSUPPORTED)." + abandoned,
-          }],
-          details: { status: "UNSUPPORTED" },
-        };
-      }
-
-      st.copilot = next;
-      persistRepo(ctx as unknown as ExtensionContext, root);
-      if (isCopilotOutstanding(next)) loopArmed = true;
-      log(`copilot check for PR #${pr.number}: ${next.status} (availability ${support}` +
-        `${next.note ? `, ${next.note}` : ""})`);
-
-      const analysis = analyzeCopilot(payload, { anchorAt: next.requestedAt ?? next.armedAt });
-      const lines = analysis.actionable.slice(0, 20).map((t) =>
-        `  - ${t.id} ${t.path ?? "(no file)"}${t.line ? ":" + t.line : ""}` +
-        `${t.isOutdated ? " [outdated — the code moved; if that fixed it, resolve the thread]" : ""}\n      ${t.excerpt}`);
-      const text = next.status === "OPEN"
-        ? `review-gate: PR #${pr.number} — ${analysis.actionable.length} Copilot thread(s) waiting on you ` +
-          `(${analysis.resolved} resolved, ${analysis.answered} answered):\n${lines.join("\n")}\n` +
-          "For each: fix it and resolve the thread, or reply in the thread with the reason it will " +
-          "not be fixed. Resolve: gh api graphql -f query='mutation($t:ID!){resolveReviewThread" +
-          "(input:{threadId:$t}){thread{isResolved}}}' -F t=<threadId>. Reply: " +
-          "gh api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply" +
-          "(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}' -F t=<threadId> -F b='<why>'. " +
-          "Then call check_copilot_review again."
-        : next.status === "AWAITING"
-          ? `review-gate: Copilot has not posted its review of PR #${pr.number} yet. Do something useful and ` +
-            "call check_copilot_review again in a minute."
-          // Released with a readable payload. `evaluateCopilot` puts
-          // actionable threads ahead of every release, so this list is
-          // normally empty — it is kept as the belt to the sidecar-count
-          // braces used by the fail-safe paths above, and it costs one call
-          // on data that is already in hand.
-          : `review-gate: Copilot review of PR #${pr.number} — ${next.note ?? next.status}.` +
-            copilotUnhandledText(analysis.actionable);
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          status: next.status,
-          pr: pr.number,
-          actionable: analysis.actionable.length,
-          resolved: analysis.resolved,
-          answered: analysis.answered,
-          support,
-        },
-      };
-    },
-  });
-
-  // ---------- pause_for_question tool (agent-requested loop pause) ----------
-
-  pi.registerTool({
-    name: "pause_for_question",
-    label: "Pause For Question",
-    description:
-      "Pause the review-gate auto-continuation loop because you hit a GENUINE blocker only the " +
-      "user can resolve (ambiguous requirement, a product/design decision between valid options, " +
-      "missing credentials or access). Waiting on the user's answer to a question you already " +
-      "asked — e.g. the grill questions while negotiating the loop goal — is such a blocker: " +
-      "call this instead of re-asking. The extension shows the `question` parameter to the user " +
-      "IN FULL, as a notification in the transcript, so do NOT repeat it " +
-      "in your reply — write one short line pointing at it (\"see the question above\") or add only " +
-      "the context the parameter does not carry, then END the turn. If the tool result says the " +
-      "question could NOT be shown, write it out in your reply instead. The pause " +
-      "clears automatically on the user's next message. The " +
-      "ship gate is NOT affected — git commit/push and gh pr stay blocked while gates are unmet. " +
-      "Do NOT use this to ask permission to continue routine loop work, to skip a review round, " +
-      "or to end the task — those remain prohibited.",
-    parameters: Type.Object({
-      question: Type.String({
-        description:
-          "The COMPLETE question the user must answer, including the options and your recommendation. " +
-          "It is rendered to the user verbatim, so it must stand on its own — your reply should not restate it.",
-      }),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const question = params.question.trim();
-      if (!question) {
-        return {
-          content: [{ type: "text", text: "review-gate: pause rejected — provide the actual question the user must answer." }],
-          details: {},
+          content: [{ type: "text", text: "review-gate: 当前是 detached HEAD，无法确定基准分支。先 checkout 一个分支再调 setup_workspace。" }],
+          details: { settled: false, workBranch: undefined as string | undefined },
           isError: true,
         };
       }
-      // THE POINT OF THIS TOOL IS THAT THE USER SEES THE QUESTION.
-      //
-      // REGRESSION THIS FIXES: the question used to be stored in
-      // `state.pausedQuestion` and nowhere else, while the tool result told the
-      // agent it had been "delivered to the user verbatim". The agent duly
-      // wrote "see the question above" — and the user saw a bare warning with no
-      // question in it. Every channel that claims delivery must actually
-      // deliver, and the result text below reports what really happened.
-      const banner = "───── AI 需要你回答 ─────\n";
-      const askUser = (lead: string): boolean => showToUser(ctx, lead, banner + question);
-      // Honesty extends to the edges: a question past the notice cap is shown
-      // CLIPPED, so the agent is told to carry the rest itself rather than
-      // being assured the user saw everything. The banner is part of what
-      // showToUser measures, so it is part of what decides "clipped".
-      const clipped = banner.length + question.length > USER_NOTICE_MAX_CHARS;
-      const deliveryNote = (delivered: boolean) => !delivered
-        ? "WARNING: the question could NOT be shown (no interactive UI). Write " +
-          "the COMPLETE question out in your reply instead, then END the turn."
-        : clipped
-        ? `WARNING: the question exceeded the ${USER_NOTICE_MAX_CHARS}-character notice cap and was ` +
-          "shown CLIPPED. Put whatever was cut off in your reply, keep future questions shorter, " +
-          "then END the turn."
-        : "Your question was shown to the user in full, so do NOT repeat it in your reply. Write " +
-          "one short line pointing at it (or only the context the parameter did not carry) and " +
-          "END the turn.";
+      let base = here;
+      // R3-6 — an orchestration child's base is DECLARED by its supervisor,
+      // not derived from where it happens to stand. A parallel lane runs in a
+      // gate-created worktree checked out on `orch/<task>-<stamp>`, so the
+      // "current branch" default would make it merge its work into that
+      // scratch branch — which is exactly what happened to a whole lane in the
+      // third run. The agent may still override it, and the USER still
+      // confirms it in the dialog below.
+      const injectedBase = String(process.env[ORCH_BASE_BRANCH_ENV] ?? "").trim();
+      const proposedBase = String(params.base ?? "").trim() || injectedBase;
+      if (proposedBase && proposedBase !== here) {
+        // The agent knows this session continues an existing feature branch:
+        // the base is elsewhere. The USER still confirms it — a wrong base is
+        // a merge into somebody else's work.
+        const ok = await askWorkspace(
+          `基准分支 = ${proposedBase}，工作分支 = ${params.branch ? String(params.branch) : "新建"}。确认吗？`,
+          [`是，合并回 ${proposedBase}`, "否，用当前分支作为基准"],
+        );
 
-      // Round-17 (user ask): a pause is EXACTLY a 'human needed' moment —
-      // signal the cross-session channel (best-effort) so an observer
-      // session can wake and point the user at this pane.
-      notifyUserAttention("等待回答提问");
-      // Explore/normal have no auto-continuation to pause — the agent can
-      // simply ask and end its turn. Informational no-op, never an error.
-      if (state.taskMode === "explore" || state.taskMode === "normal") {
-        const delivered = askUser(`review-gate: AI 有一个问题在等你回答（${state.taskMode} 模式，本来就没有自动循环）。`);
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: no enforced loop in "${state.taskMode}" mode — auto-continuation is already off. ${deliveryNote(delivered)}`,
-          }],
-          details: { mode: state.taskMode, delivered },
-        };
+        if (!ok) {
+          return {
+            content: [{ type: "text", text: `review-gate: 基准分支未确认（提议 ${proposedBase}）。` }],
+            details: { settled: false, workBranch: undefined as string | undefined },
+            isError: true,
+          };
+        }
+        if (ok.startsWith("是")) {
+          try {
+            execFileSync("git", ["rev-parse", "--verify", proposedBase], { cwd: root, encoding: "utf8" });
+          } catch {
+            return {
+              content: [{ type: "text", text: `review-gate: 基准分支 ${proposedBase} 不存在。` }],
+              details: { settled: false, workBranch: undefined as string | undefined },
+              isError: true,
+            };
+          }
+          st.baseBranch = proposedBase;
+          logBranchOp(st, { op: "base_branch_set", branch: proposedBase, at: new Date().toISOString() });
+          notes.push(...refreshBaseBeforeBranch(root, proposedBase));
+          const work = deriveWorkBranchName(params.branch ? String(params.branch) : here, here);
+          if (work !== here) {
+            try {
+              execFileSync("git", ["checkout", "-b", work], { cwd: root, encoding: "utf8" });
+              logBranchOp(st, { op: "checkout", from: here, to: work, at: new Date().toISOString() });
+            } catch (err) {
+              return {
+                content: [{ type: "text", text: `review-gate: 创建工作分支 ${work} 失败 — ${err instanceof Error ? err.message : String(err)}` }],
+                details: { settled: false, workBranch: undefined as string | undefined },
+                isError: true,
+              };
+            }
+          }
+          st.workBranch = work;
+          logBranchOp(st, { op: "work_branch_set", branch: work, base: proposedBase, at: new Date().toISOString() });
+          persistRepo(ctx as unknown as ExtensionContext, root);
+          return {
+            content: [{
+              type: "text",
+              text: `review-gate: 工作区已确认。基准分支 ${proposedBase}，工作分支 ${work}（当前所在）。` +
+                (notes.length ? `\n${notes.join("\n")}` : "") +
+                "\ndeclare_done 时门禁会把工作分支合回基准（冲突则中止并交还给你处理）。",
+            }],
+            details: { settled: true, baseBranch: proposedBase, workBranch: work },
+          };
+        }
       }
-      if (state.pausedQuestion) {
-        const delivered = askUser("review-gate: AI 又提了一个问题（循环已处于暂停中）。");
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: the loop is ALREADY paused for an earlier question, so this call did not " +
-              `change the pause state. ${deliveryNote(delivered)}`,
-          }],
-          details: { alreadyPaused: true, delivered },
-        };
+      if (isProtectedBranch(here)) {
+        // main/master is never a base a session commits onto; the user picks
+        // the development branch it should branch from and merge back into.
+        const proposed = `dev/${new Date().toISOString().slice(0, 10)}`;
+        const picked = await askWorkspace(
+          `当前在受保护分支 ${here}，本会话不能直接在它上面开发。基准分支用哪个？`,
+          [`从 ${here} 拉一条基准分支 ${proposed}`, `就用 ${here} 作为基准（工作分支仍会另建）`],
+        );
+
+        if (!picked) {
+          return {
+            content: [{ type: "text", text: `review-gate: 用户未确认基准分支（当前 ${here}），未建立工作分支。` }],
+            details: { settled: false, workBranch: undefined as string | undefined },
+            isError: true,
+          };
+        }
+        if (picked.startsWith("从 ")) {
+          try {
+            execFileSync("git", ["checkout", "-b", proposed], { cwd: root, encoding: "utf8" });
+            logBranchOp(st, { op: "checkout", from: here, to: proposed, at: new Date().toISOString() });
+            base = proposed;
+          } catch (err) {
+            return {
+              content: [{ type: "text", text: `review-gate: 创建基准分支失败 — ${err instanceof Error ? err.message : String(err)}` }],
+              details: { settled: false, workBranch: undefined as string | undefined },
+              isError: true,
+            };
+          }
+        }
+      } else {
+        const picked = await askWorkspace(
+          `把当前分支 ${here} 作为本会话的基准分支吗？（工作完成后合并回它）`,
+          [`是，基准分支 = ${here}`, "否，我先自己切到正确的分支再来"],
+        );
+
+        if (!picked || picked.startsWith("否")) {
+          return {
+            content: [{ type: "text", text: `review-gate: 基准分支未确认（当前 ${here}）。切到正确的分支后重新调 setup_workspace。` }],
+            details: { settled: false, workBranch: undefined as string | undefined },
+            isError: true,
+          };
+        }
       }
-      // Loop (or undecided → behaves as loop): record the pause. Persisted so
-      // it survives a restart while waiting; the ship gate ignores it entirely
-      // (unmetRequirements never reads pausedQuestion — tighten-only).
-      state.pausedQuestion = { question: question.slice(0, 2000), at: new Date().toISOString() };
-      loopArmed = false;
-      persist(ctx as unknown as ExtensionContext);
-      const delivered = askUser("review-gate: AI 申请暂停循环等待你的回答 — 你的下一条消息会自动恢复循环（ship 命令仍被拦截）。");
+      st.baseBranch = base;
+      logBranchOp(st, { op: "base_branch_set", branch: base, at: new Date().toISOString() });
+      notes.push(...refreshBaseBeforeBranch(root, base));
+
+      // ---- 3. the work branch ----
+      const seed = (state.sessionId ?? randomBytes(3).toString("hex")).slice(0, 8);
+      const work = deriveWorkBranchName(params.branch ? String(params.branch) : undefined, seed);
+      if (work !== currentBranch(root)) {
+        try {
+          execFileSync("git", ["checkout", "-b", work], { cwd: root, encoding: "utf8" });
+        } catch (err) {
+          return {
+            content: [{ type: "text", text: `review-gate: 创建工作分支 ${work} 失败 — ${err instanceof Error ? err.message : String(err)}` }],
+            details: { settled: false, workBranch: undefined as string | undefined },
+            isError: true,
+          };
+        }
+        logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
+      }
+      st.workBranch = work;
+      logBranchOp(st, { op: "work_branch_set", branch: work, base, at: new Date().toISOString() });
+      persistRepo(ctx as unknown as ExtensionContext, root);
       return {
         content: [{
           type: "text",
-          text:
-            "review-gate: loop PAUSED — auto-continuation is off until the user's next message. " +
-            `${deliveryNote(delivered)} Do not keep working. ` +
-            "Ship commands stay blocked while gates are unmet. The pause clears automatically when the " +
-            "user replies (or on your next code/doc edit).",
+          text: `review-gate: 工作区已确认。基准分支 ${base}，工作分支 ${work}（当前所在）。` +
+            (notes.length ? `\n${notes.join("\n")}` : "") +
+            "\ndeclare_done 时门禁会按分支日志把工作分支合回基准（冲突则中止并交还给你处理）。",
         }],
-        details: { paused: true, delivered },
+        details: { settled: true, baseBranch: base, workBranch: work },
       };
     },
   });
 
-  // ---------- request_scope_limit tool (user-consented gate fence narrowing) ----------
 
-  pi.registerTool({
-    name: "request_scope_limit",
-    label: "Request Scope Limit",
-    description:
-      "Ask the USER whether the review gate may be limited to THIS session's own edits when it " +
-      "is demanding coverage of PRE-EXISTING changes (dirty files or branch commits that pre-date " +
-      "this session). The extension shows the user a confirmation dialog — you cannot approve it " +
-      "yourself. If the user agrees, the pre-existing changes recorded at grant time stop arming " +
-      "the gate: with no session edits the ship gate disarms entirely; with session edits the " +
-      "review scope narrows to the files this session touched (instruct the reviewer accordingly; " +
-      "out-of-scope findings become advisory). If the user declines, scope requests lock for the " +
-      "session — do not ask again. This never weakens the gate for the session's OWN edits.",
-    parameters: Type.Object({
-      reason: Type.String({ description: "One-line justification: which unmet requirements target pre-existing changes (shown to the user as untrusted data)" }),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
-
-      if (state.taskMode === "normal") {
-        return { content: [{ type: "text", text: "review-gate: normal mode — the gate is already off; no scope limit needed." }], details: {} };
-      }
-      if (state.scopeLimit) {
-        return {
-          content: [{ type: "text", text: "review-gate: a user-granted scope limit is already active — the gate covers only this session's edits." }],
-          details: { alreadyLimited: true },
-        };
-      }
-      if (scopeLimitDeclined) {
-        return deny("review-gate: the user already DECLINED a scope limit this session — do not ask again; satisfy the full gate or let the USER run /gate-bypass.");
-      }
-      if (!ctx.hasUI) {
-        return deny("review-gate: no interactive UI — narrowing the gate fence requires the user's explicit dialog approval (fail-closed). Ask the user out-of-band.");
-      }
-      const all = changedFiles(cwd);
-      if (all === undefined) {
-        return deny("review-gate: git status unavailable — cannot determine the pre-existing change set (fail-closed).");
-      }
-      const sessionRel = [...sessionEditedPaths];
-      const sessionSet = new Set(sessionRel);
-      // Only code/doc files arm the gate, so only they justify a dialog — but
-      // the exemption snapshot below covers EVERY non-session changed file.
-      const preexisting = all.filter((f) => (isCodeFile(f) || isDocFile(f)) && !sessionSet.has(f));
-      const ahead = await commitsAheadOfBase(cwd);
-      if (preexisting.length === 0 && ahead === 0) {
-        return deny("review-gate: every current change was made in THIS session — there is nothing pre-existing to exempt; the full gate applies.");
-      }
-
-      // USER CONSENT — extension-rendered dialog with fixed consequence copy;
-      // the agent's reason is displayed as clearly-labeled untrusted data.
-      //
-      // The file LISTS go to the transcript, not the dialog: twenty paths is
-      // easily twenty rendered rows, which is exactly the geometry that makes
-      // the terminal flicker (lib/dialog-budget.ts). The dialog keeps the
-      // counts and the consequences.
-      const preexistingList = preexisting.slice(0, 20).join(", ") || "（仅分支上已有的提交）";
-      const sessionList = sessionRel.length > 0 ? sessionRel.slice(0, 20).join(", ") : "（无）";
-      const moreP = preexisting.length > 20 ? `（另有 ${preexisting.length - 20} 个未列出）` : "";
-      const moreS = sessionRel.length > 20 ? `（另有 ${sessionRel.length - 20} 个未列出）` : "";
-      showToUser(
-        ctx,
-        "review-gate: AI 请求缩小审查范围——涉及的文件如下。",
-        `既有变更 ${preexisting.length} 个（同意后不再触发门禁）: ${preexistingList}${moreP}` +
-        (ahead > 0 ? `\n分支领先基线 ${ahead} 个提交` : "") + "\n" +
-        `本会话修改 ${sessionRel.length} 个（仍需完整审查）: ${sessionList}${moreS}\n` +
-        `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
-      );
-      let ok = false;
-      let dialogFailed = false;
-      try {
-        ok = await confirmBounded(
-          ctx as unknown as ExtensionContext,
-          "review-gate: AI 请求把审查范围缩小到本会话的修改——是否同意？",
-          "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
-            `既有变更 ${preexisting.length} 个` +
-            (ahead > 0 ? `，分支领先基线 ${ahead} 个提交` : "") +
-            `；本会话修改 ${sessionRel.length} 个（清单见上方消息）。\n` +
-            "同意后：审查只需覆盖本会话自己的修改；若本会话没有任何修改，ship 拦截将解除。\n" +
-            "拒绝后：AI 本会话内不能再次请求缩小范围。",
-          "（清单与理由见上方消息）",
-        );
-      } catch { dialogFailed = true; }
-
-      // A dialog that could not be shown is NOT a decline: fail closed for
-      // THIS request without burning the session's anti-grinding lock.
-      if (dialogFailed) {
-        return deny(
-          "review-gate: the confirmation dialog could not be shown — no scope limit granted (fail-closed), " +
-          "and this does NOT count as a user decline; retry when an interactive dialog is possible.",
-        );
-      }
-
-      if (!ok) {
-        scopeLimitDeclined = true;
-        return deny(
-          "review-gate: the user DECLINED the scope limit — the FULL gate applies (pre-existing " +
-          "changes included). Scope requests are now locked for this session; continue the loop and cover everything.",
-        );
-      }
-
-      // GRANTED: snapshot EVERY non-session changed file as exempt (non-code
-      // files never arm the gate, but freezing the full set keeps later
-      // re-arm filtering unambiguous), then re-derive arming from THIS
-      // session's own edits only. Verdicts/bindings are untouched — narrowing
-      // the fence never fabricates a READY or a PASS.
-      state.scopeLimit = {
-        preexistingFiles: all.filter((f) => !sessionSet.has(f)),
-        sessionFiles: sessionRel,
-        at: new Date().toISOString(),
-      };
-      state.hasCodeChange = sessionRel.some(isCodeFile);
-      state.hasDocChange = sessionRel.some(isDocFile);
-      persist(ctx as unknown as ExtensionContext);
-      const stillArmed = state.hasCodeChange || state.hasDocChange;
-      try {
-        ctx.ui.notify(
-          stillArmed
-            ? "review-gate: 用户已同意缩小审查范围——门禁只覆盖本会话的修改（既有变更已豁免）。"
-            : "review-gate: 用户已同意缩小审查范围——本会话没有自身修改，ship 拦截已解除（既有变更已豁免）。",
-          "warning",
-        );
-      } catch { /* headless */ }
-      return {
-        content: [{
-          type: "text",
-          text: stillArmed
-            ? "review-gate: the user GRANTED the scope limit. The gate now covers ONLY this session's edits: " +
-              `${sessionRel.join(", ")}. When you run the review, instruct the reviewer to verdict only on ` +
-              "findings in these files — pre-existing issues elsewhere are advisory, not blocking. Precommit " +
-              "still runs project-wide; if it fails on pre-existing problems, report that to the user (only " +
-              "the USER can /gate-bypass)."
-            : "review-gate: the user GRANTED the scope limit and this session has no edits of its own — the " +
-              "ship gate is disarmed for the pre-existing changes; you may proceed.",
-        }],
-        details: { granted: true, stillArmed, sessionFiles: sessionRel },
-      };
-    },
+  // ---------- user-interaction tools (ask_user + the two consent tools) ----------
+  //
+  // `ask_user`, `request_scope_limit` and `request_sensitive_edit` moved to
+  // lib/user-interaction-tools.ts (+ lib/consent-request-tools.ts) for the
+  // architecture rule this file is the repository's own worst example of
+  // (AGENTS.md §"架构规范"). ONE registration call wires all three: a family
+  // the extension could wire half of is a family it eventually does.
+  //
+  // What they need from THIS file arrives as this deps object. `state` is a
+  // GETTER on purpose — the extension rebinds its state object at
+  // session_start and clears `pausedQuestion` from several other handlers, so
+  // a captured reference would leave the tools writing into a dead copy of
+  // the very state the gate reads. The dialogs stay here too (showToUser /
+  // confirmBounded / askEitherSide are this file's helpers, and the last is
+  // what lets an orchestrator answer the same box the human can).
+  registerUserInteractionTools(pi, {
+    state: () => state,
+    persist: (ctx) => persist(ctx as unknown as ExtensionContext),
+    setLoopArmed: (armed) => { loopArmed = armed; },
+    showToUser: (uiCtx, lead, body) => showToUser(uiCtx as Parameters<typeof showToUser>[0], lead, body),
+    confirmBounded: (uiCtx, title, message, pointer) =>
+      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message, pointer),
+    askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
+    cwd,
+    sessionEditedPaths: () => [...sessionEditedPaths],
+    commitsAheadOfBase: () => commitsAheadOfBase(cwd),
+    scopeLimitDeclined: () => scopeLimitDeclined,
+    declineScopeLimit: () => { scopeLimitDeclined = true; },
+    sensitiveGrants: () => sensitiveGrants,
+    storeSensitiveGrants: (next) => { sensitiveGrants = next; },
+    sensitiveDeclinedPaths,
+    log: (message) => log(message),
   });
 
-  // ---------- request_sensitive_edit tool (user-consented one-shot sensitive write) ----------
-
-  pi.registerTool({
-    name: "request_sensitive_edit",
-    label: "Request Sensitive File Edit",
-    description:
-      "Ask the USER for one-time authorization to edit ONE sensitive file (.env, private key, " +
-      "credentials…) that the gate blocks by default. The extension shows a confirmation dialog — " +
-      "you cannot approve it yourself. A granted authorization covers that EXACT path only, is " +
-      "consumed by the first edit that SUCCEEDS, and expires after 10 minutes; it is never " +
-      "persisted, so it dies with the session. The gate's OWN enforcement is NEVER grantable: " +
-      "`.git/` internals (the L3 hooks) and `.pi/review-gate-state.json` / " +
-      "`.pi/precommit-cache.json` (the verdicts and the already-passed record a commit is checked " +
-      "against). If the user declines, that path is locked for the session — " +
-      "do not ask again, ask the user to edit it by hand. Call this only when the edit is genuinely " +
-      "required by the user's request, and state exactly what you will change.",
-    parameters: Type.Object({
-      path: Type.String({ description: "The sensitive file to edit — absolute, or relative to the session cwd" }),
-      reason: Type.String({ description: "One line: what you will change in this file and why (shown to the user as untrusted data)" }),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
-
-      const raw = params.path.trim();
-      if (raw.length === 0) return deny("review-gate: path is required — name the exact file you need to edit.");
-      const absPath = normalizeSensitivePath(raw, cwd);
-
-      if (!isSensitiveFile(absPath)) {
-        return deny(
-          `review-gate: "${raw}" is not a sensitive file — the gate does not block it. Edit it directly; ` +
-          "no authorization is needed.",
-        );
-      }
-      // Gate-integrity paths are refused BEFORE any dialog: a "yes" here would
-      // let the agent talk the user into disarming the L3 hook that checks it.
-      if (isGateIntegrityPath(absPath)) {
-        return deny(
-          `review-gate: "${raw}" is part of the gate's own enforcement — never authorizable from ` +
-          "here. `.git/hooks/*` IS the L3 layer, and `.pi/review-gate-state.json` / " +
-          "`.pi/precommit-cache.json` are the verdicts and the already-passed record a commit is " +
-          "checked against. A dialog here would be the agent asking permission to disarm its own " +
-          "gate. If this change is really needed, the USER must make it by hand.",
-        );
-      }
-      if (sensitiveDeclinedPaths.has(absPath)) {
-        return deny(
-          `review-gate: the user already DECLINED editing "${raw}" this session — do not ask again. ` +
-          "Tell the user what the file needs and let them edit it themselves.",
-        );
-      }
-      const existing = findGrant(sensitiveGrants, absPath, Date.now());
-      if (existing) {
-        return {
-          content: [{
-            type: "text",
-            text:
-              `review-gate: "${raw}" is already authorized (until ` +
-              `${new Date(existing.expiresAt).toISOString()}). Make the edit now — the authorization ` +
-              "is consumed once it succeeds.",
-          }],
-          details: { alreadyGranted: true, path: absPath },
-        };
-      }
-      if (!ctx.hasUI) {
-        return deny(
-          "review-gate: no interactive UI — writing a sensitive file requires the user's explicit dialog " +
-          "approval (fail-closed). Ask the user out-of-band to make the edit.",
-        );
-      }
-
-      // USER CONSENT — extension-rendered dialog with fixed consequence copy;
-      // the agent's reason is displayed as clearly-labeled untrusted data.
-      //
-      // The full path and reason go to the transcript first; the dialog gets a
-      // TAIL-truncated path and the reason last, so a pathological path (the
-      // agent picks it) can never push the authorization copy out of a
-      // budget-bounded dialog.
-      const shownPath = absPath.length > SENSITIVE_PATH_DIALOG_MAX_CHARS
-        ? "…" + absPath.slice(-SENSITIVE_PATH_DIALOG_MAX_CHARS)
-        : absPath;
-      showToUser(
-        ctx,
-        "review-gate: AI 请求一次性修改敏感文件——完整信息如下。",
-        `文件（完整路径）: ${absPath}\n` +
-        `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
-      );
-      let ok = false;
-      let dialogFailed = false;
-      try {
-        ok = await confirmBounded(
-          ctx as unknown as ExtensionContext,
-          "review-gate: AI 请求一次性修改敏感文件——完整信息如下。",
-          `文件（完整路径）: ${absPath}\n` +
-          `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}\n` +
-          "同意后：只授权这一个路径，写入成功一次即失效；10 分钟内未使用也会过期，且不跨会话保留。\n" +
-            "拒绝后：AI 本会话内不能再为该路径弹窗。\n" +
-            "请确认这确实是你本次要求的一部分；文件里的密钥/凭据会暴露给模型。\n" +
-            `文件（默认禁止 AI 写入）: ${shownPath}\n` +
-            `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
-          "（完整路径与理由见上方消息）",
-        );
-      } catch { dialogFailed = true; }
-
-      // A dialog that could not be shown is NOT a decline: fail closed for THIS
-      // request without burning the path's anti-grinding lock.
-      if (dialogFailed) {
-        return deny(
-          "review-gate: the confirmation dialog could not be shown — no authorization granted " +
-          "(fail-closed), and this does NOT count as a user decline; retry when a dialog is possible.",
-        );
-      }
-
-      if (!ok) {
-        sensitiveDeclinedPaths.add(absPath);
-        return deny(
-          `review-gate: the user DECLINED editing "${raw}". This path is now locked for the session — ` +
-          "do not ask again. Describe the change you wanted and let the user apply it.",
-        );
-      }
-
-      const now = Date.now();
-      const expiresAt = now + SENSITIVE_GRANT_TTL_MS;
-      sensitiveGrants = addGrant(
-        sensitiveGrants,
-        { path: absPath, at: new Date(now).toISOString(), expiresAt, reason: params.reason.slice(0, 300) },
-        now,
-      );
-      log(`sensitive-grant issued for ${absPath}`);
-      try {
-        ctx.ui.notify(`review-gate: 用户已授权 AI 修改 ${absPath}（一次性，10 分钟内有效）。`, "warning");
-      } catch { /* headless */ }
-      return {
-        content: [{
-          type: "text",
-          text:
-            `review-gate: the user GRANTED a one-shot edit of ${absPath}. Make ONLY the change you ` +
-            "described, on this exact path, now — the authorization is consumed by the first successful " +
-            "edit and expires in 10 minutes. Do not echo the file's secrets back to the user.",
-        }],
-        details: { granted: true, path: absPath, expiresAt },
-      };
-    },
-  });
   // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
 
   pi.on("input", (event, ctx) => {
@@ -5355,7 +5754,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (event.source !== "extension") lastRunAborted = false;
     // A real user message (interactive TUI or an RPC driver — never
     // "extension", which is how the gate injects its own [REVIEW_GATE_RESUME]
-    // follow-ups) answers a standing pause_for_question pause: clear it and
+    // follow-ups) answers a standing ask_user pause: clear it and
     // re-arm auto-continuation so the loop enforces again from this turn on.
     if (state.pausedQuestion && event.source !== "extension") {
       delete state.pausedQuestion;
@@ -5379,19 +5778,56 @@ export default function reviewGate(pi: ExtensionAPI) {
       "(first classification is remapped to normal; later agent loop upgrades are rejected; only " +
       "the user can force loop via /gate-mode). Downgrades after the first classification pop a " +
       "confirmation dialog for the user — you cannot approve it yourself, and a declined " +
-      "dialog locks further agent-initiated downgrades for this session.",
+      "dialog locks further agent-initiated downgrades for this session. " +
+      "\"orchestrator\" is the PROJECT-MANAGER role — loop plus the orchestration constraints " +
+      "(you write no code, a plan the user approved authorizes every child session, and " +
+      "declare_done additionally requires an empty task queue and no live children). Pick it " +
+      "only when the user asked you to supervise rather than to build; it requires tmux.",
     parameters: Type.Object({
-      mode: Type.String({ description: '"loop" | "explore" | "normal"' }),
+      mode: Type.String({ description: '"loop" | "explore" | "normal" | "orchestrator"' }),
       reason: Type.String({ description: "One-line justification (shown to the user as untrusted data)" }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const requested = normalizeTaskMode(params.mode.trim());
       if (requested === undefined) {
         return {
-          content: [{ type: "text", text: 'review-gate: unknown mode — use "loop", "explore", or "normal".' }],
+          content: [{ type: "text", text: 'review-gate: unknown mode — use "loop", "explore", "normal", or "orchestrator".' }],
           details: {},
           isError: true,
         };
+      }
+      // ORCHESTRATOR PRECONDITIONS. Both are facts about the environment, not
+      // judgements, so they are checked before the rule engine ever runs:
+      //  - no tmux ⇒ the role is impossible (its children ARE panes of the
+      //    user's window, and a relay is a split), so entering it would only
+      //    fail later, one confusing tool call at a time;
+      //  - a session STARTED as somebody's orchestration child must never
+      //    become an orchestrator itself. It would inherit the channel of the
+      //    orchestration supervising it and start answering its own bell.
+      //    A relay successor is exempt: it also carries an orchestration id,
+      //    but it carries a predecessor pane too, which is what makes it the
+      //    intended holder of the role.
+      if (requested === "orchestrator") {
+        if (!process.env.TMUX) {
+          return {
+            content: [{ type: "text", text: ORCHESTRATOR_NEEDS_TMUX }],
+            details: { mode: state.taskMode ?? null },
+            isError: true,
+          };
+        }
+        if (isOrchestrationChild()) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                "review-gate: 本会话是某个编排的**子会话**（环境里带着 RG_ORCHESTRATION_ID），" +
+                "不能自己变成项目经理 —— 那会让它接管管着自己的那个 orchestration 的通知渠道。" +
+                "你就是普通 loop 会话：干活、送审、declare_done；有事项目经理会找你。",
+            }],
+            details: { mode: state.taskMode ?? null },
+            isError: true,
+          };
+        }
       }
       // FIRST CLASSIFICATION: while the mode is undecided and THIS session
       // has not edited anything, the AGENT's own pick IS the classification —
@@ -5470,10 +5906,12 @@ export default function reviewGate(pi: ExtensionAPI) {
           ctx.ui.notify(
             effective === "loop"
               ? `review-gate: 会话类型已判定为循环任务${sourceNote}。可用 /gate-mode 切换。`
-              : effective === "explore"
-                ? `review-gate: 会话类型已判定为探查任务${sourceNote} — gate 仅供参考，AI 可自主结束（commit/push 等 ship 命令仍被完整拦截）。可用 /gate-mode 切换。`
-                : `review-gate: 会话类型已判定为普通任务${sourceNote} — 本会话门禁关闭。可用 /gate-mode 切换。`,
-            effective === "loop" ? "info" : "warning",
+              : effective === "orchestrator"
+                ? `review-gate: 本会话已进入项目经理（orchestrator）模式${sourceNote} — 你负责统筹调度，不写代码；plan 需用户批准后才能开子会话。可用 /gate-mode 切换。`
+                : effective === "explore"
+                  ? `review-gate: 会话类型已判定为探查任务${sourceNote} — gate 仅供参考，AI 可自主结束（commit/push 等 ship 命令仍被完整拦截）。可用 /gate-mode 切换。`
+                  : `review-gate: 会话类型已判定为普通任务${sourceNote} — 本会话门禁关闭。可用 /gate-mode 切换。`,
+            isEnforcedMode(effective) ? "info" : "warning",
           );
         } catch { /* headless */ }
         // Loop mode decided ⇒ deliver the Step 0 loop-goal directive right
@@ -5482,7 +5920,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         // this the agent could edit for a whole turn before ever seeing the
         // exit contract it is supposed to establish first.
         const goalNote = effective === "loop"
-          ? "\n\n" + buildLoopGoalDirective(readLoopGoal(primaryRepoRoot), loopGoalConfirmed())
+          ? "\n\n" + buildLoopGoalDirective(readSessionLoopGoal(primaryRepoRoot), loopGoalConfirmed())
+
           : "";
         return {
           content: [{
@@ -5551,14 +5990,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "request_arbitration",
     label: "Request Arbitration",
     description:
-      "Contest a review-gate ship block you believe is MEANINGLESS or CIRCULAR (the only way " +
-      "to satisfy the gate is an action the gate forbids). ONLY a lone `gh pr edit` limited to " +
-      "--title/--body/--body-file is arbitrable — never git commit/push or gh pr create. An " +
-      "INDEPENDENT arbiter (you cannot write its verdict) rules: GATE_WINS (comply), AGENT_WINS " +
-      "(one single-use bypass of this exact command), or HUMAN (a human decides). Call this only " +
-      "AFTER the gate has actually blocked the command.",
+      "Contest a review-gate block you believe is a MISJUDGEMENT. Two things are contestable, " +
+      "both only AFTER the gate actually blocked: (a) a TEXT the language/attribution heuristics " +
+      "refused (commit subject/body, PR title/body, romanized non-English, AI attribution, test " +
+      "label) — a granted appeal passes THAT EXACT CONTENT once; (b) a ship block on a lone " +
+      "`gh pr edit` limited to --title/--body/--body-file that is genuinely CIRCULAR. Never " +
+      "git commit/push or gh pr create, and never a FACT the gate observed (no workspace, no " +
+      "approved goal, unmet review gate, sensitive file) — those have a correct next step. " +
+      "An INDEPENDENT arbiter (you cannot write its verdict) rules GATE_WINS / AGENT_WINS / " +
+      "HUMAN. Quota: 3 per session, shared; a refused content cannot be appealed twice.",
     parameters: Type.Object({
-      argument: Type.String({ description: "Your case for why this specific block is circular/meaningless — cite evidence (e.g. the offending text is pre-existing)." }),
+      argument: Type.String({ description: "Your case for why this specific block is a misjudgement / circular — cite evidence (e.g. the non-Latin text is a quoted filename)." }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
@@ -5566,7 +6008,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!projectConfig.arbiter.enabled) {
         return deny("review-gate: arbitration is disabled for this project (arbiter.enabled=false). GATE_WINS — comply with the gate.");
       }
-      // Must contest a REAL, recent block.
+      // Must contest a REAL, recent block — and the MOST RECENT one, when both
+      // kinds happened: that is the block the agent is actually stuck on.
+      if (!lastBlockedShip && !lastBlockedText) {
+        return deny("review-gate: 没有可申诉的拦截。先把命令/编辑真跑一次——申诉只受理已经发生的拦截。");
+      }
+      if (lastBlockedText && (!lastBlockedShip || lastBlockedText.at >= lastBlockedShip.at)) {
+        return arbitrateText(lastBlockedText, String(params.argument ?? ""), ctx);
+      }
       if (!lastBlockedShip) {
         return deny("review-gate: no ship block to arbitrate. Run the command first; arbitration only contests an actual block.");
       }
@@ -5574,8 +6023,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!parsed.ok) {
         return deny(`review-gate: this block is NOT arbitrable — ${parsed.reason}. Only a lone \`gh pr edit\` (title/body) qualifies; git commit/push and gh pr create must go through the full gate.`);
       }
-      // Per-session cap and re-roll prevention.
-      if (arbitrationsUsed >= projectConfig.arbiter.maxPerSession) {
+      // Per-session cap (SHARED with text appeals, and persisted) and re-roll
+      // prevention.
+      if (appealsUsed() >= projectConfig.arbiter.maxPerSession) {
         return deny(`review-gate: arbitration limit reached (${projectConfig.arbiter.maxPerSession}/session). Escalate to the user or /gate-bypass.`);
       }
       const fp = computeFingerprint(cwd);
@@ -5593,7 +6043,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         return deny(`review-gate: this exact action was already arbitrated this round → ${cached}. Re-rolling is not allowed; change the action or comply with the gate.`);
       }
 
-      arbitrationsUsed += 1;
+      spendArbitration(ctx);
 
       // Gather TRUSTED ground-truth evidence ourselves (the arbiter is tool-less).
       const currentPr = gatherPrText(parsed.action);
@@ -5613,7 +6063,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Fail-closed: any spawn/parse failure → GATE_WINS.
       const decision = verdict?.decision ?? "GATE_WINS";
       arbitrationDecisions.set(decisionKey, decision);
-      appendLesson(`arbitration #${arbitrationsUsed} decision=${decision} reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} cmd=${lastBlockedShip.command.slice(0, 200)} arg=${params.argument.slice(0, 200)}`);
+      appendLesson(`arbitration #${appealsUsed()} decision=${decision} reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} cmd=${lastBlockedShip.command.slice(0, 200)} arg=${params.argument.slice(0, 200)}`);
 
       if (decision === "AGENT_WINS") {
         const bindings = await computeTokenBindings(parsed.action, fp.digest);
@@ -5656,15 +6106,15 @@ export default function reviewGate(pi: ExtensionAPI) {
             round: bindings.round, commandDigest: bindings.commandDigest, bodyFileDigest: bindings.bodyFileDigest,
             issuedAt: Date.now(), ttlMs: BYPASS_TOKEN_TTL_MS, consumed: false,
           };
-          appendLesson(`arbitration #${arbitrationsUsed} HUMAN→allow-once`);
+          appendLesson(`arbitration #${appealsUsed()} HUMAN→allow-once`);
           return { content: [{ type: "text", text: "review-gate: human allowed this exact `gh pr edit` ONCE. Run the same command now." }], details: { decision: "HUMAN", human: "allow-once" } };
         }
         if (choice === "Pause gate and wait") {
           loopArmed = false;
-          appendLesson(`arbitration #${arbitrationsUsed} HUMAN→pause`);
+          appendLesson(`arbitration #${appealsUsed()} HUMAN→pause`);
           return { content: [{ type: "text", text: "review-gate: gate PAUSED by the human — auto-continuation disarmed. No bypass issued. Wait for further instructions." }], details: { decision: "HUMAN", human: "pause" } };
         }
-        appendLesson(`arbitration #${arbitrationsUsed} HUMAN→gate-wins`);
+        appendLesson(`arbitration #${appealsUsed()} HUMAN→gate-wins`);
         return deny("review-gate: human ruled GATE_WINS — comply with the gate.");
       }
 
@@ -5691,12 +6141,22 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- L2: auto-continuation ----------
 
   pi.on("agent_settled", async (_event, ctx) => {
+    // SUPERVISION, first thing and unconditionally: report what this session
+    // is doing and apply whatever the orchestrator has sent. It runs before
+    // every early return below because a child that is paused, bypassed or in
+    // explore mode still has a supervisor waiting to hear from it — silence
+    // is exactly the failure this replaced (a finished child classified
+    // `working` for 725 seconds, R3-5).
+    noteChildProgress(); // E — a settled turn is forward progress.
+    reportChildState(ctx);
+    await drainChildInstructions(ctx);
+
     // Explore and normal never auto-continue — that is their defining
     // difference from loop. This check MUST stay before the loopArmed check:
     // explore/normal-mode edits set loopArmed = true in tool_result, and only
     // this early return keeps the continuation loop off.
     if (state.taskMode === "explore" || state.taskMode === "normal") return;
-    // Paused for a user question (pause_for_question): defense-in-depth —
+    // Paused for a user question (ask_user): defense-in-depth —
     // loopArmed is in-memory and resets on restart, but the persisted pause
     // must keep auto-continuation off until the user actually replies.
     if (state.pausedQuestion) return;
@@ -5704,11 +6164,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.bypass.active) return;
     if (!ctx.isIdle()) return;
 
+    // R-3 — AN ORCHESTRATOR IS NOT IN THE LOOP, and the loop's nudge is not
+    // merely off-topic for it: its criteria can never be met. The RESUME text
+    // reads the SUPERVISOR's own sidecar ("code review gate is PENDING",
+    // "precommit has not run", "the loop goal is unconfirmed"), and a project
+    // manager writes no code, runs no precommit and negotiates no loop goal —
+    // constraint 2 forbids the first and the plan replaces the third. The
+    // second run measured it firing twice, each time telling the supervisor
+    // to review work its CHILDREN had done. Its continuation is the plan.
+    if (state.taskMode === "orchestrator") {
+      orchestratorSettled(ctx);
+      return;
+    }
+
     const fp = computeFingerprint(cwd);
     // Ship-gate requirements only exist once this session touched something.
     const problems = (state.hasCodeChange || state.hasDocChange)
       ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
       : [];
+
 
     // L7/L8 — completion-only requirements (never part of the ship authority):
     // an open Copilot review cycle and an unapproved loop goal. They keep the
@@ -5724,8 +6198,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     // Goal-only continuation: the ONLY remaining item is the unapproved loop
     // goal. If the agent already grilled the user and is waiting for the
-    // answer, it must pause_for_question instead of re-asking — the resume
-    // text below says so explicitly.
+    // answer, ask_user already paused the loop — the resume text below
+    // points at it instead of re-asking.
     const goalOnly =
       problems.length === 0 &&
       completion.length === 1 &&
@@ -5739,7 +6213,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Injecting a continuation would override an explicit human stop, so the
     // loop pauses instead; the user's next message resumes it (input handler
     // clears the flag). Tighten-only — ship commands stay blocked while gates
-    // are unmet, exactly like pause_for_question.
+    // are unmet, exactly like an ask_user pause.
     if (lastRunAborted) {
       try {
         ctx.ui.notify(
@@ -5761,22 +6235,30 @@ export default function reviewGate(pi: ExtensionAPI) {
     // keeps doing deterministic work or blocks in bash on the three
     // criteria) — never idle.
     const childSnapshots: ChildSnapshot[] = [];
-    const doneChannelsByPane = new Map<string, string>();
+    const sessionIdsBySession = new Map<string, string>();
     for (const list of childSessions.values()) {
       for (const c of list) {
         childSnapshots.push({
           title: c.title,
-          paneId: c.paneId,
+          sessionId: c.sessionId,
           role: c.role,
           spawnedAt: c.spawnedAt,
-          alive: paneAlive(c.paneId),
+          // Criterion (b): the live PROCESS's exitCode — an exited child is
+          // finished even if its artifacts were never written.
+          alive: judgeProcessAlive(c.child),
+          // Round-5 P1: activity is the evidence a child is still working —
+          // newest write among its transcript and stderr/stdout logs.
+          lastActivityAt: lastActivityAt(
+            { sessionDir: c.sessionDir, stderrPath: c.stderrPath },
+            [c.stdoutPath],
+          ),
         });
-        doneChannelsByPane.set(c.paneId, c.doneChannel);
+        sessionIdsBySession.set(c.sessionId, c.title);
       }
     }
     if (childSnapshots.length > 0) {
       const childVerdict = classifyChildren(childSnapshots, Date.now());
-      const childNotice = buildChildWaitNotice(childVerdict, doneChannelsByPane);
+      const childNotice = buildChildWaitNotice(childVerdict, sessionIdsBySession);
       const notifyNow = childVerdict.terminated.length > 0 || Date.now() - lastChildNoticeAt >= CHILD_NOTICE_MIN_MS;
       if (childNotice) {
         if (!notifyNow) {
@@ -5861,28 +6343,18 @@ export default function reviewGate(pi: ExtensionAPI) {
         [...problems, ...completion].map((p) => `- ${p}`).join("\n") +
         (problems.length > 0
           ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
-            "Continue: fix → re-review → record_review → precommit → declare_done. " +
-            "If you already asked the user a question and are waiting on their answer " +
-            "(grill questions while negotiating the loop goal, a product/design decision, " +
-            "missing access) — call pause_for_question with the COMPLETE question and END the " +
-            "turn instead of re-asking or working on. The user's next message resumes the loop. " +
-            "Do not summarize; execute."
+            "Continue: fix → judge_submit({role:\"reviewer\"}) → declare_done. " +
+            SETTLED_TOOL_REMINDER + " Do not summarize; execute."
           : `\n(completion continuation ${completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
             (goalOnly
-              ? "The only open item is the unapproved loop goal. If you already asked the user a " +
-                "question, call pause_for_question and END the turn — do not re-ask; the user's " +
-                "next message resumes the loop. Otherwise interview the user now, ONE question per " +
-                "turn labeled \"N of M\" (each with your recommended answer; all at once only when " +
-                "the user asks for it), draft it in Simplified Chinese, get it through the " +
-                "`goal-auditor` audit (record_goal_prereview), then call propose_loop_goal for " +
-                "approval. " +
-                "Do not summarize; execute."
+              ? "The only open item is the unapproved loop goal. Interview the user with ask_user " +
+                "(the gate runs the interview and pauses for their answers), draft the goal in " +
+                "Simplified Chinese, get it through the `goal-auditor` audit, then call " +
+                "propose_loop_goal for approval. Do not summarize; execute."
               : "Continue: work these off — Copilot threads get a fix + resolve or a reply explaining " +
-                "why not (check_copilot_review verifies), an unapproved goal gets negotiated, " +
-                "drafted in Simplified Chinese, audited by `goal-auditor` (record_goal_prereview) and " +
-                "only then submitted via propose_loop_goal. If you already asked the user a question and are " +
-                "waiting on their answer (e.g. grill questions), call pause_for_question and END the " +
-                "turn instead of re-asking. Do not summarize; execute.")) +
+                "why not (check_copilot_review verifies), an unapproved goal gets negotiated with " +
+                "ask_user, drafted in Simplified Chinese, audited by `goal-auditor` and only then " +
+                "submitted via propose_loop_goal. Do not summarize; execute.")) +
         (!sessionEdited && !state.scopeLimit
           ? "\nIf these unmet gates target PRE-EXISTING changes this session never made, you may call request_scope_limit — the USER decides whether session-only coverage suffices."
           : "") +
@@ -5927,13 +6399,21 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
     state.sessionId = sessionId;
-    // Round-18 (user ask): DIRECTED attention — register only after the
-    // session id is restored, otherwise myAttentionChannel() is undefined
-    // and a real parent-directed wake would be missed on startup/resume.
-    const attentionChannel = myAttentionChannel();
-    if (attentionChannel && sideEffectsEnabled()) {
-      watchRegistry.register(attentionChannel, "子会话用户注意");
-    }
+    // A new session negotiates its OWN goal: whatever audit rounds a previous
+    // session spent on its draft do not carry into this one's count.
+    delete state.goalAuditRound;
+    // A session's OWN branch decisions do not carry over: it confirms its
+    // base and creates its work branch (setup_workspace) or it does not
+    // commit at all.
+    delete state.baseBranch;
+    delete state.workBranch;
+    delete state.mergeConflict;
+    delete state.mergeWaived;
+    // Where did this session start, and on top of what? Both are gate facts
+    // from the first turn: the dirty worktree blocks edits until the user
+    // settles it, and the starting branch is the first branchOps entry — the
+    // beginning of the trail declare_done follows back.
+    recordSessionStartWorkspace();
 
     // Per-project overrides (sd0x-dev-flow R6): maxRounds is clamped to [3,50]
     // by the loader, so a forged config cannot make the cap unreachable.
@@ -5948,6 +6428,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     // captured ctx is dead after a replacement and must never be ticked
     // again (a stale tick throws on ctx.hasUI and crashes pi).
     armUiRefreshTimer();
+    // THE SUPERVISION HEARTBEAT (round-4 P0). Armed here, for every session
+    // that has an orchestration address, because the whole point is that it
+    // does not depend on the agent doing anything: a child blocked in
+    // `judge_wait` for ten minutes must keep saying it is alive, and the
+    // first report must not wait for the first `turn_end` either.
+    startChildHeartbeat(ctx);
+    reportChildState(ctx, undefined, { force: true });
+
     // Reflect the precommit config source in the status bar right away.
     updateWidget(ctx);
 
@@ -5959,6 +6447,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     // which lib/task-mode.ts would reject) means the undecided state — whose
     // enforcement behaves as loop — never applies to a headless run.
     if (!ctx.hasUI) setTaskMode("normal", "auto", ctx);
+
+    // A SPAWNER may hand a session its starting mode (RG_GATE_MODE): a child
+    // opened by `orchestrator_spawn` is an ordinary loop session, and a relay
+    // successor is an orchestrator. Neither should have to classify itself
+    // into a role somebody else already decided, and a child that guessed
+    // "orchestrator" would take over the very orchestration supervising it.
+    //
+    // It is not a way around the consent rules: it applies only to a session
+    // that is still UNDECIDED and interactive, and only for the two enforced
+    // modes — a spawner can hand out a tighter starting point, never a looser
+    // one. Anything else in the variable is ignored (normalizeTaskMode).
+    if (ctx.hasUI && state.taskMode === undefined) {
+      const requestedBySpawner = requestedModeFromEnv();
+      if (isEnforcedMode(requestedBySpawner) && requestedBySpawner !== undefined) {
+        if (requestedBySpawner !== "orchestrator" || process.env.TMUX) {
+          setTaskMode(requestedBySpawner, "auto", ctx);
+        }
+      }
+    }
 
     // A restored pause survives the restart: keep auto-continuation disarmed
     // until the user's next message clears it (input handler).
@@ -6063,15 +6570,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     // so a later subagent-session shutdown cannot leave the widget frozen).
     lastUiCtx = undefined;
     disarmUiRefreshTimer();
-    // Cancel every background channel listener — a reloaded/resumed session
-    // must not keep tmux wait-for processes alive, and a stale listener
-    // would wake the NEW session about an OLD child. The registry latches
-    // shutdown so a signal already in flight cannot re-arm an orphan
-    // listener (round-16 Nit); session_start calls reset().
+    // Cancel every background watcher — a reloaded/resumed session must not
+    // keep stale exit listeners, and a stale listener would wake the NEW
+    // session about an OLD child. The registry latches shutdown so a signal
+    // already in flight cannot re-arm an orphan listener (round-16 Nit);
+    // session_start calls reset().
     watchRegistry.shutdown();
-    // Judge children are tmux panes — they survive the session by design
-    // (the human can see and interrupt them), so shutdown only drops the
-    // registry, not the panes. A fresh session rebuilds it on demand.
+    // The supervision probe is a timer this session owns; a leaked one would
+    // keep waking a session that is gone.
+    stopSupervisionTimer();
+    // Same for the child heartbeat: a leaked timer would keep reporting on
+    // behalf of a session that is gone, and its supervisor would read those
+    // reports as a healthy child.
+    stopChildHeartbeat();
+
+
+    // Judge children are independent pi processes — they survive the session
+    // by design (their session files persist, so a fresh session can resume
+    // or close them). Shutdown only drops the registry; the processes keep
+    // running and their transcripts stay on disk.
     childSessions.clear();
   });
 
@@ -6086,7 +6603,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       pi.sendMessage({
         customType: "review-gate-resume",
         content:
-          "[REVIEW_GATE_PAUSED] Context compacted. The review loop is PAUSED (pause_for_question), " +
+          "[REVIEW_GATE_PAUSED] Context compacted. The review loop is PAUSED (ask_user), " +
           `awaiting the user's answer to: "${state.pausedQuestion.question.slice(0, 500)}"\n` +
           "Do not resume the loop on your own — wait for the user's reply (it clears the pause automatically). " +
           "Ship commands remain blocked while gates are unmet.",
@@ -6115,6 +6632,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   // One-way stale-state reconciliation: git-clean can clear flags, only edits set them.
   // P0-7: re-arm when stash pop / checkout restores dirty state without an edit event.
   pi.on("turn_end", async (_event, ctx) => {
+    // The heartbeat. `turn_end` fires whether or not this session has edits,
+    // so it is the one event that proves the extension is alive — which is
+    // exactly what `stalled` is the absence of. Placed before the early
+    // return below for that reason.
+    noteChildProgress(); // E — a turn boundary is forward progress (the timer heartbeat is not).
+    reportChildState(ctx);
+
     if (!state.hasCodeChange && !state.hasDocChange) return;
     const allFiles = changedFiles(cwd);
     if (allFiles === undefined) return;
@@ -6143,351 +6667,79 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   // ---------- commands ----------
+  //
+  // The WHOLE command layer — the workflow catalog plus /gate-status,
+  // /gate-bypass, /gate-mode, /gate-reset, /gate-lesson and /gate-doctor —
+  // moved to lib/gate-command-tools.ts (+ lib/gate-diagnosis-commands.ts) for
+  // the architecture rule this file is the repository's own worst example of
+  // (AGENTS.md §"架构规范"). ONE registration call wires all of them: a layer
+  // the extension could wire half of is a layer it eventually does.
+  //
+  // What they need from THIS file arrives as this deps object. `state`,
+  // `projectConfig` and `primaryRepoRoot` are GETTERS on purpose — the
+  // extension rebinds all three (session_start reloads the state and the
+  // config, /gate-reset replaces the state object outright), so a captured
+  // reference would leave the status readout describing a dead copy of the
+  // very state the gate reads.
 
-  function registerWorkflowCommand(name: WorkflowCommandName) {
-    const command = WORKFLOW_COMMANDS[name];
-    pi.registerCommand(name, {
-      description: command.description,
-      handler: async (args, ctx) => {
-        if (!ctx.isIdle()) {
-          ctx.ui.notify(`Agent is busy. Retry ${command.usage} when it is idle.`, "warning");
-          return;
-        }
-        pi.sendUserMessage(
-          buildWorkflowPrompt(name, args ?? ""),
-        );
-      },
-    });
-  }
-
-  for (const name of Object.keys(WORKFLOW_COMMANDS) as WorkflowCommandName[]) {
-    registerWorkflowCommand(name);
-  }
-
-  /** Read-only model-chain diagnosis for /gate-status. Best-effort: any IO
-   *  failure yields no lines (diagnostics never block, never gate).
+  /**
+   * Everything /gate-reset clears.
    *
-   *  PRIMARY facts source is the session's own model registry (the SAME
-   *  facts the model registry exposes — it includes built-in catalogs
-   *  like anthropic that never appear in models-store.json; reading only
-   *  the store mis-reported every built-in judge chain as BLOCKED while
-   *  the review was literally running on fable-5). File reads are a
-   *  fallback when the registry exposes nothing. */
-  function modelDiagnosisLines(registry?: unknown): string[] {
-    try {
-      const home = homedir();
-      const globalAgentsDir = pathJoin(home, ".pi", "agent", "agents");
-      const projectAgentsDir = pathJoin(primaryRepoRoot, ".pi", "agents");
-      // Effective chain = PROJECT layer file when present, else global
-      // (project outranks global, exactly like the runtime load order).
-      const readAgent = (name: string): string | undefined => {
-        // Project layer wins by IDENTITY (frontmatter `name`), not basename:
-        // pi-subagents registers any .md under the project dir under its
-        // frontmatter name, so custom.md carrying `name: reviewer` really
-        // shadows the global reviewer (round-11 P1/P2).
-        const projText = findProjectAgentText(projectAgentsDir, name);
-        if (projText !== undefined) return projText;
-        try {
-          const p = pathJoin(globalAgentsDir, `${name}.md`);
-          return existsSync(p) ? readFileSync(p, "utf8") : undefined;
-        } catch { return undefined; }
-      };
-      const authedProviders = new Set<string>();
-      const models: Array<{ provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> }> = [];
-      const facts: RegistryFacts = { models, authedProviders, allowed: isModelAllowed };
-      const reg = registry as { getAll?: () => unknown[]; hasConfiguredAuth?: (m: unknown) => boolean } | undefined;
-      const all = reg?.getAll?.() ?? [];
-      if (Array.isArray(all) && all.length > 0) {
-        // Symmetric with gate-doctor's hasAuth guard: a registry without
-        // hasConfiguredAuth skips the auth filter entirely (treating every
-        // provider as authed would be wrong — the missing method is the
-        // signal that auth is not part of this registry's contract).
-        const authCheckable = typeof reg?.hasConfiguredAuth === "function";
-        for (const m of all) {
-          const obj = m as { provider?: unknown; id?: unknown; reasoning?: unknown; thinkingLevelMap?: unknown };
-          if (typeof obj.provider !== "string" || typeof obj.id !== "string") continue;
-          const tlm = obj.thinkingLevelMap;
-          const thinkingLevelMap =
-            typeof tlm === "object" && tlm !== null && !Array.isArray(tlm)
-              ? Object.fromEntries(Object.entries(tlm).filter(([, mapped]) => mapped === null || typeof mapped === "string")) as Record<string, string | null>
-              : undefined;
-          models.push({
-            provider: obj.provider,
-            id: obj.id,
-            ...(typeof obj.reasoning === "boolean" ? { reasoning: obj.reasoning } : {}),
-            ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
-          });
-          if (!authCheckable || reg!.hasConfiguredAuth!(obj)) authedProviders.add(obj.provider);
-        }
-      }
-      if (models.length === 0) {
-        // Fallback: disk files (a host session without a usable registry).
-        try {
-          const store = JSON.parse(
-            readFileSync(pathJoin(home, ".pi", "agent", "models-store.json"), "utf8"),
-          ) as Record<string, { models?: Array<{ provider?: string; id?: string }> }>;
-          for (const prov of Object.keys(store)) {
-            for (const m of store[prov]?.models ?? []) {
-              if (typeof m.provider === "string" && typeof m.id === "string") {
-                models.push({ provider: m.provider, id: m.id });
-              }
-            }
-          }
-        } catch { /* no store — empty registry */ }
-        try {
-          const auth = JSON.parse(
-            readFileSync(pathJoin(home, ".pi", "agent", "auth.json"), "utf8"),
-          ) as Record<string, unknown>;
-          for (const k of Object.keys(auth)) authedProviders.add(k);
-        } catch { /* no auth — no provider looks usable */ }
-      }
-      // Diagnose KNOWN agents first, then any user-built/third-party agent
-      // files found in either layer (project outranks global per readAgent).
-      const fileNames = (dir: string): string[] => {
-        try {
-          return readdirSync(dir).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, ""));
-        } catch {
-          return [];
-        }
-      };
-      // The PROJECT layer is enumerated by frontmatter IDENTITY, not basename:
-      // pi-subagents registers a project file under its `name`, so a
-      // `custom.md` carrying `name: foo` is live as `foo`. Enumerating it as
-      // "custom" made readAgent (which resolves by identity) find nothing, and
-      // a project-ONLY agent whose basename differs from its name was invisible
-      // here while gate-doctor's union enumeration did see it.
-      const projectIdentityNames = (dir: string): string[] => {
-        try {
-          const out: string[] = [];
-          for (const f of readdirSync(dir)) {
-            if (!f.endsWith(".md")) continue;
-            try {
-              const id = projectAgentIdentity(readFileSync(pathJoin(dir, f), "utf8"));
-              if (id !== undefined) out.push(id);
-            } catch { /* unreadable file — not loadable either */ }
-          }
-          return out;
-        } catch {
-          return [];
-        }
-      };
-      const allNames = [...new Set([...KNOWN_AGENTS, ...fileNames(globalAgentsDir), ...projectIdentityNames(projectAgentsDir)])];
-      const entries = allNames
-        .map((name) => {
-          const text = readAgent(name);
-          return text ? diagnoseChain(name, text, facts) : null;
-        })
-        .filter((e): e is NonNullable<typeof e> => e !== null && e.chain.length > 0);
-      return entries.length === 0 ? [] : formatModelDiagnosis(entries).split("\n");
-    } catch {
-      return []; // diagnostics only — never block the status readout
-    }
+   * It stays HERE, as one function, because every binding it touches lives in
+   * THIS closure: the state object the extension rebinds, its loop counters
+   * and locks, the never-persisted sensitive-file grants, the bypass token
+   * and the appeal ledger. The command module owns the ordering around it
+   * (reset → persist → notify) and nothing else.
+   */
+  function resetSessionState(): void {
+    state = emptyState(state.sessionId, state.maxRounds);
+    loopArmed = true;
+    continuationsInjected = 0;
+    completionContinuations = 0;
+    loopStall = undefined;
+    stallNoticeShown = false;
+    agentDowngradesLocked = false;
+    lastRunAborted = false;
+    scopeLimitDeclined = false;
+    sessionEditedPaths.clear();
+    // The user's call: revoke outstanding one-shot sensitive-file
+    // authorizations AND lift the per-path decline locks.
+    sensitiveGrants = [];
+    sensitiveDeclinedPaths.clear();
+    clearBypassToken();
+    lastBlockedShip = null;
+    lastBlockedText = null;
+    // A user-initiated reset clears the appeal ledger too: quota, decided
+    // contents and any live pass. It is the user's own call, and leaving a
+    // pass behind would let it authorize content after the reset.
+    delete state.appeals;
+    arbitrationDecisions.clear();
   }
 
-  pi.registerCommand("gate-status", {
-    description: "Show review-gate state",
-    handler: async (_args, ctx) => {
-      const fp = computeFingerprint(cwd);
-      const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
-      const others = otherRepoStatus();
-      const lines = [
-        `review:    ${state.review.verdict}${state.review.at ? ` (${state.review.at})` : ""}`,
-        `precommit: ${state.precommit.verdict}` +
-          (state.precommit.verdict === "PASS"
-            ? ` [lane ${state.precommit.mode ?? "?"}, tests: ${state.precommit.testScope ?? "unknown"}]` +
-              (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run") +
-              (state.precommit.testScope === "skipped" ? " — ⚠️ tests were NOT run in this lane" : "")
-            : "") +
-          (state.precommit.at ? ` (${state.precommit.at})` : ""),
-        ...formatPrecommitSummary(lastPrecommitTiming(primaryRepoRoot)),
-        `changes:   code=${state.hasCodeChange} docs=${state.hasDocChange}`,
-        `docSync:   ${projectConfig.docSync ? `ENFORCED (attested: ${state.review.docSync ?? "none"})` : "off"}`,
-        `rounds:    ${state.rounds.length}/${state.maxRounds}`,
-        `config:    thinkHarder=${projectConfig.thinkHarder}${state.strategicResetFired ? " (fired)" : ""} gitMemory=${projectConfig.gitMemory}`,
-        `task mode: ${state.taskMode ?? "undecided (behaves as loop; agent decides via set_gate_mode)"}`,
-        ...(state.scopeLimit
-          ? [`scope:     session-only (user-granted ${state.scopeLimit.at}; ${state.scopeLimit.preexistingFiles.length} pre-existing file(s) exempt)`]
-          : []),
-        ...(state.pausedQuestion
-          ? [`paused:    awaiting user answer to "${state.pausedQuestion.question.slice(0, 120)}" (${state.pausedQuestion.at})`]
-          : []),
-        // L8: whether THIS text is the contract the user approved (loop mode
-        // ships are blocked until it is), and L7: the Copilot cycle, which
-        // gates completion only — both are easy to misread from the outside,
-        // so the readout names them explicitly.
-        `loop goal: ${loopGoalConfirmed() ? "approved by the user" : readLoopGoal(primaryRepoRoot).present ? "DRAFT — not approved (loop-mode ships blocked)" : "none"}`,
-        ...(state.copilot
-          ? [`copilot:   ${state.copilot.status}${state.copilot.pr ? ` PR #${state.copilot.pr}` : ""}` +
-            ` (round ${state.copilot.rounds}, no round cap` +
-            `${state.copilot.note ? `; ${state.copilot.note.slice(0, 120)}` : ""})`]
-          : []),
-        `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
-        `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
-        ...modelDiagnosisLines(ctx.modelRegistry),
-        // Explore: ship commands stay fully gated (L1), but declare_done and
-        // auto-continuation are advisory. Normal: the ship gate is OFF.
-        state.taskMode === "normal"
-          ? "ship gate: OFF (normal mode — extension inactive)"
-          : state.taskMode === "explore"
-            ? (problems.length
-              ? `ship gate: BLOCKED (explore: completion advisory, ship still gated)\n${problems.map((p) => `  - ${p}`).join("\n")}`
-              : "ship gate: OPEN (explore)")
-            : (problems.length ? `ship gate: BLOCKED\n${problems.map((p) => `  - ${p}`).join("\n")}` : "ship gate: OPEN"),
-        // Every OTHER repo this session edited gets its own line. Showing only
-        // the session repo is how a multi-repo session could look green while
-        // the repo it was about to commit sat at PENDING (and vice versa).
-        ...others.lines,
-      ];
-      ctx.ui.notify(lines.join("\n"), problems.length || others.blocked ? "warning" : "info");
-    },
-  });
-
-  pi.registerCommand("gate-bypass", {
-    description: "Bypass the review gate (requires a reason; user-confirmed)",
-    handler: async (args, ctx) => {
-      const reason = (args ?? "").trim();
-      if (!reason) { ctx.ui.notify("Usage: /gate-bypass <reason>", "error"); return; }
-      const ok = ctx.hasUI
-        ? await confirmBounded(
-            ctx,
-            "Bypass review gate?",
-            `Reason: ${reason}\nDisables ship blocking until /gate-reset.`,
-          )
-        : true;
-      if (!ok) return;
-      state.bypass = { active: true, reason, at: new Date().toISOString() };
-      loopArmed = false;
-      persist(ctx);
-      ctx.ui.notify(`review-gate: BYPASSED (${reason})`, "warning");
-    },
-  });
-
-  pi.registerCommand("gate-mode", {
-    description: "Set task workflow: /gate-mode loop|explore|normal",
-    handler: async (args, ctx) => {
-      const mode = normalizeTaskMode((args ?? "").trim());
-      if (mode === undefined) {
-        ctx.ui.notify("Usage: /gate-mode loop|explore|normal", "error");
-        return;
-      }
-      // /gate-mode is user-invoked — an explicit choice, so source is "user"
-      // and any direction is allowed without a confirm dialog. A fresh user
-      // decision also clears the agent-downgrade lock.
-      agentDowngradesLocked = false;
-      setTaskMode(mode, "user", ctx);
-      ctx.ui.notify(
-        mode === "loop"
-          ? "review-gate: switched to loop workflow"
-          : mode === "explore"
-            ? "review-gate: switched to explore workflow — gates advisory, AI may self-complete; prefer read-only work (ship commands stay gated)"
-            : "review-gate: switched to NORMAL mode — all quality gates are OFF for this session (as if the extension were not installed)",
-        mode === "loop" ? "info" : "warning",
-      );
-    },
-  });
-
-  pi.registerCommand("gate-reset", {
-    description: "Reset review-gate state for this session",
-    handler: async (_args, ctx) => {
-      state = emptyState(state.sessionId, state.maxRounds);
-      loopArmed = true;
-      continuationsInjected = 0;
-      completionContinuations = 0;
-      loopStall = undefined;
-      stallNoticeShown = false;
-      agentDowngradesLocked = false;
-      lastRunAborted = false;
-      scopeLimitDeclined = false;
-      sessionEditedPaths.clear();
-      // The user's call: revoke outstanding one-shot sensitive-file
-      // authorizations AND lift the per-path decline locks.
-      sensitiveGrants = [];
-      sensitiveDeclinedPaths.clear();
-      clearBypassToken();
-      lastBlockedShip = null;
-      arbitrationsUsed = 0;
-      arbitrationDecisions.clear();
-      persist(ctx);
-      ctx.ui.notify("review-gate: state reset", "info");
-    },
-  });
-
-  // sd0x-dev-flow self-improvement loop port: /gate-lesson records a corrected
-  // mistake into a per-project lesson log (.pi/review-gate-lessons.md). Lessons
-  // recurring 3+ times should be promoted into rules/config by the user.
-  pi.registerCommand("gate-lesson", {
-    description: "Record a lesson learned (self-improvement log): /gate-lesson <text>",
-    handler: async (args, ctx) => {
-      const text = (args ?? "").trim();
-      if (!text) { ctx.ui.notify("Usage: /gate-lesson <what went wrong → correct approach>", "error"); return; }
-      const logPath = pathJoin(cwd, ".pi", "review-gate-lessons.md");
-      try {
-        const { appendFileSync, mkdirSync } = await import("node:fs");
-        mkdirSync(pathDirname(logPath), { recursive: true });
-        let n = 1;
-        try { n = (readFileSync(logPath, "utf8").match(/^### L\d+/gm) ?? []).length + 1; } catch { /* new log */ }
-        appendFileSync(logPath, `\n### L${n} — ${new Date().toISOString().slice(0, 10)}\n\n${text}\n`);
-        ctx.ui.notify(`review-gate: lesson L${n} recorded in .pi/review-gate-lessons.md`, "info");
-      } catch (e) {
-        ctx.ui.notify(`review-gate: could not write lesson log: ${(e as Error).message}`, "error");
-      }
-    },
-  });
-
-  // /gate-doctor — read-only health check: verifies every optimization this
-  // package ships actually works in the CURRENT environment (model
-  // chains, opencode-go prune, precommit runner, git hooks, global config
-  // fallback, L5 gate, Copilot gh, command registry). Pure diagnostics: it
-  // reads files and probes executables, writes NOTHING, and never feeds a
-  // gate verdict.
-  pi.registerCommand("gate-doctor", {
-    description: "Diagnose whether all optimizations are live (read-only health check)",
-    handler: async (_args, ctx) => {
-      const home = homedir();
-      const packageRoot = pathJoin(pathDirname(fileURLToPath(import.meta.url)), "..");
-      const readFileSafe = (p: string): string | undefined => {
-        try { return readFileSync(p, "utf8"); } catch { return undefined; }
-      };
-      // git rev-parse --git-path hooks resolves the real hooks dir (worktrees,
-      // core.hooksPath); unavailable → the hooks check degrades to WARN.
-      let hooksDir: string | undefined;
-      try {
-        const out = execFileSync("git", ["rev-parse", "--git-path", "hooks"], {
-          cwd, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-        if (out.length > 0) hooksDir = pathResolve(cwd, out);
-      } catch { /* git unavailable — hooks unverifiable */ }
-      const checks = await runGateDoctor({
-        homeDir: home,
-        packageRoot,
-        agentsDir: pathJoin(home, ".pi", "agent", "agents"),
-        // Project-layer overrides outrank the global copies for diagnosis
-        // (round-2 P2) — same per-file precedence pi-subagents loads with.
-        projectAgentsDir: pathJoin(primaryRepoRoot, ".pi", "agents"),
-        modelsStorePath: pathJoin(home, ".pi", "agent", "models-store.json"),
-        globalConfigPath: globalConfigPath(home),
-        registryFacts: factsFromRegistry(ctx.modelRegistry, home, readFileSafe),
-        hooksDir,
-        workflowCommandCount: Object.keys(WORKFLOW_COMMANDS).length,
-        isNonEnglishText,
-        probeGh: async () => {
-          try {
-            const out = execFileSync("gh", ["--version"], {
-              encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
-            });
-            return { ok: true, value: out.split(/\r?\n/)[0] ?? "" };
-          } catch (e) {
-            const err = e as { code?: unknown; message?: unknown };
-            return { ok: false, error: err.code === "ENOENT" ? "gh not installed" : String(err.message ?? err.code ?? e) };
-          }
-        },
-        readFile: readFileSafe,
-        exists: existsSync,
-        readdir: (p) => { try { return readdirSync(p); } catch { return undefined; } },
-      });
-      const attention = checks.filter((c) => c.status !== "PASS").length;
-      ctx.ui.notify(formatDoctorReport(checks), attention ? "warning" : "info");
-    },
+  registerGateCommands(pi, {
+    state: () => state,
+    projectConfig: () => projectConfig,
+    primaryRepoRoot: () => primaryRepoRoot,
+    cwd,
+    // The doctor reads the assets THIS package ships; the path is computed
+    // here rather than inside lib/ so it cannot silently change meaning when
+    // a module moves between directories.
+    packageRoot: pathJoin(pathDirname(fileURLToPath(import.meta.url)), ".."),
+    persist: (ctx) => persist(ctx as unknown as ExtensionContext),
+    callTool: (name, params, ctx) => callTool(name, params, ctx),
+    toolText: (result) => toolText(result),
+    otherRepoStatus: () => otherRepoStatus(),
+    loopGoalConfirmed: () => loopGoalConfirmed(),
+    loopGoalPresent: () => readSessionLoopGoal(primaryRepoRoot).present,
+    confirmBounded: (uiCtx, title, message) =>
+      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message),
+    setLoopArmed: (armed) => { loopArmed = armed; },
+    setTaskMode: (mode, source, ctx) => setTaskMode(mode, source, ctx as ExtensionContext),
+    // Only a USER action may lift the lock — /gate-mode and /gate-reset are
+    // the only two callers, and both are user-invoked commands.
+    unlockAgentDowngrades: () => { agentDowngradesLocked = false; },
+    resetSession: resetSessionState,
+    findProjectAgentText: (dir, name) => findProjectAgentText(dir, name),
   });
 
   // ---------- per-turn protocol reminder ----------
@@ -6517,8 +6769,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // tools instead of shell-editing files after a failed tool call. Pure
     // guidance — no enforcement.
     systemPrompt += "\n\n" + EDIT_DISCIPLINE_DIRECTIVE;
-
-    // Inert in snapshot sessions (see session_start): a reviewer the gate
 
     // While the mode is undecided, ask the agent to classify the task
     // IN-SESSION as its first action (set_gate_mode). Enforcement below stays
@@ -6559,11 +6809,39 @@ export default function reviewGate(pi: ExtensionAPI) {
     // first edit arms the gate. An UNCONFIRMED goal has its body withheld
     // (L8) and blocks ships at L1; the hooks stay out of it.
     if (state.taskMode === "loop") {
-      const goal = readLoopGoal(primaryRepoRoot);
+      const goal = readSessionLoopGoal(primaryRepoRoot);
+
       const goalConfirmed = loopGoalConfirmed();
       systemPrompt += "\n\n" + buildLoopGoalDirective(goal, goalConfirmed);
 
     }
+
+    // The orchestration layer's two prompts, and they are deliberately
+    // asymmetric (task book §5). The ORCHESTRATOR gets the whole contract;
+    // a CHILD gets one sentence — telling it about the plan would make it
+    // optimize for the plan instead of for its own task.
+    if (state.taskMode === "orchestrator") {
+      systemPrompt += "\n\n" + ORCHESTRATOR_DIRECTIVE;
+      const inherited = formatInheritanceBrief(readInheritance(), currentOrchestrationId());
+      if (inherited) systemPrompt += "\n\n" + inherited;
+      // F13 — an orchestrator RETURNS HERE, and that is the whole fix.
+      //
+      // Falling through used to append the loop block, which tells the
+      // session to "negotiate a loop goal → judge_submit reviewer →
+      // declare_done". For a project manager every clause of that is wrong:
+      // its exit contract is the PLAN, not a goal, and constraint 2 forbids
+      // it from writing the code a review would judge. Worse, the unmet-gate
+      // list it was shown ("code review gate PENDING", "precommit has not
+      // run") was read from the sidecar its CHILD had dirtied — two sessions,
+      // one file (F4). Its own contract is the orchestration's, and
+      // orchestratorDoneProblems is where that lives.
+      systemPrompt += "\n\n" + buildOrchestratorExitBlock(orchestrationDoneProblems());
+      return { systemPrompt };
+    }
+    if (isOrchestrationChild()) {
+      systemPrompt += "\n\n" + CHILD_OF_ORCHESTRATOR_DIRECTIVE;
+    }
+
 
     if (!gateArmed && problems.length === 0) {
       return { systemPrompt };
@@ -6573,23 +6851,22 @@ export default function reviewGate(pi: ExtensionAPI) {
       systemPrompt:
         systemPrompt +
         "\n\n## Review Gate (enforced)\n" +
-        "pi-review-gate is active. After editing code you MUST: " +
-        "(1) run the precommit runner FIRST (its lint:fix step edits files, and any edit " +
-        "invalidates a review binding — reviewing first throws that review away), " +
-        "(2) run an independent review, (3) call record_review with the FULL reviewer output, " +
-        "(4) fix all findings, then repeat from (1) until READY, (5) call declare_done. " +
-        "Batch related edits before starting a round: the loop is billed per round, not per line. " +
-        "git commit/push and gh pr create/edit are HARD-BLOCKED until gates pass.\n" +
+        "改完就送审：`judge_submit({role:\"reviewer\", task:<本轮改动说明>})` —— 门禁自己跑 " +
+        "precommit、提交 checkpoint、算审查范围、派 reviewer，并在它退出时机械记录 verdict。" +
+        "被打回就按 findings 修，然后再 judge_submit；READY 了就 `declare_done`（门禁自己把工作分支合回基准）。" +
+        "攒一批改动再送审：循环按轮计费，不按行。" +
+        "git commit/push 与 gh pr create/edit 在门禁通过前是硬拦截。\n" +
+        buildAgentDirectives() + "\n" +
         (sessionRepos.size > 1
           ? "Multi-repo session: this session has edited " + sessionRepos.size + " repositories (" +
             [...sessionRepos].join(", ") +
-            "). record_review / run_precommit now REQUIRE an explicit `repo` (absolute path) — " +
+            "). `judge_submit` REQUIRES an explicit `repo` (absolute path) here — " +
             "a verdict binds to that repo's own worktree and unblocks only that repo, so run the " +
             "loop once per repo; " +
             "declare_done and git commit/push/gh pr require EVERY edited repo to pass its own review + precommit " +
             "before shipping.\n"
           : "") +
-        "You are ENCOURAGED to proactively consult the `adviser` subagent (a stronger, " +
+        "You are ENCOURAGED to proactively consult the `adviser` judge child (a stronger, " +
         "independent second opinion, pinned to a top-tier model at max thinking) BEFORE " +
         "and DURING non-trivial, ambiguous, or risky work \u2014 consulting early is cheaper " +
         "than a failed review later. The `reviewer` (also a top-tier model at max) is the " +
@@ -6598,12 +6875,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         "is done without re-reviewing; asking for permission to continue the loop; citing " +
         "context length or token budget as a reason to skip review; outputting a polished " +
         "completion-style summary. Brief status lines are fine; execute the next step.\n" +
-        "EXCEPTION — genuine blockers: if progress is stopped by a question only the user can " +
-        "answer (ambiguous requirement, a product decision, missing access), call " +
-        "pause_for_question — put the COMPLETE question (options + your recommendation) in the " +
-        "`question` parameter, then end the turn with a one-line pointer instead of repeating it. " +
-        "Auto-continuation pauses until the user replies; ship commands stay blocked. Never " +
-        "use it to ask permission to continue routine loop work.\n" +
+        "Anything that needs the user — an ambiguous requirement, a product decision, scope, " +
+        "missing access — goes through `ask_user`: it asks them (options + your recommendation) " +
+        "and pauses the loop until they answer. Never write the question into your reply and end " +
+        "the turn; that costs an iteration and may not read as a question at all. Ship commands " +
+        "stay blocked either way, and asking permission to continue routine loop work is not a " +
+        "use for it.\n" +
         (state.pausedQuestion
           ? `Loop currently PAUSED awaiting the user's answer to: "${state.pausedQuestion.question.slice(0, 200)}". ` +
             "If the user has replied, continue the loop; otherwise end the turn after asking.\n"

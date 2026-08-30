@@ -36,7 +36,7 @@ test("buildReviewPrompt names the changed files and sets the COMMIT contract", (
   assert.doesNotMatch(prompt, /完成信号/); // no channel → no signal instruction
 });
 
-test("round-16 P1: the done channel is embedded at the end of the reviewer task", () => {
+test("the completion contract is embedded at the end of the reviewer task", () => {
   const prompt = buildReviewPrompt(
     "review",
     ["src/a.ts"],
@@ -47,44 +47,21 @@ test("round-16 P1: the done channel is embedded at the end of the reviewer task"
     undefined,
     undefined,
     undefined,
-    "rg-review-abc123-done",
   );
-  assert.match(prompt, /完成信号/);
-  assert.match(prompt, /tmux wait-for -S rg-review-abc123-done/);
+  assert.match(prompt, /完成/);
+  assert.match(prompt, /进程退出即完成/);
+  assert.match(prompt, /question fence/);
+  assert.match(prompt, /同一 session id 重新拉起/);
   // The instruction is at the END (after the OUTPUT/verdict contract).
-  assert.ok(prompt.indexOf("tmux wait-for -S rg-review-abc123-done") > prompt.indexOf("Verdict shape"));
-
-test("round-16 P2: the inbox question channel is embedded at the end of the reviewer task", () => {
-  const prompt = buildReviewPrompt(
-    "review",
-    ["src/a.ts"],
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    "rg-review-abc123-done",
-    { path: "/repo/.pi/tmux-sessions/rg-review-abc123/inbox.jsonl", channel: "rg-review-abc123-inbox" },
-  );
-  assert.match(prompt, /提问通道/);
-  assert.match(prompt, /\/repo\/\.pi\/tmux-sessions\/rg-review-abc123\/inbox\.jsonl/);
-  assert.match(prompt, /tmux wait-for -S rg-review-abc123-inbox/);
-  // The channel is the FULL derived value (inboxChannelFor(title)) — never
-  // literal "<channel>-inbox" concatenation (double-suffix trap).
-  assert.match(prompt, /rg-review-abc123-inbox/);
-  assert.doesNotMatch(prompt, /wait-for -S <channel>-inbox/);
-  // No inbox param → no question-path instruction.
-  const plain = buildReviewPrompt("review", [], undefined, undefined, undefined, undefined, undefined, undefined, undefined);
-  assert.doesNotMatch(plain, /提问通道/);
+  assert.ok(prompt.indexOf("进程退出即完成") > prompt.indexOf("Verdict shape"));
+  assert.doesNotMatch(prompt, /tmux|wait-for|inbox|channel/);
   // Round-17: output discipline is part of the task text.
   assert.match(prompt, /输出纪律:verdict fence 在最前,其后最多 5 行结论要点/, "the discipline is pinned in the task");
 });
-});
 
 test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no isolation is READ-ONLY", () => {
-  // Relative would land in the snapshot's own .pi/, where the main agent
+  // Relative would land in whatever directory the judge happens to be in — its
+  // own throwaway worktree, say — where the main agent
   // never looks: the stream would appear to work and deliver nothing.
   const isolated = buildReviewPrompt(
     "review",
@@ -99,7 +76,7 @@ test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no i
   assert.match(isolated, /abc123\.\.def456/);
   assert.match(isolated, /no edit\/write tools/);
 
-  // REGRESSION: without a snapshot the reviewer is in the USER'S worktree and
+  // REGRESSION: without isolation the reviewer is in the USER'S worktree and
   // the engine-level denylist only removes edit/write TOOLS — bash stays. A
   // prompt that still promised "disposable copy, edit freely" turned that into
   // a fail-open: the reviewer would rewrite the user's files through bash.
@@ -112,8 +89,8 @@ test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no i
 });
 
 test("REGRESSION: no pre-baked diff is ever pasted into a review prompt", () => {
-  // The reviewer holds a SNAPSHOT of the change, so it reads the real thing with
-  // `git diff HEAD`. The old path pasted a per-shard diff "for orientation" that
+  // The reviewer judges an immutable commit range, so it reads the real thing
+  // with `git show` / `git diff baseline..HEAD`. The old path pasted a per-shard diff "for orientation" that
   // could already have drifted; the field and the prompt block are gone, and
   // this test keeps them gone.
   const prompt = buildReviewPrompt(
@@ -147,10 +124,12 @@ test("REVIEW_VERDICT_SCHEMA is the shape handed to a spawned reviewer", () => {
   assert.ok(schema.required.includes("docSync"), "docSync must be required")
 });
 
-test("the verdict must carry the reviewer's REAL cwd (second proof of isolation)", () => {
-  // Evidence, not decoration: the gate matches this against the snapshot it
-  // prepared, which is how a reviewer that ran in the live worktree — or was
-  // pointed correctly and then `cd`-ed away — stops being able to approve.
+test("the verdict must carry the reviewer's REAL cwd (a check the gate runs)", () => {
+  // Since round-9 `record_review` compares this with the repo the round was
+  // prepared for and downgrades a READY that reports something else (before
+  // that, nothing checked it and a fence claiming any path produced the same
+  // READY). It is a consistency check on a self-reported value — it rejects a
+  // mismatching report and proves nothing about who wrote the verdict.
   const schema = REVIEW_VERDICT_SCHEMA as unknown as {
     properties: Record<string, { description?: string }>;
     required: readonly string[];
@@ -170,20 +149,24 @@ test("the verdict must carry the reviewer's REAL cwd (second proof of isolation)
   assert.match(prompt, /run `pwd`/);
   assert.match(prompt, /do NOT copy the path out of this task text/i);
   assert.match(prompt, /"cwd": "<your real pwd>"/);
-  assert.match(prompt, /matches it against the pane it spawned you in/);
+  assert.match(prompt, /matches it against the repo this round was prepared for/);
+  assert.doesNotMatch(prompt, /against the pane/,
+    "the check does not measure the pane — claiming it does is the over-claim this field punishes");
 
-  // …and the NO-isolation branch must not promise a check that cannot happen:
-  // it just told the reviewer there is no snapshot this round.
+  // BOTH branches must promise the same thing, because the gate checks
+  // unconditionally. A branch that says "this is not checked" would be the
+  // very kind of unverified claim this field exists to catch.
   const bare = buildReviewPrompt("review", ["src/a.ts"]);
-  assert.match(bare, /run `pwd`/, "the pwd is still recorded without isolation");
-  assert.doesNotMatch(bare, /pane it spawned you in/,
-    "promising a pane check with no pane contradicts the same prompt");
-  assert.match(bare, /does not match it against one/);
+  assert.match(bare, /run `pwd`/, "the pwd is still demanded without isolation");
+  assert.match(bare, /matches it against the repo this round was prepared for/,
+    "the promise is the same on both branches — the check is unconditional");
+  assert.doesNotMatch(bare, /does not match it against one/,
+    "the retired 'not checked' wording must not come back");
 });
 
 test("REGRESSION: this module is PURE — no engine, no snapshots, no I/O, no sharding", () => {
   // Review dispatch moved out of here on purpose: the engine dropped per-agent
-  // cwd, so isolation had to move to the caller (prepare_review + subagents).
+  // cwd, so spawning moved to the caller (prepare_review + review_spawn).
   // If engine or filesystem coupling ever comes back into this file, the
   // review path silently regains the collisions that made reviewer writes
   // unsafe. And the single-review contract has NO sharding left to plan.
@@ -241,7 +224,7 @@ test("scopeDirective rides the task text when given (goal criterion 1)", () => {
 
 test("round-18: the polish-gate REASON rides the task text verbatim, absent when not given", () => {
   const reason = { reason: "把 P2 修干净再收尾", at: "2026-08-28T06:00:00.000Z", round: 4 };
-  const withReason = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { path: "x", channel: "y" }, reason);
+  const withReason = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, undefined, undefined, undefined, undefined, reason);
   assert.match(withReason, /REASON FOR THIS ROUND/);
   assert.match(withReason, /把 P2 修干净再收尾/);
   assert.match(withReason, /round 4/);

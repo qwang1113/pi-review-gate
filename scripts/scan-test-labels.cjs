@@ -8,9 +8,8 @@
  * content so it checks exactly what is about to be committed.
  *
  * Non-English detection mirrors lib/lang-detect.ts — keep them in sync: a
- * label is flagged only when a NON-LATIN script (CJK/Kana/Hangul/Cyrillic/…)
- * is the MAJORITY of its letters (majority-body policy). A minority foreign
- * word passes; Latin-with-diacritics (café), digits, punctuation, URLs and
+ * label is flagged when it contains ANY non-Latin letter (CJK/Kana/Hangul/
+ * Cyrillic/…). Latin-with-diacritics (café), digits, punctuation, URLs and
  * emoji all pass.
  *
  * We do NOT regex raw source (that false-positives on comments, embedded
@@ -62,38 +61,25 @@ function isTestFile(p) {
 }
 
 // ---- non-English detection (mirror of lib/lang-detect.ts) --------------------
-// Majority-body policy with ASYMMETRIC counting (kept in sync with
-// analyzeLanguageMix() in lib/lang-detect.ts): NON-Latin letters are counted
-// over the FULL label (so a non-Latin body can't hide inside `code`/URLs),
-// while LATIN letters are counted over the PROSE only (so a Latin code span
-// can't dilute the ratio). Fails when non-Latin letters are STRICTLY more than
-// half of (proseLatin + fullNonLatin). Only `\p{L}` letters count.
-function stripNonProse(text) {
-  let t = text;
-  t = t.replace(/```[\s\S]*?```/g, " ");
-  t = t.replace(/~~~[\s\S]*?~~~/g, " ");
-  t = t.replace(/`[^`]*`/g, " ");
-  t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1");
-  t = t.replace(/\bhttps?:\/\/\S+/gi, " ");
-  t = t.replace(/\bwww\.\S+/gi, " ");
-  t = t.replace(/<[^>]+>/g, " ");
-  return t;
-}
+// ONE HARD RULE, kept in sync with judgeEnglish() in lib/lang-detect.ts: a
+// label with ANY non-Latin letter is refused. The whole label is scanned —
+// code spans, URLs and markup included — because wrapping a label in backticks
+// must not turn it into a bypass. Latin-with-diacritics (café), digits,
+// punctuation, emoji and fullwidth punctuation carry no non-Latin LETTER and
+// therefore pass. The majority-ratio policy this file used to mirror was
+// retired on 2026-08-29 (see lib/lang-detect.ts for why); the sanctioned
+// exceptions are the `// review-gate: allow-non-english` markers below and,
+// inside a Pi session, an arbitrated appeal.
+//
+// This file is CJS with no Pi dependency (the git hook runs it with plain
+// node), so the rule is duplicated here rather than imported — keep the two
+// in sync.
 function isNonEnglishText(text) {
   if (!text) return false;
-  const full = text.normalize("NFC");
-  const prose = stripNonProse(full);
-  let latin = 0;
-  for (const ch of prose) {
-    if (/\p{L}/u.test(ch) && /\p{Script=Latin}/u.test(ch)) latin++;
+  for (const ch of text.normalize("NFC")) {
+    if (/\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch)) return true;
   }
-  let nonLatin = 0;
-  for (const ch of full) {
-    if (/\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch)) nonLatin++;
-  }
-  const total = latin + nonLatin;
-  if (total === 0) return false;
-  return nonLatin * 2 > total;
+  return false;
 }
 
 // ---- bypass markers ----------------------------------------------------------

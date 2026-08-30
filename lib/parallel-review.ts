@@ -1,16 +1,17 @@
 /**
  * Review contract — the ONE reviewer per round, and what it is told.
  *
- * Every review round is a single reviewer over the WHOLE change, holding its
- * OWN disposable snapshot (created by the extension's `prepare_review`), and
- * its verdict is the only one the gate records (`record_review` parses every
- * fence; worst verdict wins if multiple appear).
+ * Every review round is a single reviewer over the WHOLE change, judging an
+ * IMMUTABLE COMMIT RANGE (`baseline..HEAD`, registered by the extension's
+ * `prepare_review`), and its verdict is the only one the gate records
+ * (`record_review` parses every fence; worst verdict wins if multiple appear).
  *
- * NO ENGINE HERE. Reviews are dispatched by the extension (`prepare_review` +
- * plain subagents), because the pdw engine discards a per-agent `cwd` and a
- * reviewer must hold its OWN snapshot of the change it judges. Every function
- * in this file is pure over strings, so the reviewer contract can be pinned by
- * tests with no workflow engine, no git and no filesystem.
+ * NO ENGINE HERE. The reviewer runs as a tmux judge child — its own pi process
+ * (`review_spawn`) — and judge-role subagent dispatch is hard-blocked, because
+ * that sandbox has no per-child isolation and would land the judge in the live
+ * worktree. Every function in this file is pure over strings, so the reviewer
+ * contract can be pinned by tests with no workflow engine, no git and no
+ * filesystem.
  */
 
 /**
@@ -131,9 +132,8 @@ export function extractPrecommitBaseline(
   });
 }
 
-
-// Pure module: no engine, no snapshots, no I/O. Reviews are dispatched by the
-// extension (prepare_review + subagents); this file only decides WHAT to say
+// Pure module: no engine, no I/O. The extension spawns the reviewer as its own
+// pi process (prepare_review + review_spawn); this file only decides WHAT to say
 // to the reviewer and what verdict shape to hand it as its outputSchema.
 import { buildStreamDirective } from "./review-stream.ts";
 
@@ -147,12 +147,21 @@ export interface ReviewVerdict {
   /**
    * The directory the reviewer ACTUALLY ran in, from its own `pwd`.
    *
-   * Second, independent piece of evidence that the reviewer was inside the
-   * snapshot prepared for it (the first is the spawn the gate observed). It
-   * also catches the case the spawn guard cannot see: a reviewer pointed at its
-   * snapshot correctly that then `cd`-ed into the live worktree. The prompt
-   * insists on a real `pwd` rather than copying the path out of the task text,
-   * because a copied value proves nothing.
+   * What it is, stated without embellishment (round-11 P1): a self-reported
+   * consistency check. `record_review` compares this string with the repo the
+   * round was prepared for and downgrades a READY that does not match. So it
+   * rejects a MISMATCHING report — a review run against the wrong repo — and
+   * nothing else.
+   *
+   * It proves nothing. The value is supplied by the reviewed party, and the
+   * gate never reads `paneCurrentPath`, so any value equal to the repo root
+   * passes, fabricated or not. Calling it identity evidence would be the same
+   * over-claim the field exists to catch. (Measuring the pane would not fix
+   * that either: a finished judge's pane is gone before the verdict lands.)
+   *
+   * The prompt still insists on a real `pwd` rather than copying the path out
+   * of the task text — an honest reviewer reports what it measured, and that
+   * is the case this check can act on.
    */
   cwd: string;
   /**
@@ -184,7 +193,7 @@ export const REVIEW_VERDICT_SCHEMA = {
       type: "string",
       description:
         "Absolute path you actually ran in, taken from your own `pwd` — not copied from the task text. " +
-        "The gate checks it against the snapshot prepared for you.",
+        "The gate checks it against the repo this round was prepared for.",
     },
     docSync: { type: "string", enum: ["UPDATED", "NOT_NEEDED"] },
     findings: {
@@ -202,23 +211,24 @@ export const REVIEW_VERDICT_SCHEMA = {
     },
     notes: { type: "string" },
   },
-  // `cwd` is REQUIRED: it is one of the two independent proofs that the
-  // reviewer ran inside its snapshot, and an optional field would simply be
-  // omitted by the models that most need to be checked.
+  // `cwd` is REQUIRED so that a mismatching report is actually visible: an
+  // optional field would simply be omitted by the models that most need the
+  // check. It is a consistency check on a self-reported value, not proof of
+  // who produced the verdict — see the field's doc comment.
   required: ["gate", "cwd", "docSync", "findings"],
 } as const;
 
 /**
  * Build the review prompt handed to the ONE reviewer.
  *
- * `isolation` is the SAFETY-CRITICAL argument. A reviewer that got its own
- * snapshot may edit and mutate freely; a reviewer running in the LIVE worktree
- * (isolation unavailable) must be told the opposite, because the engine-level
- * denylist only removes the edit/write TOOLS — `bash` stays, and a reviewer
- * that had been promised "you are in a disposable copy" would happily rewrite
- * the user's files through it. Omitting the argument therefore means "no
- * snapshot": the read-only contract is the DEFAULT, and the permissive one has
- * to be granted explicitly.
+ * `isolation` is the SAFETY-CRITICAL argument. It says the reviewer runs as
+ * its own judge child, so it may check the reviewed range out into a THROWAWAY
+ * worktree and mutate freely there; a reviewer with no isolation must be told
+ * the opposite, because the engine-level denylist only removes the edit/write
+ * TOOLS — `bash` stays, and a reviewer that had been promised "you may edit
+ * freely" would happily rewrite the user's files through it. Omitting the
+ * argument therefore means "no isolation": the read-only contract is the
+ * DEFAULT, and the permissive one has to be granted explicitly.
  */
 export function buildReviewPrompt(
   label: string,
@@ -237,22 +247,6 @@ export function buildReviewPrompt(
   scopeKind?: "full" | "incremental",
   session?: { dir: string; id: string },
   precommitBaseline?: string,
-  /**
-   * The done channel the reviewer will signal (doneChannelFor(title)).
-   * Embedded so the child never has to GUESS the channel (round-16 P1: the
-   * protocol promises 'channel 由任务文本给出' but the task text did not
-   * carry it — the child guessed wrong and the main session was never
-   * woken).
-   */
-  doneChannel?: string,
-  /**
-   * The inbox question channel (path + signal channel) embedded for the
-   * child, so it can ask the main session WITHOUT guessing (round-16 P2: the
-   * protocol promises the inbox path/channel are given by the task text, but
-   * no builder carried them). channel = inboxChannelFor(title), i.e.
-   * rg-<title>-inbox — never literal "<channel>-inbox" concatenation.
-   */
-  inbox?: { path: string; channel: string },
   /**
    * The reason the MAIN session gave for opening this round while the gate
    * was already met (round-18 polish gate). Injected verbatim so the
@@ -281,9 +275,10 @@ export function buildReviewPrompt(
   ];
   if (streamPath) lines.push("", buildStreamDirective(streamPath));
   // NOTE: the `diff` field and its prompt block are gone. Nothing produces a
-  // per-reviewer diff any more, and nothing should: the reviewer holds a snapshot
-  // of the change, so it runs `git diff HEAD` against the real thing instead of
-  // reading a copy that may have drifted. Keeping a dead field invites someone
+  // per-reviewer diff any more, and nothing should: the reviewer judges an
+  // immutable commit range, so it runs `git show` / `git diff baseline..HEAD`
+  // against real history instead of reading a copy that may have drifted.
+  // Keeping a dead field invites someone
   // to "restore" the weaker path.
   if (goalText && goalText.trim()) {
     lines.push("", "Loop goal (accept the change against it, criterion by criterion):", goalText.trim());
@@ -333,19 +328,21 @@ export function buildReviewPrompt(
   lines.push(
     "",
     "OUTPUT: fenced JSON verdict FIRST (the gate parses it; docSync is REQUIRED on the single-review path), then a prose review below the fence.",
-    // The reviewer's own `pwd` is EVIDENCE, and only if it is measured: a value
-    // copied out of this prompt would prove nothing about where the review
-    // actually happened, which is precisely the failure this field exists for.
+    // The prompt asks for a MEASURED `pwd`, not one copied out of this text —
+    // a copied value says nothing about where the review actually happened,
+    // and only a measured one makes the check below meaningful.
     //
-    // The SECOND sentence is branch-specific. Promising "the gate checks it
-    // against the snapshot prepared for you" on the no-isolation branch
-    // contradicts the paragraph above it (which just said there is no snapshot
-    // this round) and could push a literal-minded reviewer into a needless
-    // non-READY.
+    // BOTH branches make the same promise, because since round-9 the gate
+    // really does compare it: `record_review` checks the reported cwd against
+    // the repo THIS ROUND WAS PREPARED FOR and downgrades a READY that reports
+    // something else. (That is all it does — see the `cwd` field's doc
+    // comment.) Telling the reviewer otherwise on one branch would be the same
+    // class of lie this field exists to catch.
     'Before you answer, run `pwd` and put its output in the verdict\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
+      " The gate matches it against the repo this round was prepared for" +
       (isolation
-        ? " The gate matches it against the pane it spawned you in (the shared repo root)."
-        : " This only records where you read; the gate does not match it against one."),
+        ? " (the shared repo root), so `cd` back there before you answer if you ended up inside your throwaway worktree."
+        : "."),
     // eslint-disable-next-line max-len
     'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "cwd": "<your real pwd>", "docSync": "UPDATED"|"NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",
@@ -353,20 +350,10 @@ export function buildReviewPrompt(
     // verdict fence and the finding stream; prose beyond a 5-line summary is
     // wasted tokens.
     "输出纪律:verdict fence 在最前,其后最多 5 行结论要点(每条一句);不复述任务、不复述代码、不写过程叙事;详细证据放 findings 流(evidence 字段),不要写进正文。",
-    ...(doneChannel
-      ? [
-          "",
-          `完成信号(必须):当你完成本轮审核、输出最终 verdict 之后,运行 tmux wait-for -S ${doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
-        ]
-      : []),
-    ...(inbox
-      ? [
-          "",
-          `- 提问通道(需要决策/澄清任务时):把一行 JSON 追加到 ${inbox.path}:`,
-          '  {"type":"question","text":"……"}',
-          `  然后运行 tmux wait-for -S ${inbox.channel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)。提问后继续等待回复,不要自行假定答案。`,
-        ]
-      : []),
+    "",
+    "完成(必须):输出最终 verdict 后正常退出即可——进程退出即完成,主会话以你的输出为准,",
+    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
+    "主会话会带着答案用同一 session id 重新拉起你。",
   );
   return lines.join("\n");
 }

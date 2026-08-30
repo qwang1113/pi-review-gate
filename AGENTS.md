@@ -9,45 +9,101 @@ feature is integrated directly and enabled by default; it never hides
 behind an opt-in flag or a config toggle. If a feature cannot be safe by
 default, make it safe by default rather than adding a switch.
 
+### 三条哲学（2026-08-30 · 本项目的根本约束）
+
+它们排在本文其余所有条目之前。此后每一轮改动都按它们判断对错 —— 包括判断
+本文件里其他段落是不是已经过时。
+
+> **哲学一 · 能由门禁提供工具的，就不要让 agent 自己拼命令。**
+>
+> 判断标准只有一句：这件事需要 agent 拼 shell / git / tmux 命令吗？需要，
+> 那就是门禁的缺口，不是 agent 的失误。agent 只表达**意图**，门禁负责
+> **怎么做**。一条要 agent 记住的多步流程，等价于一个迟早会漏掉某一步的缺陷。
+>
+> **哲学二 · 工具集要简洁、无歧义：一件事只有一个工具。**
+>
+> 不提供功能重叠的多个入口让 agent 挑 ——「用 A 也行、用 B 也可以」本身就是
+> 设计失败：agent 每一轮都要停下来判断该用哪个，而它判断错的那次没人会发现。
+> 多阶段流程（A→B→C）整合进**一个**工具，门禁在内部走完，中间态不暴露。
+> 工具名要让 agent 一眼看出用途，不能靠读描述才明白。
+>
+> **哲学三 · 永不并行两套实现，只保留最新的。**
+>
+> 个人项目，不承担任何历史兼容负担。新方案落地时旧实现**删除** —— 不保留、
+> 不加开关、不留兼容层、不做「advanced entry」这类后门。留着的旧路径不会
+> 安静地待着：它会被人用、会漂移、会在某一轮变成事故的那一半。
+
+
 ### Single-review loop (the only execution path, agent-initiated)
 
-**Judge roles run as tmux children** — the review is the only parallel
-loop, and each round runs in its OWN pi process: a tmux pane of the main
-session's right column, spawned by the extension itself (`review_spawn`).
-The judge child loads NO review-gate extension and runs with
-`--exclude-tools edit,write`; it stays alive across rounds, so its context
-is reused until a READY lands. Each review round is ONE reviewer over the
-WHOLE change:
+**Judge roles run as their own pi processes** — the review is the only parallel
+loop, and each round runs in its OWN non-interactive pi process (`pi -p`
+with a deterministic `--session-id`), spawned by the extension itself
+(`judge_submit`). The judge child loads NO review-gate extension and runs with
+It runs with
+`--exclude-tools edit,write`; its session id is DETERMINISTIC per role+repo,
+so re-spawning with the same `--session-id` continues the same session — its
+context is reused across rounds until a READY lands. Each review round is ONE
+reviewer over the WHOLE change:
 
-- **Review → tmux judge child** (`review_checkpoint` → `prepare_review` →
-  `review_spawn` → `review_send` → `review_watch` → `record_review`). You
-  commit the change as a checkpoint FIRST (`review_checkpoint` — the only
-  commit allowed before a READY; it requires a full precommit PASS). The
+- **Review → ONE call**: `judge_submit({role:"reviewer", task:<what you
+  changed this round>})`. The gate runs the whole chain itself — full
+  precommit, the checkpoint commit (it stamps the checkpoint marker), the
+  `baseline..HEAD` computation, the dispatch — and any step that fails sends
+  the round back with the reason instead of leaving it half-submitted. The
   full precommit ALREADY ran typecheck + build + the complete suite on that
-  exact content — **never manually re-run the full suite or `tsc`** before a
-  checkpoint (the runner caches by input: unchanged content reuses the
-  recorded PASS in seconds). Develop with targeted tests only; let
-  `run_precommit` be the single full gate. The
-  reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
+  exact content — **never manually re-run the full suite or `tsc`** before
+  submitting (the runner caches by input: unchanged content reuses the
+  recorded PASS in seconds). Develop with targeted tests only.
+  The reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
   starts at the last REVIEWED commit, so a chain of checkpoints since the
   last READY is all covered (round-9 P1); there is no second reviewer of
-  any kind. `record_review` verifies HEAD is still the reviewed commit (a
-  new checkpoint after prepare ⇒ STALE ⇒ BLOCKED) and binds a READY to the
-  reviewed commit's TREE (content binding — squash preserves it); the ship
-  gates additionally refuse content-changing commits after the reviewed one
-  (unreviewed content can never ship).
+  any kind. When the judge's process exits, the gate reads THIS round's
+  output, records the verdict itself and wakes you with it — you never carry
+  a verdict from one tool to another. The recording keeps every mechanical
+  check: HEAD must still be the reviewed commit (a new checkpoint after
+  prepare ⇒ STALE ⇒ BLOCKED), and a READY binds to the reviewed commit's TREE
+  (content binding — squash preserves it); the ship gates additionally refuse
+  content-changing commits after the reviewed one (unreviewed content can
+  never ship). `run_precommit` / `review_checkpoint` / `prepare_review` /
+  `record_review` are **not tools** (2026-08-30, 哲学三): the gate still runs
+  every one of those steps inside `judge_submit`, but none of them is
+  registered, so there is no second path to sequence by hand.
+  `review_diff` / `review_sandbox` were **evaluated and formally NOT built**
+  (2026-08-31, 哲学三): the judge runs `--no-extensions` so there is nowhere to
+  register them without a judge-side extension entry, and that would re-open the
+  recursion surface `--no-extensions` exists to close. The reviewer's own `git
+  diff` / `git show` are simple read-only commands (not the multi-step ship/tmux
+  flows 哲学一 targets), and its sandbox verification is an inherently
+  reviewer-owned judgement call, not a mechanical sequence the gate can own
+  without becoming the reviewer. The reviewer's throwaway worktrees are the
+  gate's to CLEAN, though, not to build: `judge_submit` points the judge's
+  `$TMPDIR` at a per-session dir and reclaims any worktree under it when the
+  judge exits (谁创建谁回收).
+
 - **No decompose, no module loop, no wave daily.** The module-planning
   machinery and its wave tools were removed 2026-08-26. Large tasks are
   still sliced by YOU into sequential rounds of the same single review
   loop; there is no module table, no plan state, no planner.
 
 Detail: `docs/execution-model.md` + `docs/judge-protocol.md`; runtime
-contract: `lib/tmux-session.ts` + `lib/judge-prompt.ts`.
+contract: `lib/judge-process.ts` + `lib/judge-prompt.ts`.
 
 The review loop is AGENT-DRIVEN: you start it yourself once edits
-are complete (one `prepare_review` → one spawn → one `record_review`) — the
-slash commands are only optional explicit triggers, never the expected
-entry. The user approves at one point only: the loop goal.
+are complete (one `judge_submit`) — the slash commands are only optional
+explicit triggers, never the expected entry. The user is asked at two points
+only: `ask_user` (the ONE way to reach them — it runs the interview and
+pauses the loop) and the loop-goal approval dialog.
+
+Where work lands is the gate's business too: `setup_workspace` settles a
+dirty worktree and creates this session's work branch (a commit may only land
+on it) — swallowing the whole branch dance, including a best-effort `git
+fetch` + `--ff-only` update of the base — and `declare_done` **squash-merges**
+that branch back into the base the user confirmed (checkpoint history stays off
+the target; the gate composes an English Conventional-Commit subject
+mechanically from the folded checkpoints' own type/scope, so it always
+satisfies L5 without ever using the Chinese goal title) — a conflict stops it,
+records the files and hands them to you.
 
 ## Git workflow guardrails
 
@@ -196,76 +252,168 @@ exists; it is NOT a runtime selector and does NOT change the one-reviewer
 rule. A single reviewer is the norm, and no Note is required about it.
 (a) **Goal pre-review — MECHANICALLY ENFORCED.** The draft goal must pass an
 audit by the dedicated `goal-auditor` role before the user is ever asked to
-approve it, and this is no longer a protocol the agent could skip:
-`record_goal_prereview` records the auditor's JSON fence (PASS ⇔ a `READY`
-verdict), bound to the sha256 of the audited text, and `propose_loop_goal`
+approve it, and the gate runs that audit itself: `judge_submit({role:
+"goal-auditor", task:<the full draft>})` builds the auditor's task, dispatches
+it, adjudicates the verdict and records it. The adjudication is one rule —
+**only P0/P1 block** — so a READY carrying P2/Nit findings is a PASS and
+never buys another audit round (B2: the agent used to volunteer one). The
+record is bound to the sha256 of the audited text, and `propose_loop_goal`
 refuses — without rendering any dialog — unless that PASS matches the
-submitted text exactly. A FAIL means: fix the objections and re-audit; the
-revised text needs its own PASS (the record binds to content). The goal text
-must be written in **Simplified Chinese** (identifiers, paths and code tokens
-stay English) — the auditor blocks a draft that is not.
+submitted text exactly. A failed audit means: fix the objections and submit
+the revised draft the same way (it needs its own PASS — the record binds to
+content). The goal text must be written in **Simplified Chinese** (identifiers,
+paths and code tokens stay English) — the auditor blocks a draft that is not.
 (b) **Every re-review carries the previous round's conclusion — MECHANICALLY**:
 the goal-auditor's re-audit gets the old draft + its own objections + what
-changed (`record_goal_prereview` persists every audit's verdict, findings
-verbatim and the judged draft; `prepare_goal_audit` — called BEFORE
-dispatching the auditor — returns the ready-made task text carrying the
-previous verdict + findings + previous draft and the mechanically computed
-draft delta); round N+1 gets the
-previous verdict and findings (the gate injects them as the 'Review scope
-for this round' block, now embedded in `prepare_review`'s ready-made task
-text). Settled-and-unchanged material gets a consistency scan, not a
+changed (the gate persists every audit's verdict, findings verbatim and the
+judged draft, and builds the re-audit task with that carryover plus the
+mechanically computed draft delta); round N+1 of a code review gets the
+previous verdict and findings the same way (the 'Review scope for this round'
+block in the reviewer's task text). Settled-and-unchanged material gets a
+consistency scan, not a
 re-derivation — it never narrows what a reviewer may look at, and a settled
 conclusion may always be reopened with evidence. This is the INCREMENTAL
 review contract: first round full, later rounds focused on the increment.
 (b2) **Fresh context, read on demand — MECHANICALLY.** The three review
-roles (reviewer, adviser, goal-auditor) run `context:"fresh"` — they never
-fork the main session's whole conversation. Their task text carries the
+roles (reviewer, adviser, goal-auditor) each run as their OWN pi process (`pi -p --session-id`) — they never
 transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
-to grep on demand. `prepare_adviser` hands back the adviser's ready-made
-brief: transcript pointer + a conclusion artifact the adviser appends to,
-plus — from the second consultation of a goal on — the previous conclusion
-and the files changed since (no history ⇒ full brief).
-(c) **The reviewer judges a COMMIT RANGE, and findings stream.** Call
-`prepare_review` AFTER the checkpoint — it computes `baseline..HEAD` (the
+to grep on demand. `judge_submit({role:"adviser"})` builds that brief itself:
+transcript pointer + a conclusion artifact the adviser appends to, plus —
+from the second consultation of a goal on — the previous conclusion and the
+files changed since (no history ⇒ full brief).
+
+(c) **The reviewer judges a COMMIT RANGE, and findings stream.** The chain
+inside `judge_submit` computes `baseline..HEAD` (the
 immutable commits under review) and a finding-stream file. Inside its own
 copy a reviewer SHOULD verify by doing — mutation analysis included — and
 must restore before finishing. Because the reviewed range is immutable,
 **you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
 that carry evidence (confirm each in the code first), leave Nits for the
-verdict. WAITING-WINDOW DISCIPLINE (v4): (1) 有可实现的确定性工作(代码/测试/
-文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后
-才阻塞等待——在**一次 bash 调用**里同时托管三条判据:done channel 信号
-(`tmux wait-for <doneChannel>`,无标志,用 bash 工具自己的 `timeout` 参数做上限,
-turn 不结束;⚠️ `tmux wait-for` **没有 `-t` 超时选项**——`wait-for -t 5 <chan>`
-以 `unknown flag -t` 在 7ms 内报错返回,包成 `while ! tmux wait-for -t 5 <chan>;
-do :; done` 就是空转轮询,实测 120 次循环仅 0.5s)、pane 退出/死亡
-(`tmux display-message -p -t <paneId> '#{pane_dead}'`),
-以及 capture-pane 里是否已出现 verdict fence(子会话已产出结论但未发信号是
-实测过的失败模式);任一命中即结束等待并继续。(3) **禁止**用结束 turn 把
-唤醒责任交给子会话——子会话可能报错/崩溃/永远不发信号,而主会话是门禁的
-最后监督者,门禁未通过前不得停止自动循环(存活不变量);`agent_settled` 会
-注入托管等待指令,但主动托管远比被动拉起可靠。
-The verdict arrives through the done channel and wakes this
-session (`review_watch`); the reviewer may ask questions through its inbox.
-(d) **The judge child runs as a tmux pane — MECHANICALLY ENFORCED.**
-`review_spawn` runs the judge as a pi process in a pane of the main session's
-tmux (right column, stacked below the first judge); a judge role dispatched
+verdict. WAITING-WINDOW DISCIPLINE: (1) 有可实现的确定性工作(代码/测试/
+文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后再调
+`judge_wait({role})`——门禁在里面跑三条判据(进程退出 / exit-code 落盘 /
+本轮 stdout 里出现明文 fence,任一命中即返回)并把已读结论带回来,不需要你
+手写 bash;(3) **禁止**用结束 turn 把唤醒责任交给子会话——子会话可能报错/
+崩溃/永远不退,而主会话是门禁的最后监督者,门禁未通过前不得停止自动循环
+(存活不变量)。
+The verdict arrives through the process EXIT: the gate reads THIS round's
+output, records it and wakes this session with the result. The reviewer may ask
+questions by outputting a question fence and exiting — answer by submitting the
+same role again (`judge_submit` resumes the session, context intact).
+(d) **The judge child runs as its own pi process — MECHANICALLY ENFORCED.**
+`judge_submit` runs the judge as `pi -p --session-id <id>` (non-interactive,
+no tmux); a judge role dispatched
 through `subagent` / `workflowScript` / `workflowScriptPath` is HARD-blocked
 (the workflow sandbox has no per-child isolation, so the judge would land in
 one shared cwd — your live worktree, the exact failure this ends). The
-single reviewer is one `review_spawn` call per round. **Singleton per role,
-reused across rounds**: `review_spawn` does NOT open a new pane every round —
-an alive same-role child in the same repo is REUSED (that is how the judge's
-context carries over until a READY), dead panes are dropped first, and
-`fresh: true` kills the old pane before spawning a new one. A reused pane is
-REBOUND to the round's own channels (the previous listeners are dropped, the
-new done/inbox channels are registered, the inbox path moves with it), so
-`prepare_review`'s ready-made task text is usable as-is. `record_review`
-withholds a READY unless the round was PREPARED (a registered
-`baseline..HEAD` target) and the verdict carries the pane's `cwd` (measured
-with `pwd`, a required field of the verdict schema). While a judge child is
-open, `declare_done` requires closing it out (`record_review` /
-`review_close`). No tmux available ⇒ fail-closed (no judge can run).
+single reviewer is one `judge_submit` call per round; you never pass a session
+id, a title or a directory — the gate derives all three from role+repo.
+**One session per role, continued across rounds**: the session id is
+deterministic per role+repo, so the next round re-opens the SAME transcript
+(that is how a judge's context carries over until a READY). A role whose
+process is still RUNNING refuses the new round rather than dropping it
+(a non-interactive judge reads its task once, at spawn); `fresh: true` kills
+it first. The recording withholds a READY unless the round was PREPARED (a
+registered `baseline..HEAD` target) and the verdict carries the child's `cwd`
+(measured with `pwd`, a required field of the verdict schema). While a judge
+child is open, `declare_done` requires closing it out (its verdict is
+recorded on exit, or `judge_close({role})`).
+
+### 项目经理（orchestrator）模式 —— 编排层，2026-08-29 新增
+
+一轮上下文做不完的大需求，交给一个**只负责统筹**的会话：
+`set_gate_mode("orchestrator")`（需要 tmux；子会话就是用户那个 window 里的
+pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之上：进入不需要确认，
+离开要用户确认。
+
+设计铁律只有一句（用户原话）：**能提供工具的，就不要让会话自己组装。** 项目经理
+只表达意图，门禁负责实现 —— 它不手写 tmux 命令、不写等待脚本、不自己拼通知。
+工具集（10 个）：`orchestrator_plan` / `_spawn` / `_wait` / `_answer` /
+`_instruct` / `_close` / `_recover` / `_attach` / `_handoff` / `_notify`
+（判定逻辑在 `lib/orchestrator-*.ts`，`extensions/review-gate.ts` 只接线）。
+
+**2026-08-30 通道重构：tmux 退回显示器。** 前三轮端到端验证的 40+ 条缺陷里约
+三分之二源于同一个根因 —— 拿 tmux 屏幕当 API。已全部换成 pi 官方结构化通道：
+
+- **点对点通道**（`lib/orchestrator-channel.ts`）：每个子会话一条专属文件
+  `<orch-id>/<child-id>.jsonl`，物理隔离，因此没有收件人过滤这回事。通道是
+  **文件路径、不属于任何进程** —— 项目经理换人时打开同一批路径即可，子会话
+  完全无感。旧的全局广播队列已删除。
+- **状态取真值**：子会话侧门禁用 `ctx.isIdle()` / `ctx.getContextUsage()` 上报
+  working / waiting-input / **waiting-judge** / idle / done；`dead` 由 pane 消失
+  判定，`stalled` 由心跳超时判定。`working` 还带一个**进展维度**（第五轮 E）：
+  健康快照给出「自上次推进（工具调用 / turn 边界，不含心跳）以来的时长」，让长时间
+  无进展的 `working` 与卡死可被区分 —— 它只是回执里的一个**读数**，不改变
+  `isNewsworthy`、不叫醒项目经理。`screenLooksBusy`、屏幕解析与按键模拟全部删除，
+  tmux 在编排层只剩三件事：**判 pane 存活**、**开关 pane**、**给 pane 上色与标题**
+  （纯展示，`select-pane -P/-T` + window 级 `setw pane-border-*`，一律不带 `-g`）。
+- **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：`judge_wait`、
+  full precommit、任何长命令都发生在**同一个 turn 内部**，agent 既不 settle 也不
+  结束 turn，挂在 `agent_settled` / `turn_end` 上的心跳因此必然超时 —— 一个正在等
+  自己 reviewer 的健康子会话被报成「失联」，而回执建议的 `interrupt` / `close`
+  照做就会把那一轮审查腰斩（唯一一条「照门禁说的做反而出事」的缺陷）。现在心跳由
+  子会话侧扩展的定时器发（10s），只要进程活着就发；已知的长阻塞如实上报成
+  `waiting-judge`（附已等秒数、在等谁），它**不叫醒项目经理**，`stalled` 也因此
+  回到只表示「扩展不在了」，其建议动作里**不再出现 `interrupt`**。
+
+- **提问任意一方先答即生效**：子会话侧用 `AbortController` + `Promise.race`
+  把「人在框里答」与「项目经理经通道答」并列，谁先答谁生效，另一边的框自动
+  撤下。框始终弹着 —— 这就是项目经理死亡时的天然回退，因此**没有任何超时机制**。
+- **投递走 `pi.sendUserMessage`**：`orchestrator_instruct({mode})` 把文本写进
+  通道，子会话自己的门禁用 pi 的 API 注入（`interrupt` 走 `ctx.abort()`）。
+  `send-keys` 投递路径已删除。
+- **`orchestrator_wait` 是项目经理的唯一信息入口**：它必然被调，所以凡是项目
+  经理需要知道的都从回执里**推给它** —— 五块：健康快照、待答请求（结构化，
+  含全部选项与正文）、死亡/僵死与可执行恢复动作、它自己的上下文用量与带时机
+  判断的接力提醒、以及还差什么才能 `declare_done`。`timeoutMs: 0` 即快照
+  （原 `orchestrator_status` 已并入）。让 agent「记得去查」本身就是设计缺陷。
+
+
+
+对**其他会话**来说，只有三件事需要知道：
+
+1. **plan 是编排层的 loop goal，而且和它一样要先过审计**：
+   `.pi/orchestrator-plan.json` 自己写不算数，批准绑定在内容 hash 上（与 loop goal
+   同一机制）；`orchestrator_plan({action:"submit"})` 内部先派 `goal-auditor` 用
+   plan 专用模板审一轮（只 P0/P1 阻塞，裁决绑定 canonical plan 文本），**审计不过
+   直接退 findings、一个框都不弹**，过了才请用户批准。反过来，**不扩权的改动不再
+   重新惊动用户**：边界收窄、同目录内且不与他人相交的文件细化、加依赖、降并行度
+   都让批准平移到新内容并记一条审计条目；新增任务、新目录、删依赖、串行改并行、
+   提高并行度一律重批（`lib/orchestrator-plan-approval.ts`）。这个 plan 审计者是
+   门禁的**内部实现**：项目经理从没派过它、也在任何 `orchestrator_wait` 回执里见不到
+   它，所以裁决记完门禁**自己把它收掉**（谁派谁负责，第五轮 O-6）——`declare_done`
+   不再被一个它从未被告知的 judge child 拦住。`propose_loop_goal` 内部的 goal 审计者
+   同理，也是门禁自收。
+
+2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
+   只被多注入一句「有项目经理在管这轮任务」。plan、调度细节一律不注入 —— 知道
+   plan 会让它为 plan 而不是为自己的任务做优化。
+3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
+   换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。
+
+系统通知（OSC 777/9/99）**只有项目经理能发**，且带节流 —— 单一入口 + 只推给
+用户本人，与 `lib/attention.ts` 禁止的「任何会话都能广播」是相反的形态。
+
+### 架构规范：新建文件 600 行硬拦，存量只提醒
+
+`judge_submit` 内部的 checkpoint 步骤会拦下**本次新增**且超过
+600 行的源文件（`lib/file-size-gate.ts`）。判定发生在提交 checkpoint 那一刻，
+而不是编辑当下（那时文件还写了一半，硬拦只会逼人盲目重构），且只判源码扩展名
+——Markdown、JSON、锁文件与 fixture 不判长度。存量大文件只输出提醒 ——
+近 9000 行（截至 2026-08-29）的 `extensions/review-gate.ts` 不是一次写出来的，
+是几十次「只加 100 行」累积的；收尾时硬逼着拆只会拆得更烂。
+
+配套的两道人审关卡：`goal-auditor` 在**目标阶段**就否掉会造成架构劣化的方案
+（往超大文件里堆新职责、复制门禁已有的规则、把逻辑埋在无法单测的入口里、
+根本没说新代码落在哪），`reviewer` 把架构/抽象/模块化/语义化写进**代码改动
+审查主清单**，可以直接出 P1。写新功能时先想清楚它落在哪个模块，而不是落在
+「我正好打开的那个文件」。
+
+「落在哪个模块」不该靠猜：`docs/module-map.md` 是这份地图 —— 它写清了
+`extensions/review-gate.ts` 与 `lib/` 各模块的职责分工（含 L1–L8 每层落在哪、
+工具族为什么注册在 `lib/orchestrator-*-tools.ts` 而不是扩展里），以及 `hooks/`
+/ `scripts/` / `agents/` / `test/` 的落点约定。动手前先查它，别先打开编辑器；
+新增或删除 `lib/` 模块时，同一轮改动里顺手同步它那张速查表。
 
 ### Read-only exploration — parallel-safe
 
@@ -273,8 +421,8 @@ Read-only subagents (recon, code reading, analysis) are inherently
 parallel-safe: they never write to the worktree, so they cannot invalidate
 a binding or race with each other. Spawn several concurrently, overlap
 exploration with your own edits, and merge the findings. Only the main
-agent writes to the worktree. (Adviser consultations run as tmux judge
-children, not subagents — see the review protocol above.)
+agent writes to the worktree. (Adviser consultations run as judge
+child processes, not subagents — see the review protocol above.)
 
 ### Wave daily — removed
 

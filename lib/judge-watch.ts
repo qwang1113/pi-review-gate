@@ -1,96 +1,88 @@
 /**
- * Judge-child completion watchers — the wake-up registry behind
- * review_spawn / review_watch, extracted from the extension so the
- * re-arm/shutdown race is testable without a pi runtime.
+ * Judge-child completion watchers — the wake-up registry behind review_spawn
+ * / review_watch, now keyed on PROCESS EXIT EVENTS instead of tmux wait-for
+ * channels.
  *
- * Lifecycle contract:
- *  - `register(channel, label)`: one listener per channel (a re-registration
- *    cancels the old handle). When the child signals `tmux wait-for -S
- *    <channel>`, the wake callback fires and the listener RE-ARMS ITSELF for
- *    the next round on the same pane (round-14 P1: a judge pane is reused for
- *    every round of its life — the same title ⇒ same channel — and a one-shot
- *    listener would leave rounds 2..N with no wake-up).
- *  - Re-arm happens only when the agent did not replace the handle in the
- *    meantime (the identity check on the registry), so a manual
- *    review_watch with a custom label keeps its label until the next signal.
- *  - `shutdown()`: session teardown. Stops further re-arms and cancels every
- *    outstanding handle. Without the shuttingDown latch the race would be:
- *    signal resolves the promise → session_shutdown cancels + clears the
- *    registry → the .then callback runs and sees the channel absent →
- *    re-registers → an orphan tmux wait-for for a session that is tearing
- *    down (round-16 Nit). `reset()` re-opens registration for a NEW session
- *    (session_start) on the same extension instance.
+ * WHY THE CHANGE (2026-08-28, tmux removal): a judge is a non-interactive
+ * `pi -p` process; its completion is its EXIT — an OS-guaranteed event, not
+ * a signal the child may forget to send. The registry keeps the SAME
+ * contract as the tmux version:
+ *
+ *  - `register(sessionId, label)`: one watcher per session id (a
+ *    re-registration replaces the old one). When the child's process exits,
+ *    the wake callback fires. Unlike the tmux version there is no re-arm:
+ *    each spawn owns one exit event; the NEXT round's spawn registers a new
+ *    watcher (judge-process.ts spawns a fresh process per round, and the
+ *    registry is keyed by session id, so a reused session id gets a fresh
+ *    watcher per round).
+ *  - `shutdown()`: session teardown — cancels every outstanding watcher.
+ *    `reset()` re-opens registration for a NEW session (session_start).
+ *
+ * The watcher is a thin wrapper over the ChildProcess: `child.on("exit")`
+ * with a `child.exitCode` check, so a child that already exited before
+ * registration (race) still fires immediately.
  */
 
-import type { WaitHandle } from "./tmux-session.ts";
+/** A cancellable process-exit wait. */
+export interface ProcessWaitHandle {
+  /** Resolves true on exit, false on cancel. */
+  promise: Promise<boolean>;
+  /** Remove the exit listener; the promise resolves false. */
+  cancel: () => void;
+}
 
-/** Waits on a channel; returns a cancellable handle (waitForSignalAsync). */
-export type WatchWaiter = (channel: string, timeoutMs?: number) => WaitHandle;
+/** Watches a ChildProcess; returns a cancellable handle. */
+export type ProcessWaiter = (child: { on: (ev: string, fn: (...a: unknown[]) => void) => unknown; exitCode?: number | null }) => ProcessWaitHandle;
 
 /** Delivers the wake message to the pi session (pi.sendMessage). */
-export type WatchWake = (label: string, channel: string) => void;
+export type ProcessWake = (label: string, sessionId: string) => void;
 
-export interface WatchRegistry {
-  /** Currently registered handles, keyed by channel. */
-  active: ReadonlyMap<string, WaitHandle>;
-  /** Register (or replace) the listener for one channel. No-op after shutdown. */
-  register(channel: string, label: string): void;
-  /**
-   * Drop ONE channel's listener (cancel + forget). Round-17: a reused judge
-   * pane is rebound to the round's own channels, so the previous round's
-   * listener must go — otherwise a stale `tmux wait-for` lingers and a signal
-   * on it wakes the session for a round that no longer exists.
-   */
-  unregister(channel: string): void;
+export interface ProcessWatchRegistry {
+  /** Currently registered handles, keyed by session id. */
+  active: ReadonlyMap<string, ProcessWaitHandle>;
+  /** Register (or replace) the watcher for one session id. No-op after shutdown. */
+  register(sessionId: string, label: string): void;
+  /** Drop ONE session id's watcher (cancel + forget). */
+  unregister(sessionId: string): void;
   /** session_shutdown: latch shutdown, cancel handles, clear the registry. */
   shutdown(): void;
   /** session_start: a new session may register watchers again. */
   reset(): void;
 }
 
-export function createWatchRegistry(waiter: WatchWaiter, wake: WatchWake): WatchRegistry {
-  const active = new Map<string, WaitHandle>();
-  // P0 (round-17): label per channel for idempotent re-registration.
+export function createProcessWatchRegistry(waiter: ProcessWaiter, wake: ProcessWake): ProcessWatchRegistry {
+  const active = new Map<string, ProcessWaitHandle>();
   const activeLabels = new Map<string, string>();
   let shuttingDown = false;
 
-  function register(channel: string, label: string): void {
+  function register(sessionId: string, label: string): void {
     if (shuttingDown) return;
-    // P0 (round-17): IDEMPOTENT — the same channel with the same label is
-    // never re-spawned (session_start re-registers the attention channel on
-    // every session; without this guard each re-registration cancelled and
-    // re-spawned a tmux wait-for, and N session simulations leaked N
-    // never-ending children that kept test processes alive). A DIFFERENT
-    // label (manual review_watch) still replaces the handle.
-    const existing = active.get(channel);
-    if (existing && activeLabels.get(channel) === label) return;
+    // Idempotent: same session id with the same label is never re-watched
+    // (session_start re-registers the attention channel on every session).
+    const existing = active.get(sessionId);
+    if (existing && activeLabels.get(sessionId) === label) return;
     existing?.cancel();
-    const handle = waiter(channel);
-    active.set(channel, handle);
-    activeLabels.set(channel, label);
-    handle.promise.then((signalled) => {
-      if (active.get(channel) === handle) {
-        active.delete(channel);
-        activeLabels.delete(channel);
+    const handle = waiter(childFor(sessionId));
+    active.set(sessionId, handle);
+    activeLabels.set(sessionId, label);
+    handle.promise.then((exited) => {
+      if (active.get(sessionId) === handle) {
+        active.delete(sessionId);
+        activeLabels.delete(sessionId);
       }
-      if (!signalled) return;
+      if (!exited) return;
       try {
-        wake(label, channel);
+        wake(label, sessionId);
       } catch {
-        /* the session may be shutting down — the listener is gone anyway */
+        /* the session may be shutting down — the watcher is gone anyway */
       }
-      // Re-arm for the NEXT round on the same pane (round-14 P1) — unless
-      // shutdown began while the signal was in flight (round-16 Nit): the
-      // registry was cleared, and re-registering would spawn an orphan tmux
-      // wait-for for a session that is tearing down.
-      if (active.get(channel) === undefined && !shuttingDown) register(channel, label);
     });
   }
 
-  function unregister(channel: string): void {
-    active.get(channel)?.cancel();
-    active.delete(channel);
-    activeLabels.delete(channel);
+  function unregister(sessionId: string): void {
+    active.get(sessionId)?.cancel();
+    active.delete(sessionId);
+    activeLabels.delete(sessionId);
   }
 
   function shutdown(): void {
@@ -105,4 +97,50 @@ export function createWatchRegistry(waiter: WatchWaiter, wake: WatchWake): Watch
   }
 
   return { active, register, unregister, shutdown, reset };
+}
+
+/**
+ * The ChildProcess registry the watcher consults: session id → live child.
+ * Owned by the extension (review-gate.ts), injected here so the watcher
+ * stays pure and testable.
+ */
+const childBySession = new Map<string, { on: (ev: string, fn: (...a: unknown[]) => unknown) => unknown; exitCode?: number | null }>();
+
+/** Remember the live child for a session id (called at spawn). */
+export function rememberChildProcess(sessionId: string, child: { on: (ev: string, fn: (...a: unknown[]) => unknown) => unknown; exitCode?: number | null }): void {
+  childBySession.set(sessionId, child);
+}
+
+/** Forget a session id's child (called at close / after exit). */
+export function forgetChildProcess(sessionId: string): void {
+  childBySession.delete(sessionId);
+}
+
+function childFor(sessionId: string): { on: (ev: string, fn: (...a: unknown[]) => unknown) => unknown; exitCode?: number | null } {
+  return childBySession.get(sessionId) ?? {
+    on: () => { /* no-op: no live child */ },
+    exitCode: null,
+  };
+}
+
+/** The default waiter: resolve on the child's exit event. */
+export function waitForProcessExit(child: { on: (ev: string, fn: (...a: unknown[]) => unknown) => unknown; exitCode?: number | null }): ProcessWaitHandle {
+  let cancelled = false;
+  const promise = new Promise<boolean>((resolve) => {
+    const onExit = () => {
+      if (cancelled) return;
+      resolve(true);
+    };
+    child.on("exit", onExit);
+    // Already exited before registration (race): fire immediately.
+    if (child.exitCode !== null && child.exitCode !== undefined) {
+      resolve(true);
+    }
+  });
+  return {
+    promise,
+    cancel: () => {
+      cancelled = true;
+    },
+  };
 }

@@ -6,11 +6,17 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 import { createRequire } from "node:module";
 
 // 100 fixture git calls live in this file (and the hooks under test shell out
 // to git themselves), so neutralise the host config once for the process.
 neutraliseHostGitConfig();
+// The hooks under test read the gate's OWN variables (RG_STATE_VARIANT picks
+// which sidecar file counts). Inside a gate session — an orchestrator child
+// has one — those would travel into every fixture and make the hook look for
+// a sidecar the fixture never wrote, i.e. allow everything.
+neutraliseGateEnv();
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PRE_COMMIT = join(ROOT, "hooks", "pre-commit");
@@ -169,7 +175,10 @@ test("gates met + matching fingerprints → allow", () => {
 
 test("review not READY → block", () => {
   const dir = makeGitRepo();
-  writeState(dir, { ...readyState(dir), review: { verdict: "PENDING", fingerprint: null, at: null } });
+  // withChangedFile: the fixture must hold real staged content, or the commit
+  // would publish HEAD's own tree — a no-content commit the gates skip by
+  // design (message-only rewrite exemption).
+  writeState(dir, { ...readyState(dir), review: { verdict: "PENDING", fingerprint: null, at: null } }, true);
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /review is PENDING/);
@@ -177,7 +186,7 @@ test("review not READY → block", () => {
 
 test("precommit NO_CHECKS_RUN → block (PR #7 lesson 3)", () => {
   const dir = makeGitRepo();
-  writeState(dir, { ...readyState(dir), precommit: { verdict: "NO_CHECKS_RUN", fingerprint: null, at: "t" } });
+  writeState(dir, { ...readyState(dir), precommit: { verdict: "NO_CHECKS_RUN", fingerprint: null, at: "t" } }, true);
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /zero checks/);
@@ -234,7 +243,7 @@ test("SECURITY: agent/auto-set normal must NOT make the hook advisory", () => {
       ...extra,
       review: { verdict: "PENDING", fingerprint: null, at: null },
       precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
-    });
+    }, true);
     const res = runPreCommit(dir);
     assert.equal(res.status, 1, JSON.stringify(extra));
     assert.match(res.stderr, /review is PENDING/);
@@ -253,7 +262,7 @@ test("SECURITY: auto-classified explore must NOT make the hook advisory", () => 
       ...extra,
       review: { verdict: "PENDING", fingerprint: null, at: null },
       precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
-    });
+    }, true);
     const res = runPreCommit(dir);
     assert.equal(res.status, 1, JSON.stringify(extra));
     assert.match(res.stderr, /review is PENDING/);
@@ -308,7 +317,7 @@ test("pausedQuestion: gates unmet stay blocked even while paused (no fail-open)"
     ...readyState(dir),
     review: { verdict: "PENDING", fingerprint: null, at: null },
     pausedQuestion: { question: "q", at: "t" },
-  });
+  }, true);
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /review is PENDING/);
@@ -345,7 +354,7 @@ test("scopeLimit: session edits stay fully gated even under a scope limit (no fa
     ...readyState(dir),
     review: { verdict: "PENDING", fingerprint: null, at: null },
     scopeLimit: { preexistingFiles: ["src/old.ts"], sessionFiles: ["src/new.ts"], at: "t" },
-  });
+  }, true);
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /review is PENDING/);
@@ -589,8 +598,9 @@ test("docSync: corrupt project config → default ENFORCED (fail-safe, never fai
 
 test("fingerprint mismatch on review → block", () => {
   const dir = makeGitRepo();
-  // State says hasCodeChange=true + review READY but fingerprint won't match clean repo.
-  writeState(dir, { ...readyState(dir), review: { verdict: "READY", fingerprint: "wrong-fp", at: "t" } });
+  // State says hasCodeChange=true + review READY but the fingerprint cannot
+  // match the staged content.
+  writeState(dir, { ...readyState(dir), review: { verdict: "READY", fingerprint: "wrong-fp", at: "t" } }, true);
   const res = runPreCommit(dir);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /fingerprint mismatch/);
@@ -1761,7 +1771,11 @@ test("unreviewed-commit check: a content-changing commit after the reviewed comm
     review: { verdict: "READY", fingerprint: reviewedTree, commitSha: reviewedSha, at: "t", docSync: "NOT_NEEDED" },
     precommit: { verdict: "PASS", fingerprint: headTree, at: "t" },
   });
-  const res = runPreCommit(dir);
+  // Checked on the PUSH path: after the revert the worktree tree equals HEAD's,
+  // so a COMMIT here would publish no content and is exempt by design
+  // (message-only rewrite). A push publishes the whole history — including the
+  // unreviewed commit — so that is where this check has to hold.
+  const res = runPreCommit(dir, { REVIEW_GATE_REQUIRE_FULL: "1" });
   assert.equal(res.status, 1);
   assert.match(res.stderr, /unreviewed commits since the last READY/);
 });
@@ -1802,7 +1816,9 @@ test("round-10 P1: docSync enforcement survives the unreviewed-commit branch (co
     review: { verdict: "READY", fingerprint: reviewedTree, commitSha: reviewedSha, at: "t" }, // NO docSync
     precommit: { verdict: "PASS", fingerprint: reviewedTree, at: "t" },
   });
-  const res = runPreCommit(dir);
+  // Push path: the worktree is clean here, so a commit would publish HEAD's own
+  // tree and is exempt (message-only rewrite). docSync must still hold on push.
+  const res = runPreCommit(dir, { REVIEW_GATE_REQUIRE_FULL: "1" });
   assert.equal(res.status, 1);
   assert.match(res.stderr, /docSync enforced/,
     "docSync must still block when commitSha is present (it was unreachable before the fix)");
@@ -1826,9 +1842,61 @@ test("unreviewed-commit check: a fingerprint mismatch keeps the branch off (guar
     ...readyState(dir),
     review: { verdict: "READY", fingerprint: "wrong-fp", commitSha: reviewedSha, at: "t", docSync: "NOT_NEEDED" },
   });
-  const res = runPreCommit(dir);
+  // Push path, same reason as above: the commit here would add no content.
+  const res = runPreCommit(dir, { REVIEW_GATE_REQUIRE_FULL: "1" });
   assert.equal(res.status, 1);
   assert.match(res.stderr, /fingerprint mismatch/);
   assert.doesNotMatch(res.stderr, /unreviewed commits since the last READY/,
     "a fingerprint problem must keep the unreviewed-commit branch off (length guard, not message matching)");
+});
+
+// ---------------------------------------------------------------------------
+// Message-only rewrite (2026-08-29). Fixing a non-English commit message used
+// to be impossible from inside a session: `git commit --amend` and
+// `git rebase -i` reword both land here, and an unmet gate refused both. A
+// commit that publishes HEAD's own tree adds no content, so the CONTENT gates
+// have nothing to judge — but a PUSH publishes the whole history and stays
+// gated.
+// ---------------------------------------------------------------------------
+
+test("a commit that publishes no new content passes even with the gate unmet", () => {
+  const dir = makeGitRepo();
+  writeFileSync(join(dir, "code.ts"), "export const v = 1;\n");
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "committed"], { cwd: dir, stdio: "ignore" });
+  // Worktree clean ⇒ the tree an amend would publish equals HEAD's.
+  writeState(dir, {
+    ...readyState(dir),
+    review: { verdict: "BLOCKED", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+  });
+  const res = runPreCommit(dir);
+  assert.equal(res.status, 0, `a message-only rewrite must not be blocked: ${res.stderr}`);
+});
+
+test("the same no-content state still BLOCKS a push", () => {
+  const dir = makeGitRepo();
+  writeFileSync(join(dir, "code.ts"), "export const v = 1;\n");
+  execFileSync("git", ["add", "code.ts"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "committed"], { cwd: dir, stdio: "ignore" });
+  writeState(dir, {
+    ...readyState(dir),
+    review: { verdict: "BLOCKED", fingerprint: null, at: null },
+    precommit: { verdict: "NOT_RUN", fingerprint: null, at: null },
+  });
+  const res = runPreCommit(dir, { REVIEW_GATE_REQUIRE_FULL: "1" });
+  assert.equal(res.status, 1, "a push publishes history the exemption never judged");
+  assert.match(res.stderr, /review is BLOCKED/);
+});
+
+test("commit-msg refuses a non-English message and accepts an English one", () => {
+  const dir = makeGitRepo();
+  const msg = join(dir, "MSG");
+  writeFileSync(msg, "fix(api): handle expired tokens\n\n# a git comment 中文 is not the message\n");
+  const ok = spawnSync("bash", [join(ROOT, "hooks", "commit-msg"), msg], { encoding: "utf8" });
+  assert.equal(ok.status, 0, ok.stderr);
+  writeFileSync(msg, "fix: 修复问题\n");
+  const bad = spawnSync("bash", [join(ROOT, "hooks", "commit-msg"), msg], { encoding: "utf8" });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /not English/);
 });

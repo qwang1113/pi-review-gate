@@ -53,7 +53,7 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
   → run_precommit first (cheap checks before the expensive judge)
   → review_checkpoint (commits the change; the only commit before a READY)
   → prepare_review (registers baseline..HEAD; returns stream path + task text)
-  → review_spawn / review_send / review_watch (ONE tmux judge child)
+  → review_spawn / review_send (ONE tmux judge child; the wake-up listener comes with the spawn)
   → read the finding stream while it works; fix streamed P0/P1/P2 with evidence
   → record_review with the FULL reviewer output (all fences parsed; worst wins)
   → BLOCKED? fix everything, then start again from precommit
@@ -65,7 +65,8 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
 
 - **Precommit first**: `run_precommit` (fast lane for intermediates, full for
   the final round) must PASS before the reviewer runs.
-- **Isolation + streaming**: the reviewer holds a frozen copy, so the main
+- **Immutability + streaming**: the reviewer judges a COMMIT RANGE (immutable
+  git history), so the main
   agent keeps fixing the real worktree from streamed findings (confirm each in
   the code first; leave Nits for the verdict).
 - **Commit target is mechanical** (2026-08-27): judge-role subagent dispatch
@@ -88,9 +89,10 @@ edit code (batch related edits — the loop is billed per ROUND, not per line)
 
 - Binding, fail-closed, fingerprint, verdict/docSync parsing, receipt
   validation: **zero changes** (structural tests pin this).
-- Single-writer: the MAIN WORKTREE has exactly one writer — the main agent. Each reviewer sits in its OWN disposable snapshot worktree and restores it before finishing.
-- No engine anywhere: reviews run as plain subagents; the pdw engine was
-  retired entirely.
+- Single-writer: the MAIN WORKTREE has exactly one writer — the main agent. The reviewer judges an immutable commit range and, when it needs to run something, checks that range out into its OWN throwaway worktree.
+- No engine anywhere: reviews run as tmux judge children (their own pi
+  processes); the pdw engine was retired entirely, and judge-role subagent
+  dispatch is hard-blocked.
 - Verdicts only from L3.
 
 ## 7. Parallel-stability verification
@@ -136,7 +138,7 @@ session (`lib/tmux-session.ts` spawns the pane; `lib/judge-prompt.ts` builds
 the launcher and task files). The child loads no review-gate extension and
 runs `--exclude-tools edit,write`; its context is reused across rounds until
 a READY lands, and the done channel wakes the main session
-(`review_watch`). (Historical: reviews were dispatched as plain subagents
+(through the listener `review_spawn` registered for it). (Historical: reviews were dispatched as plain subagents
 with a per-call `cwd` into the snapshot.)
 
 #### Post-install verification checklist

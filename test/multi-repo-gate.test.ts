@@ -9,6 +9,11 @@ import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { hermeticGitEnv } from "./helpers/git.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
+
+// Same reason as loop-goal-gate.test.ts: the extension runs for real here, so
+// the surrounding gate session's own variables must not reach it.
+neutraliseGateEnv();
 
 // ---------------------------------------------------------------------------
 // Regression test for the P-multi fix: the ship gate must bind to the repo a
@@ -85,6 +90,25 @@ interface MockPi {
   setCwd: (c: string) => void;
   entries: Array<{ customType?: string; data?: unknown }>;
 }
+
+type InternalExecute = (id: string, params: unknown, s: unknown, u: unknown, c: unknown) => Promise<unknown>;
+
+/**
+ * Reach one of the gate's INTERNAL implementations.
+ *
+ * Seven of the ten deleted advanced entries still exist as code — they hold
+ * mechanical checks the gate runs inside `judge_submit` / `propose_loop_goal`
+ * — but none of them is registered with pi, so an agent cannot see them. The
+ * extension exposes them on a non-tool property for exactly this kind of
+ * unit-level assertion.
+ */
+function internalTool(pi: unknown, name: string): InternalExecute {
+  const map = (pi as { __reviewGateInternalTools?: Map<string, InternalExecute> }).__reviewGateInternalTools;
+  const run = map?.get(name);
+  assert.ok(run, `internal tool ${name} must exist`);
+  return run!;
+}
+
 
 function makeMockPi(cwd: string): MockPi {
   const tools = new Map();
@@ -353,7 +377,11 @@ test("P-multi: record_review without `repo` is REJECTED once several repos are e
   writeFileSync(join(repoB, "a.ts"), "export const a = 21;\n");
   await toolResult({ toolName: "edit", isError: false, input: { path: join(repoB, "a.ts") }, content: [] }, ctx);
 
-  const recordReview = tools.get("record_review")!.execute;
+  // `record_review` is an INTERNAL implementation now (the gate records a
+  // verdict itself when a reviewer exits), so it is reached through the test
+  // seam rather than the tool registry. The multi-repo rule it enforces is
+  // unchanged, and unchanged is what this asserts.
+  const recordReview = internalTool(pi, "record_review");
   const ambiguous = await recordReview("id", { reviewer_output: READY_REVIEW }, undefined, undefined, ctx) as
     { isError?: boolean; content: Array<{ text: string }> };
   assert.equal(ambiguous.isError, true, "an ambiguous target must fail closed, not guess");
@@ -389,7 +417,7 @@ test("P-multi: run_precommit obeys the same explicit-repo rule as record_review"
   writeFileSync(join(repoB, "a.ts"), "export const a = 41;\n");
   await toolResult({ toolName: "edit", isError: false, input: { path: join(repoB, "a.ts") }, content: [] }, ctx);
 
-  const runPrecommit = tools.get("run_precommit")!.execute;
+  const runPrecommit = internalTool(pi, "run_precommit");
   const ambiguous = await runPrecommit("id", {}, undefined, undefined, ctx) as
     { isError?: boolean; content: Array<{ text: string }> };
   assert.equal(ambiguous.isError, true, "a PASS recorded against the wrong repo blocks the intended one");

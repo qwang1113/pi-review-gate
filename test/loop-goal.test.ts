@@ -13,6 +13,8 @@ import {
   LOOP_GOAL_MAX_CHARS,
   LOOP_GOAL_MISSING_DIRECTIVE,
   LOOP_GOAL_RELPATH,
+  loopGoalRelPath,
+
   LOOP_GOAL_STALE_MS,
   buildGoalConfirmMessage,
   buildLoopGoalDirective,
@@ -125,10 +127,12 @@ test("no goal ⇒ the Step 0 directive: grill the user, then propose_loop_goal",
   assert.equal(text, LOOP_GOAL_MISSING_DIRECTIVE);
   assert.match(text, /Step 0/);
   assert.match(text, new RegExp(LOOP_GOAL_RELPATH.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  // USER REQUIREMENT: the goal is NEGOTIATED, not assumed — interview first,
-  // then submit it for the user's approval through the trusted tool.
-  assert.match(text, /GRILL the user first/);
-  assert.match(text, /recommended answer/);
+  // USER REQUIREMENT: the goal is NEGOTIATED, not assumed — ask the user
+  // through the ONE asking tool, then submit it for their approval.
+  assert.match(text, /ASK THE USER FIRST, with `ask_user\(\{questions\}\)`/);
+  assert.match(text, /recommendation/);
+  assert.doesNotMatch(text, /ONE question per turn/,
+    "the gate runs the interview now — the agent does not pace it");
   assert.match(text, /propose_loop_goal/);
   assert.match(text, /Writing that file yourself grants nothing/);
   // The engineering skills stay user-invoked accelerators, never a dependency.
@@ -156,15 +160,15 @@ test("an APPROVED goal is injected verbatim with the acceptance contract attache
   assert.match(text, /adviser/);
   assert.match(text, /reviewer/);
   assert.match(text, /P1 finding/);
-  // HOW the goal reaches a subagent is load-bearing and was allowed to drift:
-  // an acceptance judge (reviewer / reviewer-readonly / module-reviewer /
-  // arbiter) does NOT read .pi/loop-goal.md — a snapshot carries no .pi/, and
+  // HOW the goal reaches a judge child is load-bearing and was allowed to
+  // drift: an acceptance judge (reviewer / adviser / goal-auditor) does NOT
+  // read .pi/loop-goal.md — it does not inherit this session's context, and
   // only a goal the USER approved may become a contract — so the directive must
   // say "paste the TEXT", never "hand over the file". The sibling prompts are
   // already pinned (extension-structure / workflow-commands); this one, the most
   // frequently injected of the three, was not, and the stale wording survived
   // several rounds because of it.
-  assert.match(text, /Paste the goal TEXT into every subagent task/);
+  assert.match(text, /Paste the goal TEXT into every judge child (?:\n\s*)?and subagent task/);
   assert.doesNotMatch(text, /[Hh]and this file to every subagent/, "the goal travels as text, not as a file path");
   assert.doesNotMatch(text, /older than 24h/);
   // The file content is repo data, not gate instructions: it must be framed so
@@ -329,11 +333,18 @@ test("loopGoalEditGate: loop/undecided require a confirmed goal; explore/normal 
 test("LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK names the path forward (negotiate → goal-auditor → dialog)", () => {
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /loop goal/);
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /propose_loop_goal/);
-  // The pre-review is MECHANICAL now: naming the auditor role alone would not
-  // tell the agent how the gate is actually satisfied.
+  // The pre-review is MECHANICAL now, and the gate RUNS it: the copy must name
+  // the one call that satisfies the gate, not the old three-step recipe.
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /goal-auditor/);
-  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /record_goal_prereview/);
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /That ONE call runs the/,
+    "the audit is INSIDE propose_loop_goal — there is no second call to make");
+  assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /prepare_goal_audit|record_goal_prereview/,
+    "the agent no longer drives the audit by hand");
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /Simplified Chinese/);
+  // The ONE asking tool must be named: an agent told to "negotiate" without it
+  // writes the question into its reply and ends the turn (the exact iteration
+  // this replaced).
+  assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /ask_user/, "the negotiation names the asking tool");
   assert.match(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\.pi\/loop-goal\.md/); // names the real path
   assert.doesNotMatch(LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, /\bblock(er|ed|ing|s)?\b/i, "the reason must not call itself a block");
 });
@@ -358,7 +369,8 @@ test("buildGoalPrereviewRefusal: says WHY, HOW to recover, and echoes the eviden
   const text = "# 目标\n\n一行意图。\n";
   const missing = buildGoalPrereviewRefusal({ goalText: text, auditorInstalled: true, packageAgentsDir: "/pkg/agents" });
   assert.match(missing, /no goal-auditor pre-review has been recorded/);
-  assert.match(missing, /record_goal_prereview/, "must name the tool that satisfies the gate");
+  assert.match(missing, /it runs the audit ITSELF/, "must name the call that satisfies the gate");
+  assert.doesNotMatch(missing, /tmux|review_spawn/, "the retired dispatch path must not come back");
   assert.match(missing, /Simplified Chinese/, "must state the language rule before another round is burned");
 
   const failed = buildGoalPrereviewRefusal({
@@ -459,7 +471,6 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
     carryover: "Goal-auditor re-audit carryover — …",
     sessionDir: "/home/u/.pi/agent/sessions/--repo--",
     sessionId: "sess-9",
-    doneChannel: "rg-goal-audit-abc123-done",
   });
   assert.match(task, /You are goal-auditor/);
   assert.match(task, /Goal-auditor re-audit carryover/);
@@ -467,33 +478,16 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
   assert.match(task, /# 目标/);
   assert.match(task, /sess-9/);
   assert.match(task, /\{"gate":"READY"\|"BLOCKED"/);
-  // Round-16 P1: the done channel the child must signal is EMBEDDED in the
-  // task text — the protocol promises 'channel 由任务文本给出' and the task
-  // must actually carry it (it did not; the child guessed and the main
-  // session was never woken).
-  assert.match(task, /tmux wait-for -S rg-goal-audit-abc123-done/);
-  assert.match(task, /完成信号/);
+  // The completion contract is embedded: exit = done, question = resume.
+  assert.match(task, /进程退出即完成/);
+  assert.match(task, /同一 session id 重新拉起/);
+  assert.doesNotMatch(task, /tmux|wait-for|channel|inbox/);
   // First audit (no carryover, no session): plain template, no stale claims.
   const first = buildGoalAuditTask("# 目标");
   assert.doesNotMatch(first, /carryover/i);
   assert.doesNotMatch(first, /sess-/);
-  assert.doesNotMatch(first, /完成信号/); // no channel → no signal instruction
-
-test("buildGoalAuditTask: round-16 P2 inbox question channel is embedded when provided", () => {
-  const task = buildGoalAuditTask("# 目标\n\n标准一。", {
-    doneChannel: "rg-goal-audit-abc123-done",
-    inboxPath: "/repo/.pi/tmux-sessions/rg-goal-audit-abc123/inbox.jsonl",
-    inboxChannel: "rg-goal-audit-abc123-inbox",
-  });
-  assert.match(task, /提问通道/);
-  assert.match(task, /rg-goal-audit-abc123\/inbox\.jsonl/);
-  assert.match(task, /tmux wait-for -S rg-goal-audit-abc123-inbox/);
-  assert.doesNotMatch(task, /wait-for -S <channel>-inbox/);
-  const plain = buildGoalAuditTask("# 目标");
   // Round-17: output discipline is part of the task text.
   assert.match(task, /输出纪律:只输出 fence \+ ≤3 行结论要点/, "the discipline is pinned in the task");
-  assert.doesNotMatch(plain, /提问通道/);
-});
 });
 
 test("buildGoalAuditTask: the draft delta is computed mechanically and injected (round-4 P1)", () => {
@@ -510,6 +504,40 @@ test("buildGoalAuditTask: the draft delta is computed mechanically and injected 
   const first = buildGoalAuditTask(next);
   assert.doesNotMatch(first, /机械差异/);
 });
+
+// ---------------------------------------------------------------------------
+// R-10 — one goal file per SESSION, not per worktree
+// ---------------------------------------------------------------------------
+
+test("R-10: a session with a sidecar variant reads and writes its OWN goal file", () => {
+  // The measured problem: an orchestration child shares the supervisor's
+  // worktree, so its approved goal landed in the supervisor's
+  // `.pi/loop-goal.md`. With two serial children that is data loss — the
+  // second approval overwrites the first, and the reviewer verifies against
+  // that very file.
+  assert.equal(loopGoalRelPath(), LOOP_GOAL_RELPATH, "an ordinary session is unchanged");
+  assert.equal(loopGoalRelPath(""), LOOP_GOAL_RELPATH);
+  assert.equal(loopGoalRelPath("t1-abc"), ".pi/loop-goal.t1-abc.md");
+  assert.equal(loopGoalRelPath("../evil/../x"), ".pi/loop-goal.evil-..-x.md",
+
+    "a variant can never escape the .pi/ scope");
+
+  const root = mkdtempSync(join(tmpdir(), "loop-goal-variant-"));
+  try {
+    mkdirSync(join(root, ".pi"), { recursive: true });
+    writeFileSync(join(root, LOOP_GOAL_RELPATH), "监督者的目标", "utf8");
+    writeFileSync(join(root, loopGoalRelPath("t1-abc")), "子会话 t1 的目标", "utf8");
+
+    assert.equal(readLoopGoal(root).text, "监督者的目标");
+    assert.equal(readLoopGoal(root, Date.now(), "t1-abc").text, "子会话 t1 的目标",
+      "two sessions in ONE worktree keep their own contracts");
+    assert.equal(readLoopGoal(root, Date.now(), "t2-def").present, false,
+      "and a third session sees neither of them");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 
 test("diffDraftLines: pure line diff, insertion and deletion both detected", () => {
   const { removed, added } = diffDraftLines(

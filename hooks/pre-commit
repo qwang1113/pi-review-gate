@@ -6,7 +6,21 @@ set -euo pipefail
 
 [[ "${REVIEW_GATE_BYPASS:-}" == "1" ]] && exit 0
 
-STATE_FILE=".pi/review-gate-state.json"
+# Sidecar variant (F4): a session an orchestrator spawned owns its OWN sidecar
+# (RG_STATE_VARIANT), so the hook must check the file that session actually
+# writes. The variable is sanitized here too — the hook never trusts an
+# environment string with a path in it. NO variable ⇒ the DEFAULT file, which
+# is the fail-closed direction: an orchestrator-mode sidecar with no review
+# blocks, whereas checking a child's commit against a file it never wrote
+# would let it through.
+RG_VARIANT_RAW="${RG_STATE_VARIANT:-}"
+RG_VARIANT="$(printf '%s' "$RG_VARIANT_RAW" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^[.-]*//' | cut -c1-64)"
+if [[ -n "$RG_VARIANT" ]]; then
+  STATE_FILE=".pi/review-gate-state.${RG_VARIANT}.json"
+else
+  STATE_FILE=".pi/review-gate-state.json"
+fi
+
 
 # .blocked marker (extension write failure) → fail closed even without JSON.
 if [[ -f "${STATE_FILE}.blocked" ]]; then
@@ -300,6 +314,41 @@ try {
   console.error("[review-gate] cannot compute the worktree tree — failing closed.");
   process.exit(1);
 }
+
+// MESSAGE-ONLY REWRITE (mirror of lib/git-rewrite.ts isMessageOnlyRewrite).
+// `git commit --amend` and a `git rebase -i` reword produce a commit whose
+// TREE is identical to the one it replaces: no content enters the branch, so
+// the content gates below have nothing to judge. Refusing it is what made a
+// non-English commit message unfixable — both repair paths ran through this
+// hook, and the only remaining exit was a human running /gate-bypass. The
+// message itself is still checked (commit-msg hook, L5).
+//
+// THREE CONDITIONS, all of which must hold:
+//  1. COMMIT ONLY. A PUSH publishes the whole history, including commits this
+//     exemption never looked at, so pre-push (which re-execs this hook with
+//     REVIEW_GATE_REQUIRE_FULL=1) must NOT be exempt.
+//  2. The WORKTREE tree equals HEAD's.
+//  3. The INDEX — which is what the commit actually publishes — holds no
+//     staged change either. The staged-divergence checker above already
+//     refuses a divergent index, but this exemption does not lean on that:
+//     measuring both is one cheap git call and removes the dependency
+//     (mirrors isMessageOnlyRewrite in lib/git-rewrite.ts, which requires the
+//     same two facts at the tool layer).
+if (!requireFullTests) {
+  try {
+    const { execFileSync } = require("node:child_process");
+    const headTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
+    let staged = true;
+    try {
+      // Honors GIT_INDEX_FILE, so `git commit -a`'s temporary index is the
+      // one measured. Exit 1 = differences; any other failure stays "staged".
+      execFileSync("git", ["diff", "--cached", "--quiet", "HEAD"], { stdio: "ignore" });
+      staged = false;
+    } catch { staged = true; }
+    if (headTree && headTree === currentFp && !staged) process.exit(0);
+  } catch { /* no HEAD (root commit) — the gates below apply as usual */ }
+}
+
 
 // FINGERPRINT ALGORITHM MIGRATION.
 //

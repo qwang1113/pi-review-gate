@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pi-review-gate: strip/flag AI attribution in commit messages.
+# pi-review-gate: commit-message gates — AI attribution (flag) + English (L5).
 # PR #7 lesson 8: only AI is \b-bounded (avoids maintainer/domain false
 # positives under -i); GPT/OpenAI stay unbounded to catch ChatGPT/GPT-4.
 set -euo pipefail
@@ -11,4 +11,50 @@ if grep -Eiq 'Co-Authored-By:.*(Claude|Anthropic|GPT|OpenAI|Copilot|noreply@anth
   || grep -Eiq '🤖.*(Claude|\bAI\b|GPT|OpenAI)' "$MSG_FILE"; then
   echo "[review-gate] commit message contains AI attribution — remove it (or REVIEW_GATE_BYPASS=1)." >&2
   exit 1
+fi
+
+# L5 (English) at the MESSAGE layer. The tool layer already judges a message
+# passed on the command line, but a message typed in an EDITOR — `git commit`
+# without -m, and every `git rebase -i` reword — never passes through it. That
+# gap is exactly where the non-English messages this gate exists to prevent
+# came from, and message-only rewrites are now allowed through pre-commit, so
+# this is the check that keeps a reword honest.
+#
+# Comment lines (git's own `#` scissors/help block) are dropped first; they are
+# not part of the message. Node does the scan because bash has no reliable
+# Unicode script classes.
+if command -v node >/dev/null 2>&1; then
+  node - "$MSG_FILE" <<'NODE' || exit 1
+const { readFileSync } = require("node:fs");
+let text;
+try { text = readFileSync(process.argv[2], "utf8"); } catch { process.exit(0); }
+// Mirror of judgeEnglish() in lib/lang-detect.ts: ANY non-Latin letter fails.
+// Git's own comment lines are not the message — and the character that starts
+// them is configurable (`core.commentChar`), so ASK git instead of assuming
+// `#`.
+//
+// KNOWN EDGE, bounded on purpose: with `core.commentChar=auto` git picks a
+// char per message, and reproducing that choice here would mean re-deriving
+// git's candidate list against the buffer it saw. We fall back to `#` (git's
+// default and its first candidate). The cost is that a BODY line starting
+// with the fallback char is skipped by this scan — a narrow fail-open that
+// only exists in the editor path, and one the tool layer (command-line
+// messages) and the reviewer still cover. The opposite choice — scanning
+// everything — would flag a localized git's own help block on every commit,
+// which is a fail-CLOSED that breaks normal use.
+let commentChar = "#";
+try {
+  const { execFileSync } = require("node:child_process");
+  const configured = execFileSync("git", ["config", "--get", "core.commentChar"], { encoding: "utf8" }).trim();
+  if (configured && configured !== "auto") commentChar = configured[0];
+} catch { /* unset or unreadable — git's default stands */ }
+const prose = text.split("\n").filter((l) => !l.startsWith(commentChar)).join("\n");
+for (const ch of prose.normalize("NFC")) {
+  if (/\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch)) {
+    console.error(`[review-gate] commit message is not English (found "${ch}") — L5 accepts no non-Latin letters.`);
+    console.error("[review-gate] Rewrite it in English (or REVIEW_GATE_BYPASS=1 for a one-off).");
+    process.exit(1);
+  }
+}
+NODE
 fi

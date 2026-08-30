@@ -25,7 +25,10 @@ import {
 } from "../lib/gate-doctor.ts";
 import { diagnoseChain, type ModelChainEntry } from "../lib/model-diagnose.ts";
 import { resolvePackageAgentsDir } from "../lib/model-config.ts";
-import { isNonEnglishText } from "../lib/lang-detect.ts";
+import { judgeEnglish } from "../lib/lang-detect.ts";
+
+/** The L5 decision as the doctor consumes it (a predicate over one text). */
+const nonEnglish = (text: string) => judgeEnglish("commit-body", text) !== undefined;
 
 function entry(role: string, model: string, fallbacks: string[], facts: Parameters<typeof diagnoseChain>[2]): ModelChainEntry {
   const frontmatter = `---\nmodel: "${model}"\nfallbackModels: [${fallbacks.map((f) => `"${f}"`).join(",")}]\n---\n`;
@@ -162,7 +165,7 @@ test("checkGitHooks: missing hook FAILs, marker-less WARNs, unverifiable WARNs",
 // ---------- l5-language ----------
 
 test("checkLangGate: working gate passes, broken gate fails", () => {
-  const pass = checkLangGate(isNonEnglishText);
+  const pass = checkLangGate(nonEnglish);
   assert.equal(pass.status, "PASS");
   const fail = checkLangGate(() => false);
   assert.equal(fail.status, "FAIL");
@@ -294,7 +297,7 @@ function baseDeps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
     registryFacts: PASS_FACTS,
     hooksDir,
     workflowCommandCount: 15,
-    isNonEnglishText,
+    nonEnglish,
     probeGh: async () => ({ ok: true, value: "gh version 2.40.0" }),
     readFile: (p) => { try { return readFileSync(p, "utf8"); } catch { return undefined; } },
     exists: (p) => { try { accessSync(p); return true; } catch { return false; } },

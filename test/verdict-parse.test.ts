@@ -266,6 +266,204 @@ test("parseFenceFileFindings: findings without a severity or a file are skipped"
   ]);
 });
 
+/**
+ * Round-10 P1 (reviewer, reproduced): equal-severity aggregation rebuilt the
+ * verdict WITHOUT cwd, so a reviewer that repeats its identical verdict first
+ * and last — a format `agents/reviewer.md` explicitly calls safe — lost the
+ * proof and was blocked by the very check meant to protect it. A gate that
+ * punishes the format it recommends is worse than no gate.
+ */
+test("cwd survives equal-severity aggregation, and contradictions drop it", () => {
+  const fence = (cwd: string): string =>
+    '```json\n{"gate":"READY","cwd":"' + cwd + '","docSync":"NOT_NEEDED","findings":[]}\n```';
+
+  const repeated = parseReviewOutput(`${fence("/repo")}\n\nprose in between\n\n${fence("/repo")}`);
+  assert.equal(repeated.verdict, "READY");
+  assert.equal(repeated.cwd, "/repo", "agreeing fences must keep the proof");
+
+  // Two fences that disagree about where the review ran prove nothing —
+  // dropping it is fail-closed (the gate blocks a READY with no cwd).
+  const contradictory = parseReviewOutput(`${fence("/repo")}\n${fence("/evil/elsewhere")}`);
+  assert.equal(contradictory.cwd, undefined, "a contradiction is not evidence");
+
+  // But SILENCE is not contradiction: a terse fence that omits cwd must not
+  // erase the value the other one reported. Treating absence as disagreement
+  // reintroduced the same false rejection, in a shape reviewers actually
+  // produce (short opening fence, full closing fence).
+  const terse = '```json\n{"gate":"READY","docSync":"NOT_NEEDED","findings":[]}\n```';
+  assert.equal(parseReviewOutput(`${terse}\n${fence("/repo")}`).cwd, "/repo", "terse first");
+  assert.equal(parseReviewOutput(`${fence("/repo")}\n${terse}`).cwd, "/repo", "terse last");
+  assert.equal(parseReviewOutput(`${terse}\n${terse}`).cwd, undefined, "nobody reported one");
+
+  // A contradiction never un-happens. Folding is PAIRWISE, so remembering it
+  // only as `undefined` let the next agreeing fence resurrect the value:
+  // /evil + /repo + /repo folded back to "/repo" — the contradiction, washed
+  // out by repetition. It must survive from ANY position in the sequence.
+  for (const [label, fences] of [
+    ["first", [fence("/evil"), fence("/repo"), fence("/repo")]],
+    ["middle", [fence("/repo"), fence("/evil"), fence("/repo")]],
+    ["last", [fence("/repo"), fence("/repo"), fence("/evil")]],
+  ] as Array<[string, string[]]>) {
+    assert.equal(parseReviewOutput(fences.join("\n")).cwd, undefined,
+      `a contradiction in ${label} position must stick`);
+  }
+  // …while three genuinely agreeing fences still keep it.
+  assert.equal(
+    parseReviewOutput([fence("/repo"), terse, fence("/repo")].join("\n")).cwd,
+    "/repo",
+    "agreement interrupted by silence is still agreement",
+  );
+});
+
+/**
+ * Round-14 P2 (reviewer-measured): the SAME finding reported in two fences is
+ * one finding. Summing blindly made `isPlateaued` read the output's SHAPE
+ * instead of its content — repeated→single→single looked like the count was
+ * shrinking, so a real plateau went undetected — and repeating the verdict
+ * first and last is a format the reviewer protocol recommends.
+ */
+test("the same finding in two fences counts once", () => {
+  const F = (findings: unknown[]): string =>
+    '```json\n{"gate":"BLOCKED","cwd":"/repo","docSync":"NOT_NEEDED","findings":' +
+    JSON.stringify(findings) + "}\n```";
+  const boom = { file: "a.ts", line: 12, severity: "P1", issue: "boom" };
+  const other = { file: "b.ts", line: 20, severity: "P2", issue: "other" };
+
+  const repeated = parseReviewOutput(`${F([boom])}\n\nprose\n\n${F([boom])}`);
+  assert.equal(repeated.findingsTotal, 1, "one finding, reported twice, is one finding");
+  assert.deepEqual(repeated.findingFingerprints, ["a.ts#1#boom"], "…and one fingerprint");
+
+  // Distinct findings still add up, and a partial overlap counts the union.
+  assert.equal(parseReviewOutput(`${F([boom])}\n${F([other])}`).findingsTotal, 2);
+  assert.equal(parseReviewOutput(`${F([boom])}\n${F([boom, other])}`).findingsTotal, 2);
+
+  // Round-15 P2: "same finding" is decided on an EXACT key, never on the
+  // coarse cross-round fingerprint. Two real defects that share a line bucket
+  // and their first 80 issue characters produce ONE fingerprint but must
+  // still count as two findings — the coarse key exists to match a finding to
+  // itself across rounds, and is far too loose to be an identity.
+  const long = "x".repeat(80);
+  const collideA = { file: "a.ts", line: 11, severity: "P1", issue: long + "AAA" };
+  const collideB = { file: "a.ts", line: 19, severity: "P2", issue: long + "BBB" };
+  const collided = parseReviewOutput(`${F([collideA])}\n${F([collideB])}`);
+  assert.equal(collided.findingsTotal, 2, "distinct defects must not merge on a coarse key");
+  assert.equal(collided.findingFingerprints.length, 1, "…while still sharing one coarse fingerprint");
+
+  // The identity includes severity and the exact line, so neither differing
+  // alone may be swallowed.
+  assert.equal(parseReviewOutput(`${F([boom])}\n${F([{ ...boom, severity: "P2" }])}`).findingsTotal, 2);
+  assert.equal(parseReviewOutput(`${F([boom])}\n${F([{ ...boom, line: 13 }])}`).findingsTotal, 2);
+
+  // A finding with neither file nor issue produces no fingerprint, so it
+  // cannot be deduplicated — the total must still be the plain sum, never
+  // recomputed from the fingerprint count (which would report 0 findings).
+  const bare = parseReviewOutput(`${F([{ line: 1, severity: "P2" }])}\n${F([{ line: 1, severity: "P2" }])}`);
+  assert.equal(bare.findingsTotal, 2, "unfingerprintable findings are counted, not dropped");
+});
+
+/**
+ * `findings_total` is a number the REVIEWER states about itself, so it is
+ * sanitized where it enters rather than trusted downstream. Measured before
+ * the guard: `findings_total: -5` folded with one real finding to a total of
+ * -4, and `isPlateaued` compares totals numerically — a negative count makes
+ * "non-decreasing" meaningless.
+ */
+test("a self-reported findings_total is sanitized at the source", () => {
+  const T = (n: number): string =>
+    '```json\n{"gate":"BLOCKED","cwd":"/repo","findings_total":' + n + "}\n```";
+
+  assert.equal(parseReviewOutput(T(-5)).findingsTotal, 0, "a negative count is not a count");
+  assert.equal(parseReviewOutput(T(2.7)).findingsTotal, 2, "…nor is a fractional one");
+  assert.equal(parseReviewOutput(T(3)).findingsTotal, 3, "a plain count still passes through");
+
+  // And it cannot drag a real fence's total below zero when folded.
+  const real = '```json\n{"gate":"BLOCKED","cwd":"/repo","findings":[{"file":"a.ts","line":12,"severity":"P1","issue":"boom"}]}\n```';
+  assert.equal(parseReviewOutput(`${T(-5)}\n${real}`).findingsTotal, 1);
+});
+
+/**
+ * Round-13 P1 (reviewer): worse()'s doc said it "aggregates equal-severity
+ * fences", which hid a branch that really exists — a LIGHTER fence is folded
+ * in too, keeping the worse verdict and accumulating the evidence. The
+ * argument for dropping the sticky cwd conflict depends on that branch, so it
+ * gets a test rather than only a corrected sentence.
+ */
+test("a lighter fence is folded in: the worse verdict holds, the evidence adds up", () => {
+  const F = (gate: string, findings: unknown[]): string =>
+    '```json\n{"gate":"' + gate + '","cwd":"/repo","docSync":"NOT_NEEDED","findings":' +
+    JSON.stringify(findings) + "}\n```";
+
+  const out = parseReviewOutput([
+    F("NEEDS_HUMAN", [{ file: "a.ts", line: 1, severity: "P2", issue: "x" }]),
+    F("READY", [{ file: "b.ts", line: 2, severity: "Nit", issue: "y" }]),
+  ].join("\n"));
+
+  assert.equal(out.verdict, "NEEDS_HUMAN", "a lighter fence must not soften the verdict");
+  assert.equal(out.findingsTotal, 2, "…and its findings are still counted");
+});
+
+/**
+ * The sticky conflict flag is DROPPED when a worse fence replaces the fold
+ * wholesale. That is safe only because the fold is monotonic — a verdict never
+ * gets better — so a forgotten conflict can never reach the cwd check, which
+ * runs on READY alone. This test makes that argument checkable instead of
+ * merely asserted in a comment.
+ */
+test("a dropped cwd conflict can never resurface as an approved READY", () => {
+  const F = (gate: string, cwd?: string): string =>
+    '```json\n{"gate":"' + gate + '"' + (cwd ? `,"cwd":"${cwd}"` : "") +
+    ',"docSync":"NOT_NEEDED","findings":[]}\n```';
+
+  // Contradiction, then a WORSE fence (takes over and forgets the conflict),
+  // then agreeing READY fences trying to bring the verdict back.
+  for (const heavier of ["BLOCKED", "NEEDS_HUMAN"]) {
+    const out = parseReviewOutput(
+      [F("READY", "/evil"), F("READY", "/repo"), F(heavier, "/x"), F("READY", "/repo")].join("\n"),
+    );
+    assert.notEqual(out.verdict, "READY",
+      `${heavier} must hold — the fold is monotonic, so the cwd check is never reached`);
+  }
+});
+
+/**
+ * Round-11 P2 (reviewer-measured): a fence whose JSON is broken falls to the
+ * salvage path, which recovers ONLY the gate word — no cwd. That is correct
+ * and must stay correct: salvage reads untrusted, malformed text, so a loose
+ * regex "recovering" a cwd from it would fabricate a report out of
+ * exactly the input we trust least. It costs no honest reviewer anything,
+ * because a salvaged READY is already downgraded before the cwd check runs.
+ */
+test("salvage recovers the gate word but never a cwd", () => {
+  const broken = '```json\n{"gate":"READY","cwd":"/repo","notes":"he said "hi" there"}\n```';
+  const salvaged = parseReviewOutput(broken);
+  assert.equal(salvaged.verdict, "BLOCKED", "a salvaged READY is downgraded — pre-existing rule");
+  assert.equal(salvaged.cwd, undefined, "malformed text must not become a reported cwd");
+});
+
+/**
+ * Round-9 P1 (reviewer, reproduced): the schema and the task text have always
+ * required the judge's own `pwd` and said the gate checks it — but the parser
+ * DROPPED the field, so a fence claiming any cwd at all produced an identical
+ * READY. The parser now carries it verbatim; the gate does the comparing.
+ */
+test("cwd travels verbatim so the gate can run its check", () => {
+  const withCwd = parseReviewOutput('```json\n{"gate":"READY","cwd":"/repo/root","docSync":"NOT_NEEDED","findings":[]}\n```');
+  assert.equal(withCwd.cwd, "/repo/root");
+
+  // A dishonest value is NOT the parser's call — it must reach the gate intact.
+  const elsewhere = parseReviewOutput('```json\n{"gate":"READY","cwd":"/evil/elsewhere","docSync":"NOT_NEEDED","findings":[]}\n```');
+  assert.equal(elsewhere.cwd, "/evil/elsewhere");
+
+  // Absent / blank / non-string ⇒ absent, so the gate sees "nothing reported".
+  for (const fence of [
+    '```json\n{"gate":"READY","docSync":"NOT_NEEDED","findings":[]}\n```',
+    '```json\n{"gate":"READY","cwd":"   ","docSync":"NOT_NEEDED","findings":[]}\n```',
+    '```json\n{"gate":"READY","cwd":42,"docSync":"NOT_NEEDED","findings":[]}\n```',
+  ]) {
+    assert.equal(parseReviewOutput(fence).cwd, undefined, fence);
+  }
+});
+
 test("parseFenceFileFindings: unparseable fences are skipped, not fatal", () => {
   assert.deepEqual(parseFenceFileFindings("```json\n{broken\n```"), []);
   assert.deepEqual(parseFenceFileFindings("no fence"), []);

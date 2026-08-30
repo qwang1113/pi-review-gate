@@ -227,18 +227,25 @@ function splitModel(id: string): { provider: string; model: string } {
  * Spawn the arbiter and return its verdict, or undefined on ANY failure
  * (timeout, spawn error, unparseable/unknown output). The caller MUST treat
  * undefined as GATE_WINS (fail-closed).
+ *
+ * `systemPrompt` is a parameter because there are two kinds of arbitration
+ * with genuinely different questions: may this `gh pr edit` run once (the
+ * default), and is this refused TEXT a legitimate exception (lib/text-appeal.ts).
+ * Everything else — the isolation flags, the strict parse, the fail-closed
+ * contract — is identical, and must stay that way.
  */
 export async function runArbiter(
   modelId: string,
   prompt: string,
   exec: ArbiterExec = defaultArbiterExec,
   timeoutMs: number = ARBITER_TIMEOUT_MS,
+  systemPrompt: string = ARBITER_SYSTEM_PROMPT,
 ): Promise<ArbiterVerdict | undefined> {
   const { provider, model } = splitModel(modelId);
   const argv = [
     "pi", "-p", ...ARBITER_ISOLATION_FLAGS,
     "--provider", provider, "--model", model,
-    "--system-prompt", ARBITER_SYSTEM_PROMPT,
+    "--system-prompt", systemPrompt,
     prompt,
   ];
   return parseArbiterVerdict(await exec(argv, timeoutMs));

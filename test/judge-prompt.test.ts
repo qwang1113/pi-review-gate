@@ -18,8 +18,6 @@ import {
   JUDGE_ROLES,
   agentRoleBody,
   buildJudgeSystemPrompt,
-  doneChannelFor,
-  inboxChannelFor,
   modelSpecFor,
   resolveRoleFile,
   writeJudgeSpawnFiles,
@@ -85,7 +83,8 @@ test("buildJudgeSystemPrompt = role body + shared protocol", () => {
     const prompt = buildJudgeSystemPrompt(repo, "adviser", join(dir, "home"));
     assert.ok(prompt.startsWith("ADVISER_BODY"));
     assert.ok(prompt.includes(JUDGE_COMMON_PROTOCOL));
-    assert.ok(prompt.includes("tmux wait-for -S"));
+    assert.ok(prompt.includes("进程退出即完成"));
+    assert.ok(prompt.includes("session id 重新拉起"));
     // the round-1 F5 divergence rule is present in the embedded copy
     assert.ok(prompt.includes("做不到的验证明说"));
   } finally {
@@ -160,7 +159,7 @@ test("modelSpecFor: explicit slots[0] wins; auto:true uses the frontmatter defau
   }
 });
 
-test("writeJudgeSpawnFiles: env-based launcher, no interpolation, tools narrowed", () => {
+test("writeJudgeSpawnFiles: writes the system prompt and resolves the model", () => {
   const dir = sandbox();
   try {
     const repo = join(dir, "repo");
@@ -180,25 +179,8 @@ test("writeJudgeSpawnFiles: env-based launcher, no interpolation, tools narrowed
     });
     assert.ok(existsSync(files.sysPromptPath));
     assert.ok(readFileSync(files.sysPromptPath, "utf8").includes("AUDIT_BODY"));
-    const launcher = readFileSync(files.launcherPath, "utf8");
-    // F8: no caller data is interpolated into the launcher — every value is
-    // read from RG_* environment variables at runtime.
-    assert.ok(!launcher.includes(repo));
-    assert.ok(launcher.includes("$RG_SP_FILE"));
-    assert.ok(launcher.includes("$RG_MODEL"));
-    assert.ok(launcher.includes("$RG_REPO_ROOT"));
-    // F7: judges have no write surface in the shared live worktree.
-    assert.ok(launcher.includes("--exclude-tools edit,write"));
-    // the npm: prefix pitfall stays pinned
-    assert.ok(launcher.includes("-e npm:pi-subagents"));
-    // env carries the values
-    assert.equal(files.env.RG_MODEL, "anthropic/claude-opus-5:max");
-    assert.equal(files.env.RG_TITLE, "rg-test-role");
-    // no path interpolation into the command (round-2 P2)
-    assert.equal(files.command, 'exec /bin/bash "$RG_LAUNCHER"');
-    assert.equal(files.env.RG_LAUNCHER, files.launcherPath);
-    assert.equal(doneChannelFor("rg-test-role"), "rg-rg-test-role-done");
-    assert.equal(inboxChannelFor("rg-test-role"), "rg-rg-test-role-inbox");
+    // auto:false ⇒ slots[0] — the model the child actually runs with.
+    assert.equal(files.model, "anthropic/claude-opus-5:max");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

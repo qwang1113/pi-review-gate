@@ -208,20 +208,23 @@ test("SKILL.md and AGENTS.md document the MECHANICAL goal pre-review (goal-audit
     // refusal — a doc that only says "consult someone first" would describe
     // the retired, skippable rule.
     assert.match(src, /goal-auditor/, `${file} must name the dedicated goal-auditor role`);
-    assert.match(src, /record_goal_prereview/, `${file} must name the tool that records the audit`);
+    // The gate RUNS the audit now, so the docs must name the one call that
+    // does it — naming the internal recording tool would describe a step the
+    // agent no longer performs.
+    assert.match(src, /judge_submit\(\{\s*role:\s*"goal-auditor"/, `${file} must name the call that audits the draft`);
     assert.match(src, /propose_loop_goal/i, `${file} must reference propose_loop_goal`);
     // Scoped to the PRE-REVIEW passage, not the whole file: a file-wide match
     // for "refuses" or "Simplified Chinese" is satisfied by unrelated prose
     // elsewhere, so deleting the rule itself would leave these green (the same
     // "a bare match is vacuous" standard this file already applies below).
-    // Anchored on the RECORDING TOOL — the token that only appears where the
+    // Anchored on the AUDIT CALL — the token that only appears where the
     // mechanical rule is described ("goal-auditor" alone also names the role in
-    // model-tier tables and role rosters). A file may mention the tool more
+    // model-tier tables and role rosters). A file may mention the call more
     // than once, so EVERY occurrence gets a window and the rule must hold in at
     // least one of them: that keeps the assertion honest (deleting the rule
-    // fails it) without breaking when the tool is referenced elsewhere.
+    // fails it) without breaking when the call is referenced elsewhere.
     const windows: string[] = [];
-    for (let i = src.indexOf("record_goal_prereview"); i !== -1; i = src.indexOf("record_goal_prereview", i + 1)) {
+    for (let i = src.indexOf("goal-auditor\""); i !== -1; i = src.indexOf("goal-auditor\"", i + 1)) {
       windows.push(src.slice(Math.max(0, i - 1500), i + 2000));
     }
     assert.ok(windows.length > 0, `${file} must contain the pre-review passage`);
@@ -248,10 +251,10 @@ test("SKILL.md and AGENTS.md document the MECHANICAL goal pre-review (goal-audit
   }
 });
 
-test("SKILL.md hands the loop goal to subagents as TEXT, never as a file to read", () => {
-  // An acceptance judge (reviewer / reviewer-readonly / module-reviewer /
-  // arbiter) has no `.pi/loop-goal.md` in its defaultReads, and a review
-  // snapshot deliberately carries no `.pi/` at all, so a subagent told to READ
+test("SKILL.md hands the loop goal over as TEXT, never as a file to read", () => {
+  // An acceptance judge (reviewer / adviser / goal-auditor) has no
+  // `.pi/loop-goal.md` in its defaultReads and may be reading from a throwaway
+  // worktree of its own, so a judge told to READ
   // the goal file silently ends up with no acceptance contract. The rule is
   // pinned in lib/loop-goal.ts (test/loop-goal.test.ts locks both injected
   // directives); this locks the SKILL.md copy, whose lack of a fence is exactly
@@ -268,7 +271,7 @@ test("SKILL.md hands the loop goal to subagents as TEXT, never as a file to read
   assert.doesNotMatch(
     src,
     /hand (the goal file|this file)|[Hh]and the goal to every subagent/,
-    "SKILL.md must not tell a subagent to read the goal FILE (a snapshot has no .pi/)",
+    "SKILL.md must not tell a judge to read the goal FILE (it may not have one)",
   );
   assert.doesNotMatch(
     src,
@@ -288,7 +291,7 @@ test("REGRESSION: the single-review protocol states ONE reviewer per round", () 
   }
   // …and the same must hold in the /review command prompt the extension sends.
   const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
-  assert.match(commands, /(ONE|one) (independent )?reviewer per round/i, "/review prompt must state the single-review protocol");
+  assert.match(commands, /(ONE|one) (independent )?reviewer( per round)?\b/i, "/review prompt must state the single-review protocol");
   // No sharding anywhere: the reviewer count is never computed from families.
   const skill = readFileSync(SKILL_MD, "utf8");
   assert.doesNotMatch(skill, /planFanoutFromFacts|review-fanout\.ts|two reviewer/i, "no fan-out language may remain");
@@ -329,15 +332,16 @@ test("REGRESSION: every re-review must carry the previous round's conclusion", (
   assert.match(reviewer, /reopen it/i);
 });
 
-test("AGENTS.md and SKILL.md make judge roles tmux children — the only review path", () => {
-  // 2026-08-27 model: judge roles run as their own pi processes in tmux
-  // panes (review_spawn); subagent dispatch of a judge role is HARD-blocked.
+test("AGENTS.md and SKILL.md make judge roles their own pi processes — the only review path", () => {
+  // 2026-08-29 model: judge roles run as their own non-interactive pi
+  // processes, dispatched by the gate through judge_submit; subagent dispatch
+  // of a judge role is HARD-blocked.
   for (const file of [AGENTS_MD, SKILL_MD]) {
     const src = readFileSync(file, "utf8");
     assert.match(
       src,
-      /tmux|review_spawn/i,
-      `${file} must declare the tmux judge-child execution path`,
+      /judge_submit/,
+      `${file} must declare the judge-child execution path`,
     );
     assert.match(
       src,
@@ -378,7 +382,7 @@ test("REGRESSION: the commit-isolation contract is stated where a reviewer reads
 test("REGRESSION: isolation + streaming are documented in every protocol surface", () => {
   for (const file of [SKILL_MD, AGENTS_MD]) {
     const src = readFileSync(file, "utf8");
-    assert.match(src, /prepare_review/, `${file} must name the tool that hands out snapshots`);
+    assert.match(src, /baseline\.\.HEAD/, `${file} must name the immutable range a reviewer judges`);
     assert.match(src, /stream/i, `${file} must describe streamed findings`);
     assert.match(
       src,
@@ -388,10 +392,46 @@ test("REGRESSION: isolation + streaming are documented in every protocol surface
   }
   // The /review prompt the extension actually sends carries it too.
   const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
-  assert.match(commands, /prepare_review/);
-  assert.match(commands, /never poll in a tight loop|no polling/i);
-  // And the design record no longer contradicts the implementation.
+  assert.match(commands, /baseline\.\.HEAD/);
+  assert.match(commands, /never poll in a tight loop|no polling|WAKES this session/i);
+
+  // And the design record no longer contradicts the implementation. The
+  // single-writer rule survived the model change; the SNAPSHOT it used to be
+  // phrased in terms of did not (2026-08-27: the reviewer judges an immutable
+  // commit range and uses a throwaway worktree only when it runs something).
   const plan = readFileSync(join(ROOT, "docs", "parallel-execution-plan.md"), "utf8");
   assert.match(plan, /MAIN WORKTREE has exactly one writer/i);
-  assert.match(plan, /own disposable snapshot worktree/i);
+  assert.match(plan, /immutable commit range/i,
+    "the boundary is stated in terms of the CURRENT model");
+  assert.doesNotMatch(plan, /reviewer sits in its OWN disposable snapshot/i,
+    "the retired snapshot phrasing must not come back as current guidance");
 });
+
+test("every judge role is told that findings carry BLOCKERS ONLY", () => {
+  // The adjudication is mechanical (no open P0/P1 ⇒ pass), so a non-blocking
+  // entry in `findings` is noise the main agent still has to triage — and a
+  // P2 is where a real blocker goes to hide. All three role definitions, the
+  // protocol doc and the copy embedded in the judge's system prompt must say
+  // so, or one surface teaching the old habit is enough to keep it.
+  const surfaces = [
+    join(AGENTS, "reviewer.md"),
+    join(AGENTS, "goal-auditor.md"),
+    join(AGENTS, "adviser.md"),
+    join(ROOT, "docs", "judge-protocol.md"),
+    join(ROOT, "lib", "judge-prompt.ts"),
+  ];
+  for (const file of surfaces) {
+    const src = readFileSync(file, "utf8");
+    assert.match(
+      src,
+      /BLOCKERS ONLY|只写阻塞项|does NOT belong in `findings`/,
+      `${file} must state that findings carry blockers only`,
+    );
+    assert.match(
+      src,
+      /P2|Nit/,
+      `${file} must name what does NOT belong there`,
+    );
+  }
+});
+

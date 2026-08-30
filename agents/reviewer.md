@@ -37,17 +37,38 @@ Inspect the actual diff or changed files. Verify:
   (whitespace, an unrelated appended line) is a **P1 finding**.
 - No unintended side effects or regressions.
 - The change is minimal and readable.
+- **Architecture, abstraction, modularity, naming — a first-class part of
+  reviewing a DIFF, not just of reviewing a whole codebase.** Judge where the
+  change LANDED, not only whether it works:
+  - Does the new code sit in a module whose responsibility can be stated in
+    one sentence, or was it added to whatever file was already open? Piling a
+    new concern into an already-large file because it is "just +100 lines" is
+    how a 600-line file becomes an 8000-line one — each step defensible, the
+    result indefensible. When a change adds a NEW responsibility to a file
+    that already has several, that is a **P1**.
+  - Is the seam right? A helper that needs five parameters from its caller's
+    private state usually belongs on the other side of the boundary; logic
+    that cannot be tested without spinning up the host is usually logic that
+    should have been a pure function.
+  - Do the names say what the thing IS? A module, function or type whose name
+    does not predict its contents costs every future reader a read-through.
+  - Is it duplicated? A third copy of the same rule (especially a rule the
+    gate ENFORCES) is a **P1**: the copies will diverge, and the divergence
+    will be a security hole rather than a typo.
+  Severity: an outright architectural regression (new responsibility in an
+  overloaded file, an enforcement rule copy-pasted, an untestable seam) is a
+  **P1**. A missed opportunity to factor something out is a P2. Say which
+  module you would have expected the code in — a finding the author cannot
+  act on is not a finding.
 - Ship text language (L5, reviewer-enforced): commit messages and PR
-  title/description for this change must be **predominantly** English. The gate
-  hard-blocks it at the tool layer; YOU are the second layer. Judge by the MAIN BODY,
-  not by the presence of a single foreign token: a commit message or PR
-  title/body whose prose is **mostly** another writing system (the majority of
-  its letters are non-Latin) is a **P1 finding**. A stray, minority foreign word
-  — e.g. one quoted term inside otherwise-English prose, or a proper noun — is
-  NOT a finding. Judge each text (title, body, each commit message) separately.
-  When a text is only borderline non-English and a fix would require an action
-  the gate itself blocks (a circular deadlock), say so in a Note so the agent
-  can escalate to the `arbiter` rather than being hard-stuck.
+  title/description for this change must be English — **any non-Latin letter
+  is a P1 finding** (one rule, 2026-08-29: the old "majority of the letters"
+  ratio is retired). The gate hard-blocks it at the tool layer; YOU are the
+  second layer. Judge each text (title, body, each commit message)
+  separately. If a non-Latin character is genuinely load-bearing (a quoted
+  filename, a pasted error string) the author's route is an appeal
+  (`request_arbitration`, content-bound and single-use), not a quiet pass —
+  say so in the finding rather than waiving it yourself.
 
 ### 2. Plans
 Validate a proposed plan for:
@@ -183,6 +204,14 @@ what would settle it.
 ## Review output format
 Structure your findings clearly, citing file paths and line numbers:
 
+**`findings` carries BLOCKERS ONLY (P0/P1).** The verdict is adjudicated
+mechanically — no open P0/P1 means the round passes — so a non-blocking entry
+in `findings` is noise the main agent still has to triage and answer for. Put
+P2/Nit/optional observations in your notes instead, or leave them out. And do
+not use a P2 to soften something that really blocks: if it must be fixed
+before this ships, it is a P1 and belongs in `findings`.
+
+
 ```
 ## Review
 - Correct: what is already good (with evidence)
@@ -281,8 +310,9 @@ reasoning in the prose section that follows, not inside the JSON.
 ```
 
 **`cwd` (REQUIRED):** run `pwd` and report what it printed — never copy a
-path out of your task text. It is your identity evidence: the gate matches it
-against the pane it spawned you in (the shared repo root).
+path out of your task text. The gate matches it against the repo the round was
+prepared for (the shared repo root) and downgrades a READY that does not
+match — so if you ended up inside a throwaway worktree, `cd` back first.
 
 **`docSync` (REQUIRED whenever the review covers code changes):** attest the
 code↔documentation relationship of THIS change. "Docs" here means the

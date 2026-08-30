@@ -12,6 +12,12 @@ import { goalTextHash } from "../lib/loop-goal.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { isPiSelfPath } from "../lib/pi-self.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
+
+// This file boots a REAL pi process with the extension loaded. It must decide
+// the gate's state from the fixture alone, so the variables the surrounding
+// gate session sets (RG_STATE_VARIANT & co.) are cleared before any spawn.
+neutraliseGateEnv();
 
 // ---------------------------------------------------------------------------
 // Behavioral regression for the loop goal's core promise: writing
@@ -252,14 +258,28 @@ test("a nested sub/.pi/ file is NOT gate-owned (only the repo root's is)", async
 const GOAL_TEXT =
   "# Loop goal: test\n\n**Intent**: n/a\n\n**Exit criteria**:\n1. tests pass\n\n**Date**: 2026-08-23";
 
-type ToolMap = { tools: Map<string, unknown> };
+type ToolMap = {
+  tools: Map<string, unknown>;
+  /**
+   * The gate's INTERNAL implementations (`record_goal_prereview`,
+   * `run_precommit`, `review_checkpoint`, `record_review`, the three
+   * prepares). They are not registered with pi — an agent cannot see them —
+   * but their mechanical checks are the subject of several suites, so the
+   * extension exposes them on a non-tool property for exactly this.
+   */
+  __reviewGateInternalTools?: Map<string, ToolExecute>;
+};
 
 type ToolExecute = (id: string, params: unknown, s: unknown, u: unknown, c: unknown) => Promise<unknown>;
 
 function tool(pi: ToolMap, name: string): ToolExecute {
-  const t = pi.tools.get(name) as { execute: ToolExecute } | undefined;
-  return (id, params, s, u, c) => t!.execute(id, params, s, u, c);
+  const registered = pi.tools.get(name) as { execute: ToolExecute } | undefined;
+  if (registered) return (id, params, s, u, c) => registered.execute(id, params, s, u, c);
+  const internal = pi.__reviewGateInternalTools?.get(name);
+  assert.ok(internal, `neither a registered nor an internal tool: ${name}`);
+  return internal!;
 }
+
 
 function setMode(pi: ToolMap, ctx: unknown, mode: string) {
   // set_gate_mode is a registered TOOL, so drive it exactly like the agent does.
@@ -292,6 +312,8 @@ async function approveGoal(pi: ToolMap, ctx: unknown, goal: string, repo?: strin
   assert.equal((result as { details: { approved?: boolean } }).details.approved, true, "goal must be approved by the mock dialog");
 }
 
+
+
 test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS — no dialog at all", async () => {
   // The whole point of the mechanical pre-review: the user must never be asked
   // to approve a draft no auditor judged. A refusal that still rendered the
@@ -320,7 +342,8 @@ test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS —
   assert.equal((noAudit as { isError?: boolean }).isError, true, "an unaudited goal must be refused");
   assert.equal((noAudit as { details: { approved?: boolean } }).details.approved, false);
   assert.equal(dialogs, 0, "the user must not be asked about an unaudited draft");
-  assert.match(JSON.stringify(noAudit), /record_goal_prereview/, "the refusal must name the recovery path");
+  assert.match(JSON.stringify(noAudit), /it runs the audit ITSELF/,
+    "the recovery path is ONE call, not a sequence the agent has to remember");
   assert.equal(readSidecar(repo).loopGoal, undefined, "no approval may be recorded");
   // The isolated HOME has no goal-auditor, so the refusal offers the BOOTSTRAP
   // remedy — and a project copy must clear it by frontmatter IDENTITY, not by
@@ -738,6 +761,13 @@ test("L8: a NESTED independent repo is not unlocked by the primary repo's goal",
   writeFileSync(join(nested, "n.ts"), "export const n = 1;\n");
   git(nested, "add", "n.ts");
   git(nested, "commit", "-m", "init");
+  // The nested repo is this FIXTURE's own scaffolding, not work the session
+  // found lying around: ignore it in repo A, or the pre-existing-changes gate
+  // (pinned in extension-structure.test.ts) blocks the edit before the goal
+  // layer this test is about is ever reached.
+  writeFileSync(join(repoA, ".gitignore"), "nested/\n");
+  git(repoA, "add", ".gitignore");
+  git(repoA, "commit", "-m", "ignore the nested fixture repo");
   const fileA = join(repoA, "a.ts");
   const nestedFile = join(nested, "n.ts");
   const pi = makeMockPi(repoA);
@@ -756,7 +786,7 @@ test("L8: a NESTED independent repo is not unlocked by the primary repo's goal",
 });
 
 test("L8: snapshot ship gate holds when the snapshot IS the process cwd (real reviewer child)", async () => {
-  // A real reviewer subagent is a `pi` child process spawned with cwd = the
+  // A real reviewer child is a `pi` process spawned with cwd = the
   // snapshot, so primaryRepoRoot resolves to the snapshot root — the exact
   // scenario where returning the untouched empty state for the primary repo
   // let `git push` through (round P1). The in-process mock normally keeps

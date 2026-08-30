@@ -69,7 +69,10 @@ test("review-loop skill makes the main agent hand its impossible list to the rev
   assert.match(skill, /Do NOT hand over your justification as a conclusion/);
   // It belongs to the review step, ahead of the record step.
   const handover = skill.indexOf('Hand over your "impossible" list');
-  const record = skill.indexOf("4. **Record**");
+  // "4. **Record**" grew a subtitle when recording stopped being a call the
+  // agent makes (2026-08-30) — anchor on the numbered step, not on the words
+  // that follow it, or a rewording silently unpins the ordering rule.
+  const record = skill.indexOf("4. **Record");
   const review = skill.indexOf("3. **Review**");
   assert.ok(review !== -1 && record !== -1, "skill protocol must keep its Review and Record steps");
   assert.ok(handover > review && handover < record, "handover instruction must sit inside the Review step");

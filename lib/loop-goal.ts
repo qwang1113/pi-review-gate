@@ -32,9 +32,33 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import type { TaskMode } from "./task-mode.ts";
 
 /** Repo-root-relative location of the goal file (gate-excluded via `.pi/`). */
 export const LOOP_GOAL_RELPATH = ".pi/loop-goal.md";
+
+/**
+ * The goal file for ONE session — per sidecar variant (R-10).
+ *
+ * The measured problem: an orchestration child shares the supervisor's
+ * worktree, so it wrote its approved goal into the SUPERVISOR's
+ * `.pi/loop-goal.md`. With one child that is merely surprising; with two
+ * serial children it is data loss, because the second child's approval
+ * overwrites the first one's — and the reviewer verifies against that very
+ * file. The sidecar solved the same problem for gate state (F4) by moving the
+ * CHILD, and the goal file now follows it: same variable
+ * (`RG_STATE_VARIANT`), same shape, same reason.
+ *
+ * A session with no variant (the ordinary case) keeps the plain path, so
+ * nothing about a normal loop session changes.
+ */
+export function loopGoalRelPath(variant?: string): string {
+  const safe = variant
+    ? variant.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 64)
+    : "";
+  return safe.length > 0 ? `.pi/loop-goal.${safe}.md` : LOOP_GOAL_RELPATH;
+}
+
 
 /** Max characters of goal text injected into the system prompt. */
 export const LOOP_GOAL_MAX_CHARS = 1500;
@@ -219,28 +243,13 @@ export function buildGoalAuditTask(
     prevDraft?: string;
     sessionDir?: string;
     sessionId?: string;
-    /**
-     * The done channel the auditor will signal (doneChannelFor(title)).
-     * Embedded so the child never has to GUESS the channel (round-16 P1:
-     * the protocol promises 'channel 由任务文本给出' but the task text
-     * did not carry it — the child guessed wrong and the main session was
-     * never woken).
-     */
-    doneChannel?: string;
-    /**
-     * The inbox question channel (path + signal channel), embedded so the
-     * auditor can ask the main session without guessing (round-16 P2).
-     * channel = inboxChannelFor(title), i.e. rg-<title>-inbox.
-     */
-    inboxPath?: string;
-    inboxChannel?: string;
   } = {},
 ): string {
   const lines = [
     "You are goal-auditor. Audit the draft loop goal below as the exit contract for this session.",
     "",
-    "Spawn this auditor with `context: \"fresh\"` explicitly (round-10 P1: a global",
-    "defaultSubagentContext would override the agent's own defaultContext).",
+    "You run as your own pi process (pi -p --session-id): your own session, with none of the main",
+    "repository and the transcript pointer below.",
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
     "===== 待审计的 goal 草稿 =====",
@@ -260,7 +269,7 @@ export function buildGoalAuditTask(
     ...(opts.sessionDir && opts.sessionId
       ? [
           "",
-          `You run context:\"fresh\" — if the audit needs the main session's conversation, read it on demand from ${opts.sessionDir} (file named <timestamp>_${opts.sessionId}.jsonl).`,
+          `You do NOT inherit the main session's conversation — if the audit needs it, read it on demand from ${opts.sessionDir} (file named <timestamp>_${opts.sessionId}.jsonl).`,
         ]
       : []),
     "",
@@ -272,20 +281,10 @@ export function buildGoalAuditTask(
     // Round-17 (user ask): output discipline — auditor output beyond the
     // fence + 3 lines is wasted tokens.
     "输出纪律:只输出 fence + ≤3 行结论要点;不复述任务、不复述代码、不写过程叙事。",
-    ...(opts.doneChannel
-      ? [
-          "",
-          `完成信号(必须):当你完成本轮审计、输出最终 verdict 之后,运行 tmux wait-for -S ${opts.doneChannel}(通过 bash 执行,无任何附加说明)。这是主会话得知你完成的方式——它不会轮询你的屏幕。`,
-        ]
-      : []),
-    ...(opts.inboxPath && opts.inboxChannel
-      ? [
-          "",
-          `- 提问通道(需要决策/澄清任务时):把一行 JSON 追加到 ${opts.inboxPath}:`,
-          '  {"type":"question","text":"……"}',
-          `  然后运行 tmux wait-for -S ${opts.inboxChannel} 唤醒主会话(channel = inboxChannelFor(title),即 rg-<title>-inbox)。提问后继续等待回复,不要自行假定答案。`,
-        ]
-      : []),
+    "",
+    "完成(必须):输出最终 verdict 后正常退出即可——进程退出即完成,主会话以你的输出为准,",
+    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
+    "主会话会带着答案用同一 session id 重新拉起你。",
   ];
   return lines.join("\n");
 }
@@ -392,10 +391,11 @@ export function buildGoalPrereviewRefusal(ctx: GoalPrereviewRefusalContext): str
   return (
     "review-gate: propose_loop_goal refused — " + why + ". The user's approval dialog is not shown until a " +
     "dedicated `goal-auditor` audit of THIS exact text passes.\n" +
-    "Recovery path: revise the draft against the objections → call `prepare_goal_audit` with the revised " +
-    "draft (it returns the ready-made auditor task with the carryover + draft delta) → dispatch the " +
-    "`goal-auditor` subagent with that task → record its FULL raw output with `record_goal_prereview` → " +
-    "again with the identical text.\n" +
+    "Recovery path: revise the draft against the objections and call propose_loop_goal again — " +
+    "it runs the audit ITSELF (builds the auditor's task with the carryover and the draft delta, " +
+    "dispatches the judge, adjudicates the verdict and records the PASS). There is no separate " +
+    "audit call to make.\n" +
+
     "The goal text submitted to the user must be written in Simplified Chinese (technical identifiers, tool " +
     "names, file paths and code tokens stay English) — the auditor blocks a draft that is not.\n" +
     "Submitted first line: " + (firstLine.slice(0, 120) || "(empty)") +
@@ -473,14 +473,12 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
 
 /** Ship-block copy for loop mode without a confirmed goal (L1 only). */
 export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
-  "loop goal not confirmed by the user — interview the user about what \"done\" means (ONE " +
-  "question per turn, labeled \"N of M\", each with your recommended answer — all at once only " +
-  "when the user asks for it), draft it in Simplified Chinese (identifiers, paths and code " +
-  "tokens stay English), call `prepare_goal_audit` with that exact draft and dispatch the " +
-  "`goal-auditor` subagent with its ready-made task, then record its full raw output with " +
-  "`record_goal_prereview` — propose_loop_goal is refused without a recorded " +
-  "PASS for the identical text — then call propose_loop_goal so the USER can " +
-  "approve it in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
+  "loop goal not confirmed by the user — interview them with `ask_user` (it asks and pauses the " +
+  "loop until they answer), draft the goal in Simplified Chinese (identifiers, paths and code " +
+  "tokens stay English), then call `propose_loop_goal` — it runs the `goal-auditor` audit itself " +
+  "(dispatch, adjudicate, record) and only then asks the USER to approve it " +
+
+  "in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
 /**
  * Edit-block copy for loop mode without a confirmed goal (L8 tool_call gate).
@@ -489,21 +487,23 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
  * of the edit gate is that the negotiation happens before the agent can
  * change a file. It also carries the goal pre-review step, which is MECHANICAL
  * since 2026-08-25 (it superseded the 2026-08-18 `adviser` merged rule): the
- * draft must be audited by the dedicated `goal-auditor` role and recorded via
- * `record_goal_prereview`, or propose_loop_goal refuses without a dialog.
+ * draft must pass a `goal-auditor` audit, and since 2026-08-29 the gate runs
+ * that audit itself — since 2026-08-30 it runs INSIDE `propose_loop_goal`,
+ * which dispatches the judge, adjudicates the verdict (only P0/P1 block) and
+ * records it before the user is ever asked. The agent submits a draft, not a
+ * sequence.
+
  */
 export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
   "review-gate: loop mode requires an approved loop goal BEFORE any edit/write call. " +
-  "Negotiate it first: interview the user about what \"done\" means (ONE question per turn, " +
-  "labeled \"N of M\", each with your recommended answer), write the goal in Simplified Chinese " +
-  "(technical identifiers, paths and code tokens stay English), call `prepare_goal_audit` with " +
-  "that exact draft, dispatch the `goal-auditor` subagent with its ready-made task, and record its " +
-  "full raw output with " +
-  "`record_goal_prereview` — propose_loop_goal refuses to show the user's dialog without a " +
-  "recorded PASS for the identical text (a FAIL means: fix the objections and re-audit). Then " +
-  "call propose_loop_goal so the USER approves it in a dialog. (If this session was never meant " +
-  "to run a full loop, classify it first with set_gate_mode: explore/normal do not require a " +
-  "goal.) Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
+  "Negotiate it first: ask the user with `ask_user` (it asks them and pauses the loop until " +
+  "they answer), write the goal in Simplified Chinese (technical identifiers, paths and code " +
+  "tokens stay English), then call `propose_loop_goal` with it. That ONE call runs the " +
+  "`goal-auditor` audit itself (dispatch, adjudicate — only P0/P1 objections count — and record) " +
+  "and shows the user the approval dialog only once it passes. A failed audit means: fix the objections and submit the revised " +
+  "draft the same way. (If this " +
+  "session was never meant to run a full loop, classify it first with set_gate_mode: " +
+  "explore/normal do not require a goal.) Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
 /**
  * Pure decision behind the L8 edit gate: may an edit/write call pass in the
@@ -512,21 +512,33 @@ export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
  * `taskMode` undefined (undecided) behaves as loop — fail-closed, exactly
  * like every other layer of the gate. explore/normal never require the goal:
  * explore deliberately allows small edits during an investigation, and normal
- * steps aside entirely. The caller supplies `goalConfirmed` for the TARGET
- * repo (see isLoopGoalConfirmed), so a multi-repo session checks each repo's
- * own goal before writing into it.
+ * steps aside entirely. `orchestrator` is exempt for a different reason: its
+ * exit contract is the PLAN (lib/orchestrator-plan.ts), approved in its own
+ * dialog, and its write surface is closed far tighter than L8 could — an
+ * orchestrator may only touch its plan and handoff docs, never code. Making
+ * it also demand a loop goal would ask the user to approve two contracts for
+ * one session. The caller supplies `goalConfirmed` for the TARGET repo (see
+ * isLoopGoalConfirmed), so a multi-repo session checks each repo's own goal
+ * before writing into it.
  */
 export function loopGoalEditGate(opts: {
-  taskMode: "normal" | "explore" | "loop" | undefined;
+  taskMode: TaskMode | undefined;
   goalConfirmed: boolean;
 }): boolean {
   if (opts.taskMode === "normal" || opts.taskMode === "explore") return true;
+  if (opts.taskMode === "orchestrator") return true;
   return opts.goalConfirmed;
 }
 
-/** Read `<repoRoot>/.pi/loop-goal.md`. Never throws: any failure ⇒ absent. */
-export function readLoopGoal(repoRoot: string, now: number = Date.now()): LoopGoal {
-  const path = join(repoRoot, LOOP_GOAL_RELPATH);
+/**
+ * Read this session's goal file. Never throws: any failure ⇒ absent.
+ *
+ * `variant` selects the per-session file (R-10); omitted ⇒ the plain
+ * `.pi/loop-goal.md`, which is what an ordinary loop session uses.
+ */
+export function readLoopGoal(repoRoot: string, now: number = Date.now(), variant?: string): LoopGoal {
+  const path = join(repoRoot, loopGoalRelPath(variant));
+
   let raw: string;
   try {
     raw = readFileSync(path, "utf8").trim();
@@ -580,23 +592,21 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "EXIT CONTRACT: the checkable facts that mean the task is done and the loop may end. It is " +
   "NOT yours to assume — a self-written contract lets you grade yourself against your own " +
   "guess, and a leftover file from a previous task is someone else's contract.\n" +
-  "1. GRILL the user first. Unless the user asked for them all at once, ask ONE question per " +
-  "turn and label it with its position — \"N of M\" — so the user always knows the progress; " +
-  "give your own recommended answer and wait for the reply before asking the next. Their " +
-  "answers open the next round; stop when nothing is left silently assumed. Facts are YOUR job " +
-  "(read the repo, run tools) — only decisions go to the user. Sized to the change: a one-line " +
-  "bugfix is one question, not a questionnaire.\n" +
+  "1. ASK THE USER FIRST, with `ask_user({questions})`: it runs the interview (one question at a " +
+  "time, its N / M progress, your options and recommendation, 'answer in chat' and 'skip the " +
+  "rest' for them) and pauses the loop until the answers come back — all of them at once. " +
+  "Facts are YOUR job (read the repo, run tools); only decisions go to the user. Sized to the " +
+  "change: a one-line bugfix is one question, not a questionnaire. Later questions that depend " +
+  "on an earlier answer are a SECOND ask_user round, not a guess.\n" +
   "2. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
   "tokens stay English): task title, one-line intent, 3–7 checkable exit criteria, non-goals, " +
   "ISO date.\n" +
-  "3. PRE-REVIEW it mechanically: call `prepare_goal_audit` with the draft to get the ready-made " +
-  "auditor task (it carries the carryover + draft delta when this is a re-audit of a revised " +
-  "draft), dispatch the dedicated `goal-auditor` subagent with that task, then record its FULL " +
-  "raw output with `record_goal_prereview`. The " +
-  "extension parses the auditor's JSON fence itself — a FAIL means fix the objections and " +
-  "re-audit (the revised text needs its own PASS, the record binds to content).\n" +
-  "4. Then call `propose_loop_goal` with the PASSED text. It refuses without a matching PASS. " +
-  "The EXTENSION shows it to the user for " +
+  "3. Submit it with `propose_loop_goal`. That ONE call runs the audit itself: it builds the " +
+  "auditor's task (with the carryover and the draft delta when this is a re-audit), dispatches " +
+  "the `goal-auditor` judge, waits for it, adjudicates the verdict — only P0/P1 block, " +
+  "non-blocking findings never buy another round — and records the PASS. A BLOCKED audit comes " +
+  "back with the objections and NO dialog is shown: fix them and call it again.\n" +
+  "4. Once it passes, the EXTENSION shows the text to the user for " +
   "approval and writes `" + LOOP_GOAL_RELPATH + "` itself. Writing that file yourself grants " +
   "nothing — an unapproved goal blocks commit/push/PR in loop mode and its body is withheld " +
   "from this prompt.\n" +
@@ -606,7 +616,8 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "write-capable subagents run SERIALLY in this worktree (their edits change the worktree, so a " +
   "review recorded before them can no longer ship, and concurrent writers would keep invalidating " +
   "the binding between precommit and review), read-only subagents may run in parallel. You stay " +
-  "the writer of record: you run precommit, you run the review, you fix the findings. " +
+  "the writer of record: `judge_submit({role:\"reviewer\"})` runs precommit, the checkpoint and the " +
+  "review for you; you fix the findings. " +
   "`adviser` advises against the goal; `reviewer` accepts against it, criterion by criterion.";
 
 /**
@@ -661,15 +672,16 @@ export function buildLoopGoalDirective(goal: LoopGoal, confirmed = false): strin
       ? "⚠ This goal is older than 24h — it may be left over from a previous session. Confirm it " +
         "against what the user is asking for NOW, and renegotiate it if it no longer matches.\n"
       : "") +
-    "Work to these criteria and stop when they are all met. Paste the goal TEXT into every subagent " +
-    "task you spawn (an acceptance judge does not read the file itself — a snapshot carries no " +
-    "`.pi/`, and only a goal the user approved may become a contract): `adviser` advises against " +
+    "Work to these criteria and stop when they are all met. Paste the goal TEXT into every judge child " +
+    "and subagent task you spawn (an acceptance judge does not read the file itself — it does not " +
+    "inherit your context, and only a goal the user approved may become a contract): `adviser` advises against " +
     "the goal, `reviewer` accepts against it criterion by " +
     "criterion (an unmet criterion is a P1 finding ⇒ BLOCKED). Write-capable subagents run " +
     "SERIALLY in this worktree; read-only ones may run in parallel. If the goal no longer matches " +
-    "the user's request, renegotiate it with the user, put the REVISED text through the " +
-    "`goal-auditor` audit again (`record_goal_prereview` — the pass binds to content, so any edit " +
-    "needs a fresh one) and only then re-submit it via `propose_loop_goal` — " +
+    "the user's request, renegotiate it with the user and re-submit the REVISED text via " +
+    "`propose_loop_goal` — it runs the `goal-auditor` audit itself (the pass binds to content, so " +
+    "any edit needs a fresh one) — " +
+
     "the path is gate-excluded, so updating it never invalidates a review, but editing the file " +
     "yourself drops the approval and blocks shipping until the user approves the new text."
   );

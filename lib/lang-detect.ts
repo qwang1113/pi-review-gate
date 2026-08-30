@@ -1,19 +1,26 @@
 /**
- * Language gate for commit / PR text (L5) and test labels (L6).
+ * The L5 language gate: commit messages, PR text and test labels must be
+ * ENGLISH.
  *
- * Requirement: commit messages and PR title/description must be ENGLISH. We do
- * not try to prove text *is* English (undecidable, and English borrows foreign
- * words); instead we score the writing system of its LETTERS and fail only when
- * a NON-LATIN script (CJK, Kana, Hangul, Cyrillic, Greek, Arabic, Hebrew, Thai,
- * Devanagari, …) is the MAJORITY of the letters in the prose body.
+ * ONE RULE, ONE IMPLEMENTATION (2026-08-29). Every L5 decision in this project
+ * is {@link judgeEnglish}: **any non-Latin letter rejects**. The call sites
+ * differ only in the `kind` they pass, which decides the wording of the block
+ * — not the verdict.
  *
- * MAJORITY-BODY policy (was: "any non-Latin letter fails"): a real deadlock
- * showed the old rule was too strict — a mostly-English PR body with a single
- * quoted foreign term (e.g. "确认中") was flagged non-English and blocked a
- * legitimate ship. The gate now measures the ratio: only text whose MAIN prose
- * is another writing system fails. A stray/minority foreign word passes. When
- * the rough script check is wrong at the margin, the agent may escalate to the
- * arbiter (lib/arbitration.ts) rather than being hard-stuck.
+ * WHY A HARD RULE AND NOT A RATIO. The previous policy failed a text only when
+ * a non-Latin script was the MAJORITY of its letters. It was introduced to stop
+ * a legitimate English body with one quoted foreign term from being blocked,
+ * and it cost more than it bought: a long English body diluted a fully Chinese
+ * SUBJECT below the threshold and shipped (observed 2026-08-29), the ratio was
+ * un-obvious to reason about, and every reader had to know which of two
+ * policies applied where. The dilution hole was patched for subjects only,
+ * which left three different behaviours in four call sites.
+ *
+ * The hard rule is safe to apply everywhere BECAUSE the mistake is appealable:
+ * a text the gate wrongly refuses (a Chinese filename in a subject, a pasted
+ * Chinese stack trace in a body) goes to `request_arbitration`, which binds a
+ * single-use pass to that exact content. A wrong guess costs one appeal, not a
+ * stranded commit — see docs/execution-model.md.
  *
  * This deliberately ALLOWS: ASCII, code identifiers, numbers, punctuation,
  * URLs, emoji, and Latin text with diacritics (café, naïve). Pure, no I/O,
@@ -21,112 +28,121 @@
  */
 
 /**
- * True if any character is a LETTER from a script other than Latin. Uses Unicode
- * property escapes: `\p{L}` = any letter, `\p{Script=Latin}` = a Latin letter.
+ * True if any character is a LETTER from a script other than Latin. Uses
+ * Unicode property escapes: `\p{L}` = any letter, `\p{Script=Latin}` = a Latin
+ * letter.
  */
 function isNonLatinLetter(ch: string): boolean {
   return /\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch);
 }
 
 /**
- * Strip non-prose spans so the language ratio reflects the human-readable body,
- * not markup that would dilute it. Removes fenced/inline code, URLs and Markdown
- * link destinations (keeping the visible link text), and HTML tags. A big Latin
- * code block must not mask a non-Latin body, and a URL's Latin host must not
- * count as English prose.
- */
-export function stripNonProse(text: string): string {
-  let t = text;
-  t = t.replace(/```[\s\S]*?```/g, " "); // fenced code blocks
-  t = t.replace(/~~~[\s\S]*?~~~/g, " "); // alt fenced code blocks
-  t = t.replace(/`[^`]*`/g, " ");        // inline code
-  t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1"); // [text](url) → text (drop dest)
-  t = t.replace(/\bhttps?:\/\/\S+/gi, " "); // bare URLs
-  t = t.replace(/\bwww\.\S+/gi, " ");
-  t = t.replace(/<[^>]+>/g, " ");         // HTML tags
-  return t;
-}
-
-export type LanguageVerdict = "LATIN_DOMINANT" | "NON_LATIN_MAJORITY" | "NO_LETTERS";
-
-export interface LanguageMix {
-  latinLetters: number;
-  nonLatinLetters: number;
-  totalLetters: number;
-  verdict: LanguageVerdict;
-}
-
-/**
- * Analyze the script mix of a single text after NFC normalization. Only `\p{L}`
- * letters count (punctuation, digits, emoji, whitespace, CJK punctuation are
- * NOT language-body evidence).
+ * True if the text contains ANY non-Latin letter.
  *
- * ASYMMETRIC counting (closes the "hide the body in a code fence" bypass):
- *  - NON-Latin letters are counted over the FULL text — so `确认中` inside a
- *    ```code``` fence, `inline code`, or <html> still counts. You cannot hide a
- *    non-Latin body by wrapping it in markup.
- *  - LATIN letters are counted over the PROSE only (non-prose spans stripped) —
- *    so a big Latin code block / URL cannot DILUTE the ratio and mask a
- *    non-Latin prose body.
- * The verdict is NON_LATIN_MAJORITY when non-Latin letters are STRICTLY more
- * than half of (proseLatin + fullNonLatin) — exactly 50% (e.g. "English 中文")
- * passes as Latin-dominant. If there are non-Latin letters but ZERO Latin prose
- * letters, that is a fully non-Latin body → NON_LATIN_MAJORITY.
- */
-export function analyzeLanguageMix(text: string): LanguageMix {
-  if (!text) return { latinLetters: 0, nonLatinLetters: 0, totalLetters: 0, verdict: "NO_LETTERS" };
-  const full = text.normalize("NFC");
-  const prose = stripNonProse(full);
-  let latin = 0;
-  for (const ch of prose) {
-    if (/\p{L}/u.test(ch) && !isNonLatinLetter(ch)) latin++;
-  }
-  let nonLatin = 0;
-  for (const ch of full) {
-    if (isNonLatinLetter(ch)) nonLatin++;
-  }
-  const total = latin + nonLatin;
-  let verdict: LanguageVerdict;
-  if (total === 0) verdict = "NO_LETTERS";
-  else if (nonLatin * 2 > total) verdict = "NON_LATIN_MAJORITY";
-  else verdict = "LATIN_DOMINANT";
-  return { latinLetters: latin, nonLatinLetters: nonLatin, totalLetters: total, verdict };
-}
-
-/**
- * True if the text's MAIN prose is a non-Latin writing system (i.e. it is NOT
- * predominantly English/Latin). Empty/whitespace text is treated as English.
- * A minority foreign word passes; only a non-Latin-majority body fails.
- */
-export function isNonEnglishText(text: string): boolean {
-  return analyzeLanguageMix(text).verdict === "NON_LATIN_MAJORITY";
-}
-
-/**
- * True if the prose contains ANY non-Latin letter at all (even a minority one).
- * Used to decide whether the pure-Latin romanized-language semantic fallback is
- * worth running: it only makes sense when the text is 100% Latin script.
+ * Scans the FULL text — code spans, URLs and HTML included. Nothing is
+ * stripped first: a body hidden inside a ```fence``` is still the body, and
+ * the gate must not offer markup as a bypass.
  */
 export function containsNonLatinLetter(text: string): boolean {
   if (!text) return false;
-  // Scan the FULL text (not prose-stripped): a non-Latin letter anywhere —
-  // including inside code/URLs — means the pure-Latin romanized-language
-  // semantic fallback is not applicable.
   for (const ch of text.normalize("NFC")) {
     if (isNonLatinLetter(ch)) return true;
   }
   return false;
 }
 
+/** Which surface an L5 decision was made on. Wording only — never the rule. */
+export type L5Kind = "commit-subject" | "commit-body" | "pr-text" | "test-label";
+
+/** One refused text, with the surface it came from. */
+export interface L5Rejection {
+  kind: L5Kind;
+  /** The exact text that was refused (callers truncate it for display). */
+  text: string;
+}
+
 /**
- * Given candidate strings (commit messages, or PR title+body), return the first
- * one whose main body is not English, or undefined if all are English. Each
- * string is judged SEPARATELY (never concatenated) so a long English body can
- * never mask a fully non-English title. Used to produce a precise block reason.
+ * THE L5 judgement — the single implementation every call site uses.
+ *
+ * Returns the rejection, or undefined when the text may pass. Empty text
+ * passes (there is nothing to be non-English about).
  */
-export function firstNonEnglish(texts: readonly string[]): string | undefined {
+export function judgeEnglish(kind: L5Kind, text: string): L5Rejection | undefined {
+  return containsNonLatinLetter(text) ? { kind, text } : undefined;
+}
+
+/**
+ * The first of `texts` that L5 refuses, judged SEPARATELY (never concatenated)
+ * so a long English text cannot mask a short non-English one.
+ */
+export function firstNonEnglishText(kind: L5Kind, texts: readonly string[]): L5Rejection | undefined {
   for (const t of texts) {
-    if (isNonEnglishText(t)) return t;
+    const hit = judgeEnglish(kind, t);
+    if (hit) return hit;
   }
   return undefined;
+}
+
+/** What part of a commit message failed the L5 check. */
+export type CommitMessagePart = "subject" | "body";
+
+/** The offending message plus WHICH part of it failed. */
+export interface NonEnglishCommitMessage {
+  /** The exact text that failed — the subject line, or the whole message. */
+  text: string;
+  /** Which part the verdict came from (drives a precise block reason). */
+  part: CommitMessagePart;
+}
+
+/**
+ * The SUBJECT line of a commit message, as GIT would resolve it.
+ *
+ * `git commit` runs the message through `git stripspace`, which drops leading
+ * blank lines before taking the subject — so the subject of `"\n\n修复问题\n\nbody"`
+ * is `修复问题`, NOT the empty first line. Reading the literal first line would
+ * therefore hand a one-newline bypass to anything that judges the subject.
+ */
+export function commitSubjectLine(message: string): string {
+  for (const line of message.split("\n")) {
+    if (line.trim().length > 0) return line.trim();
+  }
+  return "";
+}
+
+/**
+ * L5 for ONE COMMIT MESSAGE. Subject and body obey the SAME hard rule; the
+ * split exists so the block can say WHERE the offending text is — the subject
+ * is the line every log, blame and changelog shows, and pointing at the whole
+ * message when only its first line is at fault wastes a round.
+ *
+ * Takes ONE WHOLE message, deliberately: `git commit -m A -m B` builds a
+ * single message whose paragraphs are A and B, so only A is a subject.
+ * Callers must join the paragraphs with a blank line first, exactly as git
+ * does.
+ */
+export function nonEnglishCommitMessage(message: string): NonEnglishCommitMessage | undefined {
+  const subject = commitSubjectLine(message);
+  if (judgeEnglish("commit-subject", subject)) return { text: subject, part: "subject" };
+  if (judgeEnglish("commit-body", message)) return { text: message, part: "body" };
+  return undefined;
+}
+
+/** How much of a refused text a block reason quotes back. */
+export const L5_QUOTE_LENGTH = 60;
+
+const KIND_LABEL: Record<L5Kind, string> = {
+  "commit-subject": "the commit SUBJECT line",
+  "commit-body": "the commit message body",
+  "pr-text": "the PR title/description",
+  "test-label": "a test label",
+};
+
+/**
+ * The one-sentence block reason for a rejection — the SAME sentence at every
+ * call site, so the four surfaces cannot drift into four vocabularies. The
+ * caller adds its own next step (appeal, rewrite hint).
+ */
+export function l5BlockReason(hit: L5Rejection): string {
+  return `${KIND_LABEL[hit.kind]} is not English: "${hit.text.slice(0, L5_QUOTE_LENGTH)}". ` +
+    "L5 accepts no non-Latin letters at all.";
 }

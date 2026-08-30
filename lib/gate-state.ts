@@ -21,9 +21,12 @@ import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
+import { normalizeRuntime } from "./orchestrator-registry.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
+import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
+
 import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
@@ -88,7 +91,76 @@ export interface GateState {
    * against this, and record_review binds a READY to the reviewed commit's
    * tree. Written only by review_checkpoint; absent before the first one.
    */
-  checkpoint?: { sha: string; prevSha: string; at: string };
+  checkpoint?: {
+    sha: string;
+    prevSha: string;
+    at: string;
+    /**
+     * This round reached the checkpoint WITHOUT a precommit PASS, on the
+     * user's `/gate-bypass` authorization (R-22).
+     *
+     * Recorded so the fact survives the round: the reviewer is told, and
+     * `declare_done` repeats it. A bypass the user granted is legitimate; a
+     * bypass nobody can see afterwards is not.
+     */
+    precommitBypassed?: boolean;
+  };
+
+  /**
+   * The worktree the session STARTED in, when it was not clean. Recorded at
+   * session start and cleared once `setup_workspace` settled it with the
+   * user. While it stands unsettled, loop-mode edits are refused: changes the
+   * session did not make must not silently become part of what it ships.
+   */
+  worktreeDirty?: { files: string[]; at: string; settled?: boolean };
+  /**
+   * The branch this session's work must end up in — the user confirms it
+   * (`setup_workspace`), the gate merges into it (`declare_done`).
+   */
+  baseBranch?: string;
+  /**
+   * The branch this session commits on. Absent ⇒ commits are refused
+   * (fail-closed): a session must never commit onto whatever branch it
+   * happened to start on.
+   */
+  workBranch?: string;
+  /**
+   * Append-only audit of every branch/worktree operation the gate performed:
+   * where the session came from, what it discarded, where its checkpoints
+   * landed, which base and work branch were chosen. This is what makes the
+   * final merge a lookup instead of a guess.
+   */
+  branchOps?: import("./workspace-branch.ts").BranchOp[];
+  /**
+   * A merge the gate started and could not finish. `declare_done` refuses
+   * while it stands: the conflict is the agent's to resolve (or the user's to
+   * waive), never the gate's to guess at.
+   */
+  mergeConflict?: { branch: string; base: string; files: string[]; at: string };
+  /** The user waived the merge for this session (escape hatch, on record). */
+  mergeWaived?: { at: string; reason: string };
+  /**
+   * The COMPLETION record — `declare_done` was accepted (R3-5).
+   *
+   * It exists because a supervisor could not tell a finished child from a
+   * running one: the orchestration probe was reduced to reading the child's
+   * TERMINAL, where "Working" printed an hour ago still matched, and a child
+   * that had merged its branch and closed every gate produced no signal for
+   * 725 seconds. The gate already knew — it had just accepted the completion
+   * — and wrote that fact nowhere. Now it does, in the child's own sidecar,
+   * which the orchestrator reads through `childGateState`.
+   *
+   * Written on ACCEPTANCE only (a rejected `declare_done` records nothing),
+   * and never cleared by the loop reset below it: "this task was completed at
+   * T" stays true even when the session goes on to do something else.
+   */
+  completion?: {
+    at: string;
+    /** How the work branch landed — merged, waived, or nothing to merge. */
+    merge: "merged" | "waived" | "none";
+    /** The one-paragraph summary the agent declared with (bounded). */
+    summary?: string;
+  };
   hasCodeChange: boolean;
   hasDocChange: boolean;
   review: {
@@ -199,14 +271,24 @@ export interface GateState {
    */
   taskModeSource?: TaskModeSource;
   /**
+   * The orchestration this session runs, when it is an orchestrator
+   * (lib/orchestrator-registry.ts). Holds the child registry, the user's plan
+   * approval and the notification throttle — everything that has to survive a
+   * turn boundary and be readable by a relay successor.
+   *
+   * Optional: an ordinary loop session never writes it, and older sidecars
+   * simply have none.
+   */
+  orchestrator?: import("./orchestrator-registry.ts").OrchestratorRuntime;
+  /**
    * sd0x-dev-flow R10 ("Think Harder") port: whether the one-shot strategic
    * reset checklist has fired for this state lifetime. Optional so schema-1
    * sidecars written by older versions still validate; absent ⇒ not fired.
    */
   strategicResetFired?: boolean;
   /**
-   * Agent-requested loop pause (pause_for_question tool): the agent hit a
-   * genuine blocker only the user can resolve, so L2 auto-continuation is
+   * The loop pause an `ask_user` interview leaves behind: something the user
+   * has not answered yet, so L2 auto-continuation is
    * paused until the user's next interactive message. This NEVER affects the
    * ship gate — unmetRequirements() ignores it entirely; a paused loop still
    * blocks git commit/push and gh pr. Persisted so the pause survives a
@@ -216,6 +298,27 @@ export interface GateState {
     question: string;
     at: string;
   };
+  /**
+   * The last `ask_user` interview: what was asked and what came back, kept so
+   * the Q&A survives the dialogs that carried it (they leave no transcript of
+   * their own) and an interrupted interview stays inspectable. Diagnostic
+   * only — no enforcement path reads it.
+   */
+  askUser?: {
+    at: string;
+    answers: import("./ask-user.ts").AskAnswer[];
+  };
+  /**
+   * A-class text appeals (lib/text-appeal.ts): how many were spent (a quota
+   * SHARED with `gh pr edit` arbitration), which contents were already
+   * decided (so a refused text cannot be re-rolled), and the single live
+   * content-bound pass, if one was granted.
+   *
+   * Persisted because all three are anti-abuse facts: an in-memory quota
+   * would reset on every restart, and a refused text could be appealed again
+   * by killing the session. Absent ⇒ nothing appealed yet.
+   */
+  appeals?: import("./text-appeal.ts").AppealRecord;
   /**
    * USER-GRANTED review-scope limit (request_scope_limit tool): the user
    * confirmed via an extension-rendered dialog that the gate only needs to
@@ -283,6 +386,18 @@ export interface GateState {
    */
   goalPrereview?: GoalPrereviewRecord;
   /**
+   * The PLAN pre-audit — `goalPrereview`'s twin for the orchestration layer
+   * (round-4 §7), written only by the gate after it parsed the auditor's JSON
+   * fence inside `orchestrator_plan`'s submit.
+   *
+   * Absent ⇒ this plan was never audited, and `submit` shows no dialog. It
+   * binds to the plan's CANONICAL text (tasks, boundaries, dependencies,
+   * parallelism), so executing the plan — which rewrites statuses constantly
+   * — never invalidates it, while widening a boundary always does.
+   */
+  planAudit?: PlanAuditRecord;
+
+  /**
    * L8b audit HISTORY (goal criterion 2): every goal-auditor audit ever
    * recorded, PASS or FAIL, oldest first — `goalPrereview` above is only the
    * latest record. Persisted so a re-audit chain is inspectable (and the
@@ -290,6 +405,16 @@ export interface GateState {
    * singular record.
    */
   goalPrereviewHistory?: GoalPrereviewRecord[];
+  /**
+   * Audits of the CURRENT goal (B2), counted by the gate so the agent never
+   * has to. It counts the lineage being negotiated right now — every revision
+   * of one draft — and resets when that negotiation ends (a goal the user
+   * approved) or when a new session starts negotiating. It is deliberately
+   * NOT `goalPrereviewHistory.length`: that history is append-only across
+   * every goal the repo ever had, so it would announce "round 22" on the
+   * third audit of today's draft.
+   */
+  goalAuditRound?: number;
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of
    *  them. Ship enforcement never reads it; absence just narrows the
@@ -314,9 +439,73 @@ export function emptyState(sessionId: string | null, maxRounds: number): GateSta
   };
 }
 
-export function sidecarPath(cwd: string, configDirName = ".pi"): string {
-  return join(cwd, configDirName, "review-gate-state.json");
+/**
+ * Environment variable that gives a session its OWN sidecar file (F4).
+ *
+ * THE MEASURED PROBLEM. The sidecar is one file per worktree, and `taskMode`
+ * is a single-valued field in it. When an orchestrator supervises a child in
+ * the same worktree, the two sessions write the same file: the orchestrator
+ * records `taskMode: "orchestrator"`, the child records `taskMode: "loop"`,
+ * each `ask_user` record overwrites the other's, and the orchestrator's own
+ * prompt ends up quoting the CHILD's unmet gates ("code review gate PENDING")
+ * as if they were its own. That is F4 and half of F13.
+ *
+ * WHY THE CHILD MOVES AND NOT THE ORCHESTRATOR. The obvious fix is to give
+ * the orchestrator a special file, and it is the wrong way round. The L3 git
+ * hook (`hooks/pre-commit`) resolves the sidecar by this same rule, and a
+ * MISSING variable must fail toward the STRICTER file: with children on the
+ * variant path, a hook that somehow runs without the variable falls back to
+ * the default file — the orchestrator's, an enforced mode with no review —
+ * and blocks. With it the other way round, the same accident would check a
+ * child's commit against a file the child never wrote and let it through. The
+ * fail-closed direction decides it.
+ *
+ * As a bonus this also separates SERIAL children from each other: two
+ * children that run one after another in the same worktree no longer inherit
+ * each other's verdicts.
+ */
+export const STATE_VARIANT_ENV = "RG_STATE_VARIANT";
+
+/**
+ * The base branch an orchestration child's work must end up in (R3-6).
+ *
+ * WHY IT IS INJECTED RATHER THAN INFERRED. `setup_workspace` defaults the
+ * base to "the branch you are standing on". For a child in a gate-created
+ * worktree that branch is `orch/<task>-<stamp>` — a name the gate invented
+ * minutes earlier — so the child dutifully merged its work into the scratch
+ * branch and the lane's output never reached the orchestration's real base.
+ * Measured in the third run: of two parallel lanes, one asked the right
+ * question only because its agent happened to pass `base` itself, and both
+ * lanes ended up merged by hand.
+ *
+ * The orchestrator knows the base at spawn time, so it says so. The child
+ * still SHOWS it to whoever answers the dialog — an injected default is a
+ * default, not a decision made behind anyone's back.
+ */
+export const ORCH_BASE_BRANCH_ENV = "RG_ORCH_BASE_BRANCH";
+
+
+/** Only these characters may reach a filename. Anything else is dropped. */
+const STATE_VARIANT_SAFE = /[^A-Za-z0-9._-]/g;
+
+/**
+ * The sidecar variant this process runs under, sanitized, or `undefined` for
+ * the default file. Never throws and never returns something that could
+ * escape the `.pi/` directory.
+ */
+export function stateVariantFrom(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env[STATE_VARIANT_ENV]?.trim();
+  if (!raw) return undefined;
+  const safe = raw.replace(STATE_VARIANT_SAFE, "-").replace(/^[.-]+/, "").slice(0, 64);
+  return safe.length > 0 ? safe : undefined;
 }
+
+export function sidecarPath(cwd: string, configDirName = ".pi", variant?: string): string {
+  const safe = variant ? variant.replace(STATE_VARIANT_SAFE, "-").replace(/^[.-]+/, "").slice(0, 64) : "";
+  const name = safe.length > 0 ? `review-gate-state.${safe}.json` : "review-gate-state.json";
+  return join(cwd, configDirName, name);
+}
+
 
 /**
  * Load and validate the sidecar.
@@ -366,6 +555,23 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         delete parsed.lastReadyReview;
       }
     }
+    // Orchestration runtime. Same threat model as `lastReadyReview` above:
+    // this blob carries the USER'S plan approval (which authorizes spawning
+    // child sessions) and tmux pane ids (which become command targets), and
+    // it lives in an ordinary repo-local file. `normalizeRuntime` validates
+    // it and drops the approval on any doubt — the session then simply has to
+    // ask the user again. The orchestration ID is deliberately NOT taken from
+    // the file: the session re-derives it from its own environment, so a
+    // forged one can never become an attention channel key.
+    if (parsed.orchestrator !== undefined) {
+      // The id is passed EMPTY on purpose, so this line says what the comment
+      // above claims: nothing about the address survives the file. The session
+      // stamps its own (env-derived) id in when it loads the runtime
+      // (lib/orchestrator-wiring.ts).
+      const cleaned = normalizeRuntime(parsed.orchestrator, "");
+      if (cleaned) parsed.orchestrator = cleaned;
+      else delete parsed.orchestrator;
+    }
     // Round-18 polish gate: malformed per-round file lists and the last
     // reason are DROPPED (absent means 'no trigger / nothing to carry',
     // which is the safe direction for both).
@@ -378,6 +584,23 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         if (r.blockingFiles !== undefined &&
             (!Array.isArray(r.blockingFiles) || !r.blockingFiles.every((v) => typeof v === "string"))) {
           delete r.blockingFiles;
+        }
+        // A persisted total must be a real count. `isPlateaued` only guards
+        // against `null` and then compares numerically, and EVERY comparison
+        // with NaN is false — so a NaN slipping in here would sail past the
+        // unparseable-total guard and let overlap alone declare a plateau.
+        // Anything that is not a finite non-negative number becomes `null`,
+        // which is the guard's own fail-closed value (round-15 P1). The
+        // sidecar is a file: a stale writer or a hand edit can put anything
+        // in it, so the parser's sanitizing is not enough on its own.
+        if (r.findingsTotal !== undefined && r.findingsTotal !== null &&
+            (typeof r.findingsTotal !== "number" ||
+              !Number.isFinite(r.findingsTotal) || r.findingsTotal < 0)) {
+          r.findingsTotal = null;
+        }
+        if (r.fingerprints !== undefined &&
+            (!Array.isArray(r.fingerprints) || !r.fingerprints.every((v) => typeof v === "string"))) {
+          r.fingerprints = [];
         }
       }
     }
@@ -412,6 +635,19 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
          typeof parsed.pausedQuestion.question !== "string" ||
          typeof parsed.pausedQuestion.at !== "string")) {
       delete parsed.pausedQuestion;
+    }
+    // Malformed completion record → treated as ABSENT, which is the
+    // fail-closed direction here: a supervisor then keeps watching a child it
+    // cannot prove is finished, rather than writing it off (and marking its
+    // plan task done) on a field anything could have written. `merge` is
+    // constrained to the three landings the gate itself records.
+    if (parsed.completion !== undefined) {
+      const c = parsed.completion as Record<string, unknown> | null;
+      const validMerge = c?.merge === "merged" || c?.merge === "waived" || c?.merge === "none";
+      if (!c || typeof c !== "object" || Array.isArray(c) || typeof c.at !== "string" || !c.at ||
+          !validMerge || (c.summary !== undefined && typeof c.summary !== "string")) {
+        delete parsed.completion;
+      }
     }
     // Malformed scope limit → treated as ABSENT (fail-closed: absent means
     // the FULL-scope gate; dropping a forged one can only widen coverage,
@@ -497,6 +733,83 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
       } else {
         parsed.goalPrereviewHistory = parsed.goalPrereviewHistory.filter(isGoalPrereviewRecord);
       }
+    }
+    // The goal's audit round is a plain counter; anything else on disk is
+    // corruption, and dropping it restarts the count rather than printing
+    // "第 NaN 轮审计".
+    if (parsed.goalAuditRound !== undefined &&
+      (typeof parsed.goalAuditRound !== "number" || !Number.isFinite(parsed.goalAuditRound) || parsed.goalAuditRound < 0)) {
+      delete parsed.goalAuditRound;
+    }
+    // The ask_user record is diagnostic, so a malformed one is dropped whole:
+    // no enforcement path reads it, and half a record answers nothing.
+    if (parsed.askUser !== undefined) {
+      const rec = parsed.askUser as { at?: unknown; answers?: unknown };
+      const ok = !!rec && typeof rec === "object" && typeof rec.at === "string" &&
+        Array.isArray(rec.answers) &&
+        rec.answers.every((a) =>
+          typeof a === "object" && a !== null &&
+          typeof (a as { question?: unknown }).question === "string" &&
+          ["answered", "skipped", "deferred-to-chat", "unanswered"].includes(String((a as { kind?: unknown }).kind)) &&
+          // An `answer` that is not text would be replayed into the agent's
+          // prompt as the user's words — it must be a string or absent.
+          ((a as { answer?: unknown }).answer === undefined || typeof (a as { answer?: unknown }).answer === "string"));
+      if (!ok) delete parsed.askUser;
+    }
+    // APPEALS are anti-abuse bookkeeping, so a malformed record is dropped
+    // WHOLE and the session starts from zero spent appeals. That is the safe
+    // direction for the pass (a forged one would authorize content no arbiter
+    // ever saw) and the honest one for the quota: a record the gate cannot
+    // read is not evidence that anything was spent.
+    if (parsed.appeals !== undefined) {
+      const a = parsed.appeals as { used?: unknown; decided?: unknown; pass?: unknown };
+      const decisionsOk = !!a && typeof a === "object" &&
+        typeof a.used === "number" && Number.isFinite(a.used) && a.used >= 0 &&
+        !!a.decided && typeof a.decided === "object" && !Array.isArray(a.decided) &&
+        Object.entries(a.decided as Record<string, unknown>).every(([digest, decision]) =>
+          /^[0-9a-f]{64}$/.test(digest) &&
+          ["GATE_WINS", "AGENT_WINS", "HUMAN"].includes(String(decision)));
+      const p = a?.pass as { digest?: unknown; kind?: unknown; issuedAt?: unknown } | undefined;
+      const passOk = p === undefined ||
+        (!!p && typeof p === "object" && typeof p.digest === "string" && /^[0-9a-f]{64}$/.test(p.digest) &&
+          typeof p.kind === "string" && typeof p.issuedAt === "string");
+      if (!decisionsOk || !passOk) delete parsed.appeals;
+    }
+    // WORKSPACE + BRANCH facts decide where commits may land and what gets
+    // merged, so a corrupt one must not be believed. Each is dropped
+    // independently, and dropping any of them TIGHTENS the gate: no work
+    // branch ⇒ no commit, no base ⇒ no merge, no settled flag ⇒ edits stay
+    // blocked until setup_workspace runs again.
+    if (parsed.baseBranch !== undefined && typeof parsed.baseBranch !== "string") delete parsed.baseBranch;
+    if (parsed.workBranch !== undefined && typeof parsed.workBranch !== "string") delete parsed.workBranch;
+    if (parsed.worktreeDirty !== undefined) {
+      const w = parsed.worktreeDirty as { files?: unknown; at?: unknown; settled?: unknown };
+      const ok = !!w && typeof w === "object" && typeof w.at === "string" &&
+        Array.isArray(w.files) && w.files.every((f) => typeof f === "string") &&
+        (w.settled === undefined || typeof w.settled === "boolean");
+      if (!ok) delete parsed.worktreeDirty;
+    }
+    if (parsed.branchOps !== undefined) {
+      if (!Array.isArray(parsed.branchOps)) delete parsed.branchOps;
+      else {
+        parsed.branchOps = parsed.branchOps.filter((o) =>
+          typeof o === "object" && o !== null &&
+          typeof (o as { op?: unknown }).op === "string" &&
+          typeof (o as { at?: unknown }).at === "string");
+      }
+    }
+    if (parsed.mergeConflict !== undefined) {
+      const m = parsed.mergeConflict as { branch?: unknown; base?: unknown; files?: unknown; at?: unknown };
+      const ok = !!m && typeof m === "object" && typeof m.branch === "string" && typeof m.base === "string" &&
+        typeof m.at === "string" && Array.isArray(m.files) && m.files.every((f) => typeof f === "string");
+      if (!ok) delete parsed.mergeConflict;
+    }
+    if (parsed.mergeWaived !== undefined) {
+      const w = parsed.mergeWaived as { at?: unknown; reason?: unknown };
+      // A forged waiver would skip the merge silently — it must be a complete
+      // record or nothing.
+      const ok = !!w && typeof w === "object" && typeof w.at === "string" && typeof w.reason === "string";
+      if (!ok) delete parsed.mergeWaived;
     }
     const migrated = migrateFingerprintVersion(parsed);
     if (out) out.migrated = migrated;

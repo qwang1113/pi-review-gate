@@ -230,6 +230,154 @@ test("pausedQuestion: malformed shapes fail toward NOT paused (loop stays armed)
     assert.equal(loaded?.pausedQuestion, undefined, JSON.stringify(bad));
   }
 });
+
+// ---------------------------------------------------------------------------
+// completion — the fact a supervising orchestrator reads (R3-5)
+// ---------------------------------------------------------------------------
+
+test("completion: `declare_done` acceptance round-trips through the sidecar", () => {
+  // This record is the ONLY criterion for the `done` child state: without it
+  // an orchestrator was left inferring completion from leftover terminal
+  // text, and inferred "working" for 725 seconds on a finished child.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const s = emptyState("s", 10);
+  s.completion = { at: "2026-08-30T04:20:00.000Z", merge: "merged", summary: "全部完成" };
+  saveSidecar(path, s);
+  assert.deepEqual(loadSidecar(path)?.completion, s.completion);
+});
+
+test("completion: a malformed record is DROPPED, so the child keeps being supervised", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of [
+    "done!",
+    42,
+    null,
+    [{ at: "t", merge: "merged" }],
+    { merge: "merged" },                       // no time
+    { at: "t" },                               // no landing
+    { at: "t", merge: "shipped" },             // not a landing the gate records
+    { at: "", merge: "merged" },               // empty time
+    { at: "t", merge: "merged", summary: 7 },
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, completion: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar itself must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.completion, undefined,
+      `${JSON.stringify(bad)} must not be able to mark a task done`);
+  }
+});
+
+
+test("goalAuditRound: a corrupt counter is dropped, so the count restarts at 1", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of ["3", -1, Number.NaN, Number.POSITIVE_INFINITY, null, {}]) {
+    writeFileSync(path, JSON.stringify({ ...base, goalAuditRound: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.goalAuditRound, undefined, JSON.stringify(bad));
+  }
+  writeFileSync(path, JSON.stringify({ ...base, goalAuditRound: 3 }));
+  assert.equal(loadSidecar(path)?.goalAuditRound, 3, "a real count survives");
+});
+
+test("askUser: a malformed interview record is dropped whole", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of [
+    "string",
+    { answers: [] }, // no timestamp
+    { at: "t" }, // no answers
+    { at: "t", answers: [{ question: 42, kind: "answered" }] },
+    { at: "t", answers: [{ question: "q", kind: "made-up" }] },
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, askUser: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.askUser, undefined, JSON.stringify(bad));
+  }
+  const good = { at: "2026-08-29T00:00:00.000Z", answers: [{ question: "q", kind: "answered", answer: "a" }] };
+  writeFileSync(path, JSON.stringify({ ...base, askUser: good }));
+  assert.deepEqual(loadSidecar(path)?.askUser, good, "a real record survives");
+});
+
+test("workspace/branch facts: corruption is dropped, and dropping TIGHTENS the gate", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  // A non-string branch would reach a git argv and a commit decision.
+  for (const field of ["baseBranch", "workBranch"] as const) {
+    writeFileSync(path, JSON.stringify({ ...base, [field]: 42 }));
+    assert.equal(loadSidecar(path)?.[field], undefined, field);
+    writeFileSync(path, JSON.stringify({ ...base, [field]: "feat/x" }));
+    assert.equal(loadSidecar(path)?.[field], "feat/x", `${field} survives when real`);
+  }
+  for (const bad of ["s", { at: "t" }, { files: [] }, { at: "t", files: [1] }, { at: "t", files: [], settled: "yes" }]) {
+    writeFileSync(path, JSON.stringify({ ...base, worktreeDirty: bad }));
+    assert.equal(loadSidecar(path)?.worktreeDirty, undefined, JSON.stringify(bad));
+  }
+  // A dropped `settled` flag leaves edits BLOCKED, never open.
+  writeFileSync(path, JSON.stringify({ ...base, worktreeDirty: { at: "t", files: ["?? a.ts"], settled: true } }));
+  assert.equal(loadSidecar(path)?.worktreeDirty?.settled, true);
+
+  writeFileSync(path, JSON.stringify({ ...base, branchOps: "nope" }));
+  assert.equal(loadSidecar(path)?.branchOps, undefined);
+  writeFileSync(path, JSON.stringify({
+    ...base,
+    branchOps: [{ op: "checkout", from: null, to: "main", at: "t" }, { nonsense: true }, { op: 5, at: "t" }],
+  }));
+  assert.equal(loadSidecar(path)?.branchOps?.length, 1, "only well-formed ops survive");
+
+  for (const bad of [{ branch: "w", base: "b", at: "t" }, { branch: "w", base: "b", files: ["x"] }, "s"]) {
+    writeFileSync(path, JSON.stringify({ ...base, mergeConflict: bad }));
+    assert.equal(loadSidecar(path)?.mergeConflict, undefined, JSON.stringify(bad));
+  }
+  // A forged waiver would skip the merge silently.
+  for (const bad of [{ at: "t" }, { reason: "r" }, "s", 1]) {
+    writeFileSync(path, JSON.stringify({ ...base, mergeWaived: bad }));
+    assert.equal(loadSidecar(path)?.mergeWaived, undefined, JSON.stringify(bad));
+  }
+  writeFileSync(path, JSON.stringify({ ...base, mergeWaived: { at: "t", reason: "user handles it" } }));
+  assert.deepEqual(loadSidecar(path)?.mergeWaived, { at: "t", reason: "user handles it" });
+});
+
+
+
+/**
+ * Round-15 P1 (reviewer-measured): a persisted `findingsTotal` reaches
+ * `isPlateaued`, which guards only against `null` and then compares
+ * numerically — and every comparison with NaN is false. A NaN (or an
+ * Infinity that becomes one when folded) would therefore slip past the
+ * unparseable-total guard and let fingerprint overlap alone declare a
+ * plateau. The sidecar is a file, so sanitizing at the parser is not enough.
+ */
+test("a persisted findingsTotal that is not a real count is read as unparseable", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+
+  for (const bad of [Number.NaN, Infinity, -Infinity, -3, "7", {}]) {
+    const s = { ...base, rounds: [{ round: 1, findingsTotal: bad, fingerprints: ["a#1#x"], verdict: "BLOCKED", at: "t" }] };
+    // JSON has no NaN/Infinity literal — they serialize to null, which is
+    // already the fail-closed value, so those two are injected as raw text.
+    const raw = JSON.stringify(s).replace('"findingsTotal":null', `"findingsTotal":${String(bad)}`);
+    writeFileSync(path, raw);
+    const loaded = loadSidecar(path);
+    if (!loaded) continue; // a body JSON.parse rejects outright is also fail-closed
+    assert.equal(loaded.rounds[0]?.findingsTotal, null, `${String(bad)} must not survive as a count`);
+  }
+
+  // A real count still round-trips untouched.
+  const good = { ...base, rounds: [{ round: 1, findingsTotal: 2, fingerprints: ["a#1#x"], verdict: "BLOCKED", at: "t" }] };
+  writeFileSync(path, JSON.stringify(good));
+  assert.equal(loadSidecar(path)?.rounds[0]?.findingsTotal, 2);
+});
+
 test("round-18 polish fields round-trip and malformed values are dropped", () => {
   const dir = makeTemp();
   const path = join(dir, "state.json");
@@ -519,6 +667,32 @@ test("plateau: same findings 3 rounds, non-decreasing → true", () => {
     round(3, 3, ["a#1#x", "b#2#y", "d#4#w"]),
   ];
   assert.ok(isPlateaued(rounds, 3));
+});
+
+/**
+ * Round-14 P2 (reviewer-measured): plateau detection must depend on the
+ * FINDINGS, not on how the reviewer formatted its output. Before
+ * `parseReviewOutput` deduplicated across fences, a round whose reviewer
+ * repeated its verdict fence scored double, and the next honest round looked
+ * like convergence (2 → 1) — so a genuine plateau went undetected. This pins
+ * the parser's contract from the consumer's side.
+ */
+test("plateau: a repeated verdict fence must not read as convergence", () => {
+  const repeatedThenSingle = [
+    round(1, 1, ["a.ts#1#boom"]), // what a deduplicated repeated-fence round yields
+    round(2, 1, ["a.ts#1#boom"]),
+    round(3, 1, ["a.ts#1#boom"]),
+  ];
+  assert.ok(isPlateaued(repeatedThenSingle, 3), "identical rounds are a plateau");
+
+  // The pre-fix shape, kept explicit: an inflated first round makes the same
+  // three rounds look like they are shrinking.
+  const inflated = [
+    round(1, 2, ["a.ts#1#boom", "a.ts#1#boom"]),
+    round(2, 1, ["a.ts#1#boom"]),
+    round(3, 1, ["a.ts#1#boom"]),
+  ];
+  assert.ok(!isPlateaued(inflated, 3), "double counting hides the plateau — hence the dedup");
 });
 
 test("converging (totals decreasing) → not plateaued", () => {

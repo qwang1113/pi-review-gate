@@ -58,7 +58,9 @@ import {
   runTestsByPathCommand,
   shellQuote,
   splitTokens,
+  stepEnv,
   stepInputScope,
+
 } from "./precommit-plan.mjs";
 import {
   computeInputDigests,
@@ -188,6 +190,59 @@ function present(idx, lines, step) {
   pumpLive();
 }
 
+// ---- fail-fast across the parallel stage ----
+//
+// A precommit that already knows its verdict is FAIL has nothing left to
+// learn: the remaining checks cost minutes and change nothing. The FIRST
+// failure aborts the rest immediately (user ask, 2026-08-29).
+//
+// Aborted steps are reported as `skip` with a reason, never as `fail`: they
+// did not fail, they never finished — and `checksRun` counts only steps that
+// actually produced a result. Their cache entries are dropped by
+// `record()` (non-pass ⇒ delete), so the next run re-runs them.
+const liveSteps = new Map(); // idx -> ChildProcess, only while it runs
+const abortedSteps = new Set(); // idx of steps THIS mechanism killed
+let failFastBy = null; // name of the step whose failure stopped the run
+
+function abortRemainingSteps(failedName) {
+  failFastBy = failedName;
+  for (const [idx, child] of liveSteps) {
+    abortedSteps.add(idx);
+    killStepTree(child);
+  }
+}
+
+/**
+ * Terminate a step and everything it started.
+ *
+ * Signalling the `bash -c` wrapper alone is not enough, and it cost a measured
+ * 25 seconds: bash dies, but its grandchild (`npm` → the real command) keeps
+ * running AND keeps the stdout pipe open, so the runner still waits for the
+ * step it just aborted. Each step therefore leads its OWN process group, and
+ * the whole group is signalled.
+ */
+function killStepTree(child) {
+  try {
+    if (typeof child.pid === "number") process.kill(-child.pid, "SIGTERM");
+    else child.kill("SIGTERM");
+  } catch {
+    // The group is already gone, or this platform refused the group signal —
+    // fall back to the direct child.
+    try { child.kill("SIGTERM"); } catch { /* already gone */ }
+  }
+}
+
+// A detached group must never outlive the runner: if we exit (normally, or on
+// Ctrl-C, which no longer reaches the steps' own groups), take them with us.
+function killAllLiveSteps() {
+  for (const child of liveSteps.values()) killStepTree(child);
+}
+process.on("exit", killAllLiveSteps);
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => { killAllLiveSteps(); process.exit(1); });
+}
+
+
 function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
   const started = Date.now();
   return new Promise((resolve) => {
@@ -201,9 +256,22 @@ function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
     const cmd = yieldCpu ? `nice -n 10 ${command}` : command;
     const child = spawn("bash", ["-c", cmd], {
       cwd,
+      // R-15 — a step is NOT this session. Stripping the gate's own session
+      // variables here is the root fix for the failure that made every
+      // orchestration child unable to reach a precommit PASS (and therefore
+      // unable to finish at all): see `stepEnv` in ./precommit-plan.mjs.
+      env: stepEnv(process.env),
       stdio: ["ignore", "pipe", "pipe"],
+
       timeout: 15 * 60 * 1000,
+      // Each step LEADS its own process group, so fail-fast can terminate the
+      // whole tree it started (bash → npm → the real command), not just the
+      // wrapper. The runner kills every live group on its own exit, so a
+      // detached group never outlives the run.
+      detached: true,
     });
+    // Registered while it runs, so the first failure can stop the others.
+    liveSteps.set(idx, child);
     // The old spawnSync had a 64MB maxBuffer that turned pathological output
     // into a hard failure; the streamed version caps capture the same way,
     // but truncates with a marker instead of failing the step.
@@ -244,14 +312,22 @@ function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
       flushDecoders();
       const full = capture.text;
       running.delete(idx);
+      liveSteps.delete(idx);
       live.full = full;
-      const closing = `◀ ${name} — ${passed ? "pass" : "fail"} (${durationMs}ms, exit ${code ?? `signal ${signal}`})`;
+      // Fail-fast: this step's failure is the whole run's verdict, so the
+      // remaining ones are killed here — before anyone waits on them.
+      const aborted = abortedSteps.has(idx);
+      if (!passed && !aborted) abortRemainingSteps(name);
+      const outcome = aborted ? "aborted" : passed ? "pass" : "fail";
+      const closing = `◀ ${name} — ${outcome} (${durationMs}ms, exit ${code ?? `signal ${signal}`})`;
       // A step that already streamed live must not have its body reprinted:
       // emit only what the last pump did not cover, plus the closing marker.
       const lines = live.headerPrinted
         ? [full.slice(live.streamed), closing].filter((l) => l !== "")
         : [`\n▶ ${name} — ${cmd}`, full, closing];
-      const status = passed ? "pass" : "fail";
+      // An aborted step is `skip`, not `fail`: it never produced a result, and
+      // reporting it as failed would invent failures the code does not have.
+      const status = aborted ? "skip" : passed ? "pass" : "fail";
       // Keyed on the DECLARED command, not on `cmd`: the `nice` prefix is a
       // scheduling detail that depends on how many steps happened to run in
       // parallel, and letting it into the key would miss on every run.
@@ -265,6 +341,7 @@ function runStep(name, command, idx, yieldCpu = false, cacheScope = "all") {
         name,
         command: cmd,
         status,
+        ...(aborted ? { reason: `aborted — ${failFastBy ?? "an earlier check"} failed (fail-fast)` } : {}),
         durationMs,
         cached: false,
         cacheScope,
@@ -987,9 +1064,29 @@ if (fix) {
 }
 
 // ---- stage 2: everything else, in parallel, keyed on the post-fix tree ----
+//
+// Fail-fast reaches ACROSS the stages: a failing fix step already decided the
+// verdict, and stage 2 would just spend minutes confirming it. Its steps are
+// reported as aborted — the same word the killed parallel peers get, because
+// it is the same fact: they never ran.
+const fixFailed = steps.some((s) => s.name === fix?.name && s.status === "fail");
 const toRun = [];
 for (const s of runnable) {
   if (s === fix) continue;
+  if (fixFailed) {
+    abortedSteps.add(s.idx);
+    present(s.idx, [`\n⏭ ${s.name} — aborted (${failFastBy ?? fix?.name} failed)`], {
+      name: s.name,
+      command: s.command,
+      status: "skip",
+      reason: `aborted — ${failFastBy ?? fix?.name} failed (fail-fast)`,
+      durationMs: 0,
+      cached: false,
+      cacheScope: s.cacheScope,
+      tail: "",
+    });
+    continue;
+  }
   const hit = lookupHit(s);
   if (hit) cachedStep(s.name, s.command, s.idx, hit, s.cacheScope);
   else toRun.push(s);
@@ -1005,6 +1102,14 @@ saveCache(repoRoot, cache);
 // ---- verdict ----
 // `anyFail` is derived from the (declaration-ordered) steps, not from return
 // values: parallel steps cannot report back through the old boolean channel.
+// Say it out loud when the run stopped early: a reader who sees three checks
+// and four steps must not have to guess which ones never finished. Only when
+// something was ACTUALLY aborted — a failure with no peer left to stop is
+// just a failure, and claiming otherwise describes a run that did not happen.
+if (failFastBy && abortedSteps.size > 0) {
+  stream(`\n⏹ fail-fast: ${failFastBy} failed — ${abortedSteps.size} remaining check(s) aborted, not run.`);
+}
+
 const anyFail = steps.some((s) => s.status === "fail");
 let overall;
 if (anyFail) overall = "## Overall: ❌ FAIL";
@@ -1058,6 +1163,12 @@ if (asJson) {
   }
   console.log(`\nTotal: ${result.totalMs}ms`);
   console.log("");
+  // The run stopped at the first failure: say which check ended it, so the
+  // aborted steps above read as "never ran", not as "passed".
+  if (failFastBy && abortedSteps.size > 0) {
+    console.log(`⏹ fail-fast: ${failFastBy} failed — ${abortedSteps.size} remaining check(s) aborted, not run.`);
+    console.log("");
+  }
   // testScope skipped means the fast lane dropped the test step entirely: a
   // PASS here did NOT execute the test suite. Say so in the human report —
   // silently "PASS" next to a zero-test run is exactly the trap users hit.

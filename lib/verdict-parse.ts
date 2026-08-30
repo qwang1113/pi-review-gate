@@ -20,6 +20,19 @@ export interface ParsedVerdict {
    * blocks when enforcement is on, it never passes).
    */
   docSync?: DocSyncAttestation;
+  /**
+   * The directory the reviewer says it ran in (its own `pwd`), verbatim.
+   *
+   * Carried through so the GATE can check it against the repo the round was
+   * prepared for. The schema and the task text both state that check, and
+   * until round-9 nothing performed it: a fence claiming any cwd at all parsed
+   * to the same READY (reviewer-reproduced with `/evil/elsewhere`). A stated
+   * check that does not run is worse than none, because it is believed.
+   *
+   * This parser does not judge the value — it is self-reported, and weighing
+   * it is the gate's job.
+   */
+  cwd?: string;
 }
 
 interface FenceVerdict {
@@ -28,25 +41,93 @@ interface FenceVerdict {
   findingFingerprints: string[];
   hasP0P1: boolean;
   docSync?: DocSyncAttestation;
+  cwd: string | undefined;
+  /**
+   * Sticky: two fences reported DIFFERENT directories somewhere in this fold.
+   *
+   * Needed because `undefined` alone is ambiguous — it means both "nobody
+   * reported one" and "the reports contradicted". `worse()` folds pairwise, so
+   * without this flag a later agreeing fence resurrects a cwd that an earlier
+   * contradiction had already destroyed (measured: /evil, /repo, /repo folded
+   * back to /repo). A contradiction never un-happens.
+   */
+  cwdConflict: boolean;
+  /**
+   * EXACT per-finding keys, used only to recognise the same finding reported
+   * in two fences of one output. Deliberately not the coarse `fingerprints`,
+   * which exist to match a finding to itself ACROSS rounds and are too loose
+   * to serve as an identity (round-15 P2).
+   */
+  findingIdentities: string[];
 }
 
 const SEVERITY: Record<string, number> = { BLOCKED: 3, NEEDS_HUMAN: 2, READY: 1 };
 
-/** P0-4: aggregate findings across equal-severity fences. The first verdict
-    is kept but hasP0P1 accumulates, so READY+READY with P1 in either → BLOCKED. */
+/** P0-4: fold one fence into the running worst verdict. A STRICTLY worse fence
+    replaces the fold; every NON-WORSE one (equal severity OR lighter) is merged
+    into it, keeping the worse verdict and accumulating the evidence — so
+    READY+READY with a P1 in either becomes BLOCKED, and a NEEDS_HUMAN followed
+    by a READY stays NEEDS_HUMAN with both fences' findings.
+    The lighter branch is not a curiosity: the sticky cwd conflict has to
+    survive it (round-13 P1 — the doc said "equal-severity" and hid it). */
 function worse(a: FenceVerdict | undefined, b: FenceVerdict): FenceVerdict {
   if (!a) return b;
   const bWorse = SEVERITY[b.verdict] > SEVERITY[a.verdict];
+  // Taking b wholesale drops a's cwdConflict — deliberately safe: the fold is
+  // MONOTONIC (a verdict only ever gets worse), so once this branch is taken
+  // the result can never return to READY, and the cwd check runs on READY
+  // only. A forgotten conflict therefore cannot influence any decision.
   if (bWorse) return b;
-  // Equal severity: merge — accumulate findings and hasP0P1. docSync merges
-  // conservatively: agreeing fences keep the value, disagreeing fences drop
-  // it (absent blocks under enforcement — fail-closed on contradiction).
+  // Counting uses the EXACT identities; the coarse fingerprints are only
+  // deduplicated so a repeated fence cannot inflate the cross-round overlap
+  // denominator. Deciding "same finding" on the coarse key merged genuinely
+  // distinct defects (round-15 P2).
+  const mergedIdentities = [...new Set([...a.findingIdentities, ...b.findingIdentities])];
+  const duplicateFindings =
+    a.findingIdentities.length + b.findingIdentities.length - mergedIdentities.length;
+  const mergedFingerprints = [...new Set([...a.findingFingerprints, ...b.findingFingerprints])];
+
+  const cwdConflict = a.cwdConflict || b.cwdConflict ||
+    (a.cwd !== undefined && b.cwd !== undefined && a.cwd !== b.cwd);
+  // b is NOT worse (equal, or lighter — this branch covers both, despite what
+  // the historical "equal severity" wording suggested): keep a's verdict and
+  // fold b's evidence in. docSync and cwd
+  // merge conservatively: agreeing fences keep the value, disagreeing fences
+  // drop it (absent blocks under enforcement — fail-closed on contradiction).
+  //
+  // cwd MUST be merged, not dropped: the reviewer protocol explicitly allows
+  // repeating the identical verdict first and last (agents/reviewer.md), and
+  // rebuilding without the field turned that honest habit into a CWD CHECK
+  // FAILED — a gate that punishes the format it recommends.
   return {
     verdict: a.verdict,
-    findingsTotal: (a.findingsTotal ?? 0) + (b.findingsTotal ?? 0),
-    findingFingerprints: [...a.findingFingerprints, ...b.findingFingerprints],
+    // The SAME finding reported in two fences is one finding, not two — same
+    // reason the identical repeated verdict must not be read as a
+    // contradiction: repeating the verdict first and last is a format the
+    // reviewer protocol recommends, and counting it twice made
+    // `isPlateaued` a function of the output's SHAPE rather than its content
+    // (measured: repeated→single→single looked like findings shrinking, so a
+    // real plateau went undetected).
+    //
+    // Deduplication is by fingerprint, and the total is reduced by exactly the
+    // number of duplicates removed — never recomputed from the fingerprint
+    // count, because a finding with neither `file` nor `issue` is counted but
+    // produces no fingerprint.
+    findingsTotal: Math.max(0, (a.findingsTotal ?? 0) + (b.findingsTotal ?? 0) - duplicateFindings),
+    findingFingerprints: mergedFingerprints,
+    findingIdentities: mergedIdentities,
     hasP0P1: a.hasP0P1 || b.hasP0P1,
     docSync: a.docSync === b.docSync ? a.docSync : undefined,
+    // Only a CONTRADICTION destroys the report. A fence that simply omits cwd
+    // (a terse opening fence before the full one, say) contradicts nothing, so
+    // it must not erase the value the other fence did report — that would be
+    // the same false rejection this merge exists to prevent.
+    //
+    // The conflict is STICKY (see cwdConflict): folding is pairwise, so a
+    // contradiction that is only remembered as `undefined` gets overwritten by
+    // the next agreeing fence.
+    cwd: cwdConflict ? undefined : a.cwd ?? b.cwd,
+    cwdConflict,
   };
 }
 
@@ -81,7 +162,15 @@ function recoverFenceVerdict(body: string): FenceVerdict | undefined {
   if (!verdict) return undefined;
   // Salvaged READY is untrustworthy (possible hidden P0/P1) → downgrade.
   const safeVerdict = verdict === "READY" ? "BLOCKED" : verdict;
-  return { verdict: safeVerdict, findingsTotal: null, findingFingerprints: [], hasP0P1: false };
+  // No cwd is recovered ON PURPOSE: this body is malformed, untrusted text.
+  // A loose regex "recovering" a directory from it would manufacture the very
+  // evidence the check is meant to weigh, out of the input we trust least. It
+  // costs an honest reviewer nothing — a salvaged READY is already downgraded
+  // above, and the cwd check only runs on READY.
+  return {
+    verdict: safeVerdict, findingsTotal: null, findingFingerprints: [], findingIdentities: [],
+    hasP0P1: false, cwd: undefined, cwdConflict: false,
+  };
 }
 
 /**
@@ -155,11 +244,24 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
       const s = ((f as Record<string, unknown>).severity as string ?? "").toUpperCase();
       return s === "P0" || s === "P1";
     });
-  } else if (typeof obj.findings_total === "number") {
-    findingsTotal = obj.findings_total;
+  } else if (typeof obj.findings_total === "number" && Number.isFinite(obj.findings_total)) {
+    // A self-reported count, so it is sanitized at the source rather than
+    // trusted: a negative or fractional value is not a number of findings.
+    // Measured before this guard: `findings_total: -5` merged with a real
+    // fence to a total of -4, and `isPlateaued` compares totals numerically.
+    findingsTotal = Math.max(0, Math.floor(obj.findings_total));
   }
 
+  // TWO keys per finding, because they answer different questions (round-15
+  // P2): `fingerprints` is deliberately COARSE — a line bucket and a truncated
+  // issue — so the same problem still matches itself across rounds while the
+  // reviewer rewords it or it drifts a few lines. `identities` is EXACT, and
+  // is the only thing allowed to decide "these two are the same finding" when
+  // folding fences of one output. Using the coarse key for that collapsed
+  // genuinely distinct findings (measured: a.ts:11 and a.ts:19 sharing their
+  // first 80 issue characters counted as one).
   const fingerprints: string[] = [];
+  const identities: string[] = [];
   if (Array.isArray(findings)) {
     for (const f of findings) {
       if (typeof f === "object" && f !== null) {
@@ -168,6 +270,9 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
         const issue = typeof ff.issue === "string" ? ff.issue : typeof ff.title === "string" ? ff.title : "";
         const line = typeof ff.line === "number" ? Math.floor(ff.line / 10) : "";
         if (file || issue) fingerprints.push(`${file}#${line}#${issue.slice(0, 80)}`);
+        const exactLine = typeof ff.line === "number" ? ff.line : "";
+        const severity = typeof ff.severity === "string" ? ff.severity : "";
+        if (file || issue) identities.push(`${file}\u0000${exactLine}\u0000${severity}\u0000${issue}`);
       }
     }
   }
@@ -179,7 +284,16 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
     docSync = docSyncRaw.trim().toUpperCase() as DocSyncAttestation;
   }
 
-  return { verdict, findingsTotal, findingFingerprints: fingerprints, hasP0P1, docSync };
+  // `cwd` travels verbatim — the gate compares it, this parser does not judge it.
+  const cwdRaw = obj.cwd;
+  const cwd = typeof cwdRaw === "string" && cwdRaw.trim() !== "" ? cwdRaw.trim() : undefined;
+
+  // cwdConflict starts false: a single fence cannot contradict itself.
+  return {
+    verdict, findingsTotal, findingFingerprints: fingerprints, findingIdentities: identities,
+    hasP0P1, docSync,
+    cwd, cwdConflict: false,
+  };
 }
 
 /**
@@ -209,6 +323,7 @@ export function parseReviewOutput(text: string): ParsedVerdict | undefined {
     findingsTotal: result.findingsTotal,
     findingFingerprints: result.findingFingerprints,
     docSync: result.docSync,
+    cwd: result.cwd,
   };
 }
 
