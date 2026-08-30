@@ -269,7 +269,7 @@ function hiddenHit(subcommand: string, segment: string): TmuxGuardHit {
       `review-gate: 禁止 \`tmux ${subcommand}\` —— 它会破坏或越出用户的 tmux 环境。` +
       "这条命令把它藏在了包装命令、嵌套 shell 或 shell 语法（子 shell / 命令替换）里，" +
       "门禁按 fail-closed 处理：宁可误伤一次（改写即可），也不能放过一次搞挂用户 window 的调用。" +
-      "需要开子会话用 `orchestrator_spawn`，接力用 `orchestrator_relay`。",
+      "需要开子会话用 `orchestrator_spawn`，接力用 `orchestrator_handoff`，救活死掉的用 `orchestrator_recover`。",
   };
 }
 
@@ -315,7 +315,7 @@ export function detectForbiddenTmux(
         reason:
           `review-gate: 禁止 \`tmux ${subcommand}\` —— 它会破坏或越出用户的 tmux 环境` +
           "（编排只允许在用户与你约定的那一个 window 内 split）。" +
-          "需要开子会话用 `orchestrator_spawn`，接力用 `orchestrator_relay`。",
+          "需要开子会话用 `orchestrator_spawn`，接力用 `orchestrator_handoff`，救活死掉的用 `orchestrator_recover`。",
       };
     }
 

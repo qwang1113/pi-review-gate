@@ -5354,9 +5354,10 @@ export default function reviewGate(pi: ExtensionAPI) {
               (orchestratorMode
                 // R-30: an orchestrator has no review of its own to run, so
                 // pointing it at the loop would be pointing it at nothing.
-                // These are the SAME items `orchestrator_status` lists.
-                ? "\n把上面这些做完再退出（这就是 `orchestrator_status` 里「还差什么」那一段，两处用的是同一个判据函数）。"
-                : "\nComplete the loop (fix → review → record_review → precommit) and try again.") +
+                // These are the SAME items block 5 of the `orchestrator_wait`
+                // receipt lists — one decision function, two surfaces.
+                ? "\n把上面这些做完再退出（这就是 `orchestrator_wait` 回执第 5 块「还差什么」，两处用的是同一个判据函数）。"
+                : "\nComplete the loop (fix → judge_submit({role:\"reviewer\"}) → READY) and try again.") +
               (problems.some((p) => p.includes("modified after the last READY"))
                 ? "\nTip: any code OR doc edit after a READY review invalidates it — including handoff/design/" +
                   "plan docs. Finish ALL edits (docs included) FIRST, then run the final review + precommit " +

@@ -514,7 +514,7 @@ export function planHash(plan: OrchestratorPlan): string {
   return createHash("sha256").update(canonicalPlanText(plan), "utf8").digest("hex");
 }
 
-/** One-screen rendering for the approval dialog and orchestrator_status. */
+/** One-screen rendering for the approval dialog and the takeover report. */
 export function formatPlanSummary(plan: OrchestratorPlan): string {
   const lines: string[] = [
     `${plan.title}`,

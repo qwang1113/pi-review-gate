@@ -140,7 +140,7 @@ export function predecessorCloseAuthorization(
       ok: false,
       reason:
         "本会话不是任何人的接任者，不能以「接力」的名义关掉一个项目经理 pane。" +
-        "接力的顺序是固定的：老会话写交接文档 → `orchestrator_relay` 开出新会话 → " +
+        "接力的顺序是固定的：老会话写交接文档 → `orchestrator_handoff` 开出新会话 → " +
         "由新会话关掉老会话（这天然证明新会话已经起来了，中间不断档）。",
     };
   }

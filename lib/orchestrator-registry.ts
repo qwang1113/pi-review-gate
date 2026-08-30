@@ -386,7 +386,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   };
 }
 
-/** One-screen rendering for `orchestrator_status`. */
+/** One-screen rendering for `orchestrator_attach`'s takeover report. */
 export function formatChildren(
   runtime: OrchestratorRuntime,
   alivePaneIds: readonly string[],

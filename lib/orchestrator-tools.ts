@@ -252,7 +252,7 @@ async function handlePlanAction(
   );
 }
 
-/** Register `orchestrator_plan`, `orchestrator_status` and `orchestrator_notify`. */
+/** Register `orchestrator_plan` and `orchestrator_notify`. */
 export function registerOrchestratorStateTools(host: ToolHost, deps: OrchestratorDeps): void {
   host.registerTool({
     name: "orchestrator_plan",
