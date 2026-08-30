@@ -406,9 +406,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `orchestrator-pane-decor.ts` | 子会话的可视化区分：按 childId 派色（纯函数，同一子会话永远同色）、`@task-slug · state 220s` 的边框标题、window 级标签栏开关判定。**纯展示层**：只写不读，任何判定都不看它 |
 | `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：目录前缀内的边界细化、收窄、加依赖、降并行度⇒批准迁移并记审计；新任务/新目录/删依赖/串行改并行/提并行度⇒重新批准 |
 | `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案 |
-
 | `orchestrator-handoff-advice.ts` | 上下文用量 + 待答请求数 ⇒ 接力时机（软/硬阈值，没读数就明说没读数） |
-
 | `orchestrator-answer-tools.ts` | 工具 `orchestrator_answer`：把答案写进通道（选项原文/序号/唯一子串，含糊即拒），代批 goal 时按约束 8 比对任务边界 |
 | `orchestrator-delivery.ts` | 投递：任务文件 + `pi --session-id @file` 启动、恢复用的 argv 与说明，以及「什么才算送达」的判据（通道记录 / 子会话回执） |
 | `orchestrator-deps.ts` | 编排工具需要的依赖集合；host 类型本身住在 `tool-host.ts`，这里只 re-export |
@@ -417,7 +415,6 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `orchestrator-gate.ts` | 编排的 14 条硬约束，写成纯决策以便逐条单测 |
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
 | `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
-
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash |
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西 |
@@ -425,7 +422,6 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close / handoff）并注册全部八个编排会话工具——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，answer 与 recover/attach 在各自的 `*-tools.ts` |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块 |
 | `orchestrator-tmux.ts` | 仅剩的 tmux 命令构造：开 pane / 关 pane / 列 pane，加上 pane 装饰（`select-pane -P/-T` 与 window 级 `setw pane-border-*`，一律不带 `-g`，且都会过 `assertSafeTmuxArgv`）—— 没有 send-keys，也没有 capture-pane |
-
 | `orchestrator-tool-kit.ts` | 编排工具的共用前置：模式校验、pane 实况、plan 可用性 |
 | `orchestrator-tools.ts` | plan / notify 两个不碰 tmux 的工具 |
 | `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据），以及那份五块回执的装配 |
