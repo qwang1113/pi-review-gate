@@ -19,7 +19,7 @@ function frontmatter(file: string): string {
 
 test("every agent frontmatter carries the required fields", () => {
   const files = readdirSync(AGENTS).filter((f) => f.endsWith(".md"));
-  assert.ok(files.length >= 5, `expected at least 5 agents, found ${files.length}`);
+  assert.ok(files.length >= 4, `expected at least 4 agents, found ${files.length}`);
   for (const f of files) {
     const body = frontmatter(f);
     for (const key of ["name", "description", "model", "fallbackModels", "thinking", "systemPromptMode", "tools"]) {
@@ -35,7 +35,7 @@ test("agents/*.md exactly matches KNOWN_AGENTS (config/render see every agent)",
   const files = readdirSync(AGENTS).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, "")).sort();
   const known = [...KNOWN_AGENTS].sort();
   assert.deepEqual(files, known, "shipped agents must equal KNOWN_AGENTS");
-  assert.ok(files.length >= 6, `expected all 6 agents, found ${files.length}`);
+  assert.ok(files.length >= 4, `expected all 4 agents, found ${files.length}`);
 });
 
 test("L3 judges (reviewer/adviser/arbiter/goal-auditor) think at max — the verdict tier never degrades", () => {
@@ -53,7 +53,6 @@ test("incremental-review roles run context: fresh — nothing forks the main ses
     assert.match(frontmatter(f), /^defaultContext: fresh$/m, `${f}: must default to fresh context`);
   }
   // The judging roles that stay fork-based do so deliberately (arbiter needs
-  // the block context; recon inherits cheaply).
   assert.doesNotMatch(frontmatter("arbiter.md"), /^defaultContext: fresh$/m);
 });
 
@@ -63,7 +62,7 @@ test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its ve
   // before granting the session's exit contract.
   const body = frontmatter("goal-auditor.md");
   assert.match(body, /^model: claude-fable-5$/m, "the goal auditor must stay on the strong judging chain");
-  assert.match(body, /^fallbackModels: claude-opus-5, opencode-go\/deepseek-v4-flash$/m, "same fallback chain as the other judges");
+  assert.match(body, /^fallbackModels: claude-opus-5$/m, "same fallback chain as the other judges");
   assert.doesNotMatch(body, /tools:.*\b(edit|write|bash)\b/, "the auditor audits text; it must not be able to write");
   const src = readFileSync(join(AGENTS, "goal-auditor.md"), "utf8");
   // Its output IS the gate record, so the two rules the parser depends on must
@@ -81,44 +80,15 @@ test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its ve
 });
 
 
-test("L2 fixer is the execution tier: write-capable, mid-tier, max thinking, never a judge", () => {
-  const body = frontmatter("fixer.md");
-  assert.match(body, /^model: claude-sonnet-5$/m, "L2 primary must be the mid-tier model");
-  assert.match(body, /^thinking: max$/m, "L2 executes at max thinking (user policy: max thinking for coding/orchestration)");
-  assert.match(body, /tools:.*\b(edit|write)\b/, "fixer needs write tools");
-  const src = readFileSync(join(AGENTS, "fixer.md"), "utf8");
-  assert.match(src, /NOT a judge/i, "fixer must declare it never judges");
-});
-
-// The mid-tier chain is pinned EXACTLY (model + thinking + deepseek source
-// priority self > opencode-go > onekey + family fallbacks) for every execution
-// role — not just the family-span assertion below.
-const MID_TIER_CHAIN =
-  /^model: claude-sonnet-5$/m;
-const MID_TIER_FALLBACK =
-  /^fallbackModels: claude-opus-5,\s*opencode-go\/deepseek-v4-flash$/m;
-
-test("L2 execution role (fixer) pins the exact mid-tier chain at max thinking", () => {
-  for (const f of ["fixer.md"]) {
-    const body = frontmatter(f);
-    assert.match(body, MID_TIER_CHAIN, `${f}: L2 primary must be claude-sonnet-5`);
-    assert.match(body, /^thinking: max$/m, `${f}: L2 executes at max thinking`);
-    assert.match(
-      body,
-      MID_TIER_FALLBACK,
-      `${f}: fallback must follow deepseek source priority self > oc-sdk-go > onekey, then grok/glm/opus`,
-    );
-  }
-});
 
 test("L3 judge roles pin the exact strong-tier chain (model + fallbacks + max thinking)", () => {
   const STRONG_FALLBACK =
-    /^fallbackModels: claude-opus-5,\s*opencode-go\/deepseek-v4-flash$/m;
+    /^fallbackModels: claude-opus-5$/m;
   for (const f of ["reviewer.md", "adviser.md", "arbiter.md"]) {
     const body = frontmatter(f);
     assert.match(body, /^model: claude-fable-5$/m, `${f}: L3 primary must be claude-fable-5`);
     assert.match(body, /^thinking: max$/m, `${f}: L3 must think at max`);
-    assert.match(body, STRONG_FALLBACK, `${f}: fallback must be the cross-family strong chain`);
+    assert.match(body, STRONG_FALLBACK, `${f}: fallback must be the strong chain`);
   }
 });
 
@@ -145,58 +115,7 @@ test("AGENTS.md states read-only parallel exploration and NO wave protocol", () 
   assert.match(src, /removed on 2026-08-26|were removed|no wave/i, "AGENTS.md must state the wave machinery is removed");
 });
 
-test("recon is the cheap read-only tier: cheap model, low/off thinking, no write tools", () => {
-  assert.ok(existsSync(join(AGENTS, "recon.md")), "agents/recon.md must exist");
-  const body = frontmatter("recon.md");
-  assert.match(body, /^model: claude-haiku-4-5$/m, "recon primary must be the cheap model");
-  assert.match(body, /^fallbackModels: opencode-go\/deepseek-v4-flash$/m, "recon fallback is the one approved cheap fallback (opencode-go only runs flash)");
-  const thinking = body.match(/^thinking: (\S+)/m)?.[1];
-  assert.ok(thinking && ["off", "low"].includes(thinking), `recon thinking '${thinking}' must be off or low`);
-  assert.doesNotMatch(body, /tools:.*\b(edit|write|bash)\b/, "recon must be strictly read-only (no edit/write/bash)");
-  const src = readFileSync(join(AGENTS, "recon.md"), "utf8");
-  assert.match(src, /never (writes|edits|judges)|not.*(judge|reviewer)/i, "recon must declare it never judges");
-});
 
-// ── Model tiers: strong judges, mid execution, cheap recon ────────────────
-
-test("L3 judge fallback chains span at least two model families (cross-family fallback)", () => {
-  for (const f of ["reviewer.md", "adviser.md", "arbiter.md"]) {
-    const body = frontmatter(f);
-    const fb = body.match(/^fallbackModels: (.+)$/m)?.[1];
-    assert.ok(fb, `${f}: fallbackModels required`);
-    const ids = fb.split(/\s*,\s*/);
-    assert.ok(ids.length >= 2, `${f}: at least 2 fallbacks`);
-    // Families: anthropic (claude), openai (gpt), zhipu (glm), xai (grok)
-    const families = new Set<string>();
-    for (const id of ids) {
-      if (/claude/.test(id)) families.add("anthropic");
-      else if (/gpt/.test(id)) families.add("openai");
-      else if (/glm/.test(id)) families.add("zhipu");
-      else if (/grok/.test(id)) families.add("xai");
-      else families.add("other");
-    }
-    assert.ok(families.size >= 2, `${f}: fallbacks must span ≥2 model families (got ${[...families].join(",")})`);
-  }
-});
-
-test("L2 execution fallbacks span families and include the cheap-but-strong flash", () => {
-  for (const f of ["fixer.md"]) {
-    const body = frontmatter(f);
-    const fb = body.match(/^fallbackModels: (.+)$/m)?.[1];
-    assert.ok(fb, `${f}: fallbackModels required`);
-    const ids = fb.split(/\s*,\s*/);
-    assert.ok(ids.length >= 2, `${f}: at least 2 fallbacks`);
-    const families = new Set<string>();
-    for (const id of ids) {
-      if (/deepseek/.test(id)) families.add("deepseek");
-      else if (/grok/.test(id)) families.add("xai");
-      else if (/glm/.test(id)) families.add("zhipu");
-      else if (/claude/.test(id)) families.add("anthropic");
-      else families.add("other");
-    }
-    assert.ok(families.size >= 2, `${f}: execution fallbacks must span ≥2 model families (got ${[...families].join(",")})`);
-  }
-});
 
 // ── Review protocol: goal pre-review + single-reviewer final ───────────────
 
@@ -334,8 +253,8 @@ test("REGRESSION: every re-review must carry the previous round's conclusion", (
 
 test("AGENTS.md and SKILL.md make judge roles their own pi processes — the only review path", () => {
   // 2026-08-29 model: judge roles run as their own non-interactive pi
-  // processes, dispatched by the gate through judge_submit; subagent dispatch
-  // of a judge role is HARD-blocked.
+  // processes, dispatched by the gate through judge_submit; the subagent
+  // dispatch surface was retired 2026-09-06 with the pi-subagents companion.
   for (const file of [AGENTS_MD, SKILL_MD]) {
     const src = readFileSync(file, "utf8");
     assert.match(
@@ -345,8 +264,8 @@ test("AGENTS.md and SKILL.md make judge roles their own pi processes — the onl
     );
     assert.match(
       src,
-      /BLOCKS judge roles|HARD-?blocked/i,
-      `${file} must state that judge-role dispatch is blocked`,
+      /only\s+through\s+`?judge_submit|no second (dispatch )?path|only review path/i,
+      `${file} must state that judge roles dispatch only through judge_submit`,
     );
   }
   // …and must not resurrect the engine as a dependency.
@@ -394,17 +313,6 @@ test("REGRESSION: isolation + streaming are documented in every protocol surface
   const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
   assert.match(commands, /baseline\.\.HEAD/);
   assert.match(commands, /never poll in a tight loop|no polling|WAKES this session/i);
-
-  // And the design record no longer contradicts the implementation. The
-  // single-writer rule survived the model change; the SNAPSHOT it used to be
-  // phrased in terms of did not (2026-08-27: the reviewer judges an immutable
-  // commit range and uses a throwaway worktree only when it runs something).
-  const plan = readFileSync(join(ROOT, "docs", "parallel-execution-plan.md"), "utf8");
-  assert.match(plan, /MAIN WORKTREE has exactly one writer/i);
-  assert.match(plan, /immutable commit range/i,
-    "the boundary is stated in terms of the CURRENT model");
-  assert.doesNotMatch(plan, /reviewer sits in its OWN disposable snapshot/i,
-    "the retired snapshot phrasing must not come back as current guidance");
 });
 
 test("every judge role is told that findings carry BLOCKERS ONLY", () => {

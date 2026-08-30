@@ -29,16 +29,11 @@
  * object literal.
  *
  * BEHAVIOR IS FROZEN: this was moved verbatim out of the extension, ORDER
- * included (the edit arm answers first and returns before the subagent scan;
- * the subagent scan runs before the bash arm). The orderings inside each arm
- * are documented in that arm's module and pinned in
- * test/extension-structure.test.ts.
+ * included (the edit arm answers first and returns before the bash arm).
+ * The orderings inside each arm are documented in that arm's module and
+ * pinned in test/extension-structure.test.ts.
  */
 
-import { readFileSync } from "node:fs";
-import { resolve as pathResolve } from "node:path";
-
-import { isJudgeAgentName, judgeRoleInScript, normalizeToolName } from "./judge-prompt.ts";
 import {
   evaluateEditCall,
   type EditGuardDeps,
@@ -73,68 +68,6 @@ export interface ShipGateHookDeps extends EditGuardDeps, ShipGateBashDeps {
   isEditTool(toolName: string): boolean;
 }
 
-// (Which agent names are JUDGE roles is lib/judge-prompt.ts's own
-// `isJudgeAgentName` — the same module `judgeRoleInScript` comes from, and the
-// same list that detector scans with. The extension used to carry a
-// byte-equivalent second copy; two places to edit one list is exactly how it
-// drifts, so the copy died with the move (哲学三).)
-
-
-/**
- * The judge-role subagent block (HARD), as a pure decision over the two
- * channels a judge role can arrive through plus the read of a script file.
- *
- * 2026-08-27 execution model: judge roles (reviewer / adviser /
- * goal-auditor) run ONLY as their own pi processes (review_spawn), never as
- * subagents. A subagent call naming a judge role is refused here — the
- * agent is told to use the review_spawn flow instead. This is the INVERTED
- * successor of the snapshot-pin guard: the same failure it blocked (a
- * judge running in the live worktree where the gate looks) is now blocked
- * by removing the dispatch shape entirely.
- */
-export function judgeSubagentBlock(input: {
-  /** The top-level `agent` parameter, if the call carried one. */
-  agentName: string;
-  /** An inline `workflowScript` body, if the call carried one. */
-  script: string | undefined;
-  /** A `workflowScriptPath`, if the call carried one. */
-  scriptPath: string | undefined;
-  /** Read that path; `undefined` on ANY failure (which fails closed below). */
-  readScript: (path: string) => string | undefined;
-}): ToolCallBlock | undefined {
-  // Round-8 P1: the top-level agent field is NOT the only channel — a
-  // workflowScript can name a judge role INSIDE its body (runs.run({
-  // agent: "reviewer" })), and the sandbox still cannot give per-child
-  // isolation. Scan the script text with judgeRoleInScript (the retired
-  // guard's own detector, now covering all four judge roles).
-  const { agentName, script, scriptPath } = input;
-  const scriptText = script !== undefined
-    ? script
-    : scriptPath !== undefined
-      ? input.readScript(scriptPath)
-      : undefined;
-  const judgeName = (agentName && isJudgeAgentName(agentName))
-    ? agentName
-    : scriptText !== undefined ? judgeRoleInScript(scriptText) : undefined;
-  // Round-9 P2: a workflowScriptPath that cannot be read must FAIL CLOSED
-  // — the read above yields undefined and no scan would run, letting an
-  // unreadable script dispatch a judge role unchecked.
-  const unreadableScript = scriptPath !== undefined && script === undefined && scriptText === undefined;
-  if (judgeName || unreadableScript) {
-    return {
-      block: true,
-      reason:
-        judgeName
-          ? `review-gate: \`${judgeName}\` is a judge role and runs ONLY as its own pi process — ` +
-            "subagent dispatch for it is retired (2026-08-27 execution model). Submit it with " +
-            "`judge_submit({role, task})`: the gate runs the whole chain and dispatches the judge itself. " +
-            "(A judge dispatched as a subagent would run in your live worktree " +
-            "with no isolation at all — the exact failure the model was built to end.)"
-          : "review-gate: workflowScriptPath could not be read, so a judge role inside it cannot be ruled out — failing closed. Read the script, then dispatch non-judge work through it or submit judge roles with `judge_submit`.",
-    };
-  }
-  return undefined;
-}
 
 /**
  * L1: the whole `tool_call` hook.
@@ -154,22 +87,6 @@ export async function evaluateToolCall(
     return evaluateEditCall(deps, input, ctx);
   }
 
-  // ---------- judge-role subagent block (HARD) ----------
-  const subagentTool = normalizeToolName(event.toolName);
-  if (subagentTool === "subagent") {
-    const cwd = deps.cwd();
-    const block = judgeSubagentBlock({
-      agentName: typeof input.agent === "string" ? input.agent : "",
-      script: typeof input.workflowScript === "string" ? input.workflowScript : undefined,
-      scriptPath: typeof input.workflowScriptPath === "string" ? input.workflowScriptPath : undefined,
-      readScript: (p) => {
-        try {
-          return readFileSync(pathResolve(cwd, p), "utf8");
-        } catch { return undefined; }
-      },
-    });
-    if (block) return block;
-  }
 
   if (event.toolName !== "bash") return undefined;
   return evaluateShipCommand(deps, input, ctx);

@@ -8,8 +8,7 @@
  * test in test/extension-structure.test.ts pinned the SHAPE of the code and
  * nothing ran it. Here the decisions run, with three-line fakes for the seams.
  *
- * Scope: the pure decisions (`sensitiveEditBlock`, `judgeSubagentBlock`,
- * `describeShips`, `buildShipBlockReason`) plus the two
+ * Scope: the pure decisions (`sensitiveEditBlock`,
  * arms' ORDER — the orderings the gate's safety rests on (security floor
  * before the normal-mode return, gate-owned exemption before the L8 goal gate,
  * tmux backstop before `/gate-bypass`, `/gate-bypass` before ship detection).
@@ -23,7 +22,6 @@ import { join } from "node:path";
 
 import {
   evaluateToolCall,
-  judgeSubagentBlock,
   type ShipGateHookDeps,
 } from "../lib/ship-gate-hook.ts";
 import { sensitiveEditBlock } from "../lib/ship-gate-edit-guard.ts";
@@ -204,103 +202,6 @@ test("every tool_call refreshes the extension's context — including the ones t
   assert.deepEqual(r.calls, ["noteContext"]);
 });
 
-// ---------------------------------------------------------------------------
-// The judge-role subagent block.
-
-test("the block recognizes a judge role in every spelling a dispatch can carry", () => {
-  // Through `judgeSubagentBlock`, not the predicate directly: the predicate is
-  // lib/judge-prompt.ts's `isJudgeAgentName` (covered in its own test), and what
-  // matters here is that the L1 block asks it with the raw `agent` value —
-  // trimming, casing, a path and a `.md` suffix all have to survive the trip.
-  const named = (agentName: string) => judgeSubagentBlock({
-    agentName,
-    script: undefined,
-    scriptPath: undefined,
-    readScript: () => undefined,
-  });
-  for (const spelling of [
-    "reviewer", "Reviewer", " adviser ", "goal-auditor",
-    "agents/reviewer.md", "reviewer-readonly", "/abs/path/adviser.MD",
-  ]) {
-    assert.equal(named(spelling)?.block, true, spelling);
-  }
-  for (const other of ["recon", "fixer", "reviewer2", "my-reviewer", ""]) {
-    assert.equal(named(other), undefined, other);
-  }
-});
-
-test("judgeSubagentBlock refuses a judge named at the top level, and points at judge_submit", () => {
-  const block = judgeSubagentBlock({
-    agentName: "reviewer",
-    script: undefined,
-    scriptPath: undefined,
-    readScript: () => undefined,
-  });
-  assert.equal(block?.block, true);
-  assert.match(block!.reason, /`reviewer` is a judge role/);
-  assert.match(block!.reason, /judge_submit\(\{role, task\}\)/);
-});
-
-test("judgeSubagentBlock scans an INLINE workflowScript for a judge role", () => {
-  const block = judgeSubagentBlock({
-    agentName: "",
-    script: 'await runs.run("a", { agent: "adviser", task: "x" });',
-    scriptPath: undefined,
-    readScript: () => { throw new Error("must not read a file when the script is inline"); },
-  });
-  assert.equal(block?.block, true, "a judge role inside the script body is the same dispatch");
-});
-
-test("judgeSubagentBlock reads a workflowScriptPath, and FAILS CLOSED when it cannot", () => {
-  const clean = judgeSubagentBlock({
-    agentName: "",
-    script: undefined,
-    scriptPath: "flows/ok.js",
-    readScript: () => 'runs.run("a", { agent: "fixer" })',
-  });
-  assert.equal(clean, undefined, "a readable, judge-free script passes");
-
-  const named = judgeSubagentBlock({
-    agentName: "",
-    script: undefined,
-    scriptPath: "flows/bad.js",
-    readScript: () => 'runs.run("a", { agent: "goal-auditor" })',
-  });
-  assert.equal(named?.block, true);
-
-  const unreadable = judgeSubagentBlock({
-    agentName: "",
-    script: undefined,
-    scriptPath: "flows/missing.js",
-    readScript: () => undefined,
-  });
-  assert.equal(unreadable?.block, true,
-    "an unreadable script could hide a judge role — no information must not mean pass");
-  assert.match(unreadable!.reason, /failing closed/);
-});
-
-test("a plain subagent call is untouched, and the whole scan is skipped for other tools", async () => {
-  const r = makeDeps();
-  assert.equal(await evaluateToolCall(r.deps, { toolName: "subagent", input: { agent: "recon" } }, {}), undefined);
-  assert.equal(await evaluateToolCall(r.deps, { toolName: "subagent", input: {} }, {}), undefined);
-});
-
-test("the hook reads a workflowScriptPath relative to the session cwd", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rg-ship-hook-"));
-  try {
-    mkdirSync(join(dir, "flows"), { recursive: true });
-    writeFileSync(join(dir, "flows", "f.js"), 'runs.run("a", { agent: "reviewer" })', "utf8");
-    const r = makeDeps({}, dir);
-    const out = await evaluateToolCall(
-      r.deps,
-      { toolName: "subagent", input: { workflowScriptPath: "flows/f.js" } },
-      {},
-    );
-    assert.equal(out?.block, true, "the relative path must resolve against the session cwd");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
 
 // ---------------------------------------------------------------------------
 // The bash arm: the ship gate's own order.

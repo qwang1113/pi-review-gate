@@ -4,11 +4,9 @@
  * frontmatters and the model registry facts; it answers, per agent, which
  * model the chain resolves to and whether the chain is usable at all.
  *
- * Nothing here decides a gate verdict — it is diagnostics only. The
- * provider allowlist (opencode-go → deepseek-v4-flash only, USER
- * REQUIREMENT, `lib/model-allowlist.ts`) is applied the same way the
- * resolver applies it, so the diagnosis never names a model the resolver
- * would refuse.
+ * Nothing here decides a gate verdict — it is diagnostics only.
+ * (The provider allowlist was retired 2026-09-06 with the
+ * pi-opencode-bridge companion.)
  */
 import { KNOWN_THINKING_LEVELS, frontmatterBlock } from "./model-config.ts";
 export interface ModelChainEntry {
@@ -39,11 +37,6 @@ export interface RegistryFacts {
   }>;
   /** Providers with configured credentials (auth.json keys). */
   authedProviders: ReadonlySet<string>;
-  /**
-   * Provider allowlist predicate (lib/model-allowlist.ts isModelAllowed): a
-   * model the resolver would refuse must not show as usable here.
-   */
-  allowed: (model: { provider: string; id: string }) => boolean;
 }
 
 /** Parse the YAML-ish frontmatter of an agent definition. Best-effort. */
@@ -137,9 +130,6 @@ function candidateOk(
   }
   const model = facts.models.find((m) => m.provider === resolved.provider && m.id === resolved.id);
   if (!model) return { ok: false, reason: "not in the model registry" };
-  if (!facts.allowed(resolved)) {
-    return { ok: false, reason: "provider allowlist forbids it (opencode-go: deepseek-v4-flash only)" };
-  }
   if (!facts.authedProviders.has(resolved.provider)) {
     return { ok: false, reason: `no configured credentials for provider "${resolved.provider}"` };
   }

@@ -8,7 +8,6 @@ import {
   resolveSpec,
   type RegistryFacts,
 } from "../lib/model-diagnose.ts";
-import { isModelAllowed } from "../lib/model-allowlist.ts";
 
 const REVIEWER_FRONTMATTER = `---
 name: reviewer
@@ -32,7 +31,6 @@ function facts(overrides: Partial<RegistryFacts> = {}): RegistryFacts {
       { provider: "opencode-go", id: "qwen3.8-max" },
     ],
     authedProviders: new Set(["anthropic", "opencode-go"]),
-    allowed: isModelAllowed,
     ...overrides,
   };
 }
@@ -150,19 +148,6 @@ test("diagnoseChain: first usable model wins (provider order)", () => {
   assert.match(entry.candidates[2]!.reason ?? "", /no configured credentials/);
 });
 
-test("diagnoseChain: allowlist rejects every non-flash opencode-go model", () => {
-  const fm = `---
-model: opencode-go/qwen3.8-max
-fallbackModels: opencode-go/gpt-5.6-luna, opencode-go/deepseek-v4-pro
----`;
-  const entry = diagnoseChain("worker", fm, facts({ authedProviders: new Set(["opencode-go"]) }));
-  assert.equal(entry.blocked, true, "the whole chain is forbidden — only flash may run on opencode-go");
-  assert.equal(entry.usable, null);
-  for (const c of entry.candidates) {
-    assert.equal(c.ok, false);
-    assert.match(c.reason ?? "", /allowlist|registry/);
-  }
-});
 
 test("diagnoseChain: flash-only chain resolves on opencode-go", () => {
   const fm = `---
@@ -260,17 +245,18 @@ test("formatModelDiagnosis renders a readable block with the BLOCKED marker", ()
   const dead = diagnoseChain(
     "worker",
     `---
-model: opencode-go/qwen3.8-max
+model: noauth-provider/no-creds-model
 ---`,
-    facts({ authedProviders: new Set(["opencode-go"]) }),
+    facts({ authedProviders: new Set() }),
   );
   const text = formatModelDiagnosis([ok, dead]);
   assert.match(text, /reviewer: → claude-fable-5/);
   assert.match(text, /worker: ⚠️ BLOCKED/);
-  assert.match(text, /allowlist forbids/);
+  assert.match(text, /no configured credentials/);
   assert.match(text, /✓ claude-fable-5/);
   assert.match(text, /✗ onekey\/gpt-5\.6-sol/);
 });
+
 
 test("formatModelDiagnosis handles no entries", () => {
   assert.match(formatModelDiagnosis([]), /none found/);

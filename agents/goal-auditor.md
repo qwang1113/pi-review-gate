@@ -2,7 +2,7 @@
 name: goal-auditor
 description: Dedicated loop-goal auditor — pre-reviews a DRAFT exit contract before the user is ever asked to approve it, and emits the machine verdict the gate records
 model: claude-fable-5
-fallbackModels: claude-opus-5, opencode-go/deepseek-v4-flash
+fallbackModels: claude-opus-5
 thinking: max
 systemPromptMode: replace
 inheritProjectContext: true

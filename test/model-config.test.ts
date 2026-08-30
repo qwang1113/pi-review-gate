@@ -28,6 +28,7 @@ import {
   projectAgentIdentity,
   resolvePackageAgentsDir,
   ensureAgentFilesPresent,
+  validateAgentsForStartup,
 } from "../lib/model-config.ts";
 
 const REG: ModelRegistry = {
@@ -118,19 +119,6 @@ test("validateSpec accepts supported thinking levels and rejects unsupported one
   assert.equal(validateSpec(REG, "onekey/gpt-5.5:xhigh").ok, false, "missing xhigh key = not offered (restricted tier)");
 });
 
-test("opencode-go cost allowlist also refuses a PROVIDER-LESS id that only resolves there", () => {
-  // Round-12 R3 P2: the bare-id branch of the allowlist had ZERO coverage —
-  // deleting it left model-config, review-fanout, model-diagnose, gate-doctor
-  // and extension-structure all green, so a bare slot could render a banned
-  // opencode-go model for any agent.
-  assert.equal(validateSpec(REG, "opencode-go/deepseek-v4-pro").ok, false, "the annotated form is refused");
-  const bare = validateSpec(REG, "deepseek-v4-pro");
-  assert.equal(bare.ok, false, "a bare id that resolves ONLY under opencode-go is refused too");
-  assert.match(bare.reason ?? "", /opencode-go only allows deepseek-v4-flash/, `reason must name the allowlist: ${bare.reason}`);
-  // The allowed model still passes in BOTH forms.
-  assert.equal(validateSpec(REG, "opencode-go/deepseek-v4-flash").ok, true);
-  assert.equal(validateSpec(REG, "deepseek-v4-flash").ok, true);
-});
 
 test("a reasoning:false refusal names `off` as the supported level, not 'no metadata'", () => {
   // Round-12 R3 Nit: such a model DOES support exactly one level (`off`) but
@@ -194,12 +182,6 @@ test("reasoning:false models only accept off", () => {
   assert.equal(validateSpec(reg, "p/plain:high").ok, false);
 });
 
-test("validateSpec enforces the opencode-go cost allowlist", () => {
-  assert.equal(validateSpec(REG, "opencode-go/deepseek-v4-flash:high").ok, true);
-  const v = validateSpec(REG, "opencode-go/deepseek-v4-pro:high");
-  assert.equal(v.ok, false);
-  assert.match(v.reason!, /opencode-go/);
-});
 
 test("validateSpec warns (not blocks) when the model has no thinking metadata", () => {
   const reg: ModelRegistry = { onekey: [{ id: "mystery-model", thinkingLevelMap: undefined }] };
@@ -321,10 +303,10 @@ test("loadRegistry: the FIRST source's metadata is never overwritten by a later 
 test("parseAgentsSection accepts valid entries and reports diagnostics", () => {
   const r = parseAgentsSection({
     reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] },
-    fixer: { slots: ["opencode-go/deepseek-v4-flash:high"] }, // auto defaults true
+    adviser: { slots: ["opencode-go/deepseek-v4-flash:high"] }, // auto defaults true
   });
   assert.deepEqual(r.sections.reviewer, { auto: false, slots: ["onekey/gpt-5.6-sol:high", "claude-fable-5:max"] });
-  assert.deepEqual(r.sections.fixer, { slots: ["opencode-go/deepseek-v4-flash:high"] });
+  assert.deepEqual(r.sections.adviser, { slots: ["opencode-go/deepseek-v4-flash:high"] });
   assert.equal(r.diagnostics.length, 0);
 });
 
@@ -336,25 +318,25 @@ test("parseAgentsSection truncates slots beyond MAX_SLOTS with a diagnostic", ()
 });
 
 test("parseAgentsSection tolerates corrupt entries without throwing", () => {
-  const r = parseAgentsSection({ reviewer: "nope", fixer: { slots: "not-an-array" }, garbage: 42 });
+  const r = parseAgentsSection({ reviewer: "nope", adviser: { slots: "not-an-array" }, garbage: 42 });
   // A KNOWN agent with a non-object entry is malformed (keeps the last
   // render, round-11 P1); an unknown name is dropped entirely.
   assert.deepEqual(r.sections.reviewer, { malformed: true }, "a non-object entry for a known agent is malformed");
-  assert.deepEqual(r.sections.fixer, { malformed: true });
+  assert.deepEqual(r.sections.adviser, { malformed: true });
   assert.equal(r.sections.garbage, undefined, "an unknown agent name is dropped");
   assert.ok(r.diagnostics.length >= 1);
 });
 
 test("effectiveAgentsConfig layers defaults ← global ← project and labels the source", () => {
-  const globalRaw = { agents: { reviewer: { auto: false, slots: ["claude-fable-5:max"] }, fixer: { auto: false, slots: ["claude-sonnet-5:max"] } } };
+  const globalRaw = { agents: { reviewer: { auto: false, slots: ["claude-fable-5:max"] }, "goal-auditor": { auto: false, slots: ["claude-sonnet-5:max"] } } };
   const projectRaw = { agents: { reviewer: { auto: false, slots: ["onekey/gpt-5.6-sol:high"] } } };
   const { map } = effectiveAgentsConfig(globalRaw.agents, projectRaw.agents);
   const reviewer = map.reviewer!;
   assert.equal(reviewer.auto, false);
   assert.deepEqual(reviewer.slots, ["onekey/gpt-5.6-sol:high"], "project wins over global for the same agent");
   assert.equal(reviewer.source, "project");
-  assert.deepEqual(map.fixer!.slots, ["claude-sonnet-5:max"], "unset in project falls through to global");
-  assert.equal(map.fixer!.source, "global");
+  assert.deepEqual(map["goal-auditor"]!.slots, ["claude-sonnet-5:max"], "unset in project falls through to global");
+  assert.equal(map["goal-auditor"]!.source, "global");
   assert.deepEqual(map.adviser!.slots, [], "unset anywhere is default");
   assert.equal(map.adviser!.auto, true);
   assert.equal(map.adviser!.source, "default");
@@ -377,7 +359,7 @@ const SAMPLE_AGENT = `---
 name: reviewer
 description: some description
 model: claude-fable-5
-fallbackModels: claude-opus-5, opencode-go/deepseek-v4-flash
+fallbackModels: claude-opus-5
 thinking: max
 tools: read, grep, find, ls, bash
 ---
@@ -544,7 +526,7 @@ test("replaceFrontmatterModels: a following key's own block list is not swallowe
   assert.match(out, /  - bash/);
 });
 
-test("parseAgentFrontmatterFields mirrors pi-subagents semantics (round-11)", () => {
+test("parseAgentFrontmatterFields mirrors the runtime frontmatter parser semantics (round-11)", () => {
   // Round-11 P1: a regex approximation diverged from the runtime parser on
   // block scalars, nested keys and quoted empties — this reference parser
   // is what projectAgentIdentity / the doctor / the widget all use now.
@@ -688,7 +670,7 @@ test("extractFrontmatterChain block list STOPS at the next top-level key (round-
   assert.equal(chain!.fallback.some((f) => f === "read" || f === "grep" || f === "plan.md"), false, "later block keys must not leak");
 });
 
-test("frontmatter rendering result still parses under pi-subagents-style parsing", () => {
+test("frontmatter rendering result still parses under the runtime's frontmatter rules", () => {
   const out = replaceFrontmatterModels(SAMPLE_AGENT, { model: "onekey/gpt-5.6-sol:high", fallbackModels: ["claude-fable-5:max"] })!;
   // The generated marker is a comment line; every original field must survive.
   assert.match(out, /# @generated by pi-review-gate/);
@@ -1253,4 +1235,48 @@ test("the self-heal's agent list covers the gate-critical goal-auditor role", ()
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+
+test("validateAgentsForStartup refuses a role with NO config entry", () => {
+  const checks = validateAgentsForStartup({}, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /没有任何配置/);
+});
+
+test("validateAgentsForStartup refuses auto:true (no explicit slots)", () => {
+  const map: AgentsConfigMap = { reviewer: { auto: true, slots: [], source: "default" } };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /未配置模型链/);
+});
+
+test("validateAgentsForStartup refuses an empty slot list under auto:false", () => {
+  const map: AgentsConfigMap = { reviewer: { auto: false, slots: [], source: "global" } };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /未配置模型链/);
+});
+
+test("validateAgentsForStartup refuses an unresolvable spec", () => {
+  const map: AgentsConfigMap = {
+    reviewer: { auto: false, slots: ["anthropic/claude-nonexistent:max"], source: "global" },
+  };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /spec 非法或不可解析/);
+});
+
+test("validateAgentsForStartup refuses a malformed entry", () => {
+  const map: AgentsConfigMap = { reviewer: { auto: true, slots: [], source: "global", malformed: true } };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /malformed/);
+});
+
+test("validateAgentsForStartup passes a fully configured role", () => {
+  const map: AgentsConfigMap = {
+    reviewer: { auto: false, slots: ["anthropic/claude-fable-5:max"], source: "global" },
+  };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, true);
+});
 });

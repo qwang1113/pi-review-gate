@@ -53,12 +53,13 @@ export function describeDirty(files: DirtyFile[], maxListed = 12): string {
 }
 
 /** What the user chose to do with a dirty worktree. */
-export type WorktreeChoice = "baseline" | "handled" | "discard";
+export type WorktreeChoice = "baseline" | "handled" | "discard" | "exempt";
 
 export const WORKTREE_CHOICES: Record<WorktreeChoice, string> = {
   baseline: "接受为本会话基线（随后提交成 checkpoint）",
   handled: "我已自行处理，重新检测",
   discard: "丢弃这些改动（门禁代执行，不可恢复）",
+  exempt: "放行这些改动（不删不改，豁免进审查；仅限本会话之外的 mock/本地内容）",
 };
 
 /** Map a dialog line back to the choice it stands for. */
@@ -106,15 +107,43 @@ export function isProtectedBranch(branch: string): boolean {
  * protected branch name.
  */
 export function deriveWorkBranchName(proposed: string | undefined, fallbackSeed: string): string {
-  const raw = (proposed ?? "").trim() || `session-${fallbackSeed}`;
-  const safe = raw
-    .replace(/[^A-Za-z0-9._/-]/g, "-")
-    .replace(/\/{2,}/g, "/")
-    .replace(/^[-/.]+|[-/.]+$/g, "")
-    .slice(0, 60);
-  const name = safe || `session-${fallbackSeed}`;
-  return isProtectedBranch(name) ? `session-${fallbackSeed}` : name;
+  const fallback = () => `session-${fallbackSeed}`;
+  const raw = (proposed ?? "").trim() || fallback();
+  // Git check-ref-format rules, applied to the PROPOSAL before any
+  // sanitization: a name that violates them is not "sanitized into", it is
+  // rejected back to the session fallback — a work branch must never be a
+  // silently-mangled version of what the user asked for.
+  const name = raw;
+  if (!isValidGitBranchName(name)) return fallback();
+  // Never work directly on a protected branch.
+  return isProtectedBranch(name) ? fallback() : name;
 }
+
+/**
+ * Git's check-ref-format rules (see `git check-ref-format`):
+ *  - no empty, no `.`, no `..`, no `@{`, no `//`, no trailing `/`
+ *  - no space, `~ ^ : ? * [ \\`, no ASCII control chars
+ *  - no leading `.`, no trailing `.lock`
+ *  - a lone `@` is invalid
+ * Returns false for anything git would refuse.
+ */
+export function isValidGitBranchName(name: string): boolean {
+  if (!name || name.length === 0) return false;
+  if (name.length > 255) return false;
+  // Control characters (ASCII 0x00-0x1f and 0x7f) are never valid.
+  if (/[\u0000-\u001f\u007f]/.test(name)) return false;
+  if (name.startsWith(".")) return false;
+  if (name.endsWith(".lock")) return false;
+  if (name.includes("..")) return false;
+  if (name.includes("@{")) return false;
+  if (name.includes("//")) return false;
+  if (name.endsWith("/")) return false;
+  if (name === "@") return false;
+  // The full banned set.
+  if (/[ ~^:?*[\\]/.test(name)) return false;
+  return true;
+}
+
 
 export type FinishAction =
   /** Work and base are the same branch (single-branch repo): nothing to merge. */

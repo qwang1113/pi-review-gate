@@ -312,6 +312,16 @@ test("runArbiter fails closed (undefined) when the exec fails", async () => {
   assert.equal(await runArbiter("onekey/gpt-5.6-sol", "prompt", deadExec), undefined);
 });
 
+test("runArbiter fails closed (undefined) on a malformed model id — no built-in fallback", async () => {
+  const spyExec = async () => "never called";
+  // No provider/model split possible: the arbiter model must come from the
+  // config layer, so an unparseable id cannot fall back to a hard-coded
+  // default — the caller treats undefined as GATE_WINS.
+  assert.equal(await runArbiter("malformed", "prompt", spyExec), undefined);
+  assert.equal(await runArbiter("", "prompt", spyExec), undefined);
+  assert.equal(await runArbiter("only/provider/", "prompt", spyExec), undefined);
+});
+
 test("runArbiter passes isolation flags and the chosen model to argv", async () => {
   let seen: readonly string[] = [];
   const spyExec = async (argv: readonly string[]) => { seen = argv; return '{"decision":"HUMAN"}'; };

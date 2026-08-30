@@ -4,14 +4,13 @@
  *
  * pi packages natively load extensions + skills from the package itself, so
  * this installer ONLY handles what the pi package spec does not: the
- * sub-agents (loaded by pi-subagents from ~/.pi/agent/agents/), the git
+ * sub-agents (copied into ~/.pi/agent/agents/), the git
  * hooks (installed per repo), and the COMPANION pi packages this extension
- * depends on at runtime (pi-subagents for the spawn-reviewer protocol,
- * pi-opencode-bridge for the opencode-go provider) — registered idempotently
+ * depends on at runtime — registered idempotently
  * via `pi install` so `pi install pi-review-gate` alone gives a working loop.
  *
  *   1. Copy agents/*.md → ~/.pi/agent/agents/  (idempotent, overwrite-owned)
- *   2. Register companion pi packages (pi-subagents / pi-opencode-bridge)
+ *   2. Register companion pi packages
  *      into ~/.pi/agent/settings.json when missing (idempotent via `pi install`).
  *   3. If the current directory is a git repository, install the git hooks
  *      into it (the common local-dev case: `npm install` in this repo).
@@ -34,14 +33,16 @@ const AGENTS_DST = join(AGENT_DIR, "agents");
 const PI_SETTINGS_PATH = join(AGENT_DIR, "settings.json");
 
 // Agent basenames this package USED to ship but no longer does. An upgrade
-// must delete their copies from AGENTS_DST: pi-subagents loads every *.md
-// there, so a retired agent would otherwise keep running after the update.
+// must delete their copies from AGENTS_DST: the agent runtime loads every
+// *.md there, so a retired agent would otherwise keep running after the update.
 const RETIRED_AGENTS = [
   "module-reviewer.md",
   "planner.md",
   "triage.md",
   "worker.md",
   "worker-readonly.md",
+  "fixer.md",
+  "recon.md",
 ];
 
 /**
@@ -52,22 +53,17 @@ const RETIRED_AGENTS = [
  * idempotent by construction: `pi install` of an already-present package is a
  * no-op that keeps the existing entry.
  *
- * The list is the extension's WORKING PLATFORM: subagents (pi-subagents),
- * provider keys (pi-opencode-bridge / pi-anthropic-oauth), editor
- * integration (pi-vim, @narumitw/pi-lsp), MCP tooling (pi-mcp-adapter,
- * pi-web-access), notifications (pi-notify), and the hashline editor
+ * The list is the extension's WORKING PLATFORM: provider keys
+ * (pi-anthropic-oauth), editor integration (pi-vim), MCP tooling
+ * (pi-mcp-adapter), notifications (pi-notify), and the hashline editor
  * (pi-hashline-edit-pro). Every entry is also pinned in package.json
  * dependencies so the whole platform resolves on `npm install` / `pi install`.
  */
 const COMPANION_PACKAGES = [
-  "npm:pi-subagents",
-  "npm:pi-opencode-bridge",
   "npm:pi-anthropic-oauth",
   "npm:pi-mcp-adapter",
   "npm:pi-notify",
   "npm:pi-vim",
-  "npm:pi-web-access",
-  "npm:@narumitw/pi-lsp",
   "npm:pi-hashline-edit-pro"
 ];
 
@@ -122,7 +118,7 @@ function installAgents() {
   log(`sub-agents installed (${count} files → ${AGENTS_DST})`);
 
   // Retired agents shipped by OLDER versions of this package must not linger:
-  // pi-subagents loads every *.md in AGENTS_DST, so a leftover
+  // every *.md in AGENTS_DST is loaded, so a leftover
   // module-reviewer.md / triage.md would keep running after an upgrade.
   let removed = 0;
   for (const f of RETIRED_AGENTS) {
@@ -169,55 +165,9 @@ function installHooksHere() {
 }
 
 /**
- * Write pi-subagents' fleet-inspector keybindings into the GLOBAL subagent
- * config (pi-subagents reads only <agentDir>/extensions/subagent/config.json;
- * there is no project-level file). The fleet inspector is where a subagent's
- * full session history can be scrolled; MacBooks have no PageUp/PageDown, so
- * the defaults bind vim-style Ctrl+b (up) / Ctrl+f, Ctrl+d (down) instead.
- *
- * Smart-merge, never clobber: the file is created when missing, the
- * fleetKeybindings field is added when absent (all other fields preserved),
- * and an EXISTING fleetKeybindings field is left completely alone — the
- * user's own bindings win. A file that does not parse, or is not a JSON
- * object (including an array), is skipped with a warning — never overwritten.
- */
-const DEFAULT_FLEET_KEYBINDINGS = {
-  fleetKeybindings: {
-    pageUp: ["ctrl+b"],
-    pageDown: ["ctrl+f", "ctrl+d"],
-  },
-};
-
-function installFleetKeybindings() {
-  const configPath = join(AGENT_DIR, "extensions", "subagent", "config.json");
-  if (!existsSync(configPath)) {
-    mkdirSync(dirname(configPath), { recursive: true });
-    writeFileSync(configPath, `${JSON.stringify(DEFAULT_FLEET_KEYBINDINGS, null, "\t")}\n`, "utf8");
-    log(`fleet keybindings written (${configPath})`);
-    return;
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync(configPath, "utf8"));
-  } catch {
-    log(`  ⚠ subagent config at ${configPath} is not valid JSON — leaving it untouched`);
-    return;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    log(`  ⚠ subagent config at ${configPath} is not a JSON object — leaving it untouched`);
-    return;
-  }
-  if (parsed.fleetKeybindings !== undefined) {
-    log("fleet keybindings already configured — keeping the user's bindings");
-    return;
-  }
-  parsed.fleetKeybindings = DEFAULT_FLEET_KEYBINDINGS.fleetKeybindings;
-  writeFileSync(configPath, `${JSON.stringify(parsed, null, "\t")}\n`, "utf8");
-  log(`fleet keybindings merged into ${configPath}`);
-}
 
 /**
- * Register companion pi packages (pi-subagents, pi-opencode-bridge) that this
+ * Register companion pi packages that this
  * extension needs at runtime, so `pi install pi-review-gate` alone yields a
  * working review loop. Reads the user's ~/.pi/agent/settings.json packages
  * list: missing entries are registered via `pi install <spec>` (idempotent —
@@ -256,51 +206,6 @@ function registerCompanions() {
     }
   }
 }
-/**
- * USER REQUIREMENT — cost guard: the opencode-go provider bills per model
- * and ONLY deepseek-v4-flash is approved. Its models-store entry (a pi
- * provider cache) lists every billable model, so this prunes the cache to
- * flash alone on install. The code-level allowlist (lib/model-allowlist.ts
- * isModelAllowed) is the real backstop — this pruning only stops the
- * registry from even offering the expensive ids. Idempotent: a cache that
- * is already flash-only (or absent) is left untouched. Fail-soft: any IO
- * error logs guidance and never fails the install.
- */
-function pruneOpenCodeGoModels() {
-  const storePath = join(AGENT_DIR, "models-store.json");
-  let raw;
-  try {
-    if (!existsSync(storePath)) return;
-    raw = readFileSync(storePath, "utf8");
-  } catch (e) {
-    log(`  ✗ could not read ${storePath}: ${e.message} — leaving it untouched`);
-    return;
-  }
-  let store;
-  try {
-    store = JSON.parse(raw);
-  } catch (e) {
-    log(`  ✗ ${storePath} is not valid JSON — leaving it untouched`);
-    return;
-  }
-  if (typeof store !== "object" || store === null || Array.isArray(store)) return;
-  const og = store["opencode-go"];
-  if (!og || typeof og !== "object" || !Array.isArray(og.models)) return;
-  const before = og.models.length;
-  og.models = og.models.filter((m) => m && typeof m === "object" && m.id === "deepseek-v4-flash");
-  if (og.models.length === before) return; // already flash-only
-  try {
-    // Keep one backup so a mistaken prune is reversible (never clobber an
-    // existing one — the first prune's backup is the interesting one).
-    if (!existsSync(`${storePath}.bak`)) copyFileSync(storePath, `${storePath}.bak`);
-    const tmp = `${storePath}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(store, null, 1));
-    renameSync(tmp, storePath);
-    log(`pruned opencode-go models-store to deepseek-v4-flash only (${before} → ${og.models.length}; backup at ${storePath}.bak)`);
-  } catch (e) {
-    log(`  ✗ could not write pruned ${storePath}: ${e.message} — the code-level allowlist still guards model choice`);
-  }
-}
 
 /**
  * GLOBAL-layer model-config render after the agents copy: reads the `agents`
@@ -322,7 +227,53 @@ function pruneOpenCodeGoModels() {
  */
 async function applyGlobalModelConfig() {
   try {
-    const cfgPath = join(homedir(), ".pi", "review-gate.json");
+  // ── DEFAULT AGENTS SECTION (user requirement 2026-08-30: NO built-in
+  // defaults — the config file must exist and name every role's slots).
+  //  - file ABSENT  → write the full 4-role default agents section.
+  //    overwrite a role the user already configured — that would silently
+  //    undo their pins on every upgrade).
+  const cfgPath = join(homedir(), ".pi", "review-gate.json");
+  const DEFAULT_AGENTS = {
+    reviewer: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
+    adviser: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
+    arbiter: { auto: false, slots: ["onekey/gpt-5.6-sol:max"] },
+    "goal-auditor": { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max"] },
+  };
+  try {
+    if (!existsSync(cfgPath)) {
+      const payload = {
+        agents: DEFAULT_AGENTS,
+        _installDefaultAgents: true,
+      };
+      mkdirSync(join(homedir(), ".pi"), { recursive: true });
+      writeFileSync(cfgPath, JSON.stringify(payload, null, 2) + "\n", "utf8");
+      log(`  ✓ wrote default agents section to ${cfgPath}`);
+    } else {
+      // Present: parse, then fill ONLY missing roles. Corrupt/unparseable
+      // files are left untouched (the extension surfaces them at start).
+      try {
+        const existing = JSON.parse(readFileSync(cfgPath, "utf8"));
+        if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+          const agents = existing.agents && typeof existing.agents === "object" && !Array.isArray(existing.agents)
+            ? existing.agents
+            : {};
+          const missing = Object.keys(DEFAULT_AGENTS).filter((k) => !(k in agents));
+          if (missing.length > 0) {
+            const merged = { ...existing, agents: { ...agents } };
+            for (const k of missing) merged.agents[k] = DEFAULT_AGENTS[k];
+            writeFileSync(cfgPath, JSON.stringify(merged, null, 2) + "\n", "utf8");
+            log(`  ✓ merged missing default agents into ${cfgPath}: ${missing.join(", ")}`);
+          }
+        }
+      } catch {
+        log(`  ⚠ existing config at ${cfgPath} is unreadable — left untouched (the session-start check will surface the problem)`);
+      }
+    }
+  } catch (e) {
+    log(`  ⚠ could not write default agents config (${e instanceof Error ? e.message : String(e)}) — the session-start check will surface the missing roles`);
+  }
+
+
     let raw;
     if (existsSync(cfgPath)) {
       try {
@@ -377,11 +328,6 @@ try {
 }
 
 try {
-  pruneOpenCodeGoModels();
-} catch (e) {
-  log(`  ✗ models-store prune failed: ${e.message}`);
-}
-try {
   registerCompanions();
 } catch (e) {
   log(`  ✗ companion registration failed: ${e.message}`);
@@ -390,10 +336,5 @@ try {
   installHooksHere();
 } catch (e) {
   log(`  ✗ hook install failed: ${e.message}`);
-}
-try {
-  installFleetKeybindings();
-} catch (e) {
-  log(`  ✗ fleet keybindings install failed: ${e.message}`);
 }
 log("done (extension + skills load natively via the pi package manifest)");

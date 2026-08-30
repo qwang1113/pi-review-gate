@@ -320,14 +320,15 @@ export interface GateState {
    */
   appeals?: import("./text-appeal.ts").AppealRecord;
   /**
-   * USER-GRANTED review-scope limit (request_scope_limit tool): the user
-   * confirmed via an extension-rendered dialog that the gate only needs to
-   * cover THIS session's own edits — pre-existing worktree/branch changes
-   * stop arming it. `preexistingFiles` snapshots the changed files exempted
-   * at grant time, so every re-arm path (session_start P0-2, bash git
-   * re-arm, turn_end reconciliation) exempts exactly those files — and a
-   * file this session later edits is RECLAIMED (removed) from the snapshot
-   * by the edit handler: the grant never covers the session's own work.
+   * USER-GRANTED review-scope limit: the user confirmed via an
+   * extension-rendered dialog (request_scope_limit tool) OR via the
+   * setup_workspace "放行这些改动" option that the gate only needs to cover
+   * THIS session's own edits — pre-existing worktree/branch changes stop
+   * arming it. `preexistingFiles` snapshots the changed files exempted at
+   * grant time, so every re-arm path (session_start P0-2, bash git re-arm,
+   * turn_end reconciliation) exempts exactly those files — and a file this
+   * session later edits is RECLAIMED (removed) from the snapshot by the edit
+   * handler: the grant never covers the session's own work.
    * Branch commits are exempt for as long as the grant stands — a new
    * commit under a standing grant is either the exempted pre-existing work
    * being shipped (exactly what the user consented to) or a user/bypass
