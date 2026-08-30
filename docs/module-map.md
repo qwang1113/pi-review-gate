@@ -41,12 +41,18 @@
 
 ### 1.2 工具注册分两处（重要）
 
-- **扩展直接注册 9 个** gate 工具：`judge_submit`、`propose_loop_goal`、
-  `setup_workspace`、`declare_done`、`ask_user`、`set_gate_mode`、
-  `request_scope_limit`、`request_sensitive_edit`、`request_arbitration`。
-  核对：`grep -c '^  pi.registerTool({' extensions/review-gate.ts` → 当前 9。
+- **扩展直接注册 6 个** gate 工具：`judge_submit`、`propose_loop_goal`、
+  `setup_workspace`、`declare_done`、`set_gate_mode`、`request_arbitration`。
+  核对：`grep -c '^  pi.registerTool({' extensions/review-gate.ts` → 当前 6。
 
-- **15 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+- **18 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+  - `lib/user-interaction-tools.ts`：`ask_user`（采访本身），并且是这一族的
+    **唯一注册入口**——它自己调 `lib/consent-request-tools.ts`，所以扩展里只有
+    一次 `registerUserInteractionTools(pi, {...})` 接线。
+  - `lib/consent-request-tools.ts`：`request_scope_limit`、
+    `request_sensitive_edit`（两个「请用户放宽门禁」的工具；对话、门禁状态与
+    授权表都经注入的 deps 拿，所以「对话弹不出来 ≠ 用户拒绝」这类分支能用假
+    实现单测）。
   - `lib/copilot-review-tools.ts`：`request_copilot_review`、
     `check_copilot_review`（L7 的两个工具；它们要打的 gh 电话在
     `lib/copilot-gh.ts`，经注入的 `gh` seam 调用，所以每条分支都能用假实现单测）。
@@ -61,7 +67,7 @@
   - `lib/orchestrator-recovery-tools.ts`：`orchestrator_recover`、
     `orchestrator_attach`。
   核对：`grep -rh 'name: "' lib/*.ts | grep -oE 'name: "[a-z_]+"' | sort -u | wc -l`
-  → 18，其中 3 个是下面说的**内部实现**，不注册给 pi；9 + 15 = **24**。
+  → 21，其中 3 个是下面说的**内部实现**，不注册给 pi；6 + 18 = **24**。
 
 - **7 个实现存在，但不是工具**（2026-08-30，哲学三）。`run_precommit`、
   `review_checkpoint`、`record_review`、`record_goal_prereview`、
@@ -277,6 +283,10 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 ### 域 8：用户交互与提示注入
 
 `ask-user.ts` 是采访模型（逐题推进、上限、跳过与「在聊天里回答」的语义），
+`user-interaction-tools.ts` 是它的执行侧（工具 `ask_user`：什么时候暂停循环、
+每答一题就落盘、人与项目经理谁先答谁生效），并且是这一族的唯一注册入口——
+它自己转注册 `consent-request-tools.ts` 的两个同意工具
+（`request_scope_limit` / `request_sensitive_edit`，见 §1.2）；
 `agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
 `dialog-budget.ts` 管确认对话框的渲染行数预算（宿主不截断，长度得自己管），
 跨会话的唤醒**不在**这一域：一个编排子会话经它自己的**通道**上报（见域 4），
@@ -317,11 +327,11 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 
 ---
 
-## 五、`lib/` 全量速查表（86 个模块）
+## 五、`lib/` 全量速查表（88 个模块）
 
 **维护指令（这张表没有机械约束，只有这一条）**：在 `lib/` 下**新增或删除**一个
 模块时，**同一轮改动里**顺手加/删这里的一行——否则这张表会静静地过时。
-随时可核对条目数：`ls lib/*.ts | wc -l`（当前 86，与本表条目一一对应）。
+随时可核对条目数：`ls lib/*.ts | wc -l`（当前 88，与本表条目一一对应）。
 
 | 模块 | 一句话职责 |
 | --- | --- |
@@ -334,6 +344,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交 |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
 | `constants.ts` | 全仓唯一的共享常量：代码/文档扩展名、敏感文件模式、ship 命令种类、语言指令、轮次上限 |
+| `consent-request-tools.ts` | 工具 `request_scope_limit` / `request_sensitive_edit`：两个「请用户放宽门禁」的同意口子，对话与门禁状态经注入的 deps；由 `user-interaction-tools.ts` 转注册 |
 | `copilot-gh.ts` | L7 的 gh 访问层：`gh` 以 argv 异步 spawn（超时 + abort），PR / 线程 payload / 可用性探测都在这里 |
 | `copilot-review-tools.ts` | 工具 `request_copilot_review` / `check_copilot_review`：L7 状态机的两个驱动端，gh 访问经注入的 seam |
 | `copilot-review.ts` | L7：PR 之后的 Copilot 审查闭环（请求、等待、逐 thread 消账） |
@@ -409,6 +420,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `text-appeal.ts` | 启发式文本拦截的申诉口子（A 类） |
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |
 | `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条只读面板） |
+| `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
 | `verdict-parse.ts` | 裁决解析：review 只认 JSON fence，precommit 只认 `## Overall:` sentinel |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
 | `workspace-branch.ts` | `setup_workspace` 与 `declare_done` 背后的工作区与分支事实 |
