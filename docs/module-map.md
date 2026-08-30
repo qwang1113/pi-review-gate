@@ -41,11 +41,17 @@
 
 ### 1.2 工具注册分两处（重要）
 
-- **扩展直接注册 6 个** gate 工具：`judge_submit`、`propose_loop_goal`、
-  `setup_workspace`、`declare_done`、`set_gate_mode`、`request_arbitration`。
-  核对：`grep -c '^  pi.registerTool({' extensions/review-gate.ts` → 当前 6。
+- **扩展直接注册 5 个** gate 工具：`judge_submit`、`setup_workspace`、
+  `declare_done`、`set_gate_mode`、`request_arbitration`。
+  核对：`grep -c '^  pi.registerTool({' extensions/review-gate.ts` → 当前 5。
 
-- **18 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+- **19 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
+  - `lib/goal-tools.ts`：`propose_loop_goal`（L8：跑 goal 审计 → 问用户 →
+    写文件），并且是这一族的**唯一注册入口**——它同时把内部实现
+    `record_goal_prereview` 注册到 internalHost，所以扩展里只有一次
+    `registerGoalTools({ agent: pi, internal: internalHost }, {...})` 接线。
+    工具体在 `lib/goal-prereview-tools.ts`（审计裁决落成记录，外加两个工具
+    共用的提交检查）。
   - `lib/user-interaction-tools.ts`：`ask_user`（采访本身），并且是这一族的
     **唯一注册入口**——它自己调 `lib/consent-request-tools.ts`，所以扩展里只有
     一次 `registerUserInteractionTools(pi, {...})` 接线。
@@ -136,7 +142,7 @@
 | **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | 扩展 `tool_call` + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
 | **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
 | **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账 | `lib/copilot-review-tools.ts`（工具 `request_copilot_review` / `check_copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线 | `lib/copilot-review.ts` |
-| **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | 扩展工具 `propose_loop_goal`（内部自跑 goal 审计并记录裁决） | `lib/loop-goal.ts` |
+| **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | `lib/goal-tools.ts`（工具 `propose_loop_goal`，内部自跑 goal 审计）+ `lib/goal-prereview-tools.ts`（内部实现 `record_goal_prereview`：裁决落成记录），扩展只接线 | `lib/loop-goal.ts` |
 
 > **落点指引**：加一条新的**判定规则**（什么该拦、什么该放）→ 落在
 > `lib/` 里对应的纯模块，并配一个 `test/*.test.ts`；只有「把判定接到某个
@@ -161,7 +167,9 @@
 `/tmp` 草稿会话不自动进 loop，`workspace-branch.ts` 是 `setup_workspace` 与
 `declare_done` 背后的工作区/分支事实。两条**带自己层号**的关卡也在这一域：
 `copilot-review.ts`（L7，PR 之后的 Copilot 审查闭环）与 `loop-goal.ts`（L8，
-用户批准的退出契约）——它们的接线见 §2 的层表。
+用户批准的退出契约）——两者的**判定**在这里，工具体分别在
+`copilot-review-tools.ts` 与 `goal-tools.ts` / `goal-prereview-tools.ts`，
+接线见 §2 的层表。
 
 > **落点**：新的拦截规则 → 新建一个 `lib/<rule>.ts` 纯模块（facts in,
 > decision out）+ 同名单测；只有接线改扩展。新的**放行**口子要格外小心：
@@ -385,6 +393,8 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `gate-timings.ts` | `.pi/gate-timings.jsonl` 可观测日志，每个门禁事件一行 |
 | `git-memory.ts` | 上下文压缩后重新注入过滤、截断过的 git 状态快照 |
 | `git-rewrite.ts` | 识别「只改 message」的历史重写，解开 L5 与门禁互锁的死结 |
+| `goal-prereview-tools.ts` | **内部实现**（注册在 internalHost）：`record_goal_prereview`——把 goal-auditor 的裁决落成绑定草稿 sha256 的记录；外加两个 goal 工具共用的提交检查（空稿、长度上限、goal 绑定哪个 repo） |
+| `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：两个 host，agent 侧只看得见 `propose_loop_goal` |
 | `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：会话文件放哪、何时算完成、审计裁决是否阻塞 |
 | `judge-process.ts` | judge 子进程基座：`pi -p --session-id` 的确定性会话 id 与进程管理 |
 | `judge-prompt.ts` | judge 子会话的系统提示装配：角色定义 + 共同协议 |

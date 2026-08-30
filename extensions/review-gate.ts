@@ -116,7 +116,6 @@ import {
   decideJudgeDispatch,
   judgeRunDirName,
   hasJudgeFence,
-  adjudicateGoalAudit,
 } from "../lib/judge-lifecycle.ts";
 import {
   createProgressReporter,
@@ -253,6 +252,10 @@ import { registerAdvisoryPrepareTools } from "../lib/advisory-prepare-tools.ts";
 // The L7 Copilot tools moved the same way: this file wires them, the module
 // owns their bodies (and lib/copilot-gh.ts the `gh` calls they make).
 import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
+// The L8 goal family (the agent-facing `propose_loop_goal` and the internal
+// `record_goal_prereview`) moved the same way: this file wires them, the
+// module owns their bodies (and lib/goal-prereview-tools.ts the audit record).
+import { registerGoalTools } from "../lib/goal-tools.ts";
 import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   writeJudgeSpawnFiles,
@@ -340,24 +343,20 @@ import {
   LOOP_GOAL_RELPATH,
   loopGoalRelPath,
 
-  LOOP_GOAL_MAX_WRITE_CHARS,
   buildLoopGoalDirective,
-  buildGoalConfirmMessage,
-  buildGoalTranscriptMessage,
   goalTextHash,
   isLoopGoalConfirmed,
-  normalizeGoalText,
   readLoopGoal,
-  formatGoalPrereviewCarryover,
-  // buildGoalAuditTask moved with prepare_goal_audit (lib/advisory-prepare-tools.ts).
-  GOAL_CONFIRM_TITLE,
+  // buildGoalAuditTask moved with prepare_goal_audit (lib/advisory-prepare-tools.ts);
+  // the goal family's own text builders (transcript/confirm/refusal messages,
+  // the length cap, the carryover) moved with it into lib/goal-tools.ts +
+  // lib/goal-prereview-tools.ts.
   LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
   loopGoalEditGate,
   goalPrereviewPassed,
-  buildGoalPrereviewRefusal,
 } from "../lib/loop-goal.ts";
-import type { GoalPrereviewRecord, LoopGoal } from "../lib/loop-goal.ts";
+import type { LoopGoal } from "../lib/loop-goal.ts";
 
 import { fitDialogMessage } from "../lib/dialog-budget.ts";
 // The model-chain diagnosis and the /gate-doctor checks are reached only
@@ -5743,482 +5742,50 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
   });
 
-  // ---------- record_goal_prereview tool (L8b — the goal-auditor's verdict) ----------
-
-  // INTERNAL, not registered: `propose_loop_goal` runs the audit itself and
-  // records the verdict through this implementation.
-  internalTool({
-    name: "record_goal_prereview",
-    label: "Record Goal Pre-review",
-    description:
-      "ADVANCED / internal: the gate records a goal audit ITSELF when the auditor's process exits, " +
-      "against the draft it dispatched — the normal flow is " +
-      "`judge_submit({role:\"goal-auditor\", task:<draft>})` → propose_loop_goal. Call this directly " +
-      "only when you have an auditor output the gate could not read. " +
-      "Records the audit of a DRAFT loop goal; propose_loop_goal " +
-      "refuses to show the user's approval dialog until a PASS is recorded for the IDENTICAL text. " +
-      "The EXTENSION parses the auditor's JSON fence " +
-      "itself (PASS ⇔ a READY verdict with no unresolved P0/P1) and hashes the draft itself — there " +
-      "is no `passed` parameter you could set, and a " +
-      "hand-written verdict is not a review. A failed audit means: fix the objections and submit the " +
-      "revised text (its hash differs, so it needs its own PASS).",
-    parameters: Type.Object({
-      goal: Type.String({ description: "The FULL draft goal text that was audited (the exact text you will submit)" }),
-      auditor_output: Type.String({ description: "Complete raw output from the goal-auditor judge child" }),
-      repo: Type.Optional(Type.String({
-        description:
-          "Absolute path of the repo this goal binds to (default: the session repo) — must match the " +
-          "repo you pass to propose_loop_goal.",
-      })),
-      auditStartedAt: Type.Optional(Type.String({
-        description:
-          "ISO timestamp of when you DISPATCHED the goal-auditor (the wall-clock start of this audit). " +
-          "Goal criterion 6 records first-vs-re-audit durations, and the gate cannot see the dispatch " +
-          "— the tool only records verdicts. Omit on re-records of the same audit.",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const goalText = normalizeGoalText(String(params.goal ?? ""));
-      if (goalText.length === 0) {
-        return {
-          content: [{ type: "text", text: "review-gate: record_goal_prereview rejected — the goal text is empty." }],
-          details: { recorded: false },
-          isError: true,
-        };
-      }
-      // Same cap as propose_loop_goal: auditing a draft the approval tool can
-      // never accept would burn a full audit round to produce a PASS that is
-      // structurally unusable.
-      if (goalText.length > LOOP_GOAL_MAX_WRITE_CHARS) {
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: record_goal_prereview rejected — the goal is ${goalText.length} chars, over the ` +
-              `${LOOP_GOAL_MAX_WRITE_CHARS} limit propose_loop_goal enforces. Shorten it BEFORE auditing: an ` +
-              "exit contract is 3–7 checkable criteria, not a design doc.",
-          }],
-          details: { recorded: false },
-          isError: true,
-        };
-      }
-      // SAME resolution as propose_loop_goal, deliberately NOT resolveToolRepo:
-      // that helper requires a repo the session already EDITED, but a goal (and
-      // therefore its audit) is recorded before the first edit lands. Using it
-      // here would make a second repo's goal impossible to pre-review — a dead
-      // end with no way out.
-      let goalRoot = primaryRepoRoot;
-      const rawRepo = String(params.repo ?? "").trim();
-      if (rawRepo) {
-        const abs = pathResolve(cwd, rawRepo);
-        const root = gitRootOfDir(abs);
-        if (!root) {
-          return {
-            content: [{
-              type: "text",
-              text: `review-gate: repo "${rawRepo}" (resolved ${abs}) is not inside a readable git repository — ` +
-                "a goal pre-review can only bind to a real repo.",
-            }],
-            details: { recorded: false },
-            isError: true,
-          };
-        }
-        goalRoot = root;
-      }
-      const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
-
-      // The EXTENSION reads the verdict; the agent only carries the output.
-      // parseReviewOutput already encodes the two rules that matter here: a
-      // READY carrying unresolved P0/P1 is contradictory and becomes BLOCKED,
-      // and a fence we could not fully parse can never come back READY.
-      const parsed = parseReviewOutput(params.auditor_output);
-      if (!parsed) {
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: no recognizable verdict in the goal-auditor's output — NOTHING was recorded " +
-              "(fail-closed). The auditor must end its reply with exactly ONE fenced JSON verdict, e.g.\n" +
-              `\`\`\`json\n{"gate":"READY"|"BLOCKED","findings":[{"severity":"P1","issue":"…"}]}\n\`\`\`\n` +
-              "Common causes: the reply was pure prose with no fence, it was truncated before the fence, " +
-              "or an unescaped straight quote inside a string broke the JSON. Re-run the audit — do not " +
-              "hand-write the verdict.",
-          }],
-          details: { recorded: false },
-          isError: true,
-        };
-      }
-      const newHash = goalTextHash(goalText);
-      const findings = parseFenceFindings(params.auditor_output);
-      // ONE adjudication for the record, the reply and the gate (B2): a READY
-      // without P0/P1 is a PASS no matter how many P2/Nit findings ride along.
-      // The audit ROUND counts audits of the GOAL being negotiated now — the
-      // gate counts, so the agent never has to (and cannot miscount). It is
-      // not the length of goalPrereviewHistory: that is append-only across
-      // every goal this repo ever had.
-      goalSt.goalAuditRound = (goalSt.goalAuditRound ?? 0) + 1;
-      const adjudication = adjudicateGoalAudit({
-        verdict: parsed.verdict,
-        findings,
-        round: goalSt.goalAuditRound,
-      });
-      const passed = adjudication.pass;
-      // Wall-clock duration of THIS audit, when the agent reported when it
-      // dispatched the auditor (goal criterion 6). Parsed leniently: a bogus
-      // timestamp records no duration rather than failing the record.
-      const startedAt = typeof params.auditStartedAt === "string" ? Date.parse(params.auditStartedAt) : NaN;
-      // A future timestamp (clock skew, a typo) records NO duration rather
-      // than a negative one that would poison the timing diagnostic.
-      const now = Date.now();
-      const durationMs = Number.isFinite(startedAt) && startedAt > 0 && startedAt <= now ? now - startedAt : undefined;
-      const record: GoalPrereviewRecord = {
-        hash: newHash,
-        verdict: passed ? "PASS" : "FAIL",
-        at: new Date().toISOString(),
-        findingsTotal: parsed.findingsTotal,
-        ...(findings.length ? { findings } : {}),
-        draft: normalizeGoalText(goalText),
-        ...(durationMs !== undefined ? { durationMs } : {}),
-      };
-      // Re-audit carryover (goal criterion 2): replacing a record for a
-      // DIFFERENT draft means this audit is a re-audit — hand the previous
-      // verdict and its findings back so the agent can put them in the
-      // auditor's task text. Same-hash re-records (a PASS retried) carry
-      // nothing: there is no revised draft to judge.
-      const prev = goalSt.goalPrereview;
-      const carryover = prev && prev.hash !== newHash ? formatGoalPrereviewCarryover(prev) : undefined;
-      // Latest-only for the CHECK (propose_loop_goal matches the CURRENT
-      // draft's PASS), but EVERY audit is persisted in the history (goal
-      // criterion 2: PASS or FAIL, oldest first) so the re-audit chain and
-      // its carryover data survive newer drafts.
-      goalSt.goalPrereviewHistory = [...(goalSt.goalPrereviewHistory ?? []), record];
-      goalSt.goalPrereview = record;
-
-      if (goalRoot === primaryRepoRoot) persist(ctx as unknown as ExtensionContext);
-      else persistRepo(ctx as unknown as ExtensionContext, goalRoot);
-      log(`goal pre-review recorded for ${goalRoot}: ${record.verdict} (${goalText.length} chars, findings: ${parsed.findingsTotal ?? "unparseable"})`);
-      // Wall-clock since the previous audit — the incremental-economy datum
-      // (goal criterion 6, (a)): re-audits of a revised draft should be
-      // measurably cheaper than first audits. Diagnostic only.
-      const prevAt = prev?.at ? Date.parse(prev.at) : NaN;
-      const auditGapMin = Number.isFinite(prevAt)
-        ? Math.round((Date.now() - prevAt) / 60000)
-        : null;
-      return {
-        content: [{
-          type: "text",
-          text:
-            // B2 ("whack-a-mole"): the gate states the verdict AND its
-            // consequence. The measured failure was an agent that read a
-            // READY carrying P2 findings as "not done yet" and volunteered
-            // another audit round — so the rule is spelled out mechanically:
-            // only P0/P1 block, non-blocking findings never buy a re-audit.
-            `review-gate: ${adjudication.message}\n` +
-            (passed
-              ? `记录：PASS（${record.hash.slice(0, 12)}…）。用 IDENTICAL 文本调 propose_loop_goal——改一个字就要重审。`
-              : `记录：FAIL（verdict ${parsed.verdict}）。propose_loop_goal 保持阻塞。`) +
-            (durationMs !== undefined
-              ? `\n本轮审计耗时 ${Math.round(durationMs / 1000)}s。`
-              : "") +
-            (auditGapMin !== null
-              ? `\n距上一轮审计 ${auditGapMin} min。`
-              : "") +
-            (carryover
-              ? "\n重审时把修订稿直接交给 `propose_loop_goal` 即可：它建的审计任务会自动带上本轮结论与草稿差异。"
-              : "")
-
-        }],
-        details: { recorded: true, verdict: record.verdict, findingsTotal: parsed.findingsTotal ?? null, reaudit: !!carryover, auditGapMin, durationMs: durationMs ?? null },
-      };
+  /**
+   * The GOAL family — `propose_loop_goal` (L8: the user approves this
+   * session's exit contract) and the internal `record_goal_prereview` (L8b:
+   * the goal-auditor's verdict becomes a record) — lives in
+   * lib/goal-tools.ts + lib/goal-prereview-tools.ts; only its wiring is here.
+   *
+   * TWO HOSTS, deliberately named at the call site: the agent's tool goes to
+   * `pi`, the internal implementation to `internalHost`, which pi never
+   * learns a name from. The audit stays TRUSTED across the move — the fence
+   * is parsed and the draft hashed in THIS process (lib/verdict-parse.ts +
+   * lib/loop-goal.ts), never by the agent.
+   *
+   * What they need from THIS file arrives as this deps object: the repo roots
+   * and their gate state, the persistence, the audit chain (`runGoalAudit` —
+   * dispatch the judge, wait for it, record the verdict), the three
+   * user-facing surfaces (transcript notice, bounded dialog, and the
+   * either-side funnel an orchestrator may answer through), this session's
+   * own loop-goal path, the project-layer agent lookup and the one file write
+   * an approval performs.
+   */
+  registerGoalTools({ agent: pi, internal: internalHost }, {
+    // Getters: session_start re-resolves both, and a goal bound to the
+    // pre-session cwd would be recorded where nothing ever reads it.
+    primaryRepoRoot: () => primaryRepoRoot,
+    cwd: () => cwd,
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    log: (message) => log(message),
+    runGoalAudit: (input) => runGoalAudit(input),
+    showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
+    confirmBounded: (uiCtx, title, message, pointer, signal) =>
+      confirmBounded(uiCtx as ExtensionContext, title, message, pointer, signal),
+    askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
+    loopGoalPath: (root) => loopGoalPathIn(root),
+    loopGoalRelPath: loopGoalRelPath(SESSION_STATE_VARIANT),
+    findProjectAgent: (dir, name) => findProjectAgentText(dir, name),
+    // The directory is created with the file: the goal is the first thing a
+    // session writes into .pi/, so its parent may not exist yet.
+    writeGoalFile: (path, text) => {
+      mkdirSync(pathDirname(path), { recursive: true });
+      writeFileSync(path, text, "utf8");
     },
   });
 
-  // ---------- propose_loop_goal tool (L8 — the user approves the contract) ----------
-
-  pi.registerTool({
-    name: "propose_loop_goal",
-    label: "Propose Loop Goal",
-    description:
-      "Submit the NEGOTIATED loop goal (this session's exit contract) for the user's approval. " +
-      "Interview the user first — ONE question per turn, labeled \"N of M\", each with your " +
-      "recommended answer (all at once only when the user asks for it) — and only " +
-      "submit what they actually agreed to. Write the goal in SIMPLIFIED CHINESE (technical " +
-      "identifiers, paths and code tokens stay English). REQUIRED FIRST: the draft must pass a " +
-      "dedicated `goal-auditor` audit — and THIS TOOL RUNS IT ITSELF: it dispatches the auditor, " +
-      "waits for it, adjudicates (only P0/P1 block) and records the verdict. A failed audit comes " +
-      "back with the objections and NO dialog is shown; fix them and call this again. That makes " +
-      "it a MINUTES-LONG call. " +
-      "Once it passes, the extension shows the text in a confirmation " +
-      "dialog and, if the user approves, writes .pi/loop-goal.md itself and records the approval. " +
-      "Writing that file yourself grants nothing: in loop mode an unapproved goal blocks " +
-      "commit/push/PR and its body is withheld from your prompt. Shape: task title, one-line " +
-      "intent, 3–7 checkable exit criteria, non-goals, ISO date. `repo` selects WHICH repo the " +
-      "goal binds to (default: this session's repo) — a multi-repo session approves a goal per " +
-      "repo before editing there; one repo's approval never opens another's write surface.",
-    parameters: Type.Object({
-      goal: Type.String({ description: "The full goal text (Markdown) as agreed with the user" }),
-      repo: Type.Optional(Type.String({
-        description:
-          "Absolute path of the repo this goal binds to (default: the session repo). Required to " +
-          "unlock edit/write in a SECOND repo the session works in.",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const goalText = normalizeGoalText(String(params.goal ?? ""));
-      if (goalText.length === 0) {
-        return {
-          content: [{ type: "text", text: "review-gate: propose_loop_goal rejected — the goal text is empty." }],
-          details: { approved: false },
-          isError: true,
-        };
-      }
-      if (goalText.length > LOOP_GOAL_MAX_WRITE_CHARS) {
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: propose_loop_goal rejected — the goal is ${goalText.length} chars, over the ` +
-              `${LOOP_GOAL_MAX_WRITE_CHARS} limit. An exit contract is 3–7 checkable criteria, not a design doc.`,
-          }],
-          details: { approved: false },
-          isError: true,
-        };
-      }
-      // Per-repo binding: the goal belongs to the repo the WRITES land in.
-      // Default is the session repo; a multi-repo session passes `repo` so
-      // each repo gets its own contract (the L8 edit gate checks each repo's
-      // own goal + sidecar confirmation, so without this a second repo could
-      // never be unlocked — the block message would point at a dead end).
-      // Deliberately NOT resolveToolRepo: that helper requires the target to
-      // be a repo the session has ALREADY edited, but the whole point of the
-      // goal is to be approved BEFORE the first edit lands.
-      let goalRoot = primaryRepoRoot;
-      const rawRepo = String(params.repo ?? "").trim();
-      if (rawRepo) {
-        const abs = pathResolve(cwd, rawRepo);
-        // A goal bound to a NON-repo path could never satisfy the edit gate
-        // (it checks gitRootOfDir of the target write) — that would be a dead
-        // approval, and writing .pi/ into an arbitrary directory is worse.
-        // Refuse instead of silently recording it.
-        const root = gitRootOfDir(abs);
-        if (!root) {
-          return {
-            content: [{
-              type: "text",
-              text: `review-gate: repo \"${rawRepo}\" (resolved ${abs}) is not inside a readable git repository — ` +
-                "a loop goal can only bind to a real repo.",
-            }],
-            details: { approved: false },
-            isError: true,
-          };
-        }
-        goalRoot = root;
-      }
-      const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
-
-      // L8b GOAL PRE-REVIEW — fail-closed, and BEFORE any user-facing surface.
-      // The user is only ever asked about a draft a dedicated auditor already
-      // judged, and the gate RUNS that audit itself (philosophy two): the
-      // agent submits a draft, not a three-call sequence. Placed ahead of
-      // showToUser/confirm so a failed audit costs the user nothing — no
-      // transcript spam, no dialog, no file write.
-      //
-      // A PASS already on record for this exact text skips the audit: the
-      // record binds to the sha256 of the draft, so re-auditing identical
-      // text would burn minutes to reach the same verdict.
-      if (!goalPrereviewPassed(goalSt.goalPrereview, goalText)) {
-        // The auditor has to be installed for any of this to work. Checked
-        // FIRST, because a missing agent is a setup problem with a concrete
-        // fix, not an audit that failed. Dispatchability is what matters, not
-        // a filename: pi-subagents keys agents by their frontmatter `name`,
-        // so a copy called custom.md that declares `name: goal-auditor` IS
-        // dispatchable and must not be reported as missing. EVERY layer is
-        // resolved that way — the same rule gate-doctor applies — so the two
-        // never disagree.
-        const packageAgentsDir = resolvePackageAgentsDir();
-        const auditorInstalled =
-          findProjectAgentText(pathJoin(homedir(), ".pi", "agent", "agents"), "goal-auditor") !== undefined ||
-          // Both project layers are consulted: pi-subagents loads them from the
-          // SESSION's project root, while a multi-repo goal binds to goalRoot —
-          // checking only one of them would look in the wrong directory.
-          [pathJoin(goalRoot, ".pi", "agents"), pathJoin(primaryRepoRoot, ".pi", "agents")]
-            .some((dir) => findProjectAgentText(dir, "goal-auditor") !== undefined);
-        if (!auditorInstalled) {
-          return {
-            content: [{
-              type: "text",
-              text: buildGoalPrereviewRefusal({
-                ...(goalSt.goalPrereview ? { record: goalSt.goalPrereview } : {}),
-                goalText,
-                auditorInstalled,
-                repoRoot: goalRoot,
-                packageAgentsDir,
-              }),
-            }],
-            details: { approved: false, prereview: goalSt.goalPrereview?.verdict ?? "NONE" },
-            isError: true,
-          };
-        }
-        const audit = await runGoalAudit({
-          root: goalRoot,
-          goalText,
-          ctx,
-          progress: createProgressReporter({
-            title: "review-gate: propose_loop_goal（goal 审计）",
-            onUpdate: _onUpdate as ToolUpdate | undefined,
-          }),
-        });
-        if (!audit.ok) {
-          return {
-            content: [{ type: "text", text: audit.text }],
-            details: { approved: false, prereview: "BLOCKED" },
-            isError: true,
-          };
-        }
-      }
-
-      // The goal text goes to the TRANSCRIPT; the binding repo must be shown
-      // at CONSENT time (both surfaces), so a repo-scoped approval is never
-      // given for a repo the user was not shown.
-      const repoLine = goalRoot === primaryRepoRoot
-        ? "本仓库 (" + primaryRepoRoot + ")"
-        : goalRoot;
-
-      // Consent comes from a dialog the EXTENSION renders — there is no
-      // parameter the model could set to claim it. No UI ⇒ no approval; a
-      // session without a UI is forced to normal mode at session_start, so
-      // reaching this branch means the UI disappeared, not a headless run.
-      const uiCtx = ctx as unknown as ExtensionContext;
-      // The goal itself is shown in the TRANSCRIPT first: it is the thing the
-      // user has to read, and it is far too tall for a dialog (that is what
-      // made the terminal flicker). ui.notify renders synchronously, so it is
-      // on screen BEFORE the dialog below asks about it; the dialog that
-      // follows carries only the decision.
-      // The pre-review fact is shown to the USER too: the approval is more
-      // informed when it is visible that an independent auditor already passed
-      // THIS text. It goes AFTER the repo line on purpose — the dialog budget
-      // truncates from the tail, and the repo binding is the consent-critical
-      // fact that must never be the thing that gets cut.
-      // The record is guaranteed to exist here: goalPrereviewPassed() above
-      // already required a PASS bound to this text, so this reads it directly
-      // rather than advertising a fallback state that cannot occur.
-      const prereviewLine = "goal-auditor 预审: PASS @ " + goalSt.goalPrereview!.at;
-      // The goal approval is one of the two dialogs an ORCHESTRATOR may
-      // answer on the user's behalf, so it goes through the channel funnel
-      // below (`askEitherSide` with topic `goal-approval`) rather than
-      // straight to `ui.confirm`: the request it writes carries the whole
-      // draft, which is the text constraint 8 is judged on.
-
-      showToUser(
-        uiCtx,
-        GOAL_CONFIRM_TITLE,
-        buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" + prereviewLine,
-      );
-      // EITHER the user or (when this session is an orchestration child) the
-      // project manager may answer. The channel request carries the FULL draft
-      // as its payload, so the orchestrator sees the exact text it is being
-      // asked to approve and constraint 8 is checked against that same text —
-      // never against something the orchestrator retyped (R-7).
-      const goalDialogTitle = GOAL_CONFIRM_TITLE;
-      const goalApproveLabel = "认可，写入 .pi/loop-goal.md";
-      const goalRejectLabel = "不认可，退回重谈";
-      let approved = false;
-      try {
-        const picked = await askEitherSide(
-          {
-            dialogKind: "confirm",
-            topic: "goal-approval",
-            title: goalDialogTitle,
-            options: [goalApproveLabel, goalRejectLabel],
-            payload: goalText,
-          },
-          uiCtx.hasUI === true,
-          async (signal) => {
-            const ok = await confirmBounded(
-              uiCtx,
-              goalDialogTitle,
-              buildGoalConfirmMessage(goalText, "绑定仓库(不可信数据): " + repoLine + "\n" + prereviewLine),
-              "（目标全文见上方消息）",
-              signal,
-            );
-            return ok ? goalApproveLabel : goalRejectLabel;
-          },
-        );
-        approved = picked === goalApproveLabel;
-      } catch {
-        approved = false;
-      }
-
-      // The decision may carry a REASON — but only on REJECTION: the user
-      // rejects with the objection so the agent renegotiates against the real
-      // problem instead of re-asking. The CONFIRM path no longer asks for a
-      // reason (the approval is the whole signal; a per-approval input box was
-      // friction with nothing to act on). Reason input is best-effort — a
-      // headless/no-input environment simply yields no reason.
-      let reason: string | undefined;
-      if (!approved) {
-        try {
-          const typed = await uiCtx.ui?.input?.(
-            "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
-            "必填:哪里不合适",
-          );
-          reason = (typed ?? "").trim() || undefined;
-        } catch {
-          reason = undefined;
-        }
-      }
-      if (!approved) {
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: the user did NOT approve this goal." +
-              (reason
-                ? ` Reason: ${reason}. Renegotiate against THAT objection and submit the corrected goal again — `
-                : " Ask what is wrong with it, renegotiate, and submit the corrected goal again — ") +
-              "do not start shipping work in the meantime.",
-          }],
-          details: { approved: false, reason: reason ?? null },
-        };
-      }
-
-      // The EXTENSION writes the file: an approval must describe the text the
-      // user saw, not text the agent might swap in afterwards. The path lives
-      // in the gate-owned .pi/ scope, so this write never moves the worktree
-      // fingerprint and cannot invalidate a READY review or a precommit PASS.
-      const goalPath = loopGoalPathIn(goalRoot);
-
-      try {
-        mkdirSync(pathDirname(goalPath), { recursive: true });
-        writeFileSync(goalPath, goalText + "\n", "utf8");
-      } catch (e) {
-        return {
-          content: [{
-            type: "text",
-            text: `review-gate: could not write ${loopGoalRelPath(SESSION_STATE_VARIANT)} (${e instanceof Error ? e.message : String(e)}). ` +
-
-              "The approval was NOT recorded.",
-          }],
-          details: { approved: false },
-          isError: true,
-        };
-      }
-      goalSt.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString(), ...(reason ? { reason } : {}) };
-      // This goal's negotiation is over, so its audit count ends with it: the
-      // NEXT goal's first audit must announce round 1, not round N+1.
-      delete goalSt.goalAuditRound;
-      if (goalRoot === primaryRepoRoot) persist(uiCtx);
-      else persistRepo(uiCtx, goalRoot);
-      log(`loop goal approved by the user for ${goalRoot} (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: goal approved and written to ${loopGoalRelPath(SESSION_STATE_VARIANT)} (repo: ${goalRoot}). Work to it; if it has to ` +
-
-            "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
-            "yourself drops the approval and blocks shipping)." +
-            (reason ? `\nUser's note on approval: ${reason}` : ""),
-        }],
-        details: { approved: true, reason: reason ?? null },
-      };
-    },
-  });
 
   /**
    * The two L7 Copilot tools — `request_copilot_review` (ask for the review,
