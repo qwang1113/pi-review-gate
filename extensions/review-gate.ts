@@ -191,6 +191,8 @@ import {
 } from "../lib/orchestrator-directives.ts";
 import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
 import { formatPlanSummary, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
+import { contextPercentFromUsage } from "../lib/orchestrator-handoff-advice.ts";
+
 import {
   adjudicatePlanAudit,
   buildPlanAuditTask,
@@ -1190,20 +1192,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     };
   }
 
-  /** Percent of this session's context window in use, when the host says. */
+  /**
+   * Percent of this session's context window in use, when the host says.
+   *
+   * The ARITHMETIC lives in lib/orchestrator-handoff-advice.ts, and it moved
+   * there because the version written here was wrong in a way nothing could
+   * catch: it read `usage.used / usage.max`, while pi returns
+   * `{ tokens, contextWindow, percent }`. The fallback for "percent is null
+   * right after a compaction" therefore could never fire, and its absence is
+   * indistinguishable from its presence — both render the same honest "no
+   * reading" line. A pure function has a test per shape instead.
+   */
   function contextPercentOf(ctx: { getContextUsage?: () => unknown } | undefined): number | undefined {
     try {
-      const usage = ctx?.getContextUsage?.() as { used?: number; max?: number; percent?: number } | undefined;
-      if (!usage) return undefined;
-      if (typeof usage.percent === "number" && Number.isFinite(usage.percent)) return usage.percent;
-      if (typeof usage.used === "number" && typeof usage.max === "number" && usage.max > 0) {
-        return (usage.used / usage.max) * 100;
-      }
-      return undefined;
+      return contextPercentFromUsage(ctx?.getContextUsage?.());
     } catch {
       return undefined;
     }
   }
+
 
   /**
    * Is a JUDGE this session dispatched still running, and since when?
@@ -4303,6 +4310,25 @@ export default function reviewGate(pi: ExtensionAPI) {
    * role, no new agent file, no new model pin.
    */
   async function runPlanAudit(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }> {
+    // FAIL-CLOSED AROUND THE WHOLE CHAIN. Anything unexpected in here — a
+    // judge that could not be spawned, an IO error reading its output — must
+    // become "the plan was not audited", never an exception that escapes into
+    // the tool and leaves the orchestrator unable to tell whether a dialog is
+    // about to appear.
+    try {
+      return await auditPlanRound(plan);
+    } catch (error) {
+      return {
+        ok: false,
+        text:
+          `review-gate: plan 审计过程本身出错了（${(error as Error).message}）——` +
+          "什么都没有记录，plan **没有**被送到用户面前。直接再 `submit` 一次即可重跑。",
+      };
+    }
+  }
+
+  async function auditPlanRound(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }> {
+
     const root = primaryRepoRoot;
     const hash = planAuditHash(plan);
     // A re-audit is handed the previous round's verdict and objections — the

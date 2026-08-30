@@ -353,16 +353,27 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "Read or change the orchestration PLAN — the task list that is this orchestration's exit " +
       "contract, and the only thing that authorizes spawning a child session. Actions: " +
       "\"read\" (default), \"write\" (replace the plan; every task MUST declare fileBoundaries), " +
-      "\"submit\" (ask the USER to approve it — the gate renders the dialog; writing the file " +
-      "yourself grants nothing), \"set-status\" (move one task through the state machine), " +
-      "\"add-decision\" / \"resolve-decision\" (questions only the human can settle). Changing " +
-      "tasks, boundaries, dependencies or maxParallel REVOKES the approval: it binds to content.",
+      "\"submit\" (the gate AUDITS the plan with a judge process first — minutes-long — and only " +
+      "asks the USER to approve it if the audit passes; a failed audit comes back as findings " +
+      "with no dialog shown, so fix them and submit again), \"set-status\" (move one task through " +
+      "the state machine — `write` never changes a status), \"add-decision\" / \"resolve-decision\" " +
+      "(questions only the human can settle). WHAT `write` DOES TO THE APPROVAL: it keeps it for " +
+      "edits that grant nothing new — a narrowed boundary, a dropped task, a new path inside the " +
+      "directory of a boundary this task already had that no other task claims, an added " +
+      "dependency, parallel→serial, a lower maxParallel — and records why. It REVOKES it for a " +
+      "new task, a new directory, a removed dependency, serial→parallel or a higher maxParallel. " +
+      "So refine boundaries freely as you learn where the work lands; only real widening costs " +
+      "the user a dialog.",
+
     parameters: Type.Object({
       action: Type.Optional(Type.Enum(PLAN_ACTIONS)),
       plan: Type.Optional(Type.Any({
         description:
           "For action=\"write\": { title, intent, maxParallel?, tasks: [{ id, title, " +
-          "fileBoundaries: [\"lib/\", ...], dependsOn?: [], execution?: \"serial\"|\"parallel\" }] }",
+          "fileBoundaries: [\"lib/\", ...], dependsOn?: [], execution?: \"serial\"|\"parallel\" }] }. " +
+          "Do NOT send `status`: existing tasks keep the status execution gave them (use " +
+          "\"set-status\"), and only a genuinely new task starts at `pending`.",
+
       })),
       taskId: Type.Optional(Type.String({ description: "For action=\"set-status\"" })),
       status: Type.Optional(Type.Enum({ pending: "pending", running: "running", done: "done", blocked: "blocked" })),

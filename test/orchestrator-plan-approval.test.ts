@@ -31,6 +31,8 @@ import {
   snapshotApprovedPlan,
 } from "../lib/orchestrator-plan-approval.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
+import { buildPlanConfirmMessage } from "../lib/orchestrator-tools.ts";
+
 
 /** The plan shape the round-4 run actually used: one file per task. */
 function fileGrainPlan(): OrchestratorPlan {
@@ -300,7 +302,17 @@ test("the approval dialog states the boundary semantics the user actually agreed
   const world = makeFakeWorld({ plan: twoTaskPlan() });
   world.confirmAnswers.push(true);
   await world.call("orchestrator_plan", { action: "submit" });
-  const shown = world.shown.join("\n");
-  assert.match(shown, /目录/, "the user is told an approved boundary covers new files in its own directory");
-  assert.match(shown, /不与其他任务重叠/);
+
+  // BOTH surfaces are pinned, because the rule they describe is the one thing
+  // in this round that WIDENS what an approval means. A user who learns it
+  // afterwards did not agree to it, so this copy is a criterion, not prose.
+  const transcript = world.shown.join("\n");
+  assert.match(transcript, /同一目录内/, "the transcript says what an approved boundary absorbs");
+  assert.match(transcript, /不与其他任务重叠/, "and the limit on it");
+  assert.match(transcript, /新增任务|新目录/, "and what still comes back to them");
+
+  const dialog = buildPlanConfirmMessage(world.plan()!);
+  assert.match(dialog, /文件细化不会再问/, "the decision box carries the same rule, not a softer one");
+  assert.match(dialog, /新增任务、碰到新目录/, "including what does invalidate the approval");
 });
+

@@ -25,7 +25,8 @@ neutraliseGateEnv();
 
 import { makeFakeWorld, projectionOf, replyText, twoTaskPlan, type FakeWorld } from "./helpers/fake-orchestration.ts";
 import { deliveryVerdict } from "../lib/orchestrator-delivery.ts";
-import { handoffAdvice } from "../lib/orchestrator-handoff-advice.ts";
+import { contextPercentFromUsage, handoffAdvice } from "../lib/orchestrator-handoff-advice.ts";
+
 
 async function spawnT1(world: FakeWorld): Promise<string> {
   const reply = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
@@ -160,6 +161,27 @@ test("the four bands are a function of BOTH numbers — questions come before a 
   assert.equal(handoffAdvice({ percent: 95, openRequests: 0 }).urgency, "now");
   assert.match(handoffAdvice({ percent: 95, openRequests: 1 }).line, /先把这 1 个待答请求回掉/);
 });
+
+test("the usage reading understands pi's ACTUAL shape — and the fallback really fires", () => {
+  // pi returns { tokens, contextWindow, percent }. The first version of this
+  // read `used`/`max`, which pi has never had: the fallback it was supposed to
+  // provide could not fire, and a missing fallback renders identically to an
+  // unused one (both produce the honest "no reading" line). Hence one case per
+  // shape.
+  assert.equal(contextPercentFromUsage({ tokens: 100, contextWindow: 200, percent: 50 }), 50);
+  assert.equal(
+    contextPercentFromUsage({ tokens: 50_000, contextWindow: 200_000, percent: null }),
+    25,
+    "percent is null right after a compaction — THIS is when the fallback matters",
+  );
+  assert.equal(contextPercentFromUsage({ tokens: null, contextWindow: 200_000, percent: null }), undefined,
+    "an unknown token count is not a zero token count");
+  assert.equal(contextPercentFromUsage({ tokens: 10, contextWindow: 0, percent: null }), undefined);
+  assert.equal(contextPercentFromUsage(undefined), undefined);
+  assert.equal(contextPercentFromUsage({ used: 100, max: 200 }), undefined,
+    "the fields the old code invented must not silently start working either");
+});
+
 
 /** The id of the newest instruction on a child's channel. */
 function latestInstructId(world: FakeWorld, childId: string): string {

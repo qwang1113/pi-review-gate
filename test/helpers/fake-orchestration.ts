@@ -201,6 +201,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   const shown: string[] = [];
   const confirmAnswers: boolean[] = [];
   let memory: SupervisionMemory = {};
+  const paneDecor = new Map<string, { title: string; at: number }>();
+
   const env: Record<string, string> = { TMUX_PANE: "%0", ...(options.env ?? {}) };
 
   const tools = new Map<
@@ -241,6 +243,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     channelHome: () => "/home/test",
     supervisionMemory: () => memory,
     saveSupervisionMemory: (next) => { memory = next; },
+    paneDecorMemory: () => paneDecor,
+
     contextPercent: () => options.contextPercent,
     // The plan pre-audit is a judge PROCESS in production; the fake answers
     // from a canned verdict so a protocol test can drive both branches (a PASS

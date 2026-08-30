@@ -37,7 +37,8 @@ import {
   type ChannelRecord,
 } from "../lib/orchestrator-channel.ts";
 import { decideSupervisionEvents, formatSupervisionReceipt, superviseChildren } from "../lib/orchestrator-supervisor.ts";
-import { memoryChannelIO } from "./helpers/fake-orchestration.ts";
+import { makeFakeWorld, memoryChannelIO, replyText, twoTaskPlan } from "./helpers/fake-orchestration.ts";
+
 import type { ChildSession } from "../lib/orchestrator-registry.ts";
 
 const T0 = Date.parse("2026-08-30T10:00:00.000Z");
@@ -216,3 +217,24 @@ test("the rendered health line reads as reassurance, with the duration in it", (
   assert.match(line, /220s/);
   assert.match(line, /别打断/);
 });
+
+test("`orchestrator_recover`'s refusal tells the orchestrator to LOOK, not to interrupt", async () => {
+  // The exit criterion names this wording specifically, so it is pinned here:
+  // this refusal is what a supervisor reads at the exact moment it suspects a
+  // child is stuck, and the sentence it used to end with ("先 interrupt 打断
+  // 它") is the one that would have cut a live review round in half.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const child = world.runtime().children[0]!;
+
+  const reply = await world.call("orchestrator_recover", { childId: child.id });
+
+  assert.equal(reply.isError, true, "a live pane is never re-opened");
+  const text = replyText(reply);
+  assert.match(text, /waiting-judge/, "the first thing it points at is 'it may simply be busy'");
+  assert.match(text, /不要打断|别打断|不.*interrupt/,
+    "and it must never suggest interrupting a child whose state it has not established");
+  assert.doesNotMatch(text, /先 `orchestrator_instruct\(\{mode:"interrupt"\}\)`/,
+    "the exact recommendation that caused the round-4 near-miss must not come back");
+});
+

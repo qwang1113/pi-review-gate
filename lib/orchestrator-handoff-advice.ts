@@ -48,11 +48,45 @@ export interface HandoffAdviceInput {
 }
 
 /**
+ * Turn pi's `getContextUsage()` into a percentage — or nothing.
+
+ *
+ * WHY THIS IS A FUNCTION IN lib/ AND NOT THREE LINES IN THE EXTENSION. The
+ * first version lived inline and read `usage.used / usage.max`, which are not
+ * fields pi has: the real shape is `{ tokens, contextWindow, percent }`. So
+ * the fallback that was supposed to cover "percent is null right after a
+ * compaction" could never once have fired, and nothing would have caught it —
+ * the honest "no reading" line looks exactly the same whether the fallback is
+ * missing or merely unused. Here it is a pure function with a test per shape.
+ *
+ * `percent` is preferred when pi gives it; `tokens / contextWindow` is the
+ * arithmetic fallback and is reported the same way (the CALLER says where the
+ * number came from). Anything else — no usage object, a null token count, a
+ * zero window — yields `undefined`, because a missing measurement must never
+ * be rendered as room to spare.
+ */
+export function contextPercentFromUsage(usage: unknown): number | undefined {
+  if (typeof usage !== "object" || usage === null) return undefined;
+  const value = usage as { tokens?: unknown; contextWindow?: unknown; percent?: unknown };
+  if (typeof value.percent === "number" && Number.isFinite(value.percent)) return value.percent;
+  const tokens = value.tokens;
+  const window = value.contextWindow;
+  if (
+    typeof tokens === "number" && Number.isFinite(tokens) &&
+    typeof window === "number" && Number.isFinite(window) && window > 0
+  ) {
+    return (tokens / window) * 100;
+  }
+  return undefined;
+}
+
+/**
  * Judge the moment.
  *
  * No usage reading at all yields `none` with an honest line — a missing
  * measurement must never be reported as "plenty of room left".
  */
+
 export function handoffAdvice(input: HandoffAdviceInput): HandoffAdvice {
   const soft = input.soft ?? HANDOFF_SOFT_PERCENT;
   const hard = input.hard ?? HANDOFF_HARD_PERCENT;

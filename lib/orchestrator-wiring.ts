@@ -412,6 +412,11 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
   // changed and would re-ring the same unanswered question on every poll.
   const io = nodeChannelIO();
   let memory: SupervisionMemory = {};
+  // Same ownership rule as the supervision memory: one per orchestration, so
+  // the border-repaint throttle cannot leak between orchestrations (or, in a
+  // test process, between worlds).
+  const paneDecor = new Map<string, { title: string; at: number }>();
+
 
   const deps: OrchestratorDeps = {
     repoRoot: host.repoRoot,
@@ -450,6 +455,8 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     channelHome: () => host.channelHome?.(),
     supervisionMemory: () => memory,
     saveSupervisionMemory: (next) => { memory = next; },
+    paneDecorMemory: () => paneDecor,
+
     contextPercent: () => host.contextPercent?.(),
     auditPlan: (plan) =>
       host.auditPlan

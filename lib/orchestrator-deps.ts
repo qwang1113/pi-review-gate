@@ -172,6 +172,20 @@ export interface OrchestratorDeps {
   saveSupervisionMemory(next: SupervisionMemory): void;
 
   /**
+   * What each child's pane border currently says — the repaint throttle.
+   *
+   * Owned by the orchestration (like the supervision memory) rather than by
+   * the module, for two reasons that are really one: the wait loop probes
+   * every 2 seconds and the title carries a seconds counter, so without a
+   * memory the gate would fork a tmux process per child per probe; and a
+   * memory living in a module would be shared by every orchestration in the
+   * process, which is exactly the kind of hidden global this layer removed
+   * everywhere else.
+   */
+  paneDecorMemory(): Map<string, { title: string; at: number }>;
+
+
+  /**
    * This orchestrator's OWN context usage, as a percentage (receipt block 4).
    *
    * `undefined` means the host genuinely could not measure it, and the receipt

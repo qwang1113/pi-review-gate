@@ -330,6 +330,12 @@ export function childChannelProjection(deps: OrchestratorDeps, childId: string) 
   }
 }
 
+
+
+/** Shortest gap between two repaints of the SAME pane. */
+const PANE_REPAINT_MIN_MS = 5_000;
+
+
 /**
  * Repaint every child's border label from the health that was just measured.
  *
@@ -347,6 +353,14 @@ export function childChannelProjection(deps: OrchestratorDeps, childId: string) 
  *
  * Returns the legend (childId → label) so a caller can print the same names
  * it just painted.
+ *
+ * THROTTLED, and it has to be. The wait loop probes every 2 seconds, so an
+ * unthrottled repaint would spawn a tmux process per child per probe — 150
+ * of them per child over one default wait — and the title carries a SECONDS
+ * counter, so comparing the rendered string would never dedupe anything
+ * either. A border that lags by a few seconds costs nothing; a supervisor
+ * that forks a process every two seconds for decoration is a real cost.
+
  */
 export function refreshPaneLabels(
   deps: OrchestratorDeps,
@@ -358,16 +372,25 @@ export function refreshPaneLabels(
   const legend: Array<{ childId: string; label: string }> = [];
   for (const supervision of snapshot.children) {
     const child = supervision.child;
-    const title = plan?.tasks.find((task) => task.id === child.taskId)?.title ?? child.taskId;
-    const label = paneLabelFor(child.taskId, title);
+    const taskTitle = plan?.tasks.find((task) => task.id === child.taskId)?.title ?? child.taskId;
+    const label = paneLabelFor(child.taskId, taskTitle);
+
     legend.push({ childId: child.id, label });
     if (supervision.state === "dead") continue;
+    const title = paneTitleForHealth(label, supervision.health);
+    const painted = deps.paneDecorMemory().get(child.id);
+    const now = deps.now();
+    if (painted && painted.title === title) continue;
+    if (painted && now - painted.at < PANE_REPAINT_MIN_MS) continue;
+    deps.paneDecorMemory().set(child.id, { title, at: now });
+
     try {
-      deps.tmux(buildPaneTitleArgv(child.paneId, paneTitleForHealth(label, supervision.health)));
+      deps.tmux(buildPaneTitleArgv(child.paneId, title));
     } catch {
       /* cosmetic only — never allowed to affect supervision */
     }
   }
+
   return legend;
 }
 
