@@ -91,7 +91,7 @@ export type ChannelWriter = "child" | "orchestrator";
  * reporting that instead of letting the silence be interpreted is what keeps
  * a healthy review round from looking like a hang.
  */
-export type ChildReportedState = "working" | "waiting-input" | "idle" | "done" | "waiting-judge";
+export type ChildReportedState = "working" | "waiting-input" | "idle" | "done" | "waiting-judge" | "mode-changed";
 
 
 /** A bulky field that lives in a side file next to the channel. */

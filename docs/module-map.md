@@ -270,8 +270,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   `orchestrator-plan-audit.ts`（plan 的前置审计：任务模板、裁决绑定 canonical
   文本、只 P0/P1 阻塞）、
   `orchestrator-pane-decor.ts`（子会话的颜色/标签/边框标题——纯展示层，只出不进）、
-  `orchestrator-child-state.ts`（**子会话七态**：working / waiting-input /
-  waiting-judge / idle / done / dead / stalled，判据全部是结构化真值——纯函数，
+  `orchestrator-child-state.ts`（**子会话状态**：working / waiting-input /
+  waiting-judge / idle / done / dead / stalled + mode-changed（模式切换事件，
+  叫醒项目经理），判据全部是结构化真值——纯函数，
   用一串通道记录就能单测）、
 
   `orchestrator-handoff-advice.ts`（上下文用量 + 待答请求数 ⇒ 接力时机）、
@@ -335,9 +336,12 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 ### 域 7：模型配置与诊断
 
 `model-config.ts` 把 `review-gate.json` 的 `agents` 段渲染成 `agents/*.md`
-的 frontmatter（项目层盖全局层），`model-allowlist.ts` 是 provider 级允许名
-单，`model-diagnose.ts` 回答「我的审查实际跑在哪个模型上」，`gate-doctor.ts`
-是 `/gate-doctor` 的只读体检，`ui-widget.ts` 构造 editor 下方那条只读面板。
+的 frontmatter（项目层盖全局层），**无内置默认**：安装脚本写入 6 角色的默认
+slots，会话启动时 `validateAgentsForStartup` 硬检查每个角色（缺失/slots 空/
+spec 非法即停会话），`modelSpecFor` 对未配置角色返回 undefined（派发
+fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diagnose.ts`
+回答「我的审查实际跑在哪个模型上」，`gate-doctor.ts` 是 `/gate-doctor` 的只读
+体检，`ui-widget.ts` 构造 editor 下方那条只读面板。
 
 > **落点**：除 `model-config.ts` 会把配置渲染进 `agents/*.md` 之外，这一域
 > 全是**诊断**：它们永远不产生门禁裁决。想让某个诊断「顺手拦一下」时，请把
@@ -401,7 +405,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `adviser-brief.ts` | 组装 adviser 咨询的 brief：主会话 transcript 指针 + 结论落盘路径，第二次起带上轮结论与其后改动 |
 | `advisory-prepare-tools.ts` | **内部实现**（不注册给 pi）：组装 adviser brief 与 goal 审计任务文本，由 `judge_submit` / `propose_loop_goal` 调用 |
 | `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表 |
-| `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限 |
+| `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限；模型走 `agents.arbiter.slots[0]`（配置层），不再硬编码 |
 | `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义 |
 | `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交 |
@@ -437,13 +441,13 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `loop-goal.ts` | L8：loop 会话退出契约的文件、审批记录与注入 |
 | `loop-stall.ts` | L2 自动续跑的断路器：外部阻塞（限流、模型不可达）时停止空转 |
 | `model-allowlist.ts` | provider 级模型允许名单，独立模块以便跨引擎存活 |
-| `model-config.ts` | 每个 agent 的模型链配置层：把 `review-gate.json` 的 `agents` 段渲染成 frontmatter |
+| `model-config.ts` | 每个 agent 的模型链配置层：把 `review-gate.json` 的 `agents` 段渲染成 frontmatter；`validateAgentsForStartup` 启动硬检查（无内置默认） |
 | `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |
 | `orchestration-id.ts` | 编排 id：编排的稳定地址（不是 session id），接力换人后子会话无感 |
 | `orchestrator-boundaries.ts` | 文件边界代数：两个任务能否并行的唯一判据 |
 | `orchestrator-channel.ts` | 点对点通道：路径、记录 schema、追加/读取/行游标、大 payload 溢出到旁文件、投影（还欠着什么）、心跳超时判定 |
 | `orchestrator-child-channel.ts` | 子会话侧：状态上报、「人与项目经理任意一方先答即生效」的竞态提问、读取与确认编排下发的指令 |
-| `orchestrator-child-state.ts` | 子会话七态（working / waiting-input / **waiting-judge** / idle / done / dead / stalled）与再唤醒退避；`waiting-judge` 是「在等门禁自己派出去的 reviewer/precommit」，不叫醒项目经理，也让 `stalled` 回到只表示「扩展不在了」。判据全部是结构化真值，不看屏幕 |
+| `orchestrator-child-state.ts` | 子会话状态（working / waiting-input / **waiting-judge** / idle / done / dead / stalled + mode-changed）与再唤醒退避；`waiting-judge` 是「在等门禁自己派出去的 reviewer/precommit」，不叫醒项目经理；`mode-changed` 是模式切换事件，叫醒项目经理。也让 `stalled` 回到只表示「扩展不在了」。判据全部是结构化真值，不看屏幕 |
 | `orchestrator-pane-decor.ts` | 子会话的可视化区分：按 childId 派色（纯函数，同一子会话永远同色）、`@task-slug · state 220s` 的边框标题、window 级标签栏开关判定。**纯展示层**：只写不读，任何判定都不看它 |
 | `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：目录前缀内的边界细化、收窄、加依赖、降并行度⇒批准迁移并记审计；新任务/新目录/删依赖/串行改并行/提并行度⇒重新批准 |
 | `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案 |

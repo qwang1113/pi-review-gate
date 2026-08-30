@@ -212,13 +212,12 @@ const defaultArbiterExec: ArbiterExec = (argv, timeoutMs) =>
     }
   });
 
-function splitModel(id: string): { provider: string; model: string } {
+function splitModel(id: string): { provider: string; model: string } | undefined {
   const idx = id.indexOf("/");
   if (idx <= 0 || idx === id.length - 1) {
-    // Malformed id → the single default constant (no duplicated literal that
-    // could drift from project-config's DEFAULT_ARBITER_MODEL).
-    const di = DEFAULT_ARBITER_MODEL.indexOf("/");
-    return { provider: DEFAULT_ARBITER_MODEL.slice(0, di), model: DEFAULT_ARBITER_MODEL.slice(di + 1) };
+    // Malformed id — the arbiter model comes from agents.arbiter.slots[0]
+    // (no built-in fallback): refuse, and the caller fails closed.
+    return undefined;
   }
   return { provider: id.slice(0, idx), model: id.slice(idx + 1) };
 }
@@ -241,7 +240,9 @@ export async function runArbiter(
   timeoutMs: number = ARBITER_TIMEOUT_MS,
   systemPrompt: string = ARBITER_SYSTEM_PROMPT,
 ): Promise<ArbiterVerdict | undefined> {
-  const { provider, model } = splitModel(modelId);
+  const split = splitModel(modelId);
+  if (!split) return undefined; // malformed id — fail closed (GATE_WINS)
+  const { provider, model } = split;
   const argv = [
     "pi", "-p", ...ARBITER_ISOLATION_FLAGS,
     "--provider", provider, "--model", model,

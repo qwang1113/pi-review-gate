@@ -380,6 +380,7 @@ import {
   frontmatterBlock,
   resolvePackageAgentsDir,
   ensureAgentFilesPresent,
+  validateAgentsForStartup,
 } from "../lib/model-config.ts";
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
@@ -1256,19 +1257,23 @@ export default function reviewGate(pi: ExtensionAPI) {
    * is computed from an unbroken run of identical states, so re-reporting is
    * cheap but not free.
    */
-  function reportChildState(ctx: ExtensionContext, note?: string, opts: { force?: boolean } = {}): void {
+  function reportChildState(
+    ctx: ExtensionContext,
+    note?: string,
+    opts: { force?: boolean; state?: ChildReportedState } = {},
+  ): void {
     const binding = childBinding();
     if (!binding) return;
     const streaming = ctx.isIdle?.() === false || ctx.hasPendingMessages?.() === true;
     const percent = contextPercentOf(ctx as unknown as { getContextUsage?: () => unknown });
     const judging = activeJudgeWait();
-    const reported: ChildReportedState = judging
+    const reported: ChildReportedState = opts.state ?? (judging
       ? "waiting-judge"
       : streaming
         ? "working"
         : state.completion?.at
           ? "done"
-          : "idle";
+          : "idle");
     const now = Date.now();
     const changed = reported !== lastReportedChildState;
     if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
@@ -1511,7 +1516,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // it. `latestCtx` is refreshed on every tool_call, so it is current by
     // the time any orchestration tool runs.
     contextPercent: () => contextPercentOf(latestCtx as unknown as { getContextUsage?: () => unknown }),
-    auditPlan: (plan) => runPlanAudit(plan),
+    auditPlan: (plan, onUpdate) => runPlanAudit(plan, onUpdate as { step?: (t: string) => void; done?: (t: string) => void } | undefined),
 
     sessionTranscriptPath: () => {
       try {
@@ -2697,6 +2702,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     loopStall = undefined; // a mode decision is a change of circumstances
     stallNoticeShown = false;
     persist(ctx);
+    // MODE-CHANGE NOTIFICATION (user requirement 2026-08-30): every mode
+    // transition — via set_gate_mode tool OR /gate-mode command — is
+    // reported to the supervising orchestrator as a forced state update, so
+    // a child that downgraded to explore/normal (or became an orchestrator)
+    // is never silently invisible to the project manager waiting on it.
+    // Without this, an orchestrator could wait forever on a child that
+    // stopped heartbeating after a mode switch (deadlock).
+    reportChildState(ctx, `gate mode → ${mode}`, { force: true, state: "mode-changed" });
   }
 
   // ---------- L6 (extension side): test-label language, checked at edit time ----------
@@ -2879,6 +2892,29 @@ export default function reviewGate(pi: ExtensionAPI) {
     };
   }
 
+
+  /**
+   * The arbiter model, resolved from the agents config layer (arbiter role).
+   *
+   * The arbiter USED to be a hard-coded constant (project-config's
+   * DEFAULT_ARBITER_MODEL). Per the all-roles-through-config requirement it
+   * now comes from agents.arbiter.slots[0]. Absent/unconfigured → undefined,
+   * which callers treat as fail-closed (no arbiter, GATE_WINS).
+   */
+  function resolveArbiterModel(): string | undefined {
+    try {
+      const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
+      const arbiter = map.arbiter;
+      if (arbiter && arbiter.auto === false && arbiter.slots.length > 0) return arbiter.slots[0]!;
+      // Fall back to the legacy field when the agents layer has no arbiter
+      // entry (a config from before this change): the legacy model is still
+      // the user's own pin, not a built-in default.
+      return projectConfig.arbiter.model || undefined;
+    } catch {
+      return projectConfig.arbiter.model || undefined;
+    }
+  }
+
   /**
    * Hear an appeal against an A-class TEXT block (lib/text-appeal.ts).
    *
@@ -2898,7 +2934,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!admission.ok) return deny(`review-gate: ${admission.reason}`);
 
     const verdict = await runArbiter(
-      projectConfig.arbiter.model,
+      resolveArbiterModel() ?? projectConfig.arbiter.model,
       buildTextAppealPrompt(block, argument),
       undefined,
       undefined,
@@ -3110,7 +3146,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           "review-gate: 会话开始时工作区有未提交改动，尚未与用户确认处置——先调 setup_workspace。" +
           `\n${state.worktreeDirty.files.slice(0, 12).map((f) => `  ${f}`).join("\n")}` +
           (state.worktreeDirty.files.length > 12 ? `\n  …还有 ${state.worktreeDirty.files.length - 12} 个` : "") +
-          "\nsetup_workspace 会让用户三选一（接受为基线 / 已自行处理重检 / 门禁代执行丢弃），随后建立工作分支。",
+          "\nsetup_workspace 会让用户四选一（接受为基线 / 已自行处理重检 / 门禁代执行丢弃 / 放行这些改动豁免进审查），随后建立工作分支。",
       };
     }
     const goalRoot = absPath
@@ -3917,14 +3953,17 @@ export default function reviewGate(pi: ExtensionAPI) {
    * contract checkable, and does it match the repository?" — so no fourth
    * role, no new agent file, no new model pin.
    */
-  async function runPlanAudit(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }> {
+  async function runPlanAudit(
+    plan: OrchestratorPlan,
+    onUpdate?: { step?: (t: string) => void; done?: (t: string) => void } | undefined,
+  ): Promise<{ ok: true } | { ok: false; text: string }> {
     // FAIL-CLOSED AROUND THE WHOLE CHAIN. Anything unexpected in here — a
     // judge that could not be spawned, an IO error reading its output — must
     // become "the plan was not audited", never an exception that escapes into
     // the tool and leaves the orchestrator unable to tell whether a dialog is
     // about to appear.
     try {
-      return await auditPlanRound(plan);
+      return await auditPlanRound(plan, onUpdate);
     } catch (error) {
       return {
         ok: false,
@@ -3934,8 +3973,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       };
     }
   }
-
-  async function auditPlanRound(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }> {
+  async function auditPlanRound(
+    plan: OrchestratorPlan,
+    onUpdate?: { step?: (t: string) => void; done?: (t: string) => void } | undefined,
+  ): Promise<{ ok: true } | { ok: false; text: string }> {
 
     const root = primaryRepoRoot;
     const hash = planAuditHash(plan);
@@ -3952,6 +3993,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       ...(state.sessionId ? { sessionId: state.sessionId, sessionDir: sessionDirForCwd(cwd) } : {}),
     });
 
+    onUpdate?.step?.("派发 plan 审计（goal-auditor 独立进程）");
     const dispatch = dispatchJudgeRound({
       root,
       role: "goal-auditor",
@@ -3976,7 +4018,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     // The SAME wait implementation `judge_wait` uses (process exit, exit-code
     // file, or a verdict fence already in this round's stdout).
+    onUpdate?.step?.("审计运行中（最长 10 分钟，完成即返回）");
     await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx);
+    onUpdate?.done?.("审计进程结束");
     // O-6 — the gate dispatched this plan auditor internally, so the gate
     // closes it (the round-5 P1). The orchestrator never asked for a judge
     // child and never saw one in an `orchestrator_wait` receipt; leaving it
@@ -4148,6 +4192,17 @@ export default function reviewGate(pi: ExtensionAPI) {
         workDir,
         parentSessionId: state.sessionId ?? undefined,
       });
+      if (!files.model) {
+        // NO BUILT-IN DEFAULT (user requirement 2026-08-30): a role with no
+        // resolvable chain cannot be dispatched. Fail closed with the reason
+        // (the startup hard check surfaces it too, but a runtime config
+        // change after start must not silently spawn a default model).
+        return {
+          ok: false,
+          reused: decision.continuesSession,
+          error: `角色 ${role} 没有可派发的模型链（agents 配置缺失或不可解析）——请修复 ~/.pi/review-gate.json 后重试`,
+        };
+      }
       // "Reused" is a fact about the SESSION, not about the process: the
       // transcript decided it above, before this round could add to it.
       const continuesSession = decision.continuesSession;
@@ -5546,6 +5601,31 @@ export default function reviewGate(pi: ExtensionAPI) {
             };
           }
           notes.push("用户已自行处理，复检干净。");
+        } else if (choice === "exempt") {
+          // USER REQUIREMENT (2026-08-30): a "pass through" option for
+          // pre-existing mock/local changes. Snapshot EVERY current dirty
+          // file into the same scopeLimit structure request_scope_limit
+          // uses — the ship gate and the review scope then treat them as
+          // exempt (no review coverage required), the files stay in the
+          // worktree untouched, and declare_done still merges them.
+          const sessionSet = new Set<string>();
+          const preexisting = files.map((f) => f.path);
+          if (st.scopeLimit) {
+            // A grant from request_scope_limit already exists — extend it
+            // with the dirty files (never shrink).
+            st.scopeLimit = {
+              ...st.scopeLimit,
+              preexistingFiles: [...new Set([...st.scopeLimit.preexistingFiles, ...preexisting])],
+            };
+          } else {
+            st.scopeLimit = {
+              preexistingFiles: preexisting,
+              sessionFiles: [...sessionSet],
+              at: new Date().toISOString(),
+            };
+          }
+          // The worktree is now settled; the files stay put.
+          notes.push(`已放行 ${files.length} 个改动（不删不改，豁免进审查；快照 ${new Date().toISOString()}）。`);
         } else {
           notes.push(`接受 ${files.length} 个改动为本会话基线（记得提交成 checkpoint）。`);
         }
@@ -6059,7 +6139,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         agentArgument: params.argument,
       });
 
-      const verdict = await runArbiter(projectConfig.arbiter.model, prompt);
+      const verdict = await runArbiter(resolveArbiterModel() ?? projectConfig.arbiter.model, prompt);
       // Fail-closed: any spawn/parse failure → GATE_WINS.
       const decision = verdict?.decision ?? "GATE_WINS";
       arbitrationDecisions.set(decisionKey, decision);
@@ -6755,6 +6835,40 @@ export default function reviewGate(pi: ExtensionAPI) {
     // normal-mode early return so the window can never leak across turns in
     // any mode.
     editFailurePending = false;
+
+    // STARTUP HARD CHECK (user requirement 2026-08-30): every role must have
+    // a resolvable model chain in the agents config layer — no silent
+    // built-in fallback. A missing/corrupt/unresolvable chain STOPS the
+    // session with the reason (normal mode is exempt: the user turned the
+    // gate off explicitly).
+    if (state.taskMode !== "normal") {
+      try {
+        const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
+        const checks = validateAgentsForStartup(map, loadRegistry(), KNOWN_AGENTS);
+        const bad = Object.entries(checks).filter(([, c]) => c && !c.ok);
+        if (bad.length > 0) {
+          const details = bad.map(([name, c]) => `- ${name}: ${c?.reason ?? "未知原因"}`).join("\n");
+          return {
+            systemPrompt:
+              systemPrompt +
+              `\n\n## REVIEW-GATE: 配置错误，会话无法启动\n` +
+              `角色模型配置不完整 —— 以下角色无法获得可派发的模型链：\n${details}\n` +
+              `\n请修复 ~/.pi/review-gate.json（或运行安装脚本重建默认配置）后重开会话。` +
+              `\n在配置修复前，本会话拒绝执行任何工作（ship 命令仍被拦截）。`
+          };
+        }
+      } catch (e) {
+        return {
+          systemPrompt:
+              systemPrompt +
+              `\n\n## REVIEW-GATE: 配置检查异常，会话无法启动\n` +
+              `启动配置检查本身失败（${e instanceof Error ? e.message : String(e)}）。` +
+              `\n请修复 ~/.pi/review-gate.json 后重开会话。`
+        };
+      }
+    }
+
+
 
     // Normal mode (user-confirmed later, or a consent-free first
     // classification / /tmp scratch clamp): the extension steps aside — no

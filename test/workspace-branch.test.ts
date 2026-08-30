@@ -10,6 +10,7 @@ import {
   parseConflictFiles,
   interpretWorktreeChoice,
   isProtectedBranch,
+  isValidGitBranchName,
   WORKTREE_CHOICES,
   MAX_BRANCH_OPS,
   type BranchOp,
@@ -49,9 +50,11 @@ test("every choice line maps back to its choice, and nothing else does", () => {
   assert.equal(interpretWorktreeChoice(WORKTREE_CHOICES.baseline), "baseline");
   assert.equal(interpretWorktreeChoice(WORKTREE_CHOICES.handled), "handled");
   assert.equal(interpretWorktreeChoice(WORKTREE_CHOICES.discard), "discard");
+  assert.equal(interpretWorktreeChoice(WORKTREE_CHOICES.exempt), "exempt");
   assert.equal(interpretWorktreeChoice("something else"), undefined);
   assert.equal(interpretWorktreeChoice(undefined), undefined, "a dismissed dialog chooses nothing");
 });
+
 
 // ---- the audit log ----
 
@@ -70,21 +73,51 @@ test("branch ops append in order and stay bounded", () => {
 });
 
 // ---- branch names ----
-
-test("a work branch name is sanitized and never a protected branch", () => {
-  assert.equal(deriveWorkBranchName("feat/my thing", "abc"), "feat/my-thing");
+test("a work branch name follows git ref rules and never a protected branch", () => {
+  assert.equal(deriveWorkBranchName("feat/add-pagination", "abc"), "feat/add-pagination");
   assert.equal(deriveWorkBranchName(undefined, "abc"), "session-abc");
   assert.equal(deriveWorkBranchName("", "abc"), "session-abc");
   assert.equal(deriveWorkBranchName("main", "abc"), "session-abc");
   assert.equal(deriveWorkBranchName("master", "abc"), "session-abc");
-  assert.equal(deriveWorkBranchName("--weird--", "abc"), "weird");
-  assert.ok(deriveWorkBranchName("x".repeat(200), "abc").length <= 60);
+  // Illegal git ref characters → fall back, never a mangled name.
+  assert.equal(deriveWorkBranchName("feat/my thing", "abc"), "session-abc");
+  assert.equal(deriveWorkBranchName("--weird--", "abc"), "--weird--");
+  assert.equal(deriveWorkBranchName("x".repeat(256), "abc"), "session-abc");
+  assert.equal(deriveWorkBranchName("feat..x", "abc"), "session-abc");
+  assert.equal(deriveWorkBranchName(".hidden", "abc"), "session-abc");
+  assert.equal(deriveWorkBranchName("feat/x.lock", "abc"), "session-abc");
+  assert.equal(deriveWorkBranchName("feat/x y", "abc"), "session-abc");
 });
+
 
 test("protected branches are exactly main and master", () => {
   assert.equal(isProtectedBranch("main"), true);
   assert.equal(isProtectedBranch(" master "), true);
   assert.equal(isProtectedBranch("develop"), false);
+});
+
+test("isValidGitBranchName applies git check-ref-format rules", () => {
+  assert.equal(isValidGitBranchName("feat/add-pagination"), true);
+  assert.equal(isValidGitBranchName("session-abc"), true);
+  assert.equal(isValidGitBranchName("fix/auth-token"), true);
+  assert.equal(isValidGitBranchName(""), false);
+  assert.equal(isValidGitBranchName("feat/my thing"), false);
+  assert.equal(isValidGitBranchName("feat..x"), false);
+  assert.equal(isValidGitBranchName(".hidden"), false);
+  assert.equal(isValidGitBranchName("feat/x.lock"), false);
+  assert.equal(isValidGitBranchName("feat/x/"), false);
+  assert.equal(isValidGitBranchName("feat//x"), false);
+  assert.equal(isValidGitBranchName("feat/x y"), false);
+  assert.equal(isValidGitBranchName("feat~1"), false);
+  assert.equal(isValidGitBranchName("feat^x"), false);
+  assert.equal(isValidGitBranchName("feat:x"), false);
+  assert.equal(isValidGitBranchName("feat?x"), false);
+  assert.equal(isValidGitBranchName("feat*x"), false);
+  assert.equal(isValidGitBranchName("feat[x]"), false);
+  assert.equal(isValidGitBranchName("feat\\x"), false);
+  assert.equal(isValidGitBranchName("feat@{x"), false);
+  assert.equal(isValidGitBranchName("@"), false);
+  assert.equal(isValidGitBranchName("x".repeat(256)), false);
 });
 
 // ---- committing ----

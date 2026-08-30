@@ -64,6 +64,8 @@ export type ChildState =
   | "done"
   /** Alive and reporting, but not working and not asking — it stopped. */
   | "idle"
+  /** It switched gate mode (loop→explore/normal/orchestrator) — newsworthy. */
+  | "mode-changed"
   /** Its pane is gone. */
   | "dead"
   /** Pane alive, but nothing has been reported for long enough to worry. */
@@ -135,6 +137,9 @@ export function classifyChildState(observation: ChildObservation): ChildState {
   if (stalledNow(observation)) return "stalled";
 
   if (last?.state === "waiting-judge") return "waiting-judge";
+  // A mode switch is a one-shot event: the report carries it, and the next
+  // heartbeat re-reports the child's real state. A supervisor must SEE it.
+  if (last?.state === "mode-changed") return "mode-changed";
   if (last?.state === "idle") return "idle";
   // Either it reported `working`, or it has not reported at all yet and is
   // still inside its heartbeat budget (a session that is booting).
@@ -260,6 +265,9 @@ export function childHealth(observation: ChildObservation): ChildHealth {
  * indistinguishable from a hang.
  */
 export function isNewsworthy(state: ChildState): boolean {
+  // mode-changed is a one-shot event the supervisor must not miss — a child
+  // that silently downgraded to explore/normal could otherwise be waited on
+  // forever under the assumption it is still enforcing loop.
   return state !== "working" && state !== "waiting-judge";
 }
 
@@ -286,6 +294,7 @@ export function describeChildState(state: ChildState): string {
     case "waiting-judge": return "在等门禁自己派出去的活（reviewer / precommit）";
     case "done": return "已完成";
     case "idle": return "停下了（没有 declare_done）";
+    case "mode-changed": return "切换了门禁模式";
     case "dead": return "pane 已消失";
     case "stalled": return "pane 还在，但心跳停了（扩展已不在，不是「它在忙」）";
   }

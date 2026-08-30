@@ -185,7 +185,7 @@ export function buildJudgeSystemPrompt(repoRoot: string, role: string, home?: st
  *    literal).
  * Falls back to "anthropic/claude-fable-5:max" when nothing resolves.
  */
-export function modelSpecFor(agents: AgentsConfigMap, role: string, repoRoot: string, home?: string): string {
+export function modelSpecFor(agents: AgentsConfigMap, role: string, repoRoot: string, home?: string): string | undefined {
   const entry = agents[role];
   if (entry && !entry.auto && entry.slots.length > 0) return entry.slots[0]!;
   const roleFile = resolveRoleFile(repoRoot, role, home);
@@ -201,7 +201,10 @@ export function modelSpecFor(agents: AgentsConfigMap, role: string, repoRoot: st
       }
     } catch { /* fall through */ }
   }
-  return "anthropic/claude-fable-5:max";
+  // NO BUILT-IN DEFAULT (user requirement 2026-08-30). A role without a
+  // resolvable chain is a configuration error — the caller fails closed
+  // (the startup hard check is what surfaces it to the user).
+  return undefined;
 }
 
 function defaultThinking(roleFile: string): string {
@@ -240,8 +243,8 @@ export interface JudgeSpawnInput {
 export interface JudgeSpawnFiles {
   /** Absolute path of the written system-prompt file. */
   sysPromptPath: string;
-  /** The effective model spec for the role (modelSpecFor). */
-  model: string;
+  /** The effective model spec for the role (modelSpecFor); undefined = unconfigured. */
+  model: string | undefined;
 }
 
 /**

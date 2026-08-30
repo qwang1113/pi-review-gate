@@ -322,7 +322,56 @@ function pruneOpenCodeGoModels() {
  */
 async function applyGlobalModelConfig() {
   try {
-    const cfgPath = join(homedir(), ".pi", "review-gate.json");
+  // ── DEFAULT AGENTS SECTION (user requirement 2026-08-30: NO built-in
+  // defaults — the config file must exist and name every role's slots).
+  //  - file ABSENT  → write the full 6-role default agents section.
+  //  - file PRESENT → merge in ONLY the roles that are missing (never
+  //    overwrite a role the user already configured — that would silently
+  //    undo their pins on every upgrade).
+  const cfgPath = join(homedir(), ".pi", "review-gate.json");
+  const DEFAULT_AGENTS = {
+    reviewer: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max", "opencode-go/deepseek-v4-flash"] },
+    adviser: { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max", "opencode-go/deepseek-v4-flash"] },
+    arbiter: { auto: false, slots: ["onekey/gpt-5.6-sol:max"] },
+    fixer: { auto: false, slots: ["anthropic/claude-sonnet-5:max", "anthropic/claude-opus-5:max", "opencode-go/deepseek-v4-flash"] },
+    recon: { auto: false, slots: ["anthropic/claude-haiku-4-5:low", "opencode-go/deepseek-v4-flash"] },
+    "goal-auditor": { auto: false, slots: ["anthropic/claude-fable-5:max", "anthropic/claude-opus-5:max", "opencode-go/deepseek-v4-flash"] },
+  };
+  try {
+    if (!existsSync(cfgPath)) {
+      const payload = {
+        agents: DEFAULT_AGENTS,
+        _installDefaultAgents: true,
+      };
+      mkdirSync(join(homedir(), ".pi"), { recursive: true });
+      writeFileSync(cfgPath, JSON.stringify(payload, null, 2) + "\n", "utf8");
+      log(`  ✓ wrote default agents section to ${cfgPath}`);
+    } else {
+      // Present: parse, then fill ONLY missing roles. Corrupt/unparseable
+      // files are left untouched (the extension surfaces them at start).
+      try {
+        const existing = JSON.parse(readFileSync(cfgPath, "utf8"));
+        if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+          const agents = existing.agents && typeof existing.agents === "object" && !Array.isArray(existing.agents)
+            ? existing.agents
+            : {};
+          const missing = Object.keys(DEFAULT_AGENTS).filter((k) => !(k in agents));
+          if (missing.length > 0) {
+            const merged = { ...existing, agents: { ...agents } };
+            for (const k of missing) merged.agents[k] = DEFAULT_AGENTS[k];
+            writeFileSync(cfgPath, JSON.stringify(merged, null, 2) + "\n", "utf8");
+            log(`  ✓ merged missing default agents into ${cfgPath}: ${missing.join(", ")}`);
+          }
+        }
+      } catch {
+        log(`  ⚠ existing config at ${cfgPath} is unreadable — left untouched (the session-start check will surface the problem)`);
+      }
+    }
+  } catch (e) {
+    log(`  ⚠ could not write default agents config (${e instanceof Error ? e.message : String(e)}) — the session-start check will surface the missing roles`);
+  }
+
+
     let raw;
     if (existsSync(cfgPath)) {
       try {

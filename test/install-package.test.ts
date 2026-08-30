@@ -154,7 +154,7 @@ test("postinstall global-layer model renderer exists and never touches the proje
   // and (its cwd being untrustworthy) it never renders any PROJECT layer.
   const installerSrc = readFileSync(join(ROOT, "scripts", "install-package.mjs"), "utf8");
   assert.match(installerSrc, /function applyGlobalModelConfig\(/, "global model render must exist");
-  const fn = installerSrc.slice(installerSrc.indexOf("function applyGlobalModelConfig("), installerSrc.indexOf("function applyGlobalModelConfig(") + 2200);
+  const fn = installerSrc.slice(installerSrc.indexOf("function applyGlobalModelConfig("), installerSrc.indexOf("function applyGlobalModelConfig(") + 6000);
   assert.match(fn, /join\(homedir\(\), "\.pi", "review-gate\.json"\)/);
   assert.match(fn, /targetDir: AGENTS_DST/);
   assert.match(fn, /effectiveAgentsConfig\(agents, undefined\)/);

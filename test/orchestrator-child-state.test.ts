@@ -42,7 +42,7 @@ function observe(records: ChannelRecord[], overrides: Partial<ChildObservation> 
   };
 }
 
-function stateRecord(state: "working" | "waiting-input" | "idle" | "done", at = iso()): ChannelRecord {
+function stateRecord(state: "working" | "waiting-input" | "idle" | "done" | "mode-changed", at = iso()): ChannelRecord {
   return { kind: "state", from: "child", at, state };
 }
 
@@ -93,6 +93,11 @@ test("round-1 P1: a completion older than the CURRENT assignment is not a comple
 
 test("a child that stopped without finishing is `idle`", () => {
   assert.equal(classifyChildState(observe([stateRecord("idle")])), "idle");
+});
+
+test("a mode switch is reported as mode-changed and is newsworthy", () => {
+  assert.equal(classifyChildState(observe([stateRecord("mode-changed")])), "mode-changed");
+  assert.equal(isNewsworthy("mode-changed"), true, "a child that silently changed mode must wake the orchestrator");
 });
 
 test("`stalled` is the one state a child cannot report: silence while its pane lives", () => {

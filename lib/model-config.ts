@@ -562,6 +562,72 @@ export function effectiveAgentsConfig(
 }
 
 // ---------------------------------------------------------------------------
+// Startup validation — every role must have a RESOLVABLE model chain.
+// ---------------------------------------------------------------------------
+
+/**
+ * One role's startup-readiness verdict.
+ */
+export interface AgentStartupCheck {
+  ok: boolean;
+  /** Human-readable reason, present exactly when !ok. */
+  reason?: string;
+}
+
+/**
+ * Validate that EVERY role (not just judges) has a chain the gate can actually
+ * dispatch. This is the hard check the session start runs (standard 2): a
+ * missing/corrupt config, an empty slot list, an unresolvable spec or a model
+ * the registry does not know must STOP the session with the reason — never
+ * silently fall back to a built-in default that may not exist or may not be
+ * what the user pinned.
+ *
+ * Pure over injected facts: the caller decides what "config" means (the
+ * effective map), what the registry holds, and which roles matter.
+ */
+export function validateAgentsForStartup(
+  map: AgentsConfigMap,
+  registry: ModelRegistry,
+  validNames: readonly string[] = KNOWN_AGENTS,
+): Record<string, AgentStartupCheck> {
+  const checks: Record<string, AgentStartupCheck> = {};
+  for (const name of validNames) {
+    const e = map[name];
+    if (!e) {
+      checks[name] = { ok: false, reason: `角色 ${name} 没有任何配置（不在 agents 配置层里）` };
+      continue;
+    }
+    if (e.malformed) {
+      checks[name] = { ok: false, reason: `角色 ${name} 的配置字段非法（malformed）` };
+      continue;
+    }
+    if (e.auto !== false || e.slots.length === 0) {
+      // "auto:true" (or any state without an explicit slot list) means the
+      // role would fall back to a built-in default. Per the no-defaults
+      // requirement, an unconfigured role must STOP the session rather than
+      // silently dispatch a default chain that may not exist or may not be
+      // what the user pinned.
+      checks[name] = {
+        ok: false,
+        reason: `角色 ${name} 未配置模型链（auto:${String(e.auto)}，slots 为空）——安装脚本应在 ~/.pi/review-gate.json 写入该角色的默认 slots`,
+      };
+      continue;
+    }
+    const invalid = e.slots.find((s) => !validateSpec(registry, s).ok);
+    if (invalid) {
+      checks[name] = {
+        ok: false,
+        reason: `角色 ${name} 的 spec 非法或不可解析："${invalid}"（${validateSpec(registry, invalid).reason}）`,
+      };
+      continue;
+    }
+    checks[name] = { ok: true };
+  }
+  return checks;
+}
+
+
+// ---------------------------------------------------------------------------
 // Frontmatter rendering (model/fallbackModels replacement, marker preserved)
 // ---------------------------------------------------------------------------
 

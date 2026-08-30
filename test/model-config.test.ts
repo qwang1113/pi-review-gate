@@ -28,6 +28,7 @@ import {
   projectAgentIdentity,
   resolvePackageAgentsDir,
   ensureAgentFilesPresent,
+  validateAgentsForStartup,
 } from "../lib/model-config.ts";
 
 const REG: ModelRegistry = {
@@ -1253,4 +1254,48 @@ test("the self-heal's agent list covers the gate-critical goal-auditor role", ()
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+
+test("validateAgentsForStartup refuses a role with NO config entry", () => {
+  const checks = validateAgentsForStartup({}, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /没有任何配置/);
+});
+
+test("validateAgentsForStartup refuses auto:true (no explicit slots)", () => {
+  const map: AgentsConfigMap = { reviewer: { auto: true, slots: [], source: "default" } };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /未配置模型链/);
+});
+
+test("validateAgentsForStartup refuses an empty slot list under auto:false", () => {
+  const map: AgentsConfigMap = { reviewer: { auto: false, slots: [], source: "global" } };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /未配置模型链/);
+});
+
+test("validateAgentsForStartup refuses an unresolvable spec", () => {
+  const map: AgentsConfigMap = {
+    reviewer: { auto: false, slots: ["anthropic/claude-nonexistent:max"], source: "global" },
+  };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /spec 非法或不可解析/);
+});
+
+test("validateAgentsForStartup refuses a malformed entry", () => {
+  const map: AgentsConfigMap = { reviewer: { auto: true, slots: [], source: "global", malformed: true } };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, false);
+  assert.match(checks.reviewer.reason ?? "", /malformed/);
+});
+
+test("validateAgentsForStartup passes a fully configured role", () => {
+  const map: AgentsConfigMap = {
+    reviewer: { auto: false, slots: ["anthropic/claude-fable-5:max"], source: "global" },
+  };
+  const checks = validateAgentsForStartup(map, REG, ["reviewer"]);
+  assert.equal(checks.reviewer.ok, true);
+});
 });

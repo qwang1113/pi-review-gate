@@ -1164,7 +1164,7 @@ test("normal mode: prompt-transparent except the language directive; loop resume
   // BEFORE any gate text is appended.
   const promptAt = SRC.indexOf('pi.on("before_agent_start"');
   assert.ok(promptAt >= 0);
-  const promptBody = SRC.slice(promptAt, promptAt + 2500);
+  const promptBody = SRC.slice(promptAt, promptAt + 5000);
   const langAt = promptBody.indexOf("LANGUAGE_DIRECTIVE");
   const normalAt = promptBody.indexOf('state.taskMode === "normal"');
   const directiveAt = promptBody.indexOf("GATE_MODE_DECISION_DIRECTIVE");
@@ -1189,7 +1189,7 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   // 1. before_agent_start injects the discipline paragraph in every
   //    non-normal mode (after the normal early return).
   const promptAt = SRC.indexOf('pi.on("before_agent_start"');
-  const promptBody = SRC.slice(promptAt, promptAt + 2500);
+  const promptBody = SRC.slice(promptAt, promptAt + 5000);
   const normalAt = promptBody.indexOf('state.taskMode === "normal"');
   const disciplineAt = promptBody.indexOf("EDIT_DISCIPLINE_DIRECTIVE");
   assert.ok(disciplineAt > normalAt, "discipline directive must be injected after the normal-mode return");

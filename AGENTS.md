@@ -216,22 +216,27 @@ frontmatter in `agents/*.md` is the single source of truth and
 > (the postinstall copies them from this repo — edits there are
 > overwrite-owned on the next install).
 
-**Model configuration layer (per-agent slots + auto switch, default-on).**
-The agent frontmatter stays the single thing pi-subagents reads, but editing
-models by hand is a frequent, error-prone chore, so a config layer renders
-frontmatter for you — project `.pi/review-gate.json` overrides global
-`~/.pi/review-gate.json` (like precommit), then the built-in default:
+**Model configuration layer (per-agent slots, NO built-in defaults).**
+Every role's model chain comes from the `agents` section of `review-gate.json` —
+there is no silent built-in fallback. `scripts/install-package.mjs` writes a
+default 6-role `agents` section to `~/.pi/review-gate.json` when the file is
+absent, and merges in ONLY the roles missing from an existing file (never
+overwrites a user's own pins). At session start the gate HARD-CHECKS every
+role (reviewer/adviser/arbiter/fixer/recon/goal-auditor): a missing entry, an
+empty slot list, or an unresolvable spec STOPS the session with the reason
+(`validateAgentsForStartup`). `modelSpecFor` returns undefined for an
+unconfigured role and the dispatch fails closed instead of spawning a default.
 
-- `agents.<name>.auto` — `true` (default) keeps the built-in chain. When set
-  EXPLICITLY at a layer the renderer writes a *default-chain overlay* (marker
-  + the built-in default models) so that layer SHADOWS a lower layer's slot
-  render — flipping a slot off always lands the built-in default, never a
-  leftover lower-priority render. Unconfigured agents are cleaned up instead
-  (any stale generated copy is deleted; the global layer restores the upstream
-  default rather than leaving no file);
-  `false` uses `slots: [spec, ...]` (`slots[0]` = main model, rest =
-  fallbacks). Every slot may carry its own `:thinking` suffix
-  (`claude-fable-5:max`, `onekey/gpt-5.6-sol:high`) for per-model thinking.
+- `agents.<name>.auto` — `false` uses `slots: [spec, ...]` (`slots[0]` =
+  main model, rest = fallbacks). Every slot may carry its own `:thinking`
+  suffix (`claude-fable-5:max`, `onekey/gpt-5.6-sol:high`) for per-model
+  thinking. `auto: true` keeps the upstream default chain as a shadow
+  overlay (so a higher layer can shadow a lower layer's slot render), but
+  the STARTUP check still requires an explicit slot list for every role —
+  an unconfigured role is an error, never a silent default.
+- **Arbiter goes through the same config layer**: `agents.arbiter.slots[0]`
+  is the arbiter model (project-config's legacy `arbiter.model` field is a
+  fallback only). An unconfigured arbiter fails closed (GATE_WINS).
 - **Rendering is layered**: project → `<project>/.pi/agents/*.md`, global →
   `~/.pi/agent/agents/*.md`; `scripts/install-package.mjs` applies only the
   global layer. Writes validate (resolvable spec, supported thinking level,
@@ -239,10 +244,12 @@ frontmatter for you — project `.pi/review-gate.json` overrides global
 - The pi widget (`belowEditor`) always shows the effective
   `adviser`/`reviewer` models (spec, auto state, deciding layer) — a
   read-only surface; the config itself is plain JSON in `review-gate.json`.
-- All of this is inert until you configure it: no `agents` section (or all
-  `auto: true`) behaves exactly like today.
-- Project/global layer diagnostics are surfaced when an `agents` section is
-  malformed; invalid model specs never replace the last generated chain.
+- A missing/corrupt `agents` section is a startup error, not a silent
+  pass-through: the session stops and names every role that lacks a
+  resolvable chain (`validateAgentsForStartup` + the before_agent_start
+  hard check). Project/global layer diagnostics are surfaced when an
+  `agents` section is malformed; invalid model specs never replace the last
+  generated chain.
 
 **Review protocol (single-review).** The review that ends
 a round is ONE reviewer — by design. There is no second reviewer, no split

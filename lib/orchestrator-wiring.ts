@@ -387,7 +387,7 @@ export interface OrchestratorHostBindings {
   /** This orchestrator's OWN context usage, as a percentage (receipt block 4). */
   contextPercent?(): number | undefined;
   /** Run + record the plan pre-audit (the extension owns the judge process). */
-  auditPlan?(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }>;
+  auditPlan?(plan: OrchestratorPlan, onUpdate?: { step?: (t: string) => void; done?: (t: string) => void }): Promise<{ ok: true } | { ok: false; text: string }>;
 
   /** Override the channel root. Tests point it at a scratch dir. */
   channelHome?(): string | undefined;
@@ -458,9 +458,9 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     paneDecorMemory: () => paneDecor,
 
     contextPercent: () => host.contextPercent?.(),
-    auditPlan: (plan) =>
+    auditPlan: (plan, onUpdate) =>
       host.auditPlan
-        ? host.auditPlan(plan)
+        ? host.auditPlan(plan, onUpdate)
         : Promise.resolve({
             ok: false as const,
             text:
