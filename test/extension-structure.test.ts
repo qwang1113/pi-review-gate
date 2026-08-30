@@ -1063,11 +1063,18 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
   // The hook body is lib/ship-gate-hook.ts + its two arms; the mode question
   // is about the hook AS A WHOLE, so it is asked of all three together.
   const body = HOOK_BODY;
-  assert.doesNotMatch(body, /taskMode\s*===\s*"explore"/,
+  // `(?:\(\)\s*)?` in all three patterns: the arms read the mode through the
+  // injected `deps.taskMode()` getter, and a pattern written for the old bare
+  // `state.taskMode` spelling cannot match a CALL — it would be always-true,
+  // which is exactly how a negated branch (or an explore carve-out) would get
+  // back in unnoticed. Round-1 P1 of this move: two migrated patterns had that
+  // defect and a `deps.taskMode() !== "loop"` mutation passed the whole suite.
+  const modeExpr = String.raw`taskMode\s*(?:\(\)\s*)?`;
+  assert.doesNotMatch(body, new RegExp(`${modeExpr}===\\s*"explore"`),
     "tool_call must never branch on explore");
-  assert.doesNotMatch(body, /taskMode\s*!==/,
+  assert.doesNotMatch(body, new RegExp(`${modeExpr}!==`),
     "tool_call must not use negated mode branches");
-  const modeBranches = [...body.matchAll(/taskMode\s*(?:\(\)\s*)?===\s*"(\w+)"/g)].map((m) => m[1]);
+  const modeBranches = [...body.matchAll(new RegExp(`${modeExpr}===\\s*"(\\w+)"`, "g"))].map((m) => m[1]);
   assert.deepEqual([...new Set(modeBranches)].sort(), ["loop", "normal", "orchestrator"],
     "the only tool_call mode branches are normal (step aside), loop (goal block) and " +
     "orchestrator (which only ADDS restrictions)");
@@ -1099,13 +1106,21 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
     "the write restriction can only BLOCK, never wave a write through");
   const guardSite = windowIn(
     SHIP_BASH_SRC,
-    "const tmuxHit = detectForbiddenTmux(",
+    // Open at the SECTION comment, not at the call: the old window reached
+    // ~300 bytes back from the orchestrator site, so a return smuggled in
+    // just above the tier selection was inside it. Anchoring at the call
+    // would have quietly narrowed that.
+    "// tmux BACKSTOP (task book §4.3)",
     "if (tmuxHit) return { block: true, reason: tmuxHit.reason };",
     "tmux backstop tier",
   );
   assert.match(guardSite, /detectForbiddenTmux\(/,
     "the second orchestrator site only selects the tmux backstop tier");
-  assert.doesNotMatch(guardSite, /return;/,
+  // ANY return, not the old `/return;/` spelling: the extracted arm writes
+  // every exit as `return undefined;`, so a pattern looking for a bare
+  // `return;` is dead (round-1 P1). The window ends BEFORE the tier's own
+  // `return { block: true, … }`, so nothing legitimate can match here.
+  assert.doesNotMatch(guardSite, /\breturn\b/,
     "the tmux backstop must not contain a pass-through return");
   // The L8 explore short-circuit lives in the helper loopGoalEditBlockFor
   // (kept OUT of the handler body on purpose — see its docblock): it only

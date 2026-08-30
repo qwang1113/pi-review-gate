@@ -38,7 +38,7 @@
 import { readFileSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
 
-import { judgeRoleInScript, normalizeToolName } from "./judge-prompt.ts";
+import { isJudgeAgentName, judgeRoleInScript, normalizeToolName } from "./judge-prompt.ts";
 import {
   evaluateEditCall,
   type EditGuardDeps,
@@ -73,19 +73,12 @@ export interface ShipGateHookDeps extends EditGuardDeps, ShipGateBashDeps {
   isEditTool(toolName: string): boolean;
 }
 
-/**
- * Is this agent name one of the four JUDGE roles?
- *
- * Pure, and deliberately tolerant of the spellings an agent actually types: a
- * path (`agents/reviewer.md`), a file name, any case. A judge role must be
- * recognized however it is spelled, because the refusal below is the only
- * thing keeping a judge out of the live worktree.
- */
-export function isJudgeRoleAgent(raw: string): boolean {
-  const tail = raw.trim().split(/[\\/]/).pop() ?? raw;
-  const name = tail.replace(/\.md$/i, "").trim().toLowerCase();
-  return name === "reviewer" || name === "reviewer-readonly" || name === "adviser" || name === "goal-auditor";
-}
+// (Which agent names are JUDGE roles is lib/judge-prompt.ts's own
+// `isJudgeAgentName` — the same module `judgeRoleInScript` comes from, and the
+// same list that detector scans with. The extension used to carry a
+// byte-equivalent second copy; two places to edit one list is exactly how it
+// drifts, so the copy died with the move (哲学三).)
+
 
 /**
  * The judge-role subagent block (HARD), as a pure decision over the two
@@ -120,7 +113,7 @@ export function judgeSubagentBlock(input: {
     : scriptPath !== undefined
       ? input.readScript(scriptPath)
       : undefined;
-  const judgeName = (agentName && isJudgeRoleAgent(agentName))
+  const judgeName = (agentName && isJudgeAgentName(agentName))
     ? agentName
     : scriptText !== undefined ? judgeRoleInScript(scriptText) : undefined;
   // Round-9 P2: a workflowScriptPath that cannot be read must FAIL CLOSED

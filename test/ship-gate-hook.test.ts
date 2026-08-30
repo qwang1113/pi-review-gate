@@ -9,7 +9,7 @@
  * nothing ran it. Here the decisions run, with three-line fakes for the seams.
  *
  * Scope: the pure decisions (`sensitiveEditBlock`, `judgeSubagentBlock`,
- * `isJudgeRoleAgent`, `describeShips`, `buildShipBlockReason`) plus the two
+ * `describeShips`, `buildShipBlockReason`) plus the two
  * arms' ORDER — the orderings the gate's safety rests on (security floor
  * before the normal-mode return, gate-owned exemption before the L8 goal gate,
  * tmux backstop before `/gate-bypass`, `/gate-bypass` before ship detection).
@@ -23,7 +23,6 @@ import { join } from "node:path";
 
 import {
   evaluateToolCall,
-  isJudgeRoleAgent,
   judgeSubagentBlock,
   type ShipGateHookDeps,
 } from "../lib/ship-gate-hook.ts";
@@ -208,15 +207,25 @@ test("every tool_call refreshes the extension's context — including the ones t
 // ---------------------------------------------------------------------------
 // The judge-role subagent block.
 
-test("isJudgeRoleAgent recognizes every spelling a dispatch can carry", () => {
+test("the block recognizes a judge role in every spelling a dispatch can carry", () => {
+  // Through `judgeSubagentBlock`, not the predicate directly: the predicate is
+  // lib/judge-prompt.ts's `isJudgeAgentName` (covered in its own test), and what
+  // matters here is that the L1 block asks it with the raw `agent` value —
+  // trimming, casing, a path and a `.md` suffix all have to survive the trip.
+  const named = (agentName: string) => judgeSubagentBlock({
+    agentName,
+    script: undefined,
+    scriptPath: undefined,
+    readScript: () => undefined,
+  });
   for (const spelling of [
     "reviewer", "Reviewer", " adviser ", "goal-auditor",
     "agents/reviewer.md", "reviewer-readonly", "/abs/path/adviser.MD",
   ]) {
-    assert.equal(isJudgeRoleAgent(spelling), true, spelling);
+    assert.equal(named(spelling)?.block, true, spelling);
   }
   for (const other of ["recon", "fixer", "reviewer2", "my-reviewer", ""]) {
-    assert.equal(isJudgeRoleAgent(other), false, other);
+    assert.equal(named(other), undefined, other);
   }
 });
 

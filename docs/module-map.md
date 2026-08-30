@@ -137,7 +137,8 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 
 - `lib/ship-gate-hook.ts`：入口 `evaluateToolCall` + 三条臂之间的分派 + deps
   汇总（`ShipGateHookDeps` 是另外两条臂 deps 的并集），另外持有 **judge 角色
-  subagent 拦截**（`judgeSubagentBlock` / `isJudgeRoleAgent`）—— 它既不属于
+  subagent 拦截**（`judgeSubagentBlock`；判定「哪些名字是 judge 角色」用的是
+  `lib/judge-prompt.ts` 的 `isJudgeAgentName`，不另起一份）—— 它既不属于
   edit 也不属于 bash，管的是一次 `subagent` 调用。
 - `lib/ship-gate-edit-guard.ts`：**edit/write 臂**。敏感文件安全底线
   （`sensitiveEditBlock`，唯一一条在 `normal` 模式下也必须生效的检查）、
@@ -168,7 +169,7 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 | **L2** 自动续跑 | 门禁未满足时重新触发一轮 | 扩展 `agent_settled` | `lib/gate-state.ts`（未满足项）、`lib/loop-stall.ts`（断路器） |
 | **L3** git 钩子 | 离开 pi 也有效的纵深防御 | `hooks/pre-commit`、`hooks/pre-push`、`hooks/commit-msg` | `scripts/compute-fingerprint.cjs`、`scripts/check-staged-divergence.cjs`（钩子不依赖 TypeScript） |
 | **L4** 输出语言 | 每轮无条件注入简体中文指令 | 扩展 `before_agent_start` | `lib/constants.ts` 的 `LANGUAGE_DIRECTIVE` |
-| **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | 扩展 `tool_call` + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
+| **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | `lib/ship-gate-bash.ts`（ship 命令上的 commit message / PR 文案）+ 扩展的 checkpoint 路径 + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
 | **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
 | **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账 | `lib/copilot-review-tools.ts`（工具 `request_copilot_review` / `check_copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线 | `lib/copilot-review.ts` |
 | **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | `lib/goal-tools.ts`（工具 `propose_loop_goal`，内部自跑 goal 审计）+ `lib/goal-prereview-tools.ts`（内部实现 `record_goal_prereview`：裁决落成记录），扩展只接线 | `lib/loop-goal.ts` |
@@ -483,7 +484,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `side-effects.ts` | 唯一一处「本进程能不能碰外部世界」的判定（测试 / CI / 无 TTY / 显式关闭一律不能），通知与编排共用 |
 | `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |
 | `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit） |
-| `ship-gate-hook.ts` | **L1 `tool_call` 钩子的入口**：`evaluateToolCall` 分派到两条臂，`ShipGateHookDeps` 汇总两条臂的 deps；judge 角色 subagent 拦截（`judgeSubagentBlock` / `isJudgeRoleAgent`，含 `workflowScript` 内嵌与不可读 `workflowScriptPath` 的 fail-closed）也在这里 |
+| `ship-gate-hook.ts` | **L1 `tool_call` 钩子的入口**：`evaluateToolCall` 分派到两条臂，`ShipGateHookDeps` 汇总两条臂的 deps；judge 角色 subagent 拦截（`judgeSubagentBlock`，含 `workflowScript` 内嵌与不可读 `workflowScriptPath` 的 fail-closed；角色名判定复用 `judge-prompt.ts` 的 `isJudgeAgentName`）也在这里 |
 | `ship-gate-edit-guard.ts` | L1 的 **edit/write 臂**：敏感文件安全底线（`sensitiveEditBlock`，`normal` 模式也生效）、gate-owned 豁免、L8 目标门、orchestrator 写限制、L6 标签检查；检查次序即契约 |
 | `ship-gate-bash.ts` | L1 的 **bash 臂 = ship gate 本体**：tmux backstop、`/gate-bypass`、ship 识别、L5/AI 署名、message-only rewrite 豁免、逐 repo 门禁、一次性仲裁令牌、拦截文案（`describeShips` / `buildShipBlockReason`） |
 | `task-mode.ts` | 会话门禁模式模型：normal < explore < loop < orchestrator 与升降级规则 |
