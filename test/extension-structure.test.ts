@@ -1267,6 +1267,10 @@ test("request_arbitration is registered and is a NARROW, fail-closed capability"
   assert.match(SRC, /verdict\?\.decision \?\? "GATE_WINS"/);
   // No-UI HUMAN path fails closed to GATE_WINS.
   assert.match(SRC, /!ctx\.hasUI[\s\S]{0,200}GATE_WINS/);
+  // Criterion 1: an unconfigured arbiter (no agents.arbiter.slots[0]) is
+  // refused BEFORE any spawn — no hard-coded default model.
+  assert.match(SRC, /if \(!resolveArbiterModel\(\)\)/, "an unconfigured arbiter fails closed");
+  assert.match(SRC, /仲裁者未配置模型链/, "the refusal names the missing config");
 });
 
 test("arbiter bypass token is in-memory ONLY, never persisted to the sidecar", () => {
@@ -3501,6 +3505,7 @@ test("setup_workspace settles the worktree and the branches, and records both", 
   assert.match(body, /choice === "exempt"/, "the exempt option must exist");
   assert.match(body, /st\.scopeLimit = \{/, "it writes the same scopeLimit the scope-limit tool uses");
   assert.match(body, /preexistingFiles:/, "it snapshots the dirty files as pre-existing");
+  assert.match(body, /\.filter\(\(p\) => !sessionSet\.has\(p\)\)/, "the snapshot NEVER includes this session's own edits");
   assert.match(body, /st\.hasCodeChange = \[\.\.\.st\.scopeLimit\.sessionFiles\]\.some\(isCodeFile\)/, "re-arm comes from the session's own edits only");
 });
 

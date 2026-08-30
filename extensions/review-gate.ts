@@ -5605,13 +5605,19 @@ export default function reviewGate(pi: ExtensionAPI) {
           notes.push("用户已自行处理，复检干净。");
         } else if (choice === "exempt") {
           // USER REQUIREMENT (2026-08-30): a "pass through" option for
-          // pre-existing mock/local changes. Snapshot EVERY current dirty
-          // file into the same scopeLimit structure request_scope_limit
-          // uses — the ship gate and the review scope then treat them as
-          // exempt (no review coverage required), the files stay in the
-          // worktree untouched, and declare_done still merges them.
-          const sessionSet = new Set<string>();
-          const preexisting = files.map((f) => f.path);
+          // pre-existing mock/local changes. Snapshot the dirty files into
+          // the same scopeLimit structure request_scope_limit uses — the
+          // ship gate and the review scope then treat them as exempt (no
+          // review coverage required), the files stay in the worktree
+          // untouched, and declare_done still merges them.
+          //
+          // NEVER exempt THIS session's own edits (mirrors
+          // request_scope_limit's preexisting filter): a session that edited
+          // first and then picks 放行 must not get its own work out of the
+          // review. The grant covers only files the session did not touch.
+          const sessionSet = new Set(sessionEditedPaths);
+          const preexisting = files.map((f) => f.path).filter((p) => !sessionSet.has(p));
+          const exemptedOwnWork = files.map((f) => f.path).filter((p) => sessionSet.has(p));
           if (st.scopeLimit) {
             // A grant from request_scope_limit already exists — extend it
             // with the dirty files (never shrink).
@@ -5627,14 +5633,18 @@ export default function reviewGate(pi: ExtensionAPI) {
             };
           }
           // RE-ARM from THIS session's own edits only (mirrors
-          // request_scope_limit's granted branch): everything dirty is
-          // pre-existing and exempt, so with no session edits the gate is
-          // disarmed for THIS session — the exempted mock changes no longer
-          // demand review. Session edits re-arm it via the edit handler.
+          // request_scope_limit's granted branch): pre-existing dirty files
+          // are exempt, so the gate is armed exactly by what this session
+          // edited — never weakened for its own work.
           st.hasCodeChange = [...st.scopeLimit.sessionFiles].some(isCodeFile);
           st.hasDocChange = [...st.scopeLimit.sessionFiles].some(isDocFile);
           // The worktree is now settled; the files stay put.
-          notes.push(`已放行 ${files.length} 个改动（不删不改，豁免进审查；快照 ${new Date().toISOString()}）。`);
+          const exemptCount = preexisting.length;
+          notes.push(
+            exemptedOwnWork.length > 0
+              ? `已放行 ${exemptCount} 个本会话之外的改动（不删不改，豁免进审查）；本会话自己改的 ${exemptedOwnWork.length} 个文件仍要审查。`
+              : `已放行 ${exemptCount} 个改动（不删不改，豁免进审查；快照 ${new Date().toISOString()}）。`
+          );
         } else {
           notes.push(`接受 ${files.length} 个改动为本会话基线（记得提交成 checkpoint）。`);
         }
@@ -5981,7 +5991,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (decision.action === "noop") {
         // Criterion 3: EVERY return path reports to the supervisor — a noop
         // is still a mode-related event the orchestrator should see.
-        reportChildState(ctx, `gate mode already ${effective}（noop）`, { force: true });
+        reportChildState(ctx, `gate mode already ${effective}（noop）`, { force: true, state: "mode-changed" });
         return {
           content: [{ type: "text", text: `review-gate: gate mode is already "${effective}".` }],
           details: { mode: effective },
@@ -6060,7 +6070,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // Criterion 3: a DECLINED downgrade is still a mode-related event the
         // supervisor must not miss — the child stays in loop, which changes
         // what the orchestrator may expect of it.
-        reportChildState(ctx, `gate mode 降级被用户拒绝（保持 ${state.taskMode ?? "undecided"}）`, { force: true });
+        reportChildState(ctx, `gate mode 降级被用户拒绝（保持 ${state.taskMode ?? "undecided"}）`, { force: true, state: "mode-changed" });
         return {
           content: [{
             type: "text",
@@ -6077,7 +6087,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // Criterion 3: the REJECTED path also reports — a refused mode change
       // is information the supervisor should have (the child tried to leave
       // loop and could not).
-      reportChildState(ctx, `gate mode 变更被拒（${decision.reason}）`, { force: true });
+      reportChildState(ctx, `gate mode 变更被拒（${decision.reason}）`, { force: true, state: "mode-changed" });
       return {
         content: [{ type: "text", text: `review-gate: mode change rejected — ${decision.reason}` }],
         details: { mode: state.taskMode ?? null },
