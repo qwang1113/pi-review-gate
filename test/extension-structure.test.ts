@@ -3495,6 +3495,13 @@ test("setup_workspace settles the worktree and the branches, and records both", 
   assert.match(body, /op: "base_branch_set"/);
   assert.match(body, /op: "work_branch_set"/);
   assert.match(body, /isProtectedBranch\(here\)/, "main/master is never worked on directly");
+  // Criterion 4 — the "放行" option: snapshot into scopeLimit and re-arm
+  // from the session's OWN files only (the exempted mock changes stop
+  // demanding review).
+  assert.match(body, /choice === "exempt"/, "the exempt option must exist");
+  assert.match(body, /st\.scopeLimit = \{/, "it writes the same scopeLimit the scope-limit tool uses");
+  assert.match(body, /preexistingFiles:/, "it snapshots the dirty files as pre-existing");
+  assert.match(body, /st\.hasCodeChange = \[\.\.\.st\.scopeLimit\.sessionFiles\]\.some\(isCodeFile\)/, "re-arm comes from the session's own edits only");
 });
 
 test("a commit may only land on this session's OWN work branch (fail-closed)", () => {

@@ -183,7 +183,8 @@ export function buildJudgeSystemPrompt(repoRoot: string, role: string, home?: st
  *    `:thinking` suffix from the frontmatter when present) — the built-in
  *    default, single-sourced from the agent file (round-1 F13: no duplicated
  *    literal).
- * Falls back to "anthropic/claude-fable-5:max" when nothing resolves.
+ * Returns undefined when NOTHING resolves — there is NO hard-coded fallback
+ * (user requirement 2026-08-30); the caller fails closed.
  */
 export function modelSpecFor(agents: AgentsConfigMap, role: string, repoRoot: string, home?: string): string | undefined {
   const entry = agents[role];

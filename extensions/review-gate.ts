@@ -2906,12 +2906,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
       const arbiter = map.arbiter;
       if (arbiter && arbiter.auto === false && arbiter.slots.length > 0) return arbiter.slots[0]!;
-      // Fall back to the legacy field when the agents layer has no arbiter
-      // entry (a config from before this change): the legacy model is still
-      // the user's own pin, not a built-in default.
-      return projectConfig.arbiter.model || undefined;
+      // NO BUILT-IN DEFAULT (criterion 1): an unconfigured arbiter returns
+      // undefined and the caller fails closed (GATE_WINS). The legacy
+      // projectConfig.arbiter.model field is NOT a fallback — its default
+      // value is the hard-coded DEFAULT_ARBITER_MODEL, which this
+      // requirement removes.
+      return undefined;
     } catch {
-      return projectConfig.arbiter.model || undefined;
+      return undefined;
     }
   }
 
@@ -2934,7 +2936,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!admission.ok) return deny(`review-gate: ${admission.reason}`);
 
     const verdict = await runArbiter(
-      resolveArbiterModel() ?? projectConfig.arbiter.model,
+      resolveArbiterModel() ?? "",
       buildTextAppealPrompt(block, argument),
       undefined,
       undefined,
@@ -5624,6 +5626,13 @@ export default function reviewGate(pi: ExtensionAPI) {
               at: new Date().toISOString(),
             };
           }
+          // RE-ARM from THIS session's own edits only (mirrors
+          // request_scope_limit's granted branch): everything dirty is
+          // pre-existing and exempt, so with no session edits the gate is
+          // disarmed for THIS session — the exempted mock changes no longer
+          // demand review. Session edits re-arm it via the edit handler.
+          st.hasCodeChange = [...st.scopeLimit.sessionFiles].some(isCodeFile);
+          st.hasDocChange = [...st.scopeLimit.sessionFiles].some(isDocFile);
           // The worktree is now settled; the files stay put.
           notes.push(`已放行 ${files.length} 个改动（不删不改，豁免进审查；快照 ${new Date().toISOString()}）。`);
         } else {
@@ -5970,6 +5979,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       });
 
       if (decision.action === "noop") {
+        // Criterion 3: EVERY return path reports to the supervisor — a noop
+        // is still a mode-related event the orchestrator should see.
+        reportChildState(ctx, `gate mode already ${effective}（noop）`, { force: true });
         return {
           content: [{ type: "text", text: `review-gate: gate mode is already "${effective}".` }],
           details: { mode: effective },
@@ -6042,7 +6054,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         // Declined: lock agent-initiated downgrades for this session so the
         // dialog cannot be re-popped until the user acts (/gate-mode).
+        // Declined: lock agent-initiated downgrades for this session so the
+        // dialog cannot be re-popped until the user acts (/gate-mode).
         agentDowngradesLocked = true;
+        // Criterion 3: a DECLINED downgrade is still a mode-related event the
+        // supervisor must not miss — the child stays in loop, which changes
+        // what the orchestrator may expect of it.
+        reportChildState(ctx, `gate mode 降级被用户拒绝（保持 ${state.taskMode ?? "undecided"}）`, { force: true });
         return {
           content: [{
             type: "text",
@@ -6056,6 +6074,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
 
+      // Criterion 3: the REJECTED path also reports — a refused mode change
+      // is information the supervisor should have (the child tried to leave
+      // loop and could not).
+      reportChildState(ctx, `gate mode 变更被拒（${decision.reason}）`, { force: true });
       return {
         content: [{ type: "text", text: `review-gate: mode change rejected — ${decision.reason}` }],
         details: { mode: state.taskMode ?? null },
@@ -6087,6 +6109,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       if (!projectConfig.arbiter.enabled) {
         return deny("review-gate: arbitration is disabled for this project (arbiter.enabled=false). GATE_WINS — comply with the gate.");
+      }
+      // Criterion 1: no built-in arbiter default — an unconfigured arbiter
+      // (no agents.arbiter.slots[0]) fails closed here, before any spawn.
+      if (!resolveArbiterModel()) {
+        return deny("review-gate: 仲裁者未配置模型链（agents.arbiter.slots 缺失或为空）——按 fail-closed 处理，GATE_WINS。请修复 ~/.pi/review-gate.json 后重试。");
       }
       // Must contest a REAL, recent block — and the MOST RECENT one, when both
       // kinds happened: that is the block the agent is actually stuck on.
@@ -6139,7 +6166,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         agentArgument: params.argument,
       });
 
-      const verdict = await runArbiter(resolveArbiterModel() ?? projectConfig.arbiter.model, prompt);
+      const verdict = await runArbiter(resolveArbiterModel() ?? "", prompt);
       // Fail-closed: any spawn/parse failure → GATE_WINS.
       const decision = verdict?.decision ?? "GATE_WINS";
       arbitrationDecisions.set(decisionKey, decision);
