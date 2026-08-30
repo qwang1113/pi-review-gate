@@ -1057,10 +1057,13 @@ test("loop directives: decision table injects on every turn, incl. unarmed first
   // The full line: `const loopDirectives = state.taskMode === "loop" ? ...`
   const line = SRC.slice(directivesAt - 120, directivesAt + 30);
   assert.match(line, /state\.taskMode === "loop"/, "decision table guarded on loop mode only");
-  // A first turn with NO edits and NO problems must still reach the injection:
-  // no unarmed early-return may come before it.
-  const unarmedEarly = SRC.indexOf("if (!gateArmed && problems.length === 0)", handlerAt);
-  assert.equal(unarmedEarly, -1, "unarmed early-return removed — directives reach every loop turn");
+  // The undecided-clean early return (added round 3) must sit AFTER the
+  // injection, so a loop session never loses the decision table: loop mode
+  // falls through regardless of gateArmed.
+  const earlyAt = SRC.indexOf("state.taskMode === undefined && !gateArmed && problems.length === 0", handlerAt);
+  assert.ok(earlyAt > 0, "undecided-clean early return must exist");
+  assert.ok(directivesAt < earlyAt,
+    "the decision table is injected BEFORE the undecided early return");
 });
 
 test("loop directives: all-gates-green block names the completion steps", () => {

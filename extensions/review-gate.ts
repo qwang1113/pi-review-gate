@@ -7016,11 +7016,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     // MODE-UNDECIDED early return (2026-08-30): the Review Gate block below
     // is loop-specific — "READY 了就 declare_done", the judge_submit guidance
     // and the all-green 收尾 line all presume a chosen loop mode. A session
-    // that has not called set_gate_mode yet sees only the mode-decision
-    // directive (already injected above), exactly as before the unarmed
-    // early-return was deleted. Loop mode still falls through and renders
-    // the full block on every turn.
-    if (state.taskMode === undefined) {
+    // that has not called set_gate_mode yet and has NOTHING to report sees
+    // only the mode-decision directive (already injected above), exactly as
+    // before the unarmed early-return was deleted. An undecided session that
+    // HAS edited still falls through: its `Current unmet:` list is real and
+    // must stay visible even before a mode is chosen (reviewer P2, round 3).
+    // Loop mode always falls through and renders the full block every turn.
+    if (state.taskMode === undefined && !gateArmed && problems.length === 0) {
       return { systemPrompt };
     }
 

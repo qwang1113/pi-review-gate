@@ -53,13 +53,14 @@ test("language gate is injected in before_agent_start", () => {
 });
 
 /**
- * The OLD "nothing changed this session" early return was REMOVED 2026-08-30:
- * the loop directives (goal + decision table) must reach the FIRST turn, so
- * the handler now always falls through to the full prompt render. The
- * language directive's unconditional status is preserved by sitting at the
- * very top of the handler, before every branch.
+ * The OLD unconditional "nothing changed" early return was REMOVED 2026-08-30:
+ * the loop directives (goal + decision table) must reach the FIRST turn. A
+ * narrower undecided-clean early return (taskMode undefined && clean) was
+ * added in round 3 — it sits after the loop injection, so loop mode still
+ * renders the full block every turn. The language directive's unconditional
+ * status is preserved by sitting at the very top of the handler, before
+ * every branch and every return.
  */
-const EARLY_RETURN_RE = /if\s*\([^)]*problems\.length\s*===\s*0\s*\)\s*\{\s*return\s*\{\s*systemPrompt\s*\}/;
 
 /**
  * How much of the handler to slice for the ordering assertions. Generous on
@@ -84,10 +85,13 @@ test("language gate is UNCONDITIONAL — injected at the top of before_agent_sta
   const firstAppend = body.indexOf("let systemPrompt");
   assert.ok(injectAt >= 0 && firstAppend >= 0, "injection must exist");
   assert.ok(injectAt > firstAppend, "LANGUAGE_DIRECTIVE must be appended first");
-  // The old no-changes early return is gone — the handler always falls through
-  // to the full render, so the language directive can never be skipped.
-  assert.doesNotMatch(body, EARLY_RETURN_RE,
-    "no-changes early return removed — every turn renders the full prompt");
+  // The language directive is appended before ANY return in the handler —
+  // explore, normal, orchestrator and the undecided-clean early return all
+  // come after it, so it can never be skipped.
+  const firstReturn = body.search(/return\s*\{/);
+  assert.ok(firstReturn > 0, "a return must exist");
+  assert.ok(injectAt < firstReturn,
+    "LANGUAGE_DIRECTIVE is appended before the first return");
 });
 
 test("the handler always returns a systemPrompt (never undefined)", () => {
