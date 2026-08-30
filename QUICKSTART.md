@@ -122,11 +122,11 @@ agent：调 set_gate_mode("loop")
 | `/review`、`/precommit` | 显式触发 review / precommit |
 | `/gate-reset` | 重置门禁状态 |
 | `/gate-lesson <text>` | 记录经验教训 |
-| `/gate-doctor` | 只读体检：逐项检查优化是否生效（模型链、goal-auditor 角色可派发性、opencode-go 白名单、precommit runner、git hooks、全局配置、L5 门、Copilot gh、命令注册），输出 PASS/FAIL/WARN + 证据 + 修复建议 |
+| `/gate-doctor` | 只读体检：逐项检查优化是否生效（模型链、goal-auditor 角色可派发性、precommit runner、git hooks、全局配置、L5 门、Copilot gh、命令注册），输出 PASS/FAIL/WARN + 证据 + 修复建议 |
 
 ## 7. 成本须知
 
 - review 用顶级推理模型（每轮一个 reviewer，审整个 diff），**按轮计费**——批量编辑再触发；
-- `opencode-go` provider 在代码层面**只允许 deepseek-v4-flash**（其余模型按次计费且被显式禁止）；
-- review 不跑 pdw 引擎，也不走子代理派发：judge 角色由 `judge_submit` 起成独立 pi 进程（不带门禁扩展）跑，**每轮一个 reviewer 一个 commit 范围**，不分片、不双审；子代理调度 judge 角色会被硬拦截；
+- 模型由 `~/.pi/review-gate.json` 的 `agents` 段配置（fallback 链只含已配置的 provider）；
+- review 不跑 pdw 引擎，也不走子代理派发：judge 角色由 `judge_submit` 起成独立 pi 进程（不带门禁扩展）跑，**每轮一个 reviewer 一个 commit 范围**，不分片、不双审；subagent 派发面已随 pi-subagents companion 退役（2026-09-06）；
 - decompose / wave daily 已移除（2026-08-26）：大的任务切成同一单审循环的连续轮次，无模块表、无波次调度、无 plan 状态。

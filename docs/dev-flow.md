@@ -13,14 +13,15 @@
   adviser）。同一工作区、同一分支；cwd 为仓库根目录。session id 按
   role+repo 确定性派生，所以同一角色跨轮复用同一段上下文；进程退出即完成，
   门禁读它本轮的输出并记录结论。没有 tmux、没有 pane、没有信号通道。
-- **探查 subagent**：廉价的只读探查角色（recon）保持 subagent 形态，
-  只读、并行安全，主会话和子会话都可以派。
+- **只读探查**：并行的只读代码/文档探查并行安全（读者不写工作树，
+  不会失效审查绑定）。L1/L2 执行层（recon / fixer）及其 subagent 派发已随
+  pi-subagents companion 退役（2026-09-06）。
 - **门禁**：`git commit` / `git push` / `gh pr` 在 READY + precommit 通过前
   一律硬拦；`review_checkpoint` 是送审前唯一的提交通道。
 
 ## 阶段 0：目标起草
 
-用户提出任务 → 主会话调研（查代码/文档，可派 recon 并行）→ 起草目标文本
+用户提出任务 → 主会话调研（查代码/文档，可并行只读探查）→ 起草目标文本
 （任务标题、意图、3–7 条可检查的验收标准、非目标、ISO 日期），简体中文
 （标识符/路径/代码 token 保持英文）。
 
@@ -83,7 +84,7 @@
   继承语义）不变，只是消费方式从渲染 agent frontmatter 变为子会话的
   `--model` / `--thinking` / `--system-prompt`。子会话是单模型进程：
   `auto:false` 取 `slots[0]`（链头），`auto:true` 取角色定义自身的
-  frontmatter 默认；fallback 链是 subagent 启动概念，不适用于子会话。
+  frontmatter 默认；fallback 链只用于渲染层（`--model` 直传只取链头）。
 
 ## 审核单元：commit 而非工作区
 

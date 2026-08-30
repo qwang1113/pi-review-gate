@@ -1,14 +1,14 @@
 /**
  * Judge child-session prompt assembly — role definition + shared protocol.
  *
- * A judge child is a tmux pane running its OWN pi process (no review-gate
+ * A judge child is its own non-interactive pi process (no review-gate
  * extension). The gate builds that process's SYSTEM PROMPT from two parts:
  *
  *   1. the role's definition body (agents/<role>.md minus frontmatter) —
  *      what the role IS, how it judges, its output contract, and
- *   2. the SHARED judge protocol — how every judge behaves as a tmux child:
- *      read-only discipline, convergence, one-class-of-issue-per-round, recon
- *      delegation, inbox questions, and the completion signal.
+ *   2. the SHARED judge protocol — how every judge behaves as a child:
+ *      read-only discipline, convergence, one-class-of-issue-per-round,
+ *      inbox questions, and the completion signal.
  *
  * ROUND-1 FINDINGS THIS FILE ABSORBS (all measured by the independent
  * reviewer during the tmux migration):
@@ -53,8 +53,6 @@ export const JUDGE_COMMON_PROTOCOL = `## 运行形态（独立 pi 进程）
   工作区、同一分支，cwd 为仓库根目录。
 - 你的上下文跨多轮复用：每次主会话用同一个 session id 重新拉起你，都延续同一段
   对话——你记得自己说过什么、查过什么。本轮任务文本在启动时随 @file 传入。
-- 你可以派廉价的只读探查 subagent（recon）并行查代码、查文档、做调研——
-  需要覆盖面时派出去，不要自己逐文件慢慢读。
 
 ## 客观与公正
 - 独立判断：不顺着主会话的叙述走，也不顺着自己上一轮的结论走。
@@ -265,70 +263,3 @@ export function writeJudgeSpawnFiles(input: JudgeSpawnInput): JudgeSpawnFiles {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Judge-role dispatch detection (moved from lib/reviewer-spawn-guard.ts when
-// the snapshot guard retired 2026-08-27 — the subagent BLOCK still needs the
-// detector: a judge role named inside a workflowScript string would bypass a
-// top-level-only input.agent check).
-// ---------------------------------------------------------------------------
-
-/** Agents whose subagent dispatch is HARD-blocked (judge roles). */
-export const JUDGE_AGENT_NAMES: readonly string[] = Object.freeze([
-  "reviewer",
-  "reviewer-readonly", // retired role; blocking the name still costs nothing
-  "adviser",
-  "goal-auditor",
-]);
-
-/** Tool name that dispatches subagents (pi-subagents registers exactly this). */
-export function normalizeToolName(raw: string): string {
-  const tail = raw.split(/__|\//).pop() ?? raw;
-  return tail.trim().toLowerCase();
-}
-
-/**
- * Normalize an agent reference to its bare name: `agents/reviewer.md`,
- * `./reviewer`, `Reviewer` all mean the same agent to pi-subagents, which
- * resolves by name.
- */
-export function normalizeAgentName(raw: string): string {
-  const tail = raw.trim().split(/[\\/]/).pop() ?? raw;
-  return tail.replace(/\.md$/i, "").trim().toLowerCase();
-}
-
-/** Is this agent reference one of the judge roles? */
-export function isJudgeAgentName(raw: string): boolean {
-  return JUDGE_AGENT_NAMES.includes(normalizeAgentName(raw));
-}
-
-/**
- * Which judge role a workflow script dispatches, if any.
- *
- * TWO-STEP ON PURPOSE. A workflow that spawns children always names them in an
- * `agent:` field (`runs.run("a", { agent: "reviewer", … })`), so reading those
- * VALUES is both precise and immune to prose: a task string that merely says
- * "hand this to the reviewer" is not a dispatch and must not be blocked.
- *
- * Only when a script carries no `agent:` field at all do we fall back to a
- * word-boundary scan of the whole text. `\breviewer\b` does not match
- * "reviewers" (a plural in prose) but does match inside "reviewer-readonly"
- * (`-` is a word boundary) — which is another judge role, so that direction of
- * over-matching costs nothing.
- */
-export function judgeRoleInScript(script: string): string | undefined {
-  // Quoted OR bare values: `agent: "reviewer"` and `agent: reviewer` (a bare
-  // identifier — common in generated/short scripts) must both be caught, or a
-  // workflow could dispatch a judge role without the gate ever seeing it.
-  const fieldRe = /\bagent\s*:\s*["'`]?([A-Za-z0-9_.\-/]+)["'`]?/g;
-  let m: RegExpExecArray | null;
-  let sawField = false;
-  while ((m = fieldRe.exec(script)) !== null) {
-    sawField = true;
-    if (isJudgeAgentName(m[1])) return normalizeAgentName(m[1]);
-  }
-  if (sawField) return undefined;
-  for (const name of JUDGE_AGENT_NAMES) {
-    if (new RegExp(`\\b${name}\\b`).test(script)) return name;
-  }
-  return undefined;
-}

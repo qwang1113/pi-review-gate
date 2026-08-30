@@ -1,14 +1,12 @@
 /**
  * /gate-doctor — read-only health check for the optimizations this package
- * ships: the agent model chains, the opencode-go provider allowlist, the
+ * ships: the agent model chains, the
  * precommit runner, the git hooks, the user-global config fallback, the L5
  * language gate, the Copilot gh compatibility path, and the command registry.
- * (The pdw engine check was deleted with the engine itself — step 2 of
- * docs/parallel-execution-plan.md.)
+ * (The pdw engine check was deleted with the engine itself.)
  */
 import { dirname, join } from "node:path";
 import { diagnoseChain, type ModelChainEntry, type RegistryFacts } from "./model-diagnose.ts";
-import { isModelAllowed } from "./model-allowlist.ts";
 import { projectAgentIdentity, frontmatterBlock, resolvePackageAgentsDir } from "./model-config.ts";
 
 export type DoctorStatus = "PASS" | "FAIL" | "WARN";
@@ -76,68 +74,6 @@ export function checkModelChains(entries: ModelChainEntry[], factsAvailable: boo
   return { id: "model-chains", title: "agent model chains resolve to a usable model", status: "PASS", evidence };
 }
 
-/**
- * USER REQUIREMENT — the opencode-go provider bills per model and only
- * deepseek-v4-flash is approved; the postinstall prunes the models-store
- * cache to flash alone (scripts/install-package.mjs pruneOpenCodeGoModels).
- * The code-level allowlist is the real backstop — this check only verifies
- * the cache is not offering the expensive ids.
- */
-export function checkOpencodeGoStore(storeRaw: string | undefined, backupExists: boolean): DoctorCheck {
-  const base: DoctorCheck = {
-    id: "opencode-go",
-    title: "opencode-go models-store is pruned to deepseek-v4-flash only",
-    status: "PASS",
-    evidence: [],
-  };
-  if (storeRaw === undefined) {
-    return {
-      ...base,
-      status: "PASS",
-      evidence: ["no models-store.json — nothing to prune (the code-level allowlist still guards)"],
-    };
-  }
-  let store: unknown;
-  try {
-    store = JSON.parse(storeRaw);
-  } catch {
-    return {
-      ...base,
-      status: "WARN",
-      evidence: ["models-store.json is not valid JSON — cannot verify the prune"],
-    };
-  }
-  if (typeof store !== "object" || store === null || Array.isArray(store)) {
-    return { ...base, status: "WARN", evidence: ["models-store.json has an unexpected shape"] };
-  }
-  const og = (store as Record<string, unknown>)["opencode-go"];
-  if (typeof og !== "object" || og === null || !Array.isArray((og as { models?: unknown }).models)) {
-    return { ...base, evidence: ["opencode-go has no models-store entry — nothing to prune"] };
-  }
-  const models = (og as { models: Array<{ id?: unknown }> }).models;
-  const stray = models.filter((m) => !(m && typeof m === "object" && m.id === "deepseek-v4-flash"));
-  if (stray.length > 0) {
-    return {
-      ...base,
-      status: "FAIL",
-      evidence: [
-        `opencode-go lists ${stray.length} model(s) besides deepseek-v4-flash: ${stray
-          .map((m) => String((m as { id?: unknown })?.id ?? "?"))
-          .join(", ")}`,
-      ],
-      advice: [
-        "re-run the postinstall prune (scripts/install-package.mjs, idempotent; a .bak backup is kept) or edit models-store.json by hand — the code-level allowlist still blocks these at runtime",
-      ],
-    };
-  }
-  return {
-    ...base,
-    evidence: [
-      `opencode-go lists ${models.length} model(s), all deepseek-v4-flash`,
-      ...(backupExists ? ["prune backup present at models-store.json.bak"] : []),
-    ],
-  };
-}
 
 export function checkGlobalConfig(raw: string | undefined): DoctorCheck {
   if (raw === undefined) {
@@ -502,7 +438,7 @@ export function factsFromRegistry(registry: unknown, homeDir: string, readFile: 
       }
     } catch { /* no auth — no provider looks usable */ }
   }
-  return { models, authedProviders, allowed: isModelAllowed };
+  return { models, authedProviders };
 }
 
 function modelChainCheck(deps: DoctorDeps): DoctorCheck {
@@ -569,7 +505,7 @@ function modelChainCheck(deps: DoctorDeps): DoctorCheck {
     // `continue` below) AND then be skipped, so the role vanished from the
     // diagnosis and a DEAD live chain reported PASS.
     if (frontmatterBlock(text) === undefined) return;
-    const diagnosed = diagnoseChain(role, text, deps.registryFacts ?? { models: [], authedProviders: new Set(), allowed: () => true });
+    const diagnosed = diagnoseChain(role, text, deps.registryFacts ?? { models: [], authedProviders: new Set() });
     if (diagnosed.chain.length > 0) entries.push(diagnosed);
   };
   // Global files, with any same-identity project override winning.
@@ -612,7 +548,6 @@ export async function runGateDoctor(deps: DoctorDeps): Promise<DoctorCheck[]> {
   return [
     modelChainCheck(deps),
     goalAuditorCheck(deps),
-    checkOpencodeGoStore(deps.readFile(deps.modelsStorePath), deps.exists(`${deps.modelsStorePath}.bak`)),
     checkGlobalConfig(deps.readFile(deps.globalConfigPath)),
     checkPrecommitRunner(runnerCandidates(deps.packageRoot), deps.exists),
     checkGitHooks(hookProbeFor(deps), GATE_HOOK_NAMES),

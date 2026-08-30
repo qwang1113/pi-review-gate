@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import {
   checkModelChains,
-  checkOpencodeGoStore,
   checkGlobalConfig,
   checkPrecommitRunner,
   checkGitHooks,
@@ -44,8 +43,7 @@ const PASS_FACTS = {
   allowed: () => true,
 };
 
-// (the pdw-engine check and its tests were deleted with the engine itself —
-// step 2 of docs/handoff-remove-pdw.md)
+// (the pdw-engine check and its tests were deleted with the engine itself)
 
 // ---------- model-chains ----------
 
@@ -68,39 +66,6 @@ test("checkModelChains: a blocked chain FAILs with facts, degrades to WARN witho
   // Facts unavailable: an unprovable chain must never report a confident FAIL.
   const warn = checkModelChains([blocked], false);
   assert.equal(warn.status, "WARN");
-});
-
-// ---------- opencode-go ----------
-
-test("checkOpencodeGoStore: absent store passes (allowlist still guards)", () => {
-  const check = checkOpencodeGoStore(undefined, false);
-  assert.equal(check.status, "PASS");
-});
-
-test("checkOpencodeGoStore: flash-only store passes, backup noted", () => {
-  const store = JSON.stringify({ "opencode-go": { models: [{ id: "deepseek-v4-flash" }, { id: "deepseek-v4-flash" }] } });
-  const check = checkOpencodeGoStore(store, true);
-  assert.equal(check.status, "PASS");
-  assert.ok(check.evidence.some((e) => e.includes("2 model(s)")));
-  assert.ok(check.evidence.some((e) => e.includes(".bak")));
-});
-
-test("checkOpencodeGoStore: stray models FAIL with the offending ids", () => {
-  const store = JSON.stringify({ "opencode-go": { models: [{ id: "deepseek-v4-flash" }, { id: "opencode-go/expensive-1" }] } });
-  const check = checkOpencodeGoStore(store, false);
-  assert.equal(check.status, "FAIL");
-  assert.ok(check.evidence[0]?.includes("opencode-go/expensive-1"));
-  assert.ok(check.advice?.[0]?.includes("prune"));
-});
-
-test("checkOpencodeGoStore: corrupt JSON warns, never fails", () => {
-  const check = checkOpencodeGoStore("{not json", false);
-  assert.equal(check.status, "WARN");
-});
-
-test("checkOpencodeGoStore: provider entry missing entirely passes", () => {
-  const check = checkOpencodeGoStore(JSON.stringify({ anthropic: { models: [] } }), false);
-  assert.equal(check.status, "PASS");
 });
 
 // ---------- global-config ----------
@@ -206,8 +171,6 @@ test("factsFromRegistry: session registry wins, disk store is the fallback", () 
   const facts = factsFromRegistry(reg, "/nonexistent-home", () => undefined);
   assert.equal(facts.models.length, 1);
   assert.ok(facts.authedProviders.has("anthropic"));
-  assert.ok(!facts.allowed({ provider: "opencode-go", id: "expensive" }), "allowlist applies in facts too");
-  assert.ok(facts.allowed({ provider: "opencode-go", id: "deepseek-v4-flash" }));
 });
 
 test("factsFromRegistry carries registry model metadata forward", () => {
@@ -310,7 +273,7 @@ test("runGateDoctor: healthy environment reports every check, all PASS", async (
   const checks = await runGateDoctor(baseDeps());
   const ids = checks.map((c) => c.id);
   assert.deepEqual(ids, [
-    "model-chains", "goal-auditor", "opencode-go", "global-config",
+    "model-chains", "goal-auditor", "global-config",
     "precommit-runner", "git-hooks", "l5-language", "copilot-gh", "commands",
   ]);
   for (const c of checks) {
@@ -345,7 +308,7 @@ test("runGateDoctor: a project-layer agent override outranks the global copy", a
   assert.equal(noProj.find((c) => c.id === "model-chains")!.status, "FAIL", "without a project override the dead global chain fails");
 });
 
-test("runGateDoctor: a project-layer-ONLY agent file is diagnosed (pi-subagents loads it)", async () => {
+test("runGateDoctor: a project-layer-ONLY agent file is diagnosed (project layer is live)", async () => {
   // Round-5 P2: the union enumeration — a file with NO global copy still
   // spawns under pi-subagents' project layer, so a dead chain there must
   // surface instead of hiding outside the doctor's file list.
@@ -410,7 +373,7 @@ test("runGateDoctor: a project override with a nonstandard delimiter is DIAGNOSE
     `the role must not vanish from the diagnosis: ${JSON.stringify(chains.evidence)}`,
   );
 });
-test("runGateDoctor: a project file pi-subagents would skip does not shadow the global chain (round-11)", async () => {
+test("runGateDoctor: a project file the runtime would skip does not shadow the global chain (round-11)", async () => {
   // Round-11 P2: pi-subagents requires BOTH `name` and `description` in a
   // frontmatter or it skips the file (agents.ts loadable check) — a
   // malformed project copy must not hide a healthy global chain.
@@ -471,7 +434,7 @@ test("runGateDoctor: broken environment surfaces FAILs, one IO failure never thr
   assert.equal(byId.get("model-chains")?.status, "FAIL");
   assert.equal(byId.get("commands")?.status, "FAIL");
   assert.equal(byId.get("copilot-gh")?.status, "WARN");
-  assert.equal(checks.length, 9, "one broken check must not suppress the rest");
+  assert.equal(checks.length, 8, "one broken check must not suppress the rest");
 });
 
 test("goalAuditorCheck: a missing goal-auditor is a FAIL with an actionable repair", async () => {
@@ -573,7 +536,7 @@ test("goalAuditorCheck: a PROJECT-layer copy is enough — resolved by frontmatt
   rmSync(join(projectAgentsDir, "custom.md"), { force: true });
   writeFileSync(join(projectAgentsDir, "goal-auditor.md"), "---\nmodel: claude-fable-5\n---\n");
   const unloadable = goalAuditorCheck({ ...deps, projectAgentsDir });
-  assert.equal(unloadable.status, "FAIL", "a file pi-subagents would skip is not dispatchability");
+  assert.equal(unloadable.status, "FAIL", "a file the runtime would skip is not dispatchability");
   assert.match(unloadable.evidence.join("\n"), /no project agent declares name: goal-auditor/);
   writeFileSync(join(projectAgentsDir, "goal-auditor.md"), "---\nname: reviewer\ndescription: x\n---\n");
   assert.equal(goalAuditorCheck({ ...deps, projectAgentsDir }).status, "FAIL", "the filename must never outrank the declared name");

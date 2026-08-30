@@ -106,27 +106,29 @@ asking for now, and renegotiate it (`ask_user` →
 `judge_submit({role:"goal-auditor"})` → `propose_loop_goal`) if it no longer matches — the
 audit binds to the revised text, so any edit needs a fresh PASS.
 
-**Slicing the work to subagents**: turn each criterion (or vertical slice) into
-a subagent task and hand the goal text to every subagent you spawn.
+**Slicing the work**: turn each criterion (or vertical slice) into a
+sequential round of the same single review loop; there is no module table,
+no plan state, no planner (the subagent machinery was retired with the
+pi-subagents companion).
+### Parallel exploration — read-only scans run concurrently
 
-### Parallel exploration — read-only subagents run concurrently
-
-Read-only subagents (recon, code reading, analysis) are inherently
-parallel-safe: they never write to the worktree, so they cannot invalidate a
+Read-only exploration (code reading, analysis) is inherently
+parallel-safe: readers never write to the worktree, so they cannot invalidate a
 binding or race with each other. When you need to explore several areas of the
-codebase, spawn them in parallel — each reads its own files and returns
+codebase, fan out read-only scans (or subagent calls if a subagent tool is
+available in your pi setup) — each reads its own files and returns
 findings; you merge the results. Exploration and editing may also overlap:
-while a read-only subagent surveys the code, you can concurrently edit a
+while a read-only scan surveys the code, you can concurrently edit a
 different file (the single-writer invariant still holds — only YOU write).
-(Adviser consultations run as judge child processes, not subagents.)
-
+(Adviser consultations run as judge child processes.)
 ### Serial writers — exactly one writer in the worktree
 
-Write-capable subagents run **serially in this worktree**: their edits change
-the worktree like any other, so a review recorded before them can no longer
-ship (the binding tree moved), and concurrent writers would keep invalidating
-the binding between precommit and review. Read-only subagents (recon,
-analysis) may run in parallel. You stay the single writer of record: you run
+Write-capable subagents run **serially in this worktree** when a subagent
+tool is available: their edits change the worktree like any other, so a review
+recorded before them can no longer ship (the binding tree moved), and
+concurrent writers would keep invalidating the binding between precommit and
+review. Read-only scans may run in parallel. You stay the single writer of
+record: you run
 precommit, you run the review, you fix findings — never delegate the gate
 itself.
 
@@ -143,8 +145,7 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
 0. **Goal first (loop mode)** — establish `.pi/loop-goal.md` as described above
    before you start editing, then work to it. Hand the goal text to every
-   subagent, to `adviser`, and to `reviewer` (as TEXT in the task, never as a
-   file path: the task carries the approved text, not a pointer to the
+   round's task, to `adviser`, and to `reviewer` (as TEXT in the task, never as a
    possibly-stale file).
 
 0b. **Autonomous protocol (no command needed)** — you drive the loop
@@ -185,9 +186,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    - **the range + the findings stream + the reviewer's task text**.
    - **the dispatch** — ONE reviewer, as its own pi process, with the exit
      watcher registered. You never pass a session id, a title or a directory.
-     The gate BLOCKS judge roles dispatched through
-     `subagent`/`workflowScript`/`workflowScriptPath` entirely (that sandbox
-     has no per-child isolation — the judge would land in your live worktree).
+     The `subagent` dispatch surface was retired 2026-09-06 with the
+     pi-subagents companion — judge roles dispatch ONLY through `judge_submit`.
 
    When the reviewer's process exits, the gate reads THIS round's output,
    records the verdict itself and wakes you with it — you never copy a
@@ -345,21 +345,13 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    build/type surfaces: fast mode runs lint + tests, full mode adds typecheck
    and build (and prefers a project's `test` script over `test:unit`).
 
-## Model tiers — cheap models read, mid models execute, strong models judge
+## Model tiers — strong models judge
 
-Design record: `docs/execution-model.md` + `docs/judge-protocol.md`. Three
-tiers, all default-on:
+Design record: `docs/execution-model.md` + `docs/judge-protocol.md`. The
+L1/L2 execution tiers (`recon` / `fixer`) were retired with the pi-subagents
+companion (their dispatch mechanism); the gate ships the judging tier only:
 
-- **L1 cheap/fast** (`recon`, `claude-haiku-4-5` →
-  `opencode-go/deepseek-v4-flash`, **thinking `low`/off**) — mechanical
-  code/doc search, heavy reading. Advisory only; carries no verdict. The main
-  agent delegates heavy reading to `recon` so expensive models never pay token
-  cost for scanning.
-- **L2 execution** (`fixer`, `claude-sonnet-5` →
-  `claude-opus-5` → `opencode-go/deepseek-v4-flash`, **thinking `max`**) —
-  implements findings into a diff; you review and merge it (single writer
-  stays with you).
-- **L3 judgment** (reviewer / adviser / arbiter / goal-auditor, `max` thinking) — the only
+- **Judgment** (reviewer / adviser / arbiter / goal-auditor, `max` thinking) — the only
   tier whose verdicts may be recorded. Never delegate the verdict to a
   cheaper model.
 - No split review of any kind: one reviewer, one commit range, one verdict.

@@ -18,7 +18,7 @@
  * calls the function below, so the extension wires the whole family exactly
  * once (philosophy two: one thing, one entry). The rules are not this
  * module's either: the chain analysis is lib/model-diagnose.ts, the checks
- * are lib/gate-doctor.ts, the allowlist lib/model-allowlist.ts and the L5
+ * are lib/gate-doctor.ts, and the L5
  * language policy lib/lang-detect.ts. What is left here is the ENVIRONMENT
  * probing those pure functions need — the model registry, the two agent
  * layers, the git hooks dir, the `gh` binary — behind an injected seam.
@@ -41,7 +41,6 @@ import { execFileSync } from "node:child_process";
 
 import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "./model-diagnose.ts";
 import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "./gate-doctor.ts";
-import { isModelAllowed } from "./model-allowlist.ts";
 import { KNOWN_AGENTS, projectAgentIdentity } from "./model-config.ts";
 import { judgeEnglish } from "./lang-detect.ts";
 import { globalConfigPath } from "./project-config.ts";
@@ -114,7 +113,7 @@ export function modelDiagnosisLines(deps: GateDiagnosisDeps, registry?: unknown)
     };
     const authedProviders = new Set<string>();
     const models: Array<{ provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> }> = [];
-    const facts: RegistryFacts = { models, authedProviders, allowed: isModelAllowed };
+    const facts: RegistryFacts = { models, authedProviders };
     const reg = registry as { getAll?: () => unknown[]; hasConfiguredAuth?: (m: unknown) => boolean } | undefined;
     const all = reg?.getAll?.() ?? [];
     if (Array.isArray(all) && all.length > 0) {
@@ -265,7 +264,7 @@ export async function runGateDoctorCommand(deps: GateDiagnosisDeps, ctx: Command
 export function registerGateDiagnosisCommands(host: CommandHost, deps: GateDiagnosisDeps): void {
   // /gate-doctor — read-only health check: verifies every optimization this
   // package ships actually works in the CURRENT environment (model
-  // chains, opencode-go prune, precommit runner, git hooks, global config
+  // chains, precommit runner, git hooks, global config
   // fallback, L5 gate, Copilot gh, command registry). Pure diagnostics: it
   // reads files and probes executables, writes NOTHING, and never feeds a
   // gate verdict.

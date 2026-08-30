@@ -196,33 +196,27 @@ frontmatter in `agents/*.md` is the single source of truth and
 
 - **Strong tier — judging** (`reviewer`, `adviser`, `arbiter`,
   `goal-auditor`): `claude-fable-5` primary, fallback chain
-  `claude-opus-5 → opencode-go/deepseek-v4-flash`, `thinking: max`.
+  `claude-opus-5`, `thinking: max`.
   `goal-auditor` is the dedicated pre-reviewer of the loop GOAL (read-only
   tools) whose verdict the gate records mechanically.
-- **Mid tier — coding & execution** (`fixer`): `claude-sonnet-5` primary,
-  fallback `claude-opus-5 → opencode-go/deepseek-v4-flash`, `thinking: max`.
-- **Cheap tier — reading & scanning** (`recon`): `claude-haiku-4-5`
-  primary, fallback `opencode-go/deepseek-v4-flash`, `thinking: low`/off.
-  `recon` is the strictly read-only reconnaissance agent (tools:
-  read/grep/find/ls) — delegate heavy reading, code search and doc
-  exploration to it so expensive models never pay token cost for scanning.
+  The L1/L2 execution tiers (`recon` / `fixer`) were retired — the gate
+  ships the four judging roles only.
 
-> **Why the chains are short.** pi-subagents requires every fallback in the
-> chain to RESOLVE in the active model registry — one unresolvable pin
+> **Why the chains are short.** every fallback in the
 > (a provider that is not configured) fails the whole agent launch. The
-> chains therefore pin only providers the package can rely on (anthropic /
-> opencode-go) plus the flash fallback; a user who configures onekey /
-> deepseek / oc-sdk-go can extend the chains in `~/.pi/agent/agents/*.md`
+> chains therefore pin only providers the package can rely on (anthropic);
+> a user who configures onekey / deepseek / oc-sdk-go can extend the
+> chains in `~/.pi/agent/agents/*.md`
 > (the postinstall copies them from this repo — edits there are
 > overwrite-owned on the next install).
 
 **Model configuration layer (per-agent slots, NO built-in defaults).**
 Every role's model chain comes from the `agents` section of `review-gate.json` —
 there is no silent built-in fallback. `scripts/install-package.mjs` writes a
-default 6-role `agents` section to `~/.pi/review-gate.json` when the file is
+default 4-role `agents` section to `~/.pi/review-gate.json` when the file is
 absent, and merges in ONLY the roles missing from an existing file (never
 overwrites a user's own pins). At session start the gate HARD-CHECKS every
-role (reviewer/adviser/arbiter/fixer/recon/goal-auditor): a missing entry, an
+role (reviewer/adviser/arbiter/goal-auditor): a missing entry, an
 empty slot list, or an unresolvable spec STOPS the session with the reason
 (`validateAgentsForStartup`). `modelSpecFor` returns undefined for an
 unconfigured role and the dispatch fails closed instead of spawning a default.
@@ -239,8 +233,7 @@ unconfigured role and the dispatch fails closed instead of spawning a default.
   fallback only). An unconfigured arbiter fails closed (GATE_WINS).
 - **Rendering is layered**: project → `<project>/.pi/agents/*.md`, global →
   `~/.pi/agent/agents/*.md`; `scripts/install-package.mjs` applies only the
-  global layer. Writes validate (resolvable spec, supported thinking level,
-  opencode-go allowlist) and refuse to land on failure.
+  global layer. Writes validate (resolvable spec, supported thinking level)
 - The pi widget (`belowEditor`) always shows the effective
   `adviser`/`reviewer` models (spec, auto state, deciding layer) — a
   read-only surface; the config itself is plain JSON in `review-gate.json`.
@@ -309,10 +302,11 @@ questions by outputting a question fence and exiting — answer by submitting th
 same role again (`judge_submit` resumes the session, context intact).
 (d) **The judge child runs as its own pi process — MECHANICALLY ENFORCED.**
 `judge_submit` runs the judge as `pi -p --session-id <id>` (non-interactive,
-no tmux); a judge role dispatched
-through `subagent` / `workflowScript` / `workflowScriptPath` is HARD-blocked
-(the workflow sandbox has no per-child isolation, so the judge would land in
-one shared cwd — your live worktree, the exact failure this ends). The
+no tmux). The `subagent` dispatch surface was retired 2026-09-06 with the
+pi-subagents companion — a judge role can only be dispatched through
+`judge_submit`, so there is no second path to sequence by hand (the
+workflow-sandbox block that used to guard `subagent` calls died with it: the
+tool the block protected no longer exists). The
 single reviewer is one `judge_submit` call per round; you never pass a session
 id, a title or a directory — the gate derives all three from role+repo.
 **One session per role, continued across rounds**: the session id is
@@ -424,12 +418,12 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 ### Read-only exploration — parallel-safe
 
-Read-only subagents (recon, code reading, analysis) are inherently
-parallel-safe: they never write to the worktree, so they cannot invalidate
+Parallel read-only exploration (code reading, analysis) is inherently
+safe: readers never write to the worktree, so they cannot invalidate
 a binding or race with each other. Spawn several concurrently, overlap
 exploration with your own edits, and merge the findings. Only the main
 agent writes to the worktree. (Adviser consultations run as judge
-child processes, not subagents — see the review protocol above.)
+child processes — see the review protocol above.)
 
 ### Wave daily — removed
 

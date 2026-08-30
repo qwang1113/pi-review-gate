@@ -6,12 +6,11 @@
  * `prepare_review`), and its verdict is the only one the gate records
  * (`record_review` parses every fence; worst verdict wins if multiple appear).
  *
- * NO ENGINE HERE. The reviewer runs as a tmux judge child — its own pi process
- * (`review_spawn`) — and judge-role subagent dispatch is hard-blocked, because
- * that sandbox has no per-child isolation and would land the judge in the live
- * worktree. Every function in this file is pure over strings, so the reviewer
- * contract can be pinned by tests with no workflow engine, no git and no
- * filesystem.
+ * NO ENGINE HERE. The reviewer runs as its own non-interactive pi process
+ * (dispatched by `judge_submit`); the subagent dispatch surface was retired
+ * 2026-09-06 with the pi-subagents companion. Every function in this file
+ * is pure over strings, so the reviewer contract can be pinned by tests
+ * with no workflow engine, no git and no filesystem.
  */
 
 /**
@@ -133,7 +132,7 @@ export function extractPrecommitBaseline(
 }
 
 // Pure module: no engine, no I/O. The extension spawns the reviewer as its own
-// pi process (prepare_review + review_spawn); this file only decides WHAT to say
+// pi process via judge_submit; this file only decides WHAT to say
 // to the reviewer and what verdict shape to hand it as its outputSchema.
 import { buildStreamDirective } from "./review-stream.ts";
 

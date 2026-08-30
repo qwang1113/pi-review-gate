@@ -98,7 +98,7 @@ L2  Auto-continuation     agent_settled → if gates unmet, inject
                           injections when nothing moves (same fingerprint,
                           verdicts, round count and unmet list 3x in a row —
                           i.e. an external blocker such as provider quota);
-                          a freshly running subagent counts as motion, so a
+                          a freshly running judge child counts as motion, so a
                           live review is never orphaned. Tighten-only: no
                           verdict is granted and ship stays blocked.
                           The resume text also carries the single-review
@@ -292,7 +292,7 @@ complete default configuration JSON covering every configurable field:
 
 You reply with **ALL your overrides in one message**; the agent applies them,
 validates every model spec (`validateSpec`/`validateSlots` — an unresolvable
-spec, unsupported thinking level, or opencode-go allowlist violation is
+spec, unsupported thinking level, or a malformed spec is
 refused and reported back, never written) and every precommit script against
 package.json, then writes the **merged** result: the `precommit` section is
 always written (the required minimum), and `agents`/scalar fields only for
@@ -371,10 +371,10 @@ can override any of them per agent:
 
 | Role | When | Gates? | Model priority (first = preferred) | Thinking |
 |------|------|--------|-------------------------------------|----------|
-| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → Opus 5 → opencode-go/flash | `max` |
-| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | Fable 5 → Opus 5 → opencode-go/flash | `max` |
-| **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | Fable 5 → Opus 5 → opencode-go/flash | `max` |
-| **`goal-auditor`** (`agents/goal-auditor.md`) | *before the user sees a goal* — audits the DRAFT exit contract (checkable criteria, scope, non-goals, match with the ask, Simplified-Chinese rule) | yes — `propose_loop_goal` dispatches it and records its verdict itself, and shows no dialog without a matching PASS | Fable 5 → Opus 5 → opencode-go/flash | `max` |
+| **`adviser`** (`agents/adviser.md`) | *before / during* work — the main agent is **encouraged to proactively consult** it on design, tradeoffs, risks, hard decisions | no, advises only | Fable 5 → Opus 5 | `max` |
+| **`reviewer`** (`agents/reviewer.md`) | *after* a diff exists — independent audit that emits the recorded verdict | yes (READY/BLOCKED) | Fable 5 → Opus 5 | `max` |
+| **`arbiter`** (`agents/arbiter.md`) | *only* when the agent contests a **circular** ship block via `request_arbitration` | rules GATE_WINS / AGENT_WINS / HUMAN on one `gh pr edit` | Fable 5 → Opus 5 | `max` |
+| **`goal-auditor`** (`agents/goal-auditor.md`) | *before the user sees a goal* — audits the DRAFT exit contract (checkable criteria, scope, non-goals, match with the ask, Simplified-Chinese rule) | yes — `propose_loop_goal` dispatches it and records its verdict itself, and shows no dialog without a matching PASS | Fable 5 → Opus 5 | `max` |
 
 `thinking` is a single value, not a fallback list; `max` is the highest valid
 pi level (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — pi clamps
@@ -383,21 +383,12 @@ adviser early is cheaper
 than a failed review later, so the extension's per-turn reminder and the
 `review-loop` skill both nudge for it.
 
-### Execution tiers (L1/L2) — cheap models read, mid models execute
+### Retired execution tiers (L1/L2)
+The gate ships the four judging roles only — the L1/L2 execution tiers (`recon` / `fixer`) were retired with the pi-subagents companion (their dispatch mechanism); the historical design record was deleted.
 
-Beyond the L3 judges, two cheaper tiers do the mechanical work; design record
-and numbers in `docs/parallel-execution-plan.md` (historical):
-
-| Tier | Models (first = preferred) | Role | Verdict power |
-|---|---|---|---|
-| **L1 cheap/fast** | `claude-haiku-4-5` → `opencode-go/deepseek-v4-flash` | `agents/recon.md` — strictly read-only code/doc search and heavy reading. Thinking `low`/off. | none — advisory input for the reviewer |
-| **L2 execution** | `claude-sonnet-5` → `claude-opus-5` → `opencode-go/deepseek-v4-flash` | `agents/fixer.md` — implements findings into a diff the main agent merges. Thinking `max`. | none — output reviewed by the main agent |
-
-The chains are deliberately short: pi-subagents requires every fallback to
-resolve in the active registry, so the pinned chains name only providers the
-package can rely on (anthropic / opencode-go) plus the flash fallback. A user
-who configures a onekey gateway / oc-sdk-go (`pi-opencode-bridge`) / a
-DeepSeek subscription can extend the chains in
+The chains are deliberately short: every fallback must resolve in the active
+model registry, so the pinned chains name only providers the
+who configures a onekey gateway / oc-sdk-go / a
 `~/.pi/agent/agents/*.md`. Protocol rules (in the
 `review-loop`
 skill, all default-on): every review round is ONE
@@ -424,7 +415,7 @@ built-in frontmatter default), with an **`auto` switch** per agent:
 {
   "agents": {
     "reviewer": { "auto": false, "slots": ["onekey/gpt-5.6-sol:high", "claude-fable-5:max", "onekey/glm-5.3:high"] },
-    "fixer":    { "auto": false, "slots": ["opencode-go/deepseek-v4-flash:high"] }
+    "adviser":   { "auto": false, "slots": ["claude-fable-5:max"] }
   }
 }
 ```
@@ -444,14 +435,15 @@ built-in frontmatter default), with an **`auto` switch** per agent:
   diagnostic at render time so the deployed default is never a surprise.
 - **Per-model thinking levels.** Every slot may carry its own `:thinking`
   suffix (`claude-fable-5:max`, `onekey/gpt-5.6-sol:high`); the renderer keeps
-  the suffix on each candidate so pi-subagents applies the requested level per
-  retry. A level the registry EXPLICITLY maps to null is refused on save —
+  the suffix on each candidate so the agent runtime applies the requested
+  level per retry. A level the registry EXPLICITLY maps to null is refused
+  on save —
   except `:off` on a `reasoning: false` model, which is always usable (the
   renderer never consults the map there); missing metadata follows
-  pi-subagents defaults (all levels except `max`, while metadata-backed
+  agent-runtime defaults (all levels except `max`, while metadata-backed
   `xhigh`/`max` must be explicitly listed).
 
-Rendering is layered the way pi-subagents loads agents: the project layer
+Rendering is layered the way the agent runtime loads agents: the project layer
 renders into `<project>/.pi/agents/*.md` (which outranks user-global) and the
 global layer into `~/.pi/agent/agents/*.md`. `scripts/install-package.mjs`
 applies only the GLOBAL layer (its cwd is not trustworthy), rendering it
@@ -844,25 +836,14 @@ pi install git:github.com/<you>/pi-review-gate
 The package's `postinstall` (`scripts/install-package.mjs`) runs automatically
 on `pi install` / `npm install` and:
 
-1. copies `agents/*.md` → `~/.pi/agent/agents/` (pi-subagents loads them there),
+1. copies `agents/*.md` → `~/.pi/agent/agents/` (the agent runtime loads them there),
 2. registers the **companion pi packages** this extension needs at runtime —
    the pinned platform in `package.json` `dependencies` — via `pi install` when
    they are missing from `~/.pi/agent/settings.json` (idempotent:
-   already-present packages are left untouched): `pi-subagents` (the
-   spawn-reviewer protocol), `pi-opencode-bridge` (the opencode-go provider),
-   `pi-anthropic-oauth`, `pi-mcp-adapter`, `pi-notify`, `pi-vim`,
-   `pi-web-access`, `@narumitw/pi-lsp` and `pi-hashline-edit-pro`.
+   already-present packages are left untouched): `pi-anthropic-oauth`,
+   `pi-mcp-adapter`, `pi-notify`, `pi-vim`, and `pi-hashline-edit-pro`.
 3. if the current directory is a git repo, installs the git hooks into it
    (idempotent; chained, never clobbered).
-4. writes pi-subagents' **fleet-inspector keybindings** into the global subagent config
-   (`~/.pi/agent/extensions/subagent/config.json`) — vim-style page bindings
-   (`Ctrl+b` up / `Ctrl+f`, `Ctrl+d` down) for scrolling a subagent's session
-   history on keyboards without PageUp/PageDown. Smart-merged, never clobbered:
-   the file is created when missing, `fleetKeybindings` is added when absent
-   (all other fields preserved), and an existing `fleetKeybindings` is left
-   untouched — your own bindings win. To customize, edit that file's
-   `fleetKeybindings`; to restore the defaults, delete the field (or the file)
-   and reinstall.
 
 So a fresh `pi install pi-review-gate` on a pi with a working provider setup
 gives a working loop out of the box — no manual companion installs needed.
@@ -898,8 +879,8 @@ output, records the verdict itself (binding a READY to the reviewed commit's
 TREE — content binding, so a squash preserves it; a READY whose HEAD moved is
 STALE ⇒ BLOCKED) and wakes the main session with it. Because the reviewed
 range is immutable, the agent keeps fixing the real worktree while the
-reviewer runs. Subagent dispatch of judge roles is HARD-blocked (a judge as a
-subagent would run in the live worktree with no isolation). One reviewer, one
+reviewer runs. The `subagent` dispatch surface was retired 2026-09-06 with the
+pi-subagents companion — a judge role can only be dispatched through `judge_submit`. One reviewer, one
 commit range, no second reviewer.
 
 **The decompose module loop and wave daily were removed (2026-08-26).**
@@ -1072,7 +1053,7 @@ one fact:
   the L8 edit gate does not block a reviewer's mutation analysis inside the
   disposable checkout it made of the reviewed range; the L1 sensitive-file
   floor and the bash ship gate stay active there.
-  See `docs/subagents-collaboration.md` §5.)
+  (The judge worktree exemption is documented in `docs/execution-model.md`.)
 
 **What deliberately did NOT change.** The L3 git hooks and the verdict logic
 stay blind to the goal: an approval is a *dialog* fact, and a hook cannot show
@@ -1080,10 +1061,10 @@ a dialog — a hook that failed on an unapproved goal would block commits it can
 never unblock. So the requirement lives in the extension's L1 path and in
 `declare_done`, never in `unmetRequirements()` (a structural test pins this).
 
-- **Who uses it.** The main agent slices the work against the goal (write
-  subagents serially in the same worktree — their edits move the worktree
-  fingerprint, so a review recorded earlier can no longer ship them; read-only
-  subagents may run in parallel), `adviser` advises against it, and `reviewer`
+- **Who uses it.** The main agent slices the work against the goal (
+  parallel read-only exploration in the worktree — readers never write, so
+  they cannot invalidate a recorded review; the main agent stays the only
+  writer), `adviser` advises against it, and `reviewer`
   accepts against it criterion by criterion. Reviewers get the goal through the
   spawn task text — the judge child never reads the sidecar directly,
   so the goal file is not readable inside one (see `prepare_review`). The main
@@ -1369,7 +1350,7 @@ gated **per repo**:
 | `/gate-bypass <reason>` | Disable ship blocking (user-confirmed, reason required, logged in state) |
 | `/gate-reset` | Reset gate state (mode returns to undecided — the agent re-decides via `set_gate_mode`; also clears the agent-downgrade lock) |
 | `/gate-lesson <text>` | Append a lesson to `.pi/review-gate-lessons.md` (self-improvement log) |
-| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — agent model chains, `goal-auditor` dispatchability (the role that gates goal approval), opencode-go models-store prune, precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
+| `/gate-doctor` | Read-only health check: verifies every optimization this package ships actually works in the current environment — agent model chains, `goal-auditor` dispatchability (the role that gates goal approval), precommit runner, git hooks, user-global config fallback, L5 language gate, Copilot gh compatibility, workflow command registry. Prints `PASS / FAIL / WARN` per check with evidence and repair advice; writes nothing and never feeds a gate verdict |
 
 ### sd0x-dev-flow workflow commands
 
@@ -1392,7 +1373,7 @@ can ship default to a dry run and still pass through the same hard review gate.
 
 Pi already exposes packaged skills as `/skill:<name>`. The commands above are
 implemented as lightweight workflow dispatchers because their useful behavior
-maps directly onto Pi's existing tools, subagents, `gh`, and trusted gate. Broad
+maps directly onto Pi's existing tools, `gh`, and trusted gate. Broad
 or platform-specific sd0x skills are intentionally not copied wholesale.
 
 Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
@@ -1420,7 +1401,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal`/`orchestrator` + a reason). The agent's pick IS the classification — no classifier model reviews it. On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) `loop`, `orchestrator` and `explore` apply directly with source `auto`, while `normal` still pops the confirm dialog. Everything delegates to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. `orchestrator` additionally has two environment preconditions checked before the engine runs: no `$TMUX` (its children ARE panes) and "this session is itself somebody's orchestration child" (it would take over the channel of the orchestration supervising it) are both refused. |
 | `setup_workspace` | Settles in ONE call where this session works: what happens to changes that were already in the worktree (adopt them as this session's baseline / the user handled them / the gate discards them) and which branch is the BASE the work must end up in. The **extension** asks the user, executes what they chose — including creating the work branch — and records every step in its branch log, which `declare_done` later follows back to merge. Call it once, early: while a dirty worktree is unsettled edits are refused, and without a work branch commits are refused. |
 | `ask_user` | The ONE way to reach the user — requirement ambiguity, a product/design decision, scope trade-offs, the loop-goal interview. Calling it **pauses** the loop until the answers come back, which is why a question written into the reply and an ended turn is not an alternative: that costs a whole iteration and may not even read as a question. The extension runs the interview itself (one question at a time with its `N / M` progress, choices when the call supplied options, free text otherwise, plus "answer in chat" and "skip the rest"), and every answer returns at once with the unanswered ones marked. It replaced `pause_for_question`, which was deleted on 2026-08-29: that tool only *paused* and carried exactly one question, leaving the agent to restate it in the reply — two ways to reach the user, one of which delivered nothing. Asking permission to continue routine loop work is still prohibited. |
-| `judge_submit` | The ONE entry point for a judge round (`reviewer` / `adviser` / `goal-auditor`). The call passes WHO and WHAT; the gate owns everything procedural — session id, working directory, spawn vs. resume vs. kill, the completion listener — so no session id, title or directory is ever passed in. For `reviewer` it runs the whole chain itself: the FULL precommit, the checkpoint commit (it stamps the checkpoint marker), the `baseline..HEAD` computation and the finding-stream file, then the dispatch; any step that fails sends the round back with the reason instead of leaving it half-submitted. The judge child is a fresh non-interactive pi process (`pi -p --session-id`, deterministic per role+repo, no review-gate extension loaded, `--exclude-tools edit,write`); dispatching a judge role through `subagent` / `workflowScript` / `workflowScriptPath` is hard-blocked instead. It returns as soon as the round is SUBMITTED, not when the judge is done: the child's process EXIT wakes this session, and the gate reads that round's output and records the verdict itself. A role whose process is still RUNNING refuses the round (nothing is silently dropped) unless `fresh: true` kills it first. POLISH GATE: after two consecutive READYs, or the same file polished for three rounds, a reviewer round without a `reason` is refused, and the reason travels into the reviewer's task text. |
+| `judge_submit` | The ONE entry point for a judge round (`reviewer` / `adviser` / `goal-auditor`). The call passes WHO and WHAT; the gate owns everything procedural — session id, working directory, spawn vs. resume vs. kill, the completion listener — so no session id, title or directory is ever passed in. For `reviewer` it runs the whole chain itself: the FULL precommit, the checkpoint commit (it stamps the checkpoint marker), the `baseline..HEAD` computation and the finding-stream file, then the dispatch; any step that fails sends the round back with the reason instead of leaving it half-submitted. The judge child is a fresh non-interactive pi process (`pi -p --session-id`, deterministic per role+repo, no review-gate extension loaded, `--exclude-tools edit,write`); the `subagent` dispatch surface was retired 2026-09-06 with the pi-subagents companion, so `judge_submit` is the only way a judge role can run. It returns as soon as the round is SUBMITTED, not when the judge is done: the child's process EXIT wakes this session, and the gate reads that round's output and records the verdict itself. A role whose process is still RUNNING refuses the round (nothing is silently dropped) unless `fresh: true` kills it first. POLISH GATE: after two consecutive READYs, or the same file polished for three rounds, a reviewer round without a `reason` is refused, and the reason travels into the reviewer's task text. |
 | `judge_read` | Snapshot of a judge role — never a wait: its session state (running / finished + exit code), the tail of its stdout log, the conclusion parsed from its transcript (the last assistant text carrying a verdict fence), and its stderr tail. The process may already be gone; the transcript and the logs are not. |
 | `judge_wait` | Block until a role's current round is over, then return what it produced. This is the FALLBACK, not the normal path — `judge_submit` already wakes the session on completion, so it is for when there is genuinely nothing else to do. Three independent criteria end the wait: the process exited, its exit-code file landed, or a verdict/question fence is already in that round's stdout. On timeout it returns the current state instead of failing, so the decision stays with the agent. |
 | `judge_close` | Terminate a judge role's pi PROCESS (SIGTERM) and drop it from the registry. Not a memory wipe: the transcript stays on disk, so the next dispatch of that role resumes the same conversation. Idempotent — an already-finished child still closes successfully. `declare_done` requires an open judge child to be closed out (its verdict is recorded on exit, or by this tool). |
@@ -1485,7 +1466,7 @@ with its argument. The extension then:
    it, and any bypass it grants is single-use and bound to the command's exact
    raw bytes.
 2. Gathers **trusted ground truth itself** (`gh pr view`, `git log`, the
-   proposed body file) and spawns an **independent** arbiter subagent
+   proposed body file) and spawns an **independent** arbiter process
    (`agents/arbiter.md`, a top-tier model) tool-less and isolated (same argv/no
    -tools discipline as the classifier) — the agent **cannot hand-write** the
    verdict, and its argument is passed as clearly-marked **untrusted** data.
@@ -1528,7 +1509,7 @@ Configure via `.pi/review-gate.json` → `"arbiter": { "enabled", "model",
 - Ambient `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` / `GIT_CONFIG_PARAMETERS` / … injecting `core.excludesFile` (or any other setting) → ignored: the whole `GIT_CONFIG*` family is stripped by prefix, so configuration injection cannot hide a real edit from the digest
 - `git commit -a` / `git commit -- <path>` (git publishes a TEMPORARY index) → correctly judged: the hook forwards git's own `GIT_INDEX_FILE` as an explicit argument and the checker verifies it belongs to this repository, so these commits are neither wrongly blocked nor able to ship unreviewed content
 - Commit/push whose cwd is inside a review snapshot worktree (an `rg-review-snap-*` path segment) → blocked even with no sidecar (legacy guard for older installs' leftovers: such a worktree carries no `.pi/` but shares the real repo's `.git`; the 2026-08-27 model creates no snapshots)
-- Judge roles (`reviewer` / `adviser` / `goal-auditor`) dispatched through `subagent` / `workflowScript` / `workflowScriptPath` → the dispatch is **blocked at `tool_call`** (the workflow sandbox has no per-child isolation, so the judge would land in the live worktree); the agent is steered to `judge_submit`. Management actions and non-judge roles (`recon`) keep running
+- Judge roles (`reviewer` / `adviser` / `goal-auditor`) run only through `judge_submit` — the `subagent` dispatch surface was retired 2026-09-06 with the pi-subagents companion, so there is no second dispatch path to guard
 - Round never prepared (no registered `baseline..HEAD` target when the verdict arrives) → any READY is recorded as **BLOCKED** — a verdict with nothing to bind to cannot ship. HEAD moved past the prepared commit → **BLOCKED** (STALE): the reviewer judged an older commit and the change has since grown
 - Loop-mode (or undecided) `edit`/`write` tool call while no USER-approved loop goal exists for the target repo → blocked at tool_call: the negotiation must happen before the work starts, and each repo checks its own goal (see the [Loop goal](#loop-goal--the-exit-contract-negotiated-with-the-user-l8-the-edit-gate-also-covers-undecided-mode) section)
 - Ship command hidden in `bash -c` / `eval` / `xargs` → still detected (over-detection preferred)
@@ -1884,8 +1865,7 @@ ran six consecutive times on this repo (typecheck concurrent with `npm test`,
 which contains the two timing regressions) — all six PASS; wall clock
 138–157 s, on par with the serial baseline (`npm test` ~137 s + typecheck
 ~2 s). The parallel win lands on multi-step repos; see
-`docs/parallel-execution-plan.md` §7 (historical).
-
+~2 s). The parallel win lands on multi-step repos.
 The practical consequence: batching edits into fewer, larger review rounds
 saves far more wall time than any micro-optimization here, because the loop is
 billed per round.
@@ -1932,7 +1912,7 @@ lib/ship-detect.ts            bash → ship-command detection (+evasion & de-obf
 lib/fingerprint.ts            worktree fingerprint (content-addressed git tree hash; staging-invariant) + tree increments for incremental review
 lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/review-scope.ts           incremental-review scoping + escalation thresholds + the previous round's settled conclusion (pure)
-lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running subagent, notice text (pure)
+lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running judge child, notice text (pure)
 lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
 lib/judge-process.ts          judge-child lifecycle: `pi -p --session-id` spawn (argv, no shell), stdout/stderr tee, liveness from the child's own exitCode
 lib/judge-lifecycle.ts        judge round decisions (pure): work dir per role+repo, dispatch vs. refuse-busy, the three end-of-round criteria, judge_wait's reply, goal-audit adjudication
@@ -1940,9 +1920,8 @@ lib/poll-wait.ts              the wait skeleton with its criteria injected (pure
 lib/progress-stream.ts        live tool progress: pure frame rendering + a throttled reporter over `onUpdate`, and the slow-call notice for the LLM guards
 lib/text-appeal.ts            A-class text appeals (pure): content digest, quota + re-roll brakes, the single-use pass, the arbiter brief
 lib/git-rewrite.ts            message-only rewrites (pure): tree-equality test, `--amend` recognition, the branch a rebase will land on
-lib/judge-prompt.ts            judge role resolution (repo → package → ~/.pi/agent/agents), model spec, launcher files, judge-role dispatch detection for the subagent block
+lib/judge-prompt.ts            judge role resolution (repo → package → ~/.pi/agent/agents), model spec, launcher files
 lib/parallel-review.ts        single-review contract: reviewer prompt + verdict schema (pure, no engine)
-docs/subagents-collaboration.md how the gate and pi-subagents cooperate: what is established, what is deliberately NOT used (gate param / worktree isolation), what was added (the single-review spawn shape, the L8b goal pre-review collaboration)
 lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
 lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)

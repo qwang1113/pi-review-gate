@@ -460,7 +460,7 @@ test("L2 STALL BREAKER: no-progress circuit breaker precedes every continuation 
   assert.ok(clears.length >= 3, `stall state must be cleared at every progress site (found ${clears.length})`);
 });
 
-test("L2 STALL BREAKER: a running subagent counts as motion (never orphan a live review)", () => {
+test("L2 STALL BREAKER: a running judge child counts as motion (never orphan a live review)", () => {
   // Without this, the breaker trips on the loop's OWN review: while an async
   // reviewer runs, the fingerprint, both verdicts, the round count and the
   // unmet list are all necessarily unchanged.
@@ -468,21 +468,16 @@ test("L2 STALL BREAKER: a running subagent counts as motion (never orphan a live
   const breakerAt = SRC.indexOf("evaluateStall(", start);
   const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
   const call = SRC.slice(breakerAt, injectAt);
-  assert.match(call, /inMotion:\s*subagentInMotion\(\)\s*\|\|\s*judgeChildInMotion\(\)/,
-    "the breaker must be told about work in flight (subagents OR tmux judge children)");
+  assert.match(call, /inMotion:\s*judgeChildInMotion\(\)/,
+    "the breaker must be told about judge work in flight");
   // The motion probe must be bounded in age, or a hung run would disable the
   // breaker permanently — the exact failure it exists to catch.
-  const probe = windowOf("function subagentInMotion(", "\n  }", "subagentInMotion");
-  assert.match(probe, /STALL_MOTION_MAX_AGE_SEC/, "motion credit must expire with age");
-  assert.match(probe, /state === "running"/, "only RUNNING subagents count as motion");
-  // Round-16 P2: tmux judge children are motion too — and their probe must
-  // carry the SAME freshness bound (a hung-but-alive pane must not disable
-  // the breaker forever; the goal-auditor flagged exactly that hazard).
   const judgeProbe = windowOf("function judgeChildInMotion(", "\n  }", "judgeChildInMotion");
   assert.match(judgeProbe, /STALL_MOTION_MAX_AGE_SEC/, "judge-child motion credit must expire with age");
   assert.match(judgeProbe, /Date\.parse\(c\.spawnedAt\)/, "freshness is measured from the spawn timestamp");
   assert.match(judgeProbe, /Number\.isFinite/, "an unparseable spawnedAt must fail closed (no motion)");
 });
+
 
 
 test("corrupt config layer keeps the last render — BOTH layers, fail-safe (round-12 P1)", () => {
@@ -1452,7 +1447,6 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
   for (const [factBlock, src] of [
     ["先调 setup_workspace", SRC],
     ["LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK", SHIP_BASH_SRC],
-    ["is a judge role and runs ONLY as its own pi process", SHIP_HOOK_SRC],
     ["matches a sensitive-file pattern", SHIP_EDIT_SRC],
   ] as const) {
     const at = src.indexOf(factBlock);
@@ -3421,48 +3415,6 @@ test("P2: record_review downgrades a READY to BLOCKED when HEAD moved past the p
   assert.match(segment, /staleTarget/);
 });
 
-test("P2: judge-role subagent block covers ALL three dispatch channels", () => {
-  // Round-8 P1: top-level input.agent is not the only channel — a judge role
-  // named inside a workflowScript string (runs.run({agent:"reviewer"})) or a
-  // workflowScriptPath file would bypass a top-level-only check. The block
-  // must scan the script text with the retired guard's own detector.
-  // The window is the pure decision itself (lib/ship-gate-hook.ts's
-  // judgeSubagentBlock), not "everything after a comment": the old anchor was
-  // a comment string, so once the code moved the slice collapsed to a single
-  // character and every assertion below it passed vacuously.
-  const segment = windowIn(
-    SHIP_HOOK_SRC,
-    "export function judgeSubagentBlock(",
-    // `\n}\n`, not `\n}`: the inline parameter type closes with `}): …` and a
-    // bare `\n}` would end the window at the SIGNATURE, before any of the code
-    // this test is about.
-    "\n}\n",
-    "judge-role subagent block",
-  );
-  assert.match(segment, /script !== undefined\s*\n\s*\? script/, "the inline workflowScript channel");
-  assert.match(segment, /input\.readScript\(scriptPath\)/, "the workflowScriptPath channel");
-  // The path channel FAILS CLOSED when the file cannot be read: an unreadable
-  // script could hide a judge role, so "no information" must not mean "pass".
-  assert.match(segment, /const unreadableScript = scriptPath !== undefined && script === undefined && scriptText === undefined;/);
-  assert.match(segment, /if \(judgeName \|\| unreadableScript\)/,
-    "an unreadable script must refuse, exactly like a named judge role");
-  assert.match(segment, /judgeRoleInScript/);
-  // …and the extension's hook must actually feed all three channels in.
-  const dispatch = windowIn(
-    SHIP_HOOK_SRC,
-    "const block = judgeSubagentBlock({",
-    "\n    });",
-    "judgeSubagentBlock call site",
-  );
-  assert.match(dispatch, /input\.agent/, "the top-level agent channel");
-  assert.match(dispatch, /input\.workflowScript\b/, "the inline script channel");
-  assert.match(dispatch, /input\.workflowScriptPath\b/, "the script-path channel");
-  // The refusal text must steer to the judge_submit flow, never to a retry of subagent.
-  assert.match(segment, /runs ONLY as its own pi process/);
-  assert.match(segment, /judge_submit\(\{role, task\}\)/,
-    "…and it must name the ONE call that dispatches a judge correctly");
-  assert.doesNotMatch(segment, /tmux judge child|tmux flow/);
-});
 
 test("P2: checkpoint carries prevSha so the documented checkpoint→prepare flow does not self-lock", () => {
   // Round-8 P1-1: if review_checkpoint records its OWN commit as the baseline

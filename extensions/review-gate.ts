@@ -75,7 +75,7 @@ import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-direct
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands } from "../lib/ship-detect.ts";
-import { buildAgentsWidget, buildModelConfigWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
+import { buildModelConfigWidget } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -2542,11 +2542,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
     if (!hasUI) return;
-    // belowEditor — agent model config, then sub-agent runs (running first).
+    // belowEditor — agent model config (sub-agent runs were retired with
+    // the pi-subagents companion 2026-09-06).
     try {
-      const agents = scanAgentArtifacts(pathJoin(cwd, ".pi-subagents", "artifacts"), Date.now(), { maxAgeSec: 2 * 3600 });
       const modelLines = modelConfigWidgetLines();
-      const lines = [...modelLines, ...(modelLines.length > 0 ? [""] : []), ...buildAgentsWidget(agents)];
+      const lines = modelLines;
       const key = lines.join("\n");
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
@@ -2555,39 +2555,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     } catch { /* display-only */ }
   }
 
-  /**
-   * Is a subagent demonstrably still working? Read from the same artifact scan
-   * the TUI widget uses, so the breaker and the display can never disagree.
-   *
-   * Only FRESH runs count (`STALL_MOTION_MAX_AGE_SEC`): a run that has been
-   * "running" for hours is the hung case the breaker exists for, not motion.
-   * Any failure to scan yields false — the breaker keeps its normal behavior
-   * rather than being silently disabled by an unreadable directory.
-   */
-
-  function subagentInMotion(): boolean {
-    try {
-      // `maxAgeSec` only prunes FINISHED runs from the scan (lib/ui-widget.ts:
-      // a running run is always kept). The age bound that matters here is the
-      // explicit predicate below — the option merely keeps the scan cheap.
-      const agents = scanAgentArtifacts(pathJoin(cwd, ".pi-subagents", "artifacts"), Date.now(), {
-        maxAgeSec: STALL_MOTION_MAX_AGE_SEC,
-      });
-      return agents.some((a) => a.state === "running" && a.ageSec <= STALL_MOTION_MAX_AGE_SEC);
-    } catch {
-      return false;
-    }
-  }
 
   /**
    * Is a judge child process (reviewer / adviser / goal-auditor) still in
    * flight? The stall breaker must not cut the loop off while a judge is
    * working — its verdict is exactly what the unchanged signature is waiting
-   * for (round-16 P2: only subagentInMotion was consulted, so a waiting
-   * main session tripped the breaker with 'check provider status' while the
+   * for (round-16 P2: only the subagent scan was consulted, so a waiting
    * reviewer was mid-round).
    *
-   * Freshness bound like subagentInMotion's: a child that has been alive
+   * Freshness bound: a child that has been alive
    * since before STALL_MOTION_MAX_AGE_SEC is the HUNG case the breaker
    * exists for, not motion (goal-auditor P2: alive-forever must not
    * disable the breaker).
@@ -6430,7 +6406,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // will produce does not exist yet. Cutting the loop off there would
       // orphan the very review the gate is waiting for, so observable work in
       // flight counts as motion — until it is too old to be believable.
-      { inMotion: subagentInMotion() || judgeChildInMotion() },
+      { inMotion: judgeChildInMotion() },
     );
     loopStall = stall;
     if (stall.stalled) {

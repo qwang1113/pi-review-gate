@@ -135,11 +135,9 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 （`pi.on("tool_call", (event, ctx) => evaluateToolCall(shipGateHookDeps, event, ctx))`）
 加一个注入的 deps 对象。按**职责**切成三块（也让每个文件都远离 600 行硬拦）：
 
-- `lib/ship-gate-hook.ts`：入口 `evaluateToolCall` + 三条臂之间的分派 + deps
-  汇总（`ShipGateHookDeps` 是另外两条臂 deps 的并集），另外持有 **judge 角色
-  subagent 拦截**（`judgeSubagentBlock`；判定「哪些名字是 judge 角色」用的是
-  `lib/judge-prompt.ts` 的 `isJudgeAgentName`，不另起一份）—— 它既不属于
-  edit 也不属于 bash，管的是一次 `subagent` 调用。
+- `lib/ship-gate-hook.ts`：入口 `evaluateToolCall` + 两条臂之间的分派 + deps
+  汇总（`ShipGateHookDeps` 是两条臂 deps 的并集）。（judge 角色 subagent
+  拦截曾在这里；随 pi-subagents companion 退役 2026-09-06。）
 - `lib/ship-gate-edit-guard.ts`：**edit/write 臂**。敏感文件安全底线
   （`sensitiveEditBlock`，唯一一条在 `normal` 模式下也必须生效的检查）、
   gate-owned 豁免、L8 目标门、orchestrator 写限制、L6 标签检查。这里的
@@ -388,8 +386,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | --- | --- | --- |
 | `hooks/` | L3 纵深防御：`pre-commit`（校验 sidecar 与指纹、跑标签扫描与暂存分叉检查）、`pre-push`（同一套 + full lane 要求）、`commit-msg`（AI 署名 + L5 英文，覆盖编辑器里写的 message） | 新增一条**离开 pi 也必须成立**的检查；bash 写成，不能 import TypeScript |
 | `scripts/` | 跑得起来的执行体：`precommit-runner.mjs`（确定性质量门）、`precommit-plan.mjs`（纯规划，可单测）、`precommit-cache.mjs`（按输入摘要缓存每步）、`precommit-config.mjs`（读 `.pi/review-gate.json` 的 precommit 段）、`compute-fingerprint.cjs`（钩子用的指纹，镜像 `lib/fingerprint.ts`）、`check-staged-divergence.cjs`、`scan-test-labels.cjs`（L6）、`install-git-hooks.sh`、`install-package.mjs` | **新增一条 precommit 检查**（改 runner + plan）；新增钩子要用的、不能依赖 TypeScript 的逻辑（CJS/MJS） |
-| `agents/` | 六个角色定义：`reviewer`、`adviser`、`goal-auditor`、`arbiter`、`fixer`、`recon`。frontmatter 是模型链、thinking、工具集的**单一事实源** | **新增或调整一个 judge 角色**：先改这里的 md，模型链由 `lib/model-config.ts` 渲染/校验 |
-| `test/` | `*.test.ts` + `test/helpers/`（`git.ts`、`fake-orchestration.ts`、`gate-env.ts`——后者在测试载入时清掉继承来的 `RG_*` / `REVIEW_GATE_*` 环境变量，否则父会话的门禁状态会污染被测门禁）。约定是**一个 lib 模块一个同名测试文件**（少数执行/接线模块并进相邻的分组测试），另有 `extension-structure.test.ts` / `agents-structure.test.ts` 这类结构性测试守住跨文件不变量 | 新建 `lib/foo.ts` 就同时新建 `test/foo.test.ts`；测试若会读门禁状态，先 `neutraliseGateEnv()` |
+| `agents/` | 四个角色定义：`reviewer`、`adviser`、`goal-auditor`、`arbiter`。frontmatter 是模型链、thinking、工具集的**单一事实源** | **新增或调整一个 judge 角色**：先改这里的 md，模型链由 `lib/model-config.ts` 渲染/校验 |
 | `skills/` | `skills/review-loop`：随包分发给 pi 的技能，描述审查循环怎么跑 | 面向**使用者**的操作指南（而不是门禁自身的判定）放这里 |
 
 ---
@@ -489,7 +486,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `side-effects.ts` | 唯一一处「本进程能不能碰外部世界」的判定（测试 / CI / 无 TTY / 显式关闭一律不能），通知与编排共用 |
 | `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |
 | `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit） |
-| `ship-gate-hook.ts` | **L1 `tool_call` 钩子的入口**：`evaluateToolCall` 分派到两条臂，`ShipGateHookDeps` 汇总两条臂的 deps；judge 角色 subagent 拦截（`judgeSubagentBlock`，含 `workflowScript` 内嵌与不可读 `workflowScriptPath` 的 fail-closed；角色名判定复用 `judge-prompt.ts` 的 `isJudgeAgentName`）也在这里 |
+| `ship-gate-hook.ts` | **L1 `tool_call` 钩子的入口**：`evaluateToolCall` 分派到两条臂，`ShipGateHookDeps` 汇总两条臂的 deps |
 | `ship-gate-edit-guard.ts` | L1 的 **edit/write 臂**：敏感文件安全底线（`sensitiveEditBlock`，`normal` 模式也生效）、gate-owned 豁免、L8 目标门、orchestrator 写限制、L6 标签检查；检查次序即契约 |
 | `ship-gate-bash.ts` | L1 的 **bash 臂 = ship gate 本体**：tmux backstop、`/gate-bypass`、ship 识别、L5/AI 署名、message-only rewrite 豁免、逐 repo 门禁、一次性仲裁令牌、拦截文案（`describeShips` / `buildShipBlockReason`） |
 | `task-mode.ts` | 会话门禁模式模型：normal < explore < loop < orchestrator 与升降级规则 |
