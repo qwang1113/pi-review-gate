@@ -1915,41 +1915,107 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     "say so and update FROZEN. If you REMOVED one, lower the count.");
 });
 
-test("the SHIPPED skill and the agent-facing docs name no deleted tool at all", () => {
-  // The ratchet above covers code. These three files are the OTHER surfaces a
-  // model reads — `skills/review-loop/SKILL.md` ships with the package and is
-  // loaded as a skill, and AGENTS.md is read by every session in this repo.
-  // They contain no internal wiring, so unlike the code the bar here is
-  // ABSOLUTE: a deleted tool name in any of them is a defect, full stop.
-  //
-  // (README.md and QUICKSTART.md are excluded on purpose: they are reference
-  // documentation for a HUMAN and legitimately explain what the internal
-  // steps do, under a banner that says so.)
-  const DELETED = [
-    "run_precommit", "review_checkpoint", "prepare_review", "prepare_adviser",
-    "prepare_goal_audit", "record_review", "record_goal_prereview",
-    "review_spawn", "review_watch", "review_send",
-    "orchestrator_read", "orchestrator_key", "orchestrator_status",
-    "orchestrator_send", "orchestrator_relay",
+/** The fifteen names that are no longer registered with pi. */
+const DELETED_TOOL_NAMES = [
+  "run_precommit", "review_checkpoint", "prepare_review", "prepare_adviser",
+  "prepare_goal_audit", "record_review", "record_goal_prereview",
+  "review_spawn", "review_watch", "review_send",
+  "orchestrator_read", "orchestrator_key", "orchestrator_status",
+  "orchestrator_send", "orchestrator_relay",
+];
+
+/**
+ * Does this document tell an agent to use a tool that no longer exists?
+ *
+ * The one legitimate mention is a SENTENCE saying the name is gone, and the
+ * two rules that make that exception hold up were both found by a reviewer
+ * demonstrating an evasion:
+ *
+ *  - the exception is scoped to the sentence the name sits in, not to a
+ *    window of following lines. A forward window lets "Call X now. It is no
+ *    longer registered." through — and instruction-first, caveat-after is the
+ *    most natural prose order there is. Prose still wraps, so the sentence is
+ *    reassembled across line breaks and then cut at the first terminator.
+ *  - an imperative ANYWHERE in that sentence cancels the exception, because
+ *    the verb sits on either side of the name: "Call X now" and "X is
+ *    deleted, but you can still call it" are the same defect.
+ *
+ * `\b` matters: "the gate still RUNS it internally" is a description and stays
+ * exempt, while a bare "run" is an instruction. `可以` is the Chinese giveaway
+ * ("you may still…"); the bare characters 调 and 用 are unusable here because
+ * they occur inside ordinary words.
+ */
+function deletedToolInstructions(text: string, label = "doc"): string[] {
+  const lines = text.split("\n");
+  const offences: string[] = [];
+  lines.forEach((line, i) => {
+    for (const tool of DELETED_TOOL_NAMES) {
+      if (!line.includes(tool)) continue;
+      const joined = lines.slice(i, i + 3).join(" ");
+      const at = joined.indexOf(tool);
+      const start = Math.max(0, joined.lastIndexOf("。", at) + 1, joined.lastIndexOf(". ", at) + 1);
+      const endRel = joined.slice(at).search(/。|\.\s|$/);
+      const sentence = joined.slice(start, at + (endRel < 0 ? joined.length : endRel) + 1);
+      const imperative = /\b(call|run|use|invoke)\b/i.test(sentence) || /可以/.test(sentence);
+      const saysItIsGone =
+        /不再|已删|已并入|删除|are \*\*not tools\*\*|no longer|not registered/.test(sentence);
+      if (saysItIsGone && !imperative) continue;
+      offences.push(`${label}:${i + 1} — ${line.trim().slice(0, 100)}`);
+    }
+  });
+  return offences;
+}
+
+test("the deleted-tool rule catches the evasions, and still allows saying they are gone", () => {
+  // A guard whose own semantics are untested is not a guard. Every CAUGHT row
+  // below is a real evasion (the first two were demonstrated by a reviewer
+  // against the previous version of this rule); every ALLOWED row is prose
+  // that has to keep working, or the rule would force the docs to stop
+  // explaining what happened.
+  const CAUGHT: Array<[string, string]> = [
+    ["instruction first, caveat after", "Call run_precommit now. It is no longer registered."],
+    ["caveat, then 'you can still call it'", "`run_precommit` 已删除，但你还是可以 call 它。"],
+    ["a plain instruction", "Just call run_precommit."],
+    ["a bare mention with no negation at all", "The run_precommit tool records the gate."],
   ];
+  const ALLOWED: Array<[string, string]> = [
+    ["a plain removal statement", "`run_precommit` is no longer registered."],
+    ["the same in Chinese", "`run_precommit` 不再作为工具暴露。"],
+    ["a removal statement that WRAPPED", "The precommit lane and\n`run_precommit` are **not tools** any more."],
+    ["'the gate still RUNS it' — a description, not an imperative",
+      "`run_precommit` is no longer registered; the gate still runs it internally."],
+  ];
+  for (const [why, text] of CAUGHT) {
+    assert.notDeepEqual(deletedToolInstructions(text), [], `must be caught: ${why}`);
+  }
+  for (const [why, text] of ALLOWED) {
+    assert.deepEqual(deletedToolInstructions(text), [], `must be allowed: ${why}`);
+  }
+});
+
+test("the SHIPPED skill and the agent-facing docs name no deleted tool at all", () => {
+  // The ratchet above covers code. These are the OTHER surfaces a model reads
+  // — `skills/review-loop/SKILL.md` ships with the package and pi loads it as
+  // a skill, and AGENTS.md is read by every session in this repo. They contain
+  // no internal wiring, so unlike the code the bar here is ABSOLUTE.
+  //
+  // README.md and QUICKSTART.md are excluded on purpose: they are reference
+  // documentation for a HUMAN and legitimately explain what the internal steps
+  // do — but ONLY because a banner over the tool table says those rows describe
+  // internal steps rather than callable tools. That banner is load-bearing, so
+  // it is pinned here: delete it and the exemption it earns goes with it.
+  assert.match(readFileSync(join(ROOT, "README.md"), "utf8"),
+    /Ten entries left this table on 2026-08-30/,
+    "the README banner is what earns README/QUICKSTART their exemption — it may not quietly vanish");
+
   const offences: string[] = [];
   for (const rel of [join("skills", "review-loop", "SKILL.md"), "AGENTS.md"]) {
-    const src = readFileSync(join(ROOT, rel), "utf8");
-    const lines = src.split("\n");
-    lines.forEach((line, i) => {
-      for (const tool of DELETED) {
-        if (!line.includes(tool)) continue;
-        // A sentence that says the name is GONE is the one legitimate use —
-        // and prose wraps, so the negation may land a line or two later.
-        const sentence = lines.slice(i, i + 3).join(" ");
-        if (/不再|已删|已并入|删除|are \*\*not tools\*\*|no longer|not registered/.test(sentence)) continue;
-        offences.push(`${rel}:${i + 1} — ${line.trim().slice(0, 100)}`);
-      }
-    });
+    offences.push(...deletedToolInstructions(readFileSync(join(ROOT, rel), "utf8"), rel));
   }
   assert.deepEqual(offences, [],
     `an agent-facing document names a tool that is not registered:\n${offences.join("\n")}`);
 });
+
 
 
 
