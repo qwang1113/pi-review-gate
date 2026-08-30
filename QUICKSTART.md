@@ -15,20 +15,32 @@ pi install /absolute/path/to/pi-review-gate   # 或 npm:pi-review-gate
 bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 ```
 
-## 2. 三种会话模式（agent 启动时自行分类，也可你随时 `/gate-mode` 切换）
+## 2. 四种会话模式（agent 启动时自行分类，也可你随时 `/gate-mode` 切换）
 
 | 模式 | 行为 | 适用 |
 |------|------|------|
 | `loop` | 完整门禁：review READY + precommit PASS 才能 ship；未满足时自动继续 | 写代码、改文档、交付 |
 | `explore` | 门禁 advisory，ship 命令仍被拦；agent 可自行结束 | 调查、分析、排障 |
 | `normal` | 门禁完全关闭（agent 不能自己选，需你确认） | 闲聊、杂事 |
+| `orchestrator` | loop **加上**编排约束：本会话只统筹、不写代码，先要你批准一份 plan 才能开子会话；`declare_done` 还要求任务队列清空、没有活着的子会话 | 一轮上下文做不完的大需求 |
+
+`orchestrator`（项目经理）模式需要 tmux —— 它的子会话就是你那个 window 里的 pane。
+它自己不拼 tmux 命令，全部走十个工具：`orchestrator_plan`（写/提交 plan，提交时门禁
+先派 `goal-auditor` 审一轮）、`orchestrator_spawn`（按 plan 任务开子会话）、
+`orchestrator_wait`（它唯一的信息入口，`timeoutMs: 0` 即快照）、`orchestrator_answer`
+（代答子会话弹出的问题）、`orchestrator_instruct`（给子会话发话/打断）、
+`orchestrator_close`（关掉某个 pane）、`orchestrator_recover`（pane 死了原地复活）、
+`orchestrator_attach`（换人接手一次读回全局）、`orchestrator_handoff`（上下文快满时接力）、
+`orchestrator_notify`（**只有它**能发系统通知，且有节流）。
 
 ## 3. 一个典型 loop 会话长什么样
 
 ```
 你：实现分页功能
 agent：调 set_gate_mode("loop")
-  → 问你目标（一次一题，N of M）→ 用简体中文起草目标
+  → setup_workspace（**一次调用**：问你工作区里已有的改动怎么办，再定下基准分支、
+     建好本会话的工作分支；没有工作分支时 commit 一律被拒）
+  → 用 ask_user 问你目标（一次一题，N of M）→ 用简体中文起草目标
   → propose_loop_goal（**一次调用**：门禁自己起 goal-auditor 子进程预审这份草案、
      等它退出、记录裁决；不通过就把 findings 退回来让你改，**不弹任何对话框**骚扰你）
   → 过了才弹窗让你批准（窗中会显示「goal-auditor 预审: PASS @ …」）
@@ -40,9 +52,15 @@ agent：调 set_gate_mode("loop")
      同时：agent 边读流式 findings 边修（不用等审完）
   → judge 进程退出时门禁自己读结论、机械校验（未 prepare ⇒ 不授予；HEAD 已移动 ⇒
      STALE ⇒ BLOCKED）、记录裁决并唤醒 agent
-  → BLOCKED？修 → 再来一轮；READY？declare_done → 提交
+  → BLOCKED？修 → 再来一轮；READY？declare_done（门禁自己把工作分支合回你在
+     setup_workspace 里确认的基准分支；冲突就中止、列出文件交还给你）
 ```
 
+- **工作区与分支归门禁管**：`setup_workspace` 一次问清工作区里已有的改动怎么办、
+  基准分支是哪个，并建好本会话的工作分支（会话启动时工作区就是脏的、又没 settle 时
+  edit 会被拦；没有工作分支时 commit 一律被拒）；
+  READY 之后 `declare_done` 自己把工作分支合回那个基准分支，冲突则中止并把文件
+  列给 agent —— 你不用手动 checkout / merge。
 - **precommit 在 review 之前**：这个顺序由门禁保证，不需要谁记着 —— 便宜的检查先跑，
   贵的审核只花在绿树上。
 - 每轮按 ROUND 计费：**把相关改动批量做完再触发一轮**，比十个小轮省十倍。
@@ -89,7 +107,7 @@ agent：调 set_gate_mode("loop")
 | 模型 429 / 额度耗尽，循环空转 | provider 限流，注入再多也没用 | 熔断器会在连续无进展后停止注入并提示；`/model` 切到其它 provider（如 anthropic），你的下一条消息即恢复循环 |
 | agents 副本与仓库不同步（正文过时） | `~/.pi/agent/agents/*.md` 落后于本仓库 | 重跑 `node scripts/install-package.mjs`（幂等）；用 `/gate-doctor` 检出 |
 | `STALE`（裁决被记成 BLOCKED） | prepare 之后又有新 checkpoint 提交，reviewer 审的是更旧的 commit | 把新改动并入，再 `judge_submit` 跑一轮；旧 findings 仍然有效 |
-| `tmux unavailable` | 宿主没有 tmux（judge 子会话的硬依赖） | 安装 tmux（`brew install tmux`）；没有 tmux 时门禁 fail-closed，judge 无法启动 |
+| `orchestrator 模式需要 tmux` | 想进项目经理模式，但 `$TMUX` 为空 —— 它的子会话就是你那个 window 里的 pane | 在一个 tmux window 里启动会话再 `/gate-mode orchestrator`。**judge 不受影响**：reviewer / adviser / goal-auditor 是 `pi -p --session-id` 非交互进程，不用 tmux |
 | `~/.pi/review-snapshots/<repo-key>/` 里堆了 `rg-review-snap-*` | 旧版本遗留的孤儿快照（新模型不再创建快照） | 手动清理：`git worktree prune` + `rm -rf ~/.pi/review-snapshots/<repo-key>/rg-review-snap-*` |
 | `git commit` 报 `.git/hooks/pre-commit: No such file or directory` | 有人在旧快照里跑了安装脚本：快照是 linked worktree，**`.git/hooks` 与真仓库共享** | 在**真工作树**重跑 `bash scripts/install-git-hooks.sh` |
 | 想完全绕过 | — | 你执行 `/gate-bypass <reason>`（会话内）或会话外用 `REVIEW_GATE_BYPASS=1`（仅 hooks 层）；注意 `/gate-bypass` 只解除 L1 ship gate，**解除不了 L8 的 edit/write 硬拦**——未确认 goal 前编辑仍被拦 |
@@ -99,7 +117,7 @@ agent：调 set_gate_mode("loop")
 | 命令 | 作用 |
 |------|------|
 | `/gate-status` | 模式、verdict、轮数、未满足项 |
-| `/gate-mode loop\|explore\|normal` | 你手动切换模式 |
+| `/gate-mode loop\|explore\|normal\|orchestrator` | 你手动切换模式（`orchestrator` 需要 tmux） |
 | `/gate-bypass <reason>` | 你授权本会话跳过 ship 拦截 |
 | `/review`、`/precommit` | 显式触发 review / precommit |
 | `/gate-reset` | 重置门禁状态 |
