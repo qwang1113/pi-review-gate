@@ -125,7 +125,8 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 | 形态 | `pi -p` 一次性进程，不占 pane | 交互式 pi，占用户 window 里的一个 pane |
 | 谁开的 | `judge_submit` | `orchestrator_spawn`（唯一入口） |
 | 「有事了」 | 进程退出 | **`orchestrator_wait` 的回执**（它自己去读每条通道，把结果推给你） |
-| 状态从哪来 | 进程存活 / `exit-code` 文件 | 六态结构化真值：`working` / `waiting-input` / `idle` / `done` 由子会话自报，`dead`（pane 消失）与 `stalled`（心跳超时）由编排侧从外面判 |
+| 状态从哪来 | 进程存活 / `exit-code` 文件 | 七态结构化真值：`working` / `waiting-input` / **`waiting-judge`**（在等门禁自己派的 reviewer/precommit，附已等秒数，不叫醒项目经理）/ `idle` / `done` 由子会话自报（心跳是扩展自己的定时器，与 agent 是否活跃无关），`dead`（pane 消失）与 `stalled`（心跳超时 ⇒ 扩展真的不在了）由编排侧从外面判 |
+
 | 正常终态 | 输出 verdict 后退出 | `declare_done` 之后**仍然活着** |
 | 异常终态 | exit-code 文件缺失 | pane 消失（`dead`）或心跳停摆（`stalled`），用 `orchestrator_recover` 复活 |
 | 等待 | `judge_wait` | `orchestrator_wait` |

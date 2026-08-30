@@ -168,11 +168,17 @@ test("the usage reading understands pi's ACTUAL shape — and the fallback reall
   // provide could not fire, and a missing fallback renders identically to an
   // unused one (both produce the honest "no reading" line). Hence one case per
   // shape.
-  assert.equal(contextPercentFromUsage({ tokens: 100, contextWindow: 200, percent: 50 }), 50);
+  // The fixtures deliberately DISAGREE, so the preference is pinned rather
+  // than merely satisfied: with `percent` present it must win outright, and a
+  // table where percent happened to equal tokens/window would pass even if the
+  // branch were deleted.
+  assert.equal(contextPercentFromUsage({ tokens: 100, contextWindow: 200, percent: 73 }), 73,
+    "when pi states a percent, that IS the reading — no recomputation");
   assert.equal(
     contextPercentFromUsage({ tokens: 50_000, contextWindow: 200_000, percent: null }),
     25,
     "percent is null right after a compaction — THIS is when the fallback matters",
+
   );
   assert.equal(contextPercentFromUsage({ tokens: null, contextWindow: 200_000, percent: null }), undefined,
     "an unknown token count is not a zero token count");

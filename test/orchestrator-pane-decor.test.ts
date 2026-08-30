@@ -180,3 +180,53 @@ test("the probe repaints the label from the health it just measured", async () =
   assert.match(titles[titles.length - 1]!, /waiting-judge/,
     "so the border answers 'what is it doing' without a tool call");
 });
+
+test("the repaint is throttled — the probe must not fork a tmux process every 2 seconds", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const child = world.runtime().children[0]!;
+  const titlesNow = (): number => tmuxLog(world).filter((line) => line.includes("-T @t1")).length;
+
+  await world.call("orchestrator_wait", { timeoutMs: 0 });
+  const afterFirst = titlesNow();
+  assert.ok(afterFirst >= 1, "the first probe paints");
+
+  // Same instant, same state: nothing to say, so nothing is spawned. The wait
+  // loop probes every 2 seconds, so without this an hour-long orchestration
+  // would fork thousands of tmux processes purely for decoration.
+  await world.call("orchestrator_wait", { timeoutMs: 0 });
+  assert.equal(titlesNow(), afterFirst, "an unchanged title costs nothing");
+
+  // A state change 2 seconds later is still inside the throttle window.
+  world.childReports(child.id, "waiting-judge", { waitingFor: "reviewer" });
+  world.advance(2_000);
+  await world.call("orchestrator_wait", { timeoutMs: 0 });
+  assert.equal(titlesNow(), afterFirst, "a border that lags a few seconds costs nothing");
+
+  // Past the window, the change lands.
+  world.advance(6_000);
+  world.childReports(child.id, "waiting-judge", { waitingFor: "reviewer" });
+  await world.call("orchestrator_wait", { timeoutMs: 0 });
+  assert.ok(titlesNow() > afterFirst, "but the border does have to catch up eventually");
+  assert.match(tmuxLog(world).filter((l) => l.includes("-T @t1")).pop()!, /waiting-judge/);
+});
+
+test("the throttle memory belongs to the orchestration, not to the module", async () => {
+  // Two worlds in one process: the fake clock is fixed, so both children get
+  // the same id. A module-level cache would make the second world's first
+  // paint disappear — which is also how a real second orchestration in one pi
+  // process would lose its borders.
+  const first = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await first.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await first.call("orchestrator_wait", { timeoutMs: 0 });
+
+  const second = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await second.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await second.call("orchestrator_wait", { timeoutMs: 0 });
+
+  assert.ok(
+    tmuxLog(second).some((line) => line.includes("-T @t1")),
+    "the second orchestration paints its own panes",
+  );
+});
+
