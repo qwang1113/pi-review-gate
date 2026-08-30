@@ -900,7 +900,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     return (
       `\nnote: a READY review is recorded on ${elsewhere.join(", ")} — not on ${blockedRoots.join(", ")}. ` +
       "A verdict counts only for the repo it was recorded against, so it does not unblock this one: " +
-      'review the blocked repo and call record_review (then run_precommit) with "repo": "<that repo path>".'
+      'run the loop for the blocked repo: `judge_submit({role:"reviewer", repo:"<that repo path>", task:<what you changed there>})` ' +
+      "— the gate runs that repo's own precommit, checkpoint and review, and records the verdict against it."
     );
   }
 
@@ -3771,7 +3772,8 @@ export default function reviewGate(pi: ExtensionAPI) {
         return {
           content: [{
             type: "text",
-            text: `review-gate: review_checkpoint rejected — precommit is ${st.precommit.verdict}; run run_precommit and get a PASS first (a checkpoint bypasses READY only, never precommit). ` +
+            text: `review-gate: checkpoint rejected — precommit is ${st.precommit.verdict} (a checkpoint bypasses READY only, never precommit). ` +
+              "`judge_submit({role:\"reviewer\"})` runs the full lane before this step, so fix what it reported and submit the round again. " +
               "如果 precommit 是因为与本次改动无关的环境问题失败的，那是用户的决定：让用户 `/gate-bypass <理由>`，" +
               "bypass 会连这条前置一起覆盖，并把「本轮 precommit 被 bypass」写进记录。",
           }],
@@ -3786,7 +3788,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         return {
           content: [{
             type: "text",
-            text: `review-gate: review_checkpoint rejected — the precommit PASS covers ${st.precommit.testScope ?? "unknown"}; run run_precommit with mode "full" first (dev-flow: 全量通过才允许送审).`,
+            text: `review-gate: checkpoint rejected — the precommit PASS covers ${st.precommit.testScope ?? "unknown"}, not the full suite (dev-flow: 全量通过才允许送审). \`judge_submit({role:"reviewer"})\` always runs the FULL lane, so re-submit the round rather than reusing this narrowed PASS.`,
           }],
           details: { committed: false },
           isError: true,
@@ -3923,7 +3925,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
                 : "\n\nThe required full precommit already ran typecheck + build + the COMPLETE test suite on this exact content " +
                   "(cache: an unchanged input set is reused in seconds — do NOT manually re-run the full suite or `tsc`; " +
-                  "run only targeted tests for files you keep editing, and let run_precommit be the single full gate).") +
+                  "run only targeted tests for files you keep editing, and let the round's own full lane be the single gate).") +
               (sizeCheck.advisory.length ? "\n\n" + formatFileSizeVerdict(sizeCheck) : ""),
           }],
           details: { committed: true, sha, precommitBypassed },
@@ -5291,13 +5293,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       // done while a judge child session is still open — its context may hold
       // a pending verdict or an unanswered question, and dropping it silently
       // strands a process (and its expensive model context). The round
-      // must be closed out with record_review / judge_close first. In loop
+      // must be closed out first — either the judge exits and the gate
+      // records its verdict, or `judge_close` ends it. In loop
       // mode this is a hard requirement; explore/normal report it as
       // advisory via the branch below.
       for (const [root, list] of childSessions) {
         if (list.length > 0) {
           problems.push(`[${repoLabel(root)}] ${list.length} judge child session(s) still open (` +
-            `${list.map((c) => c.sessionId).join(", ")}) — finish the round (record_review / judge_close) ` +
+            `${list.map((c) => c.sessionId).join(", ")}) — let the round finish (the gate records its ` +
+            "verdict when the judge exits) or close it with `judge_close({role})` " +
             "before declaring done");
         }
       }
@@ -5650,7 +5654,7 @@ export default function reviewGate(pi: ExtensionAPI) {
               ? `\n距上一轮审计 ${auditGapMin} min。`
               : "") +
             (carryover
-              ? "\n重审时先用修订稿调 `prepare_goal_audit`：它会带上本轮结论与草稿差异。"
+              ? "\n重审时把修订稿直接交给 `propose_loop_goal` 即可：它建的审计任务会自动带上本轮结论与草稿差异。"
               : "")
 
         }],
@@ -5670,9 +5674,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       "recommended answer (all at once only when the user asks for it) — and only " +
       "submit what they actually agreed to. Write the goal in SIMPLIFIED CHINESE (technical " +
       "identifiers, paths and code tokens stay English). REQUIRED FIRST: the draft must pass a " +
-      "dedicated `goal-auditor` audit recorded via record_goal_prereview — this tool refuses " +
-      "(no dialog at all) unless the sidecar holds a PASS for the IDENTICAL text. " +
-      "The extension shows the text in a confirmation " +
+      "dedicated `goal-auditor` audit — and THIS TOOL RUNS IT ITSELF: it dispatches the auditor, " +
+      "waits for it, adjudicates (only P0/P1 block) and records the verdict. A failed audit comes " +
+      "back with the objections and NO dialog is shown; fix them and call this again. That makes " +
+      "it a MINUTES-LONG call. " +
+      "Once it passes, the extension shows the text in a confirmation " +
       "dialog and, if the user approves, writes .pi/loop-goal.md itself and records the approval. " +
       "Writing that file yourself grants nothing: in loop mode an unapproved goal blocks " +
       "commit/push/PR and its body is withheld from your prompt. Shape: task title, one-line " +
@@ -8131,7 +8137,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         (sessionRepos.size > 1
           ? "Multi-repo session: this session has edited " + sessionRepos.size + " repositories (" +
             [...sessionRepos].join(", ") +
-            "). record_review / run_precommit now REQUIRE an explicit `repo` (absolute path) — " +
+            "). `judge_submit` REQUIRES an explicit `repo` (absolute path) here — " +
             "a verdict binds to that repo's own worktree and unblocks only that repo, so run the " +
             "loop once per repo; " +
             "declare_done and git commit/push/gh pr require EVERY edited repo to pass its own review + precommit " +

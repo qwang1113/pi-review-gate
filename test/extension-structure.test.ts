@@ -1851,6 +1851,72 @@ test("the internal host captures an implementation WITHOUT exposing it", () => {
     "…and never reaches pi's registry");
 });
 
+test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", () => {
+  // THE DEFECT CLASS THIS EXISTS FOR. Round 1 unregistered ten tools; three
+  // rounds of review then found, one at a time, prose that still told the
+  // agent to CALL them — a per-turn multi-repo directive, a cross-repo unblock
+  // hint, two tmux refusals, and a `/precommit` command whose entire content
+  // was a tool name. Every one was found by a human reading, and the next was
+  // always somewhere nobody had looked yet.
+  //
+  // A rule like "no imperative before the name" would have missed most of
+  // them (`"). record_review / run_precommit now REQUIRE …"` has no verb in
+  // front of it), and "no mention at all" is wrong: the seven internal
+  // implementations legitimately name themselves, and `callTool("…")` IS the
+  // wiring. So this is a RATCHET instead of a classifier. The remaining
+  // mentions are counted per file and frozen; adding one fails until somebody
+  // states, in this table, that the new mention is a description and not an
+  // instruction. It cannot tell a good mention from a bad one — it makes a
+  // human do that once, at the moment the mention is written.
+  const DELETED = [
+    "run_precommit", "review_checkpoint", "prepare_review", "prepare_adviser",
+    "prepare_goal_audit", "record_review", "record_goal_prereview",
+    "review_spawn", "review_watch", "review_send",
+    "orchestrator_read", "orchestrator_key", "orchestrator_status",
+    "orchestrator_send", "orchestrator_relay",
+  ];
+  /**
+   * Mentions in agent-readable strings, per file, as of 2026-08-30.
+   *
+   *  - `review-prepare-tools.ts` / `advisory-prepare-tools.ts` — the internal
+   *    implementations naming themselves in their own refusals.
+   *  - `review-gate.ts` — `name: "…"` registrations on `internalHost`,
+   *    `callTool("…")` wiring, and the internal steps' own refusal text.
+   *
+   * Anything ELSE is a new mention. Lower these numbers when you delete one;
+   * raise one only with a reason you would defend in review.
+   */
+  const FROZEN: Record<string, number> = {
+    "advisory-prepare-tools.ts": 3,
+    "review-prepare-tools.ts": 7,
+    "review-gate.ts": 25,
+  };
+
+  const sources = [
+    ...readdirSync(join(ROOT, "lib")).filter((f) => f.endsWith(".ts")).map((f) => join("lib", f)),
+    join("extensions", "review-gate.ts"),
+  ];
+  const found: Record<string, number> = {};
+  for (const rel of sources) {
+    let n = 0;
+    for (const line of readFileSync(join(ROOT, rel), "utf8").split("\n")) {
+      const trimmed = line.trim();
+      // Comments describe the code to a HUMAN; no model reads them.
+      if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue;
+      // Only lines that carry a string literal can reach an agent.
+      if (!line.includes('"') && !line.includes("'") && !line.includes("`")) continue;
+      for (const tool of DELETED) n += line.split(tool).length - 1;
+    }
+    if (n > 0) found[rel.split("/").pop()!] = n;
+  }
+  assert.deepEqual(found, FROZEN,
+    "a deleted tool name appeared in (or vanished from) agent-readable text. " +
+    "If you ADDED one, it must be a description of an internal step, not an instruction — " +
+    "say so and update FROZEN. If you REMOVED one, lower the count.");
+});
+
+
+
 
 
 test("judge_wait applies the three end-of-round criteria and returns conclusion + progress", () => {
@@ -2354,13 +2420,24 @@ test("auto-loop prohibited behaviors are in the per-turn reminder (sd0x-dev-flow
   assert.match(SRC, /completion-style summary/);
 });
 
-test("the multi-repo reminder teaches the CURRENT record_review/run_precommit contract", () => {
-  // This exact string once told the agent that those tools "target the repo you
-  // most recently edited". They no longer do (an explicit `repo` is required
-  // once several repos are edited), and a per-turn prompt outranks every doc:
-  // a session that believed the old wording recorded round after round of
-  // READY against the wrong repo and read the resulting block as sabotage.
-  assert.match(SRC, /REQUIRE an explicit `repo`/);
+test("the multi-repo reminder teaches the CURRENT per-repo contract", () => {
+  // This exact string once told the agent that the recording tools "target the
+  // repo you most recently edited". They no longer do (an explicit `repo` is
+  // required once several repos are edited), and a per-turn prompt outranks
+  // every doc: a session that believed the old wording recorded round after
+  // round of READY against the wrong repo and read the block as sabotage.
+  //
+  // 2026-08-30: the same reminder then had to stop naming `record_review` /
+  // `run_precommit`, which are no longer registered — a per-turn instruction
+  // pointing at a tool the model cannot call is that failure in a new costume.
+  // The contract it states is unchanged; the entry point is `judge_submit`.
+  const reminder = windowOf("Multi-repo session: this session has edited", "before shipping.", "multi-repo reminder");
+  assert.match(reminder, /REQUIRES? an explicit `repo`/);
+  assert.match(reminder, /judge_submit/, "the reminder names the ONE registered entry point");
+  for (const gone of ["record_review", "run_precommit"]) {
+    assert.ok(!reminder.includes(gone), `${gone} is not registered and must not be named per turn`);
+  }
+
   assert.doesNotMatch(SRC, /target the repo you most recently edited/);
 });
 

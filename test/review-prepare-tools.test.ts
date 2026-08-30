@@ -132,14 +132,19 @@ test("an unresolvable repo is reported, and nothing else happens", async () => {
   cleanup(f);
 });
 
-test("no checkpoint on record ⇒ refused, and the refusal names review_checkpoint", async () => {
+test("no checkpoint on record ⇒ refused, and the refusal names the ONE registered way back", async () => {
   const f = fake();
   delete f.st.checkpoint;
   const reply = await call(f);
   assert.equal(reply.isError, true);
   assert.equal(reply.details?.prepared, false);
   assert.match(textOf(reply), /no checkpoint on record/);
-  assert.match(textOf(reply), /review_checkpoint/);
+  // The refusal must point at a tool the agent can actually call. Naming the
+  // unregistered internal step (`review_checkpoint`) would send it after a
+  // name that does not exist — the exact class of defect this round fixed.
+  assert.match(textOf(reply), /judge_submit/);
+  assert.ok(!textOf(reply).includes("Call review_checkpoint"),
+    "an unregistered tool must never be the instruction");
   assert.deepEqual(f.targets, []);
   cleanup(f);
 });

@@ -168,7 +168,7 @@ async function doPrepareReview(
   const st = deps.stateFor(root);
   if (!st.checkpoint?.sha) {
     return {
-      content: [{ type: "text", text: "review-gate: prepare_review rejected — no checkpoint on record. Call review_checkpoint first (commit the current work): the reviewed range is baseline..HEAD, and the baseline is the last checkpoint sha." }],
+      content: [{ type: "text", text: "review-gate: prepare_review rejected — no checkpoint on record. The reviewed range is baseline..HEAD and the baseline IS the last checkpoint sha, so `judge_submit({role:\"reviewer\"})` commits one before it gets here; reaching this branch means that step did not land — re-submit the round." }],
       details: { prepared: false },
       isError: true,
     };
