@@ -28,7 +28,7 @@
 | --- | --- |
 | `session_start` | 恢复 sidecar 状态、判定会话模式、装配常驻指令 |
 | `before_agent_start` | 每轮注入 L4 语言指令、goal 摘要、per-turn 协议提醒 |
-| `tool_call` | L1 ship 拦截、敏感文件拦截、L5 文案判定 |
+| `tool_call` | L1 ship 拦截、敏感文件拦截、L5 文案判定 —— **正文已搬进 `lib/ship-gate-hook.ts` + 两条臂**，扩展只留一行接线与注入的 deps |
 | `tool_result` | 追踪本轮编辑、记录 precommit 结果、编辑纪律 nudge、附加提示 |
 | `input` | 用户真的说话了：重置编辑失败 nudge、解除 ESC 暂停 |
 | `agent_end` | ESC 中止检测，喂给 L2 的暂停判定 |
@@ -98,6 +98,9 @@
 搬迁一路搬下来的）。**新工具族与新命令请照抄这个形状**：判定逻辑在 `lib/`，
 注册也在 `lib/`，扩展只提供依赖。
 
+**钩子也开始走同一条路**：`tool_call`（L1）是第一个搬出去的生命周期钩子，
+见下面 §1.4。
+
 ### 1.3 命令
 
 **命令一个都不在扩展里了**（2026-08-30）。扩展只有**一次**接线调用
@@ -126,6 +129,32 @@
   绑定），聚成一个 `resetSessionState()`，命令经 `deps.resetSession()` 一个口子
   调用它 —— 命令模块只拥有「reset → persist → notify」这个顺序。
 
+### 1.4 L1 `tool_call` 钩子：三个模块
+
+L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
+（`pi.on("tool_call", (event, ctx) => evaluateToolCall(shipGateHookDeps, event, ctx))`）
+加一个注入的 deps 对象。按**职责**切成三块（也让每个文件都远离 600 行硬拦）：
+
+- `lib/ship-gate-hook.ts`：入口 `evaluateToolCall` + 三条臂之间的分派 + deps
+  汇总（`ShipGateHookDeps` 是另外两条臂 deps 的并集），另外持有 **judge 角色
+  subagent 拦截**（`judgeSubagentBlock` / `isJudgeRoleAgent`）—— 它既不属于
+  edit 也不属于 bash，管的是一次 `subagent` 调用。
+- `lib/ship-gate-edit-guard.ts`：**edit/write 臂**。敏感文件安全底线
+  （`sensitiveEditBlock`，唯一一条在 `normal` 模式下也必须生效的检查）、
+  gate-owned 豁免、L8 目标门、orchestrator 写限制、L6 标签检查。这里的
+  **次序就是契约**：安全底线在 normal 提前返回之前，gate-owned 豁免在 L8
+  目标门之前（否则门禁会卡死在自己的文件上）。
+- `lib/ship-gate-bash.ts`：**bash 臂 = ship gate 本体**。tmux backstop、
+  `/gate-bypass`、ship 命令识别、L5/AI 署名判定、message-only rewrite 豁免、
+  逐 repo 门禁检查、一次性仲裁令牌，以及拦截文案
+  （`describeShips` / `buildShipBlockReason`）。次序同样是契约：tmux backstop
+  在 `/gate-bypass` 之上，`/gate-bypass` 在 ship 检测之上。
+
+→ 改 L1 的任何判定：改这三个模块，不必碰扩展；扩展只在 deps 里补一个新的口子。
+纯判定的单测在 `test/ship-gate-hook.test.ts`，结构断言在
+`test/extension-structure.test.ts`（它扫的是这三个模块的源码，不是扩展）。
+
+
 ---
 
 ## 二、L1–L8：每层落在哪
@@ -135,7 +164,7 @@
 
 | 层 | 是什么 | 接线/执行在哪 | 判定逻辑在哪 |
 | --- | --- | --- | --- |
-| **L1** ship gate（硬拦） | 未过门禁前拦下 `git commit` / `git push` / `gh pr create` / `gh pr edit` | 扩展 `tool_call` | `lib/ship-detect.ts`、`lib/shell-lex.ts`、`lib/constants.ts`、`lib/repo-resolve.ts`、`lib/fingerprint.ts` |
+| **L1** ship gate（硬拦） | 未过门禁前拦下 `git commit` / `git push` / `gh pr create` / `gh pr edit` | `lib/ship-gate-hook.ts`（`evaluateToolCall`），扩展只留一行 `pi.on("tool_call", …)` 接线 | `lib/ship-gate-bash.ts`（ship 臂）、`lib/ship-gate-edit-guard.ts`（edit 臂）、`lib/ship-detect.ts`、`lib/shell-lex.ts`、`lib/constants.ts`、`lib/repo-resolve.ts`、`lib/fingerprint.ts` |
 | **L2** 自动续跑 | 门禁未满足时重新触发一轮 | 扩展 `agent_settled` | `lib/gate-state.ts`（未满足项）、`lib/loop-stall.ts`（断路器） |
 | **L3** git 钩子 | 离开 pi 也有效的纵深防御 | `hooks/pre-commit`、`hooks/pre-push`、`hooks/commit-msg` | `scripts/compute-fingerprint.cjs`、`scripts/check-staged-divergence.cjs`（钩子不依赖 TypeScript） |
 | **L4** 输出语言 | 每轮无条件注入简体中文指令 | 扩展 `before_agent_start` | `lib/constants.ts` 的 `LANGUAGE_DIRECTIVE` |
@@ -454,6 +483,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `side-effects.ts` | 唯一一处「本进程能不能碰外部世界」的判定（测试 / CI / 无 TTY / 显式关闭一律不能），通知与编排共用 |
 | `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |
 | `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit） |
+| `ship-gate-hook.ts` | **L1 `tool_call` 钩子的入口**：`evaluateToolCall` 分派到两条臂，`ShipGateHookDeps` 汇总两条臂的 deps；judge 角色 subagent 拦截（`judgeSubagentBlock` / `isJudgeRoleAgent`，含 `workflowScript` 内嵌与不可读 `workflowScriptPath` 的 fail-closed）也在这里 |
+| `ship-gate-edit-guard.ts` | L1 的 **edit/write 臂**：敏感文件安全底线（`sensitiveEditBlock`，`normal` 模式也生效）、gate-owned 豁免、L8 目标门、orchestrator 写限制、L6 标签检查；检查次序即契约 |
+| `ship-gate-bash.ts` | L1 的 **bash 臂 = ship gate 本体**：tmux backstop、`/gate-bypass`、ship 识别、L5/AI 署名、message-only rewrite 豁免、逐 repo 门禁、一次性仲裁令牌、拦截文案（`describeShips` / `buildShipBlockReason`） |
 | `task-mode.ts` | 会话门禁模式模型：normal < explore < loop < orchestrator 与升降级规则 |
 | `text-appeal.ts` | 启发式文本拦截的申诉口子（A 类） |
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |
@@ -476,8 +508,8 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
    `lib/orchestrator-*-tools.ts` 的形状：判定与工具注册都在 `lib/`，经
    `lib/tool-host.ts` 那道 seam 拿依赖，别再往那个七千余行的文件里加。命令族
    同理，形状见 `lib/gate-command-tools.ts`（seam 是它自己的 `CommandHost`）。
-4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态（90 个模块里 71 个有）；
-   其余 19 个里多数并进相邻的分组测试（`test/orchestrator-atoms.test.ts`、
+4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态（98 个模块里 75 个有）；
+   其余 23 个里多数并进相邻的分组测试（`test/orchestrator-atoms.test.ts`、
    `test/orchestrator-tools.test.ts`、`test/extension-structure.test.ts`），
    但个别模块——`agent-directives.ts`、`orchestrator-dispatch.ts`——在 `test/`
    下**零引用**，正是本问说的那种情形。真正的判据不是

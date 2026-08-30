@@ -69,23 +69,19 @@ import {
   OSCILLATION_LIMIT,
   STRATEGIC_RESET_OFFSET,
   STRATEGIC_RESET_CHECKLIST,
-  requiresFullPrecommit,
   TASK_TEXT_MARKER,
-  type ShipCommandKind,
 } from "../lib/constants.ts";
 import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-directives.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
+import { detectShipCommands } from "../lib/ship-detect.ts";
 import { buildAgentsWidget, buildModelConfigWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
-  resolveShipRepos,
   resolveCommandRepos,
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
 import {
-  firstNonEnglishText,
   nonEnglishCommitMessage,
   containsNonLatinLetter,
   l5BlockReason,
@@ -125,7 +121,7 @@ import {
   type SlowNoticeSink,
   type ToolUpdate,
 } from "../lib/progress-stream.ts";
-import { isMessageOnlyRewrite, hasAmendFlag, rebaseBranchName } from "../lib/git-rewrite.ts";
+import { rebaseBranchName } from "../lib/git-rewrite.ts";
 // The interview's pure functions are no longer reached from here: `ask_user`
 // lives in lib/user-interaction-tools.ts and imports them itself.
 import { registerUserInteractionTools } from "../lib/user-interaction-tools.ts";
@@ -179,8 +175,7 @@ import type { ToolHost } from "../lib/tool-host.ts";
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
 // repository's own worst example of the architecture rule this round adds.
 import { newOrchestrationId, orchestrationIdFromEnv } from "../lib/orchestration-id.ts";
-import { detectForbiddenTmux } from "../lib/orchestrator-guard.ts";
-import { orchestratorDoneProblems, orchestratorWriteBlock } from "../lib/orchestrator-gate.ts";
+import { orchestratorDoneProblems } from "../lib/orchestrator-gate.ts";
 import {
   ORCHESTRATOR_DIRECTIVE,
   CHILD_OF_ORCHESTRATOR_DIRECTIVE,
@@ -256,12 +251,19 @@ import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
 // `record_goal_prereview`) moved the same way: this file wires them, the
 // module owns their bodies (and lib/goal-prereview-tools.ts the audit record).
 import { registerGoalTools } from "../lib/goal-tools.ts";
+// The L1 tool_call hook moved the same way — it was the single biggest thing
+// left in this file. lib/ship-gate-hook.ts owns the dispatch (and the
+// judge-role subagent refusal), lib/ship-gate-edit-guard.ts the edit arm and
+// lib/ship-gate-bash.ts the ship gate itself; this file keeps the deps.
+import {
+  evaluateToolCall,
+  type BlockedShipRecord,
+  type ShipGateHookDeps,
+} from "../lib/ship-gate-hook.ts";
 import { recordedFindingsFrom } from "../lib/polish-gate.ts";
 import {
   writeJudgeSpawnFiles,
   JUDGE_ROLES,
-  judgeRoleInScript,
-  normalizeToolName,
 } from "../lib/judge-prompt.ts";
 import {
   failedStepNames,
@@ -285,7 +287,6 @@ import {
   computeFingerprint,
   incrementSinceTree,
   isGateOwnedPath,
-  mayBeGateOwned,
   reviewCoverageFiles,
   worktreeTreeOid,
 } from "../lib/fingerprint.ts";
@@ -324,11 +325,8 @@ import {
 } from "../lib/task-mode.ts";
 import {
   createLlmClassifier,
-  classifyAiAttribution,
   classifyNonEnglish,
-  classifyShipCommand,
   createVerdictMemo,
-  isSuspiciousShipCandidate,
   type LlmClassifier,
 } from "../lib/llm-classify.ts";
 import { isPiSelfRoot } from "../lib/pi-self.ts";
@@ -403,8 +401,6 @@ import {
 // left here is the READ side — the edit guard and the grant it consumes.
 import {
   consumeGrant,
-  findGrant,
-  isGateIntegrityPath,
   normalizeSensitivePath,
   type SensitiveGrant,
 } from "../lib/sensitive-grant.ts";
@@ -421,7 +417,6 @@ import {
 } from "../lib/parallel-review.ts";
 import {
   parseArbitrableAction,
-  tokenAuthorizes,
   buildArbiterPrompt,
   runArbiter,
   sha256,
@@ -1028,7 +1023,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   let concurrentSessionNotice: string | null = null;
   // The most recent ship command the gate BLOCKED, so request_arbitration can
   // only contest a real block (not an agent-invented one).
-  let lastBlockedShip: { command: string; problems: string[]; blockReason: string; at: number } | null = null;
+  let lastBlockedShip: BlockedShipRecord | null = null;
   // The most recent A-class TEXT block (lib/text-appeal.ts), for the same
   // reason: an appeal contests a block that actually happened, never a
   // hypothetical one.
@@ -2465,11 +2460,6 @@ export default function reviewGate(pi: ExtensionAPI) {
    * Any failure to scan yields false — the breaker keeps its normal behavior
    * rather than being silently disabled by an unreadable directory.
    */
-  function isJudgeRoleAgent(raw: string): boolean {
-    const tail = raw.trim().split(/[\\/]/).pop() ?? raw;
-    const name = tail.replace(/\.md$/i, "").trim().toLowerCase();
-    return name === "reviewer" || name === "reviewer-readonly" || name === "adviser" || name === "goal-auditor";
-  }
 
   function subagentInMotion(): boolean {
     try {
@@ -2724,547 +2714,58 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   // ---------- L1: tool_call — sensitive files + ship gate ----------
+  //
+  // The hook's BODY lives in lib/ship-gate-hook.ts (+ its two arms,
+  // lib/ship-gate-edit-guard.ts and lib/ship-gate-bash.ts). This file keeps
+  // only the wiring and the deps: everything the decision cannot own — the
+  // session cwd, the per-repo gate state, the git measurements, the LLM
+  // classifier, the appeal recorder and the arbiter token — arrives through
+  // one injected object, so every branch of L1 is testable without a session.
+  const shipGateHookDeps: ShipGateHookDeps = {
+    noteContext: (c) => { latestCtx = c as ExtensionContext; },
+    isEditTool: (toolName) => EDIT_TOOL_NAMES.has(toolName),
+    cwd: () => cwd,
+    primaryRepoRoot: () => primaryRepoRoot,
+    taskMode: () => state.taskMode,
+    relayHandoffPath: () => state.orchestrator?.relay?.handoffPath,
+    sensitiveGrants: () => sensitiveGrants,
+    sensitiveDeclined: (absPath) => sensitiveDeclinedPaths.has(absPath),
+    nearestExistingDir,
+    loopGoalEditBlockFor,
+    checkTestLabels: (path, input, ctx) => checkTestLabels(
+      path,
+      editedTestContent(input, path),
+      ctx,
+      statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
+    ),
+    markSessionEdited: () => { sessionEdited = true; },
+    bypassActive: () => state.bypass.active,
+    projectConfig: () => projectConfig,
+    sessionRepos: () => sessionRepos,
+    knownRepoRoots,
+    enforcementStateFor,
+    stateForRepo,
+    repoLabel,
+    currentBranch,
+    worktreeTree,
+    headCommitTree,
+    hasStagedChanges,
+    unreviewedTreesSince,
+    loopGoalConfirmed: () => loopGoalConfirmed(),
+    crossRepoVerdictHint,
+    classifier,
+    notice: (ctx) => statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
+    refuseText,
+    appendLesson,
+    bypassToken: () => bypassToken,
+    setBypassToken: (token) => { bypassToken = token; },
+    clearBypassToken,
+    computeTokenBindings,
+    setLastBlockedShip: (record) => { lastBlockedShip = record; },
+  };
 
-  pi.on("tool_call", async (event, ctx) => {
-    // Keep the newest context for the orchestration tools (persist + dialogs);
-    // this hook runs immediately before every tool body, including theirs.
-    latestCtx = ctx as unknown as ExtensionContext;
-    const input = event.input as Record<string, unknown>;
-    if (EDIT_TOOL_NAMES.has(event.toolName)) {
-      const path = coalesceToolPath(input);
-      // Match on the NORMALIZED path, not the raw one. `resolve` collapses `.`
-      // and `..`, so `.pi/./precommit-cache.json` and `a/../.env` cannot slip
-      // past a pattern that anchors on path segments. (The grant lookup below
-      // already keyed on the normalized form; matching the raw string here was
-      // the inconsistency.)
-      const absPath = path ? normalizeSensitivePath(path, cwd) : undefined;
-      if (absPath && isSensitiveFile(absPath)) {
-        // A live grant means the USER already approved this exact path in a
-        // dialog (request_sensitive_edit). It is consumed on the successful
-        // tool_result, so the pass here is for one landing edit only.
-        // `cwd` (the session cwd), not ctx.cwd: the grant is keyed at
-        // request time with the same base, and a mismatched base would make a
-        // relative path miss its own grant.
-        if (!findGrant(sensitiveGrants, absPath, Date.now())) {
-          // absPath in both checks, so the hint matches what the tool would do.
-          const askable = !isGateIntegrityPath(absPath) && !sensitiveDeclinedPaths.has(absPath);
-          return {
-            block: true,
-            reason:
-              `review-gate: "${path}" matches a sensitive-file pattern (.env/keys/credentials). ` +
-              (askable
-                ? "Ask the user to edit it themselves, or call request_sensitive_edit to ask them " +
-                  "for one-time authorization for this exact path."
-                : "Ask the user to edit it themselves — this path cannot be authorized from here."),
-          };
-        }
-      }
-      // Normal mode (“as if not installed” — consent-free first classification,
-      // /tmp clamp, no-UI session_start, or later user consent): the L6 label check
-      // (and its LLM call) is skipped. The sensitive-file guard ABOVE runs in
-      // every mode: it is a security floor, not workflow enforcement.
-      if (state.taskMode === "normal") return;
-      // Explore mode does NOT block edits: the system prompt asks the agent to
-      // prefer read-only work, but small edits during an investigation are
-      // allowed. Sensitive-file and L6 label checks above/below stay active.
-      //
-      // USER REQUIREMENT: a passed edit counts as THIS session's work — from
-      // here on, any mode change (including the first classification) goes
-      // through the normal consent rules. Blocked edits (sensitive file / L6 /
-      // L8 goal) and normal-mode edits do not set it: they change nothing.
-      //
-      // Gate-owned writes (.pi/, .pi-subagents/) are excluded for the same
-      // reason tool_result skips them: everything under those dirs is invisible
-      // to a review (excluded from the fingerprint AND from changedFiles), so
-      // no edit there is session WORK — the gate's own sidecar, a loop goal, a
-      // subagent artifact and the project config alike. Counting them would
-      // suppress the "changes pre-date this session" hint and force consent for
-      // a mode change the agent never earned. mayBeGateOwned pre-filters on
-      // the raw path, so ordinary edits pay no filesystem cost here. The
-      // exemption comes BEFORE the L8 goal gate on purpose: without it the
-      // gate would deadlock on its own files (the goal file itself, the
-      // sidecar, the project config) before a goal can even be approved.
-      if (path) {
-        const abs = path.startsWith("/") ? path : pathJoin(cwd, path);
-        // nearestExistingDir: a write creating a NEW nested gate-owned path
-        // (e.g. .pi/plan/state.json) must still resolve its repo instead of
-        // losing the exemption to the primary-repo fallback (round P2).
-        if (mayBeGateOwned(abs) && isGateOwnedPath(abs, gitRootOfDir(nearestExistingDir(pathDirname(abs))) ?? primaryRepoRoot)) {
-          return;
-        }
-      }
-      // L8 edit gate (HARD): in loop mode (or undecided, which behaves as
-      // loop) an edit/write call requires a loop goal the USER approved — for
-      // THE REPO THE WRITE LANDS IN. The goal must be negotiated BEFORE the
-      // work starts: blocking at ship time only is theatre, because by then
-      // the agent has already written its own exit contract. Each repo is
-      // checked against its own sidecar confirmation, so one repo's approved
-      // goal never opens another repo's write surface. Path-less edit calls
-      // cannot be attributed to a repo, so they fail closed against the
-      // primary repo.
-      // (Reaching this line means the write is a normal edit: the sensitive
-      // floor passed above and the gate-owned exemption already returned.)
-      const goalBlock = loopGoalEditBlockFor(absPath);
-      if (goalBlock) return goalBlock;
-      // CONSTRAINT 2 — an orchestrator does not write code. Only its plan
-      // (already exempt above, it lives under `.pi/`) and its handoff /
-      // report documents pass; everything else is delegated work. Placed
-      // after the L8 goal gate so the two never disagree about which refusal
-      // the author sees first.
-      if (state.taskMode === "orchestrator" && path) {
-        // F2 — a write OUTSIDE the repository is allowed. `absPath` is what
-        // decides it: only a path that resolves inside the repo root is
-        // judged against the in-repo whitelist. A path the resolver could not
-        // make absolute stays fail-closed (treated as in-repo), because
-        // "unknown location" must never buy the wider permission.
-        const insideRepo = !absPath || absPath.startsWith(primaryRepoRoot + "/");
-        const rel = absPath && insideRepo ? absPath.slice(primaryRepoRoot.length + 1) : path;
-        const orchestratorBlock = orchestratorWriteBlock({
-          relPath: rel,
-          taskMode: state.taskMode,
-          relayHandoffPath: state.orchestrator?.relay?.handoffPath,
-          outsideRepo: !insideRepo,
-        });
+  pi.on("tool_call", (event, ctx) => evaluateToolCall(shipGateHookDeps, event, ctx));
 
-        if (orchestratorBlock) return { block: true, reason: orchestratorBlock };
-      }
-      // L6 label check. NOTE the ordering: it runs AFTER the gate-owned
-      // exemption and the L8 goal gate on purpose — a gate-owned write (.pi/
-      // test files included) or a goal-blocked write pays neither the L6
-      // classification nor its LLM call.
-      if (path) {
-        const labelProblem = await checkTestLabels(
-          path,
-          editedTestContent(input, path),
-          ctx,
-          statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
-        );
-        if (labelProblem) return { block: true, reason: labelProblem };
-      }
-      sessionEdited = true;
-      return;
-    }
-
-    // ---------- judge-role subagent block (HARD) ----------
-    //
-    // 2026-08-27 execution model: judge roles (reviewer / adviser /
-    // goal-auditor) run ONLY as their own pi processes (review_spawn), never as
-    // subagents. A subagent call naming a judge role is refused here — the
-    // agent is told to use the review_spawn flow instead. This is the INVERTED
-    // successor of the snapshot-pin guard: the same failure it blocked (a
-    // judge running in the live worktree where the gate looks) is now blocked
-    // by removing the dispatch shape entirely.
-    const subagentTool = normalizeToolName(event.toolName);
-    if (subagentTool === "subagent") {
-      const agentName = typeof input.agent === "string" ? input.agent : "";
-      // Round-8 P1: the top-level agent field is NOT the only channel — a
-      // workflowScript can name a judge role INSIDE its body (runs.run({
-      // agent: "reviewer" })), and the sandbox still cannot give per-child
-      // isolation. Scan the script text with judgeRoleInScript (the retired
-      // guard's own detector, now covering all four judge roles).
-      const script = typeof input.workflowScript === "string" ? input.workflowScript : undefined;
-      const scriptPath = typeof input.workflowScriptPath === "string" ? input.workflowScriptPath : undefined;
-      const scriptText = script !== undefined
-        ? script
-        : scriptPath !== undefined
-          ? (() => {
-              try {
-                const abs = pathResolve(cwd, scriptPath);
-                return readFileSync(abs, "utf8");
-              } catch { return undefined; }
-            })()
-          : undefined;
-      const judgeName = (agentName && isJudgeRoleAgent(agentName))
-        ? agentName
-        : scriptText !== undefined ? judgeRoleInScript(scriptText) : undefined;
-      // Round-9 P2: a workflowScriptPath that cannot be read must FAIL CLOSED
-      // — the catch above yields undefined and no scan would run, letting an
-      // unreadable script dispatch a judge role unchecked.
-      const unreadableScript = scriptPath !== undefined && script === undefined && scriptText === undefined;
-      if (judgeName || unreadableScript) {
-        return {
-          block: true,
-          reason:
-            judgeName
-              ? `review-gate: \`${judgeName}\` is a judge role and runs ONLY as its own pi process — ` +
-                "subagent dispatch for it is retired (2026-08-27 execution model). Submit it with " +
-                "`judge_submit({role, task})`: the gate runs the whole chain and dispatches the judge itself. " +
-                "(A judge dispatched as a subagent would run in your live worktree " +
-                "with no isolation at all — the exact failure the model was built to end.)"
-              : "review-gate: workflowScriptPath could not be read, so a judge role inside it cannot be ruled out — failing closed. Read the script, then dispatch non-judge work through it or submit judge roles with `judge_submit`.",
-        };
-      }
-    }
-
-    if (event.toolName !== "bash") return;
-    // L1 (the ship gate). What actually gates it is right below: `normal` mode
-    // and an active `/gate-bypass` both return BEFORE any ship detection, so
-    // "this session loads the extension" is not by itself enough — do not
-    // claim otherwise here (round-12 P1: the previous rewrite did, and /tmp
-    // sessions are clamped to normal, making the claim plainly false).
-    const command = typeof input.command === "string" ? input.command : "";
-    if (!command) return;
-    // The ship path runs up to three LLM guards before it can answer; each is
-    // a few seconds, and a blocked bash call with no explanation reads as a
-    // hang. Same status-bar sink as the L6 label check.
-    const shipNotice = statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY);
-
-    // Normal mode (user-confirmed, or the consent-free /tmp scratchFirstMode
-    // first classification which maps loop / missing picks to normal):
-    // the ship gate,
-    // commit-message checks, and LLM ship classification are all off. This is
-    // the mode's defining behavior; explore below never gets this branch.
-    if (state.taskMode === "normal") return;
-
-    // tmux BACKSTOP (task book §4.3). Placed ABOVE /gate-bypass on purpose:
-    // a bypass is the user's escape from the SHIP gate, and it was never a
-    // licence to destroy their working environment. The destructive
-    // subcommands are refused in every gated mode; the three the
-    // orchestration tools replace are redirected only in orchestrator mode,
-    // where a tool exists to do the same thing correctly. The gate's own tmux
-    // calls never pass through here — they are argv, not bash.
-    const tmuxHit = detectForbiddenTmux(command, {
-      orchestratorMode: state.taskMode === "orchestrator",
-    });
-    if (tmuxHit) return { block: true, reason: tmuxHit.reason };
-
-    // /gate-bypass (user-authorized, reason logged in state): the L1 ship gate
-    // steps aside for the rest of the session. The git hooks mirror it via
-    // REVIEW_GATE_BYPASS=1 for commits made OUTSIDE Pi; inside the session
-    // this is the only in-session escape. (Missing before 2026-08-16: the
-    // command set state.bypass but L1 never consulted it, so a bypassed
-    // session still blocked every ship — only the hooks honored it.)
-    if (state.bypass.active) return;
-
-    // Explore mode does NOT block bash — investigations need diagnostic
-    // commands. Ship commands below stay FULLY gated in every mode except the
-    // normal mode: explore only relaxes auto-continuation and
-    // declare_done, never the ship gate.
-
-    // P0-5: detect ALL ship commands, not just the first. Block if ANY operation
-    // would ship ungated and warn about compound commands.
-    const ships = detectShipCommands(command);
-
-    // P-multi: resolve the repos this command operates on — but ONLY once
-    // there is something to check. A plain command (no ship op, not even a
-    // suspicious git/gh mention) must not pay for the per-segment git
-    // subprocesses in resolveShipRepos.
-    if (ships.length === 0
-      && !(projectConfig.llmGuards.shipDetect && isSuspiciousShipCandidate(command))) {
-      return;
-    }
-    const resolution = resolveShipRepos(command, cwd);
-    const checkRoots = new Set(resolution.repos);
-    if (resolution.ambiguous) {
-      for (const r of sessionRepos) checkRoots.add(r);
-    }
-    let anyChange = false;
-    for (const root of checkRoots) {
-      const st = enforcementStateFor(root);
-      if (st) {
-        if (st.hasCodeChange || st.hasDocChange) { anyChange = true; break; }
-      } else {
-        // Sidecar-less repo: uncommitted work still counts as a change so the
-        // fail-closed "state missing" check below actually runs (an agent that
-        // edited files via bash, not the edit tool, must not short-circuit).
-        // changedFiles() returning UNDEFINED (dir missing / bare repo / .git
-        // internals) is itself unverifiable — count it as a change so the
-        // block loop fails closed instead of silently passing.
-        const files = changedFiles(root);
-        if ((files && files.length > 0) || files === undefined) { anyChange = true; break; }
-      }
-    }
-
-    if (ships.length === 0) {
-      // Guard #4 additional layer (tighten-only): the static parser saw no ship
-      // op, but the command mentions git/gh with dynamic shell constructs the
-      // parser cannot resolve (encodings, aliases, substitutions). Ask flash
-      // whether it would ship; only a positive answer ADDS a detection — "none"
-      // or a failed call changes nothing (the command was passing anyway).
-      if (
-        projectConfig.llmGuards.shipDetect &&
-        anyChange &&
-        isSuspiciousShipCandidate(command)
-      ) {
-        const kind = await withSlowNotice(
-          shipNotice,
-          "review-gate: 正在做 ship 命令语义判定…",
-          () => classifyShipCommand(classifier(), command),
-        );
-        if (kind !== undefined && kind !== "none") {
-          ships.push({ kind, segment: command });
-        }
-      }
-      if (ships.length === 0) return;
-    }
-
-    // Short-circuit: if no changes tracked in any touched repo, no gate to
-    // enforce. (A sidecar-less repo with uncommitted work still fails closed
-    // in the per-repo check below — it has no state here, so it never
-    // short-circuits; the block loop treats it as "state missing".)
-    if (!anyChange) return;
-
-    // AI attribution (HARD) + English-language (L5, HARD) checks on commit
-    // messages and PR title/description. Both are A-CLASS: heuristics the gate
-    // can get wrong, so every refusal here carries the appeal route
-    // (lib/text-appeal.ts) and is recorded as an appealable block.
-    for (const s of ships) {
-      if (s.kind === "commit") {
-        // (WHERE a commit lands is checked per REPO, in the checkRoots loop
-        // below: each repo has its own work branch, and a commit in repo B
-        // must not be judged against repo A's branch.)
-        const msgs = extractCommitMessages(s.segment);
-        for (const msg of msgs) {
-          if (COMMIT_MSG_FORBIDDEN.some((re) => re.test(msg))) {
-            const reason = refuseText("ai-attribution", msg,
-              "commit message contains AI attribution. Rewrite without it.", ctx);
-            if (reason) return { block: true, reason };
-          }
-        }
-        // Guard #2 (tighten-only): regexes missed — ask flash about paraphrased
-        // AI attribution ("pair-programmed with an assistant"). Failure → pass
-        // (exact pre-LLM behavior).
-        if (msgs.length > 0 && projectConfig.llmGuards.aiAttribution) {
-          const attributed = await withSlowNotice(
-            shipNotice,
-            "review-gate: 正在做 AI 署名语义判定…",
-            () => classifyAiAttribution(classifier(), msgs),
-          );
-          if (attributed === true) {
-            const reason = refuseText("ai-attribution", msgs.join("\n\n"),
-              "commit message contains AI attribution (semantic check). Rewrite without it.", ctx);
-            if (reason) return { block: true, reason };
-          }
-        }
-        // L5 (HARD): a commit message must be English — no non-Latin letter,
-        // subject or body. The two parts share one rule and differ only in
-        // what the reason points at.
-        //
-        // The paragraphs are JOINED first, exactly as git builds the message
-        // from repeated -m: only the FIRST paragraph's first line is a subject.
-        const whole = msgs.join("\n\n");
-        const nonEn = nonEnglishCommitMessage(whole);
-        if (nonEn) {
-          const reason = refuseText(
-            nonEn.part === "subject" ? "commit-subject" : "commit-body",
-            nonEn.text,
-            l5BlockReason({
-              kind: nonEn.part === "subject" ? "commit-subject" : "commit-body",
-              text: nonEn.text,
-            }) + " 用英文重写（git commit --amend）。",
-            ctx,
-          );
-          if (reason) return { block: true, reason };
-        } else if (msgs.length > 0 && projectConfig.llmGuards.englishCheck
-          && !msgs.some(containsNonLatinLetter)
-          && await withSlowNotice(
-            shipNotice,
-            "review-gate: 正在做 L5 语义判定（罗马化非英文）…",
-            () => classifyNonEnglish(classifier(), msgs),
-          ) === true) {
-          // L5 blind spot: the letters are all Latin, but the text may still
-          // be romanized non-English (pinyin/romaji). Only worth asking when
-          // there is no non-Latin letter at all — otherwise the hard rule
-          // above already answered.
-          const reason = refuseText("romanized", whole,
-            "commit message reads as romanized non-English (semantic check). Rewrite it in English.", ctx);
-          if (reason) return { block: true, reason };
-        }
-      } else if (s.kind === "pr-create" || s.kind === "pr-edit") {
-        const prTexts = extractPrTextFields(s.segment);
-        const nonEn = firstNonEnglishText("pr-text", prTexts);
-        if (nonEn) {
-          const reason = refuseText("pr-text", nonEn.text,
-            l5BlockReason(nonEn) + " 用英文重写（gh pr edit --title/--body）。", ctx);
-          if (reason) return { block: true, reason };
-        } else if (prTexts.length > 0 && projectConfig.llmGuards.englishCheck
-          && !prTexts.some(containsNonLatinLetter)
-          && await withSlowNotice(
-            shipNotice,
-            "review-gate: 正在做 L5 语义判定（罗马化非英文）…",
-            () => classifyNonEnglish(classifier(), prTexts),
-          ) === true) {
-          const reason = refuseText("romanized", prTexts.join("\n\n"),
-            "PR title/description reads as romanized non-English (semantic check). Rewrite it in English.", ctx);
-          if (reason) return { block: true, reason };
-        }
-      }
-    }
-
-    // MESSAGE-ONLY REWRITE (lib/git-rewrite.ts). A `git commit --amend` that
-    // publishes the tree it replaces adds no content, so the CONTENT gates
-    // have nothing to judge — and refusing it is what left a non-English
-    // commit message unfixable (the only exit was a human running
-    // /gate-bypass).
-    //
-    // IT EXEMPTS THE CONTENT GATES AND NOTHING ELSE (round-3 P1). The branch
-    // rule, the fail-closed sidecar checks and the loop-goal gate below still
-    // run: WHERE a commit lands is not a content question, and this round's
-    // own rebase-aware `currentBranch` is exactly what lets that rule keep
-    // applying during a reword instead of deadlocking on a detached HEAD.
-    //
-    // The message was already judged: L5 and the AI-attribution guard run
-    // ABOVE this, so a rewrite cannot smuggle in a bad message.
-    //
-    // Two measurements, because `--amend` publishes the INDEX while the
-    // fingerprint is a worktree tree: the worktree must equal HEAD's tree AND
-    // the index must hold no staged change. Either alone is bypassable (stage
-    // a change, then restore the worktree).
-    const messageOnlyRewrite =
-      !resolution.ambiguous &&
-      ships.every((s) => s.kind === "commit" && hasAmendFlag(s.segment)) &&
-      // EVERY repo this command touches must qualify: a compound
-      // `git -C A commit --amend && git -C B commit --amend` must not be
-      // exempted by repo A alone.
-      [...checkRoots].every((root) => isMessageOnlyRewrite({
-        amend: true,
-        newTree: worktreeTree(root),
-        replacedTree: headCommitTree(root) || undefined,
-        stagedChanges: hasStagedChanges(root),
-      }));
-    if (messageOnlyRewrite) {
-      appendLesson(`message-only rewrite: content gates skipped (tree unchanged): ${command.slice(0, 160)}`);
-    }
-
-
-    // P-multi: check every repo this command ships FROM (checkRoots was
-    // already resolved above, before the short-circuits). Each ship segment's
-    // repo is checked with ITS OWN sidecar + fingerprint.
-    const problems: string[] = [];
-    // Label EVERY problem line once more than one repo is in play. An
-    // unlabelled "code review gate is PENDING" from the primary repo is what
-    // a real multi-repo session read as being about the repo it had just
-    // reviewed; single-repo wording is left untouched.
-    const multiRepo = checkRoots.size > 1 || knownRepoRoots().length > 1;
-    const blockedUnreviewed: string[] = [];
-    // Primary-repo fingerprint for the arbiter token path below (kept from the
-    // loop so we do not re-hash the primary repo).
-    let primaryFp: Fingerprint = { digest: "", head: "", unavailable: true };
-    // Lane requirement for THIS command. A commit is local and reversible, so
-    // the fast lane satisfies it; anything that publishes (push, gh pr) needs a
-    // run whose tests were not narrowed. A compound command is judged by its
-    // strictest segment — `git commit && git push` must satisfy the push rule.
-    const requireFullTests = ships.some((s) => requiresFullPrecommit(s.kind as ShipCommandKind));
-    for (const root of checkRoots) {
-      const st = enforcementStateFor(root);
-      const fp = computeFingerprint(root);
-      if (root === primaryRepoRoot) primaryFp = fp;
-      // WHERE the commit lands, per repo (user requirement): a session commits
-      // on the work branch IT created, or nowhere — so nobody else's branch
-      // quietly absorbs this session's work. Fail-closed: no work branch on
-      // record ⇒ no commit, and setup_workspace is what creates one.
-      if (ships.some((s) => s.kind === "commit")) {
-        const where = commitBranchAllowed({
-          workBranch: (root === primaryRepoRoot ? state : stateForRepo(root)).workBranch,
-          currentBranch: currentBranch(root),
-        });
-        if (!where.allowed) {
-          problems.push(multiRepo ? `[${repoLabel(root)}] ${where.reason}` : (where.reason as string));
-        }
-      }
-      if (st) {
-        // The CONTENT gates — and the only thing a message-only rewrite is
-        // exempt from, because it publishes no content for them to judge.
-        const unmet = messageOnlyRewrite ? [] : unmetRequirements(st, headCommitTree(root), false, {
-          requireDocSync: projectConfig.docSync,
-          unreviewedCommits: unreviewedTreesSince(root, st.review),
-          requireFullTests,
-        });
-        for (const p of unmet) {
-          problems.push(multiRepo ? `[${repoLabel(root)}] ${p}` : p);
-        }
-        // Only a repo that is actually holding this ship up is worth pointing
-        // the cross-repo hint at; a clean repo that simply never needed a
-        // review would make the hint name an innocent bystander.
-        if (unmet.length > 0 && st.review.verdict !== "READY") blockedUnreviewed.push(root);
-      } else {
-        // No sidecar for a non-primary repo: fail-closed when it holds
-        // uncommitted work (an unreviewed diff must not ship through a repo
-        // that never initialized its gate), but allow ships from a clean repo
-        // this session has not touched. changedFiles() returning UNDEFINED
-        // (dir missing / bare repo / .git internals) is UNVERIFIABLE — that
-        // fails closed too (P0: a mis-parsed fake dir must never sail through
-        // on "zero information").
-        const files = changedFiles(root);
-        if (files && files.length > 0) {
-          problems.push(
-            `[${repoLabel(root)}] gate state missing (fail-closed) — ${files.length} uncommitted change(s) but no review-gate sidecar; initialize the gate for that repo (edit a file via the edit tool, then review + precommit there) before shipping`,
-          );
-        } else if (files === undefined) {
-          problems.push(
-            `[${repoLabel(root)}] worktree unverifiable (fail-closed) — not inside a readable git repository and no review-gate sidecar; refusing to ship there`,
-          );
-        }
-      }
-    }
-    // L8 — loop mode ships only against a goal the USER approved. The
-    // negotiation is the point: without it the agent writes its own exit
-    // contract, works to it, and grades itself against it, and a leftover file
-    // from a previous task passes for a contract too. Blocking at ship time
-    // (rather than at declare_done) is what makes the negotiation happen
-    // BEFORE the work lands — by the time `declare_done` runs, the code is
-    // already pushed and agreeing on the goal is theatre.
-    //
-    // L1 only, deliberately: the git hooks judge code facts from the sidecar
-    // and cannot see a dialog, so this requirement never enters
-    // unmetRequirements() (the ship authority they share).
-    if (state.taskMode === "loop" && !loopGoalConfirmed()) {
-      problems.push(multiRepo ? `[${repoLabel(primaryRepoRoot)}] ${LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK}` : LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
-    }
-
-    if (problems.length === 0) return;
-
-    // Single-use arbiter bypass token (lib/arbitration.ts). Only a lone,
-    // in-scope `gh pr edit` (title/body) can EVER match — the token is bound to
-    // the exact command + worktree fingerprint + review round + body-file
-    // content, and is consumed on the first authorized run. It never bypasses
-    // commit/push/pr-create (those are not arbitrable, so no token is ever
-    // issued for them) and never touches the code review loop.
-    if (ships.length === 1 && ships[0].kind === "pr-edit" && bypassToken && !primaryFp.unavailable) {
-      const parsed = parseArbitrableAction(command);
-      if (parsed.ok) {
-        const bindings = await computeTokenBindings(parsed.action, primaryFp.digest);
-        if (tokenAuthorizes(bypassToken, bindings, Date.now())) {
-          bypassToken = { ...bypassToken, consumed: true }; // consume on attempt
-          clearBypassToken();
-          try {
-            ctx.ui.notify("review-gate: single-use arbiter bypass consumed for this `gh pr edit`. Re-review after PR text is fixed.", "warning");
-          } catch { /* headless */ }
-          appendLesson(`arbiter AGENT_WINS bypass consumed: ${desc(command, ships)}`);
-          return;
-        }
-      }
-    }
-
-    // Record this block so request_arbitration can only contest a REAL block.
-    // The cross-repo hint is part of the recorded text: the arbiter should read
-    // exactly what the agent read, and "your READY is on another repo" is the
-    // single most relevant fact when a multi-repo block is being contested.
-    const blockReason =
-      `review-gate: ${desc(command, ships)} blocked — quality gates unmet:\n` +
-      problems.map((p) => `  - ${p}`).join("\n") +
-      (ships.length > 1 ? "\nCompound ship commands are unsafe: later operations run after HEAD changes. Split them." : "") +
-      crossRepoVerdictHint(blockedUnreviewed);
-    lastBlockedShip = { command, problems, blockReason, at: Date.now() };
-
-    // O13: ONE next-step line. The problems above already say what is unmet;
-    // the arbitration sentence is added only where it can apply at all (a lone
-    // `gh pr edit`), because a ship gate is a FACT — satisfy it, do not argue
-    // with it.
-    return {
-      block: true,
-      reason: blockReason + "\n" + (ships.length === 1 && ships[0].kind === "pr-edit"
-        ? "跑完审查循环清掉门禁；若这条拦截确实是循环死结（唯一的修法就是这条 gh pr edit），可 request_arbitration。"
-        : "跑完审查循环清掉门禁（judge_submit → declare_done）。"),
-    };
-  });
-
-  // P0-5: describe compound vs single ship for block/lesson messages.
-  function desc(_command: string, ships: Array<{ kind: string }>): string {
-    return ships.length > 1
-      ? `compound command with ${ships.map((s) => s.kind).join(" + ")}`
-      : ships[0].kind;
-  }
 
   // Compute the current binding material for a parsed arbitrable action: hash
   // each --body-file's (path + content) so replacing the file after issue
