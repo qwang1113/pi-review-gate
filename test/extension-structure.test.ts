@@ -55,6 +55,35 @@ const ASK_USER_SRC = readFileSync(join(ROOT, "lib", "user-interaction-tools.ts")
 const ASK_USER_TOOLS = new Set(["ask_user"]);
 const CONSENT_SRC = readFileSync(join(ROOT, "lib", "consent-request-tools.ts"), "utf8");
 const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit"]);
+/**
+ * The COMMAND layer moved the same way, split by the same rule: the commands
+ * that READ (the model-chain readout /gate-status embeds, and /gate-doctor)
+ * in one module, everything else in the other. lib/gate-command-tools.ts is
+ * the layer's single registration entry point — it registers the workflow
+ * catalog and the five state/status commands and calls the diagnosis module
+ * itself — so the extension wires all of them exactly once. Their structural
+ * rules did not move with them: they are asserted below against the module
+ * that now owns each one.
+ */
+const CMD_SRC = readFileSync(join(ROOT, "lib", "gate-command-tools.ts"), "utf8");
+const DIAG_SRC = readFileSync(join(ROOT, "lib", "gate-diagnosis-commands.ts"), "utf8");
+
+/**
+ * The body of one registered COMMAND, from its `registerCommand("name"` line
+ * to the next registration (or the end of the registering function).
+ *
+ * The same anchored-window discipline as `windowIn`: a fixed byte count would
+ * rot silently as the command grows.
+ */
+function commandBodyOf(src: string, name: string): string {
+  return windowIn(
+    src,
+    `registerCommand("${name}"`,
+    /\n  host\.registerCommand\(|\n\}/,
+    `command /${name}`,
+  );
+}
+
 
 
 /** Which source owns a given tool's body. */
@@ -422,8 +451,8 @@ test("MODEL WIDGET wiring reaches the real updateWidget path", async () => {
 
 test("MODEL DIAGNOSIS: project outranks global, registry auth gates, disk fallback", () => {
   // round-1 P2: the rewritten modelDiagnosisLines had no coverage either.
-  const fn = windowOf("function modelDiagnosisLines(", "\n  }", "modelDiagnosisLines");
-  assert.match(fn, /findProjectAgentText\(projectAgentsDir, name\)/, "effective chain = project file first (by identity)");
+  const fn = windowIn(DIAG_SRC, "export function modelDiagnosisLines(", "\n}", "modelDiagnosisLines");
+  assert.match(fn, /deps\.findProjectAgentText\(projectAgentsDir, name\)/, "effective chain = project file first (by identity)");
   assert.match(fn, /hasConfiguredAuth/, "registry auth must gate the authed set");
   assert.match(fn, /models-store\.json/, "disk fallback reads the provider store");
   assert.match(fn, /auth\.json/, "disk fallback reads auth");
@@ -789,7 +818,9 @@ test("gate mode is decided by the agent itself in set_gate_mode — no LLM class
   // the undecided directive from the same module.
   assert.match(SRC, /evaluateModeChange\(\{/);
   assert.match(SRC, /GATE_MODE_DECISION_DIRECTIVE/);
-  assert.match(SRC, /registerCommand\(["']gate-mode["']/);
+  // The USER-invoked path lives in the command module now (the extension only
+  // wires it), so the command's existence is asserted against that module.
+  assert.match(CMD_SRC, /registerCommand\(["']gate-mode["']/);
 });
 
 test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' parameter, decline locks downgrades", () => {
@@ -879,9 +910,7 @@ test("USER REQUIREMENT: /tmp first classification clamps via scratchFirstMode; /
 
   // User path: /gate-mode writes source "user" directly and must not consult
   // evaluateModeChange — that is what lets the user force loop in /tmp.
-  const gateModeAt = SRC.indexOf('registerCommand("gate-mode"');
-  assert.ok(gateModeAt >= 0, "/gate-mode must exist");
-  const gateModeBody = SRC.slice(gateModeAt, SRC.indexOf("registerCommand", gateModeAt + 20));
+  const gateModeBody = commandBodyOf(CMD_SRC, "gate-mode");
   assert.doesNotMatch(gateModeBody, /evaluateModeChange/,
     "/gate-mode must not consult the agent rule engine");
   assert.doesNotMatch(gateModeBody, /piSelfTask|scratchFirstMode/,
@@ -890,13 +919,27 @@ test("USER REQUIREMENT: /tmp first classification clamps via scratchFirstMode; /
 });
 
 test("the downgrade lock is cleared ONLY by user actions (/gate-mode, gate-reset)", () => {
+  // Both commands moved to lib/gate-command-tools.ts, but the flag itself is
+  // an extension binding, so the two CLEAR SITES are still in the extension:
+  // the `unlockAgentDowngrades` seam /gate-mode reaches through, and the
+  // per-session reset /gate-reset reaches through. A third assignment
+  // anywhere would be a non-user path and fails here.
   // (the `let … = false` declaration is excluded — only assignment sites count)
   const clears = [...SRC.matchAll(/(?<!let )agentDowngradesLocked = false/g)].map((m) => m.index!);
-  assert.equal(clears.length, 2, "exactly two clear sites: /gate-mode and /gate-reset");
-  const gateModeAt = SRC.indexOf('registerCommand("gate-mode"');
-  const gateResetAt = SRC.indexOf('registerCommand("gate-reset"');
-  assert.ok(clears.some((i) => i > gateModeAt && i < gateModeAt + 1200), "/gate-mode must clear the lock");
-  assert.ok(clears.some((i) => i > gateResetAt && i < gateResetAt + 800), "/gate-reset must clear the lock");
+  assert.equal(clears.length, 2, "exactly two clear sites: the unlock seam and the session reset");
+  const unlockAt = SRC.indexOf("unlockAgentDowngrades: () =>");
+  const resetFnAt = SRC.indexOf("function resetSessionState(");
+  assert.ok(unlockAt > 0, "the unlock seam must exist");
+  assert.ok(resetFnAt > 0, "resetSessionState must exist");
+  assert.ok(clears.some((i) => i > unlockAt && i < unlockAt + 200), "the unlock seam must clear the lock");
+  assert.ok(clears.some((i) => i > resetFnAt && i < resetFnAt + 1500), "the session reset must clear the lock");
+  // And only the two USER commands reach those seams.
+  assert.match(commandBodyOf(CMD_SRC, "gate-mode"), /deps\.unlockAgentDowngrades\(\)/,
+    "/gate-mode must clear the lock");
+  assert.match(commandBodyOf(CMD_SRC, "gate-reset"), /deps\.resetSession\(\)/,
+    "/gate-reset must clear the lock (through the session reset)");
+  assert.equal((CMD_SRC.match(/deps\.unlockAgentDowngrades\(\)/g) ?? []).length, 1,
+    "no command other than /gate-mode may reach the unlock seam");
 });
 
 test("explore workflow: advisory completion, no edit/bash blocking, ship gate intact", () => {
@@ -1139,9 +1182,13 @@ test("a standing arbiter token is cleared on any edit / new round / gate-reset",
   assert.match(SRC, /clearBypassToken\(\);\s*\/\/ any edit invalidates/);
   // gate-reset clears it and the arbitration bookkeeping.
 
-  // Anchored on the handler's real end, not a byte count: the reset list
-  // grows as more session state appears.
-  const resetRegion = windowOf('registerCommand("gate-reset"', "ctx.ui.notify", "gate-reset handler");
+  // /gate-reset moved to lib/gate-command-tools.ts, but everything it clears
+  // is an EXTENSION binding, so the list itself stayed here as one function
+  // the command reaches through one seam. Anchored on the function's real
+  // end, not a byte count: the reset list grows as more session state appears.
+  assert.match(commandBodyOf(CMD_SRC, "gate-reset"), /deps\.resetSession\(\)/,
+    "/gate-reset must go through the extension's session reset");
+  const resetRegion = windowOf("function resetSessionState(", "\n  }", "resetSessionState");
   assert.match(resetRegion, /clearBypassToken\(\)/);
   // The appeal ledger (quota + decided contents + live pass) is persisted, so
   // the reset must delete it rather than zero an in-memory counter.
@@ -1289,16 +1336,25 @@ test("checkpointMessage never builds a message its own L5 check would refuse", (
 
 
 test("commands registered: gate-status, gate-bypass, gate-mode, gate-reset", () => {
-  for (const cmd of ["gate-status", "gate-bypass", "gate-mode", "gate-reset"]) {
-    assert.match(SRC, new RegExp(`registerCommand\\(["']${cmd}["']`), cmd);
+  for (const cmd of ["gate-status", "gate-bypass", "gate-mode", "gate-reset", "gate-lesson"]) {
+    assert.match(CMD_SRC, new RegExp(`registerCommand\\(["']${cmd}["']`), cmd);
   }
+  // /gate-doctor sits in the read-only diagnosis module, which the command
+  // module registers itself — so the extension still wires the layer once.
+  assert.match(DIAG_SRC, /registerCommand\(["']gate-doctor["']/);
+  assert.match(CMD_SRC, /registerGateDiagnosisCommands\(host, deps\)/);
+  // ONE registration call in the extension, and no command body left in it.
+  assert.equal((SRC.match(/registerGateCommands\(pi, \{/g) ?? []).length, 1,
+    "the extension must wire the command layer exactly once");
+  assert.doesNotMatch(SRC, /registerCommand\(/,
+    "no command may be registered from the extension any more");
 });
 
 test("high-value sd0x-dev-flow commands are registered from a shared catalog", () => {
-  assert.match(SRC, /WORKFLOW_COMMANDS/);
-  assert.match(SRC, /registerWorkflowCommand/);
-  assert.match(SRC, /buildWorkflowPrompt/);
-  assert.match(SRC, /pi\.sendUserMessage/);
+  assert.match(CMD_SRC, /WORKFLOW_COMMANDS/);
+  assert.match(CMD_SRC, /registerWorkflowCommand/);
+  assert.match(CMD_SRC, /buildWorkflowPrompt/);
+  assert.match(CMD_SRC, /host\.sendUserMessage/);
 
   const catalog = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
   for (const cmd of [
@@ -1927,7 +1983,10 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
   const FROZEN: Record<string, number> = {
     "advisory-prepare-tools.ts": 3,
     "review-prepare-tools.ts": 7,
-    "review-gate.ts": 25,
+    // The `/precommit` command's `callTool("run_precommit", …)` wiring moved
+    // here with the command layer.
+    "gate-command-tools.ts": 1,
+    "review-gate.ts": 24,
   };
 
   const sources = [
@@ -2591,8 +2650,8 @@ test("the multi-repo reminder teaches the CURRENT per-repo contract", () => {
 });
 
 test("gate-lesson command registered (self-improvement loop port)", () => {
-  assert.match(SRC, /registerCommand\(["']gate-lesson["']/);
-  assert.match(SRC, /review-gate-lessons\.md/);
+  assert.match(CMD_SRC, /registerCommand\(["']gate-lesson["']/);
+  assert.match(CMD_SRC, /review-gate-lessons\.md/);
 });
 
 test("precommit trust does NOT depend on parsing bash command text (root-cause fix)", () => {
@@ -2937,9 +2996,7 @@ test("REGRESSION (P0b): the no-tests-warning is wired into the tool result and /
     "the warning text must name the dropped test step");
   assert.ok(toolBody.indexOf("skippedNote") > toolBody.indexOf("pushNote"),
     "the skipped warning must ride in the same PASS detail as the lane note");
-  const statusAt = SRC.indexOf('pi.registerCommand("gate-status"');
-  assert.ok(statusAt > 0, "gate-status must exist");
-  const statusBody = SRC.slice(statusAt, SRC.indexOf("pi.registerCommand(", statusAt + 1));
+  const statusBody = commandBodyOf(CMD_SRC, "gate-status");
   assert.match(statusBody, /tests were NOT run in this lane/,
     "gate-status must surface the skipped test step");
   assert.match(statusBody, /testScope === "skipped"/,
@@ -3000,11 +3057,19 @@ test("the baseline is written only for a READY verdict", () => {
 test("timings are appended, never read back into a decision", () => {
   // The observability log is diagnostics-only. `readTimings`/`lastPrecommitTiming`
   // may only feed the status command's rendering.
-  const statusAt = SRC.indexOf('pi.registerCommand("gate-status"');
-  assert.ok(statusAt > 0);
-  const readAt = SRC.indexOf("lastPrecommitTiming(");
-  assert.ok(readAt > statusAt, "the only timings read must be inside /gate-status");
-  assert.ok(!/unmetRequirements\([^)]*Timing/.test(SRC), "no timing value may enter the ship authority");
+  // /gate-status moved to lib/gate-command-tools.ts, so the ONE read moved
+  // with it: the extension must not read a timing at all any more, and the
+  // command module must read it in exactly one place — the status readout.
+  assert.doesNotMatch(SRC, /lastPrecommitTiming\(/,
+    "the extension no longer reads timings — /gate-status owns the only read");
+  assert.match(commandBodyOf(CMD_SRC, "gate-status"), /lastPrecommitTiming\(/,
+    "the only timings read must be inside /gate-status");
+  assert.equal((CMD_SRC.match(/lastPrecommitTiming\(/g) ?? []).length, 1,
+    "exactly one timings read site");
+  for (const [name, text] of [["review-gate.ts", SRC], ["gate-command-tools.ts", CMD_SRC]] as const) {
+    assert.ok(!/unmetRequirements\([^)]*Timing/.test(text),
+      `${name}: no timing value may enter the ship authority`);
+  }
 });
 
 test("the extension never calls require() (ESM type-stripped runtime)", () => {

@@ -12,7 +12,7 @@
 `lib/` 全量模块的速查表，让你在动手前 30 秒内找到落点。
 
 写新功能时先想清楚它落在哪个模块，而不是落在「我正好打开的那个文件」——
-`extensions/review-gate.ts` 的近 9000 行就是几十次「只加 100 行」累积出来的。
+`extensions/review-gate.ts` 的七千余行就是几十次「只加 100 行」累积出来的。
 
 ---
 
@@ -88,18 +88,37 @@
 
 这不是特例，是**这个仓库正在走的路**：`lib/judge-session-tools.ts` 的头注释
 直接写明它是 orchestrator 那一批搬迁的续集，理由就是 AGENTS.md 那条架构规范
-——扩展是一次次「就在这儿再加个工具体」堆到近 9000 行的。**新工具族请照抄这
-个形状**：判定逻辑在 `lib/`，工具注册也在 `lib/`，扩展只提供依赖。
+——扩展是一次次「就在这儿再加个工具体」堆到七千余行的（顶峰近 9000 行，几轮
+搬迁一路搬下来的）。**新工具族与新命令请照抄这个形状**：判定逻辑在 `lib/`，
+注册也在 `lib/`，扩展只提供依赖。
 
 ### 1.3 命令
 
-- 扩展直接注册 6 个门禁命令：`/gate-status`、`/gate-bypass`、`/gate-mode`、
-  `/gate-reset`、`/gate-lesson`、`/gate-doctor`。
+**命令一个都不在扩展里了**（2026-08-30）。扩展只有**一次**接线调用
+`registerGateCommands(pi, {...})`，命令层整体住在两个模块：
+
+- `lib/gate-command-tools.ts`：命令层的**唯一注册入口**。工作流命令的注册包装、
+  `/precommit` 那条门禁自己跑的 lane，以及 `/gate-status`、`/gate-bypass`、
+  `/gate-mode`、`/gate-reset`、`/gate-lesson` 五个命令的正文；它自己转注册下面
+  那个模块，所以「有哪些命令」只有一个地方回答。命令 host 的 seam
+  （`CommandHost` / `CommandContext`）也定义在这里 —— 工具走
+  `lib/tool-host.ts`，命令是另一个面，两者不混用。
+- `lib/gate-diagnosis-commands.ts`：两个**只读**诊断 —— `/gate-status` 内嵌的
+  模型链读数（`modelDiagnosisLines`）与 `/gate-doctor` 体检正文。它只做环境探测
+  （模型注册表、两层 agent 目录、git 钩子目录、`gh` 可执行），判定规则仍在
+  `lib/model-diagnose.ts` / `lib/gate-doctor.ts`。它不写任何状态，也不喂任何裁决。
+  → 改一个命令的文案或时机：改 `lib/gate-command-tools.ts`，不必碰扩展。
+
+- 门禁命令共 6 个：`/gate-status`、`/gate-bypass`、`/gate-mode`、`/gate-reset`、
+  `/gate-lesson`、`/gate-doctor`。
 - 工作流命令（`/review`、`/precommit`、`/precommit-fast`、`/verify`、
   `/next-step`、`/risk-assess`、`/smart-commit`、`/create-pr`、
   `/load-pr-review`、`/watch-ci`、`/gate-init`）的**定义与提示词**在
-  `lib/workflow-commands.ts`，扩展只是循环注册它们。
-  → 加一条工作流命令：改 `lib/workflow-commands.ts`，不必碰扩展。
+  `lib/workflow-commands.ts`，`gate-command-tools.ts` 只是循环注册它们。
+  → 加一条工作流命令：改 `lib/workflow-commands.ts`，命令层与扩展都不必碰。
+- `/gate-reset` 清掉的那一堆会话可变量仍然留在扩展里（它们本来就是扩展闭包的
+  绑定），聚成一个 `resetSessionState()`，命令经 `deps.resetSession()` 一个口子
+  调用它 —— 命令模块只拥有「reset → persist → notify」这个顺序。
 
 ---
 
@@ -353,6 +372,8 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `edit-projection.ts` | 从 edit/write 入参投影出改后完整文件内容，供标签检查看到上下文 |
 | `file-size-gate.ts` | 新建源码文件 600 行硬拦、存量超阈值只提醒的纯判定 |
 | `fingerprint.ts` | 工作区指纹：内容寻址、暂存无关，门禁裁决与它绑定 |
+| `gate-command-tools.ts` | 命令层的**唯一注册入口**：工作流命令的注册包装、`/precommit` lane，以及 `/gate-status` / `/gate-bypass` / `/gate-mode` / `/gate-reset` / `/gate-lesson` 五个命令正文；命令 host 的 seam（`CommandHost` / `CommandContext`）也在这里；自己转注册 `gate-diagnosis-commands.ts` |
+| `gate-diagnosis-commands.ts` | 两个只读诊断命令面：`/gate-status` 内嵌的模型链读数（`modelDiagnosisLines`）与 `/gate-doctor` 正文；只做环境探测，不写状态、不喂裁决；由 `gate-command-tools.ts` 转注册 |
 | `gate-doctor.ts` | `/gate-doctor` 的只读体检：模型链、provider 允许名单、precommit runner、git 钩子、命令注册表 |
 | `gate-state.ts` | 门禁状态机与 sidecar 读写、未满足项计算、并发绑定合并 |
 | `gate-timings.ts` | `.pi/gate-timings.jsonl` 可观测日志，每个门禁事件一行 |
@@ -436,9 +457,10 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
    MJS，不能 import TypeScript）；不必须 → `lib/`。
 3. **它是新工具族吗？** 是 → 照 `lib/judge-session-tools.ts` 与
    `lib/orchestrator-*-tools.ts` 的形状：判定与工具注册都在 `lib/`，经
-   `lib/tool-host.ts` 那道 seam 拿依赖，别再往那个近 9000 行的文件里加。
-4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态（78 个模块里 64 个有）；
-   其余 14 个里多数并进相邻的分组测试（`test/orchestrator-atoms.test.ts`、
+   `lib/tool-host.ts` 那道 seam 拿依赖，别再往那个七千余行的文件里加。命令族
+   同理，形状见 `lib/gate-command-tools.ts`（seam 是它自己的 `CommandHost`）。
+4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态（90 个模块里 71 个有）；
+   其余 19 个里多数并进相邻的分组测试（`test/orchestrator-atoms.test.ts`、
    `test/orchestrator-tools.test.ts`、`test/extension-structure.test.ts`），
    但个别模块——`agent-directives.ts`、`orchestrator-dispatch.ts`——在 `test/`
    下**零引用**，正是本问说的那种情形。真正的判据不是

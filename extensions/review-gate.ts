@@ -74,7 +74,7 @@ import {
   type ShipCommandKind,
 } from "../lib/constants.ts";
 import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-directives.ts";
-import { defaultProjectConfig, globalConfigPath, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
+import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands, extractCommitMessages, extractPrTextFields } from "../lib/ship-detect.ts";
 import { buildAgentsWidget, buildModelConfigWidget, scanAgentArtifacts } from "../lib/ui-widget.ts";
@@ -85,7 +85,6 @@ import {
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
 import {
-  judgeEnglish,
   firstNonEnglishText,
   nonEnglishCommitMessage,
   containsNonLatinLetter,
@@ -131,6 +130,10 @@ import { isMessageOnlyRewrite, hasAmendFlag, rebaseBranchName } from "../lib/git
 // The interview's pure functions are no longer reached from here: `ask_user`
 // lives in lib/user-interaction-tools.ts and imports them itself.
 import { registerUserInteractionTools } from "../lib/user-interaction-tools.ts";
+// The COMMAND layer moved out the same way: every slash command lives in
+// lib/gate-command-tools.ts (+ lib/gate-diagnosis-commands.ts) and is wired
+// from here with one call.
+import { registerGateCommands } from "../lib/gate-command-tools.ts";
 
 import {
   parsePorcelain,
@@ -250,11 +253,7 @@ import {
   type StepTiming,
   type TestScope,
 } from "../lib/precommit-receipt.ts";
-import {
-  appendTiming,
-  formatPrecommitSummary,
-  lastPrecommitTiming,
-} from "../lib/gate-timings.ts";
+import { appendTiming } from "../lib/gate-timings.ts";
 import { tailLogFile } from "../lib/precommit-tail.ts";
 import {
   decideReviewScope,
@@ -346,8 +345,9 @@ import {
 import type { GoalPrereviewRecord, LoopGoal } from "../lib/loop-goal.ts";
 
 import { fitDialogMessage } from "../lib/dialog-budget.ts";
-import { diagnoseChain, formatModelDiagnosis, type RegistryFacts } from "../lib/model-diagnose.ts";
-import { factsFromRegistry, formatDoctorReport, runGateDoctor } from "../lib/gate-doctor.ts";
+// The model-chain diagnosis and the /gate-doctor checks are reached only
+// through lib/gate-diagnosis-commands.ts now — this file wires that module,
+// it no longer runs either diagnosis itself.
 import {
   buildStallNotice,
   evaluateStall,
@@ -368,7 +368,7 @@ import {
 } from "../lib/model-config.ts";
 import type { ModelRegistry, RegistryModelInfo } from "../lib/model-config.ts";
 import { buildStreamConsumerDirective, buildStreamDirective } from "../lib/review-stream.ts";
-import { isModelAllowed } from "../lib/model-allowlist.ts";
+// The model allowlist is consulted by the diagnosis module, not here.
 // The baseline resolution moved with prepare_review (lib/review-prepare-tools.ts).
 // The Copilot TOOLS and the `gh` access they run on moved out of this file
 // (lib/copilot-review-tools.ts + lib/copilot-gh.ts); what is left here is the
@@ -399,12 +399,8 @@ import {
   recordBlockedMarker,
   reconcileBlockedMarker,
 } from "../lib/blocked-marker.ts";
-import {
-  WORKFLOW_COMMANDS,
-  buildWorkflowPrompt,
-  workflowCommand,
-  type WorkflowCommandName,
-} from "../lib/workflow-commands.ts";
+// The workflow-command catalog is read by lib/gate-command-tools.ts, which
+// registers every command in it.
 import {
   formatPrecommitBaseline,
   REVIEW_VERDICT_SCHEMA,
@@ -7175,399 +7171,79 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
   // ---------- commands ----------
-
-  function registerWorkflowCommand(name: WorkflowCommandName) {
-    const command = workflowCommand(name);
-    pi.registerCommand(name, {
-      description: command.description,
-      handler: async (args, ctx) => {
-        if (!ctx.isIdle()) {
-          ctx.ui.notify(`Agent is busy. Retry ${command.usage} when it is idle.`, "warning");
-          return;
-        }
-        // PHILOSOPHY ONE — some commands are not a request to the agent at
-        // all. `/precommit` used to mean "agent, go call run_precommit"; that
-        // tool is no longer registered, and re-exposing it to keep a command
-        // alive would be the back door philosophy three forbids. The gate
-        // runs the lane itself instead: one intent, no turn spent, and no
-        // tool name for an agent to misremember.
-        const gateRuns = command.gateRuns;
-        if (gateRuns) {
-          await runPrecommitCommand(gateRuns.precommitMode, ctx);
-          return;
-        }
-        pi.sendUserMessage(
-          buildWorkflowPrompt(name, args ?? ""),
-        );
-      },
-    });
-  }
+  //
+  // The WHOLE command layer — the workflow catalog plus /gate-status,
+  // /gate-bypass, /gate-mode, /gate-reset, /gate-lesson and /gate-doctor —
+  // moved to lib/gate-command-tools.ts (+ lib/gate-diagnosis-commands.ts) for
+  // the architecture rule this file is the repository's own worst example of
+  // (AGENTS.md §"架构规范"). ONE registration call wires all of them: a layer
+  // the extension could wire half of is a layer it eventually does.
+  //
+  // What they need from THIS file arrives as this deps object. `state`,
+  // `projectConfig` and `primaryRepoRoot` are GETTERS on purpose — the
+  // extension rebinds all three (session_start reloads the state and the
+  // config, /gate-reset replaces the state object outright), so a captured
+  // reference would leave the status readout describing a dead copy of the
+  // very state the gate reads.
 
   /**
-   * Run the trusted precommit lane for a USER command and print the verdict.
+   * Everything /gate-reset clears.
    *
-   * It goes through the same internal implementation the review chain uses,
-   * so the PASS it records is the one the ship gate accepts — there is no
-   * second lane and no second way to be granted one.
+   * It stays HERE, as one function, because every binding it touches lives in
+   * THIS closure: the state object the extension rebinds, its loop counters
+   * and locks, the never-persisted sensitive-file grants, the bypass token
+   * and the appeal ledger. The command module owns the ordering around it
+   * (reset → persist → notify) and nothing else.
    */
-  async function runPrecommitCommand(mode: "fast" | "full", ctx: ExtensionContext): Promise<void> {
-    ctx.ui.notify(`review-gate: 正在跑 precommit（${mode} lane）……`, "info");
-    try {
-      const result = await callTool("run_precommit", { mode }, ctx);
-      const verdict = String(result.details?.verdict ?? "UNKNOWN");
-      ctx.ui.notify(
-        `review-gate: precommit ${verdict}\n${toolText(result)}`,
-        verdict === "PASS" ? "info" : "error",
-      );
-    } catch (error) {
-      ctx.ui.notify(`review-gate: precommit 没跑起来 —— ${(error as Error).message}`, "error");
-    }
+  function resetSessionState(): void {
+    state = emptyState(state.sessionId, state.maxRounds);
+    loopArmed = true;
+    continuationsInjected = 0;
+    completionContinuations = 0;
+    loopStall = undefined;
+    stallNoticeShown = false;
+    agentDowngradesLocked = false;
+    lastRunAborted = false;
+    scopeLimitDeclined = false;
+    sessionEditedPaths.clear();
+    // The user's call: revoke outstanding one-shot sensitive-file
+    // authorizations AND lift the per-path decline locks.
+    sensitiveGrants = [];
+    sensitiveDeclinedPaths.clear();
+    clearBypassToken();
+    lastBlockedShip = null;
+    lastBlockedText = null;
+    // A user-initiated reset clears the appeal ledger too: quota, decided
+    // contents and any live pass. It is the user's own call, and leaving a
+    // pass behind would let it authorize content after the reset.
+    delete state.appeals;
+    arbitrationDecisions.clear();
   }
 
-
-  for (const name of Object.keys(WORKFLOW_COMMANDS) as WorkflowCommandName[]) {
-    registerWorkflowCommand(name);
-  }
-
-  /** Read-only model-chain diagnosis for /gate-status. Best-effort: any IO
-   *  failure yields no lines (diagnostics never block, never gate).
-   *
-   *  PRIMARY facts source is the session's own model registry (the SAME
-   *  facts the model registry exposes — it includes built-in catalogs
-   *  like anthropic that never appear in models-store.json; reading only
-   *  the store mis-reported every built-in judge chain as BLOCKED while
-   *  the review was literally running on fable-5). File reads are a
-   *  fallback when the registry exposes nothing. */
-  function modelDiagnosisLines(registry?: unknown): string[] {
-    try {
-      const home = homedir();
-      const globalAgentsDir = pathJoin(home, ".pi", "agent", "agents");
-      const projectAgentsDir = pathJoin(primaryRepoRoot, ".pi", "agents");
-      // Effective chain = PROJECT layer file when present, else global
-      // (project outranks global, exactly like the runtime load order).
-      const readAgent = (name: string): string | undefined => {
-        // Project layer wins by IDENTITY (frontmatter `name`), not basename:
-        // pi-subagents registers any .md under the project dir under its
-        // frontmatter name, so custom.md carrying `name: reviewer` really
-        // shadows the global reviewer (round-11 P1/P2).
-        const projText = findProjectAgentText(projectAgentsDir, name);
-        if (projText !== undefined) return projText;
-        try {
-          const p = pathJoin(globalAgentsDir, `${name}.md`);
-          return existsSync(p) ? readFileSync(p, "utf8") : undefined;
-        } catch { return undefined; }
-      };
-      const authedProviders = new Set<string>();
-      const models: Array<{ provider: string; id: string; reasoning?: boolean; thinkingLevelMap?: Record<string, string | null> }> = [];
-      const facts: RegistryFacts = { models, authedProviders, allowed: isModelAllowed };
-      const reg = registry as { getAll?: () => unknown[]; hasConfiguredAuth?: (m: unknown) => boolean } | undefined;
-      const all = reg?.getAll?.() ?? [];
-      if (Array.isArray(all) && all.length > 0) {
-        // Symmetric with gate-doctor's hasAuth guard: a registry without
-        // hasConfiguredAuth skips the auth filter entirely (treating every
-        // provider as authed would be wrong — the missing method is the
-        // signal that auth is not part of this registry's contract).
-        const authCheckable = typeof reg?.hasConfiguredAuth === "function";
-        for (const m of all) {
-          const obj = m as { provider?: unknown; id?: unknown; reasoning?: unknown; thinkingLevelMap?: unknown };
-          if (typeof obj.provider !== "string" || typeof obj.id !== "string") continue;
-          const tlm = obj.thinkingLevelMap;
-          const thinkingLevelMap =
-            typeof tlm === "object" && tlm !== null && !Array.isArray(tlm)
-              ? Object.fromEntries(Object.entries(tlm).filter(([, mapped]) => mapped === null || typeof mapped === "string")) as Record<string, string | null>
-              : undefined;
-          models.push({
-            provider: obj.provider,
-            id: obj.id,
-            ...(typeof obj.reasoning === "boolean" ? { reasoning: obj.reasoning } : {}),
-            ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
-          });
-          if (!authCheckable || reg!.hasConfiguredAuth!(obj)) authedProviders.add(obj.provider);
-        }
-      }
-      if (models.length === 0) {
-        // Fallback: disk files (a host session without a usable registry).
-        try {
-          const store = JSON.parse(
-            readFileSync(pathJoin(home, ".pi", "agent", "models-store.json"), "utf8"),
-          ) as Record<string, { models?: Array<{ provider?: string; id?: string }> }>;
-          for (const prov of Object.keys(store)) {
-            for (const m of store[prov]?.models ?? []) {
-              if (typeof m.provider === "string" && typeof m.id === "string") {
-                models.push({ provider: m.provider, id: m.id });
-              }
-            }
-          }
-        } catch { /* no store — empty registry */ }
-        try {
-          const auth = JSON.parse(
-            readFileSync(pathJoin(home, ".pi", "agent", "auth.json"), "utf8"),
-          ) as Record<string, unknown>;
-          for (const k of Object.keys(auth)) authedProviders.add(k);
-        } catch { /* no auth — no provider looks usable */ }
-      }
-      // Diagnose KNOWN agents first, then any user-built/third-party agent
-      // files found in either layer (project outranks global per readAgent).
-      const fileNames = (dir: string): string[] => {
-        try {
-          return readdirSync(dir).filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, ""));
-        } catch {
-          return [];
-        }
-      };
-      // The PROJECT layer is enumerated by frontmatter IDENTITY, not basename:
-      // pi-subagents registers a project file under its `name`, so a
-      // `custom.md` carrying `name: foo` is live as `foo`. Enumerating it as
-      // "custom" made readAgent (which resolves by identity) find nothing, and
-      // a project-ONLY agent whose basename differs from its name was invisible
-      // here while gate-doctor's union enumeration did see it.
-      const projectIdentityNames = (dir: string): string[] => {
-        try {
-          const out: string[] = [];
-          for (const f of readdirSync(dir)) {
-            if (!f.endsWith(".md")) continue;
-            try {
-              const id = projectAgentIdentity(readFileSync(pathJoin(dir, f), "utf8"));
-              if (id !== undefined) out.push(id);
-            } catch { /* unreadable file — not loadable either */ }
-          }
-          return out;
-        } catch {
-          return [];
-        }
-      };
-      const allNames = [...new Set([...KNOWN_AGENTS, ...fileNames(globalAgentsDir), ...projectIdentityNames(projectAgentsDir)])];
-      const entries = allNames
-        .map((name) => {
-          const text = readAgent(name);
-          return text ? diagnoseChain(name, text, facts) : null;
-        })
-        .filter((e): e is NonNullable<typeof e> => e !== null && e.chain.length > 0);
-      return entries.length === 0 ? [] : formatModelDiagnosis(entries).split("\n");
-    } catch {
-      return []; // diagnostics only — never block the status readout
-    }
-  }
-
-  pi.registerCommand("gate-status", {
-    description: "Show review-gate state",
-    handler: async (_args, ctx) => {
-      const fp = computeFingerprint(cwd);
-      const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
-      const others = otherRepoStatus();
-      const lines = [
-        `review:    ${state.review.verdict}${state.review.at ? ` (${state.review.at})` : ""}`,
-        `precommit: ${state.precommit.verdict}` +
-          (state.precommit.verdict === "PASS"
-            ? ` [lane ${state.precommit.mode ?? "?"}, tests: ${state.precommit.testScope ?? "unknown"}]` +
-              (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run") +
-              (state.precommit.testScope === "skipped" ? " — ⚠️ tests were NOT run in this lane" : "")
-            : "") +
-          (state.precommit.at ? ` (${state.precommit.at})` : ""),
-        ...formatPrecommitSummary(lastPrecommitTiming(primaryRepoRoot)),
-        `changes:   code=${state.hasCodeChange} docs=${state.hasDocChange}`,
-        `docSync:   ${projectConfig.docSync ? `ENFORCED (attested: ${state.review.docSync ?? "none"})` : "off"}`,
-        `rounds:    ${state.rounds.length}/${state.maxRounds}`,
-        `config:    thinkHarder=${projectConfig.thinkHarder}${state.strategicResetFired ? " (fired)" : ""} gitMemory=${projectConfig.gitMemory}`,
-        `task mode: ${state.taskMode ?? "undecided (behaves as loop; agent decides via set_gate_mode)"}`,
-        ...(state.scopeLimit
-          ? [`scope:     session-only (user-granted ${state.scopeLimit.at}; ${state.scopeLimit.preexistingFiles.length} pre-existing file(s) exempt)`]
-          : []),
-        ...(state.pausedQuestion
-          ? [`paused:    awaiting user answer to "${state.pausedQuestion.question.slice(0, 120)}" (${state.pausedQuestion.at})`]
-          : []),
-        // L8: whether THIS text is the contract the user approved (loop mode
-        // ships are blocked until it is), and L7: the Copilot cycle, which
-        // gates completion only — both are easy to misread from the outside,
-        // so the readout names them explicitly.
-        `loop goal: ${loopGoalConfirmed() ? "approved by the user" : readSessionLoopGoal(primaryRepoRoot).present ? "DRAFT — not approved (loop-mode ships blocked)" : "none"}`,
-
-        ...(state.copilot
-          ? [`copilot:   ${state.copilot.status}${state.copilot.pr ? ` PR #${state.copilot.pr}` : ""}` +
-            ` (round ${state.copilot.rounds}, no round cap` +
-            `${state.copilot.note ? `; ${state.copilot.note.slice(0, 120)}` : ""})`]
-          : []),
-        `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
-        `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
-        ...modelDiagnosisLines(ctx.modelRegistry),
-        // Explore: ship commands stay fully gated (L1), but declare_done and
-        // auto-continuation are advisory. Normal: the ship gate is OFF.
-        state.taskMode === "normal"
-          ? "ship gate: OFF (normal mode — extension inactive)"
-          : state.taskMode === "explore"
-            ? (problems.length
-              ? `ship gate: BLOCKED (explore: completion advisory, ship still gated)\n${problems.map((p) => `  - ${p}`).join("\n")}`
-              : "ship gate: OPEN (explore)")
-            : (problems.length ? `ship gate: BLOCKED\n${problems.map((p) => `  - ${p}`).join("\n")}` : "ship gate: OPEN"),
-        // Every OTHER repo this session edited gets its own line. Showing only
-        // the session repo is how a multi-repo session could look green while
-        // the repo it was about to commit sat at PENDING (and vice versa).
-        ...others.lines,
-      ];
-      ctx.ui.notify(lines.join("\n"), problems.length || others.blocked ? "warning" : "info");
-    },
-  });
-
-  pi.registerCommand("gate-bypass", {
-    description: "Bypass the review gate (requires a reason; user-confirmed)",
-    handler: async (args, ctx) => {
-      const reason = (args ?? "").trim();
-      if (!reason) { ctx.ui.notify("Usage: /gate-bypass <reason>", "error"); return; }
-      const ok = ctx.hasUI
-        ? await confirmBounded(
-            ctx,
-            "Bypass review gate?",
-            `Reason: ${reason}\nDisables ship blocking until /gate-reset.`,
-          )
-        : true;
-      if (!ok) return;
-      state.bypass = { active: true, reason, at: new Date().toISOString() };
-      loopArmed = false;
-      persist(ctx);
-      ctx.ui.notify(`review-gate: BYPASSED (${reason})`, "warning");
-    },
-  });
-
-  pi.registerCommand("gate-mode", {
-    description: "Set task workflow: /gate-mode loop|explore|normal|orchestrator",
-    handler: async (args, ctx) => {
-      const mode = normalizeTaskMode((args ?? "").trim());
-      if (mode === undefined) {
-        ctx.ui.notify("Usage: /gate-mode loop|explore|normal|orchestrator", "error");
-        return;
-      }
-      // The orchestrator role is impossible without tmux — its children ARE
-      // panes of the user's window. Refuse here too, not just in the tool:
-      // the user should be told now, rather than watching every orchestration
-      // tool fail one at a time.
-      if (mode === "orchestrator" && !process.env.TMUX) {
-        ctx.ui.notify(ORCHESTRATOR_NEEDS_TMUX, "error");
-        return;
-      }
-      // /gate-mode is user-invoked — an explicit choice, so source is "user"
-      // and any direction is allowed without a confirm dialog. A fresh user
-      // decision also clears the agent-downgrade lock.
-      agentDowngradesLocked = false;
-      setTaskMode(mode, "user", ctx);
-      ctx.ui.notify(
-        mode === "loop"
-          ? "review-gate: switched to loop workflow"
-          : mode === "orchestrator"
-            ? "review-gate: switched to ORCHESTRATOR (project manager) — plan the work, spawn and supervise child sessions; you write no code yourself"
-            : mode === "explore"
-              ? "review-gate: switched to explore workflow — gates advisory, AI may self-complete; prefer read-only work (ship commands stay gated)"
-              : "review-gate: switched to NORMAL mode — all quality gates are OFF for this session (as if the extension were not installed)",
-        isEnforcedMode(mode) ? "info" : "warning",
-      );
-    },
-  });
-
-  pi.registerCommand("gate-reset", {
-    description: "Reset review-gate state for this session",
-    handler: async (_args, ctx) => {
-      state = emptyState(state.sessionId, state.maxRounds);
-      loopArmed = true;
-      continuationsInjected = 0;
-      completionContinuations = 0;
-      loopStall = undefined;
-      stallNoticeShown = false;
-      agentDowngradesLocked = false;
-      lastRunAborted = false;
-      scopeLimitDeclined = false;
-      sessionEditedPaths.clear();
-      // The user's call: revoke outstanding one-shot sensitive-file
-      // authorizations AND lift the per-path decline locks.
-      sensitiveGrants = [];
-      sensitiveDeclinedPaths.clear();
-      clearBypassToken();
-      lastBlockedShip = null;
-      lastBlockedText = null;
-      // A user-initiated reset clears the appeal ledger too: quota, decided
-      // contents and any live pass. It is the user's own call, and leaving a
-      // pass behind would let it authorize content after the reset.
-      delete state.appeals;
-      arbitrationDecisions.clear();
-      persist(ctx);
-      ctx.ui.notify("review-gate: state reset", "info");
-    },
-  });
-
-  // sd0x-dev-flow self-improvement loop port: /gate-lesson records a corrected
-  // mistake into a per-project lesson log (.pi/review-gate-lessons.md). Lessons
-  // recurring 3+ times should be promoted into rules/config by the user.
-  pi.registerCommand("gate-lesson", {
-    description: "Record a lesson learned (self-improvement log): /gate-lesson <text>",
-    handler: async (args, ctx) => {
-      const text = (args ?? "").trim();
-      if (!text) { ctx.ui.notify("Usage: /gate-lesson <what went wrong → correct approach>", "error"); return; }
-      const logPath = pathJoin(cwd, ".pi", "review-gate-lessons.md");
-      try {
-        const { appendFileSync, mkdirSync } = await import("node:fs");
-        mkdirSync(pathDirname(logPath), { recursive: true });
-        let n = 1;
-        try { n = (readFileSync(logPath, "utf8").match(/^### L\d+/gm) ?? []).length + 1; } catch { /* new log */ }
-        appendFileSync(logPath, `\n### L${n} — ${new Date().toISOString().slice(0, 10)}\n\n${text}\n`);
-        ctx.ui.notify(`review-gate: lesson L${n} recorded in .pi/review-gate-lessons.md`, "info");
-      } catch (e) {
-        ctx.ui.notify(`review-gate: could not write lesson log: ${(e as Error).message}`, "error");
-      }
-    },
-  });
-
-  // /gate-doctor — read-only health check: verifies every optimization this
-  // package ships actually works in the CURRENT environment (model
-  // chains, opencode-go prune, precommit runner, git hooks, global config
-  // fallback, L5 gate, Copilot gh, command registry). Pure diagnostics: it
-  // reads files and probes executables, writes NOTHING, and never feeds a
-  // gate verdict.
-  pi.registerCommand("gate-doctor", {
-    description: "Diagnose whether all optimizations are live (read-only health check)",
-    handler: async (_args, ctx) => {
-      const home = homedir();
-      const packageRoot = pathJoin(pathDirname(fileURLToPath(import.meta.url)), "..");
-      const readFileSafe = (p: string): string | undefined => {
-        try { return readFileSync(p, "utf8"); } catch { return undefined; }
-      };
-      // git rev-parse --git-path hooks resolves the real hooks dir (worktrees,
-      // core.hooksPath); unavailable → the hooks check degrades to WARN.
-      let hooksDir: string | undefined;
-      try {
-        const out = execFileSync("git", ["rev-parse", "--git-path", "hooks"], {
-          cwd, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-        if (out.length > 0) hooksDir = pathResolve(cwd, out);
-      } catch { /* git unavailable — hooks unverifiable */ }
-      const checks = await runGateDoctor({
-        homeDir: home,
-        packageRoot,
-        agentsDir: pathJoin(home, ".pi", "agent", "agents"),
-        // Project-layer overrides outrank the global copies for diagnosis
-        // (round-2 P2) — same per-file precedence pi-subagents loads with.
-        projectAgentsDir: pathJoin(primaryRepoRoot, ".pi", "agents"),
-        modelsStorePath: pathJoin(home, ".pi", "agent", "models-store.json"),
-        globalConfigPath: globalConfigPath(home),
-        registryFacts: factsFromRegistry(ctx.modelRegistry, home, readFileSafe),
-        hooksDir,
-        workflowCommandCount: Object.keys(WORKFLOW_COMMANDS).length,
-        nonEnglish: (text) => judgeEnglish("commit-body", text) !== undefined,
-        probeGh: async () => {
-          try {
-            const out = execFileSync("gh", ["--version"], {
-              encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"],
-            });
-            return { ok: true, value: out.split(/\r?\n/)[0] ?? "" };
-          } catch (e) {
-            const err = e as { code?: unknown; message?: unknown };
-            return { ok: false, error: err.code === "ENOENT" ? "gh not installed" : String(err.message ?? err.code ?? e) };
-          }
-        },
-        readFile: readFileSafe,
-        exists: existsSync,
-        readdir: (p) => { try { return readdirSync(p); } catch { return undefined; } },
-      });
-      const attention = checks.filter((c) => c.status !== "PASS").length;
-      ctx.ui.notify(formatDoctorReport(checks), attention ? "warning" : "info");
-    },
+  registerGateCommands(pi, {
+    state: () => state,
+    projectConfig: () => projectConfig,
+    primaryRepoRoot: () => primaryRepoRoot,
+    cwd,
+    // The doctor reads the assets THIS package ships; the path is computed
+    // here rather than inside lib/ so it cannot silently change meaning when
+    // a module moves between directories.
+    packageRoot: pathJoin(pathDirname(fileURLToPath(import.meta.url)), ".."),
+    persist: (ctx) => persist(ctx as unknown as ExtensionContext),
+    callTool: (name, params, ctx) => callTool(name, params, ctx),
+    toolText: (result) => toolText(result),
+    otherRepoStatus: () => otherRepoStatus(),
+    loopGoalConfirmed: () => loopGoalConfirmed(),
+    loopGoalPresent: () => readSessionLoopGoal(primaryRepoRoot).present,
+    confirmBounded: (uiCtx, title, message) =>
+      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message),
+    setLoopArmed: (armed) => { loopArmed = armed; },
+    setTaskMode: (mode, source, ctx) => setTaskMode(mode, source, ctx as ExtensionContext),
+    // Only a USER action may lift the lock — /gate-mode and /gate-reset are
+    // the only two callers, and both are user-invoked commands.
+    unlockAgentDowngrades: () => { agentDowngradesLocked = false; },
+    resetSession: resetSessionState,
+    findProjectAgentText: (dir, name) => findProjectAgentText(dir, name),
   });
 
   // ---------- per-turn protocol reminder ----------
