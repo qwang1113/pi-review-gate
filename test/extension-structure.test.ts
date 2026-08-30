@@ -1940,6 +1940,8 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   const drainAt = SRC.indexOf("async function drainChildInstructions(");
   const drain = SRC.slice(drainAt, drainAt + 2600);
   assert.match(drain, /pi\.sendUserMessage\(text, \{ deliverAs: instruction\.mode \}\)/);
+  assert.match(drain, /deliverAs: "steer"/,
+    "an interrupt WITH text aborts then delivers the message immediately (2026-08-31)");
   assert.match(drain, /ctx\.abort\?\.\(\)/, "interrupt is ctx.abort(), not a Ctrl-C keystroke");
   assert.match(drain, /acknowledgeInstruct\(binding, instruction\.instructId, false/,
     "a failure is acknowledged AS a failure — the receipt the orchestrator builds on");
