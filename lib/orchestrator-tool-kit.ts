@@ -13,15 +13,17 @@
  */
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
-import { buildCapturePaneArgv, buildListPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
+import { buildListPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
+import { channelPathFor, projectChannel, readChannel } from "./orchestrator-channel.ts";
+import type { ChildAssets } from "./orchestrator-supervisor.ts";
 import {
-  emptyStartupEvidence,
-  parsePaneSnapshot,
-  readStartupEvidence,
-  type PaneSnapshot,
-  type StartupEvidence,
-} from "./orchestrator-pane-read.ts";
-import { deliveryVerdict, type DeliveryKind, type DeliveryVerdict } from "./orchestrator-delivery.ts";
+  deliveryVerdict,
+  emptyDeliveryEvidence,
+  type DeliveryEvidence,
+  type DeliveryKind,
+  type DeliveryVerdict,
+} from "./orchestrator-delivery.ts";
+
 
 import type { ChildSession } from "./orchestrator-registry.ts";
 import type { OrchestratorPlan } from "./orchestrator-plan.ts";
@@ -103,26 +105,15 @@ export function currentPlan(
 }
 
 /**
- * READ a child's screen (F3, channel 1).
+ * READING A CHILD'S SCREEN IS GONE (2026-08-30).
  *
- * `undefined` means tmux could not be read — which is deliberately different
- * from "the pane is empty": the waiter turns the first into "liveness
- * unknown, keep waiting" and the second into evidence, and conflating them is
- * what made a live child look dead (F14).
+ * `capturePane` used to live here and every state question went through it.
+ * It is deleted along with its parsers: a child now REPORTS on its channel
+ * (lib/orchestrator-child-channel.ts) and lib/orchestrator-supervisor.ts
+ * reads that. The only thing tmux is still asked is {@link alivePanes} —
+ * which panes exist — because a dead process cannot file a report.
  */
-export function capturePane(
-  deps: OrchestratorDeps,
-  paneId: string,
-  lines?: number,
-): PaneSnapshot | undefined {
-  try {
-    const result = deps.tmux(buildCapturePaneArgv(paneId, lines ?? undefined));
-    if (!result.ok) return undefined;
-    return parsePaneSnapshot(result.stdout);
-  } catch {
-    return undefined;
-  }
-}
+
 
 /** What a child's own gate sidecar says (F3, channel 2 — the exact one). */
 export interface ChildGateFacts {
@@ -152,6 +143,36 @@ const GOAL_DRAFT_MAX = 4000;
  * as coming from the sidecar, because it only ever knows about the GATE's own
  * dialogs — an ordinary question from the child appears nowhere in it.
  */
+/**
+ * WHAT SURVIVED A CHILD THAT DIED — read from its own gate sidecar.
+ *
+ * A dead child is not a lost task, and the receipt has to say so in the same
+ * breath as the death (task book §4): its branch, its last checkpoint and its
+ * last review verdict are all on disk, owned by git and by the sidecar, and
+ * none of them cared that the process went away. Without this block the
+ * orchestrator's only honest move on a crash is to assume the worst.
+ */
+export function childAssets(deps: OrchestratorDeps, child: ChildSession): ChildAssets | undefined {
+  const raw = deps.childGateState(child.cwd, child.stateVariant);
+  if (!raw) return undefined;
+  const str = (value: unknown): string | undefined =>
+    typeof value === "string" && value.length > 0 ? value : undefined;
+  const nested = (key: string): Record<string, unknown> | undefined => {
+    const value = raw[key];
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  };
+  const review = nested("review");
+  return {
+    ...(str(raw.workBranch) === undefined ? {} : { branch: str(raw.workBranch)! }),
+    ...(str(raw.lastCheckpointSha) === undefined ? {} : { checkpoint: str(raw.lastCheckpointSha)! }),
+    ...(review && str(review.verdict) !== undefined ? { reviewVerdict: str(review.verdict)! } : {}),
+    ...(str(raw.completedAt) === undefined ? {} : { completedAt: str(raw.completedAt)! }),
+  };
+}
+
+
 export function childGateFacts(deps: OrchestratorDeps, child: ChildSession): ChildGateFacts {
   const raw = deps.childGateState(child.cwd, child.stateVariant);
   if (!raw) return { present: false, lines: [], editedFiles: [] };
@@ -206,9 +227,7 @@ export const DELIVERY_VERIFY_INTERVAL_MS = 1000;
 
 export interface DeliveryCheck {
   verdict: DeliveryVerdict;
-  evidence: StartupEvidence;
-  /** The last screen that was read — handed back so a failure shows it. */
-  snapshot?: PaneSnapshot;
+  evidence: DeliveryEvidence;
 }
 
 /**
@@ -220,16 +239,18 @@ export interface DeliveryCheck {
  * every healthy spawn. It stops at the FIRST positive evidence: there is
  * nothing to gain by watching a child that has demonstrably started.
  *
- * The evidence itself is judged by lib/orchestrator-delivery.ts, which knows
- * that a running process proves a SPAWN (the task rode in on the argv) and
- * proves nothing at all about a typed message.
+ * WHAT IS POLLED IS THE CHANNEL, not a screen. For a spawn, any record at all
+ * proves the process started AND its gate is alive; for an instruction, the
+ * child's own acknowledgement proves it was injected. The judgement itself is
+ * lib/orchestrator-delivery.ts's — this function only gathers.
  */
 export async function verifyDelivery(
   deps: OrchestratorDeps,
   opts: {
     kind: DeliveryKind;
-    paneId: string;
-    marker?: string;
+    childId: string;
+    /** Present for `instruct`: the record whose acknowledgement is awaited. */
+    instructId?: string;
     /** Where the child's own sidecar would appear, when it has one. */
     cwd?: string;
     stateVariant?: string;
@@ -239,21 +260,55 @@ export async function verifyDelivery(
 ): Promise<DeliveryCheck> {
   const attempts = Math.max(1, opts.attempts ?? DELIVERY_VERIFY_ATTEMPTS);
   const interval = Math.max(0, opts.intervalMs ?? DELIVERY_VERIFY_INTERVAL_MS);
-  let evidence: StartupEvidence = emptyStartupEvidence();
-  let snapshot: PaneSnapshot | undefined;
+  let evidence = emptyDeliveryEvidence();
   let verdict: DeliveryVerdict = deliveryVerdict(opts.kind, evidence);
 
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) await deps.sleep(interval);
-    snapshot = capturePane(deps, opts.paneId);
-    const pane = readStartupEvidence(snapshot, opts.marker);
-    const sidecarPresent = opts.cwd
-      ? Boolean(deps.childGateState(opts.cwd, opts.stateVariant))
-      : false;
-    evidence = { ...pane, sidecarPresent };
+    evidence = readDeliveryEvidence(deps, opts);
     verdict = deliveryVerdict(opts.kind, evidence);
     if (verdict.ok) break;
   }
-  return { verdict, evidence, ...(snapshot ? { snapshot } : {}) };
+  return { verdict, evidence };
 }
+
+/** One observation of a delivery, straight from the channel and the sidecar. */
+function readDeliveryEvidence(
+  deps: OrchestratorDeps,
+  opts: { childId: string; instructId?: string; cwd?: string; stateVariant?: string },
+): DeliveryEvidence {
+  const sidecarPresent = opts.cwd
+    ? Boolean(deps.childGateState(opts.cwd, opts.stateVariant))
+    : false;
+  try {
+    const io = deps.channelIO();
+    const path = channelPathFor(deps.runtime().orchestrationId, opts.childId, deps.channelHome());
+    const read = readChannel(io, path);
+    const ack = opts.instructId
+      ? read.records.find(
+          (record) => record.kind === "instruct-ack" && record.instructId === opts.instructId,
+        )
+      : undefined;
+    return {
+      channelReported: read.records.length > 0,
+      sidecarPresent,
+      ...(ack && ack.kind === "instruct-ack"
+        ? { ack: { delivered: ack.delivered, ...(ack.detail === undefined ? {} : { detail: ack.detail }) } }
+        : {}),
+    };
+  } catch {
+    return { channelReported: false, sidecarPresent };
+  }
+}
+
+/** Everything still outstanding on one child's channel. */
+export function childChannelProjection(deps: OrchestratorDeps, childId: string) {
+  try {
+    const path = channelPathFor(deps.runtime().orchestrationId, childId, deps.channelHome());
+    return projectChannel(readChannel(deps.channelIO(), path).records);
+  } catch {
+    return projectChannel([]);
+  }
+}
+
 

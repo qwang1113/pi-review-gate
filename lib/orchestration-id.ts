@@ -2,30 +2,36 @@
  * The ORCHESTRATION ID — the stable address of an orchestration, not of the
  * session that happens to be running it.
  *
- * WHY IT EXISTS (measured failure, 2026-08-29). Directed attention
- * (lib/attention.ts) addresses a child's wake-up to `RG_PARENT_SESSION`, the
- * spawning session's id, stamped into the child's environment at spawn time.
- * That is correct for a judge child (it lives and dies inside one round) but
- * WRONG for an orchestrator's child session, which outlives its parent: when
- * the orchestrator hands over to a successor (the relay protocol), every child
- * keeps signalling the RETIRED session id. The measured result was a whole
- * night of orchestration in which `~/.pi/agent/review-gate-attention.json`
- * recorded zero delivered events and the user had to relay questions by hand.
+ * WHY IT EXISTS (measured failure, 2026-08-29). Supervision used to be
+ * addressed to `RG_PARENT_SESSION`, the spawning session's id, stamped into
+ * the child's environment at spawn time. That is correct for a judge child
+ * (it lives and dies inside one round) but WRONG for an orchestrator's child
+ * session, which outlives its parent: when the orchestrator hands over to a
+ * successor, every child keeps signalling the RETIRED session id. The
+ * measured result was a whole night of orchestration with zero delivered
+ * events, and a user relaying questions by hand.
  *
  * THE FIX is one level of indirection: children are addressed to an
  * ORCHESTRATION, and a session claims that orchestration. The id is minted
  * once, injected as `RG_ORCHESTRATION_ID`, and INHERITED by the successor
- * across a relay — so a child spawned by the first orchestrator still reaches
- * the third one, with no restart and nothing to re-stamp in its environment.
+ * across a handoff — so a child spawned by the first orchestrator still
+ * reaches the third one, with no restart and nothing to re-stamp in its
+ * environment.
  *
- * Resolution order is the whole policy, and it lives in {@link attentionTargetId}:
- * an orchestration id wins over a parent session id, because a session running
- * under an orchestration must publish to the orchestration even when it also
- * knows who spawned it. A session with neither publishes nothing (the
- * standalone case attention.ts already handles).
+ * TODAY THAT ADDRESS IS A DIRECTORY. The id names the channel directory
+ * (lib/orchestrator-channel.ts), which is what makes the indirection
+ * physical rather than a filter somebody has to remember to apply: a
+ * successor opens the same paths, and the traffic of a different
+ * orchestration is not merely ignored, it is somewhere else entirely.
+ *
+ * Resolution order is the whole policy, and it lives in
+ * {@link supervisionTargetId}: an orchestration id wins over a parent session
+ * id, because a session running under an orchestration must report to the
+ * orchestration even when it also knows who spawned it.
  *
  * Pure string module: no filesystem, no environment mutation, no tmux.
  */
+
 
 /** Environment variable carrying the orchestration id into a child session. */
 export const ORCHESTRATION_ID_ENV = "RG_ORCHESTRATION_ID";
@@ -94,21 +100,29 @@ export function orchestrationIdFromEnv(
   return normalizeOrchestrationId(env[ORCHESTRATION_ID_ENV]);
 }
 
+/** Environment variable carrying the SPAWNING session's id into a child. */
+export const PARENT_SESSION_ENV = "RG_PARENT_SESSION";
+
+/** The parent session id this process was started by, if any. */
+export function parentSessionId(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env[PARENT_SESSION_ENV]?.trim();
+  return raw && raw.length > 0 ? raw : undefined;
+}
+
 /**
- * WHO a session's attention events are addressed to.
+ * WHO a session reports to.
  *
  * The orchestration id wins over the spawning session id: a child of an
  * orchestrator must reach whoever currently HOLDS the orchestration, not the
- * session that happened to spawn it (that session may have relayed away or
+ * session that happened to spawn it (that session may have handed over or
  * died). Only a child with no orchestration falls back to its parent session
  * — the judge-child case, which is exactly right there because a judge round
  * never outlives the session that dispatched it.
  *
- * Both inputs are PASSED IN rather than read from the environment here, so
- * this module stays free of attention.ts's own environment contract (and of
- * the import cycle that would create).
+ * Both inputs are PASSED IN rather than read from the environment here, so a
+ * caller can resolve an address for a child other than itself.
  */
-export function attentionTargetId(opts: {
+export function supervisionTargetId(opts: {
   orchestrationId?: string;
   parentSessionId?: string;
 }): string | undefined {
@@ -117,6 +131,18 @@ export function attentionTargetId(opts: {
   const parent = opts.parentSessionId?.trim();
   return parent && parent.length > 0 ? parent : undefined;
 }
+
+/**
+ * The address THIS process reports to, resolved from its own environment.
+ * `undefined` means "standalone": it reports nowhere and wakes nobody.
+ */
+export function supervisionTarget(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return supervisionTargetId({
+    orchestrationId: env[ORCHESTRATION_ID_ENV],
+    parentSessionId: parentSessionId(env),
+  });
+}
+
 
 /** True when this address is an orchestration rather than a session. */
 export function isOrchestrationTarget(target: string | undefined): boolean {

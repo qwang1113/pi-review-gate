@@ -41,37 +41,38 @@
 
 ### 1.2 工具注册分两处（重要）
 
-- **扩展直接注册 13 个** gate 工具：
-  按族看（快照，权威判据是下面的命令）：审查链（`judge_submit`、
-  `review_checkpoint`、
-  `record_review`、`run_precommit`）、目标链
-  （`propose_loop_goal`、`record_goal_prereview`）、
-  会话与用户（`setup_workspace`、`declare_done`、
-  `ask_user`、`set_gate_mode`、`request_scope_limit`、
-  `request_sensitive_edit`、`request_arbitration`）。
-  核对：`grep -c 'name: "' extensions/review-gate.ts` → 当前 13；
-  逐个看用 `grep -n 'name: "' extensions/review-gate.ts`。
+- **扩展直接注册 9 个** gate 工具：`judge_submit`、`propose_loop_goal`、
+  `setup_workspace`、`declare_done`、`ask_user`、`set_gate_mode`、
+  `request_scope_limit`、`request_sensitive_edit`、`request_arbitration`。
+  核对：`grep -c '^  pi.registerTool({' extensions/review-gate.ts` → 当前 9。
 
-- **21 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
-  - `lib/judge-relay-tools.ts`：`review_spawn`、`review_watch`、`review_send`
-    （把一件事**转交**给 judge 进程的三个工具）。
-  - `lib/review-prepare-tools.ts`：`prepare_review`（准备 reviewer 要判的那
-    一轮：不可变的 `baseline..HEAD`、polish gate、findings 流、review target）。
-  - `lib/advisory-prepare-tools.ts`：`prepare_adviser`、`prepare_goal_audit`
-    （两个只组装**任务文本**的准备：不算 git 范围，也不登记 review target）。
+- **15 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
   - `lib/copilot-review-tools.ts`：`request_copilot_review`、
     `check_copilot_review`（L7 的两个工具；它们要打的 gh 电话在
     `lib/copilot-gh.ts`，经注入的 `gh` seam 调用，所以每条分支都能用假实现单测）。
   - `lib/judge-session-tools.ts`：`judge_read` / `judge_close` / `judge_wait`
     （作用于一个**已存在**的 judge 会话的三个工具）。
-  - `lib/orchestrator-tools.ts`：`orchestrator_plan`、`orchestrator_status`、
-    `orchestrator_notify`。
-  - `lib/orchestrator-read-tools.ts`：`orchestrator_read`、`orchestrator_key`。
+  - `lib/orchestrator-tools.ts`：`orchestrator_plan`、`orchestrator_notify`。
   - `lib/orchestrator-session-tools.ts`：`orchestrator_spawn`、
-    `orchestrator_send`、`orchestrator_wait`、`orchestrator_close`、
-    `orchestrator_relay`。
-  核对：`grep -rln 'name: "[a-z_]*"' lib/*.ts` → 上面八个文件；
-  `grep -rh 'name: "' lib/*.ts | wc -l` → 21。
+    `orchestrator_instruct`、`orchestrator_wait`、`orchestrator_close`、
+    `orchestrator_handoff`（并从这里转注册下面两个模块，所以「有哪些编排工具」
+    只有一个地方回答）。
+  - `lib/orchestrator-answer-tools.ts`：`orchestrator_answer`。
+  - `lib/orchestrator-recovery-tools.ts`：`orchestrator_recover`、
+    `orchestrator_attach`。
+  核对：`grep -rh 'name: "' lib/*.ts | grep -oE 'name: "[a-z_]+"' | sort -u | wc -l`
+  → 18，其中 3 个是下面说的**内部实现**，不注册给 pi；9 + 15 = **24**。
+
+- **7 个实现存在，但不是工具**（2026-08-30，哲学三）。`run_precommit`、
+  `review_checkpoint`、`record_review`、`record_goal_prereview`、
+  `prepare_review`、`prepare_adviser`、`prepare_goal_audit` 的**代码还在**——
+  它们持有 precommit 回执校验、L5 文案规则、checkpoint 标记、审计裁决这些机械
+  检查，`judge_submit` 与 `propose_loop_goal` 在内部调用它们，所以每条检查只有
+  一份实现。但它们注册到扩展内部的 `internalHost` 而不是 `pi`：**agent 看不到
+  这些名字**，因此没有第二条路可选。另外三个（`review_spawn` / `review_watch` /
+  `review_send`）连实现一起删了 —— 它们连内部都没人调。
+  核对：`test/extension-structure.test.ts` 的「TEN advanced entries」那一条。
+
 
 这些模块都经同一道 **seam** 接进扩展：`lib/tool-host.ts` 定义那个 host 类型
 （`lib/orchestrator-deps.ts` 只是把它 re-export，因为编排工具是第一批搬出去
@@ -110,7 +111,7 @@
 | **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | 扩展 `tool_call` + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
 | **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
 | **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账 | `lib/copilot-review-tools.ts`（工具 `request_copilot_review` / `check_copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线 | `lib/copilot-review.ts` |
-| **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | 扩展工具 `propose_loop_goal` / `record_goal_prereview` | `lib/loop-goal.ts` |
+| **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | 扩展工具 `propose_loop_goal`（内部自跑 goal 审计并记录裁决） | `lib/loop-goal.ts` |
 
 > **落点指引**：加一条新的**判定规则**（什么该拦、什么该放）→ 落在
 > `lib/` 里对应的纯模块，并配一个 `test/*.test.ts`；只有「把判定接到某个
@@ -125,7 +126,7 @@
 `ship-detect.ts` 判断一条命令行里是否含 ship 操作，`shell-lex.ts` 是它的底座
 （引号、续行、here-doc、命令替换——正则做不对这件事，所以有一个真正的词法
 器）。`file-size-gate.ts` 是架构标准里唯一的机械规则（新建源码文件 600 行硬
-拦、存量只提醒，判定点是 `review_checkpoint` 那一刻，不在 precommit runner
+拦、存量只提醒，判定点是 `judge_submit` 里那次 checkpoint 提交的一刻，不在 precommit runner
 里）。`polish-gate.ts` 管「连续 READY 还在打磨」的再审理由，
 `loop-stall.ts` 是 L2 的断路器，`git-rewrite.ts` 解开「只改 commit message」
 与 L5 的互锁，`blocked-marker.ts` 在 sidecar 写不进去时 fail-closed，
@@ -171,9 +172,10 @@ judge（reviewer / adviser / goal-auditor）是**自己的 pi 进程**：
 共同协议），`judge-watch.ts` / `child-watch.ts` 负责「它退出了就唤醒主会话」
 且不依赖子进程守规矩；`judge-session-tools.ts` 是作用于**已存在**会话的那三个
 工具（`judge_read` / `judge_close` / `judge_wait`）的实现与注册，
-`judge-relay-tools.ts` 则是把一件事**转交**给 judge 进程的那三个
-（`review_spawn` / `review_watch` / `review_send`）——注意这六个工具都不在扩展
-里，见 §1.2。
+——注意这三个工具都不在扩展里，见 §1.2。把一件事**转交**给 judge 进程的那三个
+（`review_spawn` / `review_watch` / `review_send`）已于 2026-08-30 整体删除：
+`judge_submit` 自己派单、自己登记完成 watcher，它们是同一件事的第二条路。
+
 
 审查内容侧：`parallel-review.ts` 持有审查契约（一轮一个 reviewer，判不可变的
 `baseline..HEAD`），`review-baseline.ts` 在链被 squash/rebase 后按内容找回基
@@ -181,10 +183,11 @@ judge（reviewer / adviser / goal-auditor）是**自己的 pi 进程**：
 findings 边审边流出，`verdict-parse.ts` 解析裁决（review 只认 JSON fence，
 precommit 只认 `## Overall:` sentinel），`adviser-brief.ts` 组装 adviser 的
 brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致。把这些
-拼成一份**判官真正收到的任务文本**的，是两个 prepare 模块：
-`review-prepare-tools.ts`（`prepare_review` —— 算范围、开流、登记 review
-target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
-`prepare_goal_audit` —— 只组装文本，不碰 git 范围）。
+拼成一份**判官真正收到的任务文本**的，是两个 prepare 模块 —— 它们是**内部实现**，
+不再注册成工具（哲学三），由 `judge_submit` 与 `propose_loop_goal` 在内部调用：
+`review-prepare-tools.ts`（算范围、开流、登记 review target）与
+`advisory-prepare-tools.ts`（adviser brief 与 goal 审计任务文本，不碰 git 范围）。
+
 
 > **落点**：改「judge 怎么被启动/等待/唤醒」→ `judge-*.ts`；改「它被告知
 > 什么、它的产物怎么解析」→ `judge-prompt.ts` / `parallel-review.ts` /
@@ -192,39 +195,42 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 
 ### 域 4：orchestrator 编排层
 
-23 个模块，按「决策 / 执行 / 工具」三层切开：
-
+22 个模块，按「决策 / 通道 / 执行 / 工具」四层切开。2026-08-30 的通道重构删掉了
+三个（`orchestrator-probe.ts` / `orchestrator-pane-read.ts` /
+`orchestrator-keys.ts` —— 它们的全部工作就是让**终端**可读），新增了四个：
 
 - **纯决策**：`orchestrator-gate.ts`（14 条硬约束）、
   `orchestrator-boundaries.ts`（文件边界代数——两个任务能否并行只由它回答）、
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
-  `orchestrator-child-state.ts`（**子会话五态**：working / waiting-input /
-  done / idle / dead，以及「什么时候该再叫一次」的退避——纯函数，用假屏幕就能单测）、
-
-  `orchestrator-wait.ts`（「有事发生」对子会话意味着什么）、
+  `orchestrator-child-state.ts`（**子会话六态**：working / waiting-input /
+  idle / done / dead / stalled，判据全部是结构化真值——纯函数，用一串通道记录
+  就能单测）、
+  `orchestrator-handoff-advice.ts`（上下文用量 + 待答请求数 ⇒ 接力时机）、
+  `orchestrator-wait.ts`（「有事发生」是什么，以及那份五块回执怎么装）、
   `orchestrator-registry.ts`（编排只能操作门禁替它创建的东西）、
   `orchestrator-relay.ts`（自我接力：只有后继者能关掉前任）、
   `orchestration-id.ts`（编排的稳定地址，接力换人后子会话无感）。
-- **与真实机器打交道**：`orchestrator-tmux.ts`（所有 tmux 命令的唯一构造
-  处）、`orchestrator-wiring.ts`（跑 tmux、读写 plan、加删 worktree、取
-  attention 事件）、`orchestrator-delivery.ts`（投递任务并**校验真的送达**才
-  报成功）、`orchestrator-pane-read.ts`（读子会话屏幕）、
-  `orchestrator-keys.ts`（按键，封闭键位表）、
-  `orchestrator-probe.ts`（**状态探针**：周期性观察每个子会话，把「没有事件」
-  变成「有事件」——它是无人值守的前提，判定本身在 `orchestrator-child-state.ts`）、
-  `orchestrator-notify.ts`
-
-  （桌面通知，唯一入口 + 节流）、`orchestrator-guard.ts`（tmux backstop：
-  拦手写 tmux）。
-- **工具与接线**：`orchestrator-tools.ts`（plan / status / notify）、
-  `orchestrator-read-tools.ts`（read / key）、
-  `orchestrator-session-tools.ts`（五个会话工具的注册与编排——wait / close /
-  relay 各自的判定分别住在 `orchestrator-wait.ts` / `orchestrator-registry.ts`
-  / `orchestrator-relay.ts`）、
-  `orchestrator-dispatch.ts`（spawn / send）、`orchestrator-tool-kit.ts`
-  （每个工具的共用前置：模式、pane 实况、plan 可用性）、
+- **通道（两侧，IO 经注入的 seam）**：`orchestrator-channel.ts`（路径、记录
+  schema、追加/读取/游标、大 payload 溢出、投影、心跳）、
+  `orchestrator-child-channel.ts`（子会话侧：上报、两方竞态提问、读取与确认
+  指令）、`orchestrator-supervisor.ts`（编排侧：读所有通道、判定、决定什么算
+  新闻、渲染回执的前三块）。
+- **与真实机器打交道**：`orchestrator-tmux.ts`（tmux 命令的唯一构造处，现在
+  只剩开 pane / 关 pane / 列 pane —— 没有 `send-keys`，没有 `capture-pane`）、
+  `orchestrator-wiring.ts`（跑 tmux、读写 plan、加删 worktree、持有通道 IO 与
+  监督记忆）、`orchestrator-delivery.ts`（投递并**校验真的送达**才报成功，证据
+  是通道记录与子会话回执）、`orchestrator-notify.ts`（桌面通知，唯一入口 +
+  节流）、`orchestrator-guard.ts`（tmux backstop：拦手写 tmux）。
+- **工具与接线**：`orchestrator-tools.ts`（plan / notify）、
+  `orchestrator-session-tools.ts`（spawn / instruct / wait / close / handoff 的
+  注册，并转注册下面两个模块，所以「有哪些编排工具」只有一个地方回答）、
+  `orchestrator-answer-tools.ts`（answer，含约束 8 的代批边界）、
+  `orchestrator-recovery-tools.ts`（recover / attach、孤儿检测）、
+  `orchestrator-dispatch.ts`（spawn / instruct 的实现）、`orchestrator-tool-kit.ts`
+  （每个工具的共用前置：模式、pane 实况、plan 可用性、子会话资产）、
   `orchestrator-deps.ts`（编排工具要的依赖集合，host 类型在 `tool-host.ts`）、
   `orchestrator-directives.ts`（项目经理拿全套契约，子会话只拿一句话）。
+
 
 > **落点**：新的编排**规则** → `orchestrator-gate.ts` 或
 > `orchestrator-boundaries.ts`（能被单测点名的那种）；新的**能力**（读、按
@@ -273,7 +279,8 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 `ask-user.ts` 是采访模型（逐题推进、上限、跳过与「在聊天里回答」的语义），
 `agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
 `dialog-budget.ts` 管确认对话框的渲染行数预算（宿主不截断，长度得自己管），
-`attention.ts` 是定向唤醒：子会话只唤醒对它负责的那**一个**会话，禁止广播；
+跨会话的唤醒**不在**这一域：一个编排子会话经它自己的**通道**上报（见域 4），
+全局广播队列已删除；
 `edit-discipline.ts` 管「edit/write 失败后改用 bash 写文件」这个习惯，两条通道
 都用：`tool_result` 里追加 `EDIT_FAILURE_NUDGE` / `BASH_WRITE_NUDGE`，以及每轮
 随系统提示注入的 `EDIT_DISCIPLINE_DIRECTIVE`（与 `agent-directives.ts` 同一条
@@ -281,7 +288,7 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 
 > **落点**：想让 agent 改掉某个行为习惯，先问这是不是**提示**能解决的——
 > 是就改 `agent-directives.ts`，不是就写成域 1 的机械规则。系统级通知只有
-> 编排层能发（`orchestrator-notify.ts`），别在 `attention.ts` 里加广播。
+> 编排层能发（`orchestrator-notify.ts`），任何会话都能广播的形态不要再回来。
 
 ### 域 9：通用基础设施
 
@@ -310,21 +317,20 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 
 ---
 
-## 五、`lib/` 全量速查表（85 个模块）
+## 五、`lib/` 全量速查表（86 个模块）
 
 **维护指令（这张表没有机械约束，只有这一条）**：在 `lib/` 下**新增或删除**一个
 模块时，**同一轮改动里**顺手加/删这里的一行——否则这张表会静静地过时。
-随时可核对条目数：`ls lib/*.ts | wc -l`（当前 84，与本表条目一一对应）。
+随时可核对条目数：`ls lib/*.ts | wc -l`（当前 86，与本表条目一一对应）。
 
 | 模块 | 一句话职责 |
 | --- | --- |
 | `adviser-brief.ts` | 组装 adviser 咨询的 brief：主会话 transcript 指针 + 结论落盘路径，第二次起带上轮结论与其后改动 |
-| `advisory-prepare-tools.ts` | 工具 `prepare_adviser` / `prepare_goal_audit`：组装 adviser brief 与 goal 审计任务文本（不碰 git 范围） |
+| `advisory-prepare-tools.ts` | **内部实现**（不注册给 pi）：组装 adviser brief 与 goal 审计任务文本，由 `judge_submit` / `propose_loop_goal` 调用 |
 | `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表 |
 | `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限 |
 | `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义 |
 | `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
-| `attention.ts` | 定向 attention：子会话只唤醒对它负责的那一个会话，禁止广播 |
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交 |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
 | `constants.ts` | 全仓唯一的共享常量：代码/文档扩展名、敏感文件模式、ship 命令种类、语言指令、轮次上限 |
@@ -344,7 +350,6 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 | `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：会话文件放哪、何时算完成、审计裁决是否阻塞 |
 | `judge-process.ts` | judge 子进程基座：`pi -p --session-id` 的确定性会话 id 与进程管理 |
 | `judge-prompt.ts` | judge 子会话的系统提示装配：角色定义 + 共同协议 |
-| `judge-relay-tools.ts` | 把一件事**转交**给 judge 进程的三个工具（`review_spawn` / `review_watch` / `review_send`）及其注册 |
 | `judge-session.ts` | 把 judge「会话」当作被管理实体：transcript、run 目录、自述状态文件 |
 | `judge-session-tools.ts` | 作用于**已存在**的 judge 会话的三个工具（`judge_read` / `judge_close` / `judge_wait`）及其注册 |
 | `judge-watch.ts` | judge 完成的唤醒登记，键在进程退出事件上 |
@@ -357,29 +362,31 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 | `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |
 | `orchestration-id.ts` | 编排 id：编排的稳定地址（不是 session id），接力换人后子会话无感 |
 | `orchestrator-boundaries.ts` | 文件边界代数：两个任务能否并行的唯一判据 |
-| `orchestrator-child-state.ts` | 子会话五态（working / waiting-input / done / idle / dead）与再唤醒退避；判定用结构化真值（含 sidecar 的完成记录），不用 token 增长、也不整屏匹配「在跑」 |
+| `orchestrator-channel.ts` | 点对点通道：路径、记录 schema、追加/读取/行游标、大 payload 溢出到旁文件、投影（还欠着什么）、心跳超时判定 |
+| `orchestrator-child-channel.ts` | 子会话侧：状态上报、「人与项目经理任意一方先答即生效」的竞态提问、读取与确认编排下发的指令 |
+| `orchestrator-child-state.ts` | 子会话六态（working / waiting-input / idle / done / dead / stalled）与再唤醒退避；判据全部是结构化真值，不看屏幕 |
+| `orchestrator-handoff-advice.ts` | 上下文用量 + 待答请求数 ⇒ 接力时机（软/硬阈值，没读数就明说没读数） |
 
-| `orchestrator-delivery.ts` | 任务投递：写任务文件 + argv 启动，并校验真的送达才报成功 |
+| `orchestrator-answer-tools.ts` | 工具 `orchestrator_answer`：把答案写进通道（选项原文/序号/唯一子串，含糊即拒），代批 goal 时按约束 8 比对任务边界 |
+| `orchestrator-delivery.ts` | 投递：任务文件 + `pi --session-id @file` 启动、恢复用的 argv 与说明，以及「什么才算送达」的判据（通道记录 / 子会话回执） |
 | `orchestrator-deps.ts` | 编排工具需要的依赖集合；host 类型本身住在 `tool-host.ts`，这里只 re-export |
 | `orchestrator-directives.ts` | 编排两侧的指令：项目经理拿全套契约，子会话只拿一句话 |
-| `orchestrator-dispatch.ts` | dispatch 半边：`orchestrator_spawn` / `orchestrator_send` |
+| `orchestrator-dispatch.ts` | dispatch 半边：`orchestrator_spawn` / `orchestrator_instruct` |
 | `orchestrator-gate.ts` | 编排的 14 条硬约束，写成纯决策以便逐条单测 |
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
-| `orchestrator-keys.ts` | 在子会话里按键（封闭键位表），让项目经理能选中非默认项 |
 | `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
-| `orchestrator-pane-read.ts` | 读子会话屏幕：只在页脚（`↑↓ navigate enter select`）之上解析对话框，折行选项合并 |
-| `orchestrator-probe.ts` | 状态探针：周期观察每个子会话，进入 waiting-input / done / idle / dead 时自己生成事件；完成写回登记表 `doneAt`，落点越界另发一条事件；出队时按当下真值作废陈旧事件 |
 
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash |
-| `orchestrator-read-tools.ts` | 注册 `orchestrator_read` / `orchestrator_key` 两个原子工具 |
+| `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
 | `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西 |
 | `orchestrator-relay.ts` | 自我接力：只有后继者能关掉前任 |
-| `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close / relay），并注册五个会话工具——spawn / send 的实现在 `orchestrator-dispatch.ts` |
-| `orchestrator-tmux.ts` | 所有 tmux 命令的唯一构造处——项目经理永远不手写 tmux |
+| `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close / handoff）并注册全部八个编排会话工具——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，answer 与 recover/attach 在各自的 `*-tools.ts` |
+| `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块 |
+| `orchestrator-tmux.ts` | 仅剩的 tmux 命令构造：开 pane / 关 pane / 列 pane —— 没有 send-keys，也没有 capture-pane |
 | `orchestrator-tool-kit.ts` | 编排工具的共用前置：模式校验、pane 实况、plan 可用性 |
-| `orchestrator-tools.ts` | plan / status / notify 三个不碰 tmux 的工具 |
-| `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据） |
-| `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、加删 worktree、取 attention 事件 |
+| `orchestrator-tools.ts` | plan / notify 两个不碰 tmux 的工具 |
+| `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据），以及那份五块回执的装配 |
+| `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、加删 worktree、持有本编排唯一的通道 IO 与监督记忆 |
 | `parallel-review.ts` | 审查契约：一轮一个 reviewer、判不可变的 `baseline..HEAD`，以及交给它的任务文本 |
 | `pi-self.ts` | `/tmp` 草稿会话识别：这类会话不由 agent 自行进入 loop |
 | `polish-gate.ts` | 连续 READY 或同一文件反复打磨时，再审必须给出理由 |
@@ -390,11 +397,12 @@ target）与 `advisory-prepare-tools.ts`（`prepare_adviser` /
 | `project-config.ts` | 每项目门禁配置 `.pi/review-gate.json` 的解析与层叠 |
 | `repo-resolve.ts` | 多仓解析：裁决绑定到编辑真正发生的那个仓库 |
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
-| `review-prepare-tools.ts` | 工具 `prepare_review`：算不可变的 `baseline..HEAD`、polish gate、findings 流，并登记裁决要绑定的 review target |
+| `review-prepare-tools.ts` | **内部实现**（不注册给 pi）：算不可变的 `baseline..HEAD`、polish gate、findings 流，并登记裁决要绑定的 review target；由 `judge_submit` 调用 |
 | `review-scope.ts` | 增量审查定档：增量多大就升级为整轮深审的阈值 |
 | `review-stream.ts` | findings 流：reviewer 边审边发，主会话边修 |
 | `sensitive-grant.ts` | 敏感文件的一次性用户授权：限定路径、限时、用后即焚 |
 | `session-dir.ts` | pi 的 session-dir 编码约定，fresh-context 角色据此找到主会话 transcript |
+| `side-effects.ts` | 唯一一处「本进程能不能碰外部世界」的判定（测试 / CI / 无 TTY / 显式关闭一律不能），通知与编排共用 |
 | `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |
 | `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit） |
 | `task-mode.ts` | 会话门禁模式模型：normal < explore < loop < orchestrator 与升降级规则 |

@@ -1,24 +1,42 @@
 /**
- * DELIVERY — getting a task into a child session, and refusing to say it
+ * DELIVERY — getting work into a child session, and refusing to say it
  * arrived unless it demonstrably did (F7, F8, F11).
  *
  * THE MEASURED FAILURE, in order. `orchestrator_spawn` typed the task text
  * into the new pane with `send-keys`: the text was TRUNCATED mid-sentence
  * (F7), no Enter ever submitted what survived (F8), and the tool nevertheless
- * reported "任务说明已发过去" and told the orchestrator to go wait (F8 again).
- * The orchestrator then waited on a child that was sitting in an empty
- * composer with 0.0% context. One human keystroke is what unblocked the whole
- * night. This module removes both halves of that failure:
+ * reported "任务说明已发过去" and told the orchestrator to go wait. The
+ * orchestrator then waited on a child sitting in an empty composer with 0.0%
+ * context. One human keystroke unblocked the whole night.
  *
- *  1. THE TASK NO LONGER TRAVELS THROUGH THE KEYBOARD. It is written to a
+ * TWO RULES CAME OUT OF THAT, and both are still here:
+ *
+ *  1. NOTHING TRAVELS THROUGH THE KEYBOARD. The opening task is written to a
  *     file and handed to the child as pi's own `@file` argv message — the
- *     exact mechanism lib/judge-process.ts has used since 2026-08-28. A file
- *     cannot be truncated by a TUI, cannot be split by a newline, and needs
- *     no Enter: it IS the session's first prompt.
+ *     mechanism lib/judge-process.ts has used since 2026-08-28. A file cannot
+ *     be truncated by a TUI, cannot be split by a newline, and needs no Enter:
+ *     it IS the session's first prompt.
  *  2. THE RECEIPT IS EARNED, NOT ASSUMED. {@link deliveryVerdict} takes the
- *     evidence actually observed after the fact and decides whether delivery
- *     may be claimed. No evidence ⇒ the tool FAILS. "Sent" is not a thing the
- *     gate can know by having tried.
+ *     evidence actually observed and decides whether delivery may be claimed.
+ *     No evidence ⇒ the tool FAILS. "Sent" is not a thing the gate can know by
+ *     having tried.
+ *
+ * ── WHAT CHANGED (2026-08-30): THE EVIDENCE IS NO LONGER A SCREEN ──
+ *
+ * Proof used to be a marker string spotted in `capture-pane` output, plus a
+ * second lane ("submitted" vs "queued") inferred from whether a `Steering:`
+ * line happened to be rendered. Every part of that was a guess about pixels,
+ * and the `send-keys` path it verified no longer exists — a later message
+ * goes into the child's CHANNEL and is injected by the child's own gate with
+ * `pi.sendUserMessage`.
+ *
+ * So the evidence is now structured and unambiguous:
+ *
+ *  - a SPAWN is proven when the child appends anything at all to its channel
+ *    (its gate booted and is reporting) or when its sidecar lands on disk;
+ *  - an INSTRUCTION is proven by the child's own acknowledgement record,
+ *    which also says whether it was actually applied. There is no lane to
+ *    infer: `deliverAs` decided that before the message was ever written.
  *
  * WHERE THE TASK FILE LIVES: outside the repository, next to the gate's
  * orchestration worktrees. A task file inside the worktree would be swept
@@ -26,29 +44,15 @@
  * lib/orchestrator-wiring.ts puts worktrees under the temp dir.
  *
  * Pure module: it builds strings and judges evidence. The IO (writing the
- * file, capturing the pane) belongs to the wiring.
+ * file, reading the channel) belongs to the wiring.
  */
-
-import type { StartupEvidence } from "./orchestrator-pane-read.ts";
 
 /** Subdirectory of the orchestration scratch root that holds task files. */
 export const TASK_FILE_DIRNAME = "tasks";
 
 /**
- * A message longer than this — or one containing a newline — is delivered as
- * a FILE plus a one-line pointer instead of being typed.
- *
- * The bound is small on purpose. F7 proved the failure mode is silent
- * truncation somewhere between the tool and the TUI, and nobody can say where
- * exactly; the only safe reading is that typing is for short, single-line
- * text and nothing else.
- */
-export const SEND_INLINE_MAX_CHARS = 200;
-
-/**
- * A per-delivery token that appears in the task file AND on the child's
- * screen once it renders the message. It is what turns "we ran a command"
- * into "the child has this text".
+ * A per-delivery token that appears in the task file, so a human reading the
+ * child's transcript can tell which assignment it is looking at.
  */
 export function buildDeliveryMarker(taskId: string, now: number): string {
   const safe = taskId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 24);
@@ -60,13 +64,7 @@ export function taskFileName(marker: string): string {
   return `${marker.replace(/[^A-Za-z0-9._-]/g, "-")}.md`;
 }
 
-/**
- * The document the child opens as its first message.
- *
- * The marker is on its own line at the top: it has to survive whatever
- * wrapping the child's renderer applies, because it is the evidence the pane
- * check looks for.
- */
+/** The document the child opens as its first message. */
 export function buildTaskDocument(opts: {
   marker: string;
   taskId: string;
@@ -77,57 +75,59 @@ export function buildTaskDocument(opts: {
     `<!-- ${opts.marker} -->`,
     `# 任务 ${opts.taskId}：${opts.title}`,
     "",
-    `投递标记：\`${opts.marker}\`（项目经理据此确认这份任务真的到了你手上，别删）`,
-    "",
     opts.brief.trim(),
     "",
   ].join("\n");
 }
 
+/**
+ * A child's pi session id — DETERMINISTIC, derived from its registry handle.
+ *
+ * This is what makes death survivable. `pi --session-id <id>` re-opens the
+ * SAME transcript, so a child whose pane was killed (crash, a stray
+ * `kill-pane`, a machine that slept) is restarted with its whole history
+ * intact rather than started over from the task document. It is the same
+ * trick lib/judge-process.ts uses to carry a judge's context across rounds.
+ */
+export function childSessionId(childId: string): string {
+  // A DOT is excluded along with everything else non-alphanumeric: pi turns a
+  // session id into a file name, and `..` in a file name is the one sequence
+  // that stops being a name and starts being a path.
+  return `rg-child-${childId.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 48)}`;
+}
+
 /** The argv a child pane runs: pi with the task file as its first message. */
-export function buildChildCommand(taskPath: string, piBin = "pi"): string[] {
-  return [piBin, `@${taskPath}`];
-}
-
-/** How a message should reach an ALREADY RUNNING child. */
-export type SendMode =
-  | { kind: "inline"; text: string }
-  | { kind: "file"; body: string; pointer: (path: string) => string };
-
-export const ECHO_MARKER_CHARS = 16;
-
-/**
- * The slice of a typed message that is looked for on the child's screen.
- *
- * SHORT on purpose. A terminal wraps at its own width, so the longer the
- * needle the more likely it straddles a line break and is never found —
- * which would turn a perfectly good delivery into a false failure. Sixteen
- * characters is long enough to be distinctive and short enough to survive
- * any sane pane width.
- */
-export function echoMarker(text: string): string {
-  return String(text ?? "").replace(/\s+/g, " ").trim().slice(0, ECHO_MARKER_CHARS);
+export function buildChildCommand(taskPath: string, childId: string, piBin = "pi"): string[] {
+  return [piBin, "--session-id", childSessionId(childId), `@${taskPath}`];
 }
 
 /**
- * Decide how to deliver a message to a running child.
+ * The argv that RESUMES a child after its pane died.
  *
- * Short single-line text is typed (a running session has no other way in);
- * anything else becomes a file plus a one-line pointer, so `send-keys` only
- * ever carries a path.
+ * No task file: the transcript already holds the assignment and everything
+ * the child did about it. What it gets instead is a short note saying it was
+ * recovered, because the one thing the transcript cannot contain is the fact
+ * that the process it belonged to has been restarted.
  */
-export function planSend(message: string): SendMode {
-  const text = message.trim();
-  if (text.length <= SEND_INLINE_MAX_CHARS && !text.includes("\n")) {
-    return { kind: "inline", text };
-  }
-  return {
-    kind: "file",
-    body: text,
-    pointer: (path: string) =>
-      `项目经理给你发了一份说明，请先完整读一遍再继续：${path}`,
-  };
+export function buildRecoverCommand(childId: string, notePath: string, piBin = "pi"): string[] {
+  return [piBin, "--session-id", childSessionId(childId), `@${notePath}`];
 }
+
+/** The note a recovered child opens with. */
+export function buildRecoveryNote(opts: { childId: string; taskId: string; reason: string }): string {
+  return [
+    `# 会话已恢复（${opts.childId}）`,
+    "",
+    `你这个会话的 pane 之前消失了（${opts.reason}），项目经理用同一个 session id 把它重开了 —— ` +
+    "上面的对话历史就是你自己的，任务没有换。",
+    "",
+    `任务 ${opts.taskId} 仍在进行中。先用 \`/gate-status\` 看一眼门禁现在的状态` +
+    "（工作分支、review 裁决、precommit 都还在，没有随进程消失），再接着做。",
+    "",
+  ].join("\n");
+}
+
+
 
 // ---------------------------------------------------------------------------
 // The receipt (F8) — what counts as proof
@@ -135,81 +135,77 @@ export function planSend(message: string): SendMode {
 
 /** Which delivery path is being judged; they have different proofs. */
 export type DeliveryKind =
-  /** The task rode in on the argv — pi running at all means it has it. */
+  /** The task rode in on the argv — a reporting gate means it has it. */
   | "spawn"
-  /** The text was typed into a running session — the echo is the proof. */
-  | "send";
+  /** A message written to the channel for the child's gate to inject. */
+  | "instruct";
 
-/**
- * WHICH LANE a delivery landed in (R-20).
- *
- * The same text has two completely different fates depending on whether the
- * child was busy: typed into an idle composer it is SUBMITTED (and a
- * `/gate-bypass …` is executed as a slash command), while a busy child files
- * it in the steering queue as an ordinary message the agent will read (the
- * command never runs). The hand-run had to discover that by experiment; the
- * receipt now says which one happened.
- */
-export type DeliveryLane = "submitted" | "queued";
+/** Everything observed about one delivery. No field is inferred from a screen. */
+export interface DeliveryEvidence {
+  /** The child has appended at least one record to its channel. */
+  channelReported: boolean;
+  /** Its own gate sidecar exists on disk. */
+  sidecarPresent: boolean;
+  /** The child's acknowledgement of an instruction, when it made one. */
+  ack?: { delivered: boolean; detail?: string };
+}
+
+/** Nothing observed yet. */
+export function emptyDeliveryEvidence(): DeliveryEvidence {
+  return { channelReported: false, sidecarPresent: false };
+}
 
 export type DeliveryVerdict =
-  | { ok: true; summary: string; lane?: DeliveryLane }
+  | { ok: true; summary: string }
   | { ok: false; reason: string };
-
 
 /**
  * May this delivery be reported as successful?
  *
  * SPAWN. The task is in the process's argv, so the question reduces to "did
- * the process start". A pi-looking screen, the marker on screen, or the
- * child's own sidecar on disk each answer it.
+ * the process start and is its gate alive". A channel record answers both at
+ * once — only a running gate can write one. A sidecar on disk answers the
+ * second half and is accepted as the weaker fallback.
  *
- * SEND. The text went through the keyboard, so a running process proves
- * NOTHING about whether the text landed — that is precisely the F8 mistake.
- * Only the echo (the marker/pointer visible on screen) counts.
+ * INSTRUCT. The message is in the channel, which proves only that it was
+ * WRITTEN. The child's acknowledgement is what proves it was injected, and an
+ * acknowledgement that says `delivered: false` is a FAILURE reported with the
+ * child's own explanation — not a success with a caveat.
  *
- * When nothing was observed the verdict is a FAILURE with the evidence
- * spelled out, and the caller is told what state the world is in. The
- * user's rule for this round (2026-08-29): keep the pane, do not kill a
- * session that may well be alive; put the task back to `pending` so it can be
- * picked up again.
+ * When nothing was observed the verdict is a failure with the evidence spelled
+ * out. The user's standing rule for that case (2026-08-29): keep the pane, do
+ * not kill a session that may well be alive; put the task back to `pending` so
+ * it can be picked up again.
  */
-export function deliveryVerdict(
-  kind: DeliveryKind,
-  evidence: StartupEvidence,
-): DeliveryVerdict {
+export function deliveryVerdict(kind: DeliveryKind, evidence: DeliveryEvidence): DeliveryVerdict {
   if (kind === "spawn") {
-    if (evidence.markerVisible) return { ok: true, summary: "任务标记已出现在子会话屏幕上" };
-    if (evidence.sidecarPresent) return { ok: true, summary: "子会话已写出自己的门禁 sidecar，扩展已加载" };
-    if (evidence.looksLikePi) return { ok: true, summary: "子会话 pane 里已经是一个运行中的 pi 会话（任务随 argv 一起进去的）" };
+    if (evidence.channelReported) {
+      return { ok: true, summary: "子会话已在自己的通道上报了状态 —— 进程起来了，门禁扩展也活着" };
+    }
+    if (evidence.sidecarPresent) {
+      return { ok: true, summary: "子会话已写出自己的门禁 sidecar，扩展已加载（尚未上报状态）" };
+    }
     return {
       ok: false,
       reason:
-        "开出了 pane，但看不到任何「子会话真的起跑了」的证据 —— 不回执「已发送」。" +
+        "开出了 pane，但通道里一条记录都没有、sidecar 也不存在 —— 不回执「已发送」。" +
         "（上一轮正是这里谎报，导致项目经理空等一整夜。）",
     };
   }
-  if (evidence.markerVisible) {
-    return { ok: true, summary: "消息已出现在子会话屏幕上（作为一条输入被提交）", lane: "submitted" };
-  }
-  // R-14 — the OTHER lane. A message sent while the child is running a tool
-  // goes into its steering queue and is delivered when that tool returns. It
-  // is visible on screen as a `Steering:` line, and treating that as "not
-  // delivered" is what pushed the hand-run toward re-sending (R-13's setup).
-  if (evidence.steeringQueued) {
+  const ack = evidence.ack;
+  if (!ack) {
     return {
-      ok: true,
-      summary:
-        "消息已进入子会话的 steering 队列（它此刻正在跑工具）—— " +
-        "会在这次工具调用结束后作为一条普通消息送达，**不会**被当成 slash 命令执行",
-      lane: "queued",
+      ok: false,
+      reason:
+        "指令已写进通道，但子会话一直没有回执 —— 它的门禁可能没在跑（stalled），" +
+        "或者进程已经不在了。先看 orchestrator_wait 的健康快照，再决定 recover 还是 close。",
     };
   }
-  return {
-    ok: false,
-    reason:
-      "消息敲进去了，但屏幕上既看不到它、也没有进 steering 队列 —— 无法确认子会话真的收到" +
-      "（可能没提交、可能被截断）。不回执「已发送」：请 `orchestrator_read` 看现状后重试。",
-  };
+  if (!ack.delivered) {
+    return {
+      ok: false,
+      reason: `子会话收到了指令但没能注入：${ack.detail ?? "（它没有说明原因）"}`,
+    };
+  }
+  return { ok: true, summary: `子会话已确认注入${ack.detail ? `：${ack.detail}` : ""}` };
 }
-

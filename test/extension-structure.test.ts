@@ -16,10 +16,13 @@ const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts")
 const JUDGE_SESSION_TOOLS = new Set(["judge_read", "judge_close", "judge_wait"]);
 /**
  * The other half of the same family: the tools that RELAY to a judge session
- * (a round, a follow-up, a completion watcher) moved to lib/ the same way.
+ * (a round, a follow-up, a completion watcher) are DELETED (2026-08-30,
+ * philosophy three): `judge_submit` dispatches a round and registers its own
+ * completion watcher, so `review_spawn` / `review_watch` / `review_send` were
+ * purely a second way to ask for the same thing. Their absence is asserted
+ * below rather than their behavior.
  */
-const RELAY_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-relay-tools.ts"), "utf8");
-const JUDGE_RELAY_TOOLS = new Set(["review_spawn", "review_watch", "review_send"]);
+
 /**
  * The PREPARE family moved the same way, split by responsibility: the round a
  * reviewer judges (a commit range, a findings stream, a review target) in one
@@ -43,7 +46,6 @@ const COPILOT_GH_SRC = readFileSync(join(ROOT, "lib", "copilot-gh.ts"), "utf8");
 /** Which source owns a given tool's body. */
 function sourceOf(tool: string): string {
   if (JUDGE_SESSION_TOOLS.has(tool)) return JUDGE_TOOLS_SRC;
-  if (JUDGE_RELAY_TOOLS.has(tool)) return RELAY_TOOLS_SRC;
   if (REVIEW_PREPARE_TOOLS.has(tool)) return REVIEW_PREPARE_SRC;
   if (ADVISORY_PREPARE_TOOLS.has(tool)) return ADVISORY_PREPARE_SRC;
   if (COPILOT_TOOLS.has(tool)) return COPILOT_TOOLS_SRC;
@@ -81,9 +83,6 @@ const LIB_TOOL_HANDLERS: Record<string, string> = {
   judge_read: "async function doRead(",
   judge_close: "async function doClose(",
   judge_wait: "async function doWait(",
-  review_spawn: "async function doSpawn(",
-  review_watch: "async function doWatch(",
-  review_send: "async function doSend(",
   prepare_review: "async function doPrepareReview(",
   prepare_adviser: "async function doPrepareAdviser(",
   prepare_goal_audit: "async function doPrepareGoalAudit(",
@@ -119,19 +118,31 @@ function judgeToolsWiring(): string {
   return windowOf("registerJudgeSessionTools(pi, {", "\n  });", "judge tools wiring");
 }
 
-/** The extension's wiring of the judge RELAY tools — deps, nothing else. */
-function relayToolsWiring(): string {
-  return windowOf("registerJudgeRelayTools(pi, {", "\n  });", "judge relay tools wiring");
-}
+/**
+ * THE TEN ADVANCED ENTRIES ARE NOT REGISTERED (2026-08-30, philosophy three).
+ *
+ * Seven of them still EXIST as implementations, captured into `internalHost`
+ * so `judge_submit` and `propose_loop_goal` call the ONE copy of each
+ * mechanical check; the other three were deleted outright. What must be true
+ * either way is that `pi` never learns the names — an agent that can see a
+ * step can be tempted to sequence the steps by hand, which is the whole cost
+ * philosophy two is about.
+ */
+const DELETED_TOOL_ENTRIES = [
+  "run_precommit", "review_checkpoint", "prepare_review", "prepare_adviser",
+  "prepare_goal_audit", "record_review", "record_goal_prereview",
+  "review_spawn", "review_watch", "review_send",
+];
+
 
 /** The extension's wiring of `prepare_review` — deps, nothing else. */
 function REVIEW_PREPARE_WIRING(): string {
-  return windowOf("registerReviewPrepareTools(pi, {", "\n  });", "review prepare tools wiring");
+  return windowOf("registerReviewPrepareTools(internalHost, {", "\n  });", "review prepare tools wiring");
 }
 
 /** The extension's wiring of the two advisory prepare tools — deps, nothing else. */
 function ADVISORY_WIRING(): string {
-  return windowOf("registerAdvisoryPrepareTools(pi, {", "\n  });", "advisory prepare tools wiring");
+  return windowOf("registerAdvisoryPrepareTools(internalHost, {", "\n  });", "advisory prepare tools wiring");
 }
 
 /** The extension's wiring of the two Copilot review tools — deps, nothing else. */
@@ -522,8 +533,14 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
     "the questions themselves are shown, not just filed");
   // The interview: one dialog per question, with its N / M progress.
   assert.match(toolBody, /progressLabel\(index, questions\.length\)/);
-  assert.match(toolBody, /uiCtx\.ui\?\.select\?\.\(/, "options ⇒ a choice dialog");
-  assert.match(toolBody, /uiCtx\.ui\?\.input\?\.\(/, "no options ⇒ free text");
+  assert.match(toolBody, /uiCtx\.ui!\.select!\(/, "options ⇒ a choice dialog");
+  assert.match(toolBody, /uiCtx\.ui!\.input!\(/, "no options ⇒ free text");
+  // Both go through the channel funnel, so an orchestration child's project
+  // manager can answer the same question the human can (2026-08-30) — and
+  // whichever of them answers first takes the box off the other's screen.
+  assert.match(toolBody, /askEitherSide\(/, "every gate question is answerable by EITHER side");
+  assert.match(toolBody, /topic: "ask-user"/, "the request is LABELLED by the gate that raised it");
+
   // A dismissed dialog or a broken UI is NOT consent: it becomes an
   // unanswered question, which pauses the loop.
   assert.match(toolBody, /picked = undefined; \/\/ a broken dialog is silence, never an answer/);
@@ -1558,44 +1575,76 @@ test("user ask 2026-08-27: prepare_review wires the trusted precommit baseline i
     "a truncated goal must be completed from the file when writing the task");
 });
 
-test("attention stays DIRECTED and file-based — no tmux signal, no global broadcast", () => {
-  // SIGNAL side: the event is published through lib/attention.ts, addressed by
-  // attentionTarget() — the ORCHESTRATION this session belongs to
-  // (RG_ORCHESTRATION_ID) if there is one, otherwise the spawning session
-  // (RG_PARENT_SESSION). Never a global bell.
-  const fnAt = SRC.indexOf("function notifyUserAttention(");
-  assert.ok(fnAt > 0, "notifyUserAttention must exist");
-  const fn = SRC.slice(fnAt, fnAt + 900);
-
-  assert.match(fn, /publishAttention\(\{/, "the event goes through the payload publisher");
-  assert.match(fn, /fromSessionId: attentionIdentity\(\)/, "the payload identifies the sender (self-wake filter)");
-  assert.match(fn, /toSessionId: attentionTarget\(\)/,
-    "the payload is addressed by attentionTarget(): the ORCHESTRATION it belongs to, else the spawning session");
-  assert.match(fn, /reason,/, "the payload carries the reason");
-  // F12 — and WHERE it came from. Without an origin pane the orchestration
-  // waiter has nothing to check ownership against, and it spun on foreign
-  // traffic (measured: `fromPane: None` on every event of the first real run).
-  assert.match(fn, /fromPane: process\.env\.TMUX_PANE/,
-    "the payload stamps its origin pane, so a waiter can tell whose event it is");
-
-  assert.doesNotMatch(fn, /osascript/, "no macOS notification is fired from the extension");
-  assert.doesNotMatch(fn, /waitForSignalAsync|wait-for/, "no tmux signal is fired from the extension");
-  // The address derives from the parent session id — no global broadcast.
+test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast", () => {
+  // The global attention queue is GONE (2026-08-30). A child of an
+  // orchestration now writes to ONE file that belongs to it alone, so
+  // isolation is a property of the medium rather than a filter every reader
+  // has to remember to apply — which is what F12/R-16 were about.
+  assert.doesNotMatch(SRC, /publishAttention|consumeAttention|attentionTarget\(/,
+    "the global attention queue and its recipient filter are deleted");
+  assert.doesNotMatch(SRC, /review-gate-attention/, "and so is the file it rode on");
   assert.doesNotMatch(SRC, /rg-user-attention/, "the global broadcast channel is GONE");
   assert.doesNotMatch(SRC, /createWatchRegistry\(/, "the tmux channel watcher registry is GONE");
-  // propose_loop_goal: signalled right before the approval dialog renders.
-  const goalBody = toolBodyOf("propose_loop_goal");
-  const dialogAt = goalBody.indexOf("confirmBounded(");
-  const signalAt = goalBody.indexOf("notifyUserAttention(\"等待 goal 批准\"");
-  assert.ok(signalAt > 0 && signalAt < dialogAt, "the approval dialog signals attention before rendering");
-  // ask_user: signalled when the interview starts, with its own reason.
-  const pauseBody = toolBodyOf("ask_user");
-  assert.match(pauseBody, /notifyUserAttention\(\"等待回答提问\"\)/, "a pause signals attention with its reason");
-  // Spawn side: the child receives RG_PARENT_SESSION so it knows who to wake.
+
+  // The binding: an orchestration id + this session's own child id. With
+  // neither, every reporting function below is a silent no-op.
+  const bindingAt = SRC.indexOf("function childBinding(");
+  assert.ok(bindingAt > 0, "the child side needs a binding to its own channel");
+  const binding = SRC.slice(bindingAt, bindingAt + 700);
+  assert.match(binding, /supervisionTarget\(\)/,
+    "addressed to the ORCHESTRATION, so a handoff never retires the channel");
+  assert.match(binding, /STATE_VARIANT_ENV/, "and to this session's own child id");
+  assert.match(binding, /if \(!orchestrationId \|\| !childId\) return undefined/,
+    "a standalone session reports nowhere");
+
+  // The report itself is pi's own truth, never a screen.
+  const reportAt = SRC.indexOf("function reportChildState(");
+  assert.ok(reportAt > 0, "the child reports its own state");
+  const report = SRC.slice(reportAt, reportAt + 900);
+  assert.match(report, /ctx\.isIdle\?\.\(\) === false/, "streaming is asked, not inferred");
+  assert.match(report, /state\.completion\?\.at \? "done" : "idle"/,
+    "R3-5: a finished child is `done`, and one that merely stopped is `idle`");
+  assert.doesNotMatch(report, /capture-pane|screenLooksBusy/, "no screen is consulted, in any state");
+
+  // It is called from pi's OWN events, unconditionally and first.
+  const settled = windowOf('pi.on("agent_settled"', "\n  });", "agent_settled");
+  assert.match(settled, /reportChildState\(ctx\)/);
+  assert.match(settled, /drainChildInstructions\(ctx\)/, "and the orchestrator's messages are applied there");
+  const turnEnd = windowOf('pi.on("turn_end"', "\n  });", "turn_end");
+  assert.match(turnEnd, /reportChildState\(ctx\)/, "turn_end is the heartbeat `stalled` is the absence of");
+
+  // Delivery is pi's API, never a keyboard.
+  const drainAt = SRC.indexOf("async function drainChildInstructions(");
+  const drain = SRC.slice(drainAt, drainAt + 1600);
+  assert.match(drain, /pi\.sendUserMessage\(text, \{ deliverAs: instruction\.mode \}\)/);
+  assert.match(drain, /ctx\.abort\?\.\(\)/, "interrupt is ctx.abort(), not a Ctrl-C keystroke");
+  assert.match(drain, /acknowledgeInstruct\(binding, instruction\.instructId, false/,
+    "a failure is acknowledged AS a failure — the receipt the orchestrator builds on");
+
+  // Spawn side: the judge child is still told who spawned it.
   const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
   const spawn = SRC.slice(spawnAt, spawnAt + 9000);
   assert.match(spawn, /parentSessionId: state\.sessionId \?\? undefined/, "the child is told who spawned it");
 });
+
+test("every gate dialog is answerable by EITHER the human or the project manager", () => {
+  const funnelAt = SRC.indexOf("async function askEitherSide(");
+  assert.ok(funnelAt > 0, "there is ONE funnel every gate question goes through");
+  const funnel = SRC.slice(funnelAt, funnelAt + 700);
+  assert.match(funnel, /askThroughChannel\(binding, \{ \.\.\.request, hasUI \}, render\)/,
+    "the race lives in the pure module, not in the extension");
+  assert.match(funnel, /if \(!binding\) return hasUI \? render\(/,
+    "a session with no orchestration just renders the dialog, exactly as before");
+
+  // The goal approval is the one dialog constraint 8 applies to, so its
+  // request must carry the DRAFT — that is the text the boundary check reads.
+  const goalBody = toolBodyOf("propose_loop_goal");
+  assert.match(goalBody, /topic: "goal-approval"/);
+  assert.match(goalBody, /payload: goalText/,
+    "R-7: the orchestrator approves the text the CHILD wrote, never one it retyped");
+  assert.match(goalBody, /signal,/, "and the box is dismissible, so an answered question stops being asked");
+});
+
 
 test("round-18: prepare_review carries the polish-gate reason — parameter, refusal, persistence, reviewer injection", () => {
   const body = toolBodyOf("prepare_review");
@@ -1682,7 +1731,7 @@ test("judge_submit is the agent's single judge entry and hides every process det
   // and a bare indexOf of a vanished anchor returns -1, which silently widens
   // the slice to the rest of the file instead of failing. windowOf asserts
   // both ends.
-  const body = windowOf('name: "judge_submit"', "\n  registerJudgeRelayTools(pi, {", "judge_submit body");
+  const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
   // The agent says WHO and WHAT. Anything procedural is the gate's business.
   assert.match(body, /role: Type\.Enum\(\{ reviewer/, "the role is the addressing key");
   assert.match(body, /task: Type\.String\(/, "the task text is the other input");
@@ -1760,47 +1809,48 @@ test("judge_read / judge_close / judge_wait address a judge by ROLE", () => {
   }
 });
 
-test("review_spawn / review_watch / review_send are lib/ tools the extension only WIRES", () => {
-  // The move is only real if the extension stopped owning these bodies: a
-  // second registration left behind would shadow the module's, and the unit
-  // tests would then pin code nobody runs.
-  for (const tool of ["review_spawn", "review_watch", "review_send"]) {
-    assert.ok(RELAY_TOOLS_SRC.includes(`name: "${tool}"`), `${tool} must be registered in lib/judge-relay-tools.ts`);
-    assert.ok(!SRC.includes(`name: "${tool}"`), `${tool} must no longer be registered in the extension`);
+test("the TEN advanced entries are not registered anywhere an agent can see", () => {
+  // Philosophy three, mechanically. Seven of them still exist as
+  // implementations (captured into `internalHost` so `judge_submit` and
+  // `propose_loop_goal` call ONE copy of each mechanical check); three were
+  // deleted outright. Either way `pi` never learns the name.
+  const LIB_SOURCES = readdirSync(join(ROOT, "lib"))
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => ({ file: f, code: readFileSync(join(ROOT, "lib", f), "utf8") }));
+
+  for (const tool of DELETED_TOOL_ENTRIES) {
+    assert.ok(!SRC.includes(`pi.registerTool({\n    name: "${tool}"`),
+      `${tool} must not be registered with pi`);
+    for (const { file, code } of LIB_SOURCES) {
+      if (!code.includes(`name: "${tool}"`)) continue;
+      // A lib module may still DEFINE it, but the extension must wire that
+      // module through `internalHost`, never through `pi`.
+      const registrar = code.match(/export function (register\w+)\(host: ToolHost/);
+      assert.ok(registrar, `${file} registers ${tool}: it needs a named registrar to wire internally`);
+      assert.ok(SRC.includes(`${registrar![1]}(internalHost, {`),
+        `${file}'s ${registrar![1]} must be wired through internalHost, not pi`);
+    }
   }
-  // One role enum, shared by the two tools that take it (a second spelling is
-  // how they would silently start accepting different roles).
-  assert.match(
-    RELAY_TOOLS_SRC,
-    /const JUDGE_ROLE_ENUM = Type\.Enum\(\{ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" \}\)/,
-    "the shared role parameter is the three judge roles",
-  );
-  assert.match(toolBodyOf("review_spawn"), /role: JUDGE_ROLE_ENUM/, "review_spawn takes the shared role");
-  assert.match(toolBodyOf("review_send"), /role: Type\.Optional\(JUDGE_ROLE_ENUM\)/,
-    "review_send takes the same role, optionally");
-  // The refusals stay the module's, and the role list stays the ONE list.
-  assert.match(RELAY_TOOLS_SRC, /import \{ JUDGE_ROLES \} from "\.\/judge-prompt\.ts"/,
-    "the accepted roles are the shared constant, never a copy");
-  // Everything the tools cannot own arrives through deps — and every dep is
-  // bound to the extension's own owner, so none of them can drift into a
-  // second implementation.
-  const wiring = relayToolsWiring();
-  assert.match(wiring, /resolveRepo: \(requested\) => resolveToolRepo\(requested\)/, "the repo resolution stays the gate's");
-  assert.match(wiring, /dispatchRound: \(request\) => dispatchJudgeRound\(request\)/,
-    "a round is dispatched by the ONE spawn owner (identity, reuse, fresh-kill)");
-  assert.match(wiring, /childByRole: \(root, role\) => judgeChildByRole\(root, role\)/, "the registry answers by role");
-  assert.match(wiring, /findChild: \(root, role, sessionId\) => findJudgeChild\(root, role, sessionId\)/,
-    "…and by role-or-id, with the role winning");
-  assert.match(wiring, /childBySessionId: \(sessionId\) => \[\.\.\.childSessions\.values\(\)\]\.flat\(\)/,
-    "review_watch is addressed by the internal key alone, so its lookup spans every repo");
-  assert.match(wiring, /registerWatch: \(sessionId, label\) => registerWatch\(sessionId, label\)/,
-    "the completion watcher is registered by the extension's own helper");
-  // A resume is a DISPATCH under the same session id (a fresh run dir), not a
-  // write into the previous round's files — round-9's "instantly done" bug.
-  assert.match(toolBodyOf("review_send"),
-    /deps\.dispatchRound\(\{ root, role: child\.role, title: child\.title, task: text, streamPath: child\.streamPath \}\)/,
-    "review_send resumes through the same dispatch owner, keeping the round's stream");
+  // The modules whose whole subject is gone leave nothing behind at all —
+  // an unused file is how a removed path comes back.
+  for (const gone of [
+    "judge-relay-tools.ts", "orchestrator-read-tools.ts", "orchestrator-probe.ts",
+    "orchestrator-pane-read.ts", "orchestrator-keys.ts", "attention.ts",
+  ]) {
+    assert.ok(!existsSync(join(ROOT, "lib", gone)), `lib/${gone} must be deleted, not left unused`);
+  }
 });
+
+test("the internal host captures an implementation WITHOUT exposing it", () => {
+  const at = SRC.indexOf("function captureInternalTool(");
+  assert.ok(at > 0, "there is one capture point");
+  const capture = SRC.slice(at, at + 400);
+  assert.match(capture, /toolExecutes\.set\(s\.name, s\.execute as ToolExecute\)/,
+    "the body is reachable by name for the chain…");
+  assert.doesNotMatch(capture, /registerToolUpstream|pi\.registerTool/,
+    "…and never reaches pi's registry");
+});
+
 
 
 test("judge_wait applies the three end-of-round criteria and returns conclusion + progress", () => {
@@ -2113,20 +2163,15 @@ test("review_checkpoint: the pre-review commit channel is registered with its co
   assert.match(body, /REVIEW_GATE_BYPASS: "1"/, "hook bypass is scoped to the child process");
 });
 
-test("review_watch: the wake-up watcher is registered with triggerTurn semantics", () => {
-  // The tool itself moved to lib/judge-relay-tools.ts; the WAKE-UP mechanism
-  // it re-registers did not — so the registration is asserted against the
-  // module that owns it, and the helper + registry against the extension.
-  assert.ok(RELAY_TOOLS_SRC.includes('name: "review_watch"'), "review_watch must be registered");
-  const watchBody = toolBodyOf("review_watch");
-  assert.match(watchBody, /deps\.registerWatch\(sessionId, label\)/,
-    "the tool reaches the helper through its dep, and nothing else");
-  assert.match(relayToolsWiring(), /registerWatch: \(sessionId, label\) => registerWatch\(sessionId, label\)/,
-    "…and the wiring binds that dep to the extension's own helper");
-  // Round-14 (user ask): the registration logic lives in the shared
-  // registerWatch helper; review_spawn calls it AUTOMATICALLY, review_watch
-  // only re-registers with a custom label. The wake must be a new turn —
-  // never polling, never sleeping on the agent side.
+test("the completion watcher is registered with triggerTurn semantics", () => {
+  // `review_watch` — the tool that RE-registered a watcher by hand — is gone.
+  // Every dispatched round registers one automatically, so it was a second
+  // way to ask for something already done. The MECHANISM it drove is still
+  // load-bearing, and it is what this asserts.
+  //
+  // The wake must be a NEW TURN — never polling, never sleeping on the agent
+  // side.
+
   const helperAt = SRC.indexOf("function registerWatch(");
   assert.ok(helperAt >= 0, "registerWatch helper must exist");
   const helper = SRC.slice(helperAt, helperAt + 400);
@@ -2907,7 +2952,7 @@ test("review_checkpoint is fail-closed about the branch it commits on", () => {
 
 test("judge_submit builds the task for EVERY role, and a goal audit streams its findings", () => {
   // Same asserted window as the entry test above: the relay wiring closes it.
-  const body = windowOf('name: "judge_submit"', "\n  registerJudgeRelayTools(pi, {", "judge_submit body");
+  const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
   // The agent hands over a draft or a question; the gate builds what the
   // judge actually receives.
   assert.match(body, /callTool\("prepare_goal_audit", \{ goal: task, repo: root \}/);
@@ -3114,20 +3159,27 @@ test("R-3: an orchestrator never receives the LOOP's continuation — its criter
   const own = windowOf("function orchestratorSettled(", "\n  }", "orchestratorSettled");
   assert.match(own, /buildOrchestratorResume\(/, "and it has a continuation of its own");
   assert.match(own, /orchestrationDoneProblems\(\)/, "built from the PLAN");
-  assert.match(own, /startProbeTimer\(ctx\)/, "which also arms the state probe");
+  assert.match(own, /startSupervisionTimer\(ctx\)/, "which also arms the background supervisor");
   assert.doesNotMatch(own, /unmetRequirements|LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/,
     "and never from the loop's gates");
 });
 
-test("R-16/R-23: the background state probe is wired, default-on in orchestrator mode, and cleaned up", () => {
-  const start = windowOf("function startProbeTimer(", "\n  }", "startProbeTimer");
-  assert.match(start, /PROBE_INTERVAL_MS/, "the cadence comes from the probe module, not a literal here");
+test("the background supervisor is wired, default-on in orchestrator mode, and cleaned up", () => {
+  const start = windowOf("function startSupervisionTimer(", "\n  }", "startSupervisionTimer");
+  assert.match(start, /SUPERVISION_INTERVAL_MS/, "the cadence is a named constant, not a literal at the call site");
   assert.match(start, /state\.taskMode !== "orchestrator"/, "it exists only for the supervising role");
   assert.match(start, /ctx\.isIdle\?\.\(\)/, "a wake-up mid-turn would be noise");
   assert.match(start, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");
+  // What it reads is the CHANNELS — no pane is captured anywhere in the loop.
+  const drain = windowOf("function drainSupervisionNews(", "\n  }", "drainSupervisionNews");
+  assert.match(drain, /superviseChildren\(\{/, "the read is the supervisor module's");
+  assert.match(drain, /deps\.supervisionMemory\(\)|orchestratorDeps\.supervisionMemory\(\)/,
+    "the event memory is SHARED with orchestrator_wait, so neither re-rings what the other reported");
+  assert.doesNotMatch(drain, /capture-pane/, "and nothing in it renders a terminal");
   const shutdown = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown");
-  assert.match(shutdown, /stopProbeTimer\(\)/, "a leaked timer would keep waking a session that is gone");
+  assert.match(shutdown, /stopSupervisionTimer\(\)/, "a leaked timer would keep waking a session that is gone");
 });
+
 
 test("R-26: an orchestration CHILD hands the borrowed worktree back on the BASE branch", () => {
   // The child merged, checked itself back out onto its own intermediate

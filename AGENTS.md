@@ -9,6 +9,31 @@ feature is integrated directly and enabled by default; it never hides
 behind an opt-in flag or a config toggle. If a feature cannot be safe by
 default, make it safe by default rather than adding a switch.
 
+### 三条哲学（2026-08-30 · 本项目的根本约束）
+
+它们排在本文其余所有条目之前。此后每一轮改动都按它们判断对错 —— 包括判断
+本文件里其他段落是不是已经过时。
+
+> **哲学一 · 能由门禁提供工具的，就不要让 agent 自己拼命令。**
+>
+> 判断标准只有一句：这件事需要 agent 拼 shell / git / tmux 命令吗？需要，
+> 那就是门禁的缺口，不是 agent 的失误。agent 只表达**意图**，门禁负责
+> **怎么做**。一条要 agent 记住的多步流程，等价于一个迟早会漏掉某一步的缺陷。
+>
+> **哲学二 · 工具集要简洁、无歧义：一件事只有一个工具。**
+>
+> 不提供功能重叠的多个入口让 agent 挑 ——「用 A 也行、用 B 也可以」本身就是
+> 设计失败：agent 每一轮都要停下来判断该用哪个，而它判断错的那次没人会发现。
+> 多阶段流程（A→B→C）整合进**一个**工具，门禁在内部走完，中间态不暴露。
+> 工具名要让 agent 一眼看出用途，不能靠读描述才明白。
+>
+> **哲学三 · 永不并行两套实现，只保留最新的。**
+>
+> 个人项目，不承担任何历史兼容负担。新方案落地时旧实现**删除** —— 不保留、
+> 不加开关、不留兼容层、不做「advanced entry」这类后门。留着的旧路径不会
+> 安静地待着：它会被人用、会漂移、会在某一轮变成事故的那一半。
+
+
 ### Single-review loop (the only execution path, agent-initiated)
 
 **Judge roles run as their own pi processes** — the review is the only parallel
@@ -41,8 +66,10 @@ reviewer over the WHOLE change:
   (content binding — squash preserves it); the ship gates additionally refuse
   content-changing commits after the reviewed one (unreviewed content can
   never ship). `run_precommit` / `review_checkpoint` / `prepare_review` /
-  `record_review` stay registered as advanced entries for the rare case where
-  you need one on its own.
+  `record_review` are **not tools** (2026-08-30, 哲学三): the gate still runs
+  every one of those steps inside `judge_submit`, but none of them is
+  registered, so there is no second path to sequence by hand.
+
 - **No decompose, no module loop, no wave daily.** The module-planning
   machinery and its wave tools were removed 2026-08-26. Large tasks are
   still sliced by YOU into sequential rounds of the same single review
@@ -234,10 +261,11 @@ review contract: first round full, later rounds focused on the increment.
 (b2) **Fresh context, read on demand — MECHANICALLY.** The three review
 roles (reviewer, adviser, goal-auditor) each run as their OWN pi process (`pi -p --session-id`) — they never
 transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
-to grep on demand. `prepare_adviser` hands back the adviser's ready-made
-brief: transcript pointer + a conclusion artifact the adviser appends to,
-plus — from the second consultation of a goal on — the previous conclusion
-and the files changed since (no history ⇒ full brief).
+to grep on demand. `judge_submit({role:"adviser"})` builds that brief itself:
+transcript pointer + a conclusion artifact the adviser appends to, plus —
+from the second consultation of a goal on — the previous conclusion and the
+files changed since (no history ⇒ full brief).
+
 (c) **The reviewer judges a COMMIT RANGE, and findings stream.** The chain
 inside `judge_submit` computes `baseline..HEAD` (the
 immutable commits under review) and a finding-stream file. Inside its own
@@ -284,16 +312,34 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 设计铁律只有一句（用户原话）：**能提供工具的，就不要让会话自己组装。** 项目经理
 只表达意图，门禁负责实现 —— 它不手写 tmux 命令、不写等待脚本、不自己拼通知。
-工具集：`orchestrator_plan` / `_spawn` / `_send` / `_read` / `_key` / `_wait` /
-`_notify` / `_relay` / `_close` / `_status`（判定逻辑在 `lib/orchestrator-*.ts`，
-`extensions/review-gate.ts` 只接线）。
+工具集（10 个）：`orchestrator_plan` / `_spawn` / `_wait` / `_answer` /
+`_instruct` / `_close` / `_recover` / `_attach` / `_handoff` / `_notify`
+（判定逻辑在 `lib/orchestrator-*.ts`，`extensions/review-gate.ts` 只接线）。
 
-`_read` 与 `_key` 是 2026-08-29 端到端验证后补上的两个**原子能力**：attention 事件
-只带一句 reason、不带问题正文，所以项目经理必须能**读**子会话的屏幕（含对话框选项与
-当前高亮项）与它自己的 sidecar，并能**按**下非默认项 —— 缺了这两样，无人值守的问答
-链路在第一跳就死锁。配套的三条铁律：投递不走 send-keys 传长文本（写任务文件、用
-`pi @file` argv 启动）、回执必须先校验对方真的收到（校验不过就报失败，绝不谎报）、
-`orchestrator_wait` 只认「发给本编排且来自本编排已登记子会话」的事件且必然返回。
+**2026-08-30 通道重构：tmux 退回显示器。** 前三轮端到端验证的 40+ 条缺陷里约
+三分之二源于同一个根因 —— 拿 tmux 屏幕当 API。已全部换成 pi 官方结构化通道：
+
+- **点对点通道**（`lib/orchestrator-channel.ts`）：每个子会话一条专属文件
+  `<orch-id>/<child-id>.jsonl`，物理隔离，因此没有收件人过滤这回事。通道是
+  **文件路径、不属于任何进程** —— 项目经理换人时打开同一批路径即可，子会话
+  完全无感。旧的全局广播队列已删除。
+- **状态取真值**：子会话侧门禁在 `agent_settled` / `turn_end` 上用
+  `ctx.isIdle()` / `ctx.getContextUsage()` 上报 working / waiting-input /
+  idle / done；`dead` 由 pane 消失判定，`stalled` 由心跳超时判定。
+  `screenLooksBusy`、屏幕解析与按键模拟全部删除，tmux 在编排层只剩两件事：
+  **判 pane 存活**、**开关 pane**。
+- **提问任意一方先答即生效**：子会话侧用 `AbortController` + `Promise.race`
+  把「人在框里答」与「项目经理经通道答」并列，谁先答谁生效，另一边的框自动
+  撤下。框始终弹着 —— 这就是项目经理死亡时的天然回退，因此**没有任何超时机制**。
+- **投递走 `pi.sendUserMessage`**：`orchestrator_instruct({mode})` 把文本写进
+  通道，子会话自己的门禁用 pi 的 API 注入（`interrupt` 走 `ctx.abort()`）。
+  `send-keys` 投递路径已删除。
+- **`orchestrator_wait` 是项目经理的唯一信息入口**：它必然被调，所以凡是项目
+  经理需要知道的都从回执里**推给它** —— 五块：健康快照、待答请求（结构化，
+  含全部选项与正文）、死亡/僵死与可执行恢复动作、它自己的上下文用量与带时机
+  判断的接力提醒、以及还差什么才能 `declare_done`。`timeoutMs: 0` 即快照
+  （原 `orchestrator_status` 已并入）。让 agent「记得去查」本身就是设计缺陷。
+
 
 
 对**其他会话**来说，只有三件事需要知道：
@@ -311,7 +357,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 ### 架构规范：新建文件 600 行硬拦，存量只提醒
 
-`review_checkpoint`（`judge_submit` 内部走的也是它）会拦下**本次新增**且超过
+`judge_submit` 内部的 checkpoint 步骤会拦下**本次新增**且超过
 600 行的源文件（`lib/file-size-gate.ts`）。判定发生在提交 checkpoint 那一刻，
 而不是编辑当下（那时文件还写了一半，硬拦只会逼人盲目重构），且只判源码扩展名
 ——Markdown、JSON、锁文件与 fixture 不判长度。存量大文件只输出提醒 ——

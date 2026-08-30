@@ -258,14 +258,28 @@ test("a nested sub/.pi/ file is NOT gate-owned (only the repo root's is)", async
 const GOAL_TEXT =
   "# Loop goal: test\n\n**Intent**: n/a\n\n**Exit criteria**:\n1. tests pass\n\n**Date**: 2026-08-23";
 
-type ToolMap = { tools: Map<string, unknown> };
+type ToolMap = {
+  tools: Map<string, unknown>;
+  /**
+   * The gate's INTERNAL implementations (`record_goal_prereview`,
+   * `run_precommit`, `review_checkpoint`, `record_review`, the three
+   * prepares). They are not registered with pi — an agent cannot see them —
+   * but their mechanical checks are the subject of several suites, so the
+   * extension exposes them on a non-tool property for exactly this.
+   */
+  __reviewGateInternalTools?: Map<string, ToolExecute>;
+};
 
 type ToolExecute = (id: string, params: unknown, s: unknown, u: unknown, c: unknown) => Promise<unknown>;
 
 function tool(pi: ToolMap, name: string): ToolExecute {
-  const t = pi.tools.get(name) as { execute: ToolExecute } | undefined;
-  return (id, params, s, u, c) => t!.execute(id, params, s, u, c);
+  const registered = pi.tools.get(name) as { execute: ToolExecute } | undefined;
+  if (registered) return (id, params, s, u, c) => registered.execute(id, params, s, u, c);
+  const internal = pi.__reviewGateInternalTools?.get(name);
+  assert.ok(internal, `neither a registered nor an internal tool: ${name}`);
+  return internal!;
 }
+
 
 function setMode(pi: ToolMap, ctx: unknown, mode: string) {
   // set_gate_mode is a registered TOOL, so drive it exactly like the agent does.
@@ -328,7 +342,8 @@ test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS —
   assert.equal((noAudit as { isError?: boolean }).isError, true, "an unaudited goal must be refused");
   assert.equal((noAudit as { details: { approved?: boolean } }).details.approved, false);
   assert.equal(dialogs, 0, "the user must not be asked about an unaudited draft");
-  assert.match(JSON.stringify(noAudit), /judge_submit/, "the refusal must name the recovery path");
+  assert.match(JSON.stringify(noAudit), /it runs the audit ITSELF/,
+    "the recovery path is ONE call, not a sequence the agent has to remember");
   assert.equal(readSidecar(repo).loopGoal, undefined, "no approval may be recorded");
   // The isolated HOME has no goal-auditor, so the refusal offers the BOOTSTRAP
   // remedy — and a project copy must clear it by frontmatter IDENTITY, not by

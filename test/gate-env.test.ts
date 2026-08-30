@@ -5,7 +5,7 @@ import { gateEnvKeys, neutraliseGateEnv, GATE_ENV_PREFIXES } from "./helpers/gat
 import { STATE_VARIANT_ENV } from "../lib/gate-state.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
-import { PARENT_SESSION_ENV } from "../lib/attention.ts";
+import { PARENT_SESSION_ENV } from "../lib/orchestration-id.ts";
 import { PREDECESSOR_PANE_ENV, HANDOFF_PATH_ENV, PREDECESSOR_TRANSCRIPT_ENV } from "../lib/orchestrator-relay.ts";
 
 /**

@@ -1,428 +1,333 @@
 /**
- * A FAKE ORCHESTRATION — tmux, panes, child sessions and the attention queue,
- * simulated well enough to drive the real tools end to end.
+ * A FAKE ORCHESTRATION — panes, plans and the supervision CHANNEL, simulated
+ * well enough to drive the real tools end to end with no tmux and no pi.
  *
- * WHY THIS EXISTS. The previous round shipped the orchestration layer with
+ * WHY THIS EXISTS. The round before last shipped the orchestration layer with
  * 1867 green unit tests and it deadlocked on the first hop of the first real
- * run. Every one of the fourteen defects lived in the seam between a decision
- * and the world: the task text was typed into a pane and truncated, the Enter
- * that would have submitted it was never sent, the receipt said "delivered"
- * anyway, and the waiter treated somebody else's event as news. Not one of
- * those is visible to a test that stubs `tmux()` as "returns ok".
+ * run: every defect lived in the seam between a decision and the world, and
+ * none of them is visible to a test that stubs `tmux()` as "returns ok". So
+ * this fake models the PROTOCOL rather than the calls.
  *
- * So this fake models the PROTOCOL instead of the calls:
+ * WHAT CHANGED (2026-08-30). The old fake simulated a TERMINAL — a screen, a
+ * typed input buffer, a highlighted dialog row, arrow keys moving it — because
+ * that was the interface the orchestrator had. That interface is gone, and so
+ * is all of that machinery. What is left is much smaller and much closer to
+ * the real thing:
  *
- *  - a pane is a little state machine with a screen, an input buffer and an
- *    optional dialog, and it only changes when a plausible tmux command
- *    arrives (`send-keys -l` types, `send-keys Enter` submits, arrow keys move
- *    a highlight);
- *  - `capture-pane` renders that state the way pi actually renders it —
- *    `"→ "` for the selected row and `"  "` for the others, verified against
- *    the installed pi bundle;
- *  - a child only "starts" if it was launched with something to do, so a
- *    spawn that forgets the task cannot pass;
- *  - the attention queue is a real queue with addressed events, so a waiter
- *    that ignores the address can be caught doing it.
+ *  - tmux does three things (`split-window`, `kill-pane`, `list-panes`) and a
+ *    pane is just an id plus the argv it was started with, because that is
+ *    genuinely all the orchestrator asks of it now;
+ *  - the CHANNEL is an in-memory {@link ChannelIO} over a `Map`, driving the
+ *    REAL `lib/orchestrator-channel.ts` — the records, the spill rule, the
+ *    projection and the classifier are all the production code;
+ *  - a fake CHILD is a few lines that append real records to that channel, so
+ *    a test says "the child reported waiting-input" instead of drawing a box.
  *
  * It is deliberately NOT a mock library: tests assert on observable state
- * (what is on the screen, what the plan says, which task file was written),
+ * (what is in the channel, what the plan says, which task file was written),
  * not on which functions were called.
  */
 
 import assert from "node:assert/strict";
 
 import { registerOrchestratorStateTools } from "../../lib/orchestrator-tools.ts";
-import { createChildProbe, type ChildProbe } from "../../lib/orchestrator-probe.ts";
-
 import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session-tools.ts";
-import { registerOrchestratorReadTools } from "../../lib/orchestrator-read-tools.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "../../lib/orchestrator-registry.ts";
-import type { AttentionEvent } from "../../lib/attention.ts";
+import {
+  appendRecord,
+  channelPathFor,
+  projectChannel,
+  readChannel,
+  type ChannelIO,
+  type ChannelRecord,
+  type ChildReportedState,
+} from "../../lib/orchestrator-channel.ts";
+import type { SupervisionMemory } from "../../lib/orchestrator-supervisor.ts";
 import type { TaskMode } from "../../lib/task-mode.ts";
+import { STATE_VARIANT_ENV } from "../../lib/gate-state.ts";
 
 /** Fixed clock so ids and timestamps are reproducible. */
 export const NOW = 1_700_000_000_000;
 
-/** One simulated pane. */
+/** One simulated pane: an id and what it was started with. Nothing renders. */
 export interface FakePane {
   id: string;
-  /** Lines already "printed" into the pane. */
-  printed: string[];
-  /** Text typed but not yet submitted (what `send-keys -l` accumulates). */
-  buffer: string;
-  /** The open choice dialog, if any. */
-  dialog?: { title: string; options: string[]; selected: number };
   /** The argv the pane was started with (empty for the orchestrator's own). */
   command: string[];
-  /** The belowEditor widget line, rendered BELOW the dialog (R-1/R-9). */
-  widget?: string;
-  /** Pane width; set it to make long option labels wrap (R-12). */
-  width?: number;
-  /** The key this renderer accepts as "submit" (default `Enter`, R-8). */
-  submitKey?: string;
-  /** Dialogs that open as soon as the current one is answered (R-5). */
-  queuedDialogs?: Array<{ title: string; options: string[]; selected: number }>;
-
+  cwd?: string;
+  env: Record<string, string>;
   alive: boolean;
-
 }
 
-export interface FakeOrchestrationOptions {
+/** An in-memory filesystem for the channel. Real records, no disk. */
+export function memoryChannelIO(now: () => number): ChannelIO & { files: Map<string, string> } {
+  const files = new Map<string, string>();
+  return {
+    files,
+    ensureDir() { /* directories are implicit in a map */ },
+    appendLine(path, line) {
+      files.set(path, (files.get(path) ?? "") + line);
+    },
+    readText(path) {
+      return files.get(path);
+    },
+    writeText(path, text) {
+      files.set(path, text);
+    },
+    now,
+  };
+}
+
+/** The whole fake world one test runs against. */
+export interface FakeWorld {
+  /** Tools registered by the modules under test, by name. */
+  tools: Map<string, (params: Record<string, unknown>, signal?: { readonly aborted: boolean }) => Promise<ToolReply>>;
+  deps: OrchestratorDeps;
+  panes: Map<string, FakePane>;
+  io: ChannelIO & { files: Map<string, string> };
+  runtime: () => OrchestratorRuntime;
+  plan: () => OrchestratorPlan | undefined;
+  /** Scratch files the gate wrote (task documents, recovery notes). */
+  scratch: Map<string, string>;
+  /** Child gate sidecars, keyed by cwd. */
+  sidecars: Map<string, Record<string, unknown>>;
+  /** Answers the fake user/orchestrator dialog will give, in order. */
+  confirmAnswers: boolean[];
+  /** Everything `showToUser` printed. */
+  shown: string[];
+  now: () => number;
+  advance: (ms: number) => void;
+  /** Append a record to a child's channel AS THAT CHILD would. */
+  childReports: (childId: string, state: ChildReportedState, extra?: Record<string, unknown>) => void;
+  childAsks: (childId: string, request: {
+    requestId: string;
+    title: string;
+    options: string[];
+    payload?: string;
+    topic?: "goal-approval" | "workspace" | "ask-user" | "plan-approval" | "other";
+  }) => void;
+  childSettles: (childId: string, requestId: string, by: "human" | "orchestrator" | "dismissed") => void;
+  childAcks: (childId: string, instructId: string, delivered: boolean, detail?: string) => void;
+  /** Everything currently on a child's channel. */
+  channelOf: (childId: string) => ChannelRecord[];
+  call: (name: string, params?: Record<string, unknown>) => Promise<ToolReply>;
+}
+
+export interface FakeWorldOptions {
   taskMode?: TaskMode;
   plan?: OrchestratorPlan;
-  approved?: boolean;
-  ownPane?: string;
-  env?: NodeJS.ProcessEnv;
-  notificationsWork?: boolean;
-  orchestrationId?: string;
-  /**
-   * A spawned pane comes up as a running pi session. Set false to simulate the
-   * F8 failure: the pane exists and nothing ever started in it.
-   */
-  childStarts?: boolean;
-  /** `list-panes` fails — liveness becomes UNKNOWN (F14). */
+  /** Pre-approve the plan (the usual starting point for a spawn test). */
+  approvePlan?: boolean;
+  env?: Record<string, string>;
+  contextPercent?: number;
+  /** Make `list-panes` fail, so liveness is UNKNOWN rather than false. */
   tmuxBroken?: boolean;
-  /** Scratch writes fail (disk full, read-only /tmp…). */
-  scratchBroken?: boolean;
-  /** The repo's shared git hooks point INTO this worktree path (R-28). */
-  hooksPointAtWorktree?: string;
-  /** Repairing the hooks fails, so `orchestrator_close` must refuse (R-28). */
-  hookRepairFails?: boolean;
-  /** The branch the SUPERVISOR stands on — a child's base branch (R3-6). */
-  currentBranch?: string;
+  /**
+   * Whether a spawned child's gate "boots and reports" (the default, and what
+   * a healthy child does on its first `turn_end`). Set false to test the
+   * F8 case: a pane opened, but nothing proves the session ever started.
+   */
+  autoReport?: boolean;
 }
 
+const ORCHESTRATION_ID = "orch-deadbeef-abc";
 
-export interface FakeOrchestration {
-  call(name: string, params?: Record<string, unknown>): Promise<ToolReply>;
-  deps: OrchestratorDeps;
-  tmuxCalls: string[][];
-  worktrees: string[];
-  removed: string[];
-  confirmAnswers: boolean[];
-  emitted: string[];
-  /** Everything handed to `showToUser` (the transcript, O-1). */
-  shown: string[];
-  /** name → content of every scratch file written. */
-  scratch: Map<string, string>;
-  /** Events waiting to be consumed, oldest first. */
-  attention: AttentionEvent[];
-  panes: Map<string, FakePane>;
-  /** cwd|variant → the child's own sidecar contents. */
-  sidecars: Map<string, Record<string, unknown>>;
-  plan(): OrchestratorPlan | undefined;
-  runtime(): OrchestratorRuntime;
-  setEnv(env: NodeJS.ProcessEnv): void;
-  setTmuxBroken(broken: boolean): void;
-  /** Open a dialog in a pane, as a child session would. */
-  openDialog(paneId: string, title: string, options: string[], selected?: number): void;
-  /** The pane vanishes (crash, or the user closed it). */
-  killPane(paneId: string): void;
-  /** Queue an attention event addressed to `to`. */
-  pushAttention(event: Partial<AttentionEvent> & { toSessionId: string }): void;
-  setSidecar(cwd: string, variant: string | undefined, state: Record<string, unknown>): void;
-  render(paneId: string): string;
-  /** Move the fake clock forward (the probe reasons about elapsed time). */
-  advance(ms: number): void;
-  /** Current fake clock, in ms. */
-  now(): number;
-  /** Mark a child cwd as having a judge process in flight (R-23). */
-  setJudgeRunning(cwd: string, running: boolean): void;
-  /** How many times the gate repaired the repository's git hooks (R-28). */
-  hookRepairs(): number;
-
-}
-
-/**
- * The key-hint footer a real choice list draws under its rows.
- *
- * The fake renders it because the PARSER now requires it (R-1/R-9): a pane
- * with no footer has no dialog, which is what stops the belowEditor widget
- * (`▶ reviewer | # Task for reviewer`) from being read as "the dialog and its
- * only option". A test that wants the widget-pollution case renders the
- * widget below the footer, exactly as a real pane does.
- */
-export const DIALOG_FOOTER_LINE = "  ↑↓ navigate  enter select  esc cancel";
-
-/** Render a pane the way pi renders one (see the header). */
-function renderPane(pane: FakePane): string {
-  const lines = [...pane.printed];
-  if (pane.dialog) {
-    lines.push(pane.dialog.title);
-    pane.dialog.options.forEach((option, i) => {
-      const prefix = i === pane.dialog!.selected ? "→ " : "  ";
-      if (pane.width && option.length + prefix.length > pane.width) {
-        // A narrow pane WRAPS: the remainder is rendered at column 0, which
-        // is what made the old parser drop the third option (R-12).
-        const head = option.slice(0, pane.width - prefix.length);
-        lines.push(`${prefix}${head}`, option.slice(pane.width - prefix.length));
-      } else {
-        lines.push(`${prefix}${option}`);
-      }
-    });
-    lines.push(DIALOG_FOOTER_LINE);
+/** Build the world and register the real tools against it. */
+export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
+  let clock = NOW;
+  const now = () => clock;
+  const io = memoryChannelIO(now);
+  const panes = new Map<string, FakePane>([
+    ["%0", { id: "%0", command: [], env: {}, alive: true }],
+  ]);
+  let paneSeq = 1;
+  let runtime: OrchestratorRuntime = emptyRuntime(ORCHESTRATION_ID);
+  let plan: OrchestratorPlan | undefined = options.plan;
+  if (plan && options.approvePlan) {
+    runtime = { ...runtime, approvedPlanHash: planHash(plan) };
   }
-  if (pane.buffer) lines.push(`> ${pane.buffer}`);
-  // The belowEditor widget lives BELOW everything, dialog included.
-  if (pane.widget) lines.push(pane.widget);
-  return lines.join("\n");
-}
+  const scratch = new Map<string, string>();
+  const sidecars = new Map<string, Record<string, unknown>>();
+  const shown: string[] = [];
+  const confirmAnswers: boolean[] = [];
+  let memory: SupervisionMemory = {};
+  const env: Record<string, string> = { TMUX_PANE: "%0", ...(options.env ?? {}) };
 
-
-export function fakeOrchestration(options: FakeOrchestrationOptions = {}): FakeOrchestration {
-  const tools = new Map<string, (params: Record<string, unknown>, signal?: { aborted: boolean }) => Promise<ToolReply>>();
+  const tools = new Map<
+    string,
+    (params: Record<string, unknown>, signal?: { readonly aborted: boolean }) => Promise<ToolReply>
+  >();
   const host: ToolHost = {
-    registerTool(def) {
-      tools.set(def.name, (params, signal) =>
-        def.execute("id", params, signal ?? { aborted: false }, undefined, undefined));
+    registerTool(definition) {
+      tools.set(definition.name, (params, signal) =>
+        definition.execute(`test-${definition.name}`, params, signal, undefined, undefined));
     },
   };
-
-  const orchestrationId = options.orchestrationId ?? "orch-abc-1";
-  let plan = options.plan;
-  let runtime: OrchestratorRuntime = emptyRuntime(orchestrationId);
-  if (options.approved && plan) {
-    runtime = { ...runtime, approvedPlanHash: planHash(plan), approvedPlanAt: new Date(NOW).toISOString() };
-  }
-  let env = options.env ?? ({} as NodeJS.ProcessEnv);
-  let tmuxBroken = options.tmuxBroken ?? false;
-  const childStarts = options.childStarts ?? true;
-  const ownPane = options.ownPane ?? "%1";
-  // A movable clock: the four-state probe reasons about how long a screen has
-  // been still, so a test has to be able to let time pass without sleeping.
-  let clock = NOW;
-  const now = (): number => clock;
-
-  const panes = new Map<string, FakePane>();
-  panes.set(ownPane, { id: ownPane, printed: ["orchestrator"], buffer: "", command: [], alive: true });
-
-  const tmuxCalls: string[][] = [];
-  const worktrees: string[] = [];
-  const removed: string[] = [];
-  const confirmAnswers: boolean[] = [];
-  const emitted: string[] = [];
-  const shown: string[] = [];
-  const scratch = new Map<string, string>();
-  const attention: AttentionEvent[] = [];
-  const sidecars = new Map<string, Record<string, unknown>>();
-  const judgeRunning = new Set<string>();
-  const hookNames = ["pre-commit", "pre-push", "commit-msg"];
-  let hooksPointAt: string | undefined = options.hooksPointAtWorktree;
-  let hookRepairs = 0;
-  let probeInstance: ChildProbe | undefined;
-  let nextPane = 2;
-
-  const sidecarKey = (cwd: string, variant?: string): string => `${cwd}|${variant ?? ""}`;
-
-
-  /** Apply one key to a pane, exactly as a TUI would. */
-  function pressKey(pane: FakePane, key: string): void {
-    if (pane.dialog) {
-      const size = pane.dialog.options.length;
-      // Which key SUBMITS is a property of the renderer, and a real one was
-      // measured accepting only `KPEnter` (R-8). A pane can therefore be told
-      // to ignore plain `Enter`, which is what makes the gate's submit
-      // fallback observable instead of assumed.
-      const submitKey = pane.submitKey ?? "Enter";
-      if (key === "Up") pane.dialog.selected = (pane.dialog.selected - 1 + size) % size;
-      else if (key === "Down") pane.dialog.selected = (pane.dialog.selected + 1) % size;
-      else if (key === submitKey) {
-        pane.printed.push(`answered: ${pane.dialog.options[pane.dialog.selected]}`);
-        delete pane.dialog;
-        const next = pane.queuedDialogs?.shift();
-        if (next) pane.dialog = next;
-      } else if (key === "Escape") {
-        pane.printed.push("dialog dismissed");
-        delete pane.dialog;
-      }
-      return;
-    }
-    if (key === "Enter" && pane.buffer) {
-      pane.printed.push(`> ${pane.buffer}`);
-      pane.buffer = "";
-    }
-  }
-
 
   const deps: OrchestratorDeps = {
     repoRoot: "/repo",
     now,
-
-    env: () => env,
+    env: () => env as unknown as NodeJS.ProcessEnv,
     taskMode: () => options.taskMode ?? "orchestrator",
     runtime: () => runtime,
     saveRuntime: (next) => { runtime = next; },
-    readPlan: () => ({ plan, problems: [] }),
+    readPlan: () => (plan ? { plan, problems: [] } : { problems: [] }),
     savePlan: (next) => { plan = next; },
-    tmux: (argv) => {
-      tmuxCalls.push([...argv]);
-      const [sub] = argv;
-      if (sub === "list-panes") {
-        if (tmuxBroken) return { ok: false, stdout: "", stderr: "no server running" };
-        const alive = [...panes.values()].filter((p) => p.alive).map((p) => p.id);
-        return { ok: true, stdout: alive.join("\n"), stderr: "" };
-      }
-      if (sub === "split-window") {
-        const id = `%${nextPane++}`;
-        const dashDash = argv.indexOf("#{pane_id}");
-        const command = argv.slice(dashDash + 1);
-        // A pane only LOOKS like a running pi session when it was actually
-        // given something to run — this is what makes an F8-style spawn
-        // (pane opened, nothing started) observable instead of assumed.
-        const printed = childStarts && command.length > 0
-          ? [`pi ${command.slice(1).join(" ")}`, "Context 2% · esc to interrupt"]
-          : [];
-        panes.set(id, { id, printed, buffer: "", command, alive: true });
-        return { ok: true, stdout: `${id}\n`, stderr: "" };
-      }
-      if (sub === "capture-pane") {
-        const target = argv[argv.indexOf("-t") + 1]!;
-        const pane = panes.get(target);
-        if (!pane || !pane.alive) return { ok: false, stdout: "", stderr: "can't find pane" };
-        return { ok: true, stdout: renderPane(pane), stderr: "" };
-      }
-      if (sub === "send-keys") {
-        const target = argv[argv.indexOf("-t") + 1]!;
-        const pane = panes.get(target);
-        if (!pane || !pane.alive) return { ok: false, stdout: "", stderr: "can't find pane" };
-        const literal = argv.indexOf("-l");
-        if (literal !== -1) {
-          pane.buffer += argv.slice(literal + 1).join(" ");
-          return { ok: true, stdout: "", stderr: "" };
-        }
-        for (const key of argv.slice(argv.indexOf("-t") + 2)) pressKey(pane, key);
-        return { ok: true, stdout: "", stderr: "" };
-      }
-      if (sub === "kill-pane") {
-        const target = argv[argv.indexOf("-t") + 1]!;
-        const pane = panes.get(target);
-        if (!pane) return { ok: false, stdout: "", stderr: "can't find pane" };
-        pane.alive = false;
-        return { ok: true, stdout: "", stderr: "" };
-      }
-      return { ok: true, stdout: "", stderr: "" };
-    },
-    ownPane: () => ownPane,
+    tmux: (argv) => runFakeTmux(argv),
+    ownPane: () => env.TMUX_PANE,
     confirm: async () => confirmAnswers.shift() ?? false,
     showToUser: (title, text) => { shown.push(`${title}\n${text}`); },
     writeScratchFile: (name, content) => {
-      if (options.scratchBroken) return { ok: false, error: "read-only file system" };
-      scratch.set(name, content);
-      return { ok: true, path: `/tmp/rg-orchestration/tasks/${name}` };
-    },
-    childGateState: (cwd, variant) => sidecars.get(sidecarKey(cwd, variant)),
-    sleep: async () => {},
-    addWorktree: (name) => {
-      const path = `/tmp/wt/${name}`;
-      worktrees.push(path);
+      const path = `/tmp/rg-scratch/${name}`;
+      scratch.set(path, content);
       return { ok: true, path };
     },
-    removeWorktree: (path) => { removed.push(path); },
-    childJudgeRunning: (cwd) => judgeRunning.has(cwd),
-    gitHooksReferencing: (path) => (hooksPointAt === path ? [...hookNames] : []),
-    currentBranch: () => options.currentBranch ?? "base-branch",
-    repairGitHooks: () => {
-      if (options.hookRepairFails) return { ok: false, error: "install-git-hooks.sh failed" };
-      hooksPointAt = undefined;
-      hookRepairs += 1;
-      return { ok: true };
-    },
-    probe: () => (probeInstance ??= createChildProbe(deps)),
-    consumeAttention: () => {
-      const index = attention.findIndex((e) => e.toSessionId === orchestrationId && !e.handledAt);
-      if (index === -1) return undefined;
-      const event = { ...attention[index]!, handledAt: new Date(now()).toISOString() };
-      attention[index] = event;
-      return event;
-    },
-
+    childGateState: (cwd) => sidecars.get(cwd),
+    sleep: async () => { /* the fake has no latency */ },
+    addWorktree: (name) => ({ ok: true, path: `/tmp/rg-wt/${name}` }),
+    removeWorktree: () => { /* nothing to remove in a map */ },
+    childJudgeRunning: () => false,
+    channelIO: () => io,
+    channelHome: () => "/home/test",
+    supervisionMemory: () => memory,
+    saveSupervisionMemory: (next) => { memory = next; },
+    contextPercent: () => options.contextPercent,
+    gitHooksReferencing: () => [],
+    currentBranch: () => "main",
+    repairGitHooks: () => ({ ok: true }),
     branchFacts: () => ({ mergeSettled: true, mergeWaived: false }),
-    emitNotification: (sequence) => {
-      emitted.push(sequence);
-      return options.notificationsWork ?? true;
-    },
-    fileChars: () => 1000,
-    sessionTranscriptPath: () => "/sessions/self.jsonl",
+    emitNotification: () => true,
+    fileChars: () => 500,
+    sessionTranscriptPath: () => "/tmp/transcript.jsonl",
   };
+
+  function runFakeTmux(argv: readonly string[]): { ok: boolean; stdout: string; stderr: string } {
+    const sub = argv[0];
+    if (sub === "list-panes") {
+      if (options.tmuxBroken) return { ok: false, stdout: "", stderr: "no server running" };
+      const live = [...panes.values()].filter((p) => p.alive).map((p) => p.id);
+      return { ok: true, stdout: live.join("\n"), stderr: "" };
+    }
+    if (sub === "split-window") {
+      const id = `%${paneSeq++}`;
+      const cwdAt = argv.indexOf("-c");
+      const paneEnv: Record<string, string> = {};
+      for (let i = 0; i < argv.length - 1; i++) {
+        if (argv[i] === "-e") {
+          const [key, ...rest] = String(argv[i + 1]).split("=");
+          paneEnv[key!] = rest.join("=");
+        }
+      }
+      const marker = argv.indexOf("#{pane_id}");
+      panes.set(id, {
+        id,
+        command: marker >= 0 ? argv.slice(marker + 1).map(String) : [],
+        ...(cwdAt >= 0 ? { cwd: String(argv[cwdAt + 1]) } : {}),
+        env: paneEnv,
+        alive: true,
+      });
+      // A healthy child's gate boots and reports on its own channel; that is
+      // the ONLY thing that proves to the spawner that the session started
+      // (F8). `autoReport: false` is the failure case.
+      const spawnedChildId = paneEnv[STATE_VARIANT_ENV];
+      if (options.autoReport !== false && spawnedChildId) {
+        appendRecord(io, { orchestrationId: ORCHESTRATION_ID, childId: spawnedChildId, home: "/home/test" }, {
+          kind: "state", from: "child", at: new Date(now()).toISOString(), state: "working",
+          sessionId: `rg-child-${spawnedChildId}`,
+        });
+      }
+      return { ok: true, stdout: `${id}\n`, stderr: "" };
+    }
+    if (sub === "kill-pane") {
+      const target = String(argv[argv.indexOf("-t") + 1]);
+      const pane = panes.get(target);
+      if (pane) pane.alive = false;
+      return { ok: true, stdout: "", stderr: "" };
+    }
+    return { ok: false, stdout: "", stderr: `fake tmux: unsupported ${String(sub)}` };
+  }
 
   registerOrchestratorStateTools(host, deps);
   registerOrchestratorSessionTools(host, deps);
-  registerOrchestratorReadTools(host, deps);
+
+  const target = (childId: string) => ({ orchestrationId: ORCHESTRATION_ID, childId, home: "/home/test" });
+  const stamp = () => new Date(now()).toISOString();
 
   return {
-    async call(name, params = {}) {
-      const tool = tools.get(name);
-      assert.ok(tool, `tool ${name} must be registered`);
-      return tool(params, params.__signal as { aborted: boolean } | undefined);
-    },
+    tools,
     deps,
-    tmuxCalls,
-    worktrees,
-    removed,
-    confirmAnswers,
-    emitted,
-    shown,
-    scratch,
-    attention,
     panes,
+    io,
+    scratch,
     sidecars,
-    plan: () => plan,
+    shown,
+    confirmAnswers,
+    now,
+    advance: (ms) => { clock += ms; },
     runtime: () => runtime,
-    setEnv: (next) => { env = next; },
-    setTmuxBroken: (broken) => { tmuxBroken = broken; },
-    openDialog: (paneId, title, opts, selected = 0) => {
-      const pane = panes.get(paneId);
-      assert.ok(pane, `pane ${paneId} must exist`);
-      pane.dialog = { title, options: opts, selected };
+    plan: () => plan,
+    childReports: (childId, state, extra = {}) => {
+      appendRecord(io, target(childId), {
+        kind: "state", from: "child", at: stamp(), state, ...extra,
+      } as ChannelRecord);
     },
-    killPane: (paneId) => {
-      const pane = panes.get(paneId);
-      if (pane) pane.alive = false;
-    },
-    pushAttention: (event) => {
-      attention.push({
-        id: `evt-${attention.length + 1}`,
-        fromSessionId: "child-session",
-        repo: "/repo",
-        reason: "等待回答提问",
-        createdAt: new Date(NOW).toISOString(),
-        ...event,
+    childAsks: (childId, request) => {
+      appendRecord(io, target(childId), {
+        kind: "request",
+        from: "child",
+        at: stamp(),
+        requestId: request.requestId,
+        dialogKind: "select",
+        ...(request.topic ? { topic: request.topic } : {}),
+        title: request.title,
+        options: request.options,
+        ...(request.payload === undefined ? {} : { payload: request.payload }),
+      });
+      appendRecord(io, target(childId), {
+        kind: "state", from: "child", at: stamp(), state: "waiting-input", dialogTitle: request.title,
       });
     },
-    setSidecar: (cwd, variant, state) => { sidecars.set(sidecarKey(cwd, variant), state); },
-    render: (paneId) => {
-      const pane = panes.get(paneId);
-      return pane ? renderPane(pane) : "";
+    childSettles: (childId, requestId, by) => {
+      appendRecord(io, target(childId), { kind: "request-settled", from: "child", at: stamp(), requestId, by });
     },
-    advance: (ms) => { clock += ms; },
-    now: () => clock,
-    setJudgeRunning: (cwd, running) => {
-      if (running) judgeRunning.add(cwd);
-      else judgeRunning.delete(cwd);
+    childAcks: (childId, instructId, delivered, detail) => {
+      appendRecord(io, target(childId), {
+        kind: "instruct-ack", from: "child", at: stamp(), instructId, delivered,
+        ...(detail === undefined ? {} : { detail }),
+      });
     },
-    hookRepairs: () => hookRepairs,
+    channelOf: (childId) =>
+      readChannel(io, channelPathFor(ORCHESTRATION_ID, childId, "/home/test")).records,
+    call: async (name, params = {}) => {
+      const run = tools.get(name);
+      assert.ok(run, `tool ${name} is not registered`);
+      return run!(params);
+    },
   };
-
 }
 
-/** A minimal two-task plan: `a` serial, `b` parallel with a disjoint boundary. */
-export function samplePlan(input?: unknown): OrchestratorPlan {
-  const parsed = parsePlan(input ?? {
-    title: "拆分",
-    intent: "把大文件拆成模块",
-    maxParallel: 2,
+/** A minimal two-task plan, both tasks touching different files. */
+export function twoTaskPlan(): OrchestratorPlan {
+  const parsed = parsePlan({
+    title: "测试计划",
+    intent: "两个互不重叠的任务",
     tasks: [
-      { id: "a", title: "抽 plan", fileBoundaries: ["lib/plan"] },
-      { id: "b", title: "抽 tmux", fileBoundaries: ["lib/tmux"], execution: "parallel" },
+      { id: "t1", title: "任务一", fileBoundaries: ["lib/a/"] },
+      { id: "t2", title: "任务二", fileBoundaries: ["lib/b/"] },
     ],
-  }, new Date(NOW).toISOString());
-  assert.ok(parsed.ok, parsed.problems.join("; "));
+  });
+  assert.ok(parsed.plan, `plan fixture must parse: ${parsed.problems.join("; ")}`);
   return parsed.plan!;
 }
 
-/** The text of a tool reply, joined. */
+/** The text a tool reply carries. */
 export function replyText(reply: ToolReply): string {
   return reply.content.map((c) => c.text).join("\n");
+}
+
+/** What is still outstanding on a child's channel. */
+export function projectionOf(world: FakeWorld, childId: string) {
+  return projectChannel(world.channelOf(childId));
 }

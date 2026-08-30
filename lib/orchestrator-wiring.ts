@@ -26,14 +26,16 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { writeFileAtomic } from "./atomic-write.ts";
-import { consumeAttention, sideEffectsEnabled } from "./attention.ts";
-import type { AttentionEvent } from "./attention.ts";
+import { sideEffectsEnabled } from "./side-effects.ts";
+import { nodeChannelIO } from "./orchestrator-channel.ts";
+import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
+
 import { assertSafeTmuxArgv } from "./orchestrator-tmux.ts";
 import { writeNotification } from "./orchestrator-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state.ts";
 
-import { createChildProbe, type ChildProbe } from "./orchestrator-probe.ts";
+
 
 import { parsePlan, PLAN_RELPATH, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
@@ -382,6 +384,10 @@ export interface OrchestratorHostBindings {
   showToUser(title: string, text: string): void;
   branchFacts(): BranchFacts;
   sessionTranscriptPath(): string | undefined;
+  /** This orchestrator's OWN context usage, as a percentage (receipt block 4). */
+  contextPercent?(): number | undefined;
+  /** Override the channel root. Tests point it at a scratch dir. */
+  channelHome?(): string | undefined;
 
   now?(): number;
   env?(): NodeJS.ProcessEnv;
@@ -397,11 +403,13 @@ export interface OrchestratorHostBindings {
  */
 export function createOrchestratorDeps(host: OrchestratorHostBindings): OrchestratorDeps {
   const env = () => (host.env ? host.env() : process.env);
-  // ONE probe per orchestration, created lazily so it can close over `deps`
-  // itself. Its per-child memory is the whole point: a probe rebuilt on every
-  // call would see every screen as freshly changed and could never conclude
-  // that a child has stopped.
-  let probeInstance: ChildProbe | undefined;
+  // ONE channel IO and ONE supervision memory per orchestration. The memory
+  // is what the event rules compare against, and it has to OUTLIVE a single
+  // `orchestrator_wait`: rebuilt per call it would see every state as freshly
+  // changed and would re-ring the same unanswered question on every poll.
+  const io = nodeChannelIO();
+  let memory: SupervisionMemory = {};
+
   const deps: OrchestratorDeps = {
     repoRoot: host.repoRoot,
     now: host.now ?? (() => Date.now()),
@@ -435,8 +443,12 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     gitHooksReferencing: (path) => gitHooksReferencing(host.repoRoot, path),
     currentBranch: () => currentBranchOf(host.repoRoot),
     repairGitHooks: () => repairGitHooks(host.repoRoot),
-    probe: () => (probeInstance ??= createChildProbe(deps)),
-    consumeAttention: (): AttentionEvent | undefined => consumeAttention(host.orchestrationId()),
+    channelIO: () => io,
+    channelHome: () => host.channelHome?.(),
+    supervisionMemory: () => memory,
+    saveSupervisionMemory: (next) => { memory = next; },
+    contextPercent: () => host.contextPercent?.(),
+
     branchFacts: host.branchFacts,
     emitNotification: (sequence) => emitNotification(sequence, env()),
     fileChars: (relPath) => fileCharsIn(host.repoRoot, relPath),

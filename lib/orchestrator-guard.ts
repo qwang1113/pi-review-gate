@@ -81,8 +81,13 @@ export const TOOL_REPLACED: readonly string[] = Object.freeze([
 
 /** Which tool to call instead of typing the command. */
 const TOOL_FOR: Readonly<Record<string, string>> = Object.freeze({
-  "split-window": "orchestrator_spawn（或接力用 orchestrator_relay）",
-  "send-keys": "orchestrator_send",
+  "split-window": "orchestrator_spawn（接力用 orchestrator_handoff，救活死掉的用 orchestrator_recover）",
+  // Typing at a child is gone entirely: a MESSAGE goes through
+  // `orchestrator_instruct` and an ANSWER through `orchestrator_answer`, both
+  // via the child's channel. Naming only one of them here would send the
+  // agent to the wrong tool for half the cases.
+  "send-keys": "orchestrator_instruct（发消息/打断）或 orchestrator_answer（回它在等的那个问题）",
+
   "kill-pane": "orchestrator_close",
 });
 

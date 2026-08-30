@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   FORBIDDEN_TMUX_SUBCOMMANDS,
@@ -7,8 +8,7 @@ import {
   assertSafeTmuxArgv,
   buildKillPaneArgv,
   buildListPanesArgv,
-  buildRelayPaneArgv,
-  buildSendMessageArgv,
+  buildHandoffPaneArgv,
   buildSpawnPaneArgv,
   isPaneId,
   parsePaneIds,
@@ -27,13 +27,12 @@ test("every builder REFUSES a bad pane id rather than interpolating it", () => {
   // about never addressing a target we did not get from tmux itself.
   assert.throws(() => buildKillPaneArgv("not-a-pane"), UnsafeTmuxCommand);
   assert.throws(() => buildListPanesArgv("$(whoami)"), UnsafeTmuxCommand);
-  assert.throws(() => buildSendMessageArgv("%1x", "hi"), UnsafeTmuxCommand);
   assert.throws(() => buildSpawnPaneArgv({ orchestratorPane: "", cwd: "/repo" }), UnsafeTmuxCommand);
   assert.throws(
     () => buildSpawnPaneArgv({ orchestratorPane: "%1", lastChildPane: "bogus", cwd: "/repo" }),
     UnsafeTmuxCommand,
   );
-  assert.throws(() => buildRelayPaneArgv({ orchestratorPane: "x", cwd: "/repo" }), UnsafeTmuxCommand);
+  assert.throws(() => buildHandoffPaneArgv({ orchestratorPane: "x", cwd: "/repo" }), UnsafeTmuxCommand);
 });
 
 test("the gate holds ITSELF to the forbidden list", () => {
@@ -80,25 +79,23 @@ test("environment travels as -e pairs, in a stable order", () => {
     "sorted, so the argv is testable");
 });
 
-test("a relay always splits off the orchestrator's own pane", () => {
-  const argv = buildRelayPaneArgv({ orchestratorPane: "%1", cwd: "/repo" });
+test("a handoff always splits off the orchestrator's own pane", () => {
+  const argv = buildHandoffPaneArgv({ orchestratorPane: "%1", cwd: "/repo" });
   assert.deepEqual(argv.slice(0, 4), ["split-window", "-h", "-t", "%1"],
     "horizontal, so closing the old pane hands the left column to the successor");
 });
 
-test("a message is sent LITERALLY and submitted separately", () => {
-  const [literal, enter] = buildSendMessageArgv("%3", "run tests; then Enter C-c");
-  assert.deepEqual(literal, ["send-keys", "-t", "%3", "-l", "run tests; then Enter C-c"],
-    "-l means the payload is text, never key names");
-  assert.deepEqual(enter, ["send-keys", "-t", "%3", "Enter"],
-    "submitting is its own command, so a payload cannot submit itself early");
+test("NOTHING in this module can type at a pane any more (2026-08-30)", () => {
+  // Philosophy three, asserted rather than assumed. `send-keys` produced four
+  // separate measured defects (truncation, no submit, the wrong lane, a
+  // newline read as a menu selection); text and answers now travel through
+  // the child's channel, so the builders that typed are DELETED — not left
+  // unused, which is how a removed path comes back.
+  const source = readFileSync(new URL("../lib/orchestrator-tmux.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /"send-keys"/, "no builder may emit send-keys");
+  assert.doesNotMatch(source, /"capture-pane"/, "and nothing here reads a screen");
 });
 
-test("a multi-line message is flattened rather than half-submitted", () => {
-  const [literal] = buildSendMessageArgv("%3", "line one\nline two\r\nline three  ");
-  assert.equal(literal![4], "line one line two line three",
-    "an embedded newline would submit the first line and leave the rest as garbage");
-});
 
 test("kill and list address a PANE and nothing wider", () => {
   assert.deepEqual(buildKillPaneArgv("%5"), ["kill-pane", "-t", "%5"]);

@@ -22,12 +22,11 @@ import { ORCH_BASE_BRANCH_ENV, STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import {
-  buildSendMessageArgv,
   buildSpawnPaneArgv,
   parseSpawnedPaneId,
 } from "./orchestrator-tmux.ts";
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
-import { proxyApprovalProblems, spawnAuthorization, worktreeRequirement } from "./orchestrator-gate.ts";
+import { spawnAuthorization, worktreeRequirement } from "./orchestrator-gate.ts";
 import {
   findChild,
   lastChildPane,
@@ -42,31 +41,22 @@ import {
   buildChildCommand,
   buildDeliveryMarker,
   buildTaskDocument,
-  echoMarker,
-  planSend,
-  SEND_INLINE_MAX_CHARS,
   taskFileName,
+  type DeliveryEvidence,
 } from "./orchestrator-delivery.ts";
 import {
-  describeStartupEvidence,
-  dialogIsOpen,
-  formatPaneSnapshot,
-  type PaneSnapshot,
-} from "./orchestrator-pane-read.ts";
-import { APPROVE_LABEL_PATTERN } from "./orchestrator-keys.ts";
-import { screenLooksBusy } from "./orchestrator-child-state.ts";
-import { normalizeGoalText } from "./loop-goal.ts";
-import { captureDialog, selectOptionInChild } from "./orchestrator-read-tools.ts";
-import type { ChildSession } from "./orchestrator-registry.ts";
+  appendRecord,
+  newChannelId,
+  type ChannelInstructRecord,
+} from "./orchestrator-channel.ts";
 import {
   alivePanes,
-  capturePane,
-  childGateFacts,
   currentPlan,
   toolFail as fail,
   toolReply as reply,
   verifyDelivery,
 } from "./orchestrator-tool-kit.ts";
+
 
 
 /**
@@ -231,7 +221,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
       env,
       // F7/F8 — the task rides in on the argv. No typing, nothing to
       // truncate, no Enter to forget.
-      command: buildChildCommand(written.path),
+      command: buildChildCommand(written.path, childId),
     }));
     if (!result.ok) throw new Error(result.stderr || "tmux split-window 失败");
     paneId = parseSpawnedPaneId(result.stdout);
@@ -263,8 +253,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // F8 — EARN the receipt. Nothing below claims delivery that was not seen.
   const check = await verifyDelivery(deps, {
     kind: "spawn",
-    paneId,
-    marker,
+    childId,
     cwd,
     stateVariant: childId,
   });
@@ -272,17 +261,17 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     const current = currentPlan(deps).plan;
     if (current) {
       const back = applyTaskStatus(current, taskId, "pending", {
-        note: `spawn 未能确认子会话起跑（${describeStartupEvidence(check.evidence)}）`,
+        note: `spawn 未能确认子会话起跑（${describeDeliveryEvidence(check.evidence)}）`,
         now: new Date(deps.now()).toISOString(),
       });
       if (back.ok) deps.savePlan(back.plan);
     }
     return fail(
       `review-gate: ${check.verdict.reason}\n` +
-      `观察到的证据：${describeStartupEvidence(check.evidence)}。\n` +
+      `观察到的证据：${describeDeliveryEvidence(check.evidence)}。\n` +
       `pane ${paneId} 和子会话登记 ${childId} 都**保留**着（不误杀一个可能其实活着的会话），` +
       `任务 ${taskId} 已退回 pending。\n` +
-      `下一步：\`orchestrator_read({ childId: "${childId}" })\` 看那个 pane 到底怎么了；` +
+      `下一步：\`orchestrator_wait({ timeoutMs: 0 })\` 看它在健康快照里是什么状态；` +
       `确认没救就 \`orchestrator_close({ childId: "${childId}" })\` 再重开。\n` +
       `任务书在：${written.path}`,
       { childId, paneId, delivered: false, evidence: check.evidence },
@@ -294,7 +283,8 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     `任务 ${taskId} 已置为 running，任务书 ${written.path} 已随 \`pi @file\` 带进去。\n` +
     `投递已核实：${check.verdict.summary}。\n` +
     "接下来用 `orchestrator_wait` 等它 —— 不要结束 turn 把盯梢责任丢给用户。" +
-    "它一旦有事找你，用 `orchestrator_read` 看它到底在问什么，用 `orchestrator_key` 答它的选项框。",
+    "它有事找你时，wait 的回执里会直接带上完整的问题与选项，用 `orchestrator_answer` 回。",
+
     {
       childId,
       paneId,
@@ -306,258 +296,118 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   );
 }
 
-/** The affirmative row of a goal-approval dialog, when exactly one looks like it. */
-function findApprovalOption(snapshot: PaneSnapshot | undefined): number | undefined {
-  const options = snapshot?.dialog?.options ?? [];
-  const hits = options.filter((o) => APPROVE_LABEL_PATTERN.test(o.label));
-  return hits.length === 1 ? hits[0]!.index : undefined;
+/** One line naming what was and was not observed about a delivery. */
+function describeDeliveryEvidence(evidence: DeliveryEvidence): string {
+  const parts = [
+    `通道有记录=${evidence.channelReported ? "是" : "否"}`,
+    `sidecar 存在=${evidence.sidecarPresent ? "是" : "否"}`,
+  ];
+  if (evidence.ack) {
+    parts.push(`子会话回执=${evidence.ack.delivered ? "已注入" : "未注入"}${evidence.ack.detail ? `（${evidence.ack.detail}）` : ""}`);
+  }
+  return parts.join("，");
 }
 
+/** The three delivery modes, and what each one means to the child's gate. */
+const INSTRUCT_MODES = new Set(["steer", "followUp", "interrupt"]);
+
 /**
- * CONSTRAINT 8, done against the TRUTH (R-7).
+ * `orchestrator_instruct` — say something to a running child, or stop it.
  *
- * What it used to do: boundary-check the text the CALLER typed into
- * `approveGoal`, and then press "认可" on whatever was actually on screen.
- * Those are two different documents. Measured on 2026-08-30: the orchestrator
- * passed an abridged goal (3 exit criteria, no non-goals section), the check
- * passed, and the FULL goal (7 criteria) was approved on the user's behalf —
- * so the mechanical guarantee of constraint 8 rested entirely on the
- * orchestrator transcribing honestly. Worse, R-6's path false-positives were
- * actively pushing it to rewrite the text to get through.
+ * ── WHY THIS IS ONE TOOL WITH A MODE (philosophy two) ──
  *
- * Now the caller expresses INTENT ("approve it") and the gate reads the draft
- * from the child's own sidecar (`goalPrereview.draft` — the data F10 pointed
- * at) and checks THAT. A caller-supplied text is not compared and cannot
- * widen anything; when it differs from the sidecar, the receipt says so,
- * because a mismatch means the orchestrator was looking at something else.
+ * It used to be `orchestrator_send` plus a separate `kind: "command"` lane
+ * plus an `approveGoal` flag plus no interrupt at all, and the orchestrator
+ * had to work out which of them applied. Every one of those distinctions was
+ * really the same question — HOW should this text reach the agent — and pi
+ * answers it with one parameter. So the mode IS `deliverAs`:
+ *
+ *   steer      cut into the current turn (pi.sendUserMessage, deliverAs steer)
+ *   followUp   let it finish, then read this (deliverAs followUp)
+ *   interrupt  stop what it is doing (ctx.abort()), no text
+ *
+ * ── WHY NOTHING IS TYPED ──
+ *
+ * The old path was `tmux send-keys`, and it produced four separate measured
+ * defects: truncation (F7), no submit (F8), landing in the composer or the
+ * steering queue by luck (R-20), and — worst — newlines inside a message
+ * being read by an open dialog as "submit the highlighted row", which
+ * answered a question on the child's behalf with an option nobody chose
+ * (R-13). None of that is possible now: the text is written to the child's
+ * channel as data, and the child's OWN gate injects it through pi's API. A
+ * dialog is no longer something to guard against here either — an open
+ * dialog is answered with `orchestrator_answer`, and a message delivered
+ * while one is open simply queues behind it.
+ *
+ * THE RECEIPT IS STILL EARNED. Writing to the channel proves nothing; the
+ * child's acknowledgement record does. No acknowledgement ⇒ this FAILS, and
+ * says so.
  */
-async function approveChildGoal(
+export async function dispatchInstruct(
   deps: OrchestratorDeps,
-  child: ChildSession,
-  supplied: unknown,
+  params: Record<string, unknown>,
 ): Promise<ToolReply> {
-  const childId = child.id;
-  const { plan } = currentPlan(deps);
-  const task = plan?.tasks.find((t) => t.id === child.taskId);
-  if (!task) {
-    return fail(`review-gate: 找不到子会话 "${childId}" 对应的任务 "${child.taskId}"，无法做边界比对。`);
-  }
-  const facts = childGateFacts(deps, child);
-  const draft = facts.goalDraft;
-  if (!draft) {
-    return fail(
-      `review-gate: 代批被拒 —— 读不到子会话 ${childId} sidecar 里的 goal 草稿` +
-      "（`goalPrereview.draft`）。门禁只批**它自己读到的那一份**，不批调用方手抄的文本（R-7）。\n" +
-      "先确认它确实已经把草稿提交给了 goal-auditor / 正在等批准，再重试。",
-      { childId, approved: false, boundaryOk: false },
-    );
-  }
-  // R3-1 — CONSTRAINT 8 IS JUDGED ON FILES, NOT ON PROSE. The draft is still
-  // read from the child's own sidecar (R-7) and still echoed in the receipt,
-  // but what decides the approval is where this child has actually written:
-  // a documentation goal that quotes the modules it documents is not a scope
-  // change, and treating it as one cost two bypasses in the third run.
-  const check = proxyApprovalProblems(facts.editedFiles, task);
-  if (!check.ok) return fail("review-gate: " + check.reason, { outside: check.outside });
-
-  // R3-2 — this note is about a STRING the caller passed, so it may only
-  // appear when one was passed. `approveGoal: true` (the normal call) carries
-  // no text at all, and the third run still saw "你传进来的文本与 sidecar 不
-  // 一致" on a boolean call — sending the orchestrator off to re-read a child
-  // for a copy it never held.
-  const suppliedText = typeof supplied === "string" ? supplied.trim() : "";
-  const mismatchNote =
-    suppliedText && normalizeGoalText(suppliedText) !== normalizeGoalText(draft)
-      ? "\n注意：你在 `approveGoal` 里传的那段**字符串**与 sidecar 里的真实草稿不一致 —— " +
-        "门禁比对并批准的是 sidecar 那一份（你手上的可能已经过时了，建议 `orchestrator_read` 重看一遍）。"
-      : "";
-
-  // F11 — the boundary check is only HALF the job. The old code stopped here
-  // and reported "已过边界比对", which the caller reasonably read as
-  // "approved"; in reality the approval dialog was sitting untouched in the
-  // child's pane. Approving means ANSWERING that dialog, verifiably.
-  const snapshot = await captureDialog(deps, child.paneId);
-  const approveIndex = findApprovalOption(snapshot);
-  if (approveIndex === undefined) {
-    // R-18 — do NOT bounce the caller to a path that just failed. The screen
-    // has already been re-read several times here; say which of the two
-    // situations it actually is.
-    const options = snapshot?.dialog?.options ?? [];
-    return fail(
-      "review-gate: 边界比对通过（约束 8，比的是 sidecar 里的真实草稿），**但代批没有真的执行** —— " +
-      (options.length === 0
-        ? "重读了几次，子会话屏幕上都没有待答的对话框（它可能还没提交批准、或者已经被答掉了）。\n" +
-          `先 \`orchestrator_read({ childId: "${childId}" })\` 确认它到底在等什么。`
-        : "屏幕上的框里找不到唯一一个「认可/批准」选项，不能盲按。现有选项：" +
-          options.map((o) => `${o.index}. ${o.label}`).join(" / ") +
-          `\n用 \`orchestrator_key({ childId: "${childId}", index: <第几项> })\` 亲自答它（那条路径带命中校验）。`),
-      { childId, boundaryOk: true, approved: false, options: options.length },
-    );
-  }
-  const answered = await selectOptionInChild(deps, child, { index: approveIndex });
-  if (answered.isError) return answered;
-  return reply(
-    "review-gate: 代批完成 —— 先拿子会话 sidecar 里的真实 goal 草稿过任务边界比对（约束 8），" +
-    "再在它的对话框上选中并提交了「认可」项。" + mismatchNote + "\n" +
-    `被批准的草稿（来源：sidecar goalPrereview.draft，共 ${draft.length} 字）前 200 字：\n${draft.slice(0, 200)}\n\n` +
-    answered.content.map((c) => c.text).join("\n"),
-    { childId, boundaryOk: true, approved: true, draftChars: draft.length },
-  );
-}
-
-
-/**
- * How long the gate waits for a busy child to free up before it gives up on
- * delivering a COMMAND (R-20).
- *
- * A command typed into a busy session does not run — it lands in the steering
- * queue as an ordinary message, which is how a `/gate-bypass` "took effect"
- * without taking effect. Rather than making the orchestrator poll the screen
- * by hand for the idle window (the hand-run's downgrade), the gate waits for
- * it here, and REFUSES honestly if it never comes.
- */
-export const COMMAND_WINDOW_ATTEMPTS = 15;
-export const COMMAND_WINDOW_INTERVAL_MS = 2000;
-
-/** Wait until the child is not visibly running a tool. */
-async function waitForIdleWindow(
-  deps: OrchestratorDeps,
-  paneId: string,
-  attempts = COMMAND_WINDOW_ATTEMPTS,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
-  for (let attempt = 0; attempt < Math.max(1, attempts); attempt++) {
-    if (attempt > 0) await deps.sleep(COMMAND_WINDOW_INTERVAL_MS);
-    const snapshot = capturePane(deps, paneId);
-    if (!snapshot) return { ok: false, reason: "读不到它的屏幕（capture-pane 失败），不敢投命令" };
-    if (dialogIsOpen(snapshot)) return { ok: false, reason: "它现在有一个打开的对话框，先答框再说" };
-    if (!screenLooksBusy(snapshot.text)) return { ok: true };
-  }
-  return {
-    ok: false,
-    reason:
-      `等了 ${Math.round((COMMAND_WINDOW_INTERVAL_MS * attempts) / 1000)}s 它一直在跑工具 —— ` +
-      "此刻投过去的命令只会排进 steering 队列、当成普通消息读掉，**不会**被执行",
-  };
-}
-
-export async function dispatchSend(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const childId = String(params.childId ?? "").trim();
   const child = findChild(deps.runtime(), childId);
   if (!child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
   if (child.closedAt) return fail(`review-gate: 子会话 "${childId}" 已经关闭了。`);
 
-  const message = String(params.message ?? "").trim();
-  const approveRaw = params.approveGoal;
-  const wantsApproval = approveRaw !== undefined && approveRaw !== false && approveRaw !== "";
-  const kind: "message" | "command" =
-    String(params.kind ?? "").trim().toLowerCase() === "command" ? "command" : "message";
-  if (!message && !wantsApproval) return fail("review-gate: 要发的内容是空的。");
-
-  // CONSTRAINT 8 — proxy-approving a child's goal is allowed, but only inside
-  // the task's declared boundary. Outside it, this is a scope change, and
-  // scope is the user's.
-  if (wantsApproval) return approveChildGoal(deps, child, approveRaw);
-
-  // R-13 — THE ACCIDENT. A dialog was open, a long message went in through
-  // `send-keys`, and the newlines inside it were read by the TUI as "submit
-  // the highlighted row": the child recorded option A as the project
-  // manager's answer while the user had actually decided C, and BOTH receipts
-  // said only that delivery could not be confirmed. Nothing may be typed at a
-  // child that is holding a question.
-  const guard = await captureDialog(deps, child.paneId);
-  if (dialogIsOpen(guard)) {
+  const rawMode = String(params.mode ?? "followUp").trim();
+  if (!INSTRUCT_MODES.has(rawMode)) {
     return fail(
-      `review-gate: 子会话 ${childId} 现在有一个**打开的对话框**，拒绝投文本。\n` +
-      "原因是一次真实事故（R-13）：文本经 send-keys 打进去时，其中的换行会被 TUI 当成" +
-      "「提交当前高亮项」，于是编排层替子会话答了一个它根本没打算选的选项，而两边都以为什么都没发生。\n" +
-      `先用 \`orchestrator_read({ childId: "${childId}" })\` 看清这个框，用 \`orchestrator_key\` 答掉它，再发文本。\n\n` +
-      (guard ? formatPaneSnapshot(guard, 40) : ""),
-      { childId, delivered: false, dialogOpen: true },
+      `review-gate: mode 只能是 steer / followUp / interrupt，收到的是 ${JSON.stringify(params.mode)}。\n` +
+      "（pi 的 sendUserMessage 只支持 steer 与 followUp 两种投递；nextTurn 属于另一套 API，本门禁不提供。）",
     );
   }
-
-  // R-20 — a COMMAND only runs when it is typed into an idle composer.
-  if (kind === "command") {
-    if (message.includes("\n") || message.length > SEND_INLINE_MAX_CHARS) {
-      return fail(
-        "review-gate: 命令必须是一行短文本（slash 命令走输入框提交），多行/超长内容请用 `kind: \"message\"` 发。",
-        { childId, delivered: false },
-      );
-    }
-    const window = await waitForIdleWindow(deps, child.paneId);
-    if (!window.ok) {
-      return fail(
-        `review-gate: 命令没有投出去 —— ${window.reason}。什么都没发（宁可不发，也不把命令降级成一条消息）。\n` +
-        "稍后重试，或者改用 `kind: \"message\"` 明确地只发一条说明。",
-        { childId, delivered: false, kind },
-      );
-    }
+  const mode = rawMode as ChannelInstructRecord["mode"];
+  const message = String(params.message ?? "").trim();
+  if (mode !== "interrupt" && !message) {
+    return fail("review-gate: 要发的内容是空的（只有 mode:\"interrupt\" 可以不带正文）。");
   }
 
-  // F7 — long or multi-line text never goes through the keyboard.
-  const mode = planSend(message);
-  let typed: string;
-  let marker: string;
-  if (mode.kind === "inline") {
-    typed = mode.text;
-    marker = echoMarker(mode.text);
-  } else {
-    const fileMarker = buildDeliveryMarker(child.taskId, deps.now());
-    const written = deps.writeScratchFile(
-      taskFileName(fileMarker),
-      buildTaskDocument({
-        marker: fileMarker,
-        taskId: child.taskId,
-        title: "项目经理的说明",
-        brief: mode.body,
-      }),
-    );
-    if (!written.ok) return fail(`review-gate: 说明文件写不出来（${written.error}）—— 什么都没发。`);
-    typed = mode.pointer(written.path);
-    marker = written.path.split("/").pop() ?? written.path;
-  }
-
+  const instructId = newChannelId("ins", deps.now());
   try {
-    for (const argv of buildSendMessageArgv(child.paneId, typed)) {
-      const result = deps.tmux(argv);
-      if (!result.ok) return fail(`review-gate: 发送失败 —— ${result.stderr || "tmux send-keys 出错"}`);
-    }
+    appendRecord(
+      deps.channelIO(),
+      { orchestrationId: deps.runtime().orchestrationId, childId, ...(deps.channelHome() === undefined ? {} : { home: deps.channelHome()! }) },
+      {
+        kind: "instruct",
+        from: "orchestrator",
+        at: new Date(deps.now()).toISOString(),
+        instructId,
+        mode,
+        ...(message ? { text: message } : {}),
+      },
+    );
   } catch (error) {
-    return fail(`review-gate: 发送失败 —— ${(error as Error).message}`);
+    return fail(`review-gate: 指令写不进通道 —— ${(error as Error).message}。什么都没发。`);
   }
 
-  const check = await verifyDelivery(deps, { kind: "send", paneId: child.paneId, marker });
+  const check = await verifyDelivery(deps, { kind: "instruct", childId, instructId });
   if (!check.verdict.ok) {
     return fail(
-      `review-gate: ${check.verdict.reason}\n观察到的证据：${describeStartupEvidence(check.evidence)}。`,
-      { childId, delivered: false, evidence: check.evidence },
+      `review-gate: ${check.verdict.reason}\n观察到的证据：${describeDeliveryEvidence(check.evidence)}。`,
+      { childId, instructId, mode, delivered: false, evidence: check.evidence },
     );
   }
-  const lane = check.verdict.lane ?? "submitted";
+
   // NEW WORK UN-FINISHES A CHILD (round-1 P1). Whatever this text is — the
   // next task, a correction, a question — the child has now been handed
-  // something, so its previous completion stops counting: the probe may not
-  // call it `done` again on the strength of a record from the last round, and
-  // the orchestration exit check must see it as ALIVE again. Stamped for the
-  // steering-queue lane too: a queued message is still read by the child.
-  deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
-  // A command that ended up in the queue did NOT run. Saying "delivered"
-  // there is the R-20 trap: the orchestrator waits for an effect that will
-  // never happen.
-  if (kind === "command" && lane === "queued") {
-    return fail(
-      `review-gate: 这条命令**没有被执行** —— 它进了 steering 队列（子会话在投递的瞬间又忙了起来），` +
-      "会被当成一条普通消息读掉。要么稍后重试，要么明确改用 `kind: \"message\"`。",
-      { childId, delivered: true, executed: false, lane, evidence: check.evidence },
-    );
+  // something, so its previous completion stops counting: the supervisor may
+  // not call it `done` again on the strength of a record from the last round,
+  // and the orchestration exit check must see it as ALIVE again.
+  if (mode !== "interrupt") {
+    deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
   }
-  return reply(
-    `review-gate: 已发给子会话 ${childId}（pane ${child.paneId}）` +
-    (mode.kind === "file" ? "，正文写成文件、只把路径敲了进去（长文本不走键盘）" : "") +
-    `。投递已核实：${check.verdict.summary}。\n` +
-    `送达通道：${lane === "submitted" ? "输入框已提交" : "steering 队列"}` +
-    `（本次意图：${kind === "command" ? "作为命令执行" : "只是一条消息"}）。`,
-    { childId, delivered: true, lane, kind, executed: kind === "command" },
-  );
 
+  return reply(
+    `review-gate: 已通过通道下发给子会话 ${childId}（mode=${mode}）。${check.verdict.summary}。\n` +
+    (mode === "interrupt"
+      ? "它已经中断当前这一轮；下一条 followUp 才会让它重新开始干活。"
+      : mode === "steer"
+        ? "它会在当前这一轮里就读到这条消息。"
+        : "它会在跑完手上这一轮之后读到这条消息。"),
+    { childId, instructId, mode, delivered: true },
+  );
 }
+

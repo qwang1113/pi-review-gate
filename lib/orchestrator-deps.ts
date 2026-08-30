@@ -15,10 +15,11 @@
  * Types only: this module contains no behavior at all.
  */
 
-import type { AttentionEvent } from "./attention.ts";
 import type { OrchestratorPlan } from "./orchestrator-plan.ts";
 import type { OrchestratorRuntime } from "./orchestrator-registry.ts";
-import type { ChildProbe } from "./orchestrator-probe.ts";
+import type { ChannelIO } from "./orchestrator-channel.ts";
+import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
+
 
 import type { TaskMode } from "./task-mode.ts";
 
@@ -144,16 +145,34 @@ export interface OrchestratorDeps {
   childJudgeRunning(cwd: string): boolean;
 
   /**
-   * The orchestration's ONE state probe (lib/orchestrator-probe.ts).
+   * The SUPERVISION CHANNEL's filesystem seam (lib/orchestrator-channel.ts).
    *
-   * Shared rather than created per call, because it carries the per-child
-   * memory the four-state machine compares against — a probe built fresh
-   * inside `orchestrator_wait` would see every screen as "changed" and could
-   * never observe that a child has stopped. The background timer and the
-   * waiter therefore drive the SAME instance, and the event queue is drained
-   * by whichever of them delivers the news.
+   * Injected rather than imported so a test drives the real protocol against
+   * an in-memory map: no orchestration test needs a disk, and none needs a
+   * tmux server either.
    */
-  probe(): ChildProbe;
+  channelIO(): ChannelIO;
+
+  /**
+   * Root under which channel directories live. `undefined` = the real pi
+   * agent home; a test points it somewhere of its own.
+   */
+  channelHome(): string | undefined;
+
+  /**
+   * The per-child memory the supervision event rules compare against
+   * (lib/orchestrator-supervisor.ts).
+   *
+   * Shared rather than rebuilt per call: a memory created fresh inside
+   * `orchestrator_wait` would see every state as "changed" and would re-ring
+   * the same unanswered question on every poll. The background timer and the
+   * waiter therefore read and write the SAME record.
+   */
+  supervisionMemory(): SupervisionMemory;
+  saveSupervisionMemory(next: SupervisionMemory): void;
+
+  /** This orchestrator's OWN context usage, as a percentage (block 4). */
+  contextPercent(): number | undefined;
 
 
   /**
@@ -187,8 +206,7 @@ export interface OrchestratorDeps {
   repairGitHooks(): { ok: true } | { ok: false; error: string };
 
 
-  /** Take the next attention event addressed to THIS orchestration, if any. */
-  consumeAttention(): AttentionEvent | undefined;
+
 
   /** Branch state for the exit checks. */
   branchFacts(): BranchFacts;

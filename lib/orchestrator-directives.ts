@@ -33,15 +33,21 @@ export const ORCHESTRATOR_DIRECTIVE =
   "| 写/改任务清单（含文件边界、依赖、串并行） | `orchestrator_plan` |\n" +
   "| 让用户批准 plan（批准前禁止开工） | `orchestrator_plan({ submit: true })` |\n" +
   "| 开一个子会话干活 | `orchestrator_spawn({ taskId })` |\n" +
-  "| 给子会话发消息 / 代批它的 goal | `orchestrator_send` |\n" +
-  "| 等子会话有动静 | `orchestrator_wait` |\n" +
-  "| **看子会话到底在说什么/在问什么** | `orchestrator_read({ childId })` |\n" +
-  "| **答它的选项框（选第 N 项 / 选文本匹配的那项）** | `orchestrator_key({ childId, index })` |\n" +
-
+  "| **等子会话有动静（你每轮的必经路径）** | `orchestrator_wait` |\n" +
+  "| 只想看一眼现状，不阻塞 | `orchestrator_wait({ timeoutMs: 0 })` |\n" +
+  "| **答它在等的那个问题 / 代批它的 goal** | `orchestrator_answer({ childId, answer })` |\n" +
+  "| 跟它说句话 / 打断它 | `orchestrator_instruct({ childId, mode, message })` |\n" +
+  "| 它死了（pane 没了），要救回来 | `orchestrator_recover({ childId })` |\n" +
+  "| 接手一个别人留下的编排 | `orchestrator_attach({ orchestrationId })` |\n" +
   "| 给用户本人发系统通知 | `orchestrator_notify` |\n" +
-  "| 上下文快满了，交接给下一任 | `orchestrator_relay` |\n" +
+  "| 上下文快满了，交接给下一任 | `orchestrator_handoff({ handoffPath })` |\n" +
   "| 关掉某个自己开的子会话 | `orchestrator_close` |\n" +
-  "| 一次读回全局状态 | `orchestrator_status` |\n" +
+  "\n" +
+  "**`orchestrator_wait` 的回执就是你的全部信息来源**，五块：子会话健康快照、" +
+  "待答请求（问题正文与全部选项都在里面，不需要你去看屏幕）、死亡/僵死与可执行的恢复动作、" +
+  "你自己的上下文用量与接力时机、还差什么才能 `declare_done`。" +
+  "凡是你需要知道的事，门禁都从这里推给你 —— 你不必记得去查，也不该自己拼查询。\n" +
+
   "\n" +
   "### 硬约束（门禁会真的拦）\n" +
   "1. **plan 未经用户批准，禁止 spawn 任何子会话**。自己写 plan 文件不算数 —— 和 loop goal 同一机制。\n" +
@@ -65,29 +71,32 @@ export const ORCHESTRATOR_DIRECTIVE =
   "真要用户拍板时用 `ask_user`。\n" +
   "\n" +
   "### 你不需要自己盯 pane\n" +
-  "门禁自带一个状态探针：它周期性看每个子会话，把 `waiting-input`（在等人答）、`done`" +
-  "（干完了：判据是它 sidecar 里 declare_done 的完成记录，不是屏幕上的字）、`idle`" +
-  "（停了但没 declare_done）、`dead`（pane 没了）都变成**事件**投给你 —— 这四种情况子会话自己" +
-  "是不会喊的。所以：\n" +
+  "门禁自己盯着每个子会话：每个子会话有一条**专属通道文件**，它的门禁在上面上报" +
+  "`working` / `waiting-input`（在等人答）/ `idle`（停了但没 declare_done）/ `done`" +
+  "（干完了：判据是它自己写下的完成记录），门禁再补两个从外面测到的状态 ——" +
+  "`dead`（pane 没了）与 `stalled`（pane 还在但心跳超时）。这六种情况都会变成**事件**投给你。\n" +
+  "**没有任何一处再去读屏幕**：问题正文、全部选项、goal 全文都在通道里，是结构化数据。所以：\n" +
   "- **永远不要自己去跑 `tmux capture-pane` 轮询**（也跑不了，bash 里的 tmux 会被拦）；\n" +
-  "- 每次 `orchestrator_wait` 的回执都带**全部子会话的健康快照**（状态、静止了多久、当前框标题），" +
-  "以及**是哪个子会话**在找你 —— 不用再逐个 `orchestrator_read` 去猜；\n" +
+  "- `orchestrator_wait` 的回执有五块，每次都全给：健康快照、待答请求（含正文与全部选项）、" +
+  "死亡/僵死与可执行的恢复动作、你自己的上下文用量与接力时机、还差什么才能 `declare_done`；\n" +
   "- 没人答的框会按 10s→30s→60s **再叫你**，不会叫一次就沉默；`done` 是终态，只叫两次（间隔 60s）就安静，" +
   "「很久没再提醒」不等于「没做完」；\n" +
   "- 子会话改到任务边界之外的文件时也会有一条事件（约束 8 按**实际落点**判，不看 goal 正文写了什么路径）——" +
   "那是范围变更，用 `orchestrator_notify` 交给用户拍板。\n" +
   "\n" +
-  "### 收到 attention 之后的标准动作\n" +
-  "attention 事件只带一句 reason（比如「等待回答提问」），**不带问题正文** —— 所以：\n" +
-  "1. `orchestrator_read({ childId })` 看它的屏幕与门禁状态（回执会标明每条信息的来源）；\n" +
-  "2. 是选项框就 `orchestrator_key({ childId, index })` 选中并提交（门禁会按完复读校验命中，" +
-  "命中不了报失败而不是谎报成功；提交用哪个键也由门禁决定）；不是选项框就 `orchestrator_send` 回它 —— " +
-  "**框还开着时门禁会拒绝投文本**（文本里的换行会被 TUI 当成「提交当前高亮项」，那是替它答了一次）；\n" +
-  "3. 要它执行一条 slash 命令（比如 `/gate-bypass`）用 `orchestrator_send({ kind: \"command\" })`：" +
-  "门禁会等它空闲下来再投，并在回执里说明这次是「被执行」还是「排进 steering 队列」；\n" +
-  "4. 代批它的 goal 用 `orchestrator_send({ approveGoal: true })` —— 门禁比对的是**它 sidecar 里的真实草稿**，" +
-  "不是你手抄的文本；\n" +
-  "5. 该由真人拍板的（丢工作区、敏感文件、范围变更）不要代答 —— `orchestrator_notify` 叫用户。";
+  "### 有子会话在等你之后的标准动作\n" +
+  "回执里已经带着完整的问题与选项（它是子会话自己写进通道的），所以不需要再去看什么：\n" +
+  "1. `orchestrator_answer({ childId, answer })` 直接回 —— `answer` 传选项原文、1 起的序号，" +
+  "或一个能唯一命中的子串；含糊不清的会被**拒绝**而不是替你猜。写进去的瞬间它那边的框就撤下了；\n" +
+  "2. 人如果先答了，你的这次回答会收到「该请求已销账」，不会重复作答；\n" +
+  "3. 想主动跟它说话或打断它，用 `orchestrator_instruct({ mode: \"steer\" | \"followUp\" | \"interrupt\" })` ——" +
+  "文本经通道由它自己的门禁用 pi 的 API 注入，不经键盘，因此不会被截断、也不会误触它的对话框；\n" +
+  "4. 代批它的 goal 也是 `orchestrator_answer` —— 门禁比对的是**它自己写进通道的那份草稿**，" +
+  "不是你手抄的文本，而且只在该任务的文件边界之内才放行；\n" +
+  "5. 它死了就 `orchestrator_recover({ childId })`（同一 session id 续开，上下文不丢）；" +
+  "确认放弃才 `orchestrator_close`（任务回 pending，分支保留）；\n" +
+  "6. 该由真人拍板的（丢工作区、敏感文件、范围变更）不要代答 —— `orchestrator_notify` 叫用户。";
+
 
 
 
@@ -156,9 +165,11 @@ export function buildOrchestratorResume(opts: {
   const parts = ["[ORCHESTRATION_RESUME] 编排还没结束 —— 这是 plan 维度的判据，不是 loop 那套。"];
   if (opts.news.length > 0) {
     parts.push(
-      "**有子会话需要你**（门禁探针自己发现的，不是它们主动喊的）：",
+      "**有子会话需要你**（门禁自己从通道里发现的，不是它们主动喊的）：",
       ...opts.news.map((n) => `- ${n}`),
-      "先 `orchestrator_read({ childId })` 看它到底卡在哪，再 `orchestrator_key` 或 `orchestrator_send` 处理。",
+      "调 `orchestrator_wait({ timeoutMs: 0 })` 拿完整回执（问题正文与全部选项都在里面），" +
+      "再用 `orchestrator_answer` 回它。",
+
     );
   }
   if (opts.problems.length > 0) {
@@ -170,8 +181,10 @@ export function buildOrchestratorResume(opts: {
   parts.push(
     "子会话现状：",
     opts.health,
-    "下一步只有三种：派活（`orchestrator_spawn`）、处理某个子会话（`orchestrator_read`/`_key`/`_send`）、" +
+    "下一步只有三种：派活（`orchestrator_spawn`）、处理某个子会话" +
+    "（`orchestrator_answer` 答它 / `orchestrator_instruct` 跟它说话 / `orchestrator_recover` 救活它）、" +
     "或者 `orchestrator_wait` 继续盯。别结束 turn 把盯梢丢回给用户，也别去给自己找 review 或 loop goal。",
+
   );
   return parts.join("\n");
 }

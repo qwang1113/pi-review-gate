@@ -27,16 +27,12 @@
  *    pane, which creates the right column;
  *  - every later child → `split-window -v` off the LAST child pane, which
  *    stacks it under the others instead of splitting the orchestrator again;
- *  - a relay (handing the orchestration to a successor) → `split-window -h`
+ *  - a handoff (giving the orchestration to a successor) → `split-window -h`
  *    off the orchestrator's own pane, so the successor lands beside it and
  *    inherits the left column when the old pane is closed.
  *
  * Pure module: builds and validates argv. It never spawns anything.
  */
-
-import { TMUX_KEY_NAMES, type LowLevelKey } from "./orchestrator-keys.ts";
-import { PANE_CAPTURE_LINES } from "./orchestrator-pane-read.ts";
-
 
 /** A tmux pane id as tmux itself prints it: `%` followed by digits. */
 const PANE_ID = /^%\d{1,10}$/;
@@ -140,12 +136,12 @@ export function buildSpawnPaneArgv(opts: SpawnPaneOptions): readonly string[] {
 }
 
 /**
- * Open the SUCCESSOR orchestrator beside the current one (relay, §8).
+ * Open the SUCCESSOR orchestrator beside the current one (handoff).
  * Always horizontal off the orchestrator's own pane: when the old pane is
  * closed afterwards, tmux expands the successor into the left column, which
  * is what makes the handover invisible in the user's layout.
  */
-export function buildRelayPaneArgv(opts: {
+export function buildHandoffPaneArgv(opts: {
   orchestratorPane: string;
   cwd: string;
   env?: Readonly<Record<string, string>>;
@@ -168,69 +164,26 @@ export function buildRelayPaneArgv(opts: {
 }
 
 /**
- * Deliver a message to a child pane.
+ * THERE IS NO `send-keys` BUILDER, AND THAT IS THE POINT (2026-08-30).
  *
- * TWO commands, deliberately: `-l` sends the text LITERALLY (so a message
- * containing `Enter`, `C-c` or a semicolon is data, never a key name), and a
- * separate `Enter` submits it. Sending them as one string is the classic way
- * to shred a multi-line message into half-executed input.
+ * Delivering text and pressing keys used to live here. Both are gone, with
+ * every caller, because typing at a TUI is not an API: the measured results
+ * were a truncated task document (F7), a message that was never submitted
+ * (F8), text landing in the composer or the steering queue depending on
+ * timing (R-20), and a confirmation dialog that ignored `Enter` and `C-m` and
+ * accepted only `KPEnter` (R-8).
+ *
+ * Both jobs now go through the channel instead:
+ *
+ *  - a MESSAGE is written to the child's channel and the child's own gate
+ *    injects it with `pi.sendUserMessage` (lib/orchestrator-child-channel.ts);
+ *  - an ANSWER to a dialog is written to the same channel and resolves the
+ *    `ui.select` the child's gate is already awaiting — no keystroke exists
+ *    anywhere in that path.
+ *
+ * What is left in this module is what tmux is genuinely for: creating a pane,
+ * closing a pane, and enumerating which panes exist.
  */
-export function buildSendMessageArgv(pane: string, text: string): readonly (readonly string[])[] {
-  const target = requirePane(pane, "pane");
-  // A newline inside the payload would submit early and split the message in
-  // two; the child's input is a single line, so they are flattened to spaces.
-  const oneLine = text.replace(/\r?\n/g, " ").trim();
-  return [
-    assertSafeTmuxArgv(["send-keys", "-t", target, "-l", oneLine]),
-    assertSafeTmuxArgv(["send-keys", "-t", target, "Enter"]),
-  ];
-}
-
-/**
- * READ a child pane's visible text (F3 — the capability whose absence
- * deadlocked the first real orchestration).
- *
- * `-p` prints to stdout instead of a paste buffer, and `-S -<n>` starts the
- * capture n lines into the scrollback so an option list that has scrolled
- * just off the bottom is still there. Read-only: `capture-pane` cannot change
- * anything in the child's session, which is why it needs no further guarding
- * beyond the pane-id check.
- */
-export function buildCapturePaneArgv(pane: string, lines: number = PANE_CAPTURE_LINES): readonly string[] {
-  const count = Number.isFinite(lines) ? Math.min(2000, Math.max(1, Math.floor(lines))) : PANE_CAPTURE_LINES;
-  return assertSafeTmuxArgv([
-    "capture-pane",
-    "-p",
-    "-t",
-    requirePane(pane, "pane"),
-    "-S",
-    `-${count}`,
-  ]);
-}
-
-/**
- * Press KEYS in a child pane (F6/F11).
- *
- * The argv is built from the closed {@link TMUX_KEY_NAMES} map rather than
- * from caller-supplied words, and that is the security property: `send-keys`
- * treats any name it does not recognize as LITERAL TEXT, so a passthrough
- * would type "escpae" into the child's composer — or worse, let a crafted
- * "key" become arbitrary input. Nothing that is not a key can get through
- * this function.
- *
- * Note the contrast with {@link buildSendMessageArgv}, which passes `-l` to
- * force the opposite interpretation (everything is literal, no key names).
- */
-export function buildSendKeysArgv(pane: string, keys: readonly LowLevelKey[]): readonly string[] {
-  const target = requirePane(pane, "pane");
-  const names = keys.map((key) => {
-    const name = TMUX_KEY_NAMES[key];
-    if (!name) throw new UnsafeTmuxCommand(`不认识的按键：${JSON.stringify(key)}`);
-    return name;
-  });
-  if (names.length === 0) throw new UnsafeTmuxCommand("没有要按的键");
-  return assertSafeTmuxArgv(["send-keys", "-t", target, ...names]);
-}
 
 
 /** Close ONE pane. Panes only — never a window, never a session. */

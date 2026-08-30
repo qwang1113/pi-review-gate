@@ -19,7 +19,7 @@ import {
   clampChildWaitTimeout,
   evaluateChildWait,
 } from "../lib/orchestrator-wait.ts";
-import type { AttentionEvent } from "../lib/attention.ts";
+import type { SupervisionEvent } from "../lib/orchestrator-supervisor.ts";
 
 const READY = {
   planApproved: true,
@@ -149,21 +149,20 @@ test("the successor's brief names all three inherited things", () => {
 // Wait criteria (§6.3)
 // ---------------------------------------------------------------------------
 
-function attention(reason: string): AttentionEvent {
-  return {
-    id: "e1", fromSessionId: "child", toSessionId: "orch-abc-1",
-    repo: "/repo", reason, createdAt: "2026-08-29T12:00:00.000Z",
-  };
+function supervision(summary: string): SupervisionEvent {
+  return { childId: "c1", state: "waiting-input", summary };
 }
 
-test("an attention event is the most informative outcome, so it wins", () => {
+test("a supervision event is the most informative outcome, so it wins", () => {
   const decision = evaluateChildWait({
-    attention: attention("等待回答提问"), done: true, paneAlive: true,
+    events: [supervision("c1 在等回答：「等待回答提问」")], done: true, paneAlive: true,
   });
   assert.equal(decision.done, true);
-  assert.equal(decision.reason, "attention");
+  assert.equal(decision.reason, "supervision");
   assert.match(decision.summary, /等待回答提问/, "the summary carries what the child actually asked for");
+  assert.equal(decision.childId, "c1");
 });
+
 
 test("a finished child does NOT exit — 'done' is an event, not a process end", () => {
   const decision = evaluateChildWait({ done: true, paneAlive: true });
@@ -190,8 +189,12 @@ test("nothing yet is not an end state, and the note becomes the live snapshot", 
 test("the wait budget is clamped to a sane window", () => {
   assert.equal(clampChildWaitTimeout(undefined), CHILD_WAIT_DEFAULT_MS);
   assert.equal(clampChildWaitTimeout("soon"), CHILD_WAIT_DEFAULT_MS);
-  assert.equal(clampChildWaitTimeout(0), 1000);
-  assert.equal(clampChildWaitTimeout(-1), 1000);
+  // 0 is the SNAPSHOT mode that absorbed `orchestrator_status` — it is passed
+  // through rather than clamped up to a 1s busy-poll, and so is anything
+  // meaningless-but-non-blocking.
+  assert.equal(clampChildWaitTimeout(0), 0);
+  assert.equal(clampChildWaitTimeout(-1), 0);
+
   assert.equal(clampChildWaitTimeout(10 ** 12), CHILD_WAIT_MAX_MS);
   assert.equal(clampChildWaitTimeout(60_000), 60_000);
 });

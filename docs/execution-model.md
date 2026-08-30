@@ -69,12 +69,14 @@
   上下文原样延续。没有 inbox 文件、没有 channel。
 - **流式 findings**：追加到 `.pi/review-stream/<round>.jsonl`
   （仅证据，禁止 verdict 形状的行）。
-- **定向 parent 用户注意**（round-18）：`propose_loop_goal` 弹窗与
-  `ask_user` 只通知**启动本会话的那个会话**（parent）。parent
-  标识在启动时经环境变量 `RG_PARENT_SESSION` 传入；事件走旁路文件
-  （`~/.pi/agent/review-gate-attention.json`，跨 repo 可读）。没有
-  tmux 信号侧（2026-08-28 起 defaultSignal 为空操作）——文件即送达，
-  parent 在自己的 turn 边界消费。**无 macOS 通知**（用户要求）。
+- **子会话的问题走点对点通道**（2026-08-30）：`propose_loop_goal` 的批准框与
+  `ask_user` 的每一问都写进**本子会话专属的通道文件**
+  （`~/.pi/agent/rg-channels/<orch-id>/<child-id>.jsonl`），带完整选项与正文。
+  项目经理与坐在 pane 前的人**任意一方先答即生效**，另一边的框自动撤下。
+  上一版的全局 attention 队列（`~/.pi/agent/review-gate-attention.json`）已删除
+  —— 它靠一个收件人字段区分传输，等待方会消费到别人的事件。**无 macOS 通知**
+  （用户要求；给人发桌面通知是编排层独有的另一条通道）。
+
 - **主会话存活不变量**（round-18，用户硬约束）：门禁未通过前主会话**不得**
   停止自动循环。`agent_settled` 的 `classifyChildren()`（lib/child-watch.ts）
   托管等待：进程已退出或静默超时的子会话**立即结束等待**（注入
@@ -129,24 +131,26 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 两个等待共用 `lib/poll-wait.ts` 这一套骨架（probe / 发快照 / 判据或预算命中
 即返回），只是把判据换掉 —— 这正是上一轮把骨架做成判据可注入的原因。
 
-**attention 只是门铃，不是话筒**（2026-08-29 端到端验证的头号发现）：事件只带一句
-reason（如「等待回答提问」），**不带问题正文**。所以醒来之后的标准动作是
-`orchestrator_read({childId})` —— 它同时给两路信息并**分别标注来源**：tmux
-`capture-pane` 的可见文本（含对话框选项与当前高亮项的启发式解析）与子会话自己的
-sidecar（门禁类对话框的结构化真值，比如它正在申请批准的 goal 草稿）。要答选项框用
-`orchestrator_key({childId, index})`：门禁自己读高亮、算方向键次数、**按完复读校验
-命中**，命中不了报失败而不是谎报成功；低层按键（`keys: ["escape"]`）作为兜底。
+**回执就是话筒**（2026-08-30 通道重构）：`orchestrator_wait` 的回执直接带着
+问题正文与**全部选项原文** —— 它是子会话自己写进通道的结构化数据，不是从屏幕上
+解析出来的。所以醒来之后的标准动作是 `orchestrator_answer({childId, answer})`，
+没有「先去读一眼」这一步。（上一版这里是「attention 只是门铃，不是话筒」：事件
+只带一句 reason，醒来后必须 `orchestrator_read` 抓屏解析、再 `orchestrator_key`
+模拟方向键作答。那条链路与它依赖的两个模块已整体删除。）
 
 **投递不走键盘**：`orchestrator_spawn` 把任务正文写成仓库外的任务文件、以
-`pi @<taskfile>` argv 启动子会话（与 `lib/judge-process.ts` 同一机制），因此不存在
-截断、也不需要补 Enter；`orchestrator_send` 的长文本同理。两者在回执成功前都必须
-观察到「对方真的收到并起跑」的证据，观察不到就回执失败并把任务标回 `pending`
-（保留 pane，不误杀）。
+`pi --session-id <id> @<taskfile>` argv 启动子会话（与 `lib/judge-process.ts`
+同一机制），因此不存在截断、也不需要补 Enter；后续消息走
+`orchestrator_instruct`，写进通道由子会话自己的门禁用 `pi.sendUserMessage`
+注入。两者在回执成功前都必须观察到「对方真的收到」的证据 —— spawn 看通道里是否
+有它自己的上报，instruct 看它的 `instruct-ack` —— 观察不到就回执失败并把任务标回
+`pending`（保留 pane，不误杀）。
+
 
 
 **寻址**：judge 子会话寻址派它的那个 session（`RG_PARENT_SESSION`）是对的
 —— 它活不过这一轮。编排子会话会**活过**开它的会话（接力换人），所以它寻址的
-是稳定的 orchestration id（`RG_ORCHESTRATION_ID`）。`attentionTarget()`
+是稳定的 orchestration id（`RG_ORCHESTRATION_ID`）。`supervisionTargetId()`
 是唯一的解析规则：orchestration id 优先，回退 parent session，两者都无则
 静默（独立会话叫不醒任何人）。接力时新会话继承同一个 id，因此**子会话完全
 无感、无需重启**。
@@ -165,7 +169,8 @@ shell）；门禁自己的执行路径也过同一份禁止清单，所以「门
 
 送审是**一次调用**：`judge_submit({role:"reviewer", task:<本轮改动说明>})`。
 门禁在这一次调用里依次跑完下面四步，任一步失败就带原因打回（不留半提交
-状态）；这些工具本身仍然注册着，作为需要单独跑时的高级入口。
+状态）。这四步的实现**还在**，但 2026-08-30 起**不再注册成工具**（哲学三）：
+门禁在内部调用它们，agent 看不到这些名字，因此没有第二条路可选。
 
 - `run_precommit`（full lane）：不过就打回。
 - `review_checkpoint`：`git add -A && git commit`（英文 message 校验，

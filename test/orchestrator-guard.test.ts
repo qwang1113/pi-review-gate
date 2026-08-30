@@ -34,7 +34,9 @@ test("every TOOL-REPLACED subcommand is redirected in orchestrator mode and left
   assert.deepEqual([...TOOL_REPLACED].sort(), ["kill-pane", "send-keys", "split-window"]);
   const expectedTool: Record<string, RegExp> = {
     "split-window": /orchestrator_spawn/,
-    "send-keys": /orchestrator_send/,
+    // Typing at a child was ONE tool and is now two, split by what the text
+    // is for: an instruction, or an answer to a question it is holding.
+    "send-keys": /orchestrator_instruct.*orchestrator_answer/,
     "kill-pane": /orchestrator_close/,
   };
   for (const sub of TOOL_REPLACED) {

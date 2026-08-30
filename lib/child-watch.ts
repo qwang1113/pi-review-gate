@@ -139,7 +139,7 @@ export function buildChildWaitNotice(
           reason === "session-ended"
             ? "进程已退出"
             : "静默超过上限"
-        }。用 judge_read 读取它已产出的输出：有结论就据此继续（record_review / record_goal_prereview），没有结论就 judge_close 后重新派发。`,
+        }。用 judge_read 读取它已产出的输出（门禁在它退出时已经把裁决记好了）：没有结论就 judge_close 后重新派发。`,
       ),
     );
   }

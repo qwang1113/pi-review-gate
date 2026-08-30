@@ -164,7 +164,24 @@ import {
   venueRefusal,
   type MergeVenue,
 } from "../lib/worktree-merge.ts";
-import { attentionTarget, publishAttention } from "../lib/attention.ts";
+// ---- the SUPERVISION CHANNEL (both sides). A child reports on it and reads
+// its instructions from it; an orchestrator reads it and writes answers. It
+// replaced the global attention queue, the screen scraping and send-keys.
+import {
+  instructText,
+  nodeChannelIO,
+  type ChannelIO,
+} from "../lib/orchestrator-channel.ts";
+import {
+  acknowledgeInstruct,
+  askThroughChannel,
+  pendingInstructions,
+  reportState,
+  type ChannelDialogRequest,
+  type ChildChannelBinding,
+} from "../lib/orchestrator-child-channel.ts";
+import { supervisionTarget } from "../lib/orchestration-id.ts";
+import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
 // repository's own worst example of the architecture rule this round adds.
@@ -179,12 +196,16 @@ import {
   buildOrchestratorResume,
 } from "../lib/orchestrator-directives.ts";
 import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
-import { describeProbeEvent, describeStaleEvent, PROBE_INTERVAL_MS } from "../lib/orchestrator-probe.ts";
+import {
+  decideSupervisionEvents,
+  superviseChildren,
+  type SupervisionMemory,
+} from "../lib/orchestrator-supervisor.ts";
 import { formatChildHealth } from "../lib/orchestrator-child-state.ts";
 
 import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
 import { registerOrchestratorSessionTools } from "../lib/orchestrator-session-tools.ts";
-import { registerOrchestratorReadTools } from "../lib/orchestrator-read-tools.ts";
+
 
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
@@ -200,15 +221,28 @@ import {
 // judge_wait) are registered from lib/, like the orchestration tools: this
 // file keeps only what it alone owns and hands the rest over as deps.
 import { registerJudgeSessionTools } from "../lib/judge-session-tools.ts";
+import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "../lib/judge-lifecycle.ts";
 // The judge tools that RELAY to a session (review_spawn / review_watch /
 // review_send) are the other half of the same family, and are registered the
 // same way — the dispatch owner and the child registry reach them as deps.
-import { registerJudgeRelayTools } from "../lib/judge-relay-tools.ts";
-// The PREPARE family went the same way, split by responsibility: the round a
-// reviewer judges (a commit range, a findings stream, a review target) is one
-// module, the two advisory task builders are the other.
+//
+// THE TEN ADVANCED ENTRIES ARE GONE (2026-08-30, philosophy three). There are
+// no longer tools named `review_spawn` / `review_watch` / `review_send`,
+// `prepare_review` / `prepare_adviser` / `prepare_goal_audit`,
+// `run_precommit` / `review_checkpoint`, `record_review` /
+// `record_goal_prereview`. Every one of them was a SECOND path to something
+// `judge_submit` (or `propose_loop_goal`) already does end to end, and the
+// cost of a second path is not redundancy — it is an agent stopping to decide
+// which one applies, every single round.
+//
+// Seven of them are still IMPLEMENTATIONS, registered into `internalHost`
+// instead of into `pi`: the chain calls them so the mechanical checks live in
+// exactly one place, and no model can see the names. The other three
+// (`review_spawn` / `review_watch` / `review_send`) were deleted outright,
+// module included.
 import { registerReviewPrepareTools } from "../lib/review-prepare-tools.ts";
 import { registerAdvisoryPrepareTools } from "../lib/advisory-prepare-tools.ts";
+
 // The L7 Copilot tools moved the same way: this file wires them, the module
 // owns their bodies (and lib/copilot-gh.ts the `gh` calls they make).
 import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
@@ -531,6 +565,55 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     return registerToolUpstream(spec);
   };
+  /**
+   * The INTERNAL host — an implementation the gate runs but does not expose.
+   *
+   * Philosophy three says the ten advanced entries are DELETED, and philosophy
+   * two says the gate still has to perform every step they used to name. Both
+   * hold at once because a tool has two halves: an implementation and a
+   * registration. This host keeps the first and drops the second — the body is
+   * captured into `toolExecutes` (so `judge_submit` and `propose_loop_goal`
+   * still call the ONE implementation, with all its mechanical checks) and
+   * `pi` never learns the name exists, so no agent can be tempted to sequence
+   * the steps by hand.
+   *
+   * Nothing here is a back door: the names are unreachable from a model, and
+   * `test/extension-structure.test.ts` asserts that they are not registered.
+   */
+  function captureInternalTool(spec: unknown): void {
+    const s = spec as { name?: string; execute?: unknown };
+    if (typeof s?.name === "string" && typeof s?.execute === "function") {
+      toolExecutes.set(s.name, s.execute as ToolExecute);
+    }
+  }
+  /** The `lib/` tool modules register through this. */
+  const internalHost: ToolHost = { registerTool: captureInternalTool };
+  /**
+   * A TEST SEAM, and deliberately not a tool surface.
+   *
+   * The internal implementations have to stay reachable by a test — they hold
+   * mechanical checks (the precommit receipt, the L5 message rule, the
+   * checkpoint marker, the audit adjudication) whose behavior is the point of
+   * several suites, and driving them only through the minutes-long chains
+   * that call them would test almost nothing.
+   *
+   * It is not a back door: an agent's world is the TOOL REGISTRY, and nothing
+   * here is in it. `pi` never learns these names, no schema is published for
+   * them, and `test/extension-structure.test.ts` asserts exactly that.
+   */
+  (pi as unknown as { __reviewGateInternalTools?: Map<string, ToolExecute> })
+    .__reviewGateInternalTools = toolExecutes;
+
+  /**
+   * The in-file bodies register through this, which keeps pi's own parameter
+   * typing (the typebox schema flows into `execute`'s params) while the
+   * definition goes nowhere near the model.
+   */
+  const internalTool: typeof pi.registerTool = ((spec: unknown) => {
+    captureInternalTool(spec);
+  }) as typeof pi.registerTool;
+
+
   /** Call another gate tool internally; a missing tool is a programming error. */
   async function callTool(
     name: string,
@@ -1078,44 +1161,132 @@ export default function reviewGate(pi: ExtensionAPI) {
    * session_shutdown so a reload/resume never leaks a stale listener.
    */
 
-  /**
-   * Who WE are for the self-wake filter. Round-17 Nit (reviewer): a shared
-   * "unknown-session" fallback made two id-less hosts look like the SAME
-   * session, so each would silently swallow the other's events. The pid is
-   * unique per process, which is exactly the granularity the filter needs.
-   */
-  function attentionIdentity(): string {
-    return state.sessionId ?? `unknown-${process.pid}`;
+  // ---------- the CHILD side of the supervision channel ----------
+  //
+  // A session spawned by an orchestrator reports on ONE file that belongs to
+  // it alone, and reads its instructions from the same file. The agent in
+  // this session knows nothing about any of it: everything below is done by
+  // the gate, on pi's own events, which is the whole reason it can be
+  // trusted. (The ORCHESTRATOR side is lib/orchestrator-supervisor.ts.)
+  //
+  // A session with no orchestration address has no binding at all and every
+  // function here is a silent no-op — a standalone session reports nowhere.
+
+  const channelIO: ChannelIO = nodeChannelIO();
+
+  /** This session's channel, or undefined when it is not somebody's child. */
+  function childBinding(): ChildChannelBinding | undefined {
+    const orchestrationId = supervisionTarget();
+    const childId = process.env[STATE_VARIANT_ENV]?.trim();
+    if (!orchestrationId || !childId) return undefined;
+    return {
+      io: channelIO,
+      target: { orchestrationId, childId },
+      ...(state.sessionId ? { sessionId: state.sessionId } : {}),
+    };
   }
 
-  /**
-   * Directed attention (round-18): wake the ONE session responsible for us —
-   * the orchestration we belong to (`RG_ORCHESTRATION_ID`) if there is one,
-   * otherwise the session that SPAWNED us (`RG_PARENT_SESSION`). Addressing
-   * the orchestration is what keeps a child reaching the CURRENT orchestrator
-   * after a relay handed the role to a successor. With neither this is a
-   * silent no-op ("no-parent") — a standalone session never wakes anybody. No
-   * macOS notification, no osascript: the wake is the target's transcript
-   * message. (Notifying the HUMAN is a different, orchestrator-only channel —
-   * lib/orchestrator-notify.ts.) Never throws and never blocks a dialog.
-   */
-  function notifyUserAttention(reason: string, repo?: string): void {
+  /** Percent of this session's context window in use, when the host says. */
+  function contextPercentOf(ctx: { getContextUsage?: () => unknown } | undefined): number | undefined {
     try {
-      publishAttention({
-        fromSessionId: attentionIdentity(),
-        toSessionId: attentionTarget(),
-        // F12 — stamp WHERE this came from. The orchestration waiter uses the
-        // origin pane to tell "one of my children is calling" from "an event
-        // that merely happens to be addressed to me": the hand-run measured
-        // `fromPane: None` on every event, which left the waiter with nothing
-        // to filter on and made it return instantly on foreign traffic.
-        fromPane: process.env.TMUX_PANE?.trim() || undefined,
-        repo: repo ?? cwd,
-        reason,
-
-      });
-    } catch { /* attention is a convenience, never a gate */ }
+      const usage = ctx?.getContextUsage?.() as { used?: number; max?: number; percent?: number } | undefined;
+      if (!usage) return undefined;
+      if (typeof usage.percent === "number" && Number.isFinite(usage.percent)) return usage.percent;
+      if (typeof usage.used === "number" && typeof usage.max === "number" && usage.max > 0) {
+        return (usage.used / usage.max) * 100;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
+
+  /**
+   * Tell the orchestration what this session is doing.
+   *
+   * Called from `agent_settled` and `turn_end` — pi's own truth — never from
+   * a heuristic about a terminal. `ctx.isIdle()` separates "still streaming"
+   * from "stopped", and the gate's own completion record separates "stopped"
+   * from "finished": a child that ran `declare_done` is `done`, and one that
+   * merely went quiet is `idle`. That distinction is the entire fix for R3-5,
+   * where a finished child was classified `working` and produced no event for
+   * 725 seconds.
+   */
+  function reportChildState(ctx: ExtensionContext, note?: string): void {
+    const binding = childBinding();
+    if (!binding) return;
+    const streaming = ctx.isIdle?.() === false || ctx.hasPendingMessages?.() === true;
+    const percent = contextPercentOf(ctx as unknown as { getContextUsage?: () => unknown });
+    reportState(
+      binding,
+      streaming ? "working" : state.completion?.at ? "done" : "idle",
+      {
+        ...(percent === undefined ? {} : { contextPercent: Math.round(percent) }),
+        ...(note === undefined ? {} : { note }),
+      },
+    );
+  }
+
+  /**
+   * Apply whatever the orchestrator has sent, through pi's OWN delivery API.
+   *
+   * `steer` / `followUp` are `sendUserMessage`'s own modes and `interrupt` is
+   * `ctx.abort()`; nothing is typed at a terminal, so nothing can be
+   * truncated, split by a newline, or read by an open dialog as a menu
+   * selection. Every one of those was measured on the `send-keys` path this
+   * replaces (F7, F8, R-20, R-13).
+   *
+   * The acknowledgement is what the orchestrator's receipt is built on, so it
+   * is written from what ACTUALLY happened — a failure is acknowledged as a
+   * failure, never omitted.
+   */
+  async function drainChildInstructions(ctx: ExtensionContext): Promise<void> {
+    const binding = childBinding();
+    if (!binding) return;
+    for (const instruction of pendingInstructions(binding)) {
+      try {
+        if (instruction.mode === "interrupt") {
+          ctx.abort?.();
+          acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()");
+          continue;
+        }
+        const text = instructText(channelIO, instruction);
+        if (!text) {
+          acknowledgeInstruct(binding, instruction.instructId, false, "指令没有正文（也没有可读的溢出文件）");
+          continue;
+        }
+        await pi.sendUserMessage(text, { deliverAs: instruction.mode });
+        acknowledgeInstruct(binding, instruction.instructId, true, `pi.sendUserMessage(deliverAs:${instruction.mode})`);
+      } catch (error) {
+        acknowledgeInstruct(binding, instruction.instructId, false, (error as Error).message);
+      }
+    }
+  }
+
+  /**
+   * Raise a gate dialog that EITHER the human or the orchestrator may answer.
+   *
+   * This is the single funnel every gate question goes through, and it is why
+   * the orchestrator never needs to read a screen: the request — title, every
+   * option in order, and the full payload (a goal draft, a plan) — is written
+   * into the channel as data. Whoever answers first wins; the other side is
+   * cancelled, so a box the orchestrator answered DISAPPEARS from the user's
+   * screen instead of asking a question that is already settled.
+   *
+   * A session with no orchestration simply renders the dialog, exactly as it
+   * always did.
+   */
+  async function askEitherSide(
+    request: Omit<ChannelDialogRequest, "hasUI">,
+    hasUI: boolean,
+    render: (signal: AbortSignal) => Promise<string | undefined>,
+  ): Promise<string | undefined> {
+    const binding = childBinding();
+    if (!binding) return hasUI ? render(new AbortController().signal) : undefined;
+    const outcome = await askThroughChannel(binding, { ...request, hasUI }, render);
+    return outcome.answer;
+  }
+
 
   // ---------- orchestration layer (the project-manager role) ----------
   //
@@ -1179,7 +1350,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
   registerOrchestratorSessionTools(pi, orchestratorDeps);
-  registerOrchestratorReadTools(pi, orchestratorDeps);
 
   /** Constraints 3, 4, 10 and 11 — the orchestration's own exit contract. */
   function orchestrationDoneProblems(): string[] {
@@ -1214,56 +1384,94 @@ export default function reviewGate(pi: ExtensionAPI) {
   // forever. The probe manufactures those events, and this timer is what
   // makes it fire even when the supervisor is NOT sitting inside
   // `orchestrator_wait`.
-  let probeTimer: ReturnType<typeof setInterval> | undefined;
+  let supervisionTimer: ReturnType<typeof setInterval> | undefined;
   let orchestratorContinuations = 0;
+  /** The supervisor's own last health read, for the continuation message. */
+  let lastSupervisionHealth: ReturnType<typeof formatChildHealth> = "";
 
-  /** The news the probe has for the supervisor right now, as text lines. */
-  function drainProbeNews(): string[] {
+  /** How often the background supervisor re-reads every child's channel. */
+  const SUPERVISION_INTERVAL_MS = 10_000;
+
+  /**
+   * What the children need from the supervisor RIGHT NOW, as text lines.
+   *
+   * The whole read is the channels — no pane is captured, no text is matched.
+   * The event memory lives in the deps (one per orchestration), so the
+   * background timer and `orchestrator_wait` share it and neither re-rings
+   * what the other has already reported.
+   */
+  function drainSupervisionNews(): string[] {
     if (state.taskMode !== "orchestrator") return [];
-    const probe = orchestratorDeps.probe();
-    probe.observe();
-    const drained = probe.drain();
-    // Stale events are named too, but as an aside: a supervisor that is woken
-    // by the timer still deserves to know an event was written off rather
-    // than delivered (R3-3), and never to be sent looking for it.
-    return [
-      ...drained.events.map(describeProbeEvent),
-      ...drained.stale.map((s) => `（已作废，不用处理）${describeStaleEvent(s)}`),
-    ];
+    try {
+      const runtime = orchestratorDeps.runtime();
+      const open = runtime.children.filter((c) => !c.closedAt);
+      if (open.length === 0) return [];
+      const panes = alivePaneIdsForSupervision();
+      const snapshot = superviseChildren({
+        orchestrationId: runtime.orchestrationId,
+        children: open,
+        livePanes: panes,
+        io: channelIO,
+        at: Date.now(),
+      });
+      lastSupervisionHealth = formatChildHealth(snapshot.health);
+      const decided: { events: { summary: string }[]; memory: SupervisionMemory } =
+        decideSupervisionEvents(snapshot, orchestratorDeps.supervisionMemory(), Date.now());
+      orchestratorDeps.saveSupervisionMemory(decided.memory);
+      return decided.events.map((event) => event.summary);
+    } catch {
+      return []; // supervision is a convenience for the timer, never a gate
+    }
   }
 
-  function stopProbeTimer(): void {
-    if (probeTimer) clearInterval(probeTimer);
-    probeTimer = undefined;
+  /** Pane ids that exist right now; `undefined` when tmux cannot be read. */
+  function alivePaneIdsForSupervision(): Set<string> | undefined {
+    const self = process.env.TMUX_PANE?.trim();
+    if (!self) return undefined;
+    try {
+      const out = execFileSync("tmux", ["list-panes", "-t", self, "-F", "#{pane_id}"], {
+        encoding: "utf8", timeout: 5000,
+      });
+      return new Set(out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    } catch {
+      return undefined;
+    }
+  }
+
+  function stopSupervisionTimer(): void {
+    if (supervisionTimer) clearInterval(supervisionTimer);
+    supervisionTimer = undefined;
   }
 
   /**
-   * Arm the background probe (default-on in orchestrator mode, 10s).
+   * Arm the background supervisor (default-on in orchestrator mode, 10s).
    *
    * It only WAKES the session when there is something a supervisor has to act
    * on, and only while the session is idle — a wake-up delivered mid-turn
-   * would just be noise, and the waiter runs the same probe itself.
+   * would just be noise, and `orchestrator_wait` reads the same channels
+   * itself.
    */
-  function startProbeTimer(ctx: ExtensionContext): void {
-    if (probeTimer || state.taskMode !== "orchestrator") return;
-    probeTimer = setInterval(() => {
+  function startSupervisionTimer(ctx: ExtensionContext): void {
+    if (supervisionTimer || state.taskMode !== "orchestrator") return;
+    supervisionTimer = setInterval(() => {
       try {
-        if (state.taskMode !== "orchestrator") { stopProbeTimer(); return; }
+        if (state.taskMode !== "orchestrator") { stopSupervisionTimer(); return; }
         if (!ctx.isIdle?.()) return;
-        const news = drainProbeNews();
+        const news = drainSupervisionNews();
         if (news.length === 0) return;
         pi.sendMessage({
           customType: "review-gate",
           content:
-            "[ORCHESTRATION_PROBE] 门禁探针发现子会话需要你：\n" +
+            "[ORCHESTRATION] 子会话需要你：\n" +
             news.map((n) => `- ${n}`).join("\n") +
-            "\n用 `orchestrator_read({ childId })` 看它在等什么，再答它；别让它就这么等着。",
+            "\n调 `orchestrator_wait({ timeoutMs: 0 })` 拿完整回执（问题正文与选项都在里面），" +
+            "再用 `orchestrator_answer` 回；别让它就这么等着。",
           display: true,
         }, { triggerTurn: true, deliverAs: "steer" });
-      } catch { /* a probe is a convenience, never a gate */ }
-    }, PROBE_INTERVAL_MS);
+      } catch { /* supervision is a convenience, never a gate */ }
+    }, SUPERVISION_INTERVAL_MS);
     // Never hold the process open for a supervision timer.
-    (probeTimer as unknown as { unref?: () => void }).unref?.();
+    (supervisionTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   /**
@@ -1274,9 +1482,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    * will never have.
    */
   function orchestratorSettled(ctx: ExtensionContext): void {
-    startProbeTimer(ctx);
+    startSupervisionTimer(ctx);
     const problems = orchestrationDoneProblems();
-    const news = drainProbeNews();
+    const news = drainSupervisionNews();
     if (problems.length === 0 && news.length === 0) return;
     if (orchestratorContinuations >= state.maxRounds) return;
     orchestratorContinuations += 1;
@@ -1284,11 +1492,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       buildOrchestratorResume({
         problems,
         news,
-        health: formatChildHealth(orchestratorDeps.probe().lastHealth()),
+        health: lastSupervisionHealth,
       }) + `\n(编排续跑 ${orchestratorContinuations}/${state.maxRounds})`,
       { deliverAs: "followUp" },
     );
   }
+
 
   // The watcher registry (lib/judge-watch.ts) owns the handle map and the
   // shutdown latch: a signal that resolves while session_shutdown is
@@ -2200,18 +2409,25 @@ export default function reviewGate(pi: ExtensionAPI) {
   /**
    * `ui.confirm` with the dialog-height budget applied. Never let a caller pass
    * unbounded text straight to the host: that is the flicker bug.
+   *
+   * `signal` is what lets an ORCHESTRATOR's answer take the box off the
+   * user's screen: pi dismisses the dialog when it aborts, and the resolved
+   * `undefined` is then read as "somebody else settled this", not as a
+   * refusal (lib/orchestrator-child-channel.ts owns that distinction).
    */
   async function confirmBounded(
-    uiCtx: { ui?: { confirm?: (title: string, message: string) => Promise<boolean> } },
+    uiCtx: { ui?: { confirm?: (title: string, message: string, opts?: { signal?: AbortSignal }) => Promise<boolean> } },
     title: string,
     message: string,
     pointer?: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     const fitted = pointer === undefined
       ? fitDialogMessage(title, message)
       : fitDialogMessage(title, message, pointer);
-    return (await uiCtx.ui?.confirm?.(title, fitted.message)) === true;
+    return (await uiCtx.ui?.confirm?.(title, fitted.message, signal ? { signal } : undefined)) === true;
   }
+
   // SECURITY: source is persisted so the git pre-commit hook can distinguish a
   // user-chosen explore/normal (advisory hook) from an agent selection
   // (hook stays fully enforced). The in-session mode decision is made via the
@@ -3454,7 +3670,9 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- review_checkpoint tool (the pre-review commit channel) ----------
 
-  pi.registerTool({
+  // INTERNAL, not registered (philosophy three): the checkpoint is a step of
+  // `judge_submit`, not a thing to sequence by hand.
+  internalTool({
     name: "review_checkpoint",
     label: "Review Checkpoint",
     description:
@@ -3826,6 +4044,94 @@ export default function reviewGate(pi: ExtensionAPI) {
       ...(typeof prepared.details?.stream === "string" ? { streamPath: prepared.details.stream } : {}),
     };
   }
+
+  /**
+   * The GOAL AUDIT, run by the gate from inside `propose_loop_goal`.
+   *
+   * WHY THIS IS NOT A SEPARATE TOOL ANY MORE (philosophy two). The audit was
+   * three calls in a fixed order — `judge_submit({role:"goal-auditor"})`,
+   * wait for the process, then `record_goal_prereview` — and the agent had to
+   * sequence them correctly every time, for a chain in which it makes no
+   * decision at all. It now says only "here is the draft"; the gate builds
+   * the auditor's task, runs the judge process, waits for it to exit, records
+   * the verdict against the exact text it dispatched, and either continues to
+   * the user's dialog or hands the objections back.
+   *
+   * IT BLOCKS, and that is deliberate. `propose_loop_goal` is a minutes-long
+   * call now, because the alternative — return early and make the agent come
+   * back — is exactly the multi-step dance this removes. The findings still
+   * stream while it runs, so the draft can be fixed against real objections
+   * rather than a summary at the end.
+   *
+   * The recording itself is unchanged and still mechanical: the verdict binds
+   * to the sha256 of the audited text (only P0/P1 block), so a PASS can never
+   * belong to a different draft than the one the user is about to see.
+   */
+  async function runGoalAudit(input: {
+    root: string;
+    goalText: string;
+    ctx: unknown;
+    progress?: ProgressReporter;
+  }): Promise<{ ok: true } | { ok: false; text: string }> {
+    const { root, goalText, ctx } = input;
+    input.progress?.step("组装 goal 审计任务");
+    const prepared = await callTool("prepare_goal_audit", { goal: goalText, repo: root }, ctx);
+    if (prepared.isError) {
+      input.progress?.fail("被拒");
+      return { ok: false, text: "review-gate: goal 审计任务无法生成。\n" + toolText(prepared) };
+    }
+    const streamPath = pathJoin(root, ".pi", "review-stream", `goal-${goalTextHash(goalText).slice(0, 12)}.jsonl`);
+    try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
+    const task = `${extractTaskText(toolText(prepared))}\n\n${buildStreamDirective(streamPath)}`;
+    input.progress?.done("已生成");
+
+    input.progress?.step("goal-auditor 审计中（这一步是分钟级的）");
+    const startedAt = new Date().toISOString();
+    const dispatch = dispatchJudgeRound({
+      root,
+      role: "goal-auditor",
+      title: `goal-auditor-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`,
+      task,
+      // A previous audit still running is judging a DIFFERENT draft (this one
+      // has no PASS yet), so it cannot answer the question being asked here.
+      fresh: true,
+      streamPath,
+    });
+    if (!dispatch.ok) {
+      input.progress?.fail("spawn 失败");
+      return { ok: false, text: `review-gate: goal 审计没能启动 — ${dispatch.error ?? "judge 进程未能启动"}` };
+    }
+    // The draft is on record only AFTER the dispatch is accepted: a verdict
+    // must never be recorded against text no auditor ever read.
+    pendingGoalAudits.set(root, { draft: goalText, startedAt });
+    const child = judgeChildByRole(root, "goal-auditor");
+    if (!child) {
+      input.progress?.fail("registry 里找不到刚起的 judge");
+      return { ok: false, text: "review-gate: goal 审计已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。" };
+    }
+    // Wait through the SAME implementation `judge_wait` uses (three criteria:
+    // the process exited, its exit-code file landed, or a verdict fence is
+    // already in this round's stdout). Re-using it means the audit cannot
+    // hang on a criterion the tool would have accepted.
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx);
+    // Recording is idempotent: the exit watcher may have got there first, and
+    // the pending-draft entry it consumes makes the second call a no-op.
+    const note = await recordJudgeConclusion(child.sessionId);
+
+    input.progress?.done("审计完成");
+
+    const goalSt = root === primaryRepoRoot ? state : stateForRepo(root);
+    if (goalPrereviewPassed(goalSt.goalPrereview, goalText)) return { ok: true };
+    return {
+      ok: false,
+      text:
+        "review-gate: goal 审计**没过**，用户那一关连问都没问 —— 先按下面的 findings 改草稿，" +
+        "改完直接再调一次 `propose_loop_goal`（门禁会重新审计；裁决绑定文本，改一个字就要重审）。\n\n" +
+        (note ?? `审计记录：${goalSt.goalPrereview?.verdict ?? "NONE"}`) +
+        `\n\nfindings 流：${streamPath}`,
+    };
+  }
+
 
   /**
    * The checkpoint's commit message.
@@ -4335,27 +4641,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       };
     },
   });
+  // `review_spawn` / `review_watch` / `review_send` are GONE, module and all
+  // (lib/judge-relay-tools.ts is deleted). Unlike the prepare family they were
+  // not even used internally: `judge_submit` dispatches rounds itself and
+  // registers its own completion watcher, so those three were purely a second
+  // way to ask for the same thing.
 
-  /**
-   * The three tools that RELAY to a judge session — review_spawn (dispatch a
-   * round under an explicit title), review_watch (re-register the completion
-   * watcher) and review_send (resume a role with a follow-up) — live in
-   * lib/judge-relay-tools.ts; only their wiring is here. What they need from
-   * THIS file (the repo resolution, the one dispatch owner, the child
-   * registry and the watch registration) arrives as this deps object, and
-   * nothing else of them does: every rule they apply is unit-testable
-   * without a spawned judge.
-   */
-  registerJudgeRelayTools(pi, {
-    resolveRepo: (requested) => resolveToolRepo(requested),
-    dispatchRound: (request) => dispatchJudgeRound(request),
-    childByRole: (root, role) => judgeChildByRole(root, role),
-    findChild: (root, role, sessionId) => findJudgeChild(root, role, sessionId),
-    // Addressed by the internal key alone, so the lookup spans every repo's
-    // registry — review_watch never receives a repo to narrow it with.
-    childBySessionId: (sessionId) => [...childSessions.values()].flat().find((c) => c.sessionId === sessionId),
-    registerWatch: (sessionId, label) => registerWatch(sessionId, label),
-  });
 
   /**
    * The three tools that OBSERVE or END a judge session — judge_read,
@@ -4402,7 +4693,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * three git reads) arrives as this deps object, and nothing else of it
    * does: every branch it applies is unit-testable without a repository.
    */
-  registerReviewPrepareTools(pi, {
+  registerReviewPrepareTools(internalHost, {
     resolveRepo: (requested) => resolveToolRepo(requested),
     stateFor: (root) => stateForRepo(root),
     persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
@@ -4446,7 +4737,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * a review target, which is exactly why they are a separate module from the
    * reviewer's round preparation.
    */
-  registerAdvisoryPrepareTools(pi, {
+  registerAdvisoryPrepareTools(internalHost, {
     resolveRepo: (requested) => resolveToolRepo(requested),
     stateFor: (root) => stateForRepo(root),
     persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
@@ -4465,7 +4756,9 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
   // ---------- record_review tool ----------
 
-  pi.registerTool({
+  // INTERNAL, not registered: the gate records a verdict itself when the
+  // reviewer's process exits, from that round's own output.
+  internalTool({
     name: "record_review",
     label: "Record Review",
     description:
@@ -4739,7 +5032,9 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- run_precommit tool (the ONLY path to a PASS) ----------
 
-  pi.registerTool({
+  // INTERNAL, not registered: precommit is the first step of `judge_submit`,
+  // which always runs the FULL lane before it freezes anything.
+  internalTool({
     name: "run_precommit",
     label: "Run Precommit",
     description:
@@ -5172,7 +5467,9 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- record_goal_prereview tool (L8b — the goal-auditor's verdict) ----------
 
-  pi.registerTool({
+  // INTERNAL, not registered: `propose_loop_goal` runs the audit itself and
+  // records the verdict through this implementation.
+  internalTool({
     name: "record_goal_prereview",
     label: "Record Goal Pre-review",
     description:
@@ -5437,42 +5734,66 @@ export default function reviewGate(pi: ExtensionAPI) {
       const goalSt = goalRoot === primaryRepoRoot ? state : stateForRepo(goalRoot);
 
       // L8b GOAL PRE-REVIEW — fail-closed, and BEFORE any user-facing surface.
-      // The user should only ever be asked about a draft a dedicated auditor
-      // already judged: without this the pre-review was protocol the agent
-      // could simply skip, and the dialog is exactly what it would skip it for.
-      // Placed ahead of showToUser/confirm so a refusal costs the user nothing
-      // — no transcript spam, no dialog, no file write.
+      // The user is only ever asked about a draft a dedicated auditor already
+      // judged, and the gate RUNS that audit itself (philosophy two): the
+      // agent submits a draft, not a three-call sequence. Placed ahead of
+      // showToUser/confirm so a failed audit costs the user nothing — no
+      // transcript spam, no dialog, no file write.
+      //
+      // A PASS already on record for this exact text skips the audit: the
+      // record binds to the sha256 of the draft, so re-auditing identical
+      // text would burn minutes to reach the same verdict.
       if (!goalPrereviewPassed(goalSt.goalPrereview, goalText)) {
+        // The auditor has to be installed for any of this to work. Checked
+        // FIRST, because a missing agent is a setup problem with a concrete
+        // fix, not an audit that failed. Dispatchability is what matters, not
+        // a filename: pi-subagents keys agents by their frontmatter `name`,
+        // so a copy called custom.md that declares `name: goal-auditor` IS
+        // dispatchable and must not be reported as missing. EVERY layer is
+        // resolved that way — the same rule gate-doctor applies — so the two
+        // never disagree.
         const packageAgentsDir = resolvePackageAgentsDir();
-        // Dispatchability is what matters, not a filename: pi-subagents keys
-        // agents by their frontmatter `name`, so a copy called custom.md that
-        // declares `name: goal-auditor` IS dispatchable and must not be
-        // reported as missing. EVERY layer is resolved that way — the same
-        // rule gate-doctor applies — so the two never disagree.
         const auditorInstalled =
           findProjectAgentText(pathJoin(homedir(), ".pi", "agent", "agents"), "goal-auditor") !== undefined ||
           // Both project layers are consulted: pi-subagents loads them from the
           // SESSION's project root, while a multi-repo goal binds to goalRoot —
-          // checking only one of them would show (or hide) the bootstrap hint
-          // against the wrong directory. This flag is advisory copy only; it
-          // never affects the refusal itself.
+          // checking only one of them would look in the wrong directory.
           [pathJoin(goalRoot, ".pi", "agents"), pathJoin(primaryRepoRoot, ".pi", "agents")]
             .some((dir) => findProjectAgentText(dir, "goal-auditor") !== undefined);
-        return {
-          content: [{
-            type: "text",
-            text: buildGoalPrereviewRefusal({
-              ...(goalSt.goalPrereview ? { record: goalSt.goalPrereview } : {}),
-              goalText,
-              auditorInstalled,
-              repoRoot: goalRoot,
-              packageAgentsDir,
-            }),
-          }],
-          details: { approved: false, prereview: goalSt.goalPrereview?.verdict ?? "NONE" },
-          isError: true,
-        };
+        if (!auditorInstalled) {
+          return {
+            content: [{
+              type: "text",
+              text: buildGoalPrereviewRefusal({
+                ...(goalSt.goalPrereview ? { record: goalSt.goalPrereview } : {}),
+                goalText,
+                auditorInstalled,
+                repoRoot: goalRoot,
+                packageAgentsDir,
+              }),
+            }],
+            details: { approved: false, prereview: goalSt.goalPrereview?.verdict ?? "NONE" },
+            isError: true,
+          };
+        }
+        const audit = await runGoalAudit({
+          root: goalRoot,
+          goalText,
+          ctx,
+          progress: createProgressReporter({
+            title: "review-gate: propose_loop_goal（goal 审计）",
+            onUpdate: _onUpdate as ToolUpdate | undefined,
+          }),
+        });
+        if (!audit.ok) {
+          return {
+            content: [{ type: "text", text: audit.text }],
+            details: { approved: false, prereview: "BLOCKED" },
+            isError: true,
+          };
+        }
       }
+
       // The goal text goes to the TRANSCRIPT; the binding repo must be shown
       // at CONSENT time (both surfaces), so a repo-scoped approval is never
       // given for a repo the user was not shown.
@@ -5499,26 +5820,52 @@ export default function reviewGate(pi: ExtensionAPI) {
       // already required a PASS bound to this text, so this reads it directly
       // rather than advertising a fallback state that cannot occur.
       const prereviewLine = "goal-auditor 预审: PASS @ " + goalSt.goalPrereview!.at;
-      // Round-17 (user ask): a goal-approval dialog is EXACTLY a 'human
-      // needed' moment — signal the cross-session channel (best-effort) so an
-      // observer session can wake and point the user here.
-      notifyUserAttention("等待 goal 批准", goalRoot);
+      // The goal approval is one of the two dialogs an ORCHESTRATOR may
+      // answer on the user's behalf, so it goes through the channel funnel
+      // below (`askEitherSide` with topic `goal-approval`) rather than
+      // straight to `ui.confirm`: the request it writes carries the whole
+      // draft, which is the text constraint 8 is judged on.
+
       showToUser(
         uiCtx,
         GOAL_CONFIRM_TITLE,
         buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" + prereviewLine,
       );
+      // EITHER the user or (when this session is an orchestration child) the
+      // project manager may answer. The channel request carries the FULL draft
+      // as its payload, so the orchestrator sees the exact text it is being
+      // asked to approve and constraint 8 is checked against that same text —
+      // never against something the orchestrator retyped (R-7).
+      const goalDialogTitle = GOAL_CONFIRM_TITLE;
+      const goalApproveLabel = "认可，写入 .pi/loop-goal.md";
+      const goalRejectLabel = "不认可，退回重谈";
       let approved = false;
       try {
-        approved = await confirmBounded(
-          uiCtx,
-          GOAL_CONFIRM_TITLE,
-          buildGoalConfirmMessage(goalText, "绑定仓库(不可信数据): " + repoLine + "\n" + prereviewLine),
-          "（目标全文见上方消息）",
+        const picked = await askEitherSide(
+          {
+            dialogKind: "confirm",
+            topic: "goal-approval",
+            title: goalDialogTitle,
+            options: [goalApproveLabel, goalRejectLabel],
+            payload: goalText,
+          },
+          uiCtx.hasUI === true,
+          async (signal) => {
+            const ok = await confirmBounded(
+              uiCtx,
+              goalDialogTitle,
+              buildGoalConfirmMessage(goalText, "绑定仓库(不可信数据): " + repoLine + "\n" + prereviewLine),
+              "（目标全文见上方消息）",
+              signal,
+            );
+            return ok ? goalApproveLabel : goalRejectLabel;
+          },
         );
+        approved = picked === goalApproveLabel;
       } catch {
         approved = false;
       }
+
       // The decision may carry a REASON — but only on REJECTION: the user
       // rejects with the objection so the agent renegotiates against the real
       // problem instead of re-asking. The CONFIRM path no longer asks for a
@@ -5659,19 +6006,31 @@ export default function reviewGate(pi: ExtensionAPI) {
       const st = root === primaryRepoRoot ? state : stateForRepo(root);
       const uiCtx = ctx as unknown as {
         ui?: {
-          select?: (title: string, options: string[]) => Promise<string | undefined>;
+          select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
           notify?: (message: string, type?: "info" | "warning" | "error") => void;
         };
       };
       const notes: string[] = [];
-      notifyUserAttention("确认工作区与分支");
+      /**
+       * Every workspace question goes through the channel funnel, so an
+       * orchestration child can be settled by its project manager exactly as
+       * it can by the human sitting in the pane — and neither waits for the
+       * other. A standalone session just renders the dialog, as before.
+       */
+      const askWorkspace = (title: string, choices: string[]): Promise<string | undefined> =>
+        askEitherSide(
+          { dialogKind: "select", topic: "workspace", title, options: choices },
+          typeof uiCtx.ui?.select === "function",
+          (signal) => uiCtx.ui!.select!(title, choices, { signal }),
+        ).catch(() => undefined);
+
 
       // ---- 1. the dirty worktree, if there is one ----
       let files = dirtyFiles(root);
       if (files.length) {
         showToUser(uiCtx, "───── 工作区有未提交改动 ─────", describeDirty(files));
         const choices = Object.values(WORKTREE_CHOICES);
-        const picked = await uiCtx.ui?.select?.("这些改动怎么处理？", choices).catch(() => undefined);
+        const picked = await askWorkspace("这些改动怎么处理？", choices);
         const choice = interpretWorktreeChoice(picked);
         if (!choice) {
           // A dismissed dialog decides nothing — and deciding for the user
@@ -5748,10 +6107,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         // The agent knows this session continues an existing feature branch:
         // the base is elsewhere. The USER still confirms it — a wrong base is
         // a merge into somebody else's work.
-        const ok = await uiCtx.ui?.select?.(
+        const ok = await askWorkspace(
           `基准分支 = ${proposedBase}，工作分支 = ${params.branch ? String(params.branch) : "新建"}。确认吗？`,
           [`是，合并回 ${proposedBase}`, "否，用当前分支作为基准"],
-        ).catch(() => undefined);
+        );
+
         if (!ok) {
           return {
             content: [{ type: "text", text: `review-gate: 基准分支未确认（提议 ${proposedBase}）。` }],
@@ -5802,10 +6162,11 @@ export default function reviewGate(pi: ExtensionAPI) {
         // main/master is never a base a session commits onto; the user picks
         // the development branch it should branch from and merge back into.
         const proposed = `dev/${new Date().toISOString().slice(0, 10)}`;
-        const picked = await uiCtx.ui?.select?.(
+        const picked = await askWorkspace(
           `当前在受保护分支 ${here}，本会话不能直接在它上面开发。基准分支用哪个？`,
           [`从 ${here} 拉一条基准分支 ${proposed}`, `就用 ${here} 作为基准（工作分支仍会另建）`],
-        ).catch(() => undefined);
+        );
+
         if (!picked) {
           return {
             content: [{ type: "text", text: `review-gate: 用户未确认基准分支（当前 ${here}），未建立工作分支。` }],
@@ -5827,10 +6188,11 @@ export default function reviewGate(pi: ExtensionAPI) {
           }
         }
       } else {
-        const picked = await uiCtx.ui?.select?.(
+        const picked = await askWorkspace(
           `把当前分支 ${here} 作为本会话的基准分支吗？（工作完成后合并回它）`,
           [`是，基准分支 = ${here}`, "否，我先自己切到正确的分支再来"],
-        ).catch(() => undefined);
+        );
+
         if (!picked || picked.startsWith("否")) {
           return {
             content: [{ type: "text", text: `review-gate: 基准分支未确认（当前 ${here}）。切到正确的分支后重新调 setup_workspace。` }],
@@ -5919,8 +6281,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       const uiCtx = ctx as unknown as {
         hasUI?: boolean;
         ui?: {
-          select?: (title: string, options: string[]) => Promise<string | undefined>;
-          input?: (title: string, placeholder?: string) => Promise<string | undefined>;
+          select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
+          input?: (title: string, placeholder?: string, opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
           notify?: (message: string, type?: "info" | "warning" | "error") => void;
         };
       };
@@ -5950,7 +6312,6 @@ export default function reviewGate(pi: ExtensionAPI) {
         `${progressLabel(i, questions.length)} ${q.text}` +
         (q.options?.length ? `\n   选项：${q.options.join(" / ")}` : "") +
         (q.recommended ? `\n   推荐：${q.recommended}` : "")).join("\n"));
-      notifyUserAttention("等待回答提问");
 
       // An interview interrupted earlier (crash, restart, or the agent
       // re-submitting the same list) resumes where it stopped: the questions
@@ -5970,12 +6331,27 @@ export default function reviewGate(pi: ExtensionAPI) {
         const choices = buildChoiceList(q);
         let picked: string | undefined;
         try {
-          picked = choices.length
-            ? await uiCtx.ui?.select?.(`${title}\n${q.text}`, choices)
-            : await uiCtx.ui?.input?.(`${title}\n${q.text}\n${FREE_TEXT_HINT}`, q.recommended ?? "");
+          // EITHER the user or the project manager may answer (when this
+          // session is an orchestration child). The channel request carries
+          // the question and every row VERBATIM, which is why the supervisor
+          // never had to read this screen — and never mis-parsed it.
+          picked = await askEitherSide(
+            {
+              dialogKind: choices.length ? "select" : "input",
+              topic: "ask-user",
+              title: `${title}\n${q.text}`,
+              options: choices,
+              ...(q.recommended ? { payload: `推荐答案：${q.recommended}` } : {}),
+            },
+            uiCtx.hasUI === true,
+            (signal) => (choices.length
+              ? uiCtx.ui!.select!(`${title}\n${q.text}`, choices, { signal })
+              : uiCtx.ui!.input!(`${title}\n${q.text}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal })),
+          );
         } catch {
           picked = undefined; // a broken dialog is silence, never an answer
         }
+
         if (picked !== undefined) anyDialog = true;
         // Free text carries its escapes as typed sentinels; a choice list
         // carries them as rows. Both must exist, or the escapes would only
@@ -6725,6 +7101,15 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- L2: auto-continuation ----------
 
   pi.on("agent_settled", async (_event, ctx) => {
+    // SUPERVISION, first thing and unconditionally: report what this session
+    // is doing and apply whatever the orchestrator has sent. It runs before
+    // every early return below because a child that is paused, bypassed or in
+    // explore mode still has a supervisor waiting to hear from it — silence
+    // is exactly the failure this replaced (a finished child classified
+    // `working` for 725 seconds, R3-5).
+    reportChildState(ctx);
+    await drainChildInstructions(ctx);
+
     // Explore and normal never auto-continue — that is their defining
     // difference from loop. This check MUST stay before the loopArmed check:
     // explore/normal-mode edits set loopArmed = true in tool_result, and only
@@ -7144,7 +7529,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     watchRegistry.shutdown();
     // The supervision probe is a timer this session owns; a leaked one would
     // keep waking a session that is gone.
-    stopProbeTimer();
+    stopSupervisionTimer();
 
     // Judge children are independent pi processes — they survive the session
     // by design (their session files persist, so a fresh session can resume
@@ -7193,6 +7578,12 @@ export default function reviewGate(pi: ExtensionAPI) {
   // One-way stale-state reconciliation: git-clean can clear flags, only edits set them.
   // P0-7: re-arm when stash pop / checkout restores dirty state without an edit event.
   pi.on("turn_end", async (_event, ctx) => {
+    // The heartbeat. `turn_end` fires whether or not this session has edits,
+    // so it is the one event that proves the extension is alive — which is
+    // exactly what `stalled` is the absence of. Placed before the early
+    // return below for that reason.
+    reportChildState(ctx);
+
     if (!state.hasCodeChange && !state.hasDocChange) return;
     const allFiles = changedFiles(cwd);
     if (allFiles === undefined) return;

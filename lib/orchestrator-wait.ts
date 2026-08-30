@@ -1,85 +1,72 @@
 /**
- * WAIT CRITERIA for an orchestration child — the other half of the generic
- * waiting skeleton, rewritten after the first real orchestration deadlocked
- * inside it (F12, F14).
+ * WAIT CRITERIA and THE RECEIPT for an orchestration child.
  *
  * lib/poll-wait.ts owns the LOOP (probe, publish, stop on a criterion or the
- * budget); this module owns what "something happened" MEANS for an
- * interactive child session. The two waiters differ on every criterion even
- * though the loop is identical, which is why the skeleton is generic:
+ * budget); this module owns two things the loop cannot know:
+ *
+ *  1. what "something happened" MEANS for an interactive child session, and
+ *  2. what the orchestrator is TOLD when the wait returns.
+ *
+ * The two waiters in this repository differ on every criterion even though
+ * the loop is identical, which is why the skeleton is generic:
  *
  *              judge child (`pi -p`)        orchestration child (interactive)
  *   shape      one-shot process             long-lived pane
- *   "news"     the process exited           an ATTENTION event arrived
+ *   "news"     the process exited           its channel state changed
  *   normal end verdict printed, exits       declare_done, and it stays alive
- *   failure    exit-code file missing       the pane vanished
+ *   failure    exit-code file missing       the pane vanished, or it went mute
  *
  * The consequence worth stating: a child that FINISHES does not exit, so
  * "waiting for the process to end" would hang forever here. The end states
- * are events, not exits.
+ * are reports, not exits.
  *
- * WHAT THE REWRITE FIXED, and each of these was a measured deadlock:
+ * ── WHAT THE 2026-08-30 REWRITE REMOVED ──
  *
- *  - ADDRESSING (F12). Events are taken only when they are addressed to THIS
- *    orchestration and come from a pane this orchestration registered. The
- *    hand-run consumed eight events belonging to somebody else's session and
- *    returned instantly from each, burning the whole round budget on nothing.
- *  - "DEQUEUED" IS NOT "DONE" (F12). Marking an event handled says a listener
- *    saw it; it says nothing about the dialog that raised it. A human who
- *    answers the box in the pane leaves the event unhandled forever, and the
- *    old waiter reported that stale event as news. Now the child's SCREEN is
- *    re-read: a closed dialog means the matter is settled and waiting
- *    continues instead of ending on a ghost.
- *  - UNKNOWN ≠ GONE (F14). When `list-panes` cannot be read the old probe saw
- *    an empty pane list and concluded the child had died — an instant,
- *    permanent "pane-gone". Liveness that could not be measured is now its own
- *    state and keeps the wait alive.
+ * Every criterion used to be an inference about a global event queue and a
+ * rendered screen, and the addressing had to be re-checked in code because
+ * the queue was shared by the whole machine (F12: eight events belonging to
+ * somebody else consumed in one round, each returning instantly and burning
+ * the budget). Both problems are gone by construction: a child's channel is
+ * its own file, so there is nothing to address-filter, and its state is what
+ * it SAID rather than what its terminal looked like.
  *
- * Pure module: an observation in, a decision out.
+ * What survives from that era is the one lesson that was not about screens:
+ * UNKNOWN ≠ GONE (F14). When `list-panes` cannot be read, liveness is
+ * unmeasured, and an unmeasured child keeps being waited on.
+ *
+ * ── THE RECEIPT IS THE INTERFACE (task book §3.5) ──
+ *
+ * {@link buildWaitReceipt} assembles all four blocks every single time —
+ * health, pending questions, deaths with their recovery actions, and the
+ * orchestrator's own context budget with the handover call. Whether the wait
+ * blocked or returned instantly (`timeoutMs: 0`, which is the old
+ * `orchestrator_status`) changes nothing about what comes back: one shape,
+ * one call, nothing the orchestrator has to remember to go and ask for.
+ *
+ * Pure module: observations in, a decision and a string out.
  */
 
-import type { AttentionEvent } from "./attention.ts";
-import type { ChildHealth, ChildState } from "./orchestrator-child-state.ts";
-import { describeProbeEvent, type ProbeEvent } from "./orchestrator-probe.ts";
+import { handoffAdvice, type HandoffAdvice } from "./orchestrator-handoff-advice.ts";
+import {
+  formatSupervisionReceipt,
+  type SupervisionEvent,
+  type SupervisionSnapshot,
+} from "./orchestrator-supervisor.ts";
 
 export type ChildWaitReason =
-  /** The child raised an attention event and its dialog is still open. */
-  | "attention"
-  /** The gate's own probe manufactured the news (waiting-input / idle / dead). */
-  | "probe"
+  /** The supervisor saw a state worth waking the orchestrator for. */
+  | "supervision"
   /** The child reported its task complete. */
   | "child-done"
   /** Its pane is gone — it died, or the user closed it. */
   | "pane-gone"
-  /** An event arrived, but whatever raised it was already dealt with. */
-  | "settled-elsewhere"
   /** Nothing yet. */
   | "pending";
 
-
 export interface ChildWaitObservation {
-  /** The attention event addressed to this orchestration, if one arrived. */
-  attention?: AttentionEvent;
-  /**
-   * Is the thing that raised the event STILL waiting?
-   *
-   * `undefined` means it could not be checked (no pane read) — treated as
-   * "still open", because failing to confirm that something was handled must
-   * never silence a request for help.
-   */
-  attentionStillOpen?: boolean;
-  /**
-   * What the ORIGIN child is doing right now, per the probe.
-   *
-   * An event may only be written off as "the user answered it themselves"
-   * when the child has demonstrably MOVED ON (it is working again). R-16 was
-   * exactly this judgement made on one weaker fact — "I cannot see a dialog"
-   * — while the dialog was on screen the whole time and merely unparsed.
-   */
-  originState?: ChildState;
-  /** Events the gate's own probe manufactured (already drained). */
-  probeEvents?: ProbeEvent[];
-  /** The child reported done (registry doneAt is set). */
+  /** Newsworthy states the supervisor manufactured on this poll. */
+  events?: SupervisionEvent[];
+  /** The child under watch reported done (registry `doneAt` is set). */
   done: boolean;
   /** Its pane still exists right now. */
   paneAlive: boolean;
@@ -87,8 +74,6 @@ export interface ChildWaitObservation {
   livenessUnknown?: boolean;
   /** Free-form progress line for the live snapshot (never a criterion). */
   note?: string;
-  /** The health of every open child at this instant (R-4/R-11/R-23). */
-  health?: ChildHealth[];
 }
 
 export interface ChildWaitDecision {
@@ -96,7 +81,7 @@ export interface ChildWaitDecision {
   reason: ChildWaitReason;
   /** One line the tool can hand straight back to the agent. */
   summary: string;
-  /** WHICH child this is about — the question the old receipt left open. */
+  /** WHICH child this is about. */
   childId?: string;
 }
 
@@ -105,43 +90,23 @@ export interface ChildWaitDecision {
  *
  * ORDER MATTERS, and every step of it was paid for:
  *
- *  1. the gate's OWN probe events come first — they name the child and the
- *     state, and they are the only signal that exists for a child that
- *     stopped without asking anything (R-23);
- *  2. an attention event ends the wait unless the child provably moved on;
- *  3. `done`, then UNKNOWN liveness (never a death, F14), then a vanished
- *     pane, so a dead child is never waited on to the end of the budget.
+ *  1. supervision events come first — they name the child and the state, and
+ *     they are the only signal that exists for a child that stopped without
+ *     asking anything (R-23) or finished without saying so (R3-5);
+ *  2. `done` for the specific child being waited on;
+ *  3. UNKNOWN liveness (never a death, F14) before a vanished pane, so a
+ *     transient tmux failure cannot end supervision.
  */
 export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitDecision {
-  const manufactured = observation.probeEvents ?? [];
-  if (manufactured.length > 0) {
-    const first = manufactured[0]!;
-    const rest = manufactured.length > 1 ? `（另有 ${manufactured.length - 1} 条同类事件）` : "";
+  const events = observation.events ?? [];
+  if (events.length > 0) {
+    const first = events[0]!;
+    const rest = events.length > 1 ? `（另有 ${events.length - 1} 条事件）` : "";
     return {
       done: true,
-      reason: "probe",
+      reason: "supervision",
       childId: first.childId,
-      summary: `${describeProbeEvent(first)}${rest}`,
-    };
-  }
-  if (observation.attention) {
-    const from = observation.attention.fromPane;
-    const settled =
-      observation.attentionStillOpen === false && observation.originState === "working";
-    if (settled) {
-      return {
-        done: false,
-        reason: "settled-elsewhere",
-        summary:
-          `收到一条 attention（${observation.attention.reason}），但那个子会话屏幕上已经没有待答的框、而且又在跑了 ——` +
-          "多半是用户本人当场答掉了。事件已销账≠事情没办成：继续等（真没办成的话，探针会按 10s→30s→60s 再叫你）。",
-      };
-    }
-    return {
-      done: true,
-      reason: "attention",
-      ...(from ? { childId: from } : {}),
-      summary: `子会话有事找你：${observation.attention.reason}`,
+      summary: `${first.summary}${rest}`,
     };
   }
   if (observation.done) {
@@ -164,49 +129,69 @@ export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitD
   return { done: false, reason: "pending", summary: observation.note ?? "子会话仍在工作" };
 }
 
-
 // ---------------------------------------------------------------------------
-// Addressing (F12) — whose event is this?
+// The receipt — the orchestrator's ONE information channel
 // ---------------------------------------------------------------------------
 
-export interface AttentionAcceptance {
-  accept: boolean;
-  /** Why it was dropped — reported, never swallowed silently. */
-  reason?: string;
+/** Everything the receipt is built from. */
+export interface WaitReceiptInput {
+  snapshot: SupervisionSnapshot;
+  decision: ChildWaitDecision;
+  /** The orchestrator's OWN context usage, measured by the gate. */
+  contextPercent?: number;
+  /**
+   * What still blocks `declare_done` — the block that absorbed the old
+   * `orchestrator_status`.
+   *
+   * It rides here for the same reason the handoff advice does: an
+   * orchestrator that has to REMEMBER to go and ask "am I finished yet"
+   * finds out at the wrong moment. Empty ⇒ the orchestration may end.
+   */
+  exitBlockers?: string[];
+  /** What a handoff gave this session, when it is a successor. */
+  inheritance?: string;
+  /** How long the call actually blocked, in ms. */
+  waitedMs: number;
+
+}
+
+/** The receipt, plus the advice block so a caller can act on it structurally. */
+export interface WaitReceipt {
+  text: string;
+  advice: HandoffAdvice;
 }
 
 /**
- * Is this event ours to act on?
+ * Assemble the whole reply.
  *
- * lib/attention.ts already filters by `toSessionId`, but that filter alone
- * was not enough in the field: the queue is a GLOBAL file shared by every
- * session on the machine, so a mis-addressed or leftover event still reaches
- * the reader, and an orchestrator that returns from `wait` on somebody else's
- * business is exactly the F12 spin. The second filter is ownership: the event
- * must come from a pane this orchestration created.
- *
- * An event with NO origin pane is accepted (older publishers did not stamp
- * one) but flagged, because refusing it could silence a genuine child.
+ * Blocks 1–3 come from the supervisor; block 4 is computed here from the
+ * orchestrator's own context reading and the number of questions outstanding
+ * — deliberately NOT left to the orchestrator to look up, because "remember
+ * to check your context" is a rule an agent forgets exactly when it matters.
  */
-export function acceptAttention(
-  event: AttentionEvent,
-  opts: { orchestrationId: string; childPanes: readonly string[] },
-): AttentionAcceptance {
-  if (event.toSessionId !== opts.orchestrationId) {
-    return {
-      accept: false,
-      reason: `事件是发给 ${event.toSessionId} 的，不是本编排（${opts.orchestrationId}）—— 已忽略`,
-    };
-  }
-  const from = event.fromPane?.trim();
-  if (!from) return { accept: true, reason: "事件没带来源 pane（旧版本发布者），无法核对归属，暂且采信" };
-  if (!opts.childPanes.includes(from)) {
-    return {
-      accept: false,
-      reason: `事件来自 pane ${from}，不是本编排登记过的子会话 —— 已忽略`,
-    };
-  }
-  return { accept: true };
+export function buildWaitReceipt(input: WaitReceiptInput): WaitReceipt {
+  const advice = handoffAdvice({
+    ...(input.contextPercent === undefined ? {} : { percent: input.contextPercent }),
+    openRequests: input.snapshot.requests.length,
+  });
+  const lead = input.decision.done
+    ? `**${input.decision.summary}**`
+    : `（等了 ${Math.round(input.waitedMs / 1000)}s，没有新事件）${input.decision.summary}`;
+  const blockers = input.exitBlockers ?? [];
+  const text = [
+    lead,
+    "",
+    formatSupervisionReceipt(input.snapshot),
+    "",
+    "### 4. 你自己的上下文与接力时机",
+    advice.line,
+    "",
+    "### 5. 还差什么才能收尾（declare_done）",
+    blockers.length > 0 ? blockers.map((p) => `- ${p}`).join("\n") : "- 没有了，可以 declare_done",
+    ...(input.inheritance ? ["", input.inheritance] : []),
+  ].join("\n");
+
+  return { text, advice };
 }
 
 // ---------------------------------------------------------------------------
@@ -225,10 +210,20 @@ export function acceptAttention(
  */
 export const CHILD_WAIT_DEFAULT_MS = 300_000;
 export const CHILD_WAIT_MAX_MS = 900_000;
-/** Nobody benefits from a wait shorter than one poll interval. */
+/** Nobody benefits from a blocking wait shorter than one poll interval. */
 export const CHILD_WAIT_MIN_MS = 1_000;
 
+/**
+ * Clamp the requested window.
+ *
+ * ZERO IS SPECIAL and is passed through untouched: it is the snapshot mode
+ * that absorbed `orchestrator_status` (philosophy two — blocking or not is a
+ * PARAMETER, not a second tool). Anything else is clamped into the blocking
+ * range, so a mistyped `5` cannot produce a busy-poll.
+ */
 export function clampChildWaitTimeout(value: unknown): number {
+  if (value === 0) return 0;
   const n = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : CHILD_WAIT_DEFAULT_MS;
+  if (n <= 0) return 0;
   return Math.min(CHILD_WAIT_MAX_MS, Math.max(CHILD_WAIT_MIN_MS, n));
 }

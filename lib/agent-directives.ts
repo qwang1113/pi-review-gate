@@ -26,7 +26,7 @@ export const TOOL_DECISION_TABLE =
   "| --- | --- |\n" +
   "| 问用户、等用户拍板 | `ask_user({questions})` — 它会问并暂停循环；别把问题写进回复就结束 |\n" +
   "| 提交本轮改动送审 | `judge_submit({role:\"reviewer\", task})` — 门禁自己跑 precommit→checkpoint→送审 |\n" +
-  "| 审 goal 草稿 | `judge_submit({role:\"goal-auditor\", task})` |\n" +
+  "| 提交 goal 草稿 | `propose_loop_goal({goal})` — 门禁自己跑 goal 审计，过了才弹用户批准框 |\n" +
   "| 自己决定不了的设计取舍 | `judge_submit({role:\"adviser\", task})` |\n" +
   "| 工作区有别人的改动 / 还没有工作分支 | `setup_workspace()` |\n" +
   "| 看 judge 的状态或结论 | `judge_read({role})`；实在没别的可做才 `judge_wait({role})` |\n" +

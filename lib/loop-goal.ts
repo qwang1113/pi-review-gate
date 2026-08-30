@@ -391,11 +391,11 @@ export function buildGoalPrereviewRefusal(ctx: GoalPrereviewRefusalContext): str
   return (
     "review-gate: propose_loop_goal refused — " + why + ". The user's approval dialog is not shown until a " +
     "dedicated `goal-auditor` audit of THIS exact text passes.\n" +
-    "Recovery path: revise the draft against the objections → " +
-    "`judge_submit({role:\"goal-auditor\", task:<the revised draft>})` (the gate builds the auditor's " +
-    "task with the carryover and the draft delta, dispatches it, adjudicates the verdict and records " +
-    "the PASS) → call propose_loop_goal " +
-    "again with the identical text.\n" +
+    "Recovery path: revise the draft against the objections and call propose_loop_goal again — " +
+    "it runs the audit ITSELF (builds the auditor's task with the carryover and the draft delta, " +
+    "dispatches the judge, adjudicates the verdict and records the PASS). There is no separate " +
+    "audit call to make.\n" +
+
     "The goal text submitted to the user must be written in Simplified Chinese (technical identifiers, tool " +
     "names, file paths and code tokens stay English) — the auditor blocks a draft that is not.\n" +
     "Submitted first line: " + (firstLine.slice(0, 120) || "(empty)") +
@@ -475,8 +475,9 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
 export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
   "loop goal not confirmed by the user — interview them with `ask_user` (it asks and pauses the " +
   "loop until they answer), draft the goal in Simplified Chinese (identifiers, paths and code " +
-  "tokens stay English), submit it with `judge_submit({role:\"goal-auditor\", task:<draft>})` — the " +
-  "gate audits, adjudicates and records it — then call propose_loop_goal so the USER approves it " +
+  "tokens stay English), then call `propose_loop_goal` — it runs the `goal-auditor` audit itself " +
+  "(dispatch, adjudicate, record) and only then asks the USER to approve it " +
+
   "in a dialog. Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
 /**
@@ -487,17 +488,20 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
  * change a file. It also carries the goal pre-review step, which is MECHANICAL
  * since 2026-08-25 (it superseded the 2026-08-18 `adviser` merged rule): the
  * draft must pass a `goal-auditor` audit, and since 2026-08-29 the gate runs
- * that audit itself — `judge_submit` dispatches it, adjudicates the verdict
- * (only P0/P1 block) and records it, so propose_loop_goal has a PASS to match.
+ * that audit itself — since 2026-08-30 it runs INSIDE `propose_loop_goal`,
+ * which dispatches the judge, adjudicates the verdict (only P0/P1 block) and
+ * records it before the user is ever asked. The agent submits a draft, not a
+ * sequence.
+
  */
 export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
   "review-gate: loop mode requires an approved loop goal BEFORE any edit/write call. " +
   "Negotiate it first: ask the user with `ask_user` (it asks them and pauses the loop until " +
   "they answer), write the goal in Simplified Chinese (technical identifiers, paths and code " +
-  "tokens stay English), then submit it with `judge_submit({role:\"goal-auditor\", task:<the " +
-  "full draft>})` — the gate audits it, adjudicates the verdict (only P0/P1 objections count) " +
-  "and records the PASS propose_loop_goal needs. A failed audit means: fix the objections and submit the revised " +
-  "draft the same way. Then call propose_loop_goal so the USER approves it in a dialog. (If this " +
+  "tokens stay English), then call `propose_loop_goal` with it. That ONE call runs the " +
+  "`goal-auditor` audit itself (dispatch, adjudicate — only P0/P1 objections count — and record) " +
+  "and shows the user the approval dialog only once it passes. A failed audit means: fix the objections and submit the revised " +
+  "draft the same way. (If this " +
   "session was never meant to run a full loop, classify it first with set_gate_mode: " +
   "explore/normal do not require a goal.) Writing " + LOOP_GOAL_RELPATH + " yourself does not count.";
 
@@ -597,13 +601,12 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "2. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
   "tokens stay English): task title, one-line intent, 3–7 checkable exit criteria, non-goals, " +
   "ISO date.\n" +
-  "3. Submit it for audit: `judge_submit({role:\"goal-auditor\", task:<the full draft>})`. The gate " +
-  "builds the auditor's task (with the carryover and the draft delta when this is a re-audit), " +
-  "dispatches it, adjudicates the verdict — only P0/P1 block, non-blocking findings never buy " +
-  "another round — and records the PASS. BLOCKED means: fix the objections and submit the " +
-  "revised draft the same way.\n" +
-  "4. Then call `propose_loop_goal` with the PASSED text. It refuses without a matching PASS. " +
-  "The EXTENSION shows it to the user for " +
+  "3. Submit it with `propose_loop_goal`. That ONE call runs the audit itself: it builds the " +
+  "auditor's task (with the carryover and the draft delta when this is a re-audit), dispatches " +
+  "the `goal-auditor` judge, waits for it, adjudicates the verdict — only P0/P1 block, " +
+  "non-blocking findings never buy another round — and records the PASS. A BLOCKED audit comes " +
+  "back with the objections and NO dialog is shown: fix them and call it again.\n" +
+  "4. Once it passes, the EXTENSION shows the text to the user for " +
   "approval and writes `" + LOOP_GOAL_RELPATH + "` itself. Writing that file yourself grants " +
   "nothing — an unapproved goal blocks commit/push/PR in loop mode and its body is withheld " +
   "from this prompt.\n" +
@@ -675,9 +678,10 @@ export function buildLoopGoalDirective(goal: LoopGoal, confirmed = false): strin
     "the goal, `reviewer` accepts against it criterion by " +
     "criterion (an unmet criterion is a P1 finding ⇒ BLOCKED). Write-capable subagents run " +
     "SERIALLY in this worktree; read-only ones may run in parallel. If the goal no longer matches " +
-    "the user's request, renegotiate it with the user, put the REVISED text through the " +
-    "`goal-auditor` audit again (`record_goal_prereview` — the pass binds to content, so any edit " +
-    "needs a fresh one) and only then re-submit it via `propose_loop_goal` — " +
+    "the user's request, renegotiate it with the user and re-submit the REVISED text via " +
+    "`propose_loop_goal` — it runs the `goal-auditor` audit itself (the pass binds to content, so " +
+    "any edit needs a fresh one) — " +
+
     "the path is gate-excluded, so updating it never invalidates a review, but editing the file " +
     "yourself drops the approval and blocks shipping until the user approves the new text."
   );

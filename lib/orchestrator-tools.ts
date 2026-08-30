@@ -295,59 +295,14 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
     },
   });
 
-  host.registerTool({
-    name: "orchestrator_status",
-    label: "Orchestrator Status",
-    description:
-      "Read back the WHOLE orchestration in one call: the plan and its task states, every child " +
-      "session with its live/dead pane, what a relay handed you, and exactly what still blocks " +
-      "declare_done. This is how a successor orchestrator picks up where the previous one stopped.",
-    parameters: Type.Object({}),
-    async execute() {
-      const refusal = requireOrchestratorMode(deps);
-      if (refusal) return refusal;
-      const { plan, problem } = currentPlan(deps);
-      if (problem) return problem;
-      const runtime = deps.runtime();
-      const panes = alivePanes(deps);
-      const branch = deps.branchFacts();
-      const facts = {
-        plan,
-        runtime,
-        alivePaneIds: panes.panes,
-        workBranch: branch.workBranch,
-        baseBranch: branch.baseBranch,
-        mergeSettled: branch.mergeSettled,
-        mergeWaived: branch.mergeWaived,
-      };
-      const problems = orchestratorDoneProblems(facts);
-      const inheritance = formatInheritanceBrief(readInheritance(deps.env()), runtime.orchestrationId);
-      const text = [
-        "## 编排状态",
-        formatOrchestrationStatus(facts),
-        panes.ok ? "" : "（读不到 tmux pane 列表：子会话存活状态不可信，先确认还在 tmux 里）",
-        "",
-        "### plan",
-        plan ? formatPlanSummary(plan) : "（还没有 plan）",
-        "",
-        "### 子会话",
-        formatChildren(runtime, panes.panes),
-        // R-11 — a human glancing at a pane mis-reads liveness (the second run
-        // produced a "t3 显示 terminated" that was simply wrong). The probe's
-        // structured verdict is the truth, so the status prints it here rather
-        // than leaving the reader to infer it from a pane list.
-        "",
-        "### 子会话现在在干什么（来源：门禁探针）",
-        formatChildHealth(deps.probe().observe().health),
+  // THERE IS NO `orchestrator_status` (2026-08-30). Everything it printed —
+  // the plan, the children, what a handoff left behind, and what still blocks
+  // `declare_done` — is now blocks 1–5 of the `orchestrator_wait` receipt,
+  // reachable with `timeoutMs: 0` when an instant snapshot is what is wanted.
+  // Two tools answering "how are things" is philosophy two's exact failure
+  // mode: the agent has to pick, and the one it picks is the one that happens
+  // to be shorter to type.
 
-        inheritance ? "\n" + inheritance : "",
-        "",
-        "### 还差什么才能 declare_done",
-        problems.length ? problems.map((p) => `- ${p}`).join("\n") : "- 没有了，可以 declare_done",
-      ].filter((line) => line !== "").join("\n");
-      return reply(text, { problems, childCount: runtime.children.length });
-    },
-  });
 
   host.registerTool({
     name: "orchestrator_notify",

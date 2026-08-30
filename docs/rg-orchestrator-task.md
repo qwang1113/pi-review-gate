@@ -1,5 +1,24 @@
 # 任务：项目经理（orchestrator）角色 —— 门禁内置的会话编排层
 
+> **⚠️ 这是 2026-08-29 那一轮的任务书，不是当前实现的说明。**
+>
+> 它被保留下来是因为「为什么要有项目经理这个角色」「用户的工作流长什么样」
+> 「plan 为什么是编排层的 loop goal」这些**意图**至今成立，读它有价值。但
+> 它描述的**机制**已在 2026-08-30 的通道重构里整体换掉：
+>
+> - 子会话 → 项目经理不再走 `lib/attention.ts` 的全局 attention 队列（已删除），
+>   而是每个子会话一条**专属通道文件**；
+> - 项目经理 → 子会话不再走 `tmux send-keys`（已删除），而是写通道 +
+>   子会话侧门禁用 `pi.sendUserMessage` 注入；
+> - 状态不再从 `capture-pane` 的屏幕文本推断，六态全部来自结构化真值；
+> - `orchestrator_read` / `_key` 合并为 `orchestrator_answer`，`_status` 并入
+>   `orchestrator_wait({timeoutMs:0})`，`_send` → `_instruct`，`_relay` →
+>   `_handoff`，新增 `_recover` / `_attach`。
+>
+> **当前实现请读 `docs/orchestrator-supervision.md`**，那份文档逐节写明了
+> 「被替换掉的是什么、为什么」。本文以下内容不再更新。
+
+
 你在 pi-review-gate 仓库工作。本轮新增一个角色：**项目经理**，由门禁提供全套工具，负责
 统筹、规划、调度子会话，把「一个 agent 一轮做不完的大需求」跑完。全程走 loop 门禁流程。
 
