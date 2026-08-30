@@ -1071,6 +1071,10 @@ test("loop directives: all-gates-green block names the completion steps", () => 
   const greenAt = SRC.indexOf("All gates satisfied", handlerAt);
   assert.ok(greenAt > 0, "all-green branch must exist");
   const greenLine = SRC.slice(greenAt, greenAt + 220);
+  // The 收尾 line is LOOP-only: an undecided session must not see it
+  // (reviewer P2-4 — the loop block presumes a chosen mode).
+  assert.match(SRC.slice(greenAt - 80, greenAt), /state\.taskMode === "loop"/,
+    "the 收尾 line is gated on loop mode");
   assert.match(greenLine, /declare_done/, "green branch names declare_done as the next step");
   assert.match(greenLine, /request_copilot_review/, "green branch names the Copilot cycle");
 });
@@ -3497,6 +3501,11 @@ test("setup_workspace honors params.branch on a protected branch (2026-08-30)", 
     "an existing base is checked out, not re-created");
   assert.match(branchBlock, /\["checkout", "-b", proposed\]/,
     "a new base is still created when it does not exist");
+  // The dialog copy matches the execution: the user consents to reuse when
+  // the branch already exists (reviewer P2: the old copy promised a fresh
+  // "拉一条" but the handler could checkout a leftover).
+  assert.match(branchBlock, /已存在则复用/,
+    "the dialog names the reuse behavior");
 });
 
 test("loop mode decision reminds to setup_workspace before work (2026-08-30)", () => {
