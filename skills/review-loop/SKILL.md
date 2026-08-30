@@ -29,7 +29,7 @@ fallback list. If a model doesn't support `max`, pi clamps it down.
 
 **Single-reviewer round.** Each review round is ONE reviewer over the WHOLE
 change — no second reviewer, no split, no different-family audit. One
-checkpoint commit range, one verdict, one `record_review` call. This is by
+checkpoint commit range, one verdict, one `judge_submit` call. This is by
 design (user decision 2026-08-26): parallel/multi-judge patterns were removed
 because they multiplied cost without adding an independent signal that a single
 strong reviewer does not already provide.
@@ -156,8 +156,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
       needs user confirmation (there is no plan).
 
 1. **Consult (recommended, not gated)** — before or during non-trivial work,
-   call `prepare_adviser` FIRST and send its brief to the `adviser` judge
-   child (the brief carries the fresh-context transcript pointer, the
+   `judge_submit({role:"adviser", task:<your question>})` — the gate builds
+   the brief itself (it carries the fresh-context transcript pointer, the
    conclusion artifact path, and — from the second consultation of the goal
    on — the previous consultation's conclusion and the files changed since;
    the adviser appends its conclusion to the artifact for the next time).
@@ -195,13 +195,14 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    multiple fences appear (the parser keeps the worst), and an absent
    `docSync` means the round is incomplete (fails closed).
 
-   `run_precommit` / `review_checkpoint` / `prepare_review` / `record_review`
-   stay available as advanced entries for the rare case where you need one on
-   its own; the normal path is the single call above.
+   The precommit lane, the checkpoint commit, the range computation and the
+   verdict recording are **not tools** (2026-08-30) — the gate still performs
+   every one of them inside `judge_submit`, but none of them is registered,
+   so there is nothing to sequence and no second path to choose between.
 
    **Why this is safe**: the verdict binds to the reviewed commit's TREE
    (content binding — squash/amend preserving the tree keeps the READY
-   alive), and `record_review` re-checks HEAD is still the reviewed commit
+   alive), and the recording re-checks HEAD is still the reviewed commit
    (a new checkpoint after prepare ⇒ STALE ⇒ BLOCKED). The worst a race can
    do is discard a verdict, never ship unverified work: the reviewed range
    is immutable, so you may keep fixing the worktree while the reviewer
@@ -216,8 +217,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    `NO CHECKS RUN` is NOT a pass — tell the user real checks are missing.
 
    (Running `node scripts/precommit-runner.mjs` by hand still prints the
-   human-readable report, but only the `run_precommit` tool records the gate:
-   it spawns the trusted bundled runner and verifies a private nonce receipt,
+   human-readable report, but only the gate's own trusted lane records a
+   PASS: it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
    **Waiting-window discipline (v4)** — 主会话是门禁的最后监督者,门禁未通过
@@ -250,7 +251,7 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix,
    Nit = optional. Any P0/P1 open ⇒ gate BLOCKED.
 
-   Every re-review carries the previous round's conclusion: `prepare_review`
+   Every re-review carries the previous round's conclusion: the gate
    embeds a 'Review scope for this round' block in the ready-made task text
    (the prior verdict and findings, what is new since the last READY tree,
    and the findings to re-check one by one). First round = full review;
@@ -291,9 +292,10 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    without it (disable per project via `"docSync": false` in
    `.pi/review-gate.json`).
 
-4. **Record** — call the `record_review` tool with the reviewer's FULL raw
-   output (the gate parses every fence; the worst verdict wins — never
-   summarize or trim it). The same call verifies the commit target: it
+4. **Record — the GATE does this, not you.** When the reviewer's process
+   exits the gate reads THIS round's raw output, parses every fence (the
+   worst verdict wins) and records the verdict, then wakes you with it. That
+   same step verifies the commit target: it
    withholds a READY when the round was never prepared (no registered
    `baseline..HEAD`), downgrades a READY to BLOCKED when HEAD moved past the
    reviewed commit (STALE), and binds the READY to the reviewed commit's
@@ -333,7 +335,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    must be bound to the SAME (current) tree — the reviewed HEAD commit tree;
    if a new checkpoint landed since the READY, run the affected step again.
    It also rejects while a judge child session is still open: finish the
-   round (`record_review` / `judge_close`) first.
+   round (let the judge exit — the gate records its verdict then — or
+   `judge_close({role})`) first.
 
    It also rejects while a Copilot cycle is still open or the loop goal is
    unapproved — those are completion requirements, not ship requirements.
@@ -367,9 +370,9 @@ Every repo has its OWN gate: its own review verdict, its own precommit PASS,
 its own reviewed tree. A verdict never transfers between repos, and the
 ship gate checks the repo the command actually runs in.
 
-So once a session has edited more than one repo, `record_review` and
-`run_precommit` **require** an explicit `"repo": "<absolute path>"` — they
-refuse to guess. **Run the loops per repo, precommit-first per repo**: repos
+So once a session has edited more than one repo, `judge_submit`
+**requires** an explicit `"repo": "<absolute path>"` — it
+refuses to guess. **Run the loop per repo**: repos
 share no state (own sidecar, own fingerprint, own verdict), so repo A's
 precommit and repo B's reviewer may interleave, but each repo's OWN
 precommit must finish before its reviewer is prepared (an edit from the

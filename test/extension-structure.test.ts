@@ -1915,6 +1915,43 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     "say so and update FROZEN. If you REMOVED one, lower the count.");
 });
 
+test("the SHIPPED skill and the agent-facing docs name no deleted tool at all", () => {
+  // The ratchet above covers code. These three files are the OTHER surfaces a
+  // model reads — `skills/review-loop/SKILL.md` ships with the package and is
+  // loaded as a skill, and AGENTS.md is read by every session in this repo.
+  // They contain no internal wiring, so unlike the code the bar here is
+  // ABSOLUTE: a deleted tool name in any of them is a defect, full stop.
+  //
+  // (README.md and QUICKSTART.md are excluded on purpose: they are reference
+  // documentation for a HUMAN and legitimately explain what the internal
+  // steps do, under a banner that says so.)
+  const DELETED = [
+    "run_precommit", "review_checkpoint", "prepare_review", "prepare_adviser",
+    "prepare_goal_audit", "record_review", "record_goal_prereview",
+    "review_spawn", "review_watch", "review_send",
+    "orchestrator_read", "orchestrator_key", "orchestrator_status",
+    "orchestrator_send", "orchestrator_relay",
+  ];
+  const offences: string[] = [];
+  for (const rel of [join("skills", "review-loop", "SKILL.md"), "AGENTS.md"]) {
+    const src = readFileSync(join(ROOT, rel), "utf8");
+    const lines = src.split("\n");
+    lines.forEach((line, i) => {
+      for (const tool of DELETED) {
+        if (!line.includes(tool)) continue;
+        // A sentence that says the name is GONE is the one legitimate use —
+        // and prose wraps, so the negation may land a line or two later.
+        const sentence = lines.slice(i, i + 3).join(" ");
+        if (/不再|已删|已并入|删除|are \*\*not tools\*\*|no longer|not registered/.test(sentence)) continue;
+        offences.push(`${rel}:${i + 1} — ${line.trim().slice(0, 100)}`);
+      }
+    });
+  }
+  assert.deepEqual(offences, [],
+    `an agent-facing document names a tool that is not registered:\n${offences.join("\n")}`);
+});
+
+
 
 
 
