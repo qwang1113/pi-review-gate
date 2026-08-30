@@ -160,8 +160,10 @@ Binding every verdict to worktree content has one unavoidable consequence: a
 one-character fix invalidates the previous PASS, so everything runs again. On a
 large repo that is minutes per loop round, nearly all of it re-testing code the
 round never touched. The runner therefore has **two lanes**: `/precommit-fast`
-and `/precommit` pick one explicitly, and the gate picks `full` itself for a
-review round and for every ship command.
+and `/precommit` pick one explicitly, and a review round runs `full` itself —
+which is also the lane every ship command requires, since a ship path only
+READS the recorded receipt (it never runs the checks) and refuses a narrower
+one.
 
 | Lane | Runs | Satisfies |
 |---|---|---|
@@ -1013,8 +1015,10 @@ one fact:
   answer, all at once only when the user asks for it — until nothing is left
   silently assumed. Facts are the agent's job (read the repo, run the tools);
   only decisions go to the user.
-- **Then the goal-auditor — mechanically (since 2026-08-25).** The agent makes
-  ONE call, `judge_submit({role:"goal-auditor", task:<the full draft>})`: the
+- **Then the goal-auditor — mechanically (since 2026-08-25).** It is ONE call:
+  `propose_loop_goal` dispatches that audit itself (and
+  `judge_submit({role:"goal-auditor", task:<the full draft>})` is the same
+  round run by hand). The
   gate builds the auditor task (with the previous audit's carryover + the draft
   delta on a re-audit), dispatches the judge as its own pi process, and records
   the verdict when it exits.
@@ -1028,12 +1032,15 @@ one fact:
   objections and re-audit; the revised text needs its own PASS. The goal text
   is written in **Simplified Chinese** (identifiers, paths and code tokens stay
   English); the auditor blocks a draft that is not.
-- **Then `propose_loop_goal`.** It first checks the sidecar's pre-review record
-  and REFUSES — with no transcript echo, no dialog and no file write — unless a
-  PASS is bound to the exact submitted text (missing or hash-mismatched both
-  fail closed; there is no TTL). The refusal names the repo it checked and the
-  submitted first line; on a HASH MISMATCH it also echoes both hash prefixes,
-  so an invisible whitespace edit is diagnosable. Only
+- **Then `propose_loop_goal`.** When no PASS is bound to the exact submitted
+  text, that ONE call runs the audit itself — it dispatches the `goal-auditor`,
+  waits for its process to exit, adjudicates the verdict (only P0/P1 block) and
+  records the PASS. It REFUSES — with no transcript echo, no dialog and no file
+  write — when that audit comes back BLOCKED, and when the `goal-auditor` role
+  is not installed at all. A recorded PASS binds to CONTENT, not to a clock
+  (there is no TTL): the refusal names the repo it checked and the submitted
+  first line, and on a HASH MISMATCH it also echoes both hash prefixes, so an
+  invisible whitespace edit is diagnosable. Only
   then does the **extension** show the negotiated text in
   a confirm dialog, and only if the user approves does the extension write
   `.pi/loop-goal.md` and record the sha256 of exactly that text in the sidecar.
@@ -1412,7 +1419,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 |------|---------|
 | `set_gate_mode` | The agent's in-session mode decision/switch (`loop`/`explore`/`normal`/`orchestrator` + a reason). The agent's pick IS the classification — no classifier model reviews it. On the FIRST call (mode undecided, this session has made no edits yet — pre-existing changes from before the session don't count — interactive session) `loop`, `orchestrator` and `explore` apply directly with source `auto`, while `normal` still pops the confirm dialog. Everything delegates to the pure rule engine in `lib/task-mode.ts`: upgrades apply immediately (source `auto`); every downgrade pops an extension-rendered confirm dialog (fixed consequence copy, agent reason labeled untrusted); a declined dialog locks agent-initiated downgrades for the session. `orchestrator` additionally has two environment preconditions checked before the engine runs: no `$TMUX` (its children ARE panes) and "this session is itself somebody's orchestration child" (it would take over the channel of the orchestration supervising it) are both refused. |
 | `setup_workspace` | Settles in ONE call where this session works: what happens to changes that were already in the worktree (adopt them as this session's baseline / the user handled them / the gate discards them) and which branch is the BASE the work must end up in. The **extension** asks the user, executes what they chose — including creating the work branch — and records every step in its branch log, which `declare_done` later follows back to merge. Call it once, early: while a dirty worktree is unsettled edits are refused, and without a work branch commits are refused. |
-| `ask_user` | The ONE way to reach the user — requirement ambiguity, a product/design decision, scope trade-offs, the loop-goal interview. Calling it **pauses** the loop until the answers come back, which is why a question written into the reply and an ended turn is not an alternative: that costs a whole iteration and may not even read as a question. The extension runs the interview itself (one question at a time with its `N / M` progress, choices when the call supplied options, free text otherwise, plus "answer in chat" and "skip the rest"), and every answer returns at once with the unanswered ones marked. It replaced `pause_for_question`, which was deleted on 2026-08-30: that tool only *paused*, leaving the agent to restate the question itself — two ways to reach the user, one of which delivered nothing. Asking permission to continue routine loop work is still prohibited. |
+| `ask_user` | The ONE way to reach the user — requirement ambiguity, a product/design decision, scope trade-offs, the loop-goal interview. Calling it **pauses** the loop until the answers come back, which is why a question written into the reply and an ended turn is not an alternative: that costs a whole iteration and may not even read as a question. The extension runs the interview itself (one question at a time with its `N / M` progress, choices when the call supplied options, free text otherwise, plus "answer in chat" and "skip the rest"), and every answer returns at once with the unanswered ones marked. It replaced `pause_for_question`, which was deleted on 2026-08-29: that tool only *paused* and carried exactly one question, leaving the agent to restate it in the reply — two ways to reach the user, one of which delivered nothing. Asking permission to continue routine loop work is still prohibited. |
 | `judge_submit` | The ONE entry point for a judge round (`reviewer` / `adviser` / `goal-auditor`). The call passes WHO and WHAT; the gate owns everything procedural — session id, working directory, spawn vs. resume vs. kill, the completion listener — so no session id, title or directory is ever passed in. For `reviewer` it runs the whole chain itself: the FULL precommit, the checkpoint commit (it stamps the checkpoint marker), the `baseline..HEAD` computation and the finding-stream file, then the dispatch; any step that fails sends the round back with the reason instead of leaving it half-submitted. The judge child is a fresh non-interactive pi process (`pi -p --session-id`, deterministic per role+repo, no review-gate extension loaded, `--exclude-tools edit,write`); dispatching a judge role through `subagent` / `workflowScript` / `workflowScriptPath` is hard-blocked instead. It returns as soon as the round is SUBMITTED, not when the judge is done: the child's process EXIT wakes this session, and the gate reads that round's output and records the verdict itself. A role whose process is still RUNNING refuses the round (nothing is silently dropped) unless `fresh: true` kills it first. POLISH GATE: after two consecutive READYs, or the same file polished for three rounds, a reviewer round without a `reason` is refused, and the reason travels into the reviewer's task text. |
 | `judge_read` | Snapshot of a judge role — never a wait: its session state (running / finished + exit code), the tail of its stdout log, the conclusion parsed from its transcript (the last assistant text carrying a verdict fence), and its stderr tail. The process may already be gone; the transcript and the logs are not. |
 | `judge_wait` | Block until a role's current round is over, then return what it produced. This is the FALLBACK, not the normal path — `judge_submit` already wakes the session on completion, so it is for when there is genuinely nothing else to do. Three independent criteria end the wait: the process exited, its exit-code file landed, or a verdict/question fence is already in that round's stdout. On timeout it returns the current state instead of failing, so the decision stays with the agent. |
@@ -1429,9 +1436,12 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 ### Internal implementations — not registered
 
 These four are **not tools**: they are registered into the extension's own
-`internalHost`, so no model can see or call them. `judge_submit` runs the first
-three as steps of its chain and `propose_loop_goal` runs the fourth, which is
-how every mechanical check ends up living in exactly one place. Their
+`internalHost`, so no model can see or call them. `judge_submit` runs
+`run_precommit`, `review_checkpoint` and `prepare_review` as steps of its
+submission chain, and calls `record_review` itself from the judge child's
+process-exit callback; `propose_loop_goal` dispatches the goal audit and
+records it through `record_goal_prereview` the same way. That is how every
+mechanical check ends up living in exactly one place. Their
 descriptions are kept because they are still exactly how the gate behaves — but
 read them as the gate's internal steps, not as things to sequence by hand.
 (`review_checkpoint`, `prepare_adviser` and `prepare_goal_audit` moved the same
