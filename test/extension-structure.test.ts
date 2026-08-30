@@ -942,6 +942,12 @@ test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' par
   assert.match(region, /agentDowngradesLocked = true/);
   // Apply-path modes carry the rule engine's source (always "auto").
   assert.match(region, /setTaskMode\(\w+, decision\.source/);
+  // Criterion 3: every set_gate_mode return path reports the change to the
+  // supervisor as mode-changed (setTaskMode's apply path + noop + declined
+  // + rejected). Stripping any one of them must turn this red.
+  const modeChangedHits = SRC.match(/reportChildState\([^)]*state: "mode-changed"/g) ?? [];
+  assert.ok(modeChangedHits.length >= 4,
+    `expected 4 mode-changed reports (apply/noop/declined/rejected), got ${modeChangedHits.length}`);
 });
 
 test("USER REQUIREMENT: /tmp first classification clamps via scratchFirstMode; /gate-mode never goes through it", () => {
