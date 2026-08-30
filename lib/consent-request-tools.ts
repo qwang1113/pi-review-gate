@@ -120,20 +120,35 @@ export async function doRequestScopeLimit(
     `本会话修改 ${sessionRel.length} 个（仍需完整审查）: ${sessionList}${moreS}\n` +
     `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}`,
   );
+  // The consent dialog goes through the CHANNEL when this session is an
+  // orchestration child: the project manager may answer it exactly like the
+  // human, so a consent request can never deadlock the child on a dialog its
+  // supervisor cannot even see (measured deadlock, 2026-08-31). A standalone
+  // session renders the plain confirm as before.
+  const CONFIRM_OPTIONS = ["同意缩小审查范围", "拒绝（保持完整门禁）"];
   let ok = false;
   let dialogFailed = false;
+  const consentTitle = "review-gate: AI 请求把审查范围缩小到本会话的修改——是否同意？";
+  const consentBody =
+    "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
+    `既有变更 ${preexisting.length} 个` +
+    (ahead > 0 ? `，分支领先基线 ${ahead} 个提交` : "") +
+    `；本会话修改 ${sessionRel.length} 个（清单见上方消息）。\n` +
+    "同意后：审查只需覆盖本会话自己的修改；若本会话没有任何修改，ship 拦截将解除。\n" +
+    "拒绝后：AI 本会话内不能再次请求缩小范围。";
   try {
-    ok = await deps.confirmBounded(
-      uiCtx,
-      "review-gate: AI 请求把审查范围缩小到本会话的修改——是否同意？",
-      "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
-        `既有变更 ${preexisting.length} 个` +
-        (ahead > 0 ? `，分支领先基线 ${ahead} 个提交` : "") +
-        `；本会话修改 ${sessionRel.length} 个（清单见上方消息）。\n` +
-        "同意后：审查只需覆盖本会话自己的修改；若本会话没有任何修改，ship 拦截将解除。\n" +
-        "拒绝后：AI 本会话内不能再次请求缩小范围。",
-      "（清单与理由见上方消息）",
+    const picked = await deps.askEitherSide(
+      {
+        dialogKind: "select",
+        topic: "scope-limit",
+        title: `${consentTitle}\n${consentBody}`,
+        options: CONFIRM_OPTIONS,
+        ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
+      },
+      uiCtx.hasUI === true,
+      (signal) => deps.confirmBounded(uiCtx, consentTitle, consentBody, "（清单与理由见上方消息）", signal).then((yes) => (yes ? CONFIRM_OPTIONS[0] : undefined)),
     );
+    ok = picked !== undefined && picked === CONFIRM_OPTIONS[0];
   } catch { dialogFailed = true; }
 
   // A dialog that could not be shown is NOT a decline: fail closed for
@@ -264,21 +279,34 @@ export async function doRequestSensitiveEdit(
     `文件（完整路径）: ${absPath}\n` +
     `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}`,
   );
+  // Same channel treatment as request_scope_limit (2026-08-31): an
+  // orchestration child's consent dialog must be answerable by its project
+  // manager, or it deadlocks the child on a dialog the supervisor cannot see.
+  const CONFIRM_OPTIONS = ["同意一次性修改", "拒绝（保持拦截）"];
   let ok = false;
   let dialogFailed = false;
+  const consentTitle = "review-gate: AI 请求一次性修改敏感文件——完整信息如下。";
+  const consentBody =
+    `文件（完整路径）: ${absPath}\n` +
+    `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}\n` +
+    "同意后：只授权这一个路径，写入成功一次即失效；10 分钟内未使用也会过期，且不跨会话保留。\n" +
+    "拒绝后：AI 本会话内不能再为该路径弹窗。\n" +
+    "请确认这确实是你本次要求的一部分；文件里的密钥/凭据会暴露给模型。\n" +
+    `文件（默认禁止 AI 写入）: ${shownPath}\n` +
+    `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}`;
   try {
-    ok = await deps.confirmBounded(
-      uiCtx,
-      "review-gate: AI 请求一次性修改敏感文件——完整信息如下。",
-      `文件（完整路径）: ${absPath}\n` +
-      `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}\n` +
-      "同意后：只授权这一个路径，写入成功一次即失效；10 分钟内未使用也会过期，且不跨会话保留。\n" +
-        "拒绝后：AI 本会话内不能再为该路径弹窗。\n" +
-        "请确认这确实是你本次要求的一部分；文件里的密钥/凭据会暴露给模型。\n" +
-        `文件（默认禁止 AI 写入）: ${shownPath}\n` +
-        `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}`,
-      "（完整路径与理由见上方消息）",
+    const picked = await deps.askEitherSide(
+      {
+        dialogKind: "select",
+        topic: "sensitive-edit",
+        title: `${consentTitle}\n${consentBody}`,
+        options: CONFIRM_OPTIONS,
+        ...(reason ? { payload: `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}` } : {}),
+      },
+      uiCtx.hasUI === true,
+      (signal) => deps.confirmBounded(uiCtx, consentTitle, consentBody, "（完整路径与理由见上方消息）", signal).then((yes) => (yes ? CONFIRM_OPTIONS[0] : undefined)),
     );
+    ok = picked !== undefined && picked === CONFIRM_OPTIONS[0];
   } catch { dialogFailed = true; }
 
   // A dialog that could not be shown is NOT a decline: fail closed for THIS

@@ -75,7 +75,7 @@ import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-direct
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands } from "../lib/ship-detect.ts";
-import { buildModelConfigWidget } from "../lib/ui-widget.ts";
+import { buildGateWidget, buildModelConfigWidget, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -471,7 +471,13 @@ function readSessionLoopGoal(root: string): LoopGoal {
 
 
 const ENTRY_TYPE = "review-gate-state";
-const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
+// 2026-08-31 (P0, onchain deadlock investigation): `replace` / `insert` are
+// pi's hashline edit tools and were MISSING here — a session could edit files
+// through them while every edit gate (L8 goal gate, sensitive-file floor,
+// orchestrator write restriction, edit tracking) was silently skipped.
+// Orchestration children use replace/insert, which is exactly how a child
+// bypassed the loop-goal requirement and edited straight away.
+const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit", "replace", "insert"]);
 
 /**
  * Read the PROJECT-layer agent file that actually shadows `name` at runtime:
@@ -1688,7 +1694,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // The judge finished: the gate reads its verdict and records it BEFORE
       // waking the session, so the agent never has to carry the output from
       // one tool to another (and cannot mis-carry it).
+      // 2026-08-31 (UX): the widget is refreshed IMMEDIATELY (before the
+      // recording finishes) so the on-screen gate state turns over at the
+      // same moment the judge exits — not a 5s timer tick later — and the
+      // recording itself runs in the background of the wake.
+      if (lastUiCtx) updateWidget(lastUiCtx);
       void recordJudgeConclusion(sessionId).then((recorded) => {
+        if (lastUiCtx) updateWidget(lastUiCtx);
         const content = `[review-gate] 子会话 ${label} 完成（session ${sessionId}）。` +
           (recorded ? `\n${recorded}` : " 用 judge_read({role}) 读它的输出并继续。");
         pi.sendMessage({ customType: "review-gate", content, display: true }, { triggerTurn: true, deliverAs: "steer" });
@@ -1843,35 +1855,92 @@ export default function reviewGate(pi: ExtensionAPI) {
    *
    * NEVER fatal, and never anything but a fast-forward: offline is a note, a
    * DIVERGED base is a note (a merge/rebase/force there is the user's call, not
-   * the gate's). Returns the notes to fold into the setup_workspace receipt.
+   * the gate's).
+   *
+   * 2026-08-31: the fetch is now ASYNC — it must never block the
+   * setup_workspace call the way a slow/offline `git fetch` did (the tool
+   * froze mid-setup). The branch cut itself stays synchronous (local-only,
+   * fast); the fetch + optional ff-only merge run in the background and
+   * their outcome lands in the notes the caller folds into the receipt.
    */
   function refreshBaseBeforeBranch(root: string, base: string): string[] {
+    const notes: string[] = [`基准分支 ${base} 的远端更新在后台进行（git fetch 异步执行，不阻塞本次工作区确认）——它可能暂时落后于远端，declare_done 前可手动确认。`];
+    void refreshBaseAsync(root, base).then((result) => {
+      if (result) notes.push(...result);
+    });
+    return notes;
+  }
+
+  /**
+   * The asynchronous half of refreshBaseBeforeBranch: best-effort fetch,
+   * then a fast-forward merge of `@{u}` when standing on `base` with an
+   * upstream. Never throws; resolves to the notes describing the outcome.
+   */
+  async function refreshBaseAsync(root: string, base: string): Promise<string[]> {
     const notes: string[] = [];
     let fetched = false;
     try {
-      execFileSync("git", ["fetch", "--quiet"], { cwd: root, encoding: "utf8" });
+      await runGitAsync(root, ["fetch", "--quiet"]);
       fetched = true;
     } catch {
       notes.push(`基准分支 ${base} 未能从远端更新（git fetch 失败，可能离线）—— 它可能落后于远端。`);
     }
-    // Fast-forward only, and only when actually standing on base (the common
-    // case at branch-cut time). No upstream ⇒ nothing to fast-forward to.
-    if (fetched && currentBranch(root) === base) {
-      let hasUpstream = false;
-      try {
-        execFileSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], { cwd: root, encoding: "utf8" });
-        hasUpstream = true;
-      } catch { /* no tracking branch */ }
-      if (hasUpstream) {
+    if (fetched) {
+      const branchNow = await currentBranchAsync(root);
+      if (branchNow === base) {
+        let hasUpstream = false;
         try {
-          execFileSync("git", ["merge", "--ff-only", "@{u}"], { cwd: root, encoding: "utf8" });
-          notes.push(`基准分支 ${base} 已快进到远端最新。`);
-        } catch {
-          notes.push(`基准分支 ${base} 与远端已分叉，门禁不会替你 merge/rebase —— 请自行处理后再开工作分支（本次仍按当前 ${base} 建分支）。`);
+          await runGitAsync(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+          hasUpstream = true;
+        } catch { /* no tracking branch */ }
+        if (hasUpstream) {
+          try {
+            await runGitAsync(root, ["merge", "--ff-only", "@{u}"]);
+            notes.push(`基准分支 ${base} 已快进到远端最新。`);
+          } catch {
+            notes.push(`基准分支 ${base} 与远端已分叉，门禁不会替你 merge/rebase —— 请自行处理后再开工作分支（本次仍按当前 ${base} 建分支）。`);
+          }
         }
       }
     }
     return notes;
+  }
+
+  /** Run a git command async; resolves on success, rejects on failure. */
+  function runGitAsync(root: string, args: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn("git", args, { cwd: root, stdio: "ignore" });
+      // Background by design: the fetch must never keep the host alive.
+      child.unref?.();
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`git ${args[0]} exited ${code}`));
+      });
+    });
+  }
+
+  /** Async current-branch read (mirrors currentBranch's rebase fallback). */
+  async function currentBranchAsync(root: string): Promise<string | undefined> {
+    try {
+      const name = (await runGitOutput(root, ["symbolic-ref", "--quiet", "--short", "HEAD"])).trim();
+      if (name) return name;
+    } catch { /* detached — maybe a rebase */ }
+    return undefined;
+  }
+
+  /** Run git capturing stdout; rejects on failure. */
+  function runGitOutput(root: string, args: string[]): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const child = spawn("git", args, { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
+      let out = "";
+      child.stdout.on("data", (d) => { out += String(d); });
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (code === 0) resolve(out);
+        else reject(new Error(`git ${args[0]} exited ${code}`));
+      });
+    });
   }
 
   /**
@@ -2518,6 +2587,48 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * The gate facts the belowEditor widget renders: workspace/branch,
+   * verdicts, unmet requirements. Computed from the live session state and
+   * the same unmetRequirements() the ship gate uses — the widget shows
+   * exactly what blocks shipping. Display-only: it never feeds an
+   * enforcement path.
+   */
+  function gateWidgetFacts(): GateWidgetFacts {
+    const fp = computeFingerprint(cwd);
+    const problems = (state.hasCodeChange || state.hasDocChange)
+      ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
+      : [];
+    const completion: string[] = [];
+    for (const root of sessionRepos) {
+      // READ-ONLY: enforcementStateFor never creates a sidecar/cache entry,
+      // so a mere widget refresh cannot turn a repo with "no usable gate
+      // state" into one that looks tracked (measured regression, 2026-08-31).
+      const st = root === primaryRepoRoot ? state : enforcementStateFor(root);
+      if (!st) continue;
+      for (const p of copilotProblemsFor(st)) {
+        completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+      }
+    }
+    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    return {
+      mode: state.taskMode,
+      baseBranch: state.baseBranch,
+      workBranch: state.workBranch,
+      dirtyCount: state.worktreeDirty && !state.worktreeDirty.settled ? state.worktreeDirty.files.length : 0,
+      edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
+      review: state.review.verdict as GateWidgetFacts["review"],
+      reviewAt: state.review.at ?? undefined,
+      rounds: state.rounds.length,
+      precommit: state.precommit.verdict as GateWidgetFacts["precommit"],
+      precommitAt: state.precommit.at ?? undefined,
+      precommitFast: state.precommit.verdict === "PASS" && state.precommit.testScope !== undefined && state.precommit.testScope !== "full",
+      goalApproved: loopGoalConfirmed(),
+      copilotOpen: completion.some((p) => p.includes("Copilot")),
+      unmet: [...problems, ...completion],
+    };
+  }
+
   function updateWidget(ctx: ExtensionContext) {
     // Idempotent re-arm (round-2 P2: the session_shutdown comment promised
     // this and it did not exist): every widget-refresh path — the 5s timer
@@ -2542,11 +2653,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
     if (!hasUI) return;
-    // belowEditor — agent model config (sub-agent runs were retired with
-    // the pi-subagents companion 2026-09-06).
+    // belowEditor — the gate status panel. Content-compared so pi only
+    // re-renders when something actually changed.
     try {
       const modelLines = modelConfigWidgetLines();
-      const lines = modelLines;
+      const lines = [...buildGateWidget(gateWidgetFacts()), ...(modelLines.length ? ["", ...modelLines] : [])];
       const key = lines.join("\n");
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
@@ -5828,8 +5939,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     persist: (ctx) => persist(ctx as unknown as ExtensionContext),
     setLoopArmed: (armed) => { loopArmed = armed; },
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as Parameters<typeof showToUser>[0], lead, body),
-    confirmBounded: (uiCtx, title, message, pointer) =>
-      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message, pointer),
+    confirmBounded: (uiCtx, title, message, pointer, signal) =>
+      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message, pointer, signal),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
     cwd,
     sessionEditedPaths: () => [...sessionEditedPaths],
