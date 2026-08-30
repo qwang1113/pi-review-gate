@@ -128,21 +128,10 @@ import {
   type ToolUpdate,
 } from "../lib/progress-stream.ts";
 import { isMessageOnlyRewrite, hasAmendFlag, rebaseBranchName } from "../lib/git-rewrite.ts";
-import {
-  normalizeQuestions,
-  resumeFrom,
-  interpretFreeText,
-  buildNoDialogNotice,
-  FREE_TEXT_HINT,
-  progressLabel,
-  buildChoiceList,
-  interpretChoice,
-  formatAnswers,
-  formatTranscriptSummary,
-  needsUserReply,
-  MAX_QUESTIONS,
-  type AskAnswer,
-} from "../lib/ask-user.ts";
+// The interview's pure functions are no longer reached from here: `ask_user`
+// lives in lib/user-interaction-tools.ts and imports them itself.
+import { registerUserInteractionTools } from "../lib/user-interaction-tools.ts";
+
 import {
   parsePorcelain,
   describeDirty,
@@ -396,9 +385,9 @@ import {
   resolveOpenPr,
   resolveRepoSlug,
 } from "../lib/copilot-gh.ts";
+// The TTL and the grant WRITE moved out with request_sensitive_edit; what is
+// left here is the READ side — the edit guard and the grant it consumes.
 import {
-  SENSITIVE_GRANT_TTL_MS,
-  addGrant,
   consumeGrant,
   findGrant,
   isGateIntegrityPath,
@@ -2372,12 +2361,8 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** Hard cap on one transcript notice, so nothing can flood the screen. */
   const USER_NOTICE_MAX_CHARS = 4000;
 
-  /**
-   * Max characters of a sensitive path echoed INSIDE the dialog. The path is
-   * agent-chosen, so an unbounded one would push the authorization copy out of
-   * the row budget; the full path is shown in the transcript instead.
-   */
-  const SENSITIVE_PATH_DIALOG_MAX_CHARS = 60;
+  // (The sensitive-path dialog cap moved to lib/consent-request-tools.ts with
+  // the tool that echoes the path — SENSITIVE_PATH_DIALOG_MAX_CHARS.)
 
   /**
    * Put text in front of the USER, in the transcript, RIGHT NOW.
@@ -6247,474 +6232,40 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
 
 
-  // ---------- ask_user tool (the ONE way to reach the user) ----------
-
-  pi.registerTool({
-    name: "ask_user",
-    label: "Ask The User",
-    description:
-      "Ask the user something — the ONE entry point for every moment that needs a human: " +
-      "requirement ambiguity, a product/design decision, scope trade-offs, how to handle a " +
-      "conflict, the goal interview. CALLING IT PAUSES: the loop stops until the user has " +
-      "answered, so ask instead of guessing, and never write a question into your reply and end " +
-      "the turn (that costs a whole iteration and the user may not even read it as a question). " +
-      "The gate runs the interview: one question at a time with its N / M progress, choices when " +
-      "you give options, free text otherwise, plus 'answer in chat' and 'skip the rest' for the " +
-      "user. Every answer comes back at once, unanswered ones marked. Write questions that stand " +
-      "on their own, with the options AND your recommendation. When later questions depend on the " +
-      "answer to an earlier one (pick an architecture, then its details), call ask_user AGAIN for " +
-      "the follow-up round instead of guessing the branch.",
-    parameters: Type.Object({
-      questions: Type.Array(
-        Type.Object({
-          text: Type.String({ description: "The complete question, with the context the user needs to decide" }),
-          options: Type.Optional(Type.Array(Type.String(), {
-            description: "The choices, when this is a pick rather than free text",
-          })),
-          recommended: Type.Optional(Type.String({
-            description: "Your own recommendation (one of `options` when you give options)",
-          })),
-        }),
-        { description: `1-${MAX_QUESTIONS} questions, asked in order` },
-      ),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const questions = normalizeQuestions(params.questions);
-      // Over the cap the extra questions are DROPPED — say so, or the agent
-      // waits for answers to questions nobody was ever asked.
-      const droppedQuestions = Math.max(0, (Array.isArray(params.questions) ? params.questions.length : 0) - questions.length);
-      if (!questions.length) {
-        return {
-          content: [{ type: "text", text: "review-gate: ask_user rejected — no question in the list. Write the actual question (options + your recommendation) and call again." }],
-          details: { asked: 0, answered: 0, pending: false },
-          isError: true,
-        };
-      }
-      const uiCtx = ctx as unknown as {
-        hasUI?: boolean;
-        ui?: {
-          select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
-          input?: (title: string, placeholder?: string, opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
-          notify?: (message: string, type?: "info" | "warning" | "error") => void;
-        };
-      };
-      // NO UI AT ALL (print / json / headless RPC): pi hands extensions a
-      // no-op UI whose dialogs resolve to undefined and whose notify does
-      // nothing — so "did notify exist?" is not the question, `hasUI` is
-      // (the same discriminator request_scope_limit uses). Asking there and
-      // reporting a finished interview is how a headless session ends up
-      // paused, waiting for answers to questions nobody was ever shown.
-      if (uiCtx.hasUI !== true) {
-        state.pausedQuestion = {
-          question: questions.map((q) => q.text).join("\n").slice(0, 2000),
-          at: new Date().toISOString(),
-        };
-        loopArmed = false;
-        persist(ctx as unknown as ExtensionContext);
-        return {
-          content: [{ type: "text", text: buildNoDialogNotice(questions) }],
-          details: { asked: questions.length, answered: 0, pending: true },
-          isError: true,
-        };
-      }
-      // The user must SEE the questions even when no dialog can be rendered
-      // (headless), and the transcript is where the Q&A stays readable after
-      // the dialogs close.
-      showToUser(uiCtx, "───── AI 有问题要问你 ─────", questions.map((q, i) =>
-        `${progressLabel(i, questions.length)} ${q.text}` +
-        (q.options?.length ? `\n   选项：${q.options.join(" / ")}` : "") +
-        (q.recommended ? `\n   推荐：${q.recommended}` : "")).join("\n"));
-
-      // An interview interrupted earlier (crash, restart, or the agent
-      // re-submitting the same list) resumes where it stopped: the questions
-      // the user already settled are not asked again.
-      const answers: AskAnswer[] = resumeFrom(state.askUser, questions);
-      const resumedCount = answers.length;
-      let skipRest = false;
-      /** Did ANY dialog actually render? A no is what makes this headless. */
-      let anyDialog = false;
-      for (const [index, q] of questions.entries()) {
-        if (index < answers.length) continue; // already settled before the interruption
-        if (skipRest) {
-          answers.push({ question: q.text, kind: "skipped" });
-          continue;
-        }
-        const title = `问题 ${progressLabel(index, questions.length)}`;
-        const choices = buildChoiceList(q);
-        let picked: string | undefined;
-        try {
-          // EITHER the user or the project manager may answer (when this
-          // session is an orchestration child). The channel request carries
-          // the question and every row VERBATIM, which is why the supervisor
-          // never had to read this screen — and never mis-parsed it.
-          picked = await askEitherSide(
-            {
-              dialogKind: choices.length ? "select" : "input",
-              topic: "ask-user",
-              title: `${title}\n${q.text}`,
-              options: choices,
-              ...(q.recommended ? { payload: `推荐答案：${q.recommended}` } : {}),
-            },
-            uiCtx.hasUI === true,
-            (signal) => (choices.length
-              ? uiCtx.ui!.select!(`${title}\n${q.text}`, choices, { signal })
-              : uiCtx.ui!.input!(`${title}\n${q.text}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal })),
-          );
-        } catch {
-          picked = undefined; // a broken dialog is silence, never an answer
-        }
-
-        if (picked !== undefined) anyDialog = true;
-        // Free text carries its escapes as typed sentinels; a choice list
-        // carries them as rows. Both must exist, or the escapes would only
-        // apply to half the questions.
-        const meaning = choices.length ? interpretChoice(picked, q) : interpretFreeText(picked);
-        if (meaning.kind === "skip-rest") {
-          skipRest = true;
-          answers.push({ question: q.text, kind: "skipped" });
-        } else if (meaning.kind === "answered") {
-          answers.push({ question: q.text, kind: "answered", answer: meaning.answer });
-        } else if (meaning.kind === "deferred-to-chat") {
-          answers.push({ question: q.text, kind: "deferred-to-chat" });
-        } else {
-          // Dismissed (ESC) or no dialog at all: NOT a request to answer in
-          // chat — the user asked for nothing, and the reply must say so.
-          answers.push({ question: q.text, kind: "unanswered" });
-        }
-        // Persisted after EVERY question: an interview that dies here resumes
-        // at the next one instead of asking the user everything again.
-        state.askUser = { at: new Date().toISOString(), answers: [...answers] };
-        persist(ctx as unknown as ExtensionContext);
-      }
-
-      state.askUser = { at: new Date().toISOString(), answers };
-      const pending = needsUserReply(answers);
-      if (pending) {
-        // Anything unanswered ⇒ the loop stops and waits for the user's next
-        // message — the same pause the loop has always honoured.
-        state.pausedQuestion = {
-          question: answers.filter((a) => a.kind !== "answered").map((a) => a.question).join("\n").slice(0, 2000),
-          at: new Date().toISOString(),
-        };
-        loopArmed = false;
-      } else {
-        // Every question answered: nothing is waiting on the user, so the
-        // loop is armed again (leaving it off would strand the session on a
-        // question that no longer exists).
-        delete state.pausedQuestion;
-        loopArmed = true;
-      }
-      persist(ctx as unknown as ExtensionContext);
-      // A UI existed but every dialog came back empty (they were all
-      // dismissed, or the host refused to render them): the questions still
-      // reached nobody, so the agent carries them itself.
-      if (!anyDialog) {
-        return {
-          content: [{ type: "text", text: buildNoDialogNotice(questions) }],
-          details: { asked: questions.length, answered: 0, pending: true },
-          isError: true,
-        };
-      }
-      showToUser(uiCtx, "───── 采访结束 ─────", formatTranscriptSummary(answers));
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: ask_user 采访完成（${formatTranscriptSummary(answers)}）。\n${formatAnswers(answers)}\n` +
-            (resumedCount ? `（前 ${resumedCount} 题沿用了上次中断前的回答，没有重复问用户。）\n` : "") +
-            (droppedQuestions ? `（提交了 ${questions.length + droppedQuestions} 个问题，只问了前 ${MAX_QUESTIONS} 个；其余请下一轮再问。）\n` : "") +
-            (pending
-              ? "有问题没得到回答 — 循环已暂停，等用户的下一条消息；不要替他决定。"
-              : "全部已答 — 按答案继续。"),
-        }],
-        details: { asked: questions.length, answered: answers.filter((a) => a.kind === "answered").length, pending },
-      };
-    },
+  // ---------- user-interaction tools (ask_user + the two consent tools) ----------
+  //
+  // `ask_user`, `request_scope_limit` and `request_sensitive_edit` moved to
+  // lib/user-interaction-tools.ts (+ lib/consent-request-tools.ts) for the
+  // architecture rule this file is the repository's own worst example of
+  // (AGENTS.md §"架构规范"). ONE registration call wires all three: a family
+  // the extension could wire half of is a family it eventually does.
+  //
+  // What they need from THIS file arrives as this deps object. `state` is a
+  // GETTER on purpose — the extension rebinds its state object at
+  // session_start and clears `pausedQuestion` from several other handlers, so
+  // a captured reference would leave the tools writing into a dead copy of
+  // the very state the gate reads. The dialogs stay here too (showToUser /
+  // confirmBounded / askEitherSide are this file's helpers, and the last is
+  // what lets an orchestrator answer the same box the human can).
+  registerUserInteractionTools(pi, {
+    state: () => state,
+    persist: (ctx) => persist(ctx as unknown as ExtensionContext),
+    setLoopArmed: (armed) => { loopArmed = armed; },
+    showToUser: (uiCtx, lead, body) => showToUser(uiCtx as Parameters<typeof showToUser>[0], lead, body),
+    confirmBounded: (uiCtx, title, message, pointer) =>
+      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message, pointer),
+    askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
+    cwd,
+    sessionEditedPaths: () => [...sessionEditedPaths],
+    commitsAheadOfBase: () => commitsAheadOfBase(cwd),
+    scopeLimitDeclined: () => scopeLimitDeclined,
+    declineScopeLimit: () => { scopeLimitDeclined = true; },
+    sensitiveGrants: () => sensitiveGrants,
+    storeSensitiveGrants: (next) => { sensitiveGrants = next; },
+    sensitiveDeclinedPaths,
+    log: (message) => log(message),
   });
 
-
-  // ---------- request_scope_limit tool (user-consented gate fence narrowing) ----------
-
-  pi.registerTool({
-    name: "request_scope_limit",
-    label: "Request Scope Limit",
-    description:
-      "Ask the USER whether the review gate may be limited to THIS session's own edits when it " +
-      "is demanding coverage of PRE-EXISTING changes (dirty files or branch commits that pre-date " +
-      "this session). The extension shows the user a confirmation dialog — you cannot approve it " +
-      "yourself. If the user agrees, the pre-existing changes recorded at grant time stop arming " +
-      "the gate: with no session edits the ship gate disarms entirely; with session edits the " +
-      "review scope narrows to the files this session touched (instruct the reviewer accordingly; " +
-      "out-of-scope findings become advisory). If the user declines, scope requests lock for the " +
-      "session — do not ask again. This never weakens the gate for the session's OWN edits.",
-    parameters: Type.Object({
-      reason: Type.String({ description: "One-line justification: which unmet requirements target pre-existing changes (shown to the user as untrusted data)" }),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
-
-      if (state.taskMode === "normal") {
-        return { content: [{ type: "text", text: "review-gate: normal mode — the gate is already off; no scope limit needed." }], details: {} };
-      }
-      if (state.scopeLimit) {
-        return {
-          content: [{ type: "text", text: "review-gate: a user-granted scope limit is already active — the gate covers only this session's edits." }],
-          details: { alreadyLimited: true },
-        };
-      }
-      if (scopeLimitDeclined) {
-        return deny("review-gate: the user already DECLINED a scope limit this session — do not ask again; satisfy the full gate or let the USER run /gate-bypass.");
-      }
-      if (!ctx.hasUI) {
-        return deny("review-gate: no interactive UI — narrowing the gate fence requires the user's explicit dialog approval (fail-closed). Ask the user out-of-band.");
-      }
-      const all = changedFiles(cwd);
-      if (all === undefined) {
-        return deny("review-gate: git status unavailable — cannot determine the pre-existing change set (fail-closed).");
-      }
-      const sessionRel = [...sessionEditedPaths];
-      const sessionSet = new Set(sessionRel);
-      // Only code/doc files arm the gate, so only they justify a dialog — but
-      // the exemption snapshot below covers EVERY non-session changed file.
-      const preexisting = all.filter((f) => (isCodeFile(f) || isDocFile(f)) && !sessionSet.has(f));
-      const ahead = await commitsAheadOfBase(cwd);
-      if (preexisting.length === 0 && ahead === 0) {
-        return deny("review-gate: every current change was made in THIS session — there is nothing pre-existing to exempt; the full gate applies.");
-      }
-
-      // USER CONSENT — extension-rendered dialog with fixed consequence copy;
-      // the agent's reason is displayed as clearly-labeled untrusted data.
-      //
-      // The file LISTS go to the transcript, not the dialog: twenty paths is
-      // easily twenty rendered rows, which is exactly the geometry that makes
-      // the terminal flicker (lib/dialog-budget.ts). The dialog keeps the
-      // counts and the consequences.
-      const preexistingList = preexisting.slice(0, 20).join(", ") || "（仅分支上已有的提交）";
-      const sessionList = sessionRel.length > 0 ? sessionRel.slice(0, 20).join(", ") : "（无）";
-      const moreP = preexisting.length > 20 ? `（另有 ${preexisting.length - 20} 个未列出）` : "";
-      const moreS = sessionRel.length > 20 ? `（另有 ${sessionRel.length - 20} 个未列出）` : "";
-      showToUser(
-        ctx,
-        "review-gate: AI 请求缩小审查范围——涉及的文件如下。",
-        `既有变更 ${preexisting.length} 个（同意后不再触发门禁）: ${preexistingList}${moreP}` +
-        (ahead > 0 ? `\n分支领先基线 ${ahead} 个提交` : "") + "\n" +
-        `本会话修改 ${sessionRel.length} 个（仍需完整审查）: ${sessionList}${moreS}\n` +
-        `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
-      );
-      let ok = false;
-      let dialogFailed = false;
-      try {
-        ok = await confirmBounded(
-          ctx as unknown as ExtensionContext,
-          "review-gate: AI 请求把审查范围缩小到本会话的修改——是否同意？",
-          "门禁当前要求覆盖【本会话之前就存在】的修改。\n" +
-            `既有变更 ${preexisting.length} 个` +
-            (ahead > 0 ? `，分支领先基线 ${ahead} 个提交` : "") +
-            `；本会话修改 ${sessionRel.length} 个（清单见上方消息）。\n` +
-            "同意后：审查只需覆盖本会话自己的修改；若本会话没有任何修改，ship 拦截将解除。\n" +
-            "拒绝后：AI 本会话内不能再次请求缩小范围。",
-          "（清单与理由见上方消息）",
-        );
-      } catch { dialogFailed = true; }
-
-      // A dialog that could not be shown is NOT a decline: fail closed for
-      // THIS request without burning the session's anti-grinding lock.
-      if (dialogFailed) {
-        return deny(
-          "review-gate: the confirmation dialog could not be shown — no scope limit granted (fail-closed), " +
-          "and this does NOT count as a user decline; retry when an interactive dialog is possible.",
-        );
-      }
-
-      if (!ok) {
-        scopeLimitDeclined = true;
-        return deny(
-          "review-gate: the user DECLINED the scope limit — the FULL gate applies (pre-existing " +
-          "changes included). Scope requests are now locked for this session; continue the loop and cover everything.",
-        );
-      }
-
-      // GRANTED: snapshot EVERY non-session changed file as exempt (non-code
-      // files never arm the gate, but freezing the full set keeps later
-      // re-arm filtering unambiguous), then re-derive arming from THIS
-      // session's own edits only. Verdicts/bindings are untouched — narrowing
-      // the fence never fabricates a READY or a PASS.
-      state.scopeLimit = {
-        preexistingFiles: all.filter((f) => !sessionSet.has(f)),
-        sessionFiles: sessionRel,
-        at: new Date().toISOString(),
-      };
-      state.hasCodeChange = sessionRel.some(isCodeFile);
-      state.hasDocChange = sessionRel.some(isDocFile);
-      persist(ctx as unknown as ExtensionContext);
-      const stillArmed = state.hasCodeChange || state.hasDocChange;
-      try {
-        ctx.ui.notify(
-          stillArmed
-            ? "review-gate: 用户已同意缩小审查范围——门禁只覆盖本会话的修改（既有变更已豁免）。"
-            : "review-gate: 用户已同意缩小审查范围——本会话没有自身修改，ship 拦截已解除（既有变更已豁免）。",
-          "warning",
-        );
-      } catch { /* headless */ }
-      return {
-        content: [{
-          type: "text",
-          text: stillArmed
-            ? "review-gate: the user GRANTED the scope limit. The gate now covers ONLY this session's edits: " +
-              `${sessionRel.join(", ")}. When you run the review, instruct the reviewer to verdict only on ` +
-              "findings in these files — pre-existing issues elsewhere are advisory, not blocking. Precommit " +
-              "still runs project-wide; if it fails on pre-existing problems, report that to the user (only " +
-              "the USER can /gate-bypass)."
-            : "review-gate: the user GRANTED the scope limit and this session has no edits of its own — the " +
-              "ship gate is disarmed for the pre-existing changes; you may proceed.",
-        }],
-        details: { granted: true, stillArmed, sessionFiles: sessionRel },
-      };
-    },
-  });
-
-  // ---------- request_sensitive_edit tool (user-consented one-shot sensitive write) ----------
-
-  pi.registerTool({
-    name: "request_sensitive_edit",
-    label: "Request Sensitive File Edit",
-    description:
-      "Ask the USER for one-time authorization to edit ONE sensitive file (.env, private key, " +
-      "credentials…) that the gate blocks by default. The extension shows a confirmation dialog — " +
-      "you cannot approve it yourself. A granted authorization covers that EXACT path only, is " +
-      "consumed by the first edit that SUCCEEDS, and expires after 10 minutes; it is never " +
-      "persisted, so it dies with the session. The gate's OWN enforcement is NEVER grantable: " +
-      "`.git/` internals (the L3 hooks) and `.pi/review-gate-state.json` / " +
-      "`.pi/precommit-cache.json` (the verdicts and the already-passed record a commit is checked " +
-      "against). If the user declines, that path is locked for the session — " +
-      "do not ask again, ask the user to edit it by hand. Call this only when the edit is genuinely " +
-      "required by the user's request, and state exactly what you will change.",
-    parameters: Type.Object({
-      path: Type.String({ description: "The sensitive file to edit — absolute, or relative to the session cwd" }),
-      reason: Type.String({ description: "One line: what you will change in this file and why (shown to the user as untrusted data)" }),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
-
-      const raw = params.path.trim();
-      if (raw.length === 0) return deny("review-gate: path is required — name the exact file you need to edit.");
-      const absPath = normalizeSensitivePath(raw, cwd);
-
-      if (!isSensitiveFile(absPath)) {
-        return deny(
-          `review-gate: "${raw}" is not a sensitive file — the gate does not block it. Edit it directly; ` +
-          "no authorization is needed.",
-        );
-      }
-      // Gate-integrity paths are refused BEFORE any dialog: a "yes" here would
-      // let the agent talk the user into disarming the L3 hook that checks it.
-      if (isGateIntegrityPath(absPath)) {
-        return deny(
-          `review-gate: "${raw}" is part of the gate's own enforcement — never authorizable from ` +
-          "here. `.git/hooks/*` IS the L3 layer, and `.pi/review-gate-state.json` / " +
-          "`.pi/precommit-cache.json` are the verdicts and the already-passed record a commit is " +
-          "checked against. A dialog here would be the agent asking permission to disarm its own " +
-          "gate. If this change is really needed, the USER must make it by hand.",
-        );
-      }
-      if (sensitiveDeclinedPaths.has(absPath)) {
-        return deny(
-          `review-gate: the user already DECLINED editing "${raw}" this session — do not ask again. ` +
-          "Tell the user what the file needs and let them edit it themselves.",
-        );
-      }
-      const existing = findGrant(sensitiveGrants, absPath, Date.now());
-      if (existing) {
-        return {
-          content: [{
-            type: "text",
-            text:
-              `review-gate: "${raw}" is already authorized (until ` +
-              `${new Date(existing.expiresAt).toISOString()}). Make the edit now — the authorization ` +
-              "is consumed once it succeeds.",
-          }],
-          details: { alreadyGranted: true, path: absPath },
-        };
-      }
-      if (!ctx.hasUI) {
-        return deny(
-          "review-gate: no interactive UI — writing a sensitive file requires the user's explicit dialog " +
-          "approval (fail-closed). Ask the user out-of-band to make the edit.",
-        );
-      }
-
-      // USER CONSENT — extension-rendered dialog with fixed consequence copy;
-      // the agent's reason is displayed as clearly-labeled untrusted data.
-      //
-      // The full path and reason go to the transcript first; the dialog gets a
-      // TAIL-truncated path and the reason last, so a pathological path (the
-      // agent picks it) can never push the authorization copy out of a
-      // budget-bounded dialog.
-      const shownPath = absPath.length > SENSITIVE_PATH_DIALOG_MAX_CHARS
-        ? "…" + absPath.slice(-SENSITIVE_PATH_DIALOG_MAX_CHARS)
-        : absPath;
-      showToUser(
-        ctx,
-        "review-gate: AI 请求一次性修改敏感文件——完整信息如下。",
-        `文件（完整路径）: ${absPath}\n` +
-        `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
-      );
-      let ok = false;
-      let dialogFailed = false;
-      try {
-        ok = await confirmBounded(
-          ctx as unknown as ExtensionContext,
-          "review-gate: AI 请求一次性修改敏感文件——完整信息如下。",
-          `文件（完整路径）: ${absPath}\n` +
-          `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}\n` +
-          "同意后：只授权这一个路径，写入成功一次即失效；10 分钟内未使用也会过期，且不跨会话保留。\n" +
-            "拒绝后：AI 本会话内不能再为该路径弹窗。\n" +
-            "请确认这确实是你本次要求的一部分；文件里的密钥/凭据会暴露给模型。\n" +
-            `文件（默认禁止 AI 写入）: ${shownPath}\n` +
-            `AI 给出的理由（未经核实）: ${params.reason.slice(0, 300)}`,
-          "（完整路径与理由见上方消息）",
-        );
-      } catch { dialogFailed = true; }
-
-      // A dialog that could not be shown is NOT a decline: fail closed for THIS
-      // request without burning the path's anti-grinding lock.
-      if (dialogFailed) {
-        return deny(
-          "review-gate: the confirmation dialog could not be shown — no authorization granted " +
-          "(fail-closed), and this does NOT count as a user decline; retry when a dialog is possible.",
-        );
-      }
-
-      if (!ok) {
-        sensitiveDeclinedPaths.add(absPath);
-        return deny(
-          `review-gate: the user DECLINED editing "${raw}". This path is now locked for the session — ` +
-          "do not ask again. Describe the change you wanted and let the user apply it.",
-        );
-      }
-
-      const now = Date.now();
-      const expiresAt = now + SENSITIVE_GRANT_TTL_MS;
-      sensitiveGrants = addGrant(
-        sensitiveGrants,
-        { path: absPath, at: new Date(now).toISOString(), expiresAt, reason: params.reason.slice(0, 300) },
-        now,
-      );
-      log(`sensitive-grant issued for ${absPath}`);
-      try {
-        ctx.ui.notify(`review-gate: 用户已授权 AI 修改 ${absPath}（一次性，10 分钟内有效）。`, "warning");
-      } catch { /* headless */ }
-      return {
-        content: [{
-          type: "text",
-          text:
-            `review-gate: the user GRANTED a one-shot edit of ${absPath}. Make ONLY the change you ` +
-            "described, on this exact path, now — the authorization is consumed by the first successful " +
-            "edit and expires in 10 minutes. Do not echo the file's secrets back to the user.",
-        }],
-        details: { granted: true, path: absPath, expiresAt },
-      };
-    },
-  });
   // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
 
   pi.on("input", (event, ctx) => {

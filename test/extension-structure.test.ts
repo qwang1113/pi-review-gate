@@ -42,6 +42,20 @@ const ADVISORY_PREPARE_TOOLS = new Set(["prepare_adviser", "prepare_goal_audit"]
 const COPILOT_TOOLS_SRC = readFileSync(join(ROOT, "lib", "copilot-review-tools.ts"), "utf8");
 const COPILOT_TOOLS = new Set(["request_copilot_review", "check_copilot_review"]);
 const COPILOT_GH_SRC = readFileSync(join(ROOT, "lib", "copilot-gh.ts"), "utf8");
+/**
+ * The USER-INTERACTION family moved the same way, split by responsibility:
+ * the interview (`ask_user`) in one module, the two tools that ask the user
+ * to RELAX the gate in the other. lib/user-interaction-tools.ts is the
+ * family's single registration entry point — it registers `ask_user` and
+ * calls the consent module itself — so the extension wires all three exactly
+ * once. Their structural rules did not move with them: they are asserted
+ * here, against the module that now owns each one.
+ */
+const ASK_USER_SRC = readFileSync(join(ROOT, "lib", "user-interaction-tools.ts"), "utf8");
+const ASK_USER_TOOLS = new Set(["ask_user"]);
+const CONSENT_SRC = readFileSync(join(ROOT, "lib", "consent-request-tools.ts"), "utf8");
+const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit"]);
+
 
 /** Which source owns a given tool's body. */
 function sourceOf(tool: string): string {
@@ -49,6 +63,8 @@ function sourceOf(tool: string): string {
   if (REVIEW_PREPARE_TOOLS.has(tool)) return REVIEW_PREPARE_SRC;
   if (ADVISORY_PREPARE_TOOLS.has(tool)) return ADVISORY_PREPARE_SRC;
   if (COPILOT_TOOLS.has(tool)) return COPILOT_TOOLS_SRC;
+  if (ASK_USER_TOOLS.has(tool)) return ASK_USER_SRC;
+  if (CONSENT_TOOLS.has(tool)) return CONSENT_SRC;
   return SRC;
 }
 
@@ -88,6 +104,9 @@ const LIB_TOOL_HANDLERS: Record<string, string> = {
   prepare_goal_audit: "async function doPrepareGoalAudit(",
   request_copilot_review: "async function doRequestCopilotReview(",
   check_copilot_review: "async function doCheckCopilotReview(",
+  ask_user: "export async function doAskUser(",
+  request_scope_limit: "export async function doRequestScopeLimit(",
+  request_sensitive_edit: "export async function doRequestSensitiveEdit(",
 };
 
 /**
@@ -506,17 +525,31 @@ test("L2 ORDER: explore check precedes loopArmed in agent_settled (explore edits
 });
 
 test("ask_user is the ONE way to reach the user, and pause_for_question is gone", () => {
-  assert.match(SRC, /name: "ask_user"/);
+  assert.match(ASK_USER_SRC, /name: "ask_user"/);
   assert.doesNotMatch(SRC, /name: "pause_for_question"/,
     "the second asking entry point must not come back");
-  const toolStart = SRC.indexOf('name: "ask_user"');
-  const toolBody = SRC.slice(toolStart, SRC.indexOf('name: "request_scope_limit"', toolStart));
+  assert.doesNotMatch(ASK_USER_SRC, /name: "pause_for_question"/,
+    "…and it must not reappear in the module that now owns the asking tool");
+  // ONE registration call wires the whole family; the extension registers
+  // none of the three itself any more.
+  assert.match(SRC, /registerUserInteractionTools\(pi, \{/,
+    "the extension wires the family exactly once");
+  assert.doesNotMatch(SRC, /name: "ask_user"/,
+    "the tool body moved to lib/ — a second registration here would be a second path");
+  const toolBody = toolBodyOf("ask_user");
   // Calling it PAUSES when anything is left unanswered, and the pause persists
   // (it must survive a restart while the user is away).
   assert.match(toolBody, /const pending = needsUserReply\(answers\)/);
   assert.match(toolBody, /state\.pausedQuestion = \{/);
-  assert.match(toolBody, /loopArmed = false/);
-  assert.match(toolBody, /persist\(/);
+  assert.match(toolBody, /deps\.setLoopArmed\(false\)/);
+  assert.match(toolBody, /deps\.persist\(/);
+  // The pause is written into the EXTENSION's own state object, not a copy:
+  // several handlers there clear `pausedQuestion`, and a captured/duplicated
+  // state would let the tool pause a session nobody can un-pause.
+  assert.match(toolBody, /const state = deps\.state\(\);/,
+    "the gate state is read through the injected getter, per call");
+  assert.match(windowOf("registerUserInteractionTools(pi, {", "\n  });", "user-interaction wiring"),
+    /state: \(\) => state,/, "and the extension hands over its LIVE state, not a snapshot");
   // …but it must NEVER touch the ship authority: unmetRequirements takes no
   // pause input, and no call site filters its problems on pausedQuestion.
   assert.doesNotMatch(SRC, /unmetRequirements\([^)]*pausedQuestion/);
@@ -527,9 +560,8 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
   // `state.pausedQuestion` and nowhere else, while the tool result told the
   // agent it had been "delivered to the user verbatim" — the user saw a
   // warning with no question in it.
-  const toolStart = SRC.indexOf('name: "ask_user"');
-  const toolBody = SRC.slice(toolStart, SRC.indexOf('name: "request_scope_limit"', toolStart));
-  assert.match(toolBody, /showToUser\(uiCtx, "───── AI 有问题要问你 ─────"/,
+  const toolBody = toolBodyOf("ask_user");
+  assert.match(toolBody, /deps\.showToUser\(uiCtx, "───── AI 有问题要问你 ─────"/,
     "the questions themselves are shown, not just filed");
   // The interview: one dialog per question, with its N / M progress.
   assert.match(toolBody, /progressLabel\(index, questions\.length\)/);
@@ -538,7 +570,7 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
   // Both go through the channel funnel, so an orchestration child's project
   // manager can answer the same question the human can (2026-08-30) — and
   // whichever of them answers first takes the box off the other's screen.
-  assert.match(toolBody, /askEitherSide\(/, "every gate question is answerable by EITHER side");
+  assert.match(toolBody, /deps\.askEitherSide\(/, "every gate question is answerable by EITHER side");
   assert.match(toolBody, /topic: "ask-user"/, "the request is LABELLED by the gate that raised it");
 
   // A dismissed dialog or a broken UI is NOT consent: it becomes an
@@ -552,7 +584,7 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
   // Progress is persisted after EVERY question, so an interview that dies
   // mid-way resumes instead of asking the user everything again.
   assert.match(toolBody, /resumeFrom\(state\.askUser, questions\)/, "an interrupted interview resumes");
-  assert.match(toolBody, /state\.askUser = \{ at: new Date\(\)\.toISOString\(\), answers: \[\.\.\.answers\] \};[\s\S]{0,120}persist\(/,
+  assert.match(toolBody, /state\.askUser = \{ at: new Date\(\)\.toISOString\(\), answers: \[\.\.\.answers\] \};[\s\S]{0,120}deps\.persist\(/,
     "each answer is persisted as it arrives");
   // NO UI at all (print / json / headless RPC): pi's no-op UI still HAS a
   // notify, so "did notify exist?" proves nothing — `hasUI` is the
@@ -678,19 +710,21 @@ test("ESC abort (Operation aborted) pauses auto-continuation until the next real
 });
 
 test("request_scope_limit: extension-driven user consent, no 'confirmed' parameter, declined locks", () => {
-  const toolStart = SRC.indexOf('name: "request_scope_limit"');
-  assert.ok(toolStart >= 0, "request_scope_limit tool must be registered");
-  const toolEnd = SRC.indexOf("pi.registerTool", toolStart);
-  const body = SRC.slice(toolStart, toolEnd > toolStart ? toolEnd : toolStart + 7000);
+  assert.match(CONSENT_SRC, /name: "request_scope_limit"/, "request_scope_limit tool must be registered");
+  const body = toolBodyOf("request_scope_limit");
   // Consent is obtained by the EXTENSION (dialog) — the tool schema exposes
   // only a reason; there is no parameter the model could set to claim consent.
-  assert.match(body, /confirmBounded\(/);
+  assert.match(body, /deps\.confirmBounded\(/);
   assert.match(body, /parameters: Type\.Object\(\{\s*reason: Type\.String/);
   assert.doesNotMatch(body, /confirmed/);
   // No UI ⇒ fail-closed deny; a declined dialog locks further requests — but
   // a dialog that could not be SHOWN fails closed without burning the lock.
   assert.match(body, /hasUI/);
-  assert.match(body, /scopeLimitDeclined = true/);
+  assert.match(body, /deps\.declineScopeLimit\(\)/);
+  // …and the lock is the EXTENSION's session flag, set through that seam.
+  assert.match(windowOf("registerUserInteractionTools(pi, {", "\n  });", "user-interaction wiring"),
+    /declineScopeLimit: \(\) => \{ scopeLimitDeclined = true; \}/,
+    "the decline must land on the session lock the gate actually reads");
   assert.match(body, /dialogFailed/);
   assert.match(body, /state\.scopeLimit = \{/);
 });
@@ -718,9 +752,7 @@ test("scope limit exempts pre-existing files at EVERY re-arm site (session_start
   const hits = SRC.match(/scopeLimit\?\.preexistingFiles/g) ?? [];
   assert.ok(hits.length >= 3, `expected >=3 exempt-filter sites, found ${hits.length}`);
   // The grant never touches verdicts/bindings — only the arming flags.
-  const toolStart = SRC.indexOf('name: "request_scope_limit"');
-  const toolEnd = SRC.indexOf("pi.registerTool", toolStart);
-  const body = SRC.slice(toolStart, toolEnd > toolStart ? toolEnd : toolStart + 7000);
+  const body = toolBodyOf("request_scope_limit");
   assert.doesNotMatch(body, /state\.review\.verdict\s*=/);
   assert.doesNotMatch(body, /state\.precommit\.verdict\s*=/);
 });
@@ -1407,10 +1439,10 @@ test("sensitive-file guard wired into tool_call", () => {
 test("request_sensitive_edit: the user decides in an extension dialog, not the agent", () => {
   const body = toolBodyOf("request_sensitive_edit");
 
-  assert.match(body, /confirmBounded\(/, "the extension must render the confirm dialog itself");
+  assert.match(body, /deps\.confirmBounded\(/, "the extension must render the confirm dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
     "no agent-supplied 'confirmed' parameter — that would be self-approval");
-  assert.match(body, /if \(!ctx\.hasUI\)/, "no UI must fail closed instead of granting");
+  assert.match(body, /if \(!uiCtx\.hasUI\)/, "no UI must fail closed instead of granting");
   assert.match(body, /dialogFailed/, "a dialog that could not be shown is not a decline");
 });
 
@@ -1424,14 +1456,20 @@ test("SECURITY: request_sensitive_edit refuses .git internals before showing any
 });
 
 test("SECURITY: a declined sensitive path is locked, and grants never reach the sidecar", () => {
-  assert.match(SRC, /sensitiveDeclinedPaths\.add\(absPath\)/,
+  assert.match(CONSENT_SRC, /deps\.sensitiveDeclinedPaths\.add\(absPath\)/,
     "a decline must lock that path against re-asking");
-  assert.match(SRC, /sensitiveDeclinedPaths\.has\(absPath\)/,
+  assert.match(CONSENT_SRC, /deps\.sensitiveDeclinedPaths\.has\(absPath\)/,
     "a locked path must be refused before any dialog");
+  // The lock is ONE set, the extension's own: a copy handed to the tool would
+  // forget the decline the moment the tool returned.
+  assert.match(windowOf("registerUserInteractionTools(pi, {", "\n  });", "user-interaction wiring"),
+    /\n    sensitiveDeclinedPaths,/, "the extension shares its set, it does not copy it");
   // In-memory only: persisting a grant would let a write authorization survive
   // a crash/resume, i.e. outlive the conversation the user consented in.
   assert.doesNotMatch(SRC, /state\.sensitiveGrants/,
     "sensitive-file grants must never be written into the persisted gate state");
+  assert.doesNotMatch(CONSENT_SRC, /state\.sensitiveGrants/,
+    "…and the module that ISSUES them must not persist them either");
 });
 
 test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict and hashes the text", () => {
@@ -3069,9 +3107,9 @@ test("a dirty worktree the session did not create blocks edits until it is settl
 });
 
 test("setup_workspace settles the worktree and the branches, and records both", () => {
-  const at = SRC.indexOf('name: "setup_workspace"');
-  assert.ok(at > 0, "setup_workspace must be registered");
-  const body = SRC.slice(at, SRC.indexOf('name: "ask_user"', at));
+  // The user-interaction family moved to lib/, so the window now closes on
+  // the wiring call that replaced it — an anchor that cannot rot silently.
+  const body = windowOf('name: "setup_workspace"', "registerUserInteractionTools(pi, {", "setup_workspace");
   // The three-way choice is the USER's, and a dismissed dialog settles nothing.
   assert.match(body, /interpretWorktreeChoice\(picked\)/);
   assert.match(body, /if \(!choice\) \{/, "no choice ⇒ nothing is settled");
@@ -3428,7 +3466,7 @@ test("R3-6: setup_workspace defaults an orchestration child's base to the DECLAR
   // A lane's worktree stands on `orch/<task>-<stamp>`, so "the branch I am on"
   // is the one answer that is certainly wrong — a whole lane merged into that
   // scratch branch and stopped there.
-  const setup = windowOf('name: "setup_workspace"', 'name: "request_scope_limit"', "setup_workspace");
+  const setup = windowOf('name: "setup_workspace"', "registerUserInteractionTools(pi, {", "setup_workspace");
   assert.match(setup, /const injectedBase = String\(process\.env\[ORCH_BASE_BRANCH_ENV\]/);
   assert.match(setup, /String\(params\.base \?\? ""\)\.trim\(\) \|\| injectedBase/,
     "an explicit argument still wins over the injected default");
