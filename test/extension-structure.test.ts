@@ -82,6 +82,35 @@ const CMD_SRC = readFileSync(join(ROOT, "lib", "gate-command-tools.ts"), "utf8")
 const DIAG_SRC = readFileSync(join(ROOT, "lib", "gate-diagnosis-commands.ts"), "utf8");
 
 /**
+ * The L1 `tool_call` HOOK moved out too — the first hook to follow the tool
+ * families, and the biggest thing that was left in the extension. It is split
+ * three ways by responsibility: the dispatch plus the judge-role subagent
+ * refusal (lib/ship-gate-hook.ts), the edit/write arm (lib/ship-gate-edit-guard.ts)
+ * and the bash ship gate itself (lib/ship-gate-bash.ts). The extension keeps
+ * one `pi.on("tool_call", …)` wiring line and the injected deps.
+ *
+ * Every structural rule that used to be sliced out of the extension's handler
+ * is asserted below against the module that now owns the code — the WINDOW
+ * moved, the rule did not. `HOOK_BODY` is the concatenation used by the rules
+ * that are about the hook AS A WHOLE (mode branches, "the Copilot cycle never
+ * reaches L1"), which no single arm can answer on its own; rules about ORDER
+ * inside one arm are asserted against that arm alone, because concatenating
+ * would let an ordering hold across a module boundary where it means nothing.
+ */
+const SHIP_HOOK_SRC = readFileSync(join(ROOT, "lib", "ship-gate-hook.ts"), "utf8");
+const SHIP_EDIT_SRC = readFileSync(join(ROOT, "lib", "ship-gate-edit-guard.ts"), "utf8");
+const SHIP_BASH_SRC = readFileSync(join(ROOT, "lib", "ship-gate-bash.ts"), "utf8");
+const HOOK_BODY = [SHIP_HOOK_SRC, SHIP_EDIT_SRC, SHIP_BASH_SRC].join("\n");
+/** The extension's wiring of the L1 hook — deps and the one `pi.on` line. */
+function shipHookWiring(): string {
+  return windowOf(
+    "const shipGateHookDeps: ShipGateHookDeps = {",
+    "evaluateToolCall(shipGateHookDeps, event, ctx));",
+    "L1 hook wiring",
+  );
+}
+
+/**
  * The body of one registered COMMAND, from its `registerCommand("name"` line
  * to the next registration (or the end of the registering function).
  *
@@ -131,6 +160,17 @@ function windowIn(src: string, start: string, end: string | RegExp, label: strin
 
 function windowOf(start: string, end: string | RegExp, label: string, from = 0): string {
   return windowIn(SRC, start, end, label, from);
+}
+
+/**
+ * The same source with every comment removed.
+ *
+ * For the rules that are about what the gate READS rather than what it says:
+ * a docblock naming another module is documentation, and a test that reddened
+ * on it would only teach people to reword the comment.
+ */
+function codeOnly(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/[^\n]*/g, "$1");
 }
 
 /**
@@ -306,8 +346,8 @@ test("the loop goal gates SHIP at L1 only — hooks and verdict logic stay blind
   const reqBody = gateState.slice(reqAt, gateState.indexOf("\nexport ", reqAt + 10));
   assert.doesNotMatch(reqBody, /loopGoal|copilot/i,
     "the ship authority must not read the goal approval or the Copilot cycle");
-  // The ship block itself lives in the extension's L1 tool_call path.
-  assert.match(SRC, /LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/);
+  // The ship block itself lives in the L1 bash arm (lib/ship-gate-bash.ts).
+  assert.match(SHIP_BASH_SRC, /LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/);
   // …and the goal file must remain inside the fingerprint-excluded .pi/ scope,
   // otherwise writing a goal would invalidate the session's own review.
   const fp = readFileSync(join(ROOT, "lib", "fingerprint.ts"), "utf8");
@@ -350,12 +390,18 @@ test("edits under gate-owned dirs do NOT arm the gate (writing a loop goal must 
 
   // Same scope on the tool_call side: a gate-owned write must not count as
   // this session's edit either, or it would suppress the "changes pre-date
-  // this session" hint and force consent for a later mode change.
-  const toolCallAt = SRC.indexOf('pi.on("tool_call"');
-  const callSkipAt = SRC.indexOf("isGateOwnedPath(abs", toolCallAt);
-  const sessionEditAt = SRC.indexOf("sessionEdited = true", toolCallAt);
-  assert.ok(toolCallAt > 0 && callSkipAt > 0 && sessionEditAt > 0, "tool_call must apply the same skip");
+  // this session" hint and force consent for a later mode change. The edit arm
+  // now lives in lib/ship-gate-edit-guard.ts — the ordering is asserted there.
+  const callSkipAt = SHIP_EDIT_SRC.indexOf("isGateOwnedPath(abs,");
+  const sessionEditAt = SHIP_EDIT_SRC.indexOf("deps.markSessionEdited()");
+  assert.ok(callSkipAt > 0 && sessionEditAt > 0, "the edit arm must apply the same skip");
   assert.ok(callSkipAt < sessionEditAt, "the skip must precede the session-edit attribution");
+  assert.match(SHIP_EDIT_SRC.slice(callSkipAt, callSkipAt + 160), /return undefined;/,
+    "the skip must return, not fall through");
+  // …and the extension may no longer set the flag itself: it is a dep now, so
+  // a second copy of the attribution cannot drift back in.
+  assert.match(shipHookWiring(), /markSessionEdited: \(\) => \{ sessionEdited = true; \}/,
+    "the session-edit attribution reaches the arm through the injected dep");
 });
 
 test("extension imports from local lib/ (single source of truth)", () => {
@@ -377,9 +423,12 @@ test("NotebookEdit is in the edit-tool set", () => {
 });
 
 test("L1: tool_call handler exists and can block", () => {
-  assert.match(SRC, /pi\.on\(["']tool_call["']/);
-  assert.match(SRC, /block:\s*true/);
-  assert.match(SRC, /detectShipCommands/);
+  // The extension WIRES the hook; lib/ship-gate-hook.ts is what decides.
+  assert.match(SRC, /pi\.on\(["']tool_call["'], \(event, ctx\) => evaluateToolCall\(shipGateHookDeps, event, ctx\)\)/,
+    "the extension keeps exactly the wiring line");
+  assert.match(SHIP_HOOK_SRC, /export async function evaluateToolCall\(/);
+  assert.match(HOOK_BODY, /block:\s*true/);
+  assert.match(SHIP_BASH_SRC, /detectShipCommands/);
 });
 
 test("L2: agent_settled auto-continuation with recursion guard", () => {
@@ -859,7 +908,8 @@ test("gate mode is decided by the agent itself in set_gate_mode — no LLM class
   // on a dirty worktree still gets the consent-free first classification.
   assert.match(SRC, /!sessionEdited/);
   assert.match(SRC, /sessionEdited = false/); // session_start reset
-  assert.match(SRC, /sessionEdited = true/);  // tool_call passed-edit arm
+  // …set from the L1 edit arm through the injected markSessionEdited dep.
+  assert.match(shipHookWiring(), /markSessionEdited: \(\) => \{ sessionEdited = true; \}/);
   // The tool must delegate to the pure, unit-tested rule engine and inject
   // the undecided directive from the same module.
   assert.match(SRC, /evaluateModeChange\(\{/);
@@ -1010,47 +1060,67 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
   //   loop         — the L8 loop-goal ship block, which only ADDS a requirement;
   //   orchestrator — the write restriction and the tmux backstop tier, both of
   //                  which only ADD a refusal (pinned individually below).
-  const start = SRC.indexOf('pi.on("tool_call"');
-  assert.ok(start >= 0, "tool_call handler must exist");
-  // Slice the HANDLER only (it closes with `\n  });` at handler indentation),
-  // not everything up to the next handler — helper functions live in between.
-  const end = SRC.indexOf("\n  });", start);
-  assert.ok(end > start, "tool_call handler must be closed");
-  const body = SRC.slice(start, end);
-  assert.doesNotMatch(body, /taskMode\s*===\s*"explore"/,
+  // The hook body is lib/ship-gate-hook.ts + its two arms; the mode question
+  // is about the hook AS A WHOLE, so it is asked of all three together.
+  const body = HOOK_BODY;
+  // `(?:\(\)\s*)?` in all three patterns: the arms read the mode through the
+  // injected `deps.taskMode()` getter, and a pattern written for the old bare
+  // `state.taskMode` spelling cannot match a CALL — it would be always-true,
+  // which is exactly how a negated branch (or an explore carve-out) would get
+  // back in unnoticed. Round-1 P1 of this move: two migrated patterns had that
+  // defect and a `deps.taskMode() !== "loop"` mutation passed the whole suite.
+  const modeExpr = String.raw`taskMode\s*(?:\(\)\s*)?`;
+  assert.doesNotMatch(body, new RegExp(`${modeExpr}===\\s*"explore"`),
     "tool_call must never branch on explore");
-  assert.doesNotMatch(body, /taskMode\s*!==/,
+  assert.doesNotMatch(body, new RegExp(`${modeExpr}!==`),
     "tool_call must not use negated mode branches");
-  const modeBranches = [...body.matchAll(/taskMode\s*===\s*"(\w+)"/g)].map((m) => m[1]);
+  const modeBranches = [...body.matchAll(new RegExp(`${modeExpr}===\\s*"(\\w+)"`, "g"))].map((m) => m[1]);
   assert.deepEqual([...new Set(modeBranches)].sort(), ["loop", "normal", "orchestrator"],
     "the only tool_call mode branches are normal (step aside), loop (goal block) and " +
     "orchestrator (which only ADDS restrictions)");
   // The loop branch must only PUSH a requirement — its own block body must not
   // return (i.e. it can never wave a ship through, only add to `problems`).
-  const loopAt = body.indexOf('taskMode === "loop"');
-  const loopBlock = body.slice(loopAt, body.indexOf("\n    }", loopAt));
+  const loopBlock = windowIn(SHIP_BASH_SRC, 'deps.taskMode() === "loop"', "\n  }", "L8 ship branch");
   assert.match(loopBlock, /problems\.push\(/);
   assert.doesNotMatch(loopBlock, /return|block:\s*false/);
   // The two ORCHESTRATOR sites, pinned individually. Both can only tighten:
   // one refuses a write outside the plan/handoff surface (constraint 2), the
   // other merely tells the tmux backstop which tier to apply. Neither has a
   // pass-through return, so orchestrator mode can never loosen L1.
-  const orchestratorSites = [...body.matchAll(/state\.taskMode === "orchestrator"/g)];
+  const orchestratorSites = [...body.matchAll(/taskMode(?:\(\))? === "orchestrator"/g)];
   assert.equal(orchestratorSites.length, 2,
     "exactly two orchestrator sites in tool_call: the write block and the tmux guard tier");
-  // The window covers the whole site, comments included: F2 added the
-  // outside-the-repo carve-out and its reasoning, and a window that stopped
-  // short would silently stop pinning the `block: true` return below.
-  const writeSite = body.slice(orchestratorSites[0]!.index!, orchestratorSites[0]!.index! + 1400);
+  // The window is ANCHORED at both ends (not a byte count): F2 added the
+  // outside-the-repo carve-out and its reasoning, and a fixed-length window
+  // would silently stop pinning the `block: true` return below.
+  const writeSite = windowIn(
+    SHIP_EDIT_SRC,
+    'if (taskMode === "orchestrator" && path) {',
+    "\n  }",
+    "orchestrator write site",
+  );
 
   assert.match(writeSite, /orchestratorWriteBlock\(\{/,
     "the first orchestrator site is the write restriction (constraint 2)");
   assert.match(writeSite, /return \{ block: true, reason: orchestratorBlock \}/,
     "the write restriction can only BLOCK, never wave a write through");
-  const guardSite = body.slice(Math.max(0, orchestratorSites[1]!.index! - 300), orchestratorSites[1]!.index! + 200);
+  const guardSite = windowIn(
+    SHIP_BASH_SRC,
+    // Open at the SECTION comment, not at the call: the old window reached
+    // ~300 bytes back from the orchestrator site, so a return smuggled in
+    // just above the tier selection was inside it. Anchoring at the call
+    // would have quietly narrowed that.
+    "// tmux BACKSTOP (task book §4.3)",
+    "if (tmuxHit) return { block: true, reason: tmuxHit.reason };",
+    "tmux backstop tier",
+  );
   assert.match(guardSite, /detectForbiddenTmux\(/,
     "the second orchestrator site only selects the tmux backstop tier");
-  assert.doesNotMatch(guardSite, /return;/,
+  // ANY return, not the old `/return;/` spelling: the extracted arm writes
+  // every exit as `return undefined;`, so a pattern looking for a bare
+  // `return;` is dead (round-1 P1). The window ends BEFORE the tier's own
+  // `return { block: true, … }`, so nothing legitimate can match here.
+  assert.doesNotMatch(guardSite, /\breturn\b/,
     "the tmux backstop must not contain a pass-through return");
   // The L8 explore short-circuit lives in the helper loopGoalEditBlockFor
   // (kept OUT of the handler body on purpose — see its docblock): it only
@@ -1066,13 +1136,27 @@ test("SECURITY: explore never weakens the L1 ship gate; only user-confirmed norm
 test("SECURITY: the sensitive-file guard runs BEFORE the normal-mode edit return (security floor)", () => {
   // Normal mode skips workflow checks but must never skip the .env/keys
   // guard — the early return has to come after isSensitiveFile.
-  const start = SRC.indexOf('pi.on("tool_call"');
-  const body = SRC.slice(start, SRC.indexOf('pi.on("tool_result"', start));
+  //
+  // The window is the EDIT ARM ONLY (lib/ship-gate-edit-guard.ts's
+  // evaluateEditCall), never a concatenation: an ordering that held only
+  // because another module happens to be appended afterwards would pin
+  // nothing at all.
+  const body = windowIn(
+    SHIP_EDIT_SRC,
+    "export async function evaluateEditCall(",
+    "\n}",
+    "edit arm",
+  );
   const sensitiveAt = body.indexOf("isSensitiveFile");
-  const normalEditReturn = body.indexOf('state.taskMode === "normal"');
+  const normalEditReturn = body.indexOf('taskMode === "normal"');
   assert.ok(sensitiveAt >= 0 && normalEditReturn >= 0, "both checks must exist");
   assert.ok(sensitiveAt < normalEditReturn,
     "sensitive-file guard must precede the normal-mode early return");
+  // …and the refusal it produces must sit BEFORE that return too: matching the
+  // pattern and then falling through to normal mode would be the same hole.
+  const refusalAt = body.indexOf("return sensitiveEditBlock(");
+  assert.ok(refusalAt > sensitiveAt && refusalAt < normalEditReturn,
+    "the sensitive refusal must be returned before the normal-mode early return");
 });
 
 test("normal mode: prompt-transparent except the language directive; loop resume paths skip it", () => {
@@ -1197,7 +1281,7 @@ test("arbiter bypass token is in-memory ONLY, never persisted to the sidecar", (
 test("arbiter bypass only ever matches a lone gh pr edit, never commit/push/pr-create", () => {
   // The token-consumption branch is guarded on kind === "pr-edit"; there is no
   // token path for other ship kinds (they are never arbitrable).
-  assert.match(SRC, /ships\[0\]\.kind === "pr-edit" && bypassToken/);
+  assert.match(SHIP_BASH_SRC, /ships\[0\]\.kind === "pr-edit" && token/);
   // An AGENT_WINS decision never sets review READY or precommit PASS.
   const arbAt = SRC.indexOf('name: "request_arbitration"') >= 0
     ? SRC.indexOf("request_arbitration") : SRC.indexOf("request_arbitration");
@@ -1247,16 +1331,17 @@ test("L5 is ONE hard rule: every call site judges through the shared function", 
   // 2026-08-29: the four call sites used to run three different policies
   // (strict subject, majority body, majority PR text, scanner labels). They
   // now differ only in the `kind` they pass.
-  assert.match(SRC, /extractPrTextFields/);
-  assert.match(SRC, /s\.kind === "pr-create" \|\| s\.kind === "pr-edit"/);
-  assert.match(SRC, /nonEnglishCommitMessage\(whole\)/, "bash commit path");
+  assert.match(SHIP_BASH_SRC, /extractPrTextFields/);
+  assert.match(SHIP_BASH_SRC, /s\.kind === "pr-create" \|\| s\.kind === "pr-edit"/);
+  assert.match(SHIP_BASH_SRC, /nonEnglishCommitMessage\(whole\)/, "bash commit path");
   assert.match(SRC, /nonEnglishCommitMessage\(message\)/, "review_checkpoint path");
-  assert.match(SRC, /firstNonEnglishText\("pr-text", prTexts\)/, "PR title/body path");
+  assert.match(SHIP_BASH_SRC, /firstNonEnglishText\("pr-text", prTexts\)/, "PR title/body path");
   assert.match(SRC, /l5BlockReason\(\{ kind: "test-label"/, "L6 label path");
   // The retired majority machinery must be gone — a leftover call would
   // reintroduce the dilution hole it was removed for.
   for (const gone of [/\bisNonEnglishText\b/, /\bfirstNonEnglish\(/, /\banalyzeLanguageMix\b/]) {
     assert.doesNotMatch(SRC, gone, `the majority-policy API must be retired (${gone})`);
+    assert.doesNotMatch(HOOK_BODY, gone, `the majority-policy API must be retired in L1 (${gone})`);
   }
   const langDetect = readFileSync(join(ROOT, "lib", "lang-detect.ts"), "utf8");
   for (const gone of ["analyzeLanguageMix", "stripNonProse", "NON_LATIN_MAJORITY"]) {
@@ -1272,7 +1357,12 @@ test("a message-only rewrite is not a content change, at L1 and in the branch ru
   // be fixed from inside a session — `git commit --amend` was refused as a
   // commit, and `git rebase -i` reword was refused because a detached HEAD
   // names no branch. Both refusals are now answered by facts.
-  const callBody = windowOf('pi.on("tool_call"', 'pi.on("tool_result"', "tool_call handler");
+  const callBody = windowIn(
+    SHIP_BASH_SRC,
+    "export async function evaluateShipCommand(",
+    "\n}",
+    "ship gate (bash arm)",
+  );
   assert.match(callBody, /hasAmendFlag\(s\.segment\)/, "the exemption is scoped to an amend");
   assert.match(callBody, /isMessageOnlyRewrite\(\{/, "…and decided by the pure tree comparison");
   const exemptionAt = callBody.indexOf("isMessageOnlyRewrite({");
@@ -1313,7 +1403,7 @@ test("a message-only rewrite is not a content change, at L1 and in the branch ru
   assert.match(callBody, /!resolution\.ambiguous &&/);
   // The INDEX is what an amend publishes, so the worktree tree alone is not
   // evidence: staging a change and restoring the worktree must not qualify.
-  assert.match(callBody, /stagedChanges: hasStagedChanges\(root\)/);
+  assert.match(callBody, /stagedChanges: deps\.hasStagedChanges\(root\)/);
   // The branch rule reads where a rebase will land instead of refusing.
   const branchFn = windowOf("function currentBranch(", "\n  }", "currentBranch");
   assert.match(branchFn, /rebaseBranch\(root\)/, "a detached rebase HEAD still names its branch");
@@ -1328,15 +1418,17 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
   // The dividing line (user requirement): a HEURISTIC the gate can get wrong
   // gets an appeal route; a FACT it observed does not, or the appeal becomes
   // the way to argue past the process.
-  const aClass: Array<[string, RegExp]> = [
-    ["commit subject/body", /refuseText\(\s*\n?\s*nonEn\.part === "subject" \? "commit-subject" : "commit-body"/],
-    ["PR text", /refuseText\("pr-text"/],
-    ["romanized", /refuseText\("romanized"/],
-    ["AI attribution", /refuseText\("ai-attribution"/],
-    ["test label", /refuseText\("test-label"/],
+  // The four ship-text refusals live in the L1 bash arm and reach `refuseText`
+  // through the injected dep; the L6 test-label one is still the extension's.
+  const aClass: Array<[string, string, RegExp]> = [
+    ["commit subject/body", SHIP_BASH_SRC, /deps\.refuseText\(\s*\n?\s*nonEn\.part === "subject" \? "commit-subject" : "commit-body"/],
+    ["PR text", SHIP_BASH_SRC, /deps\.refuseText\("pr-text"/],
+    ["romanized", SHIP_BASH_SRC, /deps\.refuseText\("romanized"/],
+    ["AI attribution", SHIP_BASH_SRC, /deps\.refuseText\("ai-attribution"/],
+    ["test label", SRC, /refuseText\("test-label"/],
   ];
-  for (const [what, pattern] of aClass) {
-    assert.match(SRC, pattern, `${what} must refuse through the appealable path`);
+  for (const [what, src, pattern] of aClass) {
+    assert.match(src, pattern, `${what} must refuse through the appealable path`);
   }
   // refuseText is the ONLY place the hint is attached, so the route and the
   // record of the block can never drift apart.
@@ -1347,15 +1439,15 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
   assert.match(refuse, /consumeAppealPass\(/, "…exactly once");
   // B-class: these reasons state the correct next step and must not offer an
   // appeal instead.
-  for (const factBlock of [
-    "先调 setup_workspace",
-    "LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK",
-    "is a judge role and runs ONLY as its own pi process",
-    "matches a sensitive-file pattern",
-  ]) {
-    const at = SRC.indexOf(factBlock);
+  for (const [factBlock, src] of [
+    ["先调 setup_workspace", SRC],
+    ["LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK", SHIP_BASH_SRC],
+    ["is a judge role and runs ONLY as its own pi process", SHIP_HOOK_SRC],
+    ["matches a sensitive-file pattern", SHIP_EDIT_SRC],
+  ] as const) {
+    const at = src.indexOf(factBlock);
     assert.ok(at > 0, `the B-class block must exist: ${factBlock}`);
-    assert.ok(!SRC.slice(at, at + 600).includes("APPEAL_HINT"),
+    assert.ok(!src.slice(at, at + 600).includes("APPEAL_HINT"),
       `a FACT must not offer an appeal: ${factBlock}`);
   }
 });
@@ -1535,7 +1627,18 @@ test("stale-state reconciliation is one-way", () => {
 });
 
 test("sensitive-file guard wired into tool_call", () => {
-  assert.match(SRC, /isSensitiveFile/);
+  // `assert.match(SRC, /isSensitiveFile/)` was VACUOUS after the hook moved:
+  // the tool_result handler mentions the same symbol, so the guard could have
+  // vanished from L1 entirely and this would still have been green. It now
+  // names the arm that owns the guard, and the wiring that reaches it.
+  assert.match(SHIP_EDIT_SRC, /isSensitiveFile\(absPath\)/,
+    "the L1 edit arm matches the NORMALIZED path against the patterns");
+  assert.match(SHIP_EDIT_SRC, /return sensitiveEditBlock\(\{ rawPath: path, askable \}\)/,
+    "…and refuses through the pure decision");
+  assert.match(shipHookWiring(), /sensitiveGrants: \(\) => sensitiveGrants/,
+    "the live grants reach the arm from the extension, never a copy");
+  assert.match(shipHookWiring(), /sensitiveDeclined: \(absPath\) => sensitiveDeclinedPaths\.has\(absPath\)/,
+    "…and so does the declined-path lock");
 });
 
 test("request_sensitive_edit: the user decides in an extension dialog, not the agent", () => {
@@ -2283,20 +2386,30 @@ test("STREAMING: the LLM guards announce themselves only when slow, on the statu
   // A `tool_call` hook has no onUpdate at all (that is a tool's channel), so
   // the six guard calls use the status line — and only past the threshold,
   // or a 200ms round-trip would narrate itself.
-  const guarded = SRC.match(/await withSlowNotice\(/g) ?? [];
+  // Four of the five guards live in the L1 bash arm now; the L6 label one is
+  // still the extension's (checkTestLabels).
+  const guardSrc = SRC + "\n" + SHIP_BASH_SRC;
+  const guarded = guardSrc.match(/await withSlowNotice\(/g) ?? [];
   assert.ok(guarded.length >= 5, `every LLM guard call must be wrapped (found ${guarded.length})`);
   for (const call of [
     /classifyNonEnglish\(classifier\(\), labels\)/,
-    /classifyShipCommand\(classifier\(\), command\)/,
-    /classifyAiAttribution\(classifier\(\), msgs\)/,
-    /classifyNonEnglish\(classifier\(\), msgs\)/,
-    /classifyNonEnglish\(classifier\(\), prTexts\)/,
+    /classifyShipCommand\(deps\.classifier\(\), command\)/,
+    /classifyAiAttribution\(deps\.classifier\(\), msgs\)/,
+    /classifyNonEnglish\(deps\.classifier\(\), msgs\)/,
+    /classifyNonEnglish\(deps\.classifier\(\), prTexts\)/,
   ]) {
-    assert.match(SRC, new RegExp(`withSlowNotice\\([\\s\\S]{0,300}${call.source}`),
+    assert.match(guardSrc, new RegExp(`withSlowNotice\\([\\s\\S]{0,300}${call.source}`),
       `this classifier call must run inside a slow-notice: ${call}`);
   }
+  // The sink is the gate's own status line, cleared when the call ends. The
+  // bash arm receives it through the injected `notice` dep, so the extension
+  // remains the ONE place that knows the status-bar key.
   assert.match(SRC, /statusNotice\(llmNoticeUi\(ctx\), LLM_STATUS_KEY\)/,
     "the sink is the gate's own status line, cleared when the call ends");
+  assert.match(shipHookWiring(), /notice: \(ctx\) => statusNotice\(llmNoticeUi\(ctx\), LLM_STATUS_KEY\)/,
+    "the bash arm gets that same sink injected, never one of its own");
+  assert.match(SHIP_BASH_SRC, /const shipNotice = deps\.notice\(ctx\);/,
+    "…and uses it for every guard in the ship path");
 });
 
 test("STREAMING: progress text is a partial result only — it never enters a tool's return", () => {
@@ -2629,9 +2742,18 @@ test("SECURITY: the Copilot requirement never touches the SHIP gate (it would de
   // Fixing a Copilot finding requires a commit and a push. A Copilot
   // requirement inside the ship authority would therefore block its own
   // remedy — so it may appear only in the completion paths.
-  const callStart = SRC.indexOf('pi.on("tool_call"');
-  const callBody = SRC.slice(callStart, SRC.indexOf("\n  });", callStart));
-  assert.doesNotMatch(callBody, /copilot/i, "the L1 ship gate must not consult the Copilot cycle");
+  // The whole L1 hook is the scope — all three modules AND the deps the
+  // extension injects into it (a Copilot fact smuggled in through a dep would
+  // deadlock exactly the same way).
+  //
+  // CODE only: a module docblock naming lib/copilot-review-tools.ts in the
+  // list of families that moved out of the extension consults nothing. The
+  // rule is about what the gate READS, so comments are stripped first — and
+  // stripping them is what keeps this from being "rename the comment".
+  assert.doesNotMatch(codeOnly(HOOK_BODY), /copilot/i,
+    "the L1 ship gate must not consult the Copilot cycle");
+  assert.doesNotMatch(codeOnly(shipHookWiring()), /copilot/i,
+    "…and no injected dep may carry it in");
   // …and it must be wired into both completion surfaces instead.
   const doneStart = SRC.indexOf('name: "declare_done"');
   assert.match(SRC.slice(doneStart, doneStart + 6000), /copilotProblemsFor\(/);
@@ -2661,16 +2783,19 @@ test("waiting for Copilot spends its OWN continuation budget, not the review loo
   assert.match(body, /problems\.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP/);
 });
 test("SECURITY: a sensitive-file grant is consumed on the RESULT, not at tool_call", () => {
-  const callStart = SRC.indexOf('pi.on("tool_call"');
   const resultStart = SRC.indexOf('pi.on("tool_result"');
-  assert.ok(callStart > 0 && resultStart > callStart);
-  const callBody = SRC.slice(callStart, resultStart);
+  assert.ok(resultStart > 0);
+  // The two halves now live in different files: the CHECK is the L1 edit arm,
+  // the CONSUMPTION is still the extension's tool_result handler.
+  const callBody = HOOK_BODY;
   const resultBody = SRC.slice(resultStart);
 
-  assert.match(callBody, /findGrant\(sensitiveGrants/,
+  assert.match(SHIP_EDIT_SRC, /findGrant\(deps\.sensitiveGrants\(\)/,
     "tool_call only checks the grant");
   assert.doesNotMatch(callBody, /consumeGrant\(/,
     "burning the grant before the edit lands would force a new dialog after any retry");
+  assert.doesNotMatch(shipHookWiring(), /consumeGrant\(/,
+    "…and no injected dep may consume it either");
   assert.match(resultBody, /consumeGrant\(/,
     "a landed edit must burn the one-shot grant");
 });
@@ -2695,7 +2820,7 @@ test("P0-2: branch commit detection via commitsAheadOfBase", () => {
 });
 
 test("P0-5: detectShipCommands returns array", () => {
-  assert.match(SRC, /ships\.length/);
+  assert.match(SHIP_BASH_SRC, /ships\.length/);
 });
 
 test("P1: stash/checkout/merge/rebase re-arming exists in tool_result bash handler", () => {
@@ -2772,21 +2897,21 @@ test("precommit trust does NOT depend on parsing bash command text (root-cause f
 test("LLM guards: deterministic checks precede every LLM call (tighten-only order)", () => {
   // Guard #2: COMMIT_MSG_FORBIDDEN regex loop must appear BEFORE the semantic
   // attribution call in the commit branch.
-  const forbidden = SRC.indexOf("COMMIT_MSG_FORBIDDEN.some");
-  const semanticAttr = SRC.indexOf("classifyAiAttribution(");
+  const forbidden = SHIP_BASH_SRC.indexOf("COMMIT_MSG_FORBIDDEN.some");
+  const semanticAttr = SHIP_BASH_SRC.indexOf("classifyAiAttribution(");
   assert.ok(forbidden > 0 && semanticAttr > forbidden,
     "regex attribution check must precede classifyAiAttribution");
 
   // L5: the deterministic script check must precede the semantic one —
   // anchored to the commit-msg branch (`msgs`), because the L6 edit-time
   // branch also calls classifyNonEnglish earlier in the file.
-  const unicodeCheck = SRC.indexOf("nonEnglishCommitMessage(whole)");
-  const semanticEnglish = SRC.indexOf("classifyNonEnglish(classifier(), msgs)");
+  const unicodeCheck = SHIP_BASH_SRC.indexOf("nonEnglishCommitMessage(whole)");
+  const semanticEnglish = SHIP_BASH_SRC.indexOf("classifyNonEnglish(deps.classifier(), msgs)");
   assert.ok(unicodeCheck > 0 && semanticEnglish > unicodeCheck,
     "Unicode script check must precede classifyNonEnglish in the commit branch");
   // same ordering in the PR branch
-  const unicodePr = SRC.indexOf('firstNonEnglishText("pr-text", prTexts)');
-  const semanticPr = SRC.indexOf("classifyNonEnglish(classifier(), prTexts)");
+  const unicodePr = SHIP_BASH_SRC.indexOf('firstNonEnglishText("pr-text", prTexts)');
+  const semanticPr = SHIP_BASH_SRC.indexOf("classifyNonEnglish(deps.classifier(), prTexts)");
   assert.ok(unicodePr > 0 && semanticPr > unicodePr,
     "Unicode script check must precede classifyNonEnglish in the PR branch");
   // L6: the deterministic violations check must precede the semantic layer
@@ -2798,29 +2923,50 @@ test("LLM guards: deterministic checks precede every LLM call (tighten-only orde
 
   // Guard #4: the ship LLM layer only runs inside the ships.length === 0
   // branch (it can only ADD detections, never lift one).
-  const staticShips = SRC.indexOf("detectShipCommands(command)");
-  const shipLlm = SRC.indexOf("classifyShipCommand(");
+  const staticShips = SHIP_BASH_SRC.indexOf("detectShipCommands(command)");
+  const shipLlm = SHIP_BASH_SRC.indexOf("classifyShipCommand(");
   assert.ok(staticShips > 0 && shipLlm > staticShips,
     "static ship detection must precede classifyShipCommand");
-  const between = SRC.slice(staticShips, shipLlm);
+  const between = SHIP_BASH_SRC.slice(staticShips, shipLlm);
   assert.match(between, /ships\.length === 0/,
     "LLM ship layer must be gated on the static detector finding nothing");
 });
 
 test("LLM guards: every call site is gated on its llmGuards config flag", () => {
-  assert.match(SRC, /projectConfig\.llmGuards\.aiAttribution/);
+  // The three ship-path guards read the config in the L1 bash arm; the L6
+  // label guard reads it in the extension's checkTestLabels.
+  assert.match(SHIP_BASH_SRC, /projectConfig\.llmGuards\.aiAttribution/);
+  assert.match(SHIP_BASH_SRC, /projectConfig\.llmGuards\.englishCheck/);
+  assert.match(SHIP_BASH_SRC, /projectConfig\.llmGuards\.shipDetect/);
   assert.match(SRC, /projectConfig\.llmGuards\.englishCheck/);
-  assert.match(SRC, /projectConfig\.llmGuards\.shipDetect/);
 });
 
 test("L6 edit-time check scans the FULL projected file, not newText fragments", () => {
   // P1 regression guard: the extension must project via lib/edit-projection.ts.
   assert.match(SRC, /projectEditedContent\(/);
   assert.ok(SRC.includes('../lib/edit-projection.ts'), "must import lib/edit-projection.ts");
-  // and the label check runs inside the edit-tool branch before returning
-  const editBranch = SRC.indexOf("EDIT_TOOL_NAMES.has(event.toolName)");
-  const labelCheck = SRC.indexOf("checkTestLabels(");
-  assert.ok(editBranch > 0 && labelCheck > 0, "checkTestLabels must exist");
+  // …and the label check runs inside the L1 EDIT arm, after the gate-owned
+  // exemption and the L8 goal gate, before the edit is let through. Anchored
+  // in lib/ship-gate-edit-guard.ts: `EDIT_TOOL_NAMES.has(...)` still occurs in
+  // the extension's tool_result handler, so matching it there would pin
+  // nothing about the edit arm at all.
+  const editArm = windowIn(
+    SHIP_EDIT_SRC,
+    "export async function evaluateEditCall(",
+    "\n}",
+    "edit arm",
+  );
+  const goalGateAt = editArm.indexOf("deps.loopGoalEditBlockFor(absPath)");
+  const labelCheckAt = editArm.indexOf("deps.checkTestLabels(");
+  const passAt = editArm.indexOf("deps.markSessionEdited()");
+  assert.ok(goalGateAt > 0 && labelCheckAt > goalGateAt,
+    "the L6 label check must run after the L8 goal gate (a blocked write pays no LLM call)");
+  assert.ok(passAt > labelCheckAt,
+    "the L6 label check must run before the edit is let through");
+  // The extension still owns the projection — it is what the check reads.
+  assert.match(SRC, /checkTestLabels\(/, "the extension owns the L6 implementation");
+  assert.match(shipHookWiring(), /editedTestContent\(input, path\)/,
+    "the arm reaches it through the injected dep, with the projected content");
 });
 
 // ---------------------------------------------------------------------------
@@ -2861,10 +3007,9 @@ test("every enforcement path computes a FRESH fingerprint", () => {
     // fingerprint, so the window is closed by the block after it.
     ['pi.on("agent_settled"', "// L7/L8 — completion-only requirements"],
 
-    // The P-multi per-repo fingerprint loop sits far below the ship-detection
-    // anchor inside the tool_call handler — bounded by the loop itself, not by
-    // a byte count that every added comment invalidates.
-    ["detectShipCommands(command)", "if (root === primaryRepoRoot) primaryFp = fp;"],
+    // (The ship path's own per-repo fingerprint loop moved to
+    // lib/ship-gate-bash.ts and is asserted separately below — it is the same
+    // rule, against the module that now owns the code.)
   ];
   for (const [anchor, extent] of anchors) {
     const at = SRC.indexOf(anchor);
@@ -2886,6 +3031,22 @@ test("every enforcement path computes a FRESH fingerprint", () => {
     assert.ok(!body.includes("advisoryFingerprint()"),
       `${anchor} must NOT use the advisory memo`);
   }
+  // The L1 ship path, same rule, against the module that now owns it: the
+  // P-multi per-repo loop sits far below the ship-detection anchor, so the
+  // window is bounded by the loop itself, not by a byte count that every
+  // added comment invalidates.
+  const shipLoop = windowIn(
+    SHIP_BASH_SRC,
+    "detectShipCommands(command)",
+    "if (root === primaryRepoRoot) primaryFp = fp;",
+    "L1 ship gate per-repo loop",
+  );
+  assert.match(shipLoop, /computeFingerprint\(/,
+    "the ship gate must call computeFingerprint() directly");
+  assert.ok(!shipLoop.includes("advisoryFingerprint()"),
+    "the ship gate must NOT use the advisory memo");
+  assert.ok(!HOOK_BODY.includes("advisoryFingerprint"),
+    "the advisory memo must not reach the L1 hook at all");
 });
 
 test("the advisory memo never caches an UNAVAILABLE fingerprint", () => {
@@ -3056,12 +3217,17 @@ test("L5 is HARD at the ship gate, and says how to fix or contest each refusal",
   // L5 blocks the ship (user policy 2026-08-16) and now uses ONE rule
   // everywhere (2026-08-29). Because the rule is hard, every refusal has to
   // carry both routes: the fix, and the appeal for a genuine misjudgement.
-  const callBody = windowOf('pi.on("tool_call"', 'pi.on("tool_result"', "tool_call handler");
+  const callBody = windowIn(
+    SHIP_BASH_SRC,
+    "export async function evaluateShipCommand(",
+    "\n}",
+    "ship gate (bash arm)",
+  );
   assert.match(callBody, /L5 \(HARD\)/, "the L5 section must be marked HARD");
   assert.match(callBody, /l5BlockReason\(/, "the wording comes from the shared function");
   assert.match(callBody, /git commit --amend/, "the commit refusal points at the fix");
   assert.match(callBody, /gh pr edit --title\/--body/, "the PR refusal points at the fix");
-  assert.match(callBody, /refuseText\(/, "…and every refusal carries the appeal route");
+  assert.match(callBody, /deps\.refuseText\(/, "…and every refusal carries the appeal route");
   assert.doesNotMatch(callBody, /advisory only — never a block/,
     "the advisory-only rationale must be gone");
   assert.doesNotMatch(callBody, /predominantly non-English/,
@@ -3073,18 +3239,26 @@ test("REGRESSION: /gate-bypass actually disarms the L1 ship gate in-session", ()
   // The /gate-bypass command wrote state.bypass but L1 never consulted it —
   // a bypassed session still blocked every ship command at tool_call (only
   // the git hooks honored it). The bash branch must step aside on
-  // state.bypass.active BEFORE any ship detection.
-  const callStart = SRC.indexOf('pi.on("tool_call"');
-  const callBody = SRC.slice(callStart, SRC.indexOf('pi.on("tool_result"', callStart));
-  const normalAt = callBody.indexOf('state.taskMode === "normal"');
-  const bypassAt = callBody.indexOf("state.bypass.active");
+  // the bypass flag BEFORE any ship detection. The bash arm is the window —
+  // never a concatenation, or the ordering could hold across a file boundary.
+  const callBody = windowIn(
+    SHIP_BASH_SRC,
+    "export async function evaluateShipCommand(",
+    "\n}",
+    "ship gate (bash arm)",
+  );
+  const normalAt = callBody.indexOf('deps.taskMode() === "normal"');
+  const bypassAt = callBody.indexOf("deps.bypassActive()");
   assert.ok(normalAt > 0 && bypassAt > normalAt,
     "the bypass check must come after the normal-mode early return");
   const detectAt = callBody.indexOf("detectShipCommands(command)");
   assert.ok(detectAt > bypassAt,
     "the bypass check must run BEFORE ship detection");
-  assert.match(callBody.slice(bypassAt, bypassAt + 120), /return;/,
+  assert.match(callBody.slice(bypassAt, bypassAt + 120), /return undefined;/,
     "bypass must early-return the bash branch");
+  // …and the flag it reads is the gate's own `state.bypass.active`, injected.
+  assert.match(shipHookWiring(), /bypassActive: \(\) => state\.bypass\.active/,
+    "the bypass dep must be bound to the state /gate-bypass writes");
 });
 
 test("REGRESSION (P0b): the no-tests-warning is wired into the tool result and /gate-status", () => {
@@ -3131,8 +3305,8 @@ test("check_copilot_review leaves a released cycle alone (no resurrection, no gh
 test("publishing paths require a full precommit run; a commit does not", () => {
   // The split has to be applied at BOTH decision points. A missing
   // `requireFullTests` on either would let a narrowed run publish.
-  assert.match(SRC, /requiresFullPrecommit/, "the ship gate must consult the lane rule");
-  const shipAt = SRC.indexOf("const requireFullTests = ships.some(");
+  assert.match(SHIP_BASH_SRC, /requiresFullPrecommit/, "the ship gate must consult the lane rule");
+  const shipAt = SHIP_BASH_SRC.indexOf("const requireFullTests = ships.some(");
   assert.ok(shipAt > 0, "the ship path must derive the lane requirement from the detected commands");
 
   // declare_done publishes by implication, so it hardcodes the strict side.
@@ -3241,13 +3415,41 @@ test("P2: judge-role subagent block covers ALL three dispatch channels", () => {
   // named inside a workflowScript string (runs.run({agent:"reviewer"})) or a
   // workflowScriptPath file would bypass a top-level-only check. The block
   // must scan the script text with the retired guard's own detector.
-  const segment = SRC.slice(SRC.indexOf("judge-role subagent block"));
-  assert.match(segment, /input\.workflowScript/);
-  assert.match(segment, /input\.workflowScriptPath/);
+  // The window is the pure decision itself (lib/ship-gate-hook.ts's
+  // judgeSubagentBlock), not "everything after a comment": the old anchor was
+  // a comment string, so once the code moved the slice collapsed to a single
+  // character and every assertion below it passed vacuously.
+  const segment = windowIn(
+    SHIP_HOOK_SRC,
+    "export function judgeSubagentBlock(",
+    // `\n}\n`, not `\n}`: the inline parameter type closes with `}): …` and a
+    // bare `\n}` would end the window at the SIGNATURE, before any of the code
+    // this test is about.
+    "\n}\n",
+    "judge-role subagent block",
+  );
+  assert.match(segment, /script !== undefined\s*\n\s*\? script/, "the inline workflowScript channel");
+  assert.match(segment, /input\.readScript\(scriptPath\)/, "the workflowScriptPath channel");
+  // The path channel FAILS CLOSED when the file cannot be read: an unreadable
+  // script could hide a judge role, so "no information" must not mean "pass".
+  assert.match(segment, /const unreadableScript = scriptPath !== undefined && script === undefined && scriptText === undefined;/);
+  assert.match(segment, /if \(judgeName \|\| unreadableScript\)/,
+    "an unreadable script must refuse, exactly like a named judge role");
   assert.match(segment, /judgeRoleInScript/);
-  // The refusal text must steer to the review_spawn flow, never to a retry of subagent.
+  // …and the extension's hook must actually feed all three channels in.
+  const dispatch = windowIn(
+    SHIP_HOOK_SRC,
+    "const block = judgeSubagentBlock({",
+    "\n    });",
+    "judgeSubagentBlock call site",
+  );
+  assert.match(dispatch, /input\.agent/, "the top-level agent channel");
+  assert.match(dispatch, /input\.workflowScript\b/, "the inline script channel");
+  assert.match(dispatch, /input\.workflowScriptPath\b/, "the script-path channel");
+  // The refusal text must steer to the judge_submit flow, never to a retry of subagent.
   assert.match(segment, /runs ONLY as its own pi process/);
-  assert.match(segment, /review_checkpoint/);
+  assert.match(segment, /judge_submit\(\{role, task\}\)/,
+    "…and it must name the ONE call that dispatches a judge correctly");
   assert.doesNotMatch(segment, /tmux judge child|tmux flow/);
 });
 
@@ -3297,17 +3499,24 @@ test("setup_workspace settles the worktree and the branches, and records both", 
 test("a commit may only land on this session's OWN work branch (fail-closed)", () => {
   // Checked PER REPO, inside the ship loop: a commit in repo B must never be
   // judged against repo A's work branch.
-  const start = SRC.indexOf("// WHERE the commit lands, per repo");
-  assert.ok(start > 0, "the per-repo branch check must exist in the ship loop");
-  const body = SRC.slice(start, start + 1200);
+  const body = windowIn(
+    SHIP_BASH_SRC,
+    "// WHERE the commit lands, per repo",
+    "\n    }",
+    "per-repo branch check",
+  );
   assert.match(body, /ships\.some\(\(s\) => s\.kind === "commit"\)/);
   assert.match(body, /commitBranchAllowed\(\{/);
-  assert.match(body, /workBranch: \(root === primaryRepoRoot \? state : stateForRepo\(root\)\)\.workBranch/,
+  assert.match(body, /workBranch: deps\.stateForRepo\(root\)\.workBranch/,
     "each repo answers with its OWN work branch");
-  assert.match(body, /currentBranch: currentBranch\(root\)/);
+  assert.match(body, /currentBranch: deps\.currentBranch\(root\)/);
   // The pure decision refuses when no work branch is on record — pinned in
   // test/workspace-branch.test.ts; here we only pin that the gate ASKS.
   assert.match(body, /if \(!where\.allowed\) \{/);
+  // `stateForRepo` IS the primary repo's own state — the arm asks one seam for
+  // every repo, and that only stays correct while this holds.
+  assert.match(SRC, /function stateForRepo\(root: string\): GateState \{\s*\n\s*if \(root === primaryRepoRoot\) return state;/,
+    "stateForRepo must answer with the session's own state for the primary repo");
 });
 
 test("declare_done lands the work itself, and a conflict stops it honestly", () => {
@@ -3717,9 +3926,14 @@ test("SURVIVAL INVARIANT: every ENFORCED mode arms the loop, orchestrator includ
 });
 
 test("the tmux backstop sits above /gate-bypass", () => {
-  const handler = SRC.slice(SRC.indexOf('pi.on("tool_call"'));
+  const handler = windowIn(
+    SHIP_BASH_SRC,
+    "export async function evaluateShipCommand(",
+    "\n}",
+    "ship gate (bash arm)",
+  );
   const guardAt = handler.indexOf("detectForbiddenTmux(");
-  const bypassAt = handler.indexOf("if (state.bypass.active) return;");
+  const bypassAt = handler.indexOf("if (deps.bypassActive()) return undefined;");
   assert.ok(guardAt > 0 && bypassAt > 0);
   assert.ok(guardAt < bypassAt,
     "a bypass is the user's escape from the SHIP gate — it was never a licence to destroy their tmux session");
