@@ -29,32 +29,36 @@ bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 你：实现分页功能
 agent：调 set_gate_mode("loop")
   → 问你目标（一次一题，N of M）→ 用简体中文起草目标
-  → 调 prepare_goal_audit 取任务文本 → review_spawn 开 goal-auditor tmux 子会话预审该草案 → record_goal_prereview 记录其裁决
-     （不通过就改草案重审；没有匹配的 PASS 就**不会弹任何对话框**骚扰你）
-  → propose_loop_goal 弹窗让你批准（窗中会显示“goal-auditor 预审: PASS @ …”）
+  → propose_loop_goal（**一次调用**：门禁自己起 goal-auditor 子进程预审这份草案、
+     等它退出、记录裁决；不通过就把 findings 退回来让你改，**不弹任何对话框**骚扰你）
+  → 过了才弹窗让你批准（窗中会显示「goal-auditor 预审: PASS @ …」）
   → 改代码
-  → run_precommit（fast）→ 全绿
-  → review_checkpoint（把改动提交为 checkpoint——READY 前唯一的 commit 通道）
-  → prepare_review（计算不可变审核范围 baseline..HEAD + findings 流文件）
-  → review_spawn 开 tmux 子会话审（每轮一个 reviewer，审整个 commit 范围）
-     同时：agent 边读流式 findings 边修（不用等审完；完成信号会主动唤醒，监听在 spawn 时已注册）
-  → record_review（机械校验：未 prepare ⇒ 不授予；HEAD 已移动 ⇒ STALE ⇒ BLOCKED）
+  → judge_submit({role:"reviewer", task:<本轮改动说明>})
+     **这一次调用**里门禁依次跑完：full precommit → checkpoint 提交（READY 前唯一
+     的 commit 通道）→ 算不可变审核范围 baseline..HEAD + 开 findings 流 → 派 reviewer。
+     任一步失败就带原因打回，不留半提交状态。
+     同时：agent 边读流式 findings 边修（不用等审完）
+  → judge 进程退出时门禁自己读结论、机械校验（未 prepare ⇒ 不授予；HEAD 已移动 ⇒
+     STALE ⇒ BLOCKED）、记录裁决并唤醒 agent
   → BLOCKED？修 → 再来一轮；READY？declare_done → 提交
 ```
 
-- **先 precommit 后 review**：便宜的检查先跑，贵的审核只花在绿树上。
+- **precommit 在 review 之前**：这个顺序由门禁保证，不需要谁记着 —— 便宜的检查先跑，
+  贵的审核只花在绿树上。
 - 每轮按 ROUND 计费：**把相关改动批量做完再触发一轮**，比十个小轮省十倍。
-- 最终轮用 `run_precommit mode=full`（push/PR/declare_done 要求测试没被收窄）。
+- 只想知道「能不能构建」而不开一轮审查：用 `/precommit`（full）或 `/precommit-fast`
+  —— 这两条命令由**门禁自己执行**并直接打印裁决，不消耗 agent 的一轮。
+
 - **绑定是内容寻址的 commit tree**：`git add`、`git commit`、切分支、以及 squash checkpoint
   链（内容不变）都不会破坏绑定，READY + PASS 依然有效——**不要为了"重建绑定"而重跑一轮
   review**（那是纯浪费）。只有提交内容变化（新的 checkpoint / 编辑 / lint:fix 改写）才会
   让绑定失效。
 - **复审要带上一轮结论**：第 N+1 轮把上一轮的 verdict 与 findings 交给 reviewer；
   已定论且未改动的部分只做一致性扫描，不重新论证（门禁会自动注入这段 scope）。
-- **reviewer 审的是不可变 commit 范围，你可以边审边修**：先 `review_checkpoint` 把改动提交成
+- **reviewer 审的是不可变 commit 范围，你可以边审边修**：`judge_submit` 先把改动提交成
   checkpoint（READY 前唯一的 commit 通道，要求 precommit full 通过），reviewer 审
   `baseline..HEAD`。被审历史不可变，你边读流式 findings 边修真实工作树，互不干扰。
-- **审核目标是机械校验的**：`record_review` 验证本轮确实 prepare 过（否则不授予 READY）、
+- **审核目标是机械校验的**：门禁在记录裁决时验证本轮确实 prepare 过（否则不授予 READY）、
   HEAD 没有越过被审提交（越了 ⇒ STALE ⇒ BLOCKED，findings 仍然算数）；READY 绑定被审
   commit 的 TREE（内容绑定——之后把 checkpoint 链 squash 成一个提交，READY 依然有效）。
 
@@ -73,19 +77,18 @@ agent：调 set_gate_mode("loop")
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| `loop mode requires an approved loop goal BEFORE any edit/write call` | loop 模式（含未决）还没确认目标就动手编辑 | 先逐轮问清“done”的定义 → 中文起草 → `prepare_goal_audit` 取任务文本 → goal-auditor 预审（`record_goal_prereview`）→ `propose_loop_goal` 在对话框里确认；批准前 edit/write 一律被拦（`.pi/` 与 `.pi-subagents/` 门禁自有文件除外；explore/normal 模式不要求 goal） |
-| `propose_loop_goal refused — no goal-auditor pre-review has been recorded` （或 `…belongs to DIFFERENT text`） | 目标草案没经预审，或预审后改过字（hash 变了） | 调 `prepare_goal_audit` 审该段**原文**取回任务文本（重审时自动带上一轮结论与草稿差异），把它的完整原始输出交给 `record_goal_prereview`，再用**一字不改**的文本重提；FAIL 就先改掉 P0/P1 再重审 |
+| `loop mode requires an approved loop goal BEFORE any edit/write call` | loop 模式（含未决）还没确认目标就动手编辑 | 先逐轮问清"done"的定义 → 中文起草 → `propose_loop_goal`（它自己跑 goal-auditor 预审，过了才弹对话框让你确认）；批准前 edit/write 一律被拦（`.pi/` 与 `.pi-subagents/` 门禁自有文件除外；explore/normal 模式不要求 goal） |
+| `propose_loop_goal refused — no goal-auditor pre-review has been recorded` （或 `…belongs to DIFFERENT text`） | 审计没过，或过了之后又改过字（hash 变了） | 按退回来的 findings 改草稿，**再调一次 `propose_loop_goal`** —— 它会重新跑审计（重审时自动带上一轮结论与草稿差异）。没有第二个调用要做 |
 | `goal-auditor` 角色不可派发（拒绝文案里的 BOOTSTRAP 段） | `~/.pi/agent/agents/goal-auditor.md` 缺失 | 开一个新会话（扩展会在启动时从包内 `agents/` 幂等自愈）；仍缺失就跑 `/gate-doctor` 看诊断行给出的 `node …/scripts/install-package.mjs` |
 | `code review gate is PENDING` | 改完没 review | 走 review 循环（或 `/review`） |
-| `precommit not run` / `FAILED` | 没跑或跑挂了 | `run_precommit`；修失败项 |
+| `precommit not run` / `FAILED` | 没跑或跑挂了 | 直接 `judge_submit({role:"reviewer"})`（它自己先跑 full lane）；只想看构建结果就 `/precommit`；修失败项 |
 | `fingerprint mismatch` | 审核后又改了文件 | 再 review + 再 precommit |
 | `docSync enforced` | 代码改动缺文档 attestation | reviewer 在 verdict 里给 `UPDATED`/`NOT_NEEDED` |
 | commit/PR 文案非英文 | L5 硬拦截（majority-body 判定） | 改成英文；或你执行 `/gate-bypass <reason>` |
 | `Unknown JSON field: "headRefOid"` | gh 版本过老 | 已自动 fallback（升级 gh 更佳） |
 | 模型 429 / 额度耗尽，循环空转 | provider 限流，注入再多也没用 | 熔断器会在连续无进展后停止注入并提示；`/model` 切到其它 provider（如 anthropic），你的下一条消息即恢复循环 |
 | agents 副本与仓库不同步（正文过时） | `~/.pi/agent/agents/*.md` 落后于本仓库 | 重跑 `node scripts/install-package.mjs`（幂等）；用 `/gate-doctor` 检出 |
-| `STALE`（record_review 报 BLOCKED） | prepare 之后又有新 checkpoint 提交，reviewer 审的是更旧的 commit | 把新改动并入再提交 checkpoint，重跑一轮；旧 findings 仍然有效 |
-| 未 prepare 直接 record_review | 裁决没有可绑定的审核目标 | 按流程走：checkpoint → prepare_review → 送审 → record_review |
+| `STALE`（裁决被记成 BLOCKED） | prepare 之后又有新 checkpoint 提交，reviewer 审的是更旧的 commit | 把新改动并入，再 `judge_submit` 跑一轮；旧 findings 仍然有效 |
 | `tmux unavailable` | 宿主没有 tmux（judge 子会话的硬依赖） | 安装 tmux（`brew install tmux`）；没有 tmux 时门禁 fail-closed，judge 无法启动 |
 | `~/.pi/review-snapshots/<repo-key>/` 里堆了 `rg-review-snap-*` | 旧版本遗留的孤儿快照（新模型不再创建快照） | 手动清理：`git worktree prune` + `rm -rf ~/.pi/review-snapshots/<repo-key>/rg-review-snap-*` |
 | `git commit` 报 `.git/hooks/pre-commit: No such file or directory` | 有人在旧快照里跑了安装脚本：快照是 linked worktree，**`.git/hooks` 与真仓库共享** | 在**真工作树**重跑 `bash scripts/install-git-hooks.sh` |
@@ -107,5 +110,5 @@ agent：调 set_gate_mode("loop")
 
 - review 用顶级推理模型（每轮一个 reviewer，审整个 diff），**按轮计费**——批量编辑再触发；
 - `opencode-go` provider 在代码层面**只允许 deepseek-v4-flash**（其余模型按次计费且被显式禁止）；
-- review 不跑 pdw 引擎，也不走子代理派发：judge 角色由 `review_spawn` 在 tmux 子会话（独立 pi 进程，不带门禁扩展）里跑，**每轮一个 reviewer 一个 commit 范围**，不分片、不双审；子代理调度 judge 角色会被硬拦截；
+- review 不跑 pdw 引擎，也不走子代理派发：judge 角色由 `judge_submit` 起成独立 pi 进程（不带门禁扩展）跑，**每轮一个 reviewer 一个 commit 范围**，不分片、不双审；子代理调度 judge 角色会被硬拦截；
 - decompose / wave daily 已移除（2026-08-26）：大的任务切成同一单审循环的连续轮次，无模块表、无波次调度、无 plan 状态。

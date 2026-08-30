@@ -410,7 +410,12 @@ import {
   recordBlockedMarker,
   reconcileBlockedMarker,
 } from "../lib/blocked-marker.ts";
-import { WORKFLOW_COMMANDS, buildWorkflowPrompt, type WorkflowCommandName } from "../lib/workflow-commands.ts";
+import {
+  WORKFLOW_COMMANDS,
+  buildWorkflowPrompt,
+  workflowCommand,
+  type WorkflowCommandName,
+} from "../lib/workflow-commands.ts";
 import {
   formatPrecommitBaseline,
   REVIEW_VERDICT_SCHEMA,
@@ -7614,12 +7619,23 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- commands ----------
 
   function registerWorkflowCommand(name: WorkflowCommandName) {
-    const command = WORKFLOW_COMMANDS[name];
+    const command = workflowCommand(name);
     pi.registerCommand(name, {
       description: command.description,
       handler: async (args, ctx) => {
         if (!ctx.isIdle()) {
           ctx.ui.notify(`Agent is busy. Retry ${command.usage} when it is idle.`, "warning");
+          return;
+        }
+        // PHILOSOPHY ONE — some commands are not a request to the agent at
+        // all. `/precommit` used to mean "agent, go call run_precommit"; that
+        // tool is no longer registered, and re-exposing it to keep a command
+        // alive would be the back door philosophy three forbids. The gate
+        // runs the lane itself instead: one intent, no turn spent, and no
+        // tool name for an agent to misremember.
+        const gateRuns = command.gateRuns;
+        if (gateRuns) {
+          await runPrecommitCommand(gateRuns.precommitMode, ctx);
           return;
         }
         pi.sendUserMessage(
@@ -7628,6 +7644,28 @@ export default function reviewGate(pi: ExtensionAPI) {
       },
     });
   }
+
+  /**
+   * Run the trusted precommit lane for a USER command and print the verdict.
+   *
+   * It goes through the same internal implementation the review chain uses,
+   * so the PASS it records is the one the ship gate accepts — there is no
+   * second lane and no second way to be granted one.
+   */
+  async function runPrecommitCommand(mode: "fast" | "full", ctx: ExtensionContext): Promise<void> {
+    ctx.ui.notify(`review-gate: 正在跑 precommit（${mode} lane）……`, "info");
+    try {
+      const result = await callTool("run_precommit", { mode }, ctx);
+      const verdict = String(result.details?.verdict ?? "UNKNOWN");
+      ctx.ui.notify(
+        `review-gate: precommit ${verdict}\n${toolText(result)}`,
+        verdict === "PASS" ? "info" : "error",
+      );
+    } catch (error) {
+      ctx.ui.notify(`review-gate: precommit 没跑起来 —— ${(error as Error).message}`, "error");
+    }
+  }
+
 
   for (const name of Object.keys(WORKFLOW_COMMANDS) as WorkflowCommandName[]) {
     registerWorkflowCommand(name);

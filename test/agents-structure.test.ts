@@ -291,7 +291,7 @@ test("REGRESSION: the single-review protocol states ONE reviewer per round", () 
   }
   // …and the same must hold in the /review command prompt the extension sends.
   const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
-  assert.match(commands, /(ONE|one) (independent )?reviewer per round/i, "/review prompt must state the single-review protocol");
+  assert.match(commands, /(ONE|one) (independent )?reviewer( per round)?\b/i, "/review prompt must state the single-review protocol");
   // No sharding anywhere: the reviewer count is never computed from families.
   const skill = readFileSync(SKILL_MD, "utf8");
   assert.doesNotMatch(skill, /planFanoutFromFacts|review-fanout\.ts|two reviewer/i, "no fan-out language may remain");
@@ -382,7 +382,7 @@ test("REGRESSION: the commit-isolation contract is stated where a reviewer reads
 test("REGRESSION: isolation + streaming are documented in every protocol surface", () => {
   for (const file of [SKILL_MD, AGENTS_MD]) {
     const src = readFileSync(file, "utf8");
-    assert.match(src, /prepare_review/, `${file} must name the tool that hands out snapshots`);
+    assert.match(src, /baseline\.\.HEAD/, `${file} must name the immutable range a reviewer judges`);
     assert.match(src, /stream/i, `${file} must describe streamed findings`);
     assert.match(
       src,
@@ -392,8 +392,9 @@ test("REGRESSION: isolation + streaming are documented in every protocol surface
   }
   // The /review prompt the extension actually sends carries it too.
   const commands = readFileSync(join(ROOT, "lib", "workflow-commands.ts"), "utf8");
-  assert.match(commands, /prepare_review/);
-  assert.match(commands, /never poll in a tight loop|no polling/i);
+  assert.match(commands, /baseline\.\.HEAD/);
+  assert.match(commands, /never poll in a tight loop|no polling|WAKES this session/i);
+
   // And the design record no longer contradicts the implementation. The
   // single-writer rule survived the model change; the SNAPSHOT it used to be
   // phrased in terms of did not (2026-08-27: the reviewer judges an immutable

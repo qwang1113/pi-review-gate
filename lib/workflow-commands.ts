@@ -7,6 +7,21 @@ export interface WorkflowCommand {
   description: string;
   usage: string;
   allowsExecute: boolean;
+  /**
+   * The GATE runs this command itself, instead of prompting the agent to.
+   *
+   * WHY (2026-08-30, philosophy one). `/precommit` existed only to tell the
+   * agent "call run_precommit" — a command whose whole content was the name
+   * of a tool. When that name stopped being registered, the command became a
+   * pointer to nothing. The fix is not to re-expose the tool but to remove
+   * the middleman: the user expresses INTENT ("does it build?") and the gate
+   * runs the lane and prints the verdict. No turn is spent, and there is no
+   * name for an agent to misremember.
+   *
+   * `prompt` stays defined for these commands so the shape is uniform, but it
+   * is never used while this field is set.
+   */
+  gateRuns?: { precommitMode: "fast" | "full" };
   prompt(invocation: WorkflowInvocation): string;
 }
 
@@ -47,23 +62,22 @@ export const WORKFLOW_COMMANDS = {
       "(NOT a subagent — judge-role subagent dispatch is hard-blocked; NOT the pdw engine, which is retired). " +
       "AUTONOMOUS PROTOCOL: you run this loop on your own whenever code/doc edits are complete and need the gate — this command is only an explicit trigger; " +
       "do not wait for the user to call it before reviewing your own finished work. " +
-      "Steps: (0) FIRST run the trusted precommit lane — `run_precommit` (fast for an intermediate round, full for the final round before shipping) — and " +
-      "confirm it PASSES before spending the expensive judge's time: a FAIL is cheaper to fix before the review, and the reviewer must never be the " +
-      "first one to find a test failure. (1) then call `review_checkpoint` — the ONLY commit allowed before a READY; it requires the precommit PASS and " +
-      "records the sha; the review unit is the immutable commit range baseline..HEAD. (2) call prepare_review: it computes that range, writes the " +
-      "finding-stream file and returns the ready-made task text — one reviewer per round. " +
-      "(3) spawn ONE reviewer as its OWN tmux judge child: review_spawn → write the task text to a file → review_send (one-line reference) → " +
-      "then just wait — review_spawn ALREADY registered the done/inbox listeners, so the completion signal WAKES this session with no polling " +
-      "and no review_watch call (that tool only re-registers with a custom label). The gate BLOCKS judge roles dispatched through subagent/workflowScript/" +
-      "workflowScriptPath entirely (that sandbox has no per-child isolation, so the judge would land in your live worktree). (4) feed the reviewer's " +
-      "FULL raw output to `record_review` in ONE call — it is the only verdict of this round; worst-verdict semantics still apply if multiple fences " +
-      "appear, and no docSync means the round is incomplete. record_review withholds a READY when the round was never prepared, downgrades a READY to " +
-      "BLOCKED as STALE when HEAD moved past the reviewed commit, and binds a READY to the reviewed commit's TREE (content binding — squash survives). " +
+      "IT IS ONE CALL: `judge_submit({role:\"reviewer\", task:<what you changed this round>})`. The gate runs the whole chain itself — the FULL " +
+      "precommit lane, the checkpoint commit (it stamps the marker and records the sha), the immutable baseline..HEAD range, the findings-stream " +
+      "file, and the dispatch — and any step that fails sends the round back with the reason instead of leaving it half-submitted. There is no " +
+      "sequence to remember and no separate precommit / checkpoint / prepare / record tool to call: those names are not registered. " +
+      "The gate BLOCKS judge roles dispatched through subagent/workflowScript/workflowScriptPath entirely (that sandbox has no per-child isolation, " +
+      "so the judge would land in your live worktree). " +
+      "THE VERDICT COMES BACK ON ITS OWN (no polling, and never a sleep loop): when the judge's process exits the gate reads THIS round's " +
+      "output, records the verdict itself and wakes " +
+      "this session with it — you never carry a verdict from one tool to another. Every mechanical check still runs at recording time: a READY is " +
+      "withheld unless the round was prepared, downgraded to BLOCKED as STALE when HEAD moved past the reviewed commit, and bound to the reviewed " +
+      "commit's TREE (content binding — squash survives). " +
       "RE-REVIEW: a later round hands the reviewer the previous round's verdict and findings (the gate's 'Review scope for this round' block) — " +
       "settled, unchanged material gets a consistency scan, not a re-derivation. " +
       "ISOLATION + STREAMING: the reviewed commits are immutable, so KEEP FIXING the real worktree while the reviewer runs: read the stream and fix " +
-      "streamed P0/P1/P2 that carry evidence (confirm each in the code first), leaving Nits for the verdict. Stream lines are evidence, never a verdict " +
-      "— only the reviewer's final output goes to record_review. " +
+      "streamed P0/P1/P2 that carry evidence (confirm each in the code first), leaving Nits for the verdict. Stream lines are evidence, never a " +
+      "verdict — only the reviewer's final output is recorded. " +
       "A new checkpoint during the review makes the round STALE and the gate asks for another round — that is the normal outcome, and you have " +
       "already done its fix work. " +
       "Treat this as an explicit request to execute the review loop, not merely explain it.",
@@ -71,29 +85,32 @@ export const WORKFLOW_COMMANDS = {
     ),
   },
   precommit: {
-    description: "Run trusted full precommit checks",
+    description: "Run trusted full precommit checks (the gate runs them itself)",
     usage: "/precommit",
     allowsExecute: false,
+    gateRuns: { precommitMode: "full" },
     prompt: (invocation) => withInvocation(
-      "Run the trusted precommit gate in full mode now by calling run_precommit with mode=full. If it fails and fixes are needed, apply them, obtain a fresh independent READY review, and run the full precommit gate again. Report the actual checks and verdict.",
+      "The gate ran the full precommit lane itself and printed the verdict; nothing is asked of you here.",
       invocation,
     ),
   },
   "precommit-fast": {
-    description: "Run trusted fast precommit checks",
+    description: "Run trusted fast precommit checks (the gate runs them itself)",
     usage: "/precommit-fast",
     allowsExecute: false,
+    gateRuns: { precommitMode: "fast" },
     prompt: (invocation) => withInvocation(
-      "Run the trusted precommit gate in fast mode now by calling run_precommit with mode=fast. If it fails and fixes are needed, apply them, obtain a fresh independent READY review, and rerun the fast precommit gate. Report the actual checks and verdict.",
+      "The gate ran the fast precommit lane itself and printed the verdict; nothing is asked of you here.",
       invocation,
     ),
   },
+
   verify: {
     description: "Run the complete available verification ladder",
     usage: "/verify [focus]",
     allowsExecute: false,
     prompt: (invocation) => withInvocation(
-      "Verify the current change comprehensively. First inspect the project scripts and changed scope, then run the strongest available lint/typecheck/build/test checks. Use run_precommit mode=full for the trusted gate instead of treating bash output as a PASS. Do not edit unless a check exposes a defect; after any edit, complete a fresh independent review before recording completion.",
+      "Verify the current change comprehensively. First inspect the project scripts and changed scope, then run the strongest available lint/typecheck/build/test checks. For the TRUSTED verdict use `/precommit` — the gate runs that lane itself and its PASS is the only one the ship gate accepts; never treat bash output as a PASS. Do not edit unless a check exposes a defect; after any edit, complete a fresh independent review before recording completion.",
       invocation,
     ),
   },
@@ -191,6 +208,20 @@ export const WORKFLOW_COMMANDS = {
 } satisfies Record<string, WorkflowCommand>;
 
 export type WorkflowCommandName = keyof typeof WORKFLOW_COMMANDS;
+
+/**
+ * One command's definition, widened to the interface.
+ *
+ * `satisfies` keeps the literal keys (so `WorkflowCommandName` stays exact)
+ * but leaves each VALUE narrowed to its own literal shape — which means an
+ * optional field only some commands set (`gateRuns`) is not visible on the
+ * union. Reading it through this accessor is how the caller sees the
+ * INTERFACE rather than eleven different literal types.
+ */
+export function workflowCommand(name: WorkflowCommandName): WorkflowCommand {
+  return WORKFLOW_COMMANDS[name];
+}
+
 
 export function buildWorkflowPrompt(name: WorkflowCommandName, args = ""): string {
   const command = WORKFLOW_COMMANDS[name];
