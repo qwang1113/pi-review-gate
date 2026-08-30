@@ -56,6 +56,19 @@ const ASK_USER_TOOLS = new Set(["ask_user"]);
 const CONSENT_SRC = readFileSync(join(ROOT, "lib", "consent-request-tools.ts"), "utf8");
 const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit"]);
 /**
+ * The GOAL family moved the same way, split by the same rule: the APPROVAL
+ * (`propose_loop_goal` — run the audit, ask the user, write the file) in one
+ * module, the AUDIT RECORD (`record_goal_prereview` — read the auditor's
+ * fence, adjudicate it, persist it) plus the checks both tools share in the
+ * other. lib/goal-tools.ts is the family's single registration entry point —
+ * it registers BOTH tools, each on the host that may see it — so the
+ * extension wires them exactly once. Their structural rules did not move with
+ * them: they are asserted below against the module that now owns each one.
+ */
+const GOAL_TOOLS_SRC = readFileSync(join(ROOT, "lib", "goal-tools.ts"), "utf8");
+const GOAL_TOOLS = new Set(["propose_loop_goal", "record_goal_prereview"]);
+const GOAL_PREREVIEW_SRC = readFileSync(join(ROOT, "lib", "goal-prereview-tools.ts"), "utf8");
+/**
  * The COMMAND layer moved the same way, split by the same rule: the commands
  * that READ (the model-chain readout /gate-status embeds, and /gate-doctor)
  * in one module, everything else in the other. lib/gate-command-tools.ts is
@@ -94,6 +107,7 @@ function sourceOf(tool: string): string {
   if (COPILOT_TOOLS.has(tool)) return COPILOT_TOOLS_SRC;
   if (ASK_USER_TOOLS.has(tool)) return ASK_USER_SRC;
   if (CONSENT_TOOLS.has(tool)) return CONSENT_SRC;
+  if (GOAL_TOOLS.has(tool)) return GOAL_TOOLS_SRC;
   return SRC;
 }
 
@@ -136,7 +150,23 @@ const LIB_TOOL_HANDLERS: Record<string, string> = {
   ask_user: "export async function doAskUser(",
   request_scope_limit: "export async function doRequestScopeLimit(",
   request_sensitive_edit: "export async function doRequestSensitiveEdit(",
+  propose_loop_goal: "export async function doProposeLoopGoal(",
+  record_goal_prereview: "export async function doRecordGoalPrereview(",
 };
+
+/**
+ * The handler of a tool whose REGISTRATION and BODY are in different lib/
+ * modules. The goal family is the one that splits that way: lib/goal-tools.ts
+ * is the single registration entry point (two tools, two hosts), while the
+ * audit record it dispatches to lives in lib/goal-prereview-tools.ts. Naming
+ * the source explicitly keeps the "same source" rule intact everywhere else —
+ * a tool can still never be matched against another module's handler by
+ * accident.
+ */
+const LIB_HANDLER_SOURCES: Record<string, string> = {
+  record_goal_prereview: GOAL_PREREVIEW_SRC,
+};
+
 
 /**
  * The body of one registered tool: from its `name:` line to the next one,
@@ -145,8 +175,8 @@ const LIB_TOOL_HANDLERS: Record<string, string> = {
  * Registration reads `pi.registerTool` in the extension and `host.registerTool`
  * in a lib/ tool module; the last tool of a module is closed by the end of
  * its registration function (`\n}`). The handler is read from the SAME source
- * as the registration, so a tool cannot be matched against another module's
- * handler of the same name.
+ * as the registration unless LIB_HANDLER_SOURCES names another one, so a tool
+ * cannot be matched against another module's handler of the same name.
  */
 function toolBodyOf(tool: string): string {
   const src = sourceOf(tool);
@@ -158,7 +188,8 @@ function toolBodyOf(tool: string): string {
   );
   const handler = LIB_TOOL_HANDLERS[tool];
   if (!handler) return registration;
-  return `${registration}\n${windowIn(src, handler, "\n}", `handler of ${tool}`)}`;
+  const handlerSrc = LIB_HANDLER_SOURCES[tool] ?? src;
+  return `${registration}\n${windowIn(handlerSrc, handler, "\n}", `handler of ${tool}`)}`;
 }
 
 /** The extension's wiring of the judge session tools — deps, nothing else. */
@@ -196,6 +227,21 @@ function ADVISORY_WIRING(): string {
 /** The extension's wiring of the two Copilot review tools — deps, nothing else. */
 function COPILOT_WIRING(): string {
   return windowOf("registerCopilotReviewTools(pi, {", "\n  });", "copilot review tools wiring");
+}
+
+/**
+ * The extension's wiring of the goal family — deps, nothing else.
+ *
+ * TWO hosts here, unlike every other family: the agent-visible
+ * `propose_loop_goal` goes to `pi`, the internal `record_goal_prereview` to
+ * the capture-only `internalHost`. The start anchor pins exactly that.
+ */
+function GOAL_WIRING(): string {
+  return windowOf(
+    "registerGoalTools({ agent: pi, internal: internalHost }, {",
+    "\n  });",
+    "goal tools wiring",
+  );
 }
 
 test("loop goal: injected ONLY in loop mode, before the unarmed early-return", () => {
@@ -1529,14 +1575,21 @@ test("SECURITY: a declined sensitive path is locked, and grants never reach the 
 });
 
 test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict and hashes the text", () => {
-  const start = SRC.indexOf('name: "record_goal_prereview"');
-  assert.ok(start > 0, "the pre-review tool must be registered");
-  const nextTool = SRC.indexOf('name: "propose_loop_goal"', start);
-  assert.ok(nextTool > start, "propose_loop_goal must follow record_goal_prereview");
-  const body = SRC.slice(start, nextTool);
+  // The tool moved to lib/ (registration in lib/goal-tools.ts on the INTERNAL
+  // host, body in lib/goal-prereview-tools.ts) — the rule follows the code:
+  // `toolBodyOf` reads both windows, and the shared submission checks
+  // (`checkGoalDraft`) are read with them, because the repo binding and the
+  // length cap are asserted below and now live there.
+  const body = toolBodyOf("record_goal_prereview") + "\n" +
+    windowIn(GOAL_PREREVIEW_SRC, "export function checkGoalDraft(",
+      "\nexport function buildGoalRecordReply(", "checkGoalDraft");
   // The verdict is READ, never accepted: no `passed`/`verdict` parameter may
-  // exist, or the pre-review becomes an agent self-certification again.
-  assert.match(body, /parseReviewOutput\(params\.auditor_output\)/, "the extension must parse the auditor output itself");
+  // exist, or the pre-review becomes an agent self-certification again. The
+  // raw param is narrowed once at the handler boundary (the lib tool host
+  // hands over `Record<string, unknown>`), then parsed by the gate itself.
+  assert.match(body, /const auditorOutput = typeof params\.auditor_output === "string"/,
+    "the auditor output is narrowed, not cast");
+  assert.match(body, /parseReviewOutput\(auditorOutput\)/, "the extension must parse the auditor output itself");
   // B2: ONE mechanical adjudication decides PASS — a READY without P0/P1 —
   // and the same call produces the sentence the agent reads.
   assert.match(body, /adjudicateGoalAudit\(\{/, "the extension adjudicates the audit itself");
@@ -1561,10 +1614,18 @@ test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict
   const noFence = body.indexOf("if (!parsed)");
   const write = body.indexOf("goalSt.goalPrereview =");
   assert.ok(noFence > 0 && write > noFence, "the unparseable guard must precede the sidecar write");
-  // Same repo resolution as propose_loop_goal (never resolveToolRepo, which
-  // requires an already-edited repo and would dead-end a second repo's goal).
-  assert.match(body, /gitRootOfDir\(abs\)/);
+  // Same repo resolution as propose_loop_goal — literally the same function
+  // now (never resolveToolRepo, which requires an already-edited repo and
+  // would dead-end a second repo's goal).
+  assert.match(body, /gitRootOfDir\)\(abs\)/);
   assert.doesNotMatch(body, /resolveToolRepo\(/, "it must not CALL resolveToolRepo (naming it in the rationale is fine)");
+  // The INTERNAL host is the one it registers on: pi must never learn this name.
+  const registrationAt = GOAL_TOOLS_SRC.indexOf('name: "record_goal_prereview"');
+  const hostAt = GOAL_TOOLS_SRC.lastIndexOf("registerTool({", registrationAt);
+  assert.ok(hostAt > 0 && !/hosts\.agent|pi\./.test(GOAL_TOOLS_SRC.slice(hostAt - 40, hostAt)),
+    "record_goal_prereview must not be registered on the agent-visible host");
+  assert.match(GOAL_TOOLS_SRC, /registerRecordGoalPrereview\(hosts\.internal, deps\)/,
+    "…and the family entry point must hand it the internal host");
 });
 
 test("goal criterion 3: prepare_adviser is registered and hands back a brief with artifact + session pointer", () => {
@@ -1948,11 +2009,20 @@ test("the TEN advanced entries are not registered anywhere an agent can see", ()
       `${tool} must not be registered with pi`);
     for (const { file, code } of LIB_SOURCES) {
       if (!code.includes(`name: "${tool}"`)) continue;
-      // A lib module may still DEFINE it, but the extension must wire that
-      // module through `internalHost`, never through `pi`.
-      const registrar = code.match(/export function (register\w+)\(host: ToolHost/);
+      // A lib module may still DEFINE it, but the extension must hand that
+      // module the `internalHost`, never `pi` alone. Two shapes exist: a
+      // family that registers ONLY internal implementations takes the host as
+      // its first parameter (`register…(internalHost, {`), and one that
+      // registers both an agent-visible tool and an internal one takes both
+      // hosts in an object (the goal family: `{ agent: pi, internal:
+      // internalHost }`). Either way the wiring must NAME internalHost — and
+      // the per-tool assertion that the deleted name landed on that host,
+      // rather than beside it, lives in the tool's own test.
+      const registrar = code.match(/export function (register\w+)\((?:host: ToolHost|hosts: \w+)/);
       assert.ok(registrar, `${file} registers ${tool}: it needs a named registrar to wire internally`);
-      assert.ok(SRC.includes(`${registrar![1]}(internalHost, {`),
+      const callAt = SRC.indexOf(`${registrar![1]}(`);
+      assert.ok(callAt > 0, `${file}'s ${registrar![1]} must be wired from the extension`);
+      assert.match(SRC.slice(callAt, callAt + 200), /internalHost/,
         `${file}'s ${registrar![1]} must be wired through internalHost, not pi`);
     }
   }
@@ -2017,7 +2087,15 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // The `/precommit` command's `callTool("run_precommit", …)` wiring moved
     // here with the command layer.
     "gate-command-tools.ts": 1,
-    "review-gate.ts": 24,
+    // The goal family took `record_goal_prereview` with it: ONE `name: "…"`
+    // registration on the internal host in goal-tools.ts, and in
+    // goal-prereview-tools.ts the tool-name union, the two `tool: "…"` /
+    // `input.tool === "…"` discriminators of the shared submission check and
+    // its own refusal text. Descriptions of an internal step, never an
+    // instruction to call one.
+    "goal-tools.ts": 1,
+    "goal-prereview-tools.ts": 5,
+    "review-gate.ts": 21,
   };
 
   const sources = [
@@ -2306,23 +2384,19 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the process 
 });
 
 test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surface", () => {
-  const start = SRC.indexOf('name: "propose_loop_goal"');
-  // The Copilot tools used to be the next registration here; they moved to
-  // lib/copilot-review-tools.ts, so the window now ends at setup_workspace —
-  // still "the next tool registered in the extension", which is what bounds it.
-  const nextTool = SRC.indexOf('name: "setup_workspace"', start);
-  // Without these, a renamed/removed tool would silently make `body` the whole
-  // file (or empty) and every ordering assertion below would pass vacuously.
-  assert.ok(start > 0, "propose_loop_goal must be registered");
-  assert.ok(nextTool > start, "the window must end at the next tool registration");
-  const body = SRC.slice(start, nextTool);
+  // The tool moved to lib/goal-tools.ts; the rule follows the code. The window
+  // is its registration plus `doProposeLoopGoal` (the handler that registration
+  // dispatches to), which is where every ordering below actually happens.
+  const body = toolBodyOf("propose_loop_goal");
   const check = body.indexOf("goalPrereviewPassed(");
   assert.ok(check > 0, "the gate must consult the pre-review record");
   // Order is the whole point: a check placed after showToUser/confirmBounded
   // would still parade an unaudited draft in front of the user.
   const show = body.indexOf("showToUser(");
   const confirm = body.indexOf("confirmBounded(");
-  const write = body.indexOf("writeFileSync(goalPath");
+  // The write is an injected seam now (the module owns WHEN, the extension
+  // owns the syscall) — the wiring is asserted with the other deps below.
+  const write = body.indexOf("writeGoalFile(goalPath");
   assert.ok(show > check, "the transcript echo must come AFTER the pre-review check");
   assert.ok(confirm > check, "the dialog must come AFTER the pre-review check");
   assert.ok(write > check, "the goal file may only be written after the check");
@@ -2338,24 +2412,27 @@ test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surfac
 // L8 — the loop goal is negotiated with the user, not written by the agent
 
 test("propose_loop_goal: the USER approves in an extension dialog, and the EXTENSION writes the file", () => {
-  const start = SRC.indexOf('name: "propose_loop_goal"');
-  assert.ok(start > 0, "the tool must be registered");
-  // Bound at the next tool registration so an assertion can never be
-  // satisfied by the next tool's code (round P2: the flat window overshot
-  // into it). That neighbour used to be request_copilot_review; since the
-  // Copilot tools moved to lib/, it is setup_workspace.
-  const nextTool = SRC.indexOf('name: "setup_workspace"', start);
-  assert.ok(nextTool > start, "setup_workspace must follow propose_loop_goal");
-  const body = SRC.slice(start, nextTool);
+  // The tool moved to lib/goal-tools.ts (registration + `doProposeLoopGoal`);
+  // the window is both, so an assertion can never be satisfied by a
+  // neighbouring tool's code (round P2: the old flat window overshot into it).
+  const body = toolBodyOf("propose_loop_goal");
   assert.match(body, /confirmBounded\(/,
     "the extension must render the approval dialog itself");
   assert.doesNotMatch(body, /confirmed\s*:\s*Type\./,
     "no agent-supplied 'confirmed' parameter — that would be self-approval");
   // The approval must describe text the USER saw: the extension writes the
-  // file, and the sidecar records the hash of exactly that text.
-  assert.match(body, /writeFileSync\(goalPath/);
+  // file, and the sidecar records the hash of exactly that text. The syscall
+  // itself is the injected seam (the extension wires it to writeFileSync).
+  assert.match(body, /writeGoalFile\(goalPath/);
+  assert.match(GOAL_WIRING(), /writeFileSync\(path, text, "utf8"\)/,
+    "…and the wiring really writes the file the module was handed");
   assert.match(body, /(?:state|goalSt)\.loopGoal = \{ hash: goalTextHash\(goalText\)/);
-  assert.match(body, /LOOP_GOAL_MAX_WRITE_CHARS/, "the goal must be length-bounded");
+  // Length-bounded, through the check BOTH goal tools share: the cap lives in
+  // one place now, so the audit can never accept a draft the approval refuses.
+  assert.match(body, /checkGoalDraft\(\{\n\s+tool: "propose_loop_goal"/,
+    "the submission goes through the shared check");
+  assert.match(GOAL_PREREVIEW_SRC, /goalText\.length > LOOP_GOAL_MAX_WRITE_CHARS/,
+    "the goal must be length-bounded");
 });
 
 test("propose_loop_goal: confirm/reject may carry a user REASON (input after the dialog)", () => {
@@ -2363,14 +2440,10 @@ test("propose_loop_goal: confirm/reject may carry a user REASON (input after the
   // the Yes/No dialog. A rejection reason must be handed back to the agent so
   // it renegotiates against the real objection; an approval reason is
   // persisted with the confirmation and echoed to the agent.
-  const start = SRC.indexOf('name: "propose_loop_goal"');
-  assert.ok(start > 0);
-  // Bound at the next tool registration (round P2: the flat window overshot
-  // into the neighbouring tool's code — request_copilot_review then, and
-  // setup_workspace since the Copilot tools moved to lib/).
-  const nextTool = SRC.indexOf('name: "setup_workspace"', start);
-  assert.ok(nextTool > start);
-  const body = SRC.slice(start, nextTool);
+  // Registration + handler, from the module that owns them now
+  // (lib/goal-tools.ts) — never a flat window that could overshoot into a
+  // neighbouring tool's code (round P2).
+  const body = toolBodyOf("propose_loop_goal");
   assert.match(body, /uiCtx\.ui\?\..*input/, "a reason input must follow the confirm dialog");
   assert.match(body, /did NOT approve this goal\."/, "rejection path must exist");
   assert.match(body, /Reason: \$\{reason\}/, "rejection reason must reach the agent");
@@ -3518,7 +3591,10 @@ test("R3-5: an accepted declare_done WRITES the completion record, before the lo
   // The gate knew the task was finished and wrote that nowhere, so a
   // supervising orchestrator was reduced to reading the child's terminal —
   // and read "working" for 725 seconds on a child that had already merged.
-  const done = windowOf('name: "declare_done"', "record_goal_prereview", "declare_done");
+  // Bounded at the next thing the extension does after declare_done: wiring
+  // the goal family. (It used to be the `record_goal_prereview` registration,
+  // which moved to lib/goal-tools.ts.)
+  const done = windowOf('name: "declare_done"', "registerGoalTools(", "declare_done");
   const write = done.indexOf("state.completion = {");
   assert.ok(write > 0, "declare_done must record its own acceptance");
   assert.ok(write > done.indexOf("const finish = finishWorkBranch("),
