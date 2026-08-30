@@ -1941,9 +1941,10 @@ const DELETED_TOOL_NAMES = [
  *    deleted, but you can still call it" are the same defect.
  *
  * `\b` matters: "the gate still RUNS it internally" is a description and stays
- * exempt, while a bare "run" is an instruction. `可以` is the Chinese giveaway
- * ("you may still…"); the bare characters 调 and 用 are unusable here because
- * they occur inside ordinary words.
+ * exempt, while a bare "run" is an instruction. The Chinese side needs two
+ * tokens, both two-character verbs: `可以` ("you may still…") and `调用`
+ * ("invoke it"). The bare characters 调 and 用 are unusable here — they occur
+ * inside ordinary words like 作用 and 使用, so they would flag normal prose.
  */
 function deletedToolInstructions(text: string, label = "doc"): string[] {
   const lines = text.split("\n");
@@ -1956,7 +1957,7 @@ function deletedToolInstructions(text: string, label = "doc"): string[] {
       const start = Math.max(0, joined.lastIndexOf("。", at) + 1, joined.lastIndexOf(". ", at) + 1);
       const endRel = joined.slice(at).search(/。|\.\s|$/);
       const sentence = joined.slice(start, at + (endRel < 0 ? joined.length : endRel) + 1);
-      const imperative = /\b(call|run|use|invoke)\b/i.test(sentence) || /可以/.test(sentence);
+      const imperative = /\b(call|run|use|invoke)\b/i.test(sentence) || /可以|调用/.test(sentence);
       const saysItIsGone =
         /不再|已删|已并入|删除|are \*\*not tools\*\*|no longer|not registered/.test(sentence);
       if (saysItIsGone && !imperative) continue;
@@ -1977,6 +1978,9 @@ test("the deleted-tool rule catches the evasions, and still allows saying they a
     ["caveat, then 'you can still call it'", "`run_precommit` 已删除，但你还是可以 call 它。"],
     ["a plain instruction", "Just call run_precommit."],
     ["a bare mention with no negation at all", "The run_precommit tool records the gate."],
+    // Measured by a reviewer against the `可以`-only version of this rule.
+    ["Chinese: 'you still need to invoke it'", "`run_precommit` 已删除，你仍需调用它。"],
+    ["Chinese: 'invoke it yourself when needed'", "`run_precommit` 已删除，必要时自己调用它。"],
   ];
   const ALLOWED: Array<[string, string]> = [
     ["a plain removal statement", "`run_precommit` is no longer registered."],
@@ -1984,6 +1988,10 @@ test("the deleted-tool rule catches the evasions, and still allows saying they a
     ["a removal statement that WRAPPED", "The precommit lane and\n`run_precommit` are **not tools** any more."],
     ["'the gate still RUNS it' — a description, not an imperative",
       "`run_precommit` is no longer registered; the gate still runs it internally."],
+    // The reason the Chinese tokens are two characters: 调 and 用 alone live
+    // inside ordinary words, and a rule built on them would flag these.
+    ["Chinese prose containing 作用", "`run_precommit` 不再是工具，它的作用由门禁内部承担。"],
+    ["Chinese prose containing 使用", "`run_precommit` 已删除，门禁内部使用同一份实现。"],
   ];
   for (const [why, text] of CAUGHT) {
     assert.notDeepEqual(deletedToolInstructions(text), [], `must be caught: ${why}`);
