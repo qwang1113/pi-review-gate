@@ -63,3 +63,20 @@ test("reviewScratchWorktrees is empty when the judge created nothing", () => {
   assert.deepEqual(reviewScratchWorktrees("worktree /Users/q/workspace/repo\n", scratch), []);
   assert.deepEqual(reviewScratchWorktrees("", scratch), []);
 });
+
+test("reviewScratchWorktrees never over-matches a sibling whose id SHARES this prefix", () => {
+  // The destructive edge (round-5 P2): a lane `rg-reviewer-abc123` must never
+  // reclaim `rg-reviewer-abc123-2`'s worktree just because the path starts with
+  // the same characters. The trailing "/" in the prefix is what stops it — a
+  // bare `startsWith` would delete a concurrent lane's live review copy.
+  const scratch = judgeScratchDir("rg-reviewer-abc123");
+  const sibling = judgeScratchDir("rg-reviewer-abc123-2");
+  assert.ok(sibling.startsWith(scratch), "the sibling id shares the prefix — the trap this pins");
+  const porcelain = [
+    `worktree ${scratch}/rg-review-mine`,
+    `worktree ${sibling}/rg-review-theirs`,
+  ].join("\n");
+  assert.deepEqual(reviewScratchWorktrees(porcelain, scratch), [`${scratch}/rg-review-mine`],
+    "only THIS lane's worktree — the sibling with the shared prefix is untouched");
+});
+

@@ -3563,6 +3563,36 @@ test("runSquashLanding squashes, commits with the gate bypass, and cleans up wit
 });
 
 
+test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit paths", () => {
+  // Round-5 O-6: propose_loop_goal and orchestrator_plan({submit}) each dispatch
+  // a goal-auditor judge INTERNALLY. Leaving it registered made declare_done
+  // refuse on a judge child the caller was never told about. The mechanism is
+  // "whoever dispatched it closes it": each audit calls judge_close for the
+  // goal-auditor after recording. judge_close's OWN removal from the registry
+  // (childSessions → []) is proven behaviourally in
+  // test/judge-session-tools.test.ts; this pins that the audits actually make
+  // that call, so deleting either one turns a test red (the exact gap the
+  // reviewer found: without this, removing both close calls left the suite green).
+  const goalAt = SRC.indexOf("async function runGoalAudit(");
+  const goal = SRC.slice(goalAt, SRC.indexOf("async function auditPlanRound("));
+  assert.ok(goalAt > 0 && goal.length > 0, "the goal-audit function exists");
+  assert.match(goal, /callTool\("judge_close", \{ role: "goal-auditor", repo: root \}, ctx\)/,
+    "the goal audit closes its auditor after recording the verdict");
+
+  const planAt = SRC.indexOf("async function auditPlanRound(");
+  const plan = SRC.slice(planAt, planAt + 3500);
+  assert.ok(planAt > 0, "the plan-audit function exists");
+  assert.match(plan, /const closeAuditor = \(\) => callTool\("judge_close", \{ role: "goal-auditor", repo: root \}/,
+    "the plan audit defines the close");
+  assert.match(plan, /await closeAuditor\(\);/, "…and calls it before every return path");
+
+  // Exactly the two gate-internal closes exist — no more (a stray one would be a
+  // second, unaccounted-for path), no fewer (the gap the reviewer found).
+  const internalCloses = [...SRC.matchAll(/callTool\("judge_close", \{ role: "goal-auditor"/g)];
+  assert.equal(internalCloses.length, 2, "one internal close per audit path, and only those");
+});
+
+
 test("review_checkpoint is fail-closed about the branch it commits on", () => {
   const body = toolBodyOf("review_checkpoint");
   assert.match(body, /const checkpointState = root === primaryRepoRoot \? state : stateForRepo\(root\)/,
