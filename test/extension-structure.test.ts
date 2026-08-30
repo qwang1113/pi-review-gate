@@ -1694,26 +1694,57 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // The report itself is pi's own truth, never a screen.
   const reportAt = SRC.indexOf("function reportChildState(");
   assert.ok(reportAt > 0, "the child reports its own state");
-  const report = SRC.slice(reportAt, reportAt + 900);
+  const report = SRC.slice(reportAt, reportAt + 1200);
   assert.match(report, /ctx\.isIdle\?\.\(\) === false/, "streaming is asked, not inferred");
-  assert.match(report, /state\.completion\?\.at \? "done" : "idle"/,
+  assert.match(report, /state\.completion\?\.at/,
     "R3-5: a finished child is `done`, and one that merely stopped is `idle`");
+  assert.match(report, /\? "done"/);
+  assert.match(report, /: "idle"/);
+  // Round-4 P0 — a judge round of its own is neither `working` nor `idle`.
+  assert.match(report, /activeJudgeWait\(\)/,
+    "a judge THIS session dispatched is a fact the gate holds, never something to infer from silence");
+  assert.match(report, /"waiting-judge"/,
+    "and it is reported as its own state, so a healthy review round is never read as a hang");
   assert.doesNotMatch(report, /capture-pane|screenLooksBusy/, "no screen is consulted, in any state");
+
+  // Round-4 P0 — THE HEARTBEAT IS A TIMER, not an agent event. This is the
+  // whole fix: `agent_settled` / `turn_end` do not fire during a judge_wait,
+  // a precommit or any long tool call, so a heartbeat that rode on them went
+  // silent for minutes and a healthy child was reported `stalled`.
+  const heartbeatAt = SRC.indexOf("function startChildHeartbeat(");
+  assert.ok(heartbeatAt > 0, "the child heartbeat must be its own timer");
+  const heartbeat = SRC.slice(heartbeatAt, heartbeatAt + 600);
+  assert.match(heartbeat, /setInterval\(/, "it ticks on its own, independently of the agent");
+  assert.match(heartbeat, /reportChildState\(live\)/, "each tick reports liveness");
+  assert.match(heartbeat, /drainChildInstructions\(live\)/,
+    "and applies the orchestrator's messages, which is what makes followUp reach a BUSY child");
+  assert.match(SRC, /function stopChildHeartbeat\(\)/, "and a session shutdown must be able to stop it");
+  const shutdown = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown");
+  assert.match(shutdown, /stopChildHeartbeat\(\)/, "a leaked heartbeat would report for a session that is gone");
+
 
   // It is called from pi's OWN events, unconditionally and first.
   const settled = windowOf('pi.on("agent_settled"', "\n  });", "agent_settled");
   assert.match(settled, /reportChildState\(ctx\)/);
   assert.match(settled, /drainChildInstructions\(ctx\)/, "and the orchestrator's messages are applied there");
   const turnEnd = windowOf('pi.on("turn_end"', "\n  });", "turn_end");
-  assert.match(turnEnd, /reportChildState\(ctx\)/, "turn_end is the heartbeat `stalled` is the absence of");
+  assert.match(turnEnd, /reportChildState\(ctx\)/, "turn_end still reports — the timer is a floor, not a replacement");
 
   // Delivery is pi's API, never a keyboard.
   const drainAt = SRC.indexOf("async function drainChildInstructions(");
-  const drain = SRC.slice(drainAt, drainAt + 1600);
+  const drain = SRC.slice(drainAt, drainAt + 2600);
   assert.match(drain, /pi\.sendUserMessage\(text, \{ deliverAs: instruction\.mode \}\)/);
   assert.match(drain, /ctx\.abort\?\.\(\)/, "interrupt is ctx.abort(), not a Ctrl-C keystroke");
   assert.match(drain, /acknowledgeInstruct\(binding, instruction\.instructId, false/,
     "a failure is acknowledged AS a failure — the receipt the orchestrator builds on");
+  // Round-4 P1 — the two-stage handshake. `received` is written BEFORE any
+  // injection is attempted: that is what lets a `followUp` to a busy child be
+  // reported as delivered instead of silently lost.
+  assert.match(drain, /"received"/, "the child says it HAS the instruction first");
+  assert.match(drain, /"injected"/, "and separately that pi actually took it");
+  assert.match(drain, /acknowledgedReceipts/,
+    "the receipt is written once per instruction, not once per heartbeat tick");
+
 
   // Spawn side: the judge child is still told who spawned it.
   const spawnAt = SRC.indexOf("function dispatchJudgeRound(");

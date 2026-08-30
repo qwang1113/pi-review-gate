@@ -227,9 +227,15 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 - **纯决策**：`orchestrator-gate.ts`（14 条硬约束）、
   `orchestrator-boundaries.ts`（文件边界代数——两个任务能否并行只由它回答）、
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
-  `orchestrator-child-state.ts`（**子会话六态**：working / waiting-input /
-  idle / done / dead / stalled，判据全部是结构化真值——纯函数，用一串通道记录
-  就能单测）、
+  `orchestrator-plan-approval.ts`（**这次改动扩权了吗**——不扩权的边界细化不
+  重新惊动用户，扩权一律重批）、
+  `orchestrator-plan-audit.ts`（plan 的前置审计：任务模板、裁决绑定 canonical
+  文本、只 P0/P1 阻塞）、
+  `orchestrator-pane-decor.ts`（子会话的颜色/标签/边框标题——纯展示层，只出不进）、
+  `orchestrator-child-state.ts`（**子会话七态**：working / waiting-input /
+  waiting-judge / idle / done / dead / stalled，判据全部是结构化真值——纯函数，
+  用一串通道记录就能单测）、
+
   `orchestrator-handoff-advice.ts`（上下文用量 + 待答请求数 ⇒ 接力时机）、
   `orchestrator-wait.ts`（「有事发生」是什么，以及那份五块回执怎么装）、
   `orchestrator-registry.ts`（编排只能操作门禁替它创建的东西）、
@@ -396,7 +402,11 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `orchestrator-boundaries.ts` | 文件边界代数：两个任务能否并行的唯一判据 |
 | `orchestrator-channel.ts` | 点对点通道：路径、记录 schema、追加/读取/行游标、大 payload 溢出到旁文件、投影（还欠着什么）、心跳超时判定 |
 | `orchestrator-child-channel.ts` | 子会话侧：状态上报、「人与项目经理任意一方先答即生效」的竞态提问、读取与确认编排下发的指令 |
-| `orchestrator-child-state.ts` | 子会话六态（working / waiting-input / idle / done / dead / stalled）与再唤醒退避；判据全部是结构化真值，不看屏幕 |
+| `orchestrator-child-state.ts` | 子会话七态（working / waiting-input / **waiting-judge** / idle / done / dead / stalled）与再唤醒退避；`waiting-judge` 是「在等门禁自己派出去的 reviewer/precommit」，不叫醒项目经理，也让 `stalled` 回到只表示「扩展不在了」。判据全部是结构化真值，不看屏幕 |
+| `orchestrator-pane-decor.ts` | 子会话的可视化区分：按 childId 派色（纯函数，同一子会话永远同色）、`@task-slug · state 220s` 的边框标题、window 级标签栏开关判定。**纯展示层**：只写不读，任何判定都不看它 |
+| `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：目录前缀内的边界细化、收窄、加依赖、降并行度⇒批准迁移并记审计；新任务/新目录/删依赖/串行改并行/提并行度⇒重新批准 |
+| `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案 |
+
 | `orchestrator-handoff-advice.ts` | 上下文用量 + 待答请求数 ⇒ 接力时机（软/硬阈值，没读数就明说没读数） |
 
 | `orchestrator-answer-tools.ts` | 工具 `orchestrator_answer`：把答案写进通道（选项原文/序号/唯一子串，含糊即拒），代批 goal 时按约束 8 比对任务边界 |
@@ -414,7 +424,8 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 | `orchestrator-relay.ts` | 自我接力：只有后继者能关掉前任 |
 | `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close / handoff）并注册全部八个编排会话工具——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，answer 与 recover/attach 在各自的 `*-tools.ts` |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块 |
-| `orchestrator-tmux.ts` | 仅剩的 tmux 命令构造：开 pane / 关 pane / 列 pane —— 没有 send-keys，也没有 capture-pane |
+| `orchestrator-tmux.ts` | 仅剩的 tmux 命令构造：开 pane / 关 pane / 列 pane，加上 pane 装饰（`select-pane -P/-T` 与 window 级 `setw pane-border-*`，一律不带 `-g`，且都会过 `assertSafeTmuxArgv`）—— 没有 send-keys，也没有 capture-pane |
+
 | `orchestrator-tool-kit.ts` | 编排工具的共用前置：模式校验、pane 实况、plan 可用性 |
 | `orchestrator-tools.ts` | plan / notify 两个不碰 tmux 的工具 |
 | `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据），以及那份五块回执的装配 |

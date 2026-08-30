@@ -386,6 +386,9 @@ export interface OrchestratorHostBindings {
   sessionTranscriptPath(): string | undefined;
   /** This orchestrator's OWN context usage, as a percentage (receipt block 4). */
   contextPercent?(): number | undefined;
+  /** Run + record the plan pre-audit (the extension owns the judge process). */
+  auditPlan?(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }>;
+
   /** Override the channel root. Tests point it at a scratch dir. */
   channelHome?(): string | undefined;
 
@@ -448,6 +451,16 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     supervisionMemory: () => memory,
     saveSupervisionMemory: (next) => { memory = next; },
     contextPercent: () => host.contextPercent?.(),
+    auditPlan: (plan) =>
+      host.auditPlan
+        ? host.auditPlan(plan)
+        : Promise.resolve({
+            ok: false as const,
+            text:
+              "review-gate: 门禁没有接上 plan 审计通道（宿主未提供 auditPlan）——" +
+              "在审计能跑起来之前，plan 不会被送到用户面前。这是门禁自身的缺陷，请报告。",
+          }),
+
 
     branchFacts: host.branchFacts,
     emitNotification: (sequence) => emitNotification(sequence, env()),

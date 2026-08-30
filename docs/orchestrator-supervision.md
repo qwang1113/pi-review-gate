@@ -66,7 +66,7 @@ JSONL 那一行只留一个引用。读取方经同一个 IO seam 解引用，�
 
 ---
 
-## 二、状态：六态，全部来自真值
+## 二、状态：七态，全部来自真值
 
 `lib/orchestrator-child-state.ts`（判定）+ `lib/orchestrator-child-channel.ts`（子会话侧上报）
 
@@ -94,17 +94,43 @@ JSONL 那一行只留一个引用。读取方经同一个 IO seam 解引用，�
    任务（round-1 P1）。少了这条，一个做完又被重新派活、然后卡住的子会话会一直被报成
    「已完成」—— 而卡住恰恰是监督者唯一必须听到的事。
 4. **沉默（`stalled`）排在任何正面自报之前**：比心跳预算更旧的报告不再是关于当下的证据。
-5. `idle` / `working`。
+5. **`waiting-judge`**：它在等门禁**自己派出去**的活（reviewer / precommit）。
+6. `idle` / `working`。
 
 `paneAlive === undefined`（tmux 读不出来）**永远不判死**（F14）：读不到是信息缺失，
 而误判死亡与漏判死亡一样会终结监督。
 
-### 2.2 心跳从哪来
+### 2.2 心跳从哪来（2026-08-30 重写：定时器，不是 agent 事件）
 
-子会话侧门禁在 **`agent_settled`** 与 **`turn_end`** 上无条件上报（`reportChildState`）。
-`turn_end` 是关键：它与这个会话有没有改动无关，所以它是「扩展还活着」的证明 ——
-而 `stalled` 正是这个证明的缺席。上报里还带上 `ctx.getContextUsage()` 的读数，所以
-项目经理不必去问「你还剩多少上下文」。
+心跳由**子会话侧扩展自己的定时器**发（`startChildHeartbeat`，10s 一跳，状态没变时
+每 60s 落一条记录）。只要进程活着它就跳，与 agent 在不在产生事件无关。
+
+**为什么必须这样。** 原来的心跳挂在 `agent_settled` / `turn_end` 上 —— 那是 **agent**
+事件。而 `judge_wait`、full precommit、任何长命令都发生在**同一个 turn 内部**：agent
+既不 settle 也不结束 turn，通道里就不再有新记录。于是 180 秒的 `HEARTBEAT_STALE_MS`
+必然超时，一个正在等自己 reviewer 的健康子会话被报成「失联」。第四轮实测：2 次误报、
+约 14 分钟、12 次无效唤醒。**更糟的是回执给出的动作是 `interrupt` / `close` ——
+照做就会把正在跑的那一轮审查腰斩**，这是唯一一条「照门禁说的做反而出事」的缺陷。
+
+`turn_end` / `agent_settled` 仍然上报，但它们现在只是**下限**，不再是唯一来源。
+
+### 2.3 长阻塞如实上报：`waiting-judge`
+
+沉默与「正在等一件已知的事」是两回事。门禁**自己**派出了 judge，所以它百分之百知道
+在等谁、等了多久 —— 于是它就这么说：健康快照显示「在等 reviewer（已等 220s）——
+正常，别打断」，pane 边框上也是 `@t2-gate-commands · waiting-judge 220s`。
+
+两条随之而来的性质：
+
+- `waiting-judge` **不算 newsworthy**，不会叫醒项目经理（为它自己派的活叫醒它不是监督，
+  是噪音）；
+- `stalled` 因此回到它本来的含义 —— **扩展真的不在了**。它的建议动作里**不再有
+  `interrupt`**：门禁都不应答的进程，打断不会让它复活，而万一它其实还在跑 reviewer，
+  打断就是把那一轮审查腰斩。`orchestrator_recover` 拒绝重开一个活着的 pane 时也一样，
+  它现在给的是「去看健康快照」而不是「先打断它」。
+
+上报里还带上 `ctx.getContextUsage()` 的读数，所以项目经理不必去问「你还剩多少上下文」。
+
 
 ---
 
@@ -153,8 +179,19 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 现在这四种都不可能发生，而且「框开着不许投文本」这条防御也不需要了 —— 框用
 `orchestrator_answer` 回，消息只会排在它后面。
 
-**回执依然要挣**：写进通道只证明写进去了，子会话的 `instruct-ack` 才证明注入了。
-没有回执 ⇒ 这次调用**失败**，并说明为什么。
+**回执依然要挣**，但它分两级（2026-08-30）：子会话的 `instruct-ack` 带 `stage` ——
+`received`（门禁拿到并入队了）与 `injected`（pi 真的收下了）。
+
+- **`followUp` 认 `received`**。它的定义就是「等你跑完这轮再读」，一个正忙的子会话
+  按定义**不可能**立刻注入。原来要求注入，于是这个 mode 恰恰在它为之设计的场景里
+  必然失败 —— 而消息其实已经写进通道了，就此沉底丢失（第四轮实测丢了一条补充授权，
+  只能改用 `orchestrator_answer` 的选项文本绕过去）。
+- **`steer` / `interrupt` 仍要求 `injected`**：它们承诺的是「当前这一轮」，排队不算。
+
+投影里也只有 `injected` 才把指令移出子会话的收件箱 —— 只 `received` 的消息必须留着，
+否则恢复时就会丢掉它。没有任何回执 ⇒ 调用失败，且文案第一句是「先看它是不是
+`waiting-judge`」，而不是建议去 close 或 interrupt。
+
 
 ---
 
@@ -246,6 +283,80 @@ tmux 读不出来时**一条孤儿都不报**：信息缺失不是证据。
 
 ---
 
+## 六甲、plan：不扩权的改动不惊动人，扩权一律重批
+
+`lib/orchestrator-plan-approval.ts`（判定）+ `orchestrator_plan({action:"write"})`
+
+第四轮最贵的一条缺陷：一轮验证里用户被弹了 **3 次** plan 批准框，第 2 次弹出时无人
+在屏幕前，干等 425 秒。根因不是「状态变化让批准失效」（那早就排除在 hash 之外），
+而是**唯一能改边界的入口是整份重写 plan，而扩一个文件是常态**：3 个任务里有 2 个在
+实施中发现模块必须拆成两个文件（门禁自己的 600 行硬拦），项目经理在定 plan 时根本
+无从预知。于是「派一个任务 → 撞边界 → 重写 plan → 叫醒真人」成了稳定循环。
+
+现在 `write` 内部比对**已批准 plan 的授权快照**（runtime 里的 `approvedPlan`）与新
+plan，把每一处差异归入两类之一：
+
+| 判为**不扩权**（批准迁移到新内容，记一条审计条目，不弹框） | 判为**扩权**（批准失效，重新征求用户） |
+| --- | --- |
+| 边界收窄、任务被删 | 新增任务 |
+| 新增路径落在该任务**已批准边界的目录前缀内**，且不与其他任务边界相交 | 碰到新目录前缀 |
+| 增加依赖（更串行） | 删除依赖 |
+| `parallel` → `serial` | `serial` → `parallel` |
+| 降低 `maxParallel` | 提高 `maxParallel` |
+
+三条硬止损：**无斜杠的边界不产生前缀**（`README.md` 或顶层 `lib` —— 归一化后无法
+区分顶层文件与顶层目录，猜错就等于把一个文件放大成整个仓库）；新增路径**不得与任何
+其他任务**（快照里的和新 plan 里的）相交；**只有已存在的任务**能走细化，新任务没有
+可比对的已批准边界。读不到授权快照时一律判扩权 —— fail-closed 的代价只是多弹一次框。
+
+这条规则**放宽了「批准」的含义**，所以它写在用户批准的那份文本里（`orchestrator_plan`
+的 transcript 消息），不是事后才让人发现的规则。每次迁移都记进
+`runtime.approvalAmendments`，用户随时能查「为什么这次没问我」。
+
+## 六乙、plan 也要先过审计
+
+`lib/orchestrator-plan-audit.ts` + `orchestrator_plan({action:"submit"})`
+
+原来的不对称：loop goal 必须先过 `goal-auditor` 才能弹批准框，plan 却直接送到人面前。
+而 plan 错的代价更高 —— 边界划错会让子会话互相踩、依赖写错会让串行变并行、并行度
+定高会烧资源，且这些都不是读文本能看出来的，得对着仓库查。
+
+`submit` 内部吞掉整条链（与 `propose_loop_goal` 同一形状）：建审计任务 → 派
+`goal-auditor`（**不新增角色**：审的都是「动手前的契约」）→ 等它退出 → 解析 fence →
+裁决（**只 P0/P1 阻塞**）→ 记录。**审计不过就把 findings 退回给项目经理，一个框都不弹**；
+过了才渲染批准框。裁决绑定 canonical plan 文本的 sha256，所以改任务状态不会让它失效，
+改一个边界就要重审；重审时门禁自动把上一轮的结论与 findings 带给审计者。
+
+审计要点（写在任务模板里）：任务拆分是否完整、边界是否覆盖真实落点（测试/文档/安装
+脚本/注册入口这些最容易漏）、边界重叠与 `execution` 是否自洽、依赖是否成环或缺失、
+`maxParallel` 是否安全、每个任务是否可独立验收。
+
+## 六丙、哪个 pane 是哪个：颜色 + 状态标签
+
+`lib/orchestrator-pane-decor.ts`（纯逻辑）+ `orchestrator-tmux.ts`（argv）
+
+一个 window 里四个 `pi` pane 就是四个一样的黑框。所以 `orchestrator_spawn`
+**在它自己内部**（和建 pane、建 worktree、写任务书、登记 registry 同一层级）给子会话：
+
+- 按 `childId` 派一个稳定颜色（纯函数 —— 同一个子会话在任何进程里看到的都是同一色），
+  `select-pane -P fg=colourN` 设边框；
+- `select-pane -T` 设标题，形如 `@t2-gate-commands · waiting-judge 220s` ——
+  **任务名 + 当前状态 + 该状态已持续多久**；
+- window 级 `setw pane-border-status top` / `pane-border-format '#{pane_title}'`
+  打开顶部标签栏（**一律不带 `-g`**，不碰用户全局配置；argv 仍过 `assertSafeTmuxArgv`）。
+
+标题由本来就在周期跑的监督探针顺带刷新，所以不看回执也知道谁在干什么。健康快照每行
+带同一个颜色名（`- [青] t1-… `），屏幕上的色块与回执条目能对上。`orchestrator_close`
+在关掉**最后一个**被装饰的子会话时用 `setw -u` 撤销 window 级设置（早撤会把还在用的
+兄弟 pane 的标签抹掉，不撤就是留垃圾），且撤销发生在 `kill-pane` **之前** —— pane 一死
+它的 id 就不再是合法的 `setw` 目标。
+
+两条边界：它**不是工具、不是 action**（一个展示需求不该让工具集重新长回去），装饰失败
+**只降级成一句提示**，绝不让 spawn 或探针失败。而且它**只出不进**：没有任何判定读
+pane 标题 —— 那就是回到读屏幕了。
+
+---
+
 ## 七、tmux 还剩什么
 
 两件事，都不涉及渲染：
@@ -265,13 +376,13 @@ tmux 读不出来时**一条孤儿都不报**：信息缺失不是证据。
 | --- | --- | --- |
 | `lib/orchestrator-channel.ts` | 通道路径、记录 schema、追加/读取/游标、spill、投影、心跳判定 | IO 经注入的 seam |
 | `lib/orchestrator-child-channel.ts` | 子会话侧：上报、两方竞态提问、读取与确认指令 | IO/对话框/计时器全注入 |
-| `lib/orchestrator-child-state.ts` | 六态判定、健康行、退避常量 | 纯函数 |
+| `lib/orchestrator-child-state.ts` | 七态判定（含 `waiting-judge`）、健康行、退避常量 | 纯函数 |
 | `lib/orchestrator-supervisor.ts` | 编排侧：读所有通道、判定、决定什么算新闻、渲染回执 1–3 块 | 纯（IO 经 seam） |
 | `lib/orchestrator-handoff-advice.ts` | 上下文用量 → 接力时机 | 纯函数 |
 | `lib/orchestrator-wait.ts` | 等待判据、预算、回执装配（含第 4、5 块） | 纯函数 |
 | `lib/orchestrator-answer-tools.ts` | `orchestrator_answer`（含约束 8 的代批边界） | 判定可单测 |
 | `lib/orchestrator-recovery-tools.ts` | `orchestrator_recover` / `orchestrator_attach`、孤儿检测 | 孤儿判定是纯函数 |
-| `lib/orchestrator-tmux.ts` | 仅剩的 tmux 构造：开/关/列 pane | 纯函数 |
+| `lib/orchestrator-tmux.ts` | 仅剩的 tmux 构造：开/关/列 pane + pane 装饰（不带 `-g`） | 纯函数 |
 
 协议级测试（不依赖真实 tmux、不依赖 pi 进程、不碰磁盘）：
 `test/orchestrator-channel.test.ts`、`test/orchestrator-child-state.test.ts`、

@@ -34,6 +34,8 @@ import { registerOrchestratorStateTools } from "../../lib/orchestrator-tools.ts"
 import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session-tools.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
+import { snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
+
 import { emptyRuntime, type OrchestratorRuntime } from "../../lib/orchestrator-registry.ts";
 import {
   appendRecord,
@@ -109,11 +111,25 @@ export interface FakeWorld {
     topic?: "goal-approval" | "workspace" | "ask-user" | "plan-approval" | "other";
   }) => void;
   childSettles: (childId: string, requestId: string, by: "human" | "orchestrator" | "dismissed") => void;
-  childAcks: (childId: string, instructId: string, delivered: boolean, detail?: string) => void;
+  childAcks: (
+    childId: string,
+    instructId: string,
+    delivered: boolean,
+    detail?: string,
+    /** Which half of the handshake — omit for the legacy "injected" shape. */
+    stage?: "received" | "injected",
+  ) => void;
+
   /** Everything currently on a child's channel. */
   channelOf: (childId: string) => ChannelRecord[];
   call: (name: string, params?: Record<string, unknown>) => Promise<ToolReply>;
+  /** How many times the plan pre-audit was dispatched. */
+  planAudits: () => number;
+  /** Every tmux argv the gate ran, in order — the decoration lives in here. */
+  tmuxCalls: string[][];
+
 }
+
 
 export interface FakeWorldOptions {
   taskMode?: TaskMode;
@@ -130,7 +146,25 @@ export interface FakeWorldOptions {
    * F8 case: a pane opened, but nothing proves the session ever started.
    */
   autoReport?: boolean;
+  /**
+   * Make the plan pre-audit BLOCK, with this text as the refusal.
+   *
+   * Set it and `submit` must hand the text back without ever calling
+   * `confirm` — "a failed audit shows no dialog" is the property, and the
+   * only way to test it is to be able to fail one.
+   */
+  planAuditFails?: string;
+  /**
+   * Make every COSMETIC tmux write fail (`select-pane`, `setw`).
+   *
+   * The property it proves: a spawn must survive losing its decoration. A
+   * session that works with a plain border beats a refused session with a
+   * pretty one.
+   */
+  tmuxDecorFails?: boolean;
+
 }
+
 
 const ORCHESTRATION_ID = "orch-deadbeef-abc";
 
@@ -144,10 +178,24 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   ]);
   let paneSeq = 1;
   let runtime: OrchestratorRuntime = emptyRuntime(ORCHESTRATION_ID);
+  let planAudits = 0;
+  const tmuxCalls: string[][] = [];
+
+
   let plan: OrchestratorPlan | undefined = options.plan;
   if (plan && options.approvePlan) {
-    runtime = { ...runtime, approvedPlanHash: planHash(plan) };
+    const hash = planHash(plan);
+    // A real approval records WHAT was approved, not just its hash — that
+    // snapshot is what lets a later narrowing edit skip the dialog, so a fake
+    // approval without it would test a world that cannot happen.
+    runtime = {
+      ...runtime,
+      approvedPlanHash: hash,
+      approvedPlanAt: new Date(NOW).toISOString(),
+      approvedPlan: snapshotApprovedPlan(plan, hash, new Date(NOW).toISOString()),
+    };
   }
+
   const scratch = new Map<string, string>();
   const sidecars = new Map<string, Record<string, unknown>>();
   const shown: string[] = [];
@@ -194,6 +242,16 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     supervisionMemory: () => memory,
     saveSupervisionMemory: (next) => { memory = next; },
     contextPercent: () => options.contextPercent,
+    // The plan pre-audit is a judge PROCESS in production; the fake answers
+    // from a canned verdict so a protocol test can drive both branches (a PASS
+    // opens the dialog, a FAIL must open nothing at all).
+    auditPlan: async () => {
+      planAudits += 1;
+      return options.planAuditFails
+        ? { ok: false as const, text: options.planAuditFails }
+        : { ok: true as const };
+    },
+
     gitHooksReferencing: () => [],
     currentBranch: () => "main",
     repairGitHooks: () => ({ ok: true }),
@@ -204,7 +262,17 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   };
 
   function runFakeTmux(argv: readonly string[]): { ok: boolean; stdout: string; stderr: string } {
+    tmuxCalls.push([...argv]);
     const sub = argv[0];
+    // Cosmetic writes (`select-pane -P/-T`, `setw pane-border-*`) are the ones
+    // a spawn must survive losing — `tmuxDecorFails` is how a test proves that.
+    const decorative = sub === "select-pane" || sub === "setw";
+    if (decorative) {
+      return options.tmuxDecorFails
+        ? { ok: false, stdout: "", stderr: "fake tmux: refused a cosmetic option" }
+        : { ok: true, stdout: "", stderr: "" };
+    }
+
     if (sub === "list-panes") {
       if (options.tmuxBroken) return { ok: false, stdout: "", stderr: "no server running" };
       const live = [...panes.values()].filter((p) => p.alive).map((p) => p.id);
@@ -292,12 +360,14 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     childSettles: (childId, requestId, by) => {
       appendRecord(io, target(childId), { kind: "request-settled", from: "child", at: stamp(), requestId, by });
     },
-    childAcks: (childId, instructId, delivered, detail) => {
+    childAcks: (childId, instructId, delivered, detail, stage) => {
       appendRecord(io, target(childId), {
         kind: "instruct-ack", from: "child", at: stamp(), instructId, delivered,
+        ...(stage === undefined ? {} : { stage }),
         ...(detail === undefined ? {} : { detail }),
       });
     },
+
     channelOf: (childId) =>
       readChannel(io, channelPathFor(ORCHESTRATION_ID, childId, "/home/test")).records,
     call: async (name, params = {}) => {
@@ -305,6 +375,10 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       assert.ok(run, `tool ${name} is not registered`);
       return run!(params);
     },
+    planAudits: () => planAudits,
+    tmuxCalls,
+
+
   };
 }
 

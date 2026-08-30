@@ -23,8 +23,20 @@ import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import {
   buildSpawnPaneArgv,
+  buildPaneStyleArgv,
+  buildPaneTitleArgv,
+  buildShowPaneLabelsArgv,
   parseSpawnedPaneId,
 } from "./orchestrator-tmux.ts";
+import {
+  paneColorFor,
+  paneLabelFor,
+  paneStyleFor,
+  paneTitleFor,
+  PANE_BORDER_FORMAT,
+  PANE_BORDER_STATUS,
+} from "./orchestrator-pane-decor.ts";
+
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
 import { spawnAuthorization, worktreeRequirement } from "./orchestrator-gate.ts";
 import {
@@ -86,6 +98,56 @@ function schedulingVerdict(
   if (blockers.length) return { ok: false, reason: `前置任务未完成：${blockers.join(", ")}` };
   return { ok: false, reason: `任务 "${task.id}" 当前状态是 ${task.status}，只有 pending 的任务可以开工` };
 }
+
+/**
+ * Give this child's pane its colour and its label — INSIDE the spawn.
+ *
+ * WHERE THIS RUNS IS PART OF THE REQUIREMENT, not an implementation taste
+ * (user, 2026-08-30). It is not a tool, not an action, and not a second step
+ * the orchestrator takes after `orchestrator_spawn` returns — not even
+ * through an internal helper it would have to remember to call. It is one of
+ * the atomic things a spawn already does, exactly like creating the worktree
+ * or writing the task file, and the proof of that is that the project
+ * manager's call sequence did not change by one character when this landed.
+ *
+ * FAILURE IS COSMETIC, ALWAYS. Every tmux result here is checked and then
+ * DOWNGRADED to a note in the reply: a child that is running with a plain
+ * border is a child that is running, while a spawn that failed because tmux
+ * would not set a colour would be the gate breaking real work over decoration.
+ */
+function decorateChildPane(
+  deps: OrchestratorDeps,
+  opts: { paneId: string; childId: string; taskId: string; title: string },
+): { label: string; note: string } {
+  const label = paneLabelFor(opts.taskId, opts.title);
+  const failures: string[] = [];
+  const run = (argv: readonly string[]): void => {
+    try {
+      const result = deps.tmux(argv);
+      if (!result.ok) failures.push(result.stderr || argv.join(" "));
+    } catch (error) {
+      failures.push((error as Error).message);
+    }
+  };
+  run(buildPaneStyleArgv(opts.paneId, paneStyleFor(opts.childId)));
+  run(buildPaneTitleArgv(opts.paneId, paneTitleFor({ label, state: "working", stateForSeconds: 0 })));
+  for (const argv of buildShowPaneLabelsArgv(opts.paneId, PANE_BORDER_STATUS, PANE_BORDER_FORMAT)) {
+    run(argv);
+  }
+  if (failures.length === 0) {
+    return {
+      label,
+      note: `pane 已标记为 ${label}（${paneColorFor(opts.childId).name}边框，标题随状态自动刷新）。`,
+    };
+  }
+  return {
+    label,
+    note:
+      `pane 装饰没能全部生效（${failures[0]}）—— 纯展示层，子会话本身不受影响，` +
+      "健康快照与通道判定照常。",
+  };
+}
+
 
 /**
  * CONSTRAINT 1's awkward corner (F1) — a task sitting in `running` with
@@ -247,6 +309,17 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     // belongs to whatever ran in that worktree before (round-1 P1).
     lastAssignedAt: new Date(deps.now()).toISOString(),
   }));
+
+  // One of the spawn's own atomic actions (see decorateChildPane): the child
+  // gets its colour and its `@task · state` border here, not in a step the
+  // caller has to remember.
+  const decor = decorateChildPane(deps, {
+    paneId,
+    childId,
+    taskId,
+    title: task.title,
+  });
+
   const started = applyTaskStatus(plan!, taskId, "running", { now: new Date(deps.now()).toISOString() });
   if (started.ok) deps.savePlan(started.plan);
 
@@ -282,6 +355,8 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动（${verdict.execution}${worktree ? `，worktree=${worktree}` : ""}）。\n` +
     `任务 ${taskId} 已置为 running，任务书 ${written.path} 已随 \`pi @file\` 带进去。\n` +
     `投递已核实：${check.verdict.summary}。\n` +
+    `${decor.note}\n` +
+
     "接下来用 `orchestrator_wait` 等它 —— 不要结束 turn 把盯梢责任丢给用户。" +
     "它有事找你时，wait 的回执里会直接带上完整的问题与选项，用 `orchestrator_answer` 回。",
 
@@ -303,8 +378,13 @@ function describeDeliveryEvidence(evidence: DeliveryEvidence): string {
     `sidecar 存在=${evidence.sidecarPresent ? "是" : "否"}`,
   ];
   if (evidence.ack) {
-    parts.push(`子会话回执=${evidence.ack.delivered ? "已注入" : "未注入"}${evidence.ack.detail ? `（${evidence.ack.detail}）` : ""}`);
+    const stage = evidence.ack.stage ?? "injected";
+    const said = evidence.ack.delivered
+      ? (stage === "received" ? "已收到并入队" : "已注入")
+      : "未注入";
+    parts.push(`子会话回执=${said}${evidence.ack.detail ? `（${evidence.ack.detail}）` : ""}`);
   }
+
   return parts.join("，");
 }
 
@@ -383,7 +463,20 @@ export async function dispatchInstruct(
     return fail(`review-gate: 指令写不进通道 —— ${(error as Error).message}。什么都没发。`);
   }
 
-  const check = await verifyDelivery(deps, { kind: "instruct", childId, instructId });
+  // The sidecar path is passed in FROM THE REGISTRY (round-4 P1). It used to be
+  // omitted here, so `sidecarPresent` was structurally false and the failure
+  // message reported "sidecar 存在=否" about a child whose sidecar was on disk
+  // and being written at that very moment — evidence that pointed straight at
+  // the wrong conclusion ("it died").
+  const check = await verifyDelivery(deps, {
+    kind: "instruct",
+    childId,
+    instructId,
+    instructMode: mode,
+    cwd: child.cwd,
+    ...(child.stateVariant === undefined ? {} : { stateVariant: child.stateVariant }),
+  });
+
   if (!check.verdict.ok) {
     return fail(
       `review-gate: ${check.verdict.reason}\n观察到的证据：${describeDeliveryEvidence(check.evidence)}。`,

@@ -127,12 +127,27 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     );
   }
   if (panes.panes.includes(child.paneId)) {
+    // ROUND-4 P0 — THE LINE THAT USED TO BE HERE WAS THE DEFECT. It said
+    // "if it is just stuck, interrupt it first", and both children it was
+    // ever printed about were healthy: they were sitting in `judge_wait`
+    // waiting for their own reviewers, misreported as `stalled` because the
+    // heartbeat rode on agent events. An orchestrator that had followed this
+    // advice would have aborted a running review round — the only measured
+    // case of the gate's own instructions making things worse. Interrupting
+    // is NEVER suggested here now: a live pane means there is nothing to
+    // recover, and what to do about it is a question for the health snapshot.
     return fail(
-      `review-gate: 子会话 ${childId} 的 pane ${child.paneId} 还活着 —— 拒绝重开。\n` +
-      "它如果只是卡住了（stalled），先 `orchestrator_instruct({mode:\"interrupt\"})` 打断它；" +
-      "确认要放弃才 `orchestrator_close`。",
+      `review-gate: 子会话 ${childId} 的 pane ${child.paneId} 还活着 —— 拒绝重开` +
+      "（重开一个还活着的会话，会得到两个进程写同一个 worktree）。\n" +
+      "先看 `orchestrator_wait({timeoutMs:0})` 的健康快照：\n" +
+      "  - `waiting-judge`：它在等自己派出去的 reviewer / precommit，**完全正常，不要打断**，等着就好；\n" +
+      "  - `waiting-input`：它在等回答，用 `orchestrator_answer` 回它；\n" +
+      "  - `working`：它在干活；\n" +
+      "  - `stalled`：心跳真的停了 —— 那就是放弃它（`orchestrator_close`）的场景，" +
+      "而不是打断：门禁都不应答的进程，打断不会让它复活。",
       { childId, recovered: false },
     );
+
   }
 
   const reason = String(params.reason ?? "").trim() || "pane 消失";

@@ -54,6 +54,7 @@ import {
   childHealth,
   classifyChildState,
   describeChildState,
+  describeChildStateDetailed,
   isNewsworthy,
   nextRewakeDelayMs,
   DONE_REPORT_LIMIT,
@@ -61,6 +62,8 @@ import {
   type ChildHealth,
   type ChildState,
 } from "./orchestrator-child-state.ts";
+import { paneColorFor } from "./orchestrator-pane-decor.ts";
+
 import type { ChildSession } from "./orchestrator-registry.ts";
 
 /** What survived a child that died — the reason a death is not a disaster. */
@@ -337,10 +340,7 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
     for (const troubled of snapshot.troubled) {
       sections.push(`- **${troubled.child.id}**（任务 ${troubled.child.taskId}）：${describeChildState(troubled.state)}`);
       sections.push(`  未丢失的资产：${formatAssets(troubled.assets)}`);
-      sections.push(
-        `  可执行动作：\`orchestrator_recover({childId:"${troubled.child.id}"})\` 续开同一会话，` +
-        `或 \`orchestrator_close({childId:"${troubled.child.id}"})\` 放弃（任务回 pending，分支保留）。`,
-      );
+      sections.push(`  可执行动作：${recoveryAdvice(troubled)}`);
     }
   }
 
@@ -350,6 +350,45 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
   return sections.join("\n");
 }
 
+/**
+ * What to actually DO about a troubled child.
+ *
+ * ── WHY THIS IS NOT ONE SENTENCE ANY MORE (round-4 P0) ──
+ *
+ * It used to offer `recover` or `close` for both states, and `recover`'s own
+ * refusal then suggested `orchestrator_instruct({mode:"interrupt"})` when the
+ * pane turned out to be alive. That was the single worst line the gate has
+ * ever printed: the two children it was printed about were `waiting-judge` in
+ * everything but name — quietly waiting for their own reviewers — and an
+ * orchestrator that followed the advice would have aborted a running review
+ * round. It was the one measured case of "doing what the gate said makes
+ * things worse", and a human had to intervene to prevent it.
+ *
+ * The heartbeat fix removes the false positives at the source, so `stalled`
+ * now means the extension really is gone. This wording exists for the
+ * remainder: a `stalled` child is still NOT interrupted, because interrupting
+ * a process whose gate is not answering does nothing except destroy whatever
+ * it was in the middle of. Recover it (the transcript survives) or close it
+ * (the branch survives). Those are the only two moves.
+ */
+function recoveryAdvice(troubled: ChildSupervision): string {
+  const id = troubled.child.id;
+  if (troubled.state === "dead") {
+    return (
+      `\`orchestrator_recover({childId:"${id}"})\` 续开同一会话（transcript 接着上次），` +
+      `或 \`orchestrator_close({childId:"${id}"})\` 放弃（任务回 pending，分支保留）。`
+    );
+  }
+  return (
+    `先确认它是不是真的没人了：心跳由子会话侧的独立定时器发，与 agent 忙不忙无关，` +
+    `所以「在等 reviewer」现在会显示成 \`waiting-judge\` 而不是 stalled —— 走到这里说明心跳确实停了。\n` +
+    `    \`orchestrator_recover({childId:"${id}"})\` 用同一 session id 重开（它拒绝重开活着的 pane），` +
+    `或 \`orchestrator_close({childId:"${id}"})\` 放弃。\n` +
+    `    **不要** \`orchestrator_instruct({mode:"interrupt"})\`：门禁不应答的进程不会因为被打断而恢复，` +
+    `而它万一还在跑自己的 reviewer，打断就等于把那一轮审查腰斩。`
+  );
+}
+
 function formatHealthLines(health: readonly ChildHealth[]): string {
   if (health.length === 0) return "（本编排目前没有存活的子会话）";
   return health
@@ -357,7 +396,10 @@ function formatHealthLines(health: readonly ChildHealth[]): string {
       const quiet = h.quietForSeconds === undefined ? "未上报过" : `${h.quietForSeconds}s 前`;
       const dialog = h.dialogTitle ? `，框：${h.dialogTitle}` : "";
       const ctx = h.contextPercent === undefined ? "" : `，上下文 ${h.contextPercent}%`;
-      return `- ${h.childId}：${describeChildState(h.state)}，最后活动 ${quiet}${dialog}${ctx}`;
+      // The colour is the same pure function the pane border uses, so the row
+      // a supervisor reads and the rectangle a human sees are the same child.
+      const color = paneColorFor(h.childId).name;
+      return `- [${color}] ${h.childId}：${describeChildStateDetailed(h)}，最后活动 ${quiet}${dialog}${ctx}`;
     })
     .join("\n");
 }
@@ -371,6 +413,7 @@ function formatAssets(assets: ChildAssets | undefined): string {
   if (assets.completedAt) parts.push(`已 declare_done（${assets.completedAt}）`);
   return parts.length > 0 ? parts.join("、") : "没有提交过任何东西（分支上没有内容）";
 }
+
 
 function indent(text: string): string {
   return text

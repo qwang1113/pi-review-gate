@@ -13,15 +13,19 @@
  */
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
-import { buildListPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
+import { buildListPanesArgv, buildPaneTitleArgv, parsePaneIds } from "./orchestrator-tmux.ts";
+import { paneLabelFor, paneTitleForHealth } from "./orchestrator-pane-decor.ts";
 import { channelPathFor, projectChannel, readChannel } from "./orchestrator-channel.ts";
-import type { ChildAssets } from "./orchestrator-supervisor.ts";
+import type { ChildAssets, SupervisionSnapshot } from "./orchestrator-supervisor.ts";
+
 import {
   deliveryVerdict,
   emptyDeliveryEvidence,
   type DeliveryEvidence,
   type DeliveryKind,
   type DeliveryVerdict,
+  type InstructDeliveryMode,
+
 } from "./orchestrator-delivery.ts";
 
 
@@ -251,6 +255,8 @@ export async function verifyDelivery(
     childId: string;
     /** Present for `instruct`: the record whose acknowledgement is awaited. */
     instructId?: string;
+    /** Present for `instruct`: what was promised decides which ack suffices. */
+    instructMode?: InstructDeliveryMode;
     /** Where the child's own sidecar would appear, when it has one. */
     cwd?: string;
     stateVariant?: string;
@@ -260,13 +266,14 @@ export async function verifyDelivery(
 ): Promise<DeliveryCheck> {
   const attempts = Math.max(1, opts.attempts ?? DELIVERY_VERIFY_ATTEMPTS);
   const interval = Math.max(0, opts.intervalMs ?? DELIVERY_VERIFY_INTERVAL_MS);
+  const verdictOpts = opts.instructMode === undefined ? {} : { instructMode: opts.instructMode };
   let evidence = emptyDeliveryEvidence();
-  let verdict: DeliveryVerdict = deliveryVerdict(opts.kind, evidence);
+  let verdict: DeliveryVerdict = deliveryVerdict(opts.kind, evidence, verdictOpts);
 
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) await deps.sleep(interval);
     evidence = readDeliveryEvidence(deps, opts);
-    verdict = deliveryVerdict(opts.kind, evidence);
+    verdict = deliveryVerdict(opts.kind, evidence, verdictOpts);
     if (verdict.ok) break;
   }
   return { verdict, evidence };
@@ -284,22 +291,34 @@ function readDeliveryEvidence(
     const io = deps.channelIO();
     const path = channelPathFor(deps.runtime().orchestrationId, opts.childId, deps.channelHome());
     const read = readChannel(io, path);
-    const ack = opts.instructId
-      ? read.records.find(
+    // The LAST matching ack, not the first: the handshake is two records now
+    // (`received`, then `injected`), and reading the first one would report a
+    // queued message forever as merely queued — including in the receipt of a
+    // `steer` that has since landed.
+    const acks = opts.instructId
+      ? read.records.filter(
           (record) => record.kind === "instruct-ack" && record.instructId === opts.instructId,
         )
-      : undefined;
+      : [];
+    const ack = acks[acks.length - 1];
     return {
       channelReported: read.records.length > 0,
       sidecarPresent,
       ...(ack && ack.kind === "instruct-ack"
-        ? { ack: { delivered: ack.delivered, ...(ack.detail === undefined ? {} : { detail: ack.detail }) } }
+        ? {
+            ack: {
+              delivered: ack.delivered,
+              ...(ack.stage === undefined ? {} : { stage: ack.stage }),
+              ...(ack.detail === undefined ? {} : { detail: ack.detail }),
+            },
+          }
         : {}),
     };
   } catch {
     return { channelReported: false, sidecarPresent };
   }
 }
+
 
 /** Everything still outstanding on one child's channel. */
 export function childChannelProjection(deps: OrchestratorDeps, childId: string) {
@@ -309,6 +328,47 @@ export function childChannelProjection(deps: OrchestratorDeps, childId: string) 
   } catch {
     return projectChannel([]);
   }
+}
+
+/**
+ * Repaint every child's border label from the health that was just measured.
+ *
+ * WHY IT RIDES THE PROBE. The supervision pass already re-reads every channel
+ * on a timer and inside every `orchestrator_wait`, so it already knows each
+ * child's state and how long it has held it. Writing that onto the border
+ * costs one tmux call per child and gives the human the answer without a tool
+ * call at all — which is the entire point of putting the state on the border
+ * rather than only in the receipt.
+ *
+ * STRICTLY ONE-WAY. Nothing ever reads these titles back: they are an output
+ * of the projection, never an input to it. A tmux failure is swallowed for
+ * the same reason — supervision must not degrade because a cosmetic write
+ * failed, and a child whose pane is `dead` is skipped rather than written to.
+ *
+ * Returns the legend (childId → label) so a caller can print the same names
+ * it just painted.
+ */
+export function refreshPaneLabels(
+  deps: OrchestratorDeps,
+  snapshot: SupervisionSnapshot,
+): Array<{ childId: string; label: string }> {
+  const plan = (() => {
+    try { return deps.readPlan().plan; } catch { return undefined; }
+  })();
+  const legend: Array<{ childId: string; label: string }> = [];
+  for (const supervision of snapshot.children) {
+    const child = supervision.child;
+    const title = plan?.tasks.find((task) => task.id === child.taskId)?.title ?? child.taskId;
+    const label = paneLabelFor(child.taskId, title);
+    legend.push({ childId: child.id, label });
+    if (supervision.state === "dead") continue;
+    try {
+      deps.tmux(buildPaneTitleArgv(child.paneId, paneTitleForHealth(label, supervision.health)));
+    } catch {
+      /* cosmetic only — never allowed to affect supervision */
+    }
+  }
+  return legend;
 }
 
 

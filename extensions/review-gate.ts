@@ -163,6 +163,8 @@ import {
   instructText,
   nodeChannelIO,
   type ChannelIO,
+  type ChildReportedState,
+
 } from "../lib/orchestrator-channel.ts";
 import {
   acknowledgeInstruct,
@@ -188,6 +190,17 @@ import {
   buildOrchestratorResume,
 } from "../lib/orchestrator-directives.ts";
 import { createOrchestratorDeps, readPlanFile } from "../lib/orchestrator-wiring.ts";
+import { formatPlanSummary, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
+import {
+  adjudicatePlanAudit,
+  buildPlanAuditTask,
+  formatPlanAuditCarryover,
+  formatPlanAuditRefusal,
+  planAuditHash,
+  planAuditPassed,
+  type PlanAuditRecord,
+} from "../lib/orchestrator-plan-audit.ts";
+
 import {
   decideSupervisionEvents,
   superviseChildren,
@@ -1193,30 +1206,137 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * Is a JUDGE this session dispatched still running, and since when?
+   *
+   * This is the fact that turns silence into a statement. The gate is the one
+   * that spawned the judge, so it does not have to infer anything: the child
+   * process is in its own registry, and `exitCode === null` is liveness.
+   */
+  function activeJudgeWait(): { role: string; since: number } | undefined {
+    for (const children of childSessions.values()) {
+      for (const judge of children) {
+        if (judge.child && judge.child.exitCode === null) {
+          const since = Date.parse(judge.spawnedAt);
+          return { role: judge.role, since: Number.isFinite(since) ? since : Date.now() };
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Tell the orchestration what this session is doing.
    *
-   * Called from `agent_settled` and `turn_end` — pi's own truth — never from
-   * a heuristic about a terminal. `ctx.isIdle()` separates "still streaming"
-   * from "stopped", and the gate's own completion record separates "stopped"
-   * from "finished": a child that ran `declare_done` is `done`, and one that
-   * merely went quiet is `idle`. That distinction is the entire fix for R3-5,
-   * where a finished child was classified `working` and produced no event for
-   * 725 seconds.
+   * Called from `agent_settled`, `turn_end` AND the independent heartbeat
+   * timer — pi's own truth, never a heuristic about a terminal.
+   * `ctx.isIdle()` separates "still streaming" from "stopped", and the gate's
+   * own completion record separates "stopped" from "finished": a child that
+   * ran `declare_done` is `done`, and one that merely went quiet is `idle`.
+   * That distinction is the entire fix for R3-5, where a finished child was
+   * classified `working` and produced no event for 725 seconds.
+   *
+   * ── WAITING-JUDGE (round-4 P0) ──
+   *
+   * A judge round of its own outranks both `working` and `idle`, and it has
+   * to, because BOTH readings were wrong while one was running: streaming
+   * inside `judge_wait` reported `working` while the heartbeat died with it
+   * (⇒ `stalled` ⇒ an `interrupt` suggestion aimed at a live review round),
+   * and a child that dispatched a judge and settled reported `idle` — "it
+   * stopped" — about a session doing exactly what it should. The gate knows
+   * which judge and since when, so it says so.
+   *
+   * THROTTLED, because the heartbeat calls it every tick: a record is written
+   * when the state CHANGES or when the last one is old enough to be worth
+   * refreshing. Without that the channel would grow a line every few seconds
+   * for no new information — and `lastStateSince` (how long a state has held)
+   * is computed from an unbroken run of identical states, so re-reporting is
+   * cheap but not free.
    */
-  function reportChildState(ctx: ExtensionContext, note?: string): void {
+  function reportChildState(ctx: ExtensionContext, note?: string, opts: { force?: boolean } = {}): void {
     const binding = childBinding();
     if (!binding) return;
     const streaming = ctx.isIdle?.() === false || ctx.hasPendingMessages?.() === true;
     const percent = contextPercentOf(ctx as unknown as { getContextUsage?: () => unknown });
+    const judging = activeJudgeWait();
+    const reported: ChildReportedState = judging
+      ? "waiting-judge"
+      : streaming
+        ? "working"
+        : state.completion?.at
+          ? "done"
+          : "idle";
+    const now = Date.now();
+    const changed = reported !== lastReportedChildState;
+    if (!opts.force && !changed && now - lastChildReportAt < CHILD_STATE_REFRESH_MS) return;
+    lastReportedChildState = reported;
+    lastChildReportAt = now;
     reportState(
       binding,
-      streaming ? "working" : state.completion?.at ? "done" : "idle",
+      reported,
       {
         ...(percent === undefined ? {} : { contextPercent: Math.round(percent) }),
+        ...(judging ? { waitingFor: judging.role } : {}),
         ...(note === undefined ? {} : { note }),
       },
     );
   }
+
+  /** How often the heartbeat ticks (drain + a state refresh when it is due). */
+  const CHILD_HEARTBEAT_MS = 10_000;
+  /** How stale an unchanged state report may get before it is rewritten. */
+  const CHILD_STATE_REFRESH_MS = 60_000;
+  let childHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let lastChildReportAt = 0;
+  let lastReportedChildState: ChildReportedState | undefined;
+  /**
+   * Instructions this session has already acknowledged as RECEIVED.
+   *
+   * In memory rather than derived from the channel because the receipt is
+   * written once per instruction: the projection deliberately keeps an
+   * instruction pending until it is INJECTED, so re-reading it would make the
+   * heartbeat append a duplicate `received` on every tick.
+   */
+  const acknowledgedReceipts = new Set<string>();
+
+
+  /**
+   * THE HEARTBEAT — an independent timer, and the whole point is what it does
+   * NOT depend on.
+   *
+   * Reporting used to ride on `agent_settled` and `turn_end`, which are AGENT
+   * events: they do not fire during a `judge_wait`, a full precommit, or any
+   * long tool call, because all of those happen inside one turn. So the
+   * channel went silent for minutes at a time while the process was perfectly
+   * healthy, the supervisor's 180-second budget expired, and a working child
+   * was reported as lost — twice in one run, ~14 minutes, with `interrupt`
+   * offered as the remedy (round-4 P0, the one defect where following the
+   * gate's own advice made things worse).
+   *
+   * A timer owned by the extension cannot have that failure mode: it ticks
+   * while the agent is blocked, so `stalled` goes back to meaning what it
+   * says — the extension itself is gone.
+   *
+   * It also drains instructions, which is what makes `followUp` deliverable
+   * to a BUSY child: the orchestrator's message is acknowledged within one
+   * tick instead of waiting for the agent to settle (round-4 P1 — a message
+   * that was written, never acknowledged, and silently lost).
+   */
+  function startChildHeartbeat(ctx: ExtensionContext): void {
+    if (childHeartbeatTimer || !childBinding()) return;
+    childHeartbeatTimer = setInterval(() => {
+      const live = latestCtx ?? ctx;
+      try {
+        reportChildState(live);
+      } catch { /* a heartbeat must never break the session it reports on */ }
+      void drainChildInstructions(live).catch(() => { /* best effort */ });
+    }, CHILD_HEARTBEAT_MS);
+  }
+
+  function stopChildHeartbeat(): void {
+    if (childHeartbeatTimer) clearInterval(childHeartbeatTimer);
+    childHeartbeatTimer = undefined;
+  }
+
 
   /**
    * Apply whatever the orchestrator has sent, through pi's OWN delivery API.
@@ -1235,21 +1355,51 @@ export default function reviewGate(pi: ExtensionAPI) {
     const binding = childBinding();
     if (!binding) return;
     for (const instruction of pendingInstructions(binding)) {
+      // STAGE ONE — "I have it". Written BEFORE anything is attempted, and
+      // exactly once per instruction, because it answers a different question
+      // than the injection does: it proves this child's gate is alive and has
+      // the message. That is the only honest bar for a `followUp`, whose whole
+      // definition is "read this when you are done" — demanding an injection
+      // from a busy child made the orchestrator's tool fail on a message that
+      // had in fact arrived, and the message was then dropped (round-4 P1).
+      if (!acknowledgedReceipts.has(instruction.instructId)) {
+        acknowledgedReceipts.add(instruction.instructId);
+        acknowledgeInstruct(
+          binding,
+          instruction.instructId,
+          true,
+          `已入队（mode=${instruction.mode}）`,
+          "received",
+        );
+      }
       try {
         if (instruction.mode === "interrupt") {
           ctx.abort?.();
-          acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()");
+          acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
           continue;
         }
         const text = instructText(channelIO, instruction);
         if (!text) {
-          acknowledgeInstruct(binding, instruction.instructId, false, "指令没有正文（也没有可读的溢出文件）");
+          acknowledgeInstruct(
+            binding,
+            instruction.instructId,
+            false,
+            "指令没有正文（也没有可读的溢出文件）",
+            "injected",
+          );
           continue;
         }
         await pi.sendUserMessage(text, { deliverAs: instruction.mode });
-        acknowledgeInstruct(binding, instruction.instructId, true, `pi.sendUserMessage(deliverAs:${instruction.mode})`);
+        acknowledgeInstruct(
+          binding,
+          instruction.instructId,
+          true,
+          `pi.sendUserMessage(deliverAs:${instruction.mode})`,
+          "injected",
+        );
       } catch (error) {
-        acknowledgeInstruct(binding, instruction.instructId, false, (error as Error).message);
+        acknowledgeInstruct(binding, instruction.instructId, false, (error as Error).message, "injected");
+
       }
     }
   }
@@ -1332,6 +1482,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       mergeSettled: Boolean(state.baseBranch) && !state.mergeConflict,
       mergeWaived: Boolean(state.mergeWaived),
     }),
+    // ROUND-4 P1 — THIS BINDING WAS SIMPLY MISSING. `orchestrator_wait`'s
+    // fourth block (context usage + when to hand over) is computed from it,
+    // and because nothing was passed, all 15+ receipts of the fourth run said
+    // "宿主未提供读数": the orchestrator could not tell whether it had room
+    // for another task round, on the one axis — running long — that defines
+    // unattended work. The reading itself was always available; nobody wired
+    // it. `latestCtx` is refreshed on every tool_call, so it is current by
+    // the time any orchestration tool runs.
+    contextPercent: () => contextPercentOf(latestCtx as unknown as { getContextUsage?: () => unknown }),
+    auditPlan: (plan) => runPlanAudit(plan),
+
     sessionTranscriptPath: () => {
       try {
         const dir = sessionDirForCwd(cwd);
@@ -4119,6 +4280,106 @@ export default function reviewGate(pi: ExtensionAPI) {
         `\n\nfindings 流：${streamPath}`,
     };
   }
+
+  /**
+   * THE PLAN AUDIT, run by the gate from inside `orchestrator_plan`'s submit.
+   *
+   * The goal audit's twin, deliberately identical in shape (philosophy two):
+   * ONE call builds the auditor's task, runs the judge process, waits for it
+   * to exit, reads THIS round's output, adjudicates it and records the verdict
+   * against the plan's canonical hash. The orchestrator submits a plan and
+   * gets back either the user's dialog or a list of objections — it never
+   * sequences an audit by hand, and it never sees a half-finished one.
+   *
+   * WHY A PLAN NEEDS THIS AT ALL: a wrong plan is more expensive than a wrong
+   * goal. It decides what several children may touch, in what order, and how
+   * many run at once — a missed boundary puts two writers in one file. The
+   * user asked for the asymmetry (goal audited, plan not) to be closed.
+   *
+   * IT BLOCKS for minutes, for the same reason `propose_loop_goal` does.
+   *
+   * The ROLE is `goal-auditor` (user decision): the same judgement — "is this
+   * contract checkable, and does it match the repository?" — so no fourth
+   * role, no new agent file, no new model pin.
+   */
+  async function runPlanAudit(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }> {
+    const root = primaryRepoRoot;
+    const hash = planAuditHash(plan);
+    // A re-audit is handed the previous round's verdict and objections — the
+    // same carryover contract the goal audit has: settled material gets a
+    // consistency scan, not a re-derivation.
+    const previous = state.planAudit;
+    const carryover = previous && previous.hash !== hash
+      ? formatPlanAuditCarryover(previous)
+      : undefined;
+    const task = buildPlanAuditTask(plan, {
+      ...(carryover === undefined ? {} : { carryover }),
+      repoRoot: root,
+      ...(state.sessionId ? { sessionId: state.sessionId, sessionDir: sessionDirForCwd(cwd) } : {}),
+    });
+
+    const dispatch = dispatchJudgeRound({
+      root,
+      role: "goal-auditor",
+      title: `plan-auditor-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`,
+      task,
+      // A previous audit still running is judging a DIFFERENT plan (this one
+      // has no PASS yet), so it cannot answer the question being asked here.
+      fresh: true,
+    });
+    if (!dispatch.ok) {
+      return {
+        ok: false,
+        text: `review-gate: plan 审计没能启动 —— ${dispatch.error ?? "judge 进程未能启动"}。plan 没有被送到用户面前。`,
+      };
+    }
+    const child = judgeChildByRole(root, "goal-auditor");
+    if (!child) {
+      return {
+        ok: false,
+        text: "review-gate: plan 审计已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。",
+      };
+    }
+    // The SAME wait implementation `judge_wait` uses (process exit, exit-code
+    // file, or a verdict fence already in this round's stdout).
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx);
+
+    // THIS round's output only — the transcript accumulates every round of the
+    // role's session, so its last fence could belong to a goal audit that ran
+    // before this one.
+    const output = readRoundStdout(child.stdoutPath);
+    const parsed = output ? parseReviewOutput(output) : undefined;
+    if (!parsed) {
+      const why = readStderrTail(child.stderrPath)?.trim().split("\n").slice(-3).join(" ") ?? "";
+      return {
+        ok: false,
+        text:
+          "review-gate: plan 审计没有产出可解析的裁决，什么都没有记录（fail-closed）——" +
+          "plan **没有**被送到用户面前。\n" +
+          (why ? `审计进程最后的错误输出：${why.slice(0, 200)}\n` : "") +
+          "直接再 `submit` 一次即可重跑审计。",
+      };
+    }
+    const findings = parseFenceFindings(output!);
+    const adjudication = adjudicatePlanAudit(parsed.verdict, findings);
+    const record: PlanAuditRecord = {
+      hash,
+      verdict: adjudication.verdict,
+      at: new Date().toISOString(),
+      findingsTotal: parsed.findingsTotal,
+      ...(findings.length ? { findings } : {}),
+      planText: formatPlanSummary(plan),
+    };
+    state.planAudit = record;
+    persist(latestCtx);
+
+    // The PASS must bind to the plan that was actually judged — the same
+    // content binding the user's approval uses, so a plan edited between the
+    // audit and the dialog cannot ride in on someone else's PASS.
+    if (planAuditPassed(record, plan)) return { ok: true };
+    return { ok: false, text: formatPlanAuditRefusal(record) };
+  }
+
 
 
   /**
@@ -6946,6 +7207,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     // captured ctx is dead after a replacement and must never be ticked
     // again (a stale tick throws on ctx.hasUI and crashes pi).
     armUiRefreshTimer();
+    // THE SUPERVISION HEARTBEAT (round-4 P0). Armed here, for every session
+    // that has an orchestration address, because the whole point is that it
+    // does not depend on the agent doing anything: a child blocked in
+    // `judge_wait` for ten minutes must keep saying it is alive, and the
+    // first report must not wait for the first `turn_end` either.
+    startChildHeartbeat(ctx);
+    reportChildState(ctx, undefined, { force: true });
+
     // Reflect the precommit config source in the status bar right away.
     updateWidget(ctx);
 
@@ -7089,6 +7358,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The supervision probe is a timer this session owns; a leaked one would
     // keep waking a session that is gone.
     stopSupervisionTimer();
+    // Same for the child heartbeat: a leaked timer would keep reporting on
+    // behalf of a session that is gone, and its supervisor would read those
+    // reports as a healthy child.
+    stopChildHeartbeat();
+
 
     // Judge children are independent pi processes — they survive the session
     // by design (their session files persist, so a fresh session can resume

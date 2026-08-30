@@ -147,7 +147,7 @@ export interface DeliveryEvidence {
   /** Its own gate sidecar exists on disk. */
   sidecarPresent: boolean;
   /** The child's acknowledgement of an instruction, when it made one. */
-  ack?: { delivered: boolean; detail?: string };
+  ack?: { delivered: boolean; stage?: "received" | "injected"; detail?: string };
 }
 
 /** Nothing observed yet. */
@@ -159,6 +159,9 @@ export type DeliveryVerdict =
   | { ok: true; summary: string }
   | { ok: false; reason: string };
 
+/** How the instruction asked to be delivered — it decides what proof means. */
+export type InstructDeliveryMode = "steer" | "followUp" | "interrupt";
+
 /**
  * May this delivery be reported as successful?
  *
@@ -168,16 +171,28 @@ export type DeliveryVerdict =
  * second half and is accepted as the weaker fallback.
  *
  * INSTRUCT. The message is in the channel, which proves only that it was
- * WRITTEN. The child's acknowledgement is what proves it was injected, and an
- * acknowledgement that says `delivered: false` is a FAILURE reported with the
- * child's own explanation — not a success with a caveat.
+ * WRITTEN. What the child says about it is the proof — and WHICH ack is
+ * enough depends on what was promised:
  *
- * When nothing was observed the verdict is a failure with the evidence spelled
- * out. The user's standing rule for that case (2026-08-29): keep the pane, do
- * not kill a session that may well be alive; put the task back to `pending` so
- * it can be picked up again.
+ *   - `followUp` promises "when you are done, read this". A busy child cannot
+ *     inject it yet BY DEFINITION, so demanding an injection made the tool
+ *     fail on exactly the children it was designed for, and the message it
+ *     had already written was left orphaned (round-4 P1: one authorization
+ *     lost that way). `received` — the child's gate saying it has the message
+ *     and has queued it — is the honest bar, and it is a real one: only a
+ *     live gate writes it.
+ *   - `steer` and `interrupt` promise to act on the CURRENT turn. Nothing but
+ *     an injection satisfies that, so `received` alone keeps the check
+ *     waiting rather than claiming success.
+ *
+ * An ack that says `delivered: false` is a FAILURE reported with the child's
+ * own explanation — never a success with a caveat.
  */
-export function deliveryVerdict(kind: DeliveryKind, evidence: DeliveryEvidence): DeliveryVerdict {
+export function deliveryVerdict(
+  kind: DeliveryKind,
+  evidence: DeliveryEvidence,
+  opts: { instructMode?: InstructDeliveryMode } = {},
+): DeliveryVerdict {
   if (kind === "spawn") {
     if (evidence.channelReported) {
       return { ok: true, summary: "子会话已在自己的通道上报了状态 —— 进程起来了，门禁扩展也活着" };
@@ -193,19 +208,40 @@ export function deliveryVerdict(kind: DeliveryKind, evidence: DeliveryEvidence):
     };
   }
   const ack = evidence.ack;
+  const mode = opts.instructMode ?? "followUp";
   if (!ack) {
     return {
       ok: false,
       reason:
-        "指令已写进通道，但子会话一直没有回执 —— 它的门禁可能没在跑（stalled），" +
-        "或者进程已经不在了。先看 orchestrator_wait 的健康快照，再决定 recover 还是 close。",
+        "指令已写进通道，但子会话的门禁一直没有回执（连「已收到」都没有）—— " +
+        "它的扩展可能没在跑，也可能进程已经不在了。\n" +
+        "先看 `orchestrator_wait` 的健康快照：显示 `waiting-judge` 就是它在等自己的 reviewer，" +
+        "**这条指令仍在通道里排队，什么都不用做**；只有确认它 `stalled`（心跳真的停了）才谈恢复。",
     };
   }
-  if (!ack.delivered) {
+  const stage = ack.stage ?? "injected";
+  if (!ack.delivered && stage === "injected") {
     return {
       ok: false,
       reason: `子会话收到了指令但没能注入：${ack.detail ?? "（它没有说明原因）"}`,
     };
   }
+  if (stage === "received") {
+    if (mode === "followUp") {
+      return {
+        ok: true,
+        summary:
+          "子会话的门禁已确认收到并入队" +
+          `${ack.detail ? `：${ack.detail}` : ""} —— 它跑完手上这一轮就会读到`,
+      };
+    }
+    return {
+      ok: false,
+      reason:
+        `子会话已确认收到，但 mode=${mode} 要求它在**当前这一轮**里就读到，而它还没注入。` +
+        "再等一会儿；如果它正在 `waiting-judge`，改用 `followUp` 才是对的形状。",
+    };
+  }
   return { ok: true, summary: `子会话已确认注入${ack.detail ? `：${ack.detail}` : ""}` };
 }
+

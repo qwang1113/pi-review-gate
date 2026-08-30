@@ -28,7 +28,9 @@
  */
 
 import { emptyNotifyHistory, type NotifyHistory } from "./orchestrator-notify.ts";
+import type { ApprovedPlanSnapshot } from "./orchestrator-plan-approval.ts";
 import { isPaneId } from "./orchestrator-tmux.ts";
+
 
 /** One child session, as the orchestration knows it. */
 export interface ChildSession {
@@ -100,6 +102,28 @@ export interface OrchestratorRuntime {
    */
   approvedPlanHash?: string;
   approvedPlanAt?: string;
+  /**
+   * WHAT the user approved, not just its hash (round-4 P0).
+   *
+   * The hash answers "is this the same plan"; it cannot answer "is this plan
+   * WEAKER than the one that was approved", and that second question is the
+   * one that decides whether a human has to be woken up for an edit that
+   * granted nothing. lib/orchestrator-plan-approval.ts compares against this
+   * snapshot; without it, every boundary refinement is indistinguishable from
+   * a power grab and costs an approval dialog.
+   */
+  approvedPlan?: ApprovedPlanSnapshot;
+  /**
+   * Edits that kept the approval alive, newest last — the audit trail for
+   * "why was I not asked about this?".
+   *
+   * Carrying an approval across an edit is a decision the gate makes on the
+   * user's behalf, and a decision nobody can inspect afterwards is exactly
+   * the kind of quiet authority this project refuses to build. Bounded, so a
+   * long orchestration cannot grow the sidecar without limit.
+   */
+  approvalAmendments?: Array<{ at: string; changes: string[] }>;
+
   /** A relay in progress — see lib/orchestrator-relay.ts. */
   relay?: {
     handoffPath: string;
@@ -366,6 +390,13 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
 
   const ownPane = isPaneId(obj.ownPane) ? obj.ownPane : undefined;
   const approvedPlanAt = approvalIntact ? str(obj.approvedPlanAt) : undefined;
+  // The SNAPSHOT carries the same authority as the hash — it is what decides
+  // whether a later edit needs a new dialog — so it is validated as hard and
+  // dropped on the same doubt. A snapshot whose hash does not match the
+  // recorded approval is not this approval's snapshot and is discarded: the
+  // fail-closed direction simply costs one dialog.
+  const approvedPlan = approvalIntact ? normalizeApprovedPlan(obj.approvedPlan, hash) : undefined;
+  const approvalAmendments = normalizeAmendments(obj.approvalAmendments);
   const successorPane = isPaneId(rawRelay?.successorPane) ? rawRelay.successorPane : undefined;
   return {
     orchestrationId,
@@ -374,6 +405,9 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     ...(ownPane ? { ownPane } : {}),
     ...(approvalIntact && hash ? { approvedPlanHash: hash } : {}),
     ...(approvedPlanAt ? { approvedPlanAt } : {}),
+    ...(approvedPlan ? { approvedPlan } : {}),
+    ...(approvalAmendments.length > 0 ? { approvalAmendments } : {}),
+
     ...(relayHandoff && relayAt
       ? {
           relay: {
@@ -385,6 +419,71 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
       : {}),
   };
 }
+
+/**
+ * Validate the approved-plan snapshot read back from the sidecar.
+ *
+ * It is untrusted input with real authority: a forged snapshot could make a
+ * boundary the user never saw look "already approved", which is precisely the
+ * power grab the approval exists to prevent. So every field is checked, the
+ * whole thing is dropped on any doubt, and it must belong to the SAME
+ * approval as the hash beside it — otherwise it is a leftover from an older
+ * plan and comparing against it would authorize the wrong content.
+ *
+ * Dropping it is safe by construction: without a snapshot, `write` cannot
+ * prove an edit is a narrowing, so the approval is revoked and the user is
+ * asked. One extra dialog is the correct price for an unreadable record.
+ */
+function normalizeApprovedPlan(raw: unknown, hash: string | undefined): ApprovedPlanSnapshot | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  const snapshotHash = typeof obj.hash === "string" ? obj.hash : undefined;
+  if (!snapshotHash || !hash || snapshotHash !== hash) return undefined;
+  const at = typeof obj.at === "string" && obj.at.length > 0 ? obj.at : undefined;
+  const maxParallel = typeof obj.maxParallel === "number" && Number.isFinite(obj.maxParallel)
+    ? Math.floor(obj.maxParallel)
+    : undefined;
+  if (!at || maxParallel === undefined || !Array.isArray(obj.tasks)) return undefined;
+
+  const tasks: ApprovedPlanSnapshot["tasks"] = [];
+  for (const entry of obj.tasks) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return undefined;
+    const task = entry as Record<string, unknown>;
+    const id = typeof task.id === "string" && task.id.length > 0 ? task.id : undefined;
+    const execution = task.execution === "serial" || task.execution === "parallel"
+      ? task.execution
+      : undefined;
+    if (!id || !execution || !Array.isArray(task.fileBoundaries)) return undefined;
+    const fileBoundaries = task.fileBoundaries.filter((b): b is string => typeof b === "string" && b.length > 0);
+    if (fileBoundaries.length !== task.fileBoundaries.length) return undefined;
+    const dependsOn = Array.isArray(task.dependsOn)
+      ? task.dependsOn.filter((d): d is string => typeof d === "string" && d.length > 0)
+      : [];
+    tasks.push({ id, fileBoundaries, dependsOn, execution });
+  }
+  return { hash: snapshotHash, at, maxParallel, tasks };
+}
+
+/** How many amendment entries are kept — enough to explain, bounded on purpose. */
+const MAX_APPROVAL_AMENDMENTS = 20;
+
+/** Validate the amendment trail. Purely informational, so a bad entry is skipped. */
+function normalizeAmendments(raw: unknown): Array<{ at: string; changes: string[] }> {
+  if (!Array.isArray(raw)) return [];
+  const entries: Array<{ at: string; changes: string[] }> = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+    const entry = item as Record<string, unknown>;
+    const at = typeof entry.at === "string" && entry.at.length > 0 ? entry.at : undefined;
+    const changes = Array.isArray(entry.changes)
+      ? entry.changes.filter((c): c is string => typeof c === "string" && c.length > 0)
+      : [];
+    if (!at || changes.length === 0) continue;
+    entries.push({ at, changes });
+  }
+  return entries.slice(-MAX_APPROVAL_AMENDMENTS);
+}
+
 
 /** One-screen rendering for `orchestrator_attach`'s takeover report. */
 export function formatChildren(

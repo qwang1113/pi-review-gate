@@ -43,12 +43,23 @@ import {
   HEARTBEAT_STALE_MS,
 } from "./orchestrator-channel.ts";
 
-/** The six states a registered child can be in. */
+/** The seven states a registered child can be in. */
 export type ChildState =
   /** Its own report says it is streaming, or it has work in flight. */
   | "working"
   /** A dialog is open and unanswered — the request is IN the channel. */
   | "waiting-input"
+  /**
+   * Blocked on something THE GATE ITSELF started — a judge round, a full
+   * precommit. Healthy, expected, and nothing for a supervisor to do.
+   *
+   * It exists because the alternative was measured (round-4 P0): the child
+   * fell silent inside `judge_wait`, the silence was read as `stalled`, and
+   * the receipt's own advice (`interrupt` / `close`) would have cut a running
+   * review round in half. Naming the wait is what makes the difference
+   * between "nobody is home" and "waiting for the reviewer, 220s in".
+   */
+  | "waiting-judge"
   /** It reported its task complete. */
   | "done"
   /** Alive and reporting, but not working and not asking — it stopped. */
@@ -57,6 +68,7 @@ export type ChildState =
   | "dead"
   /** Pane alive, but nothing has been reported for long enough to worry. */
   | "stalled";
+
 
 /** One measurement of one child. Every field is observed, never assumed. */
 export interface ChildObservation {
@@ -94,7 +106,16 @@ export interface ChildObservation {
  *     a file rather than an inference about pixels;
  *  3. completion, bounded by the current assignment;
  *  4. silence (stalled) before any positive report, because a report older
- *     than the heartbeat budget is not evidence of anything current.
+ *     than the heartbeat budget is not evidence of anything current;
+ *  5. and only THEN the positive reports, `waiting-judge` among them.
+ *
+ * Step 4 still precedes step 5 on purpose, and the ordering is exactly what
+ * makes `waiting-judge` honest rather than a blindfold: a child that says it
+ * is waiting for a reviewer and then STOPS heartbeating is `stalled` like any
+ * other corpse. What changed in round 4 is that the heartbeat no longer
+ * depends on the agent producing events, so a live child inside a 10-minute
+ * `judge_wait` keeps clearing step 4 and lands here, where its own report
+ * says what it is doing.
  */
 export function classifyChildState(observation: ChildObservation): ChildState {
   if (observation.paneAlive === false) return "dead";
@@ -113,11 +134,13 @@ export function classifyChildState(observation: ChildObservation): ChildState {
 
   if (stalledNow(observation)) return "stalled";
 
+  if (last?.state === "waiting-judge") return "waiting-judge";
   if (last?.state === "idle") return "idle";
   // Either it reported `working`, or it has not reported at all yet and is
   // still inside its heartbeat budget (a session that is booting).
   return "working";
 }
+
 
 /** `isStalled`, with the assignment stamp as the activity floor. */
 function stalledNow(observation: ChildObservation): boolean {
@@ -152,6 +175,18 @@ export interface ChildHealth {
   contextPercent?: number;
   /** Its own pi session id — what `orchestrator_recover` re-opens. */
   sessionId?: string;
+  /**
+   * How long the child has been in THIS state, in seconds.
+   *
+   * Separate from `quietForSeconds` and not redundant with it: with an
+   * independent heartbeat the child is never quiet for long, so the number
+   * that carries meaning is how long the STATE has lasted — 220 seconds of
+   * `waiting-judge` is a review round, 900 seconds of `waiting-input` is a
+   * question nobody answered.
+   */
+  stateForSeconds?: number;
+  /** What it is blocked on while `waiting-judge` (`reviewer`, `precommit`…). */
+  waitingFor?: string;
 }
 
 /** Build the health line for one child. */
@@ -161,12 +196,20 @@ export function childHealth(observation: ChildObservation): ChildHealth {
   const lastActivityAt = projection.lastActivityAt;
   const parsed = lastActivityAt ? Date.parse(lastActivityAt) : Number.NaN;
   const open = projection.openRequests[0];
+  // A question's clock starts when it was ASKED, not when the child last
+  // reported: the heartbeat keeps re-reporting `waiting-input`, and the number
+  // a supervisor needs is how long the human (or it) has left it hanging.
+  const since = open?.at ?? projection.lastStateSince;
+  const sinceMs = since ? Date.parse(since) : Number.NaN;
   return {
     childId: observation.childId,
     state,
     ...(lastActivityAt === undefined ? {} : { lastActivityAt }),
     ...(Number.isFinite(parsed)
       ? { quietForSeconds: Math.max(0, Math.round((observation.at - parsed) / 1000)) }
+      : {}),
+    ...(Number.isFinite(sinceMs)
+      ? { stateForSeconds: Math.max(0, Math.round((observation.at - sinceMs) / 1000)) }
       : {}),
     ...(open?.title === undefined ? {} : { dialogTitle: open.title }),
     ...(projection.lastState?.contextPercent === undefined
@@ -175,20 +218,30 @@ export function childHealth(observation: ChildObservation): ChildHealth {
     ...(projection.lastState?.sessionId === undefined
       ? {}
       : { sessionId: projection.lastState.sessionId }),
+    ...(state === "waiting-judge" && projection.lastState?.waitingFor !== undefined
+      ? { waitingFor: projection.lastState.waitingFor }
+      : {}),
   };
 }
+
 
 /**
  * States that are WORTH WAKING the orchestrator for.
  *
- * `working` is the only one that is not: it means "all is well, nobody has to
- * do anything". Everything else is either a request, a completion, or a
- * failure — and R3-5 is the standing proof that a completion which produces
- * no signal is indistinguishable from a hang.
+ * Two are not, and they are the two that mean "all is well, nobody has to do
+ * anything": `working`, and — since round 4 — `waiting-judge`. Waking a
+ * supervisor for a review round it started itself is not supervision, it is
+ * noise: the measured cost was 12 useless wake-ups across ~14 minutes, each
+ * one arriving with an `interrupt` suggestion attached.
+ *
+ * Everything else is either a request, a completion, or a failure — and R3-5
+ * is the standing proof that a completion which produces no signal is
+ * indistinguishable from a hang.
  */
 export function isNewsworthy(state: ChildState): boolean {
-  return state !== "working";
+  return state !== "working" && state !== "waiting-judge";
 }
+
 
 /** Re-ask backoff for a request nobody has answered yet. */
 export const REWAKE_BACKOFF_MS: readonly number[] = Object.freeze([10_000, 30_000, 60_000]);
@@ -209,11 +262,33 @@ export function describeChildState(state: ChildState): string {
   switch (state) {
     case "working": return "在干活";
     case "waiting-input": return "等人回答";
+    case "waiting-judge": return "在等门禁自己派出去的活（reviewer / precommit）";
     case "done": return "已完成";
     case "idle": return "停下了（没有 declare_done）";
     case "dead": return "pane 已消失";
-    case "stalled": return "pane 还在但已失联（心跳超时）";
+    case "stalled": return "pane 还在，但心跳停了（扩展已不在，不是「它在忙」）";
   }
+}
+
+/**
+ * One state, with the number that makes it readable.
+ *
+ * `waiting-judge` reads as "在等 reviewer 220s" rather than as a bare label,
+ * because the whole point of the state is that the DURATION is the reassuring
+ * part: a supervisor who cannot see how long the wait has run has no way to
+ * tell a normal review round from a wedged one.
+ */
+export function describeChildStateDetailed(health: ChildHealth): string {
+  const base = describeChildState(health.state);
+  if (health.state === "waiting-judge") {
+    const what = health.waitingFor ?? "reviewer";
+    const forSeconds = health.stateForSeconds === undefined ? "" : `（已等 ${health.stateForSeconds}s）`;
+    return `在等 ${what}${forSeconds} —— 正常，别打断`;
+  }
+  if (health.state === "waiting-input" && health.stateForSeconds !== undefined) {
+    return `${base}（已等 ${health.stateForSeconds}s）`;
+  }
+  return base;
 }
 
 /** Render the health snapshot the orchestrator reads every round. */
@@ -224,7 +299,8 @@ export function formatChildHealth(list: readonly ChildHealth[]): string {
       const quiet = h.quietForSeconds === undefined ? "" : `，已静默 ${h.quietForSeconds}s`;
       const dialog = h.dialogTitle ? `，框：${h.dialogTitle}` : "";
       const ctx = h.contextPercent === undefined ? "" : `，上下文 ${h.contextPercent}%`;
-      return `- ${h.childId}：${describeChildState(h.state)}${quiet}${dialog}${ctx}`;
+      return `- ${h.childId}：${describeChildStateDetailed(h)}${quiet}${dialog}${ctx}`;
     })
     .join("\n");
 }
+

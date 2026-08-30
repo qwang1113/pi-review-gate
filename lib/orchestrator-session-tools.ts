@@ -28,8 +28,11 @@ import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.
 import {
   buildKillPaneArgv,
   buildHandoffPaneArgv,
+  buildHidePaneLabelsArgv,
   parseSpawnedPaneId,
 } from "./orchestrator-tmux.ts";
+import { isLastDecoratedChild } from "./orchestrator-pane-decor.ts";
+
 import { spawnAuthorization } from "./orchestrator-gate.ts";
 import {
   closableChild,
@@ -64,10 +67,12 @@ import {
   alivePanes,
   childAssets,
   currentPlan,
+  refreshPaneLabels,
   toolFail as fail,
   toolReply as reply,
   requireOrchestratorMode,
 } from "./orchestrator-tool-kit.ts";
+
 
 
 /**
@@ -146,6 +151,10 @@ async function doWait(
       at: deps.now(),
       assetsFor: (child) => childAssets(deps, child),
     });
+    // The border labels are repainted from the health that was just measured
+    // — the probe is already here, so the screen never lags the receipt.
+    refreshPaneLabels(deps, snapshot);
+
 
     // The event rules carry a memory across polls, and it lives in the
     // sidecar rather than in this closure: a wait that rebuilt it would see
@@ -294,6 +303,18 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   const closable = closableChild(runtime, childId);
   if (!closable.ok) return fail("review-gate: " + closable.reason);
   const child = closable.child;
+  // The window-level label bar is taken down BEFORE the pane dies, because
+  // after `kill-pane` this pane id is no longer a valid `setw` target — and it
+  // is taken down only for the LAST decorated child, since the option is
+  // shared by every pane in the window (the orchestrator's own included).
+  // Leaving it set forever would be litter in the user's window; removing it
+  // while a sibling is still labelled would blank a border that is still in
+  // use. Purely cosmetic either way, so every failure here is swallowed.
+  if (isLastDecoratedChild(runtime.children, child.id)) {
+    for (const argv of buildHidePaneLabelsArgv(child.paneId)) {
+      try { deps.tmux(argv); } catch { /* cosmetic */ }
+    }
+  }
   try {
     const result = deps.tmux(buildKillPaneArgv(child.paneId));
     if (!result.ok && !/can't find pane|no such pane/i.test(result.stderr)) {
@@ -302,6 +323,7 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   } catch (error) {
     return fail(`review-gate: 关闭 pane 失败 —— ${(error as Error).message}`);
   }
+
   // R-28 — THE INCIDENT THIS BRANCH EXISTS FOR. `.git/hooks` lives in the
   // COMMON git dir, so it is shared by every linked worktree: a child that
   // installed the gate's hooks from inside its own orchestration worktree

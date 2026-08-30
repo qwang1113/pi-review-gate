@@ -314,6 +314,48 @@ export function isLegalTransition(from: TaskStatus, to: TaskStatus): boolean {
 }
 
 /**
+ * Carry the EXECUTION RECORD across a plan rewrite (round-4 P1).
+ *
+ * `write` replaces the plan wholesale, and the tool's own parameter shape
+ * never mentioned `status` — so an orchestrator that widened one boundary
+ * reset every task to `pending`, twice in one run, including two tasks whose
+ * branches were already merged. The damage is not cosmetic: constraint 3
+ * counts these statuses, and the state machine refuses `pending → done`, so
+ * recovering meant walking each task back through `running` by hand.
+ *
+ * The rule follows from what a status IS. Boundaries, dependencies and
+ * parallelism are what the USER approved (they are in `canonicalPlanText`);
+ * a status is what EXECUTION produced (it is deliberately excluded from it).
+ * Rewriting the approved content therefore has no business destroying the
+ * record of what already ran — so status and note are taken from the task
+ * with the same id, and only a genuinely NEW task starts at `pending`. A task
+ * that disappeared from the plan takes its status with it.
+ *
+ * `applyTaskStatus` stays the only way a status CHANGES; this is the only way
+ * one SURVIVES. Never mutates either input.
+ */
+export function mergeTaskProgress(
+  previous: OrchestratorPlan | undefined,
+  next: OrchestratorPlan,
+): OrchestratorPlan {
+  if (!previous) return next;
+  const before = new Map(previous.tasks.map((task) => [task.id, task]));
+  return {
+    ...next,
+    tasks: next.tasks.map((task) => {
+      const kept = before.get(task.id);
+      if (!kept) return task;
+      return {
+        ...task,
+        status: kept.status,
+        ...(kept.note === undefined ? {} : { note: kept.note }),
+      };
+    }),
+  };
+}
+
+
+/**
  * Move ONE task, returning a NEW plan (the caller persists it) or the reason
  * the move was refused. Never mutates its input.
  */

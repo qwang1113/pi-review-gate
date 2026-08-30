@@ -323,11 +323,20 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   `<orch-id>/<child-id>.jsonl`，物理隔离，因此没有收件人过滤这回事。通道是
   **文件路径、不属于任何进程** —— 项目经理换人时打开同一批路径即可，子会话
   完全无感。旧的全局广播队列已删除。
-- **状态取真值**：子会话侧门禁在 `agent_settled` / `turn_end` 上用
-  `ctx.isIdle()` / `ctx.getContextUsage()` 上报 working / waiting-input /
-  idle / done；`dead` 由 pane 消失判定，`stalled` 由心跳超时判定。
-  `screenLooksBusy`、屏幕解析与按键模拟全部删除，tmux 在编排层只剩两件事：
-  **判 pane 存活**、**开关 pane**。
+- **状态取真值**：子会话侧门禁用 `ctx.isIdle()` / `ctx.getContextUsage()` 上报
+  working / waiting-input / **waiting-judge** / idle / done；`dead` 由 pane 消失
+  判定，`stalled` 由心跳超时判定。`screenLooksBusy`、屏幕解析与按键模拟全部删除，
+  tmux 在编排层只剩三件事：**判 pane 存活**、**开关 pane**、**给 pane 上色与标题**
+  （纯展示，`select-pane -P/-T` + window 级 `setw pane-border-*`，一律不带 `-g`）。
+- **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：`judge_wait`、
+  full precommit、任何长命令都发生在**同一个 turn 内部**，agent 既不 settle 也不
+  结束 turn，挂在 `agent_settled` / `turn_end` 上的心跳因此必然超时 —— 一个正在等
+  自己 reviewer 的健康子会话被报成「失联」，而回执建议的 `interrupt` / `close`
+  照做就会把那一轮审查腰斩（唯一一条「照门禁说的做反而出事」的缺陷）。现在心跳由
+  子会话侧扩展的定时器发（10s），只要进程活着就发；已知的长阻塞如实上报成
+  `waiting-judge`（附已等秒数、在等谁），它**不叫醒项目经理**，`stalled` 也因此
+  回到只表示「扩展不在了」，其建议动作里**不再出现 `interrupt`**。
+
 - **提问任意一方先答即生效**：子会话侧用 `AbortController` + `Promise.race`
   把「人在框里答」与「项目经理经通道答」并列，谁先答谁生效，另一边的框自动
   撤下。框始终弹着 —— 这就是项目经理死亡时的天然回退，因此**没有任何超时机制**。
@@ -344,8 +353,15 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 对**其他会话**来说，只有三件事需要知道：
 
-1. **plan 是编排层的 loop goal**：`.pi/orchestrator-plan.json` 自己写不算数，
-   批准绑定在内容 hash 上（与 loop goal 同一机制）。
+1. **plan 是编排层的 loop goal，而且和它一样要先过审计**：
+   `.pi/orchestrator-plan.json` 自己写不算数，批准绑定在内容 hash 上（与 loop goal
+   同一机制）；`orchestrator_plan({action:"submit"})` 内部先派 `goal-auditor` 用
+   plan 专用模板审一轮（只 P0/P1 阻塞，裁决绑定 canonical plan 文本），**审计不过
+   直接退 findings、一个框都不弹**，过了才请用户批准。反过来，**不扩权的改动不再
+   重新惊动用户**：边界收窄、同目录内且不与他人相交的文件细化、加依赖、降并行度
+   都让批准平移到新内容并记一条审计条目；新增任务、新目录、删依赖、串行改并行、
+   提高并行度一律重批（`lib/orchestrator-plan-approval.ts`）。
+
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
    只被多注入一句「有项目经理在管这轮任务」。plan、调度细节一律不注入 —— 知道
    plan 会让它为 plan 而不是为自己的任务做优化。

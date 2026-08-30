@@ -25,6 +25,8 @@ import { normalizeRuntime } from "./orchestrator-registry.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
+import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
+
 import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
@@ -383,6 +385,18 @@ export interface GateState {
    * pre-review requirement there could never be unblocked.
    */
   goalPrereview?: GoalPrereviewRecord;
+  /**
+   * The PLAN pre-audit — `goalPrereview`'s twin for the orchestration layer
+   * (round-4 §7), written only by the gate after it parsed the auditor's JSON
+   * fence inside `orchestrator_plan`'s submit.
+   *
+   * Absent ⇒ this plan was never audited, and `submit` shows no dialog. It
+   * binds to the plan's CANONICAL text (tasks, boundaries, dependencies,
+   * parallelism), so executing the plan — which rewrites statuses constantly
+   * — never invalidates it, while widening a boundary always does.
+   */
+  planAudit?: PlanAuditRecord;
+
   /**
    * L8b audit HISTORY (goal criterion 2): every goal-auditor audit ever
    * recorded, PASS or FAIL, oldest first — `goalPrereview` above is only the

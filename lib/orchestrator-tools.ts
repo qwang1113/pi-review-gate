@@ -18,14 +18,21 @@ import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.
 import {
   applyTaskStatus,
   formatPlanSummary,
+  mergeTaskProgress,
   nextDecisionId,
   parsePlan,
-
   planHash,
   PLAN_RELPATH,
   type OrchestratorPlan,
   type TaskStatus,
 } from "./orchestrator-plan.ts";
+import {
+  decideApprovalCarry,
+  formatApprovalAmendments,
+  formatApprovalWidenings,
+  snapshotApprovedPlan,
+} from "./orchestrator-plan-approval.ts";
+
 import {
   formatOrchestrationStatus,
   notifyAuthorization,
@@ -82,9 +89,29 @@ export function buildPlanTranscriptMessage(plan: OrchestratorPlan): string {
     formatPlanSummary(plan) +
     "\n───────────────────────\n" +
     "同样的内容也在 `" + PLAN_RELPATH + "`（可随时自己去看）。\n" +
-    "批准的是**内容**：任务、文件边界、依赖、并行度中任何一项被改动，批准即失效。"
+    "批准的是**内容**：任务、文件边界、依赖、并行度中任何一项被**扩大**，批准即失效。\n\n" +
+    BOUNDARY_SEMANTICS
   );
 }
+
+/**
+ * WHAT AN APPROVED BOUNDARY ACTUALLY COVERS — stated to the user, in the
+ * dialog, before they agree to it.
+ *
+ * This paragraph is the honest half of the round-4 P0 fix. Letting a task
+ * refine `lib/x.ts` into `lib/x.ts` + `lib/y.ts` without a new dialog is what
+ * makes unattended orchestration possible — an orchestrator cannot know at
+ * planning time that a module will have to become two files. But it does
+ * widen what "approved" means, and a rule the user discovers AFTERWARDS is
+ * not a rule they agreed to. So it is written where they are deciding, in the
+ * text the approval binds to.
+ */
+const BOUNDARY_SEMANTICS =
+  "关于文件边界的确切含义（请读一句）：批准某个任务的边界后，该任务还可以在**同一目录内**" +
+  "新增文件（例如批了 `lib/a.ts`，它可以再拆出 `lib/b.ts`），前提是新增的路径**不与其他任务重叠**。\n" +
+  "这类细化不会再来打扰你（门禁会记进审计条目）。以下改动一律**重新**征求你的批准：" +
+  "新增任务、碰到新目录、删除依赖、把串行改成并行、提高并行上限。";
+
 
 /**
  * Dialog body — the DECISION only.
@@ -98,7 +125,9 @@ export function buildPlanConfirmMessage(plan: OrchestratorPlan): string {
   return (
     "plan 全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
     "批准后，项目经理才能按这份 plan 开子会话干活。批准的是**内容**：" +
-    "任务、文件边界、依赖、并行度中任何一项被改动，批准即失效，需要重新批准。\n" +
+    "新增任务、碰到新目录、删依赖、串行改并行、提高并行上限，都会让批准失效并重新问你；" +
+    "**同一目录内、且不与其他任务重叠的文件细化不会再问**（详见上方消息）。\n" +
+
     `标题（不可信数据）：${plan.title.slice(0, 80)}\n` +
     `规模：${plan.tasks.length} 个任务，并行上限 ${plan.maxParallel}`
   );
@@ -120,23 +149,65 @@ async function handlePlanAction(
         { problems: parsed.problems },
       );
     }
-    deps.savePlan(parsed.plan);
-    // Writing the plan REVOKES any previous approval whose content differs —
-    // the same content binding the loop goal uses. Recomputing here (rather
-    // than trusting the stored hash) is what makes "I edited it a bit" fail.
+    // ROUND-4 P1 — the execution record survives the rewrite. `write` replaces
+    // the approved CONTENT; it has no business resetting statuses that
+    // `set-status` produced (twice measured: two merged tasks reported as
+    // never started).
+    const previous = deps.readPlan().plan;
+    const next = mergeTaskProgress(previous, parsed.plan);
+    deps.savePlan(next);
+
+    // ROUND-4 P0 — DOES THIS EDIT NEED THE USER AT ALL? Recomputing the hash
+    // (rather than trusting a stored one) is what makes "I edited it a bit"
+    // fail. But an edit that GRANTS NOTHING NEW is not the thing the approval
+    // protects against, and treating it as one is what woke a human up for
+    // every task dispatched. So: identical content keeps the approval,
+    // narrowing content keeps it and records why, and only a genuine widening
+    // revokes it.
     const runtime = deps.runtime();
-    const stillApproved = runtime.approvedPlanHash === planHash(parsed.plan);
-    if (!stillApproved && runtime.approvedPlanHash) {
-      deps.saveRuntime({ ...runtime, approvedPlanHash: undefined, approvedPlanAt: undefined });
+    const nextHash = planHash(next);
+    if (runtime.approvedPlanHash === nextHash) {
+      return reply(
+        `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) +
+        "\n\n内容与已批准的版本一致，批准仍然有效。",
+        { approved: true },
+      );
     }
+    if (!runtime.approvedPlanHash) {
+      return reply(
+        `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) +
+        "\n\n尚未获得用户批准 —— 用 `orchestrator_plan({ action: \"submit\" })` 提交批准后才能 spawn。",
+        { approved: false },
+      );
+    }
+    const carry = runtime.approvedPlan
+      ? decideApprovalCarry(runtime.approvedPlan, next)
+      : { carries: false, widenings: ["门禁没有已批准 plan 的授权快照（记录不可读或来自更早的版本），无法证明这次改动没有扩权"], amendments: [] };
+    if (carry.carries) {
+      // The approval MOVES to the new content: the hash is what every later
+      // check compares against, so leaving it on the old text would refuse
+      // the very plan that was just judged harmless.
+      deps.saveRuntime({
+        ...runtime,
+        approvedPlanHash: nextHash,
+        approvedPlan: snapshotApprovedPlan(next, nextHash, runtime.approvedPlan?.at ?? nowIso),
+        approvalAmendments: [
+          ...(runtime.approvalAmendments ?? []),
+          { at: nowIso, changes: carry.amendments },
+        ],
+      });
+      return reply(
+        `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) + "\n\n" +
+        formatApprovalAmendments(carry.amendments) +
+        "\n（这条迁移已记进 runtime 的 approvalAmendments，用户随时可以查为什么没被问。）",
+        { approved: true, amended: true, amendments: carry.amendments },
+      );
+    }
+    deps.saveRuntime({ ...runtime, approvedPlanHash: undefined, approvedPlanAt: undefined, approvedPlan: undefined });
     return reply(
-      `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` +
-      formatPlanSummary(parsed.plan) +
-      "\n\n" +
-      (stillApproved
-        ? "内容与已批准的版本一致，批准仍然有效。"
-        : "尚未获得用户批准 —— 用 `orchestrator_plan({ action: \"submit\" })` 提交批准后才能 spawn。"),
-      { approved: stillApproved },
+      `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) + "\n\n" +
+      formatApprovalWidenings(carry.widenings),
+      { approved: false, widenings: carry.widenings },
     );
   }
 
@@ -145,6 +216,21 @@ async function handlePlanAction(
 
   if (action === PLAN_ACTIONS.submit) {
     if (!plan) return fail("review-gate: 还没有 plan 可提交 —— 先用 action:\"write\" 写一份。");
+
+    // THE AUDIT RUNS INSIDE SUBMIT, and it runs FIRST (user requirement,
+    // 2026-08-30). The asymmetry it closes: a loop goal could not reach the
+    // user without a `goal-auditor` PASS, while a plan — which decides what
+    // several children may touch and how many run at once — went straight to
+    // the human. The shape is copied from `propose_loop_goal` deliberately
+    // (philosophy two): ONE call builds the task, dispatches the judge, waits,
+    // adjudicates and records. A failed audit hands the objections back and
+    // NO DIALOG IS SHOWN — the user is never asked to sign something an
+    // independent reader has already objected to.
+    const audit = await deps.auditPlan(plan);
+    if (!audit.ok) {
+      return fail(audit.text, { approved: false, audited: false });
+    }
+
     // O-1 — the FULL plan goes to the transcript first, and the dialog then
     // points at it. A plan approval binds to CONTENT (tasks, boundaries,
     // dependencies, parallelism), and the dialog body is capped at a couple
@@ -166,13 +252,19 @@ async function handlePlanAction(
         { approved: false },
       );
     }
+    const hash = planHash(plan);
     deps.saveRuntime({
       ...deps.runtime(),
-      approvedPlanHash: planHash(plan),
+      approvedPlanHash: hash,
       approvedPlanAt: nowIso,
+      // WHAT was approved, not just its fingerprint — this is what later lets
+      // a narrowing edit skip the dialog instead of waking the user again.
+      approvedPlan: snapshotApprovedPlan(plan, hash, nowIso),
+      approvalAmendments: [],
     });
     return reply("review-gate: plan 已获用户批准，可以开始 `orchestrator_spawn`。", { approved: true });
   }
+
 
   if (action === PLAN_ACTIONS["set-status"]) {
     if (!plan) return fail("review-gate: 还没有 plan。");

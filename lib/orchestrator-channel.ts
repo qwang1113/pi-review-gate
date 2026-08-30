@@ -63,9 +63,17 @@ export const MAX_INLINE_RECORD_CHARS = 1500;
  * No record for this long, while the pane is still alive, means `stalled` —
  * the extension died or the process wedged.
  *
- * The child heartbeats on every settle and every turn end, so silence this
- * long is not "a slow task": a child blocked in a 700s poll still reports,
- * because reporting is the extension's job and not the agent's.
+ * WHAT THIS BUDGET IS ALLOWED TO MEAN (round-4 P0). It used to be measured
+ * against a heartbeat driven by the child's AGENT events (`agent_settled`,
+ * `turn_end`), and those stop for the entire length of a `judge_wait`, a full
+ * precommit or any long tool call — all of which happen INSIDE one turn. So
+ * the rule claimed to measure "is the extension alive" while actually
+ * measuring "is the agent producing events", and a child quietly waiting for
+ * its own reviewer was reported as lost twice in one run, for ~14 minutes,
+ * with `interrupt` offered as the fix. The heartbeat is now sent by an
+ * INDEPENDENT TIMER in the child's gate (see the extension's
+ * `startChildHeartbeat`): it ticks while the agent is blocked, so silence for
+ * this long once again means what it says — nobody is home.
  */
 export const HEARTBEAT_STALE_MS = 180_000;
 
@@ -76,8 +84,15 @@ export type ChannelWriter = "child" | "orchestrator";
  * What a child reports about itself. `dead` is NOT in here on purpose: a
  * corpse cannot file a report, so liveness is the one thing the orchestrator
  * measures from outside (pane existence).
+ *
+ * `waiting-judge` is the round-4 addition, and it exists because SILENCE and
+ * WAITING FOR A KNOWN THING are not the same fact. The gate is the one that
+ * dispatched the judge, so it knows precisely why the agent went quiet;
+ * reporting that instead of letting the silence be interpreted is what keeps
+ * a healthy review round from looking like a hang.
  */
-export type ChildReportedState = "working" | "waiting-input" | "idle" | "done";
+export type ChildReportedState = "working" | "waiting-input" | "idle" | "done" | "waiting-judge";
+
 
 /** A bulky field that lives in a side file next to the channel. */
 export interface ChannelPayloadRef {
@@ -107,6 +122,13 @@ export interface ChannelStateRecord extends ChannelRecordBase {
   dialogTitle?: string;
   /** Free-form progress note; never a criterion. */
   note?: string;
+  /**
+   * WHAT it is blocked on, when `state` is `waiting-judge` (`reviewer`,
+   * `precommit`, …). Written by the gate that started that work, never
+   * inferred: "waiting" with no object is just silence with a label.
+   */
+  waitingFor?: string;
+
 }
 
 /** Child → orchestrator: a dialog is open, here is the whole question. */
@@ -166,14 +188,39 @@ export interface ChannelInstructRecord extends ChannelRecordBase {
   textRef?: ChannelPayloadRef;
 }
 
-/** Child → orchestrator: I injected that instruction (or could not). */
+/**
+ * Child → orchestrator: I have that instruction — and later, I applied it.
+ *
+ * TWO STAGES, BECAUSE `followUp` MEANS "LATER" (round-4 P1). The old record
+ * had one meaning ("injected"), so the only way to acknowledge a `followUp`
+ * was to have already delivered it. But `followUp` is DEFINED as "finish what
+ * you are doing, then read this": a busy child cannot inject it yet, the
+ * orchestrator's tool therefore judged the send a failure, and the message it
+ * had already written was silently orphaned in the channel. Measured: one
+ * authorization lost, worked around by smuggling the text into an answer
+ * option.
+ *
+ * So a child now says `received` the moment the instruction is in its hands
+ * (which is what proves the gate is alive and listening) and `injected` when
+ * pi has actually taken it. `steer` and `interrupt` still require `injected`
+ * — they promise to act on the CURRENT turn, and a queued one has not.
+ */
+export type InstructAckStage = "received" | "injected";
+
 export interface ChannelInstructAckRecord extends ChannelRecordBase {
   kind: "instruct-ack";
   from: "child";
   instructId: string;
+  /** True once the instruction was actually applied (`injected`). */
   delivered: boolean;
+  /**
+   * Which half of the handshake this is. Absent ⇒ `injected`: records written
+   * before this field existed only ever reported completed injections.
+   */
+  stage?: InstructAckStage;
   detail?: string;
 }
+
 
 export type ChannelRecord =
   | ChannelStateRecord
@@ -386,6 +433,18 @@ function parseRecord(line: string): ChannelRecord | undefined {
 export interface ChannelProjection {
   /** Most recent self-report, if the child ever made one. */
   lastState?: ChannelStateRecord;
+  /**
+   * When the child ENTERED the state it is in now — the first report of an
+   * unbroken run of the same state, not the newest one.
+   *
+   * It answers "how long has this been going on", which is the number that
+   * makes a state readable: `waiting-judge 220s` is a healthy review round,
+   * `waiting-input 900s` is a question nobody is coming to answer. The
+   * heartbeat rewrites the same state every minute, so the NEWEST record
+   * cannot answer it.
+   */
+  lastStateSince?: string;
+
   /** Requests that have neither been settled nor answered yet. */
   openRequests: ChannelRequestRecord[];
   /**
@@ -410,12 +469,20 @@ export interface ChannelProjection {
  */
 export function projectChannel(records: readonly ChannelRecord[]): ChannelProjection {
   const settled = new Set<string>();
-  const acked = new Set<string>();
+  const injected = new Set<string>();
   for (const record of records) {
     if (record.kind === "request-settled") settled.add(record.requestId);
-    if (record.kind === "instruct-ack") acked.add(record.instructId);
+    // Only an INJECTED acknowledgement takes an instruction out of the child's
+    // inbox. A `received` ack proves the gate has it — which is what the
+    // orchestrator's receipt is allowed to rely on — but the child still has
+    // to deliver it, and dropping it here would lose exactly the `followUp`
+    // messages this two-stage handshake exists to stop losing.
+    if (record.kind === "instruct-ack" && (record.stage ?? "injected") === "injected") {
+      injected.add(record.instructId);
+    }
   }
   let lastState: ChannelStateRecord | undefined;
+  let lastStateSince: string | undefined;
   const openRequests: ChannelRequestRecord[] = [];
   const pendingAnswers: ChannelAnswerRecord[] = [];
   const pendingInstructs: ChannelInstructRecord[] = [];
@@ -424,6 +491,10 @@ export function projectChannel(records: readonly ChannelRecord[]): ChannelProjec
     if (!lastActivityAt || record.at > lastActivityAt) lastActivityAt = record.at;
     switch (record.kind) {
       case "state":
+        // A run of identical states keeps its FIRST timestamp: the heartbeat
+        // re-reports the same state on a timer, so "since" would otherwise
+        // reset every tick and every wait would look freshly started.
+        if (!lastState || lastState.state !== record.state) lastStateSince = record.at;
         lastState = record;
         break;
       case "request":
@@ -433,13 +504,22 @@ export function projectChannel(records: readonly ChannelRecord[]): ChannelProjec
         if (!settled.has(record.requestId)) pendingAnswers.push(record);
         break;
       case "instruct":
-        if (!acked.has(record.instructId)) pendingInstructs.push(record);
+        if (!injected.has(record.instructId)) pendingInstructs.push(record);
         break;
       default:
         break;
     }
   }
-  return { lastState, openRequests, pendingAnswers, pendingInstructs, lastActivityAt };
+
+  return {
+    lastState,
+    ...(lastStateSince === undefined ? {} : { lastStateSince }),
+    openRequests,
+    pendingAnswers,
+    pendingInstructs,
+    lastActivityAt,
+  };
+
 }
 
 /**

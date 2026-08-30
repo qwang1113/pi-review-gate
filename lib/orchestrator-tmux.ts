@@ -191,6 +191,71 @@ export function buildKillPaneArgv(pane: string): readonly string[] {
   return assertSafeTmuxArgv(["kill-pane", "-t", requirePane(pane, "pane")]);
 }
 
+/**
+ * ── PANE DECORATION (2026-08-30) ──
+ *
+ * Four builders, all cosmetic, and they are the ONLY writes this module makes
+ * that are not about creating, closing or listing a pane. They exist because
+ * the user asked for children to be tellable apart on screen, and because the
+ * gate — not the orchestrator — has to be the one that runs them (philosophy
+ * one: the project manager never assembles a tmux command).
+ *
+ * WHY THIS IS NOT THE FORBIDDEN KIND OF CONFIG WRITE. `assertSafeTmuxArgv`
+ * refuses any option write carrying `-g`, because that is the user's GLOBAL
+ * configuration and no gate has business touching it. These are window- and
+ * pane-scoped: `select-pane -P/-T` affects exactly one pane the registry
+ * created, and `setw -t <pane>` affects the window that pane lives in — the
+ * one the orchestration was invited into. Both are undone on close.
+ *
+ * The colour and title STRINGS are decided in lib/orchestrator-pane-decor.ts;
+ * everything here does is put them in an argv array where no shell can see
+ * them. A title is arbitrary text (a task title), so it travels as its own
+ * argv element and is never concatenated into a command line.
+ */
+
+/** Set one pane's border colour (`-P` is the pane style). */
+export function buildPaneStyleArgv(pane: string, style: string): readonly string[] {
+  return assertSafeTmuxArgv(["select-pane", "-t", requirePane(pane, "pane"), "-P", style]);
+}
+
+/** Set one pane's title — what `pane-border-format` then renders. */
+export function buildPaneTitleArgv(pane: string, title: string): readonly string[] {
+  return assertSafeTmuxArgv(["select-pane", "-t", requirePane(pane, "pane"), "-T", title]);
+}
+
+/**
+ * Turn the label bar on for the WINDOW a pane belongs to.
+ *
+ * Two commands rather than one because tmux takes one option per call; the
+ * caller runs them in order and treats any failure as cosmetic.
+ */
+export function buildShowPaneLabelsArgv(
+  pane: string,
+  status: string,
+  format: string,
+): readonly (readonly string[])[] {
+
+  const target = requirePane(pane, "pane");
+  return [
+    assertSafeTmuxArgv(["setw", "-t", target, "pane-border-status", status]),
+    assertSafeTmuxArgv(["setw", "-t", target, "pane-border-format", format]),
+  ];
+}
+
+/**
+ * Undo it — `-u` restores each option to what the user's own config says,
+ * which is not the same as setting it to a default we invented.
+ */
+export function buildHidePaneLabelsArgv(pane: string): readonly (readonly string[])[] {
+
+  const target = requirePane(pane, "pane");
+  return [
+    assertSafeTmuxArgv(["setw", "-t", target, "-u", "pane-border-status"]),
+    assertSafeTmuxArgv(["setw", "-t", target, "-u", "pane-border-format"]),
+  ];
+}
+
+
 /** List the pane ids of the window a pane belongs to (liveness probing). */
 export function buildListPanesArgv(pane: string): readonly string[] {
   return assertSafeTmuxArgv([

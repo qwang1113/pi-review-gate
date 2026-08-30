@@ -54,6 +54,8 @@ import {
   type ChannelRequestRecord,
   type ChannelTarget,
   type ChildReportedState,
+  type InstructAckStage,
+
 } from "./orchestrator-channel.ts";
 
 /** How often the channel is re-read while a question is outstanding. */
@@ -263,6 +265,12 @@ export function acknowledgeInstruct(
   instructId: string,
   delivered: boolean,
   detail?: string,
+  /**
+   * `received` = the gate has the instruction and queued it; `injected` = pi
+   * has taken it. Defaults to `injected` so the old single-stage meaning is
+   * preserved for any caller that does not care about the distinction.
+   */
+  stage: InstructAckStage = "injected",
 ): void {
   try {
     appendRecord(binding.io, binding.target, {
@@ -271,9 +279,11 @@ export function acknowledgeInstruct(
       at: stamp(binding.io),
       instructId,
       delivered,
+      stage,
       ...(detail === undefined ? {} : { detail }),
     });
   } catch {
     /* best effort */
   }
 }
+

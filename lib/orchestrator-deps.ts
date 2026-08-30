@@ -171,8 +171,33 @@ export interface OrchestratorDeps {
   supervisionMemory(): SupervisionMemory;
   saveSupervisionMemory(next: SupervisionMemory): void;
 
-  /** This orchestrator's OWN context usage, as a percentage (block 4). */
+  /**
+   * This orchestrator's OWN context usage, as a percentage (receipt block 4).
+   *
+   * `undefined` means the host genuinely could not measure it, and the receipt
+   * says exactly that rather than implying room. Round 4 measured the other
+   * failure: the extension never PASSED this binding at all, so every one of
+   * 15+ receipts reported "宿主未提供读数" and the orchestrator had no way to
+   * judge when to hand over — on the one axis (running long) that defines
+   * unattended work.
+   */
   contextPercent(): number | undefined;
+
+  /**
+   * Run the PLAN PRE-AUDIT and record its verdict (round-4 §7).
+   *
+   * Injected rather than implemented here because the whole chain belongs to
+   * the extension: spawning the `goal-auditor` judge process, waiting for it,
+   * parsing its fence, binding the verdict to the plan's canonical hash. The
+   * tool only needs the answer — and the answer is deliberately narrow: `ok`
+   * means "the dialog may open", anything else is text to hand back.
+   *
+   * It BLOCKS for minutes, exactly like the goal audit inside
+   * `propose_loop_goal`, and for the same reason: returning early and asking
+   * the agent to come back is the multi-step dance this design removes.
+   */
+  auditPlan(plan: OrchestratorPlan): Promise<{ ok: true } | { ok: false; text: string }>;
+
 
 
   /**
