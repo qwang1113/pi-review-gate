@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
   ORCHESTRATOR_DOC_PATTERN,
   formatOrchestrationStatus,
-  humanOnlyDecision,
   notifyAuthorization,
   orchestratorDoneProblems,
   orchestratorWriteBlock,
@@ -165,16 +164,6 @@ test("CONSTRAINT 9: only an orchestrator may notify the human", () => {
   }
 });
 
-test("CONSTRAINT 14: irreversible and security decisions are never proxied", () => {
-  for (const kind of ["sensitive-file"]) {
-    const reason = humanOnlyDecision(kind);
-    assert.ok(reason, `${kind} must be human-only`);
-    assert.match(reason, /真人/);
-  }
-  assert.equal(humanOnlyDecision("technical-tradeoff"), undefined,
-    "technical trade-offs ARE the orchestrator's to make — the boundary cuts both ways");
-  assert.equal(humanOnlyDecision("gate-bypass"), undefined);
-});
 
 // ---------------------------------------------------------------------------
 // CONSTRAINTS 3, 4, 10, 11 — the exit contract

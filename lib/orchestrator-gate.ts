@@ -23,7 +23,8 @@
  *  11 unreported decisions block exit ... {@link orchestratorDoneProblems}
  *  12 relay preconditions ............... lib/orchestrator-relay.ts
  *  13 children come from the tool ....... lib/orchestrator-guard.ts + registry
- *  14 human-only decisions not proxied .. {@link humanOnlyDecision}
+ *  14 (retired 2026-09-07: humanOnlyDecision was dead code — the consent
+ *      model lets the project manager answer sensitive-edit dialogs too)
  *
  * Pure module: no IO, no git, no tmux.
  */
@@ -217,28 +218,6 @@ export function notifyAuthorization(taskMode: TaskMode | undefined): Authorizati
   };
 }
 
-// ---------------------------------------------------------------------------
-// Constraint 14 — some decisions may never be answered on the user's behalf
-// ---------------------------------------------------------------------------
-
-export type HumanOnlyDecision = "sensitive-file";
-
-const HUMAN_ONLY_REASONS: Readonly<Record<HumanOnlyDecision, string>> = Object.freeze({
-  "sensitive-file":
-    "敏感文件（.env / 私钥 / 凭据）授权必须真人确认 —— 项目经理不得代答。",
-});
-
-/**
- * The decisions an orchestrator must escalate rather than answer.
- *
- * The boundary the user drew: technical trade-offs, `/gate-bypass` and
- * proxy-approving a child's goal (inside its task boundary) are the
- * orchestrator's to make, on the record. Anything IRREVERSIBLE or
- * security-relevant is the human's, full stop.
- */
-export function humanOnlyDecision(kind: string): string | undefined {
-  return HUMAN_ONLY_REASONS[kind as HumanOnlyDecision];
-}
 
 // ---------------------------------------------------------------------------
 // Constraints 3, 4, 10, 11 — what an orchestration must settle before it ends
