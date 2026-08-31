@@ -118,6 +118,36 @@ test("a well-formed runtime survives a round trip", () => {
   assert.deepEqual(cleaned, runtime);
 });
 
+test("an approved plan's task REPO survives the sidecar round trip", () => {
+  // snapshotApprovedPlan writes repo; normalizeApprovedPlan must read it
+  // back (2026-09-15) — the repo decides WHICH checkout a task's child
+  // writes in, so a snapshot that dropped it would misjudge a later repo
+  // change as a widening (fail-closed, but wrong).
+  const runtime = {
+    ...runtimeWith(child()),
+    approvedPlanHash: GOOD_HASH,
+    approvedPlanAt: NOW,
+    approvedPlan: {
+      hash: GOOD_HASH,
+      at: NOW,
+      maxParallel: 2,
+      tasks: [
+        { id: "t1", fileBoundaries: ["lib/a/"], dependsOn: [], execution: "serial", repo: "/other/repo" },
+        { id: "t2", fileBoundaries: ["lib/b/"], dependsOn: [], execution: "serial" },
+      ],
+    },
+  };
+  const cleaned = normalizeRuntime(JSON.parse(JSON.stringify(runtime)), "orch-abc-1");
+  assert.deepEqual(
+    cleaned?.approvedPlan?.tasks.map((t) => ({ id: t.id, repo: t.repo })),
+    [
+      { id: "t1", repo: "/other/repo" },
+      { id: "t2", repo: undefined },
+    ],
+    "the repo of each approved task is read back exactly as approved",
+  );
+});
+
 test("SECURITY: the orchestration ID comes from the SESSION, never from the file", () => {
   const cleaned = normalizeRuntime({ orchestrationId: "orch-forged-1", children: [] }, "orch-real-1");
   assert.equal(cleaned?.orchestrationId, "orch-real-1",

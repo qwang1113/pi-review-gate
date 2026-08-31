@@ -446,7 +446,13 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     const dependsOn = Array.isArray(task.dependsOn)
       ? task.dependsOn.filter((d): d is string => typeof d === "string" && d.length > 0)
       : [];
-    tasks.push({ id, fileBoundaries, dependsOn, execution });
+    // The declared repo is authorizing: it decides WHICH checkout a task's
+    // child writes in. Written by snapshotApprovedPlan, so read it back with
+    // the same shape — a snapshot that dropped it would read a task approved
+    // with a repo as one approved without, and the carryover check would
+    // misjudge a later repo change as a widening (fail-closed, but wrong).
+    const repo = typeof task.repo === "string" && task.repo.length > 0 ? task.repo : undefined;
+    tasks.push({ id, fileBoundaries, dependsOn, execution, ...(repo ? { repo } : {}) });
   }
   return { hash: snapshotHash, at, maxParallel, tasks };
 }
