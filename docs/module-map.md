@@ -41,9 +41,10 @@
 
 ### 1.2 工具注册分两处（重要）
 
-- **扩展直接注册 5 个** gate 工具：`judge_submit`、`setup_workspace`、
-  `declare_done`、`set_gate_mode`、`request_arbitration`。
-  核对：`grep -c '^  pi.registerTool({' extensions/review-gate.ts` → 当前 5。
+- **扩展直接注册 4 个** gate 工具：`judge_submit`、
+  `declare_done`、`set_gate_mode`、`request_arbitration`（`setup_workspace` 于
+  2026-09-07 退役）。
+  核对：`grep -c '^  pi.registerTool({' extensions/review-gate.ts` → 当前 4。
 
 - **19 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
   - `lib/goal-tools.ts`：`propose_loop_goal`（L8：跑 goal 审计 → 问用户 →
@@ -192,8 +193,8 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 `sensitive-grant.ts` 与 `arbitration.ts` 是两个**受限的放行口子**（一次性
 敏感文件授权、独立 arbiter 裁决循环拦截）。`task-mode.ts` 定义模式强弱序
 （normal < explore < loop < orchestrator）与升降级规则，`pi-self.ts` 让
-`/tmp` 草稿会话不自动进 loop，`workspace-branch.ts` 是 `setup_workspace` 与
-`declare_done` 背后的工作区/分支事实。两条**带自己层号**的关卡也在这一域：
+`/tmp` 草稿会话不自动进 loop，`workspace-branch.ts` 是保护分支
+（main/master/dev/develop）检测：会话开始提示、checkpoint 前弹确认框。
 `copilot-review.ts`（L7，PR 之后的 Copilot 审查闭环）与 `loop-goal.ts`（L8，
 用户批准的退出契约）——两者的**判定**在这里，工具体分别在
 `copilot-review-tools.ts` 与 `goal-tools.ts` / `goal-prereview-tools.ts`，
@@ -260,8 +261,8 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 三个（`orchestrator-probe.ts` / `orchestrator-pane-read.ts` /
 `orchestrator-keys.ts` —— 它们的全部工作就是让**终端**可读），新增了四个：
 
-- **纯决策**：`orchestrator-gate.ts`（14 条硬约束）、
-  `orchestrator-boundaries.ts`（文件边界代数——两个任务能否并行只由它回答）、
+- **纯决策**：`orchestrator-gate.ts`（13 条硬约束；约束 7/10 已随隔离 worktree 与工作分支退役）、
+  `orchestrator-boundaries.ts`（文件边界代数——同 repo 任务互斥、跨 repo 可并行的判据）、
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
   `orchestrator-plan-approval.ts`（**这次改动扩权了吗**——不扩权的边界细化不
   重新惊动用户，扩权一律重批）、
@@ -285,7 +286,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   新闻、渲染回执的前三块）。
 - **与真实机器打交道**：`orchestrator-tmux.ts`（tmux 命令的唯一构造处，现在
   只剩开 pane / 关 pane / 列 pane —— 没有 `send-keys`，没有 `capture-pane`）、
-  `orchestrator-wiring.ts`（跑 tmux、读写 plan、加删 worktree、持有通道 IO 与
+  `orchestrator-wiring.ts`（跑 tmux、读写 plan、持有通道 IO 与
   监督记忆）、`orchestrator-delivery.ts`（投递并**校验真的送达**才报成功，证据
   是通道记录与子会话回执）、`orchestrator-notify.ts`（桌面通知，唯一入口 +
   节流）、`orchestrator-guard.ts`（tmux backstop：拦手写 tmux）。
@@ -467,7 +468,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `orchestrator-tool-kit.ts` | 编排工具的共用前置：模式校验、pane 实况、plan 可用性 |
 | `orchestrator-tools.ts` | plan / notify 两个不碰 tmux 的工具 |
 | `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据），以及那份五块回执的装配 |
-| `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、加删 worktree、持有本编排唯一的通道 IO 与监督记忆 |
+| `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、持有本编排唯一的通道 IO 与监督记忆 |
 | `parallel-review.ts` | 审查契约：一轮一个 reviewer、判不可变的 `baseline..HEAD`，以及交给它的任务文本 |
 | `pi-self.ts` | `/tmp` 草稿会话识别：这类会话不由 agent 自行进入 loop |
 | `polish-gate.ts` | 连续 READY 或同一文件反复打磨时，再审必须给出理由 |
@@ -497,8 +498,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
 | `verdict-parse.ts` | 裁决解析：review 只认 JSON fence，precommit 只认 `## Overall:` sentinel |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
-| `workspace-branch.ts` | `setup_workspace` 与 `declare_done` 背后的工作区与分支事实 |
-| `worktree-merge.ts` | 合并**在哪儿**执行：基准分支被别的 worktree 占着时（并行 lane 的常态）就地合并的判定，脏工作区一律拒绝（但真正的护栏是 `git merge --squash` 自身的原子拒绝，脏检查只为更好的报错）；以及 **squash subject 归纳**（从各 checkpoint 的 type/scope 折出主 type/scope，全 ASCII，L5 恒成立） |
+| `workspace-branch.ts` | 保护分支检测（main/master/dev/develop）：checkpoint 前的确认框与 ship 拒绝（2026-09-07 起 `setup_workspace`/工作分支/squash 落地全部退役，只剩这个软护栏） |
 
 ---
 

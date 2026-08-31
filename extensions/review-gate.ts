@@ -131,28 +131,7 @@ import { registerUserInteractionTools } from "../lib/user-interaction-tools.ts";
 // from here with one call.
 import { registerGateCommands } from "../lib/gate-command-tools.ts";
 
-import {
-  parsePorcelain,
-  describeDirty,
-  appendBranchOp,
-  deriveWorkBranchName,
-  decideFinish,
-  commitBranchAllowed,
-  parseConflictFiles,
-  interpretWorktreeChoice,
-  isProtectedBranch,
-  WORKTREE_CHOICES,
-  type DirtyFile,
-  type BranchOp,
-} from "../lib/workspace-branch.ts";
-import {
-  decideMergeVenue,
-  squashMergeArgv,
-  squashMergeMessage,
-  parseWorktreeList,
-  venueRefusal,
-  type MergeVenue,
-} from "../lib/worktree-merge.ts";
+import { isProtectedBranch } from "../lib/workspace-branch.ts";
 // ---- the SUPERVISION CHANNEL (both sides). A child reports on it and reads
 // its instructions from it; an orchestrator reads it and writes answers. It
 // replaced the global attention queue, the screen scraping and send-keys.
@@ -307,7 +286,6 @@ import {
   sidecarPath as sidecarPathIn,
   stateVariantFrom,
   STATE_VARIANT_ENV,
-  ORCH_BASE_BRANCH_ENV,
 
   unmetRequirements,
   type GateState,
@@ -1529,14 +1507,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // something they could not read.
     showToUser: (title, text) => { showToUser(latestCtx ?? {}, title, text); },
 
-    branchFacts: () => ({
-      workBranch: state.workBranch,
-      baseBranch: state.baseBranch,
-      // "Settled", not "already merged": declare_done merges AFTER these
-      // checks, so requiring a completed merge here could never pass.
-      mergeSettled: Boolean(state.baseBranch) && !state.mergeConflict,
-      mergeWaived: Boolean(state.mergeWaived),
-    }),
     // ROUND-4 P1 — THIS BINDING WAS SIMPLY MISSING. `orchestrator_wait`'s
     // fourth block (context usage + when to hand over) is computed from it,
     // and because nothing was passed, all 15+ receipts of the fourth run said
@@ -1554,6 +1524,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         return state.sessionId ? `${dir}/${state.sessionId}.jsonl` : undefined;
       } catch { return undefined; }
     },
+    knownRepoRoots: () => knownRepoRoots(),
     // Symmetric re-arm (goal 5): the project manager's work is its
     // orchestration tools — the loop session's work is its edits. The
     // whole reason `loopArmed` has three re-arm sites on the edit path
@@ -1568,11 +1539,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   registerOrchestratorStateTools(pi, orchestratorDeps);
   registerOrchestratorSessionTools(pi, orchestratorDeps);
 
-  /** Constraints 3, 4, 10 and 11 — the orchestration's own exit contract. */
+  /** Constraints 3, 4 and 11 — the orchestration's own exit contract. */
   function orchestrationDoneProblems(): string[] {
     if (state.taskMode !== "orchestrator") return [];
     const runtime = state.orchestrator ?? emptyRuntime(currentOrchestrationId());
-    const branch = orchestratorDeps.branchFacts();
     const panes = (() => {
       try {
         const self = orchestratorDeps.ownPane();
@@ -1585,10 +1555,6 @@ export default function reviewGate(pi: ExtensionAPI) {
       plan: readPlanFile(primaryRepoRoot).plan,
       runtime,
       alivePaneIds: panes,
-      workBranch: branch.workBranch,
-      baseBranch: branch.baseBranch,
-      mergeSettled: branch.mergeSettled,
-      mergeWaived: branch.mergeWaived,
     });
   }
 
@@ -1942,405 +1908,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     return undefined;
   }
 
-  /** `git status --porcelain`, parsed. An unreadable repo reports clean. */
-  function dirtyFiles(root: string): DirtyFile[] {
-    try {
-      return parsePorcelain(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }));
-    } catch {
-      return [];
-    }
-  }
-
-  /** Append one entry to the branch audit log (bounded, best-effort). */
-  function logBranchOp(st: GateState, op: BranchOp): void {
-    st.branchOps = appendBranchOp(st.branchOps, op);
-  }
-
-  /**
-   * Record where this session STARTED: the branch it is on and whatever was
-   * already uncommitted. Both are facts the session must not silently absorb
-   * — the dirty worktree blocks edits until `setup_workspace` settles it, and
-   * the branch is the first entry of the trail declare_done follows back.
-   */
-  function recordSessionStartWorkspace(): void {
-    try {
-      const files = dirtyFiles(primaryRepoRoot);
-      if (files.length) {
-        state.worktreeDirty = {
-          files: files.map((f) => `${f.status.trim() || "??"} ${f.path}`).slice(0, 200),
-          at: new Date().toISOString(),
-        };
-      } else {
-        delete state.worktreeDirty;
-      }
-      const branch = currentBranch(primaryRepoRoot);
-      if (branch) {
-        logBranchOp(state, { op: "checkout", from: null, to: branch, at: new Date().toISOString() });
-      }
-    } catch { /* never block a session start on bookkeeping */ }
-  }
-
-  /** What `finishWorkBranch` reports — including HOW the work landed (R3-5). */
-  type FinishResult = { ok: boolean; text: string; merge: "merged" | "waived" | "none" };
-
-  /** `git worktree list --porcelain`; "" when it cannot be read (⇒ no holder). */
-  function gitWorktreeList(root: string): string {
-    try {
-      return execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: root, encoding: "utf8" });
-    } catch {
-      return "";
-    }
-  }
-
-  /**
-   * Best-effort refresh of `base` from its remote before a work branch is cut
-   * off it (D — the fetch + `--ff-only` update the AGENTS.md branch dance used
-   * to leave to the agent). setup_workspace expresses the intent ("branch off a
-   * current base"); the gate does the git.
-   *
-   * NEVER fatal, and never anything but a fast-forward: offline is a note, a
-   * DIVERGED base is a note (a merge/rebase/force there is the user's call, not
-   * the gate's).
-   *
-   * 2026-08-31: the fetch is now ASYNC — it must never block the
-   * setup_workspace call the way a slow/offline `git fetch` did (the tool
-   * froze mid-setup). The branch cut itself stays synchronous (local-only,
-   * fast); the fetch + optional ff-only merge run in the background and
-   * their outcome lands in the notes the caller folds into the receipt.
-   */
-  function refreshBaseBeforeBranch(root: string, base: string): string[] {
-    // The receipt note says the refresh runs in the background; the OUTCOME
-    // lands in .pi/gate-timings.jsonl (kind: base-refresh) so it stays
-    // visible to later sessions / /gate-status / a grep — reviewer P1:
-    // pushing into a local array after the receipt was returned was dead code.
-    const notes: string[] = [`基准分支 ${base} 的远端更新在后台进行（git fetch 异步执行，不阻塞本次工作区确认）——它可能暂时落后于远端，declare_done 前可手动确认；结果会写入 .pi/gate-timings.jsonl。`];
-    void refreshBaseAsync(root, base);
-    return notes;
-  }
-
-  /**
-   * The asynchronous half of refreshBaseBeforeBranch: best-effort fetch,
-   * then a fast-forward merge of `@{u}` when standing on `base` with an
-   * upstream. Never throws; the outcome is recorded as a base-refresh
-   * timing record so it is actually visible after the receipt returned.
-   */
-  async function refreshBaseAsync(root: string, base: string): Promise<void> {
-    const at = new Date().toISOString();
-    let outcome: "fetched-ff" | "diverged" | "offline" | "no-upstream" | "not-on-base" = "offline";
-    let note = "";
-    let fetched = false;
-    try {
-      await runGitAsync(root, ["fetch", "--quiet"]);
-      fetched = true;
-    } catch {
-      outcome = "offline";
-      note = `基准分支 ${base} 未能从远端更新（git fetch 失败，可能离线）—— 它可能落后于远端。`;
-    }
-    if (fetched) {
-      const branchNow = await currentBranchAsync(root);
-      if (branchNow !== base) {
-        outcome = "not-on-base";
-        note = `基准分支 ${base} 的远端更新已拉取，但当前已不在 ${base} 上（在 ${branchNow ?? "?"}），跳过 ff-only 合并。`;
-      } else {
-        let hasUpstream = false;
-        try {
-          await runGitAsync(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
-          hasUpstream = true;
-        } catch { /* no tracking branch */ }
-        if (!hasUpstream) {
-          outcome = "no-upstream";
-          note = `基准分支 ${base} 没有上游跟踪分支，远端更新已拉取但未合并。`;
-        } else {
-          try {
-            await runGitAsync(root, ["merge", "--ff-only", "@{u}"]);
-            outcome = "fetched-ff";
-            note = `基准分支 ${base} 已快进到远端最新。`;
-          } catch {
-            outcome = "diverged";
-            note = `基准分支 ${base} 与远端已分叉，门禁不会替你 merge/rebase —— 请自行处理后再开工作分支（本次仍按当前 ${base} 建分支）。`;
-          }
-        }
-      }
-    }
-    try {
-      appendTiming(root, { kind: "base-refresh", at, repo: root, base, outcome, note });
-    } catch { /* diagnostics only */ }
-  }
-
-  /** Run a git command async; resolves on success, rejects on failure. */
-  function runGitAsync(root: string, args: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const child = spawn("git", args, { cwd: root, stdio: "ignore" });
-      // Background by design: the fetch must never keep the host alive.
-      child.unref?.();
-      child.once("error", reject);
-      child.once("exit", (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`git ${args[0]} exited ${code}`));
-      });
-    });
-  }
-
-  /** Async current-branch read (mirrors currentBranch's rebase fallback). */
-  async function currentBranchAsync(root: string): Promise<string | undefined> {
-    try {
-      const name = (await runGitOutput(root, ["symbolic-ref", "--quiet", "--short", "HEAD"])).trim();
-      if (name) return name;
-    } catch { /* detached — maybe a rebase */ }
-    return undefined;
-  }
-
-  /** Run git capturing stdout; rejects on failure. */
-  function runGitOutput(root: string, args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const child = spawn("git", args, { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
-      let out = "";
-      child.stdout.on("data", (d) => { out += String(d); });
-      child.once("error", reject);
-      child.once("exit", (code) => {
-        if (code === 0) resolve(out);
-        else reject(new Error(`git ${args[0]} exited ${code}`));
-      });
-    });
-  }
-
-  /**
-   * THE GATE'S SQUASH LANDING, executed in ONE worktree (`cwd`) — the shared
-   * core of both merge venues (self and holder).
-   *
-   * It folds the work branch into base as a SINGLE commit (the checkpoint
-   * history stays off the target branch) and commits it with a message the
-   * gate DERIVES, never the loop goal's title: that title is Simplified Chinese
-   * and L5 refuses a non-English commit, so the subject is composed from the
-   * checkpoints' own Conventional-Commit type/scope (always ASCII — see
-   * lib/worktree-merge.ts `squashMergeSubject`).
-   *
-   * REVIEW_GATE_BYPASS=1, like the checkpoint commit above: this is a
-   * gate-authored landing of content that already passed a READY review. The
-   * fingerprint hook cannot meaningfully judge a commit made on the BASE branch
-   * (self venue) or inside a FOREIGN holder worktree whose sidecar is not this
-   * review's state (holder venue) — which is exactly why the previous
-   * `--no-ff` merge, a merge commit, never ran these commit hooks at all.
-   */
-  function runSquashLanding(cwd: string, work: string, base: string):
-    | { ok: true }
-    | { ok: false; conflicted: boolean; files: string[]; cleaned: boolean; error?: string } {
-    let subjects: string[] = [];
-    try {
-      subjects = execFileSync("git", ["log", "--format=%s", `${base}..${work}`], { cwd, encoding: "utf8" })
-        .split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
-    } catch { /* unreadable range → an empty list still yields a legal chore subject */ }
-    const { subject, body } = squashMergeMessage(work, base, subjects);
-    try {
-      execFileSync("git", squashMergeArgv(work), { cwd, encoding: "utf8" });
-      execFileSync("git", ["commit", "-m", subject, "-m", body], {
-        cwd,
-        encoding: "utf8",
-        env: { ...process.env, REVIEW_GATE_BYPASS: "1" },
-      });
-      return { ok: true };
-    } catch (err) {
-      let files: string[] = [];
-      try {
-        files = parseConflictFiles(
-          execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], { cwd, encoding: "utf8" }),
-        );
-      } catch { /* the cleanup below still runs */ }
-      // A `--squash` merge sets no MERGE_HEAD, so `git merge --abort` cannot
-      // undo it; the staged/conflicted state is discarded with `git reset
-      // --hard HEAD` instead. Safe because the venue was verified clean first
-      // (the self venue just checked out `base`; the holder passed venueRefusal).
-      let cleaned = true;
-      try { execFileSync("git", ["merge", "--abort"], { cwd, encoding: "utf8" }); } catch { /* squash: nothing to abort */ }
-      try { execFileSync("git", ["reset", "--hard", "HEAD"], { cwd, encoding: "utf8" }); } catch { cleaned = false; }
-      return {
-        ok: false,
-        conflicted: files.length > 0,
-        files,
-        cleaned,
-        error: err instanceof Error ? err.message : String(err),
-      };
-    }
-  }
-
-  /**
-   * R3-7 — land the work by merging INSIDE the worktree that holds the base.
-   *
-   * This is the only path that works for a parallel orchestration lane: its
-   * base branch is checked out in the supervisor's worktree, so switching to
-   * it here is impossible by git's own rules. Nothing is checked out and no
-   * HEAD is moved — the merge is executed in that directory, on the branch it
-   * is already standing on.
-   *
-   * The safety rule the user set (2026-08-30): touch that worktree ONLY when
-   * it is clean and actually standing on the base. Anything else refuses and
-   * says why, because a merge run over somebody's uncommitted work can lose
-   * it, and no receipt is worth that.
-   */
-  function mergeInHoldingWorktree(
-    ctx: ExtensionContext,
-    venue: Extract<MergeVenue, { kind: "worktree" }>,
-    work: string,
-    base: string,
-  ): FinishResult {
-    const st = state;
-    const refusal = venueRefusal(venue, {
-      base,
-      ...(currentBranch(venue.path) ? { currentBranch: currentBranch(venue.path)! } : {}),
-      dirtyFiles: dirtyFiles(venue.path).map((f) => `${f.status.trim() || "??"} ${f.path}`),
-    });
-    if (refusal) {
-      return { ok: false, merge: "none", text: `review-gate: declare_done 被拒 — ${refusal}` };
-    }
-    const landed = runSquashLanding(venue.path, work, base);
-    if (landed.ok) {
-      delete st.mergeConflict;
-      logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString(), venue: venue.path });
-      persist(ctx);
-      return { ok: true, merge: "merged", text: `squash-merged ${work} into ${base} —— ${venue.reason}` };
-    }
-    // The holder worktree is left exactly as it was found — the squash cleanup
-    // (`reset --hard HEAD`, since a `--squash` sets no MERGE_HEAD to abort) is
-    // reported rather than assumed (round-1 Nit): this is the module whose
-    // whole point is that a receipt never overstates.
-    const restored = landed.cleaned
-      ? "，已回退，那个工作区回到原样"
-      : "，**但回退没有成功** —— 请自己去 " + `${venue.path} 看一眼它现在的状态`;
-    if (landed.conflicted) st.mergeConflict = { branch: work, base, files: landed.files, at: new Date().toISOString() };
-    persist(ctx);
-    return {
-      ok: false,
-      merge: "none",
-      text: landed.conflicted
-        ? `review-gate: declare_done 被拒 — ${work} squash 合并回 ${base} 有冲突（合并在持有基准分支的 worktree ` +
-          `${venue.path} 里执行${restored}）。\n` +
-          `冲突文件：\n${landed.files.map((f) => `  ${f}`).join("\n")}\n` +
-          `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
-          "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
-        : `review-gate: declare_done 被拒 — 在 worktree ${venue.path} 里 squash 合并 ${work} → ${base} 失败` +
-          `（不是冲突：没有未解决路径）${restored}。` +
-          `\n${(landed.error ?? "").split("\n")[0]}` +
-          "\n先手动确认两条分支的状态，再重试。",
-    };
-  }
-
-  /**
-   * Land this session's work on the branch the user confirmed — the last
-   * procedural job of a task, and the gate's, not the agent's.
-   *
-   * It reads its own record (workBranch/baseBranch, both set by
-   * setup_workspace) rather than inferring anything from the current
-   * checkout. Three outcomes, all honest: nothing to merge, merged, or
-   * CONFLICT — and a conflict aborts the merge, records the files and
-   * refuses. Resolving it is creative work (the agent's), waiving it is a
-   * decision (the user's); guessing is neither.
-   */
-  function finishWorkBranch(ctx: ExtensionContext): FinishResult {
-    const st = state;
-    if (st.mergeWaived) {
-      return { ok: true, text: `merge waived by the user (${st.mergeWaived.reason})`, merge: "waived" };
-    }
-    const action = decideFinish({
-      workBranch: st.workBranch,
-      baseBranch: st.baseBranch,
-      workIsAncestorOfBase: isAncestor(primaryRepoRoot, st.workBranch, st.baseBranch),
-    });
-    if (action === "no-branching") return { ok: true, text: "no work branch to merge", merge: "none" };
-    if (action === "already-merged") {
-      return { ok: true, text: `${st.workBranch} is already in ${st.baseBranch}`, merge: "none" };
-    }
-    const work = st.workBranch as string;
-    const base = st.baseBranch as string;
-    // R3-7 — WHERE can this merge even run? In a linked worktree the base
-    // branch is, by construction, checked out somewhere else, and `git
-    // checkout <base>` there fails 100% of the time. Decide the venue first.
-    const venue = decideMergeVenue({
-      base,
-      work,
-      selfPath: primaryRepoRoot,
-      worktrees: parseWorktreeList(gitWorktreeList(primaryRepoRoot)),
-    });
-    if (venue.kind === "worktree") return mergeInHoldingWorktree(ctx, venue, work, base);
-    try {
-      execFileSync("git", ["checkout", base], { cwd: primaryRepoRoot, encoding: "utf8" });
-      logBranchOp(st, { op: "checkout", from: work, to: base, at: new Date().toISOString() });
-    } catch (err) {
-      return {
-        ok: false,
-        merge: "none" as const,
-        text: `review-gate: declare_done 被拒 — 切到基准分支 ${base} 失败：` +
-          `${(err instanceof Error ? err.message : String(err)).split("\n")[0]}`,
-      };
-    }
-    const landed = runSquashLanding(primaryRepoRoot, work, base);
-    if (landed.ok) {
-      delete st.mergeConflict;
-      // WHERE THE WORKTREE IS LEFT STANDING (R-26, amended 2026-08-30).
-      //
-      // THE SESSION'S WORK IS LANDED: declare_done is a task's final act,
-      // so the worktree is left on the BASE branch — a clean, honest
-      // finish (user decision). The work branch record is cleared too:
-      // a commit may only land on a recorded work branch, and there is
-      // nothing left to commit, so the next checkpoint fails closed
-      // until the user runs setup_workspace again for a NEW task.
-      //
-      // An ORCHESTRATION CHILD borrowed this worktree from its supervisor,
-      // and it is finished with it. Measured on 2026-08-30: the child
-      // merged, went back to its own intermediate branch, and left the
-      // SUPERVISOR's worktree standing there — so the project manager's
-      // view of its own repository was two commits stale. Handing the
-      // worktree back on the BASE branch is what makes "borrowed" honest;
-      // ordinary sessions now finish on the base for the same reason.
-      // The merge already ran with base checked out (the venue algebra
-      // checked it out above); leave the worktree standing there. Nothing
-      // to switch — the session's task is over.
-      try {
-        // The work branch has served its purpose; forget it so a stray
-        // checkpoint cannot land on a branch whose work is merged.
-        delete st.workBranch;
-        delete st.baseBranch;
-      } catch { /* diagnostics */ }
-
-      logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString() });
-      persist(ctx);
-      return { ok: true, text: `squash-merged ${work} into ${base}`, merge: "merged" };
-    }
-    // The squash failed. runSquashLanding already discarded its staged/
-    // conflicted state (`reset --hard HEAD`, since a `--squash` sets no
-    // MERGE_HEAD to abort); restore the session's own checkout on the work
-    // branch so a later checkpoint is legal again.
-    try {
-      execFileSync("git", ["checkout", work], { cwd: primaryRepoRoot, encoding: "utf8" });
-      logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
-    } catch { /* best-effort: the branch may already be checked out */ }
-    if (landed.conflicted) {
-      st.mergeConflict = { branch: work, base, files: landed.files, at: new Date().toISOString() };
-    }
-    persist(ctx);
-    return {
-      ok: false,
-      merge: "none" as const,
-      text: landed.conflicted
-        ? `review-gate: declare_done 被拒 — ${work} squash 合并回 ${base} 有冲突，已回退（工作区回到 ${work}，无残留）。\n` +
-          `冲突文件：\n${landed.files.map((f) => `  ${f}`).join("\n")}\n` +
-          `处理方式：把 ${base} 合进 ${work} 解决冲突后重新 declare_done；` +
-          "或 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并。"
-        : `review-gate: declare_done 被拒 — squash 合并 ${work} → ${base} 失败（不是冲突：没有未解决路径），已回退并回到 ${work}。` +
-          `\n${(landed.error ?? "").split("\n")[0]}` +
-          "\n先手动确认两条分支的状态，再重试。",
-    };
-  }
-
-  /** Is `maybeAncestor` already contained in `branch`? */
-  function isAncestor(root: string, maybeAncestor: string | undefined, branch: string | undefined): boolean {
-    if (!maybeAncestor || !branch) return false;
-    try {
-      execFileSync("git", ["merge-base", "--is-ancestor", maybeAncestor, branch], { cwd: root, encoding: "utf8" });
-      return true;
-    } catch {
-      return false; // not an ancestor, or one of the refs does not exist
-    }
-  }
 
 
   /** HEAD commit tree OID — the content-boundary every ship binding compares against (round-8 P1). */
@@ -2776,9 +2343,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     return {
       mode: state.taskMode,
-      baseBranch: state.baseBranch,
-      workBranch: state.workBranch,
-      dirtyCount: state.worktreeDirty && !state.worktreeDirty.settled ? state.worktreeDirty.files.length : 0,
+      branch: currentBranch(primaryRepoRoot) ?? "(detached)",
       edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
       review: state.review.verdict as GateWidgetFacts["review"],
       reviewAt: state.review.at ?? undefined,
@@ -3388,20 +2953,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // explore never gates on the goal (loopGoalEditGate would return true
     // anyway) — skip the lookup before paying for it.
     if (state.taskMode === "explore") return undefined;
-    // The session started on top of changes it did not make. Until the user
-    // has said what those are (baseline / handled / discarded), an edit would
-    // silently mix them into what this session ships — so it is refused at
-    // the same layer as the unapproved goal.
-    if (state.worktreeDirty && !state.worktreeDirty.settled) {
-      return {
-        block: true,
-        reason:
-          "review-gate: 会话开始时工作区有未提交改动，尚未与用户确认处置——先调 setup_workspace。" +
-          `\n${state.worktreeDirty.files.slice(0, 12).map((f) => `  ${f}`).join("\n")}` +
-          (state.worktreeDirty.files.length > 12 ? `\n  …还有 ${state.worktreeDirty.files.length - 12} 个` : "") +
-          "\nsetup_workspace 会让用户四选一（接受为基线 / 已自行处理重检 / 门禁代执行丢弃 / 放行这些改动豁免进审查），随后建立工作分支。",
-      };
-    }
     const goalRoot = absPath
       ? // Every write pays the real per-edit git resolution: a fast path that
         // attributed anything under primaryRepoRoot to the primary repo would
@@ -3737,19 +3288,39 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const root = target.root;
-      // A checkpoint IS a commit, so it obeys the same branch rule — and
-      // FAIL-CLOSED, like every other commit: no work branch on record means
-      // no commit, or a session with no branch of its own would quietly
-      // checkpoint onto whatever it started on (main included). The branch is
-      // compared against the TARGET repo's own record, not the primary's.
-      const checkpointState = root === primaryRepoRoot ? state : stateForRepo(root);
-      const where = commitBranchAllowed({ workBranch: checkpointState.workBranch, currentBranch: currentBranch(root) });
-      if (!where.allowed) {
-        return {
-          content: [{ type: "text", text: `review-gate: review_checkpoint rejected — ${where.reason}` }],
-          details: { committed: false },
-          isError: true,
+      // A checkpoint IS a commit, so it lands on the CURRENT branch — no
+      // work-branch rule anymore (2026-09-07, user decision: sessions work
+      // directly on the branch they are on, including main). The one
+      // guardrail left is the PROTECTED-branch confirmation: on
+      // main/master/dev/develop a checkpoint asks the user (or the
+      // orchestrator, through the same channel) before it commits.
+      const here = currentBranch(root);
+      if (here && isProtectedBranch(here)) {
+        // The confirmation goes through the CHANNEL funnel (askEitherSide), so an
+        // orchestration child's project manager can answer it exactly as the
+        // human in the pane can — whoever answers first wins.
+        const uiCtx = ctx as unknown as {
+          ui?: {
+            select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
+          };
         };
+        const picked = await askEitherSide(
+          {
+            dialogKind: "select",
+            topic: "protected-branch",
+            title: "在受保护分支上提交 checkpoint？",
+            options: ["是，确认提交", "否，取消"],
+          },
+          typeof uiCtx.ui?.select === "function",
+          (signal) => uiCtx.ui!.select!("在受保护分支上提交 checkpoint？", ["是，确认提交", "否，取消"], { signal }),
+        ).catch(() => undefined);
+        if (!picked || picked.startsWith("否")) {
+          return {
+            content: [{ type: "text", text: `review-gate: checkpoint 未提交 — 用户未确认在受保护分支 ${here} 上提交。` }],
+            details: { committed: false },
+            isError: true,
+          };
+        }
       }
       const message = String(params.message ?? "").trim();
       if (message.length === 0) {
@@ -3936,15 +3507,6 @@ export default function reviewGate(pi: ExtensionAPI) {
           ...(precommitBypassed ? { precommitBypassed: true } : {}),
         };
 
-        // Which branch did this checkpoint land on? declare_done reads the
-        // log to merge the right branch back into the right base.
-        logBranchOp(st, {
-          op: "checkpoint_commit",
-          sha,
-          branch: currentBranch(root) ?? "(detached)",
-          at: new Date().toISOString(),
-          message: message.split("\n")[0].slice(0, 120),
-        });
         persistRepo(ctx as unknown as ExtensionContext, root);
         return {
           content: [{
@@ -5414,17 +4976,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "declare_done",
     label: "Declare Done",
     description:
-      "Declare the current task complete. Re-validates every gate server-side, then LANDS the work: " +
-      "the gate merges this session's work branch into the base the user confirmed. A merge " +
-      "conflict is reported with its files and refuses completion — resolve it and call again, or " +
-      "pass waiveMerge to ask the user to leave the branch unmerged.",
+      "Declare the current task complete. Re-validates every gate server-side. " +
+      "The work stays on the branch it was done on — no gate merge (2026-09-07, user decision); " +
+      "merging/rebasing/pushing is the user's own git workflow.",
     parameters: Type.Object({
       summary: Type.String({ description: "One-paragraph completion summary" }),
-      waiveMerge: Type.Optional(Type.String({
-        description:
-          "Ask the USER to finish WITHOUT merging the work branch (they confirm in a dialog, and " +
-          "the reason is recorded). Use it only when they chose to handle the merge themselves.",
-      })),
     }),
     async execute(_id, params, _signal, onUpdate, ctx) {
       // Completion re-runs every gate and then MERGES — minutes of work in
@@ -5571,44 +5127,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       progress.done("全部满足");
-      // The USER's escape hatch from the merge, and it is theirs: the agent
-      // can only ASK. A waiver granted in a dialog is recorded with its
-      // reason, so "why is this branch still unmerged?" has an answer.
-      const waiveReason = String(params.waiveMerge ?? "").trim();
-      if (waiveReason && state.workBranch && !state.mergeWaived) {
-        const granted = await confirmBounded(
-          ctx as unknown as { ui?: { confirm?: (t: string, m: string) => Promise<boolean> } },
-          "review-gate: 本次不把工作分支合并回基准分支？",
-          `工作分支 ${state.workBranch} → 基准 ${state.baseBranch ?? "(未记录)"}\n` +
-          `理由（不可信数据）：${waiveReason.slice(0, 300)}\n` +
-          "选 Yes：分支留在原地，由你自己处理合并。",
-        );
-        if (granted) {
-          state.mergeWaived = { at: new Date().toISOString(), reason: waiveReason.slice(0, 300) };
-          persist(ctx as unknown as ExtensionContext);
-        } else {
-          return {
-            content: [{ type: "text", text: "review-gate: 用户没有同意跳过合并 — 先解决合并（或让用户确认后重试）。" }],
-            details: { accepted: false, problems: ["merge waiver declined by the user"] },
-            isError: true,
-          };
-        }
-      }
-      // The gates are met — now the work has to LAND. The gate follows its own
-      // branch log back to the base the user confirmed and merges the work
-      // branch into it. A conflict is not the gate's to resolve: it stops,
-      // records what conflicted, and hands the list back.
-      progress.step(`合并工作分支 → ${state.baseBranch ?? "(基准未记录)"}`);
-      const finish = finishWorkBranch(ctx as unknown as ExtensionContext);
-      if (!finish.ok) {
-        progress.fail("冲突/未完成");
-        return {
-          content: [{ type: "text", text: finish.text }],
-          details: { accepted: false, problems: [finish.text] },
-          isError: true,
-        };
-      }
-      progress.done("已合并");
+      // No landing step anymore (2026-09-07, user decision): the work stays
+      // on the branch it was done on. `declare_done` closes the gates;
+      // merging/rebasing/pushing is the user's own git workflow.
       loopArmed = false;
       // R3-5 — RECORD THE COMPLETION, in this session's own sidecar.
       //
@@ -5621,7 +5142,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // bookkeeping below and is never cleared by it.
       state.completion = {
         at: new Date().toISOString(),
-        merge: finish.merge,
+        merge: "none", // no landing step anymore (2026-09-07)
         ...(String(params.summary ?? "").trim()
           ? { summary: String(params.summary).trim().slice(0, 500) }
           : {}),
@@ -5755,338 +5276,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     delay: (ms) => new Promise((r) => setTimeout(r, ms)),
   });
 
-  // ---------- setup_workspace tool (dirty worktree + branch, in one call) ----------
-
-  pi.registerTool({
-    name: "setup_workspace",
-    label: "Set Up Workspace",
-    description:
-      "Settle where this session works, in ONE call: what to do with changes that were already in " +
-      "the worktree (accept as this session's baseline / you handled them / the gate discards " +
-      "them) and which branch is the BASE this session's work must end up in. The gate asks the " +
-      "user, executes what they choose — including creating the work branch — and records every " +
-      "step in its branch log, which declare_done later follows back to merge. Call it once, " +
-      "early: while a dirty worktree is unsettled, edits are refused, and without a work branch " +
-      "commits are refused.",
-    parameters: Type.Object({
-      branch: Type.Optional(Type.String({
-        description: "Your proposed work branch name (default: session-<short id>; pass the CURRENT branch to keep working on it)",
-      })),
-      base: Type.Optional(Type.String({
-        description: "The branch the work must merge back into (default: the current one, which the user confirms)",
-      })),
-      repo: Type.Optional(Type.String({
-        description: "Absolute repo path (default: this session's repo)",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const root = params.repo ? (gitRootOfDir(pathResolve(cwd, String(params.repo))) ?? primaryRepoRoot) : primaryRepoRoot;
-      const st = root === primaryRepoRoot ? state : stateForRepo(root);
-      const uiCtx = ctx as unknown as {
-        ui?: {
-          select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
-          notify?: (message: string, type?: "info" | "warning" | "error") => void;
-        };
-      };
-      const notes: string[] = [];
-      /**
-       * Every workspace question goes through the channel funnel, so an
-       * orchestration child can be settled by its project manager exactly as
-       * it can by the human sitting in the pane — and neither waits for the
-       * other. A standalone session just renders the dialog, as before.
-       */
-      const askWorkspace = (title: string, choices: string[]): Promise<string | undefined> =>
-        askEitherSide(
-          { dialogKind: "select", topic: "workspace", title, options: choices },
-          typeof uiCtx.ui?.select === "function",
-          (signal) => uiCtx.ui!.select!(title, choices, { signal }),
-        ).catch(() => undefined);
-
-
-      // ---- 1. the dirty worktree, if there is one ----
-      // 2026-08-31 (user bug): files THIS SESSION edited through the gate's
-      // edit tools are this session's own work, NOT pre-existing changes —
-      // asking "how do you want to handle these?" about them would make the
-      // user confirm (or worse, discard) work the agent just did. They are
-      // filtered out of the pre-existing set before the dialog; what remains
-      // is genuinely somebody else's (or a previous session's) uncommitted
-      // work, which is exactly what setup_workspace exists to settle.
-      const sessionOwn = new Set(sessionEditedPaths);
-      let files = dirtyFiles(root).filter((f) => !sessionOwn.has(f.path));
-      if (files.length) {
-        showToUser(uiCtx, "───── 工作区有未提交改动 ─────", describeDirty(files));
-        const choices = Object.values(WORKTREE_CHOICES);
-        const picked = await askWorkspace("这些改动怎么处理？", choices);
-        const choice = interpretWorktreeChoice(picked);
-        if (!choice) {
-          // A dismissed dialog decides nothing — and deciding for the user
-          // here would mean either shipping their changes or deleting them.
-          return {
-            content: [{ type: "text", text: "review-gate: 用户没有选择处置方式，工作区仍未确认（编辑保持拦截）。等他回答后重试。" }],
-            details: { settled: false, workBranch: undefined as string | undefined },
-            isError: true,
-          };
-        }
-        if (choice === "discard") {
-          try {
-            execFileSync("git", ["checkout", "--", "."], { cwd: root, encoding: "utf8" });
-            execFileSync("git", ["clean", "-fd"], { cwd: root, encoding: "utf8" });
-          } catch (err) {
-            return {
-              content: [{ type: "text", text: `review-gate: 丢弃失败 — ${err instanceof Error ? err.message : String(err)}。工作区仍未确认。` }],
-              details: { settled: false, workBranch: undefined as string | undefined },
-              isError: true,
-            };
-          }
-          logBranchOp(st, {
-            op: "worktree_discard",
-            files: files.map((f) => f.path).slice(0, 50),
-            at: new Date().toISOString(),
-            reason: "用户在 setup_workspace 中选择丢弃",
-          });
-          files = dirtyFiles(root);
-          notes.push(files.length ? `已丢弃，但仍有 ${files.length} 个改动残留（可能被 .gitignore 覆盖）。` : "改动已丢弃，工作区干净。");
-        } else if (choice === "handled") {
-          files = dirtyFiles(root);
-          if (files.length) {
-            // "I handled it" is a claim the gate CHECKS: still dirty ⇒ still
-            // unsettled, or the edit gate would open on a false statement.
-            st.worktreeDirty = { files: files.map((f) => `${f.status.trim() || "??"} ${f.path}`), at: new Date().toISOString() };
-            persistRepo(ctx as unknown as ExtensionContext, root);
-            return {
-              content: [{ type: "text", text: `review-gate: 重新检测后工作区仍不干净（${files.length} 个改动），未放行。\n${describeDirty(files)}` }],
-              details: { settled: false, workBranch: undefined as string | undefined },
-              isError: true,
-            };
-          }
-          notes.push("用户已自行处理，复检干净。");
-        } else if (choice === "exempt") {
-          // USER REQUIREMENT (2026-08-30): a "pass through" option for
-          // pre-existing mock/local changes. Snapshot the dirty files into
-          // the same scopeLimit structure request_scope_limit uses — the
-          // ship gate and the review scope then treat them as exempt (no
-          // review coverage required), the files stay in the worktree
-          // untouched, and declare_done still merges them.
-          //
-          // NEVER exempt THIS session's own edits (mirrors
-          // request_scope_limit's preexisting filter): a session that edited
-          // first and then picks 放行 must not get its own work out of the
-          // review. The grant covers only files the session did not touch.
-          const sessionSet = new Set(sessionEditedPaths);
-          const preexisting = files.map((f) => f.path).filter((p) => !sessionSet.has(p));
-          const exemptedOwnWork = files.map((f) => f.path).filter((p) => sessionSet.has(p));
-          if (st.scopeLimit) {
-            // A grant from request_scope_limit already exists — extend it
-            // with the dirty files (never shrink).
-            st.scopeLimit = {
-              ...st.scopeLimit,
-              preexistingFiles: [...new Set([...st.scopeLimit.preexistingFiles, ...preexisting])],
-            };
-          } else {
-            st.scopeLimit = {
-              preexistingFiles: preexisting,
-              sessionFiles: [...sessionSet],
-              at: new Date().toISOString(),
-            };
-          }
-          // RE-ARM from THIS session's own edits only (mirrors
-          // request_scope_limit's granted branch): pre-existing dirty files
-          // are exempt, so the gate is armed exactly by what this session
-          // edited — never weakened for its own work.
-          st.hasCodeChange = [...st.scopeLimit.sessionFiles].some(isCodeFile);
-          st.hasDocChange = [...st.scopeLimit.sessionFiles].some(isDocFile);
-          // The worktree is now settled; the files stay put.
-          const exemptCount = preexisting.length;
-          notes.push(
-            exemptedOwnWork.length > 0
-              ? `已放行 ${exemptCount} 个本会话之外的改动（不删不改，豁免进审查）；本会话自己改的 ${exemptedOwnWork.length} 个文件仍要审查。`
-              : `已放行 ${exemptCount} 个改动（不删不改，豁免进审查；快照 ${new Date().toISOString()}）。`
-          );
-        } else {
-          notes.push(`接受 ${files.length} 个改动为本会话基线（记得提交成 checkpoint）。`);
-        }
-      }
-      // Settled either way: clean, discarded, or accepted as the baseline.
-      st.worktreeDirty = files.length
-        ? { files: files.map((f) => `${f.status.trim() || "??"} ${f.path}`), at: new Date().toISOString(), settled: true }
-        : undefined;
-      if (!st.worktreeDirty) delete st.worktreeDirty;
-
-      // ---- 2. the base branch ----
-      const here = currentBranch(root);
-      if (!here) {
-        return {
-          content: [{ type: "text", text: "review-gate: 当前是 detached HEAD，无法确定基准分支。先 checkout 一个分支再调 setup_workspace。" }],
-          details: { settled: false, workBranch: undefined as string | undefined },
-          isError: true,
-        };
-      }
-      let base = here;
-      // R3-6 — an orchestration child's base is DECLARED by its supervisor,
-      // not derived from where it happens to stand. A parallel lane runs in a
-      // gate-created worktree checked out on `orch/<task>-<stamp>`, so the
-      // "current branch" default would make it merge its work into that
-      // scratch branch — which is exactly what happened to a whole lane in the
-      // third run. The agent may still override it, and the USER still
-      // confirms it in the dialog below.
-      const injectedBase = String(process.env[ORCH_BASE_BRANCH_ENV] ?? "").trim();
-      const proposedBase = String(params.base ?? "").trim() || injectedBase;
-      if (proposedBase && proposedBase !== here) {
-        // The agent knows this session continues an existing feature branch:
-        // the base is elsewhere. The USER still confirms it — a wrong base is
-        // a merge into somebody else's work.
-        const ok = await askWorkspace(
-          `基准分支 = ${proposedBase}，工作分支 = ${params.branch ? String(params.branch) : "新建"}。确认吗？`,
-          [`是，合并回 ${proposedBase}`, "否，用当前分支作为基准"],
-        );
-
-        if (!ok) {
-          return {
-            content: [{ type: "text", text: `review-gate: 基准分支未确认（提议 ${proposedBase}）。` }],
-            details: { settled: false, workBranch: undefined as string | undefined },
-            isError: true,
-          };
-        }
-        if (ok.startsWith("是")) {
-          try {
-            execFileSync("git", ["rev-parse", "--verify", proposedBase], { cwd: root, encoding: "utf8" });
-          } catch {
-            return {
-              content: [{ type: "text", text: `review-gate: 基准分支 ${proposedBase} 不存在。` }],
-              details: { settled: false, workBranch: undefined as string | undefined },
-              isError: true,
-            };
-          }
-          st.baseBranch = proposedBase;
-          logBranchOp(st, { op: "base_branch_set", branch: proposedBase, at: new Date().toISOString() });
-          notes.push(...refreshBaseBeforeBranch(root, proposedBase));
-          const work = deriveWorkBranchName(params.branch ? String(params.branch) : here, here);
-          if (work !== here) {
-            try {
-              execFileSync("git", ["checkout", "-b", work], { cwd: root, encoding: "utf8" });
-              logBranchOp(st, { op: "checkout", from: here, to: work, at: new Date().toISOString() });
-            } catch (err) {
-              return {
-                content: [{ type: "text", text: `review-gate: 创建工作分支 ${work} 失败 — ${err instanceof Error ? err.message : String(err)}` }],
-                details: { settled: false, workBranch: undefined as string | undefined },
-                isError: true,
-              };
-            }
-          }
-          st.workBranch = work;
-          logBranchOp(st, { op: "work_branch_set", branch: work, base: proposedBase, at: new Date().toISOString() });
-          persistRepo(ctx as unknown as ExtensionContext, root);
-          return {
-            content: [{
-              type: "text",
-              text: `review-gate: 工作区已确认。基准分支 ${proposedBase}，工作分支 ${work}（当前所在）。` +
-                (notes.length ? `\n${notes.join("\n")}` : "") +
-                "\ndeclare_done 时门禁会把工作分支合回基准（冲突则中止并交还给你处理）。",
-            }],
-            details: { settled: true, baseBranch: proposedBase, workBranch: work },
-          };
-        }
-      }
-      if (isProtectedBranch(here)) {
-        // main/master is never a base a session commits onto; the user picks
-        // the development branch it should branch from and merge back into.
-        // On a protected branch the base is never the branch itself: the user
-        // picks a dev base to branch from. Honor an explicit branch proposal
-        // (2026-08-30 fix: the auto dev/<date> name ignored params.branch and
-        // collided with a leftover branch from an earlier session).
-        const proposed = params.branch ? deriveWorkBranchName(String(params.branch), `dev/${new Date().toISOString().slice(0, 10)}`)
-          : `dev/${new Date().toISOString().slice(0, 10)}`;
-        const picked = await askWorkspace(
-          `当前在受保护分支 ${here}，本会话不能直接在它上面开发。基准分支用哪个？（${proposed} 已存在则直接复用）`,
-          [`从 ${here} 拉一条基准分支 ${proposed}（已存在则复用）`, `就用 ${here} 作为基准（工作分支仍会另建）`],
-        );
-
-        if (!picked) {
-          return {
-            content: [{ type: "text", text: `review-gate: 用户未确认基准分支（当前 ${here}），未建立工作分支。` }],
-            details: { settled: false, workBranch: undefined as string | undefined },
-            isError: true,
-          };
-        }
-        if (picked.startsWith("从 ")) {
-          try {
-            // Reuse an existing base branch instead of colliding with it:
-            // a leftover dev/<date> from an earlier session would otherwise
-            // fail the create and block the whole workspace setup.
-            // Probe by SUCCESS, not by exit status: --verify --quiet exits
-            // non-zero when the ref is missing and execFileSync throws on
-            // non-zero. A catch therefore means "missing" (a real git
-            // failure then falls through to the checkout below, which will
-            // surface it in the outer catch).
-            let exists = false;
-            try {
-              execFileSync("git", ["rev-parse", "--verify", "--quiet", proposed], { cwd: root, encoding: "utf8" });
-              exists = true;
-            } catch {
-              exists = false;
-            }
-            if (exists) {
-              execFileSync("git", ["checkout", proposed], { cwd: root, encoding: "utf8" });
-            } else {
-              execFileSync("git", ["checkout", "-b", proposed], { cwd: root, encoding: "utf8" });
-            }
-            logBranchOp(st, { op: "checkout", from: here, to: proposed, at: new Date().toISOString() });
-            base = proposed;
-          } catch (err) {
-            return {
-              content: [{ type: "text", text: `review-gate: 创建基准分支失败 — ${err instanceof Error ? err.message : String(err)}` }],
-              details: { settled: false, workBranch: undefined as string | undefined },
-              isError: true,
-            };
-          }
-        }
-      } else {
-        const picked = await askWorkspace(
-          `把当前分支 ${here} 作为本会话的基准分支吗？（工作完成后合并回它）`,
-          [`是，基准分支 = ${here}`, "否，我先自己切到正确的分支再来"],
-        );
-
-        if (!picked || picked.startsWith("否")) {
-          return {
-            content: [{ type: "text", text: `review-gate: 基准分支未确认（当前 ${here}）。切到正确的分支后重新调 setup_workspace。` }],
-            details: { settled: false, workBranch: undefined as string | undefined },
-            isError: true,
-          };
-        }
-      }
-      st.baseBranch = base;
-      logBranchOp(st, { op: "base_branch_set", branch: base, at: new Date().toISOString() });
-      notes.push(...refreshBaseBeforeBranch(root, base));
-
-      // ---- 3. the work branch ----
-      const seed = (state.sessionId ?? randomBytes(3).toString("hex")).slice(0, 8);
-      const work = deriveWorkBranchName(params.branch ? String(params.branch) : undefined, seed);
-      if (work !== currentBranch(root)) {
-        try {
-          execFileSync("git", ["checkout", "-b", work], { cwd: root, encoding: "utf8" });
-        } catch (err) {
-          return {
-            content: [{ type: "text", text: `review-gate: 创建工作分支 ${work} 失败 — ${err instanceof Error ? err.message : String(err)}` }],
-            details: { settled: false, workBranch: undefined as string | undefined },
-            isError: true,
-          };
-        }
-        logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
-      }
-      st.workBranch = work;
-      logBranchOp(st, { op: "work_branch_set", branch: work, base, at: new Date().toISOString() });
-      persistRepo(ctx as unknown as ExtensionContext, root);
-      return {
-        content: [{
-          type: "text",
-          text: `review-gate: 工作区已确认。基准分支 ${base}，工作分支 ${work}（当前所在）。` +
-            (notes.length ? `\n${notes.join("\n")}` : "") +
-            "\ndeclare_done 时门禁会按分支日志把工作分支合回基准（冲突则中止并交还给你处理）。",
-        }],
-        details: { settled: true, baseBranch: base, workBranch: work },
-      };
-    },
-  });
 
 
   // ---------- user-interaction tools (ask_user + the two consent tools) ----------
@@ -6303,13 +5492,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // this the agent could edit for a whole turn before ever seeing the
         // exit contract it is supposed to establish first.
         const goalNote = effective === "loop"
-          ? "\n\n" + buildLoopGoalDirective(readSessionLoopGoal(primaryRepoRoot), loopGoalConfirmed()) +
-            // 2026-08-30 (B): the worktree/branch must be settled BEFORE any
-            // real work, not at the first judge_submit refusal. Loop mode is
-            // decided here — remind the agent to settle the workspace now.
-            (!state.workBranch && dirtyFiles(primaryRepoRoot).length > 0
-              ? "\n\n注意：工作区还有未提交改动且尚未建立工作分支 —— 先调 `setup_workspace`（确认基准分支并建工作分支），再开始编辑。"
-              : "")
+          ? "\n\n" + buildLoopGoalDirective(readSessionLoopGoal(primaryRepoRoot), loopGoalConfirmed())
           : "";
         return {
           content: [{
@@ -6810,18 +5993,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // A new session negotiates its OWN goal: whatever audit rounds a previous
     // session spent on its draft do not carry into this one's count.
     delete state.goalAuditRound;
-    // A session's OWN branch decisions do not carry over: it confirms its
-    // base and creates its work branch (setup_workspace) or it does not
-    // commit at all.
-    delete state.baseBranch;
-    delete state.workBranch;
-    delete state.mergeConflict;
-    delete state.mergeWaived;
-    // Where did this session start, and on top of what? Both are gate facts
-    // from the first turn: the dirty worktree blocks edits until the user
-    // settles it, and the starting branch is the first branchOps entry — the
-    // beginning of the trail declare_done follows back.
-    recordSessionStartWorkspace();
 
     // Per-project overrides (sd0x-dev-flow R6): maxRounds is clamped to [3,50]
     // by the loader, so a forged config cannot make the cap unreachable.
@@ -6847,6 +6018,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Reflect the precommit config source in the status bar right away.
     updateWidget(ctx);
 
+
+    // PROTECTED-BRANCH NOTICE (2026-09-07, user decision): the workspace
+    // settlement layer is gone, so a session may sit on main/master/dev/
+    // develop with nobody having asked anything. Say so up front — the
+    // checkpoint confirmation is the hard half, this is the soft half.
+    const startBranch = currentBranch(primaryRepoRoot);
+    if (startBranch && isProtectedBranch(startBranch) && ctx.hasUI) {
+      showToUser(
+        ctx as unknown as ExtensionContext,
+        "───── 当前在受保护分支 ─────",
+        `本会话在 ${startBranch} 上开始。checkpoint 会直接提交到当前分支；` +
+        `在受保护分支上提交前门禁会弹框确认。若这不是你的意图，先切换分支。`,
+      );
+    }
     // USER REQUIREMENT — a session that cannot show a dialog runs in normal
     // mode, period. Every enforced mode now depends on dialogs (loop-goal
     // approval, sensitive-edit authorization, downgrade confirmation), so a
@@ -7323,7 +6508,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         "\n\n## Review Gate (enforced)\n" +
         "改完就送审：`judge_submit({role:\"reviewer\", task:<本轮改动说明>})` —— 门禁自己跑 " +
         "precommit、提交 checkpoint、算审查范围、派 reviewer，并在它退出时机械记录 verdict。" +
-        "被打回就按 findings 修，然后再 judge_submit；READY 了就 `declare_done`（门禁自己把工作分支合回基准）。" +
+        "被打回就按 findings 修，然后再 judge_submit；READY 了就 `declare_done`（工作留在当前分支，合并/推送由你自己安排）。" +
         "攒一批改动再送审：循环按轮计费，不按行。" +
         "git commit/push 与 gh pr create/edit 在门禁通过前是硬拦截。\n" +
         (sessionRepos.size > 1

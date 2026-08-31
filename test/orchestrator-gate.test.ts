@@ -10,7 +10,6 @@ import {
   orchestratorWriteBlock,
   proxyApprovalProblems,
   spawnAuthorization,
-  worktreeRequirement,
   type OrchestratorDoneFacts,
 } from "../lib/orchestrator-gate.ts";
 import { parsePlan, planHash, type OrchestratorPlan, type PlanTask } from "../lib/orchestrator-plan.ts";
@@ -37,8 +36,6 @@ function doneFacts(overrides: Partial<OrchestratorDoneFacts> = {}): Orchestrator
     plan: planOf({ tasks: [{ id: "a", title: "a", fileBoundaries: ["lib"], status: "done" }] }),
     runtime: emptyRuntime("orch-abc-1"),
     alivePaneIds: [],
-    mergeSettled: true,
-    mergeWaived: false,
     ...overrides,
   };
 }
@@ -108,16 +105,6 @@ test("CONSTRAINT 2: the relay's own handoff path is writable while the relay sta
     "the pattern is anchored — it is a specific place, not a name anywhere");
 });
 
-// ---------------------------------------------------------------------------
-// CONSTRAINT 7 — parallel work needs isolation
-// ---------------------------------------------------------------------------
-
-test("CONSTRAINT 7: only a task that will run ALONGSIDE another gets a worktree", () => {
-  assert.equal(worktreeRequirement("parallel").needed, true);
-  assert.match(worktreeRequirement("parallel").reason, /约束 7/);
-  assert.equal(worktreeRequirement("serial").needed, false,
-    "a worktree per serial task would multiply checkouts for no isolation benefit");
-});
 
 // ---------------------------------------------------------------------------
 // CONSTRAINT 8 — a proxied goal stays inside the task
@@ -179,7 +166,7 @@ test("CONSTRAINT 9: only an orchestrator may notify the human", () => {
 });
 
 test("CONSTRAINT 14: irreversible and security decisions are never proxied", () => {
-  for (const kind of ["discard-worktree", "sensitive-file", "merge-waiver"]) {
+  for (const kind of ["discard-worktree", "sensitive-file"]) {
     const reason = humanOnlyDecision(kind);
     assert.ok(reason, `${kind} must be human-only`);
     assert.match(reason, /真人/);
@@ -281,23 +268,6 @@ test("R-29: a decision declares what the plan must become, and the blocker repea
 });
 
 
-test("CONSTRAINT 10: an unsettled work branch blocks, and a waiver releases it", () => {
-  const blocked = orchestratorDoneProblems(doneFacts({
-    workBranch: "feat/x", baseBranch: undefined, mergeSettled: false,
-  }));
-  assert.ok(blocked.some((p) => /约束 10/.test(p)));
-
-  assert.deepEqual(
-    orchestratorDoneProblems(doneFacts({ workBranch: "feat/x", mergeSettled: false, mergeWaived: true })),
-    [],
-    "the user's recorded decision not to merge is an answer, not a hole",
-  );
-  assert.deepEqual(
-    orchestratorDoneProblems(doneFacts({ workBranch: "feat/x", baseBranch: "main", mergeSettled: true })),
-    [],
-    "settled means declare_done's own merge step will run it home",
-  );
-});
 
 test("the status line is short enough to inject every turn", () => {
   const line = formatOrchestrationStatus(doneFacts());

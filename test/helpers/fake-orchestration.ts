@@ -236,8 +236,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     },
     childGateState: (cwd) => sidecars.get(cwd),
     sleep: async () => { /* the fake has no latency */ },
-    addWorktree: (name) => ({ ok: true, path: `/tmp/rg-wt/${name}` }),
-    removeWorktree: () => { /* nothing to remove in a map */ },
+    knownRepoRoots: () => ["/repo"],
     childJudgeRunning: () => false,
     channelIO: () => io,
     channelHome: () => "/home/test",
@@ -256,10 +255,6 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
         : { ok: true as const };
     },
 
-    gitHooksReferencing: () => [],
-    currentBranch: () => "main",
-    repairGitHooks: () => ({ ok: true }),
-    branchFacts: () => ({ mergeSettled: true, mergeWaived: false }),
     emitNotification: () => true,
     fileChars: () => 500,
     sessionTranscriptPath: () => "/tmp/transcript.jsonl",

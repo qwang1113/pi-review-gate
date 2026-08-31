@@ -32,7 +32,7 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
-import { ORCH_BASE_BRANCH_ENV, STATE_VARIANT_ENV } from "./gate-state.ts";
+import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV, normalizeOrchestrationId } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import { buildSpawnPaneArgv, parseSpawnedPaneId } from "./orchestrator-tmux.ts";
@@ -99,12 +99,10 @@ export function detectOrphans(
 
 /** Environment a recovered (or freshly attached) child pane is given. */
 function childEnv(deps: OrchestratorDeps, child: ChildSession): Record<string, string> {
-  const base = deps.currentBranch();
   return {
     [ORCHESTRATION_ID_ENV]: deps.runtime().orchestrationId,
     [GATE_MODE_ENV]: "loop",
     [STATE_VARIANT_ENV]: child.stateVariant ?? child.id,
-    ...(base ? { [ORCH_BASE_BRANCH_ENV]: base } : {}),
   };
 }
 
@@ -196,8 +194,8 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     `review-gate: 子会话 ${childId} 已用同一个 session id（\`${childSessionId(childId)}\`）在 pane ${paneId} 重开 —— ` +
     "它的 transcript 是接着上次的，不是从头来。\n" +
     `任务 ${child.taskId} 保持 running（它本来就没有停止成立）；登记表已指向新 pane。\n` +
-    `它死前留下的资产：${assets?.branch ? `分支 \`${assets.branch}\`` : "没有工作分支"}` +
-    `${assets?.reviewVerdict ? `、review 裁决 ${assets.reviewVerdict}` : ""}` +
+    "它死前留下的资产：" +
+    `${assets?.reviewVerdict ? `review 裁决 ${assets.reviewVerdict}` : ""}` +
     `${assets?.checkpoint ? `、checkpoint \`${assets.checkpoint.slice(0, 12)}\`` : ""}。\n` +
     "接着用 `orchestrator_wait` 等它 —— 它重开后会自己在通道上报状态。",
     { childId, paneId, recovered: true, sessionId: childSessionId(childId) },

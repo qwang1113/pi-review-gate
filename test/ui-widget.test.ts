@@ -27,12 +27,10 @@ test("buildModelConfigWidget maps every auto state and source label deterministi
 });
 
 
-test("buildGateWidget renders workspace/branch, verdicts, unmet — a status panel", () => {
+test("buildGateWidget renders branch, verdicts, unmet — a status panel", () => {
   const lines = buildGateWidget({
     mode: "loop",
-    baseBranch: "main",
-    workBranch: "feat/x",
-    dirtyCount: 3,
+    branch: "feat/x",
     edited: true,
     review: "PENDING",
     rounds: 2,
@@ -41,8 +39,8 @@ test("buildGateWidget renders workspace/branch, verdicts, unmet — a status pan
     copilotOpen: false,
     unmet: ["code review gate is PENDING (need READY)", "precommit has not run"],
   });
-  assert.ok(lines.length >= 3, "panel has at least workspace + verdicts + unmet");
-  assert.match(lines[0]!, /门禁 · mode loop · base main · work feat\/x · 脏 3 · 已编辑/);
+  assert.ok(lines.length >= 3, "panel has at least branch + verdicts + unmet");
+  assert.match(lines[0]!, /门禁 · mode loop · feat\/x · 已编辑/);
   assert.match(lines[1]!, /审核 待审核 · 第 2 轮 \| precommit 未运行 \| goal 已批准 \| copilot 关/);
   assert.match(lines[2]!, /⚠ review: code review gate is PENDING/);
   assert.match(lines[3]!, /⚠ precommit: precommit has not run/);

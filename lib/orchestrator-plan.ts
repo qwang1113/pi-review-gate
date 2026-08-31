@@ -57,6 +57,12 @@ export interface PlanTask {
   title: string;
   /** Normalized repo-relative boundaries. Never empty (constraint 5). */
   fileBoundaries: NormalizedBoundary[];
+  /**
+   * Repo root this task works in (2026-09-07). Absent ⇒ the orchestration's
+   * own repo. The scheduler serializes WITHIN a repo and parallelizes
+   * ACROSS repos — two children may never edit the same checkout at once.
+   */
+  repo?: string;
   /** Task ids that must be `done` before this one may start. */
   dependsOn: string[];
   /** What the plan ASKED for; the scheduler may downgrade it (constraint 6). */
@@ -206,6 +212,7 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString()):
       id,
       title: taskTitle,
       fileBoundaries: boundaries,
+      ...(asString(t.repo) ? { repo: asString(t.repo)! } : {}),
       dependsOn: asStringArray(t.dependsOn).map((d) => d.trim()).filter(Boolean),
       execution,
       status,
@@ -431,6 +438,7 @@ export interface ScheduleResult {
 export function scheduleNextTasks(
   plan: OrchestratorPlan,
   runningTaskIds: readonly string[],
+  repoRoot: string,
 ): ScheduleResult {
   const running = plan.tasks.filter((t) => runningTaskIds.includes(t.id));
   const slots = Math.max(0, plan.maxParallel - running.length);
@@ -443,16 +451,20 @@ export function scheduleNextTasks(
   const start: ScheduleDecision[] = [];
   const deferred: DeferredTask[] = [];
   // Everything a new pick must stay clear of: what is already running plus
-  // what this batch has just picked.
+  // what this batch has just picked. Two children may NEVER share one
+  // checkout (2026-09-07): the isolation worktree is gone, so parallelism
+  // exists only ACROSS repos — same-repo tasks are serialized by the repo
+  // key, whatever their file boundaries say.
   const occupied: PlanTask[] = [...running];
+  const sameRepo = (a: PlanTask, b: PlanTask) => (a.repo ?? repoRoot) === (b.repo ?? repoRoot);
   for (const task of candidates) {
     if (start.length >= slots) break;
-    const clash = occupied.find((other) => declarationsOverlap(task.fileBoundaries, other.fileBoundaries));
+    const clash = occupied.find((other) => sameRepo(task, other));
     if (clash) {
       deferred.push({
         task,
         blockedBy: clash.id,
-        reason: `文件边界与 "${clash.id}" 重叠，按约束 6 降级串行：等它结束后再开`,
+        reason: `与 "${clash.id}" 在同一 repo（${task.repo ?? repoRoot}），同一 checkout 不能两个写者并存：等它结束后再开`,
       });
       continue;
     }
@@ -467,14 +479,15 @@ export function scheduleNextTasks(
  * The pairs the plan asked to run in parallel but which may NOT (constraint 6).
  * Reported at approval time so the user sees the downgrade before it happens.
  */
-export function conflictingParallelPairs(plan: OrchestratorPlan): Array<{ a: string; b: string }> {
+export function conflictingParallelPairs(plan: OrchestratorPlan, repoRoot: string): Array<{ a: string; b: string }> {
   const parallel = plan.tasks.filter((t) => t.execution === "parallel");
   const pairs: Array<{ a: string; b: string }> = [];
+  const sameRepo = (a: PlanTask, b: PlanTask) => (a.repo ?? repoRoot) === (b.repo ?? repoRoot);
   for (let i = 0; i < parallel.length; i++) {
     for (let j = i + 1; j < parallel.length; j++) {
       const a = parallel[i]!;
       const b = parallel[j]!;
-      if (declarationsOverlap(a.fileBoundaries, b.fileBoundaries)) pairs.push({ a: a.id, b: b.id });
+      if (sameRepo(a, b)) pairs.push({ a: a.id, b: b.id });
     }
   }
   return pairs;
@@ -557,7 +570,7 @@ export function planHash(plan: OrchestratorPlan): string {
 }
 
 /** One-screen rendering for the approval dialog and the takeover report. */
-export function formatPlanSummary(plan: OrchestratorPlan): string {
+export function formatPlanSummary(plan: OrchestratorPlan, repoRoot = ""): string {
   const lines: string[] = [
     `${plan.title}`,
     `目标：${plan.intent}`,
@@ -568,12 +581,13 @@ export function formatPlanSummary(plan: OrchestratorPlan): string {
     const deps = t.dependsOn.length ? ` ← ${t.dependsOn.join(", ")}` : "";
     lines.push(
       `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}\n` +
-      `    边界：${t.fileBoundaries.join(", ")}`,
+      `    边界：${t.fileBoundaries.join(", ")}` +
+      (t.repo ? `\n    repo：${t.repo}` : ""),
     );
   }
-  const conflicts = conflictingParallelPairs(plan);
+  const conflicts = conflictingParallelPairs(plan, repoRoot);
   if (conflicts.length) {
-    lines.push("", "并行降级（边界重叠，将改为串行）：" + conflicts.map((c) => `${c.a}↔${c.b}`).join("、"));
+    lines.push("", "并行降级（同一 repo 不能并行，将改为串行）：" + conflicts.map((c) => `${c.a}↔${c.b}`).join("、"));
   }
   const open = openDecisions(plan);
   if (open.length) {

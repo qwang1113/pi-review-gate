@@ -95,15 +95,14 @@ explicit triggers, never the expected entry. The user is asked at two points
 only: `ask_user` (the ONE way to reach them — it runs the interview and
 pauses the loop) and the loop-goal approval dialog.
 
-Where work lands is the gate's business too: `setup_workspace` settles a
-dirty worktree and creates this session's work branch (a commit may only land
-on it) — swallowing the whole branch dance, including a best-effort `git
-fetch` + `--ff-only` update of the base — and `declare_done` **squash-merges**
-that branch back into the base the user confirmed (checkpoint history stays off
-the target; the gate composes an English Conventional-Commit subject
-mechanically from the folded checkpoints' own type/scope, so it always
-satisfies L5 without ever using the Chinese goal title) — a conflict stops it,
-records the files and hands them to you.
+Where work lands is yours again (2026-09-07, user decision): the workspace
+settlement layer (`setup_workspace`, the mandatory work branch, declare_done's
+squash-merge) is gone. You work directly on the branch you are on — including
+main, with one guardrail: the gate warns at session start on
+main/master/dev/develop, and a checkpoint on those branches pops a
+confirmation dialog first. `declare_done` closes the gates and leaves the
+work where it is; merging/rebasing/pushing is your git workflow, guided by
+the guardrails below.
 
 ## Git workflow guardrails
 

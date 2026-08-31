@@ -236,14 +236,13 @@ test("a vanished pane is `dead`, and the receipt names the assets that survived 
   const childId = await spawnT1(world);
   readyChild(world, childId);
   const child = world.runtime().children[0]!;
-  world.sidecars.set(child.cwd, { workBranch: "feat/t1", review: { verdict: "READY" } });
+  world.sidecars.set(child.cwd, { review: { verdict: "READY" } });
   world.panes.get(child.paneId)!.alive = false;
 
   const reply = await world.call("orchestrator_wait", { timeoutMs: 0 });
   const text = replyText(reply);
   assert.match(text, /pane 已消失/);
-  assert.match(text, /feat\/t1/, "the branch survived the death and must be named in the same breath");
-  assert.match(text, /review 裁决 READY/);
+  assert.match(text, /review 裁决 READY/, "the review verdict survived the death and is named");
   assert.match(text, /orchestrator_recover/, "the receipt carries the executable recovery action");
 });
 

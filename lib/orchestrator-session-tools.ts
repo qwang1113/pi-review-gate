@@ -258,15 +258,10 @@ function emptySnapshot(): SupervisionSnapshot {
 function exitBlockers(deps: OrchestratorDeps): string[] {
   const { plan } = currentPlan(deps);
   const panes = alivePanes(deps);
-  const branch = deps.branchFacts();
   return orchestratorDoneProblems({
     ...(plan ? { plan } : {}),
     runtime: deps.runtime(),
     alivePaneIds: panes.panes,
-    ...(branch.workBranch === undefined ? {} : { workBranch: branch.workBranch }),
-    ...(branch.baseBranch === undefined ? {} : { baseBranch: branch.baseBranch }),
-    mergeSettled: branch.mergeSettled,
-    mergeWaived: branch.mergeWaived,
   });
 }
 
@@ -324,38 +319,6 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
     return fail(`review-gate: 关闭 pane 失败 —— ${(error as Error).message}`);
   }
 
-  // R-28 — THE INCIDENT THIS BRANCH EXISTS FOR. `.git/hooks` lives in the
-  // COMMON git dir, so it is shared by every linked worktree: a child that
-  // installed the gate's hooks from inside its own orchestration worktree
-  // repointed the WHOLE repository's hooks at a directory this call is about
-  // to delete. Measured on 2026-08-30: after one `orchestrator_close`, every
-  // session in the repo failed to commit ("cannot execute: No such file or
-  // directory"), including an innocent third child mid-merge — and it could
-  // not repair itself, because `.git/hooks` is gate-blocked and reinstalling
-  // from its own temp worktree only moves the crater.
-  //
-  // So the resource is checked BEFORE it is removed, and repaired first:
-  // there is never a window in which the repository cannot commit.
-  let hookNote = "";
-  if (child.worktree) {
-    const referencing = deps.gitHooksReferencing(child.worktree);
-    if (referencing.length > 0) {
-      const repaired = deps.repairGitHooks();
-      if (!repaired.ok) {
-        return fail(
-          `review-gate: 拒绝清理 worktree —— 仓库的 git 钩子（${referencing.join(", ")}）现在指向 ` +
-          `${child.worktree}，删掉它会让**整个仓库**都提交不了（R-28 事故的复现路径）；` +
-          `而门禁尝试把钩子复位到主工作区也失败了：${repaired.error}。\n` +
-          "pane 与登记都保留着。请在主工作区手动跑 `bash scripts/install-git-hooks.sh` 复位钩子后重试。",
-          { childId: child.id, hooksReferencing: referencing, closed: false },
-        );
-      }
-      hookNote =
-        `\n注意：仓库的 git 钩子（${referencing.join(", ")}）当时指向这个 worktree —— ` +
-        "门禁已先把它们复位到主工作区，再删的 worktree（R-28：先复位、后删除，中间不留破损窗口）。";
-    }
-  }
-  if (child.worktree) deps.removeWorktree(child.worktree);
   deps.saveRuntime(markChildClosed(deps.runtime(), child.id, new Date(deps.now()).toISOString()));
   // O-2 — only remind about the task status when it still NEEDS moving. The
   // orchestrator usually sets the task `done` before closing; repeating the
@@ -370,10 +333,8 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
     ? "。别忘了把它的任务状态置为 done 或 pending（`orchestrator_plan`）。"
     : `。任务 ${child.taskId} 当前是 ${closedTask.status}，无需再动。`;
   return reply(
-    `review-gate: 子会话 ${child.id}（pane ${child.paneId}）已关闭` +
-    (child.worktree ? `，worktree ${child.worktree} 已清理` : "") +
-    statusNudge + hookNote,
-    { childId: child.id, hooksRepaired: hookNote.length > 0 },
+    `review-gate: 子会话 ${child.id}（pane ${child.paneId}）已关闭` + statusNudge,
+    { childId: child.id },
   );
 
 }
@@ -465,8 +426,9 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     description:
       "Open an interactive CHILD SESSION for one plan task, in a pane of THIS window. The gate " +
       "picks the split direction (right column, stacked downward), injects the orchestration id " +
-      "so the child's wake-ups survive a relay, starts it in loop mode, creates an isolated " +
-      "worktree when the task will run in parallel, and registers the pane — a pane nobody " +
+      "so the child's wake-ups survive a relay, starts it in loop mode in the repo its task " +
+      "declares (same-repo children are serialized by the gate; only different repos run " +
+      "in parallel), and registers the pane — a pane nobody " +
       "registered cannot be addressed later. Requires a plan the USER approved.",
     parameters: Type.Object({
       taskId: Type.String({ description: "Plan task id this child will work on" }),

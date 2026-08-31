@@ -28,9 +28,9 @@ export const TOOL_DECISION_TABLE =
   "| 提交本轮改动送审 | `judge_submit({role:\"reviewer\", task})` — 门禁自己跑 precommit→checkpoint→送审 |\n" +
   "| 提交 goal 草稿 | `propose_loop_goal({goal})` — 门禁自己跑 goal 审计，过了才弹用户批准框 |\n" +
   "| 自己决定不了的设计取舍 | `judge_submit({role:\"adviser\", task})` |\n" +
-  "| 工作区有别人的改动 / 还没有工作分支 | `setup_workspace()` |\n" +
+  "| 当前在 main/master/dev/develop 上要提交 | checkpoint 前门禁会弹确认框；ship 提交（git commit）会被拒 — 切到开发分支 |\n" +
   "| 看 judge 的状态或结论 | `judge_read({role})`；实在没别的可做才 `judge_wait({role})` |\n" +
-  "| 任务做完了 | `declare_done({summary})` — 门禁自己合分支 |\n" +
+  "| 任务做完了 | `declare_done({summary})` — 门禁复检后收尾，工作留在当前分支 |\n" +
   "| 要改敏感文件 / 缩小审查范围 | `request_sensitive_edit` / `request_scope_limit` |";
 
 /**
@@ -57,21 +57,17 @@ export const REQUIREMENT_PROTOCOL =
 
 /**
  * Explore-mode extra guidance, appended after the standing block when the
- * session is in explore mode (investigation). Two reminders the decision table
+ * session is in explore mode (investigation). One reminder the decision table
  * does not carry: a task that turns into delivery work must first be
  * escalated to the full loop (set_gate_mode("loop") applies immediately, no
- * user consent needed), and a delivery task should settle the workspace
- * (setup_workspace) before editing. Both were measured failures: an explore
- * session receiving a fix request went straight to editing, skipping both
- * (2026-08-31).
+ * user consent needed). Measured 2026-08-31: an explore session receiving a
+ * fix request went straight to editing, skipping the escalation.
  */
 export const EXPLORE_MODE_NOTE =
   "## 注意（explore 探查模式）\n" +
   "当前是 explore（探查）模式：门禁为 advisory，ship 命令（git commit/push、gh pr）仍被完整拦截。\n" +
   "若用户的任务变成**交付性工作**（修复、实现、重构、要提交上线），先调用 `set_gate_mode(\"loop\")` " +
-  "升级到完整门禁循环（立即生效，无需用户确认），再开始改代码；只有纯分析/只读调查才留在 explore。\n" +
-  "开始交付前，若本会话还没有 `setup_workspace`（确认基准分支、建工作分支），先调它；" +
-  "工作区有别人的改动时，也必须先调 `setup_workspace` 处置。";
+  "升级到完整门禁循环（立即生效，无需用户确认），再开始改代码；只有纯分析/只读调查才留在 explore。";
 
 /** The whole standing block, in the order an agent reads it. */
 export function buildAgentDirectives(mode?: "loop" | "explore"): string {

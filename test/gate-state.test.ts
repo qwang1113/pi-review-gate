@@ -307,45 +307,6 @@ test("askUser: a malformed interview record is dropped whole", () => {
   assert.deepEqual(loadSidecar(path)?.askUser, good, "a real record survives");
 });
 
-test("workspace/branch facts: corruption is dropped, and dropping TIGHTENS the gate", () => {
-  const dir = makeTemp();
-  const path = join(dir, "state.json");
-  const base = emptyState("s", 10);
-  // A non-string branch would reach a git argv and a commit decision.
-  for (const field of ["baseBranch", "workBranch"] as const) {
-    writeFileSync(path, JSON.stringify({ ...base, [field]: 42 }));
-    assert.equal(loadSidecar(path)?.[field], undefined, field);
-    writeFileSync(path, JSON.stringify({ ...base, [field]: "feat/x" }));
-    assert.equal(loadSidecar(path)?.[field], "feat/x", `${field} survives when real`);
-  }
-  for (const bad of ["s", { at: "t" }, { files: [] }, { at: "t", files: [1] }, { at: "t", files: [], settled: "yes" }]) {
-    writeFileSync(path, JSON.stringify({ ...base, worktreeDirty: bad }));
-    assert.equal(loadSidecar(path)?.worktreeDirty, undefined, JSON.stringify(bad));
-  }
-  // A dropped `settled` flag leaves edits BLOCKED, never open.
-  writeFileSync(path, JSON.stringify({ ...base, worktreeDirty: { at: "t", files: ["?? a.ts"], settled: true } }));
-  assert.equal(loadSidecar(path)?.worktreeDirty?.settled, true);
-
-  writeFileSync(path, JSON.stringify({ ...base, branchOps: "nope" }));
-  assert.equal(loadSidecar(path)?.branchOps, undefined);
-  writeFileSync(path, JSON.stringify({
-    ...base,
-    branchOps: [{ op: "checkout", from: null, to: "main", at: "t" }, { nonsense: true }, { op: 5, at: "t" }],
-  }));
-  assert.equal(loadSidecar(path)?.branchOps?.length, 1, "only well-formed ops survive");
-
-  for (const bad of [{ branch: "w", base: "b", at: "t" }, { branch: "w", base: "b", files: ["x"] }, "s"]) {
-    writeFileSync(path, JSON.stringify({ ...base, mergeConflict: bad }));
-    assert.equal(loadSidecar(path)?.mergeConflict, undefined, JSON.stringify(bad));
-  }
-  // A forged waiver would skip the merge silently.
-  for (const bad of [{ at: "t" }, { reason: "r" }, "s", 1]) {
-    writeFileSync(path, JSON.stringify({ ...base, mergeWaived: bad }));
-    assert.equal(loadSidecar(path)?.mergeWaived, undefined, JSON.stringify(bad));
-  }
-  writeFileSync(path, JSON.stringify({ ...base, mergeWaived: { at: "t", reason: "user handles it" } }));
-  assert.deepEqual(loadSidecar(path)?.mergeWaived, { at: "t", reason: "user handles it" });
-});
 
 
 

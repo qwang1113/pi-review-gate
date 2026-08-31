@@ -163,31 +163,45 @@ test("a legal move returns a NEW plan and records the note", () => {
 // Scheduling (constraint 6)
 // ---------------------------------------------------------------------------
 
-test("CONSTRAINT 6: overlapping tasks are DEFERRED, never co-scheduled", () => {
+test("CONSTRAINT 6: same-repo tasks are DEFERRED, never co-scheduled (2026-09-07)", () => {
+  // The isolation worktree is gone, so two children may never share one
+  // checkout: same-repo tasks serialize whatever their boundaries say.
   const plan = planOf({
     maxParallel: 2,
     tasks: [
-      { id: "a", title: "a", fileBoundaries: ["lib"], execution: "parallel" },
-      { id: "b", title: "b", fileBoundaries: ["lib/deep.ts"], execution: "parallel" },
+      { id: "a", title: "a", fileBoundaries: ["lib"] },
+      { id: "b", title: "b", fileBoundaries: ["docs"] }, // disjoint, but SAME repo
     ],
   });
-  const { start, deferred } = scheduleNextTasks(plan, []);
-  assert.deepEqual(start.map((s) => s.task.id), ["a"], "only one of an overlapping pair starts");
+  const { start, deferred } = scheduleNextTasks(plan, [], "/repo");
+  assert.deepEqual(start.map((s) => s.task.id), ["a"], "only one child per repo starts");
   assert.deepEqual(deferred.map((d) => d.task.id), ["b"]);
   assert.equal(deferred[0]!.blockedBy, "a");
-  assert.match(deferred[0]!.reason, /约束 6/, "the deferral says why, so the user can be told");
+  assert.match(deferred[0]!.reason, /同一 repo/, "the deferral says why, so the user can be told");
 });
 
-test("independent tasks DO run in parallel, up to the cap", () => {
-  const plan = planOf({ maxParallel: 2 });
-  const { start, deferred } = scheduleNextTasks(plan, []);
-  assert.deepEqual(start.map((s) => s.task.id), ["a", "b"]);
-  assert.deepEqual(start.map((s) => s.execution), ["serial", "parallel"],
-    "the first has nothing beside it; the second genuinely runs alongside");
+test("cross-repo tasks DO run in parallel (2026-09-07)", () => {
+  const plan = planOf({ maxParallel: 2, tasks: [
+    { id: "a", title: "a", fileBoundaries: ["lib"], repo: "/repo-a" },
+    { id: "b", title: "b", fileBoundaries: ["lib"], repo: "/repo-b" },
+  ] });
+  const { start, deferred } = scheduleNextTasks(plan, [], "/repo-a");
+  assert.deepEqual(start.map((s) => s.task.id), ["a", "b"], "different checkouts may run side by side");
+  assert.deepEqual(start.map((s) => s.execution), ["serial", "parallel"]);
   assert.deepEqual(deferred, []);
 });
 
-test("a task overlapping something ALREADY RUNNING waits for it", () => {
+test("an undeclared repo means the orchestration's own repo", () => {
+  const plan = planOf({ maxParallel: 2, tasks: [
+    { id: "a", title: "a", fileBoundaries: ["lib"] },
+    { id: "b", title: "b", fileBoundaries: ["lib"], repo: "/repo-b" },
+  ] });
+  const { start, deferred } = scheduleNextTasks(plan, [], "/repo-a");
+  assert.deepEqual(start.map((s) => s.task.id), ["a", "b"], "a defaults to the primary repo, which differs from b");
+});
+
+
+test("a task in the SAME repo as something ALREADY RUNNING waits for it", () => {
   const plan = planOf({
     maxParallel: 2,
     tasks: [
@@ -195,7 +209,7 @@ test("a task overlapping something ALREADY RUNNING waits for it", () => {
       { id: "b", title: "b", fileBoundaries: ["lib/x.ts"] },
     ],
   });
-  const { start, deferred } = scheduleNextTasks(plan, ["a"]);
+  const { start, deferred } = scheduleNextTasks(plan, ["a"], "/repo");
   assert.deepEqual(start, []);
   assert.deepEqual(deferred.map((d) => d.blockedBy), ["a"]);
 });
@@ -205,24 +219,24 @@ test("the parallel cap and unmet dependencies both hold tasks back", () => {
     { id: "a", title: "a", fileBoundaries: ["lib/a"], status: "running" },
     { id: "b", title: "b", fileBoundaries: ["lib/b"] },
   ] });
-  assert.deepEqual(scheduleNextTasks(full, ["a"]), { start: [], deferred: [] },
+  assert.deepEqual(scheduleNextTasks(full, ["a"], "/repo"), { start: [], deferred: [] },
     "no free slot ⇒ nothing starts");
-
   const chained = planOf({ tasks: [
     { id: "a", title: "a", fileBoundaries: ["lib/a"] },
     { id: "b", title: "b", fileBoundaries: ["lib/b"], dependsOn: ["a"] },
   ] });
-  assert.deepEqual(scheduleNextTasks(chained, []).start.map((s) => s.task.id), ["a"],
+  assert.deepEqual(scheduleNextTasks(chained, [], "/repo").start.map((s) => s.task.id), ["a"],
     "b is not a candidate at all until a is done");
 });
 
-test("conflicting parallel pairs are reported at approval time", () => {
+test("same-repo parallel pairs are reported at approval time (2026-09-07)", () => {
   const plan = planOf({ tasks: [
     { id: "a", title: "a", fileBoundaries: ["lib"], execution: "parallel" },
     { id: "b", title: "b", fileBoundaries: ["lib/x"], execution: "parallel" },
-    { id: "c", title: "c", fileBoundaries: ["docs"], execution: "parallel" },
+    { id: "c", title: "c", fileBoundaries: ["docs"], execution: "parallel", repo: "/repo-b" },
   ] });
-  assert.deepEqual(conflictingParallelPairs(plan), [{ a: "a", b: "b" }]);
+  assert.deepEqual(conflictingParallelPairs(plan, "/repo"), [{ a: "a", b: "b" }],
+    "same repo ⇒ parallel is downgraded; a different repo keeps its parallel");
   assert.match(formatPlanSummary(plan), /并行降级/,
     "the user sees the downgrade in the approval dialog, before it happens");
 });

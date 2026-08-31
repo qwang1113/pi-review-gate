@@ -18,7 +18,7 @@
  */
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
-import { ORCH_BASE_BRANCH_ENV, STATE_VARIANT_ENV } from "./gate-state.ts";
+import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import {
@@ -38,7 +38,7 @@ import {
 } from "./orchestrator-pane-decor.ts";
 
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
-import { spawnAuthorization, worktreeRequirement } from "./orchestrator-gate.ts";
+import { spawnAuthorization } from "./orchestrator-gate.ts";
 import {
   findChild,
   lastChildPane,
@@ -86,7 +86,7 @@ function schedulingVerdict(
   const { plan } = currentPlan(deps);
   if (!plan) return { ok: false, reason: "没有 plan" };
   const running = runningTaskIds(deps.runtime(), alive);
-  const schedule = scheduleNextTasks(plan, running);
+  const schedule = scheduleNextTasks(plan, running, deps.repoRoot);
   const picked = schedule.start.find((s) => s.task.id === task.id);
   if (picked) return { ok: true, execution: picked.execution };
   const deferred = schedule.deferred.find((d) => d.task.id === task.id);
@@ -226,37 +226,13 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   const verdict = schedulingVerdict(deps, task, panes.panes);
   if (!verdict.ok) return fail(`review-gate: 现在还不能开 "${taskId}" —— ${verdict.reason}`);
 
-  // Read BEFORE the worktree is created: `addWorktree` checks out a fresh
-  // `orch/...` branch, and reading the base afterwards from a child's own
-  // directory would hand it exactly the wrong answer (R3-6).
-  const orchestrationBase = deps.currentBranch();
-
-
-  // CONSTRAINT 7 — a child that will run alongside another gets its own
-  // worktree, created BY THE GATE (the agent never assembles a git command).
-  let worktree: string | undefined;
-  const need = worktreeRequirement(verdict.execution);
-  if (need.needed) {
-    const created = deps.addWorktree(taskId);
-    if (!created.ok) {
-      return fail(`review-gate: ${need.reason}，但 worktree 创建失败：${created.error}`);
-    }
-    worktree = created.path;
-  }
-
-  // O-1 — the receipt describes the ISOLATION decision in isolation terms, not
-  // in the plan's `execution` vocabulary. The scheduler may run a task that is
-  // `serial` in the plan alongside a sibling that is still going (that is
-  // correct — sharing the main worktree would let two writers clobber each
-  // other's review binding), and echoing `parallel` there made a read-only
-  // receipt look like the plan had been changed. So say WHY the worktree was
-  // (or was not) isolated, from the concurrency fact itself.
-  const concurrentSiblings = runningTaskIds(deps.runtime(), panes.panes).length;
-  const isolationNote = worktree
-    ? `因当前有 ${concurrentSiblings} 个并发子会话，自动使用隔离 worktree（共享主工作区会让两个写者互相打断 review 绑定），worktree=${worktree}`
-    : "在共享主工作区里跑（当前没有需要隔离的并发子会话）";
-
-  const cwd = worktree ?? deps.repoRoot;
+  // 2026-09-07 (user decision): no isolated worktrees anymore. Children
+  // share the main worktree and run SERIALLY within a repo (see
+  // schedulingVerdict); the only parallelism left is across repos, so a
+  // task's declared `repo` picks the checkout the child works in.
+  const cwd = task.repo && deps.knownRepoRoots().includes(task.repo)
+    ? task.repo
+    : deps.repoRoot;
   const childId = newChildId(taskId, deps.now());
   const marker = buildDeliveryMarker(taskId, deps.now());
   const written = deps.writeScratchFile(
@@ -264,7 +240,6 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     buildTaskDocument({ marker, taskId, title: task.title, brief }),
   );
   if (!written.ok) {
-    if (worktree) deps.removeWorktree(worktree);
     return fail(`review-gate: 任务书写不出来（${written.error}）—— 一个 pane 都没开。`);
   }
 
@@ -278,14 +253,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     // F4 — its OWN gate sidecar, so supervisor and worker never overwrite
     // each other's mode, Q&A record and unmet-gate list.
     [STATE_VARIANT_ENV]: childId,
-    // R3-6 — WHERE ITS WORK HAS TO LAND. A child in a gate-created worktree
-    // stands on `orch/<task>-<stamp>`, so "the branch I am on" is the wrong
-    // default for its base: the third run had a whole lane merge into that
-    // scratch branch and stop there. The orchestration's base is known HERE,
-    // so it is stated here rather than guessed there.
-    ...(orchestrationBase ? { [ORCH_BASE_BRANCH_ENV]: orchestrationBase } : {}),
   };
-
   let paneId: string | undefined;
   try {
     const result = deps.tmux(buildSpawnPaneArgv({
@@ -300,11 +268,9 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     if (!result.ok) throw new Error(result.stderr || "tmux split-window 失败");
     paneId = parseSpawnedPaneId(result.stdout);
   } catch (error) {
-    if (worktree) deps.removeWorktree(worktree);
     return fail(`review-gate: 开子会话失败 —— ${(error as Error).message}`);
   }
   if (!paneId) {
-    if (worktree) deps.removeWorktree(worktree);
     return fail("review-gate: tmux 没有回报新 pane id，无法登记这个子会话 —— 已回滚（未登记的 pane 不可寻址）。");
   }
 
@@ -313,7 +279,6 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     taskId,
     paneId,
     cwd,
-    ...(worktree ? { worktree } : {}),
     stateVariant: childId,
     taskFile: written.path,
     createdAt: new Date(deps.now()).toISOString(),
@@ -364,7 +329,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   }
 
   return reply(
-    `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动（${isolationNote}）。\n` +
+    `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动（共享主工作区，同一 repo 内串行）。\n` +
     `任务 ${taskId} 已置为 running，任务书 ${written.path} 已随 \`pi @file\` 带进去。\n` +
     `投递已核实：${check.verdict.summary}。\n` +
     `${decor.note}\n` +
@@ -376,9 +341,6 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
       childId,
       paneId,
       execution: verdict.execution,
-      worktree,
-      isolated: worktree !== undefined,
-      concurrentSiblings,
       taskFile: written.path,
       delivered: true,
     },
