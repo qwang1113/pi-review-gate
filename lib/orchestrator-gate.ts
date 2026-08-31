@@ -17,7 +17,7 @@
  *   5 tasks declare file boundaries ..... lib/orchestrator-plan.ts (parse)
  *   6 same-repo tasks never parallel ... lib/orchestrator-plan.ts (schedule)
  *   7 (retired 2026-09-07: no worktree isolation — cross-repo only)
- *   8 proxied goal stays in boundary .... {@link proxyGoalProblems}
+ *   8 proxied goal stays in boundary .... {@link proxyApprovalProblems}
  *   9 notification single entry+throttle. {@link notifyAuthorization} + notify.ts
  *  10 (retired 2026-09-07: work-branch landing is gone)
  *  11 unreported decisions block exit ... {@link orchestratorDoneProblems}
