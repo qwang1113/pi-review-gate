@@ -4435,6 +4435,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       changedFilesInRange: (root, baseline, head) =>
         execFileSync("git", ["diff", "--name-only", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
           .trim().split("\n").filter(Boolean),
+      worktreeClean: (root) =>
+        execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }).trim() === "",
     },
     readText: (path) => {
       try { return readFileSync(path, "utf8"); } catch { return undefined; }

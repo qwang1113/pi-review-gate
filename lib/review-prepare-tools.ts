@@ -83,6 +83,10 @@ export interface ReviewPrepareGit {
   revParse(root: string, rev: string): string;
   /** `git diff --name-only <baseline>..<head>`. THROWS when it cannot run. */
   changedFilesInRange(root: string, baseline: string, head: string): string[];
+  /** Is the worktree CLEAN (no staged/unstaged/untracked changes)? The
+   *  empty-range exit-goal round REQUIRES it — a READY must never bless
+   *  content no reviewer saw (round-2 P2). */
+  worktreeClean(root: string): boolean;
 }
 
 /**
@@ -270,6 +274,17 @@ async function doPrepareReview(
   // than a code diff. The range renders as `head..head` and files stays
   // empty; buildReviewPrompt's empty-range branch words the task.
   const emptyRange = head === baseline;
+  // Round-2 P2 (security): an empty-range READY binds to the HEAD tree, and
+  // the ship gate compares exactly that tree — so a READY taken with a dirty
+  // worktree would mechanically bless content no reviewer saw. The clean-
+  // worktree condition therefore lives in the GATE, not only in the prompt.
+  if (emptyRange && !deps.git.worktreeClean(root)) {
+    return {
+      content: [{ type: "text", text: "review-gate: prepare_review refused — the worktree is dirty, so the empty-range exit-goal round cannot bless it. Commit or stash your changes first (judge_submit with a dirty worktree commits a checkpoint and reviews the real diff), then retry." }],
+      details: { prepared: false, emptyRange: true, dirtyWorktree: true },
+      isError: true,
+    };
+  }
   const range = `${(emptyRange ? head : baseline).slice(0, 12)}..${head.slice(0, 12)}`;
   let files: string[] = [];
   if (!emptyRange) {

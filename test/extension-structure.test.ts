@@ -2215,8 +2215,9 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
   const FROZEN: Record<string, number> = {
     "advisory-prepare-tools.ts": 3,
     // 2026-08-31: the no-checkpoint refusal (3 mentions) became the
-    // empty-range exit-goal audit — the mentions are gone with it.
-    "review-prepare-tools.ts": 4,
+    // empty-range exit-goal audit — the mentions are gone with it; the
+    // dirty-worktree refusal keeps one self-describing mention.
+    "review-prepare-tools.ts": 5,
     // The `/precommit` command's `callTool("run_precommit", …)` wiring moved
     // here with the command layer.
     "gate-command-tools.ts": 1,

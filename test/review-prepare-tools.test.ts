@@ -34,6 +34,7 @@ interface Fake {
   revs: Record<string, string>;
   ancestors: Set<string>;
   changed: string[];
+  clean: boolean;
   goal: { confirmed: boolean; text: string; truncated: boolean };
   repo: { ok: boolean; error: string };
   files: Record<string, string>;
@@ -64,6 +65,7 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     revs: { HEAD: "hhhhhhhhhhhh", "HEAD^{tree}": "tttttttttttt", "cccccccccccc^": "pppppppppppp" },
     ancestors: new Set<string>(),
     changed: ["lib/a.ts", "lib/b.ts"],
+    clean: true,
     goal: { confirmed: false, text: "", truncated: false },
     repo: { ok: true, error: "" },
     files: {},
@@ -89,6 +91,7 @@ function fake(overrides: Partial<Fake> = {}): Fake {
         return v;
       },
       changedFilesInRange: () => state.changed,
+      worktreeClean: () => state.clean,
     },
     readText: (p) => state.files[p],
   };
@@ -199,6 +202,20 @@ test("HEAD equal to the baseline is an empty range — accepted as an exit-goal 
   assert.match(textOf(reply), /EXIT GOAL is met/);
   // The empty-range round still registers a target (HEAD tree binding).
   assert.equal(f.targets.length, 1);
+  cleanup(f);
+});
+
+test("empty range + dirty worktree ⇒ refused (round-2 P2: a READY must never bless unseen content)", async () => {
+  const f = fake();
+  f.revs.HEAD = "pppppppppppp";
+  f.revs["HEAD^{tree}"] = "tttttttttttt";
+  f.clean = false;
+  const reply = await call(f);
+  assert.equal(reply.isError, true);
+  assert.equal(reply.details?.prepared, false);
+  assert.equal(reply.details?.dirtyWorktree, true);
+  assert.match(textOf(reply), /worktree is dirty/);
+  assert.deepEqual(f.targets, [], "a refused round registers no review target");
   cleanup(f);
 });
 
