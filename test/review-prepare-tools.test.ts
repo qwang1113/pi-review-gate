@@ -219,6 +219,20 @@ test("empty range + dirty worktree ⇒ refused (round-2 P2: a READY must never b
   cleanup(f);
 });
 
+test("worktreeClean throwing is fail-closed — treated as NOT clean (round-4 P2)", async () => {
+  const f = fake();
+  f.revs.HEAD = "pppppppppppp";
+  f.revs["HEAD^{tree}"] = "tttttttttttt";
+  f.deps.git.worktreeClean = () => { throw new Error("git exploded"); };
+  const reply = await call(f);
+  assert.equal(reply.isError, true, "a throwing probe must refuse, never bless");
+  assert.equal(reply.details?.prepared, false);
+  assert.equal(reply.details?.dirtyWorktree, true);
+  assert.match(textOf(reply), /dirty \(or unreadable\)/);
+  assert.deepEqual(f.targets, [], "no target may be registered for a refused round");
+  cleanup(f);
+});
+
 test("no checkpoint on record is allowed — an empty-range exit-goal audit", async () => {
   const f = fake();
   // Drop the checkpoint entirely; HEAD is the baseline, so the range is empty.
