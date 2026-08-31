@@ -128,7 +128,11 @@ test("a spawn registers the pane, injects the address, and starts pi with a task
   assert.ok(pane.command.some((arg) => arg.startsWith("@")), `task file argv: ${pane.command.join(" ")}`);
   assert.ok(pane.command.includes("--session-id"), "a deterministic session id is what makes recovery possible");
   const taskArg = pane.command.find((arg) => arg.startsWith("@"))!;
-  assert.match(world.scratch.get(taskArg.slice(1)) ?? "", /做任务一/);
+  // The argv carries the REPO-RELATIVE ref; the fake keys its scratch store by
+  // absolute path under the child's cwd (the task's repo).
+  const ref = taskArg.slice(1);
+  assert.ok(!ref.startsWith("/"), `the task file ref is repo-relative, not absolute: ${ref}`);
+  assert.match(world.scratch.get(`/repo/${ref}`) ?? "", /做任务一/);
 });
 
 test("a task declaring a repo spawns its child in THAT repo, not the orchestrator's", async () => {

@@ -2272,34 +2272,26 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
   /**
-   * The gate facts the belowEditor widget renders: workspace/branch,
-   * verdicts, unmet requirements. Computed from the live session state and
-   * the same unmetRequirements() the ship gate uses — the widget shows
-   * exactly what blocks shipping. Display-only: it never feeds an
-   * enforcement path.
+   * The gate facts the belowEditor widget renders: mode, branch, edited flag,
+   * and whether the loop goal is confirmed.
+   *
+   * 2026-09-16 — DELIBERATELY CHEAP (input-lag fix): this used to call
+   * `computeFingerprint()` on every 5s tick — a full shadow-index materialize
+   * + two `git add` passes that took ~3.2s in a 13k-file repo and ran on
+   * pi's main event loop, freezing the editor while typing. The widget now
+   * shows ONLY state that needs no git work: the in-memory gate state, the
+   * branch (one `symbolic-ref`), and the loop-goal confirmation. The unmet-
+   * requirements count is gone from the strip; it lives in `/gate-status`.
+   * Display-only: this never feeds an enforcement path.
    */
   function gateWidgetFacts(): GateWidgetFacts {
-    const fp = computeFingerprint(cwd);
-    const problems = (state.hasCodeChange || state.hasDocChange)
-      ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
-      : [];
     const completion: string[] = [];
-    for (const root of sessionRepos) {
-      // READ-ONLY: enforcementStateFor never creates a sidecar/cache entry,
-      // so a mere widget refresh cannot turn a repo with "no usable gate
-      // state" into one that looks tracked (measured regression, 2026-08-31).
-      const st = root === primaryRepoRoot ? state : enforcementStateFor(root);
-      if (!st) continue;
-      for (const p of copilotProblemsFor(st)) {
-        completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
-      }
-    }
     if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     return {
       mode: state.taskMode,
       branch: currentBranch(primaryRepoRoot) ?? "(detached)",
       edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
-      unmet: [...problems, ...completion],
+      unmet: completion,
     };
   }
 

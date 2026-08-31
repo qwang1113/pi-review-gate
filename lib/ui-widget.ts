@@ -6,6 +6,12 @@
  * details live in the `/gate-status` command; the strip is deliberately
  * minimal to keep the editor area quiet.
  *
+ * 2026-09-16 — CHEAP BY CONTRACT: the strip must never run git work. It used
+ * to include a full worktree fingerprint on every 5s tick (measured ~3.2s in
+ * a 13k-file repo, on pi's main event loop — typing froze). The facts now
+ * carry only in-memory state, one `symbolic-ref`, and the loop-goal flag;
+ * anything that needs a fingerprint lives in `/gate-status` instead.
+ *
  * Everything here is a pure function of plain strings so it can be
  * unit-tested without a TUI. The extension owns the side effects
  * (reading goal files, calling setWidget) and the try/catch fallbacks.

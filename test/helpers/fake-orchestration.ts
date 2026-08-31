@@ -234,8 +234,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     ownPane: () => env.TMUX_PANE,
     confirm: async () => confirmAnswers.shift() ?? false,
     showToUser: (title, text) => { shown.push(`${title}\n${text}`); },
-    writeScratchFile: (name, content) => {
-      const path = `/tmp/rg-scratch/${name}`;
+    writeTaskFile: (name, content, repoRoot) => {
+      const path = `${repoRoot ?? "/repo"}/.pi/tasks/${name}`;
       scratch.set(path, content);
       return { ok: true, path };
     },

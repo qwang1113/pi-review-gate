@@ -2,7 +2,7 @@
  * Where the orchestration layer meets the real machine.
  *
  * Everything the tools need that involves the OUTSIDE WORLD — running tmux,
- * reading and writing the plan file, writing scratch task documents,
+ * reading and writing the plan file, writing task documents into `.pi/tasks/`,
  * taking attention events off the queue — is implemented once here, so the
  * extension only has to supply what genuinely belongs to it: the gate state,
  * the user dialog and the repo facts.
@@ -24,7 +24,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 
 import { dirname, join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { sideEffectsEnabled } from "./side-effects.ts";
 import { nodeChannelIO } from "./orchestrator-channel.ts";
@@ -84,10 +83,33 @@ export function writePlanFile(repoRoot: string, plan: OrchestratorPlan): void {
   writeFileAtomic(path, JSON.stringify(plan, null, 2) + "\n");
 }
 
-/** The scratch root for this repo's orchestration artifacts (under /tmp). */
-export function scratchRootFor(repoRoot: string): string {
-  const key = repoRoot.replace(/[^A-Za-z0-9]/g, "-").slice(-40);
-  return join(tmpdir(), "rg-orchestration", key);
+/**
+ * Write a task document INSIDE the repo's gate-owned `.pi/` scope (F7).
+ *
+ * The file lives at `<repo>/.pi/tasks/<name>`, covered by `.gitignore`'s
+ * `.pi/` rule and the fingerprint's `:/.pi` exclusion — so a child's
+ * `git add -A` checkpoint can never sweep it into history, and the child
+ * receives it as the REPO-RELATIVE `@.pi/tasks/<name>` reference instead of
+ * an absolute `/var/folders/...` path leaking into its first prompt.
+ * The name is sanitized to a single path segment, so a caller (or a
+ * corrupted registry) can never write outside this directory.
+ */
+export function writeTaskFile(
+  repoRoot: string,
+  name: string,
+  content: string,
+): { ok: true; path: string } | { ok: false; error: string } {
+  const safe = name.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 120);
+  if (!safe) return { ok: false, error: "文件名非法" };
+  try {
+    const dir = join(repoRoot, ".pi", TASK_FILE_DIRNAME);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, safe);
+    writeFileAtomic(path, content);
+    return { ok: true, path };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
 }
 
 
@@ -106,31 +128,6 @@ export function emitNotification(sequence: string, env: NodeJS.ProcessEnv = proc
   return true;
 }
 
-/**
- * Write a task document OUTSIDE the repository (F7).
- *
- * The scratch root lives under the system temp dir: anything the gate
- * creates inside the repo ends up in the first child's `git add -A`
- * checkpoint. The name is sanitized to a single path segment, so a caller (or
- * a corrupted registry) can never write outside this directory.
- */
-export function writeScratchFile(
-  repoRoot: string,
-  name: string,
-  content: string,
-): { ok: true; path: string } | { ok: false; error: string } {
-  const safe = name.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 120);
-  if (!safe) return { ok: false, error: "文件名非法" };
-  try {
-    const dir = join(scratchRootFor(repoRoot), TASK_FILE_DIRNAME);
-    mkdirSync(dir, { recursive: true });
-    const path = join(dir, safe);
-    writeFileAtomic(path, content);
-    return { ok: true, path };
-  } catch (error) {
-    return { ok: false, error: (error as Error).message };
-  }
-}
 
 /**
  * Read a CHILD's own gate sidecar (F3 channel 2 / F10).
@@ -326,7 +323,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     },
     confirm: host.confirm,
     showToUser: host.showToUser,
-    writeScratchFile: (name, content) => writeScratchFile(host.repoRoot, name, content),
+    writeTaskFile: (name, content, repoRoot) => writeTaskFile(repoRoot ?? host.repoRoot, name, content),
     childGateState: (childCwd, variant) => readChildGateState(childCwd, variant),
     sleep: (ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }),
 

@@ -101,12 +101,16 @@ export interface OrchestratorDeps {
   showToUser(title: string, text: string): void;
 
   /**
-   * Write a scratch file OUTSIDE the repository (task documents, F7).
+   * Write a task document INSIDE the given repo's gate-owned `.pi/tasks/` (F7).
    *
-   * Outside on purpose: a task file inside the worktree lands in the first
-   * child's `git add -A` checkpoint.
+   * The `.pi/` scope is covered by `.gitignore` and the fingerprint's
+   * `:/.pi` exclusion, so the file can never land in a child's checkpoint;
+   * the child receives it as the repo-relative `@.pi/tasks/<name>` ref,
+   * resolved against ITS pane cwd — which for a recovery is the CHILD's
+   * declared repo, not the orchestrator's. `repoRoot` defaults to the
+   * orchestrator's own repo when omitted.
    */
-  writeScratchFile(name: string, content: string): { ok: true; path: string } | { ok: false; error: string };
+  writeTaskFile(name: string, content: string, repoRoot?: string): { ok: true; path: string } | { ok: false; error: string };
 
   /**
    * Read a child's OWN gate sidecar as parsed JSON (F10's channel).
