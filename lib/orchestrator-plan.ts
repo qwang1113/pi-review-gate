@@ -558,6 +558,7 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
       id: t.id,
       title: t.title,
       fileBoundaries: [...t.fileBoundaries].sort(),
+      ...(t.repo ? { repo: t.repo } : {}),
       dependsOn: [...t.dependsOn].sort(),
       execution: t.execution,
     })),

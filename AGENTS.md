@@ -97,16 +97,28 @@ pauses the loop) and the loop-goal approval dialog.
 
 Where work lands is yours again (2026-09-07, user decision): the workspace
 settlement layer (`setup_workspace`, the mandatory work branch, declare_done's
-squash-merge) is gone. You work directly on the branch you are on — including
-main, with one guardrail: the gate warns at session start on
-main/master/dev/develop, and a checkpoint on those branches pops a
-confirmation dialog first. `declare_done` closes the gates and leaves the
-work where it is; merging/rebasing/pushing is your git workflow, guided by
-the guardrails below.
+squash-merge) is gone. You work directly on the branch you are on. Two
+mechanical facts replace the old enforcement, and they are DIFFERENT from
+each other:
+
+- **The gate's own checkpoint** (`judge_submit` commits it) lands on the
+  current branch, whatever it is. On a PROTECTED branch (main/master/dev/
+  develop) it pops a confirmation dialog first — the user (or, in an
+  orchestration, the project manager through the channel) confirms before it
+  commits.
+- **Your own `git commit`** on a protected branch is REFUSED by the ship
+  gate (a shell command cannot show a dialog, so it fails closed).
+
+`declare_done` closes the gates and leaves the work where it is;
+merging/rebasing/pushing is your git workflow, guided by the guardrails
+below — which still prefer a feature branch over working on main.
 
 ## Git workflow guardrails
 
-Hard rules for every git operation in this repo. On top of these rules, the
+These guardrails are the WORKFLOW this repo prefers — a feature branch is
+the normal place for a change. They are not the gate's enforcement: the gate
+only refuses your own `git commit` on a protected branch (its own checkpoint
+confirms with the user instead, per above). On top of these rules, the
 pi-review-gate extension hard-blocks ship commands (`git commit`, `git push`,
 `gh pr create`) until the quality gates pass.
 
