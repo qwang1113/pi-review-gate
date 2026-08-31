@@ -102,10 +102,10 @@ mechanical facts replace the old enforcement, and they are DIFFERENT from
 each other:
 
 - **The gate's own checkpoint** (`judge_submit` commits it) lands on the
-  current branch, whatever it is. On a PROTECTED branch (main/master/dev/
-  develop) it pops a confirmation dialog first — the user (or, in an
-  orchestration, the project manager through the channel) confirms before it
-  commits.
+  current branch, whatever it is — EXCEPT on a PROTECTED branch
+  (main/master/dev/develop), where it is REFUSED outright, no dialog
+  (2026-09-16, user decision: "无论如何都不能在保护分支上面做 commit，
+  checkpoint 也不行"). Checkpointing requires a feature branch.
 - **Your own `git commit`** on a protected branch is REFUSED by the ship
   gate (a shell command cannot show a dialog, so it fails closed).
 
@@ -117,8 +117,8 @@ below — which still prefer a feature branch over working on main.
 
 These guardrails are the WORKFLOW this repo prefers — a feature branch is
 the normal place for a change. They are not the gate's enforcement: the gate
-only refuses your own `git commit` on a protected branch (its own checkpoint
-confirms with the user instead, per above). On top of these rules, the
+only refuses your own `git commit` on a protected branch — and now its own
+checkpoint refuses them too, without asking (2026-09-16). On top of these
 pi-review-gate extension hard-blocks ship commands (`git commit`, `git push`,
 `gh pr create`) until the quality gates pass.
 

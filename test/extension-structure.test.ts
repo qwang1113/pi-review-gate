@@ -3485,13 +3485,15 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
 });
 
 
-test("review_checkpoint asks the user before landing on a PROTECTED branch", () => {
+test("review_checkpoint REFUSES outright on a PROTECTED branch — no dialog, fail-closed", () => {
   const body = toolBodyOf("review_checkpoint");
   assert.match(body, /isProtectedBranch\(here\)/, "the protected-branch guard must exist");
   assert.match(body, /currentBranch\(root\)/, "the current branch is read per repo");
-  assert.match(body, /askEitherSide\(/, "the user (or orchestrator, via the channel) confirms in a dialog");
-  assert.match(body, /在受保护分支上提交 checkpoint/, "the dialog names the protected branch");
-  assert.match(body, /picked\.startsWith\("否"\)/, "a declined confirmation refuses the commit");
+  assert.match(body, /checkpoint 拒绝/, "a protected branch refuses the checkpoint");
+  assert.match(body, /isError: true/, "the refusal is an error");
+  assert.doesNotMatch(body, /在受保护分支上提交 checkpoint/, "no confirmation dialog is shown");
+  assert.doesNotMatch(body, /askEitherSide\(/, "no channel ask for a protected branch");
+  assert.doesNotMatch(body, /picked\.startsWith\("否"\)/, "no decline path — the refusal is unconditional");
 });
 
 

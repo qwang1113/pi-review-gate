@@ -935,7 +935,7 @@ The loop protocol (also available as the `review-loop` skill):
 
 ```
 work directly on the current branch (no work-branch dance; protected branches
-main/master/dev/develop get a session-start notice and a checkpoint confirmation)
+main/master/dev/develop refuse checkpoints outright — work on a feature branch)
 ask_user(...) → propose_loop_goal(...)   # negotiate the exit contract (the gate audits it)
 edit code (batch related edits — the loop is billed per ROUND, not per line)
   → judge_submit({role:"reviewer", task})   # ONE call: the gate runs precommit →

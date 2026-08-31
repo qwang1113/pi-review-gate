@@ -498,7 +498,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
 | `verdict-parse.ts` | 裁决解析：review 只认 JSON fence，precommit 只认 `## Overall:` sentinel |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
-| `workspace-branch.ts` | 保护分支检测（main/master/dev/develop）：checkpoint 前的确认框与 ship 拒绝（2026-09-07 起 `setup_workspace`/工作分支/squash 落地全部退役，只剩这个软护栏） |
+| `workspace-branch.ts` | 保护分支检测（main/master/dev/develop）：checkpoint 与 ship 一律拒绝（2026-09-07 起 `setup_workspace`/工作分支/squash 落地全部退役，只剩这个硬护栏；2026-09-16 起 checkpoint 不再弹确认框，直接拒） |
 
 ---
 

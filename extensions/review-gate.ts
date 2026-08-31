@@ -3228,37 +3228,21 @@ export default function reviewGate(pi: ExtensionAPI) {
       const root = target.root;
       // A checkpoint IS a commit, so it lands on the CURRENT branch — no
       // work-branch rule anymore (2026-09-07, user decision: sessions work
-      // directly on the branch they are on, including main). The one
-      // guardrail left is the PROTECTED-branch confirmation: on
-      // main/master/dev/develop a checkpoint asks the user (or the
-      // orchestrator, through the same channel) before it commits.
+      // directly on the branch they are on, including main). The ONE hard
+      // line left (2026-09-16, user decision): a checkpoint on a PROTECTED
+      // branch (main/master/dev/develop) is REFUSED outright — no dialog,
+      // no channel ask. It used to pop a confirmation the user (or the
+      // orchestrator's project manager) could answer, but the user decided
+      // "无论如何都不能在保护分支上面做 commit，checkpoint 也不行" — so the
+      // gate's own commit now fails closed exactly like the agent's own
+      // `git commit` does. To checkpoint, work on a feature branch.
       const here = currentBranch(root);
       if (here && isProtectedBranch(here)) {
-        // The confirmation goes through the CHANNEL funnel (askEitherSide), so an
-        // orchestration child's project manager can answer it exactly as the
-        // human in the pane can — whoever answers first wins.
-        const uiCtx = ctx as unknown as {
-          ui?: {
-            select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
-          };
+        return {
+          content: [{ type: "text", text: `review-gate: checkpoint 拒绝 — 不能在受保护分支 ${here} 上提交（checkpoint 也是 commit）。请先切到功能分支（如 git checkout -b <branch>）再 checkpoint。` }],
+          details: { committed: false },
+          isError: true,
         };
-        const picked = await askEitherSide(
-          {
-            dialogKind: "select",
-            topic: "protected-branch",
-            title: "在受保护分支上提交 checkpoint？",
-            options: ["是，确认提交", "否，取消"],
-          },
-          typeof uiCtx.ui?.select === "function",
-          (signal) => uiCtx.ui!.select!("在受保护分支上提交 checkpoint？", ["是，确认提交", "否，取消"], { signal }),
-        ).catch(() => undefined);
-        if (!picked || picked.startsWith("否")) {
-          return {
-            content: [{ type: "text", text: `review-gate: checkpoint 未提交 — 用户未确认在受保护分支 ${here} 上提交。` }],
-            details: { committed: false },
-            isError: true,
-          };
-        }
       }
       const message = String(params.message ?? "").trim();
       if (message.length === 0) {
