@@ -11,6 +11,7 @@ import {
   countOscillations,
   loadSidecar,
   migrateFingerprintVersion,
+  invalidateBindings,
   FINGERPRINT_MIGRATION_NOTICE,
   saveSidecar,
   shouldStrategicReset,
@@ -1152,4 +1153,44 @@ test("goalPrereview: findings/draft/durationMs shape is validated (round-2 P1: s
     assert.ok(loaded, `the sidecar itself must stay valid for ${JSON.stringify(rec)}`);
     assert.equal(loaded?.goalPrereview, undefined, JSON.stringify(rec));
   }
+});
+
+// ---------------------------------------------------------------------------
+// invalidateBindings — edit-path downgrade, single point of truth
+// ---------------------------------------------------------------------------
+
+test("invalidateBindings: READY+PASS with fingerprints downgrade and clear fingerprints", () => {
+  const s = readyState();
+  assert.equal(s.review.verdict, "READY");
+  assert.equal(s.review.fingerprint, FP);
+  assert.equal(s.precommit.verdict, "PASS");
+  assert.equal(s.precommit.fingerprint, FP);
+
+  invalidateBindings(s);
+
+  assert.equal(s.review.verdict, "PENDING");
+  assert.equal(s.review.fingerprint, null, "review fingerprint must clear with the verdict");
+  assert.equal(s.precommit.verdict, "NOT_RUN");
+  assert.equal(s.precommit.fingerprint, null, "precommit fingerprint must clear with the verdict");
+});
+
+test("invalidateBindings: already-downgraded state is untouched", () => {
+  const s = emptyState("sess1", 10);
+  // PENDING + NOT_RUN (fresh state) — nothing to downgrade.
+  invalidateBindings(s);
+  assert.equal(s.review.verdict, "PENDING");
+  assert.equal(s.review.fingerprint, null);
+  assert.equal(s.precommit.verdict, "NOT_RUN");
+  assert.equal(s.precommit.fingerprint, null);
+});
+
+test("invalidateBindings: BLOCKED review / FAIL precommit are left alone (not downgrade targets)", () => {
+  const s = emptyState("sess1", 10);
+  s.review = { verdict: "BLOCKED", fingerprint: FP, at: "t" };
+  s.precommit = { verdict: "FAIL", fingerprint: FP, at: "t", mode: "full", testScope: "full" };
+  invalidateBindings(s);
+  assert.equal(s.review.verdict, "BLOCKED", "BLOCKED is a finding verdict, not a pass to downgrade");
+  assert.equal(s.precommit.verdict, "FAIL", "FAIL is not a pass to downgrade");
+  assert.equal(s.review.fingerprint, FP);
+  assert.equal(s.precommit.fingerprint, FP);
 });

@@ -55,9 +55,28 @@ export const REQUIREMENT_PROTOCOL =
   "3. 准备采纳时先**反述**：目标、范围、交付物、非目标，让用户确认。\n" +
   "4. 用户确认后才采纳（进 goal 协商或开始实现）；他提出修正就改完再反述一次。";
 
+/**
+ * Explore-mode extra guidance, appended after the standing block when the
+ * session is in explore mode (investigation). Two reminders the decision table
+ * does not carry: a task that turns into delivery work must first be
+ * escalated to the full loop (set_gate_mode("loop") applies immediately, no
+ * user consent needed), and a delivery task should settle the workspace
+ * (setup_workspace) before editing. Both were measured failures: an explore
+ * session receiving a fix request went straight to editing, skipping both
+ * (2026-08-31).
+ */
+export const EXPLORE_MODE_NOTE =
+  "## 注意（explore 探查模式）\n" +
+  "当前是 explore（探查）模式：门禁为 advisory，ship 命令（git commit/push、gh pr）仍被完整拦截。\n" +
+  "若用户的任务变成**交付性工作**（修复、实现、重构、要提交上线），先调用 `set_gate_mode(\"loop\")` " +
+  "升级到完整门禁循环（立即生效，无需用户确认），再开始改代码；只有纯分析/只读调查才留在 explore。\n" +
+  "开始交付前，若本会话还没有 `setup_workspace`（确认基准分支、建工作分支），先调它；" +
+  "工作区有别人的改动时，也必须先调 `setup_workspace` 处置。";
+
 /** The whole standing block, in the order an agent reads it. */
-export function buildAgentDirectives(): string {
-  return `${TOOL_DECISION_TABLE}\n\n${REQUIREMENT_PROTOCOL}\n\n${END_OF_TURN_CHECK}`;
+export function buildAgentDirectives(mode?: "loop" | "explore"): string {
+  return (`${TOOL_DECISION_TABLE}\n\n${REQUIREMENT_PROTOCOL}\n\n${END_OF_TURN_CHECK}` +
+    (mode === "explore" ? `\n\n${EXPLORE_MODE_NOTE}` : ""));
 }
 
 /**
