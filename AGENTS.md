@@ -395,7 +395,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    直接退 findings、一个框都不弹**，过了才请用户批准。反过来，**不扩权的改动不再
    重新惊动用户**：边界收窄、同目录内且不与他人相交的文件细化、加依赖、降并行度
    都让批准平移到新内容并记一条审计条目；新增任务、新目录、删依赖、串行改并行、
-   提高并行度一律重批（`lib/orchestrator-plan-approval.ts`）。这个 plan 审计者是
+   提高并行度、任务改到另一个 repo（新写面）一律重批（`lib/orchestrator-plan-approval.ts`）。这个 plan 审计者是
    门禁的**内部实现**：项目经理从没派过它、也在任何 `orchestrator_wait` 回执里见不到
    它，所以裁决记完门禁**自己把它收掉**（谁派谁负责，第五轮 O-6）——`declare_done`
    不再被一个它从未被告知的 judge child 拦住。`propose_loop_goal` 内部的 goal 审计者
@@ -403,7 +403,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
    只被多注入一句「有项目经理在管这轮任务」。plan、调度细节一律不注入 —— 知道
-   plan 会让它为 plan 而不是为自己的任务做优化。
+   plan 会让它为 plan 而不是为自己的任务做优化。它在**任务声明的 repo** 里工作
+   （plan 任务可带 `repo` 字段；不声明就用主 repo），同一 repo 的任务由门禁
+   串行调度，只有不同 repo 的任务可以并行。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。
 
