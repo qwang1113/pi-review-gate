@@ -2274,29 +2274,31 @@ export default function reviewGate(pi: ExtensionAPI) {
     const landed = runSquashLanding(primaryRepoRoot, work, base);
     if (landed.ok) {
       delete st.mergeConflict;
-      // WHERE THE WORKTREE IS LEFT STANDING, and it depends on whose worktree
-      // it is (R-26).
+      // WHERE THE WORKTREE IS LEFT STANDING (R-26, amended 2026-08-30).
       //
-      // An ordinary session goes back to its work branch: standing on the base
-      // would make its NEXT checkpoint illegal (a commit may only land on the
-      // work branch), for no reason the agent could see.
+      // THE SESSION'S WORK IS LANDED: declare_done is a task's final act,
+      // so the worktree is left on the BASE branch — a clean, honest
+      // finish (user decision). The work branch record is cleared too:
+      // a commit may only land on a recorded work branch, and there is
+      // nothing left to commit, so the next checkpoint fails closed
+      // until the user runs setup_workspace again for a NEW task.
       //
-      // An ORCHESTRATION CHILD borrowed this worktree from its supervisor, and
-      // it is finished with it. Measured on 2026-08-30: the child merged, went
-      // back to its own intermediate branch, and left the SUPERVISOR's
-      // worktree standing there — so the project manager's view of its own
-      // repository was two commits stale (`wc -l` on a file that had already
-      // been split, a new module reported as "does not exist"), and the next
-      // serial child spawned from it would have branched off the wrong
-      // baseline. Handing the worktree back on the BASE branch is what makes
-      // "borrowed" honest.
-      const handBackToBase = isOrchestrationChild();
+      // An ORCHESTRATION CHILD borrowed this worktree from its supervisor,
+      // and it is finished with it. Measured on 2026-08-30: the child
+      // merged, went back to its own intermediate branch, and left the
+      // SUPERVISOR's worktree standing there — so the project manager's
+      // view of its own repository was two commits stale. Handing the
+      // worktree back on the BASE branch is what makes "borrowed" honest;
+      // ordinary sessions now finish on the base for the same reason.
+      // The merge already ran with base checked out (the venue algebra
+      // checked it out above); leave the worktree standing there. Nothing
+      // to switch — the session's task is over.
       try {
-        if (!handBackToBase) {
-          execFileSync("git", ["checkout", work], { cwd: primaryRepoRoot, encoding: "utf8" });
-          logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
-        }
-      } catch { /* the merge landed; where we stand is diagnostics */ }
+        // The work branch has served its purpose; forget it so a stray
+        // checkpoint cannot land on a branch whose work is merged.
+        delete st.workBranch;
+        delete st.baseBranch;
+      } catch { /* diagnostics */ }
 
       logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString() });
       persist(ctx);

@@ -3906,15 +3906,30 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
 });
 
 
-test("R-26: an orchestration CHILD hands the borrowed worktree back on the BASE branch", () => {
-  // The child merged, checked itself back out onto its own intermediate
-  // branch, and left the SUPERVISOR's worktree standing there — so the
-  // project manager's view of its own repository was two commits stale, and
-  // the next serial child would have branched off the wrong baseline.
+test("R-26 (amended): declare_done leaves the worktree on the BASE branch for EVERY session", () => {
+  // Originally the child-only rule: an orchestration child merged and went
+  // back to its own intermediate branch, leaving the supervisor's worktree
+  // stale — so it had to hand the borrowed worktree back on the base. An
+  // ordinary session went back to its work branch so its next checkpoint
+  // stayed legal. Amended 2026-08-30 (user decision): declare_done is a
+  // task's FINAL act, so EVERY session lands on the base — and the branch
+  // records are cleared, so a stray checkpoint fails closed until the user
+  // runs setup_workspace for a new task.
   const finish = windowOf("function finishWorkBranch(", "\n  }", "finishWorkBranch");
-  assert.match(finish, /const handBackToBase = isOrchestrationChild\(\)/);
-  assert.match(finish, /if \(!handBackToBase\) \{/,
-    "an ordinary session still returns to its work branch (its next checkpoint depends on it)");
+  assert.doesNotMatch(finish, /if \(!handBackToBase\)/, "no session-specific return-to-work branch remains");
+  assert.match(finish, /delete st\.workBranch/, "the work branch record is cleared after landing");
+  // The success path (from the landed merge to the merge log) must contain
+  // NO checkout at all — the venue already checked out base, and nothing
+  // switches away from it. Bounded precisely so a re-added checkout on the
+  // work branch cannot hide above the two `delete`s.
+  const landedAt = finish.indexOf("if (landed.ok) {", finish.indexOf("runSquashLanding"));
+  const mergeLogAt = finish.indexOf("op: \"merge\"", landedAt);
+  const successPath = finish.slice(landedAt, mergeLogAt);
+  assert.doesNotMatch(successPath, /checkout/, "the success path switches to NOTHING — it stays on the base");
+  assert.match(successPath, /delete st\.workBranch/, "the clearing happens inside the success path");
+  assert.match(finish, /The squash failed[\s\S]*execFileSync\("git", \["checkout", work\]/,
+    "the conflict path still restores the work branch via a real git checkout");
+  assert.match(finish, /delete st\.baseBranch/, "and so is the base record — the task owns no branch anymore");
 });
 
 test("R3-5: an accepted declare_done WRITES the completion record, before the loop bookkeeping", () => {
