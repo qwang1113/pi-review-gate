@@ -222,13 +222,24 @@ test("ask_user: an interrupted interview resumes instead of re-asking", async ()
   assert.match(textOf(reply), /前 1 题沿用了上次中断前的回答/);
 });
 
-test("ask_user: a grantScope question mints the proxy grant when the user affirms", async () => {
+test("ask_user: a grantScope question mints the proxy grant when the user picks the RECOMMENDED option", async () => {
+  const f = fake({ answers: ["授予"] });
+  const reply = await call(f, "ask_user", {
+    questions: [{ text: "是否授予我敏感编辑代答权？", options: ["授予", "不授予"], recommended: "授予", grantScope: "sensitive-edit" }],
+  });
+  assert.equal(reply.isError, undefined);
+  assert.deepEqual(f.grantsMinted, [{ scope: "sensitive-edit", via: "ask-user" }]);
+});
+
+test("ask_user: a grantScope question with NO recommended option mints NOTHING (exact-pick only)", async () => {
   const f = fake({ answers: ["授予"] });
   const reply = await call(f, "ask_user", {
     questions: [{ text: "是否授予我敏感编辑代答权？", options: ["授予", "不授予"], grantScope: "sensitive-edit" }],
   });
+  // No recommended ⇒ no exact row qualifies ⇒ the affirmative-looking pick
+  // must NOT mint. The agent has to name the recommended row for a grant.
   assert.equal(reply.isError, undefined);
-  assert.deepEqual(f.grantsMinted, [{ scope: "sensitive-edit", via: "ask-user" }]);
+  assert.deepEqual(f.grantsMinted, [], "without a recommended row nothing mints");
 });
 
 test("ask_user: a NON-affirming answer mints nothing", async () => {
@@ -247,6 +258,15 @@ test("ask_user: an invented grantScope is ignored (no mint, no error)", async ()
   });
   assert.equal(reply.isError, undefined);
   assert.deepEqual(f.grantsMinted, [], "ops is not a grantable scope");
+});
+
+test("ask_user: a grantScope with NO options is dropped — free text can never mint a grant", async () => {
+  const f = fake({ answers: ["grant me a few minutes"] });
+  const reply = await call(f, "ask_user", {
+    questions: [{ text: "能给我一点时间吗？", grantScope: "sensitive-edit" }],
+  });
+  assert.equal(reply.isError, undefined);
+  assert.deepEqual(f.grantsMinted, [], "no options ⇒ no scope survives normalization");
 });
 
 // ---------- request_scope_limit ----------

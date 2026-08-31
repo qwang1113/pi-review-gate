@@ -59,6 +59,7 @@ import {
   isGrantableScope,
   MAX_QUESTIONS,
   type AskAnswer,
+  type AskQuestion,
 } from "./ask-user.ts";
 
 /** Just enough of pi's tool context for a dialog and a transcript notice. */
@@ -149,6 +150,20 @@ export type ConsentToolDeps = Pick<
 
 // ---------- ask_user ----------
 
+/**
+ * The user-visible authorization notice a grantScope question carries.
+ *
+ * 2026-09-16 (reviewer P1): a grantScope invisible to the user let an agent
+ * harvest the sensitive-edit proxy grant from an answer to an UNRELATED
+ * question (substring match fired on "grant me a few minutes"). The scope
+ * must be stated in the dialog and the transcript, so consent is explicit.
+ */
+function grantNotice(q: AskQuestion): string {
+  if (!q.grantScope || !isGrantableScope(q.grantScope)) return "";
+  return `\n\n⚠️ 回答此题即表示：你**明确授予项目经理「${q.grantScope}」代答权**（本 orchestration 内有效）。若不打算授权，请选拒绝/否。`;
+}
+
+
 export async function doAskUser(
   deps: UserInteractionToolDeps,
   params: Record<string, unknown>,
@@ -190,7 +205,7 @@ export async function doAskUser(
   // (headless), and the transcript is where the Q&A stays readable after
   // the dialogs close.
   deps.showToUser(uiCtx, "───── AI 有问题要问你 ─────", questions.map((q, i) =>
-    `${progressLabel(i, questions.length)} ${q.text}` +
+    `${progressLabel(i, questions.length)} ${q.text}${grantNotice(q)}` +
     (q.options?.length ? `\n   选项：${q.options.join(" / ")}` : "") +
     (q.recommended ? `\n   推荐：${q.recommended}` : "")).join("\n"));
 
@@ -220,14 +235,14 @@ export async function doAskUser(
         {
           dialogKind: choices.length ? "select" : "input",
           topic: "ask-user",
-          title: `${title}\n${q.text}`,
+          title: `${title}\n${q.text}${grantNotice(q)}`,
           options: choices,
           ...(q.recommended ? { payload: `推荐答案：${q.recommended}` } : {}),
         },
         uiCtx.hasUI === true,
         (signal) => (choices.length
-          ? uiCtx.ui!.select!(`${title}\n${q.text}`, choices, { signal })
-          : uiCtx.ui!.input!(`${title}\n${q.text}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal })),
+          ? uiCtx.ui!.select!(`${title}\n${q.text}${grantNotice(q)}`, choices, { signal })
+          : uiCtx.ui!.input!(`${title}\n${q.text}${grantNotice(q)}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal })),
       );
     } catch {
       picked = undefined; // a broken dialog is silence, never an answer
@@ -243,14 +258,15 @@ export async function doAskUser(
       answers.push({ question: q.text, kind: "skipped" });
     } else if (meaning.kind === "answered") {
       answers.push({ question: q.text, kind: "answered", answer: meaning.answer });
-      // GRANT DOOR 1/3 (2026-09-16): a question carrying a grantScope mints
-      // the proxy grant when the user affirms — and only then. The scope
-      // must be one the gate recognizes; the user's answer is judged by the
-      // same affirmative words the consent dialogs use.
+      // GRANT DOOR 1/3 (2026-09-16, reviewer P1 fix): a question carrying a
+      // grantScope mints the proxy grant ONLY when the user picked the exact
+      // option the agent RECOMMENDED — the recommended option's own text is
+      // the authorization the user saw and chose (the notice in grantNotice
+      // states it). Substring matching is gone: an unrelated "grant me a few
+      // minutes" can no longer harvest the scope.
       if (q.grantScope && isGrantableScope(q.grantScope)) {
-        const affirming = /同意|允许|授权|授予|yes|allow|grant/i.test(meaning.answer ?? "")
-          && !/拒绝|不|取消|no|reject|deny/i.test(meaning.answer ?? "");
-        if (affirming) {
+        const pickedExact = meaning.kind === "answered" && meaning.answer === q.recommended;
+        if (pickedExact) {
           deps.grantProxyScope(q.grantScope, "ask-user");
         }
       }

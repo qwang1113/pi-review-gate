@@ -125,11 +125,15 @@ function normalizeOne(item: unknown): AskQuestion | undefined {
   const grantScope = typeof rawGrant === "string" && rawGrant.trim() !== ""
     ? rawGrant.trim().slice(0, MAX_OPTION_CHARS)
     : undefined;
+  // A grantScope question MUST be a choice list (2026-09-16 reviewer P1):
+  // free text would let a substring match harvest the grant from an
+  // unrelated answer. No options ⇒ the scope is dropped, never silently kept.
+  const grantable = grantScope && isGrantableScope(grantScope) && options && options.length > 0;
   return {
     text: trimmed,
     ...(options && options.length ? { options } : {}),
     ...(recommended ? { recommended } : {}),
-    ...(grantScope ? { grantScope } : {}),
+    ...(grantable ? { grantScope } : {}),
   };
 }
 
