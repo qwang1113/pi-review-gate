@@ -162,6 +162,11 @@ export interface FakeWorldOptions {
    * pretty one.
    */
   tmuxDecorFails?: boolean;
+  /**
+   * Repos a task's `repo` declaration may resolve to (default: none, so a
+   * declared repo is refused — the fake's equivalent of "not a git root").
+   */
+  resolvableRepos?: string[];
 
 }
 
@@ -236,6 +241,10 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     },
     childGateState: (cwd) => sidecars.get(cwd),
     sleep: async () => { /* the fake has no latency */ },
+    resolveTaskRepo: (repo) =>
+      options.resolvableRepos?.includes(repo)
+        ? { ok: true, root: repo }
+        : { ok: false, reason: `fake: "${repo}" 不是已知仓库` },
     knownRepoRoots: () => ["/repo"],
     childJudgeRunning: () => false,
     channelIO: () => io,

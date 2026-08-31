@@ -454,7 +454,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `orchestrator-delivery.ts` | 投递：任务文件 + `pi --session-id @file` 启动、恢复用的 argv 与说明，以及「什么才算送达」的判据（通道记录 / 子会话回执） |
 | `orchestrator-deps.ts` | 编排工具需要的依赖集合；host 类型本身住在 `tool-host.ts`，这里只 re-export |
 | `orchestrator-directives.ts` | 编排两侧的指令：项目经理拿全套契约，子会话只拿一句话 |
-| `orchestrator-dispatch.ts` | dispatch 半边：`orchestrator_spawn` / `orchestrator_instruct` |
+| `orchestrator-dispatch.ts` | dispatch 半边：`orchestrator_spawn` / `orchestrator_instruct`；spawn 时按任务声明的 `repo` 解析子会话 cwd（`resolveTaskRepo`，fail-closed——解析不了就拒绝，绝不回退到项目经理自己的 repo） |
 | `orchestrator-gate.ts` | 编排的 11 条硬约束（约束 7/10/14 于 2026-09-07 退役），写成纯决策以便逐条单测 |
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
 | `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
@@ -468,7 +468,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `orchestrator-tool-kit.ts` | 编排工具的共用前置：模式校验、pane 实况、plan 可用性 |
 | `orchestrator-tools.ts` | plan / notify 两个不碰 tmux 的工具 |
 | `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据），以及那份五块回执的装配 |
-| `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、持有本编排唯一的通道 IO 与监督记忆 |
+| `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、持有本编排唯一的通道 IO 与监督记忆；`resolveTaskRepo` 默认实现用 git 的 `--show-toplevel` 把任务声明的 repo 解析成仓库根（子目录/符号链接路径都归一） |
 | `parallel-review.ts` | 审查契约：一轮一个 reviewer、判不可变的 `baseline..HEAD`，以及交给它的任务文本 |
 | `pi-self.ts` | `/tmp` 草稿会话识别：这类会话不由 agent 自行进入 loop |
 | `polish-gate.ts` | 连续 READY 或同一文件反复打磨时，再审必须给出理由 |
