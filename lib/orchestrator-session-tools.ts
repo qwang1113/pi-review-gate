@@ -498,7 +498,7 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
       "Close a pane this orchestration owns: a registered child (`childId`), or — only when you " +
       "are the SUCCESSOR of a relay — the predecessor orchestrator (`predecessorPane`). Nothing " +
       "else is addressable: the user's own panes and other orchestrations' panes are refused. " +
-      "A child's gate-created worktree is cleaned up with it.",
+      "A child's pane is killed; its transcript and gate state survive on disk.",
     parameters: Type.Object({
       childId: Type.Optional(Type.String()),
       predecessorPane: Type.Optional(Type.String({

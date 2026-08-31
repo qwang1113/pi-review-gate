@@ -121,7 +121,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   if (!panes.ok) {
     return fail(
       "review-gate: 读不到 tmux pane 列表，无法确认它到底死没死 —— 不敢重开（重开一个其实还活着的会话，" +
-      "会得到两个进程写同一个 worktree）。先修好 tmux 再试。",
+      "会得到两个进程写同一个工作区）。先修好 tmux 再试。",
     );
   }
   if (panes.panes.includes(child.paneId)) {
@@ -136,7 +136,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     // recover, and what to do about it is a question for the health snapshot.
     return fail(
       `review-gate: 子会话 ${childId} 的 pane ${child.paneId} 还活着 —— 拒绝重开` +
-      "（重开一个还活着的会话，会得到两个进程写同一个 worktree）。\n" +
+      "（重开一个还活着的会话，会得到两个进程写同一个工作区）。\n" +
       "先看 `orchestrator_wait({timeoutMs:0})` 的健康快照：\n" +
       "  - `waiting-judge`：它在等自己派出去的 reviewer / precommit，**完全正常，不要打断**，等着就好；\n" +
       "  - `waiting-input`：它在等回答，用 `orchestrator_answer` 回它；\n" +

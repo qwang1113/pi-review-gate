@@ -2,10 +2,10 @@
  * Where the orchestration layer meets the real machine.
  *
  * Everything the tools need that involves the OUTSIDE WORLD — running tmux,
- * reading and writing the plan file, adding and removing git worktrees,
+ * reading and writing the plan file, writing scratch task documents,
  * taking attention events off the queue — is implemented once here, so the
  * extension only has to supply what genuinely belongs to it: the gate state,
- * the user dialog and the branch facts.
+ * the user dialog and the repo facts.
  *
  * That split is the whole point. `extensions/review-gate.ts` is already the
  * repository's worst architectural offender at 8659 lines, and this round
