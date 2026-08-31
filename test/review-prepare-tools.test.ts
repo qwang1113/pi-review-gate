@@ -132,22 +132,6 @@ test("an unresolvable repo is reported, and nothing else happens", async () => {
   cleanup(f);
 });
 
-test("no checkpoint on record ⇒ refused, and the refusal names the ONE registered way back", async () => {
-  const f = fake();
-  delete f.st.checkpoint;
-  const reply = await call(f);
-  assert.equal(reply.isError, true);
-  assert.equal(reply.details?.prepared, false);
-  assert.match(textOf(reply), /no checkpoint on record/);
-  // The refusal must point at a tool the agent can actually call. Naming the
-  // unregistered internal step (`review_checkpoint`) would send it after a
-  // name that does not exist — the exact class of defect this round fixed.
-  assert.match(textOf(reply), /judge_submit/);
-  assert.ok(!textOf(reply).includes("Call review_checkpoint"),
-    "an unregistered tool must never be the instruction");
-  assert.deepEqual(f.targets, []);
-  cleanup(f);
-});
 
 test("polish gate armed + no reason ⇒ refused WITHOUT building any task text", async () => {
   const f = fake();
@@ -198,16 +182,36 @@ test("the polish reason is NOT persisted when the gate is not armed", async () =
   cleanup(f);
 });
 
-test("HEAD equal to the baseline is an empty range, refused with the retry instruction", async () => {
+test("HEAD equal to the baseline is an empty range — accepted as an exit-goal audit", async () => {
   const f = fake();
   // prevSha becomes the baseline; make HEAD identical to it.
   f.revs.HEAD = "pppppppppppp";
+  f.revs["HEAD^{tree}"] = "tttttttttttt";
   const reply = await call(f);
-  assert.equal(reply.isError, true);
-  assert.equal(reply.details?.prepared, false);
-  assert.match(textOf(reply), /the range is empty/);
-  assert.match(textOf(reply), /Call review_checkpoint again/);
-  assert.deepEqual(f.targets, []);
+  assert.notEqual(reply.isError, true);
+  assert.equal(reply.details?.prepared, true);
+  assert.equal(reply.details?.range, "pppppppppppp..pppppppppppp");
+  assert.equal(reply.details?.fileCount, 0);
+  assert.deepEqual(reply.details?.files, []);
+  assert.match(textOf(reply), /review round ready/);
+  assert.match(textOf(reply), /0 file\(s\)/);
+  // The task text tells the reviewer this round audits the EXIT GOAL.
+  assert.match(textOf(reply), /EXIT GOAL is met/);
+  // The empty-range round still registers a target (HEAD tree binding).
+  assert.equal(f.targets.length, 1);
+  cleanup(f);
+});
+
+test("no checkpoint on record is allowed — an empty-range exit-goal audit", async () => {
+  const f = fake();
+  // Drop the checkpoint entirely; HEAD is the baseline, so the range is empty.
+  f.st.checkpoint = undefined;
+  const reply = await call(f);
+  assert.notEqual(reply.isError, true);
+  assert.equal(reply.details?.prepared, true);
+  assert.equal(reply.details?.range, "hhhhhhhhhhhh..hhhhhhhhhhhh");
+  assert.equal(reply.details?.fileCount, 0);
+  assert.match(textOf(reply), /EXIT GOAL is met/);
   cleanup(f);
 });
 
