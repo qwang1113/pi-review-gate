@@ -658,6 +658,29 @@ test("ask_user is the ONE way to reach the user, and pause_for_question is gone"
   assert.doesNotMatch(SRC, /unmetRequirements\([^)]*pausedQuestion/);
 });
 
+test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pick only (reviewer P1, 2026-09-16)", () => {
+  // P1 fix: the sensitive-edit proxy grant used to be minted from an
+  // INVISIBLE grantScope + substring match on free text ("grant me a few
+  // minutes" harvested it). Three structural guards pin the fix:
+  //  1. The user-visible notice exists and is wired into the dialog/transcript.
+  //  2. Minting is exact-pick: answer === recommended, never a substring.
+  //  3. A grantScope without options is DROPPED at normalization (free text
+  //     can never carry a grant) — asserted in the schema module.
+  assert.match(ASK_USER_SRC, /function grantNotice\(q: AskQuestion\): string/,
+    "the grant notice helper exists");
+  assert.match(ASK_USER_SRC, /明确授予项目经理/,
+    "the notice states the scope in plain Chinese");
+  assert.match(ASK_USER_SRC, /meaning\.kind === "answered" && meaning\.answer === q\.recommended/,
+    "minting is an EXACT pick of the recommended row — no substring match");
+  assert.doesNotMatch(ASK_USER_SRC, /\/同意\|允许\|授权\|授予\|yes\|allow\|grant\/i\.test\(meaning\.answer/,
+    "the old substring predicate must not come back");
+  const askSrc = readFileSync(join(ROOT, "lib", "ask-user.ts"), "utf8");
+  assert.match(askSrc, /grantable = grantScope && isGrantableScope\(grantScope\) && options && options\.length > 0/,
+    "a grantScope without options is dropped at the schema");
+  assert.match(askSrc, /\.\.\.\(grantable \? \{ grantScope \} : \{\}\)/,
+    "…and the scope only survives when the question is a real choice list");
+});
+
 test("ask_user: the QUESTIONS reach the user, and silence is never an answer", () => {
   // REGRESSION this inherits: a question used to be written to
   // `state.pausedQuestion` and nowhere else, while the tool result told the
