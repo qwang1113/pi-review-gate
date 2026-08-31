@@ -514,31 +514,13 @@ test("corrupt config layer keeps the last render — BOTH layers, fail-safe (rou
   assert.doesNotMatch(layers, /[\u4e00-\u9fff]/, "the model-config layer must not add non-English diagnostics");
 });
 
-test("MODEL WIDGET: deployed lookup is project-first, frontmatter-scoped, with slots[0]/'?' fallback", () => {
-  // round-1 P2: modelConfigWidgetLines had NO coverage at all. The data path
-  // matters because it decides what the belowEditor widget CLAIMS is in force.
-  const fn = windowOf("function modelConfigWidgetLines(", "\n  }", "modelConfigWidgetLines");
-  assert.match(fn, /findProjectAgentText\(projectDir, name\)/, "project layer must be looked up FIRST, by identity");
-  // `model:` must be scoped to the frontmatter block, and the block must come
-  // from the SHARED delimiter authority (round-12 R3 P2: a local strict regex
-  // here disagreed with the lenient identity lookup two lines above, so a file
-  // found by identity could still fail to yield its deployed model).
-  assert.match(fn, /frontmatterBlock\(text\)/, "the frontmatter block must come from lib/model-config.ts");
-  assert.doesNotMatch(fn, /\^---\\r\?\\n/, "no local delimiter regex may compete with the shared one");
-  assert.match(fn, /\^model:\\s\*\(\.\+\)\$\/m/, "`model:` must be matched only inside that block");
-  assert.match(
-    fn,
-    /deployed\(name\) \?\? \(s\.auto === false && s\.slots\.length > 0 \? s\.slots\[0\]! : "\?"\)/,
-    "fallback order: deployed file → slots[0] (auto OFF) → '?'",
-  );
-  assert.match(fn, /\["reviewer", "adviser"\]/, "the widget shows exactly reviewer + adviser");
-  assert.match(fn, /display-only/, "never breaks the TUI");
-});
-
-test("MODEL WIDGET wiring reaches the real updateWidget path", async () => {
+test("WIDGET: the model-config block is gone from the belowEditor strip", () => {
+  // The strip is deliberately minimal — mode/branch/edited + unmet count.
+  assert.doesNotMatch(SRC, /modelConfigWidgetLines/, "the widget must not build model-config lines anymore");
+  assert.doesNotMatch(SRC, /buildModelConfigWidget/, "the model-config widget builder must be gone");
   const body = windowOf("function updateWidget(", "\n  }", "updateWidget");
-  assert.match(body, /modelConfigWidgetLines\(\)/);
-  assert.match(body, /ctx\.ui\.setWidget\("review-gate-agents"/);
+  assert.match(body, /buildGateWidget\(gateWidgetFacts\(\)\)/, "the strip comes from the single gate facts");
+  assert.match(body, /ctx\.ui\.setWidget\("review-gate-agents"/, "the strip still renders through setWidget");
 });
 
 test("MODEL DIAGNOSIS: project outranks global, registry auth gates, disk fallback", () => {

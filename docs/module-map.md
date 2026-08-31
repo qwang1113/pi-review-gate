@@ -340,7 +340,7 @@ slots，会话启动时 `validateAgentsForStartup` 硬检查每个角色（缺�
 spec 非法即停会话），`modelSpecFor` 对未配置角色返回 undefined（派发
 fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diagnose.ts`
 回答「我的审查实际跑在哪个模型上」，`gate-doctor.ts` 是 `/gate-doctor` 的只读
-体检，`ui-widget.ts` 构造 editor 下方那条只读面板。
+体检，`ui-widget.ts` 构造 editor 下方那条**单行**状态条（详情在 `/gate-status`）。
 
 > **落点**：除 `model-config.ts` 会把配置渲染进 `agents/*.md` 之外，这一域
 > 全是**诊断**：它们永远不产生门禁裁决。想让某个诊断「顺手拦一下」时，请把
@@ -494,7 +494,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `task-mode.ts` | 会话门禁模式模型：normal < explore < loop < orchestrator 与升降级规则 |
 | `text-appeal.ts` | 启发式文本拦截的申诉口子（A 类） |
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |
-| `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条只读面板） |
+| `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条**单行**状态条，详情在 `/gate-status`） |
 | `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
 | `verdict-parse.ts` | 裁决解析：review 只认 JSON fence，precommit 只认 `## Overall:` sentinel |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
