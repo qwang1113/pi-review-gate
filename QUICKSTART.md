@@ -38,8 +38,6 @@ bash <package-root>/scripts/install-git-hooks.sh   # 在目标仓库内执行
 ```
 你：实现分页功能
 agent：调 set_gate_mode("loop")
-  → setup_workspace（**一次调用**：问你工作区里已有的改动怎么办，再定下基准分支、
-     建好本会话的工作分支；没有工作分支时 commit 一律被拒）
   → 用 ask_user 问你目标（一次一题，N of M）→ 用简体中文起草目标
   → propose_loop_goal（**一次调用**：门禁自己起 goal-auditor 子进程预审这份草案、
      等它退出、记录裁决；不通过就把 findings 退回来让你改，**不弹任何对话框**骚扰你）
@@ -52,15 +50,13 @@ agent：调 set_gate_mode("loop")
      同时：agent 边读流式 findings 边修（不用等审完）
   → judge 进程退出时门禁自己读结论、机械校验（未 prepare ⇒ 不授予；HEAD 已移动 ⇒
      STALE ⇒ BLOCKED）、记录裁决并唤醒 agent
-  → BLOCKED？修 → 再来一轮；READY？declare_done（门禁自己把工作分支合回你在
-     setup_workspace 里确认的基准分支；冲突就中止、列出文件交还给你）
+  → BLOCKED？修 → 再来一轮；READY？declare_done（门禁复检后收尾；工作留在当前分支，
+     合并/推送由你自己安排）
 ```
 
-- **工作区与分支归门禁管**：`setup_workspace` 一次问清工作区里已有的改动怎么办、
-  基准分支是哪个，并建好本会话的工作分支（会话启动时工作区就是脏的、又没 settle 时
-  edit 会被拦；没有工作分支时 commit 一律被拒）；
-  READY 之后 `declare_done` 自己把工作分支合回那个基准分支，冲突则中止并把文件
-  列给 agent —— 你不用手动 checkout / merge。
+- **在当前分支上直接工作**：`setup_workspace` 已退役（2026-09-07），不再有工作分支与
+  自动合并。会话开始时工作区有未提交改动**不拦编辑**；checkpoint 直接落在当前分支。
+  唯一保留的护栏：在 main/master/dev/develop 上，会话开始会提示、checkpoint 前会弹确认框。
 - **precommit 在 review 之前**：这个顺序由门禁保证，不需要谁记着 —— 便宜的检查先跑，
   贵的审核只花在绿树上。
 - 每轮按 ROUND 计费：**把相关改动批量做完再触发一轮**，比十个小轮省十倍。

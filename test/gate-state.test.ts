@@ -11,6 +11,7 @@ import {
   countOscillations,
   loadSidecar,
   migrateFingerprintVersion,
+  invalidateBindings,
   FINGERPRINT_MIGRATION_NOTICE,
   saveSidecar,
   shouldStrategicReset,
@@ -306,45 +307,6 @@ test("askUser: a malformed interview record is dropped whole", () => {
   assert.deepEqual(loadSidecar(path)?.askUser, good, "a real record survives");
 });
 
-test("workspace/branch facts: corruption is dropped, and dropping TIGHTENS the gate", () => {
-  const dir = makeTemp();
-  const path = join(dir, "state.json");
-  const base = emptyState("s", 10);
-  // A non-string branch would reach a git argv and a commit decision.
-  for (const field of ["baseBranch", "workBranch"] as const) {
-    writeFileSync(path, JSON.stringify({ ...base, [field]: 42 }));
-    assert.equal(loadSidecar(path)?.[field], undefined, field);
-    writeFileSync(path, JSON.stringify({ ...base, [field]: "feat/x" }));
-    assert.equal(loadSidecar(path)?.[field], "feat/x", `${field} survives when real`);
-  }
-  for (const bad of ["s", { at: "t" }, { files: [] }, { at: "t", files: [1] }, { at: "t", files: [], settled: "yes" }]) {
-    writeFileSync(path, JSON.stringify({ ...base, worktreeDirty: bad }));
-    assert.equal(loadSidecar(path)?.worktreeDirty, undefined, JSON.stringify(bad));
-  }
-  // A dropped `settled` flag leaves edits BLOCKED, never open.
-  writeFileSync(path, JSON.stringify({ ...base, worktreeDirty: { at: "t", files: ["?? a.ts"], settled: true } }));
-  assert.equal(loadSidecar(path)?.worktreeDirty?.settled, true);
-
-  writeFileSync(path, JSON.stringify({ ...base, branchOps: "nope" }));
-  assert.equal(loadSidecar(path)?.branchOps, undefined);
-  writeFileSync(path, JSON.stringify({
-    ...base,
-    branchOps: [{ op: "checkout", from: null, to: "main", at: "t" }, { nonsense: true }, { op: 5, at: "t" }],
-  }));
-  assert.equal(loadSidecar(path)?.branchOps?.length, 1, "only well-formed ops survive");
-
-  for (const bad of [{ branch: "w", base: "b", at: "t" }, { branch: "w", base: "b", files: ["x"] }, "s"]) {
-    writeFileSync(path, JSON.stringify({ ...base, mergeConflict: bad }));
-    assert.equal(loadSidecar(path)?.mergeConflict, undefined, JSON.stringify(bad));
-  }
-  // A forged waiver would skip the merge silently.
-  for (const bad of [{ at: "t" }, { reason: "r" }, "s", 1]) {
-    writeFileSync(path, JSON.stringify({ ...base, mergeWaived: bad }));
-    assert.equal(loadSidecar(path)?.mergeWaived, undefined, JSON.stringify(bad));
-  }
-  writeFileSync(path, JSON.stringify({ ...base, mergeWaived: { at: "t", reason: "user handles it" } }));
-  assert.deepEqual(loadSidecar(path)?.mergeWaived, { at: "t", reason: "user handles it" });
-});
 
 
 
@@ -1152,4 +1114,44 @@ test("goalPrereview: findings/draft/durationMs shape is validated (round-2 P1: s
     assert.ok(loaded, `the sidecar itself must stay valid for ${JSON.stringify(rec)}`);
     assert.equal(loaded?.goalPrereview, undefined, JSON.stringify(rec));
   }
+});
+
+// ---------------------------------------------------------------------------
+// invalidateBindings — edit-path downgrade, single point of truth
+// ---------------------------------------------------------------------------
+
+test("invalidateBindings: READY+PASS with fingerprints downgrade and clear fingerprints", () => {
+  const s = readyState();
+  assert.equal(s.review.verdict, "READY");
+  assert.equal(s.review.fingerprint, FP);
+  assert.equal(s.precommit.verdict, "PASS");
+  assert.equal(s.precommit.fingerprint, FP);
+
+  invalidateBindings(s);
+
+  assert.equal(s.review.verdict, "PENDING");
+  assert.equal(s.review.fingerprint, null, "review fingerprint must clear with the verdict");
+  assert.equal(s.precommit.verdict, "NOT_RUN");
+  assert.equal(s.precommit.fingerprint, null, "precommit fingerprint must clear with the verdict");
+});
+
+test("invalidateBindings: already-downgraded state is untouched", () => {
+  const s = emptyState("sess1", 10);
+  // PENDING + NOT_RUN (fresh state) — nothing to downgrade.
+  invalidateBindings(s);
+  assert.equal(s.review.verdict, "PENDING");
+  assert.equal(s.review.fingerprint, null);
+  assert.equal(s.precommit.verdict, "NOT_RUN");
+  assert.equal(s.precommit.fingerprint, null);
+});
+
+test("invalidateBindings: BLOCKED review / FAIL precommit are left alone (not downgrade targets)", () => {
+  const s = emptyState("sess1", 10);
+  s.review = { verdict: "BLOCKED", fingerprint: FP, at: "t" };
+  s.precommit = { verdict: "FAIL", fingerprint: FP, at: "t", mode: "full", testScope: "full" };
+  invalidateBindings(s);
+  assert.equal(s.review.verdict, "BLOCKED", "BLOCKED is a finding verdict, not a pass to downgrade");
+  assert.equal(s.precommit.verdict, "FAIL", "FAIL is not a pass to downgrade");
+  assert.equal(s.review.fingerprint, FP);
+  assert.equal(s.precommit.fingerprint, FP);
 });

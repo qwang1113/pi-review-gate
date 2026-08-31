@@ -122,7 +122,7 @@ export function buildRecoveryNote(opts: { childId: string; taskId: string; reaso
     "上面的对话历史就是你自己的，任务没有换。",
     "",
     `任务 ${opts.taskId} 仍在进行中。先用 \`/gate-status\` 看一眼门禁现在的状态` +
-    "（工作分支、review 裁决、precommit 都还在，没有随进程消失），再接着做。",
+    "（review 裁决、precommit 都还在，没有随进程消失），再接着做。",
     "",
   ].join("\n");
 }

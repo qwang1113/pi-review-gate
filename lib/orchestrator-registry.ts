@@ -40,14 +40,8 @@ export interface ChildSession {
   taskId: string;
   /** tmux pane it runs in (the only pane the gate may kill for it). */
   paneId: string;
-  /** Working directory it was started in (repo root or a worktree). */
+  /** Working directory it was started in (the repo root). */
   cwd: string;
-  /**
-   * Set when the GATE created a worktree for this child (constraint 7). The
-   * gate that created it is the one that removes it — a worktree the agent
-   * assembled by hand is not in here and is not cleaned up here either.
-   */
-  worktree?: string;
   /**
    * The sidecar variant this child was started with (`RG_STATE_VARIANT`, F4).
    *
@@ -302,11 +296,6 @@ export function closableChild(
   return { ok: true, child };
 }
 
-/** The worktrees the gate created and still has to clean up. */
-export function pendingWorktrees(runtime: OrchestratorRuntime): ChildSession[] {
-  return runtime.children.filter((c) => c.worktree && !c.closedAt);
-}
-
 /**
  * Sanitize a runtime read back from the gate sidecar.
  *
@@ -348,7 +337,6 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     // Conditional spreads, not `field: str(...)`: writing an explicit
     // `undefined` would add a KEY that the original object never had, so a
     // sanitized runtime would no longer deep-equal the one the gate wrote.
-    const worktree = str(c.worktree);
     const doneAt = str(c.doneAt);
     const lastAssignedAt = str(c.lastAssignedAt);
     const closedAt = str(c.closedAt);
@@ -361,7 +349,6 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     children.push({
       id, taskId, cwd, createdAt,
       paneId: c.paneId,
-      ...(worktree ? { worktree } : {}),
       ...(stateVariant ? { stateVariant } : {}),
       ...(taskFile ? { taskFile } : {}),
       ...(lastAssignedAt ? { lastAssignedAt } : {}),
@@ -499,7 +486,6 @@ export function formatChildren(
           ? (c.doneAt ? "done（pane 仍在）" : "alive")
           : "pane 已消失（异常退出或被用户关掉）";
       return `- ${c.id} [${state}] task=${c.taskId} pane=${c.paneId}` +
-        (c.worktree ? ` worktree=${c.worktree}` : "") +
         ` 开始于 ${c.createdAt}`;
     })
     .join("\n");

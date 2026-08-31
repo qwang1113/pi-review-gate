@@ -32,7 +32,7 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
-import { ORCH_BASE_BRANCH_ENV, STATE_VARIANT_ENV } from "./gate-state.ts";
+import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV, normalizeOrchestrationId } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import { buildSpawnPaneArgv, parseSpawnedPaneId } from "./orchestrator-tmux.ts";
@@ -99,12 +99,10 @@ export function detectOrphans(
 
 /** Environment a recovered (or freshly attached) child pane is given. */
 function childEnv(deps: OrchestratorDeps, child: ChildSession): Record<string, string> {
-  const base = deps.currentBranch();
   return {
     [ORCHESTRATION_ID_ENV]: deps.runtime().orchestrationId,
     [GATE_MODE_ENV]: "loop",
     [STATE_VARIANT_ENV]: child.stateVariant ?? child.id,
-    ...(base ? { [ORCH_BASE_BRANCH_ENV]: base } : {}),
   };
 }
 
@@ -123,7 +121,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   if (!panes.ok) {
     return fail(
       "review-gate: 读不到 tmux pane 列表，无法确认它到底死没死 —— 不敢重开（重开一个其实还活着的会话，" +
-      "会得到两个进程写同一个 worktree）。先修好 tmux 再试。",
+      "会得到两个进程写同一个工作区）。先修好 tmux 再试。",
     );
   }
   if (panes.panes.includes(child.paneId)) {
@@ -138,7 +136,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     // recover, and what to do about it is a question for the health snapshot.
     return fail(
       `review-gate: 子会话 ${childId} 的 pane ${child.paneId} 还活着 —— 拒绝重开` +
-      "（重开一个还活着的会话，会得到两个进程写同一个 worktree）。\n" +
+      "（重开一个还活着的会话，会得到两个进程写同一个工作区）。\n" +
       "先看 `orchestrator_wait({timeoutMs:0})` 的健康快照：\n" +
       "  - `waiting-judge`：它在等自己派出去的 reviewer / precommit，**完全正常，不要打断**，等着就好；\n" +
       "  - `waiting-input`：它在等回答，用 `orchestrator_answer` 回它；\n" +
@@ -196,8 +194,8 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     `review-gate: 子会话 ${childId} 已用同一个 session id（\`${childSessionId(childId)}\`）在 pane ${paneId} 重开 —— ` +
     "它的 transcript 是接着上次的，不是从头来。\n" +
     `任务 ${child.taskId} 保持 running（它本来就没有停止成立）；登记表已指向新 pane。\n` +
-    `它死前留下的资产：${assets?.branch ? `分支 \`${assets.branch}\`` : "没有工作分支"}` +
-    `${assets?.reviewVerdict ? `、review 裁决 ${assets.reviewVerdict}` : ""}` +
+    "它死前留下的资产：" +
+    `${assets?.reviewVerdict ? `review 裁决 ${assets.reviewVerdict}` : ""}` +
     `${assets?.checkpoint ? `、checkpoint \`${assets.checkpoint.slice(0, 12)}\`` : ""}。\n` +
     "接着用 `orchestrator_wait` 等它 —— 它重开后会自己在通道上报状态。",
     { childId, paneId, recovered: true, sessionId: childSessionId(childId) },
@@ -294,7 +292,7 @@ export function registerOrchestratorRecoveryTools(host: ToolHost, deps: Orchestr
       "TRANSCRIPT continues rather than starting over, then re-points the registry at the new " +
       "pane and leaves the plan task `running` — nothing about it stopped being true. It REFUSES " +
       "when the pane is actually still alive (two processes in one worktree is worse than a stuck " +
-      "child) and when tmux cannot be read at all. Its branch, checkpoints and review verdict " +
+      "child) and when tmux cannot be read at all. Its checkpoints and review verdict " +
       "survived the death and are named in the receipt.",
     parameters: Type.Object({
       childId: Type.String({ description: "Registry handle of the dead child" }),

@@ -44,7 +44,7 @@ import {
 import { detectForbiddenTmux } from "./orchestrator-guard.ts";
 import { hasAmendFlag, isMessageOnlyRewrite } from "./git-rewrite.ts";
 import { changedFiles, computeFingerprint, type Fingerprint } from "./fingerprint.ts";
-import { commitBranchAllowed } from "./workspace-branch.ts";
+import { isProtectedBranch } from "./workspace-branch.ts";
 import { unmetRequirements, type GateState } from "./gate-state.ts";
 import { LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK } from "./loop-goal.ts";
 import {
@@ -451,17 +451,16 @@ export async function evaluateShipCommand(
     const st = deps.enforcementStateFor(root);
     const fp = computeFingerprint(root);
     if (root === primaryRepoRoot) primaryFp = fp;
-    // WHERE the commit lands, per repo (user requirement): a session commits
-    // on the work branch IT created, or nowhere — so nobody else's branch
-    // quietly absorbs this session's work. Fail-closed: no work branch on
-    // record ⇒ no commit, and setup_workspace is what creates one.
+    // A commit on a PROTECTED branch (main/master/dev/develop) is refused
+    // outright by the ship gate: the checkpoint tool can ask the user to
+    // confirm, but a raw `git commit` in a shell has no dialog, so it
+    // fails closed with a pointer to the branch rule instead.
     if (ships.some((s) => s.kind === "commit")) {
-      const where = commitBranchAllowed({
-        workBranch: deps.stateForRepo(root).workBranch,
-        currentBranch: deps.currentBranch(root),
-      });
-      if (!where.allowed) {
-        problems.push(multiRepo ? `[${deps.repoLabel(root)}] ${where.reason}` : (where.reason as string));
+      const here = deps.currentBranch(root);
+      if (here && isProtectedBranch(here)) {
+        problems.push(multiRepo
+          ? `[${deps.repoLabel(root)}] 当前在受保护分支 ${here} 上，直接提交被门禁拒绝 — 切到开发分支再提交（或确认这是有意为之）。`
+          : `当前在受保护分支 ${here} 上，直接提交被门禁拒绝 — 切到开发分支再提交（或确认这是有意为之）。`);
       }
     }
     if (st) {

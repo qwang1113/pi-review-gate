@@ -174,7 +174,6 @@ export function childAssets(deps: OrchestratorDeps, child: ChildSession): ChildA
   };
   const review = nested("review");
   return {
-    ...(str(raw.workBranch) === undefined ? {} : { branch: str(raw.workBranch)! }),
     ...(str(raw.lastCheckpointSha) === undefined ? {} : { checkpoint: str(raw.lastCheckpointSha)! }),
     ...(review && str(review.verdict) !== undefined ? { reviewVerdict: str(review.verdict)! } : {}),
     ...(str(raw.completedAt) === undefined ? {} : { completedAt: str(raw.completedAt)! }),
@@ -196,8 +195,6 @@ export function childGateFacts(deps: OrchestratorDeps, child: ChildSession): Chi
 
   const mode = str(raw.taskMode);
   if (mode) lines.push(`门禁模式：${mode}`);
-  const branch = str(raw.workBranch);
-  if (branch) lines.push(`工作分支：${branch}${str(raw.baseBranch) ? ` → ${str(raw.baseBranch)}` : ""}`);
   const review = nested("review");
   if (review) lines.push(`review 判决：${str(review.verdict) ?? "?"}`);
   const precommit = nested("precommit");

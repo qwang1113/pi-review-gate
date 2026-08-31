@@ -71,26 +71,8 @@ export interface ReviewTiming {
   fingerprint: string;
 }
 
-/**
- * The async base-refresh outcome (setup_workspace's background git fetch).
- *
- * The fetch + ff-only merge run AFTER the setup_workspace receipt is
- * returned (2026-08-31, UX: never block the tool on the network), so its
- * outcome cannot ride the receipt. It lands here instead — a diagnostic
- * record a later session (or a grep of .pi/gate-timings.jsonl) can read,
- * which is what makes the background result actually visible.
- */
-export interface BaseRefreshTiming {
-  kind: "base-refresh";
-  at: string;
-  repo: string;
-  base: string;
-  /** What the background git fetch + ff-only merge concluded. */
-  outcome: "fetched-ff" | "diverged" | "offline" | "no-upstream" | "not-on-base";
-  note: string;
-}
 
-export type GateTiming = PrecommitTiming | ReviewTiming | BaseRefreshTiming;
+export type GateTiming = PrecommitTiming | ReviewTiming;
 function timingsPath(repoRoot: string): string {
   return join(repoRoot, TIMINGS_RELPATH);
 }

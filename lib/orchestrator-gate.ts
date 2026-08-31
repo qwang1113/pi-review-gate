@@ -15,15 +15,16 @@
  *   3 unfinished tasks block exit ....... {@link orchestratorDoneProblems}
  *   4 live children block exit .......... {@link orchestratorDoneProblems}
  *   5 tasks declare file boundaries ..... lib/orchestrator-plan.ts (parse)
- *   6 overlapping tasks never parallel .. lib/orchestrator-plan.ts (schedule)
- *   7 parallel ⇒ own worktree ........... {@link worktreeRequirement}
- *   8 proxied goal stays in boundary .... {@link proxyGoalProblems}
+ *   6 same-repo tasks never parallel ... lib/orchestrator-plan.ts (schedule)
+ *   7 (retired 2026-09-07: no worktree isolation — cross-repo only)
+ *   8 proxied goal stays in boundary .... {@link proxyApprovalProblems}
  *   9 notification single entry+throttle. {@link notifyAuthorization} + notify.ts
- *  10 work branch merged or waived ...... {@link orchestratorDoneProblems}
+ *  10 (retired 2026-09-07: work-branch landing is gone)
  *  11 unreported decisions block exit ... {@link orchestratorDoneProblems}
  *  12 relay preconditions ............... lib/orchestrator-relay.ts
  *  13 children come from the tool ....... lib/orchestrator-guard.ts + registry
- *  14 human-only decisions not proxied .. {@link humanOnlyDecision}
+ *  14 (retired 2026-09-07: humanOnlyDecision was dead code — the consent
+ *      model lets the project manager answer sensitive-edit dialogs too)
  *
  * Pure module: no IO, no git, no tmux.
  */
@@ -144,49 +145,6 @@ export function orchestratorWriteBlock(opts: {
 
 
 // ---------------------------------------------------------------------------
-// Constraint 7 — parallel work needs its own worktree
-// ---------------------------------------------------------------------------
-
-/**
- * Does this child need an isolated worktree?
- *
- * Only a child that will run ALONGSIDE another: two agents editing one
- * worktree invalidate each other's review bindings and race on every file.
- *
- * WHY A SERIAL CHILD SHARING THE ORCHESTRATOR'S WORKTREE IS SAFE (F9/O-2,
- * settled with the user on 2026-08-29 — this is the argument that decision
- * rests on, so it is written down rather than assumed).
- *
- *  1. ONE WRITER AT A TIME. "Serial" is enforced upstream by the scheduler
- *     (constraint 6 + `maxParallel`), not merely intended: a second child is
- *     not spawned while the first one's pane is alive. Two writers never
- *     coexist in the shared worktree, so the file-level races and the
- *     review-binding invalidation that motivate constraint 7 cannot occur.
- *  2. THE SUPERVISOR IS NOT A WRITER. Constraint 2 refuses every code write
- *     from an orchestrator session ({@link orchestratorWriteBlock}), so the
- *     one process that is ALWAYS present alongside the child contributes no
- *     edits at all.
- *  3. THE ONE THING THEY DID SHARE IS NOW SPLIT. The remaining coupling was
- *     the gate sidecar — one file per worktree, with a single-valued
- *     `taskMode` and a single `askUser` record, which the two sessions
- *     overwrote for each other (F4). Since this round each child is started
- *     with its own `RG_STATE_VARIANT` and therefore its own
- *     `.pi/review-gate-state.<variant>.json` (lib/gate-state.ts), so there is
- *     no shared mutable state left between supervisor and worker — nor
- *     between two serial children.
- *
- * The alternative (a worktree per serial child) was considered and rejected
- * BY THE USER for a concrete reason: a child's `declare_done` merges its work
- * branch into the base, and git refuses to check out a branch that another
- * worktree already holds — so isolating serial children would break the exact
- * step they exist to reach.
- */
-
-export function worktreeRequirement(execution: TaskExecution): { needed: boolean; reason: string } {
-  return execution === "parallel"
-    ? { needed: true, reason: "并行任务必须各自独立 worktree（约束 7）：同一 worktree 里两个写者会互相打断 review 绑定" }
-    : { needed: false, reason: "串行任务在主 worktree 里跑即可" };
-}
 
 // ---------------------------------------------------------------------------
 // Constraint 8 — a goal approved on the user's behalf stays inside the task
@@ -260,32 +218,6 @@ export function notifyAuthorization(taskMode: TaskMode | undefined): Authorizati
   };
 }
 
-// ---------------------------------------------------------------------------
-// Constraint 14 — some decisions may never be answered on the user's behalf
-// ---------------------------------------------------------------------------
-
-export type HumanOnlyDecision = "discard-worktree" | "sensitive-file" | "merge-waiver";
-
-const HUMAN_ONLY_REASONS: Readonly<Record<HumanOnlyDecision, string>> = Object.freeze({
-  "discard-worktree":
-    "丢弃工作区是不可逆的（别人的改动可能就此消失），必须真人确认 —— 项目经理不得代答。",
-  "sensitive-file":
-    "敏感文件（.env / 私钥 / 凭据）授权必须真人确认 —— 项目经理不得代答。",
-  "merge-waiver":
-    "「本次不合并工作分支」要留档给真人确认 —— 项目经理不得代答。",
-});
-
-/**
- * The decisions an orchestrator must escalate rather than answer.
- *
- * The boundary the user drew: technical trade-offs, `/gate-bypass` and
- * proxy-approving a child's goal (inside its task boundary) are the
- * orchestrator's to make, on the record. Anything IRREVERSIBLE or
- * security-relevant is the human's, full stop.
- */
-export function humanOnlyDecision(kind: string): string | undefined {
-  return HUMAN_ONLY_REASONS[kind as HumanOnlyDecision];
-}
 
 // ---------------------------------------------------------------------------
 // Constraints 3, 4, 10, 11 — what an orchestration must settle before it ends
@@ -296,21 +228,6 @@ export interface OrchestratorDoneFacts {
   runtime: OrchestratorRuntime;
   /** Pane ids that exist RIGHT NOW (observed, never assumed). */
   alivePaneIds: readonly string[];
-  /** Work branch state, from the gate's own branch log. */
-  workBranch?: string;
-  baseBranch?: string;
-  /**
-   * The work branch's landing is SETTLED: a base branch is on record and no
-   * merge conflict is outstanding, so `declare_done`'s own merge step will
-   * run it home.
-   *
-   * Deliberately not "already merged": the gate merges INSIDE declare_done,
-   * after these checks, so demanding a completed merge here could never be
-   * satisfied — it would deadlock the exit it is meant to guard.
-   */
-  mergeSettled: boolean;
-  /** The user waived the merge on the record. */
-  mergeWaived: boolean;
 }
 
 /**
@@ -385,16 +302,6 @@ export function orchestratorDoneProblems(facts: OrchestratorDoneFacts): string[]
     }
   }
 
-
-  // Constraint 10 — the work has to land somewhere, or the decision not to
-  // land it has to be on the record.
-  if (facts.workBranch && !facts.mergeSettled && !facts.mergeWaived) {
-    problems.push(
-      `工作分支 ${facts.workBranch} 的归宿没有落定（基准分支未记录，或有未解决的合并冲突：` +
-      `${facts.baseBranch ?? "基准未记录"}）—— 解决冲突或补上基准，` +
-      "或者用 declare_done({ waiveMerge: \"<理由>\" }) 让用户确认本次不合并（约束 10）",
-    );
-  }
 
   return problems;
 }

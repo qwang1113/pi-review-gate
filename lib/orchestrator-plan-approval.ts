@@ -74,6 +74,7 @@ export interface ApprovedTaskSnapshot {
   fileBoundaries: NormalizedBoundary[];
   dependsOn: string[];
   execution: TaskExecution;
+  repo?: string;
 }
 
 /**
@@ -109,6 +110,7 @@ export function snapshotApprovedPlan(
       fileBoundaries: [...task.fileBoundaries],
       dependsOn: [...task.dependsOn],
       execution: task.execution,
+      ...(task.repo ? { repo: task.repo } : {}),
     })),
   };
 }
@@ -257,6 +259,13 @@ export function decideApprovalCarry(
       widenings.push(`任务 "${task.id}" 从 serial 改成 parallel`);
     } else if (before.execution === "parallel" && task.execution === "serial") {
       amendments.push(`任务 "${task.id}" 从 parallel 改成 serial`);
+    }
+    // 2026-09-07: a task's `repo` decides which checkout it writes in. A
+    // change of repo is a NEW write surface — always a widening, never an
+    // amendment (the user approved the task in one repo; moving it to
+    // another must be re-approved).
+    if ((before.repo ?? undefined) !== (task.repo ?? undefined)) {
+      widenings.push(`任务 "${task.id}" 的工作 repo 从 ${before.repo ?? "(主 repo)"} 改为 ${task.repo ?? "(主 repo)"}`);
     }
 
     const boundaries = classifyBoundaryChange({

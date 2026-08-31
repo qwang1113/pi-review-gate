@@ -54,10 +54,10 @@ export const ORCHESTRATOR_DIRECTIVE =
   "2. **禁止写代码**：只放行 plan（`.pi/` 下）与交接/汇报文档（`docs/orchestrator-*.md`）。\n" +
   "3. plan 里还有未完成任务 → `declare_done` 被拒（判据是**整体任务**，不是你自己这一轮）。\n" +
   "4. 还有活着的子会话 → `declare_done` 被拒。\n" +
-  "5. 每个任务必须声明**文件边界**；边界重叠的任务不会被并行调度（自动降级串行）；" +
-  "并行任务由门禁自己建独立 worktree。\n" +
+  "5. 每个任务必须声明**文件边界**；同一 repo 的任务不会并行调度（自动降级串行），" +
+  "只有不同 repo 的任务可以并行。\n" +
   "6. **代批子会话的 goal** 只能在该任务的文件边界之内；越界就不是技术取舍而是范围变更 —— 通知用户。\n" +
-  "7. 有挂起的用户决策却从未通知用户 → 拒绝退出。工作分支未合并回基准也拒绝退出（除非记录不合并的理由）。\n" +
+  "7. 有挂起的用户决策却从未通知用户 → 拒绝退出。\n" +
   "\n" +
   "### 决策权边界\n" +
   "**你可以自己决定**（但要留档并汇报）：技术取舍、`/gate-bypass`、代批 goal（须与 plan 边界一致）。\n" +
@@ -130,7 +130,7 @@ export function buildOrchestratorExitBlock(problems: readonly string[]): string 
     "不需要协商 loop goal，不需要 `judge_submit` 送审自己的改动（你本来就不写代码），" +
     "代码的审查由每个子会话在它自己的 loop 里各自完成。\n" +
     "收尾用 `declare_done` —— 门禁会重新校验：plan 无未完成任务、没有活着的子会话、" +
-    "没有「登记了却从未通知用户」的决策、工作分支的归宿已落定。";
+    "没有「登记了却从未通知用户」的决策。";
   if (problems.length === 0) {
     return head + "\n\n现在没有未决项：plan 做完就可以 `declare_done`。";
   }

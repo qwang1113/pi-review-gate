@@ -107,39 +107,6 @@ export interface GateState {
   };
 
   /**
-   * The worktree the session STARTED in, when it was not clean. Recorded at
-   * session start and cleared once `setup_workspace` settled it with the
-   * user. While it stands unsettled, loop-mode edits are refused: changes the
-   * session did not make must not silently become part of what it ships.
-   */
-  worktreeDirty?: { files: string[]; at: string; settled?: boolean };
-  /**
-   * The branch this session's work must end up in — the user confirms it
-   * (`setup_workspace`), the gate merges into it (`declare_done`).
-   */
-  baseBranch?: string;
-  /**
-   * The branch this session commits on. Absent ⇒ commits are refused
-   * (fail-closed): a session must never commit onto whatever branch it
-   * happened to start on.
-   */
-  workBranch?: string;
-  /**
-   * Append-only audit of every branch/worktree operation the gate performed:
-   * where the session came from, what it discarded, where its checkpoints
-   * landed, which base and work branch were chosen. This is what makes the
-   * final merge a lookup instead of a guess.
-   */
-  branchOps?: import("./workspace-branch.ts").BranchOp[];
-  /**
-   * A merge the gate started and could not finish. `declare_done` refuses
-   * while it stands: the conflict is the agent's to resolve (or the user's to
-   * waive), never the gate's to guess at.
-   */
-  mergeConflict?: { branch: string; base: string; files: string[]; at: string };
-  /** The user waived the merge for this session (escape hatch, on record). */
-  mergeWaived?: { at: string; reason: string };
-  /**
    * The COMPLETION record — `declare_done` was accepted (R3-5).
    *
    * It exists because a supervisor could not tell a finished child from a
@@ -321,8 +288,7 @@ export interface GateState {
   appeals?: import("./text-appeal.ts").AppealRecord;
   /**
    * USER-GRANTED review-scope limit: the user confirmed via an
-   * extension-rendered dialog (request_scope_limit tool) OR via the
-   * setup_workspace "放行这些改动" option that the gate only needs to cover
+   * extension-rendered dialog (request_scope_limit tool) that the gate only needs to cover
    * THIS session's own edits — pre-existing worktree/branch changes stop
    * arming it. `preexistingFiles` snapshots the changed files exempted at
    * grant time, so every re-arm path (session_start P0-2, bash git re-arm,
@@ -441,6 +407,27 @@ export function emptyState(sessionId: string | null, maxRounds: number): GateSta
 }
 
 /**
+ * Content-change invalidation — the ONE place a session's own edit downgrades
+ * standing bindings. READY → PENDING and PASS → NOT_RUN, and the fingerprint
+ * goes with the verdict: a downgraded binding must not keep pointing at the
+ * content it no longer describes. (Measured residue: the edit path used to
+ * flip the verdict but leave the fingerprint, leaving an impossible state
+ * like `{verdict:"NOT_RUN", fingerprint:"…"}` in the sidecar — harmless to
+ * enforcement, misleading to every reader, 2026-08-31.)
+ */
+export function invalidateBindings(st: GateState): void {
+  if (st.review.verdict === "READY") {
+    st.review.verdict = "PENDING";
+    st.review.fingerprint = null;
+  }
+  if (st.precommit.verdict === "PASS") {
+    st.precommit.verdict = "NOT_RUN";
+    st.precommit.fingerprint = null;
+  }
+}
+
+
+/**
  * Environment variable that gives a session its OWN sidecar file (F4).
  *
  * THE MEASURED PROBLEM. The sidecar is one file per worktree, and `taskMode`
@@ -466,24 +453,6 @@ export function emptyState(sessionId: string | null, maxRounds: number): GateSta
  * each other's verdicts.
  */
 export const STATE_VARIANT_ENV = "RG_STATE_VARIANT";
-
-/**
- * The base branch an orchestration child's work must end up in (R3-6).
- *
- * WHY IT IS INJECTED RATHER THAN INFERRED. `setup_workspace` defaults the
- * base to "the branch you are standing on". For a child in a gate-created
- * worktree that branch is `orch/<task>-<stamp>` — a name the gate invented
- * minutes earlier — so the child dutifully merged its work into the scratch
- * branch and the lane's output never reached the orchestration's real base.
- * Measured in the third run: of two parallel lanes, one asked the right
- * question only because its agent happened to pass `base` itself, and both
- * lanes ended up merged by hand.
- *
- * The orchestrator knows the base at spawn time, so it says so. The child
- * still SHOWS it to whoever answers the dialog — an injected default is a
- * default, not a decision made behind anyone's back.
- */
-export const ORCH_BASE_BRANCH_ENV = "RG_ORCH_BASE_BRANCH";
 
 
 /** Only these characters may reach a filename. Anything else is dropped. */
@@ -775,42 +744,6 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         (!!p && typeof p === "object" && typeof p.digest === "string" && /^[0-9a-f]{64}$/.test(p.digest) &&
           typeof p.kind === "string" && typeof p.issuedAt === "string");
       if (!decisionsOk || !passOk) delete parsed.appeals;
-    }
-    // WORKSPACE + BRANCH facts decide where commits may land and what gets
-    // merged, so a corrupt one must not be believed. Each is dropped
-    // independently, and dropping any of them TIGHTENS the gate: no work
-    // branch ⇒ no commit, no base ⇒ no merge, no settled flag ⇒ edits stay
-    // blocked until setup_workspace runs again.
-    if (parsed.baseBranch !== undefined && typeof parsed.baseBranch !== "string") delete parsed.baseBranch;
-    if (parsed.workBranch !== undefined && typeof parsed.workBranch !== "string") delete parsed.workBranch;
-    if (parsed.worktreeDirty !== undefined) {
-      const w = parsed.worktreeDirty as { files?: unknown; at?: unknown; settled?: unknown };
-      const ok = !!w && typeof w === "object" && typeof w.at === "string" &&
-        Array.isArray(w.files) && w.files.every((f) => typeof f === "string") &&
-        (w.settled === undefined || typeof w.settled === "boolean");
-      if (!ok) delete parsed.worktreeDirty;
-    }
-    if (parsed.branchOps !== undefined) {
-      if (!Array.isArray(parsed.branchOps)) delete parsed.branchOps;
-      else {
-        parsed.branchOps = parsed.branchOps.filter((o) =>
-          typeof o === "object" && o !== null &&
-          typeof (o as { op?: unknown }).op === "string" &&
-          typeof (o as { at?: unknown }).at === "string");
-      }
-    }
-    if (parsed.mergeConflict !== undefined) {
-      const m = parsed.mergeConflict as { branch?: unknown; base?: unknown; files?: unknown; at?: unknown };
-      const ok = !!m && typeof m === "object" && typeof m.branch === "string" && typeof m.base === "string" &&
-        typeof m.at === "string" && Array.isArray(m.files) && m.files.every((f) => typeof f === "string");
-      if (!ok) delete parsed.mergeConflict;
-    }
-    if (parsed.mergeWaived !== undefined) {
-      const w = parsed.mergeWaived as { at?: unknown; reason?: unknown };
-      // A forged waiver would skip the merge silently — it must be a complete
-      // record or nothing.
-      const ok = !!w && typeof w === "object" && typeof w.at === "string" && typeof w.reason === "string";
-      if (!ok) delete parsed.mergeWaived;
     }
     const migrated = migrateFingerprintVersion(parsed);
     if (out) out.migrated = migrated;

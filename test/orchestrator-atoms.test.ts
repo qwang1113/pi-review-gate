@@ -33,7 +33,7 @@ import {
   CHILD_WAIT_MAX_MS,
 } from "../lib/orchestrator-wait.ts";
 import { readFileSync } from "node:fs";
-import { orchestratorWriteBlock, worktreeRequirement } from "../lib/orchestrator-gate.ts";
+import { orchestratorWriteBlock } from "../lib/orchestrator-gate.ts";
 import { childGateFacts } from "../lib/orchestrator-tool-kit.ts";
 import { detectOrphans } from "../lib/orchestrator-recovery-tools.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
@@ -195,23 +195,6 @@ test("F4: a sidecar variant gives a session its own file, and cannot escape .pi/
   assert.equal(stateVariantFrom({ [STATE_VARIANT_ENV]: "a/b" } as NodeJS.ProcessEnv), "a-b");
 });
 
-test("F9 / O-2: a serial child shares the worktree, and WHY that is safe is on the record", () => {
-  // The user chose "isolate the sidecar, keep the shared worktree" over "a
-  // worktree per child", so the safety of that choice rests on an argument
-  // rather than on a mechanism. An argument nobody wrote down is an
-  // assumption, and O-2 is precisely the gate having warned about the shared
-  // sidecar while the layer kept using it — so the reasoning is pinned here.
-  assert.equal(worktreeRequirement("parallel").needed, true);
-  assert.equal(worktreeRequirement("serial").needed, false);
-
-  const source = readFileSync(new URL("../lib/orchestrator-gate.ts", import.meta.url), "utf8");
-  const at = source.indexOf("WHY A SERIAL CHILD SHARING THE ORCHESTRATOR'S WORKTREE IS SAFE");
-  assert.ok(at > 0, "the argument must be written down next to the decision it justifies");
-  const argument = source.slice(at, at + 1800);
-  assert.match(argument, /ONE WRITER AT A TIME/, "serial is enforced, not merely intended");
-  assert.match(argument, /THE SUPERVISOR IS NOT A WRITER/, "constraint 2 keeps the orchestrator out");
-  assert.match(argument, /RG_STATE_VARIANT/, "and the one shared mutable thing is now split (F4)");
-});
 
 test("F10: what a child has EDITED is readable from its sidecar — constraint 8's real input", () => {
   const deps = {

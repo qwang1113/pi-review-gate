@@ -49,12 +49,8 @@ export type GateReviewVerdict = (typeof GATE_REVIEW_VERDICTS)[number];
 export interface GateWidgetFacts {
   /** Current gate mode (loop / explore / normal / orchestrator). */
   mode?: string;
-  /** Base branch this session's work must end up in. */
-  baseBranch?: string;
-  /** The branch this session commits on. */
-  workBranch?: string;
-  /** Unsettled pre-existing dirty files (block edits until settled). */
-  dirtyCount?: number;
+  /** Current branch (the session works directly on it — no work branch). */
+  branch?: string;
   /** The session has edited at least one file. */
   edited: boolean;
   /** Review verdict of the current round. */
@@ -128,11 +124,9 @@ export function unmetTag(line: string): string {
 export function buildGateWidget(f: GateWidgetFacts): string[] {
   const lines: string[] = [];
 
-  // ---- block 1: workspace / branch ----
+  // ---- block 1: branch / mode ----
   const wsBits: string[] = [`mode ${f.mode ?? "?"}`];
-  if (f.baseBranch) wsBits.push(`base ${f.baseBranch}`);
-  if (f.workBranch) wsBits.push(`work ${f.workBranch}`);
-  if (f.dirtyCount && f.dirtyCount > 0) wsBits.push(`脏 ${f.dirtyCount}`);
+  if (f.branch) wsBits.push(f.branch);
   wsBits.push(f.edited ? "已编辑" : "未编辑");
   lines.push(`门禁 · ${wsBits.join(" · ")}`);
 

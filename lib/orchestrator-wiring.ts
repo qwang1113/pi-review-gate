@@ -2,10 +2,10 @@
  * Where the orchestration layer meets the real machine.
  *
  * Everything the tools need that involves the OUTSIDE WORLD — running tmux,
- * reading and writing the plan file, adding and removing git worktrees,
+ * reading and writing the plan file, writing scratch task documents,
  * taking attention events off the queue — is implemented once here, so the
  * extension only has to supply what genuinely belongs to it: the gate state,
- * the user dialog and the branch facts.
+ * the user dialog and the repo facts.
  *
  * That split is the whole point. `extensions/review-gate.ts` is already the
  * repository's worst architectural offender at 8659 lines, and this round
@@ -39,7 +39,7 @@ import { sidecarPath } from "./gate-state.ts";
 
 import { parsePlan, PLAN_RELPATH, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
-import type { BranchFacts, OrchestratorDeps, PlanRead, TmuxRunResult } from "./orchestrator-deps.ts";
+import type { OrchestratorDeps, PlanRead, TmuxRunResult } from "./orchestrator-deps.ts";
 import type { TaskMode } from "./task-mode.ts";
 
 /** Run one tmux command with no shell in between. */
@@ -84,74 +84,12 @@ export function writePlanFile(repoRoot: string, plan: OrchestratorPlan): void {
   writeFileAtomic(path, JSON.stringify(plan, null, 2) + "\n");
 }
 
-/**
- * Worktrees for parallel children live OUTSIDE the repo, under the system
- * temp dir: a checkout inside the repo would show up in every status, every
- * fingerprint and every `git add -A` the gate performs.
- */
-export function worktreeRootFor(repoRoot: string): string {
+/** The scratch root for this repo's orchestration artifacts (under /tmp). */
+export function scratchRootFor(repoRoot: string): string {
   const key = repoRoot.replace(/[^A-Za-z0-9]/g, "-").slice(-40);
   return join(tmpdir(), "rg-orchestration", key);
 }
 
-/**
- * The branch name a gate-created worktree is checked out ON.
- *
- * R-2: the worktree used to be created with `--detach`, so the child landed
- * on a detached HEAD and its own `setup_workspace` refused ("当前是 detached
- * HEAD，无法确定基准分支"). Both children that hit this invented the same
- * `git checkout -b` workaround — which is precisely the "the gate provides
- * the tool, the session does not assemble it" rule being broken. The gate
- * creates the worktree, so the gate creates its branch.
- */
-export function worktreeBranchName(taskId: string, now: number = Date.now()): string {
-  const safe = taskId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 40).replace(/^[.-]+/, "");
-  return `orch/${safe || "task"}-${Math.floor(now).toString(36)}`;
-}
-
-export function addWorktree(
-  repoRoot: string,
-  name: string,
-): { ok: true; path: string } | { ok: false; error: string } {
-  const safe = name.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 48);
-  const path = join(worktreeRootFor(repoRoot), `${safe}-${Date.now().toString(36)}`);
-  const branch = worktreeBranchName(name);
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    // `-b <branch>`, never `--detach` (R-2): a child must arrive on a branch
-    // it can commit to. The branch starts at the current HEAD, which is the
-    // baseline the orchestration is working from.
-    execFileSync("git", ["-C", repoRoot, "worktree", "add", "-b", branch, path], {
-      encoding: "utf8",
-      timeout: 120_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { ok: true, path };
-  } catch (error) {
-    const err = error as { stderr?: Buffer | string; message?: string };
-    return { ok: false, error: String(err.stderr ?? err.message ?? "git worktree add failed") };
-  }
-}
-
-
-/** Remove a worktree the gate created. Best-effort: never throws. */
-export function removeWorktree(repoRoot: string, path: string): void {
-  // Refuse to touch anything outside the directory we create them in: a
-  // corrupted registry entry must not be able to point `git worktree remove`
-  // (or the rm below) at the user's own checkout.
-  const root = worktreeRootFor(repoRoot);
-  const target = resolve(path);
-  if (!target.startsWith(resolve(root) + "/")) return;
-  try {
-    execFileSync("git", ["-C", repoRoot, "worktree", "remove", "--force", target], {
-      encoding: "utf8",
-      timeout: 60_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch {
-    try { rmSync(target, { recursive: true, force: true }); } catch { /* best-effort */ }
-  }
-}
 
 /**
  * Emit the notification sequence, gated by the SAME side-effect check
@@ -171,8 +109,8 @@ export function emitNotification(sequence: string, env: NodeJS.ProcessEnv = proc
 /**
  * Write a task document OUTSIDE the repository (F7).
  *
- * Same root as the orchestration worktrees, for the same reason: anything the
- * gate creates inside the worktree ends up in the first child's `git add -A`
+ * The scratch root lives under the system temp dir: anything the gate
+ * creates inside the repo ends up in the first child's `git add -A`
  * checkpoint. The name is sanitized to a single path segment, so a caller (or
  * a corrupted registry) can never write outside this directory.
  */
@@ -184,7 +122,7 @@ export function writeScratchFile(
   const safe = name.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 120);
   if (!safe) return { ok: false, error: "文件名非法" };
   try {
-    const dir = join(worktreeRootFor(repoRoot), TASK_FILE_DIRNAME);
+    const dir = join(scratchRootFor(repoRoot), TASK_FILE_DIRNAME);
     mkdirSync(dir, { recursive: true });
     const path = join(dir, safe);
     writeFileAtomic(path, content);
@@ -284,78 +222,6 @@ export function hooksDirFor(repoRoot: string): string | undefined {
   }
 }
 
-/**
- * Which installed hooks currently EXEC something inside `path`.
- *
- * This is the check that turns R-28 from an incident into a refusal: every
- * child that ran `install-git-hooks.sh` from inside its own orchestration
- * worktree left the repository's shared hooks pointing at a temp directory,
- * and deleting that directory broke committing for every session in the repo.
- */
-export function gitHooksReferencing(repoRoot: string, path: string): string[] {
-  const dir = hooksDirFor(repoRoot);
-  if (!dir || !path) return [];
-  const needle = resolve(path);
-  const hits: string[] = [];
-  for (const hook of GATE_HOOKS) {
-    try {
-      const file = join(dir, hook);
-      if (!existsSync(file)) continue;
-      const body = readFileSync(file, "utf8");
-      if (body.includes(needle)) hits.push(hook);
-    } catch { /* an unreadable hook is not evidence of a reference */ }
-  }
-  return hits;
-}
-
-/**
- * Re-point the repository's hooks at the MAIN worktree's copy.
- *
- * Runs the package's own installer from `repoRoot`, which is the main
- * checkout: `scripts/install-git-hooks.sh` resolves the hook sources relative
- * to itself, so the hooks end up pointing at a stable path rather than at
- * whatever worktree happened to install them last.
- */
-export function repairGitHooks(repoRoot: string): { ok: true } | { ok: false; error: string } {
-  const script = join(repoRoot, "scripts", "install-git-hooks.sh");
-  if (!existsSync(script)) {
-    return { ok: false, error: `找不到钩子安装脚本：${script}` };
-  }
-  try {
-    execFileSync("bash", [script], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      timeout: 60_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { ok: true };
-  } catch (error) {
-    const err = error as { stderr?: Buffer | string; message?: string };
-    return { ok: false, error: String(err.stderr ?? err.message ?? "install-git-hooks.sh failed") };
-  }
-}
-
-
-/**
- * The branch a checkout is standing on; undefined when detached or unreadable.
- *
- * Used at spawn time to tell a child where its work has to LAND (R3-6): the
- * supervisor's own branch is the orchestration's base, and a child in a
- * gate-created worktree cannot derive that from anything it can see.
- */
-export function currentBranchOf(repoRoot: string): string | undefined {
-  try {
-    const out = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      timeout: 10_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    return out && out !== "HEAD" ? out : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 
 /** Character count of a repo-relative file; undefined when it is not there. */
@@ -382,7 +248,6 @@ export interface OrchestratorHostBindings {
   confirm(title: string, message: string, pointer?: string): Promise<boolean>;
   /** Print text into the user's transcript (the plan's full text, O-1). */
   showToUser(title: string, text: string): void;
-  branchFacts(): BranchFacts;
   sessionTranscriptPath(): string | undefined;
   /** This orchestrator's OWN context usage, as a percentage (receipt block 4). */
   contextPercent?(): number | undefined;
@@ -395,6 +260,9 @@ export interface OrchestratorHostBindings {
   now?(): number;
   env?(): NodeJS.ProcessEnv;
 
+
+  /** Every repo this session is accountable for, primary first. */
+  knownRepoRoots(): string[];
   /**
    * Fired on every orchestration-tool execution (2026-08-30, symmetric
    * re-arm). The extension re-arms `loopArmed` here.
@@ -453,12 +321,8 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     childGateState: (childCwd, variant) => readChildGateState(childCwd, variant),
     sleep: (ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }),
 
-    addWorktree: (name) => addWorktree(host.repoRoot, name),
-    removeWorktree: (path) => removeWorktree(host.repoRoot, path),
+    knownRepoRoots: host.knownRepoRoots,
     childJudgeRunning: (childCwd) => childJudgeRunning(childCwd, host.now ? host.now() : Date.now()),
-    gitHooksReferencing: (path) => gitHooksReferencing(host.repoRoot, path),
-    currentBranch: () => currentBranchOf(host.repoRoot),
-    repairGitHooks: () => repairGitHooks(host.repoRoot),
     channelIO: () => io,
     channelHome: () => host.channelHome?.(),
     supervisionMemory: () => memory,
@@ -477,7 +341,6 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
           }),
 
 
-    branchFacts: host.branchFacts,
     onToolCall: host.onToolCall,
     onHandoff: host.onHandoff,
     emitNotification: (sequence) => emitNotification(sequence, env()),

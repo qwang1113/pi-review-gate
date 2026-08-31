@@ -17,15 +17,7 @@ import { tmpdir } from "node:os";
 
 import { neutraliseHostGitConfig } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
-import {
-  addWorktree,
-  childJudgeRunning,
-  gitHooksReferencing,
-  hooksDirFor,
-  removeWorktree,
-  worktreeBranchName,
-  worktreeRootFor,
-} from "../lib/orchestrator-wiring.ts";
+import { childJudgeRunning, hooksDirFor } from "../lib/orchestrator-wiring.ts";
 
 neutraliseHostGitConfig();
 neutraliseGateEnv();
@@ -47,82 +39,6 @@ function makeRepo(): string {
   return dir;
 }
 
-// ---------------------------------------------------------------------------
-// R-2 — a gate-created worktree arrives ON A BRANCH
-// ---------------------------------------------------------------------------
-
-test("R-2: a gate-created worktree is on a BRANCH, not a detached HEAD", () => {
-  // The measured failure: the worktree was created with `--detach`, so the
-  // child's own `setup_workspace` refused ("当前是 detached HEAD，无法确定基准
-  // 分支") and the child had to improvise `git checkout -b`. Two children
-  // independently invented the same workaround — which is the "the gate
-  // provides the tool, the session does not assemble it" rule being broken.
-  const repo = makeRepo();
-  const created = addWorktree(repo, "t3-module-map-docs");
-  assert.ok(created.ok, created.ok ? "" : created.error);
-  dirs.push(worktreeRootFor(repo));
-
-  const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-    cwd: created.ok ? created.path : repo,
-    encoding: "utf8",
-  }).trim();
-  assert.notEqual(branch, "HEAD", "a child must not land on a detached HEAD");
-  assert.match(branch, /^orch\/t3-module-map-docs-/, "and the branch names the task it was made for");
-
-  if (created.ok) removeWorktree(repo, created.path);
-});
-
-test("R-2: two worktrees for the same task never collide on a branch name", () => {
-  const first = worktreeBranchName("t1", 1);
-  const second = worktreeBranchName("t1", 2);
-  assert.notEqual(first, second);
-  assert.match(worktreeBranchName("../evil task", 1), /^orch\/[A-Za-z0-9._-]+$/,
-    "a hostile task id cannot escape the namespace");
-});
-
-// ---------------------------------------------------------------------------
-// R-28 — the shared hooks directory
-// ---------------------------------------------------------------------------
-
-test("R-28: a hook that points INTO a worktree is DETECTED before that worktree is removed", () => {
-  const repo = makeRepo();
-  const hooks = hooksDirFor(repo);
-  assert.ok(hooks, "the hooks dir is resolved from the COMMON git dir");
-  mkdirSync(hooks!, { recursive: true });
-
-  const created = addWorktree(repo, "t2-lane");
-  assert.ok(created.ok, created.ok ? "" : created.error);
-  const worktree = created.ok ? created.path : "";
-  dirs.push(worktreeRootFor(repo));
-
-  // Nothing references it yet.
-  assert.deepEqual(gitHooksReferencing(repo, worktree), []);
-
-  // The exact shape the incident left behind: the repository's shared hook
-  // exec'ing a script inside a temporary worktree.
-  writeFileSync(
-    join(hooks!, "commit-msg"),
-    `#!/usr/bin/env bash\n# pi-review-gate:installed\nexec "${worktree}/hooks/commit-msg" "$@"\n`,
-  );
-  writeFileSync(join(hooks!, "pre-commit"), "#!/usr/bin/env bash\nexec /somewhere/else/pre-commit \"$@\"\n");
-
-  assert.deepEqual(gitHooksReferencing(repo, worktree), ["commit-msg"],
-    "only the hook that actually points into the doomed directory is named");
-  assert.deepEqual(gitHooksReferencing(repo, "/tmp/unrelated"), []);
-
-  if (created.ok) removeWorktree(repo, created.path);
-});
-
-test("R-28: removeWorktree refuses any path outside the gate's own scratch root", () => {
-  const repo = makeRepo();
-  const victim = mkdtempSync(join(tmpdir(), "rg-not-ours-"));
-  dirs.push(victim);
-  writeFileSync(join(victim, "keep.txt"), "important\n");
-
-  removeWorktree(repo, victim);
-  assert.equal(readFileSync(join(victim, "keep.txt"), "utf8"), "important\n",
-    "a corrupted registry entry must never point the cleanup at somebody's checkout");
-});
 
 // ---------------------------------------------------------------------------
 // R-23 — "is a judge round in flight" is a FACT, read from disk

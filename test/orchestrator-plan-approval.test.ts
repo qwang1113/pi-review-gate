@@ -138,6 +138,10 @@ test("every OTHER kind of widening still stops at the user", () => {
 
   const nowParallel = decideApprovalCarry(base, withTask(plan, "t1", { execution: "parallel" }));
   assert.equal(nowParallel.carries, false);
+
+  const movedRepo = decideApprovalCarry(base, withTask(plan, "t1", { repo: "/other-repo" }));
+  assert.equal(movedRepo.carries, false, "moving a task to another repo is a NEW write surface");
+  assert.match(movedRepo.widenings.join("\n"), /repo/, "the widening names the repo change");
 });
 
 test("narrowing in every direction is free: fewer tasks, more dependencies, less parallelism", () => {

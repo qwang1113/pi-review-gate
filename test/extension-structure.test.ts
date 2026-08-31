@@ -1050,13 +1050,16 @@ test("loop directives: decision table injects on every turn, incl. unarmed first
   assert.ok(handlerAt > 0);
   const injectAt = SRC.indexOf('state.taskMode === "loop"', handlerAt);
   assert.ok(injectAt > 0, "loop branch must inject directives");
+  // The decision table is injected in BOTH enforced loop and advisory explore
+  // (explore gained it 2026-08-31: it used to early-return before the loop
+  // injection, so an explore session never saw the situation→tool table).
+  const exploreAt = SRC.indexOf('buildAgentDirectives("explore")', handlerAt);
+  assert.ok(exploreAt > 0, "explore branch must inject the decision table too");
+  assert.ok(exploreAt < injectAt, "the explore early-return injection sits before the loop one");
   // buildAgentDirectives is called unconditionally for loop, outside any
   // gateArmed guard.
   const directivesAt = SRC.indexOf("buildAgentDirectives()", handlerAt);
   assert.ok(directivesAt > 0, "decision table must be injected in before_agent_start");
-  // The full line: `const loopDirectives = state.taskMode === "loop" ? ...`
-  const line = SRC.slice(directivesAt - 120, directivesAt + 30);
-  assert.match(line, /state\.taskMode === "loop"/, "decision table guarded on loop mode only");
   // The undecided-clean early return (added round 3) must sit AFTER the
   // injection, so a loop session never loses the decision table: loop mode
   // falls through regardless of gateArmed.
@@ -1418,8 +1421,8 @@ test("a message-only rewrite is not a content change, at L1 and in the branch ru
     "L5 must judge the NEW message BEFORE the rewrite is let through");
   // Round-3 P1: the exemption skips the CONTENT gates and nothing else. It
   // used to `return` from the whole ship gate, which also dropped the branch
-  // rule — so an amend could land on main, on another session's branch, or
-  // with no work branch at all.
+  // rule — so an amend could land on main. The protected-branch rule is one
+  // of the survivors.
   //
   // Round-4 P1: the first guard written here was VACUOUS — it matched the
   // literal shape of that `return` with a regex the real call could never
@@ -1437,7 +1440,7 @@ test("a message-only rewrite is not a content change, at L1 and in the branch ru
     "only the content requirements are skipped");
   // …and the checks that must survive are all downstream of the decision.
   for (const [what, anchor] of [
-    ["the branch rule", "commitBranchAllowed({"],
+    ["the branch rule", "isProtectedBranch("],
     ["the fail-closed sidecar check", "gate state missing (fail-closed)"],
     ["the loop-goal ship gate", "LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK"],
   ] as const) {
@@ -1487,8 +1490,7 @@ test("A-class blocks are appealable; B-class facts are NOT", () => {
   // B-class: these reasons state the correct next step and must not offer an
   // appeal instead.
   for (const [factBlock, src] of [
-    ["先调 setup_workspace", SRC],
-    ["LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK", SHIP_BASH_SRC],
+    ["在受保护分支上", SRC],
     ["matches a sensitive-file pattern", SHIP_EDIT_SRC],
   ] as const) {
     const at = src.indexOf(factBlock);
@@ -2242,7 +2244,7 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // instruction to call one.
     "goal-tools.ts": 1,
     "goal-prereview-tools.ts": 5,
-    "review-gate.ts": 21,
+    "review-gate.ts": 20,
   };
 
   const sources = [
@@ -2853,12 +2855,7 @@ test("SECURITY: a new session and /gate-reset both start with no sensitive-file 
 test("no network fetch anywhere in the extension", () => {
   // The extension has "npx" in regex patterns (anti-forgery detection),
   // and import("node:child_process") — both are fine. Only block actual network calls.
-  // The JS global `fetch(...)` is the thing to block — NOT the string "fetch",
-  // which now appears as a git argv: setup_workspace runs a best-effort `git
-  // fetch` to update the base before branching (D). That is a git subprocess,
-  // not a JS network call, and it degrades to a note when offline.
   assert.doesNotMatch(SRC, /(?<![.\w"'])fetch\s*\(/, "no JS fetch() network call");
-  assert.match(SRC, /"fetch", "--quiet"/, "the only `fetch` is the best-effort `git fetch` in setup_workspace");
   assert.doesNotMatch(SRC, /import\("https?:/);
   // "npx" inside regex patterns is OK; "npx " (command invocation) is not.
   assert.doesNotMatch(SRC, /['"]npx\s/);
@@ -3470,168 +3467,7 @@ test("P2: checkpoint carries prevSha so the documented checkpoint→prepare flow
   assert.match(ext, /prevSha/);
 });
 
-test("a dirty worktree the session did not create blocks edits until it is settled", () => {
-  const start = SRC.indexOf("function loopGoalEditBlockFor(");
-  const body = SRC.slice(start, start + 3000);
-  assert.match(body, /state\.worktreeDirty && !state\.worktreeDirty\.settled/,
-    "unsettled pre-existing changes block edits");
-  assert.match(body, /setup_workspace/, "and the block names the tool that settles them");
-  // Recorded at session start, from git itself — not from anything the agent says.
-  const startAt = SRC.indexOf("function recordSessionStartWorkspace(");
-  const record = SRC.slice(startAt, startAt + 1500);
-  assert.match(record, /dirtyFiles\(primaryRepoRoot\)/);
-  assert.match(record, /op: "checkout", from: null, to: branch/,
-    "the starting branch opens the audit trail");
-});
 
-
-test("setup_workspace honors params.branch on a protected branch (2026-08-30)", () => {
-  // On main/master the base is never the branch itself; the auto dev/<date>
-  // name used to IGNORE the agent's branch proposal and collided with a
-  // leftover branch. The proposal must be honored, and an existing base must
-  // be reused (checkout) instead of failing the create (checkout -b).
-  const body = windowOf('name: "setup_workspace"', "registerUserInteractionTools(pi, {", "setup_workspace");
-  const protectedAt = body.indexOf("isProtectedBranch(here)");
-  assert.ok(protectedAt > 0, "protected-branch guard must exist");
-  const branchBlock = body.slice(protectedAt, protectedAt + 2600);
-  // The proposed base honors the agent's branch proposal.
-  assert.match(branchBlock, /params\.branch \? deriveWorkBranchName\(String\(params\.branch\)/,
-    "params.branch must drive the proposed base on a protected branch");
-  // An existing base is reused, not re-created.
-  assert.match(branchBlock, /execFileSync\("git", \["rev-parse", "--verify", "--quiet", proposed\]/,
-    "existing-base probe must exist");
-  assert.match(branchBlock, /catch \{[\s\S]{0,40}?exists = false;/,
-    "a missing ref (catch) is treated as nonexistent, not as an error");
-  assert.match(branchBlock, /\["checkout", proposed\]/,
-    "an existing base is checked out, not re-created");
-  assert.match(branchBlock, /\["checkout", "-b", proposed\]/,
-    "a new base is still created when it does not exist");
-  // The dialog copy matches the execution: the user consents to reuse when
-  // the branch already exists (reviewer P2: the old copy promised a fresh
-  // "拉一条" but the handler could checkout a leftover).
-  assert.match(branchBlock, /已存在则复用/,
-    "the dialog names the reuse behavior");
-});
-
-test("setup_workspace filters THIS session's own edits out of the pre-existing dialog (2026-08-31)", () => {
-  // User bug: calling setup_workspace AFTER editing made the gate ask about
-  // (or worse, offer to discard) the session's own work as if it were
-  // pre-existing. The pre-existing set must exclude files the session edited
-  // through the gate's own edit tools (sessionEditedPaths).
-  const body = windowOf('name: "setup_workspace"', "registerUserInteractionTools(pi, {", "setup_workspace");
-  assert.match(body, /sessionOwn = new Set\(sessionEditedPaths\)/,
-    "the session's own edited paths are collected before the dirty check");
-  assert.match(body, /dirtyFiles\(root\)\.filter\(\(f\) => !sessionOwn\.has\(f\.path\)\)/,
-    "the dirty list excludes this session's own edits before the dialog");
-});
-
-test("loop mode decision reminds to setup_workspace before work (2026-08-30)", () => {
-  // The worktree/branch used to be settled only at the first judge_submit
-  // refusal — far too late, after the edits. The loop-mode decision point
-  // must already nudge the agent to call setup_workspace when the worktree
-  // is dirty and no work branch exists.
-  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
-  const modeAt = SRC.indexOf('name: "set_gate_mode"');
-  assert.ok(modeAt > 0, "set_gate_mode tool must exist");
-  const goalNoteAt = SRC.indexOf("buildLoopGoalDirective(readSessionLoopGoal(primaryRepoRoot), loopGoalConfirmed())", modeAt);
-  assert.ok(goalNoteAt > 0, "loop decision must build the goal note");
-  const setupNudge = SRC.slice(goalNoteAt, goalNoteAt + 700);
-  assert.match(setupNudge, /setup_workspace/,
-    "loop decision names setup_workspace as the next step");
-  assert.match(setupNudge, /!state\.workBranch && dirtyFiles\(primaryRepoRoot\)\.length > 0/,
-    "the nudge fires only when the worktree is dirty and no branch exists");
-});
-test("setup_workspace settles the worktree and the branches, and records both", () => {
-  // The user-interaction family moved to lib/, so the window now closes on
-  // the wiring call that replaced it — an anchor that cannot rot silently.
-  const body = windowOf('name: "setup_workspace"', "registerUserInteractionTools(pi, {", "setup_workspace");
-  // The three-way choice is the USER's, and a dismissed dialog settles nothing.
-  assert.match(body, /interpretWorktreeChoice\(picked\)/);
-  assert.match(body, /if \(!choice\) \{/, "no choice ⇒ nothing is settled");
-  // "I handled it" is verified, not believed.
-  assert.match(body, /choice === "handled"[\s\S]{0,400}?dirtyFiles\(root\)/);
-  // Discarding is the GATE's action, and it is recorded.
-  assert.match(body, /"checkout", "--", "\."/);
-  assert.match(body, /"clean", "-fd"/);
-  assert.match(body, /op: "worktree_discard"/);
-  // Branch decisions are recorded as they happen.
-  assert.match(body, /op: "base_branch_set"/);
-  assert.match(body, /op: "work_branch_set"/);
-  assert.match(body, /isProtectedBranch\(here\)/, "main/master is never worked on directly");
-  // Criterion 4 — the "放行" option: snapshot into scopeLimit and re-arm
-  // from the session's OWN files only (the exempted mock changes stop
-  // demanding review).
-  assert.match(body, /choice === "exempt"/, "the exempt option must exist");
-  assert.match(body, /st\.scopeLimit = \{/, "it writes the same scopeLimit the scope-limit tool uses");
-  assert.match(body, /preexistingFiles:/, "it snapshots the dirty files as pre-existing");
-  assert.match(body, /\.filter\(\(p\) => !sessionSet\.has\(p\)\)/, "the snapshot NEVER includes this session's own edits");
-  assert.match(body, /st\.hasCodeChange = \[\.\.\.st\.scopeLimit\.sessionFiles\]\.some\(isCodeFile\)/, "re-arm comes from the session's own edits only");
-});
-
-test("a commit may only land on this session's OWN work branch (fail-closed)", () => {
-  // Checked PER REPO, inside the ship loop: a commit in repo B must never be
-  // judged against repo A's work branch.
-  const body = windowIn(
-    SHIP_BASH_SRC,
-    "// WHERE the commit lands, per repo",
-    "\n    }",
-    "per-repo branch check",
-  );
-  assert.match(body, /ships\.some\(\(s\) => s\.kind === "commit"\)/);
-  assert.match(body, /commitBranchAllowed\(\{/);
-  assert.match(body, /workBranch: deps\.stateForRepo\(root\)\.workBranch/,
-    "each repo answers with its OWN work branch");
-  assert.match(body, /currentBranch: deps\.currentBranch\(root\)/);
-  // The pure decision refuses when no work branch is on record — pinned in
-  // test/workspace-branch.test.ts; here we only pin that the gate ASKS.
-  assert.match(body, /if \(!where\.allowed\) \{/);
-  // `stateForRepo` IS the primary repo's own state — the arm asks one seam for
-  // every repo, and that only stays correct while this holds.
-  assert.match(SRC, /function stateForRepo\(root: string\): GateState \{\s*\n\s*if \(root === primaryRepoRoot\) return state;/,
-    "stateForRepo must answer with the session's own state for the primary repo");
-});
-
-test("declare_done lands the work itself, and a conflict stops it honestly", () => {
-  const body = toolBodyOf("declare_done");
-  assert.match(body, /const finish = finishWorkBranch\(/, "the gate merges, the agent does not");
-  const finishAt = SRC.indexOf("function finishWorkBranch(");
-  const finish = SRC.slice(finishAt, finishAt + 4500);
-
-  assert.match(finish, /decideFinish\(\{/, "the decision is the pure function's");
-  assert.match(finish, /runSquashLanding\(/, "the gate lands via the shared squash helper");
-  // A conflict leaves NOTHING half-applied: the squash cleanup lives in
-  // runSquashLanding; finishWorkBranch reads its verdict and returns to the
-  // work branch.
-  assert.match(finish, /landed\.conflicted/);
-  assert.match(finish, /st\.mergeConflict = \{/);
-  assert.match(finish, /ok: false/);
-  assert.match(finish, /st\.mergeWaived/, "a waiver already on record skips the merge");
-  // A merge failure that is NOT a conflict must not be reported as one — the
-  // distinction is carried by the helper's `conflicted` flag.
-  assert.match(finish, /landed\.conflicted\s*\?/, "conflict vs non-conflict is branched on the flag");
-  // …and the waiver must be WRITABLE, by the user, or the escape hatch the
-  // refusal points at does not exist (round-4 P1: it was read-only).
-  assert.match(body, /waiveMerge/, "declare_done takes the waiver request");
-  assert.match(body, /confirmBounded\(/, "the USER grants it, in a dialog");
-  assert.match(body, /state\.mergeWaived = \{ at: new Date\(\)\.toISOString\(\), reason:/,
-    "a granted waiver is recorded with its reason");
-});
-
-test("runSquashLanding squashes, commits with the gate bypass, and cleans up with reset --hard", () => {
-  const at = SRC.indexOf("function runSquashLanding(");
-  assert.ok(at > 0, "the shared squash landing helper exists");
-  const fn = SRC.slice(at, at + 2600);
-  // Stage the squash, then commit it from the DERIVED (ASCII) message — never
-  // the loop goal's Chinese title.
-  assert.match(fn, /squashMergeArgv\(work\)/, "the fold is a --squash stage");
-  assert.match(fn, /squashMergeMessage\(work, base, subjects\)/, "the subject/body are derived from the checkpoints");
-  assert.match(fn, /"commit", "-m", subject, "-m", body/, "the gate commits the squash itself");
-  // A gate-authored landing of already-READY content: the fingerprint hook
-  // cannot judge a commit on the base branch / in a foreign worktree.
-  assert.match(fn, /REVIEW_GATE_BYPASS: "1"/, "the landing bypasses the commit hooks, like the checkpoint commit");
-  // A --squash sets no MERGE_HEAD, so cleanup is a reset --hard, not an abort.
-  assert.match(fn, /"reset", "--hard", "HEAD"/, "squash cleanup discards the staged/conflicted state");
-});
 
 
 test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit paths", () => {
@@ -3664,13 +3500,13 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
 });
 
 
-test("review_checkpoint is fail-closed about the branch it commits on", () => {
+test("review_checkpoint asks the user before landing on a PROTECTED branch", () => {
   const body = toolBodyOf("review_checkpoint");
-  assert.match(body, /const checkpointState = root === primaryRepoRoot \? state : stateForRepo\(root\)/,
-    "the TARGET repo's own work branch decides");
-  assert.match(body, /commitBranchAllowed\(\{ workBranch: checkpointState\.workBranch/);
-  assert.doesNotMatch(body, /if \(state\.workBranch\) \{[\s\S]{0,200}?commitBranchAllowed/,
-    "no work branch on record must REFUSE, not exempt (round-4 P1)");
+  assert.match(body, /isProtectedBranch\(here\)/, "the protected-branch guard must exist");
+  assert.match(body, /currentBranch\(root\)/, "the current branch is read per repo");
+  assert.match(body, /askEitherSide\(/, "the user (or orchestrator, via the channel) confirms in a dialog");
+  assert.match(body, /在受保护分支上提交 checkpoint/, "the dialog names the protected branch");
+  assert.match(body, /picked\.startsWith\("否"\)/, "a declined confirmation refuses the commit");
 });
 
 
@@ -3800,9 +3636,7 @@ test("the orchestration deps hand over only what the EXTENSION owns", () => {
   assert.match(deps, /taskMode: \(\) => state\.taskMode/);
   assert.match(deps, /loadRuntime: \(\) => state\.orchestrator/);
   assert.match(deps, /orchestrationId: currentOrchestrationId/);
-  // Constraint 10's fact is "settled", never "already merged": declare_done
-  // merges AFTER the checks, so demanding a completed merge would deadlock.
-  assert.match(deps, /mergeSettled: Boolean\(state\.baseBranch\) && !state\.mergeConflict/);
+  // Constraint 10 is gone (2026-09-07): no work-branch landing to settle.
 });
 
 test("PROMPTS are asymmetric: the orchestrator gets the contract, a child gets one line", () => {
@@ -3906,44 +3740,16 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
 });
 
 
-test("R-26 (amended): declare_done leaves the worktree on the BASE branch for EVERY session", () => {
-  // Originally the child-only rule: an orchestration child merged and went
-  // back to its own intermediate branch, leaving the supervisor's worktree
-  // stale — so it had to hand the borrowed worktree back on the base. An
-  // ordinary session went back to its work branch so its next checkpoint
-  // stayed legal. Amended 2026-08-30 (user decision): declare_done is a
-  // task's FINAL act, so EVERY session lands on the base — and the branch
-  // records are cleared, so a stray checkpoint fails closed until the user
-  // runs setup_workspace for a new task.
-  const finish = windowOf("function finishWorkBranch(", "\n  }", "finishWorkBranch");
-  assert.doesNotMatch(finish, /if \(!handBackToBase\)/, "no session-specific return-to-work branch remains");
-  assert.match(finish, /delete st\.workBranch/, "the work branch record is cleared after landing");
-  // The success path (from the landed merge to the merge log) must contain
-  // NO checkout at all — the venue already checked out base, and nothing
-  // switches away from it. Bounded precisely so a re-added checkout on the
-  // work branch cannot hide above the two `delete`s.
-  const landedAt = finish.indexOf("if (landed.ok) {", finish.indexOf("runSquashLanding"));
-  const mergeLogAt = finish.indexOf("op: \"merge\"", landedAt);
-  const successPath = finish.slice(landedAt, mergeLogAt);
-  assert.doesNotMatch(successPath, /checkout/, "the success path switches to NOTHING — it stays on the base");
-  assert.match(successPath, /delete st\.workBranch/, "the clearing happens inside the success path");
-  assert.match(finish, /The squash failed[\s\S]*execFileSync\("git", \["checkout", work\]/,
-    "the conflict path still restores the work branch via a real git checkout");
-  assert.match(finish, /delete st\.baseBranch/, "and so is the base record — the task owns no branch anymore");
-});
 
 test("R3-5: an accepted declare_done WRITES the completion record, before the loop bookkeeping", () => {
   // The gate knew the task was finished and wrote that nowhere, so a
   // supervising orchestrator was reduced to reading the child's terminal —
-  // and read "working" for 725 seconds on a child that had already merged.
-  // Bounded at the next thing the extension does after declare_done: wiring
-  // the goal family. (It used to be the `record_goal_prereview` registration,
-  // which moved to lib/goal-tools.ts.)
+  // and read "working" for 725 seconds on a child that had finished.
   const done = windowOf('name: "declare_done"', "registerGoalTools(", "declare_done");
   const write = done.indexOf("state.completion = {");
   assert.ok(write > 0, "declare_done must record its own acceptance");
-  assert.ok(write > done.indexOf("const finish = finishWorkBranch("),
-    "…after the merge, so `merge:` states how the work actually landed");
+  assert.match(done.slice(write, write + 200), /merge: "none"/,
+    "no landing step anymore — the completion records 'none'");
   assert.ok(write < done.indexOf("st.rounds = [];"),
     "…and before the loop reset, which must never be able to erase it");
   assert.doesNotMatch(done.slice(write), /delete state\.completion|state\.completion = undefined/,
@@ -3955,41 +3761,17 @@ test("R3-5: a new edit CLEARS the completion record, in both repo branches", () 
   // reads this record to call a child `done`, and a session that starts
   // editing again is working — whoever asked it to, including a human typing
   // straight into the pane, which no orchestration tool can observe.
-  const edits = SRC.split('if (state.review.verdict === "READY")');
-  assert.ok(edits.length >= 2, "the edit accounting must still exist");
+  // Both edit branches (primary + cross-repo) must clear the completion;
+  // the downgrade itself lives in invalidateBindings (2026-08-31), so the
+  // anchor is the shared downgrade call.
+  const edits = SRC.split("invalidateBindings(");
+  assert.ok(edits.length >= 2, "the edit accounting must still exist (via invalidateBindings)");
   const clears = SRC.match(/delete (?:s|state)\.completion;/g) ?? [];
   assert.equal(clears.length, 2,
     "both the primary-repo and the cross-repo edit branches must expire it");
 });
 
 
-test("R3-7: the merge asks WHERE it can run before it switches any branch", () => {
-  // `git checkout <base>` in a linked worktree fails 100% of the time — the
-  // base branch is held by the supervisor's checkout — so both parallel lanes
-  // of the third run had to be merged by hand.
-  const finish = windowOf("function finishWorkBranch(", "\n  }", "finishWorkBranch");
-  const venue = finish.indexOf("decideMergeVenue({");
-  assert.ok(venue > 0, "the venue decision must exist");
-  assert.ok(venue < finish.indexOf('["checkout", base]'),
-    "and it must come BEFORE the checkout it exists to avoid");
-  assert.match(finish, /if \(venue\.kind === "worktree"\) return mergeInHoldingWorktree\(/);
-  const holding = windowOf("function mergeInHoldingWorktree(", "\n  }", "mergeInHoldingWorktree");
-  assert.match(holding, /venueRefusal\(/, "a dirty holder is refused, never merged over (user decision)");
-  assert.doesNotMatch(holding, /"checkout"/,
-    "the whole point is that nothing is checked out in somebody else's worktree");
-});
-
-test("R3-6: setup_workspace defaults an orchestration child's base to the DECLARED one", () => {
-  // A lane's worktree stands on `orch/<task>-<stamp>`, so "the branch I am on"
-  // is the one answer that is certainly wrong — a whole lane merged into that
-  // scratch branch and stopped there.
-  const setup = windowOf('name: "setup_workspace"', "registerUserInteractionTools(pi, {", "setup_workspace");
-  assert.match(setup, /const injectedBase = String\(process\.env\[ORCH_BASE_BRANCH_ENV\]/);
-  assert.match(setup, /String\(params\.base \?\? ""\)\.trim\(\) \|\| injectedBase/,
-    "an explicit argument still wins over the injected default");
-  assert.ok(setup.indexOf("injectedBase") < setup.indexOf("if (proposedBase && proposedBase !== here)"),
-    "and the USER still confirms it in the same dialog — an injected default is not a decision made for them");
-});
 
 
 

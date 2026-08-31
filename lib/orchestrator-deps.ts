@@ -47,14 +47,6 @@ export interface PlanRead {
   problems: string[];
 }
 
-/** Branch facts constraint 10 is decided on. */
-export interface BranchFacts {
-  workBranch?: string;
-  baseBranch?: string;
-  /** A base branch is recorded and no merge conflict is outstanding. */
-  mergeSettled: boolean;
-  mergeWaived: boolean;
-}
 
 /**
  * Everything the orchestration tools need from the outside world.
@@ -127,11 +119,6 @@ export interface OrchestratorDeps {
   /** Injectable sleep, so delivery verification can be tested without waiting. */
   sleep(ms: number): Promise<void>;
 
-
-  /** Create an isolated worktree for a parallel child (constraint 7). */
-  addWorktree(name: string): { ok: true; path: string } | { ok: false; error: string };
-  /** Remove one the gate created. Best-effort: never throws. */
-  removeWorktree(path: string): void;
 
   /**
    * Is a JUDGE process in flight inside that child's worktree?
@@ -215,40 +202,9 @@ export interface OrchestratorDeps {
 
 
   /**
-   * Which repository-level git hooks currently point INTO this path.
-   *
-   * `.git/hooks` is shared by every linked worktree, so a child that
-   * installed the gate's hooks from inside its own orchestration worktree
-   * repointed them at a directory `orchestrator_close` is about to delete —
-   * and that broke committing for the WHOLE repository (R-28). Empty ⇒
-   * nothing references it and the worktree is safe to remove.
-   */
-  gitHooksReferencing(path: string): string[];
-
-  /**
-   * The branch the ORCHESTRATION itself is standing on — the base every
-   * child's work has to end up in (R3-6).
-   *
-   * Read from the supervisor's own worktree at spawn time and injected into
-   * the child, because a child in a gate-created worktree would otherwise
-   * default its base to the `orch/...` branch the gate had just invented for
-   * it, and its lane's output would stop there.
-   */
-  currentBranch(): string | undefined;
-
-  /**
-   * Re-point the repository's hooks at the MAIN worktree's copy.
-   *
-   * Called before a referenced worktree is removed, so there is never a
-   * window in which the repo cannot commit.
-   */
-  repairGitHooks(): { ok: true } | { ok: false; error: string };
 
 
 
-
-  /** Branch state for the exit checks. */
-  branchFacts(): BranchFacts;
 
   /**
    * Put the desktop-notification escape sequence on the terminal. Returns
@@ -267,6 +223,12 @@ export interface OrchestratorDeps {
 
   /** This session's transcript path, handed to a successor on relay. */
   sessionTranscriptPath(): string | undefined;
+
+  /**
+   * Every repo this session is accountable for, primary first (2026-09-07:
+   * cross-repo parallelism needs the scheduler to know which repos exist).
+   */
+  knownRepoRoots(): string[];
 
   /**
    * Fired on every orchestration-tool execution (2026-08-30, symmetric

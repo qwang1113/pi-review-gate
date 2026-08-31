@@ -95,19 +95,30 @@ explicit triggers, never the expected entry. The user is asked at two points
 only: `ask_user` (the ONE way to reach them — it runs the interview and
 pauses the loop) and the loop-goal approval dialog.
 
-Where work lands is the gate's business too: `setup_workspace` settles a
-dirty worktree and creates this session's work branch (a commit may only land
-on it) — swallowing the whole branch dance, including a best-effort `git
-fetch` + `--ff-only` update of the base — and `declare_done` **squash-merges**
-that branch back into the base the user confirmed (checkpoint history stays off
-the target; the gate composes an English Conventional-Commit subject
-mechanically from the folded checkpoints' own type/scope, so it always
-satisfies L5 without ever using the Chinese goal title) — a conflict stops it,
-records the files and hands them to you.
+Where work lands is yours again (2026-09-07, user decision): the workspace
+settlement layer (`setup_workspace`, the mandatory work branch, declare_done's
+squash-merge) is gone. You work directly on the branch you are on. Two
+mechanical facts replace the old enforcement, and they are DIFFERENT from
+each other:
+
+- **The gate's own checkpoint** (`judge_submit` commits it) lands on the
+  current branch, whatever it is. On a PROTECTED branch (main/master/dev/
+  develop) it pops a confirmation dialog first — the user (or, in an
+  orchestration, the project manager through the channel) confirms before it
+  commits.
+- **Your own `git commit`** on a protected branch is REFUSED by the ship
+  gate (a shell command cannot show a dialog, so it fails closed).
+
+`declare_done` closes the gates and leaves the work where it is;
+merging/rebasing/pushing is your git workflow, guided by the guardrails
+below — which still prefer a feature branch over working on main.
 
 ## Git workflow guardrails
 
-Hard rules for every git operation in this repo. On top of these rules, the
+These guardrails are the WORKFLOW this repo prefers — a feature branch is
+the normal place for a change. They are not the gate's enforcement: the gate
+only refuses your own `git commit` on a protected branch (its own checkpoint
+confirms with the user instead, per above). On top of these rules, the
 pi-review-gate extension hard-blocks ship commands (`git commit`, `git push`,
 `gh pr create`) until the quality gates pass.
 
@@ -384,7 +395,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    直接退 findings、一个框都不弹**，过了才请用户批准。反过来，**不扩权的改动不再
    重新惊动用户**：边界收窄、同目录内且不与他人相交的文件细化、加依赖、降并行度
    都让批准平移到新内容并记一条审计条目；新增任务、新目录、删依赖、串行改并行、
-   提高并行度一律重批（`lib/orchestrator-plan-approval.ts`）。这个 plan 审计者是
+   提高并行度、任务改到另一个 repo（新写面）一律重批（`lib/orchestrator-plan-approval.ts`）。这个 plan 审计者是
    门禁的**内部实现**：项目经理从没派过它、也在任何 `orchestrator_wait` 回执里见不到
    它，所以裁决记完门禁**自己把它收掉**（谁派谁负责，第五轮 O-6）——`declare_done`
    不再被一个它从未被告知的 judge child 拦住。`propose_loop_goal` 内部的 goal 审计者
@@ -392,7 +403,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
    只被多注入一句「有项目经理在管这轮任务」。plan、调度细节一律不注入 —— 知道
-   plan 会让它为 plan 而不是为自己的任务做优化。
+   plan 会让它为 plan 而不是为自己的任务做优化。它在**任务声明的 repo** 里工作
+   （plan 任务可带 `repo` 字段；不声明就用主 repo），同一 repo 的任务由门禁
+   串行调度，只有不同 repo 的任务可以并行。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。
 
