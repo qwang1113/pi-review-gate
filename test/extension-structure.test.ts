@@ -668,8 +668,21 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   //     can never carry a grant) — asserted in the schema module.
   assert.match(ASK_USER_SRC, /function grantNotice\(q: AskQuestion\): string/,
     "the grant notice helper exists");
+  // The helper existing is NOT the property — the user must SEE it. Assert
+  // the INTERPOLATION at every rendering call site (reviewer P2, 2026-09-16:
+  // a helper left intact in dead code proved nothing).
+  const interpolations = (ASK_USER_SRC.match(/grantNotice\(q\)/g) ?? []).length;
+  assert.ok(interpolations >= 4, `the notice is interpolated at the dialog/transcript call sites (got ${interpolations})`);
+  assert.match(ASK_USER_SRC, /title: `\$\{title\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
+    "the CHANNEL title interpolates the notice");
+  assert.match(ASK_USER_SRC, /uiCtx\.ui![^\n]*select!?\(`\$\{title\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}/,
+    "the pane dialog interpolates the notice");
+  assert.match(ASK_USER_SRC, /uiCtx\.ui![^\n]*input!?\(`\$\{title\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}/,
+    "the free-text dialog interpolates the notice too");
+  assert.match(ASK_USER_SRC, /\$\{q\.text\}\$\{grantNotice\(q\)\}` \+/,
+    "the transcript interpolates the notice");
   assert.match(ASK_USER_SRC, /明确授予项目经理/,
-    "the notice states the scope in plain Chinese");
+    "the notice text states the grant in plain Chinese");
   assert.match(ASK_USER_SRC, /meaning\.kind === "answered" && meaning\.answer === q\.recommended/,
     "minting is an EXACT pick of the recommended row — no substring match");
   assert.doesNotMatch(ASK_USER_SRC, /\/同意\|允许\|授权\|授予\|yes\|allow\|grant\/i\.test\(meaning\.answer/,

@@ -260,6 +260,24 @@ test("ask_user: an invented grantScope is ignored (no mint, no error)", async ()
   assert.deepEqual(f.grantsMinted, [], "ops is not a grantable scope");
 });
 
+test("ask_user: a grantScope is VISIBLE in the dialog title and the transcript (reviewer P2 fix)", async () => {
+  const f = fake({ answers: ["授予"] });
+  const reply = await call(f, "ask_user", {
+    questions: [{ text: "是否授予我敏感编辑代答权？", options: ["授予", "不授予"], recommended: "授予", grantScope: "sensitive-edit" }],
+  });
+  assert.equal(reply.isError, undefined);
+  // The channel title (what the dialog AND the orchestrator receipt show)
+  // must carry the authorization notice — the user reads THIS, not the
+  // grantScope field.
+  assert.equal(f.asked.length, 1);
+  assert.match(f.asked[0], /明确授予项目经理/, "the dialog title states the grant");
+  assert.match(f.asked[0], /sensitive-edit/, "…and names the scope");
+  // The transcript notice must carry it too.
+  const body = f.notices.map((n) => `${n.lead}\n${n.body}`).join("\n");
+  assert.match(body, /明确授予项目经理/, "the transcript states the grant");
+  assert.deepEqual(f.grantsMinted, [{ scope: "sensitive-edit", via: "ask-user" }], "and the grant was minted");
+});
+
 test("ask_user: a grantScope with NO options is dropped — free text can never mint a grant", async () => {
   const f = fake({ answers: ["grant me a few minutes"] });
   const reply = await call(f, "ask_user", {
