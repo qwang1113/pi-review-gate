@@ -56,6 +56,7 @@ import {
   formatAnswers,
   formatTranscriptSummary,
   needsUserReply,
+  isGrantableScope,
   MAX_QUESTIONS,
   type AskAnswer,
 } from "./ask-user.ts";
@@ -96,6 +97,22 @@ export interface UserInteractionToolDeps {
     hasUI: boolean,
     render: (signal: AbortSignal) => Promise<string | undefined>,
   ): Promise<string | undefined>;
+  /**
+   * Can THIS session route consent dialogs through an orchestration channel
+   * (i.e. it is an orchestration child)? An orchestrator's OWN session
+   * answers false — its `request_sensitive_edit` would otherwise render a
+   * dialog only the human can close, deadlocking the project manager on a
+   * box it is supposed to answer, not to ask (measured: onchain run,
+   * 2026-08-31 — the PM called request_sensitive_edit to "authorize" a
+   * child's .env edit and froze for 2h18m on its own dialog).
+   */
+  canChannelDialogs(): boolean;
+  /**
+   * Mint a proxy grant for `scope` (user said yes via ask_user). The gate
+   * records it on the orchestration runtime; a no-op outside an
+   * orchestration.
+   */
+  grantProxyScope(scope: string, via: "ask-user" | "gate-grant" | "first-answer"): void;
   /** The session's primary repo/worktree directory. */
   cwd: string;
   /** Repo-relative paths THIS session edited (the never-exempt set). */
@@ -127,7 +144,7 @@ export type ConsentToolDeps = Pick<
   | "state" | "persist" | "showToUser" | "confirmBounded" | "cwd"
   | "sessionEditedPaths" | "commitsAheadOfBase" | "scopeLimitDeclined"
   | "declineScopeLimit" | "sensitiveGrants" | "storeSensitiveGrants"
-  | "sensitiveDeclinedPaths" | "log" | "askEitherSide"
+  | "sensitiveDeclinedPaths" | "log" | "askEitherSide" | "canChannelDialogs"
 >;
 
 // ---------- ask_user ----------
@@ -226,6 +243,17 @@ export async function doAskUser(
       answers.push({ question: q.text, kind: "skipped" });
     } else if (meaning.kind === "answered") {
       answers.push({ question: q.text, kind: "answered", answer: meaning.answer });
+      // GRANT DOOR 1/3 (2026-09-16): a question carrying a grantScope mints
+      // the proxy grant when the user affirms — and only then. The scope
+      // must be one the gate recognizes; the user's answer is judged by the
+      // same affirmative words the consent dialogs use.
+      if (q.grantScope && isGrantableScope(q.grantScope)) {
+        const affirming = /同意|允许|授权|授予|yes|allow|grant/i.test(meaning.answer ?? "")
+          && !/拒绝|不|取消|no|reject|deny/i.test(meaning.answer ?? "");
+        if (affirming) {
+          deps.grantProxyScope(q.grantScope, "ask-user");
+        }
+      }
     } else if (meaning.kind === "deferred-to-chat") {
       answers.push({ question: q.text, kind: "deferred-to-chat" });
     } else {

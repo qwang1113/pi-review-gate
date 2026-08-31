@@ -46,6 +46,10 @@ interface Fake {
   /** What each ask_user dialog answers (one per question, in order). */
   answers: Array<string | undefined>;
   asked: string[];
+  /** This fake session can route dialogs through an orchestration channel. */
+  canChannelDialogs: boolean;
+  /** Grants minted via grantProxyScope, in order. */
+  grantsMinted: Array<{ scope: string; via: string }>;
   cwd: string;
   sessionEdited: string[];
   ahead: number;
@@ -71,6 +75,8 @@ function fake(over: Partial<Fake> = {}): Fake {
     confirmAnswer: true,
     answers: [],
     asked: [],
+    canChannelDialogs: false,
+    grantsMinted: [],
     cwd: "/nonexistent-repo",
     sessionEdited: [],
     ahead: 0,
@@ -86,6 +92,7 @@ function fake(over: Partial<Fake> = {}): Fake {
       if (f.confirmAnswer === "throw") throw new Error("no dialog here");
       return f.confirmAnswer;
     },
+    canChannelDialogs: () => f.canChannelDialogs ?? false,
     askEitherSide: async (request) => {
       f.asked.push(request.title);
       if (f.answers.length > 0) return f.answers.shift()!;
@@ -105,6 +112,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     storeSensitiveGrants: (next) => { f.grants = next; },
     sensitiveDeclinedPaths: f.declined,
     log: (message) => { f.logs.push(message); },
+    grantProxyScope: (scope, via) => { f.grantsMinted.push({ scope, via }); },
   };
   const host: ToolHost = {
     registerTool: (definition) => {
@@ -212,6 +220,33 @@ test("ask_user: an interrupted interview resumes instead of re-asking", async ()
   assert.equal(f.asked.length, 1, "the settled question is not asked again");
   assert.match(f.asked[0], /问题二/);
   assert.match(textOf(reply), /前 1 题沿用了上次中断前的回答/);
+});
+
+test("ask_user: a grantScope question mints the proxy grant when the user affirms", async () => {
+  const f = fake({ answers: ["授予"] });
+  const reply = await call(f, "ask_user", {
+    questions: [{ text: "是否授予我敏感编辑代答权？", options: ["授予", "不授予"], grantScope: "sensitive-edit" }],
+  });
+  assert.equal(reply.isError, undefined);
+  assert.deepEqual(f.grantsMinted, [{ scope: "sensitive-edit", via: "ask-user" }]);
+});
+
+test("ask_user: a NON-affirming answer mints nothing", async () => {
+  const f = fake({ answers: ["不授予"] });
+  const reply = await call(f, "ask_user", {
+    questions: [{ text: "是否授予我敏感编辑代答权？", options: ["授予", "不授予"], grantScope: "sensitive-edit" }],
+  });
+  assert.equal(reply.isError, undefined);
+  assert.deepEqual(f.grantsMinted, [], "a decline is not a grant");
+});
+
+test("ask_user: an invented grantScope is ignored (no mint, no error)", async () => {
+  const f = fake({ answers: ["是"] });
+  const reply = await call(f, "ask_user", {
+    questions: [{ text: "授予运维权？", options: ["是", "否"], grantScope: "ops" }],
+  });
+  assert.equal(reply.isError, undefined);
+  assert.deepEqual(f.grantsMinted, [], "ops is not a grantable scope");
 });
 
 // ---------- request_scope_limit ----------

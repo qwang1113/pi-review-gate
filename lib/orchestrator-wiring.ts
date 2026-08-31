@@ -243,6 +243,8 @@ export interface OrchestratorHostBindings {
   /** The orchestration id this session holds (inherited or freshly minted). */
   orchestrationId(): string;
   confirm(title: string, message: string, pointer?: string): Promise<boolean>;
+  /** A multi-option dialog in the orchestrator's own pane (grant door 3). */
+  select?(title: string, options: readonly string[]): Promise<string | undefined>;
   /** Print text into the user's transcript (the plan's full text, O-1). */
   showToUser(title: string, text: string): void;
   sessionTranscriptPath(): string | undefined;
@@ -322,6 +324,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
       return pane && pane.length > 0 ? pane : undefined;
     },
     confirm: host.confirm,
+    select: host.select ?? (() => Promise.resolve(undefined)),
     showToUser: host.showToUser,
     writeTaskFile: (name, content, repoRoot) => writeTaskFile(repoRoot ?? host.repoRoot, name, content),
     childGateState: (childCwd, variant) => readChildGateState(childCwd, variant),

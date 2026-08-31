@@ -1499,8 +1499,8 @@ test("the checkpoint message is delegated to the pure, unit-tested lib module", 
 
 
 
-test("commands registered: gate-status, gate-bypass, gate-mode, gate-reset", () => {
-  for (const cmd of ["gate-status", "gate-bypass", "gate-mode", "gate-reset", "gate-lesson"]) {
+test("commands registered: gate-status, gate-bypass, gate-grant, gate-mode, gate-reset", () => {
+  for (const cmd of ["gate-status", "gate-bypass", "gate-grant", "gate-mode", "gate-reset", "gate-lesson"]) {
     assert.match(CMD_SRC, new RegExp(`registerCommand\\(["']${cmd}["']`), cmd);
   }
   // /gate-doctor sits in the read-only diagnosis module, which the command

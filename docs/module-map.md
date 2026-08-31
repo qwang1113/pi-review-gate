@@ -194,7 +194,7 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 敏感文件授权、独立 arbiter 裁决循环拦截）。`task-mode.ts` 定义模式强弱序
 （normal < explore < loop < orchestrator）与升降级规则，`pi-self.ts` 让
 `/tmp` 草稿会话不自动进 loop，`workspace-branch.ts` 是保护分支
-（main/master/dev/develop）检测：会话开始提示、checkpoint 前弹确认框。
+（main/master/dev/develop）检测：会话开始提示、checkpoint 直接拒绝（2026-09-16 起不再弹确认框）。
 `copilot-review.ts`（L7，PR 之后的 Copilot 审查闭环）与 `loop-goal.ts`（L8，
 用户批准的退出契约）——两者的**判定**在这里，工具体分别在
 `copilot-review-tools.ts` 与 `goal-tools.ts` / `goal-prereview-tools.ts`，

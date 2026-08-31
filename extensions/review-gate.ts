@@ -190,7 +190,7 @@ import { registerOrchestratorSessionTools } from "../lib/orchestrator-session-to
 
 
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
-import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { addGrant, emptyRuntime, hasGrant, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
@@ -1501,6 +1501,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     storeRuntime: persistOrchestration,
     orchestrationId: currentOrchestrationId,
     confirm: (title, message, pointer) => confirmBounded(latestCtx ?? {}, title, message, pointer),
+    select: (title, options) => {
+      const ctx = latestCtx as { ui?: { select?: (t: string, o: string[]) => Promise<string | undefined> } } | undefined;
+      if (!ctx?.ui?.select) return Promise.resolve(undefined);
+      return ctx.ui.select(title, [...options]);
+    },
     // O-1 — the plan's full text goes into the TRANSCRIPT before the dialog
     // asks about it, exactly like the loop goal. A plan approval binds to
     // content, so a truncated dialog body was asking the user to sign
@@ -5225,6 +5230,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     confirmBounded: (uiCtx, title, message, pointer, signal) =>
       confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message, pointer, signal),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
+    canChannelDialogs: () => childBinding() !== undefined,
+    grantProxyScope: (scope, via) => {
+      if (!state.orchestrator) return; // not an orchestration — nothing to grant
+      persistOrchestration(addGrant(state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
+    },
     cwd,
     sessionEditedPaths: () => [...sessionEditedPaths],
     commitsAheadOfBase: () => commitsAheadOfBase(cwd),
@@ -5946,7 +5956,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // PROTECTED-BRANCH NOTICE (2026-09-07, user decision): the workspace
     // settlement layer is gone, so a session may sit on main/master/dev/
     // develop with nobody having asked anything. Say so up front — the
-    // checkpoint confirmation is the hard half, this is the soft half.
+    // checkpoint (and ship) refusal is the hard half, this notice is the
+    // soft half.
     const startBranch = currentBranch(primaryRepoRoot);
     if (startBranch && isProtectedBranch(startBranch) && ctx.hasUI) {
       showToUser(
@@ -6252,6 +6263,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     otherRepoStatus: () => otherRepoStatus(),
     loopGoalConfirmed: () => loopGoalConfirmed(),
     loopGoalPresent: () => readSessionLoopGoal(primaryRepoRoot).present,
+    hasProxyGrant: (scope) => hasGrant(state.orchestrator ?? emptyRuntime("none"), scope),
+    grantProxyScope: (scope, via) => {
+      if (!state.orchestrator) return;
+      persistOrchestration(addGrant(state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
+    },
     confirmBounded: (uiCtx, title, message) =>
       confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message),
     setLoopArmed: (armed) => { loopArmed = armed; },

@@ -29,6 +29,7 @@ import {
   type FakeWorld,
 } from "./helpers/fake-orchestration.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
+import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 
@@ -417,6 +418,68 @@ test("a goal-approval request with no draft attached is REFUSED rather than appr
   const reply = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md" });
   assert.equal(reply.isError, true);
   assert.match(replyText(reply), /没有带上 goal 全文/);
+});
+
+test("sensitive-edit proxy answer: NO grant → the user's three-choice door in the PM pane decides", async () => {
+  // 1) No grant + user picks "拒绝" → refused, nothing written.
+  const w1 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c1 = await spawnT1(w1);
+  w1.childAsks(c1, {
+    requestId: "req-s1",
+    title: "AI 请求一次性修改敏感文件",
+    options: ["同意一次性修改", "拒绝（保持拦截）"],
+    topic: "sensitive-edit",
+  });
+  w1.options.selectAnswers = ["拒绝"];
+  const r1 = await w1.call("orchestrator_answer", { childId: c1, answer: "同意一次性修改" });
+  assert.equal(r1.isError, true);
+  assert.match(replyText(r1), /用户拒绝授予敏感编辑代答权/);
+  assert.equal(w1.channelOf(c1).filter((r) => r.kind === "answer").length, 0, "nothing written");
+
+  // 2) User picks "允许并记住" → grant minted AND the answer goes through.
+  const w2 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c2 = await spawnT1(w2);
+  w2.childAsks(c2, {
+    requestId: "req-s2",
+    title: "AI 请求一次性修改敏感文件",
+    options: ["同意一次性修改", "拒绝（保持拦截）"],
+    topic: "sensitive-edit",
+  });
+  w2.options.selectAnswers = ["允许并记住（本 orchestration 内都代答）"];
+  const r2 = await w2.call("orchestrator_answer", { childId: c2, answer: "同意一次性修改" });
+  assert.equal(r2.isError, undefined, replyText(r2));
+  assert.equal(w2.channelOf(c2).filter((r) => r.kind === "answer").length, 1, "the answer was written");
+  assert.equal(hasGrant(w2.runtime(), "sensitive-edit"), true, "the grant was minted");
+
+  // 3) "仅允许这一次" → passes once, NO grant recorded.
+  const w3 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const c3 = await spawnT1(w3);
+  w3.childAsks(c3, {
+    requestId: "req-s3",
+    title: "AI 请求一次性修改敏感文件",
+    options: ["同意一次性修改", "拒绝（保持拦截）"],
+    topic: "sensitive-edit",
+  });
+  w3.options.selectAnswers = ["仅允许这一次"];
+  const r3 = await w3.call("orchestrator_answer", { childId: c3, answer: "同意一次性修改" });
+  assert.equal(r3.isError, undefined, replyText(r3));
+  assert.equal(hasGrant(w3.runtime(), "sensitive-edit"), false, "no grant persisted");
+});
+
+test("sensitive-edit proxy answer: WITH a grant, no dialog — the answer just goes through", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  world.saveRuntime(addGrant(world.runtime(), { scope: "sensitive-edit", grantedAt: new Date().toISOString(), via: "gate-grant" }));
+  world.childAsks(childId, {
+    requestId: "req-g1",
+    title: "AI 请求一次性修改敏感文件",
+    options: ["同意一次性修改", "拒绝（保持拦截）"],
+    topic: "sensitive-edit",
+  });
+  const reply = await world.call("orchestrator_answer", { childId, answer: "同意一次性修改" });
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.equal(world.channelOf(childId).filter((r) => r.kind === "answer").length, 1);
+  assert.equal(world.options.selectAnswers?.length ?? 0, 0, "no PM-pane dialog was opened");
 });
 
 // ---------------------------------------------------------------------------

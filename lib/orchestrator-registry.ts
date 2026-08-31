@@ -118,12 +118,50 @@ export interface OrchestratorRuntime {
    */
   approvalAmendments?: Array<{ at: string; changes: string[] }>;
 
+
+  /**
+   * User-granted proxy authorities (2026-09-16, user decision).
+   *
+   * The project manager may NOT answer a child's sensitive-edit consent
+   * request unless the USER explicitly granted that scope — "I give you
+   * full power" is a chat message, not an authorization. Each grant is
+   * minted by the gate itself (never by the PM writing a file) through one
+   * of three doors: an `ask_user` answer with a grant scope, the
+   * `/gate-grant` command, or the PM's first proxy answer when the user
+   * picks "allow and remember". Persisted with the runtime, so a relay
+   * successor inherits them.
+   */
+  grants?: OrchestrationGrant[];
+
   /** A relay in progress — see lib/orchestrator-relay.ts. */
   relay?: {
     handoffPath: string;
     successorPane?: string;
     at: string;
   };
+}
+/** One proxy authority the user granted the project manager. */
+export interface OrchestrationGrant {
+  /** What the PM may do on the user's behalf: `sensitive-edit` today. */
+  scope: string;
+  /** ISO time the user granted it. */
+  grantedAt: string;
+  /** Which door minted it: ask_user / gate-grant / first-answer. */
+  via: "ask-user" | "gate-grant" | "first-answer";
+}
+
+/** True when the runtime carries a grant for `scope`. */
+export function hasGrant(runtime: OrchestratorRuntime, scope: string): boolean {
+  return (runtime.grants ?? []).some((g) => g.scope === scope);
+}
+
+/** Add a grant. Never mutates its input; keeps the list bounded. */
+export function addGrant(
+  runtime: OrchestratorRuntime,
+  grant: OrchestrationGrant,
+): OrchestratorRuntime {
+  const grants = (runtime.grants ?? []).filter((g) => g.scope !== grant.scope);
+  return { ...runtime, grants: [...grants, grant] };
 }
 
 export function emptyRuntime(orchestrationId: string): OrchestratorRuntime {

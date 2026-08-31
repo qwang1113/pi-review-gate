@@ -37,7 +37,7 @@
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
 import { appendRecord } from "./orchestrator-channel.ts";
-import { findChild } from "./orchestrator-registry.ts";
+import { addGrant, findChild, hasGrant } from "./orchestrator-registry.ts";
 import { proxyApprovalProblems } from "./orchestrator-gate.ts";
 import { superviseChildren, type PendingRequest } from "./orchestrator-supervisor.ts";
 import {
@@ -136,6 +136,40 @@ async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>)
   if (request.topic === "goal-approval") {
     const guard = goalApprovalGuard(deps, child.taskId, childId, request, resolved.answer);
     if (guard) return guard;
+  }
+
+  // PROXY-AUTHORITY GATE (2026-09-16, user decision): the project manager
+  // may answer a child's SENSITIVE-EDIT consent request only after the USER
+  // explicitly granted that scope. "I give you full power" in chat is NOT
+  // a grant. Three doors mint one: ask_user with a grant scope, /gate-grant,
+  // or — this door — the user picking "allow and remember" on the FIRST
+  // blocked answer. Declining (refusing the edit) needs no grant: it
+  // changes nothing about the worktree.
+  if (request.topic === "sensitive-edit") {
+    const declining = /拒绝|取消|no|reject|deny/i.test(resolved.answer)
+      && !/同意|允许|授权|yes|allow|grant/i.test(resolved.answer);
+    if (!declining && !hasGrant(deps.runtime(), "sensitive-edit")) {
+      // GRANT DOOR 3/3: the user decides in the PM's own pane.
+      deps.showToUser(
+        `子会话 ${childId} 请求敏感编辑，项目经理想代答：`,
+        `${request.title}\n\n项目经理的答案：${resolved.answer}`,
+      );
+      const picked = await deps.select(
+        "授予项目经理『敏感编辑代答权』？",
+        ["允许并记住（本 orchestration 内都代答）", "仅允许这一次", "拒绝"],
+      );
+      if (picked === "允许并记住（本 orchestration 内都代答）") {
+        deps.saveRuntime(addGrant(deps.runtime(), { scope: "sensitive-edit", grantedAt: new Date(deps.now()).toISOString(), via: "first-answer" }));
+      } else if (picked === "仅允许这一次") {
+        // fall through — this answer passes once, no grant recorded
+      } else {
+        return fail(
+          `review-gate: 用户拒绝授予敏感编辑代答权 —— 子会话 ${childId} 的请求未代答。` +
+          "（用户可之后用 /gate-grant sensitive-edit 或 ask_user 授予。）",
+          { childId, answered: false, needGrant: "sensitive-edit" },
+        );
+      }
+    }
   }
 
   try {

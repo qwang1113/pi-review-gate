@@ -90,6 +90,14 @@ export interface OrchestratorDeps {
   confirm(title: string, message: string, pointer?: string): Promise<boolean>;
 
   /**
+   * A multi-option dialog in the ORCHESTRATOR's own pane (2026-09-16, the
+   * first-answer grant door). Only the user can answer it — it renders in
+   * the PM's pane precisely because the PM asked to proxy something it has
+   * no grant for, and only the human may hand that grant out.
+   */
+  select(title: string, options: readonly string[]): Promise<string | undefined>;
+
+  /**
    * Print something to the user's transcript BEFORE a dialog asks about it.
    *
    * The plan approval binds to CONTENT (tasks, boundaries, dependencies,

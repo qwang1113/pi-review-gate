@@ -75,6 +75,16 @@ export async function doRequestScopeLimit(
   if (state.taskMode === "normal") {
     return { content: [{ type: "text", text: "review-gate: normal mode — the gate is already off; no scope limit needed." }], details: {} };
   }
+  // Same orchestrator self-block as request_sensitive_edit: the PM's own
+  // session has no channel side to answer a consent dialog, so asking here
+  // would freeze it on a human-only box. A child's scope-limit request is
+  // answered with orchestrator_answer instead.
+  if (state.taskMode === "orchestrator" && !deps.canChannelDialogs()) {
+    return deny(
+      "review-gate: 你是项目经理（orchestrator 会话）—— 不要自己调 request_scope_limit。" +
+      "子会话的范围请求会出现在 orchestrator_wait 回执里，用 orchestrator_answer 代答。",
+    );
+  }
   if (state.scopeLimit) {
     return {
       content: [{ type: "text", text: "review-gate: a user-granted scope limit is already active — the gate covers only this session's edits." }],
@@ -213,6 +223,7 @@ export async function doRequestSensitiveEdit(
   params: Record<string, unknown>,
   ctx: unknown,
 ): Promise<ToolReply> {
+  const state = deps.state();
   const uiCtx = ctx as UiContext;
   const reason = String(params.reason ?? "");
 
@@ -224,6 +235,22 @@ export async function doRequestSensitiveEdit(
     return deny(
       `review-gate: "${raw}" is not a sensitive file — the gate does not block it. Edit it directly; ` +
       "no authorization is needed.",
+    );
+  }
+  // ORCHESTRATOR SELF-BLOCK (measured deadlock, 2026-08-31 onchain run):
+  // the project manager once called THIS tool to "authorize" a child's .env
+  // edit. In the orchestrator's OWN session there is no channel side to
+  // answer the consent dialog (it is not an orchestration child), so the
+  // box rendered in its pane and only the human could close it — the PM
+  // froze for 2h18m on a dialog it was supposed to answer, not to ask.
+  // An orchestrator never edits sensitive files itself (it writes no code);
+  // a child's sensitive request must be answered with `orchestrator_answer`.
+  if (state.taskMode === "orchestrator" && !deps.canChannelDialogs()) {
+    return deny(
+      "review-gate: 你是项目经理（orchestrator 会话）—— 不要自己调 request_sensitive_edit。" +
+      "子会话的敏感文件请求会出现在 orchestrator_wait 回执的『待答请求』里，" +
+      "用 orchestrator_answer({childId, requestId, answer}) 代答（选『同意一次性修改』即授权）。" +
+      "这个工具在项目经理会话里会弹一个只有用户能关的确认框，把你自己卡住。",
     );
   }
   // Gate-integrity paths are refused BEFORE any dialog: a "yes" here would
