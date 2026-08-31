@@ -221,33 +221,39 @@ function registerGateStatus(host: CommandHost, deps: GateCommandDeps): void {
       const fp = computeFingerprint(deps.cwd);
       const problems = unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync });
       const others = deps.otherRepoStatus();
+      // ---- 裁决 (verdicts) ----
+      const review = `review:    ${state.review.verdict}${state.review.at ? ` (${state.review.at})` : ""}`;
+      const precommit = `precommit: ${state.precommit.verdict}` +
+        (state.precommit.verdict === "PASS"
+          ? ` [lane ${state.precommit.mode ?? "?"}, tests: ${state.precommit.testScope ?? "unknown"}]` +
+            (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run") +
+            (state.precommit.testScope === "skipped" ? " — ⚠️ tests were NOT run in this lane" : "")
+          : "") +
+        (state.precommit.at ? ` (${state.precommit.at})` : "");
       const lines = [
-        `review:    ${state.review.verdict}${state.review.at ? ` (${state.review.at})` : ""}`,
-        `precommit: ${state.precommit.verdict}` +
-          (state.precommit.verdict === "PASS"
-            ? ` [lane ${state.precommit.mode ?? "?"}, tests: ${state.precommit.testScope ?? "unknown"}]` +
-              (state.precommit.testScope === "full" ? "" : " — commit OK, push/PR need a full run") +
-              (state.precommit.testScope === "skipped" ? " — ⚠️ tests were NOT run in this lane" : "")
-            : "") +
-          (state.precommit.at ? ` (${state.precommit.at})` : ""),
+        "── 裁决 ──",
+        review,
+        precommit,
         ...formatPrecommitSummary(lastPrecommitTiming(primaryRepoRoot)),
+        "── 工作区 ──",
         `changes:   code=${state.hasCodeChange} docs=${state.hasDocChange}`,
         `docSync:   ${projectConfig.docSync ? `ENFORCED (attested: ${state.review.docSync ?? "none"})` : "off"}`,
         `rounds:    ${state.rounds.length}/${state.maxRounds}`,
-        `config:    thinkHarder=${projectConfig.thinkHarder}${state.strategicResetFired ? " (fired)" : ""} gitMemory=${projectConfig.gitMemory}`,
         `task mode: ${state.taskMode ?? "undecided (behaves as loop; agent decides via set_gate_mode)"}`,
+        "── 配置 ──",
+        `config:    thinkHarder=${projectConfig.thinkHarder}${state.strategicResetFired ? " (fired)" : ""} gitMemory=${projectConfig.gitMemory}`,
         ...(state.scopeLimit
           ? [`scope:     session-only (user-granted ${state.scopeLimit.at}; ${state.scopeLimit.preexistingFiles.length} pre-existing file(s) exempt)`]
           : []),
         ...(state.pausedQuestion
           ? [`paused:    awaiting user answer to "${state.pausedQuestion.question.slice(0, 120)}" (${state.pausedQuestion.at})`]
           : []),
+        "── 门禁 ──",
         // L8: whether THIS text is the contract the user approved (loop mode
         // ships are blocked until it is), and L7: the Copilot cycle, which
         // gates completion only — both are easy to misread from the outside,
         // so the readout names them explicitly.
         `loop goal: ${deps.loopGoalConfirmed() ? "approved by the user" : deps.loopGoalPresent() ? "DRAFT — not approved (loop-mode ships blocked)" : "none"}`,
-
         ...(state.copilot
           ? [`copilot:   ${state.copilot.status}${state.copilot.pr ? ` PR #${state.copilot.pr}` : ""}` +
             ` (round ${state.copilot.rounds}, no round cap` +
@@ -255,7 +261,6 @@ function registerGateStatus(host: CommandHost, deps: GateCommandDeps): void {
           : []),
         `bypass:    ${state.bypass.active ? `ACTIVE (${state.bypass.reason})` : "off"}`,
         `fingerprint: ${fp.unavailable ? "UNAVAILABLE" : fp.digest.slice(0, 12)}`,
-        ...modelDiagnosisLines(deps, ctx.modelRegistry),
         // Explore: ship commands stay fully gated (L1), but declare_done and
         // auto-continuation are advisory. Normal: the ship gate is OFF.
         state.taskMode === "normal"
@@ -269,6 +274,12 @@ function registerGateStatus(host: CommandHost, deps: GateCommandDeps): void {
         // the session repo is how a multi-repo session could look green while
         // the repo it was about to commit sat at PENDING (and vice versa).
         ...others.lines,
+        // Model chains: the first line from modelDiagnosisLines is the
+        // `model chains:` header — our ── 模型 ── section header replaces it.
+        ...(() => {
+          const ml = modelDiagnosisLines(deps, ctx.modelRegistry);
+          return ml.length > 1 ? ["── 模型 ──", ...ml.slice(1)] : [];
+        })(),
       ];
       ctx.ui.notify(lines.join("\n"), problems.length || others.blocked ? "warning" : "info");
     },

@@ -29,7 +29,7 @@ import { writeFileAtomic } from "./atomic-write.ts";
 import { sideEffectsEnabled } from "./side-effects.ts";
 import { nodeChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
-
+import { gitRootOfDir } from "./repo-resolve.ts";
 import { assertSafeTmuxArgv } from "./orchestrator-tmux.ts";
 import { writeNotification } from "./orchestrator-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
@@ -261,7 +261,16 @@ export interface OrchestratorHostBindings {
   env?(): NodeJS.ProcessEnv;
 
 
+  /**
+   * Resolve a task's declared `repo` to the repo root the child's pane
+   * starts in (2026-09-15). Absent ⇒ the wiring resolves it with git's
+   * own `--show-toplevel`, so the child's cwd is the REAL repo root even
+   * when the plan names a subdirectory or a symlinked path.
+   */
+  resolveTaskRepo?(repo: string): { ok: true; root: string } | { ok: false; reason: string };
+
   /** Every repo this session is accountable for, primary first. */
+  knownRepoRoots(): string[];
   knownRepoRoots(): string[];
   /**
    * Fired on every orchestration-tool execution (2026-08-30, symmetric
@@ -321,6 +330,20 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     childGateState: (childCwd, variant) => readChildGateState(childCwd, variant),
     sleep: (ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }),
 
+    // A task's declared repo may be ANY git checkout — not only one this
+    // session has already edited — so the child's cwd is resolved from the
+    // path itself (git's --show-toplevel), never from knownRepoRoots
+    // membership. A path that is not a repo root is a fail-closed refusal.
+    resolveTaskRepo: (repo) => {
+      if (host.resolveTaskRepo) return host.resolveTaskRepo(repo);
+      const root = gitRootOfDir(repo);
+      return root
+        ? { ok: true, root }
+        : {
+            ok: false,
+            reason: `声明的 repo "${repo}" 不是 git 仓库根（或目录不存在）—— 无法确定子会话的工作目录`
+          };
+    },
     knownRepoRoots: host.knownRepoRoots,
     childJudgeRunning: (childCwd) => childJudgeRunning(childCwd, host.now ? host.now() : Date.now()),
     channelIO: () => io,

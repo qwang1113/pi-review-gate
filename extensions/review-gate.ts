@@ -75,7 +75,7 @@ import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-direct
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands } from "../lib/ship-detect.ts";
-import { buildGateWidget, buildModelConfigWidget, type GateWidgetFacts } from "../lib/ui-widget.ts";
+import { buildGateWidget, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -2270,52 +2270,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
   }
 
-  /**
-   * Current adviser/reviewer model configuration for the belowEditor widget:
-   * the effective spec (the DEPLOYED frontmatter model when a rendered file
-   * exists, else slots[0] when auto is OFF, else "?"), the auto switch state
-   * and the deciding config layer. Display-only — it never throws and never
-   * influences a verdict.
-   */
-  function modelConfigWidgetLines(): string[] {
-    try {
-      const { map } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-      const deployed = (name: string): string | undefined => {
-        // Project layer wins by IDENTITY (frontmatter `name`), not basename:
-        // pi-subagents registers any .md under <repo>/.pi/agents under its
-        // frontmatter name, so custom.md carrying `name: reviewer` really
-        // shadows the global reviewer (round-11 P1/P2).
-        const projectDir = pathJoin(primaryRepoRoot, ".pi", "agents");
-        const projText = findProjectAgentText(projectDir, name);
-        const text = projText ?? (() => {
-          try {
-            const p = pathJoin(homedir(), ".pi", "agent", "agents", `${name}.md`);
-            return existsSync(p) ? readFileSync(p, "utf8") : undefined;
-          } catch { return undefined; }
-        })();
-        if (text === undefined) return undefined;
-        // Match `model:` only INSIDE the frontmatter block, never a body line
-        // that happens to start with "model:". Same delimiter authority as the
-        // identity lookup above (lib/model-config.ts), so a file found by
-        // identity always has its deployed model read too.
-        const fm = frontmatterBlock(text);
-        const m = fm !== undefined ? /^model:\s*(.+)$/m.exec(fm) : undefined;
-        return m ? m[1]!.trim() : undefined;
-      };
-      const entries = ["reviewer", "adviser"].map((name) => {
-        const s = map[name] ?? { auto: true, slots: [], source: "default" as const };
-        // Show what is actually DEPLOYED (the rendered frontmatter) when there
-        // is one — a validation-refused or never-rendered chain must not be
-        // displayed as if in force. Fall back to the intended slots[0]/?
-        // only when no deployed file exists.
-        const spec = deployed(name) ?? (s.auto === false && s.slots.length > 0 ? s.slots[0]! : "?");
-        return { name, spec, auto: s.auto, source: s.source };
-      });
-      return buildModelConfigWidget(entries);
-    } catch {
-      return []; // display-only — never break the TUI
-    }
-  }
 
   /**
    * The gate facts the belowEditor widget renders: workspace/branch,
@@ -2345,14 +2299,6 @@ export default function reviewGate(pi: ExtensionAPI) {
       mode: state.taskMode,
       branch: currentBranch(primaryRepoRoot) ?? "(detached)",
       edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
-      review: state.review.verdict as GateWidgetFacts["review"],
-      reviewAt: state.review.at ?? undefined,
-      rounds: state.rounds.length,
-      precommit: state.precommit.verdict as GateWidgetFacts["precommit"],
-      precommitAt: state.precommit.at ?? undefined,
-      precommitFast: state.precommit.verdict === "PASS" && state.precommit.testScope !== undefined && state.precommit.testScope !== "full",
-      goalApproved: loopGoalConfirmed(),
-      copilotOpen: completion.some((p) => p.includes("Copilot")),
       unmet: [...problems, ...completion],
     };
   }
@@ -2382,10 +2328,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     if (!hasUI) return;
     // belowEditor — the gate status panel. Content-compared so pi only
+    // belowEditor — the gate status strip. Content-compared so pi only
     // re-renders when something actually changed.
     try {
-      const modelLines = modelConfigWidgetLines();
-      const lines = [...buildGateWidget(gateWidgetFacts()), ...(modelLines.length ? ["", ...modelLines] : [])];
+      const lines = buildGateWidget(gateWidgetFacts());
       const key = lines.join("\n");
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
@@ -4489,6 +4435,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       changedFilesInRange: (root, baseline, head) =>
         execFileSync("git", ["diff", "--name-only", `${baseline}..${head}`], { cwd: root, encoding: "utf8" })
           .trim().split("\n").filter(Boolean),
+      worktreeClean: (root) =>
+        execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }).trim() === "",
     },
     readText: (path) => {
       try { return readFileSync(path, "utf8"); } catch { return undefined; }

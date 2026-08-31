@@ -28,6 +28,7 @@ import {
   twoTaskPlan,
   type FakeWorld,
 } from "./helpers/fake-orchestration.ts";
+import { parsePlan } from "../lib/orchestrator-plan.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 
@@ -128,6 +129,55 @@ test("a spawn registers the pane, injects the address, and starts pi with a task
   assert.ok(pane.command.includes("--session-id"), "a deterministic session id is what makes recovery possible");
   const taskArg = pane.command.find((arg) => arg.startsWith("@"))!;
   assert.match(world.scratch.get(taskArg.slice(1)) ?? "", /做任务一/);
+});
+
+test("a task declaring a repo spawns its child in THAT repo, not the orchestrator's", async () => {
+  const plan = parsePlan({
+    title: "跨仓库计划",
+    intent: "任务声明了另一个仓库",
+    tasks: [
+      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/other/repo" },
+    ],
+  });
+  assert.ok(plan.plan);
+  const world = makeFakeWorld({
+    plan: plan.plan,
+    approvePlan: true,
+    // The declared repo is NOT one this session has edited — that is the
+    // point: knownRepoRoots membership must not gate the child's cwd.
+    resolvableRepos: ["/other/repo"],
+  });
+  const childId = await spawnT1(world);
+  const child = world.runtime().children[0]!;
+  assert.equal(child.cwd, "/other/repo", "the registry records the task's repo as the child's cwd");
+  const pane = world.panes.get(child.paneId)!;
+  assert.equal(pane.cwd, "/other/repo", "tmux split-window -c receives the task's repo");
+});
+
+test("a task declaring an unresolvable repo is REFUSED, never silently falling back", async () => {
+  const plan = parsePlan({
+    title: "坏仓库计划",
+    intent: "任务声明了一个不存在的仓库",
+    tasks: [
+      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/nowhere/repo" },
+    ],
+  });
+  assert.ok(plan.plan);
+  const world = makeFakeWorld({ plan: plan.plan, approvePlan: true });
+  const reply = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  assert.equal(reply.isError, true, replyText(reply));
+  assert.match(replyText(reply), /repo 无法使用/);
+  assert.equal(world.panes.size, 1, "no pane may be opened for an unresolvable repo");
+  assert.equal(world.plan()!.tasks.find((t) => t.id === "t1")!.status, "pending", "the task stays pending");
+});
+
+test("a task WITHOUT a repo declaration still spawns in the orchestrator's own repo", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  const child = world.runtime().children[0]!;
+  assert.equal(child.cwd, "/repo", "no repo declared ⇒ the orchestrator's own repo");
+  const pane = world.panes.get(child.paneId)!;
+  assert.equal(pane.cwd, "/repo");
 });
 
 test("a spawn is only reported as delivered once the child's gate REPORTS", async () => {

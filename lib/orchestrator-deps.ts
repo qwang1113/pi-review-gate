@@ -228,6 +228,24 @@ export interface OrchestratorDeps {
    * Every repo this session is accountable for, primary first (2026-09-07:
    * cross-repo parallelism needs the scheduler to know which repos exist).
    */
+  /**
+   * Resolve a task's declared `repo` to the repo root the child's pane
+   * should start in (2026-09-15).
+   *
+   * A task may declare ANY git checkout — not only the ones this session
+   * has already edited — so membership in `knownRepoRoots()` is NOT the
+   * test. The declared path must be a real git repository root; the
+   * resolved root is what the child's cwd (and therefore its gate's
+   * primaryRepoRoot) binds to. A path that is not a repo root is a
+   * fail-closed refusal — the spawn must never silently fall back to the
+   * orchestrator's own repo.
+   */
+  resolveTaskRepo(repo: string): { ok: true; root: string } | { ok: false; reason: string };
+
+  /**
+   * Every repo this session is accountable for, primary first (2026-09-07:
+   * cross-repo parallelism needs the scheduler to know which repos exist).
+   */
   knownRepoRoots(): string[];
 
   /**

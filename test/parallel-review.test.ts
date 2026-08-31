@@ -59,6 +59,24 @@ test("the completion contract is embedded at the end of the reviewer task", () =
   assert.match(prompt, /输出纪律:verdict fence 在最前,其后最多 5 行结论要点/, "the discipline is pinned in the task");
 });
 
+test("buildReviewPrompt: an empty range audits the EXIT GOAL, not a diff", () => {
+  const prompt = buildReviewPrompt(
+    "review",
+    [],
+    "criterion 1: widget is one line\ncriterion 2: tests pass",
+    undefined,
+    { streamPath: "/repo/.pi/review-stream/r-review.jsonl", commitRange: "abc123..abc123" },
+  );
+  assert.match(prompt, /NO code change to audit/);
+  assert.match(prompt, /EXIT GOAL is met/);
+  assert.match(prompt, /criterion by criterion/);
+  assert.match(prompt, /confirm the worktree is clean/);
+  assert.match(prompt, /report a READY only when the task is genuinely done/);
+  assert.match(prompt, /criterion 1: widget is one line/);
+  assert.doesNotMatch(prompt, /Audit the COMMIT RANGE/);
+  assert.doesNotMatch(prompt, /Audit the INCREMENT/);
+});
+
 test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no isolation is READ-ONLY", () => {
   // Relative would land in whatever directory the judge happens to be in — its
   // own throwaway worktree, say — where the main agent

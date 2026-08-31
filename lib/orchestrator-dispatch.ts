@@ -229,9 +229,21 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // share the main worktree and run SERIALLY within a repo (see
   // schedulingVerdict); the only parallelism left is across repos, so a
   // task's declared `repo` picks the checkout the child works in.
-  const cwd = task.repo && deps.knownRepoRoots().includes(task.repo)
-    ? task.repo
-    : deps.repoRoot;
+  //
+  // 2026-09-15: the declared repo is resolved from the PATH itself, not
+  // from knownRepoRoots membership — a task may target a checkout this
+  // session has not edited yet, and the child's cwd (and therefore its
+  // gate's primaryRepoRoot) must still bind to THAT repo. An unresolvable
+  // repo is a fail-closed refusal, never a silent fallback to our own.
+  let cwd = deps.repoRoot;
+  if (task.repo) {
+    const resolved = deps.resolveTaskRepo(task.repo);
+    if (!resolved.ok) {
+      return fail(`review-gate: 任务 "${taskId}" 声明的 repo 无法使用 —— ${resolved.reason}；` +
+        "一个 pane 都没开。修正 plan 里该任务的 repo 声明后再试。");
+    }
+    cwd = resolved.root;
+  }
   const childId = newChildId(taskId, deps.now());
   const marker = buildDeliveryMarker(taskId, deps.now());
   const written = deps.writeScratchFile(

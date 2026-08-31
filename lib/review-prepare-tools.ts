@@ -83,6 +83,10 @@ export interface ReviewPrepareGit {
   revParse(root: string, rev: string): string;
   /** `git diff --name-only <baseline>..<head>`. THROWS when it cannot run. */
   changedFilesInRange(root: string, baseline: string, head: string): string[];
+  /** Is the worktree CLEAN (no staged/unstaged/untracked changes)? The
+   *  empty-range exit-goal round REQUIRES it — a READY must never bless
+   *  content no reviewer saw (round-2 P2). */
+  worktreeClean(root: string): boolean;
 }
 
 /**
@@ -166,13 +170,11 @@ async function doPrepareReview(
   const root = target.root;
   const reason = typeof params.reason === "string" ? params.reason : undefined;
   const st = deps.stateFor(root);
-  if (!st.checkpoint?.sha) {
-    return {
-      content: [{ type: "text", text: "review-gate: prepare_review rejected — no checkpoint on record. The reviewed range is baseline..HEAD and the baseline IS the last checkpoint sha, so `judge_submit({role:\"reviewer\"})` commits one before it gets here; reaching this branch means that step did not land — re-submit the round." }],
-      details: { prepared: false },
-      isError: true,
-    };
-  }
+  // No checkpoint on record is allowed — the "audit the exit goal" round:
+  // nothing is frozen to diff, so prepare resolves an empty range (HEAD..HEAD)
+  // and the reviewer judges loop-goal / task completion instead of a diff.
+  // A real code round still goes through judge_submit, which commits a
+  // checkpoint before this tool runs; baseline falls back to HEAD below.
   // Round-18 polish gate (user ask, B-tier): when the gate is
   // demonstrably met (or a file keeps being polished), the next round
   // must carry an explicit reason. Refuse WITHOUT rendering anything
@@ -229,19 +231,26 @@ async function doPrepareReview(
     }
   }
   if (!baseline) {
-    baseline =
-      st.checkpoint.prevSha ||
-      (() => {
-        try {
-          return deps.git.revParse(root, `${st.checkpoint!.sha}^`);
-        } catch {
-          // Round-9 P2 / round-10 Nit: a root commit or an unreachable sha
-          // must not throw out of the tool — fall back to the checkpoint
-          // sha itself as the baseline (an empty range at worst: the
-          // reviewer audits the checkpoint commit alone).
-          return st.checkpoint!.sha;
-        }
-      })();
+    if (st.checkpoint?.sha) {
+      baseline =
+        st.checkpoint.prevSha ||
+        (() => {
+          try {
+            return deps.git.revParse(root, `${st.checkpoint!.sha}^`);
+          } catch {
+            // Round-9 P2 / round-10 Nit: a root commit or an unreachable sha
+            // must not throw out of the tool — fall back to the checkpoint
+            // sha itself as the baseline (an empty range at worst: the
+            // reviewer audits the checkpoint commit alone).
+            return st.checkpoint!.sha;
+          }
+        })();
+    } else {
+      // No checkpoint on record — the "audit the exit goal" round: nothing
+      // is frozen to diff, so the range is empty (HEAD..HEAD) and the
+      // reviewer judges the loop goal / task completion instead of a diff.
+      baseline = undefined; // resolved below as HEAD when emptyRange
+    }
   }
   let head = "";
   let tree = "";
@@ -255,18 +264,44 @@ async function doPrepareReview(
       isError: true,
     };
   }
-  if (head === baseline) {
-    return {
-      content: [{ type: "text", text: "review-gate: prepare_review — HEAD equals the checkpoint baseline, so the range is empty. Call review_checkpoint again after your fixes, then prepare." }],
-      details: { prepared: false },
-      isError: true,
-    };
+  // No checkpoint on record: nothing is frozen to diff, so the round is the
+  // "audit the exit goal" kind — HEAD..HEAD (empty), reviewer judges the loop
+  // goal / task completion instead of a diff.
+  if (baseline === undefined) baseline = head;
+  // Empty range (head === baseline): nothing new to diff. This is NOT a
+  // refusal anymore — it is the "audit the exit goal" round: the reviewer
+  // judges whether the task is DONE (loop goal met, worktree clean) rather
+  // than a code diff. The range renders as `head..head` and files stays
+  // empty; buildReviewPrompt's empty-range branch words the task.
+  const emptyRange = head === baseline;
+  // Round-2 P2 (security): an empty-range READY binds to the HEAD tree, and
+  // the ship gate compares exactly that tree — so a READY taken with a dirty
+  // worktree would mechanically bless content no reviewer saw. The clean-
+  // worktree condition therefore lives in the GATE, not only in the prompt.
+  if (emptyRange) {
+    // Round-2 P2 (security): an empty-range READY binds to the HEAD tree, and
+    // the ship gate compares exactly that tree — so a READY taken with a dirty
+    // worktree would mechanically bless content no reviewer saw. The clean-
+    // worktree condition therefore lives in the GATE, not only in the prompt.
+    // A git failure here counts as NOT clean (fail-closed): same rule as the
+    // file's other git reads — a probe must never throw out of the tool.
+    let clean = false;
+    try { clean = deps.git.worktreeClean(root); } catch { /* fail-closed */ }
+    if (!clean) {
+      return {
+        content: [{ type: "text", text: "review-gate: prepare_review refused — the worktree is dirty (or unreadable), so the empty-range exit-goal round cannot bless it. Commit or stash your changes first (judge_submit with a dirty worktree commits a checkpoint and reviews the real diff), then retry." }],
+        details: { prepared: false, emptyRange: true, dirtyWorktree: true },
+        isError: true,
+      };
+    }
   }
-  const range = `${baseline.slice(0, 12)}..${head.slice(0, 12)}`;
+  const range = `${(emptyRange ? head : baseline).slice(0, 12)}..${head.slice(0, 12)}`;
   let files: string[] = [];
-  try {
-    files = deps.git.changedFilesInRange(root, baseline, head);
-  } catch { /* empty file list is still a valid round */ }
+  if (!emptyRange) {
+    try {
+      files = deps.git.changedFilesInRange(root, baseline, head);
+    } catch { /* empty file list is still a valid round */ }
+  }
   const runId = `review-${Date.now().toString(36)}`;
   const streamPath = pathJoin(root, ".pi", "review-stream", `${runId}-review.jsonl`);
   try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* stream is optional */ }

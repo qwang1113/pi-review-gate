@@ -256,10 +256,13 @@ export function buildReviewPrompt(
   const streamPath = isolation?.streamPath;
   const range = isolation?.commitRange ?? "baseline..HEAD";
   const lines = [
-    scopeKind === "incremental"
-      ? "You are the reviewer of this round. Audit the INCREMENT listed below — the files that changed since the last READY review — and re-check every finding the scope block lists. Deep-audit the increment and those findings; material already settled and unchanged gets a consistency scan, not a re-derivation. You keep FULL-diff visibility and authority: reopen any settled conclusion you can contradict with evidence. Verify from the code (never guess), and report findings with file paths and line numbers."
-      : `You are the reviewer of this round. Audit the COMMIT RANGE ${range} below — immutable git history, and the ONLY thing this round judges. Read it with \`git show\` / \`git diff ${range}\`, verify from the code (never guess), and report findings with file paths and line numbers.`,
-    "",
+    // Empty range: nothing to diff — the round audits ONLY the exit goal.
+    // The reviewer judges whether the task is DONE (goal met), not a diff.
+    files.length === 0 && range.split("..")[0] === range.split("..")[1]
+      ? "You are the reviewer of this round. There is NO code change to audit (empty commit range " + `${range}` + ") this round exists to verify the EXIT GOAL is met. Check the loop goal below criterion by criterion (accept only if EVERY criterion is verifiably met), confirm the worktree is clean, and report a READY only when the task is genuinely done. A BLOCKED with findings is the correct verdict when any criterion is unmet or unverifiable."
+      : scopeKind === "incremental"
+        ? "You are the reviewer of this round. Audit the INCREMENT listed below — the files that changed since the last READY review — and re-check every finding the scope block lists. Deep-audit the increment and those findings; material already settled and unchanged gets a consistency scan, not a re-derivation. You keep FULL-diff visibility and authority: reopen any settled conclusion you can contradict with evidence. Verify from the code (never guess), and report findings with file paths and line numbers."
+        : `You are the reviewer of this round. Audit the COMMIT RANGE ${range} below — immutable git history, and the ONLY thing this round judges. Read it with \`git show\` / \`git diff ${range}\`, verify from the code (never guess), and report findings with file paths and line numbers.`,
     `Changed files (${files.length}) in ${range}:`,
     files.map((f) => `- ${f}`).join("\n"),
     "",
