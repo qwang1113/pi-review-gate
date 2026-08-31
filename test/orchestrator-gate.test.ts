@@ -166,7 +166,7 @@ test("CONSTRAINT 9: only an orchestrator may notify the human", () => {
 });
 
 test("CONSTRAINT 14: irreversible and security decisions are never proxied", () => {
-  for (const kind of ["discard-worktree", "sensitive-file"]) {
+  for (const kind of ["sensitive-file"]) {
     const reason = humanOnlyDecision(kind);
     assert.ok(reason, `${kind} must be human-only`);
     assert.match(reason, /真人/);

@@ -106,8 +106,7 @@ function schedulingVerdict(
  * (user, 2026-08-30). It is not a tool, not an action, and not a second step
  * the orchestrator takes after `orchestrator_spawn` returns — not even
  * through an internal helper it would have to remember to call. It is one of
- * the atomic things a spawn already does, exactly like creating the worktree
- * or writing the task file, and the proof of that is that the project
+ * the atomic things a spawn already does, exactly like writing the task file,
  * manager's call sequence did not change by one character when this landed.
  *
  * FAILURE IS COSMETIC, ALWAYS. Every tmux result here is checked and then
@@ -283,7 +282,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     taskFile: written.path,
     createdAt: new Date(deps.now()).toISOString(),
     // The spawn IS the first assignment: a completion record older than this
-    // belongs to whatever ran in that worktree before (round-1 P1).
+    // belongs to whatever ran this task before (round-1 P1).
     lastAssignedAt: new Date(deps.now()).toISOString(),
   }));
 

@@ -221,11 +221,9 @@ export function notifyAuthorization(taskMode: TaskMode | undefined): Authorizati
 // Constraint 14 — some decisions may never be answered on the user's behalf
 // ---------------------------------------------------------------------------
 
-export type HumanOnlyDecision = "discard-worktree" | "sensitive-file";
+export type HumanOnlyDecision = "sensitive-file";
 
 const HUMAN_ONLY_REASONS: Readonly<Record<HumanOnlyDecision, string>> = Object.freeze({
-  "discard-worktree":
-    "丢弃工作区是不可逆的（别人的改动可能就此消失），必须真人确认 —— 项目经理不得代答。",
   "sensitive-file":
     "敏感文件（.env / 私钥 / 凭据）授权必须真人确认 —— 项目经理不得代答。",
 });

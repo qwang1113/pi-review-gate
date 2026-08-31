@@ -292,7 +292,7 @@ export function registerOrchestratorRecoveryTools(host: ToolHost, deps: Orchestr
       "TRANSCRIPT continues rather than starting over, then re-points the registry at the new " +
       "pane and leaves the plan task `running` — nothing about it stopped being true. It REFUSES " +
       "when the pane is actually still alive (two processes in one worktree is worse than a stuck " +
-      "child) and when tmux cannot be read at all. Its branch, checkpoints and review verdict " +
+      "child) and when tmux cannot be read at all. Its checkpoints and review verdict " +
       "survived the death and are named in the receipt.",
     parameters: Type.Object({
       childId: Type.String({ description: "Registry handle of the dead child" }),
