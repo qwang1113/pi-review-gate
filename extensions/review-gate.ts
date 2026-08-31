@@ -311,6 +311,7 @@ import {
 
   unmetRequirements,
   type GateState,
+  invalidateBindings,
 } from "../lib/gate-state.ts";
 import { parseReviewOutput, parsePrecommitOutput, parseFenceFindings, parseFenceFileFindings } from "../lib/verdict-parse.ts";
 import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
@@ -3543,8 +3544,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             : absEditPath;
           if (!s.sessionEditedFiles) s.sessionEditedFiles = [];
           if (!s.sessionEditedFiles.includes(rel)) s.sessionEditedFiles.push(rel);
-          if (s.review.verdict === "READY") s.review.verdict = "PENDING";
-          if (s.precommit.verdict === "PASS") s.precommit.verdict = "NOT_RUN";
+          invalidateBindings(s);
           // A NEW EDIT UN-FINISHES THE TASK (round-2 hardening). The
           // completion record is what a supervising orchestrator reads to
           // decide a child is `done`; a session that starts editing again is
@@ -3598,8 +3598,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           const idx = state.scopeLimit.preexistingFiles.indexOf(rel);
           if (idx >= 0) state.scopeLimit.preexistingFiles.splice(idx, 1);
         }
-        if (state.review.verdict === "READY") state.review.verdict = "PENDING";
-        if (state.precommit.verdict === "PASS") state.precommit.verdict = "NOT_RUN";
+        invalidateBindings(state);
         // Same as the cross-repo branch above: editing again means this task
         // is not finished any more, so the completion an orchestrator reads
         // must go with it.
@@ -3665,8 +3664,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           if (arming.some(isCodeFile) && !st.hasCodeChange) { st.hasCodeChange = true; }
           if (arming.some(isDocFile) && !st.hasDocChange) { st.hasDocChange = true; }
           if (st.hasCodeChange || st.hasDocChange) {
-            if (st.review.verdict === "READY") st.review.verdict = "PENDING";
-            if (st.precommit.verdict === "PASS") st.precommit.verdict = "NOT_RUN";
+            invalidateBindings(st);
             clearBypassToken();
             persistRepo(ctx as unknown as ExtensionContext, root);
           }
@@ -7247,7 +7245,8 @@ export default function reviewGate(pi: ExtensionAPI) {
           "本模式下门禁（review/precommit）为 advisory（建议性），自动续跑已禁用，" +
           "任务满意完成即可自行 `declare_done` —— 由你判断何时算完成。" +
           "ship 命令（git commit/push、gh pr）仍被完全拦截；" +
-          "若任务变成交付性工作，请让用户运行 /gate-mode loop。" +
+          "若任务变成交付性工作，先 `set_gate_mode(\"loop\")` 升级到完整门禁循环（立即生效），再开始改代码。" +
+          "\n\n" + buildAgentDirectives("explore") +
           (problems.length ? `\nAdvisory 门禁状态：\n${problems.map((p) => `- ${p}`).join("\n")}` : ""),
       };
     }

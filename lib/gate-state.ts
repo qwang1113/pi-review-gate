@@ -441,6 +441,27 @@ export function emptyState(sessionId: string | null, maxRounds: number): GateSta
 }
 
 /**
+ * Content-change invalidation — the ONE place a session's own edit downgrades
+ * standing bindings. READY → PENDING and PASS → NOT_RUN, and the fingerprint
+ * goes with the verdict: a downgraded binding must not keep pointing at the
+ * content it no longer describes. (Measured residue: the edit path used to
+ * flip the verdict but leave the fingerprint, leaving an impossible state
+ * like `{verdict:"NOT_RUN", fingerprint:"…"}` in the sidecar — harmless to
+ * enforcement, misleading to every reader, 2026-08-31.)
+ */
+export function invalidateBindings(st: GateState): void {
+  if (st.review.verdict === "READY") {
+    st.review.verdict = "PENDING";
+    st.review.fingerprint = null;
+  }
+  if (st.precommit.verdict === "PASS") {
+    st.precommit.verdict = "NOT_RUN";
+    st.precommit.fingerprint = null;
+  }
+}
+
+
+/**
  * Environment variable that gives a session its OWN sidecar file (F4).
  *
  * THE MEASURED PROBLEM. The sidecar is one file per worktree, and `taskMode`

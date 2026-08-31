@@ -1050,13 +1050,16 @@ test("loop directives: decision table injects on every turn, incl. unarmed first
   assert.ok(handlerAt > 0);
   const injectAt = SRC.indexOf('state.taskMode === "loop"', handlerAt);
   assert.ok(injectAt > 0, "loop branch must inject directives");
+  // The decision table is injected in BOTH enforced loop and advisory explore
+  // (explore gained it 2026-08-31: it used to early-return before the loop
+  // injection, so an explore session never saw the situation→tool table).
+  const exploreAt = SRC.indexOf('buildAgentDirectives("explore")', handlerAt);
+  assert.ok(exploreAt > 0, "explore branch must inject the decision table too");
+  assert.ok(exploreAt < injectAt, "the explore early-return injection sits before the loop one");
   // buildAgentDirectives is called unconditionally for loop, outside any
   // gateArmed guard.
   const directivesAt = SRC.indexOf("buildAgentDirectives()", handlerAt);
   assert.ok(directivesAt > 0, "decision table must be injected in before_agent_start");
-  // The full line: `const loopDirectives = state.taskMode === "loop" ? ...`
-  const line = SRC.slice(directivesAt - 120, directivesAt + 30);
-  assert.match(line, /state\.taskMode === "loop"/, "decision table guarded on loop mode only");
   // The undecided-clean early return (added round 3) must sit AFTER the
   // injection, so a loop session never loses the decision table: loop mode
   // falls through regardless of gateArmed.
@@ -3955,8 +3958,11 @@ test("R3-5: a new edit CLEARS the completion record, in both repo branches", () 
   // reads this record to call a child `done`, and a session that starts
   // editing again is working — whoever asked it to, including a human typing
   // straight into the pane, which no orchestration tool can observe.
-  const edits = SRC.split('if (state.review.verdict === "READY")');
-  assert.ok(edits.length >= 2, "the edit accounting must still exist");
+  // Both edit branches (primary + cross-repo) must clear the completion;
+  // the downgrade itself lives in invalidateBindings (2026-08-31), so the
+  // anchor is the shared downgrade call.
+  const edits = SRC.split("invalidateBindings(");
+  assert.ok(edits.length >= 2, "the edit accounting must still exist (via invalidateBindings)");
   const clears = SRC.match(/delete (?:s|state)\.completion;/g) ?? [];
   assert.equal(clears.length, 2,
     "both the primary-repo and the cross-repo edit branches must expire it");
