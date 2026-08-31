@@ -24,11 +24,11 @@ test("buildGateWidget hides the unmet count when zero", () => {
   assert.match(lines[0]!, /^门禁 · mode explore · 未编辑$/);
 });
 
-test("buildGateWidget falls back to ? for an unknown mode", () => {
+test("buildGateWidget falls back to 未知 for an unknown mode", () => {
   const lines = buildGateWidget({
     edited: true,
     unmet: [],
   });
   assert.equal(lines.length, 1);
-  assert.match(lines[0]!, /^门禁 · mode \? · 已编辑$/);
+  assert.match(lines[0]!, /^门禁 · mode 未知 · 已编辑$/);
 });

@@ -278,12 +278,22 @@ async function doPrepareReview(
   // the ship gate compares exactly that tree — so a READY taken with a dirty
   // worktree would mechanically bless content no reviewer saw. The clean-
   // worktree condition therefore lives in the GATE, not only in the prompt.
-  if (emptyRange && !deps.git.worktreeClean(root)) {
-    return {
-      content: [{ type: "text", text: "review-gate: prepare_review refused — the worktree is dirty, so the empty-range exit-goal round cannot bless it. Commit or stash your changes first (judge_submit with a dirty worktree commits a checkpoint and reviews the real diff), then retry." }],
-      details: { prepared: false, emptyRange: true, dirtyWorktree: true },
-      isError: true,
-    };
+  if (emptyRange) {
+    // Round-2 P2 (security): an empty-range READY binds to the HEAD tree, and
+    // the ship gate compares exactly that tree — so a READY taken with a dirty
+    // worktree would mechanically bless content no reviewer saw. The clean-
+    // worktree condition therefore lives in the GATE, not only in the prompt.
+    // A git failure here counts as NOT clean (fail-closed): same rule as the
+    // file's other git reads — a probe must never throw out of the tool.
+    let clean = false;
+    try { clean = deps.git.worktreeClean(root); } catch { /* fail-closed */ }
+    if (!clean) {
+      return {
+        content: [{ type: "text", text: "review-gate: prepare_review refused — the worktree is dirty (or unreadable), so the empty-range exit-goal round cannot bless it. Commit or stash your changes first (judge_submit with a dirty worktree commits a checkpoint and reviews the real diff), then retry." }],
+        details: { prepared: false, emptyRange: true, dirtyWorktree: true },
+        isError: true,
+      };
+    }
   }
   const range = `${(emptyRange ? head : baseline).slice(0, 12)}..${head.slice(0, 12)}`;
   let files: string[] = [];

@@ -28,7 +28,7 @@ export interface GateWidgetFacts {
  * Pure: everything comes from the facts object.
  */
 export function buildGateWidget(f: GateWidgetFacts): string[] {
-  const wsBits: string[] = [`mode ${f.mode ?? "?"}`];
+  const wsBits: string[] = [`mode ${f.mode ?? "未知"}`];
   if (f.branch) wsBits.push(f.branch);
   wsBits.push(f.edited ? "已编辑" : "未编辑");
   if (f.unmet.length > 0) wsBits.push(`${f.unmet.length} 项未满足`);
