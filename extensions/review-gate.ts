@@ -75,7 +75,7 @@ import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-direct
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands } from "../lib/ship-detect.ts";
-import { buildModelConfigWidget } from "../lib/ui-widget.ts";
+import { buildGateWidget, buildModelConfigWidget, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
   resolveCommandRepos,
@@ -372,6 +372,11 @@ import {
   type StallState,
 } from "../lib/loop-stall.ts";
 import {
+  decideRevival,
+  buildRevivalMessage,
+  REVIVAL_INTERVAL_MS,
+} from "../lib/session-revival.ts";
+import {
   effectiveAgentsConfig,
   applyAgentConfigLayer,
   loadRegistry,
@@ -471,7 +476,13 @@ function readSessionLoopGoal(root: string): LoopGoal {
 
 
 const ENTRY_TYPE = "review-gate-state";
-const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit"]);
+// 2026-08-31 (P0, onchain deadlock investigation): `replace` / `insert` are
+// pi's hashline edit tools and were MISSING here — a session could edit files
+// through them while every edit gate (L8 goal gate, sensitive-file floor,
+// orchestrator write restriction, edit tracking) was silently skipped.
+// Orchestration children use replace/insert, which is exactly how a child
+// bypassed the loop-goal requirement and edited straight away.
+const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit", "replace", "insert"]);
 
 /**
  * Read the PROJECT-layer agent file that actually shadows `name` at runtime:
@@ -704,7 +715,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // anchor while the child may have stopped without signalling.
   }
   let loopArmed = true; // /gate-bypass or NEEDS_HUMAN disarms auto-continuation
-  // Per-project knobs (sd0x-dev-flow auto-loop-project.md port). Loaded at
+  // Re-arm the loop AND clear the arbitration pause together: working again
+  // means the human stop no longer applies (2026-08-30, P1).
+  function armLoop(): void {
+    loopArmed = true;
+    arbitrationPaused = false;
+  }
+  // Arbitration pause (2026-08-30, P1): the revival timer must respect the
+  // third way an arbiter ruling can end — the human picked "Pause gate and
+  // wait" in the dialog. Set in the arbitration tool, cleared by armLoop.
+  let arbitrationPaused = false;
   // session_start; a missing/corrupt config file falls back to safe defaults.
   let projectConfig: ProjectConfig = defaultProjectConfig();
   // A declined downgrade confirmation locks agent-initiated downgrades for the
@@ -1399,8 +1419,17 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       try {
         if (instruction.mode === "interrupt") {
+          // Highest priority (2026-08-31): abort the current turn AND carry
+          // the new message, so the child stops what it was doing and reads
+          // this immediately. A bare interrupt (no text) stays a plain abort.
+          const interruptText = instructText(channelIO, instruction);
           ctx.abort?.();
-          acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
+          if (interruptText) {
+            await pi.sendUserMessage(interruptText, { deliverAs: "steer" });
+            acknowledgeInstruct(binding, instruction.instructId, true, "已中断并立即投递正文 (deliverAs:steer)", "injected");
+          } else {
+            acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
+          }
           continue;
         }
         const text = instructText(channelIO, instruction);
@@ -1524,6 +1553,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return state.sessionId ? `${dir}/${state.sessionId}.jsonl` : undefined;
       } catch { return undefined; }
     },
+    // Symmetric re-arm (goal 5): the project manager's work is its
+    // orchestration tools — the loop session's work is its edits. The
+    // whole reason `loopArmed` has three re-arm sites on the edit path
+    // and none for the manager is that the manager never edits; here it
+    // re-arms itself by managing.
+    onToolCall: () => { armLoop(); },
+    // Goal 7 — a handoff is a VOLUNTARY exit. The successor inherits the
+    // orchestration; waking the retired session would put two project
+    // managers on one orchestration.
+    onHandoff: () => { handedOffOrchestration = true; },
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
   registerOrchestratorSessionTools(pi, orchestratorDeps);
@@ -1561,6 +1600,20 @@ export default function reviewGate(pi: ExtensionAPI) {
   // forever. The probe manufactures those events, and this timer is what
   // makes it fire even when the supervisor is NOT sitting inside
   // `orchestrator_wait`.
+  // ---- THE REVIVAL TIMER (2026-08-30, survival invariant) ----
+  //
+  // The one clock the invariant rides on. `agent_settled` fires once per
+  // turn and the NEXT turn comes from THIS turn's injection, so a turn that
+  // ends under any of the six guards never gets a second chance — the
+  // event chain is broken and nothing will ever re-trigger it. The loop
+  // session heals because edits re-arm `loopArmed`; an orchestrator writes
+  // no code (constraint 2) and cannot. So the gate keeps its own minute-
+  // level clock, independent of everything the agent did.
+  let revivalTimer: ReturnType<typeof setInterval> | undefined;
+  /** When this session last injected a revival (ms epoch). */
+  let lastRevivalAt: number | undefined;
+  /** A session that handed its orchestration over must not be revived. */
+  let handedOffOrchestration = false;
   let supervisionTimer: ReturnType<typeof setInterval> | undefined;
   let orchestratorContinuations = 0;
   /** The supervisor's own last health read, for the continuation message. */
@@ -1621,6 +1674,65 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * Arm the REVIVAL timer — the survival invariant for BOTH modes,
+   * every 60s. It exists to catch a session that stopped with its exit
+   * contract unmet (provider error, agent that decided it was done early).
+   *
+   * Deliberately independent of the event chain: it does not consume the
+   * continuation budget (`maxRounds`) and ignores the `loop-stall` circuit
+   * breaker — both are right for the INJECTION path they guard, and both
+   * are wrong here, where a stopped session costs nothing per minute and a
+   * silently abandoned task costs the whole run. Human stops (ESC, ask_user,
+   * bypass, arbitration pause) DO stop it — the invariant never overrides a
+   * person.
+   */
+  function startRevivalTimer(ctx: ExtensionContext): void {
+    if (revivalTimer) return;
+    revivalTimer = setInterval(() => {
+      // Same freshness rule as the child heartbeat: `latestCtx` is
+      // refreshed on every tool_call, so a stale captured ctx must never
+      // silently kill the check (a throwing isIdle would be swallowed by
+      // the catch below and the session would never be revived).
+      const live = latestCtx ?? ctx;
+      try {
+        if (state.taskMode === "explore" || state.taskMode === "normal") {
+          stopRevivalTimer();
+          return;
+        }
+        const mode = state.taskMode as "loop" | "orchestrator";
+        // P2: the problems assembly costs a fingerprint (~180ms) — pass it
+        // LAZY so the cheap guards (mode, consent, idle, throttle) run
+        // first, and only a session that might actually be revived pays.
+        let problemsCache: string[] | undefined;
+        const decision = decideRevival({
+          mode,
+          exitProblems: () => (problemsCache ??= sessionExitProblems()),
+          idle: !!live.isIdle?.(),
+          humanStop: {
+            aborted: lastRunAborted,
+            awaitingAnswer: !!state.pausedQuestion,
+            bypassed: state.bypass.active,
+            arbitrationPaused,
+          },
+          handedOff: handedOffOrchestration,
+          lastRevivalAt,
+          now: Date.now(),
+          intervalMs: REVIVAL_INTERVAL_MS,
+        });
+        if (!decision.revive) return;
+        lastRevivalAt = Date.now();
+        pi.sendUserMessage(buildRevivalMessage(mode, problemsCache ?? []), { deliverAs: "followUp" });
+      } catch { /* a revival must never break the session it revives */ }
+    }, REVIVAL_INTERVAL_MS);
+    (revivalTimer as unknown as { unref?: () => void }).unref?.();
+  }
+  function stopRevivalTimer(): void {
+    if (revivalTimer) clearInterval(revivalTimer);
+    revivalTimer = undefined;
+  }
+
+
+  /**
    * Arm the background supervisor (default-on in orchestrator mode, 10s).
    *
    * It only WAKES the session when there is something a supervisor has to act
@@ -1652,6 +1764,35 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * THE UNIFIED EXIT CRITERION (2026-08-30).
+   *
+   * Every place that asks "is this session done?" reads this one function:
+   * `agent_settled` continuation, the revival timer, and `declare_done`.
+   * It used to be two separately-assembled answers — the loop's gate
+   * problems plus completion items, and the orchestration's plan/children/
+   * decisions — which is how one mode could end up with a revival clock
+   * and the other without one. One function, one answer.
+   */
+  function sessionExitProblems(): string[] {
+    if (state.taskMode === "orchestrator") {
+      return orchestrationDoneProblems();
+    }
+    const fp = computeFingerprint(cwd);
+    const problems = (state.hasCodeChange || state.hasDocChange)
+      ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
+      : [];
+    const completion: string[] = [];
+    for (const root of sessionRepos) {
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      for (const p of copilotProblemsFor(st)) {
+        completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+      }
+    }
+    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    return [...problems, ...completion];
+  }
+
+  /**
    * The orchestrator's own `agent_settled` continuation (R-3).
    *
    * Same shape as the loop's, entirely different criteria: the plan, the
@@ -1660,7 +1801,16 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function orchestratorSettled(ctx: ExtensionContext): void {
     startSupervisionTimer(ctx);
-    const problems = orchestrationDoneProblems();
+    startRevivalTimer(ctx);
+    // USER REQUIREMENT (shared with the loop path): the user aborted this
+    // run with ESC — do not override an explicit human stop. The user's
+    // next message clears the flag and the loop resumes.
+    if (lastRunAborted) {
+      try { ctx.ui.notify("review-gate: 检测到手动中止（ESC）— 编排自动续跑已暂停；你的下一条消息会恢复。", "warning"); } catch { /* headless */ }
+      updateWidget(ctx);
+      return;
+    }
+    const problems = sessionExitProblems();
     const news = drainSupervisionNews();
     if (problems.length === 0 && news.length === 0) return;
     if (orchestratorContinuations >= state.maxRounds) return;
@@ -1688,7 +1838,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // The judge finished: the gate reads its verdict and records it BEFORE
       // waking the session, so the agent never has to carry the output from
       // one tool to another (and cannot mis-carry it).
+      // 2026-08-31 (UX): the widget is refreshed IMMEDIATELY (before the
+      // recording finishes) so the on-screen gate state turns over at the
+      // same moment the judge exits — not a 5s timer tick later — and the
+      // recording itself runs in the background of the wake.
+      if (lastUiCtx) updateWidget(lastUiCtx);
       void recordJudgeConclusion(sessionId).then((recorded) => {
+        if (lastUiCtx) updateWidget(lastUiCtx);
         const content = `[review-gate] 子会话 ${label} 完成（session ${sessionId}）。` +
           (recorded ? `\n${recorded}` : " 用 judge_read({role}) 读它的输出并继续。");
         pi.sendMessage({ customType: "review-gate", content, display: true }, { triggerTurn: true, deliverAs: "steer" });
@@ -1843,35 +1999,108 @@ export default function reviewGate(pi: ExtensionAPI) {
    *
    * NEVER fatal, and never anything but a fast-forward: offline is a note, a
    * DIVERGED base is a note (a merge/rebase/force there is the user's call, not
-   * the gate's). Returns the notes to fold into the setup_workspace receipt.
+   * the gate's).
+   *
+   * 2026-08-31: the fetch is now ASYNC — it must never block the
+   * setup_workspace call the way a slow/offline `git fetch` did (the tool
+   * froze mid-setup). The branch cut itself stays synchronous (local-only,
+   * fast); the fetch + optional ff-only merge run in the background and
+   * their outcome lands in the notes the caller folds into the receipt.
    */
   function refreshBaseBeforeBranch(root: string, base: string): string[] {
-    const notes: string[] = [];
+    // The receipt note says the refresh runs in the background; the OUTCOME
+    // lands in .pi/gate-timings.jsonl (kind: base-refresh) so it stays
+    // visible to later sessions / /gate-status / a grep — reviewer P1:
+    // pushing into a local array after the receipt was returned was dead code.
+    const notes: string[] = [`基准分支 ${base} 的远端更新在后台进行（git fetch 异步执行，不阻塞本次工作区确认）——它可能暂时落后于远端，declare_done 前可手动确认；结果会写入 .pi/gate-timings.jsonl。`];
+    void refreshBaseAsync(root, base);
+    return notes;
+  }
+
+  /**
+   * The asynchronous half of refreshBaseBeforeBranch: best-effort fetch,
+   * then a fast-forward merge of `@{u}` when standing on `base` with an
+   * upstream. Never throws; the outcome is recorded as a base-refresh
+   * timing record so it is actually visible after the receipt returned.
+   */
+  async function refreshBaseAsync(root: string, base: string): Promise<void> {
+    const at = new Date().toISOString();
+    let outcome: "fetched-ff" | "diverged" | "offline" | "no-upstream" | "not-on-base" = "offline";
+    let note = "";
     let fetched = false;
     try {
-      execFileSync("git", ["fetch", "--quiet"], { cwd: root, encoding: "utf8" });
+      await runGitAsync(root, ["fetch", "--quiet"]);
       fetched = true;
     } catch {
-      notes.push(`基准分支 ${base} 未能从远端更新（git fetch 失败，可能离线）—— 它可能落后于远端。`);
+      outcome = "offline";
+      note = `基准分支 ${base} 未能从远端更新（git fetch 失败，可能离线）—— 它可能落后于远端。`;
     }
-    // Fast-forward only, and only when actually standing on base (the common
-    // case at branch-cut time). No upstream ⇒ nothing to fast-forward to.
-    if (fetched && currentBranch(root) === base) {
-      let hasUpstream = false;
-      try {
-        execFileSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], { cwd: root, encoding: "utf8" });
-        hasUpstream = true;
-      } catch { /* no tracking branch */ }
-      if (hasUpstream) {
+    if (fetched) {
+      const branchNow = await currentBranchAsync(root);
+      if (branchNow !== base) {
+        outcome = "not-on-base";
+        note = `基准分支 ${base} 的远端更新已拉取，但当前已不在 ${base} 上（在 ${branchNow ?? "?"}），跳过 ff-only 合并。`;
+      } else {
+        let hasUpstream = false;
         try {
-          execFileSync("git", ["merge", "--ff-only", "@{u}"], { cwd: root, encoding: "utf8" });
-          notes.push(`基准分支 ${base} 已快进到远端最新。`);
-        } catch {
-          notes.push(`基准分支 ${base} 与远端已分叉，门禁不会替你 merge/rebase —— 请自行处理后再开工作分支（本次仍按当前 ${base} 建分支）。`);
+          await runGitAsync(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+          hasUpstream = true;
+        } catch { /* no tracking branch */ }
+        if (!hasUpstream) {
+          outcome = "no-upstream";
+          note = `基准分支 ${base} 没有上游跟踪分支，远端更新已拉取但未合并。`;
+        } else {
+          try {
+            await runGitAsync(root, ["merge", "--ff-only", "@{u}"]);
+            outcome = "fetched-ff";
+            note = `基准分支 ${base} 已快进到远端最新。`;
+          } catch {
+            outcome = "diverged";
+            note = `基准分支 ${base} 与远端已分叉，门禁不会替你 merge/rebase —— 请自行处理后再开工作分支（本次仍按当前 ${base} 建分支）。`;
+          }
         }
       }
     }
-    return notes;
+    try {
+      appendTiming(root, { kind: "base-refresh", at, repo: root, base, outcome, note });
+    } catch { /* diagnostics only */ }
+  }
+
+  /** Run a git command async; resolves on success, rejects on failure. */
+  function runGitAsync(root: string, args: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn("git", args, { cwd: root, stdio: "ignore" });
+      // Background by design: the fetch must never keep the host alive.
+      child.unref?.();
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`git ${args[0]} exited ${code}`));
+      });
+    });
+  }
+
+  /** Async current-branch read (mirrors currentBranch's rebase fallback). */
+  async function currentBranchAsync(root: string): Promise<string | undefined> {
+    try {
+      const name = (await runGitOutput(root, ["symbolic-ref", "--quiet", "--short", "HEAD"])).trim();
+      if (name) return name;
+    } catch { /* detached — maybe a rebase */ }
+    return undefined;
+  }
+
+  /** Run git capturing stdout; rejects on failure. */
+  function runGitOutput(root: string, args: string[]): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const child = spawn("git", args, { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
+      let out = "";
+      child.stdout.on("data", (d) => { out += String(d); });
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (code === 0) resolve(out);
+        else reject(new Error(`git ${args[0]} exited ${code}`));
+      });
+    });
   }
 
   /**
@@ -2045,29 +2274,31 @@ export default function reviewGate(pi: ExtensionAPI) {
     const landed = runSquashLanding(primaryRepoRoot, work, base);
     if (landed.ok) {
       delete st.mergeConflict;
-      // WHERE THE WORKTREE IS LEFT STANDING, and it depends on whose worktree
-      // it is (R-26).
+      // WHERE THE WORKTREE IS LEFT STANDING (R-26, amended 2026-08-30).
       //
-      // An ordinary session goes back to its work branch: standing on the base
-      // would make its NEXT checkpoint illegal (a commit may only land on the
-      // work branch), for no reason the agent could see.
+      // THE SESSION'S WORK IS LANDED: declare_done is a task's final act,
+      // so the worktree is left on the BASE branch — a clean, honest
+      // finish (user decision). The work branch record is cleared too:
+      // a commit may only land on a recorded work branch, and there is
+      // nothing left to commit, so the next checkpoint fails closed
+      // until the user runs setup_workspace again for a NEW task.
       //
-      // An ORCHESTRATION CHILD borrowed this worktree from its supervisor, and
-      // it is finished with it. Measured on 2026-08-30: the child merged, went
-      // back to its own intermediate branch, and left the SUPERVISOR's
-      // worktree standing there — so the project manager's view of its own
-      // repository was two commits stale (`wc -l` on a file that had already
-      // been split, a new module reported as "does not exist"), and the next
-      // serial child spawned from it would have branched off the wrong
-      // baseline. Handing the worktree back on the BASE branch is what makes
-      // "borrowed" honest.
-      const handBackToBase = isOrchestrationChild();
+      // An ORCHESTRATION CHILD borrowed this worktree from its supervisor,
+      // and it is finished with it. Measured on 2026-08-30: the child
+      // merged, went back to its own intermediate branch, and left the
+      // SUPERVISOR's worktree standing there — so the project manager's
+      // view of its own repository was two commits stale. Handing the
+      // worktree back on the BASE branch is what makes "borrowed" honest;
+      // ordinary sessions now finish on the base for the same reason.
+      // The merge already ran with base checked out (the venue algebra
+      // checked it out above); leave the worktree standing there. Nothing
+      // to switch — the session's task is over.
       try {
-        if (!handBackToBase) {
-          execFileSync("git", ["checkout", work], { cwd: primaryRepoRoot, encoding: "utf8" });
-          logBranchOp(st, { op: "checkout", from: base, to: work, at: new Date().toISOString() });
-        }
-      } catch { /* the merge landed; where we stand is diagnostics */ }
+        // The work branch has served its purpose; forget it so a stray
+        // checkpoint cannot land on a branch whose work is merged.
+        delete st.workBranch;
+        delete st.baseBranch;
+      } catch { /* diagnostics */ }
 
       logBranchOp(st, { op: "merge", work, base, at: new Date().toISOString() });
       persist(ctx);
@@ -2518,6 +2749,48 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * The gate facts the belowEditor widget renders: workspace/branch,
+   * verdicts, unmet requirements. Computed from the live session state and
+   * the same unmetRequirements() the ship gate uses — the widget shows
+   * exactly what blocks shipping. Display-only: it never feeds an
+   * enforcement path.
+   */
+  function gateWidgetFacts(): GateWidgetFacts {
+    const fp = computeFingerprint(cwd);
+    const problems = (state.hasCodeChange || state.hasDocChange)
+      ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
+      : [];
+    const completion: string[] = [];
+    for (const root of sessionRepos) {
+      // READ-ONLY: enforcementStateFor never creates a sidecar/cache entry,
+      // so a mere widget refresh cannot turn a repo with "no usable gate
+      // state" into one that looks tracked (measured regression, 2026-08-31).
+      const st = root === primaryRepoRoot ? state : enforcementStateFor(root);
+      if (!st) continue;
+      for (const p of copilotProblemsFor(st)) {
+        completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+      }
+    }
+    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    return {
+      mode: state.taskMode,
+      baseBranch: state.baseBranch,
+      workBranch: state.workBranch,
+      dirtyCount: state.worktreeDirty && !state.worktreeDirty.settled ? state.worktreeDirty.files.length : 0,
+      edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
+      review: state.review.verdict as GateWidgetFacts["review"],
+      reviewAt: state.review.at ?? undefined,
+      rounds: state.rounds.length,
+      precommit: state.precommit.verdict as GateWidgetFacts["precommit"],
+      precommitAt: state.precommit.at ?? undefined,
+      precommitFast: state.precommit.verdict === "PASS" && state.precommit.testScope !== undefined && state.precommit.testScope !== "full",
+      goalApproved: loopGoalConfirmed(),
+      copilotOpen: completion.some((p) => p.includes("Copilot")),
+      unmet: [...problems, ...completion],
+    };
+  }
+
   function updateWidget(ctx: ExtensionContext) {
     // Idempotent re-arm (round-2 P2: the session_shutdown comment promised
     // this and it did not exist): every widget-refresh path — the 5s timer
@@ -2542,11 +2815,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
     if (!hasUI) return;
-    // belowEditor — agent model config (sub-agent runs were retired with
-    // the pi-subagents companion 2026-09-06).
+    // belowEditor — the gate status panel. Content-compared so pi only
+    // re-renders when something actually changed.
     try {
       const modelLines = modelConfigWidgetLines();
-      const lines = modelLines;
+      const lines = [...buildGateWidget(gateWidgetFacts()), ...(modelLines.length ? ["", ...modelLines] : [])];
       const key = lines.join("\n");
       if (key !== lastAgentsWidget) {
         lastAgentsWidget = key;
@@ -2674,6 +2947,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // end its turn with children still running and gates unmet.
     loopArmed = isEnforcedMode(mode);
     continuationsInjected = 0;
+    orchestratorContinuations = 0; // goal 6 — reset with the loop budget
     completionContinuations = 0;
     loopStall = undefined; // a mode decision is a change of circumstances
     stallNoticeShown = false;
@@ -3277,7 +3551,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // working, whoever asked it to — including a human typing straight
           // into the pane, which no orchestration tool can observe.
           if (s.completion) delete s.completion;
-          loopArmed = true;
+          armLoop();
           if (s.pausedQuestion) delete s.pausedQuestion;
           dirty = true;
           clearBypassToken(); // any edit invalidates a standing arbiter bypass
@@ -3330,7 +3604,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // is not finished any more, so the completion an orchestrator reads
         // must go with it.
         if (state.completion) delete state.completion;
-        loopArmed = true;
+        armLoop();
         // The agent resumed working on its own — a standing question pause
         // (ask_user) is moot; clear it so the loop enforces again.
         if (state.pausedQuestion) delete state.pausedQuestion;
@@ -3414,7 +3688,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             const st = root === primaryRepoRoot ? state : stateForRepo(root);
             st.copilot = armCopilotReview(st.copilot, nowIso);
             persistRepo(ctx as unknown as ExtensionContext, root);
-            loopArmed = true;
+            armLoop();
           }
         }
       }
@@ -5379,6 +5653,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // auto-continuations. Like rounds above, this only clears satisfied
       // history — it cannot loosen the ship gate.
       continuationsInjected = 0;
+      orchestratorContinuations = 0; // goal 6 — reset with the loop budget
       completionContinuations = 0;
       loopStall = undefined; // a completed task is real progress
       stallNoticeShown = false;
@@ -5467,7 +5742,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
     repoDir: (root) => repoDirFor(root),
     copilotEnabled: (st) => copilotEnabled(st),
-    armLoop: () => { loopArmed = true; },
+    armLoop: () => { armLoop(); },
     log: (message) => log(message),
     gh: {
       resolveOpenPr: (dir, signal) => resolveOpenPr(dir, signal),
@@ -5531,7 +5806,15 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
       // ---- 1. the dirty worktree, if there is one ----
-      let files = dirtyFiles(root);
+      // 2026-08-31 (user bug): files THIS SESSION edited through the gate's
+      // edit tools are this session's own work, NOT pre-existing changes —
+      // asking "how do you want to handle these?" about them would make the
+      // user confirm (or worse, discard) work the agent just did. They are
+      // filtered out of the pre-existing set before the dialog; what remains
+      // is genuinely somebody else's (or a previous session's) uncommitted
+      // work, which is exactly what setup_workspace exists to settle.
+      const sessionOwn = new Set(sessionEditedPaths);
+      let files = dirtyFiles(root).filter((f) => !sessionOwn.has(f.path));
       if (files.length) {
         showToUser(uiCtx, "───── 工作区有未提交改动 ─────", describeDirty(files));
         const choices = Object.values(WORKTREE_CHOICES);
@@ -5828,8 +6111,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     persist: (ctx) => persist(ctx as unknown as ExtensionContext),
     setLoopArmed: (armed) => { loopArmed = armed; },
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as Parameters<typeof showToUser>[0], lead, body),
-    confirmBounded: (uiCtx, title, message, pointer) =>
-      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message, pointer),
+    confirmBounded: (uiCtx, title, message, pointer, signal) =>
+      confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message, pointer, signal),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
     cwd,
     sessionEditedPaths: () => [...sessionEditedPaths],
@@ -5857,7 +6140,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // re-arm auto-continuation so the loop enforces again from this turn on.
     if (state.pausedQuestion && event.source !== "extension") {
       delete state.pausedQuestion;
-      if (state.taskMode !== "explore" && state.taskMode !== "normal") loopArmed = true;
+      if (state.taskMode !== "explore" && state.taskMode !== "normal") armLoop();
       persist(ctx);
     }
   });
@@ -6233,6 +6516,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         if (choice === "Pause gate and wait") {
           loopArmed = false;
+          arbitrationPaused = true; // P1: the revival timer must respect this
           appendLesson(`arbitration #${appealsUsed()} HUMAN→pause`);
           return { content: [{ type: "text", text: "review-gate: gate PAUSED by the human — auto-continuation disarmed. No bypass issued. Wait for further instructions." }], details: { decision: "HUMAN", human: "pause" } };
         }
@@ -6299,6 +6583,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
 
+    // The revival clock for the LOOP session: armed here so a turn that
+    // ends under any of the six guards above still gets its minute-level
+    // second chance. (The orchestrator arms it in orchestratorSettled.)
+    startRevivalTimer(ctx);
     const fp = computeFingerprint(cwd);
     // Ship-gate requirements only exist once this session touched something.
     const problems = (state.hasCodeChange || state.hasDocChange)
@@ -6701,6 +6989,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The supervision probe is a timer this session owns; a leaked one would
     // keep waking a session that is gone.
     stopSupervisionTimer();
+    // The revival timer is this session's own clock; a leaked one would
+    // keep reviving a session that is gone.
+    stopRevivalTimer();
     // Same for the child heartbeat: a leaked timer would keep reporting on
     // behalf of a session that is gone, and its supervisor would read those
     // reports as a healthy child.
@@ -6815,8 +7106,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function resetSessionState(): void {
     state = emptyState(state.sessionId, state.maxRounds);
-    loopArmed = true;
+    armLoop();
     continuationsInjected = 0;
+    orchestratorContinuations = 0; // goal 6 — reset with the loop budget
     completionContinuations = 0;
     loopStall = undefined;
     stallNoticeShown = false;

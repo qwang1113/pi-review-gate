@@ -418,8 +418,10 @@ const INSTRUCT_MODES = new Set(["steer", "followUp", "interrupt"]);
  *
  *   steer      cut into the current turn (pi.sendUserMessage, deliverAs steer)
  *   followUp   let it finish, then read this (deliverAs followUp)
- *   interrupt  stop what it is doing (ctx.abort()), no text
- *
+ *   interrupt  HIGHEST priority: stop what it is doing (ctx.abort()) and read
+ *              the message immediately. Since 2026-08-31 it carries a text —
+ *              a bare abort needed a second followUp to say anything; one call
+ *              now means "stop and do THIS instead, now".
  * ── WHY NOTHING IS TYPED ──
  *
  * The old path was `tmux send-keys`, and it produced four separate measured
@@ -455,8 +457,13 @@ export async function dispatchInstruct(
   }
   const mode = rawMode as ChannelInstructRecord["mode"];
   const message = String(params.message ?? "").trim();
-  if (mode !== "interrupt" && !message) {
-    return fail("review-gate: 要发的内容是空的（只有 mode:\"interrupt\" 可以不带正文）。");
+  // 2026-08-31 (UX): `interrupt` may now carry a message. It used to be a
+  // bare abort ("stop what you are doing") that needed a SECOND followUp to
+  // say anything — two calls for what is really one intent: "stop and do
+  // THIS instead, now". With a text it becomes the highest-priority delivery:
+  // the child aborts its current turn and reads the message immediately.
+  if (!message) {
+    return fail("review-gate: 要发的内容是空的（连 interrupt 打断也要说一句为什么/下一步是什么）。");
   }
 
   const instructId = newChannelId("ins", deps.now());
@@ -510,7 +517,7 @@ export async function dispatchInstruct(
   return reply(
     `review-gate: 已通过通道下发给子会话 ${childId}（mode=${mode}）。${check.verdict.summary}。\n` +
     (mode === "interrupt"
-      ? "它已经中断当前这一轮；下一条 followUp 才会让它重新开始干活。"
+      ? "它已中断当前这一轮，并立即收到这条消息（最高优先级）。"
       : mode === "steer"
         ? "它会在当前这一轮里就读到这条消息。"
         : "它会在跑完手上这一轮之后读到这条消息。"),

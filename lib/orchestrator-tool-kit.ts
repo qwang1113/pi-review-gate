@@ -56,6 +56,11 @@ export function toolFail(text: string, details?: Record<string, unknown>): ToolR
  * the refusal points at how the role is actually entered.
  */
 export function requireOrchestratorMode(deps: OrchestratorDeps): ToolReply | undefined {
+  // Symmetric re-arm (2026-08-30): every orchestration-tool execution counts
+  // as the project manager's WORK, the same way an edit is a loop session's
+  // work. Fired only when the call is LEGITIMATE (orchestrator mode), so a
+  // loop session mis-calling an orchestration tool cannot re-arm its own loop.
+  if (deps.taskMode() === "orchestrator") deps.onToolCall?.("orchestrator");
   if (deps.taskMode() === "orchestrator") return undefined;
   return toolFail(
     "review-gate: 编排工具只在 orchestrator（项目经理）模式下可用。" +

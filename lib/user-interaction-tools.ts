@@ -86,7 +86,7 @@ export interface UserInteractionToolDeps {
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
   /** `ui.confirm` with the dialog-height budget applied (never bypassed). */
-  confirmBounded(uiCtx: unknown, title: string, message: string, pointer?: string): Promise<boolean>;
+  confirmBounded(uiCtx: unknown, title: string, message: string, pointer?: string, signal?: AbortSignal): Promise<boolean>;
   /**
    * Raise a dialog EITHER the human or the orchestrator may answer; whoever
    * answers first wins, and the other side's box comes off the screen.
@@ -127,7 +127,7 @@ export type ConsentToolDeps = Pick<
   | "state" | "persist" | "showToUser" | "confirmBounded" | "cwd"
   | "sessionEditedPaths" | "commitsAheadOfBase" | "scopeLimitDeclined"
   | "declineScopeLimit" | "sensitiveGrants" | "storeSensitiveGrants"
-  | "sensitiveDeclinedPaths" | "log"
+  | "sensitiveDeclinedPaths" | "log" | "askEitherSide"
 >;
 
 // ---------- ask_user ----------

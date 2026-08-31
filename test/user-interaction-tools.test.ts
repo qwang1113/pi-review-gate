@@ -88,7 +88,13 @@ function fake(over: Partial<Fake> = {}): Fake {
     },
     askEitherSide: async (request) => {
       f.asked.push(request.title);
-      return f.answers.shift();
+      if (f.answers.length > 0) return f.answers.shift()!;
+      if (request.topic === "scope-limit" || request.topic === "sensitive-edit") {
+        // Consent dialogs are SELECTs: agreed = first option.
+        if (f.confirmAnswer === "throw") throw new Error("no dialog here");
+        return f.confirmAnswer === true ? request.options[0] : undefined;
+      }
+      return undefined; // ask_user without an explicit answer is unanswered
     },
     cwd: f.cwd,
     sessionEditedPaths: () => f.sessionEdited,
@@ -215,7 +221,7 @@ test("request_scope_limit: a previous decline locks the session, before any dial
   const reply = await call(f, "request_scope_limit", { reason: "都是既有改动" });
   assert.equal(reply.isError, true);
   assert.match(textOf(reply), /already DECLINED/);
-  assert.deepEqual(f.confirms, [], "a locked session must not raise the dialog again");
+  assert.deepEqual(f.asked, [], "a locked session must not raise the dialog again");
 });
 
 test("request_scope_limit: no UI fails closed", async () => {
@@ -249,6 +255,21 @@ test("request_scope_limit: granted narrows arming to the session's own edits", a
   assert.equal(f.st.hasCodeChange, true, "arming is re-derived from the session's own edits");
   assert.equal(f.persists, 1);
   assert.match(textOf(reply), /GRANTED the scope limit/);
+});
+
+test("request_scope_limit: the consent dialog goes through the channel with a scope-limit topic (orchestrator-answerable)", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rg-scope-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  git(dir, ["init", "-q"]);
+  writeFileSync(join(dir, "old.ts"), "export const a = 1;\n");
+  writeFileSync(join(dir, "mine.ts"), "export const b = 2;\n");
+  const f = fake({ cwd: dir, sessionEdited: ["mine.ts"] });
+  // The project manager answers through the channel (option 1 = agree).
+  f.answers.push("同意缩小审查范围");
+  const reply = await call(f, "request_scope_limit", { reason: "既有改动来自上一个会话" });
+  assert.equal(reply.details?.granted, true);
+  assert.equal(f.asked.length, 1, "the consent dialog is raised exactly once, through askEitherSide");
+  assert.match(f.asked[0], /审查范围缩小/);
 });
 
 test("request_scope_limit: a dialog that could not be SHOWN is not a decline", async (t) => {
@@ -286,7 +307,7 @@ test("request_sensitive_edit: a non-sensitive path needs no authorization", asyn
   const reply = await call(f, "request_sensitive_edit", { path: "lib/thing.ts", reason: "改逻辑" });
   assert.equal(reply.isError, true);
   assert.match(textOf(reply), /is not a sensitive file/);
-  assert.deepEqual(f.confirms, []);
+  assert.deepEqual(f.asked, []);
 });
 
 test("SECURITY: request_sensitive_edit refuses gate-integrity paths before any dialog", async () => {
@@ -296,7 +317,7 @@ test("SECURITY: request_sensitive_edit refuses gate-integrity paths before any d
     assert.equal(reply.isError, true, `${path} must be refused`);
     assert.match(textOf(reply), /never authorizable from here|part of the gate's own enforcement/);
   }
-  assert.deepEqual(f.confirms, [], "the user is never asked to disarm the gate");
+  assert.deepEqual(f.asked, [], "the user is never asked to disarm the gate");
   assert.deepEqual(f.grants, []);
 });
 
@@ -305,12 +326,12 @@ test("request_sensitive_edit: a declined path is locked for the session", async 
   const first = await call(f, "request_sensitive_edit", { path: ".env", reason: "加一个变量" });
   assert.equal(first.isError, true);
   assert.match(textOf(first), /DECLINED editing/);
-  assert.equal(f.confirms.length, 1);
+  assert.equal(f.asked.length, 1);
 
   const second = await call(f, "request_sensitive_edit", { path: ".env", reason: "再试一次" });
   assert.equal(second.isError, true);
   assert.match(textOf(second), /already DECLINED/);
-  assert.equal(f.confirms.length, 1, "a locked path must never raise a second dialog");
+  assert.equal(f.asked.length, 1, "a locked path must never raise a second dialog");
 });
 
 test("request_sensitive_edit: an unshowable dialog fails closed WITHOUT locking the path", async () => {
@@ -337,7 +358,7 @@ test("request_sensitive_edit: granted issues ONE bounded, unpersisted grant", as
   // A live grant is reported, not re-asked.
   const again = await call(f, "request_sensitive_edit", { path: ".env", reason: "同一处改动" });
   assert.equal(again.details?.alreadyGranted, true);
-  assert.equal(f.confirms.length, 1);
+  assert.equal(f.asked.length, 1);
 });
 
 test("request_sensitive_edit: no UI fails closed", async () => {

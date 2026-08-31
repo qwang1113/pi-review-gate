@@ -267,4 +267,23 @@ export interface OrchestratorDeps {
 
   /** This session's transcript path, handed to a successor on relay. */
   sessionTranscriptPath(): string | undefined;
+
+  /**
+   * Fired on every orchestration-tool execution (2026-08-30, symmetric
+   * re-arm).
+   *
+   * The extension wires this to re-arm `loopArmed` — the loop session
+   * re-arms itself by EDITING, and an orchestrator writes no code
+   * (constraint 2), so its work (plan, spawn, instruct, wait, ...) is the
+   * equivalent motion. Without this, one early return under `!loopArmed`
+   * would leave the project manager permanently disarmed.
+   */
+  onToolCall?(name: string): void;
+
+  /**
+   * Fired when THIS session handed its orchestration to a successor
+   * (`orchestrator_handoff`). The extension sets its `handedOff` flag so
+   * the revival timer leaves the (voluntarily) retired session alone.
+   */
+  onHandoff?(): void;
 }

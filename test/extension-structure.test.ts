@@ -1940,6 +1940,8 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   const drainAt = SRC.indexOf("async function drainChildInstructions(");
   const drain = SRC.slice(drainAt, drainAt + 2600);
   assert.match(drain, /pi\.sendUserMessage\(text, \{ deliverAs: instruction\.mode \}\)/);
+  assert.match(drain, /deliverAs: "steer"/,
+    "an interrupt WITH text aborts then delivers the message immediately (2026-08-31)");
   assert.match(drain, /ctx\.abort\?\.\(\)/, "interrupt is ctx.abort(), not a Ctrl-C keystroke");
   assert.match(drain, /acknowledgeInstruct\(binding, instruction\.instructId, false/,
     "a failure is acknowledged AS a failure — the receipt the orchestrator builds on");
@@ -3511,6 +3513,18 @@ test("setup_workspace honors params.branch on a protected branch (2026-08-30)", 
     "the dialog names the reuse behavior");
 });
 
+test("setup_workspace filters THIS session's own edits out of the pre-existing dialog (2026-08-31)", () => {
+  // User bug: calling setup_workspace AFTER editing made the gate ask about
+  // (or worse, offer to discard) the session's own work as if it were
+  // pre-existing. The pre-existing set must exclude files the session edited
+  // through the gate's own edit tools (sessionEditedPaths).
+  const body = windowOf('name: "setup_workspace"', "registerUserInteractionTools(pi, {", "setup_workspace");
+  assert.match(body, /sessionOwn = new Set\(sessionEditedPaths\)/,
+    "the session's own edited paths are collected before the dirty check");
+  assert.match(body, /dirtyFiles\(root\)\.filter\(\(f\) => !sessionOwn\.has\(f\.path\)\)/,
+    "the dirty list excludes this session's own edits before the dialog");
+});
+
 test("loop mode decision reminds to setup_workspace before work (2026-08-30)", () => {
   // The worktree/branch used to be settled only at the first judge_submit
   // refusal — far too late, after the edits. The loop-mode decision point
@@ -3869,7 +3883,7 @@ test("R-3: an orchestrator never receives the LOOP's continuation — its criter
     "it branches BEFORE the loop's own unmet-requirement computation");
   const own = windowOf("function orchestratorSettled(", "\n  }", "orchestratorSettled");
   assert.match(own, /buildOrchestratorResume\(/, "and it has a continuation of its own");
-  assert.match(own, /orchestrationDoneProblems\(\)/, "built from the PLAN");
+  assert.match(own, /sessionExitProblems\(\)/, "built from the UNIFIED exit criterion");
   assert.match(own, /startSupervisionTimer\(ctx\)/, "which also arms the background supervisor");
   assert.doesNotMatch(own, /unmetRequirements|LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/,
     "and never from the loop's gates");
@@ -3892,15 +3906,30 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
 });
 
 
-test("R-26: an orchestration CHILD hands the borrowed worktree back on the BASE branch", () => {
-  // The child merged, checked itself back out onto its own intermediate
-  // branch, and left the SUPERVISOR's worktree standing there — so the
-  // project manager's view of its own repository was two commits stale, and
-  // the next serial child would have branched off the wrong baseline.
+test("R-26 (amended): declare_done leaves the worktree on the BASE branch for EVERY session", () => {
+  // Originally the child-only rule: an orchestration child merged and went
+  // back to its own intermediate branch, leaving the supervisor's worktree
+  // stale — so it had to hand the borrowed worktree back on the base. An
+  // ordinary session went back to its work branch so its next checkpoint
+  // stayed legal. Amended 2026-08-30 (user decision): declare_done is a
+  // task's FINAL act, so EVERY session lands on the base — and the branch
+  // records are cleared, so a stray checkpoint fails closed until the user
+  // runs setup_workspace for a new task.
   const finish = windowOf("function finishWorkBranch(", "\n  }", "finishWorkBranch");
-  assert.match(finish, /const handBackToBase = isOrchestrationChild\(\)/);
-  assert.match(finish, /if \(!handBackToBase\) \{/,
-    "an ordinary session still returns to its work branch (its next checkpoint depends on it)");
+  assert.doesNotMatch(finish, /if \(!handBackToBase\)/, "no session-specific return-to-work branch remains");
+  assert.match(finish, /delete st\.workBranch/, "the work branch record is cleared after landing");
+  // The success path (from the landed merge to the merge log) must contain
+  // NO checkout at all — the venue already checked out base, and nothing
+  // switches away from it. Bounded precisely so a re-added checkout on the
+  // work branch cannot hide above the two `delete`s.
+  const landedAt = finish.indexOf("if (landed.ok) {", finish.indexOf("runSquashLanding"));
+  const mergeLogAt = finish.indexOf("op: \"merge\"", landedAt);
+  const successPath = finish.slice(landedAt, mergeLogAt);
+  assert.doesNotMatch(successPath, /checkout/, "the success path switches to NOTHING — it stays on the base");
+  assert.match(successPath, /delete st\.workBranch/, "the clearing happens inside the success path");
+  assert.match(finish, /The squash failed[\s\S]*execFileSync\("git", \["checkout", work\]/,
+    "the conflict path still restores the work branch via a real git checkout");
+  assert.match(finish, /delete st\.baseBranch/, "and so is the base record — the task owns no branch anymore");
 });
 
 test("R3-5: an accepted declare_done WRITES the completion record, before the loop bookkeeping", () => {
@@ -4031,6 +4060,26 @@ test("SURVIVAL INVARIANT: every ENFORCED mode arms the loop, orchestrator includ
   assert.ok(advisoryReturns.length >= 2,
     "the advisory-mode early returns name explore and normal explicitly — orchestrator is never in that set");
 });
+
+test("REVIVAL TIMER: the human stops it respects are real bindings, not literals", () => {
+  // P1 (2026-08-30): `arbitrationPaused: false` was a literal — the fourth
+  // human stop was advertised in docs/module-map.md but never wired, so an
+  // arbiter ruling that paused the gate still woke the session every 60s.
+  // Every human-stop field the revival timer passes must read REAL state.
+  const revival = windowOf("function startRevivalTimer(", "function stopRevivalTimer", "startRevivalTimer");
+  assert.match(revival, /aborted: lastRunAborted/, "ESC pause reads the real abort flag");
+  assert.match(revival, /awaitingAnswer: !!state\.pausedQuestion/, "ask_user pause reads the real paused question");
+  assert.match(revival, /bypassed: state\.bypass\.active/, "bypass reads the real bypass state");
+  assert.match(revival, /arbitrationPaused,/, "arbitration pause reads the real flag, not a literal false");
+  assert.doesNotMatch(revival, /arbitrationPaused: false/, "no literal false may stand in for the arbitration stop");
+  // And the flag is SET where the human actually pauses, CLEARED where work
+  // resumes — armLoop() is the single re-arm path that clears it.
+  assert.match(SRC, /if \(choice === "Pause gate and wait"\) \{[\s\S]{0,200}?arbitrationPaused = true;/,
+    "the arbitration pause branch sets the flag");
+  const armLoop = windowOf("function armLoop()", "let arbitrationPaused", "armLoop");
+  assert.match(armLoop, /arbitrationPaused = false;/, "armLoop clears the arbitration pause");
+});
+
 
 test("the tmux backstop sits above /gate-bypass", () => {
   const handler = windowIn(

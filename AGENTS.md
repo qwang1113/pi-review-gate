@@ -360,9 +360,13 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 - **提问任意一方先答即生效**：子会话侧用 `AbortController` + `Promise.race`
   把「人在框里答」与「项目经理经通道答」并列，谁先答谁生效，另一边的框自动
   撤下。框始终弹着 —— 这就是项目经理死亡时的天然回退，因此**没有任何超时机制**。
+  2026-08-31 起 `request_scope_limit` / `request_sensitive_edit` 的 consent 框也走
+  同一通道：项目经理可代答（先答先生效），工具描述与本文已同步这个信任模型。
 - **投递走 `pi.sendUserMessage`**：`orchestrator_instruct({mode})` 把文本写进
-  通道，子会话自己的门禁用 pi 的 API 注入（`interrupt` 走 `ctx.abort()`）。
-  `send-keys` 投递路径已删除。
+  通道，子会话自己的门禁用 pi 的 API 注入。`mode` 即优先级：`interrupt`（最高，
+  2026-08-31 起可带正文 —— 中断当前 turn 并立即投递，一次调用表达「停下、做
+  这个」；旧版是空 abort，还要第二次 followUp 才说得了话）、`steer`（当前轮切
+  入）、`followUp`（等本轮跑完）。`send-keys` 投递路径已删除。
 - **`orchestrator_wait` 是项目经理的唯一信息入口**：它必然被调，所以凡是项目
   经理需要知道的都从回执里**推给它** —— 五块：健康快照、待答请求（结构化，
   含全部选项与正文）、死亡/僵死与可执行恢复动作、它自己的上下文用量与带时机

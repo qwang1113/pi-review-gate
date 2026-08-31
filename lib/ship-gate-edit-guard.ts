@@ -131,6 +131,25 @@ export async function evaluateEditCall(
   const primaryRepoRoot = deps.primaryRepoRoot();
   const taskMode = deps.taskMode();
   const path = coalesceToolPath(input);
+  // FAIL-CLOSED on a pathless edit call (reviewer P1, 2026-08-31):
+  // pi-hashline's replace/insert declare `path` OPTIONAL and auto-resolve it
+  // from the anchors INTERNALLY — but the gate sees the raw call, where an
+  // omitted path would silently skip the sensitive-file floor, the
+  // gate-owned exemption check, the orchestrator write restriction and the
+  // per-repo L8 binding below (every one of them keys on `path`/`absPath`).
+  // The tool itself requires a non-empty path to do anything, so refusing
+  // here costs nothing legitimate: the model re-sends with the path spelled
+  // out, and the gate then runs every check it is supposed to run.
+  if (!path) {
+    return {
+      block: true,
+      reason:
+        "review-gate: edit tool call without a `path` — the gate cannot attribute it to a repo, " +
+        "so every path-based check (sensitive files, gate-owned paths, the L8 goal, the " +
+        "orchestrator write restriction) would be skipped. Re-send the edit with the " +
+        "`path` parameter explicitly named; the gate needs it to run its checks.",
+    };
+  }
   // Match on the NORMALIZED path, not the raw one. `resolve` collapses `.`
   // and `..`, so `.pi/./precommit-cache.json` and `a/../.env` cannot slip
   // past a pattern that anchors on path segments. (The grant lookup below
