@@ -13,7 +13,6 @@ import {
   markChildDone,
   newChildId,
   normalizeRuntime,
-  pendingWorktrees,
   registerChild,
   runningTaskIds,
   vanishedChildren,
@@ -100,15 +99,6 @@ test("only a REGISTERED, open child is closable — the user's panes are unaddre
   if (!closed.ok) assert.match(closed.reason, /已经关闭/, "an already-closed child is a no-op, not an error to retry");
 });
 
-test("worktrees the gate created are tracked until their child closes", () => {
-  const runtime = runtimeWith(
-    child({ id: "a-1", worktree: "/tmp/wt/a" }),
-    child({ id: "b-1", paneId: "%3" }),
-  );
-  assert.deepEqual(pendingWorktrees(runtime).map((c) => c.id), ["a-1"],
-    "a child with no gate-created worktree has nothing to clean up");
-  assert.deepEqual(pendingWorktrees(markChildClosed(runtime, "a-1", NOW)), []);
-});
 
 // ---------------------------------------------------------------------------
 // Reading the runtime back from the (untrusted) sidecar
@@ -118,7 +108,7 @@ const GOOD_HASH = "a".repeat(64);
 
 test("a well-formed runtime survives a round trip", () => {
   const runtime = {
-    ...runtimeWith(child({ id: "a-1", worktree: "/tmp/wt/a" })),
+    ...runtimeWith(child({ id: "a-1" })),
     approvedPlanHash: GOOD_HASH,
     approvedPlanAt: NOW,
     ownPane: "%1",
@@ -184,7 +174,7 @@ test("the status rendering distinguishes the four states a child can be in", () 
   let runtime = runtimeWith(
     child({ id: "a-1", paneId: "%2" }),
     child({ id: "b-1", paneId: "%3", taskId: "b" }),
-    child({ id: "c-1", paneId: "%4", taskId: "c", worktree: "/tmp/wt/c" }),
+    child({ id: "c-1", paneId: "%4", taskId: "c" }),
   );
   runtime = markChildDone(runtime, "b-1", NOW);
   runtime = markChildClosed(runtime, "c-1", NOW);
@@ -192,7 +182,6 @@ test("the status rendering distinguishes the four states a child can be in", () 
   assert.match(text, /a-1 \[alive\]/);
   assert.match(text, /b-1 \[done（pane 仍在）\]/);
   assert.match(text, /c-1 \[closed\]/);
-  assert.match(text, /worktree=\/tmp\/wt\/c/);
   assert.equal(formatChildren(emptyRuntime("orch-abc-1"), []), "（还没有开过子会话）");
 
   const dead = formatChildren(runtimeWith(child({ id: "d-1", paneId: "%9" })), []);

@@ -261,7 +261,7 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 三个（`orchestrator-probe.ts` / `orchestrator-pane-read.ts` /
 `orchestrator-keys.ts` —— 它们的全部工作就是让**终端**可读），新增了四个：
 
-- **纯决策**：`orchestrator-gate.ts`（13 条硬约束；约束 7/10 已随隔离 worktree 与工作分支退役）、
+- **纯决策**：`orchestrator-gate.ts`（12 条硬约束；约束 7/10 已随隔离 worktree 与工作分支退役）、
   `orchestrator-boundaries.ts`（文件边界代数——同 repo 任务互斥、跨 repo 可并行的判据）、
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
   `orchestrator-plan-approval.ts`（**这次改动扩权了吗**——不扩权的边界细化不
@@ -455,7 +455,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `orchestrator-deps.ts` | 编排工具需要的依赖集合；host 类型本身住在 `tool-host.ts`，这里只 re-export |
 | `orchestrator-directives.ts` | 编排两侧的指令：项目经理拿全套契约，子会话只拿一句话 |
 | `orchestrator-dispatch.ts` | dispatch 半边：`orchestrator_spawn` / `orchestrator_instruct` |
-| `orchestrator-gate.ts` | 编排的 13 条硬约束（约束 7/10 于 2026-09-07 退役），写成纯决策以便逐条单测 |
+| `orchestrator-gate.ts` | 编排的 12 条硬约束（约束 7/10 于 2026-09-07 退役），写成纯决策以便逐条单测 |
 | `orchestrator-guard.ts` | tmux backstop：拦截绕过工具手写的 tmux 命令 |
 | `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash |
