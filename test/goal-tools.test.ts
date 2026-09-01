@@ -186,7 +186,10 @@ function fake(over: Partial<RecordFake> = {}): RecordFake {
     },
     showToUser: () => { f.surfaces.push("showToUser"); return true; },
     confirmBounded: async () => { f.surfaces.push("confirm"); return f.approve; },
-    askEitherSide: (_request, _hasUI, render) => render(new AbortController().signal),
+    askEitherSide: async (_request, _hasUI, render) => {
+      const answer = await render(new AbortController().signal);
+      return { answer, by: answer === undefined ? "dismissed" : "human", requestId: "r1", ...(f.rejectReason ? { reason: f.rejectReason } : {}) };
+    },
     loopGoalPath: (root) => `${root}/.pi/loop-goal.md`,
     loopGoalRelPath: ".pi/loop-goal.md",
     findProjectAgent: (_dir, name) =>
@@ -340,6 +343,20 @@ test("propose: the user's rejection carries their reason back, and nothing is wr
   assert.match(out.content[0]!.text, /退出条件 3 不可检查/);
   assert.deepEqual(f.written, []);
   assert.equal(f.st.loopGoal, undefined, "a rejected goal is not recorded as approved");
+});
+
+test("propose: the ORCHESTRATOR's decline reason (channel) is used as the rejection reason", async () => {
+  // The PM answered the goal dialog through the channel with a reason; the
+  // child's local input box is NOT consulted (the PM cannot see it).
+  const f = fake({ approve: false, rejectReason: undefined });
+  await doRecordGoalPrereview(f.deps, { goal: GOAL, auditor_output: AUDITOR_PASS }, {});
+  // Simulate the channel answer carrying a reason: the extension's askEitherSide
+  // returns the full outcome, so make the fake's askEitherSide inject it.
+  f.deps.askEitherSide = async () => ({ answer: "不认可，退回重谈", by: "orchestrator", requestId: "r1", reason: "验收标准 4 不可机械检查" });
+  const out = await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.equal(out.details?.approved, false);
+  assert.equal(out.details?.reason, "验收标准 4 不可机械检查", "the channel reason is the objection the agent renegotiates against");
+  assert.match(out.content[0]!.text, /验收标准 4 不可机械检查/);
 });
 
 test("propose: a file the gate cannot write means the approval was NOT recorded", async () => {

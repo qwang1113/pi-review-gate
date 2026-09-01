@@ -146,7 +146,7 @@ export function clampMaxParallel(value: unknown): number {
  * boundary checks unsound is a problem, and a plan with problems is not a
  * plan — callers must not fall back to a partially-understood one.
  */
-export function parsePlan(raw: unknown, now: string = new Date().toISOString()): PlanParseResult {
+export function parsePlan(raw: unknown, now: string = new Date().toISOString(), strictRepo = false): PlanParseResult {
   const problems: string[] = [];
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, problems: ["plan 必须是一个 JSON 对象"] };
@@ -193,6 +193,16 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString()):
     const declared = asStringArray(t.fileBoundaries);
     if (declared.length === 0) {
       problems.push(`${label} ("${id}") 必须声明 fileBoundaries（文件边界），并行调度与代批 goal 都靠它`);
+    }
+    // CONSTRAINT 6 (strict write path) — every task declares WHICH repo it
+    // works in. `repo` decides the child's cwd (orchestrator_dispatch), and a
+    // task without it silently lands in the orchestrator's OWN repo — the
+    // measured 2026-09-01 t2 deadlock (child spawned in onchain, goal bound
+    // to onchain, edits blocked for server-service-dashboard). The READ path
+    // stays lenient (strictRepo=false): legacy plans predating the field keep
+    // loading, scheduling against `a.repo ?? repoRoot` as before.
+    if (strictRepo && !asString(t.repo)) {
+      problems.push(`${label} ("${id}") 必须声明 repo（该任务工作的仓库绝对路径）——未声明时子会话 cwd 会落在项目经理自己的仓库`);
     }
     const { boundaries, problems: boundaryProblems } = normalizeBoundaries(declared);
     for (const bp of boundaryProblems) {

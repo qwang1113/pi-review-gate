@@ -147,7 +147,7 @@ export async function doRequestScopeLimit(
     "同意后：审查只需覆盖本会话自己的修改；若本会话没有任何修改，ship 拦截将解除。\n" +
     "拒绝后：AI 本会话内不能再次请求缩小范围。";
   try {
-    const picked = await deps.askEitherSide(
+    const outcome = await deps.askEitherSide(
       {
         dialogKind: "select",
         topic: "scope-limit",
@@ -158,7 +158,7 @@ export async function doRequestScopeLimit(
       uiCtx.hasUI === true,
       (signal) => deps.confirmBounded(uiCtx, consentTitle, consentBody, "（清单与理由见上方消息）", signal).then((yes) => (yes ? CONFIRM_OPTIONS[0] : undefined)),
     );
-    ok = picked !== undefined && picked === CONFIRM_OPTIONS[0];
+    ok = outcome.answer !== undefined && outcome.answer === CONFIRM_OPTIONS[0];
   } catch { dialogFailed = true; }
 
   // A dialog that could not be shown is NOT a decline: fail closed for
@@ -322,7 +322,7 @@ export async function doRequestSensitiveEdit(
     `文件（默认禁止 AI 写入）: ${shownPath}\n` +
     `AI 给出的理由（未经核实）: ${reason.slice(0, 300)}`;
   try {
-    const picked = await deps.askEitherSide(
+    const outcome = await deps.askEitherSide(
       {
         dialogKind: "select",
         topic: "sensitive-edit",
@@ -333,7 +333,7 @@ export async function doRequestSensitiveEdit(
       uiCtx.hasUI === true,
       (signal) => deps.confirmBounded(uiCtx, consentTitle, consentBody, "（完整路径与理由见上方消息）", signal).then((yes) => (yes ? CONFIRM_OPTIONS[0] : undefined)),
     );
-    ok = picked !== undefined && picked === CONFIRM_OPTIONS[0];
+    ok = outcome.answer !== undefined && outcome.answer === CONFIRM_OPTIONS[0];
   } catch { dialogFailed = true; }
 
   // A dialog that could not be shown is NOT a decline: fail closed for THIS

@@ -41,9 +41,9 @@ function fileGrainPlan(): OrchestratorPlan {
     intent: "把三个工具搬进各自的模块",
     maxParallel: 2,
     tasks: [
-      { id: "t1", title: "用户交互工具", fileBoundaries: ["lib/user-interaction-tools.ts"] },
-      { id: "t2", title: "命令层", fileBoundaries: ["lib/gate-command-tools.ts"], dependsOn: ["t1"] },
-      { id: "t3", title: "文档", fileBoundaries: ["docs/execution-model.md"], execution: "parallel" },
+      { id: "t1", title: "用户交互工具", repo: "/repo", fileBoundaries: ["lib/user-interaction-tools.ts"] },
+      { id: "t2", title: "命令层", repo: "/repo", fileBoundaries: ["lib/gate-command-tools.ts"], dependsOn: ["t1"] },
+      { id: "t3", title: "文档", repo: "/repo", fileBoundaries: ["docs/execution-model.md"], execution: "parallel" },
     ],
   });
   assert.ok(parsed.plan, parsed.problems.join("; "));
@@ -174,8 +174,8 @@ test("without a snapshot the gate cannot prove anything, so it asks — fail-clo
       title: "测试计划",
       intent: "两个互不重叠的任务",
       tasks: [
-        { id: "t1", title: "任务一", fileBoundaries: ["lib/a/", "lib/a2/"] },
-        { id: "t2", title: "任务二", fileBoundaries: ["lib/b/"] },
+        { id: "t1", title: "任务一", repo: "/repo", fileBoundaries: ["lib/a/", "lib/a2/"] },
+        { id: "t2", title: "任务二", repo: "/repo", fileBoundaries: ["lib/b/"] },
       ],
     },
   });
@@ -202,9 +202,10 @@ test("the tool carries the approval across a narrowing edit — and records why 
           id: "t1",
           title: "用户交互工具",
           fileBoundaries: ["lib/user-interaction-tools.ts", "lib/consent-request-tools.ts"],
+          repo: "/repo",
         },
-        { id: "t2", title: "命令层", fileBoundaries: ["lib/gate-command-tools.ts"], dependsOn: ["t1"] },
-        { id: "t3", title: "文档", fileBoundaries: ["docs/execution-model.md"], execution: "parallel" },
+        { id: "t2", title: "命令层", repo: "/repo", fileBoundaries: ["lib/gate-command-tools.ts"], dependsOn: ["t1"] },
+        { id: "t3", title: "文档", repo: "/repo", fileBoundaries: ["docs/execution-model.md"], execution: "parallel" },
       ],
     },
   });
@@ -232,9 +233,10 @@ test("a spawn is still authorized after the boundary was refined — the whole p
           id: "t1",
           title: "用户交互工具",
           fileBoundaries: ["lib/user-interaction-tools.ts", "lib/consent-request-tools.ts"],
+          repo: "/repo",
         },
-        { id: "t2", title: "命令层", fileBoundaries: ["lib/gate-command-tools.ts"], dependsOn: ["t1"] },
-        { id: "t3", title: "文档", fileBoundaries: ["docs/execution-model.md"], execution: "parallel" },
+        { id: "t2", title: "命令层", repo: "/repo", fileBoundaries: ["lib/gate-command-tools.ts"], dependsOn: ["t1"] },
+        { id: "t3", title: "文档", repo: "/repo", fileBoundaries: ["docs/execution-model.md"], execution: "parallel" },
       ],
     },
   });
@@ -254,9 +256,9 @@ test("`write` PRESERVES task status and note — a rewrite is not an execution r
       title: "测试计划",
       intent: "两个互不重叠的任务",
       tasks: [
-        { id: "t1", title: "任务一", fileBoundaries: ["lib/a/"] },
-        { id: "t2", title: "任务二", fileBoundaries: ["lib/b/"] },
-        { id: "t3", title: "新任务", fileBoundaries: ["docs/"] },
+        { id: "t1", title: "任务一", repo: "/repo", fileBoundaries: ["lib/a/"] },
+        { id: "t2", title: "任务二", repo: "/repo", fileBoundaries: ["lib/b/"] },
+        { id: "t3", title: "新任务", repo: "/repo", fileBoundaries: ["docs/"] },
       ],
     },
   });

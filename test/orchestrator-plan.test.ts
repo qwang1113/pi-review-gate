@@ -54,6 +54,35 @@ test("CONSTRAINT 5: a task with no declared file boundary is refused", () => {
   assert.equal(parsed.plan, undefined, "a plan with problems is not a plan");
 });
 
+test("CONSTRAINT 6 (write path): a task with no declared repo is refused when strictRepo", () => {
+  const parsed = parsePlan({
+    title: "t", intent: "i",
+    tasks: [{ id: "a", title: "server-service-dashboard: BFF proxy", fileBoundaries: ["src"] }],
+  }, NOW, true);
+  assert.equal(parsed.ok, false);
+  assert.ok(parsed.problems.some((p) => /repo/.test(p)),
+    "the strict write path must name the missing repo — it decides the child's cwd");
+  assert.equal(parsed.plan, undefined);
+});
+
+test("CONSTRAINT 6 (write path): a task WITH a repo passes strictRepo", () => {
+  const parsed = parsePlan({
+    title: "t", intent: "i",
+    tasks: [{ id: "a", title: "BFF proxy", repo: "/work/server-service-dashboard", fileBoundaries: ["src"] }],
+  }, NOW, true);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.plan?.tasks[0].repo, "/work/server-service-dashboard");
+});
+
+test("READ path stays lenient: a legacy plan without repo still loads (strictRepo defaults false)", () => {
+  const parsed = parsePlan({
+    title: "t", intent: "i",
+    tasks: [{ id: "a", title: "legacy", fileBoundaries: ["src"] }],
+  }, NOW);
+  assert.equal(parsed.ok, true, "an old plan without repo must keep loading");
+  assert.equal(parsed.plan?.tasks[0].repo, undefined);
+});
+
 test("validation reports EVERY problem, not just the first", () => {
   const parsed = parsePlan({
     tasks: [

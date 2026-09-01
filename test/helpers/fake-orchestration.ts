@@ -249,7 +249,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     childGateState: (cwd) => sidecars.get(cwd),
     sleep: async () => { /* the fake has no latency */ },
     resolveTaskRepo: (repo) =>
-      options.resolvableRepos?.includes(repo)
+      (options.resolvableRepos ?? ["/repo"]).includes(repo)
         ? { ok: true, root: repo }
         : { ok: false, reason: `fake: "${repo}" 不是已知仓库` },
     knownRepoRoots: () => ["/repo"],
