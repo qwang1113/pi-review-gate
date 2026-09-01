@@ -354,7 +354,7 @@ L8 edit gate 拦得住 edit，拦不住「读着读着忘了协商」。
 说出口。
 
 配套的 advisory（同一天）：loop 且无已批准 goal 时，read-only 工具（read/grep/ls
-等）的结果会被追加一行提醒——每 5 分钟最多一次、每会话最多 2 次，explore/normal
+等）的结果会被追加一行提醒——每 5 分钟最多一次、每会话最多 2 次，explore/normal/orchestrator
 不触发。不拦，只是把「你还没协商 goal」放回视线里。
 
 ## 六丙、哪个 pane 是哪个：颜色 + 状态标签
