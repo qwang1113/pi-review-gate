@@ -324,6 +324,22 @@ test("loop goal: set_gate_mode(loop) delivers Step 0 in the same turn it decides
   assert.match(SRC.slice(toolInjectAt - 200, toolInjectAt), /effective === "loop"/);
 });
 
+test("loop goal: the force-negotiate directive is injected in before_agent_start once the turn threshold is hit", () => {
+  // 2026-09-17 (user decision): past GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD un-goaled
+  // turns, the EVERY-TURN prompt (not only the RESUME injection) must escalate
+  // the goal directive — the agent cannot miss that negotiation is the only
+  // acceptable next action.
+  const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
+  assert.ok(handlerAt > 0, "handler must exist");
+  const injectAt = SRC.indexOf("buildGoalForceNegotiateDirective(", handlerAt);
+  assert.ok(injectAt > 0, "the force-negotiate directive must be injected in before_agent_start");
+  const guard = SRC.slice(injectAt - 300, injectAt);
+  assert.match(guard, /goalNegotiationOverdue\(state\.turnsWithoutGoal\)/,
+    "it must be guarded on the threshold, not unconditional");
+  assert.match(guard, /!goalConfirmed/,
+    "and only while the goal is still unconfirmed");
+});
+
 test("the loop goal gates SHIP at L1 only — hooks and verdict logic stay blind to it", () => {
   // USER REQUIREMENT (L8): an unapproved goal blocks commit/push/PR, because
   // negotiating the contract after the code is pushed is theatre. What did NOT
@@ -478,6 +494,27 @@ test("L2 STALL BREAKER: a running judge child counts as motion (never orphan a l
   assert.match(judgeProbe, /STALL_MOTION_MAX_AGE_SEC/, "judge-child motion credit must expire with age");
   assert.match(judgeProbe, /Date\.parse\(c\.spawnedAt\)/, "freshness is measured from the spawn timestamp");
   assert.match(judgeProbe, /Number\.isFinite/, "an unparseable spawnedAt must fail closed (no motion)");
+});
+
+test("L2 STALL BREAKER: an overdue goal negotiation counts as motion (never swallow the force-negotiate directive)", () => {
+  // 2026-09-17 P1 (reviewer): the force-negotiate directive exists for the
+  // read-only probe loop — no edits, no review, no rounds — which is EXACTLY
+  // the signature the stall breaker trips on (~4 unchanged settles). If the
+  // breaker returned before the RESUME injection, the directive at turn 60
+  // would never fire in the scenario it was built for. An overdue negotiation
+  // must therefore be treated as in-motion, the same exemption a running
+  // reviewer gets.
+  const start = SRC.indexOf('pi.on("agent_settled"');
+  const breakerAt = SRC.indexOf("evaluateStall(", start);
+  const injectAt = SRC.indexOf("REVIEW_GATE_RESUME", start);
+  const call = SRC.slice(breakerAt, injectAt);
+  assert.match(call, /inMotion:\s*judgeChildInMotion\(\) \|\| forceNegotiate/,
+    "an overdue negotiation must be in-motion so the directive survives the breaker");
+  // The fact is computed earlier in the handler (before the fingerprint, at the
+  // turn counter), so it exists by the time the stall check reads it.
+  const settledWindow = SRC.slice(start, injectAt);
+  assert.match(settledWindow, /const forceNegotiate = goalNegotiationOverdue\(state\.turnsWithoutGoal\)/,
+    "the forceNegotiate fact must be computed before the stall check");
 });
 
 

@@ -5994,6 +5994,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // only burn the budget telling the agent to retry the impossible — the
     // observed 7-injection quota burn. Stop injecting and name the cause.
     // Tighten-only: no verdict is granted, ship commands stay blocked.
+    // 2026-09-17 P1 (reviewer): the force-negotiate directive must NOT be
+    // swallowed by the stall breaker. The exact scenario it exists for — a
+    // read-only probe loop (no edits → fingerprint unchanged, no review →
+    // verdicts PENDING, no rounds) — trips the L2 stall breaker at ~4
+    // unchanged settles, which returns before the RESUME injection. So a
+    // stalled read-only loop would never see the directive at turn 60.
+    // A force-negotiate directive IS motion: it is the gate telling the agent
+    // to do the one thing that ends the loop. Treat an overdue negotiation as
+    // in-motion (same exemption a running reviewer gets), so the directive
+    // reaches the agent exactly when it is needed.
     const stall = evaluateStall(
       loopStall,
       progressSignature({
@@ -6008,7 +6018,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // will produce does not exist yet. Cutting the loop off there would
       // orphan the very review the gate is waiting for, so observable work in
       // flight counts as motion — until it is too old to be believable.
-      { inMotion: judgeChildInMotion() },
+      { inMotion: judgeChildInMotion() || forceNegotiate },
     );
     loopStall = stall;
     if (stall.stalled) {
@@ -6559,6 +6569,13 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       const goalConfirmed = loopGoalConfirmed();
       systemPrompt += "\n\n" + buildLoopGoalDirective(goal, goalConfirmed);
+      // 2026-09-17: once the un-goaled turn count hits the threshold, the
+      // standing goal directive is escalated to the force-negotiate form on
+      // EVERY turn (not only in the RESUME injection) — the agent cannot miss
+      // that the ONLY acceptable next action is goal negotiation.
+      if (!goalConfirmed && goalNegotiationOverdue(state.turnsWithoutGoal)) {
+        systemPrompt += "\n\n" + buildGoalForceNegotiateDirective(state.turnsWithoutGoal);
+      }
 
     }
 

@@ -55,11 +55,15 @@ test("the audit task carries the 7th check: requirements clarified & goal deriva
 test("the 7th check is mechanically checkable: decisions, task-book completeness, transcript", () => {
   const task = buildPlanAuditTask(planOf());
   // (a) unresolved plan.decisions are a P1.
+  // (a) unresolved plan.decisions are a P1 — the SPECIFIC verdict sentence,
+  // not a bare /P1/ that matches elsewhere in the template.
   assert.match(task, /plan\.decisions/);
   assert.match(task, /resolvedAt/);
-  // (b) a vague task book ("做分页" with no acceptance criteria) is a P1.
+  assert.match(task, /需求未澄清，P1/);
+  // (b) a vague task book ("做分页" with no acceptance criteria) is a P1 —
+  // the SPECIFIC threshold sentence, not the example alone.
   assert.match(task, /做分页/);
-  assert.match(task, /P1/);
+  assert.match(task, /没有交互\/边界\/验收标准的任务书是 P1/);
   // (c) the auditor is directed to the PM's transcript for ask_user/grillme evidence.
   assert.match(task, /transcript/);
   assert.match(task, /ask_user\/grillme/);
