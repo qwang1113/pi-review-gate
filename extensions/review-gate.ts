@@ -147,6 +147,7 @@ import {
   askThroughChannel,
   pendingInstructions,
   reportState,
+  type ChannelDialogOutcome,
   type ChannelDialogRequest,
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
@@ -1486,11 +1487,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     request: Omit<ChannelDialogRequest, "hasUI">,
     hasUI: boolean,
     render: (signal: AbortSignal) => Promise<string | undefined>,
-  ): Promise<string | undefined> {
+  ): Promise<ChannelDialogOutcome> {
     const binding = childBinding();
-    if (!binding) return hasUI ? render(new AbortController().signal) : undefined;
-    const outcome = await askThroughChannel(binding, { ...request, hasUI }, render);
-    return outcome.answer;
+    if (!binding) {
+      const answer = hasUI ? await render(new AbortController().signal) : undefined;
+      return { answer, by: "human", requestId: "" };
+    }
+    return askThroughChannel(binding, { ...request, hasUI }, render);
   }
 
 
@@ -4502,6 +4505,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   registerAdvisoryPrepareTools(internalHost, {
     resolveRepo: (requested) => resolveToolRepo(requested),
+    cwd,
     stateFor: (root) => stateForRepo(root),
     persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
     sessionDir: (ctx) => sessionDirFromContext(ctx, cwd),

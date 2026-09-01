@@ -123,6 +123,8 @@ export interface ChannelDialogOutcome {
   answer: string | undefined;
   by: "human" | "orchestrator" | "dismissed";
   requestId: string;
+  /** The orchestrator's decline reason (goal rejection), when one was given. */
+  reason?: string;
 }
 
 /** Raise the dialog. Must honour `signal` by resolving `undefined` when aborted. */
@@ -165,17 +167,17 @@ export async function askThroughChannel(
   let decided = false;
   let settle!: (outcome: ChannelDialogOutcome) => void;
   const decision = new Promise<ChannelDialogOutcome>((resolve) => { settle = resolve; });
-  const finish = (answer: string | undefined, by: ChannelDialogOutcome["by"]): void => {
+  const finish = (answer: string | undefined, by: ChannelDialogOutcome["by"], reason?: string): void => {
     if (decided) return;
     decided = true;
-    settle({ answer, by, requestId });
+    settle({ answer, by, requestId, ...(reason === undefined ? {} : { reason }) });
   };
 
-  const channelSide = watchForAnswer(binding, requestId, pollAbort.signal).then((answer) => {
-    if (answer === undefined || decided) return;
+  const channelSide = watchForAnswer(binding, requestId, pollAbort.signal).then((got) => {
+    if (got.answer === undefined || decided) return;
     // The orchestrator got there first: take the box off the human's screen.
     dialogAbort.abort();
-    finish(answer, "orchestrator");
+    finish(got.answer, "orchestrator", got.reason);
   });
 
   const humanSide = (request.hasUI
@@ -221,7 +223,7 @@ async function watchForAnswer(
   binding: ChildChannelBinding,
   requestId: string,
   signal: AbortSignal,
-): Promise<string | undefined> {
+): Promise<{ answer: string | undefined; reason?: string }> {
   const sleep = binding.sleep ?? defaultSleep;
   const interval = binding.pollMs ?? ANSWER_POLL_MS;
   const path = bindingPath(binding);
@@ -236,12 +238,14 @@ async function watchForAnswer(
     if (read) {
       cursor = read.cursor;
       for (const record of read.records) {
-        if (record.kind === "answer" && record.requestId === requestId) return record.answer;
+        if (record.kind === "answer" && record.requestId === requestId) {
+          return { answer: record.answer, reason: record.reason };
+        }
       }
     }
     await sleep(interval, signal);
   }
-  return undefined;
+  return { answer: undefined };
 }
 
 /**

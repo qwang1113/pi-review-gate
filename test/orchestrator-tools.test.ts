@@ -94,7 +94,9 @@ test("every tool refuses outside orchestrator mode", async () => {
 
 test("writing a plan does NOT approve it; the user's dialog does", async () => {
   const world = makeFakeWorld();
-  const written = await world.call("orchestrator_plan", { action: "write", plan: twoTaskPlan() });
+  // The write path is STRICT: every task must declare its repo (the child's cwd).
+  const plan = { ...twoTaskPlan(), tasks: twoTaskPlan().tasks.map((t) => ({ ...t, repo: "/repo" })) };
+  const written = await world.call("orchestrator_plan", { action: "write", plan });
   assert.equal(written.isError, undefined, replyText(written));
   assert.equal(world.runtime().approvedPlanHash, undefined, "writing must not approve");
 
@@ -102,6 +104,18 @@ test("writing a plan does NOT approve it; the user's dialog does", async () => {
   const submitted = await world.call("orchestrator_plan", { action: "submit" });
   assert.equal(submitted.isError, undefined, replyText(submitted));
   assert.ok(world.runtime().approvedPlanHash, "the user's yes is what approves it");
+});
+
+test("WRITE path REFUSES a task with no repo — the strict flag is pinned at the call site", async () => {
+  // The parsePlan unit tests pin the rule itself, but THIS pins the ACTION:
+  // if someone drops the `true` at the write call site, the deadlock (child
+  // spawned in the orchestrator's own repo) silently returns.
+  const world = makeFakeWorld();
+  const plan = { ...twoTaskPlan(), tasks: twoTaskPlan().tasks.map((t) => ({ ...t, repo: undefined })) };
+  const written = await world.call("orchestrator_plan", { action: "write", plan });
+  assert.equal(written.isError, true, replyText(written));
+  assert.match(replyText(written), /必须声明 repo/, "the refusal names the missing repo");
+  assert.equal(world.plan(), undefined, "nothing is written");
 });
 
 test("CONSTRAINT 1: spawning without an approved plan is refused", async () => {
@@ -152,11 +166,17 @@ test("a task declaring a repo spawns its child in THAT repo, not the orchestrato
     // point: knownRepoRoots membership must not gate the child's cwd.
     resolvableRepos: ["/other/repo"],
   });
-  const childId = await spawnT1(world);
+  const receipt = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  assert.equal(receipt.isError, undefined, replyText(receipt));
   const child = world.runtime().children[0]!;
   assert.equal(child.cwd, "/other/repo", "the registry records the task's repo as the child's cwd");
   const pane = world.panes.get(child.paneId)!;
   assert.equal(pane.cwd, "/other/repo", "tmux split-window -c receives the task's repo");
+  // Fix 2 — the success receipt names the child's cwd, so the PM always sees
+  // WHICH repo the child's gate is bound to (goal + edits).
+  const details = receipt.details as Record<string, unknown>;
+  assert.equal(details.cwd, "/other/repo", "the receipt names the child's cwd");
+  assert.match(replyText(receipt), /cwd[^\n]*\/other\/repo/, "the receipt text states the child's working directory");
 });
 
 test("a task declaring an unresolvable repo is REFUSED, never silently falling back", async () => {
@@ -418,6 +438,24 @@ test("a goal-approval request with no draft attached is REFUSED rather than appr
   const reply = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md" });
   assert.equal(reply.isError, true);
   assert.match(replyText(reply), /没有带上 goal 全文/);
+});
+
+test("declining a goal with `reason` writes it into the channel — the child renegotiates against it", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  world.childAsks(childId, {
+    requestId: "goal-1",
+    title: "认可这个 loop goal 吗？",
+    options: ["认可，写入 .pi/loop-goal.md", "不认可，退回重谈"],
+    payload: "# 目标\n退出条件 3 不可检查",
+    topic: "goal-approval",
+  });
+  const reply = await world.call("orchestrator_answer", { childId, answer: "不认可，退回重谈", reason: "退出条件 3 没有可检查的验收标准" });
+  assert.equal(reply.isError, undefined, replyText(reply));
+  const answer = world.channelOf(childId).find((r) => r.kind === "answer");
+  assert.ok(answer, "an answer record must be written");
+  assert.equal(answer.answer, "不认可，退回重谈");
+  assert.equal(answer.reason, "退出条件 3 没有可检查的验收标准", "the decline reason rides in the answer record");
 });
 
 test("sensitive-edit proxy answer: NO grant → the user's three-choice door in the PM pane decides", async () => {

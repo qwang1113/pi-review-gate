@@ -143,7 +143,10 @@ async function handlePlanAction(
   const nowIso = new Date(deps.now()).toISOString();
 
   if (action === PLAN_ACTIONS.write) {
-    const parsed = parsePlan(params.plan, nowIso);
+    // strictRepo: WRITING a plan requires every task to declare `repo` (the
+    // child's cwd). The READ path (readPlanFile) stays lenient so legacy
+    // plans without the field keep loading.
+    const parsed = parsePlan(params.plan, nowIso, true);
     if (!parsed.ok || !parsed.plan) {
       return fail(
         "review-gate: plan 不合法，没有写入：\n" + parsed.problems.map((p) => `  - ${p}`).join("\n"),
@@ -378,6 +381,7 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
           id: Type.String({ description: "Task id, [A-Za-z0-9._-] 1-64 chars" }),
           title: Type.String({ description: "Task title" }),
           fileBoundaries: Type.Array(Type.String({ description: "Paths this task may touch" })),
+          repo: Type.String({ description: "ABSOLUTE path of the repo this task works in (the child's cwd) — REQUIRED since 2026-09-02; a missing repo silently lands the child in the orchestrator's own repo" }),
           dependsOn: Type.Optional(Type.Array(Type.String())),
           execution: Type.Optional(Type.Union([Type.Literal("serial"), Type.Literal("parallel")])),
           status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("running"), Type.Literal("done"), Type.Literal("blocked")])),

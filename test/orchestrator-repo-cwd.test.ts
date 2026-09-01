@@ -92,6 +92,13 @@ test("resolveTaskRepo REFUSES a path that does not exist", () => {
   const resolved = deps.resolveTaskRepo("/definitely/not/a/repo-anywhere");
   assert.equal(resolved.ok, false, "fail-closed: a missing directory is not a repo");
 });
+
+test("resolveTaskRepo REFUSES a RELATIVE repo — it would resolve to the orchestrator's own repo", () => {
+  const deps = depsWith(makeRepo());
+  const resolved = deps.resolveTaskRepo("lib");
+  assert.equal(resolved.ok, false, "fail-closed: a relative repo must never resolve against the PM cwd");
+  if (!resolved.ok) assert.match(resolved.reason, /绝对路径/);
+});
 test("resolveTaskRepo REFUSES a RELATIVE path that is not inside a repo", () => {
   // The process cwd is this repo's own directory (a git repo), so a
   // relative path into a NON-repo sibling of the process cwd must refuse.

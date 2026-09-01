@@ -46,7 +46,7 @@ import { join as pathJoin } from "node:path";
 import { Type } from "typebox";
 
 import type { ToolHost, ToolReply } from "./tool-host.ts";
-import type { ChannelDialogRequest } from "./orchestrator-child-channel.ts";
+import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import {
   GOAL_CONFIRM_TITLE,
   buildGoalConfirmMessage,
@@ -119,7 +119,7 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
     request: Omit<ChannelDialogRequest, "hasUI">,
     hasUI: boolean,
     render: (signal: AbortSignal) => Promise<string | undefined>,
-  ): Promise<string | undefined>;
+  ): Promise<ChannelDialogOutcome>;
   /** Absolute path of THIS session's loop-goal file in one repo. */
   loopGoalPath(root: string): string;
   /** Its repo-relative path, for the messages that name it. */
@@ -305,8 +305,10 @@ export async function doProposeLoopGoal(
   const goalApproveLabel = "认可，写入 .pi/loop-goal.md";
   const goalRejectLabel = "不认可，退回重谈";
   let approved = false;
+  /** The orchestrator's decline reason, when the PM answered with one. */
+  let channelReason: string | undefined;
   try {
-    const picked = await deps.askEitherSide(
+    const outcome = await deps.askEitherSide(
       {
         dialogKind: "confirm",
         topic: "goal-approval",
@@ -326,7 +328,11 @@ export async function doProposeLoopGoal(
         return ok ? goalApproveLabel : goalRejectLabel;
       },
     );
-    approved = picked === goalApproveLabel;
+    approved = outcome.answer === goalApproveLabel;
+    // The ORCHESTRATOR's decline reason (if it answered with one) becomes
+    // the rejection reason — the child renegotiates against it instead of
+    // waiting on the (PM-invisible) local input box.
+    channelReason = outcome.reason;
   } catch {
     approved = false;
   }
@@ -339,14 +345,21 @@ export async function doProposeLoopGoal(
   // headless/no-input environment simply yields no reason.
   let reason: string | undefined;
   if (!approved) {
-    try {
-      const typed = await uiCtx.ui?.input?.(
-        "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
-        "必填:哪里不合适",
-      );
-      reason = (typed ?? "").trim() || undefined;
-    } catch {
-      reason = undefined;
+    // The PM's decline reason (via channel) wins — the child renegotiates
+    // against the REAL objection. The local input box is only the fallback
+    // when nobody answered through the channel.
+    if (channelReason) {
+      reason = channelReason;
+    } else {
+      try {
+        const typed = await uiCtx.ui?.input?.(
+          "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
+          "必填:哪里不合适",
+        );
+        reason = (typed ?? "").trim() || undefined;
+      } catch {
+        reason = undefined;
+      }
     }
   }
   if (!approved) {

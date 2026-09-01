@@ -23,7 +23,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { sideEffectsEnabled } from "./side-effects.ts";
 import { nodeChannelIO } from "./orchestrator-channel.ts";
@@ -336,6 +336,13 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     // membership. A path that is not a repo root is a fail-closed refusal.
     resolveTaskRepo: (repo) => {
       if (host.resolveTaskRepo) return host.resolveTaskRepo(repo);
+      // A RELATIVE repo would resolve through gitRootOfDir against the PM's
+      // cwd — silently landing the child in the orchestrator's OWN repo (the
+      // 2026-09-01 t2 deadlock). Refuse it outright: only an absolute path
+      // names a checkout unambiguously.
+      if (!isAbsolute(repo)) {
+        return { ok: false, reason: `声明的 repo "${repo}" 不是绝对路径 —— 相对路径会按项目经理的 cwd 解析，可能落到错误的仓库；请写仓库的绝对路径` };
+      }
       const root = gitRootOfDir(repo);
       return root
         ? { ok: true, root }

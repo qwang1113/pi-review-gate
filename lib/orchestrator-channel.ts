@@ -181,6 +181,8 @@ export interface ChannelAnswerRecord extends ChannelRecordBase {
   from: "orchestrator";
   requestId: string;
   answer: string;
+  /** Why the orchestrator declined (goal rejection) — carried back to the child's renegotiation. */
+  reason?: string;
 }
 
 /**

@@ -41,7 +41,7 @@ import { Type } from "typebox";
 
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import type { GateState } from "./gate-state.ts";
-import type { ChannelDialogRequest } from "./orchestrator-child-channel.ts";
+import type { ChannelDialogOutcome, ChannelDialogRequest } from "./orchestrator-child-channel.ts";
 import type { SensitiveGrant } from "./sensitive-grant.ts";
 import { registerConsentRequestTools } from "./consent-request-tools.ts";
 import {
@@ -97,7 +97,7 @@ export interface UserInteractionToolDeps {
     request: Omit<ChannelDialogRequest, "hasUI">,
     hasUI: boolean,
     render: (signal: AbortSignal) => Promise<string | undefined>,
-  ): Promise<string | undefined>;
+  ): Promise<ChannelDialogOutcome>;
   /**
    * Can THIS session route consent dialogs through an orchestration channel
    * (i.e. it is an orchestration child)? An orchestrator's OWN session
@@ -231,7 +231,7 @@ export async function doAskUser(
       // session is an orchestration child). The channel request carries
       // the question and every row VERBATIM, which is why the supervisor
       // never had to read this screen — and never mis-parsed it.
-      picked = await deps.askEitherSide(
+      picked = (await deps.askEitherSide(
         {
           dialogKind: choices.length ? "select" : "input",
           topic: "ask-user",
@@ -243,7 +243,7 @@ export async function doAskUser(
         (signal) => (choices.length
           ? uiCtx.ui!.select!(`${title}\n${q.text}${grantNotice(q)}`, choices, { signal })
           : uiCtx.ui!.input!(`${title}\n${q.text}${grantNotice(q)}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal })),
-      );
+      )).answer;
     } catch {
       picked = undefined; // a broken dialog is silence, never an answer
     }

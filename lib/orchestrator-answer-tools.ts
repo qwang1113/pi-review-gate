@@ -102,6 +102,9 @@ function pendingFor(deps: OrchestratorDeps, childId: string): PendingRequest[] {
 
 async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const childId = String(params.childId ?? "").trim();
+  // Only meaningful when DECLINING (a goal rejection): the child reads it as
+  // the objection to renegotiate against. Ignored on approvals.
+  const reason = typeof params.reason === "string" ? params.reason.trim() : undefined;
   const child = findChild(deps.runtime(), childId);
   if (!child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
   if (child.closedAt) return fail(`review-gate: 子会话 "${childId}" 已经关闭了。`);
@@ -186,6 +189,7 @@ async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>)
         at: new Date(deps.now()).toISOString(),
         requestId: request.requestId,
         answer: resolved.answer,
+        ...(reason === undefined ? {} : { reason }),
       },
     );
   } catch (error) {
@@ -193,10 +197,11 @@ async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>)
   }
 
   return reply(
-    `review-gate: 已回答子会话 ${childId} 的「${request.title}」—— 选了：${resolved.answer}\n` +
+    `review-gate: 已回答子会话 ${childId} 的「${request.title}」—— 选了：${resolved.answer}` +
+    (reason ? `，原因：${reason}` : "") + "\n" +
     "答案已写进通道；它那边的框会自己撤下来（人这时如果正盯着那个框，会看到它消失）。\n" +
     "下一次 `orchestrator_wait` 的回执会确认这个请求已销账。",
-    { childId, requestId: request.requestId, answered: true, answer: resolved.answer },
+    { childId, requestId: request.requestId, answered: true, answer: resolved.answer, ...(reason === undefined ? {} : { reason }) },
   );
 }
 
@@ -259,6 +264,9 @@ export function registerOrchestratorAnswerTool(host: ToolHost, deps: Orchestrato
       answer: Type.String({
         description: "选项原文、1 起的序号，或一个能唯一命中的子串；自由文本框则是答案本身",
       }),
+      reason: Type.Optional(Type.String({
+        description: "拒绝原因（仅拒绝 goal 时填）——会随答案写进通道，子会话拿它重新协商，不再干等原因",
+      })),
       requestId: Type.Optional(Type.String({
         description: "同时有多个待答请求时必填（回执与 wait 的收据里都有它）",
       })),

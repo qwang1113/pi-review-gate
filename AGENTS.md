@@ -412,7 +412,9 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    `TASK_GOAL_DIRECTIVE`（plan 批准 ≠ goal 批准，必须先协商自己的 loop goal，
    2026-09-01）。plan、调度细节一律不注入 —— 知道
    plan 会让它为 plan 而不是为自己的任务做优化。它在**任务声明的 repo** 里工作
-   （plan 任务可带 `repo` 字段；不声明就用主 repo），同一 repo 的任务由门禁
+   （plan 任务**必须**声明 `repo` 字段——子会话 cwd 就落在那里；2026-09-01 实测
+   漏写导致子会话被开在项目经理仓库、goal 绑错、编辑被 L8 拦的死锁，写 plan 时
+   强制），同一 repo 的任务由门禁
    串行调度，只有不同 repo 的任务可以并行。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。

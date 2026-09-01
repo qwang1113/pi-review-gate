@@ -1986,8 +1986,7 @@ test("every gate dialog is answerable by EITHER the human or the project manager
   const funnel = SRC.slice(funnelAt, funnelAt + 700);
   assert.match(funnel, /askThroughChannel\(binding, \{ \.\.\.request, hasUI \}, render\)/,
     "the race lives in the pure module, not in the extension");
-  assert.match(funnel, /if \(!binding\) return hasUI \? render\(/,
-    "a session with no orchestration just renders the dialog, exactly as before");
+  assert.match(funnel, /if \(!binding\) \{/, "a session with no orchestration falls back to rendering the dialog");
 
   // The goal approval is the one dialog constraint 8 applies to, so its
   // request must carry the DRAFT — that is the text the boundary check reads.

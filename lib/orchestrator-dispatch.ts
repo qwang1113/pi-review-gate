@@ -347,6 +347,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
 
   return reply(
     `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动（共享主工作区，同一 repo 内串行）。\n` +
+    `子会话工作目录（cwd）：${cwd} —— 它的 gate 绑定这个仓库，goal 也绑这里。\n` +
     `任务 ${taskId} 已置为 running，任务书已随 \`pi @${taskFileRelPath(taskFileName(marker))}\` 带进去（落盘：${written.path}）。\n` +
     `投递已核实：${check.verdict.summary}。\n` +
     `${decor.note}\n` +
@@ -357,6 +358,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     {
       childId,
       paneId,
+      cwd,
       execution: verdict.execution,
       taskFile: taskFileRelPath(taskFileName(marker)),
       delivered: true,

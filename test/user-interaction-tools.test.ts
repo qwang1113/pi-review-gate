@@ -95,13 +95,12 @@ function fake(over: Partial<Fake> = {}): Fake {
     canChannelDialogs: () => f.canChannelDialogs ?? false,
     askEitherSide: async (request) => {
       f.asked.push(request.title);
-      if (f.answers.length > 0) return f.answers.shift()!;
-      if (request.topic === "scope-limit" || request.topic === "sensitive-edit") {
-        // Consent dialogs are SELECTs: agreed = first option.
-        if (f.confirmAnswer === "throw") throw new Error("no dialog here");
-        return f.confirmAnswer === true ? request.options[0] : undefined;
-      }
-      return undefined; // ask_user without an explicit answer is unanswered
+      const answer = f.answers.length > 0
+        ? f.answers.shift()!
+        : request.topic === "scope-limit" || request.topic === "sensitive-edit"
+          ? (f.confirmAnswer === "throw" ? (() => { throw new Error("no dialog here"); })() : (f.confirmAnswer === true ? request.options[0] : undefined))
+          : undefined;
+      return { answer, by: answer === undefined ? "dismissed" : "human", requestId: "r1" };
     },
     cwd: f.cwd,
     sessionEditedPaths: () => f.sessionEdited,

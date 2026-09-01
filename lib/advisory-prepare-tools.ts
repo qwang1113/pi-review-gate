@@ -33,12 +33,13 @@
  * is a separate, deliberate change.
  */
 
-import { dirname as pathDirname, join as pathJoin } from "node:path";
+import { dirname as pathDirname, join as pathJoin, resolve as pathResolve } from "node:path";
 
 import { Type } from "typebox";
 
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import type { ToolRepoTarget } from "./repo-resolve.ts";
+import { gitRootOfDir } from "./repo-resolve.ts";
 import type { GateState } from "./gate-state.ts";
 import {
   buildAdviserBrief,
@@ -55,6 +56,35 @@ import {
 import { TASK_TEXT_MARKER } from "./constants.ts";
 
 /**
+ * Resolve the repo a GOAL audit targets — deliberately NOT `resolveToolRepo`.
+ *
+ * `resolveToolRepo` requires the repo to be one this session has already EDITED
+ * (its gate state must exist to bind a verdict). A goal, though, is recorded
+ * BEFORE the first edit lands (the L8 edit gate blocks every edit until the
+ * goal is approved), so a second repo's goal could never be audited — a dead
+ * end with no way out (the same warning lib/goal-prereview-tools.ts:94-95
+ * gives for `checkGoalDraft`). The goal binding is `gitRootOfDir`-based there;
+ * the audit must resolve the same way or a goal for an unedited repo can never
+ * pass its own audit. `resolveToolRepo` stays for review/precommit records,
+ * whose verdicts DO bind to an edited repo's worktree.
+ */
+export function resolveGoalRepo(requested: string | undefined, cwd: string): ToolRepoTarget {
+  // No explicit repo: the goal binds to the SESSION repo (its primary root).
+  // `cwd` is the session's primary repo/worktree — the same default
+  // `checkGoalDraft` uses when `repo` is omitted.
+  const abs = pathResolve(cwd, requested ?? cwd);
+  const root = gitRootOfDir(abs);
+  if (!root) {
+    return {
+      ok: false,
+      error: `review-gate: goal 审计的 repo "${requested ?? cwd}" (resolved ${abs}) is not inside a readable git repository — a goal audit can only target a real repo.`
+    };
+  }
+  return { ok: true, root };
+}
+
+
+/**
  * Everything these tools need from the outside world.
  *
  * Deliberately narrow and side-effect-explicit: every method is a thing a
@@ -67,6 +97,8 @@ export interface AdvisoryPrepareToolDeps {
   stateFor(root: string): GateState;
   /** Persist one repo's state (sidecar + blocked-marker handling). */
   persist(ctx: unknown, root: string): void;
+  /** The session's primary repo/worktree directory (goal audit resolves repo against it). */
+  cwd: string;
   /** The session dir pi is ACTUALLY using, for the judge's transcript pointer. */
   sessionDir(ctx: unknown): string;
   /** Has the USER approved this repo's loop goal? */
@@ -213,7 +245,7 @@ async function doPrepareGoalAudit(
   params: Record<string, unknown>,
   ctx: unknown,
 ): Promise<ToolReply> {
-  const target = deps.resolveRepo(typeof params.repo === "string" ? params.repo : undefined);
+  const target = resolveGoalRepo(typeof params.repo === "string" ? params.repo : undefined, deps.cwd);
   if (!target.ok) {
     return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
   }

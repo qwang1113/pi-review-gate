@@ -1,14 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import {
   registerAdvisoryPrepareTools,
+  resolveGoalRepo,
   type AdvisoryPrepareToolDeps,
 } from "../lib/advisory-prepare-tools.ts";
 import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { goalTextHash, normalizeGoalText } from "../lib/loop-goal.ts";
+import { git } from "./helpers/git.ts";
 
 /**
  * The two advisory preparations used to live inside the 8900-line extension,
@@ -37,6 +41,7 @@ interface Fake {
   increments: Record<string, { files: string[] }>;
   headTree: string;
   repo: { ok: boolean; error: string };
+  cwd: string;
 }
 
 /** One valid conclusion line, as the adviser appends it to its artifact. */
@@ -50,6 +55,13 @@ function conclusionLine(goalHash: string, at: string): string {
 }
 
 function fake(overrides: Partial<Fake> = {}): Fake {
+  // A REAL throwaway git repo for `cwd`: `resolveGoalRepo` (used by
+  // prepare_goal_audit) resolves the default repo through `gitRootOfDir`,
+  // so a fake path would never resolve. Created once per fake.
+  const tmp = mkdtempSync(join(tmpdir(), "rg-adv-"));
+  git(tmp, ["init", "-q"]);
+  git(tmp, ["config", "user.name", "t"]);
+  git(tmp, ["config", "user.email", "t@t"]);
   const state: Fake = {
     deps: undefined as unknown as AdvisoryPrepareToolDeps,
     tools: new Map(),
@@ -63,11 +75,13 @@ function fake(overrides: Partial<Fake> = {}): Fake {
     increments: {},
     headTree: "tree-now",
     repo: { ok: true, error: "" },
+    cwd: tmp,
     ...overrides,
   };
   state.files[join(ROOT, ".pi", "loop-goal.md")] ??= GOAL_TEXT;
   state.deps = {
     resolveRepo: () => (state.repo.ok ? { ok: true, root: ROOT } : { ok: false, error: state.repo.error }),
+    cwd: state.cwd,
     stateFor: () => state.st,
     persist: (_ctx, root) => { state.persisted.push(root); },
     sessionDir: () => "/sessions/main",
@@ -213,12 +227,29 @@ test("prepare_adviser: a truncated goal is pointed at its file", async () => {
 
 // ---------- prepare_goal_audit ----------
 
+test("resolveGoalRepo: a repo this session has NOT edited is still resolvable (gitRootOfDir, not sessionRepos)", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rg-goal-repo-"));
+  // A bare dir with no .git is NOT a repo: refuse (fail-closed).
+  const bare = resolveGoalRepo(tmp, tmpdir());
+  assert.equal(bare.ok, false);
+  assert.match(bare.error ?? "", /not inside a readable git repository/);
+  // A real git repo IS resolvable even though no session ever edited it.
+  git(tmp, ["init", "-q"]);
+  git(tmp, ["config", "user.name", "t"]);
+  git(tmp, ["config", "user.email", "t@t"]);
+  git(tmp, ["commit", "--allow-empty", "-m", "init"]);
+  const repo = resolveGoalRepo(tmp, tmpdir());
+  assert.equal(repo.ok, true);
+  assert.equal((repo as { ok: true; root: string }).root, realpathSync(tmp), "gitRootOfDir returns the canonical path");
+  rmSync(tmp, { recursive: true, force: true });
+});
+
 test("prepare_goal_audit: an unresolvable repo is reported", async () => {
   const f = fake();
-  f.repo = { ok: false, error: "review-gate: which repo?" };
-  const reply = await call(f, "prepare_goal_audit", { goal: "草稿" });
+  f.cwd = "/no-such-dir";
+  const reply = await call(f, "prepare_goal_audit", { goal: "草稿", repo: "/no-such-dir/repo" });
   assert.equal(reply.isError, true);
-  assert.equal(textOf(reply), "review-gate: which repo?");
+  assert.match(textOf(reply), /not inside a readable git repository/);
 });
 
 test("prepare_goal_audit: an empty (or whitespace-only) draft is refused", async () => {
