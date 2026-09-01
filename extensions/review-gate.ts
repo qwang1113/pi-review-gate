@@ -335,6 +335,7 @@ import {
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
   loopGoalEditGate,
   goalPrereviewPassed,
+  goalReminderDue,
 } from "../lib/loop-goal.ts";
 import type { LoopGoal } from "../lib/loop-goal.ts";
 
@@ -482,6 +483,8 @@ const READ_ONLY_TOOL_NAMES = new Set([
 const GOAL_REMINDER_TEXT =
   "\n[review-gate] 你还没协商并获批本会话的 loop goal —— 记得先用 `propose_loop_goal` " +
   "走完协商再改代码（未批准前 L8 会拦下 edit/write）。";
+
+
 
 /**
  * Read the PROJECT-layer agent file that actually shadows `name` at runtime:
@@ -3156,9 +3159,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       const canRemind =
         state.taskMode !== "explore" &&
         state.taskMode !== "normal" &&
+        state.taskMode !== "orchestrator" &&
         !loopGoalConfirmed() &&
-        nowMs - lastGoalReminderAt >= GOAL_REMINDER_MIN_MS &&
-        goalReminderCount < GOAL_REMINDER_CAP;
+        goalReminderDue({
+          now: nowMs,
+          lastAt: lastGoalReminderAt,
+          count: goalReminderCount,
+          minMs: GOAL_REMINDER_MIN_MS,
+          cap: GOAL_REMINDER_CAP,
+        });
       if (canRemind) {
         lastGoalReminderAt = nowMs;
         goalReminderCount += 1;

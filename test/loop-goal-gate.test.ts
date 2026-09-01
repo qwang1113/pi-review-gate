@@ -8,7 +8,7 @@ import {
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { goalTextHash } from "../lib/loop-goal.ts";
+import { goalTextHash, goalReminderDue } from "../lib/loop-goal.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { isPiSelfPath } from "../lib/pi-self.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
@@ -922,5 +922,34 @@ test("D: explore mode never reminds (goal is a loop-mode contract)", async () =>
 
   const res = await readResult(handlers, ctx);
   assert.equal(res, undefined, "explore mode must not remind (no rewrite)");
+});
+
+test("D: orchestrator mode never reminds (its contract is the plan, not a goal)", async () => {
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const { handlers, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  await setMode(pi, ctx, "orchestrator");
+
+  const res = await readResult(handlers, ctx);
+  assert.equal(res, undefined, "orchestrator mode must not remind (no rewrite)");
+});
+
+
+
+test("D: goalReminderDue pure throttle — window AND cap are each pinned (reviewer P2)", () => {
+  const MIN = 5 * 60_000;
+  const CAP = 2;
+  // Window: a reminder inside the window is due; one right at the edge is due.
+  assert.equal(goalReminderDue({ now: 1_000_000, lastAt: 0, count: 0, minMs: MIN, cap: CAP }), true);
+  assert.equal(goalReminderDue({ now: MIN, lastAt: 0, count: 0, minMs: MIN, cap: CAP }), true, "at the window edge, due");
+  assert.equal(goalReminderDue({ now: MIN - 1, lastAt: 0, count: 0, minMs: MIN, cap: CAP }), false, "inside the window, not due");
+  // Cap: at cap-1 it is still due (after the window), at cap it is not —
+  // this is the half the integration test could NOT pin before the clock seam.
+  assert.equal(goalReminderDue({ now: MIN + 1, lastAt: 0, count: CAP - 1, minMs: MIN, cap: CAP }), true, "count at cap-1, after window: due");
+  assert.equal(goalReminderDue({ now: MIN + 1, lastAt: 0, count: CAP, minMs: MIN, cap: CAP }), false, "count at cap: never again");
+  // Both halves must hold: a fresh window does NOT reset a spent cap.
+  assert.equal(goalReminderDue({ now: 10 * MIN, lastAt: 0, count: CAP, minMs: MIN, cap: CAP }), false, "a long window cannot reset the cap");
 });
 
