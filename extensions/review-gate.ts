@@ -463,6 +463,26 @@ const ENTRY_TYPE = "review-gate-state";
 // bypassed the loop-goal requirement and edited straight away.
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "Edit", "Write", "NotebookEdit", "notebook_edit", "replace", "insert"]);
 
+// D (2026-09-01): read-only tools whose results carry the goal-negotiation
+// reminder while this session is loop-mode and its goal is unapproved.
+// `bash` is deliberately excluded: a read-only bash command (ls, git log)
+// must not be nagged — the reminder targets the agent's passive reading,
+// not shell diagnostics. Includes pi's file-reading tools and the MCP-style
+// read/grep family.
+const READ_ONLY_TOOL_NAMES = new Set([
+  "read", "read_file", "Read", "read_more",
+  "grep", "anchor_grep", "rg",
+  "ls", "cat", "head", "tail",
+]);
+
+/** D — one-line advisory appended to read-only results while the session is
+ * loop-mode and its loop goal is not yet confirmed. Not a block: the L8 edit
+ * gate is the enforcement, this text just keeps the negotiation in front of
+ * an agent that is busy reading. */
+const GOAL_REMINDER_TEXT =
+  "\n[review-gate] 你还没协商并获批本会话的 loop goal —— 记得先用 `propose_loop_goal` " +
+  "走完协商再改代码（未批准前 L8 会拦下 edit/write）。";
+
 /**
  * Read the PROJECT-layer agent file that actually shadows `name` at runtime:
  * pi-subagents loads every `.md` under <repo>/.pi/agents and registers it
@@ -660,6 +680,15 @@ export default function reviewGate(pi: ExtensionAPI) {
   // only while the agent keeps ending turns instead of hosting the wait, and
   // the stall breaker must stay the sole arbiter of the review budget.
   let lastChildNoticeAt = 0;
+  // D (2026-09-01): goal-negotiation reminder for read-only tools, throttled.
+  // In-memory by design: a restart is itself a fresh session with a fresh
+  // reminder budget, and the L8 edit gate stays the hard backstop — this is
+  // advisory only.
+  let lastGoalReminderAt = 0;
+  const GOAL_REMINDER_MIN_MS = 5 * 60_000; // every 5 minutes at most
+  let goalReminderCount = 0;
+  const GOAL_REMINDER_CAP = 2; // per session at most
+
   const CHILD_NOTICE_MIN_MS = 60_000;
   /**
    * Gate-owned hosted-wait watchdog. It is intentionally NOT `unref()`'d:
@@ -3108,6 +3137,36 @@ export default function reviewGate(pi: ExtensionAPI) {
         clearBypassToken(); // any edit invalidates a standing arbiter bypass
       }
       if (dirty) persist(ctx);
+      return;
+    }
+
+    // 1.5 D — goal-negotiation reminder on read-only tools (advisory, throttled).
+    //
+    // MEASURED (2026-09-01, onchain): an orchestration child read code for
+    // four minutes and then its process died — it never negotiated its own
+    // loop goal because the task brief claimed one was already approved. The
+    // L8 edit gate blocks every edit/write until the goal is approved, but it
+    // cannot remind an agent that keeps READING. This branch appends a
+    // one-line reminder to read-only results while the session is loop-mode
+    // and the goal is unconfirmed. Never blocks; throttled to GOAL_REMINDER_MIN_MS
+    // apart and GOAL_REMINDER_CAP total per session (user decision, 2026-09-01).
+    // Explore/normal never remind (their gate modes do not require a goal).
+    if (READ_ONLY_TOOL_NAMES.has(event.toolName)) {
+      const nowMs = Date.now();
+      const canRemind =
+        state.taskMode !== "explore" &&
+        state.taskMode !== "normal" &&
+        !loopGoalConfirmed() &&
+        nowMs - lastGoalReminderAt >= GOAL_REMINDER_MIN_MS &&
+        goalReminderCount < GOAL_REMINDER_CAP;
+      if (canRemind) {
+        lastGoalReminderAt = nowMs;
+        goalReminderCount += 1;
+        return {
+          content: [...(event.content ?? []), { type: "text", text: GOAL_REMINDER_TEXT }],
+          isError: event.isError === true,
+        };
+      }
       return;
     }
 

@@ -77,8 +77,36 @@ export function buildTaskDocument(opts: {
     "",
     opts.brief.trim(),
     "",
+    TASK_GOAL_DIRECTIVE,
+    "",
   ].join("\n");
 }
+
+/**
+ * The goal directive the gate appends to every orchestration task document.
+ *
+ * MEASURED (2026-09-01, onchain): an orchestrator wrote "目标文本见
+ * .pi/loop-goal.md（已批准）。开始工作。" into a task brief, and the child —
+ * a fresh loop session with its OWN goal to negotiate — took the plan's
+ * approval for its own, skipped propose_loop_goal, and started reading code
+ * instead of negotiating. The L8 edit gate would have stopped the edits, but
+ * the child never reached an edit: it read for four minutes and then its
+ * process died. The text below is appended AFTER the brief, so no brief the
+ * orchestrator writes can claim a goal is pre-approved: whatever it says, the
+ * directive restates the mechanical fact — plan approval is NOT goal
+ * approval, and the child's own loop goal must be negotiated and approved
+ * before any edit.
+ *
+ * This is a directive, not a promise: the enforcement is the L8 edit gate
+ * (loopGoalEditGate), which blocks every edit/write until the goal file the
+ * session OWNS (its RG_STATE_VARIANT sidecar) is approved. The directive only
+ * makes the child's first turn say it out loud.
+ */
+export const TASK_GOAL_DIRECTIVE =
+  "本会话的退出条约是你自己的 loop goal。任务书只是 plan 的任务边界，不是你的 goal；" +
+  "plan 批准 ≠ goal 批准。开始改代码前，你必须先用 `propose_loop_goal` 协商并获批" +
+  "你自己的 goal（goal-auditor 审计 + 用户批准）。未批准 goal 前，L8 edit gate 会拦下" +
+  "所有 edit/write。";
 
 /**
  * A child's pi session id — DETERMINISTIC, derived from its registry handle.
