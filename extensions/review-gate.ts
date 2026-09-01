@@ -1480,12 +1480,6 @@ export default function reviewGate(pi: ExtensionAPI) {
           gateInterruptController = new AbortController();
           ctx.abort?.();
           if (interruptText) {
-            // Race, not await: sendUserMessage resolves only after the WHOLE
-            // turn finishes (pi's prompt()), so a bare await would make the
-            // injected ack land minutes late and the PM's 15s receipt
-            // window report a delivered message as failed. A short bound
-            // covers the actual failure (pi rejecting the message) while
-            // letting a busy child's long turn proceed in the background.
             // sendUserMessage is fire-and-forget in this pi build (the loader
             // does not return the promise), so there is nothing to await or
             // race: the message is handed to pi synchronously and the ack

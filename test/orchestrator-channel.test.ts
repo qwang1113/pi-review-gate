@@ -449,3 +449,26 @@ test("an interrupt fired BEFORE the dialog opened does not kill a later dialog",
   assert.equal(outcome.answer, "A");
   assert.equal(outcome.by, "human", "a later dialog is not dismissed by an interrupt that already fired");
 });
+
+test("a render that NEVER resolves cannot hang a settled question (P1 pin)", async () => {
+  const io = memoryIO(() => T0);
+  const interrupt = new AbortController();
+  // The measured deadlock's shape: a dialog whose render ignores its abort
+  // signal and never settles. The decision must still complete.
+  const neverResolving = new Promise<string | undefined>(() => {});
+  const asking = askThroughChannel(binding(io), {
+    dialogKind: "confirm", title: "永远不关的框", options: ["A"], hasUI: true,
+  }, () => neverResolving, interrupt.signal);
+
+  await Promise.resolve();
+  interrupt.abort();
+  const outcome = await Promise.race([
+    asking,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("askThroughChannel hung on a never-resolving render")), 200)),
+  ]);
+  assert.equal(outcome.by, "interrupted",
+    "the interrupt settles the question even though the render never resolves");
+  const settled = readChannel(io, channelPathFor(ORCH, "c1", HOME)).records
+    .find((r) => r.kind === "request-settled");
+  assert.ok(settled, "the settle record is written without waiting for the render");
+});
