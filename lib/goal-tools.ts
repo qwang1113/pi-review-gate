@@ -439,6 +439,9 @@ export async function doProposeLoopGoal(
   // This goal's negotiation is over, so its audit count ends with it: the
   // NEXT goal's first audit must announce round 1, not round N+1.
   delete goalSt.goalAuditRound;
+  // The force-negotiate clock resets with the approval: the goal is now
+  // confirmed, so un-goaled turns stop counting from here.
+  delete goalSt.turnsWithoutGoal;
   deps.persist(ctx, goalRoot);
   deps.log(`loop goal approved by the user for ${goalRoot} (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
   return {

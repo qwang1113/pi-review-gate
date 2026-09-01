@@ -28,6 +28,9 @@ import {
   formatGoalPrereviewCarryover,
   buildGoalAuditTask,
   diffDraftLines,
+  GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
+  buildGoalForceNegotiateDirective,
+  goalNegotiationOverdue,
 } from "../lib/loop-goal.ts";
 
 function repoWithGoal(content?: string, mtimeMs?: number): string {
@@ -549,4 +552,37 @@ test("diffDraftLines: pure line diff, insertion and deletion both detected", () 
   const del = diffDraftLines("a\nb\nc", "a\nc");
   assert.deepEqual(del.removed, ["b"]);
   assert.deepEqual(del.added, []);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-17 — force-negotiate threshold (user decision: prompt, not block)
+// ---------------------------------------------------------------------------
+
+test("goalNegotiationOverdue: overdue exactly at the threshold, and never on corrupt counts", () => {
+  // Below, at, and past the threshold.
+  assert.equal(goalNegotiationOverdue(0), false);
+  assert.equal(goalNegotiationOverdue(59), false);
+  assert.equal(goalNegotiationOverdue(60), true);
+  assert.equal(goalNegotiationOverdue(61), true);
+  // A missing or malformed count reads as 0 — fail-open, never locked.
+  assert.equal(goalNegotiationOverdue(undefined), false);
+  assert.equal(goalNegotiationOverdue(NaN), false);
+  assert.equal(goalNegotiationOverdue(-1), false);
+  // A custom threshold is honoured.
+  assert.equal(goalNegotiationOverdue(2, 3), false);
+  assert.equal(goalNegotiationOverdue(3, 3), true);
+});
+
+test("buildGoalForceNegotiateDirective: names the count, the threshold and the ONLY acceptable next step", () => {
+  const below = buildGoalForceNegotiateDirective(30);
+  assert.match(below, /30\/60/);
+  assert.match(below, /ask_user/);
+  assert.match(below, /propose_loop_goal/);
+  const overdue = buildGoalForceNegotiateDirective(60);
+  assert.match(overdue, /已达 60 轮（阈值 60）/);
+  assert.match(overdue, /先协商，再干活/);
+});
+
+test("the threshold constant is the user's chosen 60 turns", () => {
+  assert.equal(GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD, 60);
 });

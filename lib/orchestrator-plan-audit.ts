@@ -167,6 +167,18 @@ export function buildPlanAuditTask(
     "4. 依赖是否成环或缺失：有没有任务实际依赖另一个任务的产物却没写 dependsOn？",
     "5. maxParallel 是否安全：并行度与边界隔离、与机器/额度成本相称吗？",
     "6. 每个任务是否可独立验收：一个子会话拿到它，能不能自己判断做完没做完？",
+    "7. 需求是否已澄清、goal 是否可派生（PM=产品经理，2026-09-17）：",
+    "   项目经理同时承担产品经理角色——plan 提交前必须把涉及的项目代码过一遍，",
+    "   用 grillme/ask_user 把需求反述澄清，摸清每个子会话的 goal 才能起 plan。",
+    "   逐任务核对以下可查证事实，不要凭印象打分：",
+    "   (a) plan.decisions：有没有登记了却从未解决（缺 resolvedAt）的需求决策？",
+    "       有——需求未澄清，P1。",
+    "   (b) 任务书完整度：每个任务的 title+note 是否达到『子会话拿到就能独立协商 goal』？",
+    "       只写『做分页』没有交互/边界/验收标准的任务书是 P1——子会话会回头找 PM 猜需求。",
+    "   (c) 澄清证据：读 ${opts.sessionDir ? 'PM 的 transcript（' + opts.sessionDir + ' 下 <ts>_' + (opts.sessionId ?? '') + '.jsonl）' : 'PM 的 transcript'}，",
+    "       找 ask_user/grillme 的 Q&A 段落，逐条对照：澄清结论是否真的反映进了 plan 的任务书？",
+    "       需求有歧义、验收标准缺失、或澄清结论没落进 plan——P1。",
+
     "",
     ...(opts.sessionDir && opts.sessionId
       ? [

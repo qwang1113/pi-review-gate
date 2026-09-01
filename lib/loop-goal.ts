@@ -721,3 +721,50 @@ export function goalReminderDue(opts: {
   return opts.now - opts.lastAt >= opts.minMs && opts.count < opts.cap;
 }
 
+/**
+ * 2026-09-17 (user decision): the number of agent turns a loop-mode session may spend
+ * WITHOUT negotiating an approved goal before the gate starts FORCING the negotiation.
+ *
+ * WHY: an agent that only ever probes (read/bash are not gated by L8 — only
+ * edit/write are) can explore forever and never negotiate its exit contract.
+ * Measured failure: "探查截断死循环" — the agent reads, the context truncates, and
+ * the loop restarts, with the goal negotiation deferred indefinitely. Past this
+ * threshold the gate injects a STRONG directive (not a tool block — user decision)
+ * that the ONLY acceptable next action is goal negotiation.
+ */
+export const GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD = 60;
+
+/**
+ * Pure decision: has this session spent enough un-goaled turns to force negotiation?
+ * `turns` is the persisted count of agent turns without an approved goal; a missing
+ * or malformed count (NaN / negative) reads as 0 and is NOT overdue — fail-open in
+ * the direction that never locks the session on corrupt state.
+ */
+export function goalNegotiationOverdue(turns: number | undefined, threshold: number = GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD): boolean {
+  if (turns === undefined || !Number.isFinite(turns) || turns < 0) return false;
+  return turns >= threshold;
+}
+
+/**
+ * The STRONG directive injected once the threshold is hit. It is a directive, not
+ * a block: the user chose prompt-forcing over tool-blocking (2026-09-17), so the
+ * gate does not hard-block read-only tools — it makes the negotiation the only
+ * sane next action and repeats it every turn until the goal is approved.
+ */
+export function buildGoalForceNegotiateDirective(
+  turns: number | undefined,
+  threshold: number = GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
+): string {
+  const shown = goalNegotiationOverdue(turns, threshold)
+    ? `已达 ${turns ?? 0} 轮（阈值 ${threshold}）`
+    : `已 ${turns ?? 0}/${threshold} 轮`;
+  return (
+    "## 强制协商 loop goal（门禁，2026-09-17）\n" +
+    `你已 ${shown} 未获批 loop goal。` +
+    "继续只读探查或任何其他工作之前，**必须先**用 `ask_user` 采访用户澄清需求，" +
+    "把目标写成简体中文（标识符/路径/代码 token 保持英文），再过 `goal-auditor` 审计，" +
+    "最后 `propose_loop_goal` 请用户批准。goal 未获批前，除了协商 goal 本身，" +
+    "其余动作都是死循环的一部分——先协商，再干活。"
+  );
+}
+

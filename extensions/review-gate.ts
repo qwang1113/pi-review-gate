@@ -337,6 +337,9 @@ import {
   loopGoalEditGate,
   goalPrereviewPassed,
   goalReminderDue,
+  GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
+  buildGoalForceNegotiateDirective,
+  goalNegotiationOverdue,
 } from "../lib/loop-goal.ts";
 import type { LoopGoal } from "../lib/loop-goal.ts";
 
@@ -5858,6 +5861,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     // ends under any of the six guards above still gets its minute-level
     // second chance. (The orchestrator arms it in orchestratorSettled.)
     startRevivalTimer(ctx);
+    // 2026-09-17 (user decision): count un-goaled turns so the force-negotiate
+    // directive fires at GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD. This is a REAL
+    // settled loop turn (explore/normal/orchestrator/aborted all returned
+    // above), and the count persists so a restart cannot reset the clock.
+    // Cleared in doProposeLoopGoal on approval.
+    if (!loopGoalConfirmed()) {
+      state.turnsWithoutGoal = (state.turnsWithoutGoal ?? 0) + 1;
+    } else {
+      state.turnsWithoutGoal = undefined;
+    }
+    const forceNegotiate = goalNegotiationOverdue(state.turnsWithoutGoal);
     const fp = computeFingerprint(cwd);
     // Ship-gate requirements only exist once this session touched something.
     const problems = (state.hasCodeChange || state.hasDocChange)
@@ -6022,6 +6036,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       "[REVIEW_GATE_RESUME] " +
         (problems.length > 0 ? "Quality gates are still unmet:\n" : "The task is not finished yet:\n") +
         [...problems, ...completion].map((p) => `- ${p}`).join("\n") +
+        (forceNegotiate
+          ? "\n\n" + buildGoalForceNegotiateDirective(state.turnsWithoutGoal)
+          : "") +
         (problems.length > 0
           ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
             "Continue: fix → judge_submit({role:\"reviewer\"}) → declare_done. " +
