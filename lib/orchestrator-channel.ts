@@ -156,7 +156,7 @@ export interface ChannelRequestRecord extends ChannelRecordBase {
    * the `payload` of THIS record — written by the child itself, so a
    * hand-copied text can neither widen nor narrow what gets approved (R-7).
    */
-  topic?: "goal-approval" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "other";
+  topic?: "goal-approval" | "goal-reason" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "other";
   title: string;
   /** The exact rows offered, in order. Empty for `input`. */
   options: string[];
@@ -171,7 +171,7 @@ export interface ChannelSettledRecord extends ChannelRecordBase {
   from: "child";
   requestId: string;
   /** `human` = answered in the pane, `orchestrator` = answered via the channel. */
-  by: "human" | "orchestrator" | "dismissed";
+  by: "human" | "orchestrator" | "dismissed" | "interrupted";
   answer?: string;
 }
 

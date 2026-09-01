@@ -64,6 +64,7 @@ import {
 } from "./orchestrator-channel.ts";
 import {
   alivePanes,
+  childChannelProjection,
   currentPlan,
   toolFail as fail,
   toolReply as reply,
@@ -495,13 +496,21 @@ export async function dispatchInstruct(
     deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
   }
 
+  // STOP-FIRST (2026-09-01): the child's gate dismisses an OPEN dialog when
+  // the instruction lands. Tell the PM what just got cancelled — a goal box,
+  // a question, a consent — and that answering is the other tool's job.
+  const open = childChannelProjection(deps, childId).openRequests[0];
+  const cancelledLine = open
+    ? `\n本次打断同时取消了子会话的待答请求「${open.title}」—— 它不再等这个回答了；若你的本意是回答它，请用 orchestrator_answer。`
+    : "";
   return reply(
     `review-gate: 已通过通道下发给子会话 ${childId}（mode=${mode}）。${check.verdict.summary}。\n` +
     (mode === "interrupt"
       ? "它已中断当前这一轮，并立即收到这条消息（最高优先级）。"
       : mode === "steer"
         ? "它会在当前这一轮里就读到这条消息。"
-        : "它会在跑完手上这一轮之后读到这条消息。"),
+        : "它会在跑完手上这一轮之后读到这条消息。") +
+    cancelledLine,
     { childId, instructId, mode, delivered: true },
   );
 }

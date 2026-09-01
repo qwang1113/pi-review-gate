@@ -85,7 +85,7 @@ export function memoryChannelIO(now: () => number): ChannelIO & { files: Map<str
 /** The whole fake world one test runs against. */
 export interface FakeWorld {
   /** Tools registered by the modules under test, by name. */
-  tools: Map<string, (params: Record<string, unknown>, signal?: { readonly aborted: boolean }) => Promise<ToolReply>>;
+  tools: Map<string, (params: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolReply>>;
   deps: OrchestratorDeps;
   panes: Map<string, FakePane>;
   io: ChannelIO & { files: Map<string, string> };
@@ -218,7 +218,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
 
   const tools = new Map<
     string,
-    (params: Record<string, unknown>, signal?: { readonly aborted: boolean }) => Promise<ToolReply>
+    (params: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolReply>
   >();
   const host: ToolHost = {
     registerTool(definition) {

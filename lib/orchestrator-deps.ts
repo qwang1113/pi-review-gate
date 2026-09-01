@@ -209,7 +209,7 @@ export interface OrchestratorDeps {
    * `propose_loop_goal`, and for the same reason: returning early and asking
    * the agent to come back is the multi-step dance this design removes.
    */
-  auditPlan(plan: OrchestratorPlan, onUpdate?: { step?: (t: string) => void; done?: (t: string) => void }): Promise<{ ok: true } | { ok: false; text: string }>;
+  auditPlan(plan: OrchestratorPlan, onUpdate?: { step?: (t: string) => void; done?: (t: string) => void }, signal?: AbortSignal): Promise<{ ok: true } | { ok: false; text: string }>;
 
 
 

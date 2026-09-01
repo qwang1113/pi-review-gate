@@ -24,7 +24,7 @@ const ROOT = "/repo";
 
 interface Fake {
   deps: JudgeSessionToolDeps;
-  tools: Map<string, (params: Record<string, unknown>, signal?: { readonly aborted: boolean }, onUpdate?: unknown) => Promise<ToolReply>>;
+  tools: Map<string, (params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: unknown) => Promise<ToolReply>>;
   schemas: Map<string, Record<string, unknown>>;
   order: string[];
   files: Map<string, string>;

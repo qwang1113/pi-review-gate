@@ -121,7 +121,7 @@ export interface ChannelDialogRequest {
 /** Who ended a question, and with what. */
 export interface ChannelDialogOutcome {
   answer: string | undefined;
-  by: "human" | "orchestrator" | "dismissed";
+  by: "human" | "orchestrator" | "dismissed" | "interrupted";
   requestId: string;
   /** The orchestrator's decline reason (goal rejection), when one was given. */
   reason?: string;
@@ -147,6 +147,10 @@ export async function askThroughChannel(
   binding: ChildChannelBinding,
   request: ChannelDialogRequest,
   render: DialogRenderer,
+  /** An external "stop" (an instruct interrupt). When it fires, the dialog is
+   * dismissed as INTERRUPTED — not as a human "dismissed", because a stopped
+   * goal approval must never read as a user rejection. */
+  interruptSignal?: AbortSignal,
 ): Promise<ChannelDialogOutcome> {
   const requestId = newChannelId("req", binding.io.now());
   appendRecord(binding.io, binding.target, {
@@ -196,12 +200,28 @@ export async function askThroughChannel(
     finish(undefined, "dismissed");
   });
 
+  // An external interrupt (an instruct) dismisses the box as INTERRUPTED.
+  // Distinct from a human "dismissed": a stopped goal approval must not read
+  // as a rejection, and a stopped consent stays fail-closed.
+  const interruptSide = interruptSignal === undefined
+    ? Promise.resolve<string | undefined>(undefined)
+    : new Promise<string | undefined>((resolve) => {
+        if (interruptSignal.aborted) { resolve(undefined); return; }
+        const onAbort = () => { dialogAbort.abort(); finish(undefined, "interrupted"); resolve(undefined); };
+        interruptSignal.addEventListener("abort", onAbort, { once: true });
+        // Whatever settles the dialog first (human / orchestrator / interrupt),
+        // the interrupt side resolves — a dangling promise would hang the
+        // allSettled that awaits it.
+        decision.then(() => { interruptSignal.removeEventListener("abort", onAbort); resolve(undefined); });
+      })
+    .then(() => undefined);
+
   const outcome = await decision;
   pollAbort.abort();
   dialogAbort.abort();
   // Both sides are settled or cancelled by now; awaiting them keeps the
   // renderer's own cleanup inside this call rather than after it returns.
-  await Promise.allSettled([channelSide, humanSide]);
+  await Promise.allSettled([channelSide, humanSide, interruptSide]);
 
   appendRecord(binding.io, binding.target, {
     kind: "request-settled",

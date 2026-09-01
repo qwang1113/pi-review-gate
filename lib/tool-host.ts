@@ -41,7 +41,7 @@ export interface ToolHost {
     execute: (
       id: string,
       params: Record<string, unknown>,
-      signal: { readonly aborted: boolean } | undefined,
+      signal: AbortSignal | undefined,
       onUpdate: unknown,
       ctx: unknown,
     ) => Promise<ToolReply>;

@@ -399,3 +399,53 @@ test("a SECOND orchestrator opening the same paths sees exactly the same thing",
   assert.equal(read().requests[0]!.title, "问题",
     "nothing about the successor's identity changes what the channel says");
 });
+
+// ---------------------------------------------------------------------------
+// STOP-FIRST (2026-09-01): an instruct interrupt dismisses an open dialog
+// ---------------------------------------------------------------------------
+
+test("an instruct interrupt dismisses an open dialog as INTERRUPTED, not as a human dismissal", async () => {
+  const io = memoryIO(() => T0);
+  const bind = binding(io);
+  const interrupt = new AbortController();
+  let dialogAborted = false;
+  const render = (signal: AbortSignal) => new Promise<string | undefined>((resolve) => {
+    signal.addEventListener("abort", () => { dialogAborted = true; resolve(undefined); }, { once: true });
+  });
+
+  const asking = askThroughChannel(bind, {
+    dialogKind: "confirm", topic: "goal-approval", title: "认可目标吗", options: ["认可", "不认可"], hasUI: true,
+  }, render, interrupt.signal);
+
+  await Promise.resolve();
+  const open = projectChannel(readChannel(io, channelPathFor(ORCH, "c1", HOME)).records).openRequests;
+  assert.equal(open.length, 1, "the goal box is waiting");
+
+  // The orchestrator interrupts instead of answering.
+  interrupt.abort();
+  const outcome = await asking;
+
+  assert.equal(outcome.answer, undefined);
+  assert.equal(outcome.by, "interrupted", "an interrupt is not a rejection");
+  assert.equal(dialogAborted, true, "the box came off the screen");
+  const settled = readChannel(io, channelPathFor(ORCH, "c1", HOME)).records
+    .find((r) => r.kind === "request-settled");
+  assert.ok(settled, "the request is settled, so the supervisor's wait ends");
+  assert.equal((settled as { by: string }).by, "interrupted");
+  assert.equal(projectChannel(readChannel(io, channelPathFor(ORCH, "c1", HOME)).records).openRequests.length, 0,
+    "no request is left open for the child to wedge on");
+});
+
+test("an interrupt fired BEFORE the dialog opened does not kill a later dialog", async () => {
+  const io = memoryIO(() => T0);
+  // The drain aborted the OLD controller and installed a FRESH one.
+  const oldController = new AbortController();
+  oldController.abort();
+  const freshController = new AbortController();
+  const outcome = await askThroughChannel(binding(io), {
+    dialogKind: "select", title: "选一个", options: ["A", "B"], hasUI: true,
+  }, async () => "A", freshController.signal);
+
+  assert.equal(outcome.answer, "A");
+  assert.equal(outcome.by, "human", "a later dialog is not dismissed by an interrupt that already fired");
+});

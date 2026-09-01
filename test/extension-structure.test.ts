@@ -1958,11 +1958,19 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
 
   // Delivery is pi's API, never a keyboard.
   const drainAt = SRC.indexOf("async function drainChildInstructions(");
-  const drain = SRC.slice(drainAt, drainAt + 2600);
-  assert.match(drain, /pi\.sendUserMessage\(text, \{ deliverAs: instruction\.mode \}\)/);
+  const drain = SRC.slice(drainAt, drainAt + 6500);
+  assert.match(drain, /pi\.sendUserMessage\(text, \{ deliverAs: instruction\.mode \}\)/,
+    "delivery is pi's own API, raced against a short bound so the ack is not minutes late");
   assert.match(drain, /deliverAs: "steer"/,
     "an interrupt WITH text aborts then delivers the message immediately (2026-08-31)");
   assert.match(drain, /ctx\.abort\?\.\(\)/, "interrupt is ctx.abort(), not a Ctrl-C keystroke");
+  // STOP-FIRST (2026-09-01): an open dialog is dismissed BEFORE the message
+  // is injected — the measured deadlock was the box staying up while the
+  // child wedged on it.
+  assert.match(drain, /gateInterruptController\.abort\(\)/,
+    "interrupt/steer dismiss an open dialog first");
+  assert.match(drain, /gateInterruptController = new AbortController\(\)/,
+    "and a FRESH controller so one interrupt never cancels a later dialog");
   assert.match(drain, /acknowledgeInstruct\(binding, instruction\.instructId, false/,
     "a failure is acknowledged AS a failure — the receipt the orchestrator builds on");
   // Round-4 P1 — the two-stage handshake. `received` is written BEFORE any
@@ -1983,9 +1991,9 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
 test("every gate dialog is answerable by EITHER the human or the project manager", () => {
   const funnelAt = SRC.indexOf("async function askEitherSide(");
   assert.ok(funnelAt > 0, "there is ONE funnel every gate question goes through");
-  const funnel = SRC.slice(funnelAt, funnelAt + 700);
-  assert.match(funnel, /askThroughChannel\(binding, \{ \.\.\.request, hasUI \}, render\)/,
-    "the race lives in the pure module, not in the extension");
+  const funnel = SRC.slice(funnelAt, funnelAt + 900);
+  assert.match(funnel, /askThroughChannel\(binding, \{ \.\.\.request, hasUI \}, render, currentInterruptSignal\(\)\)/,
+    "the race lives in the pure module, not in the extension — and the dialog listens to the gate's interrupt source");
   assert.match(funnel, /if \(!binding\) \{/, "a session with no orchestration falls back to rendering the dialog");
 
   // The goal approval is the one dialog constraint 8 applies to, so its

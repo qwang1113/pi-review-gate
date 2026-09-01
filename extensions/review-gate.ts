@@ -638,10 +638,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     ctx: unknown,
     /** Live-output sink forwarded to the called tool (the chain streams). */
     onUpdate?: ToolUpdate,
+    /** The caller's abort signal, forwarded so ESC can stop internal waits. */
+    signal?: AbortSignal | undefined,
   ) {
     const run = toolExecutes.get(name);
     if (!run) throw new Error(`review-gate: internal tool ${name} is not registered`);
-    return run(`internal-${name}`, params, undefined, onUpdate, ctx);
+    return run(`internal-${name}`, params, signal, onUpdate, ctx);
   }
   /** The text a tool result carries (its content joined). */
   function toolText(result: { content?: { type: string; text: string }[] }): string {
@@ -1330,7 +1332,32 @@ export default function reviewGate(pi: ExtensionAPI) {
   const CHILD_HEARTBEAT_MS = 10_000;
   /** How stale an unchanged state report may get before it is rewritten. */
   const CHILD_STATE_REFRESH_MS = 60_000;
+  /**
+   * How long drain waits for pi to ACCEPT a message before acking injected.
+   * sendUserMessage resolves only after the whole turn (pi's prompt()), so
+   * the ack must not await it — but a genuine rejection should still surface.
+   */
+  const INJECT_ACK_BOUND_MS = 2_000;
   let childHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  /** True while a drain is mid-flight — the re-entrancy guard. */
+  let drainingInstructions = false;
+  /**
+   * The child-side interrupt source: an instruct (interrupt/steer) fires it
+   * to dismiss an OPEN dialog as INTERRUPTED before the message is injected.
+   * Wired into askThroughChannel's `interruptSignal`, so the box comes down
+   * and the waiting request settles by:"interrupted" — never read as a user
+   * rejection, never as consent.
+   */
+  let gateInterruptController: AbortController = new AbortController();
+  /**
+   * The signal a dialog currently open listens to for an instruct interrupt.
+   * Every dialog gets the CURRENT controller's signal; drain aborts that
+   * controller and installs a fresh one, so one interrupt dismisses the dialog
+   * open AT THAT MOMENT and never a later one.
+   */
+  function currentInterruptSignal(): AbortSignal {
+    return gateInterruptController.signal;
+  }
   let lastChildReportAt = 0;
   let lastReportedChildState: ChildReportedState | undefined;
   /**
@@ -1411,6 +1438,21 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function drainChildInstructions(ctx: ExtensionContext): Promise<void> {
     const binding = childBinding();
     if (!binding) return;
+    // RE-ENTRANCY GUARD: the heartbeat and agent_settled both drain; an
+    // `await pi.sendUserMessage()` inside one drain would let the OTHER fire
+    // while the first is still mid-flight, and the instruction would be
+    // injected twice (round-4: a message that was written, never acknowledged,
+    // and silently lost — the inverse: acknowledged twice, then acted on twice).
+    if (drainingInstructions) return;
+    drainingInstructions = true;
+    try {
+      await drainInstructionsInner(binding, ctx);
+    } finally {
+      drainingInstructions = false;
+    }
+  }
+
+  async function drainInstructionsInner(binding: ChildChannelBinding, ctx: ExtensionContext): Promise<void> {
     for (const instruction of pendingInstructions(binding)) {
       // STAGE ONE — "I have it". Written BEFORE anything is attempted, and
       // exactly once per instruction, because it answers a different question
@@ -1435,10 +1477,26 @@ export default function reviewGate(pi: ExtensionAPI) {
           // the new message, so the child stops what it was doing and reads
           // this immediately. A bare interrupt (no text) stays a plain abort.
           const interruptText = instructText(channelIO, instruction);
+          // STOP-FIRST (user decision 2026-09-01): any OPEN dialog is
+          // dismissed as INTERRUPTED before the message is injected — a
+          // goal box, a question, a consent. The controller is swapped so
+          // the NEXT dialog starts clean; the abort below additionally
+          // stops the current turn if one is running.
+          gateInterruptController.abort();
+          gateInterruptController = new AbortController();
           ctx.abort?.();
           if (interruptText) {
-            await pi.sendUserMessage(interruptText, { deliverAs: "steer" });
-            acknowledgeInstruct(binding, instruction.instructId, true, "已中断并立即投递正文 (deliverAs:steer)", "injected");
+            // Race, not await: sendUserMessage resolves only after the WHOLE
+            // turn finishes (pi's prompt()), so a bare await would make the
+            // injected ack land minutes late and the PM's 15s receipt
+            // window report a delivered message as failed. A short bound
+            // covers the actual failure (pi rejecting the message) while
+            // letting a busy child's long turn proceed in the background.
+            await Promise.race([
+              pi.sendUserMessage(interruptText, { deliverAs: "steer" }),
+              new Promise((resolve) => setTimeout(resolve, INJECT_ACK_BOUND_MS)),
+            ]).catch(() => undefined);
+            acknowledgeInstruct(binding, instruction.instructId, true, "已解除等待并立即投递正文 (deliverAs:steer)", "injected");
           } else {
             acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
           }
@@ -1455,12 +1513,26 @@ export default function reviewGate(pi: ExtensionAPI) {
           );
           continue;
         }
-        await pi.sendUserMessage(text, { deliverAs: instruction.mode });
+        // STOP-FIRST for steer too: it cuts INTO the current turn, so an
+        // open dialog (goal box / question / consent) must come down first —
+        // otherwise the message is injected while the child stays wedged on
+        // the box (the measured deadlock). followUp is the one mode that
+        // does NOT stop: its whole meaning is "read this when you are done".
+        if (instruction.mode === "steer") {
+          gateInterruptController.abort();
+          gateInterruptController = new AbortController();
+        }
+        await Promise.race([
+          pi.sendUserMessage(text, { deliverAs: instruction.mode }),
+          new Promise((resolve) => setTimeout(resolve, INJECT_ACK_BOUND_MS)),
+        ]).catch(() => undefined);
         acknowledgeInstruct(
           binding,
           instruction.instructId,
           true,
-          `pi.sendUserMessage(deliverAs:${instruction.mode})`,
+          instruction.mode === "steer"
+            ? `已解除等待并投递 (deliverAs:${instruction.mode})`
+            : `pi.sendUserMessage(deliverAs:${instruction.mode})`,
           "injected",
         );
       } catch (error) {
@@ -1493,7 +1565,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       const answer = hasUI ? await render(new AbortController().signal) : undefined;
       return { answer, by: "human", requestId: "" };
     }
-    return askThroughChannel(binding, { ...request, hasUI }, render);
+    // The dialog listens to the gate's interrupt source as well as its own
+    // abort: an instruct fired while it is open dismisses it as INTERRUPTED
+    // so the child can process the message instead of staying wedged on the box.
+    return askThroughChannel(binding, { ...request, hasUI }, render, currentInterruptSignal());
   }
 
 
@@ -1556,7 +1631,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // it. `latestCtx` is refreshed on every tool_call, so it is current by
     // the time any orchestration tool runs.
     contextPercent: () => contextPercentOf(latestCtx as unknown as { getContextUsage?: () => unknown }),
-    auditPlan: (plan, onUpdate) => runPlanAudit(plan, onUpdate as { step?: (t: string) => void; done?: (t: string) => void } | undefined),
+    auditPlan: (plan, onUpdate, signal) => runPlanAudit(plan, onUpdate as { step?: (t: string) => void; done?: (t: string) => void } | undefined, signal),
 
     sessionTranscriptPath: () => {
       try {
@@ -3674,6 +3749,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     goalText: string;
     ctx: unknown;
     progress?: ProgressReporter;
+    /** The caller's abort signal — ESC must be able to stop the audit wait. */
+    signal?: AbortSignal | undefined;
   }): Promise<{ ok: true } | { ok: false; text: string }> {
     const { root, goalText, ctx } = input;
     input.progress?.step("组装 goal 审计任务");
@@ -3715,8 +3792,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the process exited, its exit-code file landed, or a verdict fence is
     // already in this round's stdout). Re-using it means the audit cannot
     // hang on a criterion the tool would have accepted.
-    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx);
-    // Recording is idempotent: the exit watcher may have got there first, and
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx, undefined, input.signal);
     // the pending-draft entry it consumes makes the second call a no-op.
     const note = await recordJudgeConclusion(child.sessionId);
     // O-6 — WHOEVER DISPATCHED IT CLOSES IT. This goal-auditor is the gate's
@@ -3766,6 +3842,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function runPlanAudit(
     plan: OrchestratorPlan,
     onUpdate?: { step?: (t: string) => void; done?: (t: string) => void } | undefined,
+    signal?: AbortSignal | undefined,
   ): Promise<{ ok: true } | { ok: false; text: string }> {
     // FAIL-CLOSED AROUND THE WHOLE CHAIN. Anything unexpected in here — a
     // judge that could not be spawned, an IO error reading its output — must
@@ -3773,7 +3850,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the tool and leaves the orchestrator unable to tell whether a dialog is
     // about to appear.
     try {
-      return await auditPlanRound(plan, onUpdate);
+      return await auditPlanRound(plan, onUpdate, signal);
     } catch (error) {
       return {
         ok: false,
@@ -3786,6 +3863,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function auditPlanRound(
     plan: OrchestratorPlan,
     onUpdate?: { step?: (t: string) => void; done?: (t: string) => void } | undefined,
+    signal?: AbortSignal | undefined,
   ): Promise<{ ok: true } | { ok: false; text: string }> {
 
     const root = primaryRepoRoot;
@@ -3829,7 +3907,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The SAME wait implementation `judge_wait` uses (process exit, exit-code
     // file, or a verdict fence already in this round's stdout).
     onUpdate?.step?.("审计运行中（最长 10 分钟，完成即返回）");
-    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx);
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx, undefined, signal);
     onUpdate?.done?.("审计进程结束");
     // O-6 — the gate dispatched this plan auditor internally, so the gate
     // closes it (the round-5 P1). The orchestrator never asked for a judge
