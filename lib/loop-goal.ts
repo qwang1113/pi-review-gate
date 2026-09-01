@@ -701,3 +701,23 @@ function formatAge(ageMs: number | undefined): string {
   if (hours < 48) return hours + "h ago";
   return Math.floor(hours / 24) + "d ago";
 }
+
+/**
+ * D (2026-09-01): pure throttle decision for the goal-negotiation reminder.
+ *
+ * Injectable `now` is the clock seam the integration tests cannot reach:
+ * they drive the extension through pi events with no way to fake Date.now,
+ * so the per-session CAP used to be indistinguishable from the 5-minute
+ * WINDOW (reviewer P2). Keeping the decision pure makes both halves
+ * testable. Returns true when a reminder is due now.
+ */
+export function goalReminderDue(opts: {
+  now: number;
+  lastAt: number;
+  count: number;
+  minMs: number;
+  cap: number;
+}): boolean {
+  return opts.now - opts.lastAt >= opts.minMs && opts.count < opts.cap;
+}
+

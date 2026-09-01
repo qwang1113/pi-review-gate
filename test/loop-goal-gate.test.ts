@@ -8,7 +8,7 @@ import {
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { goalTextHash } from "../lib/loop-goal.ts";
+import { goalTextHash, goalReminderDue } from "../lib/loop-goal.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
 import { isPiSelfPath } from "../lib/pi-self.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
@@ -860,3 +860,96 @@ test("L8: propose_loop_goal refuses a NON-repo repo param and shows the binding 
   assert.match(dialogText, new RegExp(repoB.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     "the consent dialog must name the repo the goal binds to");
 });
+
+// ---------------------------------------------------------------------------
+// D (2026-09-01): goal-negotiation reminder on read-only tools.
+//
+// MEASURED: an orchestration child read code for minutes and never
+// negotiated its own loop goal, because the task brief claimed one was
+// already approved. The L8 edit gate blocks edits, but reading is not an
+// edit. This pins the advisory: a loop-mode session WITHOUT a confirmed goal
+// gets a throttled one-line reminder appended to read-only results.
+// ---------------------------------------------------------------------------
+
+function readResult(handlers: Map<string, (e: unknown, c: unknown) => unknown>, ctx: unknown) {
+  return handlers.get("tool_result")!({
+    toolName: "read",
+    isError: false,
+    input: { path: "/tmp/x.ts" },
+    content: [{ type: "text", text: "file body" }],
+  }, ctx);
+}
+
+test("D: loop mode without a confirmed goal appends the reminder to a read result (throttled)", async () => {
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const { handlers, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+
+  // Undecided mode behaves as loop (fail-closed, same as L8).
+  const first = await readResult(handlers, ctx);
+  assert.ok(first && (first as { content?: unknown[] }).content, "read result must come back");
+  const text = JSON.stringify((first as { content: Array<{ text?: string }> }).content);
+  assert.match(text, /propose_loop_goal/, "the reminder must name the negotiation tool");
+
+  // Throttle: a second read inside the 5-minute window does NOT remind again.
+  // (An un-rewritten result is `undefined` — the handler only returns a
+  // replacement object when it has something to append.)
+  const second = await readResult(handlers, ctx);
+  assert.equal(second, undefined, "throttled: no second reminder inside the window");
+});
+
+test("D: a confirmed goal silences the reminder", async () => {
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const { handlers, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  await approveGoal(pi, ctx, GOAL_TEXT);
+
+  const res = await readResult(handlers, ctx);
+  assert.equal(res, undefined, "a confirmed goal must not remind (no rewrite)");
+});
+
+test("D: explore mode never reminds (goal is a loop-mode contract)", async () => {
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const { handlers, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  await setMode(pi, ctx, "explore");
+
+  const res = await readResult(handlers, ctx);
+  assert.equal(res, undefined, "explore mode must not remind (no rewrite)");
+});
+
+test("D: orchestrator mode never reminds (its contract is the plan, not a goal)", async () => {
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const { handlers, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  await setMode(pi, ctx, "orchestrator");
+
+  const res = await readResult(handlers, ctx);
+  assert.equal(res, undefined, "orchestrator mode must not remind (no rewrite)");
+});
+
+
+
+test("D: goalReminderDue pure throttle — window AND cap are each pinned (reviewer P2)", () => {
+  const MIN = 5 * 60_000;
+  const CAP = 2;
+  // Window: a reminder inside the window is due; one right at the edge is due.
+  assert.equal(goalReminderDue({ now: 1_000_000, lastAt: 0, count: 0, minMs: MIN, cap: CAP }), true);
+  assert.equal(goalReminderDue({ now: MIN, lastAt: 0, count: 0, minMs: MIN, cap: CAP }), true, "at the window edge, due");
+  assert.equal(goalReminderDue({ now: MIN - 1, lastAt: 0, count: 0, minMs: MIN, cap: CAP }), false, "inside the window, not due");
+  // Cap: at cap-1 it is still due (after the window), at cap it is not —
+  // this is the half the integration test could NOT pin before the clock seam.
+  assert.equal(goalReminderDue({ now: MIN + 1, lastAt: 0, count: CAP - 1, minMs: MIN, cap: CAP }), true, "count at cap-1, after window: due");
+  assert.equal(goalReminderDue({ now: MIN + 1, lastAt: 0, count: CAP, minMs: MIN, cap: CAP }), false, "count at cap: never again");
+  // Both halves must hold: a fresh window does NOT reset a spent cap.
+  assert.equal(goalReminderDue({ now: 10 * MIN, lastAt: 0, count: CAP, minMs: MIN, cap: CAP }), false, "a long window cannot reset the cap");
+});
+

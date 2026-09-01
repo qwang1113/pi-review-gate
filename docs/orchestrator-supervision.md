@@ -331,6 +331,32 @@ plan，把每一处差异归入两类之一：
 脚本/注册入口这些最容易漏）、边界重叠与 `execution` 是否自洽、依赖是否成环或缺失、
 `maxParallel` 是否安全、每个任务是否可独立验收。
 
+## 六乙、任务书的最后一句话是门禁的
+
+`buildTaskDocument` 生成的任务书，在项目经理的 brief **之后**由门禁追加一段
+**硬指示**（`TASK_GOAL_DIRECTIVE`，2026-09-01）：
+
+> 本会话的退出条约是你自己的 loop goal。任务书只是 plan 的任务边界，不是你的 goal；
+> plan 批准 ≠ goal 批准。开始改代码前，你必须先用 `propose_loop_goal` 协商并获批
+> 你自己的 goal（goal-auditor 审计 + 用户批准）。未批准 goal 前，L8 edit gate 会拦下
+> 所有 edit/write。
+
+**为什么是门禁追加而不是项目经理写**：2026-09-01 onchain 事故里，项目经理在
+brief 里写了一句「目标文本见 .pi/loop-goal.md（已批准）。开始工作。」，子会话——一个
+有自己 goal 要协商的全新 loop 会话——把 plan 的批准当成了自己的，跳过
+`propose_loop_goal` 直接读代码，读了四分钟进程就消失了，一次协商都没发生。
+L8 edit gate 拦得住 edit，拦不住「读着读着忘了协商」。
+
+所以：**任务书里任何「goal 已批准」的宣称，都会被紧随其后的门禁硬指示否定**。
+项目经理写不写这句都无所谓——写了对子会话是噪声，不写也不丢信息，因为硬指示
+恒在。真正的机械兜底是 L8 edit gate（`loopGoalEditGate`）：子会话不协商出
+自己批准过的 goal，任何 edit/write 都过不去。硬指示只是让第一轮就把这句话
+说出口。
+
+配套的 advisory（同一天）：loop 且无已批准 goal 时，read-only 工具（read/grep/ls
+等）的结果会被追加一行提醒——每 5 分钟最多一次、每会话最多 2 次，explore/normal/orchestrator
+不触发。不拦，只是把「你还没协商 goal」放回视线里。
+
 ## 六丙、哪个 pane 是哪个：颜色 + 状态标签
 
 `lib/orchestrator-pane-decor.ts`（纯逻辑）+ `orchestrator-tmux.ts`（argv）
