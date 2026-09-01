@@ -178,6 +178,18 @@ export function abandonedRunningTask(
 }
 
 export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
+  // IDENTITY CHECK FIRST (2026-09-17, user decision). This session holds an
+  // orchestration identity; the sidecar may hold ANOTHER orchestration's
+  // runtime (a stale plan + child registry from a previous run). Spawning
+  // under the wrong identity would split panes the old orchestration still
+  // owns and register children nobody can address. Refuse loudly instead of
+  // silently adopting the stale runtime.
+  const conflict = deps.runtimeConflict?.();
+  if (conflict) {
+    return fail(`review-gate: 当前会话持有新编排身份（${deps.runtime().orchestrationId}），无法继续旧编排（${conflict}）。` +
+      "sidecar 里登记的是另一个 orchestration 的 runtime —— 不接管、不开 pane。" +
+      "若要接手旧编排，请用同一个 RG_ORCHESTRATION_ID 启动会话（或 relay 交接）。");
+  }
   const first = currentPlan(deps);
   if (first.problem) return first.problem;
   let plan = first.plan;

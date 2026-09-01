@@ -156,7 +156,7 @@ import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
 // repository's own worst example of the architecture rule this round adds.
-import { newOrchestrationId, orchestrationIdFromEnv } from "../lib/orchestration-id.ts";
+import { newOrchestrationId, orchestrationIdFromEnv, ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { orchestratorDoneProblems } from "../lib/orchestrator-gate.ts";
 import {
   ORCHESTRATOR_DIRECTIVE,
@@ -5476,6 +5476,26 @@ export default function reviewGate(pi: ExtensionAPI) {
                 "review-gate: 本会话是某个编排的**子会话**（环境里带着 RG_ORCHESTRATION_ID），" +
                 "不能自己变成项目经理 —— 那会让它接管管着自己的那个 orchestration 的通知渠道。" +
                 "你就是普通 loop 会话：干活、送审、declare_done；有事项目经理会找你。",
+            }],
+            details: { mode: state.taskMode ?? null },
+            isError: true,
+          };
+        }
+        // IDENTITY TAKE-OVER GUARD (2026-09-17, user decision): a session
+        // that did NOT inherit an orchestration id (no RG_ORCHESTRATION_ID)
+        // and finds a plan ALREADY written by somebody else must not
+        // silently become that orchestration's holder. The plan carries the
+        // user's approval and authorizes spawning; adopting it under a NEW
+        // minted id would spawn children nobody can address.
+        if (!process.env[ORCHESTRATION_ID_ENV] && readPlanFile(primaryRepoRoot).plan !== undefined) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                "review-gate: 当前会话没有继承编排身份（无 RG_ORCHESTRATION_ID），" +
+                "但本仓库已有别人写好的 plan —— 不接管旧编排。" +
+                "若这是你要接手的旧编排，请用同一个 RG_ORCHESTRATION_ID 启动会话；" +
+                "若是新编排，先清掉旧 plan（或换一个 repo）。",
             }],
             details: { mode: state.taskMode ?? null },
             isError: true,

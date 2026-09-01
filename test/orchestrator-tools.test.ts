@@ -712,3 +712,30 @@ test("notify writes once and is then throttled", async () => {
   const second = await world.call("orchestrator_notify", { title: "要你拍板", body: "有个不可逆的决定" });
   assert.match(replyText(second), /节流|throttl/i);
 });
+
+// ---------------------------------------------------------------------------
+// IDENTITY CONFLICT (2026-09-17): a new session must not adopt another
+// orchestration's stale runtime
+// ---------------------------------------------------------------------------
+
+test("spawn REFUSES when the sidecar holds another orchestration's runtime", async () => {
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    approvePlan: true,
+    // The session minted its own id, but the sidecar carries an old one.
+    identityConflict: "orch-deadbeef-OLD",
+  });
+  const reply = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  assert.equal(reply.isError, true, "a conflicting identity must fail the spawn");
+  assert.match(replyText(reply), /orch-deadbeef-OLD/, "the foreign id is named");
+  assert.match(replyText(reply), /无法继续旧编排/, "the refusal says why");
+  assert.equal([...world.panes.values()].length, 1, "no pane is opened under the wrong identity");
+});
+
+test("spawn proceeds normally when the identity matches or is inherited", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const reply = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  assert.equal(reply.isError, undefined, replyText(reply));
+  const pane = [...world.panes.values()].find((p) => p.env[GATE_MODE_ENV] === "loop");
+  assert.ok(pane, "the child pane opened as a loop session");
+});
