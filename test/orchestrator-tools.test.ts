@@ -177,6 +177,14 @@ test("a task declaring a repo spawns its child in THAT repo, not the orchestrato
   const details = receipt.details as Record<string, unknown>;
   assert.equal(details.cwd, "/other/repo", "the receipt names the child's cwd");
   assert.match(replyText(receipt), /cwd[^\n]*\/other\/repo/, "the receipt text states the child's working directory");
+  // CROSS-REPO FIX (2026-09-17): the task file must land in the TASK's repo,
+  // not the orchestrator's — the child resolves @.pi/tasks/<file> against ITS
+  // cwd. Writing it elsewhere made cross-repo spawns hand the child a path
+  // it could not find: pi exited at boot and the pane died.
+  const taskFilePaths = [...world.scratch.keys()].filter((p) => p.includes("/.pi/tasks/"));
+  assert.ok(taskFilePaths.length > 0, "the task file was written");
+  assert.ok(taskFilePaths.every((p) => p.startsWith("/other/repo/")),
+    `the task file lands in the TASK repo, not the orchestrator's: ${taskFilePaths.join(", ")}`);
 });
 
 test("a task declaring an unresolvable repo is REFUSED, never silently falling back", async () => {

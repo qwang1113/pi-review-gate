@@ -1332,12 +1332,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   const CHILD_HEARTBEAT_MS = 10_000;
   /** How stale an unchanged state report may get before it is rewritten. */
   const CHILD_STATE_REFRESH_MS = 60_000;
-  /**
-   * How long drain waits for pi to ACCEPT a message before acking injected.
-   * sendUserMessage resolves only after the whole turn (pi's prompt()), so
-   * the ack must not await it — but a genuine rejection should still surface.
-   */
-  const INJECT_ACK_BOUND_MS = 2_000;
   let childHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
   /** True while a drain is mid-flight — the re-entrancy guard. */
   let drainingInstructions = false;
@@ -1492,10 +1486,11 @@ export default function reviewGate(pi: ExtensionAPI) {
             // window report a delivered message as failed. A short bound
             // covers the actual failure (pi rejecting the message) while
             // letting a busy child's long turn proceed in the background.
-            await Promise.race([
-              pi.sendUserMessage(interruptText, { deliverAs: "steer" }),
-              new Promise((resolve) => setTimeout(resolve, INJECT_ACK_BOUND_MS)),
-            ]).catch(() => undefined);
+            // sendUserMessage is fire-and-forget in this pi build (the loader
+            // does not return the promise), so there is nothing to await or
+            // race: the message is handed to pi synchronously and the ack
+            // records that. A failure surfaces as the child never acking.
+            pi.sendUserMessage(interruptText, { deliverAs: "steer" });
             acknowledgeInstruct(binding, instruction.instructId, true, "已解除等待并立即投递正文 (deliverAs:steer)", "injected");
           } else {
             acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
@@ -1522,10 +1517,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           gateInterruptController.abort();
           gateInterruptController = new AbortController();
         }
-        await Promise.race([
-          pi.sendUserMessage(text, { deliverAs: instruction.mode }),
-          new Promise((resolve) => setTimeout(resolve, INJECT_ACK_BOUND_MS)),
-        ]).catch(() => undefined);
+        pi.sendUserMessage(text, { deliverAs: instruction.mode });
         acknowledgeInstruct(
           binding,
           instruction.instructId,

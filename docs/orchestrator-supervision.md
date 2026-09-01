@@ -49,7 +49,7 @@
 | --- | --- | --- |
 | `state` | 子 → 编排 | 我现在是 working / waiting-input / idle / done；带上下文用量、session id |
 | `request` | 子 → 编排 | 我弹了一个框：标题、**全部选项（原文、按序）**、正文 payload、topic |
-| `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / orchestrator / dismissed |
+| `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / orchestrator / dismissed / **interrupted**（instruct 打断时解除的框，不是拒绝） |
 | `answer` | 编排 → 子 | 这个请求的答案 |
 | `instruct` | 编排 → 子 | 跟你说句话（steer / followUp）或打断你（interrupt） |
 | `instruct-ack` | 子 → 编排 | 我注入了（或没能注入，附原因） |
@@ -168,9 +168,9 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 
 `mode` 就是 pi 自己的 `deliverAs`：
 
-- `steer` —— 切进它当前这一轮；
-- `followUp` —— 等它跑完手上这轮再读；
-- `interrupt` —— `ctx.abort()`，不带正文。
+- `steer` —— 切进它当前这一轮；同时解除它挂着的框（by:`interrupted`）再投递；
+- `followUp` —— 等它跑完手上这轮再读，**不**解除任何框；
+- `interrupt` —— 最高优先级：`ctx.abort()` 停掉当前轮 + 解除挂着的框 + 带正文立即投递。
 
 文本写进通道，由**子会话自己的门禁**用 pi 的 API 注入。**被替换掉的是什么**：
 `tmux send-keys`，它产出过四条独立缺陷 —— 任务书被截断（F7）、没有 Enter 提交（F8）、

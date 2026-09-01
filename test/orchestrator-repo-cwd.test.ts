@@ -106,3 +106,74 @@ test("resolveTaskRepo REFUSES a RELATIVE path that is not inside a repo", () => 
   const resolved = deps.resolveTaskRepo("./definitely-not-a-repo-xyz");
   assert.equal(resolved.ok, false, "a relative path to a missing dir must refuse");
 });
+
+// ---------------------------------------------------------------------------
+// runtimeConflict (2026-09-17): a fresh session must not adopt another
+// orchestration's stale runtime; a relay successor legitimately may.
+// ---------------------------------------------------------------------------
+
+test("runtimeConflict: fresh session + foreign sidecar runtime => the foreign id", () => {
+  const root = makeRepo();
+  const host: OrchestratorHostBindings = {
+    repoRoot: root,
+    taskMode: () => "orchestrator" as const,
+    // The sidecar holds ANOTHER orchestration's runtime.
+    loadRuntime: () => ({
+      orchestrationId: "orch-deadbeef-OLD",
+      children: [],
+      notify: { sentAt: [], lastByKey: {} },
+    }),
+    storeRuntime: () => {},
+    // No RG_ORCHESTRATION_ID in env: the session mints its own.
+    orchestrationId: () => "orch-12345678-NEW",
+    env: () => ({}) as NodeJS.ProcessEnv,
+    confirm: async () => true,
+    showToUser: () => {},
+    sessionTranscriptPath: () => undefined,
+    knownRepoRoots: () => [root],
+  };
+  const deps = createOrchestratorDeps(host);
+  assert.equal(deps.runtimeConflict?.(), "orch-deadbeef-OLD",
+    "a fresh session sees the foreign runtime's id as a conflict");
+});
+
+test("runtimeConflict: a relay successor (env id present) is NOT a conflict", () => {
+  const root = makeRepo();
+  const host: OrchestratorHostBindings = {
+    repoRoot: root,
+    taskMode: () => "orchestrator" as const,
+    loadRuntime: () => ({
+      orchestrationId: "orch-deadbeef-OLD",
+      children: [],
+      notify: { sentAt: [], lastByKey: {} },
+    }),
+    storeRuntime: () => {},
+    orchestrationId: () => "orch-deadbeef-OLD",
+    env: () => ({ RG_ORCHESTRATION_ID: "orch-deadbeef-OLD" }) as NodeJS.ProcessEnv,
+    confirm: async () => true,
+    showToUser: () => {},
+    sessionTranscriptPath: () => undefined,
+    knownRepoRoots: () => [root],
+  };
+  const deps = createOrchestratorDeps(host);
+  assert.equal(deps.runtimeConflict?.(), undefined,
+    "inheriting the id via env makes the takeover legitimate");
+});
+
+test("runtimeConflict: no sidecar runtime is never a conflict", () => {
+  const root = makeRepo();
+  const host: OrchestratorHostBindings = {
+    repoRoot: root,
+    taskMode: () => "orchestrator" as const,
+    loadRuntime: () => undefined,
+    storeRuntime: () => {},
+    orchestrationId: () => "orch-12345678-NEW",
+    env: () => ({}) as NodeJS.ProcessEnv,
+    confirm: async () => true,
+    showToUser: () => {},
+    sessionTranscriptPath: () => undefined,
+    knownRepoRoots: () => [root],
+  };
+  const deps = createOrchestratorDeps(host);
+  assert.equal(deps.runtimeConflict?.(), undefined, "no stored runtime means nothing to conflict with");
+});

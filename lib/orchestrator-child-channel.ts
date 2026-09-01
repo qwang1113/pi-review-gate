@@ -219,9 +219,12 @@ export async function askThroughChannel(
   const outcome = await decision;
   pollAbort.abort();
   dialogAbort.abort();
-  // Both sides are settled or cancelled by now; awaiting them keeps the
-  // renderer's own cleanup inside this call rather than after it returns.
-  await Promise.allSettled([channelSide, humanSide, interruptSide]);
+  // The decision is made; the request is settled. The renderer's cleanup
+  // must NOT gate that — a render that never resolves (a dialog that
+  // ignores its abort signal) would otherwise hang every settled question
+  // forever (measured: HUNG-on-allSettled). Fire the cleanup, write the
+  // settle record, return.
+  void Promise.allSettled([channelSide, humanSide, interruptSide]);
 
   appendRecord(binding.io, binding.target, {
     kind: "request-settled",

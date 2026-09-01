@@ -260,9 +260,15 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   }
   const childId = newChildId(taskId, deps.now());
   const marker = buildDeliveryMarker(taskId, deps.now());
+  // CROSS-REPO FIX (2026-09-17, measured): the task file MUST land in the
+  // TASK's repo (the child resolves `@.pi/tasks/<file>` against ITS cwd,
+  // which is `cwd` above). Writing it into the ORCHESTRATOR's repo made a
+  // cross-repo spawn hand the child a relative path it could not find —
+  // pi exited at boot, the pane died, and the delivery check found nothing.
   const written = deps.writeTaskFile(
     taskFileName(marker),
     buildTaskDocument({ marker, taskId, title: task.title, brief }),
+    cwd,
   );
   if (!written.ok) {
     return fail(`review-gate: 任务书写不出来（${written.error}）—— 一个 pane 都没开。`);
@@ -511,7 +517,10 @@ export async function dispatchInstruct(
   // STOP-FIRST (2026-09-01): the child's gate dismisses an OPEN dialog when
   // the instruction lands. Tell the PM what just got cancelled — a goal box,
   // a question, a consent — and that answering is the other tool's job.
-  const open = childChannelProjection(deps, childId).openRequests[0];
+  // STOP-FIRST (2026-09-01): steer/interrupt dismiss an OPEN dialog;
+  // followUp does NOT (its whole meaning is "read this when you are done"),
+  // so the cancellation notice only applies to the two stopping modes.
+  const open = mode === "followUp" ? undefined : childChannelProjection(deps, childId).openRequests[0];
   const cancelledLine = open
     ? `\n本次打断同时取消了子会话的待答请求「${open.title}」—— 它不再等这个回答了；若你的本意是回答它，请用 orchestrator_answer。`
     : "";

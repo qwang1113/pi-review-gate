@@ -373,6 +373,10 @@ export async function doProposeLoopGoal(
             (await uiCtx.ui?.input?.(
               "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
               "必填:哪里不合适",
+              // P1 FIX (2026-09-17): the signal MUST reach pi's dialog, or an
+              // instruct interrupt cannot dismiss the box and the child stays
+              // wedged on it forever (the measured deadlock's true culprit).
+              signal ? { signal } : undefined,
             )) ?? undefined,
         );
         // An INTERRUPTED reason box means nobody answered: stay undefined.

@@ -965,6 +965,20 @@ test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' par
     `expected 4 mode-changed reports (apply/noop/declined/rejected), got ${modeChangedHits.length}`);
 });
 
+test("set_gate_mode(orchestrator) refuses to take over a plan written by another orchestration", () => {
+  const at = SRC.indexOf('name: "set_gate_mode"');
+  const region = SRC.slice(at, SRC.indexOf("registerTool", at + 10));
+  // A session with no inherited RG_ORCHESTRATION_ID must not adopt a plan
+  // somebody else wrote: the plan carries the user's approval and would
+  // authorize spawning under a NEW minted id nobody can address.
+  assert.match(region, /ORCHESTRATION_ID_ENV/,
+    "the guard reads whether the session inherited an orchestration id");
+  assert.match(region, /readPlanFile\(primaryRepoRoot\)/,
+    "the guard checks whether a plan already exists");
+  assert.match(region, /不接管旧编排/, "and it says so plainly");
+  assert.match(region, /isError: true/, "refusing, never silently proceeding");
+});
+
 test("USER REQUIREMENT: /tmp first classification clamps via scratchFirstMode; /gate-mode never goes through it", () => {
   // Agent path: /tmp sessions clamp the first verdict and keep piSelfTask true
   // so later agent upgrades to loop are rejected.
