@@ -46,6 +46,7 @@ import { unmetRequirements, type GateState } from "./gate-state.ts";
 import { formatPrecommitSummary, lastPrecommitTiming } from "./gate-timings.ts";
 import { isEnforcedMode, normalizeTaskMode, type TaskMode } from "./task-mode.ts";
 import { ORCHESTRATOR_NEEDS_TMUX } from "./orchestrator-directives.ts";
+import { GRANTABLE_SCOPES } from "./ask-user.ts";
 import type { ProjectConfig } from "./project-config.ts";
 import {
   WORKFLOW_COMMANDS,
@@ -128,7 +129,10 @@ export interface GateCommandDeps extends GateDiagnosisDeps {
   otherRepoStatus(): { lines: string[]; blocked: boolean };
   /** Is the loop goal on disk the one the USER approved? */
   loopGoalConfirmed(): boolean;
-  /** Is there a goal draft at all (approved or not)? */
+  /** True when the user granted the PM proxy scope `scope` (orchestrator only). */
+  hasProxyGrant(scope: string): boolean;
+  /** Mint a proxy grant for `scope` — /gate-grant's door (2026-09-16). */
+  grantProxyScope(scope: string, via: "ask-user" | "gate-grant" | "first-answer"): void;
   loopGoalPresent(): boolean;
   /** `ui.confirm` with the dialog-height budget applied (never bypassed). */
   confirmBounded(uiCtx: unknown, title: string, message: string): Promise<boolean>;
@@ -346,6 +350,34 @@ function registerGateMode(host: CommandHost, deps: GateCommandDeps): void {
   });
 }
 
+function registerGateGrant(host: CommandHost, deps: GateCommandDeps): void {
+  host.registerCommand("gate-grant", {
+    description: "Grant the project manager a proxy scope (orchestrator only): /gate-grant sensitive-edit",
+    handler: async (args, ctx) => {
+      const scope = (args ?? "").trim();
+      if (!scope) { ctx.ui.notify("Usage: /gate-grant <scope> — scopes: sensitive-edit", "error"); return; }
+      if (!GRANTABLE_SCOPES.includes(scope as (typeof GRANTABLE_SCOPES)[number])) {
+        ctx.ui.notify(`review-gate: 未知授权范围 "${scope}" —— 可授：${GRANTABLE_SCOPES.join(", ")}`, "error");
+        return;
+      }
+      if (deps.hasProxyGrant(scope)) {
+        ctx.ui.notify(`review-gate: 项目经理已有 ${scope} 代答权（无需重复授予）`, "info");
+        return;
+      }
+      const ok = ctx.hasUI
+        ? await deps.confirmBounded(
+            ctx,
+            `授予项目经理 ${scope} 代答权？`,
+            "授予后，项目经理可代答子会话的该类请求（如敏感文件编辑），直到本 orchestration 结束。",
+          )
+        : true;
+      if (!ok) return;
+      deps.grantProxyScope(scope, "gate-grant");
+      ctx.ui.notify(`review-gate: 已授予项目经理 ${scope} 代答权（via /gate-grant）`, "info");
+    },
+  });
+}
+
 function registerGateReset(host: CommandHost, deps: GateCommandDeps): void {
   host.registerCommand("gate-reset", {
     description: "Reset review-gate state for this session",
@@ -399,6 +431,7 @@ export function registerGateCommands(host: CommandHost, deps: GateCommandDeps): 
   }
   registerGateStatus(host, deps);
   registerGateBypass(host, deps);
+  registerGateGrant(host, deps);
   registerGateMode(host, deps);
   registerGateReset(host, deps);
   registerGateLesson(host, deps);

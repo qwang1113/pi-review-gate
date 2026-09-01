@@ -47,15 +47,15 @@ import { sidecarPath, stateVariantFrom, STATE_VARIANT_ENV } from "../lib/gate-st
 // ---------------------------------------------------------------------------
 
 test("F7: the task rides in on the argv as pi's own @file reference, under a stable session id", () => {
-  const argv = buildChildCommand("/tmp/rg/tasks/rg-task-a-1.md", "a-1");
-  assert.deepEqual(argv, ["pi", "--session-id", "rg-child-a-1", "@/tmp/rg/tasks/rg-task-a-1.md"]);
+  const argv = buildChildCommand(".pi/tasks/rg-task-a-1.md", "a-1");
+  assert.deepEqual(argv, ["pi", "--session-id", "rg-child-a-1", "@.pi/tasks/rg-task-a-1.md"]);
   assert.equal(childSessionId("a-1"), "rg-child-a-1");
   assert.equal(childSessionId("../../etc"), "rg-child-------etc", "an id can never become a path");
 });
 
 test("a recovery re-opens the SAME session id, with a note instead of the task", () => {
-  const argv = buildRecoverCommand("a-1", "/tmp/rg/tasks/note.md");
-  assert.deepEqual(argv, ["pi", "--session-id", "rg-child-a-1", "@/tmp/rg/tasks/note.md"]);
+  const argv = buildRecoverCommand("a-1", ".pi/tasks/note.md");
+  assert.deepEqual(argv, ["pi", "--session-id", "rg-child-a-1", "@.pi/tasks/note.md"]);
   const note = buildRecoveryNote({ childId: "a-1", taskId: "t1", reason: "pane 消失" });
   assert.match(note, /上面的对话历史就是你自己的/, "the transcript continues — it did not restart");
   assert.match(note, /t1/);

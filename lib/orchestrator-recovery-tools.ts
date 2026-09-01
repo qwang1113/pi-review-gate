@@ -41,6 +41,7 @@ import {
   buildRecoveryNote,
   childSessionId,
   taskFileName,
+  taskFileRelPath,
 } from "./orchestrator-delivery.ts";
 import {
   findChild,
@@ -149,9 +150,13 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   }
 
   const reason = String(params.reason ?? "").trim() || "pane 消失";
-  const note = deps.writeScratchFile(
-    taskFileName(`rg-recover-${childId}-${Math.floor(deps.now()).toString(36)}`),
+  const noteName = taskFileName(`rg-recover-${childId}-${Math.floor(deps.now()).toString(36)}`);
+  const note = deps.writeTaskFile(
+    noteName,
     buildRecoveryNote({ childId, taskId: child.taskId, reason }),
+    // The note must land in the CHILD's declared repo: the recovered pane
+    // opens with cwd=child.cwd and resolves `@.pi/tasks/<note>` against it.
+    child.cwd,
   );
   if (!note.ok) return fail(`review-gate: 恢复说明写不出来（${note.error}）—— 什么都没做。`);
 
@@ -165,7 +170,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
       ...(last ? { lastChildPane: last } : {}),
       cwd: child.cwd,
       env: childEnv(deps, child),
-      command: buildRecoverCommand(child.id, note.path),
+      command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
     }));
     if (!result.ok) return fail(`review-gate: 重开 pane 失败 —— ${result.stderr || "tmux split-window 出错"}`);
     const spawned = parseSpawnedPaneId(result.stdout);
@@ -184,7 +189,7 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     ...runtime,
     children: runtime.children.map((c) =>
       c.id === child.id
-        ? { ...c, paneId, lastAssignedAt: now, taskFile: note.path, doneAt: undefined }
+        ? { ...c, paneId, lastAssignedAt: now, taskFile: taskFileRelPath(noteName), doneAt: undefined }
         : c,
     ),
   });

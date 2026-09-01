@@ -56,8 +56,10 @@ import {
   formatAnswers,
   formatTranscriptSummary,
   needsUserReply,
+  isGrantableScope,
   MAX_QUESTIONS,
   type AskAnswer,
+  type AskQuestion,
 } from "./ask-user.ts";
 
 /** Just enough of pi's tool context for a dialog and a transcript notice. */
@@ -96,6 +98,22 @@ export interface UserInteractionToolDeps {
     hasUI: boolean,
     render: (signal: AbortSignal) => Promise<string | undefined>,
   ): Promise<string | undefined>;
+  /**
+   * Can THIS session route consent dialogs through an orchestration channel
+   * (i.e. it is an orchestration child)? An orchestrator's OWN session
+   * answers false — its `request_sensitive_edit` would otherwise render a
+   * dialog only the human can close, deadlocking the project manager on a
+   * box it is supposed to answer, not to ask (measured: onchain run,
+   * 2026-08-31 — the PM called request_sensitive_edit to "authorize" a
+   * child's .env edit and froze for 2h18m on its own dialog).
+   */
+  canChannelDialogs(): boolean;
+  /**
+   * Mint a proxy grant for `scope` (user said yes via ask_user). The gate
+   * records it on the orchestration runtime; a no-op outside an
+   * orchestration.
+   */
+  grantProxyScope(scope: string, via: "ask-user" | "gate-grant" | "first-answer"): void;
   /** The session's primary repo/worktree directory. */
   cwd: string;
   /** Repo-relative paths THIS session edited (the never-exempt set). */
@@ -127,10 +145,24 @@ export type ConsentToolDeps = Pick<
   | "state" | "persist" | "showToUser" | "confirmBounded" | "cwd"
   | "sessionEditedPaths" | "commitsAheadOfBase" | "scopeLimitDeclined"
   | "declineScopeLimit" | "sensitiveGrants" | "storeSensitiveGrants"
-  | "sensitiveDeclinedPaths" | "log" | "askEitherSide"
+  | "sensitiveDeclinedPaths" | "log" | "askEitherSide" | "canChannelDialogs"
 >;
 
 // ---------- ask_user ----------
+
+/**
+ * The user-visible authorization notice a grantScope question carries.
+ *
+ * 2026-09-16 (reviewer P1): a grantScope invisible to the user let an agent
+ * harvest the sensitive-edit proxy grant from an answer to an UNRELATED
+ * question (substring match fired on "grant me a few minutes"). The scope
+ * must be stated in the dialog and the transcript, so consent is explicit.
+ */
+function grantNotice(q: AskQuestion): string {
+  if (!q.grantScope || !isGrantableScope(q.grantScope)) return "";
+  return `\n\n⚠️ 回答此题即表示：你**明确授予项目经理「${q.grantScope}」代答权**（本 orchestration 内有效）。若不打算授权，请选拒绝/否。`;
+}
+
 
 export async function doAskUser(
   deps: UserInteractionToolDeps,
@@ -173,7 +205,7 @@ export async function doAskUser(
   // (headless), and the transcript is where the Q&A stays readable after
   // the dialogs close.
   deps.showToUser(uiCtx, "───── AI 有问题要问你 ─────", questions.map((q, i) =>
-    `${progressLabel(i, questions.length)} ${q.text}` +
+    `${progressLabel(i, questions.length)} ${q.text}${grantNotice(q)}` +
     (q.options?.length ? `\n   选项：${q.options.join(" / ")}` : "") +
     (q.recommended ? `\n   推荐：${q.recommended}` : "")).join("\n"));
 
@@ -203,14 +235,14 @@ export async function doAskUser(
         {
           dialogKind: choices.length ? "select" : "input",
           topic: "ask-user",
-          title: `${title}\n${q.text}`,
+          title: `${title}\n${q.text}${grantNotice(q)}`,
           options: choices,
           ...(q.recommended ? { payload: `推荐答案：${q.recommended}` } : {}),
         },
         uiCtx.hasUI === true,
         (signal) => (choices.length
-          ? uiCtx.ui!.select!(`${title}\n${q.text}`, choices, { signal })
-          : uiCtx.ui!.input!(`${title}\n${q.text}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal })),
+          ? uiCtx.ui!.select!(`${title}\n${q.text}${grantNotice(q)}`, choices, { signal })
+          : uiCtx.ui!.input!(`${title}\n${q.text}${grantNotice(q)}\n${FREE_TEXT_HINT}`, q.recommended ?? "", { signal })),
       );
     } catch {
       picked = undefined; // a broken dialog is silence, never an answer
@@ -226,6 +258,18 @@ export async function doAskUser(
       answers.push({ question: q.text, kind: "skipped" });
     } else if (meaning.kind === "answered") {
       answers.push({ question: q.text, kind: "answered", answer: meaning.answer });
+      // GRANT DOOR 1/3 (2026-09-16, reviewer P1 fix): a question carrying a
+      // grantScope mints the proxy grant ONLY when the user picked the exact
+      // option the agent RECOMMENDED — the recommended option's own text is
+      // the authorization the user saw and chose (the notice in grantNotice
+      // states it). Substring matching is gone: an unrelated "grant me a few
+      // minutes" can no longer harvest the scope.
+      if (q.grantScope && isGrantableScope(q.grantScope)) {
+        const pickedExact = meaning.kind === "answered" && meaning.answer === q.recommended;
+        if (pickedExact) {
+          deps.grantProxyScope(q.grantScope, "ask-user");
+        }
+      }
     } else if (meaning.kind === "deferred-to-chat") {
       answers.push({ question: q.text, kind: "deferred-to-chat" });
     } else {

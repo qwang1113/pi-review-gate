@@ -190,7 +190,7 @@ import { registerOrchestratorSessionTools } from "../lib/orchestrator-session-to
 
 
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
-import { emptyRuntime, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { addGrant, emptyRuntime, hasGrant, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
@@ -1501,6 +1501,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     storeRuntime: persistOrchestration,
     orchestrationId: currentOrchestrationId,
     confirm: (title, message, pointer) => confirmBounded(latestCtx ?? {}, title, message, pointer),
+    select: (title, options) => {
+      const ctx = latestCtx as { ui?: { select?: (t: string, o: string[]) => Promise<string | undefined> } } | undefined;
+      if (!ctx?.ui?.select) return Promise.resolve(undefined);
+      return ctx.ui.select(title, [...options]);
+    },
     // O-1 — the plan's full text goes into the TRANSCRIPT before the dialog
     // asks about it, exactly like the loop goal. A plan approval binds to
     // content, so a truncated dialog body was asking the user to sign
@@ -2272,34 +2277,26 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
   /**
-   * The gate facts the belowEditor widget renders: workspace/branch,
-   * verdicts, unmet requirements. Computed from the live session state and
-   * the same unmetRequirements() the ship gate uses — the widget shows
-   * exactly what blocks shipping. Display-only: it never feeds an
-   * enforcement path.
+   * The gate facts the belowEditor widget renders: mode, branch, edited flag,
+   * and whether the loop goal is confirmed.
+   *
+   * 2026-09-16 — DELIBERATELY CHEAP (input-lag fix): this used to call
+   * `computeFingerprint()` on every 5s tick — a full shadow-index materialize
+   * + two `git add` passes that took ~3.2s in a 13k-file repo and ran on
+   * pi's main event loop, freezing the editor while typing. The widget now
+   * shows ONLY state that needs no git work: the in-memory gate state, the
+   * branch (one `symbolic-ref`), and the loop-goal confirmation. The unmet-
+   * requirements count is gone from the strip; it lives in `/gate-status`.
+   * Display-only: this never feeds an enforcement path.
    */
   function gateWidgetFacts(): GateWidgetFacts {
-    const fp = computeFingerprint(cwd);
-    const problems = (state.hasCodeChange || state.hasDocChange)
-      ? unmetRequirements(state, fp.digest, fp.unavailable, { requireDocSync: projectConfig.docSync })
-      : [];
     const completion: string[] = [];
-    for (const root of sessionRepos) {
-      // READ-ONLY: enforcementStateFor never creates a sidecar/cache entry,
-      // so a mere widget refresh cannot turn a repo with "no usable gate
-      // state" into one that looks tracked (measured regression, 2026-08-31).
-      const st = root === primaryRepoRoot ? state : enforcementStateFor(root);
-      if (!st) continue;
-      for (const p of copilotProblemsFor(st)) {
-        completion.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
-      }
-    }
     if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     return {
       mode: state.taskMode,
       branch: currentBranch(primaryRepoRoot) ?? "(detached)",
       edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
-      unmet: [...problems, ...completion],
+      unmet: completion,
     };
   }
 
@@ -3236,37 +3233,21 @@ export default function reviewGate(pi: ExtensionAPI) {
       const root = target.root;
       // A checkpoint IS a commit, so it lands on the CURRENT branch — no
       // work-branch rule anymore (2026-09-07, user decision: sessions work
-      // directly on the branch they are on, including main). The one
-      // guardrail left is the PROTECTED-branch confirmation: on
-      // main/master/dev/develop a checkpoint asks the user (or the
-      // orchestrator, through the same channel) before it commits.
+      // directly on the branch they are on, including main). The ONE hard
+      // line left (2026-09-16, user decision): a checkpoint on a PROTECTED
+      // branch (main/master/dev/develop) is REFUSED outright — no dialog,
+      // no channel ask. It used to pop a confirmation the user (or the
+      // orchestrator's project manager) could answer, but the user decided
+      // "无论如何都不能在保护分支上面做 commit，checkpoint 也不行" — so the
+      // gate's own commit now fails closed exactly like the agent's own
+      // `git commit` does. To checkpoint, work on a feature branch.
       const here = currentBranch(root);
       if (here && isProtectedBranch(here)) {
-        // The confirmation goes through the CHANNEL funnel (askEitherSide), so an
-        // orchestration child's project manager can answer it exactly as the
-        // human in the pane can — whoever answers first wins.
-        const uiCtx = ctx as unknown as {
-          ui?: {
-            select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
-          };
+        return {
+          content: [{ type: "text", text: `review-gate: checkpoint 拒绝 — 不能在受保护分支 ${here} 上提交（checkpoint 也是 commit）。请先切到功能分支（如 git checkout -b <branch>）再 checkpoint。` }],
+          details: { committed: false },
+          isError: true,
         };
-        const picked = await askEitherSide(
-          {
-            dialogKind: "select",
-            topic: "protected-branch",
-            title: "在受保护分支上提交 checkpoint？",
-            options: ["是，确认提交", "否，取消"],
-          },
-          typeof uiCtx.ui?.select === "function",
-          (signal) => uiCtx.ui!.select!("在受保护分支上提交 checkpoint？", ["是，确认提交", "否，取消"], { signal }),
-        ).catch(() => undefined);
-        if (!picked || picked.startsWith("否")) {
-          return {
-            content: [{ type: "text", text: `review-gate: checkpoint 未提交 — 用户未确认在受保护分支 ${here} 上提交。` }],
-            details: { committed: false },
-            isError: true,
-          };
-        }
       }
       const message = String(params.message ?? "").trim();
       if (message.length === 0) {
@@ -5249,6 +5230,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     confirmBounded: (uiCtx, title, message, pointer, signal) =>
       confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message, pointer, signal),
     askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
+    canChannelDialogs: () => childBinding() !== undefined,
+    grantProxyScope: (scope, via) => {
+      if (!state.orchestrator) return; // not an orchestration — nothing to grant
+      persistOrchestration(addGrant(state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
+    },
     cwd,
     sessionEditedPaths: () => [...sessionEditedPaths],
     commitsAheadOfBase: () => commitsAheadOfBase(cwd),
@@ -5970,7 +5956,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // PROTECTED-BRANCH NOTICE (2026-09-07, user decision): the workspace
     // settlement layer is gone, so a session may sit on main/master/dev/
     // develop with nobody having asked anything. Say so up front — the
-    // checkpoint confirmation is the hard half, this is the soft half.
+    // checkpoint (and ship) refusal is the hard half, this notice is the
+    // soft half.
     const startBranch = currentBranch(primaryRepoRoot);
     if (startBranch && isProtectedBranch(startBranch) && ctx.hasUI) {
       showToUser(
@@ -6276,6 +6263,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     otherRepoStatus: () => otherRepoStatus(),
     loopGoalConfirmed: () => loopGoalConfirmed(),
     loopGoalPresent: () => readSessionLoopGoal(primaryRepoRoot).present,
+    hasProxyGrant: (scope) => hasGrant(state.orchestrator ?? emptyRuntime("none"), scope),
+    grantProxyScope: (scope, via) => {
+      if (!state.orchestrator) return;
+      persistOrchestration(addGrant(state.orchestrator, { scope, grantedAt: new Date().toISOString(), via }));
+    },
     confirmBounded: (uiCtx, title, message) =>
       confirmBounded(uiCtx as Parameters<typeof confirmBounded>[0], title, message),
     setLoopArmed: (armed) => { loopArmed = armed; },

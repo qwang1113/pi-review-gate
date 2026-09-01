@@ -97,6 +97,10 @@ export interface FakeWorld {
   sidecars: Map<string, Record<string, unknown>>;
   /** Answers the fake user/orchestrator dialog will give, in order. */
   confirmAnswers: boolean[];
+  /** The options the world was built with (selectAnswers included). */
+  options: FakeWorldOptions;
+  /** Replace the runtime (used to pre-seed a grant). */
+  saveRuntime: (next: OrchestratorRuntime) => void;
   /** Everything `showToUser` printed. */
   shown: string[];
   now: () => number;
@@ -108,7 +112,7 @@ export interface FakeWorld {
     title: string;
     options: string[];
     payload?: string;
-    topic?: "goal-approval" | "workspace" | "ask-user" | "plan-approval" | "other";
+    topic?: "goal-approval" | "workspace" | "ask-user" | "plan-approval" | "sensitive-edit" | "other";
   }) => void;
   childSettles: (childId: string, requestId: string, by: "human" | "orchestrator" | "dismissed") => void;
   childAcks: (
@@ -167,6 +171,8 @@ export interface FakeWorldOptions {
    * declared repo is refused — the fake's equivalent of "not a git root").
    */
   resolvableRepos?: string[];
+  /** Answers the PM-pane `select` (grant door 3) gives, in order. */
+  selectAnswers?: string[];
 
 }
 
@@ -233,9 +239,10 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     tmux: (argv) => runFakeTmux(argv),
     ownPane: () => env.TMUX_PANE,
     confirm: async () => confirmAnswers.shift() ?? false,
+    select: async () => options.selectAnswers?.shift() ?? undefined,
     showToUser: (title, text) => { shown.push(`${title}\n${text}`); },
-    writeScratchFile: (name, content) => {
-      const path = `/tmp/rg-scratch/${name}`;
+    writeTaskFile: (name, content, repoRoot) => {
+      const path = `${repoRoot ?? "/repo"}/.pi/tasks/${name}`;
       scratch.set(path, content);
       return { ok: true, path };
     },
@@ -340,6 +347,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     sidecars,
     shown,
     confirmAnswers,
+    options,
+    saveRuntime: (next) => { runtime = next; },
     now,
     advance: (ms) => { clock += ms; },
     runtime: () => runtime,

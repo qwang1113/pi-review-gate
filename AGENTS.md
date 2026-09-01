@@ -102,10 +102,10 @@ mechanical facts replace the old enforcement, and they are DIFFERENT from
 each other:
 
 - **The gate's own checkpoint** (`judge_submit` commits it) lands on the
-  current branch, whatever it is. On a PROTECTED branch (main/master/dev/
-  develop) it pops a confirmation dialog first — the user (or, in an
-  orchestration, the project manager through the channel) confirms before it
-  commits.
+  current branch, whatever it is — EXCEPT on a PROTECTED branch
+  (main/master/dev/develop), where it is REFUSED outright, no dialog
+  (2026-09-16, user decision: "无论如何都不能在保护分支上面做 commit，
+  checkpoint 也不行"). Checkpointing requires a feature branch.
 - **Your own `git commit`** on a protected branch is REFUSED by the ship
   gate (a shell command cannot show a dialog, so it fails closed).
 
@@ -117,8 +117,8 @@ below — which still prefer a feature branch over working on main.
 
 These guardrails are the WORKFLOW this repo prefers — a feature branch is
 the normal place for a change. They are not the gate's enforcement: the gate
-only refuses your own `git commit` on a protected branch (its own checkpoint
-confirms with the user instead, per above). On top of these rules, the
+only refuses your own `git commit` on a protected branch — and now its own
+checkpoint refuses them too, without asking (2026-09-16). On top of these
 pi-review-gate extension hard-blocks ship commands (`git commit`, `git push`,
 `gh pr create`) until the quality gates pass.
 
@@ -373,7 +373,12 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   把「人在框里答」与「项目经理经通道答」并列，谁先答谁生效，另一边的框自动
   撤下。框始终弹着 —— 这就是项目经理死亡时的天然回退，因此**没有任何超时机制**。
   2026-08-31 起 `request_scope_limit` / `request_sensitive_edit` 的 consent 框也走
-  同一通道：项目经理可代答（先答先生效），工具描述与本文已同步这个信任模型。
+  同一通道：项目经理可代答（先答先生效）。**但敏感编辑的代答需要用户显式授权**
+  （2026-09-16 起，`orchestrator_answer` 对 sensitive-edit 无授权时弹三选框给用户：
+  「允许并记住 / 仅允许这一次 / 拒绝」）；`request_sensitive_edit` 在项目经理自己的
+  会话里被**直接拒绝**（它没有通道侧可答自己的框，曾把 PM 卡死 2 小时），
+  改走 `orchestrator_answer`。三个授权入口：ask_user 带 `grantScope` 的提问、
+  `/gate-grant sensitive-edit` 命令、首次代答的三选框。
 - **投递走 `pi.sendUserMessage`**：`orchestrator_instruct({mode})` 把文本写进
   通道，子会话自己的门禁用 pi 的 API 注入。`mode` 即优先级：`interrupt`（最高，
   2026-08-31 起可带正文 —— 中断当前 turn 并立即投递，一次调用表达「停下、做

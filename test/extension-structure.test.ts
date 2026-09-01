@@ -658,6 +658,42 @@ test("ask_user is the ONE way to reach the user, and pause_for_question is gone"
   assert.doesNotMatch(SRC, /unmetRequirements\([^)]*pausedQuestion/);
 });
 
+test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pick only (reviewer P1, 2026-09-16)", () => {
+  // P1 fix: the sensitive-edit proxy grant used to be minted from an
+  // INVISIBLE grantScope + substring match on free text ("grant me a few
+  // minutes" harvested it). Three structural guards pin the fix:
+  //  1. The user-visible notice exists and is wired into the dialog/transcript.
+  //  2. Minting is exact-pick: answer === recommended, never a substring.
+  //  3. A grantScope without options is DROPPED at normalization (free text
+  //     can never carry a grant) — asserted in the schema module.
+  assert.match(ASK_USER_SRC, /function grantNotice\(q: AskQuestion\): string/,
+    "the grant notice helper exists");
+  // The helper existing is NOT the property — the user must SEE it. Assert
+  // the INTERPOLATION at every rendering call site (reviewer P2, 2026-09-16:
+  // a helper left intact in dead code proved nothing).
+  const interpolations = (ASK_USER_SRC.match(/grantNotice\(q\)/g) ?? []).length;
+  assert.ok(interpolations >= 4, `the notice is interpolated at the dialog/transcript call sites (got ${interpolations})`);
+  assert.match(ASK_USER_SRC, /title: `\$\{title\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
+    "the CHANNEL title interpolates the notice");
+  assert.match(ASK_USER_SRC, /uiCtx\.ui![^\n]*select!?\(`\$\{title\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}/,
+    "the pane dialog interpolates the notice");
+  assert.match(ASK_USER_SRC, /uiCtx\.ui![^\n]*input!?\(`\$\{title\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}/,
+    "the free-text dialog interpolates the notice too");
+  assert.match(ASK_USER_SRC, /\$\{q\.text\}\$\{grantNotice\(q\)\}` \+/,
+    "the transcript interpolates the notice");
+  assert.match(ASK_USER_SRC, /明确授予项目经理/,
+    "the notice text states the grant in plain Chinese");
+  assert.match(ASK_USER_SRC, /meaning\.kind === "answered" && meaning\.answer === q\.recommended/,
+    "minting is an EXACT pick of the recommended row — no substring match");
+  assert.doesNotMatch(ASK_USER_SRC, /\/同意\|允许\|授权\|授予\|yes\|allow\|grant\/i\.test\(meaning\.answer/,
+    "the old substring predicate must not come back");
+  const askSrc = readFileSync(join(ROOT, "lib", "ask-user.ts"), "utf8");
+  assert.match(askSrc, /grantable = grantScope && isGrantableScope\(grantScope\) && options && options\.length > 0/,
+    "a grantScope without options is dropped at the schema");
+  assert.match(askSrc, /\.\.\.\(grantable \? \{ grantScope \} : \{\}\)/,
+    "…and the scope only survives when the question is a real choice list");
+});
+
 test("ask_user: the QUESTIONS reach the user, and silence is never an answer", () => {
   // REGRESSION this inherits: a question used to be written to
   // `state.pausedQuestion` and nowhere else, while the tool result told the
@@ -1499,8 +1535,8 @@ test("the checkpoint message is delegated to the pure, unit-tested lib module", 
 
 
 
-test("commands registered: gate-status, gate-bypass, gate-mode, gate-reset", () => {
-  for (const cmd of ["gate-status", "gate-bypass", "gate-mode", "gate-reset", "gate-lesson"]) {
+test("commands registered: gate-status, gate-bypass, gate-grant, gate-mode, gate-reset", () => {
+  for (const cmd of ["gate-status", "gate-bypass", "gate-grant", "gate-mode", "gate-reset", "gate-lesson"]) {
     assert.match(CMD_SRC, new RegExp(`registerCommand\\(["']${cmd}["']`), cmd);
   }
   // /gate-doctor sits in the read-only diagnosis module, which the command
@@ -3485,13 +3521,15 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
 });
 
 
-test("review_checkpoint asks the user before landing on a PROTECTED branch", () => {
+test("review_checkpoint REFUSES outright on a PROTECTED branch — no dialog, fail-closed", () => {
   const body = toolBodyOf("review_checkpoint");
   assert.match(body, /isProtectedBranch\(here\)/, "the protected-branch guard must exist");
   assert.match(body, /currentBranch\(root\)/, "the current branch is read per repo");
-  assert.match(body, /askEitherSide\(/, "the user (or orchestrator, via the channel) confirms in a dialog");
-  assert.match(body, /在受保护分支上提交 checkpoint/, "the dialog names the protected branch");
-  assert.match(body, /picked\.startsWith\("否"\)/, "a declined confirmation refuses the commit");
+  assert.match(body, /checkpoint 拒绝/, "a protected branch refuses the checkpoint");
+  assert.match(body, /isError: true/, "the refusal is an error");
+  assert.doesNotMatch(body, /在受保护分支上提交 checkpoint/, "no confirmation dialog is shown");
+  assert.doesNotMatch(body, /askEitherSide\(/, "no channel ask for a protected branch");
+  assert.doesNotMatch(body, /picked\.startsWith\("否"\)/, "no decline path — the refusal is unconditional");
 });
 
 

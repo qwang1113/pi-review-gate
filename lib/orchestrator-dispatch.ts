@@ -54,6 +54,7 @@ import {
   buildDeliveryMarker,
   buildTaskDocument,
   taskFileName,
+  taskFileRelPath,
   type DeliveryEvidence,
 } from "./orchestrator-delivery.ts";
 import {
@@ -246,7 +247,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   }
   const childId = newChildId(taskId, deps.now());
   const marker = buildDeliveryMarker(taskId, deps.now());
-  const written = deps.writeScratchFile(
+  const written = deps.writeTaskFile(
     taskFileName(marker),
     buildTaskDocument({ marker, taskId, title: task.title, brief }),
   );
@@ -274,7 +275,12 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
       env,
       // F7/F8 — the task rides in on the argv. No typing, nothing to
       // truncate, no Enter to forget.
-      command: buildChildCommand(written.path, childId),
+      // F7/F8 — the task rides in on the argv. No typing, nothing to
+      // truncate, no Enter to forget. The reference is REPO-RELATIVE:
+      // the pane starts in `cwd` (the task's repo), and pi expands
+      // `@.pi/tasks/<file>` against that cwd — no absolute path ever
+      // reaches the child's first prompt.
+      command: buildChildCommand(taskFileRelPath(taskFileName(marker)), childId),
     }));
     if (!result.ok) throw new Error(result.stderr || "tmux split-window 失败");
     paneId = parseSpawnedPaneId(result.stdout);
@@ -291,7 +297,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     paneId,
     cwd,
     stateVariant: childId,
-    taskFile: written.path,
+    taskFile: taskFileRelPath(taskFileName(marker)),
     createdAt: new Date(deps.now()).toISOString(),
     // The spawn IS the first assignment: a completion record older than this
     // belongs to whatever ran this task before (round-1 P1).
@@ -334,14 +340,14 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
       `任务 ${taskId} 已退回 pending。\n` +
       `下一步：\`orchestrator_wait({ timeoutMs: 0 })\` 看它在健康快照里是什么状态；` +
       `确认没救就 \`orchestrator_close({ childId: "${childId}" })\` 再重开。\n` +
-      `任务书在：${written.path}`,
+      `任务书在：${written.path}（随 \`pi @${taskFileRelPath(taskFileName(marker))}\` 传入）`,
       { childId, paneId, delivered: false, evidence: check.evidence },
     );
   }
 
   return reply(
     `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动（共享主工作区，同一 repo 内串行）。\n` +
-    `任务 ${taskId} 已置为 running，任务书 ${written.path} 已随 \`pi @file\` 带进去。\n` +
+    `任务 ${taskId} 已置为 running，任务书已随 \`pi @${taskFileRelPath(taskFileName(marker))}\` 带进去（落盘：${written.path}）。\n` +
     `投递已核实：${check.verdict.summary}。\n` +
     `${decor.note}\n` +
 
@@ -352,7 +358,7 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
       childId,
       paneId,
       execution: verdict.execution,
-      taskFile: written.path,
+      taskFile: taskFileRelPath(taskFileName(marker)),
       delivered: true,
     },
   );

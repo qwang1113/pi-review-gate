@@ -31,24 +31,35 @@
  * `pi.sendUserMessage`.
  *
  * So the evidence is now structured and unambiguous:
- *
  *  - a SPAWN is proven when the child appends anything at all to its channel
  *    (its gate booted and is reporting) or when its sidecar lands on disk;
  *  - an INSTRUCTION is proven by the child's own acknowledgement record,
  *    which also says whether it was actually applied. There is no lane to
  *    infer: `deliverAs` decided that before the message was ever written.
+ * ── WHERE THE TASK FILE LIVES (2026-09-16): INSIDE THE REPO'S `.pi/` ──
  *
- * WHERE THE TASK FILE LIVES: outside the repository, next to the gate's
- * orchestration worktrees. A task file inside the worktree would be swept
- * into the first child's `git add -A` checkpoint — the same reason
- * lib/orchestrator-wiring.ts puts worktrees under the temp dir.
+ * The task file used to be written outside the repository, next to the
+ * gate's orchestration worktrees under the system temp dir, and handed to
+ * the child as an ABSOLUTE `@<path>` argv. pi expands `@file` into
+ * `<file name="/var/folders/...">…</file>` — an absolute path staring at
+ * the child from its very first prompt, even though the pane already starts
+ * in the task's own repo. The file now lives in `<repo>/.pi/tasks/`, a
+ * gate-owned dir that `.gitignore`'s `.pi/` rule and the fingerprint's
+ * `:/.pi` exclusion already cover (so a child's `git add -A` checkpoint can
+ * never sweep it into history), and the child gets it as a REPO-RELATIVE
+ * `@.pi/tasks/<file>` reference, resolved against the pane cwd.
  *
  * Pure module: it builds strings and judges evidence. The IO (writing the
  * file, reading the channel) belongs to the wiring.
  */
 
-/** Subdirectory of the orchestration scratch root that holds task files. */
+/** Subdirectory of the gate-owned `.pi/` scope that holds task files. */
 export const TASK_FILE_DIRNAME = "tasks";
+
+/** Repo-relative path of one task file: `.pi/tasks/<name>`. */
+export function taskFileRelPath(name: string): string {
+  return `.pi/${TASK_FILE_DIRNAME}/${name}`;
+}
 
 /**
  * A per-delivery token that appears in the task file, so a human reading the
@@ -96,9 +107,17 @@ export function childSessionId(childId: string): string {
   return `rg-child-${childId.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 48)}`;
 }
 
-/** The argv a child pane runs: pi with the task file as its first message. */
-export function buildChildCommand(taskPath: string, childId: string, piBin = "pi"): string[] {
-  return [piBin, "--session-id", childSessionId(childId), `@${taskPath}`];
+/**
+ * The argv a child pane runs: pi with the task file as its first message.
+ *
+ * `taskRef` is the `@file` reference as it should appear in the argv — a
+ * REPO-RELATIVE path (`.pi/tasks/<name>`), resolved by pi against the pane
+ * cwd, which `orchestrator_spawn` already set to the task's repo. An
+ * absolute path here would leak into the child's very first prompt as
+ * `<file name="/var/folders/...">…</file>` (pi expands `@file` verbatim).
+ */
+export function buildChildCommand(taskRef: string, childId: string, piBin = "pi"): string[] {
+  return [piBin, "--session-id", childSessionId(childId), `@${taskRef}`];
 }
 
 /**
@@ -109,8 +128,8 @@ export function buildChildCommand(taskPath: string, childId: string, piBin = "pi
  * recovered, because the one thing the transcript cannot contain is the fact
  * that the process it belonged to has been restarted.
  */
-export function buildRecoverCommand(childId: string, notePath: string, piBin = "pi"): string[] {
-  return [piBin, "--session-id", childSessionId(childId), `@${notePath}`];
+export function buildRecoverCommand(childId: string, noteRef: string, piBin = "pi"): string[] {
+  return [piBin, "--session-id", childSessionId(childId), `@${noteRef}`];
 }
 
 /** The note a recovered child opens with. */

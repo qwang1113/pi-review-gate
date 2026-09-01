@@ -31,6 +31,26 @@ export interface AskQuestion {
   options?: string[];
   /** The agent's own recommendation — the user should never have to guess it. */
   recommended?: string;
+  /**
+   * ORCHESTRATOR ONLY (2026-09-16): when the project manager asks the user
+   * for a proxy authority, this names the scope (e.g. `sensitive-edit`).
+   * An affirmative answer mints a grant for the whole orchestration; any
+   * other answer mints nothing. The gate recognizes the scope from a fixed
+   * list — an agent cannot invent one.
+   */
+  grantScope?: string;
+}
+
+/**
+ * Proxy scopes the gate will actually mint — an agent cannot invent one.
+ * `sensitive-edit` today; "运维类" is deliberately not a scope until the
+ * user names the operations it should cover.
+ */
+export const GRANTABLE_SCOPES = ["sensitive-edit"] as const;
+
+/** True when `scope` is a grantable proxy scope. */
+export function isGrantableScope(scope: string | undefined): scope is string {
+  return scope !== undefined && (GRANTABLE_SCOPES as readonly string[]).includes(scope);
 }
 
 /** What the user did with one question. */
@@ -101,10 +121,19 @@ function normalizeOne(item: unknown): AskQuestion | undefined {
   const recommended = typeof rawRecommended === "string" && rawRecommended.trim() !== ""
     ? rawRecommended.trim().slice(0, MAX_OPTION_CHARS)
     : undefined;
+  const rawGrant = (item as { grantScope?: unknown })?.grantScope;
+  const grantScope = typeof rawGrant === "string" && rawGrant.trim() !== ""
+    ? rawGrant.trim().slice(0, MAX_OPTION_CHARS)
+    : undefined;
+  // A grantScope question MUST be a choice list (2026-09-16 reviewer P1):
+  // free text would let a substring match harvest the grant from an
+  // unrelated answer. No options ⇒ the scope is dropped, never silently kept.
+  const grantable = grantScope && isGrantableScope(grantScope) && options && options.length > 0;
   return {
     text: trimmed,
     ...(options && options.length ? { options } : {}),
     ...(recommended ? { recommended } : {}),
+    ...(grantable ? { grantScope } : {}),
   };
 }
 

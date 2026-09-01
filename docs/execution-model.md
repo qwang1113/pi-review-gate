@@ -203,7 +203,7 @@ spawn（无 shell）；门禁自己的执行路径也过同一份禁止清单，
   commit 标题由门禁打上 checkpoint 标记）→ 记录 commit sha。只绕过 READY，
   不绕过 precommit；普通 `git commit` 在 READY 前仍被拦。2026-09-07 起
   直接落在**当前分支**（不再有工作分支）；在 main/master/dev/develop 上
-  checkpoint 前先弹确认框。
+  checkpoint 直接拒绝（2026-09-16 起不再弹确认框，与 ship 拒绝一致）。
 - `prepare_review`：计算 `baseline..HEAD`（自上次审核基线以来的 commit），
   生成任务文本与 findings 流路径，注册审核目标。
 - dispatch：spawn 或续接该 role 的 session。

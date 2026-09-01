@@ -194,7 +194,7 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 敏感文件授权、独立 arbiter 裁决循环拦截）。`task-mode.ts` 定义模式强弱序
 （normal < explore < loop < orchestrator）与升降级规则，`pi-self.ts` 让
 `/tmp` 草稿会话不自动进 loop，`workspace-branch.ts` 是保护分支
-（main/master/dev/develop）检测：会话开始提示、checkpoint 前弹确认框。
+（main/master/dev/develop）检测：会话开始提示、checkpoint 直接拒绝（2026-09-16 起不再弹确认框）。
 `copilot-review.ts`（L7，PR 之后的 Copilot 审查闭环）与 `loop-goal.ts`（L8，
 用户批准的退出契约）——两者的**判定**在这里，工具体分别在
 `copilot-review-tools.ts` 与 `goal-tools.ts` / `goal-prereview-tools.ts`，
@@ -498,7 +498,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
 | `verdict-parse.ts` | 裁决解析：review 只认 JSON fence，precommit 只认 `## Overall:` sentinel |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
-| `workspace-branch.ts` | 保护分支检测（main/master/dev/develop）：checkpoint 前的确认框与 ship 拒绝（2026-09-07 起 `setup_workspace`/工作分支/squash 落地全部退役，只剩这个软护栏） |
+| `workspace-branch.ts` | 保护分支检测（main/master/dev/develop）：checkpoint 与 ship 一律拒绝（2026-09-07 起 `setup_workspace`/工作分支/squash 落地全部退役，只剩这个硬护栏；2026-09-16 起 checkpoint 不再弹确认框，直接拒） |
 
 ---
 
