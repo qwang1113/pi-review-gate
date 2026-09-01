@@ -106,6 +106,18 @@ test("writing a plan does NOT approve it; the user's dialog does", async () => {
   assert.ok(world.runtime().approvedPlanHash, "the user's yes is what approves it");
 });
 
+test("WRITE path REFUSES a task with no repo — the strict flag is pinned at the call site", async () => {
+  // The parsePlan unit tests pin the rule itself, but THIS pins the ACTION:
+  // if someone drops the `true` at the write call site, the deadlock (child
+  // spawned in the orchestrator's own repo) silently returns.
+  const world = makeFakeWorld();
+  const plan = { ...twoTaskPlan(), tasks: twoTaskPlan().tasks.map((t) => ({ ...t, repo: undefined })) };
+  const written = await world.call("orchestrator_plan", { action: "write", plan });
+  assert.equal(written.isError, true, replyText(written));
+  assert.match(replyText(written), /必须声明 repo/, "the refusal names the missing repo");
+  assert.equal(world.plan(), undefined, "nothing is written");
+});
+
 test("CONSTRAINT 1: spawning without an approved plan is refused", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan() });
   const reply = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
