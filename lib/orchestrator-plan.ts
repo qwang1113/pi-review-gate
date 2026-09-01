@@ -31,6 +31,7 @@
  * the extension owns IO, exactly as it does for the loop goal.
  */
 
+import { isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
 import {
   declarationsOverlap,
@@ -201,8 +202,16 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
     // to onchain, edits blocked for server-service-dashboard). The READ path
     // stays lenient (strictRepo=false): legacy plans predating the field keep
     // loading, scheduling against `a.repo ?? repoRoot` as before.
-    if (strictRepo && !asString(t.repo)) {
-      problems.push(`${label} ("${id}") 必须声明 repo（该任务工作的仓库绝对路径）——未声明时子会话 cwd 会落在项目经理自己的仓库`);
+    if (strictRepo) {
+      const repo = asString(t.repo);
+      if (!repo) {
+        problems.push(`${label} ("${id}") 必须声明 repo（该任务工作的仓库绝对路径）——未声明时子会话 cwd 会落在项目经理自己的仓库`);
+      } else if (!isAbsolute(repo)) {
+        // A relative repo (e.g. "lib") would resolve through gitRootOfDir
+        // against the PM's cwd — silently landing the child in the
+        // orchestrator's OWN repo, the exact deadlock this constraint kills.
+        problems.push(`${label} ("${id}") 的 repo 必须是绝对路径（当前是相对路径 "${repo}"）——相对路径会按项目经理的 cwd 解析，可能落到错误的仓库`);
+      }
     }
     const { boundaries, problems: boundaryProblems } = normalizeBoundaries(declared);
     for (const bp of boundaryProblems) {

@@ -74,6 +74,16 @@ test("CONSTRAINT 6 (write path): a task WITH a repo passes strictRepo", () => {
   assert.equal(parsed.plan?.tasks[0].repo, "/work/server-service-dashboard");
 });
 
+test("CONSTRAINT 6 (write path): a RELATIVE repo is refused — it would resolve to the PM's own repo", () => {
+  const parsed = parsePlan({
+    title: "t", intent: "i",
+    tasks: [{ id: "a", title: "BFF proxy", repo: "lib", fileBoundaries: ["src"] }],
+  }, NOW, true);
+  assert.equal(parsed.ok, false);
+  assert.ok(parsed.problems.some((p) => /绝对路径/.test(p)),
+    "a relative repo must be named as the failure — it silently lands the child in the orchestrator's own repo");
+});
+
 test("READ path stays lenient: a legacy plan without repo still loads (strictRepo defaults false)", () => {
   const parsed = parsePlan({
     title: "t", intent: "i",
