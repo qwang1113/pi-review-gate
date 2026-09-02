@@ -321,6 +321,11 @@ import {
 } from "../lib/edit-discipline.ts";
 import { projectEditedContent } from "../lib/edit-projection.ts";
 import {
+  READONLY_STALL_NUDGE,
+  evaluateReadonlyStall,
+  type ReadonlyStallState,
+} from "../lib/readonly-stall.ts";
+import {
   LOOP_GOAL_RELPATH,
   loopGoalRelPath,
 
@@ -765,6 +770,12 @@ export default function reviewGate(pi: ExtensionAPI) {
   // discipline.ts). This targets the recurring "edit failed → shell edits the
   // file" workaround without policing ordinary bash usage.
   let editFailurePending = false;
+  // Read-only drill stall guard (lib/readonly-stall.ts): counts consecutive
+  // successful read-only tool calls (read family + bash) with no edit landing
+  // in between; at READONLY_STALL_LIMIT it appends READONLY_STALL_NUDGE to
+  // the next result (nudge only, never a block — see the module doc). The
+  // state lives for the session: a drill that spans several turns still trips.
+  let readonlyStallState: ReadonlyStallState | undefined;
   // USER REQUIREMENT (ESC = pause): when the user aborts a run (ESC — the
   // TUI's "Operation aborted"), the L2 auto-continuation must NOT steamroll
   // that explicit human stop with a [REVIEW_GATE_RESUME] follow-up. agent_end
@@ -3089,6 +3100,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
       editFailurePending = false;
+      // A landed edit IS production: the drill counter starts over (the
+      // guard exists to catch sessions that read but never write).
+      readonlyStallState = evaluateReadonlyStall({
+        previous: readonlyStallState,
+        produced: true,
+        read: false,
+      }).state;
       const path = coalesceToolPath(event.input as Record<string, unknown>);
       if (!path) return;
 
@@ -3255,6 +3273,32 @@ export default function reviewGate(pi: ExtensionAPI) {
           isError: event.isError === true,
         };
       }
+
+      // Read-only drill stall guard (lib/readonly-stall.ts) — PRODUCTIVITY,
+      // not liveness: the L2 stall breaker only evaluates at turn boundaries
+      // and the child-health progress reading counts ANY tool call as
+      // forward progress, so a session that keeps grepping through library
+      // source (node_modules/) trips neither. Count consecutive successful
+      // read-family calls with no edit landing in between; at
+      // READONLY_STALL_LIMIT append the nudge (never a block). Skipped in
+      // normal mode like the edit-discipline nudges. State is in-memory
+      // only — no persistence.
+      if (state.taskMode !== "normal" && event.isError !== true) {
+        const stall = evaluateReadonlyStall({
+          previous: readonlyStallState,
+          produced: false,
+          read: true,
+        });
+        readonlyStallState = stall.state;
+        if (stall.nudge) {
+          return {
+            content: [...(event.content ?? []), { type: "text", text: READONLY_STALL_NUDGE }],
+            // The enclosing condition already excludes isError:true, so the
+            // result is not an error; keep the original semantics (false).
+            isError: false,
+          };
+        }
+      }
       return;
     }
 
@@ -3348,6 +3392,28 @@ export default function reviewGate(pi: ExtensionAPI) {
           content: [...(event.content ?? []), { type: "text", text: BASH_WRITE_NUDGE }],
           isError: event.isError === true,
         };
+      }
+
+      // Read-only drill stall guard (lib/readonly-stall.ts): bash is the
+      // drill workhorse (grep/sed through node_modules/), so count it like
+      // the read family. Deliberately at the END of the bash branch — after
+      // every state-maintenance safety net (sentinel invalidation, re-arm,
+      // copilot, edit-discipline nudge) — so this nudge can never skip them.
+      // Skipped in normal mode. State is in-memory only — no persistence.
+      if (state.taskMode !== "normal" && event.isError !== true) {
+        const stall = evaluateReadonlyStall({
+          previous: readonlyStallState,
+          produced: false,
+          read: true,
+        });
+        readonlyStallState = stall.state;
+        if (stall.nudge) {
+          return {
+            content: [...(event.content ?? []), { type: "text", text: READONLY_STALL_NUDGE }],
+            // Enclosing condition excludes isError:true; result is not an error.
+            isError: false,
+          };
+        }
       }
       return;
     }

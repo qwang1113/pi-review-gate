@@ -1325,6 +1325,34 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   assert.ok(normalGuards >= 2, "both nudge sites must carry a normal-mode guard");
 });
 
+test("readonly-drill stall guard: in-memory nudge wired at the read-family and bash sites", () => {
+  // USER REQUIREMENT (2026-09-18): a session can spend many minutes in
+  // read-only tool calls (grepping node_modules/ source) that never produce
+  // anything, and neither the L2 stall breaker (turn-boundary only) nor the
+  // child-health progress reading (counts ANY tool call) trips. The guard
+  // counts consecutive successful read-only calls and nudges at the limit.
+  const resultAt = SRC.indexOf('pi.on("tool_result"');
+  const resultEnd = SRC.indexOf('pi.on("session_start"', resultAt);
+  const resultBody = SRC.slice(resultAt, resultEnd);
+  // 1. The read-family branch (1.5 D) carries the counter + nudge.
+  const readAt = resultBody.indexOf("READ_ONLY_TOOL_NAMES.has(event.toolName)");
+  assert.ok(readAt >= 0);
+  assert.ok(resultBody.indexOf("evaluateReadonlyStall", readAt) > readAt, "read-family branch must fold the counter");
+  assert.ok(resultBody.indexOf("READONLY_STALL_NUDGE", readAt) > readAt, "read-family branch must append the nudge");
+  // 2. The bash branch carries the counter + nudge too (drill workhorse).
+  assert.ok(resultBody.indexOf('event.toolName === "bash"') > readAt);
+  const bashAt = resultBody.indexOf('event.toolName === "bash"');
+  assert.ok(resultBody.indexOf("evaluateReadonlyStall", bashAt) > bashAt, "bash branch must fold the counter");
+  assert.ok(resultBody.indexOf("READONLY_STALL_NUDGE", bashAt) > bashAt, "bash branch must append the nudge");
+  // 3. Three fold sites total: edit-success reset, read-family count, bash count.
+  const stallSites = resultBody.split("evaluateReadonlyStall").length - 1;
+  assert.equal(stallSites, 3, "counter must be folded at exactly three sites (edit reset + read + bash)");
+  const normalGuards = (resultBody.match(/state\.taskMode === "normal"/g) ?? []).length;
+  assert.ok(normalGuards >= 4, "both new sites plus the two nudge sites carry a normal-mode guard");
+  // 4. The counter state is a plain in-memory `let`, not a persisted field.
+  assert.match(SRC, /let readonlyStallState: ReadonlyStallState \| undefined;/);
+});
+
 test("compaction recovery: session_compact re-injects state", () => {
   assert.match(SRC, /pi\.on\(["']session_compact["']/);
   assert.match(SRC, /survived/i);
