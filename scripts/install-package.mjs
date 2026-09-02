@@ -53,14 +53,13 @@ const RETIRED_AGENTS = [
  * idempotent by construction: `pi install` of an already-present package is a
  * no-op that keeps the existing entry.
  *
- * The list is the extension's WORKING PLATFORM: provider keys
- * (pi-anthropic-oauth), editor integration (pi-vim), MCP tooling
- * (pi-mcp-adapter), notifications (pi-notify), and the hashline editor
- * (pi-hashline-edit-pro). Every entry is also pinned in package.json
- * dependencies so the whole platform resolves on `npm install` / `pi install`.
+ * The list is the extension's WORKING PLATFORM: editor integration
+ * (pi-vim), MCP tooling (pi-mcp-adapter), notifications (pi-notify), and the
+ * hashline editor (pi-hashline-edit-pro). Every entry is also pinned in
+ * package.json dependencies so the whole platform resolves on `npm install` /
+ * `pi install`.
  */
 const COMPANION_PACKAGES = [
-  "npm:pi-anthropic-oauth",
   "npm:pi-mcp-adapter",
   "npm:pi-notify",
   "npm:pi-vim",

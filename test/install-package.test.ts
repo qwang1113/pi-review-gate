@@ -18,7 +18,6 @@ const HOOK_INSTALLER = join(ROOT, "scripts", "install-git-hooks.sh");
 // COMPANION_PACKAGES in scripts/install-package.mjs (the manifest test
 // cross-checks the two lists).
 const COMPANION_EXPECTED = [
-  "pi-anthropic-oauth",
   "pi-hashline-edit-pro",
   "pi-mcp-adapter",
   "pi-notify",
@@ -71,7 +70,7 @@ test("package.json is a publishable pi package (manifest, peers, postinstall)", 
   // COMPANION_PACKAGES exactly, else a companion never gets registered.
   const installer = readFileSync(join(ROOT, "scripts", "install-package.mjs"), "utf8");
   const companions = [...installer.matchAll(/"npm:([^"]+)"/g)].map((m) => m[1]!.replace(/^@.*?\//, "")).sort();
-  assert.ok(companions.length >= 5, `expected ≥5 companions, found ${companions.length}`);
+  assert.ok(companions.length >= 4, `expected ≥4 companions, found ${companions.length}`);
   for (const dep of Object.keys(deps)) {
     if (dep.startsWith("@quintinshaw/") || dep.startsWith("@earendil-works/")) continue; // non-companion
     const bare = dep.replace(/^@.*?\//, "");
@@ -604,7 +603,6 @@ test("postinstall registers missing companion packages via pi install", () => {
   const { status, stderr, installs } = runInstallerWithFakePi(home, ["npm:pi-vim"]);
   assert.equal(status, 0, `installer failed: ${stderr}`);
   const expectedMissing = [
-    "npm:pi-anthropic-oauth",
     "npm:pi-mcp-adapter",
     "npm:pi-notify",
     "npm:pi-hashline-edit-pro",
@@ -614,9 +612,9 @@ test("postinstall registers missing companion packages via pi install", () => {
 
 test("postinstall registers several missing companions (partial home)", () => {
   const home = makeHome();
-  // Only the two earliest companions preinstalled — the rest must be added in
-  // COMPANION_PACKAGES order, skipping the present ones.
-  const { status, stderr, installs } = runInstallerWithFakePi(home, ["npm:pi-anthropic-oauth", "npm:pi-mcp-adapter"]);
+  // Only the earliest companion preinstalled — the rest must be added in
+  // COMPANION_PACKAGES order, skipping the present one.
+  const { status, stderr, installs } = runInstallerWithFakePi(home, ["npm:pi-mcp-adapter"]);
   assert.equal(status, 0, `installer failed: ${stderr}`);
   const expectedMissing = [
     "npm:pi-notify",
@@ -630,7 +628,6 @@ test("postinstall skips companions already present in settings.json", () => {
   const home = makeHome();
   // ALL companions preinstalled: nothing may be re-registered.
   const all = [
-    "npm:pi-anthropic-oauth",
     "npm:pi-mcp-adapter",
     "npm:pi-notify",
     "npm:pi-vim",
@@ -656,7 +653,7 @@ test("postinstall registers ALL companions when settings.json has none", () => {
   // Every npm: spec in COMPANION_PACKAGES must be registered, in order.
   const installerSrc = readFileSync(INSTALLER, "utf8");
   const specs = [...installerSrc.matchAll(/"npm:[^"]+"/g)].map((m) => m[0].slice(1, -1));
-  assert.ok(specs.length >= 5, `expected ≥5 companions, got ${specs.length}`);
+  assert.ok(specs.length >= 4, `expected ≥4 companions, got ${specs.length}`);
   assert.deepEqual(installs, specs.map((s) => `install ${s}`));
 });
 
