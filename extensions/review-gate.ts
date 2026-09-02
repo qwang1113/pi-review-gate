@@ -2403,6 +2403,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (sessionInGit && !loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     return {
       mode: state.taskMode,
+      nonGit: !sessionInGit,
       // NON-GIT SHORT-CIRCUIT: `currentBranch` would run git and, outside a
       // repository, leak "fatal: not a git repository" to the terminal.
       // The user decision (2026-09-02): in a non-git directory, do not call
@@ -5644,10 +5645,17 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       if (decision.action === "apply") {
         const scratchFirst = piSelf && state.taskMode === undefined;
+        // NON-GIT (2026-09-02): a non-git directory is clamped the same way
+        // as /tmp scratch (never loop via the agent), but the REASON the
+        // user sees must say what it is — "this session started in /tmp"
+        // would be a lie in a non-git dir that is not /tmp (reviewer P2).
+        const nonGitFirst = !sessionInGit && state.taskMode === undefined;
         setTaskMode(effective, decision.source, ctx as unknown as ExtensionContext);
         try {
-          const sourceNote = scratchFirst
-            ? "（/tmp 临时会话，规则禁止 loop，无需确认）"
+          const sourceNote = scratchFirst || nonGitFirst
+            ? nonGitFirst
+              ? "（非 git 目录，规则禁止 loop，无需确认）"
+              : "（/tmp 临时会话，规则禁止 loop，无需确认）"
             : "";
           ctx.ui.notify(
             effective === "loop"
