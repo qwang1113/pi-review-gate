@@ -93,12 +93,17 @@ export function evaluateReadonlyStall(input: ReadonlyStallInput): ReadonlyStallV
 /**
  * The nudge appended to a tool result when the drill counter crosses the
  * limit. It must (a) say plainly that the session has been reading for a
- * while without producing, (b) steer toward verifying by doing — a minimal
- * implementation or a targeted test — and (c) NOT claim to block or
- * interrupt anything (a nudge can be ignored at no cost).
+ * while without producing, (b) steer toward stopping and re-orienting —
+ * verify a hypothesis by a minimal write, or step back and reconsider the
+ * search — and (c) NOT claim to block or interrupt anything (a nudge can be
+ * ignored at no cost). The copy is deliberately MODE-NEUTRAL: in loop mode
+ * the productive move is a minimal implementation or a test; in explore
+ * (read-only investigation) the same session has no write obligation, so
+ * the nudge must not command one.
  */
 export const READONLY_STALL_NUDGE =
   "\n\n[review-gate] 你已经连续 " +
   `${READONLY_STALL_LIMIT} 次只读工具调用而没有产出代码改动。` +
-  "如果这是在库源码（如 node_modules/）里钻探，先停下来：写一个最小实现或一条测试验证你的假设，" +
-  "或直接查项目内既有先例，而不是继续追读源码。门禁没有拦截你，但继续只读调用不会让任务前进。";
+  "如果这是在库源码（如 node_modules/）里钻探，先停下来确认方向：" +
+  "写一个最小实现或一条测试验证你的假设（若本任务允许改动），或换一个搜索角度，" +
+  "而不是继续追读源码。门禁没有拦截你，但继续只读调用不会让任务前进。";

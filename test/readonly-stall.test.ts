@@ -6,6 +6,13 @@ import {
   evaluateReadonlyStall,
 } from "../lib/readonly-stall.ts";
 
+test("the threshold constant is the user's chosen 30 consecutive reads", () => {
+  // Pinned literally (sibling precedent: test/loop-goal.test.ts pins the
+  // 60-turn threshold the same way) so a silent retune cannot change the
+  // behaviour without this test failing.
+  assert.equal(READONLY_STALL_LIMIT, 30);
+});
+
 // ---------------------------------------------------------------------------
 // evaluateReadonlyStall — the fold logic
 
