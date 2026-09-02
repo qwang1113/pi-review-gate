@@ -85,7 +85,7 @@ export function memoryChannelIO(now: () => number): ChannelIO & { files: Map<str
 /** The whole fake world one test runs against. */
 export interface FakeWorld {
   /** Tools registered by the modules under test, by name. */
-  tools: Map<string, (params: Record<string, unknown>, signal?: { readonly aborted: boolean }) => Promise<ToolReply>>;
+  tools: Map<string, (params: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolReply>>;
   deps: OrchestratorDeps;
   panes: Map<string, FakePane>;
   io: ChannelIO & { files: Map<string, string> };
@@ -159,6 +159,12 @@ export interface FakeWorldOptions {
    */
   planAuditFails?: string;
   /**
+   * Simulate the IDENTITY conflict: the sidecar holds another orchestration's
+   * runtime while this session minted its own id. `runtimeConflict()` then
+   * returns that foreign id and every spawn must refuse.
+   */
+  identityConflict?: string;
+  /**
    * Make every COSMETIC tmux write fail (`select-pane`, `setw`).
    *
    * The property it proves: a spawn must survive losing its decoration. A
@@ -218,7 +224,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
 
   const tools = new Map<
     string,
-    (params: Record<string, unknown>, signal?: { readonly aborted: boolean }) => Promise<ToolReply>
+    (params: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolReply>
   >();
   const host: ToolHost = {
     registerTool(definition) {
@@ -233,6 +239,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     env: () => env as unknown as NodeJS.ProcessEnv,
     taskMode: () => options.taskMode ?? "orchestrator",
     runtime: () => runtime,
+    runtimeConflict: () => options.identityConflict,
     saveRuntime: (next) => { runtime = next; },
     readPlan: () => (plan ? { plan, problems: [] } : { problems: [] }),
     savePlan: (next) => { plan = next; },

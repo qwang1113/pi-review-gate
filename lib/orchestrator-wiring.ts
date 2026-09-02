@@ -33,6 +33,7 @@ import { assertSafeTmuxArgv } from "./orchestrator-tmux.ts";
 import { writeNotification } from "./orchestrator-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state.ts";
+import { orchestrationIdFromEnv } from "./orchestration-id.ts";
 
 
 
@@ -251,7 +252,7 @@ export interface OrchestratorHostBindings {
   /** This orchestrator's OWN context usage, as a percentage (receipt block 4). */
   contextPercent?(): number | undefined;
   /** Run + record the plan pre-audit (the extension owns the judge process). */
-  auditPlan?(plan: OrchestratorPlan, onUpdate?: { step?: (t: string) => void; done?: (t: string) => void }): Promise<{ ok: true } | { ok: false; text: string }>;
+  auditPlan?(plan: OrchestratorPlan, onUpdate?: { step?: (t: string) => void; done?: (t: string) => void }, signal?: AbortSignal): Promise<{ ok: true } | { ok: false; text: string }>;
 
   /** Override the channel root. Tests point it at a scratch dir. */
   channelHome?(): string | undefined;
@@ -316,6 +317,19 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
       return stored.orchestrationId === id ? stored : { ...stored, orchestrationId: id };
     },
     saveRuntime: host.storeRuntime,
+    runtimeConflict: () => {
+      // A session that INHERITED the id (RG_ORCHESTRATION_ID in its env) is
+      // a relay successor: adopting the stored runtime is the intended move.
+      // A session WITHOUT it minted its own id — if the sidecar holds a
+      // DIFFERENT orchestration's runtime, that is a stale takeover, not an
+      // inheritance: spawning would split panes under the wrong identity.
+      const inherited = orchestrationIdFromEnv(env());
+      const stored = host.loadRuntime();
+      if (inherited || !stored) return undefined;
+      const id = host.orchestrationId();
+      if (stored.orchestrationId === id) return undefined;
+      return stored.orchestrationId;
+    },
     readPlan: () => readPlanFile(host.repoRoot),
     savePlan: (plan) => writePlanFile(host.repoRoot, plan),
     tmux: (argv) => runTmux(argv, env()),
@@ -360,9 +374,9 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     paneDecorMemory: () => paneDecor,
 
     contextPercent: () => host.contextPercent?.(),
-    auditPlan: (plan, onUpdate) =>
+    auditPlan: (plan, onUpdate, signal) =>
       host.auditPlan
-        ? host.auditPlan(plan, onUpdate)
+        ? host.auditPlan(plan, onUpdate, signal)
         : Promise.resolve({
             ok: false as const,
             text:

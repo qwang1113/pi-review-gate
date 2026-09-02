@@ -138,6 +138,7 @@ async function handlePlanAction(
   deps: OrchestratorDeps,
   params: Record<string, unknown>,
   onUpdate?: { step?: (t: string) => void; done?: (t: string) => void } | undefined,
+  signal?: AbortSignal | undefined,
 ): Promise<ToolReply> {
   const action = String(params.action ?? "read");
   const nowIso = new Date(deps.now()).toISOString();
@@ -231,7 +232,7 @@ async function handlePlanAction(
     // NO DIALOG IS SHOWN — the user is never asked to sign something an
     // independent reader has already objected to.
     onUpdate?.step?.("plan 审计中（goal-auditor 独立进程，分钟级）");
-    const audit = await deps.auditPlan(plan);
+    const audit = await deps.auditPlan(plan, undefined, signal);
     onUpdate?.done?.(audit.ok ? "plan 审计通过" : "plan 审计未过");
     if (!audit.ok) {
       return fail(audit.text, { approved: false, audited: false });
@@ -416,10 +417,10 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       answer: Type.Optional(Type.String({ description: "For action=\"resolve-decision\"" })),
 
     }),
-    async execute(_id, params, _signal, onUpdate) {
+    async execute(_id, params, signal, onUpdate) {
       const refusal = requireOrchestratorMode(deps);
       if (refusal) return refusal;
-      return handlePlanAction(deps, params, onUpdate as { step?: (t: string) => void; done?: (t: string) => void } | undefined);
+      return handlePlanAction(deps, params, onUpdate as { step?: (t: string) => void; done?: (t: string) => void } | undefined, signal as AbortSignal | undefined);
     },
   });
 

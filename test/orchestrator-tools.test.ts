@@ -177,6 +177,14 @@ test("a task declaring a repo spawns its child in THAT repo, not the orchestrato
   const details = receipt.details as Record<string, unknown>;
   assert.equal(details.cwd, "/other/repo", "the receipt names the child's cwd");
   assert.match(replyText(receipt), /cwd[^\n]*\/other\/repo/, "the receipt text states the child's working directory");
+  // CROSS-REPO FIX (2026-09-17): the task file must land in the TASK's repo,
+  // not the orchestrator's — the child resolves @.pi/tasks/<file> against ITS
+  // cwd. Writing it elsewhere made cross-repo spawns hand the child a path
+  // it could not find: pi exited at boot and the pane died.
+  const taskFilePaths = [...world.scratch.keys()].filter((p) => p.includes("/.pi/tasks/"));
+  assert.ok(taskFilePaths.length > 0, "the task file was written");
+  assert.ok(taskFilePaths.every((p) => p.startsWith("/other/repo/")),
+    `the task file lands in the TASK repo, not the orchestrator's: ${taskFilePaths.join(", ")}`);
 });
 
 test("a task declaring an unresolvable repo is REFUSED, never silently falling back", async () => {
@@ -711,4 +719,31 @@ test("notify writes once and is then throttled", async () => {
   assert.equal(first.isError, undefined, replyText(first));
   const second = await world.call("orchestrator_notify", { title: "要你拍板", body: "有个不可逆的决定" });
   assert.match(replyText(second), /节流|throttl/i);
+});
+
+// ---------------------------------------------------------------------------
+// IDENTITY CONFLICT (2026-09-17): a new session must not adopt another
+// orchestration's stale runtime
+// ---------------------------------------------------------------------------
+
+test("spawn REFUSES when the sidecar holds another orchestration's runtime", async () => {
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    approvePlan: true,
+    // The session minted its own id, but the sidecar carries an old one.
+    identityConflict: "orch-deadbeef-OLD",
+  });
+  const reply = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  assert.equal(reply.isError, true, "a conflicting identity must fail the spawn");
+  assert.match(replyText(reply), /orch-deadbeef-OLD/, "the foreign id is named");
+  assert.match(replyText(reply), /无法继续旧编排/, "the refusal says why");
+  assert.equal([...world.panes.values()].length, 1, "no pane is opened under the wrong identity");
+});
+
+test("spawn proceeds normally when the identity matches or is inherited", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const reply = await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  assert.equal(reply.isError, undefined, replyText(reply));
+  const pane = [...world.panes.values()].find((p) => p.env[GATE_MODE_ENV] === "loop");
+  assert.ok(pane, "the child pane opened as a loop session");
 });

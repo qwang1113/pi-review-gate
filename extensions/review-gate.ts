@@ -156,7 +156,7 @@ import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
 // repository's own worst example of the architecture rule this round adds.
-import { newOrchestrationId, orchestrationIdFromEnv } from "../lib/orchestration-id.ts";
+import { newOrchestrationId, orchestrationIdFromEnv, ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { orchestratorDoneProblems } from "../lib/orchestrator-gate.ts";
 import {
   ORCHESTRATOR_DIRECTIVE,
@@ -337,6 +337,9 @@ import {
   loopGoalEditGate,
   goalPrereviewPassed,
   goalReminderDue,
+  GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD,
+  buildGoalForceNegotiateDirective,
+  goalNegotiationOverdue,
 } from "../lib/loop-goal.ts";
 import type { LoopGoal } from "../lib/loop-goal.ts";
 
@@ -638,10 +641,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     ctx: unknown,
     /** Live-output sink forwarded to the called tool (the chain streams). */
     onUpdate?: ToolUpdate,
+    /** The caller's abort signal, forwarded so ESC can stop internal waits. */
+    signal?: AbortSignal | undefined,
   ) {
     const run = toolExecutes.get(name);
     if (!run) throw new Error(`review-gate: internal tool ${name} is not registered`);
-    return run(`internal-${name}`, params, undefined, onUpdate, ctx);
+    return run(`internal-${name}`, params, signal, onUpdate, ctx);
   }
   /** The text a tool result carries (its content joined). */
   function toolText(result: { content?: { type: string; text: string }[] }): string {
@@ -801,6 +806,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   // `activeRepoRoot` is the repo the agent most recently edited — the target
   // of record_review / run_precommit. `sessionRepos` collects every repo this
   // session has edited; declare_done requires ALL of them to pass.
+  // True when the session cwd sits inside a git repository (gitRootOfDir
+  // succeeded). When false, the session is a NON-GIT directory (e.g. /tmp):
+  // the gate short-circuits entirely — no git calls, no branch, no loop
+  // goal, no checkpoint/review/precommit/ship machinery, no fatal noise on
+  // stderr (2026-09-02, user decision: "非 git 目录就不显示分支或者说不调用
+  // git 的信息 所有的逻辑都应该这样").
+  let sessionInGit = gitRootOfDir(cwd) !== null;
   let primaryRepoRoot = gitRootOfDir(cwd) ?? cwd;
   const activeRepoRoot = { current: primaryRepoRoot };
   const sessionRepos = new Set<string>([primaryRepoRoot]);
@@ -1331,6 +1343,25 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** How stale an unchanged state report may get before it is rewritten. */
   const CHILD_STATE_REFRESH_MS = 60_000;
   let childHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  /** True while a drain is mid-flight — the re-entrancy guard. */
+  let drainingInstructions = false;
+  /**
+   * The child-side interrupt source: an instruct (interrupt/steer) fires it
+   * to dismiss an OPEN dialog as INTERRUPTED before the message is injected.
+   * Wired into askThroughChannel's `interruptSignal`, so the box comes down
+   * and the waiting request settles by:"interrupted" — never read as a user
+   * rejection, never as consent.
+   */
+  let gateInterruptController: AbortController = new AbortController();
+  /**
+   * The signal a dialog currently open listens to for an instruct interrupt.
+   * Every dialog gets the CURRENT controller's signal; drain aborts that
+   * controller and installs a fresh one, so one interrupt dismisses the dialog
+   * open AT THAT MOMENT and never a later one.
+   */
+  function currentInterruptSignal(): AbortSignal {
+    return gateInterruptController.signal;
+  }
   let lastChildReportAt = 0;
   let lastReportedChildState: ChildReportedState | undefined;
   /**
@@ -1411,6 +1442,21 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function drainChildInstructions(ctx: ExtensionContext): Promise<void> {
     const binding = childBinding();
     if (!binding) return;
+    // RE-ENTRANCY GUARD: the heartbeat and agent_settled both drain; an
+    // `await pi.sendUserMessage()` inside one drain would let the OTHER fire
+    // while the first is still mid-flight, and the instruction would be
+    // injected twice (round-4: a message that was written, never acknowledged,
+    // and silently lost — the inverse: acknowledged twice, then acted on twice).
+    if (drainingInstructions) return;
+    drainingInstructions = true;
+    try {
+      await drainInstructionsInner(binding, ctx);
+    } finally {
+      drainingInstructions = false;
+    }
+  }
+
+  async function drainInstructionsInner(binding: ChildChannelBinding, ctx: ExtensionContext): Promise<void> {
     for (const instruction of pendingInstructions(binding)) {
       // STAGE ONE — "I have it". Written BEFORE anything is attempted, and
       // exactly once per instruction, because it answers a different question
@@ -1435,10 +1481,21 @@ export default function reviewGate(pi: ExtensionAPI) {
           // the new message, so the child stops what it was doing and reads
           // this immediately. A bare interrupt (no text) stays a plain abort.
           const interruptText = instructText(channelIO, instruction);
+          // STOP-FIRST (user decision 2026-09-01): any OPEN dialog is
+          // dismissed as INTERRUPTED before the message is injected — a
+          // goal box, a question, a consent. The controller is swapped so
+          // the NEXT dialog starts clean; the abort below additionally
+          // stops the current turn if one is running.
+          gateInterruptController.abort();
+          gateInterruptController = new AbortController();
           ctx.abort?.();
           if (interruptText) {
-            await pi.sendUserMessage(interruptText, { deliverAs: "steer" });
-            acknowledgeInstruct(binding, instruction.instructId, true, "已中断并立即投递正文 (deliverAs:steer)", "injected");
+            // sendUserMessage is fire-and-forget in this pi build (the loader
+            // does not return the promise), so there is nothing to await or
+            // race: the message is handed to pi synchronously and the ack
+            // records that. A failure surfaces as the child never acking.
+            pi.sendUserMessage(interruptText, { deliverAs: "steer" });
+            acknowledgeInstruct(binding, instruction.instructId, true, "已解除等待并立即投递正文 (deliverAs:steer)", "injected");
           } else {
             acknowledgeInstruct(binding, instruction.instructId, true, "已调用 ctx.abort()", "injected");
           }
@@ -1455,12 +1512,23 @@ export default function reviewGate(pi: ExtensionAPI) {
           );
           continue;
         }
-        await pi.sendUserMessage(text, { deliverAs: instruction.mode });
+        // STOP-FIRST for steer too: it cuts INTO the current turn, so an
+        // open dialog (goal box / question / consent) must come down first —
+        // otherwise the message is injected while the child stays wedged on
+        // the box (the measured deadlock). followUp is the one mode that
+        // does NOT stop: its whole meaning is "read this when you are done".
+        if (instruction.mode === "steer") {
+          gateInterruptController.abort();
+          gateInterruptController = new AbortController();
+        }
+        pi.sendUserMessage(text, { deliverAs: instruction.mode });
         acknowledgeInstruct(
           binding,
           instruction.instructId,
           true,
-          `pi.sendUserMessage(deliverAs:${instruction.mode})`,
+          instruction.mode === "steer"
+            ? `已解除等待并投递 (deliverAs:${instruction.mode})`
+            : `pi.sendUserMessage(deliverAs:${instruction.mode})`,
           "injected",
         );
       } catch (error) {
@@ -1493,7 +1561,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       const answer = hasUI ? await render(new AbortController().signal) : undefined;
       return { answer, by: "human", requestId: "" };
     }
-    return askThroughChannel(binding, { ...request, hasUI }, render);
+    // The dialog listens to the gate's interrupt source as well as its own
+    // abort: an instruct fired while it is open dismisses it as INTERRUPTED
+    // so the child can process the message instead of staying wedged on the box.
+    return askThroughChannel(binding, { ...request, hasUI }, render, currentInterruptSignal());
   }
 
 
@@ -1556,7 +1627,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // it. `latestCtx` is refreshed on every tool_call, so it is current by
     // the time any orchestration tool runs.
     contextPercent: () => contextPercentOf(latestCtx as unknown as { getContextUsage?: () => unknown }),
-    auditPlan: (plan, onUpdate) => runPlanAudit(plan, onUpdate as { step?: (t: string) => void; done?: (t: string) => void } | undefined),
+    auditPlan: (plan, onUpdate, signal) => runPlanAudit(plan, onUpdate as { step?: (t: string) => void; done?: (t: string) => void } | undefined, signal),
 
     sessionTranscriptPath: () => {
       try {
@@ -2326,10 +2397,18 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function gateWidgetFacts(): GateWidgetFacts {
     const completion: string[] = [];
-    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    // NON-GIT SHORT-CIRCUIT: the loop goal is a per-REPO contract — outside
+    // a repository there is no repo to bind it to, so it must not surface
+    // as an unmet requirement either (2026-09-02, user decision).
+    if (sessionInGit && !loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     return {
       mode: state.taskMode,
-      branch: currentBranch(primaryRepoRoot) ?? "(detached)",
+      nonGit: !sessionInGit,
+      // NON-GIT SHORT-CIRCUIT: `currentBranch` would run git and, outside a
+      // repository, leak "fatal: not a git repository" to the terminal.
+      // The user decision (2026-09-02): in a non-git directory, do not call
+      // git at all — no branch is shown.
+      branch: sessionInGit ? currentBranch(primaryRepoRoot) ?? "(detached)" : undefined,
       edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
       unmet: completion,
     };
@@ -3302,6 +3381,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const root = target.root;
+      // NON-GIT SHORT-CIRCUIT: a checkpoint IS a commit — outside a
+      // repository there is no commit to make. Refuse before any git call
+      // (currentBranch below would otherwise leak fatal to the terminal).
+      if (!sessionInGit) {
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— checkpoint 不可用（无仓库可提交）。" }],
+          details: { committed: false },
+          isError: true,
+        };
+      }
       // A checkpoint IS a commit, so it lands on the CURRENT branch — no
       // work-branch rule anymore (2026-09-07, user decision: sessions work
       // directly on the branch they are on, including main). The ONE hard
@@ -3674,6 +3763,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     goalText: string;
     ctx: unknown;
     progress?: ProgressReporter;
+    /** The caller's abort signal — ESC must be able to stop the audit wait. */
+    signal?: AbortSignal | undefined;
   }): Promise<{ ok: true } | { ok: false; text: string }> {
     const { root, goalText, ctx } = input;
     input.progress?.step("组装 goal 审计任务");
@@ -3715,8 +3806,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the process exited, its exit-code file landed, or a verdict fence is
     // already in this round's stdout). Re-using it means the audit cannot
     // hang on a criterion the tool would have accepted.
-    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx);
-    // Recording is idempotent: the exit watcher may have got there first, and
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx, undefined, input.signal);
     // the pending-draft entry it consumes makes the second call a no-op.
     const note = await recordJudgeConclusion(child.sessionId);
     // O-6 — WHOEVER DISPATCHED IT CLOSES IT. This goal-auditor is the gate's
@@ -3766,6 +3856,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function runPlanAudit(
     plan: OrchestratorPlan,
     onUpdate?: { step?: (t: string) => void; done?: (t: string) => void } | undefined,
+    signal?: AbortSignal | undefined,
   ): Promise<{ ok: true } | { ok: false; text: string }> {
     // FAIL-CLOSED AROUND THE WHOLE CHAIN. Anything unexpected in here — a
     // judge that could not be spawned, an IO error reading its output — must
@@ -3773,7 +3864,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the tool and leaves the orchestrator unable to tell whether a dialog is
     // about to appear.
     try {
-      return await auditPlanRound(plan, onUpdate);
+      return await auditPlanRound(plan, onUpdate, signal);
     } catch (error) {
       return {
         ok: false,
@@ -3786,6 +3877,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   async function auditPlanRound(
     plan: OrchestratorPlan,
     onUpdate?: { step?: (t: string) => void; done?: (t: string) => void } | undefined,
+    signal?: AbortSignal | undefined,
   ): Promise<{ ok: true } | { ok: false; text: string }> {
 
     const root = primaryRepoRoot;
@@ -3829,7 +3921,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The SAME wait implementation `judge_wait` uses (process exit, exit-code
     // file, or a verdict fence already in this round's stdout).
     onUpdate?.step?.("审计运行中（最长 10 分钟，完成即返回）");
-    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx);
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx, undefined, signal);
     onUpdate?.done?.("审计进程结束");
     // O-6 — the gate dispatched this plan auditor internally, so the gate
     // closes it (the round-5 P1). The orchestrator never asked for a judge
@@ -4267,6 +4359,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const root = target.root;
+      // NON-GIT SHORT-CIRCUIT: the review chain (precommit → checkpoint →
+      // baseline..HEAD) is meaningless outside a repository, and its git
+      // steps would leak fatal to the terminal. Refuse up front.
+      if (!sessionInGit) {
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— judge_submit 不可用（无仓库可审查）。" }],
+          details: { submitted: false },
+          isError: true,
+        };
+      }
       const role = String(params.role ?? "");
       if (!JUDGE_ROLES.includes(role as (typeof JUDGE_ROLES)[number])) {
         return {
@@ -4577,6 +4679,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const targetRoot = target.root;
+      // NON-GIT SHORT-CIRCUIT (defense): judge_submit refuses outside a
+      // repository, so this internal step should never be reached there;
+      // fail closed anyway rather than bind a verdict to a non-repo.
+      if (!sessionInGit) {
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— record_review 不可用（无仓库可绑定）。" }],
+          details: { recorded: false },
+          isError: true,
+        };
+      }
       const st = stateForRepo(targetRoot);
       delete st.pausedQuestion;
       const fp = computeFingerprint(targetRoot);
@@ -4842,6 +4954,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const targetRoot = target.root;
+      // NON-GIT SHORT-CIRCUIT: the runner's change detection and fingerprint
+      // binding are git-backed; outside a repository the run would fail its
+      // own checks and leak fatal noise. Nothing to verify there — refuse.
+      if (!sessionInGit) {
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— run_precommit 不可用（无仓库可检查）。" }],
+          details: { ok: false },
+          isError: true,
+        };
+      }
       const targetDir = targetRoot === primaryRepoRoot ? cwd : targetRoot;
       const st = stateForRepo(targetRoot);
       // Same liveness rule as record_review: running precommit proves the
@@ -4992,6 +5114,18 @@ export default function reviewGate(pi: ExtensionAPI) {
         onUpdate: onUpdate as ToolUpdate | undefined,
       });
       progress.step("门禁复检");
+      // NON-GIT SHORT-CIRCUIT (2026-09-02, user decision): outside a git
+      // repository there is nothing the gate could have reviewed or
+      // precommitted — declare_done has no gate to re-run. The old path
+      // fell into fail-closed "code review gate is PENDING" forever
+      // because computeFingerprint returns UNAVAILABLE outside a repo.
+      if (!sessionInGit) {
+        progress.step("完成");
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— 门禁不介入，declare_done 直接完成（无仓库可审查/提交）。" }],
+          details: { ok: true, nonGit: true },
+        };
+      }
       // R-30 — THE ORCHESTRATOR'S EXIT CONTRACT IS THE PLAN, and it is the
       // ONE the status tool already reports. Measured on 2026-08-30: with
       // every task done, no live children and no open decisions,
@@ -5403,6 +5537,26 @@ export default function reviewGate(pi: ExtensionAPI) {
             isError: true,
           };
         }
+        // IDENTITY TAKE-OVER GUARD (2026-09-17, user decision): a session
+        // that did NOT inherit an orchestration id (no RG_ORCHESTRATION_ID)
+        // and finds a plan ALREADY written by somebody else must not
+        // silently become that orchestration's holder. The plan carries the
+        // user's approval and authorizes spawning; adopting it under a NEW
+        // minted id would spawn children nobody can address.
+        if (!process.env[ORCHESTRATION_ID_ENV] && readPlanFile(primaryRepoRoot).plan !== undefined) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                "review-gate: 当前会话没有继承编排身份（无 RG_ORCHESTRATION_ID），" +
+                "但本仓库已有别人写好的 plan —— 不接管旧编排。" +
+                "若这是你要接手的旧编排，请用同一个 RG_ORCHESTRATION_ID 启动会话；" +
+                "若是新编排，先清掉旧 plan（或换一个 repo）。",
+            }],
+            details: { mode: state.taskMode ?? null },
+            isError: true,
+          };
+        }
       }
       // FIRST CLASSIFICATION: while the mode is undecided and THIS session
       // has not edited anything, the AGENT's own pick IS the classification —
@@ -5423,6 +5577,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       // else is path-exempt — a session started in ~/.pi or in this repo runs
       // the full loop. Path detection is deterministic: the session cwd is
       // chosen by the USER.
+      // NON-GIT SHORT-CIRCUIT (2026-09-02, user decision): outside a git
+      // repository there is nothing to review/checkpoint/ship, so the
+      // enforced modes are impossible. Clamp loop/orchestrator to normal —
+      // same shape as the /tmp scratch clamp below (piSelf). This must be
+      // checked BEFORE evaluateModeChange so a loop upgrade request can
+      // never reach the rule engine as a real loop.
+      const nonGitTask = !sessionInGit;
+      if (nonGitTask && state.taskMode === undefined && (effective === "loop" || effective === "orchestrator")) {
+        effective = "normal";
+      }
       const piSelf = isPiSelfRoot(primaryRepoRoot);
       if (
         state.taskMode === undefined &&
@@ -5461,7 +5625,18 @@ export default function reviewGate(pi: ExtensionAPI) {
         hasChanges: sessionEdited,
         hasUI: ctx.hasUI,
         downgradesLocked: agentDowngradesLocked,
-        piSelfTask: piSelf,
+        // piSelfTask = the environment forbids enforced modes: /tmp scratch
+        // sessions (path-based) AND non-git directories (nothing to review/
+        // checkpoint/ship — user decision 2026-09-02). The engine then
+        // clamps first classification and rejects later loop upgrades in
+        // ONE place (lib/task-mode.ts).
+        piSelfTask: piSelf || !sessionInGit,
+        // NON-GIT (2026-09-02): when the clamp comes from the non-git rule
+        // and not the /tmp path, the reject reason must say so — the /tmp
+        // default would be a lie in a non-git dir (reviewer P2).
+        clampReason: !sessionInGit && !piSelf
+          ? `this session is not inside a git repository — non-git directories cannot enter "${effective}" via the agent. Ask the user to run /gate-mode ${effective} if they really want the enforced workflow here.`
+          : undefined,
       });
 
       if (decision.action === "noop") {
@@ -5476,10 +5651,17 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       if (decision.action === "apply") {
         const scratchFirst = piSelf && state.taskMode === undefined;
+        // NON-GIT (2026-09-02): a non-git directory is clamped the same way
+        // as /tmp scratch (never loop via the agent), but the REASON the
+        // user sees must say what it is — "this session started in /tmp"
+        // would be a lie in a non-git dir that is not /tmp (reviewer P2).
+        const nonGitFirst = !sessionInGit && state.taskMode === undefined;
         setTaskMode(effective, decision.source, ctx as unknown as ExtensionContext);
         try {
-          const sourceNote = scratchFirst
-            ? "（/tmp 临时会话，规则禁止 loop，无需确认）"
+          const sourceNote = scratchFirst || nonGitFirst
+            ? nonGitFirst
+              ? "（非 git 目录，规则禁止 loop，无需确认）"
+              : "（/tmp 临时会话，规则禁止 loop，无需确认）"
             : "";
           ctx.ui.notify(
             effective === "loop"
@@ -5774,6 +5956,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     // ends under any of the six guards above still gets its minute-level
     // second chance. (The orchestrator arms it in orchestratorSettled.)
     startRevivalTimer(ctx);
+    // 2026-09-17 (user decision): count un-goaled turns so the force-negotiate
+    // directive fires at GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD. This is a REAL
+    // settled loop turn (explore/normal/orchestrator/aborted all returned
+    // above), and the count persists so a restart cannot reset the clock.
+    // Cleared in doProposeLoopGoal on approval.
+    if (!loopGoalConfirmed()) {
+      state.turnsWithoutGoal = (state.turnsWithoutGoal ?? 0) + 1;
+    } else {
+      state.turnsWithoutGoal = undefined;
+    }
+    const forceNegotiate = goalNegotiationOverdue(state.turnsWithoutGoal);
     const fp = computeFingerprint(cwd);
     // Ship-gate requirements only exist once this session touched something.
     const problems = (state.hasCodeChange || state.hasDocChange)
@@ -5896,6 +6089,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // only burn the budget telling the agent to retry the impossible — the
     // observed 7-injection quota burn. Stop injecting and name the cause.
     // Tighten-only: no verdict is granted, ship commands stay blocked.
+    // 2026-09-17 P1 (reviewer): the force-negotiate directive must NOT be
+    // swallowed by the stall breaker. The exact scenario it exists for — a
+    // read-only probe loop (no edits → fingerprint unchanged, no review →
+    // verdicts PENDING, no rounds) — trips the L2 stall breaker at ~4
+    // unchanged settles, which returns before the RESUME injection. So a
+    // stalled read-only loop would never see the directive at turn 60.
+    // A force-negotiate directive IS motion: it is the gate telling the agent
+    // to do the one thing that ends the loop. Treat an overdue negotiation as
+    // in-motion (same exemption a running reviewer gets), so the directive
+    // reaches the agent exactly when it is needed.
     const stall = evaluateStall(
       loopStall,
       progressSignature({
@@ -5910,7 +6113,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // will produce does not exist yet. Cutting the loop off there would
       // orphan the very review the gate is waiting for, so observable work in
       // flight counts as motion — until it is too old to be believable.
-      { inMotion: judgeChildInMotion() },
+      { inMotion: judgeChildInMotion() || forceNegotiate },
     );
     loopStall = stall;
     if (stall.stalled) {
@@ -5938,6 +6141,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       "[REVIEW_GATE_RESUME] " +
         (problems.length > 0 ? "Quality gates are still unmet:\n" : "The task is not finished yet:\n") +
         [...problems, ...completion].map((p) => `- ${p}`).join("\n") +
+        (forceNegotiate
+          ? "\n\n" + buildGoalForceNegotiateDirective(state.turnsWithoutGoal)
+          : "") +
         (problems.length > 0
           ? `\n(continuation ${continuationsInjected}/${state.maxRounds}) ` +
             "Continue: fix → judge_submit({role:\"reviewer\"}) → declare_done. " +
@@ -5973,6 +6179,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     // special-case is needed — there is nothing to make inert.)
     // P-multi: re-derive the primary repo and reset per-repo tracking for the
     // new session (a switched session may target a different checkout).
+    // One probe, two facts: the session cwd's git-ness AND its root.
+    // `gitRootOfDir` already silences git's stderr (stdio ignore), so this
+    // single call never leaks the "fatal: not a git repository" noise.
+    sessionInGit = gitRootOfDir(cwd) !== null;
     primaryRepoRoot = gitRootOfDir(cwd) ?? cwd;
     activeRepoRoot.current = primaryRepoRoot;
     sessionRepos.clear();
@@ -6025,6 +6235,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     updateWidget(ctx);
 
 
+
+    // NON-GIT DIRECTORY SHORT-CIRCUIT (2026-09-02, user decision): in a
+    // directory that is not inside a git repository (e.g. /tmp), the whole
+    // gate steps aside — no git calls, no branch, no loop goal, no
+    // checkpoint/review/precommit/ship machinery. The previous behavior
+    // CALLED git anyway and swallowed the stderr, which still leaked
+    // "fatal: not a git repository" to the terminal on every startup and
+    // widget tick. Nothing here can ship (there is no repo to commit to),
+    // so normal mode is the honest classification; the language directive
+    // (L4) stays — it is orthogonal to the gate.
+    if (!sessionInGit) {
+      setTaskMode("normal", "auto", ctx);
+      if (ctx.hasUI) {
+        try {
+          ctx.ui.notify("review-gate: 非 git 目录 —— 门禁不介入（无仓库可审查/提交）。", "info");
+        } catch { /* headless */ }
+      }
+      return; // skip P0-2 arming, protected-branch notice, heartbeat-state report
+    }
     // PROTECTED-BRANCH NOTICE (2026-09-07, user decision): the workspace
     // settlement layer is gone, so a session may sit on main/master/dev/
     // develop with nobody having asked anything. Say so up front — the
@@ -6458,6 +6687,13 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       const goalConfirmed = loopGoalConfirmed();
       systemPrompt += "\n\n" + buildLoopGoalDirective(goal, goalConfirmed);
+      // 2026-09-17: once the un-goaled turn count hits the threshold, the
+      // standing goal directive is escalated to the force-negotiate form on
+      // EVERY turn (not only in the RESUME injection) — the agent cannot miss
+      // that the ONLY acceptable next action is goal negotiation.
+      if (!goalConfirmed && goalNegotiationOverdue(state.turnsWithoutGoal)) {
+        systemPrompt += "\n\n" + buildGoalForceNegotiateDirective(state.turnsWithoutGoal);
+      }
 
     }
 

@@ -49,7 +49,7 @@
 | --- | --- | --- |
 | `state` | 子 → 编排 | 我现在是 working / waiting-input / idle / done；带上下文用量、session id |
 | `request` | 子 → 编排 | 我弹了一个框：标题、**全部选项（原文、按序）**、正文 payload、topic |
-| `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / orchestrator / dismissed |
+| `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / orchestrator / dismissed / **interrupted**（instruct 打断时解除的框，不是拒绝） |
 | `answer` | 编排 → 子 | 这个请求的答案 |
 | `instruct` | 编排 → 子 | 跟你说句话（steer / followUp）或打断你（interrupt） |
 | `instruct-ack` | 子 → 编排 | 我注入了（或没能注入，附原因） |
@@ -168,9 +168,9 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 
 `mode` 就是 pi 自己的 `deliverAs`：
 
-- `steer` —— 切进它当前这一轮；
-- `followUp` —— 等它跑完手上这轮再读；
-- `interrupt` —— `ctx.abort()`，不带正文。
+- `steer` —— 切进它当前这一轮；同时解除它挂着的框（by:`interrupted`）再投递；
+- `followUp` —— 等它跑完手上这轮再读，**不**解除任何框；
+- `interrupt` —— 最高优先级：`ctx.abort()` 停掉当前轮 + 解除挂着的框 + 带正文立即投递。
 
 文本写进通道，由**子会话自己的门禁**用 pi 的 API 注入。**被替换掉的是什么**：
 `tmux send-keys`，它产出过四条独立缺陷 —— 任务书被截断（F7）、没有 Enter 提交（F8）、
@@ -330,6 +330,18 @@ plan，把每一处差异归入两类之一：
 审计要点（写在任务模板里）：任务拆分是否完整、边界是否覆盖真实落点（测试/文档/安装
 脚本/注册入口这些最容易漏）、边界重叠与 `execution` 是否自洽、依赖是否成环或缺失、
 `maxParallel` 是否安全、每个任务是否可独立验收。
+
+**第 7 条（2026-09-17，PM=产品经理）**：需求是否已澄清、goal 是否可派生——逐任务核对
+`plan.decisions` 有无未解决（缺 `resolvedAt`）的需求决策、任务书是否达到『子会话拿到
+就能独立协商 goal』的完整度（只写『做分页』没有交互/边界/验收标准就是 P1）、以及读
+PM 的 transcript 里 ask_user/grillme 的 Q&A 段验证澄清结论真的落进了 plan。
+项目经理同时承担产品经理角色：**plan 提交前必须把涉及的项目代码过一遍，用
+grillme/ask_user 把需求反述澄清，摸清每个子会话的 goal 才能起 plan**，禁止在需求未
+澄清前开工。
+
+**loop 侧配套（2026-09-17）**：loop 模式下累计 60 轮未获批 loop goal（`turnsWithoutGoal`
+持久化计数，重启延续），门禁在每轮注入强提示要求先协商 goal 再干活（只注入提示、
+不硬拦工具——用户决策），goal 获批后计数清零。
 
 ## 六乙、任务书的最后一句话是门禁的
 

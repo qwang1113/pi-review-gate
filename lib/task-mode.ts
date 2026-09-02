@@ -202,6 +202,11 @@ export function evaluateModeChange(opts: {
    *  (see lib/pi-self.ts) — the ONLY path-exempt case. Loop is forbidden
    *  for the agent (first classification and later upgrades). See header. */
   piSelfTask?: boolean;
+  /** Override the reject reason when the clamp is NOT the /tmp scratch rule
+   *  (2026-09-02: a non-git directory reaches the same clamp through
+   *  piSelfTask, but telling the user 'this session started in /tmp' would
+   *  be a lie — reviewer P2). Defaults to the /tmp wording. */
+  clampReason?: string;
 }): ModeChangeDecision {
   const { current } = opts;
   let { requested } = opts;
@@ -276,6 +281,7 @@ export function evaluateModeChange(opts: {
       return {
         action: "reject",
         reason:
+          opts.clampReason ??
           `this session started in /tmp — scratch sessions cannot enter "${requested}" ` +
           "via the agent. Ask the user to run /gate-mode " + requested + " if they really " +
           "want the full enforced workflow here.",

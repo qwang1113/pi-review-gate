@@ -100,6 +100,7 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
     goalText: string;
     ctx: unknown;
     progress?: ProgressReporter;
+    signal?: AbortSignal | undefined;
   }): Promise<{ ok: true } | { ok: false; text: string }>;
   /** Put text in front of the user, in the transcript, right now. */
   showToUser(uiCtx: unknown, lead: string, body: string): boolean;
@@ -178,6 +179,7 @@ export async function doProposeLoopGoal(
   params: Record<string, unknown>,
   ctx: unknown,
   onUpdate: unknown,
+  signal?: AbortSignal | undefined,
 ): Promise<ToolReply> {
   // Empty draft, the write cap, and the repo the goal binds to — the same
   // three checks the audit record runs, in the same order (lib/goal-prereview-tools.ts).
@@ -249,6 +251,7 @@ export async function doProposeLoopGoal(
         title: "review-gate: propose_loop_goal（goal 审计）",
         onUpdate: onUpdate as ToolUpdate | undefined,
       }),
+      signal,
     });
     if (!audit.ok) {
       return {
@@ -307,6 +310,8 @@ export async function doProposeLoopGoal(
   let approved = false;
   /** The orchestrator's decline reason, when the PM answered with one. */
   let channelReason: string | undefined;
+  /** True when an instruct interrupt dismissed the approval box: not a rejection. */
+  let approvalInterrupted = false;
   try {
     const outcome = await deps.askEitherSide(
       {
@@ -333,6 +338,7 @@ export async function doProposeLoopGoal(
     // the rejection reason — the child renegotiates against it instead of
     // waiting on the (PM-invisible) local input box.
     channelReason = outcome.reason;
+    approvalInterrupted = outcome.by === "interrupted";
   } catch {
     approved = false;
   }
@@ -346,23 +352,56 @@ export async function doProposeLoopGoal(
   let reason: string | undefined;
   if (!approved) {
     // The PM's decline reason (via channel) wins — the child renegotiates
-    // against the REAL objection. The local input box is only the fallback
-    // when nobody answered through the channel.
+    // against the REAL objection. Without one, the reason is asked THROUGH
+    // the channel too (topic goal-reason), so a PM that rejected the goal
+    // can supply it — and an instruct interrupt can dismiss the box instead
+    // of leaving the child wedged on a PM-invisible local input (measured).
     if (channelReason) {
       reason = channelReason;
     } else {
       try {
-        const typed = await uiCtx.ui?.input?.(
-          "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
-          "必填:哪里不合适",
+        const outcome = await deps.askEitherSide(
+          {
+            dialogKind: "input",
+            topic: "goal-reason",
+            title: "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
+            options: [],
+            payload: undefined,
+          },
+          uiCtx.hasUI === true,
+          async (signal) =>
+            (await uiCtx.ui?.input?.(
+              "拒绝原因(将转达给 AI 供重新协商;留空则退回通用提示)",
+              "必填:哪里不合适",
+              // P1 FIX (2026-09-17): the signal MUST reach pi's dialog, or an
+              // instruct interrupt cannot dismiss the box and the child stays
+              // wedged on it forever (the measured deadlock's true culprit).
+              signal ? { signal } : undefined,
+            )) ?? undefined,
         );
-        reason = (typed ?? "").trim() || undefined;
+        // An INTERRUPTED reason box means nobody answered: stay undefined.
+        reason = outcome.by === "interrupted" || outcome.by === "dismissed"
+          ? undefined
+          : (outcome.answer ?? "").trim() || undefined;
       } catch {
         reason = undefined;
       }
     }
   }
   if (!approved) {
+    // An INTERRUPTED approval is not a rejection: the PM stopped the goal
+    // dialog to say something else, so the child should re-submit when it
+    // is ready — not read "the user said no".
+    if (approvalInterrupted) {
+      return {
+        content: [{
+          type: "text",
+          text: "review-gate: 目标协商被中断（项目经理发来消息，目标确认框已被解除）。" +
+            "重新提交协商后的目标即可；不是被拒绝。",
+        }],
+        details: { approved: false, interrupted: true },
+      };
+    }
     return {
       content: [{
         type: "text",
@@ -400,6 +439,9 @@ export async function doProposeLoopGoal(
   // This goal's negotiation is over, so its audit count ends with it: the
   // NEXT goal's first audit must announce round 1, not round N+1.
   delete goalSt.goalAuditRound;
+  // The force-negotiate clock resets with the approval: the goal is now
+  // confirmed, so un-goaled turns stop counting from here.
+  delete goalSt.turnsWithoutGoal;
   deps.persist(ctx, goalRoot);
   deps.log(`loop goal approved by the user for ${goalRoot} (${goalText.length} chars${reason ? `, reason: ${reason}` : ""})`);
   return {
@@ -450,6 +492,6 @@ export function registerGoalTools(hosts: GoalToolHosts, deps: GoalToolDeps): voi
           "unlock edit/write in a SECOND repo the session works in.",
       })),
     }),
-    execute: (_id, params, _signal, onUpdate, ctx) => doProposeLoopGoal(deps, params, ctx, onUpdate),
+    execute: (_id, params, signal, onUpdate, ctx) => doProposeLoopGoal(deps, params, ctx, onUpdate, signal),
   });
 }

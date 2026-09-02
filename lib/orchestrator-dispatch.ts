@@ -64,6 +64,7 @@ import {
 } from "./orchestrator-channel.ts";
 import {
   alivePanes,
+  childChannelProjection,
   currentPlan,
   toolFail as fail,
   toolReply as reply,
@@ -177,6 +178,18 @@ export function abandonedRunningTask(
 }
 
 export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
+  // IDENTITY CHECK FIRST (2026-09-17, user decision). This session holds an
+  // orchestration identity; the sidecar may hold ANOTHER orchestration's
+  // runtime (a stale plan + child registry from a previous run). Spawning
+  // under the wrong identity would split panes the old orchestration still
+  // owns and register children nobody can address. Refuse loudly instead of
+  // silently adopting the stale runtime.
+  const conflict = deps.runtimeConflict?.();
+  if (conflict) {
+    return fail(`review-gate: 当前会话持有新编排身份（${deps.runtime().orchestrationId}），无法继续旧编排（${conflict}）。` +
+      "sidecar 里登记的是另一个 orchestration 的 runtime —— 不接管、不开 pane。" +
+      "若要接手旧编排，请用同一个 RG_ORCHESTRATION_ID 启动会话（或 relay 交接）。");
+  }
   const first = currentPlan(deps);
   if (first.problem) return first.problem;
   let plan = first.plan;
@@ -247,9 +260,15 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   }
   const childId = newChildId(taskId, deps.now());
   const marker = buildDeliveryMarker(taskId, deps.now());
+  // CROSS-REPO FIX (2026-09-17, measured): the task file MUST land in the
+  // TASK's repo (the child resolves `@.pi/tasks/<file>` against ITS cwd,
+  // which is `cwd` above). Writing it into the ORCHESTRATOR's repo made a
+  // cross-repo spawn hand the child a relative path it could not find —
+  // pi exited at boot, the pane died, and the delivery check found nothing.
   const written = deps.writeTaskFile(
     taskFileName(marker),
     buildTaskDocument({ marker, taskId, title: task.title, brief }),
+    cwd,
   );
   if (!written.ok) {
     return fail(`review-gate: 任务书写不出来（${written.error}）—— 一个 pane 都没开。`);
@@ -495,13 +514,24 @@ export async function dispatchInstruct(
     deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
   }
 
+  // STOP-FIRST (2026-09-01): the child's gate dismisses an OPEN dialog when
+  // the instruction lands. Tell the PM what just got cancelled — a goal box,
+  // a question, a consent — and that answering is the other tool's job.
+  // STOP-FIRST (2026-09-01): steer/interrupt dismiss an OPEN dialog;
+  // followUp does NOT (its whole meaning is "read this when you are done"),
+  // so the cancellation notice only applies to the two stopping modes.
+  const open = mode === "followUp" ? undefined : childChannelProjection(deps, childId).openRequests[0];
+  const cancelledLine = open
+    ? `\n本次打断同时取消了子会话的待答请求「${open.title}」—— 它不再等这个回答了；若你的本意是回答它，请用 orchestrator_answer。`
+    : "";
   return reply(
     `review-gate: 已通过通道下发给子会话 ${childId}（mode=${mode}）。${check.verdict.summary}。\n` +
     (mode === "interrupt"
       ? "它已中断当前这一轮，并立即收到这条消息（最高优先级）。"
       : mode === "steer"
         ? "它会在当前这一轮里就读到这条消息。"
-        : "它会在跑完手上这一轮之后读到这条消息。"),
+        : "它会在跑完手上这一轮之后读到这条消息。") +
+    cancelledLine,
     { childId, instructId, mode, delivered: true },
   );
 }

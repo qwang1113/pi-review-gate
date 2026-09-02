@@ -383,6 +383,16 @@ export interface GateState {
    */
   goalAuditRound?: number;
   /** P-multi: repo roots (other than the session repo) this session edited,
+  /**
+   * 2026-09-17 (user decision): consecutive agent turns in loop mode WITHOUT an
+   * approved loop goal. Counted in `agent_settled` (aborted/explore/normal/
+   * orchestrator turns excluded), persisted so a restart or resume continues the
+   * count instead of letting the agent reset the clock by re-spawning. Cleared
+   * when the goal is approved. At `GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD` the gate
+   * starts injecting the force-negotiate directive.
+   */
+  turnsWithoutGoal?: number;
+  /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of
    *  them. Ship enforcement never reads it; absence just narrows the
    *  declare_done scope to the session repo (tighten-only). */
@@ -710,6 +720,14 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     if (parsed.goalAuditRound !== undefined &&
       (typeof parsed.goalAuditRound !== "number" || !Number.isFinite(parsed.goalAuditRound) || parsed.goalAuditRound < 0)) {
       delete parsed.goalAuditRound;
+    }
+    // The un-goaled turn counter is a plain counter too; anything else on disk
+    // is corruption, and dropping it restarts the count. A forged LARGE value
+    // would only trigger the force-negotiate directive early (a prompt, not a
+    // block — fail-open by design), so no extra bound is needed beyond sanity.
+    if (parsed.turnsWithoutGoal !== undefined &&
+      (typeof parsed.turnsWithoutGoal !== "number" || !Number.isFinite(parsed.turnsWithoutGoal) || parsed.turnsWithoutGoal < 0)) {
+      delete parsed.turnsWithoutGoal;
     }
     // The ask_user record is diagnostic, so a malformed one is dropped whole:
     // no enforcement path reads it, and half a record answers nothing.

@@ -20,6 +20,8 @@
 export interface GateWidgetFacts {
   /** Current gate mode (loop / explore / normal / orchestrator). */
   mode?: string;
+  /** True outside a git repository — the strip shows 非 git 目录 instead of a branch. */
+  nonGit?: boolean;
   /** Current branch (the session works directly on it — no work branch). */
   branch?: string;
   /** The session has edited at least one file. */
@@ -34,6 +36,9 @@ export interface GateWidgetFacts {
  * Pure: everything comes from the facts object.
  */
 export function buildGateWidget(f: GateWidgetFacts): string[] {
+  // NON-GIT (2026-09-02): outside a repository the strip leads with
+  // 非 git 目录 — mode/branch are both meaningless there (reviewer P2).
+  if (f.nonGit) return [`门禁 · 非 git 目录 · ${f.edited ? "已编辑" : "未编辑"}`];
   const wsBits: string[] = [`mode ${f.mode ?? "未初始化"}`];
   if (f.branch) wsBits.push(f.branch);
   wsBits.push(f.edited ? "已编辑" : "未编辑");

@@ -32,3 +32,19 @@ test("buildGateWidget falls back to 未初始化 for an unset mode", () => {
   assert.equal(lines.length, 1);
   assert.match(lines[0]!, /^门禁 · mode 未初始化 · 已编辑$/);
 });
+
+test("buildGateWidget shows 非 git 目录 and no branch outside a repository", () => {
+  // 2026-09-02 (user decision): outside a git repository the strip leads
+  // with 非 git 目录 — mode and branch are both meaningless there, and
+  // rendering them would require git calls that leak fatal noise.
+  const lines = buildGateWidget({
+    mode: "normal",
+    nonGit: true,
+    branch: undefined,
+    edited: false,
+    unmet: [],
+  });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /^门禁 · 非 git 目录 · 未编辑$/);
+  assert.doesNotMatch(lines[0]!, /mode|branch/);
+});

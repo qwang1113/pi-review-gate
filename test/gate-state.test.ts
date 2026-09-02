@@ -286,6 +286,20 @@ test("goalAuditRound: a corrupt counter is dropped, so the count restarts at 1",
   assert.equal(loadSidecar(path)?.goalAuditRound, 3, "a real count survives");
 });
 
+test("turnsWithoutGoal: a corrupt counter is dropped (fail-open, never a lock)", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of ["3", -1, Number.NaN, Number.POSITIVE_INFINITY, null, {}]) {
+    writeFileSync(path, JSON.stringify({ ...base, turnsWithoutGoal: bad }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `sidecar must stay valid for ${JSON.stringify(bad)}`);
+    assert.equal(loaded?.turnsWithoutGoal, undefined, JSON.stringify(bad));
+  }
+  writeFileSync(path, JSON.stringify({ ...base, turnsWithoutGoal: 42 }));
+  assert.equal(loadSidecar(path)?.turnsWithoutGoal, 42, "a real count survives");
+});
+
 test("askUser: a malformed interview record is dropped whole", () => {
   const dir = makeTemp();
   const path = join(dir, "state.json");
