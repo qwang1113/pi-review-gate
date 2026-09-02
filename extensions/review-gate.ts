@@ -5631,6 +5631,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         // clamps first classification and rejects later loop upgrades in
         // ONE place (lib/task-mode.ts).
         piSelfTask: piSelf || !sessionInGit,
+        // NON-GIT (2026-09-02): when the clamp comes from the non-git rule
+        // and not the /tmp path, the reject reason must say so — the /tmp
+        // default would be a lie in a non-git dir (reviewer P2).
+        clampReason: !sessionInGit && !piSelf
+          ? `this session is not inside a git repository — non-git directories cannot enter "${effective}" via the agent. Ask the user to run /gate-mode ${effective} if they really want the enforced workflow here.`
+          : undefined,
       });
 
       if (decision.action === "noop") {

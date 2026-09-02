@@ -213,6 +213,26 @@ test("USER REQUIREMENT: /tmp first classification never applies loop", () => {
   assert.equal(fromExplore.action, "reject");
 });
 
+test("clampReason overrides the /tmp wording for a non-git clamp (2026-09-02)", () => {
+  // A non-git directory reaches the same clamp through piSelfTask, but the
+  // reject reason must say what the clamp actually is — the /tmp default
+  // would be a lie in a non-git dir (reviewer P2).
+  const later = decide({
+    current: "normal",
+    requested: "loop",
+    piSelfTask: true,
+    clampReason: "this session is not inside a git repository — non-git directories cannot enter \"loop\" via the agent. Ask the user to run /gate-mode loop if they really want the enforced workflow here.",
+  });
+  assert.equal(later.action, "reject");
+  if (later.action === "reject") {
+    assert.doesNotMatch(later.reason, /\/tmp/);
+    assert.match(later.reason, /not inside a git repository/);
+  }
+  // Without the override the /tmp wording stays.
+  const noOverride = decide({ current: "normal", requested: "loop", piSelfTask: true });
+  if (noOverride.action === "reject") assert.match(noOverride.reason, /\/tmp/);
+});
+
 test("scratchFirstMode: only an explicit explore pick stays explore", () => {
   assert.equal(scratchFirstMode("explore"), "explore");
   assert.equal(scratchFirstMode("normal"), "normal");

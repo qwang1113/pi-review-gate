@@ -3994,6 +3994,10 @@ test("non-git directory: the gate short-circuits entirely (user decision 2026-09
   // The loop goal is a per-repo contract — not an unmet requirement outside one.
   assert.match(widget, /sessionInGit && !loopGoalConfirmed\(\)/,
     "the loop-goal unmet must not surface outside a repository");
+  // The widget WIRING is pinned too: `nonGit: !sessionInGit` — flipping it
+  // to a constant would render the 非 git 目录 strip for repo sessions.
+  assert.match(widget, /nonGit: !sessionInGit,/,
+    "the strip's nonGit flag must be wired to sessionInGit (reviewer P2)");
   // session_start forces normal mode and returns before any git-backed step.
   const start = windowOf("pi.on(\"session_start\"", "pi.on(\"session_shutdown\"", "session_start");
   assert.match(start, /if \(!sessionInGit\) \{/, "session_start must branch on sessionInGit");
