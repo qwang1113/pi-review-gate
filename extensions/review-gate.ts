@@ -806,6 +806,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   // `activeRepoRoot` is the repo the agent most recently edited — the target
   // of record_review / run_precommit. `sessionRepos` collects every repo this
   // session has edited; declare_done requires ALL of them to pass.
+  // True when the session cwd sits inside a git repository (gitRootOfDir
+  // succeeded). When false, the session is a NON-GIT directory (e.g. /tmp):
+  // the gate short-circuits entirely — no git calls, no branch, no loop
+  // goal, no checkpoint/review/precommit/ship machinery, no fatal noise on
+  // stderr (2026-09-02, user decision: "非 git 目录就不显示分支或者说不调用
+  // git 的信息 所有的逻辑都应该这样").
+  let sessionInGit = gitRootOfDir(cwd) !== null;
   let primaryRepoRoot = gitRootOfDir(cwd) ?? cwd;
   const activeRepoRoot = { current: primaryRepoRoot };
   const sessionRepos = new Set<string>([primaryRepoRoot]);
@@ -2390,10 +2397,17 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function gateWidgetFacts(): GateWidgetFacts {
     const completion: string[] = [];
-    if (!loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    // NON-GIT SHORT-CIRCUIT: the loop goal is a per-REPO contract — outside
+    // a repository there is no repo to bind it to, so it must not surface
+    // as an unmet requirement either (2026-09-02, user decision).
+    if (sessionInGit && !loopGoalConfirmed()) completion.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
     return {
       mode: state.taskMode,
-      branch: currentBranch(primaryRepoRoot) ?? "(detached)",
+      // NON-GIT SHORT-CIRCUIT: `currentBranch` would run git and, outside a
+      // repository, leak "fatal: not a git repository" to the terminal.
+      // The user decision (2026-09-02): in a non-git directory, do not call
+      // git at all — no branch is shown.
+      branch: sessionInGit ? currentBranch(primaryRepoRoot) ?? "(detached)" : undefined,
       edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
       unmet: completion,
     };
@@ -3366,6 +3380,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const root = target.root;
+      // NON-GIT SHORT-CIRCUIT: a checkpoint IS a commit — outside a
+      // repository there is no commit to make. Refuse before any git call
+      // (currentBranch below would otherwise leak fatal to the terminal).
+      if (!sessionInGit) {
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— checkpoint 不可用（无仓库可提交）。" }],
+          details: { committed: false },
+          isError: true,
+        };
+      }
       // A checkpoint IS a commit, so it lands on the CURRENT branch — no
       // work-branch rule anymore (2026-09-07, user decision: sessions work
       // directly on the branch they are on, including main). The ONE hard
@@ -4334,6 +4358,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const root = target.root;
+      // NON-GIT SHORT-CIRCUIT: the review chain (precommit → checkpoint →
+      // baseline..HEAD) is meaningless outside a repository, and its git
+      // steps would leak fatal to the terminal. Refuse up front.
+      if (!sessionInGit) {
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— judge_submit 不可用（无仓库可审查）。" }],
+          details: { submitted: false },
+          isError: true,
+        };
+      }
       const role = String(params.role ?? "");
       if (!JUDGE_ROLES.includes(role as (typeof JUDGE_ROLES)[number])) {
         return {
@@ -4644,6 +4678,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const targetRoot = target.root;
+      // NON-GIT SHORT-CIRCUIT (defense): judge_submit refuses outside a
+      // repository, so this internal step should never be reached there;
+      // fail closed anyway rather than bind a verdict to a non-repo.
+      if (!sessionInGit) {
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— record_review 不可用（无仓库可绑定）。" }],
+          details: { recorded: false },
+          isError: true,
+        };
+      }
       const st = stateForRepo(targetRoot);
       delete st.pausedQuestion;
       const fp = computeFingerprint(targetRoot);
@@ -4909,6 +4953,16 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
       }
       const targetRoot = target.root;
+      // NON-GIT SHORT-CIRCUIT: the runner's change detection and fingerprint
+      // binding are git-backed; outside a repository the run would fail its
+      // own checks and leak fatal noise. Nothing to verify there — refuse.
+      if (!sessionInGit) {
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— run_precommit 不可用（无仓库可检查）。" }],
+          details: { ok: false },
+          isError: true,
+        };
+      }
       const targetDir = targetRoot === primaryRepoRoot ? cwd : targetRoot;
       const st = stateForRepo(targetRoot);
       // Same liveness rule as record_review: running precommit proves the
@@ -5059,6 +5113,18 @@ export default function reviewGate(pi: ExtensionAPI) {
         onUpdate: onUpdate as ToolUpdate | undefined,
       });
       progress.step("门禁复检");
+      // NON-GIT SHORT-CIRCUIT (2026-09-02, user decision): outside a git
+      // repository there is nothing the gate could have reviewed or
+      // precommitted — declare_done has no gate to re-run. The old path
+      // fell into fail-closed "code review gate is PENDING" forever
+      // because computeFingerprint returns UNAVAILABLE outside a repo.
+      if (!sessionInGit) {
+        progress.step("完成");
+        return {
+          content: [{ type: "text", text: "review-gate: 非 git 目录 —— 门禁不介入，declare_done 直接完成（无仓库可审查/提交）。" }],
+          details: { ok: true, nonGit: true },
+        };
+      }
       // R-30 — THE ORCHESTRATOR'S EXIT CONTRACT IS THE PLAN, and it is the
       // ONE the status tool already reports. Measured on 2026-08-30: with
       // every task done, no live children and no open decisions,
@@ -5510,6 +5576,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       // else is path-exempt — a session started in ~/.pi or in this repo runs
       // the full loop. Path detection is deterministic: the session cwd is
       // chosen by the USER.
+      // NON-GIT SHORT-CIRCUIT (2026-09-02, user decision): outside a git
+      // repository there is nothing to review/checkpoint/ship, so the
+      // enforced modes are impossible. Clamp loop/orchestrator to normal —
+      // same shape as the /tmp scratch clamp below (piSelf). This must be
+      // checked BEFORE evaluateModeChange so a loop upgrade request can
+      // never reach the rule engine as a real loop.
+      const nonGitTask = !sessionInGit;
+      if (nonGitTask && state.taskMode === undefined && (effective === "loop" || effective === "orchestrator")) {
+        effective = "normal";
+      }
       const piSelf = isPiSelfRoot(primaryRepoRoot);
       if (
         state.taskMode === undefined &&
@@ -5548,7 +5624,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         hasChanges: sessionEdited,
         hasUI: ctx.hasUI,
         downgradesLocked: agentDowngradesLocked,
-        piSelfTask: piSelf,
+        // piSelfTask = the environment forbids enforced modes: /tmp scratch
+        // sessions (path-based) AND non-git directories (nothing to review/
+        // checkpoint/ship — user decision 2026-09-02). The engine then
+        // clamps first classification and rejects later loop upgrades in
+        // ONE place (lib/task-mode.ts).
+        piSelfTask: piSelf || !sessionInGit,
       });
 
       if (decision.action === "noop") {
@@ -6084,6 +6165,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     // special-case is needed — there is nothing to make inert.)
     // P-multi: re-derive the primary repo and reset per-repo tracking for the
     // new session (a switched session may target a different checkout).
+    // One probe, two facts: the session cwd's git-ness AND its root.
+    // `gitRootOfDir` already silences git's stderr (stdio ignore), so this
+    // single call never leaks the "fatal: not a git repository" noise.
+    sessionInGit = gitRootOfDir(cwd) !== null;
     primaryRepoRoot = gitRootOfDir(cwd) ?? cwd;
     activeRepoRoot.current = primaryRepoRoot;
     sessionRepos.clear();
@@ -6136,6 +6221,25 @@ export default function reviewGate(pi: ExtensionAPI) {
     updateWidget(ctx);
 
 
+
+    // NON-GIT DIRECTORY SHORT-CIRCUIT (2026-09-02, user decision): in a
+    // directory that is not inside a git repository (e.g. /tmp), the whole
+    // gate steps aside — no git calls, no branch, no loop goal, no
+    // checkpoint/review/precommit/ship machinery. The previous behavior
+    // CALLED git anyway and swallowed the stderr, which still leaked
+    // "fatal: not a git repository" to the terminal on every startup and
+    // widget tick. Nothing here can ship (there is no repo to commit to),
+    // so normal mode is the honest classification; the language directive
+    // (L4) stays — it is orthogonal to the gate.
+    if (!sessionInGit) {
+      setTaskMode("normal", "auto", ctx);
+      if (ctx.hasUI) {
+        try {
+          ctx.ui.notify("review-gate: 非 git 目录 —— 门禁不介入（无仓库可审查/提交）。", "info");
+        } catch { /* headless */ }
+      }
+      return; // skip P0-2 arming, protected-branch notice, heartbeat-state report
+    }
     // PROTECTED-BRANCH NOTICE (2026-09-07, user decision): the workspace
     // settlement layer is gone, so a session may sit on main/master/dev/
     // develop with nobody having asked anything. Say so up front — the

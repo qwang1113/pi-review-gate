@@ -2323,7 +2323,11 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // instruction to call one.
     "goal-tools.ts": 1,
     "goal-prereview-tools.ts": 5,
-    "review-gate.ts": 20,
+    // 2026-09-02: +2 — the non-git short-circuit refusals name the two
+    // internal steps they disable (`run_precommit 不可用` /
+    // `record_review 不可用`). Descriptions of what the gate refuses
+    // outside a repository, never instructions to call either.
+    "review-gate.ts": 22,
   };
 
   const sources = [
@@ -3206,7 +3210,15 @@ test("session_start surfaces the migration notice and clears the flag", () => {
   // The window is a reading heuristic, not a contract: the P-multi reset
   // block, no-UI mode forcing, the normal-mode no-arm comment and the
   // snapshot cleanup at the handler head keep pushing the notice section down.
-  const body = SRC.slice(at, at + 10500);
+  // The window is a reading heuristic, not a contract: the P-multi reset
+  // block, no-UI mode forcing, the normal-mode no-arm comment, the
+  // non-git short-circuit (2026-09-02) and the snapshot cleanup at the
+  // handler head keep pushing the notice section down. Anchor on the
+  // NOTICE itself instead of a fixed slice so a growing handler head
+  // cannot push the assertion out of the window.
+  const noticeAt = SRC.indexOf("if (fingerprintMigrated) {", at);
+  assert.ok(noticeAt > at && noticeAt < at + 20000, "the migration notice must live inside session_start");
+  const body = SRC.slice(noticeAt, noticeAt + 600);
   assert.match(body, /if \(fingerprintMigrated\)/,
     "an invalidated binding must be explained, not silently applied");
   assert.match(body, /FINGERPRINT_MIGRATION_NOTICE/);
@@ -3956,4 +3968,40 @@ test("the tmux backstop sits above /gate-bypass", () => {
   assert.ok(guardAt > 0 && bypassAt > 0);
   assert.ok(guardAt < bypassAt,
     "a bypass is the user's escape from the SHIP gate — it was never a licence to destroy their tmux session");
+});
+
+
+test("non-git directory: the gate short-circuits entirely (user decision 2026-09-02)", () => {
+  // Root cause this fixes: outside a git repository, the extension's git
+  // reads (symbolic-ref / rev-parse) threw and LEAKED "fatal: not a git
+  // repository" to the terminal (they had no stdio ignore), once at
+  // startup and on every widget tick. The user decision: in a non-git
+  // directory, do not call git AT ALL — no branch, no loop goal, no
+  // checkpoint/review/precommit/ship machinery.
+  //
+  // sessionInGit is derived ONCE from gitRootOfDir(cwd) (which itself
+  // silences stderr), so the probe never leaks; every git-backed path
+  // then branches on it BEFORE any git call.
+  assert.match(SRC, /let sessionInGit = gitRootOfDir\(cwd\) !== null;/,
+    "sessionInGit must be derived from gitRootOfDir (the stderr-silenced probe)");
+  assert.match(SRC, /sessionInGit = gitRootOfDir\(cwd\) !== null;/,
+    "session_start re-derives sessionInGit for a switched session");
+  // The widget must not call currentBranch (the fatal source) outside a repo.
+  const widget = windowOf("function gateWidgetFacts()", "function updateWidget", "gateWidgetFacts");
+  assert.match(widget, /sessionInGit \? currentBranch\(primaryRepoRoot\)/,
+    "the status strip must not run git outside a repository");
+  assert.match(widget, /branch: sessionInGit/, "non-git branch must be absent, not \"(detached)\"");
+  // The loop goal is a per-repo contract — not an unmet requirement outside one.
+  assert.match(widget, /sessionInGit && !loopGoalConfirmed\(\)/,
+    "the loop-goal unmet must not surface outside a repository");
+  // session_start forces normal mode and returns before any git-backed step.
+  const start = windowOf("pi.on(\"session_start\"", "pi.on(\"session_shutdown\"", "session_start");
+  assert.match(start, /if \(!sessionInGit\) \{/, "session_start must branch on sessionInGit");
+  assert.match(start, /setTaskMode\(\"normal\", \"auto\", ctx\)/,
+    "a non-git session is forced to normal mode");
+  // The review/checkpoint/precommit tools refuse outside a repository.
+  for (const tool of ["checkpoint", "judge_submit", "run_precommit", "record_review", "declare_done"]) {
+    assert.match(SRC, new RegExp(`非 git 目录 —— ${tool} 不可用|非 git 目录 —— 门禁不介入`),
+      `non-git refusal copy must exist for ${tool}`);
+  }
 });
