@@ -3998,6 +3998,12 @@ test("non-git directory: the gate short-circuits entirely (user decision 2026-09
   // to a constant would render the 非 git 目录 strip for repo sessions.
   assert.match(widget, /nonGit: !sessionInGit,/,
     "the strip's nonGit flag must be wired to sessionInGit (reviewer P2)");
+  // The clampReason CALL SITE is pinned the same way (reviewer P2, round 3):
+  // replacing it with `clampReason: undefined` would silently regress the
+  // reject wording to the /tmp lie while every test stays green.
+  const modeChange = windowOf("const decision = evaluateModeChange({", "      });", "set_gate_mode decision");
+  assert.match(modeChange, /clampReason: !sessionInGit && !piSelf/,
+    "the non-git clamp reason must be passed to evaluateModeChange");
   // session_start forces normal mode and returns before any git-backed step.
   const start = windowOf("pi.on(\"session_start\"", "pi.on(\"session_shutdown\"", "session_start");
   assert.match(start, /if \(!sessionInGit\) \{/, "session_start must branch on sessionInGit");
