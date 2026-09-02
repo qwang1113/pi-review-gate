@@ -842,8 +842,8 @@ on `pi install` / `npm install` and:
 2. registers the **companion pi packages** this extension needs at runtime —
    the pinned platform in `package.json` `dependencies` — via `pi install` when
    they are missing from `~/.pi/agent/settings.json` (idempotent:
-   already-present packages are left untouched): `pi-anthropic-oauth`,
-   `pi-mcp-adapter`, `pi-notify`, `pi-vim`, and `pi-hashline-edit-pro`.
+   already-present packages are left untouched): `pi-mcp-adapter`,
+   `pi-notify`, `pi-vim`, and `pi-hashline-edit-pro`.
 3. if the current directory is a git repo, installs the git hooks into it
    (idempotent; chained, never clobbered).
 

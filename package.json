@@ -50,7 +50,6 @@
     "typebox": "*"
   },
   "dependencies": {
-    "pi-anthropic-oauth": "^0.2.4",
     "pi-hashline-edit-pro": "^2.7.1",
     "pi-mcp-adapter": "^2.26.0",
     "pi-notify": "^1.4.0",
