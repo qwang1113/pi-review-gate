@@ -167,10 +167,23 @@ test("severity classification covers the forms judges actually write", () => {
 });
 
 // (The shared wait formatter is gone with the pane migration: replies are
-// built where the criteria live now. The discipline hint survives — and no
-// longer promises a wake that panes cannot send.)
-test("the wait discipline names the report wake, not a wait tool", () => {
+// built where the criteria live now. The discipline hint survives — and since
+// 2026-09-05 it names the tool again, because the tool exists again.)
+test("the wait discipline is the three sentences, and names a tool that EXISTS", () => {
   assert.match(WAIT_DISCIPLINE_HINT, /等待纪律/);
-  assert.match(WAIT_DISCIPLINE_HINT, /标准报告唤醒/);
-  assert.doesNotMatch(WAIT_DISCIPLINE_HINT, /judge_wait/);
+  // ① do the deterministic work you have — including the soft half the user
+  // insisted on: after a submission there is often nothing left, and the gate
+  // SUGGESTS rather than demands.
+  assert.match(WAIT_DISCIPLINE_HINT, /有确定性工作/);
+  assert.match(WAIT_DISCIPLINE_HINT, /下一轮要什么|收尾报告/);
+  assert.match(WAIT_DISCIPLINE_HINT, /不强求/);
+  // ② wait through the tool, not through a hand-written sleep.
+  assert.match(WAIT_DISCIPLINE_HINT, /judge_wait/);
+  assert.match(WAIT_DISCIPLINE_HINT, /sleep/);
+  // ③ it is message-driven: the first message returns.
+  assert.match(WAIT_DISCIPLINE_HINT, /消息驱动/);
+  assert.match(WAIT_DISCIPLINE_HINT, /任一到达即返回/);
+  // The self-contradiction that caused the nine-minute lock is GONE.
+  assert.doesNotMatch(WAIT_DISCIPLINE_HINT, /禁止.*结束 turn|没有轮询工具/);
 });
+

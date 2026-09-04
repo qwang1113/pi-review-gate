@@ -227,13 +227,20 @@ import { addGrant, emptyRuntime, hasGrant, type OrchestratorRuntime } from "../l
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
+// (Nothing is imported from lib/judge-session.ts here anymore: the transcript
+// READ died with judge_read — a round's conclusion is the channel report.)
+
+// The judge tools that observe/end a session (judge_close / judge_wait) are
+// registered from lib/, like the orchestration tools: this file keeps only
+// what it alone owns and hands the rest over as deps.
+
 import {
-  readJudgeConclusion,
-} from "../lib/judge-session.ts";
-// The judge tools that observe/end a session (judge_read / judge_close /
-// judge_wait) are registered from lib/, like the orchestration tools: this
-// file keeps only what it alone owns and hands the rest over as deps.
-import { registerJudgeSessionTools, probeJudgeRound } from "../lib/judge-session-tools.ts";
+  registerJudgeSessionTools,
+  registerJudgeWaitTool,
+  probeJudgeRound,
+  type JudgeSessionToolDeps,
+} from "../lib/judge-session-tools.ts";
+
 import { registerJudgeSpawnTools } from "../lib/judge-spawn-tools.ts";
 import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "../lib/judge-lifecycle.ts";
 // The judge tools that RELAY to a session (review_spawn / review_watch /
@@ -5061,17 +5068,21 @@ export default function reviewGate(pi: ExtensionAPI) {
 
 
   /**
-   * The three tools that OBSERVE or END a judge session — judge_read,
-   * judge_close, judge_wait — live in lib/judge-session-tools.ts; only their
-   * wiring is here. What they need from THIS file (the repo resolution, the
-   * child registry, the exit watcher, the pending audit, the hosted-wait
-   * watchdog) arrives as this deps object, and nothing else of them does:
-   * every rule they apply is unit-testable without a spawned judge.
+   * The two tools that OBSERVE or END a judge session — judge_close and
+   * judge_wait — live in lib/judge-session-tools.ts; only their wiring is
+   * here. What they need from THIS file (the repo resolution, the child
+   * registry, the announced-question cursor, the pending audit, the
+   * hosted-wait watchdog) arrives as this deps object, and nothing else of
+   * them does: every rule they apply is unit-testable without a spawned judge.
    */
-  // Management entries (judge_wait/judge_read/judge_close) live on the INTERNAL
-  // host only: agents never see them (criterion 5), the gate's own chains still
-  // call the one implementation through callTool.
-  registerJudgeSessionTools(internalHost, {
+  // WHERE EACH ONE LIVES. `judge_close` stays on the INTERNAL host: its only
+  // callers are the gate's own audit chains closing the auditor they opened.
+  // `judge_wait` is registered on BOTH — the same implementation, once for
+  // those chains and once for the AGENT, which needs a way to wait for its
+  // judge's next message that is not a hand-written sleep loop (2026-09-05,
+  // user decision D1).
+  const judgeSessionDeps: JudgeSessionToolDeps = {
+
     resolveRepo: (requested) => {
       const resolved = resolveToolRepo(requested);
       if (resolved.ok) ensureHierarchyLoaded(resolved.root);
@@ -5104,7 +5115,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         return readFileSync(path, "utf8");
       } catch { return undefined; }
     },
-    conclusion: (child) => readJudgeConclusion(child.sessionDir),
+    announcedQuestions: () => announcedRequestIds,
+    markQuestionsAnnounced: (ids) => { for (const id of ids) announcedRequestIds.add(id); },
+
     recordVerdict: async (concluded, root, role) => {
       const text = await recordRoundOutput(concluded, root, role);
       // A report the gate recognises IS the verdict — there is no text to
@@ -5116,7 +5129,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
     dropPendingAudit: (root) => dropAudits(root),
     cancelWaitTimer: () => cancelChildWaitTimer(),
-  });
+  };
+  registerJudgeSessionTools(internalHost, judgeSessionDeps);
+  // The SAME implementation on the agent surface — one waiting tool, two
+  // hosts. A second registration is not a second implementation: both
+  // executes close over `judgeSessionDeps`.
+  registerJudgeWaitTool(pi, judgeSessionDeps);
+
   // judge_conclude is the ONLY tool that exists on one side only: a judge
   // concludes its own round through it, and the main session must never see
   // it (a main session that could self-certify a verdict breaks the gate).

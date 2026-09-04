@@ -145,11 +145,25 @@ export function clampWaitTimeout(requestedMs: number | undefined): number {
 }
 
 /**
- * Mechanical wait discipline: blocking is the LAST resort, not the reflex.
+ * THE wait discipline — one wording, injected everywhere a session might be
+ * tempted to sit and watch (2026-09-05, user decision).
+ *
+ * It replaced a self-contradiction that cost a measured nine minutes: the gate
+ * forbade ending the turn to be woken up, and at the same time had no waiting
+ * tool on the agent surface — so the agent locked itself inside a 280s bash
+ * sleep, never settled, and a report that had landed sat unrecorded. The three
+ * sentences resolve it: do the work you have, then wait through the TOOL, and
+ * know that the tool returns on the first message rather than at the end of a
+ * round. Sentence ① keeps its second half deliberately soft — after a
+ * submission there is often genuinely nothing to prepare, and a rule that
+ * demands work anyway just teaches the agent to invent some.
  */
 export const WAIT_DISCIPLINE_HINT =
-  "等待纪律：还有确定性工作（代码/测试/文档/其他 repo 事务）就先做掉，别在这里空等——" +
-  "pane 没有完成信号，完成以 channel report 落盘为准；门禁用标准报告唤醒，阻塞等待只是最后手段。";
+  "等待纪律：①有确定性工作（代码/测试/文档/其他 repo 事务）就先做掉，尤其 goal / plan 审计期间：读代码、调查、补上下文；" +
+  "送 reviewer 前应已准备充分，送完往往没事可做——这时可以看看下一轮要什么、或先准备收尾报告（提示，不强求）。" +
+  "②确实没活可做了，才调 judge_wait 等，不要手写 sleep 轮询。" +
+  "③judge_wait 是消息驱动的：新 finding、judge 提问、本轮结论、pane 消失，任一到达即返回，拿到就继续干。";
+
 
 
 

@@ -34,6 +34,13 @@ export interface JudgeEntry {
   streamPath?: string;
   /** Newest report the opener already recorded — the wait's consumed cursor. */
   lastReportId?: string;
+  /**
+   * How many streamed findings the opener has already been shown — the
+   * message-driven wait's OTHER cursor. Without it the finding that ended one
+   * wait would end the next one instantly, and the loop would never advance.
+   */
+  lastFindingCount?: number;
+
   /** Round number the opener assigned this review's current round (judge_conclude stamps it on the report; one round concludes once). */
   roundSeq?: number;
   /** ISO timestamp of registration. */

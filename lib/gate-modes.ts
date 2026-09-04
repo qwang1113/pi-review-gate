@@ -59,10 +59,15 @@ export interface ModeSpec {
  * tasks. `ask_user` is deliberately ABSENT — questions are the one thing a
  * judge must ask, and they race through the channel.
  *
+ * Every name here must be a tool that EXISTS somewhere (a deny entry for a
+ * deleted tool is a claim about a surface nobody has) — `judge_read` left this
+ * list when it left the codebase, 2026-09-05.
+ *
  * Single source: lib/judge-side.ts re-exports this set (no second copy).
  */
 export const JUDGE_DENIED_TOOLS: ReadonlySet<string> = new Set([
-  "judge_submit", "judge_spawn", "judge_answer", "judge_recover", "judge_close", "judge_wait", "judge_read",
+  "judge_submit", "judge_spawn", "judge_answer", "judge_recover", "judge_close", "judge_wait",
+
   "orchestrator_spawn", "orchestrator_instruct", "orchestrator_wait", "orchestrator_close",
   "orchestrator_handoff", "orchestrator_plan", "orchestrator_notify", "orchestrator_answer",
   "orchestrator_recover", "orchestrator_attach",

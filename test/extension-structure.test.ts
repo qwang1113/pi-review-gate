@@ -15,7 +15,8 @@ const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
 /** The mode registry owns the static prompt sections the extension used to inline. */
 const GATE_MODES_SRC = readFileSync(join(ROOT, "lib", "gate-modes.ts"), "utf8");
 const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
-const JUDGE_SESSION_TOOLS = new Set(["judge_read", "judge_close", "judge_wait"]);
+const JUDGE_SESSION_TOOLS = new Set(["judge_close", "judge_wait"]);
+
 /**
  * The other half of the same family: the tools that RELAY to a judge session
  * (a round, a follow-up, a completion watcher) are DELETED (2026-08-30,
@@ -182,7 +183,7 @@ function codeOnly(src: string): string {
  * tool does would land in neither window alone, so the two are read together.
  */
 const LIB_TOOL_HANDLERS: Record<string, string> = {
-  judge_read: "async function doRead(",
+
   judge_close: "async function doClose(",
   judge_wait: "async function doWait(",
   prepare_review: "async function doPrepareReview(",
@@ -235,7 +236,8 @@ function toolBodyOf(tool: string): string {
 
 /** The extension's wiring of the judge session tools — deps, nothing else. */
 function judgeToolsWiring(): string {
-  return windowOf("registerJudgeSessionTools(internalHost, {", "\n  });", "judge tools wiring");
+  return windowOf("const judgeSessionDeps: JudgeSessionToolDeps = {", "\n  };", "judge tools wiring");
+
 }
 
 /**
@@ -2284,15 +2286,17 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
 });
 
-test("judge_read / judge_close / judge_wait address a judge by ROLE", () => {
-  // One role enum, shared by the three tools (a fourth spelling of it is how
+test("judge_close / judge_wait address a judge by ROLE", () => {
+  // One role enum, shared by both tools (a third spelling of it is how
+
   // two of them would silently start accepting different roles).
   assert.match(
     JUDGE_TOOLS_SRC,
     /const ROLE_PARAM = Type\.Optional\(Type\.Enum\(\{ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" \}\)\)/,
     "the shared role parameter is the three judge roles",
   );
-  for (const tool of ["judge_read", "judge_close", "judge_wait"]) {
+  for (const tool of ["judge_close", "judge_wait"]) {
+
     const body = toolBodyOf(tool);
     assert.match(body, /role: ROLE_PARAM/, `${tool} takes a role`);
     assert.match(
@@ -2313,10 +2317,18 @@ test("judge_read / judge_close / judge_wait address a judge by ROLE", () => {
   assert.match(JUDGE_TOOLS_SRC, /function checkOpener\(/, "the opener check is one shared helper");
   assert.equal(
     (JUDGE_TOOLS_SRC.match(/checkOpener\(deps, /g) ?? []).length,
-    3,
-    "read, close and wait each pass the opener check before touching the judge",
+    2,
+    "close and wait each pass the opener check before touching the judge",
   );
-  assert.match(toolBodyOf("judge_read"), /只读 adviser/, "the read is narrowed to the adviser");
+  // `judge_read` is DELETED (2026-09-05, D4): a zero-caller path, invisible to
+  // agents and called by no gate chain, whose only remaining effect was to
+  // give injected texts a tool name nobody could reach.
+  assert.ok(!JUDGE_TOOLS_SRC.includes(`name: "judge_read"`), "judge_read must not be registered anywhere");
+  assert.ok(!JUDGE_TOOLS_SRC.includes("async function doRead("), "judge_read's implementation is gone, not orphaned");
+  assert.ok(!SRC.includes(`name: "judge_read"`), "the extension must not register it either");
+  assert.ok(!SRC.includes(`callTool("judge_read"`), "…and no gate chain may still call it");
+
+
   // The old names are RETIRED — no alias, no compatibility shim.
   for (const gone of ["review_read", "review_close", "review_wait"]) {
     assert.ok(!SRC.includes(`name: "${gone}"`), `${gone} must no longer be registered in the extension`);
@@ -2366,20 +2378,32 @@ test("the TEN advanced entries are not registered anywhere an agent can see", ()
   }
 });
 
-test("management entries are implemented but invisible: judge_wait/judge_read/judge_close", () => {
-  // Criterion 5: polling, reading conclusions and closing panes belong to the
-  // gate. The bodies stay (the gate's own audit chains call them through
-  // callTool), but no agent may see the names.
-  for (const tool of ["judge_wait", "judge_read", "judge_close"]) {
-    assert.ok(!SRC.includes(`pi.registerTool({\n    name: "${tool}"`),
-      `${tool} must not be registered with pi`);
-    assert.ok(JUDGE_TOOLS_SRC.includes(`name: "${tool}"`),
-      `${tool}'s implementation must stay (gate chains call it)`);
-  }
-  assert.match(SRC, /registerJudgeSessionTools\(internalHost,/,
-    "the family must be wired through internalHost, not pi");
+test("judge_close stays gate-internal; judge_wait is ONE implementation on BOTH hosts", () => {
+  // Closing a pane belongs to the gate: its only callers are the audit chains
+  // closing the auditor they opened. WAITING does not — an opener with nothing
+  // left to do must be able to wait for its judge's next message through a
+  // tool, or it writes a `sleep` loop and locks itself out of its own wake-up
+  // (measured 2026-09-05: nine minutes, one unrecorded report).
+  assert.ok(!SRC.includes(`pi.registerTool({\n    name: "judge_close"`),
+    "judge_close must not be registered with pi");
+  assert.ok(JUDGE_TOOLS_SRC.includes(`name: "judge_close"`),
+    "judge_close's implementation must stay (gate chains call it)");
+  assert.ok(JUDGE_TOOLS_SRC.includes(`name: "judge_wait"`), "judge_wait's implementation stays in lib/");
+  // ONE implementation, TWO hosts (D1): the agent registration must go through
+  // the same registrar, over the same deps object — a second `registerTool`
+  // written inline in the extension would be the second implementation.
+  assert.match(SRC, /registerJudgeSessionTools\(internalHost, judgeSessionDeps\)/,
+    "the family is wired through internalHost, not pi");
   assert.doesNotMatch(SRC, /registerJudgeSessionTools\(pi,/,
-    "pi must never receive the management family");
+    "pi must never receive the whole management family");
+  assert.match(SRC, /registerJudgeWaitTool\(pi, judgeSessionDeps\)/,
+    "the agent surface gets judge_wait — the SAME implementation, over the SAME deps");
+  assert.equal(
+    (JUDGE_TOOLS_SRC.match(/name: "judge_wait"/g) ?? []).length,
+    1,
+    "…and it is registered from exactly one place in lib/",
+  );
+
   // …while the intent entries stay visible: submit spawns rounds, spawn opens
   // goal/plan audits, answer replies through the gate.
   assert.ok(SRC.includes(`pi.registerTool({\n    name: "judge_submit"`),
@@ -2596,10 +2620,10 @@ test("the SHIPPED skill and the agent-facing docs name no deleted tool at all", 
 
 
 
-test("judge_wait applies the channel end-of-round criteria and returns conclusion + progress", () => {
+test("judge_wait applies the MESSAGE-DRIVEN criteria and returns the standard report", () => {
   const body = toolBodyOf("judge_wait");
   assert.match(body, /clampWaitTimeout\(.*params\.timeoutMs/, "the blocking window is clamped by the gate");
-  assert.match(body, /probeJudgeRound\(deps, child, consumedAtStart\)/, "the loop probes with the shared criteria");
+  assert.match(body, /probeJudgeWait\(deps, child, cursors\)/, "the loop probes with the shared criteria");
   // The wait SKELETON is generic (lib/poll-wait.ts) and this tool only injects
   // its own criteria — the next waiter reuses the loop instead of copying it.
   assert.match(body, /await pollUntil\(\{/, "the loop itself comes from the shared waiter");
@@ -2611,12 +2635,23 @@ test("judge_wait applies the channel end-of-round criteria and returns conclusio
   assert.match(body, /reportConclusion\(io, projection\.lastReport\)/, "…on the report's STRUCTURED conclusion, not on its text");
   assert.match(body, /pane-dead/, "a dead pane ends the wait as failed");
   assert.match(body, /lastReportId: observation\.reportId/, "the consumed report cannot end a second wait");
+  assert.match(body, /lastFindingCount: observation\.seenFindingCount/, "…and a shown finding cannot end the next one");
   const probe = windowIn(JUDGE_TOOLS_SRC, "export function probeJudgeRound(", "\n}", "probeJudgeRound");
   assert.match(probe, /projection\.lastReport/, "the report criterion reads the channel");
   assert.match(probe, /judgePaneAlive\(deps\.tmux/, "pane death is probed from tmux, not inferred");
-  assert.match(body, /recentStreamFindings\(deps, child\.streamPath\)/,
-    "the unfinished branch carries the newest streamed findings");
+  // The two NEW criteria read what the gate ALREADY writes (P0: the judge-side
+  // record format is untouched) — the round's stream file and the channel's
+  // own open requests, never a new record kind.
+  const waitProbe = windowIn(JUDGE_TOOLS_SRC, "export function probeJudgeWait(", "\n}", "probeJudgeWait");
+  assert.match(waitProbe, /recentStreamFindings\(deps, child\.streamPath\)/, "findings come from the existing stream file");
+  assert.match(waitProbe, /cursors\.announcedQuestions\.has\(q\.requestId\)/, "questions come from the channel's open requests");
+  assert.match(waitProbe, /seenFindingCount > cursors\.findingCount/, "…and only what is NEW ends the wait");
+  // ONE report format for both wake-up paths (D2): the wait must not grow its
+  // own prose.
+  assert.match(body, /buildStandardReport\(\{/, "the reply is the gate's standard report");
+  assert.doesNotMatch(body, /本轮已结束（判据/, "no second report text may come back");
 });
+
 
 test("STREAMING: every long-running gate tool publishes progress on its own onUpdate", () => {
   // Measured (.pi/gate-timings.jsonl): a review round is 8.9 min at the
@@ -2702,14 +2737,17 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
     assert.ok(spawn.includes(field), `a dispatched round must record ${field} at spawn time`);
   }
 
-  // judge_read (adviser-only): channel state + open questions + transcript
-  // conclusion, all read through deps bound to the RECORDED record.
-  const read = toolBodyOf("judge_read");
+  // judge_wait: liveness and the round's end both come from what the gate
+  // itself wrote — the channel state and tmux — read through deps bound to the
+  // RECORDED record, never from a transcript scrape.
+  const wait = toolBodyOf("judge_wait");
   const wiring = judgeToolsWiring();
-  assert.match(read, /projection\.lastState\?\.state/, "liveness comes from the channel state");
-  assert.match(wiring, /conclusion: \(child\) => readJudgeConclusion\(child\.sessionDir\)/,
-    "the conclusion is parsed from the RECORDED session dir");
-  assert.match(read, /judgePaneAlive\(deps\.tmux/, "pane death is probed from tmux, not inferred");
+  assert.match(JUDGE_TOOLS_SRC, /projection\.lastState\?\.state/, "liveness comes from the channel state");
+  assert.match(wiring, /announcedQuestions: \(\) => announcedRequestIds/,
+    "the announced-question cursor is the SESSION's, so a wait and a settle never double-announce");
+  assert.match(JUDGE_TOOLS_SRC, /judgePaneAlive\(deps\.tmux/, "pane death is probed from tmux, not inferred");
+  assert.match(wait, /probeJudgeWait\(deps, child, cursors\)/, "the wait polls the message-driven criteria");
+
 
   // Round-5 P1, pane edition: the child snapshot must SUPPLY lastActivityAt.
   // It comes from the channel now (heartbeat, questions, reports).

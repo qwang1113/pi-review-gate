@@ -19,7 +19,7 @@ import { join } from "node:path";
 import {
   readJudgeSessionState,
   newestTranscript,
-  readJudgeConclusion,
+
   readStderrTail,
   lastActivityAt,
   terminateJudgeSession,
@@ -264,54 +264,13 @@ test("transcript: a missing sessions/ directory yields no transcript (never thro
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-// `readJudgeConclusion` is now a DIAGNOSTIC read: "what is this pane saying
-// right now?", for a round that has not concluded. Whether a round concluded —
-// and with what verdict — is answered by its channel report, never by pattern
-// matching the transcript, so the old fence-selection rule (and the
-// `hasVerdict` flag that came with it) is gone.
-test("conclusion: the LAST assistant text is returned, sign-off included", () => {
-  const dir = workdir();
-  try {
-    const sessions = join(dir, "sessions");
-    mkdirSync(sessions, { recursive: true });
-    writeFileSync(join(sessions, "s.jsonl"), [
-      assistantLine("先分析一下这个 commit range。"),
-      assistantLine("还在读 diff。"),
-      // A sign-off used to be the thing this function had to skip, because the
-      // verdict was buried above it. Nothing is buried anymore.
-      assistantLine("已交卷，等 opener。"),
-    ].join("\n"));
-    const got = readJudgeConclusion(sessions);
-    assert.equal(got.text, "已交卷，等 opener。");
-    assert.ok(got.transcriptPath);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
+// (The three `readJudgeConclusion` cases that stood here are gone with the
+// function, 2026-09-05. It was the transcript-tail read behind `judge_read`;
+// once that tool was deleted nothing in the gate read a judge's prose, and a
+// unit test is not a caller. What a round CONCLUDED is the channel report
+// (test/judge-conclude.test.ts), and what it streamed reaches the opener
+// through judge_wait (test/judge-session-tools.test.ts).)
 
-test("conclusion: a half-written final line (the judge is still writing) is skipped, not fatal", () => {
-  const dir = workdir();
-  try {
-    const sessions = join(dir, "sessions");
-    mkdirSync(sessions, { recursive: true });
-    writeFileSync(join(sessions, "s.jsonl"), [
-      assistantLine("正在分析 BLOCKED 的那一处。"),
-      '{"type":"message","message":{"role":"assis',
-    ].join("\n"));
-    const got = readJudgeConclusion(sessions);
-    assert.match(got.text!, /BLOCKED/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test("conclusion: a transcript with no assistant output is reported as empty, not as a crash", () => {
-  const dir = workdir();
-  try {
-    const sessions = join(dir, "sessions");
-    mkdirSync(sessions, { recursive: true });
-    writeFileSync(join(sessions, "s.jsonl"), JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "task" }] } }));
-    const got = readJudgeConclusion(sessions);
-    assert.equal(got.text, undefined);
-    assert.ok(got.transcriptPath, "the transcript it looked at is still reported");
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
 
 /**
  * Round-5 P1 (reviewer), and observed live: `lastActivityAt` was documented on
@@ -517,8 +476,9 @@ test("a same-title respawn gets a clean slate (no inherited exit-code or transcr
     assert.notEqual(second.exitCodePath, first.exitCodePath, "the second run gets its own artifact paths");
     assert.equal(readJudgeSessionState(second).lifecycle, "unknown",
       "a fresh spawn must NOT be classified as finished by the previous run's exit-code");
-    assert.equal(readJudgeConclusion(second.sessionDir).text, undefined,
-      "and it must not hand back the previous run's verdict");
+    assert.equal(newestTranscript(second.sessionDir), undefined,
+      "and it must not hand back the previous run's transcript");
+
     // The finished run stays readable — nothing was destroyed to achieve this.
     assert.equal(readJudgeSessionState(first).lifecycle, "finished");
   } finally { rmSync(root, { recursive: true, force: true }); }

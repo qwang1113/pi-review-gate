@@ -292,32 +292,13 @@ export function assistantTexts(transcriptPath: string): string[] {
   return out;
 }
 
-export interface JudgeConclusion {
-  /** The text to hand back, or undefined when the transcript yielded nothing. */
-  text?: string;
-  /** The transcript the text came from. */
-  transcriptPath?: string;
-}
+// (`JudgeConclusion` / `readJudgeConclusion` are GONE, 2026-09-05. They were
+// the transcript-tail read behind `judge_read`, and they outlived it by one
+// edit: with that tool deleted nothing in the gate read a judge's prose at
+// all — a round's conclusion is the structured channel report, and the
+// wait carries what the judge streamed. `assistantTexts` stays: the activity
+// probe below still uses the transcript as evidence of life.)
 
-/**
- * The judge's most recent output, read from its transcript — a DIAGNOSTIC
- * read, and nothing more.
- *
- * It used to pick the last assistant text CARRYING A VERDICT FENCE, because
- * the verdict itself was scraped out of prose. Nothing scrapes anymore: a
- * round ends when `judge_conclude` writes a structured `report` into the
- * channel, and that record is the only thing the gate reads a verdict from
- * (lib/judge-conclude.ts). What is left here answers a different, purely
- * human question — "what is this pane saying right now?" — for a round that
- * has not concluded, so the newest non-empty text is exactly right.
- */
-export function readJudgeConclusion(sessionDir: string): JudgeConclusion {
-  const transcriptPath = newestTranscript(sessionDir);
-  if (!transcriptPath) return {};
-  const texts = assistantTexts(transcriptPath);
-  if (texts.length === 0) return { transcriptPath };
-  return { text: texts[texts.length - 1]!, transcriptPath };
-}
 
 /**
  * When did this session last show a sign of life?
