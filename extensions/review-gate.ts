@@ -311,7 +311,7 @@ import {
   type GateState,
   invalidateBindings,
 } from "../lib/gate-state.ts";
-import { parseReviewOutput, parsePrecommitOutput, parseFenceFindings, parseFenceFileFindings } from "../lib/verdict-parse.ts";
+import { parseReviewOutput, parsePrecommitOutput, parseFenceFindings, parseFenceFileFindings, extractNewestFenceText } from "../lib/verdict-parse.ts";
 import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
 import {
   evaluateModeChange,
@@ -4530,9 +4530,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     if (planPending) {
       dropAudits(root);
-      const parsed = parseReviewOutput(fullText);
+      const fenced = extractNewestFenceText(fullText) ?? fullText;
+      const parsed = parseReviewOutput(fenced);
       if (!parsed) return `plan 审计没有产出可解析的裁决，什么都没有记录（fail-closed）——plan 没有被送审。`;
-      const findings = parseFenceFindings(fullText);
+      const findings = parseFenceFindings(fenced);
       const adjudication = adjudicatePlanAudit(parsed.verdict, findings);
       const st = root === primaryRepoRoot ? state : stateForRepo(root);
       st.planAudit = {
@@ -5018,10 +5019,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       "(from that round's own output), so you do not call this in the normal flow — only when you " +
       "have a reviewer output the gate could not read. " +
       "Records the verdict of an independent code/doc review. Pass the FULL raw output of a REAL, " +
-      "independent reviewer run (do not hand-write the verdict). The gate parses every JSON fence " +
-      "(worst verdict wins).",
+      "independent reviewer run (do not hand-write the verdict). Without `fence`, the gate parses " +
+      "every JSON fence (worst verdict wins); with `fence`, only that round's fence decides.",
     parameters: Type.Object({
-      reviewer_output: Type.String({ description: "Complete raw output from the reviewer" }),
+      reviewer_output: Type.String({ description: "Complete raw output from the reviewer (kept as evidence; the verdict is read from its newest fence)" }),
       repo: Type.Optional(Type.String({
         description:
           "Absolute path of the repository this review covers. REQUIRED once the session has edited " +
@@ -5032,7 +5033,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       // P0-1: record_review only accepts JSON fence verdicts, NOT precommit
       // `## Overall:` sentinels. Review and precommit are separate gates.
-      const parsed = parseReviewOutput(params.reviewer_output);
+      // Newest fence decides (a reused pane's output holds every round's fence);
+      // the full output stays evidence. Matches the collector's key bytes.
+      const fenced = extractNewestFenceText(params.reviewer_output) ?? params.reviewer_output;
+      const parsed = parseReviewOutput(fenced);
       if (!parsed) {
         return {
           content: [{
@@ -5174,7 +5178,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // findings this round (severity + file from the RAW reviewer output,
       // never line counts). The next prepare_review derives the file streak
       // from these.
-      const fileFindings = parseFenceFileFindings(params.reviewer_output);
+      const fileFindings = parseFenceFileFindings(fenced);
       const recorded = recordedFindingsFrom(fileFindings);
       st.rounds.push({
         round: st.rounds.length + 1,

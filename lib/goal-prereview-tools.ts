@@ -46,7 +46,7 @@ import {
   normalizeGoalText,
   type GoalPrereviewRecord,
 } from "./loop-goal.ts";
-import { parseReviewOutput, parseFenceFindings } from "./verdict-parse.ts";
+import { parseReviewOutput, parseFenceFindings, extractNewestFenceText } from "./verdict-parse.ts";
 import { adjudicateGoalAudit } from "./judge-lifecycle.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 
@@ -219,7 +219,8 @@ export async function doRecordGoalPrereview(
   // READY carrying unresolved P0/P1 is contradictory and becomes BLOCKED,
   // and a fence we could not fully parse can never come back READY.
   const auditorOutput = typeof params.auditor_output === "string" ? params.auditor_output : "";
-  const parsed = parseReviewOutput(auditorOutput);
+  const fenced = extractNewestFenceText(auditorOutput) ?? auditorOutput;
+  const parsed = parseReviewOutput(fenced);
   if (!parsed) {
     return {
       content: [{
@@ -236,7 +237,7 @@ export async function doRecordGoalPrereview(
     };
   }
   const newHash = goalTextHash(goalText);
-  const findings = parseFenceFindings(auditorOutput);
+  const findings = parseFenceFindings(fenced);
   // ONE adjudication for the record, the reply and the gate (B2): a READY
   // without P0/P1 is a PASS no matter how many P2/Nit findings ride along.
   // The audit ROUND counts audits of the GOAL being negotiated now — the

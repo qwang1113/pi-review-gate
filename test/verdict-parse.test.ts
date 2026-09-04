@@ -468,3 +468,19 @@ test("parseFenceFileFindings: unparseable fences are skipped, not fatal", () => 
   assert.deepEqual(parseFenceFileFindings("```json\n{broken\n```"), []);
   assert.deepEqual(parseFenceFileFindings("no fence"), []);
 });
+
+const { extractNewestFenceText } = await import(
+  new URL("../lib/verdict-parse.ts", import.meta.url).pathname
+);
+
+test("extractNewestFenceText: newest parseable block wins, unparseable tail skipped", () => {
+  const oldFence = '```json\n{"gate":"BLOCKED","findings":[]}\n```';
+  const newFence = '```json\n{"gate":"READY","findings":[]}\n```';
+  assert.equal(extractNewestFenceText(`first\n${oldFence}\nsecond\n${newFence}`), newFence);
+  // A truncated trailing block does not shadow the previous valid one.
+  assert.equal(
+    extractNewestFenceText(`${newFence}\n\`\`\`json\n{"gate":"BLOCKED"`),
+    newFence,
+  );
+  assert.equal(extractNewestFenceText("no fence here"), undefined);
+});

@@ -1840,7 +1840,11 @@ test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict
   // hands over `Record<string, unknown>`), then parsed by the gate itself.
   assert.match(body, /const auditorOutput = typeof params\.auditor_output === "string"/,
     "the auditor output is narrowed, not cast");
-  assert.match(body, /parseReviewOutput\(auditorOutput\)/, "the extension must parse the auditor output itself");
+  // Newest fence decides (a reused pane's output holds every audit's fence);
+  // the extraction is gate-computed from the output bytes — no new parameter.
+  assert.match(body, /extractNewestFenceText\(auditorOutput\) \?\? auditorOutput/,
+    "the verdict is read from the newest fence");
+  assert.match(body, /parseReviewOutput\(fenced\)/, "the extension must parse the fenced output itself");
   // B2: ONE mechanical adjudication decides PASS — a READY without P0/P1 —
   // and the same call produces the sentence the agent reads.
   assert.match(body, /adjudicateGoalAudit\(\{/, "the extension adjudicates the audit itself");
@@ -2111,7 +2115,7 @@ test("round-18: prepare_review carries the polish-gate reason — parameter, ref
   assert.match(body, /lastPolishReason/, "the reviewer task receives the stored reason");
   // record_review records per-file finding severities for the file streak.
   const recBody = toolBodyOf("record_review");
-  assert.match(recBody, /parseFenceFileFindings\(params\.reviewer_output\)/, "record_review parses severity+file per round");
+  assert.match(recBody, /parseFenceFileFindings\(fenced\)/, "record_review parses severity+file from the newest fence");
   assert.match(recBody, /recordedFindingsFrom\(fileFindings\)/, "the file lists are derived for the streak");
   assert.match(recBody, /polishFiles: recorded\.polishFiles/, "P2/Nit files are stored on the round");
   assert.match(recBody, /blockingFiles: recorded\.blockingFiles/, "P0/P1 files are stored on the round");

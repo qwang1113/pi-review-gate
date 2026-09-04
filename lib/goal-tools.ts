@@ -155,7 +155,7 @@ function registerRecordGoalPrereview(host: ToolHost, deps: GoalToolDeps): void {
       "revised text (its hash differs, so it needs its own PASS).",
     parameters: Type.Object({
       goal: Type.String({ description: "The FULL draft goal text that was audited (the exact text you will submit)" }),
-      auditor_output: Type.String({ description: "Complete raw output from the goal-auditor judge child" }),
+      auditor_output: Type.String({ description: "Complete raw output from the goal-auditor judge child (the verdict is read from its newest fence)" }),
       repo: Type.Optional(Type.String({
         description:
           "Absolute path of the repo this goal binds to (default: the session repo) — must match the " +
