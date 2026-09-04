@@ -2437,7 +2437,10 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // 2026-08-31: the no-checkpoint refusal (3 mentions) became the
     // empty-range exit-goal audit — the mentions are gone with it; the
     // dirty-worktree refusal keeps one self-describing mention.
-    "review-prepare-tools.ts": 5,
+    // 2026-09-04: −1 — the reviewer task text stopped naming `record_review`
+    // (it is no longer a tool on any host; the sentence now says "the gate
+    // re-checks … when it records your verdict").
+    "review-prepare-tools.ts": 4,
     // The `/precommit` command's `callTool("run_precommit", …)` wiring moved
     // here with the command layer.
     "gate-command-tools.ts": 1,
@@ -2604,7 +2607,7 @@ test("judge_wait applies the channel end-of-round criteria and returns conclusio
   // The RETURN carries the recorded verdict — a NEW channel report ends the
   // round (the gate records it), a dead pane ends it as failed.
   assert.match(body, /deps\.recordVerdict\(concluded, addressed\.root, child\.role\)/, "a new report goes through the gate's recorder");
-  assert.match(body, /reportConclusion\(projection\.lastReport\)/, "…on the report's STRUCTURED conclusion, not on its text");
+  assert.match(body, /reportConclusion\(io, projection\.lastReport\)/, "…on the report's STRUCTURED conclusion, not on its text");
   assert.match(body, /pane-dead/, "a dead pane ends the wait as failed");
   assert.match(body, /lastReportId: observation\.reportId/, "the consumed report cannot end a second wait");
   const probe = windowIn(JUDGE_TOOLS_SRC, "export function probeJudgeRound(", "\n}", "probeJudgeRound");
@@ -3776,7 +3779,7 @@ test("a judge's verdict is recorded from THIS round's report, never an older one
   assert.match(body, /projectChannel\(read\.records\)\.lastReport/,);
   assert.match(body, /last\.reportId === entry\?\.lastReportId/, "an already-consumed report is not recorded twice");
   assert.match(body, /reportText\(channelIO, last\)/, "an ADVISER's prose is read from its report");
-  assert.match(body, /recordRoundOutput\(reportConclusion\(last\), childRoot, role, ctx\)/,
+  assert.match(body, /recordRoundOutput\(reportConclusion\(channelIO, last\), childRoot, role, ctx\)/,
     "one recorder serves both the wait and the stragglers, on the STRUCTURED conclusion, with an explicit ctx");
   const recorderAt = SRC.indexOf("async function recordRoundOutput(");
   assert.ok(recorderAt > 0, "the single recorder must exist");

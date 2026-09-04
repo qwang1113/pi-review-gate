@@ -4310,7 +4310,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The conclusion arrives STRUCTURED on the report — the auditor concluded
     // through judge_conclude, so there is nothing to parse. An unrecognisable
     // verdict (an older build's record, a hand-edited channel) records nothing.
-    const concluded = reportConclusion(last);
+    const concluded = reportConclusion(channelIO, last);
     const verdict = normalizeConcludedVerdict(concluded.verdict);
     if (!verdict) {
       return {
@@ -4628,7 +4628,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { text: advice, recorded: false };
       }
       const childRoot = live ? repoOfChild(live) : (entry?.repoRoot ?? primaryRepoRoot);
-      const recorded = await recordRoundOutput(reportConclusion(last), childRoot, role, ctx);
+      const recorded = await recordRoundOutput(reportConclusion(channelIO, last), childRoot, role, ctx);
       if (recorded === undefined) return { recorded: false }; // no ctx: stay armed, retry next settle
       advanceReportCursor(sessionId, last.reportId);
       return { text: recorded, recorded: true };
@@ -5994,15 +5994,17 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /**
    * The GOAL family — `propose_loop_goal` (L8: the user approves this
-   * session's exit contract) and the internal `record_goal_prereview` (L8b:
-   * the goal-auditor's verdict becomes a record) — lives in
+   * session's exit contract) and the audit recorder behind it (L8b: the
+   * goal-auditor's verdict becomes a record) — lives in
    * lib/goal-tools.ts + lib/goal-prereview-tools.ts; only its wiring is here.
    *
-   * TWO HOSTS, deliberately named at the call site: the agent's tool goes to
-   * `pi`, the internal implementation to `internalHost`, which pi never
-   * learns a name from. The audit stays TRUSTED across the move — the fence
-   * is parsed and the draft hashed in THIS process (lib/verdict-parse.ts +
-   * lib/loop-goal.ts), never by the agent.
+   * ONE HOST: the family registers exactly one tool, on `pi`. Its recorder is
+   * a plain function this file calls itself when the audit round's report
+   * lands (`recordGoalPrereview`, wired through `goalPrereviewDeps` above), so
+   * there is no name for an agent to sequence by hand. The audit stays TRUSTED
+   * — the auditor's structured conclusion is adjudicated and the draft hashed
+   * in THIS process (lib/review-adjudicate.ts + lib/loop-goal.ts), never by
+   * the agent.
    *
    * What they need from THIS file arrives as this deps object: the repo roots
    * and their gate state, the persistence, the audit chain (`runGoalAudit` —

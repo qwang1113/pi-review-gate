@@ -46,7 +46,7 @@ import { createHash } from "node:crypto";
 import { canonicalPlanText, formatPlanSummary, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 import type { ChannelRecord, ChannelReportRecord } from "./orchestrator-channel.ts";
-/** One objection, exactly as the auditor's JSON fence reported it. */
+/** One objection, exactly as the auditor concluded it. */
 export interface PlanAuditFinding {
   severity: string;
   issue: string;

@@ -90,7 +90,10 @@ reviewer / goal-auditor 传 `notes` 会被**显式拒绝**（提示「本角色�
 废话。
 
 不设任何长度上限、不做超长截断、不做超长打回——打回一轮等于两倍 token。简洁靠
-三件事：没有废话字段、findings 形状本身逼简洁、以及上面那条「交卷即停」。
+三件事：没有废话字段、findings 形状本身逼简洁、以及上面那条「交卷即停」。findings
+多到一行写不下时**外溢到旁文件**（`findingsRef`），不是截断：channel 的一次 append
+必须留在 `PIPE_BUF`（4096 字节）以内，否则并发写会撕行——那是这套记录格式唯一要防
+的失败。opener 读回来的仍是完整原值。
 
 交卷写进 channel report 的是**结构化字段本体**（`verdict` / `findings` / `cwd` /
 `docSync`）。没有 fence 合成，也没有 fence 解析：opener 直接读数据，

@@ -57,8 +57,8 @@ export interface RecordedFindings {
 }
 
 /**
- * Per-round polish data, derived ONCE at record_review time from the raw
- * reviewer output and attached to the RoundRecord.
+ * Per-round polish data, derived ONCE when the verdict is recorded, straight
+ * from the judge's own structured findings, and attached to the RoundRecord.
  */
 export function recordedFindingsFrom(
   findings: ReadonlyArray<{ severity: string; file: string }>,

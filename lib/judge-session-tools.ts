@@ -35,7 +35,6 @@ import {
   projectChannel,
   readChannel,
   reportConclusion,
-  reportText,
   HEARTBEAT_STALE_MS,
   type ChannelIO,
   type ReportConclusion,
@@ -320,7 +319,7 @@ async function doRead(deps: JudgeSessionToolDeps, params: Record<string, unknown
     const lines = conclusionTail.split("\n");
     conclusionTail = lines.length <= history ? conclusionTail : lines.slice(-history).join("\n");
   }
-  const concluded = projection.lastReport ? reportConclusion(projection.lastReport) : undefined;
+  const concluded = projection.lastReport ? reportConclusion(io, projection.lastReport) : undefined;
   const hasVerdict = concluded !== undefined && normalizeConcludedVerdict(concluded.verdict) !== undefined;
   const header = `review-gate: adviser ${child.judgeId} — ${projection.lastState?.state ?? "unknown"}` +
     (alive === undefined ? "（pane 情况不明）" : alive ? "（pane 存活）" : "（pane 已消失）");
@@ -463,7 +462,7 @@ async function doWait(
     );
     // The conclusion is DATA on the report — no text is parsed to find it.
     const concluded: ReportConclusion = projection.lastReport
-      ? reportConclusion(projection.lastReport)
+      ? reportConclusion(io, projection.lastReport)
       : { verdict: "", findings: [] };
     const recorded = await deps.recordVerdict(concluded, addressed.root, child.role);
     const next = deps.hierarchy();

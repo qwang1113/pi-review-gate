@@ -141,7 +141,7 @@ export interface GoalPrereviewRecord {
   verdict: "PASS" | "FAIL";
   /** ISO time the extension recorded this audit. */
   at: string;
-  /** Findings the auditor reported (null when the fence was unparseable). */
+  /** How many findings the auditor concluded with (an older record may carry null). */
   findingsTotal?: number | null;
   /**
    * The findings VERBATIM (severity + issue), when the fence parsed. Persisted

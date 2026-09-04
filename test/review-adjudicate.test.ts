@@ -83,17 +83,22 @@ test("a finding with neither file nor issue produces no fingerprint (but is stil
   assert.deepEqual(out.findingFingerprints, ["a.ts#0#real"]);
 });
 
-test("fingerprints are deduplicated and keep their order", () => {
+test("fingerprints are ONE PER FINDING, in order — never collapsed", () => {
+  // The old fence parser deduplicated only across two fences of one output.
+  // A round is one structured call now, so this is the within-one-fence case,
+  // where it kept one entry per finding. Collapsing them here would be a new
+  // behaviour that `isPlateaued` can see: it compares consecutive rounds'
+  // fingerprint sets AND their sizes.
   const out = adjudicateReviewConclusion({
     verdict: "BLOCKED",
     findings: [
       { severity: "P1", file: "a.ts", line: 1, issue: "boom" },
       { severity: "P1", file: "b.ts", line: 1, issue: "other" },
-      { severity: "P2", file: "a.ts", line: 3, issue: "boom" }, // same coarse key
+      { severity: "P2", file: "a.ts", line: 3, issue: "boom" }, // same COARSE key, different finding
     ],
   });
-  assert.deepEqual(out.findingFingerprints, ["a.ts#0#boom", "b.ts#0#other"]);
-  assert.equal(out.findingsTotal, 3, "deduplication is for the KEY only, never for the count");
+  assert.deepEqual(out.findingFingerprints, ["a.ts#0#boom", "b.ts#0#other", "a.ts#0#boom"]);
+  assert.equal(out.findingsTotal, 3);
 });
 
 // ---- docSync and cwd travel verbatim, whitelist-guarded ----

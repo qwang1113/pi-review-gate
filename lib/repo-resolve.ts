@@ -270,12 +270,12 @@ export function resolveShipRepos(command: string, cwd: string): ShipRepoResoluti
 }
 
 /**
- * Target repo for `record_review` / `run_precommit` (P-multi deadlock fix).
+ * Target repo for the verdict recorder / `run_precommit` (P-multi deadlock fix).
  *
- * ROOT CAUSE this exists for: those two tools used to write to
+ * ROOT CAUSE this exists for: those two steps used to write to
  * `activeRepoRoot`, which ONLY an edit-tool call could move. A session that
  * edited repo B last could never again record a verdict for repo A — every
- * `record_review` landed on B while the ship gate checked A, so the agent
+ * recorded verdict landed on B while the ship gate checked A, so the agent
  * looped review→precommit→commit forever and (per the real session log)
  * misdiagnosed it as "another Pi process reset my sidecar".
  *

@@ -88,7 +88,7 @@ export interface GateState {
   /**
    * The last review_checkpoint commit (sha + wall-clock time). The review
    * unit of the new execution model: prepare_review computes baseline..HEAD
-   * against this, and record_review binds a READY to the reviewed commit's
+   * against this, and the verdict recorder binds a READY to the reviewed commit's
    * tree. Written only by review_checkpoint; absent before the first one.
    */
   checkpoint?: {
@@ -343,8 +343,8 @@ export interface GateState {
   loopGoal?: LoopGoalConfirmation;
   /**
    * L8b: the goal-auditor PRE-REVIEW of the current draft (hash + verdict +
-   * time, written only by record_goal_prereview after the EXTENSION parsed the
-   * auditor's JSON fence — never an agent-attested boolean).
+   * time, written only by the gate's own audit recorder from the auditor's
+   * structured conclusion — never an agent-attested boolean).
    *
    * Absent ⇒ the draft was never audited: propose_loop_goal refuses to show
    * the approval dialog. Like {@link loopGoal} it stays out of
@@ -354,8 +354,8 @@ export interface GateState {
   goalPrereview?: GoalPrereviewRecord;
   /**
    * The PLAN pre-audit — `goalPrereview`'s twin for the orchestration layer
-   * (round-4 §7), written only by the gate after it parsed the auditor's JSON
-   * fence inside `orchestrator_plan`'s submit.
+   * (round-4 §7), written only by the gate after it read the auditor's
+   * structured conclusion inside `orchestrator_plan`'s submit.
    *
    * Absent ⇒ this plan was never audited, and `submit` shows no dialog. It
    * binds to the plan's CANONICAL text (tasks, boundaries, dependencies,

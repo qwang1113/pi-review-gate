@@ -52,7 +52,7 @@ import { computeFingerprint } from "./fingerprint.ts";
 import { TASK_TEXT_MARKER } from "./constants.ts";
 
 /**
- * The range under review, as `record_review` will later consume it.
+ * The range under review, as the gate's verdict recorder will later consume it.
  *
  * A structural subset of the extension's own `ReviewTarget` on purpose: this
  * module must not become the second place that decides what a target IS.
@@ -116,7 +116,7 @@ export interface ReviewPrepareToolDeps {
   previousRoundFindings(st: GateState): string[];
   /** The conclusion the previous round already reached, if any. */
   settledConclusion(st: GateState): SettledConclusion | undefined;
-  /** Record the range a verdict will bind to (consumed by `record_review`). */
+  /** Record the range a verdict will bind to (consumed by the verdict recorder). */
   registerReviewTarget(root: string, target: PreparedReviewTarget): void;
   /** The git reads, so this module can be tested without a repository. */
   git: ReviewPrepareGit;
@@ -342,7 +342,7 @@ async function doPrepareReview(
     // reviewer, who judges whether the round deserves to exist.
     st.lastPolishReason,
   );
-  // Register the review target: record_review verifies HEAD is still the
+  // Register the review target: the verdict recorder verifies HEAD is still the
   // reviewed commit and binds a READY to the reviewed tree.
   deps.registerReviewTarget(root, { baseline, head, tree });
   const lines = [
@@ -372,7 +372,8 @@ async function doPrepareReview(
     task,
     "",
     "The reviewer judges the COMMIT RANGE (immutable): you may keep fixing the worktree while it ",
-    "works. record_review re-checks that HEAD is still the reviewed commit; a new checkpoint ",
+    "works. The gate re-checks that HEAD is still the reviewed commit when it records your ",
+    "verdict; a new checkpoint ",
     "after this prepare ⇒ STALE ⇒ BLOCKED.",
   ];
   return {

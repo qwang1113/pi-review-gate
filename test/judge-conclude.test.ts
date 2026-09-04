@@ -201,10 +201,15 @@ function hierarchyFile(roundSeq: number): string {
   return JSON.stringify({ version: 1, judges: { [JUDGE]: { judgeId: JUDGE, openerId: OPENER, role: "reviewer", repoRoot: "/repo", createdAt: "", roundSeq } } });
 }
 
-function lastReport(ioFiles: Map<string, string>) {
-  const io: ChannelIO = {
+/** A read-only view of the fake channel filesystem (resolves spill files too). */
+function readerIO(ioFiles: Map<string, string>): ChannelIO {
+  return {
     ensureDir() {}, appendLine() {}, readText: (p) => ioFiles.get(p), writeText() {}, now: () => NOW,
   };
+}
+
+function lastReport(ioFiles: Map<string, string>) {
+  const io = readerIO(ioFiles);
   const target = judgeChannelTarget(OPENER, JUDGE, HOME);
   return projectChannel(readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records).lastReport;
 }
@@ -237,11 +242,61 @@ test("tool: one call concludes the round, findings land on the record VERBATIM",
   assert.equal(last?.findingsCount, 1, "the count is gate-counted from the stream, not the params");
   // THE criterion: what the opener reads is what the judge concluded, field
   // for field — no serialization, no parsing, nothing lost or added.
-  const concluded = reportConclusion(last!);
+  const concluded = reportConclusion(readerIO(ioFiles), last!);
   assert.deepEqual(concluded.findings, FINDINGS);
   assert.equal(concluded.cwd, "/repo");
   assert.equal(concluded.docSync, "UPDATED");
 });
+
+test("tool: a big findings array SPILLS instead of writing an unatomic channel line", async () => {
+  // The channel's whole record format exists to keep one append below
+  // PIPE_BUF (4096 bytes), because a longer line can interleave with a
+  // concurrent writer and tear. Findings are unbounded BY DESIGN (no cap, no
+  // truncation), so they must spill exactly like an oversized prose summary —
+  // a reviewer measured 12 ordinary findings at 4342 bytes on the version
+  // that only spilled `summary`.
+  const { exec, ioFiles } = setup({ hierarchy: hierarchyFile(1) });
+  const many = Array.from({ length: 20 }, (_, i) => ({
+    severity: "P2",
+    file: `src/module-${i}.ts`,
+    line: i * 7,
+    issue: `第 ${i} 条发现：这里的判断在边界上会读到未定义的值，需要显式处理。`,
+    evidence: `npm test -- module-${i}`,
+  }));
+  const r = await exec({ verdict: "BLOCKED", findings: many, cwd: "/repo" });
+  assert.equal(r.isError, undefined);
+
+  // The LINE is what has to stay small — that is the invariant, not the record.
+  const target = judgeChannelTarget(OPENER, JUDGE, HOME);
+  const line = ioFiles.get(channelPathFor(target.orchestrationId, target.childId, target.home))!;
+  assert.ok(Buffer.byteLength(line, "utf8") < 4096,
+    `the appended line must stay under PIPE_BUF, got ${Buffer.byteLength(line, "utf8")} bytes`);
+
+  const last = lastReport(ioFiles)! as { findings?: unknown; findingsRef?: { path: string } };
+  assert.equal(last.findings, undefined, "the array moved out of the record");
+  assert.ok(last.findingsRef?.path, "…into a side file the record points at");
+  // And it comes back VERBATIM: the spill must be invisible to the opener.
+  assert.deepEqual(reportConclusion(readerIO(ioFiles), last as never).findings, many);
+});
+
+test("a report whose spilled findings cannot be read records NO findings, not stale ones", () => {
+  // Fail-closed: an unreadable side file must not resurrect another round's
+  // findings, and must not throw — the verdict still has to travel so the
+  // recorder can apply its own rules to it.
+  const orphan = {
+    reportId: "rep-x", kind: "report", from: "child", at: "", round: 1,
+    verdict: "BLOCKED", findingsRef: { path: "/gone.json", chars: 99 },
+  } as never;
+  const conclusion = reportConclusion(readerIO(new Map()), orphan);
+  assert.equal(conclusion.verdict, "BLOCKED");
+  assert.deepEqual(conclusion.findings, []);
+  // A corrupt spill is the same case, not a crash.
+  const corrupt = reportConclusion(readerIO(new Map([["/half.json", "[{\"severity\":"]])), {
+    ...(orphan as object), findingsRef: { path: "/half.json", chars: 12 },
+  } as never);
+  assert.deepEqual(corrupt.findings, []);
+});
+
 
 test("tool: a reviewer's report carries NO prose — a judge's text cannot reach the opener", async () => {
   const { exec, ioFiles } = setup({ hierarchy: hierarchyFile(1) });

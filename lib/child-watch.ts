@@ -3,7 +3,7 @@
  * good manners.
  *
  * THE MEASURED FAILURE (round-18, reproduced twice in one session). A judge
- * child finished its audit, printed the verdict fence — and never ran
+ * child finished its audit, published its verdict — and never ran
  * `tmux wait-for -S <doneChannel>`. The main session was blocked on that signal,
  * so it waited on a child that had nothing left to do. The same hole swallows a
  * child that dies at startup, crashes mid-run, or loses its provider: no signal

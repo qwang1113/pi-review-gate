@@ -4,7 +4,7 @@
  * Every review round is a single reviewer over the WHOLE change, judging an
  * IMMUTABLE COMMIT RANGE (`baseline..HEAD`, registered by the extension's
  * `prepare_review`), and its verdict is the only one the gate records
- * (`record_review` parses every fence; worst verdict wins if multiple appear).
+ * (the gate's own recorder reads its structured conclusion off the round's report).
  *
  * NO ENGINE HERE. The reviewer runs in its own tmux pane (interactive pi, gate in judge mode)
  * (dispatched by `judge_submit`); the subagent dispatch surface was retired
@@ -140,7 +140,8 @@ import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 /**
  * Shape of a single reviewer's structured verdict. Handed to the spawned
  * reviewer as its `outputSchema` (see REVIEW_VERDICT_SCHEMA below); the
- * recorded verdict itself is parsed by the gate's own all-fence parser.
+ * recorded verdict is the same shape, taken verbatim off the round's channel
+ * report and adjudicated by lib/review-adjudicate.ts.
  */
 export interface ReviewVerdict {
   gate: "READY" | "BLOCKED" | "NEEDS_HUMAN";
@@ -148,7 +149,7 @@ export interface ReviewVerdict {
    * The directory the reviewer ACTUALLY ran in, from its own `pwd`.
    *
    * What it is, stated without embellishment (round-11 P1): a self-reported
-   * consistency check. `record_review` compares this string with the repo the
+   * consistency check. The gate's verdict recorder compares this string with the repo the
    * round was prepared for and downgrades a READY that does not match. So it
    * rejects a MISMATCHING report — a review run against the wrong repo — and
    * nothing else.
@@ -342,7 +343,7 @@ export function buildReviewPrompt(
     // and only a measured one makes the check below meaningful.
     //
     // BOTH branches make the same promise, because since round-9 the gate
-    // really does compare it: `record_review` checks the reported cwd against
+    // really does compare it: the verdict recorder checks the reported cwd against
     // the repo THIS ROUND WAS PREPARED FOR and downgrades a READY that reports
     // something else. (That is all it does — see the `cwd` field's doc
     // comment.) Telling the reviewer otherwise on one branch would be the same

@@ -11,10 +11,11 @@
  *
  * WHAT WRITES THE REPORT. The opener records verdicts (STALE checks, tree
  * binding — opener-owned), but only the judge side sees its own finish. It ends the
- * round by calling judge_conclude (lib/judge-conclude.ts), which synthesises the
- * canonical fence and appends the `report`; the opener learns it through its own
- * `wait` receipt. The fence rides as the (possibly spilled) summary, so the opener
- * feeds the EXACT bytes the recorder parses — no prose round-trip, no truncation.
+ * round by calling judge_conclude (lib/judge-conclude.ts), which writes its
+ * STRUCTURED fields (verdict / findings / cwd / docSync) straight into the
+ * `report` record; the opener learns it through its own `wait` receipt and
+ * consumes those fields as data — no serialization, no parsing, no truncation
+ * (an oversized findings array spills to a side file, it is never cut).
  * Pure-ish: env parsing and channel binding are pure; IO (stream count,
  * channel) arrives injected at the call sites.
  */

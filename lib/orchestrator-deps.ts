@@ -210,7 +210,7 @@ export interface OrchestratorDeps {
    *
    * Injected rather than implemented here because the whole chain belongs to
    * the extension: spawning the `goal-auditor` judge process, waiting for it,
-   * parsing its fence, binding the verdict to the plan's canonical hash. The
+   * reading its structured conclusion, binding the verdict to the plan's canonical hash. The
    * tool only needs the answer — and the answer is deliberately narrow: `ok`
    * means "the dialog may open", anything else is text to hand back.
    *

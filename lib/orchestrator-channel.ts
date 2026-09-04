@@ -234,6 +234,16 @@ export interface ChannelInstructAckRecord extends ChannelRecordBase {
 }
 
 
+/** One finding on a report, exactly as the judge concluded it. */
+export interface ReportFinding {
+  severity: string;
+  file?: string;
+  line?: number;
+  issue: string;
+  evidence?: string;
+}
+
+
 /**
  * Judge → opener: this round is over, here is the conclusion.
  *
@@ -263,15 +273,14 @@ export interface ChannelReportRecord extends ChannelRecordBase {
   findingsCount?: number;
   /**
    * The round's findings, exactly as the judge concluded them. The opener
-   * consumes these directly — there is no text to parse.
+   * consumes these directly — there is no text to parse. Spilled to
+   * `findingsRef` when the line would otherwise exceed the inline budget: a
+   * findings array is unbounded by design (no cap, no truncation), and an
+   * over-long line is the one failure this whole record format exists to
+   * prevent.
    */
-  findings?: Array<{
-    severity: string;
-    file?: string;
-    line?: number;
-    issue: string;
-    evidence?: string;
-  }>;
+  findings?: ReportFinding[];
+  findingsRef?: ChannelPayloadRef;
   /** The judge's own `pwd`, verbatim (the opener checks it against the repo). */
   cwd?: string;
   /** Code↔doc attestation, when the round covered code changes. */
@@ -428,11 +437,38 @@ function spillIfLarge(io: ChannelIO, target: ChannelTarget, record: ChannelRecor
     const { text, ...rest } = record;
     return { ...rest, textRef: { path, chars: text.length } };
   }
-  if (record.kind === "report" && record.summary !== undefined) {
+  if (record.kind === "report") {
+    // A report carries TWO bulky things and either alone can blow the budget:
+    // an adviser's prose (`summary`) and — since the conclusion travels
+    // structured — the `findings` array. Spill both, biggest first, and stop
+    // as soon as the line fits: a round with one huge finding must not also
+    // lose its prose to a side file, and a round with twenty ordinary
+    // findings must not stay inline just because it has no prose.
+    let out: ChannelRecord = record;
     const path = payloadPathFor(target.orchestrationId, target.childId, record.reportId, target.home);
-    io.writeText(path, record.summary);
-    const { summary, ...rest } = record;
-    return { ...rest, summaryRef: { path, chars: summary.length } };
+    const findingsChars = record.findings === undefined ? 0 : JSON.stringify(record.findings).length;
+    const summaryChars = record.summary === undefined ? 0 : record.summary.length;
+    const spillFindings = () => {
+      const r = out as ChannelReportRecord;
+      if (r.findings === undefined) return;
+      const text = JSON.stringify(r.findings);
+      io.writeText(`${path}.findings`, text);
+      const { findings, ...rest } = r;
+      out = { ...rest, findingsRef: { path: `${path}.findings`, chars: text.length } };
+    };
+    const spillSummary = () => {
+      const r = out as ChannelReportRecord;
+      if (r.summary === undefined) return;
+      io.writeText(path, r.summary);
+      const { summary, ...rest } = r;
+      out = { ...rest, summaryRef: { path, chars: summary.length } };
+    };
+    const [first, second] = findingsChars >= summaryChars
+      ? [spillFindings, spillSummary]
+      : [spillSummary, spillFindings];
+    first();
+    if (JSON.stringify(out).length > MAX_INLINE_RECORD_CHARS) second();
+    return out;
   }
   // Nothing bulky to move (a huge dialog title, say). Truncation would lose
   // the very content the orchestrator needs, and an over-long line only risks
@@ -461,15 +497,6 @@ export function reportText(io: ChannelIO, record: ChannelReportRecord): string |
   return record.summary ?? resolvePayload(io, record.summaryRef);
 }
 
-/** One finding on a report, exactly as the judge concluded it. */
-export interface ReportFinding {
-  severity: string;
-  file?: string;
-  line?: number;
-  issue: string;
-  evidence?: string;
-}
-
 /** What a judge concluded, as DATA — the opener never parses a report's text. */
 export interface ReportConclusion {
   verdict: string;
@@ -479,15 +506,23 @@ export interface ReportConclusion {
 }
 
 /**
- * Read one report's structured conclusion.
+ * Read one report's structured conclusion, resolving a spilled findings array.
  *
  * The only normalization is `findings`: a report written before the field
- * existed (or one whose findings are not an array) reads as no findings rather
- * than throwing — the verdict still travels, and the recorder fails closed on
- * an unrecognisable one.
+ * existed, one whose findings are not an array, or one whose spill file is
+ * unreadable all read as NO findings rather than throwing — the verdict still
+ * travels, and the recorder fails closed on an unrecognisable one. A spill
+ * that cannot be read is the same case: the round is recorded with the
+ * verdict it reported and no findings, never with a stale set from elsewhere.
  */
-export function reportConclusion(record: ChannelReportRecord): ReportConclusion {
-  const raw = record.findings;
+export function reportConclusion(io: ChannelIO, record: ChannelReportRecord): ReportConclusion {
+  let raw: unknown = record.findings;
+  if (raw === undefined && record.findingsRef) {
+    const text = resolvePayload(io, record.findingsRef);
+    if (text !== undefined) {
+      try { raw = JSON.parse(text); } catch { raw = undefined; }
+    }
+  }
   const findings = Array.isArray(raw) ? raw.filter((f): f is ReportFinding => !!f && typeof f === "object") : [];
   return {
     verdict: record.verdict,

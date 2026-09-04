@@ -14,10 +14,10 @@
  * `GATE_EXCLUDE_PATHSPECS` keeps out of the worktree fingerprint, so writing
  * it cannot invalidate the binding of the very run it describes.
  *
- * REVIEW DURATIONS ARE APPROXIMATE, BY CONSTRUCTION. The reviewer is a
- * subagent the agent spawns; the extension only sees the `record_review` call
- * that follows. What is recorded is therefore the wall clock between the
- * previous gate event and that call — an upper bound that includes the
+ * REVIEW DURATIONS ARE APPROXIMATE, BY CONSTRUCTION. The reviewer is its own
+ * pi process in a pane; the extension only sees the round's channel report
+ * land. What is recorded is therefore the wall clock between the
+ * previous gate event and that moment — an upper bound that includes the
  * agent's own thinking. It is labelled `approximate: true` so a reader never
  * mistakes it for the reviewer's own runtime.
  */

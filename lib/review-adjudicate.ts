@@ -108,11 +108,20 @@ export function adjudicateReviewConclusion(input: StructuredConclusion): Adjudic
   // Rule 1 — a READY that ships with an open P0/P1 contradicts itself.
   const hasBlocking = findings.some((f) => isBlockingSeverity(f.severity));
   const verdict = input.verdict === "READY" && hasBlocking ? "BLOCKED" : input.verdict;
-  // Rule 3 — deduplicated, insertion-ordered fingerprints.
+  // Rule 3 — one fingerprint per finding, in order, and NOT deduplicated.
+  //
+  // The old fence parser deduplicated only when it MERGED two fences of one
+  // output (the same finding printed twice by a reviewer that repeated its
+  // verdict); within a single fence it kept one entry per finding. A round is
+  // one structured call now, so it is exactly that within-one-fence case —
+  // deduplicating here would be a NEW behaviour, and one that reaches a real
+  // decision: `isPlateaued` (lib/gate-state.ts) compares consecutive rounds'
+  // fingerprint sets and their sizes, so silently collapsing two same-bucket
+  // findings into one can flip a plateau verdict.
   const fingerprints: string[] = [];
   for (const f of findings) {
     const fp = findingFingerprint(f);
-    if (fp !== undefined && !fingerprints.includes(fp)) fingerprints.push(fp);
+    if (fp !== undefined) fingerprints.push(fp);
   }
   const docSyncRaw = typeof input.docSync === "string" ? input.docSync.trim().toUpperCase() : "";
   const docSync = DOC_SYNC_ATTESTATIONS.has(docSyncRaw) ? (docSyncRaw as DocSyncAttestation) : undefined;
