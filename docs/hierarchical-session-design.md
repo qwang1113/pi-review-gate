@@ -8,14 +8,14 @@
 
 ```
 项目经理 ── orchestrator_spawn ──> 子会话 ── judge_spawn ──> goal review pane
-                                    │  ├──────── judge_spawn ──> checkpoint review pane
+                                    │  ├──────── judge_submit（内部 spawn）──> checkpoint review pane
                                     │  └────────（向 PM 上报：report 记录）
                                     │
                                     └──（PM 自开） judge_spawn ──> plan review pane
 ```
 
 * 项目经理能开的：子会话（`orchestrator_spawn`）、plan review（`judge_spawn`，plan 是 PM 自己的产出，自开不算越级）。
-* 子会话能开的：自己名下的各类 review（goal / checkpoint），一个 review 一个独立 pane（用户选 1A）。
+* 子会话名下的 review 分两路：goal review 用 `judge_spawn` 自开；checkpoint review 用 `judge_submit` 自提（precommit → checkpoint → prepare → 内部 spawn 全链）。一个 review 一个独立 pane（用户选 1A）。
 * 严禁跨级：项目经理**不能**直接开子会话名下的 review，不能 `wait` / `answer` / `close` 别人的 review，只能读子会话上报的结论；子会话之间不能互相操作对方的 review。
 
 ## 二、谁开谁负责，上报逐级走
@@ -41,7 +41,7 @@ opener 能从门禁拿到的关于自己 review 的信息，只有三件，不�
 2. findings 流计数（读 `.pi/review-stream/<round>.jsonl` 行数，不推内容）；
 3. 结束 verdict（`record_review` 落盘后的结论正文）。
 
-实时 stdout **不推**。排查路径保留：pane 侧门禁同样把输出 tee 到本轮 `runDir/stdout.log`（与今天后台进程一致），要看自己 `tail -f`，只是不再经它做任何判定。
+实时 stdout **不推**。排查路径：人直接 attach 进 pane 看；opener 侧按需经 `tmux pipe-pane` 抓屏（带转义序列、仅排查用，不做任何判定）。今天后台进程那种干净 `stdout.log` tee 在 pane 模型下不存在——pane 内扩展无法 tee 自己的 TUI，不虚构它。
 
 ## 五、工具清单
 
