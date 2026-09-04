@@ -41,18 +41,18 @@ opener 能从门禁拿到的关于自己 review 的信息，只有三件，不�
 2. findings 流计数（读 `.pi/review-stream/<round>.jsonl` 行数，不推内容）；
 3. 结束 verdict（`record_review` 落盘后的结论正文）。
 
-实时 stdout **不推**（要看自己 `tail -f <runDir>/stdout.log`，排查路径保留）。
+实时 stdout **不推**。排查路径保留：pane 侧门禁同样把输出 tee 到本轮 `runDir/stdout.log`（与今天后台进程一致），要看自己 `tail -f`，只是不再经它做任何判定。
 
 ## 五、工具清单
 
 | 工具 | 动作 | 说明 |
 |---|---|---|
-| `judge_spawn` | 新增 | 任意 loop 会话可调；登记 opener；开独立 pane；返回 judge id。 only 入口，无第二条路开 review |
+| `judge_spawn` | 新增（限 goal / plan） | 只开无需 checkpoint 前置链的 review（goal / plan）。checkpoint review **不能**经此直开——precommit → checkpoint → prepare 链（AGENTS.md 现行保证）仍只能由 `judge_submit` 内部持有。是 goal / plan review 的唯一 agent 可见入口 |
 | `judge_wait` | 复用并泛化 | 今天的 `judge_wait` 只懂进程三判据；改为同一骨架（`poll-wait.ts`）换判据：读通道回执三件套。未结束返回进度（状态 + findings 计数） |
 | `judge_answer` | 新增 | 对应 `orchestrator_answer`：opener 代答自己 review 的框（原文/序号/唯一子串，歧义拒绝）。非 opener 调用直接拒绝 |
 | `judge_close` | 复用 | 语义不变（起不来/卡死的回收），加一条 opener 校验 |
-| `judge_submit` | 重实现为编排糖 | 对外语义不变（一次调用跑 precommit → checkpoint → prepare → spawn → wait → record），内部改走 `judge_spawn` + `judge_wait` 新链。按哲学三：旧进程直启路径删除，不并行两套实现 |
-| `judge_read` | 删除 | 三件套 + `report` 记录覆盖其用途；留着就是哲学二说的“用 A 也行用 B 也可以” |
+| `judge_submit` | 重实现为编排糖 | 对外语义不变（一次调用跑 precommit → checkpoint → prepare → spawn → wait → record）。checkpoint review 的 spawn 走门禁内部实现（agent 不可见、无第二条手调路径），goal / plan review 走 `judge_spawn` 新链。按哲学三：旧进程直启路径删除，不并行两套实现 |
+| `judge_read` | 保留但限范围 | reviewer / goal-auditor 走 record + `report`，不再需要它读；但 adviser 从不经过 `record_review`，其结论仍靠它读。限为 adviser 专用 reader，不再是通用第二入口 |
 
 跨级调用的拒绝是 fail-closed：`judge_wait` / `judge_answer` / `judge_close` 先验 `caller ∈ {opener}`，不是即拒，无对话框。
 
@@ -62,7 +62,7 @@ opener 能从门禁拿到的关于自己 review 的信息，只有三件，不�
 |---|---|
 | `lib/judge-pane.ts`（新建） | pane 版 judge 启动/回收。argv 构造复用 `judge-process.ts`，开/关 pane 复用 `orchestrator-tmux.ts`，装饰复用 `orchestrator-pane-decor.ts` |
 | `lib/hierarchy.ts`（新建） | opener 注册表 + `caller is opener` 校验（纯函数，IO 经 seam，便于单测）。这是“门禁维持秩序”的唯一实现点 |
-| `lib/orchestrator-channel.ts`（改） | 通道 key 从 `<orch-id>/<child-id>` 泛化为 `<opener-id>/<judge-id>`（opener 可以是 session id）；新增 `report` 记录种（verdict 摘要 + findings 计数 + payload spill 引用） |
+| `lib/orchestrator-channel.ts`（改） | 通道 key 从 `<orch-id>/<child-id>` 泛化为 `<opener-id>/<judge-id>`（opener 可以是 session id）；新增 `report` 记录种（verdict 摘要 + findings 计数 + payload spill 引用）。不另起 judge-channel 模块：记录/spill/游标/IO seam 是同一套原语，另起即重复实现，分 planes 只在 key 命名上区分 |
 | `lib/judge-lifecycle.ts`（改） | dispatch 改走 pane（调 `judge-pane.ts`）；verdict 记录（`record_review`、STALE 判定、tree 绑定）原样保留 |
 | `lib/orchestrator-child-state.ts`（复用，不改） | 七态判定给 review 通道直接用 |
 | `extensions/review-gate.ts`（只改接线） | 注册新工具 + 注入 deps（opener 身份、registry）。判定逻辑一律不在扩展里 |
@@ -71,4 +71,4 @@ opener 能从门禁拿到的关于自己 review 的信息，只有三件，不�
 ## 七、本轮非目标（后续轮按此文档执行，不在本文展开）
 
 * 不实现任何新工具与通道改动；`judge_submit` / `orchestrator_*` 现有行为零改动；扩展接线与 pane 管理零改动。
-* 迁移顺序建议（仅记录）：先 `hierarchy.ts` + 单测 → 通道泛化 + `report` → `judge-pane.ts` → `judge_spawn/wait/answer` 接线 → `judge_submit` 切新链并删旧路径 → `judge_read` 删除。每步各一轮送审。
+* 迁移顺序建议（仅记录）：先 `hierarchy.ts` + 单测 → 通道泛化 + `report` → `judge-pane.ts` → `judge_spawn/wait/answer` 接线 → `judge_submit` 切新链并删旧路径 → `judge_read` 收窄为 adviser 专用。每步各一轮送审。
