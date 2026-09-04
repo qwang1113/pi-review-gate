@@ -18,6 +18,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 import {
   appendRecord,
@@ -28,8 +29,8 @@ import {
   reportText,
   type ChannelIO,
 } from "./orchestrator-channel.ts";
-import { buildVerdictReport, verdictReportKey } from "./judge-side.ts";
-
+import { buildVerdictReport } from "./judge-side.ts";
+import { extractNewestFenceText } from "./verdict-parse.ts";
 /** Tail window: a fence older than this is not "this round just ended". */
 const TRANSCRIPT_TAIL_CHARS = 32768;
 
@@ -101,10 +102,17 @@ function countFindings(streamPath: string | undefined): number | undefined {
 }
 
 /**
- * Scan → build → dedupe → append. Idempotent: a fence already collected
- * (same key in `alreadyReported`, or the channel's lastReport already
- * carrying it) appends nothing. Never throws.
+ * Scan → build → dedupe → append. Idempotent: the dedup key is the verdict
+ * plus the NEWEST fence's bytes (stable while the round deliberates) — never
+ * the tail length, which shifts as the transcript grows and would re-report
+ * the previous round's fence on a reused pane. Never throws.
  */
+export function fenceReportKey(verdict: string, findingsCount: number | undefined, fenceText: string): string {
+  return createHash("sha256")
+    .update(`${verdict}#${findingsCount ?? "-"}#${fenceText}`, "utf8")
+    .digest("hex");
+}
+
 export function collectVerdictReport(
   deps: VerdictCollectDeps,
   input: VerdictCollectInput,
@@ -113,24 +121,27 @@ export function collectVerdictReport(
   try {
     const tail = readNewestTranscriptTail(input.sessionDir);
     if (!tail) return { collected: false };
+    const fenceText = extractNewestFenceText(tail);
+    if (!fenceText) return { collected: false };
+    const findingsCount = countFindings(input.streamPath);
     const built = buildVerdictReport({
       transcriptTail: tail,
-      findingsCount: countFindings(input.streamPath),
+      fenceText,
+      findingsCount,
       now: input.now,
     });
     if (!built) return { collected: false };
-    const key = verdictReportKey(built);
+    const key = fenceReportKey(built.verdict, findingsCount, fenceText);
     if (alreadyReported.has(key)) return { collected: false };
     const io = deps.channelIO();
     const target = judgeChannelTarget(input.openerId, input.judgeId, deps.channelHome());
     const read = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home));
     const last = projectChannel(read.records).lastReport;
     if (last) {
-      const lastKey = verdictReportKey({
-        verdict: last.verdict,
-        findingsCount: last.findingsCount,
-        summary: reportText(io, last) ?? "",
-      });
+      const lastFence = extractNewestFenceText(reportText(io, last) ?? "");
+      const lastKey = lastFence === undefined
+        ? undefined
+        : fenceReportKey(last.verdict, last.findingsCount, lastFence);
       if (lastKey === key) return { collected: false };
     }
     appendRecord(io, target, built);

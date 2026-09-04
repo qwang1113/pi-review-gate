@@ -77,6 +77,10 @@ export interface VerdictReportInput {
   findingsCount?: number;
   /** Clock for the record stamp. */
   now: number;
+  /** Newest fence bytes; when given, the verdict is parsed from it (a reused
+   *  pane's tail holds every previous round's fence) while the summary still
+   *  carries the whole tail as evidence. Omit to parse the tail itself. */
+  fenceText?: string | undefined;
 }
 
 /**
@@ -92,7 +96,7 @@ export function buildVerdictReport(input: VerdictReportInput): {
   findingsCount?: number;
   summary: string;
 } | undefined {
-  const parsed = parseReviewOutput(input.transcriptTail);
+  const parsed = parseReviewOutput(input.fenceText ?? input.transcriptTail);
   if (!parsed) return undefined;
   return {
     reportId: newChannelId("rep", input.now),

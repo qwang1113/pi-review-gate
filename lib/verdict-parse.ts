@@ -296,6 +296,22 @@ function parseJsonFence(body: string): FenceVerdict | undefined {
   };
 }
 
+
+/**
+ * Newest parseable fence body in the text, or undefined. A reused pane's
+ * transcript holds every previous round's fence; only the last one is the
+ * current round's conclusion, and only its bytes key the dedup (surrounding
+ * prose grows as the round deliberates, so a tail-length key would shift).
+ */
+export function extractNewestFenceText(text: string): string | undefined {
+  const fenceRe = /```(?:json)?\s*\n([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  let newest: string | undefined;
+  while ((m = fenceRe.exec(text)) !== null) {
+    if (parseJsonFence(m[1])) newest = m[0];
+  }
+  return newest;
+}
 /**
  * Parse reviewer output. Only JSON fence verdicts are accepted (not `## Overall:` sentinels).
  * P1 fix: READY with unresolved P0/P1 findings → downgraded to BLOCKED.

@@ -6,7 +6,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -43,6 +43,38 @@ function lastReportFor(io: ChannelIO, opener: string, judge: string) {
   const target = judgeChannelTarget(opener, judge, undefined);
   return projectChannel(readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records).lastReport;
 }
+
+test("reviewer repro: prose appended after a collected READY re-reports nothing", () => {
+  // Round N collected; the pane keeps deliberating into round N+1 without a
+  // new fence. The tail grows (key on tail length would shift: READY#-#107 →
+  // READY#-#162) but the newest fence bytes are unchanged ⇒ silence.
+  const io = memoryChannelIO(() => 1);
+  const dir = mkdtempSync(join(tmpdir(), "judge-report-"));
+  const file = join(dir, "s.jsonl");
+  const line = (t: string) => JSON.stringify({ text: t }) + "\n";
+  writeFileSync(file, line(`round N done\n${FENCE}`));
+  const input = { sessionDir: dir, openerId: "op1", judgeId: "jr", now: 1 };
+  assert.equal(collectVerdictReport(deps(io), input, new Set()).collected, true);
+  appendFileSync(file, line("round N+1 deliberating: re-reading the diff, no fence yet"));
+  assert.equal(collectVerdictReport(deps(io), input, new Set()).collected, false);
+});
+
+test("two sequential fences: only the newest is the round conclusion", () => {
+  const io = memoryChannelIO(() => 1);
+  const dir = mkdtempSync(join(tmpdir(), "judge-report-"));
+  const file = join(dir, "s.jsonl");
+  const line = (t: string) => JSON.stringify({ text: t }) + "\n";
+  const BLOCKED = '```json\n{"gate":"BLOCKED","findings":[{"severity":"P1","issue":"x"}]}\n```';
+  writeFileSync(file, line(`first pass\n${BLOCKED}`));
+  const input = { sessionDir: dir, openerId: "op1", judgeId: "js", now: 1 };
+  const r1 = collectVerdictReport(deps(io), input, new Set());
+  assert.equal(r1.collected, true);
+  assert.equal(r1.collected && r1.verdict, "BLOCKED");
+  appendFileSync(file, line(`second pass\n${FENCE}`));
+  const r2 = collectVerdictReport(deps(io), input, new Set());
+  assert.equal(r2.collected, true);
+  assert.equal(r2.collected && r2.verdict, "READY");
+});
 
 test("a fence in the authoritative dir becomes exactly one report", () => {
   const io = memoryChannelIO(() => 1);
