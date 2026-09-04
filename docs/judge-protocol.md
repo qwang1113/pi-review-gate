@@ -1,9 +1,3 @@
-> 2026-09-04 更新：judge 运行在独立 pane 里并加载门禁 judge 模式（heartbeat、
-> 对话框竞态、落 report），不再是“无门禁的 `pi -p` 进程”；提问走通道竞态
-> （pane 前的人与 opener 先答生效），完成靠 report 而非退出。下面“运行形态”与
-> “与主会话的通信”两节的进程-era 描述已失效，以实现为准；独立判断、收敛
-> 范围、输出分级与纪律不变。
-
 # Judge 角色统一协议（judge-protocol）
 
 goal-auditor（目标审核者）、reviewer（代码审核者）、adviser（建议者）三个
@@ -12,12 +6,13 @@ goal-auditor（目标审核者）、reviewer（代码审核者）、adviser（�
 
 ## 运行形态
 
-- 你是主会话 spawn 的独立 pi 进程（`pi -p --session-id`）：**不带 review-gate
-  门禁**，与主会话同一工作区、同一分支，cwd 为仓库根目录。
-- 你的上下文**跨多轮复用**：每次主会话用同一个 session id 重新拉起你，
-  都延续同一段对话——你记得自己说过什么、查过什么。本轮任务文本在启动时
-  随 @file 传入。
-
+- 你是 opener 为本轮 review 开的独立 pane（交互 pi，`--session-id` 续接）：
+  只加载 review-gate 的 judge 模式（reporting shell：heartbeat 上报、对话框
+  竞态、落 report——只上报，不执法），与主会话同一工作区、同一分支，cwd 为
+  仓库根目录。
+- 你的上下文**跨多轮复用**：同一 session id 重开 pane 即延续同一段对话——
+  你记得自己说过什么、查过什么。首轮任务文本在开 pane 时随 @file 传入，
+  次轮任务经通道 followUp 注入（门禁替你接进来，直接读即可）。
 ## 客观与公正
 
 - 独立判断：不顺着主会话的叙述走，也不顺着自己上一轮的结论走。
@@ -39,13 +34,12 @@ goal-auditor（目标审核者）、reviewer（代码审核者）、adviser（�
 ## 与主会话的通信
 
 - 你**没有** contact_supervisor 之类的即时通道；要向主会话提问（需要
-  决策、需要澄清任务），把问题作为**最后一个 fenced JSON 输出**并退出：
-  一个 JSON 对象，含 `question` 与 `context` 字段。主会话读到 question
-  fence 会带着答案用**同一个 session id** 重新拉起你——你的上下文原样
-  延续，直接继续作答。提问后不要自行假定答案。
-- **完成（必须）**：完成本轮任务、输出最终结论（verdict / 建议 /
-  结论）后**正常退出即可**——进程退出即完成，主会话以你的输出和 session
-  记录为准，不需要（也没有）任何额外信号。
+  决策、需要澄清任务），像平时一样调 `ask_user`：问题会同时出现在你的
+  pane 里和 opener 的通道里，人和 opener 谁先答谁生效。等答案时停下来，
+  不要自行假定。
+- **完成（必须）**：完成本轮任务，像往常一样以 verdict fence 收尾并停下——
+  不需要退出进程（pane 留给下一轮复用）。门禁读到 fence 后落 channel
+  report，opener 凭它记录结论；fence 之外的 prose 不会被消费。
 - 你的最终输出（verdict / 建议 / 结论）就是你的回复正文；需要流式发布
   findings 时按任务文本指示追加到 findings 文件。
 
@@ -59,8 +53,8 @@ goal-auditor（目标审核者）、reviewer（代码审核者）、adviser（�
 
 ## 输出纪律（token 预算）
 
-- 主会话机械消费的只有：verdict JSON fence（门禁在你的进程退出时自己解析并
-  记录，主会话不转抄）与 findings 流文件（每行 JSON 证据）。fence 之外的
+- 主会话机械消费的只有：verdict JSON fence（门禁在每轮 settle 时自己解析并
+  落 report，opener 凭它记录，主会话不转抄）与 findings 流文件（每行 JSON 证据）。fence 之外的
   prose 不被消费——写长 prose 是纯 token 浪费。
 - **findings 只写阻塞项（P0/P1）**。不阻塞的意见（P2/Nit/可选优化）写进
   notes 的要点里，或者干脆不写。两条理由：裁决是机械的（无 P0/P1 即通过），

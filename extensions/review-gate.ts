@@ -746,7 +746,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!hasChildren) return;
       try {
         pi.sendUserMessage(
-          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的 done channel、是否已结束（exit-code 文件出现，或记录的进程已不在）与静默上限；读取已有输出并继续，不要结束 turn。",
+          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的通道 report、有无 pane 死亡与静默上限；用 judge_wait 取结论并继续，不要结束 turn。",
           { deliverAs: "followUp" },
         );
       } catch { /* session was replaced or shut down */ }
@@ -2075,6 +2075,13 @@ export default function reviewGate(pi: ExtensionAPI) {
    * — the auditor's output alone cannot say what it audited.
    */
   const pendingGoalAudits = new Map<string, { draft: string; startedAt: string }>();
+  /**
+   * The plan a running plan-audit is judging, per repo — the goal map's twin.
+   * A plan verdict binds to its canonical hash; without this, a spawned plan
+   * review would run with nowhere to record to. Goal and plan share one
+   * judge id per repo, so at most ONE kind may be pending per root.
+   */
+  const pendingPlanAudits = new Map<string, { hash: string; planText: string; startedAt: string }>();
   /**
    * Review targets registered by prepare_review (commit mode): repo root →
    * the reviewed baseline..HEAD plus HEAD's tree. record_review consumes it:
@@ -4249,7 +4256,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // The killed round's audited draft dies with it: leaving it behind
       // would let a LATER report record a verdict against a draft that round
       // never judged.
-      if (existing.role === "goal-auditor") pendingGoalAudits.delete(root);
+      if (existing.role === "goal-auditor") { pendingGoalAudits.delete(root); pendingPlanAudits.delete(root); }
     }
     if (!ownPane) {
       return { ok: false, reused: continuesSession, sessionId, sessionDir, error: "当前会话不在 tmux 里，开不出 review pane——在 tmux 中重开本会话后重试；门禁不会退回旧的进程壳子。" };
@@ -4406,19 +4413,49 @@ export default function reviewGate(pi: ExtensionAPI) {
       const result = await callTool("record_review", { reviewer_output: fullText, repo: root }, lastUiCtx);
       return toolText(result);
     }
-    // A goal audit is recorded the same way, against the draft the gate
-    // dispatched — the record binds to that text's hash, so remembering it
-    // is the gate's job, not the agent's to re-paste.
-    const pending = pendingGoalAudits.get(root);
-    if (!pending || !lastUiCtx) return undefined;
-    pendingGoalAudits.delete(root);
-    const audit = await callTool("record_goal_prereview", {
-      goal: pending.draft,
-      auditor_output: fullText,
-      auditStartedAt: pending.startedAt,
-      repo: root,
-    }, lastUiCtx);
-    return toolText(audit);
+    // Audits are recorded against what the gate dispatched — the record binds
+    // to that text's hash, so remembering it is the gate's job, not the
+    // agent's to re-paste. Goal and plan share one judge id per repo, so at
+    // most one kind may be pending: both pending is an inconsistent state and
+    // records NEITHER (a plan verdict must never land on a goal draft).
+    const goalPending = pendingGoalAudits.get(root);
+    const planPending = pendingPlanAudits.get(root);
+    if (goalPending && planPending) {
+      return `同一 repo 下 goal 审计与 plan 审计同时挂着——门禁拒绝记录任何一个（防错绑）。先用 judge_close 关掉其中一个再重跑。`;
+    }
+    if (goalPending) {
+      if (!lastUiCtx) return undefined;
+      pendingGoalAudits.delete(root);
+      const audit = await callTool("record_goal_prereview", {
+        goal: goalPending.draft,
+        auditor_output: fullText,
+        auditStartedAt: goalPending.startedAt,
+        repo: root,
+      }, lastUiCtx);
+      return toolText(audit);
+    }
+    if (planPending) {
+      pendingPlanAudits.delete(root);
+      const parsed = parseReviewOutput(fullText);
+      if (!parsed) return `plan 审计没有产出可解析的裁决，什么都没有记录（fail-closed）——plan 没有被送审。`;
+      const findings = parseFenceFindings(fullText);
+      const adjudication = adjudicatePlanAudit(parsed.verdict, findings);
+      const st = root === primaryRepoRoot ? state : stateForRepo(root);
+      st.planAudit = {
+        hash: planPending.hash,
+        verdict: adjudication.verdict,
+        at: new Date().toISOString(),
+        findingsTotal: parsed.findingsTotal,
+        ...(findings.length ? { findings } : {}),
+        planText: planPending.planText,
+      };
+      try { persist(latestCtx); } catch { /* best effort */ }
+      if (adjudication.verdict === "PASS") {
+        return `plan 审计 PASS（hash ${planPending.hash.slice(0, 12)}）——可以送用户批准了。`;
+      }
+      return formatPlanAuditRefusal(st.planAudit);
+    }
+    return undefined;
   }
 
 
@@ -4701,7 +4738,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const text = await recordRoundOutput(fullText, root, role);
       return { ...(text === undefined ? {} : { text }), hasVerdict: parseReviewOutput(fullText) !== undefined };
     },
-    dropPendingAudit: (root) => { pendingGoalAudits.delete(root); },
+    dropPendingAudit: (root) => { pendingGoalAudits.delete(root); pendingPlanAudits.delete(root); },
     cancelWaitTimer: () => cancelChildWaitTimer(),
   });
   registerJudgeSpawnTools(pi, {
@@ -4761,6 +4798,29 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
+    },
+    pendingAuditKind: (root) => {
+      if (pendingGoalAudits.has(root)) return "goal";
+      if (pendingPlanAudits.has(root)) return "plan";
+      return undefined;
+    },
+    rememberGoalAudit: (root, draft) => {
+      pendingGoalAudits.set(root, { draft, startedAt: new Date().toISOString() });
+    },
+    rememberPlanAudit: (root) => {
+      const read = readPlanFile(root);
+      if (!read.plan) return { ok: false, error: `读不到 plan：${read.problems.join("；") || "plan 文件不存在"}` };
+      const plan = read.plan;
+      pendingPlanAudits.set(root, {
+        hash: planAuditHash(plan),
+        planText: formatPlanSummary(plan),
+        startedAt: new Date().toISOString(),
+      });
+      return { ok: true };
+    },
+    forgetAudit: (root) => {
+      pendingGoalAudits.delete(root);
+      pendingPlanAudits.delete(root);
     },
   });
 
@@ -5414,7 +5474,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           }
           try { reapReviewScratch(child.sessionId); } catch { /* best effort */ }
           judgeHierarchy = removeJudge(judgeHierarchy, child.sessionId);
-          if (child.role === "goal-auditor") pendingGoalAudits.delete(root);
+          if (child.role === "goal-auditor") { pendingGoalAudits.delete(root); pendingPlanAudits.delete(root); }
         }
         childSessions.clear();
         progress.step(`联关 ${ownedJudges.length} 个 review pane${closed.length ? `（已关 ${closed.join("、")}）` : ""}`);

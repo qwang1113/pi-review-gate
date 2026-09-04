@@ -41,6 +41,7 @@ import { resolveAnswer } from "./orchestrator-answer-tools.ts";
 import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
+  closeJudgePane,
   judgePaneAlive,
   openJudgePane,
   JUDGE_ID_ENV,
@@ -92,6 +93,13 @@ export interface JudgeSpawnToolDeps {
   /** Persist the round task next to the transcript dir; returns its path. */
   writeJudgeTaskFile(root: string, role: string, task: string):
     { ok: true; path: string } | { ok: false; error: string };
+  /** Which audit kind is pending for one repo (a goal draft, a plan hash, or none). */
+  pendingAuditKind(root: string): "goal" | "plan" | undefined;
+  /** Remember what this spawn dispatched, so its report is recordable. */
+  rememberGoalAudit(root: string, draft: string): void;
+  rememberPlanAudit(root: string): { ok: true } | { ok: false; error: string };
+  /** Forget both pendings (rollback, close, fresh-kill). */
+  forgetAudit(root: string): void;
 }
 
 function reply(text: string): ToolReply {
@@ -132,12 +140,35 @@ async function doSpawn(
   if (!repo.ok) return fail(`review-gate: 仓库解析失败 —— ${repo.error}`);
   const root = repo.root;
   // Goal and plan audits both run under the goal-auditor role (they judge a
-  // contract before acting, and that is one role, not two).
+  // contract before acting, and that is one role, not two) — so they share
+  // one judge id per repo, and the gate keeps them apart by pending KIND:
+  // a report is only ever recorded against the kind that is pending.
+  const pending = deps.pendingAuditKind(root);
+  if (pending !== undefined && pending !== kind) {
+    return fail(`review-gate: 已有 ${pending === "goal" ? "目标" : "计划"}审计挂着——等它结束（judge_wait）或关掉（judge_close）后再开${kind === "goal" ? "目标" : "计划"}审计。两种审计共用一个 judge，串行才不会错绑结论。`);
+  }
   const role = "goal-auditor";
+  const earlyJudgeId = judgeSessionIdFor(role, shortRepoHash(root));
+  // Spawn is birth: one pane per review object. A living pane takes its
+  // rounds through judge_submit, a dead one goes through judge_recover —
+  // spawning over either would strand a review or fork a transcript.
+  const incumbent = deps.hierarchy()[earlyJudgeId];
+  if (incumbent?.paneId) {
+    const ownPane = deps.ownPane();
+    const alive = ownPane ? judgePaneAlive(deps.tmux, ownPane, incumbent.paneId) : undefined;
+    if (alive === true) {
+      return fail(`review-gate: review ${earlyJudgeId} 的 pane（${incumbent.paneId}）还开着——新一轮走 judge_submit（pane 复用），不要重开。`);
+    }
+    if (alive === false) {
+      return fail(`review-gate: review ${earlyJudgeId} 的 pane 已消失——用 judge_recover 同 id 重开续 transcript，不要重开。`);
+    }
+    return fail("review-gate: tmux 读不出来，无法确认旧 pane 生死——信息缺失时不开新 pane。");
+  }
   let task: string;
   let streamPath: string | undefined;
+  let draft = "";
   if (kind === "goal") {
-    const draft = typeof params.draft === "string" ? params.draft.trim() : "";
+    draft = typeof params.draft === "string" ? params.draft.trim() : "";
     if (!draft) return fail("review-gate: kind=goal 需要 draft（待审的目标全文）——门禁组装审计任务，但草稿本身得由你给。");
     const built = await deps.buildGoalAuditTask(draft, root, ctx);
     if (!built.ok) return fail(`review-gate: 审计任务组装失败 —— ${built.error}`);
@@ -149,7 +180,7 @@ async function doSpawn(
     task = built.task;
     streamPath = built.streamPath;
   }
-  const judgeId = judgeSessionIdFor(role, shortRepoHash(root));
+  const judgeId = earlyJudgeId;
   const registered = registerJudge(deps.hierarchy(), {
     judgeId,
     openerId: caller,
@@ -160,7 +191,10 @@ async function doSpawn(
   });
   if (!registered.ok) return fail(`review-gate: ${registered.reason}`);
   deps.saveHierarchy(registered.table);
-  const rollback = () => deps.saveHierarchy(removeJudge(deps.hierarchy(), judgeId));
+  const rollback = () => {
+    deps.saveHierarchy(removeJudge(deps.hierarchy(), judgeId));
+    deps.forgetAudit(root);
+  };
 
   const taskFile = deps.writeJudgeTaskFile(root, role, task);
   if (!taskFile.ok) {
@@ -212,6 +246,18 @@ async function doSpawn(
     createdAt: new Date(deps.now()).toISOString(),
   });
   if (withPane.ok) deps.saveHierarchy(withPane.table);
+  // Register what was dispatched, or the report can never be recorded:
+  // a goal verdict binds to its draft, a plan verdict to its hash.
+  if (kind === "goal") {
+    deps.rememberGoalAudit(root, draft);
+  } else {
+    const remembered = deps.rememberPlanAudit(root);
+    if (!remembered.ok) {
+      try { closeJudgePane(deps.tmux, opened.paneId); } catch { /* best effort */ }
+      rollback();
+      return fail(`review-gate: plan 备案失败 —— ${remembered.error}`);
+    }
+  }
   return reply(
     `review-gate: ${kind === "goal" ? "目标" : "计划"} review 已开在独立 pane（${opened.paneId}，judge ${judgeId}）。` +
     `用 judge_wait 等结论（状态、findings 计数、verdict 由门禁推给你），不要自己去读 pane。` +

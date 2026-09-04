@@ -83,8 +83,8 @@ test("buildJudgeSystemPrompt = role body + shared protocol", () => {
     const prompt = buildJudgeSystemPrompt(repo, "adviser", join(dir, "home"));
     assert.ok(prompt.startsWith("ADVISER_BODY"));
     assert.ok(prompt.includes(JUDGE_COMMON_PROTOCOL));
-    assert.ok(prompt.includes("进程退出即完成"));
-    assert.ok(prompt.includes("session id 重新拉起"));
+    assert.ok(prompt.includes("不需要退出进程"));
+    assert.ok(prompt.includes("重开 pane 即延续"));
     // the round-1 F5 divergence rule is present in the embedded copy
     assert.ok(prompt.includes("做不到的验证明说"));
   } finally {

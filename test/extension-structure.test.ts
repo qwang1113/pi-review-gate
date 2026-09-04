@@ -3622,8 +3622,8 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   const recAt = SRC.indexOf("async function recordJudgeConclusion(");
   const rec = SRC.slice(recAt, recAt + 4000);
   assert.match(rec, /callTool\("record_goal_prereview", \{/);
-  assert.match(rec, /goal: pending\.draft/);
-  assert.match(rec, /auditStartedAt: pending\.startedAt/);
+  assert.match(rec, /goal: goalPending\.draft/);
+  assert.match(rec, /auditStartedAt: goalPending\.startedAt/);
   assert.match(rec, /pendingGoalAudits\.delete\(/, "a recorded audit does not linger");
 });
 

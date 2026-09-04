@@ -27,9 +27,14 @@ function setup(over: Partial<{
   tmux: (argv: readonly string[]) => JudgePaneRunResult;
   panes: string[];
   table: HierarchyTable;
-}> = {}): { deps: JudgeSpawnToolDeps; tools: Map<string, Exec>; seen: string[][]; store: { table: HierarchyTable } } {
+  pending?: "goal" | "plan";
+}> = {}): {
+  deps: JudgeSpawnToolDeps;
+  tools: Map<string, Exec>;
+  seen: string[][];
+  store: { table: HierarchyTable; pending?: "goal" | "plan"; draft?: string; planRemembered?: boolean; panes: string[] };
+} {
   const seen: string[][] = [];
-  const store = { table: over.table ?? emptyHierarchy() };
   const files = new Map<string, string>();
   const io: ChannelIO = {
     ensureDir() {},
@@ -38,7 +43,12 @@ function setup(over: Partial<{
     writeText(path, text) { files.set(path, text); },
     now: () => 1_700_000_000_000,
   };
-  const panes = over.panes ?? ["%1"];
+  const store: { table: HierarchyTable; pending?: "goal" | "plan"; draft?: string; planRemembered?: boolean; panes: string[] } = {
+    table: over.table ?? emptyHierarchy(),
+    ...(over.pending === undefined ? {} : { pending: over.pending }),
+    panes: over.panes ?? ["%1"],
+  };
+  const panes = store.panes;
   const tools = new Map<string, Exec>();
   const host: ToolHost = {
     registerTool(def) {
@@ -58,7 +68,7 @@ function setup(over: Partial<{
     tmux: over.tmux ?? ((argv) => {
       seen.push([...argv]);
       if (argv[0] === "split-window") return { ok: true, stdout: "%7\n", stderr: "" };
-      if (argv[0] === "list-panes") return { ok: true, stdout: `${panes.join("\n")}\n`, stderr: "" };
+      if (argv[0] === "list-panes") return { ok: true, stdout: `${store.panes.join("\n")}\n`, stderr: "" };
       return { ok: true, stdout: "", stderr: "" };
     }),
     ownPane: () => (over.ownPane === undefined ? "%1" : over.ownPane ?? undefined),
@@ -68,6 +78,10 @@ function setup(over: Partial<{
     buildGoalAuditTask: async (draft) => ({ ok: true as const, task: `AUDIT ${draft}`, streamPath: "/stream.jsonl" }),
     buildPlanAuditTask: async () => ({ ok: true as const, task: "AUDIT PLAN" }),
     writeJudgeTaskFile: () => ({ ok: true as const, path: "/sessions/task-1.md" }),
+    pendingAuditKind: () => store.pending,
+    rememberGoalAudit: (_root, draft) => { store.draft = draft; store.pending = "goal"; },
+    rememberPlanAudit: () => { store.planRemembered = true; store.pending = "plan"; return { ok: true as const }; },
+    forgetAudit: () => { delete store.pending; },
   };
   registerJudgeSpawnTools(host, deps);
   return { deps, tools, seen, store };
@@ -203,4 +217,51 @@ test("unknown caller identity fails every tool closed", async () => {
   assert.equal(answer.isError, true);
   const recover = await tools.get("judge_recover")!({ judgeId: "j" });
   assert.equal(recover.isError, true);
+});
+
+test("spawn registers the draft so the report is recordable", async () => {
+  const { tools, store } = setup();
+  const result = await tools.get("judge_spawn")!({ kind: "goal", draft: "目标草稿全文" });
+  assert.equal(result.isError, undefined, textOf(result));
+  assert.equal(store.draft, "目标草稿全文");
+  assert.equal(store.pending, "goal");
+});
+
+test("spawn plan remembers the plan hash for adjudication", async () => {
+  const { tools, store } = setup();
+  const result = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(result.isError, undefined, textOf(result));
+  assert.equal(store.planRemembered, true);
+  assert.equal(store.pending, "plan");
+});
+
+test("a pending audit of the other kind blocks the spawn (no mis-binding)", async () => {
+  const goalFirst = setup({ pending: "plan" });
+  const goalRefused = await goalFirst.tools.get("judge_spawn")!({ kind: "goal", draft: "x" });
+  assert.equal(goalRefused.isError, true);
+  assert.match(textOf(goalRefused), /计划.*审计挂着/);
+
+  const planFirst = setup({ pending: "goal" });
+  const planRefused = await planFirst.tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(planRefused.isError, true);
+  assert.match(textOf(planRefused), /目标.*审计挂着/);
+});
+
+test("spawn over a living pane is refused — rounds go through submit", async () => {
+  const { tools } = setup({ panes: ["%1", "%7"] });
+  const first = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(first.isError, undefined, textOf(first));
+  const second = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(second.isError, true);
+  assert.match(textOf(second), /还开着/);
+});
+
+test("spawn over a dead pane points at recover, not a second birth", async () => {
+  const { tools, store } = setup();
+  const first = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(first.isError, undefined, textOf(first));
+  store.panes = ["%1"];
+  const second = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(second.isError, true);
+  assert.match(textOf(second), /judge_recover/);
 });
