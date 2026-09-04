@@ -153,7 +153,7 @@ import {
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
 import { supervisionTarget } from "../lib/orchestration-id.ts";
-import { emptyHierarchy, registerJudge, removeJudge, type HierarchyTable } from "../lib/hierarchy.ts";
+import { emptyHierarchy, parseHierarchySnapshot, registerJudge, removeJudge, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
@@ -2082,6 +2082,72 @@ export default function reviewGate(pi: ExtensionAPI) {
    * judge id per repo, so at most ONE kind may be pending per root.
    */
   const pendingPlanAudits = new Map<string, { hash: string; planText: string; startedAt: string }>();
+  /** File holding one repo's judges + pendings (under `.pi/`, git-ignored like all gate state). */
+  const HIERARCHY_FILENAME = "judge-hierarchy.json";
+  /** Repos whose hierarchy slice is already merged this session. */
+  const hierarchyLoadedRoots = new Set<string>();
+  /** Repos with a hierarchy file on disk (for pruning emptied slices). */
+  const hierarchyFileRoots = new Set<string>();
+
+  /** Assign the opener table and persist it — the single funnel for table writes. */
+  function setHierarchy(next: HierarchyTable): void {
+    judgeHierarchy = next;
+    persistJudgeHierarchy();
+  }
+
+  /** Drop both pendings for one repo and persist. */
+  function dropAudits(root: string): void {
+    pendingGoalAudits.delete(root);
+    pendingPlanAudits.delete(root);
+    persistJudgeHierarchy();
+  }
+
+  /**
+   * Persist judges + pendings, sliced per repo. Restarting must not strand
+   * live panes (unaddressable judges) nor fork a second pi onto one session
+   * id — the process era's pid-file takeover, reborn as a file per repo.
+   */
+  function persistJudgeHierarchy(): void {
+    try {
+      const slices = new Map<string, { judges: Record<string, JudgeEntry>; goalAudit?: { draft: string; startedAt: string }; planAudit?: { hash: string; planText: string; startedAt: string } }>();
+      const slice = (root: string) => {
+        let s = slices.get(root);
+        if (!s) { s = { judges: {} }; slices.set(root, s); }
+        return s;
+      };
+      for (const [id, e] of Object.entries(judgeHierarchy)) slice(e.repoRoot).judges[id] = e;
+      for (const [root, v] of pendingGoalAudits) slice(root).goalAudit = v;
+      for (const [root, v] of pendingPlanAudits) slice(root).planAudit = v;
+      for (const root of hierarchyFileRoots) slice(root);
+      for (const [root, s] of slices) {
+        hierarchyFileRoots.add(root);
+        const file = pathJoin(root, ".pi", HIERARCHY_FILENAME);
+        const empty = Object.keys(s.judges).length === 0 && !s.goalAudit && !s.planAudit;
+        if (empty) { try { rmSync(file, { force: true }); } catch { /* best effort */ } continue; }
+        try { mkdirSync(pathJoin(root, ".pi"), { recursive: true }); } catch { /* best effort */ }
+        writeFileSync(file, JSON.stringify({ version: 1, ...s }), "utf8");
+      }
+    } catch { /* persistence never breaks the gate */ }
+  }
+
+  /**
+   * Merge one repo's durable slice into this session. Memory (this session)
+   * wins on conflict; a corrupt file is ignored. Idempotent per root.
+   */
+  function ensureHierarchyLoaded(root: string): void {
+    if (hierarchyLoadedRoots.has(root)) return;
+    hierarchyLoadedRoots.add(root);
+    let raw: string;
+    try { raw = readFileSync(pathJoin(root, ".pi", HIERARCHY_FILENAME), "utf8"); } catch { return; }
+    const snap = parseHierarchySnapshot(raw);
+    if (!snap) return;
+    hierarchyFileRoots.add(root);
+    for (const [id, e] of Object.entries(snap.judges)) {
+      if (!judgeHierarchy[id]) judgeHierarchy[id] = e;
+    }
+    if (!pendingGoalAudits.has(root) && snap.goalAudit) pendingGoalAudits.set(root, snap.goalAudit);
+    if (!pendingPlanAudits.has(root) && snap.planAudit) pendingPlanAudits.set(root, snap.planAudit);
+  }
   /**
    * Review targets registered by prepare_review (commit mode): repo root →
    * the reviewed baseline..HEAD plus HEAD's tree. record_review consumes it:
@@ -4240,7 +4306,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
         createdAt: new Date().toISOString(),
       });
-      if (reg.ok) judgeHierarchy = reg.table;
+      if (reg.ok) setHierarchy(reg.table);
       return { ok: true, reused: true, sessionId, sessionDir, paneId: existing.paneId, judgeId };
     }
     // fresh:true kills the living pane FIRST (singleton per role+repo).
@@ -4252,11 +4318,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       if (paneAlive === false) reapReviewScratch(sessionId);
       childSessions.set(root, list.filter((c) => c !== existing));
-      judgeHierarchy = removeJudge(judgeHierarchy, judgeId);
+      setHierarchy(removeJudge(judgeHierarchy, judgeId));
       // The killed round's audited draft dies with it: leaving it behind
       // would let a LATER report record a verdict against a draft that round
       // never judged.
-      if (existing.role === "goal-auditor") { pendingGoalAudits.delete(root); pendingPlanAudits.delete(root); }
+      if (existing.role === "goal-auditor") dropAudits(root);
     }
     if (!ownPane) {
       return { ok: false, reused: continuesSession, sessionId, sessionDir, error: "当前会话不在 tmux 里，开不出 review pane——在 tmux 中重开本会话后重试；门禁不会退回旧的进程壳子。" };
@@ -4327,7 +4393,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
         createdAt: new Date().toISOString(),
       });
-      if (reg.ok) judgeHierarchy = reg.table;
+      if (reg.ok) setHierarchy(reg.table);
       return { ok: true, reused: continuesSession, sessionId, sessionDir, paneId: opened.paneId, judgeId };
     } catch (err) {
       return { ok: false, reused: false, error: err instanceof Error ? err.message : String(err) };
@@ -4390,7 +4456,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const recorded = await recordRoundOutput(fullText, repoOfChild(child), child.role);
       if (entry) {
         const reg = registerJudge(judgeHierarchy, { ...entry, lastReportId: last.reportId });
-        if (reg.ok) judgeHierarchy = reg.table;
+        if (reg.ok) setHierarchy(reg.table);
       }
       return recorded;
     } catch {
@@ -4425,7 +4491,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     if (goalPending) {
       if (!lastUiCtx) return undefined;
-      pendingGoalAudits.delete(root);
+      dropAudits(root);
       const audit = await callTool("record_goal_prereview", {
         goal: goalPending.draft,
         auditor_output: fullText,
@@ -4435,7 +4501,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       return toolText(audit);
     }
     if (planPending) {
-      pendingPlanAudits.delete(root);
+      dropAudits(root);
       const parsed = parseReviewOutput(fullText);
       if (!parsed) return `plan 审计没有产出可解析的裁决，什么都没有记录（fail-closed）——plan 没有被送审。`;
       const findings = parseFenceFindings(fullText);
@@ -4449,7 +4515,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(findings.length ? { findings } : {}),
         planText: planPending.planText,
       };
-      try { persist(latestCtx); } catch { /* best effort */ }
+      try {
+        const ctx = latestCtx ?? lastUiCtx;
+        if (ctx) persistRepo(ctx, root); else persist(undefined);
+      } catch { /* best effort */ }
       if (adjudication.verdict === "PASS") {
         return `plan 审计 PASS（hash ${planPending.hash.slice(0, 12)}）——可以送用户批准了。`;
       }
@@ -4705,10 +4774,14 @@ export default function reviewGate(pi: ExtensionAPI) {
    * every rule they apply is unit-testable without a spawned judge.
    */
   registerJudgeSessionTools(pi, {
-    resolveRepo: (requested) => resolveToolRepo(requested),
+    resolveRepo: (requested) => {
+      const resolved = resolveToolRepo(requested);
+      if (resolved.ok) ensureHierarchyLoaded(resolved.root);
+      return resolved;
+    },
     callerId: () => callerIdentity(),
     hierarchy: () => judgeHierarchy,
-    saveHierarchy: (next) => { judgeHierarchy = next; },
+    saveHierarchy: (next) => setHierarchy(next),
     findChild: (root, role, judgeId) => {
       const c = findJudgeChild(root, role, judgeId);
       if (!c) return undefined;
@@ -4738,19 +4811,23 @@ export default function reviewGate(pi: ExtensionAPI) {
       const text = await recordRoundOutput(fullText, root, role);
       return { ...(text === undefined ? {} : { text }), hasVerdict: parseReviewOutput(fullText) !== undefined };
     },
-    dropPendingAudit: (root) => { pendingGoalAudits.delete(root); pendingPlanAudits.delete(root); },
+    dropPendingAudit: (root) => dropAudits(root),
     cancelWaitTimer: () => cancelChildWaitTimer(),
   });
   registerJudgeSpawnTools(pi, {
     callerId: () => callerIdentity(),
     hierarchy: () => judgeHierarchy,
-    saveHierarchy: (next) => { judgeHierarchy = next; },
+    saveHierarchy: (next) => setHierarchy(next),
     channelIO: () => channelIO,
     channelHome: () => undefined,
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     now: () => Date.now(),
-    resolveRepo: (requested) => resolveToolRepo(requested),
+    resolveRepo: (requested) => {
+      const resolved = resolveToolRepo(requested);
+      if (resolved.ok) ensureHierarchyLoaded(resolved.root);
+      return resolved;
+    },
     launchConfig: (root, role) => {
       const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
       const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root)));
@@ -4806,6 +4883,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
     rememberGoalAudit: (root, draft) => {
       pendingGoalAudits.set(root, { draft, startedAt: new Date().toISOString() });
+      persistJudgeHierarchy();
     },
     rememberPlanAudit: (root) => {
       const read = readPlanFile(root);
@@ -4816,11 +4894,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         planText: formatPlanSummary(plan),
         startedAt: new Date().toISOString(),
       });
+      persistJudgeHierarchy();
       return { ok: true };
     },
     forgetAudit: (root) => {
       pendingGoalAudits.delete(root);
       pendingPlanAudits.delete(root);
+      persistJudgeHierarchy();
     },
   });
 
@@ -5473,8 +5553,8 @@ export default function reviewGate(pi: ExtensionAPI) {
             } catch { /* best effort */ }
           }
           try { reapReviewScratch(child.sessionId); } catch { /* best effort */ }
-          judgeHierarchy = removeJudge(judgeHierarchy, child.sessionId);
-          if (child.role === "goal-auditor") { pendingGoalAudits.delete(root); pendingPlanAudits.delete(root); }
+          setHierarchy(removeJudge(judgeHierarchy, child.sessionId));
+          if (child.role === "goal-auditor") dropAudits(root);
         }
         childSessions.clear();
         progress.step(`联关 ${ownedJudges.length} 个 review pane${closed.length ? `（已关 ${closed.join("、")}）` : ""}`);
@@ -6496,6 +6576,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { sessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? null; } catch { /* */ }
     restore(ctx, sessionId);
     state.sessionId = sessionId;
+    // Take over previous sessions' pane judges: merge their registry + pendings
+    // so live panes stay addressable and no second pi is forked onto one
+    // session id. Judge panes themselves skip this (they operate nothing).
+    if (!readJudgeSideEnv(process.env)) {
+      for (const root of new Set([primaryRepoRoot, ...sessionRepos])) ensureHierarchyLoaded(root);
+    }
     // A new session negotiates its OWN goal: whatever audit rounds a previous
     // session spent on its draft do not carry into this one's count.
     delete state.goalAuditRound;

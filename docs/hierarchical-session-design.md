@@ -35,6 +35,7 @@
 * 意外停止恢复：pane 消失（`dead`）但 verdict 未落盘时，本轮不算结束。opener 用 `judge_recover` 以同一 session id 重开 pane 续接 transcript 继续本轮（不新开一轮、不丢上下文），跨级禁令同样适用——只有 opener 能恢复自己的 review。
 * 多轮复用：pane 是承载体，轮是任务。同一 review（如同一 checkpoint 的连续复审轮）复用同一个 pane + 同一 transcript；只有换 review 对象（新 baseline、新 goal 草稿）才开新 pane。
 * 父级联关：opener `declare_done` 时门禁先关它名下全部 judge pane 再走正常 done 流程——已结束（verdict 已落盘）的直接回收；仍在跑的按 `judge_close` 语义放弃本轮再回收（未落盘的轮不记入 review 链）。opener 不手拼 `kill-pane`，联关全程门禁执行。本条取代现行“有名下未关闭 judge 即拒 done”规则，实现时同步改掉它，不并行两套 done 门槛。
+* 重启接管：opener 注册表与两类 pending 落盘（`<repo>/.pi/judge-hierarchy.json`，按 repo 分片），新会话启动与每次触达 repo 时懒合并（内存优先、坏文件丢弃）。活 pane 重启后仍可寻址（wait/close/answer/recover 照常）；绝不为同一 session id 再开第二个 pi（两个进程写一段 transcript 正是本设计要禁的形状）。
 
 ## 四、监听三件套（用户已确认粒度）
 

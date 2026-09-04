@@ -131,3 +131,53 @@ export function listByOpener(table: HierarchyTable, openerId: string): JudgeEntr
 export function judgeIdsByOpener(table: HierarchyTable, openerId: string): string[] {
   return listByOpener(table, openerId).map((entry) => entry.judgeId);
 }
+
+/** One repo's durable slice: its judges plus at most one pending per kind. */
+export interface HierarchySnapshot {
+  version: 1;
+  judges: Record<string, JudgeEntry>;
+  goalAudit?: { draft: string; startedAt: string };
+  planAudit?: { hash: string; planText: string; startedAt: string };
+}
+
+function isJudgeEntry(value: unknown): value is JudgeEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.judgeId === "string" && v.judgeId.length > 0 &&
+    typeof v.openerId === "string" && v.openerId.length > 0 &&
+    typeof v.role === "string" &&
+    typeof v.repoRoot === "string" &&
+    typeof v.createdAt === "string"
+  );
+}
+
+/**
+ * Parse a persisted snapshot, fail-closed: anything malformed (wrong
+ * version, wrong shapes, unparseable JSON) yields undefined and the caller
+ * keeps its in-memory table — a corrupt file must never strand live judges.
+ */
+export function parseHierarchySnapshot(raw: unknown): HierarchySnapshot | undefined {
+  try {
+    const text = typeof raw === "string" ? raw : JSON.stringify(raw);
+    const value = JSON.parse(text) as Record<string, unknown>;
+    if (typeof value !== "object" || value === null || value.version !== 1) return undefined;
+    if (typeof value.judges !== "object" || value.judges === null) return undefined;
+    const judges: Record<string, JudgeEntry> = {};
+    for (const [id, entry] of Object.entries(value.judges as Record<string, unknown>)) {
+      if (isJudgeEntry(entry) && entry.judgeId === id) judges[id] = entry;
+    }
+    const out: HierarchySnapshot = { version: 1, judges };
+    const goal = value.goalAudit as Record<string, unknown> | undefined;
+    if (goal && typeof goal.draft === "string" && typeof goal.startedAt === "string") {
+      out.goalAudit = { draft: goal.draft, startedAt: goal.startedAt };
+    }
+    const plan = value.planAudit as Record<string, unknown> | undefined;
+    if (plan && typeof plan.hash === "string" && typeof plan.planText === "string" && typeof plan.startedAt === "string") {
+      out.planAudit = { hash: plan.hash, planText: plan.planText, startedAt: plan.startedAt };
+    }
+    return out;
+  } catch {
+    return undefined;
+  }
+}

@@ -13,6 +13,7 @@ import {
   removeJudge,
   listByOpener,
   judgeIdsByOpener,
+  parseHierarchySnapshot,
   type JudgeEntry,
 } from "../lib/hierarchy.ts";
 
@@ -128,4 +129,41 @@ test("registration does not mutate the input table", () => {
   const reg = registerJudge(before, entry());
   assert.equal(reg.ok, true);
   assert.deepEqual(before, {});
+});
+
+test("a persisted snapshot round-trips through parse", () => {
+  const snap = {
+    version: 1,
+    judges: { "rg-reviewer-abc123": entry({ paneId: "%7", lastReportId: "rep-1" }) },
+    goalAudit: { draft: "目标", startedAt: "2026-09-04T00:00:00.000Z" },
+  };
+  const parsed = parseHierarchySnapshot(JSON.stringify(snap));
+  assert.deepEqual(parsed, snap);
+});
+
+test("a corrupt snapshot is dropped, never trusted", () => {
+  assert.equal(parseHierarchySnapshot("not json"), undefined);
+  assert.equal(parseHierarchySnapshot(JSON.stringify({ version: 2, judges: {} })), undefined);
+  assert.equal(parseHierarchySnapshot(JSON.stringify({ version: 1 })), undefined);
+  assert.equal(parseHierarchySnapshot(JSON.stringify({ version: 1, judges: null })), undefined);
+});
+
+test("entries whose key disagrees with their id are dropped", () => {
+  const parsed = parseHierarchySnapshot(JSON.stringify({
+    version: 1,
+    judges: { "j-right": entry({ judgeId: "j-right" }), "j-wrong": entry({ judgeId: "j-other" }) },
+  }));
+  assert.deepEqual(Object.keys(parsed!.judges), ["j-right"]);
+});
+
+test("malformed pendings are dropped while good judges survive", () => {
+  const parsed = parseHierarchySnapshot(JSON.stringify({
+    version: 1,
+    judges: { "j": entry({ judgeId: "j" }) },
+    goalAudit: { draft: 42 },
+    planAudit: { hash: "h", planText: "p", startedAt: "t" },
+  }));
+  assert.deepEqual(Object.keys(parsed!.judges), ["j"]);
+  assert.equal(parsed!.goalAudit, undefined);
+  assert.deepEqual(parsed!.planAudit, { hash: "h", planText: "p", startedAt: "t" });
 });

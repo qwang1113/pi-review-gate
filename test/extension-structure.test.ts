@@ -3624,7 +3624,7 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   assert.match(rec, /callTool\("record_goal_prereview", \{/);
   assert.match(rec, /goal: goalPending\.draft/);
   assert.match(rec, /auditStartedAt: goalPending\.startedAt/);
-  assert.match(rec, /pendingGoalAudits\.delete\(/, "a recorded audit does not linger");
+  assert.match(rec, /dropAudits\(root\)/, "a recorded audit does not linger (and persists the drop)");
 });
 
 
@@ -4005,4 +4005,23 @@ test("non-git directory: the gate short-circuits entirely (user decision 2026-09
     assert.match(SRC, new RegExp(`非 git 目录 —— ${tool} 不可用|非 git 目录 —— 门禁不介入`),
       `non-git refusal copy must exist for ${tool}`);
   }
+});
+
+test("restart does not strand pane judges: registry + pendings persist per repo", () => {
+  // The process era's pid/exit-code takeover is gone; without a durable
+  // registry a restart would leave live panes unaddressable and fork a
+  // second pi onto one session id. Slices live under each repo's `.pi/`.
+  assert.match(SRC, /function persistJudgeHierarchy\(\)/, "one writer persists every mutation");
+  assert.match(SRC, /function ensureHierarchyLoaded\(root: string\)/, "restore merges one repo's slice");
+  assert.match(SRC, /function setHierarchy\(next: HierarchyTable\)/, "table writes funnel through one setter");
+  assert.match(SRC, /judge-hierarchy\.json/, "the file name is pinned");
+  // Every table write goes through the funnel — a direct assignment that
+  // skips persistence reopens the strand gap.
+  const direct = [...SRC.matchAll(/judgeHierarchy = (?!next;)/g)]
+    .filter((m) => !/let judgeHierarchy/.test(SRC.slice(Math.max(0, m.index! - 60), m.index)));
+  assert.deepEqual(direct.map((m) => m[0]), [], "no direct table assignment outside the declaration");
+  // …and session_start restores before any tool can run.
+  const startAt = SRC.indexOf('pi.on("session_start"');
+  assert.match(SRC.slice(startAt, startAt + 3000), /ensureHierarchyLoaded\(root\)/,
+    "a restarted session merges previous slices");
 });
