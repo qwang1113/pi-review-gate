@@ -32,7 +32,7 @@
 
 * opener（父级 session id 或 orchestration id）在 spawn 那一刻由门禁记下来，全程不可改。
 * review 只向它的 opener 报告：结束时写一条 `report` 记录（见 §五）进双方通道，opener 经自己的 `wait` 回执收到 verdict 摘要 + findings 计数。
-* 子会话向 PM 报告自己名下 review 的结论时，同样走 `report` 记录经编排通道上浮，不贴原文 stdout（大字段 spill，沿用 `MAX_INLINE_RECORD_CHARS=1500` 规则）。
+* 子会话向 PM 报告自己名下 review 的结论时，同样走 `report` 记录经编排通道上浮，不贴原文 stdout（大字段 spill，沿用 `MAX_INLINE_RECORD_BYTES=1500` 字节规则）。
 * PM 与子会话的审核（goal 批准框、consent 框）本来就走子会话通道 `request`（`askThroughChannel` 已实现），保持不变——这就是“项目经理和子会话的审核也走类似于子会话的通道”。
 
 ## 三、Judge pane 化（用户选 1A）

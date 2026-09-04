@@ -60,15 +60,16 @@ const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit"])
 /**
  * The GOAL family moved the same way, split by the same rule: the APPROVAL
  * (`propose_loop_goal` — run the audit, ask the user, write the file) in one
- * module, the AUDIT RECORD (`record_goal_prereview` — read the auditor's
- * fence, adjudicate it, persist it) plus the checks both tools share in the
+ * module, the AUDIT RECORD (`recordGoalPrereview` — read the auditor's
+ * structured conclusion, adjudicate it, persist it) plus the checks they share
+ * in the
  * other. lib/goal-tools.ts is the family's single registration entry point —
- * it registers BOTH tools, each on the host that may see it — so the
+ * it registers the ONE tool there is — so the
  * extension wires them exactly once. Their structural rules did not move with
  * them: they are asserted below against the module that now owns each one.
  */
 const GOAL_TOOLS_SRC = readFileSync(join(ROOT, "lib", "goal-tools.ts"), "utf8");
-const GOAL_TOOLS = new Set(["propose_loop_goal", "record_goal_prereview"]);
+const GOAL_TOOLS = new Set(["propose_loop_goal"]);
 const GOAL_PREREVIEW_SRC = readFileSync(join(ROOT, "lib", "goal-prereview-tools.ts"), "utf8");
 /**
  * The COMMAND layer moved the same way, split by the same rule: the commands
@@ -193,21 +194,19 @@ const LIB_TOOL_HANDLERS: Record<string, string> = {
   request_scope_limit: "export async function doRequestScopeLimit(",
   request_sensitive_edit: "export async function doRequestSensitiveEdit(",
   propose_loop_goal: "export async function doProposeLoopGoal(",
-  record_goal_prereview: "export async function doRecordGoalPrereview(",
 };
 
 /**
  * The handler of a tool whose REGISTRATION and BODY are in different lib/
- * modules. The goal family is the one that splits that way: lib/goal-tools.ts
- * is the single registration entry point (two tools, two hosts), while the
- * audit record it dispatches to lives in lib/goal-prereview-tools.ts. Naming
- * the source explicitly keeps the "same source" rule intact everywhere else —
- * a tool can still never be matched against another module's handler by
- * accident.
+ * modules. The goal family used to split that way: lib/goal-tools.ts is the
+ * single registration entry point, while the audit record it dispatches to
+ * lives in lib/goal-prereview-tools.ts. Since 2026-09-04 that record is a
+ * plain function rather than a second tool, so the map is EMPTY — kept because
+ * naming the source explicitly is what keeps the "same source" rule intact
+ * everywhere else: a tool can still never be matched against another module's
+ * handler by accident, and the next split has a place to declare itself.
  */
-const LIB_HANDLER_SOURCES: Record<string, string> = {
-  record_goal_prereview: GOAL_PREREVIEW_SRC,
-};
+const LIB_HANDLER_SOURCES: Record<string, string> = {};
 
 
 /**
@@ -2326,10 +2325,11 @@ test("judge_read / judge_close / judge_wait address a judge by ROLE", () => {
 });
 
 test("the TEN advanced entries are not registered anywhere an agent can see", () => {
-  // Philosophy three, mechanically. Seven of them still exist as
+  // Philosophy three, mechanically. FIVE of them still exist as
   // implementations (captured into `internalHost` so `judge_submit` and
   // `propose_loop_goal` call ONE copy of each mechanical check); three were
-  // deleted outright. Either way `pi` never learns the name.
+  // deleted outright; the two RECORDERS are plain functions on no host at all
+  // (2026-09-04). Either way `pi` never learns the name.
   const LIB_SOURCES = readdirSync(join(ROOT, "lib"))
     .filter((f) => f.endsWith(".ts"))
     .map((f) => ({ file: f, code: readFileSync(join(ROOT, "lib", f), "utf8") }));

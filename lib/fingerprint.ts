@@ -669,7 +669,7 @@ export function computeFingerprint(cwd: string): Fingerprint {
  * ####################################################################
  * # NEVER use this to decide whether a gate is SATISFIED. It is not a #
  * # fingerprint and it is not staging-invariant. Enforcement paths    #
- * # (ship blocks, declare_done, verdict recording, arbitration, the git#
+ * # (ship blocks, declare_done, verdict recording, arbitration, git   #
  * # hooks) MUST call computeFingerprint() directly, every time.       #
  * ####################################################################
  *
