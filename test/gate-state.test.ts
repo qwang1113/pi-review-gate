@@ -663,11 +663,13 @@ test("plateau: a repeated round of the same findings must not read as convergenc
   ];
   assert.ok(isPlateaued(repeatedThenSingle, 3), "identical rounds are a plateau");
 
-  // The shape that hid a plateau: a first round counted twice makes the same
-  // three rounds look like they are shrinking. It is unreachable now (one
-  // round is one conclude call, so nothing can report itself twice), but
-  // `isPlateaued`'s own contract is what this pins — it must read the
-  // fingerprints it is given, whatever produced them.
+  // The shape that hides a plateau: a first round carrying the SAME coarse
+  // key twice makes the next two rounds look like they are shrinking. This is
+  // reachable — fingerprints are one per finding and deliberately NOT
+  // deduplicated (lib/review-adjudicate.ts), so a round with two findings that
+  // share a file, a line bucket and an issue prefix produces exactly it. What
+  // this pins is `isPlateaued`'s own contract: it reads the fingerprints it is
+  // given, and a repeated key is two entries, not one.
   const inflated = [
     round(1, 2, ["a.ts#1#boom", "a.ts#1#boom"]),
     round(2, 1, ["a.ts#1#boom"]),
