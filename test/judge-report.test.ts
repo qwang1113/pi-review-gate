@@ -35,6 +35,11 @@ function workdirWithTranscript(body: string): string {
   return join(dir, "sessions");
 }
 
+/** One assistant transcript line, the only shape the collector reads. */
+function assistantLine(text: string): string {
+  return `{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":${JSON.stringify(text)}}]}}\n`;
+}
+
 function deps(io: ChannelIO): VerdictCollectDeps {
   return { channelIO: () => io, channelHome: () => undefined };
 }
@@ -51,7 +56,7 @@ test("reviewer repro: prose appended after a collected READY re-reports nothing"
   const io = memoryChannelIO(() => 1);
   const dir = mkdtempSync(join(tmpdir(), "judge-report-"));
   const file = join(dir, "s.jsonl");
-  const line = (t: string) => JSON.stringify({ text: t }) + "\n";
+  const line = assistantLine;
   writeFileSync(file, line(`round N done\n${FENCE}`));
   const input = { sessionDir: dir, openerId: "op1", judgeId: "jr", now: 1 };
   assert.equal(collectVerdictReport(deps(io), input, new Set()).collected, true);
@@ -63,7 +68,7 @@ test("two sequential fences: only the newest is the round conclusion", () => {
   const io = memoryChannelIO(() => 1);
   const dir = mkdtempSync(join(tmpdir(), "judge-report-"));
   const file = join(dir, "s.jsonl");
-  const line = (t: string) => JSON.stringify({ text: t }) + "\n";
+  const line = assistantLine;
   const BLOCKED = '```json\n{"gate":"BLOCKED","findings":[{"severity":"P1","issue":"x"}]}\n```';
   writeFileSync(file, line(`first pass\n${BLOCKED}`));
   const input = { sessionDir: dir, openerId: "op1", judgeId: "js", now: 1 };
@@ -164,4 +169,39 @@ test("buildStandardReport: adviser carries its conclusion, unrecorded stays arme
   const pending = buildStandardReport({ role: "reviewer", judgeId: "j3", unrecorded: true });
   assert.match(pending, /尚未记入 review 链/);
   assert.match(pending, /不要重开一轮/);
+});
+
+test("a fence inside a TOOL RESULT is never the round's verdict (round-7 Note)", () => {
+  // This repo's own tests and docs are full of fenced verdicts. A collector
+  // that walked every string in a transcript line would let a fixture the
+  // judge merely READ become "the newest fence" and be recorded as its verdict.
+  const io = memoryChannelIO(() => 1);
+  const dir = mkdtempSync(join(tmpdir(), "judge-report-"));
+  const file = join(dir, "s.jsonl");
+  const FIXTURE = '```json\n{"gate":"BLOCKED","findings":[{"severity":"P0","issue":"from a fixture"}]}\n```';
+  writeFileSync(file,
+    assistantLine(`round done\n${FENCE}`) +
+    // The judge then reads a test file whose content contains a fence.
+    JSON.stringify({
+      type: "message",
+      message: { role: "toolResult", content: [{ type: "text", text: `file body\n${FIXTURE}` }] },
+    }) + "\n");
+  const r = collectVerdictReport(deps(io),
+    { sessionDir: dir, openerId: "op1", judgeId: "jt", now: 1 }, new Set());
+  assert.equal(r.collected, true);
+  assert.equal(r.collected && r.verdict, "READY", "the judge's own fence decides, not the fixture it read");
+});
+
+test("thinking blocks are not the judge's word either", () => {
+  const io = memoryChannelIO(() => 1);
+  const dir = mkdtempSync(join(tmpdir(), "judge-report-"));
+  writeFileSync(join(dir, "s.jsonl"), JSON.stringify({
+    type: "message",
+    message: {
+      role: "assistant",
+      content: [{ type: "thinking", thinking: `maybe\n${FENCE}` }],
+    },
+  }) + "\n");
+  assert.equal(collectVerdictReport(deps(io),
+    { sessionDir: dir, openerId: "op1", judgeId: "jk", now: 1 }, new Set()).collected, false);
 });

@@ -78,20 +78,36 @@ export function readNewestTranscriptTail(sessionDir: string): string | undefined
   } catch { return undefined; }
 }
 
-/** One transcript line → the text a human would read from it. */
+/**
+ * One transcript line → what the JUDGE said in it, or "" for everything else.
+ *
+ * ASSISTANT TEXT ONLY, deliberately (round-7 Note). A tool result routinely
+ * carries a fenced verdict that is not a verdict at all — this repository's
+ * own tests and docs are full of them — and a walk over every string in the
+ * line would let a fixture become “the newest fence”. Thinking blocks are
+ * excluded for the same reason: a draft the judge reasoned about is not what
+ * it published.
+ */
 function transcriptLineText(line: string): string {
   const trimmed = line.trim();
   if (!trimmed) return "";
   try {
-    const parts: string[] = [];
-    const walk = (v: unknown): void => {
-      if (typeof v === "string") parts.push(v);
-      else if (Array.isArray(v)) v.forEach(walk);
-      else if (v !== null && typeof v === "object") Object.values(v).forEach(walk);
+    const parsed = JSON.parse(trimmed) as {
+      type?: string;
+      message?: { role?: string; content?: unknown };
     };
-    walk(JSON.parse(trimmed));
-    return parts.join("\n");
-  } catch { return line; }
+    if (parsed.type !== "message" || parsed.message?.role !== "assistant") return "";
+    const content = parsed.message.content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .filter((b): b is { type: string; text: string } =>
+        typeof b === "object" && b !== null
+        && (b as { type?: unknown }).type === "text"
+        && typeof (b as { text?: unknown }).text === "string")
+      .map((b) => b.text)
+      .join("\n");
+  } catch { return ""; }
 }
 
 function countFindings(streamPath: string | undefined): number | undefined {

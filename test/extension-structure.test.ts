@@ -2904,7 +2904,7 @@ test("SECURITY: the Copilot requirement never touches the SHIP gate (it would de
   const doneStart = SRC.indexOf('name: "declare_done"');
   assert.match(SRC.slice(doneStart, doneStart + 7000), /copilotProblemsFor\(/); // +1000 for the declare_done cascade block
   const settledStart = SRC.indexOf('pi.on("agent_settled"');
-  assert.match(SRC.slice(settledStart, settledStart + 4600), /copilotProblemsFor\(/); // +600 for the settleFinishedRounds wake block
+  assert.match(SRC.slice(settledStart, settledStart + 5200), /copilotProblemsFor\(/); // +1200 for the settle-wake and judge-pane blocks
 });
 
 test("a FAILED ship arms nothing; a successful PR ship arms the repo it ran in", () => {
@@ -2924,7 +2924,7 @@ test("waiting for Copilot spends its OWN continuation budget, not the review loo
   assert.match(SRC, /let completionContinuations = 0/);
   assert.match(SRC, /COMPLETION_CONTINUATION_CAP/);
   const settledStart = SRC.indexOf('pi.on("agent_settled"');
-  const body = SRC.slice(settledStart, settledStart + 10000); // +1000 for the judge-verdict hook and pane snapshots
+  const body = SRC.slice(settledStart, settledStart + 11000); // + the judge-verdict hook, pane snapshots and the judge-pane return
   assert.match(body, /problems\.length > 0 && continuationsInjected >= state\.maxRounds/);
   assert.match(body, /problems\.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP/);
 });
@@ -3834,6 +3834,21 @@ test("R-3: an orchestrator never receives the LOOP's continuation — its criter
   assert.match(own, /startSupervisionTimer\(ctx\)/, "which also arms the background supervisor");
   assert.doesNotMatch(own, /unmetRequirements|LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK/,
     "and never from the loop's gates");
+});
+
+test("round-7 P1: a judge pane never receives the LOOP's continuation either", () => {
+  // Measured in the certification e2e: the reviewer pane got the OPENER's
+  // RESUME ("code review gate is PENDING"), answered it with a second, fuller
+  // verdict fence 8s after its first, and the gate recorded a DRAFT verdict
+  // from the first report. A reporting shell has no gates of its own.
+  const settled = windowOf('pi.on("agent_settled"', "// L7/L8 — completion-only requirements", "agent_settled");
+  assert.match(settled, /if \(readJudgeSideEnv\(process\.env\)\) return;/,
+    "a judge pane returns before the RESUME injection");
+  // …but AFTER its own report-writing step, or the verdict would never land.
+  const writeAt = settled.indexOf("maybeWriteVerdictReport(ctx)");
+  const returnAt = settled.indexOf("if (readJudgeSideEnv(process.env)) return;");
+  assert.ok(writeAt > 0 && returnAt > writeAt,
+    "the pane still writes its own channel report before it stops");
 });
 
 test("the background supervisor is wired, default-on in orchestrator mode, and cleaned up", () => {

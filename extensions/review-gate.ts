@@ -6419,6 +6419,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       return;
     }
 
+    // A JUDGE PANE IS NOT IN THE LOOP EITHER (round-7 P1, measured in the
+    // certification e2e). A reporting shell has no gates of its own: the RESUME
+    // text it received ("code review gate is PENDING", "the loop goal is
+    // unconfirmed") is the OPENER's sidecar, and acting on it made the reviewer
+    // emit a second, fuller verdict fence 8 seconds after its first — two
+    // channel reports for ONE round, so the gate recorded a DRAFT verdict.
+    // Its completion is the fence it already wrote; nothing else is owed.
+    if (readJudgeSideEnv(process.env)) return;
+
     // The revival clock for the LOOP session: armed here so a turn that
     // ends under any of the six guards above still gets its minute-level
     // second chance. (The orchestrator arms it in orchestratorSettled.)
