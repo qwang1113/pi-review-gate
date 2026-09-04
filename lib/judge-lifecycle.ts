@@ -106,7 +106,7 @@ export interface JudgeSessionDirEntry {
  *  - a legacy (pre-opener) dir nobody references is reclaimed IMMEDIATELY —
  *    a new opener must never read its transcript, so keeping it only risks
  *    cross-session pollution;
-  - any other CURRENT-FORMAT unreferenced dir is reclaimed once older than the TTL;
+ *  - any other CURRENT-FORMAT unreferenced dir is reclaimed once older than the TTL;
  *    anything of unrecognised shape is never reclaimed (fail-closed).
  */
 export function selectStaleJudgeSessionDirs(
