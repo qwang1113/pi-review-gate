@@ -657,20 +657,23 @@ test("plateau: same findings 3 rounds, non-decreasing → true", () => {
  */
 test("plateau: a repeated round of the same findings must not read as convergence", () => {
   const repeatedThenSingle = [
-    round(1, 1, ["a.ts#1#boom"]), // what a deduplicated repeated-fence round yields
+    round(1, 1, ["a.ts#1#boom"]), // one finding, reported once
     round(2, 1, ["a.ts#1#boom"]),
     round(3, 1, ["a.ts#1#boom"]),
   ];
   assert.ok(isPlateaued(repeatedThenSingle, 3), "identical rounds are a plateau");
 
-  // The pre-fix shape, kept explicit: an inflated first round makes the same
-  // three rounds look like they are shrinking.
+  // The shape that hid a plateau: a first round counted twice makes the same
+  // three rounds look like they are shrinking. It is unreachable now (one
+  // round is one conclude call, so nothing can report itself twice), but
+  // `isPlateaued`'s own contract is what this pins — it must read the
+  // fingerprints it is given, whatever produced them.
   const inflated = [
     round(1, 2, ["a.ts#1#boom", "a.ts#1#boom"]),
     round(2, 1, ["a.ts#1#boom"]),
     round(3, 1, ["a.ts#1#boom"]),
   ];
-  assert.ok(!isPlateaued(inflated, 3), "double counting hides the plateau — hence the dedup");
+  assert.ok(!isPlateaued(inflated, 3), "a double-counted round hides the plateau");
 });
 
 test("converging (totals decreasing) → not plateaued", () => {
