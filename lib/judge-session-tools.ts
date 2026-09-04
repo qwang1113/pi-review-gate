@@ -344,7 +344,6 @@ export function recentStreamFindings(
   deps: Pick<JudgeSessionToolDeps, "readText">,
   streamPath: string | undefined,
 ): string[] {
-
   if (!streamPath) return [];
   const raw = deps.readText(streamPath);
   if (raw === undefined) return [];
@@ -353,6 +352,7 @@ export function recentStreamFindings(
       .map((f) => `[${f.severity}] ${f.location ? `${f.location} — ` : ""}${f.issue}`.slice(0, 300));
   } catch { return []; }
 }
+
 
 // (`judge_read` is GONE, implementation and all — 2026-09-05, user decision
 // D4. It was a zero-caller path: never on the agent surface and never called

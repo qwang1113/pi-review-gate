@@ -78,9 +78,9 @@ export const TOOL_DECISION_TABLE =
   "| 当前在 main/master/dev/develop 上要提交 | checkpoint 会被门禁直接拒（2026-09-16 起不弹确认框）；ship 提交（git commit）也会被拒 — 先切到功能分支 |\n" +
   "| 有 judge 在跑、还有活可做 | 先把活做掉——新消息落盘时门禁会用标准报告唤醒你（结论、证据位置、记录情况、待答问题） |\n" +
   "| 有 judge 在跑、确实没活可做 | `judge_wait({role})` — 消息驱动：新 finding / judge 提问 / 本轮结论 / pane 消失，任一到达即返回 |\n" +
-
   "| 任务做完了 | `declare_done({summary})` — 门禁复检后收尾，工作留在当前分支 |\n" +
   "| 要改敏感文件 / 缩小审查范围 | `request_sensitive_edit` / `request_scope_limit` |";
+
 
 /**
  * The check that stops the "ask in prose, end the turn, get woken up" cycle.

@@ -154,6 +154,15 @@ export interface RoundWaitReply {
 const ROUND_ENDING_REASONS = new Set(["report", "pane-dead"]);
 
 /**
+ * Minimum spacing between two calls of the wait — the anti-spin floor.
+ *
+ * The waiting tool normally blocks for minutes, so this costs nothing in the
+ * healthy case; it exists for the case where it returns instantly, forever.
+ */
+export const ROUND_WAIT_MIN_GAP_MS = 1_000;
+
+
+/**
  * Wait for a round to END, on top of a wait that returns on every MESSAGE.
  *
  * WHY BOTH EXIST (P0, 2026-09-05). `judge_wait` is message-driven, which is
@@ -166,9 +175,14 @@ const ROUND_ENDING_REASONS = new Set(["report", "pane-dead"]);
  * the auditor mid-round and made any draft with findings fail closed forever.
  *
  * So this keeps calling the SAME wait (哲学三: never a second waiting loop)
- * until the round really ends. It terminates for two independent reasons: the
- * wait's own cursors mean a given message ends at most one call, and the whole
- * sequence shares ONE budget.
+ * until the round really ends. It terminates for three independent reasons:
+ * the wait's own cursors mean a given message ends at most one call, the whole
+ * sequence shares ONE budget, and — because the first of those belongs to
+ * SOMEBODY ELSE — a call that returned instantly is followed by a minimum gap.
+ * That last one is not theoretical: if the cursor write is skipped (a judge
+ * with no registry entry), the same mid-round message ends every call, and a
+ * measured 354k spins burned the budget with a tmux probe and two file reads
+ * each (round-2 P2). Liveness must not depend on another module's write.
  */
 export async function awaitRoundReport(input: {
   /** One call of the waiting tool, given the window it may block for. */
@@ -178,17 +192,27 @@ export async function awaitRoundReport(input: {
   budgetMs?: number;
   /** The caller's ESC. */
   aborted?: () => boolean;
+  /** Injectable pause, so a test drives the anti-spin gap without waiting. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Minimum spacing between two calls (default 1s). */
+  minGapMs?: number;
 }): Promise<RoundWaitReply> {
   const deadline = input.now() + (input.budgetMs ?? JUDGE_WAIT_MAX_TIMEOUT_MS);
+  const minGapMs = input.minGapMs ?? ROUND_WAIT_MIN_GAP_MS;
+  const sleep = input.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   for (;;) {
-    const remaining = deadline - input.now();
+    const startedAt = input.now();
+    const remaining = deadline - startedAt;
     const reply = await input.wait(Math.max(1_000, remaining));
     const reason = reply.details?.reason;
     if (reply.isError === true) return reply;
     if (typeof reason === "string" && ROUND_ENDING_REASONS.has(reason)) return reply;
     if (input.aborted?.() === true || input.now() >= deadline) return reply;
+    const elapsed = input.now() - startedAt;
+    if (elapsed < minGapMs) await sleep(minGapMs - elapsed);
   }
 }
+
 
 
 // (THE wait discipline moved to lib/agent-directives.ts, 2026-09-05: the

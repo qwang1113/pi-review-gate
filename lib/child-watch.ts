@@ -153,8 +153,8 @@ export function buildChildWaitNotice(
         return `- ${child.role} ${child.title}（session ${child.sessionId}${label ? `, label ${label}` : ""}）`;
       }),
       WAIT_DISCIPLINE_HINT,
-
     );
   }
   return lines.join("\n");
 }
+

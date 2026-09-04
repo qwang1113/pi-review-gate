@@ -354,7 +354,19 @@ test("the polling detector needs BOTH a long sleep and a channel/stream read", (
     detectHandRolledWaitPolling("sleep 280; grep P0 .pi/review-stream/review-x.jsonl"),
     "the measured shape (sleep 280 + grep the stream) is recognised",
   );
+  // `sleep` takes a suffix on both GNU and BSD, and `sleep 5m` is the loudest
+  // version of this shape — reading its argument as a bare number would miss it.
+  assert.ok(
+    detectHandRolledWaitPolling("sleep 5m && tail .pi/review-stream/r.jsonl"),
+    "a suffixed duration is still a duration",
+  );
+  assert.equal(
+    detectHandRolledWaitPolling("sleep 5s && tail .pi/review-stream/r.jsonl"),
+    undefined,
+    "…and five seconds is still not a wait",
+  );
 });
+
 
 test("the hint is delivered through the hook and the command still runs", async () => {
   const r = makeDeps();

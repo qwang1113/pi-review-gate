@@ -198,6 +198,11 @@ const WAIT_EVIDENCE = /rg-channels|review-stream|\.pi\/judge-sessions|RG_JUDGE_S
  * channel keeps doing exactly that; it just gets told there is a tool.
  *
  * Pure and exported, so the shape is unit-testable without a shell.
+ *
+ * `sleep` takes a suffix on both GNU and BSD (`5m`, `1h`), so the argument is
+ * read as a duration rather than as a bare number — `sleep 5m` is the same
+ * wait as `sleep 300`, and reading it as NaN would let the loudest case
+ * through.
  */
 export function detectHandRolledWaitPolling(command: string): { reason: string } | undefined {
   if (!WAIT_EVIDENCE.test(command)) return undefined;
@@ -205,8 +210,7 @@ export function detectHandRolledWaitPolling(command: string): { reason: string }
   for (const tokens of lexSegmentTokens(command)) {
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i] !== "sleep") continue;
-      const seconds = Number(tokens[i + 1]);
-      if (Number.isFinite(seconds) && seconds >= POLLING_SLEEP_SECONDS) longSleep = true;
+      if (sleepSeconds(tokens[i + 1]) >= POLLING_SLEEP_SECONDS) longSleep = true;
     }
   }
   if (!longSleep) return undefined;
@@ -217,6 +221,16 @@ export function detectHandRolledWaitPolling(command: string): { reason: string }
       "改用 `judge_wait({role})`：新 finding、judge 提问、本轮结论、pane 消失，任一到达即返回，正文直接带回来。",
   };
 }
+
+/** `sleep` accepts a suffix (`30`, `5m`, `1h`); anything else is not a duration. */
+function sleepSeconds(token: string | undefined): number {
+  const matched = /^(\d+(?:\.\d+)?)([smhd])?$/.exec(token ?? "");
+  if (!matched) return Number.NaN;
+  const unit = matched[2];
+  const multiplier = unit === "m" ? 60 : unit === "h" ? 3_600 : unit === "d" ? 86_400 : 1;
+  return Number(matched[1]) * multiplier;
+}
+
 
 
 /**

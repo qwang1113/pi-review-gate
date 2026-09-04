@@ -2750,7 +2750,13 @@ test("judge_wait applies the MESSAGE-DRIVEN criteria and returns the standard re
   // own prose.
   assert.match(body, /buildStandardReport\(\{/, "the reply is the gate's standard report");
   assert.doesNotMatch(body, /本轮已结束（判据/, "no second report text may come back");
+  // …and the OTHER wake-up path — the gate noticing a finished round on its
+  // own at settle time — speaks through the same builder. Two formats would be
+  // two things to keep truthful, and the opener would have to learn both.
+  const settle = windowOf("async function settleFinishedRounds(", "\n  /**", "settleFinishedRounds");
+  assert.match(settle, /buildStandardReport\(\{/, "the settle wake-up uses the same builder");
 });
+
 
 
 test("STREAMING: every long-running gate tool publishes progress on its own onUpdate", () => {

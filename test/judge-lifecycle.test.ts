@@ -189,15 +189,38 @@ test("awaitRoundReport keeps waiting through mid-round messages and returns the 
     { details: { reason: "report" } }, // must never be reached
   ];
   let clock = 0;
+  const slept: number[] = [];
   const got = await awaitRoundReport({
     wait: async (timeoutMs) => { windows.push(timeoutMs); clock += 1_000; return replies.shift()!; },
     now: () => clock,
+    sleep: async (ms) => { slept.push(ms); },
   });
   assert.deepEqual(got, { details: { reason: "report" } });
   assert.equal(windows.length, 3, "one call per message, then the report ends it");
   assert.ok(windows[1]! < windows[0]!, "the budget is shared across the calls, not restarted by each");
   assert.equal(replies.length, 1, "it stops at the report");
+  assert.deepEqual(slept, [], "a wait that took the whole gap needs no extra pause");
 });
+
+test("awaitRoundReport cannot SPIN when the wait keeps returning instantly", async () => {
+  // Round-2 P2: the loop's other termination reason (a cursor that advances)
+  // is written by somebody else, and a judge with no registry entry skips that
+  // write. A measured 354k iterations burned the budget, each with a tmux
+  // probe and two file reads. Liveness may not depend on another module.
+  let clock = 0;
+  let calls = 0;
+  const slept: number[] = [];
+  await awaitRoundReport({
+    wait: async () => { calls++; return { details: { reason: "finding" } }; },
+    now: () => clock,
+    budgetMs: 10_000,
+    minGapMs: 1_000,
+    sleep: async (ms) => { slept.push(ms); clock += ms; },
+  });
+  assert.equal(calls, 11, "the instant replies are paced by the gap, not spun through");
+  assert.ok(slept.every((ms) => ms === 1_000), "each pause is the full gap the call did not take");
+});
+
 
 test("awaitRoundReport ends on a dead pane, an error, an abort, or the budget", async () => {
   const dead = await awaitRoundReport({
