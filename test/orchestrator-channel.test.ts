@@ -22,7 +22,7 @@ import {
   projectChannel,
   readChannel,
   requestPayload,
-  MAX_INLINE_RECORD_CHARS,
+  MAX_INLINE_RECORD_BYTES,
   judgeChannelTarget,
   reportText,
   HEARTBEAT_STALE_MS,
@@ -130,7 +130,10 @@ test("a bulky payload SPILLS to a side file so the JSONL line can never be torn"
   });
   assert.equal((stored as { payload?: string }).payload, undefined, "the bulky field left the line");
   const line = io.files.get(channelPathFor(ORCH, "c1", HOME))!;
-  assert.ok(line.length <= MAX_INLINE_RECORD_CHARS + 200, `the appended line stayed small: ${line.length}`);
+  // BYTES, not characters: PIPE_BUF is a byte limit and this project's own
+  // payloads are Simplified Chinese (3 bytes per code point).
+  const bytes = Buffer.byteLength(line, "utf8");
+  assert.ok(bytes <= MAX_INLINE_RECORD_BYTES + 200, `the appended line stayed small: ${bytes} bytes`);
 
   const read = readChannel(io, channelPathFor(ORCH, "c1", HOME));
   const record = read.records[0] as Extract<ChannelRecord, { kind: "request" }>;
@@ -519,9 +522,32 @@ test("an oversized report summary SPILLS like any other bulky payload", () => {
   assert.equal((stored as { summary?: string }).summary, undefined, "the bulky field left the line");
   const path = channelPathFor(target.orchestrationId, target.childId, target.home);
   const line = io.files.get(path)!;
-  assert.ok(line.length <= MAX_INLINE_RECORD_CHARS + 300, `the appended line stayed small: ${line.length}`);
+  const bytes = Buffer.byteLength(line, "utf8");
+  assert.ok(bytes <= MAX_INLINE_RECORD_BYTES + 300, `the appended line stayed small: ${bytes} bytes`);
   const read = readChannel(io, path);
   assert.equal(reportText(io, read.records[0] as Extract<ChannelRecord, { kind: "report" }>), huge);
+});
+
+test("the spill budget is measured in BYTES — a CJK payload cannot slip through on char count", () => {
+  // PIPE_BUF is a byte limit; `String.length` counts UTF-16 units. Everything
+  // a judge writes into this channel is Simplified Chinese by directive (L4),
+  // and a CJK code point is 3 bytes — so a record comfortably under 1500
+  // CHARACTERS can be 4400 bytes and tear on a concurrent append. Measured on
+  // characters, this payload stayed inline; measured on bytes it spills.
+  const io = memoryIO(() => T0);
+  const target = judgeChannelTarget("opener-1", "judge-1", HOME);
+  const cjk = "结论：这一处的边界判断会读到未定义值，必须显式处理。".repeat(30); // ~810 chars, ~2400 bytes
+  assert.ok(cjk.length < 1500, "the fixture must be UNDER the old character budget");
+  assert.ok(Buffer.byteLength(cjk, "utf8") > 1500, "…and OVER the byte budget, or it proves nothing");
+  const stored = appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(T0).toISOString(),
+    reportId: "rep-cjk", round: 1, verdict: "NEEDS_HUMAN", summary: cjk,
+  });
+  assert.equal((stored as { summary?: string }).summary, undefined, "it must spill on the byte budget");
+  const path = channelPathFor(target.orchestrationId, target.childId, target.home);
+  assert.ok(Buffer.byteLength(io.files.get(path)!, "utf8") < 4096, "and the line stays inside PIPE_BUF");
+  const read = readChannel(io, path);
+  assert.equal(reportText(io, read.records[0] as Extract<ChannelRecord, { kind: "report" }>), cjk);
 });
 
 test("a channel with no report has no lastReport", () => {

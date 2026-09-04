@@ -51,13 +51,21 @@ import { writeFileAtomic } from "./atomic-write.ts";
 export const CHANNEL_ROOT_DIRNAME = "rg-channels";
 
 /**
- * A serialized record longer than this spills its bulky field to a side file.
+ * A serialized record whose UTF-8 length exceeds this spills its bulky field
+ * to a side file.
  *
  * Deliberately well under `PIPE_BUF` (4096): the budget has to cover the
  * record's own envelope plus JSON escaping, and being wrong here means a torn
  * line, which is the one failure this whole scheme exists to prevent.
+ *
+ * MEASURED IN BYTES, and that is not a detail: `PIPE_BUF` is a byte limit,
+ * while `String.length` counts UTF-16 units. Everything a judge writes here is
+ * Simplified Chinese by directive (L4), and a CJK code point is 3 bytes — so a
+ * 1500-CHARACTER record can be 4400 bytes and tear, which is exactly the case
+ * this constant exists to prevent. (Found while adding the structured findings
+ * array, 2026-09-04; the prose `summary` path had the same latent hole.)
  */
-export const MAX_INLINE_RECORD_CHARS = 1500;
+export const MAX_INLINE_RECORD_BYTES = 1500;
 
 /**
  * No record for this long, while the pane is still alive, means `stalled` —
@@ -422,9 +430,14 @@ export function appendRecord(io: ChannelIO, target: ChannelTarget, record: Chann
   return stored;
 }
 
-/** Move `payload` / `text` into a side file when the line would be too long. */
+/** The UTF-8 size of a record once serialized — what `PIPE_BUF` actually bounds. */
+function recordBytes(record: ChannelRecord): number {
+  return Buffer.byteLength(JSON.stringify(record), "utf8");
+}
+
+/** Move `payload` / `text` / `findings` into a side file when the line would be too long. */
 function spillIfLarge(io: ChannelIO, target: ChannelTarget, record: ChannelRecord): ChannelRecord {
-  if (JSON.stringify(record).length <= MAX_INLINE_RECORD_CHARS) return record;
+  if (recordBytes(record) <= MAX_INLINE_RECORD_BYTES) return record;
   if (record.kind === "request" && record.payload !== undefined) {
     const path = payloadPathFor(target.orchestrationId, target.childId, record.requestId, target.home);
     io.writeText(path, record.payload);
@@ -446,11 +459,13 @@ function spillIfLarge(io: ChannelIO, target: ChannelTarget, record: ChannelRecor
     // findings must not stay inline just because it has no prose.
     let out: ChannelRecord = record;
     const path = payloadPathFor(target.orchestrationId, target.childId, record.reportId, target.home);
-    const findingsChars = record.findings === undefined ? 0 : JSON.stringify(record.findings).length;
-    const summaryChars = record.summary === undefined ? 0 : record.summary.length;
+    const findingsSize = record.findings === undefined ? 0 : Buffer.byteLength(JSON.stringify(record.findings), "utf8");
+    const summarySize = record.summary === undefined ? 0 : Buffer.byteLength(record.summary, "utf8");
     const spillFindings = () => {
       const r = out as ChannelReportRecord;
-      if (r.findings === undefined) return;
+      // An empty array is not what blew the budget — moving it out would cost
+      // a side file and save two characters.
+      if (r.findings === undefined || r.findings.length === 0) return;
       const text = JSON.stringify(r.findings);
       io.writeText(`${path}.findings`, text);
       const { findings, ...rest } = r;
@@ -463,11 +478,11 @@ function spillIfLarge(io: ChannelIO, target: ChannelTarget, record: ChannelRecor
       const { summary, ...rest } = r;
       out = { ...rest, summaryRef: { path, chars: summary.length } };
     };
-    const [first, second] = findingsChars >= summaryChars
+    const [first, second] = findingsSize >= summarySize
       ? [spillFindings, spillSummary]
       : [spillSummary, spillFindings];
     first();
-    if (JSON.stringify(out).length > MAX_INLINE_RECORD_CHARS) second();
+    if (recordBytes(out) > MAX_INLINE_RECORD_BYTES) second();
     return out;
   }
   // Nothing bulky to move (a huge dialog title, say). Truncation would lose

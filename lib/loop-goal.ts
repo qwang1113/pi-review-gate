@@ -137,14 +137,14 @@ export interface LoopGoalConfirmation {
 export interface GoalPrereviewRecord {
   /** sha256 of the NORMALIZED draft text the auditor judged (goalTextHash). */
   hash: string;
-  /** PASS ⇔ the extension parsed a READY verdict from the auditor's output. */
+  /** PASS ⇔ the extension read a READY verdict off the auditor's own conclusion. */
   verdict: "PASS" | "FAIL";
   /** ISO time the extension recorded this audit. */
   at: string;
   /** How many findings the auditor concluded with (an older record may carry null). */
   findingsTotal?: number | null;
   /**
-   * The findings VERBATIM (severity + issue), when the fence parsed. Persisted
+   * The findings VERBATIM (severity + issue), as the auditor concluded them. Persisted
    * so a RE-audit of a revised draft can be handed the previous audit's
    * objections (goal criterion 2: incremental re-audit) — fingerprints alone
    * can look a finding up, they cannot carry it into the next task text.
@@ -230,8 +230,8 @@ export function diffDraftLines(before: string, after: string): { removed: string
 /**
  * The ready-made task text for a goal-auditor audit, built by the gate.
  *
- * Goal criterion 2 (mechanically injected re-audit): `record_goal_prereview`
- * replies with this COMPLETE task template. The carryover block (previous
+ * Goal criterion 2 (mechanically injected re-audit): the gate dispatches the
+ * auditor with this COMPLETE task template. The carryover block (previous
  * verdict + findings + previous draft) and the mechanically computed draft
  * delta ride along, so the auditor is told what changed without anyone
  * hand-writing it; the fresh-context transcript pointer is included too.

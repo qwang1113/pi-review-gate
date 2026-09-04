@@ -23,7 +23,7 @@
  * THE ONE HARD RULE. A stream line is EVIDENCE, never a verdict. `parseStreamLine`
  * refuses any line carrying a verdict-shaped field, so a partial stream can
  * never be laundered into a recorded gate decision: the verdict comes only
- * from the reviewer's final output, through `record_review`, as before.
+ * from the reviewer's own `judge_conclude` call, as before.
  */
 
 /** Severities the main agent may act on before the verdict lands. */

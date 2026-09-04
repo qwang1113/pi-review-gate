@@ -215,9 +215,9 @@ export interface PaneJudgeWaitObservation {
 
 /**
  * Observe one pane judge round: a NEW channel report ends it, a dead pane
- * ends it as failed, anything else is still running. The fence criterion
- * reads the channel (where the verdict is exact bytes), never a transcript
- * scan — the transcript stays the long memory, not the signal.
+ * ends it as failed, anything else is still running. The end-of-round
+ * criterion reads the channel (where the conclusion is structured data), never
+ * a transcript scan — the transcript stays the long memory, not the signal.
  */
 export function probeJudgeRound(
   deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane">,

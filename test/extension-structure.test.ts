@@ -242,9 +242,10 @@ function judgeToolsWiring(): string {
 /**
  * THE TEN ADVANCED ENTRIES ARE NOT REGISTERED (2026-08-30, philosophy three).
  *
- * Seven of them still EXIST as implementations, captured into `internalHost`
+ * FIVE of them still EXIST as implementations, captured into `internalHost`
  * so `judge_submit` and `propose_loop_goal` call the ONE copy of each
- * mechanical check; the other three were deleted outright. What must be true
+ * mechanical check; three were deleted outright, and the two RECORDERS are
+ * plain functions on no host at all (2026-09-04). What must be true
  * either way is that `pi` never learns the names — an agent that can see a
  * step can be tempted to sequence the steps by hand, which is the whole cost
  * philosophy two is about.

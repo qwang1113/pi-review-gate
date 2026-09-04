@@ -26,7 +26,9 @@
  *
  * Design principles (from real-world harness engineering):
  *   1 glob trap        → precommit runner warns on `node --test **` scripts
- *   2 fail-open parse  → verdict-parse scans ALL fences; BLOCKED wins
+ *   2 fail-open parse  → no verdict text to parse; a judge's structured
+ *                        conclusion rides its channel report, and a READY
+ *                        carrying an open P0/P1 is recorded as BLOCKED
  *   3 NO_CHECKS_RUN    → distinct precommit verdict; never treated as pass
  *   4 NotebookEdit     → coalesceToolPath reads every path param spelling
  *   5 extension drift  → ONE CODE_EXTENSIONS list; structural test enforces it
@@ -247,19 +249,23 @@ import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "../lib/judge-lifecycle.ts";
 // cost of a second path is not redundancy — it is an agent stopping to decide
 // which one applies, every single round.
 //
-// Seven of them are still IMPLEMENTATIONS, registered into `internalHost`
+// FIVE of them are still IMPLEMENTATIONS, registered into `internalHost`
 // instead of into `pi`: the chain calls them so the mechanical checks live in
-// exactly one place, and no model can see the names. The other three
+// exactly one place, and no model can see the names. Three
 // (`review_spawn` / `review_watch` / `review_send`) were deleted outright,
-// module included.
+// module included. The last two — the RECORDERS — are plain functions on no
+// host at all (2026-09-04): `recordReviewVerdict` here and
+// `recordGoalPrereview` in lib/goal-prereview-tools.ts. Their tool shape
+// existed only to carry text that had to be parsed back into a verdict, and a
+// conclusion arrives structured now.
 import { registerReviewPrepareTools } from "../lib/review-prepare-tools.ts";
 import { registerAdvisoryPrepareTools } from "../lib/advisory-prepare-tools.ts";
 
 // The L7 Copilot tools moved the same way: this file wires them, the module
 // owns their bodies (and lib/copilot-gh.ts the `gh` calls they make).
 import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
-// The L8 goal family (the agent-facing `propose_loop_goal` and the internal
-// `record_goal_prereview`) moved the same way: this file wires them, the
+// The L8 goal family (the agent-facing `propose_loop_goal` and the audit
+// recorder behind it) moved the same way: this file wires them, the
 // module owns their bodies (and lib/goal-prereview-tools.ts the audit record).
 import { registerGoalTools } from "../lib/goal-tools.ts";
 import { recordGoalPrereview, type GoalPrereviewDeps } from "../lib/goal-prereview-tools.ts";
@@ -877,7 +883,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   // root). When the agent edits or ships from ANOTHER git repository (sibling
   // checkout, submodule, …), that repo gets its OWN sidecar + fingerprint.
   // `activeRepoRoot` is the repo the agent most recently edited — the target
-  // of record_review / run_precommit. `sessionRepos` collects every repo this
+  // of verdict recording / run_precommit. `sessionRepos` collects every repo this
   // session has edited; declare_done requires ALL of them to pass.
   // True when the session cwd sits inside a git repository (gitRootOfDir
   // succeeded). When false, the session is a NON-GIT directory (e.g. /tmp):
@@ -1074,9 +1080,9 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
-   * Resolve the repo a `record_review` / `run_precommit` call targets.
+   * Resolve the repo the verdict recorder / `run_precommit` targets.
    *
-   * Before this existed both tools wrote to `activeRepoRoot`, which only an
+   * Before this existed both steps wrote to `activeRepoRoot`, which only an
    * edit-tool call could move: a session whose last edit was in repo B could
    * never record a verdict for repo A again, so A's commit stayed blocked no
    * matter how many review rounds ran. Resolution (and the multi-repo
@@ -1207,7 +1213,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   // NOT an extension-event heuristic) and is read by exactly one caller: the
   // before_agent_start prompt renderer. A stale hit can only produce a stale
   // PROMPT for one turn; every enforcement path (ship block, declare_done,
-  // record_review, arbitration, precommit binding, git hooks) calls
+  // verdict recording, arbitration, precommit binding, git hooks) calls
   // computeFingerprint() directly and is unaffected. A null token (git
   // unreadable) always falls through to a real compute — never to a reuse.
   let advisoryFpMemo: { token: string; fp: Fingerprint } | null = null;
@@ -2252,7 +2258,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
   /**
    * Review targets registered by prepare_review (commit mode): repo root →
-   * the reviewed baseline..HEAD plus HEAD's tree. record_review consumes it:
+   * the reviewed baseline..HEAD plus HEAD's tree. The verdict recorder consumes it:
    * a READY binds to the reviewed tree, and a HEAD that moved past the
    * registered head (a new checkpoint after prepare) is STALE ⇒ BLOCKED.
    */
@@ -3403,7 +3409,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       // P-multi: an edit OUTSIDE the session repo arms THAT repo's own gate.
       // A code/doc file's repo becomes the active repo (the target for the
-      // next record_review / run_precommit) and joins the declare_done set.
+      // next verdict record / run_precommit) and joins the declare_done set.
       // A non-code/doc edit (config dumps, scratch) must NOT retarget the
       // active repo or grow the set (round-3 Nit — it would only waste a
       // round on a change-less repo).
@@ -3459,11 +3465,11 @@ export default function reviewGate(pi: ExtensionAPI) {
 
       let dirty = false;
       // P-multi: an edit in the PRIMARY repo makes it the active repo again —
-      // otherwise a single cross-repo edit would leave record_review /
+      // otherwise a single cross-repo edit would leave verdict recording /
       // run_precommit pointed at the other repo forever (multi-repo deadlock).
       // (An edit OUTSIDE any git repo — editRepo null, e.g. a /tmp scratch
       // file — must NOT retarget the active repo; that would silently point
-      // the next record_review at the primary and waste a round.)
+      // the next recorded verdict at the primary and waste a round.)
       if (editRepo === primaryRepoRoot) activeRepoRoot.current = primaryRepoRoot;
       if (isCodeFile(path) && !state.hasCodeChange) { state.hasCodeChange = true; dirty = true; }
       if (isDocFile(path) && !state.hasDocChange) { state.hasDocChange = true; dirty = true; }
@@ -4071,7 +4077,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    *
    * WHY THIS IS NOT A SEPARATE TOOL ANY MORE (philosophy two). The audit was
    * three calls in a fixed order — `judge_submit({role:"goal-auditor"})`,
-   * wait for the process, then `record_goal_prereview` — and the agent had to
+   * wait for the process, then a recording call — and the agent had to
    * sequence them correctly every time, for a chain in which it makes no
    * decision at all. It now says only "here is the draft"; the gate builds
    * the auditor's task, runs the judge process, waits for it to exit, records
@@ -4563,15 +4569,15 @@ export default function reviewGate(pi: ExtensionAPI) {
    * Read a finished judge's conclusion and RECORD it — the gate's job, not
    * the agent's.
    *
-   * The agent used to copy the reviewer's output into record_review by hand:
-   * a transcription step with nothing creative in it, which could silently
-   * carry the wrong round's text. The recording tools keep every mechanical
-   * check they had (fence parsing, no-prepare refusal, STALE detection, cwd
+   * The agent used to copy the reviewer's output into a recording tool by
+   * hand: a transcription step with nothing creative in it, which could
+   * silently carry the wrong round's text. The recorders keep every mechanical
+   * check they had (no-prepare refusal, STALE detection, cwd
    * match, tree binding) — this only removes the copying.
    *
    * Returns the recorded summary, or undefined when there was nothing to
-   * record (no fence yet, an adviser, an unknown child) — the caller then
-   * simply tells the agent to read the child.
+   * record (no report for this round yet, an adviser, an unknown child) — the
+   * caller then simply tells the agent to read the child.
    */
   /** This round's raw output, or undefined when the log is unreadable. */
   function readRoundStdout(path: string): string | undefined {
@@ -5615,7 +5621,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
       const targetDir = targetRoot === primaryRepoRoot ? cwd : targetRoot;
       const st = stateForRepo(targetRoot);
-      // Same liveness rule as record_review: running precommit proves the
+      // Same liveness rule as the verdict recorder: running precommit proves the
       // agent is not waiting on the user — clear any stale question pause.
       delete st.pausedQuestion;
       // P1 fix: pass the target dir explicitly. runTrustedPrecommit previously
@@ -5722,7 +5728,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           : `${failed} Full output: ${outcome.logPath} — read it (or grep it) to see what failed; it is the complete runner output, not a summary.`;
 
       return {
-        // Name the REPO in the text (not just details) — see record_review.
+        // Name the REPO in the text (not just details) — see recordReviewVerdict.
         // The PASS binds to the repo root, so that is what is echoed; the
         // working directory is only shown when it is genuinely a different
         // place. Compared through realpath, because a Pi launched via a

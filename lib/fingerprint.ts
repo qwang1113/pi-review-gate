@@ -47,7 +47,7 @@ import { tmpdir } from "node:os";
  * subagent runs write artifacts under .pi-subagents/. If those writes
  * participate in the fingerprint, recording a READY review immediately
  * invalidates its own binding in any repo that does not gitignore .pi
- * (record_review → persist() rewrites the sidecar → next fingerprint
+ * (recording a verdict → persist() rewrites the sidecar → next fingerprint
  * differs → "code was modified after the last READY review" forever).
  * Reviews judge PROJECT code, never Pi's own state/artifact dirs.
  *
@@ -584,7 +584,7 @@ export function worktreeTreeOid(cwd: string, extraExcludePathspecs: readonly str
     // working tree nor HEAD — and plain
     // `git rm --cached` refuses exactly that ("use -f to force removal"),
     // failing the whole tree computation. Measured: with any snapshot on disk,
-    // worktreeTreeOid threw, `record_review` read the current tree as
+    // worktreeTreeOid threw, the verdict recorder read the current tree as
     // unreadable, and EVERY READY prepared through prepare_review was
     // downgraded to BLOCKED with "STALE TREE: current tree unreadable".
     // `--cached` keeps this inside the throwaway shadow index: no working-tree
@@ -669,7 +669,7 @@ export function computeFingerprint(cwd: string): Fingerprint {
  * ####################################################################
  * # NEVER use this to decide whether a gate is SATISFIED. It is not a #
  * # fingerprint and it is not staging-invariant. Enforcement paths    #
- * # (ship blocks, declare_done, record_review, arbitration, the git   #
+ * # (ship blocks, declare_done, verdict recording, arbitration, the git#
  * # hooks) MUST call computeFingerprint() directly, every time.       #
  * ####################################################################
  *
