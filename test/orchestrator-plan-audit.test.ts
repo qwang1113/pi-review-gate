@@ -20,8 +20,10 @@ import {
   adjudicatePlanAudit,
   planAuditHash,
   planAuditPassed,
+  selectCurrentAuditReport,
   type PlanAuditFinding,
 } from "../lib/orchestrator-plan-audit.ts";
+import type { ChannelRecord } from "../lib/orchestrator-channel.ts";
 import { parsePlan, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
 
 const NOW = "2026-09-17T12:00:00.000Z";
@@ -102,4 +104,80 @@ test("planAuditHash / planAuditPassed: the record binds to the canonical plan co
     ],
   });
   assert.equal(planAuditPassed(record, widened), false);
+});
+
+function childReport(reportId: string, opts: { round?: number; verdict?: string } = {}): ChannelRecord {
+  return {
+    kind: "report",
+    from: "child",
+    at: NOW,
+    reportId,
+    ...(opts.round === undefined ? {} : { round: opts.round }),
+    verdict: opts.verdict ?? "BLOCKED",
+  };
+}
+
+function orchestratorNote(): ChannelRecord {
+  return {
+    kind: "instruct",
+    from: "orchestrator",
+    at: NOW,
+    instructId: "in-1",
+    mode: "followUp",
+    text: "下一轮任务",
+  };
+}
+
+test("selectCurrentAuditReport: an empty channel closes nothing", () => {
+  assert.deepEqual(selectCurrentAuditReport([], { expectedRound: 1, consumedReportId: undefined }), {
+    ok: false,
+    reason: "no-report",
+  });
+});
+
+test("selectCurrentAuditReport: the P0 — an older round's BLOCKED never closes a resubmit", () => {
+  // Round 1 BLOCKED, recorded and consumed; the resubmit dispatches round 2.
+  // The channel still holds only round 1: selecting for round 2 must miss.
+  const records = [childReport("rep-round-1", { round: 1 })];
+  assert.deepEqual(
+    selectCurrentAuditReport(records, { expectedRound: 2, consumedReportId: "rep-round-1" }),
+    { ok: false, reason: "already-consumed", reportId: "rep-round-1" },
+  );
+});
+
+test("selectCurrentAuditReport: an unconsumed report from another round is still a miss", () => {
+  // Fresh re-dispatch seeds the cursor at the channel's newest report, but a
+  // late report from a killed round can still arrive: round decides.
+  const records = [childReport("rep-round-1", { round: 1 })];
+  assert.deepEqual(
+    selectCurrentAuditReport(records, { expectedRound: 2, consumedReportId: undefined }),
+    { ok: false, reason: "round-mismatch", reportId: "rep-round-1", round: 1 },
+  );
+});
+
+test("selectCurrentAuditReport: pre-tool reports without a round never match a real round", () => {
+  const records = [childReport("rep-legacy")];
+  const selected = selectCurrentAuditReport(records, { expectedRound: 1, consumedReportId: undefined });
+  assert.equal(selected.ok, false);
+  assert.equal((selected as { reason: string }).reason, "round-mismatch");
+});
+
+test("selectCurrentAuditReport: the current round's fresh report closes it", () => {
+  const records = [childReport("rep-round-1", { round: 1 }), childReport("rep-round-2", { round: 2 })];
+  const selected = selectCurrentAuditReport(records, { expectedRound: 2, consumedReportId: "rep-round-1" });
+  assert.equal(selected.ok, true);
+  assert.equal(selected.ok && selected.report.reportId, "rep-round-2");
+});
+
+test("selectCurrentAuditReport: only child reports count, newest one wins", () => {
+  const records = [childReport("rep-round-2", { round: 2 }), orchestratorNote()];
+  const selected = selectCurrentAuditReport(records, { expectedRound: 2, consumedReportId: undefined });
+  assert.equal(selected.ok, true);
+  assert.equal(selected.ok && selected.report.reportId, "rep-round-2");
+});
+
+test("selectCurrentAuditReport: entries that pre-date round numbering fall back to the cursor", () => {
+  const records = [childReport("rep-round-9", { round: 9 })];
+  const selected = selectCurrentAuditReport(records, { expectedRound: undefined, consumedReportId: undefined });
+  assert.equal(selected.ok, true);
 });

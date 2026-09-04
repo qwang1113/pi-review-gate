@@ -202,7 +202,9 @@ import {
   formatPlanAuditRefusal,
   planAuditHash,
   planAuditPassed,
+  selectCurrentAuditReport,
   type PlanAuditRecord,
+  type StaleAuditReportReason,
 } from "../lib/orchestrator-plan-audit.ts";
 
 import {
@@ -4220,21 +4222,43 @@ export default function reviewGate(pi: ExtensionAPI) {
         text: "review-gate: plan 审计已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。",
       };
     }
+    // THIS round's identity: the round number this dispatch registered and the
+    // wait cursor from BEFORE the wait. Both feed the shared stale-report guard —
+    // only a report that is new since the wait AND stamped with this round may
+    // be adjudicated.
+    const auditJudgeId = child.sessionId;
+    const expectedRound = judgeHierarchy[auditJudgeId]?.roundSeq;
+    const consumedBeforeWait = judgeHierarchy[auditJudgeId]?.lastReportId;
     onUpdate?.step?.("审计运行中（最长 10 分钟，完成即返回）");
-    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx, forwardWaitUpdates(onUpdate), signal);
+    const waited = await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx, forwardWaitUpdates(onUpdate), signal);
     onUpdate?.done?.("审计结束");
     // O-6 — the gate dispatched this plan auditor internally, so the gate
     // closes it. Placed before every return path so no branch can leak the child.
     const closeAuditor = () => callTool("judge_close", { role: "goal-auditor", repo: root }, latestCtx);
-    // THIS round's report only — the channel accumulates every round of the
-    // role's session, so its last report could belong to a plan audit that ran
-    // before this one. judge_wait above ended on THIS round's report, so the
-    // newest one is it.
+    const waitDetails = (waited.details ?? {}) as { done?: unknown; reason?: unknown };
     const target = judgeChannelTarget(child.openerId, child.sessionId);
     const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-    const last = projectChannel(read.records).lastReport;
+    const selected = selectCurrentAuditReport(read.records, { expectedRound, consumedReportId: consumedBeforeWait });
     await closeAuditor();
-    const output = last ? (reportText(channelIO, last) ?? "") : "";
+    // Fail-closed on every miss: a wait that never saw THIS round's report
+    // (timeout/pending/pane-dead) or a channel whose newest report belongs to
+    // another round records NOTHING — resubmitting reruns the audit instead of
+    // adjudicating a stale verdict.
+    if (waited.isError || waitDetails.done !== true || waitDetails.reason !== "report" || !selected.ok) {
+      const why =
+        !selected.ok && selected.reason === "round-mismatch"
+          ? `channel 最新 report 属于第 ${selected.round ?? "?"} 轮，不是本轮`
+          : waitDetails.reason === "pane-dead" ? "pane 已消失" : "等待未命中本轮 report";
+      return {
+        ok: false,
+        text:
+          `review-gate: plan 审计没有等到本轮裁决（${why}），什么都没有记录` +
+          "（fail-closed）——plan **没有**被送到用户面前。\n" +
+          "直接再 `submit` 一次即可重跑审计。",
+      };
+    }
+    const last = selected.report;
+    const output = reportText(channelIO, last) ?? "";
     const fenced = output ? (extractNewestFenceText(output) ?? output) : undefined;
     const parsed = fenced ? parseReviewOutput(fenced) : undefined;
     if (!parsed) {
@@ -4369,8 +4393,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       existing.streamPath = opts.streamPath;
       existing.spawnedAt = new Date().toISOString();
       childSessions.set(root, list);
+      // The wait cursor survives a re-dispatch: already-consumed reports must
+      // not end the new round's wait (stale-report P0 — a wiped cursor ends
+      // every fresh wait on the previous round's report instantly).
+      const keptCursor = judgeHierarchy[judgeId]?.lastReportId;
       const reg = registerJudge(judgeHierarchy, {
         judgeId, openerId: opener, role, repoRoot: root, paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
+        ...(keptCursor === undefined ? {} : { lastReportId: keptCursor }),
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
         createdAt: new Date().toISOString(),
       });
@@ -4452,12 +4481,23 @@ export default function reviewGate(pi: ExtensionAPI) {
       const next = childSessions.get(root) ?? [];
       next.push(child);
       childSessions.set(root, next);
+      // fresh:true starts a NEW review object: everything the channel holds so
+      // far belongs to an older object and must never end this round's wait.
+      // Seed the cursor at the channel's current newest report (best-effort —
+      // an unreadable channel leaves it unset, and the round check at record
+      // time still refuses old rounds).
+      let freshCursor: string | undefined;
+      try {
+        const freshTarget = judgeChannelTarget(opener, judgeId);
+        freshCursor = projectChannel(readChannel(channelIO, channelPathFor(freshTarget.orchestrationId, freshTarget.childId, freshTarget.home)).records).lastReport?.reportId;
+      } catch { freshCursor = undefined; }
       const reg = registerJudge(judgeHierarchy, {
         judgeId,
         openerId: opener,
         role,
         repoRoot: root,
         paneId: opened.paneId, roundSeq: nextJudgeRound(opener, judgeId),
+        ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
         createdAt: new Date().toISOString(),
       });
@@ -4606,6 +4646,36 @@ export default function reviewGate(pi: ExtensionAPI) {
    * recorder behind both judge_wait's dep and recordJudgeConclusion, so one
    * round is never recorded twice through two paths.
    */
+  /**
+   * STALE-REPORT GUARD for audit recording — goal and plan share one judge id
+   * per repo, so a verdict is recordable only when the channel's newest report
+   * IS this round's (see `selectCurrentAuditReport`). A miss records NOTHING
+   * and keeps the pending entry armed: the caller fail-closes and the auditor
+   * simply resubmits. Reviewer verdicts never pass through here.
+   */
+  function staleAuditGuard(root: string): { reason: StaleAuditReportReason; detail: string } | undefined {
+    const me = callerIdentity();
+    const entry = Object.values(judgeHierarchy).find(
+      (e) => e.role === "goal-auditor" && e.repoRoot === root && (me === undefined || e.openerId === me),
+    );
+    let records: ChannelRecord[] = [];
+    try {
+      if (entry) {
+        const guardTarget = judgeChannelTarget(entry.openerId, entry.judgeId);
+        records = readChannel(channelIO, channelPathFor(guardTarget.orchestrationId, guardTarget.childId, guardTarget.home)).records;
+      }
+    } catch { records = []; }
+    const selected = selectCurrentAuditReport(records, {
+      expectedRound: entry?.roundSeq,
+      consumedReportId: entry?.lastReportId,
+    });
+    if (selected.ok) return undefined;
+    const detail =
+      selected.reason === "round-mismatch"
+        ? `channel 最新 report 属于第 ${selected.round ?? "?"} 轮，不是本轮`
+        : selected.reason === "already-consumed" ? "channel 最新 report 已是消费过的旧裁决" : "channel 还没有本轮 report";
+    return { reason: selected.reason, detail };
+  }
   async function recordRoundOutput(fullText: string, root: string, role: string, ctx?: unknown): Promise<string | undefined> {
     if (role === "reviewer") {
       // No live tool ctx here, so the last one the session bound is what
@@ -4635,6 +4705,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (goalPending) {
       const recordCtx = ctx ?? lastUiCtx;
       if (!recordCtx) return undefined;
+      // Same stale-report rule as the plan audit: a verdict from any other
+      // round must not land on this draft. The pending entry stays armed.
+      const stale = staleAuditGuard(root);
+      if (stale) return `review-gate: goal 审计没有等到本轮裁决（${stale.detail}），什么都没有记录（fail-closed）。直接再 submit 一次即可重跑审计。`;
       dropAudits(root);
       const audit = await callTool("record_goal_prereview", {
         goal: goalPending.draft,
@@ -4645,6 +4719,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       return toolText(audit);
     }
     if (planPending) {
+      // Same stale-report rule as above: never record another round's verdict
+      // against this plan. The pending entry stays armed.
+      const stalePlan = staleAuditGuard(root);
+      if (stalePlan) return `review-gate: plan 审计没有等到本轮裁决（${stalePlan.detail}），什么都没有记录（fail-closed）——plan 没有被送审。直接再 submit 一次即可重跑审计。`;
       dropAudits(root);
       const fenced = extractNewestFenceText(fullText) ?? fullText;
       const parsed = parseReviewOutput(fenced);

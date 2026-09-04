@@ -343,6 +343,21 @@ grillme/ask_user 把需求反述澄清，摸清每个子会话的 goal 才能起
 持久化计数，重启延续），门禁在每轮注入强提示要求先协商 goal 再干活（只注入提示、
 不硬拦工具——用户决策），goal 获批后计数清零。
 
+**一轮裁决只属于那一轮（2026-09-04，实测 P0）**：审计等待结束后，门禁**不再**无条件把
+channel 里最新那条 report 当成本轮结果。`selectCurrentAuditReport`（`lib/orchestrator-plan-audit.ts`
+的纯函数）拿三件真值做判定 —— `judge_wait` 的 `details.done/reason`、本次 dispatch 登记的
+`roundSeq`、以及等待**开始前**的 `lastReportId` 游标；只有「等到了 report」且「report 的
+`round` 等于本轮」且「不是已消费过的那条」三者同时成立才解析裁决。任何一项不成立都是
+**审计未完成**：`state.planAudit` 一个字都不写，退回「什么都没有记录，直接再 `submit`
+一次重跑」。goal 审计走同一个纯函数（`recordRoundOutput` 的两条 pending 分支），因为它
+是同一个缺陷的另一半。
+
+配套的游标规则同样重要：`dispatchJudgeRound` 复用 pane 时**保留** `lastReportId`（重派不
+等于把旧 report 变新），`fresh:true` 开新 pane 时把游标**播种**到 channel 当前最新那条
+report（新 review 对象不该被上一个对象的结论终结）。原来的行为是把游标清空 —— 于是每次
+重派的等待都被上一轮的 report 瞬间命中，`BLOCKED` 过一次的 plan/goal 永远拿不到新裁决，
+编排层就此出工死锁。
+
 ## 六乙、任务书的最后一句话是门禁的
 
 `buildTaskDocument` 生成的任务书，在项目经理的 brief **之后**由门禁追加一段
