@@ -8,11 +8,12 @@
 ## 执行模型
 
 - **主会话**：带门禁的 pi 会话，负责全部写操作与流程协调。
-- **子会话**：独立的**非交互 pi 进程**（`pi -p --session-id`，不带
-  review-gate 门禁），承载所有 Judge 角色（goal-auditor / reviewer /
-  adviser）。同一工作区、同一分支；cwd 为仓库根目录。session id 按
-  role+repo 确定性派生，所以同一角色跨轮复用同一段上下文；进程退出即完成，
-  门禁读它本轮的输出并记录结论。没有 tmux、没有 pane、没有信号通道。
+- **子会话**：用户 window 里与主会话同窗的独立 pane 中的**交互 pi 进程**
+  （门禁以 judge 模式加载：reporting-shell 工具集 + heartbeat 上报 + fence 扫描落
+  report），承载所有 Judge 角色（goal-auditor / reviewer / adviser）。同一工作区、
+  同一分支；cwd 为仓库根目录。session id 按 role+repo 确定性派生，所以同一角色
+  跨轮复用同一段上下文；judge 以 verdict fence 收尾并停下（不退出进程），门禁
+  读 fence 落 channel report 并记录结论。
 - **只读探查**：并行的只读代码/文档探查并行安全（读者不写工作树，
   不会失效审查绑定）。L1/L2 执行层（recon / fixer）及其 subagent 派发已随
   pi-subagents companion 退役（2026-09-06）。
@@ -25,7 +26,7 @@
 （任务标题、意图、3–7 条可检查的验收标准、非目标、ISO 日期），简体中文
 （标识符/路径/代码 token 保持英文）。
 
-## 阶段 1：目标审核（judge 子进程 · goal-auditor）
+## 阶段 1：目标审核（judge pane · goal-auditor）
 
 1. 目标文本送审 → goal-auditor 子会话按 `docs/judge-protocol.md` 审核。
 2. 审核期间主会话继续做确定性工作（必做的修改/查询/调研），不空等。
@@ -60,14 +61,12 @@
 
 ## 贯穿机制
 
-- **状态同步（主动唤醒，非轮询）**：**进程退出即完成**——扩展在 spawn 时注册
-  `child.on("exit")`，回调里读本轮 stdout、记录 verdict，再用
-  `pi.sendMessage({customType:"review-gate", ...}, { triggerTurn: true, deliverAs: "steer" })`
-  唤醒主会话；不需要轮询，也没有信号通道。session_shutdown 时取消全部监听。
-  **完成信号只是加速器**：子会话退出/崩溃由它自己的落盘物判定（`exit-code`
-  存在，或记录的进程已不在——死了、或 pid 被复用给了别人；见
-  `lib/judge-session.ts`）。子会话有疑问时把问题作为最后一个 fenced JSON
-  输出并退出，主会话再 `judge_submit` 同一角色带着答案续接。
+- **状态同步（标准报告唤醒，非轮询）**：judge 以 verdict fence 收尾并停下（不退出
+  进程，pane 留给下一轮复用）；门禁在每次 settle 时扫描 transcript 尾部，命中即落
+  channel report、记录 verdict，再用标准报告唤醒主会话。父会话不轮询、不直读
+  transcript。pane 消失但 verdict 未落盘时本轮不算结束，opener 以同一 session id
+  重开 pane 续接（`judge_recover`）。judge 有疑问时调 `ask_user`（人与 opener 经通道
+  竞态，先答先生效），等答案时停下、不退出 pane。
 - **消息送达（argv + 文件）**：任务文本落盘（`.pi/judge-sessions/<role-repo>/sessions/task-<ts>.md`），
   以 `@file` 形式进 argv——非交互进程没有 TUI，也就没有多行被拆碎的问题。
 - **清理（时机是关键）**：judge 子会话的生命周期 = 整个任务周期，**不在任务中途关闭**——目标可能因

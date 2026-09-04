@@ -447,6 +447,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `judge-session.ts` | 把 judge transcript 当作长记忆：结论解析仍从它读 |
 | `judge-session-tools.ts` | 作用于**已存在** pane 的三个工具（`judge_read` 限 adviser / `judge_close` / `judge_wait`，opener 校验在内，等待判据是通道 report / pane 死亡）及其注册 |
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态、落 report（复用子会话通道原语）；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
+| `judge-report.ts` | verdict 收集（门禁侧）：每次 settle 扫 pane transcript 尾部（transcript 信封先提文本再找 fence），命中即落 channel report 并去重；session 目录由调用方从权威来源传入，本模块不做编码推导 |
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
 | `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
 | `llm-classify.ts` | 语义第二意见（DeepSeek V4 Flash），契约上只能加拦（TIGHTEN-ONLY） |

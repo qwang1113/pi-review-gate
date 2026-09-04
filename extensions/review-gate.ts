@@ -168,11 +168,10 @@ import {
   JUDGE_ROLE_ENV,
 } from "../lib/judge-pane.ts";
 import {
-  buildVerdictReport,
   readJudgeSideEnv,
-  verdictReportKey,
   JUDGE_STREAM_ENV,
 } from "../lib/judge-side.ts";
+import { collectVerdictReport } from "../lib/judge-report.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
 import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
@@ -1355,46 +1354,29 @@ export default function reviewGate(pi: ExtensionAPI) {
    * No verdict fence in the transcript tail ⇒ nothing to write (questions
    * and prose are not verdicts). Reporting never breaks the judge's work.
    */
-  async function maybeWriteVerdictReport(): Promise<void> {
+  async function maybeWriteVerdictReport(ctx: ExtensionContext): Promise<void> {
     const cfg = readJudgeSideEnv(process.env);
     if (!cfg) return;
     try {
       const binding = childBinding();
       if (!binding) return;
-      let tail = "";
-      try {
-        const dir = sessionDirForCwd(cwd);
-        const newest = readdirSync(dir)
-          .filter((f) => f.endsWith(".jsonl"))
-          .map((f) => {
-            try { return { f, m: statSync(pathJoin(dir, f)).mtimeMs }; } catch { return undefined; }
-          })
-          .filter((x): x is { f: string; m: number } => x !== undefined)
-          .sort((a, b) => b.m - a.m)[0];
-        if (!newest) return;
-        tail = readFileSync(pathJoin(dir, newest.f), "utf8").slice(-32768);
-      } catch { return; }
-      if (!tail) return;
-      let findingsCount: number | undefined;
-      const streamPath = (process.env[JUDGE_STREAM_ENV] ?? "").trim();
-      if (streamPath) {
-        try {
-          findingsCount = readFileSync(streamPath, "utf8").split("\n").filter((l) => l.trim().length > 0).length;
-        } catch { /* best effort */ }
-      }
-      const built = buildVerdictReport({ transcriptTail: tail, findingsCount, now: Date.now() });
-      if (!built) return;
-      const key = verdictReportKey(built);
-      if (reportedVerdictKeys.has(key)) return;
-      const target = binding.target;
-      const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-      const last = projectChannel(read.records).lastReport;
-      if (last && verdictReportKey({ verdict: last.verdict, findingsCount: last.findingsCount, summary: reportText(channelIO, last) ?? "" }) === key) {
-        reportedVerdictKeys.add(key);
-        return;
-      }
-      appendRecord(channelIO, target, built);
-      reportedVerdictKeys.add(key);
+      // Authoritative session dir (E2E P0): the live session manager honors
+      // the pane's explicit --session-dir; the cwd encoding does not.
+      const sessionDir = sessionDirFromContext(ctx, cwd);
+      const streamPath = (process.env[JUDGE_STREAM_ENV] ?? "").trim() || undefined;
+      const result = collectVerdictReport(
+        { channelIO: () => channelIO, channelHome: () => undefined },
+        {
+          sessionDir,
+          openerId: cfg.openerId,
+          judgeId: cfg.judgeId,
+          streamPath,
+          now: Date.now(),
+        },
+        reportedVerdictKeys,
+      );
+      if (!result.collected) return;
+      reportedVerdictKeys.add(result.key);
     } catch { /* reporting never breaks the judge's own work */ }
   }
 
@@ -6342,7 +6324,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     await drainChildInstructions(ctx);
     // Judge panes report their verdict to the opener's channel on every
     // settle (fenced verdict ⇒ report, anything else ⇒ silence).
-    if (readJudgeSideEnv(process.env)) await maybeWriteVerdictReport();
+    if (readJudgeSideEnv(process.env)) await maybeWriteVerdictReport(ctx);
     // Explore and normal never auto-continue — that is their defining
     // difference from loop. This check MUST stay before the loopArmed check:
     // explore/normal-mode edits set loopArmed = true in tool_result, and only

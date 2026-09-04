@@ -1,8 +1,11 @@
 # 层级化会话通信方案（设计约定，2026-09-04）
 
-> 状态：方案约定轮，只定形状，不改行为。
-> 本轮交付仅本文档；实现分后续轮按此文档执行。
-> 背景结论见调研（三种通信：judge 进程退出即完成 / 编排文件通道 / 人机框），本文把前两者统一为**上下级调用树**。
+> 状态：已实现（pane 化落地轮 READY）。本文是过程快照，部分机制已被
+> 「门禁做中间人的统一会话模型」轮取代：提问走 `ask_user`（不再经 question
+> fence）、管理入口（`judge_wait`/`judge_read`/`judge_close`）收归门禁；
+> 以模式注册表（`lib/gate-modes.ts`）与实现为准。
+> 背景结论见调研（三种通信：judge 落 verdict fence 即完成 / 编排文件通道 / 人机框），
+> 本文把前两者统一为**上下级调用树**。
 
 ## 一、调用链（唯一合法形状）
 
@@ -31,7 +34,7 @@
 * 启动 argv 与今天 `judge-process.ts` 同一机制（`pi --session-id <id> @<taskfile>`，无 shell），只是落点从“后台进程”换成“新 pane 里的交互进程”。
 * 上下文复用不变：同 role + 同 repo 同一 session id，重开 pane 即续接同一 transcript（与 `orchestrator_recover` 的 `rg-child-<childId>` 同理）。
 * 回收：review 对象终结时由门禁 `kill-pane` + 按“关最后一个才撤销 window 设置”规则收尾；transcript 与裁决记录保留，pane 不保留。终结指三者之一：verdict 为 READY、opener 放弃、换 review 对象。verdict 为 BLOCKED（还有下一轮）时 pane 保留，下一轮复用——落 verdict 不等于终结。
-* 提问：沿用 question fence 语义，但 pane 化后走通道 `request`/`answer` 竞态（人坐 pane 前可答，opener 经通道可代答，先答生效），不再要求“输出 fence 并退出”。
+* 提问：走 `ask_user`（人坐 pane 前可答，opener 经通道可代答，先答生效），等答案时停下、不退出 pane；question fence 已废弃。
 * 意外停止恢复：pane 消失（`dead`）但 verdict 未落盘时，本轮不算结束。opener 用 `judge_recover` 以同一 session id 重开 pane 续接 transcript 继续本轮（不新开一轮、不丢上下文），跨级禁令同样适用——只有 opener 能恢复自己的 review。
 * 多轮复用：pane 是承载体，轮是任务。同一 review（如同一 checkpoint 的连续复审轮）复用同一个 pane + 同一 transcript；只有换 review 对象（新 baseline、新 goal 草稿）才开新 pane。
 * 父级联关：opener `declare_done` 时门禁先关它名下全部 judge pane 再走正常 done 流程——已结束（verdict 已落盘）的直接回收；仍在跑的按 `judge_close` 语义放弃本轮再回收（未落盘的轮不记入 review 链）。opener 不手拼 `kill-pane`，联关全程门禁执行。本条取代现行“有名下未关闭 judge 即拒 done”规则，实现时同步改掉它，不并行两套 done 门槛。

@@ -23,16 +23,18 @@
    生命周期、信号、布局、`wait-for` 无超时、多行输入被 TUI 撕碎、
    崩溃后「pane 没了但 exit-code 没写」的歧义，全部成本都在这一层。
 
-2026-08-28 起，壳子退役：judge 是 `pi -p --session-id` **非交互进程**，
-`--session-id` 按 role+repo 确定性派生，进程退出即完成，同一 id 再拉起
-即续接同一段上下文。隔离仍来自 **commit 本身**：每次送审前主会话把改动
+2026-09-04 起，进程退役：judge 是用户 window 里与主会话同窗的独立 pane
+中的**交互 pi 进程**（门禁以 judge 模式加载，只给 reporting-shell 工具集）。
+`--session-id` 按 role+repo 确定性派生；judge 以 verdict fence 收尾并停下
+（不退出进程，pane 留给下一轮复用），门禁读 fence 落 channel report 并记录结论；
+同一 id 重开 pane 即续接同一段上下文。隔离仍来自 **commit 本身**：每次送审前主会话把改动
 提交为 checkpoint commit，审核者审 `baseline..HEAD`（不可变历史）。
 
-## 运行形态：进程，不是 pane
+## 运行形态：pane 承载，轮是任务
 
-- judge = `pi -p --no-extensions --no-skills --exclude-tools edit,write
-  --system-prompt <SP> --model <M> --session-dir <dir> --session-id <id>
-  @<task文件>`。非交互：处理完 prompt 即退出；stdout/stderr 由扩展 tee
+- judge = 用户 window 里的独立 pane 中的**交互 pi 进程**
+  （`pi --session-id <id> @<task文件>`，门禁以 judge 模式加载：reporting-shell
+  工具集 + heartbeat 上报 + fence 扫描落 report）。stdout/stderr 由扩展 tee
   到本轮 `stdout.log` / `stderr.log`。
 - **session id 是 resume 键**：`rg-<role>-<repoHash>`（确定性派生）。
   同 role + 同 repo 再 spawn 同一 id ⇒ 延续同一段对话（跨轮、跨主会话
@@ -47,32 +49,29 @@
 
 ## 生命周期与 liveness
 
-- **完成 = 进程退出**（操作系统保证）。扩展持有 ChildProcess 对象本身：
-  `child.exitCode === null` ⇔ 存活——没有 PID 复用歧义、没有 pane 探针。
-- 每轮 spawn 写 `runs/<ts>/`：`pid`（`<pid> <启动时刻>`，供跨会话接管）、
-  `exit-code`（**存在**即"已结束"的权威事实）、`stdout.log`、`stderr.log`。
-  `lib/judge-session.ts` 的读取逻辑（exit-code 优先、pid 身份三态判定）
-  保留，用于**主会话重启后**按 pid 文件接管/清扫孤儿。
-- **一轮只能交给一个空闲的 role**：同 role 进程仍在跑 ⇒ 本轮**拒绝受理**
-  （非交互 judge 只在 spawn 时读一次任务，没有中途投递的通道；假装受理
-  就会让主会话等一个从未送达的轮次）。等它退出后再提交，或 `fresh: true`
-  先 SIGTERM 旧进程。
-- **上下文复用靠 session，不靠进程**：已结束的进程先清出 registry，下一轮
-  用同一个 session id 重新 spawn —— pi 追加进同一个 jsonl，上下文原样延续。
-  「是否续接」由该 role 的 sessionDir 里是否已有 transcript 决定。
-- **孤儿接管**：主会话重启后 registry 重建，按 `.pi/judge-sessions/`
-  下的 pid/exit-code 文件判定旧进程是否还活着，活着的可继续（同 id
-  resume），死了的清理。
+- **完成 = verdict fence 落 channel report**。pane 是承载体、轮是任务：verdict 为
+  BLOCKED（还有下一轮）时 pane 保留复用；终结（READY、opener 放弃、换 review 对象）
+  时门禁回收 pane，transcript 与裁决记录保留。
+- **存活由 pane 名单判定**：opener 的运行期检查一次拉取本 window 的 pane 列表
+  （`listJudgePanes`），记录在但名单里没有 ⇒ pane 死亡；名单读不出 ⇒ 按活着处理
+  （缺信息永不结束等待，fail-closed）。心跳（channel state 记录）是第二信号。
+- **一轮一 pane**：同 judge 仍有活 pane ⇒ 新一轮走复用/排队语义，由门禁在派发时
+  决定（`dispatchJudgeRound`），opener 不手选。
+- **上下文复用靠 session，不靠 pane**：同一 role + 同一 repo 同一 session id，重开
+  pane 即追加进同一个 jsonl，上下文原样延续。「是否续接」由该 role 的 sessionDir
+  里是否已有 transcript 决定。
+- **重启接管**：opener 注册表落盘（`<repo>/.pi/judge-hierarchy.json`，按 repo 分片），
+  新会话启动与每次触达时懒合并；死 pane 的异主条目由触达者过户，活 pane 保持拒绝。
+  绝不为同一 session id 再开第二个 pi。
 
 ## 通信
 
-- **完成信号**：没有信号——进程退出即完成。扩展在 spawn 时注册
-  `child.on("exit")`，回调 `pi.sendMessage(..., { triggerTurn: true,
-  deliverAs: "steer" })` 主动唤醒主会话——不轮询。
-- **提问**：judge 把问题作为**最后一个 fenced JSON 输出**并退出
-  （`{"question": "...", "context": "..."}`）；主会话读到 question fence
-  后带着答案用**同一个 session id** 重新拉起（再 `judge_submit` 同一 role 即可），
-  上下文原样延续。没有 inbox 文件、没有 channel。
+- **完成信号**：verdict fence。pane 以 fence 收尾并停下（不退出进程，留给下一轮
+  复用）；门禁在每次 settle 时扫描 transcript 尾部，命中即落 channel report 并记录
+  结论、用标准报告唤醒 opener——父会话不轮询、不直读 transcript。
+- **提问**：judge 调 `ask_user`（人与 opener 经通道竞态，先答先生效）；等答案时停下，
+  不自行假定、不退出 pane。问答闭环由门禁中转，父会话收到的永远是整理后的报告，
+  不是 judge 原文。
 - **流式 findings**：追加到 `.pi/review-stream/<round>.jsonl`
   （仅证据，禁止 verdict 形状的行）。
 - **子会话的问题走点对点通道**（2026-08-30）：`propose_loop_goal` 的批准框与
