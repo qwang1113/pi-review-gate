@@ -18,6 +18,7 @@
  * clock, no process. The extension supplies the observations.
  */
 
+import { shortOpenerHash } from "./judge-process.ts";
 /** Root of the gate's judge session tree, relative to the repo. */
 export const JUDGE_SESSIONS_RELDIR = ".pi/judge-sessions";
 
@@ -28,15 +29,30 @@ export const JUDGE_WAIT_MAX_TIMEOUT_MS = 10 * 60 * 1000;
 export const JUDGE_WAIT_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
- * The work dir of one judge role in one repo — STABLE across rounds (B5).
+ * The work dir of one judge role in one repo in one OPENER session — STABLE across rounds of the same opener (B5).
  *
- * Same role + same repo ⇒ same dir ⇒ pi appends to the same transcript when
- * the next round spawns with the same session id. The round's own artifacts
- * (task file, stdout, pid) live under `runs/<ts>/`, which is where the
- * per-round variation belongs; a title never enters the path.
+ * Same role + same repo + same opener ⇒ same dir ⇒ pi appends to the same transcript when
+ * the next round spawns with the same session id. A different opener gets a different dir,
+ * so its transcript starts fresh and never reads a previous session's files. The round's own
+ * artifacts (task file, stdout, pid) live under `runs/<ts>/`, which is where the per-round
+ * variation belongs; a title never enters the path.
  */
-export function judgeWorkDirFor(role: string, repoHash: string): string {
-  return `${JUDGE_SESSIONS_RELDIR}/${safePathPart(role)}-${safePathPart(repoHash)}`;
+export function judgeWorkDirFor(role: string, repoHash: string, openerId: string): string {
+  return `${JUDGE_SESSIONS_RELDIR}/${judgeWorkDirBasename(role, repoHash, openerId)}`;
+}
+
+/** Basename of the opener-scoped work dir (the reclaim registry compares basenames). */
+export function judgeWorkDirBasename(role: string, repoHash: string, openerId: string): string {
+  return `${safePathPart(role)}-${safePathPart(repoHash)}-${shortOpenerHash(openerId)}`;
+}
+
+/**
+ * Basename of the PRE-OPENER work dir. RECLAIM GUARD ONLY — never derive a
+ * live path from it. It exists so the sweep can protect a possibly-live legacy
+ * peer (an old-code session still running) from immediate reclaim.
+ */
+export function legacyJudgeWorkDirBasename(role: string, repoHash: string): string {
+  return `${safePathPart(role)}-${safePathPart(repoHash)}`;
 }
 
 /**
@@ -45,6 +61,59 @@ export function judgeWorkDirFor(role: string, repoHash: string): string {
  */
 function safePathPart(raw: string): string {
   return raw.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "judge";
+}
+
+/** Judge session dirs with no known owner older than this are reclaimed. */
+export const JUDGE_SESSION_DIR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Is this a PRE-OPENER dir (`<role>-<repoHash>` with no opener segment)?
+ *
+ * New dirs end with TWO trailing `-<8hex>` segments (repo hash + opener hash);
+ * legacy dirs end with exactly ONE. Anything else (e.g. `archive`) is not ours
+ * and never qualifies — deletion fail-closed: only recognised shapes are reclaimed.
+ */
+export function isLegacyJudgeSessionDirName(name: string): boolean {
+  const base = name.split("/").pop() ?? name;
+  if (/-([0-9a-f]{8})-([0-9a-f]{8})$/.test(base)) return false;
+  return /-([0-9a-f]{8})$/.test(base);
+}
+
+/** One entry of the `.pi/judge-sessions/` listing for the reclaim decision. */
+export interface JudgeSessionDirEntry {
+  /** Basename of the dir (not the full path). */
+  name: string;
+  /** Directory mtime, ms since epoch; non-finite means "age unknown". */
+  mtimeMs: number;
+}
+
+/**
+ * Which judge session dirs to reclaim. Pure so the policy is unit-testable:
+ *
+ *  - a dir the registry still references (any format, possibly a live peer's)
+ *    is never reclaimed;
+ *  - a legacy (pre-opener) dir nobody references is reclaimed IMMEDIATELY —
+ *    a new opener must never read its transcript, so keeping it only risks
+ *    cross-session pollution;
+ *  - any other unreferenced dir is reclaimed once older than the TTL.
+ */
+export function selectStaleJudgeSessionDirs(
+  entries: ReadonlyArray<JudgeSessionDirEntry>,
+  knownNames: ReadonlySet<string>,
+  nowMs: number,
+): string[] {
+  const out: string[] = [];
+  for (const entry of entries) {
+    if (knownNames.has(entry.name)) continue;
+    if (isLegacyJudgeSessionDirName(entry.name)) {
+      out.push(entry.name);
+      continue;
+    }
+    if (Number.isFinite(entry.mtimeMs) && nowMs - entry.mtimeMs > JUDGE_SESSION_DIR_TTL_MS) {
+      out.push(entry.name);
+    }
+  }
+  return out;
 }
 
 

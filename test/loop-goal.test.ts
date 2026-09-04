@@ -480,9 +480,9 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
   assert.match(task, /===== 待审计的 goal 草稿 =====/);
   assert.match(task, /# 目标/);
   assert.match(task, /sess-9/);
-  assert.match(task, /\{"gate":"READY"\|"BLOCKED"/);
-  // The completion contract is embedded: fence-and-stop, questions via ask_user.
-  assert.match(task, /verdict fence 收尾并停下/);
+  assert.match(task, /以 judge_conclude 交卷/);
+  // The completion contract is embedded: conclude-and-stop, questions via ask_user.
+  assert.match(task, /调 judge_conclude 交卷并停下/);
   assert.match(task, /ask_user/);
   assert.doesNotMatch(task, /wait-for|inbox/); // no wait plumbing in the task
   assert.match(task, /own tmux pane/, "the pane running model is stated");
@@ -491,7 +491,8 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
   assert.doesNotMatch(first, /carryover/i);
   assert.doesNotMatch(first, /sess-/);
   // Round-17: output discipline is part of the task text.
-  assert.match(task, /输出纪律:只输出 fence \+ ≤3 行结论要点/, "the discipline is pinned in the task");
+  assert.match(task, /输出纪律:先交卷再写 ≤3 行结论要点/, "the discipline is pinned in the task");
+  assert.doesNotMatch(task, /fenced JSON verdict/, "no fence may come back");
 });
 
 test("buildGoalAuditTask: the draft delta is computed mechanically and injected (round-4 P1)", () => {

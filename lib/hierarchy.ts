@@ -34,6 +34,8 @@ export interface JudgeEntry {
   streamPath?: string;
   /** Newest report the opener already recorded — the wait's consumed cursor. */
   lastReportId?: string;
+  /** Round number the opener assigned this review's current round (judge_conclude stamps it on the report; one round concludes once). */
+  roundSeq?: number;
   /** ISO timestamp of registration. */
   createdAt: string;
 }

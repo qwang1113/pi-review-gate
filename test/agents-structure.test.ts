@@ -65,11 +65,12 @@ test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its ve
   assert.match(body, /^fallbackModels: claude-opus-5$/m, "same fallback chain as the other judges");
   assert.doesNotMatch(body, /tools:.*\b(edit|write|bash)\b/, "the auditor audits text; it must not be able to write");
   const src = readFileSync(join(AGENTS, "goal-auditor.md"), "utf8");
-  // Its output IS the gate record, so the two rules the parser depends on must
-  // be stated: exactly one fence, and never a quoted example fence (the parser
-  // keeps the WORST verdict across all fences).
-  assert.match(src, /exactly ONE/i, "the prompt must demand a single fence");
-  assert.match(src, /[Nn]ever quote an example verdict fence/, "a quoted BLOCKED example would poison a real PASS");
+  // Its conclude call IS the gate record, so the two rules the tool depends on must
+  // be stated: exactly one call per round, and never a fenced verdict in prose
+  // (prose is not consumed — a verdict written only in prose is no conclusion).
+  assert.match(src, /judge_conclude/, "the prompt must name the conclude tool");
+  assert.match(src, /exactly ONCE/, "the prompt must demand a single conclude call");
+  assert.match(src, /never write a fenced/, "a fenced verdict in prose would be silently unconsumed");
   assert.match(src, /Simplified Chinese/, "the goal-language rule lives in the auditor's checklist");
   // The file must itself OBEY the rule it teaches: `parseReviewOutput` scans
   // every fence and keeps the worst, and a system prompt is quoted back by

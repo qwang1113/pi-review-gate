@@ -107,6 +107,10 @@ import {
 } from "../lib/judge-process.ts";
 import {
   judgeWorkDirFor,
+  judgeWorkDirBasename,
+  legacyJudgeWorkDirBasename,
+  selectStaleJudgeSessionDirs,
+  JUDGE_SESSIONS_RELDIR,
 } from "../lib/judge-lifecycle.ts";
 import {
   createProgressReporter,
@@ -142,7 +146,7 @@ import {
   readChannel,
   reportText,
   type ChannelIO,
-  type ChannelReportRecord,
+  type ChannelRecord,
   type ChildReportedState,
 } from "../lib/orchestrator-channel.ts";
 import {
@@ -171,7 +175,8 @@ import {
   readJudgeSideEnv,
   JUDGE_STREAM_ENV,
 } from "../lib/judge-side.ts";
-import { collectVerdictReport, buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
+import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
+import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
 import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
@@ -1354,41 +1359,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
   }
 
-  /** Report keys this session already wrote (the channel re-read is the authority). */
-  let reportedVerdictKeys = new Set<string>();
   /** Open question ids already announced (in-memory; a restart re-announces — desired). */
   let announcedRequestIds = new Set<string>();
 
-  /**
-   * Judge panes write one `report` per fenced verdict, on every settle.
-   * No verdict fence in the transcript tail ⇒ nothing to write (questions
-   * and prose are not verdicts). Reporting never breaks the judge's work.
-   */
-  async function maybeWriteVerdictReport(ctx: ExtensionContext): Promise<void> {
-    const cfg = readJudgeSideEnv(process.env);
-    if (!cfg) return;
-    try {
-      const binding = childBinding();
-      if (!binding) return;
-      // Authoritative session dir (E2E P0): the live session manager honors
-      // the pane's explicit --session-dir; the cwd encoding does not.
-      const sessionDir = sessionDirFromContext(ctx, cwd);
-      const streamPath = (process.env[JUDGE_STREAM_ENV] ?? "").trim() || undefined;
-      const result = collectVerdictReport(
-        { channelIO: () => channelIO, channelHome: () => undefined },
-        {
-          sessionDir,
-          openerId: cfg.openerId,
-          judgeId: cfg.judgeId,
-          streamPath,
-          now: Date.now(),
-        },
-        reportedVerdictKeys,
-      );
-      if (!result.collected) return;
-      reportedVerdictKeys.add(result.key);
-    } catch { /* reporting never breaks the judge's own work */ }
-  }
+  // NOTE: there is deliberately NO settle-time verdict scraping here anymore. A round
+  // ends exactly one way — the judge calls judge_conclude (judge-side-only tool), which
+  // appends the channel report itself. See lib/judge-conclude.ts.
 
   /**
    * Tell the orchestration what this session is doing.
@@ -2143,15 +2119,23 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!pendingPlanAudits.has(root) && snap.planAudit) pendingPlanAudits.set(root, snap.planAudit);
   }
 
+  /** A pane-less foreign entry older than this is not a concurrent spawn. */
+  const FOREIGN_SPAWN_GRACE_MS = 10 * 60 * 1000;
   /**
-   * Adopt foreign entries nobody can still be driving: pane dead (or never
+   * Drop foreign entries nobody can still be driving: pane dead (or never
    * recorded) AND channel silent past the heartbeat budget. A live pane or a
    * fresh heartbeat keeps the strict refusal — that is a possibly-live peer,
    * which is what the cross-level rule protects. Own entries are never
    * touched; an unreadable pane list touches nothing (missing info never
-   * kills). Pendings ride along: a dead judge's draft stays actionable.
+   * kills). A pane-less entry younger than the spawn grace is kept: it may be
+   * a concurrent spawn that has not recorded its pane yet.
+   *
+   * WHY DROP, NOT ADOPT: judge ids are opener-scoped, so a new opener never
+   * shares an id with a dead entry — adopting it would only resurrect a review
+   * whose transcript the new session must never read. Dropped entries lose
+   * registry protection and their dirs fall to the TTL/legacy reclaim.
    */
-  function reclaimDeadForeignJudges(): void {
+  function dropDeadForeignJudges(): void {
     const caller = callerIdentity();
     if (!caller) return;
     const ownPane = process.env.TMUX_PANE?.trim() || undefined;
@@ -2165,11 +2149,62 @@ export default function reviewGate(pi: ExtensionAPI) {
         if (panes === undefined) continue;
         if (panes.includes(e.paneId)) continue;
         if (channelFresh(e)) continue;
-      }
-      judgeHierarchy[id] = { ...e, openerId: caller };
+      } else if (!foreignSpawnSettled(e)) continue;
+      delete judgeHierarchy[id];
       changed = true;
     }
     if (changed) persistJudgeHierarchy();
+  }
+
+  /** A pane-less foreign entry counts as settled once older than the grace. */
+  function foreignSpawnSettled(e: JudgeEntry): boolean {
+    const at = Date.parse(e.createdAt ?? "");
+    return Number.isFinite(at) && Date.now() - at > FOREIGN_SPAWN_GRACE_MS;
+  }
+
+  /**
+   * Best-effort reclaim of judge session dirs nobody owns. Registry-referenced
+   * dirs (either format — a live peer's, whatever code it runs) are protected;
+   * unreferenced legacy dirs go immediately, anything else past the TTL
+   * (lib/judge-lifecycle.ts decides, this only lists and deletes).
+   * Never throws: the sweep must not break a dispatch.
+   */
+  function sweepStaleJudgeSessionDirs(root: string): void {
+    try {
+      const base = pathJoin(root, JUDGE_SESSIONS_RELDIR);
+      const known = new Set<string>();
+      for (const e of Object.values(judgeHierarchy)) {
+        if (e.repoRoot !== root) continue;
+        known.add(judgeWorkDirBasename(e.role, shortRepoHash(e.repoRoot), e.openerId));
+        known.add(legacyJudgeWorkDirBasename(e.role, shortRepoHash(e.repoRoot)));
+      }
+      const names = readdirSync(base, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+      const entries = names.map((name) => {
+        let mtimeMs = Number.NaN;
+        try { mtimeMs = statSync(pathJoin(base, name)).mtimeMs; } catch { /* age unknown */ }
+        return { name, mtimeMs };
+      });
+      for (const stale of selectStaleJudgeSessionDirs(entries, known, Date.now())) {
+        try { rmSync(pathJoin(base, stale), { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    } catch { /* sweep never breaks the caller */ }
+  }
+
+  /**
+   * Number this judge's next round: above both the persisted entry and every
+   * report already in the channel (a close→spawn keeps the old reports, so the
+   * entry alone would restart at 1 and collide with them). Best-effort: an
+   * unreadable channel still numbers above the entry.
+   */
+  function nextJudgeRound(openerId: string, judgeId: string): number {
+    let records: ChannelRecord[] = [];
+    try {
+      const target = judgeChannelTarget(openerId, judgeId);
+      records = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
+    } catch { /* the entry alone still numbers above */ }
+    return nextRoundSeq(judgeHierarchy[judgeId]?.roundSeq, records);
   }
 
   /** Fresh heartbeat within budget ⇒ someone may still drive this judge. */
@@ -4275,7 +4310,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * Identity is a function of role + repo, never of the round: the session id
    * (the resume key) and the WORK DIR (B5 — a title-derived dir gave pi a new
    * `--session-dir` every round, so the "resumed" session started from zero)
-   * both come from `role + repoHash`. The title is a display label, and only
+   * both come from `role + repoHash + opener`. The title is a display label, and only
    * reaches `--name` and diagnostics.
    *
    * Reuse is the default and is what carries a judge's context across rounds:
@@ -4293,33 +4328,24 @@ export default function reviewGate(pi: ExtensionAPI) {
     streamPath?: string;
   }): JudgeDispatch {
     const { root, role, task } = opts;
-    reclaimDeadForeignJudges();
+    dropDeadForeignJudges();
     const title = opts.title.replace(/[^A-Za-z0-9._-]/g, "-") || role;
     const opener = callerIdentity();
     if (!opener) {
       return { ok: false, reused: false, error: "无法确认调用者身份——身份不明时不能派 review。" };
     }
-    const sessionId = judgeSessionIdFor(role, shortRepoHash(root));
+    sweepStaleJudgeSessionDirs(root);
+    const sessionId = judgeSessionIdFor(role, shortRepoHash(root), opener);
     const judgeId = sessionId;
-    // STABLE per role+repo (B5) — identity, not a per-round path.
-    const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root)));
+    // STABLE per role+repo+opener (B5) — identity, not a per-round path.
+    const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener));
     const sessionDir = pathJoin(workDir, "sessions");
     const continuesSession = hasTranscript(sessionDir);
     const ownPane = process.env.TMUX_PANE?.trim() || undefined;
     const run = (argv: readonly string[]) => runTmux(argv);
-    // One judge id, one opener: the deterministic id collides across
-    // sessions by construction, and the SECOND opener loses — two parents
-    // for one review is the cross-level shape lib/hierarchy.ts forbids.
-    const owned = judgeHierarchy[judgeId];
-    if (owned && owned.openerId !== opener) {
-      return {
-        ok: false,
-        reused: continuesSession,
-        sessionId,
-        sessionDir,
-        error: `review ${judgeId} 属于 ${owned.openerId}——跨级派 review 被拒绝，只能由 opener 自己派下一轮。`,
-      };
-    }
+    // Opener-scoped ids do not collide across sessions by construction: a second
+    // opener derives a different id and opens its own review. Cross-opener protection
+    // still lives in lib/hierarchy.ts (registration refuses two parents for one id).
     const list = childSessions.get(root) ?? [];
     const existing = list.find((c) => c.role === role && c.sessionId === sessionId);
     const paneAlive = existing?.paneId && ownPane ? judgePaneAlive(run, ownPane, existing.paneId) : undefined;
@@ -4344,7 +4370,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       existing.spawnedAt = new Date().toISOString();
       childSessions.set(root, list);
       const reg = registerJudge(judgeHierarchy, {
-        judgeId, openerId: opener, role, repoRoot: root, paneId: existing.paneId,
+        judgeId, openerId: opener, role, repoRoot: root, paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
         createdAt: new Date().toISOString(),
       });
@@ -4431,7 +4457,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         openerId: opener,
         role,
         repoRoot: root,
-        paneId: opened.paneId,
+        paneId: opened.paneId, roundSeq: nextJudgeRound(opener, judgeId),
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
         createdAt: new Date().toISOString(),
       });
@@ -4902,7 +4928,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       return resolved;
     },
     callerId: () => callerIdentity(),
-    hierarchy: () => { reclaimDeadForeignJudges(); return judgeHierarchy; },
+    hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy; },
     saveHierarchy: (next) => setHierarchy(next),
     findChild: (root, role, judgeId) => {
       const c = findJudgeChild(root, role, judgeId);
@@ -4936,9 +4962,29 @@ export default function reviewGate(pi: ExtensionAPI) {
     dropPendingAudit: (root) => dropAudits(root),
     cancelWaitTimer: () => cancelChildWaitTimer(),
   });
+  // judge_conclude is the ONLY tool that exists on one side only: a judge
+  // concludes its own round through it, and the main session must never see
+  // it (a main session that could self-certify a verdict breaks the gate).
+  // The guard is the registration itself — anti-forgery by surface, not secret.
+  if (readJudgeSideEnv(process.env)) {
+    registerJudgeConcludeTool(pi, {
+      env: () => process.env,
+      repoRoot: () => cwd,
+      hierarchyPath: (root) => pathJoin(root, ".pi", HIERARCHY_FILENAME),
+      readText: (path) => {
+        try {
+          if (!existsSync(path)) return undefined;
+          return readFileSync(path, "utf8");
+        } catch { return undefined; }
+      },
+      channelIO: () => channelIO,
+      channelHome: () => undefined,
+      now: () => Date.now(),
+    });
+  }
   registerJudgeSpawnTools(pi, {
     callerId: () => callerIdentity(),
-    hierarchy: () => { reclaimDeadForeignJudges(); return judgeHierarchy; },
+    hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy; },
     saveHierarchy: (next) => setHierarchy(next),
     channelIO: () => channelIO,
     channelHome: () => undefined,
@@ -4950,9 +4996,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (resolved.ok) ensureHierarchyLoaded(resolved.root);
       return resolved;
     },
-    launchConfig: (root, role) => {
+    launchConfig: (root, role, opener) => {
       const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-      const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root)));
+      const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener));
       const files = writeJudgeSpawnFiles({ repoRoot: root, role, agents, workDir, title: role });
       if (!files.model) {
         return { ok: false, error: `角色 ${role} 没有可派发的模型链——请修复 ~/.pi/review-gate.json 后重试` };
@@ -4986,9 +5032,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         }),
       };
     },
-    writeJudgeTaskFile: (root, role, task) => {
+    writeJudgeTaskFile: (root, role, opener, task) => {
       try {
-        const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root)));
+        const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener));
         const sessionDir = pathJoin(workDir, "sessions");
         mkdirSync(sessionDir, { recursive: true });
         const taskPath = pathJoin(sessionDir, `task-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}.md`);
@@ -6387,9 +6433,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     noteChildProgress(); // E — a settled turn is forward progress.
     reportChildState(ctx);
     await drainChildInstructions(ctx);
-    // Judge panes report their verdict to the opener's channel on every
-    // settle (fenced verdict ⇒ report, anything else ⇒ silence).
-    if (readJudgeSideEnv(process.env)) await maybeWriteVerdictReport(ctx);
+    // Judge panes conclude through judge_conclude (their own round-ending tool) —
+    // there is no settle-time verdict scraping, so nothing to do here.
     // Finished rounds wake in every mode except normal (gate fully off): explore
     // is advisory on enforcement, not deaf — its reports still land and record.
     if (state.taskMode !== "normal" && (await settleFinishedRounds(ctx))) return;
@@ -6423,9 +6468,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // certification e2e). A reporting shell has no gates of its own: the RESUME
     // text it received ("code review gate is PENDING", "the loop goal is
     // unconfirmed") is the OPENER's sidecar, and acting on it made the reviewer
-    // emit a second, fuller verdict fence 8 seconds after its first — two
-    // channel reports for ONE round, so the gate recorded a DRAFT verdict.
-    // Its completion is the fence it already wrote; nothing else is owed.
+    // call judge_conclude twice 8 seconds apart — two channel reports for ONE round,
+    // so the gate recorded a DRAFT verdict (now refused: one round concludes once).
+    // Its completion is the single conclude call it already made; nothing else is owed.
     if (readJudgeSideEnv(process.env)) return;
 
     // The revival clock for the LOOP session: armed here so a turn that
@@ -6687,7 +6732,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // session id. Judge panes themselves skip this (they operate nothing).
     if (!readJudgeSideEnv(process.env)) {
       for (const root of new Set([primaryRepoRoot, ...sessionRepos])) ensureHierarchyLoaded(root);
-      reclaimDeadForeignJudges();
+      dropDeadForeignJudges();
     }
     // A new session negotiates its OWN goal: whatever audit rounds a previous
     // session spent on its draft do not carry into this one's count.

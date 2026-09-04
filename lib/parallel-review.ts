@@ -330,7 +330,7 @@ export function buildReviewPrompt(
 
   lines.push(
     "",
-    "OUTPUT: fenced JSON verdict FIRST (the gate parses it; docSync is REQUIRED on the single-review path), then a prose review below the fence.",
+    "OUTPUT: call judge_conclude FIRST (the gate records it; docSync is REQUIRED on the single-review path), then a prose review below.",
     // The prompt asks for a MEASURED `pwd`, not one copied out of this text —
     // a copied value says nothing about where the review actually happened,
     // and only a measured one makes the check below meaningful.
@@ -341,18 +341,18 @@ export function buildReviewPrompt(
     // something else. (That is all it does — see the `cwd` field's doc
     // comment.) Telling the reviewer otherwise on one branch would be the same
     // class of lie this field exists to catch.
-    'Before you answer, run `pwd` and put its output in the verdict\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
+    'Before you answer, run `pwd` and pass its output as the call\'s "cwd" field. Report what the command printed — do NOT copy the path out of this task text.' +
       " The gate matches it against the repo this round was prepared for" +
       (isolation
         ? " (the shared repo root), so `cd` back there before you answer if you ended up inside your throwaway worktree."
         : "."),
     // eslint-disable-next-line max-len
-    'Verdict shape: {"gate": "READY"|"BLOCKED"|"NEEDS_HUMAN", "cwd": "<your real pwd>", "docSync": "UPDATED"|"NOT_NEEDED", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], "notes": "<prose review>"}',
+    'Conclude shape: judge_conclude({verdict: "READY"|"BLOCKED"|"NEEDS_HUMAN", cwd: "<your real pwd>", docSync: "UPDATED"|"NOT_NEEDED", findings: [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], notes: "<prose review, plain text, no fences>"})',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",
-    // Round-17 (user ask): output discipline — the gate consumes ONLY the
-    // verdict fence and the finding stream; prose beyond a 5-line summary is
+    // Round-17 (user ask): output discipline — the gate consumes ONLY the conclude call
+    // verdict, and the finding stream; prose beyond a 5-line summary is
     // wasted tokens.
-    "输出纪律:verdict fence 在最前,其后最多 5 行结论要点(每条一句);不复述任务、不复述代码、不写过程叙事;详细证据放 findings 流(evidence 字段),不要写进正文。",
+    "输出纪律:先调 judge_conclude 交卷,其后最多 5 行结论要点(每条一句);不复述任务、不复述代码、不写过程叙事;详细证据放 findings 流(evidence 字段),不要写进正文。",
     "",
     JUDGE_COMPLETION_DISCIPLINE,
   );

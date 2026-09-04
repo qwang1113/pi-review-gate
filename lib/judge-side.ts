@@ -10,18 +10,16 @@
  * a gate; there is deliberately no second channel implementation for it.
  *
  * WHAT WRITES THE REPORT. The opener records verdicts (STALE checks, tree
- * binding — opener-owned), but only the judge side sees its own finish. On
- * settle it scans its transcript tail for a verdict fence and appends the
- * `report`; the opener learns it through its own `wait` receipt. The full
- * fence text rides as the (possibly spilled) summary, so the opener feeds
- * the EXACT bytes the recorder parses — no prose round-trip, no truncation.
- *
- * Pure-ish: env parsing and report building are pure; IO (transcript tail,
- * stream count, channel) arrives injected at the call sites.
+ * binding — opener-owned), but only the judge side sees its own finish. It ends the
+ * round by calling judge_conclude (lib/judge-conclude.ts), which synthesises the
+ * canonical fence and appends the `report`; the opener learns it through its own
+ * `wait` receipt. The fence rides as the (possibly spilled) summary, so the opener
+ * feeds the EXACT bytes the recorder parses — no prose round-trip, no truncation.
+ * Pure-ish: env parsing and channel binding are pure; IO (stream count,
+ * channel) arrives injected at the call sites.
  */
 import {
   judgeChannelTarget,
-  newChannelId,
   type ChannelIO,
 } from "./orchestrator-channel.ts";
 import type { ChildChannelBinding } from "./orchestrator-child-channel.ts";
@@ -30,7 +28,6 @@ import {
   JUDGE_OPENER_ENV,
   JUDGE_ROLE_ENV,
 } from "./judge-pane.ts";
-import { parseReviewOutput } from "./verdict-parse.ts";
 
 /** Task file the pane was opened with (round 1), if the opener passed one. */
 export const JUDGE_TASK_ENV = "RG_JUDGE_TASK";
@@ -70,48 +67,5 @@ export function judgeSideBinding(
   };
 }
 
-export interface VerdictReportInput {
-  /** Bounded transcript tail — the caller caps it, the fence decides. */
-  transcriptTail: string;
-  /** Stream line count, when the stream file was readable. */
-  findingsCount?: number;
-  /** Clock for the record stamp. */
-  now: number;
-  /** Newest fence bytes; when given, the verdict is parsed from it (a reused
-   *  pane's tail holds every previous round's fence) while the summary still
-   *  carries the whole tail as evidence. Omit to parse the tail itself. */
-  fenceText?: string | undefined;
-}
-
-/**
- * Build the round's `report` from a transcript tail, or `undefined` when no
- * verdict fence is in it. Pure: the caller reads the tail and appends.
- */
-export function buildVerdictReport(input: VerdictReportInput): {
-  reportId: string;
-  kind: "report";
-  from: "child";
-  at: string;
-  verdict: string;
-  findingsCount?: number;
-  summary: string;
-} | undefined {
-  const parsed = parseReviewOutput(input.fenceText ?? input.transcriptTail);
-  if (!parsed) return undefined;
-  return {
-    reportId: newChannelId("rep", input.now),
-    kind: "report",
-    from: "child",
-    at: new Date(input.now).toISOString(),
-    verdict: parsed.verdict,
-    ...(input.findingsCount === undefined ? {} : { findingsCount: input.findingsCount }),
-    summary: input.transcriptTail,
-  };
-}
-
 /** Re-exported single source: the deny set lives in lib/gate-modes.ts (mode registry). */
 export { JUDGE_DENIED_TOOLS, judgeDeniedReason } from "./gate-modes.ts";
-/** Dedup key: one verdict + count + size is one report, never two. */
-export function verdictReportKey(report: { verdict: string; findingsCount?: number; summary: string }): string {
-  return `${report.verdict}#${report.findingsCount ?? "-"}#${report.summary.length}`;
-}

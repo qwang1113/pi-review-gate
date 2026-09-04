@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   judgeWorkDirFor,
+  isLegacyJudgeSessionDirName,
+  selectStaleJudgeSessionDirs,
+  JUDGE_SESSION_DIR_TTL_MS,
   hasJudgeFence,
   clampWaitTimeout,
   adjudicateGoalAudit,
@@ -11,24 +14,70 @@ import {
   WAIT_DISCIPLINE_HINT,
 } from "../lib/judge-lifecycle.ts";
 
-// ---- B5: the work dir is a function of role+repo, never of the round ----
 
-test("judgeWorkDirFor is stable across rounds for the same role and repo", () => {
-  const first = judgeWorkDirFor("goal-auditor", "f3eb4277");
-  const second = judgeWorkDirFor("goal-auditor", "f3eb4277");
+// ---- B5: the work dir is a function of role+repo+opener, never of the round ----
+
+test("judgeWorkDirFor is stable across rounds for the same role, repo and opener", () => {
+  const first = judgeWorkDirFor("goal-auditor", "f3eb4277", "opener-1");
+  const second = judgeWorkDirFor("goal-auditor", "f3eb4277", "opener-1");
   assert.equal(first, second);
-  assert.equal(first, ".pi/judge-sessions/goal-auditor-f3eb4277");
+  assert.match(first, /^\.pi\/judge-sessions\/goal-auditor-f3eb4277-[0-9a-f]{8}$/);
 });
 
-test("judgeWorkDirFor separates roles and repos", () => {
-  assert.notEqual(judgeWorkDirFor("reviewer", "abc"), judgeWorkDirFor("adviser", "abc"));
-  assert.notEqual(judgeWorkDirFor("reviewer", "abc"), judgeWorkDirFor("reviewer", "def"));
+test("judgeWorkDirFor separates roles, repos and openers", () => {
+  assert.notEqual(judgeWorkDirFor("reviewer", "abc", "opener"), judgeWorkDirFor("adviser", "abc", "opener"));
+  assert.notEqual(judgeWorkDirFor("reviewer", "abc", "opener"), judgeWorkDirFor("reviewer", "def", "opener"));
+  assert.notEqual(judgeWorkDirFor("reviewer", "abc", "opener-1"), judgeWorkDirFor("reviewer", "abc", "opener-2"));
 });
 
 test("judgeWorkDirFor refuses path traversal in its inputs", () => {
-  const dir = judgeWorkDirFor("../../etc", "../passwd");
+  const dir = judgeWorkDirFor("../../etc", "../passwd", "../../evil");
   assert.ok(!dir.includes(".."), dir);
-  assert.equal(dir, ".pi/judge-sessions/------etc----passwd");
+});
+
+// ---- t1: reclaim of judge session dirs nobody owns ----
+
+test("legacy (pre-opener) dir names are recognised, new and foreign ones are not", () => {
+  assert.equal(isLegacyJudgeSessionDirName("goal-auditor-f3eb4277"), true);
+  assert.equal(isLegacyJudgeSessionDirName("reviewer-12345678"), true);
+  assert.equal(isLegacyJudgeSessionDirName("goal-auditor-f3eb4277-a1b2c3d4"), false);
+  assert.equal(isLegacyJudgeSessionDirName("archive"), false);
+  assert.equal(isLegacyJudgeSessionDirName("reviewer-abc"), false);
+});
+
+test("reclaim: a referenced dir is never selected, even when old or legacy", () => {
+  const now = 1_700_000_000_000;
+  const old = now - JUDGE_SESSION_DIR_TTL_MS - 1000;
+  const entries = [
+    { name: "reviewer-12345678", mtimeMs: old },
+    { name: "reviewer-12345678-a1b2c3d4", mtimeMs: old },
+  ];
+  assert.deepEqual(
+    selectStaleJudgeSessionDirs(entries, new Set(["reviewer-12345678", "reviewer-12345678-a1b2c3d4"]), now),
+    [],
+  );
+});
+
+test("reclaim: an unreferenced legacy dir is selected immediately, TTL notwithstanding", () => {
+  const now = 1_700_000_000_000;
+  assert.deepEqual(
+    selectStaleJudgeSessionDirs([{ name: "goal-auditor-f3eb4277", mtimeMs: now }], new Set(), now),
+    ["goal-auditor-f3eb4277"],
+  );
+});
+
+test("reclaim: an unreferenced new-format dir is selected only past the TTL", () => {
+  const now = 1_700_000_000_000;
+  const fresh = [{ name: "reviewer-12345678-a1b2c3d4", mtimeMs: now - 1000 }];
+  const old = [{ name: "reviewer-12345678-a1b2c3d4", mtimeMs: now - JUDGE_SESSION_DIR_TTL_MS - 1000 }];
+  assert.deepEqual(selectStaleJudgeSessionDirs(fresh, new Set(), now), []);
+  assert.deepEqual(selectStaleJudgeSessionDirs(old, new Set(), now), ["reviewer-12345678-a1b2c3d4"]);
+});
+
+test("reclaim: an unrecognised shape is selected only past the TTL, never immediately", () => {
+  const now = 1_700_000_000_000;
+  const entries = [{ name: "archive", mtimeMs: now }];
+  assert.deepEqual(selectStaleJudgeSessionDirs(entries, new Set(), now), []);
 });
 
 // (Per-round run dirs are gone with the pane migration: the pane is the

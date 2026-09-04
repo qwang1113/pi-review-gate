@@ -234,12 +234,16 @@ judge（reviewer / adviser / goal-auditor）是**独立 pane 里的交互 pi**�
 所有（项目经理 → 子会话 → review，plan review 由项目经理自开；跨级调用一律
 fail-closed）：`judge-pane.ts` 开/关/探活 pane（argv 全部复用
 `orchestrator-tmux.ts` 与 `orchestrator-pane-decor.ts`），`hierarchy.ts` 是 opener
-注册表与唯一的跨级裁判（纯函数），`judge-side.ts` 是 pane 内门禁的 reporting
-shell（heartbeat、对话框竞态、落 report，复用子会话通道原语，不另起通道），
-`judge-process.ts` 只剩身份（确定性会话 id）与 scratch 目录 helper（进程派生
-已删），`judge-session.ts` 把 transcript 当作长记忆（结论解析仍从它读），
-`judge-lifecycle.ts` 剩下超时钳制、等候纪律与审计裁决（派单/等待判据已随进程
-模型删除），`judge-prompt.ts` 装配系统提示（角色定义 + 共同协议），
+注册表与唯一的跨级裁判（纯函数，条目带 opener 派发的轮次号 `roundSeq`），`judge-side.ts` 是 pane 内门禁的 reporting
+shell（heartbeat、对话框竞态，复用子会话通道原语，不另起通道），一轮的结束是 judge
+自己调 `judge_conclude`（`judge-conclude.ts`，只在 judge 侧注册）：结构化结论→门禁合成规范
+fence→直写 channel report，一轮只交一次，transcript 扒取路径已删；
+`judge-process.ts` 只剩身份（opener 限定的确定性会话 id：同 opener 复用、换 opener 全新）与 scratch
+目录 helper（进程派生已删），`judge-session.ts` 把 transcript 当作长记忆（结论走交卷工具，
+不再从它解析），
+`judge-lifecycle.ts` 剩下 opener 限定的工作目录（含无人认领目录的 TTL/旧格式回收选择器）、
+超时钳制、等候纪律与审计裁决（派单/等待判据已随进程模型删除），`judge-report.ts` 只剩 opener 侧
+标准报告（扒取半边已删），`judge-prompt.ts` 装配系统提示（角色定义 + 共同协议），
 `child-watch.ts` 按 pane 存活 + 通道活跃度分类等待中的子会话；
 `judge-session-tools.ts` 是已收归 internalHost 的三个管理入口
 （`judge_read` / `judge_close` / `judge_wait`，实现保留供门禁链调用，agent 不可见），
@@ -439,15 +443,16 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `goal-prereview-tools.ts` | **内部实现**（注册在 internalHost）：`record_goal_prereview`——把 goal-auditor 的裁决落成绑定草稿 sha256 的记录；外加两个 goal 工具共用的提交检查（空稿、长度上限、goal 绑定哪个 repo） |
 | `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：两个 host，agent 侧只看得见 `propose_loop_goal` |
 | `gate-modes.ts` | 门禁模式注册表（唯一实现）：八种模式各有提示词模板加工具集加流程规则（plan/goal/review 仅内部置入）；`resolveGateMode` 单派发；禁跑工具表与完成纪律的 single source（`judge-side.ts` 只 re-export，各任务 builder 只引用） |
-| `hierarchy.ts` | opener 注册表与唯一的跨级裁判：谁开的 review 谁操作，其他会话一律 fail-closed（纯函数，IO 经 seam）；注册表与两类 pending 按 repo 落盘恢复（`parseHierarchySnapshot` fail-closed 解析），死 pane 异主条目由触达者过户、活 pane 保持拒绝，重启不死锁 |
-| `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：会话文件放哪、超时钳制、等候纪律、审计裁决是否阻塞（派单/等待判据已随进程模型删除） |
+| `hierarchy.ts` | opener 注册表与唯一的跨级裁判：谁开的 review 谁操作，其他会话一律 fail-closed（纯函数，IO 经 seam）；注册表与两类 pending 按 repo 落盘恢复（`parseHierarchySnapshot` fail-closed 解析），条目带 opener 派发的轮次号 `roundSeq`；死 pane 异主条目由触达者丢弃（不再过户——opener 限定的 id 不会碰撞）、活 pane 保持拒绝，重启不死锁 |
+| `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：opener 限定的会话文件放哪（含无人认领目录的 TTL/旧格式回收选择器）、超时钳制、等候纪律、审计裁决是否阻塞（派单/等待判据已随进程模型删除） |
 | `judge-pane.ts` | review pane 的开/关/探活：argv 全复用 `orchestrator-tmux.ts`，颜色标题复用 `orchestrator-pane-decor.ts`，tmux 经注入的 runner（单测用假实现） |
-| `judge-process.ts` | judge 身份（确定性会话 id，跨 pane/轮/重启的续接键）与 scratch 目录 helper；并把 judge 的 `$TMPDIR` 指向**每会话专属**的 scratch 目录（`judgeScratchDir`）——reviewer 的临时 review worktree 落在那里，门禁按 `reviewScratchWorktrees` 在 pane 回收后精确回收 |
+| `judge-process.ts` | judge 身份（opener 限定的确定性会话 id：同 opener 跨 pane/轮/重启复用、换 opener 全新）与 scratch 目录 helper；并把 judge 的 `$TMPDIR` 指向**每会话专属**的 scratch 目录（`judgeScratchDir`，以 session id 为键、随新 id 自动迁移）——reviewer 的临时 review worktree 落在那里，门禁按 `reviewScratchWorktrees` 在 pane 回收后精确回收 |
 | `judge-prompt.ts` | judge 会话的系统提示装配：角色定义 + 共同协议 |
-| `judge-session.ts` | 把 judge transcript 当作长记忆：结论解析仍从它读 |
+| `judge-session.ts` | 把 judge transcript 当作长记忆（结论走交卷工具，不再从它解析） |
 | `judge-session-tools.ts` | 已收归 internalHost 的三个管理入口（`judge_read` / `judge_close` / `judge_wait`：轮询、读结论、关 pane；实现保留供门禁链调用，agent 不可见；opener 校验与等待判据在内） |
-| `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态、落 report（复用子会话通道原语）；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
-| `judge-report.ts` | verdict 收集（门禁侧）：每次 settle 扫 pane transcript 尾部（transcript 信封先提文本再找 fence），命中即落 channel report 并去重；session 目录由调用方从权威来源传入，本模块不做编码推导 |
+| `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
+| `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论→合成规范 fence→直写 channel report；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度 |
+| `judge-report.ts` | opener 侧标准报告（wake-up 内容：verdict、证据位置、记录情况、待答问题；transcript 扒取半边已随交卷工具删除） |
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
 | `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
 | `llm-classify.ts` | 语义第二意见（DeepSeek V4 Flash），契约上只能加拦（TIGHTEN-ONLY） |

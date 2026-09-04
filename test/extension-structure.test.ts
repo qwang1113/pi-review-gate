@@ -2191,18 +2191,24 @@ test("judge_submit is the agent's single judge entry and hides every process det
   assert.match(body, /dispatchJudgeRound\(\{ root, role, title, task/, "dispatch is delegated to the one spawn owner");
 });
 
-test("dispatchJudgeRound owns identity: stable dir per role+repo, pane reuse, fresh-kill", () => {
+test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane reuse, fresh-kill", () => {
   const at = SRC.indexOf("function dispatchJudgeRound(");
   assert.ok(at > 0, "the single dispatch owner must exist");
   const body = SRC.slice(at, at + 9000);
-  // B5: the work dir is derived from role+repo — NEVER from the round's title,
+  // B5: the work dir is derived from role+repo+opener — NEVER from the round's title,
   // which gave pi a new --session-dir every round and restarted the session.
-  assert.match(body, /judgeWorkDirFor\(role, shortRepoHash\(root\)\)/,
-    "the work dir is a function of role+repo");
+  assert.match(body, /judgeWorkDirFor\(role, shortRepoHash\(root\), opener\)/,
+    "the work dir is a function of role+repo+opener");
   assert.doesNotMatch(body, /judge-sessions", `rg-\$\{title\}`/, "no title-derived session dir may come back");
-  // One judge id, one opener: the second opener loses at dispatch time.
+  // Opener-scoped ids cannot collide across sessions: a second opener derives a
+  // different id and opens its own review — there is no cross-opener refusal here.
   assert.match(body, /callerIdentity\(\)/, "the opener is the caller's own identity, never a parameter");
-  assert.match(body, /owned\.openerId !== opener/, "a second opener is refused at dispatch");
+  assert.match(body, /judgeSessionIdFor\(role, shortRepoHash\(root\), opener\)/,
+    "the session id carries the opener");
+  assert.doesNotMatch(body, /owned\.openerId !== opener/,
+    "no second-opener refusal may come back: scoped ids cannot collide");
+  assert.match(body, /sweepStaleJudgeSessionDirs\(root\)/,
+    "dispatch sweeps the session dirs nobody owns");
   // A living pane takes the round through its channel — there is no
   // refuse-busy anymore (that belonged to the one-shot process).
   assert.match(body, /kind: "instruct"/, "reuse delivers the round as a channel record");
@@ -2215,7 +2221,7 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo, pane reuse, fr
   assert.match(body, /hasTranscript\(sessionDir\)/,
     "reuse is decided by the transcript, not by a live pane");
   assert.match(body, /openJudgePane\(run, \{/, "a real pane open still exists for the no-reuse case");
-  // fresh:true kills the living pane FIRST (singleton per role+repo).
+  // fresh:true kills the living pane FIRST (singleton per role+repo+opener).
   assert.match(body, /closeJudgePane\(run, existing\.paneId\)/, "fresh kills the pane before re-opening");
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
 });
@@ -3838,17 +3844,26 @@ test("R-3: an orchestrator never receives the LOOP's continuation — its criter
 
 test("round-7 P1: a judge pane never receives the LOOP's continuation either", () => {
   // Measured in the certification e2e: the reviewer pane got the OPENER's
-  // RESUME ("code review gate is PENDING"), answered it with a second, fuller
-  // verdict fence 8s after its first, and the gate recorded a DRAFT verdict
-  // from the first report. A reporting shell has no gates of its own.
+  // RESUME ("code review gate is PENDING"), answered it with a second conclude
+  // 8s after its first, and the gate recorded a DRAFT verdict from the first
+  // report. A reporting shell has no gates of its own — and since the conclude
+  // tool, no settle-time scraping either.
   const settled = windowOf('pi.on("agent_settled"', "// L7/L8 — completion-only requirements", "agent_settled");
   assert.match(settled, /if \(readJudgeSideEnv\(process\.env\)\) return;/,
     "a judge pane returns before the RESUME injection");
-  // …but AFTER its own report-writing step, or the verdict would never land.
-  const writeAt = settled.indexOf("maybeWriteVerdictReport(ctx)");
-  const returnAt = settled.indexOf("if (readJudgeSideEnv(process.env)) return;");
-  assert.ok(writeAt > 0 && returnAt > writeAt,
-    "the pane still writes its own channel report before it stops");
+  assert.doesNotMatch(settled, /maybeWriteVerdictReport/,
+    "no settle-time verdict scraping may come back");
+});
+
+test("judge_conclude is registered judge-side only (anti-forgery by surface)", () => {
+  // The main session must never see the tool: a main session that could
+  // self-certify a verdict breaks the gate. The guard is the registration.
+  const calls = [...SRC.matchAll(/registerJudgeConcludeTool\(pi,/g)];
+  assert.equal(calls.length, 1, "exactly one registration, on the agent-visible host");
+  const at = calls[0]!.index!;
+  const window = SRC.slice(Math.max(0, at - 900), at);
+  assert.match(window, /if \(readJudgeSideEnv\(process\.env\)\) \{/,
+    "the registration sits inside the judge-side branch");
 });
 
 test("the background supervisor is wired, default-on in orchestrator mode, and cleaned up", () => {
@@ -4070,20 +4085,23 @@ test("restart does not strand pane judges: registry + pendings persist per repo"
     "a restarted session merges previous slices");
 });
 
-test("restart does not deadlock on a dead opener: dead foreign panes are adopted", () => {
-  // Persisting without reclaim trades the strand gap for a refusal deadlock:
+test("restart does not deadlock on a dead opener: dead foreign entries are dropped", () => {
+  // Persisting without a drop trades the strand gap for a refusal deadlock:
   // a restarted session id never equals the dead opener. Dead foreign
-  // entries (pane gone + channel silent) are adopted by whoever touches
-  // them; a live pane or fresh heartbeat keeps the strict refusal.
-  assert.match(SRC, /function reclaimDeadForeignJudges\(\)/, "reclaim exists");
+  // entries (pane gone + channel silent) are dropped by whoever touches
+  // them — adopting them would resurrect a review whose opener-scoped
+  // transcript the new session must never read. A live pane or fresh
+  // heartbeat keeps the strict refusal.
+  assert.match(SRC, /function dropDeadForeignJudges\(\)/, "the drop exists");
   assert.match(SRC, /e\.openerId === caller\) continue;/, "own entries are never touched");
   assert.match(SRC, /panes\.includes\(e\.paneId\)\) continue;/, "a live pane keeps the refusal");
   assert.match(SRC, /if \(channelFresh\(e\)\) continue;/, "a fresh heartbeat keeps the refusal");
-  assert.match(SRC, /judgeHierarchy\[id\] = \{ \.\.\.e, openerId: caller \};/, "the dead entry is adopted");
+  assert.match(SRC, /delete judgeHierarchy\[id\];/, "the dead entry is dropped, never adopted");
+  assert.doesNotMatch(SRC, /openerId: caller \};/, "no adoption may come back");
   // …and it runs on every hierarchy read, so no tool path can deadlock.
-  const reads = [...SRC.matchAll(/hierarchy: \(\) => \{ reclaimDeadForeignJudges\(\); return judgeHierarchy; \},/g)];
-  assert.equal(reads.length, 2, "both judge tool families reclaim on read");
+  const reads = [...SRC.matchAll(/hierarchy: \(\) => \{ dropDeadForeignJudges\(\); return judgeHierarchy; \},/g)];
+  assert.equal(reads.length, 2, "both judge tool families drop on read");
   const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
-  assert.match(SRC.slice(dispatchAt, dispatchAt + 800), /reclaimDeadForeignJudges\(\);/,
-    "dispatch reclaims before refusing");
+  assert.match(SRC.slice(dispatchAt, dispatchAt + 800), /dropDeadForeignJudges\(\);/,
+    "dispatch drops before deriving its own id");
 });

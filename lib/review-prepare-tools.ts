@@ -358,8 +358,8 @@ async function doPrepareReview(
       : []),
 
     "ADVANCED / internal：正常路径是一次 judge_submit({ role: \"reviewer\", task: <本轮改动说明> })——",
-    "它自己跑 precommit、checkpoint、本 prepare 与派发，judge 在 pane 里以 verdict fence 收尾后门禁落 channel report 并机械记录 verdict。",
-    "本工具只返回上面的审查范围与下面的任务文本；显示用 title 与 session id 都由门禁自行派生（session id 按 role+repo 确定性派生，所以同一 role 的下一轮续用同一会话）。",
+    "它自己跑 precommit、checkpoint、本 prepare 与派发，judge 在 pane 里调 judge_conclude 交卷后门禁落 channel report 并机械记录 verdict。",
+    "本工具只返回上面的审查范围与下面的任务文本；显示用 title 与 session id 都由门禁自行派生（session id 按 role+repo+opener 确定性派生，所以同一 opener 同一 role 的下一轮续用同一会话）。",
     ...(goalTruncated
       ? [
           `- 注意:任务文本中的 loop goal 因长度被截断(>1500 字符);落盘 task 文件时请用 read 读取 ${deps.loopGoalPath(root)} 全文并替换截断部分,确保 reviewer 拿到完整 goal。`,

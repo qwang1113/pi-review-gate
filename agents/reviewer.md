@@ -294,22 +294,23 @@ change **against it**:
   (P2 if it made the work go astray) and review against the actual task intent.
 
 ## Gate verdict (REQUIRED for pi-review-gate)
-When your review feeds the pi-review-gate `record_review` tool, you MUST include
-a fenced JSON verdict. Severity: P0 = must fix now, P1 = must fix before ship,
+End the round by calling `judge_conclude` ONCE — verdict, findings, cwd and notes
+as structured fields. Severity: P0 = must fix now, P1 = must fix before ship,
 P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.
 
-**Output the JSON verdict block FIRST, before the prose review.** Long reviews
-that put the verdict last can be truncated at the model's max-token limit
-(especially at `max` thinking), dropping the verdict and stalling the gate
-(no verdict ⇒ fail-closed PENDING). Leading with the verdict guarantees it
-survives. Keep each finding's `issue` to one concise sentence; put any long
-reasoning in the prose section that follows, not inside the JSON.
+**Conclude FIRST, write the prose review after.** Long reviews that conclude last can
+be truncated at the model's max-token limit (especially at `max` thinking), dropping
+the conclusion and stalling the gate (no conclude call ⇒ fail-closed PENDING).
+Concluding first guarantees it survives. Keep each finding's `issue` to one concise
+sentence; put any long reasoning in the prose section that follows, not inside the call.
 
-```json
-{"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "cwd": "<your real pwd>", "findings": [{"file": "src/x.ts", "line": 42, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
-```
+The call shape (fields, never a fenced block — prose is not consumed, so a verdict
+written only in prose counts as no conclusion): verdict READY | BLOCKED | NEEDS_HUMAN;
+docSync UPDATED | NOT_NEEDED; cwd your real `pwd` output; findings as
+severity/file/line/issue entries; notes at most 5 conclusion lines, plain prose,
+no code fences.
 
-**`cwd` (REQUIRED):** run `pwd` and report what it printed — never copy a
+**`cwd` (REQUIRED):** run `pwd` and pass what it printed as the call's `cwd` — never copy a
 path out of your task text. The gate matches it against the repo the round was
 prepared for (the shared repo root) and downgrades a READY that does not
 match — so if you ended up inside a throwaway worktree, `cd` back first.
@@ -326,10 +327,8 @@ Do not omit the field for code reviews: `docSync` is enforced by default and
 the gate fails closed on a missing attestation. If docs were touched only to
 game the gate, record a P1 finding AND do not attest `UPDATED`.
 
-Then write the detailed prose review (Correct / Verified / Blocker / Note) below
-the verdict. It is fine for the verdict to appear both first and last; the gate
-parses every fence and takes the worst, so a repeated identical verdict is safe.
-
+Then write the detailed prose review (Correct / Verified / Blocker / Note).
+One call per round: a second call is refused — say everything once.
 **Scope limit (only when the task explicitly states a USER-APPROVED scope
 limit from `request_scope_limit`):** verdict ONLY on findings inside the listed
 in-scope files (this session's own edits). Pre-existing issues in other files

@@ -68,16 +68,18 @@ test("internal shells share one tool policy: the moved judge deny set", () => {
   }
   assert.ok(JUDGE_DENIED_TOOLS.has("set_gate_mode"), "a pane cannot reclassify itself");
   assert.ok(JUDGE_DENIED_TOOLS.has("judge_submit"), "no sub-reviews");
+  assert.ok(!JUDGE_DENIED_TOOLS.has("judge_conclude"), "concluding its own round is the judge's own job");
   assert.ok(!JUDGE_DENIED_TOOLS.has("ask_user"), "questions race through the channel");
   assert.equal(judgeDeniedReason("ask_user"), undefined);
   assert.match(judgeDeniedReason("judge_submit")!, /reporting shell|评审/);
 });
 
-test("completion discipline teaches fence-and-stop, never exit-and-reopen", () => {
-  assert.match(JUDGE_COMPLETION_DISCIPLINE, /verdict fence 收尾并停下/);
+test("completion discipline teaches conclude-and-stop, never exit-and-reopen", () => {
+  assert.match(JUDGE_COMPLETION_DISCIPLINE, /judge_conclude 交卷并停下/);
+  assert.match(JUDGE_COMPLETION_DISCIPLINE, /一轮只能交一次/);
   assert.match(JUDGE_COMPLETION_DISCIPLINE, /不需要退出进程/);
   assert.match(JUDGE_COMPLETION_DISCIPLINE, /ask_user/);
-  assert.doesNotMatch(JUDGE_COMPLETION_DISCIPLINE, /进程退出即完成|重新拉起/);
+  assert.doesNotMatch(JUDGE_COMPLETION_DISCIPLINE, /verdict fence 收尾/, "no fence may come back");
   for (const mode of ["review", "plan", "goal"] as const) {
     assert.ok(MODE_REGISTRY[mode].prompt.includes(JUDGE_COMPLETION_DISCIPLINE), mode);
   }

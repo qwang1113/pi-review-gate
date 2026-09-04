@@ -274,14 +274,11 @@ export function buildGoalAuditTask(
         ]
       : []),
     "",
-    "输出一个 fenced JSON verdict(放在输出最前):",
-    '```json',
-    '{"gate":"READY"|"BLOCKED","findings":[{"severity":"P0"|"P1"|"P2","issue":"..."}]}',
-    '```',
+    "以 judge_conclude 交卷(verdict READY|BLOCKED,findings 为 severity P0|P1|P2 + issue,notes 写 ≤3 行结论要点):",
     "READY 仅当草稿无未解决 P0/P1 异议。findings 为空表示无异议。",
     // Round-17 (user ask): output discipline — auditor output beyond the
-    // fence + 3 lines is wasted tokens.
-    "输出纪律:只输出 fence + ≤3 行结论要点;不复述任务、不复述代码、不写过程叙事。",
+    // conclude call + 3 lines is wasted tokens.
+    "输出纪律:先交卷再写 ≤3 行结论要点;不复述任务、不复述代码、不写过程叙事。",
     "",
     JUDGE_COMPLETION_DISCIPLINE,
   ];

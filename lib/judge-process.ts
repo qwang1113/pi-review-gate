@@ -21,16 +21,15 @@ export const JUDGE_SESSION_PREFIX = "rg-";
 export const MAX_SESSION_ID = 80;
 
 /**
- * Deterministic session id for one judge role in one repo.
- *
- * THE RESUME KEY: same role + same repo ⇒ same session id ⇒ the next pane
- * continues the same pi session. Independent of the main session's own id,
- * so a restarted main session resumes a judge's context.
+ * THE RESUME KEY, scoped to the opener: same role + same repo + same opener
+ * ⇒ same session id ⇒ the next pane continues the same pi session.
+ * A different opener session gets a different id ⇒ a fresh transcript that never inherits another session's context.
+ * Crash recovery is unaffected: the same opener re-opens with the same id and resumes its transcript.
  */
-export function judgeSessionIdFor(role: string, repoHash: string): string {
+export function judgeSessionIdFor(role: string, repoHash: string, openerId: string): string {
   const safeRole = role.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 20);
   const safeHash = repoHash.replace(/[^A-Za-z0-9]/g, "").slice(0, 24);
-  const raw = `${JUDGE_SESSION_PREFIX}${safeRole}-${safeHash}`;
+  const raw = `${JUDGE_SESSION_PREFIX}${safeRole}-${safeHash}-${shortOpenerHash(openerId)}`;
   return raw.slice(0, MAX_SESSION_ID);
 }
 
@@ -41,6 +40,11 @@ export function shortRepoHash(repoRoot: string): string {
     hash = (hash * 31 + repoRoot.charCodeAt(i)) >>> 0;
   }
   return hash.toString(16).padStart(8, "0").slice(0, 10);
+}
+
+/** A short opener discriminator for ids (empty input still hashes deterministically; callers fail closed first). */
+export function shortOpenerHash(openerId: string): string {
+  return shortRepoHash(openerId.trim() || "unknown");
 }
 
 /** Name of the dir holding every judge round's scratch worktrees. */

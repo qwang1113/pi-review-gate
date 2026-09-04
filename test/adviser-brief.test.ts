@@ -32,13 +32,14 @@ test("first consultation: full brief with transcript pointer + artifact path", (
   assert.doesNotMatch(text, /PREVIOUS consultation/);
 });
 
-test("the completion contract is embedded at the end of the brief (fence-and-stop, questions via ask_user)", () => {
+test("the completion contract is embedded at the end of the brief (conclude-and-stop, questions via ask_user)", () => {
   const text = buildAdviserBrief(base);
-  assert.match(text, /verdict fence 收尾并停下/);
+  assert.match(text, /调 judge_conclude 交卷并停下/);
   assert.match(text, /ask_user/);
   assert.doesNotMatch(text, /进程退出即完成|同一 session id 重新拉起/);
+  assert.match(text, /verdict NEEDS_HUMAN/, "the adviser never gates");
   // The instruction is at the END (after the artifact/output contract).
-  assert.ok(text.indexOf("verdict fence 收尾并停下") > text.indexOf("artifact:"));
+  assert.ok(text.indexOf("调 judge_conclude 交卷并停下") > text.indexOf("artifact:"));
   assert.doesNotMatch(text, /wait-for|inbox/); // no wait plumbing in the brief
   assert.match(text, /own tmux pane/, "the pane running model is stated");
   // Round-17: output discipline is part of the brief.

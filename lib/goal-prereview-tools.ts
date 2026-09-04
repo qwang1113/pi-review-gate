@@ -226,11 +226,10 @@ export async function doRecordGoalPrereview(
       content: [{
         type: "text",
         text: "review-gate: no recognizable verdict in the goal-auditor's output — NOTHING was recorded " +
-          "(fail-closed). The auditor must end its reply with exactly ONE fenced JSON verdict, e.g.\n" +
-          `\`\`\`json\n{"gate":"READY"|"BLOCKED","findings":[{"severity":"P1","issue":"…"}]}\n\`\`\`\n` +
-          "Common causes: the reply was pure prose with no fence, it was truncated before the fence, " +
-          "or an unescaped straight quote inside a string broke the JSON. Re-run the audit — do not " +
-          "hand-write the verdict.",
+          "(fail-closed). The auditor must conclude through judge_conclude (verdict READY|BLOCKED plus " +
+          "findings); prose alone records nothing. " +
+          "Common causes: the round ended without a conclude call, or it was truncated before the call. " +
+          "Re-run the audit — do not hand-write the verdict.",
       }],
       details: { recorded: false },
       isError: true,

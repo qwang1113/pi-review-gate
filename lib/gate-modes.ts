@@ -78,14 +78,14 @@ export function judgeDeniedReason(toolName: string): string | undefined {
 }
 
 /**
- * How a reporting shell finishes: fence first, then stop. No process exit
- * (the pane is reused for the next round — the gate collects the fence into
- * a channel report); questions go through ask_user (human and opener race,
- * whoever answers first wins), never through a fence the gate would have to
- * re-inject.
+ * How a reporting shell finishes: conclude through the tool, then stop. No process exit
+ * (the pane is reused for the next round); questions go through ask_user (human and
+ * opener race, whoever answers first wins), never through prose the gate would have
+ * to scrape back.
  */
 export const JUDGE_COMPLETION_DISCIPLINE =
-  "完成(必须):以 verdict fence 收尾并停下即可——不需要退出进程(pane 留给下一轮复用),门禁读到 fence 后落 channel report。\n" +
+  "完成(必须):调 judge_conclude 交卷并停下即可——verdict/findings/cwd 一次给齐,一轮只能交一次," +
+  "重复调用会被拒绝;不需要退出进程(pane 留给下一轮复用)。结论只写正文等于没交卷:正文不被消费。\n" +
   "提问:有疑问时调 ask_user,人和 opener 谁先答谁生效;等答案时停下,不要自行假定。";
 
 const NO_DENY: ReadonlySet<string> = Object.freeze(new Set<string>());
@@ -109,12 +109,12 @@ const NORMAL_STATEMENT =
 const REVIEW_SHELL_FRAME =
   "## Reporting-shell 纪律（review 模式：reviewer / adviser / arbiter 共用）\n" +
   "你是只读评审壳：评审当前轮的材料、边确认边把 findings 写入 findings 流、" +
-  "以 verdict fence 收尾。角色专属口径见你的任务文本；下面是所有评审共用的完成纪律。";
+  "调 judge_conclude 交卷。角色专属口径见你的任务文本；下面是所有评审共用的完成纪律。";
 
 const GOAL_AUDIT_FRAME =
   "## Reporting-shell 纪律（goal 模式：goal-auditor 的 goal 审计任务模板）\n" +
   "你审计的是 loop goal 草稿：只有 P0/P1 能阻塞，其余 findings 只记不拦。" +
-  "审计结论只认 verdict fence；草稿正文的问题以 fence + findings 为准。";
+  "审计结论只认 judge_conclude 交卷；草稿正文的问题以交卷结论 + findings 为准。";
 
 const PLAN_AUDIT_FRAME =
   "## Reporting-shell 纪律（plan 模式：goal-auditor 的 plan 审计任务模板）\n" +

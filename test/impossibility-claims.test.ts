@@ -93,25 +93,13 @@ test("README documents the impossibility-claim rule for users of the gate", () =
   assert.match(section, /⇒ \*\*P1\*\* \(⇒ `BLOCKED`\)/, "section must state the P1 consequence");
 });
 
-test("the impossibility rule stays prompt-level: no new verdict JSON field", () => {
+test("the impossibility rule stays prompt-level: the judge writes no verdict JSON", () => {
+  // The canonical fence is synthesised by the gate now (pinned in
+  // test/judge-conclude.test.ts: "the canonical shape gains no extra top-level",
+  // key"), so the reviewer prompt must teach NO hand-written verdict shape —
+  // a judge that hand-writes fences writes unconsumed prose.
   const reviewer = read("agents", "reviewer.md");
-  const verdictLine = reviewer
-    .split("\n")
-    .find((l) => l.includes('{"gate":') && l.includes("findings"));
-  assert.ok(verdictLine, "reviewer must still document the verdict JSON shape");
-  const cut = verdictLine!.indexOf('"findings"');
-  const keysIn = (s: string) => [...s.matchAll(/"([A-Za-z_]+)":/g)].map((m) => m[1]).sort();
-  assert.deepEqual(
-    keysIn(verdictLine!.slice(0, cut)),
-    // `cwd` is the ONE addition since this test was written, and it comes from
-    // the snapshot pin (evidence that the review ran inside its snapshot), not
-    // from the impossibility rule — which still costs the verdict no field.
-    ["cwd", "docSync", "gate"],
-    "verdict schema must gain no extra top-level key beyond gate/docSync/cwd/findings",
-  );
-  assert.deepEqual(
-    keysIn(verdictLine!.slice(cut)),
-    ["file", "findings", "issue", "line", "severity"],
-    "finding entries must keep their existing shape",
-  );
+  assert.doesNotMatch(reviewer, /\\{\"gate\":/,
+    "the reviewer never hand-writes a verdict fence anymore");
+  assert.match(reviewer, /judge_conclude/, "the verdict goes through the conclude tool");
 });

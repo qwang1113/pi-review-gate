@@ -36,6 +36,7 @@ import {
   readChannel,
   requestPayload,
   type ChannelIO,
+  type ChannelRecord,
 } from "./orchestrator-channel.ts";
 import { resolveAnswer } from "./orchestrator-answer-tools.ts";
 import {
@@ -55,6 +56,7 @@ import {
 } from "./judge-side.ts";
 import { judgeSessionIdFor, shortRepoHash } from "./judge-process.ts";
 
+import { nextRoundSeq } from "./judge-conclude.ts";
 /** Goal and plan reviews are the only kinds an agent may open directly. */
 const SPAWN_KIND_PARAM = Type.Enum({ goal: "goal", plan: "plan" });
 const ROLE_PARAM = Type.Optional(Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }));
@@ -82,7 +84,7 @@ export interface JudgeSpawnToolDeps {
   /** Which repo does this call target? Never guessed. */
   resolveRepo(requested: string | undefined): { ok: true; root: string } | { ok: false; error: string };
   /** Model + system prompt + transcript dir for one role in one repo. */
-  launchConfig(root: string, role: string):
+  launchConfig(root: string, role: string, opener: string):
     | { ok: true; model: string; sysPromptPath: string; sessionDir: string }
     | { ok: false; error: string };
   /** Gate-internal audit tasks — the agent names the KIND, never assembles. ctx threads through from execute. */
@@ -91,7 +93,7 @@ export interface JudgeSpawnToolDeps {
   buildPlanAuditTask(root: string, ctx: unknown):
     Promise<{ ok: true; task: string; streamPath?: string } | { ok: false; error: string }>;
   /** Persist the round task next to the transcript dir; returns its path. */
-  writeJudgeTaskFile(root: string, role: string, task: string):
+  writeJudgeTaskFile(root: string, role: string, opener: string, task: string):
     { ok: true; path: string } | { ok: false; error: string };
   /** Which audit kind is pending for one repo (a goal draft, a plan hash, or none). */
   pendingAuditKind(root: string): "goal" | "plan" | undefined;
@@ -110,7 +112,7 @@ function fail(text: string): ToolReply {
   return { content: [{ type: "text", text }], details: undefined, isError: true };
 }
 
-/** Resolve a judge by explicit id, or deterministically by role+repo. */
+/** Resolve a judge by explicit id, or deterministically by role+repo+opener. */
 function resolveJudgeId(
   deps: JudgeSpawnToolDeps,
   params: Record<string, unknown>,
@@ -123,7 +125,22 @@ function resolveJudgeId(
   }
   const repo = deps.resolveRepo(typeof params.repo === "string" ? params.repo : undefined);
   if (!repo.ok) return { ok: false, text: `review-gate: 仓库解析失败 —— ${repo.error}` };
-  return { ok: true, judgeId: judgeSessionIdFor(role, shortRepoHash(repo.root)), root: repo.root };
+  const opener = deps.callerId();
+  if (!opener) {
+    return { ok: false, text: "review-gate: 无法确认调用者身份——身份不明时不能定位 review。" };
+  }
+  return { ok: true, judgeId: judgeSessionIdFor(role, shortRepoHash(repo.root), opener), root: repo.root };
+}
+
+/** First round number for a spawned review — above entry and channel history (see birthSeq). */
+function nextSpawnRoundSeq(deps: JudgeSpawnToolDeps, opener: string, judgeId: string): number {
+  let records: ChannelRecord[] = [];
+  try {
+    const io = deps.channelIO();
+    const target = judgeChannelTarget(opener, judgeId, deps.channelHome());
+    records = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
+  } catch { /* the entry alone still numbers above */ }
+  return nextRoundSeq(deps.hierarchy()[judgeId]?.roundSeq, records);
 }
 
 async function doSpawn(
@@ -141,14 +158,14 @@ async function doSpawn(
   const root = repo.root;
   // Goal and plan audits both run under the goal-auditor role (they judge a
   // contract before acting, and that is one role, not two) — so they share
-  // one judge id per repo, and the gate keeps them apart by pending KIND:
+  // one judge id per repo per opener, and the gate keeps them apart by pending KIND:
   // a report is only ever recorded against the kind that is pending.
   const pending = deps.pendingAuditKind(root);
   if (pending !== undefined && pending !== kind) {
     return fail(`review-gate: 已有 ${pending === "goal" ? "目标" : "计划"}审计挂着——等它的标准报告送达后再开${kind === "goal" ? "目标" : "计划"}审计。两种审计共用一个 judge，串行才不会错绑结论。`);
   }
   const role = "goal-auditor";
-  const earlyJudgeId = judgeSessionIdFor(role, shortRepoHash(root));
+  const earlyJudgeId = judgeSessionIdFor(role, shortRepoHash(root), caller);
   // Spawn is birth: one pane per review object. A living pane takes its
   // rounds through judge_submit, a dead one goes through judge_recover —
   // spawning over either would strand a review or fork a transcript.
@@ -181,11 +198,15 @@ async function doSpawn(
     streamPath = built.streamPath;
   }
   const judgeId = earlyJudgeId;
+  // Number this review's first round above every report already in the channel:
+  // a close→spawn keeps the old reports, and restarting at 1 would collide with them
+  // (the judge refuses a round its channel already closed).
+  const birthSeq = nextSpawnRoundSeq(deps, caller, earlyJudgeId);
   const registered = registerJudge(deps.hierarchy(), {
     judgeId,
     openerId: caller,
     role,
-    repoRoot: root,
+    repoRoot: root, roundSeq: birthSeq,
     ...(streamPath === undefined ? {} : { streamPath }),
     createdAt: new Date(deps.now()).toISOString(),
   });
@@ -196,7 +217,7 @@ async function doSpawn(
     deps.forgetAudit(root);
   };
 
-  const taskFile = deps.writeJudgeTaskFile(root, role, task);
+  const taskFile = deps.writeJudgeTaskFile(root, role, caller, task);
   if (!taskFile.ok) {
     rollback();
     return fail(`review-gate: 任务文件落盘失败 —— ${taskFile.error}`);
@@ -206,7 +227,7 @@ async function doSpawn(
     rollback();
     return fail("review-gate: 当前会话不在 tmux 里，开不出 review pane——在 tmux 中重开本会话后重试；门禁不会退回旧的进程壳子。");
   }
-  const launch = deps.launchConfig(root, role);
+  const launch = deps.launchConfig(root, role, caller);
   if (!launch.ok) {
     rollback();
     return fail(`review-gate: ${launch.error}`);
@@ -240,7 +261,7 @@ async function doSpawn(
     judgeId,
     openerId: caller,
     role,
-    repoRoot: root,
+    repoRoot: root, roundSeq: birthSeq,
     paneId: opened.paneId,
     ...(streamPath === undefined ? {} : { streamPath }),
     createdAt: new Date(deps.now()).toISOString(),

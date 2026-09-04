@@ -185,11 +185,9 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
     "- If you cannot write the artifact, say so in your output — the gate will record no conclusion for",
     "  the next consultation, which is fail-closed, not silent.",
     "",
-    "OUTPUT: your recommendation in prose first, then the JSON line above (copy it into the artifact).",
-    // Round-17 (user ask): output discipline — conclusion + point list only,
-    // detailed argumentation goes into the artifact JSON line.
+    "OUTPUT: your recommendation in prose first, then the JSON line above (copy it into the artifact),",
+    "then conclude the round with judge_conclude (verdict NEEDS_HUMAN — you advise, you do not gate; your conclusion rides in notes).",
     "输出纪律:结论 + 要点列表(每条一句),不写过程叙事;详细论证放 artifact 的 JSON 行。",
-    "",
     JUDGE_COMPLETION_DISCIPLINE,
   );
   return lines.join("\n");
