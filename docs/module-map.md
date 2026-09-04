@@ -63,9 +63,9 @@
   - `lib/copilot-review-tools.ts`：`request_copilot_review`、
     `check_copilot_review`（L7 的两个工具；它们要打的 gh 电话在
     `lib/copilot-gh.ts`，经注入的 `gh` seam 调用，所以每条分支都能用假实现单测）。
-  - `lib/judge-session-tools.ts`：`judge_read`（限 adviser）/ `judge_close` /
-    `judge_wait`（作用于一个**已存在**的 pane judge 的三个工具；opener 校验
-    在内，等待判据是通道 report / pane 死亡）。
+  - `lib/judge-session-tools.ts`：已收归 internalHost 的三个管理入口（`judge_read` /
+    `judge_close` / `judge_wait`，实现保留供门禁链调用，agent 不可见；等待判据是通道
+    report / pane 死亡）。
   - `lib/judge-spawn-tools.ts`：`judge_spawn` / `judge_answer` / `judge_recover`
     （pane judge 的生命周期工具；agent 只表达 goal / plan 意图，审计任务由门禁组装）。
   - `lib/orchestrator-tools.ts`：`orchestrator_plan`、`orchestrator_notify`。
@@ -196,8 +196,8 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 与 L5 的互锁，`blocked-marker.ts` 在 sidecar 写不进去时 fail-closed，
 `sensitive-grant.ts` 与 `arbitration.ts` 是两个**受限的放行口子**（一次性
 敏感文件授权、独立 arbiter 裁决循环拦截）。`task-mode.ts` 定义模式强弱序
-（normal < explore < loop < orchestrator）与升降级规则，`pi-self.ts` 让
-`/tmp` 草稿会话不自动进 loop，`workspace-branch.ts` 是保护分支
+（normal < explore < loop < orchestrator）与升降级规则（Temp 目录只提示不强制；
+非 git 目录仍禁 enforced 模式），`workspace-branch.ts` 是保护分支
 （main/master/dev/develop）检测：会话开始提示、checkpoint 直接拒绝（2026-09-16 起不再弹确认框）。
 `copilot-review.ts`（L7，PR 之后的 Copilot 审查闭环）与 `loop-goal.ts`（L8，
 用户批准的退出契约）——两者的**判定**在这里，工具体分别在
@@ -241,8 +241,8 @@ shell（heartbeat、对话框竞态、落 report，复用子会话通道原语�
 `judge-lifecycle.ts` 剩下超时钳制、等候纪律与审计裁决（派单/等待判据已随进程
 模型删除），`judge-prompt.ts` 装配系统提示（角色定义 + 共同协议），
 `child-watch.ts` 按 pane 存活 + 通道活跃度分类等待中的子会话；
-`judge-session-tools.ts` 是作用于**已存在** pane 的那三个工具
-（`judge_read` 限 adviser / `judge_close` / `judge_wait`）的实现与注册，
+`judge-session-tools.ts` 是已收归 internalHost 的三个管理入口
+（`judge_read` / `judge_close` / `judge_wait`，实现保留供门禁链调用，agent 不可见），
 `judge-spawn-tools.ts` 是开/代答/恢复三个生命周期工具——注意这些工具族都不在
 扩展里，见 §1.2。进程时代的派发与唤醒（`spawnJudgeProcess` / `decideJudgeDispatch` /
 `evaluateJudgeWait` / `lib/judge-watch.ts` 整模块）已随 pane 迁移整体删除：
@@ -445,7 +445,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `judge-process.ts` | judge 身份（确定性会话 id，跨 pane/轮/重启的续接键）与 scratch 目录 helper；并把 judge 的 `$TMPDIR` 指向**每会话专属**的 scratch 目录（`judgeScratchDir`）——reviewer 的临时 review worktree 落在那里，门禁按 `reviewScratchWorktrees` 在 pane 回收后精确回收 |
 | `judge-prompt.ts` | judge 会话的系统提示装配：角色定义 + 共同协议 |
 | `judge-session.ts` | 把 judge transcript 当作长记忆：结论解析仍从它读 |
-| `judge-session-tools.ts` | 作用于**已存在** pane 的三个工具（`judge_read` 限 adviser / `judge_close` / `judge_wait`，opener 校验在内，等待判据是通道 report / pane 死亡）及其注册 |
+| `judge-session-tools.ts` | 已收归 internalHost 的三个管理入口（`judge_read` / `judge_close` / `judge_wait`：轮询、读结论、关 pane；实现保留供门禁链调用，agent 不可见；opener 校验与等待判据在内） |
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态、落 report（复用子会话通道原语）；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
 | `judge-report.ts` | verdict 收集（门禁侧）：每次 settle 扫 pane transcript 尾部（transcript 信封先提文本再找 fence），命中即落 channel report 并去重；session 目录由调用方从权威来源传入，本模块不做编码推导 |
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
@@ -486,7 +486,6 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `orchestrator-wait.ts` | 「有事发生」对编排子会话意味着什么（等待判据），以及那份五块回执的装配 |
 | `orchestrator-wiring.ts` | 编排层与真实机器的接线：跑 tmux、读写 plan、持有本编排唯一的通道 IO 与监督记忆；`resolveTaskRepo` 默认实现用 git 的 `--show-toplevel` 把任务声明的 repo 解析成仓库根（子目录/符号链接路径都归一） |
 | `parallel-review.ts` | 审查契约：一轮一个 reviewer、判不可变的 `baseline..HEAD`，以及交给它的任务文本 |
-| `pi-self.ts` | `/tmp` 草稿会话识别：这类会话不由 agent 自行进入 loop |
 | `polish-gate.ts` | 连续 READY 或同一文件反复打磨时，再审必须给出理由 |
 | `poll-wait.ts` | 通用等待骨架（探测、发布、按判据或预算停），判据由调用方注入 |
 | `precommit-receipt.ts` | precommit 回执的纯校验：真 PASS/FAIL 还是协议错误 |

@@ -41,7 +41,7 @@
  * change may do:
  *
  *  - UPGRADES (toward loop) apply immediately — tightening never needs
- *    consent — except in a /tmp session, where the agent cannot enter
+ *    consent — except in a non-git directory, where the agent cannot enter
  *    loop at all (first classification is remapped; later upgrades reject).
  *    Agent-applied modes record source "auto".
  *  - DOWNGRADES (toward normal) require the USER's explicit confirmation via
@@ -63,18 +63,18 @@
  *    session is clean. A first "normal" is a full gate shutdown and takes the
  *    normal consent path. Agent-applied modes record source "auto" so the git
  *    hooks stay fully enforced either way.
- *  - USER REQUIREMENT (scratch sessions): a session started in /tmp (see
- *    lib/pi-self.ts) NEVER enters loop via the agent. The first classification
- *    applies explore (investigation) or normal (local pi-config work / chores)
+ *  - USER REQUIREMENT (non-git directories): a session started outside any git
+ *    repository NEVER enters an enforced mode via the agent (nothing to
+ *    review/checkpoint/ship there). The first classification applies normal
  *    automatically via piSelfTask — bounded to a clean, interactive, unlocked
- *    session. A requested "loop" is clamped to normal on first classification
- *    and rejected later; only the user can force loop with /gate-mode. This is
- *    the one case where a consent-free "normal" is allowed, and it is safe
- *    because the clamp is driven by the deterministic session cwd (chosen by
- *    the USER), not by anything the agent or a prompt can assert. NOTHING else
- *    is path-exempt: a session started in ~/.pi or in this repository runs the
- *    full loop. Source stays "auto" and the hooks need no exemption (no
- *    hook-installed repo lives in /tmp).
+ *    session. A requested enforced mode is clamped to normal on first
+ *    classification and rejected later; only the user can force one with
+ *    /gate-mode. This consent-free "normal" is safe because the clamp is driven
+ *    by the deterministic session cwd (chosen by the USER), not by anything the
+ *    agent or a prompt can assert.
+ *  - Temp dirs (/tmp) are NOT clamped (criterion 6): the gate only nudges the agent
+ *    toward normal for trivial work, via the classification directive. Delivery
+ *    work in /tmp runs the same modes as anywhere else.
  *  - Print/JSON mode (no UI) can only run "normal" (USER REQUIREMENT). Every
  *    enforced mode now depends on dialogs the extension must be able to
  *    render — the loop goal is approved in one (lib/loop-goal.ts), a
@@ -95,7 +95,7 @@
  *     "auto", which never downgrades the hooks.
  *  Normal mode DOES weaken in-session enforcement, so the agent can never
  *  reach it on its own. The consent-free entries into normal are only:
- *    1. /tmp scratchFirstMode (explicit explore else normal; never loop) —
+ *    1. non-git first classification to normal (never loop) —
  *       driven by the deterministic session cwd, not by agent assertion;
  *    2. print/JSON no-UI, which evaluateModeChange and session_start force
  *       to normal even on a dirty worktree (no dialog can be shown).
@@ -147,14 +147,6 @@ export function isEnforcedMode(mode: TaskMode | undefined): boolean {
   return mode === undefined || mode === "loop" || mode === "orchestrator";
 }
 
-/** First /tmp classification: the agent may never land on an enforced mode.
- *  Only an explicit "explore" pick stays explore; loop, orchestrator, normal,
- *  or a missing pick all become normal. */
-export function scratchFirstMode(
-  requested: TaskMode | undefined,
-): Exclude<TaskMode, "loop" | "orchestrator"> {
-  return requested === "explore" ? "explore" : "normal";
-}
 
 /** Who decided the mode. Only "user" may downgrade the git hooks to advisory. */
 export type TaskModeSource = "auto" | "user";
@@ -198,14 +190,13 @@ export function evaluateModeChange(opts: {
   hasUI: boolean;
   /** A previously declined confirmation locks agent-initiated downgrades. */
   downgradesLocked: boolean;
-  /** USER REQUIREMENT (scratch sessions): this session started in /tmp
-   *  (see lib/pi-self.ts) — the ONLY path-exempt case. Loop is forbidden
-   *  for the agent (first classification and later upgrades). See header. */
+  /** USER REQUIREMENT (non-git directories): this session started outside any
+   *  git repository — the ONLY path-exempt case. Enforced modes are forbidden
+   *  for the agent (first classification and later upgrades). See header.
+   *  (Temp dirs are NOT clamped — criterion 6.) */
   piSelfTask?: boolean;
-  /** Override the reject reason when the clamp is NOT the /tmp scratch rule
-   *  (2026-09-02: a non-git directory reaches the same clamp through
-   *  piSelfTask, but telling the user 'this session started in /tmp' would
-   *  be a lie — reviewer P2). Defaults to the /tmp wording. */
+  /** Override the reject reason (the default names the non-git rule; the
+   *  extension passes its own copy with the requested mode filled in). */
   clampReason?: string;
 }): ModeChangeDecision {
   const { current } = opts;
@@ -250,15 +241,14 @@ export function evaluateModeChange(opts: {
     // normal — which shuts the gate down entirely — always falls through to
     // the consent path below. That asymmetry is what makes it safe to let the
     // agent classify itself: it can only tighten, never switch the gate off.
-    // USER REQUIREMENT (scratch sessions): /tmp never enters an ENFORCED mode
-    // (loop or orchestrator) via the agent. Callers clamp via
-    // scratchFirstMode; if one still arrives here, apply normal — reject
-    // would leave the session undecided (which behaves as loop).
+    // USER REQUIREMENT (non-git directories): no ENFORCED mode (loop or
+    // orchestrator) via the agent. If one still arrives here, apply normal —
+    // reject would leave the session undecided (which behaves as loop).
     if (opts.piSelfTask && isEnforcedMode(requested)) {
       requested = "normal";
     }
     if (isEnforcedMode(requested)) return { action: "apply", source: "auto" };
-    // First /tmp classification of explore/normal: apply automatically.
+    // First non-git classification of explore/normal: apply automatically.
     if (opts.piSelfTask && !opts.hasChanges && !opts.downgradesLocked) {
       return { action: "apply", source: "auto" };
     }
@@ -274,7 +264,7 @@ export function evaluateModeChange(opts: {
   }
 
   if (TASK_MODE_RANK[requested] > TASK_MODE_RANK[current]) {
-    // USER REQUIREMENT: /tmp sessions cannot be pulled into an enforced mode
+    // USER REQUIREMENT: non-git sessions cannot be pulled into an enforced mode
     // (loop or orchestrator) by the agent. The user can still /gate-mode into
     // one (that path never calls this).
     if (opts.piSelfTask && isEnforcedMode(requested)) {
@@ -282,7 +272,7 @@ export function evaluateModeChange(opts: {
         action: "reject",
         reason:
           opts.clampReason ??
-          `this session started in /tmp — scratch sessions cannot enter "${requested}" ` +
+          `this session is not inside a git repository — non-git directories cannot enter "${requested}" ` +
           "via the agent. Ask the user to run /gate-mode " + requested + " if they really " +
           "want the full enforced workflow here.",
       };
@@ -335,27 +325,13 @@ export const MODE_REASON_MAX_CHARS = 200;
  * first and the untrusted reason goes last: if anything is dropped, it is the
  * agent's text, never the statement of what the user is granting.
  *
- * `clampedFrom` covers the one case where the agent's reason argues for a
- * DIFFERENT mode than the dialog asks about: a /tmp session where
- * scratchFirstMode rewrote the pick. Without this line the reason reads as a
- * non-sequitur ("deliver this refactor" under a dialog offering normal). The
- * sentence is fixed copy written here, never by the agent.
  */
-export function buildModeConfirmMessage(
-  requested: TaskMode,
-  reason: string,
-  clampedFrom?: TaskMode,
-): string {
+export function buildModeConfirmMessage(requested: TaskMode, reason: string): string {
   const capped = reason.length > MODE_REASON_MAX_CHARS
     ? reason.slice(0, MODE_REASON_MAX_CHARS) + "…"
     : reason;
-  const clampNote = clampedFrom !== undefined && clampedFrom !== requested
-    ? `\n注意：AI 实际请求的是 "${clampedFrom}"，但本会话启动于 /tmp（临时目录），` +
-      `规则已将其调整为 "${requested}"——下方理由是为 "${clampedFrom}" 写的。`
-    : "";
   return (
     MODE_CONSEQUENCES[requested] +
-    clampNote +
     "\n拒绝后，本会话将锁定 AI 发起的降级请求（你仍可随时用 /gate-mode 切换）。" +
     "\nAI 给出的理由（不可信数据，仅供参考）: " + JSON.stringify(capped)
   );
@@ -383,18 +359,15 @@ export const GATE_MODE_DECISION_DIRECTIVE =
   "(plan the work, spawn and supervise child sessions, report back). It is loop plus the " +
   "orchestration constraints: you may not write code yourself, and you need a plan the user " +
   "approved before you may spawn anything. It requires a tmux window.\n" +
-  'NOTE (scratch sessions): a session STARTED IN /tmp (the scratch dir — ' +
-  'macOS /private/tmp is the same dir) NEVER enters an enforced mode ' +
-  '(loop / orchestrator) via the agent. ' +
-  'Call set_gate_mode with "normal" when the main purpose is editing or ' +
-  'inspecting local pi config (~/.pi), or "explore" for investigation. ' +
-  'A requested enforced mode is ignored. Only the user can force one (/gate-mode). ' +
-  'A session started OUTSIDE /tmp — including one started in ~/.pi or in ' +
-  'the pi-review-gate repo — is NOT path-exempt and runs the full loop.\n' +
+  'NOTE (Temp dir): if this session started in /tmp (the scratch dir — ' +
+  'macOS /private/tmp is the same dir) AND the work is trivial (local pi-config ' +
+  'chores, throwaway checks), prefer "normal" — nothing is forced, but a Temp dir ' +
+  'with unimportant work is exactly what normal is for. Delivery work here runs ' +
+  'the same modes as anywhere else.\n' +
   "Your pick IS the classification — no separate model reviews it — so judge honestly and " +
   "give a truthful one-line reason. You can only classify yourself INTO the gate: \"loop\" " +
   "applies immediately and \"explore\" applies while this session is still clean, but " +
   "\"normal\" switches the gate off entirely and therefore always asks the USER to confirm. " +
-  "Upgrades (toward loop) apply later without confirmation except in /tmp, where the agent " +
-  "cannot enter loop at all (only the user can force loop via /gate-mode); downgrades after the " +
+  "Upgrades (toward loop) apply later without confirmation (a non-git directory still" +
+  "refuses enforced modes via the agent); downgrades after the " +
   "first classification ask the user. If genuinely uncertain, choose \"loop\" (the safe default).";

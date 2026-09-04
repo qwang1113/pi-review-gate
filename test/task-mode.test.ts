@@ -8,7 +8,6 @@ import {
   requestedModeFromEnv,
   MODE_REASON_MAX_CHARS,
   normalizeTaskMode,
-  scratchFirstMode,
   TASK_MODE_RANK,
   type TaskMode,
 } from "../lib/task-mode.ts";
@@ -200,7 +199,7 @@ test("USER REQUIREMENT: pi-self first classification applies normal automaticall
     { action: "apply", source: "auto" });
 });
 
-test("USER REQUIREMENT: /tmp first classification never applies loop", () => {
+test("USER REQUIREMENT: non-git first classification never applies loop", () => {
   // Agent asked for loop — land on normal so the session is not left undecided
   // (undecided behaves as loop).
   assert.deepEqual(decide({ current: undefined, requested: "loop", piSelfTask: true }),
@@ -208,15 +207,15 @@ test("USER REQUIREMENT: /tmp first classification never applies loop", () => {
   // Later agent upgrades to loop are rejected; only /gate-mode can force loop.
   const later = decide({ current: "normal", requested: "loop", piSelfTask: true });
   assert.equal(later.action, "reject");
-  if (later.action === "reject") assert.match(later.reason, /\/tmp/);
+  if (later.action === "reject") assert.match(later.reason, /not inside a git repository/);
   const fromExplore = decide({ current: "explore", requested: "loop", piSelfTask: true });
   assert.equal(fromExplore.action, "reject");
 });
 
-test("clampReason overrides the /tmp wording for a non-git clamp (2026-09-02)", () => {
-  // A non-git directory reaches the same clamp through piSelfTask, but the
-  // reject reason must say what the clamp actually is — the /tmp default
-  // would be a lie in a non-git dir (reviewer P2).
+test("clampReason overrides the default wording for a non-git clamp (2026-09-02)", () => {
+  // A non-git directory reaches the clamp through piSelfTask; a caller that knows
+  // more (e.g. the requested mode) overrides the reason — the default must still
+  // name the non-git rule (reviewer P2).
   const later = decide({
     current: "normal",
     requested: "loop",
@@ -228,17 +227,11 @@ test("clampReason overrides the /tmp wording for a non-git clamp (2026-09-02)", 
     assert.doesNotMatch(later.reason, /\/tmp/);
     assert.match(later.reason, /not inside a git repository/);
   }
-  // Without the override the /tmp wording stays.
+  // Without the override the non-git default stays.
   const noOverride = decide({ current: "normal", requested: "loop", piSelfTask: true });
-  if (noOverride.action === "reject") assert.match(noOverride.reason, /\/tmp/);
+  if (noOverride.action === "reject") assert.match(noOverride.reason, /not inside a git repository/);
 });
 
-test("scratchFirstMode: only an explicit explore pick stays explore", () => {
-  assert.equal(scratchFirstMode("explore"), "explore");
-  assert.equal(scratchFirstMode("normal"), "normal");
-  assert.equal(scratchFirstMode("loop"), "normal");
-  assert.equal(scratchFirstMode(undefined), "normal");
-});
 
 test("SECURITY: piSelfTask never loosens a dirty, no-UI, decided, or locked session", () => {
   // Same bounds as any other first classification: a CLEAN
@@ -340,19 +333,12 @@ test("SECURITY: the agent reason is labeled untrusted, JSON-quoted, and length-c
   assert.ok(!sneaky.includes('\n[review-gate] 官方提示'), "raw newline must not survive into the dialog");
 });
 
-test("a /tmp-clamped pick is disclosed, so the reason does not read as a non-sequitur", () => {
-  // /tmp + this session already edited + the agent asked for loop: the clamp
-  // rewrites the pick to normal, so the dialog offers normal while the agent's
-  // reason argues for loop. The fixed copy must say why.
-  const msg = buildModeConfirmMessage("normal", "deliver the refactor", "loop");
-  assert.match(msg, /AI 实际请求的是 "loop"/);
-  assert.match(msg, /\/tmp/);
-  // No note when nothing was clamped — including the same-mode call.
-  assert.doesNotMatch(buildModeConfirmMessage("normal", "r", "normal"), /实际请求的是/);
-  assert.doesNotMatch(buildModeConfirmMessage("normal", "r"), /实际请求的是/);
-  // The clamp note is EXTENSION copy: it must sit above the untrusted reason,
-  // so a truncated dialog drops the agent's text first.
-  assert.ok(msg.indexOf("AI 实际请求的是") < msg.indexOf("不可信数据"));
+test("the confirm dialog carries only the consequence copy plus the labeled reason", () => {
+  const msg = buildModeConfirmMessage("normal", "deliver the refactor");
+  assert.match(msg, /切换到 normal/);
+  assert.match(msg, /不可信数据/);
+  // No clamp note anymore: nothing rewrites the pick before the dialog.
+  assert.doesNotMatch(msg, /实际请求的是/);
 });
 
 test("the undecided-session directive instructs an in-session set_gate_mode call", () => {
@@ -360,18 +346,19 @@ test("the undecided-session directive instructs an in-session set_gate_mode call
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /fail-closed/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /"loop" \(the safe default\)/);
   // The agent's own pick IS the classification (no external classifier), and
-  // /tmp scratch sessions never enter loop via the agent.
+  // Temp dirs get a nudge toward normal for trivial work — never a clamp.
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /Your pick IS the classification/);
   // It must also spell out the one direction the agent cannot take itself.
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /always asks the USER to confirm/);
-  assert.match(GATE_MODE_DECISION_DIRECTIVE, /\/tmp/);
-  assert.match(GATE_MODE_DECISION_DIRECTIVE, /NEVER enters an enforced mode/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /NOTE \(Temp dir\)/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /prefer "normal"/);
+  assert.doesNotMatch(GATE_MODE_DECISION_DIRECTIVE, /NEVER enters an enforced mode/);
   // The fourth mode has to be discoverable, and bounded to the one situation
   // it belongs in — otherwise a session classifies itself into a supervisor
   // role nobody asked for.
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /"orchestrator" — ONLY when the user asked you/);
   assert.match(GATE_MODE_DECISION_DIRECTIVE, /requires a tmux window/);
-  assert.match(GATE_MODE_DECISION_DIRECTIVE, /NOT path-exempt/);
-  assert.match(GATE_MODE_DECISION_DIRECTIVE, /except in \/tmp/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /nothing is forced/);
+  assert.match(GATE_MODE_DECISION_DIRECTIVE, /same modes as anywhere else/);
   assert.doesNotMatch(GATE_MODE_DECISION_DIRECTIVE, /always allowed later/);
 });

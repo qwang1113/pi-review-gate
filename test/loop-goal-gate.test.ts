@@ -7,10 +7,16 @@ import {
 } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
+
+/** Scratch-dir check (replaces the deleted lib/pi-self.ts helper): Temp dirs get
+ *  only a nudge now, but fixtures still must not live under one. */
+function isScratchPath(p: string): boolean {
+  const scratch = realpathSync(tmpdir());
+  return p === scratch || p.startsWith(scratch + "/");
+}
 import { fileURLToPath } from "node:url";
 import { goalTextHash, goalReminderDue } from "../lib/loop-goal.ts";
 import { gitRootOfDir } from "../lib/repo-resolve.ts";
-import { isPiSelfPath } from "../lib/pi-self.ts";
 import { hermeticGitEnv } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 
@@ -580,7 +586,7 @@ test("L8: EXPLICIT loop mode (not just undecided) blocks edits without a goal an
   for (;;) {
     const parent = dirname(base);
     if (parent === base) break;
-    if (!base.includes("rg-review-snap-") && !isPiSelfPath(base) && gitRootOfDir(base) === null) break;
+    if (!base.includes("rg-review-snap-") && !isScratchPath(base) && gitRootOfDir(base) === null) break;
     base = parent;
   }
   // On an unusual host the candidate base is unwritable — skip on EACCES

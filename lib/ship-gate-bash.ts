@@ -211,8 +211,8 @@ export async function evaluateShipCommand(
   // hang. Same status-bar sink as the L6 label check.
   const shipNotice = deps.notice(ctx);
 
-  // Normal mode (user-confirmed, or the consent-free /tmp scratchFirstMode
-  // first classification which maps loop / missing picks to normal):
+  // Normal mode (user-confirmed, or the consent-free non-git first
+  // classification to normal):
   // the ship gate,
   // commit-message checks, and LLM ship classification are all off. This is
   // the mode's defining behavior; explore below never gets this branch.

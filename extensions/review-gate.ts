@@ -317,7 +317,6 @@ import {
   evaluateModeChange,
   buildModeConfirmMessage,
   normalizeTaskMode,
-  scratchFirstMode,
   isEnforcedMode,
   requestedModeFromEnv,
   GATE_MODE_DECISION_DIRECTIVE,
@@ -331,7 +330,6 @@ import {
   createVerdictMemo,
   type LlmClassifier,
 } from "../lib/llm-classify.ts";
-import { isPiSelfRoot } from "../lib/pi-self.ts";
 import {
   BASH_WRITE_NUDGE,
   EDIT_DISCIPLINE_DIRECTIVE,
@@ -5978,10 +5976,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       "classification; no external model second-guesses it. You can only classify yourself INTO the " +
       "gate: a first \"loop\" always applies, a first \"explore\" applies while this session is still " +
       "clean, but \"normal\" (gate fully off) always needs the user's confirmation dialog. " +
-      "In /tmp, scratchFirstMode keeps only an explicit explore and otherwise applies normal. " +
-      "Upgrades (toward loop) apply immediately except in /tmp, where the agent cannot enter loop " +
-      "(first classification is remapped to normal; later agent loop upgrades are rejected; only " +
-      "the user can force loop via /gate-mode). Downgrades after the first classification pop a " +
+      "In a Temp dir (/tmp) nothing is forced: the gate only nudges — trivial work should go " +
+      "\"normal\", delivery work runs the same modes as anywhere else. " +
+      "Upgrades (toward loop) apply immediately (a non-git directory still refuses enforced " +
+      "modes via the agent; only the user can force one via /gate-mode). Downgrades after the first classification pop a " +
       "confirmation dialog for the user — you cannot approve it yourself, and a declined " +
       "dialog locks further agent-initiated downgrades for this session. " +
       "\"orchestrator\" is the PROJECT-MANAGER role — loop plus the orchestration constraints " +
@@ -6083,36 +6081,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (nonGitTask && state.taskMode === undefined && (effective === "loop" || effective === "orchestrator")) {
         effective = "normal";
       }
-      const piSelf = isPiSelfRoot(primaryRepoRoot);
-      if (
-        state.taskMode === undefined &&
-        !sessionEdited &&
-        ctx.hasUI
-      ) {
-        if (piSelf) {
-          // /tmp is scratch space: it can never reach loop via the agent, and the
-          // /tmp is scratch space: it can never reach loop via the agent. Asking the
-          // model here would spend up to the full guard timeout on an answer
-          // nobody reads, so a scratch session makes NO LLM call at all — the
-          // same promise the pre-refactor code kept.
-          effective = scratchFirstMode(requested);
-        } else {
-        }
-      }
-      // Defense in depth: even if the first-classification block was skipped
-      // (session already edited) or a future caller forgets scratchFirstMode,
-      // a /tmp first classification must never hand "loop" to setTaskMode.
-      // evaluateModeChange remaps internally too, but it does not return the
-      // remapped mode — the tool applies `effective`.
-      if (piSelf && state.taskMode === undefined && effective === "loop") {
-        effective = "normal";
-      }
       // The pure rule engine decides; this tool only supplies FACTS. Consent
       // is obtained below by the EXTENSION (there is deliberately no
       // "confirmed" parameter the model could set). hasChanges = THIS
       // session's own edits only (pre-existing changes arm the gate via
       // state.hasCodeChange but must not force a confirmation dialog on the
-      // first classification). piSelfTask is the session cwd, not a
+      // first classification). piSelfTask now means non-git directories only:
+      // Temp dirs are NOT clamped anymore (criterion 6 — nudge instead), so the
+      // engine's path exemption covers the no-git case alone — and it is not a
       // first-classification-only flag: later agent loop upgrades must also
       // be rejected.
       const decision = evaluateModeChange({
@@ -6121,16 +6097,14 @@ export default function reviewGate(pi: ExtensionAPI) {
         hasChanges: sessionEdited,
         hasUI: ctx.hasUI,
         downgradesLocked: agentDowngradesLocked,
-        // piSelfTask = the environment forbids enforced modes: /tmp scratch
-        // sessions (path-based) AND non-git directories (nothing to review/
-        // checkpoint/ship — user decision 2026-09-02). The engine then
-        // clamps first classification and rejects later loop upgrades in
-        // ONE place (lib/task-mode.ts).
-        piSelfTask: piSelf || !sessionInGit,
-        // NON-GIT (2026-09-02): when the clamp comes from the non-git rule
-        // and not the /tmp path, the reject reason must say so — the /tmp
-        // default would be a lie in a non-git dir (reviewer P2).
-        clampReason: !sessionInGit && !piSelf
+        // piSelfTask = the environment forbids enforced modes: non-git directories
+        // (nothing to review/checkpoint/ship — user decision 2026-09-02). Temp dirs
+        // are no longer clamped (criterion 6).
+        piSelfTask: !sessionInGit,
+        // NON-GIT (2026-09-02): the clamp comes from the non-git rule, so the
+        // reject reason must say so — the /tmp default would be a lie in a non-git
+        // dir (reviewer P2).
+        clampReason: !sessionInGit
           ? `this session is not inside a git repository — non-git directories cannot enter "${effective}" via the agent. Ask the user to run /gate-mode ${effective} if they really want the enforced workflow here.`
           : undefined,
       });
@@ -6146,18 +6120,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
 
       if (decision.action === "apply") {
-        const scratchFirst = piSelf && state.taskMode === undefined;
-        // NON-GIT (2026-09-02): a non-git directory is clamped the same way
-        // as /tmp scratch (never loop via the agent), but the REASON the
-        // user sees must say what it is — "this session started in /tmp"
-        // would be a lie in a non-git dir that is not /tmp (reviewer P2).
+        // NON-GIT (2026-09-02): a non-git directory still clamps loop/orchestrator
+        // to normal without confirmation; Temp dirs only get a nudge (criterion 6).
         const nonGitFirst = !sessionInGit && state.taskMode === undefined;
         setTaskMode(effective, decision.source, ctx as unknown as ExtensionContext);
         try {
-          const sourceNote = scratchFirst || nonGitFirst
-            ? nonGitFirst
-              ? "（非 git 目录，规则禁止 loop，无需确认）"
-              : "（/tmp 临时会话，规则禁止 loop，无需确认）"
+          const sourceNote = nonGitFirst
+            ? "（非 git 目录，规则禁止 loop，无需确认）"
             : "";
           ctx.ui.notify(
             effective === "loop"
@@ -6184,7 +6153,7 @@ export default function reviewGate(pi: ExtensionAPI) {
             text:
               `review-gate: gate mode set to "${effective}" (source: ${decision.source})` +
               (effective !== requested
-                ? `。你请求的是 "${requested}"，/tmp 临时会话规则已将其调整为 "${effective}"。`
+                ? `。你请求的是 "${requested}"，目录规则已将其调整为 "${effective}"（非 git 目录禁 enforced 模式）。`
                 : ".") +
               goalNote,
           }],
@@ -6196,16 +6165,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         // USER CONSENT — rendered by the extension with fixed consequence copy;
         // the agent's reason is displayed as clearly-labeled untrusted data.
         // The dialog must describe what "yes" actually grants: the decision was
-        // computed on `effective` (which the /tmp clamp may have rewritten), so
-        // the copy is built from `effective` — never from `requested`. When the
-        // two differ, `requested` is passed as well so the fixed copy can say
-        // why the agent's reason argues for another mode.
+        // computed on `effective`, so the copy is built from it — never from `requested`.
         let ok = false;
         try {
           ok = await confirmBounded(
             ctx as unknown as ExtensionContext,
             MODE_CONFIRM_TITLE,
-            buildModeConfirmMessage(effective, params.reason, requested),
+            buildModeConfirmMessage(effective, params.reason),
           );
         } catch { ok = false; }
         if (ok) {

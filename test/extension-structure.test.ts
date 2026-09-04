@@ -1020,37 +1020,34 @@ test("set_gate_mode(orchestrator) refuses to take over a plan written by another
   assert.match(region, /isError: true/, "refusing, never silently proceeding");
 });
 
-test("USER REQUIREMENT: /tmp first classification clamps via scratchFirstMode; /gate-mode never goes through it", () => {
-  // Agent path: /tmp sessions clamp the first verdict and keep piSelfTask true
-  // so later agent upgrades to loop are rejected.
-  assert.match(SRC, /scratchFirstMode\(/);
-  assert.match(SRC, /piSelfTask:\s*piSelf/);
+test("USER REQUIREMENT: Temp dirs are nudged, never clamped; only non-git clamps (criterion 6)", () => {
+  // Agent path: /tmp sessions are NOT rewritten — the gate only nudges via the
+  // classification directive. The engine exemption covers non-git dirs alone.
+  assert.doesNotMatch(SRC, /scratchFirstMode\(/);
+  assert.match(SRC, /piSelfTask: !sessionInGit/);
   // setTaskMode must not be able to receive loop on a /tmp first classification
-  // even if the classifier block was skipped (session already edited).
-  assert.match(SRC, /piSelf && state\.taskMode === undefined && effective === "loop"/);
-  assert.match(SRC, /apply immediately except in \/tmp/);
-  assert.doesNotMatch(SRC, /Upgrades \(toward loop\) apply immediately;/);
-  assert.doesNotMatch(SRC, /ALWAYS user-confirmed/);
-  assert.doesNotMatch(SRC, /always user-consented/);
+  // setTaskMode receives the agent's pick unrewritten in /tmp; only the non-git
+  // short-circuit may still rewrite loop/orchestrator to normal.
+  assert.doesNotMatch(SRC, /piSelf && state\.taskMode === undefined && effective === "loop"/);
+  assert.match(SRC, /Temp dirs are NOT clamped/);
+  assert.match(SRC, /Upgrades \(toward loop\) apply immediately \(a non-git directory still/);
   const README = readFileSync(join(ROOT, "README.md"), "utf8");
-  assert.match(README, /scratchFirstMode/);
+  assert.doesNotMatch(README, /scratchFirstMode/);
   // The consent-free entries into normal must be enumerated, and the agent's
   // own first classification must NOT be one of them.
   assert.match(README, /Exactly two entries are consent-free/);
   assert.match(README, /including the agent's own first classification/);
+  assert.match(README, /non-git directory/, "the first entry is non-git, not /tmp");
   assert.match(README, /print\/JSON \(no UI\) session/);
   assert.doesNotMatch(README, /ONE exception/);
   assert.doesNotMatch(README, /two consent-free first-classification exceptions/);
   assert.doesNotMatch(SRC, /failed model call falls back to the normal consent rules\. /);
-  assert.match(README, /Outside `\/tmp`/);
+  assert.match(README, /Temp dirs \(`\/tmp`\) are NOT exempt/);
   assert.doesNotMatch(README, /undecided→loop/);
   assert.match(README, /Print\/JSON mode \(no UI\) cannot render those dialogs/);
   const TASK_MODE = readFileSync(join(ROOT, "lib", "task-mode.ts"), "utf8");
-  const PI_SELF = readFileSync(join(ROOT, "lib", "pi-self.ts"), "utf8");
-  assert.match(PI_SELF, /Explore still keeps the L1 ship gate/);
-  assert.doesNotMatch(PI_SELF, /the gate steps aside there/);
-  assert.doesNotMatch(PI_SELF, /Everything under \/tmp is exempt/);
-  assert.doesNotMatch(PI_SELF, /gate-exempt/);
+  // lib/pi-self.ts is deleted (criterion 6): Temp dirs are nudged, never detected.
+  assert.ok(!existsSync(join(ROOT, "lib", "pi-self.ts")), "lib/pi-self.ts must be deleted, not left unused");
   assert.doesNotMatch(README, /user-consented step-aside/);
   assert.doesNotMatch(SRC, /user-consented step-aside/);
   assert.match(TASK_MODE, /print\/JSON no-UI/);
@@ -1071,8 +1068,9 @@ test("USER REQUIREMENT: /tmp first classification clamps via scratchFirstMode; /
   // /tmp makes NO classifier call at all: it can never reach loop, and the
   // /decompose hint is only ever surfaced under loop.
   // The decompose hint and its requirement-size classifier are gone (2026-08-26);
-  // the /tmp clamp (scratchFirstMode) stays.
-  assert.match(SRC, /if \(piSelf\) \{[\s\S]{0,600}?effective = scratchFirstMode\(requested\);/);
+  // the /tmp clamp (scratchFirstMode) is gone too (criterion 6) — the
+  // classification directive only nudges Temp-dir sessions toward normal.
+  assert.match(TASK_MODE, /Temp dirs \(\/tmp\) are NOT clamped/);
   // The guard layer must document that it deliberately holds NO gate-mode
   // classifier, so a future round does not "restore" one.
   const CLASSIFY = readFileSync(join(ROOT, "lib", "llm-classify.ts"), "utf8");
@@ -4024,7 +4022,7 @@ test("non-git directory: the gate short-circuits entirely (user decision 2026-09
   // replacing it with `clampReason: undefined` would silently regress the
   // reject wording to the /tmp lie while every test stays green.
   const modeChange = windowOf("const decision = evaluateModeChange({", "      });", "set_gate_mode decision");
-  assert.match(modeChange, /clampReason: !sessionInGit && !piSelf/,
+  assert.match(modeChange, /clampReason: !sessionInGit/,
     "the non-git clamp reason must be passed to evaluateModeChange");
   // session_start forces normal mode and returns before any git-backed step.
   const start = windowOf("pi.on(\"session_start\"", "pi.on(\"session_shutdown\"", "session_start");
