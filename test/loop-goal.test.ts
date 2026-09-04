@@ -484,7 +484,8 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
   // The completion contract is embedded: fence-and-stop, questions via ask_user.
   assert.match(task, /verdict fence 收尾并停下/);
   assert.match(task, /ask_user/);
-  assert.doesNotMatch(task, /tmux|wait-for|inbox/); // "channel report" is the sanctioned completion path
+  assert.doesNotMatch(task, /wait-for|inbox/); // no wait plumbing in the task
+  assert.match(task, /own tmux pane/, "the pane running model is stated");
   // First audit (no carryover, no session): plain template, no stale claims.
   const first = buildGoalAuditTask("# 目标");
   assert.doesNotMatch(first, /carryover/i);

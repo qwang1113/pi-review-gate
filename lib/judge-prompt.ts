@@ -1,8 +1,8 @@
 /**
  * Judge child-session prompt assembly — role definition + shared protocol.
  *
- * A judge child is its own non-interactive pi process (no review-gate
- * extension). The gate builds that process's SYSTEM PROMPT from two parts:
+ * A judge child runs in its own tmux pane (interactive pi, gate loaded in judge
+ * mode). The gate builds that pane's SYSTEM PROMPT from two parts:
  *
  *   1. the role's definition body (agents/<role>.md minus frontmatter) —
  *      what the role IS, how it judges, its output contract, and

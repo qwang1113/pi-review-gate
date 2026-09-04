@@ -6,7 +6,7 @@
  * `prepare_review`), and its verdict is the only one the gate records
  * (`record_review` parses every fence; worst verdict wins if multiple appear).
  *
- * NO ENGINE HERE. The reviewer runs as its own non-interactive pi process
+ * NO ENGINE HERE. The reviewer runs in its own tmux pane (interactive pi, gate in judge mode)
  * (dispatched by `judge_submit`); the subagent dispatch surface was retired
  * 2026-09-06 with the pi-subagents companion. Every function in this file
  * is pure over strings, so the reviewer contract can be pinned by tests

@@ -249,7 +249,7 @@ export function buildGoalAuditTask(
   const lines = [
     "You are goal-auditor. Audit the draft loop goal below as the exit contract for this session.",
     "",
-    "You run as your own pi process (pi -p --session-id): your own session, with none of the main",
+    "You run in your own tmux pane (same deterministic session id across rounds): your own session, with none of the main",
     "repository and the transcript pointer below.",
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),

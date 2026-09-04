@@ -148,7 +148,7 @@ export function buildPlanAuditTask(
     "",
     "The plan below is about to be shown to a HUMAN for approval. It decides what each child",
     "session may touch, in what order, and how many run at once — so a mistake here puts two",
-    "writers in one file, or turns a serial chain into a race. You run as your own pi process",
+    "writers in one file, or turns a serial chain into a race. You run in your own pane",
     "with read-only tools: CHECK THE PLAN AGAINST THE REPOSITORY, do not judge the prose.",
     ...(opts.repoRoot ? ["", `Repository: ${opts.repoRoot}`] : []),
     "",

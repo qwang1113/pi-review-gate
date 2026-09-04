@@ -368,6 +368,6 @@ export const GATE_MODE_DECISION_DIRECTIVE =
   "give a truthful one-line reason. You can only classify yourself INTO the gate: \"loop\" " +
   "applies immediately and \"explore\" applies while this session is still clean, but " +
   "\"normal\" switches the gate off entirely and therefore always asks the USER to confirm. " +
-  "Upgrades (toward loop) apply later without confirmation (a non-git directory still" +
+  "Upgrades (toward loop) apply later without confirmation (a non-git directory still " +
   "refuses enforced modes via the agent); downgrades after the " +
   "first classification ask the user. If genuinely uncertain, choose \"loop\" (the safe default).";

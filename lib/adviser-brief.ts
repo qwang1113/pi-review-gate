@@ -5,7 +5,7 @@ import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
  *
  * Goal criterion 3 (adviser conclusion storage + injection): the gate hands
  * the main agent a ready-made adviser task template carrying (a) the main
- * session's transcript path — the adviser is its own pi process and reads it
+ * session's transcript path — the adviser runs in its own pane and reads it
  * ON DEMAND instead of inheriting a fork of the whole conversation — and
  * (b) the artifact path where the adviser appends its own conclusion. The
  * NEXT consultation of the same goal reads that file back and injects the
@@ -136,7 +136,7 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
   const lines = [
     "You are `adviser`, consulting on the CURRENT loop goal of the main session.",
     "",
-    "CONTEXT MODEL: you run as your own pi process (pi -p --session-id) — the",
+    "CONTEXT MODEL: you run in your own tmux pane (same session id across rounds) — the",
     "main session's conversation is NOT inherited. Read it on demand instead:",
     `- session dir: ${input.sessionDir}`,
     `- session id:  ${input.sessionId} (find the file named <timestamp>_${input.sessionId}.jsonl, grep/read the parts you need)`,
