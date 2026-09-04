@@ -1,86 +1,81 @@
 /**
- * The three tools that act on an EXISTING judge session — `judge_read`,
+ * The three tools that act on an EXISTING pane judge — `judge_read`,
  * `judge_close` and `judge_wait`.
  *
- * They live here rather than in `extensions/review-gate.ts` for the reason
- * this repository now has a rule about (AGENTS.md §"架构规范"): that file is
- * ~9000 lines, and it got there one "just add the tool body here" at a time.
- * The orchestration tools moved out first (lib/orchestrator-*-tools.ts); this
- * module is the same move for the judge side, and the same shape:
- * `register<Family>Tools(host, deps)`, with every effect the tools need
- * arriving through an injected `deps` object.
+ * A judge is an interactive pi in its own pane (one pane per review),
+ * owned by the opener recorded in lib/hierarchy.ts. There is no process to
+ * watch and no stdout log to tail: the round ends when a `report` record
+ * lands in the judge's channel, the pane dies, or the heartbeat goes stale.
+ * The transcript stays the long memory (conclusions are parsed from it);
+ * the channel is the completion signal.
  *
- * THE BOUNDARY: these three tools OBSERVE or END a session that already
- * exists. Dispatching a round (`judge_submit` and the review chain it runs)
- * is a different job — it owns the gate state, git and process spawning — and
- * stays in the extension for now.
+ * EVERY tool below passes `checkCaller` before doing anything else (except
+ * the adviser-only read, which still refuses other roles): a judge belongs
+ * to its opener, and any other session's operation on it is a cross-level
+ * call refused fail-closed, with no dialog.
  *
- * WHAT IS AND IS NOT INJECTED. The pure decision modules are imported
- * directly (lib/judge-lifecycle.ts for the end-of-round criteria and the
- * reply formatter, lib/poll-wait.ts for the loop, lib/review-stream.ts for
- * the findings stream): they are already testable on their own, and hiding
- * them behind deps would only make the wiring longer. What IS injected is
- * everything the tools cannot own — the filesystem, the repo resolution, and
- * the extension's in-memory registries — so every rule in this file can be
- * exercised with a fake instead of a spawned judge.
- *
- * BEHAVIOR IS FROZEN: this module was moved verbatim out of the extension.
- * Tool names, schemas, reply texts, `details` fields and error branches are
- * the ones the agent-facing contract already documents; changing any of them
- * is a separate, deliberate change.
+ * Shape (unchanged): `registerJudgeSessionTools(host, deps)`, effects
+ * through `deps` only. Pure decisions live in lib/hierarchy.ts,
+ * lib/orchestrator-channel.ts and lib/judge-pane.ts and are imported
+ * directly; what IS injected is everything the tools cannot own — identity,
+ * the registries, tmux, the channel filesystem and the verdict recorder.
  */
-
 import { Type } from "typebox";
 
 import type { ToolHost, ToolReply } from "./tool-host.ts";
-import { judgeProcessAlive } from "./judge-process.ts";
-import type { JudgeConclusion, JudgeSessionState } from "./judge-session.ts";
+import {
+  checkCaller,
+  removeJudge,
+  type HierarchyTable,
+} from "./hierarchy.ts";
+import {
+  channelPathFor,
+  isStalled,
+  judgeChannelTarget,
+  projectChannel,
+  readChannel,
+  reportText,
+  HEARTBEAT_STALE_MS,
+  type ChannelIO,
+} from "./orchestrator-channel.ts";
+import {
+  closeJudgePane,
+  judgePaneAlive,
+  type JudgePaneRunResult,
+} from "./judge-pane.ts";
+import type { JudgeConclusion } from "./judge-session.ts";
 import {
   clampWaitTimeout,
-  evaluateJudgeWait,
-  formatJudgeWaitReply,
-  tailLines,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
-  WAIT_STDOUT_TAIL_LINES,
-  type JudgeWaitOutcome,
+  WAIT_DISCIPLINE_HINT,
 } from "./judge-lifecycle.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import { pollUntil } from "./poll-wait.ts";
 import { parseStream } from "./review-stream.ts";
 
-/** Default number of stdout lines `judge_read` hands back. */
-export const DEFAULT_STDOUT_HISTORY_LINES = 200;
-/** How much of a log file the wait path reads before tailing it. */
-export const LOG_TAIL_MAX_BYTES = 8000;
+/** Default tail lines for an adviser's transcript conclusion. */
+export const DEFAULT_CONCLUSION_HISTORY_LINES = 200;
 
 /**
- * The parts of a dispatched judge child these tools address.
+ * The parts of a pane judge these tools address.
  *
  * A structural subset of the extension's own record on purpose: this module
- * must not become the second place that decides what a judge child IS.
+ * must not become the second place that decides what a judge IS.
  */
 export interface JudgeChildRecord {
-  sessionId: string;
+  /** Judge id — also the pane's resume key and the channel file name. */
+  judgeId: string;
   role: string;
-  title: string;
+  /** Repo root the review belongs to. */
+  repoRoot: string;
+  /** Who opened it — the only session that may operate it. */
+  openerId: string;
+  /** tmux pane id, once the pane exists. */
+  paneId?: string;
   /** Directory pi writes its transcript jsonl into (stable per role). */
   sessionDir: string;
-  /** Per-run stdout log (this round's raw output). */
-  stdoutPath: string;
-  /** Per-run stderr log (crash diagnosis). */
-  stderrPath: string;
-  /** exit-code file — the authoritative 'session finished' fact. */
-  exitCodePath: string;
-  /**
-   * pid record `<pid> <start>` — cross-session takeover. Never read here; it
-   * is the input {@link JudgeSessionToolDeps.sessionState} needs, and leaving
-   * it out would force the wiring to look the child up a second time.
-   */
-  pidPath: string;
   /** This round's findings stream, when the role has one. */
   streamPath?: string;
-  /** The live child process; liveness is `exitCode === null`. */
-  child?: { exitCode?: number | null; pid?: number; kill?: (signal?: string) => boolean };
 }
 
 /** Repo resolution, as `resolveToolRepoTarget` already reports it. */
@@ -95,35 +90,40 @@ export type JudgeRepoTarget = { ok: true; root: string } | { ok: false; error: s
 export interface JudgeSessionToolDeps {
   /** Which repo does this call target? Never guessed — see repo-resolve.ts. */
   resolveRepo(requested: string | undefined): JudgeRepoTarget;
-  /** Locate a judge child by ROLE (preferred) or by session id. */
-  findChild(root: string, role: string | undefined, sessionId: string | undefined): JudgeChildRecord | undefined;
-  /** Liveness/exit facts from the session's own artifacts (pid, exit-code). */
-  sessionState(child: JudgeChildRecord): JudgeSessionState;
-  /** The conclusion parsed from the RECORDED session dir. */
-  conclusion(child: JudgeChildRecord): JudgeConclusion;
-  /** Crash context that survives the process. */
-  stderrTail(child: JudgeChildRecord): string | undefined;
+  /** Who is calling — the opener check runs on this, never on a parameter. */
+  callerId(): string | undefined;
+  /** Opener registry (extension-owned) and its persistence. */
+  hierarchy(): HierarchyTable;
+  saveHierarchy(next: HierarchyTable): void;
+  /** Locate a pane judge by ROLE (preferred) or by judge id. */
+  findChild(root: string, role: string | undefined, judgeId: string | undefined): JudgeChildRecord | undefined;
+  /** Channel filesystem seam and its home override. */
+  channelIO(): ChannelIO;
+  channelHome(): string | undefined;
+  /** One tmux invocation (argv, never a shell string). */
+  tmux(argv: readonly string[]): JudgePaneRunResult;
+  /** This session's own pane — liveness is probed from its window. */
+  ownPane(): string | undefined;
+  /** Injectable clock. */
+  now(): number;
   /** Whole file, or undefined when it is absent/unreadable. */
   readText(path: string): string | undefined;
-  /** Existence only — an empty exit-code file still means "finished". */
-  fileExists(path: string): boolean;
-  /** Cancel the exit watcher (and the process record) for a session id. */
-  cancelWatch(sessionId: string): void;
-  /** Remove the child from the extension's registry. */
-  dropChild(sessionId: string): void;
-  /** Forget the goal draft a closed audit was judging. */
-  dropPendingAudit(root: string): void;
+  /** The conclusion parsed from the RECORDED session dir. */
+  conclusion(child: JudgeChildRecord): JudgeConclusion;
+  /** Run the gate's own verdict recording on the reported bytes. */
+  recordVerdict(fullText: string, root: string, role: string): Promise<{ text?: string; hasVerdict: boolean }>;
   /** Cancel the gate-owned hosted-wait watchdog. */
   cancelWaitTimer(): void;
+  /** Forget the goal draft a closed audit was judging. */
+  dropPendingAudit(root: string): void;
 }
 
 // ---------- shared parameter schemas ----------
-// One definition per parameter, shared by the three tools: a role enum that
+// One definition per parameter, shared by the tools: a role enum that
 // drifts between two of them is exactly the kind of silent inconsistency this
 // move is supposed to make impossible.
-
 const ROLE_PARAM = Type.Optional(Type.Enum({ reviewer: "reviewer", adviser: "adviser", "goal-auditor": "goal-auditor" }));
-const SESSION_ID_PARAM = Type.Optional(Type.String({ description: "Internal key; prefer role" }));
+const SESSION_ID_PARAM = Type.Optional(Type.String({ description: "Judge id (its session id); prefer role" }));
 const REPO_PARAM = Type.Optional(Type.String({
   description: "Absolute repo path (required once the session edited several repos)",
 }));
@@ -146,11 +146,11 @@ function fail(text: string, details: Record<string, unknown>): ToolReply {
  * find the key simply missing because the call failed early.
  */
 function readFailDetails(): Record<string, unknown> {
-  return { found: false, alive: false, lifecycle: "unknown", exitCode: undefined, hasVerdict: false };
+  return { found: false, alive: false, state: "unknown", hasReport: false, hasVerdict: false };
 }
 
 function closeFailDetails(): Record<string, unknown> {
-  return { closed: false, terminated: false, sessionId: undefined };
+  return { closed: false, terminated: false, judgeId: undefined };
 }
 
 function waitFailDetails(): Record<string, unknown> {
@@ -160,7 +160,7 @@ function waitFailDetails(): Record<string, unknown> {
 // ---------- shared addressing ----------
 
 type Addressed =
-  | { ok: true; root: string; role: string | undefined; sessionId: string | undefined }
+  | { ok: true; root: string; role: string | undefined; judgeId: string | undefined }
   | { ok: false; text: string };
 
 /**
@@ -177,35 +177,83 @@ function addressJudge(
   toolName: string,
 ): Addressed {
   const role = params.role ? String(params.role) : undefined;
-  const sessionId = params.sessionId ? String(params.sessionId) : undefined;
-  if (!role && !sessionId) {
+  const judgeId = params.sessionId ? String(params.sessionId) : undefined;
+  if (!role && !judgeId) {
     return { ok: false, text: `review-gate: ${toolName} needs a role (reviewer / adviser / goal-auditor).` };
   }
   const target = deps.resolveRepo(typeof params.repo === "string" ? params.repo : undefined);
   if (!target.ok) return { ok: false, text: target.error };
-  return { ok: true, root: target.root, role, sessionId };
+  return { ok: true, root: target.root, role, judgeId };
+}
+
+/** Opener check shared by the three tools (read narrows the role first). */
+function checkOpener(
+  deps: JudgeSessionToolDeps,
+  judgeId: string,
+): { ok: true } | { ok: false; text: string } {
+  const caller = deps.callerId();
+  if (!caller) {
+    return { ok: false, text: "review-gate: 无法确认调用者身份——身份不明时不能操作任何 review。" };
+  }
+  const allowed = checkCaller(deps.hierarchy(), judgeId, caller);
+  if (!allowed.ok) return { ok: false, text: `review-gate: ${allowed.reason}` };
+  return { ok: true };
 }
 
 // ---------- the wait criteria (this module's own) ----------
 
-/**
- * Observe one judge round and apply the three end-of-round criteria.
- *
- * The fence criterion reads the round's STDOUT: there the verdict is plain
- * text, while inside the transcript jsonl it is JSON-escaped — which is why
- * the old hand-written `grep '"gate":"READY"'` never matched anything.
- */
-export function probeJudgeRound(deps: JudgeSessionToolDeps, child: JudgeChildRecord): JudgeWaitOutcome {
-  return evaluateJudgeWait({
-    processAlive: judgeProcessAlive(child.child),
-    exitCodeExists: deps.fileExists(child.exitCodePath),
-    stdoutTail: readLogTail(deps, child.stdoutPath),
-  });
+export interface PaneJudgeWaitObservation {
+  done: boolean;
+  reason: "report" | "pane-dead" | "pending";
+  reportId?: string;
+  verdict?: string;
+  findingsCount?: number;
+  stateLine?: string;
 }
 
-/** Last bytes of a log file; an unreadable/absent log reads as empty. */
-export function readLogTail(deps: JudgeSessionToolDeps, path: string, maxBytes = LOG_TAIL_MAX_BYTES): string {
-  return (deps.readText(path) ?? "").slice(-maxBytes);
+/**
+ * Observe one pane judge round: a NEW channel report ends it, a dead pane
+ * ends it as failed, anything else is still running. The fence criterion
+ * reads the channel (where the verdict is exact bytes), never a transcript
+ * scan — the transcript stays the long memory, not the signal.
+ */
+export function probeJudgeRound(
+  deps: JudgeSessionToolDeps,
+  child: JudgeChildRecord,
+  consumedReportId: string | undefined,
+): PaneJudgeWaitObservation {
+  const io = deps.channelIO();
+  const home = deps.channelHome();
+  const target = judgeChannelTarget(child.openerId, child.judgeId, home);
+  const read = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home));
+  const projection = projectChannel(read.records);
+  const last = projection.lastReport;
+  if (last && last.reportId !== consumedReportId) {
+    return { done: true, reason: "report", reportId: last.reportId, verdict: last.verdict, findingsCount: last.findingsCount };
+  }
+  const ownPane = deps.ownPane();
+  const paneAlive = child.paneId && ownPane ? judgePaneAlive(deps.tmux, ownPane, child.paneId) : undefined;
+  if (paneAlive === false) {
+    return { done: true, reason: "pane-dead" };
+  }
+  const state = projection.lastState?.state ?? "unknown";
+  const since = projection.lastStateSince ?? projection.lastActivityAt ?? "—";
+  return { done: false, reason: "pending", stateLine: `${state}（自 ${since}）` };
+}
+
+/** Is this pane judge's silence a stall? Missing pane info is never a stall. */
+export function paneJudgeStalled(
+  deps: JudgeSessionToolDeps,
+  child: JudgeChildRecord,
+): boolean {
+  const io = deps.channelIO();
+  const home = deps.channelHome();
+  const target = judgeChannelTarget(child.openerId, child.judgeId, home);
+  const read = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home));
+  const projection = projectChannel(read.records);
+  const ownPane = deps.ownPane();
+  const paneAlive = child.paneId && ownPane ? judgePaneAlive(deps.tmux, ownPane, child.paneId) : undefined;
+  return isStalled(projection, paneAlive, deps.now(), HEARTBEAT_STALE_MS);
 }
 
 /**
@@ -225,56 +273,68 @@ export function recentStreamFindings(deps: JudgeSessionToolDeps, streamPath: str
   } catch { return []; }
 }
 
-// ---------- judge_read ----------
+// ---------- judge_read (adviser only) ----------
 
 async function doRead(deps: JudgeSessionToolDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const addressed = addressJudge(deps, params, "judge_read");
   if (!addressed.ok) return fail(addressed.text, readFailDetails());
-  const history = typeof params.history === "number" ? params.history : DEFAULT_STDOUT_HISTORY_LINES;
-  const child = deps.findChild(addressed.root, addressed.role, addressed.sessionId);
-  if (!child) {
+  if (addressed.role !== undefined && addressed.role !== "adviser") {
     return fail(
-      `review-gate: no judge child on record for ${addressed.role ?? addressed.sessionId}.`,
+      `review-gate: judge_read 只读 adviser——reviewer / goal-auditor 走 judge_wait 与通道 report（状态、findings 计数、verdict），那才是结论通道。`,
       readFailDetails(),
     );
   }
-
-  const running = judgeProcessAlive(child.child);
-  const state = deps.sessionState(child);
-  // Live output: tail of the stdout log (the process's stream is teed there
-  // continuously). Simple last-N-lines read (tailLogFile is a streaming tail
-  // for precommit, not a snapshot reader).
-  let stdoutTail: string | undefined;
-  const rawStdout = deps.readText(child.stdoutPath);
-  if (rawStdout !== undefined) {
-    const lines = rawStdout.split("\n");
-    stdoutTail = lines.length <= history ? rawStdout : lines.slice(-history).join("\n");
-  }
-  // The process is gone but its records are not: only then are the transcript
-  // and stderr the authoritative account of what happened.
-  const conclusion = !running ? deps.conclusion(child) : undefined;
-  const stderrTail = !running ? deps.stderrTail(child) : undefined;
-  const header = `review-gate: judge session ${child.title} (${child.role}) — ${running ? "running" : state.lifecycle}` +
-    (state.exitCode !== undefined ? ` (exit ${state.exitCode})` : "") +
-    ` [session ${child.sessionId}]`;
-  const body: string[] = [];
-  if (stdoutTail) body.push(`--- stdout (tail ${history}) ---\n${stdoutTail}`);
-  if (conclusion) {
-    body.push(
-      conclusion.text !== undefined
-        ? `--- conclusion (${conclusion.hasVerdict ? "verdict fence" : "NO verdict fence — last message, may be a sign-off"}` +
-          `, from ${conclusion.transcriptPath}) ---\n${conclusion.text}`
-        : `--- no conclusion on disk (transcript ${conclusion.transcriptPath ?? "missing"}) — the child produced no assistant output ---`,
+  const child = deps.findChild(addressed.root, addressed.role ?? "adviser", addressed.judgeId);
+  if (!child) {
+    return fail(
+      `review-gate: no judge on record for ${addressed.role ?? addressed.judgeId}.`,
+      readFailDetails(),
     );
   }
-  if (stderrTail) body.push(`--- stderr (tail) ---\n${stderrTail}`);
-  if (!stdoutTail && !conclusion) body.push("--- nothing to read yet (no stdout, no recorded session) ---");
+  if (child.role !== "adviser") {
+    return fail(
+      `review-gate: judge_read 只读 adviser——${child.role} 走 judge_wait 与通道 report。`,
+      readFailDetails(),
+    );
+  }
+  const allowed = checkOpener(deps, child.judgeId);
+  if (!allowed.ok) return fail(allowed.text, readFailDetails());
+  const history = typeof params.history === "number" ? params.history : DEFAULT_CONCLUSION_HISTORY_LINES;
+  const io = deps.channelIO();
+  const home = deps.channelHome();
+  const target = judgeChannelTarget(child.openerId, child.judgeId, home);
+  const projection = projectChannel(
+    readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records,
+  );
+  const ownPane = deps.ownPane();
+  const alive = child.paneId && ownPane ? judgePaneAlive(deps.tmux, ownPane, child.paneId) : undefined;
+  const conclusion = deps.conclusion(child);
+  let conclusionTail = conclusion.text;
+  if (conclusionTail !== undefined) {
+    const lines = conclusionTail.split("\n");
+    conclusionTail = lines.length <= history ? conclusionTail : lines.slice(-history).join("\n");
+  }
+  const header = `review-gate: adviser ${child.judgeId} — ${projection.lastState?.state ?? "unknown"}` +
+    (alive === undefined ? "（pane 情况不明）" : alive ? "（pane 存活）" : "（pane 已消失）");
+  const body: string[] = [];
+  for (const q of projection.openRequests) {
+    body.push(`--- 未答问题：${q.title}（选项：${q.options.join(" / ") || "自由文本"}）---`);
+  }
+  if (conclusionTail) {
+    body.push(
+      conclusion.hasVerdict
+        ? `--- 结论（含 verdict fence，${history} 行内）---\n${conclusionTail}`
+        : `--- 最近输出（无 verdict fence，可能只是过程语）---\n${conclusionTail}`,
+    );
+  } else {
+    body.push("--- 还没有可读的结论 ---");
+  }
   return reply([header, ...body].join("\n"), {
     found: true,
-    alive: running,
-    lifecycle: state?.lifecycle,
-    exitCode: state?.exitCode,
-    hasVerdict: conclusion?.hasVerdict ?? false,
+    alive: alive ?? false,
+    state: projection.lastState?.state ?? "unknown",
+    hasReport: projection.lastReport !== undefined,
+    hasVerdict: conclusion.hasVerdict,
   });
 }
 
@@ -283,32 +343,34 @@ async function doRead(deps: JudgeSessionToolDeps, params: Record<string, unknown
 async function doClose(deps: JudgeSessionToolDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const addressed = addressJudge(deps, params, "judge_close");
   if (!addressed.ok) return fail(addressed.text, closeFailDetails());
-  const child = deps.findChild(addressed.root, addressed.role, addressed.sessionId);
+  const child = deps.findChild(addressed.root, addressed.role, addressed.judgeId);
   if (!child) {
     // Idempotent: nothing to close is a SUCCESS, so a task-completion sweep
     // never has to know whether a round is still on record.
     return reply(
-      `review-gate: no judge child on record for ${addressed.role ?? addressed.sessionId} — nothing to close.`,
-      { closed: true, terminated: false, sessionId: undefined },
+      `review-gate: no judge on record for ${addressed.role ?? addressed.judgeId} — nothing to close.`,
+      { closed: true, terminated: false, judgeId: undefined },
     );
   }
-  const sessionId = child.sessionId;
-  // Cancel the exit watcher so no wake fires for a close we initiated.
-  deps.cancelWatch(sessionId);
-  const running = judgeProcessAlive(child.child);
-  if (running) {
-    try { child.child?.kill?.("SIGTERM"); } catch { /* already gone */ }
+  const judgeId = child.judgeId;
+  const allowed = checkOpener(deps, judgeId);
+  if (!allowed.ok) return fail(allowed.text, closeFailDetails());
+  // Cancel the hosted wait so no wake fires for a close we initiated.
+  deps.cancelWaitTimer();
+  const ownPane = deps.ownPane();
+  let terminated = false;
+  let killNote = "没有登记 pane，无需动手";
+  if (child.paneId && ownPane) {
+    const killed = closeJudgePane(deps.tmux, child.paneId);
+    terminated = killed.ok;
+    killNote = killed.ok ? `pane ${child.paneId} 已关` : `关 pane 失败（${killed.error}），登记照样清除`;
   }
-  deps.dropChild(sessionId);
+  deps.saveHierarchy(removeJudge(deps.hierarchy(), judgeId));
   // A closed audit takes its draft with it — same reason as fresh:true.
   if (child.role === "goal-auditor") deps.dropPendingAudit(addressed.root);
-  deps.cancelWaitTimer();
-  const how = running
-    ? `${child.role} session terminated (SIGTERM)`
-    : `${child.role} session had already exited`;
   return reply(
-    `review-gate: ${how}; transcript and logs stay at ${child.sessionDir}.`,
-    { closed: true, terminated: running, sessionId },
+    `review-gate: ${child.role}（${judgeId}）已关闭：${killNote}；transcript 保留，同 id 重开即续接。`,
+    { closed: true, terminated, judgeId },
   );
 }
 
@@ -322,36 +384,49 @@ async function doWait(
 ): Promise<ToolReply> {
   const addressed = addressJudge(deps, params, "judge_wait");
   if (!addressed.ok) return fail(addressed.text, waitFailDetails());
-  const child = deps.findChild(addressed.root, addressed.role, addressed.sessionId);
+  const child = deps.findChild(addressed.root, addressed.role, addressed.judgeId);
   if (!child) {
     return fail(
-      `review-gate: no judge child on record for ${addressed.role ?? addressed.sessionId} — submit a round first (judge_submit).`,
+      `review-gate: no judge on record for ${addressed.role ?? addressed.judgeId} — submit a round first (judge_submit).`,
+      waitFailDetails(),
+    );
+  }
+  const allowed = checkOpener(deps, child.judgeId);
+  if (!allowed.ok) return fail(allowed.text, waitFailDetails());
+  if (!child.paneId) {
+    return fail(
+      `review-gate: review ${child.judgeId} 没有登记 pane——它可能从未成功开出来。`,
       waitFailDetails(),
     );
   }
   const budgetMs = clampWaitTimeout(typeof params.timeoutMs === "number" ? params.timeoutMs : undefined);
-  // The blackest box in the loop: a review round is 8.9 minutes at the
-  // median. Every probe tick republishes what the judge has written so far,
-  // so waiting shows motion instead of a frozen call.
+  // The blackest box in the loop: a review round is minutes of silence.
+  // Every probe tick republishes what the judge has written so far, so
+  // waiting shows motion instead of a frozen call.
   const progress = createProgressReporter({
     title: `review-gate: 等待 ${child.role} 本轮结束`,
     onUpdate: onUpdate as ToolUpdate | undefined,
   });
   progress.step(`${child.role} 运行中`);
-  // The LOOP is generic (lib/poll-wait.ts); only these three criteria are
-  // this tool's own — that is the whole point of the split, so the next
-  // waiter (different criteria, same skeleton) reuses it instead of copying a
+  // Reports already consumed before this wait must not end it: the opener
+  // remembers the newest report it recorded per judge.
+  const consumedAtStart = deps.hierarchy()[child.judgeId]?.lastReportId;
+  // The LOOP is generic (lib/poll-wait.ts); only these criteria are this
+  // tool's own — a NEW channel report ends the round, a dead pane ends it
+  // as failed. That is the whole point of the split, so the next waiter
+  // (different criteria, same skeleton) reuses it instead of copying a
   // subtly different timeout.
   const waited = await pollUntil({
-    probe: () => probeJudgeRound(deps, child),
+    probe: () => probeJudgeRound(deps, child, consumedAtStart),
     isDone: (o) => o.done,
     budgetMs,
     signal,
     onProbe: () => {
       const findings = recentStreamFindings(deps, child.streamPath);
+      const stalled = paneJudgeStalled(deps, child);
       progress.tail([
-        tailLines(readLogTail(deps, child.stdoutPath), WAIT_STDOUT_TAIL_LINES),
-        findings.length ? `findings: ${findings.length} 条，最新 ${findings[findings.length - 1]}` : "",
+        findings.length ? `findings: ${findings.length} 条，最新 ${findings[findings.length - 1]}` : "findings 流暂无内容",
+        stalled ? "心跳已停（stalled）——pane 还在但门禁不报数，先别打断，用 judge_read 看一眼" : "",
       ].filter(Boolean).join("\n"));
     },
   });
@@ -359,30 +434,50 @@ async function doWait(
   // observation at all (lib/poll-wait.ts). That is not "finished", and it is
   // not an error either — it is "we could not measure anything in the time
   // you gave us", which the reply below states as such.
-  const outcome: JudgeWaitOutcome = waited.observation ?? { done: false, reason: "pending" };
-
-  progress.done(outcome.done ? outcome.reason : "未结束");
-  const conclusion = outcome.done ? deps.conclusion(child) : undefined;
-
-  // The RETURN is the agent's channel (user decision 6.2): a finished round
-  // hands back the conclusion plus this round's stdout tail; an unfinished
-  // one hands back the progress so far — the same tail plus the newest
-  // streamed findings — instead of a bare "not done yet".
-  const text = formatJudgeWaitReply({
-    role: child.role,
-    done: outcome.done,
-    reason: outcome.reason,
-    waitedMs: waited.waitedMs,
-    stdoutTail: readLogTail(deps, child.stdoutPath),
-    conclusion: conclusion ? { text: conclusion.text, hasVerdict: conclusion.hasVerdict } : undefined,
-    findings: recentStreamFindings(deps, child.streamPath),
-  });
-  return reply(text, {
-    done: outcome.done,
-    reason: outcome.reason,
-    role: child.role,
-    hasVerdict: conclusion?.hasVerdict ?? false,
-  });
+  const observation: PaneJudgeWaitObservation = waited.observation ?? { done: false, reason: "pending" };
+  progress.done(observation.done ? observation.reason : "未结束");
+  if (observation.done && observation.reason === "pane-dead") {
+    return reply(
+      `review-gate: ${child.role} 本轮已结束（判据：pane-dead）——pane 消失且 verdict 未落盘，本轮不算结束。` +
+      `用 judge_recover 同 id 重开续 transcript 继续，或用 judge_close 放弃。`,
+      { done: true, reason: "pane-dead", role: child.role, hasVerdict: false },
+    );
+  }
+  if (observation.done && observation.reason === "report" && observation.reportId) {
+    const io = deps.channelIO();
+    const home = deps.channelHome();
+    const target = judgeChannelTarget(child.openerId, child.judgeId, home);
+    const projection = projectChannel(
+      readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records,
+    );
+    const fullText = projection.lastReport ? (reportText(io, projection.lastReport) ?? "") : "";
+    const recorded = await deps.recordVerdict(fullText, addressed.root, child.role);
+    const next = deps.hierarchy();
+    const entry = next[child.judgeId];
+    if (entry) {
+      deps.saveHierarchy({ ...next, [child.judgeId]: { ...entry, lastReportId: observation.reportId } });
+    }
+    const text = `review-gate: ${child.role} 本轮已结束（判据：report，verdict=${observation.verdict ?? "?"}` +
+      `${observation.findingsCount === undefined ? "" : `，findings=${observation.findingsCount}`}）。\n` +
+      (recorded.text
+        ? `--- 结论（${recorded.hasVerdict ? "含 verdict fence" : "无 fence"}）---\n${recorded.text}`
+        : "--- 该轮没有留下结论文本 ---");
+    return reply(text, {
+      done: true,
+      reason: "report",
+      role: child.role,
+      hasVerdict: recorded.hasVerdict,
+    });
+  }
+  const findings = recentStreamFindings(deps, child.streamPath);
+  return reply(
+    `review-gate: ${child.role} 仍在运行（等待 ${Math.round(waited.waitedMs / 1000)}s 未命中任一判据）。\n` +
+    (findings.length
+      ? `--- findings 最近 ${findings.length} 条 ---\n${findings.slice(-5).join("\n")}`
+      : "--- findings 流暂无内容 ---") +
+    `\n${WAIT_DISCIPLINE_HINT}`,
+    { done: false, reason: "pending", role: child.role, hasVerdict: false },
+  );
 }
 
 // ---------- registration ----------
@@ -391,18 +486,17 @@ async function doWait(
 export function registerJudgeSessionTools(host: ToolHost, deps: JudgeSessionToolDeps): void {
   host.registerTool({
     name: "judge_read",
-    label: "Read Judge Child",
+    label: "Read Adviser",
     description:
-      "Read a judge child by ROLE (a snapshot, never a wait): its session state (running / " +
-      "finished + exit code), the tail of its stdout log, its conclusion parsed from the " +
-      "transcript (the last assistant text carrying a verdict fence), and the tail of its stderr. " +
-      "The process may already be gone — the transcript and logs are not.",
+      "Read YOUR OWN adviser by ROLE (a snapshot, never a wait): its channel state, open questions, and transcript " +
+      "conclusion. Adviser-only: reviewer / goal-auditor go through judge_wait and the channel report. " +
+      "Only the opener may read; anyone else is refused.",
     parameters: Type.Object({
       role: ROLE_PARAM,
       sessionId: SESSION_ID_PARAM,
       repo: REPO_PARAM,
       history: Type.Optional(Type.Integer({
-        description: `Tail lines of the stdout log (default ${DEFAULT_STDOUT_HISTORY_LINES})`,
+        description: `Tail lines of the transcript conclusion (default ${DEFAULT_CONCLUSION_HISTORY_LINES})`,
       })),
     }),
     execute: (_id, params) => doRead(deps, params),
@@ -410,13 +504,11 @@ export function registerJudgeSessionTools(host: ToolHost, deps: JudgeSessionTool
 
   host.registerTool({
     name: "judge_close",
-    label: "Close Judge Child",
+    label: "Close Own Judge",
     description:
-      "Terminate a judge role's pi PROCESS (SIGTERM; its transcript stays on disk, so the same role " +
-      "can be resumed later) and drop it from the registry. Use it at task completion (before " +
-      "declare_done) or to stop a round that has gone off the rails. NOT a memory wipe: the next " +
-      "dispatch of this role resumes the same conversation. Idempotent: an already-finished child " +
-      "still closes successfully.",
+      "Close YOUR OWN judge pane (its transcript stays on disk, so the same id re-opens the same conversation) " +
+      "and drop it from the registry. Use it at task completion (declare_done cascade-closes the rest) or to stop " +
+      "a round that has gone off the rails. Idempotent. Only the opener may close; anyone else is refused.",
     parameters: Type.Object({
       role: ROLE_PARAM,
       sessionId: SESSION_ID_PARAM,
@@ -429,12 +521,10 @@ export function registerJudgeSessionTools(host: ToolHost, deps: JudgeSessionTool
     name: "judge_wait",
     label: "Wait For Judge",
     description:
-      "Block until a judge role's current round is over, then return what it produced. This is the " +
-      "FALLBACK, not the normal path: judge_submit already wakes this session on completion, so " +
-      "call this only when there is genuinely nothing else to do. Three independent criteria end " +
-      "the wait — the process exited, its exit-code file landed, or a verdict/question fence is " +
-      "already in its stdout. On timeout it returns the current state instead of failing, so the " +
-      "decision stays yours.",
+      "Block until YOUR OWN judge's current round is over, then return what it produced. This is the FALLBACK, " +
+      "not the normal path: call this only when there is genuinely nothing else to do. A NEW channel report ends " +
+      "the wait (the gate records it), a dead pane ends it as failed. On timeout it returns the current state " +
+      "instead of failing, so the decision stays yours. Only the opener may wait; anyone else is refused.",
     parameters: Type.Object({
       role: ROLE_PARAM,
       sessionId: SESSION_ID_PARAM,

@@ -1,3 +1,9 @@
+> 2026-09-04 更新：judge 运行形态已从非交互进程迁为独立 pane（层级化调用：
+> 项目经理 → 子会话 → review，跨级调用由门禁拒绝），完成信号从进程退出改为
+> 通道 report。本文其余部分的进程-era 描述（`pi -p`、exit-code、stdout fence）
+> 已失效，以 `docs/hierarchical-session-design.md` 与实现为准；本文件的 commit
+> 审核单元、STALE/tree 绑定等判定语义不变。
+
 # 执行模型：独立 pi 进程子会话 + commit 审核（execution-model）
 
 本文记录 pi-review-gate 的 review 执行模型（2026-08-28 起）——judge

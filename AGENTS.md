@@ -36,13 +36,15 @@ default, make it safe by default rather than adding a switch.
 
 ### Single-review loop (the only execution path, agent-initiated)
 
-**Judge roles run as their own pi processes** — the review is the only parallel
-loop, and each round runs in its OWN non-interactive pi process (`pi -p`
-with a deterministic `--session-id`), spawned by the extension itself
-(`judge_submit`). The judge child loads NO review-gate extension and runs with
-It runs with
+**Judge roles run in their own panes** — the review is the only parallel
+loop, and each review runs in its OWN tmux pane (interactive pi with a
+deterministic `--session-id`), opened by whoever owns it (hierarchy:
+project manager → child session → review; plan review opened by the project
+manager itself). The judge pane loads the review-gate extension in judge mode
+(a reporting shell: heartbeat, dialog race, verdict report — never an
+enforcer). It runs with
 `--exclude-tools edit,write`; its session id is DETERMINISTIC per role+repo,
-so re-spawning with the same `--session-id` continues the same session — its
+so re-opening with the same `--session-id` continues the same session — its
 context is reused across rounds until a READY lands. Each review round is ONE
 reviewer over the WHOLE change:
 
@@ -58,8 +60,8 @@ reviewer over the WHOLE change:
   The reviewer judges the IMMUTABLE commit range `baseline..HEAD` — the range
   starts at the last REVIEWED commit, so a chain of checkpoints since the
   last READY is all covered (round-9 P1); there is no second reviewer of
-  any kind. When the judge's process exits, the gate reads THIS round's
-  output, records the verdict itself and wakes you with it — you never carry
+  kind. When the round's channel report lands, the opener records the verdict
+  itself (judge_wait does this; audit chains do the same) — you never carry
   a verdict from one tool to another. The recording keeps every mechanical
   check: HEAD must still be the reviewed commit (a new checkpoint after
   prepare ⇒ STALE ⇒ BLOCKED), and a READY binds to the reviewed commit's TREE
@@ -70,24 +72,23 @@ reviewer over the WHOLE change:
   every one of those steps inside `judge_submit`, but none of them is
   registered, so there is no second path to sequence by hand.
   `review_diff` / `review_sandbox` were **evaluated and formally NOT built**
-  (2026-08-31, 哲学三): the judge runs `--no-extensions` so there is nowhere to
-  register them without a judge-side extension entry, and that would re-open the
-  recursion surface `--no-extensions` exists to close. The reviewer's own `git
+  (2026-08-31, 哲学三): the reviewer's own `git
   diff` / `git show` are simple read-only commands (not the multi-step ship/tmux
   flows 哲学一 targets), and its sandbox verification is an inherently
   reviewer-owned judgement call, not a mechanical sequence the gate can own
   without becoming the reviewer. The reviewer's throwaway worktrees are the
   gate's to CLEAN, though, not to build: `judge_submit` points the judge's
-  `$TMPDIR` at a per-session dir and reclaims any worktree under it when the
-  judge exits (谁创建谁回收).
+  `$TMPDIR` at a per-session dir and reclaims any worktree under it when the pane
+  is closed or cascade-closed (谁创建谁回收).
 
 - **No decompose, no module loop, no wave daily.** The module-planning
   machinery and its wave tools were removed 2026-08-26. Large tasks are
   still sliced by YOU into sequential rounds of the same single review
   loop; there is no module table, no plan state, no planner.
 
-Detail: `docs/execution-model.md` + `docs/judge-protocol.md`; runtime
-contract: `lib/judge-process.ts` + `lib/judge-prompt.ts`.
+Detail: `docs/execution-model.md` + `docs/judge-protocol.md` +
+`docs/hierarchical-session-design.md`; runtime
+contract: `lib/judge-pane.ts` + `lib/hierarchy.ts` + `lib/judge-prompt.ts`.
 
 The review loop is AGENT-DRIVEN: you start it yourself once edits
 are complete (one `judge_submit`) — the slash commands are only optional
@@ -287,7 +288,8 @@ re-derivation — it never narrows what a reviewer may look at, and a settled
 conclusion may always be reopened with evidence. This is the INCREMENTAL
 review contract: first round full, later rounds focused on the increment.
 (b2) **Fresh context, read on demand — MECHANICALLY.** The three review
-roles (reviewer, adviser, goal-auditor) each run as their OWN pi process (`pi -p --session-id`) — they never
+roles (reviewer, adviser, goal-auditor) each run in their OWN pane (interactive
+pi with `--session-id`) — they never
 transcript location (`~/.pi/agent/sessions/<encoded-cwd>/<sessionId>.jsonl`)
 to grep on demand. `judge_submit({role:"adviser"})` builds that brief itself:
 transcript pointer + a conclusion artifact the adviser appends to, plus —
@@ -303,18 +305,19 @@ must restore before finishing. Because the reviewed range is immutable,
 that carry evidence (confirm each in the code first), leave Nits for the
 verdict. WAITING-WINDOW DISCIPLINE: (1) 有可实现的确定性工作(代码/测试/
 文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后再调
-`judge_wait({role})`——门禁在里面跑三条判据(进程退出 / exit-code 落盘 /
-本轮 stdout 里出现明文 fence,任一命中即返回)并把已读结论带回来,不需要你
+`judge_wait({role})`——门禁在里面读通道(新 report 落盘即结束、pane 消失即失败)
+并把已记录结论带回来,不需要你
 手写 bash;(3) **禁止**用结束 turn 把唤醒责任交给子会话——子会话可能报错/
 崩溃/永远不退,而主会话是门禁的最后监督者,门禁未通过前不得停止自动循环
 (存活不变量)。
-The verdict arrives through the process EXIT: the gate reads THIS round's
-output, records it and wakes this session with the result. The reviewer may ask
-questions by outputting a question fence and exiting — answer by submitting the
-same role again (`judge_submit` resumes the session, context intact).
-(d) **The judge child runs as its own pi process — MECHANICALLY ENFORCED.**
-`judge_submit` runs the judge as `pi -p --session-id <id>` (non-interactive,
-no tmux). The `subagent` dispatch surface was retired 2026-09-06 with the
+The round ends when its channel report lands: the opener records the verdict
+from the report's exact bytes (judge_wait does this). The reviewer may ask
+questions through the channel (human in the pane and opener race, first answer
+wins) — answer with judge_answer, or resubmit the same role
+(`judge_submit` resumes the session, context intact).
+(d) **The judge child runs in its own pane — MECHANICALLY ENFORCED.**
+`judge_submit` opens the judge in a tmux pane (interactive pi, same deterministic
+session id, no second dispatch surface). The `subagent` dispatch surface was retired
 pi-subagents companion — a judge role can only be dispatched through
 `judge_submit`, so there is no second path to sequence by hand (the
 workflow-sandbox block that used to guard `subagent` calls died with it: the
@@ -323,14 +326,15 @@ single reviewer is one `judge_submit` call per round; you never pass a session
 id, a title or a directory — the gate derives all three from role+repo.
 **One session per role, continued across rounds**: the session id is
 deterministic per role+repo, so the next round re-opens the SAME transcript
-(that is how a judge's context carries over until a READY). A role whose
-process is still RUNNING refuses the new round rather than dropping it
-(a non-interactive judge reads its task once, at spawn); `fresh: true` kills
-it first. The recording withholds a READY unless the round was PREPARED (a
+(that is how a judge's context carries over until a READY). A living pane takes
+every new round through its channel (a pane judge reads each round via its
+drain); `fresh: true` kills the pane first. The recording withholds a READY
+unless the round was PREPARED (a
 registered `baseline..HEAD` target) and the verdict carries the child's `cwd`
 (measured with `pwd`, a required field of the verdict schema). While a judge
-child is open, `declare_done` requires closing it out (its verdict is
-recorded on exit, or `judge_close({role})`).
+pane is open, `declare_done` cascade-closes it (a recorded verdict stays
+recorded; an unrecorded round is abandoned — use `judge_close({role})` to
+abandon explicitly).
 
 ### 项目经理（orchestrator）模式 —— 编排层，2026-08-29 新增
 

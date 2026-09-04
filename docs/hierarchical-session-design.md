@@ -72,7 +72,13 @@ opener 能从门禁拿到的关于自己 review 的信息，只有三件，不�
 | `extensions/review-gate.ts`（只改接线） | 注册新工具 + 注入 deps（opener 身份、registry）。判定逻辑一律不在扩展里 |
 | `test/hierarchy.test.ts`（新建） | 跨级拒绝矩阵（PM 动子会话的 review、子会话互操作、opener 自操作）纯函数单测 |
 
-## 七、本轮非目标（后续轮按此文档执行，不在本文展开）
+## 七、落地状态（2026-09-04 同轮实现完毕）
 
-* 不实现任何新工具与通道改动；`judge_submit` / `orchestrator_*` 现有行为零改动；扩展接线与 pane 管理零改动。
-* 迁移顺序建议（仅记录）：先 `hierarchy.ts` + 单测 → 通道泛化 + `report` → `judge-pane.ts`（启动/回收/恢复/联关） → `judge_spawn/wait/answer/recover` 接线 → `judge_submit` 切新链并删旧路径 → `judge_read` 收窄为 adviser 专用。每步各一轮送审。
+* 已按迁移顺序一次性落地：`hierarchy.ts` + 单测 → 通道泛化 + `report` →
+  `judge-pane.ts`（启动/回收/恢复/联关）→ `judge_spawn/wait/answer/recover` 接线 →
+  `judge_submit` 切新链并删旧路径（`spawnJudgeProcess` / `decideJudgeDispatch` /
+  `evaluateJudgeWait` / `lib/judge-watch.ts` 整模块）→ `judge_read` 收窄为 adviser
+  专用 → `declare_done` 联关取代旧拒规则。另加 judge 侧 reporting shell
+  （`judge-side.ts`）与 judge 会话工具中央拒绝表。
+* 与 `feat/improvement-plan` 的 JUDGE-1 pane 栈的关系：本线是 main 上唯一的落地
+  路径，那条线的 judge 栈废弃不合并（用户决策），局部成果如需吸收只以移植单取。

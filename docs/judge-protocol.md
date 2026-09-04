@@ -1,3 +1,9 @@
+> 2026-09-04 更新：judge 运行在独立 pane 里并加载门禁 judge 模式（heartbeat、
+> 对话框竞态、落 report），不再是“无门禁的 `pi -p` 进程”；提问走通道竞态
+> （pane 前的人与 opener 先答生效），完成靠 report 而非退出。下面“运行形态”与
+> “与主会话的通信”两节的进程-era 描述已失效，以实现为准；独立判断、收敛
+> 范围、输出分级与纪律不变。
+
 # Judge 角色统一协议（judge-protocol）
 
 goal-auditor（目标审核者）、reviewer（代码审核者）、adviser（建议者）三个

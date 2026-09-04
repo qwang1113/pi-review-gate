@@ -234,13 +234,38 @@ export interface ChannelInstructAckRecord extends ChannelRecordBase {
 }
 
 
+/**
+ * Judge → opener: this round is over, here is the conclusion.
+ *
+ * The THIRD item of the listener triple (state, findings count, verdict):
+ * the verdict RECORD is still written by the gate's recorder, but the
+ * judge side writes THIS so the opener learns it through its own `wait`
+ * receipt instead of polling a transcript. A child session reports its
+ * judges upward the same way — one `report` per finished round, never the
+ * raw stdout (bulky summaries spill exactly like request payloads).
+ */
+export interface ChannelReportRecord extends ChannelRecordBase {
+  kind: "report";
+  from: "child";
+  reportId: string;
+  /** Which round of this judge this report closes. */
+  round?: number;
+  /** The recorded verdict, e.g. READY or BLOCKED. */
+  verdict: string;
+  /** Findings the round published (stream line count), not their content. */
+  findingsCount?: number;
+  /** One-line conclusion; spilled to `summaryRef` when oversized. */
+  summary?: string;
+  summaryRef?: ChannelPayloadRef;
+}
 export type ChannelRecord =
   | ChannelStateRecord
   | ChannelRequestRecord
   | ChannelSettledRecord
   | ChannelAnswerRecord
   | ChannelInstructRecord
-  | ChannelInstructAckRecord;
+  | ChannelInstructAckRecord
+  | ChannelReportRecord;
 
 /**
  * Every filesystem touch the channel makes, as one injectable seam.
@@ -336,6 +361,18 @@ export interface ChannelTarget {
 }
 
 /**
+ * A judge channel target: `<opener-id>/<judge-id>.jsonl` under the same root.
+ *
+ * Deliberately the SAME file shape as an orchestration channel (not a
+ * second channel module): the opener may be a session id rather than an
+ * orchestration id, but the record/spill/cursor primitives do not care —
+ * planes differ by key naming only.
+ */
+export function judgeChannelTarget(openerId: string, judgeId: string, home?: string): ChannelTarget {
+  return { orchestrationId: openerId, childId: judgeId, ...(home === undefined ? {} : { home }) };
+}
+
+/**
  * Append one record, spilling an oversized payload first.
  *
  * Returns the record as it was actually written (with `payloadRef` in place
@@ -365,6 +402,12 @@ function spillIfLarge(io: ChannelIO, target: ChannelTarget, record: ChannelRecor
     const { text, ...rest } = record;
     return { ...rest, textRef: { path, chars: text.length } };
   }
+  if (record.kind === "report" && record.summary !== undefined) {
+    const path = payloadPathFor(target.orchestrationId, target.childId, record.reportId, target.home);
+    io.writeText(path, record.summary);
+    const { summary, ...rest } = record;
+    return { ...rest, summaryRef: { path, chars: summary.length } };
+  }
   // Nothing bulky to move (a huge dialog title, say). Truncation would lose
   // the very content the orchestrator needs, and an over-long line only risks
   // interleaving — never silent data loss — so it is written as it is.
@@ -385,6 +428,11 @@ export function requestPayload(io: ChannelIO, record: ChannelRequestRecord): str
 /** The full instruction text, whether it was inlined or spilled. */
 export function instructText(io: ChannelIO, record: ChannelInstructRecord): string | undefined {
   return record.text ?? resolvePayload(io, record.textRef);
+}
+
+/** The full report summary, whether it was inlined or spilled. */
+export function reportText(io: ChannelIO, record: ChannelReportRecord): string | undefined {
+  return record.summary ?? resolvePayload(io, record.summaryRef);
 }
 
 /** What a read produced: the records, and the lines that could not be parsed. */
@@ -432,6 +480,7 @@ function parseRecord(line: string): ChannelRecord | undefined {
       case "answer":
       case "instruct":
       case "instruct-ack":
+      case "report":
         return value as ChannelRecord;
       default:
         return undefined;
@@ -468,6 +517,8 @@ export interface ChannelProjection {
   pendingInstructs: ChannelInstructRecord[];
   /** ISO time of the newest record of any kind. */
   lastActivityAt?: string;
+  /** Newest round report, when any round has closed. */
+  lastReport?: ChannelReportRecord;
 }
 
 /**
@@ -499,6 +550,7 @@ export function projectChannel(records: readonly ChannelRecord[]): ChannelProjec
   const pendingAnswers: ChannelAnswerRecord[] = [];
   const pendingInstructs: ChannelInstructRecord[] = [];
   let lastActivityAt: string | undefined;
+  let lastReport: ChannelReportRecord | undefined;
   for (const record of records) {
     if (!lastActivityAt || record.at > lastActivityAt) lastActivityAt = record.at;
     switch (record.kind) {
@@ -518,6 +570,9 @@ export function projectChannel(records: readonly ChannelRecord[]): ChannelProjec
       case "instruct":
         if (!injected.has(record.instructId)) pendingInstructs.push(record);
         break;
+      case "report":
+        lastReport = record;
+        break;
       default:
         break;
     }
@@ -530,6 +585,7 @@ export function projectChannel(records: readonly ChannelRecord[]): ChannelProjec
     pendingAnswers,
     pendingInstructs,
     lastActivityAt,
+    ...(lastReport === undefined ? {} : { lastReport }),
   };
 
 }

@@ -23,6 +23,8 @@ import {
   readChannel,
   requestPayload,
   MAX_INLINE_RECORD_CHARS,
+  judgeChannelTarget,
+  reportText,
   HEARTBEAT_STALE_MS,
   type ChannelIO,
   type ChannelRecord,
@@ -471,4 +473,60 @@ test("a render that NEVER resolves cannot hang a settled question (P1 pin)", asy
   const settled = readChannel(io, channelPathFor(ORCH, "c1", HOME)).records
     .find((r) => r.kind === "request-settled");
   assert.ok(settled, "the settle record is written without waiting for the render");
+});
+
+// ---------------------------------------------------------------------------
+// Judge reports: the third listener item rides the same medium
+// ---------------------------------------------------------------------------
+
+test("a judge channel is the same file shape under an opener id", () => {
+  const target = judgeChannelTarget("session-child-1", "rg-reviewer-abc123", HOME);
+  const path = channelPathFor(target.orchestrationId, target.childId, target.home);
+  assert.ok(path.includes("session-child-1"), "the opener names the directory");
+  assert.ok(path.endsWith("rg-reviewer-abc123.jsonl"), "the judge names the file");
+  assert.doesNotMatch(path, /\\.\\./);
+});
+
+test("a round report round-trips and the projection keeps the newest", () => {
+  const io = memoryIO(() => T0);
+  const target = judgeChannelTarget("session-child-1", "rg-reviewer-abc123", HOME);
+  const path = channelPathFor(target.orchestrationId, target.childId, target.home);
+  appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(T0).toISOString(),
+    reportId: "rep-1", round: 1, verdict: "BLOCKED", findingsCount: 2, summary: "两处 P1",
+  });
+  appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(T0 + 1).toISOString(),
+    reportId: "rep-2", round: 2, verdict: "READY", findingsCount: 0, summary: "修齐",
+  });
+  const read = readChannel(io, path);
+  assert.equal(read.records.length, 2);
+  const projection = projectChannel(read.records);
+  assert.equal(projection.lastReport?.verdict, "READY");
+  assert.equal(projection.lastReport?.round, 2);
+  assert.equal(reportText(io, projection.lastReport!), "修齐");
+  assert.equal(projection.openRequests.length, 0, "a report settles nothing and disturbs nothing");
+});
+
+test("an oversized report summary SPILLS like any other bulky payload", () => {
+  const io = memoryIO(() => T0);
+  const target = judgeChannelTarget("session-child-1", "rg-reviewer-abc123", HOME);
+  const huge = "结论".repeat(2000);
+  const stored = appendRecord(io, target, {
+    kind: "report", from: "child", at: new Date(T0).toISOString(),
+    reportId: "rep-9", round: 3, verdict: "BLOCKED", summary: huge,
+  });
+  assert.equal((stored as { summary?: string }).summary, undefined, "the bulky field left the line");
+  const path = channelPathFor(target.orchestrationId, target.childId, target.home);
+  const line = io.files.get(path)!;
+  assert.ok(line.length <= MAX_INLINE_RECORD_CHARS + 300, `the appended line stayed small: ${line.length}`);
+  const read = readChannel(io, path);
+  assert.equal(reportText(io, read.records[0] as Extract<ChannelRecord, { kind: "report" }>), huge);
+});
+
+test("a channel with no report has no lastReport", () => {
+  const projection = projectChannel([
+    { kind: "state", from: "child", at: new Date(T0).toISOString(), state: "working" },
+  ]);
+  assert.equal(projection.lastReport, undefined);
 });

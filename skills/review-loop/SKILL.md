@@ -86,8 +86,9 @@ judge_submit({ role: "goal-auditor", task: "<the full draft>" })
 ```
 
 It builds the auditor's task (carrying the previous audit's findings and the
-draft delta on a re-audit), dispatches the dedicated `goal-auditor` as its own
-read-only pi process (see `agents/goal-auditor.md`), parses the verdict and
+draft delta on a re-audit), dispatches the dedicated `goal-auditor` in its own pane
+as a read-only review (see `agents/goal-auditor.md`), waits for its channel report,
+parses the verdict and
 records it. **Only P0/P1 block** — a READY carrying P2/Nit findings is a PASS,
 and non-blocking findings never buy another audit round. `propose_loop_goal`
 REFUSES to show the user's approval dialog unless a PASS is recorded for the
@@ -120,7 +121,7 @@ available in your pi setup) — each reads its own files and returns
 findings; you merge the results. Exploration and editing may also overlap:
 while a read-only scan surveys the code, you can concurrently edit a
 different file (the single-writer invariant still holds — only YOU write).
-(Adviser consultations run as judge child processes.)
+(Adviser consultations run in their own judge panes.)
 ### Serial writers — exactly one writer in the worktree
 
 Write-capable subagents run **serially in this worktree** when a subagent
@@ -184,13 +185,13 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
      gate stamps the checkpoint marker on the subject and records where it
      landed. The review unit is the immutable range `baseline..HEAD`.
    - **the range + the findings stream + the reviewer's task text**.
-   - **the dispatch** — ONE reviewer, as its own pi process, with the exit
-     watcher registered. You never pass a session id, a title or a directory.
-     The `subagent` dispatch surface was retired 2026-09-06 with the
+   - **the dispatch** — ONE reviewer in its own pane (a living pane takes every
+     new round through its channel). You never pass a session id, a title or a
+     directory. The `subagent` dispatch surface was retired 2026-09-06 with the
      pi-subagents companion — judge roles dispatch ONLY through `judge_submit`.
 
-   When the reviewer's process exits, the gate reads THIS round's output,
-   records the verdict itself and wakes you with it — you never copy a
+   When the round's channel report lands, the gate records the verdict itself —
+   you never copy a
    verdict from one place to another. Worst-verdict semantics still apply if
    multiple fences appear (the parser keeps the worst), and an absent
    `docSync` means the round is incomplete (fails closed).
@@ -224,16 +225,10 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    **Waiting-window discipline (v4)** — 主会话是门禁的最后监督者,门禁未通过
    前不得停止自动循环(round-18 存活不变量):
    1. 有可实现的确定性工作(代码/测试/文档/其他 repo 事务)→ 优先做掉,不要进入等待。
-   2. 确认没有任何可做的工作后,才进入阻塞等待——在**一次 bash 调用**里同时
-      托管三条判据:
-      a. 进程是否已退出:`kill -0 <pid 文件第一段>` 或 `test -s <workDir>/exit-code`
-         (exit-code 的存在就是"已结束"的权威事实,里面还带着退出码);
-         ⚠️ 崩溃的子会话可能**根本没来得及写 exit-code**——它同样是"已结束",
-         由主会话侧按「记录的那个进程是否还在」判定(见 lib/judge-session.ts);
-      c. verdict 已产出但进程未退:子会话的 session jsonl 里已出现
-         verdict fence(实测失败模式——子会话完成但进程未退出,主会话空等);
-      任一命中即结束等待:judge_read 读取输出继续流程,或 judge_close 后
-      重新派发。
+   2. 确认没有任何可做的工作后,才进入阻塞等待——调 `judge_wait({role})`,门禁在里面
+      读通道:新 report 落盘即结束(门禁当场记录结论)、pane 消失即失败(用
+      `judge_recover` 同 id 重开续 transcript 继续,或用 `judge_close` 放弃)。超时
+      返回当前进度(状态 + findings 计数),而不是失败——决定权在你。
    3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不退)。
       `agent_settled` 会注入托管等待指令;主动托管远比被动拉起可靠。
    因为审核范围是 immutable commit,工作区编辑不失效本轮。
@@ -258,7 +253,7 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    later rounds = incremental: settled-and-unchanged material gets a
    consistency scan, not a re-derivation — it never narrows what a reviewer
    may look at, and a settled conclusion may always be reopened with
-   evidence. The reviewer is its own pi process and inherits none of this
+   evidence. The reviewer runs in its own pane and inherits none of this
    session's conversation; the task text names the
    main session's transcript to read ON DEMAND when the conversation
    matters, instead of inheriting it.
@@ -292,9 +287,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    without it (disable per project via `"docSync": false` in
    `.pi/review-gate.json`).
 
-4. **Record — the GATE does this, not you.** When the reviewer's process
-   exits the gate reads THIS round's raw output, parses every fence (the
-   worst verdict wins) and records the verdict, then wakes you with it. That
+4. **Record — the GATE does this, not you.** When the round's channel report
+   lands the gate parses every fence from the report's exact bytes and records
+   the verdict (worst wins). That
    same step verifies the commit target: it
    withholds a READY when the round was never prepared (no registered
    `baseline..HEAD`), downgrades a READY to BLOCKED when HEAD moved past the

@@ -47,6 +47,7 @@ function makeDeps(over: Partial<ShipGateHookDeps> & { taskMode?: () => TaskMode 
   const base: ShipGateHookDeps = {
     noteContext: () => { calls.push("noteContext"); },
     isEditTool: (t) => t === "edit" || t === "write",
+    isJudgeSession: () => false,
     cwd: () => cwd,
     primaryRepoRoot: () => cwd,
     taskMode: () => "loop",
@@ -296,4 +297,18 @@ test("a lone gh pr edit is the ONLY block that mentions arbitration", () => {
   });
   assert.doesNotMatch(withCommit.shown, /request_arbitration/,
     "a compound command is judged by its strictest segment, arbitration included");
+});
+
+test("a judge session is refused outward tools before either arm", async () => {
+  const r = makeDeps({ isJudgeSession: () => true });
+  for (const toolName of ["judge_submit", "judge_spawn", "orchestrator_spawn", "propose_loop_goal", "declare_done", "set_gate_mode"]) {
+    const out = await evaluateToolCall(r.deps, { toolName, input: {} }, {});
+    assert.equal(out?.block, true, `${toolName} must not run in a judge pane`);
+    assert.match(out!.reason, /review 会话里不可用/);
+  }
+  const ask = await evaluateToolCall(r.deps, { toolName: "ask_user", input: {} }, {});
+  assert.equal(ask, undefined, "ask_user stays available — questions race through the channel");
+  const plain = makeDeps();
+  const normal = await evaluateToolCall(plain.deps, { toolName: "judge_submit", input: {} }, {});
+  assert.equal(normal, undefined, "outside a judge pane the same tool passes the hook");
 });
