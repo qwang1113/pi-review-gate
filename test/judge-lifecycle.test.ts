@@ -207,11 +207,23 @@ test("awaitRoundReport cannot SPIN when the wait keeps returning instantly", asy
   // is written by somebody else, and a judge with no registry entry skips that
   // write. A measured 354k iterations burned the budget, each with a tmux
   // probe and two file reads. Liveness may not depend on another module.
+  //
+  // THE FAKE CLOCK ONLY MOVES INSIDE `sleep`, which is deliberate: the pause
+  // IS what makes progress here. That also means an implementation without the
+  // pause would never reach the deadline, so this test arms its own trip wire
+  // — a mutant that deletes the gap must FAIL FAST, not hang. (Measured: a
+  // reviewer's mutation run sat for 22 minutes on the un-armed version before
+  // it was killed by hand.)
   let clock = 0;
   let calls = 0;
   const slept: number[] = [];
   await awaitRoundReport({
-    wait: async () => { calls++; return { details: { reason: "finding" } }; },
+    wait: async () => {
+      calls++;
+      if (calls > 100) throw new Error("awaitRoundReport spun: the minimum gap is gone");
+      return { details: { reason: "finding" } };
+    },
+
     now: () => clock,
     budgetMs: 10_000,
     minGapMs: 1_000,
