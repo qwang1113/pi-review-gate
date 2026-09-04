@@ -238,11 +238,18 @@ export interface ChannelInstructAckRecord extends ChannelRecordBase {
  * Judge → opener: this round is over, here is the conclusion.
  *
  * The THIRD item of the listener triple (state, findings count, verdict):
- * the verdict RECORD is still written by the gate's recorder, but the
- * judge side writes THIS so the opener learns it through its own `wait`
- * receipt instead of polling a transcript. A child session reports its
- * judges upward the same way — one `report` per finished round, never the
- * raw stdout (bulky summaries spill exactly like request payloads).
+ * the judge side writes THIS so the opener learns the round is over through
+ * its own `wait` receipt instead of polling a transcript. A child session
+ * reports its judges upward the same way — one `report` per finished round,
+ * never the raw stdout (bulky summaries spill exactly like request payloads).
+ *
+ * THE CONCLUSION TRAVELS STRUCTURED (2026-09-04). `verdict`, `findings`, `cwd`
+ * and `docSync` are the judge's own `judge_conclude` arguments, carried
+ * verbatim. Before that the gate serialised them into a ```json fence and the
+ * opener parsed them back out — one implementation writing a format for
+ * another implementation to undo, with the judge's prose riding along. The
+ * fence is gone; `summary` is now ONLY an adviser's prose, the one role whose
+ * product IS the text.
  */
 export interface ChannelReportRecord extends ChannelRecordBase {
   kind: "report";
@@ -254,7 +261,26 @@ export interface ChannelReportRecord extends ChannelRecordBase {
   verdict: string;
   /** Findings the round published (stream line count), not their content. */
   findingsCount?: number;
-  /** One-line conclusion; spilled to `summaryRef` when oversized. */
+  /**
+   * The round's findings, exactly as the judge concluded them. The opener
+   * consumes these directly — there is no text to parse.
+   */
+  findings?: Array<{
+    severity: string;
+    file?: string;
+    line?: number;
+    issue: string;
+    evidence?: string;
+  }>;
+  /** The judge's own `pwd`, verbatim (the opener checks it against the repo). */
+  cwd?: string;
+  /** Code↔doc attestation, when the round covered code changes. */
+  docSync?: string;
+  /**
+   * An ADVISER's prose conclusion — the only role whose output is the text
+   * itself. Spilled to `summaryRef` when oversized. A reviewer or goal-auditor
+   * report carries no prose at all: its conclusion is `verdict` + `findings`.
+   */
   summary?: string;
   summaryRef?: ChannelPayloadRef;
 }
@@ -433,6 +459,42 @@ export function instructText(io: ChannelIO, record: ChannelInstructRecord): stri
 /** The full report summary, whether it was inlined or spilled. */
 export function reportText(io: ChannelIO, record: ChannelReportRecord): string | undefined {
   return record.summary ?? resolvePayload(io, record.summaryRef);
+}
+
+/** One finding on a report, exactly as the judge concluded it. */
+export interface ReportFinding {
+  severity: string;
+  file?: string;
+  line?: number;
+  issue: string;
+  evidence?: string;
+}
+
+/** What a judge concluded, as DATA — the opener never parses a report's text. */
+export interface ReportConclusion {
+  verdict: string;
+  findings: ReportFinding[];
+  cwd?: string;
+  docSync?: string;
+}
+
+/**
+ * Read one report's structured conclusion.
+ *
+ * The only normalization is `findings`: a report written before the field
+ * existed (or one whose findings are not an array) reads as no findings rather
+ * than throwing — the verdict still travels, and the recorder fails closed on
+ * an unrecognisable one.
+ */
+export function reportConclusion(record: ChannelReportRecord): ReportConclusion {
+  const raw = record.findings;
+  const findings = Array.isArray(raw) ? raw.filter((f): f is ReportFinding => !!f && typeof f === "object") : [];
+  return {
+    verdict: record.verdict,
+    findings,
+    ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
+    ...(record.docSync === undefined ? {} : { docSync: record.docSync }),
+  };
 }
 
 /** What a read produced: the records, and the lines that could not be parsed. */

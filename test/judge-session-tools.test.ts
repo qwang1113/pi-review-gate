@@ -104,12 +104,13 @@ function fake(): Fake {
     readText: (path) => state.files.get(path),
     conclusion: (c) => {
       state.calls.push(`conclusion(${c.judgeId})`);
-      return { text: "advice text", hasVerdict: false, transcriptPath: "/sessions/adviser/t.jsonl" };
+      return { text: "advice text", transcriptPath: "/sessions/adviser/t.jsonl" };
     },
-    recordVerdict: async (text, root, role) => {
+    recordVerdict: async (concluded, root, role) => {
       state.calls.push(`recordVerdict(${role})`);
+      const text = `recorded ${concluded.verdict} (${concluded.findings.length} findings)`;
       state.recorded.push({ text, root, role });
-      return { text, hasVerdict: text.includes('"gate"') };
+      return { text, hasVerdict: concluded.verdict !== "" };
     },
     dropPendingAudit: (root) => { state.calls.push(`dropPendingAudit(${root})`); },
     cancelWaitTimer: () => { state.calls.push("cancelWaitTimer"); },

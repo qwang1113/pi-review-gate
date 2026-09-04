@@ -34,9 +34,11 @@ import {
   judgeChannelTarget,
   projectChannel,
   readChannel,
+  reportConclusion,
   reportText,
   HEARTBEAT_STALE_MS,
   type ChannelIO,
+  type ReportConclusion,
 } from "./orchestrator-channel.ts";
 import {
   closeJudgePane,
@@ -49,6 +51,7 @@ import {
   JUDGE_WAIT_MAX_TIMEOUT_MS,
   WAIT_DISCIPLINE_HINT,
 } from "./judge-lifecycle.ts";
+import { normalizeConcludedVerdict } from "./review-adjudicate.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import { pollUntil } from "./poll-wait.ts";
 import { parseStream } from "./review-stream.ts";
@@ -108,10 +111,10 @@ export interface JudgeSessionToolDeps {
   now(): number;
   /** Whole file, or undefined when it is absent/unreadable. */
   readText(path: string): string | undefined;
-  /** The conclusion parsed from the RECORDED session dir. */
+  /** The judge's most recent output text, read from the RECORDED session dir. */
   conclusion(child: JudgeChildRecord): JudgeConclusion;
-  /** Run the gate's own verdict recording on the reported bytes. */
-  recordVerdict(fullText: string, root: string, role: string): Promise<{ text?: string; hasVerdict: boolean }>;
+  /** Run the gate's own verdict recording on the report's structured conclusion. */
+  recordVerdict(concluded: ReportConclusion, root: string, role: string): Promise<{ text?: string; hasVerdict: boolean }>;
   /** Cancel the gate-owned hosted-wait watchdog. */
   cancelWaitTimer(): void;
   /** Forget the goal draft a closed audit was judging. */
@@ -308,23 +311,31 @@ async function doRead(deps: JudgeSessionToolDeps, params: Record<string, unknown
   );
   const ownPane = deps.ownPane();
   const alive = child.paneId && ownPane ? judgePaneAlive(deps.tmux, ownPane, child.paneId) : undefined;
+  // The judge's most recent output, for a still-running round: a DIAGNOSTIC
+  // read only. Whether the round CONCLUDED is answered by the channel report,
+  // not by pattern-matching the transcript.
   const conclusion = deps.conclusion(child);
   let conclusionTail = conclusion.text;
   if (conclusionTail !== undefined) {
     const lines = conclusionTail.split("\n");
     conclusionTail = lines.length <= history ? conclusionTail : lines.slice(-history).join("\n");
   }
+  const concluded = projection.lastReport ? reportConclusion(projection.lastReport) : undefined;
+  const hasVerdict = concluded !== undefined && normalizeConcludedVerdict(concluded.verdict) !== undefined;
   const header = `review-gate: adviser ${child.judgeId} — ${projection.lastState?.state ?? "unknown"}` +
     (alive === undefined ? "（pane 情况不明）" : alive ? "（pane 存活）" : "（pane 已消失）");
   const body: string[] = [];
   for (const q of projection.openRequests) {
     body.push(`--- 未答问题：${q.title}（选项：${q.options.join(" / ") || "自由文本"}）---`);
   }
+  if (hasVerdict) {
+    body.push(`--- 已交卷：verdict=${concluded!.verdict}，findings ${concluded!.findings.length} 条 ---`);
+  }
   if (conclusionTail) {
     body.push(
-      conclusion.hasVerdict
-        ? `--- 结论（含 verdict fence，${history} 行内）---\n${conclusionTail}`
-        : `--- 最近输出（无 verdict fence，可能只是过程语）---\n${conclusionTail}`,
+      hasVerdict
+        ? `--- 交卷后的最近输出（${history} 行内）---\n${conclusionTail}`
+        : `--- 最近输出（本轮尚未交卷，可能只是过程语）---\n${conclusionTail}`,
     );
   } else {
     body.push("--- 还没有可读的结论 ---");
@@ -334,7 +345,7 @@ async function doRead(deps: JudgeSessionToolDeps, params: Record<string, unknown
     alive: alive ?? false,
     state: projection.lastState?.state ?? "unknown",
     hasReport: projection.lastReport !== undefined,
-    hasVerdict: conclusion.hasVerdict,
+    hasVerdict,
   });
 }
 
@@ -450,8 +461,11 @@ async function doWait(
     const projection = projectChannel(
       readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records,
     );
-    const fullText = projection.lastReport ? (reportText(io, projection.lastReport) ?? "") : "";
-    const recorded = await deps.recordVerdict(fullText, addressed.root, child.role);
+    // The conclusion is DATA on the report — no text is parsed to find it.
+    const concluded: ReportConclusion = projection.lastReport
+      ? reportConclusion(projection.lastReport)
+      : { verdict: "", findings: [] };
+    const recorded = await deps.recordVerdict(concluded, addressed.root, child.role);
     const next = deps.hierarchy();
     const entry = next[child.judgeId];
     if (entry) {
@@ -460,7 +474,7 @@ async function doWait(
     const text = `review-gate: ${child.role} 本轮已结束（判据：report，verdict=${observation.verdict ?? "?"}` +
       `${observation.findingsCount === undefined ? "" : `，findings=${observation.findingsCount}`}）。\n` +
       (recorded.text
-        ? `--- 结论（${recorded.hasVerdict ? "含 verdict fence" : "无 fence"}）---\n${recorded.text}`
+        ? `--- 记录情况（${recorded.hasVerdict ? "verdict 已识别" : "verdict 无法识别"}）---\n${recorded.text}`
         : "--- 该轮没有留下结论文本 ---");
     return reply(text, {
       done: true,

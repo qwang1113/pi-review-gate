@@ -1,7 +1,6 @@
 /**
  * The GOAL tool family: `propose_loop_goal` (L8 — the user approves this
- * session's exit contract) and the internal `record_goal_prereview` (L8b —
- * the goal-auditor's verdict), registered together from ONE entry point.
+ * session's exit contract), and the L8b audit recorder it runs internally.
  *
  * They live here rather than in `extensions/review-gate.ts` for the reason
  * this repository has a rule about (AGENTS.md §"架构规范"): that file is
@@ -11,21 +10,19 @@
  * (lib/review-prepare-tools.ts, lib/advisory-prepare-tools.ts), the L7 Copilot
  * pair (lib/copilot-review-tools.ts) and the user-interaction family
  * (lib/user-interaction-tools.ts). Same shape here:
- * `registerGoalTools(hosts, deps)`, with every effect the tools need arriving
+ * `registerGoalTools(host, deps)`, with every effect the tools need arriving
  * through an injected `deps` object.
  *
- * TWO HOSTS, ONE ENTRY (philosophy two + three). The family registers on two
- * different hosts and that is the whole reason `hosts` is an object rather
- * than a single argument: `propose_loop_goal` is the agent's tool and goes to
- * `hosts.agent` (pi's registry), while `record_goal_prereview` is an internal
- * implementation the gate calls itself and goes to `hosts.internal` — the
- * capture-only host, which pi never learns a name from. Naming the two
- * explicitly is what makes "an agent can never sequence the audit by hand"
- * readable at the call site instead of hidden in a wiring convention.
+ * ONE HOST, ONE ENTRY (philosophy two + three). The family registers exactly
+ * one tool, on pi's registry: `propose_loop_goal`. Its audit recorder is a
+ * plain function the gate calls itself (`recordGoalPrereview`), not a second
+ * registration — so "an agent can never sequence the audit by hand" is a fact
+ * about the tool surface rather than a convention about which host something
+ * was registered on.
  *
  * THE BOUNDARY: this module owns the APPROVAL — when the audit runs, what the
  * user is shown, who may answer, and the file write that follows a yes. It
- * owns none of the audit's rules: the fence parsing, the adjudication and the
+ * owns none of the audit's rules: the adjudication and the
  * record live in lib/goal-prereview-tools.ts, and the goal text's own
  * formatting (transcript message, dialog message, refusal, hash) is
  * lib/loop-goal.ts. What is injected is everything it cannot own — the gate
@@ -59,7 +56,6 @@ import { resolvePackageAgentsDir } from "./model-config.ts";
 import { createProgressReporter, type ProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import {
   checkGoalDraft,
-  doRecordGoalPrereview,
   type GoalPrereviewDeps,
 } from "./goal-prereview-tools.ts";
 
@@ -71,16 +67,6 @@ export interface GoalUiContext {
   };
 }
 
-/**
- * The two hosts this family registers on.
- *
- * `internal` is the capture-only host: an implementation registered there is
- * reachable by name for the gate's own chains and invisible to the agent.
- */
-export interface GoalToolHosts {
-  agent: ToolHost;
-  internal: ToolHost;
-}
 
 /**
  * Everything `propose_loop_goal` needs from the outside world, on top of what
@@ -131,46 +117,15 @@ export interface GoalToolDeps extends GoalPrereviewDeps {
   writeGoalFile(path: string, text: string): void;
 }
 
-// ---------- record_goal_prereview (L8b — the goal-auditor's verdict) ----------
+// ---------- the goal audit recorder (L8b — NOT a tool) ----------
+//
+// `recordGoalPrereview` (lib/goal-prereview-tools.ts) is a plain function the
+// gate calls when the goal-auditor's round lands. It used to be registered
+// here as an `internalTool` named `record_goal_prereview` taking the auditor's
+// raw output as text — a shape that existed only because the verdict had to be
+// parsed back out of a synthesised fence. Nothing parses now, so the tool
+// wrapper is gone (2026-09-04, philosophy two and three).
 
-/**
- * INTERNAL, not registered with pi: `propose_loop_goal` runs the audit itself
- * and records the verdict through this implementation.
- */
-function registerRecordGoalPrereview(host: ToolHost, deps: GoalToolDeps): void {
-  host.registerTool({
-    name: "record_goal_prereview",
-    label: "Record Goal Pre-review",
-    description:
-      "ADVANCED / internal: the gate records a goal audit ITSELF when the auditor's process exits, " +
-      "against the draft it dispatched — the normal flow is " +
-      "`judge_submit({role:\"goal-auditor\", task:<draft>})` → propose_loop_goal. Call this directly " +
-      "only when you have an auditor output the gate could not read. " +
-      "Records the audit of a DRAFT loop goal; propose_loop_goal " +
-      "refuses to show the user's approval dialog until a PASS is recorded for the IDENTICAL text. " +
-      "The EXTENSION parses the auditor's JSON fence " +
-      "itself (PASS ⇔ a READY verdict with no unresolved P0/P1) and hashes the draft itself — there " +
-      "is no `passed` parameter you could set, and a " +
-      "hand-written verdict is not a review. A failed audit means: fix the objections and submit the " +
-      "revised text (its hash differs, so it needs its own PASS).",
-    parameters: Type.Object({
-      goal: Type.String({ description: "The FULL draft goal text that was audited (the exact text you will submit)" }),
-      auditor_output: Type.String({ description: "Complete raw output from the goal-auditor judge child (the verdict is read from its newest fence)" }),
-      repo: Type.Optional(Type.String({
-        description:
-          "Absolute path of the repo this goal binds to (default: the session repo) — must match the " +
-          "repo you pass to propose_loop_goal.",
-      })),
-      auditStartedAt: Type.Optional(Type.String({
-        description:
-          "ISO timestamp of when you DISPATCHED the goal-auditor (the wall-clock start of this audit). " +
-          "Goal criterion 6 records first-vs-re-audit durations, and the gate cannot see the dispatch " +
-          "— the tool only records verdicts. Omit on re-records of the same audit.",
-      })),
-    }),
-    execute: (_id, params, _signal, _onUpdate, ctx) => doRecordGoalPrereview(deps, params, ctx),
-  });
-}
 
 // ---------- propose_loop_goal (L8 — the user approves the contract) ----------
 
@@ -458,13 +413,14 @@ export async function doProposeLoopGoal(
 }
 
 /**
- * The family's SINGLE registration entry point: both goal tools, each on the
- * host that may see it.
+ * The family's SINGLE registration entry point.
+ *
+ * ONE tool now: `propose_loop_goal`. The audit recorder behind it is a plain
+ * function (`recordGoalPrereview`), which the extension calls when the
+ * auditor's round lands — it is not on any tool surface.
  */
-export function registerGoalTools(hosts: GoalToolHosts, deps: GoalToolDeps): void {
-  registerRecordGoalPrereview(hosts.internal, deps);
-
-  hosts.agent.registerTool({
+export function registerGoalTools(host: ToolHost, deps: GoalToolDeps): void {
+  host.registerTool({
     name: "propose_loop_goal",
     label: "Propose Loop Goal",
     description:

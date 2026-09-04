@@ -6,6 +6,13 @@
 > 以模式注册表（`lib/gate-modes.ts`）与实现为准。
 > 背景结论见调研（三种通信：judge 落 verdict fence 即完成 / 编排文件通道 / 人机框），
 > 本文把前两者统一为**上下级调用树**。
+>
+> 又一处已被取代（2026-09-04 同日第二轮）：**verdict fence 与 `record_review`
+> 都没了**。judge 调 `judge_conclude` 交卷，结构化字段直写 channel report，opener
+> 当数据消费；记录侧是普通函数 `recordReviewVerdict` / `recordGoalPrereview`，
+> 不在任何工具面上。下文凡出现 `verdict fence` / `record_review` /
+> `record_goal_prereview` 的地方，读作「`judge_conclude` 交卷 / 门禁自己的记录
+> 函数」——判定语义（STALE、tree 绑定、adviser 不进 recorder）逐条不变。
 
 ## 一、调用链（唯一合法形状）
 

@@ -188,9 +188,9 @@ export function buildPlanAuditTask(
           "",
         ]
       : []),
-    "以 judge_conclude 交卷(verdict READY|BLOCKED,findings 为 severity P0|P1|P2 + issue,notes 写结论要点):",
-    "READY 仅当 plan 无未解决 P0/P1 异议。findings 为空表示无异议。",
-    "输出纪律:先交卷再写 ≤3 行结论要点;不复述 plan、不复述代码、不写过程叙事。",
+    "以 judge_conclude 交卷(verdict READY|BLOCKED,findings 每条 severity P0|P1|P2 + issue,能给证据就填 evidence):",
+    "READY 仅当 plan 无未解决 P0/P1 异议。findings 为空表示无异议。本角色的签名里没有 notes 参数,传了会被拒——结论请写进 findings。",
+    "输出纪律:交卷即停 —— 调完 judge_conclude 就结束本轮,不写复述、不写自评、不写过程说明。",
     "",
     JUDGE_COMPLETION_DISCIPLINE,
   ].join("\n");

@@ -72,10 +72,15 @@ test("goal-auditor is a strong-tier, READ-ONLY judge — the gate records its ve
   assert.match(src, /exactly ONCE/, "the prompt must demand a single conclude call");
   assert.match(src, /never write a fenced/, "a fenced verdict in prose would be silently unconsumed");
   assert.match(src, /Simplified Chinese/, "the goal-language rule lives in the auditor's checklist");
-  // The file must itself OBEY the rule it teaches: `parseReviewOutput` scans
-  // every fence and keeps the worst, and a system prompt is quoted back by
-  // models, so an example fence here can poison a real PASS. Zero fences — the
-  // verdict shape is shown unfenced ON PURPOSE.
+  // 2026-09-04: this role's conclude call has NO `notes` parameter, and the
+  // gate refuses one. A role file still asking for prose would make the gate
+  // contradict its own dispatch on the very first round.
+  assert.match(src, /NO `notes` parameter/, "the role file must state that notes is refused");
+  assert.doesNotMatch(src, /notes your/, "…and must not still ask for one");
+  // The file must itself avoid modelling a fence: a system prompt is quoted
+  // back by models, and the conclude call takes structured fields — an example
+  // fence here would teach exactly the shape that no longer means anything.
+  // Zero fences — the verdict shape is shown unfenced ON PURPOSE.
   const fences = (src.match(/^```/gm) ?? []).length;
   assert.equal(fences, 0, `the auditor prompt must contain NO code fences, found ${fences}`);
 });
@@ -298,6 +303,25 @@ test("REGRESSION: the commit-isolation contract is stated where a reviewer reads
     "the output format must not invite the reviewer to fix the code it judges",
   );
 });
+
+test("the role files match the ROLE-SHAPED conclude signature (2026-09-04)", () => {
+  // `judge_conclude` has no `notes` parameter for a reviewer or a
+  // goal-auditor, and refuses one that is passed anyway. A role file that
+  // still asked for prose would make the gate contradict its own dispatch on
+  // the very first round — the exact self-collision this pin exists to catch.
+  for (const f of ["reviewer.md", "goal-auditor.md"]) {
+    const src = readFileSync(join(AGENTS, f), "utf8");
+    assert.match(src, /NO `notes` parameter/, `${f} must state that notes is refused`);
+    assert.doesNotMatch(src, /notes at most|notes your|and notes\b/i,
+      `${f} must not ask for a field the gate refuses`);
+    assert.match(src, /[Cc]onclude and stop/, `${f} must say the round ends at the call`);
+  }
+  // The adviser is the exception, and says so: its product IS the prose.
+  const adviser = readFileSync(join(AGENTS, "adviser.md"), "utf8");
+  assert.match(adviser, /advice goes in `notes`/, "the adviser keeps the prose field");
+  assert.match(adviser, /have no `notes` parameter at all/, "…and says which roles do not");
+});
+
 
 test("REGRESSION: isolation + streaming are documented in every protocol surface", () => {
   for (const file of [SKILL_MD, AGENTS_MD]) {

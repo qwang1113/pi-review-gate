@@ -121,10 +121,10 @@ export interface LoopGoalConfirmation {
 
 /**
  * The sidecar record of "the dedicated `goal-auditor` role pre-reviewed THIS
- * exact draft" (L8b — written only by record_goal_prereview).
+ * exact draft" (L8b — written only by the gate's own `recordGoalPrereview`).
  *
- * The verdict is the EXTENSION's own reading of the auditor's JSON fence
- * (parseReviewOutput), never a boolean the agent attested: an agent-supplied
+ * The verdict is the EXTENSION's own reading of the auditor's structured
+ * conclusion, never a boolean the agent attested: an agent-supplied
  * `passed` flag would make the pre-review a self-certification, which is the
  * hole this record exists to close. Like {@link LoopGoalConfirmation} it binds
  * to CONTENT — the hash of the text that was judged — so revising the draft
@@ -274,11 +274,11 @@ export function buildGoalAuditTask(
         ]
       : []),
     "",
-    "以 judge_conclude 交卷(verdict READY|BLOCKED,findings 为 severity P0|P1|P2 + issue,notes 写 ≤3 行结论要点):",
-    "READY 仅当草稿无未解决 P0/P1 异议。findings 为空表示无异议。",
-    // Round-17 (user ask): output discipline — auditor output beyond the
-    // conclude call + 3 lines is wasted tokens.
-    "输出纪律:先交卷再写 ≤3 行结论要点;不复述任务、不复述代码、不写过程叙事。",
+    "以 judge_conclude 交卷(verdict READY|BLOCKED,findings 每条 severity P0|P1|P2 + issue,能给证据就填 evidence):",
+    "READY 仅当草稿无未解决 P0/P1 异议。findings 为空表示无异议。本角色的签名里没有 notes 参数,传了会被拒——结论请写进 findings。",
+    // Round-17 (user ask), tightened 2026-09-04: the auditor has no prose
+    // field at all, so there is nowhere for output beyond the conclude call.
+    "输出纪律:交卷即停 —— 调完 judge_conclude 就结束本轮,不写复述、不写自评、不写过程说明。",
     "",
     JUDGE_COMPLETION_DISCIPLINE,
   ];

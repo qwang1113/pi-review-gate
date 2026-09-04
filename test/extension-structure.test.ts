@@ -274,15 +274,28 @@ function COPILOT_WIRING(): string {
 /**
  * The extension's wiring of the goal family — deps, nothing else.
  *
- * TWO hosts here, unlike every other family: the agent-visible
- * `propose_loop_goal` goes to `pi`, the internal `record_goal_prereview` to
- * the capture-only `internalHost`. The start anchor pins exactly that.
+ * ONE host, and the anchor pins that: the family registers only the
+ * agent-visible `propose_loop_goal`. Its audit recorder is a plain function
+ * the gate calls itself, on no tool surface at all (2026-09-04).
  */
 function GOAL_WIRING(): string {
   return windowOf(
-    "registerGoalTools({ agent: pi, internal: internalHost }, {",
+    "registerGoalTools(pi, {",
     "\n  });",
     "goal tools wiring",
+  );
+}
+
+/**
+ * The reviewer verdict recorder — a plain function since 2026-09-04, so it has
+ * no `name:` anchor. Everything the OPENER owns lives in this window: the
+ * STALE check, the cwd check, the tree binding, the round record.
+ */
+function recordVerdictBody(): string {
+  return windowOf(
+    "async function recordReviewVerdict(",
+    "\n  // ---------- review tooling",
+    "recordReviewVerdict",
   );
 }
 
@@ -350,7 +363,8 @@ test("the loop goal gates SHIP at L1 only — hooks and verdict logic stay blind
   // show a dialog — so the hook, the verdict parser and the fingerprint must
   // remain unaware of the goal entirely.
   const blindSources = [
-    join(ROOT, "lib", "verdict-parse.ts"),
+    join(ROOT, "lib", "precommit-parse.ts"),
+    join(ROOT, "lib", "review-adjudicate.ts"),
     join(ROOT, "lib", "fingerprint.ts"),
     join(ROOT, "hooks", "pre-commit"),
   ];
@@ -851,17 +865,20 @@ test("pause resume: any non-extension input clears the pause (interactive AND rp
 
 test("stale pause liveness: cleared when the agent proves it is not waiting", () => {
   // A pause left behind while the agent keeps looping must not silently
-  // swallow auto-continuation: edits, record_review and run_precommit all
-  // clear it (plus setTaskMode — a fresh mode decision supersedes it).
-  // P-multi: record_review/run_precommit clear the ACTIVE repo's state via a
+  // swallow auto-continuation: edits, the reviewer verdict recorder and
+  // run_precommit all clear it (plus setTaskMode — a fresh mode decision
+  // supersedes it).
+  // P-multi: the recorder / run_precommit clear the ACTIVE repo's state via a
   // local `st` (no global swap), so both spellings count.
   const clears = SRC.match(/delete (?:state|st)\.pausedQuestion/g) ?? [];
   assert.ok(clears.length >= 5, `expected >=5 clear sites, found ${clears.length}`);
-  const recordStart = SRC.indexOf('name: "record_review"');
-  const recordEnd = SRC.indexOf('name: "run_precommit"');
-  assert.ok(SRC.slice(recordStart, recordEnd).includes(".pausedQuestion"), "record_review must clear the pause");
+  const recordStart = SRC.indexOf("async function recordReviewVerdict(");
+  assert.ok(recordStart > 0, "the reviewer verdict recorder must exist");
+  const recordEnd = SRC.indexOf("// ---------- review tooling", recordStart);
+  assert.ok(SRC.slice(recordStart, recordEnd).includes(".pausedQuestion"), "recording a verdict must clear the pause");
+  const precommitStart = SRC.indexOf('name: "run_precommit"');
   const precommitEnd = SRC.indexOf('name: "declare_done"');
-  assert.ok(SRC.slice(recordEnd, precommitEnd).includes(".pausedQuestion"), "run_precommit must clear the pause");
+  assert.ok(SRC.slice(precommitStart, precommitEnd).includes(".pausedQuestion"), "run_precommit must clear the pause");
 });
 
 test("session_compact while paused re-injects the WAITING state, never a resume nudge", () => {
@@ -1397,10 +1414,48 @@ test("edit-time L6 scanner probes every install layout (not just the dev repo pa
   assert.match(SRC, /\.\.\/\.\.\/scripts\/scan-test-labels\.cjs/);
 });
 
-test("record_review parses full output through verdict-parse", () => {
-  assert.match(SRC, /name:\s*["']record_review["']/);
-  assert.match(SRC, /parseReviewOutput/);
+test("the reviewer verdict is recorded from the structured conclusion, and `record_review` is gone", () => {
+  // 2026-09-04 (user decision D4): the recorder is a plain function taking the
+  // judge's own structured conclusion. Its only reason to be a tool was that a
+  // verdict had to be parsed back out of text the gate itself serialised.
+  assert.match(SRC, /async function recordReviewVerdict\(/);
+  assert.match(SRC, /adjudicateReviewConclusion\(/, "one adjudication decides the recorded verdict");
+  assert.doesNotMatch(SRC, /name:\s*["']record_review["']/, "no tool surface may carry it back");
 });
+
+test("no fence is synthesised and none is parsed — anywhere in lib/ or the extension", () => {
+  // Philosophy three, the whole point of this round: the gate used to
+  // serialise a judge's structured conclusion into a ```json fence purely so
+  // that its own parser could read it back. Both halves are deleted, and this
+  // is the ratchet that keeps either from creeping back — a re-added parser
+  // would be a second implementation of something the channel record already
+  // carries as data.
+  const GONE = [
+    "parseReviewOutput", "parseFenceFindings", "parseFenceFileFindings",
+    "extractNewestFenceText", "buildConcludeFence", "hasJudgeFence", "VERDICT_FENCE",
+  ];
+  const sources = [
+    ...readdirSync(join(ROOT, "lib")).filter((f) => f.endsWith(".ts")).map((f) => join("lib", f)),
+    join("extensions", "review-gate.ts"),
+  ];
+  const offences: string[] = [];
+  for (const rel of sources) {
+    const text = readFileSync(join(ROOT, rel), "utf8");
+    for (const symbol of GONE) {
+      if (text.includes(symbol)) offences.push(`${rel}: ${symbol}`);
+    }
+  }
+  assert.deepEqual(offences, [],
+    `a deleted fence symbol came back:\n${offences.join("\n")}`);
+  // `parsePrecommitOutput` is the ONE parser that stays: it reads a trusted
+  // runner's `## Overall:` sentinel, which has nothing to do with a review.
+  assert.match(SRC, /parsePrecommitOutput/, "the precommit sentinel parser must survive");
+  assert.match(
+    readFileSync(join(ROOT, "lib", "precommit-parse.ts"), "utf8"),
+    /export function parsePrecommitOutput/,
+  );
+});
+
 
 test("request_arbitration is registered and is a NARROW, fail-closed capability", () => {
   assert.match(SRC, /name:\s*["']request_arbitration["']/);
@@ -1823,26 +1878,27 @@ test("SECURITY: a declined sensitive path is locked, and grants never reach the 
     "…and the module that ISSUES them must not persist them either");
 });
 
-test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict and hashes the text", () => {
-  // The tool moved to lib/ (registration in lib/goal-tools.ts on the INTERNAL
-  // host, body in lib/goal-prereview-tools.ts) — the rule follows the code:
-  // `toolBodyOf` reads both windows, and the shared submission checks
-  // (`checkGoalDraft`) are read with them, because the repo binding and the
-  // length cap are asserted below and now live there.
-  const body = toolBodyOf("record_goal_prereview") + "\n" +
+test("L8b: the goal audit recorder is TRUSTED — the extension reads the verdict and hashes the text", () => {
+  // The recorder is a plain function in lib/goal-prereview-tools.ts (2026-09-04:
+  // it was an internalTool named `record_goal_prereview` only because a verdict
+  // had to be parsed out of text). The rule follows the code: read its window
+  // plus the shared submission checks (`checkGoalDraft`), because the repo
+  // binding and the length cap are asserted below and live there.
+  const body =
+    windowIn(GOAL_PREREVIEW_SRC, "export async function recordGoalPrereview(", "\n}", "recordGoalPrereview") + "\n" +
     windowIn(GOAL_PREREVIEW_SRC, "export function checkGoalDraft(",
       "\nexport function buildGoalRecordReply(", "checkGoalDraft");
   // The verdict is READ, never accepted: no `passed`/`verdict` parameter may
-  // exist, or the pre-review becomes an agent self-certification again. The
-  // raw param is narrowed once at the handler boundary (the lib tool host
-  // hands over `Record<string, unknown>`), then parsed by the gate itself.
-  assert.match(body, /const auditorOutput = typeof params\.auditor_output === "string"/,
-    "the auditor output is narrowed, not cast");
-  // Newest fence decides (a reused pane's output holds every audit's fence);
-  // the extraction is gate-computed from the output bytes — no new parameter.
-  assert.match(body, /extractNewestFenceText\(auditorOutput\) \?\? auditorOutput/,
-    "the verdict is read from the newest fence");
-  assert.match(body, /parseReviewOutput\(fenced\)/, "the extension must parse the fenced output itself");
+  // exist, or the pre-review becomes an agent self-certification again. It
+  // arrives as the auditor's own structured conclusion off the channel report,
+  // and the gate normalizes it itself — fail-closed on anything else.
+  assert.match(body, /normalizeConcludedVerdict\(params\.conclusion\.verdict\)/,
+    "the verdict comes from the auditor's structured conclusion");
+  assert.match(body, /if \(!verdict\) \{/, "an unrecognised verdict records NOTHING");
+  assert.match(body, /severityFindingsFrom\(params\.conclusion\.findings\)/,
+    "the objections are taken verbatim, not re-derived from text");
+  assert.doesNotMatch(body, /auditor_output|extractNewestFenceText|parseReviewOutput/,
+    "no text is parsed for a verdict anymore");
   // B2: ONE mechanical adjudication decides PASS — a READY without P0/P1 —
   // and the same call produces the sentence the agent reads.
   assert.match(body, /adjudicateGoalAudit\(\{/, "the extension adjudicates the audit itself");
@@ -1862,23 +1918,24 @@ test("L8b: record_goal_prereview is TRUSTED — the extension parses the verdict
   assert.match(sessionStart, /delete state\.goalAuditRound/, "a new session starts its own count");
   assert.match(body, /goalTextHash\(goalText\)/, "the extension must hash the submitted text itself");
   assert.doesNotMatch(body, /params\.(passed|verdict|hash)\b/, "no agent-attested verdict or hash may be read");
-  // Fail-closed: an unparseable fence records NOTHING (a wiped record would
-  // silently downgrade a standing PASS, and a recorded one would be a forgery).
-  const noFence = body.indexOf("if (!parsed)");
+  // Fail-closed: a round that never concluded records NOTHING (a wiped record
+  // would silently downgrade a standing PASS, and a recorded one would be a
+  // forgery).
+  const noVerdict = body.indexOf("if (!verdict) {");
   const write = body.indexOf("goalSt.goalPrereview =");
-  assert.ok(noFence > 0 && write > noFence, "the unparseable guard must precede the sidecar write");
+  assert.ok(noVerdict > 0 && write > noVerdict, "the no-verdict guard must precede the sidecar write");
   // Same repo resolution as propose_loop_goal — literally the same function
   // now (never resolveToolRepo, which requires an already-edited repo and
   // would dead-end a second repo's goal).
   assert.match(body, /gitRootOfDir\)\(abs\)/);
   assert.doesNotMatch(body, /resolveToolRepo\(/, "it must not CALL resolveToolRepo (naming it in the rationale is fine)");
-  // The INTERNAL host is the one it registers on: pi must never learn this name.
-  const registrationAt = GOAL_TOOLS_SRC.indexOf('name: "record_goal_prereview"');
-  const hostAt = GOAL_TOOLS_SRC.lastIndexOf("registerTool({", registrationAt);
-  assert.ok(hostAt > 0 && !/hosts\.agent|pi\./.test(GOAL_TOOLS_SRC.slice(hostAt - 40, hostAt)),
-    "record_goal_prereview must not be registered on the agent-visible host");
-  assert.match(GOAL_TOOLS_SRC, /registerRecordGoalPrereview\(hosts\.internal, deps\)/,
-    "…and the family entry point must hand it the internal host");
+  // NOT A TOOL, on any host: pi must never learn a name for it, and neither
+  // may the gate's own internal host (D4 — the tool wrapper existed only for
+  // the text-parsing shape that is gone).
+  assert.doesNotMatch(GOAL_TOOLS_SRC, /name: "record_goal_prereview"/,
+    "the audit recorder must not be registered anywhere");
+  assert.match(GOAL_TOOLS_SRC, /export function registerGoalTools\(host: ToolHost/,
+    "…so the family entry point takes ONE host");
 });
 
 test("goal criterion 3: prepare_adviser is registered and hands back a brief with artifact + session pointer", () => {
@@ -2111,10 +2168,11 @@ test("round-18: prepare_review carries the polish-gate reason — parameter, ref
   // A supplied reason is persisted into gate state for the NEXT reviewer.
   assert.match(body, /st\.lastPolishReason = \{/, "the reason is persisted");
   assert.match(body, /lastPolishReason/, "the reviewer task receives the stored reason");
-  // record_review records per-file finding severities for the file streak.
-  const recBody = toolBodyOf("record_review");
-  assert.match(recBody, /parseFenceFileFindings\(fenced\)/, "record_review parses severity+file from the newest fence");
-  assert.match(recBody, /recordedFindingsFrom\(fileFindings\)/, "the file lists are derived for the streak");
+  // The verdict recorder derives per-file finding severities for the file streak.
+  const recBody = recordVerdictBody();
+  assert.match(recBody, /fileFindingsFrom\(concluded\.findings as ReviewFinding\[\]\)/,
+    "severity+file come straight off the judge's own findings");
+  assert.match(recBody, /recordedFindingsFrom\(fileFindingsFrom\(/, "the file lists are derived for the streak");
   assert.match(recBody, /polishFiles: recorded\.polishFiles/, "P2/Nit files are stored on the round");
   assert.match(recBody, /blockingFiles: recorded\.blockingFiles/, "P0/P1 files are stored on the round");
 });
@@ -2383,22 +2441,17 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // The `/precommit` command's `callTool("run_precommit", …)` wiring moved
     // here with the command layer.
     "gate-command-tools.ts": 1,
-    // The goal family took `record_goal_prereview` with it: ONE `name: "…"`
-    // registration on the internal host in goal-tools.ts, and in
-    // goal-prereview-tools.ts the tool-name union, the two `tool: "…"` /
-    // `input.tool === "…"` discriminators of the shared submission check and
-    // its own refusal text. Descriptions of an internal step, never an
-    // instruction to call one.
-    "goal-tools.ts": 1,
-    "goal-prereview-tools.ts": 5,
-    // 2026-09-02: +2 — the non-git short-circuit refusals name the two
-    // internal steps they disable (`run_precommit 不可用` /
-    // `record_review 不可用`). Descriptions of what the gate refuses
-    // outside a repository, never instructions to call either.
-    // 2026-09-04: +1 — judge_spawn 的 buildGoalAuditTask 走同一条
+    // 2026-09-04: `record_goal_prereview` and `record_review` are no longer
+    // tools on ANY host (user decision D4) — the goal family's own mentions
+    // and the extension's `callTool("record_review", …)` wiring went with
+    // them, so both counts drop.
+    // 2026-09-02: the non-git short-circuit refusals named the two internal
+    // steps they disable; the review one now speaks for a plain function and
+    // names nothing.
+    // 2026-09-04: judge_spawn 的 buildGoalAuditTask 走同一条
     // callTool("prepare_goal_audit") 接线（门禁内部组装审计任务，agent 只给
     // 意图）。接线引用，不是调用指令。
-    "review-gate.ts": 23,
+    "review-gate.ts": 19,
   };
 
   const sources = [
@@ -2550,7 +2603,8 @@ test("judge_wait applies the channel end-of-round criteria and returns conclusio
   assert.doesNotMatch(body, /while \(!outcome\.done/, "no hand-rolled wait loop may come back");
   // The RETURN carries the recorded verdict — a NEW channel report ends the
   // round (the gate records it), a dead pane ends it as failed.
-  assert.match(body, /deps\.recordVerdict\(fullText, addressed\.root, child\.role\)/, "a new report goes through the gate's recorder");
+  assert.match(body, /deps\.recordVerdict\(concluded, addressed\.root, child\.role\)/, "a new report goes through the gate's recorder");
+  assert.match(body, /reportConclusion\(projection\.lastReport\)/, "…on the report's STRUCTURED conclusion, not on its text");
   assert.match(body, /pane-dead/, "a dead pane ends the wait as failed");
   assert.match(body, /lastReportId: observation\.reportId/, "the consumed report cannot end a second wait");
   const probe = windowIn(JUDGE_TOOLS_SRC, "export function probeJudgeRound(", "\n}", "probeJudgeRound");
@@ -2623,13 +2677,9 @@ test("STREAMING: progress text is a partial result only — it never enters a to
  * on a self-reported value, which rejects a mismatching report and proves
  * nothing about who produced the verdict.
  */
-test("record_review actually runs the cwd check it demands", () => {
-  const at = SRC.indexOf('name: "record_review"');
-  assert.ok(at > 0, "record_review must be registered");
-  // Wide enough to reach the reply text: the check is near the top of the
-  // handler, the message that explains it is far below.
-  const body = SRC.slice(at, at + 14000);
-  assert.match(body, /parsed\.cwd/, "the claimed cwd is read from the parsed verdict");
+test("the verdict recorder actually runs the cwd check it demands", () => {
+  const body = recordVerdictBody();
+  assert.match(body, /parsed\.cwd/, "the claimed cwd is read from the adjudicated conclusion");
   assert.match(body, /canonicalPath\(claimed\) !== canonicalPath\(targetRoot\)/,
     "…and compared with the repo the round was prepared for, through realpath");
   assert.match(body, /cwdMismatch = "the verdict carries no `cwd`/,
@@ -3153,7 +3203,7 @@ test("every enforcement path computes a FRESH fingerprint", () => {
     // merge-waiver dialog sit between the tool name and its first fingerprint
     // call — bounded by the check that FOLLOWS the loop, not by a byte count.
     ['name: "declare_done"', "// L7/L8 — completion-only requirements"],
-    ['name: "record_review"', 6000],
+    ["async function recordReviewVerdict(", "// ---------- review tooling"],
     ['name: "request_arbitration"', 4000],
     // Same reason: R-3's orchestrator branch returns before the loop's own
     // fingerprint, so the window is closed by the block after it.
@@ -3479,7 +3529,7 @@ test("the incremental baseline records only what the review actually covered", (
   // files; recording the whole branch diff would later let the scoper call
   // never-reviewed files "already reviewed" and skip escalating to full.
   const at = SRC.indexOf("st.lastReadyReview = {");
-  assert.ok(at > 0, "record_review must set the baseline");
+  assert.ok(at > 0, "the verdict recorder must set the baseline");
   const before = SRC.slice(at - 900, at);
   assert.match(before, /st\.scopeLimit\s*\n?\s*\?\s*st\.scopeLimit\.sessionFiles/,
     "a scope-limited review must record sessionFiles, not the whole branch diff");
@@ -3546,25 +3596,25 @@ test("P2: prepare_review registers the commit target (baseline/head/tree) for re
   // prepare_review moved to lib/, so the registration is now split in two and
   // BOTH halves are asserted: the tool builds the target (with the tree, which
   // is what a READY binds to), and the extension's wiring is what actually puts
-  // it in the map record_review reads.
+  // it in the map the verdict recorder reads.
   assert.match(REVIEW_PREPARE_SRC, /deps\.registerReviewTarget\(root, \{ baseline, head, tree \}\)/);
   assert.match(REVIEW_PREPARE_WIRING(), /registerReviewTarget: \(root, target\) => \{ reviewTargets\.set\(root, target\); \}/);
-  // And the map must be consulted inside record_review, not just written.
-  assert.match(SRC, /reviewTargets\.get\(targetRoot\)/);
+  // And the map must be consulted inside the recorder, not just written.
+  assert.match(recordVerdictBody(), /reviewTargets\.get\(targetRoot\)/);
 });
 
-test("P2: record_review withholds a READY when the round was never prepared", () => {
+test("P2: the recorder withholds a READY when the round was never prepared", () => {
   // No registered target ⇒ the round was never prepared ⇒ a READY has nothing
   // to bind to ⇒ withheld (BLOCKED). The mechanical guard, not honour-based.
-  const segment = SRC.slice(SRC.indexOf('name: "record_review"'));
+  const segment = recordVerdictBody();
   assert.match(segment, /if \(!target_\)/);
   assert.match(segment, /nothing to bind/);
 });
 
-test("P2: record_review downgrades a READY to BLOCKED when HEAD moved past the prepared commit (STALE)", () => {
+test("P2: the recorder downgrades a READY to BLOCKED when HEAD moved past the prepared commit (STALE)", () => {
   // A new checkpoint after prepare_review means the reviewer judged an older
   // commit and the change under review has since grown — READY must not bind.
-  const segment = SRC.slice(SRC.indexOf('name: "record_review"'));
+  const segment = recordVerdictBody();
   assert.match(segment, /STALE/);
   assert.match(segment, /headNow !== target_\.head/);
   assert.match(segment, /staleTarget/);
@@ -3685,7 +3735,7 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   // recorder recordRoundOutput, which recordJudgeConclusion calls).
   const recAt = SRC.indexOf("async function recordRoundOutput(");
   const rec = SRC.slice(recAt, recAt + 4000);
-  assert.match(rec, /callTool\("record_goal_prereview", \{/, "recording routes through record_goal_prereview");
+  assert.match(rec, /recordGoalPrereview\(goalPrereviewDeps, \{/, "recording routes through the ONE audit recorder");
   assert.match(rec, /goal: goalPending\.draft/, "the recorded draft is the pending one");
   assert.match(rec, /auditStartedAt: goalPending\.startedAt/);
   assert.match(rec, /dropAudits\(root\)/, "a recorded audit does not linger (and persists the drop)");
@@ -3725,15 +3775,36 @@ test("a judge's verdict is recorded from THIS round's report, never an older one
   // judged. Only a report newer than the consumed cursor is recorded.
   assert.match(body, /projectChannel\(read\.records\)\.lastReport/,);
   assert.match(body, /last\.reportId === entry\?\.lastReportId/, "an already-consumed report is not recorded twice");
-  assert.match(body, /reportText\(channelIO, last\)/, "the recorder gets the report's exact bytes");
-  assert.match(body, /recordRoundOutput\(fullText, childRoot, role, ctx\)/,
-    "one recorder serves both the wait and the stragglers, with an explicit ctx");
+  assert.match(body, /reportText\(channelIO, last\)/, "an ADVISER's prose is read from its report");
+  assert.match(body, /recordRoundOutput\(reportConclusion\(last\), childRoot, role, ctx\)/,
+    "one recorder serves both the wait and the stragglers, on the STRUCTURED conclusion, with an explicit ctx");
   const recorderAt = SRC.indexOf("async function recordRoundOutput(");
   assert.ok(recorderAt > 0, "the single recorder must exist");
-  assert.match(SRC.slice(recorderAt, recorderAt + 1500), /repo: root/, "the record names its repo explicitly");
+  assert.match(SRC.slice(recorderAt, recorderAt + 1500), /recordReviewVerdict\(concluded, root, recordCtx\)/,
+    "the record names its repo explicitly");
   // Advice is not a verdict: an adviser's report is surfaced, never recorded —
   // but its cursor still advances so the next settle does not re-announce it.
   assert.match(body, /role === "adviser"/, "advice is surfaced, not recorded");
+});
+
+
+test("a judge's PROSE never reaches the opener's context, except from the adviser", () => {
+  // The report record itself carries no prose for a reviewer / goal-auditor
+  // (lib/judge-conclude.ts, pinned in test/judge-conclude.test.ts). This is the
+  // OTHER half: even if one somehow did, the opener would not quote it — the
+  // excerpt is passed for exactly one role, and the wake-up is otherwise built
+  // from structured fields plus the gate's own recorded note.
+  const body = windowOf("async function settleFinishedRounds(", "\n  /**", "settleFinishedRounds");
+  assert.match(body, /conclusionExcerpt: entry\.role === "adviser" \? conclusion\.text : undefined/,
+    "only an adviser's conclusion is quoted back");
+  assert.match(body, /verdict: obs\.verdict/, "the verdict travels structured");
+  assert.match(body, /findingsCount: obs\.findingsCount/, "so does the count");
+  // And the recorded note is the GATE's sentence, not the judge's: it comes
+  // from the recorder's return value, never from the report's text.
+  assert.match(body, /recordedNote: conclusion\.recorded \? conclusion\.text : undefined/);
+  const recorder = windowOf("async function recordJudgeConclusion(", "\n  /**", "recordJudgeConclusion");
+  assert.match(recorder, /if \(role === "adviser"\) \{[\s\S]*?reportText\(channelIO, last\)/,
+    "the report's own text is read ONLY on the adviser branch");
 });
 
 
@@ -3742,8 +3813,8 @@ test("every advanced entry says it is one, and none teaches the retired manual f
   // still saying "call this before spawning the reviewer" is enough to send
   // it back to the four-step dance judge_submit replaced.
   const advanced = [
-    "run_precommit", "review_checkpoint", "prepare_review", "record_review",
-    "prepare_goal_audit", "prepare_adviser", "record_goal_prereview",
+    "run_precommit", "review_checkpoint", "prepare_review",
+    "prepare_goal_audit", "prepare_adviser",
   ];
   for (const tool of advanced) {
     // Three of these now live in lib/ tool modules — the rule follows the code.

@@ -144,9 +144,11 @@ import {
   nodeChannelIO,
   projectChannel,
   readChannel,
+  reportConclusion,
   reportText,
   type ChannelIO,
   type ChannelRecord,
+  type ReportConclusion,
   type ChildReportedState,
 } from "../lib/orchestrator-channel.ts";
 import {
@@ -260,6 +262,7 @@ import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
 // `record_goal_prereview`) moved the same way: this file wires them, the
 // module owns their bodies (and lib/goal-prereview-tools.ts the audit record).
 import { registerGoalTools } from "../lib/goal-tools.ts";
+import { recordGoalPrereview, type GoalPrereviewDeps } from "../lib/goal-prereview-tools.ts";
 // The L1 tool_call hook moved the same way — it was the single biggest thing
 // left in this file. lib/ship-gate-hook.ts owns the dispatch (and the
 // judge-role subagent refusal), lib/ship-gate-edit-guard.ts the edit arm and
@@ -318,7 +321,14 @@ import {
   type GateState,
   invalidateBindings,
 } from "../lib/gate-state.ts";
-import { parseReviewOutput, parsePrecommitOutput, parseFenceFindings, parseFenceFileFindings, extractNewestFenceText } from "../lib/verdict-parse.ts";
+import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
+import {
+  adjudicateReviewConclusion,
+  fileFindingsFrom,
+  normalizeConcludedVerdict,
+  severityFindingsFrom,
+  type ReviewFinding,
+} from "../lib/review-adjudicate.ts";
 import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
 import {
   evaluateModeChange,
@@ -652,6 +662,24 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   (pi as unknown as { __reviewGateInternalTools?: Map<string, ToolExecute> })
     .__reviewGateInternalTools = toolExecutes;
+
+  /**
+   * The same seam, for the two RECORDERS that are plain functions rather than
+   * internal tools (2026-09-04, user decision D4: their tool shape existed only
+   * to carry text that had to be parsed back into a verdict).
+   *
+   * Same reasoning as above and the same non-back-door property: they take a
+   * STRUCTURED conclusion, `pi` never learns a name for either, and the only
+   * production callers are the gate's own settle path. A test would otherwise
+   * have to drive a minutes-long judge dispatch to reach the L8b record or the
+   * commit-target binding.
+   */
+  (pi as unknown as { __reviewGateRecorders?: Record<string, unknown> }).__reviewGateRecorders = {
+    recordGoalPrereview: (input: Parameters<typeof recordGoalPrereview>[1], ctx: unknown) =>
+      recordGoalPrereview(goalPrereviewDeps, input, ctx),
+    recordReviewVerdict: (concluded: ReportConclusion, repo: string, ctx: unknown) =>
+      recordReviewVerdict(concluded, repo, ctx),
+  };
 
   /**
    * The in-file bodies register through this, which keeps pi's own parameter
@@ -4279,25 +4307,27 @@ export default function reviewGate(pi: ExtensionAPI) {
       };
     }
     const last = selected.report;
-    const output = reportText(channelIO, last) ?? "";
-    const fenced = output ? (extractNewestFenceText(output) ?? output) : undefined;
-    const parsed = fenced ? parseReviewOutput(fenced) : undefined;
-    if (!parsed) {
+    // The conclusion arrives STRUCTURED on the report — the auditor concluded
+    // through judge_conclude, so there is nothing to parse. An unrecognisable
+    // verdict (an older build's record, a hand-edited channel) records nothing.
+    const concluded = reportConclusion(last);
+    const verdict = normalizeConcludedVerdict(concluded.verdict);
+    if (!verdict) {
       return {
         ok: false,
         text:
-          "review-gate: plan 审计没有产出可解析的裁决，什么都没有记录（fail-closed）——" +
+          "review-gate: plan 审计没有产出可识别的裁决，什么都没有记录（fail-closed）——" +
           "plan **没有**被送到用户面前。\n" +
           "直接再 `submit` 一次即可重跑审计。",
       };
     }
-    const findings = parseFenceFindings(fenced!);
-    const adjudication = adjudicatePlanAudit(parsed.verdict, findings);
+    const findings = severityFindingsFrom(concluded.findings);
+    const adjudication = adjudicatePlanAudit(verdict, findings);
     const record: PlanAuditRecord = {
       hash,
       verdict: adjudication.verdict,
       at: new Date().toISOString(),
-      findingsTotal: parsed.findingsTotal,
+      findingsTotal: concluded.findings.length,
       ...(findings.length ? { findings } : {}),
       planText: formatPlanSummary(plan),
     };
@@ -4588,16 +4618,17 @@ export default function reviewGate(pi: ExtensionAPI) {
         return { text: `${role} 本轮还没有落 channel report（pane 可能还在跑，或已消失）——门禁会在 report 落盘后用标准报告唤醒；pane 已消失可用 judge_recover 重开。`, recorded: false };
       }
       if (last.reportId === entry?.lastReportId) return undefined; // already consumed
-      const fullText = reportText(channelIO, last) ?? "";
-      if (!fullText.trim()) return { text: `${role} 的 report 为空——什么都没有记录。`, recorded: false };
       if (role === "adviser") {
-        // Advice is not a verdict: surface it, never record it — but consume
-        // the cursor so the next settle does not announce it again.
+        // Advice is not a verdict: surface its PROSE, never record it — but
+        // consume the cursor so the next settle does not announce it again.
+        // The adviser is the one role whose report carries text at all.
+        const advice = reportText(channelIO, last) ?? "";
         advanceReportCursor(sessionId, last.reportId);
-        return { text: fullText, recorded: false };
+        if (!advice.trim()) return { text: `${role} 的 report 为空——什么都没有记录。`, recorded: false };
+        return { text: advice, recorded: false };
       }
       const childRoot = live ? repoOfChild(live) : (entry?.repoRoot ?? primaryRepoRoot);
-      const recorded = await recordRoundOutput(fullText, childRoot, role, ctx);
+      const recorded = await recordRoundOutput(reportConclusion(last), childRoot, role, ctx);
       if (recorded === undefined) return { recorded: false }; // no ctx: stay armed, retry next settle
       advanceReportCursor(sessionId, last.reportId);
       return { text: recorded, recorded: true };
@@ -4697,7 +4728,24 @@ export default function reviewGate(pi: ExtensionAPI) {
         : selected.reason === "already-consumed" ? "channel 最新 report 已是消费过的旧裁决" : "channel 还没有本轮 report";
     return { reason: selected.reason, detail };
   }
-  async function recordRoundOutput(fullText: string, root: string, role: string, ctx?: unknown): Promise<string | undefined> {
+
+  /**
+   * What the goal-audit recorder needs from this session. Declared once and
+   * spread into `registerGoalTools` below, so the recorder the gate calls
+   * directly and the approval tool registered for the agent can never drift
+   * apart on which repo they read and write.
+   */
+  const goalPrereviewDeps: GoalPrereviewDeps = {
+    // Getters: session_start re-resolves both, and a goal bound to the
+    // pre-session cwd would be recorded where nothing ever reads it.
+    primaryRepoRoot: () => primaryRepoRoot,
+    cwd: () => cwd,
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    log: (message) => log(message),
+  };
+
+  async function recordRoundOutput(concluded: ReportConclusion, root: string, role: string, ctx?: unknown): Promise<string | undefined> {
     if (role === "reviewer") {
       // No live tool ctx here, so the last one the session bound is what
       // persists the record. The repo is named explicitly: a multi-repo
@@ -4705,8 +4753,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // on which repo was edited last.
       const recordCtx = ctx ?? lastUiCtx;
       if (!recordCtx) return undefined;
-      const result = await callTool("record_review", { reviewer_output: fullText, repo: root }, recordCtx);
-      return toolText(result);
+      return recordReviewVerdict(concluded, root, recordCtx);
     }
     // Audits are recorded against what the gate dispatched — the record binds
     // to that text's hash, so remembering it is the gate's job, not the
@@ -4721,7 +4768,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // re-runs (its pane and transcript stay on disk).
       if (goalPending.startedAt >= planPending.startedAt) pendingPlanAudits.delete(root);
       else pendingGoalAudits.delete(root);
-      return recordRoundOutput(fullText, root, role, ctx);
+      return recordRoundOutput(concluded, root, role, ctx);
     }
     if (goalPending) {
       const recordCtx = ctx ?? lastUiCtx;
@@ -4731,13 +4778,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       const stale = staleAuditGuard(root);
       if (stale) return `review-gate: goal 审计没有等到本轮裁决（${stale.detail}），什么都没有记录（fail-closed）。直接再 submit 一次即可重跑审计。`;
       dropAudits(root);
-      const audit = await callTool("record_goal_prereview", {
+      return recordGoalPrereview(goalPrereviewDeps, {
         goal: goalPending.draft,
-        auditor_output: fullText,
+        conclusion: concluded,
         auditStartedAt: goalPending.startedAt,
         repo: root,
       }, recordCtx);
-      return toolText(audit);
     }
     if (planPending) {
       // Same stale-report rule as above: never record another round's verdict
@@ -4745,17 +4791,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       const stalePlan = staleAuditGuard(root);
       if (stalePlan) return `review-gate: plan 审计没有等到本轮裁决（${stalePlan.detail}），什么都没有记录（fail-closed）——plan 没有被送审。直接再 submit 一次即可重跑审计。`;
       dropAudits(root);
-      const fenced = extractNewestFenceText(fullText) ?? fullText;
-      const parsed = parseReviewOutput(fenced);
-      if (!parsed) return `plan 审计没有产出可解析的裁决，什么都没有记录（fail-closed）——plan 没有被送审。`;
-      const findings = parseFenceFindings(fenced);
-      const adjudication = adjudicatePlanAudit(parsed.verdict, findings);
+      const planVerdict = normalizeConcludedVerdict(concluded.verdict);
+      if (!planVerdict) return `plan 审计没有产出可识别的裁决，什么都没有记录（fail-closed）——plan 没有被送审。`;
+      const findings = severityFindingsFrom(concluded.findings);
+      const adjudication = adjudicatePlanAudit(planVerdict, findings);
       const st = root === primaryRepoRoot ? state : stateForRepo(root);
       st.planAudit = {
         hash: planPending.hash,
         verdict: adjudication.verdict,
         at: new Date().toISOString(),
-        findingsTotal: parsed.findingsTotal,
+        findingsTotal: concluded.findings.length,
         ...(findings.length ? { findings } : {}),
         planText: planPending.planText,
       };
@@ -5054,9 +5099,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch { return undefined; }
     },
     conclusion: (child) => readJudgeConclusion(child.sessionDir),
-    recordVerdict: async (fullText, root, role) => {
-      const text = await recordRoundOutput(fullText, root, role);
-      return { ...(text === undefined ? {} : { text }), hasVerdict: parseReviewOutput(fullText) !== undefined };
+    recordVerdict: async (concluded, root, role) => {
+      const text = await recordRoundOutput(concluded, root, role);
+      // A report the gate recognises IS the verdict — there is no text to
+      // inspect for one anymore.
+      return {
+        ...(text === undefined ? {} : { text }),
+        hasVerdict: normalizeConcludedVerdict(concluded.verdict) !== undefined,
+      };
     },
     dropPendingAudit: (root) => dropAudits(root),
     cancelWaitTimer: () => cancelChildWaitTimer(),
@@ -5245,269 +5295,243 @@ export default function reviewGate(pi: ExtensionAPI) {
     incrementSinceTree: (root, tree) => incrementSinceTree(root, tree),
     headCommitTree: (root) => headCommitTree(root),
   });
-  // ---------- record_review tool ----------
+  // ---------- recording a reviewer verdict (a plain function) ----------
 
-  // INTERNAL, not registered: the gate records a verdict itself when the
-  // reviewer's process exits, from that round's own output.
-  internalTool({
-    name: "record_review",
-    label: "Record Review",
-    description:
-      "ADVANCED / internal: the gate records the verdict ITSELF when the reviewer's process exits " +
-      "(from that round's own output), so you do not call this in the normal flow — only when you " +
-      "have a reviewer output the gate could not read. " +
-      "Records the verdict of an independent code/doc review. Pass the FULL raw output of a REAL, " +
-      "independent reviewer run (do not hand-write the verdict). The verdict is read from the output's " +
-      "newest JSON fence (worst verdict wins only within that one fence); the full output stays evidence.",
-    parameters: Type.Object({
-      reviewer_output: Type.String({ description: "Complete raw output from the reviewer (kept as evidence; the verdict is read from its newest fence)" }),
-      repo: Type.Optional(Type.String({
-        description:
-          "Absolute path of the repository this review covers. REQUIRED once the session has edited " +
-          "more than one repository — the verdict binds to that repo's own worktree fingerprint and " +
-          "unblocks only that repo.",
-      })),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      // P0-1: record_review only accepts JSON fence verdicts, NOT precommit
-      // `## Overall:` sentinels. Review and precommit are separate gates.
-      // Newest fence decides (a reused pane's output holds every round's fence);
-      // the full output stays evidence. Matches the collector's key bytes.
-      const fenced = extractNewestFenceText(params.reviewer_output) ?? params.reviewer_output;
-      const parsed = parseReviewOutput(fenced);
-      if (!parsed) {
-        return {
-          content: [{
-            type: "text",
-            text: "review-gate: no recognizable review verdict found. The reviewer must output a fenced JSON verdict, " +
-              `e.g.\n\`\`\`json\n{"gate":"READY"|"BLOCKED"|"NEEDS_HUMAN","docSync":"UPDATED"|"NOT_NEEDED","findings":[...]}\n\`\`\`\n` +
-              "Common causes: (1) the review was pure Markdown (`### Blocker`) with no JSON fence — add the fence; " +
-              "(2) an unescaped quote inside a string (full-width “” are fine; a straight \" inside `issue` breaks JSON — " +
-              "escape it or rephrase). Gate remains PENDING (fail-closed).",
-          }],
-          details: {},
+  /**
+   * Record ONE reviewer round's verdict.
+   *
+   * NOT A TOOL, on any surface (2026-09-04, user decision D4). It used to be
+   * an `internalTool` taking `reviewer_output: string`, and the only reason
+   * that shape existed was that the verdict had to be PARSED back out of text
+   * the gate had itself serialised. The conclusion arrives structured now, so
+   * the tool wrapper carried nothing but a second way to sequence the same
+   * step by hand (philosophy two, philosophy three).
+   *
+   * Everything the OPENER owns still happens here and in this order: the STALE
+   * commit-target check, the cwd consistency check, the tree binding, the round
+   * record, the timing, and the auto-loop disarms.
+   */
+  async function recordReviewVerdict(
+    concluded: ReportConclusion,
+    repo: string,
+    ctx: unknown,
+  ): Promise<string> {
+    const verdictRaw = normalizeConcludedVerdict(concluded.verdict);
+    if (!verdictRaw) {
+      return "review-gate: 本轮 report 里没有可识别的 verdict —— 什么都没有记录，门禁保持 PENDING（fail-closed）。" +
+        "reviewer 必须通过 judge_conclude 交卷（verdict + findings + cwd）；散文不记录任何东西。" +
+        "用 judge_submit({role:\"reviewer\"}) 重跑本轮。";
+    }
+    // ONE adjudication for the record: a READY carrying an open P0/P1 is
+    // contradictory and becomes BLOCKED, and the round's findings become the
+    // count and the coarse cross-round fingerprints (lib/review-adjudicate.ts).
+    const parsed = adjudicateReviewConclusion({
+      verdict: verdictRaw,
+      findings: concluded.findings as ReviewFinding[],
+      ...(concluded.cwd === undefined ? {} : { cwd: concluded.cwd }),
+      ...(concluded.docSync === undefined ? {} : { docSync: concluded.docSync }),
+    });
+    // The agent is running the loop again — a standing ask_user
+    // pause is moot (liveness: a stale pause would silently swallow the
+    // next auto-continuation after a BLOCKED verdict).
+    // P-multi: the verdict binds to ONE repo — the repo the round was
+    // dispatched for, named explicitly (a multi-repo session must never
+    // depend on which repo was edited last). stateForRepo(primary) IS
+    // `state`, so the local `st` writes land on the right object and
+    // persistRepo persists to the right sidecar — no global state swap.
+    const target = resolveToolRepo(repo);
+    if (!target.ok) {
+      return target.error;
+    }
+    const targetRoot = target.root;
+    // NON-GIT SHORT-CIRCUIT (defense): judge_submit refuses outside a
+    // repository, so this step should never be reached there;
+    // fail closed anyway rather than bind a verdict to a non-repo.
+    if (!sessionInGit) {
+      return "review-gate: 非 git 目录 —— 无法记录裁决（无仓库可绑定）。";
+    }
+
+    const st = stateForRepo(targetRoot);
+    delete st.pausedQuestion;
+    const fp = computeFingerprint(targetRoot);
+    // Scope THIS round was judged under — computed BEFORE the new verdict
+    // overwrites the baseline, or it would always read as "nothing new".
+    const scopeNow = reviewScopeFor(targetRoot, st);
+    // COMMIT TARGET INTEGRITY — mechanical, not honour-based (2026-08-27
+    // execution model). prepare_review registered the reviewed range
+    // (baseline..HEAD) in reviewTargets; a verdict binds to THAT target:
+    //  - no target registered ⇒ the round was never prepared ⇒ a READY has
+    //    nothing to bind to ⇒ withhold (BLOCKED);
+    //  - HEAD moved past the registered head (a new checkpoint landed after
+    //    prepare) ⇒ STALE ⇒ BLOCKED: the reviewer judged an older commit
+    //    and the change under review has since grown;
+    //  - READY binds to the reviewed commit's TREE (content binding:
+    //    squash preserves it). Tighten-only — this can withhold a READY,
+    //    never grant one.
+    let staleTarget = false;
+    if (parsed.verdict === "READY") {
+      const target_ = reviewTargets.get(targetRoot);
+      if (!target_) {
+        staleTarget = true;
+      } else {
+        try {
+          const headNow = execFileSync("git", ["rev-parse", "HEAD"], { cwd: targetRoot, encoding: "utf8" }).trim();
+          staleTarget = headNow !== target_.head;
+        } catch { staleTarget = true; }
+      }
+      if (staleTarget) parsed.verdict = "BLOCKED";
+    }
+    // THE cwd CHECK (round-9 P1, reviewer-reproduced). The schema and the
+    // task text have always demanded a real `pwd` and said the gate checks
+    // it — but nothing did, so a verdict claiming `/evil/elsewhere` produced
+    // exactly the same READY. A stated check that does not run is worse than
+    // no check, because it is believed.
+    //
+    // WHAT IT IS (round-11 P1): a consistency check on a SELF-REPORTED
+    // value. It rejects a report that does not match the repo this round was
+    // prepared for — a review run against the wrong repo. It proves nothing
+    // about who produced the verdict: any value equal to the root passes.
+    // Reading `paneCurrentPath` would not change that either, since a
+    // finished judge's pane is gone by the time its verdict is recorded.
+    //
+    // The judge pane is spawned with `cwd: root`, so the expected answer is
+    // this repo's root. Compared through realpath, because /var vs /private/var
+    // (macOS) would otherwise fail a perfectly honest reviewer.
+    let cwdMismatch: string | undefined;
+    if (parsed.verdict === "READY") {
+      const claimed = parsed.cwd;
+      if (claimed === undefined || claimed.trim() === "") {
+        cwdMismatch = "the verdict carries no `cwd` (a required field: run `pwd` and report it)";
+      } else {
+        // canonicalPath exists for exactly this: /var vs /private/var would
+        // otherwise withhold an honest reviewer's READY.
+        if (canonicalPath(claimed) !== canonicalPath(targetRoot)) {
+          cwdMismatch = `the verdict's cwd ${JSON.stringify(claimed)} is not the repo this round was prepared for (${targetRoot})`;
+        }
+      }
+      if (cwdMismatch) parsed.verdict = "BLOCKED";
+    }
+
+    const bindTree = parsed.verdict === "READY" ? reviewTargets.get(targetRoot)?.tree ?? null : null;
+    st.review = {
+      verdict: parsed.verdict,
+      fingerprint: bindTree,
+      // Round-9 P1: the reviewed COMMIT sha rides the READY so the next
+      // prepare can baseline from it (covering every later checkpoint).
+      ...(parsed.verdict === "READY" && reviewTargets.get(targetRoot)
+        ? { commitSha: reviewTargets.get(targetRoot)!.head }
+        : {}),
+      at: new Date().toISOString(),
+      // Code↔doc attestation travels with the verdict it came from; absent
+      // stays absent (blocks under the docSync knob — fail-closed).
+      ...(parsed.docSync !== undefined ? { docSync: parsed.docSync } : {}),
+    };
+    // A READY verdict moves the incremental-review baseline: it records the
+    // git TREE that was approved and the files that approval covered, so the
+    // NEXT round can state precisely what is new instead of making the
+    // reviewer re-derive the whole diff (lib/review-scope.ts). Neither field
+    // authorizes anything — `review.fingerprint` still does that alone.
+    if (parsed.verdict === "READY") {
+      const treeOid = reviewTargets.get(targetRoot)?.tree;
+      if (treeOid) {
+        // What this review ACTUALLY covered. Under a user-granted scope
+        // limit that is only the session's own files — recording the whole
+        // branch diff would later let the increment scoper call
+        // never-reviewed, exempted files "already reviewed and unchanged"
+        // and skip the escalation to a full round.
+        const files = st.scopeLimit
+          ? st.scopeLimit.sessionFiles.slice()
+          : reviewCoverageFiles(targetRoot);
+        st.lastReadyReview = {
+          treeOid,
+          at: new Date().toISOString(),
+          ...(files ? { files } : {}),
         };
       }
+    }
+    // Round-18 polish gate: record which files carried P2/Nit vs P0/P1
+    // findings this round (severity + file straight off the judge's own
+    // findings, never line counts). The next prepare_review derives the file
+    // streak from these.
+    const recorded = recordedFindingsFrom(fileFindingsFrom(concluded.findings as ReviewFinding[]));
+    st.rounds.push({
+      round: st.rounds.length + 1,
+      findingsTotal: parsed.findingsTotal,
+      fingerprints: parsed.findingFingerprints,
+      verdict: parsed.verdict,
+      at: new Date().toISOString(),
+      ...(recorded.polishFiles.length > 0 ? { polishFiles: recorded.polishFiles } : {}),
+      ...(recorded.blockingFiles.length > 0 ? { blockingFiles: recorded.blockingFiles } : {}),
+    });
+    // Observability: what this round cost and how much of the change it had
+    // to judge. The duration is an UPPER BOUND — the reviewer is its own pi
+    // process in a pane, which the extension does not watch turn by turn,
+    // so all it can measure is the wall clock
+    // since the previous gate event (see lib/gate-timings.ts).
+    appendTiming(targetRoot, {
+      kind: "review",
+      at: new Date().toISOString(),
+      repo: targetRoot,
+      round: st.rounds.length,
+      verdict: parsed.verdict,
+      scope: scopeNow.scope,
+      changedFiles: scopeNow.changedFiles.length,
+      changedLines: scopeNow.changedLines,
+      approxMs: Math.max(0, Date.now() - lastGateEventAt),
+      approximate: true,
+      fingerprint: fp.unavailable ? "" : fp.digest.slice(0, 12),
+    });
+    lastGateEventAt = Date.now();
+    // A new review round changes the token's bound round; drop any standing
+    // token explicitly too (defense in depth — tokenAuthorizes already
+    // checks round).
+    clearBypassToken();
 
-      // The agent is running the loop again — a standing ask_user
-      // pause is moot (liveness: a stale pause would silently swallow the
-      // next auto-continuation after a BLOCKED verdict).
-      // P-multi: the verdict binds to ONE repo — `repo` when given, else the
-      // repo the agent most recently edited (single-repo sessions only; with
-      // several repos in play resolveToolRepo rejects the ambiguity instead
-      // of guessing). stateForRepo(primary) IS `state`, so the local `st`
-      // writes land on the right object and persistRepo persists to the right
-      // sidecar — no global state swap (same rationale as run_precommit: a
-      // swap would let a parallel tool_result arm the wrong repo's state).
-      const target = resolveToolRepo(params.repo);
-      if (!target.ok) {
-        return { content: [{ type: "text", text: target.error }], details: {}, isError: true };
-      }
-      const targetRoot = target.root;
-      // NON-GIT SHORT-CIRCUIT (defense): judge_submit refuses outside a
-      // repository, so this internal step should never be reached there;
-      // fail closed anyway rather than bind a verdict to a non-repo.
-      if (!sessionInGit) {
-        return {
-          content: [{ type: "text", text: "review-gate: 非 git 目录 —— record_review 不可用（无仓库可绑定）。" }],
-          details: { recorded: false },
-          isError: true,
-        };
-      }
-      const st = stateForRepo(targetRoot);
-      delete st.pausedQuestion;
-      const fp = computeFingerprint(targetRoot);
-      // Scope THIS round was judged under — computed BEFORE the new verdict
-      // overwrites the baseline, or it would always read as "nothing new".
-      const scopeNow = reviewScopeFor(targetRoot, st);
-      // COMMIT TARGET INTEGRITY — mechanical, not honour-based (2026-08-27
-      // execution model). prepare_review registered the reviewed range
-      // (baseline..HEAD) in reviewTargets; a verdict binds to THAT target:
-      //  - no target registered ⇒ the round was never prepared ⇒ a READY has
-      //    nothing to bind to ⇒ withhold (BLOCKED);
-      //  - HEAD moved past the registered head (a new checkpoint landed after
-      //    prepare) ⇒ STALE ⇒ BLOCKED: the reviewer judged an older commit
-      //    and the change under review has since grown;
-      //  - READY binds to the reviewed commit's TREE (content binding:
-      //    squash preserves it). Tighten-only — this can withhold a READY,
-      //    never grant one.
-      let staleTarget = false;
-      if (parsed.verdict === "READY") {
-        const target_ = reviewTargets.get(targetRoot);
-        if (!target_) {
-          staleTarget = true;
-        } else {
-          try {
-            const headNow = execFileSync("git", ["rev-parse", "HEAD"], { cwd: targetRoot, encoding: "utf8" }).trim();
-            staleTarget = headNow !== target_.head;
-          } catch { staleTarget = true; }
-        }
-        if (staleTarget) parsed.verdict = "BLOCKED";
-      }
-      // THE cwd CHECK (round-9 P1, reviewer-reproduced). The schema and the
-      // task text have always demanded a real `pwd` and said the gate checks
-      // it — but nothing did, so a fence claiming `/evil/elsewhere` produced
-      // exactly the same READY. A stated check that does not run is worse than
-      // no check, because it is believed.
-      //
-      // WHAT IT IS (round-11 P1): a consistency check on a SELF-REPORTED
-      // value. It rejects a report that does not match the repo this round was
-      // prepared for — a review run against the wrong repo. It proves nothing
-      // about who produced the verdict: any value equal to the root passes.
-      // Reading `paneCurrentPath` would not change that either, since a
-      // finished judge's pane is gone by the time its verdict is recorded.
-      //
-      // The judge pane is spawned with `cwd: root`, so the expected answer is
-      // this repo's root. Compared through realpath, because /var vs /private/var
-      // (macOS) would otherwise fail a perfectly honest reviewer.
-      let cwdMismatch: string | undefined;
-      if (parsed.verdict === "READY") {
-        const claimed = parsed.cwd;
-        if (claimed === undefined || claimed.trim() === "") {
-          cwdMismatch = "the verdict carries no `cwd` (a required field: run `pwd` and report it)";
-        } else {
-          // canonicalPath exists for exactly this: /var vs /private/var would
-          // otherwise withhold an honest reviewer's READY.
-          if (canonicalPath(claimed) !== canonicalPath(targetRoot)) {
-            cwdMismatch = `the verdict's cwd ${JSON.stringify(claimed)} is not the repo this round was prepared for (${targetRoot})`;
-          }
-        }
-        if (cwdMismatch) parsed.verdict = "BLOCKED";
-      }
+    let note = "";
+    if (parsed.verdict === "NEEDS_HUMAN") {
+      loopArmed = false;
+      note = " Auto-loop disarmed — waiting for a human decision.";
+    } else if (st.rounds.length >= st.maxRounds) {
+      loopArmed = false;
+      note = ` Max rounds (${st.maxRounds}) reached — escalate to the user.`;
+    } else if (isOscillating(st.rounds, OSCILLATION_LIMIT)) {
+      // The reviewer keeps flipping READY→BLOCKED with fresh findings instead
+      // of converging. Disarm the auto-loop and escalate (tighten-only: this
+      // never permits a ship, it only stops the churn so a human/adviser can
+      // break the tie). Plateau below stays for the stuck-on-same-finding case.
+      loopArmed = false;
+      note = ` Oscillation detected (${countOscillations(st.rounds)} READY→BLOCKED flips) — ` +
+        "the review is not converging. Escalate to the user or consult the adviser (a judge child process) " +
+        "instead of burning more rounds.";
+    } else if (isPlateaued(st.rounds, PLATEAU_ROUNDS)) {
+      loopArmed = false;
+      note = " Plateau detected — escalate to the user.";
+    } else if (parsed.verdict === "BLOCKED") {
+      // R10: still blocked and approaching the cap → one-shot rethink nudge.
+      note = maybeStrategicReset(st);
+    }
 
-      const bindTree = parsed.verdict === "READY" ? reviewTargets.get(targetRoot)?.tree ?? null : null;
-      st.review = {
-        verdict: parsed.verdict,
-        fingerprint: bindTree,
-        // Round-9 P1: the reviewed COMMIT sha rides the READY so the next
-        // prepare can baseline from it (covering every later checkpoint).
-        ...(parsed.verdict === "READY" && reviewTargets.get(targetRoot)
-          ? { commitSha: reviewTargets.get(targetRoot)!.head }
-          : {}),
-        at: new Date().toISOString(),
-        // Code↔doc attestation travels with the verdict it came from; absent
-        // stays absent (blocks under the docSync knob — fail-closed).
-        ...(parsed.docSync !== undefined ? { docSync: parsed.docSync } : {}),
-      };
-      // A READY verdict moves the incremental-review baseline: it records the
-      // git TREE that was approved and the files that approval covered, so the
-      // NEXT round can state precisely what is new instead of making the
-      // reviewer re-derive the whole diff (lib/review-scope.ts). Neither field
-      // authorizes anything — `review.fingerprint` still does that alone.
-      if (parsed.verdict === "READY") {
-        const treeOid = reviewTargets.get(targetRoot)?.tree;
-        if (treeOid) {
-          // What this review ACTUALLY covered. Under a user-granted scope
-          // limit that is only the session's own files — recording the whole
-          // branch diff would later let the increment scoper call
-          // never-reviewed, exempted files "already reviewed and unchanged"
-          // and skip the escalation to a full round.
-          const files = st.scopeLimit
-            ? st.scopeLimit.sessionFiles.slice()
-            : reviewCoverageFiles(targetRoot);
-          st.lastReadyReview = {
-            treeOid,
-            at: new Date().toISOString(),
-            ...(files ? { files } : {}),
-          };
-        }
-      }
-      // Round-18 polish gate: record which files carried P2/Nit vs P0/P1
-      // findings this round (severity + file from the RAW reviewer output,
-      // never line counts). The next prepare_review derives the file streak
-      // from these.
-      const fileFindings = parseFenceFileFindings(fenced);
-      const recorded = recordedFindingsFrom(fileFindings);
-      st.rounds.push({
-        round: st.rounds.length + 1,
-        findingsTotal: parsed.findingsTotal,
-        fingerprints: parsed.findingFingerprints,
-        verdict: parsed.verdict,
-        at: new Date().toISOString(),
-        ...(recorded.polishFiles.length > 0 ? { polishFiles: recorded.polishFiles } : {}),
-        ...(recorded.blockingFiles.length > 0 ? { blockingFiles: recorded.blockingFiles } : {}),
-      });
-      // Observability: what this round cost and how much of the change it had
-      // to judge. The duration is an UPPER BOUND — the reviewer is its own pi
-      // process in a pane, which the extension does not watch turn by turn,
-      // so all it can measure is the wall clock
-      // since the previous gate event (see lib/gate-timings.ts).
-      appendTiming(targetRoot, {
-        kind: "review",
-        at: new Date().toISOString(),
-        repo: targetRoot,
-        round: st.rounds.length,
-        verdict: parsed.verdict,
-        scope: scopeNow.scope,
-        changedFiles: scopeNow.changedFiles.length,
-        changedLines: scopeNow.changedLines,
-        approxMs: Math.max(0, Date.now() - lastGateEventAt),
-        approximate: true,
-        fingerprint: fp.unavailable ? "" : fp.digest.slice(0, 12),
-      });
-      lastGateEventAt = Date.now();
-      // A new review round changes the token's bound round; drop any standing
-      // token explicitly too (defense in depth — tokenAuthorizes already
-      // checks round).
-      clearBypassToken();
-
-      let note = "";
-      if (parsed.verdict === "NEEDS_HUMAN") {
-        loopArmed = false;
-        note = " Auto-loop disarmed — waiting for a human decision.";
-      } else if (st.rounds.length >= st.maxRounds) {
-        loopArmed = false;
-        note = ` Max rounds (${st.maxRounds}) reached — escalate to the user.`;
-      } else if (isOscillating(st.rounds, OSCILLATION_LIMIT)) {
-        // The reviewer keeps flipping READY→BLOCKED with fresh findings instead
-        // of converging. Disarm the auto-loop and escalate (tighten-only: this
-        // never permits a ship, it only stops the churn so a human/adviser can
-        // break the tie). Plateau below stays for the stuck-on-same-finding case.
-        loopArmed = false;
-        note = ` Oscillation detected (${countOscillations(st.rounds)} READY→BLOCKED flips) — ` +
-          "the review is not converging. Escalate to the user or consult the adviser (a judge child process) " +
-          "instead of burning more rounds.";
-      } else if (isPlateaued(st.rounds, PLATEAU_ROUNDS)) {
-        loopArmed = false;
-        note = " Plateau detected — escalate to the user.";
-      } else if (parsed.verdict === "BLOCKED") {
-        // R10: still blocked and approaching the cap → one-shot rethink nudge.
-        note = maybeStrategicReset(st);
-      }
-
-      persistRepo(ctx as unknown as ExtensionContext, targetRoot);
-      return {
-        content: [{
-          type: "text",
-          // The repo is named in the TEXT, not just details: a session that
-          // could not see which repo its verdicts landed on kept recording
-          // READY for the wrong one and read the resulting block as sabotage.
-          text: `review-gate: recorded verdict ${parsed.verdict} for ${targetRoot} ` +
-            `(round ${st.rounds.length}/${st.maxRounds}, findings: ${parsed.findingsTotal ?? "?"}).${note}` +
-            (staleTarget
-              ? "\nSTALE TARGET: the reviewer approved a commit that is no longer HEAD — a new " +
-                "checkpoint landed after prepare_review, so the READY cannot bind to the change now " +
-                "in place and is recorded as BLOCKED. This is the expected outcome of fixing while the " +
-                "review runs: those fixes are already in, so the next round is short. Re-review the " +
-                "current head with ONE call: judge_submit({role:\"reviewer\", task:<what you changed>})."
-              : "") +
-            (cwdMismatch
-              ? `\nCWD CHECK FAILED: ${cwdMismatch}. The verdict schema requires the judge's own \`pwd\`, ` +
-                "and the gate compares it with the repo this round was prepared for — a READY reporting a " +
-                "different directory is recorded as BLOCKED. If the reviewer ended inside its throwaway " +
-                "worktree, have it `cd` back to the repo root and report that instead."
-              : "") +
-            (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : ""),
-        }],
-        details: {
-          verdict: parsed.verdict,
-          round: st.rounds.length,
-          repo: repoLabel(targetRoot),
-          ...(staleTarget ? { staleTarget: true } : {}),
-        },
-      };
-    },
-  });
+    persistRepo(ctx as unknown as ExtensionContext, targetRoot);
+    // The repo is named in the TEXT, not just in a details field: a session
+    // that could not see which repo its verdicts landed on kept recording
+    // READY for the wrong one and read the resulting block as sabotage.
+    return `review-gate: recorded verdict ${parsed.verdict} for ${targetRoot} ` +
+      `(round ${st.rounds.length}/${st.maxRounds}, findings: ${parsed.findingsTotal}).${note}` +
+      (staleTarget
+        ? "\nSTALE TARGET: the reviewer approved a commit that is no longer HEAD — a new " +
+          "checkpoint landed after prepare_review, so the READY cannot bind to the change now " +
+          "in place and is recorded as BLOCKED. This is the expected outcome of fixing while the " +
+          "review runs: those fixes are already in, so the next round is short. Re-review the " +
+          "current head with ONE call: judge_submit({role:\"reviewer\", task:<what you changed>})."
+        : "") +
+      (cwdMismatch
+        ? `\nCWD CHECK FAILED: ${cwdMismatch}. The conclusion requires the judge's own \`pwd\`, ` +
+          "and the gate compares it with the repo this round was prepared for — a READY reporting a " +
+          "different directory is recorded as BLOCKED. If the reviewer ended inside its throwaway " +
+          "worktree, have it `cd` back to the repo root and report that instead."
+        : "") +
+      (parsed.verdict === "READY" ? " Next: run precommit for this same repo." : parsed.verdict === "BLOCKED" ? " Next: fix ALL findings and re-review." : "");
+  }
 
   // ---------- review tooling: change collection ----------
 
@@ -5988,14 +6012,8 @@ export default function reviewGate(pi: ExtensionAPI) {
    * own loop-goal path, the project-layer agent lookup and the one file write
    * an approval performs.
    */
-  registerGoalTools({ agent: pi, internal: internalHost }, {
-    // Getters: session_start re-resolves both, and a goal bound to the
-    // pre-session cwd would be recorded where nothing ever reads it.
-    primaryRepoRoot: () => primaryRepoRoot,
-    cwd: () => cwd,
-    stateFor: (root) => stateForRepo(root),
-    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
-    log: (message) => log(message),
+  registerGoalTools(pi, {
+    ...goalPrereviewDeps,
     runGoalAudit: (input) => runGoalAudit(input),
     showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
     confirmBounded: (uiCtx, title, message, pointer, signal) =>

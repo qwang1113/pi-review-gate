@@ -267,13 +267,22 @@ const GOAL_TEXT =
 type ToolMap = {
   tools: Map<string, unknown>;
   /**
-   * The gate's INTERNAL implementations (`record_goal_prereview`,
-   * `run_precommit`, `review_checkpoint`, `record_review`, the three
-   * prepares). They are not registered with pi — an agent cannot see them —
+   * The gate's INTERNAL implementations (`run_precommit`,
+   * `review_checkpoint`, the three prepares). They are not registered with
+   * pi — an agent cannot see them —
    * but their mechanical checks are the subject of several suites, so the
    * extension exposes them on a non-tool property for exactly this.
    */
   __reviewGateInternalTools?: Map<string, ToolExecute>;
+  /**
+   * The same seam for the two RECORDERS, which are plain functions rather than
+   * tools (2026-09-04): they take the judge's structured conclusion, and the
+   * only production caller is the gate's own settle path.
+   */
+  __reviewGateRecorders?: {
+    recordGoalPrereview: (input: unknown, ctx: unknown) => Promise<string>;
+    recordReviewVerdict: (concluded: unknown, repo: string, ctx: unknown) => Promise<string>;
+  };
 };
 
 type ToolExecute = (id: string, params: unknown, s: unknown, u: unknown, c: unknown) => Promise<unknown>;
@@ -296,18 +305,19 @@ function editCall(handlers: Map<string, (event: unknown, ctx: unknown) => unknow
   return handlers.get("tool_call")!({ toolName: "edit", input: { path } }, ctx);
 }
 
-/** A goal-auditor reply the EXTENSION will read as a pass (READY, no P0/P1). */
-const AUDITOR_PASS = 'The draft is checkable and scoped.\n\n```json\n{"gate": "READY", "findings": []}\n```';
+/** A goal-auditor round the EXTENSION will read as a pass (READY, no P0/P1). */
+const AUDITOR_PASS = { verdict: "READY", findings: [] };
 /** …and one it must read as a fail. */
-const AUDITOR_FAIL = 'Criterion 1 cannot be judged.\n\n```json\n{"gate": "BLOCKED", "findings": [{"severity": "P1", "issue": "不可检查"}]}\n```';
+const AUDITOR_FAIL = { verdict: "BLOCKED", findings: [{ severity: "P1", issue: "不可检查" }] };
+/** …and a round that never concluded: the gate must record nothing at all. */
+const AUDITOR_NO_VERDICT = { verdict: "", findings: [] };
 
-/** Drive the L8b pre-review exactly like the agent does, before proposing. */
-async function recordPrereview(pi: ToolMap, ctx: unknown, goal: string, repo?: string, output = AUDITOR_PASS) {
-  return tool(pi, "record_goal_prereview")(
-    "id",
-    repo ? { goal, auditor_output: output, repo } : { goal, auditor_output: output },
-    undefined,
-    undefined,
+/** Drive the L8b pre-review the way the gate's own settle path does. */
+async function recordPrereview(pi: ToolMap, ctx: unknown, goal: string, repo?: string, conclusion: unknown = AUDITOR_PASS) {
+  const recorders = pi.__reviewGateRecorders;
+  assert.ok(recorders, "the extension must expose its recorders on the test seam");
+  return recorders!.recordGoalPrereview(
+    repo ? { goal, conclusion, repo } : { goal, conclusion },
     ctx,
   );
 }
@@ -374,12 +384,12 @@ test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS —
   assert.equal((afterFail as { isError?: boolean }).isError, true, "a FAIL keeps the dialog shut");
   assert.equal(dialogs, 0);
 
-  // An auditor reply with NO parseable fence must record nothing (fail-closed)
-  // — otherwise a truncated or hand-written reply could look like an audit.
-  const unparseable = await recordPrereview(pi, ctx, GOAL_TEXT, undefined, "Looks good to me, ship it.");
-  assert.equal((unparseable as { isError?: boolean }).isError, true);
+  // A round that never CONCLUDED must record nothing (fail-closed) — otherwise
+  // a truncated round, or one that only wrote prose, could look like an audit.
+  const noVerdict = await recordPrereview(pi, ctx, GOAL_TEXT, undefined, AUDITOR_NO_VERDICT);
+  assert.match(String(noVerdict), /NOTHING was recorded/);
   assert.equal((readSidecar(repo).goalPrereview as { verdict?: string } | undefined)?.verdict, "FAIL",
-    "the previous record must survive an unparseable submission");
+    "the previous record must survive a round that never concluded");
 
   // PASS for the audited text opens the dialog — and only for THAT text.
   await recordPrereview(pi, ctx, GOAL_TEXT);
@@ -486,7 +496,7 @@ test("L8b BOOTSTRAP: an unlocatable package agents dir is REPORTED, never a sile
   }
 });
 
-test("L8b: record_goal_prereview refuses an empty goal and a non-repo `repo`, recording nothing", async () => {
+test("L8b: the audit recorder refuses an empty goal and a non-repo `repo`, recording nothing", async () => {
   // Both are dead-approval guards: a record bound to empty text or parked in a
   // non-repo directory could never satisfy propose_loop_goal, so recording one
   // would only look like progress.
@@ -496,31 +506,27 @@ test("L8b: record_goal_prereview refuses an empty goal and a non-repo `repo`, re
   const { handlers, ctx } = pi;
   await handlers.get("session_start")!({}, ctx);
 
-  const empty = await tool(pi, "record_goal_prereview")("id", { goal: "   \n\t ", auditor_output: AUDITOR_PASS }, undefined, undefined, ctx);
-  assert.equal((empty as { isError?: boolean }).isError, true, "an empty draft cannot be audited");
+  const empty = await recordPrereview(pi, ctx, "   \n\t ");
+  assert.match(String(empty), /rejected/, "an empty draft cannot be audited");
   assert.equal(readSidecar(repo).goalPrereview, undefined, "nothing may be recorded");
 
   // Same length cap propose_loop_goal enforces: auditing a draft the approval
   // tool can never accept would burn a whole audit round for a PASS that is
   // structurally unusable.
   const huge = "# 目标\n\n" + "卡".repeat(20001);
-  const tooLong = await tool(pi, "record_goal_prereview")("id", { goal: huge, auditor_output: AUDITOR_PASS }, undefined, undefined, ctx);
-  assert.equal((tooLong as { isError?: boolean }).isError, true, "an over-long draft must be refused BEFORE it is audited");
-  assert.match(JSON.stringify(tooLong), /20000/, "the refusal must name the limit");
+  const tooLong = await recordPrereview(pi, ctx, huge);
+  assert.match(String(tooLong), /rejected/, "an over-long draft must be refused BEFORE it is recorded");
+  assert.match(String(tooLong), /20000/, "the refusal must name the limit");
   assert.equal(readSidecar(repo).goalPrereview, undefined, "and record nothing");
 
   const notARepo = mkdtempSync(join(dirname(repo), "rg-norepo-pre-"));
   dirs.push(notARepo);
-  const badRepo = await tool(pi, "record_goal_prereview")(
-    "id",
-    { goal: GOAL_TEXT, auditor_output: AUDITOR_PASS, repo: notARepo },
-    undefined, undefined, ctx,
-  );
-  assert.equal((badRepo as { isError?: boolean }).isError, true, "a non-repo path must be refused");
+  const badRepo = await recordPrereview(pi, ctx, GOAL_TEXT, notARepo);
+  assert.match(String(badRepo), /not inside a readable git repository/, "a non-repo path must be refused");
   assert.equal(readSidecar(repo).goalPrereview, undefined, "and it must not land in the session repo either");
 
   // NEEDS_HUMAN is a FAIL, not a pass: only READY opens the dialog.
-  const needsHuman = 'Cannot judge this alone.\n\n```json\n{"gate": "NEEDS_HUMAN", "findings": []}\n```';
+  const needsHuman = { verdict: "NEEDS_HUMAN", findings: [] };
   await recordPrereview(pi, ctx, GOAL_TEXT, undefined, needsHuman);
   assert.equal((readSidecar(repo).goalPrereview as { verdict?: string } | undefined)?.verdict, "FAIL");
 });

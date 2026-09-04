@@ -43,3 +43,29 @@ test("buildStandardReport: adviser carries its conclusion, unrecorded stays arme
   assert.match(pending, /尚未记入 review 链/);
   assert.match(pending, /不要重开一轮/);
 });
+
+test("buildStandardReport: a REVIEWER's report carries structured conclusion only — no judge prose", async () => {
+  // The opener's context is the scarce resource this whole design protects: a
+  // reviewer / goal-auditor round reaches it as verdict + count + evidence
+  // pointer + next step, and nothing the judge wrote in words. That holds at
+  // two levels — the report record itself carries no prose for those roles
+  // (test/judge-conclude.ts), and the opener only ever passes an excerpt for
+  // an adviser (pinned structurally in test/extension-structure.test.ts).
+  const text = buildStandardReport({
+    role: "reviewer",
+    judgeId: "j9",
+    verdict: "BLOCKED",
+    findingsCount: 3,
+    streamPath: "/repo/.pi/review-stream/r.jsonl",
+    recordedNote: "review-gate: recorded verdict BLOCKED for /repo (round 2/10, findings: 3).",
+  });
+  assert.match(text, /结论：BLOCKED，findings 3 条/);
+  assert.match(text, /流证据：/);
+  assert.match(text, /下一步：按 findings 修完再 judge_submit/);
+  assert.doesNotMatch(text, /结论原文/, "no judge prose section may appear for a reviewer");
+  // Every line is either the header or one of the gate's own structured
+  // bullets — there is no place for a paragraph to hide.
+  for (const line of text.split("\n").slice(1)) {
+    assert.ok(/^- |^下一步：/.test(line), `unstructured line reached the opener: ${line}`);
+  }
+});

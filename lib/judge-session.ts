@@ -262,8 +262,6 @@ export function newestTranscript(sessionDir: string): string | undefined {
   return best?.path;
 }
 
-/** A fenced ```json block carrying a gate verdict. */
-const VERDICT_FENCE = /```json\s*[\s\S]*?"gate"\s*:\s*"(?:READY|BLOCKED|NEEDS_HUMAN)"[\s\S]*?```/;
 
 /**
  * Every assistant text of a transcript, oldest first. Fail-soft per line: a
@@ -297,31 +295,28 @@ export function assistantTexts(transcriptPath: string): string[] {
 export interface JudgeConclusion {
   /** The text to hand back, or undefined when the transcript yielded nothing. */
   text?: string;
-  /** True when the text was selected because it carries a verdict fence. */
-  hasVerdict: boolean;
   /** The transcript the text came from. */
   transcriptPath?: string;
 }
 
 /**
- * The judge's conclusion, read from its transcript.
+ * The judge's most recent output, read from its transcript — a DIAGNOSTIC
+ * read, and nothing more.
  *
- * SELECTION RULE (measured, not assumed): take the last assistant text that
- * CARRIES A VERDICT FENCE, not simply the last one. A judge routinely signs off
- * after its verdict ("verdict 已输出，完成信号已发出"), so "last message" reliably
- * returns the sign-off and drops the very thing the caller needs. With no fence
- * anywhere, fall back to the last non-empty text so a crashed or still-running
- * judge remains diagnosable.
+ * It used to pick the last assistant text CARRYING A VERDICT FENCE, because
+ * the verdict itself was scraped out of prose. Nothing scrapes anymore: a
+ * round ends when `judge_conclude` writes a structured `report` into the
+ * channel, and that record is the only thing the gate reads a verdict from
+ * (lib/judge-conclude.ts). What is left here answers a different, purely
+ * human question — "what is this pane saying right now?" — for a round that
+ * has not concluded, so the newest non-empty text is exactly right.
  */
 export function readJudgeConclusion(sessionDir: string): JudgeConclusion {
   const transcriptPath = newestTranscript(sessionDir);
-  if (!transcriptPath) return { hasVerdict: false };
+  if (!transcriptPath) return {};
   const texts = assistantTexts(transcriptPath);
-  if (texts.length === 0) return { hasVerdict: false, transcriptPath };
-  for (let i = texts.length - 1; i >= 0; i--) {
-    if (VERDICT_FENCE.test(texts[i]!)) return { text: texts[i]!, hasVerdict: true, transcriptPath };
-  }
-  return { text: texts[texts.length - 1]!, hasVerdict: false, transcriptPath };
+  if (texts.length === 0) return { transcriptPath };
+  return { text: texts[texts.length - 1]!, transcriptPath };
 }
 
 /**

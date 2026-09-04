@@ -48,11 +48,11 @@
 
 - **19 个工具已经搬进 `lib/`，不在扩展里**——而且这是这个仓库正在走的方向：
   - `lib/goal-tools.ts`：`propose_loop_goal`（L8：跑 goal 审计 → 问用户 →
-    写文件），并且是这一族的**唯一注册入口**——它同时把内部实现
-    `record_goal_prereview` 注册到 internalHost，所以扩展里只有一次
-    `registerGoalTools({ agent: pi, internal: internalHost }, {...})` 接线。
-    工具体在 `lib/goal-prereview-tools.ts`（审计裁决落成记录，外加两个工具
-    共用的提交检查）。
+    写文件），并且是这一族的**唯一注册入口**——扩展里只有一次
+    `registerGoalTools(pi, {...})` 接线。审计记录侧在
+    `lib/goal-prereview-tools.ts`（`recordGoalPrereview`：普通函数，2026-09-04
+    起不再注册成任何工具，门禁在审计轮的 report 落盘时自己调；外加两个 goal
+    入口共用的提交检查）。
   - `lib/user-interaction-tools.ts`：`ask_user`（采访本身），并且是这一族的
     **唯一注册入口**——它自己调 `lib/consent-request-tools.ts`，所以扩展里只有
     一次 `registerUserInteractionTools(pi, {...})` 接线。
@@ -77,17 +77,24 @@
   - `lib/orchestrator-recovery-tools.ts`：`orchestrator_recover`、
     `orchestrator_attach`。
   核对：`grep -rh 'name: "' lib/*.ts | grep -oE 'name: "[a-z_]+"' | sort -u | wc -l`
-  → 26，其中 4 个是下面说的**内部实现**（`prepare_review` / `prepare_adviser` /
-  `prepare_goal_audit` / `record_goal_prereview`，注册在 internalHost），不注册给 pi。
+  → 25，其中 3 个是下面说的**内部实现**（`prepare_review` / `prepare_adviser` /
+  `prepare_goal_audit`，注册在 internalHost），不注册给 pi。
 
-- **7 个实现存在，但不是工具**（2026-08-30，哲学三）。`run_precommit`、
-  `review_checkpoint`、`record_review`、`record_goal_prereview`、
+- **5 个实现存在，但不是工具**（2026-08-30，哲学三）。`run_precommit`、
+  `review_checkpoint`、
   `prepare_review`、`prepare_adviser`、`prepare_goal_audit` 的**代码还在**——
-  它们持有 precommit 回执校验、L5 文案规则、checkpoint 标记、审计裁决这些机械
+  它们持有 precommit 回执校验、L5 文案规则、checkpoint 标记、审计任务组装这些机械
   检查，`judge_submit` 与 `propose_loop_goal` 在内部调用它们，所以每条检查只有
   一份实现。但它们注册到扩展内部的 `internalHost` 而不是 `pi`：**agent 看不到
   这些名字**，因此没有第二条路可选。另外三个（`review_spawn` / `review_watch` /
   `review_send`）连实现一起删了 —— 它们连内部都没人调。
+
+- **两个 recorder 更进一步：连内部工具都不是**（2026-09-04，用户决定 D4）。
+  `record_review` 与 `record_goal_prereview` 是**普通函数**
+  （扩展里的 `recordReviewVerdict`、`lib/goal-prereview-tools.ts` 的
+  `recordGoalPrereview`），门禁在本轮 report 落盘时自己调。它们当初之所以要是
+  工具，唯一理由是「收一段文本再解析出裁决」；裁决现在是结构化字段直达，参数没
+  东西可传了，工具外壳就只剩「第二条可以手工编排的路」。
   核对：`test/extension-structure.test.ts` 的「TEN advanced entries」那一条。
 
 
@@ -175,7 +182,7 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 | **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | `lib/ship-gate-bash.ts`（ship 命令上的 commit message / PR 文案）+ 扩展的 checkpoint 路径 + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
 | **L6** 测试标签英文 | 暂存内容里的 `it/test/describe` 标签必须英文 | `hooks/pre-commit` → `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
 | **L7** Copilot 审查 | PR 之后的审查闭环：请求、等待、逐 thread 消账 | `lib/copilot-review-tools.ts`（工具 `request_copilot_review` / `check_copilot_review`）+ `lib/copilot-gh.ts`（gh 访问），扩展只接线 | `lib/copilot-review.ts` |
-| **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | `lib/goal-tools.ts`（工具 `propose_loop_goal`，内部自跑 goal 审计）+ `lib/goal-prereview-tools.ts`（内部实现 `record_goal_prereview`：裁决落成记录），扩展只接线 | `lib/loop-goal.ts` |
+| **L8** loop goal | 用户批准的退出契约，未批准则 ship 被拦 | `lib/goal-tools.ts`（工具 `propose_loop_goal`，内部自跑 goal 审计）+ `lib/goal-prereview-tools.ts`（普通函数 `recordGoalPrereview`：裁决落成记录，不注册成工具），扩展只接线 | `lib/loop-goal.ts` |
 
 > **落点指引**：加一条新的**判定规则**（什么该拦、什么该放）→ 落在
 > `lib/` 里对应的纯模块，并配一个 `test/*.test.ts`；只有「把判定接到某个
@@ -236,8 +243,9 @@ fail-closed）：`judge-pane.ts` 开/关/探活 pane（argv 全部复用
 `orchestrator-tmux.ts` 与 `orchestrator-pane-decor.ts`），`hierarchy.ts` 是 opener
 注册表与唯一的跨级裁判（纯函数，条目带 opener 派发的轮次号 `roundSeq`），`judge-side.ts` 是 pane 内门禁的 reporting
 shell（heartbeat、对话框竞态，复用子会话通道原语，不另起通道），一轮的结束是 judge
-自己调 `judge_conclude`（`judge-conclude.ts`，只在 judge 侧注册）：结构化结论→门禁合成规范
-fence→直写 channel report，一轮只交一次，transcript 扒取路径已删；
+自己调 `judge_conclude`（`judge-conclude.ts`，只在 judge 侧注册）：结构化结论**本体**
+直写 channel report（2026-09-04 起不再合成 fence，opener 也不再解析），签名按角色收窄
+（reviewer / goal-auditor 没有 notes 参数），一轮只交一次，transcript 扒取路径已删；
 `judge-process.ts` 只剩身份（opener 限定的确定性会话 id：同 opener 复用、换 opener 全新）与 scratch
 目录 helper（进程派生已删），`judge-session.ts` 把 transcript 当作长记忆（结论走交卷工具，
 不再从它解析），
@@ -256,8 +264,10 @@ fence→直写 channel report，一轮只交一次，transcript 扒取路径已�
 审查内容侧：`parallel-review.ts` 持有审查契约（一轮一个 reviewer，判不可变的
 `baseline..HEAD`），`review-baseline.ts` 在链被 squash/rebase 后按内容找回基
 线，`review-scope.ts` 决定增量多大就升级成整轮深审，`review-stream.ts` 让
-findings 边审边流出，`verdict-parse.ts` 解析裁决（review 只认 JSON fence，
-precommit 只认 `## Overall:` sentinel），`adviser-brief.ts` 组装 adviser 的
+findings 边审边流出，`review-adjudicate.ts` 在 judge 交上来的**结构化结论**上
+做 reviewer 裁决（READY 携带未解决 P0/P1 → BLOCKED、findings 计数、跨轮
+fingerprint；`precommit-parse.ts` 是另一件事，只认 `## Overall:`
+sentinel），`adviser-brief.ts` 组装 adviser 的
 brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致。把这些
 拼成一份**判官真正收到的任务文本**的，是两个 prepare 模块 —— 它们是**内部实现**，
 不再注册成工具（哲学三），由 `judge_submit` 与 `propose_loop_goal` 在内部调用：
@@ -266,8 +276,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 
 
 > **落点**：改「judge 怎么被启动/等待/唤醒」→ `judge-*.ts`；改「它被告知
-> 什么、它的产物怎么解析」→ `judge-prompt.ts` / `parallel-review.ts` /
-> `verdict-parse.ts`；改角色的**行为定义** → `agents/<role>.md`，不是代码。
+> 什么、它交上来的结论怎么被裁决」→ `judge-prompt.ts` / `parallel-review.ts` /
+> `judge-conclude.ts`（交卷签名）/ `review-adjudicate.ts`（裁决规则）；改角色的
+> **行为定义** → `agents/<role>.md`，不是代码。
 
 ### 域 4：orchestrator 编排层
 
@@ -440,8 +451,8 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `gate-timings.ts` | `.pi/gate-timings.jsonl` 可观测日志，每个门禁事件一行 |
 | `git-memory.ts` | 上下文压缩后重新注入过滤、截断过的 git 状态快照 |
 | `git-rewrite.ts` | 识别「只改 message」的历史重写，解开 L5 与门禁互锁的死结 |
-| `goal-prereview-tools.ts` | **内部实现**（注册在 internalHost）：`record_goal_prereview`——把 goal-auditor 的裁决落成绑定草稿 sha256 的记录；外加两个 goal 工具共用的提交检查（空稿、长度上限、goal 绑定哪个 repo） |
-| `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：两个 host，agent 侧只看得见 `propose_loop_goal` |
+| `goal-prereview-tools.ts` | **普通函数，不是工具**：`recordGoalPrereview`——把 goal-auditor 交上来的结构化结论落成绑定草稿 sha256 的记录；外加 goal 提交检查（空稿、长度上限、goal 绑定哪个 repo） |
+| `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：一个 host，一个工具 |
 | `gate-modes.ts` | 门禁模式注册表（唯一实现）：八种模式各有提示词模板加工具集加流程规则（plan/goal/review 仅内部置入）；`resolveGateMode` 单派发；禁跑工具表与完成纪律的 single source（`judge-side.ts` 只 re-export，各任务 builder 只引用） |
 | `hierarchy.ts` | opener 注册表与唯一的跨级裁判：谁开的 review 谁操作，其他会话一律 fail-closed（纯函数，IO 经 seam）；注册表与两类 pending 按 repo 落盘恢复（`parseHierarchySnapshot` fail-closed 解析），条目带 opener 派发的轮次号 `roundSeq`；死 pane 异主条目由触达者丢弃（不再过户——opener 限定的 id 不会碰撞）、活 pane 保持拒绝，重启不死锁 |
 | `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：opener 限定的会话文件放哪（含无人认领目录的 TTL/旧格式回收选择器）、超时钳制、等候纪律、审计裁决是否阻塞（派单/等待判据已随进程模型删除） |
@@ -451,7 +462,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `judge-session.ts` | 把 judge transcript 当作长记忆（结论走交卷工具，不再从它解析） |
 | `judge-session-tools.ts` | 已收归 internalHost 的三个管理入口（`judge_read` / `judge_close` / `judge_wait`：轮询、读结论、关 pane；实现保留供门禁链调用，agent 不可见；opener 校验与等待判据在内） |
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
-| `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论→合成规范 fence→直写 channel report；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度 |
+| `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论**本体**直写 channel report（无 fence 合成、无解析）；**签名按角色收窄**——reviewer / goal-auditor 只有 verdict + findings + cwd（传 notes 显式拒绝且不占额度），adviser 保留 notes（它的产出就是正文）；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度 |
 | `judge-report.ts` | opener 侧标准报告（wake-up 内容：verdict、证据位置、记录情况、待答问题；transcript 扒取半边已随交卷工具删除） |
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
 | `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
@@ -493,12 +504,14 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `parallel-review.ts` | 审查契约：一轮一个 reviewer、判不可变的 `baseline..HEAD`，以及交给它的任务文本 |
 | `polish-gate.ts` | 连续 READY 或同一文件反复打磨时，再审必须给出理由 |
 | `poll-wait.ts` | 通用等待骨架（探测、发布、按判据或预算停），判据由调用方注入 |
+| `precommit-parse.ts` | precommit 输出解析：只认 `## Overall:` sentinel（FAIL > NO_CHECKS_RUN > PASS，FAIL 终结）。review 侧没有文本可解析——judge 交卷即结构化 |
 | `precommit-receipt.ts` | precommit 回执的纯校验：真 PASS/FAIL 还是协议错误 |
 | `precommit-tail.ts` | precommit runner 日志的实时 tail（runner 走文件而非管道） |
 | `progress-stream.ts` | 长耗时门禁工具的实时进度输出 |
 | `project-config.ts` | 每项目门禁配置 `.pi/review-gate.json` 的解析与层叠 |
 | `repo-resolve.ts` | 多仓解析：裁决绑定到编辑真正发生的那个仓库 |
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
+| `review-adjudicate.ts` | reviewer 裁决（纯）：在 judge 交上来的结构化结论上判 READY 携带未解决 P0/P1 → BLOCKED、findings 计数、跨轮 coarse fingerprint；另有 verdict 规范化与两个投影（per-file 给 polish gate、severity+issue 给 goal/plan 审计） |
 | `review-prepare-tools.ts` | **内部实现**（不注册给 pi）：算不可变的 `baseline..HEAD`、polish gate、findings 流，并登记裁决要绑定的 review target；由 `judge_submit` 调用 |
 | `review-scope.ts` | 增量审查定档：增量多大就升级为整轮深审的阈值 |
 | `review-stream.ts` | findings 流：reviewer 边审边发，主会话边修 |
@@ -516,7 +529,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |
 | `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条**单行**状态条，详情在 `/gate-status`） |
 | `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
-| `verdict-parse.ts` | 裁决解析：review 只认 JSON fence，precommit 只认 `## Overall:` sentinel |
+| `verdict-parse.ts` | **已删除**（2026-09-04）：review 半边随 fence 回环一起消失，precommit 半边搬去 `precommit-parse.ts`，reviewer 裁决规则搬去 `review-adjudicate.ts` |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
 | `workspace-branch.ts` | 保护分支检测（main/master/dev/develop）：checkpoint 与 ship 一律拒绝（2026-09-07 起 `setup_workspace`/工作分支/squash 落地全部退役，只剩这个硬护栏；2026-09-16 起 checkpoint 不再弹确认框，直接拒） |
 

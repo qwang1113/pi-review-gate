@@ -490,9 +490,13 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
   const first = buildGoalAuditTask("# 目标");
   assert.doesNotMatch(first, /carryover/i);
   assert.doesNotMatch(first, /sess-/);
-  // Round-17: output discipline is part of the task text.
-  assert.match(task, /输出纪律:先交卷再写 ≤3 行结论要点/, "the discipline is pinned in the task");
+  // Round-17, tightened 2026-09-04: output discipline is part of the task text.
+  assert.match(task, /输出纪律:交卷即停/, "the discipline is pinned in the task");
   assert.doesNotMatch(task, /fenced JSON verdict/, "no fence may come back");
+  // The auditor's signature refuses `notes`, so the task it is dispatched with
+  // must not ask for one — that self-collision was the failure mode.
+  assert.doesNotMatch(task, /notes 写/, "the task must not teach a refused field");
+  assert.match(task, /没有 notes 参数/, "it says so out loud instead");
 });
 
 test("buildGoalAuditTask: the draft delta is computed mechanically and injected (round-4 P1)", () => {

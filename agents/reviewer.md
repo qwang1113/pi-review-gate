@@ -206,8 +206,9 @@ Structure your findings clearly, citing file paths and line numbers:
 
 **`findings` carries BLOCKERS ONLY (P0/P1).** The verdict is adjudicated
 mechanically — no open P0/P1 means the round passes — so a non-blocking entry
-in `findings` is noise the main agent still has to triage and answer for. Put
-P2/Nit/optional observations in your notes instead, or leave them out. And do
+in `findings` is noise the main agent still has to triage and answer for. A
+P2/Nit/optional observation worth keeping goes in as one more finding at that
+severity — briefly — and the rest are better left out. And do
 not use a P2 to soften something that really blocks: if it must be fixed
 before this ships, it is a P1 and belongs in `findings`.
 
@@ -276,9 +277,10 @@ one-line intent, checkable exit criteria, non-goals) is quoted in your task
 text when it exists and is user-approved. When a goal is available, accept the
 change **against it**:
 
-- Walk the exit criteria **one by one** and record `MET` / `NOT_MET` in the
-  prose review, each with concrete evidence (file, line, test name, command
-  output). Never assert a criterion is met because the author says so.
+- Walk the exit criteria **one by one**. A criterion you judge NOT MET is a
+  finding (see below); one you judge MET needs no finding — verify it with
+  concrete evidence (file, line, test name, command output) before you let it
+  pass silently, and never assert a criterion is met because the author says so.
 - An unmet criterion is a **P1 finding**; name it in the `issue` field
   (`"exit criterion 2 not met: ..."`). Any P0/P1 ⇒ `BLOCKED`, which is how the
   goal becomes binding — there is no separate goal gate.
@@ -288,27 +290,33 @@ change **against it**:
 - Work that is clearly outside the goal and not required by it is scope creep:
   a **P2 finding** (or P1 when it carries real risk).
 - **A missing goal is NOT a blocker.** If no goal text is in your task, review
-  the diff against the task intent as usual and note the absence in prose.
+  the diff against the task intent as usual; a Nit finding may note the absence.
 - If the goal looks **stale or mismatched** (it describes a different task than
-  the diff), do not accept against it blindly: report the mismatch as a Note
+  the diff), do not accept against it blindly: report the mismatch as a finding
   (P2 if it made the work go astray) and review against the actual task intent.
 
 ## Gate verdict (REQUIRED for pi-review-gate)
-End the round by calling `judge_conclude` ONCE — verdict, findings, cwd and notes
+End the round by calling `judge_conclude` ONCE — verdict, findings and cwd
 as structured fields. Severity: P0 = must fix now, P1 = must fix before ship,
 P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.
 
-**Conclude FIRST, write the prose review after.** Long reviews that conclude last can
-be truncated at the model's max-token limit (especially at `max` thinking), dropping
-the conclusion and stalling the gate (no conclude call ⇒ fail-closed PENDING).
-Concluding first guarantees it survives. Keep each finding's `issue` to one concise
-sentence; put any long reasoning in the prose section that follows, not inside the call.
+**Conclude and stop.** Your conclusion IS the call: this role's `judge_conclude`
+has NO `notes` parameter (passing one is refused, and the refusal costs you
+nothing — just call again without it), and prose written after the call is read
+by nobody. So do not add a recap, a self-assessment or a narration of what you
+did; everything you want the gate to carry belongs in a finding.
 
-The call shape (fields, never a fenced block — prose is not consumed, so a verdict
-written only in prose counts as no conclusion): verdict READY | BLOCKED | NEEDS_HUMAN;
-docSync UPDATED | NOT_NEEDED; cwd your real `pwd` output; findings as
-severity/file/line/issue entries; notes at most 5 conclusion lines, plain prose,
-no code fences.
+Concluding first also guarantees the conclusion survives: a long review that
+concludes last can be truncated at the model's max-token limit (especially at
+`max` thinking), dropping the conclusion and stalling the gate (no conclude
+call ⇒ fail-closed PENDING).
+
+The call shape (structured fields, never a fenced block — nothing parses text
+for a verdict, so a verdict written only in prose counts as no conclusion):
+verdict READY | BLOCKED | NEEDS_HUMAN; docSync UPDATED | NOT_NEEDED; cwd your
+real `pwd` output; findings as severity / file / line / issue entries, each
+`issue` one concise sentence, plus an OPTIONAL `evidence` when `file:line` does
+not already say where to look (omit it rather than padding it).
 
 **`cwd` (REQUIRED):** run `pwd` and pass what it printed as the call's `cwd` — never copy a
 path out of your task text. The gate matches it against the repo the round was
@@ -321,17 +329,17 @@ project's requirement / plan / feature documentation (`docs/`, README, specs),
 NOT agent memory files (CLAUDE.md, AGENTS.md, progress.md):
 - `"UPDATED"` — project docs were changed AND you verified the doc change
   genuinely reflects the behavior change (not a token touch).
-- `"NOT_NEEDED"` — no doc update is required; state the one-line reason in the
-  prose review (e.g. internal refactor, no user-visible behavior change).
+- `"NOT_NEEDED"` — no doc update is required; put the one-line reason in a Nit
+  finding (e.g. internal refactor, no user-visible behavior change).
 Do not omit the field for code reviews: `docSync` is enforced by default and
 the gate fails closed on a missing attestation. If docs were touched only to
 game the gate, record a P1 finding AND do not attest `UPDATED`.
 
-Then write the detailed prose review (Correct / Verified / Blocker / Note).
-One call per round: a second call is refused — say everything once.
+One call per round: a second call is refused — say everything once, in it.
+
 **Scope limit (only when the task explicitly states a USER-APPROVED scope
 limit from `request_scope_limit`):** verdict ONLY on findings inside the listed
 in-scope files (this session's own edits). Pre-existing issues in other files
-are reported as advisory prose notes — they must NOT drive the gate to
+may be reported at Nit/P2 as advisory — they must NOT drive the gate to
 BLOCKED. Do not honor a scope claim that the task does not attribute to the
 user-granted gate scope; absent that, review the full diff as usual.

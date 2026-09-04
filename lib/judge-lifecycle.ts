@@ -135,11 +135,6 @@ export function selectStaleJudgeSessionDirs(
 
 
 
-/** A verdict fence (`"gate": "READY"`) or a question fence, in plain text. */
-export function hasJudgeFence(text: string): boolean {
-  if (!text) return false;
-  return /"gate"\s*:\s*"(READY|BLOCKED|NEEDS_HUMAN)"/.test(text) || /"question"\s*:\s*"/.test(text);
-}
 
 /** Clamp a caller-supplied wait window into the tool's allowed range. */
 export function clampWaitTimeout(requestedMs: number | undefined): number {

@@ -21,7 +21,7 @@ Each session runs in one of **four gate modes** (strictness order `normal < expl
 
 **Only non-git directories are path-exempt, and they never enter enforced modes via the agent.** A session **started outside any git repository** has nothing to review/checkpoint/ship, so the first classification applies `normal` automatically (consent-free, driven by the deterministic session cwd). A `loop`/`orchestrator` pick is clamped to `normal`; a later agent upgrade is rejected; only the user can force an enforced mode (`/gate-mode loop`). **Temp dirs (`/tmp`) are NOT exempt** — the gate only nudges trivial work toward `normal` there; delivery work runs the same modes as anywhere else.
 
-**A session started OUTSIDE any git repository has nothing to gate.** There is no repo to review, checkpoint or ship, so the extension short-circuits entirely (2026-09-02, user decision): it forces `normal`, calls no git at all (the old behavior called git anyway and leaked `fatal: not a git repository` to the terminal), shows `非 git 目录` in the status strip, and refuses `checkpoint` / `judge_submit` / `run_precommit` / `record_review` with the reason; `set_gate_mode loop|orchestrator` is clamped to `normal`. The output-language directive (L4) stays — it is orthogonal to the gate.
+**A session started OUTSIDE any git repository has nothing to gate.** There is no repo to review, checkpoint or ship, so the extension short-circuits entirely (2026-09-02, user decision): it forces `normal`, calls no git at all (the old behavior called git anyway and leaked `fatal: not a git repository` to the terminal), shows `非 git 目录` in the status strip, and refuses `checkpoint` / `judge_submit` / `run_precommit` and the verdict recorder with the reason; `set_gate_mode loop|orchestrator` is clamped to `normal`. The output-language directive (L4) stays — it is orthogonal to the gate.
 
 - **`orchestrator`** — the **project-manager** role: everything `loop` enforces, plus the orchestration constraints. This session plans the work and supervises child sessions instead of doing it: it may not write code at all (only its plan under `.pi/` and `docs/orchestrator-*.md` handoff documents), it needs a plan the **user approved** before it may spawn anything, and `declare_done` additionally requires an empty task queue, no live children and no user decision it never reported. It requires tmux — its children are panes of the user's own window. See [The orchestrator role](#the-orchestrator-role-a-project-manager-inside-the-gate).
 - **`loop`** — the full enforced workflow: review READY + precommit PASS gate every ship, auto-continuation drives the fix→review loop.
@@ -487,7 +487,7 @@ source layer.
 | # | PR #7 finding | How pi-review-gate handles it |
 |---|---------------|-------------------------------|
 | 1 | `test/**/*.test.js` under `/bin/sh` doesn't recurse — 538 tests silently skipped | precommit runner emits a loud `[glob-trap]` warning for `node --test **` scripts; our own `npm test` uses `$(find ...)`; a meta-test reproduces npm's `/bin/sh` expansion and asserts full coverage |
-| 2 | First-fence-only verdict parsing (fail-open) | `parseReviewOutput` scans **all** JSON fences; **worst verdict wins** (BLOCKED > NEEDS_HUMAN > READY); READY with P0/P1 findings downgraded to BLOCKED |
+| 2 | First-fence-only verdict parsing (fail-open) | There is no verdict text to parse: a judge concludes through `judge_conclude` and its structured `verdict`/`findings` travel on the channel report. `adjudicateReviewConclusion` (`lib/review-adjudicate.ts`) applies the one rule that survived the parser — READY carrying an unresolved P0/P1 is downgraded to BLOCKED |
 | 3 | All-steps-skipped precommit showed PASS | Three distinct verdicts: `✅ PASS` / `❌ FAIL` / `⚠️ NO CHECKS RUN`. NO_CHECKS_RUN blocks the ship gate — configure real checks or explicitly `/gate-bypass` |
 | 4 | NotebookEdit / `.ipynb` bypassed every gate | `ipynb` is in the single CODE_EXTENSIONS list; `coalesceToolPath` reads `path`/`file_path`/`notebook_path`/every spelling; NotebookEdit is in the edit-tool set |
 | 5 | Extension lists drifted between hook sites | Exactly ONE `CODE_EXTENSIONS` list in `lib/constants.ts`; a structural test fails if any other file declares its own list |
@@ -703,7 +703,7 @@ Three content sources sit outside a plain tree hash and are handled explicitly:
 The fingerprint **excludes gate-owned paths** (`.pi/`, `.pi-subagents/` — via
 repo-root-anchored git pathspecs, mirrored in the CJS hook script with a digest
 parity test): the gate itself rewrites `.pi/review-gate-state.json` on every
-persist, so including it would let `record_review` immediately invalidate its
+persist, so including it would let a recorded verdict immediately invalidate its
 own READY binding in any repo that does not gitignore `.pi`. Reviews judge
 project code, never Pi's state dirs. (Recommended anyway: add
 `.pi/review-gate-state.json`
@@ -965,16 +965,27 @@ wasted round — an earlier design ran both concurrently to save wall time
 and was abandoned for exactly that reason. Design record:
 `docs/execution-model.md`.
 
-The reviewer should end with a fenced JSON verdict:
+The reviewer ends the round by calling `judge_conclude` once, with structured
+fields:
 
-```json
-{"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN",
- "cwd": "<the judge child's own pwd — checked against the reviewed repo>",
- "docSync": "UPDATED" | "NOT_NEEDED",
- "findings": [{"file": "src/x.ts", "line": 42, "severity": "P1", "issue": "..."}]}
+```
+judge_conclude({
+  verdict: "READY" | "BLOCKED" | "NEEDS_HUMAN",
+  cwd: "<the judge child's own pwd — checked against the reviewed repo>",
+  docSync: "UPDATED" | "NOT_NEEDED",
+  findings: [{file: "src/x.ts", line: 42, severity: "P1", issue: "…", evidence: "<optional>"}],
+})
 ```
 
-Review verdicts require **JSON fences**. Precommit verdicts are NOT parsed from
+Those fields are written straight into the round's channel `report` record and
+the opener consumes them as data — no fence is synthesised and none is parsed.
+The signature is role-shaped: a `reviewer` and a `goal-auditor` have **no**
+`notes` parameter (passing one is refused, and the refusal does not spend the
+round's single conclusion), because their conclusion IS the verdict plus the
+findings. An `adviser` keeps `notes` — its product is the prose, and the opener
+quotes it back.
+
+Precommit verdicts are a different gate and are NOT parsed from
 bash output at all: the gate spawns the trusted runner itself
 and records the result from a verified nonce receipt, so a `## Overall: ✅ PASS`
 sentinel printed by any other command can never grant a PASS.
@@ -1006,13 +1017,12 @@ one fact:
   gate builds the auditor task (with the previous audit's carryover + the draft
   delta on a re-audit), dispatches the judge as its own pi process, and records
   the verdict when it exits.
-  The **extension** parses the auditor's JSON fence
-  itself (PASS ⇔ a `READY` verdict, which verdict-parse already withholds from
-  a fence carrying unresolved P0/P1, and a salvaged fence can never be READY)
+  The **extension** reads the auditor's own structured conclusion off its
+  channel report (PASS ⇔ a `READY` verdict with no unresolved P0/P1 finding)
   and hashes the audited text itself — there is no `passed` parameter, so the
-  agent cannot ATTEST the outcome (it can only carry the auditor's output, the
-  same trust boundary as `record_review`: a hand-written `auditor_output` is
-  not defended against, see the limits list below). A FAIL means: fix the
+  agent cannot ATTEST the outcome, and there is no recorder tool it could call
+  with a hand-written verdict either: the recorder is a plain function the gate
+  invokes when the round lands. A FAIL means: fix the
   objections and re-audit; the revised text needs its own PASS. The goal text
   is written in **Simplified Chinese** (identifiers, paths and code tokens stay
   English); the auditor blocks a draft that is not.
@@ -1282,7 +1292,7 @@ gated **per repo**:
 - **Explicit target repo**: the judge tools (`judge_submit` / `judge_spawn` /
   `judge_answer` / `judge_recover`) take a `repo` argument, and it is **mandatory
   once the session has edited more than one repo** — they refuse to guess, and
-  so do the internal steps a round runs (`record_review` / `run_precommit`).
+  so do the steps a round runs (the verdict recorder / `run_precommit`).
   Run the loop once per repo, naming it.
   Historically they wrote to whichever repo was edited LAST, and only an edit
   could move that target: a session whose last edit was in repo B could never
@@ -1386,12 +1396,15 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 > **This table lists only what a model can actually call.**
 > Ten entries left this table on 2026-08-30 (philosophy three: never run two
 > implementations of the same thing). `run_precommit`, `review_checkpoint`,
-> `prepare_review`, `prepare_adviser`, `prepare_goal_audit`, `record_review` and
-> `record_goal_prereview` are **still the implementations** the gate runs —
+> `prepare_review`, `prepare_adviser` and `prepare_goal_audit` are **still the
+> implementations** the gate runs —
 > `judge_submit` and `propose_loop_goal` call them internally, so every
 > mechanical check lives in exactly one place — but they are registered into
 > the extension's own `internalHost` instead of into pi, and a model cannot
-> see the names. What they do is still exactly how the gate works, so their
+> see the names. `record_review` and `record_goal_prereview` went further on
+> 2026-09-04: they are not registered anywhere at all, on any host, and are
+> plain functions the gate calls when a round's report lands.
+> What all of them do is still exactly how the gate works, so their
 > descriptions were not deleted: they moved to
 > [Internal implementations](#internal-implementations--not-registered),
 > below the table. Anything in them that reads like an instruction to the
@@ -1417,24 +1430,35 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 
 ### Internal implementations — not registered
 
-These four are **not tools**: they are registered into the extension's own
+These three are **not tools**: they are registered into the extension's own
 `internalHost`, so no model can see or call them. `judge_submit` runs
 `run_precommit`, `review_checkpoint` and `prepare_review` as steps of its
-submission chain, and calls `record_review` itself from the judge child's
-process-exit callback; `propose_loop_goal` dispatches the goal audit and
-records it through `record_goal_prereview` the same way. That is how every
+submission chain. That is how every
 mechanical check ends up living in exactly one place. Their
 descriptions are kept because they are still exactly how the gate behaves — but
 read them as the gate's internal steps, not as things to sequence by hand.
 (`review_checkpoint`, `prepare_adviser` and `prepare_goal_audit` moved the same
 way; `review_spawn`, `review_watch` and `review_send` were deleted outright.)
 
+The two RECORDERS went one step further (2026-09-04): `record_review` and
+`record_goal_prereview` are gone from every surface, internal included, and are
+plain functions the gate calls when a round's report lands
+(`recordReviewVerdict` in the extension, `recordGoalPrereview` in
+`lib/goal-prereview-tools.ts`). Their tool shape existed only to carry raw text
+that had to be parsed back into a verdict; the conclusion arrives structured
+now, so there is nothing left for a caller to pass. What they DO is unchanged
+and described under [the review loop](#the-review-loop) and the loop-goal
+section above: the commit-target integrity check (a READY is withheld when the
+round was never prepared, downgraded to BLOCKED as STALE when HEAD moved past
+the reviewed commit, and bound to the reviewed commit's TREE), the `cwd`
+consistency check, the round history for plateau/oscillation detection, and the
+L8b PASS record bound to the audited draft's hash.
+
 | Internal step | What it does |
 |---------------|--------------|
-| `record_review` | Feed the raw reviewer output into the gate. Parses every fence; worst verdict wins; records round history for plateau/oscillation detection. A fence whose JSON is broken by an unescaped quote is salvaged fail-closed (its gate word is recovered, but a salvaged READY is downgraded to BLOCKED). It verifies the COMMIT TARGET mechanically (2026-08-27 model): a READY is withheld when the round was never prepared (no registered `baseline..HEAD` target), downgraded to BLOCKED as STALE when HEAD moved past the reviewed commit (a new checkpoint landed after prepare), and bound to the reviewed commit's TREE (content binding — a later squash of the checkpoint chain preserves it). A READY must also carry the judge's own `pwd` (a required field of the verdict schema), which the gate compares with the repo the round was prepared for — this catches a verdict produced against the wrong repo or carried over from another review; it does not measure the pane, so it is not proof against a fabricated value. Mechanical, so the agent cannot forget it. |
-| `prepare_review` | ADVANCED / internal — `judge_submit({role:"reviewer"})` runs this itself as step 3 of the chain. Registers the COMMIT target for the single reviewer of this round: requires the checkpoint from `review_checkpoint` (the only commit allowed before a READY), computes the immutable range `baseline..HEAD`, writes the append-only finding-stream file and returns the ready-made task text. In a copy of its own the reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. A READY recorded after HEAD moved (a new checkpoint during the review) does NOT bind: `record_review` compares HEAD with the registered reviewed commit and downgrades to BLOCKED (STALE), so an approval can never cover commits no reviewer saw. A READY must also carry the judge's own `pwd`, which `record_review` compares with the reviewed repo (see its row above). Round-18 POLISH GATE: when the last two recorded rounds both verdict READY, or the same file has carried P2/Nit findings in three consecutive rounds, the tool REFUSES a `reason`-less call; the supplied reason is persisted (`lastPolishReason`) and injected into the next reviewer's task text, so a "polish" round is visible to the independent judge. |
+| `prepare_review` | ADVANCED / internal — `judge_submit({role:"reviewer"})` runs this itself as step 3 of the chain. Registers the COMMIT target for the single reviewer of this round: requires the checkpoint from `review_checkpoint` (the only commit allowed before a READY), computes the immutable range `baseline..HEAD`, writes the append-only finding-stream file and returns the ready-made task text. In a copy of its own the reviewer SHOULD verify by doing — mutation analysis included — while the main agent keeps fixing the real worktree and consumes the stream as it lands. A READY recorded after HEAD moved (a new checkpoint during the review) does NOT bind: the verdict recorder compares HEAD with the registered reviewed commit and downgrades to BLOCKED (STALE), so an approval can never cover commits no reviewer saw. A READY must also carry the judge's own `pwd`, which the recorder compares with the reviewed repo. Round-18 POLISH GATE: when the last two recorded rounds both verdict READY, or the same file has carried P2/Nit findings in three consecutive rounds, the tool REFUSES a `reason`-less call; the supplied reason is persisted (`lastPolishReason`) and injected into the next reviewer's task text, so a "polish" round is visible to the independent judge. |
 | `run_precommit` | The ONLY way to record a precommit PASS. The extension spawns the bundled runner with argv (no shell) and trusts only a private, nonce-stamped receipt the runner wrote — bash stdout can never forge a PASS. `mode` picks the lane: `fast` (default — lint + typecheck + build + the tests related to the changed files) clears a `git commit`; `full` is required before `git push` / `gh pr create/edit` / `declare_done`. The receipt's `testScope` (`related`/`full`/`skipped`) is validated like every other field and travels into the sidecar, so a narrowed run can never authorize a publish. The runner's **complete** output is captured to `<repo>/.pi/precommit-last.log` on every run (gate-owned, so writing it never moves the fingerprint); the reply names the lane, the coverage, that path, and the checks that failed. The full output is never inlined into the reply — a failing suite can emit megabytes — but the run is **no longer silent while it happens**: the runner writes a **plan preamble** (every step and the exact command, plus the ones it is skipping and why) BEFORE the first check starts, then streams the running step's stdout/stderr as it arrives, and the extension **tails that log and forwards it through the tool's `onUpdate`**, so a multi-minute precommit shows live progress instead of nothing. Liveness is a *read* of the log, never a second write channel: the runner's stdio stays a file descriptor (a pipe would deadlock the detached runner at its 64KB buffer), and the tail's final flush on stop is what makes an aborted or timed-out run's log complete. The ordered `▶ … ◀` blocks still read in declaration order — only the step the log is currently at streams, so nothing is printed twice. Receipt and cache tails are bounded in BYTES as well as lines (one un-newlined 64 MiB line is still one line, and a receipt over 1 MiB is refused — which would turn a passing run into ERROR). The **test** step additionally gets `<rootDir>/.pi/` excluded so a run never executes the disposable test copies under `.pi/review-snapshots/`. That rewrite is deliberately narrow, because the jest CLI flag OVERRIDES the config value: it happens only for a single simple `jest` command that uses **default config discovery**, and the repo's own `testPathIgnorePatterns` (read from `jest --showConfig`) are merged in rather than replaced. A command that selects its own config (`--config`, `--rootDir`, `--projects`, `--selectProjects`, …), a compound or non-jest script, or a `--showConfig` that cannot be read are all left **verbatim**, with the reason recorded in the log — reproducing jest's own CLI parsing well enough to query the right config is not something the gate should be guessing at, and a wrong guess would silently drop the exclusions the project actually relies on. |
-| `record_goal_prereview` | Record the dedicated `goal-auditor` role's audit of a DRAFT goal (L8b). Pass the draft text plus the auditor's FULL raw output: the **extension** parses the JSON fence itself (PASS ⇔ a `READY` verdict — verdict-parse already downgrades a READY carrying unresolved P0/P1, and a salvaged fence is never READY) and computes the text hash itself, so there is no `passed`/`hash` parameter an agent could set. No parseable fence ⇒ `isError` and **nothing** is written (fail-closed). BLOCKED/NEEDS_HUMAN ⇒ a FAIL record. Latest-only by design, and repo-resolved exactly like `propose_loop_goal` (`gitRootOfDir`, never `resolveToolRepo` — a goal is audited before the first edit lands). |
+
 
 ### Arbiter (a narrow, fail-closed gate exception)
 
@@ -1592,16 +1616,17 @@ including a content hash, by editing the checker too):
   payloads, so file-based messages skip the in-session attribution/L5 checks.
   The commit-msg git hook (L3) still scans the FINAL message file and remains
   the deterministic backstop for attribution.
-- Fabricating the reviewer output fed to `record_review` — or the
-  `auditor_output` fed to `record_goal_prereview` — the reviewer and the
-  goal-auditor are judge processes whose output necessarily transits the main
-  agent, so both verdicts rest on the cooperative assumption (the main agent
-  can equally write the sidecar directly). What the extension DOES guarantee is
-  that no agent-attested boolean is accepted: it parses the verdict fence and
-  computes the text hash itself, so a forgery has to counterfeit a whole
-  reviewer output rather than flip a flag. Making it unforgeable would require
-  the extension to spawn the judge itself and verify a receipt, like
-  `run_precommit` (future hardening), not a runtime source check.
+- Forging a judge's channel `report` record on disk — the reviewer and the
+  goal-auditor are separate pi processes and their conclusions reach the gate
+  through the channel file, which the main agent's own process can write (it
+  can equally write the sidecar directly), so both verdicts rest on the
+  cooperative assumption. What the extension DOES guarantee is that no
+  agent-attested boolean is accepted, and that there is no TOOL to attest one
+  through: `judge_conclude` is registered only inside a judge session, and the
+  two recorders are plain functions the gate calls when a round's report lands
+  — the agent has no call it could make with a hand-written verdict. Making it
+  unforgeable would require the extension to verify a receipt from the judge
+  process, like `run_precommit` (future hardening), not a runtime source check.
 - **Git's content-transformation pipeline as a hidden fingerprint input.** The
   digest asks *git* what the worktree contains, so anything that reconfigures
   git's answer — `core.excludesFile`, `.gitattributes` filters/eol with the
@@ -1889,7 +1914,7 @@ heuristic — `sed -i`, an external editor, or a background process all change
 the worktree with no event to observe. The only memo is
 `advisoryChangeToken()`: a filesystem probe (porcelain status + size/mtime of
 every changed path) that gates a *prompt-rendering* recompute. Every
-enforcement path — ship blocks, `declare_done`, `record_review`, arbitration,
+enforcement path — ship blocks, `declare_done`, the verdict recorder, arbitration,
 and the git hooks — recomputes the real fingerprint unconditionally, so a
 stale memo can only produce a stale prompt, never a stale gate decision.
 
@@ -1927,7 +1952,8 @@ lib/model-diagnose.ts         agent model-chain diagnosis against the registry (
 lib/gate-doctor.ts            /gate-doctor read-only health checks (advisory)
 lib/gate-timings.ts           .pi/gate-timings.jsonl observability log (diagnostics only)
 lib/blocked-marker.ts         .blocked marker ownership (record failure, reclaim only our own/orphans)
-lib/verdict-parse.ts          all-fence worst-wins verdict parser
+lib/precommit-parse.ts        precommit `## Overall:` sentinel parser (worst wins; FAIL terminal)
+lib/review-adjudicate.ts      reviewer adjudication over the judge's STRUCTURED conclusion: READY+open P0/P1 → BLOCKED, findings count, coarse cross-round fingerprints
 scripts/precommit-runner.mjs  PASS/FAIL/NO_CHECKS_RUN runner; fast/full lanes, per-step cache, nonce receipt, streamed step output
 scripts/precommit-plan.mjs    pure lane planning: related-test derivation + per-step cache scope
 scripts/precommit-cache.mjs   per-step result cache keyed on git trees

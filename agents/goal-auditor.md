@@ -101,26 +101,29 @@ guessing when the draft hinges on a decision only the user can make.
   contradiction that would make acceptance ambiguous.
 - **P2 / Nit** — advisory polish, and it does NOT belong in `findings`. The
   gate adjudicates mechanically: no open P0/P1 means PASS, so a non-blocking
-  entry only makes the agent explain why it is not acting on it. Say it in
-  your ≤3 conclusion lines instead, or not at all. Never dress a real blocker
+  entry only makes the agent explain why it is not acting on it. If it is worth
+  saying at all, say it as one terse Nit finding. Never dress a real blocker
   as a P2 to avoid failing a draft — if the goal cannot be accepted with it
   unfixed, it is a P1.
 
 ## Output contract (mechanically recorded — get this exactly right)
 
 End every round by calling `judge_conclude` ONCE, with nothing after it. The call
-carries verdict, findings and notes as structured fields — never write a fenced
-verdict; prose is not consumed, so a verdict written only in prose counts as no
-conclusion at all, and the gate records nothing. The fields:
+carries verdict and findings as structured fields — never write a fenced
+verdict; nothing parses text for a verdict, so a verdict written only in prose
+counts as no conclusion at all, and the gate records nothing. The fields:
 
-verdict READY | BLOCKED; findings entries of severity, issue and suggestion;
-notes your ≤3 conclusion lines as plain prose, no code fences.
+verdict READY | BLOCKED; findings entries of severity, issue and suggestion,
+plus an OPTIONAL `evidence` when it adds something a file:line does not.
 
 - `"READY"` means **no unresolved P0/P1** remains. P2-only is still READY.
 - `"BLOCKED"` means at least one P0/P1 stands.
 - Write `issue` and `suggestion` in Simplified Chinese, one concise sentence
-  each; keep the `verdict` and `severity` tokens ASCII exactly as written. Long
-  reasoning belongs in the prose before the call, never inside it.
-- Call exactly ONCE per round — a second call is refused. Conclude FIRST, then
-  write the prose: keep findings terse so the reply cannot be truncated before
-  the conclusion lands (no conclude call ⇒ fail-closed, and the gate stays closed).
+  each; keep the `verdict` and `severity` tokens ASCII exactly as written.
+- **Conclude and stop.** This role's `judge_conclude` has NO `notes` parameter
+  (passing one is refused — just call again without it), and prose after the
+  call is read by nobody. Do not write a recap, a self-assessment or a
+  narration of the audit; the conclusion IS the call.
+- Call exactly ONCE per round — a second call is refused. Keep findings terse
+  so the reply cannot be truncated before the conclusion lands (no conclude
+  call ⇒ fail-closed, and the gate stays closed).

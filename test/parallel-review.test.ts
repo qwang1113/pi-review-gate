@@ -57,8 +57,13 @@ test("the completion contract is embedded at the end of the reviewer task", () =
   // The instruction is at the END (after the OUTPUT/conclude contract).
   assert.ok(prompt.indexOf("调 judge_conclude 交卷并停下") > prompt.indexOf("Conclude shape"));
   assert.doesNotMatch(prompt, /tmux|wait-for|inbox/); // "channel report" is the sanctioned completion path
-  // Round-17: output discipline is part of the task text.
-  assert.match(prompt, /输出纪律:先调 judge_conclude 交卷,其后最多 5 行结论要点/, "the discipline is pinned in the task");
+  // Round-17, tightened 2026-09-04: output discipline is part of the task text.
+  assert.match(prompt, /输出纪律:交卷即停/, "the discipline is pinned in the task");
+  // The dispatch must not teach a field the signature refuses (the gate would
+  // otherwise contradict itself on the reviewer's very first conclude call).
+  assert.doesNotMatch(prompt, /notes:/, "no notes field may be taught to a reviewer");
+  assert.match(prompt, /没有 notes 参数|no notes parameter/, "and the task says so out loud");
+  assert.match(prompt, /"evidence"/, "the optional evidence field is offered");
 });
 
 test("buildReviewPrompt: an empty range audits the EXIT GOAL, not a diff", () => {

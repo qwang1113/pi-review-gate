@@ -192,8 +192,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
 
    When the round's channel report lands, the gate records the verdict itself —
    you never copy a
-   verdict from one place to another. Worst-verdict semantics still apply if
-   multiple fences appear (the parser keeps the worst), and an absent
+   verdict from one place to another. The conclusion arrives STRUCTURED on the
+   report (there is no text to parse); a READY carrying an unresolved P0/P1 is
+   still downgraded to BLOCKED, and an absent
    `docSync` means the round is incomplete (fails closed).
 
    The precommit lane, the checkpoint commit, the range computation and the
@@ -235,12 +236,17 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    immutable checkpoint commits) with `git show`/`git diff`; it may verify by
    doing in a throwaway `$TMPDIR` copy (mutation analysis included) and must
    restore before finishing. The reviewer must NOT be fed your own
-   conclusions (fresh eyes only) and must end its output with a fenced JSON
-   verdict:
+   conclusions (fresh eyes only) and ends the round by calling
+   `judge_conclude` once:
 
-   ```json
-   {"gate": "READY" | "BLOCKED" | "NEEDS_HUMAN", "docSync": "UPDATED" | "NOT_NEEDED", "cwd": "<its real pwd>", "findings": [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}]}
    ```
+   judge_conclude({verdict: "READY" | "BLOCKED" | "NEEDS_HUMAN", docSync: "UPDATED" | "NOT_NEEDED", cwd: "<its real pwd>", findings: [{file: "…", line: 1, severity: "P0|P1|P2|Nit", issue: "…", evidence: "<optional>"}]})
+   ```
+
+   Those fields go straight onto the round's channel report. This role has no
+   `notes` parameter — passing one is refused (and the refusal does not spend
+   the round's single conclusion), because the conclusion IS the verdict plus
+   the findings.
 
    Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix,
    Nit = optional. Any P0/P1 open ⇒ gate BLOCKED.
@@ -287,8 +293,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    `.pi/review-gate.json`).
 
 4. **Record — the GATE does this, not you.** When the round's channel report
-   lands the gate parses every fence from the report's exact bytes and records
-   the verdict (worst wins). That
+   lands the gate reads its structured conclusion and records
+   the verdict (a READY with an open P0/P1 becomes BLOCKED). That
    same step verifies the commit target: it
    withholds a READY when the round was never prepared (no registered
    `baseline..HEAD`), downgrades a READY to BLOCKED when HEAD moved past the

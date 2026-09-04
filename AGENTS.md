@@ -67,10 +67,16 @@ reviewer over the WHOLE change:
   prepare ⇒ STALE ⇒ BLOCKED), and a READY binds to the reviewed commit's TREE
   (content binding — squash preserves it); the ship gates additionally refuse
   content-changing commits after the reviewed one (unreviewed content can
-  never ship). `run_precommit` / `review_checkpoint` / `prepare_review` /
-  `record_review` are **not tools** (2026-08-30, 哲学三): the gate still runs
+  never ship). `run_precommit` / `review_checkpoint` / `prepare_review`
+  are **not tools** (2026-08-30, 哲学三): the gate still runs
   every one of those steps inside `judge_submit`, but none of them is
-  registered, so there is no second path to sequence by hand.
+  registered, so there is no second path to sequence by hand. The two
+  RECORDERS went further (2026-09-04, 用户决定 D4): `record_review` and
+  `record_goal_prereview` are no longer registered on any host at all, not even
+  the internal one, and what remains are plain gate-side functions invoked when
+  a round's channel report lands. Their tool shape existed only to carry text
+  that had to be parsed back into a verdict; the conclusion arrives structured
+  now, so there was nothing left for a caller to pass.
   `review_diff` / `review_sandbox` were **evaluated and formally NOT built**
   (2026-08-31, 哲学三): the reviewer's own `git
   diff` / `git show` are simple read-only commands (not the multi-step ship/tmux

@@ -5,10 +5,22 @@
  * prose, and the gate scraped every transcript tail for it on every settle
  * (the window-truncation P0: a fence split across the tail window never
  * matched, so the channel report never landed and the opener waited
- * forever). Now the judge calls ONE tool, `judge_conclude`, with structured
- * fields; the gate synthesises the canonical fence itself and appends the
- * channel report directly. There is no scraping path anymore — philosophy
- * three keeps exactly one implementation.
+ * forever). Then the judge called ONE tool with structured fields — and the
+ * gate SYNTHESISED the canonical fence from them anyway, so the opener could
+ * parse it back out. The scraper was dead; its format lived on as the only
+ * consumer of itself.
+ *
+ * Since 2026-09-04 the structured fields travel structured: `judge_conclude`
+ * writes `verdict` / `findings` / `cwd` / `docSync` straight into the channel
+ * `report` record and the opener reads them as data. No fence is built, none
+ * is parsed, and philosophy three keeps exactly one implementation.
+ *
+ * THE SIGNATURE IS ROLE-SHAPED. A `reviewer` and a `goal-auditor` conclude
+ * with verdict + findings + cwd and NOTHING ELSE — there is no `notes`
+ * parameter to write prose into, which constrains output more reliably than
+ * any instruction could, and their prose was never read by anything. An
+ * `adviser` is the opposite case: its product IS the text, it never reaches
+ * the recorder, and the opener quotes it — so it keeps `notes`.
  *
  * Anti-forgery is the REGISTRATION surface, not a secret: the extension
  * registers this tool only inside a judge session (see readJudgeSideEnv) and
@@ -18,8 +30,7 @@
  * One round, one conclusion: the opener numbers rounds on the persisted
  * hierarchy entry (`roundSeq`, bumped at every dispatch) and stamps it on
  * the report (`round`, a field the channel schema already carried). A second
- * call for the same round is refused explicitly — which also retires the
- * fence-byte dedup and the draft/final double-report class.
+ * call for the same round is refused explicitly.
  *
  * Shape: pure core below, `registerJudgeConcludeTool(host, deps)` at the
  * bottom; effects through `deps` only, like every other tool family.
@@ -38,29 +49,43 @@ import {
 } from "./orchestrator-channel.ts";
 import { DOC_SYNC_ATTESTATIONS } from "./gate-state.ts";
 import { JUDGE_STREAM_ENV, readJudgeSideEnv } from "./judge-side.ts";
+import type { ReviewFinding } from "./review-adjudicate.ts";
 
 /** Tool name — pinned by structural tests on both sides of the registration. */
 export const JUDGE_CONCLUDE_TOOL = "judge_conclude";
 
-/** Verdicts a judge may conclude with (stored verbatim in the fence). */
+/** Verdicts a judge may conclude with (stored verbatim on the report). */
 export const CONCLUDE_VERDICTS = ["READY", "BLOCKED", "NEEDS_HUMAN"] as const;
 export type ConcludeVerdict = (typeof CONCLUDE_VERDICTS)[number];
 
-/** One finding as the judge reports it (structured — never a fence string). */
-export interface ConcludeFinding {
-  severity: string;
-  file?: string | undefined;
-  line?: number | undefined;
-  issue: string;
+/** One finding as the judge reports it — the shape the record carries. */
+export type ConcludeFinding = ReviewFinding;
+
+/**
+ * The ONE role whose conclusion is prose.
+ *
+ * An adviser is consulted for a judgement in words: the opener quotes it
+ * (`conclusionExcerpt`) and no recorder ever sees it. Every other role
+ * concludes in `findings`, so giving it a prose field would only invite text
+ * that nothing reads. Kept as a predicate rather than a role list because the
+ * rule is about what the output IS, not about who happens to exist today.
+ */
+export function roleAcceptsNotes(role: string): boolean {
+  return role.trim().toLowerCase() === "adviser";
 }
 
-/** Validated conclude input: what the canonical fence is built from. */
+/** The refusal a reviewer / goal-auditor gets when it still passes `notes`. */
+export const NOTES_REFUSED_REASON =
+  "本角色不接受 notes，请把结论放进 findings（每条 severity + issue，能给证据就填 evidence）";
+
+/** Validated conclude input: exactly what the channel report will carry. */
 export interface ConcludedInput {
   verdict: ConcludeVerdict;
   findings: ConcludeFinding[];
   cwd: string;
   docSync?: string | undefined;
-  notes: string;
+  /** Prose — ADVISER ONLY; absent for every other role. */
+  notes?: string | undefined;
 }
 
 function fail(text: string): ToolReply {
@@ -72,11 +97,12 @@ function reply(text: string, details: Record<string, unknown>): ToolReply {
 }
 
 /**
- * Validate raw tool params into conclude input. Returns the reason when the
- * params are unusable — a validation refusal NEVER consumes the round's
- * single conclusion (only a written report does).
+ * Validate raw tool params into conclude input, for THIS role. Returns the
+ * reason when the params are unusable — a validation refusal NEVER consumes
+ * the round's single conclusion (only a written report does), so a role that
+ * passed `notes` by habit simply calls again without it.
  */
-export function validateConcludeParams(params: Record<string, unknown>):
+export function validateConcludeParams(params: Record<string, unknown>, role: string):
   | { ok: true; input: ConcludedInput }
   | { ok: false; reason: string } {
   const verdictRaw = typeof params.verdict === "string" ? params.verdict.trim().toUpperCase() : "";
@@ -107,11 +133,15 @@ export function validateConcludeParams(params: Record<string, unknown>):
     }
     const file = typeof f.file === "string" && f.file.trim() !== "" ? f.file.trim() : undefined;
     const line = typeof f.line === "number" && Number.isFinite(f.line) ? Math.floor(f.line) : undefined;
+    // `evidence` is OPTIONAL and unvalidated (D6): for most findings the
+    // evidence IS file:line, and demanding it only manufactures filler.
+    const evidence = typeof f.evidence === "string" && f.evidence.trim() !== "" ? f.evidence.trim() : undefined;
     findings.push({
       severity,
       ...(file === undefined ? {} : { file }),
       ...(line === undefined ? {} : { line }),
       issue,
+      ...(evidence === undefined ? {} : { evidence }),
     });
   }
   let docSync: string | undefined;
@@ -125,39 +155,20 @@ export function validateConcludeParams(params: Record<string, unknown>):
     }
     docSync = normalized;
   }
-  const notes = params.notes === undefined ? "" : typeof params.notes === "string" ? params.notes : "";
-  if (typeof params.notes !== "undefined" && typeof params.notes !== "string") {
+  // The role-shaped half of the signature. A reviewer / goal-auditor has no
+  // `notes` parameter at all, so passing one is refused outright rather than
+  // silently dropped — a silently ignored field teaches the caller nothing.
+  if (!roleAcceptsNotes(role)) {
+    if (params.notes !== undefined) {
+      return { ok: false, reason: NOTES_REFUSED_REASON };
+    }
+    return { ok: true, input: { verdict: verdictRaw as ConcludeVerdict, findings, cwd, docSync } };
+  }
+  if (params.notes !== undefined && typeof params.notes !== "string") {
     return { ok: false, reason: "notes 必须是纯文本" };
   }
-  if (notes.includes("```")) {
-    return { ok: false, reason: "notes 里不能出现 ```（会伪装成第二个 verdict fence）；去掉代码围栏用纯文本重述" };
-  }
+  const notes = typeof params.notes === "string" ? params.notes : "";
   return { ok: true, input: { verdict: verdictRaw as ConcludeVerdict, findings, cwd, docSync, notes } };
-}
-
-/**
- * The canonical fence for validated input — a full ```json block, the exact bytes the
- * opener's record path parses (parseReviewOutput/parseFenceFindings need fenced text,
- * so the tool synthesises it instead of the judge hand-writing it).
- */
-export function buildConcludeFence(input: ConcludedInput): string {
-  const body = JSON.stringify({
-    gate: input.verdict,
-    findings: input.findings.map((f) => ({
-      ...(f.file === undefined ? {} : { file: f.file }),
-      ...(f.line === undefined ? {} : { line: f.line }),
-      severity: f.severity,
-      issue: f.issue,
-    })),
-    cwd: input.cwd,
-    ...(input.docSync === undefined ? {} : { docSync: input.docSync }),
-  });
-  return "```json\n" + body + "\n```";
-}
-
-/** Report summary: the fence first (machine), the notes after (human). */
-export function buildConcludeSummary(fence: string, notes: string): string {
-  return notes.trim() !== "" ? `${fence}\n\n${notes}` : fence;
 }
 
 /**
@@ -266,7 +277,7 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
   if (!cfg) {
     return fail("review-gate: judge_conclude 只在 review 会话里可用——主会话不能自证裁决。");
   }
-  const validated = validateConcludeParams(params);
+  const validated = validateConcludeParams(params, cfg.role);
   if (!validated.ok) {
     return fail(`review-gate: 交卷被拒绝（参数问题，不占交卷额度）：${validated.reason}。修正后调一次。`);
   }
@@ -288,11 +299,10 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
   if (!decided.ok) {
     return fail(`review-gate: 本轮已交过卷（report ${decided.reportId})——重复调用被拒绝，不计入任何轮次。停下等 opener，不要再调。`);
   }
-  const fence = buildConcludeFence(input);
-  const summary = buildConcludeSummary(fence, input.notes);
   const streamPath = (deps.env()[JUDGE_STREAM_ENV] ?? "").trim() || undefined;
   const findingsCount = countStreamFindings((p) => deps.readText(p), streamPath, input.findings.length);
   const now = deps.now();
+  const notes = (input.notes ?? "").trim();
   const report = {
     reportId: newChannelId("rep", now),
     kind: "report" as const,
@@ -301,7 +311,13 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
     round: seq.round,
     verdict: input.verdict,
     findingsCount,
-    summary,
+    // Verbatim: the opener records exactly what was concluded here.
+    findings: input.findings,
+    cwd: input.cwd,
+    ...(input.docSync === undefined ? {} : { docSync: input.docSync }),
+    // Prose only where prose is the product (adviser); a reviewer's report
+    // carries none, so no judge text can reach the opener's context.
+    ...(notes === "" ? {} : { summary: notes }),
   };
   try {
     appendRecord(io, target, report);
@@ -314,26 +330,41 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
   );
 }
 
-/** Register `judge_conclude` — the caller guards it to judge sessions only. */
+/**
+ * Register `judge_conclude` — the caller guards it to judge sessions only.
+ *
+ * The SCHEMA is role-shaped, not just the validation: a reviewer's tool
+ * simply has no `notes` parameter to fill in.
+ */
 export function registerJudgeConcludeTool(host: ToolHost, deps: JudgeConcludeToolDeps): void {
+  const role = readJudgeSideEnv(deps.env())?.role ?? "reviewer";
+  const findingSchema = Type.Object({
+    severity: Type.String(),
+    file: Type.Optional(Type.String()),
+    line: Type.Optional(Type.Number()),
+    issue: Type.String(),
+    evidence: Type.Optional(Type.String({ description: "Where to look, when file:line is not enough (optional)" })),
+  });
+  const base = {
+    verdict: Type.Enum({ READY: "READY", BLOCKED: "BLOCKED", NEEDS_HUMAN: "NEEDS_HUMAN" }),
+    findings: Type.Optional(Type.Array(findingSchema)),
+    cwd: Type.String({ description: "What `pwd` printed in the reviewed repo (never copy it from the task)" }),
+    docSync: Type.Optional(Type.String({ description: "UPDATED | NOT_NEEDED, when the review covers code changes" })),
+  };
   host.registerTool({
     name: JUDGE_CONCLUDE_TOOL,
     label: "Conclude Own Review Round",
     description:
       "Submit THIS review round's conclusion (one call per round; a second call is refused). " +
+      (roleAcceptsNotes(role)
+        ? "Your conclusion IS the prose: put it in `notes`. "
+        : "The conclusion is the structured fields — there is no prose field, and prose written after this call is read by nobody. ") +
       "Only registered inside a review session — the main session never sees it.",
-    parameters: Type.Object({
-      verdict: Type.Enum({ READY: "READY", BLOCKED: "BLOCKED", NEEDS_HUMAN: "NEEDS_HUMAN" }),
-      findings: Type.Optional(Type.Array(Type.Object({
-        severity: Type.String(),
-        file: Type.Optional(Type.String()),
-        line: Type.Optional(Type.Number()),
-        issue: Type.String(),
-      }))),
-      cwd: Type.String({ description: "What `pwd` printed in the reviewed repo (never copy it from the task)" }),
-      docSync: Type.Optional(Type.String({ description: "UPDATED | NOT_NEEDED, when the review covers code changes" })),
-      notes: Type.Optional(Type.String({ description: "Conclusion points as plain prose (no code fences)" })),
-    }),
+    parameters: Type.Object(
+      roleAcceptsNotes(role)
+        ? { ...base, notes: Type.String({ description: "Your conclusion and its key points, as plain prose" }) }
+        : base,
+    ),
     execute: (_id, params) => doConclude(deps, params),
   });
 }

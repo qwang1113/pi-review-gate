@@ -9,11 +9,12 @@
 
 - **主会话**：带门禁的 pi 会话，负责全部写操作与流程协调。
 - **子会话**：用户 window 里与主会话同窗的独立 pane 中的**交互 pi 进程**
-  （门禁以 judge 模式加载：reporting-shell 工具集 + heartbeat 上报 + fence 扫描落
-  report），承载所有 Judge 角色（goal-auditor / reviewer / adviser）。同一工作区、
+  （门禁以 judge 模式加载：reporting-shell 工具集 + heartbeat 上报 +
+  `judge_conclude` 落 report），承载所有 Judge 角色（goal-auditor / reviewer /
+  adviser）。同一工作区、
   同一分支；cwd 为仓库根目录。session id 按 role+repo 确定性派生，所以同一角色
-  跨轮复用同一段上下文；judge 以 verdict fence 收尾并停下（不退出进程），门禁
-  读 fence 落 channel report 并记录结论。
+  跨轮复用同一段上下文；judge 调 `judge_conclude` 交卷并停下（不退出进程），
+  结构化结论直接进 channel report，opener 凭它记录结论。
 - **只读探查**：并行的只读代码/文档探查并行安全（读者不写工作树，
   不会失效审查绑定）。L1/L2 执行层（recon / fixer）及其 subagent 派发已随
   pi-subagents companion 退役（2026-09-06）。
@@ -61,9 +62,9 @@
 
 ## 贯穿机制
 
-- **状态同步（标准报告唤醒，非轮询）**：judge 以 verdict fence 收尾并停下（不退出
-  进程，pane 留给下一轮复用）；门禁在每次 settle 时扫描 transcript 尾部，命中即落
-  channel report、记录 verdict，再用标准报告唤醒主会话。父会话不轮询、不直读
+- **状态同步（标准报告唤醒，非轮询）**：judge 调 `judge_conclude` 交卷并停下（不退出
+  进程，pane 留给下一轮复用）；交卷把结构化结论写进 channel report，门禁在每次
+  settle 时看到新 report 即记录 verdict，再用标准报告唤醒主会话。父会话不轮询、不直读
   transcript。pane 消失但 verdict 未落盘时本轮不算结束，opener 以同一 session id
   重开 pane 续接（`judge_recover`）。judge 有疑问时调 `ask_user`（人与 opener 经通道
   竞态，先答先生效），等答案时停下、不退出 pane。

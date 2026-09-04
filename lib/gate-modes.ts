@@ -85,7 +85,8 @@ export function judgeDeniedReason(toolName: string): string | undefined {
  */
 export const JUDGE_COMPLETION_DISCIPLINE =
   "完成(必须):调 judge_conclude 交卷并停下即可——verdict/findings/cwd 一次给齐,一轮只能交一次," +
-  "重复调用会被拒绝;不需要退出进程(pane 留给下一轮复用)。结论只写正文等于没交卷:正文不被消费。\n" +
+  "重复调用会被拒绝;不需要退出进程(pane 留给下一轮复用)。**交卷即停**:调完就结束本轮," +
+  "不写复述、不写自评、不写过程说明——正文不被消费,结论只写正文等于没交卷。\n" +
   "提问:有疑问时调 ask_user,人和 opener 谁先答谁生效;等答案时停下,不要自行假定。";
 
 const NO_DENY: ReadonlySet<string> = Object.freeze(new Set<string>());

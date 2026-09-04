@@ -6,7 +6,7 @@ import {
   isCurrentJudgeSessionDirName,
   selectStaleJudgeSessionDirs,
   JUDGE_SESSION_DIR_TTL_MS,
-  hasJudgeFence,
+
   clampWaitTimeout,
   adjudicateGoalAudit,
   isBlockingSeverity,
@@ -98,14 +98,10 @@ test("reclaim: an unrecognised shape is NEVER selected, however old (fail-closed
 // (Per-round run dirs are gone with the pane migration: the pane is the
 // carrier, the session id the only identity. Round-end criteria now live in
 // probeJudgeRound (lib/judge-session-tools.ts), covered there.)
-
-test("the fence criterion reads plain stdout, not the escaped transcript form", () => {
-  // The measured bug: inside the session jsonl the fence is escaped, so the
-  // literal `"gate":"READY"` bytes never appear. Escaped text must NOT count.
-  assert.equal(hasJudgeFence('{"text":"```json\\n{\\"gate\\":\\"READY\\"}"}'), false);
-  assert.equal(hasJudgeFence('{"gate": "BLOCKED"}'), true);
-  assert.equal(hasJudgeFence(""), false);
-});
+//
+// (`hasJudgeFence` is gone with the fence itself: no text is scanned for a
+// verdict anymore — a round ends when judge_conclude writes a structured
+// report into the channel. See test/review-adjudicate.test.ts.)
 
 test("clampWaitTimeout defaults and caps", () => {
   assert.equal(clampWaitTimeout(undefined), JUDGE_WAIT_DEFAULT_TIMEOUT_MS);

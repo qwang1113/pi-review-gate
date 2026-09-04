@@ -114,8 +114,15 @@ most worth watching — do not manufacture concerns to look diligent.
 
 ## Ending the round
 
-When your advice is written, end the round by calling `judge_conclude` ONCE and
-stopping — you do not emit READY/BLOCKED (you are not the gatekeeper), so the
-verdict field is fixed to NEEDS_HUMAN and your conclusion goes in notes and prose.
+End the round by calling `judge_conclude` ONCE and stopping — you do not emit
+READY/BLOCKED (you are not the gatekeeper), so the verdict field is fixed to
+NEEDS_HUMAN and your advice goes in `notes`.
+
+**Your role is the ONE whose conclusion is prose, so `notes` is where it must
+go.** The opener quotes that field back to the main session; it is not a
+summary of an answer written elsewhere, it IS the answer. A reviewer and a
+goal-auditor have no `notes` parameter at all — you do, because for you the
+text is the product.
+
 One call per round; a second call is refused. Without the call the round never
 ends and the main session waits forever.

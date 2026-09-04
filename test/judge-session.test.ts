@@ -264,37 +264,26 @@ test("transcript: a missing sessions/ directory yields no transcript (never thro
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("conclusion: the VERDICT FENCE wins over the later sign-off (the measured trap)", () => {
+// `readJudgeConclusion` is now a DIAGNOSTIC read: "what is this pane saying
+// right now?", for a round that has not concluded. Whether a round concluded —
+// and with what verdict — is answered by its channel report, never by pattern
+// matching the transcript, so the old fence-selection rule (and the
+// `hasVerdict` flag that came with it) is gone.
+test("conclusion: the LAST assistant text is returned, sign-off included", () => {
   const dir = workdir();
   try {
     const sessions = join(dir, "sessions");
     mkdirSync(sessions, { recursive: true });
     writeFileSync(join(sessions, "s.jsonl"), [
       assistantLine("先分析一下这个 commit range。"),
-      assistantLine('```json\n{"gate":"READY","findings":[]}\n```\n\n- 无 P0/P1。'),
-      // Real sign-off observed in this repo's own audits — "last message" here
-      // returns THIS and drops the verdict entirely.
-      assistantLine("Verdict 已输出并已向主会话发出完成信号。"),
+      assistantLine("还在读 diff。"),
+      // A sign-off used to be the thing this function had to skip, because the
+      // verdict was buried above it. Nothing is buried anymore.
+      assistantLine("已交卷，等 opener。"),
     ].join("\n"));
     const got = readJudgeConclusion(sessions);
-    assert.equal(got.hasVerdict, true);
-    assert.match(got.text!, /"gate":"READY"/);
-    assert.doesNotMatch(got.text!, /完成信号/, "the sign-off must not be what we hand back");
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
-test("conclusion: with no fence anywhere, the last non-empty text is returned and flagged as fence-less", () => {
-  const dir = workdir();
-  try {
-    const sessions = join(dir, "sessions");
-    mkdirSync(sessions, { recursive: true });
-    writeFileSync(join(sessions, "s.jsonl"), [
-      assistantLine("正在读取 diff……"),
-      assistantLine("还在分析。"),
-    ].join("\n"));
-    const got = readJudgeConclusion(sessions);
-    assert.equal(got.hasVerdict, false);
-    assert.equal(got.text, "还在分析。");
+    assert.equal(got.text, "已交卷，等 opener。");
+    assert.ok(got.transcriptPath);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -304,11 +293,10 @@ test("conclusion: a half-written final line (the judge is still writing) is skip
     const sessions = join(dir, "sessions");
     mkdirSync(sessions, { recursive: true });
     writeFileSync(join(sessions, "s.jsonl"), [
-      assistantLine('```json\n{"gate":"BLOCKED","findings":[]}\n```'),
+      assistantLine("正在分析 BLOCKED 的那一处。"),
       '{"type":"message","message":{"role":"assis',
     ].join("\n"));
     const got = readJudgeConclusion(sessions);
-    assert.equal(got.hasVerdict, true);
     assert.match(got.text!, /BLOCKED/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -321,7 +309,6 @@ test("conclusion: a transcript with no assistant output is reported as empty, no
     writeFileSync(join(sessions, "s.jsonl"), JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "task" }] } }));
     const got = readJudgeConclusion(sessions);
     assert.equal(got.text, undefined);
-    assert.equal(got.hasVerdict, false);
     assert.ok(got.transcriptPath, "the transcript it looked at is still reported");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

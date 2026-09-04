@@ -82,10 +82,10 @@ export const JUDGE_COMMON_PROTOCOL = `## 运行形态（独立 pane）
   不要自行假定。
 - **完成（必须）**：完成本轮任务就调 judge_conclude 交卷并停下——verdict /
   findings / cwd 一次给齐，一轮只能交一次，重复调用会被拒绝；
-  不需要退出进程（pane 留给下一轮复用）。交卷工具落 channel
-  report，opener 凭它记录结论；只写在正文里的结论不会被消费。
-- 交卷之后再写你的最终输出（结论要点）；需要流式发布
-  findings 时按任务文本指示追加到 findings 文件。
+  不需要退出进程（pane 留给下一轮复用）。交卷工具把这些**结构化字段本体**
+  写进 channel report，opener 直接消费；只写在正文里的结论不会被消费。
+- **交卷即停**：调完 judge_conclude 就结束本轮，不写复述、不写自评、不写
+  过程说明；需要流式发布 findings 时按任务文本指示追加到 findings 文件。
 ## 通用输出要求
 - 结构清晰：先结论后论证；标注文件路径与行号。
 - 严重度分级：P0 破坏性 / 安全 / 数据问题；P1 应修；P2 值得修；Nit 风格。
@@ -93,19 +93,18 @@ export const JUDGE_COMMON_PROTOCOL = `## 运行形态（独立 pane）
   （深模块、KISS/DRY/YAGNI、卫语句、命名自解释、不写聪明代码……）。
 
 ## 输出纪律（token 预算）
-- 主会话机械消费的只有：judge_conclude 交卷（门禁合成规范结论并落 report，
+- 主会话机械消费的只有：judge_conclude 交卷（结构化字段直接落 channel report，
   opener 凭它记录，主会话不转抄）与 findings 流文件（每行 JSON 证据）。交卷之外的
   prose 不被消费——写长 prose 是纯 token 浪费。
-- **findings 只写阻塞项（P0/P1）**。不阻塞的意见（P2/Nit/可选优化）写进
-  notes 的要点里，或者干脆不写。两条理由：裁决是机械的（无 P0/P1 即通过），
+- **findings 只写阻塞项（P0/P1）**。不阻塞的意见（P2/Nit/可选优化）要么按
+  findings 的形状写一条，要么干脆不写。两条理由：裁决是机械的（无 P0/P1 即通过），
   非阻塞 findings 只会变成需要转交和解释的噪音；而且「用 P2 提一句」是逃避
   真正该说的 P1 的常见方式——该阻塞就标 P0/P1，不该阻塞就别占 findings 位。
-- 交卷格式固定：先调 judge_conclude（verdict + findings + cwd + notes 一次给齐），
-  其后正文最多 5 行结论要点（每条一句）；
-  findings 每条 ≤2 行（含 file/line/severity/issue）；notes ≤5 行，只写结论与
-  关键证据。不复述任务、不复述代码、不写客套与过程叙事。详细证据放 findings
-  流（evidence 字段），不要写进正文。
-- goal-auditor：先交卷再写 ≤3 行要点；adviser：先交卷再写结论 + 要点列表，同样不写过程。`;
+- **交卷即停**：调完 judge_conclude 就结束本轮，不写复述、不写自评、不写过程
+  说明。reviewer / goal-auditor 的签名里**没有** notes 参数（传了会被拒），
+  结论就是 verdict + findings：每条 findings ≤2 行（file / line / severity /
+  一句话 issue），能给证据就填 evidence，给不出就省略。
+- adviser 例外：它的产出**就是**正文，写进 notes（opener 会引用），同样不写过程。`;
 /** Judge roles that run as independent pi processes (not subagents). */
 export const JUDGE_ROLES: readonly string[] = Object.freeze([
   "reviewer",

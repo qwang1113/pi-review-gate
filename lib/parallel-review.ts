@@ -175,8 +175,9 @@ export interface ReviewVerdict {
     line: number;
     severity: "P0" | "P1" | "P2" | "Nit";
     issue: string;
+    /** Where to look, when file:line is not enough. Optional by design. */
+    evidence?: string;
   }>;
-  notes?: string;
 }
 
 /**
@@ -184,6 +185,11 @@ export interface ReviewVerdict {
  * single-review path: there is no second reviewer to carry the
  * attestation, so the reviewer itself must attest code↔docs (the gate fails
  * closed on a missing attestation — see lib/gate-state.ts).
+ *
+ * There is NO `notes` field, on purpose (2026-09-04): a reviewer's conclusion
+ * is its verdict plus its findings, its prose was never read by anything, and
+ * `judge_conclude` refuses a `notes` argument from this role outright. Not
+ * offering the field is what actually stops the prose from being written.
  */
 export const REVIEW_VERDICT_SCHEMA = {
   type: "object",
@@ -205,11 +211,11 @@ export const REVIEW_VERDICT_SCHEMA = {
           line: { type: "number" },
           severity: { type: "string", enum: ["P0", "P1", "P2", "Nit"] },
           issue: { type: "string" },
+          evidence: { type: "string" },
         },
         required: ["file", "line", "severity", "issue"],
       },
     },
-    notes: { type: "string" },
   },
   // `cwd` is REQUIRED so that a mismatching report is actually visible: an
   // optional field would simply be omitted by the models that most need the
@@ -330,7 +336,7 @@ export function buildReviewPrompt(
 
   lines.push(
     "",
-    "OUTPUT: call judge_conclude FIRST (the gate records it; docSync is REQUIRED on the single-review path), then a prose review below.",
+    "OUTPUT: call judge_conclude and stop (the gate records it; docSync is REQUIRED on the single-review path). Everything you have to say goes in that call — there is no prose section, and this role's call has no notes parameter.",
     // The prompt asks for a MEASURED `pwd`, not one copied out of this text —
     // a copied value says nothing about where the review actually happened,
     // and only a measured one makes the check below meaningful.
@@ -347,12 +353,13 @@ export function buildReviewPrompt(
         ? " (the shared repo root), so `cd` back there before you answer if you ended up inside your throwaway worktree."
         : "."),
     // eslint-disable-next-line max-len
-    'Conclude shape: judge_conclude({verdict: "READY"|"BLOCKED"|"NEEDS_HUMAN", cwd: "<your real pwd>", docSync: "UPDATED"|"NOT_NEEDED", findings: [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "..."}], notes: "<prose review, plain text, no fences>"})',
+    'Conclude shape: judge_conclude({verdict: "READY"|"BLOCKED"|"NEEDS_HUMAN", cwd: "<your real pwd>", docSync: "UPDATED"|"NOT_NEEDED", findings: [{"file": "...", "line": 1, "severity": "P0|P1|P2|Nit", "issue": "...", "evidence": "<optional — omit when file:line says it>"}]})',
     "Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix, Nit = optional. Any open P0/P1 ⇒ BLOCKED.",
-    // Round-17 (user ask): output discipline — the gate consumes ONLY the conclude call
-    // verdict, and the finding stream; prose beyond a 5-line summary is
-    // wasted tokens.
-    "输出纪律:先调 judge_conclude 交卷,其后最多 5 行结论要点(每条一句);不复述任务、不复述代码、不写过程叙事;详细证据放 findings 流(evidence 字段),不要写进正文。",
+    // Round-17 (user ask), tightened 2026-09-04: the gate consumes ONLY the
+    // conclude call and the finding stream. There is no `notes` parameter for
+    // this role — passing one is refused — so the conclusion has nowhere to
+    // become prose, and prose after the call is read by nobody.
+    "输出纪律:交卷即停 —— 调完 judge_conclude 就结束本轮,不写复述、不写自评、不写过程说明;结论就是 verdict + findings(能给证据就填 evidence)。",
     "",
     JUDGE_COMPLETION_DISCIPLINE,
   );

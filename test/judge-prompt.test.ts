@@ -129,9 +129,21 @@ test("round-17: output discipline is part of the shared protocol (gate consumes 
   assert.match(JUDGE_COMMON_PROTOCOL, /输出纪律/, "the discipline section exists");
   assert.match(JUDGE_COMMON_PROTOCOL, /judge_conclude 交卷/, "the conclude call is the mechanical contract");
   assert.match(JUDGE_COMMON_PROTOCOL, /findings 流文件/, "the finding stream is the evidence channel");
-  assert.match(JUDGE_COMMON_PROTOCOL, /最多 5 行结论要点/, "prose beyond a 5-line summary is wasted");
-  assert.match(JUDGE_COMMON_PROTOCOL, /先交卷再写 ≤3 行/, "goal-auditor is capped tighter");
-  assert.match(JUDGE_COMMON_PROTOCOL, /不复述任务/, "no task/process retelling");
+  assert.match(JUDGE_COMMON_PROTOCOL, /交卷即停/, "the round ends AT the call — no prose section follows it");
+  assert.match(JUDGE_COMMON_PROTOCOL, /不写复述、不写自评/, "no task/process retelling");
+});
+
+test("the shared protocol no longer teaches reviewer / goal-auditor to write `notes`", () => {
+  // The signature refuses `notes` from those roles (lib/judge-conclude.ts), so
+  // a protocol that still asked for it would make the gate contradict its own
+  // dispatch on the very first round.
+  assert.match(JUDGE_COMMON_PROTOCOL, /reviewer \/ goal-auditor 的签名里\*\*没有\*\* notes 参数/);
+  // The adviser keeps it, and the protocol says which role that is.
+  assert.match(JUDGE_COMMON_PROTOCOL, /adviser 例外/);
+  // No surviving instruction to hand `notes` in alongside the verdict.
+  assert.doesNotMatch(JUDGE_COMMON_PROTOCOL, /cwd \+ notes/);
+  assert.doesNotMatch(JUDGE_COMMON_PROTOCOL, /notes 的要点里/);
+  assert.doesNotMatch(JUDGE_COMMON_PROTOCOL, /notes ≤5 行/);
 });
 
 test("modelSpecFor: explicit slots[0] wins; auto:true uses the frontmatter default", () => {
