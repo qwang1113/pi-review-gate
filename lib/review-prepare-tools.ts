@@ -358,7 +358,7 @@ async function doPrepareReview(
       : []),
 
     "ADVANCED / internal：正常路径是一次 judge_submit({ role: \"reviewer\", task: <本轮改动说明> })——",
-    "它自己跑 precommit、checkpoint、本 prepare 与派发，并在 judge 进程退出时机械记录 verdict。",
+    "它自己跑 precommit、checkpoint、本 prepare 与派发，judge 在 pane 里以 verdict fence 收尾后门禁落 channel report 并机械记录 verdict。",
     "本工具只返回上面的审查范围与下面的任务文本；显示用 title 与 session id 都由门禁自行派生（session id 按 role+repo 确定性派生，所以同一 role 的下一轮续用同一会话）。",
     ...(goalTruncated
       ? [

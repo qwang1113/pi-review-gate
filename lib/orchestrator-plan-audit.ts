@@ -44,6 +44,7 @@
 
 import { createHash } from "node:crypto";
 import { canonicalPlanText, formatPlanSummary, type OrchestratorPlan } from "./orchestrator-plan.ts";
+import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 
 /** One objection, exactly as the auditor's JSON fence reported it. */
 export interface PlanAuditFinding {
@@ -194,7 +195,7 @@ export function buildPlanAuditTask(
     "READY 仅当 plan 无未解决 P0/P1 异议。findings 为空表示无异议。",
     "输出纪律:只输出 fence + ≤3 行结论要点;不复述 plan、不复述代码、不写过程叙事。",
     "",
-    "完成(必须):输出最终 verdict 后正常退出即可——进程退出即完成,主会话以你的输出为准。",
+    JUDGE_COMPLETION_DISCIPLINE,
   ].join("\n");
 }
 

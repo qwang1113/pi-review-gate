@@ -33,6 +33,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TaskMode } from "./task-mode.ts";
+import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 
 /** Repo-root-relative location of the goal file (gate-excluded via `.pi/`). */
 export const LOOP_GOAL_RELPATH = ".pi/loop-goal.md";
@@ -282,9 +283,7 @@ export function buildGoalAuditTask(
     // fence + 3 lines is wasted tokens.
     "输出纪律:只输出 fence + ≤3 行结论要点;不复述任务、不复述代码、不写过程叙事。",
     "",
-    "完成(必须):输出最终 verdict 后正常退出即可——进程退出即完成,主会话以你的输出为准,",
-    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
-    "主会话会带着答案用同一 session id 重新拉起你。",
+    JUDGE_COMPLETION_DISCIPLINE,
   ];
   return lines.join("\n");
 }

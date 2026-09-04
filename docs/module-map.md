@@ -438,6 +438,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `git-rewrite.ts` | 识别「只改 message」的历史重写，解开 L5 与门禁互锁的死结 |
 | `goal-prereview-tools.ts` | **内部实现**（注册在 internalHost）：`record_goal_prereview`——把 goal-auditor 的裁决落成绑定草稿 sha256 的记录；外加两个 goal 工具共用的提交检查（空稿、长度上限、goal 绑定哪个 repo） |
 | `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：两个 host，agent 侧只看得见 `propose_loop_goal` |
+| `gate-modes.ts` | 门禁模式注册表（唯一实现）：八种模式各有提示词模板加工具集加流程规则（plan/goal/review 仅内部置入）；`resolveGateMode` 单派发；禁跑工具表与完成纪律的 single source（`judge-side.ts` 只 re-export，各任务 builder 只引用） |
 | `hierarchy.ts` | opener 注册表与唯一的跨级裁判：谁开的 review 谁操作，其他会话一律 fail-closed（纯函数，IO 经 seam）；注册表与两类 pending 按 repo 落盘恢复（`parseHierarchySnapshot` fail-closed 解析），死 pane 异主条目由触达者过户、活 pane 保持拒绝，重启不死锁 |
 | `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：会话文件放哪、超时钳制、等候纪律、审计裁决是否阻塞（派单/等待判据已随进程模型删除） |
 | `judge-pane.ts` | review pane 的开/关/探活：argv 全复用 `orchestrator-tmux.ts`，颜色标题复用 `orchestrator-pane-decor.ts`，tmux 经注入的 runner（单测用假实现） |
@@ -445,7 +446,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `judge-prompt.ts` | judge 会话的系统提示装配：角色定义 + 共同协议 |
 | `judge-session.ts` | 把 judge transcript 当作长记忆：结论解析仍从它读 |
 | `judge-session-tools.ts` | 作用于**已存在** pane 的三个工具（`judge_read` 限 adviser / `judge_close` / `judge_wait`，opener 校验在内，等待判据是通道 report / pane 死亡）及其注册 |
-| `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态、落 report（复用子会话通道原语），以及 judge 会话禁跑的工具表 |
+| `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态、落 report（复用子会话通道原语）；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
 | `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
 | `llm-classify.ts` | 语义第二意见（DeepSeek V4 Flash），契约上只能加拦（TIGHTEN-ONLY） |

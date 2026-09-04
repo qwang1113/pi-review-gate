@@ -12,6 +12,8 @@ const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
  * move with them — they are asserted here, against the module that now owns
  * them, so a rule cannot quietly disappear along with the code it covers.
  */
+/** The mode registry owns the static prompt sections the extension used to inline. */
+const GATE_MODES_SRC = readFileSync(join(ROOT, "lib", "gate-modes.ts"), "utf8");
 const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
 const JUDGE_SESSION_TOOLS = new Set(["judge_read", "judge_close", "judge_wait"]);
 /**
@@ -1117,26 +1119,27 @@ test("loop directives: decision table injects on every turn, incl. unarmed first
   // The situation→tool table must be visible BEFORE the first edit arms the
   // gate — that is when the loop's standing flow is first established. It may
   // no longer sit inside the gateArmed-only return branch.
+  // Since the mode registry, the static sections live in lib/gate-modes.ts
+  // and the extension references them by registry key: assert both halves.
   const handlerAt = SRC.indexOf('pi.on("before_agent_start"');
   assert.ok(handlerAt > 0);
-  const injectAt = SRC.indexOf('state.taskMode === "loop"', handlerAt);
-  assert.ok(injectAt > 0, "loop branch must inject directives");
+  const loopAt = SRC.indexOf("MODE_REGISTRY.loop.prompt", handlerAt);
+  assert.ok(loopAt > 0, "loop branch must inject the registry loop prompt");
   // The decision table is injected in BOTH enforced loop and advisory explore
   // (explore gained it 2026-08-31: it used to early-return before the loop
   // injection, so an explore session never saw the situation→tool table).
-  const exploreAt = SRC.indexOf('buildAgentDirectives("explore")', handlerAt);
-  assert.ok(exploreAt > 0, "explore branch must inject the decision table too");
-  assert.ok(exploreAt < injectAt, "the explore early-return injection sits before the loop one");
-  // buildAgentDirectives is called unconditionally for loop, outside any
-  // gateArmed guard.
-  const directivesAt = SRC.indexOf("buildAgentDirectives()", handlerAt);
-  assert.ok(directivesAt > 0, "decision table must be injected in before_agent_start");
+  const exploreAt = SRC.indexOf("MODE_REGISTRY.explore.prompt", handlerAt);
+  assert.ok(exploreAt > 0, "explore branch must inject the registry explore prompt too");
+  assert.ok(exploreAt < loopAt, "the explore early-return injection sits before the loop one");
+  // The registry wires the table itself: loop unconditionally, explore with note.
+  assert.ok(GATE_MODES_SRC.includes("buildAgentDirectives()"), "registry loop prompt carries the table");
+  assert.ok(GATE_MODES_SRC.includes('buildAgentDirectives("explore")'), "registry explore prompt carries the table");
   // The undecided-clean early return (added round 3) must sit AFTER the
   // injection, so a loop session never loses the decision table: loop mode
   // falls through regardless of gateArmed.
   const earlyAt = SRC.indexOf("state.taskMode === undefined && !gateArmed && problems.length === 0", handlerAt);
   assert.ok(earlyAt > 0, "undecided-clean early return must exist");
-  assert.ok(directivesAt < earlyAt,
+  assert.ok(loopAt < earlyAt,
     "the decision table is injected BEFORE the undecided early return");
 });
 
@@ -1158,9 +1161,9 @@ test("loop directives: all-gates-green block names the completion steps", () => 
 test("explore workflow: advisory completion, no edit/bash blocking, ship gate intact", () => {
   // declare_done is self-accepted in explore.
   assert.match(SRC, /explore task completed by AI judgment/);
-  // The system prompt guides toward read-only work instead of hard-blocking.
-  assert.match(SRC, /## Explore 工作流/);
-  assert.match(SRC, /优先只读工作/);
+  // The workflow copy lives in the mode registry since the registry move.
+  assert.match(GATE_MODES_SRC, /## Explore 工作流/);
+  assert.match(GATE_MODES_SRC, /优先只读工作/);
   // The old hard blocks must be gone: no mode-based edit/bash/run_precommit
   // refusal may remain anywhere in the extension.
   assert.doesNotMatch(SRC, /current task is in read-only workflow/);

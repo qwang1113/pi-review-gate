@@ -105,28 +105,8 @@ export function buildVerdictReport(input: VerdictReportInput): {
   };
 }
 
-
-/**
- * Tools a judge session must never run. A judge is a reporting shell: it
- * reviews, it does not open sub-reviews, manage orchestrations, negotiate
- * goals, or finish tasks. `ask_user` is deliberately ABSENT — questions
- * are the one thing a judge must ask, and they race through the channel.
- */
-export const JUDGE_DENIED_TOOLS: ReadonlySet<string> = new Set([
-  "judge_submit", "judge_spawn", "judge_answer", "judge_recover", "judge_close", "judge_wait", "judge_read",
-  "orchestrator_spawn", "orchestrator_instruct", "orchestrator_wait", "orchestrator_close",
-  "orchestrator_handoff", "orchestrator_plan", "orchestrator_notify", "orchestrator_answer",
-  "orchestrator_recover", "orchestrator_attach",
-  "propose_loop_goal", "request_copilot_review", "check_copilot_review",
-  "request_scope_limit", "request_sensitive_edit", "set_gate_mode", "declare_done",
-  "request_arbitration",
-]);
-
-/** Why this tool is refused in a judge session, or undefined when allowed. */
-export function judgeDeniedReason(toolName: string): string | undefined {
-  if (!JUDGE_DENIED_TOOLS.has(toolName)) return undefined;
-  return `review-gate: ${toolName} 在 review 会话里不可用——review 只负责评审（heartbeat 上报、答 opener 的问题、落 report），不开子 review、不管编排、不收尾任务。`;
-}
+/** Re-exported single source: the deny set lives in lib/gate-modes.ts (mode registry). */
+export { JUDGE_DENIED_TOOLS, judgeDeniedReason } from "./gate-modes.ts";
 /** Dedup key: one verdict + count + size is one report, never two. */
 export function verdictReportKey(report: { verdict: string; findingsCount?: number; summary: string }): string {
   return `${report.verdict}#${report.findingsCount ?? "-"}#${report.summary.length}`;

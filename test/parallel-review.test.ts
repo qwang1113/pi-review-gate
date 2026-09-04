@@ -49,12 +49,13 @@ test("the completion contract is embedded at the end of the reviewer task", () =
     undefined,
   );
   assert.match(prompt, /完成/);
-  assert.match(prompt, /进程退出即完成/);
-  assert.match(prompt, /question fence/);
-  assert.match(prompt, /同一 session id 重新拉起/);
+  assert.match(prompt, /verdict fence 收尾并停下/);
+  assert.match(prompt, /不需要退出进程/);
+  assert.match(prompt, /ask_user/);
+  assert.doesNotMatch(prompt, /进程退出即完成|同一 session id 重新拉起/);
   // The instruction is at the END (after the OUTPUT/verdict contract).
-  assert.ok(prompt.indexOf("进程退出即完成") > prompt.indexOf("Verdict shape"));
-  assert.doesNotMatch(prompt, /tmux|wait-for|inbox|channel/);
+  assert.ok(prompt.indexOf("verdict fence 收尾并停下") > prompt.indexOf("Verdict shape"));
+  assert.doesNotMatch(prompt, /tmux|wait-for|inbox/); // "channel report" is the sanctioned completion path
   // Round-17: output discipline is part of the task text.
   assert.match(prompt, /输出纪律:verdict fence 在最前,其后最多 5 行结论要点/, "the discipline is pinned in the task");
 });

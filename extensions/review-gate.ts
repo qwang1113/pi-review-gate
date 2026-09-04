@@ -71,7 +71,8 @@ import {
   STRATEGIC_RESET_CHECKLIST,
   TASK_TEXT_MARKER,
 } from "../lib/constants.ts";
-import { buildAgentDirectives, SETTLED_TOOL_REMINDER } from "../lib/agent-directives.ts";
+import { SETTLED_TOOL_REMINDER } from "../lib/agent-directives.ts";
+import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
 import { detectShipCommands } from "../lib/ship-detect.ts";
@@ -5914,7 +5915,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const requested = normalizeTaskMode(params.mode.trim());
       if (requested === undefined) {
         return {
-          content: [{ type: "text", text: 'review-gate: unknown mode — use "loop", "explore", "normal", or "orchestrator".' }],
+          content: [{ type: "text", text: 'review-gate: unknown mode — use "loop", "explore", "normal", or "orchestrator". "plan" / "goal" / "review" are internal-only: the gate places them onto spawned sessions itself, an agent can never pick them.' }],
           details: {},
           isError: true,
         };
@@ -7058,13 +7059,19 @@ export default function reviewGate(pi: ExtensionAPI) {
     // guidance — no enforcement.
     systemPrompt += "\n\n" + EDIT_DISCIPLINE_DIRECTIVE;
 
-    // While the mode is undecided, ask the agent to classify the task
-    // IN-SESSION as its first action (set_gate_mode). Enforcement below stays
-    // full loop behavior until it does — never deciding is fail-closed.
-    if (state.taskMode === undefined) {
+    // Mode dispatch (single key): a spawned judge pane resolves to its
+    // reporting-shell entry and gets the shell discipline — never the
+    // classification directive (whose set_gate_mode is denied to it).
+    // Anything else undecided keeps the fail-closed directive.
+    const gateMode = resolveGateMode({
+      taskMode: state.taskMode,
+      judgeRole: readJudgeSideEnv(process.env)?.role,
+    });
+    if (gateMode === "review" || gateMode === "plan" || gateMode === "goal") {
+      systemPrompt += "\n\n" + MODE_REGISTRY[gateMode].prompt;
+    } else if (state.taskMode === undefined) {
       systemPrompt += "\n\n" + GATE_MODE_DECISION_DIRECTIVE;
     }
-
     // Order matters for latency: unmetRequirements() returns [] whenever the
     // session tracks no code AND no doc change (see lib/gate-state.ts), so the
     // fingerprint it would be handed cannot affect the outcome. Computing it
@@ -7081,14 +7088,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       return {
         systemPrompt:
           systemPrompt +
-          "\n\n## Explore 工作流（调查/排查）\n" +
-          "这是调查/排查任务，不是交付循环：优先只读工作 —— 查看、运行诊断/只读命令、推理；" +
-          "除非调查确实需要，否则避免改文件（例如临时探针）。" +
-          "本模式下门禁（review/precommit）为 advisory（建议性），自动续跑已禁用，" +
-          "任务满意完成即可自行 `declare_done` —— 由你判断何时算完成。" +
-          "ship 命令（git commit/push、gh pr）仍被完全拦截；" +
-          "若任务变成交付性工作，先 `set_gate_mode(\"loop\")` 升级到完整门禁循环（立即生效），再开始改代码。" +
-          "\n\n" + buildAgentDirectives("explore") +
+          "\n\n" + MODE_REGISTRY.explore.prompt +
           (problems.length ? `\nAdvisory 门禁状态：\n${problems.map((p) => `- ${p}`).join("\n")}` : ""),
       };
     }
@@ -7147,10 +7147,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // never rendered them. `gateArmed` gates the unmet-problems list below,
     // not the directives block.
     const loopDirectives =
-      state.taskMode === "loop"
-        ? "\n\n" + buildAgentDirectives() +
-          "\n改完一个单元就 `judge_submit`，别攒到最后；全绿了还有 copilot 周期和 `declare_done` 收尾。"
-        : "";
+      state.taskMode === "loop" ? "\n\n" + MODE_REGISTRY.loop.prompt : "";
     systemPrompt += loopDirectives;
 
     // MODE-UNDECIDED early return (2026-08-30): the Review Gate block below

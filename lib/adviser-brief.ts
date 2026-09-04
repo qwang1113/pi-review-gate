@@ -1,3 +1,5 @@
+import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
+
 /**
  * Adviser brief — the gate-side template for an `adviser` consultation.
  *
@@ -188,9 +190,7 @@ export function buildAdviserBrief(input: AdviserBriefInput): string {
     // detailed argumentation goes into the artifact JSON line.
     "输出纪律:结论 + 要点列表(每条一句),不写过程叙事;详细论证放 artifact 的 JSON 行。",
     "",
-    "完成(必须):输出最终结论后正常退出即可——进程退出即完成,主会话以你的输出为准,",
-    "不需要(也没有)任何额外信号。提问:有疑问时把问题作为最后一个 question fence（fenced JSON）输出并退出,",
-    "主会话会带着答案用同一 session id 重新拉起你。",
+    JUDGE_COMPLETION_DISCIPLINE,
   );
   return lines.join("\n");
 }

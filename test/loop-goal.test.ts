@@ -481,10 +481,10 @@ test("buildGoalAuditTask: the gate builds the complete auditor task, carryover +
   assert.match(task, /# 目标/);
   assert.match(task, /sess-9/);
   assert.match(task, /\{"gate":"READY"\|"BLOCKED"/);
-  // The completion contract is embedded: exit = done, question = resume.
-  assert.match(task, /进程退出即完成/);
-  assert.match(task, /同一 session id 重新拉起/);
-  assert.doesNotMatch(task, /tmux|wait-for|channel|inbox/);
+  // The completion contract is embedded: fence-and-stop, questions via ask_user.
+  assert.match(task, /verdict fence 收尾并停下/);
+  assert.match(task, /ask_user/);
+  assert.doesNotMatch(task, /tmux|wait-for|inbox/); // "channel report" is the sanctioned completion path
   // First audit (no carryover, no session): plain template, no stale claims.
   const first = buildGoalAuditTask("# 目标");
   assert.doesNotMatch(first, /carryover/i);
