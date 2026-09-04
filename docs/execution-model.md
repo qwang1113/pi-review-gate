@@ -210,7 +210,7 @@ spawn（无 shell）；门禁自己的执行路径也过同一份禁止清单，
   生成任务文本与 findings 流路径，注册审核目标。
 - dispatch：spawn 或续接该 role 的 session。
 
-verdict **不在返回值里**：judge 进程退出时门禁自己读它的结论并调
+verdict **不在返回值里**：judge 把本轮结论写进 channel report（不再是进程退出）后，门禁自己读它并调
 `record_review`——审核目标仍是 HEAD（审核期间新增 checkpoint ⇒ STALE ⇒
 BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重写历史
 不改变内容时绑定存活；`reset --soft` 实测 tree oid 不变）。主会话被唤醒时
