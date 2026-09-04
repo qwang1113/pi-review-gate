@@ -2757,6 +2757,36 @@ test("judge_wait applies the MESSAGE-DRIVEN criteria and returns the standard re
   assert.match(settle, /buildStandardReport\(\{/, "the settle wake-up uses the same builder");
 });
 
+test("ONE report is recorded ONCE — the wait and the settle share a single cursor", () => {
+  // THE RISK THE TWO WAKE-UP PATHS CREATE. Since 2026-09-05 a finished round
+  // can be picked up by either `judge_wait` (the opener was blocking) or the
+  // settle sweep (it was not). Both RECORD, so a report seen by both would be
+  // recorded twice — a second verdict for a round that only happened once.
+  //
+  // What makes that impossible is that neither path owns a cursor of its own:
+  // both write and read `JudgeEntry.lastReportId`. This is the assertion the
+  // report's own §7 said was missing — the behaviour is unit-tested on the
+  // wait side (test/judge-session-tools.test.ts: "the consumed report does not
+  // end a second wait"), and pinned HERE on the settle side, where driving the
+  // extension's hook from a unit test is not practical.
+  const recorder = windowOf("async function recordJudgeConclusion(", "\n  /**", "recordJudgeConclusion");
+  assert.match(recorder, /if \(last\.reportId === entry\?\.lastReportId\) return undefined;/,
+    "the settle path REFUSES a report the cursor already consumed");
+  assert.match(recorder, /advanceReportCursor\(sessionId, last\.reportId\)/,
+    "…and advances that same cursor once it has recorded one");
+  const advance = windowOf("function advanceReportCursor(", "\n  }", "advanceReportCursor");
+  assert.match(advance, /lastReportId: reportId/, "the settle cursor IS JudgeEntry.lastReportId");
+  // The wait writes the same field, through its own small helper.
+  const waitCursor = windowIn(JUDGE_TOOLS_SRC, "function rememberCursors(", "\n}", "rememberCursors");
+  assert.match(waitCursor, /\.\.\.entry, \.\.\.patch/, "the wait patches the SAME registry entry");
+  assert.match(toolBodyOf("judge_wait"), /rememberCursors\(deps, child\.judgeId, \{ lastReportId: observation\.reportId \}\)/,
+    "…with the report id, on the report branch");
+  // A cursor per path would be the defect this pins against.
+  assert.doesNotMatch(SRC, /lastWaitReportId|waitConsumedReportId/,
+    "no second, wait-private report cursor may appear");
+});
+
+
 
 
 test("STREAMING: every long-running gate tool publishes progress on its own onUpdate", () => {
