@@ -61,7 +61,7 @@ reviewer over the WHOLE change:
   starts at the last REVIEWED commit, so a chain of checkpoints since the
   last READY is all covered (round-9 P1); there is no second reviewer of
   kind. When the round's channel report lands, the opener records the verdict
-  itself (judge_wait does this; audit chains do the same) — you never carry
+  itself (the gate's settle path records it and wakes you with the standard report; audit chains do the same) — you never carry
   a verdict from one tool to another. The recording keeps every mechanical
   check: HEAD must still be the reviewed commit (a new checkpoint after
   prepare ⇒ STALE ⇒ BLOCKED), and a READY binds to the reviewed commit's TREE
@@ -304,14 +304,14 @@ must restore before finishing. Because the reviewed range is immutable,
 **you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
 that carry evidence (confirm each in the code first), leave Nits for the
 verdict. WAITING-WINDOW DISCIPLINE: (1) 有可实现的确定性工作(代码/测试/
-文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作后再调
-`judge_wait({role})`——门禁在里面读通道(新 report 落盘即结束、pane 消失即失败)
-并把已记录结论带回来,不需要你
-手写 bash;(3) **禁止**用结束 turn 把唤醒责任交给子会话——子会话可能报错/
+文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作就去做别的——
+新 channel report 落盘时门禁会用标准报告唤醒你（结论、证据位置、记录情况、待答问题），
+不需要你手写 bash 轮询，也没有轮询工具;
+(3) **禁止**用结束 turn 把唤醒责任交给子会话——子会话可能报错/
 崩溃/永远不退,而主会话是门禁的最后监督者,门禁未通过前不得停止自动循环
 (存活不变量)。
 The round ends when its channel report lands: the opener records the verdict
-from the report's exact bytes (judge_wait does this). The reviewer may ask
+from the report's exact bytes (the gate's settle path records it and wakes you with the standard report). The reviewer may ask
 questions through the channel (human in the pane and opener race, first answer
 wins) — answer with judge_answer, or resubmit the same role
 (`judge_submit` resumes the session, context intact).
@@ -333,8 +333,8 @@ unless the round was PREPARED (a
 registered `baseline..HEAD` target) and the verdict carries the child's `cwd`
 (measured with `pwd`, a required field of the verdict schema). While a judge
 pane is open, `declare_done` cascade-closes it (a recorded verdict stays
-recorded; an unrecorded round is abandoned — use `judge_close({role})` to
-abandon explicitly).
+recorded; an unrecorded round is abandoned — abandon explicitly by resubmitting with
+`fresh: true`).
 
 ### 项目经理（orchestrator）模式 —— 编排层，2026-08-29 新增
 
@@ -364,7 +364,7 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   `isNewsworthy`、不叫醒项目经理。`screenLooksBusy`、屏幕解析与按键模拟全部删除，
   tmux 在编排层只剩三件事：**判 pane 存活**、**开关 pane**、**给 pane 上色与标题**
   （纯展示，`select-pane -P/-T` + window 级 `setw pane-border-*`，一律不带 `-g`）。
-- **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：`judge_wait`、
+- **心跳是独立定时器，不是 agent 事件**（2026-08-30，第四轮 P0）：门禁内部等待、
   full precommit、任何长命令都发生在**同一个 turn 内部**，agent 既不 settle 也不
   结束 turn，挂在 `agent_settled` / `turn_end` 上的心跳因此必然超时 —— 一个正在等
   自己 reviewer 的健康子会话被报成「失联」，而回执建议的 `interrupt` / `close`

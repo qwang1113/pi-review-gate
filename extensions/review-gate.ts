@@ -171,7 +171,7 @@ import {
   readJudgeSideEnv,
   JUDGE_STREAM_ENV,
 } from "../lib/judge-side.ts";
-import { collectVerdictReport } from "../lib/judge-report.ts";
+import { collectVerdictReport, buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
 import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
@@ -222,7 +222,7 @@ import {
 // The judge tools that observe/end a session (judge_read / judge_close /
 // judge_wait) are registered from lib/, like the orchestration tools: this
 // file keeps only what it alone owns and hands the rest over as deps.
-import { registerJudgeSessionTools } from "../lib/judge-session-tools.ts";
+import { registerJudgeSessionTools, probeJudgeRound } from "../lib/judge-session-tools.ts";
 import { registerJudgeSpawnTools } from "../lib/judge-spawn-tools.ts";
 import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "../lib/judge-lifecycle.ts";
 // The judge tools that RELAY to a session (review_spawn / review_watch /
@@ -672,6 +672,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!run) throw new Error(`review-gate: internal tool ${name} is not registered`);
     return run(`internal-${name}`, params, signal, onUpdate, ctx);
   }
+  /** Bridge an internal wait's motion frames into the chain's own progress tail. */
+  function forwardWaitUpdates(progress: { tail?(text: string): void; step?(t: string): void } | undefined): ToolUpdate | undefined {
+    if (!progress) return undefined;
+    return (partial) => {
+      const text = (partial.content ?? []).map((c) => c.text).join("\n").slice(-500).trim();
+      if (!text) return;
+      if (progress.tail) progress.tail(text);
+      else progress.step?.(text.slice(0, 120));
+    };
+  }
   /** The text a tool result carries (its content joined). */
   function toolText(result: { content?: { type: string; text: string }[] }): string {
     return (result.content ?? []).map((c) => c.text).join("\n");
@@ -747,7 +757,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!hasChildren) return;
       try {
         pi.sendUserMessage(
-          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的通道 report、有无 pane 死亡与静默上限；用 judge_wait 取结论并继续，不要结束 turn。",
+          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的通道 report、有无 pane 死亡与静默上限；新 report 会以标准报告送达并继续，不要结束 turn。",
           { deliverAs: "followUp" },
         );
       } catch { /* session was replaced or shut down */ }
@@ -1348,6 +1358,8 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** Report keys this session already wrote (the channel re-read is the authority). */
   let reportedVerdictKeys = new Set<string>();
+  /** Open question ids already announced (in-memory; a restart re-announces — desired). */
+  let announcedRequestIds = new Set<string>();
 
   /**
    * Judge panes write one `report` per fenced verdict, on every settle.
@@ -4060,9 +4072,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Wait through the SAME implementation `judge_wait` uses (a new channel
     // report ends the round, a dead pane ends it as failed). Re-using it means
     // the audit cannot hang on a criterion the tool would have accepted.
-    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx, undefined, input.signal);
+    // Forward wait motion into the chain's own progress (else a minutes-long
+    // audit shows no motion at all).
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx, forwardWaitUpdates(input.progress), input.signal);
     // the pending-draft entry it consumes makes the second call a no-op.
-    const note = await recordJudgeConclusion(child.sessionId);
+    const conclusion = await recordJudgeConclusion(child.sessionId, ctx ?? latestCtx);
+    const note = conclusion?.text;
     // O-6 — WHOEVER DISPATCHED IT CLOSES IT. This goal-auditor is the gate's
     // OWN internal implementation of `propose_loop_goal`; the agent never asked
     // for it and never sees it in any receipt. Leaving it registered made
@@ -4173,7 +4188,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       };
     }
     onUpdate?.step?.("审计运行中（最长 10 分钟，完成即返回）");
-    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx, undefined, signal);
+    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx, forwardWaitUpdates(onUpdate), signal);
     onUpdate?.done?.("审计结束");
     // O-6 — the gate dispatched this plan auditor internally, so the gate
     // closes it. Placed before every return path so no branch can leak the child.
@@ -4187,7 +4202,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     const last = projectChannel(read.records).lastReport;
     await closeAuditor();
     const output = last ? (reportText(channelIO, last) ?? "") : "";
-    const parsed = output ? parseReviewOutput(output) : undefined;
+    const fenced = output ? (extractNewestFenceText(output) ?? output) : undefined;
+    const parsed = fenced ? parseReviewOutput(fenced) : undefined;
     if (!parsed) {
       return {
         ok: false,
@@ -4197,7 +4213,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           "直接再 `submit` 一次即可重跑审计。",
       };
     }
-    const findings = parseFenceFindings(output!);
+    const findings = parseFenceFindings(fenced!);
     const adjudication = adjudicatePlanAudit(parsed.verdict, findings);
     const record: PlanAuditRecord = {
       hash,
@@ -4460,36 +4476,105 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
 
-  async function recordJudgeConclusion(sessionId: string): Promise<string | undefined> {
+  /** Advance the consumed cursor so a surfaced-but-unrecorded report is not re-announced. */
+  function advanceReportCursor(sessionId: string, reportId: string): void {
+    const entry = judgeHierarchy[sessionId];
+    if (!entry || entry.lastReportId === reportId) return;
+    const reg = registerJudge(judgeHierarchy, { ...entry, lastReportId: reportId });
+    if (reg.ok) setHierarchy(reg.table);
+  }
+
+  async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean } | undefined> {
     try {
-      const child = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
-      if (!child || child.role === "adviser") return undefined; // an adviser's conclusion is advice, not a verdict
+      const live = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+      const entry = judgeHierarchy[sessionId];
+      const role = live?.role ?? entry?.role;
+      const openerId = live?.openerId ?? entry?.openerId;
+      if (!role || !openerId) return undefined;
       // THIS ROUND's report only. The channel accumulates every round, so its
       // newest report can be the PREVIOUS round's — a judge that asked a
       // question or went silent would then have last round's verdict recorded
-      // against work nobody judged. The opener's wait consumes reports in
-      // order (lastReportId cursor) and records each once; this path is for
-      // callers that did not go through the wait — it records only a report
-      // newer than the cursor.
-      const entry = judgeHierarchy[child.sessionId];
-      const target = judgeChannelTarget(child.openerId, child.sessionId);
+      // against work nobody judged. Reports are consumed in order (lastReportId
+      // cursor) and recorded each once.
+      const target = judgeChannelTarget(openerId, sessionId);
       const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
       const last = projectChannel(read.records).lastReport;
       if (!last) {
-        return `${child.role} 本轮还没有落 channel report（pane 可能还在跑，或已消失）——用 judge_wait 等，或用 judge_recover/close 处理。`;
+        return { text: `${role} 本轮还没有落 channel report（pane 可能还在跑，或已消失）——门禁会在 report 落盘后用标准报告唤醒；pane 已消失可用 judge_recover 重开。`, recorded: false };
       }
-      if (last.reportId === entry?.lastReportId) return undefined; // already recorded through the wait
+      if (last.reportId === entry?.lastReportId) return undefined; // already consumed
       const fullText = reportText(channelIO, last) ?? "";
-      if (!fullText.trim()) return `${child.role} 的 report 为空——什么都没有记录。`;
-      const recorded = await recordRoundOutput(fullText, repoOfChild(child), child.role);
-      if (entry) {
-        const reg = registerJudge(judgeHierarchy, { ...entry, lastReportId: last.reportId });
-        if (reg.ok) setHierarchy(reg.table);
+      if (!fullText.trim()) return { text: `${role} 的 report 为空——什么都没有记录。`, recorded: false };
+      if (role === "adviser") {
+        // Advice is not a verdict: surface it, never record it — but consume
+        // the cursor so the next settle does not announce it again.
+        advanceReportCursor(sessionId, last.reportId);
+        return { text: fullText, recorded: false };
       }
-      return recorded;
+      const childRoot = live ? repoOfChild(live) : (entry?.repoRoot ?? primaryRepoRoot);
+      const recorded = await recordRoundOutput(fullText, childRoot, role, ctx);
+      if (recorded === undefined) return { recorded: false }; // no ctx: stay armed, retry next settle
+      advanceReportCursor(sessionId, last.reportId);
+      return { text: recorded, recorded: true };
     } catch {
       return undefined; // recording is best-effort
     }
+  }
+
+  /**
+   * Wake on finished rounds (criterion 4): for every judge THIS session opened,
+   * probe the SAME criterion judge_wait used (a new channel report ends the
+   * round) and deliver the gate-built standard report — verdict, evidence
+   * pointer, record note, open questions — via followUp. Pane-dead rounds stay
+   * with the watchdog below (no second waiter). Returns true when it woke.
+   */
+  async function settleFinishedRounds(ctx: ExtensionContext): Promise<boolean> {
+    const mine = callerIdentity();
+    if (!mine) return false;
+    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
+    const deps = {
+      channelIO: () => channelIO,
+      channelHome: () => undefined,
+      tmux: (argv: readonly string[]) => runTmux(argv),
+      ownPane: () => ownPane,
+    };
+    const notices: string[] = [];
+    for (const [judgeId, entry] of Object.entries(judgeHierarchy)) {
+      if (entry.openerId !== mine) continue;
+      const target = judgeChannelTarget(entry.openerId, judgeId);
+      const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
+      const projection = projectChannel(read.records);
+      const freshQuestions = (projection.openRequests ?? []).filter((q) => !announcedRequestIds.has(q.requestId));
+      const obs = probeJudgeRound(deps, { openerId: entry.openerId, judgeId, paneId: entry.paneId }, entry.lastReportId);
+      if (!obs.done || obs.reason !== "report") {
+        // No new report: announce only brand-new questions (once each).
+        for (const q of freshQuestions) {
+          announcedRequestIds.add(q.requestId);
+          notices.push(buildStandardReport({ role: entry.role, judgeId, openQuestions: [{ title: q.title, options: q.options, requestId: q.requestId }] }));
+        }
+        continue;
+      }
+      const conclusion = await recordJudgeConclusion(judgeId, ctx);
+      if (!conclusion) continue; // consumed elsewhere between probe and record
+      for (const q of freshQuestions) announcedRequestIds.add(q.requestId);
+      notices.push(buildStandardReport({
+        role: entry.role,
+        judgeId,
+        verdict: obs.verdict,
+        findingsCount: obs.findingsCount,
+        conclusionExcerpt: entry.role === "adviser" ? conclusion.text : undefined,
+        streamPath: entry.streamPath,
+        recordedNote: conclusion.recorded ? conclusion.text : undefined,
+        unrecorded: !conclusion.recorded && entry.role !== "adviser" ? true : undefined,
+        openQuestions: freshQuestions.map((q) => ({ title: q.title, options: q.options, requestId: q.requestId })),
+      }));
+    }
+    if (notices.length === 0) return false;
+    pi.sendUserMessage(
+      notices.join("\n\n") + "\n\nContinue: drive the loop forward from the report(s) above. Do not summarize; execute.",
+      { deliverAs: "followUp" },
+    );
+    return true;
   }
 
   /**
@@ -4497,35 +4582,42 @@ export default function reviewGate(pi: ExtensionAPI) {
    * recorder behind both judge_wait's dep and recordJudgeConclusion, so one
    * round is never recorded twice through two paths.
    */
-  async function recordRoundOutput(fullText: string, root: string, role: string): Promise<string | undefined> {
+  async function recordRoundOutput(fullText: string, root: string, role: string, ctx?: unknown): Promise<string | undefined> {
     if (role === "reviewer") {
       // No live tool ctx here, so the last one the session bound is what
       // persists the record. The repo is named explicitly: a multi-repo
       // session refuses an unqualified record, and this record must not depend
       // on which repo was edited last.
-      if (!lastUiCtx) return undefined;
-      const result = await callTool("record_review", { reviewer_output: fullText, repo: root }, lastUiCtx);
+      const recordCtx = ctx ?? lastUiCtx;
+      if (!recordCtx) return undefined;
+      const result = await callTool("record_review", { reviewer_output: fullText, repo: root }, recordCtx);
       return toolText(result);
     }
     // Audits are recorded against what the gate dispatched — the record binds
     // to that text's hash, so remembering it is the gate's job, not the
     // agent's to re-paste. Goal and plan share one judge id per repo, so at
-    // most one kind may be pending: both pending is an inconsistent state and
-    // records NEITHER (a plan verdict must never land on a goal draft).
+    // most one kind may be pending: both pending self-heals (keep the newer,
+    // drop the older) so a verdict never lands on the wrong draft.
     const goalPending = pendingGoalAudits.get(root);
     const planPending = pendingPlanAudits.get(root);
     if (goalPending && planPending) {
-      return `同一 repo 下 goal 审计与 plan 审计同时挂着——门禁拒绝记录任何一个（防错绑）。先用 judge_close 关掉其中一个再重跑。`;
+      // Self-heal: keep the newer audit, drop the older one's pending entry so its
+      // late verdict can never land on the wrong draft. The dropped side simply
+      // re-runs (its pane and transcript stay on disk).
+      if (goalPending.startedAt >= planPending.startedAt) pendingPlanAudits.delete(root);
+      else pendingGoalAudits.delete(root);
+      return recordRoundOutput(fullText, root, role, ctx);
     }
     if (goalPending) {
-      if (!lastUiCtx) return undefined;
+      const recordCtx = ctx ?? lastUiCtx;
+      if (!recordCtx) return undefined;
       dropAudits(root);
       const audit = await callTool("record_goal_prereview", {
         goal: goalPending.draft,
         auditor_output: fullText,
         auditStartedAt: goalPending.startedAt,
         repo: root,
-      }, lastUiCtx);
+      }, recordCtx);
       return toolText(audit);
     }
     if (planPending) {
@@ -4604,8 +4696,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       "(derived from role+repo, so the judge's context carries across rounds), pane open vs. channel-queued vs. " +
       "fresh kill, and the channel verdict. You pass WHO and WHAT; you never pass a session id, a " +
       "title or a directory. It returns as soon as the round is SUBMITTED, not when the judge is " +
-      "done — the round ends when its channel report lands, and you then read the " +
-      "verdict with judge_wait (or judge_read for adviser, when nothing else is left to do). A living pane takes the round " +
+      "done — the round ends when its channel report lands, and the gate wakes you with " +
+      "the standard report (verdict, evidence pointer, record note, open questions). A living pane takes the round " +
       "through its channel (nothing is silently dropped): wait for it, or pass " +
       "fresh:true to kill the pane and start over.",
     parameters: Type.Object({
@@ -4771,7 +4863,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         `- pane: ${dispatch.paneId ?? child?.paneId ?? "(pending)"}`,
         `- transcript: ${dispatch.sessionDir ?? child?.sessionDir ?? "(pending)"}`,
         ...(streamPath ? [`- findings 流（边审边修）: ${streamPath}`] : []),
-        "- 本轮结束（通道 report 落盘）即完成；用 judge_wait({role}) 取结论（三件套）。现在别等，先做别的确定性工作。",
+        "- 本轮结束（通道 report 落盘）即完成；门禁会用标准报告唤醒你（结论、证据位置、记录情况、待答问题）。现在别等，先做别的确定性工作。",
       ];
       return {
         content: [{ type: "text", text: lines.join("\n") }],
@@ -4802,7 +4894,10 @@ export default function reviewGate(pi: ExtensionAPI) {
    * watchdog) arrives as this deps object, and nothing else of them does:
    * every rule they apply is unit-testable without a spawned judge.
    */
-  registerJudgeSessionTools(pi, {
+  // Management entries (judge_wait/judge_read/judge_close) live on the INTERNAL
+  // host only: agents never see them (criterion 5), the gate's own chains still
+  // call the one implementation through callTool.
+  registerJudgeSessionTools(internalHost, {
     resolveRepo: (requested) => {
       const resolved = resolveToolRepo(requested);
       if (resolved.ok) ensureHierarchyLoaded(resolved.root);
@@ -5019,8 +5114,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       "(from that round's own output), so you do not call this in the normal flow — only when you " +
       "have a reviewer output the gate could not read. " +
       "Records the verdict of an independent code/doc review. Pass the FULL raw output of a REAL, " +
-      "independent reviewer run (do not hand-write the verdict). Without `fence`, the gate parses " +
-      "every JSON fence (worst verdict wins); with `fence`, only that round's fence decides.",
+      "independent reviewer run (do not hand-write the verdict). The verdict is read from the output's " +
+      "newest JSON fence (worst verdict wins only within that one fence); the full output stays evidence.",
     parameters: Type.Object({
       reviewer_output: Type.String({ description: "Complete raw output from the reviewer (kept as evidence; the verdict is read from its newest fence)" }),
       repo: Type.Optional(Type.String({
@@ -6329,6 +6424,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Judge panes report their verdict to the opener's channel on every
     // settle (fenced verdict ⇒ report, anything else ⇒ silence).
     if (readJudgeSideEnv(process.env)) await maybeWriteVerdictReport(ctx);
+    // Finished rounds wake in every mode except normal (gate fully off): explore
+    // is advisory on enforcement, not deaf — its reports still land and record.
+    if (state.taskMode !== "normal" && (await settleFinishedRounds(ctx))) return;
     // Explore and normal never auto-continue — that is their defining
     // difference from loop. This check MUST stay before the loopArmed check:
     // explore/normal-mode edits set loopArmed = true in tool_result, and only
@@ -6452,6 +6550,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         sessionIdsBySession.set(c.sessionId, c.title);
       }
     }
+    // (Reports already settled above; the watchdog below keeps pane-dead rounds.)
     if (childSnapshots.length > 0) {
       const childVerdict = classifyChildren(childSnapshots, Date.now());
       const childNotice = buildChildWaitNotice(childVerdict, sessionIdsBySession);

@@ -145,7 +145,7 @@ async function doSpawn(
   // a report is only ever recorded against the kind that is pending.
   const pending = deps.pendingAuditKind(root);
   if (pending !== undefined && pending !== kind) {
-    return fail(`review-gate: 已有 ${pending === "goal" ? "目标" : "计划"}审计挂着——等它结束（judge_wait）或关掉（judge_close）后再开${kind === "goal" ? "目标" : "计划"}审计。两种审计共用一个 judge，串行才不会错绑结论。`);
+    return fail(`review-gate: 已有 ${pending === "goal" ? "目标" : "计划"}审计挂着——等它的标准报告送达后再开${kind === "goal" ? "目标" : "计划"}审计。两种审计共用一个 judge，串行才不会错绑结论。`);
   }
   const role = "goal-auditor";
   const earlyJudgeId = judgeSessionIdFor(role, shortRepoHash(root));

@@ -98,11 +98,11 @@ test("buildChildWaitNotice names the terminated child, the recovery action and t
   const notice = buildChildWaitNotice(v, new Map([["rg-reviewer-live", "review-live"]]));
   assert.ok(notice, "a notice is produced");
   assert.match(notice, /review-dead/, "the dead child is named");
-  assert.match(notice, /进程已退出/, "session-ended reason is stated in PROCESS terms");
+  assert.match(notice, /pane 已消失/, "session-ended reason is stated in pane terms");
   assert.doesNotMatch(notice, /pane_dead|capture-pane/, "the hosted wait no longer teaches pane-level probes");
   assert.match(notice, /audit-silent/, "the silent child is named");
   assert.match(notice, /静默超过上限/, "silent-timeout reason is stated");
-  assert.match(notice, /judge_read/, "the recovery action (read its output) is stated");
+  assert.match(notice, /标准报告会送达/, "the recovery action (wait for the standard report) is stated");
   assert.match(notice, /review-live/, "the in-flight child is named");
   assert.match(notice, /review-live/, "its session id is named");
   assert.match(notice, /不要结束 turn/, "the hosted-wait discipline is explicit");

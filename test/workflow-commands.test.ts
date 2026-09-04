@@ -234,7 +234,7 @@ test("the waiting discipline teaches the channel-report completion contract", ()
   for (const rel of ["AGENTS.md", join("skills", "review-loop", "SKILL.md")]) {
     const text = readFileSync(join(root, rel), "utf8");
     assert.match(text, /channel report|通道/, `${rel} teaches report-based completion`);
-    assert.match(text, /judge_wait/, `${rel} names the wait that consumes it`);
+    assert.match(text, /标准报告/, `${rel} names the standard-report wake`);
     assert.doesNotMatch(text, /进程退出|exit-code/, `${rel} no longer teaches the retired process-exit check`);
   }
 });

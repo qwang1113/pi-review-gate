@@ -225,10 +225,9 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    **Waiting-window discipline (v4)** — 主会话是门禁的最后监督者,门禁未通过
    前不得停止自动循环(round-18 存活不变量):
    1. 有可实现的确定性工作(代码/测试/文档/其他 repo 事务)→ 优先做掉,不要进入等待。
-   2. 确认没有任何可做的工作后,才进入阻塞等待——调 `judge_wait({role})`,门禁在里面
-      读通道:新 report 落盘即结束(门禁当场记录结论)、pane 消失即失败(用
-      `judge_recover` 同 id 重开续 transcript 继续,或用 `judge_close` 放弃)。超时
-      返回当前进度(状态 + findings 计数),而不是失败——决定权在你。
+   2. 确认没有任何可做的工作就去做别的——新 channel report 落盘时门禁会用标准报告
+      唤醒你（结论、证据位置、记录情况、待答问题），没有轮询工具。pane 消失但结论
+      未落盘时本轮不算结束（用 `judge_recover` 同 id 重开续 transcript 继续）。
    3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不退)。
       `agent_settled` 会注入托管等待指令;主动托管远比被动拉起可靠。
    因为审核范围是 immutable commit,工作区编辑不失效本轮。
@@ -330,8 +329,8 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    must be bound to the SAME (current) tree — the reviewed HEAD commit tree;
    if a new checkpoint landed since the READY, run the affected step again.
    It also rejects while a judge child session is still open: finish the
-   round (let the judge exit — the gate records its verdict then — or
-   `judge_close({role})`) first.
+   round (wait for the standard report — the gate records its verdict on arrival —
+   or resubmit with `fresh: true`) first.
 
    It also rejects while a Copilot cycle is still open or the loop goal is
    unapproved — those are completion requirements, not ship requirements.

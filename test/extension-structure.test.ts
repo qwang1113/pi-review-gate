@@ -236,7 +236,7 @@ function toolBodyOf(tool: string): string {
 
 /** The extension's wiring of the judge session tools — deps, nothing else. */
 function judgeToolsWiring(): string {
-  return windowOf("registerJudgeSessionTools(pi, {", "\n  });", "judge tools wiring");
+  return windowOf("registerJudgeSessionTools(internalHost, {", "\n  });", "judge tools wiring");
 }
 
 /**
@@ -2303,6 +2303,28 @@ test("the TEN advanced entries are not registered anywhere an agent can see", ()
   }
 });
 
+test("management entries are implemented but invisible: judge_wait/judge_read/judge_close", () => {
+  // Criterion 5: polling, reading conclusions and closing panes belong to the
+  // gate. The bodies stay (the gate's own audit chains call them through
+  // callTool), but no agent may see the names.
+  for (const tool of ["judge_wait", "judge_read", "judge_close"]) {
+    assert.ok(!SRC.includes(`pi.registerTool({\n    name: "${tool}"`),
+      `${tool} must not be registered with pi`);
+    assert.ok(JUDGE_TOOLS_SRC.includes(`name: "${tool}"`),
+      `${tool}'s implementation must stay (gate chains call it)`);
+  }
+  assert.match(SRC, /registerJudgeSessionTools\(internalHost,/,
+    "the family must be wired through internalHost, not pi");
+  assert.doesNotMatch(SRC, /registerJudgeSessionTools\(pi,/,
+    "pi must never receive the management family");
+  // …while the intent entries stay visible: submit spawns rounds, spawn opens
+  // goal/plan audits, answer replies through the gate.
+  assert.ok(SRC.includes(`pi.registerTool({\n    name: "judge_submit"`),
+    "judge_submit stays agent-visible");
+  assert.match(SRC, /registerJudgeSpawnTools\(pi,/,
+    "the spawn family (spawn/answer/recover) stays agent-visible");
+});
+
 test("the internal host captures an implementation WITHOUT exposing it", () => {
   const at = SRC.indexOf("function captureInternalTool(");
   assert.ok(at > 0, "there is one capture point");
@@ -2884,7 +2906,7 @@ test("SECURITY: the Copilot requirement never touches the SHIP gate (it would de
   const doneStart = SRC.indexOf('name: "declare_done"');
   assert.match(SRC.slice(doneStart, doneStart + 7000), /copilotProblemsFor\(/); // +1000 for the declare_done cascade block
   const settledStart = SRC.indexOf('pi.on("agent_settled"');
-  assert.match(SRC.slice(settledStart, settledStart + 4000), /copilotProblemsFor\(/);
+  assert.match(SRC.slice(settledStart, settledStart + 4600), /copilotProblemsFor\(/); // +600 for the settleFinishedRounds wake block
 });
 
 test("a FAILED ship arms nothing; a successful PR ship arms the repo it ran in", () => {
@@ -3626,10 +3648,12 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   const setAt = body.indexOf("pendingGoalAudits.set(root");
   assert.ok(acceptedAt > 0 && setAt > acceptedAt, "the draft is recorded after the dispatch is accepted");
   // …and the recording side closes the loop with that same draft.
-  const recAt = SRC.indexOf("async function recordJudgeConclusion(");
+  // …and the recording side closes the loop with that same draft (via the single
+  // recorder recordRoundOutput, which recordJudgeConclusion calls).
+  const recAt = SRC.indexOf("async function recordRoundOutput(");
   const rec = SRC.slice(recAt, recAt + 4000);
-  assert.match(rec, /callTool\("record_goal_prereview", \{/);
-  assert.match(rec, /goal: goalPending\.draft/);
+  assert.match(rec, /callTool\("record_goal_prereview", \{/, "recording routes through record_goal_prereview");
+  assert.match(rec, /goal: goalPending\.draft/, "the recorded draft is the pending one");
   assert.match(rec, /auditStartedAt: goalPending\.startedAt/);
   assert.match(rec, /dropAudits\(root\)/, "a recorded audit does not linger (and persists the drop)");
 });
@@ -3669,14 +3693,14 @@ test("a judge's verdict is recorded from THIS round's report, never an older one
   assert.match(body, /projectChannel\(read\.records\)\.lastReport/,);
   assert.match(body, /last\.reportId === entry\?\.lastReportId/, "an already-consumed report is not recorded twice");
   assert.match(body, /reportText\(channelIO, last\)/, "the recorder gets the report's exact bytes");
-  assert.match(body, /recordRoundOutput\(fullText, repoOfChild\(child\), child\.role\)/,
-    "one recorder serves both the wait and the stragglers");
+  assert.match(body, /recordRoundOutput\(fullText, childRoot, role, ctx\)/,
+    "one recorder serves both the wait and the stragglers, with an explicit ctx");
   const recorderAt = SRC.indexOf("async function recordRoundOutput(");
   assert.ok(recorderAt > 0, "the single recorder must exist");
   assert.match(SRC.slice(recorderAt, recorderAt + 1500), /repo: root/, "the record names its repo explicitly");
-  // A question is not a verdict: questions never become reports (the judge
-  // side only writes fenced verdicts), so there is no question branch here.
-  assert.match(body, /child\.role === "adviser"/, "advice is not a verdict");
+  // Advice is not a verdict: an adviser's report is surfaced, never recorded —
+  // but its cursor still advances so the next settle does not re-announce it.
+  assert.match(body, /role === "adviser"/, "advice is surfaced, not recorded");
 });
 
 

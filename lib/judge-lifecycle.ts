@@ -65,12 +65,11 @@ export function clampWaitTimeout(requestedMs: number | undefined): number {
 }
 
 /**
- * Mechanical wait discipline, returned by `judge_wait` itself (goal criterion
- * 6): blocking is the LAST resort, not the reflex.
+ * Mechanical wait discipline: blocking is the LAST resort, not the reflex.
  */
 export const WAIT_DISCIPLINE_HINT =
   "等待纪律：还有确定性工作（代码/测试/文档/其他 repo 事务）就先做掉，别在这里空等——" +
-  "pane 没有完成信号，完成靠 judge_wait 取结论，它只用于「确实没有别的可做」时阻塞。";
+  "pane 没有完成信号，完成以 channel report 落盘为准；门禁用标准报告唤醒，阻塞等待只是最后手段。";
 
 
 

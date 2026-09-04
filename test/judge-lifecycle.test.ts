@@ -109,8 +109,8 @@ test("severity classification covers the forms judges actually write", () => {
 // (The shared wait formatter is gone with the pane migration: replies are
 // built where the criteria live now. The discipline hint survives — and no
 // longer promises a wake that panes cannot send.)
-test("the wait discipline names judge_wait, not a wake", () => {
+test("the wait discipline names the report wake, not a wait tool", () => {
   assert.match(WAIT_DISCIPLINE_HINT, /等待纪律/);
-  assert.match(WAIT_DISCIPLINE_HINT, /judge_wait/);
-  assert.doesNotMatch(WAIT_DISCIPLINE_HINT, /自动唤醒/);
+  assert.match(WAIT_DISCIPLINE_HINT, /标准报告唤醒/);
+  assert.doesNotMatch(WAIT_DISCIPLINE_HINT, /judge_wait/);
 });

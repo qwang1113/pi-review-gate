@@ -137,9 +137,9 @@ export function buildChildWaitNotice(
       ...verdict.terminated.map(({ child, reason }) =>
         `- ${child.role} ${child.title}（session ${child.sessionId}）— ${
           reason === "session-ended"
-            ? "进程已退出"
+            ? "pane 已消失"
             : "静默超过上限"
-        }。用 judge_read 读取它已产出的输出（门禁在它退出时已经把裁决记好了）：没有结论就 judge_close 后重新派发。`,
+        }。若它的 report 已落盘，标准报告会送达并记入链；没有结论就修完重派（judge_recover 同 id 续接）。`,
       ),
     );
   }
@@ -150,9 +150,8 @@ export function buildChildWaitNotice(
         const label = sessionIds.get(child.sessionId);
         return `- ${child.role} ${child.title}（session ${child.sessionId}${label ? `, label ${label}` : ""}）`;
       }),
-      "等待纪律：先做完可以做的确定性工作；确认没有可做的工作后，用 bash 托管等待——" +
-        "在一次 bash 调用里同时盯三件事（进程是否已退出——`kill -0 <pid 文件第一段>`；",
-      "以及它的 session jsonl 里是否已经出现 verdict fence），任一命中就结束等待并继续。" +
+      "等待纪律：先做完可以做的确定性工作；确认没有可做的工作就去做别的——" +
+        "新 channel report 落盘时门禁会用标准报告唤醒你。" +
         "不要结束 turn 把唤醒责任交给子会话：它可能已经退出或永远不会发信号。",
     );
   }

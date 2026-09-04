@@ -218,8 +218,8 @@ export interface PaneJudgeWaitObservation {
  * scan — the transcript stays the long memory, not the signal.
  */
 export function probeJudgeRound(
-  deps: JudgeSessionToolDeps,
-  child: JudgeChildRecord,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane">,
+  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId">,
   consumedReportId: string | undefined,
 ): PaneJudgeWaitObservation {
   const io = deps.channelIO();
