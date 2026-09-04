@@ -63,9 +63,13 @@
   - `lib/copilot-review-tools.ts`：`request_copilot_review`、
     `check_copilot_review`（L7 的两个工具；它们要打的 gh 电话在
     `lib/copilot-gh.ts`，经注入的 `gh` seam 调用，所以每条分支都能用假实现单测）。
-  - `lib/judge-session-tools.ts`：已收归 internalHost 的三个管理入口（`judge_read` /
-    `judge_close` / `judge_wait`，实现保留供门禁链调用，agent 不可见；等待判据是通道
-    report / pane 死亡）。
+  - `lib/judge-session-tools.ts`：两个作用在既有 pane judge 上的入口 ——
+    `judge_close`（只在 internalHost，门禁自己的审计链收自己派的 judge）与
+    `judge_wait`（**同一实现注册到 internalHost 与 agent 面**，`registerJudgeWaitTool`；
+    消息驱动：新 channel report / pane 死亡 / judge 提问 / 新 finding 任一到达即返回，
+    返回值由 `judge-report.ts` 的标准报告组装）。`judge_read` 已于 2026-09-05 删除
+    （零调用死路径）。
+
   - `lib/judge-spawn-tools.ts`：`judge_spawn` / `judge_answer` / `judge_recover`
     （pane judge 的生命周期工具；agent 只表达 goal / plan 意图，审计任务由门禁组装）。
   - `lib/orchestrator-tools.ts`：`orchestrator_plan`、`orchestrator_notify`。
@@ -250,11 +254,13 @@ shell（heartbeat、对话框竞态，复用子会话通道原语，不另起通
 目录 helper（进程派生已删），`judge-session.ts` 把 transcript 当作长记忆（结论走交卷工具，
 不再从它解析），
 `judge-lifecycle.ts` 剩下 opener 限定的工作目录（含无人认领目录的 TTL/旧格式回收选择器）、
-超时钳制、等候纪律与审计裁决（派单/等待判据已随进程模型删除），`judge-report.ts` 只剩 opener 侧
-标准报告（扒取半边已删），`judge-prompt.ts` 装配系统提示（角色定义 + 共同协议），
+超时钳制与审计裁决（派单/等待判据已随进程模型删除；**等待纪律 2026-09-05 搬到
+`agent-directives.ts`**，因为项目经理侧要用同一份措辞、只换工具名），`judge-report.ts`
+只剩 opener 侧标准报告（扒取半边已删），`judge-prompt.ts` 装配系统提示（角色定义 + 共同协议），
 `child-watch.ts` 按 pane 存活 + 通道活跃度分类等待中的子会话；
-`judge-session-tools.ts` 是已收归 internalHost 的三个管理入口
-（`judge_read` / `judge_close` / `judge_wait`，实现保留供门禁链调用，agent 不可见），
+`judge-session-tools.ts` 是作用在既有 pane judge 上的两个入口
+（`judge_close` 只在 internalHost；`judge_wait` 同一实现同时注册到 internalHost 与 agent 面），
+
 `judge-spawn-tools.ts` 是开/代答/恢复三个生命周期工具——注意这些工具族都不在
 扩展里，见 §1.2。进程时代的派发与唤醒（`spawnJudgeProcess` / `decideJudgeDispatch` /
 `evaluateJudgeWait` / `lib/judge-watch.ts` 整模块）已随 pane 迁移整体删除：
@@ -427,7 +433,8 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | --- | --- |
 | `adviser-brief.ts` | 组装 adviser 咨询的 brief：主会话 transcript 指针 + 结论落盘路径，第二次起带上轮结论与其后改动 |
 | `advisory-prepare-tools.ts` | **内部实现**（不注册给 pi）：组装 adviser brief 与 goal 审计任务文本，由 `judge_submit` / `propose_loop_goal` 调用 |
-| `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表 |
+| `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表；**等待纪律的唯一出处**（`buildWaitDiscipline`：子会话侧 `judge_wait`、项目经理侧 `orchestrator_wait` 共用同三条，只换工具名与消息种类） |
+
 | `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限；模型走 `agents.arbiter.slots[0]`（配置层），不再硬编码 |
 | `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义 |
 | `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
@@ -455,12 +462,15 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：一个 host，一个工具 |
 | `gate-modes.ts` | 门禁模式注册表（唯一实现）：八种模式各有提示词模板加工具集加流程规则（plan/goal/review 仅内部置入）；`resolveGateMode` 单派发；禁跑工具表与完成纪律的 single source（`judge-side.ts` 只 re-export，各任务 builder 只引用） |
 | `hierarchy.ts` | opener 注册表与唯一的跨级裁判：谁开的 review 谁操作，其他会话一律 fail-closed（纯函数，IO 经 seam）；注册表与两类 pending 按 repo 落盘恢复（`parseHierarchySnapshot` fail-closed 解析），条目带 opener 派发的轮次号 `roundSeq`；死 pane 异主条目由触达者丢弃（不再过户——opener 限定的 id 不会碰撞）、活 pane 保持拒绝，重启不死锁 |
-| `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：opener 限定的会话文件放哪（含无人认领目录的 TTL/旧格式回收选择器）、超时钳制、等候纪律、审计裁决是否阻塞（派单/等待判据已随进程模型删除） |
+| `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：opener 限定的会话文件放哪（含无人认领目录的 TTL/旧格式回收选择器）、超时钳制、审计裁决是否阻塞、`awaitRoundReport`（门禁自己的 goal/plan 审计链要的是**本轮结束**，所以它在消息驱动的 `judge_wait` 之上反复调同一个工具直到 report/pane-dead，共享一份总预算——不是第二个等待循环）；派单/等待判据已随进程模型删除，等待纪律 2026-09-05 搬到 `agent-directives.ts` |
+
+
 | `judge-pane.ts` | review pane 的开/关/探活：argv 全复用 `orchestrator-tmux.ts`，颜色标题复用 `orchestrator-pane-decor.ts`，tmux 经注入的 runner（单测用假实现） |
 | `judge-process.ts` | judge 身份（opener 限定的确定性会话 id：同 opener 跨 pane/轮/重启复用、换 opener 全新）与 scratch 目录 helper；并把 judge 的 `$TMPDIR` 指向**每会话专属**的 scratch 目录（`judgeScratchDir`，以 session id 为键、随新 id 自动迁移）——reviewer 的临时 review worktree 落在那里，门禁按 `reviewScratchWorktrees` 在 pane 回收后精确回收 |
 | `judge-prompt.ts` | judge 会话的系统提示装配：角色定义 + 共同协议 |
 | `judge-session.ts` | 把 judge transcript 当作长记忆（结论走交卷工具，不再从它解析） |
-| `judge-session-tools.ts` | 已收归 internalHost 的三个管理入口（`judge_read` / `judge_close` / `judge_wait`：轮询、读结论、关 pane；实现保留供门禁链调用，agent 不可见；opener 校验与等待判据在内） |
+| `judge-session-tools.ts` | 作用在既有 pane judge 上的两个入口：`judge_close`（只在 internalHost，门禁审计链自收）与 `judge_wait`（`registerJudgeWaitTool` 把**同一实现**注册到 internalHost 与 agent 面）；等待是**消息驱动**的 —— 新 channel report / pane 死亡 / judge 提问 / 新 finding 任一命中即返回，去重游标是 entry 上的 `lastReportId` + `lastFindingCount` 与会话侧已宣告问题集；opener 校验也在内。`judge_read` 已删（2026-09-05） |
+
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
 | `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论**本体**直写 channel report（无 fence 合成、无解析）；**签名按角色收窄**——reviewer / goal-auditor 只有 verdict + findings + cwd（传 notes 显式拒绝且不占额度），adviser 保留 notes（它的产出就是正文）；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度 |
 | `judge-report.ts` | opener 侧标准报告（wake-up 内容：verdict、证据位置、记录情况、待答问题；transcript 扒取半边已随交卷工具删除） |
@@ -523,7 +533,8 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit） |
 | `ship-gate-hook.ts` | **L1 `tool_call` 钩子的入口**：`evaluateToolCall` 分派到两条臂，`ShipGateHookDeps` 汇总两条臂的 deps |
 | `ship-gate-edit-guard.ts` | L1 的 **edit/write 臂**：敏感文件安全底线（`sensitiveEditBlock`，`normal` 模式也生效）、gate-owned 豁免、L8 目标门、orchestrator 写限制、L6 标签检查；检查次序即契约 |
-| `ship-gate-bash.ts` | L1 的 **bash 臂 = ship gate 本体**：tmux backstop、`/gate-bypass`、ship 识别、L5/AI 署名、message-only rewrite 豁免、逐 repo 门禁、一次性仲裁令牌、拦截文案（`describeShips` / `buildShipBlockReason`） |
+| `ship-gate-bash.ts` | L1 的 **bash 臂 = ship gate 本体**：tmux backstop、`/gate-bypass`、ship 识别、L5/AI 署名、message-only rewrite 豁免、逐 repo 门禁、一次性仲裁令牌、拦截文案（`describeShips` / `buildShipBlockReason`）；另有唯一一条**只提示不拦截**的探测 `detectHandRolledWaitPolling`（`sleep ≥30s` + 读通道/findings 流 ⇒ 提示改用 `judge_wait`，经 deps 的 `hint` seam 投递、每会话去重） |
+
 | `task-mode.ts` | 会话门禁模式模型：normal < explore < loop < orchestrator 与升降级规则 |
 | `text-appeal.ts` | 启发式文本拦截的申诉口子（A 类） |
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |

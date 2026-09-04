@@ -29,6 +29,8 @@
  */
 
 import { STALL_MOTION_MAX_AGE_SEC } from "./loop-stall.ts";
+import { WAIT_DISCIPLINE_HINT } from "./agent-directives.ts";
+
 
 export interface ChildSnapshot {
   title: string;
@@ -150,9 +152,8 @@ export function buildChildWaitNotice(
         const label = sessionIds.get(child.sessionId);
         return `- ${child.role} ${child.title}（session ${child.sessionId}${label ? `, label ${label}` : ""}）`;
       }),
-      "等待纪律：先做完可以做的确定性工作；确认没有可做的工作就去做别的——" +
-        "新 channel report 落盘时门禁会用标准报告唤醒你。" +
-        "不要结束 turn 把唤醒责任交给子会话：它可能已经退出或永远不会发信号。",
+      WAIT_DISCIPLINE_HINT,
+
     );
   }
   return lines.join("\n");

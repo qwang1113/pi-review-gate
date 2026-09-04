@@ -25,7 +25,12 @@ import {
   type ShipGateHookDeps,
 } from "../lib/ship-gate-hook.ts";
 import { sensitiveEditBlock } from "../lib/ship-gate-edit-guard.ts";
-import { buildShipBlockReason, describeShips } from "../lib/ship-gate-bash.ts";
+import {
+  buildShipBlockReason,
+  describeShips,
+  detectHandRolledWaitPolling,
+} from "../lib/ship-gate-bash.ts";
+
 import { defaultProjectConfig } from "../lib/project-config.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { DEFAULT_MAX_ROUNDS } from "../lib/constants.ts";
@@ -46,6 +51,8 @@ function makeDeps(over: Partial<ShipGateHookDeps> & { taskMode?: () => TaskMode 
   const state = emptyState("s1", DEFAULT_MAX_ROUNDS);
   const base: ShipGateHookDeps = {
     noteContext: () => { calls.push("noteContext"); },
+    hint: (message) => { calls.push(`hint:${message.slice(0, 24)}`); },
+
     isEditTool: (t) => t === "edit" || t === "write",
     isJudgeSession: () => false,
     cwd: () => cwd,
@@ -312,3 +319,55 @@ test("a judge session is refused outward tools before either arm", async () => {
   const normal = await evaluateToolCall(plain.deps, { toolName: "judge_submit", input: {} }, {});
   assert.equal(normal, undefined, "outside a judge pane the same tool passes the hook");
 });
+
+// ---------------------------------------------------------------------------
+// The hand-rolled WAIT hint (D6, 2026-09-05). It HINTS and never blocks: the
+// command shape it recognises — a long sleep next to a read of the gate's own
+// channel or findings stream — is exactly what a session reached for when
+// `judge_wait` was off the agent surface, and it cost nine minutes because a
+// turn that never ends never settles, so the wake-up never fires.
+
+test("the polling detector needs BOTH a long sleep and a channel/stream read", () => {
+  const hit = detectHandRolledWaitPolling(
+    "for i in 1 2 3; do sleep 60; cat /home/u/.pi/rg-channels/orch/child.jsonl; done",
+  );
+  assert.ok(hit, "a loop that sleeps and reads the channel is the shape");
+  assert.match(hit!.reason, /judge_wait/, "the hint names the tool that does this right");
+  assert.match(hit!.reason, /不拦截/, "…and says out loud that it is not a block");
+
+  assert.equal(
+    detectHandRolledWaitPolling("sleep 300"),
+    undefined,
+    "a long sleep alone is somebody's own business",
+  );
+  assert.equal(
+    detectHandRolledWaitPolling("cat .pi/review-stream/r.jsonl"),
+    undefined,
+    "reading the stream once is a diagnostic, not a wait",
+  );
+  assert.equal(
+    detectHandRolledWaitPolling("sleep 2 && cat .pi/review-stream/r.jsonl"),
+    undefined,
+    "a two-second pause is not a wait",
+  );
+  assert.ok(
+    detectHandRolledWaitPolling("sleep 280; grep P0 .pi/review-stream/review-x.jsonl"),
+    "the measured shape (sleep 280 + grep the stream) is recognised",
+  );
+});
+
+test("the hint is delivered through the hook and the command still runs", async () => {
+  const r = makeDeps();
+  const out = await evaluateToolCall(
+    r.deps,
+    { toolName: "bash", input: { command: "sleep 120; cat .pi/review-stream/r.jsonl" } },
+    {},
+  );
+  assert.equal(out, undefined, "a hint must never block the command");
+  assert.ok(r.calls.some((c) => c.startsWith("hint:")), "…and the agent is told there is a tool");
+
+  const quiet = makeDeps();
+  await evaluateToolCall(quiet.deps, { toolName: "bash", input: { command: "npm test" } }, {});
+  assert.ok(!quiet.calls.some((c) => c.startsWith("hint:")), "an ordinary command says nothing");
+});
+

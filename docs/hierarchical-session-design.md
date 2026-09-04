@@ -2,8 +2,16 @@
 
 > 状态：已实现（pane 化落地轮 READY）。本文是过程快照，部分机制已被
 > 「门禁做中间人的统一会话模型」轮取代：提问走 `ask_user`（不再经 question
-> fence）、管理入口（`judge_wait`/`judge_read`/`judge_close`）收归门禁；
+> fence）、管理入口收归门禁；
 > 以模式注册表（`lib/gate-modes.ts`）与实现为准。
+>
+> **2026-09-05 再更新（以实现为准）**：`judge_read` 已**删除**（零调用死路径）；
+> `judge_close` 仍只在门禁内部；`judge_wait` 则**重新回到 agent 面**——同一实现
+> 同时注册在 internalHost 与 agent 面，并改为**消息驱动**：新 channel report /
+> pane 死亡 / judge 提问 / 新 finding 任一到达即返回。原因是「禁止结束 turn 等唤醒」
+> 与「agent 面没有等待工具」互相矛盾，实测让一个会话把自己锁在 280s 的 bash sleep 里
+> 九分钟，其间已落盘的 report 无人记录。
+
 > 背景结论见调研（三种通信：judge 落 verdict fence 即完成 / 编排文件通道 / 人机框），
 > 本文把前两者统一为**上下级调用树**。
 >
@@ -62,12 +70,14 @@ opener 能从门禁拿到的关于自己 review 的信息，只有三件，不�
 | 工具 | 动作 | 说明 |
 |---|---|---|
 | `judge_spawn` | 新增（限 goal / plan） | 只开无需 checkpoint 前置链的 review（goal / plan）。checkpoint review **不能**经此直开——precommit → checkpoint → prepare 链（AGENTS.md 现行保证）仍只能由 `judge_submit` 内部持有。是 goal / plan review 的唯一 agent 可见入口 |
-| `judge_wait` | 复用并泛化 | 今天的 `judge_wait` 只懂进程三判据；改为同一骨架（`poll-wait.ts`）换判据：读通道回执三件套。未结束返回进度（状态 + findings 计数） |
+| `judge_wait` | 复用并泛化 | 今天的 `judge_wait` 只懂进程三判据；改为同一骨架（`poll-wait.ts`）换判据：读通道回执三件套。未结束返回进度（状态 + findings 计数）。**2026-09-05：判据再扩为消息驱动（+ judge 提问 / 新 finding），并同时注册回 agent 面** |
+
 | `judge_answer` | 新增 | 对应 `orchestrator_answer`：opener 代答自己 review 的框（原文/序号/唯一子串，歧义拒绝）。非 opener 调用直接拒绝 |
 | `judge_close` | 复用 | 语义不变（起不来/卡死的回收），加一条 opener 校验 |
 | `judge_recover` | 新增 | 对应 `orchestrator_recover`：pane 消失但 verdict 未落盘时，opener 以同一 session id 重开 pane 续接 transcript 继续本轮。pane 还活着或 tmux 读不出时拒绝（与 orchestrator_recover 同理），非 opener 调用直接拒绝 |
 | `judge_submit` | 重实现为编排糖 | 对外语义不变（一次调用跑 precommit → checkpoint → prepare → spawn → wait → record）。checkpoint review 的 spawn 走门禁内部实现（agent 不可见、无第二条手调路径），goal / plan review 走 `judge_spawn` 新链。按哲学三：旧进程直启路径删除，不并行两套实现 |
-| `judge_read` | 保留但限范围 | reviewer / goal-auditor 走 record + `report`，不再需要它读；但 adviser 从不经过 `record_review`，其结论仍靠它读。限为 adviser 专用 reader，不再是通用第二入口 |
+| `judge_read` | ~~保留但限范围~~ → **已删除（2026-09-05）** | 当轮的想法是把它收窄成 adviser 专用 reader。后来 adviser 的结论也走 channel report，它就没有调用者了：既不在 agent 面，也没有任何门禁链调它。零调用死路径按哲学三删除；adviser 的正文如今由 `judge_wait` 的标准报告带出 |
+
 
 跨级调用的拒绝是 fail-closed：`judge_wait` / `judge_answer` / `judge_close` / `judge_recover` 先验 `caller ∈ {opener}`，不是即拒，无对话框。
 

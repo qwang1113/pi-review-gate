@@ -73,7 +73,8 @@ import {
   STRATEGIC_RESET_CHECKLIST,
   TASK_TEXT_MARKER,
 } from "../lib/constants.ts";
-import { SETTLED_TOOL_REMINDER } from "../lib/agent-directives.ts";
+import { SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "../lib/agent-directives.ts";
+
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
@@ -242,7 +243,8 @@ import {
 } from "../lib/judge-session-tools.ts";
 
 import { registerJudgeSpawnTools } from "../lib/judge-spawn-tools.ts";
-import { JUDGE_WAIT_MAX_TIMEOUT_MS } from "../lib/judge-lifecycle.ts";
+import { awaitRoundReport } from "../lib/judge-lifecycle.ts";
+
 // The judge tools that RELAY to a session (review_spawn / review_watch /
 // review_send) are the other half of the same family, and are registered the
 // same way — the dispatch owner and the child registry reach them as deps.
@@ -728,6 +730,46 @@ export default function reviewGate(pi: ExtensionAPI) {
       else progress.step?.(text.slice(0, 120));
     };
   }
+  /**
+   * Wait for an INTERNAL audit's REPORT — the gate's own chains want the end of
+   * the round, not the first message.
+   *
+   * `judge_wait` is message-driven for the AGENT, and that is right for an
+   * agent: a streamed finding or a question is exactly what an opener wants
+   * the moment it happens. The goal/plan audit chains are the opposite case.
+   * They are one synchronous call inside `propose_loop_goal` /
+   * `orchestrator_plan`, nobody is there to act on a finding, and both treat
+   * "anything but a report" as an unfinished audit — so a message-driven
+   * return would close the auditor mid-round. Since every auditor streams its
+   * findings BEFORE concluding, that made any draft with findings fail closed
+   * forever (P0, found by the reviewer 2026-09-05).
+   *
+   * So the chain keeps calling the SAME tool — no second waiting loop, no
+   * second criterion (哲学三) — until the round really ends. It terminates:
+   * the cursors mean a finding or a question can end one wait and never the
+   * next, and the total budget is the tool's own hard cap, spent across the
+   * calls rather than by each of them.
+   */
+  async function awaitAuditReport(
+    root: string,
+    ctx: unknown,
+    onUpdate: ToolUpdate | undefined,
+    signal: AbortSignal | undefined,
+  ) {
+    return awaitRoundReport({
+      wait: (timeoutMs) => callTool(
+        "judge_wait",
+        { role: "goal-auditor", repo: root, timeoutMs },
+        ctx,
+        onUpdate,
+        signal,
+      ),
+      now: () => Date.now(),
+      aborted: () => signal?.aborted === true,
+    }) as ReturnType<typeof callTool>;
+
+  }
+
   /** The text a tool result carries (its content joined). */
   function toolText(result: { content?: { type: string; text: string }[] }): string {
     return (result.content ?? []).map((c) => c.text).join("\n");
@@ -803,7 +845,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!hasChildren) return;
       try {
         pi.sendUserMessage(
-          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的通道 report、有无 pane 死亡与静默上限；新 report 会以标准报告送达并继续，不要结束 turn。",
+          "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的通道 report、有无 pane 死亡与静默上限；" +
+          `新消息会以标准报告送达并继续。\n${WAIT_DISCIPLINE_HINT}`,
+
           { deliverAs: "followUp" },
         );
       } catch { /* session was replaced or shut down */ }
@@ -1404,6 +1448,9 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** Open question ids already announced (in-memory; a restart re-announces — desired). */
   let announcedRequestIds = new Set<string>();
+  /** Hints (never refusals) the gate has already delivered — said once each. */
+  const deliveredHints = new Set<string>();
+
 
   // NOTE: there is deliberately NO settle-time verdict scraping here anymore. A round
   // ends exactly one way — the judge calls judge_conclude (judge-side-only tool), which
@@ -2995,6 +3042,16 @@ export default function reviewGate(pi: ExtensionAPI) {
   // one injected object, so every branch of L1 is testable without a session.
   const shipGateHookDeps: ShipGateHookDeps = {
     noteContext: (c) => { latestCtx = c as ExtensionContext; },
+    // A HINT, not a refusal: the hook can only block or stay silent, so this
+    // is how the gate says "there is a tool for that" without taking the
+    // command away. Deduplicated per session — the same advice on every
+    // iteration of a loop would be noise, and noise is ignored.
+    hint: (message) => {
+      if (deliveredHints.has(message)) return;
+      deliveredHints.add(message);
+      try { pi.sendUserMessage(message, { deliverAs: "followUp" }); } catch { /* session gone */ }
+    },
+
     isEditTool: (toolName) => EDIT_TOOL_NAMES.has(toolName),
     isJudgeSession: () => readJudgeSideEnv(process.env) !== undefined,
     cwd: () => cwd,
@@ -4145,12 +4202,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       input.progress?.fail("registry 里找不到刚起的 judge");
       return { ok: false, text: "review-gate: goal 审计已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。" };
     }
-    // Wait through the SAME implementation `judge_wait` uses (a new channel
-    // report ends the round, a dead pane ends it as failed). Re-using it means
-    // the audit cannot hang on a criterion the tool would have accepted.
-    // Forward wait motion into the chain's own progress (else a minutes-long
-    // audit shows no motion at all).
-    const goalWaited = await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx, forwardWaitUpdates(input.progress), input.signal);
+    // Wait through the SAME implementation `judge_wait` uses, but for the END
+    // of the round: `awaitAuditReport` re-calls that one tool until a report
+    // (or a dead pane) arrives, so a streamed finding or a question — which
+    // every auditor produces before it concludes — cannot be mistaken here for
+    // an unfinished audit. Forward wait motion into the chain's own progress
+    // (else a minutes-long audit shows no motion at all).
+    const goalWaited = await awaitAuditReport(root, ctx, forwardWaitUpdates(input.progress), input.signal);
+
     // O-6 — WHOEVER DISPATCHED IT CLOSES IT. This goal-auditor is the gate's
     // OWN internal implementation of `propose_loop_goal`; the agent never asked
     // for it and never sees it in any receipt. Leaving it registered made
@@ -4292,7 +4351,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     const expectedRound = judgeHierarchy[auditJudgeId]?.roundSeq;
     const consumedBeforeWait = judgeHierarchy[auditJudgeId]?.lastReportId;
     onUpdate?.step?.("审计运行中（最长 10 分钟，完成即返回）");
-    const waited = await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, latestCtx, forwardWaitUpdates(onUpdate), signal);
+    // Same as the goal chain: wait for the ROUND to end, not for its first
+    // message — an auditor's question would otherwise read as a failed audit.
+    const waited = await awaitAuditReport(root, latestCtx, forwardWaitUpdates(onUpdate), signal);
+
     onUpdate?.done?.("审计结束");
     // O-6 — the gate dispatched this plan auditor internally, so the gate
     // closes it. Placed before every return path so no branch can leak the child.
@@ -4457,13 +4519,21 @@ export default function reviewGate(pi: ExtensionAPI) {
       existing.streamPath = opts.streamPath;
       existing.spawnedAt = new Date().toISOString();
       childSessions.set(root, list);
-      // The wait cursor survives a re-dispatch: already-consumed reports must
+      // The wait cursors survive a re-dispatch: already-consumed reports must
       // not end the new round's wait (stale-report P0 — a wiped cursor ends
-      // every fresh wait on the previous round's report instantly).
+      // every fresh wait on the previous round's report instantly). The
+      // FINDING cursor survives too, but only while the round writes to the
+      // SAME stream file: a new stream starts at zero, and a reused one (a
+      // re-audit of the same draft) must not replay what was already shown.
       const keptCursor = judgeHierarchy[judgeId]?.lastReportId;
+      const keptFindings = judgeHierarchy[judgeId]?.streamPath === opts.streamPath
+        ? judgeHierarchy[judgeId]?.lastFindingCount
+        : undefined;
       const reg = registerJudge(judgeHierarchy, {
         judgeId, openerId: opener, role, repoRoot: root, paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
         ...(keptCursor === undefined ? {} : { lastReportId: keptCursor }),
+        ...(keptFindings === undefined ? {} : { lastFindingCount: keptFindings }),
+
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
         createdAt: new Date().toISOString(),
       });
@@ -4562,6 +4632,13 @@ export default function reviewGate(pi: ExtensionAPI) {
         repoRoot: root,
         paneId: opened.paneId, roundSeq: nextJudgeRound(opener, judgeId),
         ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
+        // Same rule as the reuse path: a re-run over the SAME stream file keeps
+        // its finding cursor, so nothing already shown is shown again.
+        ...(judgeHierarchy[judgeId]?.streamPath === opts.streamPath
+          && judgeHierarchy[judgeId]?.lastFindingCount !== undefined
+          ? { lastFindingCount: judgeHierarchy[judgeId]!.lastFindingCount }
+          : {}),
+
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
         createdAt: new Date().toISOString(),
       });

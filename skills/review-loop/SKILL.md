@@ -223,15 +223,21 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    PASS: it spawns the trusted bundled runner and verifies a private nonce receipt,
    so a PASS can NOT be forged by printing a `## Overall: ✅ PASS` sentinel.)
 
-   **Waiting-window discipline (v4)** — 主会话是门禁的最后监督者,门禁未通过
-   前不得停止自动循环(round-18 存活不变量):
-   1. 有可实现的确定性工作(代码/测试/文档/其他 repo 事务)→ 优先做掉,不要进入等待。
-   2. 确认没有任何可做的工作就去做别的——新 channel report 落盘时门禁会用标准报告
-      唤醒你（结论、证据位置、记录情况、待答问题），没有轮询工具。pane 消失但结论
-      未落盘时本轮不算结束（用 `judge_recover` 同 id 重开续 transcript 继续）。
-   3. **禁止**结束 turn 把唤醒责任交给子会话(它可能报错/崩溃/永远不退)。
-      `agent_settled` 会注入托管等待指令;主动托管远比被动拉起可靠。
+   **Waiting-window discipline (v5, 2026-09-05)** — 主会话是门禁的最后监督者,
+   门禁未通过前不得停止自动循环(round-18 存活不变量)。三条口径的唯一出处是
+   `lib/agent-directives.ts` 的 `buildWaitDiscipline`:
+   1. 有确定性工作(代码/测试/文档/其他 repo 事务)→ 先做掉,尤其 goal / plan
+      审计期间:读代码、调查、补上下文。送 reviewer 前应已准备充分,送完往往
+      没事可做——这时可以看看下一轮要什么、或先准备收尾报告(**提示,不强求**)。
+   2. 确实没活可做了,才调 `judge_wait({role})` 等——不是手写 sleep 轮询,也不是
+      结束 turn。
+   3. `judge_wait` 是**消息驱动**的:新 finding、judge 提问、本轮结论、pane 消失,
+      任一到达即返回,拿到就继续干。pane 消失但结论未落盘时本轮不算结束
+      (用 `judge_recover` 同 id 重开续 transcript 继续)。没在等的时候,settle
+      唤醒仍是兜底:新消息落盘时门禁用同一份标准报告叫你(结论、证据位置、
+      记录情况、待答问题)。
    因为审核范围是 immutable commit,工作区编辑不失效本轮。
+
 3. **Review** — the reviewer audits the COMMIT RANGE `baseline..HEAD` (the
    immutable checkpoint commits) with `git show`/`git diff`; it may verify by
    doing in a throwaway `$TMPDIR` copy (mutation analysis included) and must

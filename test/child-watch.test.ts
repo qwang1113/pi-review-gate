@@ -105,5 +105,9 @@ test("buildChildWaitNotice names the terminated child, the recovery action and t
   assert.match(notice, /标准报告会送达/, "the recovery action (wait for the standard report) is stated");
   assert.match(notice, /review-live/, "the in-flight child is named");
   assert.match(notice, /review-live/, "its session id is named");
-  assert.match(notice, /不要结束 turn/, "the hosted-wait discipline is explicit");
+  // The discipline is the shared three sentences now (2026-09-05): work first,
+  // then the TOOL — the old "never end the turn" line named no way out.
+  assert.match(notice, /等待纪律/, "the hosted-wait discipline is explicit");
+  assert.match(notice, /judge_wait/, "…and it names the tool that ends the wait");
+
 });

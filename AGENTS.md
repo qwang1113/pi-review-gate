@@ -309,13 +309,18 @@ copy a reviewer SHOULD verify by doing — mutation analysis included — and
 must restore before finishing. Because the reviewed range is immutable,
 **you keep fixing the real worktree while it runs**: take streamed P0/P1/P2
 that carry evidence (confirm each in the code first), leave Nits for the
-verdict. WAITING-WINDOW DISCIPLINE: (1) 有可实现的确定性工作(代码/测试/
-文档/其他 repo 事务)→ 优先做掉,不要进入等待;(2) 确认没有可做的工作就去做别的——
-新 channel report 落盘时门禁会用标准报告唤醒你（结论、证据位置、记录情况、待答问题），
-不需要你手写 bash 轮询，也没有轮询工具;
-(3) **禁止**用结束 turn 把唤醒责任交给子会话——子会话可能报错/
-崩溃/永远不退,而主会话是门禁的最后监督者,门禁未通过前不得停止自动循环
-(存活不变量)。
+verdict. WAITING-WINDOW DISCIPLINE（2026-09-05 起的口径，`lib/agent-directives.ts`
+的 `buildWaitDiscipline` 是唯一出处）：
+(1) 有确定性工作(代码/测试/文档/其他 repo 事务)→ 先做掉，尤其 goal / plan
+审计期间：读代码、调查、补上下文；送 reviewer 前应已准备充分，送完往往没事可做——
+这时可以看看下一轮要什么、或先准备收尾报告（**提示，不强求**）;
+(2) 确实没活可做了，才调 `judge_wait({role})` 等——不是手写 sleep 轮询，也不是
+结束 turn（主会话是门禁的最后监督者，门禁未通过前不得停止自动循环，存活不变量）;
+(3) `judge_wait` 是**消息驱动**的：新 finding、judge 提问、本轮结论、pane 消失，
+任一到达即返回，拿到就继续干——它不是「等它跑完」的轮询。没在等的时候，
+settle 唤醒仍是兜底：新消息落盘时门禁会用同一份标准报告叫你
+（结论、证据位置、记录情况、待答问题）。
+
 The round ends when its channel report lands: the opener records the verdict
 from the report's exact bytes (the gate's settle path records it and wakes you with the standard report). The reviewer may ask
 questions through the channel (human in the pane and opener race, first answer

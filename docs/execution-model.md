@@ -97,7 +97,13 @@ opener 凭它记录结论；
   子会话**立即**以标准报告唤醒（结论、证据位置、记录情况、待答问题）并记入链；
   再跑 `classifyChildren()`（lib/child-watch.ts）托管其余：pane 死亡或静默超时的
   子会话**立即结束等待**（注入 `REVIEW_GATE_CHILD_ENDED`，按有无 report 分别处理）；
-  仍在飞的子会话注入 `REVIEW_GATE_CHILD_HOST_WAIT`（先做确定性工作，不要轮询）。
+  仍在飞的子会话注入 `REVIEW_GATE_CHILD_HOST_WAIT`（等待纪律见下）。
+  **等待纪律**（2026-09-05 起，唯一出处 `lib/agent-directives.ts` 的
+  `buildWaitDiscipline`）：①有确定性工作先做掉（提示、不强求：送完 reviewer 往往
+  没事可做，可以看看下一轮要什么或先备收尾报告）；②确实没活了才调
+  `judge_wait`——不是手写 sleep 轮询，也不是结束 turn（存活不变量仍然成立）；
+  ③`judge_wait` 消息驱动：新 finding / judge 提问 / 本轮结论 / pane 消失任一到达即返回。
+
   仅三类情形允许停止：用户显式中止（ESC）、`ask_user` 等待用户回答、
   所有门禁与 goal 均完成。
 - **一轮结束的三条独立判据**：(a) 新 channel report 落盘（`settleFinishedRounds` 以标准
@@ -138,7 +144,8 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 | 状态从哪来 | pane 存活（window 名单）+ channel 心跳/state/report 记录 | 七态结构化真值：`working` / `waiting-input` / **`waiting-judge`**（在等门禁自己派的 reviewer/precommit，附已等秒数，不叫醒项目经理）/ `idle` / `done` 由子会话自报（心跳是扩展自己的定时器，与 agent 是否活跃无关），`dead`（pane 消失）与 `stalled`（心跳超时 ⇒ 扩展真的不在了）由编排侧从外面判 |
 | 正常终态 | verdict 落 channel report（pane 按终结规则回收复用） | `declare_done` 之后**仍然活着** |
 | 异常终态 | pane 消失但结论未落盘（本轮不算结束，`judge_recover` 同 id 续接） | pane 消失（`dead`）或心跳停摆（`stalled`），用 `orchestrator_recover` 复活 |
-| 等待 | 无（新 report 落盘即标准报告唤醒） | `orchestrator_wait` |
+| 等待 | `judge_wait`（消息驱动，确实没活可做时才调；没在等时新 report 落盘仍以标准报告唤醒） | `orchestrator_wait` |
+
 
 关键推论：**编排子会话干完活不会退出**，所以「等进程结束」在这里会永远挂住。
 两个等待共用 `lib/poll-wait.ts` 这一套骨架（probe / 发快照 / 判据或预算命中

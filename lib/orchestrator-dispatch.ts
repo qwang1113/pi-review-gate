@@ -18,6 +18,8 @@
  */
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
+import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
+
 import { STATE_VARIANT_ENV } from "./gate-state.ts";
 import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
 import { GATE_MODE_ENV } from "./task-mode.ts";
@@ -371,8 +373,9 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     `投递已核实：${check.verdict.summary}。\n` +
     `${decor.note}\n` +
 
-    "接下来用 `orchestrator_wait` 等它 —— 不要结束 turn 把盯梢责任丢给用户。" +
+    `${ORCHESTRATOR_WAIT_DISCIPLINE}\n` +
     "它有事找你时，wait 的回执里会直接带上完整的问题与选项，用 `orchestrator_answer` 回。",
+
 
     {
       childId,

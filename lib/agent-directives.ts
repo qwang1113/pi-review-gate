@@ -17,6 +17,53 @@
  */
 
 /**
+ * THE wait discipline — one wording, two waiters (2026-09-05, user decision).
+ *
+ * WHAT IT REPLACED. The gate forbade ending a turn to be woken up and, at the
+ * same time, had no waiting tool on the agent surface. The only move left was
+ * a hand-written `sleep` loop inside one bash call — which never ends the
+ * turn, so the session never settles, so the wake-up never fires: a measured
+ * nine minutes with a finished review sitting unrecorded on disk. A rule that
+ * forbids every exit is not a rule, it is a trap.
+ *
+ * THE THREE SENTENCES, and why each one is phrased the way it is:
+ *  ① do the deterministic work you have. Its second half is deliberately SOFT
+ *    — after submitting a round there is often genuinely nothing to prepare,
+ *    and a rule that demands work anyway just teaches the agent to invent
+ *    some. The gate SUGGESTS looking ahead or drafting the closing report.
+ *  ② only then wait, and wait through the TOOL — not a sleep loop, and not by
+ *    ending the turn (the supervisor of the gate is the session itself).
+ *  ③ the tool is message-driven, so waiting is cheap: it returns on the first
+ *    thing that happened, not at the end of the round.
+ *
+ * The PROJECT MANAGER gets the same three sentences with its own tool named,
+ * plus the one thing that is only true of it: it supervises PEOPLE-facing
+ * children, so handing the watch back to the user is the failure mode its
+ * wording has always guarded against. That clause is kept verbatim in spirit.
+ */
+export function buildWaitDiscipline(tool: "judge_wait" | "orchestrator_wait"): string {
+  const messages = tool === "judge_wait"
+    ? "新 finding、judge 提问、本轮结论、pane 消失"
+    : "子会话提问、子会话完成、子会话静默、pane 消失";
+  const second = tool === "judge_wait"
+    ? `②确实没活可做了，才调 ${tool} 等 —— 不是手写 sleep 轮询，也不是结束 turn。`
+    : `②确实没活可做了，才调 ${tool} 等 —— 不是手写 sleep 轮询，更不要结束 turn 把盯梢责任丢回给用户。`;
+  return (
+    "等待纪律：①有确定性工作（代码/测试/文档/其他 repo 事务）就先做掉，尤其 goal / plan 审计期间：读代码、调查、补上下文；" +
+    "送 reviewer 前应已准备充分，送完往往没事可做——这时可以看看下一轮要什么、或先准备收尾报告（提示，不强求）。" +
+    second +
+    `③${tool} 是消息驱动的：${messages}，任一到达即返回，拿到就继续干。`
+  );
+}
+
+/** The child/loop-session wording — the one injected with a judge's replies. */
+export const WAIT_DISCIPLINE_HINT = buildWaitDiscipline("judge_wait");
+
+/** The project-manager wording — same three sentences, its own tool. */
+export const ORCHESTRATOR_WAIT_DISCIPLINE = buildWaitDiscipline("orchestrator_wait");
+
+
+/**
  * Situation → tool. Deliberately short: an agent scanning this mid-task must
  * find its row in one pass.
  */
@@ -29,7 +76,9 @@ export const TOOL_DECISION_TABLE =
   "| 提交 goal 草稿 | `propose_loop_goal({goal})` — 门禁自己跑 goal 审计，过了才弹用户批准框 |\n" +
   "| 自己决定不了的设计取舍 | `judge_submit({role:\"adviser\", task})` |\n" +
   "| 当前在 main/master/dev/develop 上要提交 | checkpoint 会被门禁直接拒（2026-09-16 起不弹确认框）；ship 提交（git commit）也会被拒 — 先切到功能分支 |\n" +
-  "| 有 judge 在跑、等结论 | 不用等——新 channel report 落盘时门禁会用标准报告唤醒你（结论、证据位置、记录情况、待答问题）。先做别的确定性工作。 |\n" +
+  "| 有 judge 在跑、还有活可做 | 先把活做掉——新消息落盘时门禁会用标准报告唤醒你（结论、证据位置、记录情况、待答问题） |\n" +
+  "| 有 judge 在跑、确实没活可做 | `judge_wait({role})` — 消息驱动：新 finding / judge 提问 / 本轮结论 / pane 消失，任一到达即返回 |\n" +
+
   "| 任务做完了 | `declare_done({summary})` — 门禁复检后收尾，工作留在当前分支 |\n" +
   "| 要改敏感文件 / 缩小审查范围 | `request_sensitive_edit` / `request_scope_limit` |";
 

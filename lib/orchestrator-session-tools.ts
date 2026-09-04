@@ -23,6 +23,8 @@
 
 import { Type } from "typebox";
 import { pollUntil } from "./poll-wait.ts";
+import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
+
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
 import {
@@ -231,8 +233,8 @@ async function doWait(
       ? "（注意：预算用完时探针一次都没返回 —— tmux 很可能卡住了，先自己看一眼 pane）"
       : "";
     return reply(
-      `review-gate: 本次预算用完。${stalled}有确定性的活就先做掉，没有就再调一次 ` +
-      "`orchestrator_wait` —— 但不要结束 turn 把盯梢责任丢给用户。\n\n" + receipt.text,
+      `review-gate: 本次预算用完。${stalled}\n${ORCHESTRATOR_WAIT_DISCIPLINE}\n\n` + receipt.text,
+
       details,
     );
   }

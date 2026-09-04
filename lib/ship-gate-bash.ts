@@ -62,6 +62,8 @@ import {
   type LlmClassifier,
 } from "./llm-classify.ts";
 import { withSlowNotice, type SlowNoticeSink } from "./progress-stream.ts";
+import { lexSegmentTokens } from "./shell-lex.ts";
+
 import type { ProjectConfig } from "./project-config.ts";
 import type { TaskMode } from "./task-mode.ts";
 import type { AppealKind } from "./text-appeal.ts";
@@ -137,6 +139,15 @@ export interface ShipGateBashDeps {
   refuseText(kind: AppealKind, text: string, message: string, ctx: unknown): string | undefined;
   /** Append one line to the gate's lesson log. */
   appendLesson(text: string): void;
+  /**
+   * Say something to the agent WITHOUT refusing the command.
+   *
+   * The hook itself can only block or stay silent, so a hint needs its own
+   * seam. The extension delivers it as a follow-up message and de-duplicates
+   * it; a test replaces it with a push into an array.
+   */
+  hint(message: string): void;
+
   /** The standing single-use arbiter bypass token, if one was issued. */
   bypassToken(): BypassToken | null;
   /** Replace it (used to mark it consumed on attempt). */
@@ -160,6 +171,53 @@ export function describeShips(_command: string, ships: Array<{ kind: string }>):
     ? `compound command with ${ships.map((s) => s.kind).join(" + ")}`
     : ships[0].kind;
 }
+
+/**
+ * A `sleep` long enough to be a WAIT rather than a pause. 30s is the smallest
+ * gap that cannot be anything else: a settle delay is a second or two.
+ */
+const POLLING_SLEEP_SECONDS = 30;
+
+/** File shapes a hand-rolled waiter reads: a channel file or a findings stream. */
+const WAIT_EVIDENCE = /rg-channels|review-stream|\.pi\/judge-sessions|RG_JUDGE_STREAM/;
+
+/**
+ * Is this command a hand-written wait for a judge — a long `sleep` next to a
+ * read of the gate's own channel or findings stream?
+ *
+ * WHY THE GATE SAYS SOMETHING (2026-09-05, user decision D6). This exact
+ * command shape cost a measured nine minutes: `sleep 280` inside one bash call
+ * while grepping the channel file. The turn never ends inside a bash call, so
+ * the session never settles, so the wake-up that was supposed to deliver the
+ * finished review never fires — the agent was waiting for something that could
+ * only arrive after it stopped waiting. `judge_wait` is the same wait done
+ * right, and it returns on the first message.
+ *
+ * It is a HINT, never a block, and that is deliberate: this is the opposite
+ * of an appeal route. An agent with a diagnostic reason to sleep and read a
+ * channel keeps doing exactly that; it just gets told there is a tool.
+ *
+ * Pure and exported, so the shape is unit-testable without a shell.
+ */
+export function detectHandRolledWaitPolling(command: string): { reason: string } | undefined {
+  if (!WAIT_EVIDENCE.test(command)) return undefined;
+  let longSleep = false;
+  for (const tokens of lexSegmentTokens(command)) {
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i] !== "sleep") continue;
+      const seconds = Number(tokens[i + 1]);
+      if (Number.isFinite(seconds) && seconds >= POLLING_SLEEP_SECONDS) longSleep = true;
+    }
+  }
+  if (!longSleep) return undefined;
+  return {
+    reason:
+      `review-gate 提示（不拦截）：这条命令看起来是手写的等待轮询（sleep ≥ ${POLLING_SLEEP_SECONDS}s + 读通道/findings 流）。` +
+      "在一次 bash 里等，turn 不会结束，门禁的唤醒也就不会发生 —— 实测这样丢过九分钟。" +
+      "改用 `judge_wait({role})`：新 finding、judge 提问、本轮结论、pane 消失，任一到达即返回，正文直接带回来。",
+  };
+}
+
 
 /**
  * The refusal text a blocked ship carries, as a pure decision.
@@ -229,6 +287,15 @@ export async function evaluateShipCommand(
     orchestratorMode: deps.taskMode() === "orchestrator",
   });
   if (tmuxHit) return { block: true, reason: tmuxHit.reason };
+
+  // The hand-rolled WAIT (D6): a hint, not a block, and it sits here — after
+  // the tmux backstop, before every early return below — so a session that has
+  // bypassed the ship gate, or is running a plain non-ship command, still
+  // hears it. Saying nothing was the previous design, and it is what let a
+  // session lock itself out of its own wake-up for nine minutes.
+  const polling = detectHandRolledWaitPolling(command);
+  if (polling) deps.hint(polling.reason);
+
 
   // /gate-bypass (user-authorized, reason logged in state): the L1 ship gate
   // steps aside for the rest of the session. The git hooks mirror it via

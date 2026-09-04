@@ -18,6 +18,9 @@
  * copy can be pinned by source tests.
  */
 
+import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
+
+
 /** The standing block injected every turn in orchestrator mode. */
 export const ORCHESTRATOR_DIRECTIVE =
   "## 你是项目经理（orchestrator 模式）\n" +
@@ -64,11 +67,14 @@ export const ORCHESTRATOR_DIRECTIVE =
   "**必须叫真人**（不得代答）：丢弃工作区（不可逆）、敏感文件授权。这两件事用 `orchestrator_notify` " +
   "叫用户，并在 plan 的 decisions 里留一条。\n" +
   "\n" +
-  "### 别把等待写成结束 turn\n" +
+  "### 等待纪律（与子会话侧同一口径）\n" +
   "派完任务就输出总结、结束 turn，是这个角色最容易犯也最贵的错：子会话弹了对话框没人管，" +
-  "用户得亲自来转告。正确做法是 `orchestrator_wait` —— 它在 attention 事件 / 门禁探针发现的状态变化 / " +
+  "用户得亲自来转告。三条口径：\n" +
+  `${ORCHESTRATOR_WAIT_DISCIPLINE}\n` +
+  "`orchestrator_wait` 在 attention 事件 / 门禁探针发现的状态变化 / " +
   "子会话完成 / pane 消失 / 预算用完 任一命中时**必然返回**（默认 300s，上限 900s）。" +
   "真要用户拍板时用 `ask_user`。\n" +
+
   "\n" +
   "### 你不需要自己盯 pane\n" +
   "门禁自己盯着每个子会话：每个子会话有一条**专属通道文件**，它的门禁在上面上报" +

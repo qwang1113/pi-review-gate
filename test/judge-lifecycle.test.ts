@@ -7,12 +7,14 @@ import {
   selectStaleJudgeSessionDirs,
   JUDGE_SESSION_DIR_TTL_MS,
 
+  awaitRoundReport,
   clampWaitTimeout,
+
   adjudicateGoalAudit,
   isBlockingSeverity,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
   JUDGE_WAIT_DEFAULT_TIMEOUT_MS,
-  WAIT_DISCIPLINE_HINT,
+
 } from "../lib/judge-lifecycle.ts";
 
 
@@ -167,23 +169,68 @@ test("severity classification covers the forms judges actually write", () => {
 });
 
 // (The shared wait formatter is gone with the pane migration: replies are
-// built where the criteria live now. The discipline hint survives — and since
-// 2026-09-05 it names the tool again, because the tool exists again.)
-test("the wait discipline is the three sentences, and names a tool that EXISTS", () => {
-  assert.match(WAIT_DISCIPLINE_HINT, /等待纪律/);
-  // ① do the deterministic work you have — including the soft half the user
-  // insisted on: after a submission there is often nothing left, and the gate
-  // SUGGESTS rather than demands.
-  assert.match(WAIT_DISCIPLINE_HINT, /有确定性工作/);
-  assert.match(WAIT_DISCIPLINE_HINT, /下一轮要什么|收尾报告/);
-  assert.match(WAIT_DISCIPLINE_HINT, /不强求/);
-  // ② wait through the tool, not through a hand-written sleep.
-  assert.match(WAIT_DISCIPLINE_HINT, /judge_wait/);
-  assert.match(WAIT_DISCIPLINE_HINT, /sleep/);
-  // ③ it is message-driven: the first message returns.
-  assert.match(WAIT_DISCIPLINE_HINT, /消息驱动/);
-  assert.match(WAIT_DISCIPLINE_HINT, /任一到达即返回/);
-  // The self-contradiction that caused the nine-minute lock is GONE.
-  assert.doesNotMatch(WAIT_DISCIPLINE_HINT, /禁止.*结束 turn|没有轮询工具/);
+// built where the criteria live now. The DISCIPLINE moved on 2026-09-05 to
+// lib/agent-directives.ts, where the project-manager wording lives beside it
+// — its assertions moved with it, to test/agent-directives.test.ts.)
+
+// ---------------------------------------------------------------------------
+// awaitRoundReport — waiting for the END of a round on top of a wait that
+// returns on every MESSAGE (P0, 2026-09-05). The gate's own audit chains are a
+// single synchronous call with nobody there to act on a finding, and they read
+// "not a report" as an unfinished audit — so a message-driven return would
+// close the auditor mid-round and make any draft with findings fail forever.
+
+test("awaitRoundReport keeps waiting through mid-round messages and returns the report", async () => {
+  const windows: number[] = [];
+  const replies = [
+    { details: { reason: "finding" } },
+    { details: { reason: "question" } },
+    { details: { reason: "report" } },
+    { details: { reason: "report" } }, // must never be reached
+  ];
+  let clock = 0;
+  const got = await awaitRoundReport({
+    wait: async (timeoutMs) => { windows.push(timeoutMs); clock += 1_000; return replies.shift()!; },
+    now: () => clock,
+  });
+  assert.deepEqual(got, { details: { reason: "report" } });
+  assert.equal(windows.length, 3, "one call per message, then the report ends it");
+  assert.ok(windows[1]! < windows[0]!, "the budget is shared across the calls, not restarted by each");
+  assert.equal(replies.length, 1, "it stops at the report");
 });
+
+test("awaitRoundReport ends on a dead pane, an error, an abort, or the budget", async () => {
+  const dead = await awaitRoundReport({
+    wait: async () => ({ details: { reason: "pane-dead" } }),
+    now: () => 0,
+  });
+  assert.equal(dead.details?.reason, "pane-dead", "a dead pane ends the round");
+
+  const failed = await awaitRoundReport({
+    wait: async () => ({ isError: true, details: { reason: "finding" } }),
+    now: () => 0,
+  });
+  assert.equal(failed.isError, true, "a failed wait is handed back, not retried forever");
+
+  let calls = 0;
+  const aborted = await awaitRoundReport({
+    wait: async () => { calls++; return { details: { reason: "finding" } }; },
+    now: () => 0,
+    aborted: () => true,
+  });
+  assert.equal(calls, 1, "an aborted caller stops after the call in flight");
+  assert.equal(aborted.details?.reason, "finding");
+
+  // The budget is what stops an auditor that streams findings forever.
+  let clock = 0;
+  let spins = 0;
+  const expired = await awaitRoundReport({
+    wait: async () => { spins++; clock += 30_000; return { details: { reason: "finding" } }; },
+    now: () => clock,
+    budgetMs: 60_000,
+  });
+  assert.equal(spins, 2, "it spends the budget and stops");
+  assert.equal(expired.details?.reason, "finding", "…returning the last thing it saw");
+});
+
 

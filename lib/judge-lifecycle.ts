@@ -144,25 +144,58 @@ export function clampWaitTimeout(requestedMs: number | undefined): number {
   return Math.min(Math.floor(requestedMs), JUDGE_WAIT_MAX_TIMEOUT_MS);
 }
 
+/** The part of a wait's reply this decision reads — reason, and whether it failed. */
+export interface RoundWaitReply {
+  isError?: boolean | undefined;
+  details?: { reason?: unknown } | undefined;
+}
+
+/** Reasons that mean the ROUND is over — everything else is a mid-round message. */
+const ROUND_ENDING_REASONS = new Set(["report", "pane-dead"]);
+
 /**
- * THE wait discipline — one wording, injected everywhere a session might be
- * tempted to sit and watch (2026-09-05, user decision).
+ * Wait for a round to END, on top of a wait that returns on every MESSAGE.
  *
- * It replaced a self-contradiction that cost a measured nine minutes: the gate
- * forbade ending the turn to be woken up, and at the same time had no waiting
- * tool on the agent surface — so the agent locked itself inside a 280s bash
- * sleep, never settled, and a report that had landed sat unrecorded. The three
- * sentences resolve it: do the work you have, then wait through the TOOL, and
- * know that the tool returns on the first message rather than at the end of a
- * round. Sentence ① keeps its second half deliberately soft — after a
- * submission there is often genuinely nothing to prepare, and a rule that
- * demands work anyway just teaches the agent to invent some.
+ * WHY BOTH EXIST (P0, 2026-09-05). `judge_wait` is message-driven, which is
+ * right for an agent: a streamed finding or a question is exactly what an
+ * opener wants the moment it happens. The gate's OWN audit chains are the
+ * opposite case — one synchronous call inside `propose_loop_goal` /
+ * `orchestrator_plan`, with nobody there to act on a finding, and both treat
+ * "anything but a report" as an unfinished audit. Every auditor streams its
+ * findings before it concludes, so a message-driven return would have closed
+ * the auditor mid-round and made any draft with findings fail closed forever.
+ *
+ * So this keeps calling the SAME wait (哲学三: never a second waiting loop)
+ * until the round really ends. It terminates for two independent reasons: the
+ * wait's own cursors mean a given message ends at most one call, and the whole
+ * sequence shares ONE budget.
  */
-export const WAIT_DISCIPLINE_HINT =
-  "等待纪律：①有确定性工作（代码/测试/文档/其他 repo 事务）就先做掉，尤其 goal / plan 审计期间：读代码、调查、补上下文；" +
-  "送 reviewer 前应已准备充分，送完往往没事可做——这时可以看看下一轮要什么、或先准备收尾报告（提示，不强求）。" +
-  "②确实没活可做了，才调 judge_wait 等，不要手写 sleep 轮询。" +
-  "③judge_wait 是消息驱动的：新 finding、judge 提问、本轮结论、pane 消失，任一到达即返回，拿到就继续干。";
+export async function awaitRoundReport(input: {
+  /** One call of the waiting tool, given the window it may block for. */
+  wait: (timeoutMs: number) => Promise<RoundWaitReply>;
+  now: () => number;
+  /** Total budget across all calls (default: the tool's own hard cap). */
+  budgetMs?: number;
+  /** The caller's ESC. */
+  aborted?: () => boolean;
+}): Promise<RoundWaitReply> {
+  const deadline = input.now() + (input.budgetMs ?? JUDGE_WAIT_MAX_TIMEOUT_MS);
+  for (;;) {
+    const remaining = deadline - input.now();
+    const reply = await input.wait(Math.max(1_000, remaining));
+    const reason = reply.details?.reason;
+    if (reply.isError === true) return reply;
+    if (typeof reason === "string" && ROUND_ENDING_REASONS.has(reason)) return reply;
+    if (input.aborted?.() === true || input.now() >= deadline) return reply;
+  }
+}
+
+
+// (THE wait discipline moved to lib/agent-directives.ts, 2026-09-05: the
+// project-manager side needs the SAME three sentences with its own waiting
+// tool named, and two copies of a wording is how two of them start drifting.
+// `buildWaitDiscipline("judge_wait")` is what used to live here.)
+
 
 
 

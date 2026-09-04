@@ -17,7 +17,8 @@
  * its options) rather than a path the opener would have to go read.
  */
 
-import { WAIT_DISCIPLINE_HINT } from "./judge-lifecycle.ts";
+import { WAIT_DISCIPLINE_HINT } from "./agent-directives.ts";
+
 
 
 /**

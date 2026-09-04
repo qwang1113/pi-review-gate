@@ -2422,6 +2422,101 @@ test("the internal host captures an implementation WITHOUT exposing it", () => {
     "…and never reaches pi's registry");
 });
 
+/**
+ * Every tool an AGENT can actually call — DERIVED from the registrations, not
+ * declared in a list a human keeps in sync.
+ *
+ * Two shapes reach `pi`: a direct `pi.registerTool({ name: … })` in the
+ * extension, and a lib registrar the extension wires with `pi` (the same
+ * registrar wired with `internalHost` is invisible, which is the whole point
+ * of the split). `judge_conclude` lands here too — it registers with `pi`
+ * behind a judge-side env check, so it is callable by SOME session; a text
+ * naming it is not naming a tool nobody has.
+ *
+ * Registration also CHAINS: a registrar wired with `pi` may register a second
+ * family with the same host (`registerUserInteractionTools` → the consent
+ * tools, `registerOrchestratorSessionTools` → the recovery tools), so the
+ * walk follows `register…(host, …)` calls out of each body it accepts.
+ */
+function agentVisibleTools(): Set<string> {
+  const defs = new Map<string, string>();
+  for (const file of readdirSync(join(ROOT, "lib")).filter((f) => f.endsWith(".ts"))) {
+    const code = readFileSync(join(ROOT, "lib", file), "utf8");
+    for (const m of code.matchAll(/export function (register\w+)\(/g)) defs.set(m[1]!, code);
+  }
+  const names = new Set<string>();
+  for (const m of SRC.matchAll(/pi\.registerTool\(\{\s*\n?\s*name: "([a-z_]+)"/g)) names.add(m[1]!);
+  const queue = [...defs.keys()].filter((r) => new RegExp(`\\b${r}\\(pi,`).test(SRC));
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const registrar = queue.shift()!;
+    if (seen.has(registrar)) continue;
+    seen.add(registrar);
+    const code = defs.get(registrar);
+    if (code === undefined) continue;
+    const body = windowIn(code, `export function ${registrar}(`, /\n\}\n/, registrar);
+    for (const n of body.matchAll(/name: "([a-z_]+)"/g)) names.add(n[1]!);
+    // A name can also be a CONSTANT (`name: JUDGE_CONCLUDE_TOOL`) — resolve it
+    // in the module that declares it, or the tool reads as unregistered.
+    for (const n of body.matchAll(/name: ([A-Z][A-Z0-9_]+)\b/g)) {
+      const literal = code.match(new RegExp(`${n[1]!}\\s*=\\s*"([a-z_]+)"`));
+      if (literal) names.add(literal[1]!);
+    }
+
+    for (const n of body.matchAll(/\b(register\w+)\(host,/g)) queue.push(n[1]!);
+  }
+  return names;
+}
+
+
+test("every tool name in agent-readable text is a tool that EXISTS on the agent surface", () => {
+  // THE DEFECT THIS EXISTS FOR (measured 2026-09-05). `judge_wait` was taken
+  // off the agent surface, and three injected texts kept telling the agent to
+  // call it — a tool receipt ("用 judge_wait 等结论"), a stall hint ("用
+  // judge_read 看一眼"), and the judge-side deny list. An instruction pointing
+  // at a tool the reader cannot call is worse than no instruction: it reads as
+  // "there is a way to do this" and there is not.
+  //
+  // COVERAGE IS THE POINT (user decision D5). It is not enough to scan the
+  // texts the extension injects directly: `prepare_review`'s refusal is
+  // CONCATENATED into an agent-facing reply by the extension
+  // ("review-gate: 本轮未送审 — prepare_review 被拒。" + toolText(prepared)),
+  // so lib/review-prepare-tools.ts and lib/advisory-prepare-tools.ts are in
+  // scope as well. Every lib module plus the extension is scanned; narrowing
+  // the scan is not an available fix.
+  const surface = agentVisibleTools();
+  assert.ok(surface.has("judge_submit") && surface.has("judge_wait") && surface.has("ask_user"),
+    "the derivation itself must work before its verdict means anything");
+  assert.ok(!surface.has("judge_close"), "…and it must NOT see what only internalHost got");
+
+  // Names that may legitimately appear WITHOUT being callable: the ones the
+  // gate deleted or kept internal. They are governed by the ratchet above
+  // (count frozen per file) and by `deletedToolInstructions` (no imperative),
+  // so this test hands them over rather than judging them twice.
+  const governedElsewhere = new Set([...DELETED_TOOL_NAMES, "judge_read", "judge_close"]);
+  const TOOL_TOKEN = /\b(?:judge|orchestrator|prepare|record|propose|declare|request|check)_[a-z][a-z_]*\b/g;
+  const offences: string[] = [];
+  const sources = [
+    ...readdirSync(join(ROOT, "lib")).filter((f) => f.endsWith(".ts")).map((f) => join("lib", f)),
+    join("extensions", "review-gate.ts"),
+  ];
+  for (const rel of sources) {
+    readFileSync(join(ROOT, rel), "utf8").split("\n").forEach((line, i) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) return;
+      if (!line.includes('"') && !line.includes("'") && !line.includes("`")) return;
+      for (const m of line.match(TOOL_TOKEN) ?? []) {
+        if (surface.has(m) || governedElsewhere.has(m)) continue;
+        offences.push(`${rel}:${i + 1} — ${m}`);
+      }
+    });
+  }
+  assert.deepEqual(offences, [],
+    "agent-readable text names a tool that is registered nowhere an agent can reach it. " +
+    "Either register it, or stop naming it.");
+});
+
+
 test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", () => {
   // THE DEFECT CLASS THIS EXISTS FOR. Round 1 unregistered ten tools; three
   // rounds of review then found, one at a time, prose that still told the
@@ -2505,14 +2600,19 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     "say so and update FROZEN. If you REMOVED one, lower the count.");
 });
 
-/** The fifteen names that are no longer registered with pi. */
+/** The sixteen names that are no longer registered with pi. */
 const DELETED_TOOL_NAMES = [
   "run_precommit", "review_checkpoint", "prepare_review", "prepare_adviser",
   "prepare_goal_audit", "record_review", "record_goal_prereview",
   "review_spawn", "review_watch", "review_send",
   "orchestrator_read", "orchestrator_key", "orchestrator_status",
   "orchestrator_send", "orchestrator_relay",
+  // 2026-09-05 (D4): deleted outright, implementation and all — it had no
+  // caller on either host. Saying so in a document stays allowed; telling
+  // anyone to call it does not.
+  "judge_read",
 ];
+
 
 /**
  * Does this document tell an agent to use a tool that no longer exists?
@@ -3718,11 +3818,25 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   const planAt = SRC.indexOf("async function auditPlanRound(");
   const plan = SRC.slice(planAt, planAt + 4500);
   for (const [name, body] of [["goal", goal], ["plan", plan]] as const) {
-    assert.match(body, /const \w*[Ww]ait\w* = await callTool\("judge_wait"/,
+    assert.match(body, /const \w*[Ww]ait\w* = await awaitAuditReport\(/,
       `the ${name} audit must KEEP the wait result, not discard it`);
+
     assert.match(body, /\.done !== true \|\| \w+\.reason !== "report"/,
       `the ${name} audit only proceeds when the wait ended on THIS round's report`);
   }
+  // …and the waiter they share must keep calling the ONE tool until the round
+  // really ends. `judge_wait` is message-driven for the agent (2026-09-05), so
+  // a single call can return on a streamed finding — which every auditor emits
+  // before it concludes. Adjudicating that as "no report" closed the auditor
+  // mid-round and made any draft with findings fail closed forever (P0).
+  const waiter = SRC.slice(SRC.indexOf("async function awaitAuditReport("), SRC.indexOf("/** The text a tool result carries"));
+  assert.match(waiter, /awaitRoundReport\(\{/, "the chains wait through the shared decision, not a hand-rolled loop");
+  assert.match(waiter, /callTool\(\s*\n?\s*"judge_wait"/, "…which re-calls the ONE waiting tool");
+  assert.doesNotMatch(waiter, /for \(;;\)|while \(/, "no second waiting loop may come back here");
+  // The decision itself (what ends a round, and the ONE shared budget) is
+  // pinned in test/judge-lifecycle.test.ts, where it can be driven directly.
+
+
   // The plan path additionally selects the report through the shared pure
   // function; the goal path records through recordRoundOutput, whose pending
   // branches call the same guard.
