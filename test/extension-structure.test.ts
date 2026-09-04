@@ -3613,6 +3613,35 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
   assert.equal(internalCloses.length, 2, "one internal close per audit path, and only those");
 });
 
+test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict P0)", () => {
+  // The measured deadlock: an audit waited, then read the channel's newest
+  // report unconditionally. A re-dispatch wiped the wait cursor, so that report
+  // was the PREVIOUS round's — every resubmit after a BLOCKED verdict
+  // re-adjudicated the old findings and the plan/goal could never pass again.
+  // Behaviour of the selection rule is unit-tested on the pure function
+  // (test/orchestrator-plan-audit.test.ts); THIS pins that both extension call
+  // sites actually consult it instead of trusting `lastReport`.
+  const goalAt = SRC.indexOf("async function runGoalAudit(");
+  const goal = SRC.slice(goalAt, SRC.indexOf("async function auditPlanRound("));
+  const planAt = SRC.indexOf("async function auditPlanRound(");
+  const plan = SRC.slice(planAt, planAt + 4500);
+  for (const [name, body] of [["goal", goal], ["plan", plan]] as const) {
+    assert.match(body, /const \w*[Ww]ait\w* = await callTool\("judge_wait"/,
+      `the ${name} audit must KEEP the wait result, not discard it`);
+    assert.match(body, /\.done !== true \|\| \w+\.reason !== "report"/,
+      `the ${name} audit only proceeds when the wait ended on THIS round's report`);
+  }
+  // The plan path additionally selects the report through the shared pure
+  // function; the goal path records through recordRoundOutput, whose pending
+  // branches call the same guard.
+  assert.match(plan, /selectCurrentAuditReport\(read\.records, \{ expectedRound, consumedReportId: consumedBeforeWait \}\)/,
+    "the plan audit selects THIS round's report by roundSeq + consumed cursor");
+  assert.match(SRC, /function staleAuditGuard\(root: string\)/,
+    "the recording path shares one stale-report guard");
+  const guarded = [...SRC.matchAll(/staleAuditGuard\(root\)/g)];
+  assert.equal(guarded.length, 2, "the goal and plan recording branches both consult it");
+});
+
 
 test("review_checkpoint REFUSES outright on a PROTECTED branch — no dialog, fail-closed", () => {
   const body = toolBodyOf("review_checkpoint");

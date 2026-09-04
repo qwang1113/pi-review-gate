@@ -4109,18 +4109,39 @@ export default function reviewGate(pi: ExtensionAPI) {
     // the audit cannot hang on a criterion the tool would have accepted.
     // Forward wait motion into the chain's own progress (else a minutes-long
     // audit shows no motion at all).
-    await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx, forwardWaitUpdates(input.progress), input.signal);
-    // the pending-draft entry it consumes makes the second call a no-op.
-    const conclusion = await recordJudgeConclusion(child.sessionId, ctx ?? latestCtx);
-    const note = conclusion?.text;
+    const goalWaited = await callTool("judge_wait", { role: "goal-auditor", repo: root, timeoutMs: JUDGE_WAIT_MAX_TIMEOUT_MS }, ctx, forwardWaitUpdates(input.progress), input.signal);
     // O-6 — WHOEVER DISPATCHED IT CLOSES IT. This goal-auditor is the gate's
     // OWN internal implementation of `propose_loop_goal`; the agent never asked
     // for it and never sees it in any receipt. Leaving it registered made
     // `declare_done` block on "a judge child is still open" that the caller was
-    // never told about (the round-5 P1, in the orchestration twin). Its verdict
-    // is already recorded above, so close it now — the transcript stays on disk
-    // and a re-audit resumes the same session by id.
-    await callTool("judge_close", { role: "goal-auditor", repo: root }, ctx);
+    // never told about (the round-5 P1, in the orchestration twin). ONE close,
+    // defined here and called on every return path below — the transcript stays
+    // on disk and a re-audit resumes the same session by id.
+    const closeGoalAuditor = () => callTool("judge_close", { role: "goal-auditor", repo: root }, ctx);
+    // A wait that never saw THIS round's report (timeout / pending / pane-dead)
+    // is an UNFINISHED audit, not a failed draft: recording nothing and saying
+    // "fix your findings" would point at the PREVIOUS round's verdict (or at
+    // none at all). Fail closed with the re-run instruction, exactly as the
+    // plan path does.
+    const goalWaitDetails = (goalWaited.details ?? {}) as { done?: unknown; reason?: unknown };
+    if (goalWaited.isError || goalWaitDetails.done !== true || goalWaitDetails.reason !== "report") {
+      await closeGoalAuditor();
+      input.progress?.fail("未等到本轮裁决");
+      const why = goalWaitDetails.reason === "pane-dead" ? "pane 已消失" : "等待未命中本轮 report";
+      return {
+        ok: false,
+        text:
+          `review-gate: goal 审计没有等到本轮裁决（${why}），什么都没有记录（fail-closed）——` +
+          "草稿 **没有**被送到用户面前，也没有任何新 findings 要你改。\n" +
+          "直接再调一次 `propose_loop_goal` 即可重跑审计。",
+      };
+    }
+    // the pending-draft entry it consumes makes the second call a no-op.
+    const conclusion = await recordJudgeConclusion(child.sessionId, ctx ?? latestCtx);
+    const note = conclusion?.text;
+    // Its verdict is recorded above, so close it now (same O-6 close as the
+    // unfinished-wait branch — one definition, every return path).
+    await closeGoalAuditor();
 
     input.progress?.done("审计完成");
 
