@@ -4025,3 +4025,21 @@ test("restart does not strand pane judges: registry + pendings persist per repo"
   assert.match(SRC.slice(startAt, startAt + 3000), /ensureHierarchyLoaded\(root\)/,
     "a restarted session merges previous slices");
 });
+
+test("restart does not deadlock on a dead opener: dead foreign panes are adopted", () => {
+  // Persisting without reclaim trades the strand gap for a refusal deadlock:
+  // a restarted session id never equals the dead opener. Dead foreign
+  // entries (pane gone + channel silent) are adopted by whoever touches
+  // them; a live pane or fresh heartbeat keeps the strict refusal.
+  assert.match(SRC, /function reclaimDeadForeignJudges\(\)/, "reclaim exists");
+  assert.match(SRC, /e\.openerId === caller\) continue;/, "own entries are never touched");
+  assert.match(SRC, /panes\.includes\(e\.paneId\)\) continue;/, "a live pane keeps the refusal");
+  assert.match(SRC, /if \(channelFresh\(e\)\) continue;/, "a fresh heartbeat keeps the refusal");
+  assert.match(SRC, /judgeHierarchy\[id\] = \{ \.\.\.e, openerId: caller \};/, "the dead entry is adopted");
+  // …and it runs on every hierarchy read, so no tool path can deadlock.
+  const reads = [...SRC.matchAll(/hierarchy: \(\) => \{ reclaimDeadForeignJudges\(\); return judgeHierarchy; \},/g)];
+  assert.equal(reads.length, 2, "both judge tool families reclaim on read");
+  const dispatchAt = SRC.indexOf("function dispatchJudgeRound(");
+  assert.match(SRC.slice(dispatchAt, dispatchAt + 800), /reclaimDeadForeignJudges\(\);/,
+    "dispatch reclaims before refusing");
+});

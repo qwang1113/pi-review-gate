@@ -133,6 +133,7 @@ import {
   channelPathFor,
   instructText,
   isStalled,
+  HEARTBEAT_STALE_MS,
   judgeChannelTarget,
   newChannelId,
   nodeChannelIO,
@@ -2147,6 +2148,49 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     if (!pendingGoalAudits.has(root) && snap.goalAudit) pendingGoalAudits.set(root, snap.goalAudit);
     if (!pendingPlanAudits.has(root) && snap.planAudit) pendingPlanAudits.set(root, snap.planAudit);
+  }
+
+  /**
+   * Adopt foreign entries nobody can still be driving: pane dead (or never
+   * recorded) AND channel silent past the heartbeat budget. A live pane or a
+   * fresh heartbeat keeps the strict refusal — that is a possibly-live peer,
+   * which is what the cross-level rule protects. Own entries are never
+   * touched; an unreadable pane list touches nothing (missing info never
+   * kills). Pendings ride along: a dead judge's draft stays actionable.
+   */
+  function reclaimDeadForeignJudges(): void {
+    const caller = callerIdentity();
+    if (!caller) return;
+    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
+    let panes: string[] | undefined;
+    try { panes = ownPane ? listJudgePanes((argv) => runTmux(argv), ownPane) : undefined; }
+    catch { panes = undefined; }
+    let changed = false;
+    for (const [id, e] of Object.entries(judgeHierarchy)) {
+      if (e.openerId === caller) continue;
+      if (e.paneId !== undefined) {
+        if (panes === undefined) continue;
+        if (panes.includes(e.paneId)) continue;
+        if (channelFresh(e)) continue;
+      }
+      judgeHierarchy[id] = { ...e, openerId: caller };
+      changed = true;
+    }
+    if (changed) persistJudgeHierarchy();
+  }
+
+  /** Fresh heartbeat within budget ⇒ someone may still drive this judge. */
+  function channelFresh(e: JudgeEntry): boolean {
+    try {
+      const target = judgeChannelTarget(e.openerId, e.judgeId);
+      const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
+      const last = projectChannel(read.records).lastActivityAt;
+      if (!last) return false;
+      const at = Date.parse(last);
+      return Number.isFinite(at) && Date.now() - at <= HEARTBEAT_STALE_MS;
+    } catch {
+      return false;
+    }
   }
   /**
    * Review targets registered by prepare_review (commit mode): repo root →
@@ -4252,6 +4296,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     streamPath?: string;
   }): JudgeDispatch {
     const { root, role, task } = opts;
+    reclaimDeadForeignJudges();
     const title = opts.title.replace(/[^A-Za-z0-9._-]/g, "-") || role;
     const opener = callerIdentity();
     if (!opener) {
@@ -4780,7 +4825,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       return resolved;
     },
     callerId: () => callerIdentity(),
-    hierarchy: () => judgeHierarchy,
+    hierarchy: () => { reclaimDeadForeignJudges(); return judgeHierarchy; },
     saveHierarchy: (next) => setHierarchy(next),
     findChild: (root, role, judgeId) => {
       const c = findJudgeChild(root, role, judgeId);
@@ -4816,7 +4861,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   });
   registerJudgeSpawnTools(pi, {
     callerId: () => callerIdentity(),
-    hierarchy: () => judgeHierarchy,
+    hierarchy: () => { reclaimDeadForeignJudges(); return judgeHierarchy; },
     saveHierarchy: (next) => setHierarchy(next),
     channelIO: () => channelIO,
     channelHome: () => undefined,
@@ -6581,6 +6626,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // session id. Judge panes themselves skip this (they operate nothing).
     if (!readJudgeSideEnv(process.env)) {
       for (const root of new Set([primaryRepoRoot, ...sessionRepos])) ensureHierarchyLoaded(root);
+      reclaimDeadForeignJudges();
     }
     // A new session negotiates its OWN goal: whatever audit rounds a previous
     // session spent on its draft do not carry into this one's count.
