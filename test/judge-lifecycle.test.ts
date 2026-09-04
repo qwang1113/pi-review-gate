@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   judgeWorkDirFor,
   isLegacyJudgeSessionDirName,
+  isCurrentJudgeSessionDirName,
   selectStaleJudgeSessionDirs,
   JUDGE_SESSION_DIR_TTL_MS,
   hasJudgeFence,
@@ -74,9 +75,23 @@ test("reclaim: an unreferenced new-format dir is selected only past the TTL", ()
   assert.deepEqual(selectStaleJudgeSessionDirs(old, new Set(), now), ["reviewer-12345678-a1b2c3d4"]);
 });
 
-test("reclaim: an unrecognised shape is selected only past the TTL, never immediately", () => {
+test("current-format names are recognised, legacy and foreign ones are not", () => {
+  assert.equal(isCurrentJudgeSessionDirName("goal-auditor-f3eb4277-a1b2c3d4"), true);
+  assert.equal(isCurrentJudgeSessionDirName("goal-auditor-f3eb4277"), false);
+  assert.equal(isCurrentJudgeSessionDirName("archive"), false);
+  assert.equal(isCurrentJudgeSessionDirName("reviewer-abc"), false);
+});
+
+test("reclaim: an unrecognised shape is NEVER selected, however old (fail-closed)", () => {
+  // Round-1 P1 (reviewer): the TTL branch accepted anything, so the kept-transcript
+  // `archive/` dir would have been rm -rf'd once past the TTL. Only current-format
+  // dirs are TTL-eligible now.
   const now = 1_700_000_000_000;
-  const entries = [{ name: "archive", mtimeMs: now }];
+  const ancient = now - JUDGE_SESSION_DIR_TTL_MS - 1000;
+  const entries = [
+    { name: "archive", mtimeMs: ancient },
+    { name: "reviewer-abc", mtimeMs: ancient },
+  ];
   assert.deepEqual(selectStaleJudgeSessionDirs(entries, new Set(), now), []);
 });
 

@@ -79,6 +79,17 @@ export function isLegacyJudgeSessionDirName(name: string): boolean {
   return /-([0-9a-f]{8})$/.test(base);
 }
 
+/**
+ * Is this a CURRENT (opener-scoped) dir (`<role>-<repoHash>-<openerHash>`)?
+ *
+ * Only this shape is eligible for TTL reclaim. Anything else that is not legacy
+ * (e.g. `archive/`) is not ours and is NEVER reclaimed — deletion fail-closed.
+ */
+export function isCurrentJudgeSessionDirName(name: string): boolean {
+  const base = name.split("/").pop() ?? name;
+  return /-([0-9a-f]{8})-([0-9a-f]{8})$/.test(base);
+}
+
 /** One entry of the `.pi/judge-sessions/` listing for the reclaim decision. */
 export interface JudgeSessionDirEntry {
   /** Basename of the dir (not the full path). */
@@ -95,7 +106,8 @@ export interface JudgeSessionDirEntry {
  *  - a legacy (pre-opener) dir nobody references is reclaimed IMMEDIATELY —
  *    a new opener must never read its transcript, so keeping it only risks
  *    cross-session pollution;
- *  - any other unreferenced dir is reclaimed once older than the TTL.
+  - any other CURRENT-FORMAT unreferenced dir is reclaimed once older than the TTL;
+ *    anything of unrecognised shape is never reclaimed (fail-closed).
  */
 export function selectStaleJudgeSessionDirs(
   entries: ReadonlyArray<JudgeSessionDirEntry>,
@@ -109,7 +121,11 @@ export function selectStaleJudgeSessionDirs(
       out.push(entry.name);
       continue;
     }
-    if (Number.isFinite(entry.mtimeMs) && nowMs - entry.mtimeMs > JUDGE_SESSION_DIR_TTL_MS) {
+    if (
+      isCurrentJudgeSessionDirName(entry.name) &&
+      Number.isFinite(entry.mtimeMs) &&
+      nowMs - entry.mtimeMs > JUDGE_SESSION_DIR_TTL_MS
+    ) {
       out.push(entry.name);
     }
   }
