@@ -328,6 +328,19 @@ export interface ChannelReportRecord extends ChannelRecordBase {
    */
   inspection?: { actions: number; kinds: string[]; rangeSeen?: boolean; appeal?: string };
   /**
+   * HOW FULL THE JUDGE'S OWN CONTEXT WAS when it concluded this round, in
+   * percent — the reading only the judge's own process can take.
+   *
+   * The gate's rotation policy (lib/judge-rotation.ts) needs it, and the
+   * opener cannot measure it: this is the one channel it can travel on. It is
+   * read at the CONCLUSION, so the decision it feeds is one round stale by
+   * construction — the alternative (asking a judge mid-round) does not exist.
+   * Optional for the same reason `inspection` is: a report written by an older
+   * build simply carries none, and "no reading" is the fail-open case
+   * (rotation then rests on the round cap alone), never a rotation.
+   */
+  contextPercent?: number;
+  /**
    * WHICH SCOPE THIS ROUND RAN UNDER, in the judge's own words: the commit
    * range and the full/incremental decision, both read back from the round's
    * task text (lib/judge-inspection.ts).
@@ -572,6 +585,11 @@ export interface ReportConclusion {
    * {@link sanitizeScopeStamp}.
    */
   scope?: ReviewScopeStamp;
+  /**
+   * The judge's own context reading at the conclusion, in percent. Present
+   * only when the report carried a usable one — see {@link sanitizeContextPercent}.
+   */
+  contextPercent?: number;
 }
 
 /**
@@ -593,9 +611,23 @@ export function sanitizeScopeStamp(raw: unknown): ReviewScopeStamp | undefined {
 }
 
 /**
+ * Keep a report's context reading only when it is a usable percentage.
+ *
+ * Same untrusted-input rule as {@link sanitizeScopeStamp}, and the fail
+ * direction matters here: an unusable reading must become `undefined` ("no
+ * reading", which never rotates) rather than a number that could cross the
+ * rotation threshold by accident. Out-of-range values are clamped instead of
+ * dropped — a host reporting 140% is reporting "full", not "unknown".
+ */
+export function sanitizeContextPercent(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
+  return Math.min(100, Math.max(0, raw));
+}
+
+/**
  * Read one report's structured conclusion, resolving a spilled findings array.
  *
- * Two fields are normalized. `findings`: a report written before the field
+ * Three fields are normalized. `findings`: a report written before the field
  * existed, one whose findings are not an array, or one whose spill file is
  * unreadable all read as NO findings rather than throwing — the verdict still
  * travels, and the recorder fails closed on an unrecognisable one. A spill
@@ -603,7 +635,9 @@ export function sanitizeScopeStamp(raw: unknown): ReviewScopeStamp | undefined {
  * verdict it reported and no findings, never with a stale set from elsewhere.
  * `scope` goes through {@link sanitizeScopeStamp} for the same reason: a
  * stamp is auditing evidence, and evidence that cannot be recognised is
- * absent, not approximated.
+ * absent, not approximated. `contextPercent` is the same rule once more
+ * ({@link sanitizeContextPercent}): an unusable reading is no reading, which
+ * is the fail-open input the rotation policy expects.
  */
 export function reportConclusion(io: ChannelIO, record: ChannelReportRecord): ReportConclusion {
   let raw: unknown = record.findings;
@@ -615,12 +649,14 @@ export function reportConclusion(io: ChannelIO, record: ChannelReportRecord): Re
   }
   const findings = Array.isArray(raw) ? raw.filter((f): f is ReportFinding => !!f && typeof f === "object") : [];
   const scope = sanitizeScopeStamp(record.scope);
+  const contextPercent = sanitizeContextPercent(record.contextPercent);
   return {
     verdict: record.verdict,
     findings,
     ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
     ...(record.docSync === undefined ? {} : { docSync: record.docSync }),
     ...(scope === undefined ? {} : { scope }),
+    ...(contextPercent === undefined ? {} : { contextPercent }),
   };
 }
 

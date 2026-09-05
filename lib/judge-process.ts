@@ -21,15 +21,19 @@ export const JUDGE_SESSION_PREFIX = "rg-";
 export const MAX_SESSION_ID = 80;
 
 /**
- * THE RESUME KEY, scoped to the opener: same role + same repo + same opener
- * ⇒ same session id ⇒ the next pane continues the same pi session.
+ * THE RESUME KEY, scoped to the opener and to the review LANE: same role +
+ * same repo + same opener + same lane ⇒ same session id ⇒ the next pane
+ * continues the same pi session.
  * A different opener session gets a different id ⇒ a fresh transcript that never inherits another session's context.
+ * A different LANE does the same on purpose: that is how the reuse unit ends
+ * (a new goal/plan) and how the gate rotates a transcript that grew too big
+ * (lib/judge-rotation.ts). Omitting the lane reproduces the pre-lane id exactly.
  * Crash recovery is unaffected: the same opener re-opens with the same id and resumes its transcript.
  */
-export function judgeSessionIdFor(role: string, repoHash: string, openerId: string): string {
+export function judgeSessionIdFor(role: string, repoHash: string, openerId: string, lane?: JudgeLane): string {
   const safeRole = role.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 20);
   const safeHash = repoHash.replace(/[^A-Za-z0-9]/g, "").slice(0, 24);
-  const raw = `${JUDGE_SESSION_PREFIX}${safeRole}-${safeHash}-${shortOpenerHash(openerId)}`;
+  const raw = `${JUDGE_SESSION_PREFIX}${safeRole}-${safeHash}-${shortOpenerHash(openerId)}${laneSuffix(lane)}`;
   return raw.slice(0, MAX_SESSION_ID);
 }
 
@@ -46,6 +50,52 @@ export function shortRepoHash(repoRoot: string): string {
 export function shortOpenerHash(openerId: string): string {
   return shortRepoHash(openerId.trim() || "unknown");
 }
+
+/**
+ * WHICH transcript a judge is running in: the review OBJECT it serves and the
+ * generation of that object's transcript.
+ *
+ * The policy that produces a lane lives in lib/judge-rotation.ts; the lane
+ * itself lives HERE, with the id derivation, because both the session id and
+ * the work dir are rendered from it and they must never disagree about which
+ * lane they name (a session id from one lane beside a dir from another is a
+ * judge writing its transcript where nobody will look for it).
+ */
+export interface JudgeLane {
+  /** Full object id — the approved goal/plan hash, or the "none" placeholder. */
+  objectId: string;
+  /** 0 for the object's first transcript, +1 for each gate-decided rotation. */
+  generation: number;
+}
+
+/**
+ * The object's discriminator inside an id or a path: always 8 hex chars.
+ *
+ * An approved hash is already hex, so it is simply truncated (the FULL id
+ * stays in the registry — comparisons are made against that, never against
+ * this prefix). Anything else — the `none` placeholder above all — is folded
+ * through the same cheap hash the repo and opener use, so every lane suffix
+ * has ONE recognisable shape for the dir-name matchers to key on.
+ */
+export function shortObjectId(objectId: string): string {
+  const raw = objectId.trim();
+  return /^[0-9a-f]{8,}$/i.test(raw) ? raw.toLowerCase().slice(0, 8) : shortRepoHash(raw || "none");
+}
+
+/**
+ * The lane suffix shared by the session id and the work dir — ONE renderer, so
+ * the two cannot drift into different lanes.
+ *
+ * No lane ⇒ empty string, byte-for-byte the pre-lane id and dir. That is what
+ * lets a caller that has no lane fact (a legacy path, a test) keep working
+ * unchanged instead of silently naming lane `none-g0`.
+ */
+export function laneSuffix(lane?: JudgeLane): string {
+  if (!lane) return "";
+  const generation = Number.isFinite(lane.generation) && lane.generation > 0 ? Math.floor(lane.generation) : 0;
+  return `-${shortObjectId(lane.objectId)}-g${generation}`;
+}
+
 
 /** Name of the dir holding every judge round's scratch worktrees. */
 export const REVIEW_SCRATCH_DIRNAME = "rg-review-scratch";

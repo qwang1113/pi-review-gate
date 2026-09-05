@@ -54,6 +54,7 @@ import {
   judgeChannelTarget,
   newChannelId,
   readChannel,
+  sanitizeContextPercent,
   type ChannelIO,
   type ChannelRecord,
   type ReviewScopeStamp,
@@ -288,6 +289,17 @@ export interface JudgeConcludeToolDeps {
    */
   reviewScope(): ReviewScopeStamp | undefined;
 
+  /**
+   * HOW FULL THIS JUDGE'S CONTEXT IS, in percent, as its own host reports it.
+   *
+   * Required, like `inspection` and `reviewScope` above, and for the same
+   * reason: an unwired host would report nothing, the opener would read "no
+   * reading", and the transcript would then be bounded by the round cap alone
+   * — silently, with nothing to notice. `undefined` stays the honest answer
+   * for a host that genuinely cannot measure usage.
+   */
+  contextPercent(): number | undefined;
+
   /** The live appeal pass, when `request_arbitration` granted one. */
   inspectionPass(): InspectionPass | undefined;
   /** A zero-inspection READY was refused — the appeal route needs to see it. */
@@ -378,6 +390,10 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
   const findingsCount = countStreamFindings((p) => deps.readText(p), streamPath, input.findings.length);
   const notes = (input.notes ?? "").trim();
   const reviewScope = deps.reviewScope();
+  // Sanitized on the WRITING side too: the host's reading is a number from
+  // another subsystem, and a NaN on the wire would read back as "no reading"
+  // anyway — dropping it here keeps the record honest at the source.
+  const contextPercent = sanitizeContextPercent(deps.contextPercent());
   const report = {
     reportId: newChannelId("rep", now),
     kind: "report" as const,
@@ -405,6 +421,13 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
     // exist. The opener records it beside what IT dispatched, so the two can
     // be compared later.
     ...(reviewScope === undefined ? {} : { scope: reviewScope }),
+    // HOW FULL THIS JUDGE'S CONTEXT IS, measured in the only process that can
+    // measure it. The opener's rotation policy (lib/judge-rotation.ts) reads
+    // it off the report and decides, before the NEXT round, whether this
+    // transcript keeps going. A third new OPTIONAL field, omitted when the
+    // host offers no reading — and "omitted" is the fail-open case there, so
+    // an old opener (or an unwired host) simply keeps reusing as before.
+    ...(contextPercent === undefined ? {} : { contextPercent }),
 
   };
   try {

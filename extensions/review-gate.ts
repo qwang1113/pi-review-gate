@@ -166,8 +166,10 @@ import {
   readChannel,
   reportConclusion,
   reportText,
+  sanitizeContextPercent,
   type ChannelIO,
   type ChannelRecord,
+  type ChannelReportRecord,
   type ReportConclusion,
   type ChildReportedState,
 } from "../lib/orchestrator-channel.ts";
@@ -181,10 +183,18 @@ import {
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
 import { supervisionTarget } from "../lib/orchestration-id.ts";
-import { emptyHierarchy, judgeLive, listByOpener, paneClosable, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
+import { emptyHierarchy, findJudgeLane, judgeLive, listByOpener, paneClosable, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
+import {
+  decideJudgeRotation,
+  judgeObjectId,
+  laneOfEntry,
+  rotationHandoffTask,
+  type JudgeRotationDecision,
+} from "../lib/judge-rotation.ts";
 import {
   judgePaneAlive,
   listJudgePanes,
+  type JudgePaneRunner,
 } from "../lib/judge-pane.ts";
 import {
   buildJudgePaneCommand,
@@ -2678,6 +2688,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       const known = new Set<string>();
       for (const e of Object.values(judgeHierarchy)) {
         if (e.repoRoot !== root) continue;
+        // A LIVE lane is protected by its identity, not by its mtime: an entry
+        // that records a lane names a dir with the lane suffix, and that is the
+        // dir this judge is writing into right now. Both shapes are added — an
+        // entry written by an older build has no lane at all, and its dir is
+        // the un-suffixed one.
+        known.add(judgeWorkDirBasename(e.role, shortRepoHash(e.repoRoot), e.openerId, laneOfEntry(e)));
         known.add(judgeWorkDirBasename(e.role, shortRepoHash(e.repoRoot), e.openerId));
         known.add(legacyJudgeWorkDirBasename(e.role, shortRepoHash(e.repoRoot)));
       }
@@ -4855,6 +4871,149 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * WHICH review object this repo's judges are serving right now.
+   *
+   * The priority is lib/judge-rotation.ts's, not this call site's: an
+   * orchestration serves its approved PLAN, every other session its approved
+   * GOAL. The goal hash counts only while the goal file still carries the
+   * user's approval — an edited goal is a different contract, and reusing the
+   * transcript of the one it replaced is precisely what the release point
+   * exists to stop.
+   */
+  function judgeObjectIdFor(root: string): string {
+    const st = root === primaryRepoRoot ? state : stateForRepo(root);
+    return judgeObjectId({
+      orchestrator: state.taskMode === "orchestrator",
+      ...(state.orchestrator?.approvedPlanHash ? { planHash: state.orchestrator.approvedPlanHash } : {}),
+      ...(loopGoalConfirmed(root, st) && st.loopGoal ? { goalHash: st.loopGoal.hash } : {}),
+    });
+  }
+
+  /**
+   * THE lane resolution — the ONE entry point every judge-starting path calls,
+   * exactly once, before it derives anything.
+   *
+   * It reads the lane the role is currently in (a scan of the registry, since
+   * a judge id now CONTAINS its lane and therefore cannot be derived before
+   * the decision is made), asks the policy what this round's lane is, and —
+   * when the answer is a NEW lane — retires the old one on the spot. Retiring
+   * belongs here rather than in each caller for the reason the whole module
+   * map exists: the paths that start a judge (`dispatchJudgeRound`,
+   * `judge_spawn`'s launch config and task file) must not each reimplement
+   * "and close the pane we just stopped using", and one of them would forget.
+   */
+  function resolveJudgeLane(root: string, role: string, opener: string): {
+    decision: JudgeRotationDecision;
+    previous?: JudgeEntry;
+  } {
+    const previous = findJudgeLane(judgeHierarchy, { role, repoRoot: root, openerId: opener });
+    const decision = decideJudgeRotation({
+      objectId: judgeObjectIdFor(root),
+      ...(previous === undefined ? {} : { previous }),
+    });
+    if (decision.rotated && previous) {
+      const nextId = judgeSessionIdFor(role, shortRepoHash(root), opener, decision.lane);
+      // A ROTATED round leaves a whole lane behind — its pane included. The
+      // registry is keyed by judge id and this round's id is a NEW one, so
+      // nothing downstream would ever look at the old pane again: it would
+      // live on with nobody left to close it (one leaked pane per rotation).
+      if (previous.judgeId !== nextId) {
+        retireJudgeLane(previous, {
+          root,
+          opener,
+          ownPane: process.env.TMUX_PANE?.trim() || undefined,
+          tmuxServer: tmuxServerFrom(process.env),
+          run: (argv: readonly string[]) => runTmux(argv),
+        });
+      }
+    }
+    return { decision, ...(previous === undefined ? {} : { previous }) };
+  }
+
+  /**
+   * The facts a rotated REVIEWER round hands over, gathered from this repo's
+   * gate state. Empty for every other case — an unrotated round needs nothing,
+   * and another role's hand-off is built by that role's own module.
+   */
+  function rotationCarryoverFacts(root: string, role: string, decision: JudgeRotationDecision): {
+    settled?: SettledConclusion;
+    openFindings?: string[];
+    delta?: { files: string[]; lines?: number; reviewedFiles?: string[] };
+  } {
+    if (!decision.rotated || role !== "reviewer") return {};
+    const st = root === primaryRepoRoot ? state : stateForRepo(root);
+    const settled = settledConclusion(st);
+    const openFindings = previousRoundFindings(st);
+    let delta: { files: string[]; lines?: number; reviewedFiles?: string[] } | undefined;
+    try {
+      const scope = reviewScopeFor(root, st);
+      delta = { files: scope.changedFiles, lines: scope.changedLines, reviewedFiles: scope.reviewedFiles };
+    } catch {
+      // A git read can fail (a repo mid-rebase, a missing tree). The hand-off
+      // is still worth sending without its delta; inventing one is not.
+      delta = undefined;
+    }
+    return {
+      ...(settled === undefined ? {} : { settled }),
+      openFindings,
+      ...(delta === undefined ? {} : { delta }),
+    };
+  }
+
+  /**
+   * Retire a lane the gate has rotated away from: close its pane, forget its
+   * row, and let its session dir age out where it stands.
+   *
+   * The dir is deliberately NOT deleted. "Archived in place" is the user's own
+   * shape (2026-09-05): the transcript stays readable, and the existing TTL
+   * sweep reclaims it once nothing in the registry points at it — which is
+   * true the moment this function returns.
+   */
+  function retireJudgeLane(
+    entry: JudgeEntry,
+    ctx: {
+      root: string;
+      opener: string;
+      ownPane: string | undefined;
+      tmuxServer: string | undefined;
+      run: JudgePaneRunner;
+    },
+  ): void {
+    const usable = paneClosable(entry, ctx.tmuxServer);
+    const alive = usable && ctx.ownPane && entry.paneId
+      ? judgePaneAlive(ctx.run, ctx.ownPane, entry.paneId)
+      : undefined;
+    if (entry.paneId && alive === true) {
+      // Same label-bar judgement as every other close path: the border line is
+      // released only when no decorated pane of this opener is left.
+      const others = countDecoratedPanes(
+        Object.values(judgeHierarchy)
+          .filter((other) =>
+            other.judgeId !== entry.judgeId
+            && other.openerId === ctx.opener
+            && other.paneId
+            && paneClosable(other, ctx.tmuxServer))
+          .map((other) => other.paneId!),
+        ctx.ownPane ? listJudgePanes(ctx.run, ctx.ownPane) : undefined,
+      );
+      const releases = ctx.ownPane !== undefined && releasesWindowLabels({
+        remainingDecoratedPanes: others,
+        insideOrchestration: labelBarOwnedByOthers(),
+      });
+      try {
+        closeSessionPane(ctx.run, entry.paneId, releases ? { hideLabelsVia: ctx.ownPane! } : {});
+      } catch { /* best effort */ }
+    }
+    // The retired lane's scratch worktrees can never be used again — whether
+    // its pane was closed here or had already died.
+    reapReviewScratch(entry.judgeId);
+    setHierarchy(removeJudge(judgeHierarchy, entry.judgeId));
+    // An audit pending against the retired lane dies with it: a report from
+    // the NEW lane must never be recorded against a draft it never judged.
+    if (entry.role === "goal-auditor") dropAudits(ctx.root);
+  }
+
 
   /**
    * Dispatch ONE round to a judge role — the single place a judge process is
@@ -4880,7 +5039,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     /** This round's findings stream, recorded on the child for judge_wait. */
     streamPath?: string;
   }): Promise<JudgeDispatch> {
-    const { root, role, task } = opts;
+    const { root, role } = opts;
     dropDeadForeignJudges();
     const title = opts.title.replace(/[^A-Za-z0-9._-]/g, "-") || role;
     const opener = callerIdentity();
@@ -4888,14 +5047,35 @@ export default function reviewGate(pi: ExtensionAPI) {
       return { ok: false, reused: false, error: "无法确认调用者身份——身份不明时不能派 review。" };
     }
     sweepStaleJudgeSessionDirs(root);
-    const sessionId = judgeSessionIdFor(role, shortRepoHash(root), opener);
+    // THE LANE this round runs in, resolved ONCE (lib/judge-rotation.ts) and
+    // handed to every derivation below. The session id, the work dir and the
+    // registry row all render from this one value, which is the only way they
+    // cannot end up naming different lanes.
+    const rotation = resolveJudgeLane(root, role, opener);
+    const lane = rotation.decision.lane;
+    const sessionId = judgeSessionIdFor(role, shortRepoHash(root), opener, lane);
     const judgeId = sessionId;
-    // STABLE per role+repo+opener (B5) — identity, not a per-round path.
-    const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener));
+    // STABLE per role+repo+opener+lane (B5) — identity, not a per-round path.
+    const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener, lane));
     const sessionDir = pathJoin(workDir, "sessions");
     const continuesSession = hasTranscript(sessionDir);
     const ownPane = process.env.TMUX_PANE?.trim() || undefined;
     const run = (argv: readonly string[]) => runTmux(argv);
+    // Stamped on every entry that records a pane, and checked before any use
+    // of a recorded one (see lib/hierarchy.ts `paneClosable`).
+    const tmuxServer = tmuxServerFrom(process.env);
+
+
+    // The task text a rotated round is sent with: the history is gone, so the
+    // hand-off (rendered by lib/review-carryover.ts, never re-written here)
+    // travels in the task itself. A normal round passes through untouched.
+    const task = rotationHandoffTask({
+      role,
+      task: opts.task,
+      decision: rotation.decision,
+      ...rotationCarryoverFacts(root, role, rotation.decision),
+    });
+
     // Opener-scoped ids do not collide across sessions by construction: a second
     // opener derives a different id and opens its own review. Cross-opener protection
     // still lives in lib/hierarchy.ts (registration refuses two parents for one id).
@@ -4903,9 +5083,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     // "same role, same session id in this repo" needs no scan of a second table.
     const existing = judgeHierarchy[judgeId];
 
-    // Stamped on every entry that records a pane, and checked before any use
-    // of a recorded one (see lib/hierarchy.ts `paneClosable`).
-    const tmuxServer = tmuxServerFrom(process.env);
+    // THE LANE BOOKKEEPING every registration below writes, so the next
+    // dispatch can make the same decision from the registry alone.
+    // `roundsInObject` is counted at DISPATCH (abandoned rounds included), and
+    // the judge's last context reading survives a REUSE but never a rotation:
+    // a new transcript starts empty, and carrying the old number forward would
+    // rotate the new one immediately.
+    const laneFields = {
+      objectId: lane.objectId,
+      generation: lane.generation,
+      roundsInObject: rotation.decision.roundsInObject,
+      ...(rotation.decision.rotated || existing?.contextPercent === undefined
+        ? {}
+        : { contextPercent: existing.contextPercent }),
+    };
 
     // A recorded pane is probed only when its id is still comparable: an entry
     // restored from disk may have been minted by a tmux server that has since
@@ -4951,6 +5142,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         ...(keptCursor === undefined ? {} : { lastReportId: keptCursor }),
         ...(keptFindings === undefined ? {} : { lastFindingCount: keptFindings }),
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
+        ...laneFields,
         spawnedAt: new Date().toISOString(),
       });
       if (reg.ok) setHierarchy(reg.table);
@@ -5072,6 +5264,7 @@ export default function reviewGate(pi: ExtensionAPI) {
               ? { lastFindingCount: judgeHierarchy[judgeId]!.lastFindingCount }
               : {}),
             ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
+            ...laneFields,
             spawnedAt: new Date().toISOString(),
           });
           if (reg.ok) setHierarchy(reg.table);
@@ -5131,6 +5324,29 @@ export default function reviewGate(pi: ExtensionAPI) {
     const entry = judgeHierarchy[sessionId];
     if (!entry || entry.lastReportId === reportId) return;
     const reg = registerJudge(judgeHierarchy, { ...entry, lastReportId: reportId });
+    if (reg.ok) setHierarchy(reg.table);
+  }
+
+  /**
+   * Record what a judge last said about its OWN context usage.
+   *
+   * The reading only exists inside the judge's process, so it rides its report
+   * (lib/orchestrator-channel.ts) and lands here — the opener's registry —
+   * where the next dispatch's rotation policy reads it. Taken from the NEWEST
+   * report that carries one: a report from an older build carries none, and
+   * "none" must leave the previous reading alone rather than erase it.
+   */
+  function noteJudgeContextFrom(judgeId: string, records: readonly ChannelRecord[]): void {
+    const entry = judgeHierarchy[judgeId];
+    if (!entry) return;
+    let percent: number | undefined;
+    for (const record of records) {
+      if (record.kind !== "report") continue;
+      const reading = sanitizeContextPercent((record as ChannelReportRecord).contextPercent);
+      if (reading !== undefined) percent = reading;
+    }
+    if (percent === undefined || percent === entry.contextPercent) return;
+    const reg = registerJudge(judgeHierarchy, { ...entry, contextPercent: percent });
     if (reg.ok) setHierarchy(reg.table);
   }
 
@@ -5348,7 +5564,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       readRoundRecords: (entry) => {
         try {
           const target = judgeChannelTarget(entry.openerId, entry.judgeId);
-          return readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
+          const records = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
+          // The same read that finds this round's report also carries the
+          // judge's own context reading — the one fact the opener cannot
+          // measure and the rotation policy needs before the NEXT dispatch.
+          noteJudgeContextFrom(entry.judgeId, records);
+          return records;
         } catch {
           return []; // an unreadable channel is "no report", never a verdict
         }
@@ -5891,6 +6112,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       // carries its own scope block and overwrites it, and a round whose text
       // says nothing new is still running against the same range.
       reviewScope: () => judgeReviewScope(),
+      // THIS pane's own context usage, taken at the conclusion — the reading
+      // the opener cannot take, and the one its rotation policy runs on
+      // (lib/judge-rotation.ts). Same wrapper the orchestration layer uses;
+      // `undefined` when the host offers no usage, which never rotates.
+      contextPercent: () => contextPercentOf(latestCtx as unknown as { getContextUsage?: () => unknown }),
       inspectionPass: () => inspectionPass,
       noteInspectionRefusal: (block) => { lastBlockedInspection = block; },
       noteConcluded: (usedPass) => {
@@ -5917,9 +6143,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (resolved.ok) ensureHierarchyLoaded(resolved.root);
       return resolved;
     },
-    launchConfig: (root, role, opener) => {
+    // THE lane resolver, shared with `dispatchJudgeRound` — one policy, one
+    // retire path, whichever tool starts the judge.
+    lane: (root, role, opener) => {
+      const resolved = resolveJudgeLane(root, role, opener);
+      return { lane: resolved.decision.lane, roundsInObject: resolved.decision.roundsInObject };
+    },
+    launchConfig: (root, role, opener, lane) => {
       const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);
-      const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener));
+      const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener, lane));
       const files = writeJudgeSpawnFiles({ repoRoot: root, role, agents, workDir, title: role });
       if (!files.model) {
         return { ok: false, error: `角色 ${role} 没有可派发的模型链——请修复 ~/.pi/review-gate.json 后重试` };
@@ -5954,9 +6186,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         }),
       };
     },
-    writeJudgeTaskFile: (root, role, opener, task) => {
+    writeJudgeTaskFile: (root, role, opener, task, lane) => {
       try {
-        const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener));
+        const workDir = pathJoin(root, judgeWorkDirFor(role, shortRepoHash(root), opener, lane));
         const sessionDir = pathJoin(workDir, "sessions");
         mkdirSync(sessionDir, { recursive: true });
         const taskPath = pathJoin(sessionDir, `task-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}.md`);

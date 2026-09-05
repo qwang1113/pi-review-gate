@@ -10,6 +10,7 @@ import {
   emptyHierarchy,
   registerJudge,
   checkCaller,
+  findJudgeLane,
   removeJudge,
   listByOpener,
   judgeIdsByOpener,
@@ -268,4 +269,42 @@ test("the retired goalAudit/planAudit fields are not read", () => {
   }));
   assert.deepEqual(Object.keys(parsed!.judges), ["j"]);
   assert.equal(parsed!.audit, undefined);
+});
+
+/**
+ * THE LANE LOOKUP. A judge id now contains its rotation lane, so "which judge
+ * is this role running in" can no longer be answered by deriving an id — the
+ * derived one names the lane the NEXT dispatch would use. This scan is what
+ * replaces that derivation, and it is deliberately NOT a second table.
+ */
+test("findJudgeLane returns this opener's judge for the role, newest lane first", () => {
+  const table = {
+    old: entry({ judgeId: "old", spawnedAt: "2026-09-01T00:00:00.000Z", objectId: "aaaa", generation: 0 }),
+    fresh: entry({ judgeId: "fresh", spawnedAt: "2026-09-05T00:00:00.000Z", objectId: "aaaa", generation: 1 }),
+    otherRole: entry({ judgeId: "otherRole", role: "adviser", spawnedAt: "2026-09-06T00:00:00.000Z" }),
+    otherRepo: entry({ judgeId: "otherRepo", repoRoot: "/elsewhere", spawnedAt: "2026-09-07T00:00:00.000Z" }),
+    otherOpener: entry({ judgeId: "otherOpener", openerId: "session-child-2", spawnedAt: "2026-09-08T00:00:00.000Z" }),
+  };
+  const found = findJudgeLane(table, { role: "reviewer", repoRoot: "/repo", openerId: "session-child-1" });
+  assert.equal(found?.judgeId, "fresh", "the newest lane of THIS role/repo/opener");
+  assert.equal(found?.generation, 1);
+  // Another role, repo or opener is somebody else's lane — never borrowed.
+  assert.equal(findJudgeLane(table, { role: "adviser", repoRoot: "/repo", openerId: "session-child-1" })?.judgeId, "otherRole");
+  assert.equal(findJudgeLane(table, { role: "reviewer", repoRoot: "/elsewhere", openerId: "session-child-1" })?.judgeId, "otherRepo");
+  assert.equal(findJudgeLane(table, { role: "reviewer", repoRoot: "/repo", openerId: "session-child-2" })?.judgeId, "otherOpener");
+  assert.equal(findJudgeLane(table, { role: "goal-auditor", repoRoot: "/repo", openerId: "session-child-1" }), undefined);
+  // An incomplete query is not a wildcard: it finds nothing.
+  assert.equal(findJudgeLane(table, { role: "", repoRoot: "/repo", openerId: "session-child-1" }), undefined);
+  assert.equal(findJudgeLane(table, { role: "reviewer", repoRoot: "/repo", openerId: " " }), undefined);
+  assert.equal(findJudgeLane({}, { role: "reviewer", repoRoot: "/repo", openerId: "session-child-1" }), undefined);
+});
+
+test("an entry from an older build carries no lane, and is still found", () => {
+  // The lane fields are optional on purpose (source-loaded extension, mixed
+  // builds). A lane-less entry must be returned, not skipped: it is still the
+  // judge whose pane a rotation has to retire.
+  const table = { legacy: entry({ judgeId: "legacy" }) };
+  const found = findJudgeLane(table, { role: "reviewer", repoRoot: "/repo", openerId: "session-child-1" });
+  assert.equal(found?.judgeId, "legacy");
+  assert.equal(found?.objectId, undefined);
 });

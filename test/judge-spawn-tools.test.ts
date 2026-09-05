@@ -21,6 +21,23 @@ import type { JudgePaneRunResult } from "../lib/judge-pane.ts";
 
 type Exec = (params: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
 
+/**
+ * What the fakes record. The three lane arrays exist so a test can assert the
+ * lane is resolved ONCE and reaches every derivation unchanged — the failure
+ * they guard against (an id from one lane beside a dir from another) is
+ * invisible in the spawn's reply.
+ */
+interface SpawnStore {
+  table: HierarchyTable;
+  pending?: "goal" | "plan";
+  draft?: string;
+  planRemembered?: boolean;
+  panes: string[];
+  lanesAsked: string[];
+  launchLanes: string[];
+  taskFileLanes: string[];
+}
+
 function setup(over: Partial<{
   caller: string | null | undefined;
   ownPane: string | null | undefined;
@@ -33,11 +50,13 @@ function setup(over: Partial<{
   insideOrchestration?: boolean;
   /** Make the plan bookkeeping fail, which rolls the whole spawn back. */
   planRememberFails?: boolean;
+  /** The lane the gate resolves for this spawn (default: a plain first lane). */
+  lane?: { lane: { objectId: string; generation: number }; roundsInObject: number };
 }> = {}): {
   deps: JudgeSpawnToolDeps;
   tools: Map<string, Exec>;
   seen: string[][];
-  store: { table: HierarchyTable; pending?: "goal" | "plan"; draft?: string; planRemembered?: boolean; panes: string[] };
+  store: SpawnStore;
 } {
   const seen: string[][] = [];
   const files = new Map<string, string>();
@@ -48,10 +67,13 @@ function setup(over: Partial<{
     writeText(path, text) { files.set(path, text); },
     now: () => 1_700_000_000_000,
   };
-  const store: { table: HierarchyTable; pending?: "goal" | "plan"; draft?: string; planRemembered?: boolean; panes: string[] } = {
+  const store: SpawnStore = {
     table: over.table ?? emptyHierarchy(),
     ...(over.pending === undefined ? {} : { pending: over.pending }),
     panes: over.panes ?? ["%1"],
+    lanesAsked: [],
+    launchLanes: [],
+    taskFileLanes: [],
   };
   const panes = store.panes;
   /**
@@ -122,10 +144,23 @@ function setup(over: Partial<{
     // back spawn takes the border line down with the pane it just opened.
     insideOrchestration: () => over.insideOrchestration === true,
     resolveRepo: () => ({ ok: true as const, root: "/repo" }),
-    launchConfig: () => ({ ok: true as const, model: "m", sysPromptPath: "/sp.md", sessionDir: "/sessions" }),
+    // The gate's lane for this spawn (lib/judge-rotation.ts). The default is a
+    // plain first lane; `store.lanesAsked` records every resolution so a test
+    // can prove it is asked exactly once per spawn.
+    lane: (root, role, opener) => {
+      store.lanesAsked.push(`${role}|${root}|${opener}`);
+      return over.lane ?? { lane: { objectId: "objecthash0001", generation: 0 }, roundsInObject: 1 };
+    },
+    launchConfig: (_root, _role, _opener, lane) => {
+      store.launchLanes.push(lane ? `${lane.objectId}#${lane.generation}` : "none");
+      return { ok: true as const, model: "m", sysPromptPath: "/sp.md", sessionDir: "/sessions" };
+    },
     buildGoalAuditTask: async (draft) => ({ ok: true as const, task: `AUDIT ${draft}`, streamPath: "/stream.jsonl" }),
     buildPlanAuditTask: async () => ({ ok: true as const, task: "AUDIT PLAN" }),
-    writeJudgeTaskFile: () => ({ ok: true as const, path: "/sessions/task-1.md" }),
+    writeJudgeTaskFile: (_root, _role, _opener, _task, lane) => {
+      store.taskFileLanes.push(lane ? `${lane.objectId}#${lane.generation}` : "none");
+      return { ok: true as const, path: "/sessions/task-1.md" };
+    },
     pendingAuditKind: () => store.pending,
     rememberGoalAudit: (_root, draft) => { store.draft = draft; store.pending = "goal"; },
     rememberPlanAudit: () => {
@@ -375,4 +410,39 @@ test("spawn over a dead pane points at recover, not a second birth", async () =>
   const second = await tools.get("judge_spawn")!({ kind: "plan" });
   assert.equal(second.isError, true);
   assert.match(textOf(second), /judge_recover/);
+});
+
+/**
+ * ONE LANE PER SPAWN, and every derivation gets THAT one.
+ *
+ * The failure this pins is invisible in the reply: a judge id rendered from
+ * one lane beside a session dir and a task file rendered from another means
+ * the pane resumes a transcript nobody writes tasks into. It is also why the
+ * lane is asked for exactly once — resolving it advances the round count.
+ */
+test("the spawn's lane reaches the id, the launch config and the task file — resolved once", async () => {
+  const { tools, store } = setup({
+    lane: { lane: { objectId: "deadbeefcafe0001", generation: 3 }, roundsInObject: 1 },
+  });
+  const result = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(result.isError, undefined, textOf(result));
+  assert.equal(store.lanesAsked.length, 1, "the lane is resolved exactly once per spawn");
+  assert.deepEqual(store.lanesAsked, ["goal-auditor|/repo|session-child-1"]);
+  assert.deepEqual(store.launchLanes, ["deadbeefcafe0001#3"], "the session dir is derived from that lane");
+  assert.deepEqual(store.taskFileLanes, ["deadbeefcafe0001#3"], "and so is the round's task file");
+  const [judgeId] = Object.keys(store.table);
+  assert.ok(judgeId!.endsWith("-deadbeef-g3"), `the judge id carries the same lane: ${judgeId}`);
+  const entry = store.table[judgeId!]!;
+  assert.equal(entry.objectId, "deadbeefcafe0001", "the FULL object id is what the registry keeps");
+  assert.equal(entry.generation, 3);
+  assert.equal(entry.roundsInObject, 1, "a birth is the object's first dispatched round");
+});
+
+test("a spawn refused on its parameters never resolves a lane (no pane is retired for a typo)", async () => {
+  // Resolving the lane can RETIRE the lane it replaces, so it must not happen
+  // for a call that is about to be refused for missing a draft.
+  const { tools, store } = setup();
+  const refused = await tools.get("judge_spawn")!({ kind: "goal" });
+  assert.equal(refused.isError, true);
+  assert.deepEqual(store.lanesAsked, []);
 });

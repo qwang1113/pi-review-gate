@@ -18,7 +18,7 @@
  * clock, no process. The extension supplies the observations.
  */
 
-import { shortOpenerHash } from "./judge-process.ts";
+import { laneSuffix, shortOpenerHash, type JudgeLane } from "./judge-process.ts";
 /** Root of the gate's judge session tree, relative to the repo. */
 export const JUDGE_SESSIONS_RELDIR = ".pi/judge-sessions";
 
@@ -37,13 +37,19 @@ export const JUDGE_WAIT_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
  * artifacts (task file, stdout, pid) live under `runs/<ts>/`, which is where the per-round
  * variation belongs; a title never enters the path.
  */
-export function judgeWorkDirFor(role: string, repoHash: string, openerId: string): string {
-  return `${JUDGE_SESSIONS_RELDIR}/${judgeWorkDirBasename(role, repoHash, openerId)}`;
+export function judgeWorkDirFor(role: string, repoHash: string, openerId: string, lane?: JudgeLane): string {
+  return `${JUDGE_SESSIONS_RELDIR}/${judgeWorkDirBasename(role, repoHash, openerId, lane)}`;
 }
 
-/** Basename of the opener-scoped work dir (the reclaim registry compares basenames). */
-export function judgeWorkDirBasename(role: string, repoHash: string, openerId: string): string {
-  return `${safePathPart(role)}-${safePathPart(repoHash)}-${shortOpenerHash(openerId)}`;
+/**
+ * Basename of the opener-scoped work dir (the reclaim registry compares basenames).
+ *
+ * The optional LANE is rendered by the same `laneSuffix` the session id uses,
+ * so a judge's dir and its transcript id always name the same lane. Omitting
+ * it reproduces the pre-lane basename byte for byte.
+ */
+export function judgeWorkDirBasename(role: string, repoHash: string, openerId: string, lane?: JudgeLane): string {
+  return `${safePathPart(role)}-${safePathPart(repoHash)}-${shortOpenerHash(openerId)}${laneSuffix(lane)}`;
 }
 
 /**
@@ -67,27 +73,44 @@ function safePathPart(raw: string): string {
 export const JUDGE_SESSION_DIR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * The CURRENT dir shape, in one place: `<role>-<repoHash>-<openerHash>`,
+ * optionally followed by a LANE (`-<objectHash>-g<generation>`).
+ *
+ * The lane tail had to be recognised here the moment rotation started minting
+ * it: an unrecognised shape is "not ours", and a rotated-away dir that is not
+ * ours would never be reclaimed — "archived in place" would quietly mean
+ * "kept forever". Both hashes are 8 hex by construction (`shortRepoHash`,
+ * `shortOpenerHash`, `shortObjectId`), so the shape stays fail-closed: only
+ * these two forms are ever eligible for deletion.
+ */
+const CURRENT_JUDGE_DIR_RE = /-([0-9a-f]{8})-([0-9a-f]{8})(?:-([0-9a-f]{8})-g(\d+))?$/;
+
+/**
  * Is this a PRE-OPENER dir (`<role>-<repoHash>` with no opener segment)?
  *
- * New dirs end with TWO trailing `-<8hex>` segments (repo hash + opener hash);
- * legacy dirs end with exactly ONE. Anything else (e.g. `archive`) is not ours
- * and never qualifies — deletion fail-closed: only recognised shapes are reclaimed.
+ * New dirs end with TWO trailing `-<8hex>` segments (repo hash + opener hash),
+ * plus an optional lane tail; legacy dirs end with exactly ONE. Anything else
+ * (e.g. `archive`) is not ours and never qualifies — deletion fail-closed:
+ * only recognised shapes are reclaimed.
  */
 export function isLegacyJudgeSessionDirName(name: string): boolean {
   const base = name.split("/").pop() ?? name;
-  if (/-([0-9a-f]{8})-([0-9a-f]{8})$/.test(base)) return false;
+  if (CURRENT_JUDGE_DIR_RE.test(base)) return false;
   return /-([0-9a-f]{8})$/.test(base);
 }
 
 /**
- * Is this a CURRENT (opener-scoped) dir (`<role>-<repoHash>-<openerHash>`)?
+ * Is this a CURRENT (opener-scoped) dir — `<role>-<repoHash>-<openerHash>`,
+ * with or without a rotation lane (`-<objectHash>-g<n>`)?
  *
- * Only this shape is eligible for TTL reclaim. Anything else that is not legacy
- * (e.g. `archive/`) is not ours and is NEVER reclaimed — deletion fail-closed.
+ * Only these shapes are eligible for TTL reclaim. Anything else that is not
+ * legacy (e.g. `archive/`) is not ours and is NEVER reclaimed — deletion
+ * fail-closed. A rotated-away lane is reclaimed exactly like any other dir
+ * with no live owner: left in place, swept after the TTL.
  */
 export function isCurrentJudgeSessionDirName(name: string): boolean {
   const base = name.split("/").pop() ?? name;
-  return /-([0-9a-f]{8})-([0-9a-f]{8})$/.test(base);
+  return CURRENT_JUDGE_DIR_RE.test(base);
 }
 
 /** One entry of the `.pi/judge-sessions/` listing for the reclaim decision. */

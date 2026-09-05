@@ -164,6 +164,8 @@ function setup(over: Partial<{
   pass: InspectionPass;
   /** The round's scope stamp; `null` = a round that has none at all. */
   scope: ReviewScopeStamp | null;
+  /** The judge's own context reading; `null` = a host that reports none. */
+  contextPercent: number | null;
 }> = {}): {
   exec: Exec;
   ioFiles: Map<string, string>;
@@ -216,6 +218,9 @@ function setup(over: Partial<{
     // no scope at all" (a goal audit) — `undefined` takes the default, which
     // is the ordinary reviewer round every other expectation describes.
     reviewScope: () => (over.scope === null ? undefined : over.scope ?? { range: "aaaaaaa..bbbbbbb", kind: "incremental" }),
+    // The judge's own context reading, which the opener's rotation policy runs
+    // on. `null` means "this host cannot measure usage" — the fail-open case.
+    contextPercent: () => (over.contextPercent === null ? undefined : over.contextPercent ?? 12),
     inspectionPass: () => over.pass,
     noteInspectionRefusal: (block) => { refusals.push(block); },
     noteConcluded: (usedPass) => { concluded.push(usedPass); },
@@ -500,4 +505,25 @@ test("tool: a round with no scope at all stamps nothing (a goal audit has no ran
   const report = lastReport(ioFiles) as unknown as Record<string, unknown>;
   assert.ok(!("scope" in report), "the field is omitted, not emitted empty");
 });
+
+test("tool: the report carries THIS judge's own context reading, for the opener's rotation policy", async () => {
+  // Only this process can measure it, and the opener decides the NEXT round's
+  // transcript on it (lib/judge-rotation.ts).
+  const { exec, ioFiles } = setup({ hierarchy: hierarchyFile(2), contextPercent: 73.4 });
+  const ok = await exec(GOOD);
+  assert.equal(ok.isError, undefined);
+  const report = lastReport(ioFiles) as { contextPercent?: number };
+  assert.equal(report.contextPercent, 73.4);
+});
+
+test("tool: a host that cannot measure usage stamps NO reading — the fail-open case", async () => {
+  // "No reading" must be distinguishable from "0%": zero would read as an
+  // empty context and keep a full transcript alive forever.
+  const { exec, ioFiles } = setup({ hierarchy: hierarchyFile(2), contextPercent: null });
+  const ok = await exec(GOOD);
+  assert.equal(ok.isError, undefined);
+  const report = lastReport(ioFiles) as unknown as Record<string, unknown>;
+  assert.ok(!("contextPercent" in report), "the field is omitted, not emitted as 0");
+});
+
 

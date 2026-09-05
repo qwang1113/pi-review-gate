@@ -52,6 +52,12 @@
 * 提问：走 `ask_user`（人坐 pane 前可答，opener 经通道可代答，先答生效），等答案时停下、不退出 pane；question fence 已废弃。
 * 意外停止恢复：pane 消失（`dead`）但 verdict 未落盘时，本轮不算结束。opener 用 `judge_recover` 以同一 session id 重开 pane 续接 transcript 继续本轮（不新开一轮、不丢上下文），跨级禁令同样适用——只有 opener 能恢复自己的 review。
 * 多轮复用：pane 是承载体，轮是任务。同一 review（如同一 checkpoint 的连续复审轮）复用同一个 pane + 同一 transcript；只有换 review 对象（新 baseline、新 goal 草稿）才开新 pane。
+* **复用的三条边界（2026-09-05 落地，`lib/judge-rotation.ts`）**：复用不能没有释放点，否则一条 transcript 会把整个项目的审查越积越多地攒在一起（实测样本：2.8MB、累计 $114、上下文 74.8%）。所以门禁给复用同时定义了单元、释放点与上限：
+  * **复用单元 = 一个已批准的 review 对象**。loop 会话取当前**已批准 goal** 的内容 hash，编排会话取**已批准 plan** 的 hash（优先级写死，不看读取顺序），两者都没有时是一个稳定占位对象 `none`——占位对象同样受下面两条闸约束，不是无界桶。
+  * **释放点 = 对象 id 变了**，惰性判定：下一次派发 judge 时比对当前 hash 与注册表里记的对象，不一致就开新 transcript。goal 一被批准，goal-auditor 那条协商期 transcript 就此结束——不需要任何一方在批准路径上主动触发。
+  * **上限 = 60% 上下文 / 同对象 8 轮**，任一命中门禁自己轮转（代次 +1）。上下文读数由 judge 侧在交卷时随 report 上报（opener 读不到自己以外进程的用量）；**读不到就不因它轮转**（fail-open，只靠轮次兜底，否则每一轮都会变成新 transcript，等于取消复用）。轮次在**派发时**计数，所以被放弃/`fresh` 重开的轮也算——否则反复重开就能绕开上限。
+  * 轮转后首轮带**压缩交接**（上轮裁决 + 未关闭 findings + delta），由 `lib/review-carryover.ts` 的 `buildReviewCarryover` 渲染，不另写第二份文本；旧 lane 的 pane 当场关闭、注册表条目移除、scratch 回收，旧目录**原地保留**交给既有 7 天 TTL。
+  * lane（`{objectId, generation}`）进 session id 与工作目录名的方式是同一个后缀渲染器（`laneSuffix`），所以 transcript id 与目录不可能落在不同 lane；agent 侧对轮转**无感**——没有开关、没有配置项。
 * 父级联关：opener `declare_done` 时门禁先关它名下全部 judge pane 再走正常 done 流程——已结束（verdict 已落盘）的直接回收；仍在跑的按 `judge_close` 语义放弃本轮再回收（未落盘的轮不记入 review 链）。opener 不手拼 `kill-pane`，联关全程门禁执行。本条取代现行“有名下未关闭 judge 即拒 done”规则，实现时同步改掉它，不并行两套 done 门槛。
 * 重启接管：opener 注册表与两类 pending 落盘（`<repo>/.pi/judge-hierarchy.json`，按 repo 分片），新会话启动与每次触达 repo 时懒合并（内存优先、坏文件丢弃）。死 pane 的异主条目由触达者自动过户（无活着的对端可冲突，pending 随行）；活 pane 或心跳新鲜的异主条目保持严格拒绝（那可能是活着的对端）。绝不为同一 session id 再开第二个 pi。
 

@@ -24,6 +24,7 @@ import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import {
   checkCaller,
+  findJudgeLane,
   paneClosable,
   registerJudge,
   removeJudge,
@@ -56,7 +57,7 @@ import {
   type JudgePaneRunResult,
 } from "./judge-pane.ts";
 import { verifyJudgeBoot, channelRecordCount } from "./orchestrator-tool-kit.ts";
-import { judgeSessionIdFor, shortRepoHash } from "./judge-process.ts";
+import { judgeSessionIdFor, shortRepoHash, type JudgeLane } from "./judge-process.ts";
 
 import { nextRoundSeq } from "./judge-conclude.ts";
 /** Goal and plan reviews are the only kinds an agent may open directly. */
@@ -101,8 +102,20 @@ export interface JudgeSpawnToolDeps {
   insideOrchestration(): boolean;
   /** Which repo does this call target? Never guessed. */
   resolveRepo(requested: string | undefined): { ok: true; root: string } | { ok: false; error: string };
+  /**
+   * THE LANE this spawn's judge belongs to (lib/judge-rotation.ts), decided by
+   * the gate — retiring a lane it replaces is the resolver's own job.
+   *
+   * Resolved ONCE per spawn and passed to every derivation below (the judge
+   * id, the launch config's session dir, the round's task file), because the
+   * resolution ADVANCES bookkeeping: asking twice would count this spawn as
+   * two rounds and could hand the second derivation a different lane than the
+   * first. That mismatch is not cosmetic — a transcript id from one lane
+   * beside a session dir from another is a judge writing where nobody reads.
+   */
+  lane(root: string, role: string, opener: string): { lane: JudgeLane; roundsInObject: number };
   /** Model + system prompt + transcript dir for one role in one repo. */
-  launchConfig(root: string, role: string, opener: string):
+  launchConfig(root: string, role: string, opener: string, lane: JudgeLane | undefined):
     | { ok: true; model: string; sysPromptPath: string; sessionDir: string }
     | { ok: false; error: string };
   /** Gate-internal audit tasks — the agent names the KIND, never assembles. ctx threads through from execute. */
@@ -111,7 +124,7 @@ export interface JudgeSpawnToolDeps {
   buildPlanAuditTask(root: string, ctx: unknown):
     Promise<{ ok: true; task: string; streamPath?: string } | { ok: false; error: string }>;
   /** Persist the round task next to the transcript dir; returns its path. */
-  writeJudgeTaskFile(root: string, role: string, opener: string, task: string):
+  writeJudgeTaskFile(root: string, role: string, opener: string, task: string, lane: JudgeLane | undefined):
     { ok: true; path: string } | { ok: false; error: string };
   /** Which audit kind is pending for one repo (a goal draft, a plan hash, or none). */
   pendingAuditKind(root: string): "goal" | "plan" | undefined;
@@ -147,6 +160,13 @@ function resolveJudgeId(
   if (!opener) {
     return { ok: false, text: "review-gate: 无法确认调用者身份——身份不明时不能定位 review。" };
   }
+  // THE REGISTRY ANSWERS FIRST, and derivation is only the fallback. A judge
+  // id carries its lane, so deriving one here would name the lane the NEXT
+  // dispatch will use — not the lane the live judge this call means is running
+  // in. `judge_answer` / `judge_recover` address something that already
+  // exists, so the recorded id is the truthful answer whenever there is one.
+  const existing = findJudgeLane(deps.hierarchy(), { role, repoRoot: repo.root, openerId: opener });
+  if (existing) return { ok: true, judgeId: existing.judgeId, root: repo.root };
   return { ok: true, judgeId: judgeSessionIdFor(role, shortRepoHash(repo.root), opener), root: repo.root };
 }
 
@@ -183,19 +203,23 @@ async function doSpawn(
     return fail(`review-gate: 已有 ${pending === "goal" ? "目标" : "计划"}审计挂着——等它的标准报告送达后再开${kind === "goal" ? "目标" : "计划"}审计。两种审计共用一个 judge，串行才不会错绑结论。`);
   }
   const role = "goal-auditor";
-  const earlyJudgeId = judgeSessionIdFor(role, shortRepoHash(root), caller);
   // Spawn is birth: one pane per review object. A living pane takes its
   // rounds through judge_submit, a dead one goes through judge_recover —
   // spawning over either would strand a review or fork a transcript.
-  const incumbent = deps.hierarchy()[earlyJudgeId];
+  //
+  // The incumbent is looked UP, not derived: a judge id now carries its lane
+  // (lib/judge-rotation.ts), and this spawn's lane may not be the one the live
+  // pane is running in. Deriving an id would then find nothing and open a
+  // SECOND pane for the same role beside the live one.
+  const incumbent = findJudgeLane(deps.hierarchy(), { role, repoRoot: root, openerId: caller });
   if (incumbent?.paneId) {
     const ownPane = deps.ownPane();
     const alive = ownPane ? judgePaneAlive(deps.tmux, ownPane, incumbent.paneId) : undefined;
     if (alive === true) {
-      return fail(`review-gate: review ${earlyJudgeId} 的 pane（${incumbent.paneId}）还开着——新一轮走 judge_submit（pane 复用），不要重开。`);
+      return fail(`review-gate: review ${incumbent.judgeId} 的 pane（${incumbent.paneId}）还开着——新一轮走 judge_submit（pane 复用），不要重开。`);
     }
     if (alive === false) {
-      return fail(`review-gate: review ${earlyJudgeId} 的 pane 已消失——用 judge_recover 同 id 重开续 transcript，不要重开。`);
+      return fail(`review-gate: review ${incumbent.judgeId} 的 pane 已消失——用 judge_recover 同 id 重开续 transcript，不要重开。`);
     }
     return fail("review-gate: tmux 读不出来，无法确认旧 pane 生死——信息缺失时不开新 pane。");
   }
@@ -215,11 +239,15 @@ async function doSpawn(
     task = built.task;
     streamPath = built.streamPath;
   }
-  const judgeId = earlyJudgeId;
+  // THE LANE, resolved once, now that nothing below can refuse on parameters
+  // alone: the resolver may RETIRE the lane this spawn replaces, and that is
+  // not a side effect to pay for a missing `draft`.
+  const laneInfo = deps.lane(root, role, caller);
+  const judgeId = judgeSessionIdFor(role, shortRepoHash(root), caller, laneInfo.lane);
   // Number this review's first round above every report already in the channel:
   // a close→spawn keeps the old reports, and restarting at 1 would collide with them
   // (the judge refuses a round its channel already closed).
-  const birthSeq = nextSpawnRoundSeq(deps, caller, earlyJudgeId);
+  const birthSeq = nextSpawnRoundSeq(deps, caller, judgeId);
   // The two checks that can refuse outright — no tmux, no resolvable model
   // chain — run BEFORE the id is claimed. They used to sit after it and undo
   // it, and the claim in between was the only reason `rollback` had to exist
@@ -228,7 +256,7 @@ async function doSpawn(
   if (!ownPane) {
     return fail("review-gate: 当前会话不在 tmux 里，开不出 review pane——在 tmux 中重开本会话后重试；门禁不会退回旧的进程壳子。");
   }
-  const launch = deps.launchConfig(root, role, caller);
+  const launch = deps.launchConfig(root, role, caller, laneInfo.lane);
   if (!launch.ok) {
     return fail(`review-gate: ${launch.error}`);
   }
@@ -244,6 +272,11 @@ async function doSpawn(
     title: role,
     sessionDir: launch.sessionDir,
     ...(streamPath === undefined ? {} : { streamPath }),
+    // The lane this birth belongs to, so the next dispatch can decide from the
+    // registry alone whether the transcript keeps going.
+    objectId: laneInfo.lane.objectId,
+    generation: laneInfo.lane.generation,
+    roundsInObject: laneInfo.roundsInObject,
     spawnedAt: new Date(deps.now()).toISOString(),
   });
 
@@ -254,7 +287,7 @@ async function doSpawn(
     deps.forgetAudit(root);
   };
 
-  const taskFile = deps.writeJudgeTaskFile(root, role, caller, task);
+  const taskFile = deps.writeJudgeTaskFile(root, role, caller, task, laneInfo.lane);
   if (!taskFile.ok) {
     rollback();
     return fail(`review-gate: 任务文件落盘失败 —— ${taskFile.error}`);
@@ -300,6 +333,12 @@ async function doSpawn(
         paneId,
         ...(deps.tmuxServer() === undefined ? {} : { tmuxServer: deps.tmuxServer()! }),
         ...(streamPath === undefined ? {} : { streamPath }),
+        // The SAME lane the id and the dirs above were rendered from — this
+        // registration REPLACES the pre-open one, so leaving the bookkeeping
+        // out here would erase it the moment the pane comes up.
+        objectId: laneInfo.lane.objectId,
+        generation: laneInfo.lane.generation,
+        roundsInObject: laneInfo.roundsInObject,
         spawnedAt: new Date(deps.now()).toISOString(),
       });
       if (withPane.ok) deps.saveHierarchy(withPane.table);

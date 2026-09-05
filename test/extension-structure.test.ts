@@ -2271,17 +2271,30 @@ test("judge_submit is the agent's single judge entry and hides every process det
 test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane reuse, fresh-kill", () => {
   const at = SRC.indexOf("function dispatchJudgeRound(");
   assert.ok(at > 0, "the single dispatch owner must exist");
-  const body = SRC.slice(at, at + 14000);
-  // B5: the work dir is derived from role+repo+opener — NEVER from the round's title,
+  // BOTH ENDS ASSERTED, no fixed slice length. This window used to be
+  // `SRC.slice(at, at + 14000)`, and the function outgrew it — a truncated
+  // window does not fail, it just quietly stops covering the tail, so every
+  // `doesNotMatch` below would pass on text nobody read.
+  const body = windowOf("function dispatchJudgeRound(", "\n  function readRoundStdout(", "dispatchJudgeRound body");
+  // B5: the work dir is derived from role+repo+opener+lane — NEVER from the round's title,
   // which gave pi a new --session-dir every round and restarted the session.
-  assert.match(body, /judgeWorkDirFor\(role, shortRepoHash\(root\), opener\)/,
-    "the work dir is a function of role+repo+opener");
+  assert.match(body, /judgeWorkDirFor\(role, shortRepoHash\(root\), opener, lane\)/,
+    "the work dir is a function of role+repo+opener+lane");
   assert.doesNotMatch(body, /judge-sessions", `rg-\$\{title\}`/, "no title-derived session dir may come back");
+  // ONE lane per dispatch, resolved before anything is derived from it: the id
+  // and the dir must name the SAME lane, and a second resolution could both
+  // hand back a different one and advance the round count twice.
+  assert.match(body, /const rotation = resolveJudgeLane\(root, role, opener\);/,
+    "the lane comes from the one resolver");
+  assert.equal(body.match(/resolveJudgeLane\(/g)?.length, 1,
+    "the lane is resolved exactly once per dispatch");
+  assert.match(body, /const lane = rotation\.decision\.lane;/,
+    "every derivation reads that one lane");
   // Opener-scoped ids cannot collide across sessions: a second opener derives a
   // different id and opens its own review — there is no cross-opener refusal here.
   assert.match(body, /callerIdentity\(\)/, "the opener is the caller's own identity, never a parameter");
-  assert.match(body, /judgeSessionIdFor\(role, shortRepoHash\(root\), opener\)/,
-    "the session id carries the opener");
+  assert.match(body, /judgeSessionIdFor\(role, shortRepoHash\(root\), opener, lane\)/,
+    "the session id carries the opener and the lane");
   assert.doesNotMatch(body, /owned\.openerId !== opener/,
     "no second-opener refusal may come back: scoped ids cannot collide");
   assert.match(body, /sweepStaleJudgeSessionDirs\(root\)/,
@@ -4883,5 +4896,57 @@ test("round 5: both inline judge-task assemblies go through the untrusted-data s
     "the reviewer note may not open the task any more");
   assert.doesNotMatch(code, /你要回答的问题（来自主会话）：\\n\$\{task\}/,
     "…nor may the adviser question");
+});
+
+/**
+ * ROTATION LEAVES NOTHING BEHIND (t6b, 2026-09-05).
+ *
+ * When the gate rotates a judge's transcript, the lane it stops using still
+ * has a live pane and a registry row. Nothing downstream would ever look at
+ * them again — the registry is keyed by judge id and the new round's id is a
+ * different one — so a rotation that does not retire the old lane leaks one
+ * pane every time. The unit tests cover the DECISION (test/judge-rotation.ts);
+ * only the source can show that the decision is acted on.
+ */
+test("rotation retires the lane it replaces: pane closed, scratch reaped, row dropped", () => {
+  const resolver = windowOf("function resolveJudgeLane(", "\n  /**\n   * The facts a rotated REVIEWER round",
+    "resolveJudgeLane body");
+  assert.match(resolver, /findJudgeLane\(judgeHierarchy, \{ role, repoRoot: root, openerId: opener \}\)/,
+    "the previous lane is looked up in the ONE registry");
+  assert.match(resolver, /decideJudgeRotation\(\{/, "the policy decides, not this call site");
+  assert.match(resolver, /if \(decision\.rotated && previous\)/, "a rotation retires the lane it replaces");
+  assert.match(resolver, /retireJudgeLane\(previous, \{/, "through the shared retire path");
+
+  const retire = windowOf("function retireJudgeLane(", "\n  /**\n   * Dispatch ONE round to a judge role",
+    "retireJudgeLane body");
+  assert.match(retire, /judgePaneAlive\(/, "a pane is probed before it is closed");
+  assert.match(retire, /closeSessionPane\(/, "the live pane is closed");
+  assert.match(retire, /releasesWindowLabels\(\{/, "with the same label-bar judgement as every other close");
+  assert.match(retire, /reapReviewScratch\(entry\.judgeId\)/, "its scratch worktrees are reclaimed");
+  assert.match(retire, /removeJudge\(judgeHierarchy, entry\.judgeId\)/, "and the row is dropped");
+  assert.match(retire, /if \(entry\.role === "goal-auditor"\) dropAudits\(/,
+    "a pending audit dies with the lane that was judging it");
+  // Archived IN PLACE: the dir is left for the TTL sweep, never deleted here.
+  assert.doesNotMatch(retire, /rmSync\(/, "a retired lane's transcript is kept, not deleted");
+});
+
+/**
+ * The judge's own context reading is the only fact in the rotation policy the
+ * opener cannot measure. It rides the report; this is the wiring that lands it
+ * in the registry, where the next dispatch reads it.
+ */
+test("the judge's context reading travels report → registry → next dispatch", () => {
+  const code = codeOnly(SRC);
+  assert.match(code, /contextPercent: \(\) => contextPercentOf\(latestCtx/,
+    "the judge side reports its own usage at the conclusion");
+  assert.match(code, /noteJudgeContextFrom\(entry\.judgeId, records\)/,
+    "the opener records it when it reads the round's channel");
+  const noting = windowOf("function noteJudgeContextFrom(", "\n  /**\n   * Close one judge's round",
+    "noteJudgeContextFrom body");
+  assert.match(noting, /sanitizeContextPercent\(/, "an unusable reading is dropped, never rounded into one");
+  assert.match(noting, /if \(reading !== undefined\) percent = reading;/,
+    "the NEWEST usable reading wins — a report without one leaves the last alone");
+  assert.match(noting, /registerJudge\(judgeHierarchy, \{ \.\.\.entry, contextPercent: percent \}\)/,
+    "it lands on the entry the lane lookup reads");
 });
 

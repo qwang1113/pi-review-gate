@@ -77,6 +77,28 @@ export interface JudgeEntry {
    * (activeJudgeWait) and the foreign-spawn grace (foreignSpawnSettled).
    */
   spawnedAt: string;
+
+  /**
+   * THE REUSE LANE this judge is running in (lib/judge-rotation.ts): which
+   * review object it serves, which generation of that object's transcript, how
+   * many rounds have been dispatched under the object, and what the judge last
+   * reported about its own context.
+   *
+   * All four are OPTIONAL, and an entry may legitimately carry none of them:
+   * this extension loads from source with no build step, so an entry written
+   * by an older opener has no lane at all. A missing lane degrades to "first
+   * round of this object" — never to an exception, and never to a guess.
+   *
+   * `objectId` is the FULL id (a goal/plan content hash). The path and the
+   * session id carry only its 8-hex prefix; the lazy release-point comparison
+   * is made HERE, against the full value.
+   */
+  objectId?: string;
+  generation?: number;
+  /** Rounds DISPATCHED under this object, abandoned ones included. */
+  roundsInObject?: number;
+  /** The judge's own context reading (percent) at the end of its last round. */
+  contextPercent?: number;
 }
 
 /** Opener registry: judge id → entry. */
@@ -159,6 +181,37 @@ export function removeJudge(table: HierarchyTable, judgeId: string): HierarchyTa
   const next = { ...table };
   delete next[id];
   return next;
+}
+
+/**
+ * The judge a role is CURRENTLY running in for this opener and repo — the
+ * lane lookup behind rotation (lib/judge-rotation.ts).
+ *
+ * The registry is keyed by judge id, and a judge id now contains its lane, so
+ * "the same role's previous transcript" can no longer be found by deriving an
+ * id: the previous lane's id is precisely the one this dispatch may be about
+ * to stop using. Hence a scan of THIS table rather than a second table —
+ * whose only job would have been to answer this one question, and which would
+ * then have to be kept true beside this one.
+ *
+ * Newest wins when several lanes of one role linger (a rotation leaves the
+ * old entry in place until the dispatch closes it): `spawnedAt` is an ISO
+ * string, so lexicographic order is chronological order.
+ */
+export function findJudgeLane(
+  table: HierarchyTable,
+  query: { role: string; repoRoot: string; openerId: string },
+): JudgeEntry | undefined {
+  const role = (query.role ?? "").trim();
+  const repoRoot = (query.repoRoot ?? "").trim();
+  const openerId = (query.openerId ?? "").trim();
+  if (!role || !repoRoot || !openerId) return undefined;
+  let best: JudgeEntry | undefined;
+  for (const entry of Object.values(table)) {
+    if (entry.role !== role || entry.repoRoot !== repoRoot || entry.openerId !== openerId) continue;
+    if (!best || (entry.spawnedAt ?? "") > (best.spawnedAt ?? "")) best = entry;
+  }
+  return best;
 }
 
 /**
