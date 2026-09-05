@@ -10,6 +10,7 @@ import {
   type ChannelIO,
 } from "../lib/orchestrator-channel.ts";
 import {
+  gateStatePersistSkip,
   judgeDeniedReason,
   judgeSideBinding,
   readJudgeSideEnv,
@@ -44,6 +45,30 @@ test("the judge binding talks through the opener's file for its judge", () => {
   assert.equal(binding.target.orchestrationId, "o1");
   assert.equal(binding.target.childId, "j1");
   assert.equal(binding.sessionId, "sess-1");
+});
+
+test("a judge writes NO gate state; a normal session persists as before", () => {
+  // Measured 2026-09-05: the judge pane has no RG_STATE_VARIANT, so its gate
+  // wrote the OPENER's sidecar — sessionId became rg-reviewer-…, taskMode fell
+  // from orchestrator to none.
+  const skip = gateStatePersistSkip({
+    RG_JUDGE_OPENER: "session-child-1",
+    RG_JUDGE_ID: "rg-reviewer-abc",
+    RG_JUDGE_ROLE: "reviewer",
+  });
+  assert.ok(skip, "a judge pane must be barred from the repo's gate state");
+  assert.equal(skip.judgeId, "rg-reviewer-abc");
+  assert.equal(skip.role, "reviewer");
+  assert.match(skip.reason, /rg-reviewer-abc/, "the record names WHICH review skipped");
+  assert.match(skip.reason, /sidecar/, "…and what it declined to write");
+
+  // The other direction matters just as much: this must not quietly disarm
+  // persistence for ordinary sessions.
+  assert.equal(gateStatePersistSkip({}), undefined, "a normal session persists");
+  assert.equal(gateStatePersistSkip({ RG_STATE_VARIANT: "child-7" }), undefined,
+    "an orchestration child has its OWN sidecar and keeps writing it");
+  assert.equal(gateStatePersistSkip({ RG_JUDGE_ID: "rg-reviewer-abc" }), undefined,
+    "half an identity is not a judge (same rule readJudgeSideEnv applies)");
 });
 
 test("a judge pane cannot run outward tools, but it can always ask — and conclude", () => {

@@ -42,6 +42,8 @@ interface Fake {
   repo: { ok: boolean; error: string };
   table: { current: HierarchyTable };
   caller: string | undefined;
+  /** The tmux server this fake session talks to — records are minted by it. */
+  tmuxServer: string | undefined;
   panes: string[];
   announced: Set<string>;
   recorded: Array<{ text: string; root: string; role: string }>;
@@ -66,6 +68,8 @@ function child(overrides: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
     repoRoot: ROOT,
     openerId: OPENER,
     paneId: "%7",
+    // Minted by the same server the fake session runs on, like a real spawn.
+    tmuxServer: "sock,1",
     sessionDir: "/sessions/reviewer",
     ...overrides,
   };
@@ -83,6 +87,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     repo: { ok: true, error: "" },
     table: { current: emptyHierarchy() },
     caller: OPENER as string | undefined,
+    tmuxServer: "sock,1" as string | undefined,
     panes: ["%1", "%7"],
     announced: new Set<string>(),
     recorded: [] as Array<{ text: string; root: string; role: string }>,
@@ -126,6 +131,9 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
       return { ok: true, stdout: "", stderr: "" };
     },
     ownPane: () => "%1",
+    // Faithful to the real wiring: the seeded records below are minted by this
+    // same server, so the ordinary paths behave exactly as they did.
+    tmuxServer: () => state.tmuxServer,
     now: () => 1_700_000_000_000,
     readText: (path) => state.files.get(path),
     announcedQuestions: () => state.announced,
@@ -325,6 +333,32 @@ test("judge_close: the opener's pane is killed and the registry entry goes", asy
   assert.ok(f.calls.includes("cancelWaitTimer"), "the hosted-wait watchdog is cancelled");
   assert.match(textOf(reply), /pane %7 已关/);
   assert.deepEqual(reply.details, { closed: true, terminated: true, judgeId: "rg-reviewer-abc" });
+});
+
+test("judge_close: a pane id from ANOTHER tmux server is never killed", async () => {
+  // The registry is persisted now, so a record can outlive the tmux server
+  // that minted its pane id — and tmux hands ids out from %0 again after a
+  // restart. Reachable from a plain judge_close({role}) in a resumed session,
+  // which would then kill whatever now holds %7 (reviewer P1, 2026-09-05).
+  const f = fake();
+  seed(f, { tmuxServer: "sock,OLD-SERVER" });
+  const reply = await call(f, "judge_close", { role: "reviewer" });
+  assert.equal(reply.isError, undefined, textOf(reply));
+  assert.deepEqual(f.panes, ["%1", "%7"], "the stranger's pane is left alone");
+  assert.equal((reply.details as { terminated: boolean }).terminated, false);
+  assert.match(textOf(reply), /另一个 tmux server/, "…and the reply says why it did not");
+  // The registry still has to be cleaned up: the entry is the thing this
+  // session owns, and leaving it would strand the round forever.
+  assert.deepEqual(f.table.current, {}, "the entry goes either way");
+});
+
+test("judge_close: an entry with no recorded server is not killed by its id either", async () => {
+  const f = fake();
+  seed(f, { tmuxServer: undefined });
+  const reply = await call(f, "judge_close", { role: "reviewer" });
+  assert.equal(reply.isError, undefined, textOf(reply));
+  assert.deepEqual(f.panes, ["%1", "%7"], "unverifiable ⇒ do not act");
+  assert.deepEqual(f.table.current, {});
 });
 
 test("judge_close: a stranger cannot close another opener's pane", async () => {

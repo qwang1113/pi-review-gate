@@ -86,6 +86,21 @@ export interface GateState {
   fingerprintVersion?: number;
   sessionId: string | null;
   /**
+   * Set when ANOTHER live session holds this worktree — the refusal text,
+   * verbatim (lib/session-exclusivity.ts decides it).
+   *
+   * IN MEMORY ONLY, and that is load-bearing rather than tidy: a refused
+   * session must not write this worktree's sidecar at all — the file belongs
+   * to the session that holds it, and persisting a refusal into it would tell
+   * the HOLDER that its own worktree is taken. `saveSidecar` strips the field
+   * as a second line of defence.
+   *
+   * It lives on the state, rather than beside it, because that is what reaches
+   * `unmetRequirements` — the one authority every ship path already shares.
+   */
+  exclusivityRefusal?: string;
+
+  /**
    * The last review_checkpoint commit (sha + wall-clock time). The review
    * unit of the new execution model: prepare_review computes baseline..HEAD
    * against this, and the verdict recorder binds a READY to the reviewed commit's
@@ -804,9 +819,15 @@ export const FINGERPRINT_MIGRATION_NOTICE =
 
 export function saveSidecar(path: string, state: GateState): void {
   state.updatedAt = new Date().toISOString();
+  // `exclusivityRefusal` is this session's own predicament, never a fact about
+  // the file: writing it would tell the session that HOLDS this worktree that
+  // its worktree is held by somebody else. The refused session is not supposed
+  // to reach this function at all (its persist is skipped upstream) — this is
+  // the second line of defence, where the bytes are actually produced.
+  const { exclusivityRefusal: _refusal, ...persisted } = state;
   // Atomic write: temp + rename, so a crashed write can't leave a truncated
   // JSON that a fail-open parser might half-read (lib/atomic-write.ts).
-  writeFileAtomic(path, JSON.stringify(state, null, 2) + "\n");
+  writeFileAtomic(path, JSON.stringify(persisted, null, 2) + "\n");
 }
 
 /**
@@ -1025,6 +1046,12 @@ export function unmetRequirements(
   },
 ): string[] {
   if (!state) return ["gate state missing (fail-closed)"];
+  // ANOTHER live session holds this worktree (lib/session-exclusivity.ts).
+  // Checked before `bypass`, and it is the ONE requirement a bypass does not
+  // clear: `/gate-bypass` is this session's authorization to ship its own
+  // work, and the work here is not this session's to authorize — the sidecar,
+  // the worktree and the review all belong to the session that holds it.
+  if (state.exclusivityRefusal) return [state.exclusivityRefusal];
   if (state.bypass.active) return [];
 
   const problems: string[] = [];

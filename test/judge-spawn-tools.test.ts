@@ -24,6 +24,7 @@ type Exec = (params: Record<string, unknown>) => Promise<{ content: Array<{ text
 function setup(over: Partial<{
   caller: string | null | undefined;
   ownPane: string | null | undefined;
+  tmuxServer: string | null | undefined;
   tmux: (argv: readonly string[]) => JudgePaneRunResult;
   panes: string[];
   table: HierarchyTable;
@@ -72,6 +73,9 @@ function setup(over: Partial<{
       return { ok: true, stdout: "", stderr: "" };
     }),
     ownPane: () => (over.ownPane === undefined ? "%1" : over.ownPane ?? undefined),
+    // Faithful to the real wiring: a session in tmux always has a server, and
+    // every pane it opens is minted by that one.
+    tmuxServer: () => (over.tmuxServer === undefined ? "sock,1" : over.tmuxServer ?? undefined),
     now: () => 1_700_000_000_000,
     resolveRepo: () => ({ ok: true as const, root: "/repo" }),
     launchConfig: () => ({ ok: true as const, model: "m", sysPromptPath: "/sp.md", sessionDir: "/sessions" }),
@@ -109,6 +113,12 @@ test("spawn plan opens a pane, registers the opener, and names the judge", async
   const entry = store.table[ids[0]!]!;
   assert.equal(entry.openerId, "session-child-1");
   assert.equal(entry.paneId, "%7");
+  // Recorded WITH the pane id. Without it `paneClosable` refuses forever, so
+  // declare_done's cascade would delete the entry and leave the pane running
+  // with nobody able to address it (reviewer P1, 2026-09-05).
+  assert.equal(entry.tmuxServer, "sock,1", "the pane id is useless without the server that minted it");
+  assert.equal(entry.sessionDir, "/sessions", "…and the transcript dir the wait needs");
+  assert.equal(entry.title, "goal-auditor");
   assert.equal(entry.streamPath, undefined, "plan audits carry no stream in this fake");
   assert.ok(seen.some((a) => a.includes("RG_JUDGE_OPENER=session-child-1")));
   assert.ok(seen.some((a) => a.includes(`RG_JUDGE_ID=${ids[0]}`)));
@@ -205,6 +215,8 @@ test("recover re-opens a dead pane under the same session id", async () => {
   assert.equal(result.isError, undefined, textOf(result));
   assert.match(textOf(result), /%9/);
   assert.equal(store.table[judgeId]!.paneId, "%9");
+  assert.equal(store.table[judgeId]!.tmuxServer, "sock,1",
+    "the recovered pane records its server too, or the entry stops being closable");
   const resume = reopened.find((a) => a[0] === "split-window" && a.includes("%9") === false);
   assert.ok(resume, "a second split-window ran for the recovery");
   assert.ok(resume!.includes("--session-id") && resume!.includes(judgeId), "recovery resumes the SAME session id");

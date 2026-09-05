@@ -245,8 +245,16 @@ judge（reviewer / adviser / goal-auditor）是**独立 pane 里的交互 pi**�
 所有（项目经理 → 子会话 → review，plan review 由项目经理自开；跨级调用一律
 fail-closed）：`judge-pane.ts` 开/关/探活 pane（argv 全部复用
 `orchestrator-tmux.ts` 与 `orchestrator-pane-decor.ts`），`hierarchy.ts` 是 opener
-注册表与唯一的跨级裁判（纯函数，条目带 opener 派发的轮次号 `roundSeq`），`judge-side.ts` 是 pane 内门禁的 reporting
-shell（heartbeat、对话框竞态，复用子会话通道原语，不另起通道），一轮的结束是 judge
+注册表与唯一的跨级裁判（纯函数，条目带 opener 派发的轮次号 `roundSeq`）——它是
+judge 的**唯一**注册表：扩展里那份内存 `childSessions` Map 已于 2026-09-05 删除
+（同一组事实两处手工双写，正是 `judge_wait` 找不到 `judge_spawn` 刚开的 judge 的
+根因）。合并后条目自带 `title` / `sessionDir` / `spawnedAt`，读点分两类：问「还在
+跑吗」的走 `judgeLive`（缺信息判活，绝不误终结等待），问「我拥有什么」的走
+`listByOpener`（联关要连死 pane 的条目一起回收）；按 pane id 关 pane 前另有
+`paneClosable`（tmux server 重启后 id 会重排，缺信息一律不动手）。
+`judge-side.ts` 是 pane 内门禁的 reporting
+shell（heartbeat、对话框竞态，复用子会话通道原语，不另起通道；它**不写**主仓库
+门禁状态——`gateStatePersistSkip`，2026-09-05），一轮的结束是 judge
 自己调 `judge_conclude`（`judge-conclude.ts`，只在 judge 侧注册）：结构化结论**本体**
 直写 channel report（2026-09-04 起不再合成 fence，opener 也不再解析），签名按角色收窄
 （reviewer / goal-auditor 没有 notes 参数），一轮只交一次，transcript 扒取路径已删；
@@ -357,6 +365,14 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 编辑真正发生的那个仓库；`project-config.ts` 解析 `.pi/review-gate.json`；
 `git-memory.ts` 在上下文压缩后重新注入过滤过的 git 快照。
 
+**谁有资格写这份 sidecar**（2026-09-05）：一个 worktree 同时只允许一个「占用主
+sidecar」的会话，判定在 `session-exclusivity.ts`（心跳文件 `.pi/session-presence.json`），
+第二个占用者 fail-closed 拒绝——拒绝理由挂在 `GateState.exclusivityRefusal` 上，
+由 `unmetRequirements`（所有 ship 路径共用的那个权威）变成拦截，同时该会话
+**不写**这份 sidecar（它属于占用者）。judge 会话与编排子会话不占用主 sidecar
+（前者不写门禁状态、后者写自己的 `RG_STATE_VARIANT` 分片），因此天然豁免——
+它们本来就与 opener 跑在同一个 worktree 里。
+
 > **落点**：新的状态字段 → `gate-state.ts`（并想清楚它是否该进指纹）；
 > 新的项目级开关 → `project-config.ts`；**任何**状态文件写入都要走
 > `atomic-write.ts`。注意：`lib/fingerprint.ts` 与
@@ -423,11 +439,17 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（107 个模块）
+## 五、`lib/` 全量速查表（108 个模块）
 
-**维护指令（这张表没有机械约束，只有这一条）**：在 `lib/` 下**新增或删除**一个
-模块时，**同一轮改动里**顺手加/删这里的一行——否则这张表会静静地过时。
-随时可核对条目数：`ls lib/*.ts | wc -l`（当前 107，与本表条目一一对应）。
+**维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
+**同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
+对这张表和 `lib/` 目录做**双向差集**（表里有目录没 = 幽灵行；目录有表里没 =
+漏登），并核对标题里的条目数。
+
+这条约束是补上的（2026-09-05）：在此之前它只是一句人肉指令，于是这张表只会
+**单向漂移**——「新增模块顺手加一行」人人做得到（你正在写那个模块），而删模块
+时你在别的文件里干活，这张表根本不在眼前。判据本来就写在这里
+（`ls lib/*.ts | wc -l` 与本表一一对应），只是从来没有人把它变成一条测试。
 
 | 模块 | 一句话职责 |
 | --- | --- |
@@ -529,6 +551,7 @@ fail-closed）。`model-diagnose.ts`
 | `sensitive-grant.ts` | 敏感文件的一次性用户授权：限定路径、限时、用后即焚 |
 | `session-revival.ts` | 存活不变量（2026-08-30）：会话在退出契约未满足时停下，门禁就周期性唤醒它。纯判定：看不见续跑预算与 loop-stall 断路器（它们管注入路径，管不了「停下」），但尊重人的叫停（ESC / ask_user / bypass / 仲裁 pause）与 handoff 交接 |
 | `session-dir.ts` | pi 的 session-dir 编码约定，fresh-context 角色据此找到主会话 transcript |
+| `session-exclusivity.ts` | 一个 worktree 只允许一个「占用主 sidecar」的会话：心跳存在文件（`.pi/session-presence.json`）判活，第二个占用者 fail-closed 拒绝（edit/write 与 ship 全拦），judge 与编排子会话因为不写主 sidecar 而天然豁免。裁决输入只有心跳新鲜度，`pid`/`host` 仅作诊断（与 `blocked-marker.ts` 同口径）；一切未知（文件缺失/损坏/时钟异常）一律放行 |
 | `side-effects.ts` | 唯一一处「本进程能不能碰外部世界」的判定（测试 / CI / 无 TTY / 显式关闭一律不能），通知与编排共用 |
 | `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |
 | `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit） |

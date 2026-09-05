@@ -26,6 +26,7 @@ import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import {
   checkCaller,
+  paneClosable,
   removeJudge,
   type HierarchyTable,
 } from "./hierarchy.ts";
@@ -80,6 +81,15 @@ export interface JudgeChildRecord {
   openerId: string;
   /** tmux pane id, once the pane exists. */
   paneId?: string;
+  /**
+   * Which tmux server minted `paneId` — carried so `judge_close` can tell
+   * whether it may kill by it.
+   *
+   * It matters HERE because the registry is persisted: a record restored after
+   * a tmux server restart carries an id that has since been reassigned, and
+   * closing by it would kill whatever now holds that number.
+   */
+  tmuxServer?: string;
   /** Directory pi writes its transcript jsonl into (stable per role). */
   sessionDir: string;
   /** This round's findings stream, when the role has one. */
@@ -112,6 +122,8 @@ export interface JudgeSessionToolDeps {
   tmux(argv: readonly string[]): JudgePaneRunResult;
   /** This session's own pane — liveness is probed from its window. */
   ownPane(): string | undefined;
+  /** The tmux server this process talks to (lib/hierarchy.ts `tmuxServerFrom`). */
+  tmuxServer(): string | undefined;
   /** Injectable clock. */
   now(): number;
   /** Whole file, or undefined when it is absent/unreadable. */
@@ -471,7 +483,14 @@ async function doClose(deps: JudgeSessionToolDeps, params: Record<string, unknow
   const ownPane = deps.ownPane();
   let terminated = false;
   let killNote = "没有登记 pane，无需动手";
-  if (child.paneId && ownPane) {
+  // `paneClosable`, not merely "there is a pane id": the registry is
+  // persisted, so a record restored after a tmux server restart carries an id
+  // that server has since handed to somebody else. Killing by it would close a
+  // stranger's pane, and this is reachable from an ordinary
+  // `judge_close({role})` in a resumed session (reviewer P1, 2026-09-05).
+  if (child.paneId && !paneClosable(child, deps.tmuxServer())) {
+    killNote = `pane ${child.paneId} 是另一个 tmux server 铸造的 id（可能已被重新分配），不动它，只清登记`;
+  } else if (child.paneId && ownPane) {
     const killed = closeJudgePane(deps.tmux, child.paneId);
     terminated = killed.ok;
     killNote = killed.ok ? `pane ${child.paneId} 已关` : `关 pane 失败（${killed.error}），登记照样清除`;

@@ -17,6 +17,8 @@ const GATE_MODES_SRC = readFileSync(join(ROOT, "lib", "gate-modes.ts"), "utf8");
 const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
 /** The audit-round engine: one round, four kinds, one cursor write. */
 const AUDIT_ROUND_SRC = readFileSync(join(ROOT, "lib", "audit-round.ts"), "utf8");
+/** The ship authority every ship path shares, and the sidecar writer. */
+const GATE_STATE_SRC = readFileSync(join(ROOT, "lib", "gate-state.ts"), "utf8");
 const JUDGE_SESSION_TOOLS = new Set(["judge_close", "judge_wait"]);
 
 /**
@@ -4539,14 +4541,21 @@ test("restart does not deadlock on a dead opener: dead foreign entries are dropp
  * passes every behavior test, and quietly reports a peer's review as its own.
  */
 function judgeReaderBody(name: string): string {
-  const body = windowOf(`function ${name}(`, /\n  \}\n/, `own-judge reader ${name}`);
+  const raw = windowOf(`function ${name}(`, /\n  \}\n/, `own-judge reader ${name}`);
   // Self-proof (both directions): the window must reach the reader's real
   // work, and must NOT have swallowed whatever function follows it. A window
   // that is too small satisfies "contains ownJudges()" for the wrong reason,
   // and one that is too large satisfies it using the NEXT function's code.
-  assert.ok(body.length > 40, `${name}: window collapsed to nothing`);
-  assert.doesNotMatch(body.slice(body.indexOf("{")), /\n  function /,
+  assert.ok(raw.length > 40, `${name}: window collapsed to nothing`);
+  assert.doesNotMatch(raw.slice(raw.indexOf("{")), /\n  function /,
     `${name}: window ran past the end of the function`);
+  // CODE ONLY. Without this the rule is satisfiable by a COMMENT: the body of
+  // judgeChildInMotion explains why it uses ownLiveJudges(), so swapping the
+  // real call for ownJudges() left the assertion green (reviewer P1,
+  // 2026-09-05). A structural test that a docblock can satisfy protects the
+  // wording, not the behaviour.
+  const body = codeOnly(raw);
+  assert.doesNotMatch(body, /ownLiveJudges\(\)[^\n]*\/\//, "comments must already be gone");
   return body;
 }
 
@@ -4583,5 +4592,81 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
   assert.match(SRC, /const ownedJudges = ownJudges\(\);/, "cascade-close is opener-scoped");
   // The health snapshot the hosted wait is built from.
   assert.match(SRC, /for \(const c of ownJudges\(\)\) \{/, "the child snapshot lists own judges only");
+});
+
+test("a judge session writes NO gate state, and says so outside the repo", () => {
+  // A judge is a reporting shell. Its pane carries no RG_STATE_VARIANT, so
+  // before this it wrote the OPENER's sidecar — the one file the git hooks
+  // read (measured 2026-09-05: sessionId became rg-reviewer-…, taskMode fell
+  // from orchestrator to none).
+  //
+  // The guard has to sit AHEAD of the writes, not merely somewhere in the
+  // function, so each window is checked for order rather than membership.
+  for (const fn of ["persist", "persistRepo"]) {
+    const body = windowOf(`function ${fn}(`, /\n  \}\n/, `${fn} body`);
+    const guardAt = body.indexOf("noteGateStatePersistSkip(ctx)");
+    assert.ok(guardAt > 0, `${fn} must consult the judge-side skip`);
+    // Window self-proof: this really is a persisting function (if the window
+    // missed the writes, "the guard comes first" would be vacuously true).
+    const writeAt = body.search(/saveSidecarPreservingConcurrent|recordBlockedMarker/);
+    assert.ok(writeAt > 0, `${fn}: window does not reach the writes it is supposed to guard`);
+    assert.ok(guardAt < writeAt, `${fn}: the skip must be decided BEFORE anything is written`);
+  }
+
+  // The decision itself lives in lib/judge-side.ts, where it is unit-tested —
+  // the extension must not re-derive "am I a judge" with its own condition.
+  assert.match(SRC, /gateStatePersistSkip\(process\.env\)/, "the rule has one home");
+
+  // And the audit record must not become the very thing it reports: no file
+  // write of any kind inside the recorder.
+  const recorder = windowOf("function noteGateStatePersistSkip(", /\n  \}\n/, "skip recorder");
+  assert.match(recorder, /pi\.appendEntry\(GATE_STATE_SKIP_ENTRY/, "it lands in pi's own session store");
+  assert.doesNotMatch(recorder, /writeFileSync|appendFileSync|mkdirSync|writeFileAtomic/,
+    "a judge must not write into the repo it is reviewing — not even to log that it did not");
+  assert.match(recorder, /gateStateSkipAnnounced/, "said once, not once per persist");
+});
+
+test("ONE gate session per worktree: refuse, hold, release — and only ONE liveness rule", () => {
+  // The decision lives in lib/session-exclusivity.ts (unit-tested there). What
+  // this pins is the WIRING, which no unit test can see.
+  assert.match(SRC, /applySessionExclusivity\(ctx\)/, "session_start decides it");
+  assert.match(SRC, /checkSessionExclusivity\(\{/, "…through the module that owns the rule");
+
+  // Refused ⇒ blocked on BOTH surfaces. Edits go through the extension's
+  // per-edit hook; ships go through unmetRequirements, the authority every
+  // ship path already shares (lib/gate-state.ts).
+  const editHook = codeOnly(windowOf("function loopGoalEditBlockFor(", /\n  \}\n/, "edit hook"));
+  const refusalAt = editHook.indexOf("state.exclusivityRefusal");
+  assert.ok(refusalAt > 0, "a refused session must not be able to edit this worktree");
+  // BEFORE the explore short-circuit: an explore session writes files too, and
+  // it would otherwise slip past on the very first line.
+  const exploreAt = editHook.indexOf('taskMode === "explore"');
+  assert.ok(exploreAt > 0, "window sanity: the explore short-circuit is in this window");
+  assert.ok(refusalAt < exploreAt, "the worktree check must come before the mode branches");
+  assert.match(GATE_STATE_SRC, /if \(state\.exclusivityRefusal\) return \[state\.exclusivityRefusal\]/,
+    "…and the ship authority refuses on the same fact");
+
+  // A refused session must not write the HOLDER's sidecar — that file is the
+  // holder's, and the refusal is memory-only in both directions.
+  const persistBody = codeOnly(windowOf("function persist(", /\n  \}\n/, "persist body"));
+  assert.match(persistBody, /if \(state\.exclusivityRefusal\) return;/, "refused ⇒ persist nothing");
+  assert.match(GATE_STATE_SRC, /const \{ exclusivityRefusal: _refusal, \.\.\.persisted \} = state;/,
+    "…and saveSidecar strips it even if something reaches it");
+
+  // The claim: written only by a session that PASSED and actually claims the
+  // sidecar, and dropped on the way out only when it is ours.
+  const apply = codeOnly(windowOf("function applySessionExclusivity(", /\n  \}\n/, "apply body"));
+  assert.match(apply, /claimsMainSidecar\(process\.env\)\) holdWorktree\(\)/,
+    "a judge / orchestration child must not claim the worktree it shares by design");
+  assert.match(SRC, /releaseWorktree\(\);/, "shutdown lets go");
+  const release = codeOnly(windowOf("function releaseWorktree(", /\n  \}\n/, "release body"));
+  assert.match(release, /presenceIsOurs\(/, "…and never deletes another session's claim");
+
+  // 哲学三: the OLD "another session wrote this sidecar within 4h" warning is
+  // gone. Two definitions of "a session is alive" is one too many.
+  const code = codeOnly(SRC);
+  assert.doesNotMatch(code, /concurrentSessionNotice/, "the old recency warning must not survive");
+  assert.doesNotMatch(code, /CONCURRENT_SESSION_WINDOW_MS/,
+    "…nor its window, which was the second liveness definition");
 });
 

@@ -54,6 +54,47 @@ export function readJudgeSideEnv(env: NodeJS.ProcessEnv): JudgeSideConfig | unde
   return { openerId, judgeId, role: role || "reviewer" };
 }
 
+/** Why a write to the repo's gate state was skipped — the audit record's content. */
+export interface GateStatePersistSkip {
+  judgeId: string;
+  role: string;
+  /** One line, for the judge's own session record and its pane notice. */
+  reason: string;
+}
+
+/**
+ * Must THIS session keep its hands off the repo's gate state?
+ *
+ * A judge is "a reporting shell … never an enforcer": it reports heartbeats,
+ * answers questions and writes one report per round. The gate sidecar
+ * (`.pi/review-gate-state.json`) is the OPENER's — its mode, its verdicts, its
+ * unmet list, and the only thing the git hooks can see.
+ *
+ * A judge pane is opened without `RG_STATE_VARIANT` (an orchestration child
+ * gets one and therefore writes its own file), so its gate wrote to the
+ * opener's file: measured 2026-09-05, the sidecar's `sessionId` became
+ * `rg-reviewer-…` and its `taskMode` fell from `orchestrator` to none — the
+ * reviewing session quietly overwriting the state of the session being
+ * reviewed.
+ *
+ * Fail-closed on the WRITE side, which for once means writing nothing: the
+ * judge has no state of its own that anybody reads, so skipping costs it
+ * nothing and protects the one record that decides whether code may ship.
+ * Returning `undefined` means "not a judge — persist normally".
+ */
+export function gateStatePersistSkip(env: NodeJS.ProcessEnv): GateStatePersistSkip | undefined {
+  const cfg = readJudgeSideEnv(env);
+  if (!cfg) return undefined;
+  return {
+    judgeId: cfg.judgeId,
+    role: cfg.role,
+    reason:
+      `review-gate: 本会话是 ${cfg.role} review（${cfg.judgeId}），已跳过对仓库门禁状态的写入——` +
+      "review 只负责评审（心跳、答 opener、落 report），主 sidecar 与 .blocked marker 属于 opener，" +
+      "judge 写它会把 opener 的 sessionId 与 taskMode 覆盖掉。",
+  };
+}
+
 /** The channel binding this judge reports, asks and drains through. */
 export function judgeSideBinding(
   io: ChannelIO,

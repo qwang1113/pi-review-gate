@@ -50,7 +50,7 @@ import {
   existsSync, statSync, readFileSync, writeFileSync, mkdtempSync, rmSync, appendFileSync,
   mkdirSync, realpathSync, openSync, closeSync, readSync, copyFileSync, readdirSync, writeSync,
 } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir, homedir, hostname } from "node:os";
 import { join as pathJoin, dirname as pathDirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -60,7 +60,6 @@ import { Type } from "typebox";
 
 import {
   coalesceToolPath,
-  CONCURRENT_SESSION_WINDOW_MS,
   DEFAULT_MAX_ROUNDS,
   isCodeFile,
   isDocFile,
@@ -178,8 +177,19 @@ import {
 } from "../lib/judge-pane.ts";
 import {
   readJudgeSideEnv,
+  gateStatePersistSkip,
   JUDGE_STREAM_ENV,
 } from "../lib/judge-side.ts";
+import {
+  PRESENCE_FILENAME,
+  PRESENCE_HEARTBEAT_MS,
+  checkSessionExclusivity,
+  claimsMainSidecar,
+  parsePresence,
+  presenceFor,
+  presenceIsOurs,
+  type PresenceRecord,
+} from "../lib/session-exclusivity.ts";
 import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
 import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
@@ -522,6 +532,13 @@ function readSessionLoopGoal(root: string): LoopGoal {
 
 
 const ENTRY_TYPE = "review-gate-state";
+/**
+ * Session-entry type for the audit record a judge leaves when it declines to
+ * write the repo's gate state. Distinct from ENTRY_TYPE on purpose: it is not
+ * gate state, it is the note saying none was written.
+ */
+const GATE_STATE_SKIP_ENTRY = "review-gate-persist-skipped";
+
 // 2026-08-31 (P0, onchain deadlock investigation): `replace` / `insert` are
 // pi's hashline edit tools and were MISSING here — a session could edit files
 // through them while every edit gate (L8 goal gate, sensitive-file floor,
@@ -1026,6 +1043,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    *  write says nothing about another repo's failed one. */
   function persistRepo(ctx: ExtensionContext, root: string) {
     if (root === primaryRepoRoot) { persist(ctx); return; }
+    // The SECOND repo's sidecar is gate state too — a judge is barred from it
+    // for exactly the same reason, and this path does not go through persist().
+    if (noteGateStatePersistSkip(ctx)) return;
     const s = stateForRepo(root);
     try {
       saveSidecarPreservingConcurrent(sidecarPath(root), s, () => digestForMerge(root));
@@ -1203,9 +1223,6 @@ export default function reviewGate(pi: ExtensionAPI) {
   /** Set when restore() dropped bindings written by an older fingerprint
    *  algorithm, so session_start can explain why they disappeared. */
   let fingerprintMigrated = false;
-  /** Set when restore() found the sidecar owned by ANOTHER, recently active
-   *  session in this same repo, so session_start can warn the user. */
-  let concurrentSessionNotice: string | null = null;
   // The most recent ship command the gate BLOCKED, so request_arbitration can
   // only contest a real block (not an agent-invented one).
   let lastBlockedShip: BlockedShipRecord | null = null;
@@ -1469,6 +1486,15 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** Open question ids already announced (in-memory; a restart re-announces — desired). */
   let announcedRequestIds = new Set<string>();
+  /**
+   * Judges whose DEATH has already been announced (in-memory, same as above).
+   *
+   * The merged registry survives the process, so a judge that died with a
+   * previous one is offered back on every settle — and `terminated` is the one
+   * classification the notice throttle deliberately does not cover. Announced
+   * once; the entry itself is kept, because `judge_recover` addresses it.
+   */
+  const announcedTerminated = new Set<string>();
   /** Hints (never refusals) the gate has already delivered — said once each. */
   const deliveredHints = new Set<string>();
 
@@ -1627,6 +1653,83 @@ export default function reviewGate(pi: ExtensionAPI) {
   function stopChildHeartbeat(): void {
     if (childHeartbeatTimer) clearInterval(childHeartbeatTimer);
     childHeartbeatTimer = undefined;
+  }
+
+  // ---------- ONE gate session per worktree (lib/session-exclusivity.ts) ----------
+
+  /** This worktree's presence file — beside the sidecar it protects. */
+  function presencePath(root: string): string {
+    return pathJoin(root, ".pi", PRESENCE_FILENAME);
+  }
+
+  /** The record on disk, or undefined when absent/unreadable/corrupt. */
+  function readPresence(root: string): PresenceRecord | undefined {
+    try { return parsePresence(readFileSync(presencePath(root), "utf8")); }
+    catch { return undefined; }
+  }
+
+  let presenceTimer: ReturnType<typeof setInterval> | undefined;
+
+  /**
+   * Hold this worktree: write the heartbeat now, then keep it fresh.
+   *
+   * Only a session that PASSED the check calls this. A refused one must never
+   * write the file — that would take the claim away from the session that
+   * actually holds it.
+   */
+  function holdWorktree(): void {
+    const write = () => {
+      const sessionId = state.sessionId;
+      if (!sessionId) return;
+      try {
+        mkdirSync(pathJoin(cwd, ".pi"), { recursive: true });
+        writeFileSync(
+          presencePath(cwd),
+          JSON.stringify(presenceFor(sessionId, process.pid, hostname(), Date.now())),
+          "utf8",
+        );
+      } catch { /* best effort: a missed heartbeat lapses, it never blocks work */ }
+    };
+    write();
+    if (presenceTimer) clearInterval(presenceTimer);
+    presenceTimer = setInterval(write, PRESENCE_HEARTBEAT_MS);
+    // The heartbeat must not hold the process open on its own.
+    presenceTimer.unref?.();
+  }
+
+  /** Stop holding, and drop the claim if it is OURS (never somebody else's). */
+  function releaseWorktree(): void {
+    if (presenceTimer) clearInterval(presenceTimer);
+    presenceTimer = undefined;
+    if (!presenceIsOurs(readPresence(cwd), state.sessionId)) return;
+    try { rmSync(presencePath(cwd), { force: true }); } catch { /* the window lapses anyway */ }
+  }
+
+  /**
+   * Decide whether this session may work in this worktree, and act on it.
+   *
+   * Refused ⇒ the refusal is put on the state, where `unmetRequirements`
+   * (the authority every ship path shares) turns it into a block, and where
+   * the edit gate reads it. Allowed ⇒ this session takes the claim.
+   */
+  function applySessionExclusivity(ctx?: ExtensionContext): void {
+    const verdict = checkSessionExclusivity({
+      env: process.env,
+      sessionId: state.sessionId,
+      existing: readPresence(cwd),
+      repoRoot: cwd,
+      now: Date.now(),
+    });
+    if (!verdict.ok) {
+      state.exclusivityRefusal = verdict.reason;
+      try { ctx?.ui.notify(verdict.reason, "error"); } catch { /* headless */ }
+      return;
+    }
+    delete state.exclusivityRefusal;
+    // A judge / orchestration child does not claim the worktree, so it must
+    // not write a heartbeat either — its own presence would refuse the very
+    // session that opened it.
+    if (claimsMainSidecar(process.env)) holdWorktree();
   }
 
 
@@ -2496,11 +2599,44 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   // ---------- persistence ----------
 
+  /** Said once per session — the skip is a standing fact, not an event. */
+  let gateStateSkipAnnounced = false;
+
+  /**
+   * Is this session barred from writing gate state, and if so, RECORD it.
+   *
+   * The record deliberately lands nowhere near the repo: `pi.appendEntry`
+   * writes into pi's own session store (`~/.pi/agent/sessions/…`) and the
+   * notice goes to this pane. A log file under `.pi/judge-sessions/…` would
+   * still be the judge writing into the repository it is reviewing, which is
+   * the very thing being fixed.
+   */
+  function noteGateStatePersistSkip(ctx?: ExtensionContext): boolean {
+    const skip = gateStatePersistSkip(process.env);
+    if (!skip) return false;
+    if (!gateStateSkipAnnounced) {
+      gateStateSkipAnnounced = true;
+      try { pi.appendEntry(GATE_STATE_SKIP_ENTRY, { ...skip, at: new Date().toISOString() }); }
+      catch { /* older Pi without appendEntry — the notice below still tells someone */ }
+      try { ctx?.ui.notify(skip.reason, "info"); } catch { /* headless */ }
+    }
+    return true;
+  }
+
   // `ctx` is optional because it is used for ONE thing — refreshing the status
   // widget. A caller that has no context (the orchestration tools persist from
   // a callback) must still be able to write the record: dropping the write
   // instead would lose the user's plan approval on a restart.
   function persist(ctx?: ExtensionContext) {
+    // A judge writes NO gate state (lib/judge-side.ts explains why). Checked
+    // here, at the single funnel every gate-state write goes through, rather
+    // than at each call site — a new caller must not be able to reintroduce it.
+    if (noteGateStatePersistSkip(ctx)) return;
+    // Nor does a session another one holds this worktree against: that sidecar
+    // is the HOLDER's — its mode, its verdicts, its unmet list — and the whole
+    // point of refusing is that these two must not overwrite each other. (The
+    // refusal itself is memory-only; saveSidecar strips it as well.)
+    if (state.exclusivityRefusal) return;
     // P-multi: persist the session's repo set so a same-session resume (or
     // restart) re-arms declare_done against every repo this session edited.
     state.sessionReposPaths = [...sessionRepos].filter((r) => r !== primaryRepoRoot);
@@ -2584,33 +2720,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     // by this call, the sidecar was already migrated inside loadSidecar().
     fingerprintMigrated = migrateFingerprintVersion(state) || sidecarMigration.migrated;
 
-    // Note a RECENT other session in this repo (independent of which source
-    // won above: the session entry may have restored our own state while the
-    // shared sidecar belongs to someone else). The sidecar holds one session
-    // at a time and only it is visible to the git hooks, so two live sessions
-    // here can surprise each other; saying so beats leaving the user to infer
-    // it from a rejected commit.
-    //
-    // There is no liveness signal available (a pid would be wrong the moment
-    // the extension runs anywhere but this machine), so the recency window
-    // cannot distinguish "still running" from "finished an hour ago" — hence
-    // the conditional wording. A warning that asserts more than it knows is
-    // how users learn to ignore this gate's warnings.
-    try {
-      const onDisk = loadSidecar(sidecarPath(cwd));
-      const otherId = onDisk?.sessionId;
-      const at = onDisk?.updatedAt ? Date.parse(onDisk.updatedAt) : NaN;
-      const recent = Number.isFinite(at) && Date.now() - at < CONCURRENT_SESSION_WINDOW_MS;
-      if (otherId && sessionId && otherId !== sessionId && recent) {
-        concurrentSessionNotice =
-          `review-gate: another Pi session (${otherId}) last wrote this repo's gate state at ${onDisk?.updatedAt}. ` +
-          "If it is still open, note that two sessions in one worktree share a single sidecar — the only " +
-          "thing the git hooks can see — and a single set of uncommitted changes: a READY/PASS that still " +
-          "matches the worktree survives the next session's write, but only until that session writes " +
-          "again, and each session's edits re-arm the other's gate. Prefer one session per worktree " +
-          "(git worktree add for parallel work). If that session is closed, ignore this.";
-      }
-    } catch { /* best effort — a missing/unreadable sidecar means nothing to warn about */ }
+    // (A "another session wrote this sidecar recently" WARNING used to be
+    // built here. It is gone: `applySessionExclusivity` decides the same
+    // question from a heartbeat and either refuses or takes the claim, and two
+    // definitions of "another session is alive" is one too many — 哲学三.)
   }
 
   // ---- TUI widgets (display-only; never throw, never block the gate) ----
@@ -3401,6 +3514,22 @@ export default function reviewGate(pi: ExtensionAPI) {
    * twice).
    */
   function loopGoalEditBlockFor(absPath: string | undefined): { block: true; reason: string } | undefined {
+    // THE WORKTREE COMES FIRST, before any mode branch below.
+    //
+    // When another live session holds this checkout, nothing this session
+    // writes here is safe — the two share one sidecar and one set of
+    // uncommitted changes, so an edit made now is an edit made to somebody
+    // else's work in progress. It refuses even in explore (an explore session
+    // still writes files) and even with an approved goal on disk (a resumed
+    // session carries one), which is exactly why it is ABOVE both.
+    //
+    // (The hook's name is the L8 goal gate's, fixed by the deps interface in
+    // lib/ship-gate-edit-guard.ts; what it really is, is this extension's
+    // per-edit block decision. The ship side reads the same refusal through
+    // `unmetRequirements`.)
+    if (state.exclusivityRefusal) {
+      return { block: true, reason: state.exclusivityRefusal };
+    }
     // explore never gates on the goal (loopGoalEditGate would return true
     // anyway) — skip the lookup before paying for it.
     if (state.taskMode === "explore") return undefined;
@@ -5216,6 +5345,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         repoRoot: root,
         openerId: c.openerId,
         ...(c.paneId === undefined ? {} : { paneId: c.paneId }),
+        // Carried, not dropped: judge_close decides whether it may kill by
+        // that pane id, and it can only do so if it knows which server minted it.
+        ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
         sessionDir: c.sessionDir,
         ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
       };
@@ -5224,6 +5356,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     channelHome: () => undefined,
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
+    tmuxServer: () => tmuxServerFrom(process.env),
     now: () => Date.now(),
     readText: (path) => {
       try {
@@ -5293,6 +5426,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     channelHome: () => undefined,
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
+    tmuxServer: () => tmuxServerFrom(process.env),
     now: () => Date.now(),
     resolveRepo: (requested) => {
       const resolved = resolveToolRepo(requested);
@@ -6830,6 +6964,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     const childSnapshots: ChildSnapshot[] = [];
     const sessionIdsBySession = new Map<string, string>();
     for (const c of ownJudges()) {
+      // A judge whose death was ALREADY announced is not news a second time.
+      // The registry is persisted now, so an entry can outlive the process
+      // that opened it: its pane died with that process, the classifier calls
+      // it `terminated`, and terminated bypasses the notice throttle — so
+      // without this the session would re-announce the same dead judge on
+      // every settle, forever, with nothing left to reclaim it (reviewer P2,
+      // 2026-09-05). Announced once is the contract; `judge_recover` still
+      // finds the entry, because the entry itself is deliberately kept.
+      if (announcedTerminated.has(c.judgeId) && !judgeLive(c, paneList, tmuxServer)) continue;
       childSnapshots.push({
         title: c.title,
         sessionId: c.judgeId,
@@ -6865,6 +7008,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         // the review continuation budget is exhausted or another notice fired
         // moments ago. Only a genuinely in-flight child is rate-limited.
         if (childVerdict.terminated.length === 0) lastChildNoticeAt = Date.now();
+        // …but each dead judge is announced ONCE. Recorded here, where the
+        // announcement actually goes out, so a notice that was throttled or
+        // never built cannot mark a death as already reported.
+        for (const t of childVerdict.terminated) announcedTerminated.add(t.child.sessionId);
         pi.sendUserMessage(
           `[REVIEW_GATE_CHILD_${childVerdict.terminated.length > 0 ? "ENDED" : "HOST_WAIT"}] ${childNotice}\n\n` +
           (childVerdict.terminated.length > 0
@@ -7177,15 +7324,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       fingerprintMigrated = false;
     }
 
-    // Say it out loud when another Pi session is live in this same repo.
-    // saveSidecarPreservingConcurrent keeps a still-valid foreign READY/PASS
-    // alive, but the two sessions still share one file and one worktree, and
-    // an unexplained "the hook rejects what the gate just approved" is what
-    // sent a real session chasing a phantom.
-    if (concurrentSessionNotice) {
-      try { ctx.ui.notify(concurrentSessionNotice, "warning"); } catch { /* headless */ }
-      concurrentSessionNotice = null;
-    }
+    // ONE gate session per worktree. This REPLACED a warning that guessed:
+    // "another session wrote this sidecar within four hours, it may still be
+    // open". It could not tell a live session from one that finished an hour
+    // ago, so it had to hedge — and a warning that asserts more than it knows
+    // is how people learn to ignore this gate. There is a real liveness signal
+    // now (a heartbeat), so the answer is a decision instead of a hedge:
+    // refuse, or take the claim. Two definitions of "another session is alive"
+    // would be one too many (哲学三), so the old one is gone.
+    applySessionExclusivity(ctx);
 
     persist(ctx);
   });
@@ -7213,6 +7360,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // behalf of a session that is gone, and its supervisor would read those
     // reports as a healthy child.
     stopChildHeartbeat();
+    // Let go of the worktree so the next session does not have to wait out the
+    // freshness window. Only OUR OWN claim is dropped — a session that was
+    // refused never wrote one, and deleting the holder's record on the way out
+    // would hand a live worktree to somebody else.
+    releaseWorktree();
 
     // Judge children are independent pi processes — they survive the session
     // by design (their session files persist, so a fresh session can resume

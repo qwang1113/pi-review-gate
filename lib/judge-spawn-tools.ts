@@ -79,6 +79,14 @@ export interface JudgeSpawnToolDeps {
   tmux(argv: readonly string[]): JudgePaneRunResult;
   /** This session's own pane — the new pane splits off it. */
   ownPane(): string | undefined;
+  /**
+   * The tmux server this process talks to (lib/hierarchy.ts `tmuxServerFrom`).
+   *
+   * Recorded WITH the pane id: an entry that has one without the other can
+   * never be closed by it again (`paneClosable` refuses), which would strand
+   * the pane instead of protecting it.
+   */
+  tmuxServer(): string | undefined;
   /** Injectable clock. */
   now(): number;
   /** Which repo does this call target? Never guessed. */
@@ -275,6 +283,7 @@ async function doSpawn(
     title: role,
     sessionDir: launch.sessionDir,
     paneId: opened.paneId,
+    ...(deps.tmuxServer() === undefined ? {} : { tmuxServer: deps.tmuxServer()! }),
     ...(streamPath === undefined ? {} : { streamPath }),
     spawnedAt: new Date(deps.now()).toISOString(),
   });
@@ -389,7 +398,14 @@ async function doRecover(
     },
   });
   if (!opened.ok) return fail(opened.error);
-  const updated = registerJudge(deps.hierarchy(), { ...entry, paneId: opened.paneId });
+  // The recovered pane is a NEW pane from THIS server — recording the server
+  // with it is what keeps the entry closable later.
+  const recoveredServer = deps.tmuxServer();
+  const updated = registerJudge(deps.hierarchy(), {
+    ...entry,
+    paneId: opened.paneId,
+    ...(recoveredServer === undefined ? {} : { tmuxServer: recoveredServer }),
+  });
   if (updated.ok) deps.saveHierarchy(updated.table);
   return reply(
     `review-gate: review ${entry.judgeId} 已在新 pane（${opened.paneId}）里用同一 session id 重开，transcript 续接，本轮继续。` +
