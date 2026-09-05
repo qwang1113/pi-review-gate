@@ -458,6 +458,15 @@ export async function doProposeRestatement(
         // The FULL text travels in the payload: an orchestrator answering on
         // the user's behalf must judge the same words the human would see,
         // never a summary the child retyped.
+        //
+        // NOT CHECKED HERE, ON PURPOSE (task split, 2026-09-06): a project
+        // manager answering this topic could confirm a station looser than the
+        // plan's own `deliveryStation`, and nothing compares the two. It grants
+        // nothing today — the station is recorded, and NO gate reads it yet —
+        // so the check belongs with the task that wires the station into the
+        // ship gate. Whoever does that must add it there (a constraint-8-style
+        // comparison against the approved plan) before the first gate starts
+        // trusting this field.
         payload: text,
       },
       uiCtx.hasUI === true,

@@ -498,8 +498,10 @@ export function buildGoalConfirmMessage(goalText: string, extraUntrusted?: strin
 
 /** Ship-block copy for loop mode without a confirmed goal (L1 only). */
 export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
-  "loop goal not confirmed by the user — interview them with `ask_user` (it asks and pauses the " +
-  "loop until they answer), draft the goal in Simplified Chinese (identifiers, paths and code " +
+  "loop goal not confirmed by the user — interview them with `ask_user` when anything is unclear " +
+  "(it asks and pauses the loop until they answer), get your understanding confirmed with " +
+  "`propose_restatement({restatement, station})` (REQUIRED first: without it the call below " +
+  "refuses and shows no dialog), draft the goal in Simplified Chinese (identifiers, paths and code " +
   "tokens stay English), then call `propose_loop_goal` — it runs the `goal-auditor` audit itself " +
   "(dispatch, adjudicate, record) and only then asks the USER to approve it " +
 
@@ -521,9 +523,13 @@ export const LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK =
  */
 export const LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK =
   "review-gate: loop mode requires an approved loop goal BEFORE any edit/write call. " +
-  "Negotiate it first: ask the user with `ask_user` (it asks them and pauses the loop until " +
-  "they answer), write the goal in Simplified Chinese (technical identifiers, paths and code " +
-  "tokens stay English), then call `propose_loop_goal` with it. That ONE call runs the " +
+  "Negotiate it first, in this order: ask the user with `ask_user` when anything is unclear (it " +
+  "asks them and pauses the loop until they answer), then say the requirement BACK to them with " +
+  "`propose_restatement({restatement, station})` — what it is, an example, BEFORE → AFTER, which " +
+  "steps change, plus where this round stops (precommit | commit | pr). That step is MECHANICAL: " +
+  "without a confirmed restatement the goal call below refuses outright and shows no dialog. " +
+  "Then write the goal in Simplified Chinese (technical identifiers, paths and code " +
+  "tokens stay English) and call `propose_loop_goal` with it. That ONE call runs the " +
   "`goal-auditor` audit itself (dispatch, adjudicate — only P0/P1 objections count — and record) " +
   "and shows the user the approval dialog only once it passes. A failed audit means: fix the objections and submit the revised " +
   "draft the same way. (If this " +
@@ -623,16 +629,25 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "Facts are YOUR job (read the repo, run tools); only decisions go to the user. Sized to the " +
   "change: a one-line bugfix is one question, not a questionnaire. Later questions that depend " +
   "on an earlier answer are a SECOND ask_user round, not a guess.\n" +
-  "2. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
+  "2. RESTATE THE REQUIREMENT and get it confirmed, with `propose_restatement({restatement, " +
+  "station})` — MECHANICAL since 2026-09-06: without a confirmed restatement on record, step 4 " +
+  "below refuses outright and shows NO dialog. Write it in SIMPLIFIED CHINESE and cover what the " +
+  "thing is, a concrete example, what it looks like BEFORE the change and AFTER it, and which " +
+  "steps become different (the before/after contrast is required). `station` is where THIS round " +
+  "stops — precommit (the gate's checks pass, the USER commits) | commit (the commit is made, the " +
+  "USER pushes) | pr (the PR is open) — ask the user rather than choosing for them. Requirement " +
+  "changed later? Restate again; the newest confirmation wins.\n" +
+  "3. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
   "tokens stay English): task title, one-line intent, 3–7 checkable exit criteria, non-goals, " +
   "ISO date.\n" +
-  "3. Submit it with `propose_loop_goal`. That ONE call runs the audit itself: it builds the " +
+  "4. Submit it with `propose_loop_goal`. That ONE call runs the audit itself: it builds the " +
   "auditor's task (with the carryover and the draft delta when this is a re-audit), dispatches " +
   "the `goal-auditor` judge, waits for it, adjudicates the verdict — only P0/P1 block, " +
   "non-blocking findings never buy another round — and records the PASS. A BLOCKED audit comes " +
   "back with the objections and NO dialog is shown: fix them and call it again.\n" +
-  "4. Once it passes, the EXTENSION shows the text to the user for " +
-  "approval and writes `" + LOOP_GOAL_RELPATH + "` itself. Writing that file yourself grants " +
+  "5. Once it passes, the EXTENSION shows the text to the user for " +
+  "approval and writes `" + LOOP_GOAL_RELPATH + "` itself (the delivery station you confirmed in " +
+  "step 2 travels with it, and is shown in that dialog). Writing that file yourself grants " +
   "nothing — an unapproved goal blocks commit/push/PR in loop mode and its body is withheld " +
   "from this prompt.\n" +
   "(Optional accelerators, only if the USER runs them: `/to-spec`, `/grilling` or `/grill-me`, " +

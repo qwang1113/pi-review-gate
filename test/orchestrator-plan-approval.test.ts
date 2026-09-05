@@ -407,3 +407,22 @@ test("the approval dialog states the boundary semantics the user actually agreed
   assert.match(dialog, /新增任务、碰到新目录/, "including what does invalidate the approval");
 });
 
+test("both consent surfaces state the DELIVERY STATION and that raising it re-asks", async () => {
+  // 2026-09-06 (reviewer P2): `decideApprovalCarry` treats a raised station as
+  // a widening, so the user has to have been told two things — which station
+  // they are approving, and that moving it later comes back to them. A rule
+  // the user meets afterwards is not a rule they agreed to.
+  const plan = { ...twoTaskPlan(), deliveryStation: "commit" as const };
+  const world = makeFakeWorld({ plan });
+  world.confirmAnswers.push(true);
+  await world.call("orchestrator_plan", { action: "submit" });
+
+  const transcript = world.shown.join("\n");
+  assert.match(transcript, /本轮交付站点/, "the plan the user reads names its station");
+  assert.match(transcript, /交付站点往后挪/, "…and says that moving it re-asks");
+
+  const dialog = buildPlanConfirmMessage(world.plan()!);
+  assert.match(dialog, /本轮交付站点/, "the decision box carries the station itself");
+  assert.match(dialog, /提高交付站点/, "…and lists it among the changes that revoke the approval");
+});
+

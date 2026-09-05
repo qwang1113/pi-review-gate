@@ -23,6 +23,7 @@ import {
   readLoopGoal,
   loopGoalEditGate,
   LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK,
+  LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK,
   goalPrereviewPassed,
   buildGoalPrereviewRefusal,
   formatGoalPrereviewCarryover,
@@ -227,6 +228,27 @@ test("the directive is honest about WHAT the goal gates (ship, not the hooks)", 
   // …while the Step-0 directive must state the real consequence of skipping
   // the negotiation (L1 ship block), so the agent is not surprised by it.
   assert.match(LOOP_GOAL_MISSING_DIRECTIVE, /blocks commit\/push\/PR/);
+});
+
+test("the Step-0 recipe teaches the RESTATEMENT FIRST — a session following it must not get refused", () => {
+  // 2026-09-06 (reviewer P1). This directive is injected every turn while a
+  // loop session has no approved goal, so it IS the order the next session
+  // follows. When `propose_loop_goal` started refusing without a confirmed
+  // restatement, a recipe that still said "ask → draft → propose" walked its
+  // reader straight into that refusal — the same failure the task book called
+  // out for TASK_GOAL_DIRECTIVE, in a second copy.
+  assert.match(LOOP_GOAL_MISSING_DIRECTIVE, /propose_restatement/);
+  const restate = LOOP_GOAL_MISSING_DIRECTIVE.indexOf("propose_restatement");
+  const propose = LOOP_GOAL_MISSING_DIRECTIVE.indexOf("Submit it with `propose_loop_goal`");
+  assert.ok(restate > 0 && propose > restate, "the restatement step must come BEFORE the goal submission");
+  assert.match(LOOP_GOAL_MISSING_DIRECTIVE, /precommit/, "…and the station it also settles");
+  // Both BLOCK texts are read at the same moment by an agent that skipped the
+  // step, so they carry the same order.
+  for (const block of [LOOP_GOAL_UNCONFIRMED_EDIT_BLOCK, LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK]) {
+    assert.match(block, /propose_restatement/);
+    assert.ok(block.indexOf("propose_restatement") < block.indexOf("propose_loop_goal"),
+      "the block text must name the earlier step first");
+  }
 });
 
 // ---------------------------------------------------------------------------

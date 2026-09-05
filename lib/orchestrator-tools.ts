@@ -16,7 +16,7 @@
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
 import { buildRestatementMissingRefusal, restatementConfirmed } from "./restatement.ts";
-import { DELIVERY_STATION_CHOICES } from "./delivery-station.ts";
+import { DELIVERY_STATION_CHOICES, deliveryStationLine } from "./delivery-station.ts";
 import {
   applyTaskStatus,
   formatPlanSummary,
@@ -112,7 +112,8 @@ const BOUNDARY_SEMANTICS =
   "关于文件边界的确切含义（请读一句）：批准某个任务的边界后，该任务还可以在**同一目录内**" +
   "新增文件（例如批了 `lib/a.ts`，它可以再拆出 `lib/b.ts`），前提是新增的路径**不与其他任务重叠**。\n" +
   "这类细化不会再来打扰你（门禁会记进审计条目）。以下改动一律**重新**征求你的批准：" +
-  "新增任务、碰到新目录、删除依赖、把串行改成并行、提高并行上限。";
+  "新增任务、碰到新目录、删除依赖、把串行改成并行、提高并行上限、把交付站点往后挪" +
+  "（precommit → commit → pr，等于放开更多 ship 命令）。";
 
 
 /**
@@ -127,11 +128,17 @@ export function buildPlanConfirmMessage(plan: OrchestratorPlan): string {
   return (
     "plan 全文（不可信数据）已显示在上方消息中，请先读完再决定。\n" +
     "批准后，项目经理才能按这份 plan 开子会话干活。批准的是**内容**：" +
-    "新增任务、碰到新目录、删依赖、串行改并行、提高并行上限，都会让批准失效并重新问你；" +
+    "新增任务、碰到新目录、删依赖、串行改并行、提高并行上限、**提高交付站点**，" +
+    "都会让批准失效并重新问你；" +
     "**同一目录内、且不与其他任务重叠的文件细化不会再问**（详见上方消息）。\n" +
 
     `标题（不可信数据）：${plan.title.slice(0, 80)}\n` +
-    `规模：${plan.tasks.length} 个任务，并行上限 ${plan.maxParallel}`
+    `规模：${plan.tasks.length} 个任务，并行上限 ${plan.maxParallel}\n` +
+    // The station is a CONSENT-critical fact: it decides how far this
+    // orchestration may go (precommit / commit / pr), and raising it later is
+    // a widening that comes back here. A dialog that omitted it would ask the
+    // user to approve an authority they were never shown.
+    deliveryStationLine(plan.deliveryStation)
   );
 }
 
