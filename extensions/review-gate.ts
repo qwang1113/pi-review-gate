@@ -174,11 +174,11 @@ import {
   closeSessionPane,
   judgePaneDecor,
   openSessionPane,
+  releasesWindowLabels,
 } from "../lib/session-factory.ts";
 import {
   readJudgeSideEnv,
   gateStatePersistSkip,
-  JUDGE_STREAM_ENV,
 } from "../lib/judge-side.ts";
 import {
   PRESENCE_FILENAME,
@@ -4881,6 +4881,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       tmux: (argv: readonly string[]) => runTmux(argv),
       ownPane: () => ownPane,
       now: () => Date.now(),
+      tmuxServer: () => tmuxServerFrom(process.env),
     };
     const notices: string[] = [];
     for (const [judgeId, entry] of Object.entries(judgeHierarchy)) {
@@ -4894,7 +4895,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       // close (2026-09-05).
       const obs = probeJudgeRound(
         deps,
-        { openerId: entry.openerId, judgeId, paneId: entry.paneId, role: entry.role },
+        {
+          openerId: entry.openerId,
+          judgeId,
+          role: entry.role,
+          ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
+          // Carried so the border repaint can refuse an id minted by a tmux
+          // server that has since restarted (it would be a stranger's pane).
+          ...(entry.tmuxServer === undefined ? {} : { tmuxServer: entry.tmuxServer }),
+        },
         entry.lastReportId,
         roundBindingOf({ judgeId, role: entry.role, repoRoot: entry.repoRoot ?? primaryRepoRoot }),
       );
@@ -5364,6 +5373,18 @@ export default function reviewGate(pi: ExtensionAPI) {
       progress.step(`spawn ${role}`);
       const dispatch = await dispatchJudgeRound({ root, role, title, task: reviewTask, fresh: params.fresh === true, streamPath });
       if (!dispatch.ok) {
+        // A KEPT PANE IS A DISPATCHED ROUND (2026-09-05). The only failure that
+        // still names a pane is the boot check timing out, and that path
+        // deliberately keeps the pane AND its registration — the judge may
+        // simply be slow, its task already rode in on the argv, and the receipt
+        // tells the opener to wait on it. So the audited draft goes on record
+        // here too: without it a late report has no pending kind to bind to and
+        // the whole round is lost. `judge_spawn` makes the same call, and the
+        // two must not disagree about what a kept pane means.
+        if (dispatch.paneId && role === "goal-auditor") {
+          pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
+          persistJudgeHierarchy();
+        }
         progress.fail("spawn 失败");
         const lead = "review-gate: judge_submit 失败 — ";
         return {
@@ -5456,6 +5477,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),
+    // The window's label bar belongs to whoever set it: inside an
+    // orchestration that is the project manager, so a child session never
+    // takes it down when its own judge closes.
+    insideOrchestration: () => Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()),
     now: () => Date.now(),
     readText: (path) => {
       try {
@@ -6231,7 +6256,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         const run = (argv: readonly string[]) => runTmux(argv);
         const closed: string[] = [];
         const tmuxServer = tmuxServerFrom(process.env);
-        for (const child of ownedJudges) {
+        for (const [index, child] of ownedJudges.entries()) {
           // `paneClosable`, not just "has a pane id": a persisted id from a
           // tmux server that has since restarted names whatever now holds that
           // number, and this is a kill (2026-09-05, adviser P1). Unverifiable
@@ -6239,7 +6264,16 @@ export default function reviewGate(pi: ExtensionAPI) {
           // do not send kill-pane into someone else's window.
           if (paneClosable(child, tmuxServer) && ownPane) {
             try {
-              if (closeSessionPane(run, child.paneId!).ok) closed.push(child.paneId!);
+              // The LAST one takes the window's label bar down with it — judge
+              // panes turn it on (C1), so something has to turn it off or the
+              // gate leaves a permanent mark on the user's window. Never inside
+              // an orchestration: there the project manager owns that bar and
+              // its children still need it.
+              const releases = releasesWindowLabels({
+                remainingDecoratedPanes: ownedJudges.length - index - 1,
+                insideOrchestration: Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()),
+              });
+              if (closeSessionPane(run, child.paneId!, { hideLabels: releases }).ok) closed.push(child.paneId!);
             } catch { /* best effort */ }
           }
           try { reapReviewScratch(child.judgeId); } catch { /* best effort */ }

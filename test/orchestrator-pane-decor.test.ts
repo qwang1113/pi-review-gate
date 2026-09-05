@@ -31,7 +31,6 @@ import {
   paneLabelFor,
   paneStyleFor,
   paneTitleFor,
-  paneTitleForHealth,
   PANE_BORDER_FORMAT,
   PANE_BORDER_STATUS,
   PANE_PALETTE,
@@ -72,7 +71,7 @@ test("the title carries the STATE and how long it has held — identity alone is
   );
 
   assert.equal(
-    paneTitleForHealth("@t1", { childId: "c", state: "done" }),
+    paneTitleFor({ label: "@t1", state: "done" }),
     "@t1 · done",
     "a state with no clock still renders",
   );

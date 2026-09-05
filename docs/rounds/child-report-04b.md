@@ -67,8 +67,17 @@ lib/session-factory.ts
 
 ```
 $ grep -rn "openJudgePane" lib extensions test
-（无输出）
+lib/session-factory.ts:203:  // them (the retired openJudgePane wrapped it; nothing else did).
+test/session-factory-structure.test.ts:114:    .filter((f) => /\b(openJudgePane|…)/.test(f.text))
+test/session-factory-structure.test.ts:118:    "the old openJudgePane is gone and no second caller assembles a spawn argv");
 ```
+
+判据措辞更正（reviewer Nit）：**实现层面零命中**，剩下的三处都不是实现——一处是
+factory 里解释「旧实现当年会包一层降级文案」的注释，两处是**钉住它被删除**的守卫测试
+自身（正则与断言文案）。守卫测试提到自己要守的名字是不可避免的自指，所以这条的机械
+判据应当读作：**除 `lib/session-factory.ts` 的注释与 `test/session-factory-structure.ts`
+的守卫外，`lib/` 与 `extensions/` 下没有任何 `openJudgePane` 的定义或调用**，这正是
+“nothing opens a pane behind the factory's back” 那条测试断言的东西。
 
 `lib/judge-pane.ts` 从 205 行收窄到 72 行，只剩两样东西：judge 的跨进程契约常量
 （`RG_JUDGE_OPENER` / `_ID` / `_ROLE`）与 pane 探活（`listJudgePanes` /
@@ -195,9 +204,36 @@ $ npm test
    但 attach 本身不开 pane，因此没有别的欠账；提一句只是备查。
 4. **`extensions/review-gate.ts` 仍有约 8200 行。** 本轮往里加的净代码很少（改造为主），
    但它离「新逻辑不要再堆进扩展」还差一次真正的拆分。
-5. **`orchestrator-pane-decor.ts` 的 `paneTitleForHealth` 现在零调用者**（刷新逻辑改走
-   factory 的 `refreshSessionPaneTitle`）。删它是 1 行改动 + 1 处测试，但属于顺手修，
-   留给下一轮判断（它仍是「健康读数 → 标题」的语义命名，可能有保留价值）。
+5. ~~`paneTitleForHealth` 零调用者~~ —— **第二轮已删**（reviewer Nit，哲学三）：
+   它是「健康读数 → 标题」的第二个渲染器，而标题现在只由
+   `refreshSessionPaneTitle` 写，留着就是两种拼法迟早分叉。
+
+---
+
+## 二·补 · 第二轮：reviewer findings 的处置
+
+第一轮 verdict 是 READY（7 条 findings：4×P2 + 3×Nit），其中 **P2-1 是我本轮引入的
+真实回归**，因此全部处置掉之后重新绑定：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-1 | judge pane 打开了 window 级边框行却从不收起，成为用户窗口里的永久残留 | 新增 `releasesWindowLabels`（纯判定）：**最后一个**被装饰的 pane 才收起，且**编排内一律不收**（那张 bar 归项目经理，子会话收起会把兄弟 pane 的边框抹掉）。接在 `judge_close` 与 `declare_done` 的级联关闭上；三条行为测试（最后一个收 / 编排内不收 / 还有兄弟不收）+ 一条纯函数测试 |
+| P2-2 | boot 核实失败时 `judge_submit` 不登记 pendingAudits，与 `judge_spawn` 的相反取舍 | 统一成 `judge_spawn` 的口径：**pane 被保留 = 这一轮已经派出去了**，所以照常登记待审草稿，否则迟到的 report 没有 kind 可绑、整轮丢失 |
+| P2-3 | `decorWarning` 只回传裸 stderr，回执丢了「仅显示降级」的语境 | 文案回到 factory 里包一层（每个调用方都直接把它贴进回执，语境属于产出方）；测试改成断言 /降级/ 与原始 stderr 都在 |
+| P2-4 | C2 重绘不校验 pane id 是否本 tmux server 铸造，可能给陌生 pane 改标题 | `paintTitle` 先过 `paneClosable`（与 kill 路径同一条规则）；`probeJudgeRound` 的 child 投影补 `tmuxServer`，扩展 settle 侧一并补齐。新增测试：同 server 恰好重绘一次、异 server 一次不写 |
+| Nit-1 | 扩展里 `JUDGE_STREAM_ENV` 成了死 import | 删 |
+| Nit-2 | `paneTitleForHealth` 零调用者 | 删（连同其测试改用 `paneTitleFor`） |
+| Nit-3 | 退出标准 3 的字面判据与守卫测试自指冲突 | 报告里更正措辞（见上文 §1.3），实现未变 |
+
+第二轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2360 pass / 0 fail**。
+
+**变异验证（在 `$TMPDIR` 副本里做，工作区未动）**：逐个把本轮的关键行为改坏，确认
+对应测试确实变红——绕过 factory 开 pane（→ 六调用点测试红）、给 argv 构造器加第二个
+使用者（→ 判据 (b) 红）、去掉 C2 的 `paintTitle("done")`（→ C2 结构测试红）、改名
+`RG_JUDGE_ROLE`（→ 契约测试与两条组合测试红）、去掉边框行 argv（→ C1 测试红）、
+judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫（→ 陌生 pane 测试红）、
+去掉降级文案包装（→ decorWarning 测试红）。
+
 
 ---
 
@@ -231,6 +267,15 @@ $ npm test
 - **改共享返回语义前先枚举调用者、按类别验收。** `verifyDelivery` 的证据判据从
   `records.length > 0` 变成 `> baseline`，调用者有三类（编排 spawn / 编排 instruct /
   judge spawn），三类各写了测试。这条是 skill 里已有的经验，这次照做了，没出事。
+- **打开一个 window 级选项，就欠下一次关闭。** C1 的修法是让 judge pane 也打开
+  `pane-border-status`/`format`——但那是 **window** 级的、被窗口里所有 pane 共享的东西，
+  而我只写了「打开」。reviewer 抓到的是它成了用户窗口里的永久残留。一般化：**凡是改动
+  的作用域大于自己创建的那个对象（window 选项、全局配置、共享文件），就必须同时回答
+  「谁在什么条件下撤销它」**，而且答案通常是「最后一个用它的人，且只有它的所有者」。
+- **模块级重绘记忆会让同进程的测试互相掩盖。** `refreshSessionPaneTitle` 在调用方不给
+  memory 时用模块内的 Map；两条测试都用 `%7` 时，第二条的重绘被第一条的记录判成「没变
+  过」，于是断言 0 !== 1。生产上 pane id 唯一所以没问题，但**测试要各用各的 pane id**，
+  否则你验的是缓存不是行为。
 
 ---
 

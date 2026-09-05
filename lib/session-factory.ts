@@ -197,7 +197,13 @@ export function decorateSessionPane(
   for (const argv of buildShowPaneLabelsArgv(paneId, PANE_BORDER_STATUS, PANE_BORDER_FORMAT)) {
     attempt(argv);
   }
-  return failures.length === 0 ? undefined : failures[0];
+  // The WORDING matters as much as the fact: a bare tmux stderr in a receipt
+  // reads like the session failed. Every caller pastes this straight into its
+  // reply, so the "display only" framing belongs here rather than in each of
+  // them (the retired openJudgePane wrapped it; nothing else did).
+  return failures.length === 0
+    ? undefined
+    : `pane 装饰失败（仅显示降级）：${failures[0]}`;
 }
 
 /** What a repaint remembers, so an unchanged title is not re-painted. */
@@ -286,6 +292,32 @@ export function closeSessionPane(
   } catch (error) {
     return { ok: false, error: (error as Error).message };
   }
+}
+
+/**
+ * May THIS close take the window's label bar down with it?
+ *
+ * WHY THE QUESTION EXISTS AT ALL. `pane-border-status` / `pane-border-format`
+ * are WINDOW options: every pane in the window shares them, including panes
+ * this session never opened. Turning them on is what makes a decorated border
+ * visible (C1); leaving them on forever is litter in the user's window, and
+ * turning them off while a sibling is still labelled blanks a border that is
+ * still in use. So it is released by the LAST decorated pane, and only by a
+ * session that owns them.
+ *
+ * "Owns them" is the second half, and it is not a detail: inside an
+ * orchestration the PROJECT MANAGER sets and unsets this bar around its
+ * children (lib/orchestrator-session-tools.ts, `isLastDecoratedChild`). A child
+ * session closing its own judge must not reach across and blank its siblings'
+ * borders — so it never releases, and the manager's own last close does.
+ */
+export function releasesWindowLabels(input: {
+  /** Panes THIS session decorated that are still open once this one is gone. */
+  remainingDecoratedPanes: number;
+  /** True when an orchestration owns this window's label bar. */
+  insideOrchestration: boolean;
+}): boolean {
+  return !input.insideOrchestration && input.remainingDecoratedPanes === 0;
 }
 
 // ---------------------------------------------------------------------------

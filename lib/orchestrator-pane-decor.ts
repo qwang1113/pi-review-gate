@@ -157,14 +157,12 @@ export function paneTitleFor(opts: {
 }
 
 
-/** The title for a child whose health has just been measured. */
-export function paneTitleForHealth(label: string, health: ChildHealth): string {
-  return paneTitleFor({
-    label,
-    state: health.state,
-    ...(health.stateForSeconds === undefined ? {} : { stateForSeconds: health.stateForSeconds }),
-  });
-}
+// (`paneTitleForHealth` is GONE, 2026-09-05. It rendered a title from a health
+// reading, which is now `refreshSessionPaneTitle`'s job in
+// lib/session-factory.ts — the ONE place a pane title is written, shared by the
+// orchestration probe and the judge probe. Leaving a second renderer behind is
+// how two spellings of the same border drift apart.)
+
 
 /**
  * `pane-border-format`, in tmux's own syntax.

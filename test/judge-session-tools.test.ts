@@ -44,7 +44,11 @@ interface Fake {
   caller: string | undefined;
   /** The tmux server this fake session talks to — records are minted by it. */
   tmuxServer: string | undefined;
+  /** Does an orchestration own this window's label bar? */
+  insideOrchestration: boolean;
   panes: string[];
+  /** Every tmux argv this fake was asked to run, in order. */
+  tmuxCalls: string[][];
   announced: Set<string>;
   recorded: Array<{ text: string; root: string; role: string }>;
   /** The newest report written into the fake channel — what the engine consumes. */
@@ -88,7 +92,11 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     table: { current: emptyHierarchy() },
     caller: OPENER as string | undefined,
     tmuxServer: "sock,1" as string | undefined,
+    // A plain loop session by default: it owns its window's label bar, so its
+    // last judge close takes it down (inside an orchestration the manager does).
+    insideOrchestration: false,
     panes: ["%1", "%7"],
+    tmuxCalls: [] as string[][],
     announced: new Set<string>(),
     recorded: [] as Array<{ text: string; root: string; role: string }>,
     lastReportId: undefined as string | undefined,
@@ -122,6 +130,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     channelIO: () => io,
     channelHome: () => HOME,
     tmux: (argv) => {
+      state.tmuxCalls.push([...argv]);
       if (argv[0] === "list-panes") return { ok: true, stdout: `${state.panes.join("\n")}\n`, stderr: "" };
       if (argv[0] === "kill-pane") {
         const pane = String(argv[argv.length - 1]);
@@ -134,6 +143,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     // Faithful to the real wiring: the seeded records below are minted by this
     // same server, so the ordinary paths behave exactly as they did.
     tmuxServer: () => state.tmuxServer,
+    insideOrchestration: () => state.insideOrchestration,
     now: () => 1_700_000_000_000,
     readText: (path) => state.files.get(path),
     announcedQuestions: () => state.announced,
@@ -335,6 +345,53 @@ test("judge_close: the opener's pane is killed and the registry entry goes", asy
   assert.deepEqual(reply.details, { closed: true, terminated: true, judgeId: "rg-reviewer-abc" });
 });
 
+test("judge_close: the LAST judge takes the window's label bar down with it", async () => {
+  // Judge panes turn the window-level border line ON (that is the C1 fix), so
+  // something has to turn it back off — otherwise the gate leaves a permanent
+  // mark on a window it was only visiting.
+  const f = fake();
+  seed(f);
+  await call(f, "judge_close", { role: "reviewer" });
+  const flat = f.tmuxCalls.map((a) => a.join(" "));
+  const unset = flat.filter((s) => s.startsWith("setw") && s.includes("-u"));
+  assert.equal(unset.length, 2, "both window options are restored to the user's own config");
+  assert.ok(
+    flat.indexOf(unset[0]!) < flat.findIndex((s) => s.startsWith("kill-pane")),
+    "…and BEFORE the pane dies: after kill-pane that id is no longer a setw target",
+  );
+});
+
+test("judge_close: inside an orchestration the label bar is left alone", async () => {
+  // There the PROJECT MANAGER owns that bar and its other children still need
+  // it; a child session releasing it would blank its siblings' borders.
+  const f = fake();
+  f.insideOrchestration = true;
+  seed(f);
+  await call(f, "judge_close", { role: "reviewer" });
+  const flat = f.tmuxCalls.map((a) => a.join(" "));
+  assert.equal(flat.filter((s) => s.startsWith("setw")).length, 0, "no window option is touched");
+  assert.ok(flat.some((s) => s.startsWith("kill-pane")), "the pane itself is still closed");
+});
+
+test("judge_close: a sibling judge still open keeps the label bar up", async () => {
+  const f = fake();
+  seed(f);
+  // A second judge of the same opener, with its own pane.
+  f.table.current = {
+    ...f.table.current,
+    "rg-adviser-xyz": {
+      ...f.table.current["rg-reviewer-abc"]!,
+      judgeId: "rg-adviser-xyz",
+      role: "adviser",
+      paneId: "%9",
+    },
+  };
+  await call(f, "judge_close", { role: "reviewer" });
+  const flat = f.tmuxCalls.map((a) => a.join(" "));
+  assert.equal(flat.filter((s) => s.startsWith("setw")).length, 0,
+    "the bar stays up while a decorated sibling is still on screen");
+});
+
 test("judge_close: a pane id from ANOTHER tmux server is never killed", async () => {
   // The registry is persisted now, so a record can outlive the tmux server
   // that minted its pane id — and tmux hands ids out from %0 again after a
@@ -534,6 +591,49 @@ test("the round probe: a new report ends it, a dead pane fails it, silence pends
   const dead = { ...c };
   assert.deepEqual(probeJudgeRound(f.deps, dead, "rep-9", f.binding), { done: true, reason: "pane-dead", openQuestions: [] });
 });
+
+test("the round probe repaints the border — but never through a stranger's pane id", () => {
+  // C2: pi overwrites the pane title after boot, so the border is repainted
+  // from every reading of the judge's state. The id it writes through is only
+  // usable while it was minted by the tmux server this process talks to: the
+  // registry is persisted, and after a server restart %7 belongs to somebody
+  // else's pane (the same rule the kill path obeys).
+  const f = fake();
+  // A pane id of its own: the repaint remembers what it last wrote per pane
+  // (that is the throttle), so two tests sharing `%7` would see each other's
+  // paint suppressed and prove nothing.
+  f.panes = ["%1", "%71"];
+  const c = seed(f, { paneId: "%71" });
+  // A state on the channel is what there is to paint: before the judge has said
+  // anything the border keeps whatever it had (nothing to report is not "idle").
+  appendRecord(channelWriter(f), channelOf(c), {
+    kind: "state",
+    from: "child",
+    at: new Date(1_700_000_000_000).toISOString(),
+    state: "working",
+  });
+  probeJudgeRound(f.deps, c, undefined, f.binding);
+  const painted = f.tmuxCalls.filter((a) => a[0] === "select-pane" && a.includes("-T"));
+  assert.equal(painted.length, 1, "one repaint per reading");
+  assert.match(painted[0]!.join(" "), /@review-reviewer/, "…labelled by the judge's role");
+
+  const g = fake();
+  g.panes = ["%1", "%72"];
+  const stranger = seed(g, { paneId: "%72", tmuxServer: "other-server,9" });
+  appendRecord(channelWriter(g), channelOf(stranger), {
+    kind: "state",
+    from: "child",
+    at: new Date(1_700_000_000_000).toISOString(),
+    state: "working",
+  });
+  probeJudgeRound(g.deps, stranger, undefined, g.binding);
+  assert.equal(
+    g.tmuxCalls.filter((a) => a[0] === "select-pane").length,
+    0,
+    "an id from another tmux server is never written through",
+  );
+});
+
 
 // THE PROBE AND THE RECORDER ANSWER THE SAME QUESTION (2026-09-05). While they
 // did not, a leftover reviewer report ended the round HERE — the wait printed

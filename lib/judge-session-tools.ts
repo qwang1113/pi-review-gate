@@ -50,6 +50,7 @@ import {
   closeSessionPane,
   judgePaneLabel,
   refreshSessionPaneTitle,
+  releasesWindowLabels,
 } from "./session-factory.ts";
 import type { ChildState } from "./orchestrator-child-state.ts";
 import {
@@ -129,6 +130,15 @@ export interface JudgeSessionToolDeps {
   ownPane(): string | undefined;
   /** The tmux server this process talks to (lib/hierarchy.ts `tmuxServerFrom`). */
   tmuxServer(): string | undefined;
+  /**
+   * Does an ORCHESTRATION own this window's label bar?
+   *
+   * The window-level border options are shared by every pane in the window. A
+   * project manager sets and unsets them around its children, so a child
+   * session closing its own judge must not release them and blank its
+   * siblings' borders — see `releasesWindowLabels`.
+   */
+  insideOrchestration(): boolean;
   /** Injectable clock. */
   now(): number;
   /** Whole file, or undefined when it is absent/unreadable. */
@@ -315,8 +325,8 @@ export interface JudgeWaitCursors {
  * the other caller.
  */
 export function probeJudgeRound(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now">,
-  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "role">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer">,
+  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "role" | "tmuxServer">,
   consumedReportId: string | undefined,
   binding: RoundBinding,
 ): PaneJudgeWaitObservation {
@@ -338,9 +348,16 @@ export function probeJudgeRound(
    *
    * The state comes from the CHANNEL projection, never from the screen, and
    * the paint is throttled and failure-swallowed inside the shared function.
+   *
+   * `paneClosable` FIRST, for the same reason the kill path checks it: the
+   * registry is persisted, so an entry restored after a tmux server restart
+   * carries a pane id that server has since handed to somebody else. Writing a
+   * title through it would rename a stranger's pane — cosmetic, but in the
+   * user's own window, and unverifiable ids are never acted on here.
    */
   const paintTitle = (state: ChildState | undefined, since?: string): void => {
     if (!child.paneId || !child.role || state === undefined) return;
+    if (!paneClosable(child, deps.tmuxServer())) return;
     const seconds = since ? Math.max(0, (deps.now() - Date.parse(since)) / 1000) : undefined;
     refreshSessionPaneTitle(deps.tmux, {
       paneId: child.paneId,
@@ -426,8 +443,8 @@ export function probeJudgeRound(
  * still reports to an opener running the oldest.
  */
 export function probeJudgeWait(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "readText" | "roundBinding">,
-  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath" | "role" | "repoRoot">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "tmuxServer" | "readText" | "roundBinding">,
+  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath" | "role" | "repoRoot" | "tmuxServer">,
   cursors: JudgeWaitCursors,
 ): PaneJudgeWaitObservation {
   const round = probeJudgeRound(deps, child, cursors.reportId, deps.roundBinding(child));
@@ -525,7 +542,21 @@ async function doClose(deps: JudgeSessionToolDeps, params: Record<string, unknow
   if (child.paneId && !paneClosable(child, deps.tmuxServer())) {
     killNote = `pane ${child.paneId} 是另一个 tmux server 铸造的 id（可能已被重新分配），不动它，只清登记`;
   } else if (child.paneId && ownPane) {
-    const killed = closeSessionPane(deps.tmux, child.paneId);
+    // THE LABEL BAR COMES DOWN WITH THE LAST DECORATED PANE (2026-09-05).
+    // Judge panes turn the window-level border line ON now (that is the fix
+    // for C1 — a judge used to get a colour nobody could see). Something has
+    // to turn it back off, or the gate leaves a permanent mark on the user's
+    // window; and it must NOT be turned off while a sibling still needs it,
+    // which is what `releasesWindowLabels` decides.
+    const siblings = Object.values(deps.hierarchy()).filter(
+      (entry) => entry.judgeId !== judgeId && entry.openerId === child.openerId && entry.paneId,
+    ).length;
+    const killed = closeSessionPane(deps.tmux, child.paneId, {
+      hideLabels: releasesWindowLabels({
+        remainingDecoratedPanes: siblings,
+        insideOrchestration: deps.insideOrchestration(),
+      }),
+    });
     terminated = killed.ok;
     killNote = killed.ok ? `pane ${child.paneId} 已关` : `关 pane 失败（${killed.error}），登记照样清除`;
   }

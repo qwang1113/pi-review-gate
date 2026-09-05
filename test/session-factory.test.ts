@@ -21,6 +21,7 @@ import {
   judgePaneLabel,
   openSessionPane,
   paneRecoverability,
+  releasesWindowLabels,
   refreshSessionPaneTitle,
   PANE_REPAINT_MIN_MS,
   type PaneRunner,
@@ -237,7 +238,10 @@ test("decor failure degrades to a warning, never to a failed open", async () => 
   });
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
-  assert.equal(outcome.decorWarning, "select failed");
+  // The warning is FRAMED, not a bare tmux stderr: every caller pastes it into
+  // a receipt, and "select failed" on its own reads like the session failed.
+  assert.match(outcome.decorWarning ?? "", /降级/);
+  assert.match(outcome.decorWarning ?? "", /select failed/);
 });
 
 test("a failed delivery check KEEPS the pane and its registration", async () => {
@@ -321,6 +325,18 @@ test("close kills exactly one pane, and takes the label bar down only when asked
   assert.ok(flat[0]!.includes("-u") && flat[0]!.includes("pane-border-status"));
   assert.equal(flat[2], "kill-pane -t %7", "the options come down BEFORE the pane dies");
 });
+
+test("who may take the window's label bar down: the last pane, and never a guest", () => {
+  // Turning the bar ON is what makes a decorated border visible (C1); leaving
+  // it on forever is litter in the user's window, and turning it off while a
+  // sibling still needs it blanks a border that is in use.
+  assert.equal(releasesWindowLabels({ remainingDecoratedPanes: 0, insideOrchestration: false }), true);
+  assert.equal(releasesWindowLabels({ remainingDecoratedPanes: 1, insideOrchestration: false }), false,
+    "a sibling still on screen keeps it up");
+  assert.equal(releasesWindowLabels({ remainingDecoratedPanes: 0, insideOrchestration: true }), false,
+    "inside an orchestration the project manager owns that bar — a child never releases it");
+});
+
 
 test("close failure is reported, not swallowed", () => {
   const outcome = closeSessionPane(() => ({ ok: false, stdout: "", stderr: "gone" }), "%7");
