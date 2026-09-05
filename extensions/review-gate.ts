@@ -4713,7 +4713,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     });
   }
 
-
   /**
    * WHAT THE AUDIT-ROUND ENGINE NEEDS FROM THIS SESSION.
    *

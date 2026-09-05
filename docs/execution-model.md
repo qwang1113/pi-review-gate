@@ -106,8 +106,13 @@ opener 凭它记录结论；
 
   仅三类情形允许停止：用户显式中止（ESC）、`ask_user` 等待用户回答、
   所有门禁与 goal 均完成。
-- **一轮结束的三条独立判据**：(a) 新 channel report 落盘（`settleFinishedRounds` 以标准
-  报告唤醒并记入链）；(b) **pane 死亡**（本 window 名单里没有记录的 pane id——名单读不
+- **一轮结束的三条独立判据**：(a) **本轮自己的** channel report 落盘
+  （`settleFinishedRounds` 以标准报告唤醒并记入链）—— 对 code review 而言「本轮自己的」
+  是有判据的（2026-09-05）：report 的 `round` 必须等于本轮 dispatch 登记的 `roundSeq`，
+  且在本仓库已有 checkpoint 时 `report.at` 必须严格晚于 `state.checkpoint.at`；不满足
+  的 report **不结束本轮**，只在唤醒文本里报成「未采纳的 report」（判据出处
+  `selectRoundReport` / `roundBindingFor`，`lib/audit-round.ts`，记录侧与探测侧共用）；
+  (b) **pane 死亡**（本 window 名单里没有记录的 pane id——名单读不
   出按活着处理，缺信息永不结束等待）；(c) 静默超过 `STALL_MOTION_MAX_AGE_SEC`
   （lib/loop-stall.ts，600 秒），按 `lastActivityAt` 计时——取自子会话的 channel 写入，
   只有一次都没写过时才回退到 `spawnedAt`。任一命中主会话自行恢复推进——子会话的

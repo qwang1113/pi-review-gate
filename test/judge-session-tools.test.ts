@@ -492,6 +492,22 @@ test("the round probe: a report from an earlier round does NOT end it either", (
   assert.match(obs.notThisRound?.detail ?? "", /不是本轮/);
 });
 
+// …BUT THE ALREADY-RECORDED ONE IS NOT "SET ASIDE" (reviewer P2, 2026-09-05).
+// The selector checks the round before the cursor, so from round 2 on the
+// previous round's report — recorded, cursor advanced — comes back as
+// `round-mismatch`. Reporting it would tell the opener that a verdict which WAS
+// adopted had been discarded, on every single wait.
+test("the round probe: the previous round's RECORDED report is not announced as set aside", () => {
+  const f = fake();
+  const c = seed(f);
+  writeReport(f, c, "READY", "rep-done", { round: 1 });
+  f.binding = { binding: "round-and-content", expectedRound: 2, contentAt: CHECKPOINT_AT };
+  const obs = probeJudgeRound(f.deps, c, "rep-done", f.binding);
+  assert.equal(obs.done, false, "it is not this round's report");
+  assert.equal(obs.notThisRound, undefined, "…and it is not news either — it was recorded");
+});
+
+
 test("the wait probe: the round's criteria first, then question, then finding", () => {
   const f = fake();
   const c = seed(f, { streamPath: "/logs/stream.jsonl" });

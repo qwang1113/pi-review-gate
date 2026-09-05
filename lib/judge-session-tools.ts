@@ -330,8 +330,19 @@ export function probeJudgeRound(
   }
   // A report is sitting there and it is NOT this round's: keep waiting, and
   // carry WHICH one and WHY so the wake-up can say it out loud.
+  //
+  // THE CONSUMED ONE IS NOT THAT (reviewer P2, 2026-09-05). The selector checks
+  // the ROUND before the cursor on purpose, so from round 2 on the previous
+  // round's report — already recorded, cursor already advanced — comes back as
+  // `round-mismatch` rather than `already-consumed`. Announcing it would report
+  // a verdict that WAS adopted as "set aside", every single wait, which is how
+  // a real warning becomes noise nobody reads. The cursor is the check that
+  // says "this one is handled", whatever reason the selector gave.
   const notThisRound =
-    selected.reason === "no-report" || selected.reason === "already-consumed" || selected.reportId === undefined
+    selected.reason === "no-report"
+    || selected.reason === "already-consumed"
+    || selected.reportId === undefined
+    || selected.reportId === consumedReportId
       ? undefined
       : {
           reportId: selected.reportId,
