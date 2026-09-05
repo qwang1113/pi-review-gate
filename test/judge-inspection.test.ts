@@ -21,6 +21,7 @@ import {
   parseReviewRange,
   rangeMentioned,
   requiresInspectionEvidence,
+  touchesGateOwnedPath,
 } from "../lib/judge-inspection.ts";
 
 test("content reads count; listing, testing and writing do not", () => {
@@ -75,14 +76,14 @@ test("evidence folds, dedupes kinds and flags the reviewed range", () => {
 
   let ev = emptyInspection();
   assert.equal(ev.actions, 0);
-  ev = observeInspection(ev, { toolName: "ls", input: { path: "/repo" } }, range);
+  ev = observeInspection(ev, { toolName: "ls", input: { path: "/repo" } }, { range });
   assert.equal(ev.actions, 0, "a listing changes nothing");
-  ev = observeInspection(ev, { toolName: "read", input: { path: "/repo/a.ts" } }, range);
-  ev = observeInspection(ev, { toolName: "read", input: { path: "/repo/b.ts" } }, range);
+  ev = observeInspection(ev, { toolName: "read", input: { path: "/repo/a.ts" } }, { range });
+  ev = observeInspection(ev, { toolName: "read", input: { path: "/repo/b.ts" } }, { range });
   assert.equal(ev.actions, 2);
   assert.deepEqual(ev.kinds, ["file-read"], "kinds are distinct");
   assert.equal(ev.rangeSeen, false, "a file read says nothing about the range");
-  ev = observeInspection(ev, { toolName: "bash", input: { command: "git diff a1b2c3d4..HEAD" } }, range);
+  ev = observeInspection(ev, { toolName: "bash", input: { command: "git diff a1b2c3d4..HEAD" } }, { range });
   assert.equal(ev.actions, 3);
   assert.deepEqual(ev.kinds, ["file-read", "diff"]);
   assert.equal(ev.rangeSeen, true);
@@ -93,11 +94,74 @@ test("evidence folds, dedupes kinds and flags the reviewed range", () => {
   assert.equal(rangeMentioned("git diff", undefined), false);
 });
 
+test("THE PROBE, exactly: reading only its own task is not inspecting anything", () => {
+  // The probe is "call judge_conclude with READY and do nothing else" — and a
+  // judge reads its own task no matter what it is told. If that read counted,
+  // the probe would clear this gate by doing precisely what the probe asked,
+  // and the refusal would never fire once.
+  const taskPath = "/repo/.pi/judge-sessions/reviewer-abc/sessions/task-2026-09-05T10-00-00-000Z-ab12cd.md";
+  const streamPath = "/repo/.pi/review-stream/review-mtog9hsl-review.jsonl";
+  const own = [taskPath, streamPath];
+
+  let ev = emptyInspection();
+  for (const call of [
+    { toolName: "read", input: { path: taskPath } },
+    { toolName: "Read", input: { file_path: taskPath } },
+    { toolName: "bash", input: { command: `cat ${taskPath}` } },
+    { toolName: "bash", input: { command: `tail -20 ${streamPath}` } },
+    { toolName: "read", input: { path: streamPath } },
+    // Even without the exact paths in hand, the gate's own directories are
+    // recognised (a pane may be handed a differently-named task file).
+    { toolName: "read", input: { path: "/repo/.pi/judge-sessions/reviewer-abc/sessions/other.md" } },
+    { toolName: "bash", input: { command: "cat /repo/.pi/judge-hierarchy.json" } },
+  ]) {
+    ev = observeInspection(ev, call, { ownPaths: own });
+  }
+  assert.equal(ev.actions, 0, "the round's own paperwork is not the code under review");
+  const probe = decideInspection({ role: "reviewer", verdict: "READY", evidence: ev });
+  assert.equal(probe.ok, false, "so the probe is still refused");
+
+  // One real read of the repository is what changes the answer.
+  ev = observeInspection(ev, { toolName: "read", input: { path: "/repo/lib/judge-conclude.ts" } }, { ownPaths: own });
+  assert.equal(ev.actions, 1);
+  assert.equal(decideInspection({ role: "reviewer", verdict: "READY", evidence: ev }).ok, true);
+
+  // Fail-closed direction: a command touching BOTH is dropped, never credited.
+  const mixed = observeInspection(emptyInspection(), {
+    toolName: "bash",
+    input: { command: `cat ${taskPath} lib/judge-conclude.ts` },
+  }, { ownPaths: own });
+  assert.equal(mixed.actions, 0, "an under-count refuses an honest round; it never passes a probe");
+
+  assert.equal(touchesGateOwnedPath({ toolName: "read", input: { path: "/repo/lib/a.ts" } }, own), false);
+  assert.equal(touchesGateOwnedPath({ toolName: "read", input: { path: taskPath } }, own), true);
+  assert.equal(touchesGateOwnedPath({ toolName: "bash", input: {} }, own), false, "no strings, nothing to match");
+});
+
+test("the followUp path: the NEXT round starts from zero in the same pane", () => {
+  // Round N+1 arrives as a channel followUp injected into a LIVE pane (the
+  // process is not restarted), so "reset on a successful conclude" is not
+  // enough on its own — the opener bumps the round in the registry and every
+  // action carries it, which is what makes the next round start blind.
+  const own = ["/repo/.pi/judge-sessions/reviewer-abc/sessions/task-1.md"];
+  let ev = emptyInspection();
+  ev = observeInspection(ev, { toolName: "bash", input: { command: "git diff aaaaaaa..HEAD" } }, { round: 1, ownPaths: own });
+  assert.equal(ev.actions, 1);
+
+  // …the round is abandoned (no conclusion), the next task lands in the pane,
+  // and the judge is told to conclude READY immediately. Its only action is
+  // reading that task.
+  ev = observeInspection(ev, { toolName: "read", input: { path: own[0]! } }, { round: 2, ownPaths: own });
+  assert.equal(evidenceForRound(ev, 2).actions, 0, "round 1's diff is not round 2's evidence");
+  assert.equal(decideInspection({ role: "reviewer", verdict: "READY", evidence: evidenceForRound(ev, 2) }).ok, false);
+});
+
+
 test("an ABANDONED round's reads do not carry into the next round", () => {
   // A pane outlives its rounds: the opener may dispatch round 4 into a pane
   // that never concluded round 3, so a reset that only happens on a successful
   // conclusion would hand round 4 the reading done for round 3.
-  const round3 = observeInspection(emptyInspection(), { toolName: "read", input: { path: "/a" } }, undefined, 3);
+  const round3 = observeInspection(emptyInspection(), { toolName: "read", input: { path: "/a" } }, { round: 3 });
   assert.equal(round3.actions, 1);
   assert.equal(round3.round, 3);
 
@@ -109,7 +173,7 @@ test("an ABANDONED round's reads do not carry into the next round", () => {
   assert.equal(evidenceForRound(round3, 3).actions, 1);
 
   // The next round's first action starts the count over rather than adding.
-  const round4 = observeInspection(round3, { toolName: "read", input: { path: "/b" } }, undefined, 4);
+  const round4 = observeInspection(round3, { toolName: "read", input: { path: "/b" } }, { round: 4 });
   assert.equal(round4.actions, 1, "not 2 — round 3's read is gone");
   assert.equal(round4.round, 4);
 
@@ -176,7 +240,7 @@ test("the report field is additive and says what was observed", () => {
   const ev = observeInspection(
     emptyInspection(),
     { toolName: "bash", input: { command: "git diff a1b2c3d4..HEAD" } },
-    "a1b2c3d4..HEAD",
+    { range: "a1b2c3d4..HEAD" },
   );
   assert.deepEqual(inspectionRecord(ev), { actions: 1, kinds: ["diff"], rangeSeen: true });
   assert.deepEqual(inspectionRecord(emptyInspection(), true), { actions: 0, kinds: [], appeal: "granted" });

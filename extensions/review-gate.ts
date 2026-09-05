@@ -198,6 +198,7 @@ import {
   readJudgeSideEnv,
   gateStatePersistSkip,
   JUDGE_TASK_ENV,
+  JUDGE_STREAM_ENV,
 } from "../lib/judge-side.ts";
 import {
   PRESENCE_FILENAME,
@@ -1289,6 +1290,23 @@ export default function reviewGate(pi: ExtensionAPI) {
     try {
       return existsSync(path) ? readFileSync(path, "utf8") : undefined;
     } catch { return undefined; }
+  }
+  /**
+   * The paths THIS round was handed: its task file and its findings stream.
+   *
+   * They are the round's own paperwork, and reading them is not reviewing the
+   * repository — the probe ("conclude READY, do nothing else") would otherwise
+   * clear the inspection gate on the task read every judge performs anyway.
+   * The generic markers live in lib/judge-inspection.ts; these two are the
+   * exact paths only this process knows.
+   */
+  function judgeOwnPaths(): string[] {
+    const paths: string[] = [];
+    for (const key of [JUDGE_TASK_ENV, JUDGE_STREAM_ENV]) {
+      const value = (process.env[key] ?? "").trim();
+      if (value) paths.push(value);
+    }
+    return paths;
   }
   // Re-roll prevention: decisions cached by (commandDigest#round). A GATE_WINS /
   // HUMAN outcome cannot be re-requested for the same action+round.
@@ -3878,10 +3896,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       judgeInspection = observeInspection(
         judgeInspection,
         { toolName: event.toolName, input: event.input },
-        judgeReviewRange,
-        // Stamped with the round the registry says we are in, so an abandoned
-        // round's reads cannot be credited to the next round in this pane.
-        judgeCurrentRound(),
+        {
+          range: judgeReviewRange,
+          // Stamped with the round the registry says we are in, so an
+          // abandoned round's reads cannot be credited to the next round.
+          round: judgeCurrentRound(),
+          // The round's OWN paperwork never counts as having reviewed the
+          // repository — reading the task a probe wrote is what the probe
+          // asked for, and crediting it would make this gate decorative.
+          ownPaths: judgeOwnPaths(),
+        },
       );
     }
     // 1. Edits: only arm gate on success.

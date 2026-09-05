@@ -113,6 +113,32 @@ const SEARCH_TOOLS: ReadonlySet<string> = new Set([
  */
 const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash", "shell", "run_command", "execute_command"]);
 
+/**
+ * THE ROUND'S OWN PAPERWORK IS NOT THE THING UNDER REVIEW.
+ *
+ * This is the hole that would have made the whole defence decorative. The
+ * probe is "call judge_conclude with READY and do nothing else" — and a judge
+ * ALWAYS reads its own task (round 1 arrives as a file). If reading the task
+ * counted as inspection, the probe would satisfy the gate by doing exactly
+ * what the probe told it to do, and the refusal would never fire once.
+ *
+ * So every read of the gate's own protocol material — the task file, the
+ * findings stream this round publishes to, the judge session directory, the
+ * registry, the channel — is excluded. What remains is a read of the
+ * REPOSITORY, which is the only thing that can count as reviewing it.
+ *
+ * Excluding is fail-closed by construction: a command that touches BOTH a task
+ * file and real code is dropped too, so the mistake this makes is refusing an
+ * honest round (which the appeal covers), never passing a probe.
+ */
+export const GATE_OWNED_PATH_MARKERS: readonly string[] = Object.freeze([
+  ".pi/judge-sessions/",
+  ".pi/review-stream/",
+  ".pi/judge-hierarchy.json",
+  "rg-channels/",
+]);
+
+
 /** Shell commands that print file content. */
 const READ_COMMANDS: ReadonlySet<string> = new Set([
   "cat", "head", "tail", "less", "more", "bat", "nl", "od", "xxd", "diff",
@@ -206,12 +232,52 @@ export function classifyShellCommand(command: string): InspectionKind | undefine
   return found;
 }
 
+/** Every string the tool call carries, for the gate-owned-path check. */
+function observationText(observation: InspectionObservation): string {
+  const parts: string[] = [];
+  const input = observation.input;
+  if (typeof input === "object" && input !== null) {
+    for (const value of Object.values(input as Record<string, unknown>)) {
+      if (typeof value === "string") parts.push(value);
+      else if (Array.isArray(value)) for (const v of value) if (typeof v === "string") parts.push(v);
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Does this call touch the round's OWN paperwork rather than the repository?
+ * See {@link GATE_OWNED_PATH_MARKERS}: reading the task the probe wrote is not
+ * evidence that the code was reviewed. `ownPaths` adds the exact paths this
+ * round was handed (task file, findings stream).
+ */
+export function touchesGateOwnedPath(
+  observation: InspectionObservation,
+  ownPaths: readonly string[] = [],
+): boolean {
+  const text = observationText(observation);
+  if (!text) return false;
+  for (const marker of GATE_OWNED_PATH_MARKERS) {
+    if (text.includes(marker)) return true;
+  }
+  for (const own of ownPaths) {
+    const path = own.trim();
+    if (path && text.includes(path)) return true;
+  }
+  return false;
+}
+
 /**
  * Is this successful tool call an inspection action? `undefined` means it is
- * not — a write, a listing, a test run, a channel append. The caller must only
- * offer SUCCESSFUL calls: a failed read inspected nothing.
+ * not — a write, a listing, a test run, a channel append, or a read of the
+ * round's own protocol material. The caller must only offer SUCCESSFUL calls:
+ * a failed read inspected nothing.
  */
-export function classifyInspection(observation: InspectionObservation): ClassifiedInspection | undefined {
+export function classifyInspection(
+  observation: InspectionObservation,
+  ownPaths: readonly string[] = [],
+): ClassifiedInspection | undefined {
+  if (touchesGateOwnedPath(observation, ownPaths)) return undefined;
   const name = observation.toolName.trim().toLowerCase();
   if (SHELL_TOOLS.has(name)) {
     const command = stringField(observation.input, "command") || stringField(observation.input, "cmd");
@@ -223,21 +289,34 @@ export function classifyInspection(observation: InspectionObservation): Classifi
   return undefined;
 }
 
+/** What the observer knows about the round an action belongs to. */
+export interface InspectionContext {
+  /** The round's `baseline..HEAD`, when it could be parsed from the task. */
+  range?: string | undefined;
+  /** The round this action belongs to, from the registry. */
+  round?: number | undefined;
+  /** Exact paths this round was handed (task file, findings stream). */
+  ownPaths?: readonly string[] | undefined;
+}
+
 /**
  * Fold one observation into the round's evidence. Returns the SAME evidence
  * when the call was not an inspection action (so callers can assign
- * unconditionally). `range` is the round's `baseline..HEAD`, when known, and
- * `round` is the round this action belongs to: when it differs from what the
- * evidence carries, the older round's actions are DROPPED rather than added to
- * (a pane outlives its rounds, and an abandoned round leaves reads behind).
+ * unconditionally).
+ *
+ * `context.round` is the round this action belongs to: when it differs from
+ * what the evidence carries, the older round's actions are DROPPED rather than
+ * added to (a pane outlives its rounds, and an abandoned round leaves reads
+ * behind). `context.ownPaths` names the round's own paperwork, which never
+ * counts — see {@link GATE_OWNED_PATH_MARKERS}.
  */
 export function observeInspection(
   previous: InspectionEvidence,
   observation: InspectionObservation,
-  range?: string | undefined,
-  round?: number | undefined,
+  context: InspectionContext = {},
 ): InspectionEvidence {
-  const classified = classifyInspection(observation);
+  const { range, round } = context;
+  const classified = classifyInspection(observation, context.ownPaths ?? []);
   if (!classified) return previous;
   const base = evidenceForRound(previous, round);
   const kinds = base.kinds.includes(classified.kind)

@@ -4344,6 +4344,15 @@ test("the inspection observer is fed IN PROCESS, from successful judge tool resu
     "the round comes from the registry FILE — the in-memory copy is loaded once and would go stale");
   assert.doesNotMatch(roundReader, /judgeHierarchy/);
 
+  // The round's OWN paperwork must be excluded, or the gate is decorative: the
+  // probe says "conclude READY and do nothing else", and a judge reads its own
+  // task regardless — crediting that read would clear the gate for free.
+  assert.match(handler, /ownPaths: judgeOwnPaths\(\)/, "the fold knows the round's own files");
+  const ownPaths = windowOf("function judgeOwnPaths(", "\n  }", "judgeOwnPaths");
+  assert.match(ownPaths, /JUDGE_TASK_ENV/, "the task file this round was opened with");
+  assert.match(ownPaths, /JUDGE_STREAM_ENV/, "the findings stream this round publishes to");
+
+
   // The judge_conclude wiring must actually pass the evidence in: an unwired
   // host would leave the rule asserting nothing.
   const wiring = windowOf("registerJudgeConcludeTool(pi, {", "\n    });", "judge_conclude deps");
