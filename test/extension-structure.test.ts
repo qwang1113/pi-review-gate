@@ -3911,10 +3911,20 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   // is the NORMAL path and only a genuinely stale round fails closed. Getting
   // this backwards fail-closes every audit while looking correct (adviser,
   // 2026-09-05); the behaviour itself is pinned in test/audit-round.test.ts.
-  assert.match(engineRun, /const settledByTheWait = settled\.status === "miss" && settled\.reason === "already-consumed";/,
-    "a round the wait already recorded is not treated as stale");
-  assert.match(engineRun, /if \(!settledHere && !settledByTheWait\)/,
-    "…and anything else the engine did not record fails closed");
+  //
+  // And it must NOT be detected by settling a second time: a successful record
+  // consumes the pending entry that picks the kind, so the second settle comes
+  // back `unknown` (reviewer P0, same day). The detector is the pair of writes
+  // a record makes — pending gone AND cursor moved.
+  assert.match(engineRun, /if \(!roundClosedDuringWait\(deps, \{ judgeId, root, cursorBefore \}\)\)/,
+    "a round the wait already recorded is not settled (or judged stale) a second time");
+  const detector = windowIn(AUDIT_ROUND_SRC, "function roundClosedDuringWait(", "\n}", "roundClosedDuringWait");
+  assert.match(detector, /if \(deps\.pendingAudit\(input\.root\) !== undefined\) return false;/,
+    "an armed pending entry means no record landed");
+  assert.match(detector, /cursorNow !== undefined && cursorNow !== input\.cursorBefore/,
+    "…and so does a cursor that never moved — BOTH are required");
+  assert.match(engineRun, /if \(settled\.status !== "recorded"\)/,
+    "…and anything the engine itself did not record fails closed");
   // The done/reason judgement itself is wired ONCE, in the run deps.
   const doneChecks = [...SRC.matchAll(/details\.reason === "report"/g)];
   assert.equal(doneChecks.length, 1, "one place decides that a wait ended on a report");

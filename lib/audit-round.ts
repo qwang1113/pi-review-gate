@@ -484,9 +484,52 @@ export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
    * pending entry is forgotten the moment the record lands.
    */
   auditPassed(root: string, pending: PendingAudit): boolean;
-  /** The verdict label for the refusal text when it did not. */
+  /**
+   * The refusal text rebuilt FROM THE RECORD, for a round the wait settled.
+   *
+   * The recorded note only exists where the record was made, and under the
+   * observer-records shape that is usually inside the wait — so a chain that
+   * only had its own note would hand back "审计记录：FAIL" and drop every
+   * finding the auditor wrote (reviewer P1, 2026-09-05). The record itself
+   * still holds them, so the kind that can rebuild its refusal from the record
+   * does; one that cannot returns undefined and the label is the fallback.
+   */
+  recordedRefusal(root: string, pending: PendingAudit): string | undefined;
+  /** The verdict label for the refusal text when nothing better exists. */
   verdictLabel(root: string, pending: PendingAudit): string;
 }
+
+/**
+ * DID THE WAIT ALREADY CLOSE THIS ROUND?
+ *
+ * `awaitRoundEnd` waits through `judge_wait`, and that tool closes the round
+ * through this same engine — so by the time the synchronous chain gets control
+ * back, THIS round is usually already recorded. That is the normal path, not a
+ * stale verdict: an audit dispatched asynchronously (judge_submit /
+ * judge_spawn) is settled by the wait or the settle sweep alone, so settling
+ * must work without this chain, and this chain must tolerate being beaten to it.
+ *
+ * The evidence is the pair of writes `settleAuditRound` makes, and ONLY makes,
+ * once a record has actually landed: it forgets the pending audit and it
+ * advances the cursor. Requiring BOTH is what keeps this fail-closed —
+ * a pending entry that is still armed, or a cursor that never moved, means no
+ * record landed, and the chain then settles the round itself (and fails closed
+ * if that does not work either).
+ *
+ * Asking `settleAuditRound` a second time cannot answer this question: the
+ * pending entry it needs to pick a kind is exactly what a successful record
+ * consumes, so a settled round comes back as `unknown` — indistinguishable
+ * from "nothing was ever dispatched" (reviewer P0, 2026-09-05).
+ */
+function roundClosedDuringWait(
+  deps: SettleAuditRoundDeps,
+  input: { judgeId: string; root: string; cursorBefore: string | undefined },
+): boolean {
+  if (deps.pendingAudit(input.root) !== undefined) return false;
+  const cursorNow = deps.judgeEntry(input.judgeId)?.lastReportId;
+  return cursorNow !== undefined && cursorNow !== input.cursorBefore;
+}
+
 
 /**
  * ONE SYNCHRONOUS AUDIT ROUND — dispatch, wait, conclude, reclaim.
@@ -531,45 +574,45 @@ export async function runAuditRound(
   // refused submission must never replace the draft a running audit is
   // judging: its verdict would be recorded against text no auditor ever read.
   deps.rememberPending(root, input.pending);
-  const judgeId = deps.judgeIdOf(root, spec.role);
-  if (!judgeId) return { ok: false, text: spec.unaddressable() };
+  // EVERYTHING PAST THE ACCEPTED DISPATCH IS INSIDE THE `try`, including the
+  // registry lookup: a pane is open from here on, so every exit — even
+  // "the registry cannot address what we just opened" — has to run the close.
+  // A `return` placed one line above it leaks exactly that pane.
   try {
+    const judgeId = deps.judgeIdOf(root, spec.role);
+    if (!judgeId) return { ok: false, text: spec.unaddressable() };
+    // The cursor BEFORE the wait. It is half the evidence that tells "the wait
+    // already closed this round" from "nothing was recorded at all" — see
+    // `roundClosedDuringWait`.
+    const cursorBefore = deps.judgeEntry(judgeId)?.lastReportId;
     const waited = await deps.awaitRoundEnd(root);
     if (!waited.ok) return { ok: false, text: spec.unfinished(waited.detail) };
-    // OBSERVER RECORDS, AND THE OBSERVER MAY HAVE BEEN THE WAIT ITSELF.
-    //
-    // `awaitRoundEnd` waits through `judge_wait`, and that tool closes the
-    // round through this very engine — so by the time control comes back, THIS
-    // round's report is often already recorded and its cursor consumed. That
-    // is the normal path, not a stale verdict: an audit dispatched
-    // asynchronously (judge_submit / judge_spawn) is settled by the wait or
-    // the settle sweep alone, so the settle must work without this chain and
-    // this chain must tolerate having been beaten to it.
-    //
-    // The distinction that keeps it fail-closed: `already-consumed` means the
-    // channel's newest report IS the one just recorded, whereas a genuinely
-    // stale round reports `round-mismatch` or `no-report` — and either of
-    // those still records nothing and says so.
-    const settled = await settleAuditRound(deps, { judgeId, root });
-    const settledHere = settled.status === "recorded";
-    const settledByTheWait = settled.status === "miss" && settled.reason === "already-consumed";
-    if (!settledHere && !settledByTheWait) {
-      // A miss already carries the kind's own fail-closed sentence, naming the
-      // round it actually saw — re-deriving it here would lose that.
-      const text = settled.status === "miss" && settled.text
-        ? settled.text
-        : spec.unfinished("本轮裁决没能记录下来");
-      return { ok: false, text };
-    }
     // Only a round recorded HERE carries its note; one the wait recorded left
     // its verdict in the gate's state, which `auditPassed` / `verdictLabel`
     // read. (That was already true before this engine existed: the goal chain
     // recorded inside its wait and always fell back to the label.)
-    const note = settledHere ? settled.text : undefined;
+    let note: string | undefined;
+    if (!roundClosedDuringWait(deps, { judgeId, root, cursorBefore })) {
+      const settled = await settleAuditRound(deps, { judgeId, root });
+      if (settled.status !== "recorded") {
+        // A miss already carries the kind's own fail-closed sentence, naming
+        // the round it actually saw — re-deriving it here would lose that.
+        const text = settled.status === "miss" && settled.text
+          ? settled.text
+          : spec.unfinished("本轮裁决没能记录下来");
+        return { ok: false, text };
+      }
+      note = settled.text;
+    }
     if (deps.auditPassed(root, input.pending)) return { ok: true };
+    // WHAT THE CALLER IS TOLD TO FIX. Preference order, and the order matters:
+    // this round's own note if it recorded here, else the refusal rebuilt from
+    // the RECORD (which still holds the findings even when the wait did the
+    // recording), else the bare verdict label.
+    const refusal = note ?? deps.recordedRefusal(root, input.pending);
     return {
       ok: false,
-      text: spec.rejected(note || `审计记录：${deps.verdictLabel(root, input.pending)}`, {
+      text: spec.rejected(refusal || `审计记录：${deps.verdictLabel(root, input.pending)}`, {
         ...(input.streamPath === undefined ? {} : { streamPath: input.streamPath }),
       }),
     };

@@ -199,7 +199,11 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     proseOf: (report) => (report.reportId === "rep-empty" ? "" : "建议：先切分模块"),
     advanceCursor: (_judgeId, reportId) => { state.cursors.push(reportId); },
     pendingAudit: () => state.pending,
-    forgetPending: (root) => { state.forgotten.push(root); },
+    // FAITHFUL: the extension's dep really deletes the entry. A fake that only
+    // records the call would let the engine keep seeing a pending audit that
+    // production has already consumed — and that is exactly the branch the
+    // synchronous chain walks after its wait recorded the round (reviewer P1).
+    forgetPending: (root) => { state.forgotten.push(root); state.pending = undefined; },
     nowIso: () => NOW,
     savePlanAudit: (_root, record) => { state.planRecords.push(record); },
     recordGoal: async ({ pending }) => {
@@ -340,6 +344,10 @@ interface RunState extends FakeState {
   waitOk: boolean;
   passed: boolean;
   dispatchOk: boolean;
+  /** What the kind can rebuild from its RECORD when the wait did the recording. */
+  recordedRefusal: string | undefined;
+  /** Did the registry hand back an addressable judge id? */
+  addressable: boolean;
 }
 
 function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: RunAuditRoundDeps } {
@@ -352,6 +360,8 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
     waitOk: true,
     passed: true,
     dispatchOk: true,
+    recordedRefusal: undefined,
+    addressable: true,
     ...over,
   };
   const deps: RunAuditRoundDeps = {
@@ -361,7 +371,7 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
     judgeEntry: (judgeId) => (state.entry?.judgeId === judgeId ? state.entry : undefined),
     readRoundRecords: () => state.records,
     pendingAudit: () => state.pending,
-    forgetPending: (root) => { state.forgotten.push(root); },
+    forgetPending: (root) => { state.forgotten.push(root); state.pending = undefined; },
     advanceCursor: (_judgeId, reportId) => { state.cursors.push(reportId); },
     savePlanAudit: (_root, record) => { state.planRecords.push(record); },
     recordGoal: async ({ pending }) => { state.goalDrafts.push(pending.draft); return state.recordResult; },
@@ -375,7 +385,7 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
       });
       return { ok: true, judgeId: "j-1" };
     },
-    judgeIdOf: () => "j-1",
+    judgeIdOf: () => (state.addressable ? "j-1" : undefined),
     rememberPending: (_root, pending) => {
       state.remembered.push(pending);
       state.pending = pending;
@@ -384,6 +394,7 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
       state.waitOk ? { ok: true, detail: "" } : { ok: false, detail: "pane 已消失" },
     closeJudge: async (_root, role) => { state.closed.push(role); },
     auditPassed: () => state.passed,
+    recordedRefusal: () => state.recordedRefusal,
     verdictLabel: () => "FAIL",
   };
   return { state, deps };
@@ -428,6 +439,52 @@ test("run/plan: a FAIL comes back as the refusal text, not as a passed audit", a
   assert.deepEqual(state.closed, ["goal-auditor"]);
 });
 
+// A REFUSAL MUST SAY WHAT TO FIX (reviewer P1). Under observer-records the
+// note lives wherever the record was made — usually inside the wait — so a
+// chain that only had its own note would hand the orchestrator a bare
+// "审计记录：FAIL" and drop every finding the auditor wrote. The plan rebuilds
+// its refusal from the RECORD instead.
+test("run/plan: a refusal recorded BY THE WAIT still carries its findings", async () => {
+  const { state, deps } = makeRunDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
+    passed: false,
+    recordedRefusal: "review-gate: plan 审计**没过** —— P1: 边界没覆盖真实落点",
+  });
+  deps.awaitRoundEnd = async () => {
+    await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+    state.entry = { ...state.entry!, lastReportId: "rep-2" };
+    return { ok: true, detail: "" };
+  };
+  const outcome = await runAuditRound(deps, {
+    spec: PLAN_AUDIT_SPEC,
+    root: ROOT,
+    task: "审计这份 plan",
+    pending: { kind: "plan", hash: "d".repeat(64), planText: "计划正文", startedAt: NOW },
+  });
+  assert.equal(outcome.ok, false);
+  const text = outcome.ok === false ? outcome.text : "";
+  assert.match(text, /边界没覆盖真实落点/, "the findings survive a round the wait recorded");
+  assert.doesNotMatch(text, /^审计记录：FAIL$/, "the bare label is the LAST resort, not the first");
+});
+
+// The pane is open from the accepted dispatch onward, so every exit past it
+// must reclaim it — including the one that says the registry cannot address
+// what was just opened (reviewer P2).
+test("run: an unaddressable judge still gets its pane reclaimed", async () => {
+  const { state, deps } = makeRunDeps({ addressable: false });
+  const outcome = await runAuditRound(deps, {
+    spec: GOAL_AUDIT_SPEC,
+    root: ROOT,
+    task: "审计这份草稿",
+    pending: { kind: "goal", draft: "# 目标草稿", startedAt: NOW },
+  });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.ok === false ? outcome.text : "", /登记表里找不到它/);
+  assert.deepEqual(state.closed, ["goal-auditor"], "a dispatched pane is never leaked");
+});
+
+
 // THE SHARPEST EDGE (adviser, 2026-09-05). `awaitRoundEnd` waits through
 // `judge_wait`, and that tool closes the round through this same engine — so
 // the synchronous chain routinely finds THIS round already recorded and its
@@ -454,7 +511,44 @@ test("run: a round the WAIT already recorded still passes (observer-records)", a
   assert.deepEqual(state.goalDrafts, ["# 目标草稿"], "recorded exactly once, by the wait");
   assert.deepEqual(state.cursors, ["rep-2"], "…and consumed exactly once");
   assert.deepEqual(state.closed, ["goal-auditor"]);
+  // AND IT IS NOT DETECTED BY ASKING settleAuditRound AGAIN. A successful
+  // record CONSUMES the pending entry, and the pending entry is what picks the
+  // kind — so a second settle comes back `unknown`, indistinguishable from
+  // "nothing was ever dispatched" (reviewer P0). The evidence used instead is
+  // the pair of writes a record makes: pending gone AND cursor moved.
+  assert.equal(state.pending, undefined, "the record consumed the pending audit");
+  assert.deepEqual(
+    await settleAuditRound(deps, { judgeId: "j-1", root: ROOT }),
+    { status: "unknown" },
+    "…which is exactly why a second settle cannot be the detector",
+  );
 });
+
+// THE OTHER HALF OF THAT EVIDENCE. A pending entry that vanished WITHOUT the
+// cursor moving is not a recorded round — nothing may ride on it.
+test("run: a consumed pending with an unmoved cursor is NOT treated as recorded", async () => {
+  const { state, deps } = makeRunDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
+  });
+  // The pending entry disappears (a stray judge_close, a crash) but no report
+  // was ever recorded: the cursor still names the previous round.
+  deps.awaitRoundEnd = async () => {
+    state.pending = undefined;
+    return { ok: true, detail: "" };
+  };
+  const outcome = await runAuditRound(deps, {
+    spec: GOAL_AUDIT_SPEC,
+    root: ROOT,
+    task: "审计这份草稿",
+    pending: { kind: "goal", draft: "# 目标草稿", startedAt: NOW },
+  });
+  assert.equal(outcome.ok, false, "no record landed, so the audit did not happen");
+  assert.deepEqual(state.goalDrafts, []);
+  assert.deepEqual(state.cursors, []);
+  assert.deepEqual(state.closed, ["goal-auditor"]);
+});
+
 
 // …but a genuinely stale round still records nothing. The two look alike from
 // the outside and the engine must keep telling them apart.

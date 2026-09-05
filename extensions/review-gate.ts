@@ -203,6 +203,7 @@ import { contextPercentFromUsage } from "../lib/orchestrator-handoff-advice.ts";
 import {
   buildPlanAuditTask,
   formatPlanAuditCarryover,
+  formatPlanAuditRefusal,
   planAuditHash,
 } from "../lib/orchestrator-plan-audit.ts";
 import {
@@ -4816,6 +4817,19 @@ export default function reviewGate(pi: ExtensionAPI) {
         // the hash this round dispatched: a plan edited between the audit and
         // the dialog cannot ride in on someone else's PASS.
         return st.planAudit?.verdict === "PASS" && st.planAudit.hash === pending.hash;
+      },
+      // Rebuilt from the RECORD, so a round the wait settled still hands the
+      // caller its findings instead of a bare "审计记录：FAIL". The plan can:
+      // `formatPlanAuditRefusal` is a pure function of the record it just
+      // wrote, and the hash check keeps it bound to THIS round's content. The
+      // goal cannot, and does not need to — its spec appends the findings
+      // stream path, which is where a goal round's objections live.
+      recordedRefusal: (root, pending) => {
+        if (pending.kind !== "plan") return undefined;
+        const st = root === primaryRepoRoot ? state : stateForRepo(root);
+        const record = st.planAudit;
+        if (!record || record.hash !== pending.hash) return undefined;
+        return formatPlanAuditRefusal(record);
       },
       verdictLabel: (root, pending) => {
         const st = root === primaryRepoRoot ? state : stateForRepo(root);
