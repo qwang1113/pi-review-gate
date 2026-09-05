@@ -378,7 +378,11 @@ test("L8a: in LOOP mode a goal is REFUSED until the user confirmed a restatement
   assert.equal(dialogs, 0, "the user must not be asked to approve a goal nobody restated for them");
   assert.equal(readSidecar(repo).loopGoal, undefined);
   assert.match(JSON.stringify(refused), /propose_restatement/, "the refusal names the step it wants");
-  assert.match(JSON.stringify(refused), /request_arbitration/, "…and the appeal route if it is a misjudgement");
+  assert.match(JSON.stringify(refused), /ask_user/,
+    "…and a misjudgement route that exists: the round's scope is the USER's decision");
+  assert.doesNotMatch(JSON.stringify(refused), /request_arbitration/,
+    "the arbiter cannot hear a tool refusal — pointing at it wastes one of three appeals");
+
 
   // The step itself, then the goal: one confirmation unblocks the negotiation,
   // and the station the user agreed to travels with it.

@@ -146,7 +146,7 @@ test("scope: loop and orchestrator require it; explore and normal do not", () =>
 // ---------------------------------------------------------------------------
 // the refusal both contract tools hand back
 
-test("the refusal is self-rescuing: the call, the skeleton, and the appeal route", () => {
+test("the refusal is self-rescuing: the call, the skeleton, and a way out that works", () => {
   for (const tool of ["propose_loop_goal", "orchestrator_plan"] as const) {
     const text = buildRestatementMissingRefusal(tool);
     assert.match(text, new RegExp(tool), "it says which tool refused");
@@ -155,8 +155,19 @@ test("the refusal is self-rescuing: the call, the skeleton, and the appeal route
     assert.match(text, /station:/);
     assert.match(text, /precommit \| commit \| pr/, "…with the three stations spelled out");
     assert.ok(text.includes(RESTATEMENT_SKELETON), "…and a skeleton to copy");
-    assert.match(text, /request_arbitration/, "…and the appeal route, which is the EXISTING one");
-    assert.match(text, /门禁不提供任何豁免开关/,
+    // THE MISJUDGEMENT ROUTE (user decision, 2026-09-06). This used to point at
+    // `request_arbitration`, which cannot hear a TOOL refusal at all: the
+    // arbiter only rules on a recorded ship / text / zero-inspection block, so
+    // the appeal comes back "nothing to arbitrate" — or, worse, judges an
+    // older unrelated block and spends one of the session's three. The routes
+    // named now both exist: hand the decision to the user, or leave the mode.
+    assert.doesNotMatch(text, /request_arbitration/,
+      "a route that cannot work is worse than no route");
+    assert.match(text, /ask_user/, "the decision belongs to the user, and the text says how to reach them");
+    assert.match(text, /gate-mode/, "…and how to leave the mode that requires a contract at all");
+
+    assert.match(text, /不提供任何豁免开关/,
+
       "…stated plainly, so nobody goes looking for a flag that does not exist");
     assert.match(text, /没有弹出任何对话框|一个框都不弹|没有弹/,
       "the user was not disturbed, and the agent must know that");

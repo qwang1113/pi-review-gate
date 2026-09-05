@@ -558,7 +558,7 @@ fail-closed）。`model-diagnose.ts`
 | `progress-stream.ts` | 长耗时门禁工具的实时进度输出 |
 | `project-config.ts` | 每项目门禁配置 `.pi/review-gate.json` 的解析与层叠 |
 | `repo-resolve.ts` | 多仓解析：裁决绑定到编辑真正发生的那个仓库 |
-| `restatement.ts` | L8a 需求反述：记录（正文 + hash + 时间 + 站点，落 gate-state 而非工作区）、内容最小校验（长度 + 必须有「改之前 → 改之后」对照，接受的写法在导出的 `RESTATEMENT_CONTRAST_TOKENS` 数组里）、两处拒绝文案（含可照抄骨架与 `request_arbitration` 出路）、确认框文案，以及工具 `propose_restatement` 的唯一注册入口 |
+| `restatement.ts` | L8a 需求反述：记录（正文 + hash + 时间 + 站点，落 gate-state 而非工作区）、内容最小校验（长度 + 必须有「改之前 → 改之后」对照，接受的写法在导出的 `RESTATEMENT_CONTRAST_TOKENS` 数组里）、两处拒绝文案（含可照抄骨架，以及**真走得通的**误判出路：`ask_user` 交给用户 / `/gate-mode` 换模式——**不指向 `request_arbitration`**，工具拒绝不产生可申诉记录，去申诉只会被回绝或误裁到别的拦截并白烧配额）、确认框文案，以及工具 `propose_restatement` 的唯一注册入口 |
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
 | `review-adjudicate.ts` | reviewer 裁决（纯）：在 judge 交上来的结构化结论上判 READY 携带未解决 P0/P1 → BLOCKED、findings 计数、跨轮 coarse fingerprint；另有 verdict 规范化与两个投影（per-file 给 polish gate、severity+issue 给 goal/plan 审计） |
 | `review-prepare-tools.ts` | **内部实现**（不注册给 pi）：算不可变的 `baseline..HEAD`、polish gate、findings 流，并登记裁决要绑定的 review target；由 `judge_submit` 调用 |

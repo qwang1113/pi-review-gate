@@ -418,9 +418,14 @@ test("L8a: in LOOP mode, no confirmed restatement ⇒ refused with NO dialog and
     "the refusal costs the user nothing — no transcript echo, no dialog, and no minutes-long audit");
   assert.equal(f.auditRuns, 0);
   assert.deepEqual(f.written, []);
-  // Self-rescuing: the refusal names the step and the appeal route.
+  // Self-rescuing: the refusal names the step, and a misjudgement route that
+  // actually works (2026-09-06 — it used to point at `request_arbitration`,
+  // which cannot hear a tool refusal: no ship/text/inspection block is
+  // recorded, so the appeal is denied or spent on an unrelated one).
   assert.match(out.content[0]!.text, /propose_restatement/);
-  assert.match(out.content[0]!.text, /request_arbitration/);
+  assert.match(out.content[0]!.text, /ask_user/);
+  assert.doesNotMatch(out.content[0]!.text, /request_arbitration/);
+
 });
 
 test("L8a: a broken restatement record (hash ≠ text) is treated as none at all", async () => {

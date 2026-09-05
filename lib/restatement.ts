@@ -296,10 +296,19 @@ export type RestatementGatedTool = "propose_loop_goal" | "orchestrator_plan";
  * points can never drift into two different stories.
  *
  * It has to be self-rescuing: the session reading it has never seen this
- * mechanism, so it carries the exact call to make (with its parameters), the
- * skeleton to copy, and the appeal route. The appeal is deliberately the
- * EXISTING `request_arbitration` — a new bypass would be a second way to skip
- * the step, which is the thing this module exists to remove.
+ * mechanism, so it carries the exact call to make (with its parameters) and
+ * the skeleton to copy.
+ *
+ * WHAT IT DELIBERATELY DOES NOT OFFER (user decision, 2026-09-06). It used to
+ * end at `request_arbitration`, which cannot hear this at all: the arbiter
+ * only rules on a recorded ship / A-class-text / zero-inspection block, and a
+ * TOOL refusal records none of them. The appeal would come back "nothing to
+ * arbitrate" — or, if the session happened to have an older text or ship block
+ * on record, it would judge THAT unrelated one and spend one of the session's
+ * three appeals on it. A route that cannot work is worse than no route, so the
+ * text names the two that do: ask the user (this is a decision about the ROUND,
+ * and they own it), or leave the mode that requires a contract at all.
+
  */
 export function buildRestatementMissingRefusal(tool: RestatementGatedTool): string {
   const what = tool === "propose_loop_goal"
@@ -324,8 +333,13 @@ export function buildRestatementMissingRefusal(tool: RestatementGatedTool): stri
     "交付站点三选一：precommit（门禁跑通，用户自己 commit）/ commit（提交完成，用户自己 push）/ pr（做到 PR 开出来）。",
     "拿不准就用 `ask_user` 问用户，别自己替他选。",
     "",
-    "若你认为这是误判（例如本轮根本不是交付性工作），用 `request_arbitration` 申诉并说明理由；" +
-    "门禁不提供任何豁免开关。",
+    "若你认为这是误判（例如本轮根本不是交付性工作）：用 `ask_user` 把这件事交给用户 —— " +
+    "「这一轮要不要按交付走」本来就是他的决定；确实只是调查/探索，就让他把模式改成 explore" +
+    "（`/gate-mode`，模式变更只有用户能批）。\n" +
+    "这里没有申诉通道可走：仲裁只受理已记录的 ship / 文案 / 零检查拦截，工具拒绝一条都不产生 —— " +
+    "去申诉要么被回「没有可申诉的拦截」，要么误裁到会话里更早的另一条并白烧一次配额。" +
+    "门禁也不提供任何豁免开关。",
+
   ].join("\n");
 }
 

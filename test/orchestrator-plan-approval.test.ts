@@ -347,7 +347,12 @@ test("submit REFUSES before the audit when nothing was restated — no dialog, n
   // The refusal has to get the NEXT session unstuck by itself.
   assert.match(replyText(reply), /propose_restatement/);
   assert.match(replyText(reply), /station/);
-  assert.match(replyText(reply), /request_arbitration/);
+  // The misjudgement route has to be one that exists: a tool refusal records
+  // no arbitrable block, so `request_arbitration` would be denied — or spend
+  // one of three appeals on an unrelated older block (2026-09-06).
+  assert.match(replyText(reply), /ask_user/);
+  assert.doesNotMatch(replyText(reply), /request_arbitration/);
+
 });
 
 test("submit proceeds once a confirmed restatement is on record", async () => {
