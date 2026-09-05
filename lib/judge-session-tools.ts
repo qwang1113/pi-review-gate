@@ -41,6 +41,7 @@ import {
   HEARTBEAT_STALE_MS,
   type ChannelIO,
   type ReportConclusion,
+  type ReviewScopeStamp,
 } from "./orchestrator-channel.ts";
 import {
   judgePaneAlive,
@@ -191,6 +192,15 @@ export interface JudgeSessionToolDeps {
     verdict?: string;
     /** The round ran under a weaker binding — surfaced, never buried. */
     bindingNote?: string;
+    /**
+     * The scope the round stamped on its own report (range + full/incremental).
+     *
+     * Carried here for the same reason `bindingNote` is: BOTH wake-up paths
+     * speak through one builder, and a fact only the settle sweep passed would
+     * be invisible to every opener that reached the same round by blocking on
+     * `judge_wait` — the more common path of the two.
+     */
+    scope?: ReviewScopeStamp;
     hasVerdict: boolean;
   }>;
   /** Cancel the gate-owned hosted-wait watchdog. */
@@ -710,6 +720,9 @@ async function doWait(
         // Its own line: the recorded note is printed first-line-only, so a
         // weaker binding announced INSIDE that note would never be read.
         ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
+        // What the round says it reviewed — the same line the settle sweep
+        // prints, so which path woke the opener never changes what it learns.
+        ...(settled.scope === undefined ? {} : { scope: settled.scope }),
         waitedSeconds,
       }),
       { done: true, reason: "report", role: child.role, hasVerdict: settled.hasVerdict },

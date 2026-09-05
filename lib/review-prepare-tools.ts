@@ -43,8 +43,9 @@ import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import type { ToolRepoTarget } from "./repo-resolve.ts";
 import type { GateState } from "./gate-state.ts";
-import type { ReviewScopeDecision, SettledConclusion } from "./review-scope.ts";
-import { formatReviewScopeDirective } from "./review-scope.ts";
+import type { ReviewScopeDecision } from "./review-scope.ts";
+// The contract's wording (and the SettledConclusion it carries) has ONE home.
+import { formatReviewScopeDirective, type SettledConclusion } from "./review-carryover.ts";
 import { polishReasonRequired } from "./polish-gate.ts";
 import { squashPointBaseline, branchBaseBaseline } from "./review-baseline.ts";
 import { buildReviewPrompt, extractPrecommitBaseline } from "./parallel-review.ts";
@@ -61,6 +62,18 @@ export interface PreparedReviewTarget {
   baseline: string;
   head: string;
   tree: string;
+  /**
+   * WHAT THE GATE IS DISPATCHING, recorded at the moment it dispatches it:
+   * the round's range as the task text states it, and the full/incremental
+   * decision this round was prepared under.
+   *
+   * Registered here rather than recomputed when the verdict lands, because
+   * the decision is a function of the worktree and the worktree keeps moving
+   * while the reviewer works — recomputing it later would record a decision
+   * this round never ran under. It is the gate's half of the audit pair in
+   * `RoundRecord.scope` (lib/gate-state.ts).
+   */
+  scope?: { range?: string; kind?: "full" | "incremental" };
 }
 
 /**
@@ -343,8 +356,11 @@ async function doPrepareReview(
     st.lastPolishReason,
   );
   // Register the review target: the verdict recorder verifies HEAD is still the
-  // reviewed commit and binds a READY to the reviewed tree.
-  deps.registerReviewTarget(root, { baseline, head, tree });
+  // reviewed commit and binds a READY to the reviewed tree. The scope travels
+  // with it so the recorder can write down what this round was DISPATCHED to
+  // review beside what the judge reports it reviewed (auditability, not a
+  // rule: nothing refuses a verdict over a mismatch).
+  deps.registerReviewTarget(root, { baseline, head, tree, scope: { range, kind: scopeNow.scope } });
   const lines = [
     `review-gate: review round ready — range ${range} (${files.length} file(s)).`,
     `stream=${streamPath}`,

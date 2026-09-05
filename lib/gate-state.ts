@@ -28,6 +28,8 @@ import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
 import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
 
 import { TEST_SCOPES, type TestScope } from "./precommit-receipt.ts";
+// The round's audit stamp is the CHANNEL's stamp: one shape, one validator.
+import { sanitizeScopeStamp, type ReviewScopeStamp } from "./orchestrator-channel.ts";
 
 export type GateVerdict = "PENDING" | "READY" | "BLOCKED" | "NEEDS_HUMAN";
 export type PrecommitVerdict = "PASS" | "FAIL" | "NO_CHECKS_RUN" | "NOT_RUN";
@@ -51,6 +53,45 @@ export const DOC_SYNC_ATTESTATIONS: ReadonlySet<string> = new Set<DocSyncAttesta
 export const GATE_VERDICTS: ReadonlySet<string> = new Set<GateVerdict>(["PENDING", "READY", "BLOCKED", "NEEDS_HUMAN"]);
 export const PRECOMMIT_VERDICTS: ReadonlySet<string> = new Set<PrecommitVerdict>(["PASS", "FAIL", "NO_CHECKS_RUN", "NOT_RUN"]);
 
+/**
+ * One side of a round's scope record.
+ *
+ * It IS the channel's wire stamp (`ReviewScopeStamp`), aliased rather than
+ * re-declared: the judge's half of this record arrives straight off a channel
+ * report, and a second structurally-identical type is how the two ends of one
+ * value drift apart.
+ */
+export type ScopeStampRecord = ReviewScopeStamp;
+
+/** Both sides of the audit pair — what the gate sent, what the judge reported. */
+export interface RoundScopeRecord {
+  /** Registered by the gate when it prepared and dispatched this round. */
+  dispatched?: ScopeStampRecord;
+  /** Stamped by the judge on the report that closed this round. */
+  reported?: ScopeStampRecord;
+}
+
+/**
+ * Keep only what is a recognisable scope pair; drop everything else.
+ *
+ * Each half goes through the CHANNEL's own stamp sanitizer — the same
+ * function that validates a stamp arriving on a report — so a sidecar and a
+ * channel record can never disagree about what a valid stamp is. A pair with
+ * neither half left becomes `undefined`, because an empty `scope` object
+ * would read as "this round recorded its scope" when it recorded nothing.
+ */
+export function sanitizeRoundScope(raw: unknown): RoundScopeRecord | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as { dispatched?: unknown; reported?: unknown };
+  const dispatched = sanitizeScopeStamp(value.dispatched);
+  const reported = sanitizeScopeStamp(value.reported);
+  if (dispatched === undefined && reported === undefined) return undefined;
+  return {
+    ...(dispatched === undefined ? {} : { dispatched }),
+    ...(reported === undefined ? {} : { reported }),
+  };
+}
+
 export interface RoundRecord {
   round: number;
   findingsTotal: number | null; // null = unparseable (PR #7 lesson 2: never fail-open on parse trouble)
@@ -69,6 +110,24 @@ export interface RoundRecord {
   polishFiles?: string[];
   /** Files that had P0/P1 findings this round (resets a file's streak). */
   blockingFiles?: string[];
+  /**
+   * WHAT THIS ROUND ACTUALLY REVIEWED — kept so a finished round is auditable
+   * after the fact ("did it review what it was sent to review, and did it run
+   * incrementally?"), without the channel file having to still exist.
+   *
+   * TWO HALVES ON PURPOSE. `dispatched` is what the GATE registered when it
+   * prepared the round; `reported` is what the JUDGE stamped on its own report
+   * (lib/judge-inspection.ts reads it back out of the task text). Only the two
+   * together are evidence: the gate's half alone says what was asked for, and
+   * the judge's half alone is "it says it reviewed that". Nothing acts on a
+   * mismatch — this is a record, not a rule.
+   *
+   * Optional, and every part of it optional: sidecars written before this
+   * field exists stay readable, and a round whose scope was never computed
+   * (any pre-checkpoint audit) records none.
+   */
+  scope?: RoundScopeRecord;
+
 }
 
 export interface GateState {
@@ -597,6 +656,13 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
             (!Array.isArray(r.fingerprints) || !r.fingerprints.every((v) => typeof v === "string"))) {
           r.fingerprints = [];
         }
+        // The audit stamp is a RECORD, and a record nobody can trust is worse
+        // than none: anything that is not a recognisable stamp is dropped
+        // rather than kept as a half-value a reader would still print.
+        const scope = sanitizeRoundScope(r.scope);
+        if (scope === undefined) delete r.scope;
+        else r.scope = scope;
+
       }
     }
     if (parsed.lastPolishReason !== undefined) {

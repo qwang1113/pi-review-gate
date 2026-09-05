@@ -19,10 +19,18 @@ import {
   inspectionRecord,
   observeInspection,
   parseReviewRange,
+  parseReviewScopeKind,
   rangeMentioned,
   requiresInspectionEvidence,
   touchesGateOwnedPath,
 } from "../lib/judge-inspection.ts";
+// The parser's counterpart: the renderer that WRITES the markers it reads.
+import { decideReviewScope } from "../lib/review-scope.ts";
+import {
+  SCOPE_MARKER_FULL,
+  SCOPE_MARKER_INCREMENTAL,
+  formatReviewScopeDirective,
+} from "../lib/review-carryover.ts";
 
 test("content reads count; listing, testing and writing do not", () => {
   assert.equal(classifyShellCommand("git diff abc1234..HEAD"), "diff");
@@ -260,3 +268,45 @@ test("the report field is additive and says what was observed", () => {
   assert.deepEqual(inspectionRecord(ev), { actions: 1, kinds: ["diff"], rangeSeen: true });
   assert.deepEqual(inspectionRecord(emptyInspection(), true), { actions: 0, kinds: [], appeal: "granted" });
 });
+
+test("the scope kind is read back out of the task text, or is absent", () => {
+  // The judge pane learns full-vs-incremental the same way it learns the
+  // range: from the prose the opener wrote. The markers come from the
+  // renderer itself, so this reads a REAL block rather than a hand-typed
+  // approximation of one.
+  const incremental = formatReviewScopeDirective(
+    decideReviewScope({
+      baseTree: "T",
+      changedFiles: ["src/a.ts"],
+      changedLines: 3,
+      previouslyReviewedFiles: ["src/a.ts"],
+    }),
+    [],
+  );
+  const full = formatReviewScopeDirective(decideReviewScope({}), []);
+  assert.equal(parseReviewScopeKind(incremental), "incremental");
+  assert.equal(parseReviewScopeKind(full), "full");
+  // No marker at all (a goal audit's task, or an opener on an older build)
+  // is UNDEFINED — never a guess, and never a default of "full", which would
+  // put an unverifiable claim on the record.
+  assert.equal(parseReviewScopeKind("审查范围：`a1b2c3d4..HEAD`（不可变）"), undefined);
+  assert.equal(parseReviewScopeKind(""), undefined);
+  assert.equal(parseReviewScopeKind(undefined), undefined);
+});
+
+test("with both markers present the FIRST one wins (the block states its decision once)", () => {
+  // A later mention is quoted or explanatory prose — e.g. the escalation note
+  // that says what a FULL round would mean. The decision is the opening line.
+  const text = [
+    "Review scope for this round:",
+    `${SCOPE_MARKER_INCREMENTAL} small increment.`,
+    `note: had it been larger this would read ${SCOPE_MARKER_FULL}`,
+  ].join("\n");
+  assert.equal(parseReviewScopeKind(text), "incremental");
+  const reversed = [
+    `${SCOPE_MARKER_FULL} no baseline.`,
+    `an earlier round said ${SCOPE_MARKER_INCREMENTAL}`,
+  ].join("\n");
+  assert.equal(parseReviewScopeKind(reversed), "full");
+});
+

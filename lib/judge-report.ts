@@ -18,6 +18,7 @@
  */
 
 import { WAIT_DISCIPLINE_HINT } from "./agent-directives.ts";
+import type { ReviewScopeStamp } from "./orchestrator-channel.ts";
 
 
 
@@ -92,6 +93,13 @@ export interface StandardReportInput {
   stateLine?: string | undefined;
   /** How long a blocking wait actually waited, in seconds. */
   waitedSeconds?: number | undefined;
+  /**
+   * WHAT THE ROUND REVIEWED, as the judge itself stamped on its report
+   * (`ChannelReportRecord.scope`): the commit range and the full/incremental
+   * decision. Absent for a round that carried neither — a goal audit, or a
+   * judge on a build that predates the stamp.
+   */
+  scope?: ReviewScopeStamp | undefined;
 
 }
 
@@ -113,6 +121,16 @@ export function buildStandardReport(input: StandardReportInput): string {
   const lines = [`[REVIEW_GATE_REPORT] ${input.role}（${input.judgeId}）${HEADLINE[reason]}`];
   if (input.verdict !== undefined) {
     lines.push(`- 结论：${input.verdict}${input.findingsCount === undefined ? "" : `，findings ${input.findingsCount} 条`}（P0/P1 边审边修走 findings 流）`);
+  }
+  // WHAT THE ROUND SAYS IT REVIEWED. Printed right under the verdict because
+  // that is the pair an audit reads: a verdict whose scope nobody wrote down
+  // cannot be checked afterwards for either laziness or duplicated work. The
+  // gate knows what it DISPATCHED; this line is what came back.
+  if (input.scope !== undefined && (input.scope.range !== undefined || input.scope.kind !== undefined)) {
+    const kind = input.scope.kind === "incremental"
+      ? "增量"
+      : input.scope.kind === "full" ? "全量深审" : "范围标记缺失";
+    lines.push(`- 本轮审查范围（judge 自报）：${input.scope.range ?? "未标注"}（${kind}）`);
   }
   if (input.unrecorded) {
     lines.push("- 记录：本轮 report 到达但尚未记入 review 链（记录时无可用上下文）——保持 armed，下次 settle 重试，不要重开一轮。");

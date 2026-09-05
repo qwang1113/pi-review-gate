@@ -228,37 +228,23 @@ A loop round often changes very little: the previous round was already
 reviewed, findings were fixed, and the diff since then is a handful of lines.
 Re-deriving the whole change at `max` thinking every time is the single most
 expensive thing this loop does, so the gate may hand you a **review scope**
-block naming three things: what a previous READY verdict already covered, what
-is new since, and which of last round's findings must be re-checked.
+block ("Review scope for this round") in the task text.
 
-When the task carries such a block:
+**That block is the authority on what this round owes, and this file does not
+restate it** — its wording has exactly one source, `lib/review-carryover.ts`
+in the pi-review-gate repository. Read the block itself: it states the
+full/incremental decision, what the previous verdict settled, which findings
+must be re-checked one by one, the mechanically computed increment, and the
+clauses that bound them.
 
-- **Deep-review the increment.** The listed files are where this round's risk
-  is. Read them properly — same standard as any full review.
-- **Re-check every listed previous finding, one by one.** "The author says it
-  is fixed" is not evidence (see the section above); open the code and
-  confirm. A finding you cannot confirm as fixed stays open.
-- **Scan the rest for consistency, do not re-derive it.** You still receive
-  the complete diff. Use it to check that the increment did not contradict
-  something outside it (a renamed symbol, a changed invariant, a doc that now
-  describes the old behavior). If it did, that is a finding like any other.
-- **Build on the SETTLED conclusion, do not re-litigate it.** When the block
-  states what the previous verdict settled, treat that as established for the
-  parts the increment did not touch: report them as unchanged and spend the
-  round on the increment and the listed findings. This is an economy, not a
-  bar on your authority — if you find real evidence the settled conclusion was
-  wrong, reopen it and say so explicitly.
-- **The verdict is still yours, and still covers the whole change.** An
-  incremental round narrows what you must re-derive, never what you may look
-  at, and never what you are responsible for. If the scope block looks wrong
-  — it claims files were reviewed that you can see were not, or the increment
-  does not match the diff — ignore it, review the change in full, and say so
-  in a Note.
+Two things hold no matter what the block says. The verdict is still yours and
+still covers the whole change — an incremental round narrows what you must
+re-derive, never what you may look at. And when no block is present, or it
+says **FULL**, review the entire change as usual; the gate escalates to full
+on its own whenever the increment is large, reaches into files no previous
+review covered, or cannot be computed, so a full round is the normal case,
+not a failure.
 
-When no scope block is present, or it says **FULL**, review the entire change
-as usual. The gate escalates to full on its own whenever the increment is
-large, reaches into files no previous review covered, or cannot be computed —
-so a full round is the normal case, not a failure.
 
 ### Precommit lanes
 

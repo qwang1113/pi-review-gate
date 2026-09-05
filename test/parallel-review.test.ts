@@ -81,7 +81,7 @@ test("buildReviewPrompt: an empty range audits the EXIT GOAL, not a diff", () =>
   assert.match(prompt, /report a READY only when the task is genuinely done/);
   assert.match(prompt, /criterion 1: widget is one line/);
   assert.doesNotMatch(prompt, /Audit the COMMIT RANGE/);
-  assert.doesNotMatch(prompt, /Audit the INCREMENT/);
+  assert.doesNotMatch(prompt, /this round is INCREMENTAL/);
 });
 
 test("buildReviewPrompt: isolation grants writes + an ABSOLUTE stream path; no isolation is READ-ONLY", () => {
@@ -261,10 +261,16 @@ test("opening instruction is scope-aware: incremental rounds audit the INCREMENT
   const scope =
     "Review scope for this round:\n- INCREMENTAL. small increment.\n- SETTLED last round — verdict READY.";
   const incremental = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, scope, "incremental");
-  assert.match(incremental, /Audit the INCREMENT/);
+  // The opening line says WHICH kind of round this is and hands the terms to
+  // the scope block — it no longer restates them (t6a: the contract has one
+  // authoritative source, lib/review-carryover.ts, and a paraphrase here is
+  // how the copies drifted).
+  assert.match(incremental, /this round is INCREMENTAL/);
   assert.doesNotMatch(incremental, /Audit the WHOLE change/);
-  assert.match(incremental, /consistency scan, not a re-derivation/);
-  assert.match(incremental, /reopen any settled conclusion you can contradict with evidence/);
+  assert.match(incremental, /block below states the contract you work under/);
+  assert.match(incremental, /That block is the authority/);
+  // The terms themselves arrive with the block, verbatim.
+  assert.match(incremental, /Review scope for this round:/);
   // The changed-files list stays the full visible set — the increment narrows
   // FOCUS, never authority (non-goal: reviewer scope is guidance, not a fence).
   assert.match(incremental, /src\/a\.ts/);
@@ -277,7 +283,7 @@ test("opening instruction is scope-aware: incremental rounds audit the INCREMENT
     "Review scope for this round:\n- FULL deep review. no previous READY review to build on — full deep review.";
   const full = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, fullDirective, "full");
   assert.match(full, /Audit the COMMIT RANGE baseline\.\.HEAD below/);
-  assert.doesNotMatch(full, /Audit the INCREMENT/);
+  assert.doesNotMatch(full, /this round is INCREMENTAL/);
 
   // Absent scopeKind (older callers) still opens with the commit-range wording.
   const legacy = buildReviewPrompt("review", ["src/a.ts"], undefined, undefined, undefined, fullDirective);

@@ -4,6 +4,8 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KNOWN_AGENTS } from "../lib/model-config.ts";
+// The incremental contract's authoritative renderer — asserted on its OUTPUT.
+import { buildReviewCarryover } from "../lib/review-carryover.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENTS = join(ROOT, "agents");
@@ -244,17 +246,39 @@ test("REGRESSION: every re-review must carry the previous round's conclusion", (
       /goal re-(audit|review)\b[\s\S]{0,400}?objection|goal-auditor[\s\S]{0,400}?\bobjection/is,
       `${file} must require the goal-auditor's re-audit to carry its own objections`,
     );
+    // The TERMS of the incremental contract are not asserted per file any
+    // more, and deliberately so: since t6a they have ONE authoritative source
+    // and every other surface carries a summary plus a pointer. What each file
+    // must still do is either state the rule or NAME that source — a summary
+    // that does neither is a second authority in disguise.
     assert.match(
       src,
-      /consistency\s+scan/i,
-      `${file} must say settled material gets a scan, not a re-derivation`,
+      /consistency\s+scan|review-carryover\.ts/i,
+      `${file} must state the consistency-scan rule or name lib/review-carryover.ts as its source`,
     );
   }
-  // The reviewer must be told it may still reopen a settled conclusion:
-  // an economy that silently removed authority would be a gate weakening.
+  // The rule itself is pinned where it actually lives. This is the assertion
+  // that keeps the loop honest: an economy that silently removed the
+  // reviewer's authority to reopen a settled conclusion would be a gate
+  // weakening, and deleting it from the source is the only way to lose it now.
+  // Asserted on the RENDERED block, not on the module's source: the source
+  // wraps these sentences across concatenated template literals, so a source
+  // scan would be testing the line breaks rather than what a reviewer reads.
+  const contract = buildReviewCarryover({
+    kind: "incremental",
+    reason: "a small increment",
+    settled: { verdict: "READY" },
+    delta: { files: ["lib/a.ts"], lines: 4 },
+  });
+  assert.match(contract, /consistency\s+scan/i, "the contract states what settled material gets");
+  assert.match(contract, /not a re-derivation — and not a skip either/, "…and that it is not a skip");
+  assert.match(contract, /Reopening is always allowed/, "…and that a settled conclusion may be reopened");
+  assert.match(contract, /not a bar on your authority/);
+  // The reviewer's own role body must point at it, or a reviewer reading only
+  // its role body would never learn the contract exists.
   const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
-  assert.match(reviewer, /re-litigate/i);
-  assert.match(reviewer, /reopen it/i);
+  assert.match(reviewer, /review-carryover\.ts/, "reviewer.md names the contract's source");
+  assert.match(reviewer, /the authority on what this round owes/i);
 });
 
 test("AGENTS.md and SKILL.md make judge roles their own pi processes — the only review path", () => {

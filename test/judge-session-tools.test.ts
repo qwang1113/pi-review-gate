@@ -22,6 +22,7 @@ import {
   appendRecord,
   judgeChannelTarget,
   type ChannelIO,
+  type ReviewScopeStamp,
 } from "../lib/orchestrator-channel.ts";
 import type { RoundBinding } from "../lib/audit-round.ts";
 
@@ -67,6 +68,8 @@ interface Fake {
   binding: RoundBinding;
   /** What the engine reports about a weaker binding, when there is one. */
   bindingNote: string | undefined;
+  /** The scope the engine says this round stamped on itself, when it did. */
+  scope: ReviewScopeStamp | undefined;
 }
 
 function child(overrides: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
@@ -114,6 +117,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
       contentAt: CHECKPOINT_AT,
     } as RoundBinding,
     bindingNote: undefined as string | undefined,
+    scope: undefined as ReviewScopeStamp | undefined,
   };
   const io: ChannelIO = {
     ensureDir() {},
@@ -187,6 +191,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
         verdict: "READY",
         hasVerdict: true,
         ...(state.bindingNote === undefined ? {} : { bindingNote: state.bindingNote }),
+        ...(state.scope === undefined ? {} : { scope: state.scope }),
       };
     },
     dropPendingAudit: (root) => { state.calls.push(`dropPendingAudit(${root})`); },
@@ -658,6 +663,29 @@ test("judge_wait: an ordinary round carries no binding note", async () => {
   const reply = await call(f, "judge_wait", { role: "reviewer" });
   assert.doesNotMatch(textOf(reply), /绑定说明：/, "a line shown every round would say nothing");
 });
+
+// BOTH wake-up paths say the same thing about a round (t6a). The settle sweep
+// and `judge_wait` share one report builder, but each passes the fields
+// itself — so a fact wired into only one of them is invisible to whoever
+// happened to reach the round the other way, which is exactly how the two
+// paths drifted before.
+test("judge_wait: the wake-up says what the round reports it reviewed", async () => {
+  const f = fake();
+  const c = seed(f);
+  writeReport(f, c, "READY", "rep-2");
+  f.scope = { range: "1234567..89abcde", kind: "incremental" };
+  const reply = await call(f, "judge_wait", { role: "reviewer" });
+  assert.match(textOf(reply), /本轮审查范围（judge 自报）：1234567\.\.89abcde（增量）/);
+});
+
+test("judge_wait: a round that stamped no scope gets no scope line", async () => {
+  const f = fake();
+  const c = seed(f);
+  writeReport(f, c, "READY", "rep-2");
+  const reply = await call(f, "judge_wait", { role: "reviewer" });
+  assert.doesNotMatch(textOf(reply), /本轮审查范围/, "no stamp, no line — never an invented one");
+});
+
 
 
 test("judge_wait: a timeout returns the state so far, the discipline, and no verdict", async () => {

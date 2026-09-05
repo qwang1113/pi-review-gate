@@ -33,6 +33,7 @@ import {
 import { JUDGE_ID_ENV, JUDGE_OPENER_ENV, JUDGE_ROLE_ENV } from "../lib/judge-pane.ts";
 import type { InspectionEvidence } from "../lib/judge-inspection.ts";
 import type { InspectionBlock, InspectionPass } from "../lib/inspection-appeal.ts";
+import type { ReviewScopeStamp } from "../lib/orchestrator-channel.ts";
 
 const NOW = 1_700_000_000_000;
 const OPENER = "session-child-1";
@@ -161,6 +162,8 @@ function setup(over: Partial<{
   inspection: InspectionEvidence;
   /** A granted appeal's pass, when the test wants one live. */
   pass: InspectionPass;
+  /** The round's scope stamp; `null` = a round that has none at all. */
+  scope: ReviewScopeStamp | null;
 }> = {}): {
   exec: Exec;
   ioFiles: Map<string, string>;
@@ -209,6 +212,10 @@ function setup(over: Partial<{
     // Default: a round the gate DID observe inspecting, so every pre-existing
     // expectation still describes a normal round.
     inspection: () => over.inspection ?? { actions: 2, kinds: ["diff", "file-read"], rangeSeen: true },
+    // The round's audit stamp. `null` in the overrides means "this round has
+    // no scope at all" (a goal audit) — `undefined` takes the default, which
+    // is the ordinary reviewer round every other expectation describes.
+    reviewScope: () => (over.scope === null ? undefined : over.scope ?? { range: "aaaaaaa..bbbbbbb", kind: "incremental" }),
     inspectionPass: () => over.pass,
     noteInspectionRefusal: (block) => { refusals.push(block); },
     noteConcluded: (usedPass) => { concluded.push(usedPass); },
@@ -469,3 +476,28 @@ test("tool: evidence stamped with ANOTHER round is not this round's evidence", a
   const report = lastReport(current.ioFiles) as { inspection?: Record<string, unknown> };
   assert.deepEqual(report.inspection, { actions: 4, kinds: ["diff"], rangeSeen: true });
 });
+
+test("tool: the report is stamped with the scope THIS round ran under", async () => {
+  // Auditability (t6a): the opener records this beside the scope it
+  // dispatched, so a finished round can be checked for both laziness and
+  // duplicated work long after the pane is gone.
+  const { exec, ioFiles } = setup({
+    hierarchy: hierarchyFile(2),
+    scope: { range: "1234567..89abcde", kind: "incremental" },
+  });
+  const ok = await exec(GOOD);
+  assert.equal(ok.isError, undefined);
+  const report = lastReport(ioFiles) as { scope?: Record<string, unknown> };
+  assert.deepEqual(report.scope, { range: "1234567..89abcde", kind: "incremental" });
+});
+
+test("tool: a round with no scope at all stamps nothing (a goal audit has no range)", async () => {
+  // An empty object here would read to every consumer as "the judge reported
+  // a scope" — the one thing the stamp must never claim falsely.
+  const { exec, ioFiles } = setup({ hierarchy: hierarchyFile(2), scope: null });
+  const ok = await exec(GOOD);
+  assert.equal(ok.isError, undefined);
+  const report = lastReport(ioFiles) as unknown as Record<string, unknown>;
+  assert.ok(!("scope" in report), "the field is omitted, not emitted empty");
+});
+

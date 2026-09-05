@@ -1,5 +1,5 @@
 /**
- * Incremental review scoping.
+ * Incremental review scoping — THE DECISION HALF.
  *
  * PROBLEM. Every edit invalidates the READY binding, so the next round asks
  * for a brand-new review — including the round where the only change was a
@@ -8,11 +8,12 @@
  * expensive step of a loop round.
  *
  * WHAT THIS DOES. The gate remembers the tree the last READY review was bound
- * to. When a new round starts it computes the INCREMENT since then and hands
- * the reviewer three explicit facts: what was already reviewed, what is new
- * this round, and which findings from last round must be re-checked one by
- * one. The reviewer still receives the complete diff as context — narrowing
- * happens in what it must DEEP-read, not in what it may look at.
+ * to. When a new round starts this module computes the INCREMENT since then
+ * and decides whether the round may run incrementally at all. It produces a
+ * DECISION, never prose: the contract handed to the reviewer — what was
+ * already settled, what is new, which findings must be re-checked, and what a
+ * consistency scan is — is rendered by `lib/review-carryover.ts`, the single
+ * authoritative source for that wording.
  *
  * WHY THERE IS AN ESCALATION THRESHOLD. Incremental reading is only safe while
  * the increment is small enough that cross-file inconsistencies cannot hide in
@@ -52,23 +53,6 @@ export interface ReviewScopeDecision {
   reason: string;
 }
 
-/**
- * What the PREVIOUS round already concluded, so a re-review can build on it
- * instead of re-deriving it. Carrying the settled conclusion forward is the
- * whole point of an incremental round: without it the reviewer re-litigates
- * questions it already answered, at max thinking, every round.
- */
-export interface SettledConclusion {
-  /** The verdict that was recorded ("READY" for the tree we build on). */
-  verdict: string;
-  /** ISO timestamp of that verdict, when known. */
-  at?: string;
-  /**
-   * Review rounds recorded SO FAR — a running count, not the round that
-   * produced the verdict (rounds recorded after it are included).
-   */
-  rounds?: number;
-}
 
 export interface IncrementInput {
   /** Tree OID the last READY review was bound to, if any. */
@@ -153,72 +137,10 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
   };
 }
 
-/** Who the scope block is written for. */
-export type ScopeAudience = "agent" | "reviewer";
-
-/**
- * The scope block that says exactly what this round may lean on.
- *
- * TWO AUDIENCES, ONE SOURCE. The gate cannot address a subagent directly, so
- * this block was originally written as an instruction to the AGENT (the
- * turn-end status text, which the agent then passes on). It is now also
- * injected verbatim into the reviewer's OWN task text by `prepare_review`,
- * where second-person phrasing about "the reviewer" would read as an
- * instruction about somebody else. `audience` switches only those sentences —
- * the decision, the increment and the findings list stay identical, because a
- * second copy of this text is exactly how the two surfaces would drift apart.
- *
- * It never says "skip" anything: the reader keeps the whole diff and the same
- * verdict authority, it is only told where the new risk is.
+/*
+ * NOTHING RENDERS TEXT HERE ANY MORE. The wording of the incremental
+ * contract — what the previous round settled, which findings must be
+ * re-checked, what a consistency scan is and is not — lives in ONE place,
+ * `lib/review-carryover.ts`. This module decides; that one speaks.
  */
-export function formatReviewScopeDirective(
-  decision: ReviewScopeDecision,
-  openFindings: string[],
-  settled?: SettledConclusion,
-  audience: ScopeAudience = "agent",
-): string {
-  const lines: string[] = ["Review scope for this round:"];
-  // Direct addresses, worded for whoever reads the block. The agent passes it
-  // on ("Hand the reviewer…"); the reviewer reads it as instructions to
-  // itself ("You…"). Everything else is shared verbatim.
-  // The one sentence that MUST switch: it names the reader as a THIRD person
-  // for the agent and a SECOND person for the reviewer. Everything else reads
-  // correctly for both — "your authority" is the reader's own either way.
-  if (decision.scope === "incremental") {
-    lines.push(
-      `- INCREMENTAL. ${decision.reason}.`,
-      `- Already reviewed and unchanged since the last READY verdict: everything outside the increment. ` +
-        `Give it a consistency scan, not a re-derivation.`,
-      `- This round's increment (deep-review these): ${decision.changedFiles.join(", ")}.`,
-      `- ${audience === "reviewer" ? "You still have the FULL diff as context" : "Hand the reviewer the FULL diff as context anyway"} — an incremental round narrows what must be ` +
-        `re-derived, never what may be looked at.`,
-    );
-    // The settled conclusion is what makes a re-review cheap: state plainly
-    // that it stands, so the reviewer builds on it instead of re-arguing it.
-    if (settled) {
-      const covered = decision.reviewedFiles.length
-        ? `${decision.reviewedFiles.length} file(s): ${decision.reviewedFiles.slice(0, 20).join(", ")}` +
-          (decision.reviewedFiles.length > 20 ? ", …" : "")
-        : "the change as it stood then";
-      lines.push(
-        `- SETTLED last round — verdict ${settled.verdict}` +
-          (settled.rounds ? `, ${settled.rounds} round(s) recorded so far` : "") +
-          (settled.at ? ` (${settled.at})` : "") +
-          `, covering ${covered}.`,
-        `- Carry that conclusion forward: what it settled and the increment did not touch stays settled. ` +
-          `Do not re-derive or re-litigate it — report it as MET/unchanged and spend the round on the increment ` +
-          `and on the previous findings listed below. If you find real evidence the settled conclusion was WRONG, ` +
-          `say so and reopen it: carrying it forward is an economy, not a bar on your authority.`,
-      );
-    }
-  } else {
-    lines.push(`- FULL deep review. ${decision.reason}.`);
-  }
-  if (openFindings.length) {
-    lines.push(
-      `- Findings from the previous round that MUST be re-checked one by one (do not take the fix on trust): ` +
-        openFindings.map((f) => `"${f}"`).join("; "),
-    );
-  }
-  return lines.join("\n");
-}
+

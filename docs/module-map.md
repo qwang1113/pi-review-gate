@@ -279,7 +279,9 @@ shell（heartbeat、对话框竞态，复用子会话通道原语，不另起通
 
 审查内容侧：`parallel-review.ts` 持有审查契约（一轮一个 reviewer，判不可变的
 `baseline..HEAD`），`review-baseline.ts` 在链被 squash/rebase 后按内容找回基
-线，`review-scope.ts` 决定增量多大就升级成整轮深审，`review-stream.ts` 让
+线，`review-scope.ts` 决定增量多大就升级成整轮深审、`review-carryover.ts` 把那个
+决定连同上轮裁决与未关闭 findings 渲染成任务书里的增量契约（该契约的**唯一**权威
+出处，其余文档与提示词只引用不重述），`review-stream.ts` 让
 findings 边审边流出，`review-adjudicate.ts` 在 judge 交上来的**结构化结论**上
 做 reviewer 裁决（READY 携带未解决 P0/P1 → BLOCKED、findings 计数、跨轮
 fingerprint；`precommit-parse.ts` 是另一件事，只认 `## Overall:`
@@ -447,7 +449,7 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（112 个模块）
+## 五、`lib/` 全量速查表（113 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -555,7 +557,8 @@ fail-closed）。`model-diagnose.ts`
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
 | `review-adjudicate.ts` | reviewer 裁决（纯）：在 judge 交上来的结构化结论上判 READY 携带未解决 P0/P1 → BLOCKED、findings 计数、跨轮 coarse fingerprint；另有 verdict 规范化与两个投影（per-file 给 polish gate、severity+issue 给 goal/plan 审计） |
 | `review-prepare-tools.ts` | **内部实现**（不注册给 pi）：算不可变的 `baseline..HEAD`、polish gate、findings 流，并登记裁决要绑定的 review target；由 `judge_submit` 调用 |
-| `review-scope.ts` | 增量审查定档：增量多大就升级为整轮深审的阈值 |
+| `review-carryover.ts` | **增量审查契约的唯一权威出处**：把「上轮裁决 → 未关闭 findings → 机械算出的 delta → 一致性扫描与可重开条款」渲染成任务书里的 `Review scope for this round` 块；构建器收显式入参（裁决/findings/delta/全量-增量决策），没有 `ReviewScopeDecision` 也能调；两行判定标记同时是 judge 侧读回全量/增量的线格式 |
+| `review-scope.ts` | 增量审查定档（只决策、不出文案）：增量多大就升级为整轮深审的阈值 |
 | `review-stream.ts` | findings 流：reviewer 边审边发，主会话边修 |
 | `sensitive-grant.ts` | 敏感文件的一次性用户授权：限定路径、限时、用后即焚 |
 | `session-revival.ts` | 存活不变量（2026-08-30）：会话在退出契约未满足时停下，门禁就周期性唤醒它。纯判定：看不见续跑预算与 loop-stall 断路器（它们管注入路径，管不了「停下」），但尊重人的叫停（ESC / ask_user / bypass / 仲裁 pause）与 handoff 交接 |

@@ -48,7 +48,12 @@
  * kinds are exercisable end-to-end with a fake channel and a fake hierarchy.
  */
 
-import type { ChannelRecord, ChannelReportRecord, ReportConclusion } from "./orchestrator-channel.ts";
+import type {
+  ChannelRecord,
+  ChannelReportRecord,
+  ReportConclusion,
+  ReviewScopeStamp,
+} from "./orchestrator-channel.ts";
 import {
   adjudicatePlanAudit,
   formatPlanAuditRefusal,
@@ -394,6 +399,14 @@ export type SettleAuditRoundOutcome =
        * the exact failure the announcement exists to prevent.
        */
       bindingNote?: string;
+      /**
+       * The scope the JUDGE reported for this round (range + full/incremental),
+       * when its report carried one. Travels on the outcome so the wake-up can
+       * print what the round says it reviewed — the opener already knows what
+       * it dispatched, and seeing both is the whole point of stamping it.
+       */
+      scope?: ReviewScopeStamp;
+
     }
   | { status: "advice"; reportId: string; text: string }
   | { status: "miss"; reason: RoundReportMiss; text?: string }
@@ -523,6 +536,9 @@ export async function settleAuditRound(
     verdict: concluded.verdict,
     text,
     ...(bindingNote === undefined ? {} : { bindingNote }),
+    // Straight off the report the recorder just accepted — never re-derived
+    // here, so what the wake-up prints is what the judge actually stamped.
+    ...(concluded.scope === undefined ? {} : { scope: concluded.scope }),
   };
 }
 

@@ -257,14 +257,12 @@ is a P1 finding, and any P0/P1 ⇒ BLOCKED.
    Severity: P0 = must fix now, P1 = must fix before ship, P2 = should fix,
    Nit = optional. Any P0/P1 open ⇒ gate BLOCKED.
 
-   Every re-review carries the previous round's conclusion: the gate
-   embeds a 'Review scope for this round' block in the ready-made task text
-   (the prior verdict and findings, what is new since the last READY tree,
-   and the findings to re-check one by one). First round = full review;
-   later rounds = incremental: settled-and-unchanged material gets a
-   consistency scan, not a re-derivation — it never narrows what a reviewer
-   may look at, and a settled conclusion may always be reopened with
-   evidence. The reviewer runs in its own pane and inherits none of this
+   Every re-review carries the previous round's conclusion: the gate embeds a
+   'Review scope for this round' block in the ready-made task text. First
+   round = full review; later rounds = incremental. The block's exact terms
+   are NOT restated here — `lib/review-carryover.ts` is their single
+   authoritative source, and the reviewer reads them in the task text itself.
+   The reviewer runs in its own pane and inherits none of this
    session's conversation; the task text names the
    main session's transcript to read ON DEMAND when the conversation
    matters, instead of inheriting it.

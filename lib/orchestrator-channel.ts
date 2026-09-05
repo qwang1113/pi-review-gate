@@ -251,6 +251,23 @@ export interface ReportFinding {
   evidence?: string;
 }
 
+/**
+ * The scope a round ran under, as a WIRE value.
+ *
+ * Spelled out here rather than imported from the review modules on purpose:
+ * this is the channel's own schema, and a record read off disk may have been
+ * written by a different build. Both halves are optional and both are
+ * validated on read (`reportConclusion`) — an unrecognised `kind` is dropped,
+ * never carried through as if it meant something.
+ */
+export interface ReviewScopeStamp {
+  /** The round's commit range, e.g. `abc123def456..789abc012def`. */
+  range?: string;
+  /** How much of the change the round was told to deep-read. */
+  kind?: "full" | "incremental";
+}
+
+
 
 /**
  * Judge → opener: this round is over, here is the conclusion.
@@ -310,6 +327,23 @@ export interface ChannelReportRecord extends ChannelRecordBase {
    * an existing field MEANS would not.
    */
   inspection?: { actions: number; kinds: string[]; rangeSeen?: boolean; appeal?: string };
+  /**
+   * WHAT THIS ROUND ACTUALLY REVIEWED, in the judge's own words: the commit
+   * range and the full/incremental decision, both read back from the round's
+   * task text (lib/judge-inspection.ts).
+   *
+   * It exists so a finished round is AUDITABLE after the fact — "did it review
+   * the range it was dispatched for, and did it run incrementally?" — against
+   * what the gate registered when it dispatched the round. The gate keeps both
+   * halves side by side (`RoundRecord.scope`, lib/gate-state.ts); nothing acts
+   * on a mismatch, it is recorded so a human can see it.
+   *
+   * A NEW OPTIONAL field, for the same reason `inspection` is one: an opener
+   * running an older build ignores it and consumes the report exactly as
+   * before, which is what keeps an old opener and a new judge pane compatible.
+   */
+  scope?: ReviewScopeStamp;
+
 }
 export type ChannelRecord =
   | ChannelStateRecord
@@ -528,17 +562,44 @@ export interface ReportConclusion {
   findings: ReportFinding[];
   cwd?: string;
   docSync?: string;
+  /**
+   * The range and full/incremental flag the round reported for itself.
+   * Present only when the report carried a usable one — see
+   * {@link sanitizeScopeStamp}.
+   */
+  scope?: ReviewScopeStamp;
+}
+
+/**
+ * Keep a report's scope stamp only where it says something.
+ *
+ * A record read off disk is untrusted input: it may come from another build,
+ * a truncated write or a hand-edited file. A non-string range and an
+ * unrecognised kind are DROPPED rather than passed on, and a stamp left with
+ * nothing in it becomes `undefined` — an empty object on the conclusion would
+ * read to every consumer as "the judge reported a scope" when it did not.
+ */
+export function sanitizeScopeStamp(raw: unknown): ReviewScopeStamp | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as { range?: unknown; kind?: unknown };
+  const range = typeof value.range === "string" && value.range.trim() ? value.range.trim() : undefined;
+  const kind = value.kind === "full" || value.kind === "incremental" ? value.kind : undefined;
+  if (range === undefined && kind === undefined) return undefined;
+  return { ...(range === undefined ? {} : { range }), ...(kind === undefined ? {} : { kind }) };
 }
 
 /**
  * Read one report's structured conclusion, resolving a spilled findings array.
  *
- * The only normalization is `findings`: a report written before the field
+ * Two fields are normalized. `findings`: a report written before the field
  * existed, one whose findings are not an array, or one whose spill file is
  * unreadable all read as NO findings rather than throwing — the verdict still
  * travels, and the recorder fails closed on an unrecognisable one. A spill
  * that cannot be read is the same case: the round is recorded with the
  * verdict it reported and no findings, never with a stale set from elsewhere.
+ * `scope` goes through {@link sanitizeScopeStamp} for the same reason: a
+ * stamp is auditing evidence, and evidence that cannot be recognised is
+ * absent, not approximated.
  */
 export function reportConclusion(io: ChannelIO, record: ChannelReportRecord): ReportConclusion {
   let raw: unknown = record.findings;
@@ -549,11 +610,13 @@ export function reportConclusion(io: ChannelIO, record: ChannelReportRecord): Re
     }
   }
   const findings = Array.isArray(raw) ? raw.filter((f): f is ReportFinding => !!f && typeof f === "object") : [];
+  const scope = sanitizeScopeStamp(record.scope);
   return {
     verdict: record.verdict,
     findings,
     ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
     ...(record.docSync === undefined ? {} : { docSync: record.docSync }),
+    ...(scope === undefined ? {} : { scope }),
   };
 }
 

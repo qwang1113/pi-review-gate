@@ -56,6 +56,7 @@ import {
   readChannel,
   type ChannelIO,
   type ChannelRecord,
+  type ReviewScopeStamp,
 } from "./orchestrator-channel.ts";
 import { DOC_SYNC_ATTESTATIONS } from "./gate-state.ts";
 import { JUDGE_STREAM_ENV, readJudgeSideEnv } from "./judge-side.ts";
@@ -274,6 +275,19 @@ export interface JudgeConcludeToolDeps {
    * whatever the wiring forgot.
    */
   inspection(): InspectionEvidence;
+  /**
+   * THIS round's review scope — the commit range and the full/incremental
+   * decision, as the host read them back from the round's task text
+   * (`parseReviewRange` / `parseReviewScopeKind`, lib/judge-inspection.ts).
+   *
+   * Required for the same reason `inspection` is: a host that forgot to wire
+   * it would produce reports that silently carry no audit stamp, and "no
+   * stamp" is indistinguishable from "the round had no range". Returning
+   * `undefined` is the honest answer when the task text carried neither — a
+   * goal audit, for instance.
+   */
+  reviewScope(): ReviewScopeStamp | undefined;
+
   /** The live appeal pass, when `request_arbitration` granted one. */
   inspectionPass(): InspectionPass | undefined;
   /** A zero-inspection READY was refused — the appeal route needs to see it. */
@@ -363,6 +377,7 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
   const streamPath = (deps.env()[JUDGE_STREAM_ENV] ?? "").trim() || undefined;
   const findingsCount = countStreamFindings((p) => deps.readText(p), streamPath, input.findings.length);
   const notes = (input.notes ?? "").trim();
+  const reviewScope = deps.reviewScope();
   const report = {
     reportId: newChannelId("rep", now),
     kind: "report" as const,
@@ -383,6 +398,14 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
     // consumes the report exactly as before (parseRecord is tolerant), which
     // is the only reason a judge on a new build can report to one at all.
     inspection: inspectionRecord(evidence, gate.usedPass),
+    // WHAT THIS ROUND REVIEWED, for the audit trail: the range and the
+    // full/incremental decision this pane read out of its own task text. Also
+    // a new OPTIONAL field, and omitted entirely when the round had neither
+    // (a goal audit) — an empty object would claim a stamp that does not
+    // exist. The opener records it beside what IT dispatched, so the two can
+    // be compared later.
+    ...(reviewScope === undefined ? {} : { scope: reviewScope }),
+
   };
   try {
     appendRecord(io, target, report);

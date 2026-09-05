@@ -44,6 +44,9 @@
  */
 
 import { lexSegments } from "./shell-lex.ts";
+// The two decision markers the scope block writes. Imported, never re-spelled:
+// the renderer and this parser are the two ends of one wire format.
+import { SCOPE_MARKER_FULL, SCOPE_MARKER_INCREMENTAL } from "./review-carryover.ts";
 
 /** What kind of looking an observed action was. */
 export type InspectionKind = "file-read" | "diff" | "search";
@@ -368,6 +371,33 @@ export function parseReviewRange(text: string | undefined): string | undefined {
   if (!text) return undefined;
   const match = /\b([0-9a-f]{7,40})\.\.([0-9a-f]{7,40}|HEAD)\b/.exec(text);
   return match ? `${match[1]}..${match[2]}` : undefined;
+}
+
+/**
+ * The round's SCOPE KIND (full or incremental), parsed out of its TASK TEXT.
+ *
+ * Same channel and same contract as `parseReviewRange` above: the decision is
+ * made opener-side (lib/review-scope.ts), rendered into the task text by
+ * lib/review-carryover.ts, and read back here — which is why the two marker
+ * lines are IMPORTED rather than re-spelled. A round whose task carries
+ * neither marker (a goal audit, an old opener's build, a hand-written task)
+ * yields `undefined`: the flag is best-effort evidence, never an assertion the
+ * gate acts on.
+ *
+ * Both markers present ⇒ the FIRST one in the text wins. The block states its
+ * own decision on its opening line, so anything further down is quoted or
+ * explanatory prose, not a second decision.
+ */
+export function parseReviewScopeKind(
+  text: string | undefined,
+): "full" | "incremental" | undefined {
+  if (!text) return undefined;
+  const incremental = text.indexOf(SCOPE_MARKER_INCREMENTAL);
+  const full = text.indexOf(SCOPE_MARKER_FULL);
+  if (incremental < 0 && full < 0) return undefined;
+  if (incremental < 0) return "full";
+  if (full < 0) return "incremental";
+  return incremental < full ? "incremental" : "full";
 }
 
 /**

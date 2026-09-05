@@ -266,8 +266,17 @@ test("the happy path registers the reviewed range and reports it", async () => {
   assert.equal(reply.details?.range, "pppppppppppp..hhhhhhhhhhhh");
   assert.equal(reply.details?.fileCount, 2);
   assert.deepEqual(reply.details?.files, ["lib/a.ts", "lib/b.ts"]);
-  // The target a READY later binds to carries the TREE, not just the commits.
-  assert.deepEqual(f.targets, [{ baseline: "pppppppppppp", head: "hhhhhhhhhhhh", tree: "tttttttttttt" }]);
+  // The target a READY later binds to carries the TREE, not just the commits —
+  // plus the scope this round was DISPATCHED under, which is the gate's half
+  // of the audit pair the verdict recorder writes down (t6a). It is registered
+  // here, at dispatch time, because the decision is a function of a worktree
+  // that keeps moving while the reviewer works.
+  assert.deepEqual(f.targets, [{
+    baseline: "pppppppppppp",
+    head: "hhhhhhhhhhhh",
+    tree: "tttttttttttt",
+    scope: { range: "pppppppppppp..hhhhhhhhhhhh", kind: "full" },
+  }]);
   // The findings stream is a real, created directory — an adviser or reviewer
   // appends to it while the round runs.
   const stream = String(reply.details?.stream);

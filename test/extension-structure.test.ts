@@ -3861,7 +3861,13 @@ test("P2: prepare_review registers the commit target (baseline/head/tree) for re
   // BOTH halves are asserted: the tool builds the target (with the tree, which
   // is what a READY binds to), and the extension's wiring is what actually puts
   // it in the map the verdict recorder reads.
-  assert.match(REVIEW_PREPARE_SRC, /deps\.registerReviewTarget\(root, \{ baseline, head, tree \}\)/);
+  // The registration also carries the round's DISPATCHED scope (t6a): the
+  // gate's half of the audit pair, captured at dispatch time rather than
+  // recomputed when the verdict lands (by then the worktree has moved).
+  assert.match(
+    REVIEW_PREPARE_SRC,
+    /deps\.registerReviewTarget\(root, \{ baseline, head, tree, scope: \{ range, kind: scopeNow\.scope \} \}\)/,
+  );
   assert.match(REVIEW_PREPARE_WIRING(), /registerReviewTarget: \(root, target\) => \{ reviewTargets\.set\(root, target\); \}/);
   // And the map must be consulted inside the recorder, not just written.
   assert.match(recordVerdictBody(), /reviewTargets\.get\(targetRoot\)/);

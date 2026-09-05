@@ -105,6 +105,7 @@ import {
   emptyInspection,
   observeInspection,
   parseReviewRange,
+  parseReviewScopeKind,
   type InspectionEvidence,
 } from "../lib/judge-inspection.ts";
 import {
@@ -350,10 +351,13 @@ import { appendTiming } from "../lib/gate-timings.ts";
 import { tailLogFile } from "../lib/precommit-tail.ts";
 import {
   decideReviewScope,
-  formatReviewScopeDirective,
   type ReviewScopeDecision,
-  type SettledConclusion,
 } from "../lib/review-scope.ts";
+// The incremental contract's WORDING lives in exactly one module.
+import {
+  formatReviewScopeDirective,
+  type SettledConclusion,
+} from "../lib/review-carryover.ts";
 import {
   advisoryChangeToken,
   changedFiles,
@@ -379,7 +383,10 @@ import {
   STATE_VARIANT_ENV,
 
   unmetRequirements,
+  sanitizeRoundScope,
   type GateState,
+  type RoundScopeRecord,
+  type ScopeStampRecord,
   invalidateBindings,
 } from "../lib/gate-state.ts";
 import { parsePrecommitOutput } from "../lib/precommit-parse.ts";
@@ -1268,20 +1275,38 @@ export default function reviewGate(pi: ExtensionAPI) {
   let judgeInspection: InspectionEvidence = emptyInspection();
   /** The round's `baseline..HEAD`, recovered from its task text when present. */
   let judgeReviewRange: string | undefined;
+  /** The round's full/incremental decision, recovered from the same text. */
+  let judgeScopeKind: "full" | "incremental" | undefined;
   /** Is THIS session a judge pane? (the observer's only scope). */
   function isJudgePane(): boolean {
     return readJudgeSideEnv(process.env) !== undefined;
   }
   /**
-   * Learn the round's review range from its task text. The range is opener
-   * knowledge that reaches a pane only as prose — round 1 through the task
-   * file in the environment, later rounds through the channel — so it is read
-   * back out of that prose. Best effort by design: no range simply means the
-   * evidence carries no range flag (a goal audit has none at all).
+   * Learn the round's review range and scope kind from its task text. Both are
+   * opener knowledge that reaches a pane only as prose — round 1 through the
+   * task file in the environment, later rounds through the channel — so they
+   * are read back out of that prose. Best effort by design: no range simply
+   * means the evidence carries no range flag (a goal audit has none at all),
+   * and no decision marker means the report carries no scope kind.
    */
   function noteJudgeTaskText(text: string | undefined): void {
     const range = parseReviewRange(text);
     if (range) judgeReviewRange = range;
+    const kind = parseReviewScopeKind(text);
+    if (kind) judgeScopeKind = kind;
+  }
+  /**
+   * THIS round's scope, as this pane read it — the judge half of the audit
+   * pair stamped on the channel report. Undefined when the task text carried
+   * neither fact, which is the honest answer for a round that has no range
+   * (a goal audit): an empty stamp would claim a scope nobody recorded.
+   */
+  function judgeReviewScope(): ScopeStampRecord | undefined {
+    if (judgeReviewRange === undefined && judgeScopeKind === undefined) return undefined;
+    return {
+      ...(judgeReviewRange === undefined ? {} : { range: judgeReviewRange }),
+      ...(judgeScopeKind === undefined ? {} : { kind: judgeScopeKind }),
+    };
   }
   /** Round 1's task, as the pane was opened with it (a path in the env). */
   function judgeTaskText(): string | undefined {
@@ -2704,7 +2729,13 @@ export default function reviewGate(pi: ExtensionAPI) {
    * a READY binds to the reviewed tree, and a HEAD that moved past the
    * registered head (a new checkpoint after prepare) is STALE ⇒ BLOCKED.
    */
-  interface ReviewTarget { baseline: string; head: string; tree: string; }
+  interface ReviewTarget {
+    baseline: string;
+    head: string;
+    tree: string;
+    /** What this round was DISPATCHED to review (the audit pair's gate half). */
+    scope?: ScopeStampRecord;
+  }
   const reviewTargets = new Map<string, ReviewTarget>();
 
   /**
@@ -5113,7 +5144,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * audits. This function only translates the outcome into the shape the two
    * callers here already speak.
    */
-  async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean; bindingNote?: string } | undefined> {
+  async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean; bindingNote?: string; scope?: ScopeStampRecord } | undefined> {
     try {
       const entry = judgeHierarchy[sessionId];
       if (!entry?.role) return undefined;
@@ -5127,6 +5158,10 @@ export default function reviewGate(pi: ExtensionAPI) {
             // Travels separately: the wake-up prints the record's first line
             // only, and a weaker binding nobody reads about is a silent one.
             ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
+            // The scope the round stamped on itself, for the same reason: the
+            // wake-up is where the opener finds out WHAT was reviewed, and a
+            // range recorded somewhere nobody prints is a range nobody checks.
+            ...(settled.scope === undefined ? {} : { scope: settled.scope }),
           };
         case "advice":
           return { text: settled.text, recorded: false };
@@ -5213,6 +5248,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         streamPath: entry.streamPath,
         recordedNote: conclusion.recorded ? conclusion.text : undefined,
         bindingNote: conclusion.bindingNote,
+        scope: conclusion.scope,
         unrecorded: !conclusion.recorded && entry.role !== "adviser" ? true : undefined,
         openQuestions: freshQuestions.map((q) => ({ title: q.title, options: q.options, requestId: q.requestId })),
       }));
@@ -5805,6 +5841,9 @@ export default function reviewGate(pi: ExtensionAPI) {
             verdict: settled.verdict,
             hasVerdict: settled.hasVerdict,
             ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
+            // The round's own scope stamp, so a `judge_wait` wake-up says the
+            // same thing the settle sweep would have said about this round.
+            ...(settled.scope === undefined ? {} : { scope: settled.scope }),
           };
         case "advice":
           return { advice: settled.text, hasVerdict: false };
@@ -5846,6 +5885,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       channelHome: () => undefined,
       now: () => Date.now(),
       inspection: () => judgeInspection,
+      // The audit stamp for THIS round, read out of the task text this pane
+      // was opened (or instructed) with. Unlike the evidence above it is NOT
+      // reset between rounds: a later round arriving through the channel
+      // carries its own scope block and overwrites it, and a round whose text
+      // says nothing new is still running against the same range.
+      reviewScope: () => judgeReviewScope(),
       inspectionPass: () => inspectionPass,
       noteInspectionRefusal: (block) => { lastBlockedInspection = block; },
       noteConcluded: (usedPass) => {
@@ -6181,6 +6226,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     // findings, never line counts). The next prepare_review derives the file
     // streak from these.
     const recorded = recordedFindingsFrom(fileFindingsFrom(concluded.findings as ReviewFinding[]));
+    // THE AUDIT PAIR (t6a): what the gate dispatched this round to review, and
+    // what the judge reported it reviewed. Recorded side by side so a finished
+    // round can be checked afterwards for BOTH failure modes — a round that
+    // skimmed less than it was sent to read, and a round that re-derived work
+    // a previous verdict had already settled. Nothing refuses a verdict over a
+    // mismatch: the gate cannot tell a legitimate divergence (an escalation
+    // the judge decided on its own) from a lazy one, so it records instead of
+    // guessing.
+    const roundScope: RoundScopeRecord | undefined = sanitizeRoundScope({
+      dispatched: reviewTargets.get(targetRoot)?.scope,
+      reported: concluded.scope,
+    });
     st.rounds.push({
       round: st.rounds.length + 1,
       findingsTotal: parsed.findingsTotal,
@@ -6189,6 +6246,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       at: new Date().toISOString(),
       ...(recorded.polishFiles.length > 0 ? { polishFiles: recorded.polishFiles } : {}),
       ...(recorded.blockingFiles.length > 0 ? { blockingFiles: recorded.blockingFiles } : {}),
+      ...(roundScope === undefined ? {} : { scope: roundScope }),
     });
     // Observability: what this round cost and how much of the change it had
     // to judge. The duration is an UPPER BOUND — the reviewer is its own pi
