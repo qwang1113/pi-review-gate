@@ -75,8 +75,10 @@ export type PendingAudit =
  *   round, an unreadable report stamp against a checkpoint that DOES exist)
  *   fails CLOSED — it is never recorded on the strength of the other half.
  *
- *   The ONE exception, and it is not a weakening: a repo with no checkpoint at
- *   all is the "audit the exit goal" round (`prepare_review`, empty range,
+ *   The ONE exception, and it is not a weakening: NO checkpoint record in the
+ *   gate's own state (not "no checkpoint commit in git" — the record lives in
+ *   the session's sidecar and starts empty every session) is the "audit the
+ *   exit goal" round (`prepare_review`, empty range,
  *   clean worktree), where nothing is frozen for a verdict to lag behind.
  *   Refusing it would not fail closed, it would make that round unclosable —
  *   no record, no round end, no reachable READY. The round binding and the

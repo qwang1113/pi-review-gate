@@ -379,8 +379,9 @@ report 没有可解析的 `at` —— 一律不记录。goal / plan / adviser �
 （`roundBindingFor` 只给 review 塞 content 时间戳），否则一个还没 checkpoint 过的新会话的第一次
 goal 审计就会永远等不到结论。
 
-**唯一的例外，而且它不是放水（2026-09-05，reviewer 的 P1 + 用户当场裁决）**：整个 repo **一条
-checkpoint 都没有**时不拒绝。那正是 `prepare_review` 明确支持的「audit the exit goal」轮 ——
+**唯一的例外，而且它不是放水（2026-09-05，reviewer 的 P1 + 用户当场裁决）**：**门禁状态里一条
+checkpoint 记录都没有**时不拒绝（注意是门禁状态、不是 git 历史 —— 记录在会话自己的 sidecar 里，
+换 session 即从空开始）。那正是 `prepare_review` 明确支持的「audit the exit goal」轮 ——
 空范围（HEAD..HEAD）、要求工作区干净、reviewer 判的是任务是否完成而不是 diff；这种轮次里**没有
 被冻结的内容**可供裁决滞后。对它 fail-closed 换不来安全，只换来**不可收敛**：记录侧永远不记、
 探测侧（本轮改动后）永远不收口、READY 永远拿不到。此时 round 绑定与游标照常强制，上一轮遗留的

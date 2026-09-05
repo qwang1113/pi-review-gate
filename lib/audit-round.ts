@@ -217,8 +217,10 @@ export function selectRoundReport(
   // unreadable report stamp is refused rather than waved through on the round.
   //
   // NO CONTENT STAMP AT ALL IS A DIFFERENT CASE, and it is not refused
-  // (reviewer P1, 2026-09-05; user decision the same day). A repo with no
-  // `checkpoint` on record is the round `prepare_review` calls the "audit the
+  // (reviewer P1, 2026-09-05; user decision the same day). No `checkpoint`
+  // record in the gate's STATE — which is the session's own sidecar, empty at
+  // the start of every session, whatever git history holds — is the round
+  // `prepare_review` calls the "audit the
   // exit goal" round: nothing is frozen, the range is empty (HEAD..HEAD) and
   // the reviewer judges whether the task is DONE. There is no content for the
   // verdict to lag behind — and refusing it does not fail closed in any useful
