@@ -67,6 +67,11 @@ import {
   type NormalizedBoundary,
 } from "./orchestrator-boundaries.ts";
 import type { OrchestratorPlan, TaskExecution } from "./orchestrator-plan.ts";
+import {
+  DEFAULT_DELIVERY_STATION,
+  isStationWidening,
+  type DeliveryStation,
+} from "./delivery-station.ts";
 
 /** The authorization-relevant shape of one task, as the user approved it. */
 export interface ApprovedTaskSnapshot {
@@ -92,6 +97,15 @@ export interface ApprovedPlanSnapshot {
   /** ISO time the user approved it. */
   at: string;
   maxParallel: number;
+  /**
+   * The station the user approved (2026-09-06).
+   *
+   * Optional because runtimes written before the field existed have none —
+   * and a missing value is read as the STRICTEST station (`precommit`), so an
+   * old snapshot can only ever make the next edit look like a widening, never
+   * like less of one.
+   */
+  deliveryStation?: DeliveryStation;
   tasks: ApprovedTaskSnapshot[];
 }
 
@@ -105,6 +119,7 @@ export function snapshotApprovedPlan(
     hash,
     at,
     maxParallel: plan.maxParallel,
+    deliveryStation: plan.deliveryStation,
     tasks: plan.tasks.map((task) => ({
       id: task.id,
       fileBoundaries: [...task.fileBoundaries],
@@ -227,6 +242,19 @@ export function decideApprovalCarry(
     widenings.push(`并行上限从 ${approved.maxParallel} 提到 ${next.maxParallel}`);
   } else if (next.maxParallel < approved.maxParallel) {
     amendments.push(`并行上限从 ${approved.maxParallel} 降到 ${next.maxParallel}`);
+  }
+
+  // THE DELIVERY STATION (2026-09-06) is authority, so it is classified the
+  // same way parallelism is: raising it (precommit → commit → pr) hands the
+  // orchestration ship commands the user never granted and revokes the
+  // approval; lowering it takes authority away and carries. A snapshot with
+  // no station at all is read as the strictest one, so an approval predating
+  // the field can only be asked about again, never silently widened.
+  const approvedStation = approved.deliveryStation ?? DEFAULT_DELIVERY_STATION;
+  if (isStationWidening(approvedStation, next.deliveryStation)) {
+    widenings.push(`交付站点从 ${approvedStation} 提到 ${next.deliveryStation}（放开了更多 ship 命令）`);
+  } else if (approvedStation !== next.deliveryStation) {
+    amendments.push(`交付站点从 ${approvedStation} 收紧到 ${next.deliveryStation}`);
   }
 
   const approvedById = new Map(approved.tasks.map((task) => [task.id, task]));

@@ -58,6 +58,18 @@ import {
   checkGoalDraft,
   type GoalPrereviewDeps,
 } from "./goal-prereview-tools.ts";
+import {
+  buildRestatementMissingRefusal,
+  restatementConfirmed,
+  restatementRequiredInMode,
+} from "./restatement.ts";
+import {
+  DELIVERY_STATION_CHOICES,
+  deliveryStationLine,
+  isDeliveryStation,
+  parseDeliveryStation,
+  type DeliveryStation,
+} from "./delivery-station.ts";
 
 /** Just enough of pi's tool context for a dialog and a transcript notice. */
 export interface GoalUiContext {
@@ -155,6 +167,27 @@ export async function doProposeLoopGoal(
   const { goalText, root: goalRoot } = checked;
   const goalSt = deps.stateFor(goalRoot);
 
+  // L8a REQUIREMENT RESTATEMENT — fail-closed, and ahead of the audit
+  // (2026-09-06, user ask). The step it enforces is "say the requirement back
+  // and have the user confirm it BEFORE any contract is drafted", so checking
+  // it after a minutes-long audit would enforce the wrong order and bill the
+  // user for it. Like the audit below, the refusal renders NO dialog: a
+  // session that skipped the step costs one refusal text.
+  //
+  // Scope, not an escape hatch: explore/normal sessions have no contract to
+  // protect (lib/restatement.ts's restatementRequiredInMode). The mode is
+  // read from the SESSION's own repo state — a goal may bind to a second
+  // repo, but the gate mode is a property of the session, not of the repo it
+  // is writing into.
+  const sessionMode = deps.stateFor(deps.primaryRepoRoot()).taskMode;
+  if (restatementRequiredInMode(sessionMode) && !restatementConfirmed(goalSt.restatement)) {
+    return {
+      content: [{ type: "text", text: buildRestatementMissingRefusal("propose_loop_goal") }],
+      details: { approved: false, restated: false },
+      isError: true,
+    };
+  }
+
   // L8b GOAL PRE-REVIEW — fail-closed, and BEFORE any user-facing surface.
   // The user is only ever asked about a draft a dedicated auditor already
   // judged, and the gate RUNS that audit itself (philosophy two): the
@@ -243,6 +276,15 @@ export async function doProposeLoopGoal(
   // already required a PASS bound to this text, so this reads it directly
   // rather than advertising a fallback state that cannot occur.
   const prereviewLine = "goal-auditor 预审: PASS @ " + goalSt.goalPrereview!.at;
+  // WHERE THIS ROUND STOPS (2026-09-06). Three sources, most specific first:
+  // an explicit `station` parameter, then the station the user already agreed
+  // to when they confirmed the restatement, then the strictest value. The
+  // user is SHOWN it in both surfaces — a station nobody read is a contract
+  // term nobody agreed to — and it is recorded beside the approval.
+  const station: DeliveryStation = isDeliveryStation(String(params.station ?? "").trim().toLowerCase())
+    ? parseDeliveryStation(params.station)
+    : (goalSt.restatement?.station ?? parseDeliveryStation(undefined));
+  const stationLine = deliveryStationLine(station);
   // The goal approval is one of the two dialogs an ORCHESTRATOR may
   // answer on the user's behalf, so it goes through the channel funnel
   // below (`askEitherSide` with topic `goal-approval`) rather than
@@ -252,7 +294,8 @@ export async function doProposeLoopGoal(
   deps.showToUser(
     uiCtx,
     GOAL_CONFIRM_TITLE,
-    buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" + prereviewLine,
+    buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" +
+      stationLine + "\n" + prereviewLine,
   );
   // EITHER the user or (when this session is an orchestration child) the
   // project manager may answer. The channel request carries the FULL draft
@@ -281,7 +324,10 @@ export async function doProposeLoopGoal(
         const ok = await deps.confirmBounded(
           uiCtx,
           goalDialogTitle,
-          buildGoalConfirmMessage(goalText, "绑定仓库(不可信数据): " + repoLine + "\n" + prereviewLine),
+          buildGoalConfirmMessage(
+            goalText,
+            "绑定仓库(不可信数据): " + repoLine + "\n" + stationLine + "\n" + prereviewLine,
+          ),
           "（目标全文见上方消息）",
           signal,
         );
@@ -390,7 +436,15 @@ export async function doProposeLoopGoal(
       isError: true,
     };
   }
-  goalSt.loopGoal = { hash: goalTextHash(goalText), at: new Date().toISOString(), ...(reason ? { reason } : {}) };
+  goalSt.loopGoal = {
+    hash: goalTextHash(goalText),
+    at: new Date().toISOString(),
+    // Recorded from the SAME value both consent surfaces displayed, never
+    // re-derived afterwards: the station the user saw is the station the
+    // contract carries.
+    station,
+    ...(reason ? { reason } : {}),
+  };
   // This goal's negotiation is over, so its audit count ends with it: the
   // NEXT goal's first audit must announce round 1, not round N+1.
   delete goalSt.goalAuditRound;
@@ -405,10 +459,11 @@ export async function doProposeLoopGoal(
       text: `review-gate: goal approved and written to ${deps.loopGoalRelPath} (repo: ${goalRoot}). Work to it; if it has to ` +
 
         "change, renegotiate with the user and call propose_loop_goal again (editing the file " +
-        "yourself drops the approval and blocks shipping)." +
+        "yourself drops the approval and blocks shipping).\n" +
+        stationLine +
         (reason ? `\nUser's note on approval: ${reason}` : ""),
     }],
-    details: { approved: true, reason: reason ?? null },
+    details: { approved: true, station, reason: reason ?? null },
   };
 }
 
@@ -425,6 +480,8 @@ export function registerGoalTools(host: ToolHost, deps: GoalToolDeps): void {
     label: "Propose Loop Goal",
     description:
       "Submit the NEGOTIATED loop goal (this session's exit contract) for the user's approval. " +
+      "REQUIRED BEFORE THIS, in loop / orchestrator mode: a restatement the user confirmed " +
+      "(`propose_restatement`) — without one this tool refuses outright and shows NO dialog. " +
       "Interview the user first — ONE question per turn, labeled \"N of M\", each with your " +
       "recommended answer (all at once only when the user asks for it) — and only " +
       "submit what they actually agreed to. Write the goal in SIMPLIFIED CHINESE (technical " +
@@ -439,13 +496,21 @@ export function registerGoalTools(host: ToolHost, deps: GoalToolDeps): void {
       "commit/push/PR and its body is withheld from your prompt. Shape: task title, one-line " +
       "intent, 3–7 checkable exit criteria, non-goals, ISO date. `repo` selects WHICH repo the " +
       "goal binds to (default: this session's repo) — a multi-repo session approves a goal per " +
-      "repo before editing there; one repo's approval never opens another's write surface.",
+      "repo before editing there; one repo's approval never opens another's write surface. " +
+      "`station` says where THIS round stops (" + DELIVERY_STATION_CHOICES + "); omit it and the " +
+      "station the user confirmed with the restatement is carried over (nothing on record ⇒ " +
+      "precommit, the strictest). It is shown to the user in the approval dialog.",
     parameters: Type.Object({
       goal: Type.String({ description: "The full goal text (Markdown) as agreed with the user" }),
       repo: Type.Optional(Type.String({
         description:
           "Absolute path of the repo this goal binds to (default: the session repo). Required to " +
           "unlock edit/write in a SECOND repo the session works in.",
+      })),
+      station: Type.Optional(Type.String({
+        description:
+          "Where this round stops: " + DELIVERY_STATION_CHOICES + ". Default: the restatement's " +
+          "station, else precommit. Only pass it when the user agreed to a DIFFERENT station.",
       })),
     }),
     execute: (_id, params, signal, onUpdate, ctx) => doProposeLoopGoal(deps, params, ctx, onUpdate, signal),

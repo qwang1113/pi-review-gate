@@ -163,8 +163,13 @@ export interface ChannelRequestRecord extends ChannelRecordBase {
    * user's behalf is constraint 8, and the draft the boundary check judges is
    * the `payload` of THIS record — written by the child itself, so a
    * hand-copied text can neither widen nor narrow what gets approved (R-7).
+   *
+   * `restatement` (2026-09-06) is the requirement restatement a child must get
+   * confirmed BEFORE it negotiates a goal. It travels the same way, carrying
+   * the full restatement as its `payload`, so a project manager answering for
+   * the user judges the child's own words rather than a retyped summary.
    */
-  topic?: "goal-approval" | "goal-reason" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "other";
+  topic?: "goal-approval" | "goal-reason" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "scope-limit" | "sensitive-edit" | "other";
   title: string;
   /** The exact rows offered, in order. Empty for `input`. */
   options: string[];

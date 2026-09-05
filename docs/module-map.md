@@ -451,7 +451,7 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（114 个模块）
+## 五、`lib/` 全量速查表（116 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -482,6 +482,7 @@ fail-closed）。`model-diagnose.ts`
 | `copilot-gh.ts` | L7 的 gh 访问层：`gh` 以 argv 异步 spawn（超时 + abort），PR / 线程 payload / 可用性探测都在这里 |
 | `copilot-review-tools.ts` | 工具 `request_copilot_review` / `check_copilot_review`：L7 状态机的两个驱动端，gh 访问经注入的 seam |
 | `copilot-review.ts` | L7：PR 之后的 Copilot 审查闭环（请求、等待、逐 thread 消账） |
+| `delivery-station.ts` | 交付站点（`precommit` / `commit` / `pr`）：类型、解析与缺省（缺失或非法一律读成 `precommit`）、严格度排序与「某站点放行哪些 `ShipCommandKind`」的纯判定；无 fs、无时钟，goal 侧与 plan 侧共用同一份枚举 |
 | `dialog-budget.ts` | 确认对话框的渲染行数预算——宿主不截断，长度必须自己管 |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |
 | `edit-projection.ts` | 从 edit/write 入参投影出改后完整文件内容，供标签检查看到上下文 |
@@ -557,6 +558,7 @@ fail-closed）。`model-diagnose.ts`
 | `progress-stream.ts` | 长耗时门禁工具的实时进度输出 |
 | `project-config.ts` | 每项目门禁配置 `.pi/review-gate.json` 的解析与层叠 |
 | `repo-resolve.ts` | 多仓解析：裁决绑定到编辑真正发生的那个仓库 |
+| `restatement.ts` | L8a 需求反述：记录（正文 + hash + 时间 + 站点，落 gate-state 而非工作区）、内容最小校验（长度 + 必须有「改之前 → 改之后」对照，接受的写法在导出的 `RESTATEMENT_CONTRAST_TOKENS` 数组里）、两处拒绝文案（含可照抄骨架与 `request_arbitration` 出路）、确认框文案，以及工具 `propose_restatement` 的唯一注册入口 |
 | `review-baseline.ts` | 审查基线解析：链被 squash/rebase 后按内容找回基线 |
 | `review-adjudicate.ts` | reviewer 裁决（纯）：在 judge 交上来的结构化结论上判 READY 携带未解决 P0/P1 → BLOCKED、findings 计数、跨轮 coarse fingerprint；另有 verdict 规范化与两个投影（per-file 给 polish gate、severity+issue 给 goal/plan 审计） |
 | `review-prepare-tools.ts` | **内部实现**（不注册给 pi）：算不可变的 `baseline..HEAD`、polish gate、findings 流，并登记裁决要绑定的 review target；由 `judge_submit` 调用 |

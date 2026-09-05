@@ -339,9 +339,16 @@ plan，把每一处差异归入两类之一：
 `plan.decisions` 有无未解决（缺 `resolvedAt`）的需求决策、任务书是否达到『子会话拿到
 就能独立协商 goal』的完整度（只写『做分页』没有交互/边界/验收标准就是 P1）、以及读
 PM 的 transcript 里 ask_user/grillme 的 Q&A 段验证澄清结论真的落进了 plan。
-项目经理同时承担产品经理角色：**plan 提交前必须把涉及的项目代码过一遍，用
-grillme/ask_user 把需求反述澄清，摸清每个子会话的 goal 才能起 plan**，禁止在需求未
-澄清前开工。
+项目经理同时承担产品经理角色：**plan 提交前必须把涉及的项目代码过一遍，摸清每个子
+会话的 goal 才能起 plan**，禁止在需求未澄清前开工。
+
+**需求反述已经是门禁固化的前置步骤（2026-09-06）**，不再靠这段劝导：`submit` 在派审计
+之前先查「有没有一份用户确认过的反述」（`propose_restatement` 写进 gate-state 的
+`restatement` 记录），没有就**直接退拒绝文案、一个框都不弹**，与审计不过同一形态。
+反述要写的内容、接受哪些「改之前 → 改之后」写法、拒绝文案里那份可照抄的骨架，
+唯一出处是 `lib/restatement.ts`——这里不复述。同一次确认里还定下**本轮交付站点**
+（`precommit` / `commit` / `pr`），它同时是 plan 的 `deliveryStation` 字段（缺省 `precommit`，
+进 canonical 文本因此进批准 hash）。
 
 **loop 侧配套（2026-09-17）**：loop 模式下累计 60 轮未获批 loop goal（`turnsWithoutGoal`
 持久化计数，重启延续），门禁在每轮注入强提示要求先协商 goal 再干活（只注入提示、

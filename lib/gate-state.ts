@@ -24,6 +24,8 @@ import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mo
 import { normalizeRuntime } from "./orchestrator-registry.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
+import { restatementHash, type RestatementRecord } from "./restatement.ts";
+import { isDeliveryStation } from "./delivery-station.ts";
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
 import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
 
@@ -469,6 +471,20 @@ export interface GateState {
    * starts injecting the force-negotiate directive.
    */
   turnsWithoutGoal?: number;
+  /**
+   * The user-confirmed REQUIREMENT RESTATEMENT for this repo (2026-09-06):
+   * what the session said the requirement is, plus the delivery station the
+   * user agreed this round stops at (lib/restatement.ts).
+   *
+   * Absent ⇒ nothing was restated: `propose_loop_goal` and
+   * `orchestrator_plan({action:"submit"})` refuse WITHOUT rendering a dialog.
+   * Like {@link loopGoal} it stays out of {@link unmetRequirements} — the git
+   * hooks cannot show a dialog, so a requirement they could never unblock has
+   * no business arming them. It deliberately OUTLIVES the drafts that follow
+   * it (a rejected goal does not mean the requirement changed); a fresh
+   * `propose_restatement` overwrites it.
+   */
+  restatement?: RestatementRecord;
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of
    *  them. Ship enforcement never reads it; absence just narrows the
@@ -761,6 +777,15 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
          (parsed.loopGoal.reason !== undefined && typeof parsed.loopGoal.reason !== "string"))) {
       delete parsed.loopGoal;
     }
+    // The goal's delivery station (2026-09-06) is metadata BESIDE the
+    // approval, so a broken one drops the FIELD and never the approval: the
+    // reader degrades a missing station to `precommit`, the strictest value,
+    // which is exactly what an unreadable one should mean. Dropping the whole
+    // record instead would revoke an approval the user really gave over a
+    // field that grants nothing.
+    if (parsed.loopGoal?.station !== undefined && !isDeliveryStation(parsed.loopGoal.station)) {
+      delete parsed.loopGoal.station;
+    }
     // L8b: a MALFORMED pre-review record is treated as ABSENT — fail-closed
     // here means "never audited", so a truncated or shape-broken record costs
     // one fresh goal-auditor round instead of opening a dialog. This is a
@@ -812,6 +837,27 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     if (parsed.turnsWithoutGoal !== undefined &&
       (typeof parsed.turnsWithoutGoal !== "number" || !Number.isFinite(parsed.turnsWithoutGoal) || parsed.turnsWithoutGoal < 0)) {
       delete parsed.turnsWithoutGoal;
+    }
+    // The REQUIREMENT RESTATEMENT (2026-09-06). Dropped WHOLE on any doubt,
+    // and unlike every neighbour above this one re-computes the hash: the
+    // record carries the confirmed TEXT, so `text` and `hash` disagreeing
+    // means the pair was not written by `propose_restatement` — corruption or
+    // an assembled record — and both readings are "nobody confirmed this".
+    // Fail-closed here costs one fresh confirmation dialog; fail-open would
+    // let a contract be negotiated against an understanding the user never
+    // saw. The station is validated against the three known values, and a
+    // record whose station alone is broken is dropped with it rather than
+    // silently downgraded: a confirmation the user gave for `pr` must not
+    // survive as something else.
+    if (parsed.restatement !== undefined) {
+      const rec = parsed.restatement as Partial<RestatementRecord> | null;
+      const ok = !!rec && typeof rec === "object" &&
+        typeof rec.text === "string" && rec.text.trim().length > 0 &&
+        typeof rec.hash === "string" && /^[0-9a-f]{64}$/.test(rec.hash) &&
+        typeof rec.at === "string" &&
+        isDeliveryStation(rec.station) &&
+        restatementHash(rec.text) === rec.hash;
+      if (!ok) delete parsed.restatement;
     }
     // The ask_user record is diagnostic, so a malformed one is dropped whole:
     // no enforcement path reads it, and half a record answers nothing.

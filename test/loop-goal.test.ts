@@ -634,6 +634,9 @@ test("buildGoalForceNegotiateDirective: names the count, the threshold and the O
   assert.match(below, /30\/60/);
   assert.match(below, /ask_user/);
   assert.match(below, /propose_loop_goal/);
+  // 2026-09-06: the directive has to name the step that comes FIRST, or a
+  // session following it lands straight in the restatement refusal.
+  assert.match(below, /propose_restatement/);
   const overdue = buildGoalForceNegotiateDirective(60);
   assert.match(overdue, /已达 60 轮（阈值 60）/);
   assert.match(overdue, /先协商，再干活/);

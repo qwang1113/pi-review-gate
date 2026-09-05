@@ -322,12 +322,75 @@ async function recordPrereview(pi: ToolMap, ctx: unknown, goal: string, repo?: s
   );
 }
 
+/**
+ * A restatement that satisfies the L8a content check (2026-09-06): it carries
+ * the before/after contrast the rule is about, and it is long enough to be a
+ * restatement rather than a gesture.
+ */
+const RESTATEMENT_TEXT = [
+  "1. 这件事是什么：本次会话要改的是 loop 会话的退出契约流程。",
+  "2. 举个例子：会话读完代码后先把需求说回给用户。",
+  "3. 改之前：直接 propose_loop_goal 谈 goal。",
+  "4. 改之后：先 propose_restatement 得到确认，再谈 goal。",
+  "5. 哪几步会变得不同：谈 goal 之前多一步反述确认。",
+].join("\n");
+
+/** The L8a step every loop-mode goal negotiation must pass through now. */
+async function confirmRestatement(pi: ToolMap, ctx: unknown, repo?: string, station = "precommit") {
+  const params: Record<string, unknown> = { restatement: RESTATEMENT_TEXT, station };
+  if (repo) params.repo = repo;
+  const out = await tool(pi, "propose_restatement")("id", params, undefined, undefined, ctx);
+  assert.equal((out as { details: { confirmed?: boolean } }).details.confirmed, true,
+    "the restatement must be confirmed by the mock dialog");
+}
+
 async function approveGoal(pi: ToolMap, ctx: unknown, goal: string, repo?: string) {
+  // L8a first — in loop mode the goal tool refuses without it (and shows no
+  // dialog), which is exactly what the gate now enforces.
+  await confirmRestatement(pi, ctx, repo);
   await recordPrereview(pi, ctx, goal, repo);
   const result = await tool(pi, "propose_loop_goal")("id", repo ? { goal, repo } : { goal }, undefined, undefined, ctx);
   assert.equal((result as { details: { approved?: boolean } }).details.approved, true, "goal must be approved by the mock dialog");
 }
 
+
+
+test("L8a: in LOOP mode a goal is REFUSED until the user confirmed a restatement — no dialog", async () => {
+  // End to end through the real extension: the tool is registered, its state
+  // is the session's sidecar, and the refusal happens even when the audit
+  // would have passed — the restatement is the EARLIER step of the same
+  // negotiation, so it cannot be satisfied by getting the draft audited.
+  const repo = makeRepo();
+  const pi = makeMockPi(repo);
+  reviewGate(pi as never);
+  const { handlers, ctx } = pi;
+  await handlers.get("session_start")!({}, ctx);
+  await setMode(pi, ctx, "loop");
+  await recordPrereview(pi, ctx, GOAL_TEXT); // the audit is NOT what is missing
+
+  let dialogs = 0;
+  const uiCtx = ctx as { ui: { confirm: (t: string, m: string) => Promise<boolean> } };
+  uiCtx.ui.confirm = async () => { dialogs++; return true; };
+
+  const refused = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT }, undefined, undefined, ctx);
+  assert.equal((refused as { isError?: boolean }).isError, true);
+  assert.equal((refused as { details: { restated?: boolean } }).details.restated, false);
+  assert.equal(dialogs, 0, "the user must not be asked to approve a goal nobody restated for them");
+  assert.equal(readSidecar(repo).loopGoal, undefined);
+  assert.match(JSON.stringify(refused), /propose_restatement/, "the refusal names the step it wants");
+  assert.match(JSON.stringify(refused), /request_arbitration/, "…and the appeal route if it is a misjudgement");
+
+  // The step itself, then the goal: one confirmation unblocks the negotiation,
+  // and the station the user agreed to travels with it.
+  await confirmRestatement(pi, ctx, undefined, "commit");
+  const sidecar = readSidecar(repo) as { restatement?: { station?: string } };
+  assert.equal(sidecar.restatement?.station, "commit", "the confirmation is persisted in the sidecar");
+  const approved = await tool(pi, "propose_loop_goal")("id", { goal: GOAL_TEXT }, undefined, undefined, ctx);
+  assert.equal((approved as { details: { approved?: boolean } }).details.approved, true);
+  const afterGoal = readSidecar(repo) as { loopGoal?: { station?: string } };
+  assert.equal(afterGoal.loopGoal?.station, "commit",
+    "the goal inherits the station from the restatement the user confirmed");
+});
 
 
 test("L8b: propose_loop_goal is REFUSED without a matching goal-auditor PASS — no dialog at all", async () => {

@@ -15,6 +15,8 @@ import type { ToolHost, ToolReply } from "../lib/tool-host.ts";
 import type { ReportConclusion } from "../lib/orchestrator-channel.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { goalTextHash, LOOP_GOAL_MAX_WRITE_CHARS } from "../lib/loop-goal.ts";
+import { restatementHash, type RestatementRecord } from "../lib/restatement.ts";
+import type { DeliveryStation } from "../lib/delivery-station.ts";
 
 /**
  * The goal tool family used to live inside the 8000-line extension, where
@@ -390,6 +392,117 @@ test("propose: an empty or over-long draft is refused before anything else happe
 // ---------------------------------------------------------------------------
 // registerGoalTools — ONE tool, one host, one entry point
 
+// ---------------------------------------------------------------------------
+// L8a — the restatement precondition (2026-09-06)
+
+/** The confirmed restatement a loop-mode goal submission needs. */
+function confirmedRestatement(station: DeliveryStation = "precommit"): RestatementRecord {
+  const text = [
+    "1. 这件事是什么：把需求反述做成谈 goal 之前的前置步骤。",
+    "2. 举个例子：子会话读完代码先反述，用户确认后才谈 goal。",
+    "3. 改之前：propose_loop_goal 只要审计过就能问用户。",
+    "4. 改之后：没有已确认的反述就直接被拒，一个框都不弹。",
+    "5. 哪几步会变得不同：谈 goal 前多一步 propose_restatement。",
+  ].join("\n");
+  return { text, hash: restatementHash(text), at: "2026-09-06T00:00:00.000Z", station };
+}
+
+test("L8a: in LOOP mode, no confirmed restatement ⇒ refused with NO dialog and NO audit", async () => {
+  const f = fake();
+  f.st.taskMode = "loop";
+  const out = await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.equal(out.isError, true);
+  assert.equal(out.details?.approved, false);
+  assert.equal(out.details?.restated, false);
+  assert.deepEqual(f.surfaces, [],
+    "the refusal costs the user nothing — no transcript echo, no dialog, and no minutes-long audit");
+  assert.equal(f.auditRuns, 0);
+  assert.deepEqual(f.written, []);
+  // Self-rescuing: the refusal names the step and the appeal route.
+  assert.match(out.content[0]!.text, /propose_restatement/);
+  assert.match(out.content[0]!.text, /request_arbitration/);
+});
+
+test("L8a: a broken restatement record (hash ≠ text) is treated as none at all", async () => {
+  const f = fake();
+  f.st.taskMode = "loop";
+  f.st.restatement = { ...confirmedRestatement(), hash: "0".repeat(64) };
+  const out = await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.equal(out.details?.restated, false, "a record that cannot prove itself is not a confirmation");
+  assert.deepEqual(f.surfaces, []);
+});
+
+test("L8a: it is SCOPE, not a gate — explore/normal sessions are not asked to restate", async () => {
+  for (const mode of ["explore", "normal"] as const) {
+    const f = fake();
+    f.st.taskMode = mode;
+    f.deps.runGoalAudit = async () => {
+      f.auditRuns += 1;
+      f.surfaces.push("audit");
+      await recordGoalPrereview(f.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+      return { ok: true };
+    };
+    const out = await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+    assert.equal(out.details?.approved, true, `${mode} mode must still be able to approve a goal`);
+  }
+});
+
+test("L8a: with a confirmed restatement the goal flows, and its STATION is carried over", async () => {
+  const f = fake();
+  f.st.taskMode = "loop";
+  f.st.restatement = confirmedRestatement("commit");
+  await recordGoalPrereview(f.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+  const out = await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.equal(out.details?.approved, true);
+  assert.equal(out.details?.station, "commit");
+  assert.equal(f.st.loopGoal?.station, "commit",
+    "the goal inherits the station the user already agreed to; it is not re-asked");
+});
+
+test("L8a: an explicit station overrides the restatement's; an unreadable one falls back", async () => {
+  const explicit = fake();
+  explicit.st.taskMode = "loop";
+  explicit.st.restatement = confirmedRestatement("precommit");
+  await recordGoalPrereview(explicit.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+  await doProposeLoopGoal(explicit.deps, { goal: GOAL, station: "pr" }, uiCtx(explicit), undefined);
+  assert.equal(explicit.st.loopGoal?.station, "pr");
+
+  const typo = fake();
+  typo.st.taskMode = "loop";
+  typo.st.restatement = confirmedRestatement("commit");
+  await recordGoalPrereview(typo.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+  await doProposeLoopGoal(typo.deps, { goal: GOAL, station: "开 PR" }, uiCtx(typo), undefined);
+  assert.equal(typo.st.loopGoal?.station, "commit",
+    "an unreadable parameter falls back to what the user confirmed, never to something looser");
+
+  const nothing = fake();
+  nothing.st.taskMode = "explore";
+  await recordGoalPrereview(nothing.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+  await doProposeLoopGoal(nothing.deps, { goal: GOAL }, uiCtx(nothing), undefined);
+  assert.equal(nothing.st.loopGoal?.station, "precommit",
+    "no restatement and no parameter ⇒ the strictest station");
+});
+
+test("L8a: the station the user SEES is the station recorded (both surfaces carry it)", async () => {
+  const f = fake();
+  f.st.taskMode = "loop";
+  f.st.restatement = confirmedRestatement("pr");
+  const shown: string[] = [];
+  f.deps.showToUser = (_ctx, _lead, body) => { f.surfaces.push("showToUser"); shown.push(body); return true; };
+  const dialogs: string[] = [];
+  f.deps.confirmBounded = async (_ctx, _title, message) => {
+    f.surfaces.push("confirm");
+    dialogs.push(message);
+    return true;
+  };
+  await recordGoalPrereview(f.deps, { goal: GOAL, conclusion: AUDITOR_PASS }, {});
+  await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.match(shown[0] ?? "", /本轮交付站点/, "the transcript names the station");
+  assert.match(dialogs[0] ?? "", /本轮交付站点/, "and so does the dialog that binds the approval");
+  assert.equal(f.st.loopGoal?.station, "pr");
+});
+
+
 test("registration: the family registers propose_loop_goal and NOTHING else", () => {
   const f = fake();
   const names: string[] = [];
@@ -416,7 +529,10 @@ test("registration: the tool accepts no agent-attested verdict or approval", () 
   const propose = specs.get("propose_loop_goal")!;
   assert.deepEqual(
     Object.keys(propose.parameters.properties ?? {}).sort(),
-    ["goal", "repo"],
+    ["goal", "repo", "station"],
+    // `station` (2026-09-06) says where the round STOPS — it grants nothing:
+    // an unreadable value is read as the strictest station, and the user is
+    // shown the value in the dialog that approves the goal.
     "no `confirmed`/`passed`/`verdict`/`hash` parameter — that would be self-approval",
   );
   assert.match(propose.description, /goal-auditor/, "the agent-facing tool names the audit it runs");

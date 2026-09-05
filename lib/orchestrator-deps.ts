@@ -22,6 +22,7 @@ import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 
 
 import type { TaskMode } from "./task-mode.ts";
+import type { RestatementRecord } from "./restatement.ts";
 
 /**
  * The tool-registration seam moved to lib/tool-host.ts once a SECOND family
@@ -63,6 +64,17 @@ export interface OrchestratorDeps {
   env(): NodeJS.ProcessEnv;
   /** Current gate mode — the tools refuse outside orchestrator mode. */
   taskMode(): TaskMode | undefined;
+  /**
+   * The REQUIREMENT RESTATEMENT the user confirmed for this repo, if any
+   * (2026-09-06). `submit` refuses without one, and shows no dialog when it
+   * does — the plan is the orchestration layer's contract, and a contract is
+   * negotiated only after both sides agree on what was asked.
+   *
+   * REQUIRED, not optional: an optional member would make "the extension
+   * forgot to wire it" indistinguishable from "the user never restated", and
+   * the two have opposite fail directions.
+   */
+  restatement(): RestatementRecord | undefined;
 
   /** The orchestration's persistent runtime (registry + approvals). */
   runtime(): OrchestratorRuntime;

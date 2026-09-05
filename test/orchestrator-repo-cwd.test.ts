@@ -45,6 +45,9 @@ function depsWith(repoRoot: string) {
   const host: OrchestratorHostBindings = {
     repoRoot,
     taskMode: () => "orchestrator" as const,
+    // These tests drive repo resolution and identity, not the plan gate, so
+    // the restatement binding only has to exist.
+    restatement: () => undefined,
     loadRuntime: () => undefined,
     storeRuntime: () => {},
     orchestrationId: () => "orch-test-1",
@@ -117,6 +120,7 @@ test("runtimeConflict: fresh session + foreign sidecar runtime => the foreign id
   const host: OrchestratorHostBindings = {
     repoRoot: root,
     taskMode: () => "orchestrator" as const,
+    restatement: () => undefined,
     // The sidecar holds ANOTHER orchestration's runtime.
     loadRuntime: () => ({
       orchestrationId: "orch-deadbeef-OLD",
@@ -142,6 +146,7 @@ test("runtimeConflict: a relay successor (env id present) is NOT a conflict", ()
   const host: OrchestratorHostBindings = {
     repoRoot: root,
     taskMode: () => "orchestrator" as const,
+    restatement: () => undefined,
     loadRuntime: () => ({
       orchestrationId: "orch-deadbeef-OLD",
       children: [],
@@ -165,6 +170,7 @@ test("runtimeConflict: no sidecar runtime is never a conflict", () => {
   const host: OrchestratorHostBindings = {
     repoRoot: root,
     taskMode: () => "orchestrator" as const,
+    restatement: () => undefined,
     loadRuntime: () => undefined,
     storeRuntime: () => {},
     orchestrationId: () => "orch-12345678-NEW",

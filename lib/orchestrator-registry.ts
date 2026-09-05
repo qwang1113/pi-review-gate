@@ -29,6 +29,7 @@
 
 import { emptyNotifyHistory, type NotifyHistory } from "./orchestrator-notify.ts";
 import type { ApprovedPlanSnapshot } from "./orchestrator-plan-approval.ts";
+import { isDeliveryStation } from "./delivery-station.ts";
 import { isPaneId } from "./orchestrator-tmux.ts";
 
 
@@ -470,6 +471,14 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     : undefined;
   if (!at || maxParallel === undefined || !Array.isArray(obj.tasks)) return undefined;
 
+  // The approved DELIVERY STATION (2026-09-06). Authorizing, like `repo` on a
+  // task: it decides which ship commands the orchestration may reach, so it
+  // has to survive the round trip or `decideApprovalCarry` would read a plan
+  // approved at `pr` as one approved at the default and misjudge a later
+  // change. Unreadable ⇒ left undefined, which the carry check reads as the
+  // STRICTEST station — the fail-closed direction (it can only cost a dialog).
+  const deliveryStation = isDeliveryStation(obj.deliveryStation) ? obj.deliveryStation : undefined;
+
   const tasks: ApprovedPlanSnapshot["tasks"] = [];
   for (const entry of obj.tasks) {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return undefined;
@@ -492,7 +501,7 @@ function normalizeApprovedPlan(raw: unknown, hash: string | undefined): Approved
     const repo = typeof task.repo === "string" && task.repo.length > 0 ? task.repo : undefined;
     tasks.push({ id, fileBoundaries, dependsOn, execution, ...(repo ? { repo } : {}) });
   }
-  return { hash: snapshotHash, at, maxParallel, tasks };
+  return { hash: snapshotHash, at, maxParallel, tasks, ...(deliveryStation ? { deliveryStation } : {}) };
 }
 
 /** How many amendment entries are kept — enough to explain, bounded on purpose. */

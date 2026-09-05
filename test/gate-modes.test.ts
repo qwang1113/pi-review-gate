@@ -92,7 +92,12 @@ test("opening the appeal route opened EXACTLY one name", () => {
   const opened = [...BEFORE].filter((tool) => !JUDGE_DENIED_TOOLS.has(tool));
   const added = [...JUDGE_DENIED_TOOLS].filter((tool) => !BEFORE.has(tool));
   assert.deepEqual(opened, ["request_arbitration"], "only the appeal route was opened");
-  assert.deepEqual(added, [], "no tool was newly denied");
+  // ONE tool was denied since that snapshot, deliberately: `propose_restatement`
+  // (2026-09-06) is the requirement-negotiation step, and a reporting shell
+  // judges a change against a contract somebody else agreed — it does not
+  // negotiate one. Anything else appearing here is an undecided denial.
+  assert.deepEqual(added, ["propose_restatement"],
+    "the only tool denied since the 2026-09-05 snapshot is the restatement step");
   // The ship commands are not in this set at all — they are refused by L1, and
   // no appeal class can ever authorize them.
   for (const ship of ["git commit", "git push", "gh pr create"]) {

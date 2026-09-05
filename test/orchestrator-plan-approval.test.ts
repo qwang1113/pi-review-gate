@@ -32,6 +32,7 @@ import {
 } from "../lib/orchestrator-plan-approval.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
 import { buildPlanConfirmMessage } from "../lib/orchestrator-tools.ts";
+import { normalizeRuntime } from "../lib/orchestrator-registry.ts";
 
 
 /** The plan shape the round-4 run actually used: one file per task. */
@@ -142,6 +143,61 @@ test("every OTHER kind of widening still stops at the user", () => {
   const movedRepo = decideApprovalCarry(base, withTask(plan, "t1", { repo: "/other-repo" }));
   assert.equal(movedRepo.carries, false, "moving a task to another repo is a NEW write surface");
   assert.match(movedRepo.widenings.join("\n"), /repo/, "the widening names the repo change");
+});
+
+test("the DELIVERY STATION is authority: raising it revokes, lowering it carries", () => {
+  // 2026-09-06. `pr` authorizes the orchestration to publish; nobody may hand
+  // it that between two dialogs. The mirror case matters just as much: a
+  // manager tightening its own contract must not have to wake the user.
+  const plan = fileGrainPlan();
+  const base = approved({ ...plan, deliveryStation: "precommit" });
+
+  const raised = decideApprovalCarry(base, { ...plan, deliveryStation: "pr" });
+  assert.equal(raised.carries, false);
+  assert.match(raised.widenings.join("\n"), /交付站点/, "the widening says what changed");
+
+  const tightened = decideApprovalCarry(
+    approved({ ...plan, deliveryStation: "pr" }), { ...plan, deliveryStation: "commit" },
+  );
+  assert.equal(tightened.carries, true);
+  assert.match(tightened.amendments.join("\n"), /交付站点/, "…and a tightening is still recorded");
+
+  const unchanged = decideApprovalCarry(base, { ...plan, deliveryStation: "precommit" });
+  assert.deepEqual(unchanged.widenings, []);
+  assert.deepEqual(unchanged.amendments, []);
+});
+
+test("a snapshot from BEFORE the station existed is read as the strictest one", () => {
+  // Old runtimes on disk have no `deliveryStation`. Reading that as "whatever
+  // the new plan says" would silently grant `pr`; reading it as `precommit`
+  // can only cost one dialog.
+  const plan = fileGrainPlan();
+  const legacy = { ...approved(plan), deliveryStation: undefined };
+  assert.equal(decideApprovalCarry(legacy, { ...plan, deliveryStation: "pr" }).carries, false);
+  assert.equal(decideApprovalCarry(legacy, { ...plan, deliveryStation: "precommit" }).carries, true);
+});
+
+test("the approved station SURVIVES the runtime round trip", () => {
+  // `normalizeApprovedPlan` rebuilds the snapshot field by field, so a field
+  // it does not know is silently dropped — which would make every later
+  // station change look like it started from `precommit`.
+  const plan = { ...fileGrainPlan(), deliveryStation: "pr" as const };
+  const runtime = normalizeRuntime({
+    orchestrationId: "orch-deadbeef-abc",
+    children: [],
+    notify: { sentAt: [], lastByKey: {} },
+    approvedPlanHash: planHash(plan),
+    approvedPlanAt: "2026-09-06T10:00:00.000Z",
+    approvedPlan: snapshotApprovedPlan(plan, planHash(plan), "2026-09-06T10:00:00.000Z"),
+  }, "orch-deadbeef-abc");
+  assert.ok(runtime, "the runtime must survive normalization for this test to mean anything");
+  assert.equal(runtime.approvedPlan?.deliveryStation, "pr");
+  // …and with it on record, dropping back to `commit` is an amendment rather
+  // than a re-approval.
+  assert.equal(
+    decideApprovalCarry(runtime.approvedPlan!, { ...plan, deliveryStation: "commit" }).carries,
+    true,
+  );
 });
 
 test("narrowing in every direction is free: fewer tasks, more dependencies, less parallelism", () => {
@@ -273,6 +329,35 @@ test("`write` PRESERVES task status and note — a rewrite is not an execution r
 // ---------------------------------------------------------------------------
 // The audit that now stands between a plan and the human
 // ---------------------------------------------------------------------------
+
+test("submit REFUSES before the audit when nothing was restated — no dialog, no judge", async () => {
+  // 2026-09-06: the restatement is the earlier step of the same negotiation.
+  // Checking it after the audit would bill the user minutes for a plan built
+  // on a reading nobody confirmed.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), restatement: null });
+  world.confirmAnswers.push(true); // would approve, if it were ever asked
+
+  const reply = await world.call("orchestrator_plan", { action: "submit" });
+
+  assert.equal(reply.isError, true);
+  assert.equal(reply.details?.restated, false);
+  assert.equal(world.planAudits(), 0, "the minutes-long audit never started");
+  assert.equal(world.confirmAnswers.length, 1, "and the user was never shown a dialog");
+  assert.equal(world.runtime().approvedPlanHash, undefined);
+  // The refusal has to get the NEXT session unstuck by itself.
+  assert.match(replyText(reply), /propose_restatement/);
+  assert.match(replyText(reply), /station/);
+  assert.match(replyText(reply), /request_arbitration/);
+});
+
+test("submit proceeds once a confirmed restatement is on record", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan() }); // the world restates by default
+  world.confirmAnswers.push(true);
+  const reply = await world.call("orchestrator_plan", { action: "submit" });
+  assert.equal(reply.details?.approved, true, replyText(reply));
+  assert.equal(world.planAudits(), 1);
+});
+
 
 test("submit runs the audit FIRST, and a failed audit opens no dialog at all", async () => {
   const world = makeFakeWorld({

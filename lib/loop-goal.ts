@@ -33,6 +33,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TaskMode } from "./task-mode.ts";
+import type { DeliveryStation } from "./delivery-station.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
 
@@ -118,6 +119,18 @@ export interface LoopGoalConfirmation {
    * Never part of the hash — a reason is metadata, not goal text.
    */
   reason?: string;
+  /**
+   * WHERE THIS ROUND STOPS (2026-09-06) — precommit / commit / pr, shown to
+   * the user in the same dialog that approved the goal.
+   *
+   * Optional for one reason only: sidecars written before this field existed
+   * must keep their approval. A missing value is READ as `precommit`
+   * (lib/delivery-station.ts) — the strictest station, which allows no ship
+   * command at all — so an old record can only ever be under-privileged,
+   * never over-privileged. Like `reason` it is NOT part of the hash: the
+   * approval binds to the goal TEXT, and the station travels beside it.
+   */
+  station?: DeliveryStation;
 }
 
 /**
@@ -773,9 +786,10 @@ export function buildGoalForceNegotiateDirective(
   return (
     "## 强制协商 loop goal（门禁，2026-09-17）\n" +
     `你已 ${shown} 未获批 loop goal。` +
-    "继续只读探查或任何其他工作之前，**必须先**用 `ask_user` 采访用户澄清需求，" +
-    "把目标写成简体中文（标识符/路径/代码 token 保持英文），再过 `goal-auditor` 审计，" +
-    "最后 `propose_loop_goal` 请用户批准。goal 未获批前，除了协商 goal 本身，" +
+    "继续只读探查或任何其他工作之前，**必须先**把需求谈清楚：有疑点就用 `ask_user` 问，" +
+    "然后用 `propose_restatement` 把理解反述给用户确认（没有这一步，下面那一步会被门禁直接拒），" +
+    "再把目标写成简体中文（标识符/路径/代码 token 保持英文）交给 " +
+    "`propose_loop_goal`（它自己跑 `goal-auditor` 审计并请用户批准）。goal 未获批前，除了协商 goal 本身，" +
     "其余动作都是死循环的一部分——先协商，再干活。"
   );
 }

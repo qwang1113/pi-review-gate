@@ -3018,8 +3018,12 @@ test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surfac
   // truncated away (the pre-review line is appended AFTER it).
   assert.match(body, /goal-auditor 预审: PASS @/);
   const repoFact = body.indexOf('"绑定仓库(不可信数据): " + repoLine');
-  const prereviewLine = body.indexOf('repoLine + "\\n" + prereviewLine');
-  assert.ok(repoFact > 0 && prereviewLine > 0, "both facts must reach the dialog");
+  // The DELIVERY STATION (2026-09-06) joins them, between the repo binding and
+  // the audit line: the dialog fitter truncates from the tail, and the two
+  // consent-critical facts (which repo, how far this round goes) must be the
+  // ones that survive.
+  const stationLine = body.indexOf('repoLine + "\\n" + stationLine + "\\n" + prereviewLine');
+  assert.ok(repoFact > 0 && stationLine > 0, "repo, station and audit must all reach the dialog");
 });
 // ---------------------------------------------------------------------------
 // L8 — the loop goal is negotiated with the user, not written by the agent
@@ -3039,7 +3043,12 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   assert.match(body, /writeGoalFile\(goalPath/);
   assert.match(GOAL_WIRING(), /writeFileSync\(path, text, "utf8"\)/,
     "…and the wiring really writes the file the module was handed");
-  assert.match(body, /(?:state|goalSt)\.loopGoal = \{ hash: goalTextHash\(goalText\)/);
+  assert.match(body, /(?:state|goalSt)\.loopGoal = \{\s*\n\s+hash: goalTextHash\(goalText\),/);
+  // …and the record carries the station the user was shown in that same dialog
+  // (2026-09-06), taken from the variable both surfaces printed — never
+  // re-derived afterwards.
+  assert.match(body, /const stationLine = deliveryStationLine\(station\)/);
+  assert.match(body, /\n\s+station,\n/);
   // Length-bounded, through the check BOTH goal tools share: the cap lives in
   // one place now, so the audit can never accept a draft the approval refuses.
   assert.match(body, /checkGoalDraft\(\{\n\s+tool: "propose_loop_goal"/,

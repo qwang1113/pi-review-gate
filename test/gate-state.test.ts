@@ -22,6 +22,7 @@ import {
   type GateVerdict,
 } from "../lib/gate-state.ts";
 import { FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
+import { restatementHash } from "../lib/restatement.ts";
 
 const tempDirs: string[] = [];
 function makeTemp(): string {
@@ -1038,6 +1039,71 @@ test("loopGoal: a non-string reason fails closed to ABSENT (not approved)", () =
     const loaded = loadSidecar(path);
     assert.ok(loaded, `sidecar itself must stay valid for reason ${JSON.stringify(bad)}`);
     assert.equal(loaded?.loopGoal, undefined, JSON.stringify(bad));
+  }
+});
+
+test("loopGoal: a broken STATION drops the field, never the approval", () => {
+  // 2026-09-06. The station is metadata beside the approval: a reader
+  // degrades a missing one to `precommit` (the strictest), so dropping the
+  // whole record over it would revoke an approval the user really gave.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  for (const bad of ["ship-it", "", 3, null, {}]) {
+    writeFileSync(path, JSON.stringify({
+      ...base, loopGoal: { hash: "a".repeat(64), at: "t", station: bad },
+    }));
+    const loaded = loadSidecar(path);
+    assert.deepEqual(loaded?.loopGoal, { hash: "a".repeat(64), at: "t" }, JSON.stringify(bad));
+  }
+  // A valid station round-trips untouched.
+  writeFileSync(path, JSON.stringify({
+    ...base, loopGoal: { hash: "a".repeat(64), at: "t", station: "pr" },
+  }));
+  assert.equal(loadSidecar(path)?.loopGoal?.station, "pr");
+});
+
+// ---------------------------------------------------------------------------
+// restatement — the user-confirmed requirement understanding (L8a)
+// ---------------------------------------------------------------------------
+
+test("restatement: a well-formed record round-trips, hash and station included", () => {
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  const text = "改之前：直接谈 goal。改之后：先反述再谈 goal。举例：子会话读完代码先说回需求。";
+  const record = { text, hash: restatementHash(text), at: "2026-09-06T00:00:00.000Z", station: "commit" };
+  writeFileSync(path, JSON.stringify({ ...base, restatement: record }));
+  assert.deepEqual(loadSidecar(path)?.restatement, record);
+});
+
+test("restatement: text and hash disagreeing drops the WHOLE record (fail-closed)", () => {
+  // The one record in the sidecar whose hash is RE-COMPUTED on load: it
+  // carries the confirmed text itself, so a pair that does not verify was not
+  // written by propose_restatement — and "not confirmed" is the safe reading
+  // (it costs one dialog; the opposite would negotiate a contract against an
+  // understanding the user never saw).
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  const text = "改之前：A。改之后：B。举例：某次调用。哪几步不同：多一步确认。";
+  const good = { text, hash: restatementHash(text), at: "t", station: "precommit" };
+
+  for (const broken of [
+    { ...good, hash: "0".repeat(64) },
+    { ...good, text: text + "（事后加的一句）" },
+    { ...good, text: "" },
+    { ...good, hash: "not-a-hash" },
+    { ...good, at: 42 },
+    { ...good, station: "ship-it" },
+    { ...good, station: undefined },
+    "a string, not a record",
+    null,
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...base, restatement: broken }));
+    const loaded = loadSidecar(path);
+    assert.ok(loaded, `the sidecar itself stays valid for ${JSON.stringify(broken)}`);
+    assert.equal(loaded?.restatement, undefined, JSON.stringify(broken));
   }
 });
 

@@ -51,7 +51,14 @@ test("the audit task carries the 7th check: requirements clarified & goal deriva
   assert.match(task, /7\. 需求是否已澄清、goal 是否可派生/);
   // It states the PM=product-manager rule.
   assert.match(task, /项目经理同时承担产品经理角色/);
-  assert.match(task, /grillme\/ask_user 把需求反述澄清/);
+  // 2026-09-06: the restatement itself is MECHANICAL now (submit refuses
+  // without a confirmed one), so the task points at that mechanism instead of
+  // asking the auditor to police an advisory step — and it names the module
+  // that owns the rules, so this prose can never become a second copy of them.
+  assert.match(task, /propose_restatement/);
+  assert.match(task, /lib\/restatement\.ts/);
+  assert.doesNotMatch(task, /grillme\/ask_user 把需求反述澄清/,
+    "the old advisory wording must be gone, not living beside the mechanism");
 });
 
 test("the 7th check is mechanically checkable: decisions, task-book completeness, transcript", () => {

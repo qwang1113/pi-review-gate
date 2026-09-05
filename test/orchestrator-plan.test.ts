@@ -341,6 +341,37 @@ test("changing what the user approved REVOKES the approval", () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// the delivery station (2026-09-06)
+
+test("deliveryStation: read from the plan, and MISSING or unreadable means precommit", () => {
+  assert.equal(planOf({ deliveryStation: "pr" }).deliveryStation, "pr");
+  assert.equal(planOf({ deliveryStation: "commit" }).deliveryStation, "commit");
+  // A plan file written before the field existed still parses — as the
+  // STRICTEST station, which allows no ship command at all.
+  assert.equal(planOf().deliveryStation, "precommit");
+  for (const broken of ["merge", "", "PR!!", 7, null, {}]) {
+    assert.equal(planOf({ deliveryStation: broken }).deliveryStation, "precommit",
+      `an unreadable station (${JSON.stringify(broken)}) must not loosen anything`);
+  }
+});
+
+test("deliveryStation: it is APPROVED CONTENT — changing it changes the hash", () => {
+  // The station decides which ship commands the orchestration may reach, so
+  // it cannot be edited under a standing approval without the gate noticing.
+  assert.notEqual(planHash(planOf({ deliveryStation: "pr" })), planHash(planOf()));
+  assert.notEqual(planHash(planOf({ deliveryStation: "pr" })), planHash(planOf({ deliveryStation: "commit" })));
+  assert.equal(planHash(planOf({ deliveryStation: "precommit" })), planHash(planOf()),
+    "an explicit precommit is the same content as an absent station");
+  assert.match(canonicalPlanText(planOf({ deliveryStation: "pr" })), /"deliveryStation":"pr"/);
+});
+
+test("deliveryStation: the summary the user approves names the station", () => {
+  assert.match(formatPlanSummary(planOf({ deliveryStation: "pr" })), /本轮交付站点/);
+  assert.match(formatPlanSummary(planOf({ deliveryStation: "pr" })), /PR/);
+  assert.match(formatPlanSummary(planOf()), /precommit/);
+});
+
 test("the canonical text is order-independent for sets", () => {
   const a = planOf({ tasks: [{ id: "a", title: "t", fileBoundaries: ["lib", "docs"], dependsOn: [] }] });
   const b = planOf({ tasks: [{ id: "a", title: "t", fileBoundaries: ["docs", "lib"], dependsOn: [] }] });

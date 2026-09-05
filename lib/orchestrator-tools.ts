@@ -15,6 +15,8 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
+import { buildRestatementMissingRefusal, restatementConfirmed } from "./restatement.ts";
+import { DELIVERY_STATION_CHOICES } from "./delivery-station.ts";
 import {
   applyTaskStatus,
   formatPlanSummary,
@@ -222,6 +224,16 @@ async function handlePlanAction(
   if (action === PLAN_ACTIONS.submit) {
     if (!plan) return fail("review-gate: 还没有 plan 可提交 —— 先用 action:\"write\" 写一份。");
 
+    // THE REQUIREMENT RESTATEMENT COMES FIRST (2026-09-06, user ask) — even
+    // before the audit, because it is the earlier step in the same story: the
+    // project manager says the requirement back, the user confirms it, and
+    // only then is a plan worth auditing. Checking it after a minutes-long
+    // audit would bill the user for a plan built on an unverified reading.
+    // No dialog is rendered — same shape as a failed audit.
+    if (!restatementConfirmed(deps.restatement())) {
+      return fail(buildRestatementMissingRefusal("orchestrator_plan"), { approved: false, restated: false });
+    }
+
     // THE AUDIT RUNS INSIDE SUBMIT, and it runs FIRST (user requirement,
     // 2026-08-30). The asymmetry it closes: a loop goal could not reach the
     // user without a `goal-auditor` PASS, while a plan — which decides what
@@ -370,7 +382,11 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "dependency, parallel→serial, a lower maxParallel — and records why. It REVOKES it for a " +
       "new task, a new directory, a removed dependency, serial→parallel or a higher maxParallel. " +
       "So refine boundaries freely as you learn where the work lands; only real widening costs " +
-      "the user a dialog.",
+      "the user a dialog. " +
+      "REQUIRED BEFORE `submit`: a restatement the USER confirmed (`propose_restatement`) — " +
+      "without one submit refuses outright and shows no dialog. `deliveryStation` says where the " +
+      "whole orchestration stops (" + DELIVERY_STATION_CHOICES + ", default precommit); raising " +
+      "it is a widening like any other.",
 
     parameters: Type.Object({
       action: Type.Optional(Type.Enum(PLAN_ACTIONS)),
@@ -378,6 +394,11 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
         title: Type.String({ description: "Plan title (required for write)" }),
         intent: Type.String({ description: "One-line intent (required for write)" }),
         maxParallel: Type.Optional(Type.Number({ description: "Parallelism cap (default 2)" })),
+        deliveryStation: Type.Optional(Type.String({
+          description:
+            "Where this orchestration stops: " + DELIVERY_STATION_CHOICES +
+            " (default precommit — the user commits). Ask the user; do not pick for them.",
+        })),
         tasks: Type.Array(Type.Object({
           id: Type.String({ description: "Task id, [A-Za-z0-9._-] 1-64 chars" }),
           title: Type.String({ description: "Task title" }),

@@ -334,6 +334,7 @@ import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
 // recorder behind it) moved the same way: this file wires them, the
 // module owns their bodies (and lib/goal-prereview-tools.ts the audit record).
 import { registerGoalTools } from "../lib/goal-tools.ts";
+import { registerRestatementTools } from "../lib/restatement.ts";
 import { recordGoalPrereview, type GoalPrereviewDeps } from "../lib/goal-prereview-tools.ts";
 // The L1 tool_call hook moved the same way — it was the single biggest thing
 // left in this file. lib/ship-gate-hook.ts owns the dispatch (and the
@@ -2088,6 +2089,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   const orchestratorDeps = createOrchestratorDeps({
     repoRoot: primaryRepoRoot,
     taskMode: () => state.taskMode,
+    // The requirement restatement `submit` demands (2026-09-06). Read live
+    // off the state object rather than captured: `propose_restatement` writes
+    // it during the same session, and a captured value would make the tool
+    // that just recorded a confirmation invisible to the tool that needs it.
+    restatement: () => state.restatement,
     loadRuntime: () => state.orchestrator,
     storeRuntime: persistOrchestration,
     orchestrationId: currentOrchestrationId,
@@ -7126,6 +7132,32 @@ export default function reviewGate(pi: ExtensionAPI) {
       writeFileSync(path, text, "utf8");
     },
   });
+
+  /**
+   * `propose_restatement` (L8a — the step BEFORE a contract is negotiated):
+   * the session says the requirement back, the user (or the project manager
+   * on their behalf) confirms it, and the gate records it. Registered here,
+   * implemented in lib/restatement.ts — the module also owns the refusal both
+   * contract tools hand back when nothing was restated.
+   *
+   * It shares the goal family's bindings deliberately: same repo resolution,
+   * same gate state, same three user-facing surfaces. The restatement and the
+   * goal are two steps of one negotiation, and a second set of bindings would
+   * be a second way for them to disagree about which repo they are talking
+   * about.
+   */
+  registerRestatementTools(pi, {
+    primaryRepoRoot: () => primaryRepoRoot,
+    cwd: () => cwd,
+    stateFor: (root) => stateForRepo(root),
+    persist: (ctx, root) => persistRepo(ctx as unknown as ExtensionContext, root),
+    log: (message) => log(message),
+    showToUser: (uiCtx, lead, body) => showToUser(uiCtx as ExtensionContext, lead, body),
+    confirmBounded: (uiCtx, title, message, pointer, signal) =>
+      confirmBounded(uiCtx as ExtensionContext, title, message, pointer, signal),
+    askEitherSide: (request, hasUI, render) => askEitherSide(request, hasUI, render),
+  });
+
 
 
   /**

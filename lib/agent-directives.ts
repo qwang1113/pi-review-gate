@@ -73,6 +73,7 @@ export const TOOL_DECISION_TABLE =
   "| --- | --- |\n" +
   "| 问用户、等用户拍板 | `ask_user({questions})` — 它会问并暂停循环；别把问题写进回复就结束 |\n" +
   "| 提交本轮改动送审 | `judge_submit({role:\"reviewer\", task})` — 门禁自己跑 precommit→checkpoint→送审 |\n" +
+  "| 把需求反述给用户确认（谈 goal 之前的必经一步） | `propose_restatement({restatement, station})` — 没有它，propose_loop_goal 直接被拒且不弹框 |\n" +
   "| 提交 goal 草稿 | `propose_loop_goal({goal})` — 门禁自己跑 goal 审计，过了才弹用户批准框 |\n" +
   "| 自己决定不了的设计取舍 | `judge_submit({role:\"adviser\", task})` |\n" +
   "| 当前在 main/master/dev/develop 上要提交 | checkpoint 会被门禁直接拒（2026-09-16 起不弹确认框）；ship 提交（git commit）也会被拒 — 先切到功能分支 |\n" +
@@ -96,13 +97,23 @@ export const END_OF_TURN_CHECK =
  *
  * The failure it prevents is silent and expensive — implementing the agent's
  * OWN reading of a request and discovering the gap at review time.
+ *
+ * Since 2026-09-06 the restatement is no longer ADVICE: `propose_restatement`
+ * is a tool, and `propose_loop_goal` / `orchestrator_plan({action:"submit"})`
+ * refuse without a confirmed one. So this block is a SUMMARY and a POINTER —
+ * the rules themselves (what the text must contain, what happens without one)
+ * live in lib/restatement.ts, and restating them here would be the second
+ * copy that drifts.
  */
 export const REQUIREMENT_PROTOCOL =
   "## 采纳需求前（澄清 → 反述 → 确认）\n" +
   "1. 先理解，别直接开干：找出范围、边界、交付方式、没说清的术语里的疑点。\n" +
-  "2. 有疑点就用 `ask_user` 一次问清（带选项和你的推荐）——不要靠猜。\n" +
-  "3. 准备采纳时先**反述**：目标、范围、交付物、非目标，让用户确认。\n" +
-  "4. 用户确认后才采纳（进 goal 协商或开始实现）；他提出修正就改完再反述一次。";
+  "2. 有疑点就用 `ask_user` 问清（带选项和你的推荐）——不要靠猜，问几轮都行。\n" +
+  "3. **反述是强制的一步，且有工具**：`propose_restatement({ restatement, station })` " +
+  "把上下文、例子、改之前 → 改之后、哪几步会变得不同交给用户确认，" +
+  "同时定下本轮交付到哪一站（precommit / commit / pr）。\n" +
+  "4. 没有已确认的反述，`propose_loop_goal` 与 `orchestrator_plan({action:\"submit\"})` " +
+  "会直接被拒、一个框都不弹（拒绝文案里有可照抄的骨架）；需求变了就再反述一次，最新一份生效。";
 
 /**
  * Explore-mode extra guidance, appended after the standing block when the

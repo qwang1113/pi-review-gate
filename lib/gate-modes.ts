@@ -79,7 +79,10 @@ export const JUDGE_DENIED_TOOLS: ReadonlySet<string> = new Set([
   "orchestrator_spawn", "orchestrator_instruct", "orchestrator_wait", "orchestrator_close",
   "orchestrator_handoff", "orchestrator_plan", "orchestrator_notify", "orchestrator_answer",
   "orchestrator_recover", "orchestrator_attach",
-  "propose_loop_goal", "request_copilot_review", "check_copilot_review",
+  // `propose_restatement` sits with `propose_loop_goal` for the same reason:
+  // a reporting shell does not negotiate the requirement it was asked to
+  // judge — it reviews a change against a contract somebody else agreed.
+  "propose_loop_goal", "propose_restatement", "request_copilot_review", "check_copilot_review",
   "request_scope_limit", "request_sensitive_edit", "set_gate_mode", "declare_done",
 ]);
 

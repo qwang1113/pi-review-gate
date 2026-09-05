@@ -38,6 +38,8 @@ import {
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
 import { snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
+import { restatementHash, type RestatementRecord } from "../../lib/restatement.ts";
+import type { DeliveryStation } from "../../lib/delivery-station.ts";
 
 import { emptyRuntime, type OrchestratorRuntime } from "../../lib/orchestrator-registry.ts";
 import {
@@ -190,7 +192,28 @@ export interface FakeWorldOptions {
   resolvableRepos?: string[];
   /** Answers the PM-pane `select` (grant door 3) gives, in order. */
   selectAnswers?: string[];
+  /**
+   * The requirement restatement `submit` requires (2026-09-06).
+   *
+   * DEFAULT: a confirmed one — the world models a manager that already did
+   * the step, which is what every pre-existing plan test is about. Pass
+   * `null` for the world where nothing was restated, and `submit` must refuse
+   * without ever calling `confirm`.
+   */
+  restatement?: RestatementRecord | null;
 
+}
+
+/** The confirmed restatement a world has unless a test says otherwise. */
+export function fakeRestatement(station: DeliveryStation = "precommit"): RestatementRecord {
+  const text = [
+    "需求反述：把项目经理对需求的理解说回给用户确认。",
+    "举例：用户要求「提交前先反述」，这轮就把反述做成门禁的前置步骤。",
+    "改之前：submit 直接派审计。",
+    "改之后：submit 先查已确认的反述，没有就直接拒。",
+    "哪几步会变得不同：submit 前多一步 propose_restatement。",
+  ].join("\n");
+  return { text, hash: restatementHash(text), at: "2026-09-06T00:00:00.000Z", station };
 }
 
 
@@ -249,6 +272,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     now,
     env: () => env as unknown as NodeJS.ProcessEnv,
     taskMode: () => options.taskMode ?? "orchestrator",
+    restatement: () => (options.restatement === null ? undefined : options.restatement ?? fakeRestatement()),
     runtime: () => runtime,
     runtimeConflict: () => options.identityConflict,
     saveRuntime: (next) => { runtime = next; },

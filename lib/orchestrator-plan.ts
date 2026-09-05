@@ -38,6 +38,11 @@ import {
   normalizeBoundaries,
   type NormalizedBoundary,
 } from "./orchestrator-boundaries.ts";
+import {
+  deliveryStationLine,
+  parseDeliveryStation,
+  type DeliveryStation,
+} from "./delivery-station.ts";
 
 /** Repo-root-relative location of the plan (gate-excluded via `.pi/`). */
 export const PLAN_RELPATH = ".pi/orchestrator-plan.json";
@@ -105,6 +110,18 @@ export interface OrchestratorPlan {
   tasks: PlanTask[];
   decisions: PlanDecision[];
   maxParallel: number;
+  /**
+   * WHERE THIS ORCHESTRATION STOPS (2026-09-06) — `precommit` (the gate's
+   * checks pass, the user commits), `commit` (the commit is made, the user
+   * pushes) or `pr` (the PR is open).
+   *
+   * Always present after {@link parsePlan}: a plan file written before the
+   * field existed, or carrying an unreadable value, is READ as `precommit`
+   * (lib/delivery-station.ts) — the strictest station, allowing no ship
+   * command at all. Part of {@link canonicalPlanText}, so raising it is a
+   * change the user is asked about again.
+   */
+  deliveryStation: DeliveryStation;
   updatedAt: string;
 }
 
@@ -281,6 +298,11 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
     tasks,
     decisions,
     maxParallel: clampMaxParallel(obj.maxParallel),
+    // Absent / misspelled ⇒ `precommit`, exactly like `clampMaxParallel`
+    // clamps rather than refuses: a plan is rejected over things a human has
+    // to fix (a missing boundary, a dependency cycle), never over a field
+    // whose safe reading is the strictest one.
+    deliveryStation: parseDeliveryStation(obj.deliveryStation),
     updatedAt: asString(obj.updatedAt) || now,
   };
   return { ok: problems.length === 0, plan: problems.length === 0 ? plan : undefined, problems };
@@ -573,6 +595,9 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
     title: plan.title,
     intent: plan.intent,
     maxParallel: plan.maxParallel,
+    // The delivery station IS approved content: `pr` grants the orchestration
+    // the authority to publish, which nobody may hand it silently.
+    deliveryStation: plan.deliveryStation,
     tasks: plan.tasks.map((t) => ({
       id: t.id,
       title: t.title,
@@ -595,6 +620,7 @@ export function formatPlanSummary(plan: OrchestratorPlan, repoRoot = ""): string
     `${plan.title}`,
     `目标：${plan.intent}`,
     `并行上限：${plan.maxParallel}`,
+    deliveryStationLine(plan.deliveryStation),
     "",
   ];
   for (const t of plan.tasks) {

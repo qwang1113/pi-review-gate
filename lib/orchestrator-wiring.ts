@@ -41,6 +41,7 @@ import { parsePlan, PLAN_RELPATH, type OrchestratorPlan } from "./orchestrator-p
 import { emptyRuntime, type OrchestratorRuntime } from "./orchestrator-registry.ts";
 import type { OrchestratorDeps, PlanRead, TmuxRunResult } from "./orchestrator-deps.ts";
 import type { TaskMode } from "./task-mode.ts";
+import type { RestatementRecord } from "./restatement.ts";
 
 /** Run one tmux command with no shell in between. */
 export function runTmux(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): TmuxRunResult {
@@ -237,6 +238,12 @@ export function fileCharsIn(repoRoot: string, relPath: string): number | undefin
 export interface OrchestratorHostBindings {
   repoRoot: string;
   taskMode(): TaskMode | undefined;
+  /**
+   * The requirement restatement the user confirmed for this repo (2026-09-06)
+   * — read live from the gate state by the extension, because
+   * `propose_restatement` writes it mid-session.
+   */
+  restatement(): RestatementRecord | undefined;
   /** The persisted runtime, or undefined before the first orchestration call. */
   loadRuntime(): OrchestratorRuntime | undefined;
   /** Persist it into the gate sidecar. */
@@ -308,6 +315,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     now: host.now ?? (() => Date.now()),
     env,
     taskMode: host.taskMode,
+    restatement: host.restatement,
     runtime(): OrchestratorRuntime {
       const stored = host.loadRuntime();
       const id = host.orchestrationId();
