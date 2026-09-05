@@ -98,9 +98,21 @@ contract: `lib/judge-pane.ts` + `lib/hierarchy.ts` + `lib/judge-prompt.ts`.
 
 The review loop is AGENT-DRIVEN: you start it yourself once edits
 are complete (one `judge_submit`) — the slash commands are only optional
-explicit triggers, never the expected entry. The user is asked at two points
-only: `ask_user` (the ONE way to reach them — it runs the interview and
-pauses the loop) and the loop-goal approval dialog.
+explicit triggers, never the expected entry. The user is asked at three points
+only: `ask_user` (the ONE way to reach them — it runs the interview, which is
+optional and uncapped, and pauses the loop), the RESTATEMENT confirmation and
+the loop-goal approval dialog.
+
+**需求反述与交付站点（2026-09-06，机械前置）.** 谈契约之前先把需求反述给用户
+确认：`propose_restatement({restatement, station})`。没有一份用户确认过的反述，
+`propose_loop_goal` 与 `orchestrator_plan({action:"submit"})` **直接被拒且不弹
+任何对话框**。同一次确认里定下**本轮交付站点** —— `precommit`（门禁跑通，用户
+自己 commit）/ `commit`（提交完成，用户自己 push）/ `pr`（做到 PR 开出来）——
+它随 goal 的批准落进 sidecar，之后由 L1 ship 门禁按站点放行、由 `declare_done`
+判「到站」。规则细节只有两处权威出处，本文不复述：`lib/restatement.ts`（什么算
+反述、缺了怎么拒）与 `lib/delivery-station.ts`（站点解析、缺省、放行表、到站
+判定）。
+
 
 Where work lands is yours again (2026-09-07, user decision): the workspace
 settlement layer (`setup_workspace`, the mandatory work branch, declare_done's
@@ -424,6 +436,19 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    它，所以裁决记完门禁**自己把它收掉**（谁派谁负责，第五轮 O-6）——`declare_done`
    不再被一个它从未被告知的 judge child 拦住。`propose_loop_goal` 内部的 goal 审计者
    同理，也是门禁自收。
+
+   提交 plan 之前还要有一份用户确认过的**需求反述**（`propose_restatement`），
+   否则 submit 同样直接被拒、不弹框；同一次确认里定下的交付站点就是 plan 的
+   `deliveryStation`（提高它属于扩权，要重批）。
+
+1b. **项目经理代批不是橡皮图章**（2026-09-06，用户要求）：代用户批准子会话的
+   goal、或代确认它的需求反述，都必须给 `orchestrator_answer` 带上 `crosscheck`
+   —— 写出该 plan 任务 id，并对「文件边界 / 任务目标 / 交付站点」三项各给一句
+   判断；缺任一项即退回，并把 plan 里那个任务与子会话提交的正文**并排**贴回。
+   拒绝不需要对照（说不永远是自由的）。子会话请求确认的站点若**宽于**已批准
+   plan 的 `deliveryStation`，代答一律被拒 —— 放宽站点只有用户能决定。判定与
+   词表在 `lib/orchestrator-answer-tools.ts`（`PROXY_CROSSCHECK_TOKENS`）。
+
 
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
    只被多注入「有项目经理在管这轮任务」一句 + 任务书末尾门禁追加的

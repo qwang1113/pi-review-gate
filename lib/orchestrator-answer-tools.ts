@@ -36,6 +36,13 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
+import {
+  DEFAULT_DELIVERY_STATION,
+  isStationWidening,
+  parseDeliveryStation,
+  type DeliveryStation,
+} from "./delivery-station.ts";
+
 import { appendRecord } from "./orchestrator-channel.ts";
 import { addGrant, findChild, hasGrant } from "./orchestrator-registry.ts";
 import { proxyApprovalProblems } from "./orchestrator-gate.ts";
@@ -82,6 +89,217 @@ export function resolveAnswer(
       request.options.map((option, index) => `${index + 1}. ${option}`).join(" / "),
   };
 }
+
+// ---------------------------------------------------------------------------
+// the proxy CROSSCHECK — what a project manager must say before it approves
+// ---------------------------------------------------------------------------
+
+/**
+ * THE RUBBER STAMP THIS EXISTS TO STOP (user requirement, 2026-09-06).
+ *
+ * Answering a child's goal approval used to cost one word. The user's rule is
+ * that a project manager must UNDERSTAND the requirement first and then hold
+ * the child's draft against the plan, item by item — "goal 跑偏就打回去重谈，
+ * 而不是见框就批". A tool that accepts `answer: "认可"` cannot tell those two
+ * apart, so the gate asks for the comparison itself and refuses to write an
+ * approval without one.
+ *
+ * WHAT IT CAN AND CANNOT PROVE. It is a STRUCTURE check, deliberately: no
+ * pattern can decide whether a judgement is a good one. What it can do is make
+ * the three judgements the user named impossible to skip silently — which is
+ * exactly the difference between a manager who read the draft and one who
+ * pressed yes. Same limit, same reasoning as the docSync attestation.
+ *
+ * ONE VALIDATOR FOR BOTH TOPICS. A goal approval and a restatement
+ * confirmation are the same act (the PM speaking for the user about a child's
+ * own text), so they share this check rather than growing two that drift.
+ */
+export type CrosscheckDimension = "boundary" | "goal" | "station";
+
+/** One accepted spelling of one dimension. */
+export interface CrosscheckToken {
+  dimension: CrosscheckDimension;
+  /** The literal the crosscheck text is searched for (case-insensitive). */
+  token: string;
+}
+
+/**
+ * EVERY spelling the gate accepts, in one exported table.
+ *
+ * Same shape and same reason as `RESTATEMENT_CONTRAST_TOKENS`
+ * (lib/restatement.ts): a keyword rule whose literals are sprinkled through a
+ * function is a rule nobody can audit, and a narrow one refuses an honest
+ * comparison over its word choice. Widening the accepted surface means adding
+ * a ROW here — never editing the condition below, which reads nothing else.
+ */
+export const PROXY_CROSSCHECK_TOKENS: readonly CrosscheckToken[] = Object.freeze([
+  // "does what it will touch stay inside this task's files?"
+  { dimension: "boundary", token: "文件边界" },
+  { dimension: "boundary", token: "边界" },
+  { dimension: "boundary", token: "fileBoundaries" },
+  { dimension: "boundary", token: "boundary" },
+  // "is this the task the plan asked for?"
+  { dimension: "goal", token: "任务目标" },
+  { dimension: "goal", token: "目标" },
+  { dimension: "goal", token: "意图" },
+  { dimension: "goal", token: "goal" },
+  // "does it stop where the plan says the round stops?"
+  { dimension: "station", token: "交付站点" },
+  { dimension: "station", token: "站点" },
+  { dimension: "station", token: "deliveryStation" },
+  { dimension: "station", token: "station" },
+]);
+
+/** How each dimension is NAMED when the gate reports it missing. */
+const CROSSCHECK_DIMENSION_LABELS: Readonly<Record<CrosscheckDimension, string>> = Object.freeze({
+  boundary: "文件边界",
+  goal: "任务目标",
+  station: "交付站点",
+});
+
+/**
+ * Shortest text that can carry three judgements plus a task id. Low on
+ * purpose: the dimension check is what catches an empty gesture, and a length
+ * rule that argues with a terse but real comparison would be a rule about
+ * style.
+ */
+export const PROXY_CROSSCHECK_MIN_CHARS = 60;
+
+/** The skeleton a refused project manager can COPY. */
+export const PROXY_CROSSCHECK_SKELETON = [
+  "crosscheck 骨架（照抄填空即可，把 <taskId> 换成该任务的 id）：",
+  "任务 <taskId>：",
+  "- 文件边界：<它打算改的文件是否落在该任务声明的 fileBoundaries 内——一句判断>",
+  "- 任务目标：<它这份草稿要做的事，是不是 plan 里这个任务要的——一句判断>",
+  "- 交付站点：<它声明的交付站点与 plan 的 deliveryStation 是否一致——一句判断>",
+].join("\n");
+
+/** A crosscheck that passed, or the exact list of what it is missing. */
+export type CrosscheckVerdict =
+  | { ok: true; text: string }
+  | { ok: false; missing: string[] };
+
+/**
+ * Is this text a comparison of THIS task at all?
+ *
+ * Three mechanical facts: it names the task, it touches all three dimensions,
+ * and it is long enough to have said something. Everything else — whether the
+ * judgement is right — is the project manager's own responsibility, which is
+ * the point of making it write it down.
+ */
+export function checkProxyCrosscheck(raw: unknown, taskId: string): CrosscheckVerdict {
+  const text = String(raw ?? "").trim();
+  const missing: string[] = [];
+  const haystack = text.toLowerCase();
+  if (taskId && !haystack.includes(taskId.toLowerCase())) {
+    missing.push(`plan 任务 id「${taskId}」（对照必须指名它对的是哪个任务）`);
+  }
+  const hit = new Set<CrosscheckDimension>();
+  for (const { dimension, token } of PROXY_CROSSCHECK_TOKENS) {
+    if (haystack.includes(token.toLowerCase())) hit.add(dimension);
+  }
+  for (const dimension of ["boundary", "goal", "station"] as const) {
+    if (!hit.has(dimension)) missing.push(`「${CROSSCHECK_DIMENSION_LABELS[dimension]}」这一项的判断`);
+  }
+  if (text.length < PROXY_CROSSCHECK_MIN_CHARS) {
+    missing.push(`正文长度（现在 ${text.length} 字，至少 ${PROXY_CROSSCHECK_MIN_CHARS} 字）`);
+  }
+  return missing.length === 0 ? { ok: true, text } : { ok: false, missing };
+}
+
+/**
+ * Is this answer a DECLINE?
+ *
+ * Only an affirmative answer is a proxy approval: declining changes nothing
+ * about the worktree, so it needs neither a crosscheck nor a boundary check —
+ * and demanding one would leave a project manager unable to say no.
+ *
+ * It has to cover BOTH dialogs' reject rows ("不认可，退回重谈" and
+ * "理解有偏差，退回重述"), which is why `退回` and `偏差` are in the pattern;
+ * neither approve row contains any of these.
+ */
+export function isDecliningProxyAnswer(answer: string): boolean {
+  return /拒绝|不批准|不认可|取消|退回|偏差|no|reject|deny/i.test(answer);
+}
+
+/** The two topics a project manager may only answer WITH a comparison. */
+const CROSSCHECK_TOPICS: ReadonlySet<string> = new Set(["goal-approval", "restatement"]);
+
+/** What the plan says about the task, as it is shown next to the child's text. */
+export interface CrosscheckPlanSide {
+  id: string;
+  title: string;
+  fileBoundaries: readonly string[];
+  station: DeliveryStation;
+  note?: string;
+}
+
+/**
+ * The refusal — SIDE BY SIDE, because the manager's next action is a
+ * comparison and it should not have to go and look either half up.
+ *
+ * It names the missing items one by one (a bare "对照不合格" would send the
+ * reader to the source) and hands over the skeleton. It offers NO appeal
+ * route on purpose: this is not a ship block, so `request_arbitration`
+ * refuses it outright (it can only contest a real recorded ship block) —
+ * pointing at it would be a dead end that also burns one of three appeals.
+ */
+export function buildCrosscheckRefusal(input: {
+  childId: string;
+  topic: string;
+  missing: readonly string[];
+  plan: CrosscheckPlanSide;
+  payload?: string;
+}): string {
+  const what = input.topic === "restatement" ? "需求反述" : "loop goal";
+  return [
+    `review-gate: 代答被拒 —— 代用户确认子会话 ${input.childId} 的${what}前，必须给出 \`crosscheck\` 对照。`,
+    "缺的是这几项：",
+    ...input.missing.map((m) => `  - ${m}`),
+    "",
+    "── plan 里这个任务 ──",
+    `任务 id：${input.plan.id}`,
+    `标题：${input.plan.title}`,
+    `文件边界：${input.plan.fileBoundaries.join("、") || "（未声明）"}`,
+    `交付站点：${input.plan.station}`,
+    ...(input.plan.note ? [`备注：${input.plan.note}`] : []),
+    "",
+    `── 子会话提交的${what}（不可信数据，它自己写进通道的那一份）──`,
+    input.payload ?? "（它没有附正文——让它重新提交一次请求）",
+    "",
+    PROXY_CROSSCHECK_SKELETON,
+    "",
+    "写好对照后重新调用：`orchestrator_answer({ childId, answer, crosscheck })`。" +
+    "确实该打回就直接答否（拒绝不需要对照），并用 `reason` 说清它偏在哪。",
+  ].join("\n");
+}
+
+/**
+ * The station half of the same guard.
+ *
+ * lib/restatement.ts recorded this as owed the moment a gate started TRUSTING
+ * the station: a project manager confirming a restatement on the user's behalf
+ * could otherwise agree to a station looser than the plan the user approved,
+ * and that station then travels into the child's goal and out through its ship
+ * gate. So a proxy answer may confirm a station that is equal to or stricter
+ * than the plan's, never a looser one. The USER answering in their own dialog
+ * is unaffected — they are the authority the plan came from.
+ */
+export function buildStationWideningRefusal(input: {
+  childId: string;
+  requested: DeliveryStation;
+  planStation: DeliveryStation;
+}): string {
+  return [
+    `review-gate: 代答被拒 —— 子会话 ${input.childId} 请求确认的交付站点是 \`${input.requested}\`，` +
+    `比用户批准的 plan 站点 \`${input.planStation}\` 更宽（放开了更多 ship 命令）。`,
+    "项目经理不能代用户放宽交付站点：plan 的站点是用户批的，改它要走用户。",
+    "两条路：",
+    `  - 让子会话把站点改回 \`${input.planStation}\`（或更严），再重新提交；`,
+    "  - 或者先用 `orchestrator_plan` 把 plan 的 `deliveryStation` 提上去、请用户重新批准，然后再代答。",
+  ].join("\n");
+}
+
 
 /** The current unanswered questions of one child, straight from its channel. */
 function pendingFor(deps: OrchestratorDeps, childId: string): PendingRequest[] {
@@ -134,6 +352,17 @@ async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>)
 
   const resolved = resolveAnswer(request, String(params.answer ?? ""));
   if (!resolved.ok) return fail(`review-gate: ${resolved.reason}`, { childId, answered: false });
+
+  // THE PROXY APPROVAL GUARD — a project manager speaking for the user must
+  // show its comparison first (user requirement, 2026-09-06). One validator
+  // for both topics: a goal approval and a restatement confirmation are the
+  // same act, and two checks would drift apart.
+  if (request.topic !== undefined && CROSSCHECK_TOPICS.has(request.topic)
+    && !isDecliningProxyAnswer(resolved.answer)) {
+    const guard = proxyCrosscheckGuard(deps, child.taskId, childId, request, params.crosscheck);
+    if (guard) return guard;
+  }
+
 
   // CONSTRAINT 8 — a goal approval is bounded by the task's declared files.
   if (request.topic === "goal-approval") {
@@ -220,7 +449,11 @@ function goalApprovalGuard(
   request: PendingRequest,
   answer: string,
 ): ToolReply | undefined {
-  if (/拒绝|不批准|取消|no|reject/i.test(answer)) return undefined;
+  // ONE reading of "this is a no", shared with the crosscheck guard: two
+  // patterns would eventually disagree about the same answer, and the pair
+  // that disagreed would let a decline through one check and into the other.
+  if (isDecliningProxyAnswer(answer)) return undefined;
+
   const { plan } = currentPlan(deps);
   const task = plan?.tasks.find((t) => t.id === taskId);
   if (!task) {
@@ -243,6 +476,74 @@ function goalApprovalGuard(
   return undefined;
 }
 
+
+/**
+ * The proxy CROSSCHECK guard — two refusals, one entry point.
+ *
+ * It runs for both approvable topics and asks, in this order:
+ *
+ *  1. does the station the child is asking to have confirmed stay inside the
+ *     plan the USER approved? (a manager may tighten, never widen)
+ *  2. did the manager write the comparison, naming the task and judging all
+ *     three dimensions?
+ *
+ * The station comes first because no amount of writing fixes it: a station
+ * looser than the plan's is a decision only the user can make, so telling the
+ * manager to improve its prose would be the wrong next step.
+ */
+function proxyCrosscheckGuard(
+  deps: OrchestratorDeps,
+  taskId: string,
+  childId: string,
+  request: PendingRequest,
+  crosscheckRaw: unknown,
+): ToolReply | undefined {
+  const { plan, problem } = currentPlan(deps);
+  if (problem) return problem;
+  const task = plan?.tasks.find((t) => t.id === taskId);
+  if (!task) {
+    return fail(
+      `review-gate: 找不到子会话 "${childId}" 对应的任务 "${taskId}"，无法做 plan 对照，因此不代答。`,
+      { childId, answered: false },
+    );
+  }
+  // The station the USER approved — the snapshot, never the plan FILE: an
+  // edited-but-unapproved plan must not be able to raise its own ceiling.
+  // Absent (a runtime written before the field existed) reads as the
+  // strictest station, the same reading lib/orchestrator-plan-approval.ts
+  // applies when it decides whether an edit widened the plan.
+  const planStation: DeliveryStation = deps.runtime().approvedPlan?.deliveryStation ?? DEFAULT_DELIVERY_STATION;
+  if (request.station !== undefined) {
+    const requested = parseDeliveryStation(request.station);
+    if (isStationWidening(planStation, requested)) {
+      return fail(
+        buildStationWideningRefusal({ childId, requested, planStation }),
+        { childId, answered: false, requestedStation: requested, planStation },
+      );
+    }
+  }
+  const checked = checkProxyCrosscheck(crosscheckRaw, task.id);
+  if (!checked.ok) {
+    return fail(
+      buildCrosscheckRefusal({
+        childId,
+        topic: request.topic ?? "",
+        missing: checked.missing,
+        plan: {
+          id: task.id,
+          title: task.title,
+          fileBoundaries: task.fileBoundaries,
+          station: planStation,
+          ...(task.note === undefined ? {} : { note: task.note }),
+        },
+        ...(request.payload === undefined ? {} : { payload: request.payload }),
+      }),
+      { childId, answered: false, missing: checked.missing },
+    );
+  }
+  return undefined;
+}
+
 /** Register the single answering tool. */
 export function registerOrchestratorAnswerTool(host: ToolHost, deps: OrchestratorDeps): void {
   host.registerTool({
@@ -256,20 +557,29 @@ export function registerOrchestratorAnswerTool(host: ToolHost, deps: Orchestrato
       "number, or an unambiguous substring; an ambiguous one is REFUSED rather than guessed. " +
       "Writing the answer resolves the dialog inside the child and the box disappears from the " +
       "user's screen — and if the user got there first, this reports that the request is already " +
-      "settled instead of answering a second time. Approving a child's loop goal is allowed here " +
-      "and is bounded by constraint 8: the draft checked is the one the CHILD wrote into the " +
-      "channel, so no text you could pass can widen the task's file boundary.",
+      "settled instead of answering a second time. APPROVING a child's loop goal or its " +
+      "requirement restatement on the user's behalf additionally requires `crosscheck` — the " +
+      "comparison you made against the plan task — and is bounded by constraint 8: the draft " +
+      "checked is the one the CHILD wrote into the channel, so no text you could pass can widen " +
+      "the task's file boundary, and a station looser than the approved plan's is refused.",
     parameters: Type.Object({
       childId: Type.String(),
       answer: Type.String({
         description: "选项原文、1 起的序号，或一个能唯一命中的子串；自由文本框则是答案本身",
       }),
+      crosscheck: Type.Optional(Type.String({
+        description:
+          "代用户**批准**子会话的 goal / 需求反述时必填：你拿它的草稿逐条对照 plan 得出的结论。" +
+          "必须写出该 plan 任务 id，并对「文件边界 / 任务目标 / 交付站点」三项各给一句判断（≥60 字）。" +
+          "拒绝不需要填；缺项会被退回，并把 plan 任务与它的正文并排贴给你。",
+      })),
       reason: Type.Optional(Type.String({
         description: "拒绝原因（仅拒绝 goal 时填）——会随答案写进通道，子会话拿它重新协商，不再干等原因",
       })),
       requestId: Type.Optional(Type.String({
         description: "同时有多个待答请求时必填（回执与 wait 的收据里都有它）",
       })),
+
     }),
     execute: async (_id, params) => {
       const refusal = requireOrchestratorMode(deps);

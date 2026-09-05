@@ -440,3 +440,22 @@ test("request_sensitive_edit: no UI fails closed", async () => {
   assert.match(textOf(reply), /no interactive UI/);
   assert.deepEqual(f.grants, []);
 });
+
+test("ask_user's own description says the interview is optional but UNCAPPED", () => {
+  // USER REQUIREMENT (2026-09-06): "有疑问就问，不设数量上限；没疑问就只做反述确认".
+  // The tool description is what the model actually reads before deciding
+  // whether to ask, so the rule has to be IN it — not only in the loop-goal
+  // directive next door.
+  let description = "";
+  const host: ToolHost = {
+    registerTool: (definition) => {
+      if (definition.name === "ask_user") description = definition.description;
+    },
+  };
+  registerUserInteractionTools(host, fake().deps);
+  assert.match(description, /no cap/i, "the count is not the thing to economize on");
+  assert.match(description, /optional/i, "…and asking nothing when nothing is unclear is fine too");
+  assert.doesNotMatch(description, /questionnaire|one question, not/i,
+    "no wording that reads as 'ask fewer questions'");
+});
+

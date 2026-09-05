@@ -33,6 +33,20 @@ import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 
+/**
+ * A crosscheck that PASSES the structure check, for the tests that are about
+ * some other rule (constraint 8, the channel write, the settled request…).
+ *
+ * It is spelled out rather than generated so those tests keep exercising the
+ * real validator: if the required shape changes, they fail here rather than
+ * quietly stopping to test anything.
+ */
+const CROSSCHECK_T1 =
+  "任务 t1：文件边界——它要动的文件都落在 lib/a/ 之内，与该任务声明的 fileBoundaries 一致；" +
+  "任务目标——草稿要做的事就是 plan 里 t1 这条，没有跑偏；" +
+  "交付站点——它声明的交付站点与 plan 的 deliveryStation 一致。";
+
+
 /** The 10 tools an orchestrator gets, and nothing else. */
 const ORCHESTRATION_TOOLS = [
   "orchestrator_plan",
@@ -414,7 +428,8 @@ test("CONSTRAINT 8 / R-7: a goal approval is judged on the CHILD's own draft and
 
   // Inside the boundary → approved.
   world.sidecars.set(child.cwd, { sessionEditedFiles: ["lib/a/one.ts"] });
-  const ok = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md" });
+  const ok = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1 });
+
   assert.equal(ok.isError, undefined, replyText(ok));
 
   // Outside it → refused as a scope change.
@@ -429,7 +444,8 @@ test("CONSTRAINT 8 / R-7: a goal approval is judged on the CHILD's own draft and
     topic: "goal-approval",
   });
   world2.sidecars.set(child2.cwd, { sessionEditedFiles: ["lib/b/other.ts"] });
-  const refused = await world2.call("orchestrator_answer", { childId: c2, answer: "认可，写入 .pi/loop-goal.md" });
+  const refused = await world2.call("orchestrator_answer", { childId: c2, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1 });
+
   assert.equal(refused.isError, true, replyText(refused));
   assert.equal(world2.channelOf(c2).filter((r) => r.kind === "answer").length, 0);
 });
@@ -443,7 +459,8 @@ test("a goal-approval request with no draft attached is REFUSED rather than appr
     options: ["认可，写入 .pi/loop-goal.md", "不认可"],
     topic: "goal-approval",
   });
-  const reply = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md" });
+  const reply = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1 });
+
   assert.equal(reply.isError, true);
   assert.match(replyText(reply), /没有带上 goal 全文/);
 });

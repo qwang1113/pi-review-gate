@@ -459,15 +459,18 @@ export async function doProposeRestatement(
         // the user's behalf must judge the same words the human would see,
         // never a summary the child retyped.
         //
-        // NOT CHECKED HERE, ON PURPOSE (task split, 2026-09-06): a project
-        // manager answering this topic could confirm a station looser than the
-        // plan's own `deliveryStation`, and nothing compares the two. It grants
-        // nothing today — the station is recorded, and NO gate reads it yet —
-        // so the check belongs with the task that wires the station into the
-        // ship gate. Whoever does that must add it there (a constraint-8-style
-        // comparison against the approved plan) before the first gate starts
-        // trusting this field.
+        // The STATION travels beside it, structured (2026-09-06). It is the
+        // half a project manager is not free to agree to: since the ship gate
+        // started reading the station, confirming one looser than the approved
+        // plan's would hand the child ship commands the user never authorized.
+        // `orchestrator_answer` compares the two and refuses the proxy answer
+        // when this is the wider one (lib/orchestrator-answer-tools.ts,
+        // `proxyCrosscheckGuard`); the USER answering their own dialog is
+        // unaffected, since the plan's station came from them in the first
+        // place.
         payload: text,
+        station,
+
       },
       uiCtx.hasUI === true,
       async (renderSignal) => {

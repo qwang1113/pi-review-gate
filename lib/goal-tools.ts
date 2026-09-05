@@ -318,6 +318,13 @@ export async function doProposeLoopGoal(
         title: goalDialogTitle,
         options: [goalApproveLabel, goalRejectLabel],
         payload: goalText,
+        // The station travels as a STRUCTURED field beside the draft, for the
+        // same reason the restatement's does: a project manager approving on
+        // the user's behalf may not confirm one looser than the plan the user
+        // approved, and that comparison is made on a field, never on prose
+        // (lib/orchestrator-answer-tools.ts).
+        station,
+
       },
       uiCtx.hasUI === true,
       async (signal) => {

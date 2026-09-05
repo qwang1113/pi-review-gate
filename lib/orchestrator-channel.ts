@@ -176,6 +176,23 @@ export interface ChannelRequestRecord extends ChannelRecordBase {
   /** The full text behind the question (a goal draft, a plan) when there is one. */
   payload?: string;
   payloadRef?: ChannelPayloadRef;
+  /**
+   * WHERE THE ROUND THIS QUESTION IS ABOUT STOPS (2026-09-06) — the delivery
+   * station the child is asking to have confirmed (`restatement`), or the one
+   * recorded beside the goal it wants approved (`goal-approval`).
+   *
+   * A pure addition: an older gate ignores it, and a record without it is read
+   * as the strictest station. It travels as a STRUCTURED field rather than
+   * inside `payload` because a DECISION is made on it — an orchestrator may
+   * not confirm a station looser than the plan the user approved — and
+   * deriving that decision by grepping prose is the exact class of mistake the
+   * channel replaced (a picture of a fact is not the fact).
+   *
+   * Untrusted like every wire value: read it through `parseDeliveryStation`
+   * (lib/delivery-station.ts), never by comparing strings.
+   */
+  station?: string;
+
 }
 
 /** Child → orchestrator: that request is over, and this is who ended it. */

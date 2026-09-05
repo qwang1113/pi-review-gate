@@ -30,6 +30,11 @@ import {
   isStationWidening,
   parseDeliveryStation,
   shipKindAllowedAtStation,
+  describeAllowedShipKinds,
+  stationArrivalProblems,
+  stationShipProblem,
+  STATION_SHIP_NEXT_STEPS,
+
   type DeliveryStation,
 } from "../lib/delivery-station.ts";
 
@@ -125,3 +130,58 @@ test("the module is PURE: no fs, no clock, no gate-state import", async () => {
   assert.deepEqual(imports, ["./constants.ts"],
     "the only dependency may be the ship-kind vocabulary itself");
 });
+
+// ---------------------------------------------------------------------------
+// The consumer side (2026-09-06): what a station REFUSES, and what it still
+// OWES when the round wants to finish.
+
+test("a station refusal names the command, the station and what that station does allow", () => {
+  const blocked = stationShipProblem("commit", "push");
+  assert.match(blocked, /`git push`/, "the reader must see the command, not an enum name");
+  assert.match(blocked, /commit/);
+  assert.match(blocked, /`git commit`/, "…and what IS allowed, so the next step is obvious");
+
+  assert.match(stationShipProblem("precommit", "commit"), /不放行任何 ship 命令/);
+  assert.equal(describeAllowedShipKinds("precommit"), "无 —— 该站点不放行任何 ship 命令");
+  assert.match(describeAllowedShipKinds("pr"), /gh pr create/);
+});
+
+test("the station's next steps are the only two that exist, and no appeal is offered", () => {
+  // Both routes end at the USER, because a station is the user's decision.
+  assert.match(STATION_SHIP_NEXT_STEPS, /propose_restatement/);
+  assert.match(STATION_SHIP_NEXT_STEPS, /deliveryStation/);
+  // The review loop cannot clear a station, and the arbiter cannot hear this
+  // block at all (it only takes a lone `gh pr edit`) — naming either would be
+  // a dead end, and the arbiter one also costs an appeal.
+  assert.doesNotMatch(STATION_SHIP_NEXT_STEPS, /judge_submit/);
+  assert.doesNotMatch(STATION_SHIP_NEXT_STEPS, /request_arbitration/);
+});
+
+test("arrival: `precommit` owes nothing beyond the gates that already ran", () => {
+  assert.deepEqual(stationArrivalProblems("precommit", { dirtyRepos: ["repo"], recordedPr: null }), []);
+});
+
+test("arrival: `commit` owes a committed worktree", () => {
+  assert.deepEqual(stationArrivalProblems("commit", { dirtyRepos: [], recordedPr: null }), []);
+  const dirty = stationArrivalProblems("commit", { dirtyRepos: ["repo-a", "repo-b"], recordedPr: null });
+  assert.equal(dirty.length, 1);
+  assert.match(dirty[0]!, /repo-a、repo-b/, "the refusal names WHICH repo still holds work");
+  assert.match(dirty[0]!, /commit/);
+});
+
+test("arrival: `pr` owes a committed worktree AND a PR the gate itself recorded", () => {
+  assert.deepEqual(stationArrivalProblems("pr", { dirtyRepos: [], recordedPr: 42 }), []);
+
+  const noPr = stationArrivalProblems("pr", { dirtyRepos: [], recordedPr: null });
+  assert.equal(noPr.length, 1);
+  assert.match(noPr[0]!, /没有记录到任何 PR/);
+
+  // A missing field is the same fact as null — an older sidecar never opened
+  // a PR either.
+  assert.equal(stationArrivalProblems("pr", { dirtyRepos: [] }).length, 1);
+
+  // Both halves missing ⇒ both are reported; a completion should learn
+  // everything it still owes in one reply.
+  assert.equal(stationArrivalProblems("pr", { dirtyRepos: ["repo"], recordedPr: null }).length, 2);
+});
+

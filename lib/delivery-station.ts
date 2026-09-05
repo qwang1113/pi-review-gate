@@ -145,3 +145,107 @@ export function deliveryStationLine(station: DeliveryStation): string {
 
 /** The choices, spelled out for a tool description or a refusal text. */
 export const DELIVERY_STATION_CHOICES = DELIVERY_STATIONS.join(" | ");
+
+// ---------------------------------------------------------------------------
+// the ship gate's side: what a station REFUSES, and how to get past it
+// ---------------------------------------------------------------------------
+
+/** How a ship kind is written in a refusal — the command, not the enum name. */
+const SHIP_KIND_COMMANDS: Readonly<Record<ShipCommandKind, string>> = Object.freeze({
+  commit: "git commit",
+  push: "git push",
+  "pr-create": "gh pr create",
+  "pr-edit": "gh pr edit",
+});
+
+/** The commands a station may reach, or the fact that it may reach none. */
+export function describeAllowedShipKinds(station: DeliveryStation): string {
+  const kinds = allowedShipKinds(station);
+  if (kinds.length === 0) return "无 —— 该站点不放行任何 ship 命令";
+  return kinds.map((kind) => `\`${SHIP_KIND_COMMANDS[kind]}\``).join(" / ");
+}
+
+/**
+ * ONE problem line for a ship command that travels further than the round is
+ * contracted to.
+ *
+ * It names the blocked command and the station rather than saying "not
+ * allowed": the reader has to be able to tell this apart from the quality
+ * gates it arrives next to, because the two have completely different exits
+ * (a quality gate is satisfied by working; a station is a contract only the
+ * USER can move — see {@link STATION_SHIP_NEXT_STEPS}).
+ */
+export function stationShipProblem(station: DeliveryStation, kind: ShipCommandKind): string {
+  return `\`${SHIP_KIND_COMMANDS[kind]}\` 超出本轮交付站点 ${station}（${describeDeliveryStation(station)}）——` +
+    `该站点放行的 ship 命令：${describeAllowedShipKinds(station)}`;
+}
+
+/**
+ * The self-rescuing tail a station block carries.
+ *
+ * The ship gate's usual next step ("run the review loop") is WRONG here and
+ * would send the reader in circles: a station is not unmet quality, it is the
+ * agreed end of the round. So this states the only two legitimate ways the
+ * round can be allowed to travel further, both of which end at the user.
+ *
+ * It deliberately offers NO appeal route: the gate's arbiter only hears a
+ * lone `gh pr edit` (lib/arbitration.ts), so pointing a blocked
+ * commit/push/pr-create at it would be a dead end that also burns one of the
+ * session's three appeals.
+ */
+export const STATION_SHIP_NEXT_STEPS =
+  "交付站点是本轮的**契约**，不是没跑完的质量门禁 —— 再跑一轮审查不会解开它。要走得更远，只有两条合法路径：\n" +
+  "  - loop 会话：请用户重新 `propose_restatement`（选一个更远的站点），再据此重谈 `propose_loop_goal`；\n" +
+  "  - 编排：项目经理把 plan 的 `deliveryStation` 提到该站点，请用户重新批准，子会话再重谈自己的 goal。";
+
+// ---------------------------------------------------------------------------
+// declare_done's side: did this round actually ARRIVE at its station?
+// ---------------------------------------------------------------------------
+
+/** The local, gate-observed facts an arrival is judged on. */
+export interface StationArrivalFacts {
+  /**
+   * Repos that still hold uncommitted work, already labelled for display.
+   * A repo whose worktree could not be READ belongs here too — unverifiable
+   * is not clean.
+   */
+  dirtyRepos: readonly string[];
+  /**
+   * The PR number the GATE recorded for this session (`state.copilot.pr`),
+   * or null/undefined when it never resolved one.
+   *
+   * Deliberately the gate's own record and not something the agent reports:
+   * "I opened the PR" is exactly the claim this check exists to stop taking
+   * on trust. It is also purely local — no `gh` call, no network — so a
+   * completion never fails because GitHub was slow.
+   */
+  recordedPr?: number | null;
+}
+
+/**
+ * What still stands between this round and the station it promised to reach.
+ *
+ * Only the two stations that promise something beyond the gate's own checks
+ * can produce a problem: `precommit` IS "the checks pass", which
+ * `declare_done` already verified before it gets here.
+ */
+export function stationArrivalProblems(
+  station: DeliveryStation,
+  facts: StationArrivalFacts,
+): string[] {
+  if (station === "precommit") return [];
+  const problems: string[] = [];
+  if (facts.dirtyRepos.length > 0) {
+    problems.push(
+      `本轮交付站点是 ${station}，但还有未提交的改动（${facts.dirtyRepos.join("、")}）——` +
+      "提交完再收尾（站点 commit 的承诺就是「提交已经做完」）。",
+    );
+  }
+  if (station === "pr" && (facts.recordedPr === undefined || facts.recordedPr === null)) {
+    problems.push(
+      "本轮交付站点是 pr，但门禁没有记录到任何 PR —— 把分支推上去、开出 PR（门禁会在 PR 类 ship 时自己记下 PR 号），再收尾。",
+    );
+  }
+  return problems;
+}
+

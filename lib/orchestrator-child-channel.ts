@@ -57,6 +57,8 @@ import {
   type InstructAckStage,
 
 } from "./orchestrator-channel.ts";
+import type { DeliveryStation } from "./delivery-station.ts";
+
 
 /** How often the channel is re-read while a question is outstanding. */
 export const ANSWER_POLL_MS = 750;
@@ -114,6 +116,17 @@ export interface ChannelDialogRequest {
   options: string[];
   /** The full text behind the question (a goal draft, a plan…), when there is one. */
   payload?: string;
+  /**
+   * The delivery station this question is about (`restatement` /
+   * `goal-approval`), when the dialog has one.
+   *
+   * Structured rather than a line inside `payload`: the orchestrator side
+   * DECIDES on it (it may not confirm a station looser than the approved
+   * plan), and a decision read out of prose is the mistake this channel
+   * exists to remove.
+   */
+  station?: DeliveryStation;
+
   /** Is there a real UI to render into? `false` ⇒ the channel answers alone. */
   hasUI: boolean;
 }
@@ -163,6 +176,8 @@ export async function askThroughChannel(
     title: request.title,
     options: request.options,
     ...(request.payload === undefined ? {} : { payload: request.payload }),
+    ...(request.station === undefined ? {} : { station: request.station }),
+
   });
   reportState(binding, "waiting-input", { dialogTitle: request.title });
 

@@ -350,6 +350,16 @@ PM 的 transcript 里 ask_user/grillme 的 Q&A 段验证澄清结论真的落进
 （`precommit` / `commit` / `pr`），它同时是 plan 的 `deliveryStation` 字段（缺省 `precommit`，
 进 canonical 文本因此进批准 hash）。
 
+**代批不是橡皮图章（2026-09-06，用户要求）**：代用户批准子会话的 goal、或代确认它的
+需求反述，`orchestrator_answer` 必须带 `crosscheck` —— 写出该 plan 任务 id，并对
+「文件边界 / 任务目标 / 交付站点」三项各给一句判断（词表与判定在
+`lib/orchestrator-answer-tools.ts`，接受的写法逐条列在 `PROXY_CROSSCHECK_TOKENS`）。
+缺任一项即退回，并把 plan 里那个任务与子会话提交的正文**并排**贴回，附可照抄的骨架；
+门禁在这里不提供申诉出路（它不是 ship block，`request_arbitration` 受理不了）。
+拒绝不需要对照。子会话请求确认的站点若**宽于**已批准 plan 的 `deliveryStation`，
+代答一律被拒——放宽站点是用户的决定；用户本人在自己框里批不受此约束。
+
+
 **loop 侧配套（2026-09-17）**：loop 模式下累计 60 轮未获批 loop goal（`turnsWithoutGoal`
 持久化计数，重启延续），门禁在每轮注入强提示要求先协商 goal 再干活（只注入提示、
 不硬拦工具——用户决策），goal 获批后计数清零。
@@ -516,7 +526,7 @@ pane 标题 —— 那就是回到读屏幕了。
 | `lib/orchestrator-supervisor.ts` | 编排侧：读所有通道、判定、决定什么算新闻、渲染回执 1–3 块 | 纯（IO 经 seam） |
 | `lib/orchestrator-handoff-advice.ts` | 上下文用量 → 接力时机 | 纯函数 |
 | `lib/orchestrator-wait.ts` | 等待判据、预算、回执装配（含第 4、5 块） | 纯函数 |
-| `lib/orchestrator-answer-tools.ts` | `orchestrator_answer`（含约束 8 的代批边界） | 判定可单测 |
+| `lib/orchestrator-answer-tools.ts` | `orchestrator_answer`（含约束 8 的代批边界、代批必填的 `crosscheck` 对照与其词表、站点不得宽于 plan 的判定） | 判定可单测 |
 | `lib/orchestrator-recovery-tools.ts` | `orchestrator_recover` / `orchestrator_attach`、孤儿检测 | 孤儿判定是纯函数 |
 | `lib/orchestrator-tmux.ts` | 仅剩的 tmux 构造：开/关/列 pane + pane 装饰（不带 `-g`） | 纯函数 |
 

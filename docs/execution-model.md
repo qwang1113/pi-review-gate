@@ -88,7 +88,8 @@ opener 凭它记录结论；
   不是 judge 原文。
 - **流式 findings**：追加到 `.pi/review-stream/<round>.jsonl`
   （仅证据，禁止 verdict 形状的行）。
-- **子会话的问题走点对点通道**（2026-08-30）：`propose_loop_goal` 的批准框与
+- **子会话的问题走点对点通道**（2026-08-30）：`propose_loop_goal` 的批准框、
+  `propose_restatement` 的反述确认框（2026-09-06）与
   `ask_user` 的每一问都写进**本子会话专属的通道文件**
   （`~/.pi/agent/rg-channels/<orch-id>/<child-id>.jsonl`），带完整选项与正文。
   项目经理与坐在 pane 前的人**任意一方先答即生效**，另一边的框自动撤下。

@@ -459,6 +459,15 @@ import {
   goalNegotiationOverdue,
 } from "../lib/loop-goal.ts";
 import type { LoopGoal } from "../lib/loop-goal.ts";
+// The delivery station (where THIS round stops) is a pure contract module;
+// the extension only supplies the facts (which goal / plan the user approved,
+// which repos are dirty) and lets it decide.
+import {
+  DEFAULT_DELIVERY_STATION,
+  stationArrivalProblems,
+  type DeliveryStation,
+} from "../lib/delivery-station.ts";
+
 
 import { fitDialogMessage } from "../lib/dialog-budget.ts";
 // The model-chain diagnosis and the /gate-doctor checks are reached only
@@ -3537,6 +3546,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     hasStagedChanges,
     unreviewedTreesSince,
     loopGoalConfirmed: () => loopGoalConfirmed(),
+    deliveryStation: (root) => deliveryStationFor(root),
+
     crossRepoVerdictHint,
     classifier,
     notice: (ctx) => statusNotice(llmNoticeUi(ctx), LLM_STATUS_KEY),
@@ -3848,6 +3859,37 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     return isLoopGoalConfirmed(goal, st.loopGoal, raw);
   }
+
+  /**
+   * WHERE THIS ROUND STOPS for one repo, or `undefined` when this session has
+   * no delivery contract at all (lib/delivery-station.ts).
+   *
+   * Two contracts, one per role, and nothing else is consulted:
+   *
+   *  - loop  — the station the USER approved together with THAT REPO's loop
+   *    goal. An unconfirmed goal yields `undefined` rather than the strictest
+   *    station: L8 already refuses that ship on its own terms, and answering
+   *    "your round stops at precommit" to a session that has no contract yet
+   *    would send it to fix the wrong thing.
+   *  - orchestrator — the station of the plan the user approved. Missing (an
+   *    older runtime, or no approval yet) reads as the strictest station,
+   *    which is the reading lib/delivery-station.ts documents for a contract
+   *    that forgot to say where it stops.
+   *
+   * explore and normal have no contract, so they get `undefined` and keep the
+   * exact ship behaviour they had before stations existed (user decision,
+   * 2026-09-06).
+   */
+  function deliveryStationFor(root: string): DeliveryStation | undefined {
+    if (state.taskMode === "orchestrator") {
+      return state.orchestrator?.approvedPlan?.deliveryStation ?? DEFAULT_DELIVERY_STATION;
+    }
+    if (state.taskMode !== "loop") return undefined;
+    const st = root === primaryRepoRoot ? state : stateForRepo(root);
+    if (!loopGoalConfirmed(root, st)) return undefined;
+    return st.loopGoal?.station ?? DEFAULT_DELIVERY_STATION;
+  }
+
 
   /**
    * L8 edit-gate decision for ONE edit/write call, or undefined to let it
@@ -6970,6 +7012,35 @@ export default function reviewGate(pi: ExtensionAPI) {
         if (state.taskMode === "loop" && !loopGoalConfirmed()) {
           completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
         }
+        // DID THIS ROUND ARRIVE AT ITS STATION (2026-09-06)?
+        //
+        // The gates above answer "is the work good enough"; this answers the
+        // other half of the contract — a round that promised a PR and stops at
+        // a clean worktree did not finish what the user agreed to. Loop mode
+        // only (user decision): an orchestrator writes no code and has no
+        // repos of its own, so the plan is its exit contract and its
+        // children's own ship gates enforce the station where the commits
+        // actually happen.
+        //
+        // Both facts are LOCAL and gate-observed: uncommitted work, and the PR
+        // number the gate itself recorded when a PR-affecting ship went
+        // through. Nothing here asks GitHub, so a completion never fails
+        // because the network was slow.
+        if (state.taskMode === "loop" && loopGoalConfirmed()) {
+          const station = state.loopGoal?.station ?? DEFAULT_DELIVERY_STATION;
+          const dirtyRepos: string[] = [];
+          let recordedPr: number | null = null;
+          for (const root of sessionRepos) {
+            const st = root === primaryRepoRoot ? state : stateForRepo(root);
+            // UNVERIFIABLE counts as dirty: "I could not read the worktree"
+            // is not evidence that the work was committed.
+            const files = changedFiles(root);
+            if (files === undefined || files.length > 0) dirtyRepos.push(repoLabel(root));
+            if (recordedPr === null && typeof st.copilot?.pr === "number") recordedPr = st.copilot.pr;
+          }
+          completionProblems.push(...stationArrivalProblems(station, { dirtyRepos, recordedPr }));
+        }
+
         // Orchestration exit contract (constraints 3, 4, 10, 11): the question
         // is whether the WHOLE job is finished, not whether this session kept
         // its own promises — an orchestrator that writes no code would

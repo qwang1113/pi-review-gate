@@ -19,13 +19,24 @@
   不会失效审查绑定）。L1/L2 执行层（recon / fixer）及其 subagent 派发已随
   pi-subagents companion 退役（2026-09-06）。
 - **门禁**：`git commit` / `git push` / `gh pr` 在 READY + precommit 通过前
-  一律硬拦；`review_checkpoint` 是送审前唯一的提交通道。
+  一律硬拦；通过之后还要看**本轮交付站点**允不允许这条命令（`lib/delivery-station.ts`）。
+  `judge_submit` 内部的 checkpoint 是送审前唯一的提交通道。
 
-## 阶段 0：目标起草
 
-用户提出任务 → 主会话调研（查代码/文档，可并行只读探查）→ 起草目标文本
-（任务标题、意图、3–7 条可检查的验收标准、非目标、ISO 日期），简体中文
+## 阶段 0：需求反述 → 目标起草
+
+用户提出任务 → 主会话调研（查代码/文档，可并行只读探查）→ 有疑问就 `ask_user`
+问清（**不设数量上限**，没疑问也可以不问）→ **把需求反述给用户确认**
+（`propose_restatement({restatement, station})`：这件事是什么、举个例子、
+改之前 → 改之后、哪几步会变得不同，并定下**本轮交付站点** precommit / commit / pr）
+→ 起草目标文本（任务标题、意图、3–7 条可检查的验收标准、非目标、ISO 日期），简体中文
 （标识符/路径/代码 token 保持英文）。
+
+反述是**机械前置**：没有用户确认过的反述，`propose_loop_goal` 与
+`orchestrator_plan({action:"submit"})` 直接被拒且不弹框。交付站点随 goal 的批准
+生效，之后 ship 门禁按它放行、`declare_done` 按它判到站。规则细节的唯一出处是
+`lib/restatement.ts` 与 `lib/delivery-station.ts`，本文不复述。
+
 
 ## 阶段 1：目标审核（judge pane · goal-auditor）
 
@@ -57,8 +68,11 @@
 ## 阶段 4：收尾
 
 1. READY 时检查工作区：还有未提交修改就停下确认内容，必要时问用户。
-2. Squash checkpoint 链成干净历史（READY 后 commit 放行）。
-3. `git push` / `gh pr create`（READY + precommit 均绑定最终 commit）。
+2. **走到本轮交付站点为止，不多走一步**：`precommit` 站到此为止，由用户自己
+   commit；`commit` 站可以 squash checkpoint 链成干净历史并提交；`pr` 站才继续
+   `git push` / `gh pr create`（READY + precommit 均绑定最终 commit）。超站的
+   命令会被 ship 门禁拦下，`declare_done` 也会检查有没有真的到站。
+
 
 ## 贯穿机制
 

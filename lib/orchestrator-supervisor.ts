@@ -89,6 +89,13 @@ export interface PendingRequest {
   options: string[];
   /** The full text behind the question, when the child attached one. */
   payload?: string;
+  /**
+   * The delivery station the question is about, exactly as the child wrote it
+   * (untrusted: parse it, do not compare it). Absent on every dialog that has
+   * no station, and on records written before the field existed.
+   */
+  station?: string;
+
   askedAt: string;
 }
 
@@ -181,6 +188,8 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
         title: open.title,
         options: open.options,
         ...(payload === undefined ? {} : { payload }),
+        ...(open.station === undefined ? {} : { station: open.station }),
+
         askedAt: open.at,
       });
     }

@@ -46,10 +46,15 @@ the work starts, listing the checkable facts that mean **done**. The same file
 then drives both roles — you slice work against it, `adviser` advises
 against it, `reviewer` accepts against it.
 
-**Negotiated, not assumed**: you do NOT write this file. Grill the user
-first — unless they asked for them all at once, ask ONE question per turn,
-labeled "N of M", give your own recommended answer, wait for the reply, repeat
-until nothing is silently assumed — then call **`propose_loop_goal`** with what they
+**Negotiated, not assumed**: you do NOT write this file. Ask the user whatever
+is genuinely unclear — `ask_user` runs the interview one question at a time,
+the interview is OPTIONAL (no doubts ⇒ no questions) and there is NO cap on how
+many you ask. Then RESTATE the requirement and get it confirmed —
+**`propose_restatement({restatement, station})`**, a mechanical prerequisite
+since 2026-09-06: what the thing is, an example, BEFORE → AFTER, which steps
+change, plus where this round stops (`precommit` | `commit` | `pr`). Without a
+confirmed restatement, `propose_loop_goal` refuses outright and shows no
+dialog at all. Only then call **`propose_loop_goal`** with what they
 agreed to. The extension shows it in a confirm dialog and, on approval, writes
 the file itself and records the hash of that exact text. In loop mode an
 unapproved goal **blocks commit/push/PR** and its body is withheld from your
@@ -141,6 +146,17 @@ blind to it (an approval is a dialog fact a hook can never see), and the goal
 file's mere existence proves nothing — only the recorded approval of its exact
 text does. Beyond that, the goal binds through the reviewer: an unmet criterion
 is a P1 finding, and any P0/P1 ⇒ BLOCKED.
+
+**Where the round STOPS is part of that contract.** The station you confirmed
+with the restatement travels with the goal's approval, and two gates read it:
+the ship gate lets a command through only when the station allows it
+(`precommit` allows none — the USER commits; `commit` allows the commit;
+`pr` allows the whole push → PR chain), and `declare_done` checks the round
+actually ARRIVED (a `commit` round needs a committed worktree, a `pr` round
+also needs a PR the gate itself recorded). A station block is NOT unmet
+quality: another review round cannot clear it — only the user can move the
+station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
+
 
 ## Protocol
 

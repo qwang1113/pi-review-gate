@@ -43,7 +43,7 @@ The design rule behind every tool below is one line from the user who asked for 
 | `orchestrator_plan` | Read/replace the plan, submit it (the gate **audits** it with a judge process first and only then asks the **user** to approve), move a task through its state machine, record and resolve decisions only the human can settle. A rewrite that grants nothing new — a narrowed boundary, a file refined inside a directory the task already had, an added dependency — keeps the approval and records why; real widening still asks. |
 | `orchestrator_spawn` | “Open a child session for task X.” The gate picks the split direction, injects the orchestration id, starts it in `loop` mode in the repo its task declares (same-repo children are serialized; only different repos run in parallel — the isolated worktree is gone since 2026-09-07), and registers the pane. |
 | `orchestrator_wait` | The orchestrator's **one** information channel — call it every round. Blocking or, with `timeoutMs: 0`, an instant snapshot; the reply is the same either way (see below). |
-| `orchestrator_answer` | Answer the question a child is holding. The question, every option and the full payload are already in the wait receipt — the child wrote them there, so nothing was read off a screen. Approving a child's loop goal happens here too, boundary-checked against the draft the CHILD wrote. |
+| `orchestrator_answer` | Answer the question a child is holding. The question, every option and the full payload are already in the wait receipt — the child wrote them there, so nothing was read off a screen. Approving a child's loop goal — or confirming its requirement restatement — happens here too, and is never a rubber stamp: it requires a `crosscheck` (the task id plus one judgement each on file boundary / task goal / delivery station), it is boundary-checked against the draft the CHILD wrote, and a station looser than the approved plan's is refused. |
 | `orchestrator_instruct` | Say something to a child (`steer` / `followUp`) or stop it (`interrupt`). Nothing is typed at a terminal: the text goes through the child's channel and its own gate injects it with `pi.sendUserMessage`. |
 | `orchestrator_notify` | The **only** channel to the human who is not watching the terminal. |
 | `orchestrator_recover` | Bring a child back after its pane vanished — same `--session-id`, so its transcript continues rather than starting over. |
@@ -92,6 +92,10 @@ L1  Ship gate (HARD)      tool_call → block git commit/push, gh pr create/edit
                           reviewed HEAD commit tree (content binding);
                           publishing (push, gh pr, declare_done) additionally
                           requires a precommit run whose tests were NOT narrowed
+                          and every ship command must additionally be INSIDE
+                          this round's delivery station (precommit | commit |
+                          pr): a green gate is not permission to travel further
+                          than the user agreed (rules: lib/delivery-station.ts)
 L2  Auto-continuation     agent_settled → if gates unmet, inject
                           [REVIEW_GATE_RESUME] follow-up (recursion-guarded,
                           max 10 rounds, plateau detection; a user ESC abort
@@ -130,6 +134,14 @@ L7  Copilot review loop   after a PR is created/updated → request GitHub
                           extension itself. COMPLETION-only: it gates
                           declare_done and keeps the loop running, and never
                           the ship gate (fixing a finding needs a commit)
+L8a Requirement           loop / orchestrator mode → before any contract is
+    restatement           negotiated, the requirement must be said BACK to the
+                          user and confirmed (`propose_restatement`), together
+                          with where this round stops (precommit | commit | pr).
+                          Without a confirmed restatement `propose_loop_goal`
+                          and `orchestrator_plan({action:"submit"})` refuse
+                          outright and render NO dialog
+                          (rules: lib/restatement.ts)
 L8  Loop-goal approval    loop mode → the exit contract must be NEGOTIATED with
                           the user and approved in an extension dialog
                           (`propose_loop_goal`). L8b: that dialog is not even
@@ -142,7 +154,9 @@ L8  Loop-goal approval    loop mode → the exit contract must be NEGOTIATED wit
                           commit/push/PR at L1, blocks edit/write tool calls at
                           the tool_call layer (per repo — each repo checks its
                           own goal; undecided mode gates edits too, and the
-                          goal body is withheld from the prompt)
+                          goal body is withheld from the prompt). The approval
+                          also carries the round's DELIVERY STATION, which L1
+                          then enforces and `declare_done` checks arrival at
 ```
 
 **Arbiter (circular-block escape).** Layered on top of L1: when the ship gate
@@ -938,14 +952,20 @@ The loop protocol (also available as the `review-loop` skill):
 ```
 work directly on the current branch (no work-branch dance; protected branches
 main/master/dev/develop refuse checkpoints outright — work on a feature branch)
-ask_user(...) → propose_loop_goal(...)   # negotiate the exit contract (the gate audits it)
+ask_user(...) (optional — no cap on questions, ask whenever anything is unclear)
+  → propose_restatement({restatement, station})  # REQUIRED: say the requirement back +
+                                                 # where this round stops; without a confirmed
+                                                 # one the next call refuses and shows no dialog
+  → propose_loop_goal(...)                 # negotiate the exit contract (the gate audits it)
 edit code (batch related edits — the loop is billed per ROUND, not per line)
   → judge_submit({role:"reviewer", task})   # ONE call: the gate runs precommit →
                                             # checkpoint → baseline..HEAD → dispatch
   → the judge's process EXIT wakes this session; the gate already recorded the verdict
   → BLOCKED? fix the findings, then judge_submit again
   → READY?  call declare_done                             # re-validated server-side; work stays on the branch
-  → ship    (git commit now passes the gate)
+  → ship    (only as far as the station allows: `precommit` stops here and the
+             USER commits; `commit` lets git commit through; `pr` lets the
+             whole push → PR chain through)
 ```
 
 **One reviewer per round, whatever the diff size.** There is no tiering:
@@ -1010,6 +1030,19 @@ one fact:
   answer, all at once only when the user asks for it — until nothing is left
   silently assumed. Facts are the agent's job (read the repo, run the tools);
   only decisions go to the user.
+  The interview itself is OPTIONAL (no doubts ⇒ no questions) and UNCAPPED —
+  the number of questions is not the thing to economize on.
+- **Then RESTATE the requirement — mechanically (since 2026-09-06).**
+  `propose_restatement({restatement, station})` says the requirement back to
+  the user (what it is, an example, BEFORE → AFTER, which steps change) and
+  fixes where this round stops: `precommit` (the gate's checks pass, the USER
+  commits) | `commit` (the commit is made, the USER pushes) | `pr` (the PR is
+  open). Without a confirmed restatement on record, `propose_loop_goal` and
+  `orchestrator_plan({action:"submit"})` refuse outright and render **no
+  dialog at all**. The rules — what counts as a restatement, what a missing
+  station degrades to, which ship commands each station allows — live in
+  `lib/restatement.ts` and `lib/delivery-station.ts` and are not restated here.
+
 - **Then the goal-auditor — mechanically (since 2026-08-25).** It is ONE call:
   `propose_loop_goal` dispatches that audit itself (and
   `judge_submit({role:"goal-auditor", task:<the full draft>})` is the same
@@ -1422,7 +1455,8 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 
 | `judge_spawn` / `judge_answer` / `judge_recover` | Pane-judge lifecycle, opener-owned: open a goal/plan review in its own pane (the gate builds the audit task and registers the draft/hash, so the report is recordable; goal and plan serialize on one judge id), answer your own review's open question, re-open a dead pane under the same session id. Any other session's call on them is refused fail-closed. |
 | `orchestrator_plan` / `orchestrator_spawn` / `orchestrator_wait` / `orchestrator_answer` / `orchestrator_instruct` / `orchestrator_notify` / `orchestrator_recover` / `orchestrator_attach` / `orchestrator_handoff` / `orchestrator_close` | The orchestration layer, available only in `orchestrator` mode — see [The orchestrator role](#the-orchestrator-role-a-project-manager-inside-the-gate). The decisions live in `lib/orchestrator-*.ts` (plan state machine, the plan pre-audit, whether an edit widened anything, file-boundary algebra, the supervision channel and its seven states, pane decoration, tmux argv construction, the bash backstop, the 14 constraints, the handoff protocol); the extension only wires them up. |
-| `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the two COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7) and an unapproved loop goal (L8). On accept the work **stays on the branch it was done on** (2026-09-07: the gate no longer merges anything — merging/rebasing/pushing is the user's own git workflow). It also clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
+| `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7), an unapproved loop goal (L8), and — in loop mode — ARRIVAL at the round's delivery station (`commit` needs a committed worktree; `pr` additionally needs the PR number the gate itself recorded; `precommit` adds nothing). On accept the work **stays on the branch it was done on** (2026-09-07: the gate no longer merges anything — merging/rebasing/pushing is the user's own git workflow). It also clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
+| `propose_restatement` | Say the requirement BACK to the user and get it confirmed — the mandatory step before `propose_loop_goal` (loop) or `orchestrator_plan({action:"submit"})` (orchestrator), both of which refuse and render **no dialog** without a confirmed restatement on record (L8a). The text is Simplified Chinese and must carry a BEFORE → AFTER contrast; `station` fixes where this round stops (`precommit` \| `commit` \| `pr`) and is what L1 and `declare_done` later enforce. An orchestrator may confirm it on the user's behalf — with a `crosscheck`, and never at a station looser than the approved plan's. Rules: `lib/restatement.ts` + `lib/delivery-station.ts`. |
 | `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first with `ask_user` (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it), and draft it in Simplified Chinese. **REQUIRED FIRST (L8b):** the draft must pass an audit by the dedicated `goal-auditor` role — and **this one call runs that audit itself**: it builds the auditor's task (carrying the previous verdict, its findings and the computed draft delta when this is a re-audit), dispatches the judge, waits for it, adjudicates the verdict (**only P0/P1 block**, so a READY carrying P2/Nit findings is a PASS and never buys another round) and records the PASS bound to the sha256 of the audited text. A failed audit comes back with the objections and renders **NO dialog at all** — fix them and call this again, which makes this a minutes-long call. Only on a PASS does the **extension** show the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 AND blocks edit/write tool calls until approved (each repo checks its own goal; the `repo` parameter binds the goal to a specific repo — required to unlock edit/write in a second repo, `gitRootOfDir(repo)` decides which one); the confirm dialog no longer asks for an optional reason (a rejection still asks for the reason, carried back for renegotiation). An unapproved goal's body is withheld from the prompt. |
 | `request_copilot_review` | Ask GitHub Copilot to review the current branch's PR (L7). The extension resolves the PR and requests the review itself (`gh pr edit --add-reviewer @copilot`, with the documented REST review-request endpoint as fallback for older `gh`), stamping the authoritative request time and head SHA. It also decides **availability from evidence** (a Copilot review on this PR or in the repo's last 20 PRs ⇒ CONFIRMED; owner in `copilotReview.owners` ⇒ ASSUMED; neither ⇒ UNKNOWN, and a silent Copilot is then released instead of waited for). The request itself is never vetoed by a read-back — those cannot see a dropped request. No gh / no GitHub remote / no PR / API refusal ⇒ `UNSUPPORTED`, requirement released — it can never strand the task. There is **no round cap**; the only budget is the 20-minute wait for a review that never arrives. |
 | `check_copilot_review` | Verify what Copilot's review left open (L7). The extension runs the GraphQL query itself and classifies each thread: resolved ⇒ handled, answered by you ⇒ handled, Copilot spoke last ⇒ still yours (listed with thread IDs and the exact `resolveReviewThread` / reply mutations) — regardless of which commit the review was submitted against, so a push cannot bury a finding. Returns AWAITING / OPEN / SATISFIED — an outcome the agent cannot report for itself. A cycle released with findings still open lists them for you to report to the user. |

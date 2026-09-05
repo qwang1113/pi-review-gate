@@ -1428,6 +1428,39 @@ test("declare_done resets BOTH per-task loop budgets (rounds AND continuationsIn
   assert.match(region, /continuationsInjected = 0/);
 });
 
+test("declare_done asks whether the round ARRIVED at its delivery station", () => {
+  // The gates above it answer "is the work good enough"; this answers the
+  // other half of the contract. It is wired ONCE, from the loop branch only:
+  // an orchestrator has no repos of its own, so the same check there would be
+  // an empty judgement at best and a deadlock at worst (the PR its child
+  // opened is recorded in the CHILD's sidecar, which it cannot see).
+  const calls = SRC.split("stationArrivalProblems(").length - 1;
+  assert.equal(calls, 1, "exactly one call site — a second reading would be a second contract");
+  const body = toolBodyOf("declare_done");
+  assert.match(body, /stationArrivalProblems\(/, "…and it is inside declare_done");
+  assert.match(body, /state\.taskMode === "loop" && loopGoalConfirmed\(\)/,
+    "the station is only known once the user approved a goal that carries one");
+  assert.match(body, /changedFiles\(root\)/, "committed-ness is measured, not asserted by the agent");
+  assert.match(body, /st\.copilot\?\.pr/,
+    "the PR is the one the GATE recorded — 'I opened a PR' is the claim this exists to stop trusting");
+});
+
+test("the ship gate reads the station from the APPROVED contract, and from nothing else", () => {
+  const fn = windowOf("function deliveryStationFor(root: string)", "\n  }", "deliveryStationFor");
+  assert.match(fn, /state\.taskMode === "orchestrator"/);
+  assert.match(fn, /approvedPlan\?\.deliveryStation/,
+    "an orchestration's ceiling is the plan the USER approved, not the plan file on disk");
+  assert.match(fn, /state\.taskMode !== "loop"\) return undefined/,
+    "explore and normal have no contract — undefined, never the strictest station");
+  assert.match(fn, /loopGoalConfirmed\(root, st\)\) return undefined/,
+    "…and neither does a repo whose goal was never approved (L8 refuses that ship on its own terms)");
+  assert.match(fn, /st\.loopGoal\?\.station \?\? DEFAULT_DELIVERY_STATION/,
+    "an approved goal written before stations existed reads as the strictest one");
+  assert.match(SRC, /deliveryStation: \(root\) => deliveryStationFor\(root\)/,
+    "…and the ship gate is actually wired to it");
+});
+
+
 test("run_precommit maps runner-protocol ERROR to a VALID sidecar verdict (never persists 'ERROR')", () => {
   // P0 regression: persisting verdict:"ERROR" (not in PRECOMMIT_VERDICTS) made
   // loadSidecar AND the git pre-commit hook reject the whole sidecar as forged.

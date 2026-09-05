@@ -117,7 +117,10 @@ export interface FakeWorld {
     title: string;
     options: string[];
     payload?: string;
-    topic?: "goal-approval" | "workspace" | "ask-user" | "plan-approval" | "sensitive-edit" | "other";
+    /** The delivery station this question is about (restatement / goal). */
+    station?: string;
+    topic?: "goal-approval" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "sensitive-edit" | "other";
+
   }) => void;
   childSettles: (childId: string, requestId: string, by: "human" | "orchestrator" | "dismissed") => void;
   childAcks: (
@@ -417,6 +420,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
         title: request.title,
         options: request.options,
         ...(request.payload === undefined ? {} : { payload: request.payload }),
+        ...(request.station === undefined ? {} : { station: request.station }),
+
       });
       appendRecord(io, target(childId), {
         kind: "state", from: "child", at: stamp(), state: "waiting-input", dialogTitle: request.title,

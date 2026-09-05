@@ -347,7 +347,12 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
       "user. Every answer comes back at once, unanswered ones marked. Write questions that stand " +
       "on their own, with the options AND your recommendation. When later questions depend on the " +
       "answer to an earlier one (pick an architecture, then its details), call ask_user AGAIN for " +
-      "the follow-up round instead of guessing the branch.",
+      "the follow-up round instead of guessing the branch. ASK AS MANY AS THE REQUIREMENT IS " +
+      `WORTH: the interview itself is optional (no doubts ⇒ no questions), but there is no cap on ` +
+      `how many you may ask — up to ${MAX_QUESTIONS} per call and another round whenever you need ` +
+      "more. Never trim a real doubt to keep the count down; agreeing on the requirement is " +
+      "cheaper than building the wrong one.",
+
     parameters: Type.Object({
       questions: Type.Array(
         Type.Object({

@@ -35,6 +35,8 @@ import { defaultProjectConfig } from "../lib/project-config.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { DEFAULT_MAX_ROUNDS } from "../lib/constants.ts";
 import type { TaskMode } from "../lib/task-mode.ts";
+import { git, neutraliseHostGitConfig } from "./helpers/git.ts";
+
 
 // ---------------------------------------------------------------------------
 // A recording deps object: every seam answers a default, and each test
@@ -78,6 +80,10 @@ function makeDeps(over: Partial<ShipGateHookDeps> & { taskMode?: () => TaskMode 
     hasStagedChanges: () => false,
     unreviewedTreesSince: () => undefined,
     loopGoalConfirmed: () => true,
+    // No delivery contract by default: every test written before stations
+    // existed must keep measuring exactly what it measured then.
+    deliveryStation: () => undefined,
+
     crossRepoVerdictHint: () => "",
     classifier: () => { throw new Error("no classifier in tests"); },
     notice: () => undefined,
@@ -381,5 +387,185 @@ test("the hint is delivered through the hook and the command still runs", async 
   const quiet = makeDeps();
   await evaluateToolCall(quiet.deps, { toolName: "bash", input: { command: "npm test" } }, {});
   assert.ok(!quiet.calls.some((c) => c.startsWith("hint:")), "an ordinary command says nothing");
+});
+
+// ---------------------------------------------------------------------------
+// THE DELIVERY STATION (2026-09-06). Where this round stops is a contract, not
+// a quality gate: these tests hold the two apart. Every case below starts from
+// a state where the quality gates are FULLY satisfied, so whatever blocks can
+// only be the station — and the two tests at the end prove the reverse, that
+// the station never makes an unmet gate pass.
+
+/** A sidecar whose review and precommit both pass for fingerprint "t". */
+function shippableState(): GateState {
+  return {
+    ...emptyState("s1", DEFAULT_MAX_ROUNDS),
+    hasCodeChange: true,
+    review: { verdict: "READY", fingerprint: "t", at: "2026-09-06T00:00:00.000Z", docSync: "NOT_NEEDED" },
+    precommit: { verdict: "PASS", fingerprint: "t", at: "2026-09-06T00:00:00.000Z", testScope: "full" },
+  };
+}
+
+const COMMIT_CMD = "git commit -m 'feat: x'";
+const PUSH_CMD = "git push origin work";
+const PR_CMD = "gh pr create --title 'feat: x' --body 'why'";
+
+async function shipAt(station: "precommit" | "commit" | "pr" | undefined, command: string, over: Partial<ShipGateHookDeps> = {}) {
+  const base = defaultProjectConfig();
+  const r = makeDeps({
+    enforcementStateFor: () => shippableState(),
+    stateForRepo: () => shippableState(),
+    deliveryStation: () => station,
+    // The semantic guards are a different subject and would need a classifier;
+    // the commit/PR texts here are plain English either way.
+    projectConfig: () => ({ ...base, llmGuards: { ...base.llmGuards, aiAttribution: false, englishCheck: false, shipDetect: false } }),
+    ...over,
+  });
+
+  return { r, out: await evaluateToolCall(r.deps, bashCall(command), {}) };
+}
+
+test("station `precommit`: every ship command is refused even with the gates green", async () => {
+  for (const command of [COMMIT_CMD, PUSH_CMD, PR_CMD]) {
+    const { out } = await shipAt("precommit", command);
+    assert.equal(out?.block, true, `${command} must not run at precommit`);
+    assert.match(out!.reason, /超出本轮交付站点 precommit/);
+    assert.match(out!.reason, /不放行任何 ship 命令/, "the refusal says what the station DOES allow");
+  }
+});
+
+test("station `commit`: the commit goes through, publishing does not", async () => {
+  const committed = await shipAt("commit", COMMIT_CMD);
+  assert.equal(committed.out, undefined, "a commit is exactly what this station promised");
+
+  for (const command of [PUSH_CMD, PR_CMD]) {
+    const { out } = await shipAt("commit", command);
+    assert.equal(out?.block, true, `${command} travels past the commit station`);
+    assert.match(out!.reason, /超出本轮交付站点 commit/);
+    assert.match(out!.reason, /`git commit`/, "…and names the one command this station allows");
+  }
+});
+
+test("station `pr`: commit, push and pr-create all pass", async () => {
+  for (const command of [COMMIT_CMD, PUSH_CMD, PR_CMD]) {
+    const { out } = await shipAt("pr", command);
+    assert.equal(out, undefined, `${command} is inside the pr station`);
+  }
+});
+
+test("a session with NO delivery contract keeps its pre-station behaviour", async () => {
+  // explore / normal, and a loop repo whose goal was never approved: the dep
+  // answers `undefined`, which must not be read as the strictest station.
+  for (const command of [COMMIT_CMD, PUSH_CMD, PR_CMD]) {
+    const { out } = await shipAt(undefined, command);
+    assert.equal(out, undefined, `${command} must be unaffected when no station applies`);
+  }
+});
+
+test("the station refusal is self-rescuing: it names the legal routes and offers no dead-end appeal", async () => {
+  const { out } = await shipAt("precommit", PUSH_CMD);
+  assert.match(out!.reason, /propose_restatement/, "a loop session is told how the station moves");
+  assert.match(out!.reason, /deliveryStation/, "…and an orchestration child is told the plan route");
+  assert.doesNotMatch(
+    out!.reason,
+    /request_arbitration/,
+    "the arbiter only hears a lone `gh pr edit`, so pointing a push at it would be a dead end that also burns an appeal",
+  );
+  assert.doesNotMatch(
+    out!.reason,
+    /judge_submit/,
+    "running another review round cannot clear a station — saying so would be a loop with no exit",
+  );
+});
+
+test("the station never relaxes a quality gate, and a station block still lists the unmet ones", async () => {
+  // Gates unmet AND the station allows the command: the original block stands.
+  const unmet = makeDeps({
+    enforcementStateFor: () => ({ ...emptyState("s1", DEFAULT_MAX_ROUNDS), hasCodeChange: true }),
+    deliveryStation: () => "pr",
+  });
+  const stillBlocked = await evaluateToolCall(unmet.deps, bashCall(PUSH_CMD), {});
+  assert.equal(stillBlocked?.block, true, "a permissive station is not an authorization");
+  assert.match(stillBlocked!.reason, /code review gate is PENDING/);
+
+  // Gates unmet AND the station refuses: BOTH problems are reported, with
+  // both next steps — the two are cleared in completely different ways.
+  const both = makeDeps({
+    enforcementStateFor: () => ({ ...emptyState("s1", DEFAULT_MAX_ROUNDS), hasCodeChange: true }),
+    deliveryStation: () => "precommit",
+  });
+  const out = await evaluateToolCall(both.deps, bashCall(PUSH_CMD), {});
+  assert.match(out!.reason, /code review gate is PENDING/, "the quality problem survives");
+  assert.match(out!.reason, /超出本轮交付站点 precommit/, "…next to the station problem");
+  assert.match(out!.reason, /judge_submit/, "…and the review loop is still named for the quality half");
+});
+
+test("a message-only `--amend` is exempt from the station, in a REAL repo", async () => {
+  // Same exemption the content gates make: an amend publishes the tree it
+  // replaces, so it travels no further than the commit that already exists.
+  // Blocking it would leave a bad commit message unfixable at `precommit`.
+  //
+  // A real worktree, because the exemption also requires the ship command to
+  // resolve unambiguously to a repo — which is a `git` measurement, not
+  // something a fake dep can answer.
+  neutraliseHostGitConfig();
+  const dir = mkdtempSync(join(tmpdir(), "rg-station-"));
+  try {
+    git(dir, ["init", "-q", "-b", "work"]);
+    writeFileSync(join(dir, "a.txt"), "one\n");
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "chore: first"]);
+    const base = defaultProjectConfig();
+    const r = makeDeps({
+      enforcementStateFor: () => shippableState(),
+      stateForRepo: () => shippableState(),
+      deliveryStation: () => "precommit",
+      worktreeTree: () => "same-tree",
+      headCommitTree: () => "same-tree",
+      hasStagedChanges: () => false,
+      projectConfig: () => ({ ...base, llmGuards: { ...base.llmGuards, aiAttribution: false, englishCheck: false, shipDetect: false } }),
+    }, dir);
+    const out = await evaluateToolCall(r.deps, bashCall("git commit --amend -m 'fix: better subject'"), {});
+    assert.equal(out, undefined, "a reword must not be trapped by the station");
+
+    // …while a REAL commit in the same repo is still refused by the station.
+    const real = await evaluateToolCall(r.deps, bashCall(COMMIT_CMD), {});
+    assert.equal(real?.block, true, "the exemption is the amend, not the repo");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+test("no tracked change ⇒ no station check either (the gate has nothing of this round to hold back)", async () => {
+  const r = makeDeps({
+    enforcementStateFor: () => emptyState("s1", DEFAULT_MAX_ROUNDS),
+    deliveryStation: () => "precommit",
+  });
+  assert.equal(await evaluateToolCall(r.deps, bashCall(COMMIT_CMD), {}), undefined);
+});
+
+test("buildShipBlockReason keeps the station and the quality halves distinguishable", () => {
+  const stationOnly = buildShipBlockReason({
+    command: "git push",
+    ships: [{ kind: "push" }],
+    problems: [],
+    stationProblems: ["`git push` 超出本轮交付站点 commit（…）——该站点放行的 ship 命令：`git commit`"],
+    crossRepoHint: "",
+  });
+  assert.match(stationOnly.recorded, /beyond this round's delivery station/,
+    "a station-only block must not be recorded as unmet quality");
+  assert.doesNotMatch(stationOnly.shown, /judge_submit/);
+
+  const mixed = buildShipBlockReason({
+    command: "git push",
+    ships: [{ kind: "push" }],
+    problems: ["precommit has not run"],
+    stationProblems: ["`git push` 超出本轮交付站点 commit"],
+    crossRepoHint: "",
+  });
+  assert.match(mixed.recorded, /quality gates unmet/);
+  assert.match(mixed.recorded, /precommit has not run/);
+  assert.match(mixed.shown, /judge_submit/, "the quality half still points at the loop");
 });
 

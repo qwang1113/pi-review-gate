@@ -138,6 +138,17 @@ test("no goal ⇒ the Step 0 directive: grill the user, then propose_loop_goal",
   assert.match(text, /recommendation/);
   assert.doesNotMatch(text, /ONE question per turn/,
     "the gate runs the interview now — the agent does not pace it");
+  // USER REQUIREMENT (2026-09-06): the interview is OPTIONAL but UNCAPPED.
+  // This directive used to say "a one-line bugfix is one question, not a
+  // questionnaire" — read as "keep it short", which is the opposite of the
+  // rule: ask whatever the requirement is worth, and ask nothing when there
+  // is no doubt. It is the only place in the repo that carried that copy, so
+  // nothing else would notice if it came back.
+  assert.match(text, /NO cap/,
+    "the agent must be told the number of questions is not the thing to economize on");
+  assert.doesNotMatch(text, /questionnaire|one question, not/i,
+    "no wording that reads as 'ask fewer questions' may return");
+
   assert.match(text, /propose_loop_goal/);
   assert.match(text, /Writing that file yourself grants nothing/);
   // The engineering skills stay user-invoked accelerators, never a dependency.
