@@ -251,8 +251,9 @@ export function selectRoundReport(
  * HAS THIS ROUND REPORTED AT ALL — the same question, for the callers that only
  * need a yes/no.
  *
- * "Is this judge still working?" is asked in two more places (the wait
- * discipline hint and the stall breaker), and both used to answer it with their
+ * "Is this judge still working?" is asked in two more places — the child's own
+ * heartbeat (a session waiting on its judge reports `waiting-judge`) and the
+ * loop-stall breaker — and both used to answer it with their
  * OWN comparison: a report newer than the PANE's spawn time. That is the class
  * of comparison this module exists to own — and it was wrong in the ordinary
  * case, because the pane outlives the round: round 2's leftover report from
