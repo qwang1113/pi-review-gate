@@ -130,7 +130,11 @@ test("a tmux that refuses cosmetics does NOT fail the spawn", async () => {
 
   assert.equal(reply.isError, undefined, "a coloured border is never worth a failed session");
   assert.equal(reply.details?.delivered, true);
-  assert.match(replyText(reply), /装饰没能全部生效/, "and it says so instead of pretending");
+  // Framed ONCE: the factory says "display only", the orchestration adds what
+  // is specific to a child. Wrapping it twice read as two nested failures.
+  assert.match(replyText(reply), /装饰失败（仅显示降级）/, "and it says so instead of pretending");
+  assert.match(replyText(reply), /纯展示层，子会话本身不受影响/, "…in the child's own words");
+  assert.doesNotMatch(replyText(reply), /没能全部生效（pane 装饰失败/, "…and not nested inside itself");
   assert.equal(world.runtime().children.length, 1, "the child is registered either way");
 });
 

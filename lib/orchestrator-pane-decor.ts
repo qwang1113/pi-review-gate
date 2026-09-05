@@ -43,7 +43,7 @@
  * lib/orchestrator-tmux.ts and the execution in the dispatch/lifecycle tools.
  */
 
-import type { ChildHealth, ChildState } from "./orchestrator-child-state.ts";
+import type { ChildState } from "./orchestrator-child-state.ts";
 
 /** One entry of the palette: what tmux is told, and what a human is told. */
 export interface PaneColor {

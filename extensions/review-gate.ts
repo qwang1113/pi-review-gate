@@ -5477,10 +5477,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),
-    // The window's label bar belongs to whoever set it: inside an
-    // orchestration that is the project manager, so a child session never
-    // takes it down when its own judge closes.
-    insideOrchestration: () => Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()),
+    // The window's label bar belongs to the ORCHESTRATION when there is one,
+    // and BOTH sides of one must say so: a child session carries the
+    // orchestration id in its environment, while the project manager MINTS its
+    // id internally and has no such variable (reviewer P2, 2026-09-05 — a PM
+    // closing its own plan auditor would otherwise take the bar down and blank
+    // the borders of children that are still running). Its mode is what says
+    // it is a manager.
+    insideOrchestration: () =>
+      Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()) || state.taskMode === "orchestrator",
     now: () => Date.now(),
     readText: (path) => {
       try {
@@ -6256,22 +6261,29 @@ export default function reviewGate(pi: ExtensionAPI) {
         const run = (argv: readonly string[]) => runTmux(argv);
         const closed: string[] = [];
         const tmuxServer = tmuxServerFrom(process.env);
-        for (const [index, child] of ownedJudges.entries()) {
+        // Only the panes this sweep will ACTUALLY close count as decorated:
+        // an entry it skips (a pane id from a tmux server that has since
+        // restarted) is not on screen and must not keep the label bar up
+        // forever (reviewer P2, 2026-09-05).
+        let remainingClosable = ownedJudges.filter((c) => c.paneId && paneClosable(c, tmuxServer)).length;
+        for (const child of ownedJudges) {
           // `paneClosable`, not just "has a pane id": a persisted id from a
           // tmux server that has since restarted names whatever now holds that
           // number, and this is a kill (2026-09-05, adviser P1). Unverifiable
           // ⇒ the entry and its scratch are still reclaimed below, we simply
           // do not send kill-pane into someone else's window.
           if (paneClosable(child, tmuxServer) && ownPane) {
+            remainingClosable -= 1;
             try {
               // The LAST one takes the window's label bar down with it — judge
               // panes turn it on (C1), so something has to turn it off or the
               // gate leaves a permanent mark on the user's window. Never inside
               // an orchestration: there the project manager owns that bar and
-              // its children still need it.
+              // its children still need it — and a MANAGER is one too, which
+              // its own environment does not say (it mints its id internally).
               const releases = releasesWindowLabels({
-                remainingDecoratedPanes: ownedJudges.length - index - 1,
-                insideOrchestration: Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()),
+                remainingDecoratedPanes: remainingClosable,
+                insideOrchestration: Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()) || orchestratorMode,
               });
               if (closeSessionPane(run, child.paneId!, { hideLabels: releases }).ok) closed.push(child.paneId!);
             } catch { /* best effort */ }

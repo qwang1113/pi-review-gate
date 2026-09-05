@@ -234,6 +234,26 @@ $ npm test
 judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫（→ 陌生 pane 测试红）、
 去掉降级文案包装（→ decorWarning 测试红）。
 
+## 二·补二 · 第三轮：P2-1 的两处漏网
+
+第二轮 verdict 仍是 READY（4 条：2×P2 + 2×Nit），两条 P2 都是 P2-1 那个修法自己的漏网：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-A | `insideOrchestration` 只读 `RG_ORCHESTRATION_ID`，而**项目经理自己的 env 里没有它**（它在进程内铸 id），于是 PM 关掉自己的 plan 审计者时会提前收走 bar，把还活着的子会话边框抹掉 | 两侧都要判：子会话看 env，项目经理看 `taskMode === "orchestrator"`。两处接线（judge_close 的依赖注入、declare_done 级联）都改，并新增结构测试「BOTH sides…」钉住两个事实都被问到 |
+| P2-B | 兄弟数数的是**登记条目**而不是屏幕上的 pane：僵尸条目会让 bar 永不释放（P2-1 的另一半）；级联那边还把自己因 `!paneClosable` 跳过的条目算进了剩余数 | judge_close 改成只数「`paneClosable` 且出现在 `listJudgePanes` 里」的兄弟（**读不到 pane 列表时按仍在算**——留下 bar 只是垃圾，抹掉活着的边框是错答案）；级联改成先算出真正会被关的集合再递减。新增测试：只是登记行的兄弟不算数 |
+| Nit | `ChildHealth` 成了未使用 type import | 删 |
+| Nit | 编排侧 `decorNote` 与 factory 的降级文案嵌套重复 | 外层只补「纯展示层…」那半句，测试同时断言不再嵌套 |
+
+顺带修掉一个**测试夹具与生产漂移**：`test/judge-session-tools.test.ts` 的 `seed()` 建
+登记条目时不写 `tmuxServer`，而真实 `registerJudge` 一定连 server 一起记。三个判定
+（能不能关、能不能重绘、算不算兄弟）都要求 id 可归属，夹具漏写让它们全都表现得像
+「根本没有 pane」——这正是上一轮那条「假实现要跟着被测行为一起长」的同一根因。
+
+第三轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2361 pass / 0 fail**。
+变异复验：把兄弟计数改回数登记行 → 「只是登记行的兄弟」测试红；把
+`insideOrchestration` 改回只读 env → 「BOTH sides…」结构测试红。
+
 
 ---
 

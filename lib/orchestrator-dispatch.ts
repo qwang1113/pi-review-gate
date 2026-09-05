@@ -121,8 +121,10 @@ function decorNote(label: string, childId: string, warning: string | undefined):
   if (!warning) {
     return `pane 已标记为 ${label}（${paneColorFor(childId).name}边框，标题随状态自动刷新）。`;
   }
-  return `pane 装饰没能全部生效（${warning}）—— 纯展示层，子会话本身不受影响，` +
-    "健康快照与通道判定照常。";
+  // The warning already says it is display-only (the factory frames it), so
+  // this adds what is specific to a CHILD and nothing more — wrapping it again
+  // produced "装饰没能全部生效（装饰失败（仅显示降级）：…）".
+  return `${warning} —— 纯展示层，子会话本身不受影响，健康快照与通道判定照常。`;
 }
 
 

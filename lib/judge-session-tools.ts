@@ -44,6 +44,7 @@ import {
 } from "./orchestrator-channel.ts";
 import {
   judgePaneAlive,
+  listJudgePanes,
   type JudgePaneRunResult,
 } from "./judge-pane.ts";
 import {
@@ -548,8 +549,19 @@ async function doClose(deps: JudgeSessionToolDeps, params: Record<string, unknow
     // to turn it back off, or the gate leaves a permanent mark on the user's
     // window; and it must NOT be turned off while a sibling still needs it,
     // which is what `releasesWindowLabels` decides.
-    const siblings = Object.values(deps.hierarchy()).filter(
-      (entry) => entry.judgeId !== judgeId && entry.openerId === child.openerId && entry.paneId,
+    // Siblings are panes ON SCREEN, not rows in the registry (reviewer P2,
+    // 2026-09-05): a stale entry — a pane the user closed by hand, or an id
+    // minted by a tmux server that has since restarted — would keep the bar up
+    // forever, which is the litter this whole release exists to prevent. An
+    // UNREADABLE pane list counts a sibling as present: keeping the bar is a
+    // cosmetic cost, blanking a live sibling's border is a wrong answer.
+    const livePanes = listJudgePanes(deps.tmux, ownPane);
+    const siblings = Object.values(deps.hierarchy()).filter((entry) =>
+      entry.judgeId !== judgeId
+      && entry.openerId === child.openerId
+      && Boolean(entry.paneId)
+      && paneClosable(entry, deps.tmuxServer())
+      && (livePanes === undefined || livePanes.includes(entry.paneId!)),
     ).length;
     const killed = closeSessionPane(deps.tmux, child.paneId, {
       hideLabels: releasesWindowLabels({

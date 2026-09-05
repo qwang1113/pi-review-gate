@@ -137,3 +137,24 @@ test("the judge probe repaints the border from the channel projection (C2)", () 
     "…from the channel projection, never from the screen");
   assert.match(body, /paintTitle\("done"\)/, "…and a finished round says so on the border");
 });
+
+test("BOTH sides of an orchestration recognise that the label bar is not theirs", () => {
+  // The window-level border line is shared by every pane in the window, so it
+  // is released by the last decorated pane — EXCEPT inside an orchestration,
+  // where the project manager owns it. Recognising "inside an orchestration"
+  // takes two different facts, and asking only the first one was a measured
+  // defect (reviewer P2, 2026-09-05): a CHILD carries the orchestration id in
+  // its environment, while the MANAGER mints its id internally and has no such
+  // variable — its gate mode is what says it is one. A manager that failed the
+  // test would blank the borders of children that are still running.
+  const ext = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
+  const sites = [
+    ext.slice(ext.indexOf("insideOrchestration: () =>"), ext.indexOf("insideOrchestration: () =>") + 200),
+    ext.slice(ext.indexOf("const releases = releasesWindowLabels({"), ext.indexOf("const releases = releasesWindowLabels({") + 300),
+  ];
+  for (const site of sites) {
+    assert.ok(site.length > 0, "both wiring sites must exist");
+    assert.match(site, /ORCHESTRATION_ID_ENV/, "a child is recognised by its environment");
+    assert.match(site, /orchestrator/, "…and a manager by its mode");
+  }
+});

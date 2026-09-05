@@ -215,6 +215,11 @@ function seed(f: Fake, over: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
       title: c.role, sessionDir: c.sessionDir,
       ...(c.paneId === undefined ? {} : { paneId: c.paneId }),
       ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
+      // A real spawn records the server that minted the pane id ALONGSIDE it
+      // (`registerJudge`), and every judgement about that pane — kill it,
+      // repaint it, count it as a sibling — refuses an id it cannot attribute.
+      // A fixture that omitted it made all three look like "no pane at all".
+      ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
       spawnedAt: now,
     },
   };
@@ -376,7 +381,9 @@ test("judge_close: inside an orchestration the label bar is left alone", async (
 test("judge_close: a sibling judge still open keeps the label bar up", async () => {
   const f = fake();
   seed(f);
-  // A second judge of the same opener, with its own pane.
+  // A second judge of the same opener, with its own pane — and that pane is ON
+  // SCREEN, which is what makes it a sibling worth keeping the bar for.
+  f.panes = ["%1", "%7", "%9"];
   f.table.current = {
     ...f.table.current,
     "rg-adviser-xyz": {
@@ -391,6 +398,36 @@ test("judge_close: a sibling judge still open keeps the label bar up", async () 
   assert.equal(flat.filter((s) => s.startsWith("setw")).length, 0,
     "the bar stays up while a decorated sibling is still on screen");
 });
+
+test("judge_close: a sibling that is only a REGISTRY ROW does not keep the bar up", async () => {
+  // The registry outlives panes: one closed by hand, or one minted by a tmux
+  // server that has since restarted, is a row and nothing else. Counting rows
+  // would leave the border line switched on in the user's window forever —
+  // which is the exact litter this release exists to prevent.
+  const f = fake();
+  seed(f);
+  f.table.current = {
+    ...f.table.current,
+    "rg-adviser-gone": {
+      ...f.table.current["rg-reviewer-abc"]!,
+      judgeId: "rg-adviser-gone",
+      role: "adviser",
+      paneId: "%9", // never in f.panes: the pane is gone
+    },
+    "rg-adviser-stranger": {
+      ...f.table.current["rg-reviewer-abc"]!,
+      judgeId: "rg-adviser-stranger",
+      role: "adviser",
+      paneId: "%1",
+      tmuxServer: "other-server,9", // an id this server did not mint
+    },
+  };
+  await call(f, "judge_close", { role: "reviewer" });
+  const flat = f.tmuxCalls.map((a) => a.join(" "));
+  assert.equal(flat.filter((s) => s.startsWith("setw") && s.includes("-u")).length, 2,
+    "neither row is a pane on screen, so this close is the last one");
+});
+
 
 test("judge_close: a pane id from ANOTHER tmux server is never killed", async () => {
   // The registry is persisted now, so a record can outlive the tmux server
