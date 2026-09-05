@@ -90,7 +90,17 @@ test("empty blocks are dropped; with none at all the instructions come back unch
   assert.match(mixed, /<b>\nkept\n<\/b>/);
 });
 
-test("a per-block cap overrides the default", () => {
-  const task = composeWithUntrustedData("I", [{ tag: "a", label: "L", text: "abcdef", maxChars: 2 }]);
-  assert.match(task, /<a>\nab\n\u2026\[truncated\]\n<\/a>/);
+test("a composed block is NOT capped by default, and an explicit cap still applies", () => {
+  // Round-5 reviewer P2: the four task assemblies had no cap before this
+  // module existed. Capping them silently would let a goal draft be AUDITED in
+  // half while propose_loop_goal's PASS binds the sha256 of the whole text —
+  // an unaudited tail carrying a passing record. So blocks are uncapped
+  // unless the caller says otherwise; the arbiter-style evidence fields ask
+  // for their cap explicitly through asUntrustedData.
+  const huge = "y".repeat(DEFAULT_UNTRUSTED_CAP * 2);
+  const uncapped = composeWithUntrustedData("I", [{ tag: "a", label: "L", text: huge }]);
+  assert.doesNotMatch(uncapped, /truncated/, "no silent truncation of a task's own material");
+  assert.ok(uncapped.includes(huge), "the whole payload reaches the judge");
+  const capped = composeWithUntrustedData("I", [{ tag: "a", label: "L", text: "abcdef", maxChars: 2 }]);
+  assert.match(capped, /<a>\nab\n\u2026\[truncated\]\n<\/a>/);
 });

@@ -59,7 +59,14 @@ export interface UntrustedBlock {
   label: string;
   /** The untrusted text itself. */
   text: string;
-  /** Per-block cap; defaults to DEFAULT_UNTRUSTED_CAP. */
+  /**
+   * Per-block cap. UNSET MEANS NO CAP, deliberately: a composed task's blocks
+   * are the material the round is ABOUT (the draft being audited, the plan
+   * being approved, the note describing the change), not evidence fields
+   * quoted into a prompt. Capping them would let a goal draft be judged in
+   * half while `propose_loop_goal`'s PASS still binds the sha256 of the WHOLE
+   * text — an unaudited tail with a passing record (round-5 reviewer P2).
+   */
   maxChars?: number;
 }
 
@@ -71,7 +78,9 @@ export interface UntrustedBlock {
  * task before the judge has read what its job is; placed after, it is material
  * the judge has already been told how to treat. Blocks whose text is empty are
  * dropped, and with no blocks at all the instructions are returned unchanged
- * (no empty untrusted region to explain).
+ * (no empty untrusted region to explain). Blocks are NOT capped unless the
+ * caller asks for it — see UntrustedBlock.maxChars for why silent truncation
+ * of a composed task's material would be worse than a long task.
  */
 export function composeWithUntrustedData(
   instructions: string,
@@ -80,7 +89,7 @@ export function composeWithUntrustedData(
   const present = blocks.filter((b) => b.text.trim() !== "");
   if (!present.length) return instructions;
   const rendered = present.map(
-    (b) => `${b.label}\n${asUntrustedData(b.tag, b.text, b.maxChars ?? DEFAULT_UNTRUSTED_CAP)}`,
+    (b) => `${b.label}\n${asUntrustedData(b.tag, b.text, b.maxChars ?? Number.POSITIVE_INFINITY)}`,
   );
   return [instructions.replace(/\s+$/, ""), "", UNTRUSTED_DATA_HEADER, "", rendered.join("\n\n")].join("\n");
 }
