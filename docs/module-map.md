@@ -423,11 +423,11 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 
 ---
 
-## 五、`lib/` 全量速查表（88 个模块）
+## 五、`lib/` 全量速查表（107 个模块）
 
 **维护指令（这张表没有机械约束，只有这一条）**：在 `lib/` 下**新增或删除**一个
 模块时，**同一轮改动里**顺手加/删这里的一行——否则这张表会静静地过时。
-随时可核对条目数：`ls lib/*.ts | wc -l`（当前 88，与本表条目一一对应）。
+随时可核对条目数：`ls lib/*.ts | wc -l`（当前 107，与本表条目一一对应）。
 
 | 模块 | 一句话职责 |
 | --- | --- |
@@ -481,7 +481,6 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `llm-classify.ts` | 语义第二意见（DeepSeek V4 Flash），契约上只能加拦（TIGHTEN-ONLY） |
 | `loop-goal.ts` | L8：loop 会话退出契约的文件、审批记录与注入 |
 | `loop-stall.ts` | L2 自动续跑的断路器：外部阻塞（限流、模型不可达）时停止空转 |
-| `model-allowlist.ts` | provider 级模型允许名单，独立模块以便跨引擎存活 |
 | `model-config.ts` | 每个 agent 的模型链配置层：把 `review-gate.json` 的 `agents` 段渲染成 frontmatter；`validateAgentsForStartup` 启动硬检查（无内置默认） |
 | `model-diagnose.ts` | 纯诊断：「我的审查实际会跑在哪个模型上、这条链可用吗」 |
 | `readonly-stall.ts` | 只读钻探止损（2026-09-18）：工具调用层计数器，连续 30 次成功的只读调用（read 家族 + bash）无 edit 落地时注入 NUDGE（只提示不拦截）。补 loop-stall 的 turn 边界盲区与进展维度「任何调用都算推进」的盲区；状态纯内存，不落盘 |
@@ -542,7 +541,6 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |
 | `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条**单行**状态条，详情在 `/gate-status`） |
 | `user-interaction-tools.ts` | 工具 `ask_user`（采访的执行侧：暂停循环、逐题落盘、双方抢答），并且是「用户交互工具族」的**唯一注册入口**（自己转注册 `consent-request-tools.ts`） |
-| `verdict-parse.ts` | **已删除**（2026-09-04）：review 半边随 fence 回环一起消失，precommit 半边搬去 `precommit-parse.ts`，reviewer 裁决规则搬去 `review-adjudicate.ts` |
 | `workflow-commands.ts` | 工作流命令的定义与提示词组装，含 `--execute` 授权字的严格解析 |
 | `workspace-branch.ts` | 保护分支检测（main/master/dev/develop）：checkpoint 与 ship 一律拒绝（2026-09-07 起 `setup_workspace`/工作分支/squash 落地全部退役，只剩这个硬护栏；2026-09-16 起 checkpoint 不再弹确认框，直接拒） |
 
