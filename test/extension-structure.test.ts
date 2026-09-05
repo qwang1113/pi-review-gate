@@ -4196,8 +4196,9 @@ test("the orchestration layer is wired in, and its logic did NOT land in this fi
   // The session tools take the orchestration deps PLUS one capability the deps
   // module has no reason to know about (how many judge panes this window has,
   // for the shared label-bar release) — still wiring, still no logic here.
-  assert.match(SRC, /registerOrchestratorSessionTools\(pi, \{\s*\n\s*\.\.\.orchestratorDeps,/);
-  assert.match(SRC, /decoratedJudgePanes: \(\) => decoratedJudgePaneCount\(\)/);
+  assert.match(SRC, /registerOrchestratorSessionTools\(pi, sessionDeps\)/);
+  assert.match(SRC, /sessionDeps\.decoratedJudgePanes = \(\) => decoratedJudgePaneCount\(\)/,
+    "attached to the live deps object — a spread copy would freeze every other field");
   for (const banned of ["buildSpawnPaneArgv", "buildSendMessageArgv", "scheduleNextTasks", "parsePlan("]) {
     assert.ok(!SRC.includes(banned),
       `${banned} belongs in lib/orchestrator-*.ts — the extension only wires the layer up`);

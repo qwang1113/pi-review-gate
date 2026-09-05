@@ -31,7 +31,10 @@
 import assert from "node:assert/strict";
 
 import { registerOrchestratorStateTools } from "../../lib/orchestrator-tools.ts";
-import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session-tools.ts";
+import {
+  registerOrchestratorSessionTools,
+  type OrchestratorSessionDeps,
+} from "../../lib/orchestrator-session-tools.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
 import { snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
@@ -144,6 +147,14 @@ export interface FakeWorldOptions {
   contextPercent?: number;
   /** Make `list-panes` fail, so liveness is UNKNOWN rather than false. */
   tmuxBroken?: boolean;
+  /**
+   * How many REVIEW panes this manager's window currently shows.
+   *
+   * The window's label bar is released by the last decorated pane of ANY kind,
+   * so a manager closing its last child while a review is still open must not
+   * take it down (the review's border would blank).
+   */
+  judgePanes?: number;
   /**
    * Whether a spawned child's gate "boots and reports" (the default, and what
    * a healthy child does on its first `turn_end`). Set false to test the
@@ -340,6 +351,12 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   }
 
   registerOrchestratorStateTools(host, deps);
+  // A manager's window holds review panes too, and the label-bar release counts
+  // BOTH kinds. The real wiring reads the judge registry; a test just says how
+  // many are on screen. Attached to the SAME deps object the tools were given —
+  // a spread copy would freeze every other field at registration time, and
+  // tests swap `channelIO` afterwards.
+  (deps as OrchestratorSessionDeps).decoratedJudgePanes = () => options.judgePanes ?? 0;
   registerOrchestratorSessionTools(host, deps);
 
   const target = (childId: string) => ({ orchestrationId: ORCHESTRATION_ID, childId, home: "/home/test" });

@@ -243,7 +243,10 @@ import {
 import { formatChildHealth } from "../lib/orchestrator-child-state.ts";
 
 import { registerOrchestratorStateTools } from "../lib/orchestrator-tools.ts";
-import { registerOrchestratorSessionTools } from "../lib/orchestrator-session-tools.ts";
+import {
+  registerOrchestratorSessionTools,
+  type OrchestratorSessionDeps,
+} from "../lib/orchestrator-session-tools.ts";
 
 
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
@@ -2017,13 +2020,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     onHandoff: () => { handedOffOrchestration = true; },
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
-  registerOrchestratorSessionTools(pi, {
-    ...orchestratorDeps,
-    // A manager's window holds BOTH kinds of decorated pane. `orchestrator_close`
-    // needs the judge count for the one decision it shares with the judge close
-    // paths: may this close take the window's shared label bar down?
-    decoratedJudgePanes: () => decoratedJudgePaneCount(),
-  });
+  // A manager's window holds BOTH kinds of decorated pane. The session tools
+  // need the judge count for the one decision they share with the judge close
+  // paths: may this close take the window's shared label bar down?
+  //
+  // Attached to the deps object rather than spread into a copy — a copy
+  // freezes every field at registration time, and these deps are one live
+  // object the rest of the session keeps using.
+  const sessionDeps: OrchestratorSessionDeps = orchestratorDeps;
+  sessionDeps.decoratedJudgePanes = () => decoratedJudgePaneCount();
+  registerOrchestratorSessionTools(pi, sessionDeps);
 
   /** Constraints 3, 4 and 11 — the orchestration's own exit contract. */
   function orchestrationDoneProblems(): string[] {

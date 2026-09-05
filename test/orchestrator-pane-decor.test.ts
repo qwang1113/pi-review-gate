@@ -155,6 +155,38 @@ test("close takes the window bar down before killing the pane, and only then", a
   assert.ok(unsets.every((line) => !line.includes(child.paneId)), "…not through the pane being killed");
 });
 
+test("a sibling CHILD keeps its pane, and the scheduler is why one repo never has two", async () => {
+  // The bar is shared by every pane in the window, so a close must not take it
+  // down while a sibling is still labelled. At the TOOL level that case only
+  // arises across repos: inside one repo the scheduler serializes children, so
+  // a second live child pane cannot exist — asserted here so the gap in the
+  // tool-level coverage is a stated fact rather than an oversight. The
+  // judgement itself (`releasesWindowLabels` + `countDecoratedPanes`, siblings
+  // of BOTH kinds) is unit-tested in test/session-factory.test.ts, and the
+  // review-pane half of it is exercised on the tool below.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "done" });
+  const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+
+  assert.equal(second.isError, true, "the first child's pane is still alive, so t2 waits");
+  assert.equal(world.runtime().children.length, 1, "…and no second pane was opened");
+});
+
+test("close leaves the window bar up while a REVIEW pane is still on screen", async () => {
+  // The other kind of decorated pane. Counting only children was a measured
+  // defect: a manager closing its last child blanked its own review's border.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, judgePanes: 1 });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const child = world.runtime().children[0]!;
+
+  await world.call("orchestrator_close", { childId: child.id });
+
+  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.deepEqual(unsets, [], "the review pane still needs the border line it is labelled with");
+});
+
+
 test("the health snapshot names the same colour the border uses", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
