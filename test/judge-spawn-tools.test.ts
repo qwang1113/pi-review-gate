@@ -36,6 +36,8 @@ interface SpawnStore {
   lanesAsked: string[];
   launchLanes: string[];
   taskFileLanes: string[];
+  /** Every `retirePrevious()` the spawn made, in order. */
+  retired: string[];
 }
 
 function setup(over: Partial<{
@@ -74,6 +76,7 @@ function setup(over: Partial<{
     lanesAsked: [],
     launchLanes: [],
     taskFileLanes: [],
+    retired: [],
   };
   const panes = store.panes;
   /**
@@ -146,10 +149,14 @@ function setup(over: Partial<{
     resolveRepo: () => ({ ok: true as const, root: "/repo" }),
     // The gate's lane for this spawn (lib/judge-rotation.ts). The default is a
     // plain first lane; `store.lanesAsked` records every resolution so a test
-    // can prove it is asked exactly once per spawn.
+    // can prove it is asked exactly once per spawn, and `store.retired` records
+    // when the lane this spawn replaces was actually closed and forgotten.
     lane: (root, role, opener) => {
       store.lanesAsked.push(`${role}|${root}|${opener}`);
-      return over.lane ?? { lane: { objectId: "objecthash0001", generation: 0 }, roundsInObject: 1 };
+      return {
+        ...(over.lane ?? { lane: { objectId: "objecthash0001", generation: 0 }, roundsInObject: 1 }),
+        retirePrevious: () => { store.retired.push(`${role}|${store.lanesAsked.length}`); },
+      };
     },
     launchConfig: (_root, _role, _opener, lane) => {
       store.launchLanes.push(lane ? `${lane.objectId}#${lane.generation}` : "none");
@@ -436,6 +443,30 @@ test("the spawn's lane reaches the id, the launch config and the task file — r
   assert.equal(entry.objectId, "deadbeefcafe0001", "the FULL object id is what the registry keeps");
   assert.equal(entry.generation, 3);
   assert.equal(entry.roundsInObject, 1, "a birth is the object's first dispatched round");
+  // The lane it replaces is retired only AFTER the new pane is up: a spawn
+  // that failed earlier would otherwise drop the old row, and the next
+  // dispatch — seeing no previous lane — would resume the transcript the gate
+  // had just rotated away, with its round count back at one.
+  assert.deepEqual(store.retired, ["goal-auditor|1"], "the previous lane is retired exactly once, at the end");
+});
+
+test("a spawn that never opens a pane retires NOTHING — the rotation is decided again next time", async () => {
+  const { tools, store } = setup({ ownPane: null });
+  const refused = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(refused.isError, true);
+  assert.deepEqual(store.retired, [], "no pane, no replacement lane, nothing to retire");
+});
+
+test("a spawn rolled back by tmux retires nothing either", async () => {
+  const { tools, store } = setup({
+    tmux: (argv) => (argv[0] === "split-window"
+      ? { ok: false, stdout: "", stderr: "no window" }
+      : { ok: true, stdout: "", stderr: "" }),
+  });
+  const refused = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(refused.isError, true);
+  assert.deepEqual(store.retired, []);
+  assert.deepEqual(store.table, {}, "the rollback also removed this spawn's own row");
 });
 
 test("a spawn refused on its parameters never resolves a lane (no pane is retired for a typo)", async () => {

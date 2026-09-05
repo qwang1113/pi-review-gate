@@ -113,7 +113,19 @@ export interface JudgeSpawnToolDeps {
    * first. That mismatch is not cosmetic — a transcript id from one lane
    * beside a session dir from another is a judge writing where nobody reads.
    */
-  lane(root: string, role: string, opener: string): { lane: JudgeLane; roundsInObject: number };
+  lane(root: string, role: string, opener: string): {
+    lane: JudgeLane;
+    roundsInObject: number;
+    /**
+     * Close and forget the lane this spawn replaces. Called ONLY after the new
+     * pane is up and registered: dropping the old row is irreversible, and a
+     * spawn that fails afterwards would leave the next dispatch with no
+     * previous lane — which decides "first" at generation 0 and resumes the
+     * transcript that was just rotated away. Idempotent; a no-op when the lane
+     * did not change.
+     */
+    retirePrevious(): void;
+  };
   /** Model + system prompt + transcript dir for one role in one repo. */
   launchConfig(root: string, role: string, opener: string, lane: JudgeLane | undefined):
     | { ok: true; model: string; sysPromptPath: string; sessionDir: string }
@@ -360,6 +372,14 @@ async function doSpawn(
     rollback();
     return fail("review-gate: 开出的 review pane 没有回报 pane id —— 已回滚。");
   }
+  // The new pane exists and its lane is registered: only NOW is the lane it
+  // replaces safe to close and forget. Retiring at resolution time would strand
+  // the rotation whenever the spawn failed on one of the refusals above — the
+  // next dispatch would see no previous lane and resume the transcript that was
+  // just rotated away. This is the SAME resolution as above, never a second
+  // one: asking twice would both advance the round count and answer from a
+  // registry this spawn has already written to.
+  laneInfo.retirePrevious();
   // Register what was dispatched, or the report can never be recorded:
   // a goal verdict binds to its draft, a plan verdict to its hash. This runs
   // even when the boot check failed, because the pane is KEPT: a slow judge

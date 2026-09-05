@@ -4896,39 +4896,57 @@ export default function reviewGate(pi: ExtensionAPI) {
    *
    * It reads the lane the role is currently in (a scan of the registry, since
    * a judge id now CONTAINS its lane and therefore cannot be derived before
-   * the decision is made), asks the policy what this round's lane is, and —
-   * when the answer is a NEW lane — retires the old one on the spot. Retiring
-   * belongs here rather than in each caller for the reason the whole module
-   * map exists: the paths that start a judge (`dispatchJudgeRound`,
-   * `judge_spawn`'s launch config and task file) must not each reimplement
-   * "and close the pane we just stopped using", and one of them would forget.
+   * the decision is made), asks the policy what this round's lane is, and hands
+   * back the one action that finishes the move: `retirePrevious`, which closes
+   * and forgets the lane this round replaces. Retiring belongs here rather than
+   * in each caller for the reason the whole module map exists: the paths that
+   * start a judge (`dispatchJudgeRound`, `judge_spawn`'s launch config and task
+   * file) must not each reimplement "and close the pane we just stopped using",
+   * and one of them would forget.
+   *
+   * WHY THE RETIRE IS NOT DONE HERE. Dropping the old row is irreversible, and
+   * a dispatch can still fail after this call (no tmux, no model chain). The
+   * next dispatch would then find NO previous lane, decide `first` at
+   * generation 0 — and resume the very transcript that was just rotated away,
+   * with the round count back at one and the context reading gone. So the
+   * caller calls `retirePrevious()` once the replacement lane is registered.
+   * It is idempotent, and a no-op when the lane did not actually change.
    */
   function resolveJudgeLane(root: string, role: string, opener: string): {
     decision: JudgeRotationDecision;
     previous?: JudgeEntry;
+    retirePrevious(): void;
   } {
     const previous = findJudgeLane(judgeHierarchy, { role, repoRoot: root, openerId: opener });
     const decision = decideJudgeRotation({
       objectId: judgeObjectIdFor(root),
       ...(previous === undefined ? {} : { previous }),
     });
-    if (decision.rotated && previous) {
-      const nextId = judgeSessionIdFor(role, shortRepoHash(root), opener, decision.lane);
-      // A ROTATED round leaves a whole lane behind — its pane included. The
-      // registry is keyed by judge id and this round's id is a NEW one, so
-      // nothing downstream would ever look at the old pane again: it would
-      // live on with nobody left to close it (one leaked pane per rotation).
-      if (previous.judgeId !== nextId) {
-        retireJudgeLane(previous, {
-          root,
-          opener,
-          ownPane: process.env.TMUX_PANE?.trim() || undefined,
-          tmuxServer: tmuxServerFrom(process.env),
-          run: (argv: readonly string[]) => runTmux(argv),
-        });
-      }
-    }
-    return { decision, ...(previous === undefined ? {} : { previous }) };
+    // THE TEST IS THE ID, NOT THE VERDICT. A lane the gate stops using leaves a
+    // whole judge behind — its registry row and its live pane — and nothing
+    // downstream would ever look at either again, because the registry is
+    // keyed by judge id and this round's id is a different one. That happens
+    // on a rotation, and it ALSO happens on a decision the policy calls
+    // `first`: an entry written by a pre-rotation build carries no lane, so
+    // the policy has nothing to compare and says "first" while the derived id
+    // still grows a lane suffix. Gating on `rotated` there left the old row in
+    // place, and `judgeChildByRole` returns the FIRST match — so `judge_wait`
+    // / `judge_close` would address the stale judge instead of the round just
+    // dispatched (reviewer P1, 2026-09-05).
+    const nextId = judgeSessionIdFor(role, shortRepoHash(root), opener, decision.lane);
+    let retired = false;
+    const retirePrevious = (): void => {
+      if (retired || !previous || previous.judgeId === nextId) return;
+      retired = true;
+      retireJudgeLane(previous, {
+        root,
+        opener,
+        ownPane: process.env.TMUX_PANE?.trim() || undefined,
+        tmuxServer: tmuxServerFrom(process.env),
+        run: (argv: readonly string[]) => runTmux(argv),
+      });
+    };
+    return { decision, ...(previous === undefined ? {} : { previous }), retirePrevious };
   }
 
   /**
@@ -4961,50 +4979,71 @@ export default function reviewGate(pi: ExtensionAPI) {
     };
   }
 
+  /** What every judge-pane close needs to know about this session's tmux. */
+  interface JudgeCloseCtx {
+    opener: string;
+    ownPane: string | undefined;
+    tmuxServer: string | undefined;
+    run: JudgePaneRunner;
+  }
+
   /**
-   * Retire a lane the gate has rotated away from: close its pane, forget its
+   * Close ONE judge's pane, with the label-bar judgement every close path in
+   * this file shares: the window's border line is released only when no
+   * decorated pane of this opener is left, and never by a guest in somebody
+   * else's orchestration.
+   *
+   * ONE copy, two callers (the `fresh` kill and the lane retire). It was two
+   * copies for exactly one round — they sat 150 lines apart and differed only
+   * in which variable held the entry, which is how a rule with six copies gets
+   * its seventh (reviewer P2, 2026-09-05).
+   */
+  function closeJudgePaneOf(entry: JudgeEntry, ctx: JudgeCloseCtx): void {
+    if (!entry.paneId) return;
+    const others = countDecoratedPanes(
+      Object.values(judgeHierarchy)
+        .filter((other) =>
+          other.judgeId !== entry.judgeId
+          && other.openerId === ctx.opener
+          && other.paneId
+          && paneClosable(other, ctx.tmuxServer))
+        .map((other) => other.paneId!),
+      ctx.ownPane ? listJudgePanes(ctx.run, ctx.ownPane) : undefined,
+    );
+    const releases = ctx.ownPane !== undefined && releasesWindowLabels({
+      remainingDecoratedPanes: others,
+      insideOrchestration: labelBarOwnedByOthers(),
+    });
+    try {
+      closeSessionPane(ctx.run, entry.paneId, releases ? { hideLabelsVia: ctx.ownPane! } : {});
+    } catch { /* best effort */ }
+  }
+
+  /**
+   * Retire a lane the gate has stopped using: close its pane, forget its
    * row, and let its session dir age out where it stands.
    *
    * The dir is deliberately NOT deleted. "Archived in place" is the user's own
    * shape (2026-09-05): the transcript stays readable, and the existing TTL
    * sweep reclaims it once nothing in the registry points at it — which is
    * true the moment this function returns.
+   *
+   * CALL IT ONLY ONCE THE REPLACEMENT LANE IS REGISTERED. Dropping the row is
+   * what makes the retirement irreversible: a dispatch that fails AFTER this
+   * (no tmux, no model chain) would leave the next one with no previous lane
+   * at all, and "no previous lane" decides `first` at generation 0 — which
+   * resumes the very transcript that was just rotated away, with the round
+   * count back at one (reviewer P2, 2026-09-05).
    */
   function retireJudgeLane(
     entry: JudgeEntry,
-    ctx: {
-      root: string;
-      opener: string;
-      ownPane: string | undefined;
-      tmuxServer: string | undefined;
-      run: JudgePaneRunner;
-    },
+    ctx: JudgeCloseCtx & { root: string },
   ): void {
     const usable = paneClosable(entry, ctx.tmuxServer);
     const alive = usable && ctx.ownPane && entry.paneId
       ? judgePaneAlive(ctx.run, ctx.ownPane, entry.paneId)
       : undefined;
-    if (entry.paneId && alive === true) {
-      // Same label-bar judgement as every other close path: the border line is
-      // released only when no decorated pane of this opener is left.
-      const others = countDecoratedPanes(
-        Object.values(judgeHierarchy)
-          .filter((other) =>
-            other.judgeId !== entry.judgeId
-            && other.openerId === ctx.opener
-            && other.paneId
-            && paneClosable(other, ctx.tmuxServer))
-          .map((other) => other.paneId!),
-        ctx.ownPane ? listJudgePanes(ctx.run, ctx.ownPane) : undefined,
-      );
-      const releases = ctx.ownPane !== undefined && releasesWindowLabels({
-        remainingDecoratedPanes: others,
-        insideOrchestration: labelBarOwnedByOthers(),
-      });
-      try {
-        closeSessionPane(ctx.run, entry.paneId, releases ? { hideLabelsVia: ctx.ownPane! } : {});
-      } catch { /* best effort */ }
-    }
+    if (alive === true) closeJudgePaneOf(entry, ctx);
     // The retired lane's scratch worktrees can never be used again — whether
     // its pane was closed here or had already died.
     reapReviewScratch(entry.judgeId);
@@ -5146,6 +5185,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         spawnedAt: new Date().toISOString(),
       });
       if (reg.ok) setHierarchy(reg.table);
+      // The replacement lane is registered — only now may the lane it replaces
+      // be closed and forgotten (a no-op on the normal reuse path, where the
+      // "previous" lane IS this one).
+      rotation.retirePrevious();
       return { ok: true, reused: true, sessionId, sessionDir, paneId: existing.paneId, judgeId };
     }
     // fresh:true kills the living pane FIRST (singleton per role+repo).
@@ -5159,23 +5202,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         // and this close also drops the registry row, after which nobody is
         // left who could release it. So it makes the same judgement as every
         // other close; the re-open turns the bar back on when it succeeds.
-        const others = countDecoratedPanes(
-          Object.values(judgeHierarchy)
-            .filter((entry) =>
-              entry.judgeId !== judgeId
-              && entry.openerId === opener
-              && entry.paneId
-              && paneClosable(entry, tmuxServer))
-            .map((entry) => entry.paneId!),
-          ownPane ? listJudgePanes(run, ownPane) : undefined,
-        );
-        const releases = ownPane !== undefined && releasesWindowLabels({
-          remainingDecoratedPanes: others,
-          insideOrchestration: labelBarOwnedByOthers(),
-        });
-        try {
-          closeSessionPane(run, existing.paneId, releases ? { hideLabelsVia: ownPane! } : {});
-        } catch { /* best effort */ }
+        closeJudgePaneOf(existing, { opener, ownPane, tmuxServer, run });
       }
       if (paneAlive === false) reapReviewScratch(sessionId);
       // One removal, one table.
@@ -5284,8 +5311,16 @@ export default function reviewGate(pi: ExtensionAPI) {
           ? `review pane 开出来了（${opened.paneId}）但一直没在通道上报状态 —— ${opened.error}；` +
             "pane 与登记都保留着，可以先 judge_wait 看它有没有动静，确认没起来再用 fresh:true 重来。"
           : opened.error;
+        // A pane that EXISTS (delivery failure) is a registered replacement
+        // lane, so the old one is finished either way; a pane that never
+        // opened leaves the previous lane alone, and the next dispatch decides
+        // the same rotation again from a registry that still has it.
+        if (opened.deliveryFailed) rotation.retirePrevious();
         return { ok: false, reused: continuesSession, sessionId, sessionDir, error: detail, ...(opened.paneId === undefined ? {} : { paneId: opened.paneId }), judgeId };
       }
+      // The new pane is up and registered: the lane it replaces is now safe to
+      // close and forget (idempotent, and a no-op when nothing changed).
+      rotation.retirePrevious();
       return { ok: true, reused: continuesSession, sessionId, sessionDir, paneId: opened.paneId, judgeId };
     } catch (err) {
       return { ok: false, reused: false, error: err instanceof Error ? err.message : String(err) };
@@ -6147,7 +6182,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // retire path, whichever tool starts the judge.
     lane: (root, role, opener) => {
       const resolved = resolveJudgeLane(root, role, opener);
-      return { lane: resolved.decision.lane, roundsInObject: resolved.decision.roundsInObject };
+      return {
+        lane: resolved.decision.lane,
+        roundsInObject: resolved.decision.roundsInObject,
+        retirePrevious: () => { resolved.retirePrevious(); },
+      };
     },
     launchConfig: (root, role, opener, lane) => {
       const { map: agents } = effectiveAgentsConfig(projectConfig.agentsGlobal, projectConfig.agentsProject);

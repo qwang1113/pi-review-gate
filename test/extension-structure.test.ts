@@ -2313,11 +2313,19 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   assert.match(body, /await openSessionPane\(run, \{/,
     "a real pane open still exists for the no-reuse case — through the ONE factory");
   // fresh:true kills the living pane FIRST (singleton per role+repo+opener) —
-  // and, being one of the five paths that close a decorated pane, it asks the
+  // and, being one of the paths that close a decorated pane, it asks the
   // shared label-bar question on the way out (the re-open turns the border line
   // back on when it succeeds; when it fails, nobody else is left to release it).
-  assert.match(body, /closeSessionPane\(run, existing\.paneId, releases \?/, "fresh kills the pane before re-opening");
-  assert.match(body, /insideOrchestration: labelBarOwnedByOthers\(\)/, "…with the same guest test as every other close");
+  // Since 2026-09-05 that question is asked in ONE place: this branch and the
+  // lane retire call the same helper instead of carrying a copy each.
+  assert.match(body, /closeJudgePaneOf\(existing, \{ opener, ownPane, tmuxServer, run \}\)/,
+    "fresh kills the pane through the shared close helper");
+  assert.doesNotMatch(body, /releasesWindowLabels\(\{/,
+    "…and does not re-inline the label-bar rule");
+  const closeHelper = windowOf("function closeJudgePaneOf(", "\n  /**\n   * Retire a lane the gate has stopped using",
+    "closeJudgePaneOf body");
+  assert.match(closeHelper, /closeSessionPane\(ctx\.run, entry\.paneId, releases \?/, "the helper is what closes the pane");
+  assert.match(closeHelper, /insideOrchestration: labelBarOwnedByOthers\(\)/, "…with the same guest test as every other close");
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
 });
 
@@ -4914,14 +4922,40 @@ test("rotation retires the lane it replaces: pane closed, scratch reaped, row dr
   assert.match(resolver, /findJudgeLane\(judgeHierarchy, \{ role, repoRoot: root, openerId: opener \}\)/,
     "the previous lane is looked up in the ONE registry");
   assert.match(resolver, /decideJudgeRotation\(\{/, "the policy decides, not this call site");
-  assert.match(resolver, /if \(decision\.rotated && previous\)/, "a rotation retires the lane it replaces");
+  // The retire test is the ID, never the policy's verdict: a pre-rotation
+  // entry has no lane, so the policy says `first` while the derived id already
+  // grows a suffix — gating on `rotated` there strands the old row, and the
+  // role lookup (first match wins) then addresses the stale judge.
+  assert.match(resolver, /previous\.judgeId === nextId\) return;/,
+    "any lane whose id changed is retired, rotation or not");
+  assert.doesNotMatch(resolver, /decision\.rotated/,
+    "the policy's verdict is not what decides a retire");
+  assert.doesNotMatch(resolver, /if \(decision\.rotated && previous\)/,
+    "the verdict-gated shape must not come back");
   assert.match(resolver, /retireJudgeLane\(previous, \{/, "through the shared retire path");
+  // AND ONLY WHEN THE REPLACEMENT IS REGISTERED. Retiring at resolution time
+  // drops the row before the dispatch can still fail (no tmux, no model
+  // chain); the next dispatch would then see no previous lane, decide `first`
+  // at generation 0, and resume the transcript that was just rotated away with
+  // its round count back at one (reviewer P2, 2026-09-05).
+  assert.match(resolver, /const retirePrevious = \(\): void => \{/,
+    "the retire is handed to the caller, not performed here");
+  assert.match(resolver, /if \(retired \|\| !previous \|\| previous\.judgeId === nextId\) return;/,
+    "…idempotent, and a no-op when the lane did not change");
+  const dispatchBody = windowOf("function dispatchJudgeRound(", "\n  function readRoundStdout(",
+    "dispatchJudgeRound body");
+  const retireCalls = dispatchBody.match(/rotation\.retirePrevious\(\)/g) ?? [];
+  assert.equal(retireCalls.length, 3,
+    "each of the dispatch's three outcomes that REGISTERED a lane retires the old one");
+  assert.match(dispatchBody, /if \(opened\.deliveryFailed\) rotation\.retirePrevious\(\);/,
+    "a pane that exists but never reported still replaced the old lane");
+
 
   const retire = windowOf("function retireJudgeLane(", "\n  /**\n   * Dispatch ONE round to a judge role",
     "retireJudgeLane body");
   assert.match(retire, /judgePaneAlive\(/, "a pane is probed before it is closed");
-  assert.match(retire, /closeSessionPane\(/, "the live pane is closed");
-  assert.match(retire, /releasesWindowLabels\(\{/, "with the same label-bar judgement as every other close");
+  assert.match(retire, /if \(alive === true\) closeJudgePaneOf\(entry, ctx\)/,
+    "the live pane is closed through the ONE close helper (label-bar rule included)");
   assert.match(retire, /reapReviewScratch\(entry\.judgeId\)/, "its scratch worktrees are reclaimed");
   assert.match(retire, /removeJudge\(judgeHierarchy, entry\.judgeId\)/, "and the row is dropped");
   assert.match(retire, /if \(entry\.role === "goal-auditor"\) dropAudits\(/,
