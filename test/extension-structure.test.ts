@@ -4321,6 +4321,57 @@ test("judge_conclude is registered judge-side only (anti-forgery by surface)", (
     "the registration sits inside the judge-side branch");
 });
 
+test("the inspection observer is fed IN PROCESS, from successful judge tool results", () => {
+  // The evidence must be gathered where the round happens (a judge pane runs
+  // THIS extension), not scraped from a transcript afterwards — a transcript
+  // is written by the very session being checked.
+  const handler = windowOf('pi.on("tool_result"', "// 1. Edits: only arm gate on success.", "tool_result observer");
+  assert.match(handler, /isJudgePane\(\) && event\.isError !== true/,
+    "judge panes only, successful calls only — a failed read inspected nothing");
+  assert.match(handler, /judgeInspection = observeInspection\(/,
+    "the fold itself lives in lib/judge-inspection.ts");
+  // It must sit BEFORE the branches, all of which return early.
+  const feedAt = SRC.indexOf("judgeInspection = observeInspection(");
+  const firstBranchAt = SRC.indexOf("if (EDIT_TOOL_NAMES.has(event.toolName)) {");
+  assert.ok(feedAt >= 0 && firstBranchAt >= 0 && feedAt < firstBranchAt,
+    "an early-returning branch must not be able to skip the observation");
+
+  // The judge_conclude wiring must actually pass the evidence in: an unwired
+  // host would leave the rule asserting nothing.
+  const wiring = windowOf("registerJudgeConcludeTool(pi, {", "\n    });", "judge_conclude deps");
+  for (const dep of ["inspection: () => judgeInspection", "inspectionPass:", "noteInspectionRefusal:", "noteConcluded:"]) {
+    assert.ok(wiring.includes(dep), `judge_conclude is wired with ${dep}`);
+  }
+  assert.match(wiring, /judgeInspection = emptyInspection\(\)/,
+    "a round's evidence must not carry into the next round");
+});
+
+test("the zero-inspection refusal has an appeal, and it grants only that round", () => {
+  // Reachability: the appeal route must be dispatched from request_arbitration,
+  // and it contests the MOST RECENT block like the other two classes.
+  const dispatch = windowOf(
+    "// Must contest a REAL, recent block",
+    "const parsed = parseArbitrableAction(",
+    "request_arbitration dispatch",
+  );
+  assert.match(dispatch, /lastBlockedInspection && lastBlockedInspection\.at === newest/);
+  assert.match(dispatch, /return arbitrateInspection\(/);
+
+  const appeal = windowOf("async function arbitrateInspection(", "\n  }\n", "arbitrateInspection");
+  assert.match(appeal, /admitInspectionAppeal\(/, "quota and no-re-rolling come from the pure module");
+  assert.match(appeal, /spendArbitration\(/, "an appeal costs a slot of the SHARED quota");
+  assert.match(appeal, /INSPECTION_APPEAL_SYSTEM_PROMPT/, "its own standing instructions");
+  assert.match(appeal, /verdict\?\.decision \?\? "GATE_WINS"/, "fail-closed on any arbiter failure");
+  assert.match(appeal, /inspectionPass = issueInspectionPass\(/, "AGENT_WINS mints the round-bound pass");
+  // What it can NEVER do: mint a ship bypass token.
+  assert.doesNotMatch(appeal, /bypassToken/, "no appeal class may authorize a ship command");
+
+  // A user reset drops the pass with the rest of the appeal state.
+  const reset = windowOf("lastBlockedShip = null;", "arbitrationDecisions.clear();", "gate reset");
+  assert.match(reset, /lastBlockedInspection = null;/);
+  assert.match(reset, /inspectionPass = undefined;/);
+});
+
 test("the background supervisor is wired, default-on in orchestrator mode, and cleaned up", () => {
   const start = windowOf("function startSupervisionTimer(", "\n  }", "startSupervisionTimer");
   assert.match(start, /SUPERVISION_INTERVAL_MS/, "the cadence is a named constant, not a literal at the call site");

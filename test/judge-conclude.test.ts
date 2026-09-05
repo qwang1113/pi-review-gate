@@ -31,6 +31,8 @@ import {
   type ChannelRecord,
 } from "../lib/orchestrator-channel.ts";
 import { JUDGE_ID_ENV, JUDGE_OPENER_ENV, JUDGE_ROLE_ENV } from "../lib/judge-pane.ts";
+import type { InspectionEvidence } from "../lib/judge-inspection.ts";
+import type { InspectionBlock, InspectionPass } from "../lib/inspection-appeal.ts";
 
 const NOW = 1_700_000_000_000;
 const OPENER = "session-child-1";
@@ -155,7 +157,19 @@ function setup(over: Partial<{
   hierarchy: string | undefined;
   stream: string | undefined;
   role: string;
-}> = {}): { exec: Exec; ioFiles: Map<string, string>; params: Record<string, unknown> } {
+  /** What the gate observed this round (default: a round that inspected). */
+  inspection: InspectionEvidence;
+  /** A granted appeal's pass, when the test wants one live. */
+  pass: InspectionPass;
+}> = {}): {
+  exec: Exec;
+  ioFiles: Map<string, string>;
+  params: Record<string, unknown>;
+  refusals: InspectionBlock[];
+  concluded: boolean[];
+} {
+  const refusals: InspectionBlock[] = [];
+  const concluded: boolean[] = [];
   const ioFiles = new Map<string, string>();
   const io: ChannelIO = {
     ensureDir() {},
@@ -192,9 +206,15 @@ function setup(over: Partial<{
     channelIO: () => io,
     channelHome: () => HOME,
     now: () => NOW,
+    // Default: a round the gate DID observe inspecting, so every pre-existing
+    // expectation still describes a normal round.
+    inspection: () => over.inspection ?? { actions: 2, kinds: ["diff", "file-read"], rangeSeen: true },
+    inspectionPass: () => over.pass,
+    noteInspectionRefusal: (block) => { refusals.push(block); },
+    noteConcluded: (usedPass) => { concluded.push(usedPass); },
   };
   registerJudgeConcludeTool(host, deps);
-  return { exec, ioFiles, params };
+  return { exec, ioFiles, params, refusals, concluded };
 }
 
 function hierarchyFile(roundSeq: number): string {
@@ -353,4 +373,74 @@ test("tool: outside a review session, and with an unreadable registry, it refuse
   const r2 = await missing.exec(GOOD);
   assert.equal(r2.isError, true);
   assert.match(r2.content[0]!.text, /不占交卷额度/);
+});
+
+test("tool: THE PROBE — zero inspection + READY is refused, and costs no conclusion", async () => {
+  const { exec, ioFiles, refusals, concluded } = setup({
+    hierarchy: hierarchyFile(1),
+    inspection: { actions: 0, kinds: [], rangeSeen: false },
+  });
+  const probe = await exec(GOOD);
+  assert.equal(probe.isError, true);
+  assert.match(probe.content[0]!.text, /未观测到任何审查动作/);
+  assert.match(probe.content[0]!.text, /不占交卷额度/);
+  assert.match(probe.content[0]!.text, /request_arbitration/, "the way out is named in the refusal");
+  assert.equal(lastReport(ioFiles), undefined, "NOTHING was written: this is not a recorded verdict");
+  assert.deepEqual(concluded, [], "a refused round did not end");
+  assert.equal(refusals.length, 1, "the refusal is recorded for the appeal route");
+  assert.equal(refusals[0]!.round, 1);
+  assert.equal(refusals[0]!.role, "reviewer");
+  assert.equal(refusals[0]!.judgeId, JUDGE);
+
+  // BLOCKED from the same zero-inspection round goes through untouched.
+  const blocked = await exec({ ...GOOD, verdict: "BLOCKED" });
+  assert.equal(blocked.isError, undefined);
+  assert.equal((lastReport(ioFiles) as { verdict?: unknown })?.verdict, "BLOCKED");
+});
+
+test("tool: a round that inspected concludes, and the report carries the evidence", async () => {
+  const { exec, ioFiles, concluded } = setup({
+    hierarchy: hierarchyFile(2),
+    inspection: { actions: 3, kinds: ["diff", "file-read"], rangeSeen: true },
+  });
+  const ok = await exec(GOOD);
+  assert.equal(ok.isError, undefined);
+  const report = lastReport(ioFiles) as { verdict?: unknown; inspection?: Record<string, unknown> };
+  assert.equal(report.verdict, "READY");
+  assert.deepEqual(report.inspection, { actions: 3, kinds: ["diff", "file-read"], rangeSeen: true });
+  assert.deepEqual(concluded, [false], "the round ended without spending a pass");
+});
+
+test("tool: an adviser concludes READY having inspected nothing — hard-coded exemption", async () => {
+  const { exec, ioFiles, refusals } = setup({
+    hierarchy: hierarchyFile(1),
+    role: "adviser",
+    inspection: { actions: 0, kinds: [], rangeSeen: false },
+  });
+  const r = await exec({ ...GOOD, notes: "my advice" });
+  assert.equal(r.isError, undefined);
+  assert.equal((lastReport(ioFiles) as { verdict?: unknown })?.verdict, "READY");
+  assert.deepEqual(refusals, []);
+});
+
+test("tool: a granted pass carries ONE zero-inspection READY and is reported as such", async () => {
+  const pass = { judgeId: JUDGE, round: 5, issuedAt: NOW };
+  const wrongRound = setup({
+    hierarchy: hierarchyFile(4),
+    inspection: { actions: 0, kinds: [], rangeSeen: false },
+    pass,
+  });
+  const stale = await wrongRound.exec(GOOD);
+  assert.equal(stale.isError, true, "a pass earned for round 5 cannot carry round 4");
+
+  const { exec, ioFiles, concluded } = setup({
+    hierarchy: hierarchyFile(5),
+    inspection: { actions: 0, kinds: [], rangeSeen: false },
+    pass,
+  });
+  const ok = await exec(GOOD);
+  assert.equal(ok.isError, undefined);
+  const report = lastReport(ioFiles) as { inspection?: Record<string, unknown> };
+  assert.deepEqual(report.inspection, { actions: 0, kinds: [], appeal: "granted" });
+  assert.deepEqual(concluded, [true], "the caller is told to spend the pass");
 });

@@ -447,7 +447,7 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（110 个模块）
+## 五、`lib/` 全量速查表（112 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -504,7 +504,8 @@ fail-closed）。`model-diagnose.ts`
 | `judge-session-tools.ts` | 作用在既有 pane judge 上的两个入口：`judge_close`（只在 internalHost，门禁审计链自收）与 `judge_wait`（`registerJudgeWaitTool` 把**同一实现**注册到 internalHost 与 agent 面）；等待是**消息驱动**的 —— 新 channel report / pane 死亡 / judge 提问 / 新 finding 任一命中即返回，去重游标是 entry 上的 `lastReportId` + `lastFindingCount` 与会话侧已宣告问题集；opener 校验也在内。**report 落地后它不自己记录**（2026-09-05）：一律交给 `audit-round.ts` 的 `settleAuditRound`，report 游标也由引擎推——它只保留 finding 游标。**「本轮是否结束」也不自己判**（2026-09-05 第二次）：`probeJudgeRound` 调 `selectRoundReport` 用同一份 binding（deps 的 `roundBinding`），不属于本轮的 report 不算结束、原样报成 `notThisRound`——两侧判据不一致时，wait 会宣布一个记录侧随后拒绝的 READY。`judge_read` 已删（2026-09-05） |
 
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
-| `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论**本体**直写 channel report（无 fence 合成、无解析）；**签名按角色收窄**——reviewer / goal-auditor 只有 verdict + findings + cwd（传 notes 显式拒绝且不占额度），adviser 保留 notes（它的产出就是正文）；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度 |
+| `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论**本体**直写 channel report（无 fence 合成、无解析）；**签名按角色收窄**——reviewer / goal-auditor 只有 verdict + findings + cwd（传 notes 显式拒绝且不占额度），adviser 保留 notes（它的产出就是正文）；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度；**零审查的 READY 直接拒**（判据在 `judge-inspection.ts`，拒绝不占额度、并给出申诉出路），观测结果以新增可选字段 `inspection` 盖在 report 上 |
+| `judge-inspection.ts` | 机械审查证据（judge 侧、进程内）：把本轮成功的工具调用分类成「读内容 / 看 diff / 检索」（列文件名的 `ls`/`find` 不算），折叠成本轮证据并从任务文本里解析 `baseline..HEAD`（**只记录、不作为阻塞条件**）；唯一规则是「带裁决的角色零审查不得交 READY」（adviser 写死豁免，未知角色按裁决角色处理——fail-closed；BLOCKED/NEEDS_HUMAN 不受限） |
 | `judge-report.ts` | opener 侧标准报告（wake-up 内容：verdict、证据位置、记录情况、待答问题、**被搁置的 report**（`notThisRound`：id/轮次/时间 + 原因，说明它没被记为本轮裁决）、**降级绑定说明**（`bindingNote`：独立成行，因为「记录」行只打印首行，塞进记录正文就等于记了没人看见）；transcript 扒取半边已随交卷工具删除） |
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
 | `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
@@ -570,6 +571,7 @@ fail-closed）。`model-diagnose.ts`
 
 | `task-mode.ts` | 会话门禁模式模型：normal < explore < loop < orchestrator 与升降级规则 |
 | `text-appeal.ts` | 启发式文本拦截的申诉口子（A 类） |
+| `inspection-appeal.ts` | 第三类申诉口子：judge 被「零审查即 READY」拒掉后走 `request_arbitration`（judge 侧唯一被放行的工具），形状照抄 `text-appeal.ts`——受理判定（配额与本轮不可重掷共用一份额度）、仲裁者 system prompt 与 brief（申诉理由按不可信数据入块）、通行证只绑「本 judge + 本轮」，绝不放行任何命令 |
 | `tool-host.ts` | 每个 `lib/` 工具注册模块共用的 host 类型 seam（`orchestrator-deps.ts` 只是 re-export 它） |
 | `ui-widget.ts` | TUI widget 的纯内容构造（editor 下方那条**单行**状态条，详情在 `/gate-status`） |
 | `untrusted-data.ts` | 主会话/编排层文本的**唯一**降级实现：`asUntrustedData` 包块（命名 tag、载荷内闭合标签中和、截断可见）+ `composeWithUntrustedData` 组装（门禁指令在前、不可信数据块在后），judge 四处任务书拼装点与仲裁/文本申诉/分类器提示词共用 |

@@ -63,6 +63,14 @@ export interface ModeSpec {
  * deleted tool is a claim about a surface nobody has) — `judge_read` left this
  * list when it left the codebase, 2026-09-05.
  *
+ * `request_arbitration` IS ALLOWED, and it is the one entry that had to be
+ * REMOVED from this list (2026-09-05). The judge-side inspection gate
+ * (lib/judge-inspection.ts) refuses a zero-inspection READY on purpose-strict
+ * terms, so it will sometimes refuse a legitimate round; denying the appeal
+ * tool as well would leave that judge with no move except pretending to read
+ * something. It grants a judge nothing else: the appeal can only authorize its
+ * OWN round's conclusion (lib/inspection-appeal.ts), never a ship command.
+ *
  * Single source: lib/judge-side.ts re-exports this set (no second copy).
  */
 export const JUDGE_DENIED_TOOLS: ReadonlySet<string> = new Set([
@@ -73,7 +81,6 @@ export const JUDGE_DENIED_TOOLS: ReadonlySet<string> = new Set([
   "orchestrator_recover", "orchestrator_attach",
   "propose_loop_goal", "request_copilot_review", "check_copilot_review",
   "request_scope_limit", "request_sensitive_edit", "set_gate_mode", "declare_done",
-  "request_arbitration",
 ]);
 
 /** Why this tool is refused in a reporting-shell session, or undefined when allowed. */

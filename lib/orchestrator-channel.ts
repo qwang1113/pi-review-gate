@@ -300,6 +300,16 @@ export interface ChannelReportRecord extends ChannelRecordBase {
    */
   summary?: string;
   summaryRef?: ChannelPayloadRef;
+  /**
+   * What the JUDGE-SIDE gate observed the round actually inspect
+   * (lib/judge-inspection.ts) — action count, kinds, and whether anything
+   * touched the reviewed range. ADDED as an optional field on purpose: this
+   * extension loads from source with no build step, so a running opener holds
+   * the build it started with while the panes it opens hold the newest one. A
+   * new field an old reader ignores keeps that pair compatible; changing what
+   * an existing field MEANS would not.
+   */
+  inspection?: { actions: number; kinds: string[]; rangeSeen?: boolean; appeal?: string };
 }
 export type ChannelRecord =
   | ChannelStateRecord

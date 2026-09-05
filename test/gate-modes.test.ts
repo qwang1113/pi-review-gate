@@ -74,6 +74,32 @@ test("internal shells share one tool policy: the moved judge deny set", () => {
   assert.match(judgeDeniedReason("judge_submit")!, /reporting shell|评审/);
 });
 
+test("opening the appeal route opened EXACTLY one name", () => {
+  // The deny set as it stood before the judge-side inspection gate
+  // (2026-09-05), written out in full on purpose. The inspection refusal needs
+  // `request_arbitration` to be reachable from inside a pane; this pins that
+  // nothing else was opened along with it — and that nothing new was denied
+  // without a decision.
+  const BEFORE = new Set([
+    "judge_submit", "judge_spawn", "judge_answer", "judge_recover", "judge_close", "judge_wait",
+    "orchestrator_spawn", "orchestrator_instruct", "orchestrator_wait", "orchestrator_close",
+    "orchestrator_handoff", "orchestrator_plan", "orchestrator_notify", "orchestrator_answer",
+    "orchestrator_recover", "orchestrator_attach",
+    "propose_loop_goal", "request_copilot_review", "check_copilot_review",
+    "request_scope_limit", "request_sensitive_edit", "set_gate_mode", "declare_done",
+    "request_arbitration",
+  ]);
+  const opened = [...BEFORE].filter((tool) => !JUDGE_DENIED_TOOLS.has(tool));
+  const added = [...JUDGE_DENIED_TOOLS].filter((tool) => !BEFORE.has(tool));
+  assert.deepEqual(opened, ["request_arbitration"], "only the appeal route was opened");
+  assert.deepEqual(added, [], "no tool was newly denied");
+  // The ship commands are not in this set at all — they are refused by L1, and
+  // no appeal class can ever authorize them.
+  for (const ship of ["git commit", "git push", "gh pr create"]) {
+    assert.ok(!JUDGE_DENIED_TOOLS.has(ship));
+  }
+});
+
 test("completion discipline teaches conclude-and-stop, never exit-and-reopen", () => {
   assert.match(JUDGE_COMPLETION_DISCIPLINE, /judge_conclude 交卷并停下/);
   assert.match(JUDGE_COMPLETION_DISCIPLINE, /一轮只能交一次/);

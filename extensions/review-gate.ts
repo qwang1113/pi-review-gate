@@ -102,6 +102,23 @@ import {
   type AppealableBlock,
 } from "../lib/text-appeal.ts";
 import {
+  emptyInspection,
+  observeInspection,
+  parseReviewRange,
+  type InspectionEvidence,
+} from "../lib/judge-inspection.ts";
+import {
+  admitInspectionAppeal,
+  buildInspectionAppealPrompt,
+  inspectionDecisionKey,
+  inspectionDeniedText,
+  inspectionGrantedText,
+  issueInspectionPass,
+  INSPECTION_APPEAL_SYSTEM_PROMPT,
+  type InspectionBlock,
+  type InspectionPass,
+} from "../lib/inspection-appeal.ts";
+import {
   judgeSessionIdFor,
   shortRepoHash,
   judgeScratchDir,
@@ -180,6 +197,7 @@ import {
 import {
   readJudgeSideEnv,
   gateStatePersistSkip,
+  JUDGE_TASK_ENV,
 } from "../lib/judge-side.ts";
 import {
   PRESENCE_FILENAME,
@@ -1238,6 +1256,40 @@ export default function reviewGate(pi: ExtensionAPI) {
   // reason: an appeal contests a block that actually happened, never a
   // hypothetical one.
   let lastBlockedText: (AppealableBlock & { at: number }) | null = null;
+  // JUDGE SIDE ONLY — the third arbitrable class. `judge_conclude` refuses a
+  // zero-inspection READY (lib/judge-inspection.ts) and records the refusal
+  // here so the appeal can contest a block that actually happened; a granted
+  // appeal parks its single-use pass in `inspectionPass`. Both live in memory
+  // only: they belong to this pane's round, and a judge writes no gate state.
+  let lastBlockedInspection: InspectionBlock | null = null;
+  let inspectionPass: InspectionPass | undefined;
+  /** What THIS round has been observed inspecting (judge panes only). */
+  let judgeInspection: InspectionEvidence = emptyInspection();
+  /** The round's `baseline..HEAD`, recovered from its task text when present. */
+  let judgeReviewRange: string | undefined;
+  /** Is THIS session a judge pane? (the observer's only scope). */
+  function isJudgePane(): boolean {
+    return readJudgeSideEnv(process.env) !== undefined;
+  }
+  /**
+   * Learn the round's review range from its task text. The range is opener
+   * knowledge that reaches a pane only as prose — round 1 through the task
+   * file in the environment, later rounds through the channel — so it is read
+   * back out of that prose. Best effort by design: no range simply means the
+   * evidence carries no range flag (a goal audit has none at all).
+   */
+  function noteJudgeTaskText(text: string | undefined): void {
+    const range = parseReviewRange(text);
+    if (range) judgeReviewRange = range;
+  }
+  /** Round 1's task, as the pane was opened with it (a path in the env). */
+  function judgeTaskText(): string | undefined {
+    const path = (process.env[JUDGE_TASK_ENV] ?? "").trim();
+    if (!path) return undefined;
+    try {
+      return existsSync(path) ? readFileSync(path, "utf8") : undefined;
+    } catch { return undefined; }
+  }
   // Re-roll prevention: decisions cached by (commandDigest#round). A GATE_WINS /
   // HUMAN outcome cannot be re-requested for the same action+round.
   const arbitrationDecisions = new Map<string, "GATE_WINS" | "AGENT_WINS" | "HUMAN">();
@@ -1854,6 +1906,9 @@ export default function reviewGate(pi: ExtensionAPI) {
           // the new message, so the child stops what it was doing and reads
           // this immediately. A bare interrupt (no text) stays a plain abort.
           const interruptText = instructText(channelIO, instruction);
+          // Same as the steer/followUp path below: a round delivered as an
+          // interrupt still carries the range the observer records against.
+          if (isJudgePane()) noteJudgeTaskText(interruptText);
           // STOP-FIRST (user decision 2026-09-01): any OPEN dialog is
           // dismissed as INTERRUPTED before the message is injected — a
           // goal box, a question, a consent. The controller is swapped so
@@ -1875,6 +1930,10 @@ export default function reviewGate(pi: ExtensionAPI) {
           continue;
         }
         const text = instructText(channelIO, instruction);
+        // A judge pane's instructions ARE its rounds: the next round's task
+        // text is where its `baseline..HEAD` is written, so the inspection
+        // observer learns the range from the same message the judge reads.
+        if (isJudgePane()) noteJudgeTaskText(text);
         if (!text) {
           acknowledgeInstruct(
             binding,
@@ -3489,6 +3548,57 @@ export default function reviewGate(pi: ExtensionAPI) {
     );
   }
 
+  /**
+   * Hear an appeal against a ZERO-INSPECTION READY refusal (the judge-side
+   * class, lib/inspection-appeal.ts).
+   *
+   * Same three-part shape as the two appeals above — admission in the pure
+   * module, an independent arbiter process, fail-closed on every failure —
+   * and what it may grant is the narrowest thing in the gate: this judge's
+   * THIS round may conclude READY once despite having inspected nothing. It
+   * issues no bypass token, touches no verdict, and cannot reach a ship
+   * command. The pass lives in memory because the round does.
+   */
+  async function arbitrateInspection(
+    block: InspectionBlock,
+    argument: string,
+    ctx: unknown,
+  ): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError?: boolean }> {
+    const deny = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
+    const key = inspectionDecisionKey(block.judgeId, block.round);
+    const admission = admitInspectionAppeal({
+      decided: arbitrationDecisions.get(key),
+      used: appealsUsed(),
+      maxPerSession: projectConfig.arbiter.maxPerSession,
+    });
+    if (!admission.ok) return deny(`review-gate: ${admission.reason}`);
+
+    spendArbitration(ctx as ExtensionContext);
+    const verdict = await runArbiter(
+      resolveArbiterModel() ?? "",
+      buildInspectionAppealPrompt(block, argument),
+      undefined,
+      undefined,
+      INSPECTION_APPEAL_SYSTEM_PROMPT,
+    );
+    // Fail-closed, and the quota is spent either way: a broken arbiter cannot
+    // be retried into a grant.
+    const decision = verdict?.decision ?? "GATE_WINS";
+    arbitrationDecisions.set(key, decision);
+    appendLesson(
+      `inspection appeal (${block.role} round ${block.round}) decision=${decision} ` +
+      `reason=${JSON.stringify(verdict?.reason ?? "(no verdict → GATE_WINS)")} arg=${argument.slice(0, 200)}`,
+    );
+    if (decision === "AGENT_WINS") {
+      inspectionPass = issueInspectionPass(block, Date.now());
+      return {
+        content: [{ type: "text", text: inspectionGrantedText(verdict?.reason ?? "") }],
+        details: { decision, round: block.round, used: appealsUsed() },
+      };
+    }
+    return deny(inspectionDeniedText(decision, verdict?.reason ?? ""));
+  }
+
 
   function bodyFileDigest(paths: readonly string[]): string {
     if (paths.length === 0) return "";
@@ -3732,6 +3842,18 @@ export default function reviewGate(pi: ExtensionAPI) {
   pi.on("tool_result", async (event, ctx) => {
     // E — a completed tool call is forward progress for the child health reading.
     noteChildProgress();
+    // 0. JUDGE SIDE: the round's mechanical inspection evidence. Folded FIRST,
+    // before any of the branches below can return, because every one of them
+    // returns early and a miss here would read as "this judge inspected
+    // nothing". Successful calls only — a failed read inspected nothing — and
+    // the classification itself lives in lib/judge-inspection.ts.
+    if (isJudgePane() && event.isError !== true) {
+      judgeInspection = observeInspection(
+        judgeInspection,
+        { toolName: event.toolName, input: event.input },
+        judgeReviewRange,
+      );
+    }
     // 1. Edits: only arm gate on success.
     if (EDIT_TOOL_NAMES.has(event.toolName)) {
       if (event.isError) {
@@ -5652,6 +5774,10 @@ export default function reviewGate(pi: ExtensionAPI) {
   // it (a main session that could self-certify a verdict breaks the gate).
   // The guard is the registration itself — anti-forgery by surface, not secret.
   if (readJudgeSideEnv(process.env)) {
+    // Round 1's task arrives as a FILE in the environment (later rounds come
+    // through the channel drain), and it is the only place this pane can learn
+    // the range its inspection evidence is measured against.
+    noteJudgeTaskText(judgeTaskText());
     registerJudgeConcludeTool(pi, {
       env: () => process.env,
       repoRoot: () => cwd,
@@ -5665,6 +5791,14 @@ export default function reviewGate(pi: ExtensionAPI) {
       channelIO: () => channelIO,
       channelHome: () => undefined,
       now: () => Date.now(),
+      inspection: () => judgeInspection,
+      inspectionPass: () => inspectionPass,
+      noteInspectionRefusal: (block) => { lastBlockedInspection = block; },
+      noteConcluded: (usedPass) => {
+        // A round's evidence belongs to that round: the next one starts blind.
+        judgeInspection = emptyInspection();
+        if (usedPass) inspectionPass = undefined;
+      },
     });
   }
   registerJudgeSpawnTools(pi, {
@@ -6957,11 +7091,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     name: "request_arbitration",
     label: "Request Arbitration",
     description:
-      "Contest a review-gate block you believe is a MISJUDGEMENT. Two things are contestable, " +
-      "both only AFTER the gate actually blocked: (a) a TEXT the language/attribution heuristics " +
+      "Contest a review-gate block you believe is a MISJUDGEMENT. Three things are contestable, " +
+      "each only AFTER the gate actually blocked: (a) a TEXT the language/attribution heuristics " +
       "refused (commit subject/body, PR title/body, romanized non-English, AI attribution, test " +
       "label) — a granted appeal passes THAT EXACT CONTENT once; (b) a ship block on a lone " +
-      "`gh pr edit` limited to --title/--body/--body-file that is genuinely CIRCULAR. Never " +
+      "`gh pr edit` limited to --title/--body/--body-file that is genuinely CIRCULAR; (c) IN A " +
+      "REVIEW SESSION, a refusal to conclude READY because the gate observed no inspection this " +
+      "round — a granted appeal lets THIS round conclude once. Never " +
       "git commit/push or gh pr create, and never a FACT the gate observed (no workspace, no " +
       "approved goal, unmet review gate, sensitive file) — those have a correct next step. " +
       "An INDEPENDENT arbiter (you cannot write its verdict) rules GATE_WINS / AGENT_WINS / " +
@@ -6980,12 +7116,23 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!resolveArbiterModel()) {
         return deny("review-gate: 仲裁者未配置模型链（agents.arbiter.slots 缺失或为空）——按 fail-closed 处理，GATE_WINS。请修复 ~/.pi/review-gate.json 后重试。");
       }
-      // Must contest a REAL, recent block — and the MOST RECENT one, when both
-      // kinds happened: that is the block the agent is actually stuck on.
-      if (!lastBlockedShip && !lastBlockedText) {
+      // Must contest a REAL, recent block — and the MOST RECENT one, when
+      // several kinds happened: that is the block the caller is actually stuck
+      // on. Three kinds exist: an A-class TEXT refusal, a ship block on a lone
+      // `gh pr edit`, and (judge side only) a zero-inspection READY refusal.
+      const blockedAt = (at: number | undefined) => at ?? -1;
+      const newest = Math.max(
+        blockedAt(lastBlockedInspection?.at),
+        blockedAt(lastBlockedText?.at),
+        blockedAt(lastBlockedShip?.at),
+      );
+      if (newest < 0) {
         return deny("review-gate: 没有可申诉的拦截。先把命令/编辑真跑一次——申诉只受理已经发生的拦截。");
       }
-      if (lastBlockedText && (!lastBlockedShip || lastBlockedText.at >= lastBlockedShip.at)) {
+      if (lastBlockedInspection && lastBlockedInspection.at === newest) {
+        return arbitrateInspection(lastBlockedInspection, String(params.argument ?? ""), ctx);
+      }
+      if (lastBlockedText && lastBlockedText.at === newest) {
         return arbitrateText(lastBlockedText, String(params.argument ?? ""), ctx);
       }
       if (!lastBlockedShip) {
@@ -7788,6 +7935,10 @@ export default function reviewGate(pi: ExtensionAPI) {
     clearBypassToken();
     lastBlockedShip = null;
     lastBlockedText = null;
+    // The judge-side class clears with the other two, pass included: a live
+    // pass would otherwise authorize a zero-inspection READY after the reset.
+    lastBlockedInspection = null;
+    inspectionPass = undefined;
     // A user-initiated reset clears the appeal ledger too: quota, decided
     // contents and any live pass. It is the user's own call, and leaving a
     // pass behind would let it authorize content after the reset.

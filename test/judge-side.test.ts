@@ -72,10 +72,12 @@ test("a judge writes NO gate state; a normal session persists as before", () => 
 });
 
 test("a judge pane cannot run outward tools, but it can always ask — and conclude", () => {
-  for (const tool of ["judge_submit", "judge_spawn", "judge_wait", "orchestrator_spawn", "propose_loop_goal", "declare_done", "set_gate_mode", "request_arbitration"]) {
+  for (const tool of ["judge_submit", "judge_spawn", "judge_wait", "orchestrator_spawn", "propose_loop_goal", "declare_done", "set_gate_mode"]) {
     assert.match(judgeDeniedReason(tool) ?? "", /review 会话里不可用/, `${tool} is refused in a judge pane`);
   }
   assert.equal(judgeDeniedReason("ask_user"), undefined, "questions race through the channel");
   assert.equal(judgeDeniedReason("bash"), undefined, "reviewing by doing stays available");
   assert.equal(judgeDeniedReason("judge_conclude"), undefined, "concluding its own round is the judge's own job");
+  assert.equal(judgeDeniedReason("request_arbitration"), undefined,
+    "the inspection gate's own appeal route must be reachable from inside the pane");
 });

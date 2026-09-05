@@ -32,6 +32,16 @@
  * the report (`round`, a field the channel schema already carried). A second
  * call for the same round is refused explicitly.
  *
+ * ZERO-INSPECTION READY IS REFUSED HERE. Registration keeps a MAIN session
+ * from self-certifying a verdict; it does nothing about a main session that
+ * ORDERS the judge to certify one (measured: an adviser complied in eight
+ * seconds). So a verdict-bearing role concluding READY must have been observed
+ * inspecting something this round — the evidence is gathered in this same
+ * process (lib/judge-inspection.ts), the refusal costs no conclusion, and a
+ * genuine misjudgement is contested through `request_arbitration`
+ * (lib/inspection-appeal.ts). `adviser` is exempt: its conclusion is prose no
+ * recorder ever reads.
+ *
  * Shape: pure core below, `registerJudgeConcludeTool(host, deps)` at the
  * bottom; effects through `deps` only, like every other tool family.
  */
@@ -49,6 +59,16 @@ import {
 } from "./orchestrator-channel.ts";
 import { DOC_SYNC_ATTESTATIONS } from "./gate-state.ts";
 import { JUDGE_STREAM_ENV, readJudgeSideEnv } from "./judge-side.ts";
+import {
+  decideInspection,
+  inspectionRecord,
+  type InspectionEvidence,
+} from "./judge-inspection.ts";
+import {
+  inspectionPassAuthorizes,
+  type InspectionBlock,
+  type InspectionPass,
+} from "./inspection-appeal.ts";
 import type { ReviewFinding } from "./review-adjudicate.ts";
 
 /** Tool name — pinned by structural tests on both sides of the registration. */
@@ -246,6 +266,19 @@ export interface JudgeConcludeToolDeps {
   channelHome(): string | undefined;
   /** Injectable clock. */
   now(): number;
+  /**
+   * THIS round's inspection evidence, as the gate observed it in this process
+   * (lib/judge-inspection.ts). Required, not optional: an unwired host would
+   * otherwise silently report "no evidence available" and the rule would be
+   * whatever the wiring forgot.
+   */
+  inspection(): InspectionEvidence;
+  /** The live appeal pass, when `request_arbitration` granted one. */
+  inspectionPass(): InspectionPass | undefined;
+  /** A zero-inspection READY was refused — the appeal route needs to see it. */
+  noteInspectionRefusal(block: InspectionBlock): void;
+  /** A round ended: reset the evidence, and spend the pass when it was used. */
+  noteConcluded(usedPass: boolean): void;
 }
 
 /** Read our persisted round number, or refuse when the gate state is unreadable. */
@@ -299,9 +332,31 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
   if (!decided.ok) {
     return fail(`review-gate: 本轮已交过卷（report ${decided.reportId})——重复调用被拒绝，不计入任何轮次。停下等 opener，不要再调。`);
   }
+  const now = deps.now();
+  // THE INSPECTION GATE. Placed after the duplicate-round check and before
+  // anything is written: a refusal here writes no report, so it costs the
+  // round nothing — the judge reads the reason, goes and looks at the code (or
+  // appeals), and calls again.
+  const evidence = deps.inspection();
+  const gate = decideInspection({
+    role: cfg.role,
+    verdict: input.verdict,
+    evidence,
+    passAuthorized: inspectionPassAuthorizes(deps.inspectionPass(), cfg.judgeId, seq.round),
+  });
+  if (!gate.ok) {
+    deps.noteInspectionRefusal({
+      judgeId: cfg.judgeId,
+      role: cfg.role,
+      round: seq.round,
+      evidence,
+      reason: gate.reason,
+      at: now,
+    });
+    return fail(`review-gate: 交卷被拒绝（本轮未观测到任何审查动作，不占交卷额度）：${gate.reason}`);
+  }
   const streamPath = (deps.env()[JUDGE_STREAM_ENV] ?? "").trim() || undefined;
   const findingsCount = countStreamFindings((p) => deps.readText(p), streamPath, input.findings.length);
-  const now = deps.now();
   const notes = (input.notes ?? "").trim();
   const report = {
     reportId: newChannelId("rep", now),
@@ -318,12 +373,20 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
     // Prose only where prose is the product (adviser); a reviewer's report
     // carries none, so no judge text can reach the opener's context.
     ...(notes === "" ? {} : { summary: notes }),
+    // What the gate OBSERVED this round, stamped on the round it belongs to.
+    // A NEW OPTIONAL field: an opener running an older build ignores it and
+    // consumes the report exactly as before (parseRecord is tolerant), which
+    // is the only reason a judge on a new build can report to one at all.
+    inspection: inspectionRecord(evidence, gate.usedPass),
   };
   try {
     appendRecord(io, target, report);
   } catch (err) {
     return fail(`review-gate: 交卷写入失败（不占交卷额度）：${(err as Error).message}。稍后重试。`);
   }
+  // The round is over: its evidence must not carry into the next one, and a
+  // pass that carried this READY is spent.
+  deps.noteConcluded(gate.usedPass);
   return reply(
     `review-gate: 本轮结论已交卷（report ${report.reportId}，verdict=${input.verdict}，findings=${input.findings.length}）。停下等 opener，不要再调一次。`,
     { concluded: true, reportId: report.reportId, round: seq.round, verdict: input.verdict },
