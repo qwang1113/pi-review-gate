@@ -288,11 +288,14 @@ changed (the gate persists every audit's verdict, findings verbatim and the
 judged draft, and builds the re-audit task with that carryover plus the
 mechanically computed draft delta); round N+1 of a code review gets the
 previous verdict and findings the same way (the 'Review scope for this round'
-block in the reviewer's task text). Settled-and-unchanged material gets a
-consistency scan, not a
-re-derivation — it never narrows what a reviewer may look at, and a settled
-conclusion may always be reopened with evidence. This is the INCREMENTAL
-review contract: first round full, later rounds focused on the increment.
+block in the reviewer's task text). That block IS the incremental review
+contract — first round full, later rounds focused on the increment — and its
+terms are NOT restated here or anywhere else: `lib/review-carryover.ts` is
+their single authoritative source, and every other surface (this file, the
+skill, the `/review` prompt, the reviewer role body, the judge protocol) may
+carry a summary and a pointer only. Two consequences worth knowing without
+reading it: the contract never narrows what a reviewer may look at, and a
+settled conclusion may always be reopened with evidence.
 (b2) **Fresh context, read on demand — MECHANICALLY.** The three review
 roles (reviewer, adviser, goal-auditor) each run in their OWN pane (interactive
 pi with `--session-id`) — they never

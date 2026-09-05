@@ -328,15 +328,19 @@ export interface ChannelReportRecord extends ChannelRecordBase {
    */
   inspection?: { actions: number; kinds: string[]; rangeSeen?: boolean; appeal?: string };
   /**
-   * WHAT THIS ROUND ACTUALLY REVIEWED, in the judge's own words: the commit
+   * WHICH SCOPE THIS ROUND RAN UNDER, in the judge's own words: the commit
    * range and the full/incremental decision, both read back from the round's
    * task text (lib/judge-inspection.ts).
    *
-   * It exists so a finished round is AUDITABLE after the fact — "did it review
-   * the range it was dispatched for, and did it run incrementally?" — against
-   * what the gate registered when it dispatched the round. The gate keeps both
-   * halves side by side (`RoundRecord.scope`, lib/gate-state.ts); nothing acts
-   * on a mismatch, it is recorded so a human can see it.
+   * It is a SELF-REPORT, and only that. It makes a finished round legible
+   * after the fact — which range, which depth — and the gate keeps it beside
+   * what it registered when it dispatched the round (`RoundRecord.scope`,
+   * lib/gate-state.ts). Since both halves come from the same gate-written
+   * text, agreement proves nothing about how the round was read; a
+   * DISAGREEMENT is the informative case (a task text from another round, a
+   * pane on another build). Nothing acts on either: it is recorded so a human
+   * can look. Whether the round inspected anything at all is a different
+   * record — `inspection`, above.
    *
    * A NEW OPTIONAL field, for the same reason `inspection` is one: an opener
    * running an older build ignores it and consumes the report exactly as

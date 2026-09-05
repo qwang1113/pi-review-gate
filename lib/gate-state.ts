@@ -111,16 +111,18 @@ export interface RoundRecord {
   /** Files that had P0/P1 findings this round (resets a file's streak). */
   blockingFiles?: string[];
   /**
-   * WHAT THIS ROUND ACTUALLY REVIEWED — kept so a finished round is auditable
-   * after the fact ("did it review what it was sent to review, and did it run
-   * incrementally?"), without the channel file having to still exist.
+   * WHICH SCOPE THIS ROUND RAN UNDER — kept so a finished round stays legible
+   * after the fact ("was it incremental, and over what range?") without the
+   * channel file having to still exist.
    *
    * TWO HALVES ON PURPOSE. `dispatched` is what the GATE registered when it
    * prepared the round; `reported` is what the JUDGE stamped on its own report
-   * (lib/judge-inspection.ts reads it back out of the task text). Only the two
-   * together are evidence: the gate's half alone says what was asked for, and
-   * the judge's half alone is "it says it reviewed that". Nothing acts on a
-   * mismatch — this is a record, not a rule.
+   * (lib/judge-inspection.ts reads it back out of the task text). Both trace
+   * back to the same gate-written text, so their AGREEING says nothing about
+   * how the round was read — that is `review.docSync`, the verdict itself and
+   * the report's own `inspection` record. Their DISAGREEING is what this pair
+   * catches: a judge answering with another round's task text, or a pane on a
+   * different build. Nothing acts on it — this is a record, not a rule.
    *
    * Optional, and every part of it optional: sidecars written before this
    * field exists stay readable, and a round whose scope was never computed

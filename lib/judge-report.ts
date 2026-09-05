@@ -122,10 +122,11 @@ export function buildStandardReport(input: StandardReportInput): string {
   if (input.verdict !== undefined) {
     lines.push(`- 结论：${input.verdict}${input.findingsCount === undefined ? "" : `，findings ${input.findingsCount} 条`}（P0/P1 边审边修走 findings 流）`);
   }
-  // WHAT THE ROUND SAYS IT REVIEWED. Printed right under the verdict because
-  // that is the pair an audit reads: a verdict whose scope nobody wrote down
-  // cannot be checked afterwards for either laziness or duplicated work. The
-  // gate knows what it DISPATCHED; this line is what came back.
+  // WHICH SCOPE THE ROUND SAYS IT RAN UNDER. Printed right under the verdict
+  // because that is the pair the opener reads together: a verdict alone does
+  // not say whether it covered the whole change or an increment of it, and
+  // the opener is the one deciding what to do next. Labelled as a SELF-REPORT
+  // — the gate knows what it dispatched; this line is what came back.
   if (input.scope !== undefined && (input.scope.range !== undefined || input.scope.kind !== undefined)) {
     const kind = input.scope.kind === "incremental"
       ? "增量"

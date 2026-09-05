@@ -1,12 +1,14 @@
 /**
- * THE AUDIT PAIR — what a finished round says it reviewed, on the record.
+ * THE AUDIT PAIR — which scope a finished round ran under, on the record.
  *
- * A verdict whose scope nobody wrote down cannot be checked afterwards for
- * either failure mode: a round that read less than it was sent to read, and a
- * round that re-derived what a previous verdict had already settled. So the
- * scope is stamped in two places by two different parties — the GATE registers
- * what it dispatched, the JUDGE stamps what it says it reviewed — and both
- * halves are kept side by side.
+ * A verdict whose range and depth nobody wrote down cannot be reasoned about
+ * afterwards at all: "was that round incremental, and over what?" has no
+ * answer once the pane is gone. So the scope is stamped by both parties — the
+ * GATE registers what it dispatched, the JUDGE stamps what it read out of its
+ * own task text — and both halves are kept side by side. They come from the
+ * same gate-written text, so agreement is expected and proves nothing about
+ * how the round was read; a DISAGREEMENT is the informative case, and it is
+ * recorded rather than acted on.
  *
  * This file pins the three layers that carry them, because they fail
  * separately: the channel record (judge → opener), the sidecar round record
@@ -135,10 +137,11 @@ test("a round records BOTH halves of the pair, and they survive a save/load", ()
 });
 
 test("a MISMATCHED pair is recorded, not corrected and not refused", () => {
-  // The gate cannot tell a legitimate divergence (the judge escalated to a
-  // full read on its own) from a lazy one, so it records what each side said
-  // and leaves the judgement to a human. Silently normalising the two would
-  // destroy the only evidence the pair exists to provide.
+  // A mismatch is the pair's whole signal — the round was concluded against a
+  // task text that is not the one this round dispatched (another round's, or
+  // another build's). The gate cannot tell which, and normalising the two
+  // sides would destroy the only evidence the pair exists to provide, so both
+  // are stored verbatim and a human decides.
   const dir = makeTemp();
   const path = sidecarPath(dir);
   const st = emptyState("sess-audit-2", 10);

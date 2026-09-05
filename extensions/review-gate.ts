@@ -6227,13 +6227,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     // streak from these.
     const recorded = recordedFindingsFrom(fileFindingsFrom(concluded.findings as ReviewFinding[]));
     // THE AUDIT PAIR (t6a): what the gate dispatched this round to review, and
-    // what the judge reported it reviewed. Recorded side by side so a finished
-    // round can be checked afterwards for BOTH failure modes — a round that
-    // skimmed less than it was sent to read, and a round that re-derived work
-    // a previous verdict had already settled. Nothing refuses a verdict over a
-    // mismatch: the gate cannot tell a legitimate divergence (an escalation
-    // the judge decided on its own) from a lazy one, so it records instead of
-    // guessing.
+    // what the judge reported for itself. Recorded side by side so a finished
+    // round says, on the record, WHICH range and WHICH depth it ran under —
+    // the fact every after-the-fact question about this round starts from
+    // ("was this round incremental, and over what?").
+    //
+    // WHAT THE PAIR DOES NOT PROVE. Both halves trace back to the same text
+    // the gate wrote, so agreement is the normal case and says nothing about
+    // how carefully the round was read — whether anything was actually read is
+    // a different record, `inspection` (lib/judge-inspection.ts), and how well
+    // is the reviewer's own verdict. What a DISAGREEMENT catches is the pair's
+    // real value: a judge whose task text was not this round's, a pane running
+    // a different build, or a scope kind carried over from an earlier round.
+    // Nothing refuses a verdict over it — a divergence can be legitimate, and
+    // the gate cannot tell which, so it records instead of guessing.
     const roundScope: RoundScopeRecord | undefined = sanitizeRoundScope({
       dispatched: reviewTargets.get(targetRoot)?.scope,
       reported: concluded.scope,

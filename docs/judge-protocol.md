@@ -138,6 +138,15 @@ report 上——旧 opener 忽略未知字段照常消费。范围（`baseline..
 回读，**只记录、不作为阻塞条件**：合法的 reviewer 可能在副本工作区里读同一份内容，
 那里根本不出现范围字符串。
 
+同一条 report 上还有第二个**新增可选字段** `scope`（`range` + `kind`：full / incremental），
+同样从本轮任务正文回读（判定标记由 `lib/review-carryover.ts` 导出、`judge-inspection.ts`
+解析，两端不可能各写各的）。它是**自述**：门禁另存一份自己派单时登记的范围与档位，两半
+并排落在 `RoundRecord.scope`（`dispatched` / `reported`）。两半同源于门禁写的那段文字，
+所以**一致说明不了这一轮读得多认真**（那由 `inspection` 与裁决本身说话）；**不一致**才是
+它的价值：judge 拿的任务文本不是这一轮的、或 pane 跑在另一份 build 上。两种情况都
+**只记录、不告警、不阻塞**。
+
+
 判据刻意从严（用户 2026-09-05 决定：宁可误拦也不放过探针），因此必然会误伤。误伤的
 出路是 `request_arbitration`——它是 judge 侧**唯一**被放开的禁跑工具，第三类可申诉
 对象就是这次拒绝（`lib/inspection-appeal.ts`）：独立仲裁者裁定，任何失败都是

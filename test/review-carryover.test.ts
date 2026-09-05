@@ -292,9 +292,17 @@ test("each decision marker opens its own line — the judge side parses them bac
 // One authoritative source (philosophy three)
 // ---------------------------------------------------------------------------
 
-/** Every prose surface that could restate the contract, read WHOLE. */
+/**
+ * Every prose surface that could restate the contract, read WHOLE.
+ *
+ * The REPO ROOT is in the list because that is where the copy this scan first
+ * missed lived (AGENTS.md, round 1 P2): a scan whose reach stops one directory
+ * short of the file everyone reads is a scan that reports "one source" while
+ * six exist.
+ */
 function proseSurfaces(): Array<{ path: string; text: string }> {
   const roots = [
+    { dir: ROOT, ext: ".md" },
     { dir: join(ROOT, "lib"), ext: ".ts" },
     { dir: join(ROOT, "agents"), ext: ".md" },
     { dir: join(ROOT, "docs"), ext: ".md" },
@@ -304,7 +312,7 @@ function proseSurfaces(): Array<{ path: string; text: string }> {
   for (const { dir, ext } of roots) {
     for (const name of readdirSync(dir)) {
       if (!name.endsWith(ext)) continue;
-      const rel = `${dir.slice(ROOT.length + 1)}/${name}`;
+      const rel = dir === ROOT ? name : `${dir.slice(ROOT.length + 1)}/${name}`;
       out.push({ path: rel, text: readFileSync(join(dir, name), "utf8") });
     }
   }
@@ -319,6 +327,7 @@ test("the scan itself sees the files it claims to (before its verdict means anyt
   const paths = files.map((f) => f.path);
   for (const expected of [
     "lib/review-carryover.ts",
+    "AGENTS.md",
     "lib/parallel-review.ts",
     "lib/workflow-commands.ts",
     "lib/judge-prompt.ts",
@@ -359,6 +368,7 @@ test("every surface that summarises the contract points at the source", () => {
   // from a second authority to whoever reads it.
   const surfaces = proseSurfaces();
   for (const expected of [
+    "AGENTS.md",
     "lib/parallel-review.ts",
     "lib/workflow-commands.ts",
     "lib/judge-prompt.ts",
