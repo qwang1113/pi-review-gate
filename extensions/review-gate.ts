@@ -1713,22 +1713,6 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the edit gate reads it. Allowed ⇒ this session takes the claim.
    */
   function applySessionExclusivity(ctx?: ExtensionContext): void {
-    // `normal` is the mode whose DEFINING behavior is that the gate is off:
-    // both the edit guard and the bash ship gate return before any of this can
-    // bite (lib/ship-gate-edit-guard.ts, lib/ship-gate-bash.ts). So a refusal
-    // here would be theatre — a message that names a rule the session is not
-    // subject to (reviewer P2, 2026-09-05).
-    //
-    // It still takes the CLAIM, though: a normal session shares the worktree
-    // and writes the same sidecar, so the sessions that DO enforce need to
-    // know it is here.
-    if (state.taskMode === "normal") {
-      delete state.exclusivityRefusal;
-      stopExclusivityRecheck();
-      if (claimsMainSidecar(process.env)) holdWorktree();
-      return;
-    }
-
     const verdict = checkSessionExclusivity({
       env: process.env,
       sessionId: state.sessionId,
@@ -1737,12 +1721,29 @@ export default function reviewGate(pi: ExtensionAPI) {
       now: Date.now(),
     });
     if (!verdict.ok) {
-      // Announce it ONCE (the re-check below runs on a timer), then keep
-      // watching: the refusal PROMISES that closing the other session is
-      // enough, so it has to be able to come back on its own. Without this the
-      // user does exactly what the message says and stays blocked until they
-      // restart the session — the refusal would be lying (reviewer P2).
-      if (state.exclusivityRefusal !== verdict.reason) {
+      // `normal` is the mode whose DEFINING behavior is that the gate is off:
+      // both the edit guard and the bash ship gate return before any of this
+      // could bite (lib/ship-gate-edit-guard.ts, lib/ship-gate-bash.ts). So no
+      // refusal is raised here — it would be a message naming a rule the
+      // session is not subject to.
+      //
+      // But it does NOT take the claim either: the record belongs to the
+      // session that holds this worktree, and overwriting it with our own id
+      // would both steal the holder's protection and make our own exit delete
+      // it (`presenceIsOurs` would say yes) — reviewer P2, 2026-09-05.
+      if (state.taskMode === "normal") {
+        delete state.exclusivityRefusal;
+        stopExclusivityRecheck();
+        return;
+      }
+      // Announce it once PER HOLDER, then keep watching: the refusal PROMISES
+      // that closing the other session is enough, so it has to be able to come
+      // back on its own. Deduped on WHO holds it, not on the text: the text
+      // carries the holder's heartbeat, which is rewritten every few seconds,
+      // so comparing the message would re-notify on every re-check tick
+      // (reviewer P2, 2026-09-05).
+      if (refusedHolderId !== verdict.holder.sessionId) {
+        refusedHolderId = verdict.holder.sessionId;
         try { ctx?.ui.notify(verdict.reason, "error"); } catch { /* headless */ }
       }
       state.exclusivityRefusal = verdict.reason;
@@ -1751,6 +1752,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     const wasRefused = state.exclusivityRefusal !== undefined;
     delete state.exclusivityRefusal;
+    refusedHolderId = undefined;
     stopExclusivityRecheck();
     if (wasRefused) {
       try { ctx?.ui.notify("review-gate: 占用这个 worktree 的会话已消失，门禁正常启动，本会话接管这个 worktree。", "info"); }
@@ -1764,6 +1766,14 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** The refused session's own watch — the only way its refusal can lift. */
   let exclusivityRecheckTimer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * WHICH holder this session has already complained about.
+   *
+   * The dedupe key is the holder's session id, not the refusal text: the text
+   * quotes the holder's heartbeat, which is rewritten every few seconds, so a
+   * text comparison would fire a fresh error box on every re-check tick.
+   */
+  let refusedHolderId: string | undefined;
 
   function startExclusivityRecheck(): void {
     if (exclusivityRecheckTimer) return;

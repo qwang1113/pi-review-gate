@@ -68,6 +68,22 @@ test("the exemption matrix × a live incumbent: only the second CLAIMANT is refu
   assert.equal(verdict(CHILD, live).ok, true, "an orchestration child does too");
 });
 
+test("the verdict is what decides whether to TAKE the claim — never the mode", () => {
+  // The caller (extensions/review-gate.ts) may choose not to REFUSE in normal
+  // mode, where the gate is off by definition. It must still ask, because the
+  // answer also decides whether it may write the presence record: taking the
+  // claim from a live holder would steal its protection and — since the record
+  // would then carry OUR session id — delete it on our way out
+  // (`presenceIsOurs`). This test pins the fact the caller relies on.
+  const live = holder(5_000);
+  assert.equal(verdict(PLAIN, live).ok, false, "occupied ⇒ do not take the claim");
+  assert.equal(verdict(PLAIN, undefined).ok, true, "free ⇒ take it");
+  assert.equal(verdict(PLAIN, holder(PRESENCE_FRESH_MS + 1)).ok, true, "lapsed ⇒ take it");
+  // And the record we would overwrite is identifiable as somebody else's.
+  assert.equal(presenceIsOurs(live, "session-newcomer"), false,
+    "a newcomer must never read the holder's record as its own");
+});
+
 test("the refusal names the holder and gives two concrete ways out", () => {
   const v = verdict(PLAIN, holder(5_000));
   assert.equal(v.ok, false);

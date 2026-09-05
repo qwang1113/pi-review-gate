@@ -4716,9 +4716,25 @@ test("ONE gate session per worktree: refuse, hold, release — and only ONE live
   assert.match(apply, /startExclusivityRecheck\(\)/, "a refused session keeps watching");
   assert.match(SRC, /function startExclusivityRecheck\(\)/, "…on a timer it owns");
   assert.match(SRC, /stopExclusivityRecheck\(\);/, "…which is stopped when it lifts and at shutdown");
-  // normal = the gate is off by definition; a refusal there could not bite.
-  assert.match(apply, /state\.taskMode === "normal"/,
-    "normal mode takes the claim but is not refused (the guards short-circuit before it)");
+  // The complaint is deduped on WHO holds it. The refusal text quotes the
+  // holder's heartbeat, which is rewritten every few seconds, so comparing the
+  // TEXT would pop a fresh error box on every re-check tick (reviewer P2).
+  assert.match(apply, /refusedHolderId !== verdict\.holder\.sessionId/,
+    "the refusal is announced once per holder, not once per heartbeat");
+
+  // normal = the gate is off by definition, so no refusal is raised there —
+  // but it must not take the claim either. The `normal` branch therefore sits
+  // INSIDE the refused case (a normal session on a FREE worktree still holds,
+  // by falling through to the bottom); holding unconditionally there would
+  // steal the holder's record and delete it on exit (reviewer P2).
+  const refusedBlockAt = apply.indexOf("if (!verdict.ok)");
+  const normalAt = apply.indexOf('state.taskMode === "normal"');
+  const holdAt = apply.lastIndexOf("holdWorktree()");
+  assert.ok(refusedBlockAt > 0 && normalAt > refusedBlockAt,
+    "the normal exemption belongs INSIDE the refused case");
+  assert.ok(holdAt > normalAt, "…and the only hold is the one after the check passed");
+  assert.equal((apply.match(/holdWorktree\(\)/g) ?? []).length, 1,
+    "exactly one place takes the claim, and it is reached only when the check passed");
 
   // 哲学三: the OLD "another session wrote this sidecar within 4h" warning is
   // gone. Two definitions of "a session is alive" is one too many.
