@@ -1242,3 +1242,34 @@ test("invalidateBindings: BLOCKED review / FAIL precommit are left alone (not do
   assert.equal(s.review.fingerprint, FP);
   assert.equal(s.precommit.fingerprint, FP);
 });
+
+test("shippedKinds survives a round trip, and unreadable evidence is dropped", () => {
+  // This field is EVIDENCE (the gate watched these ship kinds exit 0), read by
+  // the delivery station's arrival check. Losing it can only make an arrival
+  // block, which is the safe direction — so the loader may drop freely, but it
+  // must never invent a kind that is not in the gate's own vocabulary.
+  const dir = mkdtempSync(join(tmpdir(), "gate-shipped-"));
+  tempDirs.push(dir);
+  const path = join(dir, "state.json");
+
+  const good = emptyState("s", 10);
+  good.shippedKinds = ["push", "pr-create"];
+  writeFileSync(path, JSON.stringify(good));
+  assert.deepEqual(loadSidecar(path)?.shippedKinds, ["push", "pr-create"]);
+
+  // Unknown entries are filtered out; duplicates collapse.
+  writeFileSync(path, JSON.stringify({ ...good, shippedKinds: ["push", "push", "deploy", 7, null] }));
+  assert.deepEqual(loadSidecar(path)?.shippedKinds, ["push"]);
+
+  // Not an array at all ⇒ the field is gone, not coerced.
+  writeFileSync(path, JSON.stringify({ ...good, shippedKinds: "pr-create" }));
+  assert.equal(loadSidecar(path)?.shippedKinds, undefined);
+
+  // An older sidecar simply has none — and that must not break the load.
+  const legacy = emptyState("s", 10);
+  writeFileSync(path, JSON.stringify(legacy));
+  const loaded = loadSidecar(path);
+  assert.ok(loaded, "a sidecar written before the field existed still loads");
+  assert.equal(loaded!.shippedKinds, undefined);
+});
+

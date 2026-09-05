@@ -26,6 +26,8 @@ import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
 import { restatementHash, type RestatementRecord } from "./restatement.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
+import { SHIP_COMMAND_KINDS, type ShipCommandKind } from "./constants.ts";
+
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
 import type { PlanAuditRecord } from "./orchestrator-plan-audit.ts";
 
@@ -485,6 +487,28 @@ export interface GateState {
    * `propose_restatement` overwrites it.
    */
   restatement?: RestatementRecord;
+  /**
+   * SHIP KINDS THE GATE WATCHED SUCCEED in this repo (2026-09-06).
+   *
+   * Written on the `tool_result` of a bash call that carried a ship command
+   * and did NOT fail — so it says "the gate saw `gh pr create` exit 0 here",
+   * which is as close to "a PR exists" as a purely local check can get. It is
+   * never written from a parameter, so it cannot be attested by the agent.
+   *
+   * The delivery station's ARRIVAL check reads it (lib/delivery-station.ts):
+   * a `pr` round that never ran a successful `gh pr create` did not arrive.
+   * Deliberately NOT the Copilot record (`copilot.pr`), which was the first
+   * attempt and is wrong for this: that number is only filled in by
+   * `request_copilot_review` / `check_copilot_review`, so a repo with no `gh`,
+   * or one where `copilotReview.enabled` is false, opens a real PR and could
+   * never satisfy an arrival gate that insisted on it.
+   *
+   * Absent / unknown entries are dropped by the loader: this is evidence, and
+   * unreadable evidence is no evidence (the arrival then blocks, which is the
+   * safe direction).
+   */
+  shippedKinds?: ShipCommandKind[];
+
   /** P-multi: repo roots (other than the session repo) this session edited,
    *  persisted so a same-session resume re-arms declare_done against all of
    *  them. Ship enforcement never reads it; absence just narrows the
@@ -756,6 +780,21 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
          !parsed.sessionReposPaths.every((v) => typeof v === "string"))) {
       delete parsed.sessionReposPaths;
     }
+    // Observed ship kinds: keep only the known vocabulary, deduped. A record
+    // that is not an array at all is dropped entirely. Evidence that cannot be
+    // read is not evidence — and losing it only makes an ARRIVAL check block,
+    // which is the safe direction.
+    if (parsed.shippedKinds !== undefined) {
+      if (!Array.isArray(parsed.shippedKinds)) {
+        delete parsed.shippedKinds;
+      } else {
+        const known = parsed.shippedKinds.filter(
+          (v): v is ShipCommandKind => typeof v === "string" && (SHIP_COMMAND_KINDS as readonly string[]).includes(v),
+        );
+        parsed.shippedKinds = [...new Set(known)];
+      }
+    }
+
     // L7: a malformed Copilot cycle is repaired, never trusted verbatim and
     // never fatal — sanitizeCopilotState downgrades an unrecognized status to
     // ARMED (still to be proven) and drops a non-object entirely. Rejecting

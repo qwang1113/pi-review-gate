@@ -87,6 +87,18 @@ export interface BlockedShipRecord {
   problems: string[];
   blockReason: string;
   at: number;
+  /**
+   * Was any part of this block a DELIVERY STATION refusal?
+   *
+   * The arbiter rules on whether a QUALITY block is circular; it was never
+   * asked how far a round may travel, and no token it could issue would be
+   * consulted here (the station check runs above the token path). Without
+   * this flag `request_arbitration` would accept the appeal, spend one of the
+   * session's three, possibly rule AGENT_WINS — and the command would stay
+   * blocked with no explanation (round-1 reviewer P2, 2026-09-06).
+   */
+  stationBlocked?: boolean;
+
 }
 
 /**
@@ -673,11 +685,14 @@ export async function evaluateShipCommand(
     }
     if (station !== undefined) {
       const seen = new Set<ShipCommandKind>();
-      for (const s of ships) {
-        const kind = s.kind as ShipCommandKind;
+      // `ships` is ShipDetection[], whose `kind` IS the gate's vocabulary —
+      // no cast, so a future widening of that union fails here instead of
+      // being silently accepted by the station table.
+      for (const { kind } of ships) {
         if (seen.has(kind) || shipKindAllowedAtStation(station, kind)) continue;
         seen.add(kind);
         stationProblems.push(stationShipProblem(station, kind));
+
       }
     }
   }
@@ -729,6 +744,8 @@ export async function evaluateShipCommand(
     problems: [...problems, ...stationProblems],
     blockReason: recorded,
     at: Date.now(),
+    ...(stationProblems.length > 0 ? { stationBlocked: true } : {}),
+
   });
 
 

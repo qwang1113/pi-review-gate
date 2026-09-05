@@ -152,8 +152,9 @@ with the restatement travels with the goal's approval, and two gates read it:
 the ship gate lets a command through only when the station allows it
 (`precommit` allows none — the USER commits; `commit` allows the commit;
 `pr` allows the whole push → PR chain), and `declare_done` checks the round
-actually ARRIVED (a `commit` round needs a committed worktree, a `pr` round
-also needs a PR the gate itself recorded). A station block is NOT unmet
+actually ARRIVED (a `commit` round needs a committed worktree; a `pr` round
+also needs a `gh pr create` the gate watched succeed — or a PR number the
+Copilot cycle resolved, for a PR opened elsewhere). A station block is NOT unmet
 quality: another review round cannot clear it — only the user can move the
 station, by confirming a new restatement. Rules: `lib/delivery-station.ts`.
 

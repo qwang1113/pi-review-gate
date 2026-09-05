@@ -211,13 +211,24 @@ export interface StationArrivalFacts {
    */
   dirtyRepos: readonly string[];
   /**
-   * The PR number the GATE recorded for this session (`state.copilot.pr`),
-   * or null/undefined when it never resolved one.
+   * Did the gate WATCH a `gh pr create` succeed in this session?
    *
-   * Deliberately the gate's own record and not something the agent reports:
-   * "I opened the PR" is exactly the claim this check exists to stop taking
-   * on trust. It is also purely local — no `gh` call, no network — so a
-   * completion never fails because GitHub was slow.
+   * This is the evidence a `pr` round arrived, and it is the gate's OWN
+   * observation: the ship kind is read off a bash `tool_result` that did not
+   * fail (`GateState.shippedKinds`), never off a parameter the agent could
+   * set. Local, so a completion never fails because GitHub was slow.
+   */
+  observedPrCreate?: boolean;
+  /**
+   * The PR number the Copilot cycle resolved (`state.copilot.pr`), when there
+   * is one — a SECOND, independent way to prove the same fact, for a PR that
+   * was opened outside this session (in the browser, or by an earlier one).
+   *
+   * It cannot be the only evidence: that number is filled in by
+   * `request_copilot_review` / `check_copilot_review` alone, so a repo with no
+   * `gh` — or one where `copilotReview.enabled` is false — opens a real PR and
+   * would never be able to satisfy an arrival gate that insisted on it
+   * (round-1 reviewer P1, 2026-09-06).
    */
   recordedPr?: number | null;
 }
@@ -241,11 +252,18 @@ export function stationArrivalProblems(
       "提交完再收尾（站点 commit 的承诺就是「提交已经做完」）。",
     );
   }
-  if (station === "pr" && (facts.recordedPr === undefined || facts.recordedPr === null)) {
+  const prProven = facts.observedPrCreate === true ||
+    (facts.recordedPr !== undefined && facts.recordedPr !== null);
+  if (station === "pr" && !prProven) {
     problems.push(
-      "本轮交付站点是 pr，但门禁没有记录到任何 PR —— 把分支推上去、开出 PR（门禁会在 PR 类 ship 时自己记下 PR 号），再收尾。",
+      "本轮交付站点是 pr，但门禁没有看到 PR 被开出来 —— 它认的是**它自己观察到的事实**：" +
+      "一条成功跑完的 `gh pr create`（推分支还不算），或者 Copilot 周期已经解析出的 PR 号。\n" +
+      "  - 还没开 PR：`git push` 之后跑 `gh pr create`，再收尾。\n" +
+      "  - PR 是在别处开的（网页、上一轮会话）：跑一次 `request_copilot_review`，" +
+      "它会解析并记下 PR 号；或者本轮本来就只到 commit，那就让用户把站点改回 `commit`。",
     );
   }
+
   return problems;
 }
 

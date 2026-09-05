@@ -119,6 +119,30 @@ test("what is missing is reported ITEM BY ITEM, never as a bare verdict", () => 
   assert.deepEqual((partial as { missing: string[] }).missing.filter((m) => m.includes("交付站点")).length, 1);
 });
 
+test("the SKELETON does not pass when pasted unchanged", () => {
+  // Round-1 reviewer P2: the refusal has to be copyable (that is what makes it
+  // self-rescuing), but a blank form that satisfies the check is a rubber
+  // stamp the gate hands out itself — it names the task, all three dimensions
+  // and is long enough.
+  const pasted = PROXY_CROSSCHECK_SKELETON.replace(/<taskId>/g, "t1");
+  const verdict = checkProxyCrosscheck(pasted, "t1");
+  assert.equal(verdict.ok, false, "the empty form must not be an approval");
+  const missing = (verdict as { missing: string[] }).missing;
+  assert.ok(missing.some((m) => m.includes("占位符")),
+    `the refusal must say WHICH part is still blank: ${missing.join(" / ")}`);
+
+  // Filling the blanks in is what makes it pass — the skeleton stays usable.
+  assert.equal(checkProxyCrosscheck(GOOD, "t1").ok, true);
+
+  // One unfilled blank is still an unfilled form.
+  const halfFilled =
+    "任务 t1：文件边界——都在 lib/a/ 之内，与 fileBoundaries 一致；" +
+    "任务目标——就是 plan 里 t1 这条，没有跑偏；" +
+    "交付站点：<它声明的交付站点与 plan 的 deliveryStation 是否一致——一句判断>";
+  assert.equal(checkProxyCrosscheck(halfFilled, "t1").ok, false);
+});
+
+
 test("a decline is recognised in BOTH dialogs' reject rows, and no approve row looks like one", () => {
   assert.equal(isDecliningProxyAnswer(GOAL_REJECT), true);
   assert.equal(isDecliningProxyAnswer(RESTATE_REJECT), true);

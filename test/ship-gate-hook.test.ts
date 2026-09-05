@@ -569,3 +569,40 @@ test("buildShipBlockReason keeps the station and the quality halves distinguisha
   assert.match(mixed.shown, /judge_submit/, "the quality half still points at the loop");
 });
 
+test("a station refusal is RECORDED as such, so the appeal route can refuse it for free", () => {
+  // Round-1 reviewer P2: `request_arbitration` accepts any recorded ship block
+  // whose command parses as a lone `gh pr edit`. Without this flag it would
+  // spend one of the session's three appeals on a block the arbiter has no say
+  // over — and even AGENT_WINS would leave the command blocked, because the
+  // ship gate does not consult a token while a station refusal stands.
+  const records: Array<{ stationBlocked?: boolean; problems: string[] }> = [];
+  const base = defaultProjectConfig();
+  const deps = (station: "precommit" | "pr") => makeDeps({
+    enforcementStateFor: () => shippableState(),
+    stateForRepo: () => shippableState(),
+    deliveryStation: () => station,
+    projectConfig: () => ({ ...base, llmGuards: { ...base.llmGuards, aiAttribution: false, englishCheck: false, shipDetect: false } }),
+    setLastBlockedShip: (record) => { records.push(record); },
+  });
+
+  return (async () => {
+    // Station-only: recorded as a station block.
+    await evaluateToolCall(deps("precommit").deps, bashCall("gh pr edit --title 'fix: x'"), {});
+    assert.equal(records.length, 1, "a blocked ship is still recorded — the arbiter reads what the agent read");
+    assert.equal(records[0]!.stationBlocked, true);
+
+    // Quality-only (station allows it): NOT a station block, so the existing
+    // appeal route is untouched.
+    const quality = makeDeps({
+      enforcementStateFor: () => ({ ...emptyState("s1", DEFAULT_MAX_ROUNDS), hasCodeChange: true }),
+      deliveryStation: () => "pr",
+      projectConfig: () => ({ ...base, llmGuards: { ...base.llmGuards, aiAttribution: false, englishCheck: false, shipDetect: false } }),
+      setLastBlockedShip: (record) => { records.push(record); },
+    });
+    await evaluateToolCall(quality.deps, bashCall("gh pr edit --title 'fix: x'"), {});
+    assert.equal(records.length, 2);
+    assert.equal(records[1]!.stationBlocked, undefined,
+      "a pure quality block must stay arbitrable exactly as before");
+  })();
+});
+

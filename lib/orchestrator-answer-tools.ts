@@ -180,12 +180,25 @@ export type CrosscheckVerdict =
   | { ok: false; missing: string[] };
 
 /**
+ * The `<…>` blanks of {@link PROXY_CROSSCHECK_SKELETON}, derived from it.
+ *
+ * The skeleton has to be copyable — that is what makes the refusal
+ * self-rescuing — but a skeleton that PASSES when pasted unchanged is a
+ * ready-made rubber stamp handed out by the gate itself (round-1 reviewer P2).
+ * Deriving the blanks from the skeleton instead of listing them again keeps
+ * the two from drifting: edit the skeleton and this follows.
+ */
+const CROSSCHECK_PLACEHOLDERS: readonly string[] = Object.freeze(
+  [...PROXY_CROSSCHECK_SKELETON.matchAll(/<[^<>\n]+>/g)].map((m) => m[0]),
+);
+
+/**
  * Is this text a comparison of THIS task at all?
  *
- * Three mechanical facts: it names the task, it touches all three dimensions,
- * and it is long enough to have said something. Everything else — whether the
- * judgement is right — is the project manager's own responsibility, which is
- * the point of making it write it down.
+ * Four mechanical facts: it names the task, it touches all three dimensions,
+ * it is long enough to have said something, and it is not the blank form.
+ * Everything else — whether the judgement is right — is the project manager's
+ * own responsibility, which is the point of making it write it down.
  */
 export function checkProxyCrosscheck(raw: unknown, taskId: string): CrosscheckVerdict {
   const text = String(raw ?? "").trim();
@@ -204,8 +217,16 @@ export function checkProxyCrosscheck(raw: unknown, taskId: string): CrosscheckVe
   if (text.length < PROXY_CROSSCHECK_MIN_CHARS) {
     missing.push(`正文长度（现在 ${text.length} 字，至少 ${PROXY_CROSSCHECK_MIN_CHARS} 字）`);
   }
+  const blanks = CROSSCHECK_PLACEHOLDERS.filter((placeholder) => text.includes(placeholder));
+  if (blanks.length > 0) {
+    missing.push(
+      `骨架里还留着 ${blanks.length} 处没填的占位符（${blanks.join("、")}）——` +
+      "把尖括号里的提示换成你自己的判断",
+    );
+  }
   return missing.length === 0 ? { ok: true, text } : { ok: false, missing };
 }
+
 
 /**
  * Is this answer a DECLINE?

@@ -169,19 +169,36 @@ test("arrival: `commit` owes a committed worktree", () => {
   assert.match(dirty[0]!, /commit/);
 });
 
-test("arrival: `pr` owes a committed worktree AND a PR the gate itself recorded", () => {
+test("arrival: `pr` owes a committed worktree AND evidence that a PR was opened", () => {
+  // EVIDENCE 1 — the gate watched `gh pr create` exit 0. This is the primary
+  // one, and it must stand ALONE: a repo without `gh`, or one where
+  // copilotReview is disabled, never gets a PR NUMBER, and an arrival gate
+  // that insisted on the number would make such a `pr` round unfinishable
+  // (round-1 reviewer P1, 2026-09-06).
+  assert.deepEqual(stationArrivalProblems("pr", { dirtyRepos: [], observedPrCreate: true }), []);
+  // EVIDENCE 2 — a PR number the Copilot cycle resolved, for a PR opened in
+  // the browser or by an earlier session.
   assert.deepEqual(stationArrivalProblems("pr", { dirtyRepos: [], recordedPr: 42 }), []);
 
   const noPr = stationArrivalProblems("pr", { dirtyRepos: [], recordedPr: null });
   assert.equal(noPr.length, 1);
-  assert.match(noPr[0]!, /没有记录到任何 PR/);
+  assert.match(noPr[0]!, /没有看到 PR 被开出来/);
+  // The refusal must name BOTH ways out, and neither may be a fiction: the
+  // first version of this text said the gate records a PR number on any
+  // PR-class ship, which is false and left the reader with no working step.
+  assert.match(noPr[0]!, /gh pr create/);
+  assert.match(noPr[0]!, /request_copilot_review/);
+  assert.match(noPr[0]!, /推分支还不算/, "a push is not a PR — say so, it is the likely confusion");
 
   // A missing field is the same fact as null — an older sidecar never opened
   // a PR either.
   assert.equal(stationArrivalProblems("pr", { dirtyRepos: [] }).length, 1);
+  // …and `false` evidence is not evidence.
+  assert.equal(stationArrivalProblems("pr", { dirtyRepos: [], observedPrCreate: false }).length, 1);
 
   // Both halves missing ⇒ both are reported; a completion should learn
   // everything it still owes in one reply.
   assert.equal(stationArrivalProblems("pr", { dirtyRepos: ["repo"], recordedPr: null }).length, 2);
+
 });
 

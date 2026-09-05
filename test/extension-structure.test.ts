@@ -1441,9 +1441,52 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   assert.match(body, /state\.taskMode === "loop" && loopGoalConfirmed\(\)/,
     "the station is only known once the user approved a goal that carries one");
   assert.match(body, /changedFiles\(root\)/, "committed-ness is measured, not asserted by the agent");
+  assert.match(body, /st\.shippedKinds\?\.includes\("pr-create"\)/,
+    "a `pr` round arrives on a `gh pr create` the GATE watched succeed — not on a claim");
   assert.match(body, /st\.copilot\?\.pr/,
-    "the PR is the one the GATE recorded — 'I opened a PR' is the claim this exists to stop trusting");
+    "…with the Copilot-resolved PR number as the second, independent proof");
 });
+
+test("the ship-kind evidence is recorded on SUCCESS, and never behind the Copilot switch", () => {
+  // Round-1 reviewer P1: the first version read `state.copilot.pr`, which is
+  // only ever filled in by request_copilot_review / check_copilot_review — so
+  // a repo with no `gh`, or one with copilotReview disabled, could open a real
+  // PR and never satisfy the `pr` station. The evidence therefore has its own
+  // recording site, above the Copilot block and independent of its switch.
+  const window = windowOf(
+    "// DELIVERY-STATION EVIDENCE",
+    "// L7: a SUCCESSFUL PR-affecting ship",
+    "ship-kind evidence",
+  );
+  // The comments in that window NAME the switch (they explain why it is not
+  // used), so the "never behind the switch" rule is checked on the CODE only.
+  const code = codeOnly(window);
+  assert.match(code, /event\.isError !== true/,
+    "an exit code is the whole point — a failed command proves nothing");
+  assert.doesNotMatch(code, /copilotReview\.enabled/,
+    "the evidence must not depend on a feature switch that has nothing to do with it");
+  assert.match(code, /st\.shippedKinds = merged/);
+  assert.match(code, /persistRepo\(/, "…and it survives the turn it was observed in");
+
+
+});
+
+test("request_arbitration refuses a STATION block before it can spend an appeal", () => {
+  // The arbiter rules on whether a QUALITY block is circular; it was never
+  // asked how far a round may travel, and the ship gate does not consult a
+  // token while a station refusal stands. Accepting the appeal would spend one
+  // of three and leave the command blocked with no explanation.
+  const body = toolBodyOf("request_arbitration");
+  const denyAt = body.indexOf("lastBlockedShip.stationBlocked");
+  assert.ok(denyAt >= 0, "the station case must be handled at all");
+  const quotaAt = body.indexOf("arbitration limit reached");
+  const spendAt = body.indexOf("spendArbitration(ctx);");
+  assert.ok(quotaAt > denyAt && spendAt > denyAt,
+    "…and it must refuse BEFORE the quota check and before the appeal is spent");
+  assert.match(body.slice(denyAt, quotaAt), /STATION_SHIP_NEXT_STEPS/,
+    "the refusal hands over the two routes that actually move a station");
+});
+
 
 test("the ship gate reads the station from the APPROVED contract, and from nothing else", () => {
   const fn = windowOf("function deliveryStationFor(root: string)", "\n  }", "deliveryStationFor");
@@ -3552,7 +3595,13 @@ test("every enforcement path computes a FRESH fingerprint", () => {
     // call — bounded by the check that FOLLOWS the loop, not by a byte count.
     ['name: "declare_done"', "// L7/L8 — completion-only requirements"],
     ["async function recordReviewVerdict(", "// ---------- review tooling"],
-    ['name: "request_arbitration"', 4000],
+    // END ANCHOR, not a byte window (2026-09-06): the station-block deny added
+    // above the quota check pushed the fingerprint call past 4000 bytes, which
+    // is precisely the vacuous-coverage failure this comment warns about. The
+    // anchor closes on the call that SPENDS the appeal, so the window can only
+    // grow with the handler.
+    ['name: "request_arbitration"', "spendArbitration(ctx);"],
+
     // Same reason: R-3's orchestrator branch returns before the loop's own
     // fingerprint, so the window is closed by the block after it.
     ['pi.on("agent_settled"', "// L7/L8 — completion-only requirements"],

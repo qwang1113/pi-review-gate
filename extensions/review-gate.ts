@@ -464,7 +464,9 @@ import type { LoopGoal } from "../lib/loop-goal.ts";
 // which repos are dirty) and lets it decide.
 import {
   DEFAULT_DELIVERY_STATION,
+  STATION_SHIP_NEXT_STEPS,
   stationArrivalProblems,
+
   type DeliveryStation,
 } from "../lib/delivery-station.ts";
 
@@ -4279,6 +4281,33 @@ export default function reviewGate(pi: ExtensionAPI) {
           }
         }
       }
+      // DELIVERY-STATION EVIDENCE: which ship kinds the gate WATCHED succeed
+      // in each repo. `event.isError !== true` is the whole point — this is an
+      // observation of an exit code, not a claim, which is what makes it
+      // usable as arrival evidence for `declare_done`.
+      //
+      // Recorded independently of the Copilot block below (and of
+      // `copilotReview.enabled`): a repo that cannot do Copilot review still
+      // opens real PRs, and tying the evidence to that switch is exactly the
+      // bug this replaced (round-1 reviewer P1 — a `pr` round in such a repo
+      // could never finish).
+      if (cmd && event.isError !== true && state.taskMode !== "normal") {
+        const shipped = detectShipCommands(cmd).map((d) => d.kind);
+        if (shipped.length > 0) {
+          const cmdRepos = resolveCommandRepos(cmd, cwd);
+          const roots = cmdRepos.ambiguous ? new Set(sessionRepos) : new Set(cmdRepos.repos);
+          for (const root of roots) {
+            const st = root === primaryRepoRoot ? state : stateForRepo(root);
+            const before = st.shippedKinds ?? [];
+            const merged = [...new Set([...before, ...shipped])];
+            if (merged.length !== before.length) {
+              st.shippedKinds = merged;
+              persistRepo(ctx as unknown as ExtensionContext, root);
+            }
+          }
+        }
+      }
+
       // L7: a SUCCESSFUL PR-affecting ship opens a Copilot review round for
       // the repo the command ran in. `git push` counts even when no PR exists
       // yet — the check tool resolves that to UNSUPPORTED — because the usual
@@ -7022,23 +7051,36 @@ export default function reviewGate(pi: ExtensionAPI) {
         // children's own ship gates enforce the station where the commits
         // actually happen.
         //
-        // Both facts are LOCAL and gate-observed: uncommitted work, and the PR
-        // number the gate itself recorded when a PR-affecting ship went
-        // through. Nothing here asks GitHub, so a completion never fails
-        // because the network was slow.
+        // Both facts are LOCAL and gate-observed: uncommitted work, and a
+        // `gh pr create` the gate watched exit 0 (`shippedKinds`), with the
+        // Copilot-resolved PR number as a second, independent proof. Nothing
+        // here asks GitHub, so a completion never fails because the network
+        // was slow.
+        //
+        // PER REPO, not once for the session (round-1 reviewer P2): each repo
+        // carries its OWN approved goal and therefore its own station, and the
+        // facts are per repo too. Folding them into one station would let a
+        // second repo's `pr` contract go unchecked behind the primary repo's
+        // `precommit` one — the strictest station demands the LEAST here,
+        // which is the opposite of the ship gate's fold.
         if (state.taskMode === "loop" && loopGoalConfirmed()) {
-          const station = state.loopGoal?.station ?? DEFAULT_DELIVERY_STATION;
-          const dirtyRepos: string[] = [];
-          let recordedPr: number | null = null;
           for (const root of sessionRepos) {
+            const station = deliveryStationFor(root);
+            if (station === undefined) continue; // no contract for that repo
             const st = root === primaryRepoRoot ? state : stateForRepo(root);
             // UNVERIFIABLE counts as dirty: "I could not read the worktree"
             // is not evidence that the work was committed.
             const files = changedFiles(root);
-            if (files === undefined || files.length > 0) dirtyRepos.push(repoLabel(root));
-            if (recordedPr === null && typeof st.copilot?.pr === "number") recordedPr = st.copilot.pr;
+            const problems = stationArrivalProblems(station, {
+              dirtyRepos: files === undefined || files.length > 0 ? [repoLabel(root)] : [],
+              observedPrCreate: st.shippedKinds?.includes("pr-create") === true,
+              recordedPr: typeof st.copilot?.pr === "number" ? st.copilot.pr : null,
+            });
+            for (const p of problems) {
+              completionProblems.push(root === primaryRepoRoot ? p : `[${repoLabel(root)}] ${p}`);
+            }
           }
-          completionProblems.push(...stationArrivalProblems(station, { dirtyRepos, recordedPr }));
+
         }
 
         // Orchestration exit contract (constraints 3, 4, 10, 11): the question
@@ -7632,6 +7674,20 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!lastBlockedShip) {
         return deny("review-gate: no ship block to arbitrate. Run the command first; arbitration only contests an actual block.");
       }
+      // A DELIVERY-STATION block is not arbitrable, and saying so BEFORE the
+      // quota check is the point: the arbiter rules on whether a quality block
+      // is circular, and the ship gate does not consult a token while a
+      // station refusal stands — so accepting this appeal would spend one of
+      // three, possibly rule AGENT_WINS, and leave the command blocked with no
+      // explanation (round-1 reviewer P2, 2026-09-06). `deny` costs nothing.
+      if (lastBlockedShip.stationBlocked) {
+        return deny(
+          "review-gate: 这条拦截里有**交付站点**的成分，仲裁受理不了 —— 仲裁判的是「质量拦截是不是死结」，" +
+          "它从来没被问过「这一轮该走多远」，而且站点还立着的时候门禁根本不会去看仲裁令牌。\n" +
+          STATION_SHIP_NEXT_STEPS,
+        );
+      }
+
       const parsed = parseArbitrableAction(lastBlockedShip.command);
       if (!parsed.ok) {
         return deny(`review-gate: this block is NOT arbitrable — ${parsed.reason}. Only a lone \`gh pr edit\` (title/body) qualifies; git commit/push and gh pr create must go through the full gate.`);
