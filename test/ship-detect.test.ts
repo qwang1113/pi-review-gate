@@ -388,6 +388,14 @@ test("evidence rejects every measured over-match vector", () => {
     ["node -e string", "node -e 'console.log(1)\ngh pr create --title x'"],
     ["python3 -c string", 'python3 -c "x=1\ngh pr create --title y"'],
     ["a quoted echo", 'echo "gh pr create"'],
+    // WRAPPED forms (round-4 reviewer Nit, measured): `normalizedTokens`
+    // walks past sudo/env/timeout looking for a git/gh head ANYWHERE in the
+    // segment — fail-closed for blocking, fail-OPEN for evidence, and the
+    // first version of this function inherited it by re-joining the tokens.
+    ["timeout + node -e", "timeout 60 node -e 'x=1\ngh pr create --title x'"],
+    ["env + python3 -c", 'env FOO=1 python3 -c "x=1\ngh pr create --title y"'],
+    ["the documented sudo ambiguity", "sudo echo gh pr create"],
+
   ];
   for (const [label, cmd] of cases) {
     assert.ok(detectShipCommands(cmd).length > 0 || label === "a quoted echo",
@@ -402,7 +410,10 @@ test("evidence still recognises the real thing, including a multi-line PR body",
   assert.deepEqual(observedShipKinds('gh pr create --title x --body "line1\nline2"'), ["pr-create"]);
   assert.deepEqual(observedShipKinds("gh pr create --title x --body y"), ["pr-create"]);
   assert.deepEqual(observedShipKinds("git push origin work"), ["push"]);
-  assert.deepEqual(observedShipKinds("sudo git push"), ["push"], "a wrapper is still a head");
+  // Prefixes that sit before a command WITHOUT being one are stepped over.
+  assert.deepEqual(observedShipKinds("GIT_TRACE=1 git push origin work"), ["push"]);
+  assert.deepEqual(observedShipKinds("> out.txt git push origin work"), ["push"]);
+
   // A second command on its own line is a real command, not a quoted string.
   assert.deepEqual(observedShipKinds("echo hi\ngh pr create --title x"), ["pr-create"]);
   // Compound commands report each kind once.

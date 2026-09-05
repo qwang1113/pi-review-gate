@@ -443,12 +443,33 @@ export function containsHeredoc(command: string): boolean {
 export function observedShipKinds(command: string): ShipCommandKind[] {
   if (containsHeredoc(command)) return [];
   const kinds = new Set<ShipCommandKind>();
-  for (const segmentTokens of lexSegmentTokens(command)) {
-    // The lexer already dequoted; re-joining is enough for the verb matchers
-    // and keeps ONE implementation of "what is a git/gh ship verb".
-    const tokens = normalizedTokens(segmentTokens.join(" "));
-    const kind = matchGit(tokens) ?? matchGh(tokens);
+  for (const tokens of lexSegmentTokens(command)) {
+    // The HEAD of this segment, and nothing but the head. Only two things are
+    // stepped over — an env assignment and a redirection with its target —
+    // because both sit BEFORE the command without being one.
+    //
+    // NO WRAPPER FORWARD-SCAN, and that is the whole point (round-4 reviewer
+    // Nit, measured on the reviewed commit). `normalizedTokens` walks past
+    // `sudo` / `env` / `timeout` … looking for a git/gh head anywhere in the
+    // segment, which is FAIL-CLOSED when the answer is "block" and FAIL-OPEN
+    // here: `timeout 60 node -e '…gh pr create…'` and `env FOO=1 python3 -c
+    // "…"` both handed out a `pr-create` for a PR nobody opened. So the
+    // evidence path reads the lexer's own tokens (a quoted script stays ONE
+    // token) and asks the verb matchers about the head itself.
+    //
+    // The price is named and accepted: `sudo git push` proves nothing here.
+    // Re-run it unwrapped, or prove the PR the other way.
+    let i = 0;
+    while (i < tokens.length) {
+      const token = tokens[i]!;
+      if (/^\d*(>>?|<)$/.test(token)) { i += 2; continue; }      // `> out`, `2> err`
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) { i += 1; continue; } // `FOO=bar`
+      break;
+    }
+    const head = tokens.slice(i);
+    const kind = matchGit(head) ?? matchGh(head);
     if (kind) kinds.add(kind);
+
   }
   return [...kinds];
 }
