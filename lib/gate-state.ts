@@ -119,8 +119,9 @@ export interface RoundRecord {
    * prepared the round; `reported` is what the JUDGE stamped on its own report
    * (lib/judge-inspection.ts reads it back out of the task text). Both trace
    * back to the same gate-written text, so their AGREEING says nothing about
-   * how the round was read — that is `review.docSync`, the verdict itself and
-   * the report's own `inspection` record. Their DISAGREEING is what this pair
+   * how the round was read — whether it inspected anything at all is the
+   * report's own `inspection` record, and how well it read is the verdict
+   * itself. Their DISAGREEING is what this pair
    * catches: a judge answering with another round's task text, or a pane on a
    * different build. Nothing acts on it — this is a record, not a rule.
    *

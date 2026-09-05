@@ -67,8 +67,10 @@ agent：调 set_gate_mode("loop")
   链（内容不变）都不会破坏绑定，READY + PASS 依然有效——**不要为了"重建绑定"而重跑一轮
   review**（那是纯浪费）。只有提交内容变化（新的 checkpoint / 编辑 / lint:fix 改写）才会
   让绑定失效。
-- **复审要带上一轮结论**：第 N+1 轮把上一轮的 verdict 与 findings 交给 reviewer；
-  已定论且未改动的部分只做一致性扫描，不重新论证（门禁会自动注入这段 scope）。
+- **复审要带上一轮结论**：第 N+1 轮把上一轮的 verdict、未关闭 findings 与机械算出的
+  增量交给 reviewer（门禁自动注入这段 `Review scope for this round`）。这份增量契约的
+  措辞只有一个出处 —— `lib/review-carryover.ts`，本文不复述；一句话版本是：已定论、
+  且增量既未触及也未影响的部分做一致性扫描而不重新推导，有证据随时可以重开旧结论。
 - **reviewer 审的是不可变 commit 范围，你可以边审边修**：`judge_submit` 先把改动提交成
   checkpoint（READY 前唯一的 commit 通道，要求 precommit full 通过），reviewer 审
   `baseline..HEAD`。被审历史不可变，你边读流式 findings 边修真实工作树，互不干扰。

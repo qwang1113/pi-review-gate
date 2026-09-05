@@ -328,6 +328,8 @@ test("the scan itself sees the files it claims to (before its verdict means anyt
   for (const expected of [
     "lib/review-carryover.ts",
     "AGENTS.md",
+    "QUICKSTART.md",
+    "README.md",
     "lib/parallel-review.ts",
     "lib/workflow-commands.ts",
     "lib/judge-prompt.ts",
@@ -366,21 +368,39 @@ test("every surface that summarises the contract points at the source", () => {
   // Philosophy three does not forbid a summary — it forbids a SECOND
   // authority. A summary that never names the real one is indistinguishable
   // from a second authority to whoever reads it.
+  //
+  // DERIVED, NOT ALLOWLISTED (round-2 P2). This used to iterate a hardcoded
+  // list of files, which is exactly how the seventh copy hid: a paraphrase in
+  // a file nobody had listed passed a scan that had already read it. So the
+  // set is COMPUTED — anything that talks about the contract, in either
+  // language, must name its source — and a new surface is caught the day it
+  // is written rather than the day someone remembers to list it.
+  const TALKS_ABOUT_IT = /一致性扫描|consistency[ -]scan|Review scope for this round/i;
   const surfaces = proseSurfaces();
-  for (const expected of [
+  const talkers = surfaces.filter(
+    (f) => f.path !== "lib/review-carryover.ts" && TALKS_ABOUT_IT.test(f.text),
+  );
+  // The derivation must not have silently collapsed to nothing: a rule that
+  // matches no files passes vacuously, which is the failure this whole test
+  // exists to prevent. These are the surfaces known to summarise it today.
+  for (const known of [
     "AGENTS.md",
-    "lib/parallel-review.ts",
-    "lib/workflow-commands.ts",
-    "lib/judge-prompt.ts",
-    "agents/reviewer.md",
+    "QUICKSTART.md",
+    "README.md",
     "docs/judge-protocol.md",
+    "lib/parallel-review.ts",
     "skills/review-loop/SKILL.md",
   ]) {
-    const file = surfaces.find((f) => f.path === expected)!;
+    assert.ok(
+      talkers.some((f) => f.path === known),
+      `${known} summarises the contract, so the derivation must pick it up`,
+    );
+  }
+  for (const file of talkers) {
     assert.match(
       file.text,
       /review-carryover\.ts/,
-      `${expected} summarises the contract, so it must name lib/review-carryover.ts as its source`,
+      `${file.path} talks about the incremental contract, so it must name lib/review-carryover.ts as its source`,
     );
   }
 });
