@@ -349,6 +349,11 @@ test("a rolled back spawn takes the window's border line back down with it", asy
   const result = await tools.get("judge_spawn")!({ kind: "plan" });
   assert.equal(result.isError, true);
   assert.deepEqual(store.table, {}, "the registration is rolled back");
+  // …and a rolled-back spawn must not have retired the lane it was replacing:
+  // this path closes the pane and drops its own row, so a retire done earlier
+  // would leave the role with NO lane at all and un-rotate the transcript
+  // (reviewer P2, 2026-09-05).
+  assert.deepEqual(store.retired, [], "the previous lane survives a rolled-back spawn");
   const flat = seen.map((a) => a.join(" "));
   const unset = flat.filter((s) => s.startsWith("setw") && s.includes("-u"));
   assert.equal(unset.length, 2, "both window options are restored");

@@ -372,14 +372,8 @@ async function doSpawn(
     rollback();
     return fail("review-gate: 开出的 review pane 没有回报 pane id —— 已回滚。");
   }
-  // The new pane exists and its lane is registered: only NOW is the lane it
-  // replaces safe to close and forget. Retiring at resolution time would strand
-  // the rotation whenever the spawn failed on one of the refusals above — the
-  // next dispatch would see no previous lane and resume the transcript that was
-  // just rotated away. This is the SAME resolution as above, never a second
-  // one: asking twice would both advance the round count and answer from a
-  // registry this spawn has already written to.
-  laneInfo.retirePrevious();
+  // (The lane this spawn replaces is retired further down — AFTER the last
+  // path that can still roll this spawn back. See the comment there.)
   // Register what was dispatched, or the report can never be recorded:
   // a goal verdict binds to its draft, a plan verdict to its hash. This runs
   // even when the boot check failed, because the pane is KEPT: a slow judge
@@ -417,6 +411,17 @@ async function doSpawn(
       return fail(`review-gate: plan 备案失败 —— ${remembered.error}`);
     }
   }
+  // THE LAST ROLLBACK IS BEHIND US — only now is the lane this spawn replaces
+  // safe to close and forget. Retiring any earlier (at resolution time, or
+  // straight after the pane opened) hands the rollback paths above a registry
+  // with NO lane for this role: the next dispatch would decide `first` at
+  // generation 0 and resume the transcript that was just rotated away, with
+  // its round count back at one. `rememberPlanAudit` failing is a real such
+  // path — it closes the pane and drops this spawn's own row (reviewer P2,
+  // 2026-09-05). This is the SAME resolution as above, never a second one:
+  // asking twice would both advance the round count and answer from a registry
+  // this spawn has already written to.
+  laneInfo.retirePrevious();
   if (!opened.ok) {
     return fail(
       `review-gate: review pane 开出来了（${paneId}，judge ${judgeId}），但它一直没在自己的通道上报状态 —— ${opened.error}\n` +
