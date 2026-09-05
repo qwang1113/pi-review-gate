@@ -360,6 +360,37 @@ goal 审计不是「走同一个纯函数」而已 —— **它和 plan 审计�
 code review 的结论段也归到同一个 `settleAuditRound`，所以「哪份 report 收本轮、什么时候
 推游标、谁来记录」在整个门禁里只有一处答案。
 
+**代码审查的裁决不得滞后内容一轮（2026-09-05，一晚实测 4 次的 P0）**：review 的 report 绑定
+原来只认游标，于是出现了这条时间线 —— reviewer 交卷写进通道的 report **积压不送达**（agent
+在一个长 turn 里改代码，既没 settle 也没再 `judge_wait`），下一次 `judge_submit` 提交了新
+checkpoint 后，settle 立刻把**上一轮**那份旧 report 当成本轮裁决记下并绑到新 commit 上：一份
+「指出 P2 还在」的裁决，去放行了「声称修好那条 P2」的代码。四次误绑的共同特征只有一句 ——
+**report 的生成时间早于本轮 checkpoint**。
+
+现在 review 的绑定是 `round-and-content`，两条判据**同时**成立才记录，任一不成立都 fail-closed
+（用户决策：round 对不上时**不许**退回时间戳）：
+
+1. `report.round` 等于本轮 dispatch 登记的 `roundSeq`（judge 交卷时从登记表读同一个数，
+   judge 侧代码一行没改）；
+2. `report.at` **严格晚于** `state.checkpoint.at`（本轮内容诞生的时刻）。
+
+四条 fail-closed 边界：report 没有 round、登记表没有 `roundSeq`、report 没有可解析的 `at`、
+gate state 没有 `checkpoint` —— 一律不记录。goal / plan / adviser 三种轮次**不受影响**
+（`roundBindingFor` 只给 review 塞 content 时间戳），否则一个还没 checkpoint 过的新会话的第一次
+goal 审计就会永远等不到结论。
+
+**判据只有一处，等待侧与记录侧共用**：`probeJudgeRound`（`judge_wait` 与 settle 扫描的探测）
+以前自己比一句「最新 report ≠ 游标」，那正是「wait 打出『本轮已有 channel report：结论 READY』
+而记录侧随后拒绝它」的来源。现在它调同一个 `selectRoundReport`：不属于本轮的 report **不算本轮
+结束**（继续等），并原样报成一行「未采纳的 report：<id>（round/时间）—— <原因>；没有记为本轮
+裁决」。既不静默丢弃，也不冒充结论。
+
+已知的**退化情形**（不是缺陷，是事实）：worktree 干净时 `review_checkpoint` 不提交也不刷新
+`checkpoint.at`，所以「零改动重新绑定」的那一轮里时间戳判据退化，此时挡住旧 report 的是 round
+与游标。两条判据都挡不住的理论情形只有一种：reviewer 拖到下一轮 checkpoint 之后才交卷 ——
+它交卷时会重读最新的 `roundSeq`，两条判据都会认为它属于新的一轮。
+
+
 **「已被 wait 记下」不是过期（2026-09-05，adviser 发现的 P0）**：同步审计链的等待走的就是
 `judge_wait`，而它自己也经引擎记录并**消费游标**。所以链回来时本轮 report 往往已经记完了 ——
 把这种情况当成过期，代价是每一次 goal/plan 审计都失败。而改这条链的会话跑的是启动时加载的

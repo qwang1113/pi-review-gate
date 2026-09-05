@@ -56,12 +56,26 @@ export type PendingAudit =
  *   the same judge session, so the channel's newest report is routinely the
  *   PREVIOUS round's; adjudicating it recorded stale findings against a new
  *   draft (the measured P0 behind `8ea7eec`).
- * - `cursor-only` (review): the cursor alone, which is what the code review
- *   path has always used. Making it round-bound here would be a semantics
- *   change smuggled in by a refactor — out of scope by the goal's own
- *   non-goals, and the review path is a MOVE, not a rewrite.
+ * - `cursor-only` (advice): the cursor alone. An adviser's round records no
+ *   verdict at all, so there is nothing a stale report could misbind.
+ * - `round-and-content` (review): the cursor, the ROUND, and the CONTENT this
+ *   round judges — the report must carry THIS dispatch's `roundSeq` AND be
+ *   stamped strictly later than the checkpoint the round was submitted on.
+ *
+ *   Cursor-only was measured to be not enough (2026-09-05, four reproductions
+ *   in one session): a reviewer's report that lands while the agent is still
+ *   editing is not delivered until the NEXT `judge_submit` settles, and the
+ *   cursor accepted that leftover report as the new round's verdict — a READY
+ *   bound to a commit the reviewer never saw, which is the one invariant the
+ *   whole gate exists to hold. Both halves are required (user decision,
+ *   2026-09-05): the round is the structural truth the judge stamps at
+ *   conclude time, the content stamp is what makes "this verdict judged this
+ *   tree" observable, and a coarse clock or a same-second race defeats the
+ *   timestamp alone. A round that cannot be checked (no `roundSeq`, no report
+ *   round, a missing timestamp on either side) fails CLOSED — it is never
+ *   recorded on the strength of the other half.
  */
-export type ReportBinding = "round-bound" | "cursor-only";
+export type ReportBinding = "round-bound" | "cursor-only" | "round-and-content";
 
 /**
  * What the engine needs to know about a kind that is NOT mechanical: the role
@@ -138,10 +152,16 @@ export const PLAN_AUDIT_SPEC: AuditRoundSpec = {
 export const REVIEW_ROUND_SPEC: AuditRoundSpec = {
   kind: "review",
   role: "reviewer",
-  binding: "cursor-only",
+  binding: "round-and-content",
   titlePrefix: "reviewer",
-  unfinished: () =>
-    "reviewer 本轮还没有落 channel report（pane 可能还在跑，或已消失）——门禁会在 report 落盘后用标准报告唤醒；pane 已消失可用 judge_recover 重开。",
+  // The detail TRAVELS here (2026-09-05): a review round that does not close
+  // is usually "the reviewer is still working", but it can also be "a report
+  // is sitting in the channel and it is not this round's". Swallowing the
+  // detail is how the second case reads as the first, which is what let a
+  // leftover verdict be adopted in the first place.
+  unfinished: (detail) =>
+    `reviewer 本轮还没有可记录的 channel report（${detail}）——门禁不会拿别的轮次的裁决顶本轮；` +
+    "report 落盘后会用标准报告唤醒你，pane 已消失可用 judge_recover 重开。",
   notDispatched: (reason) => `review-gate: reviewer 本轮没能派出去 —— ${reason}`,
   unaddressable: () => "review-gate: reviewer 已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。",
   rejected: (note) => note ?? "review-gate: 本轮裁决没有可读的记录。",

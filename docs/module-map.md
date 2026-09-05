@@ -438,7 +438,7 @@ fail-closed）。`model-diagnose.ts`
 | `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限；模型走 `agents.arbiter.slots[0]`（配置层），不再硬编码 |
 | `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义 |
 | `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
-| `audit-round.ts` | **审计回合引擎**（2026-09-05）：「派发 judge → 等本轮 → 选 report → 裁决 → 记录 → 回收」的唯一一份实现。`settleAuditRound` 是结论段（goal / plan / review / advice 四种 kind 都经它，`judge_wait` 与 settle 扫描共用，游标只在这里推进一次、且只在记录落地后推）；`runAuditRound` 是 goal/plan 的同步回合（O-6 的 `judge_close` 是它的一个 `finally`，不再散在每条 return 上；「本轮是不是已被 wait 记完」由 `roundClosedDuringWait` 判——pending 已消费**且**游标已前进，缺一即自己再 settle 并 fail-closed）。`selectRoundReport` 是「哪份 report 收本轮」的唯一判据（round-bound 认 `roundSeq`+游标，cursor-only 只认游标——per-kind 的真实差异） |
+| `audit-round.ts` | **审计回合引擎**（2026-09-05）：「派发 judge → 等本轮 → 选 report → 裁决 → 记录 → 回收」的唯一一份实现。`settleAuditRound` 是结论段（goal / plan / review / advice 四种 kind 都经它，`judge_wait` 与 settle 扫描共用，游标只在这里推进一次、且只在记录落地后推）；`runAuditRound` 是 goal/plan 的同步回合（O-6 的 `judge_close` 是它的一个 `finally`，不再散在每条 return 上；「本轮是不是已被 wait 记完」由 `roundClosedDuringWait` 判——pending 已消费**且**游标已前进，缺一即自己再 settle 并 fail-closed）。`selectRoundReport` 是「哪份 report 收本轮」的唯一判据（round-bound 认 `roundSeq`+游标；cursor-only 只认游标；**round-and-content 认 `roundSeq`+`checkpoint.at`+游标，review 专用**——per-kind 的真实差异），`roundBindingFor` 是三件事实的唯一推导处，记录侧与探测侧（`probeJudgeRound`）共用同一判据 |
 | `audit-round-specs.ts` | 审计回合的**措辞半边**：四种 kind 的 spec（judge 角色、report 绑定方式、pane 标题前缀、fail-closed 与拒绝文案）+ `specForRound`（role 优先，goal/plan 靠 pending kind 分辨）。**引擎合，措辞不合** —— 合并机械部分是引擎的目的，合并句子则是另一种更糟的重构：plan 审计失败要让人去 `submit`，goal 的要去 `propose_loop_goal`。新增一种 round 只动这个文件 |
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交 |
 | `checkpoint-message.ts` | checkpoint 提交信息（纯函数）：把 `checkpoint` 注入 **scope** 产出合法 Conventional Commits（`type(checkpoint-<scope>)` / `type(checkpoint)` / 非 CC→`chore(checkpoint)` / 已含则幂等），并对非英文 round note 回落英文默认、丢正文（L5 自洽） |
@@ -471,11 +471,11 @@ fail-closed）。`model-diagnose.ts`
 | `judge-process.ts` | judge 身份（opener 限定的确定性会话 id：同 opener 跨 pane/轮/重启复用、换 opener 全新）与 scratch 目录 helper；并把 judge 的 `$TMPDIR` 指向**每会话专属**的 scratch 目录（`judgeScratchDir`，以 session id 为键、随新 id 自动迁移）——reviewer 的临时 review worktree 落在那里，门禁按 `reviewScratchWorktrees` 在 pane 回收后精确回收 |
 | `judge-prompt.ts` | judge 会话的系统提示装配：角色定义 + 共同协议 |
 | `judge-session.ts` | 把 judge transcript 当作长记忆（结论走交卷工具，不再从它解析） |
-| `judge-session-tools.ts` | 作用在既有 pane judge 上的两个入口：`judge_close`（只在 internalHost，门禁审计链自收）与 `judge_wait`（`registerJudgeWaitTool` 把**同一实现**注册到 internalHost 与 agent 面）；等待是**消息驱动**的 —— 新 channel report / pane 死亡 / judge 提问 / 新 finding 任一命中即返回，去重游标是 entry 上的 `lastReportId` + `lastFindingCount` 与会话侧已宣告问题集；opener 校验也在内。**report 落地后它不自己记录**（2026-09-05）：一律交给 `audit-round.ts` 的 `settleAuditRound`，report 游标也由引擎推——它只保留 finding 游标。`judge_read` 已删（2026-09-05） |
+| `judge-session-tools.ts` | 作用在既有 pane judge 上的两个入口：`judge_close`（只在 internalHost，门禁审计链自收）与 `judge_wait`（`registerJudgeWaitTool` 把**同一实现**注册到 internalHost 与 agent 面）；等待是**消息驱动**的 —— 新 channel report / pane 死亡 / judge 提问 / 新 finding 任一命中即返回，去重游标是 entry 上的 `lastReportId` + `lastFindingCount` 与会话侧已宣告问题集；opener 校验也在内。**report 落地后它不自己记录**（2026-09-05）：一律交给 `audit-round.ts` 的 `settleAuditRound`，report 游标也由引擎推——它只保留 finding 游标。**「本轮是否结束」也不自己判**（2026-09-05 第二次）：`probeJudgeRound` 调 `selectRoundReport` 用同一份 binding（deps 的 `roundBinding`），不属于本轮的 report 不算结束、原样报成 `notThisRound`——两侧判据不一致时，wait 会宣布一个记录侧随后拒绝的 READY。`judge_read` 已删（2026-09-05） |
 
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
 | `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论**本体**直写 channel report（无 fence 合成、无解析）；**签名按角色收窄**——reviewer / goal-auditor 只有 verdict + findings + cwd（传 notes 显式拒绝且不占额度），adviser 保留 notes（它的产出就是正文）；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度 |
-| `judge-report.ts` | opener 侧标准报告（wake-up 内容：verdict、证据位置、记录情况、待答问题；transcript 扒取半边已随交卷工具删除） |
+| `judge-report.ts` | opener 侧标准报告（wake-up 内容：verdict、证据位置、记录情况、待答问题、**被搁置的 report**（`notThisRound`：id/轮次/时间 + 原因，说明它没被记为本轮裁决）；transcript 扒取半边已随交卷工具删除） |
 | `judge-spawn-tools.ts` | pane judge 生命周期工具（`judge_spawn` / `judge_answer` / `judge_recover`）及其注册：agent 只给意图，审计任务由门禁组装 |
 | `lang-detect.ts` | L5 英文判定的唯一实现：任何非拉丁字母即拒，调用方只决定措辞 |
 | `llm-classify.ts` | 语义第二意见（DeepSeek V4 Flash），契约上只能加拦（TIGHTEN-ONLY） |

@@ -50,6 +50,14 @@ import {
   clampWaitTimeout,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
 } from "./judge-lifecycle.ts";
+// The ONE selector for "which report closes this round" and its wording. The
+// wait shares it with the recorder on purpose (2026-09-05): two comparisons
+// meant the wait could end a round the recorder then refused to record.
+import {
+  describeRoundMiss,
+  selectRoundReport,
+  type RoundBinding,
+} from "./audit-round.ts";
 import { buildStandardReport, type OpenQuestionBrief } from "./judge-report.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import { pollUntil } from "./poll-wait.ts";
@@ -116,6 +124,18 @@ export interface JudgeSessionToolDeps {
    */
   announcedQuestions(): ReadonlySet<string>;
   markQuestionsAnnounced(requestIds: readonly string[]): void;
+
+  /**
+   * THIS round's report binding — the role's kind, the round this dispatch
+   * registered, and the content the round judges — built by the engine's own
+   * derivation (`roundBindingFor`, lib/audit-round.ts).
+   *
+   * The wait has to answer "did this round end?" with the SAME rule the
+   * recorder uses for "may this report be recorded?". While they differed, the
+   * wait announced a READY that the recorder refused, and the agent acted on
+   * the announcement (2026-09-05).
+   */
+  roundBinding(child: Pick<JudgeChildRecord, "judgeId" | "role" | "repoRoot">): RoundBinding;
 
   /**
    * CLOSE THIS ROUND through the audit-round engine (lib/audit-round.ts).
@@ -235,6 +255,15 @@ export interface PaneJudgeWaitObservation {
   seenFindingCount?: number;
   /** Questions the opener has not been shown yet. */
   newQuestions?: OpenQuestionBrief[];
+  /**
+   * A report the channel HOLDS that is not this round's — an older round's, or
+   * one stamped no later than this round's checkpoint.
+   *
+   * It never ends the round (the recorder would refuse it), and it is never
+   * silently dropped either: the opener is told which report was set aside and
+   * why, so "still waiting" is a checkable statement rather than a guess.
+   */
+  notThisRound?: { reportId: string; round?: number; at?: string; detail: string };
 }
 
 /**
@@ -270,29 +299,60 @@ export function probeJudgeRound(
   deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane">,
   child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId">,
   consumedReportId: string | undefined,
+  binding: RoundBinding,
 ): PaneJudgeWaitObservation {
   const io = deps.channelIO();
   const home = deps.channelHome();
   const target = judgeChannelTarget(child.openerId, child.judgeId, home);
   const read = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home));
   const projection = projectChannel(read.records);
-  const last = projection.lastReport;
   const openQuestions: OpenQuestionBrief[] = (projection.openRequests ?? []).map((q) => ({
     title: q.title,
     options: q.options,
     requestId: q.requestId,
   }));
-  if (last && last.reportId !== consumedReportId) {
-    return { done: true, reason: "report", reportId: last.reportId, verdict: last.verdict, findingsCount: last.findingsCount, openQuestions };
+  // ONE criterion, shared with the recorder (lib/audit-round.ts). This used to
+  // be its own comparison — "newest report, different id from the cursor" —
+  // and that is precisely how a round ended here on a report the recorder then
+  // refused: the wait announced a READY, the gate recorded nothing, and the
+  // agent read the wake-up as a finished round (2026-09-05).
+  const selected = selectRoundReport(read.records, { ...binding, consumedReportId });
+  if (selected.ok) {
+    const report = selected.report;
+    return {
+      done: true,
+      reason: "report",
+      reportId: report.reportId,
+      verdict: report.verdict,
+      ...(report.findingsCount === undefined ? {} : { findingsCount: report.findingsCount }),
+      openQuestions,
+    };
   }
+  // A report is sitting there and it is NOT this round's: keep waiting, and
+  // carry WHICH one and WHY so the wake-up can say it out loud.
+  const notThisRound =
+    selected.reason === "no-report" || selected.reason === "already-consumed" || selected.reportId === undefined
+      ? undefined
+      : {
+          reportId: selected.reportId,
+          ...(selected.round === undefined ? {} : { round: selected.round }),
+          ...(selected.at === undefined ? {} : { at: selected.at }),
+          detail: describeRoundMiss(selected),
+        };
   const ownPane = deps.ownPane();
   const paneAlive = child.paneId && ownPane ? judgePaneAlive(deps.tmux, ownPane, child.paneId) : undefined;
   if (paneAlive === false) {
-    return { done: true, reason: "pane-dead", openQuestions };
+    return { done: true, reason: "pane-dead", openQuestions, ...(notThisRound === undefined ? {} : { notThisRound }) };
   }
   const state = projection.lastState?.state ?? "unknown";
   const since = projection.lastStateSince ?? projection.lastActivityAt ?? "—";
-  return { done: false, reason: "pending", stateLine: `${state}（自 ${since}）`, openQuestions };
+  return {
+    done: false,
+    reason: "pending",
+    stateLine: `${state}（自 ${since}）`,
+    openQuestions,
+    ...(notThisRound === undefined ? {} : { notThisRound }),
+  };
 }
 
 /**
@@ -307,11 +367,11 @@ export function probeJudgeRound(
  * still reports to an opener running the oldest.
  */
 export function probeJudgeWait(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "readText">,
-  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "readText" | "roundBinding">,
+  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath" | "role" | "repoRoot">,
   cursors: JudgeWaitCursors,
 ): PaneJudgeWaitObservation {
-  const round = probeJudgeRound(deps, child, cursors.reportId);
+  const round = probeJudgeRound(deps, child, cursors.reportId, deps.roundBinding(child));
   const findings = recentStreamFindings(deps, child.streamPath);
   const seenFindingCount = findings.length;
   if (round.done) return { ...round, seenFindingCount };
@@ -491,6 +551,11 @@ async function doWait(
     role: child.role,
     judgeId: child.judgeId,
     ...(child.streamPath === undefined ? {} : { streamPath: child.streamPath }),
+    // Rides along on EVERY outcome that is not this round's report: whichever
+    // wake-up the opener gets, it learns that a leftover report was set aside
+    // and why. (The `report` outcome can never carry one — the probe only ends
+    // a round on a report the recorder accepts.)
+    ...(observation.notThisRound === undefined ? {} : { notThisRound: observation.notThisRound }),
   };
   if (observation.done && observation.reason === "pane-dead") {
     return reply(

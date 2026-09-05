@@ -67,12 +67,75 @@ import {
 } from "./audit-round-specs.ts";
 
 /** Why the channel held no report this round may be adjudicated against. */
-export type RoundReportMiss = "no-report" | "already-consumed" | "round-mismatch";
+export type RoundReportMiss =
+  | "no-report"
+  | "already-consumed"
+  | "round-mismatch"
+  /** The round cannot be verified at all (no `roundSeq` registered). */
+  | "round-unknown"
+  /** The report is not newer than the content this round judges. */
+  | "stale-content"
+  /** One of the two timestamps is missing or unparseable. */
+  | "content-unknown";
 
-/** The outcome of asking "which report closes THIS round?". */
+/**
+ * The outcome of asking "which report closes THIS round?".
+ *
+ * A miss carries BOTH sides of whatever did not match — the report's id, round
+ * and stamp, and what the round expected — because the sentence the agent
+ * reads has to name them. "Not this round's report" with no ids is a fact the
+ * reader cannot check.
+ */
 export type RoundReportSelection =
   | { ok: true; report: ChannelReportRecord }
-  | { ok: false; reason: RoundReportMiss; reportId?: string; round?: number };
+  | {
+      ok: false;
+      reason: RoundReportMiss;
+      reportId?: string;
+      round?: number;
+      at?: string;
+      expectedRound?: number;
+      contentAt?: string;
+    };
+
+/**
+ * THE THREE FACTS that decide whether a report may close a round, derived in
+ * ONE place from the kind of round it is.
+ *
+ * It exists so the SELECTOR and the PROBE cannot drift: `judge_wait` and the
+ * settle sweep ask "did this round end?" and `settleAuditRound` asks "may this
+ * report be recorded?", and those two questions must have the same answer or
+ * the wait announces a verdict the recorder refuses (measured 2026-09-05).
+ * Both call `selectRoundReport` with a binding built here.
+ *
+ * `contentAt` is populated ONLY for the kind that binds to content (review).
+ * A goal or plan audit runs before any checkpoint exists — feeding it a
+ * content stamp, or refusing it for the lack of one, would strand the very
+ * first audit of a session.
+ */
+export interface RoundBinding {
+  binding: ReportBinding;
+  /** The round number THIS dispatch registered (`roundSeq`). */
+  expectedRound: number | undefined;
+  /** The content stamp the round judges — a review's `checkpoint.at`. */
+  contentAt: string | undefined;
+}
+
+/** Build this round's binding from the role, its pending audit and gate state. */
+export function roundBindingFor(input: {
+  role: string;
+  pendingKind?: AuditKind;
+  roundSeq?: number;
+  /** `checkpoint.at` of the repo — used by the review binding only. */
+  checkpointAt?: string;
+}): RoundBinding {
+  const binding = specForRound(input.role, input.pendingKind)?.binding ?? "cursor-only";
+  return {
+    binding,
+    expectedRound: input.roundSeq,
+    contentAt: binding === "round-and-content" ? input.checkpointAt : undefined,
+  };
+}
 
 /**
  * WHICH REPORT CLOSES THIS ROUND — the ONE selector.
@@ -80,13 +143,16 @@ export type RoundReportSelection =
  * It used to have two entry points in the extension (`staleAuditGuard` and an
  * inline call inside `auditPlanRound`), which is how the goal path and the
  * plan path ended up fail-closing on subtly different conditions. There is one
- * now, and every kind reaches it through `settleAuditRound`.
+ * now, and every kind reaches it through `settleAuditRound` — including the
+ * PROBE behind `judge_wait` and the settle sweep, which used to compare the
+ * cursor on their own (2026-09-05).
  *
  * The round source of truth is `judge-conclude.ts` (`roundSeq`, stamped on
  * every report); no second round tracker lives here. A report that pre-dates
  * round numbering counts as round 0, so it can never match a real round.
  * `expectedRound === undefined` (an entry from before round numbering) falls
- * back to the cursor check alone.
+ * back to the cursor alone for a `round-bound` audit — but NOT for a review,
+ * whose binding fails closed rather than trusting its other half.
  */
 export function selectRoundReport(
   records: ReadonlyArray<ChannelRecord>,
@@ -94,6 +160,8 @@ export function selectRoundReport(
     binding: ReportBinding;
     expectedRound: number | undefined;
     consumedReportId: string | undefined;
+    /** The content this round judges (review only) — see `RoundBinding`. */
+    contentAt?: string | undefined;
   },
 ): RoundReportSelection {
   let last: ChannelReportRecord | undefined;
@@ -101,23 +169,65 @@ export function selectRoundReport(
     if (r.kind === "report" && r.from === "child") last = r;
   }
   if (!last) return { ok: false, reason: "no-report" };
-  // ROUND FIRST, CURSOR SECOND — the order is load-bearing (2026-09-05).
+  const reportRound =
+    typeof last.round === "number" && Number.isFinite(last.round) ? Math.floor(last.round) : undefined;
+  const reportAt = typeof last.at === "string" ? last.at : undefined;
+  // Every miss below names the report it refused, so the sentence built from
+  // it is checkable against the channel file.
+  const seen = {
+    reportId: last.reportId,
+    ...(reportRound === undefined ? {} : { round: reportRound }),
+    ...(reportAt === undefined ? {} : { at: reportAt }),
+  };
+  // ROUND FIRST, CONTENT SECOND, CURSOR LAST — the order is load-bearing
+  // (2026-09-05).
   //
-  // For a round-bound kind the ROUND is what makes a report this round's; the
-  // cursor is a second safety net, not the safety itself. Checking the cursor
-  // first would let `already-consumed` MASK a round mismatch: a report from an
-  // older round that happens to be the consumed one comes back as "you already
+  // For a bound kind the ROUND is what makes a report this round's; the cursor
+  // is a second safety net, not the safety itself. Checking the cursor first
+  // would let `already-consumed` MASK a round mismatch: a report from an older
+  // round that happens to be the consumed one comes back as "you already
   // recorded this" rather than "this is not your round". Nothing in the engine
   // treats `already-consumed` as a pass today — but the moment someone does,
   // that masking would resurrect the P0 `8ea7eec` fixed (an older round's
   // verdict recorded against a new draft). Ordering it this way makes the
   // roundSeq binding structural instead of something the next caller has to
   // remember.
-  if (opts.binding === "round-bound" && opts.expectedRound !== undefined) {
-    const round =
-      typeof last.round === "number" && Number.isFinite(last.round) ? Math.floor(last.round) : 0;
-    if (round !== Math.floor(opts.expectedRound)) {
-      return { ok: false, reason: "round-mismatch", reportId: last.reportId, round };
+  if (opts.binding === "round-bound" || opts.binding === "round-and-content") {
+    if (opts.expectedRound === undefined) {
+      // A review refuses what it cannot verify; a legacy round-bound entry
+      // (written before round numbering) still falls back to the cursor.
+      if (opts.binding === "round-and-content") return { ok: false, reason: "round-unknown", ...seen };
+    } else if ((reportRound ?? 0) !== Math.floor(opts.expectedRound)) {
+      return {
+        ok: false,
+        reason: "round-mismatch",
+        ...seen,
+        round: reportRound ?? 0,
+        expectedRound: Math.floor(opts.expectedRound),
+      };
+    }
+  }
+  // THE CONTENT CHECK — a verdict may never lag the content by a round.
+  //
+  // A reviewer's report that lands while the agent is still editing is not
+  // delivered until the next submission settles; without this, that leftover
+  // report became the NEW round's verdict, binding a READY to a commit the
+  // reviewer never saw (four reproductions, 2026-09-05). It is an AND with the
+  // round check, never a fallback for it: a missing stamp on either side is
+  // refused rather than waved through on the round alone.
+  if (opts.binding === "round-and-content") {
+    const reportMs = reportAt === undefined ? Number.NaN : Date.parse(reportAt);
+    const contentMs = opts.contentAt === undefined ? Number.NaN : Date.parse(opts.contentAt);
+    if (!Number.isFinite(reportMs) || !Number.isFinite(contentMs)) {
+      return {
+        ok: false,
+        reason: "content-unknown",
+        ...seen,
+        ...(opts.contentAt === undefined ? {} : { contentAt: opts.contentAt }),
+      };
+    }
+    if (reportMs <= contentMs) {
+      return { ok: false, reason: "stale-content", ...seen, contentAt: opts.contentAt };
     }
   }
   if (last.reportId === opts.consumedReportId) {
@@ -129,11 +239,22 @@ export function selectRoundReport(
 /** The human-readable half of a miss, in the gate's own voice. */
 export function describeRoundMiss(selection: {
   reason: RoundReportMiss;
+  reportId?: string;
   round?: number;
+  at?: string;
+  expectedRound?: number;
+  contentAt?: string;
 }): string {
+  const seen = selection.reportId ? `channel 最新 report（${selection.reportId}）` : "channel 最新 report";
   switch (selection.reason) {
     case "round-mismatch":
-      return `channel 最新 report 属于第 ${selection.round ?? "?"} 轮，不是本轮`;
+      return `${seen} 属于第 ${selection.round ?? "?"} 轮，不是本轮（第 ${selection.expectedRound ?? "?"} 轮）`;
+    case "round-unknown":
+      return `${seen} 的轮次无法核对：门禁登记表里没有本轮的 roundSeq —— fail-closed，不拿时间戳顶替`;
+    case "stale-content":
+      return `${seen} 生成于 ${selection.at ?? "?"}，不晚于本轮 checkpoint（${selection.contentAt ?? "?"}）——它判的是本轮之前的内容`;
+    case "content-unknown":
+      return `${seen} 与本轮 checkpoint 的时间无法比对（report at=${selection.at ?? "无"}，checkpoint at=${selection.contentAt ?? "无"}）—— fail-closed`;
     case "already-consumed":
       return "channel 最新 report 已是消费过的旧裁决";
     default:
@@ -183,6 +304,17 @@ export interface SettleAuditRoundDeps {
   forgetPending(root: string): void;
   /** Injectable clock (ISO). */
   nowIso(): string;
+  /**
+   * The CONTENT stamp of this repo's current round — `checkpoint.at`.
+   *
+   * A review verdict may not be older than the content it claims to judge, and
+   * the checkpoint is when that content came into existence. Only the review
+   * binding reads it (`roundBindingFor`), so a goal or plan audit dispatched
+   * before any checkpoint exists is unaffected. `undefined` (no checkpoint on
+   * record) makes the review binding fail closed rather than fall back to the
+   * round alone — user decision, 2026-09-05.
+   */
+  checkpointAt(root: string): string | undefined;
   /** Persist one repo's plan-audit record (the extension owns gate state). */
   savePlanAudit(root: string, record: PlanAuditRecord): void;
   /**
@@ -257,17 +389,27 @@ export async function settleAuditRound(
   const pending = deps.pendingAudit(input.root);
   const spec = specForRound(entry.role, pending?.kind);
   if (!spec) return { status: "unknown" };
+  // The binding is built by the SHARED derivation, so the recorder and the
+  // probe behind `judge_wait` answer "is this report this round's?" the same
+  // way — a wait that announces a verdict the recorder then refuses is the
+  // failure mode this whole change exists to remove.
+  const checkpointAt = deps.checkpointAt(input.root);
+  const binding = roundBindingFor({
+    role: entry.role,
+    ...(pending?.kind === undefined ? {} : { pendingKind: pending.kind }),
+    ...(entry.roundSeq === undefined ? {} : { roundSeq: entry.roundSeq }),
+    ...(checkpointAt === undefined ? {} : { checkpointAt }),
+  });
   const selected = selectRoundReport(deps.readRoundRecords(entry), {
-    binding: spec.binding,
-    expectedRound: entry.roundSeq,
+    ...binding,
     consumedReportId: entry.lastReportId,
   });
   if (!selected.ok) {
-    // A cursor-bound kind whose newest report is its OWN consumed one has
-    // simply been recorded already: silence, not a fail-closed notice. For a
-    // round-bound audit the same observation means the opposite — this
-    // round's verdict has not arrived — so it is reported.
-    if (selected.reason === "already-consumed" && spec.binding === "cursor-only") {
+    // A kind that is NOT round-bound and whose newest report is its OWN
+    // consumed one has simply been recorded already: silence, not a
+    // fail-closed notice. For a goal or plan audit the same observation means
+    // the opposite — this round's verdict has not arrived — so it is reported.
+    if (selected.reason === "already-consumed" && spec.binding !== "round-bound") {
       return { status: "miss", reason: selected.reason };
     }
     return { status: "miss", reason: selected.reason, text: spec.unfinished(describeRoundMiss(selected)) };

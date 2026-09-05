@@ -2746,7 +2746,14 @@ test("judge_wait applies the MESSAGE-DRIVEN criteria and returns the standard re
   assert.match(body, /pane-dead/, "a dead pane ends the wait as failed");
   assert.match(body, /lastFindingCount: observation\.seenFindingCount/, "…and a shown finding cannot end the next one");
   const probe = windowIn(JUDGE_TOOLS_SRC, "export function probeJudgeRound(", "\n}", "probeJudgeRound");
-  assert.match(probe, /projection\.lastReport/, "the report criterion reads the channel");
+  // The report criterion is the ENGINE's, not the probe's own comparison
+  // (2026-09-05): while the probe picked "newest report ≠ cursor" by itself, it
+  // ended rounds on reports the recorder refused, and the opener acted on the
+  // announcement.
+  assert.match(probe, /selectRoundReport\(read\.records, \{ \.\.\.binding, consumedReportId \}\)/,
+    "the report criterion is the shared selector, applied to this round's binding");
+  assert.doesNotMatch(probe, /projection\.lastReport/,
+    "…and the probe may not pick a report on its own again");
   assert.match(probe, /judgePaneAlive\(deps\.tmux/, "pane death is probed from tmux, not inferred");
   // The two NEW criteria read what the gate ALREADY writes (P0: the judge-side
   // record format is untouched) — the round's stream file and the channel's
@@ -3115,7 +3122,7 @@ test("completion arrives as a channel report consumed by the wait — no process
   assert.match(toolBodyOf("judge_wait"), /observation\.reason === "report" && observation\.reportId/,
     "the wait ends on the channel report");
   assert.match(windowIn(JUDGE_TOOLS_SRC, "export function probeJudgeRound(", "\n}", "probeJudgeRound"),
-    /projection\.lastReport/, "…observed straight off the channel");
+    /readChannel\(io, channelPathFor\(/, "…observed straight off the channel");
 });
 
 test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", () => {
@@ -3951,20 +3958,33 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   // pinned in test/judge-lifecycle.test.ts, where it can be driven directly.
 
 
-  // AND THE SELECTOR HAS ONE CALL SITE, ANYWHERE. Two entry points
-  // (`staleAuditGuard` plus an inline call in the plan audit) is exactly how
-  // the goal path and the plan path ended up fail-closing on different
+  // AND THE SELECTOR HAS ONE IMPLEMENTATION, WITH NAMED CALLERS. Two entry
+  // points (`staleAuditGuard` plus an inline call in the plan audit) is exactly
+  // how the goal path and the plan path ended up fail-closing on different
   // conditions, so this scans every module rather than the extension alone.
+  //
+  // The PROBE was added to the caller list on 2026-09-05, deliberately: it used
+  // to answer "did this round end?" with its own comparison, which is how a
+  // wait could announce a verdict the recorder then refused. Sharing the ONE
+  // selector is the fix — a second selector is still forbidden everywhere.
   assert.doesNotMatch(SRC, /staleAuditGuard/,
     "the second stale-report entry point may not come back");
+  const SELECTOR_SITES = new Set([
+    join("lib", "audit-round.ts"),          // where it lives
+    join("lib", "judge-session-tools.ts"),  // the probe, which must agree with it
+  ]);
   for (const rel of [
     ...readdirSync(join(ROOT, "lib")).filter((f) => f.endsWith(".ts")).map((f) => join("lib", f)),
     join("extensions", "review-gate.ts"),
   ]) {
-    if (rel.endsWith("audit-round.ts")) continue;
+    if (SELECTOR_SITES.has(rel)) continue;
     assert.doesNotMatch(readFileSync(join(ROOT, rel), "utf8"), /selectRoundReport\(|selectCurrentAuditReport\(/,
       `${rel} must not decide which report closes a round — the engine does`);
   }
+  // The probe CALLS it and does not re-derive it: no second "newest report vs
+  // the cursor" comparison may live in the waiting module.
+  assert.doesNotMatch(JUDGE_TOOLS_SRC, /projection\.lastReport/,
+    "lib/judge-session-tools.ts may not pick a round's report on its own");
 });
 
 

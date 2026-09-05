@@ -70,6 +70,16 @@ export interface StandardReportInput {
    * a wake-up the opener has to go read is not a wake-up.
    */
   newFindings?: ReadonlyArray<string> | undefined;
+  /**
+   * A report the channel HOLDS that is not this round's (an older round, or one
+   * stamped no later than this round's checkpoint).
+   *
+   * It is reported and never adopted. Saying nothing about it is what made the
+   * old behaviour dangerous in both directions: silence reads as "the reviewer
+   * has not answered yet", while ADOPTING it bound a READY to a commit the
+   * reviewer never saw (2026-09-05).
+   */
+  notThisRound?: { reportId: string; round?: number; at?: string; detail: string } | undefined;
   /** The judge's own last self-reported state, e.g. `working（自 …）`. */
   stateLine?: string | undefined;
   /** How long a blocking wait actually waited, in seconds. */
@@ -111,6 +121,19 @@ export function buildStandardReport(input: StandardReportInput): string {
     const omitted = newFindings.length - shown.length;
     lines.push(`- 新 findings（${newFindings.length} 条${omitted > 0 ? `，下面列最新 ${shown.length} 条` : ""}）：`);
     for (const f of shown) lines.push(`  ${f}`);
+  }
+  // The report the gate SET ASIDE. It is named with its id, round and stamp so
+  // the claim is checkable in the channel file — an unrecorded verdict must
+  // never look like this round's conclusion, and must never vanish either.
+  const stale = input.notThisRound;
+  if (stale !== undefined) {
+    const round = stale.round === undefined ? "" : `round ${stale.round}`;
+    const at = stale.at === undefined ? "" : stale.at;
+    const tag = [round, at].filter(Boolean).join("，");
+    lines.push(
+      `- 未采纳的 report：${stale.reportId}${tag ? `（${tag}）` : ""} —— ${stale.detail}；` +
+      "**没有**记为本轮裁决，本轮仍在等自己的 report。",
+    );
   }
   if (input.stateLine !== undefined && input.stateLine.trim().length > 0) {
     lines.push(`- 当前状态：${input.stateLine.trim()}`);

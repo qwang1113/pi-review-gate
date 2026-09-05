@@ -207,8 +207,10 @@ import {
   planAuditHash,
 } from "../lib/orchestrator-plan-audit.ts";
 import {
+  roundBindingFor,
   runAuditRound,
   settleAuditRound,
+  type RoundBinding,
   type RunAuditRoundDeps,
   type SettleAuditRoundDeps,
 } from "../lib/audit-round.ts";
@@ -4609,12 +4611,26 @@ export default function reviewGate(pi: ExtensionAPI) {
       const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
       const projection = projectChannel(read.records);
       const freshQuestions = (projection.openRequests ?? []).filter((q) => !announcedRequestIds.has(q.requestId));
-      const obs = probeJudgeRound(deps, { openerId: entry.openerId, judgeId, paneId: entry.paneId }, entry.lastReportId);
+      // The sweep probes with the SAME binding the recorder will apply, so it
+      // can no longer wake the agent about a round the recorder refuses to
+      // close (2026-09-05).
+      const obs = probeJudgeRound(
+        deps,
+        { openerId: entry.openerId, judgeId, paneId: entry.paneId },
+        entry.lastReportId,
+        roundBindingOf({ judgeId, role: entry.role, repoRoot: entry.repoRoot ?? primaryRepoRoot }),
+      );
       if (!obs.done || obs.reason !== "report") {
-        // No new report: announce only brand-new questions (once each).
+        // No new report: announce only brand-new questions (once each) — and,
+        // when one goes out, say which leftover report was set aside with it.
         for (const q of freshQuestions) {
           announcedRequestIds.add(q.requestId);
-          notices.push(buildStandardReport({ role: entry.role, judgeId, openQuestions: [{ title: q.title, options: q.options, requestId: q.requestId }] }));
+          notices.push(buildStandardReport({
+            role: entry.role,
+            judgeId,
+            openQuestions: [{ title: q.title, options: q.options, requestId: q.requestId }],
+            ...(obs.notThisRound === undefined ? {} : { notThisRound: obs.notThisRound }),
+          }));
         }
         continue;
       }
@@ -4668,6 +4684,36 @@ export default function reviewGate(pi: ExtensionAPI) {
     log: (message) => log(message),
   };
 
+  /** `checkpoint.at` of one repo — the content stamp a review verdict binds to. */
+  function checkpointAtFor(root: string): string | undefined {
+    const st = root === primaryRepoRoot ? state : stateForRepo(root);
+    return st.checkpoint?.at;
+  }
+
+  /**
+   * THIS round's report binding, derived ONCE and handed to both readers.
+   *
+   * The recorder (`settleAuditRound`) and the probe (`judge_wait`, the settle
+   * sweep) have to agree on "is this report this round's?", and while they did
+   * not, a leftover reviewer report ended the wait as a READY that the recorder
+   * then bound to a commit the reviewer never saw (four reproductions,
+   * 2026-09-05). The RULE lives in lib/audit-round.ts; this only supplies the
+   * three facts it needs from THIS session — the pending audit kind, the round
+   * this dispatch registered, and the repo's checkpoint stamp.
+   */
+  function roundBindingOf(judge: { judgeId: string; role: string; repoRoot: string }): RoundBinding {
+    const roundSeq = judgeHierarchy[judge.judgeId]?.roundSeq;
+    const pendingKind = pendingAudits.get(judge.repoRoot)?.kind;
+    const checkpointAt = checkpointAtFor(judge.repoRoot);
+    return roundBindingFor({
+      role: judge.role,
+      ...(pendingKind === undefined ? {} : { pendingKind }),
+      ...(roundSeq === undefined ? {} : { roundSeq }),
+      ...(checkpointAt === undefined ? {} : { checkpointAt }),
+    });
+  }
+
+
   /**
    * WHAT THE AUDIT-ROUND ENGINE NEEDS FROM THIS SESSION.
    *
@@ -4710,6 +4756,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       pendingAudit: (root) => pendingAudits.get(root),
       forgetPending: (root) => dropAudits(root),
       nowIso: () => new Date().toISOString(),
+      checkpointAt: (root) => checkpointAtFor(root),
       savePlanAudit: (root, record) => {
         const st = root === primaryRepoRoot ? state : stateForRepo(root);
         st.planAudit = record;
@@ -5130,6 +5177,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     },
     announcedQuestions: () => announcedRequestIds,
     markQuestionsAnnounced: (ids) => { for (const id of ids) announcedRequestIds.add(id); },
+    // The wait reads the round through the SAME binding the recorder applies.
+    roundBinding: (child) => roundBindingOf(child),
 
     // The wait closes its round through the SAME engine the settle path uses,
     // so a report cannot be recorded twice (one cursor, written in one place).

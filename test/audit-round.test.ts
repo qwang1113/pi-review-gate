@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import {
   describeRoundMiss,
   runAuditRound,
+  roundBindingFor,
   selectRoundReport,
   settleAuditRound,
   type AuditRoundEntry,
@@ -31,13 +32,20 @@ import type { ChannelRecord, ChannelReportRecord, ReportConclusion } from "../li
 import type { PlanAuditRecord } from "../lib/orchestrator-plan-audit.ts";
 
 const NOW = "2026-09-05T12:00:00.000Z";
+/** The checkpoint this round reviews — an hour BEFORE the reports above. */
+const CHECKPOINT_AT = "2026-09-05T11:00:00.000Z";
 const ROOT = "/work/pi-review-gate";
 
-function childReport(reportId: string, opts: { round?: number; verdict?: string } = {}): ChannelRecord {
+function childReport(
+  reportId: string,
+  opts: { round?: number; verdict?: string; at?: string | undefined } = {},
+): ChannelRecord {
   return {
     kind: "report",
     from: "child",
-    at: NOW,
+    // `{ at: undefined }` is passed on purpose by the fail-closed cases: a
+    // report with no usable stamp must be refused, not defaulted.
+    at: "at" in opts ? (opts.at as string) : NOW,
     reportId,
     ...(opts.round === undefined ? {} : { round: opts.round }),
     verdict: opts.verdict ?? "BLOCKED",
@@ -77,15 +85,15 @@ test("selectRoundReport: the P0 — an older round's BLOCKED never closes a resu
   const records = [childReport("rep-round-1", { round: 1 })];
   assert.deepEqual(
     selectRoundReport(records, { binding: "round-bound", expectedRound: 2, consumedReportId: "rep-round-1" }),
-    { ok: false, reason: "round-mismatch", reportId: "rep-round-1", round: 1 },
+    { ok: false, reason: "round-mismatch", reportId: "rep-round-1", round: 1, at: NOW, expectedRound: 2 },
     "a consumed report from ANOTHER round is refused as a round mismatch, not as a consumed one",
   );
 });
 
-// The same cell for a CURSOR-ONLY kind, where the answer is deliberately
-// different: a code review has no round binding at all, so its consumed report
-// is refused for being consumed. Pinning both keeps the per-kind difference
-// visible instead of looking like an inconsistency.
+// The same cell for a CURSOR-ONLY kind (advice), where the answer is
+// deliberately different: an adviser's round has no round binding at all, so
+// its consumed report is refused for being consumed. Pinning both keeps the
+// per-kind difference visible instead of looking like an inconsistency.
 test("selectRoundReport: a cursor-only kind refuses that same report as consumed", () => {
   const records = [childReport("rep-round-1", { round: 1 })];
   assert.deepEqual(
@@ -115,7 +123,7 @@ test("selectRoundReport: an unconsumed report from another round is still a miss
   const records = [childReport("rep-round-1", { round: 1 })];
   assert.deepEqual(
     selectRoundReport(records, { binding: "round-bound", expectedRound: 2, consumedReportId: undefined }),
-    { ok: false, reason: "round-mismatch", reportId: "rep-round-1", round: 1 },
+    { ok: false, reason: "round-mismatch", reportId: "rep-round-1", round: 1, at: NOW, expectedRound: 2 },
   );
 });
 
@@ -160,9 +168,10 @@ test("selectRoundReport: entries that pre-date round numbering fall back to the 
   assert.equal(selected.ok, true);
 });
 
-// The review path has ALWAYS bound on the cursor alone. Making it round-bound
-// would be a semantics change smuggled in by a refactor, so the binding is
-// per kind and this pins the difference.
+// Advice binds on the cursor alone — nothing records it, so there is no
+// verdict a stale report could misbind. The review path used to share this
+// binding and no longer does (see the review section below); the per-kind
+// difference is pinned on both sides.
 test("selectRoundReport: a cursor-only kind ignores the round number entirely", () => {
   const records = [childReport("rep-round-1", { round: 1 })];
   const selected = selectRoundReport(records, {
@@ -182,9 +191,181 @@ test("selectRoundReport: a cursor-only kind still refuses its own consumed repor
   );
 });
 
-test("describeRoundMiss names the round it actually saw", () => {
-  assert.match(describeRoundMiss({ reason: "round-mismatch", round: 3 }), /第 3 轮/);
+// ---------- the review binding: round AND content, both fail-closed ----------
+
+/**
+ * THE FOUR MEASURED MISBINDINGS (2026-09-05, one session).
+ *
+ * Each is a reviewer report that landed while the agent was still editing, was
+ * never delivered, and was then adopted as the NEXT round's verdict — binding a
+ * READY to a commit that reviewer never saw. The invariant they all break is
+ * the same one line: the report was stamped BEFORE the checkpoint of the round
+ * it got recorded against.
+ */
+const MEASURED_MISBINDINGS: ReadonlyArray<{ report: string; checkpoint: string }> = [
+  { report: "2026-09-05T01:46:14.000Z", checkpoint: "2026-09-05T01:49:10.000Z" },
+  { report: "2026-09-05T02:23:16.000Z", checkpoint: "2026-09-05T02:24:26.000Z" },
+  { report: "2026-09-05T02:35:10.000Z", checkpoint: "2026-09-05T02:36:06.000Z" },
+  { report: "2026-09-05T02:37:39.000Z", checkpoint: "2026-09-05T02:38:45.000Z" },
+];
+
+test("review binding: every measured misbinding is refused as stale content", () => {
+  MEASURED_MISBINDINGS.forEach((m, i) => {
+    // The ROUND matches on purpose here: this pins the CONTENT half on its own,
+    // so a later refactor cannot delete it and still pass on the round check.
+    const selected = selectRoundReport(
+      [childReport(`rep-${i + 1}`, { round: 4, verdict: "READY", at: m.report })],
+      { binding: "round-and-content", expectedRound: 4, consumedReportId: undefined, contentAt: m.checkpoint },
+    );
+    assert.equal(selected.ok, false, `misbinding #${i + 1} must not close the round`);
+    assert.equal(selected.ok === false && selected.reason, "stale-content");
+    assert.equal(selected.ok === false && selected.at, m.report, "the miss names the report it refused");
+    assert.equal(selected.ok === false && selected.contentAt, m.checkpoint);
+  });
+});
+
+test("review binding: a report stamped after this round's checkpoint closes it", () => {
+  const selected = selectRoundReport(
+    [childReport("rep-fresh", { round: 4, verdict: "READY", at: "2026-09-05T01:50:40.419Z" })],
+    {
+      binding: "round-and-content",
+      expectedRound: 4,
+      consumedReportId: undefined,
+      contentAt: "2026-09-05T01:49:10.000Z",
+    },
+  );
+  assert.equal(selected.ok, true, "the faithful timeline is recorded — zero false positives");
+  assert.equal(selected.ok && selected.report.reportId, "rep-fresh");
+});
+
+test("review binding: equal stamps are refused — strictly newer, not 'not older'", () => {
+  const selected = selectRoundReport([childReport("rep-tie", { round: 1, at: CHECKPOINT_AT })], {
+    binding: "round-and-content",
+    expectedRound: 1,
+    consumedReportId: undefined,
+    contentAt: CHECKPOINT_AT,
+  });
+  assert.equal(selected.ok === false && selected.reason, "stale-content");
+});
+
+// NO FALLBACK BETWEEN THE TWO HALVES (user decision, 2026-09-05). A stamp that
+// clears the checkpoint says nothing about which round the report closes: the
+// judge re-reads the registered round when it concludes, so a report from the
+// previous round can be arbitrarily fresh.
+test("review binding: a round mismatch is refused even when the stamp is fresh", () => {
+  const selected = selectRoundReport([childReport("rep-prev", { round: 3, verdict: "READY", at: NOW })], {
+    binding: "round-and-content",
+    expectedRound: 4,
+    consumedReportId: undefined,
+    contentAt: CHECKPOINT_AT,
+  });
+  assert.equal(selected.ok === false && selected.reason, "round-mismatch");
+  assert.equal(selected.ok === false && selected.round, 3);
+  assert.equal(selected.ok === false && selected.expectedRound, 4);
+});
+
+test("review binding: a report with no round of its own never closes a round", () => {
+  const selected = selectRoundReport([childReport("rep-legacy", { at: NOW })], {
+    binding: "round-and-content",
+    expectedRound: 4,
+    consumedReportId: undefined,
+    contentAt: CHECKPOINT_AT,
+  });
+  assert.equal(selected.ok === false && selected.reason, "round-mismatch");
+});
+
+test("review binding: an unregistered round fails closed instead of trusting the stamp", () => {
+  const selected = selectRoundReport([childReport("rep-1", { round: 4, at: NOW })], {
+    binding: "round-and-content",
+    expectedRound: undefined,
+    consumedReportId: undefined,
+    contentAt: CHECKPOINT_AT,
+  });
+  assert.equal(selected.ok === false && selected.reason, "round-unknown");
+});
+
+test("review binding: a missing or unusable stamp on EITHER side fails closed", () => {
+  const base = { binding: "round-and-content" as const, expectedRound: 4, consumedReportId: undefined };
+  const noReportStamp = selectRoundReport([childReport("rep-1", { round: 4, at: undefined })], {
+    ...base,
+    contentAt: CHECKPOINT_AT,
+  });
+  assert.equal(noReportStamp.ok === false && noReportStamp.reason, "content-unknown");
+  const unparseable = selectRoundReport([childReport("rep-2", { round: 4, at: "昨天下午" })], {
+    ...base,
+    contentAt: CHECKPOINT_AT,
+  });
+  assert.equal(unparseable.ok === false && unparseable.reason, "content-unknown");
+  // No checkpoint on record at all — the user's call: refuse, do not fall back
+  // to the round alone.
+  const noCheckpoint = selectRoundReport([childReport("rep-3", { round: 4, at: NOW })], {
+    ...base,
+    contentAt: undefined,
+  });
+  assert.equal(noCheckpoint.ok === false && noCheckpoint.reason, "content-unknown");
+});
+
+test("review binding: its own consumed report is still just 'already recorded'", () => {
+  // The settle sweep re-observes the round it just recorded on every pass. That
+  // must stay SILENT (the engine drops the text for this reason), or every
+  // sweep would nag about a verdict that is already on record.
+  const selected = selectRoundReport([childReport("rep-4", { round: 4, at: NOW })], {
+    binding: "round-and-content",
+    expectedRound: 4,
+    consumedReportId: "rep-4",
+    contentAt: CHECKPOINT_AT,
+  });
+  assert.deepEqual(selected, { ok: false, reason: "already-consumed", reportId: "rep-4" });
+});
+
+test("roundBindingFor: only the review kind carries a content stamp", () => {
+  assert.deepEqual(roundBindingFor({ role: "reviewer", roundSeq: 3, checkpointAt: CHECKPOINT_AT }), {
+    binding: "round-and-content",
+    expectedRound: 3,
+    contentAt: CHECKPOINT_AT,
+  });
+  // A goal or plan audit runs before any checkpoint exists — handing it the
+  // content stamp (or refusing it for the lack of one) would strand the first
+  // audit of every session.
+  assert.deepEqual(roundBindingFor({ role: "goal-auditor", pendingKind: "goal", roundSeq: 3, checkpointAt: CHECKPOINT_AT }), {
+    binding: "round-bound",
+    expectedRound: 3,
+    contentAt: undefined,
+  });
+  assert.deepEqual(roundBindingFor({ role: "goal-auditor", pendingKind: "plan", roundSeq: 3 }), {
+    binding: "round-bound",
+    expectedRound: 3,
+    contentAt: undefined,
+  });
+  assert.deepEqual(roundBindingFor({ role: "adviser", roundSeq: 3, checkpointAt: CHECKPOINT_AT }), {
+    binding: "cursor-only",
+    expectedRound: 3,
+    contentAt: undefined,
+  });
+  // No spec (a goal-auditor with nothing pending): the probe keeps its old
+  // cursor-only behaviour, and the RECORDER never gets this far — it refuses
+  // the round for having no kind to record against.
+  assert.equal(roundBindingFor({ role: "goal-auditor" }).binding, "cursor-only");
+});
+
+
+test("describeRoundMiss names both sides of whatever did not match", () => {
+  assert.match(describeRoundMiss({ reason: "round-mismatch", round: 3, expectedRound: 4 }), /第 3 轮/);
+  assert.match(describeRoundMiss({ reason: "round-mismatch", round: 3, expectedRound: 4 }), /第 4 轮/);
   assert.match(describeRoundMiss({ reason: "no-report" }), /还没有本轮 report/);
+  assert.match(describeRoundMiss({ reason: "round-unknown", reportId: "rep-1" }), /roundSeq/);
+  // The stale-content sentence has to carry BOTH stamps: it is the one a human
+  // checks against the channel file and the gate state.
+  const stale = describeRoundMiss({
+    reason: "stale-content",
+    reportId: "rep-1",
+    at: "2026-09-05T01:46:14.000Z",
+    contentAt: "2026-09-05T01:49:10.000Z",
+  });
+  assert.match(stale, /rep-1/);
+  assert.match(stale, /01:46:14/);
+  assert.match(stale, /01:49:10/);
+  assert.match(describeRoundMiss({ reason: "content-unknown", reportId: "rep-1" }), /无法比对/);
 });
 
 // ---------- which spec a round runs under ----------
@@ -213,6 +394,11 @@ interface FakeState {
   reviewRounds: number;
   /** undefined = "could not record right now" (no usable tool context). */
   recordResult: string | undefined;
+  /**
+   * `checkpoint.at` of the repo — the content stamp a REVIEW verdict must be
+   * newer than. Default: an hour before the reports, i.e. a healthy round.
+   */
+  checkpointAt: string | undefined;
 }
 
 function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps: SettleAuditRoundDeps } {
@@ -226,6 +412,7 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     goalDrafts: [],
     reviewRounds: 0,
     recordResult: "recorded",
+    checkpointAt: CHECKPOINT_AT,
     ...over,
   };
   const deps: SettleAuditRoundDeps = {
@@ -244,6 +431,7 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     // synchronous chain walks after its wait recorded the round (reviewer P1).
     forgetPending: (root) => { state.forgotten.push(root); state.pending = undefined; },
     nowIso: () => NOW,
+    checkpointAt: () => state.checkpointAt,
     savePlanAudit: (_root, record) => { state.planRecords.push(record); },
     recordGoal: async ({ pending }) => {
       state.goalDrafts.push(pending.draft);
@@ -278,6 +466,74 @@ test("settle/review: the round is recorded and its cursor consumed exactly once"
   // Silence, not a fail-closed notice: it IS recorded, just not by this call.
   assert.equal(second.status === "miss" && second.text, undefined);
   assert.equal(state.reviewRounds, 1, "one report, one record");
+});
+
+// THE P0 AT THE RECORDING LEVEL (2026-09-05). The selector tests above pin the
+// rule; these pin that the RECORDER obeys it — nothing written, nothing
+// forgotten, cursor untouched, and the agent told which report was set aside.
+test("settle/review: a report older than this round's checkpoint records NOTHING", async () => {
+  const { state, deps } = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "reviewer", roundSeq: 2, lastReportId: undefined },
+    records: [childReport("rep-stale", { round: 2, verdict: "READY", at: "2026-09-05T01:46:14.000Z" })],
+    checkpointAt: "2026-09-05T01:49:10.000Z",
+  });
+  const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(settled.status, "miss");
+  assert.equal(settled.status === "miss" && settled.reason, "stale-content");
+  const text = settled.status === "miss" ? settled.text ?? "" : "";
+  assert.match(text, /rep-stale/, "the refusal names the report it did not adopt");
+  assert.match(text, /01:49:10/, "…and the checkpoint it was measured against");
+  assert.equal(state.reviewRounds, 0, "a leftover verdict is never recorded");
+  assert.deepEqual(state.cursors, [], "and it is not consumed either — it stays in the channel");
+});
+
+test("settle/review: a round mismatch records nothing, with no fallback to the stamp", async () => {
+  const { state, deps } = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "reviewer", roundSeq: 3, lastReportId: undefined },
+    // Stamped AFTER the checkpoint — the content half would have let this pass.
+    records: [childReport("rep-prev", { round: 2, verdict: "READY", at: NOW })],
+  });
+  const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(settled.status === "miss" && settled.reason, "round-mismatch");
+  assert.equal(state.reviewRounds, 0);
+  assert.deepEqual(state.cursors, []);
+});
+
+test("settle/review: no checkpoint on record refuses the verdict (fail-closed)", async () => {
+  const { state, deps } = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "reviewer", roundSeq: 2, lastReportId: undefined },
+    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
+    checkpointAt: undefined,
+  });
+  const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(settled.status === "miss" && settled.reason, "content-unknown");
+  assert.equal(state.reviewRounds, 0);
+});
+
+// SCOPED TO THE REVIEW KIND. A goal or plan audit is dispatched before this
+// session has ever checkpointed anything; if the content rule reached it, the
+// first audit of every session would wait forever.
+test("settle/goal: an audit is unaffected by the absence of a checkpoint", async () => {
+  const { state, deps } = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
+    pending: { kind: "goal", draft: "# 目标草稿", startedAt: NOW },
+    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
+    checkpointAt: undefined,
+  });
+  const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(settled.status === "recorded" && settled.kind, "goal");
+  assert.deepEqual(state.goalDrafts, ["# 目标草稿"]);
+});
+
+test("settle/advice: an adviser round is unaffected by the absence of a checkpoint", async () => {
+  const { state, deps } = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "adviser", roundSeq: 2, lastReportId: "rep-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "" })],
+    checkpointAt: undefined,
+  });
+  const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(settled.status, "advice");
+  assert.deepEqual(state.cursors, ["rep-2"]);
 });
 
 test("settle/goal: the verdict is recorded against the draft the gate dispatched", async () => {

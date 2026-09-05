@@ -23,10 +23,13 @@ import {
   judgeChannelTarget,
   type ChannelIO,
 } from "../lib/orchestrator-channel.ts";
+import type { RoundBinding } from "../lib/audit-round.ts";
 
 const ROOT = "/repo";
 const HOME = "/home/test";
 const OPENER = "session-child-1";
+/** A minute before the reports below — the checkpoint THIS round reviews. */
+const CHECKPOINT_AT = new Date(1_700_000_000_000 - 60_000).toISOString();
 
 interface Fake {
   deps: JudgeSessionToolDeps;
@@ -44,6 +47,14 @@ interface Fake {
   recorded: Array<{ text: string; root: string; role: string }>;
   /** The newest report written into the fake channel — what the engine consumes. */
   lastReportId: string | undefined;
+  /**
+   * THIS round's binding, exactly as the extension derives it for a reviewer:
+   * round 1, and a checkpoint stamped a minute BEFORE the reports below.
+   *
+   * The default is faithful on purpose — a wait that probed with a laxer rule
+   * than the recorder is the defect these tests exist for.
+   */
+  binding: RoundBinding;
 }
 
 function child(overrides: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
@@ -74,6 +85,11 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     announced: new Set<string>(),
     recorded: [] as Array<{ text: string; root: string; role: string }>,
     lastReportId: undefined as string | undefined,
+    binding: {
+      binding: "round-and-content",
+      expectedRound: 1,
+      contentAt: CHECKPOINT_AT,
+    } as RoundBinding,
   };
   const io: ChannelIO = {
     ensureDir() {},
@@ -110,6 +126,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     now: () => 1_700_000_000_000,
     readText: (path) => state.files.get(path),
     announcedQuestions: () => state.announced,
+    roundBinding: () => state.binding,
     markQuestionsAnnounced: (ids) => {
       state.calls.push(`markQuestionsAnnounced(${ids.join(",")})`);
       for (const id of ids) state.announced.add(id);
@@ -191,11 +208,29 @@ function channelWriter(f: Fake): ChannelIO {
   };
 }
 
-function writeReport(f: Fake, c: JudgeChildRecord, verdict: string, reportId = "rep-1"): void {
+function writeReport(
+  f: Fake,
+  c: JudgeChildRecord,
+  verdict: string,
+  reportId = "rep-1",
+  over: { round?: number; at?: string } = {},
+): void {
   appendRecord(
     channelWriter(f),
     channelOf(c),
-    { kind: "report", from: "child", at: new Date(1_700_000_000_000).toISOString(), reportId, verdict, findingsCount: 0, summary: `{"gate":"${verdict}","findings":[]}` },
+    {
+      kind: "report",
+      from: "child",
+      at: over.at ?? new Date(1_700_000_000_000).toISOString(),
+      reportId,
+      // A real judge stamps the round it read from the registry at conclude
+      // time; the default here is THIS round, so the healthy path stays the
+      // default and a stale one has to be asked for explicitly.
+      round: over.round ?? 1,
+      verdict,
+      findingsCount: 0,
+      summary: `{"gate":"${verdict}","findings":[]}`,
+    },
   );
   f.lastReportId = reportId;
 }
@@ -420,17 +455,41 @@ test("judge_wait: a stranger cannot wait on another opener's round", async () =>
 test("the round probe: a new report ends it, a dead pane fails it, silence pends it", () => {
   const f = fake();
   const c = seed(f);
-  assert.deepEqual(probeJudgeRound(f.deps, c, undefined), {
+  assert.deepEqual(probeJudgeRound(f.deps, c, undefined, f.binding), {
     done: false, reason: "pending", stateLine: "unknown（自 —）", openQuestions: [],
   });
   writeReport(f, c, "BLOCKED", "rep-9");
-  assert.deepEqual(probeJudgeRound(f.deps, c, undefined), {
+  assert.deepEqual(probeJudgeRound(f.deps, c, undefined, f.binding), {
     done: true, reason: "report", reportId: "rep-9", verdict: "BLOCKED", findingsCount: 0, openQuestions: [],
   });
-  assert.deepEqual(probeJudgeRound(f.deps, c, "rep-9").done, false, "a consumed report does not re-end the probe");
+  assert.deepEqual(probeJudgeRound(f.deps, c, "rep-9", f.binding).done, false, "a consumed report does not re-end the probe");
   f.panes = ["%1"];
   const dead = { ...c };
-  assert.deepEqual(probeJudgeRound(f.deps, dead, "rep-9"), { done: true, reason: "pane-dead", openQuestions: [] });
+  assert.deepEqual(probeJudgeRound(f.deps, dead, "rep-9", f.binding), { done: true, reason: "pane-dead", openQuestions: [] });
+});
+
+// THE PROBE AND THE RECORDER ANSWER THE SAME QUESTION (2026-09-05). While they
+// did not, a leftover reviewer report ended the round HERE — the wait printed
+// "本轮已有 channel report：结论 READY" — and the recorder then bound that
+// verdict to a commit the reviewer never saw.
+test("the round probe: a report older than this round's checkpoint does NOT end it", () => {
+  const f = fake();
+  const c = seed(f);
+  writeReport(f, c, "READY", "rep-stale", { at: new Date(1_700_000_000_000 - 120_000).toISOString() });
+  const obs = probeJudgeRound(f.deps, c, undefined, f.binding);
+  assert.equal(obs.done, false, "the round is still open — the recorder would refuse this report");
+  assert.equal(obs.notThisRound?.reportId, "rep-stale");
+  assert.match(obs.notThisRound?.detail ?? "", /早|不晚于/, "and the reason travels with it");
+});
+
+test("the round probe: a report from an earlier round does NOT end it either", () => {
+  const f = fake();
+  const c = seed(f);
+  writeReport(f, c, "READY", "rep-prev", { round: 0 });
+  const obs = probeJudgeRound(f.deps, c, undefined, f.binding);
+  assert.equal(obs.done, false);
+  assert.equal(obs.notThisRound?.reportId, "rep-prev");
+  assert.match(obs.notThisRound?.detail ?? "", /不是本轮/);
 });
 
 test("the wait probe: the round's criteria first, then question, then finding", () => {
@@ -461,6 +520,40 @@ test("the wait probe: the round's criteria first, then question, then finding", 
   writeReport(f, c, "READY", "rep-3");
   assert.equal(probeJudgeWait(f.deps, c, cursors).reason, "report", "a finished round outranks both");
 });
+
+// ITEM 2 OF THE ROUND-4 TASK, pinned as its own case. The ordering inside
+// `probeJudgeWait` already put a finished round ahead of a finding — this test
+// exists so a refactor cannot quietly invert it: an opener told "2 new
+// findings" while its verdict is already on disk goes back to fixing code and
+// walks straight into the next submission.
+test("the wait probe: this round's conclusion outranks findings that arrived with it", () => {
+  const f = fake();
+  const c = seed(f, { streamPath: "/logs/stream.jsonl" });
+  const cursors = { reportId: undefined, findingCount: 0, announcedQuestions: new Set<string>() };
+  f.files.set(
+    "/logs/stream.jsonl",
+    JSON.stringify({ severity: "P2", issue: "naming" }) + "\n" + JSON.stringify({ severity: "P2", issue: "wording" }),
+  );
+  writeReport(f, c, "READY", "rep-7");
+  const obs = probeJudgeWait(f.deps, c, cursors);
+  assert.equal(obs.reason, "report", "a finished round is the strongest message in one probe");
+  assert.equal(obs.verdict, "READY");
+  assert.equal(obs.seenFindingCount, 2, "the findings are still counted — the cursor must advance past them");
+});
+
+test("judge_wait: a leftover report keeps the round open and is named in the reply", async () => {
+  const f = fake();
+  const c = seed(f);
+  writeReport(f, c, "READY", "rep-stale", { at: new Date(1_700_000_000_000 - 120_000).toISOString() });
+  const reply = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });
+  const text = textOf(reply);
+  assert.match(text, /未采纳的 report：rep-stale/, "the wake-up names what it set aside");
+  assert.match(text, /仍在等/, "…and says the round is still open");
+  assert.doesNotMatch(text, /结论：READY/, "a verdict nobody recorded is never displayed as this round's");
+  assert.equal(f.calls.some((c2) => c2.startsWith("settleRound")), false, "and nothing is recorded");
+  assert.deepEqual(reply.details, { done: false, reason: "pending", role: "reviewer", hasVerdict: false });
+});
+
 
 test("stream findings still arrive newest-last, malformed lines dropped", () => {
   const f = fake();
