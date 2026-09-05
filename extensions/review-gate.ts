@@ -1713,6 +1713,22 @@ export default function reviewGate(pi: ExtensionAPI) {
    * the edit gate reads it. Allowed ⇒ this session takes the claim.
    */
   function applySessionExclusivity(ctx?: ExtensionContext): void {
+    // `normal` is the mode whose DEFINING behavior is that the gate is off:
+    // both the edit guard and the bash ship gate return before any of this can
+    // bite (lib/ship-gate-edit-guard.ts, lib/ship-gate-bash.ts). So a refusal
+    // here would be theatre — a message that names a rule the session is not
+    // subject to (reviewer P2, 2026-09-05).
+    //
+    // It still takes the CLAIM, though: a normal session shares the worktree
+    // and writes the same sidecar, so the sessions that DO enforce need to
+    // know it is here.
+    if (state.taskMode === "normal") {
+      delete state.exclusivityRefusal;
+      stopExclusivityRecheck();
+      if (claimsMainSidecar(process.env)) holdWorktree();
+      return;
+    }
+
     const verdict = checkSessionExclusivity({
       env: process.env,
       sessionId: state.sessionId,
@@ -1721,15 +1737,47 @@ export default function reviewGate(pi: ExtensionAPI) {
       now: Date.now(),
     });
     if (!verdict.ok) {
+      // Announce it ONCE (the re-check below runs on a timer), then keep
+      // watching: the refusal PROMISES that closing the other session is
+      // enough, so it has to be able to come back on its own. Without this the
+      // user does exactly what the message says and stays blocked until they
+      // restart the session — the refusal would be lying (reviewer P2).
+      if (state.exclusivityRefusal !== verdict.reason) {
+        try { ctx?.ui.notify(verdict.reason, "error"); } catch { /* headless */ }
+      }
       state.exclusivityRefusal = verdict.reason;
-      try { ctx?.ui.notify(verdict.reason, "error"); } catch { /* headless */ }
+      startExclusivityRecheck();
       return;
     }
+    const wasRefused = state.exclusivityRefusal !== undefined;
     delete state.exclusivityRefusal;
+    stopExclusivityRecheck();
+    if (wasRefused) {
+      try { ctx?.ui.notify("review-gate: 占用这个 worktree 的会话已消失，门禁正常启动，本会话接管这个 worktree。", "info"); }
+      catch { /* headless */ }
+    }
     // A judge / orchestration child does not claim the worktree, so it must
     // not write a heartbeat either — its own presence would refuse the very
     // session that opened it.
     if (claimsMainSidecar(process.env)) holdWorktree();
+  }
+
+  /** The refused session's own watch — the only way its refusal can lift. */
+  let exclusivityRecheckTimer: ReturnType<typeof setInterval> | undefined;
+
+  function startExclusivityRecheck(): void {
+    if (exclusivityRecheckTimer) return;
+    exclusivityRecheckTimer = setInterval(
+      () => { try { applySessionExclusivity(lastUiCtx); } catch { /* next tick retries */ } },
+      PRESENCE_HEARTBEAT_MS,
+    );
+    // Never hold the process open just to watch somebody else's heartbeat.
+    exclusivityRecheckTimer.unref?.();
+  }
+
+  function stopExclusivityRecheck(): void {
+    if (exclusivityRecheckTimer) clearInterval(exclusivityRecheckTimer);
+    exclusivityRecheckTimer = undefined;
   }
 
 
@@ -3980,6 +4028,22 @@ export default function reviewGate(pi: ExtensionAPI) {
       // gate's own commit now fails closed exactly like the agent's own
       // `git commit` does. To checkpoint, work on a feature branch.
       const here = currentBranch(root);
+      // ANOTHER live session holds this worktree ⇒ no commit, of any kind.
+      //
+      // This is the gate's OWN commit path, and it does `git add -A` with the
+      // hooks silenced — so a refused session would sweep the HOLDER's
+      // uncommitted work into a commit and move HEAD under it. The agent's own
+      // `git commit` is already refused (unmetRequirements), which is exactly
+      // why this one has to be too: a rule the gate enforces on the agent and
+      // then breaks on its own behalf is not a rule (reviewer P1, 2026-09-05).
+      if (state.exclusivityRefusal) {
+        return {
+          content: [{ type: "text", text: state.exclusivityRefusal }],
+          details: { committed: false },
+          isError: true,
+        };
+      }
+
       if (here && isProtectedBranch(here)) {
         return {
           content: [{ type: "text", text: `review-gate: checkpoint 拒绝 — 不能在受保护分支 ${here} 上提交（checkpoint 也是 commit）。请先切到功能分支（如 git checkout -b <branch>）再 checkpoint。` }],
@@ -6322,6 +6386,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     // The directory is created with the file: the goal is the first thing a
     // session writes into .pi/, so its parent may not exist yet.
     writeGoalFile: (path, text) => {
+      // Same rule as every other gate-state write: a session another one holds
+      // this worktree against must not overwrite `.pi/loop-goal.md` — the
+      // holder's approved goal is bound by hash, so replacing the file would
+      // invalidate the approval it already earned (reviewer P1, 2026-09-05).
+      if (state.exclusivityRefusal) throw new Error(state.exclusivityRefusal);
       mkdirSync(pathDirname(path), { recursive: true });
       writeFileSync(path, text, "utf8");
     },
@@ -6972,7 +7041,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       // every settle, forever, with nothing left to reclaim it (reviewer P2,
       // 2026-09-05). Announced once is the contract; `judge_recover` still
       // finds the entry, because the entry itself is deliberately kept.
-      if (announcedTerminated.has(c.judgeId) && !judgeLive(c, paneList, tmuxServer)) continue;
+      if (announcedTerminated.has(c.judgeId)) {
+        // A judge that is ALIVE again (re-dispatched over its pane, or
+        // recovered into a new one) has a future, so its next death is news
+        // again. Self-healing on the liveness we already computed, rather than
+        // a clear() at each of the several places that revive a judge — the
+        // set would otherwise only grow, and this session would go silent
+        // about that judge forever (reviewer P2, 2026-09-05).
+        if (judgeLive(c, paneList, tmuxServer)) announcedTerminated.delete(c.judgeId);
+        else continue;
+      }
       childSnapshots.push({
         title: c.title,
         sessionId: c.judgeId,
@@ -7374,6 +7452,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     // refused never wrote one, and deleting the holder's record on the way out
     // would hand a live worktree to somebody else.
     releaseWorktree();
+    // …and stop watching somebody else's heartbeat (a refused session's timer).
+    stopExclusivityRecheck();
 
     // Judge children are independent pi processes — they survive the session
     // by design (their session files persist, so a fresh session can resume

@@ -3216,8 +3216,13 @@ test("waiting for Copilot spends its OWN continuation budget, not the review loo
   // and the session would run out of continuations before fixing anything.
   assert.match(SRC, /let completionContinuations = 0/);
   assert.match(SRC, /COMPLETION_CONTINUATION_CAP/);
-  const settledStart = SRC.indexOf('pi.on("agent_settled"');
-  const body = SRC.slice(settledStart, settledStart + 11000); // + the judge-verdict hook, pane snapshots and the judge-pane return
+  // Anchored to the NEXT handler registration, not a character count: the old
+  // `+ 11000` had to be re-tuned by every edit inside the settle path, and it
+  // fails for a reason that has nothing to do with this rule (the same trap
+  // the declare_done window fell into, 2026-09-05).
+  const body = windowOf('pi.on("agent_settled"', /\n  pi\.on\(/, "agent_settled handler");
+  assert.match(body, /unmetRequirements\(/, "window sanity: the settle body really is in this window");
+  assert.doesNotMatch(body, /pi\.on\("session_start"/, "…and it stopped at the next handler");
   assert.match(body, /problems\.length > 0 && continuationsInjected >= state\.maxRounds/);
   assert.match(body, /problems\.length === 0 && completionContinuations >= COMPLETION_CONTINUATION_CAP/);
 });
@@ -4686,6 +4691,34 @@ test("ONE gate session per worktree: refuse, hold, release — and only ONE live
   assert.match(SRC, /releaseWorktree\(\);/, "shutdown lets go");
   const release = codeOnly(windowOf("function releaseWorktree(", /\n  \}\n/, "release body"));
   assert.match(release, /presenceIsOurs\(/, "…and never deletes another session's claim");
+
+  // The gate's OWN writes are refused too. These are the paths the agent
+  // cannot reach directly, which is exactly why they were missed: the ship
+  // gate refuses the agent's `git commit`, while the gate's own checkpoint
+  // does `git add -A` with hooks silenced, and propose_loop_goal writes
+  // .pi/loop-goal.md (reviewer P1, 2026-09-05).
+  const checkpoint = codeOnly(toolBodyOf("review_checkpoint"));
+  // The commit is located by its ARGV alone. Spelling the spawn itself would
+  // make test/hermetic-git.test.ts read this file as one that runs git (it
+  // detects on raw text, by design) — and this file never runs anything.
+  const ADD_ALL = '["add", "-A"]';
+  assert.ok(checkpoint.includes(ADD_ALL), "window sanity: this really is the body that commits");
+  const ckRefusalAt = checkpoint.indexOf("state.exclusivityRefusal");
+  const addAt = checkpoint.indexOf(ADD_ALL);
+  assert.ok(ckRefusalAt > 0 && ckRefusalAt < addAt,
+    "a refused session must be stopped BEFORE the gate's own commit sweeps the holder's work");
+  const goalWrite = codeOnly(windowOf("writeGoalFile: (path, text) => {", /\n    \},/, "goal file writer"));
+  assert.match(goalWrite, /state\.exclusivityRefusal/,
+    "…and before overwriting the holder's approved goal file");
+
+  // The refusal must be able to LIFT on its own: its own text promises that
+  // closing the other session is enough, so a re-check has to exist.
+  assert.match(apply, /startExclusivityRecheck\(\)/, "a refused session keeps watching");
+  assert.match(SRC, /function startExclusivityRecheck\(\)/, "…on a timer it owns");
+  assert.match(SRC, /stopExclusivityRecheck\(\);/, "…which is stopped when it lifts and at shutdown");
+  // normal = the gate is off by definition; a refusal there could not bite.
+  assert.match(apply, /state\.taskMode === "normal"/,
+    "normal mode takes the claim but is not refused (the guards short-circuit before it)");
 
   // 哲学三: the OLD "another session wrote this sidecar within 4h" warning is
   // gone. Two definitions of "a session is alive" is one too many.

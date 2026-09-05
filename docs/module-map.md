@@ -371,7 +371,12 @@ sidecar」的会话，判定在 `session-exclusivity.ts`（心跳文件 `.pi/ses
 由 `unmetRequirements`（所有 ship 路径共用的那个权威）变成拦截，同时该会话
 **不写**这份 sidecar（它属于占用者）。judge 会话与编排子会话不占用主 sidecar
 （前者不写门禁状态、后者写自己的 `RG_STATE_VARIANT` 分片），因此天然豁免——
-它们本来就与 opener 跑在同一个 worktree 里。
+它们本来就与 opener 跑在同一个 worktree 里。被拒会话的写面**全部**堵住：
+edit/write、ship、门禁自己的 checkpoint 提交（它会 `add -A`，不堵就会把占用者
+未提交的工作一起提交掉）、以及 `.pi/loop-goal.md` 的写入（goal 批准绑 hash，
+覆盖会让占用者已获批的 goal 失配）。唯一的例外是 `normal` 模式——那个模式的
+定义就是门禁整体关闭（edit guard 与 ship gate 都在更早处短路），所以那里不发
+拒绝，但仍写心跳让别人看见。占用者消失后由定时复检自动解除，不必重开会话。
 
 > **落点**：新的状态字段 → `gate-state.ts`（并想清楚它是否该进指纹）；
 > 新的项目级开关 → `project-config.ts`；**任何**状态文件写入都要走
@@ -551,7 +556,7 @@ fail-closed）。`model-diagnose.ts`
 | `sensitive-grant.ts` | 敏感文件的一次性用户授权：限定路径、限时、用后即焚 |
 | `session-revival.ts` | 存活不变量（2026-08-30）：会话在退出契约未满足时停下，门禁就周期性唤醒它。纯判定：看不见续跑预算与 loop-stall 断路器（它们管注入路径，管不了「停下」），但尊重人的叫停（ESC / ask_user / bypass / 仲裁 pause）与 handoff 交接 |
 | `session-dir.ts` | pi 的 session-dir 编码约定，fresh-context 角色据此找到主会话 transcript |
-| `session-exclusivity.ts` | 一个 worktree 只允许一个「占用主 sidecar」的会话：心跳存在文件（`.pi/session-presence.json`）判活，第二个占用者 fail-closed 拒绝（edit/write 与 ship 全拦），judge 与编排子会话因为不写主 sidecar 而天然豁免。裁决输入只有心跳新鲜度，`pid`/`host` 仅作诊断（与 `blocked-marker.ts` 同口径）；一切未知（文件缺失/损坏/时钟异常）一律放行 |
+| `session-exclusivity.ts` | 一个 worktree 只允许一个「占用主 sidecar」的会话：心跳存在文件（`.pi/session-presence.json`）判活，第二个占用者 fail-closed 拒绝——拦 edit/write、拦 ship、连门禁自己的 checkpoint 提交与 goal 文件写入一并拦（`normal` 模式除外：那个模式的定义就是门禁整体关闭，但它仍写心跳，好让会 enforce 的会话看见它）。judge 与编排子会话因为不写主 sidecar 而天然豁免。裁决输入只有心跳新鲜度，`pid`/`host` 仅作诊断（与 `blocked-marker.ts` 同口径）；一切未知（文件缺失/损坏/时钟异常）一律放行，占用者消失后自动复检解除 |
 | `side-effects.ts` | 唯一一处「本进程能不能碰外部世界」的判定（测试 / CI / 无 TTY / 显式关闭一律不能），通知与编排共用 |
 | `shell-lex.ts` | 最小的引号感知 shell 词法器，命令类判定的共同底座 |
 | `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit） |
