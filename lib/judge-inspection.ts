@@ -138,6 +138,15 @@ export const GATE_OWNED_PATH_MARKERS: readonly string[] = Object.freeze([
   "rg-channels/",
 ]);
 
+/**
+ * Shortest own-file BASENAME that may be matched on its own.
+ *
+ * The gate's own names (`task-2026-…-ab12cd.md`) are far longer than this; the
+ * floor only keeps a pathologically short one (`t.md`) from excluding half the
+ * repository by coincidence.
+ */
+const MIN_OWN_BASENAME = 8;
+
 
 /** Shell commands that print file content. */
 const READ_COMMANDS: ReadonlySet<string> = new Set([
@@ -262,7 +271,15 @@ export function touchesGateOwnedPath(
   }
   for (const own of ownPaths) {
     const path = own.trim();
-    if (path && text.includes(path)) return true;
+    if (!path) continue;
+    if (text.includes(path)) return true;
+    // …and by BASENAME, because a directory is only in the command until
+    // somebody changes into it: `cd <session dir> && cat task-….md` carries no
+    // marker at all. These names are minted by the gate
+    // (`task-<iso>-<hex>.md`, `review-<id>-review.jsonl`), so matching them is
+    // not a guess about ordinary file names.
+    const base = path.split("/").pop() ?? "";
+    if (base.length >= MIN_OWN_BASENAME && text.includes(base)) return true;
   }
   return false;
 }

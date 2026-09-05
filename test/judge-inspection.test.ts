@@ -133,6 +133,21 @@ test("THE PROBE, exactly: reading only its own task is not inspecting anything",
   }, { ownPaths: own });
   assert.equal(mixed.actions, 0, "an under-count refuses an honest round; it never passes a probe");
 
+  // A directory marker only helps while the directory is still in the command:
+  // `cd <session dir> && cat task-….md` carries none, so the gate's own file
+  // NAMES are matched too (they are minted by the gate, not guessed).
+  const afterCd = observeInspection(emptyInspection(), {
+    toolName: "bash",
+    input: { command: "cat task-2026-09-05T10-00-00-000Z-ab12cd.md" },
+  }, { ownPaths: own });
+  assert.equal(afterCd.actions, 0, "the task file is the task file under any prefix");
+  // An ordinary repository file with a similar-looking name still counts.
+  const realRead = observeInspection(emptyInspection(), {
+    toolName: "bash",
+    input: { command: "cat lib/judge-inspection.ts" },
+  }, { ownPaths: own });
+  assert.equal(realRead.actions, 1);
+
   assert.equal(touchesGateOwnedPath({ toolName: "read", input: { path: "/repo/lib/a.ts" } }, own), false);
   assert.equal(touchesGateOwnedPath({ toolName: "read", input: { path: taskPath } }, own), true);
   assert.equal(touchesGateOwnedPath({ toolName: "bash", input: {} }, own), false, "no strings, nothing to match");
