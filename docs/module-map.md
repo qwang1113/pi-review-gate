@@ -419,7 +419,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `hooks/` | L3 纵深防御：`pre-commit`（校验 sidecar 与指纹、跑标签扫描与暂存分叉检查）、`pre-push`（同一套 + full lane 要求）、`commit-msg`（AI 署名 + L5 英文，覆盖编辑器里写的 message） | 新增一条**离开 pi 也必须成立**的检查；bash 写成，不能 import TypeScript |
 | `scripts/` | 跑得起来的执行体：`precommit-runner.mjs`（确定性质量门）、`precommit-plan.mjs`（纯规划，可单测）、`precommit-cache.mjs`（按输入摘要缓存每步）、`precommit-config.mjs`（读 `.pi/review-gate.json` 的 precommit 段）、`compute-fingerprint.cjs`（钩子用的指纹，镜像 `lib/fingerprint.ts`）、`check-staged-divergence.cjs`、`scan-test-labels.cjs`（L6）、`install-git-hooks.sh`、`install-package.mjs` | **新增一条 precommit 检查**（改 runner + plan）；新增钩子要用的、不能依赖 TypeScript 的逻辑（CJS/MJS） |
 | `agents/` | 四个角色定义：`reviewer`、`adviser`、`goal-auditor`、`arbiter`。frontmatter 是模型链、thinking、工具集的**单一事实源** | **新增或调整一个 judge 角色**：先改这里的 md，模型链由 `lib/model-config.ts` 渲染/校验 |
-| `skills/` | `skills/review-loop`：随包分发给 pi 的技能，描述审查循环怎么跑 | 面向**使用者**的操作指南（而不是门禁自身的判定）放这里 |
+| `skills/` | 随包分发给 pi 的技能（`package.json` 的 `files` 含 `skills/`，pi 直接从包里加载，因此写在这里就等于全局可用——**不要**再往 `~/.pi/agent/skills/` 手抄副本，那会漂移）。四个：`skills/review-loop` 描述审查循环怎么跑；`skills/orchestrating-child-sessions` 项目经理编排子会话的陷阱；`skills/gate-changes-and-tests` 改门禁共享实现与写测试的经验；`skills/worktree-edit-discipline` 工作区与编辑工具的操作纪律 | 面向**使用者 / agent 操作**的指南（而不是门禁自身的判定）放这里；新增一个 skill 目录时同一轮改这一格 |
 
 ---
 
