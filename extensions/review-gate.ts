@@ -2173,11 +2173,17 @@ export default function reviewGate(pi: ExtensionAPI) {
    * done should verify the plan reached it" reads like an obvious gap. It is
    * not, for a reason this repo has already paid for once:
    *
-   *  - a project manager writes no code (constraint 2), so its `sessionRepos`
-   *    is empty and it has no worktree to be clean or dirty;
-   *  - the arrival evidence — a `gh pr create` the gate watched succeed, or a
-   *    Copilot-resolved PR number — is recorded in the CHILD's sidecar, in the
-   *    child's repo. The manager cannot read it and never will.
+   *  - a project manager DOES have a repo (`sessionRepos` always holds the
+   *    primary one) — but it is the ORCHESTRATION repo, where constraint 2
+   *    lets it write nothing except the plan and its handoff docs. Whether
+   *    THAT worktree is clean says nothing about whether the orchestration
+   *    reached its station; a couple of uncommitted plan notes would read as
+   *    "did not arrive", which is a fact about the wrong repo;
+   *  - the arrival evidence — a `gh pr create` the gate watched succeed
+   *    (`shippedKinds`), or a Copilot-resolved PR number — is written in the
+   *    sidecar of the repo the ship ran in, i.e. a CHILD's repo. This function
+   *    walks the MANAGER's own repos, so it can never see it.
+
    *
    * So an orchestration with `deliveryStation: "pr"` would be held at
    * `declare_done` by a condition it can NEVER satisfy, while the receipt
