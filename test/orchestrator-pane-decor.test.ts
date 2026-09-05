@@ -35,6 +35,7 @@ import {
   PANE_PALETTE,
 } from "../lib/orchestrator-pane-decor.ts";
 import { assertSafeTmuxArgv, buildHidePaneLabelsArgv, buildShowPaneLabelsArgv } from "../lib/orchestrator-tmux.ts";
+import { parsePlan } from "../lib/orchestrator-plan.ts";
 
 test("a child's colour is a pure function of its id — same child, same colour, forever", () => {
   const first = paneColorFor("t1-mtf5kc1z");
@@ -155,15 +156,40 @@ test("close takes the window bar down before killing the pane, and only then", a
   assert.ok(unsets.every((line) => !line.includes(child.paneId)), "…not through the pane being killed");
 });
 
-test("a sibling CHILD keeps its pane, and the scheduler is why one repo never has two", async () => {
-  // The bar is shared by every pane in the window, so a close must not take it
-  // down while a sibling is still labelled. At the TOOL level that case only
-  // arises across repos: inside one repo the scheduler serializes children, so
-  // a second live child pane cannot exist — asserted here so the gap in the
-  // tool-level coverage is a stated fact rather than an oversight. The
-  // judgement itself (`releasesWindowLabels` + `countDecoratedPanes`, siblings
-  // of BOTH kinds) is unit-tested in test/session-factory.test.ts, and the
-  // review-pane half of it is exercised on the tool below.
+test("close leaves the window bar up while a SIBLING CHILD is still on screen", async () => {
+  // The other half of the same expression (reviewer P2, 2026-09-05: pinning the
+  // judge half alone left this one free to be zeroed). Two live child panes
+  // only happen ACROSS repos — inside one repo the scheduler serializes them —
+  // so the plan declares two, which is also the only shape where a manager
+  // really can be closing one child while another is still labelled.
+  const plan = parsePlan({
+    title: "跨仓库计划",
+    intent: "两个仓库各一个任务，可以并行",
+    tasks: [
+      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/repo" },
+      { id: "t2", title: "任务二", fileBoundaries: ["src/"], repo: "/other/repo" },
+    ],
+  });
+  assert.ok(plan.plan, plan.problems.join("; "));
+  const world = makeFakeWorld({
+    plan: plan.plan!,
+    approvePlan: true,
+    resolvableRepos: ["/repo", "/other/repo"],
+  });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  assert.equal(second.isError, undefined, replyText(second));
+  const [first, sibling] = world.runtime().children;
+  assert.ok(sibling, "two children in two repos run at once — that is the case under test");
+
+  await world.call("orchestrator_close", { childId: first!.id });
+
+  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.deepEqual(unsets, [], "the sibling's border is still labelled: the bar stays up");
+});
+
+test("close in one repo cannot even meet a second live child — the scheduler serializes", async () => {
+  // Why the test above has to cross repos, asserted rather than assumed.
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
   await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "done" });
