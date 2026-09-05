@@ -5,13 +5,13 @@ description: 项目经理（orchestrator）编排子会话时的三处已实测�
 
 # 编排子会话
 
-三条都来自 2026-09-04/05 的真实编排轮次，每条都带可自查的现场证据。它们的共同形状是：**门禁的读数与现实之间隔着一层**，照读数直接行动会做出错误的指令。
+三条都来自 2026-09-05 的真实编排轮次，每条都带可自查的现场证据。它们的共同形状是：**门禁的读数与现实之间隔着一层**，照读数直接行动会做出错误的指令。
 
 ## 1. 子会话说收尾了，门禁却显示 PENDING —— 先查三项，再开口
 
 子会话报告「已收尾」，PM 去看门禁却是 `review: PENDING` / `precommit: NOT_RUN`，于是读成「它根本没通过审查」，用 `orchestrator_instruct` 催它重做——而子会话真去重做时，门禁自己会拒绝它。**这是一次「照门禁说的做反而出事」**。
 
-**触发源不是 `declare_done`。** `declare_done` 只**复检**每一道门禁（`extensions/review-gate.ts:5800` 起的处理体：非 git 短路、逐 repo 复检），它不重置任何东西。真正把 READY 打下去的是**拿到 READY 之后的任何一次编辑**——`invalidateBindings`（`lib/gate-state.ts:428`）自述得很清楚：
+**触发源不是 `declare_done`。** `declare_done`（`extensions/review-gate.ts:5800` 起）会复检每一道门禁、清掉本任务的轮次与续跑预算、写下 completion 记录——但它**不碰 `state.review` / `state.precommit`**，也就是不动裁决本身。真正把 READY 打下去的是**拿到 READY 之后的任何一次编辑**——`invalidateBindings`（`lib/gate-state.ts:428`）自述得很清楚：
 
 > Content-change invalidation — the **ONE place** a session's own edit downgrades standing bindings. READY → PENDING and PASS → NOT_RUN, and the fingerprint goes with the verdict.
 
@@ -66,7 +66,7 @@ sidecar 在 `.pi/review-gate-state.<child-task-id>.json`。三项全中，就**�
 - `extensions/review-gate.ts:4125` — `"review-gate: 本轮未送审 — prepare_review 被拒。\n" + toolText(prepared)`
 - 同类还有 `:4082`（precommit 未过）与 `:4107`（checkpoint 被拒）
 
-所以 `lib/review-prepare-tools.ts`、`lib/advisory-prepare-tools.ts` 属于注入面。2026-09-04 的一份 plan 第一版就漏掉了它们，被 plan 审计员报 **P1**。`test/extension-structure.test.ts` 里那条「every tool name in agent-readable text is a tool that EXISTS」的测试把这层写进了注释，并明说「narrowing the scan is not an available fix」。
+所以 `lib/review-prepare-tools.ts`、`lib/advisory-prepare-tools.ts` 属于注入面。2026-09-05 的一份 plan 第一版就漏掉了它们，被 plan 审计员报 **P1**。`test/extension-structure.test.ts` 里那条「every tool name in agent-readable text is a tool that EXISTS」的测试把这层写进了注释，并明说「narrowing the scan is not an available fix」。
 
 ### 同一条的第二个形态：文档里逐项枚举目录内容的表格
 
@@ -107,7 +107,7 @@ return {
 
 ### 实证
 
-2026-09-04，一位 PM 两次需要改 note（改口径、审计打回后补三条 findings），**两次都靠换新 task id 才落盘**：`t2-message-driven-wait` → `t2-msg-driven-wait-c2` → `t2-msg-driven-wait-r2`。
+2026-09-05，一位 PM 两次需要改 note（改口径、审计打回后补三条 findings），**两次都靠换新 task id 才落盘**：`t2-message-driven-wait` → `t2-msg-driven-wait-c2` → `t2-msg-driven-wait-r2`。
 
 ### 代价：换 id 会触发重新批准
 

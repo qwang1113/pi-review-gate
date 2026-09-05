@@ -74,7 +74,7 @@ if (calls > 100) throw new Error("awaitRoundReport spun: the minimum gap is gone
 
 ### 实证
 
-`agentVisibleTools()`（`test/extension-structure.test.ts:2443`）初版漏掉了一批真实注册的工具（2026-09-04 的复盘记为 7 个；该计数未经逐一复核，机制则可在下列补偿处直接读到），三个原因在最终实现里各留下一处补偿：
+`agentVisibleTools()`（`test/extension-structure.test.ts:2443`，随 `c074b86` 引入）初版漏掉了一批真实注册的工具（当时的复盘记为 7 个；该计数未经逐一复核，但下列三处补偿本身可以直接读到），三个原因在最终实现里各留下一处补偿：
 
 - **多行参数截断了窗口** → 正则放宽成 `pi\.registerTool\(\{\s*\n?\s*name: "([a-z_]+)"`；
 - **链式注册**（一个 registrar 里再调下一个）→ 用 `queue` 做广度遍历；
