@@ -34,6 +34,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TaskMode } from "./task-mode.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
+import { composeWithUntrustedData } from "./untrusted-data.ts";
 
 /** Repo-root-relative location of the goal file (gate-excluded via `.pi/`). */
 export const LOOP_GOAL_RELPATH = ".pi/loop-goal.md";
@@ -184,13 +185,11 @@ export function formatGoalPrereviewCarryover(prev: GoalPrereviewRecord): string 
           ...findings.map((f) => `  - ${f.severity}: ${f.issue}`),
         ]
       : ["- The previous audit reported no findings — confirm that still holds."]),
+    // The previous draft is AGENT-authored text, so it does NOT ride inside
+    // this gate-authored block any more (round 5): buildGoalAuditTask puts it
+    // in the untrusted data region, after the instructions.
     ...(prev.draft
-      ? [
-          "- The PREVIOUS draft (judged then):",
-          "```",
-          prev.draft,
-          "```",
-        ]
+      ? ["- The PREVIOUS draft (judged then) is in the <previous_goal_draft> data block below."]
       : []),
     "- Also tell the auditor what changed in the draft since that audit.",
   ];
@@ -246,26 +245,17 @@ export function buildGoalAuditTask(
     sessionId?: string;
   } = {},
 ): string {
-  const lines = [
-    "You are goal-auditor. Audit the draft loop goal below as the exit contract for this session.",
+  // ORDER MATTERS (round 5, 2026-09-05). Everything the GATE wrote comes
+  // first; the draft, the previous draft and the mechanical delta — all
+  // agent-authored — follow as untrusted data blocks, because a draft that
+  // opens the task frames the audit before the auditor has read its job.
+  const instructions = [
+    "You are goal-auditor. Audit the draft loop goal in the data block below as the exit contract for this session.",
     "",
     "You run in your own tmux pane (same deterministic session id across rounds): your own session, with none of the main",
     "repository and the transcript pointer below.",
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
-    "===== 待审计的 goal 草稿 =====",
-    draft,
-    ...(opts.prevDraft
-      ? (() => {
-          const { removed, added } = diffDraftLines(opts.prevDraft!, draft);
-          const parts: string[] = [];
-          if (removed.length) parts.push("Removed lines:", ...removed.map((l) => `  - ${l}`));
-          if (added.length) parts.push("Added lines:", ...added.map((l) => `  + ${l}`));
-          if (!parts.length) parts.push("(no line-level changes detected)");
-          return ["", "===== 与上一版草稿的机械差异 (diff vs previous draft) =====", ...parts, ""];
-        })()
-      : []),
-    "",
     "审计标准: 退出标准是否可检查(falsifiable)、是否覆盖用户核心诉求、Non-goals 是否明确、有无内部矛盾或与仓库现状冲突的表述。",
     ...(opts.sessionDir && opts.sessionId
       ? [
@@ -281,8 +271,34 @@ export function buildGoalAuditTask(
     "输出纪律:交卷即停 —— 调完 judge_conclude 就结束本轮,不写复述、不写自评、不写过程说明。",
     "",
     JUDGE_COMPLETION_DISCIPLINE,
-  ];
-  return lines.join("\n");
+  ].join("\n");
+  return composeWithUntrustedData(instructions, [
+    { tag: "goal_draft", label: "===== 待审计的 goal 草稿 =====", text: draft },
+    ...(opts.prevDraft
+      ? [
+          {
+            tag: "previous_goal_draft",
+            label: "===== 上一版草稿（上一轮审计判过的） =====",
+            text: opts.prevDraft,
+          },
+          {
+            tag: "goal_draft_delta",
+            label: "===== 与上一版草稿的机械差异 (diff vs previous draft) =====",
+            text: formatDraftDelta(opts.prevDraft, draft),
+          },
+        ]
+      : []),
+  ]);
+}
+
+/** The delta block's body: which lines the draft lost and gained. */
+function formatDraftDelta(prevDraft: string, draft: string): string {
+  const { removed, added } = diffDraftLines(prevDraft, draft);
+  const parts: string[] = [];
+  if (removed.length) parts.push("Removed lines:", ...removed.map((l) => `  - ${l}`));
+  if (added.length) parts.push("Added lines:", ...added.map((l) => `  + ${l}`));
+  if (!parts.length) parts.push("(no line-level changes detected)");
+  return parts.join("\n");
 }
 /**
  * Canonical form the hash is taken over: line endings unified and outer

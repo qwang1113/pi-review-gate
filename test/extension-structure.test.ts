@@ -4783,3 +4783,31 @@ test("ONE gate session per worktree: refuse, hold, release — and only ONE live
     "no session-recency judgement may be rebuilt from the sidecar's timestamp — liveness is the heartbeat");
 });
 
+/**
+ * Round 5 (2026-09-05) — the two judge tasks the EXTENSION assembles inline
+ * (the reviewer's note, the adviser's question) must go through the shared
+ * untrusted-data seam, not hand-rolled string concatenation.
+ *
+ * The seam's own ordering is proved by unit tests over the pure function
+ * (test/untrusted-data.test.ts); what those cannot see is whether these two
+ * call sites still use it, which is exactly how the old shape would come back.
+ */
+test("round 5: both inline judge-task assemblies go through the untrusted-data seam", () => {
+  const code = codeOnly(SRC);
+  assert.match(SRC, /import \{ composeWithUntrustedData \} from "\.\.\/lib\/untrusted-data\.ts"/,
+    "the extension imports the seam");
+  // Derivation self-proof: the pattern finds the call sites at all before its
+  // count means anything.
+  const calls = [...code.matchAll(/composeWithUntrustedData\(/g)];
+  assert.ok(calls.length > 0, "derivation sanity: the scan can see a call at all");
+  assert.equal(calls.length, 2, "exactly the reviewer note and the adviser question");
+  assert.match(code, /tag: "main_session_note"/, "the reviewer note is a labelled block");
+  assert.match(code, /tag: "main_session_question"/, "so is the adviser question");
+  // The pre-round-5 shape — agent text pasted BEFORE the gate's own task text
+  // — must be gone, not merely supplemented.
+  assert.doesNotMatch(code, /本轮改动说明（来自主会话）：\\n\$\{input\.note\}/,
+    "the reviewer note may not open the task any more");
+  assert.doesNotMatch(code, /你要回答的问题（来自主会话）：\\n\$\{task\}/,
+    "…nor may the adviser question");
+});
+

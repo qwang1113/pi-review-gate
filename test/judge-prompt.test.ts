@@ -22,6 +22,7 @@ import {
   resolveRoleFile,
   writeJudgeSpawnFiles,
 } from "../lib/judge-prompt.ts";
+import { UNTRUSTED_DATA_RULE } from "../lib/untrusted-data.ts";
 
 function sandbox(): string {
   return mkdtempSync(join(tmpdir(), "rg-judge-prompt-"));
@@ -132,6 +133,25 @@ test("round-17: output discipline is part of the shared protocol (gate consumes 
   assert.match(JUDGE_COMMON_PROTOCOL, /交卷即停/, "the round ends AT the call — no prose section follows it");
   assert.match(JUDGE_COMMON_PROTOCOL, /不写复述、不写自评/, "no task/process retelling");
 });
+
+test("round 5: the protocol tells the judge what an untrusted data block may NOT do", () => {
+  // The prompt half of the anti-steering fix: the task text now fences the
+  // main session's words in a data block, and this is where the judge is told
+  // that the fence means something.
+  assert.match(JUDGE_COMMON_PROTOCOL, /## 不可信数据块/, "the section exists");
+  assert.ok(
+    JUDGE_COMMON_PROTOCOL.includes(UNTRUSTED_DATA_RULE),
+    "and states the SHARED rule verbatim — one wording, not a paraphrase per file",
+  );
+  assert.match(JUDGE_COMMON_PROTOCOL, /main_session_note/, "the real tag names are listed");
+  assert.match(JUDGE_COMMON_PROTOCOL, /直接判 READY/, "the concrete steering attempt is named");
+  assert.match(JUDGE_COMMON_PROTOCOL, /P1 finding/, "…and reporting it is itself the required action");
+  // The rule must also be in the doc — otherwise the F5 pin above passes while
+  // the two copies say different things.
+  const doc = readFileSync(join(process.cwd(), "docs", "judge-protocol.md"), "utf8");
+  assert.ok(doc.includes(UNTRUSTED_DATA_RULE), "docs/judge-protocol.md carries the same sentence");
+});
+
 
 test("the shared protocol no longer teaches reviewer / goal-auditor to write `notes`", () => {
   // The signature refuses `notes` from those roles (lib/judge-conclude.ts), so

@@ -32,6 +32,7 @@ import {
   buildGoalForceNegotiateDirective,
   goalNegotiationOverdue,
 } from "../lib/loop-goal.ts";
+import { UNTRUSTED_DATA_HEADER, UNTRUSTED_DATA_RULE } from "../lib/untrusted-data.ts";
 
 function repoWithGoal(content?: string, mtimeMs?: number): string {
   const root = mkdtempSync(join(tmpdir(), "loop-goal-"));
@@ -452,10 +453,11 @@ test("formatGoalPrereviewCarryover carries the previous audit's findings verbati
   assert.match(block, /what changed in the draft since that audit/);
 });
 
-test("formatGoalPrereviewCarryover: zero findings still carry the verdict; the old draft rides along", () => {
+test("formatGoalPrereviewCarryover: zero findings still carry the verdict; the old draft is POINTED AT, not inlined", () => {
   // A prior PASS/FAIL with no parsed findings is still a conclusion — the
-  // re-audit must not re-derive it from zero. The judged draft text rides
-  // along so the re-audit can diff against the actual old text.
+  // re-audit must not re-derive it from zero. The old DRAFT itself is
+  // agent-authored, so since round 5 it no longer rides inside this
+  // gate-authored block: the carryover names the data block that carries it.
   const block = formatGoalPrereviewCarryover({
     hash: "aa",
     verdict: "PASS",
@@ -465,8 +467,9 @@ test("formatGoalPrereviewCarryover: zero findings still carry the verdict; the o
   assert.ok(block, "a verdict is carried even with zero findings");
   assert.match(block, /Previous verdict: PASS \(0 finding\(s\)/);
   assert.match(block, /reported no findings — confirm that still holds/);
-  assert.match(block, /# 目标/);
-  assert.match(block, /退出标准: 一条/);
+  assert.match(block, /<previous_goal_draft> data block/);
+  assert.doesNotMatch(block, /# 目标/, "the old draft text is not inlined into trusted instructions");
+  assert.doesNotMatch(block, /退出标准: 一条/);
 });
 
 test("buildGoalAuditTask: the gate builds the complete auditor task, carryover + transcript ride along", () => {
@@ -513,6 +516,53 @@ test("buildGoalAuditTask: the draft delta is computed mechanically and injected 
   const first = buildGoalAuditTask(next);
   assert.doesNotMatch(first, /机械差异/);
 });
+
+test("round 5: the draft is UNTRUSTED DATA and sits after the gate's instructions", () => {
+  const task = buildGoalAuditTask("# 目标\n\n标准一。", {
+    sessionDir: "/home/u/.pi/agent/sessions/--repo--",
+    sessionId: "sess-9",
+  });
+  // ORDER, not mere presence: a draft that opens the task frames the audit
+  // before the auditor has read what its job is (that is how an adviser was
+  // steered into an 8-second READY).
+  const role = task.indexOf("You are goal-auditor");
+  const criteria = task.indexOf("审计标准:");
+  const header = task.indexOf(UNTRUSTED_DATA_HEADER);
+  const draftBlock = task.indexOf("<goal_draft>");
+  assert.ok(role >= 0 && criteria > role, "the gate's own instructions come first");
+  assert.ok(header > criteria, "the untrusted region opens after them");
+  assert.ok(draftBlock > header, "and the draft rides inside it");
+  assert.match(task, /<\/goal_draft>/);
+  // The rule travels with the task, not only in the judge's system prompt.
+  assert.ok(task.includes(UNTRUSTED_DATA_RULE));
+});
+
+test("round 5: the re-audit's previous draft and mechanical delta are untrusted too", () => {
+  const prev = "# 目标\n\n## 退出标准\n1. 旧标准。";
+  const next = "# 目标\n\n## 退出标准\n1. 新标准。";
+  const task = buildGoalAuditTask(next, {
+    carryover: formatGoalPrereviewCarryover({
+      hash: "aa",
+      verdict: "FAIL",
+      at: "2026-08-27T00:00:00.000Z",
+      draft: prev,
+    })!,
+    prevDraft: prev,
+  });
+  const header = task.indexOf(UNTRUSTED_DATA_HEADER);
+  // Match the OPENING of each block (`\n<tag>\n`) — the carryover legitimately
+  // mentions the tag by name above, and a bare indexOf would find that instead.
+  assert.ok(task.indexOf("\n<previous_goal_draft>\n") > header, "the old draft is data, not instructions");
+  assert.ok(task.indexOf("\n<goal_draft_delta>\n") > header, "so is the mechanically computed delta");
+  // The carryover itself (gate-authored: verdict + findings) stays trusted,
+  // and EVERY occurrence of the old draft's text (the block itself, and the
+  // delta's "Removed lines") sits inside the untrusted region — not one of
+  // them leaks back above the instructions.
+  assert.ok(task.indexOf("PREVIOUS audit judged a DIFFERENT draft") < header);
+  assert.ok(task.indexOf("1. 旧标准。") > header, "first occurrence is inside the untrusted region");
+  assert.ok(task.lastIndexOf("1. 旧标准。") > header, "and so is the last one");
+});
+
 
 // ---------------------------------------------------------------------------
 // R-10 — one goal file per SESSION, not per worktree

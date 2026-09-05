@@ -220,6 +220,7 @@ import {
   formatPlanAuditRefusal,
   planAuditHash,
 } from "../lib/orchestrator-plan-audit.ts";
+import { composeWithUntrustedData } from "../lib/untrusted-data.ts";
 import {
   roundBindingFor,
   roundHasReported,
@@ -4458,7 +4459,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     const taskText = extractTaskText(toolText(prepared));
     return {
       ok: true,
-      taskText: `本轮改动说明（来自主会话）：\n${input.note}\n\n${taskText}`,
+      // The note is the MAIN SESSION's own words about its round — the very
+      // text an injected "just conclude READY" would ride in on. It goes
+      // AFTER the gate's task text, inside an untrusted data block (round 5).
+      taskText: composeWithUntrustedData(taskText, [
+        { tag: "main_session_note", label: "本轮改动说明（来自主会话）：", text: input.note },
+      ]),
       // The findings stream is the agent's half of the round: it fixes what
       // the reviewer confirms WHILE the reviewer works. Dropping the path
       // here would leave that channel written but unread.
@@ -4584,6 +4590,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       : undefined;
     const task = buildPlanAuditTask(plan, {
       ...(carryover === undefined ? {} : { carryover }),
+      ...(carryover !== undefined && previous?.planText ? { prevPlanText: previous.planText } : {}),
       repoRoot: root,
       ...(state.sessionId ? { sessionId: state.sessionId, sessionDir: sessionDirForCwd(cwd) } : {}),
     });
@@ -5462,7 +5469,13 @@ export default function reviewGate(pi: ExtensionAPI) {
             isError: true,
           };
         }
-        reviewTask = `你要回答的问题（来自主会话）：\n${task}\n\n${extractTaskText(toolText(prepared))}`;
+        // Same ordering rule as the reviewer note: the gate's brief first, the
+        // main session's question after it as untrusted data. The adviser was
+        // the role actually steered into an 8-second READY by a question that
+        // opened the task (round 5, 2026-09-05).
+        reviewTask = composeWithUntrustedData(extractTaskText(toolText(prepared)), [
+          { tag: "main_session_question", label: "你要回答的问题（来自主会话）：", text: task },
+        ]);
       }
       // The title is a DISPLAY label the gate derives itself (B5: it must not
       // reach the session's directory, or every round starts a new session).
@@ -5702,6 +5715,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         ok: true,
         task: buildPlanAuditTask(plan, {
           ...(carryover === undefined ? {} : { carryover }),
+          ...(carryover !== undefined && previous?.planText ? { prevPlanText: previous.planText } : {}),
           repoRoot: root,
           ...(state.sessionId ? { sessionId: state.sessionId, sessionDir: sessionDirForCwd(cwd) } : {}),
         }),

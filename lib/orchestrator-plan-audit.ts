@@ -45,6 +45,7 @@
 import { createHash } from "node:crypto";
 import { canonicalPlanText, formatPlanSummary, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
+import { composeWithUntrustedData } from "./untrusted-data.ts";
 /** One objection, exactly as the auditor concluded it. */
 export interface PlanAuditFinding {
   severity: string;
@@ -126,7 +127,12 @@ export function formatPlanAuditCarryover(prev: PlanAuditRecord): string {
           ...findings.map((f) => `  - ${f.severity}: ${f.issue}`),
         ]
       : ["- The previous audit reported no findings — confirm that still holds."]),
-    ...(prev.planText ? ["- The PREVIOUS plan (judged then):", "```", prev.planText, "```"] : []),
+    // The previous plan is ORCHESTRATOR-authored text: buildPlanAuditTask puts
+    // it in the untrusted data region after the instructions (round 5), so it
+    // no longer rides inside this gate-authored block.
+    ...(prev.planText
+      ? ["- The PREVIOUS plan (judged then) is in the <previous_plan> data block below."]
+      : []),
   ].join("\n");
 }
 
@@ -140,21 +146,28 @@ export function formatPlanAuditCarryover(prev: PlanAuditRecord): string {
  */
 export function buildPlanAuditTask(
   plan: OrchestratorPlan,
-  opts: { carryover?: string; sessionDir?: string; sessionId?: string; repoRoot?: string } = {},
+  opts: {
+    carryover?: string;
+    /** The plan the previous audit judged — rides as an untrusted block. */
+    prevPlanText?: string;
+    sessionDir?: string;
+    sessionId?: string;
+    repoRoot?: string;
+  } = {},
 ): string {
-  return [
+  // ORDER MATTERS (round 5, 2026-09-05): the gate's own instructions first,
+  // the orchestrator-authored plan text after them as untrusted data — a plan
+  // pasted above the checks frames the audit before the auditor knows its job.
+  const instructions = [
     "You are goal-auditor, this round auditing an ORCHESTRATION PLAN (not a loop goal).",
     "",
-    "The plan below is about to be shown to a HUMAN for approval. It decides what each child",
+    "The plan in the data block below is about to be shown to a HUMAN for approval. It decides what each child",
     "session may touch, in what order, and how many run at once — so a mistake here puts two",
     "writers in one file, or turns a serial chain into a race. You run in your own pane",
     "with read-only tools: CHECK THE PLAN AGAINST THE REPOSITORY, do not judge the prose.",
     ...(opts.repoRoot ? ["", `Repository: ${opts.repoRoot}`] : []),
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
-    "===== 待审计的 plan =====",
-    formatPlanSummary(plan),
-    "",
     "===== 审计要点（逐条回答，用仓库里的事实说话） =====",
     "1. 任务拆分是否完整：plan 的 intent 有没有哪一部分不属于任何任务？有没有任务其实是两件事？",
     "2. 文件边界是否覆盖真实落点：按仓库现状，每个任务真正要改的文件是否都在它的 fileBoundaries 内？",
@@ -193,6 +206,18 @@ export function buildPlanAuditTask(
     "",
     JUDGE_COMPLETION_DISCIPLINE,
   ].join("\n");
+  return composeWithUntrustedData(instructions, [
+    { tag: "plan", label: "===== 待审计的 plan =====", text: formatPlanSummary(plan) },
+    ...(opts.prevPlanText
+      ? [
+          {
+            tag: "previous_plan",
+            label: "===== 上一版 plan（上一轮审计判过的） =====",
+            text: opts.prevPlanText,
+          },
+        ]
+      : []),
+  ]);
 }
 
 /**

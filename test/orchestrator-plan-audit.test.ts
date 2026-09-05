@@ -20,9 +20,11 @@ import {
   adjudicatePlanAudit,
   planAuditHash,
   planAuditPassed,
+  formatPlanAuditCarryover,
   type PlanAuditFinding,
 } from "../lib/orchestrator-plan-audit.ts";
 import { parsePlan, type OrchestratorPlan } from "../lib/orchestrator-plan.ts";
+import { UNTRUSTED_DATA_HEADER, UNTRUSTED_DATA_RULE } from "../lib/untrusted-data.ts";
 
 const NOW = "2026-09-17T12:00:00.000Z";
 
@@ -77,6 +79,41 @@ test("the 7th check names the transcript location when sessionDir/sessionId are 
   assert.match(task, /\/tmp\/session-dir/);
   assert.match(task, /sess-123/);
 });
+
+test("round 5: the plan is UNTRUSTED DATA and sits after the gate's checks", () => {
+  const task = buildPlanAuditTask(planOf(), { repoRoot: "/work/pi-review-gate" });
+  // ORDER, not presence: the plan is orchestrator-authored text, and a plan
+  // pasted above the checks frames the audit before the auditor knows its job.
+  const role = task.indexOf("You are goal-auditor");
+  const checks = task.indexOf("===== 审计要点");
+  const header = task.indexOf(UNTRUSTED_DATA_HEADER);
+  const planBlock = task.indexOf("\n<plan>\n");
+  assert.ok(role >= 0 && checks > role, "the gate's own checks come first");
+  assert.ok(header > checks, "the untrusted region opens after them");
+  assert.ok(planBlock > header, "and the plan rides inside it");
+  assert.match(task, /<\/plan>/);
+  assert.ok(task.includes(UNTRUSTED_DATA_RULE), "the rule travels with the task");
+  // The plan's own text (its title) appears only inside the block.
+  assert.ok(task.indexOf("拆分 review-gate") > header);
+});
+
+test("round 5: a re-audit's previous plan is untrusted data, not carryover prose", () => {
+  const prev = {
+    hash: "aa",
+    verdict: "FAIL" as const,
+    at: NOW,
+    planText: "旧版 plan：任务 a 边界 lib/old",
+  };
+  const carryover = formatPlanAuditCarryover(prev);
+  assert.match(carryover, /<previous_plan> data block/, "the carryover points at the block");
+  assert.doesNotMatch(carryover, /lib\/old/, "…and does not inline the old plan itself");
+  const task = buildPlanAuditTask(planOf(), { carryover, prevPlanText: prev.planText });
+  const header = task.indexOf(UNTRUSTED_DATA_HEADER);
+  assert.ok(task.indexOf("\n<previous_plan>\n") > header);
+  assert.ok(task.indexOf("lib/old") > header, "the old plan text only appears inside the block");
+  assert.ok(task.indexOf("PREVIOUS audit judged a DIFFERENT version") < header, "the verdict carryover stays trusted");
+});
+
 
 test("adjudication: only P0/P1 block, and a READY with P2s passes", () => {
   const p1: PlanAuditFinding = { severity: "P1", issue: "任务书只写了『做分页』" };

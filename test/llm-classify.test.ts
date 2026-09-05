@@ -120,6 +120,26 @@ test("classifiers wrap the payload as <data> and use argv (never a shell string)
   assert.equal(capture.timeoutMs, LLM_GUARD_TIMEOUT_MS);
 });
 
+test("round 5: an over-long payload is truncated VISIBLY, not silently", async () => {
+  // BEHAVIOUR CHANGE, deliberate: this file used to cap the payload with no
+  // mark at all, so the classifier could be judging half an input and had no
+  // way to know. Since the wrapper is shared with the arbiter prompts
+  // (lib/untrusted-data.ts), truncation now shows as `…[truncated]` — the
+  // classifiers only judge language / AI attribution, so the mark changes no
+  // verdict. Pinned here so nobody later reads it as a stray artefact.
+  const capture: { argv?: readonly string[] } = {};
+  const c = createLlmClassifier(DEFAULT_LLM_GUARD_MODEL, fakeExec('{"ship":"none"}', capture));
+  await classifyShipCommand(c, "git status ".repeat(1000)); // > MAX_INPUT_CHARS (4000)
+  const question = capture.argv![capture.argv!.length - 1]!;
+  assert.match(question, /\u2026\[truncated\]\n<\/data>/, "the mark sits at the end of the data block");
+  // A short payload is NOT marked.
+  const short: { argv?: readonly string[] } = {};
+  const c2 = createLlmClassifier(DEFAULT_LLM_GUARD_MODEL, fakeExec('{"ship":"none"}', short));
+  await classifyShipCommand(c2, "git status");
+  assert.doesNotMatch(short.argv![short.argv!.length - 1]!, /truncated/);
+});
+
+
 test("SECURITY: classifier child is fully isolated (no extensions/skills/tools/context)", async () => {
   // Without these flags the child pi would reload review-gate itself — whose
   // guard call sites could spawn FURTHER classifier children (unbounded
