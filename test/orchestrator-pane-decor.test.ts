@@ -151,6 +151,14 @@ test("close takes the window bar down before killing the pane, and only then", a
   assert.ok(unset >= 0, "the window-level option this orchestration set must be undone");
   assert.ok(kill >= 0);
   assert.ok(unset < kill, "after kill-pane the pane id is no longer a valid setw target");
+  // AND the window is named by the ORCHESTRATOR'S OWN pane (%0), never by the
+  // child's (reviewer P2, 2026-09-05): `setw -t <pane>` uses the pane only to
+  // identify a window, and the pane being closed is exactly the id that may
+  // already be gone — a failed option write leaves the bar on for good.
+  const unsets = log.filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.equal(unsets.length, 2, "both options are restored");
+  assert.ok(unsets.every((line) => line.includes("-t %0")), "…through a pane that is provably alive");
+  assert.ok(unsets.every((line) => !line.includes(child.paneId)), "…not through the pane being killed");
 });
 
 test("the health snapshot names the same colour the border uses", async () => {

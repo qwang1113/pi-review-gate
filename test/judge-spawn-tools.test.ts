@@ -29,6 +29,10 @@ function setup(over: Partial<{
   panes: string[];
   table: HierarchyTable;
   pending?: "goal" | "plan";
+  /** True when this session is only a guest in someone else's orchestration. */
+  insideOrchestration?: boolean;
+  /** Make the plan bookkeeping fail, which rolls the whole spawn back. */
+  planRememberFails?: boolean;
 }> = {}): {
   deps: JudgeSpawnToolDeps;
   tools: Map<string, Exec>;
@@ -114,6 +118,9 @@ function setup(over: Partial<{
     // Instant: the delivery watch is a loop of sleeps, and a test must not
     // spend 30 real seconds proving that it stops at the first evidence.
     sleep: async () => {},
+    // A plain session by default: it owns its window's label bar, so a rolled
+    // back spawn takes the border line down with the pane it just opened.
+    insideOrchestration: () => over.insideOrchestration === true,
     resolveRepo: () => ({ ok: true as const, root: "/repo" }),
     launchConfig: () => ({ ok: true as const, model: "m", sysPromptPath: "/sp.md", sessionDir: "/sessions" }),
     buildGoalAuditTask: async (draft) => ({ ok: true as const, task: `AUDIT ${draft}`, streamPath: "/stream.jsonl" }),
@@ -121,7 +128,12 @@ function setup(over: Partial<{
     writeJudgeTaskFile: () => ({ ok: true as const, path: "/sessions/task-1.md" }),
     pendingAuditKind: () => store.pending,
     rememberGoalAudit: (_root, draft) => { store.draft = draft; store.pending = "goal"; },
-    rememberPlanAudit: () => { store.planRemembered = true; store.pending = "plan"; return { ok: true as const }; },
+    rememberPlanAudit: () => {
+      if (over.planRememberFails) return { ok: false as const, error: "plan 文件读不出来" };
+      store.planRemembered = true;
+      store.pending = "plan";
+      return { ok: true as const };
+    },
     forgetAudit: () => { delete store.pending; },
   };
   registerJudgeSpawnTools(host, deps);
@@ -285,6 +297,50 @@ test("spawn plan remembers the plan hash for adjudication", async () => {
   assert.equal(store.planRemembered, true);
   assert.equal(store.pending, "plan");
 });
+
+test("a rolled back spawn takes the window's border line back down with it", async () => {
+  // The pane it opened turned the WINDOW-level border line on (that is the C1
+  // fix). Rolling the spawn back has to undo that too, or a failed bookkeeping
+  // step leaves a permanent mark on the user's window — and the `setw` must be
+  // addressed through OUR pane, since the one being killed may already be gone.
+  const { tools, seen, store } = setup({ planRememberFails: true });
+  const result = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(result.isError, true);
+  assert.deepEqual(store.table, {}, "the registration is rolled back");
+  const flat = seen.map((a) => a.join(" "));
+  const unset = flat.filter((s) => s.startsWith("setw") && s.includes("-u"));
+  assert.equal(unset.length, 2, "both window options are restored");
+  assert.ok(unset.every((s) => s.includes("-t %1")), "…through the opener's own pane");
+  assert.ok(unset.every((s) => !s.includes("%7")), "…never through the pane being killed");
+});
+
+test("a rolled back spawn leaves the border line alone when a sibling judge is on screen", async () => {
+  const { tools, seen } = setup({
+    planRememberFails: true,
+    panes: ["%1", "%9"],
+    table: {
+      "rg-adviser-other": {
+        judgeId: "rg-adviser-other",
+        openerId: "session-child-1",
+        role: "adviser",
+        repoRoot: "/repo",
+        title: "adviser",
+        sessionDir: "/sessions",
+        paneId: "%9",
+        spawnedAt: new Date(1_700_000_000_000).toISOString(),
+      },
+    },
+  });
+  const result = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(result.isError, true);
+  const flat = seen.map((a) => a.join(" "));
+  // Only the UNSETS matter here: the spawn itself sets the two options on the
+  // way in (that is the C1 decoration), and a test that counted every `setw`
+  // would be asserting against its own setup.
+  assert.equal(flat.filter((s) => s.startsWith("setw") && s.includes("-u")).length, 0,
+    "a sibling still needs the border line it is labelled with");
+});
+
 
 test("a pending audit of the other kind blocks the spawn (no mis-binding)", async () => {
   const goalFirst = setup({ pending: "plan" });

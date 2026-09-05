@@ -43,12 +43,15 @@ import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
   closeSessionPane,
+  countDecoratedPanes,
   judgePaneDecor,
   openSessionPane,
   paneRecoverability,
+  releasesWindowLabels,
 } from "./session-factory.ts";
 import {
   judgePaneAlive,
+  listJudgePanes,
   type JudgePaneRunResult,
 } from "./judge-pane.ts";
 import { verifyJudgeBoot, channelRecordCount } from "./orchestrator-tool-kit.ts";
@@ -89,6 +92,12 @@ export interface JudgeSpawnToolDeps {
   now(): number;
   /** Injectable sleep, so the spawn's delivery check is testable without waiting. */
   sleep(ms: number): Promise<void>;
+  /**
+   * Does someone else own this window's label bar (an orchestration this
+   * session is only a guest in)? A guest never releases it — see
+   * `releasesWindowLabels`. Only the rollback path here asks.
+   */
+  insideOrchestration(): boolean;
   /** Which repo does this call target? Never guessed. */
   resolveRepo(requested: string | undefined): { ok: true; root: string } | { ok: false; error: string };
   /** Model + system prompt + transcript dir for one role in one repo. */
@@ -320,7 +329,26 @@ async function doSpawn(
   } else {
     const remembered = deps.rememberPlanAudit(root);
     if (!remembered.ok) {
-      try { closeSessionPane(deps.tmux, paneId); } catch { /* best effort */ }
+      // The pane we just opened turned the window's border line ON
+      // (`decorateSessionPane`), so undoing the spawn has to undo that too —
+      // unless a sibling judge is still on screen and needs it. Same judgement
+      // as `judge_close`, addressed through OUR pane because the one being
+      // killed is the id that may already be gone.
+      const others = countDecoratedPanes(
+        Object.values(deps.hierarchy())
+          .filter((entry) =>
+            entry.judgeId !== judgeId
+            && entry.openerId === caller
+            && Boolean(entry.paneId))
+          .map((entry) => entry.paneId!),
+        listJudgePanes(deps.tmux, ownPane),
+      );
+      const releases = releasesWindowLabels({
+        remainingDecoratedPanes: others,
+        insideOrchestration: deps.insideOrchestration(),
+      });
+      const closeOpts = releases ? { hideLabelsVia: ownPane } : {};
+      try { closeSessionPane(deps.tmux, paneId, closeOpts); } catch { /* best effort */ }
       rollback();
       return fail(`review-gate: plan 备案失败 —— ${remembered.error}`);
     }

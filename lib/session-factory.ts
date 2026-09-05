@@ -304,6 +304,27 @@ export function closeSessionPane(
 }
 
 /**
+ * How many of these decorated panes are still ON SCREEN.
+ *
+ * The registry outlives panes — one the user closed by hand is a row and
+ * nothing else — so "how many rows are there" is the wrong count for deciding
+ * whether the window's label bar may come down (it never would).
+ *
+ * An UNREADABLE pane list counts every candidate as present, and that
+ * direction is deliberate: keeping the bar up costs a stale border line that
+ * the next spawn re-establishes anyway, while taking it down over a live
+ * sibling blanks a border somebody is reading.
+ */
+export function countDecoratedPanes(
+  paneIds: readonly string[],
+  livePanes: readonly string[] | undefined,
+): number {
+  if (livePanes === undefined) return paneIds.length;
+  return paneIds.filter((id) => livePanes.includes(id)).length;
+}
+
+
+/**
  * May THIS close take the window's label bar down with it?
  *
  * WHY THE QUESTION EXISTS AT ALL. `pane-border-status` / `pane-border-format`

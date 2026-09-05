@@ -49,6 +49,7 @@ import {
 } from "./judge-pane.ts";
 import {
   closeSessionPane,
+  countDecoratedPanes,
   judgePaneLabel,
   refreshSessionPaneTitle,
   releasesWindowLabels,
@@ -565,13 +566,16 @@ async function doClose(deps: JudgeSessionToolDeps, params: Record<string, unknow
     // UNREADABLE pane list counts a sibling as present: keeping the bar is a
     // cosmetic cost, blanking a live sibling's border is a wrong answer.
     const livePanes = listJudgePanes(deps.tmux, ownPane);
-    const siblings = Object.values(deps.hierarchy()).filter((entry) =>
-      entry.judgeId !== judgeId
-      && entry.openerId === child.openerId
-      && Boolean(entry.paneId)
-      && paneClosable(entry, deps.tmuxServer())
-      && (livePanes === undefined || livePanes.includes(entry.paneId!)),
-    ).length;
+    const siblings = countDecoratedPanes(
+      Object.values(deps.hierarchy())
+        .filter((entry) =>
+          entry.judgeId !== judgeId
+          && entry.openerId === child.openerId
+          && Boolean(entry.paneId)
+          && paneClosable(entry, deps.tmuxServer()))
+        .map((entry) => entry.paneId!),
+      livePanes,
+    );
     const releases = releasesWindowLabels({
       // A project manager's live children are decorated panes too, and they
       // are the ones a premature release would blank.

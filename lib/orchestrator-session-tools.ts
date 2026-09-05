@@ -301,10 +301,12 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   // It is addressed through the ORCHESTRATOR'S OWN pane, not the dying child's
   // (reviewer P2, 2026-09-05): `setw -t <pane>` only names a window, and the
   // pane being closed is precisely the id that may already be gone.
-  const ownPane = deps.ownPane();
-  const releasesLabels = isLastDecoratedChild(runtime.children, child.id) && ownPane !== undefined;
+  // The orchestrator's own pane when it can read it, else the child's — the
+  // release itself must not become conditional on a diagnostic (that would
+  // trade a fixed defect for a new one: no pane read, no release, litter).
+  const labelsVia = deps.ownPane() ?? child.paneId;
   const killed = closeSessionPane(deps.tmux, child.paneId, {
-    ...(releasesLabels ? { hideLabelsVia: ownPane! } : {}),
+    ...(isLastDecoratedChild(runtime.children, child.id) ? { hideLabelsVia: labelsVia } : {}),
   });
   if (!killed.ok && !/can't find pane|no such pane/i.test(killed.error)) {
     return fail(`review-gate: 关闭 pane 失败 —— ${killed.error}`);

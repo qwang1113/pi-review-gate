@@ -280,7 +280,32 @@ judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫�
 | P2-G | 「env 里有 orchestration id ⇒ 我是子会话」对**接力继任者与 attach 接管者**不成立——它们是项目经理，却也带着这个变量，于是又落回「永不收」 | 新增判定 `labelBarOwnedByOthers()` = 带 id **且** 自己不是 orchestrator 模式；两处站点都改走它。**没有**去改已有的 `isOrchestrationChild()`（它回答的是「我是不是被派来干活的」，驱动子会话指令与模式守卫两处无关决策，扩宽它会顺带改掉那两处）。结构测试补第 3 段钉住「不能只读 env」 |
 | P2-H | 收 bar 的 `setw` 拿**正在关闭的那个 pane** 当 window 选择器；用户手动关掉 review pane 后再 judge_close / declare_done，这条 setw 直接失败被吞掉，bar 永久残留 | `closeSessionPane` 的选项从 `hideLabels: boolean` 改成 `hideLabelsVia: string`——传的是**用来指认窗口的 pane id**，三处调用方一律传**自己的 pane**（它必然活着，因为我们正跑在里面）。类型即约束：想收 bar 就必须说清楚用谁寻址。测试断言 `-t %1` 且不含 `%7` |
 
+第五轮追加两处（一条自查、一条 reviewer 流式给出）：
+- `orchestrator_close` 我一度写成「读不到自己的 pane 就不收 bar」，这是把已修的缺陷换成
+  一个新缺陷（诊断读不到 → 永久残留）。改成 `deps.ownPane() ?? child.paneId`：能用自己的
+  就用，用不了退回旧行为，释放本身不再取决于一个诊断量。
+- reviewer 指出 `orchestrator_close` 这一处的 `hideLabelsVia` **没有任何测试钉住**（改回
+  用正在销毁的子 pane 寻址仍全绿）。已补断言：两条 `setw -u` 的目标必须是项目经理自己的
+  pane（`%0`）且不含被杀的子 pane；变异复验：改回 `child.paneId` → 该测试红。
+
 第五轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2364 pass / 0 fail**。
+
+## 二·补五 · 第六轮：第四个入口 + 把「没测试钉住」补上
+
+第五轮 reviewer 给了 1×P2 + 2×Nit：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-I | `orchestrator_close` 这一处的 `hideLabelsVia` 没有任何测试钉住（改回用被杀的子 pane 寻址仍全绿） | 既有的「close takes the window bar down before killing」测试补断言：两条 `setw -u` 必须 `-t %0`（项目经理自己的 pane）且不含子 pane id。变异复验：改回 `child.paneId` → 红 |
+| Nit-I（(a) 的答案） | 第四个入口：`judge_spawn` 在 `rememberPlanAudit` 失败回滚时 `closeSessionPane` 不收 bar，而那个 pane 刚被装饰过 | 回滚路径改走同一判定（新增 `insideOrchestration` 依赖 + 抽出共享的 `countDecoratedPanes`），新增两条测试（无兄弟→收、有兄弟→不收）。变异复验：回滚不传 `hideLabelsVia` → 红 |
+| Nit-II（(c) 的答案） | 我给 `orchestrator_close` 加的 `ownPane !== undefined` 前置改了语义且无痕 | 已在第五轮自查时改成 `deps.ownPane() ?? child.paneId`：能用自己的就用，读不到退回旧行为，释放不再取决于诊断量 |
+
+第六轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2366 pass / 0 fail**。
+
+**第三条项目级经验**：这一个小改动（「收起共享 bar」）连续四轮出 P2，每轮都是同一形状——
+**我把一个「谁在用它」的问题当成了「我是谁」的问题**，然后每修一次就漏一个新入口
+（judge_close → 级联 → 回滚 → 接力继任者）。正确做法是**先把所有会关掉这类 pane 的路径
+列全**（本仓是 4 条），再让它们共用同一个判定与同一个计数函数，而不是一条一条打补丁。
 
 **第二条项目级经验**：`setw -t <pane>` 里的 pane **只是窗口的名字**，不是操作对象。凡是
 「用 X 指认 Y」的 API，指认用的那个 X 必须挑一个**你能保证还存在**的——这里正确答案永远是

@@ -5610,6 +5610,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     tmuxServer: () => tmuxServerFrom(process.env),
     now: () => Date.now(),
     sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+    insideOrchestration: () => labelBarOwnedByOthers(),
     resolveRepo: (requested) => {
       const resolved = resolveToolRepo(requested);
       if (resolved.ok) ensureHierarchyLoaded(resolved.root);
