@@ -387,12 +387,16 @@ checkpoint 都没有**时不拒绝。那正是 `prepare_review` 明确支持的�
 report 仍然被拒。
 
 **而且这条例外会自报家门（2026-09-05，项目经理的约束）**：走这条路记下的裁决，返回给 agent 的
-文本里必带一行「本轮绑定说明：本仓库还没有任何 checkpoint，这是 exit-goal 空范围轮 —— 内容时间
-判据**不适用**，本轮裁决只由 round 与 cursor 绑定」。它由 `REVIEW_ROUND_SPEC.degradedContentBinding`
-提供措辞、由引擎在**与跳过判据完全相同的条件**下挂上，并且作为**独立字段** `bindingNote` 一路传到
-`buildStandardReport`（那里的「记录」行只打印首行，把说明塞进记录正文等于记了但没人看见）。
-理由是项目经理的原话：要反对的从来不是降级，是**看不见的**降级 —— 一个没人看得见的例外，
-三轮之后就会被当成规律。单测两侧都钉住：正常轮**不得**出现这行，降级轮**必须**出现。
+文本里必带一行「本轮绑定说明：**门禁状态里**还没有可比的 checkpoint 记录（新会话 + 干净 worktree
+的第一轮就是这种情况，与 git 历史里有多少 checkpoint 提交无关），这是 exit-goal 空范围轮 ——
+内容时间判据**不适用**，本轮裁决只由 round 与 cursor 绑定」。措辞刻意说的是**门禁状态**而不是
+「本仓库」：checkpoint 记录存在会话自己的 sidecar 里、每换一个 session 就从空开始，所以一个 git
+历史里有几十个 checkpoint 提交的仓库照样会走到这条分支（reviewer 的 Nit，2026-09-05）。
+它由 `REVIEW_ROUND_SPEC.degradedContentBinding` 提供措辞、由引擎在**与跳过判据完全相同的条件**下
+挂上，并且作为**独立字段** `bindingNote` 一路传到 `buildStandardReport`（那里的「记录」行只打印
+首行，把说明塞进记录正文等于记了但没人看见）。理由是项目经理的原话：要反对的从来不是降级，
+是**看不见的**降级 —— 一个没人看得见的例外，三轮之后就会被当成规律。单测两侧都钉住：
+正常轮**不得**出现这行，降级轮**必须**出现。
 
 **判据只有一处，等待侧与记录侧共用**：`probeJudgeRound`（`judge_wait` 与 settle 扫描的探测）
 以前自己比一句「最新 report ≠ 游标」，那正是「wait 打出『本轮已有 channel report：结论 READY』

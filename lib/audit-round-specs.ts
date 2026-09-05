@@ -177,8 +177,16 @@ export const REVIEW_ROUND_SPEC: AuditRoundSpec = {
   // The exception announces ITSELF, next to the verdict it applied to. A
   // degraded binding that only the code knows about is the one shape of this
   // exception nobody would ever catch drifting into the norm.
+  //
+  // It says GATE STATE, not "this repo" (reviewer Nit, 2026-09-05): the
+  // checkpoint record lives in the session's own sidecar, which starts empty
+  // for every new session — so a repo with a hundred checkpoint commits in its
+  // git history still reaches this branch on a new session's first clean round.
+  // A sentence that says "this repo has no checkpoint" there reads as the gate
+  // lying about something the reader can check with one `git log`.
   degradedContentBinding: () =>
-    "本轮绑定说明：本仓库还没有任何 checkpoint，这是 exit-goal 空范围轮 —— " +
+    "本轮绑定说明：门禁状态里还没有可比的 checkpoint 记录（新会话 + 干净 worktree 的第一轮就是这种情况，" +
+    "与 git 历史里有多少 checkpoint 提交无关），这是 exit-goal 空范围轮 —— " +
     "内容时间判据（report 必须晚于本轮 checkpoint）**不适用**，本轮裁决只由 round 与 cursor 绑定。",
   // The detail TRAVELS here (2026-09-05): a review round that does not close
   // is usually "the reviewer is still working", but it can also be "a report
