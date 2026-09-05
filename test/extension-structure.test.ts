@@ -2135,10 +2135,18 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
 
 
   // Spawn side: the judge pane is still told who opened it — as channel
-  // identity in its environment, not as a parent session pointer.
+  // identity in its environment, not as a parent session pointer. Since the
+  // session factory landed the env is ASSEMBLED there (one place for a
+  // cross-process contract), so the dispatch names the opener as the judge
+  // role's `openerId` and lib/session-factory.ts turns it into RG_JUDGE_OPENER.
   const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
   const spawn = SRC.slice(spawnAt, spawnAt + 9000);
-  assert.match(spawn, /\[JUDGE_OPENER_ENV\]: opener/, "the pane is told who opened it");
+  assert.match(spawn, /kind: "judge",\s*\n\s*openerId: opener,/, "the pane is told who opened it");
+  assert.match(
+    readFileSync(new URL("../lib/session-factory.ts", import.meta.url), "utf8"),
+    /\[JUDGE_OPENER_ENV\]: role\.openerId/,
+    "…and the factory is what writes it into the pane's environment",
+  );
 });
 
 test("every gate dialog is answerable by EITHER the human or the project manager", () => {
@@ -2286,9 +2294,10 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
   // session id continues the transcript that is already on disk.
   assert.match(body, /hasTranscript\(sessionDir\)/,
     "reuse is decided by the transcript, not by a live pane");
-  assert.match(body, /openJudgePane\(run, \{/, "a real pane open still exists for the no-reuse case");
+  assert.match(body, /await openSessionPane\(run, \{/,
+    "a real pane open still exists for the no-reuse case — through the ONE factory");
   // fresh:true kills the living pane FIRST (singleton per role+repo+opener).
-  assert.match(body, /closeJudgePane\(run, existing\.paneId\)/, "fresh kills the pane before re-opening");
+  assert.match(body, /closeSessionPane\(run, existing\.paneId\)/, "fresh kills the pane before re-opening");
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
 });
 
@@ -2947,7 +2956,7 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
 
   // judge_close: kill the PANE, then drop the registry. Idempotent.
   const close = toolBodyOf("judge_close");
-  assert.match(close, /closeJudgePane\(deps\.tmux, child\.paneId\)/, "the pane is killed, not a process");
+  assert.match(close, /closeSessionPane\(deps\.tmux, child\.paneId\)/, "the pane is killed, not a process");
   assert.match(close, /closed: true/,
     "closing an already-finished child still reports success (idempotent)");
   assert.match(close, /transcript 保留/, "the records remain inspectable after close");

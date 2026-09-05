@@ -165,16 +165,16 @@ import {
 import { supervisionTarget } from "../lib/orchestration-id.ts";
 import { emptyHierarchy, judgeLive, listByOpener, paneClosable, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
-  buildJudgePaneCommand,
-  buildJudgeRecoverCommand,
-  closeJudgePane,
   judgePaneAlive,
   listJudgePanes,
-  openJudgePane,
-  JUDGE_ID_ENV,
-  JUDGE_OPENER_ENV,
-  JUDGE_ROLE_ENV,
 } from "../lib/judge-pane.ts";
+import {
+  buildJudgePaneCommand,
+  buildJudgeRecoverCommand,
+  closeSessionPane,
+  judgePaneDecor,
+  openSessionPane,
+} from "../lib/session-factory.ts";
 import {
   readJudgeSideEnv,
   gateStatePersistSkip,
@@ -193,6 +193,9 @@ import {
 import { buildStandardReport, STANDARD_REPORT_EXCERPT_CHARS } from "../lib/judge-report.ts";
 import { nextRoundSeq, registerJudgeConcludeTool } from "../lib/judge-conclude.ts";
 import { runTmux } from "../lib/orchestrator-wiring.ts";
+// The delivery probe a judge spawn shares with an orchestration spawn: same
+// polling, same evidence, same verdict — only the channel path differs.
+import { channelRecordCount, verifyJudgeBoot } from "../lib/orchestrator-tool-kit.ts";
 import type { ToolHost } from "../lib/tool-host.ts";
 // ---- orchestration layer (project-manager role). Everything but these few
 // wires lives in lib/orchestrator-*.ts, deliberately: this file is the
@@ -4579,7 +4582,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * finished one is dropped and re-spawned under the SAME session id, so pi
    * appends to the same transcript. `fresh` kills the incumbent first.
    */
-  function dispatchJudgeRound(opts: {
+  async function dispatchJudgeRound(opts: {
     root: string;
     role: string;
     title: string;
@@ -4587,7 +4590,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     fresh?: boolean;
     /** This round's findings stream, recorded on the child for judge_wait. */
     streamPath?: string;
-  }): JudgeDispatch {
+  }): Promise<JudgeDispatch> {
     const { root, role, task } = opts;
     dropDeadForeignJudges();
     const title = opts.title.replace(/[^A-Za-z0-9._-]/g, "-") || role;
@@ -4669,7 +4672,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     // continues by session id, so the review never starts from zero).
     if (existing) {
       if (existing.paneId && paneAlive === true && opts.fresh) {
-        try { closeJudgePane(run, existing.paneId); } catch { /* best effort */ }
+        try { closeSessionPane(run, existing.paneId); } catch { /* best effort */ }
       }
       if (paneAlive === false) reapReviewScratch(sessionId);
       // One removal, one table.
@@ -4703,12 +4706,32 @@ export default function reviewGate(pi: ExtensionAPI) {
       mkdirSync(sessionDir, { recursive: true });
       const taskPath = pathJoin(sessionDir, `task-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}.md`);
       writeFileSync(taskPath, task, "utf8");
-      const opened = openJudgePane(run, {
+      // fresh:true starts a NEW review object: everything the channel holds so
+      // far belongs to an older object and must never end this round's wait.
+      // Seed the cursor at the channel's current newest report (best-effort —
+      // an unreadable channel leaves it unset, and the round check at record
+      // time still refuses old rounds). Read BEFORE the pane opens, so a fast
+      // judge's first record cannot land inside the read.
+      const freshTarget = judgeChannelTarget(opener, judgeId);
+      const judgeChannelPath = channelPathFor(freshTarget.orchestrationId, freshTarget.childId, freshTarget.home);
+      let freshCursor: string | undefined;
+      try {
+        freshCursor = projectChannel(readChannel(channelIO, judgeChannelPath).records).lastReport?.reportId;
+      } catch { freshCursor = undefined; }
+      // A judge's channel OUTLIVES its panes, so only a record ABOVE this
+      // watermark proves that the pane opened below actually came up.
+      const baselineRecords = channelRecordCount(channelIO, judgeChannelPath);
+      const opened = await openSessionPane(run, {
         ownPane,
         cwd: root,
-        sessionId,
-        judgeId,
-        role,
+        layout: "child-column",
+        role: {
+          kind: "judge",
+          openerId: opener,
+          judgeId,
+          role,
+          ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
+        },
         command: buildJudgePaneCommand({
           sessionId,
           taskPath,
@@ -4716,48 +4739,49 @@ export default function reviewGate(pi: ExtensionAPI) {
           sysPromptPath: files.sysPromptPath,
           model: files.model,
         }),
-        env: {
-          [JUDGE_OPENER_ENV]: opener,
-          [JUDGE_ID_ENV]: judgeId,
-          [JUDGE_ROLE_ENV]: role,
-          ...(opts.streamPath === undefined ? {} : { [JUDGE_STREAM_ENV]: opts.streamPath }),
+        decor: judgePaneDecor(judgeId, role),
+        // ONE write, one table, and it happens inside the open: the entry used
+        // to be built here and mutated a second time, which is exactly how the
+        // two drifted apart.
+        register: (paneId) => {
+          const reg = registerJudge(judgeHierarchy, {
+            judgeId,
+            openerId: opener,
+            role,
+            repoRoot: root,
+            title,
+            sessionDir,
+            paneId, roundSeq: nextJudgeRound(opener, judgeId),
+            ...(tmuxServer === undefined ? {} : { tmuxServer }),
+            ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
+            // Same rule as the reuse path: a re-run over the SAME stream file keeps
+            // its finding cursor, so nothing already shown is shown again.
+            ...(judgeHierarchy[judgeId]?.streamPath === opts.streamPath
+              && judgeHierarchy[judgeId]?.lastFindingCount !== undefined
+              ? { lastFindingCount: judgeHierarchy[judgeId]!.lastFindingCount }
+              : {}),
+            ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
+            spawnedAt: new Date().toISOString(),
+          });
+          if (reg.ok) setHierarchy(reg.table);
         },
+        // EARN the receipt for a judge too: a judge that never boots leaves its
+        // opener waiting forever, which is the one silence nobody can break.
+        verify: () => verifyJudgeBoot(
+          { channelIO: () => channelIO, sleep: (ms: number) => new Promise((r) => setTimeout(r, ms)) },
+          { channelPath: judgeChannelPath, baselineRecordCount: baselineRecords },
+        ),
       });
       if (!opened.ok) {
-        return { ok: false, reused: continuesSession, sessionId, sessionDir, error: opened.error };
+        // A delivery failure KEEPS the pane and the registration (it may only
+        // be slow), so the opener can still wait on it; anything else means no
+        // pane exists at all.
+        const detail = opened.deliveryFailed
+          ? `review pane 开出来了（${opened.paneId}）但一直没在通道上报状态 —— ${opened.error}；` +
+            "pane 与登记都保留着，可以先 judge_wait 看它有没有动静，确认没起来再用 fresh:true 重来。"
+          : opened.error;
+        return { ok: false, reused: continuesSession, sessionId, sessionDir, error: detail, ...(opened.paneId === undefined ? {} : { paneId: opened.paneId }), judgeId };
       }
-      // The freshly opened pane is registered ONCE, below — there is no
-      // second record to build here anymore.
-      // fresh:true starts a NEW review object: everything the channel holds so
-      // far belongs to an older object and must never end this round's wait.
-      // Seed the cursor at the channel's current newest report (best-effort —
-      // an unreadable channel leaves it unset, and the round check at record
-      // time still refuses old rounds).
-      let freshCursor: string | undefined;
-      try {
-        const freshTarget = judgeChannelTarget(opener, judgeId);
-        freshCursor = projectChannel(readChannel(channelIO, channelPathFor(freshTarget.orchestrationId, freshTarget.childId, freshTarget.home)).records).lastReport?.reportId;
-      } catch { freshCursor = undefined; }
-      const reg = registerJudge(judgeHierarchy, {
-        judgeId,
-        openerId: opener,
-        role,
-        repoRoot: root,
-        title,
-        sessionDir,
-        paneId: opened.paneId, roundSeq: nextJudgeRound(opener, judgeId),
-        ...(tmuxServer === undefined ? {} : { tmuxServer }),
-        ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
-        // Same rule as the reuse path: a re-run over the SAME stream file keeps
-        // its finding cursor, so nothing already shown is shown again.
-        ...(judgeHierarchy[judgeId]?.streamPath === opts.streamPath
-          && judgeHierarchy[judgeId]?.lastFindingCount !== undefined
-          ? { lastFindingCount: judgeHierarchy[judgeId]!.lastFindingCount }
-          : {}),
-        ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
-        spawnedAt: new Date().toISOString(),
-      });
-      if (reg.ok) setHierarchy(reg.table);
       return { ok: true, reused: continuesSession, sessionId, sessionDir, paneId: opened.paneId, judgeId };
     } catch (err) {
       return { ok: false, reused: false, error: err instanceof Error ? err.message : String(err) };
@@ -4856,6 +4880,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       channelHome: () => undefined,
       tmux: (argv: readonly string[]) => runTmux(argv),
       ownPane: () => ownPane,
+      now: () => Date.now(),
     };
     const notices: string[] = [];
     for (const [judgeId, entry] of Object.entries(judgeHierarchy)) {
@@ -4869,7 +4894,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // close (2026-09-05).
       const obs = probeJudgeRound(
         deps,
-        { openerId: entry.openerId, judgeId, paneId: entry.paneId },
+        { openerId: entry.openerId, judgeId, paneId: entry.paneId, role: entry.role },
         entry.lastReportId,
         roundBindingOf({ judgeId, role: entry.role, repoRoot: entry.repoRoot ?? primaryRepoRoot }),
       );
@@ -5074,8 +5099,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     const waitCtx = ctx ?? latestCtx;
     return {
       ...auditRoundDeps(ctx),
-      dispatch: ({ root, role, title, task, streamPath }) => {
-        const dispatched = dispatchJudgeRound({
+      dispatch: async ({ root, role, title, task, streamPath }) => {
+        const dispatched = await dispatchJudgeRound({
           root,
           role,
           title,
@@ -5337,7 +5362,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // reach the session's directory, or every round starts a new session).
       const title = `${role}-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`;
       progress.step(`spawn ${role}`);
-      const dispatch = dispatchJudgeRound({ root, role, title, task: reviewTask, fresh: params.fresh === true, streamPath });
+      const dispatch = await dispatchJudgeRound({ root, role, title, task: reviewTask, fresh: params.fresh === true, streamPath });
       if (!dispatch.ok) {
         progress.fail("spawn 失败");
         const lead = "review-gate: judge_submit 失败 — ";
@@ -5502,6 +5527,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),
     now: () => Date.now(),
+    sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
     resolveRepo: (requested) => {
       const resolved = resolveToolRepo(requested);
       if (resolved.ok) ensureHierarchyLoaded(resolved.root);
@@ -6213,7 +6239,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           // do not send kill-pane into someone else's window.
           if (paneClosable(child, tmuxServer) && ownPane) {
             try {
-              if (closeJudgePane(run, child.paneId!).ok) closed.push(child.paneId!);
+              if (closeSessionPane(run, child.paneId!).ok) closed.push(child.paneId!);
             } catch { /* best effort */ }
           }
           try { reapReviewScratch(child.judgeId); } catch { /* best effort */ }

@@ -27,12 +27,7 @@ import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
 
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
-import {
-  buildKillPaneArgv,
-  buildHandoffPaneArgv,
-  buildHidePaneLabelsArgv,
-  parseSpawnedPaneId,
-} from "./orchestrator-tmux.ts";
+import { closeSessionPane, openSessionPane } from "./session-factory.ts";
 import { isLastDecoratedChild } from "./orchestrator-pane-decor.ts";
 
 import { spawnAuthorization } from "./orchestrator-gate.ts";
@@ -285,12 +280,8 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   if (predecessorPane) {
     const auth = predecessorCloseAuthorization(predecessorPane, deps.env());
     if (!auth.ok) return fail("review-gate: " + auth.reason);
-    try {
-      const result = deps.tmux(buildKillPaneArgv(predecessorPane));
-      if (!result.ok) return fail(`review-gate: 关闭前任 pane 失败 —— ${result.stderr}`);
-    } catch (error) {
-      return fail(`review-gate: 关闭前任 pane 失败 —— ${(error as Error).message}`);
-    }
+    const killed = closeSessionPane(deps.tmux, predecessorPane);
+    if (!killed.ok) return fail(`review-gate: 关闭前任 pane 失败 —— ${killed.error}`);
     return reply(
       `review-gate: 前任项目经理 pane ${predecessorPane} 已关闭，接力完成 —— 你现在是这个 orchestration 的持有者。`,
       { closed: predecessorPane },
@@ -307,18 +298,11 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   // Leaving it set forever would be litter in the user's window; removing it
   // while a sibling is still labelled would blank a border that is still in
   // use. Purely cosmetic either way, so every failure here is swallowed.
-  if (isLastDecoratedChild(runtime.children, child.id)) {
-    for (const argv of buildHidePaneLabelsArgv(child.paneId)) {
-      try { deps.tmux(argv); } catch { /* cosmetic */ }
-    }
-  }
-  try {
-    const result = deps.tmux(buildKillPaneArgv(child.paneId));
-    if (!result.ok && !/can't find pane|no such pane/i.test(result.stderr)) {
-      return fail(`review-gate: 关闭 pane 失败 —— ${result.stderr}`);
-    }
-  } catch (error) {
-    return fail(`review-gate: 关闭 pane 失败 —— ${(error as Error).message}`);
+  const killed = closeSessionPane(deps.tmux, child.paneId, {
+    hideLabels: isLastDecoratedChild(runtime.children, child.id),
+  });
+  if (!killed.ok && !/can't find pane|no such pane/i.test(killed.error)) {
+    return fail(`review-gate: 关闭 pane 失败 —— ${killed.error}`);
   }
 
   deps.saveRuntime(markChildClosed(deps.runtime(), child.id, new Date(deps.now()).toISOString()));
@@ -362,11 +346,20 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
     );
   }
 
-  let paneId: string | undefined;
-  try {
-    const result = deps.tmux(buildHandoffPaneArgv({
-      orchestratorPane: self!,
-      cwd: deps.repoRoot,
+  // The successor is opened by the SAME factory as every other pi session —
+  // it just lands BESIDE the opener instead of in the child column (tmux then
+  // expands it into the left column when the old pane is closed), keeps no
+  // registry row and takes no border: it is not a child, it is the next holder
+  // of this orchestration.
+  const opened = await openSessionPane(deps.tmux, {
+    ownPane: self!,
+    cwd: deps.repoRoot,
+    layout: "beside-opener",
+    // A plain interactive pi: the successor reads the handoff document its
+    // environment points at, so it needs no argv message of its own.
+    command: ["pi"],
+    role: {
+      kind: "successor",
       env: {
         ...successorEnv({
           orchestrationId: runtime.orchestrationId,
@@ -376,13 +369,13 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
         }),
         [GATE_MODE_ENV]: "orchestrator",
       },
-    }));
-    if (!result.ok) throw new Error(result.stderr || "tmux split-window 失败");
-    paneId = parseSpawnedPaneId(result.stdout);
-  } catch (error) {
-    return fail(`review-gate: 开接任会话失败 —— ${(error as Error).message}`);
+    },
+  });
+  if (!opened.ok) {
+    return fail(`review-gate: 开接任会话失败 —— ${opened.error}（接力中止，你仍然是持有者）。`);
   }
-  if (!paneId) return fail("review-gate: tmux 没有回报接任会话的 pane id —— 接力中止，你仍然是持有者。");
+  const paneId = opened.paneId;
+
 
   deps.saveRuntime({
     ...deps.runtime(),

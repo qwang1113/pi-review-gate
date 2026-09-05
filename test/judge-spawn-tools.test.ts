@@ -50,6 +50,31 @@ function setup(over: Partial<{
     panes: over.panes ?? ["%1"],
   };
   const panes = store.panes;
+  /**
+   * The boot report a freshly opened judge pane writes on its own channel.
+   *
+   * Who it is comes out of the spawn argv itself (`-e RG_JUDGE_ID=…`), the
+   * same way the real pane learns it — so this fake cannot drift from the
+   * env contract the factory builds.
+   */
+  const reportBooted = (argv: readonly string[]): void => {
+    const env = new Map<string, string>();
+    for (let i = 0; i < argv.length - 1; i++) {
+      if (argv[i] !== "-e") continue;
+      const [key, ...rest] = argv[i + 1]!.split("=");
+      env.set(key!, rest.join("="));
+    }
+    const judgeId = env.get("RG_JUDGE_ID");
+    const openerId = env.get("RG_JUDGE_OPENER");
+    if (!judgeId || !openerId) return;
+    appendRecord(io, judgeChannelTarget(openerId, judgeId, "/home/test"), {
+      kind: "state",
+      from: "child",
+      at: new Date(1_700_000_000_000).toISOString(),
+      state: "working",
+    });
+  };
+
   const tools = new Map<string, Exec>();
   const host: ToolHost = {
     registerTool(def) {
@@ -66,17 +91,29 @@ function setup(over: Partial<{
     saveHierarchy: (next) => { store.table = next; },
     channelIO: () => io,
     channelHome: () => "/home/test",
-    tmux: over.tmux ?? ((argv) => {
-      seen.push([...argv]);
-      if (argv[0] === "split-window") return { ok: true, stdout: "%7\n", stderr: "" };
-      if (argv[0] === "list-panes") return { ok: true, stdout: `${store.panes.join("\n")}\n`, stderr: "" };
-      return { ok: true, stdout: "", stderr: "" };
-    }),
+    // Every tmux fake — the default one and any a test injects — goes through
+    // the same wrapper, so a pane that OPENED always boots and reports (see
+    // `reportBooted`). A test that wants a pane which never comes up says so by
+    // failing the split, not by staying silent afterwards.
+    tmux: (argv) => {
+      const base = over.tmux ?? ((inner: readonly string[]) => {
+        seen.push([...inner]);
+        if (inner[0] === "split-window") return { ok: true, stdout: "%7\n", stderr: "" };
+        if (inner[0] === "list-panes") return { ok: true, stdout: `${store.panes.join("\n")}\n`, stderr: "" };
+        return { ok: true, stdout: "", stderr: "" };
+      });
+      const result = base(argv);
+      if (argv[0] === "split-window" && result.ok) reportBooted(argv);
+      return result;
+    },
     ownPane: () => (over.ownPane === undefined ? "%1" : over.ownPane ?? undefined),
     // Faithful to the real wiring: a session in tmux always has a server, and
     // every pane it opens is minted by that one.
     tmuxServer: () => (over.tmuxServer === undefined ? "sock,1" : over.tmuxServer ?? undefined),
     now: () => 1_700_000_000_000,
+    // Instant: the delivery watch is a loop of sleeps, and a test must not
+    // spend 30 real seconds proving that it stops at the first evidence.
+    sleep: async () => {},
     resolveRepo: () => ({ ok: true as const, root: "/repo" }),
     launchConfig: () => ({ ok: true as const, model: "m", sysPromptPath: "/sp.md", sessionDir: "/sessions" }),
     buildGoalAuditTask: async (draft) => ({ ok: true as const, task: `AUDIT ${draft}`, streamPath: "/stream.jsonl" }),

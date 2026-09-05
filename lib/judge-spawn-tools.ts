@@ -42,18 +42,16 @@ import { resolveAnswer } from "./orchestrator-answer-tools.ts";
 import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
-  closeJudgePane,
+  closeSessionPane,
+  judgePaneDecor,
+  openSessionPane,
+  paneRecoverability,
+} from "./session-factory.ts";
+import {
   judgePaneAlive,
-  openJudgePane,
-  JUDGE_ID_ENV,
-  JUDGE_OPENER_ENV,
-  JUDGE_ROLE_ENV,
   type JudgePaneRunResult,
 } from "./judge-pane.ts";
-import {
-  JUDGE_TASK_ENV,
-  JUDGE_STREAM_ENV,
-} from "./judge-side.ts";
+import { verifyJudgeBoot, channelRecordCount } from "./orchestrator-tool-kit.ts";
 import { judgeSessionIdFor, shortRepoHash } from "./judge-process.ts";
 
 import { nextRoundSeq } from "./judge-conclude.ts";
@@ -89,6 +87,8 @@ export interface JudgeSpawnToolDeps {
   tmuxServer(): string | undefined;
   /** Injectable clock. */
   now(): number;
+  /** Injectable sleep, so the spawn's delivery check is testable without waiting. */
+  sleep(ms: number): Promise<void>;
   /** Which repo does this call target? Never guessed. */
   resolveRepo(requested: string | undefined): { ok: true; root: string } | { ok: false; error: string };
   /** Model + system prompt + transcript dir for one role in one repo. */
@@ -250,12 +250,24 @@ async function doSpawn(
     return fail(`review-gate: 任务文件落盘失败 —— ${taskFile.error}`);
   }
   // (`ownPane` and `launch` were resolved above, before the claim.)
-  const opened = openJudgePane(deps.tmux, {
+  const target = judgeChannelTarget(caller, judgeId, deps.channelHome());
+  const judgeChannelPath = channelPathFor(target.orchestrationId, target.childId, target.home);
+  // A judge's channel OUTLIVES its panes — one file per role+repo, rounds
+  // appended — so "there is a record" proves nothing about the pane opened
+  // below. Only a record ABOVE this watermark does.
+  const baseline = channelRecordCount(deps.channelIO(), judgeChannelPath);
+  const opened = await openSessionPane(deps.tmux, {
     ownPane,
     cwd: root,
-    sessionId: judgeId,
-    judgeId,
-    role,
+    layout: "child-column",
+    role: {
+      kind: "judge",
+      openerId: caller,
+      judgeId,
+      role,
+      taskPath: taskFile.path,
+      ...(streamPath === undefined ? {} : { streamPath }),
+    },
     command: buildJudgePaneCommand({
       sessionId: judgeId,
       taskPath: taskFile.path,
@@ -263,45 +275,66 @@ async function doSpawn(
       sysPromptPath: launch.sysPromptPath,
       model: launch.model,
     }),
-    env: {
-      [JUDGE_OPENER_ENV]: caller,
-      [JUDGE_ID_ENV]: judgeId,
-      [JUDGE_ROLE_ENV]: role,
-      [JUDGE_TASK_ENV]: taskFile.path,
-      ...(streamPath === undefined ? {} : { [JUDGE_STREAM_ENV]: streamPath }),
+    decor: judgePaneDecor(judgeId, role),
+    // A COMPLETE entry from the first write, and it happens INSIDE the open:
+    // this registration used to omit `sessionDir`, which is precisely why
+    // `judge_wait` could not find a judge `judge_spawn` had just opened.
+    register: (paneId) => {
+      const withPane = registerJudge(deps.hierarchy(), {
+        judgeId,
+        openerId: caller,
+        role,
+        repoRoot: root, roundSeq: birthSeq,
+        title: role,
+        sessionDir: launch.sessionDir,
+        paneId,
+        ...(deps.tmuxServer() === undefined ? {} : { tmuxServer: deps.tmuxServer()! }),
+        ...(streamPath === undefined ? {} : { streamPath }),
+        spawnedAt: new Date(deps.now()).toISOString(),
+      });
+      if (withPane.ok) deps.saveHierarchy(withPane.table);
     },
+    // EARN the receipt for a judge too (it used to be an orchestration-only
+    // courtesy): a judge that never boots leaves its opener waiting forever,
+    // which is the one silence nobody else can break.
+    verify: () => verifyJudgeBoot(deps, {
+      channelPath: judgeChannelPath,
+      baselineRecordCount: baseline,
+    }),
   });
-  if (!opened.ok) {
+  if (!opened.ok && !opened.deliveryFailed) {
     rollback();
-    return fail(opened.error);
+    return fail(`review-gate: ${opened.error}`);
   }
-  const withPane = registerJudge(deps.hierarchy(), {
-    judgeId,
-    openerId: caller,
-    role,
-    repoRoot: root, roundSeq: birthSeq,
-    title: role,
-    sessionDir: launch.sessionDir,
-    paneId: opened.paneId,
-    ...(deps.tmuxServer() === undefined ? {} : { tmuxServer: deps.tmuxServer()! }),
-    ...(streamPath === undefined ? {} : { streamPath }),
-    spawnedAt: new Date(deps.now()).toISOString(),
-  });
-  if (withPane.ok) deps.saveHierarchy(withPane.table);
+  const paneId = opened.paneId;
+  if (paneId === undefined) {
+    rollback();
+    return fail("review-gate: 开出的 review pane 没有回报 pane id —— 已回滚。");
+  }
   // Register what was dispatched, or the report can never be recorded:
-  // a goal verdict binds to its draft, a plan verdict to its hash.
+  // a goal verdict binds to its draft, a plan verdict to its hash. This runs
+  // even when the boot check failed, because the pane is KEPT: a slow judge
+  // that reports late must still be recordable.
   if (kind === "goal") {
     deps.rememberGoalAudit(root, draft);
   } else {
     const remembered = deps.rememberPlanAudit(root);
     if (!remembered.ok) {
-      try { closeJudgePane(deps.tmux, opened.paneId); } catch { /* best effort */ }
+      try { closeSessionPane(deps.tmux, paneId); } catch { /* best effort */ }
       rollback();
       return fail(`review-gate: plan 备案失败 —— ${remembered.error}`);
     }
   }
+  if (!opened.ok) {
+    return fail(
+      `review-gate: review pane 开出来了（${paneId}，judge ${judgeId}），但它一直没在自己的通道上报状态 —— ${opened.error}\n` +
+      "pane 与登记都**保留**着（不误杀一个可能只是起得慢的 review）：先 `judge_wait({role})` 看它有没有动静；" +
+      "确认它真的没起来，再 `judge_close` 后重开。",
+    );
+  }
   return reply(
-    `review-gate: ${kind === "goal" ? "目标" : "计划"} review 已开在独立 pane（${opened.paneId}，judge ${judgeId}）。` +
+    `review-gate: ${kind === "goal" ? "目标" : "计划"} review 已开在独立 pane（${paneId}，judge ${judgeId}）。` +
+    `启动已核实：${opened.deliveryNote ?? "（本次没有核实项）"}。` +
     `用 judge_wait 等结论（状态、findings 计数、verdict 由门禁推给你），不要自己去读 pane。` +
     (opened.decorWarning ? `\n${opened.decorWarning}` : ""),
   );
@@ -374,39 +407,48 @@ async function doRecover(
   if (!ownPane) {
     return fail("review-gate: 当前会话不在 tmux 里，无法确认 pane 生死——信息缺失时不重开（两个进程写一个 worktree 比卡住更糟）。");
   }
-  if (!entry.paneId) {
+  // ONE recovery judgement, shared with `orchestrator_recover`
+  // (lib/session-factory.ts): refuse a live pane, refuse a handle that never
+  // had one, refuse when liveness is unreadable. Only the WORDING is local.
+  const verdict = paneRecoverability({
+    registered: true,
+    ...(entry.paneId === undefined ? {} : { paneId: entry.paneId }),
+    paneAlive: entry.paneId ? judgePaneAlive(deps.tmux, ownPane, entry.paneId) : undefined,
+  });
+  if (verdict === "no-pane") {
     return fail(`review-gate: review ${entry.judgeId} 没有登记 pane——它可能从未成功开出来，用 judge_spawn 重开。`);
   }
-  const alive = judgePaneAlive(deps.tmux, ownPane, entry.paneId);
-  if (alive === true) {
+  if (verdict === "alive") {
     return fail(`review-gate: pane ${entry.paneId} 还活着——重开一个活着的 review 会让两个进程写同一个会话，先用 judge_wait 看它在干什么。`);
   }
-  if (alive === undefined) {
+  if (verdict !== "recoverable") {
     return fail("review-gate: tmux 读不出来，无法确认它到底死没死——信息缺失时不重开。");
   }
-  const opened = openJudgePane(deps.tmux, {
+  const opened = await openSessionPane(deps.tmux, {
     ownPane,
     cwd: entry.repoRoot,
-    sessionId: entry.judgeId,
-    judgeId: entry.judgeId,
-    role: entry.role,
+    layout: "child-column",
+    role: {
+      kind: "judge",
+      openerId: entry.openerId,
+      judgeId: entry.judgeId,
+      role: entry.role,
+    },
     command: buildJudgeRecoverCommand(entry.judgeId),
-    env: {
-      [JUDGE_OPENER_ENV]: entry.openerId,
-      [JUDGE_ID_ENV]: entry.judgeId,
-      [JUDGE_ROLE_ENV]: entry.role,
+    decor: judgePaneDecor(entry.judgeId, entry.role),
+    // The recovered pane is a NEW pane from THIS server — recording the server
+    // with it is what keeps the entry closable later.
+    register: (paneId) => {
+      const recoveredServer = deps.tmuxServer();
+      const updated = registerJudge(deps.hierarchy(), {
+        ...entry,
+        paneId,
+        ...(recoveredServer === undefined ? {} : { tmuxServer: recoveredServer }),
+      });
+      if (updated.ok) deps.saveHierarchy(updated.table);
     },
   });
-  if (!opened.ok) return fail(opened.error);
-  // The recovered pane is a NEW pane from THIS server — recording the server
-  // with it is what keeps the entry closable later.
-  const recoveredServer = deps.tmuxServer();
-  const updated = registerJudge(deps.hierarchy(), {
-    ...entry,
-    paneId: opened.paneId,
-    ...(recoveredServer === undefined ? {} : { tmuxServer: recoveredServer }),
-  });
-  if (updated.ok) deps.saveHierarchy(updated.table);
+  if (!opened.ok) return fail(`review-gate: ${opened.error}`);
   return reply(
     `review-gate: review ${entry.judgeId} 已在新 pane（${opened.paneId}）里用同一 session id 重开，transcript 续接，本轮继续。` +
     (opened.decorWarning ? `\n${opened.decorWarning}` : ""),

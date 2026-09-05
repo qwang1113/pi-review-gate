@@ -32,10 +32,9 @@
 
 import { Type } from "typebox";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
-import { ORCHESTRATION_ID_ENV, normalizeOrchestrationId } from "./orchestration-id.ts";
-import { GATE_MODE_ENV } from "./task-mode.ts";
-import { buildSpawnPaneArgv, parseSpawnedPaneId } from "./orchestrator-tmux.ts";
+import { normalizeOrchestrationId } from "./orchestration-id.ts";
+import { openSessionPane, paneRecoverability } from "./session-factory.ts";
+import { paneLabelFor } from "./orchestrator-pane-decor.ts";
 import {
   buildRecoverCommand,
   buildRecoveryNote,
@@ -46,7 +45,6 @@ import {
 import {
   findChild,
   lastChildPane,
-  type ChildSession,
   type OrchestratorRuntime,
 } from "./orchestrator-registry.ts";
 import { superviseChildren, formatSupervisionReceipt } from "./orchestrator-supervisor.ts";
@@ -98,34 +96,54 @@ export function detectOrphans(
   return orphans;
 }
 
-/** Environment a recovered (or freshly attached) child pane is given. */
-function childEnv(deps: OrchestratorDeps, child: ChildSession): Record<string, string> {
-  return {
-    [ORCHESTRATION_ID_ENV]: deps.runtime().orchestrationId,
-    [GATE_MODE_ENV]: "loop",
-    [STATE_VARIANT_ENV]: child.stateVariant ?? child.id,
-  };
+/**
+ * The task title a recovered pane's border shows.
+ *
+ * The plan is the only place a human-readable title exists; without it the
+ * border would read `@t1-t1`, which tells nobody anything at 3am. A missing or
+ * unreadable plan degrades to the id — cosmetic, never fatal.
+ */
+function recoveredTaskTitle(deps: OrchestratorDeps, taskId: string): string {
+  const { plan } = currentPlan(deps);
+  return plan?.tasks.find((task) => task.id === taskId)?.title ?? taskId;
 }
 
 async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const childId = String(params.childId ?? "").trim();
   const runtime = deps.runtime();
   const child = findChild(runtime, childId);
-  if (!child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
-  if (child.closedAt) {
+  const panes = alivePanes(deps);
+  // ONE recovery judgement, shared with `judge_recover`
+  // (lib/session-factory.ts). Both tools refuse the same four situations — an
+  // unknown handle, a deliberately closed session, a pane that is still alive,
+  // and unreadable liveness — so the pair can no longer drift into two
+  // slightly different safeties. Only the WORDING below is local.
+  const verdict = paneRecoverability({
+    registered: Boolean(child),
+    ...(child?.closedAt === undefined ? {} : { closedAt: child.closedAt }),
+    ...(child?.paneId === undefined ? {} : { paneId: child.paneId }),
+    paneAlive: child && panes.ok ? panes.panes.includes(child.paneId) : undefined,
+  });
+  if (verdict === "unknown" || !child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
+  if (verdict === "closed") {
     return fail(
       `review-gate: 子会话 "${childId}" 是被 orchestrator_close 主动关掉的（${child.closedAt}），` +
       "不是死掉的。要重做这个任务就 `orchestrator_spawn` 开一个新的。",
     );
   }
-  const panes = alivePanes(deps);
-  if (!panes.ok) {
+  if (verdict === "no-pane") {
+    return fail(
+      `review-gate: 子会话 "${childId}" 没有登记 pane —— 它可能从来没成功开出来，` +
+      "用 `orchestrator_spawn` 重新派活，而不是恢复。",
+    );
+  }
+  if (verdict === "unknown-liveness") {
     return fail(
       "review-gate: 读不到 tmux pane 列表，无法确认它到底死没死 —— 不敢重开（重开一个其实还活着的会话，" +
       "会得到两个进程写同一个工作区）。先修好 tmux 再试。",
     );
   }
-  if (panes.panes.includes(child.paneId)) {
+  if (verdict === "alive") {
     // ROUND-4 P0 — THE LINE THAT USED TO BE HERE WAS THE DEFECT. It said
     // "if it is just stuck, interrupt it first", and both children it was
     // ever printed about were healthy: they were sitting in `judge_wait`
@@ -146,7 +164,6 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
       "而不是打断：门禁都不应答的进程，打断不会让它复活。",
       { childId, recovered: false },
     );
-
   }
 
   const reason = String(params.reason ?? "").trim() || "pane 消失";
@@ -163,36 +180,45 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
   const self = deps.ownPane();
   if (!self) return fail("review-gate: 读不到自己的 pane（$TMUX_PANE），无法开新 pane。");
   const last = lastChildPane(runtime, panes.panes);
-  let paneId: string;
-  try {
-    const result = deps.tmux(buildSpawnPaneArgv({
-      orchestratorPane: self,
-      ...(last ? { lastChildPane: last } : {}),
-      cwd: child.cwd,
-      env: childEnv(deps, child),
-      command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
-    }));
-    if (!result.ok) return fail(`review-gate: 重开 pane 失败 —— ${result.stderr || "tmux split-window 出错"}`);
-    const spawned = parseSpawnedPaneId(result.stdout);
-    if (!spawned) return fail("review-gate: tmux 没有回报新 pane 的 id —— 无法登记，已放弃。");
-    paneId = spawned;
-  } catch (error) {
-    return fail(`review-gate: 重开 pane 失败 —— ${(error as Error).message}`);
-  }
-
-  // The registry is re-pointed rather than re-created: the child KEEPS its id,
-  // its worktree and its task, because none of those died with the process.
-  // Its completion record is cleared for the same reason a new assignment
-  // clears it — whatever it had finished, it is being asked to carry on now.
   const now = new Date(deps.now()).toISOString();
-  deps.saveRuntime({
-    ...runtime,
-    children: runtime.children.map((c) =>
-      c.id === child.id
-        ? { ...c, paneId, lastAssignedAt: now, taskFile: taskFileRelPath(noteName), doneAt: undefined }
-        : c,
-    ),
+  const opened = await openSessionPane(deps.tmux, {
+    ownPane: self,
+    cwd: child.cwd,
+    layout: "child-column",
+    ...(last === undefined ? {} : { lastChildPane: last }),
+    // Same env as the original spawn — including the sidecar variant, which is
+    // ALSO what exempts a child from the session-exclusivity guard: a recovered
+    // pane without it would be refused at boot as a second session in the
+    // worktree.
+    role: {
+      kind: "orchestration-child",
+      orchestrationId: deps.runtime().orchestrationId,
+      stateVariant: child.stateVariant ?? child.id,
+    },
+    command: buildRecoverCommand(child.id, taskFileRelPath(noteName)),
+    decor: {
+      label: paneLabelFor(child.taskId, recoveredTaskTitle(deps, child.taskId)),
+      colorSeed: child.id,
+      state: "working",
+      stateForSeconds: 0,
+    },
+    // The registry is re-pointed rather than re-created: the child KEEPS its
+    // id, its cwd and its task, because none of those died with the process.
+    // Its completion record is cleared for the same reason a new assignment
+    // clears it — whatever it had finished, it is being asked to carry on now.
+    register: (paneId) => {
+      deps.saveRuntime({
+        ...deps.runtime(),
+        children: deps.runtime().children.map((c) =>
+          c.id === child.id
+            ? { ...c, paneId, lastAssignedAt: now, taskFile: taskFileRelPath(noteName), doneAt: undefined }
+            : c,
+        ),
+      });
+    },
   });
+  if (!opened.ok) return fail(`review-gate: 重开 pane 失败 —— ${opened.error}`);
+  const paneId = opened.paneId;
 
   const assets = childAssets(deps, child);
   return reply(

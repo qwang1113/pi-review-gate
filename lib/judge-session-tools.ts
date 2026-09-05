@@ -43,10 +43,15 @@ import {
   type ReportConclusion,
 } from "./orchestrator-channel.ts";
 import {
-  closeJudgePane,
   judgePaneAlive,
   type JudgePaneRunResult,
 } from "./judge-pane.ts";
+import {
+  closeSessionPane,
+  judgePaneLabel,
+  refreshSessionPaneTitle,
+} from "./session-factory.ts";
+import type { ChildState } from "./orchestrator-child-state.ts";
 import {
   clampWaitTimeout,
   JUDGE_WAIT_MAX_TIMEOUT_MS,
@@ -310,8 +315,8 @@ export interface JudgeWaitCursors {
  * the other caller.
  */
 export function probeJudgeRound(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane">,
-  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now">,
+  child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "role">,
   consumedReportId: string | undefined,
   binding: RoundBinding,
 ): PaneJudgeWaitObservation {
@@ -320,6 +325,31 @@ export function probeJudgeRound(
   const target = judgeChannelTarget(child.openerId, child.judgeId, home);
   const read = readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home));
   const projection = projectChannel(read.records);
+  /**
+   * C2 — REPAINT THE BORDER FROM THIS READING.
+   *
+   * pi overwrites a pane's title shortly after boot, so the one written at
+   * spawn is gone within seconds and a judge pane sat there saying nothing
+   * about itself for the whole round. The orchestration side already solved
+   * this by repainting from every health reading; this is the same function
+   * (lib/session-factory.ts), on the judge's own probe — which BOTH the wait
+   * loop and the settle sweep go through, so there is no path that reads a
+   * judge's state without refreshing what the human sees.
+   *
+   * The state comes from the CHANNEL projection, never from the screen, and
+   * the paint is throttled and failure-swallowed inside the shared function.
+   */
+  const paintTitle = (state: ChildState | undefined, since?: string): void => {
+    if (!child.paneId || !child.role || state === undefined) return;
+    const seconds = since ? Math.max(0, (deps.now() - Date.parse(since)) / 1000) : undefined;
+    refreshSessionPaneTitle(deps.tmux, {
+      paneId: child.paneId,
+      label: judgePaneLabel(child.role),
+      state,
+      ...(seconds === undefined || Number.isNaN(seconds) ? {} : { stateForSeconds: seconds }),
+      now: deps.now(),
+    });
+  };
   const openQuestions: OpenQuestionBrief[] = (projection.openRequests ?? []).map((q) => ({
     title: q.title,
     options: q.options,
@@ -333,6 +363,9 @@ export function probeJudgeRound(
   const selected = selectRoundReport(read.records, { ...binding, consumedReportId });
   if (selected.ok) {
     const report = selected.report;
+    // The round is over: say so on the border too, so a human glancing at the
+    // window sees `done` instead of the last state the judge happened to report.
+    paintTitle("done");
     return {
       done: true,
       reason: "report",
@@ -371,6 +404,7 @@ export function probeJudgeRound(
   }
   const state = projection.lastState?.state ?? "unknown";
   const since = projection.lastStateSince ?? projection.lastActivityAt ?? "—";
+  paintTitle(projection.lastState?.state, projection.lastStateSince ?? projection.lastActivityAt);
   return {
     done: false,
     reason: "pending",
@@ -392,7 +426,7 @@ export function probeJudgeRound(
  * still reports to an opener running the oldest.
  */
 export function probeJudgeWait(
-  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "readText" | "roundBinding">,
+  deps: Pick<JudgeSessionToolDeps, "channelIO" | "channelHome" | "tmux" | "ownPane" | "now" | "readText" | "roundBinding">,
   child: Pick<JudgeChildRecord, "openerId" | "judgeId" | "paneId" | "streamPath" | "role" | "repoRoot">,
   cursors: JudgeWaitCursors,
 ): PaneJudgeWaitObservation {
@@ -491,7 +525,7 @@ async function doClose(deps: JudgeSessionToolDeps, params: Record<string, unknow
   if (child.paneId && !paneClosable(child, deps.tmuxServer())) {
     killNote = `pane ${child.paneId} 是另一个 tmux server 铸造的 id（可能已被重新分配），不动它，只清登记`;
   } else if (child.paneId && ownPane) {
-    const killed = closeJudgePane(deps.tmux, child.paneId);
+    const killed = closeSessionPane(deps.tmux, child.paneId);
     terminated = killed.ok;
     killNote = killed.ok ? `pane ${child.paneId} 已关` : `关 pane 失败（${killed.error}），登记照样清除`;
   }

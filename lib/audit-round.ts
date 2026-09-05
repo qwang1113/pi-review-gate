@@ -537,7 +537,8 @@ export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
    * question being asked now.
    */
   dispatch(input: { root: string; role: string; title: string; task: string; streamPath?: string }):
-    { ok: true; judgeId: string } | { ok: false; error?: string };
+    { ok: true; judgeId: string } | { ok: false; error?: string }
+    | Promise<{ ok: true; judgeId: string } | { ok: false; error?: string }>;
   /** The judge id this repo's role is addressable by, once dispatched. */
   judgeIdOf(root: string, role: string): string | undefined;
   /** Remember what was dispatched — a verdict binds to it. */
@@ -631,7 +632,10 @@ export async function runAuditRound(
   },
 ): Promise<{ ok: true } | { ok: false; text: string }> {
   const { spec, root } = input;
-  const dispatched = deps.dispatch({
+  // `await`: a dispatch now EARNS its receipt (it watches the judge's channel
+  // for proof the pane came up), so it is allowed to be asynchronous. A
+  // synchronous implementation still satisfies the type and is awaited as-is.
+  const dispatched = await deps.dispatch({
     root,
     role: spec.role,
     // A display label the ENGINE derives — never the caller's, and never part

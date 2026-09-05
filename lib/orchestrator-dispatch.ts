@@ -20,23 +20,13 @@
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
 import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
 
-import { STATE_VARIANT_ENV } from "./gate-state.ts";
-import { ORCHESTRATION_ID_ENV } from "./orchestration-id.ts";
-import { GATE_MODE_ENV } from "./task-mode.ts";
 import {
-  buildSpawnPaneArgv,
-  buildPaneStyleArgv,
-  buildPaneTitleArgv,
-  buildShowPaneLabelsArgv,
-  parseSpawnedPaneId,
-} from "./orchestrator-tmux.ts";
+  openSessionPane,
+  type SessionPaneDecor,
+} from "./session-factory.ts";
 import {
   paneColorFor,
   paneLabelFor,
-  paneStyleFor,
-  paneTitleFor,
-  PANE_BORDER_FORMAT,
-  PANE_BORDER_STATUS,
 } from "./orchestrator-pane-decor.ts";
 
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
@@ -104,51 +94,35 @@ function schedulingVerdict(
 }
 
 /**
- * Give this child's pane its colour and its label — INSIDE the spawn.
+ * What this child's border says — the strings, not the tmux calls.
  *
- * WHERE THIS RUNS IS PART OF THE REQUIREMENT, not an implementation taste
- * (user, 2026-08-30). It is not a tool, not an action, and not a second step
- * the orchestrator takes after `orchestrator_spawn` returns — not even
- * through an internal helper it would have to remember to call. It is one of
- * the atomic things a spawn already does, exactly like writing the task file,
- * manager's call sequence did not change by one character when this landed.
+ * WHERE THE DECORATION RUNS IS PART OF THE REQUIREMENT, not an implementation
+ * taste (user, 2026-08-30). It is not a tool, not an action, and not a second
+ * step the orchestrator takes after `orchestrator_spawn` returns — it is one
+ * of the atomic things a spawn already does, exactly like writing the task
+ * file. Since 2026-09-05 that atomicity is structural: the decoration happens
+ * inside `openSessionPane` (lib/session-factory.ts) for EVERY kind of pane, so
+ * this function only says what to write.
  *
- * FAILURE IS COSMETIC, ALWAYS. Every tmux result here is checked and then
- * DOWNGRADED to a note in the reply: a child that is running with a plain
- * border is a child that is running, while a spawn that failed because tmux
- * would not set a colour would be the gate breaking real work over decoration.
+ * FAILURE IS COSMETIC, ALWAYS — the factory downgrades every tmux failure here
+ * to a warning string, which becomes the note below.
  */
-function decorateChildPane(
-  deps: OrchestratorDeps,
-  opts: { paneId: string; childId: string; taskId: string; title: string },
-): { label: string; note: string } {
-  const label = paneLabelFor(opts.taskId, opts.title);
-  const failures: string[] = [];
-  const run = (argv: readonly string[]): void => {
-    try {
-      const result = deps.tmux(argv);
-      if (!result.ok) failures.push(result.stderr || argv.join(" "));
-    } catch (error) {
-      failures.push((error as Error).message);
-    }
-  };
-  run(buildPaneStyleArgv(opts.paneId, paneStyleFor(opts.childId)));
-  run(buildPaneTitleArgv(opts.paneId, paneTitleFor({ label, state: "working", stateForSeconds: 0 })));
-  for (const argv of buildShowPaneLabelsArgv(opts.paneId, PANE_BORDER_STATUS, PANE_BORDER_FORMAT)) {
-    run(argv);
-  }
-  if (failures.length === 0) {
-    return {
-      label,
-      note: `pane 已标记为 ${label}（${paneColorFor(opts.childId).name}边框，标题随状态自动刷新）。`,
-    };
-  }
+function childPaneDecor(taskId: string, title: string, childId: string): SessionPaneDecor {
   return {
-    label,
-    note:
-      `pane 装饰没能全部生效（${failures[0]}）—— 纯展示层，子会话本身不受影响，` +
-      "健康快照与通道判定照常。",
+    label: paneLabelFor(taskId, title),
+    colorSeed: childId,
+    state: "working",
+    stateForSeconds: 0,
   };
+}
+
+/** The receipt line about the border, warning included. */
+function decorNote(label: string, childId: string, warning: string | undefined): string {
+  if (!warning) {
+    return `pane 已标记为 ${label}（${paneColorFor(childId).name}边框，标题随状态自动刷新）。`;
+  }
+  return `pane 装饰没能全部生效（${warning}）—— 纯展示层，子会话本身不受影响，` +
+    "健康快照与通道判定照常。";
 }
 
 
@@ -276,102 +250,95 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     return fail(`review-gate: 任务书写不出来（${written.error}）—— 一个 pane 都没开。`);
   }
 
-  const env: Record<string, string> = {
-    // The child's wake-ups are addressed to the ORCHESTRATION, so they keep
-    // arriving after a relay — the whole point of the id.
-    [ORCHESTRATION_ID_ENV]: deps.runtime().orchestrationId,
-    // It is an ordinary loop session, and it is told so explicitly rather
-    // than left to classify itself into something else.
-    [GATE_MODE_ENV]: "loop",
-    // F4 — its OWN gate sidecar, so supervisor and worker never overwrite
-    // each other's mode, Q&A record and unmet-gate list.
-    [STATE_VARIANT_ENV]: childId,
-  };
-  let paneId: string | undefined;
-  try {
-    const result = deps.tmux(buildSpawnPaneArgv({
-      orchestratorPane: self,
-      lastChildPane: lastChildPane(deps.runtime(), panes.panes),
-      cwd,
-      env,
-      // F7/F8 — the task rides in on the argv. No typing, nothing to
-      // truncate, no Enter to forget.
-      // F7/F8 — the task rides in on the argv. No typing, nothing to
-      // truncate, no Enter to forget. The reference is REPO-RELATIVE:
-      // the pane starts in `cwd` (the task's repo), and pi expands
-      // `@.pi/tasks/<file>` against that cwd — no absolute path ever
-      // reaches the child's first prompt.
-      command: buildChildCommand(taskFileRelPath(taskFileName(marker)), childId),
-    }));
-    if (!result.ok) throw new Error(result.stderr || "tmux split-window 失败");
-    paneId = parseSpawnedPaneId(result.stdout);
-  } catch (error) {
-    return fail(`review-gate: 开子会话失败 —— ${(error as Error).message}`);
-  }
-  if (!paneId) {
-    return fail("review-gate: tmux 没有回报新 pane id，无法登记这个子会话 —— 已回滚（未登记的 pane 不可寻址）。");
-  }
-
-  deps.saveRuntime(registerChild(deps.runtime(), {
-    id: childId,
-    taskId,
-    paneId,
+  const decor = childPaneDecor(taskId, task.title, childId);
+  const lastPane = lastChildPane(deps.runtime(), panes.panes);
+  let evidence: DeliveryEvidence | undefined;
+  const opened = await openSessionPane(deps.tmux, {
+    ownPane: self,
     cwd,
-    stateVariant: childId,
-    taskFile: taskFileRelPath(taskFileName(marker)),
-    createdAt: new Date(deps.now()).toISOString(),
-    // The spawn IS the first assignment: a completion record older than this
-    // belongs to whatever ran this task before (round-1 P1).
-    lastAssignedAt: new Date(deps.now()).toISOString(),
-  }));
-
-  // One of the spawn's own atomic actions (see decorateChildPane): the child
-  // gets its colour and its `@task · state` border here, not in a step the
-  // caller has to remember.
-  const decor = decorateChildPane(deps, {
-    paneId,
-    childId,
-    taskId,
-    title: task.title,
+    layout: "child-column",
+    ...(lastPane === undefined ? {} : { lastChildPane: lastPane }),
+    // The environment is assembled by the factory — one place for a contract
+    // three different processes read (orchestration id so wake-ups survive a
+    // relay, `loop` so the child does not classify itself into something else,
+    // its OWN sidecar variant so supervisor and worker never overwrite each
+    // other's state — F4).
+    role: {
+      kind: "orchestration-child",
+      orchestrationId: deps.runtime().orchestrationId,
+      stateVariant: childId,
+    },
+    // F7/F8 — the task rides in on the argv. No typing, nothing to truncate,
+    // no Enter to forget. The reference is REPO-RELATIVE: the pane starts in
+    // `cwd` (the task's repo), and pi expands `@.pi/tasks/<file>` against that
+    // cwd — no absolute path ever reaches the child's first prompt.
+    command: buildChildCommand(taskFileRelPath(taskFileName(marker)), childId),
+    decor,
+    // Registration rides INSIDE the open (an unregistered pane is
+    // unaddressable, and the delivery probe below runs right after it).
+    register: (paneId) => {
+      deps.saveRuntime(registerChild(deps.runtime(), {
+        id: childId,
+        taskId,
+        paneId,
+        cwd,
+        stateVariant: childId,
+        taskFile: taskFileRelPath(taskFileName(marker)),
+        createdAt: new Date(deps.now()).toISOString(),
+        // The spawn IS the first assignment: a completion record older than
+        // this belongs to whatever ran this task before (round-1 P1).
+        lastAssignedAt: new Date(deps.now()).toISOString(),
+      }));
+      const started = applyTaskStatus(plan!, taskId, "running", { now: new Date(deps.now()).toISOString() });
+      if (started.ok) deps.savePlan(started.plan);
+    },
+    // F8 — EARN the receipt. Nothing below claims delivery that was not seen.
+    verify: async () => {
+      const check = await verifyDelivery(deps, {
+        kind: "spawn",
+        childId,
+        cwd,
+        stateVariant: childId,
+      });
+      evidence = check.evidence;
+      return check.verdict.ok
+        ? { ok: true, detail: check.verdict.summary }
+        : { ok: false, detail: check.verdict.reason };
+    },
   });
-
-  const started = applyTaskStatus(plan!, taskId, "running", { now: new Date(deps.now()).toISOString() });
-  if (started.ok) deps.savePlan(started.plan);
-
-  // F8 — EARN the receipt. Nothing below claims delivery that was not seen.
-  const check = await verifyDelivery(deps, {
-    kind: "spawn",
-    childId,
-    cwd,
-    stateVariant: childId,
-  });
-  if (!check.verdict.ok) {
+  const evidenceLine = evidence ? describeDeliveryEvidence(evidence) : "（一条观察结果都没拿到）";
+  if (!opened.ok) {
+    if (!opened.deliveryFailed || !opened.paneId) {
+      return fail(`review-gate: 开子会话失败 —— ${opened.error}（未登记的 pane 不可寻址，已放弃本次开会话）。`);
+    }
+    const failedPane = opened.paneId;
     const current = currentPlan(deps).plan;
     if (current) {
       const back = applyTaskStatus(current, taskId, "pending", {
-        note: `spawn 未能确认子会话起跑（${describeDeliveryEvidence(check.evidence)}）`,
+        note: `spawn 未能确认子会话起跑（${evidenceLine}）`,
         now: new Date(deps.now()).toISOString(),
       });
       if (back.ok) deps.savePlan(back.plan);
     }
     return fail(
-      `review-gate: ${check.verdict.reason}\n` +
-      `观察到的证据：${describeDeliveryEvidence(check.evidence)}。\n` +
-      `pane ${paneId} 和子会话登记 ${childId} 都**保留**着（不误杀一个可能其实活着的会话），` +
+      `review-gate: ${opened.error}\n` +
+      `观察到的证据：${evidenceLine}。\n` +
+      `pane ${failedPane} 和子会话登记 ${childId} 都**保留**着（不误杀一个可能其实活着的会话），` +
       `任务 ${taskId} 已退回 pending。\n` +
       `下一步：\`orchestrator_wait({ timeoutMs: 0 })\` 看它在健康快照里是什么状态；` +
       `确认没救就 \`orchestrator_close({ childId: "${childId}" })\` 再重开。\n` +
       `任务书在：${written.path}（随 \`pi @${taskFileRelPath(taskFileName(marker))}\` 传入）`,
-      { childId, paneId, delivered: false, evidence: check.evidence },
+      { childId, paneId: failedPane, delivered: false, ...(evidence === undefined ? {} : { evidence }) },
     );
   }
+  const paneId = opened.paneId;
 
   return reply(
     `review-gate: 子会话 ${childId} 已在 pane ${paneId} 启动（共享主工作区，同一 repo 内串行）。\n` +
     `子会话工作目录（cwd）：${cwd} —— 它的 gate 绑定这个仓库，goal 也绑这里。\n` +
     `任务 ${taskId} 已置为 running，任务书已随 \`pi @${taskFileRelPath(taskFileName(marker))}\` 带进去（落盘：${written.path}）。\n` +
-    `投递已核实：${check.verdict.summary}。\n` +
-    `${decor.note}\n` +
+    `投递已核实：${opened.deliveryNote ?? "（本次没有核实项）"}。\n` +
+    `${decorNote(decor.label, childId, opened.decorWarning)}\n` +
 
     `${ORCHESTRATOR_WAIT_DISCIPLINE}\n` +
     "它有事找你时，wait 的回执里会直接带上完整的问题与选项，用 `orchestrator_answer` 回。",

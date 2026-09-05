@@ -13,9 +13,10 @@
  */
 
 import type { OrchestratorDeps, ToolReply } from "./orchestrator-deps.ts";
-import { buildListPanesArgv, buildPaneTitleArgv, parsePaneIds } from "./orchestrator-tmux.ts";
-import { paneLabelFor, paneTitleForHealth } from "./orchestrator-pane-decor.ts";
-import { channelPathFor, projectChannel, readChannel } from "./orchestrator-channel.ts";
+import { buildListPanesArgv, parsePaneIds } from "./orchestrator-tmux.ts";
+import { paneLabelFor } from "./orchestrator-pane-decor.ts";
+import { refreshSessionPaneTitle, type PaneTitleMemory } from "./session-factory.ts";
+import { channelPathFor, projectChannel, readChannel, type ChannelIO } from "./orchestrator-channel.ts";
 import type { ChildAssets, SupervisionSnapshot } from "./orchestrator-supervisor.ts";
 
 import {
@@ -237,24 +238,43 @@ export interface DeliveryCheck {
 }
 
 /**
+ * Everything a delivery check needs, and nothing else.
+ *
+ * NARROWER THAN `OrchestratorDeps` ON PURPOSE (2026-09-05). The check is no
+ * longer an orchestration-only affair: lib/session-factory.ts runs it for
+ * JUDGE panes too, and a judge dispatcher holds a channel and a clock, not an
+ * orchestration runtime. `OrchestratorDeps` satisfies this shape structurally,
+ * so the orchestration callers are unchanged.
+ */
+export interface DeliveryProbeDeps {
+  channelIO(): ChannelIO;
+  /** Injectable sleep, so verification is testable without waiting. */
+  sleep(ms: number): Promise<void>;
+  /** Only a session that writes a sidecar has one; a judge deliberately does not. */
+  childGateState?(cwd: string, variant?: string): Record<string, unknown> | undefined;
+}
+
+/**
  * WATCH a delivery until it can be believed, or until the budget runs out
  * (F7/F8 — the receipt is earned, never assumed).
  *
  * It polls rather than checking once because starting a pi session is not
- * instantaneous, and a single check right after `split-window` would fail on
+ * instantaneous, and a single check right after the split would fail on
  * every healthy spawn. It stops at the FIRST positive evidence: there is
  * nothing to gain by watching a child that has demonstrably started.
  *
- * WHAT IS POLLED IS THE CHANNEL, not a screen. For a spawn, any record at all
- * proves the process started AND its gate is alive; for an instruction, the
- * child's own acknowledgement proves it was injected. The judgement itself is
- * lib/orchestrator-delivery.ts's — this function only gathers.
+ * WHAT IS POLLED IS THE CHANNEL, not a screen. For a spawn, a record that was
+ * not there before proves the process started AND its gate is alive; for an
+ * instruction, the child's own acknowledgement proves it was injected. The
+ * judgement itself is lib/orchestrator-delivery.ts's — this function only
+ * gathers.
  */
-export async function verifyDelivery(
-  deps: OrchestratorDeps,
+export async function verifyDeliveryOn(
+  deps: DeliveryProbeDeps,
   opts: {
     kind: DeliveryKind;
-    childId: string;
+    /** The channel file to watch — the ONE thing that differs per session kind. */
+    channelPath: string;
     /** Present for `instruct`: the record whose acknowledgement is awaited. */
     instructId?: string;
     /** Present for `instruct`: what was promised decides which ack suffices. */
@@ -262,6 +282,16 @@ export async function verifyDelivery(
     /** Where the child's own sidecar would appear, when it has one. */
     cwd?: string;
     stateVariant?: string;
+    /**
+     * Records the channel already held BEFORE this spawn.
+     *
+     * A judge's channel outlives its panes (one file per role+repo, rounds
+     * appended), so "there is a record" proves nothing about the pane just
+     * opened — only a record ABOVE this watermark does. An orchestration child
+     * gets a brand-new channel per spawn, so it leaves this at 0 and the
+     * meaning is exactly what it always was.
+     */
+    baselineRecordCount?: number;
     attempts?: number;
     intervalMs?: number;
   },
@@ -281,18 +311,45 @@ export async function verifyDelivery(
   return { verdict, evidence };
 }
 
+/** The orchestration-side entry: same check, path derived from the runtime. */
+export async function verifyDelivery(
+  deps: OrchestratorDeps,
+  opts: {
+    kind: DeliveryKind;
+    childId: string;
+    instructId?: string;
+    instructMode?: InstructDeliveryMode;
+    cwd?: string;
+    stateVariant?: string;
+    attempts?: number;
+    intervalMs?: number;
+  },
+): Promise<DeliveryCheck> {
+  const { childId: _childId, ...rest } = opts;
+  return verifyDeliveryOn(deps, {
+    ...rest,
+    channelPath: channelPathFor(deps.runtime().orchestrationId, opts.childId, deps.channelHome()),
+  });
+}
+
 /** One observation of a delivery, straight from the channel and the sidecar. */
 function readDeliveryEvidence(
-  deps: OrchestratorDeps,
-  opts: { childId: string; instructId?: string; cwd?: string; stateVariant?: string },
+  deps: DeliveryProbeDeps,
+  opts: {
+    channelPath: string;
+    instructId?: string;
+    cwd?: string;
+    stateVariant?: string;
+    baselineRecordCount?: number;
+  },
 ): DeliveryEvidence {
-  const sidecarPresent = opts.cwd
-    ? Boolean(deps.childGateState(opts.cwd, opts.stateVariant))
+  const gateState = deps.childGateState;
+  const sidecarPresent = opts.cwd && gateState
+    ? Boolean(gateState.call(deps, opts.cwd, opts.stateVariant))
     : false;
   try {
     const io = deps.channelIO();
-    const path = channelPathFor(deps.runtime().orchestrationId, opts.childId, deps.channelHome());
-    const read = readChannel(io, path);
+    const read = readChannel(io, opts.channelPath);
     // The LAST matching ack, not the first: the handshake is two records now
     // (`received`, then `injected`), and reading the first one would report a
     // queued message forever as merely queued — including in the receipt of a
@@ -304,7 +361,7 @@ function readDeliveryEvidence(
       : [];
     const ack = acks[acks.length - 1];
     return {
-      channelReported: read.records.length > 0,
+      channelReported: read.records.length > (opts.baselineRecordCount ?? 0),
       sidecarPresent,
       ...(ack && ack.kind === "instruct-ack"
         ? {
@@ -321,6 +378,51 @@ function readDeliveryEvidence(
   }
 }
 
+/** How many records a channel holds right now (the spawn watermark). */
+export function channelRecordCount(io: ChannelIO, channelPath: string): number {
+  try {
+    return readChannel(io, channelPath).records.length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * How long a judge is given to prove it booted.
+ *
+ * Longer than the orchestration budget on purpose: a judge pane reports on its
+ * own heartbeat tick, and pi's start-up plus that tick is measurably slower
+ * than a child's first record. The check stops at the FIRST evidence either
+ * way, so the ceiling only costs anything when something is actually wrong.
+ */
+export const JUDGE_BOOT_ATTEMPTS = 30;
+
+/**
+ * Did the judge pane that was just opened actually come up?
+ *
+ * The SAME probe the orchestration spawn uses (same polling, same evidence
+ * shape, same verdict function) — the only judge-specific part is the
+ * watermark, because a judge's channel outlives its panes. It exists because
+ * a judge that never boots is the one silence its opener cannot break: it
+ * waits forever for a report nobody will write.
+ */
+export async function verifyJudgeBoot(
+  deps: DeliveryProbeDeps,
+  opts: { channelPath: string; baselineRecordCount: number; attempts?: number },
+): Promise<{ ok: boolean; detail: string }> {
+  const check = await verifyDeliveryOn(deps, {
+    kind: "spawn",
+    channelPath: opts.channelPath,
+    baselineRecordCount: opts.baselineRecordCount,
+    attempts: opts.attempts ?? JUDGE_BOOT_ATTEMPTS,
+  });
+  return check.verdict.ok
+    ? { ok: true, detail: check.verdict.summary }
+    : { ok: false, detail: check.verdict.reason };
+}
+
+
+
 
 /** Everything still outstanding on one child's channel. */
 export function childChannelProjection(deps: OrchestratorDeps, childId: string) {
@@ -332,10 +434,6 @@ export function childChannelProjection(deps: OrchestratorDeps, childId: string) 
   }
 }
 
-
-
-/** Shortest gap between two repaints of the SAME pane. */
-const PANE_REPAINT_MIN_MS = 5_000;
 
 
 /**
@@ -356,13 +454,12 @@ const PANE_REPAINT_MIN_MS = 5_000;
  * Returns the legend (childId → label) so a caller can print the same names
  * it just painted.
  *
- * THROTTLED, and it has to be. The wait loop probes every 2 seconds, so an
- * unthrottled repaint would spawn a tmux process per child per probe — 150
- * of them per child over one default wait — and the title carries a SECONDS
- * counter, so comparing the rendered string would never dedupe anything
- * either. A border that lags by a few seconds costs nothing; a supervisor
- * that forks a process every two seconds for decoration is a real cost.
-
+ * THE PAINTING ITSELF IS NOT HERE (2026-09-05). Title rendering, the repaint
+ * memory and the throttle live in lib/session-factory.ts, so a judge pane ages
+ * on its border exactly the way a child's does — that shared function is what
+ * makes "the judge border is stale" (C2) impossible to reintroduce on one side
+ * only. This function still decides WHICH children get painted and with what
+ * label, which is orchestration knowledge.
  */
 export function refreshPaneLabels(
   deps: OrchestratorDeps,
@@ -371,6 +468,7 @@ export function refreshPaneLabels(
   const plan = (() => {
     try { return deps.readPlan().plan; } catch { return undefined; }
   })();
+  const memory: PaneTitleMemory = deps.paneDecorMemory();
   const legend: Array<{ childId: string; label: string }> = [];
   for (const supervision of snapshot.children) {
     const child = supervision.child;
@@ -379,18 +477,16 @@ export function refreshPaneLabels(
 
     legend.push({ childId: child.id, label });
     if (supervision.state === "dead") continue;
-    const title = paneTitleForHealth(label, supervision.health);
-    const painted = deps.paneDecorMemory().get(child.id);
-    const now = deps.now();
-    if (painted && painted.title === title) continue;
-    if (painted && now - painted.at < PANE_REPAINT_MIN_MS) continue;
-    deps.paneDecorMemory().set(child.id, { title, at: now });
-
-    try {
-      deps.tmux(buildPaneTitleArgv(child.paneId, title));
-    } catch {
-      /* cosmetic only — never allowed to affect supervision */
-    }
+    refreshSessionPaneTitle(deps.tmux, {
+      paneId: child.paneId,
+      label,
+      state: supervision.health.state,
+      ...(supervision.health.stateForSeconds === undefined
+        ? {}
+        : { stateForSeconds: supervision.health.stateForSeconds }),
+      now: deps.now(),
+      memory,
+    });
   }
 
   return legend;

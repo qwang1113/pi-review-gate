@@ -85,7 +85,8 @@ opener 能从门禁拿到的关于自己 review 的信息，只有三件，不�
 
 | 落点 | 职责 |
 |---|---|
-| `lib/judge-pane.ts`（新建） | pane 版 judge 启动/回收/恢复/联关。argv 构造复用 `judge-process.ts`，开/关 pane 复用 `orchestrator-tmux.ts`，装饰复用 `orchestrator-pane-decor.ts`；`judge_recover` 同 id 重开续 transcript，`declare_done` 联关名下全部 pane |
+| `lib/judge-pane.ts`（新建；2026-09-05 收窄） | 原为 pane 版 judge 的启动/回收/恢复/联关。**开 pane 那一半已搬进 `lib/session-factory.ts`**（见下一行），这里只剩 judge 的跨进程契约常量（`RG_JUDGE_OPENER` / `_ID` / `_ROLE`）与 pane 探活；`judge_recover` 同 id 重开续 transcript、`declare_done` 联关名下全部 pane 的行为不变 |
+| `lib/session-factory.ts`（新建，2026-09-05） | **开一个带角色的 pi 会话的唯一入口**：split → 登记 → 装饰 → 投递核实一次做完，judge 与编排子会话（含两处 recover 与接力 successor）共用。收敛前每处各写一遍，代价是三个实测缺陷：judge pane 的边框行没人开（C1）、judge 标题没人刷新（C2）、judge 侧没有投递核实。argv 仍只在 `orchestrator-tmux.ts` 构造，颜色/标题字符串仍在 `orchestrator-pane-decor.ts` |
 | `lib/hierarchy.ts`（新建） | opener 注册表 + `caller is opener` 校验（纯函数，IO 经 seam，便于单测）。这是“门禁维持秩序”的唯一实现点 |
 | `lib/orchestrator-channel.ts`（改） | 通道 key 从 `<orch-id>/<child-id>` 泛化为 `<opener-id>/<judge-id>`（opener 可以是 session id）；新增 `report` 记录种（verdict 摘要 + findings 计数 + payload spill 引用）。不另起 judge-channel 模块：记录/spill/游标/IO seam 是同一套原语，另起即重复实现，分 planes 只在 key 命名上区分 |
 | `lib/judge-lifecycle.ts`（改） | dispatch 改走 pane（调 `judge-pane.ts`）；verdict 记录（`record_review`、STALE 判定、tree 绑定）原样保留 |
