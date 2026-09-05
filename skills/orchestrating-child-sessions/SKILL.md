@@ -1,6 +1,6 @@
 ---
 name: orchestrating-child-sessions
-description: 项目经理（orchestrator）编排子会话时的三处已实测陷阱——子会话收尾后门禁重置状态、导致 PM 误判「它没收尾」并催它重做；fileBoundaries 漏掉沿转发链路的间接注入面；orchestrator_plan 对已存在 task id 的 note 更新被静默丢弃。在 set_gate_mode("orchestrator") 之后写 plan 之前加载；子会话报告完成而门禁显示 PENDING 时加载；准备用 orchestrator_instruct 催子会话返工前加载。
+description: 项目经理（orchestrator）编排子会话时的三处已实测陷阱——子会话拿到 READY 后的任何一次编辑（含仓库外的完成报告）都会把门禁打回 PENDING，PM 据此误判「它没收尾」并催它重做；fileBoundaries 漏掉沿转发链路的间接注入面；orchestrator_plan 对已存在 task id 的 note 更新被静默丢弃。在 set_gate_mode("orchestrator") 之后写 plan 之前加载；子会话报告完成而门禁显示 PENDING 时加载；准备用 orchestrator_instruct 催子会话返工前加载。
 ---
 
 # 编排子会话
@@ -9,13 +9,19 @@ description: 项目经理（orchestrator）编排子会话时的三处已实测�
 
 ## 1. 子会话说收尾了，门禁却显示 PENDING —— 先查三项，再开口
 
-`declare_done` 成功之后，门禁会**重置** gate 状态（`review: READY → PENDING`、`precommit: PASS → NOT_RUN`）。PM 随后去看状态，看到的是重置后的读数，很容易读成「这个子会话根本没通过审查」，于是用 `orchestrator_instruct` 催它重做——而子会话真去重做时，门禁自己会拒绝它。**这是一次「照门禁说的做反而出事」**。
+子会话报告「已收尾」，PM 去看门禁却是 `review: PENDING` / `precommit: NOT_RUN`，于是读成「它根本没通过审查」，用 `orchestrator_instruct` 催它重做——而子会话真去重做时，门禁自己会拒绝它。**这是一次「照门禁说的做反而出事」**。
 
-同一形状还有第二个触发源，比第一个更隐蔽：**编辑追踪不区分 repo 内与 repo 外**，而裁决作废按「本轮有编辑」触发。于是子会话拿到 READY 后**只编辑仓库外的完成报告**，READY 也会被打掉。
+**触发源不是 `declare_done`。** `declare_done` 只**复检**每一道门禁（`extensions/review-gate.ts:5800` 起的处理体：非 git 短路、逐 repo 复检），它不重置任何东西。真正把 READY 打下去的是**拿到 READY 之后的任何一次编辑**——`invalidateBindings`（`lib/gate-state.ts:428`）自述得很清楚：
+
+> Content-change invalidation — the **ONE place** a session's own edit downgrades standing bindings. READY → PENDING and PASS → NOT_RUN, and the fingerprint goes with the verdict.
+
+它的三处调用点（`extensions/review-gate.ts:3508` / `:3562` / `:3690`）全是编辑路径：编辑工具的跨 repo 分支、同 repo 分支，以及从 bash 侧观察到文件变化的兜底。
+
+**而编辑追踪不区分 repo 内与 repo 外**，这是让 PM 最容易误判的一环：子会话拿到 READY 后**只写一份仓库外的完成报告**，`invalidateBindings` 照样触发，门禁读数瞬间变成「从没通过的样子」。
 
 ### 识别法：三项一起看
 
-判定「已收尾后被重置」而不是「从未通过」，查这三项，全中即是前者：
+判定「通过之后被一次编辑打下去」而不是「从未通过」，查这三项，全中即是前者：
 
 1. `lastReadyReview.treeOid` 与当前 `git rev-parse HEAD^{tree}` 一致；
 2. `checkpoint.sha` 与当前 `HEAD` 一致；
@@ -27,9 +33,17 @@ sidecar 在 `.pi/review-gate-state.<child-task-id>.json`。三项全中，就**�
 
 2026-09-05，子会话 `t3a-audit-round-engine` 拿到 READY 后只编辑了仓库**外**的 `/tmp/pm-rounds/child-report-03a.md`（`git status` 全程干净），`declare_done` 即被拒，理由是「code review gate is PENDING (need READY)」「precommit has not run」。
 
-当时的 sidecar 里 `review` 是**自相矛盾**的一条：`verdict: "PENDING"`，却带着只有 `verdict === "READY"` 分支才会写入的 `commitSha` 与 `docSync`，`fingerprint` 被清空；同一份 sidecar 的 `rounds` 数组如实记着那一轮 `"verdict":"READY"`。`precommit` 同样被降级（`verdict: "NOT_RUN"` 却带着 `at` / `mode` / `testScope`）。原始记录：`/tmp/pm-rounds/child-report-03a.md:196-200`。
+当时的 sidecar 里 `review` 看着**自相矛盾**：`verdict: "PENDING"`，却带着只有 `verdict === "READY"` 分支才会写入的 `commitSha` 与 `docSync`，`fingerprint` 被清空；同一份 sidecar 的 `rounds` 数组如实记着那一轮 `"verdict":"READY"`。`precommit` 同样被降级（`verdict: "NOT_RUN"` 却带着 `at` / `mode` / `testScope`）。原始记录：`/tmp/pm-rounds/child-report-03a.md:196-200`。
 
-**诚实标注**：该 sidecar `.pi/review-gate-state.t3a-audit-round-engine-mtnk0tlj.json` 现在读作 `verdict: "READY"`——t3a 后来又跑了一轮审查（`8a007c1`）把它覆盖了，所以那个矛盾态**不可原地复现**。仍然可以自查的残留是同一份 sidecar 的 `sessionEditedFiles`，里面至今赫然列着 `/tmp/pm-rounds/child-report-03a.md`——这正是「repo 外的编辑也算编辑」的直接证据。
+**这个「矛盾」恰恰是 `invalidateBindings` 跑过的指纹**：它只改 `verdict` 与 `fingerprint` 两个字段，READY 分支写下的其余字段原封不动地留在原地。所以看到「PENDING 却带着 `commitSha`」时，答案不是「记录坏了」，而是「它曾经 READY，被一次编辑降级了」——这本身就是识别法的第四个佐证。
+
+**决定性反证（可在本仓库直接自查）**：同一份 sidecar `.pi/review-gate-state.t3a-audit-round-engine-mtnk0tlj.json` 现在的读数是 `completion.at = 2026-09-05T01:15:48Z`（`declare_done` 成功）、`rounds.length = 0`（预算被清空），而 `review.verdict` 仍是 `READY`（`at` 为 01:15:32）、`precommit.verdict` 仍是 `PASS`（`at` 为 01:15:02）。**一次成功的 `declare_done` 之后，READY 与 PASS 都原样站着** —— 它清的是轮次预算，不是裁决。所以「declare_done 会重置门禁」这个说法是错的，别照它排查。
+
+**恢复办法：跑一轮「纯重新绑定」。** 被这个坑打中时不需要重做任何工作——工作区内容没变，缺的只是绑定。`t3a-audit-round-engine` 就是这么脱身的：仓库零改动（`HEAD` 仍是 `8a007c1`、`git status` 干净、测试与上一次 READY 逐字节相同）的情况下重跑一次 `judge_submit`，01:15:02 拿回 `PASS`、01:15:32 拿回 `READY`，01:15:48 `declare_done` 成功。**PM 该给的指令是「重新绑定」，不是「重做」。**
+
+（那个自相矛盾的中间态本身**不可原地复现**了——它已被后来这轮重新绑定覆盖，只留在同期记录 `/tmp/pm-rounds/child-report-03a.md:196-200` 里。仍可自查的残留是该 sidecar 的 `sessionEditedFiles` 至今列着 `/tmp/pm-rounds/child-report-03a.md`，这是「repo 外的编辑也被算作编辑」的直接证据。）
+
+**同一现象的第二个、更容易自查的实例**：写这条 skill 的会话（`t3b-skills-writeup-r2`）只用编辑工具在 `$TMPDIR` 下建了一个探针文件，它的 sidecar `sessionEditedFiles` 里就出现了 `/tmp/pm-rounds/evidence/t3b/insert-probe.ts`——一个**完全不在仓库里**的路径，照样被算作「本会话的编辑」并触发降级。
 
 ### 对子会话的操作含义：把报告排进时序
 
@@ -52,11 +66,11 @@ sidecar 在 `.pi/review-gate-state.<child-task-id>.json`。三项全中，就**�
 - `extensions/review-gate.ts:4125` — `"review-gate: 本轮未送审 — prepare_review 被拒。\n" + toolText(prepared)`
 - 同类还有 `:4082`（precommit 未过）与 `:4107`（checkpoint 被拒）
 
-所以 `lib/review-prepare-tools.ts`、`lib/advisory-prepare-tools.ts` 属于注入面。第 2 轮 plan 的第一版漏掉了它们，被 plan 审计员报 **P1**。`test/extension-structure.test.ts` 里那条「every tool name in agent-readable text is a tool that EXISTS」的测试把这层写进了注释，并明说「narrowing the scan is not an available fix」。
+所以 `lib/review-prepare-tools.ts`、`lib/advisory-prepare-tools.ts` 属于注入面。2026-09-04 的一份 plan 第一版就漏掉了它们，被 plan 审计员报 **P1**。`test/extension-structure.test.ts` 里那条「every tool name in agent-readable text is a tool that EXISTS」的测试把这层写进了注释，并明说「narrowing the scan is not an available fix」。
 
 ### 同一条的第二个形态：文档里逐项枚举目录内容的表格
 
-一张**把目录内容一项项列出来**的表也是边界的一部分：往那个目录里加东西，同一轮就得更新它，否则留下陈旧枚举。本轮实例——`docs/module-map.md` 的 `skills/` 行原本只列 `skills/review-loop`，新增 skill 目录必须同轮改它。
+一张**把目录内容一项项列出来**的表也是边界的一部分：往那个目录里加东西，同一次改动里就得更新它，否则留下陈旧枚举。实例（2026-09-05）——`docs/module-map.md` 的 `skills/` 行原本只列 `skills/review-loop`，新增 skill 目录时必须同步改它。
 
 ### 检查法
 
@@ -93,7 +107,7 @@ return {
 
 ### 实证
 
-第 2 轮 PM 两次需要改 note（改口径、审计打回后补三条 findings），**两次都靠换新 task id 才落盘**：`t2-message-driven-wait` → `t2-msg-driven-wait-c2` → `t2-msg-driven-wait-r2`。
+2026-09-04，一位 PM 两次需要改 note（改口径、审计打回后补三条 findings），**两次都靠换新 task id 才落盘**：`t2-message-driven-wait` → `t2-msg-driven-wait-c2` → `t2-msg-driven-wait-r2`。
 
 ### 代价：换 id 会触发重新批准
 
