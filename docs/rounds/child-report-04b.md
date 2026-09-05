@@ -21,10 +21,12 @@
 | 7 全绿 + 文档 + 交付站点 | **部分达成** | `tsc` EXIT=0、`npm test` 2369 pass / 0 fail、文档已同步、报告已写；**但终点不是「干净工作区 + 带 READY 的 HEAD」**——见下 |
 
 **唯一未完全达成的一条，如实说明**：退出标准 7 要求终点是「干净工作区 + 带 READY 的
-HEAD」。实际终点是 **HEAD = `9bf5587`（带 R6 的 READY），工作区里多了这份报告**。原因是
-报告必须落在仓库内，写它就会弄脏工作区、把 READY 打回 PENDING；项目经理与监督者明确
-决定「R6 的 READY 即终局，报告不再买一轮 review」。停止指令下达时手上还有两处**未提交的
-测试改动**，已按指令 `git checkout --` 还原，因此除报告外工作区与 R6 审过的那棵树逐字一致。
+HEAD」。实际终点是 **HEAD = `9bf5587`（带最后一轮代码审的 READY），工作区里多了这份
+报告**。原因是报告必须落在仓库内，写它就会弄脏工作区、把门禁打回 PENDING；项目经理与
+监督者明确决定「最后一轮代码审的 READY 即终局，报告不再买一轮打磨」——`declare_done` 随后
+被 doc review gate 拦下，用户改为授权**专为这份文档**走一轮零代码改动的 review（就是本轮）。
+停止指令下达时手上还有两处**未提交的测试改动**，已按指令 `git checkout --` 还原，因此除
+这份报告外，工作区与最后一轮代码审过的那棵树逐字一致。
 
 ---
 
@@ -162,7 +164,7 @@ judge 侧投递核实要求 `dispatchJudgeRound` 变 async，而 goal/plan 审�
 
 ### 7. 全绿 + 文档 + 交付站点
 
-**最终验收（2026-09-05，停止打磨后在 R6 READY 绑定的那棵树上重跑）**：
+**最终验收（2026-09-05，停止打磨后在最后一轮代码审绑定的那棵树 `9bf5587` 上重跑）**：
 
 ```
 $ npx tsc --noEmit ; echo "TSC EXIT=$?"
@@ -239,11 +241,11 @@ $ git diff 2c77a2e..HEAD --name-only | grep -v -E "<边界清单>"
 
 ## 三、发现但未做 / 已知遗留（交给下一轮，本轮**不**再走 review）
 
-> 2026-09-05：项目经理下达停止指令（reviewer 已连续 6 轮 READY，属于门禁缺陷 D11
-> 「打磨闸拦不住无限抛光」的复现）。以下条目**均未修**，按「现象 + 严重度 + 建议修法」
-> 如实记录。最后两条是停止指令下达时正在手上、已被**还原**的改动。
+> 2026-09-05：项目经理下达停止指令（reviewer 已连续 **10 轮** READY，属于门禁缺陷 D11
+> 「打磨闸拦不住无限抛光」的复现，逐轮数据见 §五.1）。以下条目**均未修**，按
+> 「现象 + 严重度 + 建议修法」如实记录。前两条是停止指令下达时正在手上、已被**还原**的改动。
 
-1. **`declare_done` 级联那一处的释放行为没有行为测试**（reviewer R6 的 P2，**未修**）。
+1. **`declare_done` 级联那一处的释放行为没有行为测试**（第 10 轮 reviewer 的 P2，**未修**）。
    现象：把级联里的 `closeOpts` 改成恒 `{}`（永不收 bar），全量 2369 条测试仍全绿；
    只有源码结构断言会拦住它。严重度：**P2**（用户环境残留，且它是五条关闭路径里唯一
    没有行为覆盖的一条）。建议修法：给扩展的 `declare_done` 做一个像
@@ -251,7 +253,7 @@ $ git diff 2c77a2e..HEAD --name-only | grep -v -E "<边界清单>"
    `lib/` 里的纯函数再单测——后者更符合本仓「判定不留在扩展里」的口径。
    （停止指令下达时我已写好一条**结构**断言把它钉住，按指令一并还原。）
 
-2. **`judge_spawn` 回滚路径的 `paneClosable` 过滤没被钉住**（reviewer R6 的 Nit，**未修**）。
+2. **`judge_spawn` 回滚路径的 `paneClosable` 过滤没被钉住**（第 10 轮 reviewer 的 Nit，**未修**）。
    现象：删掉那一行，`test/judge-spawn-tools.test.ts` 仍 17 pass / 0 fail。
    严重度：**Nit**（该过滤是「异 tmux server 的 pane id 不算兄弟」，删掉只会让 bar
    多留一会儿）。建议修法：加一条回滚测试，兄弟条目带 `tmuxServer: "other-server,9"`，
@@ -492,19 +494,32 @@ judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫�
 
 ### 1. 打磨闸给不出停止信号（D11 的第三次复现）—— 2026-09-05，本轮最重要的一条
 
-现象：reviewer **连续 6 轮全部 READY（R1–R6 无一 BLOCKED）**，但每一轮都附带 P2/Nit，
-而我每一轮都据此再改一轮、再提交一轮。门禁这一侧唯一的刹车是 `judge_submit` 的
-「两轮 READY 后必须给 reason」——我每次都能写出一条**真实且成立**的 reason（因为 findings
-确实是真的），于是闸门每次都放行。结果是：**收敛判据不存在**。第 3 轮曾有一个纯文档任务
-被同样的形状审了 14 轮；这一轮是 10 轮（R1–R6 记录了 6 轮裁决，另有 4 次流式 findings 的
-往返）。最终是**项目经理人工喊停**，不是门禁。
+现象：reviewer **连续 10 轮全部 READY，无一 BLOCKED**，但每一轮都附带 P2/Nit，而我每一轮
+都据此再改一轮、再提交一轮。门禁这一侧唯一的刹车是 `judge_submit` 的「两轮 READY 后必须
+给 reason」——我每次都能写出一条**真实且成立**的 reason（因为 findings 确实是真的），于是
+闸门每次都放行。结果是：**收敛判据不存在**。第 3 轮曾有一个纯文档任务被同样的形状审了
+14 轮；这一轮是 10 轮代码审 + 1 轮文档审。最终是**项目经理人工喊停**，不是门禁。
 
-时间：2026-09-05 08:39（R1 READY）→ 10:51（R6 READY）→ PM 停止指令。
-证据路径：`.pi/review-stream/review-mto4jr80-review.jsonl`（R1，7 条）、
-`review-mto5k8iq-*`（R2，4 条）、`review-mto687sn-*`（R3，2 条）、
-`review-mto775zp-*`（R4，3 条）、`review-mto8hhn7-*`（R5，1 条 P2 + 2 Nit）、
-`review-mto902lr-*` / `review-mto9amhd-*` / `review-mto9j6xz-*`（R6 及其后的流式 findings）；
-裁决记录在 `/Users/qwang/.pi/agent/rg-channels/rg-child-t4b-session-factory-r2-mto2toiz/rg-reviewer-f3eb4277-de9e8935.jsonl`。
+（更正说明：本节初稿写成「连续 6 轮」，是把门禁回执里的**已记录裁决数**（`round N/15`，
+到 6 为止）当成了轮数；judge 通道里实际有 10 份 report，`round` 依次 1…10、verdict 全为
+READY。reviewer 在文档审这一轮抓到了这处少报，一并更正。）
+
+时间与逐轮 findings 数（取自通道 report 的 `at` / `findingsCount`）：
+`round 1` 08:39:20 (7)、`2` 09:04:33 (4)、`3` 09:21:47 (2)、`4` 09:34:30 (2)、
+`5` 09:49:13 (3)、`6` 10:02:38 (3)、`7` 10:26:21 (2)、`8` 10:41:09 (3)、
+`9` 10:46:30 (2)、`10` 10:55:07 (2) —— 之后是项目经理的停止指令。
+
+证据路径（**均已逐条核实存在**）：
+- 权威记录是 judge 通道文件本身，10 份 report 全在里面：
+  `/Users/qwang/.pi/agent/rg-channels/rg-child-t4b-session-factory-r2-mto2toiz/rg-reviewer-f3eb4277-de9e8935.jsonl`；
+- 每份 report 的 findings 正文在同目录的 `…rep-<id>.payload.findings`（10 份，全部存在）；
+- `.pi/review-stream/` 下按轮生成的 findings 流**只有一部分留存**：
+  `review-mto687sn-review.jsonl`、`review-mto775zp-review.jsonl`、
+  `review-mto8hhn7-review.jsonl`、`review-mto902lr-review.jsonl`、
+  `review-mto9j6xz-review.jsonl`、`review-mtoa0w9g-review.jsonl` 存在；
+  初稿另外列的 `review-mto4jr80` / `review-mto5k8iq` / `review-mto9amhd` **不存在**
+  （那几轮 reviewer 没有走流式写入，findings 只进了 report 的 payload）——初稿把它们当成
+  证据是错的，已删。
 
 我这一侧的判断失误也如实记下：**我把「reviewer 还能挑出东西」当成了「还没到位」**。
 正确的判据应当是「退出标准是否已逐条达成」，而不是「findings 是否为空」——READY 的含义
@@ -524,9 +539,12 @@ judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫�
 ### 3. 报告本身会把 READY 打回 PENDING（结构性，非本轮偶发）
 
 完成报告落在仓库内（用户 2026-09-05 的决定，为的是避开「仓库外文件被判越界」那个缺陷），
-于是**写报告 = 弄脏工作区 = 把刚拿到的 READY 打回 PENDING**。本轮按项目经理与监督者的
-明确决定处理：**R6 的 READY 即终局，报告属于交付说明，不再为它买一轮 review**。
-若 `declare_done` 因此被拦，按指令把拦截原文交给项目经理处置，不自行补审。
+于是**写报告 = 弄脏工作区 = 把刚拿到的 READY 打回 PENDING**。实际发生的经过：项目经理与
+监督者先决定「最后一轮代码审的 READY 即终局，报告不再买一轮打磨」；`declare_done` 随即被
+`doc review gate is PENDING (need READY)` 拦下；我按指令**没有**自行补审，而是把拦截原文
+交给项目经理，用户改为授权**专为这份文档**走一轮零代码改动的 review。
+即：门禁在「文档也是交付物」这件事上没有留出「不为文档买一轮」的口子——要么补一轮，要么
+把文档移出仓库（而移出仓库正是它当初被搬进仓库要规避的那个缺陷）。
 
 ---
 
