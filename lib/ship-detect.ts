@@ -13,6 +13,8 @@
  */
 
 import type { ShipCommandKind } from "./constants.ts";
+import { lexSegmentTokens } from "./shell-lex.ts";
+
 
 export interface ShipDetection {
   kind: ShipCommandKind;
@@ -410,6 +412,47 @@ export function detectShipCommands(command: string): ShipDetection[] {
 export function containsHeredoc(command: string): boolean {
   return /<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*/.test(command);
 }
+
+/**
+ * Ship kinds this command PROVES it ran — the evidence entry point.
+ *
+ * ONE function for the whole "did this really ship?" question (philosophy
+ * two), because the answer needs the OPPOSITE bias from
+ * {@link detectShipCommands}:
+ *
+ *   - detection BLOCKS, so it over-matches on purpose. A `gh pr create` in a
+ *     heredoc body, in a `node -e '…'` string or behind an alias is refused,
+ *     and the cost of a false positive is one command the agent rephrases.
+ *   - evidence GRANTS (it is what tells `declare_done` a `pr` round arrived),
+ *     so every one of those false positives becomes a pass for a PR nobody
+ *     opened. Measured, all three: `cat > d.md <<EOF … EOF`,
+ *     `node -e 'console.log(1)\ngh pr create …'`, `python3 -c "…"`.
+ *
+ * Two narrowings, both fail-closed:
+ *
+ *   1. no heredoc anywhere in the command ({@link containsHeredoc});
+ *   2. the ship verb must sit at a real COMMAND HEAD — the segments come from
+ *      the quote-aware lexer, so a ship phrase inside a quoted argument is one
+ *      token of somebody else's command and never a head.
+ *
+ * A false NEGATIVE is harmless here: the round simply has no evidence from
+ * THIS command and proves the PR another way (a plain `gh pr create`, or the
+ * Copilot cycle's resolved number). The detector itself is left exactly as
+ * strict as it was — relaxing it would be a real ship-gate bypass.
+ */
+export function observedShipKinds(command: string): ShipCommandKind[] {
+  if (containsHeredoc(command)) return [];
+  const kinds = new Set<ShipCommandKind>();
+  for (const segmentTokens of lexSegmentTokens(command)) {
+    // The lexer already dequoted; re-joining is enough for the verb matchers
+    // and keeps ONE implementation of "what is a git/gh ship verb".
+    const tokens = normalizedTokens(segmentTokens.join(" "));
+    const kind = matchGit(tokens) ?? matchGh(tokens);
+    if (kind) kinds.add(kind);
+  }
+  return [...kinds];
+}
+
 
 
 /**

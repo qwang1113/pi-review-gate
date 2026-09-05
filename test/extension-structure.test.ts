@@ -1467,13 +1467,16 @@ test("the ship-kind evidence is recorded on SUCCESS, and never behind the Copilo
     "the evidence must not depend on a feature switch that has nothing to do with it");
   assert.match(code, /st\.shippedKinds = merged/);
   assert.match(code, /persistRepo\(/, "…and it survives the turn it was observed in");
-  // Round-2 P2: the SAME detector both blocks and (now) grants. Over-matching
-  // is safe only in the blocking direction — a heredoc body line reading
-  // `gh pr create …` is detected — so the evidence side filters it out here
-  // rather than teaching the detector about heredocs (which would be a real
-  // ship-gate bypass).
-  assert.match(code, /!containsHeredoc\(cmd\)/,
-    "a command carrying a heredoc proves nothing about a PR");
+  // Round-2/3 P2: the SAME detection both blocks and (now) grants, and it
+  // over-matches on purpose — a heredoc body, a `node -e '…'` string and a
+  // `python3 -c "…"` argument were all detected as `pr-create`. Evidence
+  // therefore comes from the narrowed entry point, never from the raw
+  // detector (teaching THAT about quoting would be a real ship-gate bypass).
+  assert.match(code, /observedShipKinds\(cmd\)/,
+    "arrival evidence must come from the evidence entry point");
+  assert.doesNotMatch(code, /detectShipCommands\(cmd\)/,
+    "…and never from the deliberately over-matching detector");
+
   // The evidence is per TASK: declare_done clears it with the rest of the
   // per-task bookkeeping, or task B inherits task A's PR.
   const done = toolBodyOf("declare_done");

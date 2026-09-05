@@ -77,7 +77,8 @@ import { SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "../lib/agent-direct
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { containsHeredoc, detectShipCommands } from "../lib/ship-detect.ts";
+import { detectShipCommands, observedShipKinds } from "../lib/ship-detect.ts";
+
 
 import { buildGateWidget, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
@@ -4293,14 +4294,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       // bug this replaced (round-1 reviewer P1 — a `pr` round in such a repo
       // could never finish).
       //
-      // A HEREDOC disqualifies the whole command as evidence (round-2 reviewer
-      // P2): the shared detector deliberately over-matches — a heredoc BODY
-      // line reading `gh pr create …` is detected, which is right when the
-      // answer is "block" and wrong when the answer is "you arrived". The
-      // detector itself must not learn about heredocs (that would be a real
-      // ship-gate bypass), so the asymmetry is resolved on this side.
-      if (cmd && event.isError !== true && state.taskMode !== "normal" && !containsHeredoc(cmd)) {
-        const shipped = detectShipCommands(cmd).map((d) => d.kind);
+      // The KINDS come from `observedShipKinds`, not from `detectShipCommands`
+      // (round-2/3 reviewer P2): the shared detector over-matches on purpose,
+      // which is right when the answer is "block" and wrong when the answer is
+      // "you arrived" — a heredoc body, a `node -e '…'` string and a
+      // `python3 -c "…"` argument were all detected as `pr-create`. The
+      // evidence entry point applies the two fail-closed narrowings; the
+      // detector itself stays exactly as strict as it was.
+      if (cmd && event.isError !== true && state.taskMode !== "normal") {
+        const shipped = observedShipKinds(cmd);
 
         if (shipped.length > 0) {
           const cmdRepos = resolveCommandRepos(cmd, cwd);
