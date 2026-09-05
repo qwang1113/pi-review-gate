@@ -8,6 +8,27 @@
 
 ---
 
+## 〇、达成情况总表（先看这张）
+
+| 退出标准 | 结论 | 一句话证据 |
+|---|---|---|
+| 1 唯一入口，6 个开 pane 调用点全走它 | **达成** | `test/session-factory-structure.test.ts` 逐个断言窗口内 `openSessionPane(` 恰好 1 次 |
+| 2 两条 grep 判据（split-window 白名单 / builder 唯一使用者） | **达成** | `grep` 输出见 §1.2；结构测试用目录枚举自证扫描面 |
+| 3 旧实现删除、不留兼容层 | **达成** | `openJudgePane` 实现层零命中（仅注释与守卫测试自指，措辞已更正） |
+| 4 C1 / C2 消失，judge 与编排一视同仁 | **达成** | 装饰四条 argv（含 window 边框行）、`refreshSessionPaneTitle` 为唯一标题写点，各有单测与变异复验 |
+| 5 投递核实两侧一致 | **达成** | `verifyDeliveryOn` 收窄为窄依赖，judge 侧带水位线；`test/delivery-probe.test.ts` 覆盖三类调用者 |
+| 6 跨进程契约逐字不变 | **达成** | 五个 env 名与语义、`judgeChannelTarget`、豁免身份均有断言；`git diff` 不含三个线格式模块 |
+| 7 全绿 + 文档 + 交付站点 | **部分达成** | `tsc` EXIT=0、`npm test` 2369 pass / 0 fail、文档已同步、报告已写；**但终点不是「干净工作区 + 带 READY 的 HEAD」**——见下 |
+
+**唯一未完全达成的一条，如实说明**：退出标准 7 要求终点是「干净工作区 + 带 READY 的
+HEAD」。实际终点是 **HEAD = `9bf5587`（带 R6 的 READY），工作区里多了这份报告**。原因是
+报告必须落在仓库内，写它就会弄脏工作区、把 READY 打回 PENDING；项目经理与监督者明确
+决定「R6 的 READY 即终局，报告不再买一轮 review」。停止指令下达时手上还有两处**未提交的
+测试改动**，已按指令 `git checkout --` 还原，因此除报告外工作区与 R6 审过的那棵树逐字一致。
+
+---
+
+
 ## 一、退出标准逐条自证
 
 ### 1. 唯一入口存在，六个开 pane 的调用点全部改走它
@@ -141,19 +162,43 @@ judge 侧投递核实要求 `dispatchJudgeRound` 变 async，而 goal/plan 审�
 
 ### 7. 全绿 + 文档 + 交付站点
 
-```
-$ npx tsc --noEmit ; echo EXIT=$?
-EXIT=0
+**最终验收（2026-09-05，停止打磨后在 R6 READY 绑定的那棵树上重跑）**：
 
-$ npm test
-ℹ tests 2349
-ℹ pass 2349
+```
+$ npx tsc --noEmit ; echo "TSC EXIT=$?"
+TSC EXIT=0
+
+$ npm test | tail
+ℹ tests 2369
+ℹ suites 5
+ℹ pass 2369
 ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 96854.898042
+NPM_TEST_EXIT=0
 ```
 
-（基线 2330 pass / 0 fail；本轮新增 3 个测试文件共 19 条，另改写 3 个既有文件里
-随实现更名的断言。）
+基线是 2330 pass / 0 fail，现在 2369 pass / 0 fail（净增 39 条：新增
+`test/session-factory.test.ts`、`test/session-factory-structure.test.ts`、
+`test/delivery-probe.test.ts` 三个文件，另在既有文件里补了 label-bar 释放、
+C2 重绘、投递核实等分支的断言；删掉的是随实现一起消失的
+`isLastDecoratedChild` 与 `paneTitleForHealth` 两条单测）。
 
+边界核查（**无越界**）：
+
+```
+$ git diff 2c77a2e..HEAD --name-only | grep -v -E "<边界清单>"
+（空：无越界）
+```
+
+改动落在：`lib/session-factory.ts`（新建）、`lib/judge-pane.ts`、
+`lib/judge-session-tools.ts`、`lib/judge-spawn-tools.ts`、
+`lib/orchestrator-dispatch.ts`、`lib/orchestrator-pane-decor.ts`、
+`lib/orchestrator-recovery-tools.ts`、`lib/orchestrator-session-tools.ts`、
+`lib/orchestrator-tool-kit.ts`、`lib/audit-round.ts`（**用户当轮批准的边界例外**，
+只两行）、`extensions/review-gate.ts`、`test/`（8 个文件）、`docs/`（3 个文件）。
 文档：`docs/module-map.md` §5 新增 `session-factory.ts` 一行、表头计数 108 → 109、
 `judge-pane.ts` 与 `orchestrator-tool-kit.ts` 两行重写，§域3 正文改口径；
 `docs/hierarchical-session-design.md` §六模块落点同步。`test/module-map.test.ts`
@@ -192,21 +237,53 @@ $ npm test
 
 ---
 
-## 三、发现但未做（都要单独走一轮 review，不属于本任务）
+## 三、发现但未做 / 已知遗留（交给下一轮，本轮**不**再走 review）
 
-1. **两处 recover 都不做投递核实。** goal 只要求 spawn 路径两侧一致；recover 也值得
-   核实（水位线机制已经具备），但那会改变 recover 的失败语义，应当单独一轮。
-2. **`dispatchJudgeRound` 复用 pane 的那条路径不核实投递。** 它是往活着的 pane 的通道里
-   写一条 instruct，理论上可以等 `instruct-ack`（judge 侧走的是同一套子会话通道原语），
-   但没有实测证据说明 judge 侧一定会 ack，贸然加会卡住每一轮 review。建议先测一次
-   judge 侧 ack 的实际行为再决定。
-3. **`lib/orchestrator-recovery-tools.ts` 的 `doAttach` 里 `childEnv` 已随收敛删除**，
-   但 attach 本身不开 pane，因此没有别的欠账；提一句只是备查。
-4. **`extensions/review-gate.ts` 仍有约 8200 行。** 本轮往里加的净代码很少（改造为主），
-   但它离「新逻辑不要再堆进扩展」还差一次真正的拆分。
-5. ~~`paneTitleForHealth` 零调用者~~ —— **第二轮已删**（reviewer Nit，哲学三）：
-   它是「健康读数 → 标题」的第二个渲染器，而标题现在只由
-   `refreshSessionPaneTitle` 写，留着就是两种拼法迟早分叉。
+> 2026-09-05：项目经理下达停止指令（reviewer 已连续 6 轮 READY，属于门禁缺陷 D11
+> 「打磨闸拦不住无限抛光」的复现）。以下条目**均未修**，按「现象 + 严重度 + 建议修法」
+> 如实记录。最后两条是停止指令下达时正在手上、已被**还原**的改动。
+
+1. **`declare_done` 级联那一处的释放行为没有行为测试**（reviewer R6 的 P2，**未修**）。
+   现象：把级联里的 `closeOpts` 改成恒 `{}`（永不收 bar），全量 2369 条测试仍全绿；
+   只有源码结构断言会拦住它。严重度：**P2**（用户环境残留，且它是五条关闭路径里唯一
+   没有行为覆盖的一条）。建议修法：给扩展的 `declare_done` 做一个像
+   `test/helpers/fake-orchestration.ts` 那样的最小假宿主，或把级联那段判定抽成
+   `lib/` 里的纯函数再单测——后者更符合本仓「判定不留在扩展里」的口径。
+   （停止指令下达时我已写好一条**结构**断言把它钉住，按指令一并还原。）
+
+2. **`judge_spawn` 回滚路径的 `paneClosable` 过滤没被钉住**（reviewer R6 的 Nit，**未修**）。
+   现象：删掉那一行，`test/judge-spawn-tools.test.ts` 仍 17 pass / 0 fail。
+   严重度：**Nit**（该过滤是「异 tmux server 的 pane id 不算兄弟」，删掉只会让 bar
+   多留一会儿）。建议修法：加一条回滚测试，兄弟条目带 `tmuxServer: "other-server,9"`，
+   断言 bar 仍被收起。（同样已写好、按指令还原。）
+
+3. **窗口标签栏（`pane-border-status` / `pane-border-format`）的共享语义还没理清**——
+   这是**下一轮的课题**，不是本轮的尾巴。它们是 **window 级**设置，被窗口里所有 pane
+   共享，而「谁有权开、谁有权收」在本仓现在是由五条关闭路径各自推断出来的：
+   - 本轮把「收」统一成了「我还能看见几个装饰 pane + 我是不是客人」，但「**开**」仍然
+     是每次 `decorateSessionPane` 无条件打开，没有任何一方登记「这条 bar 现在归谁」；
+   - 因此**跨会话**的场景仍靠约定而非机制：项目经理与它的子会话在同一个 window 里，
+     子会话的 judge pane 打开 bar、项目经理的 close 可能把它收走（反之亦然），谁先谁后
+     决定了那一瞬间谁的边框是空的；
+   - 真正的修法大概是给 window 级设置一个**显式的持有者/引用计数**（谁开的记一笔、
+     最后一个释放），而不是让五处各自数 pane。严重度：**P2/设计课题**。
+
+4. **两处 recover（`judge_recover` / `orchestrator_recover`）不做投递核实。**
+   goal 只要求 spawn 路径两侧一致；水位线机制已经具备，但给 recover 加核实会改变它的
+   失败语义（现在是「重开成功即返回」）。严重度：**Nit/设计取舍**。建议：与上面第 3 条
+   一起在下一轮决定。
+
+5. **`dispatchJudgeRound` 复用 pane 那条路径不核实投递。** 它往活着的 pane 的通道写一条
+   instruct，理论上可以等 `instruct-ack`，但**没有实测证据**说明 judge 侧一定会 ack，
+   贸然加会卡住每一轮 review。严重度：**Nit**。建议：先实测 judge 侧 ack 行为再决定。
+
+6. **`extensions/review-gate.ts` 仍有约 8300 行。** 本轮往里加的净代码很少（以改造为主，
+   新逻辑都落在 `lib/session-factory.ts`），但它离「新逻辑不要再堆进扩展」还差一次真正的
+   拆分。严重度：**架构债**。
+
+7. **`countDecoratedPanes` 的「读不到 pane 列表 ⇒ 全部按在场算」是有意的 fail-safe**，
+   代价是 tmux 不可读时 bar 会残留到下一次 spawn。已有测试钉住方向，但这个取舍值得在
+   第 3 条那次设计里一并复核。严重度：**Nit**。
 
 ---
 
@@ -413,8 +490,62 @@ judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫�
 
 ## 五、门禁自身异常
 
-本轮未观察到门禁自身的异常行为（无误拦、无误判、无卡死）。唯一一次被门禁挡下是
-预期内的：goal 首次提交被 `goal-auditor` 以两条 P1 退回（判据里 `"split-window"`
-字面量在边界外的 `lib/orchestrator-guard.ts` 也存在、以及漏了任务书要求的
-verifyDelivery 两侧一致），findings 落在
-`.pi/review-stream/goal-e98dd039e0a9.jsonl`，两条都属实且已修正后重提通过。
+### 1. 打磨闸给不出停止信号（D11 的第三次复现）—— 2026-09-05，本轮最重要的一条
+
+现象：reviewer **连续 6 轮全部 READY（R1–R6 无一 BLOCKED）**，但每一轮都附带 P2/Nit，
+而我每一轮都据此再改一轮、再提交一轮。门禁这一侧唯一的刹车是 `judge_submit` 的
+「两轮 READY 后必须给 reason」——我每次都能写出一条**真实且成立**的 reason（因为 findings
+确实是真的），于是闸门每次都放行。结果是：**收敛判据不存在**。第 3 轮曾有一个纯文档任务
+被同样的形状审了 14 轮；这一轮是 10 轮（R1–R6 记录了 6 轮裁决，另有 4 次流式 findings 的
+往返）。最终是**项目经理人工喊停**，不是门禁。
+
+时间：2026-09-05 08:39（R1 READY）→ 10:51（R6 READY）→ PM 停止指令。
+证据路径：`.pi/review-stream/review-mto4jr80-review.jsonl`（R1，7 条）、
+`review-mto5k8iq-*`（R2，4 条）、`review-mto687sn-*`（R3，2 条）、
+`review-mto775zp-*`（R4，3 条）、`review-mto8hhn7-*`（R5，1 条 P2 + 2 Nit）、
+`review-mto902lr-*` / `review-mto9amhd-*` / `review-mto9j6xz-*`（R6 及其后的流式 findings）；
+裁决记录在 `/Users/qwang/.pi/agent/rg-channels/rg-child-t4b-session-factory-r2-mto2toiz/rg-reviewer-f3eb4277-de9e8935.jsonl`。
+
+我这一侧的判断失误也如实记下：**我把「reviewer 还能挑出东西」当成了「还没到位」**。
+正确的判据应当是「退出标准是否已逐条达成」，而不是「findings 是否为空」——READY 的含义
+就是「可以收了」，附带的 P2/Nit 是**下一轮的输入**，不是本轮的债。这一点在
+`skills/review-loop` 或 `lib/agent-directives.ts` 的等待纪律里值得写死一句。
+
+建议修法（给门禁）：READY 连续 N 轮（N=2 已有阈值）时，把「再审一轮」从「给个 reason
+就能过」升级成**必须由人批准**；或者让 reviewer 的 READY 报告显式回答一句
+「本轮退出标准是否已全部达成」，把收敛判据从 findings 数量换成退出标准。
+
+### 2. goal 首轮被 `goal-auditor` 以两条 P1 退回（预期内，非缺陷）
+
+判据里 `"split-window"` 字面量在边界外的 `lib/orchestrator-guard.ts` 也存在、以及漏了
+任务书要求的 verifyDelivery 两侧一致。findings 落在
+`.pi/review-stream/goal-e98dd039e0a9.jsonl`，两条都属实，修正后重提通过。
+
+### 3. 报告本身会把 READY 打回 PENDING（结构性，非本轮偶发）
+
+完成报告落在仓库内（用户 2026-09-05 的决定，为的是避开「仓库外文件被判越界」那个缺陷），
+于是**写报告 = 弄脏工作区 = 把刚拿到的 READY 打回 PENDING**。本轮按项目经理与监督者的
+明确决定处理：**R6 的 READY 即终局，报告属于交付说明，不再为它买一轮 review**。
+若 `declare_done` 因此被拦，按指令把拦截原文交给项目经理处置，不自行补审。
+
+---
+
+## 六、边界例外的完整交代（`lib/audit-round.ts`）
+
+**改了哪两行**（`git diff 2c77a2e..HEAD -- lib/audit-round.ts` 全文只有这两处）：
+
+1. `RunAuditRoundDeps.dispatch` 的返回类型，增加 `| Promise<…>` 这一支（同步实现仍然合法）；
+2. `runAuditRound` 里 `const dispatched = deps.dispatch({…})` 改为 `await deps.dispatch({…})`
+   （该函数本来就是 `async`）。
+
+**为什么必须改它**：退出标准 5 要求 judge 侧也做投递核实，核实是「盯着通道等第一份证据」
+的异步过程，因此 `dispatchJudgeRound` 必须变 `async`。而 goal / plan 审计链经由
+`runAuditRound` 调用同一个 dispatch，它的类型是同步的——不放宽这个类型，judge 轮次派发就
+无法 await 自己的核实。
+
+**为什么不能靠改 goal 绕开**：绕开的唯一形状是「judge 轮次派发不做核实，只有 judge_spawn
+和编排 spawn 做」，这与已获批 goal 的退出标准 5（**两侧一致**）直接冲突，等于用改契约来
+回避实现困难——而且会留下一条「同为 judge spawn，一条核实一条不核实」的分叉，正是本轮要
+消灭的形状。所以我停下来用 `ask_user` 请示，用户当场批准把该文件加入边界（选项 A）。
+
+**克制**：除这两行外该文件一字未动；`git diff` 可逐字复核。
