@@ -355,7 +355,9 @@ PM 的 transcript 里 ask_user/grillme 的 Q&A 段验证澄清结论真的落进
 「文件边界 / 任务目标 / 交付站点」三项各给一句判断（词表与判定在
 `lib/orchestrator-answer-tools.ts`，接受的写法逐条列在 `PROXY_CROSSCHECK_TOKENS`）。
 缺任一项即退回，并把 plan 里那个任务与子会话提交的正文**并排**贴回，附可照抄的骨架；
-门禁在这里不提供申诉出路（它不是 ship block，`request_arbitration` 受理不了）。
+门禁在这里不提供申诉出路（它不是 ship block，`request_arbitration` 受理不了），但**有一条真出路**并写在
+退回文案里：认为门禁误判就让**用户本人在他自己那个框里批**——这条约束只加在「代答」上，用户不受限；
+拿不准就 `ask_user` 请他拍板（2026-09-06 用户裁定：不给走不通的申诉指引，但必须给走得通的出路）。
 拒绝不需要对照。子会话请求确认的站点若**宽于**已批准 plan 的 `deliveryStation`，
 代答一律被拒——放宽站点是用户的决定；用户本人在自己框里批不受此约束。
 

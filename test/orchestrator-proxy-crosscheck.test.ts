@@ -174,6 +174,15 @@ test("approving a child's GOAL without a crosscheck is refused, with both sides 
   assert.ok(text.includes(PROXY_CROSSCHECK_SKELETON), "and the skeleton is there to copy");
   assert.doesNotMatch(text, /request_arbitration/,
     "this is not a ship block — the arbiter would refuse it, so offering it is a dead end");
+  // …but "no appeal" must not read as "no way out" (user decision,
+  // 2026-09-06). The route that actually works is the one the check never
+  // touched: the USER approving in their own dialog, which this constraint was
+  // never applied to. A manager that believes the check is wrong has to be
+  // able to find it from the refusal alone.
+  assert.match(text, /用户本人在他自己那个框里批/,
+    "the refusal must name the escape that really exists");
+  assert.match(text, /ask_user/, "…and how to reach the user for it");
+
   assert.equal(world.channelOf(childId).filter((r) => r.kind === "answer").length, 0,
     "nothing may be written into the channel while the approval is refused");
 });

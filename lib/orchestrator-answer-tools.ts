@@ -295,6 +295,10 @@ export function buildCrosscheckRefusal(input: {
     "",
     "写好对照后重新调用：`orchestrator_answer({ childId, answer, crosscheck })`。" +
     "确实该打回就直接答否（拒绝不需要对照），并用 `reason` 说清它偏在哪。",
+    "对照写了、门禁还是不认，而你认为这是误判：**让用户本人在他自己那个框里批** —— " +
+    "这条约束只加在「代答」上，用户在自己的框里不受它限制；拿不准就用 `ask_user` 请他拍板。" +
+    "（这里没有申诉通道可走：代批退回不是 ship 拦截，门禁没有可供仲裁的记录。）",
+
   ].join("\n");
 }
 
