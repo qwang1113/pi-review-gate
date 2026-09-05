@@ -519,7 +519,7 @@ fail-closed）。`model-diagnose.ts`
 | `orchestrator-channel.ts` | 点对点通道：路径、记录 schema、追加/读取/行游标、大 payload 溢出到旁文件、投影（还欠着什么）、心跳超时判定 |
 | `orchestrator-child-channel.ts` | 子会话侧：状态上报、「人与项目经理任意一方先答即生效」的竞态提问、读取与确认编排下发的指令 |
 | `orchestrator-child-state.ts` | 子会话状态（working / waiting-input / **waiting-judge** / idle / done / dead / stalled + mode-changed）与再唤醒退避；`waiting-judge` 是「在等门禁自己派出去的 reviewer/precommit」，不叫醒项目经理；`mode-changed` 是模式切换事件，叫醒项目经理。也让 `stalled` 回到只表示「扩展不在了」。判据全部是结构化真值，不看屏幕 |
-| `orchestrator-pane-decor.ts` | 子会话的可视化区分：按 childId 派色（纯函数，同一子会话永远同色）、`@task-slug · state 220s` 的边框标题、window 级标签栏开关判定。**纯展示层**：只写不读，任何判定都不看它 |
+| `orchestrator-pane-decor.ts` | 可视化区分的**字符串**：按 id 派色（纯函数，同一会话永远同色）、`@task-slug · state 220s` 的边框标题模板、window 级选项的取值。**纯展示层**：只写不读，任何判定都不看它。何时收起 window 标签栏（`releasesWindowLabels` / `countDecoratedPanes`）与真正写标题（`refreshSessionPaneTitle`）都在 `session-factory.ts`，2026-09-05 起五条关闭路径共用同一判定 |
 | `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：目录前缀内的边界细化、收窄、加依赖、降并行度⇒批准迁移并记审计；新任务/新目录/删依赖/串行改并行/提并行度⇒重新批准 |
 | `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案。**「哪份 report 收本轮」已于 2026-09-05 搬去 `audit-round.ts`** —— 那是审计**回合**的问题，不是 plan 的，三种 kind 都要回答它 |
 | `orchestrator-handoff-advice.ts` | 上下文用量 + 待答请求数 ⇒ 接力时机（软/硬阈值，没读数就明说没读数） |

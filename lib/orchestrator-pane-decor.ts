@@ -176,22 +176,14 @@ export const PANE_BORDER_FORMAT = "#{pane_title}";
 /** Where the label bar goes. `top` keeps it out of the status line. */
 export const PANE_BORDER_STATUS = "top";
 
-/**
- * Is this the LAST decorated child in the window?
- *
- * The window-level options (`pane-border-status`, `pane-border-format`) are
- * shared by every pane in the window, including the orchestrator's own and
- * any pane the user opened themselves. So they are unset only when the last
- * child this orchestration decorated is going away — undoing them while a
- * sibling is still running would blank the labels of panes that still need
- * them, and leaving them forever would be litter in the user's window.
- */
-export function isLastDecoratedChild(
-  children: readonly { id: string; closedAt?: string }[],
-  closingChildId: string,
-): boolean {
-  return children.every((child) => child.id === closingChildId || Boolean(child.closedAt));
-}
+// (`isLastDecoratedChild` is GONE, 2026-09-05. It answered "is this the last
+// decorated CHILD" — one kind of pane, counted from registry rows — and both
+// halves of that were wrong once the same window also held decorated JUDGE
+// panes: a row whose pane the user had closed kept the label bar up forever,
+// and a manager closing its last child blanked a running review's border. The
+// question is now asked once, for every kind of pane, by
+// `releasesWindowLabels` + `countDecoratedPanes` in lib/session-factory.ts.)
+
 
 /** One line for the receipt, so a colour on screen matches a row in the text. */
 export function formatPaneLegend(entries: readonly { childId: string; label: string }[]): string {

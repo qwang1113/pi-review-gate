@@ -172,6 +172,7 @@ import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
   closeSessionPane,
+  countDecoratedPanes,
   judgePaneDecor,
   openSessionPane,
   releasesWindowLabels,
@@ -2016,7 +2017,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     onHandoff: () => { handedOffOrchestration = true; },
   });
   registerOrchestratorStateTools(pi, orchestratorDeps);
-  registerOrchestratorSessionTools(pi, orchestratorDeps);
+  registerOrchestratorSessionTools(pi, {
+    ...orchestratorDeps,
+    // A manager's window holds BOTH kinds of decorated pane. `orchestrator_close`
+    // needs the judge count for the one decision it shares with the judge close
+    // paths: may this close take the window's shared label bar down?
+    decoratedJudgePanes: () => decoratedJudgePaneCount(),
+  });
 
   /** Constraints 3, 4 and 11 — the orchestration's own exit contract. */
   function orchestrationDoneProblems(): string[] {
@@ -2373,6 +2380,26 @@ export default function reviewGate(pi: ExtensionAPI) {
     try { return ownPane ? listJudgePanes((argv) => runTmux(argv), ownPane) : undefined; }
     catch { return undefined; }
   }
+
+  /**
+   * How many JUDGE panes of this session are decorated and still on screen.
+   *
+   * The one consumer is the label-bar release (`releasesWindowLabels`): a
+   * project manager's window holds child panes AND review panes, and a close
+   * path that counts only its own kind either blanks the other kind's border
+   * or leaves the shared border line switched on forever. Both were measured
+   * (2026-09-05).
+   */
+  function decoratedJudgePaneCount(): number {
+    const server = tmuxServerFrom(process.env);
+    return countDecoratedPanes(
+      ownJudges()
+        .filter((entry) => entry.paneId && paneClosable(entry, server))
+        .map((entry) => entry.paneId!),
+      listOwnWindowPanes(),
+    );
+  }
+
 
   /**
    * Own judges whose pane is not KNOWN to be gone — "is one still running?".
@@ -4714,7 +4741,29 @@ export default function reviewGate(pi: ExtensionAPI) {
     // continues by session id, so the review never starts from zero).
     if (existing) {
       if (existing.paneId && paneAlive === true && opts.fresh) {
-        try { closeSessionPane(run, existing.paneId); } catch { /* best effort */ }
+        // FIFTH CLOSE PATH (reviewer, 2026-09-05). A `fresh` round kills the
+        // incumbent and re-opens immediately, so the border line would come
+        // straight back — but the re-open can FAIL (no model chain, tmux gone),
+        // and this close also drops the registry row, after which nobody is
+        // left who could release it. So it makes the same judgement as every
+        // other close; the re-open turns the bar back on when it succeeds.
+        const others = countDecoratedPanes(
+          Object.values(judgeHierarchy)
+            .filter((entry) =>
+              entry.judgeId !== judgeId
+              && entry.openerId === opener
+              && entry.paneId
+              && paneClosable(entry, tmuxServer))
+            .map((entry) => entry.paneId!),
+          ownPane ? listJudgePanes(run, ownPane) : undefined,
+        );
+        const releases = ownPane !== undefined && releasesWindowLabels({
+          remainingDecoratedPanes: others,
+          insideOrchestration: labelBarOwnedByOthers(),
+        });
+        try {
+          closeSessionPane(run, existing.paneId, releases ? { hideLabelsVia: ownPane! } : {});
+        } catch { /* best effort */ }
       }
       if (paneAlive === false) reapReviewScratch(sessionId);
       // One removal, one table.

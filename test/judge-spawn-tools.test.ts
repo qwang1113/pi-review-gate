@@ -327,6 +327,10 @@ test("a rolled back spawn leaves the border line alone when a sibling judge is o
         title: "adviser",
         sessionDir: "/sessions",
         paneId: "%9",
+        // Recorded WITH the server that minted it, the way a real spawn does:
+        // an id this process cannot attribute is a stranger's pane, not a
+        // sibling, and would not count.
+        tmuxServer: "sock,1",
         spawnedAt: new Date(1_700_000_000_000).toISOString(),
       },
     },

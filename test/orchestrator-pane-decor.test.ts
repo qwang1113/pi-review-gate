@@ -26,7 +26,6 @@ neutraliseGateEnv();
 
 import { makeFakeWorld, replyText, twoTaskPlan } from "./helpers/fake-orchestration.ts";
 import {
-  isLastDecoratedChild,
   paneColorFor,
   paneLabelFor,
   paneStyleFor,
@@ -88,15 +87,10 @@ test("the window options are window-scoped and never carry -g", () => {
   }
 });
 
-test("the window bar is removed only for the LAST decorated child", () => {
-  const children = [
-    { id: "a" },
-    { id: "b", closedAt: "2026-08-30T10:00:00.000Z" },
-  ];
-  assert.equal(isLastDecoratedChild(children, "a"), true, "b is already closed, so a is the last one");
-  assert.equal(isLastDecoratedChild([{ id: "a" }, { id: "b" }], "a"), false,
-    "removing the bar while a sibling still uses it would blank a live label");
-});
+// ("the window bar is removed only for the LAST decorated child" moved with
+// its subject: `isLastDecoratedChild` is gone, and the question — how many
+// decorated panes of ANY kind can I still see — is asserted in
+// test/session-factory.test.ts and in the four close paths' own tests.)
 
 // ---------------------------------------------------------------------------
 // Inside the tools, and nowhere else

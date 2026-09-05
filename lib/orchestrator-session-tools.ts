@@ -27,8 +27,27 @@ import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
 
 import { GATE_MODE_ENV } from "./task-mode.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.ts";
-import { closeSessionPane, openSessionPane } from "./session-factory.ts";
-import { isLastDecoratedChild } from "./orchestrator-pane-decor.ts";
+
+/**
+ * The orchestration deps plus ONE thing lib/orchestrator-deps.ts has no reason
+ * to know about: how many JUDGE panes this session has decorated.
+ *
+ * It exists for a single decision — may this close take the window's shared
+ * label bar down (`releasesWindowLabels`)? A project manager's window holds
+ * both kinds of decorated pane, and counting only one kind is how the release
+ * went wrong twice: it blanked a running review's border, or it left the bar
+ * switched on forever. OPTIONAL, so a deps object that predates this (a test
+ * fixture, another caller) simply reports no judge panes.
+ */
+export interface OrchestratorSessionDeps extends OrchestratorDeps {
+  decoratedJudgePanes?(): number;
+}
+import {
+  closeSessionPane,
+  countDecoratedPanes,
+  openSessionPane,
+  releasesWindowLabels,
+} from "./session-factory.ts";
 
 import { spawnAuthorization } from "./orchestrator-gate.ts";
 import {
@@ -270,7 +289,7 @@ function inheritanceBrief(deps: OrchestratorDeps): string | undefined {
 
 
 
-async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
+async function doClose(deps: OrchestratorSessionDeps, params: Record<string, unknown>): Promise<ToolReply> {
   const runtime = deps.runtime();
   const childId = String(params.childId ?? "").trim();
   const predecessorPane = String(params.predecessorPane ?? "").trim();
@@ -291,22 +310,40 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   const closable = closableChild(runtime, childId);
   if (!closable.ok) return fail("review-gate: " + closable.reason);
   const child = closable.child;
-  // The window-level label bar is taken down only for the LAST decorated
-  // child, since the option is shared by every pane in the window (the
-  // orchestrator's own included). Leaving it set forever would be litter in
-  // the user's window; removing it while a sibling is still labelled would
-  // blank a border that is still in use. Purely cosmetic either way, so every
-  // failure here is swallowed.
+  // THE SAME JUDGEMENT THE OTHER THREE CLOSE PATHS MAKE (reviewer P2,
+  // 2026-09-05 — "the answer to (c) is: unify them"). This one used to have
+  // its own rule (`isLastDecoratedChild`), and it carried both defects the
+  // others had already shed:
   //
-  // It is addressed through the ORCHESTRATOR'S OWN pane, not the dying child's
-  // (reviewer P2, 2026-09-05): `setw -t <pane>` only names a window, and the
-  // pane being closed is precisely the id that may already be gone.
-  // The orchestrator's own pane when it can read it, else the child's — the
-  // release itself must not become conditional on a diagnostic (that would
-  // trade a fixed defect for a new one: no pane read, no release, litter).
+  //  - it counted registry ROWS, so a child whose pane the user closed by hand
+  //    kept the bar up forever;
+  //  - it could not see JUDGE panes at all, so closing the last child while a
+  //    review was open blanked the review's border.
+  //
+  // Both are now one question — how many decorated panes can I still see —
+  // asked with the shared counter. `insideOrchestration` is false by
+  // construction: only a project manager reaches this tool (the mode guard),
+  // and a manager is never a guest in its own window.
+  //
+  // Addressed through the ORCHESTRATOR'S OWN pane when it can read it, else
+  // the child's: `setw -t <pane>` only names a window, and the pane being
+  // closed is the id that may already be gone — but the release itself must
+  // not become conditional on a diagnostic.
+  const panes = alivePanes(deps);
+  const releasesLabels = releasesWindowLabels({
+    remainingDecoratedPanes:
+      countDecoratedPanes(
+        runtime.children
+          .filter((c) => c.id !== child.id && !c.closedAt)
+          .map((c) => c.paneId),
+        panes.ok ? panes.panes : undefined,
+      )
+      + (deps.decoratedJudgePanes?.() ?? 0),
+    insideOrchestration: false,
+  });
   const labelsVia = deps.ownPane() ?? child.paneId;
   const killed = closeSessionPane(deps.tmux, child.paneId, {
-    ...(isLastDecoratedChild(runtime.children, child.id) ? { hideLabelsVia: labelsVia } : {}),
+    ...(releasesLabels ? { hideLabelsVia: labelsVia } : {}),
   });
   if (!killed.ok && !/can't find pane|no such pane/i.test(killed.error)) {
     return fail(`review-gate: 关闭 pane 失败 —— ${killed.error}`);
@@ -405,7 +442,7 @@ async function doHandoff(deps: OrchestratorDeps, params: Record<string, unknown>
  * `orchestrator_recover` + `orchestrator_attach`) — registered from here so
  * there is ONE place that answers "which orchestration tools exist".
  */
-export function registerOrchestratorSessionTools(host: ToolHost, deps: OrchestratorDeps): void {
+export function registerOrchestratorSessionTools(host: ToolHost, deps: OrchestratorSessionDeps): void {
   const guarded = (
     run: (params: Record<string, unknown>, signal: { readonly aborted: boolean } | undefined) => Promise<ToolReply>,
   ) => async (

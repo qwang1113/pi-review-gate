@@ -2140,7 +2140,10 @@ test("supervision is a POINT-TO-POINT channel — no global queue, no broadcast"
   // cross-process contract), so the dispatch names the opener as the judge
   // role's `openerId` and lib/session-factory.ts turns it into RG_JUDGE_OPENER.
   const spawnAt = SRC.indexOf("function dispatchJudgeRound(");
-  const spawn = SRC.slice(spawnAt, spawnAt + 9000);
+  // Sized to the whole function (it grew when the spawn learned to verify its
+  // delivery); a window that stopped short would silently assert about half a
+  // function and pass for the wrong reason.
+  const spawn = SRC.slice(spawnAt, spawnAt + 14000);
   assert.match(spawn, /kind: "judge",\s*\n\s*openerId: opener,/, "the pane is told who opened it");
   assert.match(
     readFileSync(new URL("../lib/session-factory.ts", import.meta.url), "utf8"),
@@ -2268,7 +2271,7 @@ test("judge_submit is the agent's single judge entry and hides every process det
 test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane reuse, fresh-kill", () => {
   const at = SRC.indexOf("function dispatchJudgeRound(");
   assert.ok(at > 0, "the single dispatch owner must exist");
-  const body = SRC.slice(at, at + 9000);
+  const body = SRC.slice(at, at + 14000);
   // B5: the work dir is derived from role+repo+opener — NEVER from the round's title,
   // which gave pi a new --session-dir every round and restarted the session.
   assert.match(body, /judgeWorkDirFor\(role, shortRepoHash\(root\), opener\)/,
@@ -2296,8 +2299,12 @@ test("dispatchJudgeRound owns identity: stable dir per role+repo+opener, pane re
     "reuse is decided by the transcript, not by a live pane");
   assert.match(body, /await openSessionPane\(run, \{/,
     "a real pane open still exists for the no-reuse case — through the ONE factory");
-  // fresh:true kills the living pane FIRST (singleton per role+repo+opener).
-  assert.match(body, /closeSessionPane\(run, existing\.paneId\)/, "fresh kills the pane before re-opening");
+  // fresh:true kills the living pane FIRST (singleton per role+repo+opener) —
+  // and, being one of the five paths that close a decorated pane, it asks the
+  // shared label-bar question on the way out (the re-open turns the border line
+  // back on when it succeeds; when it fails, nobody else is left to release it).
+  assert.match(body, /closeSessionPane\(run, existing\.paneId, releases \?/, "fresh kills the pane before re-opening");
+  assert.match(body, /insideOrchestration: labelBarOwnedByOthers\(\)/, "…with the same guest test as every other close");
   assert.match(body, /reapReviewScratch\(sessionId\)/, "a dead pane's scratch worktrees are reclaimed");
 });
 
@@ -4186,7 +4193,11 @@ test("the orchestration layer is wired in, and its logic did NOT land in this fi
   // the architecture rule this round introduces, so the orchestration layer
   // must not grow it.
   assert.match(SRC, /registerOrchestratorStateTools\(pi, orchestratorDeps\)/);
-  assert.match(SRC, /registerOrchestratorSessionTools\(pi, orchestratorDeps\)/);
+  // The session tools take the orchestration deps PLUS one capability the deps
+  // module has no reason to know about (how many judge panes this window has,
+  // for the shared label-bar release) — still wiring, still no logic here.
+  assert.match(SRC, /registerOrchestratorSessionTools\(pi, \{\s*\n\s*\.\.\.orchestratorDeps,/);
+  assert.match(SRC, /decoratedJudgePanes: \(\) => decoratedJudgePaneCount\(\)/);
   for (const banned of ["buildSpawnPaneArgv", "buildSendMessageArgv", "scheduleNextTasks", "parsePlan("]) {
     assert.ok(!SRC.includes(banned),
       `${banned} belongs in lib/orchestrator-*.ts — the extension only wires the layer up`);

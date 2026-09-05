@@ -302,6 +302,24 @@ judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫�
 
 第六轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2366 pass / 0 fail**。
 
+## 二·补六 · 第七轮：五条路径、一个判定（收敛完成）
+
+第六轮 reviewer 给出 (a)(b)(c) 三问的答案，我全部落地：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-J（(c) 的答案：应当统一） | `orchestrator_close` 仍用 `isLastDecoratedChild`：数登记行、且完全看不见 judge pane——前几轮在另外三条路径修掉的两个缺陷在它里面原样保留 | 改用同一判定：`releasesWindowLabels({remainingDecoratedPanes: 还活着的子会话 pane + 本会话的 judge pane, insideOrchestration: false})`。为拿到 judge 计数，在**我边界内**的 `lib/orchestrator-session-tools.ts` 定义 `OrchestratorSessionDeps`（`OrchestratorDeps` + 可选 `decoratedJudgePanes()`），扩展接线时补上——没有去改边界外的 `lib/orchestrator-deps.ts`。`isLastDecoratedChild` 随之**删除**（哲学三），其测试改为指向新判定 |
+| Nit-J（(a) 的答案：第五条路径） | `dispatchJudgeRound` 的 `fresh:true` 预杀：正常紧接着重开会把边框行重新打开，但重开可能失败，而它已经把登记删了——此后没人能释放 | 预杀也走同一判定；重开成功时装饰会立刻把 bar 打回来，重开失败时 bar 已经收好。结构测试补断言 |
+| Nit-K（(b) 的答案） | 回滚路径的候选过滤比 `judge_close` 少一个 `paneClosable` | 已在等结论期间自查补上（两处现在完全等价） |
+
+第七轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2365 pass / 0 fail**
+（少 1 条是删掉的 `isLastDecoratedChild` 单测，其语义已由新判定的测试覆盖）。
+
+**五条关闭路径现在的口径一致**：judge_close / declare_done 级联 / judge_spawn 回滚 /
+`fresh` 预杀 / orchestrator_close，全部 = 「我还能看见几个装饰 pane（含 judge 与子会话
+两类，读不到 pane 列表时按在场算）」+「我是不是别人窗口里的客人」，寻址一律用调用者
+自己的 pane。
+
 **第三条项目级经验**：这一个小改动（「收起共享 bar」）连续四轮出 P2，每轮都是同一形状——
 **我把一个「谁在用它」的问题当成了「我是谁」的问题**，然后每修一次就漏一个新入口
 （judge_close → 级联 → 回滚 → 接力继任者）。正确做法是**先把所有会关掉这类 pane 的路径

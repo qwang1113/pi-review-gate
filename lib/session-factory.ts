@@ -335,11 +335,18 @@ export function countDecoratedPanes(
  * still in use. So it is released by the LAST decorated pane, and only by a
  * session that owns them.
  *
- * "Owns them" is the second half, and it is not a detail: inside an
- * orchestration the PROJECT MANAGER sets and unsets this bar around its
- * children (lib/orchestrator-session-tools.ts, `isLastDecoratedChild`). A child
- * session closing its own judge must not reach across and blank its siblings'
- * borders — so it never releases, and the manager's own last close does.
+ * "Owns them" is the second half, and it is not a detail. Two facts decide it,
+ * and each was measured as a defect on its own (2026-09-05):
+ *
+ *  - a session that is only a GUEST in an orchestration's window cannot see
+ *    the manager's panes at all (they live in another session's registry), so
+ *    it can never know it is the last one and never releases;
+ *  - a MANAGER can see them — they are its own children — so it counts them
+ *    with `countDecoratedPanes` like any other decorated pane, instead of
+ *    being exempted by role.
+ *
+ * All five close paths (judge_close, declare_done's cascade, judge_spawn's
+ * rollback, a `fresh` round's pre-kill, orchestrator_close) ask exactly this.
  */
 export function releasesWindowLabels(input: {
   /** Panes THIS session decorated that are still open once this one is gone. */

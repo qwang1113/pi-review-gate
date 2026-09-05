@@ -24,6 +24,7 @@ import { Type } from "typebox";
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import {
   checkCaller,
+  paneClosable,
   registerJudge,
   removeJudge,
   type HierarchyTable,
@@ -339,7 +340,11 @@ async function doSpawn(
           .filter((entry) =>
             entry.judgeId !== judgeId
             && entry.openerId === caller
-            && Boolean(entry.paneId))
+            && Boolean(entry.paneId)
+            // Same attribution rule as `judge_close`: an id minted by a tmux
+            // server that has since restarted names a stranger's pane, not a
+            // sibling of ours, and counting it would keep the bar up forever.
+            && paneClosable(entry, deps.tmuxServer()))
           .map((entry) => entry.paneId!),
         listJudgePanes(deps.tmux, ownPane),
       );
