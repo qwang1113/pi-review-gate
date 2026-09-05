@@ -72,8 +72,15 @@ export type PendingAudit =
  *   conclude time, the content stamp is what makes "this verdict judged this
  *   tree" observable, and a coarse clock or a same-second race defeats the
  *   timestamp alone. A round that cannot be checked (no `roundSeq`, no report
- *   round, a missing timestamp on either side) fails CLOSED — it is never
- *   recorded on the strength of the other half.
+ *   round, an unreadable report stamp against a checkpoint that DOES exist)
+ *   fails CLOSED — it is never recorded on the strength of the other half.
+ *
+ *   The ONE exception, and it is not a weakening: a repo with no checkpoint at
+ *   all is the "audit the exit goal" round (`prepare_review`, empty range,
+ *   clean worktree), where nothing is frozen for a verdict to lag behind.
+ *   Refusing it would not fail closed, it would make that round unclosable —
+ *   no record, no round end, no reachable READY. The round binding and the
+ *   cursor still carry it (reviewer P1 + user decision, 2026-09-05).
  */
 export type ReportBinding = "round-bound" | "cursor-only" | "round-and-content";
 

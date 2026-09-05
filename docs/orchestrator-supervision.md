@@ -374,10 +374,17 @@ checkpoint 后，settle 立刻把**上一轮**那份旧 report 当成本轮裁�
    judge 侧代码一行没改）；
 2. `report.at` **严格晚于** `state.checkpoint.at`（本轮内容诞生的时刻）。
 
-四条 fail-closed 边界：report 没有 round、登记表没有 `roundSeq`、report 没有可解析的 `at`、
-gate state 没有 `checkpoint` —— 一律不记录。goal / plan / adviser 三种轮次**不受影响**
+三条 fail-closed 边界：report 没有 round、登记表没有 `roundSeq`、**在 checkpoint 确实存在的前提下**
+report 没有可解析的 `at` —— 一律不记录。goal / plan / adviser 三种轮次**不受影响**
 （`roundBindingFor` 只给 review 塞 content 时间戳），否则一个还没 checkpoint 过的新会话的第一次
 goal 审计就会永远等不到结论。
+
+**唯一的例外，而且它不是放水（2026-09-05，reviewer 的 P1 + 用户当场裁决）**：整个 repo **一条
+checkpoint 都没有**时不拒绝。那正是 `prepare_review` 明确支持的「audit the exit goal」轮 ——
+空范围（HEAD..HEAD）、要求工作区干净、reviewer 判的是任务是否完成而不是 diff；这种轮次里**没有
+被冻结的内容**可供裁决滞后。对它 fail-closed 换不来安全，只换来**不可收敛**：记录侧永远不记、
+探测侧（本轮改动后）永远不收口、READY 永远拿不到。此时 round 绑定与游标照常强制，上一轮遗留的
+report 仍然被拒。
 
 **判据只有一处，等待侧与记录侧共用**：`probeJudgeRound`（`judge_wait` 与 settle 扫描的探测）
 以前自己比一句「最新 report ≠ 游标」，那正是「wait 打出『本轮已有 channel report：结论 READY』

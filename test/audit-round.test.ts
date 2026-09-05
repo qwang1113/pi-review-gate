@@ -284,7 +284,7 @@ test("review binding: an unregistered round fails closed instead of trusting the
   assert.equal(selected.ok === false && selected.reason, "round-unknown");
 });
 
-test("review binding: a missing or unusable stamp on EITHER side fails closed", () => {
+test("review binding: an unreadable report stamp fails closed against a real checkpoint", () => {
   const base = { binding: "round-and-content" as const, expectedRound: 4, consumedReportId: undefined };
   const noReportStamp = selectRoundReport([childReport("rep-1", { round: 4, at: undefined })], {
     ...base,
@@ -296,13 +296,27 @@ test("review binding: a missing or unusable stamp on EITHER side fails closed", 
     contentAt: CHECKPOINT_AT,
   });
   assert.equal(unparseable.ok === false && unparseable.reason, "content-unknown");
-  // No checkpoint on record at all — the user's call: refuse, do not fall back
-  // to the round alone.
-  const noCheckpoint = selectRoundReport([childReport("rep-3", { round: 4, at: NOW })], {
+});
+
+// THE ONE CASE THAT IS NOT REFUSED, and why (reviewer P1 + user decision,
+// 2026-09-05). `prepare_review` supports a round with NO checkpoint at all —
+// the "audit the exit goal" round: empty range, clean worktree, the reviewer
+// judges whether the task is done. Refusing it would not fail closed, it would
+// make it UNCLOSABLE: nothing recorded, the probe never ends the round, no
+// reachable READY. The round binding still carries it.
+test("review binding: no checkpoint at all is the exit-goal round, not a refusal", () => {
+  const base = { binding: "round-and-content" as const, expectedRound: 4, consumedReportId: undefined };
+  const exitGoal = selectRoundReport([childReport("rep-exit", { round: 4, at: NOW })], {
     ...base,
     contentAt: undefined,
   });
-  assert.equal(noCheckpoint.ok === false && noCheckpoint.reason, "content-unknown");
+  assert.equal(exitGoal.ok, true, "an exit-goal round can still reach a verdict");
+  // …and the round half is untouched by the exception.
+  const stillRoundBound = selectRoundReport([childReport("rep-prev", { round: 3, at: NOW })], {
+    ...base,
+    contentAt: undefined,
+  });
+  assert.equal(stillRoundBound.ok === false && stillRoundBound.reason, "round-mismatch");
 });
 
 test("review binding: its own consumed report is still just 'already recorded'", () => {
@@ -499,15 +513,30 @@ test("settle/review: a round mismatch records nothing, with no fallback to the s
   assert.deepEqual(state.cursors, []);
 });
 
-test("settle/review: no checkpoint on record refuses the verdict (fail-closed)", async () => {
+// THE EXIT-GOAL ROUND STAYS CLOSABLE (reviewer P1, 2026-09-05). A session that
+// has never checkpointed anything reviews an EMPTY range — `prepare_review`
+// supports exactly that — so there is no content the verdict could lag behind.
+// Refusing it would leave the round with no record, no end and no reachable
+// READY, which is a deadlock rather than a safe refusal.
+test("settle/review: with no checkpoint on record the round still closes", async () => {
   const { state, deps } = makeSettleDeps({
     entry: { judgeId: "j-1", openerId: "o-1", role: "reviewer", roundSeq: 2, lastReportId: undefined },
     records: [childReport("rep-2", { round: 2, verdict: "READY" })],
     checkpointAt: undefined,
   });
   const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
-  assert.equal(settled.status === "miss" && settled.reason, "content-unknown");
-  assert.equal(state.reviewRounds, 0);
+  assert.equal(settled.status, "recorded");
+  assert.equal(state.reviewRounds, 1);
+  // The round half is NOT relaxed with it: a leftover report from an earlier
+  // round is still refused in a repo with no checkpoint.
+  const stale = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "reviewer", roundSeq: 3, lastReportId: undefined },
+    records: [childReport("rep-prev", { round: 2, verdict: "READY" })],
+    checkpointAt: undefined,
+  });
+  const refused = await settleAuditRound(stale.deps, { judgeId: "j-1", root: ROOT });
+  assert.equal(refused.status === "miss" && refused.reason, "round-mismatch");
+  assert.equal(stale.state.reviewRounds, 0);
 });
 
 // SCOPED TO THE REVIEW KIND. A goal or plan audit is dispatched before this

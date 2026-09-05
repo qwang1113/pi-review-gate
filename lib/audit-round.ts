@@ -212,18 +212,29 @@ export function selectRoundReport(
   // A reviewer's report that lands while the agent is still editing is not
   // delivered until the next submission settles; without this, that leftover
   // report became the NEW round's verdict, binding a READY to a commit the
-  // reviewer never saw (four reproductions, 2026-09-05). It is an AND with the
-  // round check, never a fallback for it: a missing stamp on either side is
-  // refused rather than waved through on the round alone.
-  if (opts.binding === "round-and-content") {
+  // reviewer never saw (four reproductions, 2026-09-05). Where a content stamp
+  // EXISTS it is an AND with the round check, never a fallback for it: an
+  // unreadable report stamp is refused rather than waved through on the round.
+  //
+  // NO CONTENT STAMP AT ALL IS A DIFFERENT CASE, and it is not refused
+  // (reviewer P1, 2026-09-05; user decision the same day). A repo with no
+  // `checkpoint` on record is the round `prepare_review` calls the "audit the
+  // exit goal" round: nothing is frozen, the range is empty (HEAD..HEAD) and
+  // the reviewer judges whether the task is DONE. There is no content for the
+  // verdict to lag behind — and refusing it does not fail closed in any useful
+  // sense, it makes that round UNCLOSABLE: the recorder never records, the
+  // probe never ends the round, and a READY can never be reached. The round
+  // binding and the cursor still apply, so a leftover report from an earlier
+  // round is still refused here.
+  if (opts.binding === "round-and-content" && opts.contentAt !== undefined) {
     const reportMs = reportAt === undefined ? Number.NaN : Date.parse(reportAt);
-    const contentMs = opts.contentAt === undefined ? Number.NaN : Date.parse(opts.contentAt);
+    const contentMs = Date.parse(opts.contentAt);
     if (!Number.isFinite(reportMs) || !Number.isFinite(contentMs)) {
       return {
         ok: false,
         reason: "content-unknown",
         ...seen,
-        ...(opts.contentAt === undefined ? {} : { contentAt: opts.contentAt }),
+        contentAt: opts.contentAt,
       };
     }
     if (reportMs <= contentMs) {
@@ -311,8 +322,10 @@ export interface SettleAuditRoundDeps {
    * the checkpoint is when that content came into existence. Only the review
    * binding reads it (`roundBindingFor`), so a goal or plan audit dispatched
    * before any checkpoint exists is unaffected. `undefined` (no checkpoint on
-   * record) makes the review binding fail closed rather than fall back to the
-   * round alone — user decision, 2026-09-05.
+   * record) is the "audit the exit goal" round — nothing is frozen, so there is
+   * no content for a verdict to lag behind and the round binding carries it
+   * alone. Refusing that round instead would make it unclosable, not safe
+   * (reviewer P1 + user decision, 2026-09-05).
    */
   checkpointAt(root: string): string | undefined;
   /** Persist one repo's plan-audit record (the extension owns gate state). */
