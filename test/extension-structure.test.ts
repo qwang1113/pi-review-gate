@@ -4624,6 +4624,31 @@ test("a judge session writes NO gate state, and says so outside the repo", () =>
   assert.doesNotMatch(recorder, /writeFileSync|appendFileSync|mkdirSync|writeFileAtomic/,
     "a judge must not write into the repo it is reviewing — not even to log that it did not");
   assert.match(recorder, /gateStateSkipAnnounced/, "said once, not once per persist");
+
+  // EVERY write to the repo's gate state, not just the ones inside persist().
+  // The `.blocked` marker is reconciled from session_start too — deliberately,
+  // because an early return can mean persist() never runs — and that call sat
+  // outside the guard (reviewer P1, 2026-09-05). Derive the sites instead of
+  // listing them, so a NEW one outside a guarded funnel is caught too.
+  const guardedFunnels = ["function persist(", "function persistRepo("];
+  const markerCalls = [...codeOnly(SRC).matchAll(/reconcileBlockedMarker\(|recordBlockedMarker\(/g)];
+  assert.ok(markerCalls.length >= 3, "derivation sanity: the marker is written from several places");
+  for (const call of markerCalls) {
+    const before = codeOnly(SRC).slice(0, call.index);
+    // Which function is this call in? The last funnel opened before it, if the
+    // funnel's closing brace has not been passed.
+    const inFunnel = guardedFunnels.some((fn) => {
+      const at = before.lastIndexOf(fn);
+      return at >= 0 && !before.slice(at).includes("\n  }\n");
+    });
+    if (inFunnel) continue;
+    // Outside a funnel ⇒ the call must carry both guards itself.
+    const window = codeOnly(SRC).slice(Math.max(0, call.index! - 700), call.index);
+    assert.match(window, /gateStatePersistSkip\(process\.env\)/,
+      `a gate-state write at offset ${call.index} is not behind the judge guard`);
+    assert.match(window, /state\.exclusivityRefusal/,
+      `a gate-state write at offset ${call.index} is not behind the worktree guard`);
+  }
 });
 
 test("ONE gate session per worktree: refuse, hold, release — and only ONE liveness rule", () => {

@@ -7315,7 +7315,16 @@ export default function reviewGate(pi: ExtensionAPI) {
     // sidecar — fail-closed degraded to fail-open. Done here as well as in
     // persist() because an early return (explore/normal, or a throw) can mean
     // persist() never runs this turn.
-    reconcileBlockedMarker(blockedMarkerPath(sidecarPath(cwd)), { sessionId: state.sessionId });
+    //
+    // …but NOT as a judge, and not while refused. This call is the one write
+    // to the repo's gate state that does not go through persist(), so it needs
+    // the same two guards spelled out: a judge reclaiming (or rewriting) the
+    // marker would be the reporting shell editing the fail-closed signal of
+    // the session it is reviewing, and a refused session would be doing it to
+    // the session that holds this worktree (reviewer P1, 2026-09-05).
+    if (!gateStatePersistSkip(process.env) && !state.exclusivityRefusal) {
+      reconcileBlockedMarker(blockedMarkerPath(sidecarPath(cwd)), { sessionId: state.sessionId });
+    }
 
     // Explain an invalidated binding instead of letting READY silently become
     // PENDING after an upgrade (see migrateFingerprintVersion).
