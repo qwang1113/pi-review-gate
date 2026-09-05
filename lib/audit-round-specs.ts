@@ -109,6 +109,19 @@ export interface AuditRoundSpec {
   unaddressable(): string;
   /** The round was recorded and the verdict did NOT pass. */
   rejected(note: string | undefined, extra: { streamPath?: string }): string;
+  /**
+   * THE ROUND RAN UNDER A WEAKER BINDING, AND IT SAYS SO.
+   *
+   * Only the review kind has one, because only it can degrade: with no
+   * checkpoint anywhere in the repo there is no content stamp to compare, so
+   * the content half does not apply and round + cursor carry the round alone.
+   *
+   * It is a SENTENCE, not a flag, and it travels with the recorded verdict on
+   * purpose (project manager, 2026-09-05): what makes a degradation dangerous
+   * is not the degradation, it is an INVISIBLE one — an exception nobody sees
+   * reads as the rule three rounds later.
+   */
+  degradedContentBinding?(): string;
 }
 
 export const GOAL_AUDIT_SPEC: AuditRoundSpec = {
@@ -161,6 +174,12 @@ export const REVIEW_ROUND_SPEC: AuditRoundSpec = {
   role: "reviewer",
   binding: "round-and-content",
   titlePrefix: "reviewer",
+  // The exception announces ITSELF, next to the verdict it applied to. A
+  // degraded binding that only the code knows about is the one shape of this
+  // exception nobody would ever catch drifting into the norm.
+  degradedContentBinding: () =>
+    "本轮绑定说明：本仓库还没有任何 checkpoint，这是 exit-goal 空范围轮 —— " +
+    "内容时间判据（report 必须晚于本轮 checkpoint）**不适用**，本轮裁决只由 round 与 cursor 绑定。",
   // The detail TRAVELS here (2026-09-05): a review round that does not close
   // is usually "the reviewer is still working", but it can also be "a report
   // is sitting in the channel and it is not this round's". Swallowing the

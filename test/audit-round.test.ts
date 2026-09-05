@@ -554,6 +554,26 @@ test("settle/review: with no checkpoint on record the round still closes", async
   const settled = await settleAuditRound(deps, { judgeId: "j-1", root: ROOT });
   assert.equal(settled.status, "recorded");
   assert.equal(state.reviewRounds, 1);
+  // AND IT SAYS SO, in the text the agent reads (project manager, 2026-09-05).
+  // A degradation only the code knows about is the one that becomes the norm:
+  // three rounds later nobody remembers the content criterion was skipped.
+  const recorded = settled.status === "recorded" ? settled.text : "";
+  assert.match(recorded, /本轮绑定说明/, "the recorded verdict announces the weaker binding");
+  assert.match(recorded, /exit-goal/, "…names the kind of round it was");
+  assert.match(recorded, /不适用/, "…says the content-time criterion did not apply");
+  assert.match(recorded, /round 与 cursor/, "…and what carried the round instead");
+  // The normal round must NOT carry that sentence — an announcement that shows
+  // up everywhere says nothing.
+  const normal = makeSettleDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "reviewer", roundSeq: 2, lastReportId: undefined },
+    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
+  });
+  const withCheckpoint = await settleAuditRound(normal.deps, { judgeId: "j-1", root: ROOT });
+  assert.doesNotMatch(
+    withCheckpoint.status === "recorded" ? withCheckpoint.text : "",
+    /本轮绑定说明/,
+    "a round that HAD a checkpoint says nothing about a degradation that did not happen",
+  );
   // The round half is NOT relaxed with it: a leftover report from an earlier
   // round is still refused in a repo with no checkpoint.
   const stale = makeSettleDeps({

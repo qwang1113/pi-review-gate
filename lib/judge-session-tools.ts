@@ -151,6 +151,8 @@ export interface JudgeSessionToolDeps {
     advice?: string;
     /** The report's raw verdict, for the standard report's display. */
     verdict?: string;
+    /** The round ran under a weaker binding — surfaced, never buried. */
+    bindingNote?: string;
     hasVerdict: boolean;
   }>;
   /** Cancel the gate-owned hosted-wait watchdog. */
@@ -590,6 +592,9 @@ async function doWait(
         // — so the wake-up carries it (the same field the settle path fills).
         ...(settled.advice === undefined ? {} : { conclusionExcerpt: settled.advice }),
         ...(settled.text === undefined ? { unrecorded: child.role !== "adviser" } : { recordedNote: settled.text }),
+        // Its own line: the recorded note is printed first-line-only, so a
+        // weaker binding announced INSIDE that note would never be read.
+        ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
         waitedSeconds,
       }),
       { done: true, reason: "report", role: child.role, hasVerdict: settled.hasVerdict },

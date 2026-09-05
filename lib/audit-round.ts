@@ -375,7 +375,24 @@ export interface SettleAuditRoundDeps {
 
 /** What one closing round did. `text`, where present, is for the agent. */
 export type SettleAuditRoundOutcome =
-  | { status: "recorded"; kind: AuditKind; reportId: string; hasVerdict: boolean; verdict: string; text: string }
+  | {
+      status: "recorded";
+      kind: AuditKind;
+      reportId: string;
+      hasVerdict: boolean;
+      verdict: string;
+      text: string;
+      /**
+       * The round ran under a WEAKER binding, in the round's own words.
+       *
+       * It is a field of its own and not just a paragraph of `text` because
+       * the wake-up the agent actually reads (`buildStandardReport`) prints
+       * only the FIRST line of the recorded note — an announcement appended to
+       * the end of that note would be true, recorded, and invisible, which is
+       * the exact failure the announcement exists to prevent.
+       */
+      bindingNote?: string;
+    }
   | { status: "advice"; reportId: string; text: string }
   | { status: "miss"; reason: RoundReportMiss; text?: string }
   | { status: "unrecorded"; reportId: string; hasVerdict: boolean; verdict: string }
@@ -475,6 +492,22 @@ export async function settleAuditRound(
   if (text === undefined) {
     return { status: "unrecorded", reportId: report.reportId, hasVerdict, verdict: concluded.verdict };
   }
+  // A DEGRADED BINDING ANNOUNCES ITSELF, in the same text that carries the
+  // verdict it let through (project manager, 2026-09-05).
+  //
+  // The exception below the content check is legitimate — a repo with no
+  // checkpoint has no content for a verdict to lag behind — but an exception
+  // only the code knows about is how "this round was bound by round and cursor
+  // alone" quietly becomes what everyone assumes every round is. The condition
+  // here is EXACTLY the one `selectRoundReport` skipped on, so the sentence
+  // cannot drift away from the branch it describes.
+  let bindingNote: string | undefined;
+  if (binding.binding === "round-and-content" && binding.contentAt === undefined && spec.degradedContentBinding) {
+    bindingNote = spec.degradedContentBinding();
+    // Both, on purpose: the note rides the recorded text for whoever prints it
+    // whole, and travels as its own field for the wake-up that prints one line.
+    text = `${text}\n\n${bindingNote}`;
+  }
   // The audit is on record now, so what it was judging can be forgotten. This
   // is deliberately AFTER the write (the old code dropped it before, which
   // lost the binding if the write failed).
@@ -487,6 +520,7 @@ export async function settleAuditRound(
     hasVerdict,
     verdict: concluded.verdict,
     text,
+    ...(bindingNote === undefined ? {} : { bindingNote }),
   };
 }
 

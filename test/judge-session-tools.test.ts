@@ -55,6 +55,8 @@ interface Fake {
    * than the recorder is the defect these tests exist for.
    */
   binding: RoundBinding;
+  /** What the engine reports about a weaker binding, when there is one. */
+  bindingNote: string | undefined;
 }
 
 function child(overrides: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
@@ -90,6 +92,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
       expectedRound: 1,
       contentAt: CHECKPOINT_AT,
     } as RoundBinding,
+    bindingNote: undefined as string | undefined,
   };
   const io: ChannelIO = {
     ensureDir() {},
@@ -147,7 +150,12 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
           [judgeId]: { ...entry, lastReportId: state.lastReportId },
         };
       }
-      return { text, verdict: "READY", hasVerdict: true };
+      return {
+        text,
+        verdict: "READY",
+        hasVerdict: true,
+        ...(state.bindingNote === undefined ? {} : { bindingNote: state.bindingNote }),
+      };
     },
     dropPendingAudit: (root) => { state.calls.push(`dropPendingAudit(${root})`); },
     cancelWaitTimer: () => { state.calls.push("cancelWaitTimer"); },
@@ -431,6 +439,30 @@ test("judge_wait: a finished round outranks a question that landed with it", asy
   assert.equal((reply.details as { reason: string }).reason, "report", "the strongest message wins the round");
   assert.match(textOf(reply), /结论：BLOCKED/);
 });
+
+// A WEAKER BINDING IS ANNOUNCED IN THE WAKE-UP ITSELF (project manager,
+// 2026-09-05). The engine hands it over as its own field precisely because the
+// recorded note is printed first-line-only — appending the sentence to that
+// note would record it and never show it.
+test("judge_wait: a round bound without a content stamp says so in the reply", async () => {
+  const f = fake();
+  const c = seed(f);
+  writeReport(f, c, "READY", "rep-2");
+  f.bindingNote = "本轮绑定说明：本仓库还没有任何 checkpoint，这是 exit-goal 空范围轮 —— 内容时间判据**不适用**。";
+  const reply = await call(f, "judge_wait", { role: "reviewer" });
+  const text = textOf(reply);
+  assert.match(text, /绑定说明：/, "the weaker binding is its own line in the wake-up");
+  assert.match(text, /exit-goal/, "…and it names the round it applied to");
+});
+
+test("judge_wait: an ordinary round carries no binding note", async () => {
+  const f = fake();
+  const c = seed(f);
+  writeReport(f, c, "READY", "rep-2");
+  const reply = await call(f, "judge_wait", { role: "reviewer" });
+  assert.doesNotMatch(textOf(reply), /绑定说明：/, "a line shown every round would say nothing");
+});
+
 
 test("judge_wait: a timeout returns the state so far, the discipline, and no verdict", async () => {
   const f = fake();

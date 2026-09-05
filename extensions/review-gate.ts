@@ -4571,7 +4571,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    * audits. This function only translates the outcome into the shape the two
    * callers here already speak.
    */
-  async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean } | undefined> {
+  async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean; bindingNote?: string } | undefined> {
     try {
       const live = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
       const entry = judgeHierarchy[sessionId];
@@ -4580,7 +4580,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       const settled = await settleAuditRound(auditRoundDeps(ctx), { judgeId: sessionId, root: childRoot });
       switch (settled.status) {
         case "recorded":
-          return { text: settled.text, recorded: true };
+          return {
+            text: settled.text,
+            recorded: true,
+            // Travels separately: the wake-up prints the record's first line
+            // only, and a weaker binding nobody reads about is a silent one.
+            ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
+          };
         case "advice":
           return { text: settled.text, recorded: false };
         case "miss":
@@ -4655,6 +4661,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         conclusionExcerpt: entry.role === "adviser" ? conclusion.text : undefined,
         streamPath: entry.streamPath,
         recordedNote: conclusion.recorded ? conclusion.text : undefined,
+        bindingNote: conclusion.bindingNote,
         unrecorded: !conclusion.recorded && entry.role !== "adviser" ? true : undefined,
         openQuestions: freshQuestions.map((q) => ({ title: q.title, options: q.options, requestId: q.requestId })),
       }));
@@ -5195,7 +5202,12 @@ export default function reviewGate(pi: ExtensionAPI) {
       const settled = await settleAuditRound(auditRoundDeps(undefined), { judgeId, root });
       switch (settled.status) {
         case "recorded":
-          return { text: settled.text, verdict: settled.verdict, hasVerdict: settled.hasVerdict };
+          return {
+            text: settled.text,
+            verdict: settled.verdict,
+            hasVerdict: settled.hasVerdict,
+            ...(settled.bindingNote === undefined ? {} : { bindingNote: settled.bindingNote }),
+          };
         case "advice":
           return { advice: settled.text, hasVerdict: false };
         case "unrecorded":

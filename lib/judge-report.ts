@@ -61,6 +61,14 @@ export interface StandardReportInput {
   /** recordRoundOutput's note; absent with unrecorded=true means retry later. */
   recordedNote?: string | undefined;
   unrecorded?: boolean | undefined;
+  /**
+   * The round ran under a WEAKER binding, in its own words.
+   *
+   * Printed as its own line rather than folded into `recordedNote`, which is
+   * shown first-line-only: a degradation announced somewhere the wake-up never
+   * prints is indistinguishable from one that was never announced.
+   */
+  bindingNote?: string | undefined;
   openQuestions?: ReadonlyArray<OpenQuestionBrief> | undefined;
   /** Why this wake-up happened (default `report` — the settle path's case). */
   reason?: StandardReportReason | undefined;
@@ -110,6 +118,11 @@ export function buildStandardReport(input: StandardReportInput): string {
     lines.push("- 记录：本轮 report 到达但尚未记入 review 链（记录时无可用上下文）——保持 armed，下次 settle 重试，不要重开一轮。");
   } else if (input.recordedNote !== undefined && input.recordedNote.trim().length > 0) {
     lines.push(`- 记录：${input.recordedNote.trim().split("\n")[0]}`);
+  }
+  // Right under the record it applies to: the verdict was recorded, AND it was
+  // recorded under a weaker binding than usual. Both facts or neither.
+  if (input.bindingNote !== undefined && input.bindingNote.trim().length > 0) {
+    lines.push(`- 绑定说明：${input.bindingNote.trim()}`);
   }
   if (input.conclusionExcerpt !== undefined && input.conclusionExcerpt.trim().length > 0) {
     const excerpt = input.conclusionExcerpt.trim().slice(0, STANDARD_REPORT_EXCERPT_CHARS);
