@@ -148,6 +148,22 @@ test("no goal ⇒ the Step 0 directive: grill the user, then propose_loop_goal",
     "the agent must be told the number of questions is not the thing to economize on");
   assert.doesNotMatch(text, /questionnaire|one question, not/i,
     "no wording that reads as 'ask fewer questions' may return");
+  // ONE authority, one summary (user decision, 2026-09-06): the full rule
+  // lives in `ask_user`'s own description — the only place that can quote the
+  // real per-call cap — and this directive points at it. Two full statements
+  // of the same rule is how the old copy managed to survive in two places.
+  assert.match(text, /`ask_user`'s own description/,
+    "the Step-0 copy must POINT at the rule, not restate it");
+  // "Summary, not second statement" is checked by what it must NOT carry: the
+  // mechanical details belong to the tool description, which is the only place
+  // that can quote the real per-call cap. (A length check here would measure
+  // the whole directive — steps 2-5 included — and prove nothing.)
+  assert.doesNotMatch(text, /per call/i,
+    "the per-call cap is the tool description's to state, not this one's");
+  assert.doesNotMatch(text, /Never trim a real doubt/i,
+    "…and so is the rest of the full wording");
+
+
 
   assert.match(text, /propose_loop_goal/);
   assert.match(text, /Writing that file yourself grants nothing/);

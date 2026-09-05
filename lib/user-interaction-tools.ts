@@ -336,6 +336,15 @@ export function registerUserInteractionTools(host: ToolHost, deps: UserInteracti
   host.registerTool({
     name: "ask_user",
     label: "Ask The User",
+    // THE INTERVIEW RULE LIVES HERE (user decision, 2026-09-06): optional, and
+    // uncapped in the number of questions. This description is the ONE full
+    // statement of it — it is what the model reads at the moment it decides
+    // whether to ask, and it is the only place that can quote the real
+    // per-call cap. `LOOP_GOAL_MISSING_DIRECTIVE` (lib/loop-goal.ts) carries a
+    // one-line summary and points here; do not let that grow back into a
+    // second wording, which is how the old "ask fewer questions" copy survived
+    // in two places at once.
+
     description:
       "Ask the user something — the ONE entry point for every moment that needs a human: " +
       "requirement ambiguity, a product/design decision, scope trade-offs, how to handle a " +

@@ -631,10 +631,9 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "1. ASK THE USER FIRST, with `ask_user({questions})`: it runs the interview (one question at a " +
   "time, its N / M progress, your options and recommendation, 'answer in chat' and 'skip the " +
   "rest' for them) and pauses the loop until the answers come back — all of them at once. " +
-  "Facts are YOUR job (read the repo, run tools); only decisions go to the user. There is NO cap " +
-  "on how many questions you ask — ask whenever something is genuinely unclear, and ask nothing " +
-  "when nothing is (the interview is optional; the restatement in step 2 is not). Getting the " +
-  "requirement right beats getting to the code early. Later questions that depend " +
+  "Facts are YOUR job (read the repo, run tools); only decisions go to the user. The interview " +
+  "is optional and has NO cap on the number of questions — `ask_user`'s own description carries " +
+  "that rule; what is NOT optional is the restatement in step 2. Later questions that depend " +
   "on an earlier answer are a SECOND ask_user round, not a guess.\n" +
   "2. RESTATE THE REQUIREMENT and get it confirmed, with `propose_restatement({restatement, " +
   "station})` — MECHANICAL since 2026-09-06: without a confirmed restatement on record, step 4 " +
