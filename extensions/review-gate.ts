@@ -77,7 +77,8 @@ import { SETTLED_TOOL_REMINDER, WAIT_DISCIPLINE_HINT } from "../lib/agent-direct
 import { MODE_REGISTRY, resolveGateMode } from "../lib/gate-modes.ts";
 import { defaultProjectConfig, loadProjectConfig, type ProjectConfig } from "../lib/project-config.ts";
 import { buildGitMemory } from "../lib/git-memory.ts";
-import { detectShipCommands } from "../lib/ship-detect.ts";
+import { containsHeredoc, detectShipCommands } from "../lib/ship-detect.ts";
+
 import { buildGateWidget, type GateWidgetFacts } from "../lib/ui-widget.ts";
 import {
   gitRootOfDir,
@@ -4291,8 +4292,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       // opens real PRs, and tying the evidence to that switch is exactly the
       // bug this replaced (round-1 reviewer P1 — a `pr` round in such a repo
       // could never finish).
-      if (cmd && event.isError !== true && state.taskMode !== "normal") {
+      //
+      // A HEREDOC disqualifies the whole command as evidence (round-2 reviewer
+      // P2): the shared detector deliberately over-matches — a heredoc BODY
+      // line reading `gh pr create …` is detected, which is right when the
+      // answer is "block" and wrong when the answer is "you arrived". The
+      // detector itself must not learn about heredocs (that would be a real
+      // ship-gate bypass), so the asymmetry is resolved on this side.
+      if (cmd && event.isError !== true && state.taskMode !== "normal" && !containsHeredoc(cmd)) {
         const shipped = detectShipCommands(cmd).map((d) => d.kind);
+
         if (shipped.length > 0) {
           const cmdRepos = resolveCommandRepos(cmd, cwd);
           const roots = cmdRepos.ambiguous ? new Set(sessionRepos) : new Set(cmdRepos.repos);
@@ -7072,7 +7081,8 @@ export default function reviewGate(pi: ExtensionAPI) {
             // is not evidence that the work was committed.
             const files = changedFiles(root);
             const problems = stationArrivalProblems(station, {
-              dirtyRepos: files === undefined || files.length > 0 ? [repoLabel(root)] : [],
+              dirty: files === undefined || files.length > 0,
+
               observedPrCreate: st.shippedKinds?.includes("pr-create") === true,
               recordedPr: typeof st.copilot?.pr === "number" ? st.copilot.pr : null,
             });
@@ -7169,11 +7179,18 @@ export default function reviewGate(pi: ExtensionAPI) {
         st.rounds = [];
         st.lastPolishReason = undefined;
         st.strategicResetFired = false;
+        // The delivery-station EVIDENCE is per TASK too (round-2 reviewer P2):
+        // the `gh pr create` that finished task A says nothing about task B,
+        // and leaving it behind would let the next round claim it arrived at
+        // the `pr` station without opening anything.
+        st.shippedKinds = undefined;
         if (root !== primaryRepoRoot) persistRepo(ctx as unknown as ExtensionContext, root);
       }
       state.rounds = [];
       state.lastPolishReason = undefined;
       state.strategicResetFired = false;
+      state.shippedKinds = undefined;
+
       // P1 fix: the L2 auto-continuation budget must reset with the task too.
       // continuationsInjected is capped against maxRounds in agent_settled; if
       // task A consumed it, task B in the same session would get ZERO

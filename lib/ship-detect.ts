@@ -387,6 +387,32 @@ export function detectShipCommands(command: string): ShipDetection[] {
 }
 
 /**
+ * Does this command open a HERE-DOCUMENT?
+ *
+ * FOR THE EVIDENCE PATH ONLY, and it exists because the same detection is now
+ * used in two OPPOSITE directions (round-2 reviewer P2, 2026-09-06):
+ *
+ *   - to BLOCK a ship, where over-matching is safe — a heredoc body whose
+ *     line reads `gh pr create …` is refused, and the cost is one command the
+ *     agent rephrases;
+ *   - to GRANT arrival at the `pr` station, where the SAME over-match hands
+ *     out a pass for a PR nobody opened (`cat > doc.md <<EOF` … `EOF` with
+ *     that line in the body IS detected as `pr-create` — measured, not
+ *     assumed).
+ *
+ * So the evidence recorder asks this first and records nothing when a heredoc
+ * is in play. It deliberately does NOT teach {@link detectShipCommands} about
+ * heredocs: a detector that skipped heredoc bodies would be a real ship-gate
+ * bypass, and that direction must never be relaxed. A false NEGATIVE here only
+ * means "no arrival evidence from this command" — the round proves it with a
+ * plain `gh pr create` instead.
+ */
+export function containsHeredoc(command: string): boolean {
+  return /<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*/.test(command);
+}
+
+
+/**
  * Extract -m/--message payloads from a git commit segment for AI-attribution
  * scanning. Handles -m "msg", -m'msg', --message=msg. Returns raw strings.
  */

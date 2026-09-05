@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { detectShipCommands, extractCommitMessages, extractPrTextFields } = await import(
+const { containsHeredoc, detectShipCommands, extractCommitMessages, extractPrTextFields } = await import(
+
   new URL("../lib/ship-detect.ts", import.meta.url).pathname
 );
 
@@ -325,3 +326,49 @@ test("bypass: backslash-newline continuation → commit", () => {
 test("bypass: continuation inside a quoted-splice command name", () => {
   assert.equal(firstKind('g"i\\\nt" commit'), "commit");
 });
+
+// ---------------------------------------------------------------------------
+// containsHeredoc — the EVIDENCE-side narrowing (2026-09-06, round-2 P2).
+//
+// The detector's over-matching is safe while it only BLOCKS. It stopped being
+// safe once the delivery station started reading the same detection as proof
+// that a PR was opened: a heredoc BODY line is detected as a ship command.
+
+test("a heredoc body IS detected as a ship command — the over-match this exists for", () => {
+  // Measured, not assumed: this is exactly why the evidence path may not reuse
+  // the detection unfiltered.
+  assert.equal(firstKind("cat > doc.md <<EOF\ngh pr create --title x\nEOF"), "pr-create");
+});
+
+test("containsHeredoc recognises the forms a shell actually accepts", () => {
+  for (const cmd of [
+    "cat > a.md <<EOF\nx\nEOF",
+    "cat <<-EOF\nx\nEOF",
+    "cat <<'EOF'\nx\nEOF",
+    'cat <<"END"\nx\nEND',
+    "gh pr create --body \"$(cat <<EOF\nbody\nEOF\n)\"",
+  ]) {
+    assert.equal(containsHeredoc(cmd), true, cmd);
+  }
+});
+
+test("containsHeredoc leaves ordinary commands (and redirections) alone", () => {
+  for (const cmd of [
+    "gh pr create --title x --body y",
+    "git push origin work",
+    "sort < input.txt",
+    "node script.js 2>&1",
+  ]) {
+    assert.equal(containsHeredoc(cmd), false, cmd);
+  }
+});
+
+test("containsHeredoc errs toward SEEING a heredoc — the safe direction here", () => {
+  // `<<` inside quotes is not a heredoc to a shell, and this predicate says it
+  // is. That costs a false NEGATIVE on arrival evidence (this command proves
+  // nothing), never a false pass — which is the whole reason the evidence side
+  // gets its own predicate instead of teaching the detector about quoting.
+  assert.equal(containsHeredoc("echo 'a << b'"), true);
+});
+
+

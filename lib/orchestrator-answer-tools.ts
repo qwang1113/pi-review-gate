@@ -189,8 +189,11 @@ export type CrosscheckVerdict =
  * the two from drifting: edit the skeleton and this follows.
  */
 const CROSSCHECK_PLACEHOLDERS: readonly string[] = Object.freeze(
-  [...PROXY_CROSSCHECK_SKELETON.matchAll(/<[^<>\n]+>/g)].map((m) => m[0]),
+  // Deduped: `<taskId>` appears twice in the skeleton, and a refusal that
+  // counted it twice would report more unfilled blanks than there are.
+  [...new Set([...PROXY_CROSSCHECK_SKELETON.matchAll(/<[^<>\n]+>/g)].map((m) => m[0]))],
 );
+
 
 /**
  * Is this text a comparison of THIS task at all?

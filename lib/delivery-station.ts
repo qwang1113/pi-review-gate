@@ -202,16 +202,22 @@ export const STATION_SHIP_NEXT_STEPS =
 // declare_done's side: did this round actually ARRIVE at its station?
 // ---------------------------------------------------------------------------
 
-/** The local, gate-observed facts an arrival is judged on. */
+/**
+ * The local, gate-observed facts ONE REPO's arrival is judged on.
+ *
+ * Per repo, because a station is per contract and a session may hold an
+ * approved goal in more than one repo. The caller owns the labelling — a
+ * multi-repo `declare_done` prefixes the lines it gets back, and printing the
+ * repo twice was the round-2 Nit that made this shape explicit.
+ */
 export interface StationArrivalFacts {
   /**
-   * Repos that still hold uncommitted work, already labelled for display.
-   * A repo whose worktree could not be READ belongs here too — unverifiable
-   * is not clean.
+   * Does this repo still hold uncommitted work? A worktree that could not be
+   * READ counts as dirty — unverifiable is not clean.
    */
-  dirtyRepos: readonly string[];
+  dirty: boolean;
   /**
-   * Did the gate WATCH a `gh pr create` succeed in this session?
+   * Did the gate WATCH a `gh pr create` succeed in this repo?
    *
    * This is the evidence a `pr` round arrived, and it is the gate's OWN
    * observation: the ship kind is read off a bash `tool_result` that did not
@@ -234,7 +240,8 @@ export interface StationArrivalFacts {
 }
 
 /**
- * What still stands between this round and the station it promised to reach.
+ * What still stands between this repo and the station this round promised to
+ * reach.
  *
  * Only the two stations that promise something beyond the gate's own checks
  * can produce a problem: `precommit` IS "the checks pass", which
@@ -246,9 +253,9 @@ export function stationArrivalProblems(
 ): string[] {
   if (station === "precommit") return [];
   const problems: string[] = [];
-  if (facts.dirtyRepos.length > 0) {
+  if (facts.dirty) {
     problems.push(
-      `本轮交付站点是 ${station}，但还有未提交的改动（${facts.dirtyRepos.join("、")}）——` +
+      `本轮交付站点是 ${station}，但还有未提交的改动 —— ` +
       "提交完再收尾（站点 commit 的承诺就是「提交已经做完」）。",
     );
   }
@@ -259,10 +266,12 @@ export function stationArrivalProblems(
       "本轮交付站点是 pr，但门禁没有看到 PR 被开出来 —— 它认的是**它自己观察到的事实**：" +
       "一条成功跑完的 `gh pr create`（推分支还不算），或者 Copilot 周期已经解析出的 PR 号。\n" +
       "  - 还没开 PR：`git push` 之后跑 `gh pr create`，再收尾。\n" +
-      "  - PR 是在别处开的（网页、上一轮会话）：跑一次 `request_copilot_review`，" +
-      "它会解析并记下 PR 号；或者本轮本来就只到 commit，那就让用户把站点改回 `commit`。",
+      "  - PR 是在别处开的（网页、上一轮会话）：跑一次 `request_copilot_review` 让门禁解析并记下 PR 号；" +
+      "项目关掉了 `copilotReview` 时这条走不通，那就重跑一次 `gh pr create`（已存在会直接告诉你），" +
+      "或者让用户把本轮站点改回 `commit`。",
     );
   }
+
 
   return problems;
 }

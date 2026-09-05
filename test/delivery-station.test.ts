@@ -158,15 +158,19 @@ test("the station's next steps are the only two that exist, and no appeal is off
 });
 
 test("arrival: `precommit` owes nothing beyond the gates that already ran", () => {
-  assert.deepEqual(stationArrivalProblems("precommit", { dirtyRepos: ["repo"], recordedPr: null }), []);
+  assert.deepEqual(stationArrivalProblems("precommit", { dirty: true, recordedPr: null }), []);
 });
 
 test("arrival: `commit` owes a committed worktree", () => {
-  assert.deepEqual(stationArrivalProblems("commit", { dirtyRepos: [], recordedPr: null }), []);
-  const dirty = stationArrivalProblems("commit", { dirtyRepos: ["repo-a", "repo-b"], recordedPr: null });
+  assert.deepEqual(stationArrivalProblems("commit", { dirty: false, recordedPr: null }), []);
+  const dirty = stationArrivalProblems("commit", { dirty: true, recordedPr: null });
   assert.equal(dirty.length, 1);
-  assert.match(dirty[0]!, /repo-a、repo-b/, "the refusal names WHICH repo still holds work");
+  assert.match(dirty[0]!, /未提交的改动/);
   assert.match(dirty[0]!, /commit/);
+  // The line names no repo: the judgement is per repo, and the caller labels
+  // it (a multi-repo declare_done prefixes `[repo]`). Naming it here too
+  // printed the same repo twice — round-2 Nit.
+  assert.doesNotMatch(dirty[0]!, /[[\]]/);
 });
 
 test("arrival: `pr` owes a committed worktree AND evidence that a PR was opened", () => {
@@ -175,30 +179,32 @@ test("arrival: `pr` owes a committed worktree AND evidence that a PR was opened"
   // copilotReview is disabled, never gets a PR NUMBER, and an arrival gate
   // that insisted on the number would make such a `pr` round unfinishable
   // (round-1 reviewer P1, 2026-09-06).
-  assert.deepEqual(stationArrivalProblems("pr", { dirtyRepos: [], observedPrCreate: true }), []);
+  assert.deepEqual(stationArrivalProblems("pr", { dirty: false, observedPrCreate: true }), []);
   // EVIDENCE 2 — a PR number the Copilot cycle resolved, for a PR opened in
   // the browser or by an earlier session.
-  assert.deepEqual(stationArrivalProblems("pr", { dirtyRepos: [], recordedPr: 42 }), []);
+  assert.deepEqual(stationArrivalProblems("pr", { dirty: false, recordedPr: 42 }), []);
 
-  const noPr = stationArrivalProblems("pr", { dirtyRepos: [], recordedPr: null });
+  const noPr = stationArrivalProblems("pr", { dirty: false, recordedPr: null });
   assert.equal(noPr.length, 1);
   assert.match(noPr[0]!, /没有看到 PR 被开出来/);
-  // The refusal must name BOTH ways out, and neither may be a fiction: the
-  // first version of this text said the gate records a PR number on any
-  // PR-class ship, which is false and left the reader with no working step.
+  // The refusal must name ways out that all actually work: the first version
+  // claimed the gate records a PR number on any PR-class ship (false), and the
+  // second pointed at `request_copilot_review` without saying that a project
+  // with copilotReview disabled has to do something else (round-2 Nit).
   assert.match(noPr[0]!, /gh pr create/);
   assert.match(noPr[0]!, /request_copilot_review/);
+  assert.match(noPr[0]!, /copilotReview/, "…and what to do when that switch is off");
   assert.match(noPr[0]!, /推分支还不算/, "a push is not a PR — say so, it is the likely confusion");
 
   // A missing field is the same fact as null — an older sidecar never opened
   // a PR either.
-  assert.equal(stationArrivalProblems("pr", { dirtyRepos: [] }).length, 1);
+  assert.equal(stationArrivalProblems("pr", { dirty: false }).length, 1);
   // …and `false` evidence is not evidence.
-  assert.equal(stationArrivalProblems("pr", { dirtyRepos: [], observedPrCreate: false }).length, 1);
+  assert.equal(stationArrivalProblems("pr", { dirty: false, observedPrCreate: false }).length, 1);
 
   // Both halves missing ⇒ both are reported; a completion should learn
   // everything it still owes in one reply.
-  assert.equal(stationArrivalProblems("pr", { dirtyRepos: ["repo"], recordedPr: null }).length, 2);
-
+  assert.equal(stationArrivalProblems("pr", { dirty: true, recordedPr: null }).length, 2);
 });
+
 
