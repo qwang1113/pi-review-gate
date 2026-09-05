@@ -269,3 +269,66 @@ test("a report the gate cannot read a verdict from records NOTHING (fail-closed)
   assert.equal(sidecar(repo).review.verdict, "PENDING", "the gate stays shut rather than guessing");
   assert.equal(sidecar(repo).rounds?.length ?? 0, 0);
 });
+
+/*
+ * THE TWO BINDINGS A READY HANGS ON — pinned because the 2026-09-05 audit-round
+ * convergence MOVED the call site that reaches this recorder (the settle path
+ * and judge_wait both go through `settleAuditRound` now). The recorder's body
+ * was deliberately left untouched; these two tests are what proves the move
+ * did not change what a READY means. They also cannot be checked by the
+ * session doing the refactor — it runs the extension that was loaded at
+ * startup — so a unit test is the only place they can live.
+ */
+
+test("BINDING (a): a READY whose HEAD moved after prepare is recorded as BLOCKED", async () => {
+  const { repo, pi, ctx } = await preparedRepo();
+  // A second checkpoint lands after prepare_review registered the target —
+  // exactly what happens when the agent keeps fixing while the review runs.
+  // The reviewer judged the OLDER commit, so its READY cannot bind to what is
+  // in place now.
+  writeFileSync(join(repo, "a.ts"), "export const a = 3;\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-m", "chore: a later commit the reviewer never saw");
+
+  const concluded = reportConclusion(readerIO(new Map()), reportRecord(repo));
+  const text = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+
+  assert.match(text, /recorded verdict BLOCKED/, text);
+  assert.match(text, /STALE TARGET/, "the agent is told WHY its READY became a BLOCKED");
+  const st = sidecar(repo);
+  assert.equal(st.review.verdict, "BLOCKED", "unreviewed content can never ship on someone else's READY");
+  assert.equal((st.review as { fingerprint?: string | null }).fingerprint, null,
+    "a withheld READY binds to nothing");
+});
+
+test("BINDING (b): a recorded READY binds to the reviewed commit's TREE", async () => {
+  const { repo, pi, ctx } = await preparedRepo();
+  const reviewedTree = git(repo, "rev-parse", "HEAD^{tree}");
+  const reviewedHead = git(repo, "rev-parse", "HEAD");
+
+  const concluded = reportConclusion(readerIO(new Map()), reportRecord(repo));
+  const text = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+
+  assert.match(text, /recorded verdict READY/, text);
+  const st = sidecar(repo) as unknown as {
+    review: { verdict: string; fingerprint?: string | null; commitSha?: string };
+    lastReadyReview?: { treeOid?: string };
+  };
+  // CONTENT binding, not commit binding: a squash rewrites the sha and
+  // preserves the tree, so this is what survives one.
+  assert.equal(st.review.fingerprint, reviewedTree, "the READY binds to the reviewed TREE");
+  assert.equal(st.review.commitSha, reviewedHead, "…and remembers the commit it came from, for the next baseline");
+  assert.equal(st.lastReadyReview?.treeOid, reviewedTree, "the incremental baseline moves to that same tree");
+});
+
+// The cwd check is the third thing a READY must satisfy, and it is checked in
+// the same place — a round recorded against the wrong repository is BLOCKED.
+test("BINDING (c): a READY that reports someone else's cwd is recorded as BLOCKED", async () => {
+  const { repo, pi, ctx } = await preparedRepo();
+  const concluded = reportConclusion(readerIO(new Map()), reportRecord(repo, { cwd: "/evil/elsewhere" }));
+  const text = await recorders(pi).recordReviewVerdict(concluded, repo, ctx);
+  assert.match(text, /recorded verdict BLOCKED/, text);
+  assert.match(text, /CWD CHECK FAILED/, text);
+  assert.equal(sidecar(repo).review.verdict, "BLOCKED");
+});
+

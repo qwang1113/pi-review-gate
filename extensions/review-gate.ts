@@ -201,16 +201,19 @@ import { formatPlanSummary, type OrchestratorPlan } from "../lib/orchestrator-pl
 import { contextPercentFromUsage } from "../lib/orchestrator-handoff-advice.ts";
 
 import {
-  adjudicatePlanAudit,
   buildPlanAuditTask,
   formatPlanAuditCarryover,
-  formatPlanAuditRefusal,
   planAuditHash,
-  planAuditPassed,
-  selectCurrentAuditReport,
-  type PlanAuditRecord,
-  type StaleAuditReportReason,
 } from "../lib/orchestrator-plan-audit.ts";
+import {
+  GOAL_AUDIT_SPEC,
+  PLAN_AUDIT_SPEC,
+  runAuditRound,
+  settleAuditRound,
+  type PendingAudit,
+  type RunAuditRoundDeps,
+  type SettleAuditRoundDeps,
+} from "../lib/audit-round.ts";
 
 import {
   decideSupervisionEvents,
@@ -341,7 +344,6 @@ import {
   adjudicateReviewConclusion,
   fileFindingsFrom,
   normalizeConcludedVerdict,
-  severityFindingsFrom,
   type ReviewFinding,
 } from "../lib/review-adjudicate.ts";
 import { sessionDirForCwd, sessionDirFromContext } from "../lib/session-dir.ts";
@@ -2130,18 +2132,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     return state.sessionId ?? undefined;
   }
   /**
-   * The goal draft a running audit is judging, per repo. The verdict binds to
-   * the draft's CONTENT, so the gate has to remember which text it dispatched
-   * — the auditor's output alone cannot say what it audited.
+   * THE audit this repo dispatched and has not recorded yet — one per repo.
+   *
+   * A verdict binds to the CONTENT it judged (a goal to its draft's sha256, a
+   * plan to its canonical hash), so the gate has to remember what it sent; the
+   * auditor's output alone cannot say what it audited. Goal and plan share one
+   * `goal-auditor` judge per repo, so at most one of them can be in flight —
+   * which is why this is ONE map and not two (2026-09-05, user decision). The
+   * two-map shape could represent a state the system cannot be in, and paid
+   * for it with a self-heal branch that guessed which pending to drop.
    */
-  const pendingGoalAudits = new Map<string, { draft: string; startedAt: string }>();
-  /**
-   * The plan a running plan-audit is judging, per repo — the goal map's twin.
-   * A plan verdict binds to its canonical hash; without this, a spawned plan
-   * review would run with nowhere to record to. Goal and plan share one
-   * judge id per repo, so at most ONE kind may be pending per root.
-   */
-  const pendingPlanAudits = new Map<string, { hash: string; planText: string; startedAt: string }>();
+  const pendingAudits = new Map<string, PendingAudit>();
   /** File holding one repo's judges + pendings (under `.pi/`, git-ignored like all gate state). */
   const HIERARCHY_FILENAME = "judge-hierarchy.json";
   /** Repos whose hierarchy slice is already merged this session. */
@@ -2155,10 +2156,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     persistJudgeHierarchy();
   }
 
-  /** Drop both pendings for one repo and persist. */
+  /** Forget this repo's pending audit and persist. */
   function dropAudits(root: string): void {
-    pendingGoalAudits.delete(root);
-    pendingPlanAudits.delete(root);
+    pendingAudits.delete(root);
     persistJudgeHierarchy();
   }
 
@@ -2169,20 +2169,19 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function persistJudgeHierarchy(): void {
     try {
-      const slices = new Map<string, { judges: Record<string, JudgeEntry>; goalAudit?: { draft: string; startedAt: string }; planAudit?: { hash: string; planText: string; startedAt: string } }>();
+      const slices = new Map<string, { judges: Record<string, JudgeEntry>; audit?: PendingAudit }>();
       const slice = (root: string) => {
         let s = slices.get(root);
         if (!s) { s = { judges: {} }; slices.set(root, s); }
         return s;
       };
       for (const [id, e] of Object.entries(judgeHierarchy)) slice(e.repoRoot).judges[id] = e;
-      for (const [root, v] of pendingGoalAudits) slice(root).goalAudit = v;
-      for (const [root, v] of pendingPlanAudits) slice(root).planAudit = v;
+      for (const [root, v] of pendingAudits) slice(root).audit = v;
       for (const root of hierarchyFileRoots) slice(root);
       for (const [root, s] of slices) {
         hierarchyFileRoots.add(root);
         const file = pathJoin(root, ".pi", HIERARCHY_FILENAME);
-        const empty = Object.keys(s.judges).length === 0 && !s.goalAudit && !s.planAudit;
+        const empty = Object.keys(s.judges).length === 0 && !s.audit;
         if (empty) { try { rmSync(file, { force: true }); } catch { /* best effort */ } continue; }
         try { mkdirSync(pathJoin(root, ".pi"), { recursive: true }); } catch { /* best effort */ }
         writeFileSync(file, JSON.stringify({ version: 1, ...s }), "utf8");
@@ -2205,8 +2204,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     for (const [id, e] of Object.entries(snap.judges)) {
       if (!judgeHierarchy[id]) judgeHierarchy[id] = e;
     }
-    if (!pendingGoalAudits.has(root) && snap.goalAudit) pendingGoalAudits.set(root, snap.goalAudit);
-    if (!pendingPlanAudits.has(root) && snap.planAudit) pendingPlanAudits.set(root, snap.planAudit);
+    if (!pendingAudits.has(root) && snap.audit) pendingAudits.set(root, snap.audit);
   }
 
   /** A pane-less foreign entry older than this is not a concurrent spawn. */
@@ -4168,93 +4166,32 @@ export default function reviewGate(pi: ExtensionAPI) {
   }): Promise<{ ok: true } | { ok: false; text: string }> {
     const { root, goalText, ctx } = input;
     input.progress?.step("组装 goal 审计任务");
-    const prepared = await callTool("prepare_goal_audit", { goal: goalText, repo: root }, ctx);
-    if (prepared.isError) {
+    const built = await buildGoalAuditRound(goalText, root, ctx);
+    if (!built.ok) {
       input.progress?.fail("被拒");
-      return { ok: false, text: "review-gate: goal 审计任务无法生成。\n" + toolText(prepared) };
+      return { ok: false, text: "review-gate: goal 审计任务无法生成。\n" + built.error };
     }
-    const streamPath = pathJoin(root, ".pi", "review-stream", `goal-${goalTextHash(goalText).slice(0, 12)}.jsonl`);
-    try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
-    const task = `${extractTaskText(toolText(prepared))}\n\n${buildStreamDirective(streamPath)}`;
     input.progress?.done("已生成");
 
     input.progress?.step("goal-auditor 审计中（这一步是分钟级的）");
-    const startedAt = new Date().toISOString();
-    const dispatch = dispatchJudgeRound({
+    // Everything that used to be spelled out here — dispatch, remember the
+    // draft only after the dispatch is accepted, wait for the ROUND (not its
+    // first message), fail closed on anything else, record, close the pane the
+    // gate opened itself — is `runAuditRound`. The plan audit below is the
+    // same call with the other spec.
+    const outcome = await runAuditRound(auditRunDeps(ctx, input.progress, input.signal), {
+      spec: GOAL_AUDIT_SPEC,
       root,
-      role: "goal-auditor",
-      title: `goal-auditor-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`,
-      task,
-      // A previous audit still running is judging a DIFFERENT draft (this one
-      // has no PASS yet), so it cannot answer the question being asked here.
-      fresh: true,
-      streamPath,
+      task: built.task,
+      streamPath: built.streamPath,
+      pending: { kind: "goal", draft: goalText, startedAt: new Date().toISOString() },
     });
-    if (!dispatch.ok) {
-      input.progress?.fail("spawn 失败");
-      return { ok: false, text: `review-gate: goal 审计没能启动 — ${dispatch.error ?? "review pane 未能开出来"}` };
+    if (outcome.ok) {
+      input.progress?.done("审计完成");
+      return outcome;
     }
-    // The draft is on record only AFTER the dispatch is accepted: a verdict
-    // must never be recorded against text no auditor ever read.
-    pendingGoalAudits.set(root, { draft: goalText, startedAt });
-    const child = judgeChildByRole(root, "goal-auditor");
-    if (!child) {
-      input.progress?.fail("registry 里找不到刚起的 judge");
-      return { ok: false, text: "review-gate: goal 审计已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。" };
-    }
-    // Wait through the SAME implementation `judge_wait` uses, but for the END
-    // of the round: `awaitAuditReport` re-calls that one tool until a report
-    // (or a dead pane) arrives, so a streamed finding or a question — which
-    // every auditor produces before it concludes — cannot be mistaken here for
-    // an unfinished audit. Forward wait motion into the chain's own progress
-    // (else a minutes-long audit shows no motion at all).
-    const goalWaited = await awaitAuditReport(root, ctx, forwardWaitUpdates(input.progress), input.signal);
-
-    // O-6 — WHOEVER DISPATCHED IT CLOSES IT. This goal-auditor is the gate's
-    // OWN internal implementation of `propose_loop_goal`; the agent never asked
-    // for it and never sees it in any receipt. Leaving it registered made
-    // `declare_done` block on "a judge child is still open" that the caller was
-    // never told about (the round-5 P1, in the orchestration twin). ONE close,
-    // defined here and called on every return path below — the transcript stays
-    // on disk and a re-audit resumes the same session by id.
-    const closeGoalAuditor = () => callTool("judge_close", { role: "goal-auditor", repo: root }, ctx);
-    // A wait that never saw THIS round's report (timeout / pending / pane-dead)
-    // is an UNFINISHED audit, not a failed draft: recording nothing and saying
-    // "fix your findings" would point at the PREVIOUS round's verdict (or at
-    // none at all). Fail closed with the re-run instruction, exactly as the
-    // plan path does.
-    const goalWaitDetails = (goalWaited.details ?? {}) as { done?: unknown; reason?: unknown };
-    if (goalWaited.isError || goalWaitDetails.done !== true || goalWaitDetails.reason !== "report") {
-      await closeGoalAuditor();
-      input.progress?.fail("未等到本轮裁决");
-      const why = goalWaitDetails.reason === "pane-dead" ? "pane 已消失" : "等待未命中本轮 report";
-      return {
-        ok: false,
-        text:
-          `review-gate: goal 审计没有等到本轮裁决（${why}），什么都没有记录（fail-closed）——` +
-          "草稿 **没有**被送到用户面前，也没有任何新 findings 要你改。\n" +
-          "直接再调一次 `propose_loop_goal` 即可重跑审计。",
-      };
-    }
-    // the pending-draft entry it consumes makes the second call a no-op.
-    const conclusion = await recordJudgeConclusion(child.sessionId, ctx ?? latestCtx);
-    const note = conclusion?.text;
-    // Its verdict is recorded above, so close it now (same O-6 close as the
-    // unfinished-wait branch — one definition, every return path).
-    await closeGoalAuditor();
-
-    input.progress?.done("审计完成");
-
-    const goalSt = root === primaryRepoRoot ? state : stateForRepo(root);
-    if (goalPrereviewPassed(goalSt.goalPrereview, goalText)) return { ok: true };
-    return {
-      ok: false,
-      text:
-        "review-gate: goal 审计**没过**，用户那一关连问都没问 —— 先按下面的 findings 改草稿，" +
-        "改完直接再调一次 `propose_loop_goal`（门禁会重新审计；裁决绑定文本，改一个字就要重审）。\n\n" +
-        (note ?? `审计记录：${goalSt.goalPrereview?.verdict ?? "NONE"}`) +
-        `\n\nfindings 流：${streamPath}`,
-    };
+    input.progress?.fail("未通过");
+    return outcome;
   }
 
   /**
@@ -4304,7 +4241,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     onUpdate?: { step?: (t: string) => void; done?: (t: string) => void } | undefined,
     signal?: AbortSignal | undefined,
   ): Promise<{ ok: true } | { ok: false; text: string }> {
-
     const root = primaryRepoRoot;
     const hash = planAuditHash(plan);
     // A re-audit is handed the previous round's verdict and objections — the
@@ -4321,99 +4257,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     });
 
     onUpdate?.step?.("派发 plan 审计（goal-auditor 独立 pane）");
-    const dispatch = dispatchJudgeRound({
+    // The goal audit's twin, and now literally the same code: the plan differs
+    // from the goal only in its spec (its wording, its title, and the fact
+    // that its record binds to a canonical hash rather than a draft's text).
+    return runAuditRound(auditRunDeps(latestCtx, onUpdate, signal), {
+      spec: PLAN_AUDIT_SPEC,
       root,
-      role: "goal-auditor",
-      title: `plan-auditor-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}`,
       task,
-      // A previous audit still running is judging a DIFFERENT plan (this one
-      // has no PASS yet), so it cannot answer the question being asked here.
-      fresh: true,
+      pending: {
+        kind: "plan",
+        hash,
+        planText: formatPlanSummary(plan),
+        startedAt: new Date().toISOString(),
+      },
     });
-    if (!dispatch.ok) {
-      return {
-        ok: false,
-        text: `review-gate: plan 审计没能启动 —— ${dispatch.error ?? "review pane 未能开出来"}。plan 没有被送到用户面前。`,
-      };
-    }
-    const child = judgeChildByRole(root, "goal-auditor");
-    if (!child) {
-      return {
-        ok: false,
-        text: "review-gate: plan 审计已启动，但登记表里找不到它 —— 这是门禁自身的缺陷，请重试。",
-      };
-    }
-    // THIS round's identity: the round number this dispatch registered and the
-    // wait cursor from BEFORE the wait. Both feed the shared stale-report guard —
-    // only a report that is new since the wait AND stamped with this round may
-    // be adjudicated.
-    const auditJudgeId = child.sessionId;
-    const expectedRound = judgeHierarchy[auditJudgeId]?.roundSeq;
-    const consumedBeforeWait = judgeHierarchy[auditJudgeId]?.lastReportId;
-    onUpdate?.step?.("审计运行中（最长 10 分钟，完成即返回）");
-    // Same as the goal chain: wait for the ROUND to end, not for its first
-    // message — an auditor's question would otherwise read as a failed audit.
-    const waited = await awaitAuditReport(root, latestCtx, forwardWaitUpdates(onUpdate), signal);
-
-    onUpdate?.done?.("审计结束");
-    // O-6 — the gate dispatched this plan auditor internally, so the gate
-    // closes it. Placed before every return path so no branch can leak the child.
-    const closeAuditor = () => callTool("judge_close", { role: "goal-auditor", repo: root }, latestCtx);
-    const waitDetails = (waited.details ?? {}) as { done?: unknown; reason?: unknown };
-    const target = judgeChannelTarget(child.openerId, child.sessionId);
-    const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-    const selected = selectCurrentAuditReport(read.records, { expectedRound, consumedReportId: consumedBeforeWait });
-    await closeAuditor();
-    // Fail-closed on every miss: a wait that never saw THIS round's report
-    // (timeout/pending/pane-dead) or a channel whose newest report belongs to
-    // another round records NOTHING — resubmitting reruns the audit instead of
-    // adjudicating a stale verdict.
-    if (waited.isError || waitDetails.done !== true || waitDetails.reason !== "report" || !selected.ok) {
-      const why =
-        !selected.ok && selected.reason === "round-mismatch"
-          ? `channel 最新 report 属于第 ${selected.round ?? "?"} 轮，不是本轮`
-          : waitDetails.reason === "pane-dead" ? "pane 已消失" : "等待未命中本轮 report";
-      return {
-        ok: false,
-        text:
-          `review-gate: plan 审计没有等到本轮裁决（${why}），什么都没有记录` +
-          "（fail-closed）——plan **没有**被送到用户面前。\n" +
-          "直接再 `submit` 一次即可重跑审计。",
-      };
-    }
-    const last = selected.report;
-    // The conclusion arrives STRUCTURED on the report — the auditor concluded
-    // through judge_conclude, so there is nothing to parse. An unrecognisable
-    // verdict (an older build's record, a hand-edited channel) records nothing.
-    const concluded = reportConclusion(channelIO, last);
-    const verdict = normalizeConcludedVerdict(concluded.verdict);
-    if (!verdict) {
-      return {
-        ok: false,
-        text:
-          "review-gate: plan 审计没有产出可识别的裁决，什么都没有记录（fail-closed）——" +
-          "plan **没有**被送到用户面前。\n" +
-          "直接再 `submit` 一次即可重跑审计。",
-      };
-    }
-    const findings = severityFindingsFrom(concluded.findings);
-    const adjudication = adjudicatePlanAudit(verdict, findings);
-    const record: PlanAuditRecord = {
-      hash,
-      verdict: adjudication.verdict,
-      at: new Date().toISOString(),
-      findingsTotal: concluded.findings.length,
-      ...(findings.length ? { findings } : {}),
-      planText: formatPlanSummary(plan),
-    };
-    state.planAudit = record;
-    persist(latestCtx);
-
-    // The PASS must bind to the plan that was actually judged — the same
-    // content binding the user's approval uses, so a plan edited between the
-    // audit and the dialog cannot ride in on someone else's PASS.
-    if (planAuditPassed(record, plan)) return { ok: true };
-    return { ok: false, text: formatPlanAuditRefusal(record) };
   }
 
 
@@ -4689,39 +4546,37 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (reg.ok) setHierarchy(reg.table);
   }
 
+  /**
+   * Close one judge's round — the SETTLE path's entry into the engine.
+   *
+   * Everything that used to live here (pick this round's report, keep the
+   * adviser's prose out of the record, route a verdict to the right recorder,
+   * advance the cursor exactly once) is now `settleAuditRound` in
+   * lib/audit-round.ts, shared with `judge_wait` and with the synchronous
+   * audits. This function only translates the outcome into the shape the two
+   * callers here already speak.
+   */
   async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean } | undefined> {
     try {
       const live = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
       const entry = judgeHierarchy[sessionId];
-      const role = live?.role ?? entry?.role;
-      const openerId = live?.openerId ?? entry?.openerId;
-      if (!role || !openerId) return undefined;
-      // THIS ROUND's report only. The channel accumulates every round, so its
-      // newest report can be the PREVIOUS round's — a judge that asked a
-      // question or went silent would then have last round's verdict recorded
-      // against work nobody judged. Reports are consumed in order (lastReportId
-      // cursor) and recorded each once.
-      const target = judgeChannelTarget(openerId, sessionId);
-      const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-      const last = projectChannel(read.records).lastReport;
-      if (!last) {
-        return { text: `${role} 本轮还没有落 channel report（pane 可能还在跑，或已消失）——门禁会在 report 落盘后用标准报告唤醒；pane 已消失可用 judge_recover 重开。`, recorded: false };
-      }
-      if (last.reportId === entry?.lastReportId) return undefined; // already consumed
-      if (role === "adviser") {
-        // Advice is not a verdict: surface its PROSE, never record it — but
-        // consume the cursor so the next settle does not announce it again.
-        // The adviser is the one role whose report carries text at all.
-        const advice = reportText(channelIO, last) ?? "";
-        advanceReportCursor(sessionId, last.reportId);
-        if (!advice.trim()) return { text: `${role} 的 report 为空——什么都没有记录。`, recorded: false };
-        return { text: advice, recorded: false };
-      }
+      if (!live?.role && !entry?.role) return undefined;
       const childRoot = live ? repoOfChild(live) : (entry?.repoRoot ?? primaryRepoRoot);
-      const recorded = await recordRoundOutput(reportConclusion(channelIO, last), childRoot, role, ctx);
-      if (recorded === undefined) return { recorded: false }; // no ctx: stay armed, retry next settle
-      advanceReportCursor(sessionId, last.reportId);
-      return { text: recorded, recorded: true };
+      const settled = await settleAuditRound(auditRoundDeps(ctx), { judgeId: sessionId, root: childRoot });
+      switch (settled.status) {
+        case "recorded":
+          return { text: settled.text, recorded: true };
+        case "advice":
+          return { text: settled.text, recorded: false };
+        case "miss":
+          // A consumed report on a cursor-bound round says nothing (it is
+          // already recorded); every other miss carries its fail-closed text.
+          return settled.text === undefined ? undefined : { text: settled.text, recorded: false };
+        case "unrecorded":
+          return { recorded: false }; // no ctx: stay armed, retry next settle
+        default:
+          return undefined;
+      }
     } catch {
       return undefined; // recording is best-effort
     }
@@ -4788,36 +4643,11 @@ export default function reviewGate(pi: ExtensionAPI) {
    * recorder behind both judge_wait's dep and recordJudgeConclusion, so one
    * round is never recorded twice through two paths.
    */
-  /**
-   * STALE-REPORT GUARD for audit recording — goal and plan share one judge id
-   * per repo, so a verdict is recordable only when the channel's newest report
-   * IS this round's (see `selectCurrentAuditReport`). A miss records NOTHING
-   * and keeps the pending entry armed: the caller fail-closes and the auditor
-   * simply resubmits. Reviewer verdicts never pass through here.
-   */
-  function staleAuditGuard(root: string): { reason: StaleAuditReportReason; detail: string } | undefined {
-    const me = callerIdentity();
-    const entry = Object.values(judgeHierarchy).find(
-      (e) => e.role === "goal-auditor" && e.repoRoot === root && (me === undefined || e.openerId === me),
-    );
-    let records: ChannelRecord[] = [];
-    try {
-      if (entry) {
-        const guardTarget = judgeChannelTarget(entry.openerId, entry.judgeId);
-        records = readChannel(channelIO, channelPathFor(guardTarget.orchestrationId, guardTarget.childId, guardTarget.home)).records;
-      }
-    } catch { records = []; }
-    const selected = selectCurrentAuditReport(records, {
-      expectedRound: entry?.roundSeq,
-      consumedReportId: entry?.lastReportId,
-    });
-    if (selected.ok) return undefined;
-    const detail =
-      selected.reason === "round-mismatch"
-        ? `channel 最新 report 属于第 ${selected.round ?? "?"} 轮，不是本轮`
-        : selected.reason === "already-consumed" ? "channel 最新 report 已是消费过的旧裁决" : "channel 还没有本轮 report";
-    return { reason: selected.reason, detail };
-  }
+  // The stale-report guard that used to live here is GONE as a second entry
+  // point: `selectRoundReport` (lib/audit-round.ts) answers "which report
+  // closes this round" for every kind, and `settleAuditRound` is the only
+  // caller. Two entry points are how the goal path and the plan path ended up
+  // fail-closing on subtly different conditions.
 
   /**
    * What the goal-audit recorder needs from this session. Declared once and
@@ -4835,76 +4665,165 @@ export default function reviewGate(pi: ExtensionAPI) {
     log: (message) => log(message),
   };
 
-  async function recordRoundOutput(concluded: ReportConclusion, root: string, role: string, ctx?: unknown): Promise<string | undefined> {
-    if (role === "reviewer") {
-      // No live tool ctx here, so the last one the session bound is what
-      // persists the record. The repo is named explicitly: a multi-repo
-      // session refuses an unqualified record, and this record must not depend
-      // on which repo was edited last.
-      const recordCtx = ctx ?? lastUiCtx;
-      if (!recordCtx) return undefined;
-      return recordReviewVerdict(concluded, root, recordCtx);
-    }
-    // Audits are recorded against what the gate dispatched — the record binds
-    // to that text's hash, so remembering it is the gate's job, not the
-    // agent's to re-paste. Goal and plan share one judge id per repo, so at
-    // most one kind may be pending: both pending self-heals (keep the newer,
-    // drop the older) so a verdict never lands on the wrong draft.
-    const goalPending = pendingGoalAudits.get(root);
-    const planPending = pendingPlanAudits.get(root);
-    if (goalPending && planPending) {
-      // Self-heal: keep the newer audit, drop the older one's pending entry so its
-      // late verdict can never land on the wrong draft. The dropped side simply
-      // re-runs (its pane and transcript stay on disk).
-      if (goalPending.startedAt >= planPending.startedAt) pendingPlanAudits.delete(root);
-      else pendingGoalAudits.delete(root);
-      return recordRoundOutput(concluded, root, role, ctx);
-    }
-    if (goalPending) {
-      const recordCtx = ctx ?? lastUiCtx;
-      if (!recordCtx) return undefined;
-      // Same stale-report rule as the plan audit: a verdict from any other
-      // round must not land on this draft. The pending entry stays armed.
-      const stale = staleAuditGuard(root);
-      if (stale) return `review-gate: goal 审计没有等到本轮裁决（${stale.detail}），什么都没有记录（fail-closed）。直接再 submit 一次即可重跑审计。`;
-      dropAudits(root);
-      return recordGoalPrereview(goalPrereviewDeps, {
-        goal: goalPending.draft,
-        conclusion: concluded,
-        auditStartedAt: goalPending.startedAt,
-        repo: root,
-      }, recordCtx);
-    }
-    if (planPending) {
-      // Same stale-report rule as above: never record another round's verdict
-      // against this plan. The pending entry stays armed.
-      const stalePlan = staleAuditGuard(root);
-      if (stalePlan) return `review-gate: plan 审计没有等到本轮裁决（${stalePlan.detail}），什么都没有记录（fail-closed）——plan 没有被送审。直接再 submit 一次即可重跑审计。`;
-      dropAudits(root);
-      const planVerdict = normalizeConcludedVerdict(concluded.verdict);
-      if (!planVerdict) return `plan 审计没有产出可识别的裁决，什么都没有记录（fail-closed）——plan 没有被送审。`;
-      const findings = severityFindingsFrom(concluded.findings);
-      const adjudication = adjudicatePlanAudit(planVerdict, findings);
-      const st = root === primaryRepoRoot ? state : stateForRepo(root);
-      st.planAudit = {
-        hash: planPending.hash,
-        verdict: adjudication.verdict,
-        at: new Date().toISOString(),
-        findingsTotal: concluded.findings.length,
-        ...(findings.length ? { findings } : {}),
-        planText: planPending.planText,
-      };
-      try {
-        const ctx = latestCtx ?? lastUiCtx;
-        if (ctx) persistRepo(ctx, root); else persist(undefined);
-      } catch { /* best effort */ }
-      if (adjudication.verdict === "PASS") {
-        return `plan 审计 PASS（hash ${planPending.hash.slice(0, 12)}）——可以送用户批准了。`;
-      }
-      return formatPlanAuditRefusal(st.planAudit);
-    }
-    return undefined;
+  /**
+   * WHAT THE AUDIT-ROUND ENGINE NEEDS FROM THIS SESSION.
+   *
+   * The engine (lib/audit-round.ts) owns the DECISIONS — which report closes
+   * this round, whether anything may be recorded, which kind's binding
+   * applies, when the cursor advances. This object owns only the things it
+   * cannot: the channel, the opener registry, gate state and the two record
+   * writers whose bodies this refactor deliberately left alone
+   * (`recordGoalPrereview` and `recordReviewVerdict` — the review one carries
+   * the HEAD/TREE bindings a READY hangs on).
+   *
+   * `ctx` is the live tool context when there is one; without it the writers
+   * fall back to the last UI context, and with neither they record NOTHING and
+   * say so, which the engine turns into "stay armed, retry next settle".
+   */
+  function auditRoundDeps(ctx?: unknown): SettleAuditRoundDeps {
+    return {
+      judgeEntry: (judgeId) => {
+        const e = judgeHierarchy[judgeId];
+        if (!e) return undefined;
+        return {
+          judgeId: e.judgeId,
+          openerId: e.openerId,
+          role: e.role,
+          ...(e.roundSeq === undefined ? {} : { roundSeq: e.roundSeq }),
+          ...(e.lastReportId === undefined ? {} : { lastReportId: e.lastReportId }),
+        };
+      },
+      readRoundRecords: (entry) => {
+        try {
+          const target = judgeChannelTarget(entry.openerId, entry.judgeId);
+          return readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home)).records;
+        } catch {
+          return []; // an unreadable channel is "no report", never a verdict
+        }
+      },
+      conclusionOf: (report) => reportConclusion(channelIO, report),
+      proseOf: (report) => reportText(channelIO, report),
+      advanceCursor: (judgeId, reportId) => advanceReportCursor(judgeId, reportId),
+      pendingAudit: (root) => pendingAudits.get(root),
+      forgetPending: (root) => dropAudits(root),
+      nowIso: () => new Date().toISOString(),
+      savePlanAudit: (root, record) => {
+        const st = root === primaryRepoRoot ? state : stateForRepo(root);
+        st.planAudit = record;
+        try {
+          const persistCtx = latestCtx ?? lastUiCtx;
+          if (persistCtx) persistRepo(persistCtx, root); else persist(undefined);
+        } catch { /* best effort */ }
+      },
+      recordGoal: async ({ root, pending, concluded }) => {
+        const recordCtx = ctx ?? lastUiCtx;
+        if (!recordCtx) return undefined;
+        return recordGoalPrereview(goalPrereviewDeps, {
+          goal: pending.draft,
+          conclusion: concluded,
+          auditStartedAt: pending.startedAt,
+          repo: root,
+        }, recordCtx);
+      },
+      // The repo is named explicitly: a multi-repo session refuses an
+      // unqualified record, and a verdict must never depend on which repo was
+      // edited last.
+      recordReview: async ({ root, concluded }) => {
+        const recordCtx = ctx ?? lastUiCtx;
+        if (!recordCtx) return undefined;
+        return recordReviewVerdict(concluded, root, recordCtx);
+      },
+    };
   }
+
+  /**
+   * THE goal-auditor's task for one draft — assembled in ONE place.
+   *
+   * It used to be assembled three times, verbatim: in `runGoalAudit`, in
+   * `judge_submit`'s goal-auditor branch, and in `judge_spawn`'s dep. Each
+   * copy derived the same stream path, made the same directory and appended
+   * the same stream directive, which is three chances to drift on where a
+   * round's findings are written.
+   */
+  async function buildGoalAuditRound(draft: string, root: string, ctx: unknown):
+    Promise<{ ok: true; task: string; streamPath: string } | { ok: false; error: string }> {
+    const prepared = await callTool("prepare_goal_audit", { goal: draft, repo: root }, ctx);
+    if (prepared.isError) return { ok: false, error: toolText(prepared) };
+    const streamPath = pathJoin(root, ".pi", "review-stream", `goal-${goalTextHash(draft).slice(0, 12)}.jsonl`);
+    try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
+    return {
+      ok: true,
+      task: `${extractTaskText(toolText(prepared))}\n\n${buildStreamDirective(streamPath)}`,
+      streamPath,
+    };
+  }
+
+  /**
+   * The engine's deps for a SYNCHRONOUS round (goal / plan): the conclusion
+   * half above, plus the four things only a blocking round needs — dispatch,
+   * the wait, the O-6 close, and the content-bound "did it pass?".
+   */
+  function auditRunDeps(
+    ctx: unknown,
+    progress: { step?: (t: string) => void; done?: (t: string) => void; fail?: (t: string) => void; tail?: (t: string) => void } | undefined,
+    signal: AbortSignal | undefined,
+  ): RunAuditRoundDeps {
+    const waitCtx = ctx ?? latestCtx;
+    return {
+      ...auditRoundDeps(ctx),
+      dispatch: ({ root, role, title, task, streamPath }) => {
+        const dispatched = dispatchJudgeRound({
+          root,
+          role,
+          title,
+          task,
+          fresh: true,
+          ...(streamPath === undefined ? {} : { streamPath }),
+        });
+        if (!dispatched.ok) {
+          return { ok: false, ...(dispatched.error === undefined ? {} : { error: dispatched.error }) };
+        }
+        return { ok: true, judgeId: dispatched.judgeId ?? "" };
+      },
+      judgeIdOf: (root, role) => judgeChildByRole(root, role)?.sessionId,
+      rememberPending: (root, pending) => {
+        pendingAudits.set(root, pending);
+        persistJudgeHierarchy();
+      },
+      // Wait through the SAME implementation `judge_wait` uses, but for the
+      // END of the round: a streamed finding or a question — which every
+      // auditor produces before it concludes — must not read as an unfinished
+      // audit. Wait motion is forwarded into the chain's own progress, else a
+      // minutes-long audit shows no motion at all.
+      awaitRoundEnd: async (root) => {
+        const waited = await awaitAuditReport(root, waitCtx, forwardWaitUpdates(progress), signal);
+        const details = (waited.details ?? {}) as { done?: unknown; reason?: unknown };
+        if (!waited.isError && details.done === true && details.reason === "report") {
+          return { ok: true, detail: "" };
+        }
+        return {
+          ok: false,
+          detail: details.reason === "pane-dead" ? "pane 已消失" : "等待未命中本轮 report",
+        };
+      },
+      closeJudge: async (root, role) => {
+        await callTool("judge_close", { role, repo: root }, waitCtx);
+      },
+      auditPassed: (root, pending) => {
+        const st = root === primaryRepoRoot ? state : stateForRepo(root);
+        if (pending.kind === "goal") return goalPrereviewPassed(st.goalPrereview, pending.draft);
+        // The same content binding `planAuditPassed` applies, stated against
+        // the hash this round dispatched: a plan edited between the audit and
+        // the dialog cannot ride in on someone else's PASS.
+        return st.planAudit?.verdict === "PASS" && st.planAudit.hash === pending.hash;
+      },
+      verdictLabel: (root, pending) => {
+        const st = root === primaryRepoRoot ? state : stateForRepo(root);
+        return (pending.kind === "goal" ? st.goalPrereview?.verdict : st.planAudit?.verdict) ?? "NONE";
+      },
+    };
+  }
+
 
 
   /**
@@ -5063,20 +4982,20 @@ export default function reviewGate(pi: ExtensionAPI) {
       // stream) from what the agent SAID, so the agent never assembles a
       // judge's brief by hand.
       if (role === "goal-auditor") {
-        const prepared = await callTool("prepare_goal_audit", { goal: task, repo: root }, ctx);
-        if (prepared.isError) {
+        // A goal audit streams its findings too (criterion 2): the agent can
+        // fix the draft while the auditor is still working, exactly as it
+        // does with a code review. The task and its stream come from the ONE
+        // assembler — this branch used to derive both itself.
+        const built = await buildGoalAuditRound(task, root, ctx);
+        if (!built.ok) {
           return {
-            content: [{ type: "text", text: "review-gate: 本轮未受理 — goal 审计任务无法生成。\n" + toolText(prepared) }],
+            content: [{ type: "text", text: "review-gate: 本轮未受理 — goal 审计任务无法生成。\n" + built.error }],
             details: { submitted: false, busy: false },
             isError: true,
           };
         }
-        // A goal audit streams its findings too (criterion 2): the agent can
-        // fix the draft while the auditor is still working, exactly as it
-        // does with a code review.
-        streamPath = pathJoin(root, ".pi", "review-stream", `goal-${goalTextHash(task).slice(0, 12)}.jsonl`);
-        try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
-        reviewTask = `${extractTaskText(toolText(prepared))}\n\n${buildStreamDirective(streamPath)}`;
+        streamPath = built.streamPath;
+        reviewTask = built.task;
         // (The draft is remembered only AFTER the dispatch is accepted —
         // see below. Recording it here would let a REFUSED submission
         // overwrite the draft a still-running audit is judging.)
@@ -5113,7 +5032,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       // against text no auditor ever read, and propose_loop_goal would then
       // show the user an unaudited goal.
       if (role === "goal-auditor") {
-        pendingGoalAudits.set(root, { draft: task, startedAt: new Date().toISOString() });
+        pendingAudits.set(root, { kind: "goal", draft: task, startedAt: new Date().toISOString() });
+        persistJudgeHierarchy();
       }
       const child = judgeChildByRole(root, role);
       const lines = [
@@ -5195,14 +5115,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     announcedQuestions: () => announcedRequestIds,
     markQuestionsAnnounced: (ids) => { for (const id of ids) announcedRequestIds.add(id); },
 
-    recordVerdict: async (concluded, root, role) => {
-      const text = await recordRoundOutput(concluded, root, role);
-      // A report the gate recognises IS the verdict — there is no text to
-      // inspect for one anymore.
-      return {
-        ...(text === undefined ? {} : { text }),
-        hasVerdict: normalizeConcludedVerdict(concluded.verdict) !== undefined,
-      };
+    // The wait closes its round through the SAME engine the settle path uses,
+    // so a report cannot be recorded twice (one cursor, written in one place).
+    settleRound: async (judgeId, root) => {
+      const settled = await settleAuditRound(auditRoundDeps(undefined), { judgeId, root });
+      switch (settled.status) {
+        case "recorded":
+          return { text: settled.text, verdict: settled.verdict, hasVerdict: settled.hasVerdict };
+        case "advice":
+          return { advice: settled.text, hasVerdict: false };
+        case "unrecorded":
+          return { verdict: settled.verdict, hasVerdict: settled.hasVerdict };
+        default:
+          return { hasVerdict: false };
+      }
     },
     dropPendingAudit: (root) => dropAudits(root),
     cancelWaitTimer: () => cancelChildWaitTimer(),
@@ -5259,11 +5185,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       return { ok: true, model: files.model, sysPromptPath: files.sysPromptPath, sessionDir };
     },
     buildGoalAuditTask: async (draft, root, ctx) => {
-      const prepared = await callTool("prepare_goal_audit", { goal: draft, repo: root }, ctx);
-      if (prepared.isError) return { ok: false, error: "goal 审计任务无法生成" };
-      const streamPath = pathJoin(root, ".pi", "review-stream", `goal-${goalTextHash(draft).slice(0, 12)}.jsonl`);
-      try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* the stream is optional */ }
-      return { ok: true, task: `${extractTaskText(toolText(prepared))}\n\n${buildStreamDirective(streamPath)}`, streamPath };
+      // The third caller of the ONE assembler (the other two are the audit
+      // chain and judge_submit's goal-auditor branch).
+      const built = await buildGoalAuditRound(draft, root, ctx);
+      if (!built.ok) return { ok: false, error: "goal 审计任务无法生成" };
+      return { ok: true, task: built.task, streamPath: built.streamPath };
     },
     buildPlanAuditTask: async (root) => {
       const read = readPlanFile(root);
@@ -5296,19 +5222,19 @@ export default function reviewGate(pi: ExtensionAPI) {
       }
     },
     pendingAuditKind: (root) => {
-      if (pendingGoalAudits.has(root)) return "goal";
-      if (pendingPlanAudits.has(root)) return "plan";
-      return undefined;
+      const pending = pendingAudits.get(root);
+      return pending?.kind === "goal" || pending?.kind === "plan" ? pending.kind : undefined;
     },
     rememberGoalAudit: (root, draft) => {
-      pendingGoalAudits.set(root, { draft, startedAt: new Date().toISOString() });
+      pendingAudits.set(root, { kind: "goal", draft, startedAt: new Date().toISOString() });
       persistJudgeHierarchy();
     },
     rememberPlanAudit: (root) => {
       const read = readPlanFile(root);
       if (!read.plan) return { ok: false, error: `读不到 plan：${read.problems.join("；") || "plan 文件不存在"}` };
       const plan = read.plan;
-      pendingPlanAudits.set(root, {
+      pendingAudits.set(root, {
+        kind: "plan",
         hash: planAuditHash(plan),
         planText: formatPlanSummary(plan),
         startedAt: new Date().toISOString(),
@@ -5317,8 +5243,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       return { ok: true };
     },
     forgetAudit: (root) => {
-      pendingGoalAudits.delete(root);
-      pendingPlanAudits.delete(root);
+      pendingAudits.delete(root);
       persistJudgeHierarchy();
     },
   });

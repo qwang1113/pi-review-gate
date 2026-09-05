@@ -438,6 +438,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限；模型走 `agents.arbiter.slots[0]`（配置层），不再硬编码 |
 | `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义 |
 | `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
+| `audit-round.ts` | **审计回合引擎**（2026-09-05）：「派发 judge → 等本轮 → 选 report → 裁决 → 记录 → 回收」的唯一一份实现。`settleAuditRound` 是结论段（goal / plan / review / advice 四种 kind 都经它，`judge_wait` 与 settle 扫描共用，游标只在这里推进一次、且只在记录落地后推）；`runAuditRound` 是 goal/plan 的同步回合（O-6 的 `judge_close` 是它的一个 `finally`，不再散在每条 return 上）。`selectRoundReport` 是「哪份 report 收本轮」的唯一判据（round-bound 认 `roundSeq`+游标，cursor-only 只认游标——per-kind 的真实差异）。**引擎合，措辞不合**：每 kind 一份 spec 装任务标题前缀、fail-closed 文案与拒绝文案 |
 | `blocked-marker.ts` | sidecar 写失败时落 `.blocked` 标记，`hooks/pre-commit` 据此拒绝提交 |
 | `checkpoint-message.ts` | checkpoint 提交信息（纯函数）：把 `checkpoint` 注入 **scope** 产出合法 Conventional Commits（`type(checkpoint-<scope>)` / `type(checkpoint)` / 非 CC→`chore(checkpoint)` / 已含则幂等），并对非英文 round note 回落英文默认、丢正文（L5 自洽） |
 | `child-watch.ts` | judge 子进程存活仲裁：主会话不依赖子进程「守规矩」地发完成信号 |
@@ -461,7 +462,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `goal-prereview-tools.ts` | **普通函数，不是工具**：`recordGoalPrereview`——把 goal-auditor 交上来的结构化结论落成绑定草稿 sha256 的记录；外加 goal 提交检查（空稿、长度上限、goal 绑定哪个 repo） |
 | `goal-tools.ts` | 工具 `propose_loop_goal`（跑 goal 审计 → 用户批准对话 → 门禁自己写文件），并且是 goal 工具族的**唯一注册入口**：一个 host，一个工具 |
 | `gate-modes.ts` | 门禁模式注册表（唯一实现）：八种模式各有提示词模板加工具集加流程规则（plan/goal/review 仅内部置入）；`resolveGateMode` 单派发；禁跑工具表与完成纪律的 single source（`judge-side.ts` 只 re-export，各任务 builder 只引用） |
-| `hierarchy.ts` | opener 注册表与唯一的跨级裁判：谁开的 review 谁操作，其他会话一律 fail-closed（纯函数，IO 经 seam）；注册表与两类 pending 按 repo 落盘恢复（`parseHierarchySnapshot` fail-closed 解析），条目带 opener 派发的轮次号 `roundSeq`；死 pane 异主条目由触达者丢弃（不再过户——opener 限定的 id 不会碰撞）、活 pane 保持拒绝，重启不死锁 |
+| `hierarchy.ts` | opener 注册表与唯一的跨级裁判：谁开的 review 谁操作，其他会话一律 fail-closed（纯函数，IO 经 seam）；注册表与**至多一份 pending 审计**按 repo 落盘恢复（`parseHierarchySnapshot` fail-closed 解析；2026-09-05 起是单字段 `audit: PendingAudit`——goal 与 plan 共用一个 judge，两份同时挂着是系统进不去的状态，旧的 `goalAudit`/`planAudit` 双字段不再读），条目带 opener 派发的轮次号 `roundSeq`；死 pane 异主条目由触达者丢弃（不再过户——opener 限定的 id 不会碰撞）、活 pane 保持拒绝，重启不死锁 |
 | `judge-lifecycle.ts` | `judge_submit` 背后的纯决策：opener 限定的会话文件放哪（含无人认领目录的 TTL/旧格式回收选择器）、超时钳制、审计裁决是否阻塞、`awaitRoundReport`（门禁自己的 goal/plan 审计链要的是**本轮结束**，所以它在消息驱动的 `judge_wait` 之上反复调同一个工具直到 report/pane-dead，共享一份总预算——不是第二个等待循环）；派单/等待判据已随进程模型删除，等待纪律 2026-09-05 搬到 `agent-directives.ts` |
 
 
@@ -469,7 +470,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `judge-process.ts` | judge 身份（opener 限定的确定性会话 id：同 opener 跨 pane/轮/重启复用、换 opener 全新）与 scratch 目录 helper；并把 judge 的 `$TMPDIR` 指向**每会话专属**的 scratch 目录（`judgeScratchDir`，以 session id 为键、随新 id 自动迁移）——reviewer 的临时 review worktree 落在那里，门禁按 `reviewScratchWorktrees` 在 pane 回收后精确回收 |
 | `judge-prompt.ts` | judge 会话的系统提示装配：角色定义 + 共同协议 |
 | `judge-session.ts` | 把 judge transcript 当作长记忆（结论走交卷工具，不再从它解析） |
-| `judge-session-tools.ts` | 作用在既有 pane judge 上的两个入口：`judge_close`（只在 internalHost，门禁审计链自收）与 `judge_wait`（`registerJudgeWaitTool` 把**同一实现**注册到 internalHost 与 agent 面）；等待是**消息驱动**的 —— 新 channel report / pane 死亡 / judge 提问 / 新 finding 任一命中即返回，去重游标是 entry 上的 `lastReportId` + `lastFindingCount` 与会话侧已宣告问题集；opener 校验也在内。`judge_read` 已删（2026-09-05） |
+| `judge-session-tools.ts` | 作用在既有 pane judge 上的两个入口：`judge_close`（只在 internalHost，门禁审计链自收）与 `judge_wait`（`registerJudgeWaitTool` 把**同一实现**注册到 internalHost 与 agent 面）；等待是**消息驱动**的 —— 新 channel report / pane 死亡 / judge 提问 / 新 finding 任一命中即返回，去重游标是 entry 上的 `lastReportId` + `lastFindingCount` 与会话侧已宣告问题集；opener 校验也在内。**report 落地后它不自己记录**（2026-09-05）：一律交给 `audit-round.ts` 的 `settleAuditRound`，report 游标也由引擎推——它只保留 finding 游标。`judge_read` 已删（2026-09-05） |
 
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
 | `judge-conclude.ts` | 一轮的唯一结束方式：judge 侧专用 `judge_conclude`（只在 judge 会话注册，主会话不可见——防伪靠注册面）：结构化结论**本体**直写 channel report（无 fence 合成、无解析）；**签名按角色收窄**——reviewer / goal-auditor 只有 verdict + findings + cwd（传 notes 显式拒绝且不占额度），adviser 保留 notes（它的产出就是正文）；opener 以 `roundSeq` 编轮次，一轮只交一次，重复调用显式拒绝；校验失败不占额度 |
@@ -490,7 +491,7 @@ fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diag
 | `orchestrator-child-state.ts` | 子会话状态（working / waiting-input / **waiting-judge** / idle / done / dead / stalled + mode-changed）与再唤醒退避；`waiting-judge` 是「在等门禁自己派出去的 reviewer/precommit」，不叫醒项目经理；`mode-changed` 是模式切换事件，叫醒项目经理。也让 `stalled` 回到只表示「扩展不在了」。判据全部是结构化真值，不看屏幕 |
 | `orchestrator-pane-decor.ts` | 子会话的可视化区分：按 childId 派色（纯函数，同一子会话永远同色）、`@task-slug · state 220s` 的边框标题、window 级标签栏开关判定。**纯展示层**：只写不读，任何判定都不看它 |
 | `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：目录前缀内的边界细化、收窄、加依赖、降并行度⇒批准迁移并记审计；新任务/新目录/删依赖/串行改并行/提并行度⇒重新批准 |
-| `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案；还有 plan 与 goal 两条审计共用的过期裁决判据 `selectCurrentAuditReport`（本次 dispatch 的 `roundSeq` + 等待前的 `lastReportId` 游标 ⇒ 只认本轮 report，其余一律 fail-closed 不记录） |
+| `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案。**「哪份 report 收本轮」已于 2026-09-05 搬去 `audit-round.ts`** —— 那是审计**回合**的问题，不是 plan 的，三种 kind 都要回答它 |
 | `orchestrator-handoff-advice.ts` | 上下文用量 + 待答请求数 ⇒ 接力时机（软/硬阈值，没读数就明说没读数） |
 | `orchestrator-answer-tools.ts` | 工具 `orchestrator_answer`：把答案写进通道（选项原文/序号/唯一子串，含糊即拒），代批 goal 时按约束 8 比对任务边界 |
 | `orchestrator-delivery.ts` | 投递：任务文件 + `pi --session-id @file` 启动、恢复用的 argv 与说明，以及「什么才算送达」的判据（通道记录 / 子会话回执）。任务书在 brief 之后追加 `TASK_GOAL_DIRECTIVE`（门禁硬指示：plan 批准 ≠ goal 批准，必须先协商自己的 loop goal） |

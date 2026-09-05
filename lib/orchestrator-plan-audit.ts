@@ -45,7 +45,6 @@
 import { createHash } from "node:crypto";
 import { canonicalPlanText, formatPlanSummary, type OrchestratorPlan } from "./orchestrator-plan.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
-import type { ChannelRecord, ChannelReportRecord } from "./orchestrator-channel.ts";
 /** One objection, exactly as the auditor concluded it. */
 export interface PlanAuditFinding {
   severity: string;
@@ -219,51 +218,13 @@ export function formatPlanAuditRefusal(record: PlanAuditRecord | undefined): str
   ].join("\n");
 }
 
-/**
- * WHICH REPORT CLOSES THIS AUDIT ROUND — the shared stale-report guard.
+/*
+ * "WHICH REPORT CLOSES THIS ROUND" USED TO LIVE HERE.
  *
- * A plan/goal audit dispatches a judge round, waits for it, then must adjudicate
- * THIS round's verdict. The channel accumulates every round of the role's
- * session, so its newest report can belong to an EARLIER round: a re-audit
- * re-dispatched with a wiped wait cursor ends its wait on the previous
- * round's report instantly and records stale findings against a new plan
- * (measured P0: every resubmit after a BLOCKED plan returned the first
- * round's finding verbatim, and the goal audit deadlocked the same way).
- *
- * Both audit paths (`auditPlanRound` in the extension and the pending-audit
- * branches of `recordRoundOutput`) select through THIS function, and neither
- * records when it misses — fail-closed with a re-run message, never an old
- * verdict. The round source of truth is `judge-conclude.ts` (`roundSeq`,
- * stamped on every report); no second round tracker lives here (philosophy two).
- *
- * - `expectedRound`: the round number this dispatch registered
- *   (`roundSeq`); reports from any other round are a miss. Pre-tool reports
- *   carry no round and count as 0, so they can never match a real round.
- * - `consumedReportId`: the wait cursor from BEFORE this round — the report
- *   it names is already recorded and must not close another round.
- * - `expectedRound === undefined` (entries that pre-date round numbering)
- *   skips the round check and falls back to the consumed check only.
+ * It moved to `selectRoundReport` in lib/audit-round.ts (2026-09-05) with the
+ * rest of the audit round, because the question is not the plan's: the goal
+ * audit, the plan audit and the code review all had to answer it, and having
+ * the answer live in the plan module is how the extension ended up with two
+ * entry points into it. This module is back to what it is good at — building
+ * the plan auditor's task and judging a plan record.
  */
-export type StaleAuditReportReason = "no-report" | "already-consumed" | "round-mismatch";
-
-export function selectCurrentAuditReport(
-  records: ReadonlyArray<ChannelRecord>,
-  opts: { expectedRound: number | undefined; consumedReportId: string | undefined },
-):
-  | { ok: true; report: ChannelReportRecord }
-  | { ok: false; reason: StaleAuditReportReason; reportId?: string; round?: number } {
-  let last: ChannelReportRecord | undefined;
-  for (const r of records) {
-    if (r.kind === "report" && r.from === "child") last = r;
-  }
-  if (!last) return { ok: false, reason: "no-report" };
-  if (last.reportId === opts.consumedReportId) {
-    return { ok: false, reason: "already-consumed", reportId: last.reportId };
-  }
-  const round =
-    typeof last.round === "number" && Number.isFinite(last.round) ? Math.floor(last.round) : 0;
-  if (opts.expectedRound !== undefined && round !== Math.floor(opts.expectedRound)) {
-    return { ok: false, reason: "round-mismatch", reportId: last.reportId, round };
-  }
-  return { ok: true, report: last };
-}

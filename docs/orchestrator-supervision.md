@@ -348,13 +348,23 @@ grillme/ask_user 把需求反述澄清，摸清每个子会话的 goal 才能起
 不硬拦工具——用户决策），goal 获批后计数清零。
 
 **一轮裁决只属于那一轮（2026-09-04，实测 P0）**：审计等待结束后，门禁**不再**无条件把
-channel 里最新那条 report 当成本轮结果。`selectCurrentAuditReport`（`lib/orchestrator-plan-audit.ts`
-的纯函数）拿三件真值做判定 —— `judge_wait` 的 `details.done/reason`、本次 dispatch 登记的
-`roundSeq`、以及等待**开始前**的 `lastReportId` 游标；只有「等到了 report」且「report 的
-`round` 等于本轮」且「不是已消费过的那条」三者同时成立才解析裁决。任何一项不成立都是
-**审计未完成**：`state.planAudit` 一个字都不写，退回「什么都没有记录，直接再 `submit`
-一次重跑」。goal 审计走同一个纯函数（`recordRoundOutput` 的两条 pending 分支），因为它
-是同一个缺陷的另一半。
+channel 里最新那条 report 当成本轮结果。`selectRoundReport`（`lib/audit-round.ts` 的纯函数，
+2026-09-05 从 `orchestrator-plan-audit.ts` 搬来并改名）拿三件真值做判定 —— `judge_wait` 的
+`details.done/reason`、本次 dispatch 登记的 `roundSeq`、以及等待**开始前**的 `lastReportId`
+游标；只有「等到了 report」且「report 的 `round` 等于本轮」且「不是已消费过的那条」三者
+同时成立才解析裁决。任何一项不成立都是**审计未完成**：`state.planAudit` 一个字都不写，
+退回「什么都没有记录，直接再 `submit` 一次重跑」。
+
+goal 审计不是「走同一个纯函数」而已 —— **它和 plan 审计现在是同一段代码**（2026-09-05）：
+`runAuditRound(spec)` 一份实现，两条链只差一份 spec（措辞、pane 标题前缀、记录绑定）。
+code review 的结论段也归到同一个 `settleAuditRound`，所以「哪份 report 收本轮、什么时候
+推游标、谁来记录」在整个门禁里只有一处答案。
+
+**「已被 wait 记下」不是过期（2026-09-05，adviser 发现的 P0）**：同步审计链的等待走的就是
+`judge_wait`，而它自己也经引擎记录并**消费游标**。所以链回来时本轮 report 往往已经记完了 ——
+引擎把这种 `already-consumed` 当作**正常路径**，只有 `round-mismatch` / `no-report` 才是真过期、
+才 fail-closed。搞反的代价是每一次 goal/plan 审计都失败，而改这条链的会话跑的是启动时加载的
+旧扩展、自己测不出来，只能靠 `test/audit-round.test.ts` 的两条单测钉住。
 
 配套的游标规则同样重要：`dispatchJudgeRound` 复用 pane 时**保留** `lastReportId`（重派不
 等于把旧 report 变新），`fresh:true` 开新 pane 时把游标**播种**到 channel 当前最新那条

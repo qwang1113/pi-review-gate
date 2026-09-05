@@ -42,6 +42,8 @@ interface Fake {
   panes: string[];
   announced: Set<string>;
   recorded: Array<{ text: string; root: string; role: string }>;
+  /** The newest report written into the fake channel — what the engine consumes. */
+  lastReportId: string | undefined;
 }
 
 function child(overrides: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
@@ -71,6 +73,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     panes: ["%1", "%7"],
     announced: new Set<string>(),
     recorded: [] as Array<{ text: string; root: string; role: string }>,
+    lastReportId: undefined as string | undefined,
   };
   const io: ChannelIO = {
     ensureDir() {},
@@ -111,11 +114,23 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
       state.calls.push(`markQuestionsAnnounced(${ids.join(",")})`);
       for (const id of ids) state.announced.add(id);
     },
-    recordVerdict: async (concluded, root, role) => {
-      state.calls.push(`recordVerdict(${role})`);
-      const text = `recorded ${concluded.verdict} (${concluded.findings.length} findings)`;
-      state.recorded.push({ text, root, role });
-      return { text, hasVerdict: concluded.verdict !== "" };
+    // The wait no longer picks the report or moves the cursor: it hands the
+    // round to the engine (lib/audit-round.ts) and reports what came back.
+    settleRound: async (judgeId, root) => {
+      state.calls.push(`settleRound(${judgeId})`);
+      const text = `recorded round of ${judgeId}`;
+      state.recorded.push({ text, root, role: judgeId });
+      // The real engine CONSUMES the report it just recorded — one cursor
+      // write, in one place. The fake does the same, so "a consumed report
+      // does not end a second wait" stays observable from this side.
+      const entry = state.table.current[judgeId];
+      if (entry && state.lastReportId) {
+        state.table.current = {
+          ...state.table.current,
+          [judgeId]: { ...entry, lastReportId: state.lastReportId },
+        };
+      }
+      return { text, verdict: "READY", hasVerdict: true };
     },
     dropPendingAudit: (root) => { state.calls.push(`dropPendingAudit(${root})`); },
     cancelWaitTimer: () => { state.calls.push("cancelWaitTimer"); },
@@ -182,6 +197,7 @@ function writeReport(f: Fake, c: JudgeChildRecord, verdict: string, reportId = "
     channelOf(c),
     { kind: "report", from: "child", at: new Date(1_700_000_000_000).toISOString(), reportId, verdict, findingsCount: 0, summary: `{"gate":"${verdict}","findings":[]}` },
   );
+  f.lastReportId = reportId;
 }
 
 function writeQuestion(f: Fake, c: JudgeChildRecord, requestId: string, title: string, options: string[]): void {
@@ -305,9 +321,11 @@ test("judge_wait: a new channel report ends the round, records it, and consumes 
   // The SAME builder the settle path uses — one report format, two wake-ups.
   assert.match(textOf(reply), /\[REVIEW_GATE_REPORT\] reviewer（rg-reviewer-abc）本轮已有 channel report/);
   assert.match(textOf(reply), /结论：READY/);
-  assert.match(textOf(reply), /记录：recorded READY/);
+  assert.match(textOf(reply), /记录：recorded round of/);
   assert.equal(f.recorded.length, 1, "the reported bytes go through the gate's recorder once");
-  assert.equal(f.recorded[0]!.role, "reviewer");
+  // The wait addresses the round by JUDGE ID now — the engine resolves the
+  // role (and therefore the kind) from the registry itself.
+  assert.equal(f.recorded[0]!.role, "rg-reviewer-abc");
   assert.deepEqual(reply.details, { done: true, reason: "report", role: "reviewer", hasVerdict: true });
 
   const again = await call(f, "judge_wait", { role: "reviewer", timeoutMs: 1 });

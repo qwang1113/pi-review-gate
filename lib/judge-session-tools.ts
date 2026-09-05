@@ -117,8 +117,22 @@ export interface JudgeSessionToolDeps {
   announcedQuestions(): ReadonlySet<string>;
   markQuestionsAnnounced(requestIds: readonly string[]): void;
 
-  /** Run the gate's own verdict recording on the report's structured conclusion. */
-  recordVerdict(concluded: ReportConclusion, root: string, role: string): Promise<{ text?: string; hasVerdict: boolean }>;
+  /**
+   * CLOSE THIS ROUND through the audit-round engine (lib/audit-round.ts).
+   *
+   * The wait does not pick the report, adjudicate it or move the cursor: the
+   * engine does all three, for every kind, in one place. That is what makes
+   * "one report is recorded once" structural — this path and the settle sweep
+   * share the engine's single cursor write instead of each keeping their own.
+   */
+  settleRound(judgeId: string, root: string): Promise<{
+    text?: string;
+    /** The adviser's prose, when this round was one (never recorded). */
+    advice?: string;
+    /** The report's raw verdict, for the standard report's display. */
+    verdict?: string;
+    hasVerdict: boolean;
+  }>;
   /** Cancel the gate-owned hosted-wait watchdog. */
   cancelWaitTimer(): void;
   /** Forget the goal draft a closed audit was judging. */
@@ -485,34 +499,24 @@ async function doWait(
     );
   }
   if (observation.done && observation.reason === "report" && observation.reportId) {
-    const io = deps.channelIO();
-    const home = deps.channelHome();
-    const target = judgeChannelTarget(child.openerId, child.judgeId, home);
-    const projection = projectChannel(
-      readChannel(io, channelPathFor(target.orchestrationId, target.childId, target.home)).records,
-    );
-    // The conclusion is DATA on the report — no text is parsed to find it.
-    const concluded: ReportConclusion = projection.lastReport
-      ? reportConclusion(io, projection.lastReport)
-      : { verdict: "", findings: [] };
-    const recorded = await deps.recordVerdict(concluded, addressed.root, child.role);
-    rememberCursors(deps, child.judgeId, { lastReportId: observation.reportId });
-    // An adviser's whole deliverable IS its prose, and nothing records it —
-    // so the wake-up carries it (the same field the settle path fills).
-    const advice = child.role === "adviser" && projection.lastReport
-      ? reportText(io, projection.lastReport)
-      : undefined;
+    // ONE call closes the round: the engine picks THIS round's report, routes
+    // it to the kind's recorder and consumes the cursor itself. Reading the
+    // channel here as well is exactly the second entry point that let the two
+    // paths fail-close on different conditions.
+    const settled = await deps.settleRound(child.judgeId, addressed.root);
     return reply(
       buildStandardReport({
         ...base,
         reason: "report",
-        verdict: observation.verdict ?? concluded.verdict,
+        verdict: observation.verdict ?? settled.verdict ?? "",
         ...(observation.findingsCount === undefined ? {} : { findingsCount: observation.findingsCount }),
-        ...(advice === undefined ? {} : { conclusionExcerpt: advice }),
-        ...(recorded.text === undefined ? { unrecorded: child.role !== "adviser" } : { recordedNote: recorded.text }),
+        // An adviser's whole deliverable IS its prose, and nothing records it
+        // — so the wake-up carries it (the same field the settle path fills).
+        ...(settled.advice === undefined ? {} : { conclusionExcerpt: settled.advice }),
+        ...(settled.text === undefined ? { unrecorded: child.role !== "adviser" } : { recordedNote: settled.text }),
         waitedSeconds,
       }),
-      { done: true, reason: "report", role: child.role, hasVerdict: recorded.hasVerdict },
+      { done: true, reason: "report", role: child.role, hasVerdict: settled.hasVerdict },
     );
   }
   if (observation.done && observation.reason === "question") {

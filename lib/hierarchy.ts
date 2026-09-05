@@ -18,6 +18,8 @@
  * table or a verdict — no clock, no filesystem, no tmux.
  */
 
+import type { PendingAudit } from "./audit-round.ts";
+
  /** One judge pane the gate knows about. */
 export interface JudgeEntry {
   /** The judge's id — also its pane's resume key. */
@@ -141,12 +143,21 @@ export function judgeIdsByOpener(table: HierarchyTable, openerId: string): strin
   return listByOpener(table, openerId).map((entry) => entry.judgeId);
 }
 
-/** One repo's durable slice: its judges plus at most one pending per kind. */
+/**
+ * One repo's durable slice: its judges plus AT MOST ONE pending audit.
+ *
+ * One, not one per kind (2026-09-05, user decision): goal and plan audits
+ * share a single `goal-auditor` judge per repo, so two of them can never be in
+ * flight together. The old two-field shape could represent that impossible
+ * state, and the code paid for it with a self-heal branch that guessed which
+ * pending to drop. A file still carrying the old `goalAudit` / `planAudit`
+ * fields is not read (no compatibility layer, 哲学三): the audit it named
+ * simply re-runs, which is the same fail-closed outcome every other miss has.
+ */
 export interface HierarchySnapshot {
   version: 1;
   judges: Record<string, JudgeEntry>;
-  goalAudit?: { draft: string; startedAt: string };
-  planAudit?: { hash: string; planText: string; startedAt: string };
+  audit?: PendingAudit;
 }
 
 function isJudgeEntry(value: unknown): value is JudgeEntry {
@@ -177,13 +188,22 @@ export function parseHierarchySnapshot(raw: unknown): HierarchySnapshot | undefi
       if (isJudgeEntry(entry) && entry.judgeId === id) judges[id] = entry;
     }
     const out: HierarchySnapshot = { version: 1, judges };
-    const goal = value.goalAudit as Record<string, unknown> | undefined;
-    if (goal && typeof goal.draft === "string" && typeof goal.startedAt === "string") {
-      out.goalAudit = { draft: goal.draft, startedAt: goal.startedAt };
-    }
-    const plan = value.planAudit as Record<string, unknown> | undefined;
-    if (plan && typeof plan.hash === "string" && typeof plan.planText === "string" && typeof plan.startedAt === "string") {
-      out.planAudit = { hash: plan.hash, planText: plan.planText, startedAt: plan.startedAt };
+    const audit = value.audit as Record<string, unknown> | undefined;
+    if (audit && typeof audit.startedAt === "string") {
+      if (audit.kind === "goal" && typeof audit.draft === "string") {
+        out.audit = { kind: "goal", draft: audit.draft, startedAt: audit.startedAt };
+      } else if (
+        audit.kind === "plan" &&
+        typeof audit.hash === "string" &&
+        typeof audit.planText === "string"
+      ) {
+        out.audit = {
+          kind: "plan",
+          hash: audit.hash,
+          planText: audit.planText,
+          startedAt: audit.startedAt,
+        };
+      }
     }
     return out;
   } catch {

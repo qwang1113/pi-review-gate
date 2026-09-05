@@ -135,7 +135,7 @@ test("a persisted snapshot round-trips through parse", () => {
   const snap = {
     version: 1,
     judges: { "rg-reviewer-abc123": entry({ paneId: "%7", lastReportId: "rep-1" }) },
-    goalAudit: { draft: "目标", startedAt: "2026-09-04T00:00:00.000Z" },
+    audit: { kind: "goal", draft: "目标", startedAt: "2026-09-04T00:00:00.000Z" },
   };
   const parsed = parseHierarchySnapshot(JSON.stringify(snap));
   assert.deepEqual(parsed, snap);
@@ -156,14 +156,41 @@ test("entries whose key disagrees with their id are dropped", () => {
   assert.deepEqual(Object.keys(parsed!.judges), ["j-right"]);
 });
 
-test("malformed pendings are dropped while good judges survive", () => {
+test("a malformed pending audit is dropped while good judges survive", () => {
   const parsed = parseHierarchySnapshot(JSON.stringify({
     version: 1,
     judges: { "j": entry({ judgeId: "j" }) },
-    goalAudit: { draft: 42 },
+    audit: { kind: "goal", draft: 42, startedAt: "t" },
+  }));
+  assert.deepEqual(Object.keys(parsed!.judges), ["j"]);
+  assert.equal(parsed!.audit, undefined);
+});
+
+test("a well-formed pending audit survives, per kind", () => {
+  const goal = parseHierarchySnapshot(JSON.stringify({
+    version: 1,
+    judges: {},
+    audit: { kind: "goal", draft: "d", startedAt: "t" },
+  }));
+  assert.deepEqual(goal!.audit, { kind: "goal", draft: "d", startedAt: "t" });
+  const plan = parseHierarchySnapshot(JSON.stringify({
+    version: 1,
+    judges: {},
+    audit: { kind: "plan", hash: "h", planText: "p", startedAt: "t" },
+  }));
+  assert.deepEqual(plan!.audit, { kind: "plan", hash: "h", planText: "p", startedAt: "t" });
+});
+
+// The two-field shape is NOT read (2026-09-05, user decision): no compatibility
+// layer, and the audit a stale file named simply re-runs — fail-closed, never
+// mis-recorded.
+test("the retired goalAudit/planAudit fields are not read", () => {
+  const parsed = parseHierarchySnapshot(JSON.stringify({
+    version: 1,
+    judges: { "j": entry({ judgeId: "j" }) },
+    goalAudit: { draft: "d", startedAt: "t" },
     planAudit: { hash: "h", planText: "p", startedAt: "t" },
   }));
   assert.deepEqual(Object.keys(parsed!.judges), ["j"]);
-  assert.equal(parsed!.goalAudit, undefined);
-  assert.deepEqual(parsed!.planAudit, { hash: "h", planText: "p", startedAt: "t" });
+  assert.equal(parsed!.audit, undefined);
 });

@@ -15,6 +15,8 @@ const SRC = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
 /** The mode registry owns the static prompt sections the extension used to inline. */
 const GATE_MODES_SRC = readFileSync(join(ROOT, "lib", "gate-modes.ts"), "utf8");
 const JUDGE_TOOLS_SRC = readFileSync(join(ROOT, "lib", "judge-session-tools.ts"), "utf8");
+/** The audit-round engine: one round, four kinds, one cursor write. */
+const AUDIT_ROUND_SRC = readFileSync(join(ROOT, "lib", "audit-round.ts"), "utf8");
 const JUDGE_SESSION_TOOLS = new Set(["judge_close", "judge_wait"]);
 
 /**
@@ -2574,7 +2576,10 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // 2026-09-04: judge_spawn 的 buildGoalAuditTask 走同一条
     // callTool("prepare_goal_audit") 接线（门禁内部组装审计任务，agent 只给
     // 意图）。接线引用，不是调用指令。
-    "review-gate.ts": 19,
+    // 2026-09-05: 19 → 17。goal 审计任务的三份逐字副本合成了一份
+    // (`buildGoalAuditRound`)，所以 callTool("prepare_goal_audit") 的接线引用
+    // 也从三处降到一处。
+    "review-gate.ts": 17,
   };
 
   const sources = [
@@ -2730,11 +2735,15 @@ test("judge_wait applies the MESSAGE-DRIVEN criteria and returns the standard re
   assert.match(body, /isDone: \(o\) => o\.done/, "…with this tool's criteria injected");
   assert.doesNotMatch(body, /while \(!outcome\.done/, "no hand-rolled wait loop may come back");
   // The RETURN carries the recorded verdict — a NEW channel report ends the
-  // round (the gate records it), a dead pane ends it as failed.
-  assert.match(body, /deps\.recordVerdict\(concluded, addressed\.root, child\.role\)/, "a new report goes through the gate's recorder");
-  assert.match(body, /reportConclusion\(io, projection\.lastReport\)/, "…on the report's STRUCTURED conclusion, not on its text");
+  // round, a dead pane ends it as failed. Since 2026-09-05 the wait does NOT
+  // pick that report itself: it hands the round to the audit-round engine,
+  // which selects, records and consumes it for every kind in one place.
+  assert.match(body, /deps\.settleRound\(child\.judgeId, addressed\.root\)/, "a new report goes through the ONE round engine");
+  assert.doesNotMatch(body, /reportConclusion\(io, projection\.lastReport\)/,
+    "the wait may not read the channel a second time — that was the second entry point");
+  assert.doesNotMatch(body, /rememberCursors\(deps, child\.judgeId, \{ lastReportId/,
+    "…nor keep its own report cursor: the engine advances it, and only after a record landed");
   assert.match(body, /pane-dead/, "a dead pane ends the wait as failed");
-  assert.match(body, /lastReportId: observation\.reportId/, "the consumed report cannot end a second wait");
   assert.match(body, /lastFindingCount: observation\.seenFindingCount/, "…and a shown finding cannot end the next one");
   const probe = windowIn(JUDGE_TOOLS_SRC, "export function probeJudgeRound(", "\n}", "probeJudgeRound");
   assert.match(probe, /projection\.lastReport/, "the report criterion reads the channel");
@@ -2769,21 +2778,47 @@ test("ONE report is recorded ONCE — the wait and the settle share a single cur
   // wait side (test/judge-session-tools.test.ts: "the consumed report does not
   // end a second wait"), and pinned HERE on the settle side, where driving the
   // extension's hook from a unit test is not practical.
+  // Since 2026-09-05 NEITHER path selects the report: both hand the round to
+  // the engine, which selects, records and consumes it. "Recorded once" is
+  // therefore structural — there is one cursor write, in one function.
   const recorder = windowOf("async function recordJudgeConclusion(", "\n  /**", "recordJudgeConclusion");
-  assert.match(recorder, /if \(last\.reportId === entry\?\.lastReportId\) return undefined;/,
-    "the settle path REFUSES a report the cursor already consumed");
-  assert.match(recorder, /advanceReportCursor\(sessionId, last\.reportId\)/,
-    "…and advances that same cursor once it has recorded one");
+  assert.match(recorder, /settleAuditRound\(auditRoundDeps\(ctx\), \{ judgeId: sessionId, root: childRoot \}\)/,
+    "the settle path closes the round through the engine");
+  assert.doesNotMatch(recorder, /last\.reportId === entry\?\.lastReportId/,
+    "…and no longer decides for itself which report is this round's");
+  const settleFn = windowIn(AUDIT_ROUND_SRC, "export async function settleAuditRound(", "\n}", "settleAuditRound");
+  assert.match(settleFn, /selectRoundReport\(deps\.readRoundRecords\(entry\), \{/,
+    "the engine picks this round's report through the ONE selector");
+  // THE ORDERING IS THE GUARANTEE: an unrecorded round returns before the
+  // cursor moves, so a verdict that could not be written is retried rather
+  // than silently consumed. `lastIndexOf` because the advice branch advances
+  // the same cursor earlier in the function.
+  const advanceAt = settleFn.lastIndexOf("deps.advanceCursor(entry.judgeId, report.reportId)");
+  const unrecordedAt = settleFn.indexOf('status: "unrecorded"');
+  assert.ok(advanceAt > 0 && unrecordedAt > 0 && unrecordedAt < advanceAt,
+    "the unrecorded return must come BEFORE the cursor advance");
   const advance = windowOf("function advanceReportCursor(", "\n  }", "advanceReportCursor");
   assert.match(advance, /lastReportId: reportId/, "the settle cursor IS JudgeEntry.lastReportId");
-  // The wait writes the same field, through its own small helper.
+  // The wait writes the same field, through its own small helper — still used
+  // for the FINDING cursor, which is not the engine's business.
   const waitCursor = windowIn(JUDGE_TOOLS_SRC, "function rememberCursors(", "\n}", "rememberCursors");
   assert.match(waitCursor, /\.\.\.entry, \.\.\.patch/, "the wait patches the SAME registry entry");
-  assert.match(toolBodyOf("judge_wait"), /rememberCursors\(deps, child\.judgeId, \{ lastReportId: observation\.reportId \}\)/,
-    "…with the report id, on the report branch");
-  // A cursor per path would be the defect this pins against.
-  assert.doesNotMatch(SRC, /lastWaitReportId|waitConsumedReportId/,
-    "no second, wait-private report cursor may appear");
+  assert.doesNotMatch(toolBodyOf("judge_wait"), /rememberCursors\(deps, child\.judgeId, \{ lastReportId/,
+    "the wait may NOT write the report cursor itself — that is the engine's single write");
+  // A cursor per path would be the defect this pins against — and it would be
+  // BORN where the cursors are written and typed: lib/judge-session-tools.ts
+  // (rememberCursors / JudgeWaitCursors) or the registry entry in
+  // lib/hierarchy.ts. The extension only READS `lastReportId`, so scanning it
+  // alone would have been a guard aimed at the wrong file (round-5 Nit).
+  for (const [label, src] of [
+    ["judge-session-tools", JUDGE_TOOLS_SRC],
+    ["hierarchy", readFileSync(join(ROOT, "lib", "hierarchy.ts"), "utf8")],
+    ["review-gate", SRC],
+  ] as const) {
+    assert.doesNotMatch(src, /lastWaitReportId|waitConsumedReportId/,
+      `no second, wait-private report cursor may appear in ${label}`);
+  }
+
 });
 
 
@@ -3075,8 +3110,12 @@ test("completion arrives as a channel report consumed by the wait — no process
   assert.ok(dispatchAt > 0);
   assert.match(SRC.slice(dispatchAt, dispatchAt + 9000), /judgeChannelTarget\(opener, judgeId\)/,
     "reuse delivers the round into the channel the wait consumes");
-  assert.match(toolBodyOf("judge_wait"), /projection\.lastReport/,
+  // The wait still ENDS on a channel report — it just no longer reads the
+  // channel twice: the probe observes the report, the engine records it.
+  assert.match(toolBodyOf("judge_wait"), /observation\.reason === "report" && observation\.reportId/,
     "the wait ends on the channel report");
+  assert.match(windowIn(JUDGE_TOOLS_SRC, "export function probeJudgeRound(", "\n}", "probeJudgeRound"),
+    /projection\.lastReport/, "…observed straight off the channel");
 });
 
 test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", () => {
@@ -3822,23 +3861,32 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
   // test/judge-session-tools.test.ts; this pins that the audits actually make
   // that call, so deleting either one turns a test red (the exact gap the
   // reviewer found: without this, removing both close calls left the suite green).
+  // 2026-09-05: both paths are now ONE call — `runAuditRound` — so the close
+  // is no longer "one per return branch" (which is how a branch leaks a pane)
+  // but a single `finally` in the engine, and the extension holds exactly one
+  // judge_close wiring for it.
+  const engineRun = windowIn(AUDIT_ROUND_SRC, "export async function runAuditRound(", "\n}", "runAuditRound");
+  assert.match(engineRun, /\} finally \{\s*\n\s*await deps\.closeJudge\(root, spec\.role\);/,
+    "the close runs on EVERY path out of the round, fail-closed ones included");
+
   const goalAt = SRC.indexOf("async function runGoalAudit(");
-  const goal = SRC.slice(goalAt, SRC.indexOf("async function auditPlanRound("));
+  const goal = SRC.slice(goalAt, SRC.indexOf("async function runPlanAudit("));
   assert.ok(goalAt > 0 && goal.length > 0, "the goal-audit function exists");
-  assert.match(goal, /callTool\("judge_close", \{ role: "goal-auditor", repo: root \}, ctx\)/,
-    "the goal audit closes its auditor after recording the verdict");
+  assert.match(goal, /runAuditRound\(auditRunDeps\(ctx, input\.progress, input\.signal\), \{/,
+    "the goal audit runs the engine");
+  assert.match(goal, /spec: GOAL_AUDIT_SPEC/, "…with its own spec");
 
   const planAt = SRC.indexOf("async function auditPlanRound(");
   const plan = SRC.slice(planAt, planAt + 3500);
   assert.ok(planAt > 0, "the plan-audit function exists");
-  assert.match(plan, /const closeAuditor = \(\) => callTool\("judge_close", \{ role: "goal-auditor", repo: root \}/,
-    "the plan audit defines the close");
-  assert.match(plan, /await closeAuditor\(\);/, "…and calls it before every return path");
+  assert.match(plan, /runAuditRound\(auditRunDeps\(latestCtx, onUpdate, signal\), \{/,
+    "the plan audit runs the SAME engine");
+  assert.match(plan, /spec: PLAN_AUDIT_SPEC/, "…differing only in its spec");
 
-  // Exactly the two gate-internal closes exist — no more (a stray one would be a
-  // second, unaccounted-for path), no fewer (the gap the reviewer found).
-  const internalCloses = [...SRC.matchAll(/callTool\("judge_close", \{ role: "goal-auditor"/g)];
-  assert.equal(internalCloses.length, 2, "one internal close per audit path, and only those");
+  // Exactly ONE gate-internal close wiring exists — a second one would be a
+  // second, unaccounted-for path out of a round.
+  const internalCloses = [...SRC.matchAll(/callTool\("judge_close"/g)];
+  assert.equal(internalCloses.length, 1, "one close wiring, injected into the engine");
 });
 
 test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict P0)", () => {
@@ -3847,19 +3895,29 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   // was the PREVIOUS round's — every resubmit after a BLOCKED verdict
   // re-adjudicated the old findings and the plan/goal could never pass again.
   // Behaviour of the selection rule is unit-tested on the pure function
-  // (test/orchestrator-plan-audit.test.ts); THIS pins that both extension call
-  // sites actually consult it instead of trusting `lastReport`.
-  const goalAt = SRC.indexOf("async function runGoalAudit(");
-  const goal = SRC.slice(goalAt, SRC.indexOf("async function auditPlanRound("));
-  const planAt = SRC.indexOf("async function auditPlanRound(");
-  const plan = SRC.slice(planAt, planAt + 4500);
-  for (const [name, body] of [["goal", goal], ["plan", plan]] as const) {
-    assert.match(body, /const \w*[Ww]ait\w* = await awaitAuditReport\(/,
-      `the ${name} audit must KEEP the wait result, not discard it`);
-
-    assert.match(body, /\.done !== true \|\| \w+\.reason !== "report"/,
-      `the ${name} audit only proceeds when the wait ended on THIS round's report`);
-  }
+  // (test/audit-round.test.ts); THIS pins that the extension has no second
+  // place where a round is closed.
+  //
+  // 2026-09-05: "both paths" is now ONE path. Keeping the wait result and
+  // refusing to adjudicate without THIS round's report is written once, in the
+  // engine, so a future kind cannot get its own subtly different version.
+  const engineRun = windowIn(AUDIT_ROUND_SRC, "export async function runAuditRound(", "\n}", "runAuditRound");
+  assert.match(engineRun, /const waited = await deps\.awaitRoundEnd\(root\);/,
+    "the round KEEPS its wait result, it does not discard it");
+  assert.match(engineRun, /if \(!waited\.ok\) return \{ ok: false, text: spec\.unfinished\(waited\.detail\) \};/,
+    "…and proceeds only when the wait ended on this round's report");
+  // The round is settled by whoever got there first — the wait inside
+  // `awaitRoundEnd` closes it through this same engine — so "already recorded"
+  // is the NORMAL path and only a genuinely stale round fails closed. Getting
+  // this backwards fail-closes every audit while looking correct (adviser,
+  // 2026-09-05); the behaviour itself is pinned in test/audit-round.test.ts.
+  assert.match(engineRun, /const settledByTheWait = settled\.status === "miss" && settled\.reason === "already-consumed";/,
+    "a round the wait already recorded is not treated as stale");
+  assert.match(engineRun, /if \(!settledHere && !settledByTheWait\)/,
+    "…and anything else the engine did not record fails closed");
+  // The done/reason judgement itself is wired ONCE, in the run deps.
+  const doneChecks = [...SRC.matchAll(/details\.reason === "report"/g)];
+  assert.equal(doneChecks.length, 1, "one place decides that a wait ended on a report");
   // …and the waiter they share must keep calling the ONE tool until the round
   // really ends. `judge_wait` is message-driven for the agent (2026-09-05), so
   // a single call can return on a streamed finding — which every auditor emits
@@ -3873,15 +3931,20 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   // pinned in test/judge-lifecycle.test.ts, where it can be driven directly.
 
 
-  // The plan path additionally selects the report through the shared pure
-  // function; the goal path records through recordRoundOutput, whose pending
-  // branches call the same guard.
-  assert.match(plan, /selectCurrentAuditReport\(read\.records, \{ expectedRound, consumedReportId: consumedBeforeWait \}\)/,
-    "the plan audit selects THIS round's report by roundSeq + consumed cursor");
-  assert.match(SRC, /function staleAuditGuard\(root: string\)/,
-    "the recording path shares one stale-report guard");
-  const guarded = [...SRC.matchAll(/staleAuditGuard\(root\)/g)];
-  assert.equal(guarded.length, 2, "the goal and plan recording branches both consult it");
+  // AND THE SELECTOR HAS ONE CALL SITE, ANYWHERE. Two entry points
+  // (`staleAuditGuard` plus an inline call in the plan audit) is exactly how
+  // the goal path and the plan path ended up fail-closing on different
+  // conditions, so this scans every module rather than the extension alone.
+  assert.doesNotMatch(SRC, /staleAuditGuard/,
+    "the second stale-report entry point may not come back");
+  for (const rel of [
+    ...readdirSync(join(ROOT, "lib")).filter((f) => f.endsWith(".ts")).map((f) => join("lib", f)),
+    join("extensions", "review-gate.ts"),
+  ]) {
+    if (rel.endsWith("audit-round.ts")) continue;
+    assert.doesNotMatch(readFileSync(join(ROOT, rel), "utf8"), /selectRoundReport\(|selectCurrentAuditReport\(/,
+      `${rel} must not decide which report closes a round — the engine does`);
+  }
 });
 
 
@@ -3903,16 +3966,22 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   const body = windowOf('name: "judge_submit"', "\n  // `review_spawn`", "judge_submit body");
   // The agent hands over a draft or a question; the gate builds what the
   // judge actually receives.
-  assert.match(body, /callTool\("prepare_goal_audit", \{ goal: task, repo: root \}/);
+  // The goal-auditor's task comes from the ONE assembler (three verbatim
+  // copies of it were the whole point of the 2026-09-05 convergence).
+  assert.match(body, /buildGoalAuditRound\(task, root, ctx\)/);
   assert.match(body, /callTool\("prepare_adviser", \{ repo: root \}/);
-  assert.match(body, /extractTaskText\(toolText\(prepared\)\)/);
-  // The audited DRAFT is remembered: the verdict binds to its content, and
-  // the auditor's output alone cannot say what it judged.
-  assert.match(body, /pendingGoalAudits\.set\(root, \{ draft: task, startedAt:/);
+  const assembler = windowOf("async function buildGoalAuditRound(", "\n  /**", "buildGoalAuditRound");
+  assert.match(assembler, /callTool\("prepare_goal_audit", \{ goal: draft, repo: root \}/);
+  assert.match(assembler, /extractTaskText\(toolText\(prepared\)\)/);
   // Criterion 2: a goal audit streams findings, so the draft can be fixed
   // while the auditor is still working.
-  assert.match(body, /buildStreamDirective\(streamPath\)/);
-  assert.match(body, /review-stream", `goal-\$\{goalTextHash\(task\)/);
+  assert.match(assembler, /buildStreamDirective\(streamPath\)/);
+  assert.match(assembler, /review-stream", `goal-\$\{goalTextHash\(draft\)/);
+  const assemblers = [...SRC.matchAll(/callTool\("prepare_goal_audit"/g)];
+  assert.equal(assemblers.length, 1, "ONE assembler — the three verbatim copies are gone");
+  // The audited DRAFT is remembered: the verdict binds to its content, and
+  // the auditor's output alone cannot say what it judged.
+  assert.match(body, /pendingAudits\.set\(root, \{ kind: "goal", draft: task, startedAt:/);
   // Criterion 1: the stream path comes BACK to the agent — a channel written
   // but never read is not a channel.
   assert.match(body, /streamPath,/, "the reply carries the stream path");
@@ -3920,17 +3989,17 @@ test("judge_submit builds the task for EVERY role, and a goal audit streams its 
   // The audited draft is remembered only after the dispatch is ACCEPTED: a
   // refused submission must not overwrite what a running audit is judging.
   const acceptedAt = body.indexOf("if (!dispatch.ok)");
-  const setAt = body.indexOf("pendingGoalAudits.set(root");
+  const setAt = body.indexOf("pendingAudits.set(root");
   assert.ok(acceptedAt > 0 && setAt > acceptedAt, "the draft is recorded after the dispatch is accepted");
-  // …and the recording side closes the loop with that same draft.
-  // …and the recording side closes the loop with that same draft (via the single
-  // recorder recordRoundOutput, which recordJudgeConclusion calls).
-  const recAt = SRC.indexOf("async function recordRoundOutput(");
-  const rec = SRC.slice(recAt, recAt + 4000);
-  assert.match(rec, /recordGoalPrereview\(goalPrereviewDeps, \{/, "recording routes through the ONE audit recorder");
-  assert.match(rec, /goal: goalPending\.draft/, "the recorded draft is the pending one");
-  assert.match(rec, /auditStartedAt: goalPending\.startedAt/);
-  assert.match(rec, /dropAudits\(root\)/, "a recorded audit does not linger (and persists the drop)");
+  // …and the recording side closes the loop with that same draft, through the
+  // engine's goal recorder — the pending entry IS what it records against.
+  const goalRecorder = windowOf("      recordGoal: async ({ root, pending, concluded }) => {", "\n      }", "recordGoal dep");
+  assert.match(goalRecorder, /recordGoalPrereview\(goalPrereviewDeps, \{/, "recording routes through the ONE audit recorder");
+  assert.match(goalRecorder, /goal: pending\.draft/, "the recorded draft is the pending one");
+  assert.match(goalRecorder, /auditStartedAt: pending\.startedAt/);
+  const settleFn = windowIn(AUDIT_ROUND_SRC, "export async function settleAuditRound(", "\n}", "settleAuditRound");
+  assert.match(settleFn, /deps\.forgetPending\(input\.root\)/,
+    "a recorded audit does not linger (and the extension's dep persists the drop)");
 });
 
 
@@ -3960,23 +4029,28 @@ test("judge_submit runs the whole submission chain, and cannot dead-end on it", 
 });
 
 test("a judge's verdict is recorded from THIS round's report, never an older one", () => {
-  const at = SRC.indexOf("async function recordJudgeConclusion(");
-  const body = SRC.slice(at, at + 2200);
+  const body = windowOf("async function recordJudgeConclusion(", "\n  /**", "recordJudgeConclusion");
   // The channel accumulates every round, so its newest report can belong to
   // a PREVIOUS one — recording that would bind a verdict to work nobody
-  // judged. Only a report newer than the consumed cursor is recorded.
-  assert.match(body, /projectChannel\(read\.records\)\.lastReport/,);
-  assert.match(body, /last\.reportId === entry\?\.lastReportId/, "an already-consumed report is not recorded twice");
-  assert.match(body, /reportText\(channelIO, last\)/, "an ADVISER's prose is read from its report");
-  assert.match(body, /recordRoundOutput\(reportConclusion\(channelIO, last\), childRoot, role, ctx\)/,
-    "one recorder serves both the wait and the stragglers, on the STRUCTURED conclusion, with an explicit ctx");
-  const recorderAt = SRC.indexOf("async function recordRoundOutput(");
-  assert.ok(recorderAt > 0, "the single recorder must exist");
-  assert.match(SRC.slice(recorderAt, recorderAt + 1500), /recordReviewVerdict\(concluded, root, recordCtx\)/,
+  // judged. Since 2026-09-05 that decision is the ENGINE's, in one place, and
+  // this settle path only relays what it decided.
+  assert.match(body, /settleAuditRound\(auditRoundDeps\(ctx\), \{ judgeId: sessionId, root: childRoot \}\)/,
+    "the settle path closes the round through the engine");
+  assert.doesNotMatch(body, /projectChannel\(read\.records\)\.lastReport/,
+    "…so it must not read the channel itself anymore");
+  const settleFn = windowIn(AUDIT_ROUND_SRC, "export async function settleAuditRound(", "\n}", "settleAuditRound");
+  assert.match(settleFn, /consumedReportId: entry\.lastReportId/, "an already-consumed report is not recorded twice");
+  assert.match(settleFn, /deps\.proseOf\(report\)/, "an ADVISER's prose is read from its report");
+  assert.match(settleFn, /deps\.recordReview\(\{ root: input\.root, concluded \}\)/,
+    "a review verdict goes to the review recorder, on the STRUCTURED conclusion");
+  // The record writers stay where they were — the engine calls them, and the
+  // review one still names its repo explicitly.
+  const reviewRecorder = windowOf("      recordReview: async ({ root, concluded }) => {", "\n      }", "recordReview dep");
+  assert.match(reviewRecorder, /recordReviewVerdict\(concluded, root, recordCtx\)/,
     "the record names its repo explicitly");
   // Advice is not a verdict: an adviser's report is surfaced, never recorded —
   // but its cursor still advances so the next settle does not re-announce it.
-  assert.match(body, /role === "adviser"/, "advice is surfaced, not recorded");
+  assert.match(settleFn, /spec\.kind === "advice"/, "advice is surfaced, not recorded");
 });
 
 
@@ -3994,9 +4068,13 @@ test("a judge's PROSE never reaches the opener's context, except from the advise
   // And the recorded note is the GATE's sentence, not the judge's: it comes
   // from the recorder's return value, never from the report's text.
   assert.match(body, /recordedNote: conclusion\.recorded \? conclusion\.text : undefined/);
-  const recorder = windowOf("async function recordJudgeConclusion(", "\n  /**", "recordJudgeConclusion");
-  assert.match(recorder, /if \(role === "adviser"\) \{[\s\S]*?reportText\(channelIO, last\)/,
-    "the report's own text is read ONLY on the adviser branch");
+  // The report's own TEXT is read on exactly one branch of the engine — the
+  // advice one — and the extension never reads it while recording at all.
+  const settleFn = windowIn(AUDIT_ROUND_SRC, "export async function settleAuditRound(", "\n}", "settleAuditRound");
+  assert.match(settleFn, /if \(spec\.kind === "advice"\) \{[\s\S]*?deps\.proseOf\(report\)/,
+    "the report's own text is read ONLY on the advice branch");
+  const proseReads = [...settleFn.matchAll(/deps\.proseOf\(/g)];
+  assert.equal(proseReads.length, 1, "…and exactly once");
 });
 
 
