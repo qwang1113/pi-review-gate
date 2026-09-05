@@ -46,6 +46,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
+import { isDeliveryStation, type DeliveryStation } from "./delivery-station.ts";
+
 
 /** Directory (under the pi agent home) that holds every orchestration's channels. */
 export const CHANNEL_ROOT_DIRNAME = "rg-channels";
@@ -181,17 +183,26 @@ export interface ChannelRequestRecord extends ChannelRecordBase {
    * station the child is asking to have confirmed (`restatement`), or the one
    * recorded beside the goal it wants approved (`goal-approval`).
    *
-   * A pure addition: an older gate ignores it, and a record without it is read
-   * as the strictest station. It travels as a STRUCTURED field rather than
-   * inside `payload` because a DECISION is made on it — an orchestrator may
-   * not confirm a station looser than the plan the user approved — and
-   * deriving that decision by grepping prose is the exact class of mistake the
-   * channel replaced (a picture of a fact is not the fact).
+   * A pure addition: an older gate ignores it, and a record without it leaves
+   * the station comparison unmade (see {@link sanitizeDeliveryStation}).
    *
-   * Untrusted like every wire value: read it through `parseDeliveryStation`
-   * (lib/delivery-station.ts), never by comparing strings.
+   * WHY A FIELD AND NOT A LINE IN `payload` (user decision, 2026-09-06). A
+   * DECISION is made on this value — an orchestrator may not confirm a station
+   * looser than the plan the user approved — and the alternative on the table
+   * was "the gate appends a canonical line to the payload and parses it back".
+   * That would invent a second, TEXTUAL wire format inside a field whose
+   * content is written by the CHILD: the child could print a line of the same
+   * shape in its own restatement, and the only defences are brittle
+   * conventions like "take the last match". This channel exists because
+   * reading a fact off a rendering is how the orchestration layer used to get
+   * things wrong; `ChannelReportRecord.scope` (t6a) is the same shape for the
+   * same reason.
+   *
+   * Untrusted like every wire value: read it through
+   * {@link sanitizeDeliveryStation}, never by comparing strings.
    */
   station?: string;
+
 
 }
 
@@ -645,6 +656,33 @@ export function sanitizeContextPercent(raw: unknown): number | undefined {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
   return Math.min(100, Math.max(0, raw));
 }
+
+/**
+ * Keep a request's delivery station only when it is one of the three.
+ *
+ * Same untrusted-input rule as {@link sanitizeScopeStamp}: the value was
+ * written by the CHILD, so an unknown, mistyped or hand-edited one is DROPPED
+ * rather than passed on. It deliberately does NOT go through
+ * `parseDeliveryStation`, whose job is the opposite — that one DEGRADES an
+ * unreadable value to the strictest station so a contract that forgot to say
+ * where it stops still blocks. Here there is no contract to protect: an
+ * unreadable station is "the child said nothing", and inventing `precommit`
+ * for it would show a project manager a station nobody asked for.
+ *
+ * The station VOCABULARY is still the one place that owns it
+ * (`isDeliveryStation`, lib/delivery-station.ts) — this adds a rule about
+ * missing data, never a second definition of what a station is.
+ *
+ * Dropping is also the safe direction for the only decision that reads it: no
+ * station ⇒ no widening comparison ⇒ the proxy answer still has to carry a
+ * crosscheck, and the ordinary approval rules apply unchanged.
+ */
+export function sanitizeDeliveryStation(raw: unknown): DeliveryStation | undefined {
+  if (typeof raw !== "string") return undefined;
+  const normalized = raw.trim().toLowerCase();
+  return isDeliveryStation(normalized) ? normalized : undefined;
+}
+
 
 /**
  * Read one report's structured conclusion, resolving a spilled findings array.

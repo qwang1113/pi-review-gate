@@ -264,6 +264,35 @@ test("a station LOOSER than the approved plan's is refused, a stricter one passe
   assert.equal(ok.isError, undefined, replyText(ok));
 });
 
+test("a station the child made up is DROPPED at the boundary, not read as a station", async () => {
+  // The field is written by the CHILD, so it is untrusted input. Anything that
+  // is not one of the three is dropped by `sanitizeDeliveryStation` before any
+  // consumer sees it: the comparison is simply not made, the crosscheck still
+  // is, and nothing invents a station the child never asked for.
+  const plan = { ...twoTaskPlan(), deliveryStation: "commit" as const };
+  const world = makeFakeWorld({ plan, approvePlan: true });
+  const childId = await spawnT1(world);
+  world.childAsks(childId, {
+    requestId: "re-junk",
+    title: "这是 AI 对需求的反述——理解对了吗？",
+    options: [RESTATE_APPROVE, RESTATE_REJECT],
+    payload: "改之前 → 改之后",
+    topic: "restatement",
+    station: "deploy-to-prod",
+  });
+
+  // Still refused WITHOUT a crosscheck — the ordinary rule is untouched…
+  const noCrosscheck = await world.call("orchestrator_answer", { childId, answer: RESTATE_APPROVE });
+  assert.equal(noCrosscheck.isError, true);
+  assert.doesNotMatch(replyText(noCrosscheck), /交付站点是 `/,
+    "a junk station must not be reported back as if the child had asked for one");
+
+  // …and with one it passes: there was no station to be wider than the plan.
+  const ok = await world.call("orchestrator_answer", { childId, answer: RESTATE_APPROVE, crosscheck: GOOD });
+  assert.equal(ok.isError, undefined, replyText(ok));
+});
+
+
 test("an ordinary question is untouched: no crosscheck, no station, no new refusal", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);

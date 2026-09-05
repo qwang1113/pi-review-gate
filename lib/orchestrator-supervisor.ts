@@ -46,10 +46,14 @@ import {
   projectChannel,
   readChannel,
   requestPayload,
+  sanitizeDeliveryStation,
+
   type ChannelIO,
   type ChannelProjection,
   type ChannelRequestRecord,
 } from "./orchestrator-channel.ts";
+import type { DeliveryStation } from "./delivery-station.ts";
+
 import {
   childHealth,
   classifyChildState,
@@ -90,11 +94,19 @@ export interface PendingRequest {
   /** The full text behind the question, when the child attached one. */
   payload?: string;
   /**
-   * The delivery station the question is about, exactly as the child wrote it
-   * (untrusted: parse it, do not compare it). Absent on every dialog that has
-   * no station, and on records written before the field existed.
+   * The delivery station the question is about, ALREADY SANITIZED
+   * (`sanitizeDeliveryStation`): one of the three, or absent.
+   *
+   * Absent covers three different facts on purpose — a dialog with no station,
+   * a record written before the field existed, and a value the child wrote
+   * that is not a station at all. All three mean the same thing to every
+   * consumer ("nothing was said"), and none of them may reach one as a raw
+   * string: the value is written by the CHILD, and the untrusted-input rule
+   * this channel is built on is that it gets normalized at the boundary, not
+   * at each reader (see `ChannelReportRecord.scope`).
    */
-  station?: string;
+  station?: DeliveryStation;
+
 
   askedAt: string;
 }
@@ -180,6 +192,8 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
 
     for (const open of projection.openRequests) {
       const payload = safePayload(input.io, open);
+      const station = sanitizeDeliveryStation(open.station);
+
       requests.push({
         childId: child.id,
         requestId: open.requestId,
@@ -188,7 +202,11 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
         title: open.title,
         options: open.options,
         ...(payload === undefined ? {} : { payload }),
-        ...(open.station === undefined ? {} : { station: open.station }),
+        // Sanitized HERE, at the wire→consumer boundary: a station the child
+        // wrote that is not one of the three is dropped, so no reader has to
+        // remember that this field is untrusted.
+        ...(station === undefined ? {} : { station }),
+
 
         askedAt: open.at,
       });

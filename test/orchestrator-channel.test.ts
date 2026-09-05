@@ -22,6 +22,8 @@ import {
   projectChannel,
   readChannel,
   requestPayload,
+  sanitizeDeliveryStation,
+
   MAX_INLINE_RECORD_BYTES,
   judgeChannelTarget,
   reportText,
@@ -43,6 +45,8 @@ import {
   type SupervisionMemory,
 } from "../lib/orchestrator-supervisor.ts";
 import type { ChildSession } from "../lib/orchestrator-registry.ts";
+import { parseDeliveryStation } from "../lib/delivery-station.ts";
+
 
 const T0 = 1_700_000_000_000;
 const ORCH = "orch-deadbeef-abc";
@@ -556,3 +560,32 @@ test("a channel with no report has no lastReport", () => {
   ]);
   assert.equal(projection.lastReport, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// sanitizeDeliveryStation — the untrusted-input rule for the request's station
+// (2026-09-06). Same shape and same reason as `sanitizeScopeStamp`: the value
+// is written by the CHILD, so it is normalized at the boundary and no reader
+// has to remember it came off a wire.
+
+test("a station the child wrote is kept only when it is one of the three", () => {
+  assert.equal(sanitizeDeliveryStation("precommit"), "precommit");
+  assert.equal(sanitizeDeliveryStation("commit"), "commit");
+  assert.equal(sanitizeDeliveryStation("pr"), "pr");
+  // Surrounding whitespace and case are tolerated — same reading as the rest
+  // of the gate gives a station.
+  assert.equal(sanitizeDeliveryStation("  PR "), "pr");
+});
+
+test("anything else is DROPPED, never degraded into a station nobody asked for", () => {
+  for (const raw of ["", "  ", "deploy", "PRECOMMIT!", "commit; pr", 3, null, undefined, {}, ["pr"]]) {
+    assert.equal(sanitizeDeliveryStation(raw), undefined, JSON.stringify(raw));
+  }
+  // The contrast that matters: `parseDeliveryStation` DEGRADES an unreadable
+  // value to the strictest station (a contract that forgot to say where it
+  // stops must still block), while this one drops it — here there is no
+  // contract to protect, and inventing `precommit` would show a project
+  // manager a station the child never asked for.
+  assert.equal(parseDeliveryStation("deploy"), "precommit");
+  assert.equal(sanitizeDeliveryStation("deploy"), undefined);
+});
+

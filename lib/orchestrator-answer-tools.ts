@@ -39,7 +39,6 @@ import type { OrchestratorDeps, ToolHost, ToolReply } from "./orchestrator-deps.
 import {
   DEFAULT_DELIVERY_STATION,
   isStationWidening,
-  parseDeliveryStation,
   type DeliveryStation,
 } from "./delivery-station.ts";
 
@@ -541,8 +540,14 @@ function proxyCrosscheckGuard(
   // strictest station, the same reading lib/orchestrator-plan-approval.ts
   // applies when it decides whether an edit widened the plan.
   const planStation: DeliveryStation = deps.runtime().approvedPlan?.deliveryStation ?? DEFAULT_DELIVERY_STATION;
-  if (request.station !== undefined) {
-    const requested = parseDeliveryStation(request.station);
+  // `request.station` arrives SANITIZED from the channel boundary
+  // (`sanitizeDeliveryStation`), so there is nothing to parse here and no
+  // second validator to drift: it is one of the three, or it is absent
+  // because the child said nothing readable — and then there is no station to
+  // compare and the crosscheck below is the whole check.
+  const requested = request.station;
+  if (requested !== undefined) {
+
     if (isStationWidening(planStation, requested)) {
       return fail(
         buildStationWideningRefusal({ childId, requested, planStation }),
