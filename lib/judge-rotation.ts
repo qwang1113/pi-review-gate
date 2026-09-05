@@ -227,19 +227,21 @@ export function laneOfEntry(entry: JudgeLaneRecord | undefined): JudgeLane | und
   return { objectId, generation: count(entry?.generation) };
 }
 
-/** One line for the dispatch receipt / diagnostics — why this round got a new transcript. */
-export function rotationNote(decision: JudgeRotationDecision): string | undefined {
-  switch (decision.reason) {
-    case "object-changed":
-      return "复用对象已结束（goal/plan 换了）——本轮开新 transcript，只带压缩交接。";
-    case "context":
-      return `judge 上下文已过 ${JUDGE_ROTATION_CONTEXT_PERCENT}%——门禁轮转 transcript，只带压缩交接。`;
-    case "rounds":
-      return `同一对象已跑满 ${JUDGE_ROTATION_MAX_ROUNDS} 轮——门禁轮转 transcript，只带压缩交接。`;
-    default:
-      return undefined;
-  }
-}
+/**
+ * The sentence a fresh transcript's first round opens with.
+ *
+ * WHAT IT DELIBERATELY DOES NOT SAY (user, 2026-09-05). It names no mechanism:
+ * not why this round starts where it does, not what the gate measured, not
+ * that anything was ever carried differently. A judge told it is being managed
+ * starts reasoning about the management — budgeting its own reading, hedging a
+ * verdict "because context is short", asking for more room — and every one of
+ * those is a worse review. What it needs is the one operational fact, which is
+ * true of EVERY round and merely load-bearing here: the task text in front of
+ * it is the whole of what it can rely on, and anything else has to be read.
+ */
+const FRESH_CONTEXT_PREAMBLE =
+  "你手上的任务书与交接，就是这一轮的全部上下文：下面给出的结论、findings 与增量是权威依据，"
+  + "别的事实需要就现在去读代码、git 与文件，不要凭印象补。";
 
 /** The facts a rotated round hands over, when the caller holds them. */
 export interface RotationHandoffInput {
@@ -257,8 +259,9 @@ export interface RotationHandoffInput {
 }
 
 /**
- * The task text a ROTATED round is sent with: a sentence saying the history is
- * gone, plus the compressed hand-off that replaces it.
+ * The task text a ROTATED round is sent with: {@link FRESH_CONTEXT_PREAMBLE},
+ * plus the compressed hand-off that stands in for what the fresh transcript
+ * cannot remember. Neither of them names the rotation — see that constant.
  *
  * The hand-off is rendered by `buildReviewCarryover` — never by a second
  * renderer here. Two consequences, both deliberate:
@@ -277,20 +280,20 @@ export interface RotationHandoffInput {
  */
 export function rotationHandoffTask(input: RotationHandoffInput): string {
   if (!input.decision.rotated) return input.task;
-  const note = rotationNote(input.decision);
-  const header = `${note ?? "门禁轮转了本 review 的 transcript。"}\n`
-    + "（这是一条新 transcript：先前轮次的对话不在你的上下文里，本轮任务文本就是全部依据。）";
   const carryable = input.role === "reviewer"
     && !input.task.includes(SCOPE_BLOCK_HEADING)
     && (input.settled !== undefined || (input.openFindings?.length ?? 0) > 0);
-  if (!carryable) return `${header}\n\n${input.task}`;
+  if (!carryable) return `${FRESH_CONTEXT_PREAMBLE}\n\n${input.task}`;
   const carryover = buildReviewCarryover({
     kind: "incremental",
-    reason: "the gate rotated this judge's transcript, so THIS block is the hand-off",
+    // The reason a reviewer reads is about the WORK, never about the plumbing:
+    // this block carries the previous round forward, which is all it needs to
+    // know to use it (see FRESH_CONTEXT_PREAMBLE).
+    reason: "本轮承接上一轮的结论，下面这块就是交接",
     ...(input.settled === undefined ? {} : { settled: input.settled }),
     openFindings: input.openFindings ?? [],
     ...(input.delta === undefined ? {} : { delta: input.delta }),
     audience: "reviewer",
   });
-  return `${header}\n\n${carryover}\n\n${input.task}`;
+  return `${FRESH_CONTEXT_PREAMBLE}\n\n${carryover}\n\n${input.task}`;
 }

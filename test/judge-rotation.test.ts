@@ -266,7 +266,8 @@ test("the ROTATION HAND-OFF is rendered by review-carryover, and never doubled",
   assert.ok(handoff.includes("verdict READY"), "the previous verdict travels");
   assert.ok(handoff.includes("lib/a.ts:12 stale guard"), "so do the open findings");
   assert.ok(handoff.includes("lib/a.ts"), "and the mechanical delta");
-  assert.ok(handoff.includes(String(JUDGE_ROTATION_CONTEXT_PERCENT)), "the reason is stated");
+  assert.ok(handoff.startsWith("你手上的任务书与交接，就是这一轮的全部上下文"),
+    "the round opens with the one operational fact the judge needs");
   assert.equal(handoff.split(SCOPE_BLOCK_HEADING).length - 1, 1, "exactly one contract block");
 
   // A task that already carries the block (every prepared reviewer round does)
@@ -298,4 +299,77 @@ test("the ROTATION HAND-OFF is rendered by review-carryover, and never doubled",
   // normal path, which is where it runs on every single dispatch.
   const reuse = decideJudgeRotation({ objectId: GOAL, previous: { objectId: GOAL, generation: 0, roundsInObject: 1 } });
   assert.equal(rotationHandoffTask({ role: "reviewer", task: "T", decision: reuse }), "T");
+});
+
+/**
+ * WHAT THE JUDGE IS NEVER TOLD (user, 2026-09-05).
+ *
+ * The text a rotated round is sent names no mechanism: not the rotation, not
+ * the thresholds, not that a transcript ended or that anything was measured.
+ * A judge that knows it is being managed starts managing itself — budgeting
+ * its reading, hedging a verdict on "limited context", asking for more room —
+ * and each of those is a worse review than the one it was asked for. This test
+ * is the ratchet on that wording; it covers every role and both hand-off
+ * shapes, because one uncovered branch is where the leak would come back.
+ */
+test("the rotated round's text names no mechanism — no thresholds, no rotation, no lost history", () => {
+  const rotated = decideJudgeRotation({
+    objectId: GOAL,
+    previous: { objectId: GOAL, generation: 0, roundsInObject: 2, contextPercent: 88 },
+  });
+  const byRounds = decideJudgeRotation({
+    objectId: GOAL,
+    previous: { objectId: GOAL, generation: 1, roundsInObject: JUDGE_ROTATION_MAX_ROUNDS },
+  });
+  const byObject = decideJudgeRotation({ objectId: OTHER_GOAL, previous: { objectId: GOAL, generation: 0, roundsInObject: 1 } });
+
+  const texts = [rotated, byRounds, byObject].flatMap((decision) => [
+    // with a carryover…
+    rotationHandoffTask({
+      role: "reviewer",
+      task: "REVIEW",
+      decision,
+      settled: { verdict: "READY" },
+      openFindings: ["lib/a.ts:1 x"],
+      delta: { files: ["lib/a.ts"] },
+    }),
+    // …and without one (nothing settled yet, and every non-reviewer role)
+    rotationHandoffTask({ role: "reviewer", task: "REVIEW", decision }),
+    rotationHandoffTask({ role: "adviser", task: "ADVISE", decision }),
+    rotationHandoffTask({ role: "goal-auditor", task: "AUDIT", decision }),
+  ]);
+
+  // Derivation self-proof: the scan must actually be looking at rendered text,
+  // or every "does not contain" below passes on nothing.
+  assert.equal(texts.length, 12);
+  for (const text of texts) {
+    assert.ok(text.includes("你手上的任务书与交接"), `every rotated round opens with the same fact: ${text.slice(0, 40)}`);
+    // SCOPED TO WHAT THIS MODULE AUTHORS: the opening paragraph and the
+    // decision line it feeds `buildReviewCarryover`. The rest of the contract
+    // block belongs to lib/review-carryover.ts and legitimately says things
+    // like "the FULL diff as context" — banning words there would be a rule
+    // about someone else's text, and it would fail on wording this round
+    // never wrote.
+    const preamble = text.split("\n\n")[0]!;
+    const decisionLine = text.split("\n").find((line) => line.startsWith("- INCREMENTAL.")) ?? "";
+    assert.ok(preamble.length > 0, "derivation sanity: the preamble is non-empty");
+    // …and when this text HAS a contract block, its decision line must have
+    // been found: a `find` that silently returned nothing would quietly shrink
+    // this check to the preamble alone, which is the half that was never at
+    // risk of naming a threshold.
+    assert.equal(
+      decisionLine !== "",
+      text.includes(SCOPE_BLOCK_HEADING),
+      "the decision line is located exactly when a contract block is present",
+    );
+    const authored = `${preamble}\n${decisionLine}`;
+    for (const leak of [
+      "轮转", "rotat", "代次", "generation",
+      "transcript", "上下文占用", "上下文预算", "上下文不够",
+      String(JUDGE_ROTATION_CONTEXT_PERCENT), String(JUDGE_ROTATION_MAX_ROUNDS),
+      "门禁", "历史", "截断", "先前轮次", "新一条", "对象",
+    ]) {
+      assert.equal(authored.includes(leak), false, `"${leak}" must not reach the judge: ${authored.slice(0, 120)}`);
+    }
+  }
 });
