@@ -609,8 +609,9 @@ const READ_ONLY_TOOL_NAMES = new Set([
  * gate is the enforcement, this text just keeps the negotiation in front of
  * an agent that is busy reading. */
 const GOAL_REMINDER_TEXT =
-  "\n[review-gate] 你还没协商并获批本会话的 loop goal —— 记得先用 `propose_loop_goal` " +
-  "走完协商再改代码（未批准前 L8 会拦下 edit/write）。";
+  "\n[review-gate] 你还没协商并获批本会话的 loop goal —— 顺序是先用 `propose_restatement` " +
+  "把需求反述给用户确认（没有它 `propose_loop_goal` 会直接被拒、不弹框），再 `propose_loop_goal` " +
+  "走完协商，然后才改代码（未批准前 L8 会拦下 edit/write）。";
 
 
 

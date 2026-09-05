@@ -608,11 +608,16 @@ function capText(raw: string): string {
 /**
  * Step 0 directive, injected while a loop-mode session has no CONFIRMED goal.
  *
- * The instruction is to interview the user first, ONE question per turn with
- * the position labeled ("N of M") and the agent's own recommended answer
- * attached (the `grilling` shape — all-at-once only when the user asks for
- * it), and only then submit the result through `propose_loop_goal` for the
- * user's approval. The engineering skills named below are declared
+ * The order it teaches is the order the gate ENFORCES (2026-09-06): interview
+ * the user when anything is unclear — ONE question per turn with the position
+ * labeled ("N of M") and the agent's own recommended answer attached (the
+ * `grilling` shape — all-at-once only when the user asks for it) — then get
+ * the requirement RESTATED and confirmed through `propose_restatement` (which
+ * also settles the delivery station), and only then submit the drafted goal
+ * through `propose_loop_goal` for the user's approval. The restatement step is
+ * not advice: without a confirmed one the goal call refuses outright, so a
+ * recipe that omitted it would walk its reader into that refusal.
+ * The engineering skills named below are declared
  * `disable-model-invocation: true` and assume a configured issue tracker, so
  * they are OPTIONAL accelerators the USER triggers; the interview fallback is
  * always available, which keeps this directive portable to any repo.

@@ -345,6 +345,27 @@ test("loop goal: set_gate_mode(loop) delivers Step 0 in the same turn it decides
   assert.match(SRC.slice(toolInjectAt - 200, toolInjectAt), /effective === "loop"/);
 });
 
+test("loop goal: the read-only NUDGE teaches the restatement step, in the right order", () => {
+  // 2026-09-06 (reviewer round 2). This is the FOURTH copy of the
+  // goal-negotiation instruction (the other three live in lib/loop-goal.ts and
+  // lib/orchestrator-delivery.ts). It is appended to read-only tool results, so
+  // it is often the only version a busy session actually reads — and while it
+  // still said "先用 propose_loop_goal" it pointed at a call that now refuses.
+  const at = SRC.indexOf("const GOAL_REMINDER_TEXT");
+  assert.ok(at > 0, "the nudge must still exist under this name");
+  const end = SRC.indexOf('";', at);
+  assert.ok(end > at, "the constant must be terminated — otherwise this window proves nothing");
+  const text = SRC.slice(at, end);
+  // The window really does cover the whole constant (both ends), so a partial
+  // read cannot make the assertions below pass by accident.
+  assert.match(text, /\[review-gate\]/, "the window must contain the nudge's own prefix");
+  assert.match(text, /L8 会拦下 edit\/write/, "…and its closing sentence");
+  assert.match(text, /propose_restatement/);
+  assert.ok(text.indexOf("propose_restatement") < text.indexOf("propose_loop_goal"),
+    "the earlier step must be named first — the nudge IS the order a session follows");
+});
+
+
 test("loop goal: the force-negotiate directive is injected in before_agent_start once the turn threshold is hit", () => {
   // 2026-09-17 (user decision): past GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD un-goaled
   // turns, the EVERY-TURN prompt (not only the RESUME injection) must escalate

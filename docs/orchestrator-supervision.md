@@ -442,9 +442,14 @@ report（新 review 对象不该被上一个对象的结论终结）。原来的
 **硬指示**（`TASK_GOAL_DIRECTIVE`，2026-09-01）：
 
 > 本会话的退出条约是你自己的 loop goal。任务书只是 plan 的任务边界，不是你的 goal；
-> plan 批准 ≠ goal 批准。开始改代码前，你必须先用 `propose_loop_goal` 协商并获批
-> 你自己的 goal（goal-auditor 审计 + 用户批准）。未批准 goal 前，L8 edit gate 会拦下
-> 所有 edit/write。
+> plan 批准 ≠ goal 批准。顺序是两步，不能跳：**先**用 `propose_restatement` 把你对需求的
+> 理解反述给用户确认（上下文、例子、改之前 → 改之后、哪几步会变得不同，外加本轮交付站点
+> precommit / commit / pr），**再**用 `propose_loop_goal` 协商并获批你自己的 goal
+> （goal-auditor 审计 + 用户批准）。没有已确认的反述，`propose_loop_goal` 会直接被拒、
+> 一个框都不弹；未批准 goal 前，L8 edit gate 会拦下所有 edit/write。
+
+（这段引文与 `lib/orchestrator-delivery.ts` 的 `TASK_GOAL_DIRECTIVE` 是同一份文本的摘录，
+改那个常量时同轮改这里——两处说法不一致时，以常量为准。）
 
 **为什么是门禁追加而不是项目经理写**：2026-09-01 onchain 事故里，项目经理在
 brief 里写了一句「目标文本见 .pi/loop-goal.md（已批准）。开始工作。」，子会话——一个
