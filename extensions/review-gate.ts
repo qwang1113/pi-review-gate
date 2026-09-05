@@ -2164,7 +2164,38 @@ export default function reviewGate(pi: ExtensionAPI) {
   sessionDeps.decoratedJudgePanes = () => decoratedJudgePaneCount();
   registerOrchestratorSessionTools(pi, sessionDeps);
 
-  /** Constraints 3, 4 and 11 — the orchestration's own exit contract. */
+  /**
+   * Constraints 3, 4 and 11 — the orchestration's own exit contract.
+   *
+   * WHY THERE IS NO DELIVERY-STATION CHECK HERE, and why adding one would be a
+   * regression rather than the missing piece it looks like (user decision,
+   * 2026-09-06). The plan carries a `deliveryStation`, so "the orchestrator's
+   * done should verify the plan reached it" reads like an obvious gap. It is
+   * not, for a reason this repo has already paid for once:
+   *
+   *  - a project manager writes no code (constraint 2), so its `sessionRepos`
+   *    is empty and it has no worktree to be clean or dirty;
+   *  - the arrival evidence — a `gh pr create` the gate watched succeed, or a
+   *    Copilot-resolved PR number — is recorded in the CHILD's sidecar, in the
+   *    child's repo. The manager cannot read it and never will.
+   *
+   * So an orchestration with `deliveryStation: "pr"` would be held at
+   * `declare_done` by a condition it can NEVER satisfy, while the receipt
+   * earnestly told the manager to "go open a PR". That is the worst defect
+   * class this gate can produce — following the gate's own instruction makes
+   * things worse — and it is exactly what round 4 cost when the heartbeat hung
+   * off agent events: healthy children were reported lost, and the advised
+   * `interrupt` cut a live review in half.
+   *
+   * THE DIVISION OF LABOUR, stated so nobody has to re-derive it: the plan's
+   * station is honoured by each CHILD's ship gate, at the moment a ship
+   * command runs in the repo that owns the work. At the orchestration layer a
+   * station is an AUTHORIZATION SURFACE (it bounds what a child may be given,
+   * and `orchestrator_answer` refuses a proxy confirmation looser than it); at
+   * the execution layer it is a BLOCK. The manager's exit contract stays the
+   * plan itself — every task done, no live children, no un-notified decision.
+   */
+
   function orchestrationDoneProblems(): string[] {
     if (state.taskMode !== "orchestrator") return [];
     const runtime = state.orchestrator ?? emptyRuntime(currentOrchestrationId());
@@ -7056,11 +7087,12 @@ export default function reviewGate(pi: ExtensionAPI) {
         //
         // The gates above answer "is the work good enough"; this answers the
         // other half of the contract — a round that promised a PR and stops at
-        // a clean worktree did not finish what the user agreed to. Loop mode
-        // only (user decision): an orchestrator writes no code and has no
-        // repos of its own, so the plan is its exit contract and its
-        // children's own ship gates enforce the station where the commits
-        // actually happen.
+        // a clean worktree did not finish what the user agreed to. LOOP MODE
+        // ONLY, and deliberately: the reason an orchestrator is not judged
+        // here (it could never satisfy it, and the receipt would tell it to do
+        // something impossible) is written where someone would go to "fix the
+        // gap" — the docblock of `orchestrationDoneProblems`.
+
         //
         // Both facts are LOCAL and gate-observed: uncommitted work, and a
         // `gh pr create` the gate watched exit 0 (`shippedKinds`), with the

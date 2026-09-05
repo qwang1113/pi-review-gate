@@ -361,6 +361,15 @@ PM 的 transcript 里 ask_user/grillme 的 Q&A 段验证澄清结论真的落进
 拒绝不需要对照。子会话请求确认的站点若**宽于**已批准 plan 的 `deliveryStation`，
 代答一律被拒——放宽站点是用户的决定；用户本人在自己框里批不受此约束。
 
+**站点在两层的含义不同，别把执行层的拦截搬到编排层**（2026-09-06 用户裁定）：在编排层，
+plan 的 `deliveryStation` 是**授权面**——它划定子会话能被授予到哪一站，`orchestrator_answer`
+据此拒绝宽于它的代答；真正的**拦截**发生在执行层，由每个子会话自己的 ship 门禁在它那个仓库里
+兑现。因此项目经理的 `declare_done` **不判到站**：PM 不写代码、`sessionRepos` 为空，PR 证据落在
+子会话各自的 sidecar 里，它读不到——真去判，一个 `deliveryStation: "pr"` 的编排会被一条永远
+满足不了的条件卡死，回执还会一本正经叫它「去开个 PR」，正是第四轮心跳事故那种「照门禁说的做
+反而出事」。理由与反证写在 `orchestrationDoneProblems()` 的 docblock 里（并有结构测试钉住，
+防止下一轮当成漏项补齐）；PM 的退出契约仍然是 plan 本身：任务全 done、无活着的子会话、
+未决策全部通知过。
 
 **loop 侧配套（2026-09-17）**：loop 模式下累计 60 轮未获批 loop goal（`turnsWithoutGoal`
 持久化计数，重启延续），门禁在每轮注入强提示要求先协商 goal 再干活（只注入提示、

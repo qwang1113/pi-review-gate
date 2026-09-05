@@ -4415,7 +4415,28 @@ test("declare_done consults the ORCHESTRATION's exit contract, not just this ses
   const helper = windowOf("function orchestrationDoneProblems()", "\n  }", "orchestrationDoneProblems");
   assert.match(helper, /if \(state\.taskMode !== "orchestrator"\) return \[\]/,
     "it must be inert for every other mode");
+  // THE DELIVERY STATION IS DELIBERATELY ABSENT HERE (user decision,
+  // 2026-09-06) — and it looks exactly like a gap, which is why both halves
+  // are pinned: the check must not appear, and the REASON must stay next to
+  // the place someone would add it. A project manager has no repos of its own
+  // and cannot read the child sidecar that holds the PR evidence, so a
+  // `deliveryStation: "pr"` orchestration would be held at declare_done by a
+  // condition it can never satisfy while being told to "go open a PR" — the
+  // same "follow the gate and make it worse" failure the round-4 heartbeat
+  // produced. The plan's station is enforced by each CHILD's ship gate.
+  assert.doesNotMatch(helper, /stationArrivalProblems|deliveryStationFor/,
+    "an orchestrator's exit contract is the PLAN, never a station it cannot verify");
+  const rationale = windowOf(
+    "Constraints 3, 4 and 11 — the orchestration's own exit contract",
+    "function orchestrationDoneProblems()",
+    "orchestrationDoneProblems rationale",
+  );
+  assert.match(rationale, /WHY THERE IS NO DELIVERY-STATION CHECK HERE/,
+    "the next reader must find the reason before they 'complete' the check");
+  assert.match(rationale, /CHILD's ship gate/,
+    "…including who DOES enforce the plan's station");
 });
+
 
 test("R-30: declare_done and orchestrator_status answer with the SAME function, so they cannot disagree", () => {
   // Measured on 2026-08-30: with the plan complete, no live children and no
