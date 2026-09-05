@@ -208,6 +208,7 @@ import {
 } from "../lib/orchestrator-plan-audit.ts";
 import {
   roundBindingFor,
+  roundHasReported,
   runAuditRound,
   settleAuditRound,
   type RoundBinding,
@@ -1426,17 +1427,26 @@ export default function reviewGate(pi: ExtensionAPI) {
     return undefined;
   }
 
-  /** Has this judge's channel a report newer than its spawn? */
+  /**
+   * Has this judge answered the round it is CURRENTLY on?
+   *
+   * It used to be "a report newer than the pane's spawn", which is the second
+   * timestamp comparison the round binding exists to delete — and it was wrong
+   * in the ordinary case: the pane outlives the round, so round 1's leftover
+   * report is newer than the spawn and made a judge that had just been handed
+   * round 2 read as finished (reviewer P2, 2026-09-05). The question is the
+   * engine's, so the answer is too.
+   */
   function judgeRoundReported(judge: JudgeChild): boolean {
     try {
       const target = judgeChannelTarget(judge.openerId, judge.sessionId);
       const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-      const last = projectChannel(read.records).lastReport;
-      if (!last) return false;
-      const spawnedAt = Date.parse(judge.spawnedAt);
-      const reportedAt = Date.parse(last.at);
-      if (!Number.isFinite(spawnedAt) || !Number.isFinite(reportedAt)) return true;
-      return reportedAt >= spawnedAt;
+      const root = repoOfChild(judge);
+      return roundHasReported(
+        read.records,
+        roundBindingOf({ judgeId: judge.sessionId, role: judge.role, repoRoot: root }),
+        judgeHierarchy[judge.sessionId]?.lastReportId,
+      );
     } catch {
       return false;
     }

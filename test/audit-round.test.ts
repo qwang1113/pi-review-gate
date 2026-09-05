@@ -14,6 +14,8 @@ import {
   describeRoundMiss,
   runAuditRound,
   roundBindingFor,
+  roundHasReported,
+  type RoundBinding,
   selectRoundReport,
   settleAuditRound,
   type AuditRoundEntry,
@@ -361,6 +363,31 @@ test("roundBindingFor: only the review kind carries a content stamp", () => {
   // the round for having no kind to record against.
   assert.equal(roundBindingFor({ role: "goal-auditor" }).binding, "cursor-only");
 });
+
+// The yes/no form of the SAME question, for the two callers that only need
+// "is this judge still working?" (the wait-discipline hint and the stall
+// breaker). They used to compare a report against the PANE's spawn time, which
+// the pane outliving the round makes wrong in the ordinary case.
+test("roundHasReported: only THIS round's report — or the cursor — counts as answered", () => {
+  const binding: RoundBinding = { binding: "round-and-content", expectedRound: 2, contentAt: CHECKPOINT_AT };
+  assert.equal(roundHasReported([], binding, undefined), false, "no report at all");
+  const thisRound = [childReport("rep-2", { round: 2, at: NOW })];
+  assert.equal(roundHasReported(thisRound, binding, undefined), true, "this round's report answers it");
+  assert.equal(roundHasReported(thisRound, binding, "rep-2"), true, "…and so does the cursor, once recorded");
+  // THE CASE THE OLD COMPARISON GOT WRONG: round 1's report is newer than the
+  // pane's spawn, but round 2 has just started and is owed an answer.
+  assert.equal(
+    roundHasReported([childReport("rep-1", { round: 1, at: NOW })], binding, "rep-1"),
+    false,
+    "a previous round's report does not answer the round the judge is on now",
+  );
+  assert.equal(
+    roundHasReported([childReport("rep-stale", { round: 2, at: "2026-09-05T10:00:00.000Z" })], binding, undefined),
+    false,
+    "…nor does one that predates this round's content",
+  );
+});
+
 
 
 test("describeRoundMiss names both sides of whatever did not match", () => {

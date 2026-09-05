@@ -247,6 +247,32 @@ export function selectRoundReport(
   return { ok: true, report: last };
 }
 
+/**
+ * HAS THIS ROUND REPORTED AT ALL — the same question, for the callers that only
+ * need a yes/no.
+ *
+ * "Is this judge still working?" is asked in two more places (the wait
+ * discipline hint and the stall breaker), and both used to answer it with their
+ * OWN comparison: a report newer than the PANE's spawn time. That is the class
+ * of comparison this module exists to own — and it was wrong in the ordinary
+ * case, because the pane outlives the round: round 2's leftover report from
+ * round 1 is newer than the spawn, so a judge that had just been given new work
+ * read as finished (reviewer P2, 2026-09-05).
+ *
+ * A round has reported when its report may close it, or when the cursor says it
+ * already did. Everything else — no report, another round's, one that predates
+ * this round's content — means the judge still owes this round an answer.
+ */
+export function roundHasReported(
+  records: ReadonlyArray<ChannelRecord>,
+  binding: RoundBinding,
+  consumedReportId: string | undefined,
+): boolean {
+  const selected = selectRoundReport(records, { ...binding, consumedReportId });
+  return selected.ok || selected.reason === "already-consumed";
+}
+
+
 /** The human-readable half of a miss, in the gate's own voice. */
 export function describeRoundMiss(selection: {
   reason: RoundReportMiss;
