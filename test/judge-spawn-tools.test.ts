@@ -114,12 +114,14 @@ test("spawn plan opens a pane, registers the opener, and names the judge", async
   assert.ok(seen.some((a) => a.includes(`RG_JUDGE_ID=${ids[0]}`)));
 });
 
-test("spawn rolls back when there is no tmux pane to split off", async () => {
+test("spawn never claims an id when there is no tmux pane to split off", async () => {
   const { tools, store } = setup({ ownPane: null });
   const result = await tools.get("judge_spawn")!({ kind: "plan" });
   assert.equal(result.isError, true);
   assert.match(textOf(result), /tmux/);
-  assert.deepEqual(store.table, {}, "registration without a pane is rolled back");
+  // The refusal now runs BEFORE the registration (it used to register and undo
+  // it); the invariant this protects — no entry without a pane — is the same.
+  assert.deepEqual(store.table, {}, "no pane ⇒ no registration at all");
 });
 
 test("spawn rolls back when tmux fails — no dangling registration", async () => {

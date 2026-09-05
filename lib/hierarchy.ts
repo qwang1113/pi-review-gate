@@ -30,8 +30,30 @@ export interface JudgeEntry {
   role: string;
   /** Repo root the review belongs to. */
   repoRoot: string;
+  /**
+   * Human-facing label for wait receipts and health snapshots.
+   *
+   * It, `sessionDir` and `spawnedAt` came from the extension's in-memory
+   * `childSessions` Map, which held the SAME facts as this table and was
+   * hand-written beside it on every dispatch. One registry now (哲学三): the
+   * Map is gone, so an entry has to carry everything its readers need.
+   */
+  title: string;
+  /** Directory pi writes this judge's transcript jsonl into (stable per role+repo+opener). */
+  sessionDir: string;
   /** tmux pane id, once the pane exists. */
   paneId?: string;
+  /**
+   * WHICH tmux server issued that pane id (`<socket>,<server pid>` from $TMUX).
+   *
+   * A pane id is only meaningful inside the server that minted it: after a
+   * tmux server restart ids are handed out from `%0` again, so a PERSISTED
+   * `%7` can name a completely unrelated pane — a user's editor, say. That
+   * did not matter while the registry lived in memory (a restart emptied it);
+   * now that the table survives the process, `paneId` alone is not enough to
+   * kill by.
+   */
+  tmuxServer?: string;
   /** Current round's findings stream, for the opener's wait receipt. */
   streamPath?: string;
   /** Newest report the opener already recorded — the wait's consumed cursor. */
@@ -45,8 +67,16 @@ export interface JudgeEntry {
 
   /** Round number the opener assigned this review's current round (judge_conclude stamps it on the report; one round concludes once). */
   roundSeq?: number;
-  /** ISO timestamp of registration. */
-  createdAt: string;
+  /**
+   * When this judge's CURRENT pane/round was registered.
+   *
+   * ONE timestamp, not two: `childSessions` carried a `spawnedAt` that every
+   * dispatch wrote at the same instant as this table's registration time, so
+   * the merge keeps the Map's name and drops the duplicate. Readers use it for
+   * both jobs it already did — "since when has this judge been running"
+   * (activeJudgeWait) and the foreign-spawn grace (foreignSpawnSettled).
+   */
+  spawnedAt: string;
 }
 
 /** Opener registry: judge id → entry. */
@@ -131,6 +161,73 @@ export function removeJudge(table: HierarchyTable, judgeId: string): HierarchyTa
   return next;
 }
 
+/**
+ * The tmux server this process talks to, as `<socket>,<server pid>`.
+ *
+ * `$TMUX` is `<socket path>,<server pid>,<session index>`; the first two
+ * fields identify the SERVER, and the third (which session of it we are in)
+ * is irrelevant to whether a pane id is comparable. `undefined` outside tmux.
+ */
+export function tmuxServerFrom(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = (env.TMUX ?? "").trim();
+  if (!raw) return undefined;
+  const [socket, pid] = raw.split(",");
+  return socket && pid ? `${socket},${pid}` : undefined;
+}
+
+/**
+ * Is this judge's pane still running? — for "am I waiting on somebody?".
+ *
+ * MISSING INFORMATION NEVER KILLS: an unreadable pane list (`panes ===
+ * undefined`: no tmux, a failed probe) leaves the entry alive, because
+ * reporting a working judge as gone sends its opener off to read a conclusion
+ * that does not exist yet. A pane the current server does not list IS gone,
+ * and so is an entry minted by a DIFFERENT tmux server — after a restart its
+ * id names someone else's pane, which is not this judge under any reading.
+ */
+export function judgeLive(
+  entry: Pick<JudgeEntry, "paneId" | "tmuxServer">,
+  panes: readonly string[] | undefined,
+  currentServer: string | undefined,
+): boolean {
+  if (entry.paneId === undefined) return false;
+  if (!paneIdComparable(entry, currentServer)) return false;
+  return panes === undefined || panes.includes(entry.paneId);
+}
+
+/**
+ * May the gate CLOSE this pane by its recorded id? — the opposite default.
+ *
+ * Here missing information must not ACT: killing by a pane id minted by
+ * another tmux server would close whatever now holds that number (2026-09-05,
+ * adviser P1). An entry whose server is unknown, or that predates the field,
+ * is therefore not closable — the caller still drops the entry and reclaims
+ * its scratch, it just does not send `kill-pane`.
+ */
+export function paneClosable(
+  entry: Pick<JudgeEntry, "paneId" | "tmuxServer">,
+  currentServer: string | undefined,
+): boolean {
+  if (entry.paneId === undefined) return false;
+  if (entry.tmuxServer === undefined || currentServer === undefined) return false;
+  return entry.tmuxServer === currentServer;
+}
+
+/**
+ * Shared by both: can this recorded pane id be compared to live ids at all?
+ *
+ * Only the KNOWN-DIFFERENT case is a refusal. An entry with no recorded server
+ * stays comparable so that "is it live" keeps its never-kill-on-missing-info
+ * default; `paneClosable` applies the stricter rule itself.
+ */
+function paneIdComparable(
+  entry: Pick<JudgeEntry, "tmuxServer">,
+  currentServer: string | undefined,
+): boolean {
+  if (entry.tmuxServer === undefined || currentServer === undefined) return true;
+  return entry.tmuxServer === currentServer;
+}
+
 /** Every judge one opener owns — what `declare_done` cascade-closes. */
 export function listByOpener(table: HierarchyTable, openerId: string): JudgeEntry[] {
   const opener = (openerId ?? "").trim();
@@ -160,6 +257,17 @@ export interface HierarchySnapshot {
   audit?: PendingAudit;
 }
 
+/**
+ * Is this a COMPLETE entry?
+ *
+ * Every field the merged registry's readers need is required, `title` /
+ * `sessionDir` / `spawnedAt` included: a file written before the merge carries
+ * none of them, and half-adopting such an entry would put a judge into the
+ * table that the wait receipt, the health snapshot and the cascade-close each
+ * read differently. Only the new format is read (哲学三, no compatibility
+ * layer) — a dropped entry simply re-runs its round, the same fail-closed
+ * outcome every other miss here has.
+ */
 function isJudgeEntry(value: unknown): value is JudgeEntry {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -168,7 +276,9 @@ function isJudgeEntry(value: unknown): value is JudgeEntry {
     typeof v.openerId === "string" && v.openerId.length > 0 &&
     typeof v.role === "string" &&
     typeof v.repoRoot === "string" &&
-    typeof v.createdAt === "string"
+    typeof v.title === "string" &&
+    typeof v.sessionDir === "string" &&
+    typeof v.spawnedAt === "string"
   );
 }
 

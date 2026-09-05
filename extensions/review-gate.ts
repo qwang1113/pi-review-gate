@@ -164,7 +164,7 @@ import {
   type ChildChannelBinding,
 } from "../lib/orchestrator-child-channel.ts";
 import { supervisionTarget } from "../lib/orchestration-id.ts";
-import { emptyHierarchy, parseHierarchySnapshot, registerJudge, removeJudge, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
+import { emptyHierarchy, judgeLive, listByOpener, paneClosable, parseHierarchySnapshot, registerJudge, removeJudge, tmuxServerFrom, type HierarchyTable, type JudgeEntry } from "../lib/hierarchy.ts";
 import {
   buildJudgePaneCommand,
   buildJudgeRecoverCommand,
@@ -849,8 +849,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       // user-aborted session, or a task whose child has already been closed.
       if (state.taskMode === "explore" || state.taskMode === "normal" ||
           state.pausedQuestion || lastRunAborted || !loopArmed || state.bypass.active) return;
-      const hasChildren = [...childSessions.values()].some((list) => list.length > 0);
-      if (!hasChildren) return;
+      if (ownJudges().length === 0) return;
       try {
         pi.sendUserMessage(
           "[REVIEW_GATE_CHILD_WATCHDOG] 门禁托管等待到期，重新检查子会话的通道 report、有无 pane 死亡与静默上限；" +
@@ -1411,21 +1410,26 @@ export default function reviewGate(pi: ExtensionAPI) {
    * that opened the judge, so it does not have to infer anything: the pane
    * is in its own registry, and a listed pane id is liveness (probed from
    * its window when it matters).
+   *
+   * `ownLiveJudges()` and not `ownJudges()`: the registry is now the PERSISTED
+   * table, so it also offers back this opener's judges from a previous
+   * process, whose panes died with it. Reporting one of those as "a judge is
+   * running" would leave the session waiting forever on a pane nobody can
+   * answer from — the Map this replaced could not say that because a restart
+   * emptied it.
    */
   function activeJudgeWait(): { role: string; since: number } | undefined {
-    for (const children of childSessions.values()) {
-      for (const judge of children) {
-        if (!judge.paneId) continue;
-        // A pane id on record is intent, not liveness: a dead pane stays
-        // listed until it is recovered or closed. The channel decides — a
-        // report newer than the spawn means this round is over.
-        if (judgeRoundReported(judge)) continue;
-        const since = Date.parse(judge.spawnedAt);
-        return { role: judge.role, since: Number.isFinite(since) ? since : Date.now() };
-      }
+    for (const judge of ownLiveJudges()) {
+      // A pane id on record is intent, not liveness: a dead pane stays
+      // listed until it is recovered or closed. The channel decides — a
+      // report newer than the spawn means this round is over.
+      if (judgeRoundReported(judge)) continue;
+      const since = Date.parse(judge.spawnedAt);
+      return { role: judge.role, since: Number.isFinite(since) ? since : Date.now() };
     }
     return undefined;
   }
+
 
   /**
    * Has this judge answered the round it is CURRENTLY on?
@@ -1437,15 +1441,14 @@ export default function reviewGate(pi: ExtensionAPI) {
    * round 2 read as finished (reviewer P2, 2026-09-05). The question is the
    * engine's, so the answer is too.
    */
-  function judgeRoundReported(judge: JudgeChild): boolean {
+  function judgeRoundReported(judge: JudgeEntry): boolean {
     try {
-      const target = judgeChannelTarget(judge.openerId, judge.sessionId);
+      const target = judgeChannelTarget(judge.openerId, judge.judgeId);
       const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
-      const root = repoOfChild(judge);
       return roundHasReported(
         read.records,
-        roundBindingOf({ judgeId: judge.sessionId, role: judge.role, repoRoot: root }),
-        judgeHierarchy[judge.sessionId]?.lastReportId,
+        roundBindingOf({ judgeId: judge.judgeId, role: judge.role, repoRoot: judge.repoRoot }),
+        judge.lastReportId,
       );
     } catch {
       return false;
@@ -1453,15 +1456,16 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /** Newest channel activity for one judge, or undefined when unreadable. */
-  function channelLastActivity(judge: JudgeChild): string | undefined {
+  function channelLastActivity(judge: JudgeEntry): string | undefined {
     try {
-      const target = judgeChannelTarget(judge.openerId, judge.sessionId);
+      const target = judgeChannelTarget(judge.openerId, judge.judgeId);
       const read = readChannel(channelIO, channelPathFor(target.orchestrationId, target.childId, target.home));
       return projectChannel(read.records).lastActivityAt;
     } catch {
       return undefined;
     }
   }
+
 
   /** Open question ids already announced (in-memory; a restart re-announces — desired). */
   let announcedRequestIds = new Set<string>();
@@ -2108,33 +2112,21 @@ export default function reviewGate(pi: ExtensionAPI) {
   // has no exit event to listen on. Completion arrives as a channel report
   // consumed by judge_wait — the wait is the completion path.)
   /**
-   * One pane judge the gate knows about.
+   * THE registry of pane judges — one table, `judgeHierarchy` (lib/hierarchy.ts).
    *
-   * Each entry carries the deterministic session id (the resume key), the
-   * tmux pane it lives in, and the opener recorded at spawn — the only
-   * session that may wait/answer/close/recover it. Per-round artifacts are
-   * the session transcript dir and the findings stream; there is no process,
-   * no stdout log and no pid/exit-code file anymore.
-   */
-  interface JudgeChild {
-    sessionId: string;
-    role: string;
-    title: string;
-    spawnedAt: string;
-    /** tmux pane id, once the pane exists. */
-    paneId?: string;
-    /** Who opened it — opener checks run against this, never a parameter. */
-    openerId: string;
-    /** Directory pi writes its transcript jsonl into (stable per role). */
-    sessionDir: string;
-    /** This round's findings stream, when the role has one (judge_wait reads it). */
-    streamPath?: string;
-  }
-  const childSessions = new Map<string, JudgeChild[]>();
-  /**
-   * Opener registry for pane judges (lib/hierarchy.ts): judge id → entry.
-   * The extension owns the table; lib owns the refusal. Kept beside
-   * childSessions because cascade-close and the opener tools read both.
+   * There used to be two. An in-memory `childSessions` Map held the same facts
+   * (id, role, pane, opener, stream) for THIS session's own judges, and every
+   * dispatch hand-wrote both; `judgeChildByRole` read the Map while
+   * `settleFinishedRounds` read the table, and the audit chain carried a
+   * "the registry does not know the judge I just spawned" branch that was
+   * nothing but the drift confessing itself. The Map is deleted (哲学三: the
+   * new path replaces the old one, no toggle, no compatibility layer).
+   *
+   * WHAT THE MERGE CHANGED FOR READERS. The Map only ever held judges THIS
+   * process opened; the table also holds entries restored from disk and
+   * entries belonging to OTHER openers. So every reader that meant "my own
+   * judges" now says so explicitly through `ownJudges()` — the filter is not
+   * decoration, it is the Map's old scope made mechanical.
    */
   let judgeHierarchy: HierarchyTable = emptyHierarchy();
   /**
@@ -2146,6 +2138,50 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.taskMode === "orchestrator" && orch) return orch;
     return state.sessionId ?? undefined;
   }
+  /**
+   * The judges THIS session owns — the deleted `childSessions` Map's scope.
+   *
+   * The merged table is wider than the Map was in two directions, and the two
+   * are NOT the same problem:
+   *
+   *  - OTHER openers' entries (loaded from the shared file). Reading one as
+   *    "mine" would let this session cascade-close a live peer's review, so
+   *    the opener filter is mandatory, never an optimization.
+   *  - MY OWN entries restored from a previous process. Those really are this
+   *    opener's judges — but their panes usually died with that process, so
+   *    the callers that ask "is a judge RUNNING" filter further through
+   *    `ownLiveJudges()`; the ones that ask "what do I own" (cascade-close)
+   *    want them, which is how a restart stops stranding panes.
+   *
+   * Unknown identity yields NOTHING (fail-closed): an unidentifiable session
+   * owns no judge, and must not act on one.
+   */
+  function ownJudges(): JudgeEntry[] {
+    const caller = callerIdentity();
+    return caller ? listByOpener(judgeHierarchy, caller) : [];
+  }
+
+  /** The judge panes this window currently has, or undefined when unreadable. */
+  function listOwnWindowPanes(): string[] | undefined {
+    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
+    try { return ownPane ? listJudgePanes((argv) => runTmux(argv), ownPane) : undefined; }
+    catch { return undefined; }
+  }
+
+  /**
+   * Own judges whose pane is not KNOWN to be gone — "is one still running?".
+   *
+   * The predicate itself is lib/hierarchy.ts's `judgeLive`, shared with the
+   * health snapshot so there is ONE answer to that question (哲学二): missing
+   * information keeps an entry alive, and a pane id minted by a DIFFERENT tmux
+   * server is not comparable at all.
+   */
+  function ownLiveJudges(): JudgeEntry[] {
+    const panes = listOwnWindowPanes();
+    const server = tmuxServerFrom(process.env);
+    return ownJudges().filter((e) => judgeLive(e, panes, server));
+  }
+
   /**
    * THE audit this repo dispatched and has not recorded yet — one per repo.
    *
@@ -2241,10 +2277,7 @@ export default function reviewGate(pi: ExtensionAPI) {
   function dropDeadForeignJudges(): void {
     const caller = callerIdentity();
     if (!caller) return;
-    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
-    let panes: string[] | undefined;
-    try { panes = ownPane ? listJudgePanes((argv) => runTmux(argv), ownPane) : undefined; }
-    catch { panes = undefined; }
+    const panes = listOwnWindowPanes();
     let changed = false;
     for (const [id, e] of Object.entries(judgeHierarchy)) {
       if (e.openerId === caller) continue;
@@ -2261,7 +2294,7 @@ export default function reviewGate(pi: ExtensionAPI) {
 
   /** A pane-less foreign entry counts as settled once older than the grace. */
   function foreignSpawnSettled(e: JudgeEntry): boolean {
-    const at = Date.parse(e.createdAt ?? "");
+    const at = Date.parse(e.spawnedAt ?? "");
     return Number.isFinite(at) && Date.now() - at > FOREIGN_SPAWN_GRACE_MS;
   }
 
@@ -2813,13 +2846,16 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   function judgeChildInMotion(): boolean {
     const cutoff = Date.now() - STALL_MOTION_MAX_AGE_SEC * 1000;
-    return [...childSessions.values()]
-      .flat()
+    // `ownLiveJudges()` for the same reason activeJudgeWait uses it: a
+    // persisted entry from a previous process is this opener's judge, but its
+    // pane is gone, and "motion" it is not. The age bound below still stands
+    // on its own — a live pane that never finishes is the HUNG case.
+    return ownLiveJudges()
       .filter((c) => {
         const at = Date.parse(c.spawnedAt);
         return Number.isFinite(at) && at >= cutoff;
       })
-      .some((c) => c.paneId !== undefined && !judgeRoundReported(c));
+      .some((c) => !judgeRoundReported(c));
   }
 
   // ---------- user-visible output channels ----------
@@ -4368,9 +4404,21 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Opener-scoped ids do not collide across sessions by construction: a second
     // opener derives a different id and opens its own review. Cross-opener protection
     // still lives in lib/hierarchy.ts (registration refuses two parents for one id).
-    const list = childSessions.get(root) ?? [];
-    const existing = list.find((c) => c.role === role && c.sessionId === sessionId);
-    const paneAlive = existing?.paneId && ownPane ? judgePaneAlive(run, ownPane, existing.paneId) : undefined;
+    // The lookup IS that derivation: the registry is keyed by judge id, so
+    // "same role, same session id in this repo" needs no scan of a second table.
+    const existing = judgeHierarchy[judgeId];
+
+    // Stamped on every entry that records a pane, and checked before any use
+    // of a recorded one (see lib/hierarchy.ts `paneClosable`).
+    const tmuxServer = tmuxServerFrom(process.env);
+
+    // A recorded pane is probed only when its id is still comparable: an entry
+    // restored from disk may have been minted by a tmux server that has since
+    // restarted, and `%7` would then be a stranger's pane — reusing it would
+    // send this round's task into it. Not comparable ⇒ treat as dead, which
+    // falls through to a fresh open below (transcript continues by id).
+    const paneUsable = existing !== undefined && paneClosable(existing, tmuxServer);
+    const paneAlive = paneUsable && ownPane ? judgePaneAlive(run, ownPane, existing!.paneId!) : undefined;
     // A living pane takes the round through its channel: the pane is the
     // CARRIER, the round is the task. No busy refusal exists anymore — a pane judge
     // reads every round via its drain; only a one-shot process read once.
@@ -4388,26 +4436,27 @@ export default function reviewGate(pi: ExtensionAPI) {
       } catch (err) {
         return { ok: false, reused: true, sessionId, sessionDir, paneId: existing.paneId, judgeId, error: `本轮任务写不进通道 —— ${(err as Error).message}` };
       }
-      existing.streamPath = opts.streamPath;
-      existing.spawnedAt = new Date().toISOString();
-      childSessions.set(root, list);
+      // ONE write, not two: the Map used to be mutated here (streamPath,
+      // spawnedAt) and the table registered right after, which is exactly how
+      // the two drifted apart.
       // The wait cursors survive a re-dispatch: already-consumed reports must
       // not end the new round's wait (stale-report P0 — a wiped cursor ends
       // every fresh wait on the previous round's report instantly). The
       // FINDING cursor survives too, but only while the round writes to the
       // SAME stream file: a new stream starts at zero, and a reused one (a
       // re-audit of the same draft) must not replay what was already shown.
-      const keptCursor = judgeHierarchy[judgeId]?.lastReportId;
-      const keptFindings = judgeHierarchy[judgeId]?.streamPath === opts.streamPath
-        ? judgeHierarchy[judgeId]?.lastFindingCount
+      const keptCursor = existing.lastReportId;
+      const keptFindings = existing.streamPath === opts.streamPath
+        ? existing.lastFindingCount
         : undefined;
       const reg = registerJudge(judgeHierarchy, {
-        judgeId, openerId: opener, role, repoRoot: root, paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
+        judgeId, openerId: opener, role, repoRoot: root, title, sessionDir,
+        paneId: existing.paneId, roundSeq: nextJudgeRound(opener, judgeId),
+        ...(tmuxServer === undefined ? {} : { tmuxServer }),
         ...(keptCursor === undefined ? {} : { lastReportId: keptCursor }),
         ...(keptFindings === undefined ? {} : { lastFindingCount: keptFindings }),
-
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
-        createdAt: new Date().toISOString(),
+        spawnedAt: new Date().toISOString(),
       });
       if (reg.ok) setHierarchy(reg.table);
       return { ok: true, reused: true, sessionId, sessionDir, paneId: existing.paneId, judgeId };
@@ -4420,7 +4469,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         try { closeJudgePane(run, existing.paneId); } catch { /* best effort */ }
       }
       if (paneAlive === false) reapReviewScratch(sessionId);
-      childSessions.set(root, list.filter((c) => c !== existing));
+      // One removal, one table.
       setHierarchy(removeJudge(judgeHierarchy, judgeId));
       // The killed round's audited draft dies with it: leaving it behind
       // would let a LATER report record a verdict against a draft that round
@@ -4474,19 +4523,8 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (!opened.ok) {
         return { ok: false, reused: continuesSession, sessionId, sessionDir, error: opened.error };
       }
-      const child: JudgeChild = {
-        sessionId,
-        role,
-        title,
-        spawnedAt: new Date().toISOString(),
-        paneId: opened.paneId,
-        openerId: opener,
-        sessionDir,
-        streamPath: opts.streamPath,
-      };
-      const next = childSessions.get(root) ?? [];
-      next.push(child);
-      childSessions.set(root, next);
+      // The freshly opened pane is registered ONCE, below — there is no
+      // second record to build here anymore.
       // fresh:true starts a NEW review object: everything the channel holds so
       // far belongs to an older object and must never end this round's wait.
       // Seed the cursor at the channel's current newest report (best-effort —
@@ -4502,7 +4540,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         openerId: opener,
         role,
         repoRoot: root,
+        title,
+        sessionDir,
         paneId: opened.paneId, roundSeq: nextJudgeRound(opener, judgeId),
+        ...(tmuxServer === undefined ? {} : { tmuxServer }),
         ...(freshCursor === undefined ? {} : { lastReportId: freshCursor }),
         // Same rule as the reuse path: a re-run over the SAME stream file keeps
         // its finding cursor, so nothing already shown is shown again.
@@ -4510,9 +4551,8 @@ export default function reviewGate(pi: ExtensionAPI) {
           && judgeHierarchy[judgeId]?.lastFindingCount !== undefined
           ? { lastFindingCount: judgeHierarchy[judgeId]!.lastFindingCount }
           : {}),
-
         ...(opts.streamPath === undefined ? {} : { streamPath: opts.streamPath }),
-        createdAt: new Date().toISOString(),
+        spawnedAt: new Date().toISOString(),
       });
       if (reg.ok) setHierarchy(reg.table);
       return { ok: true, reused: continuesSession, sessionId, sessionDir, paneId: opened.paneId, judgeId };
@@ -4544,14 +4584,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
   }
 
-  /** Which repo a judge child belongs to (the registry is keyed by root). */
-  function repoOfChild(child: JudgeChild): string {
-    for (const [root, list] of childSessions) {
-      if (list.some((c) => c.sessionId === child.sessionId)) return root;
-    }
-    return primaryRepoRoot;
-  }
-
+  // `repoOfChild` is gone with the Map: an entry carries its own `repoRoot`,
+  // so "which repo does this judge belong to" is a field read, not a search
+  // through a second registry keyed by root.
 
   /** Advance the consumed cursor so a surfaced-but-unrecorded report is not re-announced. */
   function advanceReportCursor(sessionId: string, reportId: string): void {
@@ -4573,10 +4608,9 @@ export default function reviewGate(pi: ExtensionAPI) {
    */
   async function recordJudgeConclusion(sessionId: string, ctx?: unknown): Promise<{ text?: string; recorded: boolean; bindingNote?: string } | undefined> {
     try {
-      const live = [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
       const entry = judgeHierarchy[sessionId];
-      if (!live?.role && !entry?.role) return undefined;
-      const childRoot = live ? repoOfChild(live) : (entry?.repoRoot ?? primaryRepoRoot);
+      if (!entry?.role) return undefined;
+      const childRoot = entry.repoRoot || primaryRepoRoot;
       const settled = await settleAuditRound(auditRoundDeps(ctx), { judgeId: sessionId, root: childRoot });
       switch (settled.status) {
         case "recorded":
@@ -4851,7 +4885,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         }
         return { ok: true, judgeId: dispatched.judgeId ?? "" };
       },
-      judgeIdOf: (root, role) => judgeChildByRole(root, role)?.sessionId,
+      judgeIdOf: (root, role) => judgeChildByRole(root, role)?.judgeId,
       rememberPending: (root, pending) => {
         pendingAudits.set(root, pending);
         persistJudgeHierarchy();
@@ -4926,22 +4960,28 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
 
-  /** The judge child of one role in one repo, if the registry still holds it. */
-  function judgeChildByRole(root: string, role: string): JudgeChild | undefined {
-    return (childSessions.get(root) ?? []).find((c) => c.role === role);
+  /** The judge of one role in one repo THIS session owns, if the registry still holds it. */
+  function judgeChildByRole(root: string, role: string): JudgeEntry | undefined {
+    return ownJudges().find((e) => e.repoRoot === root && e.role === role);
   }
 
   /**
-   * Locate a judge child by ROLE (the agent's vocabulary) or by session id
-   * (the internal key). Role wins when both are given: the agent addresses
+   * Locate a judge by ROLE (the agent's vocabulary) or by judge id (the
+   * internal key). Role wins when both are given: the agent addresses
    * roles, and a stale id it copied from an old round would silently read the
    * wrong session.
+   *
+   * Own judges only, in BOTH branches. The id lookup used to run against a Map
+   * that could only ever hold this session's own children; against the shared
+   * table a bare `judgeHierarchy[id]` would hand back a peer's review, and the
+   * caller (judge_wait's `findChild`) treats what it gets as its own.
    */
-  function findJudgeChild(root: string, role?: string, sessionId?: string): JudgeChild | undefined {
+  function findJudgeChild(root: string, role?: string, judgeId?: string): JudgeEntry | undefined {
     if (role) return judgeChildByRole(root, role);
-    if (sessionId) return [...childSessions.values()].flat().find((c) => c.sessionId === sessionId);
+    if (judgeId) return ownJudges().find((e) => e.judgeId === judgeId);
     return undefined;
   }
+
 
   pi.registerTool({
     name: "judge_submit",
@@ -5129,7 +5169,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           role,
           reused: dispatch.reused,
           paneId: dispatch.paneId ?? child?.paneId,
-          judgeId: dispatch.judgeId ?? child?.sessionId,
+          judgeId: dispatch.judgeId ?? child?.judgeId,
           sessionDir: dispatch.sessionDir ?? child?.sessionDir,
           streamPath,
         },
@@ -5171,7 +5211,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       const c = findJudgeChild(root, role, judgeId);
       if (!c) return undefined;
       return {
-        judgeId: c.sessionId,
+        judgeId: c.judgeId,
         role: c.role,
         repoRoot: root,
         openerId: c.openerId,
@@ -5945,29 +5985,37 @@ export default function reviewGate(pi: ExtensionAPI) {
       // is open” rule: finishing takes the panes with it, so done can never
       // strand one. In loop/orchestrator mode this runs for real; explore/normal
       // only report it as advisory (their done is advisory too).
-      const ownedJudges: Array<{ root: string; child: JudgeChild }> = [];
-      for (const [root, list] of childSessions) {
-        for (const child of list) ownedJudges.push({ root, child });
-      }
+      //
+      // `ownJudges()` and NOT `ownLiveJudges()`: cascade-close is the one
+      // reader that wants this opener's entries even when their pane is gone
+      // — a dead pane still leaves a registry entry, a scratch worktree and
+      // (for an auditor) a pending audit to reclaim. The opener filter is
+      // what keeps it off a PEER's review.
+      const ownedJudges = ownJudges();
       if (ownedJudges.length > 0 && (state.taskMode === "loop" || orchestratorMode)) {
         const ownPane = process.env.TMUX_PANE?.trim() || undefined;
         const run = (argv: readonly string[]) => runTmux(argv);
         const closed: string[] = [];
-        for (const { root, child } of ownedJudges) {
-          if (child.paneId && ownPane) {
+        const tmuxServer = tmuxServerFrom(process.env);
+        for (const child of ownedJudges) {
+          // `paneClosable`, not just "has a pane id": a persisted id from a
+          // tmux server that has since restarted names whatever now holds that
+          // number, and this is a kill (2026-09-05, adviser P1). Unverifiable
+          // ⇒ the entry and its scratch are still reclaimed below, we simply
+          // do not send kill-pane into someone else's window.
+          if (paneClosable(child, tmuxServer) && ownPane) {
             try {
-              if (closeJudgePane(run, child.paneId).ok) closed.push(child.paneId);
+              if (closeJudgePane(run, child.paneId!).ok) closed.push(child.paneId!);
             } catch { /* best effort */ }
           }
-          try { reapReviewScratch(child.sessionId); } catch { /* best effort */ }
-          setHierarchy(removeJudge(judgeHierarchy, child.sessionId));
-          if (child.role === "goal-auditor") dropAudits(root);
+          try { reapReviewScratch(child.judgeId); } catch { /* best effort */ }
+          setHierarchy(removeJudge(judgeHierarchy, child.judgeId));
+          if (child.role === "goal-auditor") dropAudits(child.repoRoot);
         }
-        childSessions.clear();
         progress.step(`联关 ${ownedJudges.length} 个 review pane${closed.length ? `（已关 ${closed.join("、")}）` : ""}`);
       } else if (ownedJudges.length > 0) {
-        for (const { root, child } of ownedJudges) {
-          problems.push(`[${repoLabel(root)}] judge pane ${child.paneId ?? "(无 pane)"} (${child.role}) 仍开着——explore/normal 下仅提醒，不代关。`);
+        for (const child of ownedJudges) {
+          problems.push(`[${repoLabel(child.repoRoot)}] judge pane ${child.paneId ?? "(无 pane)"} (${child.role}) 仍开着——explore/normal 下仅提醒，不代关。`);
         }
       }
       // L7/L8 — completion-only requirements. Neither is in
@@ -6777,30 +6825,26 @@ export default function reviewGate(pi: ExtensionAPI) {
     // they produced and carry on), live fresh ones are HOSTED (the agent
     // keeps doing deterministic work or blocks in bash on the three
     // criteria) — never idle.
-    const ownPane = process.env.TMUX_PANE?.trim() || undefined;
-    let paneList: string[] | undefined;
-    try {
-      paneList = ownPane ? listJudgePanes((argv) => runTmux(argv), ownPane) : undefined;
-    } catch { paneList = undefined; }
+    const paneList = listOwnWindowPanes();
+    const tmuxServer = tmuxServerFrom(process.env);
     const childSnapshots: ChildSnapshot[] = [];
     const sessionIdsBySession = new Map<string, string>();
-    for (const list of childSessions.values()) {
-      for (const c of list) {
-        childSnapshots.push({
-          title: c.title,
-          sessionId: c.sessionId,
-          role: c.role,
-          spawnedAt: c.spawnedAt,
-          // Liveness is the pane list now (probed once above): a pane id on
-          // record with an UNREADABLE list stays alive — missing information
-          // must never end a wait.
-          alive: c.paneId !== undefined && (paneList === undefined || paneList.includes(c.paneId)),
-          // The channel is the activity record now (heartbeat, questions,
-          // reports); absent ⇒ the classifier falls back to spawnedAt.
-          lastActivityAt: channelLastActivity(c),
-        });
-        sessionIdsBySession.set(c.sessionId, c.title);
-      }
+    for (const c of ownJudges()) {
+      childSnapshots.push({
+        title: c.title,
+        sessionId: c.judgeId,
+        role: c.role,
+        spawnedAt: c.spawnedAt,
+        // Liveness through the SAME predicate the wait uses (lib/hierarchy.ts):
+        // an UNREADABLE pane list stays alive — missing information must never
+        // end a wait — and a pane id from another tmux server is not this
+        // judge's pane at all.
+        alive: judgeLive(c, paneList, tmuxServer),
+        // The channel is the activity record now (heartbeat, questions,
+        // reports); absent ⇒ the classifier falls back to spawnedAt.
+        lastActivityAt: channelLastActivity(c),
+      });
+      sessionIdsBySession.set(c.judgeId, c.title);
     }
     // (Reports already settled above; the watchdog below keeps pane-dead rounds.)
     if (childSnapshots.length > 0) {
@@ -7170,12 +7214,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     // reports as a healthy child.
     stopChildHeartbeat();
 
-
     // Judge children are independent pi processes — they survive the session
     // by design (their session files persist, so a fresh session can resume
-    // or close them). Shutdown only drops the registry; the processes keep
-    // running and their transcripts stay on disk.
-    childSessions.clear();
+    // or close them). Nothing to clear here anymore: the registry IS the
+    // persisted table, and dropping it on shutdown is precisely what used to
+    // strand a live pane nobody could address after a restart.
+
   });
 
   pi.on("session_compact", async (_event, ctx) => {

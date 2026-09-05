@@ -14,6 +14,9 @@ import {
   listByOpener,
   judgeIdsByOpener,
   parseHierarchySnapshot,
+  tmuxServerFrom,
+  judgeLive,
+  paneClosable,
   type JudgeEntry,
 } from "../lib/hierarchy.ts";
 
@@ -23,7 +26,9 @@ function entry(over: Partial<JudgeEntry> = {}): JudgeEntry {
     openerId: "session-child-1",
     role: "reviewer",
     repoRoot: "/repo",
-    createdAt: "2026-09-04T00:00:00.000Z",
+    title: "reviewer",
+    sessionDir: "/repo/.pi/judge-sessions/reviewer-abc-def/sessions",
+    spawnedAt: "2026-09-04T00:00:00.000Z",
     ...over,
   };
 }
@@ -110,6 +115,42 @@ test("removal forgets the judge; removing unknown ids is a no-op", () => {
   assert.equal(removeJudge(dropped, "rg-reviewer-nope"), dropped);
 });
 
+test("tmuxServerFrom takes the SERVER out of $TMUX, ignoring the session index", () => {
+  assert.equal(tmuxServerFrom({ TMUX: "/private/tmp/tmux-501/default,12345,0" }), "/private/tmp/tmux-501/default,12345");
+  // Same server, a different session of it — still the same server.
+  assert.equal(tmuxServerFrom({ TMUX: "/private/tmp/tmux-501/default,12345,7" }), "/private/tmp/tmux-501/default,12345");
+  assert.equal(tmuxServerFrom({}), undefined, "outside tmux there is no server");
+  assert.equal(tmuxServerFrom({ TMUX: "   " }), undefined);
+  assert.equal(tmuxServerFrom({ TMUX: "garbage-without-commas" }), undefined, "an unparseable value is not a server");
+});
+
+test("judgeLive: missing information keeps a judge ALIVE, a foreign server does not", () => {
+  const live = { paneId: "%7", tmuxServer: "sock,1" };
+  assert.equal(judgeLive(live, ["%7", "%9"], "sock,1"), true, "listed by its own server ⇒ running");
+  assert.equal(judgeLive(live, ["%9"], "sock,1"), false, "not listed ⇒ gone");
+  // The never-kill-on-missing-info direction: an unreadable pane list must not
+  // end a wait on a judge that is working.
+  assert.equal(judgeLive(live, undefined, "sock,1"), true, "unreadable pane list keeps it alive");
+  assert.equal(judgeLive({ paneId: "%7" }, undefined, "sock,1"), true, "no recorded server ⇒ still comparable");
+  // …but a KNOWN-different server means %7 is somebody else's pane, and no
+  // amount of missing information makes it this judge's.
+  assert.equal(judgeLive(live, ["%7"], "sock,2"), false, "after a server restart the id is not comparable");
+  assert.equal(judgeLive(live, undefined, "sock,2"), false);
+  assert.equal(judgeLive({ tmuxServer: "sock,1" }, ["%7"], "sock,1"), false, "no pane ⇒ not running");
+});
+
+test("paneClosable: the OPPOSITE default — unverifiable means do not kill", () => {
+  assert.equal(paneClosable({ paneId: "%7", tmuxServer: "sock,1" }, "sock,1"), true);
+  assert.equal(paneClosable({ paneId: "%7", tmuxServer: "sock,1" }, "sock,2"), false, "another server's pane id");
+  // These two are exactly where the pair diverges: judgeLive says "alive"
+  // (missing info must not end a wait), paneClosable says "do not kill"
+  // (missing info must not act). Asserting them side by side is the point.
+  assert.equal(paneClosable({ paneId: "%7" }, "sock,1"), false, "no recorded server ⇒ not killable");
+  assert.equal(judgeLive({ paneId: "%7" }, undefined, "sock,1"), true, "…while the same entry stays alive");
+  assert.equal(paneClosable({ paneId: "%7", tmuxServer: "sock,1" }, undefined), false, "we are not in tmux ⇒ not killable");
+  assert.equal(paneClosable({ tmuxServer: "sock,1" }, "sock,1"), false, "no pane id ⇒ nothing to close");
+});
+
 test("listByOpener returns exactly the opener's judges for cascade-close", () => {
   let table = emptyHierarchy();
   for (const [judgeId, openerId] of [["j-1", "pm"], ["j-2", "child-1"], ["j-3", "pm"]] as const) {
@@ -154,6 +195,40 @@ test("entries whose key disagrees with their id are dropped", () => {
     judges: { "j-right": entry({ judgeId: "j-right" }), "j-wrong": entry({ judgeId: "j-other" }) },
   }));
   assert.deepEqual(Object.keys(parsed!.judges), ["j-right"]);
+});
+
+test("an entry written before the registries merged is DROPPED, not half-adopted", () => {
+  // The pre-merge disk format: no title, no sessionDir, and the timestamp
+  // under its old name. Half-adopting one would put a judge in the table that
+  // the wait receipt, the health snapshot and the cascade-close each read
+  // differently — so it is dropped whole and its round simply re-runs
+  // (哲学三: only the new format is read, no compatibility layer).
+  const legacy = {
+    judgeId: "j-old", openerId: "session-1", role: "reviewer", repoRoot: "/repo",
+    createdAt: "2026-09-04T00:00:00.000Z", paneId: "%7",
+  };
+  const parsed = parseHierarchySnapshot(JSON.stringify({
+    version: 1,
+    judges: { "j-old": legacy, "j-new": entry({ judgeId: "j-new" }) },
+  }));
+  assert.deepEqual(Object.keys(parsed!.judges), ["j-new"],
+    "the legacy entry must not survive in any form");
+});
+
+test("each merged-in field is individually required", () => {
+  // Positive control first: the full entry DOES parse. Without it, a
+  // derivation that rejects everything would pass the rejections below.
+  const full = parseHierarchySnapshot(JSON.stringify({
+    version: 1, judges: { "j": entry({ judgeId: "j" }) },
+  }));
+  assert.deepEqual(Object.keys(full!.judges), ["j"], "the check itself must accept a complete entry");
+
+  for (const missing of ["title", "sessionDir", "spawnedAt"] as const) {
+    const partial = { ...entry({ judgeId: "j" }) } as Record<string, unknown>;
+    delete partial[missing];
+    const parsed = parseHierarchySnapshot(JSON.stringify({ version: 1, judges: { "j": partial } }));
+    assert.deepEqual(Object.keys(parsed!.judges), [], `a missing ${missing} must drop the entry`);
+  }
 });
 
 test("a malformed pending audit is dropped while good judges survive", () => {

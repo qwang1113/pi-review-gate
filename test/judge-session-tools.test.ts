@@ -194,9 +194,10 @@ function seed(f: Fake, over: Partial<JudgeChildRecord> = {}): JudgeChildRecord {
     ...f.table.current,
     [c.judgeId]: {
       judgeId: c.judgeId, openerId: c.openerId, role: c.role, repoRoot: c.repoRoot,
+      title: c.role, sessionDir: c.sessionDir,
       ...(c.paneId === undefined ? {} : { paneId: c.paneId }),
       ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
-      createdAt: now,
+      spawnedAt: now,
     },
   };
   return c;

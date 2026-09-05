@@ -202,14 +202,33 @@ async function doSpawn(
   // a close→spawn keeps the old reports, and restarting at 1 would collide with them
   // (the judge refuses a round its channel already closed).
   const birthSeq = nextSpawnRoundSeq(deps, caller, earlyJudgeId);
+  // The two checks that can refuse outright — no tmux, no resolvable model
+  // chain — run BEFORE the id is claimed. They used to sit after it and undo
+  // it, and the claim in between was the only reason `rollback` had to exist
+  // for them at all.
+  const ownPane = deps.ownPane();
+  if (!ownPane) {
+    return fail("review-gate: 当前会话不在 tmux 里，开不出 review pane——在 tmux 中重开本会话后重试；门禁不会退回旧的进程壳子。");
+  }
+  const launch = deps.launchConfig(root, role, caller);
+  if (!launch.ok) {
+    return fail(`review-gate: ${launch.error}`);
+  }
+  // A COMPLETE entry from the first write: this registration used to omit
+  // `sessionDir`, and the extension's own dispatch kept that fact in its
+  // separate Map instead — which is precisely why `judge_wait` could not find
+  // a judge `judge_spawn` had just opened. One table, every field.
   const registered = registerJudge(deps.hierarchy(), {
     judgeId,
     openerId: caller,
     role,
     repoRoot: root, roundSeq: birthSeq,
+    title: role,
+    sessionDir: launch.sessionDir,
     ...(streamPath === undefined ? {} : { streamPath }),
-    createdAt: new Date(deps.now()).toISOString(),
+    spawnedAt: new Date(deps.now()).toISOString(),
   });
+
   if (!registered.ok) return fail(`review-gate: ${registered.reason}`);
   deps.saveHierarchy(registered.table);
   const rollback = () => {
@@ -222,16 +241,7 @@ async function doSpawn(
     rollback();
     return fail(`review-gate: 任务文件落盘失败 —— ${taskFile.error}`);
   }
-  const ownPane = deps.ownPane();
-  if (!ownPane) {
-    rollback();
-    return fail("review-gate: 当前会话不在 tmux 里，开不出 review pane——在 tmux 中重开本会话后重试；门禁不会退回旧的进程壳子。");
-  }
-  const launch = deps.launchConfig(root, role, caller);
-  if (!launch.ok) {
-    rollback();
-    return fail(`review-gate: ${launch.error}`);
-  }
+  // (`ownPane` and `launch` were resolved above, before the claim.)
   const opened = openJudgePane(deps.tmux, {
     ownPane,
     cwd: root,
@@ -262,9 +272,11 @@ async function doSpawn(
     openerId: caller,
     role,
     repoRoot: root, roundSeq: birthSeq,
+    title: role,
+    sessionDir: launch.sessionDir,
     paneId: opened.paneId,
     ...(streamPath === undefined ? {} : { streamPath }),
-    createdAt: new Date(deps.now()).toISOString(),
+    spawnedAt: new Date(deps.now()).toISOString(),
   });
   if (withPane.ok) deps.saveHierarchy(withPane.table);
   // Register what was dispatched, or the report can never be recorded:

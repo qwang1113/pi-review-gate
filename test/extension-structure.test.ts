@@ -2190,7 +2190,9 @@ test("round-18: child-wait watchdog is guarded, cancellable, and gate-owned", ()
   assert.match(schedule, /lastRunAborted/, "watchdog respects ESC abort");
   assert.match(schedule, /!loopArmed/, "watchdog respects the loop latch");
   assert.match(schedule, /state\.bypass\.active/, "watchdog respects bypass state");
-  assert.match(schedule, /childSessions\.values\(\)/, "watchdog rechecks that children still exist");
+  // The recheck itself is what this protects; the registry it reads is now the
+  // merged table, scoped to this opener (the `childSessions` Map is deleted).
+  assert.match(schedule, /ownJudges\(\)\.length === 0/, "watchdog rechecks that children still exist");
   assert.match(schedule, /deliverAs: "followUp"/, "watchdog resumes through the normal follow-up queue");
   assert.doesNotMatch(schedule, /\.unref\(\)/, "the hosted-wait timer keeps the main session alive");
   const childAt = SRC.indexOf("const childSnapshots");
@@ -2936,7 +2938,9 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
     "activity is read from the channel, not left undefined");
   const helperAt = SRC.indexOf("function channelLastActivity(");
   assert.ok(helperAt > 0, "the channel-activity helper must exist");
-  assert.match(SRC.slice(helperAt, helperAt + 600), /judgeChannelTarget\(judge\.openerId, judge\.sessionId\)/,
+  // Same two RECORDED fields as before; the record is the registry entry now,
+  // where the judge's id is `judgeId` (the Map called the same value sessionId).
+  assert.match(SRC.slice(helperAt, helperAt + 600), /judgeChannelTarget\(judge\.openerId, judge\.judgeId\)/,
     "…from THAT judge's own channel file");
 
   // judge_close: kill the PANE, then drop the registry. Idempotent.
@@ -3181,8 +3185,15 @@ test("SECURITY: the Copilot requirement never touches the SHIP gate (it would de
   assert.doesNotMatch(codeOnly(shipHookWiring()), /copilot/i,
     "…and no injected dep may carry it in");
   // …and it must be wired into both completion surfaces instead.
-  const doneStart = SRC.indexOf('name: "declare_done"');
-  assert.match(SRC.slice(doneStart, doneStart + 7000), /copilotProblemsFor\(/); // +1000 for the declare_done cascade block
+  // Anchored, not measured: this used to be `slice(start, start + 7000)`, and
+  // every edit inside declare_done pushed the wiring further away until the
+  // window silently stopped reaching it (a too-small window fails for a reason
+  // that has nothing to do with the rule). `toolBodyOf` ends at the next
+  // registration, so it cannot drift with the body's length.
+  const doneBody = toolBodyOf("declare_done");
+  assert.match(doneBody, /summary: Type\.String/, "window sanity: this really is declare_done's body");
+  assert.doesNotMatch(doneBody, /name: "request_arbitration"/, "…and it stopped at the end of that body");
+  assert.match(doneBody, /copilotProblemsFor\(/);
   const settledStart = SRC.indexOf('pi.on("agent_settled"');
   assert.match(SRC.slice(settledStart, settledStart + 5200), /copilotProblemsFor\(/); // +1200 for the settle-wake and judge-pane blocks
 });
@@ -4515,3 +4526,62 @@ test("restart does not deadlock on a dead opener: dead foreign entries are dropp
   assert.match(SRC.slice(dispatchAt, dispatchAt + 800), /dropDeadForeignJudges\(\);/,
     "dispatch drops before deriving its own id");
 });
+
+/**
+ * ONE registry (哲学三): the in-memory `childSessions` Map is deleted and every
+ * reader goes through the persisted table.
+ *
+ * The Map's scope was implicit — it could only ever hold judges THIS process
+ * opened. The merged table holds neither guarantee: it carries entries
+ * restored from disk AND entries belonging to other openers. So the scope has
+ * to be spelled out at each reader, and that is a property of the SOURCE, not
+ * of any single call: a reader that forgets `ownJudges()` still compiles, still
+ * passes every behavior test, and quietly reports a peer's review as its own.
+ */
+function judgeReaderBody(name: string): string {
+  const body = windowOf(`function ${name}(`, /\n  \}\n/, `own-judge reader ${name}`);
+  // Self-proof (both directions): the window must reach the reader's real
+  // work, and must NOT have swallowed whatever function follows it. A window
+  // that is too small satisfies "contains ownJudges()" for the wrong reason,
+  // and one that is too large satisfies it using the NEXT function's code.
+  assert.ok(body.length > 40, `${name}: window collapsed to nothing`);
+  assert.doesNotMatch(body.slice(body.indexOf("{")), /\n  function /,
+    `${name}: window ran past the end of the function`);
+  return body;
+}
+
+test("the judge registry is ONE table: every own-judge reader is opener-scoped", () => {
+  // The Map itself is gone — name included, so a half-finished revival is loud.
+  const codeSrc = codeOnly(SRC);
+  assert.doesNotMatch(codeSrc, /childSessions/, "the in-memory Map must not come back");
+  assert.doesNotMatch(codeSrc, /interface JudgeChild\b/, "its record type goes with it");
+
+  // Positive control for the derivation: these two helpers must exist, or
+  // every assertion below is vacuously satisfiable by a source that has no
+  // readers at all.
+  assert.match(SRC, /function ownJudges\(\): JudgeEntry\[\]/, "the opener scope has one definition");
+  assert.match(SRC, /function ownLiveJudges\(\): JudgeEntry\[\]/, "the liveness scope has one definition");
+  assert.match(SRC, /listByOpener\(judgeHierarchy, caller\)/, "the filter is lib/hierarchy.ts's, not a re-implementation");
+
+  // "Is a judge RUNNING?" — must additionally exclude entries whose pane died
+  // with a previous process, or a restarted session waits forever on a pane
+  // nobody can answer from.
+  for (const name of ["activeJudgeWait", "judgeChildInMotion"]) {
+    assert.match(judgeReaderBody(name), /ownLiveJudges\(\)/,
+      `${name} must read live own judges, never the raw table`);
+  }
+  // "Which judge is mine?" — opener scope is enough; both branches need it,
+  // since the id lookup used to run against a Map that was own-only by
+  // construction.
+  for (const name of ["judgeChildByRole", "findJudgeChild"]) {
+    assert.match(judgeReaderBody(name), /ownJudges\(\)/,
+      `${name} must not hand back another opener's review`);
+  }
+  // declare_done's cascade-close deliberately uses the WIDER scope: a dead
+  // pane still leaves an entry, a scratch worktree and a pending audit to
+  // reclaim. What must never widen is the opener.
+  assert.match(SRC, /const ownedJudges = ownJudges\(\);/, "cascade-close is opener-scoped");
+  // The health snapshot the hosted wait is built from.
+  assert.match(SRC, /for \(const c of ownJudges\(\)\) \{/, "the child snapshot lists own judges only");
+});
+
