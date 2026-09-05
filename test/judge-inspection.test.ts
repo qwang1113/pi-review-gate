@@ -15,6 +15,7 @@ import {
   classifyShellCommand,
   decideInspection,
   emptyInspection,
+  evidenceForRound,
   inspectionRecord,
   observeInspection,
   parseReviewRange,
@@ -31,6 +32,11 @@ test("content reads count; listing, testing and writing do not", () => {
   assert.equal(classifyShellCommand("sed -n '1,80p' lib/a.ts"), "file-read");
   assert.equal(classifyShellCommand("cat lib/a.ts"), "file-read");
   assert.equal(classifyShellCommand("/usr/bin/head -5 a.txt"), "file-read");
+  // A reviewer verifying in its own copy passes the checkout as a global flag;
+  // reading the flag's operand as the subcommand would miss the whole round.
+  assert.equal(classifyShellCommand("git -C /tmp/copy diff abc1234..HEAD"), "diff");
+  assert.equal(classifyShellCommand("git -c core.pager=cat show HEAD"), "diff");
+  assert.equal(classifyShellCommand("git -C /tmp/copy status"), undefined, "status is still not content");
 
   // NOT inspection: names only, running things, or changing them.
   assert.equal(classifyShellCommand("ls -la lib/"), undefined);
@@ -85,6 +91,34 @@ test("evidence folds, dedupes kinds and flags the reviewed range", () => {
   assert.equal(rangeMentioned("git show a1b2c3d4", range), true);
   assert.equal(rangeMentioned("git show deadbee", range), false);
   assert.equal(rangeMentioned("git diff", undefined), false);
+});
+
+test("an ABANDONED round's reads do not carry into the next round", () => {
+  // A pane outlives its rounds: the opener may dispatch round 4 into a pane
+  // that never concluded round 3, so a reset that only happens on a successful
+  // conclusion would hand round 4 the reading done for round 3.
+  const round3 = observeInspection(emptyInspection(), { toolName: "read", input: { path: "/a" } }, undefined, 3);
+  assert.equal(round3.actions, 1);
+  assert.equal(round3.round, 3);
+
+  // Concluding round 4 sees NOTHING of round 3's work.
+  const forRound4 = evidenceForRound(round3, 4);
+  assert.equal(forRound4.actions, 0);
+  assert.equal(decideInspection({ role: "reviewer", verdict: "READY", evidence: forRound4 }).ok, false);
+  // …and the round it WAS gathered for still counts.
+  assert.equal(evidenceForRound(round3, 3).actions, 1);
+
+  // The next round's first action starts the count over rather than adding.
+  const round4 = observeInspection(round3, { toolName: "read", input: { path: "/b" } }, undefined, 4);
+  assert.equal(round4.actions, 1, "not 2 — round 3's read is gone");
+  assert.equal(round4.round, 4);
+
+  // An unreadable round number never refuses on its own (missing information
+  // is not evidence of a stale round).
+  const unstamped = observeInspection(emptyInspection(), { toolName: "read", input: { path: "/a" } });
+  assert.equal(unstamped.round, undefined);
+  assert.equal(evidenceForRound(unstamped, 9).actions, 1);
+  assert.equal(evidenceForRound(round3, undefined).actions, 1);
 });
 
 test("THE PROBE: a verdict-bearing role cannot conclude READY having read nothing", () => {

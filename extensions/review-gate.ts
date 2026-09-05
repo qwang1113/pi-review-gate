@@ -2557,6 +2557,31 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!pendingAudits.has(root) && snap.audit) pendingAudits.set(root, snap.audit);
   }
 
+  /**
+   * THIS pane's current round number, read from the registry FILE.
+   *
+   * Deliberately not `judgeHierarchy`: this session's in-memory copy is loaded
+   * once and "memory wins on conflict", so it would keep reporting the round
+   * the pane opened with while the opener bumps the real one on every
+   * dispatch. The inspection observer stamps each action with this, and
+   * `judge_conclude` compares it against the round it is concluding — that is
+   * what keeps an ABANDONED round's reads from being credited to the next one.
+   * Undefined when the file is missing or unreadable (the evidence then
+   * carries no round and the comparison cannot refuse anything).
+   */
+  function judgeCurrentRound(): number | undefined {
+    const judgeId = readJudgeSideEnv(process.env)?.judgeId;
+    if (!judgeId) return undefined;
+    try {
+      const raw = readFileSync(pathJoin(cwd, ".pi", HIERARCHY_FILENAME), "utf8");
+      const snap = JSON.parse(raw) as { judges?: Record<string, { roundSeq?: unknown }> };
+      const seq = snap?.judges?.[judgeId]?.roundSeq;
+      return typeof seq === "number" && Number.isFinite(seq) ? Math.floor(seq) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** A pane-less foreign entry older than this is not a concurrent spawn. */
   const FOREIGN_SPAWN_GRACE_MS = 10 * 60 * 1000;
   /**
@@ -3573,7 +3598,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     });
     if (!admission.ok) return deny(`review-gate: ${admission.reason}`);
 
-    spendArbitration(ctx as ExtensionContext);
+    // The quota is SHARED with the two other classes, and it is spent BEFORE
+    // the arbiter runs: a spawn that dies must not be retried into a grant.
+    spendArbitration(ctx);
     const verdict = await runArbiter(
       resolveArbiterModel() ?? "",
       buildInspectionAppealPrompt(block, argument),
@@ -3852,6 +3879,9 @@ export default function reviewGate(pi: ExtensionAPI) {
         judgeInspection,
         { toolName: event.toolName, input: event.input },
         judgeReviewRange,
+        // Stamped with the round the registry says we are in, so an abandoned
+        // round's reads cannot be credited to the next round in this pane.
+        judgeCurrentRound(),
       );
     }
     // 1. Edits: only arm gate on success.

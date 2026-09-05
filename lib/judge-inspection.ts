@@ -56,11 +56,34 @@ export interface InspectionEvidence {
   kinds: InspectionKind[];
   /** True once an observed command mentioned the round's review range. */
   rangeSeen: boolean;
+  /**
+   * WHICH round these actions were observed under, when the observer could
+   * read it. A round does not always end with a conclusion — the opener may
+   * dispatch a new one into the same living pane — so evidence that is not
+   * stamped with the round being concluded is NOT that round's evidence
+   * (see {@link evidenceForRound}). Undefined only when the round number was
+   * unreadable at observation time.
+   */
+  round?: number;
 }
 
 /** A round that has observed nothing yet — the state every round starts in. */
 export function emptyInspection(): InspectionEvidence {
   return { actions: 0, kinds: [], rangeSeen: false };
+}
+
+/**
+ * The evidence that belongs to `round` — nothing else.
+ *
+ * A pane is reused across rounds, and a round can be ABANDONED: the opener
+ * dispatches round N+1 into a pane that never concluded round N. Resetting
+ * only on a successful conclusion would therefore credit N's reads to N+1, and
+ * a "conclude READY immediately" round would sail through on work done for a
+ * different task. Fail-closed: a mismatch reads as nothing observed.
+ */
+export function evidenceForRound(evidence: InspectionEvidence, round: number | undefined): InspectionEvidence {
+  if (round === undefined || evidence.round === undefined || evidence.round === round) return evidence;
+  return emptyInspection();
 }
 
 /**
@@ -124,6 +147,25 @@ function stringField(input: unknown, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
+/** `git` global flags that swallow the NEXT token as their value. */
+const GIT_VALUE_FLAGS: ReadonlySet<string> = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+
+/**
+ * The subcommand of a `git` invocation, skipping global flags AND the operands
+ * they consume. Taking the first non-`-` token instead would read `git -C
+ * /repo diff` as the subcommand `/repo` — i.e. a reviewer diffing another
+ * checkout would count as having inspected nothing.
+ */
+function gitSubcommand(rest: readonly string[]): string {
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i]!;
+    if (GIT_VALUE_FLAGS.has(token)) { i++; continue; }
+    if (token.startsWith("-")) continue;
+    return token;
+  }
+  return "";
+}
+
 /**
  * Classify ONE shell command. A command is inspection when ANY of its
  * segments is (`git diff … | head` counts once, through its git segment).
@@ -143,7 +185,7 @@ export function classifyShellCommand(command: string): InspectionKind | undefine
     const rest = tokens.slice(i + 1);
     let kind: InspectionKind | undefined;
     if (head === "git") {
-      const sub = rest.find((t) => !t.startsWith("-")) ?? "";
+      const sub = gitSubcommand(rest);
       if (GIT_CONTENT_SUBS.has(sub)) kind = "diff";
       else if (sub === "grep") kind = "search";
       else if (sub === "log" && rest.some((t) => GIT_LOG_PATCH_FLAGS.has(t))) kind = "diff";
@@ -184,20 +226,30 @@ export function classifyInspection(observation: InspectionObservation): Classifi
 /**
  * Fold one observation into the round's evidence. Returns the SAME evidence
  * when the call was not an inspection action (so callers can assign
- * unconditionally). `range` is the round's `baseline..HEAD`, when known.
+ * unconditionally). `range` is the round's `baseline..HEAD`, when known, and
+ * `round` is the round this action belongs to: when it differs from what the
+ * evidence carries, the older round's actions are DROPPED rather than added to
+ * (a pane outlives its rounds, and an abandoned round leaves reads behind).
  */
 export function observeInspection(
   previous: InspectionEvidence,
   observation: InspectionObservation,
   range?: string | undefined,
+  round?: number | undefined,
 ): InspectionEvidence {
   const classified = classifyInspection(observation);
   if (!classified) return previous;
-  const kinds = previous.kinds.includes(classified.kind)
-    ? previous.kinds
-    : [...previous.kinds, classified.kind];
-  const rangeSeen = previous.rangeSeen || rangeMentioned(classified.text, range);
-  return { actions: previous.actions + 1, kinds, rangeSeen };
+  const base = evidenceForRound(previous, round);
+  const kinds = base.kinds.includes(classified.kind)
+    ? base.kinds
+    : [...base.kinds, classified.kind];
+  const rangeSeen = base.rangeSeen || rangeMentioned(classified.text, range);
+  return {
+    actions: base.actions + 1,
+    kinds,
+    rangeSeen,
+    ...(round === undefined ? (base.round === undefined ? {} : { round: base.round }) : { round }),
+  };
 }
 
 /** Does this command text mention the round's range (or either endpoint)? */

@@ -4336,6 +4336,14 @@ test("the inspection observer is fed IN PROCESS, from successful judge tool resu
   assert.ok(feedAt >= 0 && firstBranchAt >= 0 && feedAt < firstBranchAt,
     "an early-returning branch must not be able to skip the observation");
 
+  // Every action is stamped with the round it belongs to: a pane outlives its
+  // rounds, and an abandoned one would otherwise lend its reads to the next.
+  assert.match(handler, /judgeCurrentRound\(\)/, "the fold carries the round");
+  const roundReader = windowOf("function judgeCurrentRound(", "\n  }", "judgeCurrentRound");
+  assert.match(roundReader, /readFileSync\(pathJoin\(cwd, "\.pi", HIERARCHY_FILENAME\)/,
+    "the round comes from the registry FILE — the in-memory copy is loaded once and would go stale");
+  assert.doesNotMatch(roundReader, /judgeHierarchy/);
+
   // The judge_conclude wiring must actually pass the evidence in: an unwired
   // host would leave the rule asserting nothing.
   const wiring = windowOf("registerJudgeConcludeTool(pi, {", "\n    });", "judge_conclude deps");

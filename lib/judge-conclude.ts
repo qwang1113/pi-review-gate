@@ -61,6 +61,7 @@ import { DOC_SYNC_ATTESTATIONS } from "./gate-state.ts";
 import { JUDGE_STREAM_ENV, readJudgeSideEnv } from "./judge-side.ts";
 import {
   decideInspection,
+  evidenceForRound,
   inspectionRecord,
   type InspectionEvidence,
 } from "./judge-inspection.ts";
@@ -337,7 +338,11 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
   // anything is written: a refusal here writes no report, so it costs the
   // round nothing — the judge reads the reason, goes and looks at the code (or
   // appeals), and calls again.
-  const evidence = deps.inspection();
+  // NARROWED TO THIS ROUND FIRST. The observer stamps each action with the
+  // round it read from the registry; `seq.round` is the AUTHORITATIVE one for
+  // the conclusion being written. A pane that never concluded its previous
+  // round still holds that round's actions, and they are not this round's.
+  const evidence = evidenceForRound(deps.inspection(), seq.round);
   const gate = decideInspection({
     role: cfg.role,
     verdict: input.verdict,

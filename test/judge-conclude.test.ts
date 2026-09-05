@@ -444,3 +444,28 @@ test("tool: a granted pass carries ONE zero-inspection READY and is reported as 
   assert.deepEqual(report.inspection, { actions: 0, kinds: [], appeal: "granted" });
   assert.deepEqual(concluded, [true], "the caller is told to spend the pass");
 });
+
+test("tool: evidence stamped with ANOTHER round is not this round's evidence", async () => {
+  // The pane is reused and a round can be abandoned (the opener dispatches the
+  // next one into a pane that never concluded). Round 7's conclusion must not
+  // be carried by the reading done for round 6.
+  const { exec, ioFiles, refusals } = setup({
+    hierarchy: hierarchyFile(7),
+    inspection: { actions: 4, kinds: ["diff"], rangeSeen: true, round: 6 },
+  });
+  const stale = await exec(GOOD);
+  assert.equal(stale.isError, true);
+  assert.match(stale.content[0]!.text, /未观测到任何审查动作/);
+  assert.equal(lastReport(ioFiles), undefined);
+  assert.equal(refusals[0]!.evidence.actions, 0, "the refusal records what THIS round observed");
+
+  // The same evidence stamped with the round being concluded goes through.
+  const current = setup({
+    hierarchy: hierarchyFile(7),
+    inspection: { actions: 4, kinds: ["diff"], rangeSeen: true, round: 7 },
+  });
+  const ok = await current.exec(GOOD);
+  assert.equal(ok.isError, undefined);
+  const report = lastReport(current.ioFiles) as { inspection?: Record<string, unknown> };
+  assert.deepEqual(report.inspection, { actions: 4, kinds: ["diff"], rangeSeen: true });
+});
