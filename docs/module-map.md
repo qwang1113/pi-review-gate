@@ -366,10 +366,10 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 ### 域 7：模型配置与诊断
 
 `model-config.ts` 把 `review-gate.json` 的 `agents` 段渲染成 `agents/*.md`
-的 frontmatter（项目层盖全局层），**无内置默认**：安装脚本写入 6 角色的默认
+的 frontmatter（项目层盖全局层），**无内置默认**：安装脚本写入 4 角色的默认
 slots，会话启动时 `validateAgentsForStartup` 硬检查每个角色（缺失/slots 空/
 spec 非法即停会话），`modelSpecFor` 对未配置角色返回 undefined（派发
-fail-closed）。`model-allowlist.ts` 是 provider 级允许名单，`model-diagnose.ts`
+fail-closed）。`model-diagnose.ts`
 回答「我的审查实际跑在哪个模型上」，`gate-doctor.ts` 是 `/gate-doctor` 的只读
 体检，`ui-widget.ts` 构造 editor 下方那条**单行**状态条（详情在 `/gate-status`）。
 
