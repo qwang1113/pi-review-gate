@@ -188,6 +188,44 @@ test("close leaves the window bar up while a SIBLING CHILD is still on screen", 
   assert.deepEqual(unsets, [], "the sibling's border is still labelled: the bar stays up");
 });
 
+test("a CLOSED sibling is not a decorated pane, even if its pane outlived the close", async () => {
+  // The `!c.closedAt` half of the filter (reviewer Nit, 2026-09-05: it could
+  // be deleted and every test stayed green). It matters exactly when a closed
+  // child's pane is still on screen — a kill that failed, or a pane tmux still
+  // lists — because then liveness alone would call it a sibling and the bar
+  // would stay up forever.
+  const plan = parsePlan({
+    title: "跨仓库计划",
+    intent: "两个仓库各一个任务",
+    tasks: [
+      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/repo" },
+      { id: "t2", title: "任务二", fileBoundaries: ["src/"], repo: "/other/repo" },
+    ],
+  });
+  assert.ok(plan.plan, plan.problems.join("; "));
+  const world = makeFakeWorld({
+    plan: plan.plan!,
+    approvePlan: true,
+    resolvableRepos: ["/repo", "/other/repo"],
+  });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
+  const [first, second] = world.runtime().children;
+
+  // t1 is CLOSED on the books while its pane stays on screen.
+  world.saveRuntime({
+    ...world.runtime(),
+    children: world.runtime().children.map((c) =>
+      c.id === first!.id ? { ...c, closedAt: new Date(world.now()).toISOString() } : c),
+  });
+
+  await world.call("orchestrator_close", { childId: second!.id });
+
+  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.equal(unsets.length, 2, "the only child this orchestration still owns is the one closing");
+});
+
+
 test("close in one repo cannot even meet a second live child — the scheduler serializes", async () => {
   // Why the test above has to cross repos, asserted rather than assumed.
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
@@ -196,6 +234,11 @@ test("close in one repo cannot even meet a second live child — the scheduler s
   const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
 
   assert.equal(second.isError, true, "the first child's pane is still alive, so t2 waits");
+  // The REASON matters, not just the refusal: "t2 was refused" would also be
+  // true if the plan were unapproved or the task unknown, and then this test
+  // would be asserting nothing about scheduling (reviewer Nit, 2026-09-05).
+  assert.match(replyText(second), /同一 repo（\/repo）/, "…refused for being the same checkout");
+  assert.match(replyText(second), /不能两个写者并存/, "…which is the serialization rule itself");
   assert.equal(world.runtime().children.length, 1, "…and no second pane was opened");
 });
 
