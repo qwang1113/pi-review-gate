@@ -157,6 +157,30 @@ test("the station's next steps are the only two that exist, and no appeal is off
   assert.doesNotMatch(STATION_SHIP_NEXT_STEPS, /request_arbitration/);
 });
 
+test("the station block answers 'I think the GATE is wrong', not only 'how do I comply'", () => {
+  // USER REQUIREMENT (2026-09-06): every place the gate can misjudge must
+  // carry a route that does NOT require getting around the gate — "otherwise
+  // it will just invent ways around it". A list of ways to comply answers
+  // "I did it wrong" and leaves the other question unanswered.
+  //
+  // A station really can be misread: the record may hold an older station than
+  // the one the user agreed to, and a multi-repo command is judged by the
+  // STRICTEST station among the repos it touches.
+  assert.match(STATION_SHIP_NEXT_STEPS, /若你认为门禁把站点读错了/,
+    "the misjudgement case must be named, not left for the reader to infer");
+  assert.match(STATION_SHIP_NEXT_STEPS, /ask_user/,
+    "…and answered with a route that exists: the station is the USER's to set");
+  assert.match(STATION_SHIP_NEXT_STEPS, /最严/,
+    "…including the multi-repo rule, which is the likeliest honest surprise");
+  // …and the tempting shortcut is closed, because it silently does nothing:
+  // the approval binds to content, so editing the file only drops the goal.
+  assert.match(STATION_SHIP_NEXT_STEPS, /不要\*\*去手改|\*\*不要\*\*去手改/,
+    "hand-editing the goal file must be named as the wrong move");
+  assert.match(STATION_SHIP_NEXT_STEPS, /hash/,
+    "…with the reason it cannot work");
+});
+
+
 test("arrival: `precommit` owes nothing beyond the gates that already ran", () => {
   assert.deepEqual(stationArrivalProblems("precommit", { dirty: true, recordedPr: null }), []);
 });

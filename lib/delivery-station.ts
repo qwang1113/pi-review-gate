@@ -188,6 +188,17 @@ export function stationShipProblem(station: DeliveryStation, kind: ShipCommandKi
  * agreed end of the round. So this states the only two legitimate ways the
  * round can be allowed to travel further, both of which end at the user.
  *
+ * TWO DIFFERENT QUESTIONS, BOTH ANSWERED (user requirement, 2026-09-06). A
+ * refusal that only says "here is how to comply" answers "I did it wrong"; it
+ * leaves "I think the GATE is wrong" with no legitimate move, and a session
+ * with no legitimate move goes looking for an illegitimate one. A station can
+ * genuinely be misread — the record may hold an older station than the one the
+ * user agreed to, and a multi-repo command is judged by the STRICTEST station
+ * among the repos it touches, which may not be the one the reader has in mind.
+ * So the text names where the value comes from and how to correct it, and
+ * closes the tempting shortcut: hand-editing `.pi/loop-goal.md` or the sidecar
+ * changes nothing, because the approval binds to content.
+ *
  * It deliberately offers NO appeal route: the gate's arbiter only hears a
  * lone `gh pr edit` (lib/arbitration.ts), so pointing a blocked
  * commit/push/pr-create at it would be a dead end that also burns one of the
@@ -196,7 +207,12 @@ export function stationShipProblem(station: DeliveryStation, kind: ShipCommandKi
 export const STATION_SHIP_NEXT_STEPS =
   "交付站点是本轮的**契约**，不是没跑完的质量门禁 —— 再跑一轮审查不会解开它。要走得更远，只有两条合法路径：\n" +
   "  - loop 会话：请用户重新 `propose_restatement`（选一个更远的站点），再据此重谈 `propose_loop_goal`；\n" +
-  "  - 编排：项目经理把 plan 的 `deliveryStation` 提到该站点，请用户重新批准，子会话再重谈自己的 goal。";
+  "  - 编排：项目经理把 plan 的 `deliveryStation` 提到该站点，请用户重新批准，子会话再重谈自己的 goal。\n" +
+  "**若你认为门禁把站点读错了**（例如用户其实同意到 commit、记录里却是 precommit；" +
+  "或多仓库命令按所有涉及仓库中**最严**的那个站点判）：走的是同一条路 —— " +
+  "用 `ask_user` 把它交给用户，请他重新 `propose_restatement` 定下正确的站点，再据此重谈 goal。" +
+  "**不要**去手改 `.pi/loop-goal.md` 或门禁记录：批准绑定内容 hash，改了只会让 goal 失效，站点不会变。";
+
 
 // ---------------------------------------------------------------------------
 // declare_done's side: did this round actually ARRIVE at its station?
