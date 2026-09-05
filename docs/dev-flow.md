@@ -81,6 +81,27 @@
 - **公正与收敛**：每轮送审的提示词只带本轮范围；客观中立、一类问题列全
   的要求在子会话**系统提示词**中一次性注入（见 judge-protocol.md），主会话
   发现走偏时在下一轮 `judge_submit` 的任务文本里直接纠正。
+- **一个 worktree 一个门禁会话（2026-09-05 起，用户可见行为变更）**：同一个
+  checkout 里第二个「占用主 sidecar」的会话**不再只是收到一句警告，而是被拒绝**
+  ——edit/write、ship、门禁自己的 checkpoint 提交与 goal 落盘全部拦下，提示里
+  指名占用者（session / pid / host / 最后心跳）并给出两条出路（`git worktree add`
+  的实际命令，或关掉那个会话）。判活靠新的心跳文件 `.pi/session-presence.json`
+  （随 `.pi/` 一起被 gitignore，不进版本库）：**只看心跳新鲜度**，`pid`/`host` 仅
+  作诊断；文件缺失、内容损坏、时钟异常一律**放行**（这里的 fail-safe 方向与门禁
+  其他处相反——被决定的是「要不要拒绝你自己的 checkout」）。占用者关闭后**无需
+  手工删文件、也无需重开会话**：约一分钟内定时复检自动解除并接管。
+  - **谁不受影响**：judge pane 与编排子会话——它们本来就与 opener 同处一个
+    worktree，且不写主 sidecar（judge 不写门禁状态、子会话写自己的
+    `RG_STATE_VARIANT` 分片），因此天然豁免。`normal` 模式也不发拒绝（该模式的
+    定义就是门禁整体关闭），但仍写心跳，好让会 enforce 的会话看见它。
+  - **同时消失的**：旧的「another Pi session … last wrote this repo's gate state
+    at …」四小时警告已删除——同一个问题只留一套存活判定（哲学三）。
+- **judge 不再写主仓库门禁状态（2026-09-05，用户可见）**：`.pi/review-gate-state.json`
+  的 `sessionId` / `taskMode` 不会再被 `rg-reviewer-…` 之类的 judge 会话覆盖，
+  已记录的 verdict 也不会被它写回 PENDING。judge 跳过写入时只在自己的会话记录里
+  留一条审计条目，不在被审仓库里落任何文件。**注意**：judge pane 跨轮复用同一个
+  进程，加载的是开 pane 那一刻的磁盘代码，所以升级后**已经开着的** judge 仍是旧
+  行为，新代码要等下一个新开的 pane 才生效。
 - **配置保留**：`.pi/review-gate.json`（项目层）→ `~/.pi/review-gate.json`
   （全局层）→ 内置默认的三层配置原样保留：precommit 的
   lint/typecheck/build/test 配置、agents 的模型槽位（auto / slots /

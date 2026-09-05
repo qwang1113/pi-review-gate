@@ -4742,5 +4742,17 @@ test("ONE gate session per worktree: refuse, hold, release — and only ONE live
   assert.doesNotMatch(code, /concurrentSessionNotice/, "the old recency warning must not survive");
   assert.doesNotMatch(code, /CONCURRENT_SESSION_WINDOW_MS/,
     "…nor its window, which was the second liveness definition");
+  // …and not merely its NAMES. The judgement was "how recently did another
+  // session write this sidecar", and its only possible input is the sidecar's
+  // own `updatedAt`; re-deriving it under fresh names would pass the two
+  // assertions above. The extension therefore reads that field NOWHERE — the
+  // deleted warning was the only thing that ever wanted it.
+  //
+  // Self-proof for the derivation: the same pattern DOES find the field in
+  // lib/gate-state.ts, which owns it. Without that control, a typo'd regex
+  // would "prove" the absence of anything at all.
+  assert.match(GATE_STATE_SRC, /updatedAt/, "derivation sanity: the field exists and the scan can see it");
+  assert.doesNotMatch(code, /updatedAt/,
+    "no session-recency judgement may be rebuilt from the sidecar's timestamp — liveness is the heartbeat");
 });
 
