@@ -271,6 +271,21 @@ judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫�
 项目经理看得见自己的子会话，编排子会话看不见项目经理的 pane。改成数「我能看见的、还在
 用它的 pane」之后，两种角色自然各归各位。
 
+## 二·补四 · 第五轮：视野判断的最后两个入口
+
+第四轮 reviewer 又给了 2 条 P2，都在同一处，且其中一条我在等结论期间已自查出并先修了：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-G | 「env 里有 orchestration id ⇒ 我是子会话」对**接力继任者与 attach 接管者**不成立——它们是项目经理，却也带着这个变量，于是又落回「永不收」 | 新增判定 `labelBarOwnedByOthers()` = 带 id **且** 自己不是 orchestrator 模式；两处站点都改走它。**没有**去改已有的 `isOrchestrationChild()`（它回答的是「我是不是被派来干活的」，驱动子会话指令与模式守卫两处无关决策，扩宽它会顺带改掉那两处）。结构测试补第 3 段钉住「不能只读 env」 |
+| P2-H | 收 bar 的 `setw` 拿**正在关闭的那个 pane** 当 window 选择器；用户手动关掉 review pane 后再 judge_close / declare_done，这条 setw 直接失败被吞掉，bar 永久残留 | `closeSessionPane` 的选项从 `hideLabels: boolean` 改成 `hideLabelsVia: string`——传的是**用来指认窗口的 pane id**，三处调用方一律传**自己的 pane**（它必然活着，因为我们正跑在里面）。类型即约束：想收 bar 就必须说清楚用谁寻址。测试断言 `-t %1` 且不含 `%7` |
+
+第五轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2364 pass / 0 fail**。
+
+**第二条项目级经验**：`setw -t <pane>` 里的 pane **只是窗口的名字**，不是操作对象。凡是
+「用 X 指认 Y」的 API，指认用的那个 X 必须挑一个**你能保证还存在**的——这里正确答案永远是
+调用者自己的 pane，而最容易顺手写下的答案（正要被销毁的那个）恰好是唯一不能用的。
+
 
 ---
 

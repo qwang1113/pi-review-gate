@@ -153,18 +153,25 @@ test("both label-bar release sites ask about a CHILD and about a MANAGER's child
     assert.ok(at > 0, `${needle} must exist in the extension`);
     return ext.slice(at, at + chars);
   };
-  // 1. judge_close's wiring.
-  const judgeWiring = windowAt("insideOrchestration: () =>", 260);
-  assert.match(judgeWiring, /ORCHESTRATION_ID_ENV/, "a child is recognised by its environment");
+  // 1. judge_close's wiring: both questions, through the shared predicates.
+  const judgeWiring = windowAt("insideOrchestration: () =>", 200);
+  assert.match(judgeWiring, /insideOrchestration: \(\) => labelBarOwnedByOthers\(\)/,
+    "a guest in someone else's orchestration window never releases");
   assert.match(judgeWiring, /otherDecoratedPanes: \(\) => liveOrchestrationChildren\(\)/,
     "…and a manager's children are counted, not assumed away");
-  // 2. declare_done's cascade.
+  // 2. declare_done's cascade asks the SAME two questions.
   const cascade = windowAt("const releases = releasesWindowLabels({", 320);
   assert.match(cascade, /remainingDecoratedPanes: remainingClosable \+ liveOrchestrationChildren\(\)/,
     "the cascade counts the manager's children too");
-  assert.match(cascade, /insideOrchestration: Boolean\(process\.env\[ORCHESTRATION_ID_ENV\]/,
-    "…and still never releases from inside a child session");
-  // 3. And the counter itself only answers for a manager.
+  assert.match(cascade, /insideOrchestration: labelBarOwnedByOthers\(\)/,
+    "…and uses the same guest test, not a second spelling of it");
+  // 3. The guest test is about VISIBILITY, not about a role: a manager that
+  //    INHERITED an orchestration carries the id in its environment too, and
+  //    reading the variable alone would file it as a guest forever.
+  const guest = windowAt("function labelBarOwnedByOthers()", 200);
+  assert.match(guest, /ORCHESTRATION_ID_ENV/, "a guest is recognised by the id in its environment");
+  assert.match(guest, /taskMode !== "orchestrator"/, "…but a manager holding that id is not a guest");
+  // 4. And the counter only answers for a manager.
   const counter = windowAt("function liveOrchestrationChildren()", 300);
   assert.match(counter, /taskMode !== "orchestrator"/, "nobody else owns child panes");
   assert.match(counter, /!c\.closedAt/, "…and a closed child is not on screen");

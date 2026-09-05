@@ -2959,8 +2959,10 @@ test("user ask 2026-08-28: the judge SESSION is the managed entity, the pane is 
   assert.match(close, /closeSessionPane\(deps\.tmux, child\.paneId, \{/, "the pane is killed, not a process");
   // …and the window's label bar comes down with the LAST decorated pane, or the
   // border line judge panes now turn on (C1) would be litter in the user's
-  // window forever.
-  assert.match(close, /hideLabels: releasesWindowLabels\(\{/, "the label bar is released by the last close");
+  // window forever — addressed through OUR pane, because the dying one may
+  // already be gone.
+  assert.match(close, /const releases = releasesWindowLabels\(\{/, "the label bar is released by the last close");
+  assert.match(close, /hideLabelsVia: ownPane/, "…and the window is named by a pane that is provably alive");
   assert.match(close, /closed: true/,
     "closing an already-finished child still reports success (idempotent)");
   assert.match(close, /transcript 保留/, "the records remain inspectable after close");

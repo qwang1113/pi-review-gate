@@ -2089,6 +2089,28 @@ export default function reviewGate(pi: ExtensionAPI) {
   }
 
   /**
+   * Does SOMEONE ELSE own this window's label bar?
+   *
+   * True for a session that lives in an orchestration's window without being
+   * its manager: the decorated panes around it belong to another session's
+   * registry, so it can never know whether it is the last one and must never
+   * release the shared border options.
+   *
+   * NOT simply "the environment carries an orchestration id": a MANAGER
+   * carries it too the moment it inherited the orchestration (a relay
+   * successor, or one that attached to it by id), and filing that manager as
+   * a guest would leave the label bar switched on forever — the same defect
+   * this pair of predicates exists to avoid, entered through a third door.
+   *
+   * Deliberately NOT `isOrchestrationChild()` above: that one answers "was I
+   * started as a worker" (it drives the child directive and the mode guard),
+   * and widening it would change two unrelated decisions.
+   */
+  function labelBarOwnedByOthers(): boolean {
+    return Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()) && state.taskMode !== "orchestrator";
+  }
+
+  /**
    * What the children need from the supervisor RIGHT NOW, as text lines.
    *
    * The whole read is the channels — no pane is captured, no text is matched.
@@ -5509,7 +5531,12 @@ export default function reviewGate(pi: ExtensionAPI) {
     // Blanket "a manager never releases" was the previous fix and it swung the
     // defect the other way — a manager with no children left (or none yet)
     // would leave the border line switched on forever. So it counts.
-    insideOrchestration: () => Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()),
+    //
+    // THE ENV ALONE IS NOT THE CHILD TEST: a manager that INHERITED an
+    // orchestration (a relay successor, or one that attached to it by id)
+    // carries the very same variable, and reading it alone would file it as a
+    // child and never let it release either.
+    insideOrchestration: () => labelBarOwnedByOthers(),
     otherDecoratedPanes: () => liveOrchestrationChildren(),
     now: () => Date.now(),
     readText: (path) => {
@@ -6308,9 +6335,12 @@ export default function reviewGate(pi: ExtensionAPI) {
               // are decorated panes of its own.
               const releases = releasesWindowLabels({
                 remainingDecoratedPanes: remainingClosable + liveOrchestrationChildren(),
-                insideOrchestration: Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()),
+                insideOrchestration: labelBarOwnedByOthers(),
               });
-              if (closeSessionPane(run, child.paneId!, { hideLabels: releases }).ok) closed.push(child.paneId!);
+              // Through OUR pane: the dying one may already be gone, and a
+              // failed `setw` would leave the bar switched on for good.
+              const closeOpts = releases ? { hideLabelsVia: ownPane } : {};
+              if (closeSessionPane(run, child.paneId!, closeOpts).ok) closed.push(child.paneId!);
             } catch { /* best effort */ }
           }
           try { reapReviewScratch(child.judgeId); } catch { /* best effort */ }

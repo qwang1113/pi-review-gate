@@ -572,13 +572,17 @@ async function doClose(deps: JudgeSessionToolDeps, params: Record<string, unknow
       && paneClosable(entry, deps.tmuxServer())
       && (livePanes === undefined || livePanes.includes(entry.paneId!)),
     ).length;
+    const releases = releasesWindowLabels({
+      // A project manager's live children are decorated panes too, and they
+      // are the ones a premature release would blank.
+      remainingDecoratedPanes: siblings + deps.otherDecoratedPanes(),
+      insideOrchestration: deps.insideOrchestration(),
+    });
     const killed = closeSessionPane(deps.tmux, child.paneId, {
-      hideLabels: releasesWindowLabels({
-        // A project manager's live children are decorated panes too, and they
-        // are the ones a premature release would blank.
-        remainingDecoratedPanes: siblings + deps.otherDecoratedPanes(),
-        insideOrchestration: deps.insideOrchestration(),
-      }),
+      // Addressed through OUR pane, not the dying one: `setw` only needs a
+      // pane to name the window, and the pane being closed may already be gone
+      // (the user closed it by hand), which would leave the bar switched on.
+      ...(releases ? { hideLabelsVia: ownPane } : {}),
     });
     terminated = killed.ok;
     killNote = killed.ok ? `pane ${child.paneId} 已关` : `关 pane 失败（${killed.error}），登记照样清除`;

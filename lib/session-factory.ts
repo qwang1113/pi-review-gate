@@ -268,18 +268,27 @@ export function refreshSessionPaneTitle(
 /**
  * Close one pane the gate itself opened (谁创建谁回收).
  *
- * `hideLabels` takes the window-level label bar down FIRST, because after
- * `kill-pane` this pane id is no longer a valid `setw` target. The caller
- * decides whether this is the last decorated pane in the window; undoing it
- * while a sibling still needs it would blank a border that is still in use.
+ * `hideLabelsVia` takes the window-level label bar down first, and it takes a
+ * pane id to ADDRESS THE WINDOW WITH — not a boolean, on purpose (reviewer P2,
+ * 2026-09-05). `setw -t <pane>` uses the pane only to name a window, and the
+ * pane being closed is the one id that may already be gone: a user who closed
+ * the review pane by hand leaves a registry row whose id tmux no longer knows,
+ * the option write fails, and the bar stays switched on in the user's window
+ * forever. The CALLER'S OWN pane is in the same window and is provably alive —
+ * the caller is running in it.
+ *
+ * Passing it also expresses the decision: labels come down only when the
+ * caller has established that this is the last decorated pane (see
+ * `releasesWindowLabels`); undoing them while a sibling still needs them
+ * blanks a border that is in use.
  */
 export function closeSessionPane(
   run: PaneRunner,
   paneId: string,
-  opts: { hideLabels?: boolean } = {},
+  opts: { hideLabelsVia?: string } = {},
 ): { ok: true } | { ok: false; error: string } {
-  if (opts.hideLabels) {
-    for (const argv of buildHidePaneLabelsArgv(paneId)) {
+  if (opts.hideLabelsVia) {
+    for (const argv of buildHidePaneLabelsArgv(opts.hideLabelsVia)) {
       try { run(argv); } catch { /* cosmetic */ }
     }
   }

@@ -319,10 +319,15 @@ test("close kills exactly one pane, and takes the label bar down only when asked
   assert.deepEqual(seen, [["kill-pane", "-t", "%7"]]);
 
   const withLabels: string[][] = [];
-  closeSessionPane(happyRunner(withLabels), "%7", { hideLabels: true });
+  // Addressed through the CALLER'S pane (%1), never the dying one (%7): `setw`
+  // only needs a pane to name the window, and the pane being closed is exactly
+  // the id that may already be gone — a failed option write would leave the
+  // border line switched on in the user's window for good.
+  closeSessionPane(happyRunner(withLabels), "%7", { hideLabelsVia: "%1" });
   const flat = withLabels.map((a) => a.join(" "));
   assert.equal(flat.length, 3, "two option resets, then the kill");
   assert.ok(flat[0]!.includes("-u") && flat[0]!.includes("pane-border-status"));
+  assert.ok(flat[0]!.includes("-t %1") && !flat[0]!.includes("%7"), "the window is named by a pane we know is alive");
   assert.equal(flat[2], "kill-pane -t %7", "the options come down BEFORE the pane dies");
 });
 

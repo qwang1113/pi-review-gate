@@ -291,15 +291,20 @@ async function doClose(deps: OrchestratorDeps, params: Record<string, unknown>):
   const closable = closableChild(runtime, childId);
   if (!closable.ok) return fail("review-gate: " + closable.reason);
   const child = closable.child;
-  // The window-level label bar is taken down BEFORE the pane dies, because
-  // after `kill-pane` this pane id is no longer a valid `setw` target — and it
-  // is taken down only for the LAST decorated child, since the option is
-  // shared by every pane in the window (the orchestrator's own included).
-  // Leaving it set forever would be litter in the user's window; removing it
-  // while a sibling is still labelled would blank a border that is still in
-  // use. Purely cosmetic either way, so every failure here is swallowed.
+  // The window-level label bar is taken down only for the LAST decorated
+  // child, since the option is shared by every pane in the window (the
+  // orchestrator's own included). Leaving it set forever would be litter in
+  // the user's window; removing it while a sibling is still labelled would
+  // blank a border that is still in use. Purely cosmetic either way, so every
+  // failure here is swallowed.
+  //
+  // It is addressed through the ORCHESTRATOR'S OWN pane, not the dying child's
+  // (reviewer P2, 2026-09-05): `setw -t <pane>` only names a window, and the
+  // pane being closed is precisely the id that may already be gone.
+  const ownPane = deps.ownPane();
+  const releasesLabels = isLastDecoratedChild(runtime.children, child.id) && ownPane !== undefined;
   const killed = closeSessionPane(deps.tmux, child.paneId, {
-    hideLabels: isLastDecoratedChild(runtime.children, child.id),
+    ...(releasesLabels ? { hideLabelsVia: ownPane! } : {}),
   });
   if (!killed.ok && !/can't find pane|no such pane/i.test(killed.error)) {
     return fail(`review-gate: 关闭 pane 失败 —— ${killed.error}`);

@@ -378,6 +378,12 @@ test("judge_close: the LAST judge takes the window's label bar down with it", as
     flat.indexOf(unset[0]!) < flat.findIndex((s) => s.startsWith("kill-pane")),
     "…and BEFORE the pane dies: after kill-pane that id is no longer a setw target",
   );
+  // …and named by OUR pane (%1), never by the dying judge's (%7): `setw` only
+  // needs a pane to identify the window, and the pane being closed is exactly
+  // the id that may already be gone (a user closing the review pane by hand),
+  // which would leave the bar switched on for good.
+  assert.ok(unset.every((s) => s.includes("-t %1")), "the window is named by a pane that is provably alive");
+  assert.ok(unset.every((s) => !s.includes("%7")), "…not by the pane being closed");
 });
 
 test("judge_close: a CHILD of an orchestration leaves the label bar alone", async () => {
