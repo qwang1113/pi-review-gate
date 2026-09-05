@@ -2069,6 +2069,26 @@ export default function reviewGate(pi: ExtensionAPI) {
   const SUPERVISION_INTERVAL_MS = 10_000;
 
   /**
+   * How many DECORATED child panes this session still owns.
+   *
+   * Only a project manager owns any: they are the panes `orchestrator_spawn`
+   * coloured and labelled. Everything else — a plain loop session, a child of
+   * an orchestration — owns none, and a child could not count the manager's
+   * anyway (they are in another session's registry).
+   *
+   * It exists for ONE decision: may this close take the window's shared label
+   * bar down with it (`releasesWindowLabels`)? Counting only judge panes made
+   * a manager blank its children's borders; counting nothing made a manager
+   * leave the bar switched on forever.
+   */
+  function liveOrchestrationChildren(): number {
+    if (state.taskMode !== "orchestrator") return 0;
+    try {
+      return orchestratorDeps.runtime().children.filter((c) => !c.closedAt).length;
+    } catch { return 0; }
+  }
+
+  /**
    * What the children need from the supervisor RIGHT NOW, as text lines.
    *
    * The whole read is the channels — no pane is captured, no text is matched.
@@ -5477,15 +5497,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     tmux: (argv) => runTmux(argv),
     ownPane: () => process.env.TMUX_PANE?.trim() || undefined,
     tmuxServer: () => tmuxServerFrom(process.env),
-    // The window's label bar belongs to the ORCHESTRATION when there is one,
-    // and BOTH sides of one must say so: a child session carries the
-    // orchestration id in its environment, while the project manager MINTS its
-    // id internally and has no such variable (reviewer P2, 2026-09-05 — a PM
-    // closing its own plan auditor would otherwise take the bar down and blank
-    // the borders of children that are still running). Its mode is what says
-    // it is a manager.
-    insideOrchestration: () =>
-      Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()) || state.taskMode === "orchestrator",
+    // WHO ELSE HAS A DECORATED PANE IN THIS WINDOW — the two halves of that
+    // question, because getting either wrong is visible to the user
+    // (reviewer P2 ×2, 2026-09-05).
+    //
+    // A CHILD of an orchestration cannot count the manager's panes at all:
+    // they are in another session's registry. So it never releases the bar and
+    // the manager does — that is `insideOrchestration`.
+    //
+    // A MANAGER, on the other hand, CAN count them: they are its own children.
+    // Blanket "a manager never releases" was the previous fix and it swung the
+    // defect the other way — a manager with no children left (or none yet)
+    // would leave the border line switched on forever. So it counts.
+    insideOrchestration: () => Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()),
+    otherDecoratedPanes: () => liveOrchestrationChildren(),
     now: () => Date.now(),
     readText: (path) => {
       try {
@@ -6275,15 +6300,15 @@ export default function reviewGate(pi: ExtensionAPI) {
           if (paneClosable(child, tmuxServer) && ownPane) {
             remainingClosable -= 1;
             try {
-              // The LAST one takes the window's label bar down with it — judge
-              // panes turn it on (C1), so something has to turn it off or the
-              // gate leaves a permanent mark on the user's window. Never inside
-              // an orchestration: there the project manager owns that bar and
-              // its children still need it — and a MANAGER is one too, which
-              // its own environment does not say (it mints its id internally).
+              // The LAST decorated pane takes the window's label bar down with
+              // it — judge panes turn it on (C1), so something has to turn it
+              // off or the gate leaves a permanent mark on the user's window.
+              // A CHILD of an orchestration never does (it cannot see the
+              // manager's panes); a MANAGER counts its live children, which
+              // are decorated panes of its own.
               const releases = releasesWindowLabels({
-                remainingDecoratedPanes: remainingClosable,
-                insideOrchestration: Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()) || orchestratorMode,
+                remainingDecoratedPanes: remainingClosable + liveOrchestrationChildren(),
+                insideOrchestration: Boolean(process.env[ORCHESTRATION_ID_ENV]?.trim()),
               });
               if (closeSessionPane(run, child.paneId!, { hideLabels: releases }).ok) closed.push(child.paneId!);
             } catch { /* best effort */ }

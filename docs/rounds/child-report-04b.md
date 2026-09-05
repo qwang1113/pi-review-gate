@@ -251,8 +251,25 @@ judge 关闭不收 bar（→ 两条测试红）、去掉 `paneClosable` 守卫�
 「根本没有 pane」——这正是上一轮那条「假实现要跟着被测行为一起长」的同一根因。
 
 第三轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2361 pass / 0 fail**。
-变异复验：把兄弟计数改回数登记行 → 「只是登记行的兄弟」测试红；把
-`insideOrchestration` 改回只读 env → 「BOTH sides…」结构测试红。
+变异复验：把兄弟计数改回数登记行 → 「只是登记行的兄弟」测试红。
+
+## 二·补三 · 第四轮：把「谁能收 bar」彻底想清楚
+
+第三轮 reviewer 又流出 2 条 P2，都在同一处，而且第二条正中我第三轮的过度纠偏：
+
+| # | findings | 处置 |
+|---|---|---|
+| P2-E | 我第三轮把「PM 也算 insideOrchestration」写死成**永不收**，于是 PM 自己开的 judge pane 打开了边框行却**没有任何路径**为它收起——从「提前收」翻到了「永远不收」 | 重新定义两个输入：`insideOrchestration` **只**表示「我是编排的子会话」（看不见项目经理的 pane，所以永不收）；项目经理**能**数自己的 pane，于是新增 `otherDecoratedPanes()`（= 活着的子会话数，非 PM 恒为 0）并计入 `remainingDecoratedPanes`。judge_close 与 declare_done 级联都改。新增两条行为测试（有子会话→不收 / 没有子会话→收）+ 结构测试改写成「两个站点都要问 child 与 manager 两个事实」 |
+| P2-F | 「读不到 pane 列表就按兄弟仍在算」这个 fail-safe 分支没有测试，可以被反向改写而全绿 | 夹具加 `paneListReadable` 开关，新增测试；变异复验：把条件反写成 `livePanes !== undefined && …` → 该测试红 |
+
+第四轮验收：`npx tsc --noEmit` EXIT=0；`npm test` **2364 pass / 0 fail**。
+变异复验：PM 不再数子会话 → 「MANAGER counts its children」红；fail-safe 反写 → 「unreadable pane list」红。
+
+**这条经验值得单独记（项目层面）**：一个「共享资源谁来收」的判定，正确形状是
+**「我还能看见几个在用它的人」**，而不是「我是不是某种角色」。我前两次都写成了角色判断
+（先是「不是编排就收」，再是「是编排就不收」），两次都错在同一个地方——角色不等于视野：
+项目经理看得见自己的子会话，编排子会话看不见项目经理的 pane。改成数「我能看见的、还在
+用它的 pane」之后，两种角色自然各归各位。
 
 
 ---

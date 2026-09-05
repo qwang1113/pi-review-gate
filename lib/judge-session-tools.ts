@@ -132,14 +132,23 @@ export interface JudgeSessionToolDeps {
   /** The tmux server this process talks to (lib/hierarchy.ts `tmuxServerFrom`). */
   tmuxServer(): string | undefined;
   /**
-   * Does an ORCHESTRATION own this window's label bar?
+   * Is this session a CHILD of an orchestration?
    *
-   * The window-level border options are shared by every pane in the window. A
-   * project manager sets and unsets them around its children, so a child
-   * session closing its own judge must not release them and blank its
-   * siblings' borders — see `releasesWindowLabels`.
+   * The window-level border options are shared by every pane in the window,
+   * and a child cannot see the project manager's panes at all — they live in
+   * another session's registry. So it never releases the bar; the manager,
+   * which CAN count them, does (see `otherDecoratedPanes`).
    */
   insideOrchestration(): boolean;
+  /**
+   * Decorated panes this session owns that are NOT judges — a project
+   * manager's live children. Zero for everyone else.
+   *
+   * Without it a manager that closed its own auditor while children were still
+   * running would blank their borders, and a manager with no children would
+   * never release the bar at all (both measured, 2026-09-05).
+   */
+  otherDecoratedPanes(): number;
   /** Injectable clock. */
   now(): number;
   /** Whole file, or undefined when it is absent/unreadable. */
@@ -565,7 +574,9 @@ async function doClose(deps: JudgeSessionToolDeps, params: Record<string, unknow
     ).length;
     const killed = closeSessionPane(deps.tmux, child.paneId, {
       hideLabels: releasesWindowLabels({
-        remainingDecoratedPanes: siblings,
+        // A project manager's live children are decorated panes too, and they
+        // are the ones a premature release would blank.
+        remainingDecoratedPanes: siblings + deps.otherDecoratedPanes(),
         insideOrchestration: deps.insideOrchestration(),
       }),
     });

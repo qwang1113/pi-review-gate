@@ -138,23 +138,34 @@ test("the judge probe repaints the border from the channel projection (C2)", () 
   assert.match(body, /paintTitle\("done"\)/, "…and a finished round says so on the border");
 });
 
-test("BOTH sides of an orchestration recognise that the label bar is not theirs", () => {
-  // The window-level border line is shared by every pane in the window, so it
-  // is released by the last decorated pane — EXCEPT inside an orchestration,
-  // where the project manager owns it. Recognising "inside an orchestration"
-  // takes two different facts, and asking only the first one was a measured
-  // defect (reviewer P2, 2026-09-05): a CHILD carries the orchestration id in
-  // its environment, while the MANAGER mints its id internally and has no such
-  // variable — its gate mode is what says it is one. A manager that failed the
-  // test would blank the borders of children that are still running.
+test("both label-bar release sites ask about a CHILD and about a MANAGER's children", () => {
+  // The window-level border line is shared by every pane in the window, so the
+  // LAST decorated pane releases it. "Last" needs two different facts, and each
+  // was measured as a defect on its own (reviewer P2 ×2, 2026-09-05):
+  //   - a CHILD of an orchestration cannot see the manager's panes, so it never
+  //     releases (recognised by the orchestration id in its environment);
+  //   - a MANAGER has decorated panes that are not judges — its children — and
+  //     must count them, or it blanks their borders when it closes its own
+  //     auditor, and never releases at all when it has none.
   const ext = readFileSync(join(ROOT, "extensions", "review-gate.ts"), "utf8");
-  const sites = [
-    ext.slice(ext.indexOf("insideOrchestration: () =>"), ext.indexOf("insideOrchestration: () =>") + 200),
-    ext.slice(ext.indexOf("const releases = releasesWindowLabels({"), ext.indexOf("const releases = releasesWindowLabels({") + 300),
-  ];
-  for (const site of sites) {
-    assert.ok(site.length > 0, "both wiring sites must exist");
-    assert.match(site, /ORCHESTRATION_ID_ENV/, "a child is recognised by its environment");
-    assert.match(site, /orchestrator/, "…and a manager by its mode");
-  }
+  const windowAt = (needle: string, chars: number): string => {
+    const at = ext.indexOf(needle);
+    assert.ok(at > 0, `${needle} must exist in the extension`);
+    return ext.slice(at, at + chars);
+  };
+  // 1. judge_close's wiring.
+  const judgeWiring = windowAt("insideOrchestration: () =>", 260);
+  assert.match(judgeWiring, /ORCHESTRATION_ID_ENV/, "a child is recognised by its environment");
+  assert.match(judgeWiring, /otherDecoratedPanes: \(\) => liveOrchestrationChildren\(\)/,
+    "…and a manager's children are counted, not assumed away");
+  // 2. declare_done's cascade.
+  const cascade = windowAt("const releases = releasesWindowLabels({", 320);
+  assert.match(cascade, /remainingDecoratedPanes: remainingClosable \+ liveOrchestrationChildren\(\)/,
+    "the cascade counts the manager's children too");
+  assert.match(cascade, /insideOrchestration: Boolean\(process\.env\[ORCHESTRATION_ID_ENV\]/,
+    "…and still never releases from inside a child session");
+  // 3. And the counter itself only answers for a manager.
+  const counter = windowAt("function liveOrchestrationChildren()", 300);
+  assert.match(counter, /taskMode !== "orchestrator"/, "nobody else owns child panes");
+  assert.match(counter, /!c\.closedAt/, "…and a closed child is not on screen");
 });

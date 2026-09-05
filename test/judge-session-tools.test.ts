@@ -46,6 +46,10 @@ interface Fake {
   tmuxServer: string | undefined;
   /** Does an orchestration own this window's label bar? */
   insideOrchestration: boolean;
+  /** Decorated panes this session owns that are not judges (a PM's children). */
+  otherDecoratedPanes: number;
+  /** Whether the fake tmux can answer `list-panes` at all. */
+  paneListReadable: boolean;
   panes: string[];
   /** Every tmux argv this fake was asked to run, in order. */
   tmuxCalls: string[][];
@@ -95,6 +99,10 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     // A plain loop session by default: it owns its window's label bar, so its
     // last judge close takes it down (inside an orchestration the manager does).
     insideOrchestration: false,
+    /** Decorated panes that are not judges — a project manager's children. */
+    otherDecoratedPanes: 0,
+    /** Can tmux answer `list-panes`? False = missing information, not death. */
+    paneListReadable: true,
     panes: ["%1", "%7"],
     tmuxCalls: [] as string[][],
     announced: new Set<string>(),
@@ -131,7 +139,12 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     channelHome: () => HOME,
     tmux: (argv) => {
       state.tmuxCalls.push([...argv]);
-      if (argv[0] === "list-panes") return { ok: true, stdout: `${state.panes.join("\n")}\n`, stderr: "" };
+      if (argv[0] === "list-panes") {
+        // A tmux that cannot answer is a real state, and the gate treats it as
+        // missing information rather than as a fact — tests need to reach it.
+        if (!state.paneListReadable) return { ok: false, stdout: "", stderr: "no server" };
+        return { ok: true, stdout: `${state.panes.join("\n")}\n`, stderr: "" };
+      }
       if (argv[0] === "kill-pane") {
         const pane = String(argv[argv.length - 1]);
         state.panes = state.panes.filter((p) => p !== pane);
@@ -144,6 +157,7 @@ function fake(register: (host: ToolHost, deps: JudgeSessionToolDeps) => void = r
     // same server, so the ordinary paths behave exactly as they did.
     tmuxServer: () => state.tmuxServer,
     insideOrchestration: () => state.insideOrchestration,
+    otherDecoratedPanes: () => state.otherDecoratedPanes,
     now: () => 1_700_000_000_000,
     readText: (path) => state.files.get(path),
     announcedQuestions: () => state.announced,
@@ -366,9 +380,9 @@ test("judge_close: the LAST judge takes the window's label bar down with it", as
   );
 });
 
-test("judge_close: inside an orchestration the label bar is left alone", async () => {
-  // There the PROJECT MANAGER owns that bar and its other children still need
-  // it; a child session releasing it would blank its siblings' borders.
+test("judge_close: a CHILD of an orchestration leaves the label bar alone", async () => {
+  // It cannot see the project manager's panes at all, so it can never know it
+  // is the last decorated one; releasing would blank its siblings' borders.
   const f = fake();
   f.insideOrchestration = true;
   seed(f);
@@ -376,6 +390,53 @@ test("judge_close: inside an orchestration the label bar is left alone", async (
   const flat = f.tmuxCalls.map((a) => a.join(" "));
   assert.equal(flat.filter((s) => s.startsWith("setw")).length, 0, "no window option is touched");
   assert.ok(flat.some((s) => s.startsWith("kill-pane")), "the pane itself is still closed");
+});
+
+test("judge_close: a MANAGER counts its children, and releases once they are gone", async () => {
+  // A manager mints its orchestration id in process, so its environment says
+  // nothing — it is recognised by its own live children. Blanket "a manager
+  // never releases" left the bar switched on forever when it had none
+  // (reviewer P2, 2026-09-05).
+  const withChildren = fake();
+  withChildren.otherDecoratedPanes = 2;
+  seed(withChildren);
+  await call(withChildren, "judge_close", { role: "reviewer" });
+  assert.equal(
+    withChildren.tmuxCalls.filter((a) => a[0] === "setw").length, 0,
+    "two children are still on screen: their borders must not be blanked",
+  );
+
+  const alone = fake();
+  alone.otherDecoratedPanes = 0;
+  seed(alone);
+  await call(alone, "judge_close", { role: "reviewer" });
+  assert.equal(
+    alone.tmuxCalls.filter((a) => a[0] === "setw" && a.includes("-u")).length, 2,
+    "with no children left this judge IS the last decorated pane",
+  );
+});
+
+test("judge_close: an unreadable pane list keeps the bar up (missing info is never a licence)", async () => {
+  // The sibling count reads `list-panes`. When tmux cannot answer, the choice
+  // is between litter (keep the bar) and blanking a border that is still in
+  // use — and only one of those is recoverable by the next spawn.
+  const f = fake();
+  seed(f);
+  f.paneListReadable = false;
+  f.table.current = {
+    ...f.table.current,
+    "rg-adviser-xyz": {
+      ...f.table.current["rg-reviewer-abc"]!,
+      judgeId: "rg-adviser-xyz",
+      role: "adviser",
+      paneId: "%9",
+    },
+  };
+  await call(f, "judge_close", { role: "reviewer" });
+  assert.equal(
+    f.tmuxCalls.filter((a) => a[0] === "setw").length, 0,
+    "a sibling that cannot be checked counts as present",
+  );
 });
 
 test("judge_close: a sibling judge still open keeps the label bar up", async () => {
