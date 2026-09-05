@@ -93,7 +93,9 @@
   - **谁不受影响**：judge pane 与编排子会话——它们本来就与 opener 同处一个
     worktree，且不写主 sidecar（judge 不写门禁状态、子会话写自己的
     `RG_STATE_VARIANT` 分片），因此天然豁免。`normal` 模式也不发拒绝（该模式的
-    定义就是门禁整体关闭），但仍写心跳，好让会 enforce 的会话看见它。
+    定义就是门禁整体关闭）：worktree **空闲**时它照常写心跳，好让会 enforce 的
+    会话看见它；worktree **已被占用**时它既不拒绝、也不写心跳——凭据属于占用者，
+    覆盖它等于把保护抢走（而且退出时还会被自己当成「我的」删掉）。
   - **同时消失的**：旧的「another Pi session … last wrote this repo's gate state
     at …」四小时警告已删除——同一个问题只留一套存活判定（哲学三）。
 - **judge 不再写主仓库门禁状态（2026-09-05，用户可见）**：`.pi/review-gate-state.json`
