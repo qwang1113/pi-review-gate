@@ -18,7 +18,7 @@
  * table or a verdict — no clock, no filesystem, no tmux.
  */
 
-import type { PendingAudit } from "./audit-round.ts";
+import type { PendingAudit } from "./audit-round-specs.ts";
 
  /** One judge pane the gate knows about. */
 export interface JudgeEntry {

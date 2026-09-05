@@ -11,20 +11,22 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  ADVICE_ROUND_SPEC,
-  GOAL_AUDIT_SPEC,
-  PLAN_AUDIT_SPEC,
-  REVIEW_ROUND_SPEC,
   describeRoundMiss,
   runAuditRound,
   selectRoundReport,
   settleAuditRound,
-  specForRound,
   type AuditRoundEntry,
-  type PendingAudit,
   type RunAuditRoundDeps,
   type SettleAuditRoundDeps,
 } from "../lib/audit-round.ts";
+import {
+  ADVICE_ROUND_SPEC,
+  GOAL_AUDIT_SPEC,
+  PLAN_AUDIT_SPEC,
+  REVIEW_ROUND_SPEC,
+  specForRound,
+  type PendingAudit,
+} from "../lib/audit-round-specs.ts";
 import type { ChannelRecord, ChannelReportRecord, ReportConclusion } from "../lib/orchestrator-channel.ts";
 import type { PlanAuditRecord } from "../lib/orchestrator-plan-audit.ts";
 

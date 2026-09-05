@@ -3887,6 +3887,16 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
   // second, unaccounted-for path out of a round.
   const internalCloses = [...SRC.matchAll(/callTool\("judge_close"/g)];
   assert.equal(internalCloses.length, 1, "one close wiring, injected into the engine");
+
+  // ENGINE MERGED, WORDING NOT. The four specs live in their own module, so a
+  // fifth kind is a new entry there and nothing else — and the engine cannot
+  // quietly grow a per-kind sentence of its own.
+  assert.doesNotMatch(AUDIT_ROUND_SRC, /export const \w+_SPEC: AuditRoundSpec = \{/,
+    "the wording belongs to lib/audit-round-specs.ts — the engine only imports it");
+  const specs = readFileSync(join(ROOT, "lib", "audit-round-specs.ts"), "utf8");
+  for (const name of ["GOAL_AUDIT_SPEC", "PLAN_AUDIT_SPEC", "REVIEW_ROUND_SPEC", "ADVICE_ROUND_SPEC"]) {
+    assert.match(specs, new RegExp(`export const ${name}: AuditRoundSpec = \\{`), `${name} lives there`);
+  }
 });
 
 test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict P0)", () => {

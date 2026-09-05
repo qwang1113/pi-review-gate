@@ -207,14 +207,16 @@ import {
   planAuditHash,
 } from "../lib/orchestrator-plan-audit.ts";
 import {
-  GOAL_AUDIT_SPEC,
-  PLAN_AUDIT_SPEC,
   runAuditRound,
   settleAuditRound,
-  type PendingAudit,
   type RunAuditRoundDeps,
   type SettleAuditRoundDeps,
 } from "../lib/audit-round.ts";
+import {
+  GOAL_AUDIT_SPEC,
+  PLAN_AUDIT_SPEC,
+  type PendingAudit,
+} from "../lib/audit-round-specs.ts";
 
 import {
   decideSupervisionEvents,
