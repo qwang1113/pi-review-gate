@@ -362,9 +362,15 @@ code review 的结论段也归到同一个 `settleAuditRound`，所以「哪份 
 
 **「已被 wait 记下」不是过期（2026-09-05，adviser 发现的 P0）**：同步审计链的等待走的就是
 `judge_wait`，而它自己也经引擎记录并**消费游标**。所以链回来时本轮 report 往往已经记完了 ——
-引擎把这种 `already-consumed` 当作**正常路径**，只有 `round-mismatch` / `no-report` 才是真过期、
-才 fail-closed。搞反的代价是每一次 goal/plan 审计都失败，而改这条链的会话跑的是启动时加载的
-旧扩展、自己测不出来，只能靠 `test/audit-round.test.ts` 的两条单测钉住。
+把这种情况当成过期，代价是每一次 goal/plan 审计都失败。而改这条链的会话跑的是启动时加载的
+旧扩展、自己测不出来，只能靠 `test/audit-round.test.ts` 的单测钉住。
+
+**怎么判断「已经记完了」：看记录留下的那对写入，不要再问一次 settle（2026-09-05，reviewer
+发现的第二个 P0）**。第一版判据是「二次 settle 返回 `already-consumed`」，它在生产里走不到 ——
+记录成功会先 `forgetPending`，而 pending 正是 `specForRound` 挑 kind 的依据，所以二次 settle
+返回的是 `unknown`，和「压根没派过审计」长得一模一样。现在的判据是 `roundClosedDuringWait`：
+**pending 已被消费**且**游标已从等待前的位置前进** —— 这两件事只有 `settleAuditRound` 记录
+成功时才会同时发生。两个条件缺一，就由本链自己 settle，仍然 fail-closed。
 
 配套的游标规则同样重要：`dispatchJudgeRound` 复用 pane 时**保留** `lastReportId`（重派不
 等于把旧 report 变新），`fresh:true` 开新 pane 时把游标**播种**到 channel 当前最新那条

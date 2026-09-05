@@ -549,6 +549,34 @@ test("run: a consumed pending with an unmoved cursor is NOT treated as recorded"
   assert.deepEqual(state.closed, ["goal-auditor"]);
 });
 
+// …AND THE MIRROR IMAGE. A cursor that moved while the pending entry is still
+// armed is not a recorded round either — a record consumes BOTH, so seeing one
+// without the other means no record landed. Without this the "pending must be
+// gone" half of the detector would only be pinned by a source-text regex.
+test("run: an advanced cursor with an ARMED pending is NOT treated as recorded", async () => {
+  const { state, deps } = makeRunDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
+  });
+  // The cursor advances (the report was surfaced) but nothing was recorded, so
+  // the pending audit is still armed.
+  deps.awaitRoundEnd = async () => {
+    state.entry = { ...state.entry!, lastReportId: "rep-2" };
+    return { ok: true, detail: "" };
+  };
+  const outcome = await runAuditRound(deps, {
+    spec: GOAL_AUDIT_SPEC,
+    root: ROOT,
+    task: "审计这份草稿",
+    pending: { kind: "goal", draft: "# 目标草稿", startedAt: NOW },
+  });
+  assert.equal(outcome.ok, false, "an armed pending means the verdict was never recorded");
+  assert.match(outcome.ok === false ? outcome.text : "", /什么都没有记录/);
+  assert.deepEqual(state.goalDrafts, [], "and settling again cannot record it either — the report is consumed");
+  assert.deepEqual(state.closed, ["goal-auditor"]);
+});
+
+
 
 // …but a genuinely stale round still records nothing. The two look alike from
 // the outside and the engine must keep telling them apart.
