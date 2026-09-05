@@ -67,10 +67,47 @@ test("selectRoundReport: an empty channel closes nothing", () => {
 test("selectRoundReport: the P0 — an older round's BLOCKED never closes a resubmit", () => {
   // Round 1 BLOCKED, recorded and consumed; the resubmit dispatches round 2.
   // The channel still holds only round 1: selecting for round 2 must miss.
+  //
+  // THIS IS THE COMBINED CELL, and the reason the ROUND is checked first: the
+  // report is BOTH already-consumed AND from another round. Were the cursor
+  // checked first, `already-consumed` would MASK the round mismatch — harmless
+  // while nothing treats that reason as a pass, and an exact rerun of the P0
+  // `8ea7eec` fixed the moment something does. The round is what makes a
+  // report this round's; the cursor is the second net, not the safety.
   const records = [childReport("rep-round-1", { round: 1 })];
   assert.deepEqual(
     selectRoundReport(records, { binding: "round-bound", expectedRound: 2, consumedReportId: "rep-round-1" }),
+    { ok: false, reason: "round-mismatch", reportId: "rep-round-1", round: 1 },
+    "a consumed report from ANOTHER round is refused as a round mismatch, not as a consumed one",
+  );
+});
+
+// The same cell for a CURSOR-ONLY kind, where the answer is deliberately
+// different: a code review has no round binding at all, so its consumed report
+// is refused for being consumed. Pinning both keeps the per-kind difference
+// visible instead of looking like an inconsistency.
+test("selectRoundReport: a cursor-only kind refuses that same report as consumed", () => {
+  const records = [childReport("rep-round-1", { round: 1 })];
+  assert.deepEqual(
+    selectRoundReport(records, { binding: "cursor-only", expectedRound: 2, consumedReportId: "rep-round-1" }),
     { ok: false, reason: "already-consumed", reportId: "rep-round-1" },
+  );
+});
+
+// AND THE CELL THAT MUST STAY A PASS: this round's own report, consumed or
+// not, is only ever refused for the cursor — never for its round.
+test("selectRoundReport: THIS round's report is never refused on round grounds", () => {
+  const records = [childReport("rep-round-2", { round: 2 })];
+  const fresh = selectRoundReport(records, {
+    binding: "round-bound",
+    expectedRound: 2,
+    consumedReportId: "rep-round-1",
+  });
+  assert.equal(fresh.ok, true, "unconsumed and this round's ⇒ it closes the round");
+  assert.deepEqual(
+    selectRoundReport(records, { binding: "round-bound", expectedRound: 2, consumedReportId: "rep-round-2" }),
+    { ok: false, reason: "already-consumed", reportId: "rep-round-2" },
+    "consumed but this round's ⇒ refused for the cursor, which is the only safe way to reach that reason",
   );
 });
 

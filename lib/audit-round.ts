@@ -101,14 +101,27 @@ export function selectRoundReport(
     if (r.kind === "report" && r.from === "child") last = r;
   }
   if (!last) return { ok: false, reason: "no-report" };
+  // ROUND FIRST, CURSOR SECOND — the order is load-bearing (2026-09-05).
+  //
+  // For a round-bound kind the ROUND is what makes a report this round's; the
+  // cursor is a second safety net, not the safety itself. Checking the cursor
+  // first would let `already-consumed` MASK a round mismatch: a report from an
+  // older round that happens to be the consumed one comes back as "you already
+  // recorded this" rather than "this is not your round". Nothing in the engine
+  // treats `already-consumed` as a pass today — but the moment someone does,
+  // that masking would resurrect the P0 `8ea7eec` fixed (an older round's
+  // verdict recorded against a new draft). Ordering it this way makes the
+  // roundSeq binding structural instead of something the next caller has to
+  // remember.
+  if (opts.binding === "round-bound" && opts.expectedRound !== undefined) {
+    const round =
+      typeof last.round === "number" && Number.isFinite(last.round) ? Math.floor(last.round) : 0;
+    if (round !== Math.floor(opts.expectedRound)) {
+      return { ok: false, reason: "round-mismatch", reportId: last.reportId, round };
+    }
+  }
   if (last.reportId === opts.consumedReportId) {
     return { ok: false, reason: "already-consumed", reportId: last.reportId };
-  }
-  if (opts.binding === "cursor-only") return { ok: true, report: last };
-  const round =
-    typeof last.round === "number" && Number.isFinite(last.round) ? Math.floor(last.round) : 0;
-  if (opts.expectedRound !== undefined && round !== Math.floor(opts.expectedRound)) {
-    return { ok: false, reason: "round-mismatch", reportId: last.reportId, round };
   }
   return { ok: true, report: last };
 }
