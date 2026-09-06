@@ -151,6 +151,51 @@ test("CONSTRAINT 8: a real landing outside the boundary still refuses, and says 
   assert.match(outside.reason!, /sessionEditedFiles/, "and names the fact it judged, so rewording is not a way through");
 });
 
+test("CONSTRAINT 8: a completion report written OUTSIDE the repo is not a breach (2026-09-06 方案 C)", () => {
+  // The measured false positive: a child writes its round report to /tmp — a
+  // process artifact that cannot pollute the worktree, enter a checkpoint or
+  // reach a tracked file — and the proxy approval was refused, twice in one
+  // round, each time costing a manual approval.
+  const task: PlanTask = {
+    id: "t9c", title: "t9c", fileBoundaries: ["lib/orchestrator", "test"],
+    dependsOn: [], execution: "serial", status: "running",
+  };
+  assert.deepEqual(
+    proxyApprovalProblems(["lib/orchestrator/plan.ts", "/tmp/rg-task-report.md"], task),
+    { ok: true, outside: [] },
+  );
+});
+
+test("CONSTRAINT 8 SAFETY EDGE: an out-of-repo SENSITIVE landing still refuses", () => {
+  // The exemption above is for noise, not for secrets. These are the paths as
+  // the sidecar really holds them — already expanded, no literal `~`.
+  const task: PlanTask = {
+    id: "t9c", title: "t9c", fileBoundaries: ["lib/orchestrator", "test"],
+    dependsOn: [], execution: "serial", status: "running",
+  };
+  for (const p of [
+    "/Users/someone/.ssh/id_rsa",
+    "/Users/someone/.pi/review-gate.json",
+    "/Users/someone/.aws/credentials",
+    "/tmp/staging/.env",
+  ]) {
+    const refused = proxyApprovalProblems(["lib/orchestrator/plan.ts", p], task);
+    assert.equal(refused.ok, false, p);
+    assert.deepEqual(refused.outside, [p], p);
+  }
+});
+
+test("the refusal copy states both halves of the rule, so a manager reading it knows which is which", () => {
+  const task: PlanTask = {
+    id: "t9c", title: "t9c", fileBoundaries: ["lib/orchestrator"],
+    dependsOn: [], execution: "serial", status: "running",
+  };
+  const refused = proxyApprovalProblems(["/Users/someone/.ssh/config"], task);
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason!, /仓库外/, "it explains what out-of-repo means for this check");
+  assert.match(refused.reason!, /敏感/, "and that sensitive out-of-repo paths are the exception");
+});
+
 // ---------------------------------------------------------------------------
 // CONSTRAINTS 9 and 14 — who may do what
 // ---------------------------------------------------------------------------

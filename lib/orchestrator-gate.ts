@@ -29,7 +29,7 @@
  * Pure module: no IO, no git, no tmux.
  */
 
-import { pathsOutsideBoundaries } from "./orchestrator-boundaries.ts";
+import { editedPathsOutsideBoundaries } from "./orchestrator-boundaries.ts";
 import {
   openDecisions,
   planHash,
@@ -182,13 +182,23 @@ export interface ProxyGoalVerdict {
  * every round rather than once at approval time — which is a STRONGER
  * guarantee than the old text scan, not a weaker one: it cannot be talked
  * around by rewording, and it does not stop watching after the approval.
+ *
+ * WHAT DOES NOT COUNT (2026-09-06 user decision 方案 C, wired 2026-09-17):
+ * a landing OUTSIDE the repository is a process artifact, not a deliverable —
+ * a completion report in `/tmp` cannot pollute the worktree, cannot enter a
+ * checkpoint and cannot reach a tracked file. It used to be reported as a
+ * violation for a purely mechanical reason (an absolute path can never be
+ * covered by a repo-relative declaration), and each false positive bought a
+ * manual approval. Out-of-repo SENSITIVE paths remain violations, so the
+ * exemption is for noise and not for secrets — see
+ * {@link editedPathsOutsideBoundaries}.
  */
 export function proxyApprovalProblems(
   editedFiles: readonly string[],
   task: PlanTask,
 ): ProxyGoalVerdict {
   const edited = editedFiles.map((f) => String(f ?? "").trim()).filter(Boolean);
-  const outside = pathsOutsideBoundaries(edited, task.fileBoundaries);
+  const outside = editedPathsOutsideBoundaries(edited, task.fileBoundaries);
   if (outside.length === 0) return { ok: true, outside: [] };
   return {
     ok: false,
@@ -198,7 +208,8 @@ export function proxyApprovalProblems(
       `${outside.slice(0, 8).join(", ")}${outside.length > 8 ? " 等" : ""}。任务边界是 ${task.fileBoundaries.join(", ")}。` +
       "这是范围变更，不是技术取舍：用 `orchestrator_notify` 通知用户，由他决定是扩边界还是让子会话回滚这些改动。" +
       "（判定依据是它 sidecar 里的实际落点 sessionEditedFiles，不是 goal 正文里出现过哪些路径 —— " +
-      "改写 goal 文本不会让这条通过。）",
+      "改写 goal 文本不会让这条通过。仓库外的流程产物如 /tmp 下的报告不算越界；" +
+      "仓库外的敏感路径如 ~/.ssh、~/.pi 下的文件仍然算。）",
   };
 }
 

@@ -1402,12 +1402,26 @@ test("readonly-drill stall guard: in-memory nudge wired at the read-family and b
   const readAt = resultBody.indexOf("READ_ONLY_TOOL_NAMES.has(event.toolName)");
   assert.ok(readAt >= 0);
   assert.ok(resultBody.indexOf("evaluateReadonlyStall", readAt) > readAt, "read-family branch must fold the counter");
-  assert.ok(resultBody.indexOf("READONLY_STALL_NUDGE", readAt) > readAt, "read-family branch must append the nudge");
+  // The nudge TEXT comes from readonlyStallNudgeFor(state.taskMode) — the
+  // module decides who hears it (normal + orchestrator hear nothing), so the
+  // extension must never inline the constant at a call site again.
+  assert.ok(
+    resultBody.indexOf("readonlyStallNudgeFor(state.taskMode)", readAt) > readAt,
+    "read-family branch must take the nudge text from the mode-aware selector",
+  );
   // 2. The bash branch carries the counter + nudge too (drill workhorse).
   assert.ok(resultBody.indexOf('event.toolName === "bash"') > readAt);
   const bashAt = resultBody.indexOf('event.toolName === "bash"');
   assert.ok(resultBody.indexOf("evaluateReadonlyStall", bashAt) > bashAt, "bash branch must fold the counter");
-  assert.ok(resultBody.indexOf("READONLY_STALL_NUDGE", bashAt) > bashAt, "bash branch must append the nudge");
+  assert.ok(
+    resultBody.indexOf("readonlyStallNudgeFor(state.taskMode)", bashAt) > bashAt,
+    "bash branch must take the nudge text from the mode-aware selector",
+  );
+  assert.equal(
+    (resultBody.match(/READONLY_STALL_NUDGE/g) ?? []).length,
+    0,
+    "no call site may inline the constant — the selector is the only source of the text",
+  );
   // 3. Three fold sites total: edit-success reset, read-family count, bash count.
   const stallSites = resultBody.split("evaluateReadonlyStall").length - 1;
   assert.equal(stallSites, 3, "counter must be folded at exactly three sites (edit reset + read + bash)");

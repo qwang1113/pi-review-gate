@@ -4,6 +4,7 @@ import {
   READONLY_STALL_LIMIT,
   READONLY_STALL_NUDGE,
   evaluateReadonlyStall,
+  readonlyStallNudgeFor,
 } from "../lib/readonly-stall.ts";
 
 test("the threshold constant is the user's chosen 30 consecutive reads", () => {
@@ -79,4 +80,40 @@ test("the nudge names the drill, steers to verify-by-doing, and does not block",
   assert.match(READONLY_STALL_NUDGE, /没有拦截/);
   assert.doesNotMatch(READONLY_STALL_NUDGE, /\bblock(ed|ing)?\b/i, "nudges must not claim to block");
   assert.doesNotMatch(READONLY_STALL_NUDGE, /interrupt/i);
+});
+
+// ---------------------------------------------------------------------------
+// readonlyStallNudgeFor — WHO hears the nudge (2026-09-17, user decision A)
+
+test("orchestrator hears nothing: the manager may not write code, so the steer is a false positive by construction", () => {
+  // Measured six handoffs in a row (03–08): a project manager doing read-only
+  // verification of a child's delivery trips the counter and is told to
+  // "write a minimal implementation or a test" — which constraint 2 forbids
+  // it from doing. Silence is the only honest answer for that role.
+  assert.equal(readonlyStallNudgeFor("orchestrator"), undefined);
+});
+
+test("normal hears nothing either — the extension steps aside completely in that mode", () => {
+  assert.equal(readonlyStallNudgeFor("normal"), undefined);
+});
+
+test("loop and explore still hear the unchanged mode-neutral copy", () => {
+  assert.equal(readonlyStallNudgeFor("loop"), READONLY_STALL_NUDGE);
+  assert.equal(readonlyStallNudgeFor("explore"), READONLY_STALL_NUDGE);
+});
+
+test("an undecided mode hears the nudge — the gate behaves as loop until it is classified", () => {
+  assert.equal(readonlyStallNudgeFor(undefined), READONLY_STALL_NUDGE);
+});
+
+test("the selector is the only thing that is mode-aware: the counter itself stays mode-blind", () => {
+  // Reading is reading; only the COPY is wrong for some roles. Keeping the
+  // fold mode-blind means a mode switch mid-session cannot resurrect a stale
+  // count or lose a live one.
+  let state: Parameters<typeof evaluateReadonlyStall>[0]["previous"];
+  for (let i = 0; i < READONLY_STALL_LIMIT; i++) {
+    state = evaluateReadonlyStall({ previous: state, produced: false, read: true }).state;
+  }
+  assert.equal(state?.consecutiveReads, READONLY_STALL_LIMIT);
+  assert.equal(state?.nudged, true);
 });

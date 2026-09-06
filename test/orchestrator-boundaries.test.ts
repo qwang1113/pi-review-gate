@@ -9,7 +9,10 @@ import {
   normalizeBoundary,
   overlappingBoundaries,
   pathWithinBoundaries,
-  pathsOutsideBoundaries,
+  editedPathsOutsideBoundaries,
+  isOutsideRepoPath,
+  isSensitiveOutsideRepoPath,
+  OUT_OF_REPO_SENSITIVE_SEGMENTS,
 } from "../lib/orchestrator-boundaries.ts";
 
 function value(raw: string): string {
@@ -81,7 +84,7 @@ test("a goal's paths are checked against the task boundary (constraint 8's predi
   assert.equal(pathWithinBoundaries("test/plan.test.ts", boundaries), true);
   assert.equal(pathWithinBoundaries("extensions/review-gate.ts", boundaries), false);
   assert.deepEqual(
-    pathsOutsideBoundaries(["lib/orchestrator/a.ts", "extensions/review-gate.ts", "README.md"], boundaries),
+    editedPathsOutsideBoundaries(["lib/orchestrator/a.ts", "extensions/review-gate.ts", "README.md"], boundaries),
     ["extensions/review-gate.ts", "README.md"],
   );
 });
@@ -91,4 +94,94 @@ test("an unusable path is treated as OUTSIDE — fail-closed", () => {
   // the whole point of the boundary is that an unclear case does not pass.
   assert.equal(pathWithinBoundaries("../escape.ts", ["."]), false);
   assert.equal(pathWithinBoundaries("/etc/passwd", ["."]), false);
+});
+
+// ---------------------------------------------------------------------------
+// Out-of-repo process artifacts (2026-09-06 user decision 方案 C)
+
+test("an out-of-repo process artifact is NOT a boundary violation", () => {
+  // Measured twice in round 4: a child writing its completion report to /tmp
+  // was reported as out-of-boundary, because an absolute path can never be
+  // covered by a repo-relative declaration. It is a process artifact — it
+  // cannot pollute the worktree, enter a checkpoint, or reach a tracked file.
+  assert.deepEqual(
+    editedPathsOutsideBoundaries(["lib/a.ts", "/tmp/rg-task-report.md", "/tmp/scratch/notes.txt"], ["lib"]),
+    [],
+  );
+});
+
+test("the exemption is only for out-of-repo paths: in-repo judgements are unchanged", () => {
+  assert.deepEqual(
+    editedPathsOutsideBoundaries(["lib/a.ts", "extensions/review-gate.ts", "/tmp/report.md"], ["lib"]),
+    ["extensions/review-gate.ts"],
+  );
+});
+
+test("a relative `..` escape stays a violation — it is not resolvable without IO, so it fails closed", () => {
+  assert.deepEqual(editedPathsOutsideBoundaries(["../sibling-repo/x.ts"], ["lib"]), ["../sibling-repo/x.ts"]);
+});
+
+test("empty and whitespace entries are dropped rather than reported", () => {
+  assert.deepEqual(editedPathsOutsideBoundaries(["", "   "], ["lib"]), []);
+});
+
+// ---------------------------------------------------------------------------
+// THE SAFETY EDGE (P0): out-of-repo SENSITIVE paths are still violations
+
+test("out-of-repo sensitive paths are still violations — real, home-EXPANDED absolute paths", () => {
+  // The paths are written the way `sessionEditedFiles` actually holds them:
+  // the shell expanded `~` long before the gate saw them, so a rule written
+  // against the literal tilde would never fire. Every one of these must be
+  // reported even though it is outside the repo.
+  const sensitive = [
+    "/Users/someone/.ssh/id_rsa",
+    "/Users/someone/.ssh/config",
+    "/Users/someone/.pi/review-gate.json",
+    "/Users/someone/.pi/agent/agents/reviewer.md",
+    "/Users/someone/.aws/credentials",
+    "/Users/someone/.gnupg/secring.gpg",
+    "/Users/someone/.config/gh/hosts.yml",
+    "/Users/someone/.kube/config",
+    "/Users/someone/.docker/config.json",
+    "/tmp/staging/.env",
+    "/tmp/leak/id_ed25519",
+    "/tmp/leak/server.pem",
+    "/tmp/leak/credentials",
+    "/var/tmp/other-repo/.git/hooks/pre-commit",
+  ];
+  for (const p of sensitive) {
+    assert.equal(isSensitiveOutsideRepoPath(p), true, p);
+    assert.deepEqual(editedPathsOutsideBoundaries([p], ["lib"]), [p], p);
+  }
+});
+
+test("the sensitive-segment rule matches wherever the directory sits, not just under $HOME", () => {
+  // Fail-closed direction: a backup copy of a key ring somewhere else is no
+  // less sensitive than the one in the home directory.
+  assert.equal(isSensitiveOutsideRepoPath("/tmp/backup/.ssh/id_rsa"), true);
+  assert.equal(isSensitiveOutsideRepoPath("/srv/data/.aws/credentials"), true);
+  // … and a same-named file that is NOT inside such a directory is not.
+  assert.equal(isSensitiveOutsideRepoPath("/tmp/ssh-notes.md"), false);
+  assert.equal(isSensitiveOutsideRepoPath("/tmp/config"), false);
+});
+
+test("every declared sensitive segment is honoured — the list is not decoration", () => {
+  for (const segment of OUT_OF_REPO_SENSITIVE_SEGMENTS) {
+    const p = `/Users/someone/${segment}/thing.conf`;
+    assert.equal(isSensitiveOutsideRepoPath(p), true, p);
+    assert.deepEqual(editedPathsOutsideBoundaries([p], ["."]), [p], p);
+  }
+});
+
+test("a harmless out-of-repo artifact is not swept up by the sensitive rule", () => {
+  for (const p of ["/tmp/report.md", "/tmp/rg-task/notes.txt", "/var/folders/T/scratch.json"]) {
+    assert.equal(isSensitiveOutsideRepoPath(p), false, p);
+  }
+});
+
+test("isOutsideRepoPath reads the one signal the sidecar actually carries: absoluteness", () => {
+  assert.equal(isOutsideRepoPath("/tmp/report.md"), true);
+  assert.equal(isOutsideRepoPath("C:\\Users\\x\\report.md"), true);
+  assert.equal(isOutsideRepoPath("lib/a.ts"), false);
+  assert.equal(isOutsideRepoPath("../escape.ts"), false, "a `..` escape is left to the ordinary check");
 });

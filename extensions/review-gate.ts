@@ -441,8 +441,8 @@ import {
 } from "../lib/edit-discipline.ts";
 import { projectEditedContent } from "../lib/edit-projection.ts";
 import {
-  READONLY_STALL_NUDGE,
   evaluateReadonlyStall,
+  readonlyStallNudgeFor,
   type ReadonlyStallState,
 } from "../lib/readonly-stall.ts";
 import {
@@ -3322,6 +3322,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       // git at all — no branch is shown.
       branch: sessionInGit ? currentBranch(primaryRepoRoot) ?? "(detached)" : undefined,
       edited: sessionEdited || state.hasCodeChange || state.hasDocChange || sessionEditedPaths.size > 0,
+      // ROUND READING (2026-09-17): the same in-memory counters /gate-status
+      // prints — no git, no fingerprint, so the cheap-by-contract rule above
+      // holds. Outside a repository there is no review to count.
+      ...(sessionInGit ? { rounds: state.rounds.length, maxRounds: state.maxRounds } : {}),
       unmet: completion,
     };
   }
@@ -4318,10 +4322,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // forward progress, so a session that keeps grepping through library
       // source (node_modules/) trips neither. Count consecutive successful
       // read-family calls with no edit landing in between; at
-      // READONLY_STALL_LIMIT append the nudge (never a block). Skipped in
-      // normal mode like the edit-discipline nudges. State is in-memory
-      // only — no persistence.
-      if (state.taskMode !== "normal" && event.isError !== true) {
+      // READONLY_STALL_LIMIT append the nudge (never a block). WHO HEARS IT is
+      // the module's decision (readonlyStallNudgeFor): normal steps aside like
+      // the edit-discipline nudges, and orchestrator is exempt because a
+      // project manager may not write code at all. State is in-memory only —
+      // no persistence.
+      const readonlyNudgeText = readonlyStallNudgeFor(state.taskMode);
+      if (readonlyNudgeText !== undefined && event.isError !== true) {
         const stall = evaluateReadonlyStall({
           previous: readonlyStallState,
           produced: false,
@@ -4330,7 +4337,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         readonlyStallState = stall.state;
         if (stall.nudge) {
           return {
-            content: [...(event.content ?? []), { type: "text", text: READONLY_STALL_NUDGE }],
+            content: [...(event.content ?? []), { type: "text", text: readonlyNudgeText }],
             // The enclosing condition already excludes isError:true, so the
             // result is not an error; keep the original semantics (false).
             isError: false,
@@ -4473,8 +4480,10 @@ export default function reviewGate(pi: ExtensionAPI) {
       // the read family. Deliberately at the END of the bash branch — after
       // every state-maintenance safety net (sentinel invalidation, re-arm,
       // copilot, edit-discipline nudge) — so this nudge can never skip them.
-      // Skipped in normal mode. State is in-memory only — no persistence.
-      if (state.taskMode !== "normal" && event.isError !== true) {
+      // Who hears it is readonlyStallNudgeFor's call (normal + orchestrator
+      // are silent). State is in-memory only — no persistence.
+      const bashReadonlyNudgeText = readonlyStallNudgeFor(state.taskMode);
+      if (bashReadonlyNudgeText !== undefined && event.isError !== true) {
         const stall = evaluateReadonlyStall({
           previous: readonlyStallState,
           produced: false,
@@ -4483,7 +4492,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         readonlyStallState = stall.state;
         if (stall.nudge) {
           return {
-            content: [...(event.content ?? []), { type: "text", text: READONLY_STALL_NUDGE }],
+            content: [...(event.content ?? []), { type: "text", text: bashReadonlyNudgeText }],
             // Enclosing condition excludes isError:true; result is not an error.
             isError: false,
           };
