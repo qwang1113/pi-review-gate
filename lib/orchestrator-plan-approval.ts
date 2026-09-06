@@ -321,12 +321,22 @@ export function decideApprovalCarry(
   // approved directory tree, so the union of files the user approved is
   // unchanged — no `done`, real or claimed, can bring a new directory or a
   // new task into the plan.
+  //
+  // THREE conditions, and the third one is not obvious: the task must still
+  // be IN the plan being written. A task that is both finished and DELETED
+  // keeps its ground — dropping a task is its own kind of edit, and whether a
+  // departed task's files become free is a question the user has not been
+  // asked. Reading the record without this would have widened the rule in a
+  // direction nobody decided, which is exactly what this module exists to
+  // refuse.
   const approvedById = new Map(approved.tasks.map((task) => [task.id, task]));
+  const nextTaskIds = new Set(next.tasks.map((task) => task.id));
   const doneTaskIds = new Set(
     (executionRecord?.tasks ?? [])
-      .filter((task) => task.status === "done" && approvedById.has(task.id))
+      .filter((task) => task.status === "done" && approvedById.has(task.id) && nextTaskIds.has(task.id))
       .map((task) => task.id),
   );
+
 
 
 
@@ -349,10 +359,9 @@ export function decideApprovalCarry(
     amendments.push(`交付站点从 ${approvedStation} 收紧到 ${next.deliveryStation}`);
   }
 
-  const nextIds = new Set(next.tasks.map((task) => task.id));
 
   for (const gone of approved.tasks) {
-    if (!nextIds.has(gone.id)) amendments.push(`任务 "${gone.id}" 已从 plan 中删除`);
+    if (!nextTaskIds.has(gone.id)) amendments.push(`任务 "${gone.id}" 已从 plan 中删除`);
   }
 
   for (const task of next.tasks) {

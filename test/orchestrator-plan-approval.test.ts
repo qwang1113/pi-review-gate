@@ -262,6 +262,34 @@ test("a task the plan records as done releases its ground through the whole deci
   assert.match(noRecord.widenings.join("\n"), /与任务 "t2" 已声明的/);
 });
 
+test("a task that is finished AND DELETED keeps its ground — that question was never asked", () => {
+  // Reading `done` from the execution record could have widened the rule in a
+  // second direction nobody decided: a task gone from the plan is still IN the
+  // approved snapshot, so releasing it would hand its files away on the
+  // strength of a record the new plan no longer mentions. The user ruled on
+  // finished tasks, not on departed ones.
+  const plan = fileGrainPlan();
+  const base = approved(plan);
+  const record: OrchestratorPlan = {
+    ...plan,
+    tasks: plan.tasks.map((t) => (t.id === "t2" ? { ...t, status: "done" as const } : t)),
+  };
+  const next: OrchestratorPlan = {
+    ...plan,
+    tasks: plan.tasks
+      .filter((t) => t.id !== "t2")
+      .map((t) => (t.id === "t1"
+        ? { ...t, fileBoundaries: ["lib/user-interaction-tools.ts", "lib/gate-command-tools.ts"] }
+        : { ...t, dependsOn: [] })),
+  };
+
+  const decision = decideApprovalCarry(base, next, record);
+
+  assert.equal(decision.carries, false, "the departed task's boundary still needs the user");
+  assert.match(decision.widenings.join("\n"), /与任务 "t2" 已声明的 lib\/gate-command-tools\.ts 相交/);
+});
+
+
 
 test("every OTHER kind of widening still stops at the user", () => {
   const plan = fileGrainPlan();
