@@ -17,17 +17,23 @@
  *   (b) the child's SESSION is gone — the caller supplies that as `alive`. In
  *       production today that is `judgeLive` (lib/hierarchy.ts): the child's
  *       pane is absent from tmux's pane list, on the same tmux server that
- *       minted the id. An UNREADABLE pane list counts as ALIVE, so missing
- *       information never ends a wait.
+ *       minted the id. Exactly three things make it say "gone": a readable
+ *       pane list that does not contain the pane, an entry carrying NO pane id
+ *       at all, and an entry whose recorded tmux server differs from this one
+ *       (after a server restart that id names somebody else's pane, so it is
+ *       not this judge under any reading). An UNREADABLE pane list is none of
+ *       those and counts as ALIVE — and so does an entry whose server is
+ *       simply unknown on either side, which `paneIdComparable` treats as
+ *       comparable rather than as a mismatch.
  *
  *       This used to be a process probe — the child's own `exitCode`, backed
  *       by a pid-identity check — and the header used to argue that a pane
  *       probe would be wrong here. Both are gone: the process model was
  *       retired with the pane model, and the pid-identity module was deleted
  *       (2026-09-06) as a second implementation with no production caller.
- *       What survives from that argument is the DIRECTION, and it is the same
- *       one: `judgeLive` only reports death on positive evidence (a readable
- *       list that does not contain the pane), never on a failure to look;
+ *       What survives from that argument is the DIRECTION: a failed LOOK never
+ *       ends a wait. An empty record does, which is a different thing — there
+ *       is nothing left to look at;
  *   (c) the child has been silent past `STALL_MOTION_MAX_AGE_SEC` (a running
  *       session that stopped being evidence of motion).
  *
