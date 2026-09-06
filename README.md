@@ -1857,7 +1857,7 @@ it is missing — see the fail-closed inventory.)
 
 ```bash
 npm install     # devDependencies: typescript + the Pi extension API types
-npm test        # 2688 tests as of 2026-09-17, node:test native TS (no build step)
+npm test        # 2689 tests as of 2026-09-17, node:test native TS (no build step)
 npm run typecheck  # tsc --noEmit
 ```
 
@@ -2010,7 +2010,7 @@ scripts/precommit-cache.mjs   per-step result cache keyed on git trees
 scripts/install-git-hooks.sh  chained installer for L3
 hooks/pre-commit|pre-push|commit-msg
 skills/review-loop/SKILL.md   the loop protocol as a Pi skill
-test/                         2688 tests as of 2026-09-17, incl. the PR #7 regression suite
+test/                         2689 tests as of 2026-09-17, incl. the PR #7 regression suite
 ```
 
 ## License

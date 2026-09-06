@@ -41,6 +41,27 @@ import {
 
   type DeliveryStation,
 } from "../lib/delivery-station.ts";
+import {
+  buildRestatementConfirmMessage,
+  buildRestatementTranscriptMessage,
+} from "../lib/restatement.ts";
+import { formatPlanSummary, parsePlan } from "../lib/orchestrator-plan.ts";
+import { buildPlanConfirmMessage, buildPlanTranscriptMessage } from "../lib/orchestrator-tools.ts";
+
+/** A minimal, VALID plan carrying one station — parsed, never hand-shaped. */
+function planWithStation(station: DeliveryStation) {
+  const parsed = parsePlan({
+    title: "t",
+    intent: "i",
+    maxParallel: 1,
+    deliveryStation: station,
+    tasks: [{ id: "t1", title: "任务一", fileBoundaries: ["lib/"], repo: "/repo" }],
+    decisions: [],
+  });
+  assert.ok(parsed.plan, `the fixture plan must parse: ${parsed.problems.join("; ")}`);
+  return parsed.plan!;
+}
+
 
 test("the three stations exist, ordered strictest first, and precommit is the default", () => {
   assert.deepEqual([...DELIVERY_STATIONS], ["precommit", "commit", "pr"]);
@@ -115,8 +136,10 @@ test("the user-facing line names the station AND who does the next step", () => 
   // The line is what a user reads before agreeing to it, so it has to say what
   // is NOT done for them — that is the half a station name alone cannot carry.
   assert.match(describeDeliveryStation("precommit"), /precommit/);
-  assert.match(describeDeliveryStation("precommit"), /你自己 commit/);
-  assert.match(describeDeliveryStation("commit"), /你自己 push/);
+  // The USER's rendering (2026-09-17: the audience is a parameter, and the
+  // DEFAULT is the agent's — see the audience test at the end of this file).
+  assert.match(describeDeliveryStation("precommit", "user"), /你自己 commit/);
+  assert.match(describeDeliveryStation("commit", "user"), /你自己 push/);
   assert.match(describeDeliveryStation("pr"), /PR/);
   assert.match(deliveryStationLine("pr"), /本轮交付站点：/);
 });
@@ -353,6 +376,34 @@ test("the rendered choice lists are derived, not typed out again", () => {
   assert.ok(deliveryStationLine("precommit").includes("由用户自己 commit"), "the default line is safe for an agent");
   assert.ok(deliveryStationLine("precommit", "user").includes("由你自己 commit"), "a dialog speaks to the user directly");
 });
+
+test("every default in the module is the SAFE person, and the user surfaces opt out of it", () => {
+  // (1) The base renderer, not just the wrappers (round-3 P2): a default that
+  // stopped one level short left the ship BLOCK — which only an agent ever
+  // reads — telling the reader it was the one who commits.
+  assert.ok(describeDeliveryStation("precommit").includes("由用户自己 commit"));
+  assert.ok(stationShipProblem("precommit", "push").includes("由用户自己 commit"));
+  assert.ok(!stationShipProblem("precommit", "push").includes("由你自己 commit"));
+
+  // (2) The surfaces the USER reads DO speak to them — each one, by output
+  // rather than by call site (round-3 Nit: only one of the five opt-ins was
+  // pinned, so dropping "user" from any of the others went unnoticed).
+  const userSurfaces: [string, string][] = [
+    ["restatement transcript", buildRestatementTranscriptMessage("反述正文", "precommit")],
+    ["restatement dialog", buildRestatementConfirmMessage("precommit")],
+    ["plan transcript", buildPlanTranscriptMessage(planWithStation("precommit"))],
+    ["plan dialog", buildPlanConfirmMessage(planWithStation("precommit"))],
+  ];
+  for (const [what, text] of userSurfaces) {
+    assert.ok(
+      text.includes("由你自己 commit"),
+      `the ${what} is read by the USER — it must address them, not describe them in the third person`,
+    );
+  }
+  // (3) …and the plan SUMMARY, whose other readers are all agents, does not.
+  assert.ok(formatPlanSummary(planWithStation("precommit")).includes("由用户自己 commit"));
+});
+
 
 
 

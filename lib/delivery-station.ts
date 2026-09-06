@@ -133,13 +133,20 @@ export function shipKindAllowedAtStation(station: DeliveryStation, kind: ShipCom
  * user's wording into a refusal told the agent to commit at exactly the
  * station where it must not (round-1 P2, 2026-09-17) — so the audience is a
  * parameter of the ONE definition rather than an excuse for a second copy.
+ *
+ * EVERY DEFAULT IN THIS MODULE IS `agent`, base function included (round-3
+ * P2). The third person ("由用户自己 commit") is merely impersonal when a user
+ * reads it; the second person is WRONG when an agent does. A default that
+ * stopped one level short left `stationShipProblem` — a ship BLOCK, read by
+ * nobody but the agent — telling the reader it was the one who commits.
+ * Surfaces the USER reads ask for `"user"` explicitly, and they are pinned.
  */
 export type StationAudience = "user" | "agent";
 
 /** One line, in the reader's own person, for a dialog, a refusal or a log. */
 export function describeDeliveryStation(
   station: DeliveryStation,
-  audience: StationAudience = "user",
+  audience: StationAudience = "agent",
 ): string {
   // The actor is always the USER; only the word for them changes.
   const you = audience === "user" ? "你自己" : "用户自己";
