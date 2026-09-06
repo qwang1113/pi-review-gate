@@ -326,6 +326,115 @@ test("`write` PRESERVES task status and note — a rewrite is not an execution r
   assert.equal(plan.tasks.find((t) => t.id === "t3")?.status, "pending", "only a NEW task starts at pending");
 });
 
+test("`write` ACCEPTS a note update for an existing task, and the approval survives it", async () => {
+  // B2b (2026-09-06, user decision): the note is prose for a human. It is
+  // outside `canonicalPlanText`, outside the approved snapshot and outside
+  // `decideApprovalCarry`, so writing one grants nothing — and dropping it
+  // was a silent data loss the last four orchestrations all worked around.
+  // The fixture declares `repo`, because a `write` must declare it (strictRepo)
+  // — without it the rewrite would differ from the approved content in a field
+  // that DOES grant something, and the approval would be revoked for a reason
+  // that has nothing to do with the note.
+  const approved = parsePlan({
+    title: "测试计划",
+    intent: "两个互不重叠的任务",
+    tasks: [
+      { id: "t1", title: "任务一", repo: "/repo", fileBoundaries: ["lib/a/"] },
+      { id: "t2", title: "任务二", repo: "/repo", fileBoundaries: ["lib/b/"] },
+    ],
+  }, undefined, true);
+  assert.ok(approved.plan, `fixture must parse: ${approved.problems.join("; ")}`);
+  const world = makeFakeWorld({ plan: approved.plan!, approvePlan: true });
+  await world.call("orchestrator_plan", { action: "set-status", taskId: "t1", status: "running", note: "旧备注" });
+
+  const written = await world.call("orchestrator_plan", {
+    action: "write",
+    plan: {
+      title: "测试计划",
+      intent: "两个互不重叠的任务",
+      tasks: [
+        { id: "t1", title: "任务一", repo: "/repo", fileBoundaries: ["lib/a/"], note: "新备注" },
+        { id: "t2", title: "任务二", repo: "/repo", fileBoundaries: ["lib/b/"] },
+      ],
+    },
+  });
+
+  const plan = world.plan()!;
+  assert.equal(plan.tasks.find((t) => t.id === "t1")?.note, "新备注", "the note the caller wrote must land");
+  assert.equal(plan.tasks.find((t) => t.id === "t1")?.status, "running", "the status is still execution's");
+  assert.equal(written.details?.approved, true, "a note is not a widening — the approval must survive");
+});
+
+// ---------------------------------------------------------------------------
+// B2 (2026-09-06) — the approval and its audit leave a trail OUTSIDE the
+// sidecar. The sidecar is reset by the next session that opens this repo, so
+// a record that lives only there stops existing exactly when somebody asks
+// "who approved this, when, against which content".
+// ---------------------------------------------------------------------------
+
+test("the USER's approval is written to the audit log, bound to the content hash", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan() });
+  world.confirmAnswers.push(true);
+
+  await world.call("orchestrator_plan", { action: "submit" });
+
+  const line = world.auditLog.find((entry) => entry.includes("plan approved by the user"));
+  assert.ok(line, `the approval must be logged; log was: ${world.auditLog.join(" | ")}`);
+  assert.match(line!, new RegExp(planHash(world.plan()!)), "the log line names the approved content");
+});
+
+test("an approval CARRIED across a narrowing edit is logged with its reasons", async () => {
+  const world = makeFakeWorld({ plan: fileGrainPlan(), approvePlan: true });
+  const before = world.runtime().approvedPlanHash!;
+
+  await world.call("orchestrator_plan", {
+    action: "write",
+    plan: {
+      title: "重构计划",
+      intent: "把三个工具搬进各自的模块",
+      maxParallel: 2,
+      tasks: [
+        {
+          id: "t1",
+          title: "用户交互工具",
+          repo: "/repo",
+          fileBoundaries: ["lib/user-interaction-tools.ts", "lib/consent-request-tools.ts"],
+        },
+        { id: "t2", title: "命令层", repo: "/repo", fileBoundaries: ["lib/gate-command-tools.ts"], dependsOn: ["t1"] },
+        { id: "t3", title: "文档", repo: "/repo", fileBoundaries: ["docs/execution-model.md"], execution: "parallel" },
+      ],
+    },
+  });
+
+  const line = world.auditLog.find((entry) => entry.includes("approval carried"));
+  assert.ok(line, `a carry decides on the user's behalf and must be logged: ${world.auditLog.join(" | ")}`);
+  assert.match(line!, new RegExp(before), "the line names where the approval came FROM");
+  assert.match(line!, /consent-request-tools/, "and why it was allowed to move");
+});
+
+test("an approval REVOKED by a widening edit is logged with the widening", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+
+  await world.call("orchestrator_plan", {
+    action: "write",
+    plan: {
+      title: "测试计划",
+      intent: "两个互不重叠的任务",
+      tasks: [
+        { id: "t1", title: "任务一", repo: "/repo", fileBoundaries: ["lib/a/"] },
+        { id: "t2", title: "任务二", repo: "/repo", fileBoundaries: ["lib/b/"] },
+        { id: "t3", title: "新任务", repo: "/repo", fileBoundaries: ["scripts/"] },
+      ],
+    },
+  });
+
+  const line = world.auditLog.find((entry) => entry.includes("approval REVOKED"));
+  assert.ok(line, `a revocation must be logged: ${world.auditLog.join(" | ")}`);
+  assert.match(line!, /t3|新任务|scripts/, "the line says what widened");
+});
+
+
+
 // ---------------------------------------------------------------------------
 // The audit that now stands between a plan and the human
 // ---------------------------------------------------------------------------

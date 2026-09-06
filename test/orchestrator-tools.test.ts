@@ -30,7 +30,7 @@ import {
 } from "./helpers/fake-orchestration.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
 import { addGrant, hasGrant } from "../lib/orchestrator-registry.ts";
-import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
+import { ORCHESTRATION_ID_ENV, newOrchestrationId } from "../lib/orchestration-id.ts";
 import { GATE_MODE_ENV } from "../lib/task-mode.ts";
 
 /**
@@ -684,15 +684,176 @@ test("attach hands back the plan, the children, the open questions and the ORPHA
   assert.equal(reply.details?.orphans, 1);
 });
 
-test("attach refuses an orchestration this session does not carry", async () => {
+test("attach refuses an id that is not this repo's, or not on disk, or malformed", async () => {
+  // B1 (2026-09-06): an id is ADOPTABLE now, so the refusals had to become
+  // specific — each of these three would previously have been the same
+  // "you do not carry it" answer, which said nothing about what to do.
   const world = makeFakeWorld();
-  const wrong = await world.call("orchestrator_attach", { orchestrationId: "orch-11111111-zzz" });
-  assert.equal(wrong.isError, true);
-  assert.match(replyText(wrong), /不能在运行中改换编排身份/);
+
+  // Another repo's orchestration: the id carries a repo hash, and adopting it
+  // would put this session's children on somebody else's channels.
+  const foreignRepo = await world.call("orchestrator_attach", { orchestrationId: "orch-11111111-zzz" });
+  assert.equal(foreignRepo.isError, true);
+  assert.match(replyText(foreignRepo), /不是本仓库/);
 
   const malformed = await world.call("orchestrator_attach", { orchestrationId: "not-an-id" });
   assert.equal(malformed.isError, true);
+  assert.match(replyText(malformed), /不像一个门禁铸造的编排 id/);
+
+  // Every refusal hands back the way out, never a dead end.
+  for (const reply of [foreignRepo, malformed]) {
+    assert.match(replyText(reply), /orchestrator_plan\(\{ action: "archive" \}\)/,
+      "the refusal must name the archive route");
+  }
 });
+
+// ---------------------------------------------------------------------------
+// B1 — the two ways out of "somebody else's plan is in this repo"
+// ---------------------------------------------------------------------------
+
+/** An orchestration id of the fake world's repo, minted like the gate does. */
+function idOfFakeRepo(at: number): string {
+  return newOrchestrationId("/repo", at);
+}
+
+/** The registry a dead project manager left behind in this repo. */
+function previousHolder(at = 1_700_000_000_000) {
+  const orchestrationId = idOfFakeRepo(at);
+  return {
+    orchestrationId,
+    children: [{
+      id: "t1-old",
+      taskId: "t1",
+      paneId: "%9",
+      cwd: "/repo",
+      createdAt: "2026-09-05T00:00:00.000Z",
+    }],
+    notify: { sentAt: [], lastByKey: {} },
+  };
+}
+
+test("attach ADOPTS the previous holder's orchestration, registry included", async () => {
+  // The measured situation: the manager's session died, its plan is still in
+  // the repo, its child panes may still be alive — and the new session never
+  // inherited the id, so before B1 this was unreachable and ended in `rm`.
+  const recorded = previousHolder();
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    recordedRuntime: recorded,
+    channelDirs: [recorded.orchestrationId],
+  });
+
+  const reply = await world.call("orchestrator_attach", { orchestrationId: recorded.orchestrationId });
+
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.deepEqual(world.adopted, [recorded.orchestrationId], "the id must actually be adopted");
+  assert.equal(world.runtime().orchestrationId, recorded.orchestrationId);
+  assert.equal(world.runtime().children.length, 1, "the previous holder's registry comes with it");
+  const text = replyText(reply);
+  assert.match(text, /已接管编排/);
+  assert.match(text, /尚未获批/, "the approval does NOT travel — the new holder must submit again");
+  assert.ok(world.auditLog.some((line) => line.includes("taken over")), "a change of holder is logged");
+});
+
+test("attach refuses to change identity once this session has children of its own", async () => {
+  const recorded = previousHolder();
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    approvePlan: true,
+    recordedRuntime: recorded,
+    channelDirs: [recorded.orchestrationId],
+  });
+  await spawnT1(world);
+
+  const reply = await world.call("orchestrator_attach", { orchestrationId: recorded.orchestrationId });
+
+  assert.equal(reply.isError, true);
+  assert.match(replyText(reply), /不能在运行中改换编排身份/);
+  assert.deepEqual(world.adopted, [], "nothing may be adopted while children are registered");
+});
+
+test("plan write/submit REFUSE while the repo records another orchestration, and route out", async () => {
+  const recorded = previousHolder();
+  const world = makeFakeWorld({
+    plan: twoTaskPlan(),
+    recordedRuntime: recorded,
+    channelDirs: [recorded.orchestrationId],
+    identityConflict: recorded.orchestrationId,
+  });
+
+  for (const action of ["write", "submit"]) {
+    const reply = await world.call("orchestrator_plan", {
+      action,
+      plan: {
+        title: "我的计划",
+        intent: "另起一轮",
+        tasks: [{ id: "n1", title: "任务", repo: "/repo", fileBoundaries: ["lib/"] }],
+      },
+    });
+    assert.equal(reply.isError, true, `${action} must refuse`);
+    const text = replyText(reply);
+    assert.match(text, new RegExp(recorded.orchestrationId), "it names WHICH orchestration is in the way");
+    assert.match(text, /orchestrator_attach/, "and both ways out");
+    assert.match(text, /action: "archive"/);
+  }
+
+  // READ stays open: you must be able to look at what is in your way.
+  const read = await world.call("orchestrator_plan", { action: "read" });
+  assert.equal(read.isError, undefined, replyText(read));
+});
+
+test("archive REFUSES while a registered child pane is still alive", async () => {
+  const recorded = previousHolder();
+  const world = makeFakeWorld({ plan: twoTaskPlan(), recordedRuntime: recorded });
+  // The dead manager's child pane is still up — that is what makes archiving
+  // it the wrong move.
+  world.panes.set("%9", { id: "%9", command: ["pi"], env: {}, alive: true });
+
+  const reply = await world.call("orchestrator_plan", { action: "archive" });
+
+  assert.equal(reply.isError, true);
+  assert.match(replyText(reply), /还有 1 个子会话活着/);
+  assert.match(replyText(reply), /orchestrator_attach/, "the honest alternative is a takeover");
+  assert.ok(world.plan(), "nothing may move while somebody is working under that plan");
+});
+
+test("archive does NOTHING when the user declines (and when there is no dialog at all)", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), recordedRuntime: previousHolder() });
+  // confirmAnswers is empty ⇒ the fake dialog answers false, which is also
+  // exactly what a headless session does.
+  const reply = await world.call("orchestrator_plan", { action: "archive" });
+
+  assert.equal(reply.isError, true);
+  assert.ok(world.plan(), "the plan must still be there");
+  assert.equal(world.scratch.size, 0, "and nothing may have been written");
+});
+
+test("archive moves the plan AND the registry aside, then the repo is free for a new plan", async () => {
+  const recorded = previousHolder();
+  const world = makeFakeWorld({ plan: twoTaskPlan(), recordedRuntime: recorded });
+  world.confirmAnswers.push(true);
+
+  const reply = await world.call("orchestrator_plan", { action: "archive" });
+
+  assert.equal(reply.isError, undefined, replyText(reply));
+  assert.equal(world.plan(), undefined, "the plan file is out of the way");
+  const archived = [...world.scratch.entries()].find(([path]) => path.includes("orchestrator-plan.archived-"));
+  assert.ok(archived, `an archive file must exist: ${[...world.scratch.keys()].join(", ")}`);
+  const payload = JSON.parse(archived![1]);
+  assert.equal(payload.plan.title, "测试计划", "the user's approved plan is preserved, never deleted");
+  assert.equal(payload.orchestration.orchestrationId, recorded.orchestrationId,
+    "the registry goes with it — leaving it behind would block every future spawn");
+  // THE RECORD ITSELF must stop naming the old orchestration. Leaving it
+  // behind is not cosmetic: `runtimeConflict` would then refuse every spawn
+  // of the NEW orchestration forever, i.e. the session would have "cleaned
+  // up" into a corner it cannot leave.
+  const stillRecorded = world.deps.recordedRuntime();
+  assert.notEqual(stillRecorded?.orchestrationId, recorded.orchestrationId,
+    "the sidecar must no longer record the archived orchestration");
+  assert.equal(stillRecorded?.children.length, 0, "and its registry is gone from the live record");
+  assert.ok(world.auditLog.some((line) => line.includes("plan archived")), "the archive is logged");
+});
+
 
 test("closing is limited to registered panes and returns the task to pending", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });

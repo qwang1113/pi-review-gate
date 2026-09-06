@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { normalizeTaskMode, type TaskMode, type TaskModeSource } from "./task-mode.ts";
 import { normalizeRuntime } from "./orchestrator-registry.ts";
+import { normalizeOrchestrationId } from "./orchestration-id.ts";
 import { FINGERPRINT_VERSION } from "./fingerprint.ts";
 import { sanitizeCopilotState, type CopilotReviewState } from "./copilot-review.ts";
 import { restatementHash, type RestatementRecord } from "./restatement.ts";
@@ -657,15 +658,35 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     // child sessions) and tmux pane ids (which become command targets), and
     // it lives in an ordinary repo-local file. `normalizeRuntime` validates
     // it and drops the approval on any doubt — the session then simply has to
-    // ask the user again. The orchestration ID is deliberately NOT taken from
-    // the file: the session re-derives it from its own environment, so a
-    // forged one can never become an attention channel key.
+    // ask the user again.
+    //
+    // THE ID IS READ BACK, AND THAT IS A CHANGE (2026-09-06, B1). It used to
+    // be blanked here, with the reasoning that "a forged id must never become
+    // an attention channel key". The blanking did not achieve that and cost
+    // something real:
+    //
+    //  - it did not achieve it, because the very next thing that happened was
+    //    lib/orchestrator-wiring.ts STAMPING the session's own id onto the
+    //    stored runtime — so a foreign registry was adopted under our address
+    //    anyway, and `runtimeConflict` (whose whole job is to refuse exactly
+    //    that) compared against `""` and returned a falsy "conflict" that
+    //    `dispatchSpawn` skipped;
+    //  - it cost the takeover path: with no id on the record, nothing on disk
+    //    could say WHICH orchestration this repo's plan belongs to, and a new
+    //    project manager had no way to adopt it (it had to `rm` the plan).
+    //
+    // What actually keeps a forged id from becoming an address is elsewhere
+    // and is unchanged: an id is only ADOPTED when a caller names it
+    // explicitly in `orchestrator_attach` and it survives that tool's checks.
+    // Read back here, the id is a FACT ABOUT THE RECORD ("this registry
+    // belongs to that orchestration"), which is what makes refusing it
+    // possible. A malformed one is not repaired: the whole blob goes, because
+    // a registry whose owner cannot be named is one nothing may act on.
     if (parsed.orchestrator !== undefined) {
-      // The id is passed EMPTY on purpose, so this line says what the comment
-      // above claims: nothing about the address survives the file. The session
-      // stamps its own (env-derived) id in when it loads the runtime
-      // (lib/orchestrator-wiring.ts).
-      const cleaned = normalizeRuntime(parsed.orchestrator, "");
+      const storedId = normalizeOrchestrationId(
+        (parsed.orchestrator as { orchestrationId?: unknown }).orchestrationId,
+      );
+      const cleaned = storedId ? normalizeRuntime(parsed.orchestrator, storedId) : undefined;
       if (cleaned) parsed.orchestrator = cleaned;
       else delete parsed.orchestrator;
     }

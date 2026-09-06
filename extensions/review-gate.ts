@@ -2084,6 +2084,19 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (!orchestrationIdValue) orchestrationIdValue = newOrchestrationId(primaryRepoRoot, Date.now());
     return orchestrationIdValue;
   }
+  /**
+   * Take over an existing orchestration's ADDRESS (B1, `orchestrator_attach`).
+   *
+   * This is the one writer of that closure variable other than the mint
+   * above, and it is deliberately dumb: every check that decides whether a
+   * takeover is legitimate lives in lib/orchestrator-takeover.ts, where it
+   * can be tested without a session. All that happens here is the assignment
+   * — from this point on every channel path, every spawned child's
+   * environment and every wake-up uses the adopted id.
+   */
+  function adoptOrchestrationId(id: string): void {
+    orchestrationIdValue = id;
+  }
   /** Started BY an orchestrator as a worker (not as its relay successor). */
   function isOrchestrationChild(): boolean {
     return orchestrationIdFromEnv() !== undefined && readInheritance().predecessorPane === undefined;
@@ -2110,7 +2123,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     restatement: () => state.restatement,
     loadRuntime: () => state.orchestrator,
     storeRuntime: persistOrchestration,
+    // B2 — the plan's records land in the SAME audit log as the restatement
+    // confirmation and the loop-goal approval. One log, one grep.
+    log: (message) => { log(message); },
     orchestrationId: currentOrchestrationId,
+    adoptOrchestrationId,
     confirm: (title, message, pointer) => confirmBounded(latestCtx ?? {}, title, message, pointer),
     select: (title, options) => {
       const ctx = latestCtx as { ui?: { select?: (t: string, o: string[]) => Promise<string | undefined> } } | undefined;
@@ -3047,6 +3064,33 @@ export default function reviewGate(pi: ExtensionAPI) {
       continuationsInjected = restoredInjections;
     } else if (restored && restored.sessionId !== sessionId) {
       state = emptyState(sessionId, restored.maxRounds ?? DEFAULT_MAX_ROUNDS);
+      // THE ORCHESTRATION RUNTIME SURVIVES THE RESET (2026-09-06, B1).
+      //
+      // Everything else here describes THIS session's round — its verdict,
+      // its precommit, its edits — and a new session owns none of it. The
+      // orchestration runtime is the one field that describes something
+      // OUTSIDE the session: which orchestration this repo runs, and which
+      // child sessions are registered under it. Those children are panes that
+      // are still alive; they did not stop existing because their supervisor's
+      // process did. Dropping it cost the same bug twice — a RELAY successor
+      // (a plain `pi`, hence a fresh session id) lost the predecessor's whole
+      // registry, and a TAKEOVER had nothing left to take over.
+      //
+      // The APPROVAL does not survive, and that asymmetry is the point: the
+      // registry is a fact about the world, while the approval is permission
+      // the user gave to a session that is gone. Re-obtaining it costs one
+      // dialog; inheriting it silently would let a session nobody approved
+      // spawn children.
+      if (restored.orchestrator) {
+        const {
+          approvedPlanHash: _hash,
+          approvedPlanAt: _at,
+          approvedPlan: _snapshot,
+          approvalAmendments: _amendments,
+          ...carried
+        } = restored.orchestrator;
+        state.orchestrator = carried;
+      }
     } else if (sidecarCorrupt) {
       state = emptyState(sessionId, DEFAULT_MAX_ROUNDS);
       state.hasCodeChange = true;
@@ -5745,11 +5789,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       savePlanAudit: (root, record) => {
         const st = root === primaryRepoRoot ? state : stateForRepo(root);
         st.planAudit = record;
+        // (The audit VERDICT is written to `.pi/review-gate-audit.log` by
+        // lib/audit-round.ts itself, through the `log` binding below — the
+        // record and its trail are decided in one place, not two.)
         try {
           const persistCtx = latestCtx ?? lastUiCtx;
           if (persistCtx) persistRepo(persistCtx, root); else persist(undefined);
         } catch { /* best effort */ }
       },
+      log: (message) => { log(message); },
       recordGoal: async ({ root, pending, concluded }) => {
         const recordCtx = ctx ?? lastUiCtx;
         if (!recordCtx) return undefined;
@@ -7494,26 +7542,23 @@ export default function reviewGate(pi: ExtensionAPI) {
             isError: true,
           };
         }
-        // IDENTITY TAKE-OVER GUARD (2026-09-17, user decision): a session
-        // that did NOT inherit an orchestration id (no RG_ORCHESTRATION_ID)
-        // and finds a plan ALREADY written by somebody else must not
-        // silently become that orchestration's holder. The plan carries the
-        // user's approval and authorizes spawning; adopting it under a NEW
-        // minted id would spawn children nobody can address.
-        if (!process.env[ORCHESTRATION_ID_ENV] && readPlanFile(primaryRepoRoot).plan !== undefined) {
-          return {
-            content: [{
-              type: "text",
-              text:
-                "review-gate: 当前会话没有继承编排身份（无 RG_ORCHESTRATION_ID），" +
-                "但本仓库已有别人写好的 plan —— 不接管旧编排。" +
-                "若这是你要接手的旧编排，请用同一个 RG_ORCHESTRATION_ID 启动会话；" +
-                "若是新编排，先清掉旧 plan（或换一个 repo）。",
-            }],
-            details: { mode: state.taskMode ?? null },
-            isError: true,
-          };
-        }
+        // THE IDENTITY TAKE-OVER GUARD USED TO BE HERE, AND THAT WAS THE BUG
+        // (2026-09-06, B1). It refused the MODE whenever this session had not
+        // inherited an orchestration id and the repo already held somebody
+        // else's plan — and its advice was to remove that plan by hand.
+        //
+        // The rule it enforced is right and is still enforced; the PLACE was
+        // wrong. Entering the role grants nothing on its own: what needs an
+        // identity is writing/submitting a plan and spawning a child, and all
+        // three refuse on `runtimeConflict` (lib/orchestrator-tools.ts,
+        // lib/orchestrator-dispatch.ts). Refusing the mode itself put the two
+        // tools that RESOLVE the situation — `orchestrator_attach` and
+        // `orchestrator_plan({action:"archive"})` — behind the very door it
+        // was holding shut, so the only executable advice left was to delete
+        // the gate's own plan file by hand. Three sessions did exactly that.
+        //
+        // Nothing replaces it here: this is the honest empty space where a
+        // check that belonged one layer down used to be.
       }
       // FIRST CLASSIFICATION: while the mode is undecided and THIS session
       // has not edited anything, the AGENT's own pick IS the classification —

@@ -12,6 +12,7 @@ import {
   conflictingParallelPairs,
   findDependencyCycle,
   formatPlanSummary,
+  mergeTaskProgress,
   isLegalTransition,
   openDecisions,
   parsePlan,
@@ -197,6 +198,59 @@ test("a legal move returns a NEW plan and records the note", () => {
   const unknown = applyTaskStatus(plan, "nope", "running", { now: NOW });
   assert.equal(unknown.ok, false);
 });
+
+// ---------------------------------------------------------------------------
+// mergeTaskProgress — what a rewrite may and may not destroy (B2b, 2026-09-06)
+// ---------------------------------------------------------------------------
+
+test("mergeTaskProgress: a NOTE the rewrite supplies wins over the old one", () => {
+  // The measured defect: `write` carried a new note for an existing task and
+  // the merge pinned the OLD one back, silently. Four consecutive rounds of
+  // orchestration hit it; each project manager had to work around it.
+  const previous = applyTaskStatus(planOf(), "a", "running", { note: "旧备注", now: NOW });
+  assert.ok(previous.ok);
+  const next = planOf({
+    tasks: [
+      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"], note: "新备注" },
+      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"] },
+    ],
+  });
+
+  const merged = mergeTaskProgress(previous.ok ? previous.plan : undefined, next);
+
+  assert.equal(merged.tasks[0]!.note, "新备注", "a note the caller supplied must land");
+  assert.equal(merged.tasks[0]!.status, "running", "the STATUS is still execution's to own");
+});
+
+test("mergeTaskProgress: an OMITTED note still inherits the previous one", () => {
+  // The other half of the same rule: a rewrite that simply does not mention
+  // notes must not wipe the ones execution recorded.
+  const previous = applyTaskStatus(planOf(), "a", "running", { note: "旧备注", now: NOW });
+  assert.ok(previous.ok);
+
+  const merged = mergeTaskProgress(previous.ok ? previous.plan : undefined, planOf());
+
+  assert.equal(merged.tasks[0]!.note, "旧备注");
+  assert.equal(merged.tasks[0]!.status, "running");
+});
+
+test("mergeTaskProgress: a note grants NOTHING — hash and canonical text ignore it", () => {
+  // This is the premise the fix rests on: if a note reached the canonical
+  // text, accepting a note update would be a content change and the user's
+  // approval would have to be re-obtained. It does not.
+  const withoutNote = planOf();
+  const withNote = planOf({
+    tasks: [
+      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"], note: "随便写点什么" },
+      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"] },
+    ],
+  });
+
+  assert.equal(canonicalPlanText(withNote), canonicalPlanText(withoutNote));
+  assert.equal(planHash(withNote), planHash(withoutNote),
+    "a note must never move the hash the user's approval binds to");
+});
+
 
 // ---------------------------------------------------------------------------
 // Scheduling (constraint 6)

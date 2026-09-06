@@ -108,6 +108,10 @@ export interface FakeWorld {
   saveRuntime: (next: OrchestratorRuntime) => void;
   /** Everything `showToUser` printed. */
   shown: string[];
+  /** Every line the tools wrote to the repo's audit log (B2). */
+  auditLog: string[];
+  /** Orchestration ids adopted through a takeover (B1). */
+  adopted: string[];
   now: () => number;
   advance: (ms: number) => void;
   /** Append a record to a child's channel AS THAT CHILD would. */
@@ -152,6 +156,14 @@ export interface FakeWorldOptions {
   contextPercent?: number;
   /** Make `list-panes` fail, so liveness is UNKNOWN rather than false. */
   tmuxBroken?: boolean;
+  /**
+   * The orchestration runtime RECORDED ON DISK (B1). Set it to one carrying
+   * a DIFFERENT id than the session holds to build the takeover situation:
+   * an old project manager's registry left behind in the sidecar.
+   */
+  recordedRuntime?: OrchestratorRuntime;
+  /** Channel directory names the gate will discover (one per orchestration). */
+  channelDirs?: string[];
   /**
    * How many REVIEW panes this manager's window currently shows.
    *
@@ -232,6 +244,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   ]);
   let paneSeq = 1;
   let runtime: OrchestratorRuntime = emptyRuntime(ORCHESTRATION_ID);
+  /** What the DISK records, when that is somebody else's orchestration (B1). */
+  let recordedOverride: OrchestratorRuntime | undefined = options.recordedRuntime;
   let planAudits = 0;
   const tmuxCalls: string[][] = [];
 
@@ -253,6 +267,9 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   const scratch = new Map<string, string>();
   const sidecars = new Map<string, Record<string, unknown>>();
   const shown: string[] = [];
+  const auditLog: string[] = [];
+  /** Ids this session ADOPTED through `orchestrator_attach` (B1). */
+  const adopted: string[] = [];
   const confirmAnswers: boolean[] = [];
   let memory: SupervisionMemory = {};
   const paneDecor = new Map<string, { title: string; at: number }>();
@@ -278,7 +295,43 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     restatement: () => (options.restatement === null ? undefined : options.restatement ?? fakeRestatement()),
     runtime: () => runtime,
     runtimeConflict: () => options.identityConflict,
-    saveRuntime: (next) => { runtime = next; },
+    // B1 — what the DISK records, which may name ANOTHER orchestration than
+    // the one this session holds. Defaults to "the same", i.e. no takeover
+    // situation at all.
+    //
+    // FAITHFUL ON WRITES: in production `recordedRuntime()` and
+    // `saveRuntime()` are the same slot (`state.orchestrator`), so persisting
+    // a runtime REPLACES what the disk records. A fake that kept answering
+    // with the old record would make "the archive cleared the registry"
+    // untestable — the assertion would pass whether or not the code did it.
+    recordedRuntime: () => recordedOverride ?? runtime,
+    channelDirNames: () => options.channelDirs ?? [],
+    adoptOrchestrationId: (id) => {
+      adopted.push(id);
+      // FAITHFUL to lib/orchestrator-wiring.ts: once the ids match, `runtime()`
+      // returns the STORED runtime — that inheritance of the previous holder's
+      // child registry is the entire point of a takeover, and a fake that only
+      // renamed our own empty runtime would test nothing.
+      const recorded = recordedOverride;
+      runtime = recorded && recorded.orchestrationId === id
+        ? recorded
+        : { ...runtime, orchestrationId: id };
+    },
+    archivePlan: (relPath, contents) => {
+      // Faithful to the real writer: the archive lands, THEN the plan goes.
+      scratch.set(`/repo/${relPath}`, contents);
+      plan = undefined;
+      return { ok: true, path: `/repo/${relPath}` };
+    },
+    saveRuntime: (next) => {
+      runtime = next;
+      // The write LANDED on the one slot the disk has: whatever another
+      // orchestration had recorded there is now this.
+      recordedOverride = undefined;
+    },
+    // The audit log the extension appends to `.pi/review-gate-audit.log`.
+    // Collected in memory here so a test can assert WHAT was recorded (B2).
+    log: (message) => { auditLog.push(message); },
     readPlan: () => (plan ? { plan, problems: [] } : { problems: [] }),
     savePlan: (next) => { plan = next; },
     tmux: (argv) => runFakeTmux(argv),
@@ -397,6 +450,8 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     scratch,
     sidecars,
     shown,
+    auditLog,
+    adopted,
     confirmAnswers,
     options,
     saveRuntime: (next) => { runtime = next; },

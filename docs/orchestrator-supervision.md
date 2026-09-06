@@ -268,12 +268,44 @@ plan 里的任务**保持 running**（它本来就没有停止成立）。
 
 ### 6.2 项目经理死了
 
-子会话不受影响 —— 框一直弹着，人随时能答（§3 的天然回退）。新会话**带着同一个
-`RG_ORCHESTRATION_ID` 启动**，然后 `orchestrator_attach({ orchestrationId })` 接管现场：
+子会话不受影响 —— 框一直弹着，人随时能答（§3 的天然回退）。新会话直接
+`set_gate_mode("orchestrator")`，再 `orchestrator_attach({ orchestrationId })` 接管现场：
 plan、每个 child 的状态与资产、通道里未答的请求、孤儿检测结果，一次交还。
 
-注意 `attach` **拒绝**在运行中改换编排身份：一个会话已经登记的子会话会瞬间失去归属。
-正确的接管方式是带着那个 id 启动，而这正是 `orchestrator_handoff` 给后继者做的事。
+**id 不用你记**（2026-09-06，B1）：门禁自己去盘上找本仓库的候选编排 —— 先看门禁
+sidecar 里记的那个，再看 `~/.pi/agent/rg-channels/` 下的通道目录名（编排 id 自带
+repo 哈希，所以「哪些编排属于本仓库」是 id 自己回答的问题）。随便调一次 attach，
+拒绝文案里就列着全部候选与可照抄的命令。
+
+`attach` 会**采用**（adopt）那个 id，四个条件缺一不可：形状合法、属于本仓库、**盘上
+能找到**（凭空编一个 id 会被拒 —— 那条通道上没有任何子会话在听）、且本会话还没有以
+自己的身份登记过子会话（这最后一条是旧拒绝里唯一正确的那半：已登记的子会话会瞬间
+失去归属）。
+
+**批准不随接管转移**（用户 2026-09-06 拍板）：登记表是关于世界的事实，批准是用户
+给上一任**会话**的许可。接管后 plan 在门禁眼里未获批，必须重新 `submit`（重跑审计 +
+用户批准框）；回执会明说这一点。
+
+**进入模式不再被旧 plan 挡住**：身份判定挂在真正需要身份的动作上 ——
+`orchestrator_plan` 的 `write` / `submit` 与 `orchestrator_spawn`；`read` 与 `archive`
+始终开放。旧版把这道判定放在 `set_gate_mode`，结果是「解开死锁的两个工具都在死锁
+里面」，唯一可执行的建议变成手删门禁自己的 plan 文件（实测发生三次，监督者自己也
+删过）。
+
+### 6.2b 不接管、另起一轮：归档
+
+`orchestrator_plan({ action: "archive" })`。门禁把 plan **连同编排登记表**写进
+`.pi/orchestrator-plan.archived-<时间戳>.json`，并把原 plan 文件改名到它旁边的
+`.raw.json`（**绝不 rm**：结构化归档对合法 plan 是忠实的，对解析不了的 plan 是有损的，
+而那恰恰是原始字节最值钱的时候）。三道闸：
+
+- 盘上登记的子会话 pane **还活着** ⇒ 拒绝，并指向接管（它们正在这份 plan 下干活）；
+- 动手前**弹确认框**给用户（用户 2026-09-06 拍板）；没有 UI 时按拒绝处理，什么都不动；
+- 登记表**随之清空**（副本已在归档文件里）—— 留着它，新编排的每一次 spawn 都会被
+  `runtimeConflict` 永远拒绝，等于「清理」进了一个出不来的角落。
+
+plan 与登记表**各自可能单独存在**（`rm` 时代留下的仓库就只剩登记表），所以任一半在
+都能归档。
 
 ### 6.3 tmux server 挂了 / 机器重启
 
@@ -542,6 +574,7 @@ pane 标题 —— 那就是回到读屏幕了。
 | `lib/orchestrator-wait.ts` | 等待判据、预算、回执装配（含第 4、5 块） | 纯函数 |
 | `lib/orchestrator-answer-tools.ts` | `orchestrator_answer`（含约束 8 的代批边界、代批必填的 `crosscheck` 对照与其词表、站点不得宽于 plan 的判定） | 判定可单测 |
 | `lib/orchestrator-recovery-tools.ts` | `orchestrator_recover` / `orchestrator_attach`、孤儿检测 | 孤儿判定是纯函数 |
+| `lib/orchestrator-takeover.ts` | 盘上候选编排 id 的发现、接管采用判定、接管/归档路由文案、归档载荷与确认框文案（§6.2 / §6.2b） | 纯函数 + 注入式读盘 |
 | `lib/orchestrator-tmux.ts` | 仅剩的 tmux 构造：开/关/列 pane + pane 装饰（不带 `-g`） | 纯函数 |
 
 协议级测试（不依赖真实 tmux、不依赖 pi 进程、不碰磁盘）：

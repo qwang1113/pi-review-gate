@@ -21,12 +21,12 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync } from "node:fs";
 
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { sideEffectsEnabled } from "./side-effects.ts";
-import { nodeChannelIO } from "./orchestrator-channel.ts";
+import { channelRoot, nodeChannelIO } from "./orchestrator-channel.ts";
 import type { SupervisionMemory } from "./orchestrator-supervisor.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { assertSafeTmuxArgv } from "./orchestrator-tmux.ts";
@@ -84,6 +84,71 @@ export function writePlanFile(repoRoot: string, plan: OrchestratorPlan): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileAtomic(path, JSON.stringify(plan, null, 2) + "\n");
 }
+
+/**
+ * ARCHIVE the plan: write the record, then MOVE the plan file aside (B1).
+ *
+ * Two properties, both of them paid for by an incident:
+ *
+ *  - ORDER. The record is written first, so a failure leaves the plan exactly
+ *    where it was — the session is back at "there is an old plan here", a
+ *    state it knows how to handle. Removing first and failing to write would
+ *    destroy the user's approved task list, which is the outcome the hand-run
+ *    `rm` produced three times and which this function exists to make
+ *    impossible.
+ *  - NOTHING IS UNLINKED. The plan file is RENAMED beside the record rather
+ *    than deleted ("绝不 rm", user's words). The record holds the plan as the
+ *    gate parsed it, which is faithful for a valid plan and lossy for one the
+ *    parser could not read — and the unreadable case is exactly when the
+ *    original bytes are worth keeping. A rename costs one file and removes
+ *    the whole question.
+ *
+ * `relPath` is confined to the gate-owned `.pi/` scope and to one path
+ * segment: it comes from the gate itself today, and a path that could escape
+ * `.pi/` would turn an archive into an arbitrary write.
+ */
+export function archivePlanFile(
+  repoRoot: string,
+  relPath: string,
+  contents: string,
+): { ok: true; path: string } | { ok: false; error: string } {
+  const name = relPath.startsWith(".pi/") ? relPath.slice(4) : relPath;
+  const safe = name.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "").slice(0, 120);
+  if (!safe) return { ok: false, error: "归档文件名非法" };
+  try {
+    const dir = join(repoRoot, ".pi");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, safe);
+    writeFileAtomic(path, contents);
+    const planPath = join(repoRoot, PLAN_RELPATH);
+    if (existsSync(planPath)) {
+      renameSync(planPath, path.replace(/\.json$/, "") + ".raw.json");
+    }
+    return { ok: true, path };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * The channel directories that exist right now — one per orchestration.
+ *
+ * Only NAMES are read (they are the ids), never contents: this answers "which
+ * orchestrations exist on this machine", and lib/orchestrator-takeover.ts
+ * filters them down to the ones whose id carries this repo's hash. An
+ * unreadable root is an empty list, never a throw — discovery only ever
+ * enriches a message.
+ */
+export function channelDirNamesIn(home?: string): string[] {
+  try {
+    return readdirSync(channelRoot(home), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
 
 /**
  * Write a task document INSIDE the repo's gate-owned `.pi/` scope (F7).
@@ -248,6 +313,21 @@ export interface OrchestratorHostBindings {
   loadRuntime(): OrchestratorRuntime | undefined;
   /** Persist it into the gate sidecar. */
   storeRuntime(runtime: OrchestratorRuntime): void;
+  /**
+   * Append one line to `.pi/review-gate-audit.log` (B2). The extension owns
+   * the file — the same writer `propose_restatement` and `propose_loop_goal`
+   * already use, so the plan's records land in the one log a human greps.
+   */
+  log(message: string): void;
+  /**
+   * Make `id` the orchestration this session holds (B1, `orchestrator_attach`).
+   *
+   * The extension keeps that id in a closure variable — everything that
+   * addresses a child derives it from there — so a takeover has to reach in
+   * and set it. The gate only calls this after `decideTakeover` accepted the
+   * id, which is what keeps the closure from becoming a back door.
+   */
+  adoptOrchestrationId(id: string): void;
   /** The orchestration id this session holds (inherited or freshly minted). */
   orchestrationId(): string;
   confirm(title: string, message: string, pointer?: string): Promise<boolean>;
@@ -320,11 +400,34 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
       const stored = host.loadRuntime();
       const id = host.orchestrationId();
       if (!stored) return emptyRuntime(id);
-      // A relay successor inherits the id from its environment; the stored
-      // runtime may still carry the predecessor's. The environment wins.
-      return stored.orchestrationId === id ? stored : { ...stored, orchestrationId: id };
+      if (stored.orchestrationId === id) return stored;
+      // A RUNTIME BELONGING TO ANOTHER ORCHESTRATION IS NOT RE-STAMPED
+      // (2026-09-06, B1). This line used to read `{ ...stored,
+      // orchestrationId: id }` — "the environment wins" — which was written
+      // for the relay case, where the successor carries the SAME id and the
+      // branch is not even reached. What it actually did was the accident it
+      // was meant to prevent: a fresh session that minted its own id adopted
+      // the previous orchestration's child registry and plan approval under
+      // the new address, so `runtimeConflict` (which compares the two ids)
+      // could never see a difference to refuse.
+      //
+      // An empty runtime is the honest answer: this session holds `id` and
+      // has nothing registered under it. The foreign record is NOT lost — it
+      // is still on disk, `runtimeConflict` names it, and
+      // `orchestrator_attach` is how a session deliberately adopts it.
+      return emptyRuntime(id);
     },
     saveRuntime: host.storeRuntime,
+    // B1 — what the DISK says, as opposed to what this session holds. The two
+    // are allowed to differ now, and every takeover decision is made on the
+    // difference.
+    recordedRuntime: () => host.loadRuntime(),
+    channelDirNames: () => channelDirNamesIn(host.channelHome?.()),
+    adoptOrchestrationId: (id) => { host.adoptOrchestrationId(id); },
+    archivePlan: (relPath, contents) => archivePlanFile(host.repoRoot, relPath, contents),
+    // Best-effort by contract (see OrchestratorDeps.log): a record for a
+    // human must never be able to fail the tool that was doing the work.
+    log: (message) => { try { host.log(message); } catch { /* audit log is best effort */ } },
     runtimeConflict: () => {
       // A session that INHERITED the id (RG_ORCHESTRATION_ID in its env) is
       // a relay successor: adopting the stored runtime is the intended move.

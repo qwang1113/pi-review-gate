@@ -50,6 +50,8 @@ function depsWith(repoRoot: string) {
     restatement: () => undefined,
     loadRuntime: () => undefined,
     storeRuntime: () => {},
+    log: () => {},
+    adoptOrchestrationId: () => {},
     orchestrationId: () => "orch-test-1",
     confirm: async () => true,
     showToUser: () => {},
@@ -128,6 +130,8 @@ test("runtimeConflict: fresh session + foreign sidecar runtime => the foreign id
       notify: { sentAt: [], lastByKey: {} },
     }),
     storeRuntime: () => {},
+    log: () => {},
+    adoptOrchestrationId: () => {},
     // No RG_ORCHESTRATION_ID in env: the session mints its own.
     orchestrationId: () => "orch-12345678-NEW",
     env: () => ({}) as NodeJS.ProcessEnv,
@@ -139,6 +143,82 @@ test("runtimeConflict: fresh session + foreign sidecar runtime => the foreign id
   const deps = createOrchestratorDeps(host);
   assert.equal(deps.runtimeConflict?.(), "orch-deadbeef-OLD",
     "a fresh session sees the foreign runtime's id as a conflict");
+});
+
+test("runtime(): a FOREIGN runtime is never re-stamped with this session's id (B1)", () => {
+  // THE LINE THIS PINS used to read `{ ...stored, orchestrationId: id }`, and
+  // it quietly undid the conflict check above: a fresh session adopted the
+  // previous orchestration's child registry and plan approval under its own
+  // new address, so the two ids `runtimeConflict` compares could never
+  // differ. An empty runtime is the honest answer — the foreign record stays
+  // on disk for `orchestrator_attach` to adopt deliberately.
+  const root = makeRepo();
+  const foreign = {
+    orchestrationId: "orch-deadbeef-OLD",
+    children: [{
+      id: "t1-x", taskId: "t1", paneId: "%3", cwd: root, createdAt: "2026-09-05T00:00:00.000Z",
+    }],
+    notify: { sentAt: [], lastByKey: {} },
+    approvedPlanHash: "a".repeat(64),
+  };
+  const host: OrchestratorHostBindings = {
+    repoRoot: root,
+    taskMode: () => "orchestrator" as const,
+    restatement: () => undefined,
+    loadRuntime: () => foreign,
+    storeRuntime: () => {},
+    log: () => {},
+    adoptOrchestrationId: () => {},
+    orchestrationId: () => "orch-12345678-NEW",
+    env: () => ({}) as NodeJS.ProcessEnv,
+    confirm: async () => true,
+    showToUser: () => {},
+    sessionTranscriptPath: () => undefined,
+    knownRepoRoots: () => [root],
+  };
+  const deps = createOrchestratorDeps(host);
+
+  const runtime = deps.runtime();
+  assert.equal(runtime.orchestrationId, "orch-12345678-NEW", "we hold our own id");
+  assert.deepEqual(runtime.children, [], "and NOT somebody else's children");
+  assert.equal(runtime.approvedPlanHash, undefined, "nor their approval");
+  assert.equal(deps.runtimeConflict?.(), "orch-deadbeef-OLD", "the conflict is still visible");
+  assert.equal(deps.recordedRuntime()?.children.length, 1,
+    "the foreign registry is not lost — a takeover is what adopts it");
+});
+
+test("runtime(): a session whose id MATCHES the record keeps the record (relay + post-attach)", () => {
+  // The same code path serves both: a relay successor inherits the id via
+  // env, and an `orchestrator_attach` adopts it — after either, the stored
+  // registry IS this session's registry. Before B1 the relay successor lost
+  // it entirely, because a fresh session id reset the sidecar.
+  const root = makeRepo();
+  const stored = {
+    orchestrationId: "orch-deadbeef-OLD",
+    children: [{
+      id: "t1-x", taskId: "t1", paneId: "%3", cwd: root, createdAt: "2026-09-05T00:00:00.000Z",
+    }],
+    notify: { sentAt: [], lastByKey: {} },
+  };
+  const host: OrchestratorHostBindings = {
+    repoRoot: root,
+    taskMode: () => "orchestrator" as const,
+    restatement: () => undefined,
+    loadRuntime: () => stored,
+    storeRuntime: () => {},
+    log: () => {},
+    adoptOrchestrationId: () => {},
+    orchestrationId: () => "orch-deadbeef-OLD",
+    env: () => ({ RG_ORCHESTRATION_ID: "orch-deadbeef-OLD" }) as NodeJS.ProcessEnv,
+    confirm: async () => true,
+    showToUser: () => {},
+    sessionTranscriptPath: () => undefined,
+    knownRepoRoots: () => [root],
+  };
+  const deps = createOrchestratorDeps(host);
+
+  assert.equal(deps.runtime().children.length, 1,
+    "the predecessor's children are reachable by whoever holds the id");
 });
 
 test("runtimeConflict: a relay successor (env id present) is NOT a conflict", () => {
@@ -153,6 +233,8 @@ test("runtimeConflict: a relay successor (env id present) is NOT a conflict", ()
       notify: { sentAt: [], lastByKey: {} },
     }),
     storeRuntime: () => {},
+    log: () => {},
+    adoptOrchestrationId: () => {},
     orchestrationId: () => "orch-deadbeef-OLD",
     env: () => ({ RG_ORCHESTRATION_ID: "orch-deadbeef-OLD" }) as NodeJS.ProcessEnv,
     confirm: async () => true,
@@ -173,6 +255,8 @@ test("runtimeConflict: no sidecar runtime is never a conflict", () => {
     restatement: () => undefined,
     loadRuntime: () => undefined,
     storeRuntime: () => {},
+    log: () => {},
+    adoptOrchestrationId: () => {},
     orchestrationId: () => "orch-12345678-NEW",
     env: () => ({}) as NodeJS.ProcessEnv,
     confirm: async () => true,

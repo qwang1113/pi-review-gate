@@ -375,9 +375,16 @@ export function isLegalTransition(from: TaskStatus, to: TaskStatus): boolean {
  * parallelism are what the USER approved (they are in `canonicalPlanText`);
  * a status is what EXECUTION produced (it is deliberately excluded from it).
  * Rewriting the approved content therefore has no business destroying the
- * record of what already ran — so status and note are taken from the task
- * with the same id, and only a genuinely NEW task starts at `pending`. A task
- * that disappeared from the plan takes its status with it.
+ * record of what already ran — so the STATUS is taken from the task with the
+ * same id, and only a genuinely NEW task starts at `pending`. A task that
+ * disappeared from the plan takes its status with it.
+ *
+ * The NOTE is different and used to be lumped in with the status, which is the
+ * defect: a note is prose for a human, it is excluded from `canonicalPlanText`
+ * and from the approval snapshot exactly as a status is, but unlike a status
+ * nothing else can write it during a rewrite. Pinning it to the old value made
+ * every note update a `write` carried disappear without a word. So a note the
+ * caller SUPPLIES wins, and only an omitted one inherits the previous value.
  *
  * `applyTaskStatus` stays the only way a status CHANGES; this is the only way
  * one SURVIVES. Never mutates either input.
@@ -396,7 +403,15 @@ export function mergeTaskProgress(
       return {
         ...task,
         status: kept.status,
-        ...(kept.note === undefined ? {} : { note: kept.note }),
+        // The NOTE is the caller's to rewrite (2026-09-06, user decision).
+        // Keeping the old one unconditionally silently dropped every note
+        // update a `write` carried — measured in four consecutive rounds, and
+        // the reason this very task id ends in `-v2`. A note grants nothing:
+        // it is absent from `canonicalPlanText`, from the approved snapshot
+        // and from `decideApprovalCarry`, so accepting it cannot widen what
+        // the user approved. An omitted note still inherits the old one, so a
+        // rewrite that simply does not mention notes does not wipe them.
+        ...(task.note === undefined && kept.note !== undefined ? { note: kept.note } : {}),
       };
     }),
   };

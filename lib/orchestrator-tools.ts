@@ -40,7 +40,7 @@ import {
   notifyAuthorization,
   orchestratorDoneProblems,
 } from "./orchestrator-gate.ts";
-import { formatChildren } from "./orchestrator-registry.ts";
+import { emptyRuntime, formatChildren } from "./orchestrator-registry.ts";
 import { formatChildHealth } from "./orchestrator-child-state.ts";
 
 import {
@@ -49,6 +49,15 @@ import {
   prepareNotification,
   recordNotify,
 } from "./orchestrator-notify.ts";
+import {
+  ARCHIVE_CONFIRM_TITLE,
+  buildArchiveConfirmMessage,
+  buildPlanArchive,
+  buildTakeoverRoute,
+  discoverOrchestrations,
+  planArchiveRelPath,
+} from "./orchestrator-takeover.ts";
+
 // Aliased to the short local names: inside a tool module `reply`/`fail` are
 // unambiguous, while the EXPORTED names stay specific enough not to collide
 // with ordinary prose elsewhere in the repo.
@@ -68,6 +77,11 @@ const PLAN_ACTIONS = {
   "set-status": "set-status",
   "add-decision": "add-decision",
   "resolve-decision": "resolve-decision",
+  // B1 (2026-09-05, user decision): "放弃旧编排、另起一轮" is an ACTION of the
+  // plan tool, not a third tool — the thing being put down IS the plan, and a
+  // separate tool would be the "two entry points for one thing" philosophy
+  // two forbids.
+  archive: "archive",
 } as const;
 
 /** The dialog the USER approves a plan in (constraint 1). */
@@ -152,6 +166,40 @@ async function handlePlanAction(
   const action = String(params.action ?? "read");
   const nowIso = new Date(deps.now()).toISOString();
 
+  // ---------------------------------------------------------------------
+  // IDENTITY GUARD (2026-09-06, B1 — MOVED HERE from `set_gate_mode`)
+  // ---------------------------------------------------------------------
+  //
+  // The rule is unchanged: a session that did not inherit an orchestration
+  // must not quietly become the holder of one that is already recorded in
+  // this repo. What changed is WHERE it is enforced. It used to refuse the
+  // MODE — you could not become a project manager at all while somebody
+  // else's plan existed — and that made the two tools which resolve the
+  // situation unreachable, because both live inside the role. The refusal
+  // has been moved onto the acts that actually need an identity:
+  //
+  //   `write` / `submit` here, and `orchestrator_spawn` (which has its own
+  //   `runtimeConflict` check, lib/orchestrator-dispatch.ts).
+  //
+  // Everything else — `read`, `archive`, and the whole of `orchestrator_attach`
+  // — stays open, which is precisely what makes the dead end resolvable from
+  // inside the role instead of with `rm`.
+  const conflict = deps.runtimeConflict?.();
+  if (conflict && (action === PLAN_ACTIONS.write || action === PLAN_ACTIONS.submit)) {
+    const candidates = discoverOrchestrations({
+      repoRoot: deps.repoRoot,
+      recorded: conflict,
+      channelDirNames: () => deps.channelDirNames(),
+    });
+    return fail(
+      `review-gate: 本仓库记录的是另一个编排（${conflict}），本会话持有的是 ` +
+      `${deps.runtime().orchestrationId}。在把这件事定下来之前，不能改写或提交 plan——` +
+      "否则会出现两个项目经理对着同一份 plan 派活。\n\n" +
+      buildTakeoverRoute({ candidates, attempting: `plan 的 ${action}` }),
+      { approved: false, identityConflict: conflict },
+    );
+  }
+
   if (action === PLAN_ACTIONS.write) {
     // strictRepo: WRITING a plan requires every task to declare `repo` (the
     // child's cwd). The READ path (readPlanFile) stays lenient so legacy
@@ -210,6 +258,14 @@ async function handlePlanAction(
           { at: nowIso, changes: carry.amendments },
         ],
       });
+      // B2 — carrying an approval across an edit is a decision the gate makes
+      // ON THE USER'S BEHALF. `approvalAmendments` records it in the sidecar,
+      // which the next session to open this repo wipes; the audit log is the
+      // copy that outlives it, and it names WHICH content the approval moved to.
+      deps.log(
+        `orchestrator plan approval carried to ${nextHash} (from ${runtime.approvedPlanHash}): ` +
+        carry.amendments.join(" / "),
+      );
       return reply(
         `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) + "\n\n" +
         formatApprovalAmendments(carry.amendments) +
@@ -218,6 +274,14 @@ async function handlePlanAction(
       );
     }
     deps.saveRuntime({ ...runtime, approvedPlanHash: undefined, approvedPlanAt: undefined, approvedPlan: undefined });
+    // B2 — a REVOCATION is the other half of the same story: the plan on disk
+    // now grants more than the user agreed to, and until they are asked again
+    // nothing may spawn. Logged with the reasons, so "why did it stop being
+    // approved" survives the sidecar.
+    deps.log(
+      `orchestrator plan approval REVOKED (widening ${runtime.approvedPlanHash} -> ${nextHash}): ` +
+      carry.widenings.join(" / "),
+    );
     return reply(
       `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) + "\n\n" +
       formatApprovalWidenings(carry.widenings),
@@ -288,7 +352,109 @@ async function handlePlanAction(
       approvedPlan: snapshotApprovedPlan(plan, hash, nowIso),
       approvalAmendments: [],
     });
+    // B2 — WHO / WHEN / against WHICH content, in the log the two sibling
+    // approvals already write to. The sidecar holds the same facts but does
+    // not survive the next session opening this repo.
+    deps.log(
+      `orchestrator plan approved by the user (hash ${hash}, ${plan.tasks.length} tasks, ` +
+      `station ${plan.deliveryStation ?? "precommit"})`,
+    );
     return reply("review-gate: plan 已获用户批准，可以开始 `orchestrator_spawn`。", { approved: true });
+  }
+
+
+  // -------------------------------------------------------------------------
+  // ARCHIVE — "this orchestration is over, I am starting a new one" (B1)
+  // -------------------------------------------------------------------------
+  //
+  // The alternative that existed before this action was a project manager
+  // typing `rm .pi/orchestrator-plan.json`, because entering the role was
+  // refused while somebody else's plan was in the repo and nothing could put
+  // that plan away. Three sessions did exactly that, one of them the
+  // supervisor. So: the gate does it, it ARCHIVES rather than deletes, and it
+  // asks the user first — the plan being put away is one they approved.
+  if (action === PLAN_ACTIONS.archive) {
+    // WHAT IS THERE TO PUT DOWN? The plan and the registry die separately —
+    // a repo left over from the `rm` era has a registry and no plan — so
+    // either half is enough to have work to do here, and neither is a
+    // precondition for the other.
+    const recordedForCheck = deps.recordedRuntime();
+    if (!plan && !recordedForCheck) {
+      return fail(
+        "review-gate: 本仓库没有什么可归档的 —— 既没有 `.pi/orchestrator-plan.json`，" +
+        "门禁记录里也没有上一轮编排的登记表。直接 `orchestrator_plan({action:\"write\"})` " +
+        "写这一轮自己的 plan 就行。",
+        { archived: false },
+      );
+    }
+    // LIVE CHILDREN VETO. The registry on DISK is the one that matters here:
+    // it belongs to the orchestration being put down, not to this session
+    // (which may hold a different id entirely). A pane that is still alive
+    // means somebody is still working under that plan — archiving it would
+    // strand them, and the honest move is a takeover instead.
+    const recorded = recordedForCheck;
+    const panes = alivePanes(deps);
+    const openChildren = (recorded?.children ?? []).filter((child) => !child.closedAt);
+    const stillAlive = panes.ok
+      ? openChildren.filter((child) => panes.panes.includes(child.paneId))
+      : [];
+    if (stillAlive.length > 0) {
+      return fail(
+        `review-gate: 这一轮编排还有 ${stillAlive.length} 个子会话活着` +
+        `（${stillAlive.map((c) => `${c.id}@${c.paneId}`).join("、")}）—— 不归档。\n` +
+        "它们正在这份 plan 下干活，归档会把它们晾在没有主管的状态。要接手它们，用 " +
+        `\`orchestrator_attach({ orchestrationId: "${recorded?.orchestrationId ?? ""}" })\`；` +
+        "确实要放弃，先 `orchestrator_close` 掉它们再归档。",
+        { archived: false, liveChildren: stillAlive.length },
+      );
+    }
+
+    const archivePath = planArchiveRelPath(nowIso);
+    // THE USER DECIDES (2026-09-06, their answer to the design question).
+    // `confirm` resolves false when there is no UI at all, and that is the
+    // wanted direction: with nobody to ask, nothing moves.
+    const granted = await deps.confirm(
+      ARCHIVE_CONFIRM_TITLE,
+      buildArchiveConfirmMessage({ plan, archivePath, liveChildren: openChildren.length }),
+    );
+    if (!granted) {
+      return fail(
+        "review-gate: 用户没有同意归档（或当前环境没有可用的对话框）——什么都没有动，plan 还在原处。\n" +
+        "另一条路仍然可用：`orchestrator_attach` 接管这份 plan 所属的编排。",
+        { archived: false },
+      );
+    }
+
+    const written = deps.archivePlan(
+      archivePath,
+      buildPlanArchive({
+        plan,
+        ...(recorded ? { runtime: { orchestrationId: recorded.orchestrationId, children: recorded.children } } : {}),
+        at: nowIso,
+        by: deps.runtime().orchestrationId,
+      }),
+    );
+    if (!written.ok) {
+      return fail(
+        `review-gate: 归档写不出来（${written.error}）—— plan 原封不动留在 ${PLAN_RELPATH}。`,
+        { archived: false },
+      );
+    }
+    // THE RUNTIME GOES WITH IT. Leaving the old registry in the sidecar would
+    // leave `runtimeConflict` refusing every spawn of the NEW orchestration
+    // forever — the session would have tidied itself into a corner it cannot
+    // leave. It is not lost: the archive file above holds a copy.
+    deps.saveRuntime(emptyRuntime(deps.runtime().orchestrationId));
+    deps.log(
+      `orchestrator plan archived to ${written.path} ` +
+      `(plan hash ${plan ? planHash(plan) : "none"}, previous orchestration ${recorded?.orchestrationId ?? "none"})`,
+    );
+    return reply(
+      `review-gate: 旧 plan 已归档到 ${written.path}（连同它的编排登记表；**没有删除任何东西**）。\n` +
+      `${PLAN_RELPATH} 已让出来了 —— 现在可以 \`orchestrator_plan({action:"write"})\` 写这一轮自己的 plan，` +
+      "再 `submit` 请用户批准。",
+      { archived: true, path: written.path },
+    );
   }
 
 
@@ -383,7 +549,11 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "asks the USER to approve it if the audit passes; a failed audit comes back as findings " +
       "with no dialog shown, so fix them and submit again), \"set-status\" (move one task through " +
       "the state machine — `write` never changes a status), \"add-decision\" / \"resolve-decision\" " +
-      "(questions only the human can settle). WHAT `write` DOES TO THE APPROVAL: it keeps it for " +
+      "(questions only the human can settle), \"archive\" (a PREVIOUS orchestration's plan is in " +
+      "this repo and you are starting a new round: the gate moves it aside — plan AND child " +
+      "registry — into a timestamped file in `.pi/`, asks the user first, and NEVER deletes " +
+      "anything; it refuses while a registered child pane is still alive and points you at " +
+      "`orchestrator_attach` instead). WHAT `write` DOES TO THE APPROVAL: it keeps it for " +
       "edits that grant nothing new — a narrowed boundary, a dropped task, a new path inside the " +
       "directory of a boundary this task already had that no other task claims, an added " +
       "dependency, parallel→serial, a lower maxParallel — and records why. It REVOKES it for a " +

@@ -365,6 +365,17 @@ export interface SettleAuditRoundDeps {
   /** Persist one repo's plan-audit record (the extension owns gate state). */
   savePlanAudit(root: string, record: PlanAuditRecord): void;
   /**
+   * Append one line to the repo's audit log (B2, 2026-09-06).
+   *
+   * The plan audit's verdict is an authority record: it is what stands
+   * between a draft plan and the user's approval dialog. It was persisted
+   * ONLY into the gate sidecar, which the next session to open the repo
+   * resets — so the answer to "was this plan audited, and what did the
+   * auditor say" disappeared exactly when it started to matter. Written here,
+   * beside the record itself, so the two can never disagree.
+   */
+  log(message: string): void;
+  /**
    * The goal and review record WRITERS — untouched bodies, called from here.
    *
    * `undefined` means "could not record right now" (no usable tool context),
@@ -437,6 +448,12 @@ function recordPlanRound(
     planText: pending.planText,
   };
   deps.savePlanAudit(root, record);
+  // B2 — the same fact, in the log a human greps. Bound to the hash, so a
+  // later reader can tell WHICH draft this verdict judged.
+  deps.log(
+    `orchestrator plan audit ${record.verdict} for ${root} ` +
+    `(hash ${record.hash}, findings ${record.findingsTotal ?? "?"})`,
+  );
   if (adjudication.verdict === "PASS") {
     return `plan 审计 PASS（hash ${pending.hash.slice(0, 12)}）——可以送用户批准了。`;
   }

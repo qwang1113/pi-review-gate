@@ -1050,18 +1050,36 @@ test("SECURITY: set_gate_mode consent is extension-driven — no 'confirmed' par
     `expected 4 mode-changed reports (apply/noop/declined/rejected), got ${modeChangedHits.length}`);
 });
 
-test("set_gate_mode(orchestrator) refuses to take over a plan written by another orchestration", () => {
+test("set_gate_mode(orchestrator) no longer refuses because somebody else's plan exists (B1)", () => {
+  // THE RULE DID NOT CHANGE, ITS PLACE DID (2026-09-06). A session that never
+  // inherited an orchestration must still not become the holder of one that
+  // is already recorded here — but entering the ROLE grants nothing, and
+  // refusing the mode locked the two tools that resolve the situation
+  // (`orchestrator_attach`, `orchestrator_plan({action:"archive"})`) behind
+  // the door being held shut. The only executable advice left was `rm` on the
+  // gate's own plan file, and three sessions took it.
   const at = SRC.indexOf('name: "set_gate_mode"');
   const region = SRC.slice(at, SRC.indexOf("registerTool", at + 10));
-  // A session with no inherited RG_ORCHESTRATION_ID must not adopt a plan
-  // somebody else wrote: the plan carries the user's approval and would
-  // authorize spawning under a NEW minted id nobody can address.
-  assert.match(region, /ORCHESTRATION_ID_ENV/,
-    "the guard reads whether the session inherited an orchestration id");
-  assert.match(region, /readPlanFile\(primaryRepoRoot\)/,
-    "the guard checks whether a plan already exists");
-  assert.match(region, /不接管旧编排/, "and it says so plainly");
-  assert.match(region, /isError: true/, "refusing, never silently proceeding");
+  assert.doesNotMatch(region, /不接管旧编排/,
+    "the mode-level plan refusal must be gone, not merely reworded");
+  assert.doesNotMatch(region, /先清掉旧 plan/,
+    "and with it the advice that made deleting the gate's state file the way out");
+  // The preconditions that ARE about the environment stay where they were.
+  assert.match(region, /ORCHESTRATOR_NEEDS_TMUX/, "no tmux still refuses the role");
+  assert.match(region, /isOrchestrationChild\(\)/, "an orchestration child still may not become a manager");
+
+  // And the rule now lives on the acts that need an identity.
+  const planTools = readFileSync(join(ROOT, "lib/orchestrator-tools.ts"), "utf8");
+  assert.match(planTools, /runtimeConflict\?\.\(\)/,
+    "orchestrator_plan must refuse write/submit while the repo records another orchestration");
+  assert.match(planTools, /PLAN_ACTIONS\.write \|\| action === PLAN_ACTIONS\.submit/,
+    "and only those two actions — read/archive must stay reachable");
+  const dispatch = readFileSync(join(ROOT, "lib/orchestrator-dispatch.ts"), "utf8");
+  assert.match(dispatch, /runtimeConflict\?\.\(\)/, "spawn keeps its own identity check");
+  for (const source of [planTools, dispatch]) {
+    assert.match(source, /buildTakeoverRoute\(/,
+      "every identity refusal must hand back the two commands that resolve it");
+  }
 });
 
 test("USER REQUIREMENT: Temp dirs are nudged, never clamped; only non-git clamps (criterion 6)", () => {
@@ -3682,13 +3700,48 @@ test("the advisory memo never caches an UNAVAILABLE fingerprint", () => {
 test("restore() collects the migration result from loadSidecar, not from a second call", () => {
   const restoreAt = SRC.indexOf("function restore(");
   assert.ok(restoreAt >= 0, "restore() must exist");
-  const body = SRC.slice(restoreAt, restoreAt + 4000);
+  // ANCHORED, NOT A FIXED SLICE (2026-09-06). A `restoreAt + 4000` window was
+  // a reading heuristic pretending to be a contract: the assertion below sits
+  // near the END of restore(), so any comment added earlier in the function
+  // pushed it out of the window and the test failed for a reason that had
+  // nothing to do with the rule. Both facts are anchored on themselves and
+  // only their ORDER and their membership in restore() are asserted — which
+  // is what the rule actually says.
+  const nextFunctionAt = SRC.indexOf("\n  function ", restoreAt + 1);
+  const end = nextFunctionAt > restoreAt ? nextFunctionAt : SRC.length;
+  const body = SRC.slice(restoreAt, end);
 
   assert.match(body, /loadSidecar\(sidecarPath\(cwd\),\s*\w+\)/,
     "loadSidecar must be given an out-parameter to report the migration");
   assert.match(body, /fingerprintMigrated\s*=\s*migrateFingerprintVersion\(state\)\s*\|\|\s*\w+\.migrated/,
     "the sidecar's migration result must be OR'd into the reported flag");
 });
+
+test("a NEW session keeps the orchestration registry but never its approval (B1)", () => {
+  // THE ASYMMETRY IS THE RULE. Everything else in a sidecar describes the
+  // session's own round and is rightly reset for a new session id. The
+  // orchestration runtime describes the WORLD — which orchestration this repo
+  // runs and which child panes are registered under it — and resetting it
+  // cost the same bug twice: a relay successor (a plain `pi`, so a fresh
+  // session id) lost the predecessor's whole registry, and a takeover had
+  // nothing left to take over, which is how `rm` became the only move.
+  //
+  // The APPROVAL must NOT survive: it is permission the user gave to a
+  // session that is gone. Re-obtaining it costs one dialog; inheriting it
+  // would let a session nobody approved spawn children.
+  const at = SRC.indexOf("restored.sessionId !== sessionId");
+  assert.ok(at > 0, "the new-session reset branch must exist");
+  const branch = SRC.slice(at, SRC.indexOf("} else if (sidecarCorrupt)", at));
+  assert.ok(branch.length > 0 && branch.length < 4000, "the branch window must be the branch");
+
+  assert.match(branch, /state\.orchestrator = carried/,
+    "the orchestration runtime must be carried into the fresh state");
+  for (const granted of ["approvedPlanHash", "approvedPlanAt", "approvedPlan", "approvalAmendments"]) {
+    assert.match(branch, new RegExp(`${granted}:\\s*_`),
+      `${granted} must be stripped — an approval never travels to a session the user did not approve`);
+  }
+});
+
 
 test("session_start surfaces the migration notice and clears the flag", () => {
   const at = SRC.indexOf('pi.on("session_start"');

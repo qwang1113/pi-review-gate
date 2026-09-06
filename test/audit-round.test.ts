@@ -431,6 +431,8 @@ interface FakeState {
   cursors: string[];
   forgotten: string[];
   planRecords: PlanAuditRecord[];
+  /** Lines the engine wrote to `.pi/review-gate-audit.log` (B2). */
+  auditLog: string[];
   goalDrafts: string[];
   reviewRounds: number;
   /** undefined = "could not record right now" (no usable tool context). */
@@ -450,6 +452,7 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     cursors: [],
     forgotten: [],
     planRecords: [],
+    auditLog: [],
     goalDrafts: [],
     reviewRounds: 0,
     recordResult: "recorded",
@@ -474,6 +477,7 @@ function makeSettleDeps(over: Partial<FakeState> = {}): { state: FakeState; deps
     nowIso: () => NOW,
     checkpointAt: () => state.checkpointAt,
     savePlanAudit: (_root, record) => { state.planRecords.push(record); },
+    log: (message) => { state.auditLog.push(message); },
     recordGoal: async ({ pending }) => {
       state.goalDrafts.push(pending.draft);
       return state.recordResult;
@@ -640,6 +644,13 @@ test("settle/plan: the record binds to the dispatched hash and adjudicates P0/P1
   assert.equal(record.verdict, "FAIL");
   assert.equal(record.planText, "计划正文");
   assert.match(settled.status === "recorded" ? settled.text : "", /审计\*\*没过\*\*/);
+  // B2 (2026-09-06): the verdict also leaves the sidecar. The sidecar is
+  // reset by the next session that opens this repo, so a record that lives
+  // only there cannot answer "was this plan audited, and what was said".
+  const logged = state.auditLog.find((line) => line.includes("plan audit"));
+  assert.ok(logged, `the verdict must reach the audit log: ${state.auditLog.join(" | ")}`);
+  assert.match(logged!, /FAIL/, "the logged verdict is the adjudicated one");
+  assert.match(logged!, new RegExp("a".repeat(64)), "bound to the hash that was judged");
 });
 
 test("settle/plan: a PASS says so, and it is the text the caller relays", async () => {

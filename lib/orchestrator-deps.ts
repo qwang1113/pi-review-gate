@@ -81,6 +81,23 @@ export interface OrchestratorDeps {
   saveRuntime(next: OrchestratorRuntime): void;
 
   /**
+   * Append one line to the repo's audit log (`.pi/review-gate-audit.log`).
+   *
+   * WHY THE ORCHESTRATION LAYER NEEDS IT (B2, 2026-09-06). The plan's
+   * approval and its audit verdict lived ONLY in the gate sidecar, and the
+   * sidecar is reset the moment another session opens in the same repo — so
+   * "who approved this plan, when, and against which content" became
+   * unanswerable exactly when somebody needed to ask it. Its two siblings
+   * already write here (`propose_restatement`, `propose_loop_goal`); the plan
+   * was the one authority-granting record with no trail at all.
+   *
+   * Best-effort by contract: the log is a record for a human, never an input
+   * to a decision, so a failed write must never fail the tool that was doing
+   * the real work.
+   */
+  log(message: string): void;
+
+  /**
    * When this session holds a DIFFERENT orchestration identity than the one
    * persisted in the sidecar, and it did NOT inherit that identity from its
    * environment (no RG_ORCHESTRATION_ID), returning a reason here means:
@@ -93,6 +110,38 @@ export interface OrchestratorDeps {
   readPlan(): PlanRead;
   /** Persist a plan the agent just wrote or mutated. */
   savePlan(plan: OrchestratorPlan): void;
+  /**
+   * ARCHIVE the plan file: write `contents` to `relPath` and take
+   * `.pi/orchestrator-plan.json` away (B1, user decision 2026-09-05 —
+   * "归档由门禁做，绝不 rm"). One dep rather than a write plus a delete,
+   * because a half-done archive (written but the plan still there, or the
+   * plan gone but nothing written) is exactly the state a hand-run produced.
+   */
+  archivePlan(relPath: string, contents: string): { ok: true; path: string } | { ok: false; error: string };
+
+  /**
+   * The orchestration runtime RECORDED ON DISK for this repo, if any.
+   *
+   * Deliberately separate from `runtime()`, which is what this session HOLDS:
+   * after B1 those two are allowed to differ, and telling them apart is the
+   * whole of "there is an old orchestration here that I am not part of". Two
+   * tools need the difference — `orchestrator_attach` (which id may I adopt)
+   * and the archive action (whose children are still alive down there).
+   */
+  recordedRuntime(): OrchestratorRuntime | undefined;
+
+  /** Channel directory names under the channel root — one per orchestration. */
+  channelDirNames(): string[];
+
+  /**
+   * ADOPT an orchestration id as this session's own (`orchestrator_attach`).
+   *
+   * The id is a closure variable in the extension, not a field of any record,
+   * because everything that addresses a child derives it from here. Only a
+   * takeover that passed {@link decideTakeover} may call this.
+   */
+  adoptOrchestrationId(id: string): void;
+
 
   /** Run one tmux command (argv, never a shell string). */
   tmux(argv: readonly string[]): TmuxRunResult;

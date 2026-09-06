@@ -1273,3 +1273,58 @@ test("shippedKinds survives a round trip, and unreadable evidence is dropped", (
   assert.equal(loaded!.shippedKinds, undefined);
 });
 
+
+// ---------------------------------------------------------------------------
+// The orchestration runtime's ID survives the file (B1, 2026-09-06)
+// ---------------------------------------------------------------------------
+
+test("loadSidecar reads the orchestration id back, and drops the blob when it is malformed", () => {
+  // WHY IT IS READ BACK NOW. It used to be blanked, on the reasoning that a
+  // forged id must not become an attention channel key. It never achieved
+  // that (the wiring immediately stamped the session's own id onto the blob),
+  // and it cost the one fact a takeover needs: WHICH orchestration this
+  // repo's registry belongs to. Adoption is what is guarded now, not reading.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  const runtime = {
+    orchestrationId: "orch-deadbeef-abc",
+    children: [{
+      id: "t1-x", taskId: "t1", paneId: "%3", cwd: "/repo", createdAt: "2026-09-06T00:00:00.000Z",
+    }],
+    notify: { sentAt: [], lastByKey: {} },
+  };
+
+  writeFileSync(path, JSON.stringify({ ...base, orchestrator: runtime }));
+  const loaded = loadSidecar(path);
+  assert.equal(loaded?.orchestrator?.orchestrationId, "orch-deadbeef-abc",
+    "the record must be able to say which orchestration it belongs to");
+  assert.equal(loaded?.orchestrator?.children.length, 1);
+
+  // A malformed id takes the WHOLE blob with it: a registry whose owner
+  // cannot be named is one nothing may act on.
+  for (const forged of ["", "not-an-id", "orch-", "../../etc", 42, null]) {
+    writeFileSync(path, JSON.stringify({ ...base, orchestrator: { ...runtime, orchestrationId: forged } }));
+    assert.equal(loadSidecar(path)?.orchestrator, undefined, `${JSON.stringify(forged)} must drop the runtime`);
+  }
+});
+
+test("an approval in the sidecar still needs the whole blob to be readable", () => {
+  // Unchanged by B1, asserted here because reading the id back is new: a
+  // damaged runtime must still lose its approval rather than keep it.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = emptyState("s", 10);
+  writeFileSync(path, JSON.stringify({
+    ...base,
+    orchestrator: {
+      orchestrationId: "orch-deadbeef-abc",
+      children: "not-an-array",
+      notify: { sentAt: [], lastByKey: {} },
+      approvedPlanHash: "a".repeat(64),
+    },
+  }));
+  assert.equal(loadSidecar(path)?.orchestrator?.approvedPlanHash, undefined,
+    "any doubt about the blob drops the authority in it");
+});
+

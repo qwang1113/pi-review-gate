@@ -31,6 +31,7 @@ import {
 
 import { applyTaskStatus, scheduleNextTasks, type PlanTask } from "./orchestrator-plan.ts";
 import { spawnAuthorization } from "./orchestrator-gate.ts";
+import { buildTakeoverRoute, discoverOrchestrations } from "./orchestrator-takeover.ts";
 import {
   findChild,
   lastChildPane,
@@ -164,9 +165,21 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   // silently adopting the stale runtime.
   const conflict = deps.runtimeConflict?.();
   if (conflict) {
-    return fail(`review-gate: 当前会话持有新编排身份（${deps.runtime().orchestrationId}），无法继续旧编排（${conflict}）。` +
-      "sidecar 里登记的是另一个 orchestration 的 runtime —— 不接管、不开 pane。" +
-      "若要接手旧编排，请用同一个 RG_ORCHESTRATION_ID 启动会话（或 relay 交接）。");
+    // The refusal now carries the WAY OUT (2026-09-06, B1). It used to end
+    // with "start a session with the same RG_ORCHESTRATION_ID", which is not
+    // something a running session can do — so the advice was unexecutable and
+    // the real-world resolution became `rm` on the plan file. The route names
+    // the candidates found on disk and the two tools that resolve it.
+    const candidates = discoverOrchestrations({
+      repoRoot: deps.repoRoot,
+      recorded: conflict,
+      channelDirNames: () => deps.channelDirNames(),
+    });
+    return fail(
+      `review-gate: 当前会话持有新编排身份（${deps.runtime().orchestrationId}），无法继续旧编排（${conflict}）。` +
+      "门禁记录里登记的是另一个 orchestration 的 runtime —— 不接管、不开 pane。\n\n" +
+      buildTakeoverRoute({ candidates, attempting: "派活（spawn）" }),
+    );
   }
   const first = currentPlan(deps);
   if (first.problem) return first.problem;
