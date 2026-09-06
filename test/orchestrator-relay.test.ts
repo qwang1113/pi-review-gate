@@ -155,7 +155,7 @@ function supervision(summary: string): SupervisionEvent {
 
 test("a supervision event is the most informative outcome, so it wins", () => {
   const decision = evaluateChildWait({
-    events: [supervision("c1 在等回答：「等待回答提问」")], done: true, paneAlive: true,
+    events: [supervision("c1 在等回答：「等待回答提问」")], paneAlive: true,
   });
   assert.equal(decision.done, true);
   assert.equal(decision.reason, "supervision");
@@ -164,23 +164,32 @@ test("a supervision event is the most informative outcome, so it wins", () => {
 });
 
 
-test("a finished child does NOT exit — 'done' is an event, not a process end", () => {
-  const decision = evaluateChildWait({ done: true, paneAlive: true });
+test("a finished child does NOT exit — 'done' arrives as an EVENT, not a process end", () => {
+  // B4: there is no separate `child-done` criterion any more. Completion is
+  // newsworthy, so the supervisor manufactures an event for it — one reading
+  // (the channel), one answer. The old second criterion read a registry field
+  // nothing wrote, which is how one receipt managed to say "已完成" and "还有
+  // 1 个子会话活着" about the same child.
+  const decision = evaluateChildWait({
+    events: [{ childId: "c1", state: "done", summary: "c1：已完成" }],
+    paneAlive: true,
+  });
   assert.equal(decision.done, true);
-  assert.equal(decision.reason, "child-done");
-  assert.match(decision.summary, /仍然活着/,
+  assert.equal(decision.reason, "supervision");
+  assert.equal(decision.childId, "c1");
+  assert.match(decision.summary, /已完成/,
     "waiting for the process to end here would hang forever — that is why the criteria differ from a judge's");
 });
 
 test("a vanished pane ends the wait instead of burning the whole budget", () => {
-  const decision = evaluateChildWait({ done: false, paneAlive: false });
+  const decision = evaluateChildWait({ paneAlive: false });
   assert.equal(decision.done, true);
   assert.equal(decision.reason, "pane-gone");
   assert.match(decision.summary, /多半没做完/);
 });
 
 test("nothing yet is not an end state, and the note becomes the live snapshot", () => {
-  const decision = evaluateChildWait({ done: false, paneAlive: true, note: "子会话 a-1 仍在 pane %2" });
+  const decision = evaluateChildWait({ paneAlive: true, note: "子会话 a-1 仍在 pane %2" });
   assert.equal(decision.done, false);
   assert.equal(decision.reason, "pending");
   assert.equal(decision.summary, "子会话 a-1 仍在 pane %2");

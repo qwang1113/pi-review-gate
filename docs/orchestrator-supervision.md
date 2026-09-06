@@ -75,9 +75,9 @@
 
 | 状态 | 判据 | 谁测的 |
 | --- | --- | --- |
-| `working` | 子会话自报（`ctx.isIdle() === false`，或有 pending 消息） | 它自己 |
+| `working` | 子会话自报（`ctx.isIdle() === false`，或有 pending 消息）**或**自报 `idle` 但 `IDLE_PROGRESS_GRACE_MS`（120s）内有推进 | 它自己（见 §2.4） |
 | `waiting-input` | 通道里有**未销账的 request** | 它自己 |
-| `idle` | 自报停下了，且没有完成记录 | 它自己 |
+| `idle` | 自报停下了、没有完成记录，**且已 120s 没有推进** | 它自己 + 进展戳 |
 | `done` | 自报停下了，且它的门禁写下了 `declare_done` 的完成记录 | 它自己 |
 | `dead` | pane 不在 `list-panes` 的输出里 | 编排层（从外面） |
 | `stalled` | pane 还在，但通道心跳超过 `HEARTBEAT_STALE_MS`（180s） | 编排层（推断） |
@@ -98,7 +98,7 @@
    「已完成」—— 而卡住恰恰是监督者唯一必须听到的事。
 4. **沉默（`stalled`）排在任何正面自报之前**：比心跳预算更旧的报告不再是关于当下的证据。
 5. **`waiting-judge`**：它在等门禁**自己派出去**的活（reviewer / precommit）。
-6. `idle` / `working`。
+6. `idle` / `working` —— 而这两者之间还要过一道**进展**关（§2.4）。
 
 `paneAlive === undefined`（tmux 读不出来）**永远不判死**（F14）：读不到是信息缺失，
 而误判死亡与漏判死亡一样会终结监督。
@@ -133,6 +133,29 @@
   它现在给的是「去看健康快照」而不是「先打断它」。
 
 上报里还带上 `ctx.getContextUsage()` 的读数，所以项目经理不必去问「你还剩多少上下文」。
+
+### 2.4 自报 `idle` 要过进展关：`IDLE_PROGRESS_GRACE_MS`（B3）
+
+子会话上报 `working` / `idle` 的依据是 `ctx.isIdle()`，而这个读数**在两次工具调用
+之间为真**：一个正在连续调 bash / read 做只读调查的会话，几乎每一跳心跳都是 idle。
+2026-09-04 实测：一个 45 秒里 transcript 涨了 23.7KB 的子会话，被连续四次报成
+「**停下了（没有 declare_done）**」，而同一行里写着「最后活动 0s 前」。代价有两份：
+项目经理据此两次多余打断；`idle` 又算 newsworthy，于是**每次 `orchestrator_wait`
+都立即返回**，它唯一的等待工具退化成忙轮询。
+
+推翻这条误报的事实**本来就在同一条记录里**：`lastProgressAt` —— 只有真实 agent 事件
+（工具返回、turn 边界）才推进，心跳不推进。它过去只是回执上的一个读数。现在它参与判定：
+
+- 自报 `idle` + 进展在 **120 秒**（`IDLE_PROGRESS_GRACE_MS`，**用户拍板的数字**）以内
+  ⇒ 判 `working`，健康行写成「在干活（自上次推进 3s；**它自报停下，未满 120s 不予采信**）」
+  —— 被推翻的那条自报**显式留在行里**，不替它藏 120 秒（用户决定，2026-09-17）；
+- 满 120 秒没有推进 ⇒ 它的 `idle` 成立，照旧报「停下了（没有 declare_done）」；
+- **没有进展戳**（还没跑过工具的新会话、或旧版扩展）⇒ **采信自报**。没有信息就不要
+  凭空造出一个矛盾 —— 否则一个真的停下的子会话会永远显示 `working`，那正是 R3-5。
+
+顺序上它排在 `dead` / `waiting-input` / `done` / `stalled` **之后**：进展戳只能把
+「自报停下」降级成「还在干活」，不能把一具尸体说活。
+
 
 
 ---
@@ -213,7 +236,7 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 3. **死亡与恢复** —— `dead` / `stalled` 的子会话、**未丢失的资产**（分支 / checkpoint /
    review 裁决 / 完成记录）、以及可直接执行的动作（`orchestrator_recover` 或 `orchestrator_close`）；
 4. **你自己的上下文用量与接力时机**（见 §5.1）；
-5. **还差什么才能 `declare_done`**。
+5. **还差什么才能 `declare_done`**（见 §5.3 —— 它与第 1 块读同一份 snapshot）。
 
 `timeoutMs: 0` 就是原来的 `orchestrator_status`。**被替换掉的是什么**：两个回答同一个
 问题的工具，agent 每轮都要选一个 —— 那正是哲学二说的设计失败。现在阻塞与否是一个参数，
@@ -248,6 +271,40 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 
 事件记忆（`SupervisionMemory`）由**调用方持有**并在 `orchestrator_wait` 与后台定时器
 之间共享，所以两者不会重复叫同一件事；它绝不是模块级变量，这样测试可以直接构造它。
+
+### 5.3 收尾块与健康快照读同一份真值（B4）
+
+`lib/orchestrator-gate.ts` 的 `orchestratorDoneProblems` + `lib/orchestrator-session-tools.ts` 的 `exitBlockers`
+
+2026-09-04 实测，**同一份回执**里：第 1 块「t8a：**已完成**」，第 5 块「plan 还有 4 个
+任务未完成：t8a(**running**)」+「还有 **1 个子会话活着**：t8a@%238」。两块都没算错 ——
+它们算的是**两份不同的读数**：第 1 块读通道（子会话自己写的完成记录），第 5 块读
+registry 的 `doneAt` 字段。而 `doneAt` 的写点在旧 probe 被删时一起消失了（b6492c5），
+字段和它的 5 个读者留了下来，从此**恒为 undefined**。项目经理只能自己在两块之间仲裁，
+再手工 `set-status` + `orchestrator_close` 收尾。
+
+修法不是把写点补回去（那等于重埋同一颗雷：完成缓存必须在每一条重新派活路径上失效，
+而 `orchestrator_instruct({mode:"interrupt"})` 带正文派新活时今天就不打派活戳），而是
+**删掉那份缓存**：`ChildSession.doneAt`、`markChildDone` 与 `orchestrator_wait` 里那条
+读它的 `child-done` 判据全部移除（那条判据本身还是个忙轮询：标志永不清除，只要有一个
+孩子报过完成，之后每次 wait 都会立刻返回）。完成只有一处真值 —— **通道**，由
+`superviseChildren` 读一次，健康快照与收尾块都吃这一份。
+
+于是收尾块现在这么说（用户拍板，2026-09-17）：
+
+- 「有 N 个子会话**已报完成、pane 还开着**：… —— 待你复验后用
+  `orchestrator_plan({action:"set-status", …})` 收尾，再 `orchestrator_close` 关掉它」；
+- 对应的 plan 行也写成 `t8a(running，孩子已报完成，待你复验后 set-status)`；
+- **门禁不替项目经理把任务标成 done** —— 独立复验是契约要求的动作，自动标 done 会把它架空；
+- 已报完成但 pane 还开着的子会话**仍然阻塞** `declare_done`（与修复前的实际行为一致，
+  变的只是它不再自相矛盾）。
+
+同一处还修了 F14 的第三扇门：注入提示词的收尾块过去在 `list-panes` 读失败时把存活
+pane 列表传成 `[]` —— 空列表在这里的含义是「每一个登记过的 pane 都消失了」，于是一次
+tmux 抖动就会告诉项目经理它的孩子全死了。现在读不到就是**未知**：不宣称任何死亡，把所有
+未关闭的子会话按「都还活着」计入（保守方向是**挡住**收尾，绝不是凭空造一具尸体），
+并在块里明说存活状态未知。
+
 
 ---
 

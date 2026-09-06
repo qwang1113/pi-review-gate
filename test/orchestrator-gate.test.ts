@@ -199,6 +199,68 @@ test("CONSTRAINT 4: a live child blocks the exit", () => {
   assert.ok(problems.some((p) => /a-1@%2/.test(p)));
 });
 
+test("B4: a child that REPORTED DONE is named as such — and still blocks the exit", () => {
+  // The measured contradiction (2026-09-04): block 1 of the receipt said
+  // "t8a：已完成" while this block said "还有 1 个子会话活着：t8a". Both were
+  // computed correctly; they were computed from DIFFERENT readings. The
+  // completion is a channel fact and is passed in now, so there is one answer.
+  const runtime = registerChild(emptyRuntime("orch-abc-1"), {
+    id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW,
+  });
+  const facts = doneFacts({
+    plan: planOf({ tasks: [{ id: "a", title: "a", fileBoundaries: ["lib/a"], status: "running" }] }),
+    runtime,
+    alivePaneIds: ["%2"],
+    reportedDone: ["a-1"],
+  });
+  const problems = orchestratorDoneProblems(facts);
+
+  assert.ok(problems.some((p) => /已报完成、pane 还开着/.test(p)),
+    "the finished child is still an exit blocker (user decision) — but it is named for what it is");
+  assert.ok(!problems.some((p) => /还有 \d+ 个子会话活着/.test(p)),
+    "and never as 'alive, go wait for it' in the same receipt that called it finished");
+  assert.ok(problems.some((p) => /set-status/.test(p) && /orchestrator_close/.test(p)),
+    "the manager is told the two moves that close it out");
+  assert.ok(problems.some((p) => /门禁不替你标 done/.test(p)),
+    "the gate never marks the task done itself — the manager's re-verification is the contract");
+  assert.ok(problems.some((p) => /a\(running，孩子已报完成/.test(p)),
+    "the plan line carries the same fact, so the two lines cannot disagree");
+
+  // WITHOUT the reading (nobody asked the channels), nothing is claimed about
+  // completion — the child is simply a live child.
+  const unread = orchestratorDoneProblems({ ...facts, reportedDone: undefined });
+  assert.ok(unread.some((p) => /还有 1 个子会话活着/.test(p)));
+  assert.ok(!unread.some((p) => /已报完成/.test(p)));
+});
+
+test("B4: a child that reported done and then VANISHED is not called 'never reported'", () => {
+  const runtime = registerChild(emptyRuntime("orch-abc-1"), {
+    id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW,
+  });
+  const problems = orchestratorDoneProblems(doneFacts({
+    runtime, alivePaneIds: [], reportedDone: ["a-1"],
+  }));
+  assert.ok(!problems.some((p) => /从未报告完成/.test(p)),
+    "it DID report — the notice is for children that died silently");
+});
+
+test("F14: unreadable liveness claims no death, and keeps every open child counted", () => {
+  // The extension used to pass `[]` when `list-panes` failed, and an empty
+  // pane list here means "every registered pane is gone": one tmux hiccup told
+  // the manager that all of its children had died.
+  const runtime = registerChild(emptyRuntime("orch-abc-1"), {
+    id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW,
+  });
+  const problems = orchestratorDoneProblems(doneFacts({
+    runtime, alivePaneIds: [], livenessUnknown: true,
+  }));
+  assert.ok(!problems.some((p) => /pane 已经消失/.test(p)), "unknown is not dead (F14)");
+  assert.ok(problems.some((p) => /存活状态未知/.test(p) && /F14/.test(p)),
+    "and the manager is told its liveness column is missing");
+  assert.ok(problems.some((p) => /还有 1 个子会话活着/.test(p)),
+    "the conservative direction is to block the exit, never to invent a corpse");
+});
+
 test("a child whose pane VANISHED without reporting done is surfaced too", () => {
   const runtime = registerChild(emptyRuntime("orch-abc-1"), {
     id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW,

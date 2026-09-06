@@ -209,14 +209,14 @@ async function doRecover(deps: OrchestratorDeps, params: Record<string, unknown>
     },
     // The registry is re-pointed rather than re-created: the child KEEPS its
     // id, its cwd and its task, because none of those died with the process.
-    // Its completion record is cleared for the same reason a new assignment
-    // clears it — whatever it had finished, it is being asked to carry on now.
+    // The new assignment stamp is what makes its OLD completion history
+    // rather than a verdict (there is no cached `doneAt` to clear — B4).
     register: (paneId) => {
       deps.saveRuntime({
         ...deps.runtime(),
         children: deps.runtime().children.map((c) =>
           c.id === child.id
-            ? { ...c, paneId, lastAssignedAt: now, taskFile: taskFileRelPath(noteName), doneAt: undefined }
+            ? { ...c, paneId, lastAssignedAt: now, taskFile: taskFileRelPath(noteName) }
             : c,
         ),
       });

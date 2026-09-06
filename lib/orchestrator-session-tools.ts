@@ -153,10 +153,15 @@ async function doWait(
   }
 
   let snapshot: SupervisionSnapshot | undefined;
+  // The pane reading THIS receipt is built from. Block 5 used to take its own,
+  // a second `list-panes` at a different instant than the probe's, so the two
+  // halves of one receipt could describe two different moments (B4).
+  let panesRead: { panes: string[]; ok: boolean } | undefined;
 
   const probe = (): ChildWaitObservation => {
     const runtime = deps.runtime();
     const panes = alivePanes(deps);
+    panesRead = panes;
     const open = runtime.children.filter((c) => !c.closedAt);
     snapshot = superviseChildren({
       orchestrationId: runtime.orchestrationId,
@@ -180,22 +185,20 @@ async function doWait(
     // A wait scoped to ONE child reports only that child's events; its
     // siblings' stay in the memory as un-reported and ring on the next call.
     const events = childId ? decided.events.filter((e) => e.childId === childId) : decided.events;
-    if (events.length > 0) return { events, done: false, paneAlive: true };
+    if (events.length > 0) return { events, paneAlive: true };
 
     // F14 — an unreadable pane list is UNKNOWN liveness, never a death.
-    if (!panes.ok) return { done: false, paneAlive: false, livenessUnknown: true };
+    if (!panes.ok) return { paneAlive: false, livenessUnknown: true };
 
     if (!childId) {
       const live = open.filter((c) => panes.panes.includes(c.paneId));
       return {
-        done: live.some((c) => c.doneAt),
         paneAlive: live.length > 0,
         note: `${live.length} 个子会话在跑`,
       };
     }
     const child = findChild(runtime, childId)!;
     return {
-      done: Boolean(child.doneAt),
       paneAlive: !child.closedAt && panes.panes.includes(child.paneId),
       note: `子会话 ${child.id} 仍在 pane ${child.paneId}`,
     };
@@ -217,7 +220,7 @@ async function doWait(
     snapshot: snapshot ?? emptySnapshot(),
     decision,
     ...(deps.contextPercent() === undefined ? {} : { contextPercent: deps.contextPercent()! }),
-    exitBlockers: exitBlockers(deps),
+    exitBlockers: exitBlockers(deps, snapshot, panesRead),
     ...(inheritanceBrief(deps) === undefined ? {} : { inheritance: inheritanceBrief(deps)! }),
     waitedMs: waited.waitedMs,
   });
@@ -270,14 +273,31 @@ function emptySnapshot(): SupervisionSnapshot {
  * question it only thinks to ask once it already believes it is finished.
  * Pushing it into the call that happens every round means it is answered
  * before that belief forms.
+ *
+ * IT READS THE SAME SNAPSHOT BLOCK 1 DOES (B4). Completion is a channel fact,
+ * and this block used to answer it from a registry field nothing wrote — so
+ * one receipt could report a child as finished at the top and as "still
+ * alive, go wait for it" at the bottom, and the manager had to arbitrate
+ * between its own gate's two answers. The snapshot (and the pane reading it
+ * was built from) is passed in for the same reason: two readings taken at two
+ * instants are two different moments in one receipt.
  */
-function exitBlockers(deps: OrchestratorDeps): string[] {
+function exitBlockers(
+  deps: OrchestratorDeps,
+  snapshot: SupervisionSnapshot | undefined,
+  panesRead: { panes: string[]; ok: boolean } | undefined,
+): string[] {
   const { plan } = currentPlan(deps);
-  const panes = alivePanes(deps);
+  const panes = panesRead ?? alivePanes(deps);
+  const reportedDone = (snapshot?.children ?? [])
+    .filter((c) => c.state === "done")
+    .map((c) => c.child.id);
   return orchestratorDoneProblems({
     ...(plan ? { plan } : {}),
     runtime: deps.runtime(),
     alivePaneIds: panes.panes,
+    ...(reportedDone.length > 0 ? { reportedDone } : {}),
+    ...(panes.ok ? {} : { livenessUnknown: true }),
   });
 }
 

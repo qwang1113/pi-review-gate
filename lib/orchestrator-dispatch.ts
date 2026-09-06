@@ -148,7 +148,11 @@ export function abandonedRunningTask(
   alivePaneIds: readonly string[],
 ): { abandoned: boolean; note?: string } {
   if (task.status !== "running") return { abandoned: false };
-  const working = liveChildren(runtime, alivePaneIds).some((c) => c.taskId === task.id && !c.doneAt);
+  // A LIVE PANE holds the task, whatever the child said about finishing (B4).
+  // "It reported done" is not "it is gone": the pane is still there, it can
+  // still be given work in that same worktree, and reclaiming the task under
+  // it would put a second child on the same repo.
+  const working = liveChildren(runtime, alivePaneIds).some((c) => c.taskId === task.id);
   if (working) return { abandoned: false };
   return {
     abandoned: true,

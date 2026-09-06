@@ -71,14 +71,24 @@ export interface ChildSession {
    * history, not a verdict.
    */
   lastAssignedAt?: string;
-  /**
-   * ISO time the child reported its task finished.
+  /*
+   * THERE IS DELIBERATELY NO `doneAt` HERE ANY MORE (B4, 2026-09-17).
    *
-   * Cleared when it is assigned new work: "this session finished something
-   * once" must never keep an ACTIVE child out of the exit check (round-1 P1 —
-   * an orchestration could `declare_done` while a child was still working).
+   * There was one, and it was a CACHE of a fact that lives in the child's
+   * channel ("I finished"). Its writer was the old screen-scraping probe;
+   * when the probe was deleted (b6492c5) the writer went with it and the
+   * field plus its five readers stayed. From then on it was permanently
+   * undefined, and the receipt said two different things about the same
+   * child in the same breath: block 1 read the channel and printed
+   * "已完成", block 5 read this field and printed "还有 1 个子会话活着".
+   *
+   * Re-adding the writer would re-bury the same mine: a cache of a
+   * completion has to be invalidated on EVERY path that gives the child new
+   * work, and one of those paths (an `interrupt` carrying text) does not
+   * even stamp `lastAssignedAt` today. Completion is read from the channel,
+   * once, by lib/orchestrator-supervisor.ts — and everything that needs it
+   * takes it from that ONE snapshot.
    */
-  doneAt?: string;
   /** ISO time the gate closed its pane. */
   closedAt?: string;
 }
@@ -223,12 +233,21 @@ export function vanishedChildren(
   return runtime.children.filter((c) => !c.closedAt && !alivePaneIds.includes(c.paneId));
 }
 
-/** Plan task ids with a live child — the input to scheduling. */
+/**
+ * Plan task ids with a live child — the input to scheduling.
+ *
+ * A PANE IS THE UNIT OF OCCUPANCY, not a completion report (B4). Same-repo
+ * tasks are serialized because they share ONE worktree, and a child whose
+ * pane is still open can still be given new work in it — so "it said it
+ * finished" is not a reason to hand its repo to somebody else. The task's
+ * slot frees when its pane is closed, which is a thing the orchestrator does
+ * deliberately.
+ */
 export function runningTaskIds(
   runtime: OrchestratorRuntime,
   alivePaneIds: readonly string[],
 ): string[] {
-  return [...new Set(liveChildren(runtime, alivePaneIds).filter((c) => !c.doneAt).map((c) => c.taskId))];
+  return [...new Set(liveChildren(runtime, alivePaneIds).map((c) => c.taskId))];
 }
 
 /**
@@ -256,49 +275,27 @@ function patchChild(
   };
 }
 
-/** Record that a child reported its task complete (it may still be alive). */
-export function markChildDone(
-  runtime: OrchestratorRuntime,
-  id: string,
-  at: string = new Date().toISOString(),
-): OrchestratorRuntime {
-  return patchChild(runtime, id, { doneAt: at });
-}
-
 /**
- * Record that a child was GIVEN new work, which un-finishes it.
+ * Record that a child was GIVEN new work.
  *
- * Both halves matter and they are the same defect (round-1 P1). A completion
- * is written once — into the child's sidecar by `declare_done`, and into this
- * registry by the probe — and nothing ever invalidated either:
+ * WHAT THE STAMP IS FOR (round-1 P1). A completion is written once — into the
+ * child's sidecar by `declare_done` — and nothing ever clears it, so a child
+ * re-tasked after finishing would report `done` again the moment it settled,
+ * INCLUDING when it had simply got stuck on the new work: the one state that
+ * produces no alarm would swallow the one situation a supervisor must hear
+ * about. `classifyChildState` therefore only believes a completion NEWER than
+ * this stamp.
  *
- *  - the probe would call a re-tasked child `done` again as soon as its
- *    screen settled, which is indistinguishable from it having got STUCK on
- *    the new work: the one state that produces no alarm would swallow the one
- *    situation a supervisor must hear about;
- *  - `doneAt` filters the child out of the orchestration exit check, so the
- *    orchestration could `declare_done` while that child was still working.
- *
- * Stamping the assignment and dropping `doneAt` fixes both: from here on the
- * child counts as ACTIVE again, and only a completion NEWER than this stamp
- * is evidence about the new work.
+ * It no longer clears a `doneAt` field, because there is none (B4): the
+ * completion is not cached in this registry at all, so there is nothing here
+ * that could go stale behind an assignment.
  */
 export function markChildAssigned(
   runtime: OrchestratorRuntime,
   id: string,
   at: string = new Date().toISOString(),
 ): OrchestratorRuntime {
-  return {
-    ...runtime,
-    children: runtime.children.map((c) => {
-      if (c.id !== id) return c;
-      // `doneAt` is DELETED rather than set to undefined: the runtime is
-      // compared and persisted as plain JSON, and an undefined key would
-      // survive a round-trip as a key that was never there.
-      const { doneAt: _finished, ...rest } = c;
-      return { ...rest, lastAssignedAt: at };
-    }),
-  };
+  return patchChild(runtime, id, { lastAssignedAt: at });
 }
 
 /** Record that the gate closed a child's pane. */
@@ -376,7 +373,6 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     // Conditional spreads, not `field: str(...)`: writing an explicit
     // `undefined` would add a KEY that the original object never had, so a
     // sanitized runtime would no longer deep-equal the one the gate wrote.
-    const doneAt = str(c.doneAt);
     const lastAssignedAt = str(c.lastAssignedAt);
     const closedAt = str(c.closedAt);
     // The variant only ever names a FILE inside `.pi/`, so it is sanitized on
@@ -391,7 +387,9 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
       ...(stateVariant ? { stateVariant } : {}),
       ...(taskFile ? { taskFile } : {}),
       ...(lastAssignedAt ? { lastAssignedAt } : {}),
-      ...(doneAt ? { doneAt } : {}),
+      // A `doneAt` in an OLD sidecar is dropped here rather than carried: the
+      // field is gone (B4), and re-admitting it would put a value nothing
+      // writes and nothing reads back into the runtime.
       ...(closedAt ? { closedAt } : {}),
     });
   }
@@ -536,7 +534,10 @@ export function formatChildren(
       const state = c.closedAt
         ? "closed"
         : alivePaneIds.includes(c.paneId)
-          ? (c.doneAt ? "done（pane 仍在）" : "alive")
+          // Registered + pane present = alive. Whether it has FINISHED is a
+          // channel fact, not a registry one (B4), and this rendering is
+          // about the registry.
+          ? "alive"
           : "pane 已消失（异常退出或被用户关掉）";
       return `- ${c.id} [${state}] task=${c.taskId} pane=${c.paneId}` +
         ` 开始于 ${c.createdAt}`;

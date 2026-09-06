@@ -56,8 +56,18 @@ import {
 export type ChildWaitReason =
   /** The supervisor saw a state worth waking the orchestrator for. */
   | "supervision"
-  /** The child reported its task complete. */
-  | "child-done"
+  /*
+   * THERE IS NO `child-done` REASON ANY MORE (B4, 2026-09-17).
+   *
+   * A completion IS a supervision event — `done` is newsworthy, so it already
+   * arrives through the branch above, named and carrying the child's id. The
+   * separate criterion read a registry field instead of the channel, and that
+   * second reading is exactly what made one receipt say "已完成" and "还有 1
+   * 个子会话活着" at the same time. It would also have been a busy poll: the
+   * flag never clears, so once any child had finished, every later wait would
+   * have returned instantly with nothing new to report.
+   */
+
   /** Its pane is gone — it died, or the user closed it. */
   | "pane-gone"
   /** Nothing yet. */
@@ -66,8 +76,7 @@ export type ChildWaitReason =
 export interface ChildWaitObservation {
   /** Newsworthy states the supervisor manufactured on this poll. */
   events?: SupervisionEvent[];
-  /** The child under watch reported done (registry `doneAt` is set). */
-  done: boolean;
+  /* No `done` flag: completion arrives as a supervision event (see above). */
   /** Its pane still exists right now. */
   paneAlive: boolean;
   /** tmux could not be read: liveness is UNKNOWN, which is not "dead". */
@@ -93,8 +102,8 @@ export interface ChildWaitDecision {
  *  1. supervision events come first — they name the child and the state, and
  *     they are the only signal that exists for a child that stopped without
  *     asking anything (R-23) or finished without saying so (R3-5);
- *  2. `done` for the specific child being waited on;
- *  3. UNKNOWN liveness (never a death, F14) before a vanished pane, so a
+ *     — a completion is one of those events, not a separate criterion (B4);
+ *  2. UNKNOWN liveness (never a death, F14) before a vanished pane, so a
  *     transient tmux failure cannot end supervision.
  */
 export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitDecision {
@@ -109,9 +118,7 @@ export function evaluateChildWait(observation: ChildWaitObservation): ChildWaitD
       summary: `${first.summary}${rest}`,
     };
   }
-  if (observation.done) {
-    return { done: true, reason: "child-done", summary: "子会话报告任务完成（它仍然活着，可继续派活或关闭）" };
-  }
+
   if (observation.livenessUnknown) {
     return {
       done: false,

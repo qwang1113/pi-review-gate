@@ -2222,18 +2222,44 @@ export default function reviewGate(pi: ExtensionAPI) {
   function orchestrationDoneProblems(): string[] {
     if (state.taskMode !== "orchestrator") return [];
     const runtime = state.orchestrator ?? emptyRuntime(currentOrchestrationId());
-    const panes = (() => {
+    // F14 — `undefined` is UNKNOWN liveness, and it is NOT an empty pane list.
+    // This used to swallow every tmux failure into `[]`, which means "every
+    // registered pane is gone": one unreadable `list-panes` told the manager
+    // that all of its children had died.
+    const panes = ((): string[] | undefined => {
       try {
         const self = orchestratorDeps.ownPane();
-        if (!self) return [] as string[];
+        if (!self) return undefined;
         const listed = orchestratorDeps.tmux(["list-panes", "-t", self, "-F", "#{pane_id}"]);
-        return listed.ok ? listed.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [];
-      } catch { return [] as string[]; }
+        if (!listed.ok) return undefined;
+        return listed.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      } catch { return undefined; }
+    })();
+    // Completion is a CHANNEL fact, read from the same supervision snapshot the
+    // health block is rendered from (B4). Asking a registry field instead is
+    // what let one receipt call a child finished and alive in the same breath.
+    const reportedDone = ((): string[] => {
+      try {
+        const open = runtime.children.filter((c) => !c.closedAt);
+        if (open.length === 0) return [];
+        const snapshot = superviseChildren({
+          orchestrationId: runtime.orchestrationId,
+          children: open,
+          livePanes: panes === undefined ? undefined : new Set(panes),
+          io: channelIO,
+          at: Date.now(),
+        });
+        return snapshot.children.filter((c) => c.state === "done").map((c) => c.child.id);
+      } catch {
+        return []; // reading the channels is best effort; the blockers still render
+      }
     })();
     return orchestratorDoneProblems({
       plan: readPlanFile(primaryRepoRoot).plan,
       runtime,
-      alivePaneIds: panes,
+      alivePaneIds: panes ?? [],
+      ...(reportedDone.length > 0 ? { reportedDone } : {}),
+      ...(panes === undefined ? { livenessUnknown: true } : {}),
     });
   }
 

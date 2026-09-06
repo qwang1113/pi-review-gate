@@ -20,6 +20,7 @@ import {
   nextRewakeDelayMs,
   REWAKE_BACKOFF_MS,
   DONE_REPORT_LIMIT,
+  IDLE_PROGRESS_GRACE_MS,
   type ChildObservation,
 } from "../lib/orchestrator-child-state.ts";
 import {
@@ -93,6 +94,72 @@ test("round-1 P1: a completion older than the CURRENT assignment is not a comple
 
 test("a child that stopped without finishing is `idle`", () => {
   assert.equal(classifyChildState(observe([stateRecord("idle")])), "idle");
+});
+
+test("B3 — a child that reported `idle` while STILL STEPPING FORWARD is working, not stopped", () => {
+  // THE MEASURED CASE (2026-09-04). The child was reading code — bash, read,
+  // bash — and `ctx.isIdle()` is true between two tool calls, so its own
+  // heartbeat reported `idle` while its transcript grew 23.7KB in 45s. The
+  // supervisor printed "停下了（没有 declare_done）" with "最后活动 0s 前" on
+  // the SAME line: the contradicting fact was already in the record.
+  const records: ChannelRecord[] = [
+    { kind: "state", from: "child", at: iso(), state: "idle", lastProgressAt: iso(-3_000), contextPercent: 24 },
+  ];
+  assert.equal(classifyChildState(observe(records)), "working",
+    "a forward step 3 seconds ago outranks the child's own `idle` reading");
+
+  const health = childHealth(observe(records));
+  assert.equal(health.progressStaleSeconds, 3);
+  assert.equal(health.selfReportedIdle, true, "the overruled report stays visible to the supervisor");
+  const rendered = formatChildHealth([health]);
+  assert.match(rendered, /在干活/);
+  assert.match(rendered, /自上次推进 3s/);
+  assert.match(rendered, /自报停下/, "the raw signal is shown, not hidden for two minutes");
+  assert.doesNotMatch(rendered, /停下了（没有 declare_done）/);
+
+  // The second half of B3's cost: `idle` is newsworthy, so every poll returned
+  // instantly and `orchestrator_wait` degraded into a busy poll.
+  assert.equal(isNewsworthy(classifyChildState(observe(records))), false,
+    "a child that is turning the crank must not wake the orchestrator");
+});
+
+test("B3 — 120s without progress is THE USER'S threshold: past it, the child's `idle` is believed", () => {
+  assert.equal(IDLE_PROGRESS_GRACE_MS, 120_000, "the user's number (2026-09-04), not a tunable magic constant");
+  const at = (sinceProgressMs: number) => observe([
+    { kind: "state", from: "child", at: iso(), state: "idle", lastProgressAt: iso(-sinceProgressMs) },
+  ]);
+  assert.equal(classifyChildState(at(IDLE_PROGRESS_GRACE_MS - 1)), "working", "one ms short of the grace");
+  assert.equal(classifyChildState(at(IDLE_PROGRESS_GRACE_MS)), "idle", "the boundary itself is a real stop");
+  assert.equal(classifyChildState(at(IDLE_PROGRESS_GRACE_MS + 60_000)), "idle");
+  assert.equal(childHealth(at(IDLE_PROGRESS_GRACE_MS)).selfReportedIdle, undefined,
+    "a believed report is not an overruled one");
+});
+
+test("B3 — an `idle` report with NO progress stamp is believed (R3-5 stays caught)", () => {
+  // No stamp is NO INFORMATION, and inventing a contradiction out of it would
+  // turn a genuinely stopped child — or one on an extension older than the
+  // stamp — into a permanent `working`.
+  assert.equal(classifyChildState(observe([stateRecord("idle")])), "idle");
+  assert.equal(childHealth(observe([stateRecord("idle")])).selfReportedIdle, undefined);
+});
+
+test("B3 — the grace period never overrules a state that outranks `idle`", () => {
+  const fresh = (state: "done" | "idle") => ({
+    kind: "state" as const, from: "child" as const, at: iso(), state, lastProgressAt: iso(-1_000),
+  });
+  assert.equal(classifyChildState(observe([fresh("done")])), "done",
+    "a completion is still a completion, however recently it stepped");
+  // Silence beats the report either way: the heartbeat is what `stalled` is
+  // the absence of, and a stale stamp cannot revive a dead extension.
+  const mute = observe([{ ...fresh("idle"), at: iso(-(HEARTBEAT_STALE_MS + 60_000)) }],
+    { at: T0 });
+  assert.equal(classifyChildState(mute), "stalled");
+  assert.equal(classifyChildState({ ...mute, paneAlive: false }), "dead");
+  const asking: ChannelRecord[] = [
+    fresh("idle"),
+    { kind: "request", from: "child", at: iso(), requestId: "r1", dialogKind: "select", title: "选一个", options: ["A"] },
+  ];
+  assert.equal(classifyChildState(observe(asking)), "waiting-input");
 });
 
 test("a mode switch is reported as mode-changed and is newsworthy", () => {
