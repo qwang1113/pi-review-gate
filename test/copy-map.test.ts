@@ -12,8 +12,9 @@
  * made both directions mechanical (2026-09-05).
  *
  * So this file re-derives the citations from disk:
- *  - every `test/x.test.ts` the section names must exist,
- *  - every test NAME it quotes must be a real `test("...")` in that file.
+ *  - every test file the tables name must exist — whether or not that row also
+ *    quotes a test name (7.2 cites files that pin behaviour, not documents),
+ *  - every test NAME they quote must be a real `test("...")` in that file.
  *
  * WHAT IT DOES NOT CHECK, on purpose (the section says so too): whether the
  * pin actually covers the copies claimed, and whether the "no pin" rows are
@@ -43,27 +44,36 @@ function copyMapSection(): string {
  * format: a backticked test PATH, then one or more backticked "quoted names"
  * that belong to it, until the next path appears.
  *
+ * TWO products, because a row may legitimately have only the first half: 7.2
+ * cites files that pin BEHAVIOUR rather than any document, so they carry no
+ * quoted name. Returning only (file, name) pairs silently dropped those rows
+ * — three cited pin files were never checked at all, and deleting one left
+ * the suite green while the map went on citing it (round-1 P1). `files` is
+ * therefore every path the tables name, pairs or not.
+ *
  * Table rows only, because the prose above them explains that format and any
  * example there would be parsed as a citation and demanded on disk (it was,
  * the first time this ran). A quoted name before any path is a format error,
  * not a silent skip — otherwise a mangled row would just stop being checked.
  */
-function citations(): { file: string; name: string }[] {
+function citations(): { files: string[]; pairs: { file: string; name: string }[] } {
   const section = copyMapSection()
     .split("\n")
     .filter((line) => line.trimStart().startsWith("|"))
     .join("\n");
 
-  const out: { file: string; name: string }[] = [];
+  const files: string[] = [];
+  const pairs: { file: string; name: string }[] = [];
   let current: string | undefined;
   const token = /`(test\/[A-Za-z0-9._-]+\.test\.ts)`|`"([^"]+)"`/g;
   for (const m of section.matchAll(token)) {
-    if (m[1]) { current = m[1]; continue; }
+    if (m[1]) { current = m[1]; files.push(m[1]); continue; }
     assert.ok(current, `§7 quotes the test name "${m[2]}" before naming any test file`);
-    out.push({ file: current!, name: m[2]! });
+    pairs.push({ file: current!, name: m[2]! });
   }
-  return out;
+  return { files: [...new Set(files)], pairs };
 }
+
 
 test("the derivation itself works before its verdict means anything", () => {
   const section = copyMapSection();
@@ -76,19 +86,24 @@ test("the derivation itself works before its verdict means anything", () => {
   assert.ok(section.length < MAP.length, "the section is not the whole file");
 
   // A regex that matched nothing would make every assertion below vacuous.
-  const cites = citations();
-  assert.ok(cites.length >= 12, `§7 must cite real pins, found ${cites.length}`);
-  const files = new Set(cites.map((c) => c.file));
-  assert.ok(files.size >= 6, `pins must span several suites, found ${files.size}`);
+  const { files, pairs } = citations();
+  assert.ok(pairs.length >= 12, `§7 must cite real pins, found ${pairs.length}`);
+  const named = new Set(pairs.map((c) => c.file));
+  assert.ok(named.size >= 6, `pins must span several suites, found ${named.size}`);
+  // 7.2's behaviour-only pins carry no quoted name, so the file list is the
+  // wider one; if it ever equals the named set, those rows stopped parsing.
+  assert.ok(files.length >= named.size, "every named file must also be in the file list");
   // And a sanity anchor: the pin everyone knows is in there.
   assert.ok(
-    cites.some((c) => c.file === "test/module-map.test.ts" && c.name.includes("both directions")),
+    pairs.some((c) => c.file === "test/module-map.test.ts" && c.name.includes("both directions")),
     "§7 must cite the §5 double-difference pin",
   );
 });
 
 test("§7 cites only test files that exist", () => {
-  for (const { file } of citations()) {
+  // EVERY path the tables name — including 7.2's rows that cite a file without
+  // quoting a test name. Those were the ones going unchecked (round-1 P1).
+  for (const file of citations().files) {
     assert.ok(
       existsSync(join(ROOT, file)),
       `§7 of docs/module-map.md cites ${file}, which no longer exists — the copy map is pointing at a pin that is gone`,
@@ -98,7 +113,7 @@ test("§7 cites only test files that exist", () => {
 
 test("§7 quotes only test names that are really declared in those files", () => {
   const cache = new Map<string, string>();
-  for (const { file, name } of citations()) {
+  for (const { file, name } of citations().pairs) {
     if (!cache.has(file)) cache.set(file, readFileSync(join(ROOT, file), "utf8"));
     const src = cache.get(file)!;
     // The literal as it is actually written: `test("<name>"`. Comparing against

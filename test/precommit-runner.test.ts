@@ -305,14 +305,33 @@ test("steps appear in DECLARATION order in the log — parallel execution, merge
 // first and alone, output and receipt stay in declaration order.
 // ---------------------------------------------------------------------------
 
-test("independent checks run in PARALLEL — wall time is less than the serial sum", () => {
-  const dir = makeDir({ name: "t", version: "1.0.0", scripts: { lint: "sleep 0.3", test: "sleep 0.3" } });
-  const started = Date.now();
-  const { code } = run(dir, ["--mode", "full"]);
-  const elapsed = Date.now() - started;
-  assert.equal(code, 0);
-  // Serial would take ~0.6s; parallel ~0.3s. Generous bound against loaded CI.
-  assert.ok(elapsed < 800, `expected parallel overlap, took ${elapsed}ms`);
+test("independent checks run in PARALLEL — each one sees the other still running", () => {
+  // A RENDEZVOUS, not a stopwatch. Each check announces itself and then waits
+  // for its peer's marker: if the two genuinely overlap both return at once;
+  // if they are serialized the first one waits out its budget and exits 1,
+  // failing the run. That is the DEFINITION of concurrency, measured
+  // directly — the verdict cannot be changed by how loaded the machine is.
+  //
+  // It used to be `elapsed < 800ms` over two `sleep 0.3`s. But that budget
+  // also had to cover node's own startup, so a busy machine ate the margin
+  // and the test failed while the scheduler was working perfectly: measured
+  // twice at 963ms and 1131ms inside a full precommit run (2026-09-05), and
+  // 480ms when run alone. A timing bound that flips with the load is not a
+  // measurement of parallelism — it is a measurement of the machine.
+  const rendezvous = (self: string, peer: string) =>
+    // ~5s budget, then fail. Passing costs one poll interval, not the budget.
+    `touch ${self}; for i in $(seq 1 250); do [ -f ${peer} ] && exit 0; sleep 0.02; done; exit 1`;
+  const dir = makeDir({
+    name: "t",
+    version: "1.0.0",
+    scripts: {
+      lint: rendezvous("lint.mark", "test.mark"),
+      test: rendezvous("test.mark", "lint.mark"),
+    },
+  });
+  const { code, receipt } = runReceipt(dir, ["--mode", "full"]);
+  assert.equal(code, 0, "serialized checks would time out waiting for each other");
+  assert.equal(receipt!.verdict, "PASS");
 });
 
 test("a SLOW earlier-declared step does not reorder the log or the receipt steps", () => {
