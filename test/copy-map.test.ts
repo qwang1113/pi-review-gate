@@ -90,9 +90,17 @@ test("the derivation itself works before its verdict means anything", () => {
   assert.ok(pairs.length >= 12, `§7 must cite real pins, found ${pairs.length}`);
   const named = new Set(pairs.map((c) => c.file));
   assert.ok(named.size >= 6, `pins must span several suites, found ${named.size}`);
-  // 7.2's behaviour-only pins carry no quoted name, so the file list is the
-  // wider one; if it ever equals the named set, those rows stopped parsing.
-  assert.ok(files.length >= named.size, "every named file must also be in the file list");
+  // The path-only rows must survive parsing — they are the ones that went
+  // unchecked (round-1 P1), and both ways of losing them again land here:
+  // dropping the path collection empties `files`, and dropping the rows
+  // themselves shrinks it back to the named set. `>=` would have caught only
+  // the first, since every named file comes FROM `files` (round-2 P2).
+  assert.ok(
+    files.length > named.size,
+    `§7's tables cite ${files.length} test files but only ${named.size} carry a quoted test name. ` +
+      "7.2 cites files that pin BEHAVIOUR and have no name to quote; if none parse, the parser " +
+      "lost them. (If every row genuinely carries a name now, relax this — but check the parser first.)",
+  );
   // And a sanity anchor: the pin everyone knows is in there.
   assert.ok(
     pairs.some((c) => c.file === "test/module-map.test.ts" && c.name.includes("both directions")),
