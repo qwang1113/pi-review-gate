@@ -683,8 +683,17 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
     // possible. A malformed one is not repaired: the whole blob goes, because
     // a registry whose owner cannot be named is one nothing may act on.
     if (parsed.orchestrator !== undefined) {
+      // OPTIONAL CHAINING IS LOAD-BEARING HERE. `parsed.orchestrator` is
+      // whatever the file said: `null` passes the `!== undefined` test above
+      // and a plain property read on it THROWS — inside the try/catch that
+      // wraps this whole function, which returns "unreadable sidecar". The
+      // blast radius would have been every mode, not this one: a loop session
+      // whose sidecar carried `"orchestrator": null` would silently lose its
+      // READY and its precommit because of a field it never reads. The old
+      // code was safe by accident (it handed the value to `normalizeRuntime`,
+      // which type-checks first); this one has to be safe on purpose.
       const storedId = normalizeOrchestrationId(
-        (parsed.orchestrator as { orchestrationId?: unknown }).orchestrationId,
+        (parsed.orchestrator as { orchestrationId?: unknown } | null)?.orchestrationId,
       );
       const cleaned = storedId ? normalizeRuntime(parsed.orchestrator, storedId) : undefined;
       if (cleaned) parsed.orchestrator = cleaned;

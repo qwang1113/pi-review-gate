@@ -1309,6 +1309,43 @@ test("loadSidecar reads the orchestration id back, and drops the blob when it is
   }
 });
 
+/** Write a state to `path` and hand the path back, so a load reads as one line. */
+function writeState(path: string, state: GateState): string {
+  writeFileSync(path, JSON.stringify(state));
+  return path;
+}
+
+
+test("an orchestration blob — valid or malformed — changes NOTHING else in the sidecar", () => {
+  // B1 touched `loadSidecar`, which every mode reads, not just an
+  // orchestrator: a loop session, a judge and a plain `normal` session all
+  // load this same file. The fix must therefore be provably CONTAINED to its
+  // own key. The dangerous shape would have been rejecting the whole sidecar
+  // over a bad orchestration id — a loop session would have silently lost its
+  // READY and its precommit because a field it never reads was damaged.
+  const dir = makeTemp();
+  const path = join(dir, "state.json");
+  const base = readyState();
+  base.taskMode = "loop";
+  base.rounds = [{ round: 1, verdict: "BLOCKED", at: "t", fingerprints: [] } as unknown as RoundRecord];
+
+  const withoutBlob = loadSidecar(writeState(path, base))!;
+  for (const blob of [
+    { orchestrationId: "orch-deadbeef-abc", children: [], notify: { sentAt: [], lastByKey: {} } },
+    { orchestrationId: "not-an-id", children: [], notify: { sentAt: [], lastByKey: {} } },
+    "not-even-an-object",
+    null,
+  ]) {
+    const loaded = loadSidecar(writeState(path, { ...base, orchestrator: blob } as unknown as GateState));
+    assert.ok(loaded, `a ${JSON.stringify(blob)} orchestration blob must not invalidate the sidecar`);
+    assert.deepEqual(loaded!.review, withoutBlob.review, "the review verdict is untouched");
+    assert.deepEqual(loaded!.precommit, withoutBlob.precommit, "so is precommit");
+    assert.equal(loaded!.taskMode, "loop");
+    assert.equal(loaded!.rounds.length, withoutBlob.rounds.length);
+  }
+});
+
+
 test("an approval in the sidecar still needs the whole blob to be readable", () => {
   // Unchanged by B1, asserted here because reading the id back is new: a
   // damaged runtime must still lose its approval rather than keep it.
