@@ -222,7 +222,10 @@ test("a DONE status only releases a task the user actually approved", () => {
       { ...plan.tasks[0]!, id: "t9", status: "done" as const, fileBoundaries: ["lib/minted.ts"] },
     ],
   };
-  const decision = decideApprovalCarry(base, next);
+  // The execution record is handed in saying the same thing, so this is the
+  // STRONGER case: even a plan on disk that calls t9 finished releases nothing,
+  // because t9 is not in the snapshot the user signed.
+  const decision = decideApprovalCarry(base, next, next);
   assert.equal(decision.carries, false);
   assert.match(decision.widenings.join("\n"), /新增任务 "t9"/, "adding it is a widening in its own right");
   assert.match(decision.widenings.join("\n"), /与任务 "t9" 已声明的 lib\/minted\.ts 相交/, "and it released nothing");
@@ -242,9 +245,21 @@ test("a task the plan records as done releases its ground through the whole deci
       return t;
     }),
   };
-  const decision = decideApprovalCarry(base, next);
+  // The EXECUTION RECORD is what retires a claim: the plan on disk (here, the
+  // one carrying t2's `done`) — never the statuses in the text being written.
+  const record: OrchestratorPlan = {
+    ...plan,
+    tasks: plan.tasks.map((t) => (t.id === "t2" ? { ...t, status: "done" as const } : t)),
+  };
+  const decision = decideApprovalCarry(base, next, record);
   assert.equal(decision.carries, true, decision.widenings.join("; "));
   assert.match(decision.amendments.join("\n"), /原持有者 "t2" 已 done/);
+
+  // …and with no record on disk at all, nothing is finished: a `write` cannot
+  // declare a task done and cash in the release in the same breath.
+  const noRecord = decideApprovalCarry(base, next);
+  assert.equal(noRecord.carries, false, "no execution record ⇒ no releases");
+  assert.match(noRecord.widenings.join("\n"), /与任务 "t2" 已声明的/);
 });
 
 
@@ -697,6 +712,36 @@ test("without a lineage on record there is nothing to restore — the user is as
   assert.match(replyText(back), /尚未获得用户批准/);
   assert.equal(world.runtime().approvedPlanHash, undefined);
 });
+
+test("THE round-8 case end to end: a file moves off a FINISHED task without a dialog", async () => {
+  // The plan ON DISK is the execution record, and it is the only thing that
+  // can retire t2's claim — which is why this runs through the tool.
+  const base = fileGrainPlan();
+  const world = makeFakeWorld({
+    plan: { ...base, tasks: base.tasks.map((t) => (t.id === "t2" ? { ...t, status: "done" as const } : t)) },
+    approvePlan: true,
+  });
+
+  const moved = await world.call("orchestrator_plan", {
+    action: "write",
+    plan: fileGrainParams((tasks) =>
+      withBoundaries(
+        withBoundaries(tasks, "t1", ["lib/user-interaction-tools.ts", "lib/gate-command-tools.ts"]),
+        "t2",
+        ["lib/gate-command-tools.ts"],
+      )),
+  });
+
+  assert.equal(moved.details?.approved, true, replyText(moved));
+  assert.match(replyText(moved), /原持有者 "t2" 已 done/, "the receipt says WHY nobody was asked");
+  assert.equal(world.confirmAnswers.length, 0, "no dialog was consumed");
+  assert.equal(
+    world.plan()!.tasks.find((t) => t.id === "t2")?.status,
+    "done",
+    "and the rewrite did not resurrect the finished task",
+  );
+});
+
 
 
 

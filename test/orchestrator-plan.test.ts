@@ -14,6 +14,7 @@ import {
   formatPlanSummary,
   mergeTaskProgress,
   isLegalTransition,
+  isPlanHash,
   openDecisions,
   parsePlan,
   planHash,
@@ -392,6 +393,18 @@ test("changing what the user approved REVOKES the approval", () => {
   ];
   for (const [what, changed] of cases) {
     assert.notEqual(planHash(changed), planHash(base), `${what} must invalidate the approval`);
+  }
+});
+
+test("the plan-hash SHAPE is one rule, owned by the function that produces it", () => {
+  // Every authorizing record read back from the sidecar (the approved hash and
+  // its lineage) is shape-checked first, and the check used to be written out
+  // again at each site. A copied authorization rule drifts, and it drifts
+  // OPEN — one site accepting an upper-case or short digest would admit a
+  // record the others refuse.
+  assert.equal(isPlanHash(planHash(planOf({}))), true);
+  for (const bad of ["", "not-a-hash", "a".repeat(63), "a".repeat(65), "A".repeat(64), " " + "a".repeat(64), 7, null, undefined, ["a".repeat(64)]]) {
+    assert.equal(isPlanHash(bad), false, `${JSON.stringify(bad)} is not a plan hash`);
   }
 });
 

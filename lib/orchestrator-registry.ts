@@ -32,6 +32,7 @@ import {
   MAX_APPROVAL_LINEAGE,
   type ApprovedPlanSnapshot,
 } from "./orchestrator-plan-approval.ts";
+import { isPlanHash } from "./orchestrator-plan.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
 import { isPaneId } from "./orchestrator-tmux.ts";
 
@@ -456,7 +457,7 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   }
 
   const hash = str(obj.approvedPlanHash);
-  const approvalIntact = !dropped && typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
+  const approvalIntact = !dropped && isPlanHash(hash);
 
   const rawRelay = obj.relay as Record<string, unknown> | undefined;
   const relayHandoff = rawRelay ? str(rawRelay.handoffPath) : undefined;
@@ -597,7 +598,7 @@ function normalizeApprovalLineage(raw: unknown): string[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) return [];
   for (const entry of raw) {
-    if (typeof entry !== "string" || !/^[0-9a-f]{64}$/.test(entry)) return [];
+    if (!isPlanHash(entry)) return [];
   }
   return (raw as string[]).slice(-MAX_APPROVAL_LINEAGE);
 }

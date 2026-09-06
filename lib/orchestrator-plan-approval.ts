@@ -66,7 +66,7 @@ import {
   boundariesConflict,
   type NormalizedBoundary,
 } from "./orchestrator-boundaries.ts";
-import type { OrchestratorPlan, TaskExecution } from "./orchestrator-plan.ts";
+import { isPlanHash, type OrchestratorPlan, type TaskExecution } from "./orchestrator-plan.ts";
 import {
   DEFAULT_DELIVERY_STATION,
   isStationWidening,
@@ -281,10 +281,16 @@ export function classifyBoundaryChange(opts: {
  * Fail-closed by construction: every difference must be recognized as an
  * amendment to survive, and anything this function does not understand falls
  * through to a widening — the direction that asks the user.
+ *
+ * `executionRecord` is the plan ALREADY ON DISK — the statuses `set-status`
+ * produced, as opposed to the ones the caller is writing. Only it can retire
+ * a task's claim on a file; omit it and no task counts as finished, which is
+ * the fail-closed direction.
  */
 export function decideApprovalCarry(
   approved: ApprovedPlanSnapshot,
   next: OrchestratorPlan,
+  executionRecord?: OrchestratorPlan,
 ): ApprovalCarryDecision {
   const widenings: string[] = [];
   const amendments: string[] = [];
@@ -293,16 +299,35 @@ export function decideApprovalCarry(
   //
   // A `done` task's boundaries are excluded from the intersection check, so
   // the files it needed can move to whoever needs them next without waking
-  // the user. Two conditions keep this from being a way to MINT the release:
-  // the status must come from the plan's execution record (`write` never sets
-  // one — mergeTaskProgress carries the previous status forward, and
-  // `set-status` is the only way one changes), and the task must exist in the
-  // APPROVED snapshot, so a brand-new task declaring itself `done` in the
-  // same edit releases nothing (adding it is a widening in its own right).
+  // the user.
+  //
+  // WHERE THE `done` COMES FROM IS THE WHOLE QUESTION, and it is deliberately
+  // NOT the text being written: `executionRecord` is the plan already on
+  // disk, i.e. what `set-status` produced. Reading it from `next` looked
+  // equivalent — `mergeTaskProgress` copies the previous status forward — but
+  // it is not: with no plan on disk to merge against, that function returns
+  // the caller's tasks verbatim, so a single `write` could have declared a
+  // task finished and cashed in the release in the same breath. No execution
+  // record ⇒ no releases at all. The task must also exist in the APPROVED
+  // snapshot, so a brand-new task cannot arrive pre-finished (adding it is a
+  // widening in its own right).
+  //
+  // WHAT THIS DOES NOT DEFEND, stated plainly: a project manager may mark a
+  // task `done` whenever it likes — `set-status` asks for no evidence, and
+  // the plan file lives under `.pi/`, which the orchestrator write block
+  // exempts. That is its own authority and this rule does not try to police
+  // it. The blast radius is what keeps that acceptable: a release only ever
+  // lets the receiving task absorb a path that is ALREADY inside its own
+  // approved directory tree, so the union of files the user approved is
+  // unchanged — no `done`, real or claimed, can bring a new directory or a
+  // new task into the plan.
   const approvedById = new Map(approved.tasks.map((task) => [task.id, task]));
   const doneTaskIds = new Set(
-    next.tasks.filter((task) => task.status === "done" && approvedById.has(task.id)).map((task) => task.id),
+    (executionRecord?.tasks ?? [])
+      .filter((task) => task.status === "done" && approvedById.has(task.id))
+      .map((task) => task.id),
   );
+
 
 
   if (next.maxParallel > approved.maxParallel) {
@@ -402,6 +427,11 @@ export function decideApprovalCarry(
 //     saying the content granted nothing new. Every hash in it therefore
 //     describes content that WAS authorized, not content that might be.
 //
+// A consequence worth stating, because it looks like a widening and is not:
+// after the approval NARROWS through a carry, writing the user's own signed
+// content back restores it — the narrowing was the orchestrator's decision,
+// not theirs, and only THEIR decision resets the lineage.
+//
 // Its trust boundary is the one `approvedPlanHash` already has, and no
 // stronger: both live in the gate sidecar, which is a file no agent may edit
 // (the gate refuses it and the refusal is not grantable). Shape validation on
@@ -412,11 +442,9 @@ export function decideApprovalCarry(
 /** How many contents one approval remembers. Bounded: the sidecar is not a log. */
 export const MAX_APPROVAL_LINEAGE = 20;
 
-const PLAN_HASH_SHAPE = /^[0-9a-f]{64}$/;
-
 /** True when this exact content was already authorized under the live approval. */
 export function lineageAuthorizes(lineage: readonly string[] | undefined, hash: string): boolean {
-  if (!PLAN_HASH_SHAPE.test(hash)) return false;
+  if (!isPlanHash(hash)) return false;
   return (lineage ?? []).includes(hash);
 }
 

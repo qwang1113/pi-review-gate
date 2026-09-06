@@ -285,7 +285,11 @@ async function handlePlanAction(
       );
     }
     const carry = runtime.approvedPlan
-      ? decideApprovalCarry(runtime.approvedPlan, next)
+      // `previous` is the EXECUTION RECORD (the plan on disk): it decides
+      // which tasks count as finished, and therefore whose boundaries stop
+      // blocking. The statuses in `next` cannot serve — with no plan on disk
+      // they are simply whatever this call wrote.
+      ? decideApprovalCarry(runtime.approvedPlan, next, previous)
       : { carries: false, widenings: ["门禁没有已批准 plan 的授权快照（记录不可读或来自更早的版本），无法证明这次改动没有扩权"], amendments: [] };
     if (carry.carries) {
       // The approval MOVES to the new content: the hash is what every later

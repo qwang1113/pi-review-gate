@@ -629,6 +629,20 @@ export function planHash(plan: OrchestratorPlan): string {
   return createHash("sha256").update(canonicalPlanText(plan), "utf8").digest("hex");
 }
 
+/**
+ * Does this value have the shape {@link planHash} produces?
+ *
+ * The PRODUCER owns the shape. Every record that carries authority — the
+ * approved hash, its lineage — is read back from an untrusted sidecar and has
+ * to be shape-checked first, and the check was being written out again at
+ * each of those sites. A rule copied per caller drifts, and an authorization
+ * rule that drifts drifts open: one site relaxing to a 63-char or
+ * upper-case digest would admit a record the others refuse.
+ */
+export function isPlanHash(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
 /** One-screen rendering for the approval dialog and the takeover report. */
 export function formatPlanSummary(plan: OrchestratorPlan, repoRoot = ""): string {
   const lines: string[] = [
