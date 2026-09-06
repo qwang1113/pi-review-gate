@@ -74,6 +74,41 @@ const REMOVAL_MARKERS = [
   "retired", "removed", "deleted", "no longer", "gone", "replaced",
 ];
 
+/** The markdown table that starts at `header`, up to the first blank line. */
+function tableAfter(text: string, header: string): string {
+  const start = text.indexOf(header);
+  if (start === -1) return "";
+  const end = text.indexOf("\n\n", start);
+  return text.slice(start, end === -1 ? text.length : end);
+}
+
+/** The single line containing `needle` — a one-row inventory is still one. */
+function lineContaining(text: string, needle: string): string {
+  const at = text.indexOf(needle);
+  if (at === -1) return "";
+  const from = text.lastIndexOf("\n", at) + 1;
+  const to = text.indexOf("\n", at);
+  return text.slice(from, to === -1 ? text.length : to);
+}
+
+/** Chinese numerals as far as any inventory in this repo counts. */
+const CN_NUMERALS: Record<string, number> = {
+  "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12,
+};
+
+/**
+ * The number a passage states out loud — "工具集（10 个）", "全部走十个工具".
+ * `undefined` when it states none, which is allowed: a list may simply list.
+ */
+function countClaimedIn(scope: string): number | undefined {
+  const digits = /(\d+)\s*个/.exec(scope);
+  if (digits) return Number(digits[1]);
+  const chinese = /([一二三四五六七八九十]+)\s*个/.exec(scope);
+  if (chinese && CN_NUMERALS[chinese[1]!] !== undefined) return CN_NUMERALS[chinese[1]!];
+  return undefined;
+}
+
+
 // ---------------------------------------------------------------------------
 // 1. the orchestration tool inventory
 // ---------------------------------------------------------------------------
@@ -87,33 +122,52 @@ test("every doc inventory of the orchestration tools is the set the gate registe
     `the registration scan found ${registered.length} tools (${registered.join(", ")}) — that is not the tool family`,
   );
 
-  const inventories = readSurfaces([
+  // Each inventory is judged INSIDE ITS OWN WINDOW, never against the whole
+  // file (round-1 P1): README names all ten tools in two different places, so
+  // a whole-file scan stayed green while either copy lost a tool. The window
+  // is the passage that claims to BE the list.
+  const inventories: { path: string; window: (text: string) => string }[] = [
     // AGENTS.md writes the family with a shorthand tail (`_spawn`, `_wait`…).
-    { path: "AGENTS.md", anchor: /工具集（\d+ 个）/ },
-    { path: "README.md", anchor: "orchestrator_handoff" },
-    { path: "QUICKSTART.md", anchor: "orchestrator_spawn" },
-  ]);
+    { path: "AGENTS.md", window: (t) => paragraphAround(t, t.indexOf("工具集（")) },
+    // README has two: the orchestrator-role table, and the row in the tool
+    // reference. Both are inventories, so both are checked.
+    { path: "README.md", window: (t) => tableAfter(t, "| Tool | What the orchestrator asks for |") },
+    { path: "README.md", window: (t) => lineContaining(t, "The orchestration layer, available only in") },
+    { path: "QUICKSTART.md", window: (t) => paragraphAround(t, t.indexOf("orchestrator_plan")) },
+  ];
 
-  for (const { path, text } of inventories) {
+  for (const { path, window } of inventories) {
+    const text = readRepoFile(path);
+    const scope = window(text);
+    // Self-proof #2: the window found the passage, and it is a passage — not
+    // the empty string and not the whole file.
+    assert.ok(
+      scope.length > 200 && scope.length < text.length,
+      `${path}: the inventory window came out at ${scope.length} chars — it did not find the list`,
+    );
     for (const tool of registered) {
       const shorthand = "`_" + tool.slice("orchestrator_".length) + "`";
       assert.ok(
-        text.includes(tool) || text.includes(shorthand),
-        `${path} lists the orchestration tools but never names ${tool} — the inventory is short of ` +
-          "what the gate registers, which is exactly how a tool nobody documents stops being used",
+        scope.includes(tool) || scope.includes(shorthand),
+        `${path} lists the orchestration tools but that list never names ${tool} — the inventory is ` +
+          "short of what the gate registers, which is exactly how a tool nobody documents stops being used",
+      );
+    }
+    // A COUNT stated out loud in the same window ("工具集（10 个）", "十个工具")
+    // is the part a human reads and nobody recomputes.
+    const counted = countClaimedIn(scope);
+    if (counted !== undefined) {
+      assert.equal(
+        counted,
+        registered.length,
+        `${path} claims ${counted} orchestration tools, the gate registers ${registered.length}`,
       );
     }
   }
-
-  // The COUNT AGENTS.md states out loud, checked against the registry: the
-  // number is the part a human reads and the part nobody recomputes.
-  const agents = inventories.find((s) => s.path === "AGENTS.md")!;
-  const claimed = /工具集（(\d+) 个）/.exec(agents.text);
-  assert.ok(claimed, "AGENTS.md must state how many orchestration tools there are");
-  assert.equal(
-    Number(claimed![1]),
-    registered.length,
-    `AGENTS.md claims ${claimed![1]} orchestration tools, the gate registers ${registered.length}`,
+  // …and at least one surface must state the count, or that check is dead code.
+  assert.ok(
+    inventories.some(({ path, window }) => countClaimedIn(window(readRepoFile(path))) !== undefined),
+    "no doc states how many orchestration tools there are — the count check never runs",
   );
 });
 
@@ -164,9 +218,13 @@ test("a doc that COUNTS the child states counts the union", () => {
       const claimed = NUMERALS[match[1]!.toLowerCase()];
       if (claimed === undefined) continue;
       // Only the child-state doctrine: the same phrase shape is used for other
-      // enumerations, so the passage has to be about a child's state.
-      const context = paragraphAround(text, match.index);
-      if (!/orchestrator-child-state|子会话|child|waiting-judge|监督/.test(context)) continue;
+      // enumerations, so the passage has to be about a child's state. The
+      // window is a NEIGHBOURHOOD, not the paragraph (round-1 P2): the copy
+      // this round corrected lives in a section HEADING — "## 二、状态：八态"
+      // — which is a paragraph of its own and mentions nothing else, so a
+      // paragraph-sized window silently skipped the very line at issue.
+      const context = text.slice(Math.max(0, match.index - 400), match.index + 400);
+      if (!/orchestrator-child-state|子会话|child|waiting-judge|监督|心跳|pane/.test(context)) continue;
       claims++;
       assert.equal(
         claimed,

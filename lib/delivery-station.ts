@@ -126,13 +126,28 @@ export function shipKindAllowedAtStation(station: DeliveryStation, kind: ShipCom
   return ALLOWED_SHIP_KINDS[station].includes(kind);
 }
 
-/** One line, in the user's language, for the dialog and the transcript. */
-export function describeDeliveryStation(station: DeliveryStation): string {
+/**
+ * WHO IS READING IT. The station sentence names an actor ("…, and YOU commit"),
+ * and the two surfaces that print it have opposite actors: the approval dialog
+ * is read by the USER, a tool refusal is read by the AGENT. Rendering the
+ * user's wording into a refusal told the agent to commit at exactly the
+ * station where it must not (round-1 P2, 2026-09-17) — so the audience is a
+ * parameter of the ONE definition rather than an excuse for a second copy.
+ */
+export type StationAudience = "user" | "agent";
+
+/** One line, in the reader's own person, for a dialog, a refusal or a log. */
+export function describeDeliveryStation(
+  station: DeliveryStation,
+  audience: StationAudience = "user",
+): string {
+  // The actor is always the USER; only the word for them changes.
+  const you = audience === "user" ? "你自己" : "用户自己";
   switch (station) {
     case "precommit":
-      return "precommit —— 门禁检查跑通即交付，由你自己 commit（不 commit、不 push、不开 PR）";
+      return `precommit —— 门禁检查跑通即交付，由${you} commit（不 commit、不 push、不开 PR）`;
     case "commit":
-      return "commit —— 提交完成即交付，由你自己 push（不 push、不开 PR）";
+      return `commit —— 提交完成即交付，由${you} push（不 push、不开 PR）`;
     case "pr":
       return "pr —— 一路做到 PR 开出来";
   }
@@ -179,8 +194,16 @@ export const DELIVERY_STATION_CHOICES_EN = DELIVERY_STATIONS
  * from {@link describeDeliveryStation} so the refusal and the approval dialog
  * can never define the same word differently.
  */
-export function deliveryStationChoiceLines(indent = "  - "): string {
-  return DELIVERY_STATIONS.map((station) => indent + describeDeliveryStation(station)).join("\n");
+export function deliveryStationChoiceLines(
+  indent = "  - ",
+  audience: StationAudience = "agent",
+): string {
+  // The default is `agent`: the only caller of a CHOICE LIST is a refusal or a
+  // tool description, both of which the agent reads. The dialog prints ONE
+  // station (deliveryStationLine), and that one defaults to `user`.
+  return DELIVERY_STATIONS
+    .map((station) => indent + describeDeliveryStation(station, audience))
+    .join("\n");
 }
 
 // ---------------------------------------------------------------------------

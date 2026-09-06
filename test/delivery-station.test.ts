@@ -254,17 +254,36 @@ test("arrival: `pr` owes a committed worktree AND evidence that a PR was opened"
 test("the station definitions live in ONE file — no other source restates them", () => {
   const AUTHORITY = "lib/delivery-station.ts";
   const definitions = [
-    ...DELIVERY_STATIONS.map(describeDeliveryStation),
+    // BOTH audiences: the dialog's wording and the refusal's wording are two
+    // renderings of one definition, and either could be hand-copied back in.
+    ...DELIVERY_STATIONS.map((station) => describeDeliveryStation(station, "user")),
+    ...DELIVERY_STATIONS.map((station) => describeDeliveryStation(station, "agent")),
     ...DELIVERY_STATIONS.map(describeDeliveryStationEn),
   ];
 
-  // (1) The needles are real needles: the authority itself contains all six.
-  // Without this, a renamed sentence would empty the scan and pass silently.
+  // The part of each sentence that carries the MEANING. The actor word is
+  // interpolated (user vs. agent), so the full rendering is not a literal in
+  // the source — these fragments are, and a hand-copy would carry them too.
+  const fragments = [
+    "门禁检查跑通即交付", "提交完成即交付", "一路做到 PR 开出来",
+    ...DELIVERY_STATIONS.map(describeDeliveryStationEn),
+  ];
+  const needles = [...definitions, ...fragments];
+
+  // (1) The needles are real needles: the authority itself contains every
+  // fragment literally, and renders every definition. Without this, a renamed
+  // sentence would empty the scan and pass silently.
   const authorityText = readRepoFile(AUTHORITY);
+  for (const fragment of fragments) {
+    assert.ok(
+      authorityText.includes(fragment),
+      `${AUTHORITY} must literally contain the definition fragment it renders: ${fragment}`,
+    );
+  }
   for (const definition of definitions) {
     assert.ok(
-      authorityText.includes(definition),
-      `${AUTHORITY} must literally contain the definition it renders: ${definition}`,
+      fragments.some((fragment) => definition.includes(fragment)),
+      `the rendered definition "${definition}" contains none of the fragments the scan hunts for`,
     );
   }
 
@@ -280,7 +299,7 @@ test("the station definitions live in ONE file — no other source restates them
   for (const rel of scanned) {
     if (rel === AUTHORITY) continue;
     const text = readRepoFile(rel);
-    for (const definition of definitions) {
+    for (const definition of needles) {
       assert.ok(
         !text.includes(definition),
         `${rel} writes out a delivery-station definition ("${definition}") that ${AUTHORITY} already owns. ` +
@@ -316,11 +335,19 @@ test("the rendered choice lists are derived, not typed out again", () => {
   // changing `describeDeliveryStation` stops moving them and this fails.
   for (const station of DELIVERY_STATIONS) {
     assert.ok(DELIVERY_STATION_CHOICES_EN.includes(describeDeliveryStationEn(station)));
-    assert.ok(deliveryStationChoiceLines().includes(describeDeliveryStation(station)));
+    assert.ok(deliveryStationChoiceLines().includes(describeDeliveryStation(station, "agent")));
+    assert.ok(deliveryStationChoiceLines("- ", "user").includes(describeDeliveryStation(station, "user")));
   }
   // One line per station, and the indent is the caller's.
   assert.equal(deliveryStationChoiceLines().split("\n").length, DELIVERY_STATIONS.length);
   assert.ok(deliveryStationChoiceLines("* ").startsWith("* precommit"));
+
+  // WHO COMMITS. A choice list is read by the AGENT, and the agent is never
+  // the one who commits at `precommit` — rendering the dialog's second person
+  // into a refusal said the opposite (round-1 P2). The dialog keeps it.
+  assert.ok(deliveryStationChoiceLines().includes("由用户自己 commit"), "the refusal names the USER as the committer");
+  assert.ok(!deliveryStationChoiceLines().includes("由你自己 commit"), "…and never the reader");
+  assert.ok(deliveryStationLine("precommit").includes("由你自己 commit"), "the dialog still speaks to the user directly");
 });
 
 
