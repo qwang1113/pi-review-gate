@@ -218,7 +218,12 @@ test("orchestrator_wait reports an external message as such — not as a spent b
 
   const text = replyText(reply);
   assert.match(text, /等待被外部消息打断/, "the manager must learn WHY it came back");
-  assert.match(text, /马上就会送到你面前/, "…and that the message is already queued for it");
+  // The honest version of "it is already queued": WHEN it lands depends on how
+  // it was sent, and a manager that dives straight back into a 900s wait locks
+  // the same message out again — the original defect, one hop later.
+  assert.match(text, /steer 会切进你当前这一轮/, "…and when a steer message lands");
+  assert.match(text, /结束这一轮 turn/, "…and what a followUp message is waiting for");
+  assert.match(text, /别立刻回到 wait 里去/, "…and the one action that always lets it through");
   assert.match(text, /没有任何东西被取消/, "…and that no child was harmed by the interrupt");
   assert.doesNotMatch(text, /本次预算用完/, "an interrupt must never be dressed up as a timeout");
   assert.equal(reply.details?.done, false);

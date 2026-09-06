@@ -260,15 +260,19 @@ async function doWait(
   if (waited.aborted) {
     const waitedSeconds = Math.round(waited.waitedMs / 1000);
     // TWO interrupts, and the difference matters to whoever reads this. ESC is
-    // the host cancelling the call. A user message is somebody TALKING TO YOU:
-    // it is already queued in this session and arrives the moment this turn
-    // reaches its next boundary, so the receipt says so instead of reading
-    // like a spent budget (B5 — a manager that used to be unreachable for the
-    // whole 900s budget while the message sat in the queue).
+    // the host cancelling the call. A user message is somebody TALKING TO YOU
+    // — but WHEN it lands depends on how it was sent, and the receipt must not
+    // paper over that: `steer` cuts into this very turn, while `followUp` is
+    // only delivered once the turn ENDS. So a manager that goes straight back
+    // into a 900s wait shuts the same message out a second time, which is the
+    // original defect wearing a different hat (round-1 P2). Hence the receipt
+    // names the one action that always works: finish this turn.
     if (waited.abortReason === "user-input") {
       return reply(
         `review-gate: 等待被外部消息打断（已等 ${waitedSeconds}s）—— ` +
-        "有人正在跟你说话，那条消息已经在本会话的队列里，马上就会送到你面前；" +
+        "有人正在跟本会话说话，消息已经在宿主队列里：steer 会切进你当前这一轮，" +
+        "followUp 要等你**结束这一轮 turn** 才送达。所以别立刻回到 wait 里去 —— " +
+        "那会把同一条消息再关在门外一次；先把手上这一轮收掉，让它进来。" +
         "子会话还在跑，没有任何东西被取消。\n\n" + receipt.text,
         { ...details, done: false, reason: "aborted", abortedBy: "user-input" },
       );
