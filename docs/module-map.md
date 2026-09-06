@@ -14,6 +14,10 @@
 写新功能时先想清楚它落在哪个模块，而不是落在「我正好打开的那个文件」——
 `extensions/review-gate.ts` 的七千余行就是几十次「只加 100 行」累积出来的。
 
+改**已有**口径（一条规则、一份清单、一个数字）而不是加新代码时，先看 §七
+「口径副本地图」：同一段话在这个仓库里往往有好几份手抄，它告诉你还有哪几处
+要跟着改、哪条测试会替你兜底、哪几处**没有任何测试看着**。
+
 ---
 
 ## 一、`extensions/review-gate.ts` 是什么
@@ -450,7 +454,7 @@ fail-closed）。`model-diagnose.ts`
 | `hooks/` | L3 纵深防御：`pre-commit`（校验 sidecar 与指纹、跑标签扫描与暂存分叉检查）、`pre-push`（同一套 + full lane 要求）、`commit-msg`（AI 署名 + L5 英文，覆盖编辑器里写的 message） | 新增一条**离开 pi 也必须成立**的检查；bash 写成，不能 import TypeScript |
 | `scripts/` | 跑得起来的执行体：`precommit-runner.mjs`（确定性质量门）、`precommit-plan.mjs`（纯规划，可单测）、`precommit-cache.mjs`（按输入摘要缓存每步）、`precommit-config.mjs`（读 `.pi/review-gate.json` 的 precommit 段）、`compute-fingerprint.cjs`（钩子用的指纹，镜像 `lib/fingerprint.ts`）、`check-staged-divergence.cjs`、`scan-test-labels.cjs`（L6）、`install-git-hooks.sh`、`install-package.mjs` | **新增一条 precommit 检查**（改 runner + plan）；新增钩子要用的、不能依赖 TypeScript 的逻辑（CJS/MJS） |
 | `agents/` | 四个角色定义：`reviewer`、`adviser`、`goal-auditor`、`arbiter`。frontmatter 是模型链、thinking、工具集的**单一事实源** | **新增或调整一个 judge 角色**：先改这里的 md，模型链由 `lib/model-config.ts` 渲染/校验 |
-| `skills/` | 随包分发给 pi 的技能（`package.json` 的 `files` 含 `skills/`，pi 直接从包里加载，因此写在这里就等于全局可用——**不要**再往 `~/.pi/agent/skills/` 手抄副本，那会漂移）。四个：`skills/review-loop` 描述审查循环怎么跑；`skills/orchestrating-child-sessions` 项目经理编排子会话的陷阱；`skills/gate-changes-and-tests` 改门禁共享实现与写测试的经验；`skills/worktree-edit-discipline` 工作区与编辑工具的操作纪律 | 面向**使用者 / agent 操作**的指南（而不是门禁自身的判定）放这里；新增一个 skill 目录时同一轮改这一格 |
+| `skills/` | 随包分发给 pi 的技能（`package.json` 的 `files` 含 `skills/`，pi 直接从包里加载，因此写在这里就等于全局可用——**不要**再往 `~/.pi/agent/skills/` 手抄副本，那会漂移）。只有一条：`skills/review-loop` 描述审查循环怎么跑 | **收录判据（2026-09-05 用户定，删掉三条不合格的之后立的界）**：skill 只写**环境事实**——这个仓库需要哪些必备依赖、怎么把它跑起来、基本现状与结构约定，也就是**门禁不会注入、而新来的人不知道就会踩坑**的东西。不进 skill 的三类：① 门禁自己的规则与流程（它每轮都自己注入，写成 skill 是重复，且会随门禁改动安静过期）；② 为门禁缺陷发明的绕行办法（那是待办清单上的一条缺陷，不是知识——缺陷修好后没人回来删它，它就从避坑指南变成误导）；③ 只对某一轮成立的排查过程 |
 
 ---
 
@@ -603,10 +607,84 @@ fail-closed）。`model-diagnose.ts`
    `lib/orchestrator-*-tools.ts` 的形状：判定与工具注册都在 `lib/`，经
    `lib/tool-host.ts` 那道 seam 拿依赖，别再往那个七千余行的文件里加。命令族
    同理，形状见 `lib/gate-command-tools.ts`（seam 是它自己的 `CommandHost`）。
-4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态（98 个模块里 75 个有）；
-   其余 23 个里多数并进相邻的分组测试（`test/orchestrator-atoms.test.ts`、
-   `test/orchestrator-tools.test.ts`、`test/extension-structure.test.ts`），
-   但个别模块——`agent-directives.ts`、`orchestrator-dispatch.ts`——在 `test/`
-   下**零引用**，正是本问说的那种情形。真正的判据不是
+4. **它测得动吗？** 同名 `test/foo.test.ts` 是常态；其余多数并进相邻的分组
+   测试（`test/orchestrator-atoms.test.ts`、`test/orchestrator-tools.test.ts`、
+   `test/extension-structure.test.ts`）。这里**不给计数、也不点名具体模块**
+   ——上一版给了（一组「多少个模块里多少个有」的数字，外加两个被点名为
+   「在 `test/` 下零引用」的模块），到 2026-09-05 复核时数字和点名**全部
+   过期**，因为没有任何测试 pin 它们；同一份文档里 §五 的模块数一直是对的，
+   区别只在于它有 `test/module-map.test.ts` 的双向差集看着。真正的判据也不是
    文件名对不对，而是**这条规则能不能被一个测试单独点名**——做不到，就说明它
    被埋在了工具体或接线里，`reviewer` 可以直接开 P1。
+
+---
+
+## 七、口径副本地图（改一处，还有哪几处要跟着改）
+
+同一段口径——同一条规则、同一份清单、同一个数字——在这个仓库里常常有好几份
+副本：权威实现一份，`AGENTS.md`、`README.md`、`QUICKSTART.md`、`docs/*.md`、
+`agents/*.md` 的角色正文、`lib/*.ts` 里的提示词字符串各抄一份。**被测试 pin
+住的那几对改错了会当轮红；没有 pin 的那些只会安静过期**——往往是在缺陷修好、
+工具改名之后，悄悄从「说明」变成「误导」。
+
+这张表回答的就是：**我改了这段口径，还有哪几处要跟着改、哪条测试会红。**
+
+`test/copy-map.test.ts` 机械核对本节点名的每个测试文件与 test 名称真实存在
+（2026-09-05 用户拍板加的：一份讲「别让副本安静过期」的清单自己安静过期最
+难察觉）。它**核不到**「有 pin / 无 pin」这个判断本身——那一栏靠人维护，所以
+下面每条都给了不随行号漂移的定位锚（小节标题、常量名、函数名），方便复核。
+
+下面两张表的「谁 pin 它们」一栏格式是固定的：先一个反引号包住的测试文件路径
+（`test/` 下、以 `.test.ts` 结尾），后面跟一个或多个反引号包住的双引号 test
+名称，同一个文件后面跟着的名称都归它。名称**逐字照抄**，含 em dash `—` 与
+撇号 `'`，否则字面量匹配会假红。`test/copy-map.test.ts` 就是这么解析的——它
+**只读表格行**，所以这段说明里写什么都不会被当成引用。
+
+### 7.1 有 pin 的副本对（改错会当轮红）
+
+| 同一段口径的副本处 | 谁 pin 它们 | pin 的种类 |
+| --- | --- | --- |
+| judge 协议正文：`docs/judge-protocol.md` ↔ `lib/judge-prompt.ts` 的 `JUDGE_COMMON_PROTOCOL` | `test/judge-prompt.test.ts` · `"F5 pin: embedded protocol keeps every rule of docs/judge-protocol.md"` · `"round 5: the protocol tells the judge what an untrusted data block may NOT do"` | bullet 块逐条包含（**单向**：嵌入副本缩水才红，文档端加一条也红；反向不管）；后者用共享常量 `UNTRUSTED_DATA_RULE` 把同一句钉在两处 |
+| judge 角色集合：`lib/judge-prompt.ts` 的角色表 ↔ tmux 子进程角色 | `test/judge-prompt.test.ts` · `"judge roles are exactly the tmux-child roles"` | 两处必须一致 |
+| 角色文件集合：`agents/*.md` ↔ `lib/model-config.ts` 的 `KNOWN_AGENTS` | `test/agents-structure.test.ts` · `"agents/*.md exactly matches KNOWN_AGENTS (config/render see every agent)"` | 双向 `deepEqual`（漏注册一个角色，配置层与渲染会静默跳过它） |
+| 模型链：`agents/{reviewer,adviser,arbiter,goal-auditor}.md` 的 frontmatter | `test/agents-structure.test.ts` · `"L3 judge roles pin the exact strong-tier chain (model + fallbacks + max thinking)"` · `"goal-auditor is a strong-tier, READ-ONLY judge — the gate records its verdict"` | 逐字（正则钉死 `model:` / `fallbackModels:` / `thinking: max`） |
+| 本文 §五的模块表 ↔ `lib/*.ts` 目录 | `test/module-map.test.ts` · `"§5 lists exactly the modules in lib/ — both directions"` · `"§5's header count matches the table it heads"` | 双向差集 + 标题里的计数（单靠计数不够：一个幽灵行加一个漏登会互相抵消） |
+| 指纹算法两份实现：`lib/fingerprint.ts` ↔ `scripts/compute-fingerprint.cjs`（钩子离开 pi 也要能算） | `test/constants.test.ts` · `"TS and CJS fingerprint implementations agree (drift guard)"` · `"TS and CJS agree on FINGERPRINT_VERSION"` | 两份实现**跑出来的结果**必须一致（不是文本比对） |
+| 代码扩展名清单：只许 `lib/constants.ts` 一份 | `test/constants.test.ts` · `"structural: no source file other than lib/constants.ts declares a code-extension list"` | **禁止出现第二份副本**（结构扫描全仓） |
+| 增量审查契约：权威 `lib/review-carryover.ts`；`AGENTS.md`、`README.md`、`QUICKSTART.md`、`docs/judge-protocol.md`、`skills/review-loop/SKILL.md` 只许写摘要 + 指针 | `test/review-carryover.test.ts` · `"the contract's clauses appear in exactly one file"` · `"every surface that summarises the contract points at the source"` · `"the scan itself sees the files it claims to (before its verdict means anything)"` | 禁止第二份副本 + 每个摘要面必须回指权威模块；第三条是**扫描自证**（窗口先证明自己看见了要看的文件，结论才作数） |
+| 「不可能性主张」规则：`agents/reviewer.md` ↔ `skills/review-loop/SKILL.md` ↔ `README.md` 的 `### "It can't be done" is a hypothesis, not a finding-free pass` | `test/impossibility-claims.test.ts` · `"reviewer treats an impossibility claim as a hypothesis to verify, not a fact"` · `"review-loop skill makes the main agent hand its impossible list to the reviewer"` · `"README documents the impossibility-claim rule for users of the gate"` | 三处都必须出现各自那几句（README 端按小节切窗后断言） |
+| 「已删除的工具名不得再出现」：`AGENTS.md` + `skills/review-loop/SKILL.md` 绝对禁；`README.md` / `QUICKSTART.md` 靠历史 banner 豁免 | `test/extension-structure.test.ts` · `"the SHIPPED skill and the agent-facing docs name no deleted tool at all"` | 负向 pin，且**豁免凭据本身被 pin**（banner 没了豁免同时失效） |
+| judge 握手口径（完成信号是通道报告，不是进程退出 / `tmux wait-for`）：`AGENTS.md`、`skills/review-loop/SKILL.md`、`docs/execution-model.md`、`docs/judge-protocol.md`、`lib/judge-prompt.ts`、`lib/parallel-review.ts`、`lib/loop-goal.ts`、`lib/adviser-brief.ts` | `test/workflow-commands.test.ts` · `"the judge handshake never teaches tmux wait-for (process exit is the completion signal)"` | 八处一起负向扫描 + 正向要求出现「标准报告」「通道」 |
+| 等待纪律三句话：主会话版 ↔ 项目经理版，权威是 `lib/agent-directives.ts` 的 `buildWaitDiscipline` | `test/agent-directives.test.ts` · `"both renderings come from ONE builder — no second copy of the wording"` | 两处渲染必须出自同一个 builder（**结构上**杜绝手抄，不是比对文本） |
+| 「wave 机制已删除」：`AGENTS.md` ↔ `skills/review-loop/SKILL.md` | `test/agents-structure.test.ts` · `"AGENTS.md states read-only parallel exploration and NO wave protocol"` · `"SKILL.md states read-only exploration rules and NO wave protocol"` | 正向要求写明已删除 + 负向禁止指令式提及 |
+| 单 reviewer / 再审携带上轮结论 / findings 只带 blockers：散在 `agents/*.md`、`docs/judge-protocol.md`、`lib/judge-prompt.ts`、`skills/review-loop/SKILL.md` | `test/agents-structure.test.ts` · `"REGRESSION: the single-review protocol states ONE reviewer per round"` · `"REGRESSION: every re-review must carry the previous round's conclusion"` · `"every judge role is told that findings carry BLOCKERS ONLY"` | 多文件循环断言：每一处都必须出现这句 |
+
+### 7.2 无 pin 的副本（会安静过期的那些）
+
+改这些口径时**没有任何测试会红**——只能靠这张表。
+
+| 同一段口径的副本处 | 权威在哪 | 实测备注 |
+| --- | --- | --- |
+| orchestrator 十工具清单：`AGENTS.md` 的「工具集（10 个）」、`README.md` 的工具表、`QUICKSTART.md`、`docs/execution-model.md`、`docs/orchestrator-supervision.md` | 实际注册（`lib/orchestrator-*-tools.ts`） | `test/orchestrator-tools.test.ts` · `"the ten orchestration tools are registered, and the deleted ones are not"` pin 的是**注册行为**，清单常量在那个测试文件自己里；**没有任何测试拿它对照文档**，五处手抄全裸奔 |
+| L1–L8 分层清单：`README.md` 的 ASCII 图（`L1 Ship gate` … `L8 Loop-goal approval`）↔ 本文 §二的表 | 无单一权威（分散在各层实现） | `test/module-map.test.ts` 只覆盖 §五；README 端只有零散句子被别的测试 pin，层级表本身不在其中 |
+| 子会话七状态（`working` / `waiting-input` / `waiting-judge` / `idle` / `done` / `dead` / `stalled`）：`AGENTS.md`、`README.md`（"seven states"）、`docs/execution-model.md`、`docs/orchestrator-supervision.md` §2 | `lib/orchestrator-child-state.ts` 的状态 union | 相关测试只 pin `classifyChildState` / `isNewsworthy` 的**行为**，从不读文档 |
+| 600 行硬拦：`AGENTS.md` 的「架构规范」段、本文 §三与 §五的 `file-size-gate.ts` 行、`agents/reviewer.md` | `lib/file-size-gate.ts` 的 `NEW_FILE_HARD_LIMIT` / `EXISTING_FILE_SOFT_LIMIT` | `test/file-size-gate.test.ts` 全文**没有 `600` 这个字面量**（它 import 常量），文档端把数字改错不会红 |
+| 交付站点定义句（precommit / commit / pr 各是什么）：`lib/restatement.ts` 里另写的一条字符串常量、`AGENTS.md`、`README.md` 的 `propose_restatement` 行 | `lib/delivery-station.ts` 的 `describeDeliveryStation` / `deliveryStationLine` | `restatement.ts` 虽然 import 了 `delivery-station.ts`，但这句是**手抄的第二份**，不经权威函数，无一致性断言 |
+| judge 默认模型链：`scripts/install-package.mjs` 的 `DEFAULT_AGENTS`、`AGENTS.md` 正文、`README.md` 的配置示例 | `agents/*.md` 的 frontmatter（这一端有 pin，见 7.1） | `test/install-package.test.ts` 只验安装**行为**，从不校验 `DEFAULT_AGENTS` 的内容与 `agents/*.md` 一致 |
+| precommit 步骤名清单（lint / typecheck / build / test.fast / test.full）：`README.md`、本文 §四的 `scripts/` 格 | `scripts/precommit-plan.mjs` | `test/precommit-plan.test.ts` 只测规划行为，不读文档 |
+| 整份文档从未被任何测试读到：`docs/orchestrator-supervision.md`、`docs/hierarchical-session-design.md`、`docs/dev-flow.md`、`docs/coding-standards.md` | —— | 它们只会被 `review-carryover.test.ts` 的 `docs/*.md` 扫描扫到，而那条只查增量契约一项，其余内容全裸 |
+| **当轮抓到的活样本**：本文 §六第 4 条曾写「98 个模块里 75 个有」「其余 23 个」，并点名两个「在 `test/` 下零引用」的模块 | 无 | 2026-09-05 复核时数字与点名**全部过期**（同一份文档里 §五 的模块数一直是对的，区别只是它有双向差集看着）。已在同一轮改成不带计数、不点名的表述 |
+
+### 7.3 一条否定结论（省得后来人再扫一遍）
+
+**三条哲学不是多副本。** 全仓只有 `AGENTS.md` 的「三条哲学」一份正文；
+`docs/dev-flow.md`、`docs/execution-model.md`、`lib/hierarchy.ts`、
+`lib/judge-lifecycle.ts`、`extensions/review-gate.ts` 等处出现的「（哲学三）」
+都是**理由标签**，不是复述。它没有 pin，但也没有副本可漂。
+
+### 7.4 这张表的边界（诚实说明）
+
+它**不是穷尽的**：`extensions/review-gate.ts` 近九千行的注释级复述只抽查过、
+`agents/*.md` 四个角色正文彼此之间没做交叉比对、`docs/rounds/*.md` 作为历史
+存档一律不比对。发现新的一对就往 7.1 / 7.2 加一行——加行时顺手确认引用格式，
+`test/copy-map.test.ts` 会替你核对名称是否真实存在。
