@@ -360,18 +360,23 @@ test("SENTINEL: a symlink pointing into ANOTHER repo arms that repo, not nothing
   assert.equal(sidecarB.hasCodeChange, true, "the repo the symlink writes into must arm");
 });
 
-test("a new file in an unresolvable in-repo directory points the active repo back home", async () => {
+test("an in-repo edit git cannot attribute points the active repo back home", async () => {
   // Round-1 reviewer P2. The retarget used to ask `editRepo === primaryRepoRoot`,
-  // and git cannot attribute a file whose directory does not exist yet — so
-  // after one cross-repo edit, a multi-repo session went on recording its
-  // verdicts against the OTHER repo. The scope answers it correctly.
+  // so an edit git could not attribute left a multi-repo session recording its
+  // verdicts against the OTHER repo. The distinguishing case has to be one git
+  // still cannot attribute AFTER the ancestor climb (round-3 reviewer P1: a new
+  // nested directory no longer is one — the climb resolves it to repoA, and the
+  // old guard would have passed it too). A symlink out of a directory that is
+  // in no repository is: only RESOLVING the file says it writes into repoA.
   const parent = newParent("retarget");
   const repoA = makeRepo(parent, "repoA");
   const repoB = makeRepo(parent, "repoB");
+  const link = join(parent, "into-a.ts");
+  symlinkSync(join(repoA, "lib", "x.ts"), link);
 
   const pi = await startSession(repoA);
   await fireEdit(pi, join(repoB, "lib", "x.ts"));            // active → repoB
-  await fireEdit(pi, join(repoA, "brand", "new", "y.ts"));   // …must come home
+  await fireEdit(pi, link);                                  // …must come home
 
   // The verdict recorder names the last-edited repo in its ambiguity refusal —
   // that label IS the active repo.
