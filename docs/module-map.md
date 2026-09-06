@@ -462,7 +462,7 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（117 个模块）
+## 五、`lib/` 全量速查表（118 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -497,6 +497,7 @@ fail-closed）。`model-diagnose.ts`
 | `dialog-budget.ts` | 确认对话框的渲染行数预算——宿主不截断，长度必须自己管 |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |
 | `edit-projection.ts` | 从 edit/write 入参投影出改后完整文件内容，供标签检查看到上下文 |
+| `edit-repo-scope.ts` | 一次编辑落在**哪个仓库**（`primary` / `other-repo` / `outside`）的唯一判定：git 有答案就听 git（跨仓库分支原样保留），没有答案时用 `fingerprint.ts` 的 `realFile` / `realDir` 解析两侧再按 `root + "/"` 边界判包含，解析不出一律回落 `primary`（fail-closed）。它存在的原因是仓库外的写入（子会话写进 `/tmp` 的完成报告）曾经作废 review 绑定，把已到手的 READY 打回 PENDING |
 | `file-size-gate.ts` | 新建源码文件 600 行硬拦、存量超阈值只提醒的纯判定 |
 | `fingerprint.ts` | 工作区指纹：内容寻址、暂存无关，门禁裁决与它绑定 |
 | `gate-command-tools.ts` | 命令层的**唯一注册入口**：工作流命令的注册包装、`/precommit` lane，以及 `/gate-status` / `/gate-bypass` / `/gate-mode` / `/gate-reset` / `/gate-lesson` 五个命令正文；命令 host 的 seam（`CommandHost` / `CommandContext`）也在这里；自己转注册 `gate-diagnosis-commands.ts` |

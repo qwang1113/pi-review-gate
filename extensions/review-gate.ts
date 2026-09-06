@@ -86,6 +86,7 @@ import {
   resolveCommandRepos,
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
+import { classifyEditRepoScope } from "../lib/edit-repo-scope.ts";
 import {
   nonEnglishCommitMessage,
   l5BlockReason,
@@ -4231,20 +4232,33 @@ export default function reviewGate(pi: ExtensionAPI) {
       // exclusion exists to prevent. It covers the gate's own sidecar/lesson
       // writes and the agent-authored .pi/loop-goal.md alike.
       if (isGateOwnedPath(absEditPath, editRepo ?? primaryRepoRoot)) return;
-      if (editRepo && editRepo !== primaryRepoRoot) {
+      // WHICH repo this edit belongs to — or none at all. The `null` answer
+      // from gitRootOfDir used to fall straight through to the PRIMARY branch
+      // below, so a file outside every repository (the `/tmp/report.md` a
+      // child session writes its completion report to) armed the doc gate and
+      // demoted a READY it could not possibly invalidate: it is in neither
+      // changedFiles() nor the fingerprint, so no reviewer ever sees it. That
+      // cost seven rounds of the same report before anyone traced it here.
+      // lib/edit-repo-scope.ts owns the judgement, including its fail-closed
+      // side: only a path resolved CONFIDENTLY outside the root skips
+      // tracking.
+      const editScope = classifyEditRepoScope({ absPath: absEditPath, primaryRepoRoot, editRepo });
+      if (editScope.scope === "outside") return;
+      if (editScope.scope === "other-repo") {
+        const otherRepo = editScope.root;
         const isProjectFile = isCodeFile(path) || isDocFile(path);
-        const isNewRepo = !sessionRepos.has(editRepo);
+        const isNewRepo = !sessionRepos.has(otherRepo);
         if (isProjectFile) {
-          sessionRepos.add(editRepo);
-          activeRepoRoot.current = editRepo;
+          sessionRepos.add(otherRepo);
+          activeRepoRoot.current = otherRepo;
         }
-        const s = stateForRepo(editRepo);
+        const s = stateForRepo(otherRepo);
         let dirty = false;
         if (isCodeFile(path) && !s.hasCodeChange) { s.hasCodeChange = true; dirty = true; }
         if (isDocFile(path) && !s.hasDocChange) { s.hasDocChange = true; dirty = true; }
         if (isProjectFile) {
-          const rel = absEditPath.startsWith(editRepo + "/")
-            ? absEditPath.slice(editRepo.length + 1)
+          const rel = absEditPath.startsWith(otherRepo + "/")
+            ? absEditPath.slice(otherRepo.length + 1)
             : absEditPath;
           if (!s.sessionEditedFiles) s.sessionEditedFiles = [];
           if (!s.sessionEditedFiles.includes(rel)) s.sessionEditedFiles.push(rel);
@@ -4261,7 +4275,7 @@ export default function reviewGate(pi: ExtensionAPI) {
           clearBypassToken(); // any edit invalidates a standing arbiter bypass
         }
         if (dirty) {
-          persistRepo(ctx as unknown as ExtensionContext, editRepo);
+          persistRepo(ctx as unknown as ExtensionContext, otherRepo);
           // P-multi (round-2 P2): the FIRST cross-repo edit grows the repo
           // set — record it in the PRIMARY sidecar's sessionReposPaths NOW so
           // a crash/restart before the next primary persist cannot drop this

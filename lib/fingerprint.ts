@@ -99,13 +99,17 @@ export function mayBeGateOwned(absPath: string): boolean {
 }
 
 /**
- * Both sides of the comparison must live in the same namespace: repo roots come
- * from `git rev-parse --show-toplevel` (physical, symlinks resolved) while edit
- * paths are built from the session cwd (possibly logical). Comparing the two
- * raw would make a symlinked worktree miss the exclusion — the gate would arm
- * on a file no review can see. Best-effort: unresolvable paths stay as-is.
+ * Both sides of a path comparison must live in the same namespace: repo roots
+ * come from `git rev-parse --show-toplevel` (physical, symlinks resolved) while
+ * edit paths are built from the session cwd (possibly logical). Comparing the
+ * two raw would make a symlinked worktree miss the exclusion — the gate would
+ * arm on a file no review can see. Best-effort: unresolvable paths stay as-is.
+ *
+ * Exported because `lib/edit-repo-scope.ts` decides "is this edit inside the
+ * repo at all?" and must resolve paths EXACTLY the way the gate-owned check
+ * does; two resolvers that disagree would classify the same path two ways.
  */
-function realDir(dir: string): string {
+export function realDir(dir: string): string {
   try {
     return realpathSync.native(dir);
   } catch {
@@ -125,7 +129,7 @@ function realDir(dir: string): string {
  * to resolving the directory when the file is not there yet (tool_call fires
  * before the write lands).
  */
-function realFile(file: string): string {
+export function realFile(file: string): string {
   try {
     return realpathSync.native(file);
   } catch {
