@@ -87,6 +87,7 @@ import {
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
 import { classifyEditRepoScope } from "../lib/edit-repo-scope.ts";
+import { isSensitiveOutsideRepoPath } from "../lib/orchestrator-boundaries.ts";
 import {
   nonEnglishCommitMessage,
   l5BlockReason,
@@ -4243,7 +4244,26 @@ export default function reviewGate(pi: ExtensionAPI) {
       // side: only a path resolved CONFIDENTLY outside the root skips
       // tracking.
       const editScope = classifyEditRepoScope({ absPath: absEditPath, primaryRepoRoot, editRepo });
-      if (editScope.scope === "outside") return;
+      if (editScope.scope === "outside") {
+        // ONE exception, and it is not about the gate: a SENSITIVE path
+        // outside the repo stays VISIBLE. `sessionEditedFiles` is the only
+        // input lib/orchestrator-boundaries.ts has for the supervision-time
+        // question "did this child write somewhere it had no business
+        // writing?" — its out-of-repo exemption for process artefacts
+        // deliberately keeps sensitive paths as violations, and dropping the
+        // record entirely would leave that exception with nothing to read
+        // (round-1 reviewer P1). Recording is NOT arming: no verdict is
+        // invalidated, no completion undone — nothing reviewable changed.
+        if (isSensitiveOutsideRepoPath(absEditPath)) {
+          if (!state.sessionEditedFiles) state.sessionEditedFiles = [];
+          if (!state.sessionEditedFiles.includes(absEditPath)) {
+            state.sessionEditedFiles.push(absEditPath);
+            sessionEditedPaths.add(absEditPath);
+            persist(ctx);
+          }
+        }
+        return;
+      }
       if (editScope.scope === "other-repo") {
         const otherRepo = editScope.root;
         const isProjectFile = isCodeFile(path) || isDocFile(path);
@@ -4289,10 +4309,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // P-multi: an edit in the PRIMARY repo makes it the active repo again —
       // otherwise a single cross-repo edit would leave verdict recording /
       // run_precommit pointed at the other repo forever (multi-repo deadlock).
-      // (An edit OUTSIDE any git repo — editRepo null, e.g. a /tmp scratch
-      // file — must NOT retarget the active repo; that would silently point
-      // the next recorded verdict at the primary and waste a round.)
-      if (editRepo === primaryRepoRoot) activeRepoRoot.current = primaryRepoRoot;
+      // Reaching this line ALREADY means the edit belongs to the primary repo
+      // — an outside path and another repo both returned above — so the
+      // retarget is unconditional now. The old `editRepo === primaryRepoRoot`
+      // guard missed the one case git cannot attribute yet (a new file in a
+      // repo directory that does not exist), leaving a multi-repo session
+      // recording its verdicts against the other repo (round-1 reviewer P2).
+      activeRepoRoot.current = primaryRepoRoot;
       if (isCodeFile(path) && !state.hasCodeChange) { state.hasCodeChange = true; dirty = true; }
       if (isDocFile(path) && !state.hasDocChange) { state.hasDocChange = true; dirty = true; }
       if (isCodeFile(path) || isDocFile(path)) {

@@ -166,11 +166,10 @@ function latestState(entries: Entry[]): GateSnapshot {
   throw new Error("the extension persisted no gate state");
 }
 
-/**
- * Fire one successful edit at a freshly started session whose repo already
- * holds a READY review, and report the gate state afterwards.
- */
-async function editThen(repoRoot: string, editedPath: string): Promise<GateSnapshot> {
+type Session = ReturnType<typeof makeMockPi>;
+
+/** A started session whose repo already holds a READY review. */
+async function startSession(repoRoot: string): Promise<Session> {
   forgeReviewedSidecar(repoRoot);
   const pi = makeMockPi(repoRoot);
   reviewGate(pi as never);
@@ -178,13 +177,22 @@ async function editThen(repoRoot: string, editedPath: string): Promise<GateSnaps
   const before = latestState(pi.entries);
   assert.equal(before.review, "READY", "fixture: the session must start from a recorded READY");
   assert.equal(before.precommit, "PASS", "fixture: the session must start from a passed precommit");
+  return pi;
+}
 
+/** One successful edit, exactly as the host reports it. */
+async function fireEdit(pi: Session, editedPath: string): Promise<void> {
   await pi.handlers.get("tool_result")!({
     toolName: "write",
     isError: false,
     input: { path: editedPath },
     content: [{ type: "text", text: "ok" }],
   }, pi.ctx);
+}
+
+async function editThen(repoRoot: string, editedPath: string): Promise<GateSnapshot> {
+  const pi = await startSession(repoRoot);
+  await fireEdit(pi, editedPath);
   return latestState(pi.entries);
 }
 
@@ -228,6 +236,27 @@ test("a sibling directory that merely SHARES the repo's path prefix is outside",
     assert.equal(after.hasCodeChange, true, "the pre-existing arming is untouched");
     assert.deepEqual(after.editedFiles, ["lib/x.ts"]);
   }
+});
+
+test("a SENSITIVE outside path is still recorded — visible to a supervisor, but not arming", async () => {
+  // The one exception to skipping outside-repo edits: `sessionEditedFiles` is
+  // what lib/orchestrator-boundaries.ts reads to decide whether a child wrote
+  // somewhere it had no business writing, and its out-of-repo exemption keeps
+  // SENSITIVE paths as violations. Writing a report to /tmp and writing to
+  // `~/.ssh/config` are not the same act — only the first one is noise.
+  const parent = newParent("sensitive");
+  const repoA = makeRepo(parent, "repoA");
+  const secret = join(parent, ".ssh", "config");
+  mkdirSync(join(parent, ".ssh"), { recursive: true });
+  writeFileSync(secret, "Host *\n");
+
+  const after = await editThen(repoA, secret);
+  assert.deepEqual(after.editedFiles, ["lib/x.ts", secret], "a supervisor must still see it");
+  // …and recording it is NOT arming: nothing reviewable changed.
+  assert.equal(after.review, "READY", "a write outside the repo invalidates no verdict");
+  assert.equal(after.precommit, "PASS");
+  assert.equal(after.hasDocChange, false);
+  assert.equal(after.completion, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -293,5 +322,37 @@ test("SENTINEL: an edit in ANOTHER git repo still arms that repo, not the primar
   ) as { hasCodeChange: boolean; review: { verdict: string } };
   assert.equal(sidecarB.hasCodeChange, true, "the other repo's own gate must arm");
   assert.equal(sidecarB.review.verdict, "PENDING");
+});
+
+test("a new file in an unresolvable in-repo directory points the active repo back home", async () => {
+  // Round-1 reviewer P2. The retarget used to ask `editRepo === primaryRepoRoot`,
+  // and git cannot attribute a file whose directory does not exist yet — so
+  // after one cross-repo edit, a multi-repo session went on recording its
+  // verdicts against the OTHER repo. The scope answers it correctly.
+  const parent = newParent("retarget");
+  const repoA = makeRepo(parent, "repoA");
+  const repoB = makeRepo(parent, "repoB");
+
+  const pi = await startSession(repoA);
+  await fireEdit(pi, join(repoB, "lib", "x.ts"));            // active → repoB
+  await fireEdit(pi, join(repoA, "brand", "new", "y.ts"));   // …must come home
+
+  // The verdict recorder names the last-edited repo in its ambiguity refusal —
+  // that label IS the active repo.
+  const recorders = (pi as unknown as {
+    __reviewGateRecorders?: {
+      recordReviewVerdict: (c: unknown, r: string, x: unknown) => Promise<string>;
+    };
+  }).__reviewGateRecorders;
+  assert.ok(recorders, "the extension must expose its recorders on the test seam");
+  const refusal = await recorders!.recordReviewVerdict(
+    { verdict: "READY", docSync: "NOT_NEEDED", findings: [] },
+    "",
+    pi.ctx,
+  );
+  assert.match(refusal, /more than one repository/);
+  const active = refusal.split("\n").filter((l) => l.includes("(last edited)"));
+  assert.equal(active.length, 1);
+  assert.ok(active[0].includes(repoA), `the session repo must be active again, got: ${active[0]}`);
 });
 
