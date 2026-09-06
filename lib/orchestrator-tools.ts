@@ -29,9 +29,13 @@ import {
   type TaskStatus,
 } from "./orchestrator-plan.ts";
 import {
+  beginApprovalLineage,
   decideApprovalCarry,
+  extendApprovalLineage,
   formatApprovalAmendments,
+  formatApprovalRestored,
   formatApprovalWidenings,
+  lineageAuthorizes,
   snapshotApprovedPlan,
 } from "./orchestrator-plan-approval.ts";
 
@@ -124,8 +128,13 @@ export function buildPlanTranscriptMessage(plan: OrchestratorPlan): string {
  */
 const BOUNDARY_SEMANTICS =
   "关于文件边界的确切含义（请读一句）：批准某个任务的边界后，该任务还可以在**同一目录内**" +
-  "新增文件（例如批了 `lib/a.ts`，它可以再拆出 `lib/b.ts`），前提是新增的路径**不与其他任务重叠**。\n" +
-  "这类细化不会再来打扰你（门禁会记进审计条目）。以下改动一律**重新**征求你的批准：" +
+  "新增文件（例如批了 `lib/a.ts`，它可以再拆出 `lib/b.ts`，`lib/` 下更深的子目录同理），" +
+  "前提是新增的路径**不与其他任务重叠**——" +
+  "但**已经做完（done）的任务不再占地**：它的文件可以交给后面的任务，回执会写明是谁让出来的。\n" +
+  "这类细化不会再来打扰你（门禁会记进审计条目）。" +
+  "把 plan **写回你此前批准过的内容**同样不会再问（撤回一次误操作不必重走批准），" +
+  "而你每批准一次新内容，之前那条链就作废。\n" +
+  "以下改动一律**重新**征求你的批准：" +
   "新增任务、碰到新目录、删除依赖、把串行改成并行、提高并行上限、把交付站点往后挪" +
   "（precommit → commit → pr，等于放开更多 ship 命令）。";
 
@@ -144,7 +153,8 @@ export function buildPlanConfirmMessage(plan: OrchestratorPlan): string {
     "批准后，项目经理才能按这份 plan 开子会话干活。批准的是**内容**：" +
     "新增任务、碰到新目录、删依赖、串行改并行、提高并行上限、**提高交付站点**，" +
     "都会让批准失效并重新问你；" +
-    "**同一目录内、且不与其他任务重叠的文件细化不会再问**（详见上方消息）。\n" +
+    "**同一目录内、且不与其他任务重叠的文件细化不会再问**，" +
+    "**已 done 的任务不再占地**，**写回你批准过的内容**也不会再问（详见上方消息）。\n" +
 
     `标题（不可信数据）：${plan.title.slice(0, 80)}\n` +
     `规模：${plan.tasks.length} 个任务，并行上限 ${plan.maxParallel}\n` +
@@ -235,6 +245,38 @@ async function handlePlanAction(
         { approved: true },
       );
     }
+    // UNDOING A WIDENING IS NOT A NEW GRANT (round-8). This content was
+    // already authorized under the live approval — the user signed it, or a
+    // carry that granted nothing new moved onto it — so writing it back
+    // restores the approval instead of costing a goal-auditor round plus a
+    // dialog for a keystroke somebody took back. It runs BEFORE the
+    // widening analysis on purpose: the analysis compares against whatever
+    // the approval currently holds, which after a revocation is nothing at
+    // all, and it has no way to see that these exact bytes were signed.
+    if (lineageAuthorizes(runtime.approvedPlanHistory, nextHash)) {
+      const restored = formatApprovalRestored(nextHash);
+      // The SNAPSHOT and the timestamp come back with the hash. A hash alone
+      // would leave the next boundary refinement facing "the gate has no
+      // authorizing snapshot" and asking the user again — the very dialog
+      // this path exists to save.
+      deps.saveRuntime({
+        ...runtime,
+        approvedPlanHash: nextHash,
+        approvedPlanAt: nowIso,
+        approvedPlan: snapshotApprovedPlan(next, nextHash, nowIso),
+        approvedPlanHistory: extendApprovalLineage(runtime.approvedPlanHistory, nextHash),
+        approvalAmendments: [
+          ...(runtime.approvalAmendments ?? []),
+          { at: nowIso, changes: [restored] },
+        ],
+      });
+      deps.log(`orchestrator plan approval RESTORED to ${nextHash} (content was already authorized)`);
+      return reply(
+        `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) + "\n\n" +
+        formatApprovalAmendments([restored]),
+        { approved: true, amended: true, restored: true, amendments: [restored] },
+      );
+    }
     if (!runtime.approvedPlanHash) {
       return reply(
         `review-gate: plan 已写入 ${PLAN_RELPATH}。\n` + formatPlanSummary(next) +
@@ -253,6 +295,9 @@ async function handlePlanAction(
         ...runtime,
         approvedPlanHash: nextHash,
         approvedPlan: snapshotApprovedPlan(next, nextHash, runtime.approvedPlan?.at ?? nowIso),
+        // The content the approval just moved onto joins its lineage, so
+        // taking a LATER edit back lands here rather than at the user.
+        approvedPlanHistory: extendApprovalLineage(runtime.approvedPlanHistory, nextHash),
         approvalAmendments: [
           ...(runtime.approvalAmendments ?? []),
           { at: nowIso, changes: carry.amendments },
@@ -273,6 +318,9 @@ async function handlePlanAction(
         { approved: true, amended: true, amendments: carry.amendments },
       );
     }
+    // The three approval fields go; `approvedPlanHistory` deliberately STAYS
+    // (it is what lets the next write take this widening back without a
+    // dialog, and every content in it was authorized before this edit).
     deps.saveRuntime({ ...runtime, approvedPlanHash: undefined, approvedPlanAt: undefined, approvedPlan: undefined });
     // B2 — a REVOCATION is the other half of the same story: the plan on disk
     // now grants more than the user agreed to, and until they are asked again
@@ -478,6 +526,10 @@ async function handlePlanAction(
       // a narrowing edit skip the dialog instead of waking the user again.
       approvedPlan: snapshotApprovedPlan(plan, hash, nowIso),
       approvalAmendments: [],
+      // A FRESH DECISION REPLACES EVERY EARLIER ONE. The lineage restarts at
+      // this content, so a plan the user just NARROWED can never be written
+      // back to a wider version that an earlier approval had carried to.
+      approvedPlanHistory: beginApprovalLineage(hash),
     });
     // B2 — WHO / WHEN / against WHICH content, in the log the two sibling
     // approvals already write to. The sidecar holds the same facts but does

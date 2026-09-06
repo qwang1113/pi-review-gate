@@ -28,7 +28,10 @@
  */
 
 import { emptyNotifyHistory, type NotifyHistory } from "./orchestrator-notify.ts";
-import type { ApprovedPlanSnapshot } from "./orchestrator-plan-approval.ts";
+import {
+  MAX_APPROVAL_LINEAGE,
+  type ApprovedPlanSnapshot,
+} from "./orchestrator-plan-approval.ts";
 import { isDeliveryStation } from "./delivery-station.ts";
 import { isPaneId } from "./orchestrator-tmux.ts";
 
@@ -135,6 +138,19 @@ export interface OrchestratorRuntime {
    * long orchestration cannot grow the sidecar without limit.
    */
   approvalAmendments?: Array<{ at: string; changes: string[] }>;
+  /**
+   * Every plan content THIS approval has legitimately bound to, oldest first
+   * (lib/orchestrator-plan-approval.ts owns the rule).
+   *
+   * It is what lets an orchestrator UNDO a widening: writing the plan back to
+   * a content the user already signed restores the approval instead of
+   * costing a whole re-submit. It carries the same authority as
+   * `approvedPlanHash` and is therefore validated as hard — and it survives a
+   * REVOCATION on purpose, because the revoked state is exactly when it has
+   * work to do.
+   */
+  approvedPlanHistory?: string[];
+
 
 
   /**
@@ -181,6 +197,33 @@ export function addGrant(
   const grants = (runtime.grants ?? []).filter((g) => g.scope !== grant.scope);
   return { ...runtime, grants: [...grants, grant] };
 }
+
+/**
+ * The runtime a DIFFERENT session may inherit: the facts about the world,
+ * with every trace of the user's permission removed.
+ *
+ * A new session (a relay successor, or a takeover through
+ * `orchestrator_attach`) keeps the child REGISTRY — those panes are alive
+ * whatever any process believes — but never the approval: that was permission
+ * the user gave to a session that is gone, and re-obtaining it costs one
+ * dialog. The extension used to spell the stripping out inline, which is
+ * exactly the shape that goes stale: `approvedPlanHistory` would have ridden
+ * into the new session untouched and let it write the plan back to a content
+ * the PREVIOUS session was authorized for. One function, one place to add the
+ * next authorizing field, and a test that can drive it directly.
+ */
+export function withoutPlanApproval(runtime: OrchestratorRuntime): OrchestratorRuntime {
+  const {
+    approvedPlanHash: _hash,
+    approvedPlanAt: _at,
+    approvedPlan: _snapshot,
+    approvalAmendments: _amendments,
+    approvedPlanHistory: _lineage,
+    ...carried
+  } = runtime;
+  return carried;
+}
+
 
 export function emptyRuntime(orchestrationId: string): OrchestratorRuntime {
   return {
@@ -428,6 +471,13 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
   // fail-closed direction simply costs one dialog.
   const approvedPlan = approvalIntact ? normalizeApprovedPlan(obj.approvedPlan, hash) : undefined;
   const approvalAmendments = normalizeAmendments(obj.approvalAmendments);
+  // THE LINEAGE IS NOT GATED ON `approvalIntact`, and that is deliberate: its
+  // whole job is to restore an approval that was REVOKED, so requiring a live
+  // `approvedPlanHash` beside it would delete it exactly when it is needed.
+  // The `dropped` doubt still kills it — a blob we could not fully read is
+  // not the one the gate wrote, so nothing authorizing in it is trusted.
+  const approvedPlanHistory = dropped ? [] : normalizeApprovalLineage(obj.approvedPlanHistory);
+
   const successorPane = isPaneId(rawRelay?.successorPane) ? rawRelay.successorPane : undefined;
   return {
     orchestrationId,
@@ -438,6 +488,8 @@ export function normalizeRuntime(raw: unknown, orchestrationId: string): Orchest
     ...(approvedPlanAt ? { approvedPlanAt } : {}),
     ...(approvedPlan ? { approvedPlan } : {}),
     ...(approvalAmendments.length > 0 ? { approvalAmendments } : {}),
+    ...(approvedPlanHistory.length > 0 ? { approvedPlanHistory } : {}),
+
 
     ...(relayHandoff && relayAt
       ? {
@@ -528,6 +580,28 @@ function normalizeAmendments(raw: unknown): Array<{ at: string; changes: string[
   }
   return entries.slice(-MAX_APPROVAL_AMENDMENTS);
 }
+
+/**
+ * Validate the approval lineage read back from the sidecar.
+ *
+ * Authorizing input, so it is read the way the hash beside it is: ANY entry
+ * that is not a plan hash means this list is not the one the gate wrote, and
+ * the WHOLE list goes — a half-trusted permission record is worse than none.
+ * Losing it only ever costs a re-submit, which is the direction that asks the
+ * user. What this cannot do is recognize a well-formed forgery; the defence
+ * against that is the same one `approvedPlanHash` relies on — the sidecar is
+ * a file the gate refuses to let an agent edit, and that refusal is not
+ * grantable.
+ */
+function normalizeApprovalLineage(raw: unknown): string[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return [];
+  for (const entry of raw) {
+    if (typeof entry !== "string" || !/^[0-9a-f]{64}$/.test(entry)) return [];
+  }
+  return (raw as string[]).slice(-MAX_APPROVAL_LINEAGE);
+}
+
 
 
 /** One-screen rendering for `orchestrator_attach`'s takeover report. */

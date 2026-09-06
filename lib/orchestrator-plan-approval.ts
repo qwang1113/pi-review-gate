@@ -153,19 +153,59 @@ export function boundaryDirPrefix(boundary: NormalizedBoundary): NormalizedBound
   return cut > 0 ? boundary.slice(0, cut) : undefined;
 }
 
+/**
+ * The APPROVED DIRECTORY TREE of one task — every prefix its approved
+ * boundaries may absorb a new path into, which is also the list a refusal has
+ * to name to be actionable.
+ *
+ * `lib/a.ts` admits `lib/`; a declared directory (`test`) admits itself; a
+ * top-level FILE (`README.md`) admits only itself, because normalization
+ * cannot tell it from a top-level directory and guessing wrong would turn one
+ * approved file into the whole repository (hard stop 1).
+ */
+export function approvedTree(boundaries: readonly NormalizedBoundary[]): NormalizedBoundary[] {
+  const tree: NormalizedBoundary[] = [];
+  for (const boundary of boundaries) {
+    const prefix = boundaryDirPrefix(boundary) ?? boundary;
+    if (!tree.includes(prefix)) tree.push(prefix);
+  }
+  return tree;
+}
+
+/** A boundary another task holds — with WHO holds it, so a refusal can name them. */
+export interface ForeignBoundary {
+  /** The task that declared it. */
+  taskId: string;
+  boundary: NormalizedBoundary;
+  /**
+   * The plan records that task as `done` (2026-09-06, user decision).
+   *
+   * A finished task's declaration no longer keeps anyone out: it exists to
+   * stop two LIVE writers from sharing a file, and nothing is writing under
+   * it any more. Without this, a task's boundaries went on blocking every
+   * later task for the rest of the orchestration — measured in round 8, where
+   * moving two files from a DONE task to the one that needed them was judged
+   * a power grab and cost an approval dialog.
+   */
+  releasedByDone: boolean;
+}
+
 /** Boundaries belonging to every task EXCEPT `taskId`, from both plans. */
 function foreignBoundaries(
   approved: ApprovedPlanSnapshot,
   next: OrchestratorPlan,
   taskId: string,
-): NormalizedBoundary[] {
-  const all: NormalizedBoundary[] = [];
-  for (const task of approved.tasks) {
-    if (task.id !== taskId) all.push(...task.fileBoundaries);
-  }
-  for (const task of next.tasks) {
-    if (task.id !== taskId) all.push(...task.fileBoundaries);
-  }
+  doneTaskIds: ReadonlySet<string>,
+): ForeignBoundary[] {
+  const all: ForeignBoundary[] = [];
+  const collect = (id: string, boundaries: readonly NormalizedBoundary[]) => {
+    if (id === taskId) return;
+    for (const boundary of boundaries) {
+      all.push({ taskId: id, boundary, releasedByDone: doneTaskIds.has(id) });
+    }
+  };
+  for (const task of approved.tasks) collect(task.id, task.fileBoundaries);
+  for (const task of next.tasks) collect(task.id, task.fileBoundaries);
   return all;
 }
 
@@ -175,13 +215,19 @@ function foreignBoundaries(
  * Returns the widenings it produced (empty ⇒ the edit is amendable) plus the
  * amendments worth recording. Exported so the protocol test can drive exactly
  * this rule instead of a whole plan.
+ *
+ * Every line it produces NAMES ITS REASON, because the receipt is the only
+ * thing the orchestrator sees: a carry says which approved directory absorbed
+ * the path (and, if a finished task used to hold it, that this is why it no
+ * longer clashes), and a refusal says either which task stands in the way or
+ * which directories the task actually holds.
  */
 export function classifyBoundaryChange(opts: {
   taskId: string;
   approvedBoundaries: readonly NormalizedBoundary[];
   nextBoundaries: readonly NormalizedBoundary[];
   /** Boundaries owned by OTHER tasks (approved and proposed alike). */
-  foreign: readonly NormalizedBoundary[];
+  foreign: readonly ForeignBoundary[];
 }): { widenings: string[]; amendments: string[] } {
   const widenings: string[] = [];
   const amendments: string[] = [];
@@ -192,37 +238,42 @@ export function classifyBoundaryChange(opts: {
     }
   }
 
+  const tree = approvedTree(opts.approvedBoundaries);
   for (const added of opts.nextBoundaries) {
     // Already inside something the user approved (`lib/` ⇒ `lib/a.ts`, or an
     // unchanged entry): this is a refinement, not a grant.
     if (opts.approvedBoundaries.some((approved) => boundaryCovers(approved, added))) continue;
 
-    const host = opts.approvedBoundaries.find((approved) => {
-      const prefix = boundaryDirPrefix(approved);
-      return prefix !== undefined && boundaryCovers(prefix, added);
-    });
+    const host = tree.find((prefix) => boundaryCovers(prefix, added));
     if (!host) {
       widenings.push(
-        `任务 "${opts.taskId}" 新增边界 ${added} —— 不在任何已批准边界（${
-          opts.approvedBoundaries.join("、") || "无"
-        }）的目录内`,
+        `任务 "${opts.taskId}" 新增边界 ${added} —— 不在该任务已批准的目录树（${
+          tree.join("、") || "无"
+        }）内`,
       );
       continue;
     }
-    const clash = opts.foreign.find((other) => boundariesConflict(other, added));
+    // A LIVE task's claim blocks; a DONE task's claim does not (see
+    // ForeignBoundary.releasedByDone). Both are looked up, because the
+    // released one is what makes the carry explainable.
+    const clash = opts.foreign.find((other) => !other.releasedByDone && boundariesConflict(other.boundary, added));
     if (clash) {
       widenings.push(
-        `任务 "${opts.taskId}" 新增边界 ${added} 与其他任务已声明的 ${clash} 相交 —— 免批准不覆盖「把别人的地盘划过来」`,
+        `任务 "${opts.taskId}" 新增边界 ${added} 与任务 "${clash.taskId}" 已声明的 ${clash.boundary} 相交 —— 免批准不覆盖「把别人的地盘划过来」`,
       );
       continue;
     }
+    const released = opts.foreign.find((other) => other.releasedByDone && boundariesConflict(other.boundary, added));
     amendments.push(
-      `任务 "${opts.taskId}" 在已批准的 ${boundaryDirPrefix(host)}/ 内细化出 ${added}（未与其他任务相交）`,
+      released
+        ? `任务 "${opts.taskId}" 在已批准的 ${host}/ 内细化出 ${added}（原持有者 "${released.taskId}" 已 done，退出相交判定）`
+        : `任务 "${opts.taskId}" 在已批准的 ${host}/ 内细化出 ${added}（未与其他任务相交）`,
     );
   }
 
   return { widenings, amendments };
 }
+
 
 /**
  * Compare what was approved with what is being written.
@@ -237,6 +288,22 @@ export function decideApprovalCarry(
 ): ApprovalCarryDecision {
   const widenings: string[] = [];
   const amendments: string[] = [];
+
+  // TASKS THAT ARE FINISHED STOP HOLDING GROUND (2026-09-06, user decision).
+  //
+  // A `done` task's boundaries are excluded from the intersection check, so
+  // the files it needed can move to whoever needs them next without waking
+  // the user. Two conditions keep this from being a way to MINT the release:
+  // the status must come from the plan's execution record (`write` never sets
+  // one — mergeTaskProgress carries the previous status forward, and
+  // `set-status` is the only way one changes), and the task must exist in the
+  // APPROVED snapshot, so a brand-new task declaring itself `done` in the
+  // same edit releases nothing (adding it is a widening in its own right).
+  const approvedById = new Map(approved.tasks.map((task) => [task.id, task]));
+  const doneTaskIds = new Set(
+    next.tasks.filter((task) => task.status === "done" && approvedById.has(task.id)).map((task) => task.id),
+  );
+
 
   if (next.maxParallel > approved.maxParallel) {
     widenings.push(`并行上限从 ${approved.maxParallel} 提到 ${next.maxParallel}`);
@@ -257,8 +324,8 @@ export function decideApprovalCarry(
     amendments.push(`交付站点从 ${approvedStation} 收紧到 ${next.deliveryStation}`);
   }
 
-  const approvedById = new Map(approved.tasks.map((task) => [task.id, task]));
   const nextIds = new Set(next.tasks.map((task) => task.id));
+
   for (const gone of approved.tasks) {
     if (!nextIds.has(gone.id)) amendments.push(`任务 "${gone.id}" 已从 plan 中删除`);
   }
@@ -300,7 +367,7 @@ export function decideApprovalCarry(
       taskId: task.id,
       approvedBoundaries: before.fileBoundaries,
       nextBoundaries: task.fileBoundaries,
-      foreign: foreignBoundaries(approved, next, task.id),
+      foreign: foreignBoundaries(approved, next, task.id, doneTaskIds),
     });
     widenings.push(...boundaries.widenings);
     amendments.push(...boundaries.amendments);
@@ -308,6 +375,67 @@ export function decideApprovalCarry(
 
   return { carries: widenings.length === 0, widenings, amendments };
 }
+
+// ---------------------------------------------------------------------------
+// THE APPROVAL LINEAGE — undoing a widening must not cost a second approval
+// ---------------------------------------------------------------------------
+//
+// ── THE MEASURED FAILURE (round-8) ──
+//
+// An orchestrator added `README.md` to a task, the gate correctly called it a
+// widening and revoked the approval, and the orchestrator immediately wrote
+// the plan back the way it was. The bytes it wrote were IDENTICAL to the
+// content the user had signed — and the approval did not come back, because
+// the runtime remembered exactly one hash and that hash had just been
+// cleared. The price of one mistaken keystroke was a full re-submit: a
+// goal-auditor round plus another dialog for the human.
+//
+// The lineage fixes that by remembering the whole chain of contents this
+// approval has legitimately bound to. Two invariants keep it from becoming a
+// way to acquire authority rather than to recover it:
+//
+//  1. It starts EMPTY at every explicit user approval, which then becomes its
+//     only entry. The user's newest decision supersedes everything before it,
+//     so a plan they later NARROWED can never be widened back to an earlier
+//     carried version — the earlier hashes are gone the moment they sign.
+//  2. It only ever grows through a carry, i.e. through `decideApprovalCarry`
+//     saying the content granted nothing new. Every hash in it therefore
+//     describes content that WAS authorized, not content that might be.
+//
+// Its trust boundary is the one `approvedPlanHash` already has, and no
+// stronger: both live in the gate sidecar, which is a file no agent may edit
+// (the gate refuses it and the refusal is not grantable). Shape validation on
+// the way back in (lib/orchestrator-registry.ts) drops a malformed list
+// WHOLE — it cannot recognize a well-formed forgery, and this module does not
+// pretend otherwise.
+
+/** How many contents one approval remembers. Bounded: the sidecar is not a log. */
+export const MAX_APPROVAL_LINEAGE = 20;
+
+const PLAN_HASH_SHAPE = /^[0-9a-f]{64}$/;
+
+/** True when this exact content was already authorized under the live approval. */
+export function lineageAuthorizes(lineage: readonly string[] | undefined, hash: string): boolean {
+  if (!PLAN_HASH_SHAPE.test(hash)) return false;
+  return (lineage ?? []).includes(hash);
+}
+
+/** The user just approved `hash`: their decision replaces every earlier one. */
+export function beginApprovalLineage(hash: string): string[] {
+  return [hash];
+}
+
+/** Record one more content the approval legitimately moved to. Never mutates. */
+export function extendApprovalLineage(lineage: readonly string[] | undefined, hash: string): string[] {
+  return [...(lineage ?? []).filter((entry) => entry !== hash), hash].slice(-MAX_APPROVAL_LINEAGE);
+}
+
+/** The amendment line recorded when an approval returns to content it already had. */
+export function formatApprovalRestored(hash: string): string {
+  return `plan 写回了此前已获授权的内容（hash ${hash.slice(0, 12)}…），批准随之平移回来 —— 撤回一次扩权不必重走批准`;
+}
+
+
 
 /** One line per amendment, for the tool reply and the runtime audit trail. */
 export function formatApprovalAmendments(amendments: readonly string[]): string {

@@ -313,8 +313,9 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
 - **纯决策**：`orchestrator-gate.ts`（11 条硬约束；约束 7/10/14 已退役）、
   `orchestrator-boundaries.ts`（文件边界代数——同 repo 任务互斥、跨 repo 可并行的判据）、
   `orchestrator-plan.ts`（plan 是编排层的退出契约，批准绑定内容 hash）、
-  `orchestrator-plan-approval.ts`（**这次改动扩权了吗**——不扩权的边界细化不
-  重新惊动用户，扩权一律重批）、
+  `orchestrator-plan-approval.ts`（**这次改动扩权了吗**——已批准目录树内的边界
+  细化、已 done 任务让出的地盘、写回此前已获授权内容（批准世系）都不重新惊动
+  用户，扩权一律重批）、
   `orchestrator-plan-audit.ts`（plan 的前置审计：任务模板、裁决绑定 canonical
   文本、只 P0/P1 阻塞）、
   `orchestrator-pane-decor.ts`（子会话的颜色/标签/边框标题——纯展示层，只出不进）、
@@ -534,7 +535,7 @@ fail-closed）。`model-diagnose.ts`
 | `orchestrator-child-channel.ts` | 子会话侧：状态上报、「人与项目经理任意一方先答即生效」的竞态提问、读取与确认编排下发的指令 |
 | `orchestrator-child-state.ts` | 子会话状态（working / waiting-input / **waiting-judge** / idle / done / dead / stalled + mode-changed）与再唤醒退避；`waiting-judge` 是「在等门禁自己派出去的 reviewer/precommit」，不叫醒项目经理；`mode-changed` 是模式切换事件，叫醒项目经理。也让 `stalled` 回到只表示「扩展不在了」。判据全部是结构化真值，不看屏幕 |
 | `orchestrator-pane-decor.ts` | 可视化区分的**字符串**：按 id 派色（纯函数，同一会话永远同色）、`@task-slug · state 220s` 的边框标题模板、window 级选项的取值。**纯展示层**：只写不读，任何判定都不看它。何时收起 window 标签栏（`releasesWindowLabels` / `countDecoratedPanes`）与真正写标题（`refreshSessionPaneTitle`）都在 `session-factory.ts`，2026-09-05 起五条关闭路径共用同一判定 |
-| `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：目录前缀内的边界细化、收窄、加依赖、降并行度⇒批准迁移并记审计；新任务/新目录/删依赖/串行改并行/提并行度⇒重新批准 |
+| `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：已批准**目录树**内的边界细化、收窄、加依赖、降并行度⇒批准迁移并记审计；新任务/新目录/删依赖/串行改并行/提并行度/换 repo/提高交付站点⇒重新批准。两条 2026-09-06 的放宽：**已 `done` 的任务退出相交判定**（它不再有活着的写者，回执写明原持有者），以及**批准世系** `approvedPlanHistory`（用户批准起、每次平移追加的内容 hash 链）——写回其中任一内容即把批准平移回来，撤回一次误操作不必重走 submit；用户每次新的显式批准**重置**世系，因此被收窄掉的旧版本回不来 |
 | `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案。**「哪份 report 收本轮」已于 2026-09-05 搬去 `audit-round.ts`** —— 那是审计**回合**的问题，不是 plan 的，三种 kind 都要回答它 |
 | `orchestrator-handoff-advice.ts` | 上下文用量 + 待答请求数 ⇒ 接力时机（软/硬阈值，没读数就明说没读数） |
 | `orchestrator-answer-tools.ts` | 工具 `orchestrator_answer`：把答案写进通道（选项原文/序号/唯一子串，含糊即拒），代批 goal 时按约束 8 比对任务边界；代批 goal / 代确认反述还必须带 `crosscheck` 对照（任务 id + 文件边界/任务目标/交付站点三判断，词表 `PROXY_CROSSCHECK_TOKENS`，缺项退回并把 plan 任务与子会话正文并排贴回），且请求携带的站点不得宽于已批准 plan 的 `deliveryStation` |
@@ -547,7 +548,7 @@ fail-closed）。`model-diagnose.ts`
 | `orchestrator-notify.ts` | 桌面通知：唯一入口 + 节流，只有项目经理能发 |
 | `orchestrator-plan.ts` | plan：编排层的退出契约，批准绑定内容 hash |
 | `orchestrator-recovery-tools.ts` | 工具 `orchestrator_recover` / `orchestrator_attach`：同 session id 续开一个死掉的子会话、接管一整个编排，以及「plan 说 running 但没人在做」的孤儿检测 |
-| `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西 |
+| `orchestrator-registry.ts` | 子会话登记表：编排只能操作门禁替它创建的东西。也是 sidecar 里那份 runtime 的**唯一净化处**：批准相关字段（hash / 时间 / 快照 / 世系）按同一强度校验、任何疑点整份丢弃；`withoutPlanApproval` 是「换了个新会话能继承什么」的唯一出处（登记表与 grants 留下，许可全部剥离）——写在调用点上的字段清单迟早漏掉新字段 |
 | `orchestrator-relay.ts` | 自我接力：只有后继者能关掉前任 |
 | `orchestrator-session-tools.ts` | 会话生命周期决策（wait / close / handoff）并注册全部八个编排会话工具——spawn / instruct 的实现在 `orchestrator-dispatch.ts`，answer 与 recover/attach 在各自的 `*-tools.ts` |
 | `orchestrator-supervisor.ts` | 编排侧监督：读遍所有通道、逐个判定、决定什么算「有事发生」（含退避与完成上限）、渲染回执的前三块 |

@@ -3731,12 +3731,16 @@ test("a NEW session keeps the orchestration registry but never its approval (B1)
   const branch = SRC.slice(at, SRC.indexOf("} else if (sidecarCorrupt)", at));
   assert.ok(branch.length > 0 && branch.length < 4000, "the branch window must be the branch");
 
-  assert.match(branch, /state\.orchestrator = carried/,
-    "the orchestration runtime must be carried into the fresh state");
-  for (const granted of ["approvedPlanHash", "approvedPlanAt", "approvedPlan", "approvalAmendments"]) {
-    assert.match(branch, new RegExp(`${granted}:\\s*_`),
-      `${granted} must be stripped — an approval never travels to a session the user did not approve`);
-  }
+  assert.match(branch, /state\.orchestrator = withoutPlanApproval\(restored\.orchestrator\)/,
+    "the orchestration runtime must be carried into the fresh state, minus the permission");
+  // WHICH fields grant power is the registry module's to know. Spelled out
+  // here as a destructure, the list went stale the moment the approval grew a
+  // field: `approvedPlanHistory` (round 9) would have ridden into a session
+  // the user never approved and let it write the plan back to a content the
+  // PREVIOUS session was authorized for. The field-by-field contract lives in
+  // test/orchestrator-registry.test.ts, where it can be driven directly.
+  assert.doesNotMatch(branch, /approvedPlanHash:\s*_/,
+    "the strip list must not be re-inlined here — one place, or it goes stale again");
 });
 
 

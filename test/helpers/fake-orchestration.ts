@@ -37,7 +37,7 @@ import {
 } from "../../lib/orchestrator-session-tools.ts";
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
-import { snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
+import { beginApprovalLineage, snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
 import { restatementHash, type RestatementRecord } from "../../lib/restatement.ts";
 import type { DeliveryStation } from "../../lib/delivery-station.ts";
 
@@ -261,6 +261,9 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       approvedPlanHash: hash,
       approvedPlanAt: new Date(NOW).toISOString(),
       approvedPlan: snapshotApprovedPlan(plan, hash, new Date(NOW).toISOString()),
+      // …and the LINEAGE the real `submit` starts, so a world can model
+      // taking a widening back (an approval without it could not).
+      approvedPlanHistory: beginApprovalLineage(hash),
     };
   }
 

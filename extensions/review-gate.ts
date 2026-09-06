@@ -289,7 +289,7 @@ import {
 import { notifyUserInput } from "../lib/poll-wait.ts";
 
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
-import { addGrant, emptyRuntime, hasGrant, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
+import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
@@ -3115,16 +3115,13 @@ export default function reviewGate(pi: ExtensionAPI) {
       // registry is a fact about the world, while the approval is permission
       // the user gave to a session that is gone. Re-obtaining it costs one
       // dialog; inheriting it silently would let a session nobody approved
-      // spawn children.
+      // spawn children. WHICH fields carry that permission is
+      // lib/orchestrator-registry.ts's to know, not this call site's: spelled
+      // out here, the list silently went stale the moment the approval grew a
+      // field (`approvedPlanHistory` would have ridden into the new session
+      // and let it write the plan back to a content it was never granted).
       if (restored.orchestrator) {
-        const {
-          approvedPlanHash: _hash,
-          approvedPlanAt: _at,
-          approvedPlan: _snapshot,
-          approvalAmendments: _amendments,
-          ...carried
-        } = restored.orchestrator;
-        state.orchestrator = carried;
+        state.orchestrator = withoutPlanApproval(restored.orchestrator);
       }
     } else if (sidecarCorrupt) {
       state = emptyState(sessionId, DEFAULT_MAX_ROUNDS);
