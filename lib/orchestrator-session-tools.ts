@@ -262,17 +262,28 @@ async function doWait(
     // TWO interrupts, and the difference matters to whoever reads this. ESC is
     // the host cancelling the call. A user message is somebody TALKING TO YOU
     // — but WHEN it lands depends on how it was sent, and the receipt must not
-    // paper over that: `steer` cuts into this very turn, while `followUp` is
-    // only delivered once the turn ENDS. So a manager that goes straight back
-    // into a 900s wait shuts the same message out a second time, which is the
-    // original defect wearing a different hat (round-1 P2). Hence the receipt
-    // names the one action that always works: finish this turn.
+    // paper over that: a `steer` (plain Enter, the default) cuts into this very
+    // turn, so simply carrying on with the work reads it; a `followUp`
+    // (Alt+Enter) is delivered only once the turn ENDS, and a manager that
+    // dives straight back into a 900s wait shuts that one out a second time —
+    // the original defect wearing a different hat (round-2 P2).
+    //
+    // AND IT MUST NOT CONTRADICT THE STANDING DISCIPLINE (round-3 P2). The
+    // wait discipline forbids ENDING THE TURN AS A WAY OF WAITING — handing
+    // the watch back to the user and hoping to be woken. Letting a message
+    // that is ALREADY QUEUED through is the opposite of that: nobody is being
+    // asked to watch anything, the turn boundary is a doorway rather than a
+    // parking spot, and the manager resumes immediately. The receipt says so
+    // in as many words, because the two would otherwise read as opposites at
+    // the very same decision point.
     if (waited.abortReason === "user-input") {
       return reply(
         `review-gate: 等待被外部消息打断（已等 ${waitedSeconds}s）—— ` +
-        "有人正在跟本会话说话，消息已经在宿主队列里：steer 会切进你当前这一轮，" +
-        "followUp 要等你**结束这一轮 turn** 才送达。所以别立刻回到 wait 里去 —— " +
-        "那会把同一条消息再关在门外一次；先把手上这一轮收掉，让它进来。" +
+        "有人正在跟本会话说话，消息已经在宿主队列里。回车发的 steer 会切进你当前这一轮：" +
+        "照常继续干活就会读到它。Alt+Enter 发的 followUp 要等这一轮 turn 结束才送达 —— " +
+        "只有这一种情况别再一头扎回长阻塞，先把手上这一轮收掉让它进来。" +
+        "（这不违反等待纪律②：那条禁的是「用结束 turn 代替等待、把盯梢责任丢回用户」；" +
+        "这里消息已经在队列里，turn 边界只是它进来的门，你随即继续盯。）" +
         "子会话还在跑，没有任何东西被取消。\n\n" + receipt.text,
         { ...details, done: false, reason: "aborted", abortedBy: "user-input" },
       );
