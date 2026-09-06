@@ -301,6 +301,87 @@ test("review binding: an unreadable report stamp fails closed against a real che
   assert.equal(unparseable.ok === false && unparseable.reason, "content-unknown");
 });
 
+/*
+ * ── IS THE ROUND BINDING ENOUGH ON ITS OWN? MEASURED 2026-09-06: NO. ──
+ *
+ * The content half was added on 2026-09-05 when the round half did not yet
+ * cover reviews, and the standing question since then has been whether it is
+ * now redundant — two rules for one thing, which this project does not keep.
+ * It is NOT redundant, and the reason is a real ordering in `judge_submit`:
+ *
+ *   1. `review_checkpoint` COMMITS the round's content and stamps
+ *      `checkpoint.at` (extensions/review-gate.ts, step 2 of submitForReview);
+ *   2. `prepare_review` registers the range;
+ *   3. only then is the judge dispatched, and `roundSeq` is registered by that
+ *      dispatch — on the pane-reuse path after the channel write succeeds, on
+ *      the fresh-pane path inside `openSessionPane`'s `register` callback.
+ *
+ * So a dispatch that FAILS at step 3 (channel write throws, pane cannot be
+ * opened) leaves the registry holding the PREVIOUS round's `roundSeq` while
+ * the checkpoint has already moved on. The previous round's unconsumed report
+ * then matches the round check exactly, and the round check alone would record
+ * it — a READY bound to a tree the reviewer never saw, which is the P0 of
+ * 2026-09-05 all over again.
+ *
+ * The test below is that state, asserted BOTH ways: refused under the review's
+ * real binding, accepted under a round-only binding. The second assertion is
+ * the point — it is what makes "delete the content half" fail here.
+ */
+test("round binding alone does NOT cover reviews: same round, newer content, only the content half refuses", () => {
+  // The registry still holds round 4 (this round's dispatch never got to
+  // register round 5); the channel still holds round 4's own report; the
+  // checkpoint is this round's, minted after that report was written.
+  const leftover = childReport("rep-round4", {
+    round: 4,
+    verdict: "READY",
+    at: "2026-09-06T10:00:00.000Z",
+  });
+  const thisRoundsCheckpoint = "2026-09-06T10:05:00.000Z";
+
+  const asReview = selectRoundReport([leftover], {
+    binding: "round-and-content",
+    expectedRound: 4,
+    consumedReportId: undefined,
+    contentAt: thisRoundsCheckpoint,
+  });
+  assert.equal(asReview.ok, false, "the review binding refuses a verdict older than its content");
+  assert.equal(asReview.ok === false && asReview.reason, "stale-content");
+
+  // Identical inputs, round binding only: ACCEPTED. This is the gap, and it is
+  // why the content half stays.
+  const asRoundOnly = selectRoundReport([leftover], {
+    binding: "round-bound",
+    expectedRound: 4,
+    consumedReportId: undefined,
+    contentAt: thisRoundsCheckpoint,
+  });
+  assert.equal(asRoundOnly.ok, true, "round + cursor alone would record the stale verdict");
+});
+
+test("round binding alone does NOT cover reviews: an unregistered round fails closed only for the review", () => {
+  // The other half of the same question. A registry entry with no `roundSeq`
+  // (written before round numbering) falls back to the cursor for a round-bound
+  // kind — deliberately, so a legacy goal audit still closes. The review must
+  // NOT inherit that fallback, and today it does not, because `round-unknown`
+  // is raised for `round-and-content` only. Retiring the review's binding to
+  // `round-bound` would silently hand it this fallback too.
+  const report = childReport("rep-legacy-round", { round: 9, verdict: "READY", at: NOW });
+  const asReview = selectRoundReport([report], {
+    binding: "round-and-content",
+    expectedRound: undefined,
+    consumedReportId: undefined,
+    contentAt: CHECKPOINT_AT,
+  });
+  assert.equal(asReview.ok === false && asReview.reason, "round-unknown");
+
+  const asRoundOnly = selectRoundReport([report], {
+    binding: "round-bound",
+    expectedRound: undefined,
+    consumedReportId: undefined,
+  });
+  assert.equal(asRoundOnly.ok, true, "the legacy fallback the review must never inherit");
+});
+
 // THE ONE CASE THAT IS NOT REFUSED, and why (reviewer P1 + user decision,
 // 2026-09-05). `prepare_review` supports a round with NO checkpoint at all —
 // the "audit the exit goal" round: empty range, clean worktree, the reviewer

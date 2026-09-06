@@ -75,6 +75,20 @@ export type PendingAudit =
  *   round, an unreadable report stamp against a checkpoint that DOES exist)
  *   fails CLOSED — it is never recorded on the strength of the other half.
  *
+ *   RE-EXAMINED 2026-09-06, with permission to retire the content half if the
+ *   round half had come to cover reviews on its own. It has NOT, and the
+ *   reason is an ordering that still holds: `judge_submit` COMMITS the
+ *   checkpoint (and stamps `checkpoint.at`) at step 2, and only registers this
+ *   round's `roundSeq` when the dispatch at step 3 succeeds. A dispatch that
+ *   fails there leaves the registry on the PREVIOUS round's number while the
+ *   content has already moved — so the previous round's leftover report passes
+ *   the round check exactly, and round + cursor alone would record it. The
+ *   second half of the same finding: `round-unknown` fails closed for THIS
+ *   binding only, so retiring the review to `round-bound` would also hand it
+ *   the legacy cursor fallback it must never have. Both are pinned in
+ *   test/audit-round.test.ts ("round binding alone does NOT cover reviews"),
+ *   asserted in both directions so that deleting either half fails there.
+ *
  *   The ONE exception, and it is not a weakening: NO checkpoint record in the
  *   gate's own state (not "no checkpoint commit in git" — the record lives in
  *   the session's sidecar and starts empty every session) is the "audit the

@@ -39,6 +39,63 @@
  * mistake the 2026-08-30 rewrite removed. If the title is stale or missing,
  * every judgement is unchanged.
  *
+ * ── THE LABEL BAR IS A WINDOW-LEVEL SHARED RESOURCE (2026-09-06) ──
+ *
+ * `PANE_BORDER_STATUS` / `PANE_BORDER_FORMAT` below are not pane options.
+ * tmux applies them per WINDOW, and one window routinely holds a project
+ * manager, several child sessions, several judge panes, and the user's own
+ * shell — belonging to DIFFERENT sessions, none of which can see the others'
+ * registries. Everything else in this file is per-pane and private; these two
+ * are the shared surface, so their ownership is stated here rather than left
+ * to be reconstructed from the code that writes them.
+ *
+ * WHO TURNS IT ON: every pane open, unconditionally. `decorateSessionPane`
+ * (lib/session-factory.ts, called only from `openSessionPane`) sets the two
+ * window options again on each spawn. Re-opening an already-open bar is a
+ * no-op, and paying for it every time is what makes the ON state independent
+ * of who arrived first.
+ *
+ * WHO TURNS IT OFF: the LAST decorated pane a session can see, and never a
+ * guest. `releasesWindowLabels` + `countDecoratedPanes` (both in
+ * lib/session-factory.ts) answer that one question for all five close paths
+ * (judge_close, judge_spawn's rollback, a `fresh` round's pre-kill,
+ * declare_done's cascade, orchestrator_close). Three properties of that answer
+ * are load-bearing:
+ *
+ *   1. It is turned off with `setw -u`, which RESTORES the user's own
+ *      configuration rather than imposing a default we invented.
+ *   2. Missing information keeps the bar UP: an unreadable pane list counts
+ *      every candidate as still present. A stale bar costs one line that the
+ *      next spawn re-establishes; a wrongly removed one blanks a border
+ *      somebody is reading.
+ *   3. The window is addressed through the CALLER'S OWN live pane, never the
+ *      pane being killed — `setw -t <pane>` only names a window, and the id
+ *      being closed may already be gone.
+ *
+ * WHAT THIS COSTS THE BYSTANDERS, and it is accepted: a window option applies
+ * to panes the gate never opened, so the user's own shell pane in that window
+ * grows a border showing its own `#{pane_title}` for as long as any gate pane
+ * lives. It is restored by whoever releases the bar. If the user closes every
+ * gate pane BY HAND, no close path runs and the bar survives until the window
+ * does.
+ *
+ * TWO KNOWN CROSS-SESSION MISFIRES, measured 2026-09-06 and deliberately NOT
+ * fixed in that round (user decision): both are display-only, and the next
+ * spawn re-establishes the bar.
+ *
+ *   (a) A manager running `orchestrator_close` counts its own children and its
+ *       own judges — it cannot see a reviewer pane the CHILD opened, because
+ *       that pane lives in the child's registry. Closing the last child while
+ *       that review is still running takes the bar down under it.
+ *   (b) An ordinary loop session opened by hand in a manager's window carries
+ *       no `RG_ORCHESTRATION_ID`, so it is not a "guest" by the test above.
+ *       Closing its own last judge pane releases the bar under the manager's
+ *       children.
+ *
+ * Both have ONE root cause — a session can only see panes in its own registry
+ * — so the honest fix is a cross-session pane registry, not a special case in
+ * the counter. Anyone reaching for that fix should start there.
+ *
  * Pure module: strings in, strings out. The argv lives in
  * lib/orchestrator-tmux.ts and the execution in the dispatch/lifecycle tools.
  */

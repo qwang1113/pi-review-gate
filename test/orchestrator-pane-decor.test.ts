@@ -34,6 +34,7 @@ import {
   PANE_BORDER_STATUS,
   PANE_PALETTE,
 } from "../lib/orchestrator-pane-decor.ts";
+import { countDecoratedPanes, releasesWindowLabels } from "../lib/session-factory.ts";
 import { assertSafeTmuxArgv, buildHidePaneLabelsArgv, buildShowPaneLabelsArgv } from "../lib/orchestrator-tmux.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
 
@@ -336,3 +337,75 @@ test("the throttle memory belongs to the orchestration, not to the module", asyn
   );
 });
 
+
+/*
+ * ── THE WINDOW LABEL BAR IS SHARED, AND TWO CROSS-SESSION CLOSES MISFIRE ──
+ *
+ * The rule itself (who opens the bar, who may take it down, what an unreadable
+ * pane list means) is argued in lib/orchestrator-pane-decor.ts's header and
+ * implemented by `releasesWindowLabels` + `countDecoratedPanes` in
+ * lib/session-factory.ts. The tests above cover it for panes a session CAN
+ * see.
+ *
+ * The two below are CHARACTERIZATION tests: they record what happens across
+ * session boundaries, which is wrong and known to be wrong (2026-09-06, left
+ * unfixed by user decision — both are display-only and the next spawn
+ * re-establishes the bar). They exist so the defect is a fact in the suite
+ * rather than a paragraph nobody re-reads, and so the round that fixes it is
+ * told exactly where to come: FLIP these two assertions and delete this block.
+ */
+
+test("KNOWN GAP (a): a manager cannot see its CHILD's judge pane, and releases the bar under it", () => {
+  // The window: manager %0, child t1 at %1 (being closed), and %9 — a reviewer
+  // pane the CHILD opened, which lives in the CHILD's registry.
+  const livePanes = ["%0", "%1", "%9"];
+  // What `orchestrator_close` counts: other children (none left) plus the
+  // MANAGER'S own judges (none). %9 is invisible to it.
+  const remaining =
+    countDecoratedPanes([], livePanes)   // no sibling children
+    + 0;                                 // manager's own decorated judges
+  assert.equal(
+    releasesWindowLabels({ remainingDecoratedPanes: remaining, insideOrchestration: false }),
+    true,
+    "TODAY the bar comes down while the child's review is still running — the gap",
+  );
+  // The same close, if the counter could see %9, is the behaviour the fix must
+  // produce. (`countDecoratedPanes` itself is correct — it is the input that
+  // is short.)
+  assert.equal(
+    releasesWindowLabels({
+      remainingDecoratedPanes: countDecoratedPanes(["%9"], livePanes),
+      insideOrchestration: false,
+    }),
+    false,
+    "with cross-session visibility the same close would keep the bar up",
+  );
+});
+
+test("KNOWN GAP (b): a hand-opened loop session is not a 'guest', so it releases a manager's bar", () => {
+  // `insideOrchestration` is `labelBarOwnedByOthers()`: RG_ORCHESTRATION_ID is
+  // set AND this session is not the orchestrator. A loop session the user
+  // started by hand in the manager's window has no such variable, so it reads
+  // as an owner rather than a guest…
+  const guestByEnv = (orchestrationId: string | undefined, isOrchestrator: boolean) =>
+    Boolean(orchestrationId?.trim()) && !isOrchestrator;
+
+  assert.equal(guestByEnv(undefined, false), false, "no orchestration id ⇒ not a guest");
+  assert.equal(
+    releasesWindowLabels({
+      remainingDecoratedPanes: 0,   // its own last judge pane just closed
+      insideOrchestration: guestByEnv(undefined, false),
+    }),
+    true,
+    "TODAY it takes the bar down under the manager's children — the gap",
+  );
+
+  // A spawned child of the orchestration, by contrast, IS a guest and never
+  // releases — that half already works.
+  assert.equal(guestByEnv("orch-123", false), true);
+  assert.equal(
+    releasesWindowLabels({ remainingDecoratedPanes: 0, insideOrchestration: true }),
+    false,
+    "a guest never releases, however few panes it can see",
+  );
+});

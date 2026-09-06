@@ -26,6 +26,40 @@
  * hook that "parsed and failed open" on it would ship unreviewed code. Parsing
  * lives here, in the extension, where a parse failure can be resolved
  * conservatively (keep the file).
+ *
+ * WHY THIS IS NOT THE SAME QUESTION THE OTHER LIVENESS CHECKS ASK
+ * (2026-09-06, the "three liveness criteria" convergence review).
+ *
+ * This repository holds several checks that all read like "is that thing still
+ * alive", and they were suspected of being one rule written several ways — a
+ * philosophy-three violation. They are not the same question, and none of them
+ * may be rewritten in terms of another:
+ *
+ *   - HERE: is a RECORD ON DISK still somebody's? The subject is an owner
+ *     entry in a file, never a process. Its only aging signal is `at`, and pid
+ *     probing is not merely unused but actively harmful (see `BlockedOwner`).
+ *   - lib/session-exclusivity.ts: is a HEARTBEAT still fresh? One positive
+ *     fact, a 60s window, and the OPPOSITE failure direction on purpose.
+ *   - lib/judge-pane.ts (`judgePaneAlive`): is a tmux PANE still listed? A
+ *     pane list that cannot be read counts as missing information and never
+ *     as a dead judge.
+ *
+ * THE FAILURE DIRECTIONS ARE WHAT MAKE THEM IRRECONCILABLE. This module fails
+ * CLOSED: an unparseable timestamp keeps the owner, a future stamp keeps it, a
+ * failed write or unlink leaves the marker standing. Deleting a live session's
+ * marker lets unreviewed code ship; keeping a dead one's costs a `/gate-reset`.
+ * Exclusivity fails OPEN for the mirror-image reason — its cost of being wrong
+ * is a human locked out of their own checkout. One shared rule would have to
+ * pick a direction, and would be wrong in the other place by construction.
+ *
+ * THE WINDOWS DIFFER FOR THE SAME REASON: four hours here (a session-scale
+ * lifetime) against 60 seconds there (one 10s heartbeat's tolerance), a factor
+ * of 240, each argued from its own cost rather than from a shared default.
+ *
+ * A FOURTH criterion used to exist — pid + process start time, answering "is
+ * that pid still OUR judge". It was deleted on 2026-09-06: it had no
+ * production caller left, which is the one thing that makes a duplicate
+ * implementation dangerous rather than merely redundant.
  */
 
 import { hostname } from "node:os";

@@ -29,6 +29,36 @@
  * question is never "which roles do we let through" but "does this session
  * claim the shared file".
  *
+ * WHY THIS IS NOT THE SAME QUESTION THE OTHER LIVENESS CHECKS ASK
+ * (2026-09-06, the "three liveness criteria" convergence review).
+ *
+ * Several checks in this repository read like "is that thing still alive", and
+ * they were suspected of being one rule written several ways. They are not, and
+ * this one is the odd one out in the direction that matters most:
+ *
+ *   - HERE: is a HEARTBEAT still fresh? A single POSITIVE fact decides, and
+ *     everything else — a missing file, a corrupt record, a clock that went
+ *     backwards, a stamp from the future — is fail-OPEN (`isFresh` and the
+ *     block above it). That is the reverse of this project's usual direction
+ *     and it is deliberate: being wrong here locks a human out of their own
+ *     checkout, so only a heartbeat somebody just wrote may refuse them.
+ *   - lib/blocked-marker.ts: is a RECORD ON DISK still somebody's? Fail-CLOSED
+ *     in every unknown, because being wrong THERE ships unreviewed code. Its
+ *     window is four hours to this module's sixty seconds — a factor of 240,
+ *     because a session's lifetime and a 10s heartbeat's tolerance are not the
+ *     same quantity.
+ *   - lib/judge-pane.ts (`judgePaneAlive`): is a tmux PANE still listed? An
+ *     unreadable pane list is missing information, never a dead judge.
+ *
+ * So the three differ in SUBJECT (a heartbeat, a disk record, a pane), in
+ * FAILURE DIRECTION (open, closed, conservative) and in TIME SCALE, and each of
+ * those three axes was argued from its own cost. Collapsing them into one rule
+ * would have to sacrifice at least two of those arguments — which is why the
+ * duplication here is not the kind philosophy three forbids. What philosophy
+ * three DID catch was a fourth criterion (pid + process start time, "is that
+ * pid still OUR judge"): it had lost its last production caller, and was
+ * deleted on 2026-09-06.
+ *
  * Pure module: no clock, no filesystem. The caller reads the file, supplies
  * `now`, and writes what `presenceFor` builds.
  */

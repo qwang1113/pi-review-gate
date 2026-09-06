@@ -14,11 +14,13 @@
  * all three:
  *
  *   (a) the done channel fired (the fast path);
- *   (b) the child's SESSION ended — its own `exit-code` file exists, or the
- *       process it recorded is no longer there (died, or its pid was recycled
- *       and now belongs to somebody else — lib/judge-session.ts). This is
- *       deliberately
- *       NOT a pane probe: the pane is a display shell that disappears with
+ *   (b) the child's SESSION ended — the caller supplies that as `alive`: in
+ *       production the live child process's `exitCode`, plus the `exit-code`
+ *       file the child writes for itself. There is no pid-identity probe
+ *       behind it: the module that once answered "is that pid still OUR judge"
+ *       was deleted (2026-09-06) as a second implementation with no production
+ *       caller. This criterion is deliberately
+ *       NOT a pane probe either: the pane is a display shell that disappears with
  *       its child, and a judge that never got to write anything is exactly
  *       the case a pane could not report either;
  *   (c) the child has been silent past `STALL_MOTION_MAX_AGE_SEC` (a running
@@ -46,11 +48,14 @@ export interface ChildSnapshot {
   alive: boolean;
   /**
    * ISO timestamp of the child's last OBSERVED activity — in production the
-   * newest write among its transcript, `stderr.log` and stdout log
-   * (`lastActivityAt()` in lib/judge-session.ts).
+   * newest line in the child's own CHANNEL (`channelLastActivity`, the
+   * projection in extensions/review-gate.ts). It used to be the newest mtime
+   * among the child's transcript and log files; that reader was deleted with
+   * lib/judge-session.ts (2026-09-06), and the channel is the better source
+   * anyway — it is a record the child WROTE, not a file somebody touched.
    *
    * Absent ⇒ fall back to `spawnedAt`. Anything OLDER than `spawnedAt` is
-   * ignored as well: not every watched file is per-run, so a stale mtime must
+   * ignored as well: not every watched source is per-run, so a stale stamp must
    * not be mistaken for this run's activity.
    */
   lastActivityAt?: string;

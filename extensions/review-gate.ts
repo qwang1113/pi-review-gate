@@ -294,8 +294,8 @@ import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type Orchestrato
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
-// (Nothing is imported from lib/judge-session.ts here anymore: the transcript
-// READ died with judge_read — a round's conclusion is the channel report.)
+// (A round's conclusion is the channel report. The transcript READ died with
+// judge_read, and the module behind it was deleted 2026-09-06.)
 
 // The judge tools that observe/end a session (judge_close / judge_wait) are
 // registered from lib/, like the orchestration tools: this file keeps only

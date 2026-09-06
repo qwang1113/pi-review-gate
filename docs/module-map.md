@@ -266,8 +266,9 @@ shell（heartbeat、对话框竞态，复用子会话通道原语，不另起通
 （reviewer / goal-auditor 没有 notes 参数），一轮只交一次，transcript 扒取路径已删；
 `judge-process.ts` 只剩身份（opener + **lane** 限定的确定性会话 id：同 opener 同 lane 复用、
 换 opener 或换 lane 全新；lane 后缀 `laneSuffix` 在这里渲染，会话 id 与工作目录共用它）与 scratch
-目录 helper（进程派生已删），`judge-session.ts` 把 transcript 当作长记忆（结论走交卷工具，
-不再从它解析），`judge-rotation.ts` 定复用的单元/释放点/上限并给出 lane（也答「本轮
+目录 helper（进程派生已删；`judge-session.ts` 那套 pid + 进程启动时刻的判活已于 2026-09-06
+按哲学三删除——它没有生产调用者，生产里 judge 判活只有 `judge-pane.ts` 的 pane 探活与
+`exit-code` 文件两条），`judge-rotation.ts` 定复用的单元/释放点/上限并给出 lane（也答「本轮
 judge 还记不记得上一轮」），`judge-pane-policy.ts` 定 pane 何时回收的两套政策，
 `judge-lifecycle.ts` 剩下 opener + lane 限定的工作目录（含无人认领目录的 TTL/旧格式回收选择器，
 新旧两种目录形状都认，所以轮转出的旧目录照旧被回收而不是永久堆积）、
@@ -461,7 +462,7 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（118 个模块）
+## 五、`lib/` 全量速查表（117 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -517,7 +518,6 @@ fail-closed）。`model-diagnose.ts`
 | `judge-prompt.ts` | judge 会话的系统提示装配：角色定义 + 共同协议 |
 | `judge-pane-policy.ts` | **judge pane 何时回收的两套政策**（纯查表，2026-09-06 用户口径「保持两套、不统一」）：门禁自派的审计员寿命 = 开它的那一次调用（`runAuditRound` 的 `finally` 是它**唯一**的执行点）；agent 自派的 review pane 留到 `declare_done`。第二套**没有分支可执行** —— 它由工具拓扑保证（`judge_close` 只在 internalHost，agent 调不到；`declare_done` 的级联关按 opener 无条件扫），所以 declare_done 侧只用测试固定「对来源盲」，绝不加一个只是「问一下再照做」的装饰性调用点。`reclaimAuditLine` 决定一次回收该不该留下日志：做到了政策承诺的就沉默，**失败或没能确认 pane 已关**才出一行（`judge_close` 连 kill 失败也会清掉登记行，回执一丢那个 pane 就再也找不到了）。给 `JudgeEntry` 加 `dispatchedBy` 的方案已在模块头写明为何被否 |
 | `judge-rotation.ts` | judge transcript 复用的**单元 / 释放点 / 上限**（纯函数，2026-09-05 用户口径）：复用单元 = 一个**已批准**的 review 对象（编排会话取 plan hash、其余取 goal hash，都没有则稳定占位 `none`——`none` 同样受两条闸约束，不是无界桶）；释放点 = 对象 id 变了（惰性判定，下次派发时比对，不改 goal/plan 的写入路径）；上限 = judge 自报上下文 ≥ `JUDGE_ROTATION_CONTEXT_PERCENT`（60）或同对象派发满 `JUDGE_ROTATION_MAX_ROUNDS`（8）轮——**轮次在派发时计数**，所以放弃/重开的轮也算，读数缺失则 fail-open（只靠轮次兜底）。`decideJudgeRotation` 给出 lane（`{objectId, generation}`，由 `judge-process.ts` 的 `laneSuffix` 渲染进 session id 与工作目录）与写回注册表的簿记；`rotationHandoffTask` 组装轮转后首轮的压缩交接——交接正文一律由 `review-carryover.ts` 的 `buildReviewCarryover` 渲染，本模块不写第二份。`judgeRemembersPreviousRound`（2026-09-06）把「本轮 judge 还记不记得上一轮」这件**只有这里知道**的事导出给 `review-scope.ts`：`reuse` **且** 该 lane 的 transcript 确实存在才算记得；`first` 也算不记得（登记表没有的 lane，它的历史门禁担保不了），任何未知一律 `false` |
-| `judge-session.ts` | 把 judge transcript 当作长记忆（结论走交卷工具，不再从它解析） |
 | `judge-session-tools.ts` | 作用在既有 pane judge 上的两个入口：`judge_close`（只在 internalHost，门禁审计链自收）与 `judge_wait`（`registerJudgeWaitTool` 把**同一实现**注册到 internalHost 与 agent 面）；等待是**消息驱动**的 —— 新 channel report / pane 死亡 / judge 提问 / 新 finding 任一命中即返回，去重游标是 entry 上的 `lastReportId` + `lastFindingCount` 与会话侧已宣告问题集；opener 校验也在内。**report 落地后它不自己记录**（2026-09-05）：一律交给 `audit-round.ts` 的 `settleAuditRound`，report 游标也由引擎推——它只保留 finding 游标。**「本轮是否结束」也不自己判**（2026-09-05 第二次）：`probeJudgeRound` 调 `selectRoundReport` 用同一份 binding（deps 的 `roundBinding`），不属于本轮的 report 不算结束、原样报成 `notThisRound`——两侧判据不一致时，wait 会宣布一个记录侧随后拒绝的 READY。`judge_read` 已删（2026-09-05） |
 
 | `judge-side.ts` | pane 内门禁的 reporting shell：heartbeat、对话框竞态（复用子会话通道原语）；结论合成与扒取已搬入 `judge-conclude.ts`；禁跑工具表已搬入 `gate-modes.ts`，此处只 re-export |
