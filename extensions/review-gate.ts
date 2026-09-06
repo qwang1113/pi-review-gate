@@ -4224,7 +4224,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       // active repo or grow the set (round-3 Nit — it would only waste a
       // round on a change-less repo).
       const absEditPath = path.startsWith("/") ? path : pathJoin(cwd, path);
-      const editRepo = gitRootOfDir(pathDirname(absEditPath));
+      // Attribution climbs to the nearest EXISTING ancestor first: `git
+      // rev-parse` fails on a directory that does not exist, and a `write`
+      // creating a new nested file targets exactly such a path — asking about
+      // the raw directory left a new file in ANOTHER repo unattributed, and
+      // therefore unarmed once unattributed stopped meaning "the primary"
+      // (round-2 reviewer P1). It is also the resolution the L8 goal gate
+      // already uses for the same question, so the two now agree.
+      const editRepoDir = nearestExistingDir(pathDirname(absEditPath));
+      const editRepo = gitRootOfDir(editRepoDir);
 
       // Gate-owned paths (.pi/, .pi-subagents/) are excluded from the
       // fingerprint AND from changedFiles(), so a reviewer can never see them.
@@ -4243,7 +4251,15 @@ export default function reviewGate(pi: ExtensionAPI) {
       // lib/edit-repo-scope.ts owns the judgement, including its fail-closed
       // side: only a path resolved CONFIDENTLY outside the root skips
       // tracking.
-      const editScope = classifyEditRepoScope({ absPath: absEditPath, primaryRepoRoot, editRepo });
+      const editScope = classifyEditRepoScope({
+        absPath: absEditPath,
+        primaryRepoRoot,
+        editRepo,
+        // Where a RESOLVED path really lives, for the one case git could not
+        // attribute: a symlink whose own directory is in no repository but
+        // whose target is inside one.
+        resolveRepoRoot: (file) => gitRootOfDir(nearestExistingDir(pathDirname(file))),
+      });
       if (editScope.scope === "outside") {
         // ONE exception, and it is not about the gate: a SENSITIVE path
         // outside the repo stays VISIBLE. `sessionEditedFiles` is the only

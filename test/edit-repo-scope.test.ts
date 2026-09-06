@@ -71,6 +71,54 @@ test("a file in the repo git could not attribute is primary (new nested dir)", (
   assert.deepEqual(classify(`${ROOT}/brand/new/deep/y.ts`, null), { scope: "primary" });
 });
 
+test("an unattributed path that resolves into ANOTHER repo arms that repo, not nothing", () => {
+  // Round-2 reviewer P1: "no repository" and "another repository" are
+  // different answers, and only the first may be skipped. A path git could
+  // not attribute (a symlink out of /tmp, a new file in a directory that does
+  // not exist) still belongs to whichever checkout it resolves into.
+  assert.deepEqual(
+    classifyEditRepoScope({
+      absPath: "/tmp/into-b.ts",
+      primaryRepoRoot: ROOT,
+      editRepo: null,
+      resolveFile: () => "/work/other/lib/x.ts",
+      resolveDir: (p) => p,
+      resolveRepoRoot: () => "/work/other",
+    }),
+    { scope: "other-repo", root: "/work/other" },
+  );
+});
+
+test("a second opinion naming the SESSION repo is primary, not a second repo", () => {
+  assert.deepEqual(
+    classifyEditRepoScope({
+      absPath: "/tmp/into-a.ts",
+      primaryRepoRoot: ROOT,
+      editRepo: null,
+      // Resolves outside the root STRING but git says it is the session repo
+      // (a symlinked worktree the resolvers could not normalize).
+      resolveFile: () => "/elsewhere/lib/x.ts",
+      resolveDir: (p) => p,
+      resolveRepoRoot: () => ROOT,
+    }),
+    { scope: "primary" },
+  );
+});
+
+test("a second opinion that throws falls back to primary, never outside", () => {
+  assert.deepEqual(
+    classifyEditRepoScope({
+      absPath: "/tmp/x.ts",
+      primaryRepoRoot: ROOT,
+      editRepo: null,
+      resolveFile: (p) => p,
+      resolveDir: (p) => p,
+      resolveRepoRoot: () => { throw new Error("git exploded"); },
+    }),
+    { scope: "primary" },
+  );
+});
+
 test("a path that RESOLVES into the repo is primary however it was spelled", () => {
   // The resolver is what decides: a symlink from outside, or a `..` climb.
   assert.deepEqual(

@@ -324,6 +324,42 @@ test("SENTINEL: an edit in ANOTHER git repo still arms that repo, not the primar
   assert.equal(sidecarB.review.verdict, "PENDING");
 });
 
+test("SENTINEL: a NEW file in a not-yet-existing directory of another repo arms THAT repo", async () => {
+  // Round-2 reviewer P1 — the hole this change could have opened. `git
+  // rev-parse` fails on the directory (it does not exist), so the edit was
+  // unattributed; once "unattributed" stopped meaning "the primary repo", the
+  // file was skipped entirely and a real source file in repoB could ship
+  // unreviewed. Attribution climbs to the nearest existing ancestor now.
+  const parent = newParent("othernew");
+  const repoA = makeRepo(parent, "repoA");
+  const repoB = makeRepo(parent, "repoB");
+
+  const after = await editThen(repoA, join(repoB, "brand", "new", "deep", "y.ts"));
+  assert.equal(after.review, "READY", "the primary repo's verdict is not the one at stake");
+  const sidecarB = JSON.parse(
+    readFileSync(join(repoB, ".pi", "review-gate-state.json"), "utf8"),
+  ) as { hasCodeChange: boolean; review: { verdict: string } };
+  assert.equal(sidecarB.hasCodeChange, true, "the OTHER repo's gate must arm");
+  assert.equal(sidecarB.review.verdict, "PENDING");
+});
+
+test("SENTINEL: a symlink pointing into ANOTHER repo arms that repo, not nothing", async () => {
+  // The same hole in its rarer shape: /tmp is in no repository, so only the
+  // RESOLVED path can say where the write lands.
+  const parent = newParent("otherlink");
+  const repoA = makeRepo(parent, "repoA");
+  const repoB = makeRepo(parent, "repoB");
+  const link = join(parent, "into-b.ts");
+  symlinkSync(join(repoB, "lib", "x.ts"), link);
+
+  const after = await editThen(repoA, link);
+  assert.equal(after.review, "READY", "the primary repo saw no edit");
+  const sidecarB = JSON.parse(
+    readFileSync(join(repoB, ".pi", "review-gate-state.json"), "utf8"),
+  ) as { hasCodeChange: boolean };
+  assert.equal(sidecarB.hasCodeChange, true, "the repo the symlink writes into must arm");
+});
+
 test("a new file in an unresolvable in-repo directory points the active repo back home", async () => {
   // Round-1 reviewer P2. The retarget used to ask `editRepo === primaryRepoRoot`,
   // and git cannot attribute a file whose directory does not exist yet — so

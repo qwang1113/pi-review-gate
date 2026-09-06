@@ -24,6 +24,10 @@
  *    worktree all land inside;
  *  - containment is tested on a `root + "/"` boundary, so `<repo>-backup/x.ts`
  *    and `<repo>2/y.ts` are outside rather than accidental prefix matches;
+ *  - and a path that resolves outside the session repo is asked about ONE more
+ *    time, because "no repository" and "another repository" are different
+ *    answers and only the first may be skipped: a write into a sibling
+ *    checkout arms THAT checkout's gate, exactly as it did before;
  *  - anything unresolvable falls back to `primary`, i.e. to the pre-existing
  *    invalidating behaviour. Being wrong there costs a review round; being
  *    wrong the other way costs the gate.
@@ -45,12 +49,23 @@ export interface EditRepoScopeInput {
   /** The session repo root, as git reports it. */
   primaryRepoRoot: string;
   /**
-   * Repo root containing the edit's DIRECTORY (`gitRootOfDir`), or null when
-   * git could not attribute it — which happens both for a path outside every
-   * repository AND for a new file in a repo subdirectory that does not exist
-   * yet, so it can never be read as "outside" on its own.
+   * Repo root containing the edit, as the caller's git attribution answered
+   * it, or null when git could not attribute it. The caller MUST climb to the
+   * nearest existing ancestor before asking git (`git rev-parse` fails on a
+   * directory that does not exist yet, which is precisely what a `write`
+   * creating a new nested file targets), so a null answer really does mean
+   * "git found no repository here".
    */
   editRepo: string | null;
+  /**
+   * Second opinion for a path git could not attribute: given the RESOLVED
+   * (physical) file path, which repository does it belong to? A symlink from
+   * /tmp into a checkout is the case that needs it — the raw path's directory
+   * is in no repository while the file itself is. Omitted ⇒ no second
+   * opinion, which can only make the answer `outside`, so unit tests may
+   * leave it out.
+   */
+  resolveRepoRoot?: (absFile: string) => string | null;
   /** Injection seam for the tests; defaults to the shared realpath helpers. */
   resolveFile?: (p: string) => string;
   resolveDir?: (p: string) => string;
@@ -81,5 +96,18 @@ export function classifyEditRepoScope(input: EditRepoScopeInput): EditRepoScope 
   // `file === root` means the path IS the repo root (a directory, not a file):
   // unexpected enough to keep the old behaviour rather than skip tracking.
   if (file === root || file.startsWith(boundary)) return { scope: "primary" };
+
+  // Not under the session repo — but "no repository" and "another repository"
+  // are different answers, and only the first one may be skipped. Ask git
+  // again about where the file REALLY lives: a write through a symlink into a
+  // sibling checkout must arm that checkout's gate, not vanish.
+  let resolvedRoot: string | null = null;
+  try {
+    resolvedRoot = input.resolveRepoRoot?.(file) ?? null;
+  } catch {
+    return { scope: "primary" };
+  }
+  if (resolvedRoot === primaryRepoRoot || resolvedRoot === root) return { scope: "primary" };
+  if (resolvedRoot) return { scope: "other-repo", root: resolvedRoot };
   return { scope: "outside" };
 }
