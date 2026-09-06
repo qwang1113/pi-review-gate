@@ -426,18 +426,27 @@ export function describeChildStateDetailed(health: ChildHealth): string {
     // B3 — the overruled `idle` report is named in the line itself, so the
     // supervisor reads BOTH facts: the child said it stopped, and its own
     // progress stamp says otherwise. Hiding the report for two minutes would
-    // trade one blind spot for another.
+    // trade one blind spot for another, and it would make the flip to `idle`
+    // arrive with no warning — a supervisor who sees this marker knows the
+    // state will turn if the child does not step again.
+    //
+    // KEPT SHORT ON PURPOSE (user, 2026-09-17). This is the line a manager
+    // scans every few minutes, one row per child, inside a five-block receipt:
+    // the information is preserved, the words are not. "自报停下·未满 120s"
+    // carries the report, the doubt and the deadline in ten characters.
     const doubted = health.selfReportedIdle
-      ? `它自报停下，未满 ${Math.round(IDLE_PROGRESS_GRACE_MS / 1000)}s 不予采信`
+      ? `·自报停下未满 ${Math.round(IDLE_PROGRESS_GRACE_MS / 1000)}s`
       : "";
     if (health.progressStaleSeconds !== undefined) {
       // A READING, not an alarm: it just names how long since the last real
       // forward step, so 60 minutes of `working` with no checkpoint reads
       // differently from a hang. No wake, no suggested action.
       const progress = `自上次推进 ${health.progressStaleSeconds}s`;
-      return `${base}（${doubted ? `${progress}；${doubted}` : progress}）`;
+      return `${base}（${progress}${doubted}）`;
     }
-    if (doubted) return `${base}（${doubted}）`;
+    // No progress reading at all (a child that never stamped one). The doubt
+    // marker cannot occur without a stamp — it is what produced the doubt —
+    // so this branch is the plain `working` line.
   }
   return base;
 }

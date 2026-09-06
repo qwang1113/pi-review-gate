@@ -112,10 +112,15 @@ test("B3 — a child that reported `idle` while STILL STEPPING FORWARD is workin
   assert.equal(health.progressStaleSeconds, 3);
   assert.equal(health.selfReportedIdle, true, "the overruled report stays visible to the supervisor");
   const rendered = formatChildHealth([health]);
-  assert.match(rendered, /在干活/);
-  assert.match(rendered, /自上次推进 3s/);
-  assert.match(rendered, /自报停下/, "the raw signal is shown, not hidden for two minutes");
+  // THE EXACT LINE, because both halves of it are requirements: the raw signal
+  // is shown (not hidden for two minutes), and it is shown in as few characters
+  // as carry it (user, 2026-09-17 — this row is scanned every few minutes, one
+  // per child, inside a five-block receipt). A sentence here would be a
+  // regression even though it says the same thing.
+  assert.match(rendered, /在干活（自上次推进 3s·自报停下未满 120s）/);
   assert.doesNotMatch(rendered, /停下了（没有 declare_done）/);
+  const marker = /·自报停下未满 \d+s/.exec(rendered)![0];
+  assert.ok(marker.length <= 14, `the doubt marker must stay dense, got ${marker.length} chars: ${marker}`);
 
   // The second half of B3's cost: `idle` is newsworthy, so every poll returned
   // instantly and `orchestrator_wait` degraded into a busy poll.
