@@ -224,16 +224,21 @@ export type InstructDeliveryMode = "steer" | "followUp" | "interrupt";
  * WRITTEN. What the child says about it is the proof — and WHICH ack is
  * enough depends on what was promised:
  *
+ *   - `interrupt` (the DEFAULT since 2026-09-17) and `steer` promise to act on
+ *     the CURRENT turn. Nothing but an injection satisfies that, so `received`
+ *     alone keeps the check waiting rather than claiming success. An
+ *     unspecified mode is judged by this bar too — the strictest one is the
+ *     safe direction for a claim of delivery.
  *   - `followUp` promises "when you are done, read this". A busy child cannot
  *     inject it yet BY DEFINITION, so demanding an injection made the tool
  *     fail on exactly the children it was designed for, and the message it
  *     had already written was left orphaned (round-4 P1: one authorization
  *     lost that way). `received` — the child's gate saying it has the message
  *     and has queued it — is the honest bar, and it is a real one: only a
- *     live gate writes it.
- *   - `steer` and `interrupt` promise to act on the CURRENT turn. Nothing but
- *     an injection satisfies that, so `received` alone keeps the check
- *     waiting rather than claiming success.
+ *     live gate writes it. THIS VALUE IS NO LONGER OPEN TO THE ORCHESTRATOR
+ *     (`orchestrator_instruct` refuses it, 2026-09-17); it survives as a
+ *     channel mode because the JUDGE lane dispatches its next round that way,
+ *     and that dispatch is judged by exactly this rule.
  *
  * An ack that says `delivered: false` is a FAILURE reported with the child's
  * own explanation — never a success with a caveat.
@@ -258,7 +263,10 @@ export function deliveryVerdict(
     };
   }
   const ack = evidence.ack;
-  const mode = opts.instructMode ?? "followUp";
+  // An unspecified mode is judged as `interrupt` — the tool's own default
+  // (2026-09-17) and the strictest bar, so a silent caller can never buy a
+  // weaker claim of delivery than the one it would get by asking.
+  const mode = opts.instructMode ?? "interrupt";
   if (!ack) {
     return {
       ok: false,
@@ -288,8 +296,10 @@ export function deliveryVerdict(
     return {
       ok: false,
       reason:
-        `子会话已确认收到，但 mode=${mode} 要求它在**当前这一轮**里就读到，而它还没注入。` +
-        "再等一会儿；如果它正在 `waiting-judge`，改用 `followUp` 才是对的形状。",
+        `子会话已确认收到，但 mode=${mode} 要求它在**当前这一轮**里就读到，而它还没注入。\n` +
+        "消息**没有丢**：它在子会话的收件箱里，那边的门禁一 drain 到就会注入。" +
+        "先看 `orchestrator_wait` 的健康快照 —— 显示 `waiting-judge` 就是它在等自己的 reviewer，等着即可；" +
+        "只有确认它 `stalled`（心跳真的停了）才谈恢复。不要重发同一条。",
     };
   }
   return { ok: true, summary: `子会话已确认注入${ack.detail ? `：${ack.detail}` : ""}` };

@@ -555,14 +555,14 @@ test("an instruction is written to the channel and only claimed once the child A
   readyChild(world, childId);
 
   // No acknowledgement yet ⇒ the delivery FAILS. Writing is not delivering.
-  const unacked = await world.call("orchestrator_instruct", { childId, message: "换个思路", mode: "followUp" });
+  const unacked = await world.call("orchestrator_instruct", { childId, message: "换个思路" });
   assert.equal(unacked.isError, true, replyText(unacked));
   assert.match(replyText(unacked), /一直没有回执/);
 
   // Now play the child's side: acknowledge the pending instruction.
   const pending = projectionOf(world, childId).pendingInstructs;
   assert.equal(pending.length, 1, "the instruction is on the channel even though the receipt failed");
-  world.childAcks(childId, pending[0]!.instructId, true, "pi.sendUserMessage(deliverAs:followUp)");
+  world.childAcks(childId, pending[0]!.instructId, true, "pi.sendUserMessage(deliverAs:steer)");
 
   const second = await world.call("orchestrator_instruct", { childId, message: "再来一次", mode: "steer" });
   // The second instruction has its own id and its own (missing) ack.
@@ -587,7 +587,7 @@ test("an instruction the child could NOT inject is a failure carrying the child'
   };
   (world.deps as { channelIO: () => typeof spy }).channelIO = () => spy;
 
-  const reply = await world.call("orchestrator_instruct", { childId, message: "在吗", mode: "followUp" });
+  const reply = await world.call("orchestrator_instruct", { childId, message: "在吗", mode: "steer" });
   assert.equal(reply.isError, true);
   assert.match(replyText(reply), /会话已经结束了/);
 });
@@ -599,7 +599,9 @@ test("every mode needs text (interrupt included since 2026-08-31); an unknown mo
 
   const bad = await world.call("orchestrator_instruct", { childId, mode: "nextTurn", message: "x" });
   assert.equal(bad.isError, true);
-  assert.match(replyText(bad), /steer \/ followUp \/ interrupt/);
+  assert.match(replyText(bad), /mode 只能是 interrupt（默认）\/ steer/);
+  assert.doesNotMatch(replyText(bad), /followUp/,
+    "the refusal must not offer a mode this tool itself refuses");
 
   const emptySteer = await world.call("orchestrator_instruct", { childId, mode: "steer" });
   assert.equal(emptySteer.isError, true);
@@ -629,6 +631,92 @@ test("interrupt with text delivers as the highest priority (2026-08-31)", async 
   assert.equal(pending[0]!.mode, "interrupt", "the mode is interrupt");
   assert.equal(pending[0]!.text, "停下，先处理这个", "the message rides the interrupt");
 });
+
+// ---------------------------------------------------------------------------
+// The DEFAULT is `interrupt`, and `followUp` is gone from the parameter
+// surface (2026-09-17, user decision). A supervisor writes because the child
+// should know NOW: an ordinary call that arrives after the round it meant to
+// correct is a correction nobody applied.
+// ---------------------------------------------------------------------------
+
+test("no mode at all means `interrupt` — the ordinary call is the one that arrives NOW", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  readyChild(world, childId);
+
+  await world.call("orchestrator_instruct", { childId, message: "停下，改做这个" });
+
+  const pending = projectionOf(world, childId).pendingInstructs;
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]!.mode, "interrupt", "the default written into the channel, not `followUp`");
+});
+
+test("`followUp` is refused, and the refusal names the two modes that DO work", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  readyChild(world, childId);
+
+  const refused = await world.call("orchestrator_instruct", { childId, mode: "followUp", message: "稍后读这条" });
+  assert.equal(refused.isError, true, replyText(refused));
+  assert.match(replyText(refused), /interrupt/, "it points at the default");
+  assert.match(replyText(refused), /steer/, "and at the gentle option that still exists");
+  assert.equal(projectionOf(world, childId).pendingInstructs.length, 0,
+    "a refused mode writes NOTHING into the channel — the child must not read a message the tool rejected");
+});
+
+test("every delivered instruction stamps lastAssignedAt — `interrupt` is no longer exempt", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  readyChild(world, childId);
+  const atSpawn = world.runtime().children[0]!.lastAssignedAt;
+  assert.ok(atSpawn, "the spawn IS the first assignment");
+
+  // Play the child's gate: acknowledge the injection the moment the record lands.
+  const originalIO = world.deps.channelIO();
+  const spy = {
+    ...originalIO,
+    appendLine(path: string, line: string) {
+      originalIO.appendLine(path, line);
+      const parsed = JSON.parse(line) as { kind?: string; instructId?: string };
+      if (parsed.kind === "instruct" && parsed.instructId) {
+        world.childAcks(childId, parsed.instructId, true, "已解除等待并立即投递正文", "injected");
+      }
+    },
+  };
+  (world.deps as { channelIO: () => typeof spy }).channelIO = () => spy;
+
+  world.advance(60_000);
+  const reply = await world.call("orchestrator_instruct", { childId, message: "停下，改做任务二", mode: "interrupt" });
+  assert.equal(reply.isError, undefined, replyText(reply));
+
+  const stamped = world.runtime().children[0]!.lastAssignedAt;
+  assert.notEqual(stamped, atSpawn,
+    "an interrupt carrying text IS new work: without this stamp the previous task's completion keeps counting");
+  assert.equal(Date.parse(stamped!), Date.parse(atSpawn!) + 60_000);
+});
+
+test("the stamp survives a FAILED receipt — the assignment is the record in the channel", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  readyChild(world, childId);
+  const atSpawn = world.runtime().children[0]!.lastAssignedAt;
+
+  // Nobody acknowledges: the receipt fails. But the message IS in the child's
+  // inbox and its gate will read it, so the child HAS been re-tasked — gating
+  // the stamp on the receipt would leave the last task's completion standing.
+  world.advance(60_000);
+  const reply = await world.call("orchestrator_instruct", { childId, message: "停下，改做任务二" });
+  assert.equal(reply.isError, true, replyText(reply));
+
+  assert.equal(projectionOf(world, childId).pendingInstructs.length, 1, "the message is in its inbox");
+  assert.equal(
+    Date.parse(world.runtime().children[0]!.lastAssignedAt!),
+    Date.parse(atSpawn!) + 60_000,
+    "and the assignment stamp moved with it",
+  );
+});
+
+
 
 // ---------------------------------------------------------------------------
 // close / recover / attach / handoff

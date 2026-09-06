@@ -206,11 +206,22 @@ function stalledNow(observation: ChildObservation): boolean {
  *
  * Bounded by `lastAssignedAt` exactly as the state is (round-1 P1): a
  * completion older than the current assignment is history, not a verdict.
+ *
+ * AND THE BOUND READS THE START OF THE RUN, NOT THE NEWEST RECORD
+ * (2026-09-17, adviser round 8). A finished child keeps REPORTING `done`: the
+ * heartbeat rewrites its unchanged state every minute with a fresh `at`, so
+ * within a minute of being re-tasked the previous round's completion looked
+ * newer than the assignment and the bound simply evaporated — the same hole
+ * the `interrupt` mode had on the writing side, reached from the other end.
+ * `lastStateSince` is when the child ENTERED this `done` run, which is the
+ * fact the bound was always about; a genuinely new completion starts a new
+ * run and stamps a new one. No `lastStateSince` (a projection from an older
+ * build) ⇒ fall back to the record's own time rather than inventing one.
  */
 export function completionReported(observation: ChildObservation): boolean {
   const last = observation.projection.lastState;
   if (last?.state !== "done") return false;
-  const reportedAt = Date.parse(last.at);
+  const reportedAt = Date.parse(observation.projection.lastStateSince ?? last.at);
   const assigned = observation.lastAssignedAt;
   return assigned === undefined || !Number.isFinite(reportedAt) || reportedAt >= assigned;
 }

@@ -107,7 +107,9 @@ export const ORCHESTRATOR_DIRECTIVE =
   "1. `orchestrator_answer({ childId, answer })` 直接回 —— `answer` 传选项原文、1 起的序号，" +
   "或一个能唯一命中的子串；含糊不清的会被**拒绝**而不是替你猜。写进去的瞬间它那边的框就撤下了；\n" +
   "2. 人如果先答了，你的这次回答会收到「该请求已销账」，不会重复作答；\n" +
-  "3. 想主动跟它说话或打断它，用 `orchestrator_instruct({ mode: \"steer\" | \"followUp\" | \"interrupt\" })` ——" +
+  "3. 想主动跟它说话，用 `orchestrator_instruct({ childId, message })` —— **默认就是 `interrupt`**：" +
+  "中断它当前这一轮，让它立刻读到（上级发话就是要它立刻知道）。只在「不想打断它、让它带着这条继续做」" +
+  "时才显式写 `mode: \"steer\"`（切进当前这一轮，不 abort）；`followUp` 已不再是本工具的选项，传了会被拒。" +
   "文本经通道由它自己的门禁用 pi 的 API 注入，不经键盘，因此不会被截断、也不会误触它的对话框；\n" +
   "4. 代批它的 goal、代确认它的需求反述，也都是 `orchestrator_answer`，但**必须带 `crosscheck`**：" +
   "先自己读懂需求，再拿它的草稿逐条对 plan —— 写出任务 id，并对「文件边界 / 任务目标 / 交付站点」" +

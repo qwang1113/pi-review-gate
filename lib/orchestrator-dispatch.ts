@@ -53,7 +53,6 @@ import {
 import {
   appendRecord,
   newChannelId,
-  type ChannelInstructRecord,
 } from "./orchestrator-channel.ts";
 import {
   alivePanes,
@@ -391,8 +390,28 @@ function describeDeliveryEvidence(evidence: DeliveryEvidence): string {
   return parts.join("，");
 }
 
-/** The three delivery modes, and what each one means to the child's gate. */
-const INSTRUCT_MODES = new Set(["steer", "followUp", "interrupt"]);
+/**
+ * The two modes an ORCHESTRATOR may ask for, and what each means to the
+ * child's gate. `followUp` is deliberately not among them — see below.
+ */
+const INSTRUCT_MODES = new Set(["interrupt", "steer"]);
+
+/**
+ * Modes the channel still carries but the parameter surface REFUSES.
+ *
+ * `followUp` (retired 2026-09-17, user decision) means "read this when you
+ * finish what you are doing", and that is the wrong shape for THIS tool: a
+ * message from the supervisor is sent because the child should know NOW —
+ * a correction that arrives after the round it was meant to correct is a
+ * correction nobody applied. So the default became `interrupt` and asking
+ * for `followUp` is refused rather than silently delivered late.
+ *
+ * It stays in the channel enum and on the child's side on purpose: the judge
+ * lane dispatches its next round as a `followUp` (a round IS "read this when
+ * you are free"), and a child running an older gate build must keep being
+ * able to read one.
+ */
+const RETIRED_INSTRUCT_MODES = new Set(["followUp"]);
 
 /**
  * `orchestrator_instruct` — say something to a running child, or stop it.
@@ -405,12 +424,17 @@ const INSTRUCT_MODES = new Set(["steer", "followUp", "interrupt"]);
  * really the same question — HOW should this text reach the agent — and pi
  * answers it with one parameter. So the mode IS `deliverAs`:
  *
- *   steer      cut into the current turn (pi.sendUserMessage, deliverAs steer)
- *   followUp   let it finish, then read this (deliverAs followUp)
- *   interrupt  HIGHEST priority: stop what it is doing (ctx.abort()) and read
- *              the message immediately. Since 2026-08-31 it carries a text —
- *              a bare abort needed a second followUp to say anything; one call
- *              now means "stop and do THIS instead, now".
+ *   interrupt  THE DEFAULT, and the highest priority: stop what it is doing
+ *              (ctx.abort()) and read the message immediately. Since
+ *              2026-08-31 it carries a text — a bare abort needed a second
+ *              message to say anything; one call now means "stop and do THIS
+ *              instead, now".
+ *   steer      cut into the current turn without aborting it (deliverAs steer)
+ *
+ * There used to be a third, `followUp` ("finish first, then read this"), and
+ * it used to be the DEFAULT. It is refused here now (2026-09-17): a
+ * supervisor writes because the child should know now, so the ordinary call
+ * must not be the latest-arriving one.
  * ── WHY NOTHING IS TYPED ──
  *
  * The old path was `tmux send-keys`, and it produced four separate measured
@@ -437,14 +461,27 @@ export async function dispatchInstruct(
   if (!child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
   if (child.closedAt) return fail(`review-gate: 子会话 "${childId}" 已经关闭了。`);
 
-  const rawMode = String(params.mode ?? "followUp").trim();
-  if (!INSTRUCT_MODES.has(rawMode)) {
+  // DEFAULT = `interrupt` (2026-09-17, user decision): a supervisor speaks
+  // because the child should know NOW. The old default was `followUp`, which
+  // made the ORDINARY call the latest-arriving one — the opposite of intent.
+  const rawMode = String(params.mode ?? "interrupt").trim();
+  if (RETIRED_INSTRUCT_MODES.has(rawMode)) {
     return fail(
-      `review-gate: mode 只能是 steer / followUp / interrupt，收到的是 ${JSON.stringify(params.mode)}。\n` +
-      "（pi 的 sendUserMessage 只支持 steer 与 followUp 两种投递；nextTurn 属于另一套 API，本门禁不提供。）",
+      `review-gate: mode="${rawMode}" 已从本工具的参数面取消 —— 上级发话就是要它立刻知道，` +
+      "「等你跑完这轮再读」不是这个工具该有的形状。\n" +
+      "改用 `interrupt`（默认，不传 mode 就是它：中断当前这一轮并立即投递），" +
+      "或显式写 `mode: \"steer\"`（温和选项：切进当前这一轮，不打断它）。",
     );
   }
-  const mode = rawMode as ChannelInstructRecord["mode"];
+  if (!INSTRUCT_MODES.has(rawMode)) {
+    return fail(
+      `review-gate: mode 只能是 interrupt（默认）/ steer，收到的是 ${JSON.stringify(params.mode)}。\n` +
+      "（两者都是 pi 的 sendUserMessage 投递：interrupt 先 abort 当前 turn 再投，steer 直接切进当前 turn；" +
+      "nextTurn 属于另一套 API，本门禁不提供。）",
+    );
+  }
+  const mode = rawMode as "interrupt" | "steer";
+
   const message = String(params.message ?? "").trim();
   // 2026-08-31 (UX): `interrupt` may now carry a message. It used to be a
   // bare abort ("stop what you are doing") that needed a SECOND followUp to
@@ -473,6 +510,25 @@ export async function dispatchInstruct(
     return fail(`review-gate: 指令写不进通道 —— ${(error as Error).message}。什么都没发。`);
   }
 
+  // NEW WORK UN-FINISHES A CHILD (round-1 P1). Whatever this text is — the
+  // next task, a correction, a question — the child has now been handed
+  // something, so its previous completion stops counting: the supervisor may
+  // not call it `done` again on the strength of a record from the last round,
+  // and the orchestration exit check must see it as ALIVE again.
+  //
+  // NO MODE IS EXEMPT (2026-09-17). `interrupt` was, from the days when it was
+  // a bare `ctx.abort()` carrying no text — stopping a child is not giving it
+  // work. It has REQUIRED a message since 2026-08-31, so the one mode that
+  // means "stop and do THIS instead" was the one mode that left the previous
+  // task's completion standing (adviser, round 8).
+  //
+  // AND IT IS STAMPED AT THE WRITE, not after the receipt: the assignment is
+  // the record in the channel. A message the child's gate merely QUEUED
+  // (`received`) fails the receipt below and is still read moments later, so
+  // gating the stamp on a successful receipt would reopen the same hole
+  // through a slower door. It costs nothing on the stall side either — the
+  // record just written is itself the channel's newest activity.
+  deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
   // The sidecar path is passed in FROM THE REGISTRY (round-4 P1). It used to be
   // omitted here, so `sidecarPresent` was structurally false and the failure
   // message reported "sidecar 存在=否" about a child whose sidecar was on disk
@@ -494,22 +550,12 @@ export async function dispatchInstruct(
     );
   }
 
-  // NEW WORK UN-FINISHES A CHILD (round-1 P1). Whatever this text is — the
-  // next task, a correction, a question — the child has now been handed
-  // something, so its previous completion stops counting: the supervisor may
-  // not call it `done` again on the strength of a record from the last round,
-  // and the orchestration exit check must see it as ALIVE again.
-  if (mode !== "interrupt") {
-    deps.saveRuntime(markChildAssigned(deps.runtime(), childId, new Date(deps.now()).toISOString()));
-  }
-
   // STOP-FIRST (2026-09-01): the child's gate dismisses an OPEN dialog when
   // the instruction lands. Tell the PM what just got cancelled — a goal box,
-  // a question, a consent — and that answering is the other tool's job.
-  // STOP-FIRST (2026-09-01): steer/interrupt dismiss an OPEN dialog;
-  // followUp does NOT (its whole meaning is "read this when you are done"),
-  // so the cancellation notice only applies to the two stopping modes.
-  const open = mode === "followUp" ? undefined : childChannelProjection(deps, childId).openRequests[0];
+  // a question, a consent — and that answering is the other tool's job. Both
+  // remaining modes stop the child (`interrupt` aborts the turn, `steer` cuts
+  // into it), so the notice applies to every delivery this tool makes.
+  const open = childChannelProjection(deps, childId).openRequests[0];
   const cancelledLine = open
     ? `\n本次打断同时取消了子会话的待答请求「${open.title}」—— 它不再等这个回答了；若你的本意是回答它，请用 orchestrator_answer。`
     : "";
@@ -517,9 +563,7 @@ export async function dispatchInstruct(
     `review-gate: 已通过通道下发给子会话 ${childId}（mode=${mode}）。${check.verdict.summary}。\n` +
     (mode === "interrupt"
       ? "它已中断当前这一轮，并立即收到这条消息（最高优先级）。"
-      : mode === "steer"
-        ? "它会在当前这一轮里就读到这条消息。"
-        : "它会在跑完手上这一轮之后读到这条消息。") +
+      : "它会在当前这一轮里就读到这条消息。") +
     cancelledLine,
     { childId, instructId, mode, delivered: true },
   );

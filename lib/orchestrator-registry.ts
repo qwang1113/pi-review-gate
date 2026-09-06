@@ -62,13 +62,19 @@ export interface ChildSession {
   /**
    * ISO time this child was last GIVEN something to do.
    *
-   * Set at spawn and again by every `orchestrator_send` that reaches it. It
-   * exists because a completion is only evidence about the work it finished:
+   * Set at spawn, and again by EVERY `orchestrator_instruct` written into the
+   * child's channel — no mode is exempt since 2026-09-17 (`interrupt`, the one
+   * that literally means "stop and do THIS instead", used to be), and it does
+   * not wait for the receipt: a message the child's gate merely queued fails
+   * the receipt and is still read moments later. It exists
+   * because a completion is only evidence about the work it finished:
    * `declare_done` leaves a record in the child's sidecar that nothing ever
    * clears, so a child re-tasked after finishing would be reported `done`
    * again the moment its screen settled — including when it had simply got
    * STUCK on the new work (round-1 P1). A completion older than this stamp is
-   * history, not a verdict.
+   * history, not a verdict — and "older" is measured from when the child
+   * ENTERED that `done` run, because its heartbeat re-reports the same state
+   * with a fresh timestamp every minute (lib/orchestrator-child-state.ts).
    */
   lastAssignedAt?: string;
   /*
@@ -84,8 +90,9 @@ export interface ChildSession {
    *
    * Re-adding the writer would re-bury the same mine: a cache of a
    * completion has to be invalidated on EVERY path that gives the child new
-   * work, and one of those paths (an `interrupt` carrying text) does not
-   * even stamp `lastAssignedAt` today. Completion is read from the channel,
+   * work — including an `interrupt` carrying text, which only started
+   * stamping `lastAssignedAt` on 2026-09-17. Completion is read from the
+   * channel,
    * once, by lib/orchestrator-supervisor.ts — and everything that needs it
    * takes it from that ONE snapshot.
    */

@@ -51,7 +51,7 @@
 | `request` | 子 → 编排 | 我弹了一个框：标题、**全部选项（原文、按序）**、正文 payload、topic |
 | `request-settled` | 子 → 编排 | 这个请求结束了，结束者是 human / orchestrator / dismissed / **interrupted**（instruct 打断时解除的框，不是拒绝） |
 | `answer` | 编排 → 子 | 这个请求的答案 |
-| `instruct` | 编排 → 子 | 跟你说句话（steer / followUp）或打断你（interrupt） |
+| `instruct` | 编排 → 子 | 打断你并立即投递（`interrupt`，缺省）或切进你当前这一轮（`steer`）；`followUp` 只剩 judge 通道在用 |
 | `instruct-ack` | 子 → 编排 | 我注入了（或没能注入，附原因） |
 
 两个方向共用一个文件，每条记录自报 `from`。分成两个文件只会让要同步的路径翻倍：
@@ -95,7 +95,12 @@
    文件里的一条记录，不是关于像素的推断。
 3. **`done`**，且受 `lastAssignedAt` 约束：比当前这次派活更早的完成记录属于**上一次**
    任务（round-1 P1）。少了这条，一个做完又被重新派活、然后卡住的子会话会一直被报成
-   「已完成」—— 而卡住恰恰是监督者唯一必须听到的事。
+   「已完成」—— 而卡住恰恰是监督者唯一必须听到的事。约束的两端在 2026-09-17 一起补齐：
+   **写的一端**，每一条**写进通道**的 `orchestrator_instruct` 都打派活戳（`interrupt` 曾是
+   唯一的豁免，而它恰恰是「停下、改做这个」；戳记也不等回执 —— 只拿到 `received` 的消息
+   回执会失败，可子会话稍后照样读到它）；**读的一端**，比的是子会话进入这段 `done`
+   的**起点**（`projection.lastStateSince`）而不是最新那条记录 —— 子会话完成后心跳每分钟
+   会用新时间戳重报一次 `done`，拿最新一条去比，等于派活后一分钟内约束自动作废。
 4. **沉默（`stalled`）排在任何正面自报之前**：比心跳预算更旧的报告不再是关于当下的证据。
 5. **`waiting-judge`**：它在等门禁**自己派出去**的活（reviewer / precommit）。
 6. `idle` / `working` —— 而这两者之间还要过一道**进展**关（§2.4）。
@@ -195,11 +200,17 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 
 `orchestrator_instruct({ childId, mode, message })`
 
-`mode` 就是 pi 自己的 `deliverAs`：
+`mode` 就是 pi 自己的 `deliverAs`，**缺省 `interrupt`**（2026-09-17 用户决定）：
 
-- `steer` —— 切进它当前这一轮；同时解除它挂着的框（by:`interrupted`）再投递；
-- `followUp` —— 等它跑完手上这轮再读，**不**解除任何框；
-- `interrupt` —— 最高优先级：`ctx.abort()` 停掉当前轮 + 解除挂着的框 + 带正文立即投递。
+- `interrupt` —— 默认，最高优先级：`ctx.abort()` 停掉当前轮 + 解除挂着的框 + 带正文立即投递；
+- `steer` —— 切进它当前这一轮（不 abort）；同时解除它挂着的框（by:`interrupted`）再投递；
+- ~~`followUp`~~ —— **已从参数面取消**，传了直接被拒，拒绝文案指回 `interrupt` / `steer`。
+
+取消它的理由是这个工具的语义：上级发话是因为子会话**现在**就该知道，一条在它要纠正的
+那一轮之后才到的纠正，等于没人执行的纠正。默认值若是「最晚到」的那一种，那么最常见的
+一次调用恰恰最没用。`followUp` 作为**通道枚举值**仍然存在，因为 judge 次轮派发用的就是
+它（一轮任务确实是「你忙完再读」），子会话侧的读取/注入路径也照旧 —— 取消的只是项目
+经理的参数面。
 
 文本写进通道，由**子会话自己的门禁**用 pi 的 API 注入。**被替换掉的是什么**：
 `tmux send-keys`，它产出过四条独立缺陷 —— 任务书被截断（F7）、没有 Enter 提交（F8）、
@@ -211,11 +222,15 @@ R3-4（标题取错行）、R-8（确认框只认 `KPEnter`，靠试出来的）
 **回执依然要挣**，但它分两级（2026-08-30）：子会话的 `instruct-ack` 带 `stage` ——
 `received`（门禁拿到并入队了）与 `injected`（pi 真的收下了）。
 
-- **`followUp` 认 `received`**。它的定义就是「等你跑完这轮再读」，一个正忙的子会话
-  按定义**不可能**立刻注入。原来要求注入，于是这个 mode 恰恰在它为之设计的场景里
-  必然失败 —— 而消息其实已经写进通道了，就此沉底丢失（第四轮实测丢了一条补充授权，
-  只能改用 `orchestrator_answer` 的选项文本绕过去）。
-- **`steer` / `interrupt` 仍要求 `injected`**：它们承诺的是「当前这一轮」，排队不算。
+- **`steer` / `interrupt` 要求 `injected`**：它们承诺的是「当前这一轮」，排队不算。
+  未指明 mode 的判定也按这条最严的走 —— 少写一个参数买不到更松的「已送达」。
+  只拿到 `received` 时文案说的是**继续等**（消息在它的收件箱里没丢、先看是不是
+  `waiting-judge`、别重发），而不是「改用 followUp」—— 指回一个工具自己拒收的模式，
+  是取消 followUp 那一轮必须一起堵上的假出路。
+- **`followUp` 认 `received`**（judge 通道仍在用它）。它的定义就是「等你跑完这轮再读」，
+  一个正忙的会话按定义**不可能**立刻注入。原来要求注入，于是这个 mode 恰恰在它为之设计
+  的场景里必然失败 —— 而消息其实已经写进通道了，就此沉底丢失（第四轮实测丢了一条补充
+  授权，只能改用 `orchestrator_answer` 的选项文本绕过去）。
 
 投影里也只有 `injected` 才把指令移出子会话的收件箱 —— 只 `received` 的消息必须留着，
 否则恢复时就会丢掉它。没有任何回执 ⇒ 调用失败，且文案第一句是「先看它是不是
@@ -287,7 +302,8 @@ registry 的 `doneAt` 字段。而 `doneAt` 的写点在旧 probe 被删时一�
 再手工 `set-status` + `orchestrator_close` 收尾。
 
 修法不是把写点补回去（那等于重埋同一颗雷：完成缓存必须在每一条重新派活路径上失效，
-而 `orchestrator_instruct({mode:"interrupt"})` 带正文派新活时今天就不打派活戳），而是
+而当时 `orchestrator_instruct({mode:"interrupt"})` 带正文派新活时并不打派活戳 —— 那个
+豁免已于 2026-09-17 取消，见 §2.1 第 3 条），而是
 **删掉那份缓存**：`ChildSession.doneAt`、`markChildDone` 与 `orchestrator_wait` 里那条
 读它的 `child-done` 判据全部移除（那条判据本身还是个忙轮询：标志永不清除，只要有一个
 孩子报过完成，之后每次 wait 都会立刻返回）。完成只有一处真值 —— **通道**，由
@@ -344,8 +360,9 @@ TOOL end reason=input-abort elapsedMs=23041               ← 170ms 后返回
 规则三条：
 
 - **谁能拉**：`event.source !== "extension"`。门禁自己注入的
-  `[REVIEW_GATE_RESUME]`、以及项目经理 `orchestrator_instruct` 的 steer / followUp
-  投递都**不算** —— `steer` 的语义是「带着这条继续做」，而 `interrupt` 在宿主层本来
+  `[REVIEW_GATE_RESUME]`、项目经理 `orchestrator_instruct` 的 `steer` 投递、以及 judge
+  通道那条 `followUp` 次轮派发都**不算** —— `steer` 的语义是「带着这条继续做」，而
+  `interrupt` 在宿主层本来
   就会 abort 当前 turn。否则一条例行注入就能腰斩一轮 review。
 - **打断谁**：本进程里**每一个正在阻塞的 `pollUntil`**。它是等待骨架的第二个中断源
   （第一个是 `signal`，即 ESC），所以 `judge_wait` 与 `orchestrator_wait` 一起受益 ——

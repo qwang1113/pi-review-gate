@@ -92,6 +92,42 @@ test("round-1 P1: a completion older than the CURRENT assignment is not a comple
     "a child re-tasked after finishing must not report finished again — that hides a child that got STUCK");
 });
 
+test("…and the child's own HEARTBEAT cannot re-date that completion (2026-09-17)", () => {
+  // A finished child keeps reporting `done`: its gate rewrites the unchanged
+  // state every minute with a fresh timestamp. Reading the NEWEST record made
+  // the round-1 bound evaporate within a minute of re-tasking — the completion
+  // of the PREVIOUS task looked newer than the assignment that replaced it.
+  const records = [
+    stateRecord("done", iso(-60_000)),   // it really finished, a minute ago
+    stateRecord("done", iso(1_000)),     // …and its heartbeat says so again, now
+  ];
+  const reassigned = observe(records, { lastAssignedAt: T0 - 1_000, at: T0 + 2_000 });
+  assert.notEqual(classifyChildState(reassigned), "done",
+    "the bound compares the START of the `done` run, not the heartbeat that refreshed it");
+
+  // The other direction must still hold, or the fix would simply hide every
+  // completion: a genuinely NEW completion starts a new run of the state.
+  const finishedAgain = observe([
+    stateRecord("done", iso(-60_000)),
+    stateRecord("working", iso(-30_000)),  // it took the new work…
+    stateRecord("done", iso(1_000)),       // …and finished THAT
+  ], { lastAssignedAt: T0 - 1_000, at: T0 + 2_000 });
+  assert.equal(classifyChildState(finishedAgain), "done");
+});
+
+test("no `lastStateSince` at all (an older projection) falls back to the record's own time", () => {
+  // The same two records as above — so the two readings genuinely DISAGREE:
+  // the run started before the assignment, the newest record came after it.
+  const records = [stateRecord("done", iso(-60_000)), stateRecord("done", iso(1_000))];
+  const projection = projectChannel(records);
+  assert.equal(projection.lastStateSince, iso(-60_000), "the projection normally answers this");
+  delete (projection as { lastStateSince?: string }).lastStateSince;
+  const observation = observe(records, { projection, lastAssignedAt: T0 - 1_000, at: T0 + 2_000 });
+  assert.equal(classifyChildState(observation), "done",
+    "missing information must not invent a contradiction — the record's own time still answers");
+});
+
+
 test("a child that stopped without finishing is `idle`", () => {
   assert.equal(classifyChildState(observe([stateRecord("idle")])), "idle");
 });

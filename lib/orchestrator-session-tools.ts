@@ -547,11 +547,13 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     name: "orchestrator_instruct",
     label: "Instruct A Child Session",
     description:
-      "Say something to a running child session, or stop it. `mode` IS pi's own delivery: " +
-      "`steer` cuts into the turn it is in the middle of, `followUp` waits until it finishes and " +
-      "is read next, `interrupt` is the HIGHEST priority — it aborts the current turn and the " +
-      "message is read immediately (since 2026-08-31 an interrupt carries its text in the same " +
-      "call; a bare abort needed a second followUp to say anything). Nothing is typed at " +
+      "Say something to a running child session, or stop it. `mode` IS pi's own delivery, and it " +
+      "DEFAULTS to `interrupt` — a supervisor writes because the child should know NOW, so the " +
+      "ordinary call aborts the turn it is in the middle of and the message is read immediately " +
+      "(an interrupt carries its text in this same call). The one alternative is `steer`: it cuts " +
+      "into the current turn WITHOUT aborting it, for a nudge the child should carry on with. " +
+      "`followUp` (\"finish first, then read this\") is REFUSED here — a correction that arrives " +
+      "after the round it was meant to correct is a correction nobody applied. Nothing is typed at " +
       "a terminal: the text is written to the child's channel and the child's OWN gate injects it " +
       "with `pi.sendUserMessage`, so it cannot be truncated, cannot be split by a newline, and " +
       "cannot be misread by an open dialog as a menu selection (all four were measured). The " +
@@ -560,7 +562,7 @@ export function registerOrchestratorSessionTools(host: ToolHost, deps: Orchestra
     parameters: Type.Object({
       childId: Type.String(),
       mode: Type.Optional(Type.String({
-        description: "\"steer\" | \"followUp\" (default) | \"interrupt\"",
+        description: "\"interrupt\" (default) | \"steer\". \"followUp\" is refused.",
       })),
       message: Type.Optional(Type.String({ description: "The text to deliver. Required for every mode (interrupt included) — say what the child should do instead." })),
     }),
