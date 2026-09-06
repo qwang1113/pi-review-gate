@@ -289,6 +289,116 @@ async function handlePlanAction(
     );
   }
 
+  // -------------------------------------------------------------------------
+  // ARCHIVE — "this orchestration is over, I am starting a new one" (B1)
+  // -------------------------------------------------------------------------
+  //
+  // The alternative that existed before this action was a project manager
+  // typing `rm .pi/orchestrator-plan.json`, because entering the role was
+  // refused while somebody else's plan was in the repo and nothing could put
+  // that plan away. Three sessions did exactly that, one of them the
+  // supervisor. So: the gate does it, it ARCHIVES rather than deletes, and it
+  // asks the user first — the plan being put away is one they approved.
+  //
+  // IT RUNS BEFORE THE PLAN HAS TO PARSE, and that placement is load-bearing.
+  // Below this point an unreadable plan file returns "the plan file does not
+  // validate" and nothing else happens. Put the archive down there and a
+  // repo with a CORRUPT plan plus another orchestration's runtime would be
+  // sealed shut again: `write` is refused by the identity guard above,
+  // `archive` would be refused by the parser, and `rm` would be the only move
+  // left — the exact dead end this whole action exists to remove. Nothing is
+  // lost by not parsing: `archivePlanFile` renames the original file beside
+  // the record, so the bytes survive even when their meaning did not.
+  if (action === PLAN_ACTIONS.archive) {
+    // WHAT IS THERE TO PUT DOWN? The plan and the registry die separately —
+    // a repo left over from the `rm` era has a registry and no plan — so
+    // either half is enough to have work to do here, and neither is a
+    // precondition for the other.
+    const existing = deps.readPlan().plan;
+    const recorded = deps.recordedRuntime();
+    const planFilePresent = existing !== undefined || deps.readPlan().problems.length > 0;
+    if (!planFilePresent && !recorded) {
+      return fail(
+        "review-gate: 本仓库没有什么可归档的 —— 既没有 `.pi/orchestrator-plan.json`，" +
+        "门禁记录里也没有上一轮编排的登记表。直接 `orchestrator_plan({action:\"write\"})` " +
+        "写这一轮自己的 plan 就行。",
+        { archived: false },
+      );
+    }
+    // LIVE CHILDREN VETO. The registry on DISK is the one that matters here:
+    // it belongs to the orchestration being put down, not to this session
+    // (which may hold a different id entirely). A pane that is still alive
+    // means somebody is still working under that plan — archiving it would
+    // strand them, and the honest move is a takeover instead.
+    const panes = alivePanes(deps);
+    const openChildren = (recorded?.children ?? []).filter((child) => !child.closedAt);
+    const stillAlive = panes.ok
+      ? openChildren.filter((child) => panes.panes.includes(child.paneId))
+      : [];
+    if (stillAlive.length > 0) {
+      return fail(
+        `review-gate: 这一轮编排还有 ${stillAlive.length} 个子会话活着` +
+        `（${stillAlive.map((c) => `${c.id}@${c.paneId}`).join("、")}）—— 不归档。\n` +
+        "它们正在这份 plan 下干活，归档会把它们晾在没有主管的状态。要接手它们，用 " +
+        `\`orchestrator_attach({ orchestrationId: "${recorded?.orchestrationId ?? ""}" })\`；` +
+        "确实要放弃，先 `orchestrator_close` 掉它们再归档。",
+        { archived: false, liveChildren: stillAlive.length },
+      );
+    }
+
+    const archivePath = planArchiveRelPath(nowIso);
+    // THE USER DECIDES (2026-09-06, their answer to the design question).
+    // `confirm` resolves false when there is no UI at all, and that is the
+    // wanted direction: with nobody to ask, nothing moves.
+    const granted = await deps.confirm(
+      ARCHIVE_CONFIRM_TITLE,
+      buildArchiveConfirmMessage({
+        ...(existing ? { plan: existing } : {}),
+        archivePath,
+        liveChildren: openChildren.length,
+      }),
+    );
+    if (!granted) {
+      return fail(
+        "review-gate: 用户没有同意归档（或当前环境没有可用的对话框）——什么都没有动，plan 还在原处。\n" +
+        "另一条路仍然可用：`orchestrator_attach` 接管这份 plan 所属的编排。",
+        { archived: false },
+      );
+    }
+
+    const written = deps.archivePlan(
+      archivePath,
+      buildPlanArchive({
+        ...(existing ? { plan: existing } : {}),
+        ...(recorded ? { runtime: { orchestrationId: recorded.orchestrationId, children: recorded.children } } : {}),
+        at: nowIso,
+        by: deps.runtime().orchestrationId,
+      }),
+    );
+    if (!written.ok) {
+      return fail(
+        `review-gate: 归档写不出来（${written.error}）—— plan 原封不动留在 ${PLAN_RELPATH}。`,
+        { archived: false },
+      );
+    }
+    // THE RUNTIME GOES WITH IT. Leaving the old registry in the sidecar would
+    // leave `runtimeConflict` refusing every spawn of the NEW orchestration
+    // forever — the session would have tidied itself into a corner it cannot
+    // leave. It is not lost: the archive file above holds a copy.
+    deps.saveRuntime(emptyRuntime(deps.runtime().orchestrationId));
+    deps.log(
+      `orchestrator plan archived to ${written.path} ` +
+      `(plan hash ${existing ? planHash(existing) : "none"}, previous orchestration ${recorded?.orchestrationId ?? "none"})`,
+    );
+    return reply(
+      `review-gate: 旧 plan 已归档到 ${written.path}（连同它的编排登记表；**没有删除任何东西**，` +
+      "原文件改名留在归档旁边）。\n" +
+      `${PLAN_RELPATH} 已让出来了 —— 现在可以 \`orchestrator_plan({action:"write"})\` 写这一轮自己的 plan，` +
+      "再 `submit` 请用户批准。",
+      { archived: true, path: written.path },
+    );
+  }
+
   const { plan, problem } = currentPlan(deps);
   if (problem) return problem;
 
@@ -363,99 +473,7 @@ async function handlePlanAction(
   }
 
 
-  // -------------------------------------------------------------------------
-  // ARCHIVE — "this orchestration is over, I am starting a new one" (B1)
-  // -------------------------------------------------------------------------
-  //
-  // The alternative that existed before this action was a project manager
-  // typing `rm .pi/orchestrator-plan.json`, because entering the role was
-  // refused while somebody else's plan was in the repo and nothing could put
-  // that plan away. Three sessions did exactly that, one of them the
-  // supervisor. So: the gate does it, it ARCHIVES rather than deletes, and it
-  // asks the user first — the plan being put away is one they approved.
-  if (action === PLAN_ACTIONS.archive) {
-    // WHAT IS THERE TO PUT DOWN? The plan and the registry die separately —
-    // a repo left over from the `rm` era has a registry and no plan — so
-    // either half is enough to have work to do here, and neither is a
-    // precondition for the other.
-    const recordedForCheck = deps.recordedRuntime();
-    if (!plan && !recordedForCheck) {
-      return fail(
-        "review-gate: 本仓库没有什么可归档的 —— 既没有 `.pi/orchestrator-plan.json`，" +
-        "门禁记录里也没有上一轮编排的登记表。直接 `orchestrator_plan({action:\"write\"})` " +
-        "写这一轮自己的 plan 就行。",
-        { archived: false },
-      );
-    }
-    // LIVE CHILDREN VETO. The registry on DISK is the one that matters here:
-    // it belongs to the orchestration being put down, not to this session
-    // (which may hold a different id entirely). A pane that is still alive
-    // means somebody is still working under that plan — archiving it would
-    // strand them, and the honest move is a takeover instead.
-    const recorded = recordedForCheck;
-    const panes = alivePanes(deps);
-    const openChildren = (recorded?.children ?? []).filter((child) => !child.closedAt);
-    const stillAlive = panes.ok
-      ? openChildren.filter((child) => panes.panes.includes(child.paneId))
-      : [];
-    if (stillAlive.length > 0) {
-      return fail(
-        `review-gate: 这一轮编排还有 ${stillAlive.length} 个子会话活着` +
-        `（${stillAlive.map((c) => `${c.id}@${c.paneId}`).join("、")}）—— 不归档。\n` +
-        "它们正在这份 plan 下干活，归档会把它们晾在没有主管的状态。要接手它们，用 " +
-        `\`orchestrator_attach({ orchestrationId: "${recorded?.orchestrationId ?? ""}" })\`；` +
-        "确实要放弃，先 `orchestrator_close` 掉它们再归档。",
-        { archived: false, liveChildren: stillAlive.length },
-      );
-    }
-
-    const archivePath = planArchiveRelPath(nowIso);
-    // THE USER DECIDES (2026-09-06, their answer to the design question).
-    // `confirm` resolves false when there is no UI at all, and that is the
-    // wanted direction: with nobody to ask, nothing moves.
-    const granted = await deps.confirm(
-      ARCHIVE_CONFIRM_TITLE,
-      buildArchiveConfirmMessage({ plan, archivePath, liveChildren: openChildren.length }),
-    );
-    if (!granted) {
-      return fail(
-        "review-gate: 用户没有同意归档（或当前环境没有可用的对话框）——什么都没有动，plan 还在原处。\n" +
-        "另一条路仍然可用：`orchestrator_attach` 接管这份 plan 所属的编排。",
-        { archived: false },
-      );
-    }
-
-    const written = deps.archivePlan(
-      archivePath,
-      buildPlanArchive({
-        plan,
-        ...(recorded ? { runtime: { orchestrationId: recorded.orchestrationId, children: recorded.children } } : {}),
-        at: nowIso,
-        by: deps.runtime().orchestrationId,
-      }),
-    );
-    if (!written.ok) {
-      return fail(
-        `review-gate: 归档写不出来（${written.error}）—— plan 原封不动留在 ${PLAN_RELPATH}。`,
-        { archived: false },
-      );
-    }
-    // THE RUNTIME GOES WITH IT. Leaving the old registry in the sidecar would
-    // leave `runtimeConflict` refusing every spawn of the NEW orchestration
-    // forever — the session would have tidied itself into a corner it cannot
-    // leave. It is not lost: the archive file above holds a copy.
-    deps.saveRuntime(emptyRuntime(deps.runtime().orchestrationId));
-    deps.log(
-      `orchestrator plan archived to ${written.path} ` +
-      `(plan hash ${plan ? planHash(plan) : "none"}, previous orchestration ${recorded?.orchestrationId ?? "none"})`,
-    );
-    return reply(
-      `review-gate: 旧 plan 已归档到 ${written.path}（连同它的编排登记表；**没有删除任何东西**）。\n` +
-      `${PLAN_RELPATH} 已让出来了 —— 现在可以 \`orchestrator_plan({action:"write"})\` 写这一轮自己的 plan，` +
-      "再 `submit` 请用户批准。",
-      { archived: true, path: written.path },
-    );
-  }
+  // (The ARCHIVE action is handled ABOVE, before the plan file has to parse.)
 
 
   if (action === PLAN_ACTIONS["set-status"]) {

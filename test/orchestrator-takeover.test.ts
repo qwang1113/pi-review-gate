@@ -218,6 +218,25 @@ test("the route names both ways out, with copyable commands", () => {
   assert.match(route, /不要手动删 plan 文件/, "the move that actually happened three times is named");
 });
 
+test("the route asserts NO fact about the session or the repo (reviewer P2)", () => {
+  // It is appended to EVERY identity refusal — including ones raised by a
+  // session that DID inherit an orchestration id, and in repos with no plan
+  // file at all. An earlier version opened by stating both of those as
+  // facts, which made the gate's own message wrong at several of its call
+  // sites. The specific reason is printed by the caller, right above this.
+  const route = buildTakeoverRoute({
+    candidates: { ids: [idOf(REPO, 1_700_000_000_000)] },
+    attempting: "接管一个编排",
+  });
+  assert.doesNotMatch(route, /RG_ORCHESTRATION_ID/,
+    "it must not claim anything about this session's environment");
+  assert.doesNotMatch(route, /已经有一份别人写好的 plan/,
+    "nor about what is in the repo — it may be a mistyped id and nothing else");
+  assert.match(route, /orchestrator_attach/, "what it DOES say is what can be done");
+  assert.match(route, /action: "archive"/);
+});
+
+
 test("with nothing discoverable the route says takeover is impossible — and still offers archive", () => {
   const route = buildTakeoverRoute({ candidates: { ids: [] }, attempting: "plan 的 write" });
   assert.match(route, /做不到/, "it must not print an attach command with no id in it");

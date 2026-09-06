@@ -204,9 +204,16 @@ export function buildTakeoverRoute(opts: {
   attempting: string;
 }): string {
   const lines = [
-    `review-gate: ${opts.attempting}需要一个编排身份，而本会话没有继承任何编排` +
-    "（env 里没有 RG_ORCHESTRATION_ID），本仓库却已经有一份别人写好的 plan。",
-    "两条路，都由门禁替你做完，**不要手动删 plan 文件**：",
+    // STATES NOTHING IT CANNOT KNOW (reviewer P2, 2026-09-06). This line used
+    // to assert two facts — "this session inherited no orchestration id" and
+    // "this repo already holds somebody else's plan" — that are true of the
+    // situation the module was written for and false at several of its call
+    // sites (a relay successor that DID inherit one, a repo with no plan at
+    // all, a caller who simply mistyped an id). Every caller prints its own
+    // specific reason immediately above this text; the route's job is only to
+    // say what can be DONE, and the two options below are true regardless.
+    `review-gate: ${opts.attempting}需要先把「这一轮编排的身份」定下来。` +
+    "下面两条路都由门禁替你做完，**不要手动删 plan 文件**：",
   ];
   if (opts.candidates.ids.length > 0) {
     lines.push("");

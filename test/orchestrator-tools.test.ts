@@ -854,6 +854,31 @@ test("archive moves the plan AND the registry aside, then the repo is free for a
   assert.ok(world.auditLog.some((line) => line.includes("plan archived")), "the archive is logged");
 });
 
+test("archive still works when the plan file does NOT parse — that is the sealed-shut case", async () => {
+  // THE DEAD END THIS PREVENTS. Every action below the plan-validation gate
+  // answers "the plan file does not validate" and does nothing else. With a
+  // corrupt plan AND another orchestration's runtime recorded, `write` is
+  // refused by the identity guard and `archive` would be refused by the
+  // parser — leaving `rm` as the only move, which is the exact situation the
+  // action exists to remove. So the archive runs BEFORE the plan must parse.
+  const recorded = previousHolder();
+  const world = makeFakeWorld({ recordedRuntime: recorded, identityConflict: recorded.orchestrationId });
+  // A plan file that exists but cannot be read as a plan.
+  world.deps.readPlan = () => ({ problems: ["plan 文件不是合法 JSON：Unexpected token"] });
+  world.confirmAnswers.push(true);
+
+  const reply = await world.call("orchestrator_plan", { action: "archive" });
+
+  assert.equal(reply.isError, undefined, replyText(reply));
+  const archived = [...world.scratch.entries()].find(([path]) => path.includes("orchestrator-plan.archived-"));
+  assert.ok(archived, "an unparseable plan must still be archivable");
+  const payload = JSON.parse(archived![1]);
+  assert.equal(payload.plan, undefined, "there is no parsed plan to record — and that is not a failure");
+  assert.equal(payload.orchestration.orchestrationId, recorded.orchestrationId,
+    "the registry is what makes it worth archiving here");
+});
+
+
 
 test("closing is limited to registered panes and returns the task to pending", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
