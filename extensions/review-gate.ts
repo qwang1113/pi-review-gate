@@ -284,6 +284,10 @@ import {
 } from "../lib/orchestrator-session-tools.ts";
 
 
+// The waiting skeleton's second interrupt source: a real user message ends a
+// long block (orchestrator_wait / judge_wait) instead of being queued behind it.
+import { notifyUserInput } from "../lib/poll-wait.ts";
+
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
 import { addGrant, emptyRuntime, hasGrant, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
@@ -7497,6 +7501,17 @@ export default function reviewGate(pi: ExtensionAPI) {
     // again, so auto-continuation may re-arm from this turn on ("extension"
     // is how the gate injects its own follow-ups — those never count).
     if (event.source !== "extension") lastRunAborted = false;
+    // …and it ENDS a long block. `orchestrator_wait` / `judge_wait` are minutes
+    // of blocking inside ONE turn, and a message typed during them used to sit
+    // in the host's steer queue until the budget ran out — measured at 14
+    // minutes of an unreachable project manager (B5). This event fires while a
+    // tool is still executing (measured 2026-09-06), so it is the whole
+    // trigger: no new tool, no new channel, nobody but the human at this
+    // session's keyboard. `source === "extension"` stays excluded — the gate's
+    // own [REVIEW_GATE_RESUME] follow-ups and an orchestrator's steer /
+    // followUp deliveries must never cut a review round short.
+    if (event.source !== "extension") notifyUserInput();
+
     // A real user message (interactive TUI or an RPC driver — never
     // "extension", which is how the gate injects its own [REVIEW_GATE_RESUME]
     // follow-ups) answers a standing ask_user pause: clear it and

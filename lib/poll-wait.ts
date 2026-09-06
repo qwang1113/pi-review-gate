@@ -25,6 +25,49 @@ export interface AbortLike {
   readonly aborted: boolean;
 }
 
+/**
+ * THE SECOND INTERRUPT SOURCE: the human speaking to THIS session (B5).
+ *
+ * MEASURED, 2026-09-04: a project manager sitting in `orchestrator_wait`
+ * ({ timeoutMs: 900000 }) was unreachable for 14 minutes — a message typed
+ * into its pane sat in the host's steer queue until the budget ran out, ESC
+ * only toggled the editor mode and only Ctrl+C landed. The wait already had
+ * an interrupt (`signal`); what it lacked was anybody to pull it.
+ *
+ * MEASURED, 2026-09-06 (/tmp/b5-probe — a real TUI driven by expect, blocking
+ * tool, message typed from outside): the host DOES emit its `input` event
+ * while a tool is blocking — source `interactive`, streamingBehavior `steer`,
+ * delivered the instant Enter is pressed — and a tool that watches it returned
+ * in 170ms instead of blocking out its 90s. So the extension's ALREADY
+ * EXISTING `pi.on("input")` handler is the whole trigger: no new tool, no new
+ * channel, and above all no "anyone can broadcast" entry point — the only
+ * thing that can pull this is the human typing into this very session.
+ *
+ * AN EPOCH, NOT A FLAG. The counter is read once when a wait starts, so an
+ * input that arrived BEFORE the wait can never end it and nothing (a test, a
+ * session, the next wait) has to remember to reset a flag. Concurrent waits
+ * all see the bump, which is the intent: the user spoke, every long block in
+ * this process should make way.
+ */
+let userInputEpoch = 0;
+/** Live waits to wake immediately, so nobody sits out the rest of a poll gap. */
+const userInputWaiters = new Set<() => void>();
+
+/**
+ * Tell every live wait in this session that a REAL user message just arrived.
+ *
+ * Called from the extension's `pi.on("input")` handler for anything the host
+ * did not inject itself (`source !== "extension"`): the gate's own
+ * `[REVIEW_GATE_RESUME]` follow-ups and an orchestrator's `steer` / `followUp`
+ * deliveries must NOT cut a wait short — `steer` means "carry on with this in
+ * mind", and `interrupt` already aborts the turn at the host level.
+ */
+export function notifyUserInput(): void {
+  userInputEpoch += 1;
+  for (const wake of [...userInputWaiters]) wake();
+}
+
+
 export interface PollWaitOptions<T> {
   /** Observe the world once — cheap, and safe to call repeatedly. */
   probe: () => T | Promise<T>;
@@ -70,6 +113,17 @@ export interface PollWaitResult<T> {
   done: boolean;
   /** Did the caller's signal abort the wait? */
   aborted: boolean;
+  /**
+   * WHICH interrupt ended it — present only when `aborted` is true.
+   *
+   * Optional on purpose: every reader that predates it keeps working, and the
+   * two are not interchangeable to a caller. `signal` is the host cancelling
+   * the call (ESC); `user-input` is a message that is about to be delivered,
+   * so the right reply says "somebody is talking to you" rather than "your
+   * budget ran out".
+   */
+  abortReason?: "signal" | "user-input";
+
   /** The budget expired while a probe was still running. */
   stalledInProbe: boolean;
   /** How long the call actually blocked. */
@@ -92,6 +146,9 @@ function realDeadlineTimer(ms: number): { promise: Promise<void>; cancel(): void
 
 /** Marker resolved by the deadline race — never a value a probe can return. */
 const TIMED_OUT = Symbol("poll-wait:timeout");
+/** Marker resolved by the user-input interrupt — likewise unforgeable by a probe. */
+const USER_INPUT = Symbol("poll-wait:user-input");
+
 
 /**
  * Poll `probe` until `isDone`, the budget expires, or the signal aborts.
@@ -114,37 +171,65 @@ export async function pollUntil<T>(opts: PollWaitOptions<T>): Promise<PollWaitRe
   // mutated by the HOST (the user pressing ESC), so a value TypeScript
   // narrowed on the previous line is exactly the value that must be re-read.
   const aborted = (): boolean => opts.signal?.aborted === true;
+
+  // The user-input interrupt, taken as a BASELINE here: only a message that
+  // arrives from now on can end this wait. `interrupted` wakes the loop out
+  // of a sleep the instant one does, so "in time" means milliseconds rather
+  // than the rest of a poll gap.
+  const epochAtStart = userInputEpoch;
+  const interruptedByInput = (): boolean => userInputEpoch !== epochAtStart;
+  let wake: () => void = () => {};
+  const interrupted = new Promise<typeof USER_INPUT>((resolve) => {
+    wake = () => resolve(USER_INPUT);
+  });
+  userInputWaiters.add(wake);
+  const stopRequested = (): boolean => aborted() || interruptedByInput();
+
   let observation: T | undefined;
   let stalledInProbe = false;
 
   try {
     for (;;) {
-      const probed = await Promise.race([Promise.resolve(opts.probe()), expired]);
+      const probed = await Promise.race([Promise.resolve(opts.probe()), expired, interrupted]);
       if (probed === TIMED_OUT) {
         stalledInProbe = observation === undefined;
         break;
       }
+      // A message that lands while a probe is still running ends the wait too
+      // — otherwise a slow probe would be exactly the case that keeps the
+      // session unreachable, which is the whole defect.
+      if (probed === USER_INPUT) break;
       observation = probed as T;
       opts.onProbe?.(observation, now() - startedAt);
       if (opts.isDone(observation)) break;
-      if (aborted()) break;
+      if (stopRequested()) break;
       if (now() >= deadline) break;
-      const slept = await Promise.race([sleep(pollMs), expired]);
+      const slept = await Promise.race([sleep(pollMs), expired, interrupted]);
       if (slept === TIMED_OUT) break;
-      if (aborted()) break;
+      if (slept === USER_INPUT) break;
+      if (stopRequested()) break;
       // NOTE: the budget is checked BEFORE the sleep, never after it. A probe
       // always follows a completed sleep, so the caller's last observation is
       // taken at the deadline rather than one poll interval before it.
 
     }
   } finally {
+    userInputWaiters.delete(wake);
     timer.cancel();
   }
+  // ESC wins the label when both fired: the host cancelled the call, so there
+  // is no turn left for a message to be delivered into.
+  const abortedBySignal = aborted();
+  const abortedByInput = interruptedByInput();
   return {
     ...(observation === undefined ? {} : { observation }),
     done: observation !== undefined && opts.isDone(observation),
-    aborted: aborted(),
-
+    aborted: abortedBySignal || abortedByInput,
+    ...(abortedBySignal
+      ? { abortReason: "signal" as const }
+      : abortedByInput
+        ? { abortReason: "user-input" as const }
+        : {}),
     stalledInProbe,
     waitedMs: now() - startedAt,
   };

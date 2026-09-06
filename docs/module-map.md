@@ -430,7 +430,10 @@ fail-closed）。`model-diagnose.ts`
 `constants.ts` 是全仓唯一的共享常量（代码/文档扩展名、敏感文件模式、ship 命
 令种类、语言指令、轮次上限）——`test/constants.test.ts` 用结构性测试逼着每个
 消费方 import 它而不是自己再写一份列表。`poll-wait.ts` 是通用等待骨架（探
-测、发布、按判据或预算停），判据由调用方注入：judge 等待与编排等待共用它。
+测、发布、按判据或预算停），判据由调用方注入：judge 等待与编排等待共用它；
+它还持有**第二个中断源** `notifyUserInput()` —— 扩展已有的 `pi.on("input")` 在
+收到真实用户消息（`source !== "extension"`）时拉它，本进程里每一个阻塞中的
+`pollUntil` 立刻返回 `aborted`，所以长阻塞的会话不会对人不可达（B5）。
 `workflow-commands.ts` 定义工作流命令及其提示词，含 `--execute` 授权字的严格
 解析。`tool-host.ts` 是每个 `lib/` 工具注册模块共用的 host 类型 seam。
 

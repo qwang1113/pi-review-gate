@@ -883,9 +883,10 @@ test("RESUME text: the unmet-gates branch points a waiting agent at ask_user", (
 test("pause resume: any non-extension input clears the pause (interactive AND rpc users)", () => {
   // source === "extension" is how the gate injects its own follow-ups; a
   // narrower filter (interactive-only) would deadlock RPC-driven sessions.
-  const start = SRC.indexOf('pi.on("input"');
-  assert.ok(start >= 0, "input handler must exist");
-  const body = SRC.slice(start, start + 1400);
+  // The window is ANCHORED at the handler's closing brace, not 1400 bytes
+  // wide: the fixed window rotted the moment the handler grew (B5 added the
+  // wait interrupt to it) and pushed the very line below out of range.
+  const body = windowOf('pi.on("input"', "\n  });", "input handler");
   assert.match(body, /event\.source !== "extension"/);
   assert.match(body, /delete state\.pausedQuestion/);
 });
@@ -927,9 +928,7 @@ test("ESC abort (Operation aborted) pauses auto-continuation until the next real
   assert.ok(injectAt > start, "agent_settled must contain the RESUME injection");
   assert.ok(SRC.slice(start, injectAt).includes("lastRunAborted"), "abort check must precede the RESUME injection");
   // …and any non-extension user input clears the pause again.
-  const inputStart = SRC.indexOf('pi.on("input"');
-  assert.ok(inputStart >= 0, "input handler must exist");
-  const inputBody = SRC.slice(inputStart, inputStart + 1800);
+  const inputBody = windowOf('pi.on("input"', "\n  });", "input handler");
   assert.match(inputBody, /lastRunAborted = false/);
 });
 
@@ -995,9 +994,7 @@ test("gate mode is decided by the agent itself in set_gate_mode — no LLM class
   assert.match(SRC, /let effective = requested;/,
     "the agent's requested mode must be the starting point of the decision");
   // The cache-only input capture must never decide anything itself.
-  const inputAt = SRC.indexOf('pi.on("input"');
-  assert.ok(inputAt >= 0, "first-input capture handler must exist");
-  const inputBody = SRC.slice(inputAt, inputAt + 600);
+  const inputBody = windowOf('pi.on("input"', "\n  });", "first-input capture handler");
   assert.doesNotMatch(inputBody, /classify|evaluateModeChange|setTaskMode/,
     "the input handler must cache only — decisions stay in set_gate_mode");
   assert.match(inputBody, /editFailurePending = false/,

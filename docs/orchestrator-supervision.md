@@ -316,6 +316,50 @@ tmux 抖动就会告诉项目经理它的孩子全死了。现在读不到就是
 未关闭的子会话按「都还活着」计入（保守方向是**挡住**收尾，绝不是凭空造一具尸体），
 并在块里明说存活状态未知。
 
+### 5.4 等待可以被人打断：外部消息就是第二个中断源（B5）
+
+`lib/poll-wait.ts` 的 `notifyUserInput()` + `extensions/review-gate.ts` 里**已有的**
+`pi.on("input")`
+
+**事故形状（2026-09-04 第一轮端到端实测）**：项目经理调
+`orchestrator_wait({timeoutMs: 900000})` 盯子会话，用户往它的 pane 里敲了一条消息 ——
+消息进了宿主的 steer 队列，**排了 14 分钟不生效**：ESC 只切编辑器模式，只有 `Ctrl+C`
+落地。这 15 分钟里项目经理对用户完全不可达。对照组刺眼：
+`orchestrator_instruct(interrupt)` 对**子会话**秒到且有回执，项目经理自己却没有对应的门。
+
+**实测（2026-09-06，`/tmp/b5-probe`：真实 pi TUI + expect 驱动 + 一个阻塞 90s 的探针
+工具 + 从外部敲入的消息）**：
+
+```
+TOOL start seconds=90
+INPUT source=interactive behavior=steer waitLive=true …   ← 阻塞进行到 23.0s
+TOOL end reason=input-abort elapsedMs=23041               ← 170ms 后返回
+```
+
+所以宿主**确实**在工具阻塞期间派发 `input` 事件（`prompt()` 在检查 `isStreaming`
+之前就调 `emitInput`），扩展里那个已经存在的 `pi.on("input")` 处理器就是全部所需的
+扳机。**没有新工具、没有新通道、更没有「谁都能广播」的入口** —— 能拉动它的只有坐在
+这个会话键盘前的人。
+
+规则三条：
+
+- **谁能拉**：`event.source !== "extension"`。门禁自己注入的
+  `[REVIEW_GATE_RESUME]`、以及项目经理 `orchestrator_instruct` 的 steer / followUp
+  投递都**不算** —— `steer` 的语义是「带着这条继续做」，而 `interrupt` 在宿主层本来
+  就会 abort 当前 turn。否则一条例行注入就能腰斩一轮 review。
+- **打断谁**：本进程里**每一个正在阻塞的 `pollUntil`**。它是等待骨架的第二个中断源
+  （第一个是 `signal`，即 ESC），所以 `judge_wait` 与 `orchestrator_wait` 一起受益 ——
+  子会话在 `judge_wait` 里被用户叫一声同样会提前返回（走它今天 ESC 中断走的那条
+  `pending` 分支：`done: false`、附已等秒数，不会被误报成有结论）。
+- **多快**：中断参与 probe 与 sleep 的 `Promise.race`，**毫秒级**，不是「下一个
+  poll 间隙」。计数器是**基线**不是标志位：进入等待时读一次，因此等待**开始之前**
+  到达的消息永远不会打断它，也没有任何东西需要「记得复位」。
+
+回执因此分两种中断说话（`abortReason` / `details.abortedBy`）：ESC 是宿主取消了这次
+调用；外部消息是**有人正在跟你说话** —— 那条消息已经在本会话队列里，本轮到达下一个
+边界就送到，所以回执明说这一点，而不是让项目经理把它读成「预算用完」。
+
+
 
 ---
 

@@ -22,7 +22,7 @@
  */
 
 import { Type } from "typebox";
-import { pollUntil } from "./poll-wait.ts";
+import { pollUntil, type PollWaitResult } from "./poll-wait.ts";
 import { ORCHESTRATOR_WAIT_DISCIPLINE } from "./agent-directives.ts";
 
 import { GATE_MODE_ENV } from "./task-mode.ts";
@@ -90,6 +90,21 @@ import {
   requireOrchestratorMode,
 } from "./orchestrator-tool-kit.ts";
 
+
+/**
+ * The `timeoutMs: 0` snapshot, expressed as the waiting skeleton's own result:
+ * a wait that did not wait. Nothing is invented — `done` is the SAME criterion
+ * the blocking path polls on, so the two branches cannot drift apart.
+ */
+function snapshotResult(observation: ChildWaitObservation): PollWaitResult<ChildWaitObservation> {
+  return {
+    observation,
+    done: evaluateChildWait(observation).done,
+    aborted: false,
+    stalledInProbe: false,
+    waitedMs: 0,
+  };
+}
 
 
 /**
@@ -205,8 +220,11 @@ async function doWait(
     };
   };
 
-  const waited = budgetMs === 0
-    ? { observation: probe(), waitedMs: 0, aborted: false, stalledInProbe: false }
+  // Typed as the skeleton's own result on BOTH branches: the snapshot path is
+  // "a wait that did not wait", not a different shape — so every field the
+  // reply reads (`abortReason` included) exists on it too.
+  const waited: PollWaitResult<ChildWaitObservation> = budgetMs === 0
+    ? snapshotResult(probe())
     : await pollUntil({
         probe,
         isDone: (observation) => evaluateChildWait(observation).done,
@@ -240,10 +258,25 @@ async function doWait(
   // as a spent budget; neither is an error, and neither leaves the caller
   // without a next step.
   if (waited.aborted) {
+    const waitedSeconds = Math.round(waited.waitedMs / 1000);
+    // TWO interrupts, and the difference matters to whoever reads this. ESC is
+    // the host cancelling the call. A user message is somebody TALKING TO YOU:
+    // it is already queued in this session and arrives the moment this turn
+    // reaches its next boundary, so the receipt says so instead of reading
+    // like a spent budget (B5 — a manager that used to be unreachable for the
+    // whole 900s budget while the message sat in the queue).
+    if (waited.abortReason === "user-input") {
+      return reply(
+        `review-gate: 等待被外部消息打断（已等 ${waitedSeconds}s）—— ` +
+        "有人正在跟你说话，那条消息已经在本会话的队列里，马上就会送到你面前；" +
+        "子会话还在跑，没有任何东西被取消。\n\n" + receipt.text,
+        { ...details, done: false, reason: "aborted", abortedBy: "user-input" },
+      );
+    }
     return reply(
-      `review-gate: 等待被中断（已等 ${Math.round(waited.waitedMs / 1000)}s）—— ` +
+      `review-gate: 等待被中断（已等 ${waitedSeconds}s）—— ` +
       "子会话还在跑，没有任何东西被取消。\n\n" + receipt.text,
-      { ...details, done: false, reason: "aborted" },
+      { ...details, done: false, reason: "aborted", abortedBy: "signal" },
     );
   }
   if (!decision.done && budgetMs > 0) {
