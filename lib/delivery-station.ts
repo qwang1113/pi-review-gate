@@ -146,6 +146,43 @@ export function deliveryStationLine(station: DeliveryStation): string {
 /** The choices, spelled out for a tool description or a refusal text. */
 export const DELIVERY_STATION_CHOICES = DELIVERY_STATIONS.join(" | ");
 
+/**
+ * The same three definitions in ENGLISH — for the tool descriptions and the
+ * per-turn directive, which are written in English.
+ *
+ * It exists for one reason: those surfaces used to hand-copy the sentence
+ * ("`precommit` (the gate's checks pass, the user commits) | …"), and a
+ * hand-copy of a definition is a copy that goes stale silently — the 2026-09-17
+ * sweep found the clause written out in `lib/restatement.ts`, `lib/loop-goal.ts`
+ * and `README.md` with no assertion tying any of them to this module. Callers
+ * render, they never restate: `test/delivery-station.test.ts` refuses a second
+ * copy anywhere under `lib/`.
+ */
+export function describeDeliveryStationEn(station: DeliveryStation): string {
+  switch (station) {
+    case "precommit":
+      return "the gate's checks pass, the USER commits";
+    case "commit":
+      return "the commit is made, the USER pushes";
+    case "pr":
+      return "the PR is open";
+  }
+}
+
+/** The English one-liner a tool description prints: every station, defined. */
+export const DELIVERY_STATION_CHOICES_EN = DELIVERY_STATIONS
+  .map((station) => `\`${station}\` (${describeDeliveryStationEn(station)})`)
+  .join(" | ");
+
+/**
+ * The Chinese choice list a refusal prints — one station per line, rendered
+ * from {@link describeDeliveryStation} so the refusal and the approval dialog
+ * can never define the same word differently.
+ */
+export function deliveryStationChoiceLines(indent = "  - "): string {
+  return DELIVERY_STATIONS.map((station) => indent + describeDeliveryStation(station)).join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // the ship gate's side: what a station REFUSES, and how to get past it
 // ---------------------------------------------------------------------------

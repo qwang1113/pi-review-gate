@@ -153,7 +153,7 @@ judge 之外还有第二类子会话，两者的形态**恰好相反**，不要�
 | 形态 | 交互式 pi，占用户 window 里与主会话同窗的一个 pane | 交互式 pi，占用户 window 里的一个 pane |
 | 谁开的 | `judge_submit`（意图入口；生命周期归门禁） | `orchestrator_spawn`（唯一入口） |
 | 「有事了」 | 新 channel report 落盘（门禁以标准报告唤醒） | **`orchestrator_wait` 的回执**（它自己去读每条通道，把结果推给你） |
-| 状态从哪来 | pane 存活（window 名单）+ channel 心跳/state/report 记录 | 七态结构化真值：`working` / `waiting-input` / **`waiting-judge`**（在等门禁自己派的 reviewer/precommit，附已等秒数，不叫醒项目经理）/ `idle` / `done` 由子会话自报（心跳是扩展自己的定时器，与 agent 是否活跃无关），`dead`（pane 消失）与 `stalled`（心跳超时 ⇒ 扩展真的不在了）由编排侧从外面判 |
+| 状态从哪来 | pane 存活（window 名单）+ channel 心跳/state/report 记录 | 八态结构化真值（权威清单：`lib/orchestrator-child-state.ts` 的 `CHILD_STATES`）：`working` / `waiting-input` / **`waiting-judge`**（在等门禁自己派的 reviewer/precommit，附已等秒数，不叫醒项目经理）/ `idle` / `done` / `mode-changed`（它改了门禁模式）由子会话自报（心跳是扩展自己的定时器，与 agent 是否活跃无关），`dead`（pane 消失）与 `stalled`（心跳超时 ⇒ 扩展真的不在了）由编排侧从外面判 |
 | 正常终态 | verdict 落 channel report（pane 按终结规则回收复用） | `declare_done` 之后**仍然活着** |
 | 异常终态 | pane 消失但结论未落盘（本轮不算结束，`judge_recover` 同 id 续接） | pane 消失（`dead`）或心跳停摆（`stalled`），用 `orchestrator_recover` 复活 |
 | 等待 | `judge_wait`（消息驱动，确实没活可做时才调；没在等时新 report 落盘仍以标准报告唤醒） | `orchestrator_wait` |

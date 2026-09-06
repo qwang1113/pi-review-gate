@@ -40,11 +40,11 @@ The design rule behind every tool below is one line from the user who asked for 
 
 | Tool | What the orchestrator asks for |
 |---|---|
-| `orchestrator_plan` | Read/replace the plan, submit it (the gate **audits** it with a judge process first and only then asks the **user** to approve), move a task through its state machine, record and resolve decisions only the human can settle. A rewrite that grants nothing new — a narrowed boundary, a file refined inside a directory the task already had, an added dependency — keeps the approval and records why; real widening still asks. |
+| `orchestrator_plan` | Read/replace the plan, submit it (the gate **audits** it with a judge process first and only then asks the **user** to approve), move a task through its state machine, record and resolve decisions only the human can settle, and **archive** a previous orchestration's plan when a new round starts (the user is asked first, nothing is deleted, and it refuses while a registered child pane is still alive). A rewrite that grants nothing new — a narrowed boundary, a file refined inside a directory the task already had, an added dependency — keeps the approval and records why; real widening still asks. |
 | `orchestrator_spawn` | “Open a child session for task X.” The gate picks the split direction, injects the orchestration id, starts it in `loop` mode in the repo its task declares (same-repo children are serialized; only different repos run in parallel — the isolated worktree is gone since 2026-09-07), and registers the pane. |
 | `orchestrator_wait` | The orchestrator's **one** information channel — call it every round. Blocking or, with `timeoutMs: 0`, an instant snapshot; the reply is the same either way (see below). |
 | `orchestrator_answer` | Answer the question a child is holding. The question, every option and the full payload are already in the wait receipt — the child wrote them there, so nothing was read off a screen. Approving a child's loop goal — or confirming its requirement restatement — happens here too, and is never a rubber stamp: it requires a `crosscheck` (the task id plus one judgement each on file boundary / task goal / delivery station), it is boundary-checked against the draft the CHILD wrote, and a station looser than the approved plan's is refused. |
-| `orchestrator_instruct` | Say something to a child (`steer` / `followUp`) or stop it (`interrupt`). Nothing is typed at a terminal: the text goes through the child's channel and its own gate injects it with `pi.sendUserMessage`. |
+| `orchestrator_instruct` | Say something to a child. `mode` IS the delivery, and it **defaults to `interrupt`** (2026-09-17, user decision: a supervisor writes because the child should know NOW) — it aborts the turn in flight and carries its own text, so one call says "stop, do this instead". The one alternative is `steer` (cut into the current turn without aborting it). `followUp` is **refused at this parameter surface** — a correction that arrives after the round it was meant to correct is a correction nobody applied; it remains a channel delivery mode, and the judge's next-round dispatch still uses it. Nothing is typed at a terminal: the text goes through the child's channel and its own gate injects it with `pi.sendUserMessage`. |
 | `orchestrator_notify` | The **only** channel to the human who is not watching the terminal. |
 | `orchestrator_recover` | Bring a child back after its pane vanished — same `--session-id`, so its transcript continues rather than starting over. |
 | `orchestrator_attach` | Take over a running orchestration: plan, children, unanswered questions, and the orphan tasks a crash left behind. |
@@ -1035,9 +1035,11 @@ one fact:
 - **Then RESTATE the requirement — mechanically (since 2026-09-06).**
   `propose_restatement({restatement, station})` says the requirement back to
   the user (what it is, an example, BEFORE → AFTER, which steps change) and
-  fixes where this round stops: `precommit` (the gate's checks pass, the USER
-  commits) | `commit` (the commit is made, the USER pushes) | `pr` (the PR is
-  open). Without a confirmed restatement on record, `propose_loop_goal` and
+  fixes where this round stops — one of the three delivery stations
+  (`precommit` | `commit` | `pr`), each DEFINED once in
+  `lib/delivery-station.ts` and rendered from there into every tool
+  description and dialog. Without a confirmed restatement on record,
+  `propose_loop_goal` and
   `orchestrator_plan({action:"submit"})` refuse outright and render **no
   dialog at all**. The rules — what counts as a restatement, what a missing
   station degrades to, which ship commands each station allows — live in
@@ -1454,7 +1456,7 @@ Git-hook bypass (human escape hatch): `REVIEW_GATE_BYPASS=1 git commit ...`
 | ~~`judge_read`~~ / `judge_close` | `judge_read` is REMOVED (2026-09-05) — a zero-caller path: not on the agent surface and called by no gate chain, so its only remaining effect was to give injected texts a tool name nobody could reach. `judge_close` stays on the gate's internal host for its own audit chains (they close the auditor they opened); `declare_done` cascade-closes the rest. |
 
 | `judge_spawn` / `judge_answer` / `judge_recover` | Pane-judge lifecycle, opener-owned: open a goal/plan review in its own pane (the gate builds the audit task and registers the draft/hash, so the report is recordable; goal and plan serialize on one judge id), answer your own review's open question, re-open a dead pane under the same session id. Any other session's call on them is refused fail-closed. |
-| `orchestrator_plan` / `orchestrator_spawn` / `orchestrator_wait` / `orchestrator_answer` / `orchestrator_instruct` / `orchestrator_notify` / `orchestrator_recover` / `orchestrator_attach` / `orchestrator_handoff` / `orchestrator_close` | The orchestration layer, available only in `orchestrator` mode — see [The orchestrator role](#the-orchestrator-role-a-project-manager-inside-the-gate). The decisions live in `lib/orchestrator-*.ts` (plan state machine, the plan pre-audit, whether an edit widened anything, file-boundary algebra, the supervision channel and its seven states, pane decoration, tmux argv construction, the bash backstop, the 14 constraints, the handoff protocol); the extension only wires them up. |
+| `orchestrator_plan` / `orchestrator_spawn` / `orchestrator_wait` / `orchestrator_answer` / `orchestrator_instruct` / `orchestrator_notify` / `orchestrator_recover` / `orchestrator_attach` / `orchestrator_handoff` / `orchestrator_close` | The orchestration layer, available only in `orchestrator` mode — see [The orchestrator role](#the-orchestrator-role-a-project-manager-inside-the-gate). The decisions live in `lib/orchestrator-*.ts` (plan state machine, the plan pre-audit, whether an edit widened anything, file-boundary algebra, the supervision channel and its child states — `CHILD_STATES` in `lib/orchestrator-child-state.ts` is the list, and nothing else keeps a copy of it — pane decoration, tmux argv construction, the bash backstop, the 14 constraints, the handoff protocol); the extension only wires them up. |
 | `declare_done` | Completion claim, **re-validated server-side** — rejects with `isError` if any gate is unmet (the reject hint reminds you that late doc/handoff edits invalidate the READY fingerprint, so finish all edits before the final review). "Declaring ≠ executing." It also enforces the COMPLETION-only requirements the ship gate deliberately does not carry: an open Copilot review cycle (L7), an unapproved loop goal (L8), and — in loop mode — ARRIVAL at the round's delivery station (`commit` needs a committed worktree; `pr` additionally needs evidence that a PR was opened — a `gh pr create` the gate itself watched succeed, or a PR number the Copilot cycle resolved; `precommit` adds nothing). On accept the work **stays on the branch it was done on** (2026-09-07: the gate no longer merges anything — merging/rebasing/pushing is the user's own git workflow). It also clears the per-task round history so a subsequent task in the same session starts its round counter fresh. |
 | `propose_restatement` | Say the requirement BACK to the user and get it confirmed — the mandatory step before `propose_loop_goal` (loop) or `orchestrator_plan({action:"submit"})` (orchestrator), both of which refuse and render **no dialog** without a confirmed restatement on record (L8a). The text is Simplified Chinese and must carry a BEFORE → AFTER contrast; `station` fixes where this round stops (`precommit` \| `commit` \| `pr`) and is what L1 and `declare_done` later enforce. An orchestrator may confirm it on the user's behalf — with a `crosscheck`, and never at a station looser than the approved plan's. Rules: `lib/restatement.ts` + `lib/delivery-station.ts`. |
 | `propose_loop_goal` | Submit the **negotiated** loop goal for the user's approval (L8). Interview the user first with `ask_user` (ONE question per turn, labeled "N of M", each with your recommended answer — all at once only when the user asks for it), and draft it in Simplified Chinese. **REQUIRED FIRST (L8b):** the draft must pass an audit by the dedicated `goal-auditor` role — and **this one call runs that audit itself**: it builds the auditor's task (carrying the previous verdict, its findings and the computed draft delta when this is a re-audit), dispatches the judge, waits for it, adjudicates the verdict (**only P0/P1 block**, so a READY carrying P2/Nit findings is a PASS and never buys another round) and records the PASS bound to the sha256 of the audited text. A failed audit comes back with the objections and renders **NO dialog at all** — fix them and call this again, which makes this a minutes-long call. Only on a PASS does the **extension** show the text in a confirm dialog (**no `confirmed` parameter**), and only on approval does the extension write `.pi/loop-goal.md` itself and record the sha256 of exactly that text. Approval binds to CONTENT: editing the file afterwards drops it. In loop mode an unapproved goal blocks commit/push/PR at L1 AND blocks edit/write tool calls until approved (each repo checks its own goal; the `repo` parameter binds the goal to a specific repo — required to unlock edit/write in a second repo, `gitRootOfDir(repo)` decides which one); the confirm dialog no longer asks for an optional reason (a rejection still asks for the reason, carried back for renegotiation). An unapproved goal's body is withheld from the prompt. |
@@ -1855,7 +1857,7 @@ it is missing — see the fail-closed inventory.)
 
 ```bash
 npm install     # devDependencies: typescript + the Pi extension API types
-npm test        # 990+ tests, node:test native TS (no build step)
+npm test        # 2688 tests as of 2026-09-17, node:test native TS (no build step)
 npm run typecheck  # tsc --noEmit
 ```
 
@@ -1954,7 +1956,13 @@ enforcement path — ship blocks, `declare_done`, the verdict recorder, arbitrat
 and the git hooks — recomputes the real fingerprint unconditionally, so a
 stale memo can only produce a stale prompt, never a stale gate decision.
 
-Layout:
+Layout — an EXCERPT, not the inventory. `lib/` has well over a hundred modules
+and this list names the ones a newcomer meets first; the complete table, with
+one line per module, is §5 of [`docs/module-map.md`](docs/module-map.md), and
+it is the one that cannot go stale (`test/module-map.test.ts` diffs it against
+`lib/` in both directions). Read the map before deciding where new code goes —
+§7 of the same file additionally records which pieces of doctrine are copied
+onto several surfaces and which test pins each copy.
 
 ```
 extensions/review-gate.ts     Pi extension (L1 + L2 + L4, tools, commands)
@@ -1983,6 +1991,11 @@ lib/poll-wait.ts              the wait skeleton with its criteria injected (pure
 lib/progress-stream.ts        live tool progress: pure frame rendering + a throttled reporter over `onUpdate`, and the slow-call notice for the LLM guards
 lib/text-appeal.ts            A-class text appeals (pure): content digest, quota + re-roll brakes, the single-use pass, the arbiter brief
 lib/git-rewrite.ts            message-only rewrites (pure): tree-equality test, `--amend` recognition, the branch a rebase will land on
+lib/delivery-station.ts       THE delivery station: the three values DEFINED once (precommit/commit/pr), which ship commands each allows, the block text and its way out, and arrival
+lib/restatement.ts            the requirement restatement the gate demands before any contract — what counts as one, the refusal skeleton, the consent surfaces
+lib/loop-goal.ts              the loop goal (L8): the exit contract, its approval binding, and the per-turn directives that teach the negotiation
+lib/orchestrator-child-state.ts   CHILD_STATES + the classification of what a supervised child is doing (pure; the states come from the child's own reports)
+lib/judge-pane.ts             the judge in its own tmux pane: argv, the deterministic session id, pane lifecycle and scratch reclamation
 lib/judge-prompt.ts            judge role resolution (repo → package → ~/.pi/agent/agents), model spec, launcher files
 lib/parallel-review.ts        single-review contract: reviewer prompt + verdict schema (pure, no engine)
 lib/model-diagnose.ts         agent model-chain diagnosis against the registry (advisory)
@@ -1997,7 +2010,7 @@ scripts/precommit-cache.mjs   per-step result cache keyed on git trees
 scripts/install-git-hooks.sh  chained installer for L3
 hooks/pre-commit|pre-push|commit-msg
 skills/review-loop/SKILL.md   the loop protocol as a Pi skill
-test/                         990+ tests incl. PR #7 regression suite
+test/                         2688 tests as of 2026-09-17, incl. the PR #7 regression suite
 ```
 
 ## License

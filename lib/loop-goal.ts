@@ -33,7 +33,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TaskMode } from "./task-mode.ts";
-import type { DeliveryStation } from "./delivery-station.ts";
+import { DELIVERY_STATION_CHOICES_EN, type DeliveryStation } from "./delivery-station.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
 
@@ -640,8 +640,7 @@ export const LOOP_GOAL_MISSING_DIRECTIVE =
   "below refuses outright and shows NO dialog. Write it in SIMPLIFIED CHINESE and cover what the " +
   "thing is, a concrete example, what it looks like BEFORE the change and AFTER it, and which " +
   "steps become different (the before/after contrast is required). `station` is where THIS round " +
-  "stops — precommit (the gate's checks pass, the USER commits) | commit (the commit is made, the " +
-  "USER pushes) | pr (the PR is open) — ask the user rather than choosing for them. Requirement " +
+  "stops — " + DELIVERY_STATION_CHOICES_EN + " — ask the user rather than choosing for them. Requirement " +
   "changed later? Restate again; the newest confirmation wins.\n" +
   "3. Draft the goal in SIMPLIFIED CHINESE (technical identifiers, tool names, paths and code " +
   "tokens stay English): task title, one-line intent, 3–7 checkable exit criteria, non-goals, " +

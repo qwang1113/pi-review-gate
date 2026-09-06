@@ -57,6 +57,8 @@ import { Type } from "typebox";
 
 import {
   DELIVERY_STATION_CHOICES,
+  DELIVERY_STATION_CHOICES_EN,
+  deliveryStationChoiceLines,
   deliveryStationLine,
   parseDeliveryStation,
   type DeliveryStation,
@@ -330,7 +332,11 @@ export function buildRestatementMissingRefusal(tool: RestatementGatedTool): stri
     "",
     RESTATEMENT_SKELETON,
     "",
-    "交付站点三选一：precommit（门禁跑通，用户自己 commit）/ commit（提交完成，用户自己 push）/ pr（做到 PR 开出来）。",
+    // RENDERED, never restated: the three definitions live once, in
+    // lib/delivery-station.ts. This file used to carry a hand-copied second
+    // version of them (2026-09-17 sweep).
+    "交付站点三选一：",
+    deliveryStationChoiceLines(),
     "拿不准就用 `ask_user` 问用户，别自己替他选。",
     "",
     "若你认为这是误判（例如本轮根本不是交付性工作）：用 `ask_user` 把这件事交给用户 —— " +
@@ -562,8 +568,7 @@ export function registerRestatementTools(host: ToolHost, deps: RestatementToolDe
       "and cover: what the thing is, a concrete example, what it looks like BEFORE the change and " +
       "AFTER it, and which steps become different — the before/after contrast is REQUIRED (arrows " +
       "→ / -> / ⇒ / => or 改之前…改之后 both count). `station` says where THIS round stops: " +
-      "`precommit` (the gate's checks pass, the user commits) | `commit` (the commit is made, the " +
-      "user pushes) | `pr` (the PR is open) — ask the user rather than choosing for them; an " +
+      DELIVERY_STATION_CHOICES_EN + " — ask the user rather than choosing for them; an " +
       "unreadable value is recorded as the strictest, `precommit`. `repo` binds the restatement to " +
       "one repo (default: this session's), same meaning as propose_loop_goal's. The extension " +
       "shows the text to the user and records the confirmation itself; an orchestrator may answer " +

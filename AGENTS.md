@@ -383,8 +383,10 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   **文件路径、不属于任何进程** —— 项目经理换人时打开同一批路径即可，子会话
   完全无感。旧的全局广播队列已删除。
 - **状态取真值**：子会话侧门禁用 `ctx.isIdle()` / `ctx.getContextUsage()` 上报
-  working / waiting-input / **waiting-judge** / idle / done；`dead` 由 pane 消失
-  判定，`stalled` 由心跳超时判定。`working` 还带一个**进展维度**（第五轮 E）：
+  working / waiting-input / **waiting-judge** / idle / done / mode-changed；`dead` 由 pane
+  消失判定，`stalled` 由心跳超时判定（这八个状态的权威清单是
+  `lib/orchestrator-child-state.ts` 的 `CHILD_STATES`，本文不再另立一份）。
+  `working` 还带一个**进展维度**（第五轮 E）：
   健康快照给出「自上次推进（工具调用 / turn 边界，不含心跳）以来的时长」，让长时间
   无进展的 `working` 与卡死可被区分 —— 它只是回执里的一个**读数**，不改变
   `isNewsworthy`、不叫醒项目经理。`screenLooksBusy`、屏幕解析与按键模拟全部删除，

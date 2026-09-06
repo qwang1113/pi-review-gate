@@ -69,16 +69,19 @@
 
 ---
 
-## 二、状态：七态，全部来自真值
+## 二、状态：八态，全部来自真值
 
-`lib/orchestrator-child-state.ts`（判定）+ `lib/orchestrator-child-channel.ts`（子会话侧上报）
+`lib/orchestrator-child-state.ts`（判定，其中 `CHILD_STATES` 是这份清单的唯一权威）
++ `lib/orchestrator-child-channel.ts`（子会话侧上报）
 
 | 状态 | 判据 | 谁测的 |
 | --- | --- | --- |
 | `working` | 子会话自报（`ctx.isIdle() === false`，或有 pending 消息）**或**自报 `idle` 但 `IDLE_PROGRESS_GRACE_MS`（120s）内有推进 | 它自己（见 §2.4） |
 | `waiting-input` | 通道里有**未销账的 request** | 它自己 |
+| `waiting-judge` | 它在等门禁**自己派出去**的活（reviewer / 全量 precommit），附已等秒数与在等谁 | 它自己（见 §2.3） |
 | `idle` | 自报停下了、没有完成记录，**且已 120s 没有推进** | 它自己 + 进展戳 |
 | `done` | 自报停下了，且它的门禁写下了 `declare_done` 的完成记录 | 它自己 |
+| `mode-changed` | 它换了门禁模式（loop→explore/normal/orchestrator）——项目经理必须知道 | 它自己 |
 | `dead` | pane 不在 `list-panes` 的输出里 | 编排层（从外面） |
 | `stalled` | pane 还在，但通道心跳超过 `HEARTBEAT_STALE_MS`（180s） | 编排层（推断） |
 
@@ -754,7 +757,7 @@ pane 标题 —— 那就是回到读屏幕了。
 | --- | --- | --- |
 | `lib/orchestrator-channel.ts` | 通道路径、记录 schema、追加/读取/游标、spill、投影、心跳判定 | IO 经注入的 seam |
 | `lib/orchestrator-child-channel.ts` | 子会话侧：上报、两方竞态提问、读取与确认指令 | IO/对话框/计时器全注入 |
-| `lib/orchestrator-child-state.ts` | 七态判定（含 `waiting-judge`）、健康行、退避常量 | 纯函数 |
+| `lib/orchestrator-child-state.ts` | 状态判定与 `CHILD_STATES` 清单（八态，含 `waiting-judge` / `mode-changed`）、健康行、退避常量 | 纯函数 |
 | `lib/orchestrator-supervisor.ts` | 编排侧：读所有通道、判定、决定什么算新闻、渲染回执 1–3 块 | 纯（IO 经 seam） |
 | `lib/orchestrator-handoff-advice.ts` | 上下文用量 → 接力时机 | 纯函数 |
 | `lib/orchestrator-wait.ts` | 等待判据、预算、回执装配（含第 4、5 块） | 纯函数 |

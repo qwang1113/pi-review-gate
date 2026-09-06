@@ -43,7 +43,7 @@ import {
   HEARTBEAT_STALE_MS,
 } from "./orchestrator-channel.ts";
 
-/** The seven states a registered child can be in. */
+/** The states a registered child can be in — enumerated in {@link CHILD_STATES}. */
 export type ChildState =
   /** Its own report says it is streaming, or it has work in flight. */
   | "working"
@@ -70,6 +70,41 @@ export type ChildState =
   | "dead"
   /** Pane alive, but nothing has been reported for long enough to worry. */
   | "stalled";
+
+/**
+ * THE state list, at runtime — so that a doc, a receipt or a test can be
+ * checked against the union instead of against somebody's memory of it.
+ *
+ * It exists because the memory was already wrong: `mode-changed` was added
+ * long after the "seven states" wording entered `README.md`,
+ * `docs/execution-model.md` and `docs/orchestrator-supervision.md`, and every
+ * one of those still said seven on 2026-09-17 — including the comment that
+ * used to sit above this very union. Nothing could have caught it; a type
+ * union is invisible at runtime.
+ *
+ * Both directions are compile-time facts, so drift cannot survive `tsc`:
+ * `satisfies` refuses a member that is not a state, and {@link ChildStateGap}
+ * refuses a state that is missing from the array.
+ */
+export const CHILD_STATES = [
+  "working",
+  "waiting-input",
+  "waiting-judge",
+  "done",
+  "idle",
+  "mode-changed",
+  "dead",
+  "stalled",
+] as const satisfies readonly ChildState[];
+
+/**
+ * `never` when {@link CHILD_STATES} covers the union — anything else is a
+ * state the array forgot, and the assignment below stops compiling.
+ */
+type ChildStateGap = Exclude<ChildState, (typeof CHILD_STATES)[number]>;
+const _everyStateIsListed: ChildStateGap extends never ? true : never = true;
+void _everyStateIsListed;
+
 
 
 /** One measurement of one child. Every field is observed, never assumed. */

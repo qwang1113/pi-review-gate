@@ -18,11 +18,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { codeSurfaces, proseSurfaces, readRepoFile, readSurfaces } from "./helpers/doc-surfaces.ts";
 import { SHIP_COMMAND_KINDS, type ShipCommandKind } from "../lib/constants.ts";
 import {
   DEFAULT_DELIVERY_STATION,
   DELIVERY_STATIONS,
+  DELIVERY_STATION_CHOICES_EN,
   allowedShipKinds,
+  deliveryStationChoiceLines,
+  describeDeliveryStationEn,
   deliveryStationLine,
   deliveryStationRank,
   describeDeliveryStation,
@@ -230,5 +234,94 @@ test("arrival: `pr` owes a committed worktree AND evidence that a PR was opened"
   // everything it still owes in one reply.
   assert.equal(stationArrivalProblems("pr", { dirty: true, recordedPr: null }).length, 2);
 });
+
+// ---------------------------------------------------------------------------
+// ONE DEFINITION (2026-09-17): the sentence that says what a station MEANS
+// ---------------------------------------------------------------------------
+//
+// `docs/module-map.md` §7.2 listed this as an unpinned copy and was right: the
+// Chinese definition was written out a second time in `lib/restatement.ts`, the
+// English one a third and fourth time in `lib/restatement.ts` and
+// `lib/loop-goal.ts`, and a fifth in `README.md` — inside a paragraph that
+// claimed the rules "are not restated here". Nothing tied any of them to
+// `describeDeliveryStation`, so a corrected definition would have reached the
+// dialog and left every tool description saying the old thing.
+//
+// The convergence is structural: callers RENDER (`describeDeliveryStationEn`,
+// `DELIVERY_STATION_CHOICES_EN`, `deliveryStationChoiceLines`) and never
+// restate. These two tests are what keeps it that way.
+
+test("the station definitions live in ONE file — no other source restates them", () => {
+  const AUTHORITY = "lib/delivery-station.ts";
+  const definitions = [
+    ...DELIVERY_STATIONS.map(describeDeliveryStation),
+    ...DELIVERY_STATIONS.map(describeDeliveryStationEn),
+  ];
+
+  // (1) The needles are real needles: the authority itself contains all six.
+  // Without this, a renamed sentence would empty the scan and pass silently.
+  const authorityText = readRepoFile(AUTHORITY);
+  for (const definition of definitions) {
+    assert.ok(
+      authorityText.includes(definition),
+      `${AUTHORITY} must literally contain the definition it renders: ${definition}`,
+    );
+  }
+
+  // (2) The scan sees what it claims to — including every file that used to
+  // carry a copy. A scan that lost them would report "converged" forever.
+  const scanned = [...codeSurfaces(), ...proseSurfaces()];
+  for (const rel of ["lib/restatement.ts", "lib/loop-goal.ts", "lib/orchestrator-plan.ts", "README.md", "AGENTS.md"]) {
+    assert.ok(scanned.includes(rel), `the scan must cover ${rel} — it carried a copy before`);
+  }
+  assert.ok(scanned.length > 100, `the scan looks too narrow (${scanned.length} files)`);
+
+  // (3) The verdict.
+  for (const rel of scanned) {
+    if (rel === AUTHORITY) continue;
+    const text = readRepoFile(rel);
+    for (const definition of definitions) {
+      assert.ok(
+        !text.includes(definition),
+        `${rel} writes out a delivery-station definition ("${definition}") that ${AUTHORITY} already owns. ` +
+          "Render it instead (describeDeliveryStation / describeDeliveryStationEn / " +
+          "DELIVERY_STATION_CHOICES_EN / deliveryStationChoiceLines) — a hand-copied definition is one " +
+          "nobody updates when the real one changes.",
+      );
+    }
+  }
+});
+
+test("every surface that summarises the station points at the module that defines it", () => {
+  // The other half of the contract: a summary is allowed, an unattributed
+  // summary is not — the reader has to be able to reach the authority.
+  const surfaces = readSurfaces([
+    { path: "AGENTS.md", anchor: "交付站点" },
+    { path: "README.md", anchor: "delivery station" },
+    { path: "QUICKSTART.md", anchor: "交付站点" },
+    { path: "docs/dev-flow.md", anchor: "交付站点" },
+    { path: "skills/review-loop/SKILL.md", anchor: "station" },
+  ]);
+  for (const { path, text } of surfaces) {
+    assert.ok(
+      text.includes("lib/delivery-station.ts"),
+      `${path} summarises the delivery station but never names lib/delivery-station.ts — ` +
+        "a summary without a pointer is where the next stale copy starts",
+    );
+  }
+});
+
+test("the rendered choice lists are derived, not typed out again", () => {
+  // Structural, not textual: if someone replaces the renderers with literals,
+  // changing `describeDeliveryStation` stops moving them and this fails.
+  for (const station of DELIVERY_STATIONS) {
+    assert.ok(DELIVERY_STATION_CHOICES_EN.includes(describeDeliveryStationEn(station)));
+    assert.ok(deliveryStationChoiceLines().includes(describeDeliveryStation(station)));
+  }
+  // One line per station, and the indent is the caller's.
+  assert.equal(deliveryStationChoiceLines().split("\n").length, DELIVERY_STATIONS.length);
+  assert.ok(deliveryStationChoiceLines("* ").startsWith("* precommit"));
+});
+
 
 

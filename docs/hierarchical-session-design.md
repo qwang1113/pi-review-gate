@@ -66,7 +66,7 @@
 
 opener 能从门禁拿到的关于自己 review 的信息，只有三件，不多不少：
 
-1. 状态（`working` / `waiting-input` / `idle` / `done` / `dead` / `stalled`，沿用 `orchestrator-child-state.ts` 七态判定，心跳仍是子会话侧独立定时器）；
+1. 状态（沿用 `orchestrator-child-state.ts` 的状态判定，清单以该模块的 `CHILD_STATES` 为准，心跳仍是子会话侧独立定时器）；
 2. findings 流计数（读 `.pi/review-stream/<round>.jsonl` 行数，不推内容）；
 3. 结束 verdict（`record_review` 落盘后的结论正文）。
 
@@ -97,7 +97,7 @@ opener 能从门禁拿到的关于自己 review 的信息，只有三件，不�
 | `lib/hierarchy.ts`（新建） | opener 注册表 + `caller is opener` 校验（纯函数，IO 经 seam，便于单测）。这是“门禁维持秩序”的唯一实现点 |
 | `lib/orchestrator-channel.ts`（改） | 通道 key 从 `<orch-id>/<child-id>` 泛化为 `<opener-id>/<judge-id>`（opener 可以是 session id）；新增 `report` 记录种（verdict 摘要 + findings 计数 + payload spill 引用）。不另起 judge-channel 模块：记录/spill/游标/IO seam 是同一套原语，另起即重复实现，分 planes 只在 key 命名上区分 |
 | `lib/judge-lifecycle.ts`（改） | dispatch 改走 pane（调 `judge-pane.ts`）；verdict 记录（`record_review`、STALE 判定、tree 绑定）原样保留 |
-| `lib/orchestrator-child-state.ts`（复用，不改） | 七态判定给 review 通道直接用 |
+| `lib/orchestrator-child-state.ts`（复用，不改） | 状态判定（清单见 `CHILD_STATES`）给 review 通道直接用 |
 | `extensions/review-gate.ts`（只改接线） | 注册新工具 + 注入 deps（opener 身份、registry）。判定逻辑一律不在扩展里 |
 | `test/hierarchy.test.ts`（新建） | 跨级拒绝矩阵（PM 动子会话的 review、子会话互操作、opener 自操作）纯函数单测 |
 

@@ -111,9 +111,10 @@ export interface OrchestratorPlan {
   decisions: PlanDecision[];
   maxParallel: number;
   /**
-   * WHERE THIS ORCHESTRATION STOPS (2026-09-06) — `precommit` (the gate's
-   * checks pass, the user commits), `commit` (the commit is made, the user
-   * pushes) or `pr` (the PR is open).
+   * WHERE THIS ORCHESTRATION STOPS (2026-09-06) — one of the three stations
+   * DEFINED in lib/delivery-station.ts (`describeDeliveryStation` /
+   * `describeDeliveryStationEn`). This comment deliberately does not repeat
+   * what each one means: that sentence has ONE home.
    *
    * Always present after {@link parsePlan}: a plan file written before the
    * field existed, or carrying an unreadable value, is READ as `precommit`

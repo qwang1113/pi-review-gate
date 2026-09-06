@@ -99,7 +99,7 @@ agent：调 set_gate_mode("loop")
 | `loop mode requires an approved loop goal BEFORE any edit/write call` | loop 模式（含未决）还没确认目标就动手编辑 | 先逐轮问清"done"的定义 → 中文起草 → `propose_loop_goal`（它自己跑 goal-auditor 预审，过了才弹对话框让你确认）；批准前 edit/write 一律被拦（`.pi/` 与 `.pi-subagents/` 门禁自有文件除外；explore/normal 模式不要求 goal） |
 | `propose_loop_goal refused — no goal-auditor pre-review has been recorded` （或 `…belongs to DIFFERENT text`） | 审计没过，或过了之后又改过字（hash 变了） | 按退回来的 findings 改草稿，**再调一次 `propose_loop_goal`** —— 它会重新跑审计（重审时自动带上一轮结论与草稿差异）。没有第二个调用要做 |
 | `propose_loop_goal 被拒 —— 还没有经用户确认的「需求反述」` | 跳过了反述这一步（2026-09-06 起是硬前置） | 先 `propose_restatement({restatement, station})`：反述里必须有「改之前 → 改之后」的对照，`station` 三选一（precommit / commit / pr）。拒绝文案里带可直接照抄的骨架 |
-| `超出本轮交付站点 …` （ship 命令被拦，但 review/precommit 都是绿的） | 这条 ship 命令走得比本轮说好的站点更远 | 站点是契约不是门禁：再跑审查也解不开。要么就停在这一站（由用户自己 commit/push），要么请用户重新 `propose_restatement` 选更远的站点并重谈 goal（编排下则是 PM 改 plan 的 `deliveryStation` 后重批） |
+| `超出本轮交付站点 …` （ship 命令被拦，但 review/precommit 都是绿的） | 这条 ship 命令走得比本轮说好的站点更远 | 站点是契约不是门禁：再跑审查也解不开。要么就停在这一站（由用户自己 commit/push），要么请用户重新 `propose_restatement` 选更远的站点并重谈 goal（编排下则是 PM 改 plan 的 `deliveryStation` 后重批）。三个站点各是什么、各放行哪些 ship 命令，定义只有一份：`lib/delivery-station.ts` |
 | `goal-auditor` 角色不可派发（拒绝文案里的 BOOTSTRAP 段） | `~/.pi/agent/agents/goal-auditor.md` 缺失 | 开一个新会话（扩展会在启动时从包内 `agents/` 幂等自愈）；仍缺失就跑 `/gate-doctor` 看诊断行给出的 `node …/scripts/install-package.mjs` |
 | `code review gate is PENDING` | 改完没 review | 走 review 循环（或 `/review`） |
 | `precommit not run` / `FAILED` | 没跑或跑挂了 | 直接 `judge_submit({role:"reviewer"})`（它自己先跑 full lane）；只想看构建结果就 `/precommit`；修失败项 |
