@@ -49,11 +49,13 @@
  * are the shared surface, so their ownership is stated here rather than left
  * to be reconstructed from the code that writes them.
  *
- * WHO TURNS IT ON: every pane open, unconditionally. `decorateSessionPane`
- * (lib/session-factory.ts, called only from `openSessionPane`) sets the two
- * window options again on each spawn. Re-opening an already-open bar is a
- * no-op, and paying for it every time is what makes the ON state independent
- * of who arrived first.
+ * WHO TURNS IT ON: every DECORATED pane open, and it does not check first.
+ * `openSessionPane` (lib/session-factory.ts) calls `decorateSessionPane` when
+ * — and only when — that open asked for decoration (`spec.decor`), which is
+ * how a pane that wants no border, such as the relay successor, takes none.
+ * For the opens that DO decorate, the two window options are set again every
+ * time; re-opening an already-open bar is a no-op, and paying for it on each
+ * spawn is what makes the ON state independent of who arrived first.
  *
  * WHO TURNS IT OFF: the LAST decorated pane a session can see, and never a
  * guest. `releasesWindowLabels` + `countDecoratedPanes` (both in
@@ -68,9 +70,12 @@
  *      every candidate as still present. A stale bar costs one line that the
  *      next spawn re-establishes; a wrongly removed one blanks a border
  *      somebody is reading.
- *   3. The window is addressed through the CALLER'S OWN live pane, never the
- *      pane being killed — `setw -t <pane>` only names a window, and the id
- *      being closed may already be gone.
+ *   3. The window is addressed through the caller's OWN live pane whenever it
+ *      has one — `setw -t <pane>` only names a window, and the id being closed
+ *      may already be gone. Where a caller might not have one it falls back to
+ *      the pane being closed (`deps.ownPane() ?? child.paneId` in
+ *      orchestrator_close): a best-effort address beats making the release
+ *      itself conditional on a diagnostic.
  *
  * WHAT THIS COSTS THE BYSTANDERS, and it is accepted: a window option applies
  * to panes the gate never opened, so the user's own shell pane in that window

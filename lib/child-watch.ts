@@ -14,15 +14,20 @@
  * all three:
  *
  *   (a) the done channel fired (the fast path);
- *   (b) the child's SESSION ended — the caller supplies that as `alive`: in
- *       production the live child process's `exitCode`, plus the `exit-code`
- *       file the child writes for itself. There is no pid-identity probe
- *       behind it: the module that once answered "is that pid still OUR judge"
- *       was deleted (2026-09-06) as a second implementation with no production
- *       caller. This criterion is deliberately
- *       NOT a pane probe either: the pane is a display shell that disappears with
- *       its child, and a judge that never got to write anything is exactly
- *       the case a pane could not report either;
+ *   (b) the child's SESSION is gone — the caller supplies that as `alive`. In
+ *       production today that is `judgeLive` (lib/hierarchy.ts): the child's
+ *       pane is absent from tmux's pane list, on the same tmux server that
+ *       minted the id. An UNREADABLE pane list counts as ALIVE, so missing
+ *       information never ends a wait.
+ *
+ *       This used to be a process probe — the child's own `exitCode`, backed
+ *       by a pid-identity check — and the header used to argue that a pane
+ *       probe would be wrong here. Both are gone: the process model was
+ *       retired with the pane model, and the pid-identity module was deleted
+ *       (2026-09-06) as a second implementation with no production caller.
+ *       What survives from that argument is the DIRECTION, and it is the same
+ *       one: `judgeLive` only reports death on positive evidence (a readable
+ *       list that does not contain the pane), never on a failure to look;
  *   (c) the child has been silent past `STALL_MOTION_MAX_AGE_SEC` (a running
  *       session that stopped being evidence of motion).
  *
@@ -41,9 +46,12 @@ export interface ChildSnapshot {
   /** ISO timestamp of the spawn. */
   spawnedAt: string;
   /**
-   * Is the child's pi PROCESS still running? Decided from the live
-   * ChildProcess's exitCode (judgeProcessAlive), not from any display: an
-   * exited process is finished even if its artifacts were never written.
+   * Is the child's session still there? Supplied by the caller; in production
+   * `judgeLive` (lib/hierarchy.ts) — its pane is still listed, on the tmux
+   * server that minted the id. `true` when the list cannot be read at all,
+   * which is why "not alive" is a positive finding rather than a failed look.
+   * (It was the process's `exitCode` under the old process model; that
+   * spelling, and the `judgeProcessAlive` it named, are both gone.)
    */
   alive: boolean;
   /**

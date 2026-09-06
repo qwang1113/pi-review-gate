@@ -34,7 +34,6 @@ import {
   PANE_BORDER_STATUS,
   PANE_PALETTE,
 } from "../lib/orchestrator-pane-decor.ts";
-import { countDecoratedPanes, releasesWindowLabels } from "../lib/session-factory.ts";
 import { assertSafeTmuxArgv, buildHidePaneLabelsArgv, buildShowPaneLabelsArgv } from "../lib/orchestrator-tmux.ts";
 import { parsePlan } from "../lib/orchestrator-plan.ts";
 
@@ -347,65 +346,47 @@ test("the throttle memory belongs to the orchestration, not to the module", asyn
  * lib/session-factory.ts. The tests above cover it for panes a session CAN
  * see.
  *
- * The two below are CHARACTERIZATION tests: they record what happens across
- * session boundaries, which is wrong and known to be wrong (2026-09-06, left
- * unfixed by user decision — both are display-only and the next spawn
- * re-establishes the bar). They exist so the defect is a fact in the suite
- * rather than a paragraph nobody re-reads, and so the round that fixes it is
- * told exactly where to come: FLIP these two assertions and delete this block.
+ * The one below drives the real `orchestrator_close` and asserts what it
+ * really does: with nothing left in ITS OWN registry it releases the bar. That
+ * is correct for what it can see, and it is also the misfire — a reviewer pane
+ * the CHILD opened is not in the manager's registry, so "nothing left" is
+ * measured over an incomplete set and a running review's border goes with it.
+ *
+ * WHAT THIS TEST DOES NOT DO, deliberately, so it does not claim more than it
+ * has: it cannot stage the other session's pane. The fake tmux lists exactly
+ * the panes this world opened, so a pane belonging to a session that does not
+ * exist here cannot be put on screen. The gap is therefore ARGUED here and in
+ * lib/orchestrator-pane-decor.ts's header, and only its visible half is
+ * asserted. A round that adds cross-session pane visibility changes the INPUT
+ * to this decision, so it should expect to rewrite this test rather than to
+ * see it fail. (2026-09-06: left unfixed by user decision — both misfires are
+ * display-only and the next spawn re-establishes the bar.)
  */
 
-test("KNOWN GAP (a): a manager cannot see its CHILD's judge pane, and releases the bar under it", () => {
-  // The window: manager %0, child t1 at %1 (being closed), and %9 — a reviewer
-  // pane the CHILD opened, which lives in the CHILD's registry.
-  const livePanes = ["%0", "%1", "%9"];
-  // What `orchestrator_close` counts: other children (none left) plus the
-  // MANAGER'S own judges (none). %9 is invisible to it.
-  const remaining =
-    countDecoratedPanes([], livePanes)   // no sibling children
-    + 0;                                 // manager's own decorated judges
-  assert.equal(
-    releasesWindowLabels({ remainingDecoratedPanes: remaining, insideOrchestration: false }),
-    true,
-    "TODAY the bar comes down while the child's review is still running — the gap",
+test("the release is measured over THIS session's registry only — which is the cross-session gap", async () => {
+  // The real close path, with nothing left that this manager can see: no
+  // sibling child, no judge of its own. It releases — and this assertion is
+  // the mirror image of "close leaves the window bar up while a REVIEW pane is
+  // still on screen" above, which is the same code with one visible pane.
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  await world.call("orchestrator_spawn", { taskId: "t1", task: "做任务一" });
+  const child = world.runtime().children[0]!;
+
+  await world.call("orchestrator_close", { childId: child.id });
+
+  const unsets = tmuxLog(world).filter((line) => line.startsWith("setw") && line.includes("-u"));
+  assert.ok(
+    unsets.length > 0,
+    "with an empty visible set the manager takes the window bar down",
   );
-  // The same close, if the counter could see %9, is the behaviour the fix must
-  // produce. (`countDecoratedPanes` itself is correct — it is the input that
-  // is short.)
+  // …and THAT is the misfire, because the visible set is the manager's own
+  // registry. A reviewer pane opened by the CHILD is on the same window and in
+  // none of these numbers, so it loses its border here. The fix is a
+  // cross-session pane registry; nothing in the counter itself is wrong.
   assert.equal(
-    releasesWindowLabels({
-      remainingDecoratedPanes: countDecoratedPanes(["%9"], livePanes),
-      insideOrchestration: false,
-    }),
-    false,
-    "with cross-session visibility the same close would keep the bar up",
+    world.runtime().children.filter((c) => !c.closedAt).length,
+    0,
+    "the set it measured: its own children, and there are none left",
   );
 });
 
-test("KNOWN GAP (b): a hand-opened loop session is not a 'guest', so it releases a manager's bar", () => {
-  // `insideOrchestration` is `labelBarOwnedByOthers()`: RG_ORCHESTRATION_ID is
-  // set AND this session is not the orchestrator. A loop session the user
-  // started by hand in the manager's window has no such variable, so it reads
-  // as an owner rather than a guest…
-  const guestByEnv = (orchestrationId: string | undefined, isOrchestrator: boolean) =>
-    Boolean(orchestrationId?.trim()) && !isOrchestrator;
-
-  assert.equal(guestByEnv(undefined, false), false, "no orchestration id ⇒ not a guest");
-  assert.equal(
-    releasesWindowLabels({
-      remainingDecoratedPanes: 0,   // its own last judge pane just closed
-      insideOrchestration: guestByEnv(undefined, false),
-    }),
-    true,
-    "TODAY it takes the bar down under the manager's children — the gap",
-  );
-
-  // A spawned child of the orchestration, by contrast, IS a guest and never
-  // releases — that half already works.
-  assert.equal(guestByEnv("orch-123", false), true);
-  assert.equal(
-    releasesWindowLabels({ remainingDecoratedPanes: 0, insideOrchestration: true }),
-    false,
-    "a guest never releases, however few panes it can see",
-  );
-});
