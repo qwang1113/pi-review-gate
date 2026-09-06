@@ -270,8 +270,10 @@ import {
 
 import {
   decideSupervisionEvents,
+  reportedDoneIds,
   superviseChildren,
   type SupervisionMemory,
+  type SupervisionSnapshot,
 } from "../lib/orchestrator-supervisor.ts";
 import { formatChildHealth } from "../lib/orchestrator-child-state.ts";
 
@@ -2225,39 +2227,18 @@ export default function reviewGate(pi: ExtensionAPI) {
     // F14 — `undefined` is UNKNOWN liveness, and it is NOT an empty pane list.
     // This used to swallow every tmux failure into `[]`, which means "every
     // registered pane is gone": one unreadable `list-panes` told the manager
-    // that all of its children had died.
-    const panes = ((): string[] | undefined => {
-      try {
-        const self = orchestratorDeps.ownPane();
-        if (!self) return undefined;
-        const listed = orchestratorDeps.tmux(["list-panes", "-t", self, "-F", "#{pane_id}"]);
-        if (!listed.ok) return undefined;
-        return listed.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      } catch { return undefined; }
-    })();
+    // that all of its children had died. The reading itself is the SAME one
+    // the background supervisor uses — one implementation, one answer.
+    const panes = alivePaneIdsForSupervision();
     // Completion is a CHANNEL fact, read from the same supervision snapshot the
     // health block is rendered from (B4). Asking a registry field instead is
     // what let one receipt call a child finished and alive in the same breath.
-    const reportedDone = ((): string[] => {
-      try {
-        const open = runtime.children.filter((c) => !c.closedAt);
-        if (open.length === 0) return [];
-        const snapshot = superviseChildren({
-          orchestrationId: runtime.orchestrationId,
-          children: open,
-          livePanes: panes === undefined ? undefined : new Set(panes),
-          io: channelIO,
-          at: Date.now(),
-        });
-        return snapshot.children.filter((c) => c.state === "done").map((c) => c.child.id);
-      } catch {
-        return []; // reading the channels is best effort; the blockers still render
-      }
-    })();
+    const snapshot = superviseNow(runtime, panes);
+    const reportedDone = snapshot ? reportedDoneIds(snapshot) : [];
     return orchestratorDoneProblems({
       plan: readPlanFile(primaryRepoRoot).plan,
       runtime,
-      alivePaneIds: panes ?? [],
+      alivePaneIds: panes === undefined ? [] : [...panes],
       ...(reportedDone.length > 0 ? { reportedDone } : {}),
       ...(panes === undefined ? { livenessUnknown: true } : {}),
     });
@@ -2348,16 +2329,8 @@ export default function reviewGate(pi: ExtensionAPI) {
     if (state.taskMode !== "orchestrator") return [];
     try {
       const runtime = orchestratorDeps.runtime();
-      const open = runtime.children.filter((c) => !c.closedAt);
-      if (open.length === 0) return [];
-      const panes = alivePaneIdsForSupervision();
-      const snapshot = superviseChildren({
-        orchestrationId: runtime.orchestrationId,
-        children: open,
-        livePanes: panes,
-        io: channelIO,
-        at: Date.now(),
-      });
+      const snapshot = superviseNow(runtime, alivePaneIdsForSupervision());
+      if (!snapshot) return [];
       lastSupervisionHealth = formatChildHealth(snapshot.health);
       const decided: { events: { summary: string }[]; memory: SupervisionMemory } =
         decideSupervisionEvents(snapshot, orchestratorDeps.supervisionMemory(), Date.now());
@@ -2368,15 +2341,47 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
   }
 
-  /** Pane ids that exist right now; `undefined` when tmux cannot be read. */
+  /**
+   * ONE supervision read — the snapshot BOTH the background timer and the
+   * injected wrap-up block are built from (B4).
+   *
+   * It is a function rather than two similar blocks because two readings of
+   * the same channels, taken in two places, is precisely the shape that let
+   * one receipt call a child finished and still-to-be-waited-for. Returns
+   * `undefined` when there is nothing to supervise (no open child).
+   */
+  function superviseNow(
+    runtime: OrchestratorRuntime,
+    livePanes: Set<string> | undefined,
+  ): SupervisionSnapshot | undefined {
+    const open = runtime.children.filter((c) => !c.closedAt);
+    if (open.length === 0) return undefined;
+    return superviseChildren({
+      orchestrationId: runtime.orchestrationId,
+      children: open,
+      livePanes,
+      io: channelIO,
+      at: Date.now(),
+    });
+  }
+
+
+  /**
+   * Pane ids that exist right now; `undefined` when tmux cannot be read.
+   *
+   * THE ONE pane reading this session takes for supervision — the wrap-up
+   * block used to take its own, which is how it ended up passing `[]` (every
+   * pane vanished) where this one says `undefined` (nothing was measured).
+   * It goes through the orchestration deps, so it carries the tmux server the
+   * rest of the gate addresses and a test can drive it.
+   */
   function alivePaneIdsForSupervision(): Set<string> | undefined {
-    const self = process.env.TMUX_PANE?.trim();
+    const self = orchestratorDeps.ownPane();
     if (!self) return undefined;
     try {
-      const out = execFileSync("tmux", ["list-panes", "-t", self, "-F", "#{pane_id}"], {
-        encoding: "utf8", timeout: 5000,
-      });
-      return new Set(out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+      const listed = orchestratorDeps.tmux(["list-panes", "-t", self, "-F", "#{pane_id}"]);
+      if (!listed.ok) return undefined;
+      return new Set(listed.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
     } catch {
       return undefined;
     }

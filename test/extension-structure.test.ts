@@ -4626,12 +4626,44 @@ test("the background supervisor is wired, default-on in orchestrator mode, and c
   assert.match(start, /triggerTurn: true/, "an idle supervisor is WOKEN, not merely written to");
   // What it reads is the CHANNELS — no pane is captured anywhere in the loop.
   const drain = windowOf("function drainSupervisionNews(", "\n  }", "drainSupervisionNews");
-  assert.match(drain, /superviseChildren\(\{/, "the read is the supervisor module's");
+  assert.match(drain, /superviseNow\(/, "the read is the ONE supervision read (B4)");
   assert.match(drain, /deps\.supervisionMemory\(\)|orchestratorDeps\.supervisionMemory\(\)/,
     "the event memory is SHARED with orchestrator_wait, so neither re-rings what the other reported");
   assert.doesNotMatch(drain, /capture-pane/, "and nothing in it renders a terminal");
+  const read = windowOf("function superviseNow(", "\n  }", "superviseNow");
+  assert.match(read, /superviseChildren\(\{/, "and that read is the supervisor module's");
+  assert.match(read, /io: channelIO/, "over the channels, never a pane");
   const shutdown = windowOf('pi.on("session_shutdown"', "\n  });", "session_shutdown");
   assert.match(shutdown, /stopSupervisionTimer\(\)/, "a leaked timer would keep waking a session that is gone");
+});
+
+test("B4/F14: the INJECTED wrap-up block reads the same channels and never invents a corpse", () => {
+  // This block is the one an orchestrator sees every turn, and it is not
+  // reachable from a tool test — so its wiring is asserted from source, the
+  // way the rest of this file asserts extension wiring.
+  const block = windowOf("function orchestrationDoneProblems(", "\n  }", "orchestrationDoneProblems");
+  assert.match(block, /return orchestratorDoneProblems\(\{/,
+    "the window really does reach the call it is about");
+
+  // ONE pane reading, shared with the background supervisor…
+  assert.match(block, /alivePaneIdsForSupervision\(\)/,
+    "not a second private `list-panes` — that is how the two readings drifted apart");
+  // …and F14: unknown liveness is declared, never flattened into an empty list.
+  assert.match(block, /livenessUnknown: true/,
+    "an unreadable pane list used to be passed as `[]`, which means 'every pane vanished'");
+
+  // Completion comes from the CHANNEL snapshot, through the one derivation.
+  assert.match(block, /superviseNow\(/);
+  assert.match(block, /reportedDoneIds\(/,
+    "block 5 answers 'who finished' from the same reading block 1 does (B4)");
+  assert.doesNotMatch(block, /doneAt/,
+    "the registry cache it used to read is gone — completion is a channel fact");
+
+  // And the pane reading itself must fail to UNKNOWN, not to empty.
+  const panes = windowOf("function alivePaneIdsForSupervision(", "\n  }", "alivePaneIdsForSupervision");
+  assert.match(panes, /if \(!listed\.ok\) return undefined;/, "a failed list-panes measures nothing");
+  assert.match(panes, /catch \{[\s\S]*return undefined;/, "and neither does a throw");
+  assert.doesNotMatch(panes, /return new Set\(\);/, "an empty set here would read as a graveyard");
 });
 
 

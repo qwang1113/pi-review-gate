@@ -153,13 +153,7 @@ export function classifyChildState(observation: ChildObservation): ChildState {
   if (projection.openRequests.length > 0) return "waiting-input";
 
   const last = projection.lastState;
-  const assigned = observation.lastAssignedAt;
-  if (last?.state === "done") {
-    const reportedAt = Date.parse(last.at);
-    const belongsToCurrentWork =
-      assigned === undefined || !Number.isFinite(reportedAt) || reportedAt >= assigned;
-    if (belongsToCurrentWork) return "done";
-  }
+  if (completionReported(observation)) return "done";
 
   if (stalledNow(observation)) return "stalled";
 
@@ -196,6 +190,31 @@ function stalledNow(observation: ChildObservation): boolean {
     staleMs,
   );
 }
+
+/**
+ * DID THIS CHILD SAY IT FINISHED — the completion fact, on its own.
+ *
+ * Separate from {@link classifyChildState} because the STATE answers a
+ * different question. A child whose pane is gone is `dead` and nothing else,
+ * which is right for supervision (a corpse is the headline) and wrong for the
+ * wrap-up block: "it finished, and then its pane went away" is not the same
+ * situation as "it died without ever reporting". Reading completion off the
+ * state made the receipt tell a manager that a child which HAD reported done
+ * "从未报告完成 …必要时把任务改回 pending 重开", while block 3 was showing
+ * that same child's `declare_done` record among its surviving assets — the
+ * very two-blocks-disagree shape B4 exists to remove.
+ *
+ * Bounded by `lastAssignedAt` exactly as the state is (round-1 P1): a
+ * completion older than the current assignment is history, not a verdict.
+ */
+export function completionReported(observation: ChildObservation): boolean {
+  const last = observation.projection.lastState;
+  if (last?.state !== "done") return false;
+  const reportedAt = Date.parse(last.at);
+  const assigned = observation.lastAssignedAt;
+  return assigned === undefined || !Number.isFinite(reportedAt) || reportedAt >= assigned;
+}
+
 
 /**
  * Milliseconds since the child's last FORWARD PROGRESS.

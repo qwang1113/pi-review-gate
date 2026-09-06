@@ -57,6 +57,7 @@ import type { DeliveryStation } from "./delivery-station.ts";
 import {
   childHealth,
   classifyChildState,
+  completionReported,
   describeChildState,
   describeChildStateDetailed,
   isNewsworthy,
@@ -117,6 +118,15 @@ export interface ChildSupervision {
   state: ChildState;
   health: ChildHealth;
   projection: ChannelProjection;
+  /**
+   * Its channel says it FINISHED (bounded by the current assignment).
+   *
+   * Not the same as `state === "done"`, and the difference is the point: a
+   * child that reported done and then lost its pane is `dead` — the state a
+   * supervisor must see first — but it is still a child that finished, and
+   * the wrap-up block has to say so instead of "从未报告完成".
+   */
+  reportedDone: boolean;
   assets?: ChildAssets;
 }
 
@@ -183,6 +193,7 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
       state,
       health: childHealth(observation),
       projection,
+      reportedDone: completionReported(observation),
     };
     if (state === "dead" || state === "stalled") {
       const assets = input.assetsFor?.(child);
@@ -222,6 +233,22 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
     malformed,
   };
 }
+
+/**
+ * The children whose channel says they FINISHED — the ONE derivation of that
+ * fact, used by every consumer of a snapshot (B4).
+ *
+ * It exists as a function rather than as three call sites doing
+ * `.filter((c) => c.state === "done")` because those three sites are exactly
+ * how B4 happened in the first place: the same question answered separately
+ * in separate places drifts, and one of them was already wrong (a child that
+ * finished and then lost its pane is `dead`, so a state filter silently
+ * dropped it).
+ */
+export function reportedDoneIds(snapshot: SupervisionSnapshot): string[] {
+  return snapshot.children.filter((c) => c.reportedDone).map((c) => c.child.id);
+}
+
 
 function safePayload(io: ChannelIO, record: ChannelRequestRecord): string | undefined {
   try {

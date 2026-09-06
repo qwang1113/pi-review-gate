@@ -115,6 +115,25 @@ test("B4: the gate does NOT close the task itself, and the child still blocks th
   assert.doesNotMatch(text, /没有了，可以 declare_done/);
 });
 
+test("B4: a child that finished and THEN lost its pane is not called '从未报告完成'", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
+  const childId = await spawnT1(world);
+  const child = world.runtime().children[0]!;
+  world.childReports(childId, "done");
+  // The pane goes away after the completion — the human closed it, or the
+  // session exited. Its STATE is `dead` (a corpse is the headline a
+  // supervisor must see), but it is still a child that finished.
+  world.panes.get(child.paneId)!.alive = false;
+
+  const text = replyText(await world.call("orchestrator_wait", { timeoutMs: 0 }));
+  assert.doesNotMatch(text, /从未报告完成/,
+    "it DID report — telling the manager to reset the task to pending would throw the work away");
+  assert.doesNotMatch(text, /必要时把任务改回 pending 重开/);
+  // The task line still carries the completion, which is what the manager acts on.
+  assert.match(text, /t1\(running，孩子已报完成/);
+});
+
+
 test("B4: a re-tasked child is not reported finished on the strength of its old completion", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const childId = await spawnT1(world);

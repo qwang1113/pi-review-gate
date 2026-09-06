@@ -72,6 +72,7 @@ import {
 } from "./orchestrator-wait.ts";
 import {
   decideSupervisionEvents,
+  reportedDoneIds,
   superviseChildren,
   type SupervisionSnapshot,
 } from "./orchestrator-supervisor.ts";
@@ -289,9 +290,7 @@ function exitBlockers(
 ): string[] {
   const { plan } = currentPlan(deps);
   const panes = panesRead ?? alivePanes(deps);
-  const reportedDone = (snapshot?.children ?? [])
-    .filter((c) => c.state === "done")
-    .map((c) => c.child.id);
+  const reportedDone = snapshot ? reportedDoneIds(snapshot) : [];
   return orchestratorDoneProblems({
     ...(plan ? { plan } : {}),
     runtime: deps.runtime(),

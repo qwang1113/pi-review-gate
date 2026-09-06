@@ -234,6 +234,11 @@ test("B4: a child that REPORTED DONE is named as such — and still blocks the e
 });
 
 test("B4: a child that reported done and then VANISHED is not called 'never reported'", () => {
+  // REACHABLE, and that took a second fix: completion used to be derived from
+  // the STATE, and a child whose pane is gone is `dead` before any report is
+  // looked at — so this case silently fell out of `reportedDone`. It comes
+  // from `completionReported` now (the channel fact, not the state), and
+  // test/orchestrator-wait-receipt.test.ts drives the same case end to end.
   const runtime = registerChild(emptyRuntime("orch-abc-1"), {
     id: "a-1", taskId: "a", paneId: "%2", cwd: "/repo", createdAt: NOW,
   });
