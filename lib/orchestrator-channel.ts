@@ -203,6 +203,37 @@ export interface ChannelRequestRecord extends ChannelRecordBase {
    */
   station?: string;
 
+  /**
+   * WHICH BATCH OF QUESTIONS THIS ONE BELONGS TO (2026-09-06).
+   *
+   * An `ask_user` interview is 1–10 questions submitted in ONE call, and the
+   * child used to write its request record only when it was about to render
+   * that question's dialog. So a five-question interview reached the
+   * orchestrator as five separate rounds of "here is one question" → "here is
+   * one answer", each costing a full wait cycle (measured this round: t9c 5
+   * round trips, t9e 4, t9h 3 — and t9h lost two questions when an instruct
+   * dismissed the box it was still standing in front of). The whole batch is
+   * now written BEFORE the first dialog opens, so every question is on the
+   * orchestrator's first receipt and can be answered in one go.
+   *
+   * These three fields say nothing the answering side must obey — they make
+   * the grouping LEGIBLE (which interview, which position, how many in all)
+   * so a receipt can render "第 2/5 题" and a project manager knows whether
+   * more of the same interview is coming.
+   *
+   * PURE ADDITIONS, and that is the point (user constraint, 2026-09-06): the
+   * project manager holding this orchestration runs the build it started
+   * with, so a record it cannot parse would cut off its own supervision. An
+   * older reader ignores all three and still sees N ordinary open requests,
+   * each answerable one at a time exactly as before — which is the identical
+   * reasoning behind `ChannelReportRecord.inspection` and `.scope`.
+   */
+  batchId?: string;
+  /** 0-based position of this question inside its batch. */
+  batchIndex?: number;
+  /** How many questions the batch holds in all. */
+  batchTotal?: number;
+
 
 }
 
@@ -681,6 +712,33 @@ export function sanitizeDeliveryStation(raw: unknown): DeliveryStation | undefin
   if (typeof raw !== "string") return undefined;
   const normalized = raw.trim().toLowerCase();
   return isDeliveryStation(normalized) ? normalized : undefined;
+}
+
+
+/** One question's place in its interview, as a consumer gets to see it. */
+export interface RequestBatchStamp {
+  id: string;
+  index: number;
+  total: number;
+}
+
+/**
+ * Keep a request's batch stamp only when all three halves agree.
+ *
+ * Same untrusted-input rule as {@link sanitizeScopeStamp}, applied to a value
+ * whose only job is to be READ: the stamp exists so a receipt can say "第 2/5
+ * 题", and a half-parsed one ("第 undefined/0 题") is worse than none at all.
+ * So a missing id, a non-integer position, a total below one or a position
+ * outside its total all drop the whole stamp — the request is still a
+ * perfectly ordinary open question, which is exactly how an older reader sees
+ * every one of them.
+ */
+export function sanitizeBatchStamp(id: unknown, index: unknown, total: unknown): RequestBatchStamp | undefined {
+  if (typeof id !== "string" || id.trim() === "") return undefined;
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return undefined;
+  if (typeof total !== "number" || !Number.isInteger(total) || total < 1) return undefined;
+  if (index >= total) return undefined;
+  return { id: id.trim(), index, total };
 }
 
 

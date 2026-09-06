@@ -415,9 +415,13 @@ fail-closed）。`model-diagnose.ts`
 
 ### 域 8：用户交互与提示注入
 
-`ask-user.ts` 是采访模型（逐题推进、上限、跳过与「在聊天里回答」的语义），
+`ask-user.ts` 是采访模型（逐题推进、上限、跳过与「在聊天里回答」的语义，以及
+`resolveQuestion`：一题结算下来到底算什么 —— 竞速送达的答案一律作数，只有沉默
+才按「是什么中止了采访」解释），
 `user-interaction-tools.ts` 是它的执行侧（工具 `ask_user`：什么时候暂停循环、
-每答一题就落盘、人与项目经理谁先答谁生效），并且是这一族的唯一注册入口——
+每答一题就落盘、人与项目经理谁先答谁生效；2026-09-06 起**整批问题先一次性上送
+通道再逐题弹框** —— 上级第一份回执就看得到全部题，用户那边仍一次只有一个框），
+并且是这一族的唯一注册入口——
 它自己转注册 `consent-request-tools.ts` 的两个同意工具
 （`request_scope_limit` / `request_sensitive_edit`，见 §1.2）；
 `agent-directives.ts` 是每轮注入的常驻指令块（「情况 → 工具」那张表），
@@ -481,7 +485,7 @@ fail-closed）。`model-diagnose.ts`
 | `agent-directives.ts` | 门禁对主会话的常驻指令块，每轮注入的「情况 → 工具」表；**等待纪律的唯一出处**（`buildWaitDiscipline`：子会话侧 `judge_wait`、项目经理侧 `orchestrator_wait` 共用同三条，只换工具名与消息种类） |
 
 | `arbitration.ts` | 仲裁：由独立 arbiter 裁决「循环无解」的门禁拦截，fail-closed 且有次数上限；模型走 `agents.arbiter.slots[0]`（配置层），不再硬编码 |
-| `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义 |
+| `ask-user.ts` | `ask_user` 的采访模型：问题上限、逐题推进、跳过与「在聊天里回答」的语义；`resolveQuestion` 是「一题结算算什么」的唯一判定（竞速送达的答案永远作数，只有沉默才按 `InterviewStop` 解释：跳过 ⇒ skipped，被 instruct 打断 ⇒ unanswered） |
 | `atomic-write.ts` | 写临时文件再 rename 的原子替换，门禁所有状态文件共用 |
 | `audit-round.ts` | **审计回合引擎**（2026-09-05）：「派发 judge → 等本轮 → 选 report → 裁决 → 记录 → 回收」的唯一一份实现。`settleAuditRound` 是结论段（goal / plan / review / advice 四种 kind 都经它，`judge_wait` 与 settle 扫描共用，游标只在这里推进一次、且只在记录落地后推）；`runAuditRound` 是 goal/plan 的同步回合（O-6 的 `judge_close` 是它的一个 `finally`，不再散在每条 return 上；「本轮是不是已被 wait 记完」由 `roundClosedDuringWait` 判——pending 已消费**且**游标已前进，缺一即自己再 settle 并 fail-closed）。`selectRoundReport` 是「哪份 report 收本轮」的唯一判据（round-bound 认 `roundSeq`+游标；cursor-only 只认游标；**round-and-content 认 `roundSeq`+`checkpoint.at`+游标，review 专用**，无 checkpoint 的 exit-goal 空范围轮则只由 round+游标兜底，否则那种轮次不可收敛——per-kind 的真实差异），`roundBindingFor` 是三件事实的唯一推导处；共用它的入口有三个：记录侧 `settleAuditRound`、探测侧 `probeJudgeRound`（`judge_wait` 与 settle 扫描）、以及只要 yes/no 的 `roundHasReported`（子会话心跳据它把状态报成 `waiting-judge`、loop 停滞断路器据它判「还在动」，它替掉了扩展里那份「report 晚于 pane spawn」的旧比较） |
 | `audit-round-specs.ts` | 审计回合的**措辞半边**：四种 kind 的 spec（judge 角色、report 绑定方式、pane 标题前缀、fail-closed 与拒绝文案）+ `specForRound`（role 优先，goal/plan 靠 pending kind 分辨）。**引擎合，措辞不合** —— 合并机械部分是引擎的目的，合并句子则是另一种更糟的重构：plan 审计失败要让人去 `submit`，goal 的要去 `propose_loop_goal`。新增一种 round 只动这个文件 |
@@ -542,7 +546,7 @@ fail-closed）。`model-diagnose.ts`
 | `orchestrator-plan-approval.ts` | 「这次 plan 改动扩权了吗」：已批准**目录树**内的边界细化、收窄、加依赖、降并行度⇒批准迁移并记审计；新任务/新目录/删依赖/串行改并行/提并行度/换 repo/提高交付站点⇒重新批准。两条 2026-09-06 的放宽：**已 `done` 的任务退出相交判定**（它不再有活着的写者，回执写明原持有者），以及**批准世系** `approvedPlanHistory`（用户批准起、每次平移追加的内容 hash 链）——写回其中任一内容即把批准平移回来，撤回一次误操作不必重走 submit；用户每次新的显式批准**重置**世系，因此被收窄掉的旧版本回不来 |
 | `orchestrator-plan-audit.ts` | plan 的前置审计（`goal-auditor` 角色 + plan 专用模板）：审计要点、裁决绑定 canonical plan 文本的 sha256、只 P0/P1 阻塞、退回 findings 的文案。**「哪份 report 收本轮」已于 2026-09-05 搬去 `audit-round.ts`** —— 那是审计**回合**的问题，不是 plan 的，三种 kind 都要回答它 |
 | `orchestrator-handoff-advice.ts` | 上下文用量 + 待答请求数 ⇒ 接力时机（软/硬阈值，没读数就明说没读数） |
-| `orchestrator-answer-tools.ts` | 工具 `orchestrator_answer`：把答案写进通道（选项原文/序号/唯一子串，含糊即拒），代批 goal 时按约束 8 比对任务边界；代批 goal / 代确认反述还必须带 `crosscheck` 对照（任务 id + 文件边界/任务目标/交付站点三判断，词表 `PROXY_CROSSCHECK_TOKENS`，缺项退回并把 plan 任务与子会话正文并排贴回），且请求携带的站点不得宽于已批准 plan 的 `deliveryStation` |
+| `orchestrator-answer-tools.ts` | 工具 `orchestrator_answer`：把答案写进通道（选项原文/序号/唯一子串，含糊即拒），代批 goal 时按约束 8 比对任务边界；代批 goal / 代确认反述还必须带 `crosscheck` 对照（任务 id + 文件边界/任务目标/交付站点三判断，词表 `PROXY_CROSSCHECK_TOKENS`，缺项退回并把 plan 任务与子会话正文并排贴回），且请求携带的站点不得宽于已批准 plan 的 `deliveryStation`。可选的 `answers` 数组一次答完子会话一整批 `ask_user` 提问：**裁决只有一份实现**（单问与批量都走 `answerOneRequest`），每条独立成败、写进通道的不回滚 |
 | `orchestrator-delivery.ts` | 投递：任务文件 + `pi --session-id @file` 启动、恢复用的 argv 与说明，以及「什么才算送达」的判据（通道记录 / 子会话回执）。任务书在 brief 之后追加 `TASK_GOAL_DIRECTIVE`（门禁硬指示：plan 批准 ≠ goal 批准，必须先协商自己的 loop goal） |
 | `orchestrator-deps.ts` | 编排工具需要的依赖集合；host 类型本身住在 `tool-host.ts`，这里只 re-export |
 | `orchestrator-directives.ts` | 编排两侧的指令：项目经理拿全套契约，子会话只拿一句话 |

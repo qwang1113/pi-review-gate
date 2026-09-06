@@ -47,6 +47,7 @@ import {
   readChannel,
   requestPayload,
   sanitizeDeliveryStation,
+  sanitizeBatchStamp,
 
   type ChannelIO,
   type ChannelProjection,
@@ -107,6 +108,18 @@ export interface PendingRequest {
    * at each reader (see `ChannelReportRecord.scope`).
    */
   station?: DeliveryStation;
+
+  /**
+   * WHICH INTERVIEW THIS QUESTION CAME FROM, when it came from one.
+   *
+   * A child's `ask_user` submits 1–10 questions in a single call and now puts
+   * ALL of them on the wire before it renders the first dialog, so the
+   * receipt can say "第 2/5 题" and the manager can answer the five in one
+   * `orchestrator_answer` instead of five. Present only when the child
+   * stamped it — a single question carries none, and so does a record from a
+   * build that predates the stamp.
+   */
+  batch?: { id: string; index: number; total: number };
 
 
   askedAt: string;
@@ -204,6 +217,10 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
     for (const open of projection.openRequests) {
       const payload = safePayload(input.io, open);
       const station = sanitizeDeliveryStation(open.station);
+      // Same boundary, same rule: the three batch scalars are the child's
+      // words, so they become a stamp only when they make sense together.
+      const batch = sanitizeBatchStamp(open.batchId, open.batchIndex, open.batchTotal);
+
 
       requests.push({
         childId: child.id,
@@ -217,7 +234,7 @@ export function superviseChildren(input: SupervisionInput): SupervisionSnapshot 
         // wrote that is not one of the three is dropped, so no reader has to
         // remember that this field is untrusted.
         ...(station === undefined ? {} : { station }),
-
+        ...(batch === undefined ? {} : { batch }),
 
         askedAt: open.at,
       });
@@ -372,7 +389,11 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
   } else {
     for (const request of snapshot.requests) {
       sections.push(
-        `- **${request.childId}** · requestId=\`${request.requestId}\` · ${request.dialogKind} · ${request.askedAt}`,
+        `- **${request.childId}** · requestId=\`${request.requestId}\` · ${request.dialogKind} · ${request.askedAt}` +
+          // The interview marker rides on the SAME line as the id, so the
+          // manager sees "this is one of five" exactly where it decides what
+          // to answer — and sees nothing extra for an ordinary lone question.
+          (request.batch ? ` · 采访 \`${request.batch.id}\` 第 ${request.batch.index + 1}/${request.batch.total} 题` : ""),
         `  问题：${request.title}`,
         ...(request.options.length > 0
           ? request.options.map((option, index) => `    ${index + 1}. ${option}`)
@@ -384,7 +405,12 @@ export function formatSupervisionReceipt(snapshot: SupervisionSnapshot): string 
       "",
       "回答用 `orchestrator_answer({childId, requestId, answer})` —— answer 传选项原文或序号；" +
       "它写进通道后子会话那边的框会自动撤下。",
+      ...(snapshot.requests.some((r) => r.batch)
+        ? ["同一「采访」的多题是一次 `ask_user` 提交的整批，**一次调用答完**：" +
+           "`orchestrator_answer({childId, answers:[{requestId, answer}, …]})`（每条独立裁决）。"]
+        : []),
     );
+
   }
 
   sections.push("", "### 3. 死亡与恢复");

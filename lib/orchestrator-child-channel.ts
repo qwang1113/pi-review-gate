@@ -106,6 +106,28 @@ export function reportState(
   }
 }
 
+/**
+ * WHICH INTERVIEW A QUESTION BELONGS TO, and where in it.
+ *
+ * Set only by the `ask_user` interview (lib/user-interaction-tools.ts), the
+ * one caller that has more than one question at a time. Every other gate
+ * dialog — a goal approval, a restatement, a consent — is a single question
+ * by nature and carries no stamp at all.
+ *
+ * It is a LABEL, never an instruction: nothing on the answering side branches
+ * on it, so a reader that has never heard of batches (the project manager's
+ * own running build) sees the same N ordinary requests it always did.
+ */
+export interface ChannelBatchStamp {
+  /** Shared by every question of one interview. */
+  id: string;
+  /** 0-based position of this question. */
+  index: number;
+  /** How many questions the interview holds in all. */
+  total: number;
+}
+
+
 /** One question, as the orchestrator will see it. */
 export interface ChannelDialogRequest {
   dialogKind: "select" | "confirm" | "input";
@@ -126,6 +148,12 @@ export interface ChannelDialogRequest {
    * exists to remove.
    */
   station?: DeliveryStation;
+
+  /**
+   * The interview this question is part of, when it is part of one — see
+   * {@link ChannelBatchStamp}. Absent for every single-question dialog.
+   */
+  batch?: ChannelBatchStamp;
 
   /** Is there a real UI to render into? `false` ⇒ the channel answers alone. */
   hasUI: boolean;
@@ -177,6 +205,14 @@ export async function askThroughChannel(
     options: request.options,
     ...(request.payload === undefined ? {} : { payload: request.payload }),
     ...(request.station === undefined ? {} : { station: request.station }),
+    // The batch stamp is FLATTENED onto the record on purpose: three optional
+    // scalars an older reader ignores, rather than a nested object it would
+    // have to recognise to make sense of the two halves.
+    ...(request.batch === undefined ? {} : {
+      batchId: request.batch.id,
+      batchIndex: request.batch.index,
+      batchTotal: request.batch.total,
+    }),
 
   });
   reportState(binding, "waiting-input", { dialogTitle: request.title });

@@ -189,6 +189,86 @@ export function interpretFreeText(typed: string | undefined): ChoiceMeaning {
 
 
 /**
+ * Why the rest of an interview will never be shown.
+ *
+ * `skip-rest` is the user pressing the escape row; `interrupted` is the
+ * project manager firing an instruct, which takes every open box down at
+ * once. They are kept apart because they settle the unshown questions
+ * differently on the wire (`dismissed` vs `interrupted`), and because a
+ * stopped goal approval must never read as a rejection — the same distinction
+ * the channel already draws.
+ */
+export type InterviewStop = "skip-rest" | "interrupted";
+
+/** What one settled question does to the interview. */
+export interface QuestionResolution {
+  answer: AskAnswer;
+  /** Set when THIS question is the one that stops the remaining ones. */
+  stop?: InterviewStop;
+}
+
+/**
+ * What one settled question MEANS — the whole rule, in one pure place.
+ *
+ * IT EXISTS BECAUSE THE QUESTIONS ARE NOW IN FLIGHT TOGETHER (2026-09-06).
+ * The interview used to ask strictly one at a time, so "the user skipped the
+ * rest" could be handled by simply not asking them. Every question of a batch
+ * is now offered to the project manager the moment the interview starts, so a
+ * question can come back ANSWERED even though the user later pressed "skip
+ * the rest" — the manager answered it first, and "先答者生效" is the
+ * invariant this whole channel is built on. Hence rule one:
+ *
+ *   AN ANSWER THE RACE DELIVERED IS ALWAYS HONOURED, whatever stopped the
+ *   rest.
+ *
+ * "The race delivered it" is the exact bar, and it is the same one every gate
+ * dialog has always been held to: the child's own race decides who answered
+ * first, so an answer still sitting unread on the channel when the interview
+ * stops was not first — precisely as an ESC has always beaten an answer the
+ * poll had not picked up yet. Nothing here re-judges that; it reads the
+ * outcome the race produced.
+ *
+ * Only silence is interpreted by the stop reason: skipped when the user chose
+ * to skip, unanswered when an instruct took the box away (nobody decided
+ * anything — the reply must not claim they did).
+
+ */
+export function resolveQuestion(
+  q: AskQuestion,
+  picked: string | undefined,
+  opts: {
+    /** This question's own box was taken down by an instruct. */
+    interrupted?: boolean;
+    /** The interview had already stopped when this question settled. */
+    stopped?: InterviewStop;
+  } = {},
+): QuestionResolution {
+  if (picked !== undefined) {
+    const meaning = q.options?.length ? interpretChoice(picked, q) : interpretFreeText(picked);
+    if (meaning.kind === "skip-rest") {
+      return { answer: { question: q.text, kind: "skipped" }, stop: "skip-rest" };
+    }
+    if (meaning.kind === "answered") {
+      return { answer: { question: q.text, kind: "answered", answer: meaning.answer } };
+    }
+    if (meaning.kind === "deferred-to-chat") {
+      return { answer: { question: q.text, kind: "deferred-to-chat" } };
+    }
+    // A dismissal reported WITH text is not a thing; fall through to silence.
+  }
+  if (opts.interrupted) {
+    return { answer: { question: q.text, kind: "unanswered" }, stop: "interrupted" };
+  }
+  if (opts.stopped === "skip-rest") {
+    return { answer: { question: q.text, kind: "skipped" } };
+  }
+  // Dismissed (ESC), no dialog at all, or an interview already stopped by an
+  // instruct: the user asked for nothing, and the reply must say so.
+  return { answer: { question: q.text, kind: "unanswered" } };
+}
+
+
+/**
  * The interview as the agent reads it back: every question with its answer,
  * including the ones nobody answered. Silence is reported as silence.
  */

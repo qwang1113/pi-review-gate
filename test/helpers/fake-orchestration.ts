@@ -124,6 +124,8 @@ export interface FakeWorld {
     /** The delivery station this question is about (restatement / goal). */
     station?: string;
     topic?: "goal-approval" | "restatement" | "workspace" | "ask-user" | "plan-approval" | "sensitive-edit" | "other";
+    /** Its place in an `ask_user` interview, when it is part of one. */
+    batch?: { id: string; index: number; total: number };
 
   }) => void;
   childSettles: (childId: string, requestId: string, by: "human" | "orchestrator" | "dismissed") => void;
@@ -479,6 +481,11 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
         options: request.options,
         ...(request.payload === undefined ? {} : { payload: request.payload }),
         ...(request.station === undefined ? {} : { station: request.station }),
+        ...(request.batch === undefined ? {} : {
+          batchId: request.batch.id,
+          batchIndex: request.batch.index,
+          batchTotal: request.batch.total,
+        }),
 
       });
       appendRecord(io, target(childId), {

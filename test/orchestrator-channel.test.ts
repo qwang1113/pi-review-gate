@@ -23,6 +23,7 @@ import {
   readChannel,
   requestPayload,
   sanitizeDeliveryStation,
+  sanitizeBatchStamp,
 
   MAX_INLINE_RECORD_BYTES,
   judgeChannelTarget,
@@ -589,3 +590,18 @@ test("anything else is DROPPED, never degraded into a station nobody asked for",
   assert.equal(sanitizeDeliveryStation("deploy"), undefined);
 });
 
+
+test("a batch stamp survives only when all three halves make sense together", () => {
+  assert.deepEqual(sanitizeBatchStamp("b1", 0, 3), { id: "b1", index: 0, total: 3 });
+  assert.deepEqual(sanitizeBatchStamp("  b1  ", 2, 3), { id: "b1", index: 2, total: 3 });
+  // Each of these would render as a nonsense position ("第 8/2 题",
+  // "第 undefined/3 题"), which is worse than showing no stamp at all — the
+  // request is still a perfectly ordinary open question either way.
+  for (const [id, index, total] of [
+    ["", 0, 3], ["  ", 0, 3], [7, 0, 3], [undefined, 0, 3],
+    ["b1", -1, 3], ["b1", 1.5, 3], ["b1", "0", 3], ["b1", undefined, 3],
+    ["b1", 0, 0], ["b1", 0, "3"], ["b1", 0, undefined], ["b1", 2, 2], ["b1", 8, 2],
+  ] as Array<[unknown, unknown, unknown]>) {
+    assert.equal(sanitizeBatchStamp(id, index, total), undefined, JSON.stringify([id, index, total]));
+  }
+});

@@ -411,6 +411,16 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   会话里被**直接拒绝**（它没有通道侧可答自己的框，曾把 PM 卡死 2 小时），
   改走 `orchestrator_answer`。三个授权入口：ask_user 带 `grantScope` 的提问、
   `/gate-grant sensitive-edit` 命令、首次代答的三选框。
+- **一次 `ask_user` 的多题整批上送、整批回答**（2026-09-06）：子会话在弹出第一个
+  框之前，就把本次采访的全部问题一次性写成 N 条 request 记录（新增可选字段
+  `batchId` / `batchIndex` / `batchTotal`，只增不改，旧上级照旧当 N 条普通待答
+  请求处理），因此它们同在项目经理的**第一份**回执里；`orchestrator_answer` 的
+  可选 `answers` 数组一次答完整批，**裁决仍只有一份实现**（单问与批量共用同一
+  条校验链，批量不是绕过 crosscheck / 约束 8 的后门），每条独立成败、写进通道的
+  不回滚。子会话那边**仍逐个弹框**，先答者生效这条不变；采访被「跳过后续」或被
+  instruct 打断时，没展示的题就地销账（分别记 `dismissed` / `interrupted`），
+  不会在回执里挂成永远没人答的请求。同理，`judge_answer` 在有多个待答问题时也
+  必须指明 `requestId`（judge pane 与子会话走同一条通道）。
 - **投递走 `pi.sendUserMessage`**：`orchestrator_instruct({mode})` 把文本写进
   通道，子会话自己的门禁用 pi 的 API 注入。`mode` 即优先级，**缺省是 `interrupt`**
   （2026-09-17 用户决定：上级发话就是要它立刻知道）——中断当前 turn 并带正文立即

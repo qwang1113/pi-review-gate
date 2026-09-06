@@ -8,6 +8,7 @@ import {
   progressLabel,
   buildChoiceList,
   interpretChoice,
+  resolveQuestion,
   formatAnswers,
   formatTranscriptSummary,
   needsUserReply,
@@ -225,3 +226,51 @@ test("an unanswered question keeps the loop waiting", () => {
   assert.equal(needsUserReply([{ question: "a", kind: "unanswered" }]), true);
 });
 
+
+// ---------- what one settled question MEANS (the batch rule) ----------
+
+const PICK = { text: "选一个", options: ["A", "B"], recommended: "A" };
+
+test("an answer the race delivered is honoured, whatever stopped the rest", () => {
+  // The one case batching created: the project manager answered this question
+  // through the channel before the user pressed "skip the rest" on an earlier
+  // one. 先答者生效 — the stop reason interprets SILENCE, never an answer.
+  assert.deepEqual(resolveQuestion(PICK, "B", { stopped: "skip-rest" }),
+    { answer: { question: "选一个", kind: "answered", answer: "B" } });
+  assert.deepEqual(resolveQuestion(PICK, "B", { stopped: "interrupted" }),
+    { answer: { question: "选一个", kind: "answered", answer: "B" } });
+  // The recommendation marker is stripped: the agent gets the option it wrote.
+  assert.equal(resolveQuestion(PICK, "A（推荐）").answer.answer, "A");
+});
+
+test("only SILENCE is interpreted by what stopped the interview", () => {
+  // Skipped: the user chose to stop, so the questions they never saw are
+  // reported as skipped…
+  assert.deepEqual(resolveQuestion(PICK, undefined, { stopped: "skip-rest" }),
+    { answer: { question: "选一个", kind: "skipped" } });
+  // …but an instruct that took the box away is nobody deciding anything, and
+  // the reply must not claim the user did.
+  assert.deepEqual(resolveQuestion(PICK, undefined, { stopped: "interrupted" }),
+    { answer: { question: "选一个", kind: "unanswered" } });
+  assert.deepEqual(resolveQuestion(PICK, undefined),
+    { answer: { question: "选一个", kind: "unanswered" } });
+});
+
+test("a question can STOP the interview, and says which way", () => {
+  const skipped = resolveQuestion(PICK, SKIP_REST_CHOICE);
+  assert.equal(skipped.stop, "skip-rest");
+  assert.equal(skipped.answer.kind, "skipped");
+  const interrupted = resolveQuestion(PICK, undefined, { interrupted: true });
+  assert.equal(interrupted.stop, "interrupted");
+  assert.equal(interrupted.answer.kind, "unanswered");
+  // An ordinary answer stops nothing.
+  assert.equal(resolveQuestion(PICK, "A").stop, undefined);
+  assert.equal(resolveQuestion(PICK, ANSWER_IN_CHAT_CHOICE).answer.kind, "deferred-to-chat");
+});
+
+test("a free-text question keeps its typed escapes", () => {
+  const free = { text: "说说看" };
+  assert.equal(resolveQuestion(free, "!skip").stop, "skip-rest");
+  assert.equal(resolveQuestion(free, "!chat").answer.kind, "deferred-to-chat");
+  assert.equal(resolveQuestion(free, "  就这样  ").answer.answer, "就这样");
+});

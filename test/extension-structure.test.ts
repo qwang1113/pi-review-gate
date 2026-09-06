@@ -753,22 +753,30 @@ test("SECURITY: a grantScope must be VISIBLE to the user and minted by EXACT pic
   // The helper existing is NOT the property — the user must SEE it. Assert
   // the INTERPOLATION at every rendering call site (reviewer P2, 2026-09-16:
   // a helper left intact in dead code proved nothing).
+  //
+  // 2026-09-06: the interview builds ONE `prompt` per question and every
+  // surface renders THAT string, so the notice can no longer be present in
+  // the channel title and missing from the box (or vice versa). The call
+  // sites are asserted through the prompt rather than four times over.
   const interpolations = (ASK_USER_SRC.match(/grantNotice\(q\)/g) ?? []).length;
-  assert.ok(interpolations >= 4, `the notice is interpolated at the dialog/transcript call sites (got ${interpolations})`);
-  assert.match(ASK_USER_SRC, /title: `\$\{title\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
-    "the CHANNEL title interpolates the notice");
-  assert.match(ASK_USER_SRC, /uiCtx\.ui![^\n]*select!?\(`\$\{title\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}/,
-    "the pane dialog interpolates the notice");
-  assert.match(ASK_USER_SRC, /uiCtx\.ui![^\n]*input!?\(`\$\{title\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}/,
-    "the free-text dialog interpolates the notice too");
+  assert.ok(interpolations >= 2, `the notice is interpolated at the dialog/transcript call sites (got ${interpolations})`);
+  assert.match(ASK_USER_SRC, /const prompt = `问题 \$\{progressLabel\(index, questions\.length\)\}\\n\$\{q\.text\}\$\{grantNotice\(q\)\}`/,
+    "the ONE prompt every surface renders interpolates the notice");
+  assert.match(ASK_USER_SRC, /title: prompt,/,
+    "the CHANNEL title is that prompt");
+  assert.match(ASK_USER_SRC, /uiCtx\.ui!\.select!\(prompt, choices/,
+    "the pane dialog renders that prompt");
+  assert.match(ASK_USER_SRC, /uiCtx\.ui!\.input!\(`\$\{prompt\}\\n\$\{FREE_TEXT_HINT\}`/,
+    "the free-text dialog renders it too");
   assert.match(ASK_USER_SRC, /\$\{q\.text\}\$\{grantNotice\(q\)\}` \+/,
     "the transcript interpolates the notice");
   assert.match(ASK_USER_SRC, /明确授予项目经理/,
     "the notice text states the grant in plain Chinese");
-  assert.match(ASK_USER_SRC, /meaning\.kind === "answered" && meaning\.answer === q\.recommended/,
+  assert.match(ASK_USER_SRC, /resolution\.answer\.kind === "answered"[\s\S]{0,900}resolution\.answer\.answer === q\.recommended/,
     "minting is an EXACT pick of the recommended row — no substring match");
-  assert.doesNotMatch(ASK_USER_SRC, /\/同意\|允许\|授权\|授予\|yes\|allow\|grant\/i\.test\(meaning\.answer/,
+  assert.doesNotMatch(ASK_USER_SRC, /同意\|允许\|授权\|授予\|yes\|allow\|grant/,
     "the old substring predicate must not come back");
+
   const askSrc = readFileSync(join(ROOT, "lib", "ask-user.ts"), "utf8");
   assert.match(askSrc, /grantable = grantScope && isGrantableScope\(grantScope\) && options && options\.length > 0/,
     "a grantScope without options is dropped at the schema");
@@ -794,10 +802,32 @@ test("ask_user: the QUESTIONS reach the user, and silence is never an answer", (
   assert.match(toolBody, /deps\.askEitherSide\(/, "every gate question is answerable by EITHER side");
   assert.match(toolBody, /topic: "ask-user"/, "the request is LABELLED by the gate that raised it");
 
+  // THE WHOLE INTERVIEW GOES UP FIRST (2026-09-06): every remaining question
+  // is handed to the funnel in one synchronous burst — each call writes its
+  // channel request record before it awaits anything — so a project manager
+  // sees all of them on its first receipt instead of one per round trip.
+  assert.match(toolBody, /const asks = remaining\.map\(/,
+    "the batch is started in one burst, not one question per await");
+  assert.match(toolBody, /batch: \{ id: batchId, index, total: questions\.length \}/,
+    "each question carries its place in the interview");
+  // …and the USER's own window is still one box at a time: renderer i waits
+  // for gate i, which the consuming loop opens only when i-1 has settled.
+  assert.match(toolBody, /await gates\[offset\]!\.opened;/,
+    "a dialog is raised only when it is that question's turn");
+  assert.match(toolBody, /gates\[offset \+ 1\]\?\.open\(\);/,
+    "…and the next turn starts only after this one settled");
+  // A question already settled by the project manager, or one the interview
+  // will never show, must not put a dead box on the user's screen.
+  assert.match(toolBody, /if \(signal\.aborted \|\| stopped !== undefined\) return undefined;/,
+    "a settled or abandoned question renders nothing");
+
   // A dismissed dialog or a broken UI is NOT consent: it becomes an
   // unanswered question, which pauses the loop.
-  assert.match(toolBody, /picked = undefined; \/\/ a broken dialog is silence, never an answer/);
-  assert.match(toolBody, /kind: "deferred-to-chat"/);
+  assert.match(toolBody, /\.catch\(\(\): ChannelDialogOutcome => \(\{ answer: undefined, by: "dismissed", requestId: "" \}\)\)/,
+    "a broken dialog is silence, never an answer");
+  assert.match(toolBody, /resolveQuestion\(q, outcome\.answer, \{/,
+    "what a settled question MEANS is the one pure rule in lib/ask-user.ts");
+
   // The answers come back in one piece, unanswered ones marked.
   assert.match(toolBody, /formatAnswers\(answers\)/);
   assert.doesNotMatch(toolBody, /ALREADY been delivered to the user verbatim/,

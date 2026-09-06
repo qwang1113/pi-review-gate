@@ -43,7 +43,7 @@ import {
 } from "./delivery-station.ts";
 
 import { appendRecord } from "./orchestrator-channel.ts";
-import { addGrant, findChild, hasGrant } from "./orchestrator-registry.ts";
+import { addGrant, findChild, hasGrant, type ChildSession } from "./orchestrator-registry.ts";
 import { proxyApprovalProblems } from "./orchestrator-gate.ts";
 import { superviseChildren, type PendingRequest } from "./orchestrator-supervisor.ts";
 import {
@@ -345,40 +345,116 @@ function pendingFor(deps: OrchestratorDeps, childId: string): PendingRequest[] {
   return snapshot.requests;
 }
 
-async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
-  const childId = String(params.childId ?? "").trim();
-  // Only meaningful when DECLINING (a goal rejection): the child reads it as
-  // the objection to renegotiate against. Ignored on approvals.
-  const reason = typeof params.reason === "string" ? params.reason.trim() : undefined;
-  const child = findChild(deps.runtime(), childId);
-  if (!child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
-  if (child.closedAt) return fail(`review-gate: 子会话 "${childId}" 已经关闭了。`);
+/**
+ * ONE item of an answering round: which question, and what to say to it.
+ *
+ * The single form (`answer` + optional `requestId`) and one element of the
+ * batch form (`answers`) normalize into the SAME shape and go through the
+ * same {@link answerOneRequest} — which is the whole design rule here. The
+ * crosscheck, the constraint-8 boundary and the sensitive-edit grant door are
+ * enforcement, and a second copy of enforcement is a copy that eventually
+ * disagrees with the first (哲学三). Batching adds a loop, never a ruleset.
+ */
+interface AnswerItem {
+  requestId?: string;
+  answer: string;
+  reason?: string;
+  crosscheck?: unknown;
+}
 
-  const requests = pendingFor(deps, childId);
-  if (requests.length === 0) {
-    return fail(
-      `review-gate: 子会话 ${childId} 现在没有待答的问题（通道里没有未销账的 request）。\n` +
-      "它可能已经被用户当场答掉了 —— `orchestrator_wait({ timeoutMs: 0 })` 看一眼现状。",
-      { childId, answered: false },
-    );
+/** What one item did. */
+type AnswerOutcome =
+  | { ok: true; requestId: string; title: string; answer: string; reason?: string }
+  | { ok: false; requestId?: string; refusal: ToolReply };
+
+/**
+ * Read the `answers` array into items.
+ *
+ * A malformed element is KEPT (as an empty answer) rather than dropped: it
+ * then fails its own adjudication and is reported on its own line. Dropping
+ * it would answer fewer questions than the caller asked for and say nothing
+ * about which one went missing.
+ */
+export function normalizeAnswerItems(raw: unknown): AnswerItem[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.map((entry) => {
+    if (!entry || typeof entry !== "object") return { answer: "" };
+    const e = entry as Record<string, unknown>;
+    const requestId = typeof e.requestId === "string" ? e.requestId.trim() : "";
+    const reason = typeof e.reason === "string" && e.reason.trim() ? e.reason.trim() : undefined;
+    return {
+      answer: typeof e.answer === "string" ? e.answer : "",
+      ...(requestId ? { requestId } : {}),
+      ...(reason === undefined ? {} : { reason }),
+      ...(e.crosscheck === undefined ? {} : { crosscheck: e.crosscheck }),
+    };
+  });
+}
+
+/**
+ * WHICH open question this item is for.
+ *
+ * `answered` holds the ids this same call has already written an answer for,
+ * and it is what keeps a batch honest: the pending list is read ONCE (the
+ * child settles asynchronously, so re-reading it mid-batch would race with
+ * its own settle records), so without this a repeated id — or a second item
+ * with no id at all — would write a second answer to a question that is
+ * already decided.
+ */
+function pickRequest(
+  childId: string,
+  requests: PendingRequest[],
+  wantedId: string,
+  answered: ReadonlySet<string>,
+): { ok: true; request: PendingRequest } | { ok: false; refusal: ToolReply } {
+  if (wantedId && answered.has(wantedId)) {
+    return {
+      ok: false,
+      refusal: fail(
+        `review-gate: requestId=${wantedId} 在这一次调用里已经回答过了，第二条被丢弃（不重复写）。`,
+        { childId, answered: false },
+      ),
+    };
   }
-  const wantedId = String(params.requestId ?? "").trim();
+  const open = requests.filter((r) => !answered.has(r.requestId));
   const request = wantedId
-    ? requests.find((r) => r.requestId === wantedId)
-    : requests.length === 1 ? requests[0] : undefined;
+    ? open.find((r) => r.requestId === wantedId)
+    : open.length === 1 ? open[0] : undefined;
   if (!request) {
-    return fail(
-      wantedId
-        ? `review-gate: 子会话 ${childId} 没有 requestId=${wantedId} 这个待答请求（可能已经被答掉了）。` +
-          `现在待答的是：${requests.map((r) => r.requestId).join("、")}`
-        : `review-gate: 子会话 ${childId} 同时有 ${requests.length} 个待答请求，必须指明 requestId：` +
-          requests.map((r) => `${r.requestId}（${r.title}）`).join("；"),
-      { childId, answered: false, pending: requests.length },
-    );
+    return {
+      ok: false,
+      refusal: fail(
+        wantedId
+          ? `review-gate: 子会话 ${childId} 没有 requestId=${wantedId} 这个待答请求（可能已经被答掉了）。` +
+            `现在待答的是：${open.map((r) => r.requestId).join("、")}`
+          : `review-gate: 子会话 ${childId} 同时有 ${open.length} 个待答请求，必须指明 requestId：` +
+            open.map((r) => `${r.requestId}（${r.title}）`).join("；"),
+        { childId, answered: false, pending: open.length },
+      ),
+    };
   }
+  return { ok: true, request };
+}
 
-  const resolved = resolveAnswer(request, String(params.answer ?? ""));
-  if (!resolved.ok) return fail(`review-gate: ${resolved.reason}`, { childId, answered: false });
+/**
+ * Adjudicate ONE answer and write it — every rule, in the one place that has
+ * them. Called once by the single form and once per item by the batch form.
+ */
+async function answerOneRequest(
+  deps: OrchestratorDeps,
+  child: ChildSession,
+  request: PendingRequest,
+  item: AnswerItem,
+): Promise<AnswerOutcome> {
+  const childId = child.id;
+  const resolved = resolveAnswer(request, item.answer);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      requestId: request.requestId,
+      refusal: fail(`review-gate: ${resolved.reason}`, { childId, answered: false }),
+    };
+  }
 
   // THE PROXY APPROVAL GUARD — a project manager speaking for the user must
   // show its comparison first (user requirement, 2026-09-06). One validator
@@ -386,15 +462,15 @@ async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>)
   // same act, and two checks would drift apart.
   if (request.topic !== undefined && CROSSCHECK_TOPICS.has(request.topic)
     && !isDecliningProxyAnswer(resolved.answer)) {
-    const guard = proxyCrosscheckGuard(deps, child.taskId, childId, request, params.crosscheck);
-    if (guard) return guard;
+    const guard = proxyCrosscheckGuard(deps, child.taskId, childId, request, item.crosscheck);
+    if (guard) return { ok: false, requestId: request.requestId, refusal: guard };
   }
 
 
   // CONSTRAINT 8 — a goal approval is bounded by the task's declared files.
   if (request.topic === "goal-approval") {
     const guard = goalApprovalGuard(deps, child.taskId, childId, request, resolved.answer);
-    if (guard) return guard;
+    if (guard) return { ok: false, requestId: request.requestId, refusal: guard };
   }
 
   // PROXY-AUTHORITY GATE (2026-09-16, user decision): the project manager
@@ -422,11 +498,15 @@ async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>)
       } else if (picked === "仅允许这一次") {
         // fall through — this answer passes once, no grant recorded
       } else {
-        return fail(
-          `review-gate: 用户拒绝授予敏感编辑代答权 —— 子会话 ${childId} 的请求未代答。` +
-          "（用户可之后用 /gate-grant sensitive-edit 或 ask_user 授予。）",
-          { childId, answered: false, needGrant: "sensitive-edit" },
-        );
+        return {
+          ok: false,
+          requestId: request.requestId,
+          refusal: fail(
+            `review-gate: 用户拒绝授予敏感编辑代答权 —— 子会话 ${childId} 的请求未代答。` +
+            "（用户可之后用 /gate-grant sensitive-edit 或 ask_user 授予。）",
+            { childId, answered: false, needGrant: "sensitive-edit" },
+          ),
+        };
       }
     }
   }
@@ -445,21 +525,111 @@ async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>)
         at: new Date(deps.now()).toISOString(),
         requestId: request.requestId,
         answer: resolved.answer,
-        ...(reason === undefined ? {} : { reason }),
+        ...(item.reason === undefined ? {} : { reason: item.reason }),
       },
     );
   } catch (error) {
-    return fail(`review-gate: 答案写不进通道 —— ${(error as Error).message}。什么都没答。`);
+    return {
+      ok: false,
+      requestId: request.requestId,
+      refusal: fail(`review-gate: 答案写不进通道 —— ${(error as Error).message}。什么都没答。`),
+    };
   }
 
-  return reply(
-    `review-gate: 已回答子会话 ${childId} 的「${request.title}」—— 选了：${resolved.answer}` +
-    (reason ? `，原因：${reason}` : "") + "\n" +
-    "答案已写进通道；它那边的框会自己撤下来（人这时如果正盯着那个框，会看到它消失）。\n" +
-    "下一次 `orchestrator_wait` 的回执会确认这个请求已销账。",
-    { childId, requestId: request.requestId, answered: true, answer: resolved.answer, ...(reason === undefined ? {} : { reason }) },
-  );
+  return {
+    ok: true,
+    requestId: request.requestId,
+    title: request.title,
+    answer: resolved.answer,
+    ...(item.reason === undefined ? {} : { reason: item.reason }),
+  };
 }
+
+async function doAnswer(deps: OrchestratorDeps, params: Record<string, unknown>): Promise<ToolReply> {
+  const childId = String(params.childId ?? "").trim();
+  const child = findChild(deps.runtime(), childId);
+  if (!child) return fail(`review-gate: 没有登记过子会话 "${childId}"。`);
+  if (child.closedAt) return fail(`review-gate: 子会话 "${childId}" 已经关闭了。`);
+
+  // ONE ROUND, ONE OR MANY QUESTIONS (2026-09-06). A child's `ask_user`
+  // interview now reaches the receipt whole (its questions carry a batch
+  // stamp), so answering it one tool call at a time was the only round trip
+  // left. `answers` closes it; `answer` is unchanged for the single case,
+  // and both walk the same adjudication.
+  const batch = normalizeAnswerItems(params.answers);
+  if (batch !== undefined && batch.length === 0) {
+    return fail("review-gate: answers 是空数组 —— 什么都没答。要么给它元素，要么用单问形式的 answer。", { childId, answered: false });
+  }
+  const items: AnswerItem[] = batch ?? [{
+    answer: String(params.answer ?? ""),
+    ...(String(params.requestId ?? "").trim() ? { requestId: String(params.requestId).trim() } : {}),
+    // Only meaningful when DECLINING (a goal rejection): the child reads it as
+    // the objection to renegotiate against. Ignored on approvals.
+    ...(typeof params.reason === "string" && params.reason.trim() ? { reason: params.reason.trim() } : {}),
+    ...(params.crosscheck === undefined ? {} : { crosscheck: params.crosscheck }),
+  }];
+
+  const requests = pendingFor(deps, childId);
+  if (requests.length === 0) {
+    return fail(
+      `review-gate: 子会话 ${childId} 现在没有待答的问题（通道里没有未销账的 request）。\n` +
+      "它可能已经被用户当场答掉了 —— `orchestrator_wait({ timeoutMs: 0 })` 看一眼现状。",
+      { childId, answered: false },
+    );
+  }
+
+  const answeredIds = new Set<string>();
+  const outcomes: AnswerOutcome[] = [];
+  for (const item of items) {
+    const picked = pickRequest(childId, requests, item.requestId ?? "", answeredIds);
+    if (!picked.ok) {
+      outcomes.push({ ok: false, refusal: picked.refusal });
+      continue;
+    }
+    const outcome = await answerOneRequest(deps, child, picked.request, item);
+    outcomes.push(outcome);
+    // Answered or refused, this question is spoken for in this round: a
+    // refusal must not make the NEXT item silently target the same box.
+    answeredIds.add(picked.request.requestId);
+  }
+
+  // The single form keeps its exact reply — it is what every existing caller
+  // (including a project manager running an older build) reads back.
+  if (outcomes.length === 1) {
+    const only = outcomes[0]!;
+    if (!only.ok) return only.refusal;
+    return reply(
+      `review-gate: 已回答子会话 ${childId} 的「${only.title}」—— 选了：${only.answer}` +
+      (only.reason ? `，原因：${only.reason}` : "") + "\n" +
+      "答案已写进通道；它那边的框会自己撤下来（人这时如果正盯着那个框，会看到它消失）。\n" +
+      "下一次 `orchestrator_wait` 的回执会确认这个请求已销账。",
+      { childId, requestId: only.requestId, answered: true, answer: only.answer, ...(only.reason === undefined ? {} : { reason: only.reason }) },
+    );
+  }
+
+  const done = outcomes.filter((o): o is Extract<AnswerOutcome, { ok: true }> => o.ok);
+  const lines = outcomes.map((o, index) => (o.ok
+    ? `${index + 1}. ✅ ${o.requestId}「${o.title}」→ 选了：${o.answer}${o.reason ? `（原因：${o.reason}）` : ""}`
+    : `${index + 1}. ❌ ${o.requestId ?? "（没定位到请求）"} —— ${o.refusal.content.map((c) => c.text).join(" ")}`));
+  const text =
+    `review-gate: 一次性回答子会话 ${childId} 的 ${outcomes.length} 个问题 —— 成功 ${done.length}，被拒 ${outcomes.length - done.length}。\n` +
+    lines.join("\n") + "\n" +
+    // EVERY ITEM IS ITS OWN DECISION, and nothing rolls back: an answer that
+    // reached the channel cannot be unwritten, so a batch never pretends to
+    // be a transaction. Fix a refused item and answer that one again.
+    "每条独立裁决：被拒的那条没有写进通道，改好后再单独回答它即可；已写进去的不会回滚。\n" +
+    "子会话那边的框会按题序自己撤下来。";
+  const details = {
+    childId,
+    answered: done.length,
+    refused: outcomes.length - done.length,
+    results: outcomes.map((o) => (o.ok
+      ? { requestId: o.requestId, ok: true, answer: o.answer }
+      : { ...(o.requestId === undefined ? {} : { requestId: o.requestId }), ok: false })),
+  };
+  return done.length === 0 ? fail(text, details) : reply(text, details);
+}
+
 
 /**
  * The proxy-approval boundary check.
@@ -594,12 +764,30 @@ export function registerOrchestratorAnswerTool(host: ToolHost, deps: Orchestrato
       "requirement restatement on the user's behalf additionally requires `crosscheck` — the " +
       "comparison you made against the plan task — and is bounded by constraint 8: the draft " +
       "checked is the one the CHILD wrote into the channel, so no text you could pass can widen " +
-      "the task's file boundary, and a station looser than the approved plan's is refused.",
+      "the task's file boundary, and a station looser than the approved plan's is refused. " +
+      "A child's `ask_user` INTERVIEW arrives as a batch (its questions share a batch stamp and " +
+      "all of them are in the receipt at once): answer the whole thing in ONE call with " +
+      "`answers: [{requestId, answer}, ...]` instead of one call per question. Every item is " +
+      "adjudicated on its own — a refused one does not stop the others, and nothing rolls back.",
     parameters: Type.Object({
       childId: Type.String(),
-      answer: Type.String({
-        description: "选项原文、1 起的序号，或一个能唯一命中的子串；自由文本框则是答案本身",
-      }),
+      answer: Type.Optional(Type.String({
+        description: "选项原文、1 起的序号，或一个能唯一命中的子串；自由文本框则是答案本身。回一整批时改用 answers。",
+      })),
+      answers: Type.Optional(Type.Array(
+        Type.Object({
+          requestId: Type.String({ description: "要回答的那个待答请求（回执里有）" }),
+          answer: Type.String({ description: "选项原文、1 起的序号，或一个能唯一命中的子串" }),
+          reason: Type.Optional(Type.String({ description: "拒绝原因（仅拒绝 goal 时填）" })),
+          crosscheck: Type.Optional(Type.String({ description: "代批 goal / 需求反述时必填，见 crosscheck" })),
+        }),
+        {
+          description:
+            "一次性回答同一个子会话的多个待答请求（它一次 ask_user 提交的整批问题）。" +
+            "每条独立裁决：某条被拒不影响其余条，已写进通道的答案不回滚。给了它就不要再给 answer。",
+        },
+      )),
+
       crosscheck: Type.Optional(Type.String({
         description:
           "代用户**批准**子会话的 goal / 需求反述时必填：你拿它的草稿逐条对照 plan 得出的结论。" +

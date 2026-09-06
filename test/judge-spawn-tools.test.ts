@@ -261,6 +261,41 @@ test("answer matches exact text, number and unique substring — and refuses amb
   assert.match(textOf(byNumber), /停下/);
 });
 
+test("with SEVERAL questions open, an answer must say which one (2026-09-06)", async () => {
+  // A judge pane talks through the same funnel a child session does, and an
+  // `ask_user` interview now writes its whole batch at once. "Answer the
+  // oldest open one" was unambiguous while questions arrived one at a time;
+  // with three open, two quick answers would both have landed on question 1
+  // — leaving 2 and 3 unanswered while the opener believed otherwise.
+  const { tools, deps, store } = setup();
+  const spawned = await tools.get("judge_spawn")!({ kind: "plan" });
+  assert.equal(spawned.isError, undefined);
+  const judgeId = Object.keys(store.table)[0]!;
+  const io = deps.channelIO();
+  const target = judgeChannelTarget("session-child-1", judgeId, "/home/test");
+  for (const [requestId, title] of [["q1", "第一题"], ["q2", "第二题"], ["q3", "第三题"]] as const) {
+    appendRecord(io, target, {
+      kind: "request", from: "child", at: new Date(1_700_000_000_000).toISOString(),
+      requestId, dialogKind: "select", title, options: ["继续", "停下"],
+      batchId: "b1", batchIndex: 0, batchTotal: 3,
+    });
+  }
+
+  const blind = await tools.get("judge_answer")!({ judgeId, answer: "1" });
+  assert.equal(blind.isError, true);
+  assert.match(textOf(blind), /必须指明 requestId/);
+  assert.match(textOf(blind), /q2/, "…and it lists what is open, so the next call can succeed");
+
+  const aimed = await tools.get("judge_answer")!({ judgeId, answer: "2", requestId: "q2" });
+  assert.equal(aimed.isError, undefined, textOf(aimed));
+  assert.match(textOf(aimed), /第二题/);
+
+  const gone = await tools.get("judge_answer")!({ judgeId, answer: "1", requestId: "nope" });
+  assert.equal(gone.isError, true);
+  assert.match(textOf(gone), /没有 requestId=nope/);
+});
+
+
 test("answer with no open question says so instead of failing", async () => {
   const { tools, store } = setup();
   const spawned = await tools.get("judge_spawn")!({ kind: "plan" });

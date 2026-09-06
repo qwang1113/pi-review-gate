@@ -460,7 +460,27 @@ async function doAnswer(
   if (open.length === 0) {
     return reply(`review-gate: review ${entry.judgeId} 当前没有未答的问题——可能人已经在 pane 里答了，或它还没提问。`);
   }
-  const first = open[0]!;
+  // WHICH question, when a judge has more than one open (2026-09-06). An
+  // `ask_user` interview now puts its whole batch on the channel at once, and
+  // a judge pane talks through this very same funnel — so "answer the oldest
+  // one" stopped being unambiguous. Two answers sent before the judge's own
+  // poll settled the first would both have landed on question 1, silently
+  // leaving 2 and 3 unanswered while the opener believed it had answered
+  // them. Same rule as `orchestrator_answer`: with several open, say which.
+  const wantedId = String(params.requestId ?? "").trim();
+  const first = wantedId
+    ? open.find((r) => r.requestId === wantedId)
+    : open.length === 1 ? open[0] : undefined;
+  if (!first) {
+    return fail(
+      wantedId
+        ? `review-gate: review ${entry.judgeId} 没有 requestId=${wantedId} 这个待答问题（可能已经答掉了）。` +
+          `现在待答的是：${open.map((r) => r.requestId).join("、")}`
+        : `review-gate: review ${entry.judgeId} 同时有 ${open.length} 个待答问题，必须指明 requestId：` +
+          open.map((r) => `${r.requestId}（${r.title}）`).join("；"),
+    );
+  }
+
   const matched = resolveAnswer(
     {
       childId: entry.judgeId,
@@ -573,11 +593,17 @@ export function registerJudgeSpawnTools(host: ToolHost, deps: JudgeSpawnToolDeps
     label: "Answer Own Judge",
     description:
       "Answer your own review's open question on its behalf (exact text, 1-based number, or unambiguous substring). " +
+      "With more than one question open — an `ask_user` interview arrives as a batch — pass the `requestId` " +
+      "the judge_wait receipt printed beside it; without one the answer is refused rather than aimed at a guess. " +
       "Only the opener may answer; anyone else is refused.",
+
     parameters: Type.Object({
       role: ROLE_PARAM,
       judgeId: JUDGE_ID_PARAM,
       answer: Type.String({ description: "选项原文、1 起序号或唯一子串" }),
+      requestId: Type.Optional(Type.String({
+        description: "同时有多个待答问题时必填（judge_wait 的回执在每个问题后面印了它）",
+      })),
       repo: REPO_PARAM,
     }),
     execute: async (_id, params) => doAnswer(deps, params),
