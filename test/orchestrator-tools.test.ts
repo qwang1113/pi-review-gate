@@ -878,6 +878,27 @@ test("archive still works when the plan file does NOT parse — that is the seal
     "the registry is what makes it worth archiving here");
 });
 
+test("the archive reply reports what it actually moved, on both paths", async () => {
+  // Same rule as the route text (round-1 P2): a receipt may not assert
+  // something that did not happen. The registry-only path — a repo left over
+  // from the `rm` era — archives no plan and renames no file.
+  const withPlan = makeFakeWorld({ plan: twoTaskPlan(), recordedRuntime: previousHolder() });
+  withPlan.confirmAnswers.push(true);
+  const planReply = await withPlan.call("orchestrator_plan", { action: "archive" });
+  assert.equal(planReply.details?.archivedPlan, true);
+  assert.match(replyText(planReply), /已改名留在归档旁边/, "a plan file WAS renamed, so say so");
+
+  const registryOnly = makeFakeWorld({ recordedRuntime: previousHolder() });
+  registryOnly.confirmAnswers.push(true);
+  const registryReply = await registryOnly.call("orchestrator_plan", { action: "archive" });
+  assert.equal(registryReply.isError, undefined, replyText(registryReply));
+  assert.equal(registryReply.details?.archivedPlan, false);
+  assert.equal(registryReply.details?.archivedRuntime, true);
+  assert.doesNotMatch(replyText(registryReply), /已改名/, "nothing was renamed — do not claim it was");
+  assert.doesNotMatch(replyText(registryReply), /已让出来/, "there was no plan file occupying the slot");
+});
+
+
 
 
 test("closing is limited to registered panes and returns the task to pending", async () => {

@@ -314,9 +314,15 @@ async function handlePlanAction(
     // a repo left over from the `rm` era has a registry and no plan — so
     // either half is enough to have work to do here, and neither is a
     // precondition for the other.
-    const existing = deps.readPlan().plan;
+    // ONE read of the file, not two: the second one could see a different
+    // file (the plan is an ordinary file another session may be writing), and
+    // then "is there a plan" and "what is the plan" would disagree.
+    const read = deps.readPlan();
+    const existing = read.plan;
     const recorded = deps.recordedRuntime();
-    const planFilePresent = existing !== undefined || deps.readPlan().problems.length > 0;
+    // An UNPARSEABLE plan file is still a plan file to be put away — that is
+    // the whole reason this action runs before the validation gate.
+    const planFilePresent = existing !== undefined || read.problems.length > 0;
     if (!planFilePresent && !recorded) {
       return fail(
         "review-gate: 本仓库没有什么可归档的 —— 既没有 `.pi/orchestrator-plan.json`，" +
@@ -390,12 +396,23 @@ async function handlePlanAction(
       `orchestrator plan archived to ${written.path} ` +
       `(plan hash ${existing ? planHash(existing) : "none"}, previous orchestration ${recorded?.orchestrationId ?? "none"})`,
     );
+    // SAYS ONLY WHAT HAPPENED (reviewer P2, round 2). The two halves are
+    // archivable separately, so a reply that always claims a plan was moved
+    // and a file renamed is wrong on the registry-only path — the one a repo
+    // from the `rm` era is actually in.
+    const moved = [
+      ...(planFilePresent ? ["plan"] : []),
+      ...(recorded ? ["编排登记表"] : []),
+    ].join(" + ");
     return reply(
-      `review-gate: 旧 plan 已归档到 ${written.path}（连同它的编排登记表；**没有删除任何东西**，` +
-      "原文件改名留在归档旁边）。\n" +
-      `${PLAN_RELPATH} 已让出来了 —— 现在可以 \`orchestrator_plan({action:"write"})\` 写这一轮自己的 plan，` +
+      `review-gate: 已归档 ${moved} → ${written.path}（**没有删除任何东西**` +
+      (planFilePresent ? `，原 ${PLAN_RELPATH} 已改名留在归档旁边` : "") +
+      ")。\n" +
+      (planFilePresent
+        ? `${PLAN_RELPATH} 已让出来了 —— 现在可以 \`orchestrator_plan({action:"write"})\` 写这一轮自己的 plan，`
+        : "本仓库本来就没有 plan 文件；现在门禁记录也干净了 —— `orchestrator_plan({action:\"write\"})` 写这一轮自己的 plan，") +
       "再 `submit` 请用户批准。",
-      { archived: true, path: written.path },
+      { archived: true, path: written.path, archivedPlan: planFilePresent, archivedRuntime: Boolean(recorded) },
     );
   }
 
