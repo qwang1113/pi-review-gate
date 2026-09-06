@@ -280,6 +280,9 @@ test("the scope kind is read back out of the task text, or is absent", () => {
       changedFiles: ["src/a.ts"],
       changedLines: 3,
       previouslyReviewedFiles: ["src/a.ts"],
+      // Reader-side precondition (t9d) — without it the decision escalates to
+      // full and this test would parse the marker it was not aiming at.
+      judgeRemembersPreviousRound: true,
     }),
     [],
   );

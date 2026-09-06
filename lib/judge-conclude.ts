@@ -254,6 +254,75 @@ export function countStreamFindings(readText: (path: string) => string | undefin
   }
 }
 
+/**
+ * HOW MUCH OF ONE FINDING'S PROSE REACHES THE PANE.
+ *
+ * A finding renders on ONE line so the round can be scanned at a glance; an
+ * issue long enough to wrap turns that list back into the prose it replaced.
+ * Nothing is lost by cutting it here — the channel record carries every
+ * finding verbatim, and this text is a second rendering for eyes only.
+ */
+export const PANE_ISSUE_MAX_CHARS = 200;
+
+/** How much of an `evidence` string may stand in as a locator. */
+const PANE_EVIDENCE_MAX_CHARS = 80;
+
+/** One line, whitespace flattened, at most `max` characters of it. */
+function clampToLine(raw: string, max: number): string {
+  const flat = raw.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+/**
+ * WHERE TO LOOK, in the best form this finding offers.
+ *
+ * `file:line` when the judge gave both, the file alone when it gave one, and
+ * `evidence` as the fallback — a finding with no file at all still told the
+ * reader where to look, and dropping that would leave the locator slot empty
+ * precisely where it is needed most. Empty string when the finding offers
+ * nothing; the caller then renders no locator rather than an empty bracket.
+ */
+function paneLocator(f: ConcludeFinding): string {
+  if (f.file !== undefined) return f.line === undefined ? f.file : `${f.file}:${f.line}`;
+  if (f.evidence !== undefined) return clampToLine(f.evidence, PANE_EVIDENCE_MAX_CHARS);
+  return "";
+}
+
+/** One finding on one line: how bad, where, and what. */
+function paneFindingLine(f: ConcludeFinding): string {
+  const severity = f.severity.trim() || "?";
+  const locator = paneLocator(f);
+  return `[${severity}]${locator === "" ? "" : ` ${locator}`} — ${clampToLine(f.issue, PANE_ISSUE_MAX_CHARS)}`;
+}
+
+/**
+ * THE ROUND'S CONCLUSION, RENDERED FOR THE HUMAN SITTING NEXT TO THE PANE.
+ *
+ * The verdict and the findings travel to the OPENER as structured data in the
+ * channel record, and that is the only path anything machine-readable uses.
+ * It left one party with no copy at all: the person watching the judge's own
+ * pane, who saw "verdict=BLOCKED, findings=3" and had to go and find the
+ * opener to learn WHICH three.
+ *
+ * So this is a TEXT-ONLY addition and deliberately nothing else. The record is
+ * built and appended untouched; this renders the same facts a second time, for
+ * eyes. Pure over its input, so the wording is unit-testable without a channel.
+ */
+export function formatConcludedForPane(input: {
+  verdict: ConcludeVerdict;
+  findings: ReadonlyArray<ConcludeFinding>;
+}): string {
+  const lines = [`verdict = ${input.verdict}`];
+  if (input.findings.length === 0) {
+    lines.push("findings：无。");
+    return lines.join("\n");
+  }
+  lines.push(`findings（${input.findings.length} 条）：`);
+  input.findings.forEach((f, i) => lines.push(`${i + 1}. ${paneFindingLine(f)}`));
+  return lines.join("\n");
+}
+
+
 /** Everything the tool needs from the outside world. */
 export interface JudgeConcludeToolDeps {
   /** This judge pane's environment (identity comes from RG_JUDGE_*). */
@@ -439,7 +508,12 @@ async function doConclude(deps: JudgeConcludeToolDeps, params: Record<string, un
   // pass that carried this READY is spent.
   deps.noteConcluded(gate.usedPass);
   return reply(
-    `review-gate: 本轮结论已交卷（report ${report.reportId}，verdict=${input.verdict}，findings=${input.findings.length}）。停下等 opener，不要再调一次。`,
+    `review-gate: 本轮结论已交卷（report ${report.reportId}，verdict=${input.verdict}，findings=${input.findings.length}）。停下等 opener，不要再调一次。\n\n`
+    // The same conclusion a second time, for the human watching THIS pane.
+    // Text only: the record above is what the opener consumes, and it was
+    // built and appended before this line ever ran.
+    + `── 本轮交卷内容（给人看的；opener 读的是通道里的结构化记录）──\n`
+    + formatConcludedForPane(input),
     { concluded: true, reportId: report.reportId, round: seq.round, verdict: input.verdict },
   );
 }

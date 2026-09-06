@@ -4135,9 +4135,25 @@ test("O-6: the gate closes the internal auditor it dispatched, in BOTH audit pat
   // is no longer "one per return branch" (which is how a branch leaks a pane)
   // but a single `finally` in the engine, and the extension holds exactly one
   // judge_close wiring for it.
+  // 2026-09-06 (t9d): that `finally` is also the ONE execution point of the
+  // pane-lifecycle policy, so the close is gated by `judgePaneReclaim` rather
+  // than written as an unconditional statement — and the reclaim's outcome is
+  // no longer discarded. What must not change is the property this test has
+  // always been about: it runs on every path out of the round.
   const engineRun = windowIn(AUDIT_ROUND_SRC, "export async function runAuditRound(", "\n}", "runAuditRound");
-  assert.match(engineRun, /\} finally \{\s*\n\s*await deps\.closeJudge\(root, spec\.role\);/,
+  const finallyBlock = engineRun.slice(engineRun.indexOf("} finally {"));
+  assert.ok(finallyBlock.startsWith("} finally {"), "the round still ends in a finally");
+  assert.match(finallyBlock, /judgePaneReclaim\("gate"\)/,
+    "the policy decides that this pane is reclaimed here — this call site does not");
+  assert.match(finallyBlock, /await deps\.closeJudge\(root, spec\.role\)/,
     "the close runs on EVERY path out of the round, fail-closed ones included");
+  assert.match(finallyBlock, /reclaimAuditLine\(/,
+    "…and a reclaim that did not do what the policy promises is written down, not dropped");
+  // No return branch may take the reclaim into its own hands again: one pane,
+  // one owner, one place it is released.
+  assert.equal(engineRun.slice(0, engineRun.indexOf("} finally {")).includes("closeJudge"), false,
+    "nothing before the finally closes the judge");
+
 
   const goalAt = SRC.indexOf("async function runGoalAudit(");
   const goal = SRC.slice(goalAt, SRC.indexOf("async function runPlanAudit("));
@@ -4969,6 +4985,67 @@ test("the judge registry is ONE table: every own-judge reader is opener-scoped",
   // The health snapshot the hosted wait is built from.
   assert.match(SRC, /for \(const c of ownJudges\(\)\) \{/, "the child snapshot lists own judges only");
 });
+
+/**
+ * PANE LIFECYCLE: THE SECOND POLICY IS TOPOLOGY, NOT A BRANCH (t9d, 2026-09-06).
+ *
+ * `lib/judge-pane-policy.ts` states both answers to "when does a judge pane go
+ * away" and is EXECUTED in exactly one place — `runAuditRound`'s reclaim. The
+ * other policy ("the agent's review pane lives until declare_done") has no
+ * branch to test, because nothing decides it at runtime: the agent cannot call
+ * `judge_close` at all, and `declare_done`'s sweep closes everything of this
+ * opener without asking who dispatched it.
+ *
+ * That is a real invariant and it is what this test pins. A future round that
+ * teaches the sweep to consult the policy and skip something would break the
+ * guarantee that finishing a task can never strand a pane — and a round that
+ * makes it consult the policy and then close everything anyway would add the
+ * decorative call site the policy module explicitly argues against.
+ */
+test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by dispatcher", () => {
+  const sweep = windowOf("const ownedJudges = ownJudges();", "progress.step(`联关", "declare_done cascade");
+  // It closes what it owns, one by one, with no question about provenance.
+  assert.match(sweep, /for \(const child of ownedJudges\) \{/, "every owned judge is visited");
+  for (const dispatcherish of ["judgePaneReclaim", "dispatchedBy", "atRoundEnd", "judge-pane-policy"]) {
+    assert.equal(sweep.includes(dispatcherish), false,
+      `the sweep must not consult "${dispatcherish}" — a decorative call site is worse than none`);
+  }
+  // …and it must not learn to skip. A `continue` guarded by the role is
+  // exactly how "finishing can never strand a pane" would quietly stop being
+  // true, and `goal-auditor` is the role such a guard would name.
+  assert.doesNotMatch(sweep, /role === "goal-auditor"[^\n]*continue/,
+    "no role may be exempted from the terminal sweep");
+
+  // THE OTHER HALF OF THE TOPOLOGY: the agent has no way to close a pane, so
+  // there is nothing for it to get wrong. `judge_close` is registered on the
+  // internal host only.
+  const registration = windowOf("judge_close", "judge_wait", "judge tool host split",
+    SRC.indexOf("// WHERE EACH ONE LIVES."));
+  assert.match(registration, /INTERNAL host/,
+    "judge_close stays off the agent's tool surface — that IS policy (b)");
+});
+
+/**
+ * THE GATE'S OWN RECLAIM NO LONGER THROWS ITS EVIDENCE AWAY (t9d).
+ *
+ * `closeJudge` used to `await callTool("judge_close", …)` and drop the reply.
+ * That reply is the ONLY place a half-done reclaim is visible: the tool clears
+ * the registry row even when the kill fails, so once the text is gone the
+ * leftover pane cannot be found by anything — the row it would be found by no
+ * longer exists.
+ */
+test("the audit chain's closeJudge reports what the reclaim achieved", () => {
+  const dep = windowOf("closeJudge: async (root, role) => {", /\n      \},\n/, "closeJudge dep");
+  assert.match(dep, /return \{/, "the outcome is returned, never discarded");
+  assert.match(dep, /terminated: closed\.details\?\.terminated === true/,
+    "whether the pane is really gone comes from the tool, not from an assumption");
+  // `hadPane` is only knowable BEFORE the close: the row is dropped by it.
+  const hadPaneAt = dep.indexOf("const hadPane =");
+  const callAt = dep.indexOf('callTool("judge_close"');
+  assert.ok(hadPaneAt >= 0 && callAt >= 0, "both halves are present");
+  assert.ok(hadPaneAt < callAt, "hadPane must be read before the row is dropped");
+});
+
 
 test("a judge session writes NO gate state, and says so outside the repo", () => {
   // A judge is a reporting shell. Its pane carries no RG_STATE_VARIANT, so

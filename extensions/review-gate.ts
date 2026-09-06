@@ -189,6 +189,7 @@ import { emptyHierarchy, findJudgeLane, judgeLive, listByOpener, paneClosable, p
 import {
   decideJudgeRotation,
   judgeObjectId,
+  judgeRemembersPreviousRound,
   laneOfEntry,
   rotationHandoffTask,
   type JudgeRotationDecision,
@@ -1449,11 +1450,20 @@ export default function reviewGate(pi: ExtensionAPI) {
    * How much of this round the reviewer must deep-read.
    *
    * Collects the git facts (increment since the last approved tree, what that
-   * review covered) and hands them to the pure decision function. Every
-   * missing fact resolves to a FULL review — see lib/review-scope.ts.
+   * review covered) PLUS the one fact that is not about the code — whether the
+   * judge taking the round still holds the previous round's reasoning — and
+   * hands them all to the pure decision function. Every missing fact resolves
+   * to a FULL review; see lib/review-scope.ts.
+   *
+   * The reader-side fact is gathered HERE rather than at each call site so all
+   * three consumers (the reviewer's task text, the turn-end directive, the
+   * timing record) describe the same round the same way.
    */
   function reviewScopeFor(root: string, st: GateState): ReviewScopeDecision {
     const base = st.lastReadyReview;
+    // No settled tree ⇒ full anyway. Returning before the lane probe keeps a
+    // session that has never had a READY free of a registry scan and a
+    // directory read on every turn.
     if (!base) return decideReviewScope({});
     const increment = incrementSinceTree(root, base.treeOid);
     return decideReviewScope({
@@ -1461,8 +1471,34 @@ export default function reviewGate(pi: ExtensionAPI) {
       changedFiles: increment?.files,
       changedLines: increment?.lines,
       previouslyReviewedFiles: base.files,
+      judgeRemembersPreviousRound: reviewerRemembersPreviousRound(root),
     });
   }
+
+  /**
+   * WILL THIS REPO'S NEXT REVIEWER STILL REMEMBER THE ROUND THAT SETTLED?
+   *
+   * The lane judgement is `resolveJudgeLane`'s, not a second copy of it: the
+   * dispatch that actually opens the reviewer asks the same function, so the
+   * scope this decides and the transcript that round lands in cannot disagree.
+   * Reading it here is free of consequence — the returned `retirePrevious` is
+   * a closure, and nothing but a caller that invokes it retires anything.
+   *
+   * FAIL-SAFE AT EVERY UNKNOWN: no caller identity, no transcript, or a lane
+   * the policy did not call `reuse` all come back `false`, and `false` only
+   * ever buys a deeper review.
+   */
+  function reviewerRemembersPreviousRound(root: string): boolean {
+    const opener = callerIdentity();
+    if (!opener) return false;
+    const { decision } = resolveJudgeLane(root, "reviewer", opener);
+    const workDir = pathJoin(root, judgeWorkDirFor("reviewer", shortRepoHash(root), opener, decision.lane));
+    return judgeRemembersPreviousRound({
+      decision,
+      transcriptExists: hasTranscript(pathJoin(workDir, "sessions")),
+    });
+  }
+
 
   /** Findings the previous round left on the table, for the next reviewer. */
   function previousRoundFindings(st: GateState): string[] {
@@ -5930,8 +5966,21 @@ export default function reviewGate(pi: ExtensionAPI) {
           detail: details.reason === "pane-dead" ? "pane 已消失" : "等待未命中本轮 report",
         };
       },
+      // THE RECLAIM, AND WHAT IT ACHIEVED. The reply used to be awaited and
+      // thrown away, which is where a half-done reclaim went to die:
+      // `judge_close` drops the registry row even when the kill FAILS, so
+      // after that reply is discarded the leftover pane is unreachable — the
+      // row it would be found by no longer exists. `hadPane` is read HERE,
+      // before the close, because it is the only moment it is still knowable.
       closeJudge: async (root, role) => {
-        await callTool("judge_close", { role, repo: root }, waitCtx);
+        const hadPane = judgeChildByRole(root, role)?.paneId !== undefined;
+        const closed = await callTool("judge_close", { role, repo: root }, waitCtx);
+        return {
+          ok: closed.isError !== true && closed.details?.closed === true,
+          hadPane,
+          terminated: closed.details?.terminated === true,
+          note: toolText(closed).split("\n")[0]?.trim() || undefined,
+        };
       },
       auditPassed: (root, pending) => {
         const st = root === primaryRepoRoot ? state : stateForRepo(root);

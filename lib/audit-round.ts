@@ -19,7 +19,11 @@
  * how its report is bound to a round, and the sentences the caller reads when
  * the round fails closed. What is shared is everything mechanical: which
  * report belongs to this round, the fail-closed rule, the pending bookkeeping,
- * and the ONE `judge_close` that reclaims a pane the gate opened itself (O-6).
+ * and the ONE `judge_close` that reclaims a pane the gate opened itself. That
+ * reclaim is the single execution point of the pane-lifecycle policy — WHY the
+ * gate's own auditor dies with its round while the agent's review pane lives
+ * until `declare_done`, and why there is no second call site, is written in
+ * lib/judge-pane-policy.ts and is not restated here.
  *
  * ── THE TWO HALVES, AND WHY THEY ARE TWO ──
  *
@@ -70,6 +74,15 @@ import {
   type PendingAudit,
   type ReportBinding,
 } from "./audit-round-specs.ts";
+// WHEN THE PANE THIS CHAIN OPENED GOES AWAY — and what a half-done reclaim
+// has to say out loud. The rule lives there; the one place it is executed is
+// this file's `runAuditRound` reclaim step.
+import {
+  judgePaneReclaim,
+  reclaimAuditLine,
+  type JudgePaneReclaimOutcome,
+} from "./judge-pane-policy.ts";
+
 
 /** Why the channel held no report this round may be adjudicated against. */
 export type RoundReportMiss =
@@ -579,12 +592,19 @@ export interface RunAuditRoundDeps extends SettleAuditRoundDeps {
   /** Wait for the END of the round (a report), not for its first message. */
   awaitRoundEnd(root: string): Promise<{ ok: boolean; detail: string }>;
   /**
-   * O-6 — whoever dispatched it closes it. The gate opened this auditor as
-   * its OWN implementation of `propose_loop_goal` / `submit`; the agent never
-   * asked for it and never sees it in a receipt, so leaving it registered
-   * blocks `declare_done` on a judge nobody was told about.
+   * Close the pane this chain opened, and REPORT WHAT THAT ACHIEVED.
+   *
+   * The rule it serves is policy (a) in lib/judge-pane-policy.ts ("谁派谁收",
+   * O-6) — see that module for why the gate's own auditor is reclaimed here
+   * and the agent's review pane is not.
+   *
+   * The outcome is a RETURN VALUE and not `void` because the interesting case
+   * is the half-done one: `judge_close` drops the registry row even when the
+   * kill fails, so a discarded reply is a pane left on the user's screen that
+   * nothing downstream can find any more (the row it would be found by is
+   * gone). This chain writes that into the audit log instead of dropping it.
    */
-  closeJudge(root: string, role: string): Promise<void>;
+  closeJudge(root: string, role: string): Promise<JudgePaneReclaimOutcome>;
   /**
    * Did the recorded verdict actually pass — for the CONTENT this round
    * judged? The pending entry is passed in rather than re-read, because the
@@ -728,7 +748,33 @@ export async function runAuditRound(
       }),
     };
   } finally {
-    await deps.closeJudge(root, spec.role);
+    // ─────────── THE ONE EXECUTION POINT of the pane-lifecycle policy ────────
+    //
+    // This chain IS the gate dispatching for itself: goal and plan audits are
+    // the only kinds that reach `runAuditRound` (a code review enters the
+    // engine at the conclusion half), and the agent neither asked for this
+    // auditor nor can see it. So the dispatcher is not a per-spec field — it
+    // is what this function is — and lib/judge-pane-policy.ts decides what
+    // that means. There is deliberately no second call site; that module's
+    // docblock says why, and `declare_done`'s source-blind sweep is pinned by
+    // a test rather than by a branch that would only pretend to consult this.
+    const policy = judgePaneReclaim("gate");
+    if (policy.atRoundEnd) {
+      // Best effort, and LOUD when it is not enough. A throw here would
+      // replace the round's real answer with an exception raised by its
+      // cleanup, so it is caught — but caught into the same audit line a
+      // failed close produces, never into silence.
+      let outcome: JudgePaneReclaimOutcome;
+      try {
+        outcome = await deps.closeJudge(root, spec.role);
+      } catch (err) {
+        outcome = { ok: false, hadPane: false, terminated: false, note: (err as Error).message };
+      }
+      const line = reclaimAuditLine({ role: spec.role, policy, outcome });
+      if (line !== undefined) {
+        try { deps.log(line); } catch { /* the log is the last thing that may break a round */ }
+      }
+    }
   }
 }
 

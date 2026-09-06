@@ -23,6 +23,17 @@
  * is an optimization, and an optimization that has to be right must give up
  * early.
  *
+ * TWO KINDS OF PRECONDITION, AND THE SECOND IS NOT ABOUT THE CODE. Everything
+ * above is about the INCREMENT — how big it is, whose files it lands in. There
+ * is also a precondition about the READER: an incremental round tells whoever
+ * takes it to stop re-deriving what the last round settled, which only means
+ * anything if that judge derived it. Since the gate rotates a judge's
+ * transcript by itself (lib/judge-rotation.ts — context, round cap, a changed
+ * contract), the reviewer of this round routinely is NOT the one that settled
+ * the last, and this module refuses to grant incremental to a reader that
+ * would have to take the settled conclusion on trust. That fact is decided
+ * where transcript continuity lives, never re-derived here.
+ *
  * FAIL-SAFE. Any missing input (no previous READY tree, unreadable git, an
  * unparseable diffstat) yields `full`. Incremental is never the default and is
  * never inferred — it is granted only when every precondition is present.
@@ -62,7 +73,19 @@ export interface IncrementInput {
   changedLines?: number;
   /** Files the previous review's diff covered (its own scope). */
   previouslyReviewedFiles?: string[];
+  /**
+   * Does the judge that will take this round still hold the previous round's
+   * REASONING? Decided by `judgeRemembersPreviousRound` (lib/judge-rotation.ts)
+   * — the reuse policy owns transcript continuity, this module only consumes
+   * its answer.
+   *
+   * ABSENT MEANS NO, like every other missing fact here: an incremental round
+   * asks its reader to stop re-deriving what the last round settled, and a
+   * reader that never derived it cannot honour that with anything but trust.
+   */
+  judgeRemembersPreviousRound?: boolean;
 }
+
 
 /**
  * Decide how much of this round the reviewer must deep-read.
@@ -91,6 +114,19 @@ export function decideReviewScope(input: IncrementInput): ReviewScopeDecision {
   if (!input.baseTree) {
     return full("no previous READY review to build on — full deep review");
   }
+  // THE READER-SIDE PRECONDITION, checked before any content rule: the rest
+  // of this function asks whether the INCREMENT is small enough to stand on a
+  // settled conclusion; this asks whether the reader can stand on one at all.
+  // The gate rotates a judge's transcript on its own (context, round cap), so
+  // "the reviewer of this round is not the one that settled the last" is a
+  // routine event, not an edge case.
+  if (input.judgeRemembersPreviousRound !== true) {
+    return full(
+      "the judge taking this round does not continue the transcript that settled the last one, " +
+      "so it never derived that conclusion and cannot carry it forward — full deep review",
+    );
+  }
+
   if (!input.changedFiles) {
     return full("the increment could not be computed (git unreadable) — full deep review");
   }

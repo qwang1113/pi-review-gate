@@ -228,6 +228,46 @@ export function laneOfEntry(entry: JudgeLaneRecord | undefined): JudgeLane | und
 }
 
 /**
+ * DOES THE JUDGE TAKING THIS ROUND STILL HOLD THE PREVIOUS ROUND'S REASONING?
+ *
+ * An INCREMENTAL review round is a promise its reader has to be able to keep:
+ * "what the last round settled stays settled — spend this round on the
+ * increment". A judge whose transcript CONTINUES can keep it: it derived that
+ * conclusion itself and still remembers why. A judge starting a FRESH
+ * transcript cannot. The carryover hands it the previous verdict, the covered
+ * file list and the open findings — but not the reasoning behind any of them,
+ * so "carry it forward" degrades into "take it on trust", which is the one
+ * thing an independent review must never do.
+ *
+ * Rotation made that case routine rather than theoretical: the gate itself
+ * mints a new transcript mid-task, at {@link JUDGE_ROTATION_CONTEXT_PERCENT}
+ * or {@link JUDGE_ROTATION_MAX_ROUNDS}, and the content-side scoping rule
+ * (lib/review-scope.ts) had no way to see it happen.
+ *
+ * TWO FACTS, BOTH REQUIRED:
+ *
+ *  - the policy REUSED the lane (`reason === "reuse"`). Every other outcome
+ *    means a different transcript — `first` included, deliberately: a lane the
+ *    registry has no record of is one whose history the gate cannot vouch for,
+ *    so a directory that happens to survive under that name does not make it
+ *    continuous.
+ *  - that lane's transcript actually EXISTS. A reused lane whose previous
+ *    round was dispatched and abandoned has nothing to resume.
+ *
+ * FAIL-SAFE BY CONSTRUCTION: every unknown resolves to `false`, and `false`
+ * only ever costs a deeper review. Pure, like everything else here — the
+ * caller observes the transcript, this decides what it means.
+ */
+export function judgeRemembersPreviousRound(input: {
+  decision: JudgeRotationDecision;
+  /** Does a transcript for THIS round's lane already exist? */
+  transcriptExists: boolean;
+}): boolean {
+  return input.decision.reason === "reuse" && input.transcriptExists === true;
+}
+
+
+/**
  * The sentence a fresh transcript's first round opens with.
  *
  * WHAT IT DELIBERATELY DOES NOT SAY (user, 2026-09-05). It names no mechanism:

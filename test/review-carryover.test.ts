@@ -43,6 +43,10 @@ function incrementalDecision() {
     changedFiles: ["src/a.ts"],
     changedLines: 3,
     previouslyReviewedFiles: reviewed,
+    // The reader-side precondition (t9d): a decision only comes out
+    // incremental for a judge that continues the transcript which settled the
+    // last round. These tests are about the TEXT, so the fact is supplied.
+    judgeRemembersPreviousRound: true,
   });
 }
 

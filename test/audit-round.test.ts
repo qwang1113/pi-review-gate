@@ -32,6 +32,7 @@ import {
 } from "../lib/audit-round-specs.ts";
 import type { ChannelRecord, ChannelReportRecord, ReportConclusion } from "../lib/orchestrator-channel.ts";
 import type { PlanAuditRecord } from "../lib/orchestrator-plan-audit.ts";
+import { judgePaneReclaim, type JudgePaneReclaimOutcome } from "../lib/judge-pane-policy.ts";
 
 const NOW = "2026-09-05T12:00:00.000Z";
 /** The checkpoint this round reviews — an hour BEFORE the reports above. */
@@ -726,6 +727,13 @@ interface RunState extends FakeState {
   waitOk: boolean;
   passed: boolean;
   dispatchOk: boolean;
+  /**
+   * What the reclaim reports back (t9d). `undefined` is the clean case: the
+   * pane was closed and confirmed gone, which the policy expects to be silent.
+   * Set it to make the reclaim half-done, or throw.
+   */
+  closeOutcome?: JudgePaneReclaimOutcome | undefined;
+  closeThrows?: boolean;
   /** What the kind can rebuild from its RECORD when the wait did the recording. */
   recordedRefusal: string | undefined;
   /** Did the registry hand back an addressable judge id? */
@@ -774,7 +782,11 @@ function makeRunDeps(over: Partial<RunState> = {}): { state: RunState; deps: Run
     },
     awaitRoundEnd: async () =>
       state.waitOk ? { ok: true, detail: "" } : { ok: false, detail: "pane 已消失" },
-    closeJudge: async (_root, role) => { state.closed.push(role); },
+    closeJudge: async (_root, role) => {
+      state.closed.push(role);
+      if (state.closeThrows) throw new Error("tmux 不见了");
+      return state.closeOutcome ?? { ok: true, hadPane: true, terminated: true };
+    },
     auditPassed: () => state.passed,
     recordedRefusal: () => state.recordedRefusal,
     verdictLabel: () => "FAIL",
@@ -1012,3 +1024,92 @@ test("run: a refused dispatch never puts a draft on record", async () => {
   assert.deepEqual(state.remembered, [], "a verdict must never bind to text no auditor read");
   assert.deepEqual(state.closed, [], "nothing was opened, so nothing is closed");
 });
+
+/*
+ * ───── THE RECLAIM IS THE POLICY'S ONE EXECUTION POINT (t9d, 2026-09-06) ────
+ *
+ * `lib/judge-pane-policy.ts` says a pane the GATE opened dies with the round
+ * that opened it, and it says so in exactly one place that acts: here. These
+ * pin both halves — that the reclaim happens, and that a reclaim which did NOT
+ * do what the policy promises stops being silent. The reply used to be awaited
+ * and discarded, which is where a leftover pane went to die: `judge_close`
+ * drops the registry row even when the kill fails, so once that text is gone
+ * nothing downstream can find the pane at all.
+ */
+
+/** Run one passing goal round with the reclaim outcome under test. */
+async function runWithReclaim(over: Partial<RunState>) {
+  const { state, deps } = makeRunDeps({
+    entry: { judgeId: "j-1", openerId: "o-1", role: "goal-auditor", roundSeq: 2, lastReportId: "rep-1" },
+    records: [childReport("rep-2", { round: 2, verdict: "READY" })],
+    ...over,
+  });
+  const outcome = await runAuditRound(deps, {
+    spec: GOAL_AUDIT_SPEC,
+    root: ROOT,
+    task: "审计这份草稿",
+    pending: { kind: "goal", draft: "# 目标草稿", startedAt: NOW },
+  });
+  const reclaimLines = state.auditLog.filter((l) => l.includes("judge pane 回收"));
+  return { state, outcome, reclaimLines };
+}
+
+test("reclaim: the policy decides it, and a clean reclaim stays out of the log", async () => {
+  // The rule is not inlined here — it is asked for. A policy that stopped
+  // saying "round-end" would stop this close from happening at all.
+  assert.equal(judgePaneReclaim("gate").atRoundEnd, true);
+  const { state, outcome, reclaimLines } = await runWithReclaim({});
+  assert.deepEqual(outcome, { ok: true });
+  assert.deepEqual(state.closed, ["goal-auditor"]);
+  assert.deepEqual(reclaimLines, [], "a reclaim that did what it promised is not news");
+});
+
+test("reclaim: a kill that failed is written down — the registry row is already gone", async () => {
+  const { outcome, reclaimLines } = await runWithReclaim({
+    closeOutcome: { ok: true, hadPane: true, terminated: false, note: "关 pane 失败（no such pane），登记照样清除" },
+  });
+  assert.deepEqual(outcome, { ok: true }, "the round's own answer is unaffected by its cleanup");
+  assert.equal(reclaimLines.length, 1);
+  assert.match(reclaimLines[0]!, /回收未确认/);
+  assert.match(reclaimLines[0]!, /登记照样清除/, "the closing tool's own words survive to the log");
+});
+
+test("reclaim: a pane that was never registered is silent — there is nothing to leak", async () => {
+  const { reclaimLines } = await runWithReclaim({
+    closeOutcome: { ok: true, hadPane: false, terminated: false, note: "没有登记 pane，无需动手" },
+  });
+  assert.deepEqual(reclaimLines, []);
+});
+
+test("reclaim: a close that failed outright is written down", async () => {
+  const { reclaimLines } = await runWithReclaim({
+    closeOutcome: { ok: false, hadPane: true, terminated: false, note: "judge_close 被拒" },
+  });
+  assert.equal(reclaimLines.length, 1);
+  assert.match(reclaimLines[0]!, /回收失败/);
+});
+
+test("reclaim: a throwing close neither loses the round nor goes unrecorded", async () => {
+  // A cleanup that raises must not replace the round's real answer with its
+  // own exception — and must not be swallowed into silence either.
+  const { state, outcome, reclaimLines } = await runWithReclaim({ closeThrows: true });
+  assert.deepEqual(outcome, { ok: true });
+  assert.deepEqual(state.closed, ["goal-auditor"], "the reclaim was attempted");
+  assert.equal(reclaimLines.length, 1);
+  assert.match(reclaimLines[0]!, /回收失败/);
+  assert.match(reclaimLines[0]!, /tmux 不见了/);
+});
+
+test("reclaim: a FAILED round reclaims and logs exactly like a passing one", async () => {
+  // The reclaim lives in `finally` for this reason; a refusal path that
+  // skipped it would leak the auditor precisely when something went wrong.
+  const { state, outcome, reclaimLines } = await runWithReclaim({
+    passed: false,
+    recordedRefusal: "P0：草稿没说新代码落在哪",
+    closeOutcome: { ok: true, hadPane: true, terminated: false, note: "关 pane 失败" },
+  });
+  assert.equal(outcome.ok, false);
+  assert.deepEqual(state.closed, ["goal-auditor"]);
+  assert.equal(reclaimLines.length, 1);
+});
+

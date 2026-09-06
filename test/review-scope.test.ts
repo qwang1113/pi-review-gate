@@ -7,6 +7,12 @@
  * baseline, an unreadable increment, a too-large increment, and — the subtle
  * one — an increment that reaches into files the previous review never saw.
  *
+ * There is also a precondition that is NOT about the code: the judge taking
+ * the round has to be the one that settled the last, or the carry-forward is
+ * taken on trust. It is pinned in its own block at the bottom; every test
+ * above it goes through `decideReviewScope` below, which supplies that fact so
+ * a CONTENT rule is what each of them actually measures.
+ *
  * The TEXT the decision turns into is not tested here any more: it moved to
  * lib/review-carryover.ts (its one authoritative source), and so did its
  * tests — test/review-carryover.test.ts.
@@ -17,10 +23,23 @@ import assert from "node:assert/strict";
 import {
   INCREMENT_MAX_FILES,
   INCREMENT_MAX_LINES,
-  decideReviewScope,
+  decideReviewScope as decideReviewScopeRaw,
+  type IncrementInput,
 } from "../lib/review-scope.ts";
 
+/**
+ * The content rules, with the READER-side precondition already satisfied.
+ *
+ * Without it every case below would escalate for the same reason and none of
+ * them would measure what it names. A test that means to exercise the reader
+ * rule calls `decideReviewScopeRaw` directly.
+ */
+function decideReviewScope(input: IncrementInput) {
+  return decideReviewScopeRaw({ judgeRemembersPreviousRound: true, ...input });
+}
+
 const reviewed = ["src/a.ts", "src/b.ts"];
+
 
 test("incremental: a small increment inside already-reviewed files", () => {
   const d = decideReviewScope({
@@ -149,3 +168,85 @@ test("the decision module renders no contract text of its own", async () => {
     "review-scope.ts exports the thresholds and the decision — nothing that formats text",
   );
 });
+
+/*
+ * ───────────── THE READER-SIDE PRECONDITION (t9d, 2026-09-06) ─────────────
+ *
+ * The gate rotates a judge's transcript on its own (lib/judge-rotation.ts:
+ * context threshold, round cap, a changed contract). A reviewer that starts a
+ * fresh transcript never derived last round's conclusion, so an incremental
+ * round would be asking it to carry forward something it can only take on
+ * trust. These pin that the escalation is unconditional and fail-safe — the
+ * content rules above cannot buy their way past it.
+ */
+
+test("full: the judge does not continue the transcript that settled the last round", () => {
+  const d = decideReviewScopeRaw({
+    baseTree: "T",
+    changedFiles: ["src/a.ts"],
+    changedLines: 3,
+    previouslyReviewedFiles: reviewed,
+    judgeRemembersPreviousRound: false,
+  });
+  assert.equal(d.scope, "full");
+  assert.match(d.reason, /does not continue the transcript/);
+});
+
+test("full: an ABSENT reader fact is a no — incremental is never inferred", () => {
+  // Same input as the canonical incremental case, minus the fact. A caller
+  // that forgot to wire it must not silently receive the cheaper round.
+  const d = decideReviewScopeRaw({
+    baseTree: "T",
+    changedFiles: ["src/a.ts"],
+    changedLines: 3,
+    previouslyReviewedFiles: reviewed,
+  });
+  assert.equal(d.scope, "full");
+  assert.match(d.reason, /does not continue the transcript/);
+});
+
+test("the reader precondition still reports the content facts it escalated over", () => {
+  // The decision is full, but the delta and the coverage it carries are what
+  // the carryover block renders — dropping them would make the escalation
+  // unexplainable to the reviewer that receives it.
+  const d = decideReviewScopeRaw({
+    baseTree: "T",
+    changedFiles: ["src/a.ts", "src/new.ts"],
+    changedLines: 7,
+    previouslyReviewedFiles: reviewed,
+    judgeRemembersPreviousRound: false,
+  });
+  assert.equal(d.scope, "full");
+  assert.deepEqual(d.changedFiles, ["src/a.ts", "src/new.ts"]);
+  assert.equal(d.changedLines, 7);
+  assert.deepEqual(d.reviewedFiles, reviewed);
+  assert.deepEqual(d.unreviewedFiles, ["src/new.ts"]);
+});
+
+test("a remembering judge is NOT enough on its own — content rules still bind", () => {
+  // The two preconditions are AND, not OR: continuity buys nothing when the
+  // increment reaches into a file the settled review never covered.
+  const d = decideReviewScopeRaw({
+    baseTree: "T",
+    changedFiles: ["src/a.ts", "src/new.ts"],
+    changedLines: 5,
+    previouslyReviewedFiles: reviewed,
+    judgeRemembersPreviousRound: true,
+  });
+  assert.equal(d.scope, "full");
+  assert.match(d.reason, /never covered/);
+});
+
+test("no settled tree outranks the reader fact — the reason names the real cause", () => {
+  // A session with nothing settled has nothing to carry forward either way;
+  // reporting the transcript as the cause would send the reader looking at
+  // the wrong thing.
+  const d = decideReviewScopeRaw({
+    changedFiles: ["src/a.ts"],
+    changedLines: 1,
+    judgeRemembersPreviousRound: false,
+  });
+  assert.equal(d.scope, "full");
+  assert.match(d.reason, /no previous READY review/);
+});
+

@@ -16,6 +16,7 @@ import {
   decideJudgeRotation,
   judgeObjectId,
   laneOfEntry,
+  judgeRemembersPreviousRound,
   rotationHandoffTask,
   JUDGE_ROTATION_CONTEXT_PERCENT,
   JUDGE_ROTATION_MAX_ROUNDS,
@@ -373,3 +374,78 @@ test("the rotated round's text names no mechanism — no thresholds, no rotation
     }
   }
 });
+
+/*
+ * ────────── DOES THE NEXT ROUND'S JUDGE REMEMBER THE LAST ONE? (t9d) ────────
+ *
+ * The reuse policy already knew when a transcript continues; nothing outside
+ * this module could ask it. `lib/review-scope.ts` now does, because granting
+ * an INCREMENTAL round to a judge with a fresh transcript asks it to carry
+ * forward a conclusion it never derived. Both facts are required and every
+ * unknown is a no — a `false` only ever costs a deeper review.
+ */
+
+test("a reused lane with a transcript is the ONE case that remembers", () => {
+  const reuse = decideJudgeRotation({
+    objectId: GOAL,
+    previous: { objectId: GOAL, generation: 0, roundsInObject: 1 },
+  });
+  assert.equal(reuse.reason, "reuse");
+  assert.equal(judgeRemembersPreviousRound({ decision: reuse, transcriptExists: true }), true);
+});
+
+test("a reused lane with NO transcript remembers nothing — an abandoned round wrote none", () => {
+  const reuse = decideJudgeRotation({
+    objectId: GOAL,
+    previous: { objectId: GOAL, generation: 0, roundsInObject: 1 },
+  });
+  assert.equal(judgeRemembersPreviousRound({ decision: reuse, transcriptExists: false }), false);
+});
+
+test("every rotation forgets, whichever cap fired", () => {
+  const byContext = decideJudgeRotation({
+    objectId: GOAL,
+    previous: { objectId: GOAL, generation: 0, roundsInObject: 1, contextPercent: JUDGE_ROTATION_CONTEXT_PERCENT },
+  });
+  const byRounds = decideJudgeRotation({
+    objectId: GOAL,
+    previous: { objectId: GOAL, generation: 0, roundsInObject: JUDGE_ROTATION_MAX_ROUNDS },
+  });
+  const byObject = decideJudgeRotation({
+    objectId: OTHER_GOAL,
+    previous: { objectId: GOAL, generation: 0, roundsInObject: 1 },
+  });
+  for (const decision of [byContext, byRounds, byObject]) {
+    assert.equal(decision.rotated, true, `${decision.reason} should be a rotation`);
+    // Even with a directory sitting there: a rotated lane's transcript belongs
+    // to the generation it replaced, never to this round.
+    assert.equal(judgeRemembersPreviousRound({ decision, transcriptExists: true }), false, decision.reason);
+  }
+});
+
+test("`first` forgets even when a directory of that name survives", () => {
+  // A lane the registry has no record of is one whose history the gate cannot
+  // vouch for — a stray directory is not evidence of continuity, and guessing
+  // in the permissive direction is what this rule exists to prevent.
+  const first = decideJudgeRotation({ objectId: GOAL });
+  assert.equal(first.reason, "first");
+  assert.equal(first.rotated, false, "first is not a rotation…");
+  assert.equal(judgeRemembersPreviousRound({ decision: first, transcriptExists: true }), false,
+    "…but it is still a fresh transcript as far as memory goes");
+});
+
+test("`rotated` is NOT the predicate — reuse and first differ while both are unrotated", () => {
+  // The one shape this must never collapse into: `!decision.rotated`. It is
+  // true for both `first` and `reuse`, and only one of them remembers.
+  const first = decideJudgeRotation({ objectId: GOAL });
+  const reuse = decideJudgeRotation({
+    objectId: GOAL,
+    previous: { objectId: GOAL, generation: 0, roundsInObject: 1 },
+  });
+  assert.equal(first.rotated, reuse.rotated);
+  assert.notEqual(
+    judgeRemembersPreviousRound({ decision: first, transcriptExists: true }),
+    judgeRemembersPreviousRound({ decision: reuse, transcriptExists: true }),
+  );
+});
+

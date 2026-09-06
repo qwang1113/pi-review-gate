@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 
 import {
   countStreamFindings,
+  formatConcludedForPane,
+  PANE_ISSUE_MAX_CHARS,
   decideConclude,
   maxSelfReportRound,
   nextRoundSeq,
@@ -526,4 +528,113 @@ test("tool: a host that cannot measure usage stamps NO reading — the fail-open
   assert.ok(!("contextPercent" in report), "the field is omitted, not emitted as 0");
 });
 
+
+/*
+ * ───────── THE CONCLUSION, RENDERED FOR THE PANE (t9d, 2026-09-06) ─────────
+ *
+ * The opener reads the verdict and the findings as structured data off the
+ * channel. The person sitting next to the judge's pane read a one-line count
+ * and had to go and find the opener to learn WHICH findings. This is a text
+ * addition and must stay one: every test below that touches the tool asserts
+ * the record is byte-identical to what it was.
+ */
+
+test("pane rendering: verdict and every finding, one line each", () => {
+  const text = formatConcludedForPane({
+    verdict: "BLOCKED",
+    findings: [
+      { severity: "P0", file: "lib/a.ts", line: 12, issue: "空指针" },
+      { severity: "P1", file: "lib/b.ts", line: 88, issue: "漏了错误分支" },
+      { severity: "P2", issue: "命名不一致" },
+    ],
+  });
+  assert.match(text, /^verdict = BLOCKED$/m);
+  assert.match(text, /findings（3 条）/);
+  assert.match(text, /^1\. \[P0\] lib\/a\.ts:12 — 空指针$/m);
+  assert.match(text, /^2\. \[P1\] lib\/b\.ts:88 — 漏了错误分支$/m);
+  // No file at all ⇒ no locator, and no empty bracket standing in for one.
+  assert.match(text, /^3\. \[P2\] — 命名不一致$/m);
+});
+
+test("pane rendering: no findings says so rather than printing an empty list", () => {
+  const text = formatConcludedForPane({ verdict: "READY", findings: [] });
+  assert.match(text, /^verdict = READY$/m);
+  assert.match(text, /findings：无。/);
+  assert.equal(text.split("\n").length, 2);
+});
+
+test("pane rendering: a file without a line still locates the finding", () => {
+  const text = formatConcludedForPane({
+    verdict: "BLOCKED",
+    findings: [{ severity: "P1", file: "docs/x.md", issue: "过时" }],
+  });
+  assert.match(text, /\[P1\] docs\/x\.md — 过时/);
+  assert.doesNotMatch(text, /docs\/x\.md:/, "no phantom line number is invented");
+});
+
+test("pane rendering: `evidence` is the locator when there is no file", () => {
+  // A finding with nowhere to point is the case the locator matters most in;
+  // dropping evidence there would leave the reader with a severity and prose.
+  const text = formatConcludedForPane({
+    verdict: "BLOCKED",
+    findings: [{ severity: "P0", issue: "范围外的回归", evidence: "npm test 里 review-scope 那组" }],
+  });
+  assert.match(text, /\[P0\] npm test 里 review-scope 那组 — 范围外的回归/);
+});
+
+test("pane rendering: a long issue is cut to one line, and the cut is visible", () => {
+  const long = "长".repeat(PANE_ISSUE_MAX_CHARS + 50);
+  const text = formatConcludedForPane({
+    verdict: "BLOCKED",
+    findings: [{ severity: "P1", file: "lib/a.ts", line: 1, issue: long }],
+  });
+  assert.equal(text.split("\n").length, 3, "one header, one count line, one finding");
+  assert.match(text, /…$/, "the truncation is marked, never silent");
+  assert.equal(text.includes("长".repeat(PANE_ISSUE_MAX_CHARS)), true);
+  assert.equal(text.includes("长".repeat(PANE_ISSUE_MAX_CHARS + 1)), false);
+});
+
+test("pane rendering: a multi-line issue is flattened, so one finding stays one line", () => {
+  const text = formatConcludedForPane({
+    verdict: "BLOCKED",
+    findings: [{ severity: "P1", file: "lib/a.ts", line: 3, issue: "第一行\n\n  第二行  \n第三行" }],
+  });
+  assert.equal(text.split("\n").length, 3);
+  assert.match(text, /第一行 第二行 第三行/);
+});
+
+test("tool: the conclusion reaches the PANE, and the channel record is untouched by it", async () => {
+  // The P0 constraint of this change: the opener's machine path is the channel
+  // record, and an opener running an older build must consume it exactly as
+  // before. So the rendering may only ever live in `content`.
+  const { exec, ioFiles } = setup({ hierarchy: hierarchyFile(2) });
+  const ok = await exec({
+    verdict: "BLOCKED",
+    cwd: "/repo",
+    findings: [{ severity: "P0", file: "lib/a.ts", line: 12, issue: "空指针" }],
+  });
+  assert.equal(ok.isError, undefined);
+  const text = ok.content[0]!.text;
+  assert.match(text, /已交卷/, "the one-line receipt is still there…");
+  assert.match(text, /\[P0\] lib\/a\.ts:12 — 空指针/, "…and the round's content is now readable beside it");
+
+  const report = lastReport(ioFiles) as unknown as Record<string, unknown>;
+  assert.deepEqual(
+    report.findings,
+    [{ severity: "P0", file: "lib/a.ts", line: 12, issue: "空指针" }],
+    "the findings travel to the opener verbatim, exactly as before",
+  );
+  assert.equal(report.verdict, "BLOCKED");
+  // Nothing about the rendering leaked onto the wire. The allowlist is the
+  // report shape as it stood BEFORE this change — an opener on an older build
+  // is the reader, so a new key here is the P0 this test exists to catch.
+  const WIRE_FIELDS = new Set([
+    "reportId", "kind", "from", "at", "round", "verdict", "findingsCount",
+    "findings", "cwd", "docSync", "summary", "inspection", "scope", "contextPercent",
+  ]);
+  for (const key of Object.keys(report)) {
+    assert.ok(WIRE_FIELDS.has(key), `unexpected field on the channel record: ${key}`);
+  }
+
+});
 
