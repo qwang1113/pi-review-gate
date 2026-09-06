@@ -125,11 +125,11 @@ test("an instruction still needs the child's own acknowledgement — nothing abo
   const { io } = memoryIO();
   appendRecord(io, TARGET, {
     kind: "instruct", from: "orchestrator", at: "2026-09-05T00:00:00.000Z",
-    instructId: "ins-1", mode: "followUp", text: "carry on",
+    instructId: "ins-1", mode: "interrupt", text: "carry on",
   });
   const queued = await verifyDeliveryOn(
     { channelIO: () => io, sleep: async () => {} },
-    { kind: "instruct", channelPath: PATH, instructId: "ins-1", instructMode: "followUp", attempts: 2 },
+    { kind: "instruct", channelPath: PATH, instructId: "ins-1", instructMode: "interrupt", attempts: 2 },
   );
   assert.equal(queued.verdict.ok, false, "writing to the channel proves nothing on its own");
 
@@ -139,7 +139,7 @@ test("an instruction still needs the child's own acknowledgement — nothing abo
   });
   const acked = await verifyDeliveryOn(
     { channelIO: () => io, sleep: async () => {} },
-    { kind: "instruct", channelPath: PATH, instructId: "ins-1", instructMode: "followUp", attempts: 2 },
+    { kind: "instruct", channelPath: PATH, instructId: "ins-1", instructMode: "interrupt", attempts: 2 },
   );
   assert.equal(acked.verdict.ok, true);
   assert.equal(acked.evidence.ack?.stage, "injected");

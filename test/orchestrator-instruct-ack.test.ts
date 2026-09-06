@@ -11,13 +11,13 @@
  * handshake is two-stage now: `received` proves the gate has it and queued
  * it, `injected` proves pi took it.
  *
- * SINCE 2026-09-17 the orchestrator can no longer ASK for `followUp` — the
- * tool defaults to `interrupt` and refuses that value — so the mode survives
- * here only where it is still real: the pure rule (the judge lane dispatches
- * its rounds that way) and the two-stage handshake it produced. What the
- * tool-level tests now guard is the other half of that decision: the failure
- * text must stop offering `followUp` as the way out, since the tool would
- * refuse it.
+ * SINCE 2026-09-17 `followUp` is gone from BOTH surfaces — the tool refuses
+ * the value (it defaults to `interrupt`) and `InstructDeliveryMode` no longer
+ * lists it, because the judge lane's own `followUp` round is verified as a
+ * pane BOOT and never reaches this rule. What survives is the two-stage
+ * handshake it produced, and these tests guard what it now has to mean: a
+ * queued message is never a delivery, it is never DROPPED either, and the
+ * failure text must stop offering `followUp` as the way out of it.
  *
  * The context reading was worse in a quieter way: the binding was never wired
  * at all, so every receipt said "宿主未提供读数" and the orchestrator had no
@@ -46,24 +46,24 @@ async function spawnT1(world: FakeWorld): Promise<string> {
 // The rule
 // ---------------------------------------------------------------------------
 
-test("`received` is enough for followUp (the judge lane), and NOT enough for steer", () => {
+test("`received` is not enough for ANY mode this tool can send", () => {
   const evidence = {
     channelReported: true,
     sidecarPresent: true,
-    ack: { delivered: true, stage: "received" as const, detail: "已入队（mode=followUp）" },
+    ack: { delivered: true, stage: "received" as const, detail: "已入队（mode=interrupt）" },
   };
-  // `followUp` is no longer offered by `orchestrator_instruct` (2026-09-17),
-  // but it is still a channel mode: the judge lane dispatches its next round
-  // that way, and this is the rule that judges THAT delivery.
-  const followUp = deliveryVerdict("instruct", evidence, { instructMode: "followUp" });
-  assert.equal(followUp.ok, true, "a queued message to a busy child IS delivered");
-
-  const steer = deliveryVerdict("instruct", evidence, { instructMode: "steer" });
-  assert.equal(steer.ok, false, "steer promises the CURRENT turn — queued does not satisfy that");
-  const reason = (steer as { reason: string }).reason;
-  assert.doesNotMatch(reason, /followUp/,
-    "and it must NOT send the caller to a mode the tool refuses — that was the fake escape hatch");
-  assert.match(reason, /没有丢|waiting-judge/, "it says what is actually true: the message is queued, keep waiting");
+  // Until 2026-09-17 `followUp` settled for this stage. It is gone from the
+  // tool AND from the verdict's mode list: the judge lane still writes that
+  // mode into its own channel, but its dispatch is verified as a pane boot,
+  // so a rule for it here would have had no caller.
+  for (const instructMode of ["interrupt", "steer"] as const) {
+    const verdict = deliveryVerdict("instruct", evidence, { instructMode });
+    assert.equal(verdict.ok, false, `${instructMode} promises the CURRENT turn — queued does not satisfy that`);
+    const reason = (verdict as { reason: string }).reason;
+    assert.doesNotMatch(reason, /followUp/,
+      "and it must NOT send the caller to a mode the tool refuses — that was the fake escape hatch");
+    assert.match(reason, /没有丢|waiting-judge/, "it says what is actually true: queued, keep waiting");
+  }
 });
 
 test("an unspecified mode is judged by the STRICTEST bar — the tool's own default", () => {
@@ -88,14 +88,14 @@ test("an injection failure is still a failure, whatever the mode", () => {
     channelReported: true,
     sidecarPresent: true,
     ack: { delivered: false, stage: "injected", detail: "sendUserMessage threw" },
-  }, { instructMode: "followUp" });
+  }, { instructMode: "steer" });
   assert.equal(verdict.ok, false);
   assert.match((verdict as { reason: string }).reason, /sendUserMessage threw/, "with the child's own explanation");
 });
 
 test("no acknowledgement at all points at the health snapshot — never at a kill", () => {
   const verdict = deliveryVerdict("instruct", { channelReported: true, sidecarPresent: false }, {
-    instructMode: "followUp",
+    instructMode: "interrupt",
   });
   assert.equal(verdict.ok, false);
   const reason = (verdict as { reason: string }).reason;

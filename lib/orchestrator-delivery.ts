@@ -209,8 +209,17 @@ export type DeliveryVerdict =
   | { ok: true; summary: string }
   | { ok: false; reason: string };
 
-/** How the instruction asked to be delivered — it decides what proof means. */
-export type InstructDeliveryMode = "steer" | "followUp" | "interrupt";
+/**
+ * How the instruction asked to be delivered — it decides what proof means.
+ *
+ * Exactly the modes `orchestrator_instruct` accepts, and nothing else: this
+ * type exists to judge THAT tool's deliveries, and it is the only production
+ * caller. `followUp` was a third member until 2026-09-17; the channel enum
+ * still carries the value (the judge lane writes its next round with it), but
+ * that dispatch is verified as a pane BOOT, never through this function, so a
+ * rule for it here would have been a branch nothing reaches.
+ */
+export type InstructDeliveryMode = "steer" | "interrupt";
 
 /**
  * May this delivery be reported as successful?
@@ -222,23 +231,23 @@ export type InstructDeliveryMode = "steer" | "followUp" | "interrupt";
  *
  * INSTRUCT. The message is in the channel, which proves only that it was
  * WRITTEN. What the child says about it is the proof — and WHICH ack is
- * enough depends on what was promised:
+ * enough depends on what was promised — and both surviving modes promise the
+ * same thing:
  *
- *   - `interrupt` (the DEFAULT since 2026-09-17) and `steer` promise to act on
- *     the CURRENT turn. Nothing but an injection satisfies that, so `received`
+ *   - `interrupt` (the DEFAULT since 2026-09-17) and `steer` act on the
+ *     CURRENT turn. Nothing but an injection satisfies that, so `received`
  *     alone keeps the check waiting rather than claiming success. An
  *     unspecified mode is judged by this bar too — the strictest one is the
  *     safe direction for a claim of delivery.
- *   - `followUp` promises "when you are done, read this". A busy child cannot
- *     inject it yet BY DEFINITION, so demanding an injection made the tool
- *     fail on exactly the children it was designed for, and the message it
- *     had already written was left orphaned (round-4 P1: one authorization
- *     lost that way). `received` — the child's gate saying it has the message
- *     and has queued it — is the honest bar, and it is a real one: only a
- *     live gate writes it. THIS VALUE IS NO LONGER OPEN TO THE ORCHESTRATOR
- *     (`orchestrator_instruct` refuses it, 2026-09-17); it survives as a
- *     channel mode because the JUDGE lane dispatches its next round that way,
- *     and that dispatch is judged by exactly this rule.
+ *
+ * THE TWO-STAGE ACK IS STILL THE RIGHT SHAPE, even though no mode settles for
+ * the first stage any more. `received` (the gate has the message and queued
+ * it) is what keeps a message the child has not injected yet in its inbox
+ * instead of dropping it — round-4 P1 lost one authorization exactly there —
+ * and it is what lets this refusal say "it is queued, keep waiting" instead of
+ * "it never arrived". The `followUp` rule that used to accept it went with the
+ * mode itself (2026-09-17): the judge lane still WRITES that mode, but its
+ * dispatch is verified as a pane boot, never here.
  *
  * An ack that says `delivered: false` is a FAILURE reported with the child's
  * own explanation — never a success with a caveat.
@@ -285,14 +294,8 @@ export function deliveryVerdict(
     };
   }
   if (stage === "received") {
-    if (mode === "followUp") {
-      return {
-        ok: true,
-        summary:
-          "子会话的门禁已确认收到并入队" +
-          `${ack.detail ? `：${ack.detail}` : ""} —— 它跑完手上这一轮就会读到`,
-      };
-    }
+    // Both surviving modes act on the CURRENT turn, so a queued message is
+    // never a delivery — there is no mode left that settles for this stage.
     return {
       ok: false,
       reason:

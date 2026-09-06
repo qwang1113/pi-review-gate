@@ -43,7 +43,7 @@ export const ORCHESTRATOR_DIRECTIVE =
   "| **答它在等的那个问题** | `orchestrator_answer({ childId, answer })` |\n" +
   "| **代批它的 goal / 代确认它的需求反述** | 同一个 `orchestrator_answer`，但必须带 `crosscheck` 对照（见下） |\n" +
 
-  "| 跟它说句话 / 打断它 | `orchestrator_instruct({ childId, mode, message })` |\n" +
+  "| 跟它说句话（默认就打断它，让它立刻读到） | `orchestrator_instruct({ childId, message })` |\n" +
   "| 它死了（pane 没了），要救回来 | `orchestrator_recover({ childId })` |\n" +
   "| 接手一个别人留下的编排 | `orchestrator_attach({ orchestrationId })` |\n" +
   "| 给用户本人发系统通知 | `orchestrator_notify` |\n" +
