@@ -3164,8 +3164,14 @@ test("L8b: propose_loop_goal checks the pre-review BEFORE any user-facing surfac
   // the audit line: the dialog fitter truncates from the tail, and the two
   // consent-critical facts (which repo, how far this round goes) must be the
   // ones that survive.
-  const stationLine = body.indexOf('repoLine + "\\n" + stationLine + "\\n" + prereviewLine');
+  // …and it is the USER's rendering of the station that the dialog prints
+  // (2026-09-17): the same sentence exists in a second person for the user and
+  // a third person for the agent, and a dialog that printed the agent's copy
+  // would tell the user that "the user" commits — about themselves.
+  const stationLine = body.indexOf('repoLine + "\\n" + stationLineForUser + "\\n" + prereviewLine');
   assert.ok(repoFact > 0 && stationLine > 0, "repo, station and audit must all reach the dialog");
+  assert.match(body, /const stationLineForUser = deliveryStationLine\(station, "user"\)/,
+    "the dialog's station line must be the one addressed to the user");
 });
 // ---------------------------------------------------------------------------
 // L8 — the loop goal is negotiated with the user, not written by the agent

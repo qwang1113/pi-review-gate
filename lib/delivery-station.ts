@@ -153,9 +153,22 @@ export function describeDeliveryStation(
   }
 }
 
-/** The station line both consent surfaces print, so they can never diverge. */
-export function deliveryStationLine(station: DeliveryStation): string {
-  return "本轮交付站点：" + describeDeliveryStation(station);
+/**
+ * The station line every surface prints, so they can never diverge.
+ *
+ * The audience DEFAULTS TO `agent`, which is the fail-safe direction: the
+ * third person ("由用户自己 commit") is merely impersonal when a user reads it,
+ * while the second person is actively WRONG when an agent does — it tells the
+ * reader to commit at the one station where the reader must not (round-1 P2,
+ * and round-2 P2 for these call sites). The dialogs and the transcript blocks
+ * the user reads therefore ask for `"user"` explicitly; everything else — tool
+ * replies, plan summaries, audit briefs — gets the safe wording by default.
+ */
+export function deliveryStationLine(
+  station: DeliveryStation,
+  audience: StationAudience = "agent",
+): string {
+  return "本轮交付站点：" + describeDeliveryStation(station, audience);
 }
 
 /** The choices, spelled out for a tool description or a refusal text. */

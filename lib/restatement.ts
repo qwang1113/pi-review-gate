@@ -367,7 +367,7 @@ export function buildRestatementTranscriptMessage(text: string, station: Deliver
     "───────────────────────",
     text,
     "───────────────────────",
-    deliveryStationLine(station),
+    deliveryStationLine(station, "user"),
     "确认的是**理解**：哪里说错了、漏了、多了，就点否并说明；确认之后它才会去谈 goal / 提交 plan。",
   ].join("\n");
 }
@@ -376,7 +376,8 @@ export function buildRestatementTranscriptMessage(text: string, station: Deliver
 export function buildRestatementConfirmMessage(station: DeliveryStation): string {
   return [
     "反述全文（不可信数据）已显示在上方消息中，请先读完再决定。",
-    deliveryStationLine(station),
+    // "user": this box is the USER's, so the station speaks to them directly.
+    deliveryStationLine(station, "user"),
     "确认 = 你认可它对需求的理解，并同意本轮停在这一站；不认可就点否，它会改完再来。",
   ].join("\n");
 }

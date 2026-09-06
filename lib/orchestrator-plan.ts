@@ -42,6 +42,7 @@ import {
   deliveryStationLine,
   parseDeliveryStation,
   type DeliveryStation,
+  type StationAudience,
 } from "./delivery-station.ts";
 
 /** Repo-root-relative location of the plan (gate-excluded via `.pi/`). */
@@ -645,12 +646,19 @@ export function isPlanHash(value: unknown): value is string {
 }
 
 /** One-screen rendering for the approval dialog and the takeover report. */
-export function formatPlanSummary(plan: OrchestratorPlan, repoRoot = ""): string {
+export function formatPlanSummary(
+  plan: OrchestratorPlan,
+  repoRoot = "",
+  audience: StationAudience = "agent",
+): string {
   const lines: string[] = [
     `${plan.title}`,
     `目标：${plan.intent}`,
     `并行上限：${plan.maxParallel}`,
-    deliveryStationLine(plan.deliveryStation),
+    // Most of this summary's readers are AGENTS (tool replies, the audit
+    // brief); the one that is not — the approval transcript — asks for the
+    // user's own person explicitly (round-2 P2).
+    deliveryStationLine(plan.deliveryStation, audience),
     "",
   ];
   for (const t of plan.tasks) {

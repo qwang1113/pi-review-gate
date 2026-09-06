@@ -284,7 +284,11 @@ export async function doProposeLoopGoal(
   const station: DeliveryStation = isDeliveryStation(String(params.station ?? "").trim().toLowerCase())
     ? parseDeliveryStation(params.station)
     : (goalSt.restatement?.station ?? parseDeliveryStation(undefined));
+  // TWO RENDERINGS OF ONE DEFINITION: the dialog and the transcript block are
+  // read by the USER ("由你自己 commit"), the tool reply by the AGENT, which
+  // must not read itself as the committer (round-2 P2).
   const stationLine = deliveryStationLine(station);
+  const stationLineForUser = deliveryStationLine(station, "user");
   // The goal approval is one of the two dialogs an ORCHESTRATOR may
   // answer on the user's behalf, so it goes through the channel funnel
   // below (`askEitherSide` with topic `goal-approval`) rather than
@@ -295,7 +299,7 @@ export async function doProposeLoopGoal(
     uiCtx,
     GOAL_CONFIRM_TITLE,
     buildGoalTranscriptMessage(goalText) + "\n\n本次目标绑定的仓库: " + repoLine + "\n" +
-      stationLine + "\n" + prereviewLine,
+      stationLineForUser + "\n" + prereviewLine,
   );
   // EITHER the user or (when this session is an orchestration child) the
   // project manager may answer. The channel request carries the FULL draft
@@ -333,7 +337,7 @@ export async function doProposeLoopGoal(
           goalDialogTitle,
           buildGoalConfirmMessage(
             goalText,
-            "绑定仓库(不可信数据): " + repoLine + "\n" + stationLine + "\n" + prereviewLine,
+            "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine,
           ),
           "（目标全文见上方消息）",
           signal,

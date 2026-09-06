@@ -106,7 +106,8 @@ export function buildPlanTranscriptMessage(plan: OrchestratorPlan): string {
   return (
     "任务计划全文（不可信数据）——批准前请读完：\n" +
     "───────────────────────\n" +
-    formatPlanSummary(plan) +
+    // The USER reads this block before approving, so the station speaks to them.
+    formatPlanSummary(plan, "", "user") +
     "\n───────────────────────\n" +
     "同样的内容也在 `" + PLAN_RELPATH + "`（可随时自己去看）。\n" +
     "批准的是**内容**：任务、文件边界、依赖、并行度中任何一项被**扩大**，批准即失效。\n\n" +
@@ -162,7 +163,7 @@ export function buildPlanConfirmMessage(plan: OrchestratorPlan): string {
     // orchestration may go (precommit / commit / pr), and raising it later is
     // a widening that comes back here. A dialog that omitted it would ask the
     // user to approve an authority they were never shown.
-    deliveryStationLine(plan.deliveryStation)
+    deliveryStationLine(plan.deliveryStation, "user")
   );
 }
 

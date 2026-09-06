@@ -347,7 +347,11 @@ test("the rendered choice lists are derived, not typed out again", () => {
   // into a refusal said the opposite (round-1 P2). The dialog keeps it.
   assert.ok(deliveryStationChoiceLines().includes("由用户自己 commit"), "the refusal names the USER as the committer");
   assert.ok(!deliveryStationChoiceLines().includes("由你自己 commit"), "…and never the reader");
-  assert.ok(deliveryStationLine("precommit").includes("由你自己 commit"), "the dialog still speaks to the user directly");
+  // The station LINE defaults to the safe wording too, and the dialogs opt in
+  // to the second person — the direction that cannot mislead a reader who is
+  // not the user (round-2 P2).
+  assert.ok(deliveryStationLine("precommit").includes("由用户自己 commit"), "the default line is safe for an agent");
+  assert.ok(deliveryStationLine("precommit", "user").includes("由你自己 commit"), "a dialog speaks to the user directly");
 });
 
 
