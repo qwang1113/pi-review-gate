@@ -22,10 +22,11 @@
  * judgeId from its own dispatch, and re-resolving the repo would refuse a
  * legitimate self-audit of a repo the session has not edited yet (measured:
  * five consecutive "等待未命中本轮 report"). The bypass is keyed on an explicit
- * `gateSelf: true` marker in `params` (not a tool parameter — tools never
- * receive it, so no agent can set it); the opener check (`checkOpener`) still
- * runs inside both functions for both paths. Agent-facing `judge_wait` /
- * `judge_close` always take the full check.
+ * `gateSelf` FUNCTION ARGUMENT on `doWait` / `doClose` (not a field of `params`
+ * — tools receive `params` from the agent verbatim, so a marker living there
+ * would be agent-settable); the opener check (`checkOpener`) still runs inside
+ * both functions for both paths. Agent-facing `judge_wait` / `judge_close`
+ * always take the full check.
 
  *
  * Shape (unchanged): `registerJudgeSessionTools(host, deps)`, effects
@@ -140,7 +141,7 @@ export interface JudgeSessionToolDeps {
   /**
    * Locate a pane judge by ID ALONE, across all repos (2026-09-08).
    *
-   * Reached only through the `gateSelf: true` marker (see `addressJudge`):
+   * Reached only through the `gateSelf` function argument (see `addressJudge`):
    * the gate's self-audit chains hold the judgeId from their own dispatch and
    * must not re-resolve the repo. The opener check still runs in `doWait` /
    * `doClose` for both paths.
@@ -285,21 +286,22 @@ function addressJudge(
   deps: JudgeSessionToolDeps,
   params: Record<string, unknown>,
   toolName: string,
+  gateSelf = false,
 ): Addressed {
   const role = params.role ? String(params.role) : undefined;
   const judgeId = params.sessionId ? String(params.sessionId) : undefined;
   if (!role && !judgeId) {
     return { ok: false, text: `review-gate: ${toolName} needs a role (reviewer / adviser / goal-auditor).` };
   }
-  // Gate-self path (2026-09-08): ONLY when the caller passes the explicit
-  // `gateSelf: true` marker — i.e. the gate's own audit chains (`selfAuditWait`
-  // / `auditRunDeps.closeJudge` in extensions/review-gate.ts), which hold the
+  // Gate-self path (2026-09-08): ONLY when the direct caller passes
+  // `gateSelf === true` as a FUNCTION ARGUMENT — i.e. the gate's own audit
+  // chains (`selfAuditWait` / `auditRunDeps.closeJudge`), which hold the
   // judgeId from their own dispatch. It is keyed on the CALLER, never on the
-  // parameter shape: an agent calling `judge_wait({sessionId})` with no `repo`
-  // must still take the edited-repo check below (goal criterion 4 pins this).
-  // The marker is not a tool parameter — tools never receive it — so no agent
-  // can set it. The opener check still runs downstream for both paths.
-  if (params.gateSelf === true && judgeId && deps.findChildById) {
+  // parameter bag: `params` comes from the agent verbatim (unknown keys are
+  // stripped nowhere), so a marker living in it would be settable by
+  // `judge_wait({sessionId, gateSelf:true})` (reviewer P1, 2026-09-08). The
+  // opener check still runs downstream for both paths.
+  if (gateSelf && judgeId && deps.findChildById) {
     const direct = deps.findChildById(judgeId);
     if (direct) return { ok: true, root: direct.repoRoot, role: role ?? direct.role, judgeId };
     // Unknown id: fall through to the normal path (which refuses fail-closed
@@ -571,8 +573,19 @@ export function recentStreamFindings(
 
 // ---------- judge_close ----------
 
-export async function doClose(deps: JudgeSessionToolDeps, params: Record<string, unknown>): Promise<ToolReply> {
-  const addressed = addressJudge(deps, params, "judge_close");
+export async function doClose(
+  deps: JudgeSessionToolDeps,
+  params: Record<string, unknown>,
+  /**
+   * GATE-SELF BYPASS (2026-09-08): true only on the gate's own direct calls.
+   * A plain function argument — NOT a field of `params`, so no agent tool call
+   * can ever set it (`params` arrives from the agent verbatim; unknown keys
+   * are stripped nowhere). `addressJudge` skips the edited-repo check only
+   * under it; the opener check still runs for both paths.
+   */
+  gateSelf = false,
+): Promise<ToolReply> {
+  const addressed = addressJudge(deps, params, "judge_close", gateSelf);
   if (!addressed.ok) return fail(addressed.text, closeFailDetails());
   const child = deps.findChild(addressed.root, addressed.role, addressed.judgeId);
   if (!child) {
@@ -653,8 +666,13 @@ export async function doWait(
   params: Record<string, unknown>,
   signal: { readonly aborted: boolean } | undefined,
   onUpdate: unknown,
+  /**
+   * GATE-SELF BYPASS (2026-09-08): true only on the gate's own direct calls.
+   * Same shape as `doClose` — a function argument, never a params field.
+   */
+  gateSelf = false,
 ): Promise<ToolReply> {
-  const addressed = addressJudge(deps, params, "judge_wait");
+  const addressed = addressJudge(deps, params, "judge_wait", gateSelf);
   if (!addressed.ok) return fail(addressed.text, waitFailDetails());
   const child = deps.findChild(addressed.root, addressed.role, addressed.judgeId);
   if (!child) {

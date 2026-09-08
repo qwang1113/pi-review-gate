@@ -2516,7 +2516,7 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
     assert.match(body, /role: ROLE_PARAM/, `${tool} takes a role`);
     assert.match(
       JUDGE_TOOLS_SRC,
-      new RegExp(`addressJudge\\(deps, params, "${tool}"\\)`),
+      new RegExp(`addressJudge\\(deps, params, "${tool}"(, gateSelf)?\\)`),
       `${tool} addresses its judge through the shared resolver`,
     );
   }
@@ -4276,7 +4276,11 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   const waiter = SRC.slice(SRC.indexOf("async function selfAuditWait("), SRC.indexOf("/** The text a tool result carries"));
   assert.match(waiter, /awaitRoundReport\(\{/, "the chains wait through the shared decision, not a hand-rolled loop");
   assert.match(waiter, /doWait\(/, "…through the shared wait implementation, addressed by judgeId");
-  assert.match(waiter, /gateSelf: true/, "…with the gate-self marker (agents cannot set it)");
+  // 2026-09-08 second round (reviewer P1): the marker is a FUNCTION ARGUMENT on
+  // doWait/doClose, never a params field — params arrive from the agent verbatim
+  // (unknown keys stripped nowhere), so a marker in params would be agent-settable.
+  assert.match(waiter, /,\n?\s*true, \/\/ gateSelf/, "…with the gate-self function argument (agents cannot set it)");
+  assert.doesNotMatch(waiter, /gateSelf: true/, "…and never as a params field");
   assert.doesNotMatch(waiter, /callTool\(\s*\n?\s*"judge_wait"/, "the gate chain must not re-enter the repo-checked tool path");
   assert.doesNotMatch(waiter, /for \(;;\)|while \(/, "no second waiting loop may come back here");
   // The decision itself (what ends a round, and the ONE shared budget) is

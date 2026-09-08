@@ -827,26 +827,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     };
   }
   /**
-   * Wait for an INTERNAL audit's REPORT — the gate's own chains want the end of
-   * the round, not the first message.
-   *
-   * `judge_wait` is message-driven for the AGENT, and that is right for an
-   * agent: a streamed finding or a question is exactly what an opener wants
-   * the moment it happens. The goal/plan audit chains are the opposite case.
-   * They are one synchronous call inside `propose_loop_goal` /
-   * `orchestrator_plan`, nobody is there to act on a finding, and both treat
-   * "anything but a report" as an unfinished audit — so a message-driven
-   * return would close the auditor mid-round. Since every auditor streams its
-   * findings BEFORE concluding, that made any draft with findings fail closed
-   * forever (P0, found by the reviewer 2026-09-05).
-   *
-   * So the chain keeps calling the SAME tool — no second waiting loop, no
-   * second criterion (哲学三) — until the round really ends. It terminates:
-   * the cursors mean a finding or a question can end one wait and never the
-   * next, and the total budget is the tool's own hard cap, spent across the
-   * calls rather than by each of them.
-   */
-  /**
    * THE GATE'S OWN WAIT (2026-09-08) — the round-end rule is `awaitRoundReport`'s:
    * one synchronous audit chain, nobody there to act on a finding, so "anything
    * but a report" is unfinished. The single `wait` step addresses the auditor by
@@ -879,9 +859,10 @@ export default function reviewGate(pi: ExtensionAPI) {
         // copy taken at dispatch time would never observe a user ESC.
         return doWait(
           selfSessionDeps(),
-          { sessionId: judgeId, timeoutMs, gateSelf: true },
+          { sessionId: judgeId, timeoutMs },
           signal,
           onUpdate,
+          true, // gateSelf: the gate's own chain, never an agent param
         );
       },
       now: () => Date.now(),
@@ -6122,7 +6103,7 @@ export default function reviewGate(pi: ExtensionAPI) {
         const judgeId = judgeChildByRole(root, role)?.judgeId;
         const closed = judgeId === undefined
           ? { isError: false, content: [{ type: "text", text: "no judge on record — nothing to close." }], details: { closed: true, terminated: false } }
-          : await doClose(selfSessionDeps(), { role, sessionId: judgeId, gateSelf: true });
+          : await doClose(selfSessionDeps(), { role, sessionId: judgeId }, true); // gateSelf: gate's own reclaim
         return {
           ok: closed.isError !== true && (closed.details as { closed?: unknown } | undefined)?.closed === true,
           hadPane,
