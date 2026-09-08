@@ -466,7 +466,7 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（118 个模块）
+## 五、`lib/` 全量速查表（120 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -503,6 +503,8 @@ fail-closed）。`model-diagnose.ts`
 | `edit-projection.ts` | 从 edit/write 入参投影出改后完整文件内容，供标签检查看到上下文 |
 | `edit-repo-scope.ts` | 一次编辑落在**哪个仓库**（`primary` / `other-repo` / `outside`）的唯一判定：git 有答案就听 git（调用方必须先爬到最近存在的祖先再问 git，跨仓库分支原样保留），没有答案时用 `fingerprint.ts` 的 `realFile` / `realDir` 解析两侧再按 `root + "/"` 边界判包含；解析后仍在仓库外的，再问一次「它到底属于哪个仓库」——「没有仓库」才跳过，「另一个仓库」照旧武装那个仓库。任何解析不出的情况一律回落 `primary`（fail-closed）。它存在的原因是仓库外的写入（子会话写进 `/tmp` 的完成报告）曾经作废 review 绑定，把已到手的 READY 打回 PENDING |
 | `file-size-gate.ts` | 新建源码文件 600 行硬拦、存量超阈值只提醒的纯判定 |
+| `minimalism.ts` | 最小化准则四条的机器可读同一份（`MINIMALISM_CHECKS` / `MINIMALISM_SEVERITY` / `MINIMALISM_SECTION`），实质条文只许 `docs/coding-standards.md` §5 一份 |
+| `dependency-justification.ts` | 新增依赖缺书面论证在 checkpoint 硬性打回的纯判定（`newDependencyNames` / `dependencyJustificationVerdict`），`review_checkpoint` 内接线 |
 | `fingerprint.ts` | 工作区指纹：内容寻址、暂存无关，门禁裁决与它绑定 |
 | `gate-command-tools.ts` | 命令层的**唯一注册入口**：工作流命令的注册包装、`/precommit` lane，以及 `/gate-status` / `/gate-bypass` / `/gate-mode` / `/gate-reset` / `/gate-lesson` 五个命令正文；命令 host 的 seam（`CommandHost` / `CommandContext`）也在这里；自己转注册 `gate-diagnosis-commands.ts` |
 | `gate-diagnosis-commands.ts` | 两个只读诊断命令面：`/gate-status` 内嵌的模型链读数（`modelDiagnosisLines`）与 `/gate-doctor` 正文；只做环境探测，不写状态、不喂裁决；由 `gate-command-tools.ts` 转注册 |
@@ -666,6 +668,7 @@ test 名称，同一个文件后面跟着的名称都归它。零个是正常情
 | 「不可能性主张」规则：`agents/reviewer.md` ↔ `skills/review-loop/SKILL.md` ↔ `README.md` 的 `### "It can't be done" is a hypothesis, not a finding-free pass` | `test/impossibility-claims.test.ts` · `"reviewer treats an impossibility claim as a hypothesis to verify, not a fact"` · `"review-loop skill makes the main agent hand its impossible list to the reviewer"` · `"README documents the impossibility-claim rule for users of the gate"` | 三处都必须出现各自那几句（README 端按小节切窗后断言） |
 | 「已删除的工具名不得再出现」：`AGENTS.md` + `skills/review-loop/SKILL.md` 绝对禁；`README.md` / `QUICKSTART.md` 靠历史 banner 豁免 | `test/extension-structure.test.ts` · `"the SHIPPED skill and the agent-facing docs name no deleted tool at all"` | 负向 pin，且**豁免凭据本身被 pin**（banner 没了豁免同时失效） |
 | judge 握手口径（完成信号是通道报告，不是进程退出 / `tmux wait-for`）：`AGENTS.md`、`skills/review-loop/SKILL.md`、`docs/execution-model.md`、`docs/judge-protocol.md`、`lib/judge-prompt.ts`、`lib/parallel-review.ts`、`lib/loop-goal.ts`、`lib/adviser-brief.ts` | `test/workflow-commands.test.ts` · `"the judge handshake never teaches tmux wait-for (process exit is the completion signal)"` | 八处一起负向扫描 + 正向要求出现「标准报告」「通道」 |
+| 最小化准则四条：权威 `docs/coding-standards.md` §5（机器可读同一份 `lib/minimalism.ts`）；`agents/reviewer.md`、`agents/goal-auditor.md`、`lib/loop-goal.ts` 的 goal 审计任务、`lib/orchestrator-plan-audit.ts` 的 plan 审计任务、`lib/agent-directives.ts` 的 `MINIMALISM_REMINDER` 只许引用 + 各自严重度映射 | `test/agents-structure.test.ts` · `"reviewer and goal-auditor cite the minimalism section (§5) with their severity maps"` · `test/agent-directives.test.ts` · `"the standing block carries the minimalism reminder (cite, never quote)"` · `test/loop-goal.test.ts` · `"buildGoalAuditTask: the audit task carries the minimalism check (cite §5, P1 for out-of-scope work)"` · `test/orchestrator-plan-audit.test.ts` · `"the audit task carries the 7th check: minimalism (cite §5, mergeable tasks are P1)"` | 引用面出现四条中任一条实质表述即判失败（禁止第二份副本） |
 | 等待纪律三句话：主会话版 ↔ 项目经理版，权威是 `lib/agent-directives.ts` 的 `buildWaitDiscipline` | `test/agent-directives.test.ts` · `"both renderings come from ONE builder — no second copy of the wording"` | 两处渲染必须出自同一个 builder（**结构上**杜绝手抄，不是比对文本） |
 | 「wave 机制已删除」：`AGENTS.md` ↔ `skills/review-loop/SKILL.md` | `test/agents-structure.test.ts` · `"AGENTS.md states read-only parallel exploration and NO wave protocol"` · `"SKILL.md states read-only exploration rules and NO wave protocol"` | 正向要求写明已删除 + 负向禁止指令式提及 |
 | 单 reviewer / 再审携带上轮结论 / findings 只带 blockers：散在 `agents/*.md`、`docs/judge-protocol.md`、`lib/judge-prompt.ts`、`skills/review-loop/SKILL.md` | `test/agents-structure.test.ts` · `"REGRESSION: the single-review protocol states ONE reviewer per round"` · `"REGRESSION: every re-review must carry the previous round's conclusion"` · `"every judge role is told that findings carry BLOCKERS ONLY"` | 多文件循环断言：每一处都必须出现这句 |
@@ -683,7 +686,7 @@ test 名称，同一个文件后面跟着的名称都归它。零个是正常情
 | --- | --- | --- |
 | L1–L8 分层清单：`README.md` 的 ASCII 图（`L1 Ship gate` … `L8 Loop-goal approval`）↔ 本文 §二的表 | 无单一权威（分散在各层实现） | `test/module-map.test.ts` 只覆盖 §五；README 端只有零散句子被别的测试 pin，层级表本身不在其中 |
 | judge 默认模型链：`scripts/install-package.mjs` 的 `DEFAULT_AGENTS`、`AGENTS.md` 正文、`README.md` 的配置示例 | `agents/*.md` 的 frontmatter（这一端有 pin，见 7.1） | `test/install-package.test.ts` 只验安装**行为**，从不校验 `DEFAULT_AGENTS` 的内容与 `agents/*.md` 一致。**2026-09-17 实测已经漂了**：`DEFAULT_AGENTS.arbiter` 是 `onekey/gpt-5.6-sol:max`（与 `lib/project-config.ts` 的 `DEFAULT_ARBITER_MODEL` 同源），而 `agents/arbiter.md` 与 AGENTS.md 都写 `claude-fable-5` → `claude-opus-5`。收敛前要先由用户拍板哪一份是对的（跨模型仲裁是不是刻意的），所以本轮只记录、不动 |
-| 整份文档从未被任何测试读到：`docs/coding-standards.md` | —— | 它只会被 `review-carryover.test.ts` 的 `docs/*.md` 扫描扫到，而那条只查增量契约一项，其余内容全裸。（`docs/orchestrator-supervision.md`、`docs/hierarchical-session-design.md`、`docs/dev-flow.md` 已于 2026-09-17 进入 `test/copy-convergence.test.ts` 与 `test/delivery-station.test.ts` 的扫描面，不再是「零测试读到」）|
+| 整份文档从未被任何测试读到：`docs/coding-standards.md` | —— | 2026-09-08 起 §5 最小化准则进入多个测试的扫描面（见 §7.1 最小化行），其余章节仍只被 `review-carryover.test.ts` 查增量契约一项。（`docs/orchestrator-supervision.md`、`docs/hierarchical-session-design.md`、`docs/dev-flow.md` 已于 2026-09-17 进入 `test/copy-convergence.test.ts` 与 `test/delivery-station.test.ts` 的扫描面，不再是「零测试读到」）|
 | **当轮抓到的活样本**：2026-09-17 第一次拿代码去核这张表的三行，三行**全是错的** —— 子会话状态 union 早已是八个（`mode-changed`），而 `README.md`、`docs/execution-model.md`、`docs/orchestrator-supervision.md` 连同 union 自己上面那句注释都还写「七」；`docs/execution-model.md` 点名了三个一个月前就删掉的工具、却从没提过 `orchestrator_plan`；`lib/restatement.ts` 里的交付站点定义句是手抄的第二份 | 无 | 这三行当轮收敛并进了 7.1（前一版的活样本是 §六第 4 条那组过期计数与点名，已在 2026-09-05 改成不带计数、不点名的表述）。教训不变：**一张讲「副本会安静过期」的表，自己也会安静过期** —— 所以每次动它，顺手拿代码核一行 |
 
 ### 7.3 一条否定结论（省得后来人再扫一遍）

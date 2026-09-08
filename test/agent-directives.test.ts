@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildAgentDirectives,
   buildWaitDiscipline,
+  MINIMALISM_REMINDER,
 
   EXPLORE_MODE_NOTE,
   ORCHESTRATOR_WAIT_DISCIPLINE,
@@ -98,4 +99,23 @@ test("EXPLORE_MODE_NOTE carries the delivery-escalation reminder", () => {
     "delivery work must escalate to the full loop (distinct phrasing)");
   assert.match(EXPLORE_MODE_NOTE, /ship 命令/,
     "the note keeps the ship-gate reminder visible in explore");
+});
+
+// ---------------------------------------------------------------------------
+// MINIMALISM REMINDER (2026-09-08). The write-time half of the doctrine: a
+// nudge, never a block. The rules live in docs/coding-standards.md §5 — this
+// block cites, never quotes (a second copy of the four checks here would
+// drift, and the copy map is the record of how often that has happened).
+// ---------------------------------------------------------------------------
+
+test("the standing block carries the minimalism reminder (cite, never quote)", () => {
+  const text = buildAgentDirectives();
+  assert.ok(text.includes(MINIMALISM_REMINDER), "the reminder renders in the standing block");
+  assert.ok(MINIMALISM_REMINDER.includes("docs/coding-standards.md"), "it cites the standards file");
+  assert.ok(MINIMALISM_REMINDER.includes("§5"), "it cites the section, not the rules");
+  assert.match(MINIMALISM_REMINDER, /只提醒、不阻塞/, "write-time is advisory by contract");
+  assert.match(MINIMALISM_REMINDER, /送审说明/, "it tells the agent where a dependency justification goes");
+  for (const rule of ["YAGNI", "复用优先", "能删就删", "新依赖须论证"]) {
+    assert.ok(!MINIMALISM_REMINDER.includes(rule), `the four checks must not be quoted here (found: ${rule})`);
+  }
 });

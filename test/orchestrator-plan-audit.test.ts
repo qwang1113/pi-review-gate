@@ -151,3 +151,13 @@ test("planAuditHash / planAuditPassed: the record binds to the canonical plan co
 // The report-selection tests moved to test/audit-round.test.ts with the
 // function itself (2026-09-05): picking THIS round's report is the audit
 // ROUND's question, not the plan's — every kind had to answer it.
+
+test("the audit task carries the 7th check: minimalism (cite §5, mergeable tasks are P1)", () => {
+  const task = buildPlanAuditTask(planOf());
+  assert.match(task, /7\. 最小化检查/);
+  assert.ok(task.includes("docs/coding-standards.md") && task.includes("Section 5"), "it cites the standards section, not a copy");
+  assert.match(task, /可合并的任务.*P1/, "mergeable/redundant tasks are a P1");
+  for (const rule of ["YAGNI", "复用优先", "能删就删", "新依赖须论证"]) {
+    assert.ok(!task.includes(rule), `the four checks must not be quoted in the task (found: ${rule})`);
+  }
+});

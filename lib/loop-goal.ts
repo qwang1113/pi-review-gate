@@ -270,6 +270,7 @@ export function buildGoalAuditTask(
     "",
     ...(opts.carryover ? [opts.carryover, ""] : []),
     "审计标准: 退出标准是否可检查(falsifiable)、是否覆盖用户核心诉求、Non-goals 是否明确、有无内部矛盾或与仓库现状冲突的表述。",
+    "最小化检查(引用 `docs/coding-standards.md` Section 5——实质条文只在那里，不在此复述): 用户没要的工作(顺手重构、推测性开关、凑数的验收标准)是 P1；真正需要的多条标准不算多——最小指必要，不指条数少。",
     ...(opts.sessionDir && opts.sessionId
       ? [
           "",

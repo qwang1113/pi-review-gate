@@ -37,6 +37,7 @@ Inspect the actual diff or changed files. Verify:
   (whitespace, an unrelated appended line) is a **P1 finding**.
 - No unintended side effects or regressions.
 - The change is minimal and readable.
+- **Minimalism — judge necessity, not just correctness** (the rules live in `docs/coding-standards.md` §5, which is their only substantive copy — do not re-derive them here; the severity map travels with that section). Deletable code left in place, a new dependency with no written justification, or a re-implementation of something the repo / stdlib / platform / an installed dep already covers is a **P1**; other minimalism observations are P2. Verify before asserting: read the helper you claim covers it, name the lines that could go, quote the missing justification.
 - **Architecture, abstraction, modularity, naming — a first-class part of
   reviewing a DIFF, not just of reviewing a whole codebase.** Judge where the
   change LANDED, not only whether it works:

@@ -294,6 +294,8 @@ import { notifyUserInput } from "../lib/poll-wait.ts";
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
 import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
+import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
+import { justificationSourceText } from "../lib/checkpoint-message.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
 // (A round's conclusion is the channel report. The transcript READ died with
@@ -4609,6 +4611,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       "Every review round judges baseline..HEAD, so checkpoints are the review unit.",
     parameters: Type.Object({
       message: Type.String({ description: "English commit message (Conventional Commits style)" }),
+      note: Type.Optional(Type.String({
+        description: "The agent's round note in its own words (the same text judge_submit receives as task) — the dependency-justification gate reads the justification from it, because the English-only commit message may have dropped the original wording.",
+      })),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
@@ -4821,6 +4826,50 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
 
+        // DEPENDENCY-JUSTIFICATION gate (minimalism §5, 2026-09-08). Runs HERE,
+        // at the checkpoint, next to the file-size gate — not at edit time:
+        // blocking mid-write would fire on a half-written round, whereas at
+        // the checkpoint the whole shape (manifest diff + round note) exists.
+        // Only a NEW dependency without a written justification blocks — worth
+        // stays with the judges (reviewer P1, goal/plan audit P0/P1).
+        const depGate = (() => {
+          if (!paths.some((p) => p === "package.json" || p.endsWith("/package.json"))) return { blocking: [] as string[] };
+          let worktreeText: string | undefined;
+          try {
+            const manifestPath = paths.find((p) => p === "package.json" || p.endsWith("/package.json"))!;
+            worktreeText = readFileSync(pathResolve(root, manifestPath), "utf8");
+          } catch {
+            return { blocking: [] as string[] }; // unreadable ⇒ no facts, never a block
+          }
+          let baseText: string | undefined;
+          try {
+            const out = execFileSync("git", ["show", `HEAD:package.json`], { cwd: root, encoding: "utf8" }) as string;
+            baseText = out;
+          } catch {
+            baseText = undefined; // no base (new repo / new manifest) ⇒ every key is new
+          }
+          const added = newDependencyNames(worktreeText, baseText);
+          if (added.length === 0) return { blocking: [] as string[] };
+          // The justification rides the agent's own words: the round note that
+          // built this message, or the message itself. submitForReview derives
+          // the message from the note via checkpointMessage(note) — so pass
+          // both, exactly as the goal's acceptance criterion 6 requires.
+          return dependencyJustificationVerdict(
+            added.map((name) => ({ name })),
+            { note: justificationSourceText(typeof params.note === "string" ? params.note : "", message), message: "" },
+          );
+        })();
+        if (depGate.blocking.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: "review-gate: review_checkpoint rejected — " + formatDependencyJustificationVerdict(depGate),
+            }],
+            details: { committed: false, unjustifiedDeps: depGate.blocking.length },
+            isError: true,
+          };
+        }
+
         const sweptIn = paths;
         execFileSync("git", ["add", "-A"], { cwd: root, encoding: "utf8" });
         execFileSync("git", ["commit", "-m", message], {
@@ -4952,7 +5001,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     //    (isError) stops the chain.
     const message = checkpointMessage(input.message ?? input.note);
     input.progress?.step("checkpoint 提交");
-    const commit = await callTool("review_checkpoint", { message, repo: input.root }, input.ctx);
+    const commit = await callTool("review_checkpoint", { message, note: input.note, repo: input.root }, input.ctx);
     if (commit.isError) {
       input.progress?.fail("被拒");
       return {

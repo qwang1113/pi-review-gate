@@ -72,3 +72,21 @@ export function buildCheckpointMessage(raw: string): string {
   const marked = injectCheckpointScope(subject);
   return body ? `${marked}\n\n${body}` : marked;
 }
+
+/**
+ * The dependency-justification gate's text source (minimalism Section 5, 2026-09-08).
+ *
+ * WHY THIS EXISTS. L5 forbids non-Latin letters in the checkpoint message,
+ * so a Chinese justification written in the round note would be dropped
+ * from the message — and a gate that reads only the message would then
+ * refuse a justification the agent actually wrote. The gate reads the NOTE
+ * first (the agent's own words, verbatim) and the message second (which may
+ * carry an English restatement). Pure: the same inputs always yield the
+ * same text.
+ */
+export function justificationSourceText(note: string, message: string): string {
+  const n = note.trim();
+  // The note is authoritative when present; the message is the fallback
+  // (direct checkpoint calls without a note still justify in English).
+  return n.length > 0 ? `${n}\n${message}` : message;
+}

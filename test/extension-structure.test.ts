@@ -2792,7 +2792,10 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // 2026-09-05: 19 → 17。goal 审计任务的三份逐字副本合成了一份
     // (`buildGoalAuditRound`)，所以 callTool("prepare_goal_audit") 的接线引用
     // 也从三处降到一处。
-    "review-gate.ts": 17,
+    // 2026-09-08: 17 → 18。submitForReview 把 round note 传给 review_checkpoint
+    // (`{ message, note: input.note, ... }`)——依赖论证门禁从 agent 自己的话里读
+    // 论证。接线引用，不是调用指令。
+    "review-gate.ts": 18,
   };
 
   const sources = [
@@ -4367,7 +4370,10 @@ test("judge_submit runs the whole submission chain, and cannot dead-end on it", 
   for (const step of [/step\("precommit \(full\)"\)/, /step\("checkpoint 提交"\)/, /step\("prepare/]) {
     assert.match(body, step, "every chain step publishes progress");
   }
-  assert.match(body, /callTool\("review_checkpoint", \{ message, repo: input\.root \}/);
+  // 2026-09-08: the round NOTE travels to the checkpoint alongside the message —
+  // the dependency-justification gate reads the justification from the agent\'s own
+  // words (L5 may have dropped them from the English-only message).
+  assert.match(body, /callTool\("review_checkpoint", \{ message, note: input\.note, repo: input\.root \}/);
   assert.match(body, /callTool\(\s*"prepare_review"/);
   // A CLEAN worktree means the round is already frozen — treating it as a
   // failure stranded the commit and dead-ended every retry (round-5 P1).
