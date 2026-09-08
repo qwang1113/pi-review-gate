@@ -33,8 +33,8 @@ function planOf(overrides: Record<string, unknown> = {}): OrchestratorPlan {
     title: "拆分 review-gate",
     intent: "把扩展拆成模块并澄清需求",
     tasks: [
-      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"], repo: "/work/pi-review-gate" },
-      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"], repo: "/work/pi-review-gate" },
+      { id: "a", title: "抽 plan 模块", repo: "/work/pi-review-gate" },
+      { id: "b", title: "抽 tmux 模块", repo: "/work/pi-review-gate" },
     ],
     decisions: [
       { id: "d1", question: "拆分后是否保留旧入口？", answer: "保留", resolvedAt: NOW, notifiedAt: NOW },
@@ -142,9 +142,9 @@ test("planAuditHash / planAuditPassed: the record binds to the canonical plan co
   // A different plan (an added task) does not ride on the same PASS.
   const widened = planOf({
     tasks: [
-      { id: "a", title: "抽 plan 模块", fileBoundaries: ["lib/plan"], repo: "/work/pi-review-gate" },
-      { id: "b", title: "抽 tmux 模块", fileBoundaries: ["lib/tmux"], repo: "/work/pi-review-gate" },
-      { id: "c", title: "抽 review 模块", fileBoundaries: ["lib/review"], repo: "/work/pi-review-gate" },
+      { id: "a", title: "抽 plan 模块", repo: "/work/pi-review-gate" },
+      { id: "b", title: "抽 tmux 模块", repo: "/work/pi-review-gate" },
+      { id: "c", title: "抽 review 模块", repo: "/work/pi-review-gate" },
     ],
   });
   assert.equal(planAuditPassed(record, widened), false);

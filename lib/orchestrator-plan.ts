@@ -14,9 +14,12 @@
  *
  *  - TASKS, not prose. The orchestrator's exit condition is mechanical
  *    ("nothing left to run", constraint 3), so the unit has to be countable.
- *  - FILE BOUNDARIES per task (constraint 5), which decide what may run in
- *    parallel (constraint 6) and bound what the orchestrator may approve on a
- *    child's behalf (constraint 8). See lib/orchestrator-boundaries.ts.
+ *  - A REPO per task (2026-09-07), which decides the child's cwd and what may
+ *    run beside what: same-repo tasks are serialized, only different repos run
+ *    in parallel. Tasks used to declare FILE BOUNDARIES too; they were removed
+ *    2026-09-17 (user decision) — with same-repo children serialized they
+ *    prevented no collision, and their only remaining effect was to revoke the
+ *    approval whenever a child discovered it needed a new directory.
  *  - PENDING DECISIONS. Anything the orchestrator escalated to the human is
  *    recorded here, and an unresolved decision the user was never TOLD about
  *    blocks the exit (constraint 11) — the failure mode this closes is an
@@ -33,11 +36,6 @@
 
 import { isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
-import {
-  declarationsOverlap,
-  normalizeBoundaries,
-  type NormalizedBoundary,
-} from "./orchestrator-boundaries.ts";
 import {
   deliveryStationLine,
   parseDeliveryStation,
@@ -62,8 +60,6 @@ export interface PlanTask {
   /** Stable, agent-chosen id — how every other tool addresses this task. */
   id: string;
   title: string;
-  /** Normalized repo-relative boundaries. Never empty (constraint 5). */
-  fileBoundaries: NormalizedBoundary[];
   /**
    * Repo root this task works in (2026-09-07). Absent ⇒ the orchestration's
    * own repo. The scheduler serializes WITHIN a repo and parallelizes
@@ -95,7 +91,7 @@ export interface PlanDecision {
    * The measured gap: a decision was registered, the user was notified, the
    * user answered — and nothing connected that answer back to the plan. The
    * answer was only written down at wrap-up, nobody was reminded that an
-   * approved option required widening a task's boundary, and `declare_done`
+   * approved option required widening a task's repo, and `declare_done`
    * checked only that the user had been TOLD, never that the question had
    * been settled. Recording the intended effect at registration time is what
    * makes "the plan still does not reflect what you decided" visible.
@@ -162,8 +158,8 @@ export function clampMaxParallel(value: unknown): number {
 
 /**
  * Parse and VALIDATE a plan from untrusted input (a tool argument or the
- * on-disk file). Fail-closed: anything that would make the scheduling or the
- * boundary checks unsound is a problem, and a plan with problems is not a
+ * on-disk file). Fail-closed: anything that would make the scheduling
+ * unsound is a problem, and a plan with problems is not a
  * plan — callers must not fall back to a partially-understood one.
  */
 export function parsePlan(raw: unknown, now: string = new Date().toISOString(), strictRepo = false): PlanParseResult {
@@ -208,12 +204,6 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
     const taskTitle = asString(t.title);
     if (!taskTitle) problems.push(`${label}.title 不能为空`);
 
-    // CONSTRAINT 5 — every task declares what it may touch. This is the
-    // check that makes constraints 6 and 8 possible at all, so it is hard.
-    const declared = asStringArray(t.fileBoundaries);
-    if (declared.length === 0) {
-      problems.push(`${label} ("${id}") 必须声明 fileBoundaries（文件边界），并行调度与代批 goal 都靠它`);
-    }
     // CONSTRAINT 6 (strict write path) — every task declares WHICH repo it
     // works in. `repo` decides the child's cwd (orchestrator_dispatch), and a
     // task without it silently lands in the orchestrator's OWN repo — the
@@ -232,10 +222,6 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
         problems.push(`${label} ("${id}") 的 repo 必须是绝对路径（当前是相对路径 "${repo}"）——相对路径会按项目经理的 cwd 解析，可能落到错误的仓库`);
       }
     }
-    const { boundaries, problems: boundaryProblems } = normalizeBoundaries(declared);
-    for (const bp of boundaryProblems) {
-      problems.push(`${label} ("${id}") 的边界 "${bp.boundary}" 非法：${bp.reason}`);
-    }
 
     const status = normalizeStatus(t.status) ?? "pending";
     if (t.status !== undefined && normalizeStatus(t.status) === undefined) {
@@ -249,7 +235,6 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
     tasks.push({
       id,
       title: taskTitle,
-      fileBoundaries: boundaries,
       ...(asString(t.repo) ? { repo: asString(t.repo)! } : {}),
       dependsOn: asStringArray(t.dependsOn).map((d) => d.trim()).filter(Boolean),
       execution,
@@ -302,7 +287,7 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
     maxParallel: clampMaxParallel(obj.maxParallel),
     // Absent / misspelled ⇒ `precommit`, exactly like `clampMaxParallel`
     // clamps rather than refuses: a plan is rejected over things a human has
-    // to fix (a missing boundary, a dependency cycle), never over a field
+    // to fix (a missing repo, a dependency cycle), never over a field
     // whose safe reading is the strictest one.
     deliveryStation: parseDeliveryStation(obj.deliveryStation),
     updatedAt: asString(obj.updatedAt) || now,
@@ -367,7 +352,7 @@ export function isLegalTransition(from: TaskStatus, to: TaskStatus): boolean {
  * Carry the EXECUTION RECORD across a plan rewrite (round-4 P1).
  *
  * `write` replaces the plan wholesale, and the tool's own parameter shape
- * never mentioned `status` — so an orchestrator that widened one boundary
+ * never mentioned `status` — so an orchestrator that rewrote one task
  * reset every task to `pending`, twice in one run, including two tasks whose
  * branches were already merged. The damage is not cosmetic: constraint 3
  * counts these statuses, and the state machine refuses `pending → done`, so
@@ -469,7 +454,7 @@ export interface ScheduleDecision {
 /** A task that could run, but not in THIS batch — and why. */
 export interface DeferredTask {
   task: PlanTask;
-  /** The id of the task whose boundaries it overlaps. */
+  /** The id of the task it has to wait for. */
   blockedBy: string;
   reason: string;
 }
@@ -482,11 +467,11 @@ export interface ScheduleResult {
 /**
  * Which tasks may start right now, and how.
  *
- * CONSTRAINT 6 is enforced by DEFERRAL, not refusal: a task whose boundaries
- * overlap something already running — or something picked earlier in this
- * same batch — is held back and runs later, serially. Refusing the plan
+ * CONSTRAINT 6 is enforced by DEFERRAL, not refusal: a task whose REPO is
+ * already occupied — by something running, or by something picked earlier in
+ * this same batch — is held back and runs later, serially. Refusing the plan
  * instead would punish a perfectly good plan for a scheduling detail, and
- * forcing the agent to re-declare boundaries to buy parallelism is exactly
+ * forcing the agent to invent a workaround to buy parallelism is exactly
  * the "invent your own workaround" pressure this layer exists to remove.
  *
  * The deferrals are RETURNED rather than swallowed: the orchestrator has to
@@ -512,7 +497,7 @@ export function scheduleNextTasks(
   // what this batch has just picked. Two children may NEVER share one
   // checkout (2026-09-07): the isolation worktree is gone, so parallelism
   // exists only ACROSS repos — same-repo tasks are serialized by the repo
-  // key, whatever their file boundaries say.
+  // key, whatever the plan says about execution.
   const occupied: PlanTask[] = [...running];
   const sameRepo = (a: PlanTask, b: PlanTask) => (a.repo ?? repoRoot) === (b.repo ?? repoRoot);
   for (const task of candidates) {
@@ -600,11 +585,11 @@ export function openDecisions(plan: OrchestratorPlan): PlanDecision[] {
  * Canonical serialization the approval hash is taken over.
  *
  * `updatedAt` and per-task `status`/`note` are EXCLUDED on purpose: the user
- * approves the WORK (tasks, boundaries, dependencies, parallelism), and
+ * approves the WORK (tasks, repos, dependencies, parallelism), and
  * executing that work necessarily rewrites statuses. Including them would
  * invalidate the approval on the first status change and make the plan
  * unusable — while excluding them keeps the guarantee that matters: nobody
- * can add a task, widen a boundary or raise the parallelism without asking.
+ * can add a task, move it to another repo or raise the parallelism without asking.
  */
 export function canonicalPlanText(plan: OrchestratorPlan): string {
   return JSON.stringify({
@@ -618,7 +603,6 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
     tasks: plan.tasks.map((t) => ({
       id: t.id,
       title: t.title,
-      fileBoundaries: [...t.fileBoundaries].sort(),
       ...(t.repo ? { repo: t.repo } : {}),
       dependsOn: [...t.dependsOn].sort(),
       execution: t.execution,
@@ -664,8 +648,7 @@ export function formatPlanSummary(
   for (const t of plan.tasks) {
     const deps = t.dependsOn.length ? ` ← ${t.dependsOn.join(", ")}` : "";
     lines.push(
-      `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}\n` +
-      `    边界：${t.fileBoundaries.join(", ")}` +
+      `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}` +
       (t.repo ? `\n    repo：${t.repo}` : ""),
     );
   }

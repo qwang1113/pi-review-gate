@@ -87,7 +87,7 @@ import {
   resolveToolRepoTarget,
 } from "../lib/repo-resolve.ts";
 import { classifyEditRepoScope } from "../lib/edit-repo-scope.ts";
-import { isSensitiveOutsideRepoPath } from "../lib/orchestrator-boundaries.ts";
+import { isSensitiveOutsideRepoPath } from "../lib/out-of-repo-paths.ts";
 import {
   nonEnglishCommitMessage,
   l5BlockReason,
@@ -4277,7 +4277,7 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (editScope.scope === "outside") {
         // ONE exception, and it is not about the gate: a SENSITIVE path
         // outside the repo stays VISIBLE. `sessionEditedFiles` is the only
-        // input lib/orchestrator-boundaries.ts has for the supervision-time
+        // input lib/out-of-repo-paths.ts has for the supervision-time
         // question "did this child write somewhere it had no business
         // writing?" — its out-of-repo exemption for process artefacts
         // deliberately keeps sensitive paths as violations, and dropping the
@@ -5145,7 +5145,7 @@ export default function reviewGate(pi: ExtensionAPI) {
    *
    * WHY A PLAN NEEDS THIS AT ALL: a wrong plan is more expensive than a wrong
    * goal. It decides what several children may touch, in what order, and how
-   * many run at once — a missed boundary puts two writers in one file. The
+   * many run at once — a task sent to the wrong repo burns a whole round. The
    * user asked for the asymmetry (goal audited, plan not) to be closed.
    *
    * IT BLOCKS for minutes, for the same reason `propose_loop_goal` does.

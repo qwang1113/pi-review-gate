@@ -51,8 +51,8 @@ function planOf(): OrchestratorPlan {
     title: "上一轮的计划",
     intent: "把编排层的缺陷清掉",
     tasks: [
-      { id: "t1", title: "任务一", repo: REPO, fileBoundaries: ["lib/"] },
-      { id: "t2", title: "任务二", repo: REPO, fileBoundaries: ["docs/"] },
+      { id: "t1", title: "任务一", repo: REPO },
+      { id: "t2", title: "任务二", repo: REPO },
     ],
   });
   assert.ok(parsed.plan, `fixture must parse: ${parsed.problems.join("; ")}`);

@@ -11,7 +11,7 @@
  * the human.
  *
  * That is backwards, because a wrong plan is more expensive than a wrong
- * goal. A boundary that misses where the work actually lands puts two writers
+ * goal. A wrong `repo` puts the child in the wrong checkout entirely; a
  * in one file; a dependency that is missing turns a serial chain into a race;
  * a `maxParallel` set too high burns machine and money on lanes that will
  * collide anyway. And unlike a goal, none of that is visible in prose — it
@@ -35,7 +35,7 @@
  *
  * `canonicalPlanText` — the same serialization the user's approval binds to.
  * So an audit PASS survives a status change (executing the plan rewrites
- * statuses constantly) and dies the moment a boundary, dependency, task or
+ * statuses constantly) and dies the moment a repo, dependency, task or
  * parallelism changes, which is precisely when it should be re-judged.
  *
  * Pure module: it builds task text and judges records. The dispatching, the
@@ -170,15 +170,15 @@ export function buildPlanAuditTask(
     ...(opts.carryover ? [opts.carryover, ""] : []),
     "===== 审计要点（逐条回答，用仓库里的事实说话） =====",
     "1. 任务拆分是否完整：plan 的 intent 有没有哪一部分不属于任何任务？有没有任务其实是两件事？",
-    "2. 文件边界是否覆盖真实落点：按仓库现状，每个任务真正要改的文件是否都在它的 fileBoundaries 内？",
-    "   （尤其注意会被漏掉的落点：测试、文档、安装脚本、类型声明、注册入口。）",
+    "2. 每个任务的 repo 是否正确：按仓库现状，该任务真正要改的文件是否都在它声明的 repo 内？",
+    "   （repo 决定子会话的 cwd 与串行调度；写错仓库是 2026-09-01 实测过的死锁。）",
     "   数量必须可复核（O-5）：凡是给出「涉及 N 处落点 / 断言 / 调用点」这类计数，",
     "   都要附上你数它用的确切命令与其输出行数（例如 `grep -c 'pi.on(\"tool_call\"' <file>` → 11），",
     "   不要写「三处」这类抽样自然语言——一个偏小的数字会诱导子会话「做完点名的那几处就交差」。",
-    "3. 边界重叠与 execution 是否自洽：声明 parallel 的任务之间边界是否真的不相交？",
-    "   相交就会被降级成串行——那 plan 承诺的并行是假的。",
+    "3. 并行是否真的可并行：门禁把同一 repo 的任务降级为串行，声明 parallel 的任务",
+    "   是不是真的分在不同 repo？全挤在一个 repo 里，plan 承诺的并行就是假的——直说。",
     "4. 依赖是否成环或缺失：有没有任务实际依赖另一个任务的产物却没写 dependsOn？",
-    "5. maxParallel 是否安全：并行度与边界隔离、与机器/额度成本相称吗？",
+    "5. maxParallel 是否安全：并行度与跨 repo 的真实并行能力、与机器/额度成本相称吗？",
     "6. 每个任务是否可独立验收：一个子会话拿到它，能不能自己判断做完没做完？",
     "7. 最小化检查(引用 `docs/coding-standards.md` Section 5——实质条文只在那里，不在此复述)：",
     "   可合并的任务、用户没要的工作、为并行而并行拆出来的任务是 P1——最小指必要，不指任务少；真正独立的两件事不要硬并。",
@@ -241,8 +241,8 @@ export function formatPlanAuditRefusal(record: PlanAuditRecord | undefined): str
       ? findings.map((f) => `  - ${f.severity}: ${f.issue}`)
       : [`  （审计器没有给出可解析的 findings，裁决是 ${record?.verdict ?? "NONE"}）`]),
     "",
-    "注意：审计裁决绑定 plan 的**授权内容**（任务、边界、依赖、并行度）——",
-    "改任务状态不会让它失效，改一个边界就要重审。",
+    "注意：审计裁决绑定 plan 的**授权内容**（任务、repo、依赖、并行度、交付站点）——",
+    "改任务状态不会让它失效，改这些就要重审。",
   ].join("\n");
 }
 

@@ -55,7 +55,7 @@ function planWithStation(station: DeliveryStation) {
     intent: "i",
     maxParallel: 1,
     deliveryStation: station,
-    tasks: [{ id: "t1", title: "任务一", fileBoundaries: ["lib/"], repo: "/repo" }],
+    tasks: [{ id: "t1", title: "任务一", repo: "/repo" }],
     decisions: [],
   });
   assert.ok(parsed.plan, `the fixture plan must parse: ${parsed.problems.join("; ")}`);

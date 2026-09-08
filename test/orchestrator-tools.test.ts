@@ -42,9 +42,8 @@ import { GATE_MODE_ENV } from "../lib/task-mode.ts";
  * quietly stopping to test anything.
  */
 const CROSSCHECK_T1 =
-  "任务 t1：文件边界——它要动的文件都落在 lib/a/ 之内，与该任务声明的 fileBoundaries 一致；" +
-  "任务目标——草稿要做的事就是 plan 里 t1 这条，没有跑偏；" +
-  "交付站点——它声明的交付站点与 plan 的 deliveryStation 一致。";
+  "任务 t1：任务目标——草稿要做的事就是 plan 里 t1 这条，没有跑偏、也没有夹带别的任务；" +
+  "交付站点——它声明的交付站点与 plan 的 deliveryStation 一致，没有往后挪。";
 
 
 /** The 10 tools an orchestrator gets, and nothing else. */
@@ -169,7 +168,7 @@ test("a task declaring a repo spawns its child in THAT repo, not the orchestrato
     title: "跨仓库计划",
     intent: "任务声明了另一个仓库",
     tasks: [
-      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/other/repo" },
+      { id: "t1", title: "任务一", repo: "/other/repo" },
     ],
   });
   assert.ok(plan.plan);
@@ -206,7 +205,7 @@ test("a task declaring an unresolvable repo is REFUSED, never silently falling b
     title: "坏仓库计划",
     intent: "任务声明了一个不存在的仓库",
     tasks: [
-      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/nowhere/repo" },
+      { id: "t1", title: "任务一", repo: "/nowhere/repo" },
     ],
   });
   assert.ok(plan.plan);
@@ -239,11 +238,9 @@ test("a spawn is only reported as delivered once the child's gate REPORTS", asyn
   assert.equal(world.runtime().children.length, 1, "the child registration is KEPT — never kill a session that may be alive");
 });
 
-test("CONSTRAINT 6: a task overlapping a running one is refused with the scheduler's reason", async () => {
+test("CONSTRAINT 6: a task in the same repo as a running one is refused with the scheduler's reason", async () => {
   const plan = twoTaskPlan();
-  // Make t2 overlap t1's boundary.
-  const overlapping = { ...plan, tasks: [plan.tasks[0]!, { ...plan.tasks[1]!, fileBoundaries: ["lib/a/"] }] };
-  const world = makeFakeWorld({ plan: overlapping, approvePlan: true });
+  const world = makeFakeWorld({ plan, approvePlan: true });
   const c1 = await spawnT1(world);
   readyChild(world, c1);
   const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
@@ -426,13 +423,15 @@ test("CONSTRAINT 8 / R-7: a goal approval is judged on the CHILD's own draft and
     topic: "goal-approval",
   });
 
-  // Inside the boundary → approved.
+  // A path inside the child's own repo → approved.
   world.sidecars.set(child.cwd, { sessionEditedFiles: ["lib/a/one.ts"] });
   const ok = await world.call("orchestrator_answer", { childId, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1 });
 
   assert.equal(ok.isError, undefined, replyText(ok));
 
-  // Outside it → refused as a scope change.
+  // A SENSITIVE path OUTSIDE the repo → refused. This is the security floor
+  // that survived the file boundaries (2026-09-17): in-repo paths are the
+  // child's own business, an out-of-repo secret is not.
   const world2 = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true });
   const c2 = await spawnT1(world2);
   const child2 = world2.runtime().children[0]!;
@@ -443,10 +442,11 @@ test("CONSTRAINT 8 / R-7: a goal approval is judged on the CHILD's own draft and
     payload: "# 目标",
     topic: "goal-approval",
   });
-  world2.sidecars.set(child2.cwd, { sessionEditedFiles: ["lib/b/other.ts"] });
+  world2.sidecars.set(child2.cwd, { sessionEditedFiles: ["/Users/someone/.ssh/id_rsa"] });
   const refused = await world2.call("orchestrator_answer", { childId: c2, answer: "认可，写入 .pi/loop-goal.md", crosscheck: CROSSCHECK_T1 });
 
   assert.equal(refused.isError, true, replyText(refused));
+  assert.match(replyText(refused), /仓库之外/, "the refusal names what it judged");
   assert.equal(world2.channelOf(c2).filter((r) => r.kind === "answer").length, 0);
 });
 
@@ -875,7 +875,7 @@ test("plan write/submit REFUSE while the repo records another orchestration, and
       plan: {
         title: "我的计划",
         intent: "另起一轮",
-        tasks: [{ id: "n1", title: "任务", repo: "/repo", fileBoundaries: ["lib/"] }],
+        tasks: [{ id: "n1", title: "任务", repo: "/repo" }],
       },
     });
     assert.equal(reply.isError, true, `${action} must refuse`);

@@ -49,8 +49,8 @@ import type { FakeWorld } from "./helpers/fake-orchestration.ts";
 
 /** A comparison that satisfies every rule, for task `t1`. */
 const GOOD =
-  "任务 t1：文件边界——它要动的文件都在 lib/a/ 之内，与该任务声明的 fileBoundaries 一致；" +
-  "任务目标——草稿要做的就是 plan 里 t1 这条；交付站点——它声明的站点与 plan 一致。";
+  "任务 t1：任务目标——草稿要做的就是 plan 里 t1 这条，没有跑偏、也没有夹带别的任务；" +
+  "交付站点——它声明的站点与 plan 批准的 deliveryStation 一致，没有往后挪。";
 
 const GOAL_APPROVE = "认可，写入 .pi/loop-goal.md";
 const GOAL_REJECT = "不认可，退回重谈";
@@ -70,23 +70,22 @@ async function spawnT1(world: FakeWorld): Promise<string> {
 test("every spelling in the token table is accepted for its dimension", () => {
   // One canonical spelling per dimension, so each row below is the only
   // variable in its own case.
-  const canonical = { boundary: "文件边界", goal: "任务目标", station: "交付站点" } as const;
+  const canonical = { goal: "任务目标", station: "交付站点" } as const;
   for (const { dimension, token } of PROXY_CROSSCHECK_TOKENS) {
     const parts = { ...canonical, [dimension]: token };
     const text =
-      `任务 t1：${parts.boundary}——落在声明的范围内，没有越界，判断为一致；` +
-      `${parts.goal}——与 plan 里那一条相同，没有跑偏；` +
-      `${parts.station}——与 plan 批准的那一个相同。`;
+      `任务 t1：${parts.goal}——与 plan 里那一条完全相同，没有跑偏、也没有夹带别的任务；` +
+      `${parts.station}——与 plan 批准的那一个一致，没有往后挪。`;
     assert.ok(text.length >= PROXY_CROSSCHECK_MIN_CHARS, `fixture too short for ${token}`);
     const verdict = checkProxyCrosscheck(text, "t1");
     assert.equal(verdict.ok, true, `"${token}" must satisfy the ${dimension} dimension`);
   }
 });
 
-test("the table covers all three dimensions, in both Chinese and English", () => {
+test("the table covers both dimensions, in both Chinese and English", () => {
   const dimensions = new Set(PROXY_CROSSCHECK_TOKENS.map((t) => t.dimension));
-  assert.deepEqual([...dimensions].sort(), ["boundary", "goal", "station"]);
-  for (const dimension of ["boundary", "goal", "station"] as const) {
+  assert.deepEqual([...dimensions].sort(), ["goal", "station"]);
+  for (const dimension of ["goal", "station"] as const) {
     const rows = PROXY_CROSSCHECK_TOKENS.filter((t) => t.dimension === dimension);
     assert.ok(rows.some((r) => /^[\x00-\x7F]+$/.test(r.token)),
       `${dimension} must accept an English spelling too — a manager writing in English is not wrong`);
@@ -99,9 +98,8 @@ test("what is missing is reported ITEM BY ITEM, never as a bare verdict", () => 
   const empty = checkProxyCrosscheck("", "t1");
   assert.equal(empty.ok, false);
   const missing = (empty as { missing: string[] }).missing;
-  assert.equal(missing.length, 5, "task id + three dimensions + length");
+  assert.equal(missing.length, 4, "task id + two dimensions + length");
   assert.ok(missing.some((m) => m.includes("t1")));
-  assert.ok(missing.some((m) => m.includes("文件边界")));
   assert.ok(missing.some((m) => m.includes("任务目标")));
   assert.ok(missing.some((m) => m.includes("交付站点")));
   assert.ok(missing.some((m) => m.includes(String(PROXY_CROSSCHECK_MIN_CHARS))));
@@ -112,9 +110,9 @@ test("what is missing is reported ITEM BY ITEM, never as a bare verdict", () => 
   assert.ok((otherTask as { missing: string[] }).missing.some((m) => m.includes("t2")));
 
   // Long enough, names the task, but says nothing about the station.
-  const twoThirds =
-    "任务 t1：文件边界看过了，都在 lib/a/ 之内；任务目标也对得上 plan 里那一条，没有跑偏，可以批。".repeat(1);
-  const partial = checkProxyCrosscheck(twoThirds, "t1");
+  const halfDone =
+    "任务 t1：任务目标对得上 plan 里那一条，没有跑偏，可以批——它要做的就是 plan 里这件事。";
+  const partial = checkProxyCrosscheck(halfDone, "t1");
   assert.equal(partial.ok, false);
   assert.deepEqual((partial as { missing: string[] }).missing.filter((m) => m.includes("交付站点")).length, 1);
 });
@@ -122,7 +120,7 @@ test("what is missing is reported ITEM BY ITEM, never as a bare verdict", () => 
 test("the SKELETON does not pass when pasted unchanged", () => {
   // Round-1 reviewer P2: the refusal has to be copyable (that is what makes it
   // self-rescuing), but a blank form that satisfies the check is a rubber
-  // stamp the gate hands out itself — it names the task, all three dimensions
+  // stamp the gate hands out itself — it names the task, both dimensions
   // and is long enough.
   const pasted = PROXY_CROSSCHECK_SKELETON.replace(/<taskId>/g, "t1");
   const verdict = checkProxyCrosscheck(pasted, "t1");
@@ -136,8 +134,7 @@ test("the SKELETON does not pass when pasted unchanged", () => {
 
   // One unfilled blank is still an unfilled form.
   const halfFilled =
-    "任务 t1：文件边界——都在 lib/a/ 之内，与 fileBoundaries 一致；" +
-    "任务目标——就是 plan 里 t1 这条，没有跑偏；" +
+    "任务 t1：任务目标——就是 plan 里 t1 这条，没有跑偏；" +
     "交付站点：<它声明的交付站点与 plan 的 deliveryStation 是否一致——一句判断>";
   assert.equal(checkProxyCrosscheck(halfFilled, "t1").ok, false);
 });
@@ -309,8 +306,10 @@ test("an ordinary question is untouched: no crosscheck, no station, no new refus
 test("the orchestrator's standing directive teaches the crosscheck, not the one-word approval", () => {
   assert.match(ORCHESTRATOR_DIRECTIVE, /crosscheck/,
     "the directive must name the parameter a proxy approval now requires");
-  assert.match(ORCHESTRATOR_DIRECTIVE, /文件边界 \/ 任务目标 \/ 交付站点/,
-    "…and the three judgements it has to contain");
+  assert.match(ORCHESTRATOR_DIRECTIVE, /任务目标 \/ 交付站点/,
+    "…and the two judgements it has to contain");
+  assert.doesNotMatch(ORCHESTRATOR_DIRECTIVE, /文件边界/,
+    "…and nothing about file boundaries, which left the plan on 2026-09-17");
   assert.match(ORCHESTRATOR_DIRECTIVE, /站点若宽于 plan|宽于 plan/,
     "…and that it may not widen the station on the user's behalf");
   assert.doesNotMatch(

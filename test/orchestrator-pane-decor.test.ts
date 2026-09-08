@@ -166,8 +166,8 @@ test("close leaves the window bar up while a SIBLING CHILD is still on screen", 
     title: "跨仓库计划",
     intent: "两个仓库各一个任务，可以并行",
     tasks: [
-      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/repo" },
-      { id: "t2", title: "任务二", fileBoundaries: ["src/"], repo: "/other/repo" },
+      { id: "t1", title: "任务一", repo: "/repo" },
+      { id: "t2", title: "任务二", repo: "/other/repo" },
     ],
   });
   assert.ok(plan.plan, plan.problems.join("; "));
@@ -198,8 +198,8 @@ test("a CLOSED sibling is not a decorated pane, even if its pane outlived the cl
     title: "跨仓库计划",
     intent: "两个仓库各一个任务",
     tasks: [
-      { id: "t1", title: "任务一", fileBoundaries: ["src/"], repo: "/repo" },
-      { id: "t2", title: "任务二", fileBoundaries: ["src/"], repo: "/other/repo" },
+      { id: "t1", title: "任务一", repo: "/repo" },
+      { id: "t2", title: "任务二", repo: "/other/repo" },
     ],
   });
   assert.ok(plan.plan, plan.problems.join("; "));

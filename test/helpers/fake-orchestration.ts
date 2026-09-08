@@ -523,8 +523,8 @@ export function twoTaskPlan(): OrchestratorPlan {
     title: "测试计划",
     intent: "两个互不重叠的任务",
     tasks: [
-      { id: "t1", title: "任务一", fileBoundaries: ["lib/a/"] },
-      { id: "t2", title: "任务二", fileBoundaries: ["lib/b/"] },
+      { id: "t1", title: "任务一" },
+      { id: "t2", title: "任务二" },
     ],
   });
   assert.ok(parsed.plan, `plan fixture must parse: ${parsed.problems.join("; ")}`);

@@ -14,10 +14,12 @@
  *   2 orchestrator writes no code ....... {@link orchestratorWriteBlock}
  *   3 unfinished tasks block exit ....... {@link orchestratorDoneProblems}
  *   4 live children block exit .......... {@link orchestratorDoneProblems}
- *   5 tasks declare file boundaries ..... lib/orchestrator-plan.ts (parse)
+ *   5 (retired 2026-09-17: tasks no longer declare file boundaries — same-repo
+ *      children are serialized, so a boundary prevented no collision and only
+ *      made every newly discovered file revoke the plan approval)
  *   6 same-repo tasks never parallel ... lib/orchestrator-plan.ts (schedule)
  *   7 (retired 2026-09-07: no worktree isolation — cross-repo only)
- *   8 proxied goal stays in boundary .... {@link proxyApprovalProblems}
+ *   8 proxied goal touches no secret .... {@link proxyApprovalProblems}
  *   9 notification single entry+throttle. {@link notifyAuthorization} + notify.ts
  *  10 (retired 2026-09-07: work-branch landing is gone)
  *  11 unreported decisions block exit ... {@link orchestratorDoneProblems}
@@ -29,7 +31,7 @@
  * Pure module: no IO, no git, no tmux.
  */
 
-import { editedPathsOutsideBoundaries } from "./orchestrator-boundaries.ts";
+import { sensitiveOutOfRepoEdits } from "./out-of-repo-paths.ts";
 import {
   openDecisions,
   planHash,
@@ -65,7 +67,7 @@ export function spawnAuthorization(
       ok: false,
       reason:
         "还没有 plan —— 编排层的开工条件是「用户批准过的 plan」。先用 `orchestrator_plan` 写出任务清单" +
-        "（每个任务都要声明文件边界），再提交给用户批准。",
+        "（每个任务都要声明 repo），再提交给用户批准。",
     };
   }
   if (!runtime.approvedPlanHash) {
@@ -147,12 +149,12 @@ export function orchestratorWriteBlock(opts: {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Constraint 8 — a goal approved on the user's behalf stays inside the task
+// Constraint 8 — a goal approved on the user's behalf touches no out-of-repo secret
 // ---------------------------------------------------------------------------
 
 export interface ProxyGoalVerdict {
   ok: boolean;
-  /** Files the child ALREADY edited that fall outside the task's boundary. */
+  /** Files the child ALREADY edited outside the repo that are SENSITIVE. */
   outside: string[];
   reason?: string;
 }
@@ -177,11 +179,19 @@ export interface ProxyGoalVerdict {
  *
  * So the comparison moved to the one thing that is not prose: the child's own
  * gate sidecar lists the files this session has EDITED (`sessionEditedFiles`).
- * A goal that quotes a hundred modules is fine; a child that writes into one
- * file outside its boundary is not, and the probe keeps checking this on
- * every round rather than once at approval time — which is a STRONGER
- * guarantee than the old text scan, not a weaker one: it cannot be talked
- * around by rewording, and it does not stop watching after the approval.
+ * A goal that quotes a hundred modules is fine; a child that writes a
+ * credential somewhere outside the repository is not, and the probe keeps
+ * checking this on every round rather than once at approval time — which is a
+ * STRONGER guarantee than the old text scan, not a weaker one: it cannot be
+ * talked around by rewording, and it does not stop watching after the
+ * approval.
+ *
+ * WHAT IT NO LONGER CHECKS (2026-09-17, user decision). It used to ask whether
+ * those edits stayed inside the task's declared file boundaries. The
+ * boundaries are gone: same-repo tasks are serialized, so a boundary
+ * prevented no collision, and its only remaining effect was to revoke the plan
+ * approval every time a child discovered it needed a new directory. What is
+ * left is the security floor — an out-of-repo path that is SENSITIVE.
  *
  * WHAT DOES NOT COUNT (2026-09-06 user decision 方案 C, wired 2026-09-17):
  * a landing OUTSIDE the repository is a process artifact, not a deliverable —
@@ -193,23 +203,21 @@ export interface ProxyGoalVerdict {
  * exemption is for noise and not for secrets — see
  * {@link editedPathsOutsideBoundaries}.
  */
-export function proxyApprovalProblems(
-  editedFiles: readonly string[],
-  task: PlanTask,
-): ProxyGoalVerdict {
+export function proxyApprovalProblems(editedFiles: readonly string[]): ProxyGoalVerdict {
   const edited = editedFiles.map((f) => String(f ?? "").trim()).filter(Boolean);
-  const outside = editedPathsOutsideBoundaries(edited, task.fileBoundaries);
+  const outside = sensitiveOutOfRepoEdits(edited);
   if (outside.length === 0) return { ok: true, outside: [] };
   return {
     ok: false,
     outside,
     reason:
-      `代批被拒（约束 8）：子会话**已经改到**了任务 "${task.id}" 边界之外的文件 —— ` +
-      `${outside.slice(0, 8).join(", ")}${outside.length > 8 ? " 等" : ""}。任务边界是 ${task.fileBoundaries.join(", ")}。` +
-      "这是范围变更，不是技术取舍：用 `orchestrator_notify` 通知用户，由他决定是扩边界还是让子会话回滚这些改动。" +
+      "代批被拒（约束 8）：子会话**已经写到了仓库之外**的敏感位置 —— " +
+      `${outside.slice(0, 8).join(", ")}${outside.length > 8 ? " 等" : ""}。` +
+      "这是安全底线，不是技术取舍：用 `orchestrator_notify` 通知用户，由他决定怎么处理这些改动。" +
       "（判定依据是它 sidecar 里的实际落点 sessionEditedFiles，不是 goal 正文里出现过哪些路径 —— " +
       "改写 goal 文本不会让这条通过。仓库外的流程产物如 /tmp 下的报告不算越界；" +
-      "仓库外的敏感路径如 ~/.ssh、~/.pi 下的文件仍然算。）",
+      "仓库外的敏感路径如 ~/.ssh、~/.pi 下的文件仍然算。仓库内改哪些文件不参与判定 —— " +
+      "同一 repo 的任务本来就串行，文件边界已于 2026-09-17 从 plan 中移除。）",
   };
 }
 
