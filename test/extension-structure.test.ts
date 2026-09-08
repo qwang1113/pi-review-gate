@@ -5401,3 +5401,32 @@ test("test-run discipline nudge: wired into the bash branch, judge panes exempt"
   assert.match(bashSite, /state\.taskMode !== "normal"/,
     "normal mode stays silent too");
 });
+
+test("thinking-loop guard: the extension forwards the assistant stream, the state machine lives in lib/", () => {
+  // 2026-09-09 (goal criteria 1–3): the DECISION lives in
+  // lib/thinking-loop-guard.ts and the ACTIONS in lib/thinking-loop-controller.ts;
+  // the extension is only allowed to forward. Both halves are pinned here.
+  const start = SRC.indexOf('pi.on("message_update"');
+  assert.ok(start > 0, "message_update must be wired");
+  const body = SRC.slice(start, SRC.indexOf('pi.on("', start + 10));
+  for (const kind of ["thinking", "text", "toolcall"]) {
+    assert.match(body, new RegExp(`observe\\("${kind}"`), `${kind} deltas must reach the detector`);
+  }
+  assert.match(SRC, /createThinkingLoopController\(/, "the extension constructs the controller");
+  assert.match(
+    SRC,
+    /pi\.on\("agent_settled", \(_event, ctx\) => \{\s*\n\s*const text = thinkingLoopInjection;/,
+    "the model-facing notice is delivered only once the session is idle again",
+  );
+  assert.match(
+    SRC,
+    /pi\.on\("message_start", \(event, ctx\) => \{\s*\n\s*if \(event\.message\.role !== "assistant"\) return;\s*\n\s*thinkingLoopCtx = ctx;\s*\n\s*thinkingLoop\.startTurn\(\);/,
+    "a new assistant message starts a fresh turn",
+  );
+  assert.match(
+    SRC,
+    /registerMarkdownTransformer\(\(markdown, context\) =>\s*\n\s*thinkingLoop\.truncateDisplay\(markdown, context\.messageType\)/,
+    "the display cut rides the markdown transformer",
+  );
+  assert.doesNotMatch(SRC, /recoveries/, "the recovery counter belongs to the controller, not the extension");
+});

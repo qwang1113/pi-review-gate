@@ -87,6 +87,7 @@ function makeMockPi(cwd: string): Harness & Record<string, unknown> {
     appendEntry: (type: string, data: unknown) => entries.push({ customType: type, data }),
     sendMessage: () => {},
     sendUserMessage: () => {},
+    registerMarkdownTransformer: () => {},
     registerCommand: () => {},
   };
   return {

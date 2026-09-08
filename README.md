@@ -1987,6 +1987,8 @@ lib/gate-state.ts             state machine, sidecar, unmetRequirements, plateau
 lib/review-scope.ts           incremental-review scoping + escalation thresholds (pure decision; renders no text)
 lib/review-carryover.ts       THE incremental review contract's one authoritative source: previous verdict → open findings → mechanical delta → consistency-scan and reopen clauses (pure)
 lib/loop-stall.ts             L2 stall breaker: no-progress signature, motion credit for a running judge child, notice text (pure)
+lib/thinking-loop-guard.ts    pure-thinking spinning detection (upstream deepseek-harness#5976): reasoning-only turn + low-entropy n-gram repeat → verdict, plus the char-AND-line bounded display cut (pure)
+lib/thinking-loop-controller.ts  what to do on a trip — cut the display, inject, abort, notify, with a capped auto-recovery counter; every effect is injected, so an event sequence is a unit test
 lib/review-stream.ts          streamed findings: append-only jsonl protocol, verdict-key refusal, actionable filter (pure)
 lib/judge-process.ts          judge identity (deterministic session id across panes/rounds/restarts) and per-session scratch dir helper
 lib/judge-lifecycle.ts        judge round decisions (pure): work dir per role+repo, dispatch vs. refuse-busy, the three end-of-round criteria, the internal wait's reply, goal-audit adjudication

@@ -36,12 +36,13 @@
 | `tool_result` | 追踪本轮编辑、记录 precommit 结果、编辑纪律 nudge、附加提示 |
 | `input` | 用户真的说话了：重置编辑失败 nudge、解除 ESC 暂停 |
 | `agent_end` | ESC 中止检测，喂给 L2 的暂停判定 |
-| `agent_settled` | L2 自动续跑（递归保护、轮次上限、平台期停止） |
+| `agent_settled` | L2 自动续跑（递归保护、轮次上限、平台期停止）；思考空转熔断的提示也在这里发出（`abort()` 之后会话才空闲，steer 队列得等下一次 run 才被取用） |
 | `turn_end` | 本轮编辑/提交状态对账（哪些改动仍在武装门禁） |
+| `message_start` / `message_update` / `message_end` | 思考空转熔断：把 assistant 流的三类增量（thinking / text / toolcall）喂给 `lib/thinking-loop-controller.ts`，assistant 消息边界重置与收尾；扩展只转发，判定与动作都在那两个模块里 |
 | `session_shutdown` | 收尾清理（watcher、临时资源） |
 | `session_compact` | 压缩后重新注入门禁状态与 git 记忆 |
 
-核对（这张表的完整判据）：`grep -n 'pi\.on("' extensions/review-gate.ts` —— 当前 10 个。
+核对（这张表的完整判据）：`grep -n 'pi\.on("' extensions/review-gate.ts` —— 当前 14 个。
 
 ### 1.2 工具注册分两处（重要）
 
@@ -472,7 +473,7 @@ fail-closed）。`model-diagnose.ts`
 
 ---
 
-## 五、`lib/` 全量速查表（121 个模块）
+## 五、`lib/` 全量速查表（123 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -508,6 +509,8 @@ fail-closed）。`model-diagnose.ts`
 | `dialog-budget.ts` | 对话框的渲染行数预算——宿主不截断，长度必须自己管；选项行同样计入（`askChoice` 按 `choiceRows` 的实际行数收紧正文额度） |
 | `edit-discipline.ts` | 识别绕过 edit/write 的 bash 写文件命令，只提示不拦截 |
 | `test-run-discipline.ts` | 识别全量测试/typecheck 命令（无参 `npm test` / `tsc --noEmit` / `node --test` 全树），追加「送审时门禁自动 full precommit」提醒；纯判定 + 文案，judge 豁免在接线处 |
+| `thinking-loop-guard.ts` | 思考空转（pure-thinking spinning）的**判定**：按 thinking/text/toolcall 三类增量折叠当前 assistant 消息，三条件齐备才判空转（零文本零工具调用 + thinking 过门槛 + 尾部窗口某个 n-gram 重复超阈值）；另导出 `truncateThinkingForDisplay`（显示截断，**字符与行数双上限**，无换行的循环样本也压得住）。纯逻辑、无 I/O，来源 deepseek-ai/deepseek-harness#5976 |
+| `thinking-loop-controller.ts` | 空转熔断的**状态机与动作**：命中后置显示截断标记、注入「停止空转、立即行动」、`abort()`、通知用户；同一会话连续自动续跑有上限（超过只中止与通知），有产出的回合重置计数。副作用（abort / notify / inject）全部注入，所以事件序列可单测；扩展只接线 |
 | `edit-projection.ts` | 从 edit/write 入参投影出改后完整文件内容，供标签检查看到上下文 |
 | `edit-repo-scope.ts` | 一次编辑落在**哪个仓库**（`primary` / `other-repo` / `outside`）的唯一判定：git 有答案就听 git（调用方必须先爬到最近存在的祖先再问 git，跨仓库分支原样保留），没有答案时用 `fingerprint.ts` 的 `realFile` / `realDir` 解析两侧再按 `root + "/"` 边界判包含；解析后仍在仓库外的，再问一次「它到底属于哪个仓库」——「没有仓库」才跳过，「另一个仓库」照旧武装那个仓库。任何解析不出的情况一律回落 `primary`（fail-closed）。它存在的原因是仓库外的写入（子会话写进 `/tmp` 的完成报告）曾经作废 review 绑定，把已到手的 READY 打回 PENDING |
 | `file-size-gate.ts` | 新建源码文件 600 行硬拦、存量超阈值只提醒的纯判定 |

@@ -446,6 +446,7 @@ import {
   looksLikeBashFileWrite,
 } from "../lib/edit-discipline.ts";
 import { FULL_LANE_NUDGE, looksLikeFullLaneRun } from "../lib/test-run-discipline.ts";
+import { createThinkingLoopController } from "../lib/thinking-loop-controller.ts";
 import { projectEditedContent } from "../lib/edit-projection.ts";
 import {
   evaluateReadonlyStall,
@@ -8889,6 +8890,78 @@ export default function reviewGate(pi: ExtensionAPI) {
     }
     if (dirty) persist(ctx);
   });
+
+  // ---------- thinking-loop guard ----------
+  //
+  // A reasoning model can spin: a turn emits ONLY thinking deltas, never text
+  // and never a tool call, so Pi never ends it and the terminal fills with tens
+  // of thousands of chunks while the user watches (deepseek-ai/deepseek-harness#5976).
+  // The decision lives in lib/thinking-loop-guard.ts and the state machine in
+  // lib/thinking-loop-controller.ts — this is only the wiring, and it is wired
+  // for EVERY session that loads this extension (main, judge pane, orchestrator
+  // child) on EVERY reasoning model: the guard is model-agnostic, and filtering
+  // by provider name would have missed the custom `dsv4` provider entirely.
+  //
+  // `ctx` is stashed rather than captured: the effects fire from a stream
+  // callback, and the extension's context is per-event, so the latest one is
+  // the live one.
+  //
+  // The model-facing notice is DEFERRED to the settle handler below, not
+  // queued as a steering message: Pi drains its steering queue from inside a
+  // RUNNING agent loop, and `abort()` is exactly what stops that loop — so a
+  // steer queued here would sit in the queue until something else started a
+  // turn. Sending it once the session is idle again is the only ordering that
+  // guarantees the model actually reads it.
+  let thinkingLoopInjection: string | undefined;
+  let thinkingLoopCtx: ExtensionContext | undefined;
+  const thinkingLoop = createThinkingLoopController({
+    abort: () => { try { thinkingLoopCtx?.abort(); } catch { /* session gone */ } },
+    notify: (message) => { try { thinkingLoopCtx?.ui.notify(message, "warning"); } catch { /* no UI (print mode) */ } },
+    inject: (text) => { thinkingLoopInjection = text; },
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    const text = thinkingLoopInjection;
+    if (!text) return;
+    thinkingLoopInjection = undefined;
+    thinkingLoopCtx = ctx;
+    // `abort()` leaves the run's last assistant message with stopReason
+    // "aborted", which the gate's ESC detection (agent_end) reads as "the USER
+    // stopped me" and pauses L2 auto-continuation. This abort was OURS and we
+    // are about to hand the session a new turn, so that reading is wrong here.
+    lastRunAborted = false;
+    try {
+      // Idle is the normal case (the abort just ended the run); a gate that
+      // already auto-continued this settle leaves us streaming, and then the
+      // notice rides that run as steering.
+      if (ctx.isIdle()) pi.sendUserMessage(text);
+      else pi.sendUserMessage(text, { deliverAs: "steer" });
+    } catch { /* the session cannot accept messages right now */ }
+  });
+
+  pi.on("message_start", (event, ctx) => {
+    if (event.message.role !== "assistant") return;
+    thinkingLoopCtx = ctx;
+    thinkingLoop.startTurn();
+  });
+
+  pi.on("message_update", (event, ctx) => {
+    thinkingLoopCtx = ctx;
+    const chunk = event.assistantMessageEvent;
+    if (chunk.type === "thinking_delta") thinkingLoop.observe("thinking", chunk.delta);
+    else if (chunk.type === "text_delta") thinkingLoop.observe("text", chunk.delta);
+    else if (chunk.type === "toolcall_delta") thinkingLoop.observe("toolcall", chunk.delta);
+  });
+
+  pi.on("message_end", (event, ctx) => {
+    if (event.message.role !== "assistant") return;
+    thinkingLoopCtx = ctx;
+    thinkingLoop.endTurn();
+  });
+
+  pi.registerMarkdownTransformer((markdown, context) =>
+    thinkingLoop.truncateDisplay(markdown, context.messageType),
+  );
 
   // ---------- commands ----------
   //
