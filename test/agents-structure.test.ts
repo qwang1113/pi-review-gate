@@ -392,3 +392,20 @@ test("every judge role is told that findings carry BLOCKERS ONLY", () => {
   }
 });
 
+test("reviewer and goal-auditor cite the minimalism section (§5) with their severity maps", () => {
+  // The rules live in docs/coding-standards.md §5 — the role files carry a
+  // pointer plus their own severity map, never a second copy of the checks.
+  const reviewer = readFileSync(join(AGENTS, "reviewer.md"), "utf8");
+  assert.ok(reviewer.includes("docs/coding-standards.md"), "reviewer.md cites the standards");
+  assert.match(reviewer, /Minimalism/, "reviewer.md names the check");
+  assert.match(reviewer, /new dependency with no written justification.*P1/i, "unjustified deps are P1");
+  const auditor = readFileSync(join(AGENTS, "goal-auditor.md"), "utf8");
+  assert.ok(auditor.includes("docs/coding-standards.md"), "goal-auditor.md cites the standards");
+  assert.match(auditor, /Is the goal minimal/, "goal-auditor.md carries the minimalism check");
+  assert.match(auditor, /the eight/, "the severity paragraph counts all eight checks");
+  for (const [file, src] of [["reviewer.md", reviewer], ["goal-auditor.md", auditor]]) {
+    for (const rule of ["复用优先", "能删就删", "新依赖须论证"]) {
+      assert.ok(!src.includes(rule), `${file} must not quote the four checks (found: ${rule})`);
+    }
+  }
+});

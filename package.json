@@ -50,7 +50,6 @@
     "typebox": "*"
   },
   "dependencies": {
-    "pi-hashline-edit-pro": "^2.7.1",
     "pi-mcp-adapter": "^2.26.0",
     "pi-notify": "^1.4.0",
     "pi-vim": "^0.14.1"

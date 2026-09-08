@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   buildAgentDirectives,
   buildWaitDiscipline,
+  MINIMALISM_REMINDER,
+  GATE_ANOMALY_PROTOCOL,
 
   EXPLORE_MODE_NOTE,
   ORCHESTRATOR_WAIT_DISCIPLINE,
@@ -98,4 +100,47 @@ test("EXPLORE_MODE_NOTE carries the delivery-escalation reminder", () => {
     "delivery work must escalate to the full loop (distinct phrasing)");
   assert.match(EXPLORE_MODE_NOTE, /ship 命令/,
     "the note keeps the ship-gate reminder visible in explore");
+});
+
+// ---------------------------------------------------------------------------
+// MINIMALISM REMINDER (2026-09-08). The write-time half of the doctrine: a
+// nudge, never a block. The rules live in docs/coding-standards.md §5 — this
+// block cites, never quotes (a second copy of the four checks here would
+// drift, and the copy map is the record of how often that has happened).
+// ---------------------------------------------------------------------------
+
+test("the standing block carries the minimalism reminder (cite, never quote)", () => {
+  const text = buildAgentDirectives();
+  assert.ok(text.includes(MINIMALISM_REMINDER), "the reminder renders in the standing block");
+  assert.ok(MINIMALISM_REMINDER.includes("docs/coding-standards.md"), "it cites the standards file");
+  assert.ok(MINIMALISM_REMINDER.includes("§5"), "it cites the section, not the rules");
+  assert.match(MINIMALISM_REMINDER, /只提醒、不阻塞/, "write-time is advisory by contract");
+  assert.match(MINIMALISM_REMINDER, /送审说明/, "it tells the agent where a dependency justification goes");
+  for (const rule of ["YAGNI", "复用优先", "能删就删", "新依赖须论证"]) {
+    assert.ok(!MINIMALISM_REMINDER.includes(rule), `the four checks must not be quoted here (found: ${rule})`);
+  }
+});
+
+test("the standing block carries the two-layer gate-anomaly protocol (2026-09-08)", () => {
+  const text = buildAgentDirectives();
+  assert.ok(text.includes(GATE_ANOMALY_PROTOCOL), "the protocol renders in the standing block");
+  // Layer 1: retryable failures → fix and continue, never report (the user's
+  // clarification: simple retryable errors must not interrupt flow).
+  assert.match(GATE_ANOMALY_PROTOCOL, /可重试.*直接继续|①.*直接继续/, "retryable failures continue");
+  assert.match(GATE_ANOMALY_PROTOCOL, /oldText 不匹配|参数校验/, "it names retryable shapes");
+  // Layer 2: genuine anomalies (deadlock / blocking) → stop, report, no
+  // self-diagnosis / workaround / blind retry.
+  assert.ok(GATE_ANOMALY_PROTOCOL.includes("ask_user"), "reporting goes through ask_user");
+  assert.match(GATE_ANOMALY_PROTOCOL, /同一方式.*拒绝|看不出还能怎么修/, "it defines the escalation test");
+  assert.match(GATE_ANOMALY_PROTOCOL, /未命中本轮 report/, "the measured deadlock shape is named");
+  assert.match(GATE_ANOMALY_PROTOCOL, /禁止自主探索|禁止自主诊断/, "self-diagnosis is prohibited at the anomaly layer");
+  // The prohibitions must NOT cover the retryable layer (over-escalation is a
+  // failure mode) — the "禁止" wording sits under the anomaly heading only.
+  const anomalyOnly = GATE_ANOMALY_PROTOCOL.slice(GATE_ANOMALY_PROTOCOL.indexOf("②"));
+  assert.match(anomalyOnly, /禁止/, "the prohibitions live under the anomaly layer");
+  const retryLayer = GATE_ANOMALY_PROTOCOL.slice(0, GATE_ANOMALY_PROTOCOL.indexOf("②"));
+  assert.doesNotMatch(retryLayer, /禁止/, "the retryable layer must not forbid anything");
+  assert.match(retryLayer, /直接继续/, "…it says continue");
+  assert.match(GATE_ANOMALY_PROTOCOL, /request_arbitration/, "the sanctioned appeal stays");
+  assert.match(GATE_ANOMALY_PROTOCOL, /gate-doctor/, "diagnostics stay with the user's command");
 });

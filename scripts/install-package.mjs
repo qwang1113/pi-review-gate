@@ -54,16 +54,14 @@ const RETIRED_AGENTS = [
  * no-op that keeps the existing entry.
  *
  * The list is the extension's WORKING PLATFORM: editor integration
- * (pi-vim), MCP tooling (pi-mcp-adapter), notifications (pi-notify), and the
- * hashline editor (pi-hashline-edit-pro). Every entry is also pinned in
- * package.json dependencies so the whole platform resolves on `npm install` /
- * `pi install`.
+ * (pi-vim), MCP tooling (pi-mcp-adapter) and notifications (pi-notify).
+ * Every entry is also pinned in package.json dependencies so the whole
+ * platform resolves on `npm install` / `pi install`.
  */
 const COMPANION_PACKAGES = [
   "npm:pi-mcp-adapter",
   "npm:pi-notify",
   "npm:pi-vim",
-  "npm:pi-hashline-edit-pro"
 ];
 
 

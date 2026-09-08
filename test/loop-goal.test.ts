@@ -694,3 +694,14 @@ test("buildGoalForceNegotiateDirective: names the count, the threshold and the O
 test("the threshold constant is the user's chosen 60 turns", () => {
   assert.equal(GOAL_FORCE_NEGOTIATE_TURN_THRESHOLD, 60);
 });
+
+test("buildGoalAuditTask: the audit task carries the minimalism check (cite §5, P1 for out-of-scope work)", () => {
+  const task = buildGoalAuditTask("# 目标\n\n标准一。");
+  assert.ok(task.includes("docs/coding-standards.md") && task.includes("Section 5"), "it cites the standards section");
+  assert.ok(task.includes("最小化检查"), "the check is present");
+  assert.match(task, /用户没要的工作.*P1/, "out-of-scope work is a P1");
+  assert.ok(task.includes("最小指必要"), "minimal means necessary, not few");
+  for (const rule of ["YAGNI", "复用优先", "能删就删", "新依赖须论证"]) {
+    assert.ok(!task.includes(rule), `the four checks must not be quoted in the task (found: ${rule})`);
+  }
+});

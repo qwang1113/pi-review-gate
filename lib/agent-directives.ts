@@ -84,6 +84,18 @@ export const TOOL_DECISION_TABLE =
 
 
 /**
+ * MINIMALISM REMINDER — the write-time half of the doctrine (2026-09-08, user
+ * decision): a nudge, never a block. The rules live in
+ * `docs/coding-standards.md` §5 (their only substantive copy — this block
+ * cites, never quotes). Rendered into the standing block by
+ * buildAgentDirectives, so every turn carries it exactly once.
+ */
+export const MINIMALISM_REMINDER =
+  "最小化提醒（只提醒、不阻塞，规则见 `docs/coding-standards.md` §5）：" +
+  "动手前先想复用（仓库已有 / 标准库 / 平台原生 / 已装依赖），能删先删再写，" +
+  "新增依赖必须在送审说明里论证为什么现有手段做不到。";
+
+/**
  * The check that stops the "ask in prose, end the turn, get woken up" cycle.
  * It is phrased as a question the agent answers, not as a rule it obeys.
  */
@@ -91,6 +103,37 @@ export const END_OF_TURN_CHECK =
   "结束本轮前自检：有没有「本该调工具却写成了文字」的事？" +
   "想问用户 → `ask_user`；改完了 → `judge_submit({role:\"reviewer\"})`；" +
   "拿不定主意 → `judge_submit({role:\"adviser\"})`。有就先调，别把工具的活写成一段话。";
+/**
+ * GATE-ANOMALY PROTOCOL (2026-09-08, user decision; split into two layers
+ * 2026-09-08 the same day after the user's clarification) — what an agent
+ * does when the gate itself looks broken.
+ *
+ * TWO LAYERS, DELIBERATELY. A single failure is normally the agent's own:
+ * fix the call and retry — that is the ordinary path and must NOT stop for a
+ * report (over-escalating a retryable failure is itself a failure mode: it
+ * interrupts flow for something the caller can fix). Only a genuine anomaly
+ * — deadlock or another blocking condition — escalates. Measured example of
+ * the real thing: a replace-tool schema/gate conflict (path rejected by one
+ * side, demanded by the other — no legal call exists) sent a session into
+ * self-diagnosis, workaround edits and blind retries for dozens of calls.
+ * The gate cannot police its own bugs; the human is the escalation path, and
+ * this protocol is injected into the standing block.
+ * `request_arbitration` (a block wrongly refused) and `/gate-doctor`
+ * (diagnostics) remain the sanctioned channels and are unaffected.
+ */
+export const GATE_ANOMALY_PROTOCOL =
+  "## 门禁异常时（分层：可重试直接继续；真异常才停下报告）\n" +
+  "**① 可重试 —— 直接继续，不报告（常态）：** 单次/偶发失败，错误明确指向调用自身" +
+  "（参数校验、oldText 不匹配、缺字段、工具名写错）——修调用立即重试，这是正常路径，不要停下来。\n" +
+  "**② 真异常 —— 停下，用 `ask_user` 报告（禁止自主探索/绕路/盲试）：** 死锁与阻塞性故障，特征：\n" +
+  "   - 修正调用后仍被**同一方式**拒绝，且看不出还能怎么修（错误不随修正变化）；\n" +
+  "   - 门禁自锁：等待/审计反复同一句失败（如「未命中本轮 report」）而 pane 早已交卷；\n" +
+  "   - 工具参数 schema 与门禁要求互斥，不存在合法调用（如带 path 被拒、不带也被拒）；\n" +
+  "   - 任何重试都回到同一点，无法推进。\n" +
+  "   报告内容：现象 + 出问题的调用原文 + 门禁返回原文 + 已试过的修正与重试次数 + " +
+  "为什么判断是门禁问题。等用户裁决，不自行继续。\n" +
+  "③ 正轨不受影响：`request_arbitration` 只用于「某个 block 是误判」的正式申诉；`/gate-doctor` 是给用户跑的诊断命令。";
+
 
 /**
  * Adopting a requirement (user ask, O12): understand, ask, restate, confirm.
@@ -131,7 +174,8 @@ export const EXPLORE_MODE_NOTE =
 
 /** The whole standing block, in the order an agent reads it. */
 export function buildAgentDirectives(mode?: "loop" | "explore"): string {
-  return (`${TOOL_DECISION_TABLE}\n\n${REQUIREMENT_PROTOCOL}\n\n${END_OF_TURN_CHECK}` +
+  return (`${TOOL_DECISION_TABLE}\n\n${MINIMALISM_REMINDER}\n\n${REQUIREMENT_PROTOCOL}\n\n${END_OF_TURN_CHECK}` +
+    `\n\n${GATE_ANOMALY_PROTOCOL}` +
     (mode === "explore" ? `\n\n${EXPLORE_MODE_NOTE}` : ""));
 }
 

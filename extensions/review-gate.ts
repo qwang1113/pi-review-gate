@@ -294,6 +294,7 @@ import { notifyUserInput } from "../lib/poll-wait.ts";
 import { formatInheritanceBrief, readInheritance } from "../lib/orchestrator-relay.ts";
 import { addGrant, emptyRuntime, hasGrant, withoutPlanApproval, type OrchestratorRuntime } from "../lib/orchestrator-registry.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "../lib/file-size-gate.ts";
+import { dependencyJustificationVerdict, formatDependencyJustificationVerdict, newDependencyNames } from "../lib/dependency-justification.ts";
 import { buildCheckpointMessage } from "../lib/checkpoint-message.ts";
 import { classifyChildren, buildChildWaitNotice, type ChildSnapshot } from "../lib/child-watch.ts";
 // (A round's conclusion is the channel report. The transcript READ died with
@@ -307,6 +308,8 @@ import {
   registerJudgeSessionTools,
   registerJudgeWaitTool,
   probeJudgeRound,
+  doWait,
+  doClose,
   type JudgeSessionToolDeps,
 } from "../lib/judge-session-tools.ts";
 
@@ -442,6 +445,7 @@ import {
   EDIT_FAILURE_NUDGE,
   looksLikeBashFileWrite,
 } from "../lib/edit-discipline.ts";
+import { FULL_LANE_NUDGE, looksLikeFullLaneRun } from "../lib/test-run-discipline.ts";
 import { projectEditedContent } from "../lib/edit-projection.ts";
 import {
   evaluateReadonlyStall,
@@ -824,39 +828,44 @@ export default function reviewGate(pi: ExtensionAPI) {
     };
   }
   /**
-   * Wait for an INTERNAL audit's REPORT — the gate's own chains want the end of
-   * the round, not the first message.
-   *
-   * `judge_wait` is message-driven for the AGENT, and that is right for an
-   * agent: a streamed finding or a question is exactly what an opener wants
-   * the moment it happens. The goal/plan audit chains are the opposite case.
-   * They are one synchronous call inside `propose_loop_goal` /
-   * `orchestrator_plan`, nobody is there to act on a finding, and both treat
-   * "anything but a report" as an unfinished audit — so a message-driven
-   * return would close the auditor mid-round. Since every auditor streams its
-   * findings BEFORE concluding, that made any draft with findings fail closed
-   * forever (P0, found by the reviewer 2026-09-05).
-   *
-   * So the chain keeps calling the SAME tool — no second waiting loop, no
-   * second criterion (哲学三) — until the round really ends. It terminates:
-   * the cursors mean a finding or a question can end one wait and never the
-   * next, and the total budget is the tool's own hard cap, spent across the
-   * calls rather than by each of them.
+   * THE GATE'S OWN WAIT (2026-09-08) — the round-end rule is `awaitRoundReport`'s:
+   * one synchronous audit chain, nobody there to act on a finding, so "anything
+   * but a report" is unfinished. The single `wait` step addresses the auditor by
+   * JUDGE ID through `doWait` directly instead of `callTool("judge_wait",
+   * { repo })`: the tool path re-runs `addressJudge`'s "has this session edited
+   * that repo" check, which refuses a legitimate self-audit of an unedited repo
+   * (measured: five consecutive "等待未命中本轮 report" on a cross-repo goal
+   * audit). The opener check still runs inside `doWait`; only the repo-addressing
+   * is bypassed, and the judgeId comes from this session's own registry
+   * (`judgeChildByRole`), never from an agent-supplied parameter.
    */
-  async function awaitAuditReport(
+  async function selfAuditWait(
     root: string,
     ctx: unknown,
     onUpdate: ToolUpdate | undefined,
     signal: AbortSignal | undefined,
   ) {
     return awaitRoundReport({
-      wait: (timeoutMs) => callTool(
-        "judge_wait",
-        { role: "goal-auditor", repo: root, timeoutMs },
-        ctx,
-        onUpdate,
-        signal,
-      ),
+      wait: (timeoutMs) => {
+        const judgeId = judgeChildByRole(root, "goal-auditor")?.judgeId;
+        if (judgeId === undefined) {
+          return Promise.resolve({
+            content: [{ type: "text", text: "review-gate: no judge on record — submit a round first (judge_submit)." }],
+            details: { done: false, reason: undefined, role: undefined, hasVerdict: false },
+            isError: true,
+          });
+        }
+        // Pass the LIVE signal through, never a frozen snapshot: `pollUntil`
+        // reads `aborted` on every tick, and a `{ aborted: signal.aborted }`
+        // copy taken at dispatch time would never observe a user ESC.
+        return doWait(
+          selfSessionDeps(),
+          { sessionId: judgeId, timeoutMs },
+          signal,
+          onUpdate,
+          true, // gateSelf: the gate's own chain, never an agent param
+        );
+      },
       now: () => Date.now(),
       aborted: () => signal?.aborted === true,
     }) as ReturnType<typeof callTool>;
@@ -975,11 +984,13 @@ export default function reviewGate(pi: ExtensionAPI) {
   // In-memory only: a fresh session starts fresh anyway.
   let sessionEdited = false;
   // Edit-discipline nudge window (prompt-only, never blocking): set when an
-  // edit/write tool call FAILS, cleared at turn start, on new user input, on a
-  // successful edit, and after one nudge. While set, a bash result that looks
-  // like a direct file write gets BASH_WRITE_NUDGE appended (lib/edit-
-  // discipline.ts). This targets the recurring "edit failed → shell edits the
-  // file" workaround without policing ordinary bash usage.
+  // edit/write tool call FAILS; cleared ONLY on a successful edit or after one
+  // nudge has been issued (2026-09-08 — it used to close at turn start / on
+  // new user input, which let a persistently broken edit tool cross turns and
+  // fall into bash file edits with no reminder). While set, a bash result
+  // that looks like a direct file write gets BASH_WRITE_NUDGE appended
+  // (lib/edit-discipline.ts). This targets the recurring "edit failed → shell
+  // edits the file" workaround without policing ordinary bash usage.
   let editFailurePending = false;
   // Read-only drill stall guard (lib/readonly-stall.ts): counts consecutive
   // successful read-only tool calls (read family + bash) with no edit landing
@@ -4168,8 +4179,11 @@ export default function reviewGate(pi: ExtensionAPI) {
       if (event.isError) {
         // Edit-discipline nudge (prompt-only, non-blocking): a failed edit is
         // the classic trigger for the "shell edits the file instead"
-        // workaround. Append guidance to THIS result and arm the same-turn
-        // bash window; the failure semantics stay untouched (isError true).
+        // workaround. Append guidance to THIS result and arm the bash window;
+        // it closes only on a successful edit or after one nudge (2026-09-08,
+        // cross-turn persistence — a persistently broken edit tool must not
+        // slip into silent bash edits next turn). Failure semantics stay
+        // untouched (isError true).
         // Skipped in normal mode: the step-aside must not add
         // extension text to results.
         if (state.taskMode === "normal") return;
@@ -4564,6 +4578,20 @@ export default function reviewGate(pi: ExtensionAPI) {
         };
       }
 
+      // Test-run discipline nudge (prompt-only, non-blocking): a manual full
+      // `npm test` / `tsc --noEmit` in the MAIN session is pure waste — the
+      // submission chain runs the full lane itself, input-cached. Judge panes
+      // are exempt: a reviewer verifies the reviewed commit in its throwaway
+      // worktree and that full run IS the job. Skipped in normal mode.
+      if (state.taskMode !== "normal"
+        && readJudgeSideEnv(process.env) === undefined
+        && cmd && looksLikeFullLaneRun(cmd)) {
+        return {
+          content: [...(event.content ?? []), { type: "text", text: FULL_LANE_NUDGE }],
+          isError: event.isError === true,
+        };
+      }
+
       // Read-only drill stall guard (lib/readonly-stall.ts): bash is the
       // drill workhorse (grep/sed through node_modules/), so count it like
       // the read family. Deliberately at the END of the bash branch — after
@@ -4609,6 +4637,9 @@ export default function reviewGate(pi: ExtensionAPI) {
       "Every review round judges baseline..HEAD, so checkpoints are the review unit.",
     parameters: Type.Object({
       message: Type.String({ description: "English commit message (Conventional Commits style)" }),
+      note: Type.Optional(Type.String({
+        description: "The agent's round note in its own words (the same text judge_submit receives as task) — the dependency-justification gate reads the justification from it, because the English-only commit message may have dropped the original wording.",
+      })),
       repo: Type.Optional(Type.String({
         description: "Absolute repo path (required once the session edited several repos)",
       })),
@@ -4821,6 +4852,53 @@ export default function reviewGate(pi: ExtensionAPI) {
           };
         }
 
+        // DEPENDENCY-JUSTIFICATION gate (minimalism §5, 2026-09-08). Runs HERE,
+        // at the checkpoint, next to the file-size gate — not at edit time:
+        // blocking mid-write would fire on a half-written round, whereas at
+        // the checkpoint the whole shape (manifest diff + round note) exists.
+        // Only a NEW dependency without a written justification blocks — worth
+        // stays with the judges (reviewer P1, goal/plan audit P0/P1).
+        const depGate = (() => {
+          // Root manifest only: a nested package.json (sub-package / fixture)
+          // must be compared against ITS OWN base, not the root's — comparing
+          // across paths judges every sub-package key as new (reviewer P2,
+          // 2026-09-08). Nested manifests stay the reviewer's judgement call.
+          if (!paths.some((p) => p === "package.json")) return { blocking: [] as string[] };
+          let worktreeText: string | undefined;
+          try {
+            worktreeText = readFileSync(pathResolve(root, "package.json"), "utf8");
+          } catch {
+            return { blocking: [] as string[] }; // unreadable ⇒ no facts, never a block
+          }
+          let baseText: string | undefined;
+          try {
+            const out = execFileSync("git", ["show", `HEAD:package.json`], { cwd: root, encoding: "utf8" }) as string;
+            baseText = out;
+          } catch {
+            baseText = undefined; // no base (new repo / new manifest) ⇒ every key is new
+          }
+          const added = newDependencyNames(worktreeText, baseText);
+          if (added.length === 0) return { blocking: [] as string[] };
+          // The justification rides the agent's own words: the round note that
+          // built this message, or the message itself. submitForReview derives
+          // the message from the note via checkpointMessage(note) — so pass
+          // both, exactly as the goal's acceptance criterion 6 requires.
+          return dependencyJustificationVerdict(
+            added.map((name) => ({ name })),
+            { note: typeof params.note === "string" ? params.note : "", message },
+          );
+        })();
+        if (depGate.blocking.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text: "review-gate: review_checkpoint rejected — " + formatDependencyJustificationVerdict(depGate),
+            }],
+            details: { committed: false, unjustifiedDeps: depGate.blocking.length },
+            isError: true,
+          };
+        }
+
         const sweptIn = paths;
         execFileSync("git", ["add", "-A"], { cwd: root, encoding: "utf8" });
         execFileSync("git", ["commit", "-m", message], {
@@ -4952,7 +5030,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     //    (isError) stops the chain.
     const message = checkpointMessage(input.message ?? input.note);
     input.progress?.step("checkpoint 提交");
-    const commit = await callTool("review_checkpoint", { message, repo: input.root }, input.ctx);
+    const commit = await callTool("review_checkpoint", { message, note: input.note, repo: input.root }, input.ctx);
     if (commit.isError) {
       input.progress?.fail("被拒");
       return {
@@ -6009,7 +6087,16 @@ export default function reviewGate(pi: ExtensionAPI) {
       // audit. Wait motion is forwarded into the chain's own progress, else a
       // minutes-long audit shows no motion at all.
       awaitRoundEnd: async (root) => {
-        const waited = await awaitAuditReport(root, waitCtx, forwardWaitUpdates(progress), signal);
+        // THE GATE WAITS ON ITSELF (2026-09-08): this chain dispatched the
+        // auditor itself and holds its judgeId, so it waits through `doWait`
+        // DIRECTLY — routing through `callTool("judge_wait", { repo: root })`
+        // would re-run `addressJudge`'s "has this session edited that repo"
+        // check and refuse a legitimate self-audit of an unedited repo
+        // (measured: five consecutive "等待未命中本轮 report"). The opener
+        // check still runs inside `doWait`; only the repo-addressing is
+        // bypassed. Waiting semantics are untouched: same round-end rule via
+        // `awaitRoundReport` — see `selfAuditWait`.
+        const waited = await selfAuditWait(root, waitCtx, forwardWaitUpdates(progress), signal);
         const details = (waited.details ?? {}) as { done?: unknown; reason?: unknown };
         if (!waited.isError && details.done === true && details.reason === "report") {
           return { ok: true, detail: "" };
@@ -6026,13 +6113,22 @@ export default function reviewGate(pi: ExtensionAPI) {
       // row it would be found by no longer exists. `hadPane` is read HERE,
       // before the close, because it is the only moment it is still knowable.
       closeJudge: async (root, role) => {
+        // SAME BYPASS AS THE WAIT (2026-09-08): the gate reclaims the auditor
+        // it opened itself — `callTool("judge_close", { repo: root })` would
+        // refuse on an unedited repo and leak the pane (measured: five
+        // "judge pane 回收失败…is not one of the repositories" in the audit
+        // log). `doClose` by judgeId keeps the opener check, skips only the
+        // repo-addressing.
         const hadPane = judgeChildByRole(root, role)?.paneId !== undefined;
-        const closed = await callTool("judge_close", { role, repo: root }, waitCtx);
+        const judgeId = judgeChildByRole(root, role)?.judgeId;
+        const closed = judgeId === undefined
+          ? { isError: false, content: [{ type: "text", text: "no judge on record — nothing to close." }], details: { closed: true, terminated: false } }
+          : await doClose(selfSessionDeps(), { role, sessionId: judgeId }, true); // gateSelf: gate's own reclaim
         return {
-          ok: closed.isError !== true && closed.details?.closed === true,
+          ok: closed.isError !== true && (closed.details as { closed?: unknown } | undefined)?.closed === true,
           hadPane,
-          terminated: closed.details?.terminated === true,
-          note: toolText(closed).split("\n")[0]?.trim() || undefined,
+          terminated: (closed.details as { terminated?: unknown } | undefined)?.terminated === true,
+          note: toolText(closed as { content: { type: string; text: string }[] }).split("\n")[0]?.trim() || undefined,
         };
       },
       auditPassed: (root, pending) => {
@@ -6341,6 +6437,21 @@ export default function reviewGate(pi: ExtensionAPI) {
   // those chains and once for the AGENT, which needs a way to wait for its
   // judge's next message that is not a hand-written sleep loop (2026-09-05,
   // user decision D1).
+  /**
+   * THE GATE'S OWN DEPS HANDLE (2026-09-08) — `judgeSessionDeps` is the object
+   * the agent-facing `judge_wait` / `judge_close` registrations close over;
+   * the gate's self-audit chains (`selfAuditWait`, `auditRunDeps.closeJudge`)
+   * call the SAME `doWait` / `doClose` implementations through this accessor
+   * instead of `callTool`, so the repo-addressing check inside `addressJudge`
+   * is bypassed for the gate's own auditor only. One object, not a copy: any
+   * drift between "what the agent's wait checks" and "what the gate's wait
+   * checks" would be a second implementation (哲学三). Agent-facing tools keep
+   * the full check — they still go through `addressJudge` with `repo`.
+   */
+  function selfSessionDeps(): JudgeSessionToolDeps {
+    return judgeSessionDeps;
+  }
+
   const judgeSessionDeps: JudgeSessionToolDeps = {
 
     resolveRepo: (requested) => {
@@ -6351,6 +6462,20 @@ export default function reviewGate(pi: ExtensionAPI) {
     callerId: () => callerIdentity(),
     hierarchy: () => { dropDeadForeignJudges(); return judgeHierarchy; },
     saveHierarchy: (next) => setHierarchy(next),
+    findChildById: (judgeId) => {
+      const c = ownJudges().find((e) => e.judgeId === judgeId);
+      if (!c) return undefined;
+      return {
+        judgeId: c.judgeId,
+        role: c.role,
+        repoRoot: c.repoRoot,
+        openerId: c.openerId,
+        ...(c.paneId === undefined ? {} : { paneId: c.paneId }),
+        ...(c.tmuxServer === undefined ? {} : { tmuxServer: c.tmuxServer }),
+        sessionDir: c.sessionDir,
+        ...(c.streamPath === undefined ? {} : { streamPath: c.streamPath }),
+      };
+    },
     findChild: (root, role, judgeId) => {
       const c = findJudgeChild(root, role, judgeId);
       if (!c) return undefined;
@@ -7603,8 +7728,11 @@ export default function reviewGate(pi: ExtensionAPI) {
   // ---------- set_gate_mode tool (in-session mode decision + self-service switching) ----------
 
   pi.on("input", (event, ctx) => {
-    // A fresh user message resets the edit-failure nudge window.
-    editFailurePending = false;
+    // 2026-09-08: the edit-failure nudge window NO LONGER closes on a fresh
+    // user message — a session whose edit tool is broken (schema/gate
+    // conflict) would otherwise cross turns and silently fall into bash file
+    // edits with no reminder. It closes on a successful edit or after one
+    // nudge has been issued; see edit-discipline.ts.
     // A real user message resumes an ESC-abort pause: the user is speaking
     // again, so auto-continuation may re-arm from this turn on ("extension"
     // is how the gate injects its own follow-ups — those never count).
@@ -8791,11 +8919,6 @@ export default function reviewGate(pi: ExtensionAPI) {
     // required on every turn, so it is injected before any early return.
     let systemPrompt = event.systemPrompt + "\n\n" + LANGUAGE_DIRECTIVE;
 
-    // New turn: the edit-failure nudge window from the PREVIOUS turn is stale
-    // (a same-turn workaround is what we care about). Reset BEFORE the
-    // normal-mode early return so the window can never leak across turns in
-    // any mode.
-    editFailurePending = false;
 
     // STARTUP HARD CHECK (user requirement 2026-08-30): every role must have
     // a resolvable model chain in the agents config layer — no silent

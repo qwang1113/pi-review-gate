@@ -1027,8 +1027,11 @@ test("gate mode is decided by the agent itself in set_gate_mode — no LLM class
   const inputBody = windowOf('pi.on("input"', "\n  });", "first-input capture handler");
   assert.doesNotMatch(inputBody, /classify|evaluateModeChange|setTaskMode/,
     "the input handler must cache only — decisions stay in set_gate_mode");
-  assert.match(inputBody, /editFailurePending = false/,
-    "new user input must close the edit-failure nudge window");
+  // 2026-09-08: the nudge window NO LONGER closes on new user input — it
+  // closes on a successful edit or after one nudge (see lib/edit-discipline.ts).
+  // The input handler must not carry the old clearing semantics.
+  assert.doesNotMatch(inputBody, /editFailurePending = false/,
+    "new user input must NOT close the edit-failure nudge window");
   assert.match(SRC, /name:\s*["']set_gate_mode["']/);
   // USER REQUIREMENT: "no changes" means THIS session's own edits
   // (sessionEdited), NOT pre-existing worktree/branch changes — a new session
@@ -1402,15 +1405,24 @@ test("edit-discipline nudges: prompt-only guidance, wired at the three sites", (
   const normalAt = promptBody.indexOf('state.taskMode === "normal"');
   const disciplineAt = promptBody.indexOf("EDIT_DISCIPLINE_DIRECTIVE");
   assert.ok(disciplineAt > normalAt, "discipline directive must be injected after the normal-mode return");
-  assert.ok(normalAt > promptBody.indexOf("editFailurePending = false"),
-    "the nudge window must reset BEFORE the normal-mode early return (no cross-turn leak)");
+  // 2026-09-08: the window no longer resets at turn boundaries (a broken edit
+  // tool must not cross turns into silent bash edits), so the declaration
+  // comment and the two clear sites must both state the NEW semantics —
+  // clearing lives ONLY at a successful edit and after a nudge.
+  const decl = SRC.slice(SRC.indexOf("let editFailurePending = false;") - 600, SRC.indexOf("let editFailurePending = false;"));
+  assert.match(decl, /cleared ONLY on a successful edit|cleared only on a successful edit/,
+    "the declaration comment must state the new close-on-edit/nudge semantics");
+  const beforeAgent = SRC.slice(promptAt, promptAt + 4000);
+  assert.doesNotMatch(beforeAgent, /editFailurePending = false/,
+    "before_agent_start must NOT clear the window any more");
   // 2. tool_result: a FAILED edit arms the window and appends the nudge.
   const resultAt = SRC.indexOf('pi.on("tool_result"');
   const resultEnd = SRC.indexOf('pi.on("session_start"', resultAt);
   const resultBody = SRC.slice(resultAt, resultEnd);
   assert.match(resultBody, /EDIT_FAILURE_NUDGE/);
   assert.match(resultBody, /editFailurePending = true/);
-  // 3. tool_result bash: same-turn write-looking command gets the nudge once.
+  // 3. tool_result bash: a write-looking command while the window is armed
+  //    (cross-turn since 2026-09-08) gets the nudge once.
   assert.match(resultBody, /BASH_WRITE_NUDGE/);
   assert.match(resultBody, /editFailurePending = false/);
   // Both nudge sites are skipped in normal mode (the step-aside must not
@@ -2516,7 +2528,7 @@ test("judge_close / judge_wait address a judge by ROLE", () => {
     assert.match(body, /role: ROLE_PARAM/, `${tool} takes a role`);
     assert.match(
       JUDGE_TOOLS_SRC,
-      new RegExp(`addressJudge\\(deps, params, "${tool}"\\)`),
+      new RegExp(`addressJudge\\(deps, params, "${tool}"(, gateSelf)?\\)`),
       `${tool} addresses its judge through the shared resolver`,
     );
   }
@@ -2792,7 +2804,10 @@ test("a deleted tool name cannot appear in NEW agent-facing text (a ratchet)", (
     // 2026-09-05: 19 → 17。goal 审计任务的三份逐字副本合成了一份
     // (`buildGoalAuditRound`)，所以 callTool("prepare_goal_audit") 的接线引用
     // 也从三处降到一处。
-    "review-gate.ts": 17,
+    // 2026-09-08: 17 → 18。submitForReview 把 round note 传给 review_checkpoint
+    // (`{ message, note: input.note, ... }`)——依赖论证门禁从 agent 自己的话里读
+    // 论证。接线引用，不是调用指令。
+    "review-gate.ts": 18,
   };
 
   const sources = [
@@ -4260,14 +4275,25 @@ test("BOTH audit paths check the WAIT RESULT before adjudicating (stale-verdict 
   // The done/reason judgement itself is wired ONCE, in the run deps.
   const doneChecks = [...SRC.matchAll(/details\.reason === "report"/g)];
   assert.equal(doneChecks.length, 1, "one place decides that a wait ended on a report");
-  // …and the waiter they share must keep calling the ONE tool until the round
-  // really ends. `judge_wait` is message-driven for the agent (2026-09-05), so
-  // a single call can return on a streamed finding — which every auditor emits
-  // before it concludes. Adjudicating that as "no report" closed the auditor
-  // mid-round and made any draft with findings fail closed forever (P0).
-  const waiter = SRC.slice(SRC.indexOf("async function awaitAuditReport("), SRC.indexOf("/** The text a tool result carries"));
+  // …and the waiter they share must keep calling until the round really ends.
+  // `judge_wait` is message-driven for the agent (2026-09-05), so a single call
+  // can return on a streamed finding — which every auditor emits before it
+  // concludes. Adjudicating that as "no report" closed the auditor mid-round
+  // and made any draft with findings fail closed forever (P0).
+  // 2026-09-08: the gate's own chains wait through `selfAuditWait`, which keeps
+  // the shared `awaitRoundReport` decision but addresses the auditor by judgeId
+  // via `doWait` (the tool path would refuse an unedited repo — measured five
+  // consecutive "等待未命中本轮 report"). The agent-facing `judge_wait` tool
+  // keeps the full repo check.
+  const waiter = SRC.slice(SRC.indexOf("async function selfAuditWait("), SRC.indexOf("/** The text a tool result carries"));
   assert.match(waiter, /awaitRoundReport\(\{/, "the chains wait through the shared decision, not a hand-rolled loop");
-  assert.match(waiter, /callTool\(\s*\n?\s*"judge_wait"/, "…which re-calls the ONE waiting tool");
+  assert.match(waiter, /doWait\(/, "…through the shared wait implementation, addressed by judgeId");
+  // 2026-09-08 second round (reviewer P1): the marker is a FUNCTION ARGUMENT on
+  // doWait/doClose, never a params field — params arrive from the agent verbatim
+  // (unknown keys stripped nowhere), so a marker in params would be agent-settable.
+  assert.match(waiter, /,\n?\s*true, \/\/ gateSelf/, "…with the gate-self function argument (agents cannot set it)");
+  assert.doesNotMatch(waiter, /gateSelf: true/, "…and never as a params field");
+  assert.doesNotMatch(waiter, /callTool\(\s*\n?\s*"judge_wait"/, "the gate chain must not re-enter the repo-checked tool path");
   assert.doesNotMatch(waiter, /for \(;;\)|while \(/, "no second waiting loop may come back here");
   // The decision itself (what ends a round, and the ONE shared budget) is
   // pinned in test/judge-lifecycle.test.ts, where it can be driven directly.
@@ -4367,7 +4393,10 @@ test("judge_submit runs the whole submission chain, and cannot dead-end on it", 
   for (const step of [/step\("precommit \(full\)"\)/, /step\("checkpoint 提交"\)/, /step\("prepare/]) {
     assert.match(body, step, "every chain step publishes progress");
   }
-  assert.match(body, /callTool\("review_checkpoint", \{ message, repo: input\.root \}/);
+  // 2026-09-08: the round NOTE travels to the checkpoint alongside the message —
+  // the dependency-justification gate reads the justification from the agent\'s own
+  // words (L5 may have dropped them from the English-only message).
+  assert.match(body, /callTool\("review_checkpoint", \{ message, note: input\.note, repo: input\.root \}/);
   assert.match(body, /callTool\(\s*"prepare_review"/);
   // A CLEAN worktree means the round is already frozen — treating it as a
   // failure stranded the commit and dead-ended every retry (round-5 P1).
@@ -5073,11 +5102,16 @@ test("declare_done's cascade is SOURCE-BLIND: it closes by opener, never by disp
 test("the audit chain's closeJudge reports what the reclaim achieved", () => {
   const dep = windowOf("closeJudge: async (root, role) => {", /\n      \},\n/, "closeJudge dep");
   assert.match(dep, /return \{/, "the outcome is returned, never discarded");
-  assert.match(dep, /terminated: closed\.details\?\.terminated === true/,
-    "whether the pane is really gone comes from the tool, not from an assumption");
+  // 2026-09-08: the close goes through `doClose` directly (gate-self bypass
+  // of the repo check) — the terminated reading is a cast-guarded property
+  // read off the same reply shape. What is pinned is that the value comes
+  // from the TOOL's reply, not from an assumption.
+  assert.match(dep, /terminated:/, "the outcome reports termination");
+  assert.match(dep, /closed\.details/, "…read off the tool reply");
+  assert.match(dep, /doClose\(selfSessionDeps\(\)/, "the gate closes its own auditor directly");
   // `hadPane` is only knowable BEFORE the close: the row is dropped by it.
   const hadPaneAt = dep.indexOf("const hadPane =");
-  const callAt = dep.indexOf('callTool("judge_close"');
+  const callAt = dep.indexOf("doClose(selfSessionDeps()");
   assert.ok(hadPaneAt >= 0 && callAt >= 0, "both halves are present");
   assert.ok(hadPaneAt < callAt, "hadPane must be read before the row is dropped");
 });
@@ -5346,3 +5380,17 @@ test("the judge's context reading travels report → registry → next dispatch"
     "it lands on the entry the lane lookup reads");
 });
 
+test("test-run discipline nudge: wired into the bash branch, judge panes exempt", () => {
+  // 2026-09-08 (goal criterion 2): a manual full-suite/typecheck in the MAIN
+  // session gets the nudge; a judge pane's full run is its job and stays
+  // silent. Both halves must be structurally pinned.
+  assert.match(SRC, /looksLikeFullLaneRun\(cmd\)/, "the bash branch consults the recogniser");
+  assert.match(SRC, /text: FULL_LANE_NUDGE/, "…and appends the nudge when it hits");
+  // Judge exemption sits in the same condition — readJudgeSideEnv(process.env)
+  // === undefined means "main session, not a judge pane".
+  const bashSite = SRC.slice(SRC.indexOf("Test-run discipline nudge"), SRC.indexOf("Test-run discipline nudge") + 700);
+  assert.match(bashSite, /readJudgeSideEnv\(process\.env\) === undefined/,
+    "judge panes must not hear the full-lane nudge");
+  assert.match(bashSite, /state\.taskMode !== "normal"/,
+    "normal mode stays silent too");
+});

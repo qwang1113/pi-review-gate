@@ -77,3 +77,12 @@ test("buildCheckpointMessage — an English subject with a Chinese body drops on
   const msg = buildCheckpointMessage("fix(gate): guard the merge\n\n这里解释为什么");
   assert.equal(msg, "fix(checkpoint-gate): guard the merge");
 });
+
+test("L5 drops a Chinese justification from the message — the dep gate reads the NOTE, not the message", () => {
+  // The contract (dependency-justification.ts): note first (agent's own
+  // words, verbatim), message second (may carry an English restatement).
+  const note = "新增 uuid，因为现有代码里没有可用的唯一 id 生成";
+  const message = buildCheckpointMessage(note);
+  assert.ok(!message.includes("因为"), "L5 drops the Chinese justification from the message");
+  assert.ok(note.includes("因为"), "…so the gate must be fed the note (wired: note: input.note plumbs it)");
+});

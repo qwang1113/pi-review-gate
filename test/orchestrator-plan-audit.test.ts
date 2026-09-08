@@ -45,10 +45,12 @@ function planOf(overrides: Record<string, unknown> = {}): OrchestratorPlan {
   return parsed.plan!;
 }
 
-test("the audit task carries the 7th check: requirements clarified & goal derivable", () => {
+test("the audit task carries the 8th check: requirements clarified & goal derivable", () => {
   const task = buildPlanAuditTask(planOf());
-  // The check exists and is numbered 7.
-  assert.match(task, /7\. 需求是否已澄清、goal 是否可派生/);
+  // The check exists and is numbered 8 (2026-09-08: the minimalism check took
+  // 7, inside the checklist — a check after the conclude instructions would
+  // never run, reviewer P1).
+  assert.match(task, /8\. 需求是否已澄清、goal 是否可派生/);
   // It states the PM=product-manager rule.
   assert.match(task, /项目经理同时承担产品经理角色/);
   // 2026-09-06: the restatement itself is MECHANICAL now (submit refuses
@@ -61,7 +63,7 @@ test("the audit task carries the 7th check: requirements clarified & goal deriva
     "the old advisory wording must be gone, not living beside the mechanism");
 });
 
-test("the 7th check is mechanically checkable: decisions, task-book completeness, transcript", () => {
+test("the 8th check is mechanically checkable: decisions, task-book completeness, transcript", () => {
   const task = buildPlanAuditTask(planOf());
   // (a) unresolved plan.decisions are a P1.
   // (a) unresolved plan.decisions are a P1 — the SPECIFIC verdict sentence,
@@ -78,7 +80,7 @@ test("the 7th check is mechanically checkable: decisions, task-book completeness
   assert.match(task, /ask_user\/grillme/);
 });
 
-test("the 7th check names the transcript location when sessionDir/sessionId are provided", () => {
+test("the 8th check names the transcript location when sessionDir/sessionId are provided", () => {
   const task = buildPlanAuditTask(planOf(), {
     sessionDir: "/tmp/session-dir",
     sessionId: "sess-123",
@@ -151,3 +153,13 @@ test("planAuditHash / planAuditPassed: the record binds to the canonical plan co
 // The report-selection tests moved to test/audit-round.test.ts with the
 // function itself (2026-09-05): picking THIS round's report is the audit
 // ROUND's question, not the plan's — every kind had to answer it.
+
+test("the audit task carries the 7th check: minimalism (inside the checklist, mergeable tasks are P1)", () => {
+  const task = buildPlanAuditTask(planOf());
+  assert.match(task, /7\. 最小化检查/);
+  assert.ok(task.includes("docs/coding-standards.md") && task.includes("Section 5"), "it cites the standards section, not a copy");
+  assert.match(task, /可合并的任务.*P1/, "mergeable/redundant tasks are a P1");
+  for (const rule of ["YAGNI", "复用优先", "能删就删", "新依赖须论证"]) {
+    assert.ok(!task.includes(rule), `the four checks must not be quoted in the task (found: ${rule})`);
+  }
+});

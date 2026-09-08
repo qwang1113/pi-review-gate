@@ -2,9 +2,7 @@
 
 **Quality gates for [Pi](https://github.com/earendil-works/pi-coding-agent)** — ship-gate hard blocking, persistent gate state, auto-continuing review loop. Globally installable.
 
-**Requires Node ≥ 22.19.0** (declared in `package.json` `engines`; the
-`pi-hashline-edit-pro` companion needs it — the previous readmap companion
-accepted Node 20).
+**Requires Node ≥ 22.19.0** (declared in `package.json` `engines`).
 
 > **新用户？先读 [QUICKSTART.md](QUICKSTART.md)（5 分钟上手），再看本文件。**
 
@@ -857,7 +855,7 @@ on `pi install` / `npm install` and:
    the pinned platform in `package.json` `dependencies` — via `pi install` when
    they are missing from `~/.pi/agent/settings.json` (idempotent:
    already-present packages are left untouched): `pi-mcp-adapter`,
-   `pi-notify`, `pi-vim`, and `pi-hashline-edit-pro`.
+   `pi-notify` and `pi-vim`.
 3. if the current directory is a git repo, installs the git hooks into it
    (idempotent; chained, never clobbered).
 
