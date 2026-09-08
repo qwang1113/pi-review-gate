@@ -64,7 +64,20 @@ test("THE LAYOUT: fewer than three columns opens a new one, three stacks in the 
   assert.deepEqual(planPanePlacement([panes("%1")]), { direction: "-h", target: "%1" },
     "one column ⇒ open a second one off the only pane");
   assert.deepEqual(planPanePlacement([panes("%1"), panes("%2")]), { direction: "-h", target: "%2" },
-    "two columns ⇒ open the third off the rightmost column's last pane");
+    "two columns ⇒ open the third beside the rightmost column's lone pane");
+  // The lone pane decides WHERE (a plain split beside it lands where the third
+  // column belongs, keeping the SHARED column rightmost); `-f` is the fallback
+  // for the shape with no lone column, where a plain split would nest.
+  assert.deepEqual(
+    planPanePlacement([panes("%1"), panes("%2", "%3", "%4")]),
+    { direction: "-h", target: "%1" },
+    "the rightmost column already shares its height ⇒ open beside the column that sits alone",
+  );
+  assert.deepEqual(
+    planPanePlacement([panes("%1", "%2"), panes("%3", "%4")]),
+    { direction: "-h", target: "%4", full: true },
+    "no column sits alone ⇒ -f still opens a real column",
+  );
   assert.deepEqual(
     planPanePlacement([panes("%1"), panes("%2"), panes("%3", "%4", "%5")]),
     { direction: "-v", target: "%5" },
@@ -74,21 +87,6 @@ test("THE LAYOUT: fewer than three columns opens a new one, three stacks in the 
     planPanePlacement([panes("%1"), panes("%2"), panes("%3"), panes("%4")]),
     { direction: "-v", target: "%3" },
     "a window that is ALREADY too wide is not merged: the new pane still lands in the third column",
-  );
-  // The measured trap (reviewer P1, 2026-09-08): close the second column of a
-  // three-column window and the third column's panes ARE the second column.
-  // Splitting that column's last pane NESTS a half-width pane inside it —
-  // three columns become a lie. A lone pane's parent is the root container, so
-  // the new column must be opened off one.
-  assert.deepEqual(
-    planPanePlacement([panes("%1"), panes("%2", "%3", "%4")]),
-    { direction: "-h", target: "%1" },
-    "the rightmost column holds three panes ⇒ open the new column off the column that sits alone",
-  );
-  assert.deepEqual(
-    planPanePlacement([panes("%1", "%2"), panes("%3", "%4")]),
-    { direction: "-h", target: "%4" },
-    "no column sits alone ⇒ fall back to the rightmost column's last pane (the nest is accepted; the pane still opens)",
   );
   assert.throws(() => planPanePlacement([]), /非空/, "an empty layout is a bug, not a layout");
 });
@@ -129,6 +127,18 @@ test("a spawn asks tmux for the new pane id — it is never guessed", () => {
   assert.deepEqual(argv.slice(argv.indexOf("-F"), argv.indexOf("-F") + 2), ["-F", "#{pane_id}"]);
   assert.deepEqual(argv.slice(argv.indexOf("-c"), argv.indexOf("-c") + 2), ["-c", "/repo"]);
   assert.equal(argv[argv.length - 1], "pi", "an interactive pi is the default command");
+});
+
+test("a new column carries -f; stacking inside a column does not", () => {
+  const opening = buildSpawnPaneArgv({
+    placement: { direction: "-h", target: "%5", full: true },
+    cwd: "/repo",
+  });
+  assert.deepEqual(opening.slice(0, 5), ["split-window", "-h", "-f", "-t", "%5"],
+    "-f spans the window height, so the split is a real column wherever the target sits");
+  assert.ok(opening.includes("-P") && opening.includes("-F"), "and tmux still prints the new pane id");
+  const stacking = buildSpawnPaneArgv({ placement: { direction: "-v", target: "%5" }, cwd: "/repo" });
+  assert.ok(!stacking.includes("-f"), "-f would make the new pane full-width and wreck the third column");
 });
 
 test("environment travels as -e pairs, in a stable order", () => {

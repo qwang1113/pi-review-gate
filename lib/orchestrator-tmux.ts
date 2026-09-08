@@ -25,11 +25,17 @@
  *     ├─ column 2   one pane, full height   (the first session opened)
  *     └─ column 3   EVERY remaining pane, height shared evenly
  *
- *  - fewer than three columns → `split-window -h` off the rightmost column's
- *    LAST pane, which adds a SIBLING column (tmux flattens a same-direction
- *    split into the container that already holds the target — measured, not
- *    assumed: splitting the second column's pane yields `{p1,p2,p3}`, not a
- *    nested column);
+ *  - fewer than three columns → `split-window -h` beside a pane that sits
+ *    ALONE in its column (the rightmost such column): a lone pane's parent IS
+ *    the window root, so the split flattens into a real sibling column and
+ *    lands where the third one belongs, keeping the SHARED column rightmost.
+ *    Splitting a pane inside a multi-pane column NESTS a half-width pane there
+ *    instead — measured, and reachable: close the middle column of a
+ *    three-column window and the third column's panes ARE the second one. If
+ *    NO column sits alone (a shape the gate never builds), the split carries
+ *    `-f`, which spans the window height and opens a real column at the right
+ *    edge. Both sequences are regression tests in
+ *    test/tmux-window-layout.integration.test.ts;
  *  - three or more → `split-window -v` off the third column's last pane;
  *  - a handoff (giving the orchestration to a successor) → `split-window -h`
  *    off the orchestrator's own pane, so the successor lands beside it and
@@ -129,6 +135,10 @@ export function buildSpawnPaneArgv(opts: SpawnPaneOptions): readonly string[] {
   return assertSafeTmuxArgv([
     "split-window",
     opts.placement.direction,
+    // `-f` spans the whole window's other axis instead of splitting the
+    // target — the one flag that turns a split into a NEW COLUMN wherever the
+    // target happens to sit (see the header).
+    ...(opts.placement.full ? ["-f"] : []),
     "-t",
     requirePane(opts.placement.target, "placement.target"),
     "-c",
@@ -360,8 +370,14 @@ export function parseWindowLayout(stdout: string): WindowLayout {
 export interface PanePlacement {
   /** `-h` opens a column, `-v` stacks inside one. */
   direction: "-h" | "-v";
-  /** The pane tmux splits. */
+  /** The pane tmux splits — or, with `full`, the pane the new column lands beside. */
   target: string;
+  /**
+   * Pass `-f`: the new pane spans the whole window's other axis instead of
+   * splitting the target. Only meaningful with `-h`, where it is what makes
+   * the split a real column.
+   */
+  full?: boolean;
 }
 
 /**
@@ -379,27 +395,23 @@ export function planPanePlacement(columns: readonly (readonly WindowPane[])[]): 
     const third = columns[2]!;
     return { direction: "-v", target: third[third.length - 1]!.id };
   }
-  // OPENING A NEW COLUMN NEEDS A PANE THAT SITS ALONE IN ITS COLUMN.
+  // OPENING A NEW COLUMN, and the lone pane is what decides where it goes.
   //
-  // tmux flattens a split into the target's PARENT container when the direction
-  // matches, and nests a new container when it does not. A pane inside a
-  // multi-pane column therefore gets a half-width neighbour inside its own
-  // column instead of a new column — measured on the lab server: splitting the
-  // rightmost column's LAST pane of a two-column window produced
-  // `{c1, c2[…{half, half}]}` and the three-column invariant became a lie.
-  // This is not hypothetical: close the second column of a three-column window
-  // and the third column's panes ARE the second column. A lone pane's parent
-  // IS the root container, so the split lands there. Rightmost such column, so
-  // the new column appears at the right edge.
-  //
-  // A window where EVERY column holds several panes has no such pane. The gate
-  // never builds one (only the third column ever shares its height), so the
-  // fallback keeps the previous behaviour: accept the nest rather than refuse
-  // to open the pane.
+  // A plain `-h` split is FLATTENED into the target's parent container when
+  // the direction matches, and NESTS a half-width pane inside it when it does
+  // not — measured: splitting the last pane of a two-column window whose right
+  // column held three panes produced `{c1, c2[…{half, half}]}` and the
+  // three-column rule became a lie. A lone pane's parent IS the window root,
+  // so splitting beside it lands exactly where the third column belongs, with
+  // the shared column staying rightmost.
   const alone = [...columns].reverse().find((column) => column.length === 1);
   if (alone) return { direction: "-h", target: alone[0]!.id };
-  const last = columns[columns.length - 1]!;
-  return { direction: "-h", target: last[last.length - 1]!.id };
+  // No column sits alone — a shape the gate never builds. A plain split would
+  // nest, so `-f` is the only way to get a real column here; it lands at the
+  // right edge (measured: `-f` ignores the target's position entirely), which
+  // is where the shared column ends up anyway.
+  const rightmost = columns[columns.length - 1]!;
+  return { direction: "-h", target: rightmost[rightmost.length - 1]!.id, full: true };
 }
 
 /**

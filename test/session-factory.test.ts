@@ -197,7 +197,7 @@ test("the three-column rule reads the WINDOW, never the opener's own child list"
   });
   const spawn = seen.find((argv) => argv[0] === "split-window")!;
   assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%2"],
-    "two columns ⇒ split the rightmost column's last pane, which tmux flattens into a third sibling");
+    "two columns ⇒ open the third beside the rightmost column's lone pane");
   assert.deepEqual(seen.filter((argv) => argv[0] === "select-layout").map((argv) => argv.join(" ")),
     ["select-layout -E -t %1"], "the window is three columns wide now ⇒ spread the widths once");
 });
@@ -234,8 +234,8 @@ test("an unreadable window falls back to splitting the opener — the pane must 
     command: ["pi"],
   });
   const spawn = seen.find((argv) => argv[0] === "split-window")!;
-  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%1"],
-    "no geometry ⇒ split the opener; a layout we cannot read is not a reason to fail the spawn");
+  assert.deepEqual(spawn.slice(0, 5), ["split-window", "-h", "-f", "-t", "%1"],
+    "no geometry ⇒ open a column off the opener (-f keeps it full height); a layout we cannot read is not a reason to fail the spawn");
   assert.equal(seen.filter((argv) => argv[0] === "select-layout").length, 0, "and nothing is equalised");
 });
 
@@ -273,7 +273,8 @@ test("combination 4 — an orchestration RECOVER: same env, split off the opener
   });
   const spawn = seen.find((argv) => argv[0] === "split-window")!;
   assert.equal(envOf(spawn).RG_STATE_VARIANT, "t1-xyz", "a recovered child keeps its exemption");
-  assert.deepEqual(spawn.slice(0, 4), ["split-window", "-h", "-t", "%1"], "no column yet ⇒ split the opener");
+  assert.deepEqual(spawn.slice(0, 5), ["split-window", "-h", "-f", "-t", "%1"],
+    "no column yet ⇒ open a column off the opener, full height");
 });
 
 test("combination 5 — a relay SUCCESSOR: beside the opener, its own env, no border", async () => {
